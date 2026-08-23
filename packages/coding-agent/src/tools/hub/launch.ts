@@ -63,17 +63,34 @@ const completionRegistrations = new WeakMap<
 	Map<DaemonBrokerClient, Map<string, CompletionRegistration>>
 >();
 
+type LocalStopResponse = "failed" | "non-terminal" | "terminal";
+
+type LocalStopLifecycle =
+	| { state: "idle" }
+	| {
+			state: "response-pending";
+			response: Promise<LocalStopResponse>;
+			settle: (response: LocalStopResponse) => void;
+	  }
+	| { state: "terminal-response" };
+
 interface OutputRegistration {
 	id: string;
 	name: string;
 	owner: string;
 	delivery: AsyncJobProgressDelivery;
 	startedAt: number;
+	/** Daemon incarnation this monitor accepted; never rebound by process name. */
+	daemonId?: string;
 	active: boolean;
 	/** Readiness of the initial broker publication for this registration. */
 	ready: Promise<void>;
-	/** A stop issued by this session's own hub tool call is in flight; its tool result is the terminal surface. */
-	localStopRequested?: boolean;
+	/**
+	 * A terminal local stop response is the authoritative completion surface.
+	 * Notifications racing a pending response wait to learn whether they still
+	 * need to synthesize completion.
+	 */
+	localStop: LocalStopLifecycle;
 	artifactId?: string;
 	cleanup: () => Promise<void>;
 }
@@ -82,6 +99,7 @@ const outputRegistrations = new WeakMap<ToolSession, Map<DaemonBrokerClient, Map
 
 interface OutputLease {
 	registration: OutputRegistration;
+	bindDaemon(daemonId: string): void;
 	retain(): Promise<void>;
 	reject(): Promise<void>;
 }
@@ -93,6 +111,7 @@ async function registerOutputSink(
 	owner: string,
 	delivery: AsyncJobProgressDelivery,
 	startPending: boolean,
+	daemonId?: string,
 ): Promise<OutputLease | undefined> {
 	if (!session.queueLaunchProgress || !session.queueLaunchCompletion || !client.onOutput) return undefined;
 	const existing = outputRegistrations.get(session)?.get(client)?.get(name);
@@ -103,6 +122,7 @@ async function registerOutputSink(
 		// once queued it cannot be retracted by reject().
 		let settled = false;
 		return {
+			bindDaemon: () => {},
 			registration: existing,
 			retain: async () => {
 				if (settled) return;
@@ -126,6 +146,7 @@ async function registerOutputSink(
 		? {
 				owner: replaceable.owner,
 				delivery: replaceable.delivery,
+				daemonId: replaceable.daemonId,
 			}
 		: undefined;
 	if (replaceable) {
@@ -166,8 +187,10 @@ async function registerOutputSink(
 		name,
 		owner,
 		delivery,
+		daemonId,
 		startedAt: Date.now(),
 		active: true,
+		localStop: { state: "idle" },
 		ready: Promise.resolve(),
 		artifactId,
 		cleanup: () => {
@@ -201,6 +224,19 @@ async function registerOutputSink(
 			}
 			return;
 		}
+		if (notification.event === "daemon-monitor-expired") {
+			await registration.cleanup();
+			return;
+		}
+		const localStop = registration.localStop;
+		if (localStop.state === "response-pending") {
+			const response = await localStop.response;
+			if (!registration.active) return;
+			if (response === "terminal") {
+				await registration.cleanup();
+				return;
+			}
+		}
 		await registration.cleanup();
 		// The owner session receives the real daemon-completed through its
 		// completion subscription, so a synthesized one would duplicate it — but
@@ -210,12 +246,10 @@ async function registerOutputSink(
 		// signal the monitoring session will ever get. An absent flag means an
 		// older broker: keep the historical suppression.
 		if (notification.daemon.owner === owner && notification.ownerNotified !== false) return;
-		// A stop this session itself issued through the hub tool settles with
-		// ownerNotified=false (stop-requested settlements skip daemon-completed),
-		// but the in-flight stop call already returns the authoritative
-		// `Stopped …` result — synthesizing a completion would surface the same
-		// terminal state twice. Only stops from a DIFFERENT client synthesize.
-		if (registration.localStopRequested) return;
+		// Once a local stop RPC reports terminal settlement, its tool result is
+		// the single completion surface even when the monitor notification
+		// arrives after the response.
+		if (registration.localStop.state === "terminal-response") return;
 		const completion = session.queueLaunchCompletion?.({
 			event: "daemon-completed",
 			completionId: `monitor:${id}:${notification.daemon.id}:${notification.daemon.exitedAt ?? Date.now()}`,
@@ -252,7 +286,7 @@ async function registerOutputSink(
 		await speculativeFlush;
 		await deliver(notification);
 	};
-	const subscription: DaemonOutputSubscription = { id, name, owner, artifactPath: artifact.path };
+	const subscription: DaemonOutputSubscription = { id, name, owner, artifactPath: artifact.path, daemonId };
 	if (startPending) subscription.startPending = true;
 	const outputUnregister = client.onOutput(subscription, sink);
 	unregisterOutput = outputUnregister;
@@ -264,6 +298,10 @@ async function registerOutputSink(
 	let retained = false;
 	return {
 		registration,
+		bindDaemon: boundDaemonId => {
+			registration.daemonId ??= boundDaemonId;
+			subscription.daemonId ??= boundDaemonId;
+		},
 		retain: async () => {
 			// An ordinary attach is successful only once the broker has installed
 			// this sink. A monitored start is acknowledged by the subsequent
@@ -293,7 +331,15 @@ async function registerOutputSink(
 			if (retained) return;
 			await registration.cleanup();
 			if (!previous) return;
-			const restored = await registerOutputSink(session, client, name, previous.owner, previous.delivery, false);
+			const restored = await registerOutputSink(
+				session,
+				client,
+				name,
+				previous.owner,
+				previous.delivery,
+				false,
+				previous.daemonId,
+			);
 			await restored?.retain();
 		},
 	};
@@ -690,6 +736,9 @@ export async function executeLaunch(
 	const name = params.op === "start" || params.op === "monitor" ? requiredName(params) : undefined;
 	const owner = session.getSessionId?.() ?? undefined;
 	const progressDelivery = params.progress === "wake" || params.progress === "ambient" ? params.progress : undefined;
+	if (params.op === "start" && progressDelivery && !owner) {
+		throw new ToolError("Live progress monitoring requires a session owner");
+	}
 	let outputLease: OutputLease | undefined;
 	const completionOwner = operation.op === "start" ? operation.owner : undefined;
 	const resumedOwner = params.op !== "start" ? (session.getSessionId?.() ?? undefined) : undefined;
@@ -712,22 +761,35 @@ export async function executeLaunch(
 			outputLease = await registerOutputSink(session, client, name, owner, progressDelivery, true);
 			if (!outputLease) throw new ToolError("This session cannot accept process progress delivery");
 		}
-		// A locally-issued stop's tool result is the single terminal surface,
-		// but the broker's terminal monitor notification (ownerNotified=false —
-		// stop settlements skip daemon-completed) may race this RPC response.
-		// Flag the live monitor before the request so its sink suppresses the
-		// synthesized completion; the registration dies with the settled stop.
+		// A monitor notification can race a locally issued stop response. Keep
+		// its delivery pending until the response says whether the stop call
+		// itself is already the authoritative terminal surface.
 		const stopRegistration =
 			operation.op === "stop" ? outputRegistrations.get(session)?.get(client)?.get(operation.name) : undefined;
-		if (stopRegistration) stopRegistration.localStopRequested = true;
+		const localStop = stopRegistration
+			? (() => {
+					const { promise: response, resolve: settle } = Promise.withResolvers<LocalStopResponse>();
+					const lifecycle = { state: "response-pending", response, settle } satisfies LocalStopLifecycle;
+					stopRegistration.localStop = lifecycle;
+					return lifecycle;
+				})()
+			: undefined;
 		let result: DaemonRpcResult;
 		try {
 			result = await client.request(operation, signal);
 		} catch (error) {
-			// The stop never settled the process; a later stop from another
-			// client must still synthesize its terminal notification.
-			if (stopRegistration) stopRegistration.localStopRequested = false;
+			localStop?.settle("failed");
+			if (stopRegistration && stopRegistration.localStop === localStop) {
+				stopRegistration.localStop = { state: "idle" };
+			}
 			throw error;
+		}
+		if (localStop && stopRegistration && result.op === "stop") {
+			const response: LocalStopResponse = TERMINAL_STATES[result.daemon.state] ? "terminal" : "non-terminal";
+			localStop.settle(response);
+			if (stopRegistration.localStop === localStop) {
+				stopRegistration.localStop = response === "terminal" ? { state: "terminal-response" } : { state: "idle" };
+			}
 		}
 		const detached =
 			params.op === "monitor" && params.progress === "off" && name
@@ -740,9 +802,18 @@ export async function executeLaunch(
 				throw new ToolError(`Cannot monitor ${params.name}: process is ${result.daemon.state}`);
 			}
 			if (!outputLease && name && owner) {
-				outputLease = await registerOutputSink(session, client, name, owner, progressDelivery, false);
+				outputLease = await registerOutputSink(
+					session,
+					client,
+					name,
+					owner,
+					progressDelivery,
+					false,
+					result.daemon.id,
+				);
 			}
 			if (!outputLease) throw new ToolError("This session cannot accept process progress delivery");
+			outputLease.bindDaemon(result.daemon.id);
 			outputLease.registration.startedAt = result.daemon.startedAt;
 			await outputLease.retain();
 		}

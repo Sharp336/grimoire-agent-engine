@@ -1194,13 +1194,28 @@ class DaemonBroker {
 						this.#progressBatcher.clear(replaced.batchKey);
 						void replaced.artifactSink.dispose();
 					}
+					const currentDaemonId = subscription.startPending === true ? undefined : record?.snapshot.id;
 					const registration = createOutputRegistration(
 						subscription,
 						socket,
 						subscriptionId,
-						subscription.startPending === true ? undefined : record?.snapshot.id,
+						subscription.daemonId ?? currentDaemonId,
 					);
 					this.#outputRegistrations.set(key, registration);
+					if (
+						subscription.startPending !== true &&
+						subscription.daemonId !== undefined &&
+						subscription.daemonId !== currentDaemonId
+					) {
+						this.#sendMonitorNotification(registration, {
+							event: "daemon-monitor-expired",
+							monitorId: registration.id,
+							registrationId: registration.registrationId,
+							name: registration.name,
+							daemonId: subscription.daemonId,
+						});
+						return;
+					}
 					if (
 						record &&
 						terminalState(record.snapshot.state) &&

@@ -57,6 +57,7 @@ interface AdvertisedOutputSubscription {
 	name: string;
 	owner: string;
 	artifactPath: string;
+	daemonId?: string;
 	lastEpoch?: string;
 	lastSeq?: number;
 }
@@ -751,6 +752,7 @@ process.stdin.once("data", () => {
 
 			const futureSubscription = {
 				id: "replacement-monitor",
+				registrationId: "replacement-registration",
 				name: "reuse",
 				owner: "owner-1",
 				artifactPath,
@@ -785,17 +787,6 @@ process.stdin.once("data", () => {
 			raw.socket.write(envelope("detach-terminal", "ordinary-client", []));
 			await raw.waitFor(message => message.id === "detach-terminal");
 
-			const futureSubscription = {
-				id: "replacement-monitor",
-				registrationId: "replacement-registration",
-				name: "reuse",
-				owner: "owner-1",
-				artifactPath,
-				startPending: true,
-			};
-			raw.socket.write(envelope("attach-next-start", "future-client", [futureSubscription]));
-			await raw.waitFor(message => message.id === "attach-next-start");
-			expect(raw.messages.some(message => message.monitorId === futureSubscription.id)).toBeFalse();
 			const secondStart = await client.request({
 				op: "start",
 				spec: spec(process.execPath, [secondScriptPath]),
@@ -2534,7 +2525,144 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		}
 	}, 20_000);
 
-	it("replays rejected output without delivering queued completion to the failed sink", async () => {
+	it("expires a recreated monitor instead of rebinding it to a same-name replacement", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-expired-incarnation-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "service.ts");
+		const artifactPath = path.join(tempDir.path(), "expired-incarnation.log");
+		await Bun.write(
+			scriptPath,
+			`process.stdout.write(process.env.RUN + "\\n");
+process.stdin.setEncoding("utf8");
+process.stdin.resume();
+process.stdin.on("data", chunk => process.stdout.write(chunk));
+`,
+		);
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir, {
+			outputReconnectGraceMs: 100,
+			progressBatchIntervalMs: 0,
+		});
+		const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+		let original: RawBrokerSocket | undefined;
+		let reconnect: RawBrokerSocket | undefined;
+		try {
+			await client.request({ op: "ping" });
+			const token = (await Bun.file(path.join(runtimeDir, "broker.token")).text()).trim();
+			const subscription: AdvertisedOutputSubscription = {
+				id: "expired-incarnation-monitor",
+				registrationId: "expired-incarnation-registration",
+				name: "expired-incarnation",
+				owner: "expired-incarnation-owner",
+				artifactPath,
+			};
+			const envelope = (id: string): string =>
+				`${JSON.stringify({
+					id,
+					token,
+					outputSubscriptionId: "expired-incarnation-client",
+					outputSubscriptions: [subscription],
+					operation: { op: "ping" },
+				})}\n`;
+
+			original = await openRawBrokerSocket(endpoint);
+			original.socket.write(envelope("register-expiring"));
+			await original.waitFor(message => message.id === "register-expiring");
+			const oldStart = await client.request({
+				op: "start",
+				spec: {
+					name: "expired-incarnation",
+					application: process.execPath,
+					args: [scriptPath],
+					env: { RUN: "OLD" },
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			if (oldStart.op !== "start") throw new Error("unexpected old start result");
+			const oldId = oldStart.daemon.id;
+			await original.waitFor(
+				message =>
+					message.event === "daemon-output" && message.monitorId === subscription.id && message.daemonId === oldId,
+			);
+			const closed = Promise.withResolvers<void>();
+			original.socket.once("close", closed.resolve);
+			original.socket.destroy();
+			await closed.promise;
+			// This integration test exercises the broker's real offline eviction timer.
+			await Bun.sleep(300);
+
+			await client.request({ op: "stop", name: "expired-incarnation", timeoutMs: 2_000 });
+			const newStart = await client.request({
+				op: "start",
+				spec: {
+					name: "expired-incarnation",
+					application: process.execPath,
+					args: [scriptPath],
+					env: { RUN: "NEW" },
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			if (newStart.op !== "start") throw new Error("unexpected replacement start result");
+			const newId = newStart.daemon.id;
+
+			subscription.daemonId = oldId;
+			reconnect = await openRawBrokerSocket(endpoint);
+			reconnect.socket.write(envelope("recreate-expired"));
+			const [expired] = await Promise.all([
+				reconnect.waitFor(
+					message => message.event === "daemon-monitor-expired" && message.monitorId === subscription.id,
+				),
+				reconnect.waitFor(message => message.id === "recreate-expired"),
+			]);
+			expect(expired).toMatchObject({
+				event: "daemon-monitor-expired",
+				monitorId: subscription.id,
+				registrationId: subscription.registrationId,
+				name: subscription.name,
+				daemonId: oldId,
+			});
+
+			await client.request({ op: "send", name: "expired-incarnation", data: "NEW_AFTER_RECONNECT\n" });
+			const observedReplacementOutput = await client.request({
+				op: "wait",
+				name: "expired-incarnation",
+				for: "exit",
+				pattern: "NEW_AFTER_RECONNECT",
+				timeoutMs: 2_000,
+			});
+			if (observedReplacementOutput.op !== "wait") throw new Error("unexpected wait result");
+			expect(observedReplacementOutput.matched).toBe("NEW_AFTER_RECONNECT");
+			expect(
+				reconnect.messages.some(
+					message =>
+						message.event === "daemon-output" &&
+						(message.daemonId === newId || String(message.text).includes("NEW")),
+				),
+			).toBeFalse();
+			expect(await Bun.file(artifactPath).text()).toBe("OLD\n");
+		} finally {
+			original?.socket.destroy();
+			reconnect?.socket.destroy();
+			await client.request({ op: "stop", name: "expired-incarnation", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
+
+	it("replays output rejected by the current sink without delivering its queued completion", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-monitor-sink-reject-");
 		const projectDir = path.join(tempDir.path(), "project");
 		const runtimeDir = path.join(tempDir.path(), "runtime");
@@ -2898,6 +3026,166 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		}
 	}, 20_000);
 
+	it("republishes the bound incarnation and settles when the broker expires it after reconnect", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-client-incarnation-expiry-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
+		const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+		const firstPublication = Promise.withResolvers<BrokerRequest>();
+		const reconnectPublication = Promise.withResolvers<BrokerRequest>();
+		const removalPublication = Promise.withResolvers<BrokerRequest>();
+		let firstSocket: net.Socket | undefined;
+		let connectionCount = 0;
+		const pingResponse = (request: BrokerRequest): string =>
+			JSON.stringify({
+				id: request.id,
+				ok: true,
+				result: {
+					op: "ping",
+					projectDir,
+					capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY],
+				},
+			});
+		const server = net.createServer(socket => {
+			const connection = ++connectionCount;
+			if (connection === 1) firstSocket = socket;
+			let requestCount = 0;
+			let buffer = "";
+			socket.on("data", chunk => {
+				buffer += chunk.toString("utf8");
+				let newline = buffer.indexOf("\n");
+				while (newline !== -1) {
+					const line = buffer.slice(0, newline);
+					buffer = buffer.slice(newline + 1);
+					if (line.trim()) {
+						const request = JSON.parse(line) as BrokerRequest;
+						requestCount++;
+						const registration = request.outputSubscriptions?.[0];
+						if (connection === 1) {
+							firstPublication.resolve(request);
+							socket.write(
+								`${[
+									{
+										event: "daemon-output",
+										monitorId: registration?.id,
+										registrationId: registration?.registrationId,
+										name: registration?.name,
+										daemonId: "old-incarnation",
+										epoch: "old-epoch",
+										seq: 1,
+										text: "OLD_OUTPUT",
+										batchKind: "progress",
+										suppressedEvents: 0,
+									},
+									JSON.parse(pingResponse(request)),
+								]
+									.map(message => JSON.stringify(message))
+									.join("\n")}\n`,
+							);
+						} else if (requestCount === 1) {
+							reconnectPublication.resolve(request);
+							socket.write(
+								`${[
+									{
+										event: "daemon-output",
+										monitorId: registration?.id,
+										registrationId: registration?.registrationId,
+										name: registration?.name,
+										daemonId: "new-incarnation",
+										epoch: "new-epoch",
+										seq: 1,
+										text: "NEW_OUTPUT",
+										batchKind: "progress",
+										suppressedEvents: 0,
+									},
+									{
+										event: "daemon-monitor-expired",
+										monitorId: registration?.id,
+										registrationId: registration?.registrationId,
+										name: registration?.name,
+										daemonId: "old-incarnation",
+									},
+									JSON.parse(pingResponse(request)),
+								]
+									.map(message => JSON.stringify(message))
+									.join("\n")}\n`,
+							);
+						} else {
+							removalPublication.resolve(request);
+							socket.write(`${pingResponse(request)}\n`);
+						}
+					}
+					newline = buffer.indexOf("\n");
+				}
+			});
+		});
+		const listening = Promise.withResolvers<void>();
+		server.once("error", listening.reject);
+		server.listen(endpoint, listening.resolve);
+		await listening.promise;
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const notifications: DaemonMonitorNotification[] = [];
+		const initialOutputDelivered = Promise.withResolvers<void>();
+		const expiryDelivered = Promise.withResolvers<void>();
+		let unregister: DaemonOutputUnregister | undefined;
+		try {
+			unregister = client.onOutput?.(
+				{
+					id: "client-expiry-monitor",
+					name: "client-expiry",
+					owner: "owner",
+					artifactPath: path.join(tempDir.path(), "client-expiry.log"),
+				},
+				notification => {
+					notifications.push(notification);
+					if (notification.event === "daemon-output") initialOutputDelivered.resolve();
+					if (notification.event === "daemon-monitor-expired") expiryDelivered.resolve();
+				},
+			);
+			if (!unregister) throw new Error("Expected output monitoring registration");
+			const first = await firstPublication.promise;
+			const registrationId = first.outputSubscriptions?.[0]?.registrationId;
+			if (typeof registrationId !== "string") throw new Error("Expected advertised registration id");
+			expect(first.outputSubscriptions?.[0]?.daemonId).toBeUndefined();
+			await initialOutputDelivered.promise;
+			await unregister.ready;
+			if (!firstSocket) throw new Error("Expected first broker socket");
+			const disconnected = Promise.withResolvers<void>();
+			firstSocket.once("close", disconnected.resolve);
+			firstSocket.destroy();
+			await disconnected.promise;
+
+			const reconnect = await reconnectPublication.promise;
+			expect(reconnect.outputSubscriptions).toEqual([
+				{
+					id: "client-expiry-monitor",
+					registrationId,
+					name: "client-expiry",
+					owner: "owner",
+					artifactPath: path.join(tempDir.path(), "client-expiry.log"),
+					daemonId: "old-incarnation",
+					lastEpoch: "old-epoch",
+					lastSeq: 1,
+				},
+			]);
+			await expiryDelivered.promise;
+			const removed = await removalPublication.promise;
+			expect(removed.outputSubscriptions).toEqual([]);
+			expect(notifications.map(notification => notification.event)).toEqual([
+				"daemon-output",
+				"daemon-monitor-expired",
+			]);
+		} finally {
+			unregister?.();
+			client.close();
+			const serverClosed = Promise.withResolvers<void>();
+			server.close(() => serverClosed.resolve());
+			await serverClosed.promise;
+		}
+	}, 20_000);
+
 	it("ignores stale same-daemon notifications after replacing a monitor registration", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-monitor-client-replacement-");
 		const projectDir = path.join(tempDir.path(), "project");
@@ -3102,6 +3390,157 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		}
 	}, 20_000);
 
+	it("ignores a rejected delivery after its monitor registration was replaced", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-stale-reject-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
+		const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+		let connectionCount = 0;
+		let brokerSocket: net.Socket | undefined;
+		const registrationIds = new Map<string, string>();
+		const server = net.createServer(socket => {
+			connectionCount++;
+			brokerSocket = socket;
+			let buffer = "";
+			socket.on("data", chunk => {
+				buffer += chunk.toString("utf8");
+				let newline = buffer.indexOf("\n");
+				while (newline !== -1) {
+					const line = buffer.slice(0, newline);
+					buffer = buffer.slice(newline + 1);
+					if (line.trim()) {
+						const request = JSON.parse(line) as {
+							id: string;
+							operation: { op: string };
+							outputSubscriptions?: Array<{ name: string; registrationId: string }>;
+						};
+						expect(request.operation.op).toBe("ping");
+						for (const subscription of request.outputSubscriptions ?? []) {
+							registrationIds.set(subscription.name, subscription.registrationId);
+						}
+						socket.write(
+							`${JSON.stringify({
+								id: request.id,
+								ok: true,
+								result: { op: "ping", projectDir, capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] },
+							})}\n`,
+						);
+					}
+					newline = buffer.indexOf("\n");
+				}
+			});
+		});
+		const listening = Promise.withResolvers<void>();
+		server.once("error", listening.reject);
+		server.listen(endpoint, () => listening.resolve());
+		await listening.promise;
+
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const oldStarted = Promise.withResolvers<void>();
+		const oldResumed = Promise.withResolvers<void>();
+		const releaseOld = Promise.withResolvers<void>();
+		const oldEvents: DaemonMonitorNotification[] = [];
+		const oldUnregister = client.onOutput?.(
+			{
+				id: "replaceable-monitor",
+				name: "old",
+				owner: "owner",
+				artifactPath: path.join(tempDir.path(), "old.log"),
+			},
+			async notification => {
+				oldEvents.push(notification);
+				oldStarted.resolve();
+				try {
+					await releaseOld.promise;
+				} finally {
+					oldResumed.resolve();
+				}
+			},
+		);
+		if (!oldUnregister) throw new Error("Expected old output registration");
+		let newUnregister: DaemonOutputUnregister | undefined;
+		try {
+			await oldUnregister.ready;
+			const oldRegistrationId = registrationIds.get("old");
+			if (!oldRegistrationId) throw new Error("Expected old registration id");
+			if (!brokerSocket) throw new Error("Expected broker connection");
+			brokerSocket.write(
+				`${JSON.stringify({
+					event: "daemon-output",
+					monitorId: "replaceable-monitor",
+					registrationId: oldRegistrationId,
+					name: "old",
+					daemonId: "old-daemon",
+					epoch: "old-epoch",
+					seq: 1,
+					text: "old",
+					batchKind: "progress",
+					suppressedEvents: 0,
+				})}\n`,
+			);
+			await oldStarted.promise;
+
+			const newDelivered = Promise.withResolvers<void>();
+			const newEvents: DaemonMonitorNotification[] = [];
+			newUnregister = client.onOutput?.(
+				{
+					id: "replaceable-monitor",
+					name: "new",
+					owner: "owner",
+					artifactPath: path.join(tempDir.path(), "new.log"),
+				},
+				notification => {
+					newEvents.push(notification);
+					newDelivered.resolve();
+				},
+			);
+			if (!newUnregister) throw new Error("Expected replacement output registration");
+			await newUnregister.ready;
+			const newRegistrationId = registrationIds.get("new");
+			if (!newRegistrationId) throw new Error("Expected replacement registration id");
+
+			releaseOld.reject(new Error("stale sink rejected"));
+			await oldResumed.promise;
+			await Promise.resolve();
+			await Promise.resolve();
+
+			const probe = await client.request({ op: "ping" });
+			expect(probe.op).toBe("ping");
+			expect(connectionCount).toBe(1);
+			if (!brokerSocket) throw new Error("Expected healthy broker connection");
+			brokerSocket.write(
+				`${JSON.stringify({
+					event: "daemon-output",
+					monitorId: "replaceable-monitor",
+					registrationId: newRegistrationId,
+					name: "new",
+					daemonId: "new-daemon",
+					epoch: "new-epoch",
+					seq: 1,
+					text: "new",
+					batchKind: "progress",
+					suppressedEvents: 0,
+				})}\n`,
+			);
+			await newDelivered.promise;
+
+			expect(oldEvents).toHaveLength(1);
+			expect(newEvents).toEqual([
+				expect.objectContaining({ event: "daemon-output", daemonId: "new-daemon", text: "new" }),
+			]);
+		} finally {
+			releaseOld.resolve();
+			oldUnregister();
+			newUnregister?.();
+			client.close();
+			const serverClosed = Promise.withResolvers<void>();
+			server.close(() => serverClosed.resolve());
+			await serverClosed.promise;
+		}
+	}, 20_000);
+
 	it("orders one daemon's completion without blocking unrelated monitor output", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-monitor-wire-order-");
 		const projectDir = path.join(tempDir.path(), "project");
@@ -3109,7 +3548,11 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		await fs.mkdir(projectDir);
 		await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
 		const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
-		type WireRequest = { id: string; operation: { op: string } };
+		type WireRequest = {
+			id: string;
+			operation: { op: string };
+			outputSubscriptions?: Array<{ id: string; registrationId: string }>;
+		};
 		const requests: WireRequest[] = [];
 		const requestWaiters: Array<(request: WireRequest) => void> = [];
 		const connected = Promise.withResolvers<net.Socket>();
@@ -3143,6 +3586,13 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 			const { promise, resolve } = Promise.withResolvers<WireRequest>();
 			requestWaiters.push(resolve);
 			return promise;
+		};
+		const registrationIdFor = (request: WireRequest, monitorId: string): string => {
+			const registrationId = request.outputSubscriptions?.find(
+				subscription => subscription.id === monitorId,
+			)?.registrationId;
+			if (!registrationId) throw new Error(`Expected registration id for ${monitorId}`);
+			return registrationId;
 		};
 		const replyToPing = (socket: net.Socket, request: WireRequest): void => {
 			expect(request.operation.op).toBe("ping");
@@ -3186,7 +3636,9 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 			},
 		);
 		if (!unregisterOutput) throw new Error("Expected output monitoring registration");
-		replyToPing(brokerSocket, await nextRequest());
+		const outputPublication = await nextRequest();
+		replyToPing(brokerSocket, outputPublication);
+		const outputRegistrationId = registrationIdFor(outputPublication, "monitor");
 		await unregisterOutput.ready;
 		const unregisterOtherOutput = client.onOutput?.(
 			{
@@ -3202,7 +3654,9 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 			},
 		);
 		if (!unregisterOtherOutput) throw new Error("Expected second output monitoring registration");
-		replyToPing(brokerSocket, await nextRequest());
+		const otherOutputPublication = await nextRequest();
+		replyToPing(brokerSocket, otherOutputPublication);
+		const otherOutputRegistrationId = registrationIdFor(otherOutputPublication, "other-monitor");
 		await unregisterOtherOutput.ready;
 
 		try {
@@ -3227,6 +3681,7 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 					{
 						event: "daemon-output",
 						monitorId: "monitor",
+						registrationId: outputRegistrationId,
 						name: "service",
 						daemonId: "daemon",
 						epoch: "epoch",
@@ -3257,6 +3712,7 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 				`${JSON.stringify({
 					event: "daemon-output",
 					monitorId: "other-monitor",
+					registrationId: otherOutputRegistrationId,
 					name: "other-service",
 					daemonId: "other-daemon",
 					epoch: "other-epoch",

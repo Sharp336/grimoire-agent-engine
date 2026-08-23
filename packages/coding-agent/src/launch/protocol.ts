@@ -146,6 +146,12 @@ export interface DaemonOutputSubscription {
 	owner: string;
 	/** Session artifact written directly by the broker while the subscription is active. */
 	artifactPath: string;
+	/**
+	 * Daemon incarnation already accepted by this client. On republish after
+	 * broker-side registration expiry, the broker expires this subscription
+	 * instead of silently binding it to a different same-name process.
+	 */
+	daemonId?: string;
 	/** Client-managed cumulative ack: broker registration epoch of the last delivered output batch. */
 	lastEpoch?: string;
 	/** Client-managed cumulative ack: highest `seq` delivered for {@link lastEpoch}. */
@@ -326,6 +332,7 @@ function outputSubscriptions(value: unknown): DaemonOutputWireSubscription[] {
 			owner: stringValue(source.owner, `request.outputSubscriptions[${index}].owner`),
 			artifactPath: stringValue(source.artifactPath, `request.outputSubscriptions[${index}].artifactPath`),
 			registrationId: stringValue(source.registrationId, `request.outputSubscriptions[${index}].registrationId`),
+			daemonId: optionalString(source.daemonId, `request.outputSubscriptions[${index}].daemonId`),
 			lastEpoch: optionalString(source.lastEpoch, `request.outputSubscriptions[${index}].lastEpoch`),
 			lastSeq:
 				source.lastSeq === undefined

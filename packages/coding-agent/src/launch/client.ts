@@ -56,7 +56,7 @@ interface OutputSinkRegistration {
 	subscription: DaemonOutputSubscription;
 	registrationId: string;
 	sink: (notification: DaemonMonitorNotification) => Promise<void> | void;
-	/** Daemon incarnation bound by the first matching notification. */
+	/** Daemon incarnation supplied at attach time or bound by the first matching notification. */
 	daemonId?: string;
 	/** Resolves once broker acknowledgement or terminal delivery confirms this subscription. */
 	resolveReady: () => void;
@@ -347,6 +347,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			subscription,
 			registrationId: crypto.randomUUID(),
 			sink,
+			daemonId: subscription.daemonId,
 			resolveReady: () => {
 				if (readySettled) return;
 				readySettled = true;
@@ -395,6 +396,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		return [...this.#outputSinks.values()].map(entry => ({
 			...entry.subscription,
 			registrationId: entry.registrationId,
+			...(entry.daemonId === undefined ? {} : { daemonId: entry.daemonId }),
 			...(entry.lastEpoch === undefined ? {} : { lastEpoch: entry.lastEpoch, lastSeq: entry.lastSeq ?? 0 }),
 		}));
 	}
@@ -635,15 +637,17 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	async #deliverOutput(message: DaemonMonitorWireNotification, generation: number): Promise<void> {
 		const entry = this.#outputSinks.get(message.monitorId);
 		if (!entry) return;
-		const notificationDaemonId = message.event === "daemon-monitor-completed" ? message.daemon.id : message.daemonId;
+		const notificationDaemonId =
+			message.event === "daemon-monitor-completed" ? message.daemon.id : message.daemonId;
 		const deliver = async (): Promise<void> => {
 			if (this.#closed || generation !== this.#socketGeneration) return;
 			if (this.#outputSinks.get(message.monitorId) !== entry) return;
 			if (message.registrationId !== entry.registrationId) return;
 			const notificationName = message.event === "daemon-monitor-completed" ? message.daemon.name : message.name;
 			if (notificationName !== entry.subscription.name) return;
-			if (entry.daemonId === undefined) entry.daemonId = notificationDaemonId;
-			else if (entry.daemonId !== notificationDaemonId) return;
+			const boundDaemonId = entry.daemonId ?? entry.subscription.daemonId;
+			if (boundDaemonId === undefined) entry.daemonId = notificationDaemonId;
+			else if (boundDaemonId !== notificationDaemonId) return;
 			// Destroying a socket does not retract frames already parsed from that
 			// socket. Once this connection's callback rejects, suppress everything
 			// queued behind it instead of invoking the sink again.
@@ -679,6 +683,10 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			try {
 				await deliver();
 			} catch (error) {
+				// The sink may have been deliberately removed or replaced while its
+				// callback was in flight. Only a failure from the current registration
+				// may poison delivery and tear down the shared connection.
+				if (this.#outputSinks.get(message.monitorId) !== entry) return;
 				entry.failedDeliveryGeneration = generation;
 				entry.completionBlocked = true;
 				logger.warn("Daemon output sink failed", {

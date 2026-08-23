@@ -97,6 +97,7 @@ describe("launch logs compatibility", () => {
 					name: "web",
 					owner: "session-owner",
 					artifactPath: "/tmp/monitor.log",
+					daemonId: "daemon-1",
 				},
 			],
 			outputSubscriptionId: "output-subscription-1",
@@ -110,6 +111,7 @@ describe("launch logs compatibility", () => {
 				name: "web",
 				owner: "session-owner",
 				artifactPath: "/tmp/monitor.log",
+				daemonId: "daemon-1",
 			},
 		]);
 		expect(request.outputSubscriptionId).toBe("output-subscription-1");
