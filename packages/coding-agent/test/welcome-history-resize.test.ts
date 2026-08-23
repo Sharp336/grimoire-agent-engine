@@ -88,7 +88,7 @@ beforeAll(async () => {
 });
 
 describe("composer welcome native-history resize", () => {
-	it("keeps one exact editor rectangle and retired welcome through repeated thinking and resize frames", () => {
+	it("keeps one exact editor rectangle and retired welcome through repeated thinking and resize frames", async () => {
 		const terminal = new TrackingTerminal(80, 12);
 		const scheduler = new ResizeScheduler();
 		const composer = new Composer({
@@ -155,6 +155,9 @@ describe("composer welcome native-history resize", () => {
 		}
 		expect(resizeFrames).toBe(3);
 		scheduler.settle();
+		// The settled anchor repaint waits on the CPR reply, which VirtualTerminal
+		// delivers on a microtask — drain it before reading the normal screen.
+		await terminal.flush();
 
 		let settledViewport = terminal.getViewport().map(row => Bun.stripANSI(row));
 		expect(countRows(settledViewport, "Welcome back!")).toBe(1);
@@ -174,6 +177,7 @@ describe("composer welcome native-history resize", () => {
 		}
 		expect(resizeFrames).toBe(5);
 		scheduler.settle();
+		await terminal.flush();
 
 		settledViewport = terminal.getViewport().map(row => Bun.stripANSI(row));
 		expect(countRows(settledViewport, "Welcome back!")).toBe(1);

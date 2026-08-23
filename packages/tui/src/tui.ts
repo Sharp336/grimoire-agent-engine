@@ -1050,22 +1050,34 @@ export class TUI extends Container {
 			// with the live region blanked, only committed history rows (correct to
 			// push) or blanks can leave the screen — never live placeholder rows
 			// such as compact tool dots, whose real blocks must enter scrollback
-			// through the ordered history path. Use the same
-			// bottom-preserving fallback as resize-anchor recovery: kitty clamps
-			// the parked cursor on height shrink instead of moving it with pushed
-			// rows, so cursor-relative addressing can start one or more rows late.
-			// The blank top row then anchors the settled CPR probe (empty window
-			// means staleRows 0).
+			// through the ordered history path. Addressing depends on the resize
+			// direction. Terminals keep the parked cursor attached to its logical
+			// line through width rewrap and height-grow scrollback pull-down, so
+			// cursor-relative movement lands on the viewport's top row. On height
+			// shrink kitty clamps the cursor instead of moving it with pushed rows,
+			// so cursor-relative addressing would start rows late; fall back to the
+			// same bottom-preserving bound as resize-anchor recovery. The blank top
+			// row then anchors the settled CPR probe (empty window means staleRows 0).
 			let erase = "";
 			if (this.#hasEverRendered && this.#providerWindow.length > 0) {
-				const staleRows = this.#reflowedRowCount(
-					this.#providerWindow,
-					0,
-					this.#providerWindow.length,
-					this.terminal.columns,
-				);
-				const top = Math.max(0, Math.min(this.#providerViewportTop, this.terminal.rows - staleRows));
-				erase = `\x1b[?25l\x1b[${top + 1};1H\x1b[J`;
+				if (this.terminal.rows < this.#previousHeight) {
+					const staleRows = this.#reflowedRowCount(
+						this.#providerWindow,
+						0,
+						this.#providerWindow.length,
+						this.terminal.columns,
+					);
+					const top = Math.max(0, Math.min(this.#providerViewportTop, this.terminal.rows - staleRows));
+					erase = `\x1b[?25l\x1b[${top + 1};1H\x1b[J`;
+				} else {
+					const up = this.#reflowedRowCount(
+						this.#providerWindow,
+						0,
+						this.#parkedViewportOffset,
+						this.terminal.columns,
+					);
+					erase = `\x1b[?25l${up > 0 ? `\x1b[${up}A` : ""}\r\x1b[J`;
+				}
 				this.#providerWindow = [];
 				this.#parkedViewportOffset = 0;
 			}

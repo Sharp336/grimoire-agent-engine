@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- Fixed the resize live-region erase wiping visible history rows when the terminal height grows: cursor-relative addressing tracks the reflowed viewport top on grow, while the bottom-preserving bound still guards height shrinks.
 - Fixed consecutive prompt submissions being skipped by persistent history, allowing the latest project metadata to replace the previous entry without duplicating editor navigation history.
 - Fixed the history drain stalling on idle screens: accepting a batch now pumps the next frame, so a large resumed transcript retires to terminal history instead of pinning the live viewport in its emergency aggregate.
 - Fixed fuzzy matching so a qualifying whole-word hit is not hidden by an earlier mid-word occurrence ([#8465](https://github.com/can1357/oh-my-pi/pull/8465) by [@Mustaqeem66](https://github.com/Mustaqeem66)).
