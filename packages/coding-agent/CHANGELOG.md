@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed rich ask dialog checkboxes never visually checking for options whose labels themselves end with "(Recommended)"
+
 ## [18.0.2] - 2026-08-23
 
 ### Added
