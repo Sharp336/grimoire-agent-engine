@@ -20,6 +20,9 @@
 ### Added
 
 - Advisor guidance can optionally wait for primary context maintenance before reviewing each completed turn.
+### Added
+
+- Tool-created goal objectives can optionally be queued as ordinary user follow-ups without duplicating `/goal` input.
 
 ## [18.0.3] - 2026-08-23
 

@@ -1788,6 +1788,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getPlanReferencePath: () => session?.getPlanReferencePath() ?? "local://PLAN.md",
 			getGoalModeState: () => session?.getGoalModeState(),
 			getGoalRuntime: () => session?.goalRuntime,
+			queueGoalUserMessage: async objective => {
+				if (!session) return;
+				await session.sendUserMessage(objective, { deliverAs: "followUp" });
+			},
 			getUsageStatistics: () => sessionManager.getUsageStatistics(),
 			getTurnBudget: () => sessionManager.getTurnBudget(),
 			recordEvalSubagentUsage: output => sessionManager.recordEvalSubagentOutput(output),

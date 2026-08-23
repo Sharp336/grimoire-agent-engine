@@ -4963,6 +4963,16 @@ export const SETTINGS_SCHEMA = {
 			description: "Run modes where active goals may auto-continue between turns",
 		},
 	},
+	"goal.injectAsUserMessage": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Inject Goal as User Message",
+			description: "Queue tool-created goal objectives as ordinary user follow-ups after the current turn",
+		},
+	},
 
 	"title.refreshOnReplan": {
 		type: "boolean",
