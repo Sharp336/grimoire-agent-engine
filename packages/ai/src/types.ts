@@ -410,6 +410,23 @@ export interface ProviderCallContext {
 	/** Controller-owned Codex worker-envelope evidence; required only for dedicated GPT delegation. */
 	codexAuthority?: ProviderCallCodexAuthorityContext;
 }
+export type ProviderCallRequestMaterializationKind = "GENERIC_LIFECYCLE_FINAL" | "DEDICATED_CODEX_AUTHORITY_TRANSLATED";
+
+/** Fv13 worker identity adds the controller-owned route-assignment identifier to the existing strict context. */
+export type ProviderCallWorkerContext = ProviderCallContext & {
+	providerRouteAssignmentId: string;
+};
+
+export interface ProviderCallGatewayRequest {
+	context: ProviderCallWorkerContext;
+	requestMaterializationKind: ProviderCallRequestMaterializationKind;
+	sourceBody: Uint8Array;
+}
+
+/** Same-Pod AF_UNIX gateway client. All durable authority, credentials, and provider egress remain gateway-owned. */
+export interface ProviderCallGateway {
+	dispatch(request: ProviderCallGatewayRequest): Promise<Response>;
+}
 
 /** Server-controlled credential material bound to the reviewed account/generation. */
 export interface ProviderCallCredential {

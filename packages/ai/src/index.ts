@@ -8,6 +8,14 @@ export * from "./auth-storage";
 export * from "./error/rate-limit";
 export * from "./oneshot-retry";
 export * from "./provider-call-authority";
+export {
+	decodeProviderCallWorkerResponse,
+	encodeProviderCallWorkerRequest,
+	ProviderCallGatewayError,
+	ProviderCallGatewayStateError,
+	UnixProviderCallGateway,
+	type UnixProviderCallGatewayOptions,
+} from "./provider-call-gateway";
 export * from "./provider-call-journal";
 export * from "./provider-call-origin-manifest";
 export * from "./provider-details";
