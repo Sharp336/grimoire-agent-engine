@@ -121,7 +121,7 @@ async function registerOutputSink(
 	if (existing?.binding === "start-pending" && startPending) {
 		return existing.acquirePendingStart?.(delivery);
 	}
-	if (existing && !startPending) {
+	if (existing && !startPending && existing.daemonId === daemonId) {
 		// Retune of a live monitor. The operation is still validating, so
 		// keep the prior delivery mode until retain(): output arriving
 		// during a failed retune must be delivered under the old mode —
@@ -393,6 +393,7 @@ async function registerOutputSink(
 			speculative = undefined;
 			if (retained) return;
 			await registration.cleanup();
+			await restorePrevious();
 		},
 	};
 }

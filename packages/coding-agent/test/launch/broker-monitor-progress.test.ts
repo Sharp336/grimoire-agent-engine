@@ -3609,8 +3609,11 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		const completionStarted = Promise.withResolvers<void>();
 		const releaseCompletion = Promise.withResolvers<void>();
 		const completionDelivered = Promise.withResolvers<void>();
+		const monitorCompletionStarted = Promise.withResolvers<void>();
+		const releaseMonitorCompletion = Promise.withResolvers<void>();
 		const monitorCompletionDelivered = Promise.withResolvers<void>();
 		const otherOutputDelivered = Promise.withResolvers<void>();
+		const otherMonitorCompletionDelivered = Promise.withResolvers<void>();
 		const deliveryOrder: string[] = [];
 		const unregisterCompletion = client.onCompletion("owner", async () => {
 			deliveryOrder.push("completion:start");
@@ -3630,7 +3633,10 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 			},
 			async notification => {
 				if (notification.event === "daemon-monitor-completed") {
-					deliveryOrder.push("monitor-completion");
+					deliveryOrder.push("monitor-completion:start");
+					monitorCompletionStarted.resolve();
+					await releaseMonitorCompletion.promise;
+					deliveryOrder.push("monitor-completion:end");
 					monitorCompletionDelivered.resolve();
 					return;
 				}
@@ -3653,7 +3659,11 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 				artifactPath: path.join(tempDir.path(), "other-progress.log"),
 			},
 			notification => {
-				if (notification.event !== "daemon-output") return;
+				if (notification.event === "daemon-monitor-completed") {
+					deliveryOrder.push("other-monitor-completion");
+					otherMonitorCompletionDelivered.resolve();
+					return;
+				}
 				deliveryOrder.push("other-output");
 				otherOutputDelivered.resolve();
 			},
@@ -3707,58 +3717,72 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 			);
 			await probe;
 			await outputStarted.promise;
-			expect(deliveryOrder).toEqual(["output:start"]);
+			await completionStarted.promise;
+			expect(deliveryOrder).toEqual(["output:start", "completion:start"]);
 
 			releaseOutput.resolve();
-			await completionStarted.promise;
-			expect(deliveryOrder).toEqual(["output:start", "output:end", "completion:start"]);
 
 			brokerSocket.write(
-				`${JSON.stringify({
-					event: "daemon-monitor-completed",
-					monitorId: "monitor",
-					registrationId: outputRegistrationId,
-					daemon,
-				})}\n`,
+				`${[
+					{
+						event: "daemon-monitor-completed",
+						monitorId: "monitor",
+						registrationId: outputRegistrationId,
+						daemon,
+					},
+					{
+						event: "daemon-output",
+						monitorId: "other-monitor",
+						registrationId: otherOutputRegistrationId,
+						name: "other-service",
+						daemonId: "other-daemon",
+						epoch: "other-epoch",
+						seq: 1,
+						text: "still live",
+						batchKind: "progress",
+						suppressedEvents: 0,
+					},
+					{
+						event: "daemon-monitor-completed",
+						monitorId: "other-monitor",
+						registrationId: otherOutputRegistrationId,
+						daemon: { ...daemon, name: "other-service", id: "other-daemon", owner: "other-owner" },
+					},
+				]
+					.map(message => JSON.stringify(message))
+					.join("\n")}\n`,
 			);
-			await monitorCompletionDelivered.promise;
-			expect(deliveryOrder).toEqual(["output:start", "output:end", "completion:start", "monitor-completion"]);
-
-			brokerSocket.write(
-				`${JSON.stringify({
-					event: "daemon-output",
-					monitorId: "other-monitor",
-					registrationId: otherOutputRegistrationId,
-					name: "other-service",
-					daemonId: "other-daemon",
-					epoch: "other-epoch",
-					seq: 1,
-					text: "still live",
-					batchKind: "progress",
-					suppressedEvents: 0,
-				})}\n`,
-			);
+			await monitorCompletionStarted.promise;
 			await otherOutputDelivered.promise;
+			await otherMonitorCompletionDelivered.promise;
 			expect(deliveryOrder).toEqual([
 				"output:start",
-				"output:end",
 				"completion:start",
-				"monitor-completion",
+				"output:end",
+				"monitor-completion:start",
 				"other-output",
+				"other-monitor-completion",
 			]);
+
+			releaseMonitorCompletion.resolve();
+			await monitorCompletionDelivered.promise;
+			expect(deliveryOrder.at(-1)).toBe("monitor-completion:end");
 
 			releaseCompletion.resolve();
 			await completionDelivered.promise;
 			expect(deliveryOrder).toEqual([
 				"output:start",
-				"output:end",
 				"completion:start",
-				"monitor-completion",
+				"output:end",
+				"monitor-completion:start",
 				"other-output",
+				"other-monitor-completion",
+				"monitor-completion:end",
 				"completion:end",
 			]);
 		} finally {
 			releaseOutput.resolve();
+			releaseMonitorCompletion.resolve();
 			releaseCompletion.resolve();
 			unregisterOutput();
 			unregisterOtherOutput();

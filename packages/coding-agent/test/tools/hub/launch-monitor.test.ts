@@ -348,6 +348,113 @@ describe("hub process output monitoring", () => {
 		]);
 	});
 
+	it("replaces an attached monitor when the same name describes a new incarnation", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		const request = harness.client.request;
+		let describedDaemon = daemon;
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			const result = await request(operation);
+			return result.op === "describe" ? { ...result, daemon: describedDaemon } : result;
+		});
+
+		await executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "wake" });
+		const original = harness.getSubscription();
+		if (!original) throw new Error("Expected original output subscription");
+		describedDaemon = { ...daemon, id: "replacement-daemon-id", createdAt: daemon.createdAt + 1 };
+
+		await executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "ambient" });
+		const replacement = harness.getSubscription();
+		if (!replacement) throw new Error("Expected replacement output subscription");
+		await harness.getOutputSink()?.({
+			event: "daemon-output",
+			monitorId: replacement.id,
+			name: daemon.name,
+			daemonId: describedDaemon.id,
+			seq: 1,
+			text: "replacement output",
+			batchKind: "progress",
+			suppressedEvents: 0,
+		});
+
+		expect(replacement).toMatchObject({ daemonId: describedDaemon.id });
+		expect(replacement.id).not.toBe(original.id);
+		expect(harness.unregisterCount()).toBe(1);
+		expect(harness.registrationCount()).toBe(1);
+		expect(harness.progress).toEqual([
+			expect.objectContaining({ delivery: "ambient", notification: expect.objectContaining({ text: "replacement output" }) }),
+		]);
+	});
+
+	it("restores an attached monitor when an overlapping replacement fails publication", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		const firstAllocationStarted = Promise.withResolvers<void>();
+		const secondAllocationStarted = Promise.withResolvers<void>();
+		const releaseFirstAllocation = Promise.withResolvers<void>();
+		const releaseSecondAllocation = Promise.withResolvers<void>();
+		let allocationCount = 0;
+		vi.spyOn(harness.session, "allocateOutputArtifact").mockImplementation(async () => {
+			const allocation = ++allocationCount;
+			if (allocation === 1) {
+				firstAllocationStarted.resolve();
+				await releaseFirstAllocation.promise;
+			}
+			if (allocation === 2) {
+				secondAllocationStarted.resolve();
+				await releaseSecondAllocation.promise;
+			}
+			return {
+				id: `hub-progress-${allocation}`,
+				path: path.join(process.cwd(), `.hub-progress-${allocation}.log`),
+			};
+		});
+		const onOutput = harness.client.onOutput;
+		if (!onOutput) throw new Error("Expected output monitoring support");
+		let publicationCount = 0;
+		vi.spyOn(harness.client, "onOutput").mockImplementation((subscription, sink) => {
+			publicationCount++;
+			const unregister = onOutput.call(harness.client, subscription, sink);
+			if (!unregister) throw new Error("Expected output registration");
+			return Object.assign(unregister, {
+				ready: publicationCount === 2 ? Promise.reject(new Error("publication failed")) : Promise.resolve(),
+			});
+		});
+
+		const first = executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "ambient" });
+		await firstAllocationStarted.promise;
+		const replacement = executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "wake" });
+		await secondAllocationStarted.promise;
+
+		releaseFirstAllocation.resolve();
+		await first;
+		const original = harness.getSubscription();
+		if (!original) throw new Error("Expected original output subscription");
+		releaseSecondAllocation.resolve();
+		await expect(replacement).rejects.toThrow("publication failed");
+
+		const restored = harness.getSubscription();
+		const restoredSink = harness.getOutputSink();
+		if (!restored || !restoredSink) throw new Error("Expected restored output registration");
+		expect(restored.id).not.toBe(original.id);
+		expect(restored.daemonId).toBe(daemon.id);
+		expect(harness.registrationCount()).toBe(1);
+		expect(harness.active.at(-1)).toEqual({ monitorId: restored.id, delivery: "ambient", active: true });
+		await restoredSink({
+			event: "daemon-output",
+			monitorId: restored.id,
+			name: daemon.name,
+			daemonId: daemon.id,
+			seq: 1,
+			text: "restored output",
+			batchKind: "progress",
+			suppressedEvents: 0,
+		});
+		expect(harness.progress).toEqual([
+			expect.objectContaining({ delivery: "ambient", notification: expect.objectContaining({ text: "restored output" }) }),
+		]);
+	});
+
 	it("detaches with progress off without stopping the process", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
