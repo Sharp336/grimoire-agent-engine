@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed rich ask dialog checkboxes never visually checking for options whose labels themselves end with "(Recommended)"
+- Fixed rich ask dialog checkboxes never visually checking for options whose labels themselves end with "(Recommended)" ([#9452](https://github.com/can1357/oh-my-pi/issues/9452))
 
 ## [18.0.2] - 2026-08-23
 
