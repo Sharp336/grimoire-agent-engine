@@ -869,6 +869,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 								reportAgentProgress(line.text, {
 									artifactId: progressArtifactId,
 									truncated: line.truncated,
+									streamProvenance: line.streamProvenance,
 								}),
 							)
 						: undefined;
@@ -935,7 +936,14 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						async: { state: "completed", jobId, type: "bash" },
 						...(timedOut ? { timedOut: true } : {}),
 					});
-					return finalText;
+					return {
+						text: finalText,
+						// Compare progress against the executor's output, before
+						// completion-only wall-time/notices are appended. A minimizer,
+						// inline cap, or other transformation changes this source and
+						// therefore keeps the successful terminal result visible.
+						terminalTextSource: result.output,
+					};
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					latestText = message;

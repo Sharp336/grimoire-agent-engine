@@ -12,6 +12,7 @@ import type {
 	DaemonSpec,
 } from "../../../src/launch/protocol";
 import { DAEMON_OUTPUT_MONITOR_CAPABILITY } from "../../../src/launch/protocol";
+import { PROGRESS_PREVIEW_MAX_BYTES } from "../../../src/session/progress-preview";
 import type { ToolSession } from "../../../src/tools";
 import { executeLaunch } from "../../../src/tools/hub/launch";
 
@@ -890,18 +891,23 @@ describe("hub process output monitoring", () => {
 		expect(harness.unregisterCount()).toBe(0);
 	});
 
-	it("drains every speculative batch before resolving a fast-terminal start", async () => {
+	it("bounds and coalesces speculative progress during a delayed monitored start", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
 		const order: string[] = [];
-		const terminalReceipt = Promise.withResolvers<void>();
+		let deliveredProgress: Extract<DaemonMonitorNotification, { event: "daemon-output" }> | undefined;
+		let deliveredTerminal: DaemonCompletionNotification | undefined;
 		vi.spyOn(harness.session, "queueLaunchProgress").mockImplementation(notification => {
-			order.push(notification.text);
+			deliveredProgress = notification;
+			order.push("progress");
 		});
 		vi.spyOn(harness.session, "queueLaunchCompletion").mockImplementation(notification => {
+			deliveredTerminal = notification;
 			order.push(`terminal:${notification.daemon.state}`);
-			return terminalReceipt.promise;
+			return Promise.resolve();
 		});
+		const startBuffered = Promise.withResolvers<void>();
+		const releaseStart = Promise.withResolvers<void>();
 		const exited: DaemonSnapshot = {
 			...daemon,
 			state: "exited",
@@ -909,6 +915,14 @@ describe("hub process output monitoring", () => {
 			exitedAt: 3,
 			exitCode: 0,
 		};
+		const batchCount = 32;
+		const progressText = Array.from({ length: batchCount }, (_, index) => {
+			let marker = `EVENT_${index}`;
+			if (index === 0) marker = "FIRST";
+			else if (index === 16) marker = "MIDDLE";
+			else if (index === batchCount - 1) marker = "LAST";
+			return `${marker}:${"x".repeat(220)}`;
+		});
 		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
 			if (operation.op === "ping") {
 				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
@@ -917,7 +931,7 @@ describe("hub process output monitoring", () => {
 			const subscription = harness.getSubscription();
 			const sink = harness.getOutputSink();
 			if (!subscription || !sink) throw new Error("Expected output subscription");
-			for (const [index, text] of ["first", "second", "third", "fourth"].entries()) {
+			for (const [index, text] of progressText.entries()) {
 				await sink({
 					event: "daemon-output",
 					monitorId: subscription.id,
@@ -926,7 +940,7 @@ describe("hub process output monitoring", () => {
 					seq: index + 1,
 					text,
 					batchKind: "progress",
-					suppressedEvents: 0,
+					suppressedEvents: 1,
 				});
 			}
 			await sink({
@@ -935,28 +949,43 @@ describe("hub process output monitoring", () => {
 				daemon: exited,
 				ownerNotified: false,
 			});
+			startBuffered.resolve();
+			await releaseStart.promise;
 			return { op: "start", daemon: exited, readyTimedOut: false };
 		});
 
-		await executeLaunch(harness.session, {
+		const launch = executeLaunch(harness.session, {
 			op: "start",
 			name: daemon.name,
 			application: process.execPath,
 			pty: false,
 			persist: true,
 			progress: "wake",
+		}).then(result => {
+			order.push("resolved");
+			return result;
 		});
-		order.push("resolved");
+		await startBuffered.promise;
+		expect(order).toEqual([]);
 
-		expect(order).toEqual(["first", "second", "third", "fourth", "terminal:exited", "resolved"]);
+		releaseStart.resolve();
+		await launch;
+
+		expect(order).toEqual(["progress", "terminal:exited", "resolved"]);
+		expect(Buffer.byteLength(deliveredProgress?.text ?? "", "utf8")).toBeLessThanOrEqual(PROGRESS_PREVIEW_MAX_BYTES);
+		expect(deliveredProgress).toMatchObject({
+			seq: batchCount,
+			suppressedEvents: batchCount,
+			truncated: true,
+		});
+		expect(deliveredProgress?.text).toContain("FIRST:");
+		expect(deliveredProgress?.text).not.toContain("MIDDLE:");
+		expect(deliveredProgress?.text).toContain("LAST:");
+		expect(deliveredTerminal?.daemon).toMatchObject({ state: "exited", exitCode: 0 });
 		expect(harness.unregisterCount()).toBe(1);
-		// A terminal receipt may wait for the current tool step to finish; it
-		// must not deadlock retention after the completion has been queued.
-		terminalReceipt.resolve();
-		await terminalReceipt.promise;
 	});
 
-	it("discards speculative progress when the start fails", async () => {
+	it("discards coalesced speculative progress and terminal completion when the start fails", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
 		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
@@ -965,17 +994,27 @@ describe("hub process output monitoring", () => {
 			}
 			if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`);
 			const subscription = harness.getSubscription();
-			if (!subscription) throw new Error("Expected output subscription");
-			// An already-running process emits during the validation window.
-			await harness.getOutputSink()?.({
-				event: "daemon-output",
+			const sink = harness.getOutputSink();
+			if (!subscription || !sink) throw new Error("Expected output subscription");
+			// An already-running process emits throughout the validation window,
+			// including a terminal signal, before the broker rejects the start.
+			for (let index = 0; index < 32; index++) {
+				await sink({
+					event: "daemon-output",
+					monitorId: subscription.id,
+					name: daemon.name,
+					daemonId: daemon.id,
+					seq: index + 1,
+					text: `leaked-${index}:${"x".repeat(220)}`,
+					batchKind: "progress",
+					suppressedEvents: 1,
+				});
+			}
+			await sink({
+				event: "daemon-monitor-completed",
 				monitorId: subscription.id,
-				name: daemon.name,
-				daemonId: daemon.id,
-				seq: 1,
-				text: "leaked",
-				batchKind: "progress",
-				suppressedEvents: 0,
+				daemon: { ...daemon, state: "exited", pid: undefined, exitedAt: 3, exitCode: 0 },
+				ownerNotified: false,
 			});
 			throw new Error(`Daemon ${daemon.name} is already running`);
 		});

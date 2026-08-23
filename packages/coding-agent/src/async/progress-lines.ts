@@ -44,6 +44,23 @@ function boundedSlice(text: string, maxChars: number, fromEnd = false, preceding
 	return start === 0 ? text : text.slice(start);
 }
 
+/**
+ * Fixed-size identity of the exact normalized stream consumed by
+ * {@link ProgressLines}. UTF-16 code units match JavaScript string equality
+ * while remaining invariant when a surrogate pair spans input chunks.
+ */
+export interface ProgressStreamProvenance {
+	codeUnits: number;
+	sha256: string;
+}
+
+export function progressStreamProvenanceForText(text: string): ProgressStreamProvenance {
+	return {
+		codeUnits: text.length,
+		sha256: crypto.createHash("sha256").update(text, "utf16le").digest("base64"),
+	};
+}
+
 export interface ProgressLine {
 	text: string;
 	truncated: boolean;
@@ -70,6 +87,7 @@ export class ProgressLines {
 	#pendingHighSurrogate = "";
 	#latestReportedStreamProvenance: ProgressStreamProvenance | undefined;
 	#epoch = 0;
+	#latestReportedStreamProvenance: ProgressStreamProvenance | undefined;
 
 	constructor(report: (line: ProgressLine) => void) {
 		this.#report = report;

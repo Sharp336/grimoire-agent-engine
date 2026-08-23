@@ -24,6 +24,7 @@ import type {
 import { DAEMON_OUTPUT_MONITOR_CAPABILITY } from "../../launch/protocol";
 import { renderTerminalOutputIsolated } from "../../launch/terminal-output-worker-client";
 import type { Theme, ThemeColor } from "../../modes/theme/theme";
+import { flattenPreviewText, ProgressPreviewAccumulator } from "../../session/progress-preview";
 import { framedBlock, outputBlockContentWidth, renderStatusLine } from "../../tui";
 import type { ToolSession } from "..";
 import { resolveToCwd } from "../path-utils";
@@ -106,6 +107,51 @@ interface OutputLease {
 	bindDaemon(daemonId: string): void;
 	retain(): Promise<void>;
 	reject(): Promise<void>;
+}
+
+interface SpeculativeMonitorBuffer {
+	preview: ProgressPreviewAccumulator;
+	latestProgress?: Extract<DaemonMonitorNotification, { event: "daemon-output" }>;
+	suppressedEvents: number;
+	sourceTruncated: boolean;
+	terminal?: Exclude<DaemonMonitorNotification, { event: "daemon-output" }>;
+}
+
+function bufferSpeculativeMonitorNotification(
+	buffer: SpeculativeMonitorBuffer,
+	notification: DaemonMonitorNotification,
+): void {
+	if (notification.event !== "daemon-output") {
+		buffer.terminal = notification;
+		return;
+	}
+	if (notification.batchKind === "artifact-only") return;
+	buffer.preview.append(notification.text, notification.truncated);
+	buffer.suppressedEvents += notification.suppressedEvents;
+	buffer.sourceTruncated ||= notification.truncated === true;
+	buffer.latestProgress = {
+		...notification,
+		text: "",
+		suppressedEvents: 0,
+		reminder: notification.reminder ?? buffer.latestProgress?.reminder,
+		truncated: undefined,
+	};
+}
+
+function takeSpeculativeMonitorNotifications(buffer: SpeculativeMonitorBuffer): DaemonMonitorNotification[] {
+	const notifications: DaemonMonitorNotification[] = [];
+	if (buffer.latestProgress) {
+		const preview = buffer.preview.take();
+		notifications.push({
+			...buffer.latestProgress,
+			text: preview ? flattenPreviewText(preview) : "",
+			suppressedEvents: buffer.suppressedEvents,
+			truncated:
+				preview?.truncated === true || buffer.sourceTruncated || buffer.suppressedEvents > 0 ? true : undefined,
+		});
+	}
+	if (buffer.terminal) notifications.push(buffer.terminal);
+	return notifications;
 }
 
 async function registerOutputSink(
@@ -301,14 +347,19 @@ async function registerOutputSink(
 		}
 	};
 	// A new subscription may receive broker notifications before its
-	// publication or launch operation is confirmed. Buffer them until the
-	// lease is retained and discard them on reject, so a failed operation
-	// never wakes the session.
-	let speculative: DaemonMonitorNotification[] | undefined = [];
+	// publication or launch operation is confirmed. Retain one bounded
+	// head/tail preview plus fixed suppression metadata and the terminal
+	// notification. Successful retention flushes progress before terminal;
+	// rejection discards both so a failed operation never wakes the session.
+	let speculative: SpeculativeMonitorBuffer | undefined = {
+		preview: new ProgressPreviewAccumulator(),
+		suppressedEvents: 0,
+		sourceTruncated: false,
+	};
 	let speculativeFlush: Promise<void> | undefined;
 	const sink = async (notification: DaemonMonitorNotification): Promise<void> => {
 		if (speculative) {
-			speculative.push(notification);
+			bufferSpeculativeMonitorNotification(speculative, notification);
 			return;
 		}
 		if (speculativeFlush) await speculativeFlush;
@@ -326,9 +377,10 @@ async function registerOutputSink(
 	const flushSpeculative = async (): Promise<void> => {
 		const buffered = speculative;
 		speculative = undefined;
-		if (!buffered || buffered.length === 0) return;
+		if (!buffered) return;
+		const notifications = takeSpeculativeMonitorNotifications(buffered);
 		const pendingFlush = (async () => {
-			for (const notification of buffered) await deliver(notification, false);
+			for (const notification of notifications) await deliver(notification, false);
 		})().catch(error => {
 			logger.warn("Buffered launch monitor delivery failed", {
 				monitorId: id,
