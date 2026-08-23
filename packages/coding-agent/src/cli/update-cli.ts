@@ -1248,11 +1248,6 @@ function printVerificationResult(result: InstalledVersionVerification, expectedV
 	console.log(chalk.yellow(`You may need to reinstall: ${installerHint()}`));
 }
 
-/** Verify the PATH-resolved launcher and print the outcome. */
-async function printVerification(expectedVersion: string): Promise<void> {
-	printVerificationResult(await verifyInstalledVersion(expectedVersion), expectedVersion);
-}
-
 async function unlinkIfExists(filePath: string): Promise<void> {
 	try {
 		await fs.promises.unlink(filePath);
@@ -1706,42 +1701,6 @@ export async function updateViaManager(
 			`This install is no longer managed by ${steps.manager}. Removing the old global package may delete this launcher; if it does, reinstall with: ${installerHint()}`,
 		),
 	);
-}
-
-async function updateViaHomebrew(expectedVersion: string, force: boolean): Promise<void> {
-	console.log(chalk.dim("Updating Homebrew formulae..."));
-	const update = await $`brew update`.nothrow();
-	if (update.exitCode !== 0) {
-		throw new Error(`brew update failed with exit code ${update.exitCode}`);
-	}
-
-	console.log(chalk.dim("Updating via Homebrew..."));
-	const args = buildHomebrewUpdateArgs(force);
-	const result = await $`brew ${args}`.nothrow();
-	if (result.exitCode !== 0) {
-		throw new Error(`brew ${args[0]} failed with exit code ${result.exitCode}`);
-	}
-
-	await printVerification(expectedVersion);
-}
-
-async function updateViaMise(expectedVersion: string, force: boolean): Promise<void> {
-	console.log(chalk.dim("Updating via mise..."));
-	const args = buildMiseUpgradeArgs();
-	const result = await $`mise ${args}`.nothrow();
-	if (result.exitCode !== 0) {
-		throw new Error(`mise upgrade failed with exit code ${result.exitCode}`);
-	}
-
-	if (force) {
-		const forceArgs = buildMiseForceInstallArgs(expectedVersion);
-		const forceResult = await $`mise ${forceArgs}`.nothrow();
-		if (forceResult.exitCode !== 0) {
-			throw new Error(`mise install --force failed with exit code ${forceResult.exitCode}`);
-		}
-	}
-
-	await printVerification(expectedVersion);
 }
 
 // Monotonic within this process so two updates started in the same millisecond

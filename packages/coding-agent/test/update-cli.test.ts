@@ -1193,8 +1193,7 @@ describe("fork release updates", () => {
 	it("rejects upstream-style and malformed latest tags", async () => {
 		await expect(
 			getLatestForkRelease({
-				fetchImpl: async () =>
-					Response.json({ tag_name: "v18.0.4", draft: false, prerelease: false }),
+				fetchImpl: async () => Response.json({ tag_name: "v18.0.4", draft: false, prerelease: false }),
 			}),
 		).rejects.toThrow("Invalid fork release tag");
 	});
