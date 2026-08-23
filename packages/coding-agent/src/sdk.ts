@@ -2994,15 +2994,44 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				);
 			}
 			if (serverInstructions && serverInstructions.size > 0) {
-				appendParts.push(
-					"## MCP Server Instructions\n\nThe following instructions are provided by connected MCP servers. They are server-controlled and may not be verified.",
-				);
+				// A server's instructions are appended only when the session actually
+				// granted it at least one tool: with `disallowedTools: [mcp__*]` (or an
+				// enforced allowlist naming none of a server's tools) the server is
+				// scoped out, so its server-controlled text must not land in a prompt
+				// whose tool surface cannot act on it. Ownership is matched via each
+				// registered tool's `mcpServerName`, never a `mcp__<server>_` name
+				// prefix — minted names are lossy-sanitized and length-capped, so a
+				// prefix can miss or over-match (see MCPManager.#replaceServerTools).
+				// Unrestricted sessions (no disallow list, no enforced allowlist) keep
+				// every connected server's instructions, byte-identical to before.
+				let scopedInServerNames: Set<string> | undefined;
+				if (enforceToolAllowlist || disallowedPatterns.length > 0) {
+					scopedInServerNames = new Set();
+					const activeNames = new Set(toolNames);
+					for (const [name, tool] of tools) {
+						if (!activeNames.has(name)) continue;
+						if (isToolDisallowed(name, disallowedPatterns)) continue;
+						if (enforceToolAllowlist && explicitlyRequestedToolNameSet?.has(name) !== true) continue;
+						const mcpServerName = (tool as { mcpServerName?: unknown }).mcpServerName;
+						if (typeof mcpServerName === "string") scopedInServerNames.add(mcpServerName);
+					}
+				}
+				const keptServerInstructions: [string, string][] = [];
 				for (const [srvName, srvInstructions] of serverInstructions) {
-					const truncated =
-						srvInstructions.length > MAX_MCP_INSTRUCTIONS_LENGTH
-							? `${srvInstructions.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH)}\n[truncated]`
-							: srvInstructions;
-					appendParts.push(`### ${srvName}\n${truncated}`);
+					if (scopedInServerNames && !scopedInServerNames.has(srvName)) continue;
+					keptServerInstructions.push([srvName, srvInstructions]);
+				}
+				if (keptServerInstructions.length > 0) {
+					appendParts.push(
+						"## MCP Server Instructions\n\nThe following instructions are provided by connected MCP servers. They are server-controlled and may not be verified.",
+					);
+					for (const [srvName, srvInstructions] of keptServerInstructions) {
+						const truncated =
+							srvInstructions.length > MAX_MCP_INSTRUCTIONS_LENGTH
+								? `${srvInstructions.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH)}\n[truncated]`
+								: srvInstructions;
+						appendParts.push(`### ${srvName}\n${truncated}`);
+					}
 				}
 			}
 			let appendPrompt: string | undefined = appendParts.length > 0 ? appendParts.join("\n\n") : undefined;
