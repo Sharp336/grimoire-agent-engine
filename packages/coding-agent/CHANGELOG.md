@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Windows: the terminal/tab title is now reclaimed automatically when another attached process (e.g. an npm `cmd` shim's `title %COMSPEC%` or a child writing `process.title`) overwrites it mid-session
+
 ## [18.0.2] - 2026-08-23
 
 ### Added

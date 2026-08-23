@@ -37,11 +37,18 @@ function writeTitleSequence(seq: string): void {
 
 interface WindowsConsoleTitleApi {
 	set(title: string): boolean;
+	/** Current console title; `""` when it is empty or the call reports failure. */
+	get(): string;
 	close(): void;
 }
 
 let windowsConsoleTitleApi: WindowsConsoleTitleApi | null | undefined;
 let lastTerminalTitle: string | undefined;
+/** Whether {@link lastTerminalTitle} was written via `SetConsoleTitleW` (vs the OSC fallback). */
+let lastTerminalTitleNativelySet = false;
+
+/** WCHAR capacity for GetConsoleTitleW; terminal titles are short, so 2048 is ample. */
+const CONSOLE_TITLE_WCHAR_CAPACITY = 2048;
 
 function getWindowsConsoleTitleApi(): WindowsConsoleTitleApi | null {
 	if (process.platform !== "win32") return null;
@@ -49,11 +56,19 @@ function getWindowsConsoleTitleApi(): WindowsConsoleTitleApi | null {
 	try {
 		const kernel32 = dlopen("kernel32.dll", {
 			SetConsoleTitleW: { args: [FFIType.ptr], returns: FFIType.bool },
+			GetConsoleTitleW: { args: [FFIType.ptr, FFIType.u32], returns: FFIType.u32 },
 		});
 		windowsConsoleTitleApi = {
 			set(title) {
 				const wideTitle = Buffer.from(`${title}\0`, "utf16le");
 				return kernel32.symbols.SetConsoleTitleW(ptr(wideTitle));
+			},
+			get() {
+				const wideTitle = Buffer.alloc(CONSOLE_TITLE_WCHAR_CAPACITY * 2);
+				const chars = kernel32.symbols.GetConsoleTitleW(ptr(wideTitle), CONSOLE_TITLE_WCHAR_CAPACITY);
+				// A zero return means failure or an empty title; either way it can
+				// never equal the expected non-empty title, so report "" (drifted).
+				return chars === 0 ? "" : wideTitle.toString("utf16le", 0, chars * 2);
 			},
 			close: () => kernel32.close(),
 		};
@@ -73,6 +88,30 @@ function setWindowsConsoleTitle(title: string): boolean {
 			api.close();
 		} catch {
 			// Ignore cleanup failures after the native title path has already failed.
+		}
+		windowsConsoleTitleApi = null;
+		return false;
+	}
+}
+
+/**
+ * On Windows the console title is shared mutable state: any attached process
+ * can overwrite it (an npm `cmd` shim's `title %COMSPEC%`, a child setting
+ * `process.title`, …). Compare the cached expectation against the live console
+ * title so a hijacked tab is repaired on the next title emit instead of being
+ * skipped by the dedup fast path. Reads that cannot be performed (FFI missing,
+ * non-Windows) report no drift, preserving the old behavior.
+ */
+function windowsConsoleTitleDrifted(expected: string): boolean {
+	const api = getWindowsConsoleTitleApi();
+	if (!api) return false;
+	try {
+		return api.get() !== expected;
+	} catch {
+		try {
+			api.close();
+		} catch {
+			// Ignore cleanup failures after the native title read has already failed.
 		}
 		windowsConsoleTitleApi = null;
 		return false;
@@ -455,13 +494,19 @@ export function formatSessionTerminalTitle(sessionName: string | undefined, cwd?
 /**
  * Set the terminal title through the native Win32 API or OSC 0.
  *
- * Repeating the same sanitized title is a no-op on every platform.
+ * Repeating the same sanitized title is a no-op — except on Windows, where the
+ * console title is shared mutable state: when the previous write went through
+ * `SetConsoleTitleW` and another attached process has overwritten the title
+ * since, the cached title is re-emitted to reclaim the tab (see
+ * {@link windowsConsoleTitleDrifted}). On the OSC fallback path dedup stays a
+ * pure no-op.
  */
 export function setTerminalTitle(title: string): void {
 	if (!process.stdout.isTTY || isTerminalHeadless()) return;
 	const next = sanitizeTerminalTitlePart(title) ?? DEFAULT_TERMINAL_TITLE;
-	if (next === lastTerminalTitle) return;
-	if (!setWindowsConsoleTitle(next)) writeTitleSequence(`\x1b]0;${next}\x07`);
+	if (next === lastTerminalTitle && !(lastTerminalTitleNativelySet && windowsConsoleTitleDrifted(next))) return;
+	lastTerminalTitleNativelySet = setWindowsConsoleTitle(next);
+	if (!lastTerminalTitleNativelySet) writeTitleSequence(`\x1b]0;${next}\x07`);
 	lastTerminalTitle = next;
 }
 
@@ -599,6 +644,7 @@ export function disposeTerminalTitleState(): void {
 	stopTerminalTitleSpinner();
 	disposeWindowsConsoleTitleApi();
 	lastTerminalTitle = undefined;
+	lastTerminalTitleNativelySet = false;
 }
 
 /**

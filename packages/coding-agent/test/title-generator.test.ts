@@ -768,4 +768,50 @@ describe("terminal title runtime", () => {
 			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
 		}
 	});
+
+	it("re-emits an unchanged title after another process hijacks the Windows console title", () => {
+		// CONTRACT (regression): on Windows the console title is shared mutable
+		// state — an npm `cmd` shim's `title %COMSPEC%` or a child setting
+		// `process.title` overwrites the tab title while omp keeps running. A
+		// dedup-skipped emit must compare the cached title against the live
+		// console title and re-write it when they diverge, reclaiming the tab
+		// instead of staying hijacked until the next title change.
+		const originalPlatform = process.platform;
+		const native = windowsTitleMock;
+		if (!native) throw new Error("Windows console title mock not initialized");
+		native.succeeds = true;
+		try {
+			Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+
+			setTerminalTitle("π > my-project");
+			setTerminalTitle("π > my-project");
+			// No drift: the dedup fast path still suppresses the second write.
+			expect(native.titles).toEqual(["π > my-project"]);
+
+			// An attached process overwrites the shared console title.
+			native.current = "C:\\WINDOWS\\system32\\cmd.exe ";
+
+			setTerminalTitle("π > my-project");
+			expect(native.titles).toEqual(["π > my-project", "π > my-project"]);
+		} finally {
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+		}
+	});
+
+	it("keeps OSC-fallback dedup a pure no-op even when the console title differs", () => {
+		// CONTRACT: the drift check only guards titles written via
+		// SetConsoleTitleW. When the previous write fell back to OSC (no FFI),
+		// there is no live console title to compare against, so repeating the
+		// same title must not re-emit.
+		const native = windowsTitleMock;
+		if (!native) throw new Error("Windows console title mock not initialized");
+		native.succeeds = false;
+		native.current = "hijacked by someone else";
+
+		setTerminalTitle("osc fallback title");
+		setTerminalTitle("osc fallback title");
+
+		expect(emittedTitles()).toEqual(["osc fallback title"]);
+		expect(writes).toHaveLength(1);
+	});
 });
