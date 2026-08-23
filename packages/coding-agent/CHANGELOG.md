@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Thinking-block display formatting is now incremental during streaming: growing thinking text resumes the fold at the last line boundary instead of re-scanning the whole block every tick.
+
 ## [18.0.3] - 2026-08-23
 
 ### Added

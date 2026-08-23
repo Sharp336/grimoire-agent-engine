@@ -7,10 +7,35 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 // so each mode keeps its own slot. One entry per mode is enough for the common
 // case of one active thinking block and never regresses (a miss recomputes
 // exactly as before).
-let proseCacheKey = "";
-let proseCacheValue = "";
-let rawCacheKey = "";
-let rawCacheValue = "";
+//
+// Each slot also enables incremental extension for the streaming case: when
+// text.startsWith(cache.text) the fold resumes at the last (possibly partial)
+// line boundary — only the appended suffix is re-scanned, reusing the folded
+// prefix and the fence state stored for that boundary. The last input line is
+// always re-folded (never committed), so its transient effects — comment-noise
+// skipping, the prose ellipsis — are replayed under the new context instead of
+// leaking into the memoized prefix.
+interface DisplayCache {
+	/** last formatted text */
+	text: string;
+	/** formatted output for `text` */
+	value: string;
+	/** folded output lines for all but the last line of `text` */
+	result: string[];
+	/** number of newline-terminated lines of `text` = split count - 1 */
+	lineCount: number;
+	/** fence state at the `result` boundary (entering the last line) */
+	inFence: boolean;
+	fenceChar: string;
+	fenceLen: number;
+}
+
+function freshDisplayCache(): DisplayCache {
+	return { text: "", value: "", result: [], lineCount: 0, inFence: false, fenceChar: "", fenceLen: 0 };
+}
+
+const proseCache = freshDisplayCache();
+const rawCache = freshDisplayCache();
 
 export function canonicalizeMessage(text: string | null | undefined): string {
 	if (!text) return "";
@@ -48,17 +73,19 @@ export function formatThinkingForDisplay(text: string, proseOnly: boolean): stri
 	if (!text) return text;
 	const hasComment = text.includes("<!--");
 	if (proseOnly) {
-		if (text === proseCacheKey) return proseCacheValue;
+		if (text === proseCache.text) return proseCache.value;
 	} else {
 		if (!hasComment) return text;
-		if (text === rawCacheKey) return rawCacheValue;
+		if (text === rawCache.text) return rawCache.value;
 	}
 
+	const cache = proseOnly ? proseCache : rawCache;
 	const lines = text.split("\n");
-	const resultLines: string[] = [];
-	let inFence = false;
-	let fenceChar = "";
-	let fenceLen = 0;
+	const resuming = cache.text.length > 0 && text.startsWith(cache.text);
+	const resultLines = resuming ? cache.result : [];
+	let inFence = resuming ? cache.inFence : false;
+	let fenceChar = resuming ? cache.fenceChar : "";
+	let fenceLen = resuming ? cache.fenceLen : 0;
 
 	const FENCE = /^( {0,3})([`~]{3,})/;
 	const appendEllipsis = () => {
@@ -82,8 +109,21 @@ export function formatThinkingForDisplay(text: string, proseOnly: boolean): stri
 		}
 	};
 
-	for (let i = 0; i < lines.length; i++) {
+	// Fold state entering the last line: the result and fence state produced
+	// by the newline-terminated lines only. Committed as the next boundary.
+	let boundaryResult: string[] | null = null;
+	let boundaryInFence = false;
+	let boundaryFenceChar = "";
+	let boundaryFenceLen = 0;
+
+	for (let i = resuming ? cache.lineCount : 0; i < lines.length; i++) {
 		const line = lines[i]!;
+		if (i === lines.length - 1) {
+			boundaryResult = resultLines.slice();
+			boundaryInFence = inFence;
+			boundaryFenceChar = fenceChar;
+			boundaryFenceLen = fenceLen;
+		}
 
 		if (inFence) {
 			const close = FENCE.exec(line);
@@ -128,13 +168,13 @@ export function formatThinkingForDisplay(text: string, proseOnly: boolean): stri
 	}
 
 	const formatted = resultLines.join("\n");
-	if (proseOnly) {
-		proseCacheKey = text;
-		proseCacheValue = formatted;
-	} else {
-		rawCacheKey = text;
-		rawCacheValue = formatted;
-	}
+	cache.text = text;
+	cache.value = formatted;
+	cache.result = boundaryResult ?? resultLines;
+	cache.lineCount = lines.length - 1;
+	cache.inFence = boundaryInFence;
+	cache.fenceChar = boundaryFenceChar;
+	cache.fenceLen = boundaryFenceLen;
 	return formatted;
 }
 
