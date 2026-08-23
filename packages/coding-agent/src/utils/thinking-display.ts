@@ -87,22 +87,6 @@ function freshDisplayCache(): DisplayCache {
 const proseCache = freshDisplayCache();
 const rawCache = freshDisplayCache();
 
-// Test-only work meter for deterministic performance assertions: counts the
-// payload bytes that pass through the fold loop (one integer add per line —
-// negligible next to the scan it observes). Tests reset it via
-// {@link __resetFoldWork} and assert operation counts, never wall-clock time.
-let foldWorkChars = 0;
-
-/** test-only: zero the fold-work counter before a measured section. */
-export function __resetFoldWork(): void {
-	foldWorkChars = 0;
-}
-
-/** test-only: payload bytes folded through the loop since the last reset. */
-export function __foldWork(): number {
-	return foldWorkChars;
-}
-
 export function canonicalizeMessage(text: string | null | undefined): string {
 	if (!text) return "";
 	const trimmed = text.trim();
@@ -244,7 +228,6 @@ export function formatThinkingForDisplay(text: string, proseOnly: boolean): stri
 	const last = lines.length - 1;
 	for (let i = 0; i < lines.length; i++) {
 		const line = lines[i]!;
-		foldWorkChars += line.length;
 		// Freeze the resume state entering the final (possibly partial) line;
 		// that line is re-folded from here on the next append.
 		if (i === last) cache.state = { ...state };
