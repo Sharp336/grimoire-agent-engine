@@ -521,6 +521,72 @@ describe("hub process output monitoring", () => {
 		]);
 	});
 
+	it("keeps a newer monitor when an older replacement publication fails later", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		const failedPublication = Promise.withResolvers<void>();
+		const olderPublicationStarted = Promise.withResolvers<void>();
+		const request = harness.client.request;
+		const olderDaemon = { ...daemon, id: "older-replacement-daemon-id", createdAt: daemon.createdAt + 1 };
+		const newerDaemon = { ...daemon, id: "newer-replacement-daemon-id", createdAt: daemon.createdAt + 2 };
+		let describedDaemon = daemon;
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			const result = await request(operation);
+			return result.op === "describe" ? { ...result, daemon: describedDaemon } : result;
+		});
+		const onOutput = harness.client.onOutput;
+		if (!onOutput) throw new Error("Expected output monitoring support");
+		let publicationCount = 0;
+		vi.spyOn(harness.client, "onOutput").mockImplementation((subscription, sink) => {
+			publicationCount++;
+			const unregister = onOutput.call(harness.client, subscription, sink);
+			if (!unregister) throw new Error("Expected output registration");
+			if (publicationCount === 2) olderPublicationStarted.resolve();
+			return Object.assign(unregister, {
+				ready: publicationCount === 2 ? failedPublication.promise : Promise.resolve(),
+			});
+		});
+
+		await executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "ambient" });
+		describedDaemon = olderDaemon;
+		const olderReplacement = executeLaunch(harness.session, {
+			op: "monitor",
+			name: daemon.name,
+			progress: "wake",
+		});
+		await olderPublicationStarted.promise;
+
+		describedDaemon = newerDaemon;
+		await executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "wake" });
+		const winner = harness.getSubscription();
+		const winnerSink = harness.getOutputSink();
+		if (!winner || !winnerSink) throw new Error("Expected newer output registration");
+
+		failedPublication.reject(new Error("older publication failed"));
+		await expect(olderReplacement).rejects.toThrow("older publication failed");
+
+		expect(harness.getSubscription()).toBe(winner);
+		expect(winner.daemonId).toBe(newerDaemon.id);
+		expect(harness.registrationCount()).toBe(1);
+		expect(harness.active.at(-1)).toEqual({ monitorId: winner.id, delivery: "wake", active: true });
+		await winnerSink({
+			event: "daemon-output",
+			monitorId: winner.id,
+			name: daemon.name,
+			daemonId: newerDaemon.id,
+			seq: 1,
+			text: "newer output",
+			batchKind: "progress",
+			suppressedEvents: 0,
+		});
+		expect(harness.progress).toEqual([
+			expect.objectContaining({
+				delivery: "wake",
+				notification: expect.objectContaining({ text: "newer output" }),
+			}),
+		]);
+	});
+
 	it("detaches with progress off without stopping the process", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);

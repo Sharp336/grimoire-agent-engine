@@ -101,6 +101,26 @@ interface OutputRegistration {
 }
 
 const outputRegistrations = new WeakMap<ToolSession, Map<DaemonBrokerClient, Map<string, OutputRegistration>>>();
+const outputRegistrationGenerations = new WeakMap<ToolSession, Map<DaemonBrokerClient, Map<string, string>>>();
+
+function claimOutputRegistrationGeneration(
+	session: ToolSession,
+	client: DaemonBrokerClient,
+	name: string,
+	id: string,
+): void {
+	let clients = outputRegistrationGenerations.get(session);
+	if (!clients) {
+		clients = new Map();
+		outputRegistrationGenerations.set(session, clients);
+	}
+	let monitors = clients.get(client);
+	if (!monitors) {
+		monitors = new Map();
+		clients.set(client, monitors);
+	}
+	monitors.set(name, id);
+}
 
 interface OutputLease {
 	registration: OutputRegistration;
@@ -162,7 +182,10 @@ async function registerOutputSink(
 	delivery: AsyncJobProgressDelivery,
 	startPending: boolean,
 	daemonId?: string,
+	restoreOf?: OutputRegistration,
 ): Promise<OutputLease | undefined> {
+	if (restoreOf && outputRegistrationGenerations.get(session)?.get(client)?.get(name) !== restoreOf.id)
+		return undefined;
 	const captureLaunchProgressEpoch = session.captureLaunchProgressEpoch;
 	if (
 		!captureLaunchProgressEpoch ||
@@ -206,6 +229,8 @@ async function registerOutputSink(
 	}
 	const artifact = await session.allocateOutputArtifact?.("hub-progress");
 	if (!artifact?.id || !artifact.path) return undefined;
+	if (restoreOf && outputRegistrationGenerations.get(session)?.get(client)?.get(name) !== restoreOf.id)
+		return undefined;
 	if (captureLaunchProgressEpoch() !== epoch) return undefined;
 	const current = outputRegistrations.get(session)?.get(client)?.get(name);
 	if (current?.epoch === epoch && current.active && current.binding === "start-pending" && startPending) {
@@ -394,6 +419,10 @@ async function registerOutputSink(
 	};
 	const restorePrevious = async (): Promise<void> => {
 		if (!previous) return;
+		// cleanup() removes the failed registration from the live slot. Its
+		// generation remains as a fence so a later failure cannot restore over
+		// a newer registration, including one installed while artifact
+		// allocation is pending.
 		const restored = await registerOutputSink(
 			session,
 			client,
@@ -402,6 +431,7 @@ async function registerOutputSink(
 			previous.delivery,
 			false,
 			previous.daemonId,
+			registration,
 		);
 		await restored?.retain();
 	};
@@ -446,7 +476,9 @@ async function registerOutputSink(
 					if (settled) return;
 					settled = true;
 					pendingLeases--;
-					if (startAccepted || pendingLeases > 0 || !registration.active) return;
+					if (startAccepted || pendingLeases > 0 || !registration.active || monitors.get(name) !== registration) {
+						return;
+					}
 					speculative = undefined;
 					await registration.cleanup();
 					await restorePrevious();
@@ -454,12 +486,14 @@ async function registerOutputSink(
 			};
 		};
 		monitors.set(name, registration);
+		claimOutputRegistrationGeneration(session, client, name, id);
 		session.setLaunchMonitorActive?.(id, delivery, true, registration.epoch);
 		unregisterDispose = session.registerDisposeCallback?.(() => void registration.cleanup());
 		unregisterSessionChange = session.registerSessionChangeCallback?.(() => void registration.cleanup());
 		return registration.acquirePendingStart(delivery);
 	}
 	monitors.set(name, registration);
+	claimOutputRegistrationGeneration(session, client, name, id);
 	session.setLaunchMonitorActive?.(id, delivery, true, registration.epoch);
 	unregisterDispose = session.registerDisposeCallback?.(() => void registration.cleanup());
 	unregisterSessionChange = session.registerSessionChangeCallback?.(() => void registration.cleanup());
@@ -485,7 +519,7 @@ async function registerOutputSink(
 		},
 		reject: async () => {
 			speculative = undefined;
-			if (retained) return;
+			if (retained || monitors.get(name) !== registration) return;
 			await registration.cleanup();
 			await restorePrevious();
 		},
