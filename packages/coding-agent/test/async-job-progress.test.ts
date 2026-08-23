@@ -6,7 +6,7 @@ import {
 	type AsyncJobProgressInfo,
 	type AsyncJobProgressSink,
 } from "@oh-my-pi/pi-coding-agent/async/job-manager";
-import type { ProgressReminder } from "@oh-my-pi/pi-coding-agent/async/progress-batcher";
+import { ProgressBatcher, type ProgressReminder } from "@oh-my-pi/pi-coding-agent/async/progress-batcher";
 import {
 	type ProgressLine,
 	ProgressLines,
@@ -64,6 +64,7 @@ function recordingSink(): {
 describe("AsyncJobManager model progress", () => {
 	afterEach(() => {
 		vi.useRealTimers();
+		vi.restoreAllMocks();
 	});
 
 	test("collects updates for 200 ms and flushes final progress before completion", async () => {
@@ -156,11 +157,21 @@ describe("AsyncJobManager model progress", () => {
 
 		manager.watchJobs([job.jobId]);
 		report("watched");
-		expect(mine.seen).toHaveLength(1);
+		vi.advanceTimersByTime(200);
+		expect(mine.seen.map(item => item.text)).toEqual(["idle"]);
 		manager.unwatchJobs([job.jobId]);
+		report("resumed after watch");
+		vi.advanceTimersByTime(200);
+		expect(mine.seen.map(item => item.text)).toEqual(["idle", "resumed after watch"]);
+
 		manager.acknowledgeDeliveries([job.jobId]);
 		report("acknowledged");
-		expect(mine.seen).toHaveLength(1);
+		vi.advanceTimersByTime(200);
+		expect(mine.seen.map(item => item.text)).toEqual(["idle", "resumed after watch"]);
+		manager.resumeDeliveries([job.jobId]);
+		report("resumed after acknowledge");
+		vi.advanceTimersByTime(200);
+		expect(mine.seen.map(item => item.text)).toEqual(["idle", "resumed after watch", "resumed after acknowledge"]);
 
 		job.release();
 		await manager.waitForAll();
@@ -187,6 +198,36 @@ describe("AsyncJobManager model progress", () => {
 		]);
 
 		job.release();
+		await manager.waitForAll();
+	});
+
+	test("activation restores progress after suppression while delivery was disabled", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({});
+		const recorder = recordingSink();
+		manager.registerProgressSink("Main", recorder.sink);
+		const gate = Promise.withResolvers<void>();
+		const started = Promise.withResolvers<(text: string) => void>();
+		const jobId = manager.register(
+			"bash",
+			"delayed activation",
+			async ({ reportAgentProgress }) => {
+				started.resolve(reportAgentProgress);
+				await gate.promise;
+				return "done";
+			},
+			{ ownerId: "Main" },
+		);
+		const report = await started.promise;
+
+		manager.watchJobs([jobId]);
+		manager.unwatchJobs([jobId]);
+		expect(manager.activateProgressDelivery(jobId, "wake")).toBe(true);
+		report("after activation");
+		vi.advanceTimersByTime(200);
+		expect(recorder.seen.map(item => item.text)).toEqual(["after activation"]);
+
+		gate.resolve();
 		await manager.waitForAll();
 	});
 
@@ -521,5 +562,143 @@ describe("AsyncJobManager model progress", () => {
 		expect(manager.getJob(jobId)?.status).toBe("cancelled");
 		expect(manager.getJob(jobId)?.errorText).toBe("failed terminal text");
 		expect(completions).toEqual([]);
+	});
+	test("reused public ids isolate queued progress and stale eviction by job generation", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({ retentionMs: 0, maxRunningJobs: 2 });
+		const oldFirstStarted = Promise.withResolvers<void>();
+		const releaseOldFirst = Promise.withResolvers<void>();
+		const delivered: string[] = [];
+		manager.registerProgressSink("Main", {
+			deliver: async (_jobId, text) => {
+				delivered.push(text);
+				if (text !== "old first") return;
+				oldFirstStarted.resolve();
+				await releaseOldFirst.promise;
+			},
+		});
+
+		const oldGate = Promise.withResolvers<void>();
+		const oldStarted = Promise.withResolvers<(text: string, info?: AsyncJobProgressInfo) => void>();
+		const oldId = manager.register(
+			"bash",
+			"old generation",
+			async ({ reportAgentProgress }) => {
+				oldStarted.resolve(reportAgentProgress);
+				await oldGate.promise;
+				return "old result";
+			},
+			{ id: "reuse", ownerId: "Main", progressDelivery: "wake" },
+		);
+		const oldJob = manager.getJob(oldId);
+		const reportOld = await oldStarted.promise;
+		reportOld("old first");
+		vi.advanceTimersByTime(200);
+		await oldFirstStarted.promise;
+		reportOld("old second");
+		vi.advanceTimersByTime(200);
+
+		expect(manager.cancel(oldId)).toBe(true);
+		expect(manager.getJob(oldId)).toBeUndefined();
+
+		const newGate = Promise.withResolvers<void>();
+		const newStarted = Promise.withResolvers<(text: string, info?: AsyncJobProgressInfo) => void>();
+		const newId = manager.register(
+			"bash",
+			"new generation",
+			async ({ reportAgentProgress }) => {
+				newStarted.resolve(reportAgentProgress);
+				await newGate.promise;
+				return { text: "new progress", terminalTextSource: "new progress" };
+			},
+			{ id: "reuse", ownerId: "Main", progressDelivery: "wake" },
+		);
+		expect(newId).toBe(oldId);
+		const newJob = manager.getJob(newId);
+		const reportNew = await newStarted.promise;
+		reportNew("new progress");
+		vi.advanceTimersByTime(200);
+		for (let iteration = 0; iteration < 5; iteration++) await Promise.resolve();
+		expect(delivered).toEqual(["old first", "new progress"]);
+
+		releaseOldFirst.resolve();
+		oldGate.resolve();
+		await oldJob?.promise;
+		for (let iteration = 0; iteration < 5; iteration++) await Promise.resolve();
+		expect(delivered).toEqual(["old first", "new progress"]);
+		expect(oldJob?.progressDeliveredCount).toBeUndefined();
+		expect(manager.getJob(newId)).toBe(newJob);
+
+		newGate.resolve();
+		await newJob?.promise;
+		expect(newJob?.status).toBe("completed");
+		expect(newJob?.progressDeliveredCount).toBe(1);
+		expect(newJob?.terminalTextProvenance).toBe("progress");
+	});
+
+	test("flushes a synchronous pre-registration progress report before failure completion", async () => {
+		const manager = new AsyncJobManager({});
+		const recorder = recordingSink();
+		manager.registerProgressSink("Main", recorder.sink);
+		const jobId = manager.register(
+			"bash",
+			"synchronous failure",
+			({ reportAgentProgress }) => {
+				reportAgentProgress("reported before throw");
+				throw new Error("synchronous failure");
+			},
+			{ ownerId: "Main", progressDelivery: "wake" },
+		);
+
+		await manager.waitForAll();
+		expect(recorder.seen.map(item => item.text)).toEqual(["reported before throw"]);
+		expect(manager.getJob(jobId)).toMatchObject({
+			status: "failed",
+			errorText: "synchronous failure",
+			progressDeliveredCount: 1,
+		});
+	});
+
+	test("progress settlement failures preserve successful and failed executor outcomes", async () => {
+		const finish = vi.spyOn(ProgressBatcher.prototype, "finish");
+		const successfulManager = new AsyncJobManager({});
+		successfulManager.registerProgressSink("Main", { deliver: () => {} });
+		finish.mockRejectedValueOnce(new Error("flush failed"));
+		const successfulId = successfulManager.register(
+			"bash",
+			"successful settlement",
+			async ({ reportAgentProgress }) => {
+				reportAgentProgress("progress");
+				return "executor result";
+			},
+			{ ownerId: "Main", progressDelivery: "wake" },
+		);
+
+		await successfulManager.waitForAll();
+		expect(successfulManager.getJob(successfulId)).toMatchObject({
+			status: "completed",
+			resultText: "executor result",
+			terminalTextProvenance: "terminal",
+		});
+
+		const failedManager = new AsyncJobManager({});
+		failedManager.registerProgressSink("Main", { deliver: () => {} });
+		finish.mockRejectedValueOnce(new Error("flush failed"));
+		const failedId = failedManager.register(
+			"bash",
+			"failed settlement",
+			async ({ reportAgentProgress }) => {
+				reportAgentProgress("progress");
+				throw new Error("executor failure");
+			},
+			{ ownerId: "Main", progressDelivery: "wake" },
+		);
+
+		await failedManager.waitForAll();
+		expect(failedManager.getJob(failedId)).toMatchObject({
+			status: "failed",
+			errorText: "executor failure",
+			terminalTextProvenance: "terminal",
+		});
 	});
 });

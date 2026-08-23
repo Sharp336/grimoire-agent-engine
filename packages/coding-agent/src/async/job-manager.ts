@@ -88,6 +88,11 @@ export interface AsyncJob {
 	terminalTextProvenance?: "progress" | "terminal";
 }
 
+interface ManagedAsyncJob extends AsyncJob {
+	/** Manager-local generation key; rotated whenever progress suppression ends. */
+	progressKey: string;
+}
+
 /** Progress content that never reached the agent before the job settled. */
 export interface AsyncJobCompletionLeftover extends ProgressPreview {
 	suppressedEvents?: number;
@@ -292,7 +297,7 @@ export class AsyncJobManager {
 		AsyncJobManager.#instance = undefined;
 	}
 
-	readonly #jobs = new Map<string, AsyncJob>();
+	readonly #jobs = new Map<string, ManagedAsyncJob>();
 	readonly #deliveries: AsyncJobDelivery[] = [];
 	readonly #inFlightDeliveries: AsyncJobDelivery[] = [];
 	readonly #suppressedDeliveries = new Set<string>();
@@ -302,8 +307,9 @@ export class AsyncJobManager {
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
 	readonly #progressSinks = new Map<string, AsyncJobProgressSink>();
 	readonly #lastDeliveredAgentProgress = new Map<string, DeliveredAgentProgress>();
+	readonly #progressJobs = new Map<string, ManagedAsyncJob>();
 	readonly #progressBatcher = new ProgressBatcher<AsyncJobProgressRecord>(
-		(jobId, batch) => this.#deliverAgentProgress(jobId, batch),
+		(progressKey, batch) => this.#deliverAgentProgress(progressKey, batch),
 		{
 			merge: mergeAsyncJobProgressRecords,
 			mergeDisplacedMetadata: mergeAsyncJobProgressMetadata,
@@ -315,6 +321,7 @@ export class AsyncJobManager {
 	#deliveryLoop: Promise<void> | undefined;
 	#deliveryQueueChanged = Promise.withResolvers<void>();
 	#disposed = false;
+	#nextProgressGeneration = 0;
 
 	#filterJobs(jobs: Iterable<AsyncJob>, filter?: AsyncJobFilter): AsyncJob[] {
 		const ownerId = filter?.ownerId;
@@ -377,7 +384,7 @@ export class AsyncJobManager {
 		const abortController = new AbortController();
 		const startTime = Date.now();
 
-		const job: AsyncJob = {
+		const job: ManagedAsyncJob = {
 			id,
 			type,
 			status: "running",
@@ -389,7 +396,9 @@ export class AsyncJobManager {
 			agentId: options?.agentId,
 			queued: options?.queued === true,
 			progressDelivery: options?.progressDelivery,
+			progressKey: `${id}\0${++this.#nextProgressGeneration}`,
 		};
+		this.#progressJobs.set(job.progressKey, job);
 
 		const reportProgress = async (text: string, details?: Record<string, unknown>): Promise<void> => {
 			if (details) job.latestDetails = details;
@@ -423,7 +432,7 @@ export class AsyncJobManager {
 				if (typeof outcome !== "string") this.#mergeSettledDetails(job, outcome.details);
 				if (this.#isCancelled(job)) {
 					job.resultText = text;
-					this.#scheduleEviction(id);
+					this.#scheduleEviction(job);
 					return;
 				}
 				await this.#settleAgentProgress(job, text, terminalTextSource);
@@ -432,20 +441,20 @@ export class AsyncJobManager {
 				// enqueue a completion after cancel() returned true.
 				if (this.#isCancelled(job)) {
 					job.resultText = text;
-					this.#scheduleEviction(id);
+					this.#scheduleEviction(job);
 					return;
 				}
 				job.status = "completed";
 				job.resultText = text;
 				this.#enqueueDelivery(id, text);
-				this.#scheduleEviction(id);
+				this.#scheduleEviction(job);
 			} catch (error) {
 				if (error instanceof AsyncJobRunError) this.#mergeSettledDetails(job, error.details);
 				const errorText = error instanceof Error ? error.message : String(error);
 				job.terminalTextProvenance = "terminal";
 				if (this.#isCancelled(job)) {
 					job.errorText = errorText;
-					this.#scheduleEviction(id);
+					this.#scheduleEviction(job);
 					return;
 				}
 				await this.#settleAgentProgress(job);
@@ -453,13 +462,13 @@ export class AsyncJobManager {
 				// the failure waits for its final progress sink to drain.
 				if (this.#isCancelled(job)) {
 					job.errorText = errorText;
-					this.#scheduleEviction(id);
+					this.#scheduleEviction(job);
 					return;
 				}
 				job.status = "failed";
 				job.errorText = errorText;
 				this.#enqueueDelivery(id, errorText);
-				this.#scheduleEviction(id);
+				this.#scheduleEviction(job);
 			}
 		})();
 
@@ -488,7 +497,7 @@ export class AsyncJobManager {
 		if (job.status !== "running") return false;
 		job.status = "cancelled";
 		job.abortController.abort();
-		this.#scheduleEviction(id);
+		this.#scheduleEviction(job);
 		return true;
 	}
 
@@ -535,7 +544,8 @@ export class AsyncJobManager {
 		const uniqueJobIds = Array.from(new Set(jobIds.map(id => id.trim()).filter(id => id.length > 0)));
 		for (const jobId of uniqueJobIds) {
 			this.#watchedJobs.add(jobId);
-			this.#clearAgentProgress(jobId);
+			const job = this.#jobs.get(jobId);
+			if (job) this.#clearAgentProgress(job);
 		}
 		this.#notifyDeliveryQueueChanged();
 		return uniqueJobIds.length;
@@ -545,9 +555,10 @@ export class AsyncJobManager {
 		const uniqueJobIds = Array.from(new Set(jobIds.map(id => id.trim()).filter(id => id.length > 0)));
 		let removed = 0;
 		for (const jobId of uniqueJobIds) {
-			if (this.#watchedJobs.delete(jobId)) {
-				removed += 1;
-			}
+			if (!this.#watchedJobs.delete(jobId)) continue;
+			removed += 1;
+			const job = this.#jobs.get(jobId);
+			if (job) this.#resumeAgentProgress(job);
 		}
 		return removed;
 	}
@@ -586,7 +597,7 @@ export class AsyncJobManager {
 			const job = this.#jobs.get(jobId);
 			if (job?.ownerId !== undefined) this.#progressSinks.get(job.ownerId)?.acknowledge?.(jobId);
 			this.#suppressedDeliveries.add(jobId);
-			this.#clearAgentProgress(jobId);
+			if (job) this.#clearAgentProgress(job);
 		}
 
 		const before = this.#deliveries.length;
@@ -610,7 +621,9 @@ export class AsyncJobManager {
 			if (!jobId) continue;
 			if (!this.#suppressedDeliveries.delete(jobId)) continue;
 			const job = this.#jobs.get(jobId);
-			if (!job || (job.status !== "completed" && job.status !== "failed")) continue;
+			if (!job) continue;
+			this.#resumeAgentProgress(job);
+			if (job.status !== "completed" && job.status !== "failed") continue;
 			const queued =
 				this.#deliveries.some(delivery => delivery.jobId === jobId) ||
 				this.#inFlightDeliveries.some(delivery => delivery.jobId === jobId);
@@ -634,10 +647,12 @@ export class AsyncJobManager {
 	}
 
 	#cancelJobs(filter?: AsyncJobFilter, reason?: unknown): void {
-		for (const job of this.getRunningJobs(filter)) {
+		for (const publicJob of this.getRunningJobs(filter)) {
+			const job = this.#jobs.get(publicJob.id);
+			if (job !== publicJob) continue;
 			job.status = "cancelled";
 			job.abortController.abort(reason);
-			this.#scheduleEviction(job.id);
+			this.#scheduleEviction(job);
 		}
 	}
 
@@ -653,10 +668,11 @@ export class AsyncJobManager {
 	 */
 	evictCompletedJobs(filter?: AsyncJobFilter): number {
 		let evicted = 0;
-		for (const job of this.#filterJobs(this.#jobs.values(), filter)) {
-			if (job.status !== "completed" && job.status !== "failed") continue;
+		for (const publicJob of this.#filterJobs(this.#jobs.values(), filter)) {
+			const job = this.#jobs.get(publicJob.id);
+			if (job !== publicJob || (job.status !== "completed" && job.status !== "failed")) continue;
 			this.acknowledgeDeliveries([job.id]);
-			if (this.#evictJob(job.id)) evicted += 1;
+			if (this.#evictJob(job)) evicted += 1;
 		}
 		return evicted;
 	}
@@ -698,10 +714,11 @@ export class AsyncJobManager {
 		const job = this.#jobs.get(jobId);
 		if (job?.status !== "running") return false;
 		job.progressDelivery = delivery;
+		this.#resumeAgentProgress(job);
 		return true;
 	}
 
-	#recordAgentProgress(job: AsyncJob, text: string, info: AsyncJobProgressInfo = {}): void {
+	#recordAgentProgress(job: ManagedAsyncJob, text: string, info: AsyncJobProgressInfo = {}): void {
 		if (
 			this.#disposed ||
 			job.status !== "running" ||
@@ -711,18 +728,23 @@ export class AsyncJobManager {
 			return;
 		if (job.ownerId === undefined || !this.#progressSinks.has(job.ownerId)) return;
 		if (info.artifactId) job.progressArtifactId = info.artifactId;
+		// Registration can report synchronously before the public map is populated.
+		// Otherwise the public map must still identify this exact generation.
+		const currentJob = this.#jobs.get(job.id);
+		if (currentJob === undefined && this.#progressJobs.get(job.progressKey) !== job) return;
+		if (currentJob !== undefined && currentJob !== job) return;
 		// Upstream producers (e.g. broker monitor batches) may arrive already
 		// rate-limited: carry their suppression metadata into the record so this
 		// second batcher's merge preserves the suppressed-event count and any
 		// chatty-monitor reminder instead of silently dropping them.
-		this.#progressBatcher.push(job.id, { text, ...info });
+		this.#progressBatcher.push(job.progressKey, { text, ...info });
 	}
 
-	async #deliverAgentProgress(jobId: string, batch: ProgressBatch<AsyncJobProgressRecord>): Promise<void> {
-		const job = this.#jobs.get(jobId);
-		if (job?.status !== "running" || this.isDeliverySuppressed(jobId)) {
-			return;
-		}
+	async #deliverAgentProgress(progressKey: string, batch: ProgressBatch<AsyncJobProgressRecord>): Promise<void> {
+		const job = this.#progressJobs.get(progressKey);
+		const currentJob = job ? this.#jobs.get(job.id) : undefined;
+		if (!job || (currentJob !== undefined && currentJob !== job) || job.status !== "running") return;
+		if (this.isDeliverySuppressed(job.id)) return;
 		if (batch.kind === "artifact-only") return;
 		const sink = job.ownerId === undefined ? undefined : this.#progressSinks.get(job.ownerId);
 		if (!sink) return;
@@ -737,13 +759,14 @@ export class AsyncJobManager {
 		};
 		const deliveredText = batch.values.map(record => record.text).join("\n");
 		try {
-			await sink.deliver(jobId, deliveredText, job, batch.seq, info);
+			await sink.deliver(job.id, deliveredText, job, batch.seq, info);
+			if (this.#jobs.get(job.id) !== job || this.#progressJobs.get(progressKey) !== job) return;
 			// Retain fixed-size cumulative raw-stream provenance, plus only this
 			// bounded delivery for callers without provenance. Multi-batch Bash
 			// output can therefore be recognized despite line framing/newline
 			// normalization, while minimized or otherwise transformed output does
 			// not match and remains terminal-visible.
-			this.#lastDeliveredAgentProgress.set(jobId, {
+			this.#lastDeliveredAgentProgress.set(progressKey, {
 				text: deliveredText,
 				streamProvenance: batch.values.reduce<ProgressStreamProvenance | undefined>(
 					(latest, record) => laterStreamProvenance(latest, record.streamProvenance),
@@ -758,14 +781,14 @@ export class AsyncJobManager {
 			job.progressDeliveredCount = (job.progressDeliveredCount ?? 0) + 1;
 		} catch (error) {
 			logger.warn("Async job progress delivery failed", {
-				jobId,
+				jobId: job.id,
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}
 	}
 
-	#flushAgentProgress(jobId: string): Promise<void> {
-		return this.#progressBatcher.finish(jobId);
+	#flushAgentProgress(job: ManagedAsyncJob): Promise<void> {
+		return this.#progressBatcher.finish(job.progressKey);
 	}
 
 	/**
@@ -776,16 +799,41 @@ export class AsyncJobManager {
 	 * Jobs whose progress never reached the agent keep the old flush so their
 	 * recorded output is not lost.
 	 */
-	async #settleAgentProgress(job: AsyncJob, terminalText?: string, terminalTextSource = terminalText): Promise<void> {
+	async #settleAgentProgress(
+		job: ManagedAsyncJob,
+		terminalText?: string,
+		terminalTextSource = terminalText,
+	): Promise<void> {
+		try {
+			await this.#settleAgentProgressInner(job, terminalText, terminalTextSource);
+		} catch (error) {
+			logger.warn("Async job progress settlement failed", {
+				jobId: job.id,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			if (this.#jobs.get(job.id) !== job) return;
+			if (terminalText !== undefined && terminalTextSource !== undefined) {
+				job.terminalTextProvenance = "terminal";
+			}
+			this.#clearAgentProgress(job);
+		}
+	}
+
+	async #settleAgentProgressInner(
+		job: ManagedAsyncJob,
+		terminalText?: string,
+		terminalTextSource = terminalText,
+	): Promise<void> {
 		let pendingCoversTerminal = false;
 		if (
 			job.progressDelivery === undefined ||
 			(job.progressDeliveredCount ?? 0) === 0 ||
 			job.progressArtifactId === undefined
 		) {
-			await this.#flushAgentProgress(job.id);
+			await this.#flushAgentProgress(job);
 		} else {
-			const pending = await this.#progressBatcher.takePending(job.id);
+			const pending = await this.#progressBatcher.takePending(job.progressKey);
+			if (this.#jobs.get(job.id) !== job) return;
 			if (pending) {
 				const record =
 					pending.values.length === 0 ? undefined : pending.values.reduce(mergeAsyncJobProgressRecords);
@@ -803,8 +851,9 @@ export class AsyncJobManager {
 						pending.values.some(value => value.text === terminalText));
 			}
 		}
+		if (this.#jobs.get(job.id) !== job) return;
 		if (terminalText !== undefined && terminalTextSource !== undefined) {
-			const delivered = this.#lastDeliveredAgentProgress.get(job.id);
+			const delivered = this.#lastDeliveredAgentProgress.get(job.progressKey);
 			job.terminalTextProvenance =
 				pendingCoversTerminal ||
 				streamProvenanceMatchesText(delivered?.streamProvenance, terminalTextSource) ||
@@ -812,17 +861,32 @@ export class AsyncJobManager {
 					? "progress"
 					: "terminal";
 		}
-		this.#lastDeliveredAgentProgress.delete(job.id);
+		this.#lastDeliveredAgentProgress.delete(job.progressKey);
 	}
 
-	#clearAgentProgress(jobId: string): void {
-		this.#progressBatcher.clear(jobId);
-		this.#lastDeliveredAgentProgress.delete(jobId);
+	#resumeAgentProgress(job: ManagedAsyncJob): void {
+		if (
+			this.#jobs.get(job.id) !== job ||
+			job.status !== "running" ||
+			job.progressDelivery === undefined ||
+			this.isDeliverySuppressed(job.id) ||
+			this.#progressJobs.get(job.progressKey) === job
+		)
+			return;
+		job.progressKey = `${job.id}\0${++this.#nextProgressGeneration}`;
+		this.#progressJobs.set(job.progressKey, job);
+	}
+
+	#clearAgentProgress(job: ManagedAsyncJob): void {
+		this.#progressBatcher.clear(job.progressKey);
+		this.#lastDeliveredAgentProgress.delete(job.progressKey);
+		this.#progressJobs.delete(job.progressKey);
 	}
 
 	#clearAllAgentProgress(): void {
 		this.#progressBatcher.dispose();
 		this.#lastDeliveredAgentProgress.clear();
+		this.#progressJobs.clear();
 	}
 
 	/**
@@ -989,31 +1053,31 @@ export class AsyncJobManager {
 		return candidate;
 	}
 
-	#evictJob(jobId: string): boolean {
-		clearTimeout(this.#evictionTimers.get(jobId));
-		this.#evictionTimers.delete(jobId);
-		this.#suppressedDeliveries.delete(jobId);
-		this.#watchedJobs.delete(jobId);
-		this.#clearAgentProgress(jobId);
-		return this.#jobs.delete(jobId);
+	#evictJob(job: ManagedAsyncJob): boolean {
+		if (this.#jobs.get(job.id) !== job) return false;
+		clearTimeout(this.#evictionTimers.get(job.id));
+		this.#evictionTimers.delete(job.id);
+		this.#suppressedDeliveries.delete(job.id);
+		this.#watchedJobs.delete(job.id);
+		this.#clearAgentProgress(job);
+		return this.#jobs.delete(job.id);
 	}
 
-	#scheduleEviction(jobId: string): void {
-		this.#clearAgentProgress(jobId);
+	#scheduleEviction(job: ManagedAsyncJob): void {
+		if (this.#jobs.get(job.id) !== job) return;
+		this.#clearAgentProgress(job);
 		if (this.#disposed) return;
 		if (this.#retentionMs <= 0) {
-			this.#evictJob(jobId);
+			this.#evictJob(job);
 			return;
 		}
-		const existing = this.#evictionTimers.get(jobId);
-		if (existing) {
-			clearTimeout(existing);
-		}
+		const existing = this.#evictionTimers.get(job.id);
+		clearTimeout(existing);
 		const timer = setTimeout(() => {
-			this.#evictJob(jobId);
+			this.#evictJob(job);
 		}, this.#retentionMs);
 		timer.unref();
-		this.#evictionTimers.set(jobId, timer);
+		this.#evictionTimers.set(job.id, timer);
 	}
 
 	#clearEvictionTimers(): void {
