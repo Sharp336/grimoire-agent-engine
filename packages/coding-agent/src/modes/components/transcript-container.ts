@@ -34,6 +34,26 @@ interface FinalizableBlock {
 	getTranscriptBlockVersion?(): number;
 }
 
+// Process-wide epoch of post-finalize ("sealed") transcript-block mutations.
+// TranscriptContainer's compacted-run replay re-validates sealed rows only
+// when this epoch moves (plus a periodic belt-and-braces pass), which is what
+// keeps steady live-tail ticks flat against committed-history depth. Bumped
+// only through {@link noteSealedTranscriptMutation}.
+let sealedMutationEpoch = 0;
+
+/**
+ * Record a post-finalize ("sealed") mutation of a transcript block. A
+ * component that can mutate after reporting finalized MUST pair every
+ * `getTranscriptBlockVersion` bump that occurs while the block reports
+ * finalized with a call to this (streaming updates on a still-live block do
+ * not count): sealed history is replayed without per-block validation unless
+ * this epoch moved, so a missed pairing strands stale bytes in the composed
+ * frame until the periodic re-validation pass.
+ */
+export function noteSealedTranscriptMutation(): void {
+	sealedMutationEpoch++;
+}
+
 /**
  * Block lifecycle:
  * - `active`: still mutating; renders live and counts against tool admission.
@@ -51,19 +71,6 @@ interface TranscriptEntry {
 
 const MAX_LIVE_BLOCKS = 256;
 const EMPTY_ROWS: readonly string[] = [];
-
-// Process-wide epoch of post-finalize ("sealed") transcript-block mutations.
-// A component that can mutate after reporting finalized MUST pair every
-// `getTranscriptBlockVersion` bump that occurs while the block is finalized
-// (streaming updates on a still-live block do not count) with a call to
-// {@link noteSealedTranscriptMutation}. TranscriptContainer's compacted-run
-// replay re-validates sealed rows only when this epoch moves (plus a periodic
-// pass), which is what keeps steady live-tick compose cost flat against
-// finalized-history depth.
-let sealedMutationEpoch = 0;
-export function noteSealedTranscriptMutation(): void {
-	sealedMutationEpoch++;
-}
 
 function isFinalized(component: Component): boolean {
 	const block = component as Component & FinalizableBlock;
@@ -366,12 +373,21 @@ export class TranscriptContainer extends Container {
 		width = Math.max(1, width);
 		const count = this.children.length;
 
-		// Stability requires the same width and, per segment, the same block at
-		// the same offset returning the same array reference. The first
-		// divergence truncates the persistent array there; everything after
-		// re-pushes.
-		let chainStable = this.#renderWidth === width;
+		// Stability requires the same width, a previous walk that COMPLETED,
+		// and, per segment, the same block at the same offset returning the
+		// same array reference. The first divergence truncates the persistent
+		// array there; everything after re-pushes.
+		let chainStable = this.#segmentsClean && this.#renderWidth === width;
 		this.#renderWidth = width;
+		// Entry-unstable (width change, or the previous walk threw mid-frame
+		// and left #segments partially rewritten while #lines was truncated
+		// with only a prefix re-pushed): the divergence truncation inside the
+		// loop only fires on a stable→unstable transition, so reset the
+		// persistent arrays here to keep the
+		// `!chainStable ⇒ lines.length === row` invariant — otherwise re-pushed
+		// rows land after the stale frame, and a stale suffix segment whose
+		// geometry numerically coincides with the new cursor would be marked
+		// stable while its rows are no longer in #lines.
 		const lines = this.#lines;
 		if (!chainStable) lines.length = 0;
 

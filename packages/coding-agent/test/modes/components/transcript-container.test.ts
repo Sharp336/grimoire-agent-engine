@@ -1,6 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { TranscriptContainer, noteSealedTranscriptMutation } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
-import { type Component } from "@oh-my-pi/pi-tui";
+import {
+	noteSealedTranscriptMutation,
+	TranscriptContainer,
+} from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
+import type { Component } from "@oh-my-pi/pi-tui";
 
 class Block implements Component {
 	#rows: string[];
@@ -106,6 +109,40 @@ class VersionedFinalizedBlock implements Component {
 	render(_width: number): string[] {
 		this.renderCount++;
 		return [...this.#lines];
+	}
+}
+
+// A live block whose render() returns a stable cached reference (the Text-like
+// contract: an identical reference across frames proves byte-identical rows) —
+// the identity the container's segment reuse keys off. Reports unfinalized so
+// every full-render walk re-invokes render(), which lets the test fail a
+// render mid-walk.
+class CachedRenderBlock implements Component {
+	renderCount = 0;
+	failNextRender = false;
+	#lines: string[];
+
+	constructor(lines: string[]) {
+		this.#lines = lines;
+	}
+
+	set(lines: string[]): void {
+		this.#lines = lines;
+	}
+
+	isTranscriptBlockFinalized(): boolean {
+		return false;
+	}
+
+	invalidate(): void {}
+
+	render(_width: number): string[] {
+		this.renderCount++;
+		if (this.failNextRender) {
+			this.failNextRender = false;
+			throw new Error("simulated render failure");
+		}
+		return this.#lines;
 	}
 }
 
@@ -234,6 +271,26 @@ describe("TranscriptContainer", () => {
 		expect(replay?.id).toBeGreaterThan(first.id);
 		expect(replay?.rows).toEqual(["final", ""]);
 	});
+
+	it("rebuilds the full frame when a block render throws mid-walk", () => {
+		const container = new TranscriptContainer();
+		const a = new CachedRenderBlock(["old-a"]);
+		const b = new CachedRenderBlock(["b"]);
+		const c = new CachedRenderBlock(["c"]);
+		for (const block of [a, b, c]) container.addChild(block);
+		expect(container.render(40)).toEqual(["old-a", "", "b", "", "c"]);
+
+		// `a` diverges (truncating the persistent line array) and `b` then
+		// throws before its segment is rewritten. The failed walk leaves a
+		// partially updated segment array beside a partially re-pushed line
+		// array; the retry must re-push every block's rows instead of marking
+		// the unchanged suffix stable off stale geometry — otherwise the final
+		// row-count clamp extends the frame with holes.
+		a.set(["new-a"]);
+		b.failNextRender = true;
+		expect(() => container.render(40)).toThrow("simulated render failure");
+		expect(container.render(40)).toEqual(["new-a", "", "b", "", "c"]);
+	});
 });
 
 describe("TranscriptContainer full render", () => {
@@ -256,7 +313,8 @@ describe("TranscriptContainer full render", () => {
 		const countsAfterFirst = history.map(block => block.renderCount);
 
 		tail.set(["tail", "grown"]);
-		for (let i = 0; i < 5; i++) expect(container.render(W)).toEqual(["h1", "h2", "", "h3", "", "h4", "h5", "", "tail", "grown"]);
+		for (let i = 0; i < 5; i++)
+			expect(container.render(W)).toEqual(["h1", "h2", "", "h3", "", "h4", "h5", "", "tail", "grown"]);
 
 		expect(history.map(block => block.renderCount)).toEqual(countsAfterFirst);
 	});
@@ -383,5 +441,4 @@ describe("TranscriptContainer full render", () => {
 		expect(history.renderCount).toBe(2);
 		expect(tail.renderCount).toBe(2);
 	});
-
 });
