@@ -26,10 +26,29 @@ function hasLegacySnapcompactFrames(archive: snapcompact.Archive): boolean {
 	return archive.frames.some(frame => frame.font === undefined && frame.variant === undefined);
 }
 
-function hasCrashRiskSnapcompactFramePayload(archive: snapcompact.Archive): boolean {
+/**
+ * Frame payload bytes as they will reach a provider. Externalized frames carry a
+ * short `blob:sha256:…` reference, so measuring `frame.data.length` would price a
+ * rewritten legacy archive at a few hundred bytes and let it slip past the crash
+ * guard below; the resolver prices each frame from its stored blob size instead.
+ */
+function framePayloadBytes(
+	archive: snapcompact.Archive,
+	resolveFrameData: BuildSessionContextOptions["resolveFrameData"],
+): number {
+	if (!resolveFrameData) return snapcompact.frameDataBytes(archive.frames);
+	let total = 0;
+	for (const frame of archive.frames) total += resolveFrameData(frame.data)?.bytes ?? frame.data.length;
+	return total;
+}
+
+function hasCrashRiskSnapcompactFramePayload(
+	archive: snapcompact.Archive,
+	resolveFrameData: BuildSessionContextOptions["resolveFrameData"],
+): boolean {
 	return (
 		archive.frames.length >= LEGACY_SNAPCOMPACT_FRAME_COUNT_GUARD ||
-		snapcompact.frameDataBytes(archive.frames) >= snapcompact.FRAME_DATA_BYTES_BUDGET
+		framePayloadBytes(archive, resolveFrameData) >= snapcompact.FRAME_DATA_BYTES_BUDGET
 	);
 }
 
@@ -41,10 +60,13 @@ function hasCrashRiskSnapcompactArchiveSize(archive: snapcompact.Archive): boole
 	);
 }
 
-function isCrashRiskLegacySnapcompactArchive(archive: snapcompact.Archive): boolean {
+function isCrashRiskLegacySnapcompactArchive(
+	archive: snapcompact.Archive,
+	resolveFrameData: BuildSessionContextOptions["resolveFrameData"],
+): boolean {
 	return (
 		hasLegacySnapcompactFrames(archive) &&
-		hasCrashRiskSnapcompactFramePayload(archive) &&
+		hasCrashRiskSnapcompactFramePayload(archive, resolveFrameData) &&
 		hasCrashRiskSnapcompactArchiveSize(archive)
 	);
 }
@@ -52,10 +74,12 @@ function isCrashRiskLegacySnapcompactArchive(archive: snapcompact.Archive): bool
 function snapcompactHistoryBlockOptions(
 	archive: snapcompact.Archive,
 	options: BuildSessionContextOptions | undefined,
-): snapcompact.HistoryBlockOptions | undefined {
-	if (options?.transcript) return undefined;
-	if (isCrashRiskLegacySnapcompactArchive(archive)) return { maxFrameDataBytes: 0 };
-	return { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET };
+): snapcompact.HistoryBlockOptions {
+	const resolveFrameData = options?.resolveFrameData;
+	const lazy = resolveFrameData ? { resolveFrameData } : {};
+	if (options?.transcript) return lazy;
+	if (isCrashRiskLegacySnapcompactArchive(archive, resolveFrameData)) return { ...lazy, maxFrameDataBytes: 0 };
+	return { ...lazy, maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET };
 }
 
 export interface SessionContext {
@@ -129,6 +153,15 @@ export interface BuildSessionContextOptions {
 	 * hides the call the agent is still waiting on.
 	 */
 	keepDanglingToolCalls?: boolean;
+	/**
+	 * Price and read a persisted snapcompact frame payload. Frames live in the
+	 * blob store, so only the archive a rebuilt context actually injects is
+	 * touched — and within it, only the frames the byte budget keeps: the
+	 * resolver is called in newest-first budget order and prices a frame from its
+	 * stored size, so an omitted frame is never read. Superseded archives stay as
+	 * references and cost nothing to keep around.
+	 */
+	resolveFrameData?: (data: string) => snapcompact.LazyFrameData | undefined;
 }
 
 /**
