@@ -1028,7 +1028,8 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 			mcpResources: {
 				serverNames: () => ["docs"],
 				getServerResources: async () => ({ resources: [{ uri: "docs://readme", name: "README" }] }),
-				readServerResource: async () => ({ contents: [{ uri: "docs://readme", mimeType: "text/plain", text: "ok" }] }) as never,
+				readServerResource: async () =>
+					({ contents: [{ uri: "docs://readme", mimeType: "text/plain", text: "ok" }] }) as never,
 			},
 		});
 
