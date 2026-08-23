@@ -325,7 +325,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 			}
 		}
 		const quotaProvider =
-			(advisor.model?.includes("/") ? advisor.model.split("/")[0] : null) ?? liveStat?.model?.provider;
+			liveStat?.model?.provider ?? (advisor.model?.includes("/") ? advisor.model.split("/")[0] : null);
 		if (this.#cachedReports && quotaProvider) {
 			const activeAccount = this.#cb.resolveActiveAccount?.(quotaProvider, liveStat?.sessionId);
 			const quota = formatCompactQuota(quotaProvider, this.#cachedReports, Date.now(), activeAccount);

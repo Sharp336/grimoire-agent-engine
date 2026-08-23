@@ -644,7 +644,37 @@ function findExactModelReferenceMatch(modelReference: string, availableModels: M
 		const provider = trimmedReference.substring(0, slashIndex).trim();
 		const modelId = trimmedReference.substring(slashIndex + 1).trim();
 		if (provider && modelId) {
-			return resolveProviderModelReference(provider, modelId, availableModels);
+			const resolved = resolveProviderModelReference(provider, modelId, availableModels);
+			if (resolved) {
+				// The provider/model split found a match.  But the full reference
+				// might also be a literal model ID on a custom provider whose IDs
+				// contain slashes (e.g. custom provider "my-custom" with model id
+				// "deepseek/deepseek-v4-flash").  When there is exactly one such
+				// bare-ID match on a non-bundled provider, prefer it directly —
+				// isProviderLockedCrossMatch would otherwise filter it out in the
+				// caller's bare-ID phase.
+				const lowerReference = trimmedReference.toLowerCase();
+				const bareMatches = availableModels.filter(m => m.id.toLowerCase() === lowerReference);
+				if (
+					bareMatches.length === 1 &&
+					bareMatches[0] !== resolved &&
+					getBundledModels(bareMatches[0].provider as GeneratedProvider).length === 0
+				) {
+					return bareMatches[0];
+				}
+				return resolved;
+			}
+
+			// The provider/model split failed.  If the prefix is NOT a known
+			// bundled provider, it is likely a custom provider whose model IDs
+			// contain slashes (e.g. custom provider "my-custom" with model id
+			// "deepseek/deepseek-v4-flash").  In that case, try the full
+			// reference as a literal model ID so the model can be found.
+			if (getBundledModels(provider.toLowerCase() as GeneratedProvider).length === 0) {
+				const lowerReference = trimmedReference.toLowerCase();
+				const bareMatches = availableModels.filter(m => m.id.toLowerCase() === lowerReference);
+				if (bareMatches.length === 1) return bareMatches[0];
+			}
 		}
 	}
 	return undefined;
