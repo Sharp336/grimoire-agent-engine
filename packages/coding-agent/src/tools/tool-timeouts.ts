@@ -36,3 +36,20 @@ export function clampTimeout(tool: ToolWithTimeout, rawTimeout?: number, maxTime
 	const capped = maxTimeout !== undefined && maxTimeout > 0 ? Math.min(timeout, maxTimeout) : timeout;
 	return Math.max(config.min, Math.min(config.max, capped));
 }
+
+/**
+ * Timeout seconds for a live/result footer.
+ *
+ * `0` is the explicit disabled contract: no deadline and no footer.
+ * Omitted uses the tool default. Any other finite value is {@link clampTimeout}.
+ */
+export function resolveDisplayTimeout(
+	tool: ToolWithTimeout,
+	rawTimeout?: number,
+	maxTimeout?: number,
+): number | undefined {
+	if (rawTimeout === 0) return undefined;
+	if (rawTimeout === undefined) return clampTimeout(tool, undefined, maxTimeout);
+	if (!Number.isFinite(rawTimeout)) return undefined;
+	return clampTimeout(tool, rawTimeout, maxTimeout);
+}

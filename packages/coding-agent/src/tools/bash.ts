@@ -1808,7 +1808,8 @@ export const bashToolRenderer = {
 		resolveEnv: args => args?.env,
 		showHeader: false,
 	}),
-	// Live timeout footer consumes elapsed seconds; tick only when a timeout is
-	// on the call so headerless pending previews stay idle.
-	animatedPartialResult: (args: BashRenderArgs | undefined) => typeof args?.timeout === "number" && args.timeout > 0,
+	// Live timeout footer consumes elapsed seconds. Tick whenever a deadline
+	// is in force, including the 300s default when the model omits `timeout`.
+	// `timeout: 0` disables the deadline; async snapshots stay static.
+	animatedPartialResult: (args: BashRenderArgs | undefined) => args?.async !== true && args?.timeout !== 0,
 };

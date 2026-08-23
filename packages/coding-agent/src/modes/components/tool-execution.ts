@@ -15,6 +15,7 @@ import {
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
 import { getProjectDir, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { isSettingsInitialized, settings } from "../../config/settings";
 import { EDIT_MODE_STRATEGIES, type EditMode, type PerFileDiffPreview } from "../../edit";
 import type { Theme } from "../../modes/theme/theme";
 import { getThemeEpoch, theme } from "../../modes/theme/theme";
@@ -30,6 +31,7 @@ import {
 	toolRenderers,
 } from "../../tools/renderers";
 import { TODO_STRIKE_TOTAL_FRAMES, type TodoToolDetails } from "../../tools/todo";
+import { resolveDisplayTimeout } from "../../tools/tool-timeouts";
 import type { XdevState } from "../../tools/xdev";
 import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, WidthAwareText } from "../../tui";
 import { convertImageToPng } from "../../utils/image-loading";
@@ -419,6 +421,8 @@ export class ToolExecutionComponent extends Container {
 	#executionStartedAtNow: number | undefined;
 	// Epoch ms for live timeout footers. Distinct from the presentation clock.
 	#startedAtMs?: number;
+	// Frozen Date.now() after seal() so a still-partial abort row does not keep ticking.
+	#elapsedNowMs?: number;
 	// Wall clock captured whenever a task card is rebuilt.
 	#taskRenderNowMs = Date.now();
 	// Set on each `render()` when the last painted pending shape must be
@@ -885,6 +889,7 @@ export class ToolExecutionComponent extends Container {
 	seal(): void {
 		if (this.#sealed) return;
 		this.#sealed = true;
+		this.#elapsedNowMs ??= Date.now();
 		this.#blockVersion++;
 		this.#displaceableByToolName = undefined;
 		this.stopAnimation();
@@ -1403,15 +1408,21 @@ export class ToolExecutionComponent extends Container {
 		return { ...(renderArgs as Record<string, unknown>), previewDiff: first.diff };
 	}
 
+	#applyLiveElapsed(context: Record<string, unknown>): void {
+		const detailsStarted = (this.#result?.details as { startedAtMs?: unknown } | undefined)?.startedAtMs;
+		if (typeof detailsStarted === "number" && Number.isFinite(detailsStarted)) {
+			this.#startedAtMs = detailsStarted;
+		}
+		if (this.#startedAtMs !== undefined) context.startedAtMs = this.#startedAtMs;
+		if (this.#elapsedNowMs !== undefined) context.nowMs = this.#elapsedNowMs;
+	}
+
 	/**
 	 * Build render context for tools that need extra state (bash, python, edit)
 	 */
 	#buildRenderContext(): Record<string, unknown> {
 		const context: Record<string, unknown> = {};
-		const normalizeTimeoutSeconds = (value: unknown, maxSeconds: number): number | undefined => {
-			if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
-			return Math.max(1, Math.min(maxSeconds, value));
-		};
+		const maxTimeout = isSettingsInitialized() ? settings.get("tools.maxTimeout") : undefined;
 
 		if (this.#toolName === "bash") {
 			// Bash needs render context even before a result exists. The renderer uses the pending-call args
@@ -1420,29 +1431,30 @@ export class ToolExecutionComponent extends Container {
 				// Pass raw output and expanded state - renderer handles width-aware truncation
 				const output = this.#getTextOutput().trimEnd();
 				context.output = output;
-				const detailsStarted = (this.#result.details as { startedAtMs?: unknown } | undefined)?.startedAtMs;
-				if (typeof detailsStarted === "number" && Number.isFinite(detailsStarted)) {
-					this.#startedAtMs = detailsStarted;
-				}
 			}
-			if (this.#startedAtMs !== undefined) context.startedAtMs = this.#startedAtMs;
+			this.#applyLiveElapsed(context);
 			context.expanded = this.#expanded;
 			context.previewLines = BASH_DEFAULT_PREVIEW_LINES;
-			context.timeout = normalizeTimeoutSeconds(this.#args?.timeout, 3600);
+			context.timeout = resolveDisplayTimeout(
+				"bash",
+				typeof this.#args?.timeout === "number" && Number.isFinite(this.#args.timeout)
+					? this.#args.timeout
+					: undefined,
+				maxTimeout,
+			);
 		} else if (this.#toolName === "eval" && this.#result) {
 			const output = this.#getTextOutput().trimEnd();
 			context.output = output;
 			context.expanded = this.#expanded;
 			context.previewLines = EVAL_DEFAULT_PREVIEW_LINES;
-			context.timeout = normalizeTimeoutSeconds(
-				this.#args?.timeout ?? (Array.isArray(this.#args?.cells) ? this.#args.cells[0]?.timeout : undefined),
-				3600,
-			);
-			const detailsStarted = (this.#result.details as { startedAtMs?: unknown } | undefined)?.startedAtMs;
-			if (typeof detailsStarted === "number" && Number.isFinite(detailsStarted)) {
-				this.#startedAtMs = detailsStarted;
-			}
-			if (this.#startedAtMs !== undefined) context.startedAtMs = this.#startedAtMs;
+			const evalTimeout =
+				typeof this.#args?.timeout === "number" && Number.isFinite(this.#args.timeout)
+					? this.#args.timeout
+					: typeof this.#args?.cells?.[0]?.timeout === "number" && Number.isFinite(this.#args.cells[0].timeout)
+						? this.#args.cells[0].timeout
+						: undefined;
+			context.timeout = resolveDisplayTimeout("eval", evalTimeout, maxTimeout);
+			this.#applyLiveElapsed(context);
 		} else if (this.#toolName === "task") {
 			// Once a result snapshot exists the task renderer's `renderResult`
 			// draws every dispatched agent as a progress/result line, so tell

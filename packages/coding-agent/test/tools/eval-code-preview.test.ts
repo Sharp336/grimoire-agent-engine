@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { EvalToolDetails } from "@oh-my-pi/pi-coding-agent/eval/types";
 import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -29,6 +29,10 @@ describe("eval renderer: viewport tail window for cell code", () => {
 
 	afterAll(() => {
 		resetSettingsForTest();
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
 	});
 
 	function renderResult(expanded: boolean): string {
@@ -92,6 +96,21 @@ describe("eval renderer: viewport tail window for cell code", () => {
 		const rendered = Bun.stripANSI(component.render(120).join("\n"));
 		expect(rendered).toContain("Wall: 12s");
 		expect(rendered).toContain("Timeout: 30s");
-		vi.restoreAllMocks();
+	});
+
+	it("omits the timeout footer when the deadline is disabled", () => {
+		const details: EvalToolDetails = {
+			language: "python",
+			languages: ["python"],
+			cells: [{ index: 0, code: "1", language: "python", output: "", status: "running" }],
+		};
+		const component = evalToolRenderer.renderResult(
+			{ content: [{ type: "text", text: "" }], details },
+			{ expanded: false, isPartial: true, renderContext: { timeout: 0 } },
+			theme,
+		);
+		const rendered = Bun.stripANSI(component.render(120).join("\n"));
+		expect(rendered).not.toContain("Timeout:");
+		expect(rendered).not.toContain("Wall:");
 	});
 });

@@ -51,4 +51,6 @@ export interface EvalToolDetails {
 		jobId: string;
 		type: "eval";
 	};
+	/** Epoch ms when execute started; live footer uses this, not approval wait. */
+	startedAtMs?: number;
 }

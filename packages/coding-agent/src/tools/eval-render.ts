@@ -94,7 +94,7 @@ function evalTimeoutFooter(
 	uiTheme: Theme,
 ): string | undefined {
 	const timeoutSeconds = renderContext?.timeout;
-	if (typeof timeoutSeconds !== "number") return undefined;
+	if (typeof timeoutSeconds !== "number" || timeoutSeconds <= 0) return undefined;
 	const elapsed = resolveLiveElapsedSeconds({
 		isPartial,
 		startedAtMs: renderContext?.startedAtMs,

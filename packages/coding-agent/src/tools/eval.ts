@@ -475,9 +475,10 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const languages = uniqueEvalLanguages(cells);
 		const notice = detailsNotice(cells);
 		const sessionAbortController = new AbortController();
+		const startedAtMs = Date.now();
 		const emitToolUpdate = onUpdate
 			? (text: string, details: EvalToolDetails): void => {
-					onUpdate({ content: [{ type: "text", text }], details });
+					onUpdate({ content: [{ type: "text", text }], details: { startedAtMs, ...details } });
 				}
 			: undefined;
 		const run = (
