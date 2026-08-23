@@ -1,5 +1,5 @@
-import type { AgentDefinition } from "./types";
 import { isToolDisallowed } from "../tools/builtin-names";
+import type { AgentDefinition } from "./types";
 
 // Built-in tools whose approval tier is "read" (see tool classes' `approval`).
 // An agent is read-only iff its declared tools are a non-empty subset of this set.
