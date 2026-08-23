@@ -528,9 +528,62 @@ The runtime/config writer accepts `:` in names used by marketplace plugins. The 
 
 Malformed JSON or a missing/invalid server map makes that provider contribute no entries from the file; depending on the provider, OMP records a discovery warning or logs the parse failure rather than failing the session. Correct the JSON shape, then run `/mcp reload` and `/mcp list`.
 
+## Build Remote Agent (phone pairing)
+
+Independent product by Linespotting AB. Not affiliated with xAI or SpaceX.
+
+Pair a phone running **Build Remote Agent** to this desktop `omp` session.
+Protocol `gbr/1`. The phone is spectator + veto, not orchestrator. Attach only
+via loopback Bot API `http://127.0.0.1:8788` after `gbr-agent run`, or MCP
+stdio `gbr-mcp`. Never put mailbox keys in MCP config.
+
+Website: https://grokbuildremote.com/
+Agent: https://github.com/LinespottingOrg/GrokBuildRemote-Agents (MIT, v0.6.0+)
+
+### Pair
+
+```bash
+curl -fsSL https://grokbuildremote.com/install.sh | bash   # Windows: irm https://grokbuildremote.com/install.ps1 | iex
+gbr-agent version    # need v0.6.0+
+gbr-agent pair && gbr-agent run
+```
+
+Phone: Build Remote Agent → scan QR **or** type the printed 8-char code.
+Unpair in the app before changing PCs.
+
+### MCP snippet (`.omp/mcp.json` or `~/.omp/agent/mcp.json`)
+
+Clone and install `gbr-mcp` once, then use an **absolute** path to `gbr-mcp.js`:
+
+```bash
+git clone https://github.com/LinespottingOrg/GrokBuildRemote-Agents.git
+cd GrokBuildRemote-Agents/mcp/gbr-mcp && npm install
+```
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/config/mcp-schema.json",
+  "mcpServers": {
+    "gbr": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/absolute/path/to/GrokBuildRemote-Agents/mcp/gbr-mcp/bin/gbr-mcp.js"]
+    }
+  }
+}
+```
+
+Or `/mcp add` → stdio → command `node` → the same script. HTTP attach without MCP:
+
+```bash
+curl -sS http://127.0.0.1:8788/health
+curl -sS http://127.0.0.1:8788/v1/sessions
+```
+
 ## References
 
 - MCP transport spec: https://modelcontextprotocol.io/specification/2025-03-26/basic/transports
 - Filesystem server package: https://www.npmjs.com/package/@modelcontextprotocol/server-filesystem
 - GitHub MCP server: https://github.com/github/github-mcp-server
 - Slack MCP server docs: https://docs.slack.dev/ai/slack-mcp-server/
+- Build Remote Agent: https://grokbuildremote.com/
