@@ -18,6 +18,30 @@ describe("task agent capability descriptions", () => {
 			expect(isReadOnlyAgent(agentByName(agents, name))).toBe(false);
 		}
 	});
+	it("classifies from the effective post-disallow tool set", () => {
+		// `disallowedTools:` can strip a mutating tool, leaving a read-only
+		// scope that the declared list alone would mark writable.
+		const base: AgentDefinition = {
+			name: "x",
+			description: "x",
+			systemPrompt: "x",
+		};
+		expect(
+			isReadOnlyAgent({
+				...base,
+				tools: ["read", "write"],
+				disallowedTools: ["write"],
+			}),
+		).toBe(true);
+		expect(
+			isReadOnlyAgent({
+				...base,
+				tools: ["read", "write"],
+				disallowedTools: ["mcp__*"],
+			}),
+		).toBe(false);
+		expect(isReadOnlyAgent({ ...base, tools: ["read", "write"] })).toBe(false);
+	});
 
 	it("disables read summarization for scout and librarian, leaves other agents summarizing", () => {
 		const agents = loadBundledAgents();
