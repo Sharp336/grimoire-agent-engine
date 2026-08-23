@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Status line model segment can prefix the active provider (`statusLine.segmentOptions.model.showProvider`), telling apart identical model names served through different providers/gateways. Off by default.
+
 ## [18.0.1] - 2026-08-23
 
 ### Added

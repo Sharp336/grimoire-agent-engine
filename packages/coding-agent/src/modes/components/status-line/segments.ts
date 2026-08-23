@@ -121,6 +121,12 @@ const modelSegment: StatusLineSegment = {
 		if (modelName.startsWith("Claude ")) {
 			modelName = modelName.slice(7);
 		}
+		// Prefix the provider on opt-in: gateways and proxies expose the same
+		// model name under different providers, and the bare name cannot tell
+		// which one is actually serving the session.
+		if (opts.showProvider && state.model?.provider) {
+			modelName = `${state.model.provider}/${modelName}`;
+		}
 
 		// Resolve the current thinking-level display ("◉ xhigh", "⟳ auto", …)
 		// when the model supports thinking and the segment isn't hiding it.

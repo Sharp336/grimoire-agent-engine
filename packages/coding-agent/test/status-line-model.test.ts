@@ -8,10 +8,14 @@ beforeAll(async () => {
 	await initTheme();
 });
 
-function createModelContext(advisorActive: boolean): SegmentContext {
+function createModelContext(
+	advisorActive: boolean,
+	model: { id: string; name: string; provider?: string } = { id: "test-model", name: "Test Model" },
+	options: SegmentContext["options"] = {},
+): SegmentContext {
 	return {
 		session: {
-			state: { model: { id: "test-model", name: "Test Model" } },
+			state: { model },
 			isFastModeActive: () => false,
 			isAutoThinking: false,
 			autoResolvedThinkingLevel: () => undefined,
@@ -23,7 +27,7 @@ function createModelContext(advisorActive: boolean): SegmentContext {
 		} as unknown as SegmentContext["session"],
 		width: 120,
 		compactThinkingLevel: false,
-		options: {},
+		options,
 		planMode: null,
 		loopMode: null,
 		prewalk: null,
@@ -57,6 +61,34 @@ function createModelContext(advisorActive: boolean): SegmentContext {
 		usage: null,
 	};
 }
+
+describe("status line model segment provider prefix", () => {
+	it("stays off by default even when the model carries a provider", () => {
+		const ctx = createModelContext(false, { id: "gpt-5.5", name: "GPT-5.5", provider: "qg-gateway" });
+		expect(Bun.stripANSI(renderSegment("model", ctx).content)).not.toContain("qg-gateway/");
+	});
+
+	it("distinguishes identical model names from different providers when opted in", () => {
+		const opts = { model: { showProvider: true } };
+		const qg = createModelContext(false, { id: "gpt-5.5", name: "GPT-5.5", provider: "qg-gateway" }, opts);
+		const official = createModelContext(false, { id: "gpt-5.5", name: "GPT-5.5", provider: "openai-codex" }, opts);
+
+		const qgContent = Bun.stripANSI(renderSegment("model", qg).content);
+		const officialContent = Bun.stripANSI(renderSegment("model", official).content);
+		expect(qgContent).toContain("qg-gateway/GPT-5.5");
+		expect(officialContent).toContain("openai-codex/GPT-5.5");
+		expect(qgContent).not.toBe(officialContent);
+	});
+
+	it("leaves a provider-less model untouched when opted in", () => {
+		const ctx = createModelContext(
+			false,
+			{ id: "test-model", name: "Test Model" },
+			{ model: { showProvider: true } },
+		);
+		expect(Bun.stripANSI(renderSegment("model", ctx).content)).toContain("Test Model");
+	});
+});
 
 describe("status line model segment advisor badge", () => {
 	it("appends a success-colored advisor symbol when all advisors run", () => {
