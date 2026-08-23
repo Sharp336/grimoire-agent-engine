@@ -452,6 +452,8 @@ describe("openai-completions convertMessages", () => {
 			{ id: "deepseek-ai/DeepSeek-V4-Pro", provider: "custom-proxy", baseUrl: "https://llm-proxy.example.com/v1" },
 			// `vision` inside `revision` is a substring, not a multimodal token.
 			{ id: "deepseek-r1-revision-0528", provider: "custom-proxy", baseUrl: "https://llm-proxy.example.com/v1" },
+			// `vision` inside `provisioned` is a substring, not a multimodal token.
+			{ id: "deepseek-v4-provisioned", provider: "custom-proxy", baseUrl: "https://llm-proxy.example.com/v1" },
 		];
 
 		const baseModel = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">;
@@ -551,18 +553,8 @@ describe("openai-completions convertMessages", () => {
 	});
 	it("preserves image_url for the multimodal DeepSeek vision SKU", () => {
 		// deepseek-v4-flash-vision-exp is genuinely multimodal: the blanket
-		// DeepSeek text-only guard must not strip its image parts. Built inline
-		// because the bundled catalog does not carry the SKU yet.
-		const baseModel = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">;
-		const model: Model<"openai-completions"> = {
-			...baseModel,
-			id: "deepseek-v4-flash-vision-exp",
-			name: "DeepSeek V4 Flash Vision Exp",
-			provider: "deepseek" as Model<"openai-completions">["provider"],
-			baseUrl: "https://api.deepseek.com",
-			api: "openai-completions",
-			input: ["text", "image"],
-		};
+		// DeepSeek text-only guard must not strip its image parts.
+		const model = getBundledModel("deepseek", "deepseek-v4-flash-vision-exp") as Model<"openai-completions">;
 		const context: Context = {
 			messages: [
 				{
