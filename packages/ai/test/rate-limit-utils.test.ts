@@ -615,3 +615,41 @@ describe("calculateRateLimitBackoffMs", () => {
 		expect(calculateRateLimitBackoffMs("CONCURRENT_LIMIT")).toBe(5_000);
 	});
 });
+
+describe("classify bare Cursor resource_exhausted", () => {
+	it("treats bare Connect resource_exhausted as transient, not a usage limit", () => {
+		const message = "Connect error resource_exhausted: Error";
+		const id = classify(message);
+		expect(is(id, Flag.Transient)).toBe(true);
+		expect(is(id, Flag.UsageLimit)).toBe(false);
+		expect(retriable(id)).toBe(true);
+		expect(isUsageLimit(message)).toBe(false);
+	});
+
+	it("keeps quota-worded resource_exhausted as a usage limit", () => {
+		const message = "Connect error resource_exhausted: Quota exceeded for this account";
+		const id = classify(message);
+		expect(is(id, Flag.UsageLimit)).toBe(true);
+	});
+});
+
+
+describe("classify raw socket errno codes", () => {
+	it("classifies raw socket errno codes as retriable", () => {
+		for (const message of [
+			"read ECONNRESET",
+			"connect ECONNREFUSED 127.0.0.1:443",
+			"connect ECONNABORTED 1.2.3.4:443",
+			"write EPIPE",
+			"connect ETIMEDOUT 1.2.3.4:443",
+			"connect EHOSTUNREACH 1.2.3.4:443",
+			"connect ENETUNREACH 1.2.3.4:443",
+		]) {
+			const id = classify(message);
+			expect(is(id, Flag.Transient)).toBe(true);
+			expect(retriable(id)).toBe(true);
+			expect(is(id, Flag.UsageLimit)).toBe(false);
+		}
+	});
+});
+

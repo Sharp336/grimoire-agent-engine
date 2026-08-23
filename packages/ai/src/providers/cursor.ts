@@ -405,6 +405,42 @@ function frameConnectMessage(data: Uint8Array, flags = 0): Buffer {
 	return frame;
 }
 
+function parseRetryDelaySeconds(value: unknown): number | undefined {
+	if (typeof value === "number" && Number.isFinite(value) && value >= 0) {
+		return Math.trunc(value);
+	}
+	if (typeof value === "object" && value !== null && "seconds" in value) {
+		const seconds = Number(value.seconds);
+		if (Number.isFinite(seconds) && seconds >= 0) return Math.trunc(seconds);
+	}
+	if (typeof value !== "string") return undefined;
+	const match = /^(\d+(?:\.\d+)?)s?$/.exec(value.trim());
+	if (!match) return undefined;
+	return Math.trunc(Number(match[1]));
+}
+
+function extractConnectRetryAfterSeconds(error: unknown): number | undefined {
+	if (!error || typeof error !== "object") return undefined;
+	const fromMember = parseRetryDelaySeconds(
+		("retry-after" in error ? error["retry-after"] : undefined) ??
+			("retryAfter" in error ? error.retryAfter : undefined) ??
+			("retryDelay" in error ? error.retryDelay : undefined),
+	);
+	if (fromMember !== undefined) return fromMember;
+	if (!("details" in error) || !Array.isArray(error.details)) return undefined;
+	for (const detail of error.details) {
+		if (!detail || typeof detail !== "object") continue;
+		const seconds = parseRetryDelaySeconds(
+			("retryDelay" in detail ? detail.retryDelay : undefined) ??
+				("retry_delay" in detail ? detail.retry_delay : undefined) ??
+				("retry-after" in detail ? detail["retry-after"] : undefined),
+		);
+		if (seconds !== undefined) return seconds;
+	}
+	return undefined;
+}
+
+
 class ConnectEndStreamError extends AIError.ProviderResponseError {
 	readonly diagnosticMessage: string;
 
@@ -421,7 +457,9 @@ function parseConnectEndStream(data: Uint8Array): Error | null {
 		if (error) {
 			const code = typeof error.code === "string" ? error.code : "unknown";
 			const message = typeof error.message === "string" ? error.message : "Unknown error";
-			const classificationMessage = `Connect error ${code}: ${message}`;
+			const retryAfterSeconds = extractConnectRetryAfterSeconds(error);
+			const suffix = retryAfterSeconds !== undefined ? ` (retry-after: ${retryAfterSeconds}s)` : "";
+			const classificationMessage = `Connect error ${code}: ${message}${suffix}`;
 			return new ConnectEndStreamError(classificationMessage, formatConnectEndStreamError(error));
 		}
 		return null;

@@ -14,6 +14,7 @@ import {
 	isUsageLimitStatus,
 	matchesUsageLimitText,
 	parseRateLimitReason,
+	RESOURCE_EXHAUSTED_PATTERN,
 } from "./rate-limit";
 
 export const Flag = {
@@ -107,7 +108,7 @@ const TRANSIENT_ENVELOPE_PATTERN = /anthropic stream envelope error:/i;
 const TRANSIENT_ENVELOPE_BEFORE_START_PATTERN = /before message_start/i;
 export const STREAM_READ_ERROR_PATTERN = /stream[_ -]?read[_ -]?error/i;
 export const TRANSIENT_TRANSPORT_PATTERN =
-	/\b(?:no[_ -]?capacity|(?:high|peak)[ _-]?demand|(?:at|over|insufficient)[ _-]?capacity|capacity[ _-]?(?:exceeded|exhausted)|peak[ _-]?load)\b|overloaded|provider.?returned.?error|rate.?limit|too many requests|\b(?:429|500|502|503|504)\b|service.?unavailable|server.?error|internal.?error|retry your request|network.?error|connection.?error|connection.?refused|unable.?to.?connect\.\s*is the computer able to access the url\?|other side closed|fetch failed|upstream.?connect|upstream.?request.?failed|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall|no error details in response|HTTP2(?:StreamReset|RefusedStream|EnhanceYourCalm)|nghttp2_(?:internal_error|refused_stream)|stream closed with error code nghttp2_(?:internal_error|refused_stream)|malformed.?function.?call/i;
+	/\b(?:no[_ -]?capacity|(?:high|peak)[ _-]?demand|(?:at|over|insufficient)[ _-]?capacity|capacity[ _-]?(?:exceeded|exhausted)|peak[ _-]?load)\b|overloaded|provider.?returned.?error|rate.?limit|too many requests|\b(?:429|500|502|503|504)\b|service.?unavailable|server.?error|internal.?error|retry your request|network.?error|connection.?error|connection.?refused|unable.?to.?connect\.\s*is the computer able to access the url\?|other side closed|fetch failed|upstream.?connect|upstream.?request.?failed|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall|no error details in response|HTTP2(?:StreamReset|RefusedStream|EnhanceYourCalm)|nghttp2_(?:internal_error|refused_stream)|stream closed with error code nghttp2_(?:internal_error|refused_stream)|malformed.?function.?call|\bECONN(?:RESET|REFUSED|ABORTED)\b|\bETIMEDOUT\b|\bEPIPE\b|\bEHOSTUNREACH\b|\bENETUNREACH\b|\bENETDOWN\b/i;
 const AUTH_FAILURE_PATTERN =
 	/\b(?:401|403|unauthorized|forbidden|authentication|auth[_ ]?unavailable|no auth available|(?:invalid|no)[_ ]?api[_ ]?key)\b/i;
 const MALFORMED_FUNCTION_CALL_PATTERN = /\bmalformed.?function.?call\b/i;
@@ -412,13 +413,14 @@ function classifyText(
 		// usage limit, mirroring isUsageLimitOutcome.
 		const isBillingCapStatus = statusClean === 402;
 		const concurrencyExcluded = reason === "CONCURRENT_LIMIT" && !isBillingCapStatus;
-		if (
-			!concurrencyExcluded &&
-			(matchesUsageLimitText(cleanMessage) ||
-				((statusClean === 403 || statusClean === undefined) && isAccountScopedCapText(cleanMessage)) ||
-				(isLimitStatus &&
-					(isOpaque || reason === "QUOTA_EXHAUSTED" || (isBillingCapStatus && reason === "CONCURRENT_LIMIT"))))
-		) {
+		const usageLimitMessage = cleanMessage.replace(RESOURCE_EXHAUSTED_PATTERN, "");
+		const usageLimitHit =
+			matchesUsageLimitText(cleanMessage) ||
+			((statusClean === 403 || statusClean === undefined) && isAccountScopedCapText(cleanMessage)) ||
+			(isLimitStatus &&
+				(isOpaque || reason === "QUOTA_EXHAUSTED" || (isBillingCapStatus && reason === "CONCURRENT_LIMIT")));
+		const bareCapacityExhausted = reason === "MODEL_CAPACITY_EXHAUSTED" && !matchesUsageLimitText(usageLimitMessage);
+		if (!concurrencyExcluded && usageLimitHit && !bareCapacityExhausted) {
 			kinds |= Flag.UsageLimit;
 		}
 
@@ -427,8 +429,9 @@ function classifyText(
 		// A concurrency cap (e.g. Vertex "Online prediction concurrent requests
 		// quota exceeded") is transient — shed-and-backoff. The bare wording need
 		// not match TRANSIENT_TRANSPORT_PATTERN, so flag it explicitly to keep
-		// AIError.retriable from treating the temporary cap as terminal.
-		if (reason === "CONCURRENT_LIMIT") kinds |= Flag.Transient;
+		// AIError.retriable from treating the temporary cap as terminal. Bare
+		// Connect resource_exhausted is MODEL_CAPACITY_EXHAUSTED: same lane.
+		if (reason === "CONCURRENT_LIMIT" || reason === "MODEL_CAPACITY_EXHAUSTED") kinds |= Flag.Transient;
 		if ((api === "openai-responses" || api === "openai-codex-responses") && isStaleResponsesText(errorMessage)) {
 			kinds |= Flag.StaleResponsesItem;
 		}
