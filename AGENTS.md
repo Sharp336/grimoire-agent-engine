@@ -23,6 +23,25 @@ This repo contains multiple packages, but **`packages/coding-agent/`** is the pr
 
 **Catalog import convention**: code in this repo imports catalog _values_ (bundled models, model-thinking helpers, identity, descriptors, model manager/cache) from `@oh-my-pi/pi-catalog/<module>` — never via `@oh-my-pi/pi-ai`. The pi-ai barrel re-exports only the model/effort _types_ its own signatures use (`Model`, `Api`, `ThinkingConfig`, `Effort`, …); type-only imports of those from `@oh-my-pi/pi-ai` are fine.
 
+## Fork 维护规则
+
+本仓库是作者自用的定制版本，不作为面向第三方的二次发行版。
+
+### 上游同步
+
+- 上游仓库为 [`can1357/oh-my-pi`](https://github.com/can1357/oh-my-pi)。
+- 定期合并上游最新正式发布版本，不要求固定在某个长期基线。
+- 可按需要在正式发布前提前合入上游 PR；应保留其来源信息，便于后续识别和去重。
+- 同步发生冲突时，优先保留明确的本地定制；其余部分尽量跟随上游实现。
+- 上游已包含等价修改时，优先采用上游版本并移除重复的本地差异。
+
+### 本地修改
+
+- 可按作者需求修改代码、配置、构建流程及其他仓库内容。
+- 本地差异应尽量保持边界清晰、改动集中且易于审查，以降低后续同步成本。
+- 修改后按风险运行必要的检查和测试，不要求为本地定制建立独立发布流程。
+- 本节只记录 Fork 的长期维护规则，不记录具体功能、需求或当前差异；这些内容以代码、提交历史及相关文档为准。
+
 ## GitHub
 
 Unless user tells you exactly what to write:
@@ -315,5 +334,3 @@ Location: `packages/*/CHANGELOG.md` (per package).
 2. Run `bun run release`.
 
 The script handles version bump, CHANGELOG finalization, commit, tag, publish, and adding new `[Unreleased]` sections.
-
-开始任何工作前，必须阅读并遵守 [FORK.md](./FORK.md)。
