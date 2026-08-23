@@ -2901,11 +2901,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Cursor's resource frames ask what THIS client's servers advertise; only
 		// live connections have any. Built once: the advisor bridges answer from
 		// the same connections the primary does.
+		// A resource-only server (advertises resources, no tools) has no registry
+		// entry to gate on. Keep it available unless the scope itself targets MCP
+		// access (an enforced allowlist — the subagent declared no MCP tools — or
+		// an `mcp__` disallow pattern): an unrelated `disallowedTools: [bash]`
+		// must not silently strip a server's resources.
+		const scopeTargetsMcp = enforceToolAllowlist || disallowedPatterns.some(pattern => pattern.startsWith("mcp__"));
 		const cursorMcpResources: CursorMcpResourceAdapter | undefined = mcpManager && {
 			serverNames: () =>
-				mcpManager
-					.getConnectedServers()
-					.filter(name => mcpServerScopedIn(toolRegistry.values(), cursorScopeAllows, name)),
+				mcpManager.getConnectedServers().filter(name => {
+					const hasOwnedTool = mcpServerScopedIn(toolRegistry.values(), cursorScopeAllows, name);
+					// Resource-only servers have no owned tool; keep them when the
+					// scope does not target MCP access at all.
+					return hasOwnedTool || !scopeTargetsMcp;
+				}),
 			getServerResources: async name => {
 				// The manager registers a server's tools before its background
 				// resource load finishes, so a frame arriving in that window
@@ -2917,8 +2926,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// Same gate as the listing: a scoped-out server's resources are
 				// not readable, even by direct server address. The primary
 				// bridge's handler re-checks, but the advisor bridge shares this
-				// adapter and has no handler-level gate.
-				if (!mcpServerScopedIn(toolRegistry.values(), cursorScopeAllows, name)) return undefined;
+				// adapter and has no handler-level gate. Resource-only servers
+				// (no owned tool) stay readable when the scope does not target
+				// MCP access at all.
+				if (!mcpServerScopedIn(toolRegistry.values(), cursorScopeAllows, name) && scopeTargetsMcp)
+					return undefined;
 				return mcpManager.readServerResource(name, uri);
 			},
 		};
@@ -3008,12 +3020,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// custom/extension tool that merely shares the name, and reflects the
 			// session-start build — so a subagent that filtered them out, a mid-session
 			// enable that never built them, or a same-named custom tool while auto-learn
-			// is off all get no guidance.
+			// is off all get no guidance. The disallow filter applies on top: a
+			// `disallowedTools: [manage_skill]` agent must not be told to call a tool
+			// the scope invariant will always reject.
 			const autoLearnInstructions = restrictToolNames
 				? undefined
 				: buildAutoLearnInstructions({
-						manageSkill: builtInToolNames.includes("manage_skill"),
-						learn: builtInToolNames.includes("learn"),
+						manageSkill:
+							builtInToolNames.includes("manage_skill") &&
+							!isToolDisallowed("manage_skill", disallowedPatterns),
+						learn: builtInToolNames.includes("learn") && !isToolDisallowed("learn", disallowedPatterns),
 					});
 			const appendParts: string[] = [];
 			if (memoryInstructions) appendParts.push(memoryInstructions);
