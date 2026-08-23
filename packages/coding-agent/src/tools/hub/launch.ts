@@ -70,6 +70,8 @@ interface OutputRegistration {
 	delivery: AsyncJobProgressDelivery;
 	startedAt: number;
 	active: boolean;
+	/** Readiness of the initial broker publication for this registration. */
+	ready: Promise<void>;
 	/** A stop issued by this session's own hub tool call is in flight; its tool result is the terminal surface. */
 	localStopRequested?: boolean;
 	artifactId?: string;
@@ -104,6 +106,7 @@ async function registerOutputSink(
 			registration: existing,
 			retain: async () => {
 				if (settled) return;
+				await existing.ready;
 				settled = true;
 				if (!existing.active || existing.delivery === delivery) return;
 				session.setLaunchMonitorActive?.(existing.id, existing.delivery, false);
@@ -165,6 +168,7 @@ async function registerOutputSink(
 		delivery,
 		startedAt: Date.now(),
 		active: true,
+		ready: Promise.resolve(),
 		artifactId,
 		cleanup: () => {
 			if (cleanupPromise) return cleanupPromise;
@@ -234,10 +238,10 @@ async function registerOutputSink(
 			});
 		}
 	};
-	// A start subscription is published before the launch request, so output
-	// arriving while that request is validating remains speculative: buffer it
-	// until the lease is retained and discard it on reject, so a failed
-	// operation never wakes the session.
+	// A new subscription may receive broker notifications before its
+	// publication or launch operation is confirmed. Buffer them until the
+	// lease is retained and discard them on reject, so a failed operation
+	// never wakes the session.
 	let speculative: DaemonMonitorNotification[] | undefined = [];
 	let speculativeFlush: Promise<void> = Promise.resolve();
 	const sink = async (notification: DaemonMonitorNotification): Promise<void> => {
@@ -250,7 +254,9 @@ async function registerOutputSink(
 	};
 	const subscription: DaemonOutputSubscription = { id, name, owner, artifactPath: artifact.path };
 	if (startPending) subscription.startPending = true;
-	unregisterOutput = client.onOutput(subscription, sink);
+	const outputUnregister = client.onOutput(subscription, sink);
+	unregisterOutput = outputUnregister;
+	registration.ready = outputUnregister.ready;
 	monitors.set(name, registration);
 	session.setLaunchMonitorActive?.(id, delivery, true);
 	unregisterDispose = session.registerDisposeCallback?.(() => void registration.cleanup());
@@ -259,6 +265,10 @@ async function registerOutputSink(
 	return {
 		registration,
 		retain: async () => {
+			// An ordinary attach is successful only once the broker has installed
+			// this sink. A monitored start is acknowledged by the subsequent
+			// start request, whose envelope advertises the same subscription.
+			if (!startPending) await registration.ready;
 			retained = true;
 			// The broker cleared its start-pending marker when the start replaced
 			// the record; stop advertising it on future reconnect envelopes too.

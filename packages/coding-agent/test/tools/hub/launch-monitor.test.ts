@@ -61,7 +61,10 @@ interface MonitorHarness {
 	registrationCount(): number;
 }
 
-function createHarness(artifact?: { id: string; path: string }): MonitorHarness {
+function createHarness(
+	artifact?: { id: string; path: string },
+	outputReady: Promise<void> = Promise.resolve(),
+): MonitorHarness {
 	const allocatedArtifact =
 		artifact ??
 		({
@@ -87,11 +90,12 @@ function createHarness(artifact?: { id: string; path: string }): MonitorHarness 
 			subscription = registered;
 			outputSink = sink;
 			registrations.add(registered.id);
-			return () => {
+			const unregister = (): void => {
 				unregisters++;
 				registrations.delete(registered.id);
 				if (outputSink === sink) outputSink = undefined;
 			};
+			return Object.assign(unregister, { ready: outputReady });
 		},
 		request: async (operation: DaemonOperation): Promise<DaemonRpcResult> => {
 			requests.push(operation);
@@ -242,6 +246,42 @@ describe("hub process output monitoring", () => {
 		expect(harness.progress).toHaveLength(0);
 		expect(harness.getSubscription()).toMatchObject({ name: daemon.name, owner: OWNER });
 		expect(harness.getOutputSink()).toBeDefined();
+	});
+
+	it("waits for broker publication before confirming an existing-process attach", async () => {
+		const publication = Promise.withResolvers<void>();
+		const harness = createHarness(undefined, publication.promise);
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		let resolved = false;
+		const attach = executeLaunch(harness.session, {
+			op: "monitor",
+			name: daemon.name,
+			progress: "wake",
+		}).then(result => {
+			resolved = true;
+			return result;
+		});
+
+		await drainMicrotasks();
+		expect(harness.getSubscription()).toBeDefined();
+		expect(resolved).toBeFalse();
+
+		publication.resolve();
+		await attach;
+		const subscription = harness.getSubscription();
+		if (!subscription) throw new Error("Expected output subscription");
+		await harness.getOutputSink()?.({
+			event: "daemon-output",
+			monitorId: subscription.id,
+			name: daemon.name,
+			daemonId: daemon.id,
+			seq: 1,
+			text: "after attach",
+			batchKind: "progress",
+			suppressedEvents: 0,
+		});
+
+		expect(harness.progress.map(item => item.notification.text)).toEqual(["after attach"]);
 	});
 
 	it("attaches to an existing process and updates its delivery mode in place", async () => {

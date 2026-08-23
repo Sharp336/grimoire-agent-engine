@@ -382,7 +382,7 @@ process.stdin.once("data", () => {
 				},
 			);
 			if (!unregister) throw new Error("Expected output monitoring support");
-			await client.request({ op: "ping" });
+			await unregister.ready;
 			await client.request({ op: "send", name: "attach", data: "finish\n" });
 			await completed.promise;
 

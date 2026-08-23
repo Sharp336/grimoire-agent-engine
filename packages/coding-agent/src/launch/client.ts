@@ -359,7 +359,6 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			this.#outputSinks.delete(subscription.id);
 			previous.rejectReady(new Error("Daemon output registration was replaced before it was acknowledged"));
 		}
-
 		if (
 			this.#brokerCapabilities !== undefined &&
 			!this.#brokerCapabilities.includes(DAEMON_OUTPUT_MONITOR_CAPABILITY)
@@ -379,7 +378,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				clearTimeout(this.#completionReconnectTimer);
 				this.#completionReconnectTimer = undefined;
 			}
-			this.#publishSubscriptions();
+			void this.#publishSubscriptions();
 		};
 		return Object.defineProperty(unregister, "ready", { value: ready }) as DaemonOutputUnregister;
 	}
@@ -398,7 +397,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 
 	#publishCompletionOwners(): void {
 		if (this.#closed) return;
-		this.#publishSubscriptions();
+		void this.#publishSubscriptions();
 	}
 
 	#publishSubscriptions(): void {
@@ -641,7 +640,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			if (message.event !== "daemon-output" && entry.completionBlocked) {
 				entry.resolveReady();
 				this.#outputSinks.delete(message.monitorId);
-				this.#publishSubscriptions();
+				void this.#publishSubscriptions();
 				return;
 			}
 			const notification = publicMonitorNotification(message);
@@ -662,7 +661,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			if (message.event !== "daemon-output" && this.#outputSinks.get(message.monitorId) === entry) {
 				entry.resolveReady();
 				this.#outputSinks.delete(message.monitorId);
-				this.#publishSubscriptions();
+				void this.#publishSubscriptions();
 			}
 		};
 		await this.#queueNotificationDelivery(notificationDaemonId, `monitor:${entry.registrationId}`, async () => {
