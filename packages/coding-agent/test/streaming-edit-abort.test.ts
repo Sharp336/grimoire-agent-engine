@@ -735,7 +735,11 @@ it(
 // Drains N macrotask ticks deterministically (no wall-clock delay) so queued
 // promise callbacks and settled I/O continuations have all run.
 async function drainMacrotasks(ticks: number): Promise<void> {
-	for (let i = 0; i < ticks; i += 1) await new Promise<void>(resolve => setImmediate(resolve));
+	for (let i = 0; i < ticks; i += 1) {
+		const { promise, resolve } = Promise.withResolvers<void>();
+		setImmediate(resolve);
+		await promise;
+	}
 }
 
 it("drops a queued removed-lines verification whose turn was reset before it started", async () => {
