@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed visible history being erased when enlarging the terminal.
 
 ## [18.0.1] - 2026-08-23
 
