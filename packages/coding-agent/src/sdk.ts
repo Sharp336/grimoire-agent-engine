@@ -1763,8 +1763,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// scope, like the pre-scope getter, plus the disallow filter.
 					const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
 					return restrictToolNames
-						? requestedToolNames?.includes("edit") === true &&
-								!isToolDisallowed("edit", disallowedPatterns)
+						? requestedToolNames?.includes("edit") === true && !isToolDisallowed("edit", disallowedPatterns)
 						: (!requestedToolNames || requestedToolNames.includes("edit")) &&
 								!isToolDisallowed("edit", disallowedPatterns);
 				}
