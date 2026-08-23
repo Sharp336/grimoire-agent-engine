@@ -18,7 +18,7 @@ import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
 import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
 import { usesCodexTaskPrompt } from "../task/prompt-policy";
-import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
+import { HIDDEN_TOOL_NAMES, isMCPToolName, isToolDisallowed, normalizeToolNames } from "../tools/builtin-names";
 import { computerExposureMode } from "../tools/computer/exposure";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { supportsExternalThinking } from "../tools/think";
@@ -77,6 +77,12 @@ interface SessionToolsOptions {
 	createInspectImageTool?: () => Promise<AgentTool | null>;
 	builtInToolNames?: Iterable<string>;
 	presentationPinnedToolNames?: ReadonlySet<string>;
+	/** Subagent tool scoping: every runtime active-set mutation preserves the startup scope. */
+	enforceToolAllowlist?: boolean;
+	/** Names the enforced `tools:` allowlist permits (hidden protocol tools are always permitted). */
+	allowedToolNames?: ReadonlySet<string>;
+	/** Disallow patterns removed from every runtime selection (trailing `*` = prefix wildcard). */
+	disallowedToolPatterns?: readonly string[];
 	/** MCP tool names whose current registry entries came from the manager snapshot. */
 	mcpManagerToolNames?: Iterable<string>;
 	ensureWriteRegistered?: () => Promise<boolean>;
@@ -210,6 +216,10 @@ export class SessionTools {
 	#announcedMountsSeeded = false;
 	#presentationPinnedToolNames: ReadonlySet<string> | undefined;
 	#runtimeSelectedToolNames: ReadonlySet<string> | undefined;
+	/** Enforced subagent scope (`tools:` allowlist + `disallowedTools:`) applied to every active-set mutation. */
+	#enforceToolAllowlist: boolean;
+	#allowedToolNames: ReadonlySet<string> | undefined;
+	#disallowedToolPatterns: readonly string[];
 	#baseSystemPrompt: string[];
 	/**
 	 * Per-turn system prompt returned by a `before_agent_start` extension hook
@@ -272,6 +282,9 @@ export class SessionTools {
 			}
 		}
 		this.#presentationPinnedToolNames = options.presentationPinnedToolNames;
+		this.#enforceToolAllowlist = options.enforceToolAllowlist === true;
+		this.#allowedToolNames = options.allowedToolNames;
+		this.#disallowedToolPatterns = options.disallowedToolPatterns ?? [];
 		this.#ensureWriteRegistered = options.ensureWriteRegistered;
 		this.#ensureGoalRegistered = options.ensureGoalRegistered;
 		this.#rebuildSystemPrompt = options.rebuildSystemPrompt;
@@ -826,9 +839,28 @@ export class SessionTools {
 		);
 	}
 
+	/**
+	 * Scope invariant for runtime mutations: a tool the startup scoping removed
+	 * (unlisted under an enforced `tools:` allowlist, or matched by
+	 * `disallowedTools:`) can never re-enter the active set through
+	 * {@link setActiveToolsByName}, extension hooks, or internal toggles. Hidden
+	 * protocol tools stay permitted, mirroring {@link isToolDisallowed}.
+	 */
+	#isToolScopedIn(name: string): boolean {
+		if (isToolDisallowed(name, this.#disallowedToolPatterns)) return false;
+		if (!this.#enforceToolAllowlist) return true;
+		return (HIDDEN_TOOL_NAMES as readonly string[]).includes(name) || this.#allowedToolNames?.has(name) === true;
+	}
+
+	#scopeActiveToolSelection(toolNames: string[]): string[] {
+		if (!this.#enforceToolAllowlist && this.#disallowedToolPatterns.length === 0) return toolNames;
+		return toolNames.filter(name => this.#isToolScopedIn(name));
+	}
+
 	async #applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
 		signal?.throwIfAborted();
 		toolNames = normalizeToolNames(toolNames);
+		toolNames = this.#scopeActiveToolSelection(toolNames);
 		const codeMode = resolveCodeMode({
 			provider: this.#host.model()?.provider ?? "",
 			toolMode: this.#host.model()?.toolMode,
@@ -889,7 +921,7 @@ export class SessionTools {
 		}
 		if (transportNeeded && builtInWriteAvailable) {
 			const write = this.#toolRegistry.get("write");
-			if (write && !validToolNames.includes("write")) {
+			if (write && !validToolNames.includes("write") && this.#isToolScopedIn("write")) {
 				tools.push(this.#wrapToolForAcpPermission(write));
 				validToolNames.push("write");
 			}

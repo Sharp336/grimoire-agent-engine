@@ -45,10 +45,13 @@ const CANONICAL_TOOL_NAMES: Record<string, true> = Object.fromEntries(
 	[...BUILTIN_TOOL_NAMES, ...HIDDEN_TOOL_NAMES].map(name => [name, true]),
 );
 
-/** Canonicalize built-in IDs and legacy aliases. Leave plugin names unchanged. */
+/** Canonicalize built-in IDs, legacy aliases, and MCP minted names. Leave plugin names unchanged. */
 export function normalizeToolName(name: string): string {
 	const lower = name.toLowerCase();
-	return LEGACY_BUILTIN_TOOL_NAME_ALIASES.get(lower) ?? (Object.hasOwn(CANONICAL_TOOL_NAMES, lower) ? lower : name);
+	return (
+		LEGACY_BUILTIN_TOOL_NAME_ALIASES.get(lower) ??
+		(Object.hasOwn(CANONICAL_TOOL_NAMES, lower) || lower.startsWith("mcp__") ? lower : name)
+	);
 }
 
 /** Normalize and deduplicate tool names while preserving first-seen order. */
@@ -67,4 +70,28 @@ export function normalizeToolNames(names: Iterable<string>): string[] {
 /** MCP tool names carry the `mcp__<server>_<tool>` prefix minted by `createMCPToolName`. */
 export function isMCPToolName(name: string): boolean {
 	return name.startsWith("mcp__");
+}
+
+/**
+ * Match a tool name against disallow patterns: a trailing `*` is a prefix
+ * wildcard (`mcp__*` = all MCP tools, `mcp__<server>_*` = one server), any
+ * other pattern matches the exact name.
+ *
+ * Hidden protocol tools (`yield`, `goal`, `think`) are never disallowable:
+ * stripping the subagent terminator would leave a `requireYieldTool` session
+ * unable to yield. The `<server>` in an `mcp__<server>_*` pattern is the
+ * sanitized tool-name prefix (`createMCPToolName` lowercases and collapses
+ * non-`[a-z_]` characters), not the raw config server name — a server named
+ * `db2` mints `mcp__db_query`, so the pattern is `mcp__db_*`.
+ */
+export function isToolDisallowed(name: string, patterns: readonly string[]): boolean {
+	if (HIDDEN_TOOL_NAMES.includes(name as HiddenToolName)) return false;
+	for (const pattern of patterns) {
+		if (pattern.endsWith("*")) {
+			if (name.startsWith(pattern.slice(0, -1))) return true;
+		} else if (name === pattern) {
+			return true;
+		}
+	}
+	return false;
 }

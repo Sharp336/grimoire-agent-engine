@@ -127,7 +127,13 @@ export function createPersistedSubagentReviverFactory(
 				parentAgentId: ref.parentId,
 				expectedAgentRef: expectedRef,
 				taskDepth,
-				toolNames: init.tools,
+				// Scope from the declarative allowlist when present: the enabled
+				// snapshot predates late registrations (extensions, MCP reconnects)
+				// and would permanently scope them out after a restart. Files from
+				// before `declaredTools` existed fall back to the snapshot.
+				toolNames: init.declaredTools ?? init.tools,
+				enforceToolAllowlist: init.enforceToolAllowlist || undefined,
+				disallowedTools: init.disallowedTools,
 				outputSchema: init.outputSchema,
 				outputSchemaMode: init.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
@@ -151,10 +157,17 @@ export function createPersistedSubagentReviverFactory(
 							customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
 						}),
 			});
-			// Clamp the active set to the persisted list: createAgentSession's
+			// Clamp the active set to the persisted scope: createAgentSession's
 			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
 			// the original run didn't carry. Unknown/missing names are ignored.
-			await session.setActiveToolsByName([...init.tools, ...session.getMountedXdevToolNames()]);
+			// Enforced revivals clamp to the declarative allowlist — the enabled
+			// snapshot predates tools that registered late originally and would
+			// drop one that is available again at revival time with no later
+			// registration event to re-activate it.
+			await session.setActiveToolsByName([
+				...(init.declaredTools ?? init.tools),
+				...session.getMountedXdevToolNames(),
+			]);
 			// Wire the extension runtime exactly as the live executor does. Without
 			// this the runner stays pre-init, every action method throws
 			// `ExtensionRuntimeNotInitializedError`, and a `tool_call` handler that

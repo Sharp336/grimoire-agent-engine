@@ -66,6 +66,12 @@ interface CursorExecBridgeOptions {
 	/** Resolves execution overrides (mounted-device permission wrappers) before the canonical map. */
 	getExecutableTool?: (name: string) => AgentTool | undefined;
 	/**
+	 * Scope gate for frame-driven tool resolution: a name it rejects resolves to
+	 * nothing (unadvertised-tool error), so scoped subagents cannot reach tools
+	 * that stay in the canonical registry but outside the active set.
+	 */
+	isToolExecutable?: (name: string) => boolean;
+	/**
 	 * The `replace`-mode `edit` instance `pi_edit` must run, when the session
 	 * granted `edit` at all.
 	 *
@@ -228,6 +234,19 @@ function buildToolErrorResult(message: string): AgentToolResult<unknown> {
 	};
 }
 
+/** Shared frame-tool resolution: scope gate first, then overrides, then the canonical map. */
+function resolveFrameTool(options: CursorExecBridgeOptions, toolName: string): AgentTool | undefined {
+	if (options.isToolExecutable && !options.isToolExecutable(toolName)) return undefined;
+	return options.getExecutableTool?.(toolName) ?? options.tools.get(toolName);
+}
+
+/** MCP names the scope gate lets this bridge execute, for not-found error hints. */
+function executableMcpToolNames(options: CursorExecBridgeOptions): string[] {
+	return Array.from(options.tools.keys()).filter(
+		name => name.startsWith("mcp__") && (!options.isToolExecutable || options.isToolExecutable(name)),
+	);
+}
+
 async function executeTool(
 	options: CursorExecBridgeOptions,
 	toolName: string,
@@ -235,7 +254,7 @@ async function executeTool(
 	args: Record<string, unknown>,
 	overrideTool?: CursorBridgeTool,
 ): Promise<ToolResultMessage> {
-	const tool = overrideTool ?? options.getExecutableTool?.(toolName) ?? options.tools.get(toolName);
+	const tool = overrideTool ?? resolveFrameTool(options, toolName);
 	if (!tool) {
 		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
 		return createToolResultMessage(toolCallId, toolName, result, true);
@@ -508,7 +527,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	) {
 		const toolCallId = decodeToolCallId(args.toolCallId);
 		const toolName = "bash";
-		const tool = this.options.tools.get(toolName);
+		const tool = resolveFrameTool(this.options, toolName);
 		if (!tool) {
 			const result = buildToolErrorResult(`Tool "${toolName}" not available`);
 			return createToolResultMessage(toolCallId, toolName, result, true);
@@ -929,15 +948,15 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		if (cursorMcpPrefersReplaceEdit(toolName, args)) {
 			const replaceTool = this.options.getEditReplaceTool?.();
 			if (!replaceTool) {
-				const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
+				const availableTools = executableMcpToolNames(this.options);
 				const message = formatMcpToolErrorMessage(toolName, availableTools);
 				return createToolResultMessage(toolCallId, toolName, buildToolErrorResult(message), true);
 			}
 			return await executeTool(this.options, "edit", toolCallId, normalizeCursorReplaceArgs(args), replaceTool);
 		}
-		const tool = this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName);
+		const tool = resolveFrameTool(this.options, toolName);
 		if (!tool) {
-			const availableTools = Array.from(this.options.tools.keys()).filter(name => name.startsWith("mcp__"));
+			const availableTools = executableMcpToolNames(this.options);
 			const message = formatMcpToolErrorMessage(toolName, availableTools);
 			const result = buildToolErrorResult(message);
 			return createToolResultMessage(toolCallId, toolName, result, true);
@@ -959,9 +978,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		const toolName = call.toolName || call.name;
 		const args = Object.keys(call.args ?? {}).length > 0 ? call.args : decodeMcpArgs(call.rawArgs ?? {});
 		const preferReplace = cursorMcpPrefersReplaceEdit(toolName, args);
-		const tool = preferReplace
-			? this.options.getEditReplaceTool?.()
-			: (this.options.getExecutableTool?.(toolName) ?? this.options.tools.get(toolName));
+		const tool = preferReplace ? this.options.getEditReplaceTool?.() : resolveFrameTool(this.options, toolName);
 		if (!tool) return false;
 		const context = this.options.getToolContext?.();
 		const settings = context?.settings;

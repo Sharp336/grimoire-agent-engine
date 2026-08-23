@@ -224,7 +224,7 @@ import {
 	xdevDocsAll,
 	xdevEntries,
 } from "./tools";
-import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
+import { isMCPToolName, isToolDisallowed, normalizeToolNames } from "./tools/builtin-names";
 import { ToolContextStore } from "./tools/context";
 import { isIrcEnabled } from "./tools/hub";
 import { getImageGenTools } from "./tools/image-gen";
@@ -513,6 +513,21 @@ export interface CreateAgentSessionOptions {
 	toolNames?: string[];
 	/** Limit the session to explicitly supplied tool names, without discovered extras. */
 	restrictToolNames?: boolean;
+	/**
+	 * Treat {@link toolNames} as a hard allowlist for custom, extension, and MCP
+	 * proxy tools too (not just built-ins). Set by the subagent executor when an
+	 * agent definition declares `tools:`; top-level sessions never set it.
+	 */
+	enforceToolAllowlist?: boolean;
+	/**
+	 * Tool-name patterns removed from the active set: trailing `*` is a prefix
+	 * wildcard (`mcp__*` = all MCP tools, `mcp__<server>_*` = one server), any
+	 * other pattern matches the exact name. The `<server>` is the sanitized
+	 * tool-name prefix (`createMCPToolName` lowercases and collapses
+	 * non-`[a-z_]` characters). Hidden protocol tools (`yield`, `goal`, `think`)
+	 * are never disallowed.
+	 */
+	disallowedTools?: string[];
 	/**
 	 * Permit only caller-supplied SDK custom tools inside a restricted session.
 	 * They must still be named in {@link toolNames}; discovered extensions, MCP,
@@ -1650,6 +1665,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let hasSession = false;
 	let hasRegistered = false;
 	const restrictToolNames = options.restrictToolNames === true;
+	const enforceToolAllowlist = options.enforceToolAllowlist === true;
+	const disallowedPatterns = options.disallowedTools ? normalizeToolNames(options.disallowedTools) : [];
 	const enableLsp = options.enableLsp ?? !restrictToolNames;
 	const lspReadOnly = options.lspReadOnly ?? restrictToolNames;
 	const asyncMaxJobs = Math.min(100, Math.max(1, settings.get("async.maxJobs") ?? 100));
@@ -2755,7 +2772,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// The grant is captured here, independently of the session's provider:
 		// a session that starts on another provider can switch to Cursor later,
 		// and the roster is built once, at session creation.
-		const editWasGranted = toolRegistry.has("edit");
+		// Scope-aware Cursor grants: scoping keeps scoped-out tools in the
+		// canonical registry but removes them from the active set, and this
+		// bridge answers native frames from the registry regardless of the
+		// advertised catalog — so grants must consult the enforced scope, not
+		// registry membership alone. (The later `explicitlyRequestedToolNames`
+		// additions — yield, auto-learn, checkpoint/rewind — never name
+		// `edit`/`write`/`grep`, so the raw request matches the finalized set.)
+		const cursorRequestedToolNames = new Set(normalizeToolNames(options.toolNames ?? []));
+		const cursorScopeAllows = (name: string): boolean =>
+			!isToolDisallowed(name, disallowedPatterns) && !(enforceToolAllowlist && !cursorRequestedToolNames.has(name));
+		const editWasGranted = toolRegistry.has("edit") && cursorScopeAllows("edit");
 		// Built on first use rather than eagerly: a session that never reaches
 		// Cursor never constructs it.
 		let cursorBridgeEditTool: AgentTool | undefined;
@@ -2769,12 +2796,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			cursorBridgeEditTool ??= createBridgeEditTool(toolSession, extensionRunner);
 			return cursorBridgeEditTool;
 		};
-		// Whether this session granted a file-writing tool. Same capture-early
-		// reasoning, plus `write` may be auto-registered further down as an xdev
-		// transport. The exec bridge answers native `delete` and
-		// resource-download frames that mutate files without running a registry
-		// tool, so it needs the grant as the session actually made it.
-		const cursorCanMutateFiles = editWasGranted || toolRegistry.has("write");
+		// Whether this session may answer native frames that mutate files without
+		// running a registry tool (`delete`, resource downloads to a path). Same
+		// capture-early reasoning, plus `write` may be auto-registered further
+		// down as an xdev transport. Under an enforced scope these frames map to
+		// the `write` grant specifically — an edit-only allowlist keeps its own
+		// replace-edit path (gated above) but gains no undeclared deletion or
+		// disk-write channel.
+		const cursorCanMutateFiles = (editWasGranted || toolRegistry.has("write")) && cursorScopeAllows("write");
 
 		let writeRegistration: Promise<boolean> | undefined;
 		const ensureWriteRegistered = (): Promise<boolean> => {
@@ -2868,6 +2897,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// registry may still hold the session's own `edit` (any mode) when
 			// this session did not start on Cursor.
 			getEditReplaceTool: getCursorBridgeEditTool,
+			// Frame-driven MCP/custom resolution must honor the subagent scope:
+			// scoped-out names resolve to nothing (unadvertised-tool error) even
+			// though their registry entries remain.
+			isToolExecutable:
+				enforceToolAllowlist || disallowedPatterns.length > 0
+					? (name: string): boolean => cursorScopeAllows(name)
+					: undefined,
 			getToolContext: () => toolContextStore.getContext(),
 			mcpResources: cursorMcpResources,
 			emitEvent: event => cursorEventEmitter?.(event),
@@ -2879,7 +2915,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// the grant: the factory builds a fresh tool and `executeTool` prefers
 			// it over the registry, so installing it unconditionally would let a
 			// session without `grep` search anyway.
-			createGrepTool: toolRegistry.has("grep") ? createBridgeGrepFactory(toolSession, extensionRunner) : undefined,
+			createGrepTool:
+				toolRegistry.has("grep") && cursorScopeAllows("grep")
+					? createBridgeGrepFactory(toolSession, extensionRunner)
+					: undefined,
 			// The native `delete` and resource-download frames mutate files
 			// without running a registry tool, so this grant is the only thing
 			// standing between a restricted session and a workspace write.
@@ -3086,12 +3125,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const explicitlyRequestedToolNameSet = explicitlyRequestedToolNames
 			? new Set(explicitlyRequestedToolNames)
 			: undefined;
+		// The Cursor scope gate was seeded from the raw request above; refresh it
+		// in place now that the forced additions (yield, auto-learn, checkpoint/
+		// rewind pairing) are final, so the bridge admits exactly what the active
+		// set may contain. Handlers only run during streaming — never between
+		// here and the bridge construction.
+		if (explicitlyRequestedToolNameSet) {
+			cursorRequestedToolNames.clear();
+			for (const name of explicitlyRequestedToolNameSet) cursorRequestedToolNames.add(name);
+		}
 		const xdevReadAvailable =
 			builtInRegistryToolNames.has("read") &&
-			(explicitlyRequestedToolNameSet === undefined || explicitlyRequestedToolNameSet.has("read"));
+			(explicitlyRequestedToolNameSet === undefined || explicitlyRequestedToolNameSet.has("read")) &&
+			!isToolDisallowed("read", disallowedPatterns);
 		const xdevWriteAvailable =
 			builtInRegistryToolNames.has("write") &&
-			(explicitlyRequestedToolNameSet === undefined || explicitlyRequestedToolNameSet.has("write"));
+			(explicitlyRequestedToolNameSet === undefined || explicitlyRequestedToolNameSet.has("write")) &&
+			!isToolDisallowed("write", disallowedPatterns);
 		const initialRequestedActiveToolNames = options.toolNames
 			? requestedActiveToolNames
 			: requestedActiveToolNames.filter(name => !defaultInactiveToolNames.has(name));
@@ -3099,15 +3149,24 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		// Custom tools and extension-registered tools are always included
 		// unless the effective registry winner is hidden / defaultInactive. Restricted callers own the list.
+		// When the caller enforces a tool allowlist (subagent `tools:` frontmatter),
+		// custom/extension/MCP tools not named in the list are excluded too.
 		const alwaysInclude: string[] = restrictToolNames
 			? []
 			: [...sdkCustomTools.map(t => t.name), ...registeredTools.map(t => t.definition.name)].filter(
-					name => !defaultInactiveToolNames.has(name),
+					name =>
+						!defaultInactiveToolNames.has(name) &&
+						(!enforceToolAllowlist || explicitlyRequestedToolNameSet?.has(name) === true),
 				);
 		for (const name of alwaysInclude) {
 			if (toolRegistry.has(name) && !initialToolNames.includes(name)) {
 				initialToolNames.push(name);
 			}
+		}
+		// Disallow patterns remove tools from the active set after the allowlist is
+		// applied (covers built-ins and any custom/extension/MCP tool not caught above).
+		if (disallowedPatterns.length > 0) {
+			initialToolNames = initialToolNames.filter(name => !isToolDisallowed(name, disallowedPatterns));
 		}
 
 		// Pre-register in the global agent registry BEFORE building the system prompt,
@@ -3166,7 +3225,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			toolSession.xdev.mountedNames.clear();
 			for (const name of mountedNames) toolSession.xdev.mountedNames.add(name);
 			initialToolNames = topLevelToolNames;
-			if (mountedNames.length > 0 && !initialToolNames.includes("write")) initialToolNames.push("write");
+			if (
+				mountedNames.length > 0 &&
+				!initialToolNames.includes("write") &&
+				!isToolDisallowed("write", disallowedPatterns)
+			)
+				initialToolNames.push("write");
 		}
 
 		setSessionActiveToolNames(initialToolNames);
@@ -3558,6 +3622,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getXdevToolEntries: () => (toolSession.xdev ? xdevEntries(toolSession.xdev) : []),
 			xdev: toolSession.xdev,
 			presentationPinnedToolNames: explicitlyRequestedToolNameSet,
+			enforceToolAllowlist: enforceToolAllowlist || undefined,
+			allowedToolNames: explicitlyRequestedToolNameSet ?? undefined,
+			disallowedToolPatterns: disallowedPatterns.length > 0 ? disallowedPatterns : undefined,
 			setActiveToolNames: setSessionActiveToolNames,
 			ensureWriteRegistered,
 			ensureGoalRegistered,
@@ -3649,7 +3716,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				session.setToolBuiltIn(name, false);
 				session.setExtensionMCPTool(name, liveTool);
 				try {
-					if ((registered.definition.defaultInactive || registered.definition.hidden) && !explicitlyRequested) {
+					// Subagent tool scoping: a tool outside the enforced allowlist or
+					// matching a disallow pattern stays registered but is never activated.
+					const scopedOut =
+						(enforceToolAllowlist && explicitlyRequestedToolNameSet?.has(name) === false) ||
+						isToolDisallowed(name, disallowedPatterns);
+					if (
+						((registered.definition.defaultInactive || registered.definition.hidden) && !explicitlyRequested) ||
+						scopedOut
+					) {
 						if (!alreadyEnabled) return;
 						await session.setActiveToolPresentation(
 							enabled.filter(enabledName => enabledName !== name),

@@ -795,6 +795,65 @@ describe("runSubprocess yield reminders", () => {
 		expect(errorSpy).not.toHaveBeenCalledWith("Subagent prompt failed", expect.anything());
 		expect(debugSpy).toHaveBeenCalledWith("Subagent prompt aborted");
 	});
+
+	it("passes enforceToolAllowlist and disallowedTools from the agent definition", async () => {
+		const session = createMockSession(({ emit }) => {
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "yield-scoped",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { ok: true } },
+				},
+				isError: false,
+			});
+		});
+		const spy = mockCreateAgentSession(session);
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-scoped-tools",
+			agent: { ...baseAgent, tools: ["read"], disallowedTools: ["mcp__*"] },
+		});
+
+		expect(result.exitCode).toBe(0);
+		const callArgs = spy.mock.calls[0][0] as {
+			enforceToolAllowlist?: boolean;
+			disallowedTools?: string[];
+		};
+		expect(callArgs.enforceToolAllowlist).toBe(true);
+		expect(callArgs.disallowedTools).toEqual(["mcp__*"]);
+	});
+
+	it("leaves scoping flags unset when the agent declares no tools", async () => {
+		const session = createMockSession(({ emit }) => {
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "yield-unscoped",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { ok: true } },
+				},
+				isError: false,
+			});
+		});
+		const spy = mockCreateAgentSession(session);
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-unscoped-tools",
+		});
+
+		expect(result.exitCode).toBe(0);
+		const callArgs = spy.mock.calls[0][0] as {
+			enforceToolAllowlist?: boolean;
+			disallowedTools?: string[];
+		};
+		expect(callArgs.enforceToolAllowlist).toBeFalsy();
+		expect(callArgs.disallowedTools).toBeUndefined();
+	});
 });
 
 describe("runSubprocess telemetry propagation", () => {

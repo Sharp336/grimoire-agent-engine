@@ -1925,3 +1925,58 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		expect(calls[0]).toEqual({ path: "." });
 	});
 });
+
+describe("CursorExecHandlers scope gate", () => {
+	let cwd: string;
+
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-scope-test-"));
+	});
+
+	function mcpStub(name: string): Tool {
+		return {
+			name,
+			description: `${name} stub`,
+			parameters: type({}),
+			execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
+		} as unknown as Tool;
+	}
+
+	it("refuses frame-driven MCP calls for names the scope gate rejects", async () => {
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([
+				["mcp__db_query", mcpStub("mcp__db_query")],
+				["mcp__other_call", mcpStub("mcp__other_call")],
+			]),
+			isToolExecutable: name => name === "mcp__db_query",
+		});
+
+		const rejected = await handlers.mcp({ toolName: "mcp__other_call", toolCallId: "s1", args: {} } as never);
+		expect(rejected.isError).toBe(true);
+
+		const allowed = await handlers.mcp({ toolName: "mcp__db_query", toolCallId: "s2", args: {} } as never);
+		expect(allowed.isError).toBeFalsy();
+	});
+});
+
+describe("CursorExecHandlers scope gate: streamed shell", () => {
+	it("refuses streamed shell frames when the scope gate rejects bash", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-scope-shell-"));
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["bash", new BashTool(createTestSession(cwd)) as unknown as Tool]]),
+			isToolExecutable: () => false,
+		});
+
+		const result = await handlers.shellStream(
+			create(ShellArgsSchema, { toolCallId: "call-scope", command: "echo hi" }),
+			{
+				onStdout: () => {},
+				onStderr: () => {},
+			},
+		);
+		expect(result.isError).toBe(true);
+		expect(result.content).toEqual([{ type: "text", text: 'Tool "bash" not available' }]);
+	});
+});
