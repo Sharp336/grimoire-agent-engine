@@ -18,7 +18,7 @@ export interface BashExecutorOptions {
 	cwd?: string;
 	/** Milliseconds before aborting the command; 0 disables the executor deadline. */
 	timeout?: number;
-	onChunk?: (chunk: string, stamp: number) => void;
+	onChunk?: (chunk: string, stamp: number, artifactId?: string) => void;
 	/**
 	 * Sampled when a chunk enters the output sink and delivered with the
 	 * matching `onChunk` call, so callers can discard chunks captured before

@@ -718,6 +718,14 @@ export class AsyncJobManager {
 		return true;
 	}
 
+	/** Replace the provisional progress artifact with the producer's settlement-time result. */
+	setProgressArtifact(jobId: string, artifactId: string | undefined): boolean {
+		const job = this.#jobs.get(jobId);
+		if (job?.status !== "running") return false;
+		job.progressArtifactId = artifactId;
+		return true;
+	}
+
 	#recordAgentProgress(job: ManagedAsyncJob, text: string, info: AsyncJobProgressInfo = {}): void {
 		if (
 			this.#disposed ||

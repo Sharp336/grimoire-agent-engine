@@ -861,13 +861,13 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			label,
 			async ({ jobId, signal: runSignal, reportProgress, reportAgentProgress }) => {
 				const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
-				const progressArtifactId = artifactPath && artifactId ? artifactId : undefined;
+				let confirmedProgressArtifactId: string | undefined;
 				const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
 				const progressLines =
 					options.progressDelivery || options.deferredProgressDelivery
 						? new ProgressLines(line =>
 								reportAgentProgress(line.text, {
-									artifactId: progressArtifactId,
+									artifactId: confirmedProgressArtifactId,
 									truncated: line.truncated,
 									streamProvenance: line.streamProvenance,
 								}),
@@ -896,8 +896,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 							// drain every chunk that already crossed that boundary into
 							// the foreground preview.
 							chunkStamp: trackChunkDelivery,
-							onChunk: (chunk, stamp) => {
+							onChunk: (chunk, stamp, artifactId) => {
 								try {
+									confirmedProgressArtifactId = artifactId;
 									tailBuffer.append(chunk);
 									latestText = tailBuffer.text();
 									void reportProgress(latestText, { async: { state: "running", jobId, type: "bash" } });
@@ -908,6 +909,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 							},
 							onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 						});
+						confirmedProgressArtifactId = result.artifactId;
 					} finally {
 						progressLines?.finish();
 					}
@@ -954,6 +956,8 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						async: { state: "failed", jobId, type: "bash" },
 					});
 					throw error;
+				} finally {
+					manager.setProgressArtifact(jobId, confirmedProgressArtifactId);
 				}
 			},
 			{

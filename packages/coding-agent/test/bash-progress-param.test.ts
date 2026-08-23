@@ -132,6 +132,39 @@ describe("bash progress parameter", () => {
 		expect(await Bun.file(artifact.path).text()).toBe(`${"H".repeat(300)}${"0".repeat(4_400)}${"T".repeat(300)}`);
 	});
 
+	test("keeps terminal output when the progress artifact cannot be created", async () => {
+		using tempDir = TempDir.createSync("@omp-bash-progress-artifact-failure-");
+		const artifact = { id: "broken-progress", path: path.join(tempDir.path(), "missing", "output.txt") };
+		const manager = new AsyncJobManager({});
+		const progress: AsyncJobProgressInfo[] = [];
+		const completions: Array<{ text: string; job?: AsyncJob }> = [];
+		manager.registerProgressSink("Main", {
+			deliver: (_jobId, _text, _job, _seq, info) => {
+				progress.push(info);
+			},
+		});
+		manager.registerDeliverySink("Main", (_jobId, text, job) => {
+			completions.push({ text, job });
+		});
+		const session = makeSession(manager);
+		session.allocateOutputArtifact = async () => artifact;
+		const tool = new BashTool(session);
+
+		await tool.execute("broken-progress-artifact", {
+			command: "printf 'only-result\\n'",
+			async: true,
+			progress: "wake",
+		});
+		await manager.waitForAll();
+		await manager.drainDeliveries();
+
+		expect(progress).toEqual([]);
+		expect(completions).toHaveLength(1);
+		expect(completions[0]?.text).toContain("only-result");
+		expect(completions[0]?.job?.progressArtifactId).toBeUndefined();
+		expect(await Bun.file(artifact.path).exists()).toBeFalse();
+	});
+
 	test("rejects progress for a foreground command", async () => {
 		const manager = new AsyncJobManager({});
 		const tool = new BashTool(makeSession(manager));
