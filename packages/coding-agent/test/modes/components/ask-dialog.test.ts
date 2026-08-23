@@ -227,6 +227,63 @@ describe("AskDialogComponent", () => {
 		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option A"]);
 	});
 
+	it("multi-select: option whose own label ends with '(Recommended)' visibly toggles", () => {
+		const onSubmit = vi.fn();
+		const onCancel = vi.fn();
+		const onPrompt = vi.fn();
+
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Choose multiple?",
+				options: [{ label: "Generic loop (Recommended)" }, { label: "Option B" }],
+				multi: true,
+			},
+		];
+
+		const component = new AskDialogComponent(questions, {
+			onSubmit,
+			onCancel,
+			onPrompt,
+		});
+
+		component.handleInput(SPACE);
+
+		// The checkbox must reflect the toggled-on state even though the
+		// label itself carries the "(Recommended)" marker.
+		expect(render(component)).toContain("☑");
+
+		component.handleInput(ENTER);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Generic loop (Recommended)"]);
+	});
+
+	it("recommended decoration is idempotent when the label already ends with '(Recommended)'", () => {
+		const onSubmit = vi.fn();
+		const onCancel = vi.fn();
+		const onPrompt = vi.fn();
+
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Choose multiple?",
+				options: [{ label: "Pick me (Recommended)" }, { label: "Option B" }],
+				multi: true,
+				recommended: 0,
+			},
+		];
+
+		const component = new AskDialogComponent(questions, {
+			onSubmit,
+			onCancel,
+			onPrompt,
+		});
+
+		const out = render(component);
+		const matches = out.match(/\(Recommended\)/g) ?? [];
+		expect(matches.length).toBe(1);
+	});
+
 	it("tab-state persistence: answer question 0, Tab forward, Tab back, answer still present", () => {
 		const onSubmit = vi.fn();
 		const onCancel = vi.fn();

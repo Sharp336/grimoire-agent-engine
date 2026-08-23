@@ -137,11 +137,6 @@ function clamp(value: number, min: number, max: number): number {
 	return Math.max(min, Math.min(value, max));
 }
 
-function stripRecommendedSuffix(label: string): string {
-	const suffix = " (Recommended)";
-	return label.endsWith(suffix) ? label.slice(0, -suffix.length) : label;
-}
-
 function questionTabLabel(question: ExtensionAskDialogQuestion, index: number): string {
 	const base = question.header?.trim() || question.id || `Q${index + 1}`;
 	return truncateToWidth(replaceTabs(base), MAX_HEADER_CHIP_WIDTH, Ellipsis.Unicode);
@@ -309,8 +304,9 @@ function renderRowLabel(
 ): string[] {
 	const isOption = rowItem.kind === "option";
 	const isOther = rowItem.kind === "other";
+	const option = rowItem.optionIndex !== undefined ? question.options[rowItem.optionIndex] : undefined;
 	const checked = isOption
-		? state.selectedOptions.has(stripRecommendedSuffix(rowItem.label))
+		? option !== undefined && state.selectedOptions.has(option.label)
 		: isOther && state.customInput !== undefined;
 	const color = selected ? "accent" : checked ? "toolOutput" : "text";
 	const marker = `${theme.fg(checked ? "success" : "dim", optionMarker(question, checked))} `;
@@ -637,7 +633,8 @@ export class AskDialogComponent implements Component {
 	}
 
 	#optionLabel(question: ExtensionAskDialogQuestion, label: string, index: number): string {
-		return question.recommended === index ? `${label} (Recommended)` : label;
+		if (question.recommended !== index) return label;
+		return label.endsWith(" (Recommended)") ? label : `${label} (Recommended)`;
 	}
 
 	#activeQuestionState(): { question: ExtensionAskDialogQuestion; state: QuestionState } | undefined {
