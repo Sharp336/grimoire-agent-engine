@@ -149,6 +149,17 @@ describe("formatThinkingForDisplay incremental (PoC E)", () => {
 		expect(formatThinkingForDisplay(b, true)).toBe(referenceFormat(b, true));
 		expect(formatThinkingForDisplay(`${b} extra`, true)).toBe(referenceFormat(`${b} extra`, true));
 	});
+	it("longer non-append rewrite must not take the prose identity fast path", () => {
+		// "abc" formats to itself via the identity fast path; the next call
+		// formats an unrelated, LONGER text whose newline lies before the
+		// cached length. Without an append-prefix verification the identity
+		// verdict would pass and return the raw text, skipping the fence
+		// ellipsis the full formatter applies.
+		const a = "abc";
+		const b = "x\n```";
+		expect(formatThinkingForDisplay(a, true)).toBe(referenceFormat(a, true));
+		expect(formatThinkingForDisplay(b, true)).toBe(referenceFormat(b, true));
+	});
 
 	it("raw mode with comments vs without: identity then real formatting", () => {
 		// No comments at all → identity (the fast path), byte-identical.

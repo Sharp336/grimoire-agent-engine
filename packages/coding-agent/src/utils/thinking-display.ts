@@ -1,8 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 
-// gpt-5.x reasoning summaries pad every summary part with an empty HTML
-// comment (`**Headline**\n\n<!-- -->`), streamed as a `<!--` delta followed by
-// ` -->`. Comments with actual content are left untouched.
+// Fence marker: 3+ backticks or tildes at line start, up to 3 spaces of indent.
 const FENCE = /^( {0,3})([`~]{3,})/;
 
 export function canonicalizeMessage(text: string | null | undefined): string {
@@ -22,6 +20,9 @@ export function canonicalizeMessage(text: string | null | undefined): string {
  * or its still-unterminated `<!--` prefix on the last line while streaming.
  * Fast-rejects ordinary prose lines without scanning past their first char.
  */
+// gpt-5.x reasoning summaries pad every summary part with an empty HTML
+// comment (`**Headline**\n\n<!-- -->`), streamed as a `<!--` delta followed by
+// ` -->`. Comments with actual content are left untouched.
 function isCommentNoise(line: string, isLastLine: boolean): boolean {
 	const t = line.trimStart();
 	if (!t.startsWith("<!--")) return false;
@@ -127,14 +128,23 @@ export function formatThinkingForDisplay(text: string, proseOnly: boolean): stri
 		c.hasComment ||
 		delta.includes("<!--") ||
 		(isLonger && `${c.text.slice(-3)}${delta.slice(0, 3)}`.includes("<!--"));
+	// Full prefix verification: the streamed text is a sibling slice of its
+	// parent, so appends compare slice offsets in O(1). A rewrite — or a raw
+	// slot first meeting a comment (its pending holds the whole text) —
+	// resets the slot.
+	const isAppend = isLonger && text.startsWith(c.text);
 	// Identity fast path: marker-free text formats to itself — raw always
 	// (its only transformation is dropping noise comment lines); prose while
-	// it is a single unterminated line that cannot open a fence nor be a
-	// noise comment. The verdict rests only on the text, so a rewrite is as
-	// safe as an append; entering identity resets the slot so no stale line
-	// state leaks in. Ordinary lines pass these checks in O(1).
+	// it is a verified append of a single unterminated line that cannot open
+	// a fence nor be a noise comment. The prose verdict rests on the cached
+	// line state plus a delta newline scan, so it is only valid on appends —
+	// on a rewrite the delta starts at the old length and can miss newlines
+	// and fence markers before it. Entering identity resets the slot so no
+	// stale line state leaks in. Ordinary lines pass these checks in O(1).
 	if (
-		proseOnly ? !hasComment && !c.hasLine && delta.indexOf("\n") === -1 && !FENCE.test(text) : !text.includes("<!--")
+		proseOnly
+			? isAppend && !hasComment && !c.hasLine && delta.indexOf("\n") === -1 && !FENCE.test(text)
+			: !text.includes("<!--")
 	) {
 		Object.assign(c, newCache());
 		c.pending = text;
@@ -142,11 +152,6 @@ export function formatThinkingForDisplay(text: string, proseOnly: boolean): stri
 		c.result = text;
 		return c.result;
 	}
-	// Full prefix verification is only reached once markers/lines/fences
-	// exist; the streamed text is a sibling slice of its parent, so appends
-	// compare slice offsets in O(1). A rewrite — or a raw slot first meeting
-	// a comment (its pending holds the whole text) — resets the slot.
-	const isAppend = isLonger && text.startsWith(c.text);
 	const reset = !isAppend || (!proseOnly && !c.hasComment);
 	if (reset) Object.assign(c, newCache());
 	c.hasComment = reset ? text.includes("<!--") : hasComment;
