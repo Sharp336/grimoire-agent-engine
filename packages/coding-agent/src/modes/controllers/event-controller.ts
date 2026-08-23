@@ -762,10 +762,15 @@ export class EventController {
 		// Restore terminal errors in transcript history when their banner clears.
 		// Recoverable empty-output attempts are discarded by session recovery and
 		// must stay hidden rather than resurfacing as a stale inline error.
-		if (this.#restorePinnedErrorInline) this.#pinnedErrorComponent?.setErrorPinned(false);
-		this.#pinnedErrorComponent = undefined;
-		this.#pinnedErrorMessage = undefined;
-		this.#restorePinnedErrorInline = true;
+		// While a retry saga is outstanding the failed attempt is not terminal:
+		// keep its inline row suppressed and the refs tracked so auto_retry_end
+		// can compact it (success) or promote it into a banner (terminal).
+		if (!this.#retryPending) {
+			if (this.#restorePinnedErrorInline) this.#pinnedErrorComponent?.setErrorPinned(false);
+			this.#pinnedErrorComponent = undefined;
+			this.#pinnedErrorMessage = undefined;
+			this.#restorePinnedErrorInline = true;
+		}
 		this.ctx.clearPinnedError();
 		if (this.ctx.retryLoader) {
 			this.ctx.retryLoader.stop();
@@ -1999,6 +2004,13 @@ export class EventController {
 			this.#pinnedErrorComponent = undefined;
 			this.#pinnedErrorMessage = undefined;
 			this.#restorePinnedErrorInline = true;
+			this.ctx.clearPinnedError();
+		} else if (this.#pinnedErrorComponent) {
+			// A retry is outstanding: the "Retrying (n/m) in Xs" loader below is the
+			// visible state, so the red fixed-region banner comes down for the wait.
+			// The component refs stay tracked — a terminal auto_retry_end still
+			// promotes the final error into one banner, and the inline row stays
+			// suppressed until retry recovery dims or restores it.
 			this.ctx.clearPinnedError();
 		}
 		const delaySeconds = Math.round(event.delayMs / 1000);

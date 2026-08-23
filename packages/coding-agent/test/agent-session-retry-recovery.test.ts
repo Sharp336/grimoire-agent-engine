@@ -285,8 +285,12 @@ describe("AgentSession retry recovery", () => {
 		}
 		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
 
+		// A generic transport 502 (NOT capacity-class): capacity errors now get
+		// a higher attempt floor when model fallback is disabled, so they no
+		// longer exhaust a 1-retry budget.
+		const budgetError = "502 bad gateway upstream_error";
 		const mock = createMockModel({
-			responses: [{ throw: RETRIABLE_SERVER_ERROR }, { throw: RETRIABLE_SERVER_ERROR }],
+			responses: [{ throw: budgetError }, { throw: budgetError }],
 		});
 		const agent = new Agent({
 			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
@@ -345,7 +349,7 @@ describe("AgentSession retry recovery", () => {
 			throw new Error("Expected an aggregated terminal error message");
 		}
 		expect(terminalError.retryRecovery).toBeUndefined();
-		expect(terminalErrorText).toBe(`Retry budget exhausted after 1 retry: ${RETRIABLE_SERVER_ERROR}`);
+		expect(terminalErrorText).toBe(`Retry budget exhausted after 1 retry: ${budgetError}`);
 		expect(resolveAssistantErrorPresentation(terminalError)).toEqual({
 			kind: "full",
 			text: terminalErrorText,
