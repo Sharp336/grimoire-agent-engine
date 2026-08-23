@@ -11,7 +11,8 @@ import {
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
 import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
-import { formatDuration, getSessionsDir, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
+import { cleanupRowsForArchivedSessions } from "../../cli/gc-cli";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
 import { type LoadedCustomShare, loadCustomShare } from "../../export/custom-share";
@@ -44,8 +45,9 @@ import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-storage";
 import type { CompactMode } from "../../session/compact-modes";
 import {
+	archiveDestinationExists,
 	archiveSessionFile,
-	getArchivedSessionsDir,
+	resolveArchiveRoots,
 	sessionHasLiveNestedSessions,
 } from "../../session/session-archive";
 import type { NewSessionOptions } from "../../session/session-entries";
@@ -1038,17 +1040,39 @@ export class CommandController {
 			return;
 		}
 
+		const agentDir = this.ctx.settings.getAgentDir();
+		const roots = resolveArchiveRoots({
+			sessionFile,
+			sessionDir: this.ctx.sessionManager.getSessionDir(),
+			cwd: this.ctx.sessionManager.getCwd(),
+			agentDir,
+		});
+		if (!roots) {
+			this.ctx.showError("Cannot archive a session outside a sessions directory");
+			return;
+		}
+		if (await archiveDestinationExists(roots.destinationPath)) {
+			this.ctx.showError("Archive destination already exists");
+			return;
+		}
+
 		const choice = await this.ctx.showHookSelector(
 			"Archive the current session?\nThe session will be removed from the normal /resume list\nand moved to the session archive.",
 			["Archive", "Cancel"],
 		);
 		if (choice !== "Archive") return;
 
+		const sessionId = this.ctx.sessionManager.getSessionId();
 		this.ctx.prepareSessionSwitch();
-		const agentDir = this.ctx.settings.getAgentDir();
-		await this.#runNewSessionFlow(undefined, "Session archived", () =>
-			archiveSessionFile(sessionFile, getSessionsDir(agentDir), getArchivedSessionsDir(agentDir)),
-		);
+		await this.#runNewSessionFlow(undefined, "Session archived", async () => {
+			await archiveSessionFile(sessionFile, roots.sessionsRoot, roots.archiveRoot);
+			const cleanup = await cleanupRowsForArchivedSessions(agentDir, roots.archiveRoot, [
+				{ id: sessionId, path: sessionFile },
+			]);
+			if (cleanup.errors.length > 0) {
+				throw new Error(cleanup.errors.join("; "));
+			}
+		});
 	}
 
 	async handleForkCommand(): Promise<void> {

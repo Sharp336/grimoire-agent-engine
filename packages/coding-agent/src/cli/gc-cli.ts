@@ -16,13 +16,16 @@ import { Settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
 import { BLOB_HASH_RE } from "../session/blob-store";
 import {
+	COMPRESSED_SESSION_SUFFIX,
 	getArchivedSessionsDir,
+	LIVE_NESTED_STATUSES,
 	moveSessionWithArtifacts,
 	resolveArchiveDestination,
+	SESSION_SUFFIX,
 	sessionArtifactsPath,
 	sessionHasLiveNestedSessions,
 } from "../session/session-archive";
-import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
+import { listSessionsReadOnly, type SessionInfo } from "../session/session-listing";
 import { FileSessionStorage } from "../session/session-storage";
 
 const BLOB_FILE_RE = /^([a-f0-9]{64})(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/;
@@ -30,11 +33,8 @@ const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/gi;
 const JSONL_GLOB = new Bun.Glob("**/*.jsonl");
 const JSONL_GZ_GLOB = new Bun.Glob("**/*.jsonl.gz");
 const JSONL_BACKUP_GLOB = new Bun.Glob("**/*.jsonl.*.bak");
-const ACTIVE_STATUSES: ReadonlySet<SessionStatus> = new Set(["pending", "interrupted", "unknown"]);
 const DAY_MS = 86_400_000;
 const GC_WRITE_GRACE_MS = 5 * 60_000;
-const SESSION_SUFFIX = ".jsonl";
-const COMPRESSED_SESSION_SUFFIX = ".jsonl.gz";
 const GC_LOCK_BREAKER_SUFFIX = ".break";
 
 export interface GcCommandFlags {
@@ -490,7 +490,7 @@ async function collectArchivedSessionIds(archiveRoot: string): Promise<string[]>
 }
 
 async function cleanupHistoryRowsForArchivedSessions(
-	options: ResolvedGcOptions,
+	options: { agentDir: string },
 	archiveRoot: string,
 	archivedSessionIds: string[],
 	result: ArchiveGcResult,
@@ -1039,7 +1039,7 @@ async function collectArchivedStatsSessions(
 }
 
 async function cleanupStatsRowsForArchivedSessions(
-	options: ResolvedGcOptions,
+	options: { agentDir: string },
 	archiveRoot: string,
 	newlyArchivedSessions: SessionInfo[],
 	result: ArchiveGcResult,
@@ -1105,6 +1105,50 @@ async function cleanupStatsRowsForArchivedSessions(
 	}
 }
 
+export async function cleanupRowsForArchivedSessions(
+	agentDir: string,
+	archiveRoot: string,
+	archivedSessions: readonly { id: string; path: string; parentSessionPath?: string }[],
+): Promise<Pick<ArchiveGcResult, "historyRowsDeleted" | "statsRowsDeleted" | "ftsRebuilt" | "errors">> {
+	const result: ArchiveGcResult = {
+		scanned: 0,
+		skippedActive: 0,
+		keptNewestGlobal: 0,
+		keptNewestPerCwd: 0,
+		wouldArchive: 0,
+		archived: 0,
+		historyRowsDeleted: 0,
+		statsRowsDeleted: 0,
+		ftsRebuilt: false,
+		errors: [],
+	};
+	const infos: SessionInfo[] = archivedSessions.map(session => ({
+		path: session.path,
+		id: session.id,
+		cwd: "",
+		created: new Date(0),
+		modified: new Date(0),
+		messageCount: 0,
+		size: 0,
+		firstMessage: "",
+		allMessagesText: "",
+		parentSessionPath: session.parentSessionPath,
+	}));
+	await cleanupHistoryRowsForArchivedSessions(
+		{ agentDir },
+		archiveRoot,
+		archivedSessions.map(session => session.id),
+		result,
+	);
+	await cleanupStatsRowsForArchivedSessions({ agentDir }, archiveRoot, infos, result);
+	return {
+		historyRowsDeleted: result.historyRowsDeleted,
+		statsRowsDeleted: result.statsRowsDeleted,
+		ftsRebuilt: result.ftsRebuilt,
+		errors: result.errors,
+	};
+}
+
 async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Promise<ArchiveGcResult> {
 	const sessionsRoot = getSessionsDir(options.agentDir);
 	const sessions = await listActiveSessions(sessionsRoot);
@@ -1127,7 +1171,7 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 	const archiveBeforeMs = Date.now() - GC_WRITE_GRACE_MS;
 
 	for (const session of sessions) {
-		if (session.status && ACTIVE_STATUSES.has(session.status)) {
+		if (session.status && LIVE_NESTED_STATUSES[session.status]) {
 			result.skippedActive += 1;
 			continue;
 		}

@@ -3,19 +3,71 @@ import * as path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { getSessionsDir, hasFsCode, isEnoent } from "@oh-my-pi/pi-utils";
 import { listSessionsReadOnly, type SessionInfo } from "./session-listing";
+import { resolveManagedSessionRoot } from "./session-paths";
 import { FileSessionStorage } from "./session-storage";
 
 const JSONL_GLOB = new Bun.Glob("**/*.jsonl");
-const LIVE_NESTED_STATUSES: Record<string, true> = {
+export const LIVE_NESTED_STATUSES: Record<string, true> = {
 	pending: true,
 	interrupted: true,
 	unknown: true,
 };
-const SESSION_SUFFIX = ".jsonl";
-const COMPRESSED_SESSION_SUFFIX = ".jsonl.gz";
+export const SESSION_SUFFIX = ".jsonl";
+export const COMPRESSED_SESSION_SUFFIX = ".jsonl.gz";
+
+export function archivedSessionsDirForRoot(sessionsRoot: string): string {
+	if (path.basename(sessionsRoot) === "sessions") {
+		return path.join(path.dirname(sessionsRoot), "archive", "sessions");
+	}
+	return path.join(sessionsRoot, "archive");
+}
 
 export function getArchivedSessionsDir(agentDir: string): string {
-	return path.join(path.dirname(getSessionsDir(agentDir)), "archive", "sessions");
+	return archivedSessionsDirForRoot(getSessionsDir(agentDir));
+}
+
+/**
+ * Pick the sessions root that actually contains `sessionFile`, then the matching
+ * archive tree. Default profile sessions keep `../archive/sessions`; a custom
+ * `--session-dir` archives beside that directory. Returns null when the file is
+ * not under the session manager directory or the default store.
+ */
+export function resolveArchiveRoots(input: {
+	sessionFile: string;
+	sessionDir: string;
+	cwd: string;
+	agentDir: string;
+}): { sessionsRoot: string; archiveRoot: string; destinationPath: string } | null {
+	const sessionFile = path.resolve(input.sessionFile);
+	const sessionDir = path.resolve(input.sessionDir);
+	const candidates: string[] = [path.resolve(getSessionsDir(input.agentDir))];
+	const managedRoot = resolveManagedSessionRoot(sessionDir, input.cwd);
+	if (managedRoot) candidates.push(path.resolve(managedRoot));
+	if (path.basename(sessionDir) === "sessions") {
+		candidates.push(sessionDir);
+	} else if (path.basename(path.dirname(sessionDir)) === "sessions") {
+		candidates.push(path.dirname(sessionDir));
+	}
+	candidates.push(sessionDir);
+
+	const seen = new Set<string>();
+	for (const sessionsRoot of candidates) {
+		if (seen.has(sessionsRoot)) continue;
+		seen.add(sessionsRoot);
+		const archiveRoot = archivedSessionsDirForRoot(sessionsRoot);
+		const destination = resolveArchiveDestination(sessionFile, sessionsRoot, archiveRoot);
+		if (destination) {
+			return { sessionsRoot, archiveRoot, destinationPath: destination.destinationPath };
+		}
+	}
+	return null;
+}
+
+export async function archiveDestinationExists(destinationPath: string): Promise<boolean> {
+	const legacyDestSession = destinationPath.endsWith(".gz")
+		? destinationPath.slice(0, -".gz".length)
+		: `${destinationPath}.gz`;
+	return (await pathExists(destinationPath)) || (await pathExists(legacyDestSession));
 }
 
 export function sessionArtifactsPath(sessionPath: string): string {

@@ -1,14 +1,18 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { gunzipSync } from "node:zlib";
+import { cleanupRowsForArchivedSessions } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
 import {
+	archiveDestinationExists,
 	archiveSessionFile,
 	getArchivedSessionsDir,
+	resolveArchiveRoots,
 	sessionHasLiveNestedSessions,
 } from "@oh-my-pi/pi-coding-agent/session/session-archive";
-import { getSessionsDir } from "@oh-my-pi/pi-utils";
+import { getHistoryDbPath, getSessionsDir } from "@oh-my-pi/pi-utils";
 
 let root: string;
 
@@ -78,6 +82,131 @@ describe("archiveSessionFile", () => {
 		);
 		expect(await Bun.file(session).exists()).toBe(true);
 		expect(await Bun.file(destination).text()).toBe("already-there");
+	});
+});
+
+describe("resolveArchiveRoots", () => {
+	test("keeps the default profile archive layout", () => {
+		const sessionFile = path.join(getSessionsDir(root), "project", "abc.jsonl");
+		const sessionDir = path.dirname(sessionFile);
+
+		expect(
+			resolveArchiveRoots({
+				sessionFile,
+				sessionDir,
+				cwd: "/unrelated",
+				agentDir: root,
+			}),
+		).toEqual({
+			sessionsRoot: getSessionsDir(root),
+			archiveRoot: getArchivedSessionsDir(root),
+			destinationPath: path.join(getArchivedSessionsDir(root), "project", "abc.jsonl.gz"),
+		});
+	});
+
+	test("archives beside a custom session directory", () => {
+		const sessionDir = path.join(root, "custom-sessions");
+		const sessionFile = path.join(sessionDir, "abc.jsonl");
+
+		expect(
+			resolveArchiveRoots({
+				sessionFile,
+				sessionDir,
+				cwd: "/tmp/project",
+				agentDir: root,
+			}),
+		).toEqual({
+			sessionsRoot: sessionDir,
+			archiveRoot: path.join(sessionDir, "archive"),
+			destinationPath: path.join(sessionDir, "archive", "abc.jsonl.gz"),
+		});
+	});
+
+	test("preserves cwd-key layout under a custom sessions root", () => {
+		const sessionsRoot = path.join(root, "alt", "sessions");
+		const sessionDir = path.join(sessionsRoot, "project");
+		const sessionFile = path.join(sessionDir, "abc.jsonl");
+
+		expect(
+			resolveArchiveRoots({
+				sessionFile,
+				sessionDir,
+				cwd: "/tmp/project",
+				agentDir: root,
+			}),
+		).toEqual({
+			sessionsRoot,
+			archiveRoot: path.join(root, "alt", "archive", "sessions"),
+			destinationPath: path.join(root, "alt", "archive", "sessions", "project", "abc.jsonl.gz"),
+		});
+	});
+
+	test("returns null when the session file is not under the session directory", () => {
+		expect(
+			resolveArchiveRoots({
+				sessionFile: path.join(root, "other", "abc.jsonl"),
+				sessionDir: path.join(getSessionsDir(root), "project"),
+				cwd: "/tmp",
+				agentDir: root,
+			}),
+		).toBeNull();
+	});
+});
+
+describe("archiveDestinationExists", () => {
+	test("detects a gzip or legacy uncompressed destination", async () => {
+		const destination = path.join(root, "archive", "done.jsonl.gz");
+		expect(await archiveDestinationExists(destination)).toBe(false);
+
+		await fs.mkdir(path.dirname(destination), { recursive: true });
+		await Bun.write(destination, "gz");
+		expect(await archiveDestinationExists(destination)).toBe(true);
+
+		await fs.unlink(destination);
+		await Bun.write(destination.slice(0, -".gz".length), "plain");
+		expect(await archiveDestinationExists(destination)).toBe(true);
+	});
+});
+
+describe("cleanupRowsForArchivedSessions", () => {
+	test("removes history and stats rows after a session is archived", async () => {
+		const session = await writeSession("project", "archive-me", "complete");
+		const historyPath = getHistoryDbPath(root);
+		await fs.mkdir(path.dirname(historyPath), { recursive: true });
+		const history = new Database(historyPath);
+		history.run("CREATE TABLE history (id INTEGER PRIMARY KEY AUTOINCREMENT, prompt TEXT NOT NULL, session_id TEXT)");
+		history.run("INSERT INTO history (prompt, session_id) VALUES ('old prompt', 'archive-me')");
+		history.run("INSERT INTO history (prompt, session_id) VALUES ('keep', 'keep-me')");
+		history.close();
+
+		const statsPath = path.join(root, "stats.db");
+		const stats = new Database(statsPath);
+		for (const table of ["messages", "user_messages", "tool_calls", "file_offsets"] as const) {
+			stats.run(`CREATE TABLE ${table} (session_file TEXT NOT NULL)`);
+			stats.run(`INSERT INTO ${table} (session_file) VALUES (?)`, [session]);
+			stats.run(`INSERT INTO ${table} (session_file) VALUES (?)`, [
+				path.join(getSessionsDir(root), "project", "keep.jsonl"),
+			]);
+		}
+		stats.close();
+
+		const destination = await archiveSessionFile(session, getSessionsDir(root), getArchivedSessionsDir(root));
+		const cleanup = await cleanupRowsForArchivedSessions(root, getArchivedSessionsDir(root), [
+			{ id: "archive-me", path: session },
+		]);
+
+		expect(destination).toBe(path.join(getArchivedSessionsDir(root), "project", "archive-me.jsonl.gz"));
+		expect(cleanup.errors).toEqual([]);
+		expect(cleanup.historyRowsDeleted).toBe(1);
+		expect(cleanup.statsRowsDeleted).toBe(4);
+
+		const historyCheck = new Database(historyPath);
+		expect(
+			(
+				historyCheck.prepare("SELECT session_id FROM history ORDER BY id").all() as Array<{ session_id: string }>
+			).map(row => row.session_id),
+		).toEqual(["keep-me"]);
+		historyCheck.close();
 	});
 });
 
