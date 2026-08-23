@@ -18,6 +18,13 @@ export interface ProgressBatch<T> {
 export interface ProgressBatcherOptions<T> {
 	/** Combine arrivals as they enter a window so the pending representation can remain bounded. */
 	merge?: (left: T, right: T) => T;
+	/**
+	 * Fold metadata from a displaced retained value into the value replacing
+	 * it without combining their payloads. Suppressed windows keep their outer
+	 * values as separate text while this seam preserves metadata from every
+	 * middle value that falls out of the bounded representation.
+	 */
+	mergeDisplacedMetadata?: (kept: T, displaced: T) => T;
 	/** Collection window before delivery. Defaults to {@link PROGRESS_BATCH_INTERVAL_MS}. */
 	intervalMs?: number;
 }
@@ -44,6 +51,7 @@ export class ProgressBatcher<T> {
 	readonly #states = new Map<string, ProgressBatchState<T>>();
 	readonly #deliver: (id: string, batch: ProgressBatch<T>) => void | Promise<void>;
 	readonly #merge?: (left: T, right: T) => T;
+	readonly #mergeDisplacedMetadata?: (kept: T, displaced: T) => T;
 	readonly #intervalMs: number;
 
 	constructor(
@@ -52,6 +60,7 @@ export class ProgressBatcher<T> {
 	) {
 		this.#deliver = deliver;
 		this.#merge = options.merge;
+		this.#mergeDisplacedMetadata = options.mergeDisplacedMetadata;
 		this.#intervalMs = options.intervalMs ?? PROGRESS_BATCH_INTERVAL_MS;
 	}
 
@@ -201,16 +210,18 @@ export class ProgressBatcher<T> {
 			state.suppressedValues.push(last);
 			return;
 		}
-		// Keep the outer representation bounded, but merge the displaced tail so
-		// metadata accumulated by every suppressed window survives the replacement.
-		state.suppressedValues[1] = this.#merge ? this.#merge(state.suppressedValues[1]!, last) : last;
+		// Keep the outer representation bounded. The old tail is displaced by
+		// the new tail, but callers with metadata-bearing values can fold its
+		// metadata into the replacement without concatenating suppressed text.
+		state.suppressedValues[1] = this.#mergeDisplacedMetadata
+			? this.#mergeDisplacedMetadata(last, state.suppressedValues[1]!)
+			: last;
 	}
 
 	#takeSuppressedValues(state: ProgressBatchState<T>, current: readonly T[]): T[] {
 		const values = [...state.suppressedValues, ...current];
 		state.suppressedValues.length = 0;
-		if (!this.#merge || values.length < 2) return values;
-		return [values.slice(1).reduce(this.#merge, values[0]!)];
+		return values;
 	}
 
 	#refill(state: ProgressBatchState<T>): void {

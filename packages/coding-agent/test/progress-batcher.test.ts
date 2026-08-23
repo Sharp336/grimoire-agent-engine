@@ -59,18 +59,23 @@ describe("ProgressBatcher", () => {
 			reminder?: "chatty-monitor";
 		}
 		const seen: ProgressBatch<Record>[] = [];
+		const mergeMetadata = (kept: Record, displaced: Record): Record => ({
+			...kept,
+			suppressedEvents: (kept.suppressedEvents ?? 0) + (displaced.suppressedEvents ?? 0) || undefined,
+			sourceTruncated: kept.sourceTruncated === true || displaced.sourceTruncated === true || undefined,
+			byteTruncated: kept.byteTruncated === true || displaced.byteTruncated === true || undefined,
+			reminder: kept.reminder ?? displaced.reminder,
+		});
 		const batcher = new ProgressBatcher<Record>(
 			(_id, batch) => {
 				seen.push(batch);
 			},
 			{
 				merge: (left, right) => ({
+					...mergeMetadata(right, left),
 					text: `${left.text.split("|")[0]}|${right.text.split("|").at(-1)}`,
-					suppressedEvents: (left.suppressedEvents ?? 0) + (right.suppressedEvents ?? 0) || undefined,
-					sourceTruncated: left.sourceTruncated === true || right.sourceTruncated === true || undefined,
-					byteTruncated: left.byteTruncated === true || right.byteTruncated === true || undefined,
-					reminder: left.reminder ?? right.reminder,
 				}),
+				mergeDisplacedMetadata: mergeMetadata,
 			},
 		);
 
@@ -98,13 +103,15 @@ describe("ProgressBatcher", () => {
 		expect(seen.at(-1)).toEqual({
 			kind: "progress",
 			values: [
+				{ text: "suppressed-first", suppressedEvents: 2 },
 				{
-					text: "suppressed-first|delivered",
-					suppressedEvents: 10,
+					text: "suppressed-last",
+					suppressedEvents: 8,
 					sourceTruncated: true,
 					byteTruncated: true,
 					reminder: "chatty-monitor",
 				},
+				{ text: "delivered" },
 			],
 			seq: 14,
 			suppressedEvents: 3,

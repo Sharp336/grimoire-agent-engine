@@ -2003,11 +2003,14 @@ export class AgentSession {
 			job.progressArtifactId !== undefined
 				? { artifactId: job.progressArtifactId, leftover: job.completionLeftover }
 				: undefined;
-		// A failed job's terminal text (thrown error, spawn failure) may never
-		// have flowed through progress — preserve it beside the artifact link
-		// instead of discarding it with the already-delivered stream.
+		// Suppress only byte-identical terminal text explicitly classified as
+		// covered by delivered progress (or its completion leftover). Successful
+		// post-processing such as Bash minimization is terminal-only provenance
+		// and must remain visible just like failure text.
 		const formatted =
-			progressSummary && job?.status !== "failed" ? "" : await this.#formatAsyncResultForFollowUp(text);
+			progressSummary && job?.terminalTextProvenance === "progress"
+				? ""
+				: await this.#formatAsyncResultForFollowUp(text);
 		if (this.#isDisposed) return;
 		if (epoch !== this.#asyncDeliveryEpoch) return;
 		if (manager.isDeliverySuppressed(jobId)) return;

@@ -393,4 +393,80 @@ describe("AsyncJobManager model progress", () => {
 		expect(order).toEqual(["progress:first", "progress:second:start", "progress:second:end", "completion"]);
 		expect(manager.getJob(jobId)?.completionLeftover).toBeUndefined();
 	}, 10_000);
+
+	test("cancellation wins while successful settlement drains final progress", async () => {
+		const manager = new AsyncJobManager({});
+		const progressStarted = Promise.withResolvers<void>();
+		const releaseProgress = Promise.withResolvers<void>();
+		const completions: string[] = [];
+		manager.registerProgressSink("Main", {
+			deliver: async () => {
+				progressStarted.resolve();
+				await releaseProgress.promise;
+			},
+		});
+		manager.registerDeliverySink("Main", (_jobId, text) => {
+			completions.push(text);
+		});
+		const jobId = manager.register(
+			"bash",
+			"cancel successful settlement",
+			async ({ reportAgentProgress }) => {
+				reportAgentProgress("final progress", { artifactId: "success-artifact" });
+				return "successful terminal text";
+			},
+			{ ownerId: "Main", progressDelivery: "wake" },
+		);
+
+		// The sink starts only when the resolved run flushes final progress, so
+		// this gate deterministically places cancel() inside the settlement await.
+		await progressStarted.promise;
+		expect(manager.getJob(jobId)?.status).toBe("running");
+		expect(manager.cancel(jobId)).toBe(true);
+		releaseProgress.resolve();
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 2_000 });
+
+		expect(manager.getJob(jobId)?.status).toBe("cancelled");
+		expect(manager.getJob(jobId)?.resultText).toBe("successful terminal text");
+		expect(completions).toEqual([]);
+	});
+
+	test("cancellation wins while failed settlement drains final progress", async () => {
+		const manager = new AsyncJobManager({});
+		const progressStarted = Promise.withResolvers<void>();
+		const releaseProgress = Promise.withResolvers<void>();
+		const completions: string[] = [];
+		manager.registerProgressSink("Main", {
+			deliver: async () => {
+				progressStarted.resolve();
+				await releaseProgress.promise;
+			},
+		});
+		manager.registerDeliverySink("Main", (_jobId, text) => {
+			completions.push(text);
+		});
+		const jobId = manager.register(
+			"bash",
+			"cancel failed settlement",
+			async ({ reportAgentProgress }) => {
+				reportAgentProgress("final progress", { artifactId: "failure-artifact" });
+				throw new Error("failed terminal text");
+			},
+			{ ownerId: "Main", progressDelivery: "wake" },
+		);
+
+		// As above, the held sink proves the failure continuation is awaiting
+		// final progress settlement when cancellation transitions the job.
+		await progressStarted.promise;
+		expect(manager.getJob(jobId)?.status).toBe("running");
+		expect(manager.cancel(jobId)).toBe(true);
+		releaseProgress.resolve();
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 2_000 });
+
+		expect(manager.getJob(jobId)?.status).toBe("cancelled");
+		expect(manager.getJob(jobId)?.errorText).toBe("failed terminal text");
+		expect(completions).toEqual([]);
+	});
 });

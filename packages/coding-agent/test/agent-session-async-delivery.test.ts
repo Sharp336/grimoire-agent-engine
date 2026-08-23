@@ -727,7 +727,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(vi.getTimerCount()).toBe(baselineTimers + 1);
 	});
 
-	it("summarizes an artifact-backed progressed job's completion to leftover plus artifact link", async () => {
+	it("summarizes artifact-backed progress without replaying byte-identical terminal text", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const progressObserved = Promise.withResolvers<void>();
 		const completionObserved = Promise.withResolvers<string>();
@@ -740,7 +740,7 @@ describe("AgentSession owner-routed async delivery", () => {
 							: message.content.flatMap(content => (content.type === "text" ? [content.text] : [])),
 					)
 					.join("\n");
-				if (text.includes("DELIVERED PROGRESS LINE")) progressObserved.resolve();
+				if (text.includes("FULL RESULT BODY MUST NOT REAPPEAR")) progressObserved.resolve();
 				if (text.includes("Resume your work using the result below")) completionObserved.resolve(text);
 				return { content: ["Done"] };
 			},
@@ -779,7 +779,7 @@ describe("AgentSession owner-routed async delivery", () => {
 			{ ownerId: "Main", progressDelivery: "wake" },
 		);
 		const report = await reporter.promise;
-		report("DELIVERED PROGRESS LINE", { artifactId: "77" });
+		report("FULL RESULT BODY MUST NOT REAPPEAR", { artifactId: "77" });
 		await progressObserved.promise;
 
 		report("LEFTOVER LINE", { artifactId: "77" });
@@ -789,7 +789,76 @@ describe("AgentSession owner-routed async delivery", () => {
 		const completion = await completionObserved.promise;
 		expect(completion).toContain("artifact://77");
 		expect(completion).toContain("LEFTOVER LINE");
-		expect(completion).not.toContain("FULL RESULT BODY MUST NOT REAPPEAR");
+		// The terminal result is identical to the already-delivered cumulative
+		// progress and therefore appears only in progress history, not again in
+		// the completion's <result> block.
+		expect(completion.split("FULL RESULT BODY MUST NOT REAPPEAR")).toHaveLength(2);
+	}, 10_000);
+
+	it("preserves a successful post-processed terminal result beside its progress artifact", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const progressObserved = Promise.withResolvers<void>();
+		const completionObserved = Promise.withResolvers<string>();
+		const mock = createMockModel({
+			handler: context => {
+				const text = context.messages
+					.flatMap(message =>
+						typeof message.content === "string"
+							? [message.content]
+							: message.content.flatMap(content => (content.type === "text" ? [content.text] : [])),
+					)
+					.join("\n");
+				if (text.includes("RAW STREAMED OUTPUT")) progressObserved.resolve();
+				if (text.includes("Resume your work using the result below")) completionObserved.resolve(text);
+				return { content: ["Done"] };
+			},
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		AsyncJobManager.setInstance(manager);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "Main",
+			ownedAsyncJobManager: manager,
+		});
+		await session.sendUserMessage("initialize then wait");
+
+		const gate = Promise.withResolvers<string>();
+		const reporter = Promise.withResolvers<(text: string, info?: { artifactId?: string }) => void>();
+		manager.register(
+			"bash",
+			"post-processed successful job",
+			async ({ reportAgentProgress }) => {
+				reporter.resolve(reportAgentProgress);
+				return gate.promise;
+			},
+			{ ownerId: "Main", progressDelivery: "wake" },
+		);
+		const report = await reporter.promise;
+		report("RAW STREAMED OUTPUT", { artifactId: "78" });
+		await progressObserved.promise;
+
+		// This successful terminal text was synthesized after streaming (the
+		// Bash minimizer has the same shape) and never traversed progress.
+		gate.resolve("MINIMIZED\tSUCCESS OUTPUT");
+		await manager.waitForAll();
+
+		const completion = await completionObserved.promise;
+		expect(completion).toContain("artifact://78");
+		expect(completion).toContain("MINIMIZED   SUCCESS OUTPUT");
+		expect(completion).not.toContain("MINIMIZED\tSUCCESS OUTPUT");
 	}, 10_000);
 
 	it("folds a failed artifact-backed job's never-progressed error into the completion", async () => {

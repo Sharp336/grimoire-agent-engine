@@ -79,6 +79,12 @@ export interface AsyncJob {
 	completionLeftover?: AsyncJobCompletionLeftover;
 	/** Stable artifact containing the complete raw output behind bounded progress previews. */
 	progressArtifactId?: string;
+	/**
+	 * Whether the terminal result is byte-identical to model-facing progress
+	 * already delivered (or folded into the completion leftover), or is
+	 * terminal-only content that must remain in the completion.
+	 */
+	terminalTextProvenance?: "progress" | "terminal";
 }
 
 /** Progress content that never reached the agent before the job settled. */
@@ -114,6 +120,25 @@ function mergeAsyncJobProgressRecords(
 		truncated: preview.truncated,
 		suppressedEvents: suppressedEvents || undefined,
 		reminder: right.reminder ?? left.reminder,
+	};
+}
+
+/**
+ * Preserve metadata from a suppressed value displaced out of the bounded
+ * outer-text window. `kept.text` is deliberately untouched: only the manager's
+ * delivery boundary joins retained outer values.
+ */
+function mergeAsyncJobProgressMetadata(
+	kept: AsyncJobProgressRecord,
+	displaced: AsyncJobProgressRecord,
+): AsyncJobProgressRecord {
+	const suppressedEvents = (kept.suppressedEvents ?? 0) + (displaced.suppressedEvents ?? 0);
+	return {
+		...kept,
+		artifactId: kept.artifactId ?? displaced.artifactId,
+		truncated: kept.truncated === true || displaced.truncated === true || undefined,
+		suppressedEvents: suppressedEvents || undefined,
+		reminder: kept.reminder ?? displaced.reminder,
 	};
 }
 
@@ -239,9 +264,13 @@ export class AsyncJobManager {
 	readonly #pollEscalation = new Map<string | undefined, PollEscalationState>();
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
 	readonly #progressSinks = new Map<string, AsyncJobProgressSink>();
+	readonly #lastDeliveredAgentProgress = new Map<string, string>();
 	readonly #progressBatcher = new ProgressBatcher<AsyncJobProgressRecord>(
 		(jobId, batch) => this.#deliverAgentProgress(jobId, batch),
-		{ merge: mergeAsyncJobProgressRecords },
+		{
+			merge: mergeAsyncJobProgressRecords,
+			mergeDisplacedMetadata: mergeAsyncJobProgressMetadata,
+		},
 	);
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
 	readonly #maxRunningJobs: number;
@@ -359,20 +388,36 @@ export class AsyncJobManager {
 					this.#scheduleEviction(id);
 					return;
 				}
-				await this.#settleAgentProgress(job);
+				await this.#settleAgentProgress(job, text);
+				// Cancellation may win while final progress is awaiting its
+				// asynchronous sink. Never overwrite that terminal state or
+				// enqueue a completion after cancel() returned true.
+				if (job.status === "cancelled") {
+					job.resultText = text;
+					this.#scheduleEviction(id);
+					return;
+				}
 				job.status = "completed";
 				job.resultText = text;
 				this.#enqueueDelivery(id, text);
 				this.#scheduleEviction(id);
 			} catch (error) {
 				if (error instanceof AsyncJobRunError) this.#mergeSettledDetails(job, error.details);
+				const errorText = error instanceof Error ? error.message : String(error);
+				job.terminalTextProvenance = "terminal";
 				if (job.status === "cancelled") {
-					job.errorText = error instanceof Error ? error.message : String(error);
+					job.errorText = errorText;
 					this.#scheduleEviction(id);
 					return;
 				}
-				const errorText = error instanceof Error ? error.message : String(error);
 				await this.#settleAgentProgress(job);
+				// Mirror the success-path guard: cancellation can occur while
+				// the failure waits for its final progress sink to drain.
+				if (job.status === "cancelled") {
+					job.errorText = errorText;
+					this.#scheduleEviction(id);
+					return;
+				}
 				job.status = "failed";
 				job.errorText = errorText;
 				this.#enqueueDelivery(id, errorText);
@@ -637,7 +682,10 @@ export class AsyncJobManager {
 		if (batch.kind === "artifact-only") return;
 		const sink = job.ownerId === undefined ? undefined : this.#progressSinks.get(job.ownerId);
 		if (!sink) return;
-		const recordSuppressedEvents = batch.values.reduce((total, record) => total + (record.suppressedEvents ?? 0), 0);
+		const recordSuppressedEvents = batch.values.reduce(
+			(total, record) => total + (record.suppressedEvents ?? 0),
+			0,
+		);
 		const suppressedEvents = batch.suppressedEvents + recordSuppressedEvents;
 		const info: AsyncJobProgressInfo = {
 			artifactId:
@@ -646,8 +694,14 @@ export class AsyncJobManager {
 			suppressedEvents: suppressedEvents || undefined,
 			reminder: batch.reminder ?? batch.values.findLast(record => record.reminder !== undefined)?.reminder,
 		};
+		const deliveredText = batch.values.map(record => record.text).join("\n");
 		try {
-			await sink.deliver(jobId, batch.values.map(record => record.text).join("\n"), job, batch.seq, info);
+			await sink.deliver(jobId, deliveredText, job, batch.seq, info);
+			// Retain only the most recent bounded delivery until settlement so
+			// terminal content can be classified by exact provenance instead of
+			// status. Bash's minimized/post-processed result differs and remains;
+			// a byte-identical cumulative terminal report is not replayed.
+			this.#lastDeliveredAgentProgress.set(jobId, deliveredText);
 			// An ambient sink may only ENQUEUE this batch while the owner is
 			// idle; that still counts as delivered because the owner folds any
 			// still-queued ambient progress into the completion-triggered flush
@@ -674,30 +728,48 @@ export class AsyncJobManager {
 	 * Jobs whose progress never reached the agent keep the old flush so their
 	 * recorded output is not lost.
 	 */
-	async #settleAgentProgress(job: AsyncJob): Promise<void> {
+	async #settleAgentProgress(job: AsyncJob, terminalText?: string): Promise<void> {
+		let pendingCoversTerminal = false;
 		if (
 			job.progressDelivery === undefined ||
 			(job.progressDeliveredCount ?? 0) === 0 ||
 			job.progressArtifactId === undefined
 		) {
 			await this.#flushAgentProgress(job.id);
-			return;
+		} else {
+			const pending = await this.#progressBatcher.takePending(job.id);
+			if (pending) {
+				const record =
+					pending.values.length === 0 ? undefined : pending.values.reduce(mergeAsyncJobProgressRecords);
+				const suppressedEvents =
+					pending.suppressedEvents +
+					pending.values.reduce((total, value) => total + (value.suppressedEvents ?? 0), 0);
+				const sourceTruncated =
+					suppressedEvents > 0 || pending.values.some(value => value.truncated === true);
+				const preview = record ? buildLineSnappedPreview(record.text, sourceTruncated) : { truncated: true };
+				job.completionLeftover = { ...preview, suppressedEvents: suppressedEvents || undefined };
+				pendingCoversTerminal =
+					terminalText !== undefined &&
+					(record?.text === terminalText || pending.values.some(value => value.text === terminalText));
+			}
 		}
-		const pending = await this.#progressBatcher.takePending(job.id);
-		if (!pending) return;
-		const record = pending.values[0];
-		const suppressedEvents = pending.suppressedEvents + (record?.suppressedEvents ?? 0);
-		const sourceTruncated = suppressedEvents > 0 || record?.truncated === true;
-		const preview = record ? buildLineSnappedPreview(record.text, sourceTruncated) : { truncated: true };
-		job.completionLeftover = { ...preview, suppressedEvents: suppressedEvents || undefined };
+		if (terminalText !== undefined) {
+			job.terminalTextProvenance =
+				pendingCoversTerminal || this.#lastDeliveredAgentProgress.get(job.id) === terminalText
+					? "progress"
+					: "terminal";
+		}
+		this.#lastDeliveredAgentProgress.delete(job.id);
 	}
 
 	#clearAgentProgress(jobId: string): void {
 		this.#progressBatcher.clear(jobId);
+		this.#lastDeliveredAgentProgress.delete(jobId);
 	}
 
 	#clearAllAgentProgress(): void {
 		this.#progressBatcher.dispose();
+		this.#lastDeliveredAgentProgress.clear();
 	}
 
 	/**

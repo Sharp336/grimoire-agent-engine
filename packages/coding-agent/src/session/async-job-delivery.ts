@@ -9,6 +9,7 @@
  * every completion — regardless of owner — into the first top-level session.
  */
 import { formatDuration, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
+import { replaceTabs } from "@oh-my-pi/pi-tui";
 import type { AsyncJob, AsyncJobCompletionLeftover, AsyncJobProgressDelivery, AsyncJobType } from "../async";
 import type { ProgressReminder } from "../async/progress-batcher";
 import chattyProgressGuidanceTemplate from "../prompts/system/chatty-progress-guidance.md" with { type: "text" };
@@ -50,8 +51,9 @@ export interface AsyncResultEntry {
 	epoch: number;
 	/**
 	 * Present when the job's live output already reached the agent: the
-	 * completion message points at the artifact and inlines only the
-	 * never-delivered leftover instead of re-sending the full result.
+	 * completion points at the artifact, inlines the never-delivered leftover,
+	 * and includes terminal-only/post-processed result text when provenance
+	 * shows it was not part of progress.
 	 */
 	progressSummary?: AsyncResultProgressSummary;
 }
@@ -265,11 +267,10 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			failed: status === "failed" || timedOut || (exitCode !== undefined && exitCode !== 0),
 			hasExitCode: exitCode !== undefined,
 			progressSummarized: entry.progressSummary !== undefined,
-			// Terminal-only content for an artifact-backed job: a thrown error or
-			// post-processing result that never flowed through progress must not
-			// be dropped with the already-delivered stream (delivery passes ""
-			// when the terminal text is fully covered by progress).
-			terminalText: entry.progressSummary && entry.result ? sanitizeText(entry.result) : undefined,
+			// `result` remains the model/artifact payload. Only this display field
+			// crosses the TUI boundary, so normalize tabs here without mutating
+			// the lossless source bytes.
+			terminalText: entry.progressSummary && entry.result ? replaceTabs(sanitizeText(entry.result)) : undefined,
 			artifactId: entry.progressSummary?.artifactId,
 			leftoverText: leftover?.text ? sanitizeText(leftover.text) : undefined,
 			leftoverHead: leftover?.head ? sanitizeText(leftover.head) : undefined,
