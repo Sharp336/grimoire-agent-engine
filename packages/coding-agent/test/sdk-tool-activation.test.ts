@@ -2503,6 +2503,62 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("reports hasEditTool false when the edit builtin is disallowed", async () => {
+		// Regression for the hasEditTool scope fix: `disallowedTools: ["edit"]`
+		// keeps `edit` in the registry but out of the active set, so hashline
+		// anchors must be suppressed (resolveFileDisplayMode contract). Before
+		// the fix the registered-but-scoped-out edit still advertised true.
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			disallowedTools: ["edit"],
+		});
+
+		try {
+			expect(session.getAllToolNames()).toContain("edit");
+			expect(session.getActiveToolNames()).not.toContain("edit");
+			expect(session.hasEditTool).toBe(false);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("reports hasEditTool false when the enforced allowlist omits edit", async () => {
+		// Regression for the hasEditTool scope fix: an enforced `tools:`
+		// allowlist that does not name `edit` never grants it, so hashline
+		// anchors must be suppressed (resolveFileDisplayMode contract).
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["read", "yield"],
+			requireYieldTool: true,
+			enforceToolAllowlist: true,
+		});
+
+		try {
+			expect(session.getActiveToolNames()).not.toContain("edit");
+			expect(session.hasEditTool).toBe(false);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("reports hasEditTool true for an unscoped session with the edit built-in registered", async () => {
+		// Control for the two scoped regressions above: without disallow or
+		// allowlist scoping, `edit` is registered and active, and hashline
+		// anchors stay advertised (resolveFileDisplayMode contract).
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession(baseOptions(tempDir));
+
+		try {
+			expect(session.getAllToolNames()).toContain("edit");
+			expect(session.getActiveToolNames()).toContain("edit");
+			expect(session.hasEditTool).toBe(true);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("renders report-issue guidance only for unrestricted sessions", async () => {
 		const normalDir = makeTempDir();
 		const restrictedDir = makeTempDir();
