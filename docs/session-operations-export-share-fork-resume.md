@@ -216,13 +216,16 @@ a new one.
 
 ## Archive
 
-Interactive `/archive` is TUI-only. It refuses while the parent session is
-streaming or a nested session is still live (`pending` / `interrupted` /
-`unknown`), asks for confirmation, starts a fresh session the same way `/new`
-does, then moves the previous `.jsonl` and artifacts through the same gzip +
-artifact relocation used by `omp gc --archive`. It then reuses that command's
-`history.db` / `stats.db` cleanup so `omp stats` does not keep counting the
-archived session.
+Interactive `/archive` is TUI-only. It refuses when the session file has not
+been written yet (`isSessionOnDisk()` is false — the same lazy-persist gap as
+#8860), while the parent session is streaming, or a nested session is still
+live (`pending` / `interrupted` / `unknown`). Those refusals happen before
+confirmation and before switching. After confirm it starts a fresh session the
+same way `/new` does, then moves the previous `.jsonl` and artifacts through
+the same gzip + artifact relocation used by `omp gc --archive`. It then reuses
+that command's `history.db` / `stats.db` cleanup against the resolved sessions
+root so a retained fork in a custom `--session-dir` keeps shared stats, and
+`omp stats` does not keep counting the archived session.
 
 The archive root follows the active session directory. Sessions under the
 default profile store go to `archive/sessions` next to `sessions`. A custom

@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added the `/archive` slash command to confirm, start a fresh session, and move the previous session into the existing `omp gc --archive` store so it leaves the `/resume` picker. It honors `--session-dir` / explicit session paths and prunes matching `history.db` / `stats.db` rows ([#9029](https://github.com/can1357/oh-my-pi/issues/9029)).
+- Added the `/archive` slash command to confirm, start a fresh session, and move the previous session into the existing `omp gc --archive` store so it leaves the `/resume` picker. Unsaved sessions are refused before switching, and archiving from a custom session directory keeps shared stats on a remaining fork ([#9029](https://github.com/can1357/oh-my-pi/issues/9029)).
 
 ## [18.0.1] - 2026-08-23
 

@@ -378,6 +378,25 @@ async function listActiveSessions(sessionsRoot: string): Promise<SessionInfo[]> 
 	return sessions;
 }
 
+function isPathInside(target: string, root: string): boolean {
+	const relative = path.relative(path.resolve(root), path.resolve(target));
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+/** Sessions still live under `sessionsRoot`, excluding anything already in the archive tree. */
+async function listRetainedSessionsForCleanup(sessionsRoot: string, archiveRoot: string): Promise<SessionInfo[]> {
+	const storage = new FileSessionStorage();
+	const byPath = new Map<string, SessionInfo>();
+	for (const session of [
+		...(await listActiveSessions(sessionsRoot)),
+		...(await listSessionsReadOnly(sessionsRoot, storage)),
+	]) {
+		if (isPathInside(session.path, archiveRoot)) continue;
+		byPath.set(path.resolve(session.path), session);
+	}
+	return [...byPath.values()];
+}
+
 function sessionCwdKey(sessionsRoot: string, session: SessionInfo): string {
 	const relativePath = path.relative(sessionsRoot, session.path);
 	if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) return session.cwd || ".";
@@ -1041,6 +1060,7 @@ async function collectArchivedStatsSessions(
 async function cleanupStatsRowsForArchivedSessions(
 	options: { agentDir: string },
 	archiveRoot: string,
+	sessionsRoot: string,
 	newlyArchivedSessions: SessionInfo[],
 	result: ArchiveGcResult,
 ): Promise<void> {
@@ -1049,7 +1069,6 @@ async function cleanupStatsRowsForArchivedSessions(
 			? getStatsDbPath()
 			: path.join(options.agentDir, "stats.db");
 	if (!(await pathExists(dbPath))) return;
-	const sessionsRoot = getSessionsDir(options.agentDir);
 
 	const archivedByPath = new Map<string, StatsSession>();
 	for (const session of newlyArchivedSessions) {
@@ -1073,7 +1092,7 @@ async function cleanupStatsRowsForArchivedSessions(
 		result.errors.push(`stats cleanup scan: ${errorMessage(error)}`);
 	}
 	try {
-		retainedSessions = await listActiveSessions(sessionsRoot);
+		retainedSessions = await listRetainedSessionsForCleanup(sessionsRoot, archiveRoot);
 	} catch (error) {
 		result.errors.push(`stats cleanup scan: ${errorMessage(error)}`);
 		return;
@@ -1109,6 +1128,7 @@ export async function cleanupRowsForArchivedSessions(
 	agentDir: string,
 	archiveRoot: string,
 	archivedSessions: readonly { id: string; path: string; parentSessionPath?: string }[],
+	sessionsRoot: string = getSessionsDir(agentDir),
 ): Promise<Pick<ArchiveGcResult, "historyRowsDeleted" | "statsRowsDeleted" | "ftsRebuilt" | "errors">> {
 	const result: ArchiveGcResult = {
 		scanned: 0,
@@ -1140,7 +1160,7 @@ export async function cleanupRowsForArchivedSessions(
 		archivedSessions.map(session => session.id),
 		result,
 	);
-	await cleanupStatsRowsForArchivedSessions({ agentDir }, archiveRoot, infos, result);
+	await cleanupStatsRowsForArchivedSessions({ agentDir }, archiveRoot, sessionsRoot, infos, result);
 	return {
 		historyRowsDeleted: result.historyRowsDeleted,
 		statsRowsDeleted: result.statsRowsDeleted,
@@ -1220,7 +1240,7 @@ async function runArchiveGc(options: ResolvedGcOptions, archiveRoot: string): Pr
 	}
 
 	await cleanupHistoryRowsForArchivedSessions(options, archiveRoot, archivedSessionIds, result);
-	await cleanupStatsRowsForArchivedSessions(options, archiveRoot, archivedSessions, result);
+	await cleanupStatsRowsForArchivedSessions(options, archiveRoot, sessionsRoot, archivedSessions, result);
 	return result;
 }
 

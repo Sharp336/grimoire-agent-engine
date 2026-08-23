@@ -1027,7 +1027,8 @@ export class CommandController {
 
 	async handleArchiveCommand(): Promise<void> {
 		const sessionFile = this.ctx.sessionManager.getSessionFile();
-		if (!sessionFile) {
+		// Lazy persistence allocates a path before the JSONL exists (#8860).
+		if (!sessionFile || !this.ctx.sessionManager.isSessionOnDisk()) {
 			this.ctx.showError("Nothing to archive (in-memory session)");
 			return;
 		}
@@ -1066,9 +1067,12 @@ export class CommandController {
 		this.ctx.prepareSessionSwitch();
 		await this.#runNewSessionFlow(undefined, "Session archived", async () => {
 			await archiveSessionFile(sessionFile, roots.sessionsRoot, roots.archiveRoot);
-			const cleanup = await cleanupRowsForArchivedSessions(agentDir, roots.archiveRoot, [
-				{ id: sessionId, path: sessionFile },
-			]);
+			const cleanup = await cleanupRowsForArchivedSessions(
+				agentDir,
+				roots.archiveRoot,
+				[{ id: sessionId, path: sessionFile }],
+				roots.sessionsRoot,
+			);
 			if (cleanup.errors.length > 0) {
 				throw new Error(cleanup.errors.join("; "));
 			}

@@ -208,6 +208,106 @@ describe("cleanupRowsForArchivedSessions", () => {
 		).toEqual(["keep-me"]);
 		historyCheck.close();
 	});
+
+	test("transfers shared stats to a retained fork in a custom session directory", async () => {
+		const sessionDir = path.join(root, "custom-sessions");
+		await fs.mkdir(sessionDir, { recursive: true });
+		const timestamp = "2026-06-26T12:00:00.000Z";
+		const timestampMs = Date.parse(timestamp);
+		const parent = path.join(sessionDir, "parent.jsonl");
+		const child = path.join(sessionDir, "child.jsonl");
+		const sharedUser = {
+			type: "message",
+			id: "shared-user",
+			parentId: null,
+			timestamp,
+			message: { role: "user", content: "shared" },
+		};
+		const sharedAssistant = {
+			type: "message",
+			id: "shared-assistant",
+			parentId: "shared-user",
+			timestamp,
+			message: { role: "assistant", content: [] },
+		};
+		await Bun.write(
+			parent,
+			[
+				JSON.stringify({ type: "session", version: 3, id: "parent-session", timestamp, cwd: "/tmp" }),
+				JSON.stringify(sharedUser),
+				JSON.stringify(sharedAssistant),
+				"",
+			].join("\n"),
+		);
+		await Bun.write(
+			child,
+			[
+				JSON.stringify({
+					type: "session",
+					version: 3,
+					id: "child-session",
+					timestamp,
+					cwd: "/tmp",
+					parentSession: parent,
+				}),
+				JSON.stringify(sharedUser),
+				JSON.stringify(sharedAssistant),
+				"",
+			].join("\n"),
+		);
+
+		const statsPath = path.join(root, "stats.db");
+		const db = new Database(statsPath);
+		db.run(
+			"CREATE TABLE messages (session_file TEXT NOT NULL, entry_id TEXT NOT NULL, timestamp INTEGER NOT NULL, UNIQUE(session_file, entry_id))",
+		);
+		db.run(
+			"CREATE TABLE user_messages (session_file TEXT NOT NULL, entry_id TEXT NOT NULL, timestamp INTEGER NOT NULL, UNIQUE(session_file, entry_id))",
+		);
+		db.run(
+			"CREATE TABLE tool_calls (session_file TEXT NOT NULL, entry_id TEXT NOT NULL, timestamp INTEGER NOT NULL, tool_call_id TEXT NOT NULL, UNIQUE(session_file, tool_call_id))",
+		);
+		db.run(
+			"CREATE TABLE file_offsets (session_file TEXT PRIMARY KEY, offset INTEGER NOT NULL, last_modified INTEGER NOT NULL)",
+		);
+		db.prepare("INSERT INTO messages (session_file, entry_id, timestamp) VALUES (?, ?, ?)").run(
+			parent,
+			"shared-assistant",
+			timestampMs,
+		);
+		db.prepare("INSERT INTO user_messages (session_file, entry_id, timestamp) VALUES (?, ?, ?)").run(
+			parent,
+			"shared-user",
+			timestampMs,
+		);
+		db.prepare("INSERT INTO file_offsets (session_file, offset, last_modified) VALUES (?, ?, ?)").run(parent, 1, 1);
+		const childStat = await fs.stat(child);
+		db.prepare("INSERT INTO file_offsets (session_file, offset, last_modified) VALUES (?, ?, ?)").run(
+			child,
+			childStat.size,
+			childStat.mtimeMs,
+		);
+		db.close();
+
+		const archiveRoot = path.join(sessionDir, "archive");
+		await archiveSessionFile(parent, sessionDir, archiveRoot);
+		const cleanup = await cleanupRowsForArchivedSessions(
+			root,
+			archiveRoot,
+			[{ id: "parent-session", path: parent }],
+			sessionDir,
+		);
+
+		expect(cleanup.errors).toEqual([]);
+		const check = new Database(statsPath);
+		expect(check.prepare("SELECT session_file, entry_id FROM messages").all()).toEqual([
+			{ session_file: child, entry_id: "shared-assistant" },
+		]);
+		expect(check.prepare("SELECT session_file, entry_id FROM user_messages").all()).toEqual([
+			{ session_file: child, entry_id: "shared-user" },
+		]);
+		check.close();
+	});
 });
 
 describe("sessionHasLiveNestedSessions", () => {
