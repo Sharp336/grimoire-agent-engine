@@ -543,15 +543,24 @@ describe("OutputSink", () => {
 
 	test("replace cancels a throttled tail and discards its pending preview", () => {
 		vi.useFakeTimers();
+		let stamp = 1;
+		const settled: number[] = [];
 		const chunks: string[] = [];
-		const sink = new OutputSink({ onChunk: chunk => chunks.push(chunk), chunkThrottleMs: 20 });
+		const sink = new OutputSink({
+			onChunk: chunk => chunks.push(chunk),
+			chunkStamp: () => stamp,
+			onChunkSettled: settledStamp => settled.push(settledStamp),
+			chunkThrottleMs: 20,
+		});
 
 		sink.push("a");
+		stamp = 2;
 		sink.push("superseded");
 		sink.replace("replacement");
 		vi.advanceTimersByTime(20);
 
 		expect(chunks).toEqual(["a"]);
+		expect(settled).toEqual([1, 2]);
 	});
 
 	test("caps artifact-on-disk size: head + notice + tail when stream exceeds cap", async () => {

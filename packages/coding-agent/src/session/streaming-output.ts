@@ -850,7 +850,7 @@ export class OutputSink {
 	#appendFd?: number;
 	readonly #spillThreshold: number;
 	readonly #headLimit: number;
-	readonly #onChunk?: (chunk: string, stamp: number) => void;
+	readonly #onChunk?: (chunk: string, stamp: number, artifactId?: string) => void;
 	readonly #chunkStamp?: () => number;
 	readonly #onChunkSettled?: (stamp: number) => void;
 	readonly #chunkThrottleMs: number;
@@ -1262,6 +1262,7 @@ export class OutputSink {
 	 */
 	replace(text: string): void {
 		this.#clearPendingChunkTimer();
+		const discardedChunkStamp = this.#pendingChunkStamp;
 		this.#buffer = text;
 		this.#bufferBytes = Buffer.byteLength(text, "utf-8");
 		this.#head = "";
@@ -1279,6 +1280,7 @@ export class OutputSink {
 		this.#pendingChunk = "";
 		this.#crNormalizer.reset();
 		this.#pendingChunkStamp = undefined;
+		if (discardedChunkStamp !== undefined) this.#onChunkSettled?.(discardedChunkStamp);
 	}
 
 	#clearPendingChunkTimer(): void {
