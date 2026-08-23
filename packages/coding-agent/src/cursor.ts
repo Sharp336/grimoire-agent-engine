@@ -453,6 +453,25 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	constructor(private options: CursorExecBridgeOptions) {}
 
 	/**
+	 * Whether a server's resources may be listed/read: no scope gate configured
+	 * (unrestricted), or at least one of the server's registered tools is
+	 * executable under it. Resource frames answer by server name and never run
+	 * a registry tool, so the gate must be consulted here — otherwise a scoped
+	 * subagent could still enumerate and read every connected server's
+	 * contents. Ownership is matched via `mcpServerName` (never a lossy
+	 * sanitized name prefix), mirroring the instructions filter.
+	 */
+	#serverScopedIn(serverName: string): boolean {
+		const gate = this.options.isToolExecutable;
+		if (!gate) return true;
+		return Array.from(this.options.tools.values()).some(
+			tool =>
+				(tool as { mcpServerName?: unknown }).mcpServerName === serverName &&
+				gate((tool as { name?: string }).name ?? ""),
+		);
+	}
+
+	/**
 	 * Modern Cursor builds paginate the legacy `read` frame with
 	 * `offset`/`limit`, exactly as `pi_read` does. Dropping them returns the
 	 * whole file (or its own truncation) for every page, so a model walking a
@@ -759,9 +778,12 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		const mcp = this.options.mcpResources;
 		if (!mcp) return [];
 		const names = server ? [server] : mcp.serverNames();
+		const filtered = names.filter(name => this.#serverScopedIn(name));
 		// Concurrently: each name may block on that server's first catalog load,
 		// and a slow server should not delay the rest of the listing.
-		const catalogs = await Promise.all(names.map(async name => [name, await mcp.getServerResources(name)] as const));
+		const catalogs = await Promise.all(
+			filtered.map(async name => [name, await mcp.getServerResources(name)] as const),
+		);
 		const listed: CursorMcpResource[] = [];
 		for (const [name, catalog] of catalogs) {
 			for (const resource of catalog?.resources ?? []) {
@@ -811,6 +833,9 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		}
 		const mcp = this.options.mcpResources;
 		if (!mcp) return null;
+		// Same scope gate as the listing: a scoped-out server's resources are
+		// not readable, even by direct server address.
+		if (!this.#serverScopedIn(server)) return null;
 		const read = await mcp.readServerResource(server, uri);
 		if (!read) return null;
 		// The mime type must describe the bytes actually sent, not whatever item

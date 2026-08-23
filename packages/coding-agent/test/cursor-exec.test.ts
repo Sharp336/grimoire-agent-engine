@@ -988,6 +988,53 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		// A server filter narrows to that server alone.
 		expect((await handlers.listMcpResources({ server: "issues" })).map(r => r.uri)).toEqual(["issues://open"]);
 	});
+	it("filters resources of scoped-out servers from listing and reads", async () => {
+		// A scoped subagent (enforced allowlist / disallowedTools) must not reach
+		// a scoped-out server's resources: resource frames answer by server name
+		// and never run a registry tool, so the scope gate must apply here too.
+		const gatedTool = { name: "mcp__docs_list", mcpServerName: "docs" } as unknown as AgentTool;
+		const openTool = { name: "mcp__issues_list", mcpServerName: "issues" } as unknown as AgentTool;
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map([
+				["mcp__docs_list", gatedTool],
+				["mcp__issues_list", openTool],
+			]),
+			isToolExecutable: name => name === "mcp__issues_list",
+			mcpResources: {
+				serverNames: () => ["docs", "issues"],
+				getServerResources: async name =>
+					name === "docs"
+						? { resources: [{ uri: "docs://readme", name: "README" }] }
+						: { resources: [{ uri: "issues://open" }] },
+				readServerResource: async (name, uri) =>
+					({ contents: [{ uri, mimeType: "text/plain", text: `content from ${name}` }] }) as never,
+			},
+		});
+
+		expect((await handlers.listMcpResources({})).map(r => r.uri)).toEqual(["issues://open"]);
+		// A direct read of the scoped-out server is refused too.
+		expect(await handlers.readMcpResource({ server: "docs", uri: "docs://readme" })).toBeNull();
+		expect(await handlers.readMcpResource({ server: "issues", uri: "issues://open" })).not.toBeNull();
+	});
+
+	it("keeps all resources when no scope gate is configured", async () => {
+		// Unrestricted sessions (no isToolExecutable) must stay byte-identical:
+		// every connected server's resources remain listable and readable.
+		const tool = { name: "mcp__docs_list", mcpServerName: "docs" } as unknown as AgentTool;
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map([["mcp__docs_list", tool]]),
+			mcpResources: {
+				serverNames: () => ["docs"],
+				getServerResources: async () => ({ resources: [{ uri: "docs://readme", name: "README" }] }),
+				readServerResource: async () => ({ contents: [{ uri: "docs://readme", mimeType: "text/plain", text: "ok" }] }) as never,
+			},
+		});
+
+		expect((await handlers.listMcpResources({})).map(r => r.uri)).toEqual(["docs://readme"]);
+		expect(await handlers.readMcpResource({ server: "docs", uri: "docs://readme" })).not.toBeNull();
+	});
 
 	it("waits for a server's catalog instead of reporting it empty", async () => {
 		// A server registers its tools before its resource catalog finishes
