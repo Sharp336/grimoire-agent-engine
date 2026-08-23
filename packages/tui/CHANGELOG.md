@@ -38,6 +38,7 @@
 - Fixed pasting an image in kitty occasionally spraying base64 text into the composer alongside the image attachment: a kitty OSC 5522 clipboard packet torn by the incomplete-escape flush is now discarded up to its terminator instead of being replayed as keystrokes.
 - Fixed Kitty OSC 66 headings activating before the host explicitly enables text sizing.
 - Markdown streaming renderer now scans only the mutable tail (not the full document) for reference-link definitions and CR on every frame, eliminating the O(n²) `RegExp.test` cost that accounted for ~26% CPU during active streaming ([#9048](https://github.com/can1357/oh-my-pi/issues/9048)).
+- Markdown streaming renderer now memoizes the ref-def/CR guard scan: while text grows append-only, only the delta is inspected for the characters a reference definition or CR needs, and a clean delta reuses the previous verdict. Guard cost drops from ~265µs to ~0.1µs per frame on a 128KB tight document ([#9048](https://github.com/can1357/oh-my-pi/issues/9048)).
 
 ## [18.0.0] - 2026-08-22
 
