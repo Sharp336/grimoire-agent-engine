@@ -1761,9 +1761,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// Construction time: the registry and active set are still empty and
 					// ReadTool caches its description here. Answer from the requested
 					// scope, like the pre-scope getter, plus the disallow filter.
-					const requestedToolNames = options.toolNames
-						? normalizeToolNames(options.toolNames)
-						: undefined;
+					const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
 					return restrictToolNames
 						? requestedToolNames?.includes("edit") === true
 						: (!requestedToolNames || requestedToolNames.includes("edit")) &&
