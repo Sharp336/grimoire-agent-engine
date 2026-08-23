@@ -1,10 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
 ### Changed
 
 - Skip tail re-lex on inert markdown deltas; splice the styled growing row onto cached rows (hazard fallback).
-
-## [18.0.3] - 2026-08-23
 
 ## [18.0.3] - 2026-08-23
 
