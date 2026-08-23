@@ -23,6 +23,11 @@ type SettingsOverrides = Partial<Record<SettingPath, unknown>>;
 const activeHarnesses: Harness[] = [];
 const sharedAuthStorage = createInMemoryAuthStorage();
 sharedAuthStorage.setRuntimeApiKey("mock", "test-key");
+// `createHarness` streams mock responses through a bundled Anthropic model so the session
+// sees realistic model metadata. AgentSession resolves the key through `ModelRegistry`, not
+// through `Agent.getApiKey`, so that provider needs a runtime key of its own; without it
+// every `session.prompt()` throws "No API key found for anthropic".
+sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
 const sharedModelRegistry = new ModelRegistry(sharedAuthStorage);
 
 afterAll(() => {
