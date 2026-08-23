@@ -67,7 +67,7 @@ Smart-ladder bookkeeping (`recordPollWaitEnd`) runs only when the smart window w
 
 ## Outputs
 - Messaging and job results: single text block plus `details: CoordinationDetails` — `{ op, from?, to?, receipts?, waited?, inbox?, peers?, jobs?, cancelled?, agents? }`. Shapes are unchanged from the former tools except that job-op details now carry `op` (`"wait" | "cancel" | "jobs"`).
-- Process results: `details: LaunchToolDetails` — `{ op, daemon?, daemons?, cursor?, timedOut?, state?, terminalRows?, matched?, spec? }` (internally `ps` stores the broker op `list`).
+- Process results: `details: LaunchToolDetails` — `{ op, daemon?, daemons?, cursor?, timedOut?, state?, terminalRows?, matched?, spec?, monitoring?, monitorDetached? }` (internally `ps` stores the broker op `list`; only `monitor` sets `monitoring` and `monitorDetached`).
 - Streaming: job-watching waits emit `onUpdate` every 500 ms with fresh snapshots. Process progress is delivered later as harness-injected progress messages, not as `onUpdate` output from the `start` or `monitor` call.
 
 ## Availability
