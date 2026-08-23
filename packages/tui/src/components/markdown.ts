@@ -981,7 +981,7 @@ const FAST_URL_PREFIX_SEAM_RE = /(?:https?|ftp):?\/{0,2}$|www\.$|[A-Za-z0-9._+-]
 // `_` is excluded (intraword `_` is inert); a FLANKED underscore is caught
 // by FAST_ROW_UNDERSCORE_RE on the raw text (SGR bytes precede text, so word
 // boundaries are invisible after styling).
-const FAST_LITERAL_MARKER_RE = /[*~`\[\]<>()$&#]/;
+const FAST_LITERAL_MARKER_RE = /[*~`[\]<>()$&#]/;
 
 // A flanking underscore (start-of-line or preceded by a non-word char) can
 // open an emphasis that a future delta closes. Only flanked `_` is a
@@ -1789,9 +1789,12 @@ export class Markdown implements Component {
 		// has no "\n", so the frozen prefix cannot advance and the rows above
 		// the spliced span stay byte-identical.
 		if (
-			this.transientRenderCache && this.#fastTailReady && this.#fastTailLines !== undefined &&
+			this.transientRenderCache &&
+			this.#fastTailReady &&
+			this.#fastTailLines !== undefined &&
 			contentWidth === this.#fastTailWidth &&
-			this.#text.length > this.#fastTailSource.length && this.#text.startsWith(this.#fastTailSource)
+			this.#text.length > this.#fastTailSource.length &&
+			this.#text.startsWith(this.#fastTailSource)
 		) {
 			const delta = this.#text.slice(this.#fastTailSource.length);
 			const deltaTabs = replaceTabs(delta);
@@ -1800,13 +1803,16 @@ export class Markdown implements Component {
 			// seam window is the raw tail's last word plus the delta.
 			const seamSafe = fastTailSeamSafe(this.#fastTailRowRaw);
 			const seamWindow =
-				this.#fastTailRowRaw.slice(Math.max(this.#fastTailRowRaw.lastIndexOf(" "), this.#fastTailRowRaw.lastIndexOf("\t")) + 1) + deltaTabs;
+				this.#fastTailRowRaw.slice(
+					Math.max(this.#fastTailRowRaw.lastIndexOf(" "), this.#fastTailRowRaw.lastIndexOf("\t")) + 1,
+				) + deltaTabs;
 			// A paragraph's last line can complete into a different block kind
 			// under an inert delta (ATX heading, blockquote, list marker, HR,
 			// reference definition) — the re-lex would then emit a different
 			// token shape, so disarm when the grown line starts one.
 			const lineStartHazard = FAST_LINE_START_HAZARD_RE.test(
-				this.#fastTailRowRaw.slice(this.#fastTailRowRaw.lastIndexOf("\n") + 1) + deltaTabs);
+				this.#fastTailRowRaw.slice(this.#fastTailRowRaw.lastIndexOf("\n") + 1) + deltaTabs,
+			);
 			// A newline/CR/ANSI delta changes block/freeze semantics — only
 			// same-line deltas can splice. Marker deltas are re-lexed through
 			// the REAL inline pipeline so self-contained marker pairs render
@@ -1818,12 +1824,16 @@ export class Markdown implements Component {
 			// the full text (CommonMark: intraword `_` is inert) — the styled
 			// render would diverge from the full re-lex. Same for a delta
 			// ENDING in `_` after a word char (a future frame could pair it).
-			const underscoreSeamHazard = markerDelta && (deltaTabs.startsWith("_") || deltaTabs.endsWith("_")) && /\w$/.test(this.#fastTailRowRaw);
+			const underscoreSeamHazard =
+				markerDelta && (deltaTabs.startsWith("_") || deltaTabs.endsWith("_")) && /\w$/.test(this.#fastTailRowRaw);
 			const deltaTokens = markerDelta && !hardDelta ? lexInlineTokens(deltaTabs) : null;
 			if (
-				seamSafe && !lineStartHazard && !hardDelta &&
+				seamSafe &&
+				!lineStartHazard &&
+				!hardDelta &&
 				(!markerDelta || (!this.#lastTailOpen && !underscoreSeamHazard && !inlineHasOpen(deltaTokens!))) &&
-				(!FAST_URL_ANYWHERE_RE.test(delta) && !FAST_URL_ANYWHERE_RE.test(seamWindow))
+				!FAST_URL_ANYWHERE_RE.test(delta) &&
+				!FAST_URL_ANYWHERE_RE.test(seamWindow)
 			) {
 				// The grown row re-renders the captured RENDERED row plus the
 				// delta through the same text paths a full re-lex applies:
@@ -1831,9 +1841,15 @@ export class Markdown implements Component {
 				// pairs style; unpaired markers were rejected above), inert
 				// deltas go through the plain swatch/entity render.
 				const { applyText } = this.#getDefaultInlineStyleContext();
-				const grown = this.#fastTailRowText + (markerDelta
-					? this.#renderInlineTokens(deltaTokens!)
-					: renderTextWithSwatches(normalizeHtmlEntitiesForTerminal(deltaTabs), applyText, this.#theme.symbols.colorSwatch || DEFAULT_COLOR_SWATCH_GLYPH));
+				const grown =
+					this.#fastTailRowText +
+					(markerDelta
+						? this.#renderInlineTokens(deltaTokens!)
+						: renderTextWithSwatches(
+								normalizeHtmlEntitiesForTerminal(deltaTabs),
+								applyText,
+								this.#theme.symbols.colorSwatch || DEFAULT_COLOR_SWATCH_GLYPH,
+							));
 				const wrapped = wrapTextWithAnsi(grown, contentWidth);
 				// Rebuild the replacement rows with the same margin/background
 				// pass #renderContentLines applies.
@@ -1933,8 +1949,7 @@ export class Markdown implements Component {
 		// Record the last-row fast-path recipe (B+). Only transient streaming
 		// frames whose last content row came from a paragraph with a
 		// self-contained trailing row are eligible.
-		const fastEligible =
-			this.transientRenderCache && contentLines.length > 0 && this.#lastTailKind === "paragraph";
+		const fastEligible = this.transientRenderCache && contentLines.length > 0 && this.#lastTailKind === "paragraph";
 		if (fastEligible) {
 			this.#fastTailReady = true;
 			this.#fastTailLines = result;
