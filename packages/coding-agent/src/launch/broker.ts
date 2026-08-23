@@ -1233,7 +1233,13 @@ class DaemonBroker {
 		if (!registration) return;
 		const daemon = this.#records.get(registration.name)?.snapshot;
 		if (!daemon || daemon.id !== registration.daemonId) return;
-		const preview = batch.kind === "artifact-only" ? undefined : batch.values[0]?.preview;
+		const preview =
+			batch.kind === "artifact-only"
+				? undefined
+				: batch.values.reduce<ProgressPreview | undefined>(
+						(merged, value) => (merged ? mergeProgressPreviews(merged, value.preview) : value.preview),
+						undefined,
+					);
 		const text = preview ? flattenPreviewText(preview) : "";
 		await registration.artifactSink.flushArtifact();
 		// A replacement or same-name daemon can land while the artifact flush

@@ -970,6 +970,78 @@ process.stdin.once("data", () => {
 		}
 	}, 20_000);
 
+	it("merges retained first and last previews into a suppression summary", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-suppression-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		const artifactPath = path.join(tempDir.path(), "suppressed-progress.log");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "service.ts");
+		await Bun.write(
+			scriptPath,
+			`process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => process.stdout.write(chunk));
+process.stdin.resume();
+`,
+		);
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir, { progressBatchIntervalMs: 0 });
+		const notifications: DaemonMonitorNotification[] = [];
+		const completed = Promise.withResolvers<void>();
+		const unregister = client.onOutput?.(
+			{ id: "suppression-monitor", name: "suppression", owner: "owner", artifactPath },
+			notification => {
+				notifications.push(notification);
+				if (notification.event === "daemon-monitor-completed") completed.resolve();
+			},
+		);
+		if (!unregister) throw new Error("Expected output monitoring support");
+		try {
+			await unregister.ready;
+			await client.request({
+				op: "start",
+				spec: {
+					name: "suppression",
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			for (let index = 0; index < 12; index++) {
+				await client.request({ op: "send", name: "suppression", data: `LINE_${index}\n` });
+				await waitForOutputCount(notifications, index + 1);
+			}
+			await client.request({ op: "stop", name: "suppression", timeoutMs: 2_000 });
+			await completed.promise;
+
+			const summary = notifications.find(
+				(notification): notification is Extract<DaemonMonitorNotification, { event: "daemon-output" }> =>
+					notification.event === "daemon-output" && notification.batchKind === "suppression-summary",
+			);
+			expect(summary).toMatchObject({
+				text: "LINE_10\nLINE_11",
+				suppressedEvents: 2,
+				truncated: true,
+			});
+			expect(await Bun.file(artifactPath).text()).toBe(
+				Array.from({ length: 12 }, (_, index) => `LINE_${index}\n`).join(""),
+			);
+		} finally {
+			unregister();
+			await client.request({ op: "stop", name: "suppression", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
+
 	it("keeps one monitor across an explicit process restart", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-monitor-restart-");
 		const projectDir = path.join(tempDir.path(), "project");

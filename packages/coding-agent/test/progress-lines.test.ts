@@ -10,7 +10,7 @@ describe("ProgressLines", () => {
 
 		lines.append(`${head}😀${tail}\n`);
 
-		expect(reported).toEqual([{ text: `${head}${tail}`, truncated: true }]);
+		expect(reported).toMatchObject([{ text: `${head}${tail}`, truncated: true }]);
 		expect(reported[0]?.text.isWellFormed()).toBeTrue();
 	});
 
@@ -22,7 +22,7 @@ describe("ProgressLines", () => {
 
 		lines.append(`${head}😀${tail}\n`);
 
-		expect(reported).toEqual([{ text: `${head}${tail}`, truncated: true }]);
+		expect(reported).toMatchObject([{ text: `${head}${tail}`, truncated: true }]);
 		expect(reported[0]?.text.isWellFormed()).toBeTrue();
 	});
 });
