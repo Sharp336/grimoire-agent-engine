@@ -932,6 +932,111 @@ function renderedLinesCacheSize(lines: readonly string[]): number {
 	return Math.max(1, size);
 }
 
+// ---------------------------------------------------------------------------
+// Fast-tail (B+) hazard gates
+// ---------------------------------------------------------------------------
+// Tier-1 eligibility: the appended delta is "markdown-inert" — it cannot open
+// or close an inline token, change block structure, or shift a swatch
+// boundary. A delta carrying a marker is re-lexed through the REAL inline
+// pipeline so self-contained marker pairs render styled — exactly what a full
+// re-lex of the grown row produces. `_` is included but narrowed: an
+// intraword `_` is literal per CommonMark flanking rules, so only FLANKED
+// underscores disarm (FAST_ROW_UNDERSCORE_RE on the row text, plus the
+// delta-edge underscoreSeamHazard check).
+const FAST_DELTA_RE = /[\n\r\\[`<!*_~$#&@\x1b]/;
+
+// Disarm when the captured row's RAW tail ends in trailing whitespace (wrap
+// trims it; appending a char moves the trim boundary) or a full/partial hex
+// swatch run (a `#` + 3-8 hex is a swatch glyph; the byte range may shift).
+const FAST_RUN_END_RE = /(?:[ \t]|#[0-9a-fA-F]{3,8}|#+)$/i;
+
+// A trailing backslash can become an escape (`\x`) once the delta supplies
+// the next char — disarm.
+const FAST_BACKSLASH_END_RE = /\\$/;
+
+// A partial `#` + 1-2 hex digits can grow into a 3-8 digit swatch glyph
+// across the seam (delta hex digits are inert).
+const FAST_SWATCH_SEAM_RE = /#[0-9a-fA-F]{0,2}$/;
+
+// A partial HTML entity at the tail end (`&am` + delta `p;`) would normalize
+// to different bytes than the plain concat.
+const FAST_ENTITY_SEAM_RE = /&[A-Za-z0-9#]{0,31}$/;
+
+// A bare URL/email anywhere in the delta or across the seam (a URL the regex
+// cut at a trailing delimiter can re-link once the delta supplies more chars;
+// a protocol head ending at the seam completes in the delta) makes the full
+// re-lex autolink while the plain concat would not.
+const FAST_URL_ANYWHERE_RE = /(?:https?|ftp):\/\/|www\.[A-Za-z0-9]|[A-Za-z0-9._%+-]+@/i;
+
+// A bare-URL/email PREFIX may end at the seam and complete in the delta
+// (`ht` + `tps://x`, `foo@` + `bar.com`).
+const FAST_URL_PREFIX_SEAM_RE = /(?:https?|ftp):?\/{0,2}$|www\.$|[A-Za-z0-9._+-]+@[A-Za-z0-9._+-]*$/;
+
+// Inline-markup delimiters that survive into rendered output as LITERAL text
+// when unpaired. The fast path detects open constructs by walking the REAL
+// inline token stream (capture) and the delta's inline token stream (frame):
+// any top-level `text` token still carrying one of these bytes holds an open
+// delimiter, so a later delta could close it and a full re-lex would restyle
+// the seam. Closed pairs tokenize into styled tokens and never appear here.
+// `_` is excluded (intraword `_` is inert); a FLANKED underscore is caught
+// by FAST_ROW_UNDERSCORE_RE on the raw text (SGR bytes precede text, so word
+// boundaries are invisible after styling).
+const FAST_LITERAL_MARKER_RE = /[*~`\[\]<>()$&#]/;
+
+// A flanking underscore (start-of-line or preceded by a non-word char) can
+// open an emphasis that a future delta closes. Only flanked `_` is a
+// delimiter; intraword `_` (a_b) is literal.
+const FAST_ROW_UNDERSCORE_RE = /(?:^|[^\w])_/;
+
+// A paragraph's LAST line can complete into a different block kind under an
+// inert delta (ATX heading, blockquote, ordered/bullet marker, HR, reference
+// definition) — the re-lex would then emit a different token shape, so disarm
+// when the grown line starts one.
+const FAST_LINE_START_HAZARD_RE =
+	/^ {0,3}(?:#{1,6}(?:[ \t]|$)|>|\d{1,9}[.)](?:[ \t]|$)|-(?:[ \t]|$)|(?:-[ \t]*){2,}[ \t]*$|\[[^[\]\n]*\](?::[ \t]*)?)/;
+
+/** Seam hazards between the captured raw row tail and the delta: the row must
+ *  not end in a wrap-trim, escape, swatch, entity, or URL/email prefix, and
+ *  must hold no unbalanced bracket an inert delta could close into a link. */
+function fastTailSeamSafe(raw: string): boolean {
+	if (FAST_RUN_END_RE.test(raw)) return false;
+	if (FAST_BACKSLASH_END_RE.test(raw)) return false;
+	if (FAST_SWATCH_SEAM_RE.test(raw)) return false;
+	if (FAST_ENTITY_SEAM_RE.test(raw)) return false;
+	if (FAST_URL_PREFIX_SEAM_RE.test(raw)) return false;
+	if (raw.endsWith("]") || raw.lastIndexOf("[") > raw.lastIndexOf("]")) return false;
+	if (raw.lastIndexOf("(") > raw.lastIndexOf(")") || raw.lastIndexOf("<") > raw.lastIndexOf(">")) return false;
+	return true;
+}
+
+/** True when the inline token stream holds an OPEN construct: a `text` token
+ * that still carries a literal delimiter (an unpaired `*`/`` ` ``/`[`/… or a
+ * flanking `_`), or raw HTML. Closed constructs are styled tokens whose
+ * delimiters are absent from their text. An open means a FUTURE delta could
+ * close it — the fast path disarms so the splice always matches a full lex. */
+function inlineHasOpen(tokens: readonly Token[]): boolean {
+	for (const token of tokens) {
+		if (isMathToken(token)) continue;
+		if (token.type === "codespan") continue; // styled leaf; its content cannot re-pair
+		if (token.type === "html") return true; // raw HTML — conservative
+		if (token.type === "text") {
+			const text = "text" in token && typeof token.text === "string" ? token.text : "";
+			if (FAST_LITERAL_MARKER_RE.test(text) || FAST_ROW_UNDERSCORE_RE.test(text)) return true;
+		}
+		if ("tokens" in token && Array.isArray((token as { tokens?: Token[] }).tokens)) {
+			if (inlineHasOpen((token as { tokens: Token[] }).tokens)) return true;
+		}
+	}
+	return false;
+}
+
+/** Isolated inline lex of a same-line delta. A single-line delta has no block
+ * structure, so the isolated inline pass equals the full lex's inline pass
+ * (marked's paragraph tokens run the same `inlineTokens` entry point). */
+function lexInlineTokens(text: string): Token[] {
+	return new Lexer(markdownParser.defaults).inlineTokens(text);
+}
+
 // A reference-link definition (`[label]: dest`) resolves across the whole
 // document, so a split lex cannot reproduce it — disable the streaming fast path
 // when one is present (rare in streamed output). The label may contain
@@ -1511,6 +1616,25 @@ export class Markdown implements Component {
 	#renderingStablePrefix = false;
 	#streamingHighlightCache?: StreamingHighlightCache;
 	#activeRenderSignature?: RenderSignature;
+	// Fast-tail (B+): when a transient frame's last content row came from a
+	// paragraph whose styled row is self-contained, the recipe below lets the
+	// NEXT append-only inert-delta frame splice a re-wrap of the grown row
+	// onto this frame's rows instead of re-lexing the whole tail.
+	#fastTailReady = false;
+	#fastTailLines?: readonly string[];
+	#fastTailSource = ""; // raw #text at capture (append-only predicate)
+	#fastTailWidth = 0; // contentWidth at capture (must match next frame)
+	#fastTailRowText = ""; // RENDERED last wrap-output row (re-wrap input)
+	#fastTailRowRaw = ""; // RAW tail source backing that row (seam scan)
+	#fastTailRowStart = 0; // result[] index of the replaced row
+	#fastTailRowEnd = 0; // exclusive result[] index
+	// B+ capture plumbing: #renderContentLines records the LAST token of the
+	// final call here (the frame's true trailing content row); render()'s
+	// capture block consumes it to build the fast-path recipe.
+	#lastTailKind: "" | "paragraph" = "";
+	#lastTailOpen = false;
+	#lastTailRowInput = "";
+	#lastTailRowRaw = "";
 	#ignoreTight = false;
 	setIgnoreTight(ignore: boolean): this {
 		this.#ignoreTight = ignore;
@@ -1550,6 +1674,9 @@ export class Markdown implements Component {
 			this.#streamPrefixText = undefined;
 			this.#streamPrefixTokens = undefined;
 			this.#streamPrefixLineCache = undefined;
+			// B+: the captured fast-path rows index the replaced content — drop
+			// the recipe so a fresh stream cannot splice onto stale rows.
+			this.#fastTailReady = false;
 		}
 		this.invalidate();
 		return true;
@@ -1568,6 +1695,11 @@ export class Markdown implements Component {
 		const next = value === true;
 		if (this.#transientRenderCache === next) return;
 		this.#transientRenderCache = next;
+		// B+ reset site: a transient flip (finalize, or a fresh stream on
+		// rewound text) means the next render re-lexes from the current
+		// source — drop the fast-path recipe so stale rows cannot be served
+		// across the transition.
+		this.#fastTailReady = false;
 		this.invalidate();
 	}
 
@@ -1647,6 +1779,102 @@ export class Markdown implements Component {
 			return EMPTY_RENDER_LINES;
 		}
 
+		// B+ fast path: an append-only, same-line delta re-renders ONLY the
+		// last content row (the paragraph's trailing wrapped row) with the
+		// grown source, so the new text shows every frame while staying
+		// byte-identical to a cold full render (the full re-lex produces the
+		// same grown inline tokens and the same wrap). The previous frame's
+		// rows live in #fastTailLines — the L1 #cachedLines was invalidated
+		// by setText, so the fast path cannot read it back. An inert delta
+		// has no "\n", so the frozen prefix cannot advance and the rows above
+		// the spliced span stay byte-identical.
+		if (
+			this.transientRenderCache && this.#fastTailReady && this.#fastTailLines !== undefined &&
+			contentWidth === this.#fastTailWidth &&
+			this.#text.length > this.#fastTailSource.length && this.#text.startsWith(this.#fastTailSource)
+		) {
+			const delta = this.#text.slice(this.#fastTailSource.length);
+			const deltaTabs = replaceTabs(delta);
+			// Prose needs the seam + URL/email scans: a URL can straddle the
+			// seam (its head may end inside the captured raw tail), so the
+			// seam window is the raw tail's last word plus the delta.
+			const seamSafe = fastTailSeamSafe(this.#fastTailRowRaw);
+			const seamWindow =
+				this.#fastTailRowRaw.slice(Math.max(this.#fastTailRowRaw.lastIndexOf(" "), this.#fastTailRowRaw.lastIndexOf("\t")) + 1) + deltaTabs;
+			// A paragraph's last line can complete into a different block kind
+			// under an inert delta (ATX heading, blockquote, list marker, HR,
+			// reference definition) — the re-lex would then emit a different
+			// token shape, so disarm when the grown line starts one.
+			const lineStartHazard = FAST_LINE_START_HAZARD_RE.test(
+				this.#fastTailRowRaw.slice(this.#fastTailRowRaw.lastIndexOf("\n") + 1) + deltaTabs);
+			// A newline/CR/ANSI delta changes block/freeze semantics — only
+			// same-line deltas can splice. Marker deltas are re-lexed through
+			// the REAL inline pipeline so self-contained marker pairs render
+			// styled — exactly what a full re-lex of the grown row produces.
+			const hardDelta = /[\n\r\x1b]/.test(delta);
+			const markerDelta = FAST_DELTA_RE.test(delta);
+			// A delta starting with `_` after a row-final word char would lex
+			// as a delimiter pair in isolation but stay intraword-literal in
+			// the full text (CommonMark: intraword `_` is inert) — the styled
+			// render would diverge from the full re-lex. Same for a delta
+			// ENDING in `_` after a word char (a future frame could pair it).
+			const underscoreSeamHazard = markerDelta && (deltaTabs.startsWith("_") || deltaTabs.endsWith("_")) && /\w$/.test(this.#fastTailRowRaw);
+			const deltaTokens = markerDelta && !hardDelta ? lexInlineTokens(deltaTabs) : null;
+			if (
+				seamSafe && !lineStartHazard && !hardDelta &&
+				(!markerDelta || (!this.#lastTailOpen && !underscoreSeamHazard && !inlineHasOpen(deltaTokens!))) &&
+				(!FAST_URL_ANYWHERE_RE.test(delta) && !FAST_URL_ANYWHERE_RE.test(seamWindow))
+			) {
+				// The grown row re-renders the captured RENDERED row plus the
+				// delta through the same text paths a full re-lex applies:
+				// marker deltas render through the real inline pipeline (closed
+				// pairs style; unpaired markers were rejected above), inert
+				// deltas go through the plain swatch/entity render.
+				const { applyText } = this.#getDefaultInlineStyleContext();
+				const grown = this.#fastTailRowText + (markerDelta
+					? this.#renderInlineTokens(deltaTokens!)
+					: renderTextWithSwatches(normalizeHtmlEntitiesForTerminal(deltaTabs), applyText, this.#theme.symbols.colorSwatch || DEFAULT_COLOR_SWATCH_GLYPH));
+				const wrapped = wrapTextWithAnsi(grown, contentWidth);
+				// Rebuild the replacement rows with the same margin/background
+				// pass #renderContentLines applies.
+				const fastPaddingX = this.#ignoreTight ? this.#paddingX : getPaddingX(this.#paddingX);
+				const leftMargin = padding(fastPaddingX);
+				const rightMargin = padding(fastPaddingX);
+				const bgFn = this.#defaultTextStyle?.bgColor;
+				const fastRows: string[] = [];
+				for (const row of wrapped) {
+					const withMargins = leftMargin + row + rightMargin;
+					fastRows.push(
+						bgFn
+							? applyBackgroundToLine(withMargins, width, bgFn)
+							: withMargins + padding(Math.max(0, width - visibleWidth(withMargins))),
+					);
+				}
+				// Splice the re-wrapped row(s) onto the previous frame's rows
+				// (new array — the parent may hold the old one).
+				const prev = this.#fastTailLines;
+				const fastResult = [
+					...prev.slice(0, this.#fastTailRowStart),
+					...fastRows,
+					...prev.slice(this.#fastTailRowEnd),
+				];
+				// Refresh caches and the recipe for the NEXT frame: the prose
+				// row re-wraps in place (its last row is the new last row).
+				this.#cachedText = this.#text;
+				this.#cachedWidth = width;
+				this.#cachedLines = fastResult;
+				this.#fastTailLines = fastResult;
+				this.#fastTailSource = this.#text;
+				this.#fastTailRowRaw += deltaTabs;
+				this.#fastTailRowText = wrapped[wrapped.length - 1] ?? "";
+				this.#fastTailRowStart += wrapped.length - 1;
+				this.#fastTailRowEnd = this.#fastTailRowStart + 1;
+				return fastResult;
+			}
+			// Hazard → disarm: the next frame re-lexes (Tier 2). Stay
+			// ready=false until the next real render re-captures.
+			this.#fastTailReady = false;
+		}
 		// Replace tabs with 3 spaces for consistent rendering
 		const normalizedText = this.transientRenderCache
 			? replaceTabs(this.#text)
@@ -1701,6 +1929,24 @@ export class Markdown implements Component {
 		this.#cachedText = this.#text;
 		this.#cachedWidth = width;
 		this.#cachedLines = result;
+
+		// Record the last-row fast-path recipe (B+). Only transient streaming
+		// frames whose last content row came from a paragraph with a
+		// self-contained trailing row are eligible.
+		const fastEligible =
+			this.transientRenderCache && contentLines.length > 0 && this.#lastTailKind === "paragraph";
+		if (fastEligible) {
+			this.#fastTailReady = true;
+			this.#fastTailLines = result;
+			this.#fastTailSource = this.#text;
+			this.#fastTailWidth = contentWidth;
+			this.#fastTailRowText = this.#lastTailRowInput;
+			this.#fastTailRowRaw = this.#lastTailRowRaw;
+			this.#fastTailRowStart = signature.paddingY + contentLines.length - 1;
+			this.#fastTailRowEnd = signature.paddingY + contentLines.length;
+		} else {
+			this.#fastTailReady = false;
+		}
 
 		// Update L2 module-level LRU so future instances with the same key skip
 		// the marked.lexer + highlightCode (Rust FFI) work entirely.
@@ -1809,6 +2055,9 @@ export class Markdown implements Component {
 		contentWidth: number,
 		signature: RenderSignature,
 	): string[] {
+		// A non-capturing final call must not serve a stale recipe, so the
+		// B+ plumbing is cleared up front; the per-token capture re-fills it.
+		if (end === tokens.length) this.#lastTailKind = "";
 		const wrappedLines: RenderedLine[] = [];
 		for (let i = start; i < end; i++) {
 			const token = tokens[i];
@@ -1830,6 +2079,34 @@ export class Markdown implements Component {
 						}
 					}
 				}
+			}
+			// B+ capture hook: the LAST token of the FINAL call is the frame's
+			// true trailing content row — record its rendered last row and raw
+			// tail so render() can build the fast-path recipe. The frozen
+			// prefix call (end < tokens.length) must never capture.
+			if (end === tokens.length && i === end - 1 && token.type === "paragraph") {
+				const raw = "raw" in token && typeof token.raw === "string" ? token.raw : "";
+				const lastLine = renderedTokenLines[renderedTokenLines.length - 1];
+				// Display math, a newline-terminated paragraph (a fresh line
+				// grows next frame — the captured row is not the mutable tail),
+				// or a tree-guide/OSC-8/OSC-66 trailing row are not
+				// self-contained.
+				if (
+					soleDisplayMath(token.tokens) ||
+					raw.endsWith("\n") ||
+					!lastLine ||
+					TREE_GUIDE_ANCHOR_RE.test(lastLine.text) ||
+					lastLine.text.includes("\x1b]") ||
+					TERMINAL.isImageLine(lastLine.text) ||
+					isOsc66Line(lastLine.text)
+				) {
+					continue;
+				}
+				const wrappedLast = wrappedLines[wrappedLines.length - 1];
+				this.#lastTailKind = "paragraph";
+				this.#lastTailRowInput = wrappedLast?.text ?? lastLine.text;
+				this.#lastTailRowRaw = raw.slice(raw.lastIndexOf("\n") + 1);
+				this.#lastTailOpen = inlineHasOpen(token.tokens ?? []);
 			}
 		}
 
