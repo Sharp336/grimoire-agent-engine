@@ -6,7 +6,7 @@
 
 - 上游仓库：[`can1357/oh-my-pi`](https://github.com/can1357/oh-my-pi)。
 - 仅同步上游正式发布的 tag，不跟随、合并或采用上游 `main` 及 tag 之后的开发提交。
-- 不修改 Rust 代码、上游构建逻辑、构建脚本或官方 native packages；不自行编译、重打包或打补丁官方 native packages。
+- 不修改 Rust 代码、上游构建逻辑或构建脚本；Fork 发布所需的 native packages 统一从当前检出的 Fork 源码构建，不下载或重打包官方上游 npm 产物。
 - 不新增 Fork 专用测试文件或测试用例；验证复用上游已有测试、现有检查和必要的人工验收。
 
 ## Fork 功能差异
@@ -23,4 +23,4 @@
 
 ## Fork Release
 
-- CI 与 Fork Release 的构建任务每次运行都会自动下载上游 npm 最新发布的官方 native packages；仓库不维护其版本、提交或文件哈希信息。发布构建仅保留 Windows x64 与 Linux x64/ARM64，不构建或发布 macOS 产物。
+- Fork Release 的 native packages 全部从当前检出的 Fork 源码构建，不再从官方上游 npm 获取本地包。发布构建仅保留 Windows x64 与 Linux x64/ARM64，不构建或发布 macOS 产物。
