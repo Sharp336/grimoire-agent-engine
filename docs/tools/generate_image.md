@@ -23,6 +23,7 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
 | `changes` | `string[]` | No | Edit instructions for input images. |
 | `aspect_ratio` | `"1:1" \| "3:4" \| "4:3" \| "9:16" \| "16:9" \| "3:2" \| "2:3"` | No | Requested output aspect ratio. |
 | `image_size` | `"1024x1024" \| "1536x1024" \| "1024x1536"` | No | Requested output size where the selected provider supports it. |
+| `background` | `"transparent" \| "opaque" \| "auto"` | No | Background handling for Codex subscription images. Omission uses `auto`. |
 | `input` | `Array<{ path?: string; data?: string; mime_type?: string }>` | No | Input images by local path or inline base64 data. |
 | `provider` | `"auto" \| "openai" \| "openai-codex" \| "antigravity" \| "xai" \| "openrouter" \| "gemini"` | No | Per-request provider preference. A concrete value is tried first; `auto` or omission uses configured/session ordering. |
 
@@ -30,8 +31,8 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
 - Success with image data:
   - `content[0].type = "text"`
   - `content[0].text` summarizes provider/model and saved image paths.
-  - `details = { provider, model, imageCount, imagePaths, images, responseText?, revisedPrompt?, promptFeedback?, usage? }`
-- Provider responses with no image data return `imageCount: 0`, empty `imagePaths` / `images`, and any provider text/feedback available.
+  - `details = { provider, model, imageCount, imagePaths, images, responseText?, revisedPrompt?, promptFeedback?, usage?, background?, outputFormat?, quality?, size? }`
+- Non-Codex provider responses with no image data retain their existing `imageCount: 0` result and any available response text or feedback.
 
 ## Flow
 1. The SDK injects `generate_image` as a custom tool via `getImageGenTools()` only when the feature gate and tool filter allow it.
@@ -41,18 +42,19 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
 5. Provider-specific aspect-ratio support is checked after provider selection.
 6. Provider dispatch:
    - OpenAI: hosted Responses image-generation on an active compatible GPT Responses model.
-   - OpenAI Codex: hosted Responses image-generation on a compatible connected ChatGPT/Codex subscription model, even when the active chat model is from another provider.
+   - OpenAI Codex: standalone GPT Image 2 generations and edits through a connected ChatGPT/Codex subscription, even when the active chat model is from another provider.
    - Antigravity: Google Antigravity SSE endpoint.
    - OpenRouter: image-capable chat completion endpoint.
    - xAI: Grok Imagine generation or edit endpoint.
    - Gemini: Gemini `generateContent` with `responseModalities: ["IMAGE"]`.
-7. Inline images in a successful provider response are saved to temporary files; paths and base64/MIME image metadata are returned. A response with no image data returns a normal zero-image result rather than `isError`.
+7. Inline images in a successful provider response are saved to temporary files; paths and base64/MIME image metadata are returned. A successful Codex response without image data is an error; other provider responses with no image data retain their existing zero-image result.
 
 ## Modes / Variants
 - Text-to-image: provide `subject` and optional style/composition fields, no `input`.
 - Image edit: provide one or more `input` images plus `changes` and a subject that identifies each image role.
 - Text rendering: use `text`; the prompt instructs callers to request sharp, legible, correctly spelled short text.
 - Provider selection: set `provider` to prefer one backend for a request; fallback still follows the remaining configured/session/built-in order after credentialed HTTP failures.
+- Background selection: `background` is supported by the Codex subscription route. Other providers are skipped rather than silently dropping an explicit selection.
 
 ## Side Effects
 - Filesystem: reads local input images and writes generated output images to `omp-image-<snowflake>.<ext>` files under the OS temporary directory.
@@ -65,15 +67,19 @@ The custom tool is registered only when `generate_image.enabled=true` (default `
 - A path input must exist and have a supported content-sniffed image type. Each input object must contain `path` or `data`; `path` wins when both are present.
 - Raw base64 `data` requires `mime_type`; a data URL supplies its own MIME type.
 - Provider timeout is `3 * 60 * 1000` ms.
-- OpenAI hosted output is requested as WebP. Other response files use MIME-derived extensions (`png`, `jpg`, `gif`, or `webp`; unknown MIME types fall back to `.png`).
+- OpenAI hosted Responses output is requested as WebP. Codex subscription images use the standalone GPT Image 2 API and are saved according to their actual decoded MIME type (normally PNG).
 - Common aspect ratios are `1:1`, `3:4`, `4:3`, `9:16`, and `16:9`; only xAI also accepts `3:2` and `2:3`.
 - `image_size` accepts `1024x1024`, `1536x1024`, and `1024x1536`. On xAI these map to `1k`, `2k`, and `2k`; omission defaults to `1k`.
 - xAI edit requests accept at most 3 input images.
+- Codex subscription edits accept at most 5 input images.
 
 ## Errors
 - No usable provider credentials: `No image API credentials found...`; the message lists supported login/API-key routes.
 - Invalid input: file not found, file over 35 MiB, unsupported content-sniffed image type, missing `path`/`data`, empty image data, or raw base64 without `mime_type`.
 - OpenAI path without a compatible GPT model: `Missing active GPT model for OpenAI image generation`.
+- Codex subscription responses without image data: `Codex image request returned no image data.`
+- More than five Codex edit references: `Codex image edits accept at most 5 input images.`
+- Explicit `background` without Codex subscription credentials fails instead of falling back to a provider that would ignore it.
 - Antigravity credentials without `projectId`: `Missing projectId in antigravity credentials`.
 - More than three xAI edit references: `xAI image edits accept up to 3 reference images...`.
 - A `3:2` or `2:3` request fails if no usable xAI route is reached.

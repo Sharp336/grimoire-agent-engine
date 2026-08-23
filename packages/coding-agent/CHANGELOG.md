@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `generate_image` now uses the standalone GPT Image 2 generations and edits endpoints for Codex subscriptions, with optional `transparent`, `opaque`, or `auto` background handling.
+
 ## [18.0.3] - 2026-08-23
 
 ### Added
