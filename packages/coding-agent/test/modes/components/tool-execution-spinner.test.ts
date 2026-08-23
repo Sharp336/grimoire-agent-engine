@@ -81,6 +81,36 @@ describe("ToolExecutionComponent live preview spinners", () => {
 		}
 	});
 
+	it("ticks live bash results that show a timeout footer", () => {
+		vi.useFakeTimers();
+		const requestRender = vi.fn();
+		const requestComponentRender = vi.fn();
+		const component = new ToolExecutionComponent(
+			"bash",
+			{ command: "sleep 600", timeout: 1400 },
+			{},
+			undefined,
+			{ requestRender, requestComponentRender } as unknown as TUI,
+			process.cwd(),
+		);
+
+		try {
+			component.updateResult(
+				{
+					content: [{ type: "text", text: "waiting" }],
+					details: { timeoutSeconds: 1400, startedAtMs: Date.now() },
+				},
+				true,
+			);
+			requestRender.mockClear();
+			requestComponentRender.mockClear();
+			vi.advanceTimersByTime(500);
+			expect(requestComponentRender).toHaveBeenCalled();
+		} finally {
+			component.stopAnimation();
+		}
+	});
+
 	it("does not tick detached async bash result snapshots", () => {
 		vi.useFakeTimers();
 		const requestRender = vi.fn();
@@ -319,6 +349,125 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			const folded = component.render(80).map(row => stripVTControlCharacters(row));
 			expect(folded).toHaveLength(1);
 			expect(folded[0]).toContain("Hub · send → Main");
+		} finally {
+			component.stopAnimation();
+		}
+	});
+
+	it("ticks live bash results that use the default timeout", () => {
+		vi.useFakeTimers();
+		const requestRender = vi.fn();
+		const requestComponentRender = vi.fn();
+		const component = new ToolExecutionComponent(
+			"bash",
+			{ command: "sleep 60" },
+			{},
+			undefined,
+			{ requestRender, requestComponentRender } as unknown as TUI,
+			process.cwd(),
+		);
+
+		try {
+			component.updateResult(
+				{
+					content: [{ type: "text", text: "waiting" }],
+					details: { timeoutSeconds: 300, startedAtMs: Date.now() },
+				},
+				true,
+			);
+			requestRender.mockClear();
+			requestComponentRender.mockClear();
+			vi.advanceTimersByTime(500);
+			expect(requestComponentRender).toHaveBeenCalled();
+		} finally {
+			component.stopAnimation();
+		}
+	});
+
+	it("freezes live wall after seal on a still-partial result", () => {
+		const startedAtMs = 1_700_000_000_000;
+		const now = vi.spyOn(Date, "now").mockReturnValue(startedAtMs + 1_000);
+		const component = new ToolExecutionComponent(
+			"bash",
+			{ command: "sleep 60", timeout: 60 },
+			{},
+			undefined,
+			{ requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
+			process.cwd(),
+		);
+
+		try {
+			component.updateResult(
+				{
+					content: [{ type: "text", text: "waiting" }],
+					details: { timeoutSeconds: 60, startedAtMs },
+				},
+				true,
+			);
+			expect(stripVTControlCharacters(component.render(120).join("\n"))).toContain("Wall: 1s");
+			component.seal();
+			now.mockReturnValue(startedAtMs + 12_000);
+			const sealed = stripVTControlCharacters(component.render(120).join("\n"));
+			expect(sealed).toContain("Wall: 1s");
+			expect(sealed).not.toContain("Wall: 12s");
+		} finally {
+			component.stopAnimation();
+		}
+	});
+
+	it("shows the default eval timeout when the call omits timeout", () => {
+		const component = new ToolExecutionComponent(
+			"eval",
+			{ language: "py", code: "1" },
+			{},
+			undefined,
+			{ requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
+			process.cwd(),
+		);
+
+		try {
+			component.updateResult(
+				{
+					content: [{ type: "text", text: "" }],
+					details: {
+						language: "python",
+						languages: ["python"],
+						cells: [{ index: 0, code: "1", language: "python", output: "", status: "running" }],
+					},
+				},
+				true,
+			);
+			expect(stripVTControlCharacters(component.render(120).join("\n"))).toContain("Timeout: 30s");
+		} finally {
+			component.stopAnimation();
+		}
+	});
+
+	it("hides the eval timeout footer when timeout is 0", () => {
+		const component = new ToolExecutionComponent(
+			"eval",
+			{ language: "py", code: "1", timeout: 0 },
+			{},
+			undefined,
+			{ requestRender: vi.fn(), requestComponentRender: vi.fn() } as unknown as TUI,
+			process.cwd(),
+		);
+
+		try {
+			component.updateResult(
+				{
+					content: [{ type: "text", text: "" }],
+					details: {
+						language: "python",
+						languages: ["python"],
+						cells: [{ index: 0, code: "1", language: "python", output: "", status: "running" }],
+					},
+				},
+				true,
+			);
+			const rendered = stripVTControlCharacters(component.render(120).join("\n"));
+			expect(rendered).not.toContain("Timeout:");
+			expect(rendered).not.toContain("Wall:");
 		} finally {
 			component.stopAnimation();
 		}

@@ -37,6 +37,7 @@ import {
 	formatTitle,
 	previewWindowRows,
 	replaceTabs,
+	resolveLiveElapsedSeconds,
 	shortenPath,
 	truncateToWidth,
 	wrapBrackets,
@@ -60,6 +61,7 @@ interface EvalRenderArgs {
 	language?: string;
 	code?: string;
 	title?: string;
+	timeout?: number;
 	cells?: EvalRenderCellArg[];
 	__partialJson?: string;
 }
@@ -69,6 +71,8 @@ interface EvalRenderContext {
 	expanded?: boolean;
 	previewLines?: number;
 	timeout?: number;
+	startedAtMs?: number;
+	nowMs?: number;
 }
 
 interface EvalRenderCell {
@@ -82,6 +86,23 @@ function normalizeRenderLanguage(value: string | undefined): EvalLanguage {
 	if (value === "rb" || value === "ruby") return "ruby";
 	if (value === "jl" || value === "julia") return "julia";
 	return "python";
+}
+
+function evalTimeoutFooter(
+	renderContext: EvalRenderContext | undefined,
+	isPartial: boolean,
+	uiTheme: Theme,
+): string | undefined {
+	const timeoutSeconds = renderContext?.timeout;
+	if (typeof timeoutSeconds !== "number" || timeoutSeconds <= 0) return undefined;
+	const elapsed = resolveLiveElapsedSeconds({
+		isPartial,
+		startedAtMs: renderContext?.startedAtMs,
+		nowMs: renderContext?.nowMs,
+	});
+	const label =
+		elapsed === undefined ? `Timeout: ${timeoutSeconds}s` : `Wall: ${elapsed}s | Timeout: ${timeoutSeconds}s`;
+	return uiTheme.fg("dim", wrapBrackets(label, uiTheme));
 }
 
 function getRenderCells(args: EvalRenderArgs | undefined): EvalRenderCell[] {
@@ -576,11 +597,8 @@ export const evalToolRenderer = {
 			return labelOutputs ? [uiTheme.fg("dim", `display[${index + 1}]`), ...body] : body;
 		});
 
-		const timeoutSeconds = options.renderContext?.timeout;
-		const timeoutLine =
-			typeof timeoutSeconds === "number"
-				? uiTheme.fg("dim", wrapBrackets(`Timeout: ${timeoutSeconds}s`, uiTheme))
-				: undefined;
+		const timeoutFooter = (): string | undefined =>
+			evalTimeoutFooter(options.renderContext, options.isPartial === true, uiTheme);
 		let warningLine: string | undefined;
 		if (details?.meta?.truncation) {
 			warningLine = formatStyledTruncationWarning(details.meta, uiTheme) ?? undefined;
@@ -606,7 +624,8 @@ export const evalToolRenderer = {
 						options.renderContext?.previewLines ?? EVAL_DEFAULT_PREVIEW_LINES,
 						previewWindowRows(),
 					);
-					const key = `${expanded}|${previewLines}|${options.spinnerFrame}|${previewWindowRows()}`;
+					const timeoutLine = timeoutFooter();
+					const key = `${expanded}|${previewLines}|${options.spinnerFrame}|${previewWindowRows()}|${timeoutLine ?? ""}`;
 					if (cached && cached.key === key && cached.width === width) {
 						return cached.result;
 					}
@@ -700,7 +719,7 @@ export const evalToolRenderer = {
 		);
 
 		if (!combinedOutput && statusLines.length === 0) {
-			const lines = [timeoutLine, noticeLine, asyncLine, warningLine].filter(Boolean) as string[];
+			const lines = [timeoutFooter(), noticeLine, asyncLine, warningLine].filter(Boolean) as string[];
 			return new Text(lines.join("\n"), 0, 0);
 		}
 
@@ -708,7 +727,7 @@ export const evalToolRenderer = {
 			const lines = [
 				uiTheme.fg("dim", "Status"),
 				...statusLines,
-				timeoutLine,
+				timeoutFooter(),
 				noticeLine,
 				asyncLine,
 				warningLine,
@@ -724,7 +743,7 @@ export const evalToolRenderer = {
 			const lines = [
 				styledOutput,
 				...(statusLines.length > 0 ? [uiTheme.fg("dim", "Status"), ...statusLines] : []),
-				timeoutLine,
+				timeoutFooter(),
 				noticeLine,
 				asyncLine,
 				warningLine,
@@ -772,6 +791,7 @@ export const evalToolRenderer = {
 						outputLines.push(truncateToWidth(statusLine, width));
 					}
 				}
+				const timeoutLine = timeoutFooter();
 				if (timeoutLine) {
 					outputLines.push(truncateToWidth(timeoutLine, width));
 				}

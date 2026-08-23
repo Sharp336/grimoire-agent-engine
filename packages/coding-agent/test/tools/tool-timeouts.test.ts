@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { clampTimeout, TOOL_TIMEOUTS } from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
+import { clampTimeout, resolveDisplayTimeout, TOOL_TIMEOUTS } from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
 
 describe("clampTimeout", () => {
 	it("returns the per-tool default when no raw timeout is given", () => {
@@ -36,5 +36,28 @@ describe("clampTimeout", () => {
 		// maxTimeout under the floor cannot drive the effective timeout below
 		// the tool's own minimum (bash min = 1s).
 		expect(clampTimeout("bash", undefined, 0.1)).toBe(TOOL_TIMEOUTS.bash.min);
+	});
+});
+
+describe("resolveDisplayTimeout", () => {
+	it("uses the per-tool default when the agent omits timeout", () => {
+		expect(resolveDisplayTimeout("bash")).toBe(TOOL_TIMEOUTS.bash.default);
+		expect(resolveDisplayTimeout("eval")).toBe(TOOL_TIMEOUTS.eval.default);
+	});
+
+	it("returns undefined when timeout is explicitly disabled", () => {
+		expect(resolveDisplayTimeout("bash", 0)).toBeUndefined();
+		expect(resolveDisplayTimeout("eval", 0)).toBeUndefined();
+	});
+
+	it("clamps a finite timeout the same way execute does", () => {
+		expect(resolveDisplayTimeout("bash", 1400)).toBe(1400);
+		expect(resolveDisplayTimeout("bash", 999_999)).toBe(TOOL_TIMEOUTS.bash.max);
+		expect(resolveDisplayTimeout("eval", 0.1)).toBe(TOOL_TIMEOUTS.eval.min);
+	});
+
+	it("applies a positive global maxTimeout ceiling", () => {
+		expect(resolveDisplayTimeout("bash", undefined, 30)).toBe(30);
+		expect(resolveDisplayTimeout("eval", 120, 20)).toBe(20);
 	});
 });

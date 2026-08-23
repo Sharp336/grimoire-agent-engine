@@ -144,6 +144,19 @@ export function getDomain(url: string): string {
 
 export { formatAge, formatBytes, formatCount, formatDuration, pluralize } from "@oh-my-pi/pi-utils";
 
+/** Whole-second elapsed for a live timeout footer. Frozen `nowMs` wins so committed rows cannot drift. */
+export function resolveLiveElapsedSeconds(args: {
+	isPartial: boolean;
+	startedAtMs?: number;
+	nowMs?: number;
+	hasFinalWall?: boolean;
+}): number | undefined {
+	if (!args.isPartial || args.hasFinalWall) return undefined;
+	if (typeof args.startedAtMs !== "number" || !Number.isFinite(args.startedAtMs)) return undefined;
+	const now = typeof args.nowMs === "number" && Number.isFinite(args.nowMs) ? args.nowMs : Date.now();
+	return Math.floor(Math.max(0, now - args.startedAtMs) / 1000);
+}
+
 // =============================================================================
 // Theme Helper Utilities
 // =============================================================================
