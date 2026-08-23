@@ -287,6 +287,13 @@ describe("KeybindingsManager.create", () => {
 		expect(manager.getKeys("app.live.toggle")).toEqual(["ctrl+l"]);
 	});
 
+	it("defaults Plan mode to Shift+Tab without colliding with thinking-level cycling", () => {
+		const manager = KeybindingsManager.inMemory();
+
+		expect(manager.getKeys("app.plan.toggle")).toEqual(["shift+tab"]);
+		expect(manager.getKeys("app.thinking.cycle")).toEqual(["alt+shift+p"]);
+	});
+
 	it("keeps the Ctrl+L live toggle default when an old model remap still claims Ctrl+L", () => {
 		const manager = KeybindingsManager.inMemory({
 			"app.model.select": "ctrl+l",

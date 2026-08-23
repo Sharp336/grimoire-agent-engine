@@ -65,6 +65,7 @@ jobs:
       - name: Build both x64 targets with one shared bundle
         env:
           RELEASE_TARGETS: linux-x64,win32-x64
+          OMP_FORK_RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
         run: bun run ci:release:build-binaries
 
       - name: Verify and smoke-test Linux x64
@@ -111,6 +112,7 @@ jobs:
       - name: Build Linux ARM64 target
         env:
           RELEASE_TARGETS: linux-arm64
+          OMP_FORK_RELEASE_TAG: ${{ needs.validate.outputs.release_tag }}
         run: bun run ci:release:build-binaries
 
       - name: Verify on a real ARM64 runner

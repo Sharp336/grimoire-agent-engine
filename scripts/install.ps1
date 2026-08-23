@@ -257,23 +257,56 @@ function Install-Binary {
     }
     Write-Host "Using version: $Latest"
 
-    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+    $OutPath = Join-Path $InstallDir "omp.exe"
+    $RetireScriptLaunchers = $false
+    if (-not $env:PI_INSTALL_DIR) {
+        $ExistingCommand = Get-Command omp -ErrorAction SilentlyContinue | Select-Object -First 1
+        $ExistingPath = if ($ExistingCommand) { $ExistingCommand.Source } else { $null }
+        if ($ExistingPath -and (Test-Path $ExistingPath -PathType Leaf)) {
+            $ExistingExtension = [System.IO.Path]::GetExtension($ExistingPath)
+            if ($ExistingExtension -ieq ".exe") {
+                $OutPath = $ExistingPath
+            } else {
+                $OutPath = Join-Path ([System.IO.Path]::GetDirectoryName($ExistingPath)) "omp.exe"
+                $RetireScriptLaunchers = $true
+            }
+            Write-Host "Replacing existing omp at $ExistingPath" -ForegroundColor Cyan
+        }
+    }
+
+    $TargetDir = [System.IO.Path]::GetDirectoryName($OutPath)
+    New-Item -ItemType Directory -Force -Path $TargetDir | Out-Null
 
     # Download binary
     $BinaryUrl = "https://github.com/$Repo/releases/download/$Latest/$BinaryName"
     Write-Host "Downloading $BinaryName..."
-    $OutPath = Join-Path $InstallDir "omp.exe"
-    Invoke-WebRequest -Uri $BinaryUrl -OutFile $OutPath -TimeoutSec 900
+    $TempPath = "$OutPath.download.$([System.Guid]::NewGuid().ToString('N')).exe"
+    try {
+        Invoke-WebRequest -Uri $BinaryUrl -OutFile $TempPath -TimeoutSec 900
+        $SmokeOutput = & $TempPath --version 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            throw "The downloaded omp binary cannot start: $SmokeOutput"
+        }
+
+        Move-Item -Force $TempPath $OutPath
+        if ($RetireScriptLaunchers) {
+            foreach ($Name in @("omp", "omp.cmd", "omp.ps1", "omp.bat")) {
+                Remove-Item (Join-Path $TargetDir $Name) -Force -ErrorAction SilentlyContinue
+            }
+        }
+    } finally {
+        Remove-Item $TempPath -Force -ErrorAction SilentlyContinue
+    }
 
     Write-Host ""
     Write-Host "[OK] Installed omp to $OutPath" -ForegroundColor Green
 
     # Add to PATH if not already there
     $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    $needsRestart = $UserPath -notlike "*$InstallDir*"
+    $needsRestart = $UserPath -notlike "*$TargetDir*"
     if ($needsRestart) {
-        Write-Host "Adding $InstallDir to PATH..."
-        [Environment]::SetEnvironmentVariable("Path", "$UserPath;$InstallDir", "User")
+        Write-Host "Adding $TargetDir to PATH..."
+        [Environment]::SetEnvironmentVariable("Path", "$UserPath;$TargetDir", "User")
     }
 
     Configure-BashShell
