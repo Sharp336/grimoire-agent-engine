@@ -161,14 +161,27 @@ describe("parseAgentFields", () => {
 		expect(parseAgentFields({ name: "scout", description: "desc" })?.readSummarize).toBeUndefined();
 	});
 
-	test("lowercases and dedupes xdevPromote names", () => {
+	test("normalizes and dedupes xdevPromote names, preserving mcp__ case", () => {
+		// Builtin names fold via the canonical map; mcp__ names pass through
+		// unchanged here — uppercase folding happens only when the promote set
+		// is compiled (compileXdevPromoteSet), not in shared normalization.
 		expect(
 			parseAgentFields({
 				name: "scout",
 				description: "desc",
 				xdevPromote: ["LSP", "mcp__Context7_Resolve", "lsp"],
 			})?.xdevPromote,
-		).toEqual(["lsp", "mcp__context7_resolve"]);
+		).toEqual(["lsp", "mcp__Context7_Resolve"]);
+	});
+
+	test("keeps uppercase mcp__ tools entries from newly matching minted names", () => {
+		// Shared `tools:` allowlist semantics are untouched: a non-builtin
+		// name passes through normalizeToolNames verbatim, so an uppercase
+		// mcp__ entry cannot start matching the lowercase minted tool name.
+		expect(parseAgentFields({ name: "scout", description: "desc", tools: ["MCP__Context_Resolve"] })?.tools).toEqual([
+			"MCP__Context_Resolve",
+			"yield",
+		]);
 	});
 
 	test("parses xdevPromote from CSV string", () => {

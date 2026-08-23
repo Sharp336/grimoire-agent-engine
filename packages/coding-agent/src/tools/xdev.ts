@@ -96,11 +96,13 @@ export function isMountableUnderXdev(
  *  list or a single tool name / comma-separated string — a hand-edited scalar
  *  like `tools.xdevPromote: lsp` promotes that tool rather than being
  *  dropped; non-string values are ignored so bad config cannot break
- *  mounting. */
+ *  mounting. Minted MCP tool names are lowercase (`createMCPToolName`), so
+ *  uppercase `mcp__` candidates are folded here — and only here — leaving
+ *  shared {@link normalizeToolName} semantics untouched for other callers. */
 export function compileXdevPromoteSet(names: readonly unknown[] | string | undefined): ReadonlySet<string> | undefined {
 	const parsed = parseArrayOrCSV(names);
 	if (!parsed) return undefined;
-	return new Set(normalizeToolNames(parsed));
+	return new Set(normalizeToolNames(parsed).map(name => (/^mcp__/i.test(name) ? name.toLowerCase() : name)));
 }
 
 /** Dispatch metadata carried on write-tool details for renderer delegation. */

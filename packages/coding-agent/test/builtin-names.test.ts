@@ -8,8 +8,12 @@ describe("normalizeToolName", () => {
 		expect(normalizeToolName("CaseAdd")).toBe("CaseAdd");
 		expect(normalizeToolName("Constructor")).toBe("Constructor");
 	});
-	it("lowercases an uppercase mcp__ prefix so promotion patterns match the minted name", () => {
-		expect(normalizeToolName("MCP__Context_Resolve")).toBe("mcp__context_resolve");
+	it("leaves mcp__ names case-untouched for every caller", () => {
+		// Shared semantics: only canonical builtins/legacy aliases fold case.
+		// Uppercase mcp__ input is folded in the xdev promote path instead
+		// (compileXdevPromoteSet), so tools:/--tools/advisor matching stays
+		// byte-identical to upstream behavior.
+		expect(normalizeToolName("MCP__Context_Resolve")).toBe("MCP__Context_Resolve");
 		expect(normalizeToolName("mcp__db_query")).toBe("mcp__db_query");
 	});
 });
