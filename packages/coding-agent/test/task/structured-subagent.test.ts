@@ -38,6 +38,7 @@ function session(
 		isolationMode?: "none" | "worktree";
 		isolationApply?: boolean;
 		modelRoles?: Record<string, string>;
+		spawns?: string;
 	} = {},
 ): ToolSession {
 	return {
@@ -52,7 +53,7 @@ function session(
 			...(options.isolationApply !== undefined ? { "task.isolation.apply": options.isolationApply } : {}),
 		}),
 		getSessionFile: () => null,
-		getSessionSpawns: () => "*",
+		getSessionSpawns: () => options.spawns ?? "*",
 		getPlanModeState: () => (options.planMode ? { enabled: true } : undefined),
 	} as unknown as ToolSession;
 }
@@ -146,6 +147,58 @@ describe("structured subagent primitive", () => {
 			if (previous === undefined) delete Bun.env.PI_BLOCKED_AGENT;
 			else Bun.env.PI_BLOCKED_AGENT = previous;
 		}
+	});
+
+	it("falls back to a spawnable agent when the eval default is primary-only", async () => {
+		// Regression (codex #3754895373): eval's agent({ prompt }) path calls
+		// runStructuredSubagent directly, bypassing TaskTool.#effectiveDefaultAgent.
+		// When the parent's spawns frontmatter names a primary-only agent first,
+		// the raw policy default is unspawnable — the preflight must fall back to
+		// the first spawnable agent from the discovered roster instead of
+		// rejecting the raw default.
+		const primaryOnly = { ...AGENT, name: "primary-only", availability: "primary" as const };
+		const factFinder = { ...AGENT, name: "fact-finder" };
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [primaryOnly, factFinder],
+			projectAgentsDir: null,
+		});
+		const dispatched: executorModule.ExecutorOptions[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			dispatched.push(options);
+			return { ...result(), agent: options.agent.name };
+		});
+
+		const settled = await runStructuredSubagent(
+			request({
+				invocationKind: "eval",
+				agent: undefined,
+				session: session({ spawns: "primary-only,fact-finder" }),
+				retainArtifacts: true,
+			}),
+		);
+
+		expect(settled.policy.agentName).toBe("fact-finder");
+		expect(dispatched[0]?.agent.name).toBe("fact-finder");
+		expect(settled.result.agent).toBe("fact-finder");
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("rejects when every allowed spawn is primary-only and no fallback exists", async () => {
+		// Control for the fallback above: with no spawnable agent in the roster
+		// the raw policy default is kept and the availability preflight rejects.
+		const primaryOnly = { ...AGENT, name: "primary-only", availability: "primary" as const };
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [primaryOnly],
+			projectAgentsDir: null,
+		});
+		const dispatch = vi.spyOn(executorModule, "runSubprocess");
+
+		await expect(
+			resolveEffectiveSubagentPolicy(
+				request({ invocationKind: "eval", agent: undefined, session: session({ spawns: "primary-only" }) }),
+			),
+		).rejects.toThrow('Agent "primary-only" is primary/main-session-only and cannot be spawned as a subagent.');
+		expect(dispatch).not.toHaveBeenCalled();
 	});
 
 	it("attenuates plan-mode agents and rejects mutable isolation controls before discovery", async () => {

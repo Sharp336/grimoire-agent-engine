@@ -36,7 +36,9 @@ import { ModelRegistry } from "./config/model-registry";
 import {
 	DEFAULT_PREWALK_TARGET,
 	expandRoleAlias,
+	extractExplicitThinkingSelector,
 	getModelMatchPreferences,
+	parseModelString,
 	resolveCliModel,
 	resolveModelRoleValue,
 	resolveModelScope,
@@ -96,12 +98,22 @@ import {
 	persistForeignSession,
 } from "./session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
+import {
+	applyPersonaToSession,
+	EMPTY_PERSONA_OVERRIDES,
+	isMainSessionPersonaUsable,
+	type PersonaExplicitOverrides,
+} from "./session/persona-apply";
+import { getRestorableSessionModels } from "./session/session-context";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
 import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { shouldShowStartupSplash } from "./startup-splash";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
+import { mainSessionTools, spawnsToString } from "./task/agent-tools";
+import { discoverAgents, getAgent } from "./task/discovery";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
+import type { AgentDefinition } from "./task/types";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
 import type { LspStartupServerInfo } from "./tools";
@@ -375,7 +387,7 @@ export interface AcpSessionFactoryOptions {
 	sessionDir?: string;
 	authStorage: AuthStorage;
 	modelRegistry: ModelRegistry;
-	parsedArgs: Pick<Args, "apiKey" | "trustedExtensions" | "tools">;
+	parsedArgs: Pick<Args, "apiKey" | "trustedExtensions" | "agent" | "model" | "thinking" | "tools" | "noTools">;
 	rawArgs: string[];
 	createSession: (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
 }
@@ -432,8 +444,43 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 				`Trusted extension failed to load: ${trustedExtensions.errors.map(item => item.error).join("; ")}`,
 			);
 		}
+		// `--agent` persona: re-resolve against THIS session's cwd (an ACP host
+		// can open any workspace); if the agent is not found there, fall back to
+		// no persona rather than failing the session. Applied to the per-session
+		// options BEFORE creation so this session actually gets the persona.
+		// `buildSessionOptions` skipped the persona for ACP mode (the launch cwd
+		// is not the session cwd), so this is the single application point.
+		const sessionOptions: CreateAgentSessionOptions = { ...args.baseOptions };
+		let personaName: string | undefined;
+		if (args.parsedArgs.agent) {
+			const { agents } = await discoverAgents(cwd);
+			const agent = getAgent(agents, args.parsedArgs.agent);
+			const disabledAgents = (nextSettings.get("task.disabledAgents") as string[] | undefined) ?? [];
+			if (isMainSessionPersonaUsable(agent, disabledAgents)) {
+				// A `--model` pattern's thinking suffix counts as an explicit CLI
+				// override; `sessionOptions.thinkingLevel` alone does not, because
+				// it can be seeded from settings defaults (enabledModels scoped
+				// thinking) independently of the CLI. The suffix is read from the
+				// selector SYNTAX (not from `resolveCliModel`'s resolved model) so
+				// a pattern deferred until extensions register — a role alias
+				// resolving to an extension-provided model — still counts.
+				const modelSuffixThinking = cliModelCarriesThinkingSuffix(
+					args.parsedArgs.model,
+					nextSettings,
+					args.modelRegistry,
+				);
+				applyAgentPersonaOptions(
+					sessionOptions,
+					agent,
+					resolveExplicitPersonaOverrides(args.parsedArgs, modelSuffixThinking),
+					nextSettings,
+				);
+				personaName = args.parsedArgs.agent;
+				sessionOptions.personaName = args.parsedArgs.agent;
+			}
+		}
 		const { session: nextSession, setToolUIContext } = await args.createSession({
-			...args.baseOptions,
+			...sessionOptions,
 			cwd,
 			sessionManager: nextSessionManager,
 			settings: nextSettings,
@@ -449,7 +496,13 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			eventBus,
 			preloadedExtensions: trustedExtensions,
 		});
-		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
+		// Persist the persona identity so resume re-applies the current definition.
+		// Only when the agent actually resolved in this session's cwd — a phantom
+		// entry would emit a spurious "no longer available" warning on resume.
+		if (personaName) {
+			nextSessionManager.appendModeChange("agent", { name: personaName });
+		}
+		if (args.parsedArgs.apiKey && !sessionOptions.model && nextSession.model) {
 			args.authStorage.setRuntimeApiKey(nextSession.model.provider, args.parsedArgs.apiKey);
 		}
 		const runner = nextSession.extensionRunner;
@@ -496,6 +549,8 @@ async function runInteractiveMode(
 	joinLink?: string,
 	startBackgroundModelDiscovery?: () => Promise<void>,
 	startupLease?: ComposerLease,
+	personaName?: string,
+	explicitPersonaOverrides?: { modelSet: boolean; thinkingSet: boolean; toolsSet: boolean },
 ): Promise<void> {
 	let mode: InteractiveMode;
 	try {
@@ -544,12 +599,24 @@ async function runInteractiveMode(
 				suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash,
 				clearInitialTerminalHistory: true,
 				recentSessions: startupLease?.recentSessions,
+				personaName,
+				explicitPersonaOverrides,
 			}),
 		);
 		void startBackgroundModelDiscovery?.();
 	} catch (error) {
 		mode.stop();
 		throw error;
+	}
+
+	// Persist the persona identity AFTER init: `mode.init()` runs
+	// `#reconcileModeFromSession`, which would re-apply the agent definition
+	// and clobber explicit CLI overrides (`--model`/`--tools`/`--thinking`)
+	// if the `mode_change` entry were visible during that reconcile. Appending
+	// here records the identity for future resumes without re-triggering the
+	// startup reconcile.
+	if (personaName) {
+		session.sessionManager.appendModeChange("agent", { name: personaName });
 	}
 
 	if (setupWizard && playStartupSplash) {
@@ -1024,6 +1091,259 @@ export function applyResolvedSystemPromptInputs(
 	}
 }
 
+/**
+ * Fill session options from an agent definition's frontmatter, honoring
+ * explicit CLI precedence: agent fields fill only what the CLI didn't set.
+ * Shared by the launch path (`--agent`) and the ACP per-`session/new` factory
+ * (which re-resolves the persona against the target cwd).
+ */
+export function applyAgentPersonaOptions(
+	options: CreateAgentSessionOptions,
+	agent: AgentDefinition,
+	explicit: PersonaExplicitOverrides,
+	settings?: Settings,
+	restorableModel?: Model,
+): void {
+	if (!explicit.modelSet && agent.model) {
+		// DEFERRED persona model: `createAgentSession` resolves `modelPattern`
+		// post-extension-registration (role aliases, extension models, `:level`
+		// suffixes); a startup-selected `options.model` reads as explicit and
+		// blocks resolution, so it becomes `modelPatternFallbackModel` — the
+		// degrade-to fallback (resume: the transcript's restorable model).
+		options.modelPattern = agent.model; // agent.model is string[]; modelPattern accepts string | string[]
+		if (options.model) {
+			options.modelPatternFallbackModel = options.model;
+			options.model = undefined;
+		} else if (restorableModel) {
+			options.modelPatternFallbackModel = restorableModel;
+		}
+		// A `:level` suffix on the SELECTED pattern beats frontmatter
+		// `thinkingLevel`; the winner is only known after extensions register,
+		// so the level travels deferred via `personaThinkingLevel` and applies
+		// only when the selected pattern carries no suffix. Any-suffix here is
+		// only a ROUTING gate (it also drops settings-seeded default levels).
+		const modelPatternHasThinkingSuffix = agent.model.some(
+			pattern => extractExplicitThinkingSelector(pattern, settings) !== undefined,
+		);
+		if (!explicit.thinkingSet && modelPatternHasThinkingSuffix) {
+			options.thinkingLevel = undefined;
+			if (agent.thinkingLevel) {
+				options.personaThinkingLevel = agent.thinkingLevel;
+			}
+		} else if (!explicit.thinkingSet && agent.thinkingLevel) {
+			options.thinkingLevel = agent.thinkingLevel;
+		}
+	} else if (!explicit.thinkingSet && agent.thinkingLevel) {
+		options.thinkingLevel = agent.thinkingLevel;
+	}
+	if (!explicit.toolsSet && agent.tools) {
+		// `mainSessionTools` strips the subagent-only `yield`/`goal` tools
+		// `parseAgentFields` appends. The list is applied as the EXACT active
+		// set with `restrictToolNames` — the same restriction a subagent
+		// spawn applies — so MCP, LSP, extensions, and memory tools are not
+		// widened into the persona session. The registry is still expanded to
+		// every allowed built-in (sdk.ts `expandRegistryToAllBuiltins`, gated
+		// on `personaName`) so `restoreBaselineTools` can re-enable the
+		// non-persona builtins when agent mode is left.
+		const tools = mainSessionTools(agent.tools);
+		options.toolNames = tools;
+		options.restrictToolNames = true;
+		// A persona that EXPLICITLY requests the LSP tool must get it: the
+		// `restrictToolNames` flag above would otherwise make
+		// `createAgentSession` default `enableLsp` to false (the subagent-
+		// style LSP disablement) and `createTools` would filter `lsp` out of
+		// the active set — while a later live `/agent` switch to the same
+		// persona CAN enable it (the normal session's `enableLsp` is already
+		// true). The persona's explicit request is the main-session
+		// equivalent of a subagent's `task.enableLsp`. An explicit
+		// `--no-lsp` still wins: it is applied after this in
+		// `buildSessionOptions`, and the ACP factory copies `baseOptions`
+		// with it already set.
+		if (tools.includes("lsp") && options.enableLsp !== false) {
+			options.enableLsp = true;
+		}
+	}
+	if (agent.systemPrompt)
+		// The persona prompt lives in the MUTABLE persona channel, not the
+		// immutable launch `appendSystemPrompt`: a later `/agent B` switch
+		// replaces it instead of stacking both personas until restart. The
+		// launch append (CLI/discovered file) stays in its own channel and is
+		// concatenated by rebuildSystemPrompt.
+		options.personaAppendPrompt = agent.systemPrompt;
+	options.spawns = spawnsToString(agent.spawns);
+	// When the tool restriction came from an explicit CLI flag (`--tools`/
+	// `--no-tools`), the SDK's baseline for `restoreBaselineTools` must be the
+	// CLI tool set — leaving agent mode re-enables exactly the CLI list, not
+	// the full registry. Unset (persona-supplied tools or no tools at all)
+	// keeps the full-registry baseline.
+	options.personaCliToolOverride = explicit.toolsSet;
+}
+
+/**
+ * Compute the explicit-CLI-flag override state for a persona application,
+ * mirroring the precedence `applyAgentPersonaOptions` gives launch flags:
+ * `--model` sets modelSet, `--thinking` (or a `--model` pattern's thinking
+ * suffix) sets thinkingSet, and `--tools`/`--no-tools` sets toolsSet. A
+ * settings-seeded default (enabledModels scoped thinking, default role) must
+ * NOT count as explicit — it would suppress the persona's frontmatter.
+ * Shared by the launch path, the ACP per-session factory, and the resume
+ * reconcile (which threads the same state through init options so a
+ * persisted persona cannot clobber explicit overrides).
+ */
+export function resolveExplicitPersonaOverrides(
+	parsed: Pick<Args, "model" | "thinking" | "tools" | "noTools">,
+	modelSuffixThinking: boolean,
+): PersonaExplicitOverrides {
+	return {
+		modelSet: parsed.model !== undefined,
+		thinkingSet: parsed.thinking !== undefined || modelSuffixThinking,
+		toolsSet: Boolean(parsed.tools || parsed.noTools),
+	};
+}
+
+export type { PersonaExplicitOverrides };
+
+/**
+ * True when the CLI `--model` selector itself carries a thinking suffix
+ * (`:low`/`:high`/`:auto`/`:max`, including via a role alias like
+ * `@review:high` whose role value carries the suffix). Derived from the
+ * selector SYNTAX rather than from `resolveCliModel`'s resolved model: a
+ * pattern deferred until extensions register (a role alias resolving to an
+ * extension-provided model) has `resolved.model === undefined` pre-extension,
+ * so the resolved check would miss the suffix and let the persona's
+ * frontmatter `thinkingLevel` clobber it. The syntactic check is a superset
+ * of the resolved check — `resolveCliModel` only reports a `thinkingLevel`
+ * when the pattern (or its expanded role value) carried an explicit suffix —
+ * with one guard: a literal model id ending in a thinking-level token (e.g.
+ * `nanogpt/coding-router:high` or `nanogpt/coding-router:max` — the catalog
+ * stores these ids WITH the provider prefix) must not be misread as a
+ * suffix, so the full flat id is checked against the registry first, and
+ * the registry's literal-id lookup is passed through for the `:max`/`:auto`
+ * path.
+ */
+function cliModelCarriesThinkingSuffix(
+	cliModel: string | undefined,
+	settings: Settings,
+	modelRegistry: ModelRegistry,
+): boolean {
+	if (!cliModel) return false;
+	// A literal model id ending in a thinking-level token (e.g.
+	// `nanogpt/coding-router:high` — the catalog stores ids WITH the provider
+	// prefix) is NOT a thinking suffix. The registry's provider-index lookup
+	// cannot find these (the id includes the prefix), so check the full flat
+	// id before the syntactic suffix detection runs.
+	const slashIdx = cliModel.indexOf("/");
+	if (slashIdx > 0) {
+		const provider = cliModel.slice(0, slashIdx);
+		if (modelRegistry.find(provider, cliModel) !== undefined) return false;
+	}
+	return (
+		extractExplicitThinkingSelector(cliModel, settings, {
+			isLiteralModelId: (provider, id) =>
+				modelRegistry.find(provider, id) !== undefined ||
+				modelRegistry.find(provider, `${provider}/${id}`) !== undefined,
+		}) !== undefined
+	);
+}
+
+/**
+ * Reconcile a persisted persona (`mode_change: agent`) into a session at
+ * startup. Shared by the RPC and print branches: `InteractiveMode.init` runs
+ * the equivalent reconcile internally, so interactive mode must NOT call this.
+ *
+ * Shared core: `applyPersonaToSession` (also used by
+ * `InteractiveMode.#reconcilePersonaFromSession`). The agent is
+ * re-discovered fresh against the session manager's cwd and its CURRENT
+ * definition is applied (tools, spawns, prompt; model/thinking only when the
+ * CLI did not explicitly set them). When the agent is missing, subagent-only,
+ * or disabled the persona-owned state (spawns, prompt, baseline) is cleared so
+ * it does not leak into the resumed transcript, exactly like the interactive
+ * else-branch. The `mode_change` entry is already persisted; nothing is
+ * appended here.
+ */
+export async function reconcilePersistedPersona(
+	session: AgentSession,
+	sessionManager: SessionManager,
+	explicit: PersonaExplicitOverrides,
+): Promise<void> {
+	const context = sessionManager.buildSessionContext();
+	if (context.mode !== "agent") return;
+	const name = context.modeData?.name as string | undefined;
+	if (!name) return;
+	let agent: AgentDefinition | undefined;
+	try {
+		const { agents } = await discoverAgents(sessionManager.getCwd());
+		agent = getAgent(agents, name);
+	} catch (error) {
+		logger.warn("Failed to discover agents during persona restore", { error: String(error) });
+		return;
+	}
+	const disabledAgents = (session.settings.get("task.disabledAgents") as string[] | undefined) ?? [];
+	if (isMainSessionPersonaUsable(agent, disabledAgents)) {
+		await applyPersonaToSession(session, agent, explicit);
+	} else {
+		// The persisted persona is gone/disabled: clear the previous session's
+		// persona-owned state so it does not leak into this transcript.
+		session.setSessionSpawns(null);
+		session.setPersonaAppendPrompt(undefined);
+		await session.restoreBaselineTools();
+		session.emitNotice("warning", `Agent "${name}" is no longer available. Restored model and thinking level.`);
+	}
+}
+
+/**
+ * Resolve the explicit-CLI override state a persisted persona must honor, in
+ * the same shape `runInteractiveMode` threads into its resume reconcile.
+ * `undefined` when no explicit flag is present. A `--model` pattern's
+ * thinking suffix counts as explicit; settings-seeded defaults do not.
+ */
+export function resolvePersistedPersonaExplicitOverrides(
+	initialArgs: Pick<Args, "model" | "thinking" | "tools" | "noTools">,
+	modelRegistry: ModelRegistry,
+	settings: Settings,
+): PersonaExplicitOverrides | undefined {
+	if (
+		initialArgs.model === undefined &&
+		initialArgs.thinking === undefined &&
+		!initialArgs.tools &&
+		!initialArgs.noTools
+	) {
+		return undefined;
+	}
+	const modelSuffixThinking = cliModelCarriesThinkingSuffix(initialArgs.model, settings, modelRegistry);
+	return resolveExplicitPersonaOverrides(initialArgs, modelSuffixThinking);
+}
+
+/**
+ * Resolve the transcript's restorable model (the session's last `model_change`
+ * entries, in fallback order) against the registry, mirroring the SDK's
+ * `restoreSessionModel` pass in `createAgentSession`. Returns the first
+ * candidate that exists in the registry; auth is NOT required here — the
+ * launch path's startup-default fallback (`modelPatternFallbackModel`) is
+ * likewise not auth-filtered, and the SDK's own restore pass re-validates
+ * auth when it runs. `undefined` when the session has no restorable model or
+ * none of the saved selectors resolve.
+ */
+export function resolveRestorableSessionModel(
+	sessionManager: SessionManager | undefined,
+	modelRegistry: ModelRegistry,
+): Model | undefined {
+	if (!sessionManager) return undefined;
+	const context = sessionManager.buildSessionContext();
+	const sessionModelStrings = getRestorableSessionModels(context.models, sessionManager.getLastModelChangeRole());
+	for (const sessionModelStr of sessionModelStrings) {
+		const parsedModel = parseModelString(sessionModelStr, {
+			allowMaxSuffix: true,
+			allowAutoAlias: true,
+			isLiteralModelId: (provider, id) => modelRegistry.find(provider, id) !== undefined,
+		});
+		if (!parsedModel) continue;
+		const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
+		if (restoredModel) return restoredModel;
+	}
+	return undefined;
+}
+
 /** Builds startup session options from parsed CLI flags, scoped models, and resolved session lineage. */
 export async function buildSessionOptions(
 	parsed: Args,
@@ -1078,7 +1398,10 @@ export async function buildSessionOptions(
 			parsed.systemPrompt !== undefined ||
 			parsed.appendSystemPrompt !== undefined ||
 			parsed.tools !== undefined ||
-			parsed.noTools === true;
+			parsed.noTools === true ||
+			// A persona changes the system-prompt and tool cache shape; the
+			// inherited key must not survive a --fork/--continue with --agent.
+			parsed.agent !== undefined;
 		if (!forkCacheShapeChanged && header?.providerPromptCacheKey) {
 			options.providerPromptCacheKey = header.providerPromptCacheKey;
 			options.providerPromptCacheKeySource = "fork";
@@ -1093,6 +1416,15 @@ export async function buildSessionOptions(
 	// createAgentSession's post-extension re-resolution (issue #6694); the
 	// scoped thinking-level seed below must be deferred along with the model.
 	let deferredDefaultRole = false;
+	// True when the CLI --model pattern itself carried a thinking suffix
+	// (e.g. "provider/model:high"). Distinct from `options.thinkingLevel`,
+	// which can be seeded from settings defaults (enabledModels scoped
+	// thinking) independently of the CLI — a settings default must not count
+	// as an explicit CLI override against the agent persona's thinkingLevel.
+	// The suffix is read from the selector SYNTAX (not from the resolved
+	// model) so a pattern deferred until extensions register — a role alias
+	// resolving to an extension-provided model — still counts.
+	const modelSuffixThinking = cliModelCarriesThinkingSuffix(parsed.model, activeSettings, modelRegistry);
 	if (parsed.model) {
 		const resolved = resolveCliModel({
 			cliProvider: parsed.provider,
@@ -1270,6 +1602,51 @@ export async function buildSessionOptions(
 		options.toolNames = parsed.tools && parsed.tools.length > 0 ? parsed.tools : [];
 	} else if (parsed.tools) {
 		options.toolNames = parsed.tools;
+	}
+
+	// Agent persona from --agent. CLI flags take precedence — agent frontmatter
+	// fills only what the CLI didn't set. ACP mode skips this: the per-`session/new`
+	// factory re-resolves the persona against each session's cwd (an ACP host can
+	// open any workspace), so applying the launch-cwd resolution here would both
+	// double-apply the persona and pin it to the wrong project.
+	if (parsed.agent && parsed.mode !== "acp") {
+		const { agents } = await discoverAgents(parsed.cwd ?? getProjectDir());
+		const agent = getAgent(agents, parsed.agent);
+		if (!agent) {
+			process.stderr.write(`${chalk.red(`Unknown agent: ${parsed.agent}`)}\n`);
+			process.exit(1);
+		}
+		if (agent.availability === "subagent" || agent.availability === "unavailable") {
+			process.stderr.write(
+				`${chalk.red(`Agent "${parsed.agent}" is subagent-only and cannot be used as the main-session persona.`)}\n`,
+			);
+			process.exit(1);
+		}
+		const disabledAgents = (activeSettings.get("task.disabledAgents") as string[] | undefined) ?? [];
+		if (disabledAgents.includes(parsed.agent)) {
+			process.stderr.write(`${chalk.red(`Agent "${parsed.agent}" is disabled in settings.`)}\n`);
+			process.exit(1);
+		}
+		applyAgentPersonaOptions(
+			options,
+			agent,
+			resolveExplicitPersonaOverrides(parsed, modelSuffixThinking),
+			activeSettings,
+			// On a RESUME, startup model defaults are skipped (restoringSession),
+			// so `applyAgentPersonaOptions` cannot preserve `options.model` as
+			// the deferred persona pattern's fallback. The transcript's
+			// restorable model (the session's last `model_change`) is the
+			// resume equivalent of the launch path's startup default: it is
+			// preserved as `modelPatternFallbackModel` so an unresolvable
+			// persona model degrades to the saved model instead of leaving the
+			// resumed session with NO model (the deferred pattern suppresses
+			// the SDK's own session-model restore).
+			resolveRestorableSessionModel(sessionManager, modelRegistry),
+		);
+		// Marks the session as persona-owned: the SDK captures the baseline
+		// tool set (without the persona's `tools:` restriction) for restoration
+		// when a non-agent session switch removes the persona.
+		options.personaName = parsed.agent;
 	}
 
 	if (parsed.noLsp) {
@@ -1961,6 +2338,25 @@ export async function runRootCommand(
 				// Branch-only protocol runner: keep RPC host code out of normal interactive startup.
 				const runRpcMode: RunRpcMode = (await import("./modes/rpc/rpc-mode")).runRpcMode;
 				stopStartupWatchdog();
+				// Persist the persona identity so a later resume/fork re-applies the
+				// current definition (mirrors the interactive branch's post-init
+				// append; there is no reconcile here to clobber CLI overrides).
+				const rpcPersona = initialArgs.agent ?? parsedArgs.agent;
+				if (rpcPersona) {
+					session.sessionManager.appendModeChange("agent", { name: rpcPersona });
+				} else {
+					// Resume reconcile (the interactive branch runs this inside
+					// InteractiveMode.init): re-apply a PERSISTED persona from its
+					// current definition when the session's last mode_change is
+					// `agent`, honoring explicit CLI overrides. Skip when a fresh
+					// --agent is present — createAgentSession already applied it.
+					await reconcilePersistedPersona(
+						session,
+						session.sessionManager,
+						resolvePersistedPersonaExplicitOverrides(initialArgs, modelRegistry, settingsInstance) ??
+							EMPTY_PERSONA_OVERRIDES,
+					);
+				}
 				await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined, eventBus, rpcInput);
 			} else if (isInteractive) {
 				const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
@@ -1983,10 +2379,24 @@ export async function runRootCommand(
 						process.exit(0);
 					}
 				}
+
 				const startupLease = takeStartupComposerLease();
 				try {
 					stopStartupWatchdog();
 					logger.endTiming();
+					// Explicit CLI override state for the resume reconcile: a persisted
+					// persona (`mode_change: agent`) must not clobber the user's
+					// explicit `--model`/`--thinking`/`--tools` — `createAgentSession`
+					// already honored them. A `--model` pattern's thinking suffix counts
+					// as explicit (it came from the CLI); settings-seeded defaults do
+					// not. The launch `--agent` path short-circuits reconcile entirely
+					// (personaName), so this only matters for a persisted persona with
+					// no launch flag.
+					const explicitPersonaOverrides = resolvePersistedPersonaExplicitOverrides(
+						initialArgs,
+						modelRegistry,
+						settingsInstance,
+					);
 					await runInteractiveMode(
 						session,
 						VERSION,
@@ -2006,6 +2416,8 @@ export async function runRootCommand(
 						parsedArgs.join,
 						startBackgroundModelDiscovery,
 						startupLease,
+						initialArgs.agent ?? parsedArgs.agent,
+						explicitPersonaOverrides,
 					);
 				} finally {
 					startupLease?.dispose();
@@ -2013,6 +2425,25 @@ export async function runRootCommand(
 			} else {
 				// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
 				stopStartupWatchdog();
+				// Persist the persona identity so a later resume/fork re-applies the
+				// current definition (mirrors the interactive branch's post-init
+				// append; there is no reconcile here to clobber CLI overrides).
+				const printPersona = initialArgs.agent ?? parsedArgs.agent;
+				if (printPersona) {
+					session.sessionManager.appendModeChange("agent", { name: printPersona });
+				} else {
+					// Resume reconcile (the interactive branch runs this inside
+					// InteractiveMode.init): re-apply a PERSISTED persona from its
+					// current definition when the session's last mode_change is
+					// `agent`, honoring explicit CLI overrides. Skip when a fresh
+					// --agent is present — createAgentSession already applied it.
+					await reconcilePersistedPersona(
+						session,
+						session.sessionManager,
+						resolvePersistedPersonaExplicitOverrides(initialArgs, modelRegistry, settingsInstance) ??
+							EMPTY_PERSONA_OVERRIDES,
+					);
+				}
 				const runPrintMode: RunPrintMode = (await import("./modes/print-mode")).runPrintMode;
 				await runPrintMode(session, {
 					mode,

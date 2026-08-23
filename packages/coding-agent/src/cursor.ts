@@ -66,6 +66,21 @@ interface CursorExecBridgeOptions {
 	/** Resolves execution overrides (mounted-device permission wrappers) before the canonical map. */
 	getExecutableTool?: (name: string) => AgentTool | undefined;
 	/**
+	 * Whether the bridge may execute a tool resolved from {@link tools} or
+	 * {@link getExecutableTool}.
+	 *
+	 * The primary session's registry is widened to every allowed built-in for
+	 * persona baseline capture (`expandRegistryToAllBuiltins`), so registry
+	 * presence no longer proves a grant: a read-only persona's `tools: [read]`
+	 * still leaves `bash`/`write` registered, and Cursor native frames like
+	 * `pi_bash`/`pi_write` arrive regardless of the advertised catalog. The
+	 * caller supplies the live enabled set (active top-level ∪ xd://-mounted);
+	 * a baseline-only tool is rejected. Overrides (`getEditReplaceTool`,
+	 * `createGrepTool`) carry their own construction-time grants and are not
+	 * re-checked here. Omit for callers whose map IS their grant (advisors).
+	 */
+	isToolGranted?: (name: string) => boolean;
+	/**
 	 * The `replace`-mode `edit` instance `pi_edit` must run, when the session
 	 * granted `edit` at all.
 	 *
@@ -88,15 +103,16 @@ interface CursorExecBridgeOptions {
 	 *
 	 * This is a grant, not a policy: it answers "did the session hand this
 	 * channel a file-writing tool", which callers derive from their own roster
-	 * before any bridge-specific rewriting. The primary Cursor session moves
-	 * `edit` out of {@link tools} and serves it through
-	 * {@link getEditReplaceTool}, so reading the map here would deny an
-	 * edit-only session. Defaults to allowed
-	 * to preserve the primary agent's behavior; callers with a restricted tool
-	 * set (advisors) opt out. The user's approval policy is resolved separately,
-	 * per call.
+	 * before any bridge-specific rewriting. Defaults to allowed to preserve the
+	 * primary agent's behavior; callers with a restricted tool set (advisors)
+	 * opt out. The user's approval policy is resolved separately, per call.
+	 *
+	 * A function form is evaluated at FRAME time, so a live grant (the primary
+	 * session's active tool set) revokes the mutation permission the moment a
+	 * `/agent` switch drops write/edit — a launch-time capture would stay true
+	 * for the rest of the session (codex #3761853483).
 	 */
-	allowDirectFileMutation?: boolean;
+	allowDirectFileMutation?: boolean | (() => boolean);
 	/**
 	 * Mirror Cursor's server-owned todo list into local session state. Cursor
 	 * resolves `update_todos` / `read_todos` remotely, so without this bridge
@@ -121,6 +137,14 @@ interface CursorExecBridgeOptions {
 	 * approval wrapper MUST apply the same wrapper here, or a frame supplying
 	 * either field silently escapes the approval gate that every other call
 	 * goes through.
+	 *
+	 * The factory is invoked at FRAME time, so it MUST re-check the live grant
+	 * and return `undefined` when `grep` is no longer granted: `executeTool`
+	 * prefers the override over the registry and skips the `isToolGranted`
+	 * re-check for a present override, so a construction-time capture would let
+	 * a `/agent` switch that dropped `grep` keep searching through scoped
+	 * frames (codex #3762233481). `undefined` falls through to the registry,
+	 * where the live grant gate applies.
 	 */
 	createGrepTool?(options: { context?: number; totalMatchLimit?: number }): CursorBridgeTool | undefined;
 	/**
@@ -236,7 +260,21 @@ async function executeTool(
 	overrideTool?: CursorBridgeTool,
 ): Promise<ToolResultMessage> {
 	const tool = overrideTool ?? options.getExecutableTool?.(toolName) ?? options.tools.get(toolName);
-	if (!tool) {
+	// The primary session's registry is widened to every allowed built-in for
+	// persona baseline capture, so registry presence no longer proves the
+	// session granted the tool. When the caller supplies the live enabled set,
+	// a baseline-only tool (registered but not active) is rejected exactly
+	// like an unknown one — Cursor native frames arrive regardless of the
+	// advertised catalog, so this is the only gate standing between a
+	// read-only persona and a `pi_bash`/`pi_write` frame.
+	//
+	// Overrides carry their own construction-time grants (see
+	// {@link CursorExecBridgeOptions.isToolGranted}), so a present override
+	// skips the active-set re-check: on a Cursor session hashline `edit` stays
+	// advertised, but `pi_edit` must still run the replace-mode instance the
+	// session granted at launch (the registry instance follows the session's
+	// configured mode, whose schema rejects `PiEditExecArgs`).
+	if (!tool || (options.isToolGranted && !overrideTool && !options.isToolGranted(toolName))) {
 		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
 		return createToolResultMessage(toolCallId, toolName, result, true);
 	}
@@ -318,7 +356,14 @@ function refuseByWritePolicy(options: CursorExecBridgeOptions, toolName: string,
 async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, toolCallId: string) {
 	const toolName = "delete";
 
-	if (options.allowDirectFileMutation === false) {
+	// The grant may be a live function (the primary session's active tool set):
+	// evaluate it at frame time so a `/agent` switch to a read-only persona
+	// revokes the mutation permission immediately (codex #3761853483).
+	const canMutateFiles =
+		typeof options.allowDirectFileMutation === "function"
+			? options.allowDirectFileMutation()
+			: options.allowDirectFileMutation !== false;
+	if (!canMutateFiles) {
 		const result = buildToolErrorResult(`Tool "${toolName}" not available`);
 		return createToolResultMessage(toolCallId, toolName, result, true);
 	}
@@ -509,7 +554,10 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		const toolCallId = decodeToolCallId(args.toolCallId);
 		const toolName = "bash";
 		const tool = this.options.tools.get(toolName);
-		if (!tool) {
+		// Same active-grant gate as `executeTool`: the primary session's
+		// registry holds baseline-only built-ins for persona restore, so a
+		// `shell_stream` frame must not reach a `bash` the persona never granted.
+		if (!tool || (this.options.isToolGranted && !this.options.isToolGranted(toolName))) {
 			const result = buildToolErrorResult(`Tool "${toolName}" not available`);
 			return createToolResultMessage(toolCallId, toolName, result, true);
 		}
@@ -784,7 +832,14 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 		downloadPath?: string;
 	}): Promise<CursorMcpResourceContent | null> {
 		if (downloadPath) {
-			if (this.options.allowDirectFileMutation === false) {
+			// Same live grant as the native `delete` frame: a function form is
+			// evaluated at frame time so a `/agent` switch to a read-only persona
+			// revokes the download permission immediately (codex #3761853483).
+			const canMutateFiles =
+				typeof this.options.allowDirectFileMutation === "function"
+					? this.options.allowDirectFileMutation()
+					: this.options.allowDirectFileMutation !== false;
+			if (!canMutateFiles) {
 				throw new Error('Tool "write" not available: this session cannot download resources to disk.');
 			}
 			const refusal = refuseByWritePolicy(this.options, "write", downloadPath);

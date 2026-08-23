@@ -28,7 +28,12 @@ import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/hub";
 import { formatBytes, formatDuration } from "../tools/render-utils";
 import { isReadOnlyAgent } from "./read-only-policy";
-import { isScoutSpawnable, resolveSpawnPolicy } from "./spawn-policy";
+import {
+	DEFAULT_SPAWN_AGENT,
+	isScoutSpawnable,
+	resolveEffectiveDefaultAgent,
+	resolveSpawnPolicy,
+} from "./spawn-policy";
 import {
 	type AgentDefinition,
 	type AgentProgress,
@@ -152,6 +157,12 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		options.disabledAgents.length > 0
 			? options.agents.filter(agent => !options.disabledAgents.includes(agent.name))
 			: options.agents;
+	// Primary-only and unavailable agents cannot be spawned as subagents
+	// (structured-subagent preflight rejects them); never advertise them as
+	// spawnable in the task tool surface.
+	filteredAgents = filteredAgents.filter(
+		agent => agent.availability !== "primary" && agent.availability !== "unavailable",
+	);
 	if (spawningDisabled) {
 		filteredAgents = [];
 	} else if (spawnPolicy.allowedAgents !== null) {
@@ -165,11 +176,16 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		blocking: agent.blocking === true,
 	}));
 	const scoutAvailable = isScoutSpawnable(options.disabledAgents, options.parentSpawns);
+	// The raw policy default comes from the parent's `spawns` frontmatter and
+	// may name an agent that cannot actually be spawned (primary/unavailable,
+	// disabled, or filtered out above). Derive the advertised default from the
+	// spawnable roster so the prompt never points at an unspawnable agent.
+	const effectiveDefaultAgent = resolveEffectiveDefaultAgent(spawnPolicy, filteredAgents, options.disabledAgents);
 	return prompt.render(taskDescriptionTemplate, {
 		agents: renderedAgents,
 		scoutAvailable,
-		spawningDisabled,
-		defaultAgent: spawnPolicy.defaultAgent,
+		spawningDisabled: spawningDisabled || effectiveDefaultAgent === undefined,
+		defaultAgent: effectiveDefaultAgent,
 		isolationEnabled: options.isolationEnabled,
 		applyIsolatedChanges: options.applyIsolatedChanges,
 		batchEnabled: options.batchEnabled,
@@ -517,7 +533,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 		const tasks: unknown[] = Array.isArray(params.tasks) ? params.tasks : [];
 		if (tasks.length > 0) {
-			const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
+			const defaultAgent = this.#effectiveDefaultAgent();
 			const effectiveAgent = (item: unknown): string => {
 				if (item && typeof item === "object" && "agent" in item) {
 					const agent = item.agent;
@@ -583,7 +599,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	get parameters(): TaskToolSchemaInstance {
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationEnabled = !planMode && this.session.settings.get("task.isolation.mode") !== "none";
-		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
+		const defaultAgent = this.#effectiveDefaultAgent();
 		return getTaskSchema({
 			isolationEnabled,
 			batchEnabled: this.#isBatchEnabled(),
@@ -623,6 +639,27 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 	#isBatchEnabled(): boolean {
 		return this.session.settings.get("task.batch");
+	}
+
+	/**
+	 * The agent a spawn defaults to when the caller omits `agent`, derived
+	 * from SPAWNABLE agents only. The raw spawn-policy default comes from the
+	 * parent's `spawns` frontmatter and may name an agent that cannot actually
+	 * be spawned (primary/unavailable, disabled, or not in the allowed list) —
+	 * the schema and execute path must never fill that unspawnable default, or
+	 * every omitted-agent call fails preflight. When the roster is empty
+	 * (e.g. a test mock with no agents) the policy's stated default is kept so
+	 * the preflight surfaces the real error; when agents ARE known but none
+	 * are spawnable, the generic worker is used instead of an unspawnable
+	 * default.
+	 */
+	#effectiveDefaultAgent(): string {
+		const spawnPolicy = resolveSpawnPolicy(this.session.getSessionSpawns());
+		const agents = discoverySnapshots.get(path.resolve(this.session.cwd)) ?? this.#discoveredAgents;
+		const disabledAgents = this.session.settings.get("task.disabledAgents") as string[];
+		const effective = resolveEffectiveDefaultAgent(spawnPolicy, agents, disabledAgents);
+		if (effective !== undefined) return effective;
+		return agents.length === 0 ? spawnPolicy.defaultAgent : DEFAULT_SPAWN_AGENT;
 	}
 
 	#getSpawnSemaphore(): Semaphore {
@@ -681,7 +718,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// Schema defaults fill `agent` for model calls, but internal callers
 		// and stale transcripts can bypass arktype. `spawnParamsFor` resolves each
 		// item's agent type against the session's actual default agent.
-		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
+		const defaultAgent = this.#effectiveDefaultAgent();
 		const batchEnabled = this.#isBatchEnabled();
 		const validationError = validateShapeParams(batchEnabled, params) ?? validateSpawnParams(params, batchEnabled);
 		if (validationError) {

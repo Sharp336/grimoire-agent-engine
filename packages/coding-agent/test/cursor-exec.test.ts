@@ -34,6 +34,7 @@ import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/ex
 import { BUILTIN_TOOLS, GrepTool, ReadTool, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import type { TruncationMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { AdviseTool } from "../src/advisor/advise-tool";
 
@@ -357,6 +358,54 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 
 		expect(result.isError).toBeFalsy();
 		expect(await Bun.file(target).text()).toBe("alpha\ngamma\n");
+	});
+
+	it("runs a pi_edit override even when the active-set grant excludes `edit`", async () => {
+		// The exact Cursor-session state behind the P1: `edit` is deleted from
+		// the registry (sdk.ts) so `initialToolNames` never includes it and the
+		// active set lacks it — `isToolGranted("edit")` is false — while the
+		// launch-requested grant (`editWasGranted`) still makes
+		// `getEditReplaceTool` return a valid replace-mode instance. The
+		// override carries its own construction-time grant, so the active-set
+		// re-check must not reject the frame.
+		const target = path.join(cwd, "sample.txt");
+		await Bun.write(target, "alpha\nbeta\n");
+		const editTool = createBridgeEditTool(createTestSession(cwd), passthroughRunner());
+
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>(),
+			getEditReplaceTool: () => editTool,
+			isToolGranted: name => name !== "edit",
+		});
+		const result = await handlers.piEdit({
+			toolCallId: "e7",
+			args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
+		} as never);
+
+		expect(result.isError).toBeFalsy();
+		expect(await Bun.file(target).text()).toBe("alpha\ngamma\n");
+	});
+
+	it("still rejects a pi_edit frame with no override when the active-set grant excludes `edit`", async () => {
+		// Control for the override exemption: without `getEditReplaceTool` there
+		// is no tool at all, so the frame fails exactly as before — the grant
+		// check is skipped only for a PRESENT override, never for an absent one.
+		const target = path.join(cwd, "sample.txt");
+		await Bun.write(target, "alpha\nbeta\n");
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>(),
+			isToolGranted: name => name !== "edit",
+		});
+		const result = await handlers.piEdit({
+			toolCallId: "e8",
+			args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
+		} as never);
+
+		expect(result.isError).toBe(true);
+		expect(result.content.map(c => (c.type === "text" ? c.text : "")).join("")).toContain("not available");
+		expect(await Bun.file(target).text()).toBe("alpha\nbeta\n");
 	});
 
 	it("reports the failure instead of editing when no edit tool is reachable", async () => {
@@ -1923,5 +1972,331 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		await handlers.piLs({ toolCallId: "c1", args: { path: "" } } as never);
 
 		expect(calls[0]).toEqual({ path: "." });
+	});
+});
+
+describe("CursorExecHandlers active-grant gating", () => {
+	let cwd: string;
+
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-active-grant-"));
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(cwd);
+	});
+
+	/**
+	 * The registry a persona session actually holds: `expandRegistryToAllBuiltins`
+	 * registers every allowed built-in for baseline capture while the ACTIVE set
+	 * stays restricted to the persona's `tools:` list. The bridge must gate on
+	 * the active set, not registry presence.
+	 */
+	function personaRegistry(): Map<string, Tool> {
+		const session = createTestSession(cwd, { enableLsp: false });
+		return new Map<string, Tool>([
+			["read", new ReadTool(session)],
+			["bash", new BashTool(session)],
+			["write", new WriteTool(session)],
+		]);
+	}
+
+	it("rejects pi_bash/pi_write frames for baseline-only tools outside the active set", async () => {
+		// A read-only persona (`tools: [read]`): only `read` is in the active
+		// grant, while `bash`/`write` remain registered for
+		// `restoreBaselineTools`. Cursor native frames arrive regardless of the
+		// advertised catalog, so the bridge must refuse them.
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: personaRegistry(),
+			isToolGranted: name => name === "read",
+		});
+
+		const bashResult = await handlers.piBash({
+			toolCallId: "g1",
+			args: { command: "echo hi" },
+		} as never);
+		expect(bashResult.isError).toBe(true);
+		expect(bashResult.content.map(c => (c.type === "text" ? c.text : "")).join("")).toContain("not available");
+
+		const target = path.join(cwd, "leak.txt");
+		const writeResult = await handlers.piWrite({
+			toolCallId: "g2",
+			args: { path: target, content: "must not land" },
+		} as never);
+		expect(writeResult.isError).toBe(true);
+		expect(writeResult.content.map(c => (c.type === "text" ? c.text : "")).join("")).toContain("not available");
+		expect(await Bun.file(target).exists()).toBe(false);
+	});
+
+	it("executes a pi_read frame for a tool inside the active set", async () => {
+		const target = path.join(cwd, "granted.txt");
+		await Bun.write(target, "granted content\n");
+
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: personaRegistry(),
+			isToolGranted: name => name === "read",
+		});
+
+		const result = await handlers.piRead({
+			toolCallId: "g3",
+			args: { path: target },
+		} as never);
+
+		expect(result.isError).toBeFalsy();
+		expect(result.content.map(c => (c.type === "text" ? c.text : "")).join("")).toContain("granted content");
+	});
+
+	it("leaves an unrestricted session's bridge behavior unchanged", async () => {
+		// No `isToolGranted`: the caller's map IS the grant (the normal
+		// unrestricted session activates every allowed built-in), so every
+		// registered tool stays executable exactly as before.
+		const handlers = new CursorExecHandlers({ cwd, tools: personaRegistry() });
+
+		const bashResult = await handlers.piBash({
+			toolCallId: "g4",
+			args: { command: "echo hi" },
+		} as never);
+		expect(bashResult.isError).toBeFalsy();
+
+		const target = path.join(cwd, "written.txt");
+		const writeResult = await handlers.piWrite({
+			toolCallId: "g5",
+			args: { path: target, content: "written" },
+		} as never);
+		expect(writeResult.isError).toBeFalsy();
+		expect(await Bun.file(target).text()).toBe("written");
+
+		const readResult = await handlers.piRead({
+			toolCallId: "g6",
+			args: { path: target },
+		} as never);
+		expect(readResult.isError).toBeFalsy();
+		expect(readResult.content.map(c => (c.type === "text" ? c.text : "")).join("")).toContain("written");
+	});
+
+	it("rejects a scoped pi_grep after the live grant drops grep (codex #3762233481)", async () => {
+		// The bridge is built ONCE at session creation, so the grep override
+		// factory is fixed at construction. A `/agent` switch that drops grep
+		// must still revoke scoped frames (`context`/`limit`), which executeTool
+		// prefers over the registry and does not re-check against the live
+		// grant — the factory itself must consult the live grant at frame time
+		// and return undefined, falling through to the registry where
+		// `isToolGranted` rejects.
+		await Bun.write(path.join(cwd, "hit.txt"), "needle\n");
+		const session = createTestSession(cwd);
+		const factory = createBridgeGrepFactory(session, passthroughRunner());
+		let grepGranted = true;
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>(),
+			// The live grant the sdk.ts bridge passes: active set ∪ xd://-mounted.
+			isToolGranted: name => name === "grep" && grepGranted,
+			// The live gate the sdk.ts bridge passes: undefined when grep is not
+			// in the active set, so executeTool falls through to the registry.
+			createGrepTool: options => (grepGranted ? factory(options) : undefined),
+		});
+
+		// Control 1: grep active at launch -> the scoped frame executes.
+		const before = await handlers.piGrep({
+			toolCallId: "g7",
+			args: { pattern: "needle", path: cwd, context: 1, limit: 5 },
+		} as never);
+		expect(before.isError).toBeFalsy();
+		expect((before.details as { matchCount?: number } | undefined)?.matchCount).toBe(1);
+
+		// The fix: a persona switch drops grep from the active set. The scoped
+		// frame must be REJECTED, not executed through the construction-time
+		// override.
+		grepGranted = false;
+		const after = await handlers.piGrep({
+			toolCallId: "g8",
+			args: { pattern: "needle", path: cwd, context: 1, limit: 5 },
+		} as never);
+		expect(after.isError).toBe(true);
+		expect(after.content.map(c => (c.type === "text" ? c.text : "")).join("")).toContain("not available");
+
+		// Control 2: switching back to a persona with grep re-allows the frame.
+		grepGranted = true;
+		const back = await handlers.piGrep({
+			toolCallId: "g9",
+			args: { pattern: "needle", path: cwd, context: 1, limit: 5 },
+		} as never);
+		expect(back.isError).toBeFalsy();
+		expect((back.details as { matchCount?: number } | undefined)?.matchCount).toBe(1);
+	});
+});
+
+// Regression for codex #3761853483 (wave-22 P1): `cursorCanMutateFiles` was
+// computed at launch time and stayed true after a `/agent` switch to a
+// read-only persona, so the Cursor `delete` frame and MCP `downloadPath` could
+// still mutate workspace files. The primary bridge now passes a LIVE function
+// over the session's active tool set (the same set `isToolGranted` reads), so
+// the permission follows the persona switch in both directions.
+describe("CursorExecHandlers live file-mutation grant (codex #3761853483)", () => {
+	let cwd: string;
+
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-live-grant-"));
+	});
+
+	afterEach(async () => {
+		await removeWithRetries(cwd);
+	});
+
+	// The registry a persona session actually holds: `expandRegistryToAllBuiltins`
+	// registers every allowed built-in for baseline capture while the ACTIVE set
+	// stays restricted to the persona's `tools:` list.
+	function personaRegistry(): Map<string, Tool> {
+		const session = createTestSession(cwd, { enableLsp: false });
+		return new Map<string, Tool>([
+			["read", new ReadTool(session)],
+			["bash", new BashTool(session)],
+			["write", new WriteTool(session)],
+		]);
+	}
+
+	it("denies native delete after the active set drops write, and re-allows it after write returns", async () => {
+		// The active set is the LIVE source the primary bridge's
+		// `allowDirectFileMutation` function reads. Start with write/edit
+		// active (`edit` is a mutating tool too, but `write` is the
+		// discriminator a write-only grant has), switch to a read-only
+		// persona (`tools: [read]`), then switch back.
+		const active = new Set<string>(["read", "write"]);
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: personaRegistry(),
+			allowDirectFileMutation: () => active.has("write"),
+		});
+
+		// Control 1: write active -> the delete executes.
+		const firstTarget = path.join(cwd, "first.txt");
+		await Bun.write(firstTarget, "remove me");
+		const before = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "live-1", path: firstTarget }));
+		expect(before.isError).toBe(false);
+		expect(await Bun.file(firstTarget).exists()).toBe(false);
+
+		// The fix: `/agent` switches to a read-only persona (`tools: [read]`),
+		// dropping write from the active set. The delete must be REJECTED and
+		// the file preserved.
+		active.clear();
+		active.add("read");
+		const secondTarget = path.join(cwd, "second.txt");
+		await Bun.write(secondTarget, "keep me");
+		const after = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "live-2", path: secondTarget }));
+		expect(after.isError).toBe(true);
+		expect(after.content).toEqual([{ type: "text", text: 'Tool "delete" not available' }]);
+		expect(await Bun.file(secondTarget).exists()).toBe(true);
+
+		// Control 2: switching back to a persona with write re-allows the delete.
+		active.add("write");
+		const thirdTarget = path.join(cwd, "third.txt");
+		await Bun.write(thirdTarget, "remove me again");
+		const back = await handlers.delete(create(DeleteArgsSchema, { toolCallId: "live-3", path: thirdTarget }));
+		expect(back.isError).toBe(false);
+		expect(await Bun.file(thirdTarget).exists()).toBe(false);
+	});
+
+	it("contrasts the pre-fix live function (denies edit-only) with the editWasGranted floor (grants)", async () => {
+		// Wave-22 P2: the live `cursorCanMutateFiles` reads the active set, but
+		// a session that granted `edit` (not `write`) and later loses `edit`
+		// from the active set (a persona switch) would lose the native
+		// delete/download grant below what it was given at launch. This
+		// harness simulates both sides of the fix: the PRE-FIX live function
+		// (no `editWasGranted` floor) denies the native delete for that
+		// session, while the FIXED function shape (ORing the launch-time
+		// `editWasGranted` floor) grants it. The end-to-end proof that the
+		// real sdk.ts path behaves this way lives in
+		// sdk-tool-activation.test.ts ("keeps the Cursor delete grant for a
+		// session that granted edit but not write").
+		// The active set a `tools: [edit]` session has after a persona switch
+		// dropped `edit`: only `read` (and the other launch-requested names)
+		// are active.
+		const active = new Set<string>(["read"]);
+		const editWasGranted = true;
+		// The pre-fix live function: write/edit in the active set, no
+		// launch-grant floor.
+		const preFix = (): boolean => active.has("write") || active.has("edit");
+		// The fixed function shape from sdk.ts: the launch-time `editWasGranted`
+		// floor ORed into the live set.
+		const fixed = (): boolean => editWasGranted || active.has("write") || active.has("edit");
+
+		// Pre-fix: the edit-only session's live set denies the delete.
+		const preFixHandlers = new CursorExecHandlers({
+			cwd,
+			tools: personaRegistry(),
+			allowDirectFileMutation: preFix,
+		});
+		const preFixTarget = path.join(cwd, "pre-fix.txt");
+		await Bun.write(preFixTarget, "keep me");
+		const denied = await preFixHandlers.delete(
+			create(DeleteArgsSchema, { toolCallId: "live-edit-only-1", path: preFixTarget }),
+		);
+		expect(denied.isError).toBe(true);
+		expect(denied.content).toEqual([{ type: "text", text: 'Tool "delete" not available' }]);
+		expect(await Bun.file(preFixTarget).exists()).toBe(true);
+
+		// Fixed: the same edit-only session keeps the grant via the floor.
+		const fixedHandlers = new CursorExecHandlers({
+			cwd,
+			tools: personaRegistry(),
+			allowDirectFileMutation: fixed,
+		});
+		const fixedTarget = path.join(cwd, "fixed.txt");
+		await Bun.write(fixedTarget, "remove me");
+		const granted = await fixedHandlers.delete(
+			create(DeleteArgsSchema, { toolCallId: "live-edit-only-2", path: fixedTarget }),
+		);
+		expect(granted.isError).toBe(false);
+		expect(await Bun.file(fixedTarget).exists()).toBe(false);
+	});
+
+	it("denies an MCP downloadPath after the active set drops write, and re-allows it after write returns", async () => {
+		// The `read_mcp_resource` download gate reads the SAME live source as
+		// the native `delete` frame, so a read-only persona cannot write
+		// workspace files through it either.
+		const active = new Set<string>(["read", "write"]);
+		const mcpResources = {
+			serverNames: () => ["files"],
+			getServerResources: async () => undefined,
+			readServerResource: async (_name: string, uri: string) => ({
+				contents: [{ uri, text: "payload" }],
+			}),
+		};
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: personaRegistry(),
+			allowDirectFileMutation: () => active.has("write"),
+			mcpResources,
+		});
+
+		// Control 1: write active -> the download lands on disk.
+		const before = await handlers.readMcpResource({
+			server: "files",
+			uri: "files://x",
+			downloadPath: "before.txt",
+		});
+		expect(before?.downloadPath).toBe("before.txt");
+		expect(await Bun.file(path.join(cwd, "before.txt")).text()).toBe("payload");
+
+		// The fix: read-only persona -> the download is refused and nothing is
+		// written.
+		active.clear();
+		active.add("read");
+		await expect(
+			handlers.readMcpResource({ server: "files", uri: "files://x", downloadPath: "after.txt" }),
+		).rejects.toThrow(/not available/);
+		expect(await Bun.file(path.join(cwd, "after.txt")).exists()).toBe(false);
+
+		// Control 2: write restored -> the download lands again.
+		active.add("write");
+		const back = await handlers.readMcpResource({
+			server: "files",
+			uri: "files://x",
+			downloadPath: "back.txt",
+		});
+		expect(back?.downloadPath).toBe("back.txt");
+		expect(await Bun.file(path.join(cwd, "back.txt")).text()).toBe("payload");
 	});
 });

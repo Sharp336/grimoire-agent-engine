@@ -209,14 +209,17 @@ import {
 	GrepTool,
 	getSearchTools,
 	HIDDEN_TOOLS,
+	isBuiltinToolAllowed,
 	isMountableUnderXdev,
 	type LspStartupServerInfo,
 	listXdevTools,
 	ReadTool,
 	releaseComputerSessionsForOwner,
+	resolveEvalAllowance,
 	resolveMountedXdevExecutable,
 	supportsExternalThinking,
 	type Tool,
+	type ToolFactory,
 	type ToolSession,
 	WebSearchTool,
 	WriteTool,
@@ -224,7 +227,7 @@ import {
 	xdevDocsAll,
 	xdevEntries,
 } from "./tools";
-import { isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
+import { type BuiltinToolName, isMCPToolName, normalizeToolNames } from "./tools/builtin-names";
 import { ToolContextStore } from "./tools/context";
 import { isIrcEnabled } from "./tools/hub";
 import { getImageGenTools } from "./tools/image-gen";
@@ -387,6 +390,11 @@ export interface CreateAgentSessionOptions {
 	/** Raw model pattern(s) (e.g. from --model CLI flag) to resolve after extensions load.
 	 * Used when model lookup is deferred because extension-provided models aren't registered yet. */
 	modelPattern?: string | string[];
+	/** Fallback model when a deferred persona `modelPattern` fails to resolve: the
+	 * startup-selected default the persona replaced (`applyAgentPersonaOptions`
+	 * preserves it here when it clears `model`). Mirrors the subagent path, which
+	 * falls back to the parent model when an agent's model is unresolvable. */
+	modelPatternFallbackModel?: Model;
 	/** Authenticated fallback selector for deferred subagent model patterns. */
 	modelPatternAuthFallback?: string;
 	/** Role name used to install retry fallbacks after deferred subagent patterns resolve. */
@@ -395,6 +403,20 @@ export interface CreateAgentSessionOptions {
 	modelPatternDefaultFallbackChain?: string[];
 	/** Thinking selector. Default: from settings, else unset */
 	thinkingLevel?: ConfiguredThinkingLevel;
+	/**
+	 * The persona's frontmatter `thinkingLevel`, threaded through deferred
+	 * model resolution. `applyAgentPersonaOptions` sets it when the persona's
+	 * model pattern may carry a `:level` suffix: only the ACTUALLY SELECTED
+	 * pattern's suffix wins over this level, and the selection is only known
+	 * after extensions register, so the level is applied here — when the
+	 * resolved deferred pattern has no explicit suffix — instead of being
+	 * dropped up front. Mirrors the immediate path where the frontmatter
+	 * level is set directly on `options.thinkingLevel`: it wins over the
+	 * restored/persisted session thinking on resume (an explicit launch
+	 * persona beats the transcript's saved level) and over settings-seeded
+	 * defaults.
+	 */
+	personaThinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); retry-fallback recovery re-clamps to it. */
 	thinkingLevelCeiling?: Effort;
 	/** OpenAI service-tier override for this session. `null` omits `service_tier`. */
@@ -513,6 +535,30 @@ export interface CreateAgentSessionOptions {
 	toolNames?: string[];
 	/** Limit the session to explicitly supplied tool names, without discovered extras. */
 	restrictToolNames?: boolean;
+	/**
+	 * Live persona system-prompt append (mutable channel). Seeded by the launch
+	 * `--agent` path so a later `/agent` switch REPLACES the launch persona's
+	 * prompt instead of stacking both (the launch `appendSystemPrompt` channel
+	 * is immutable for the session lifetime).
+	 */
+	personaAppendPrompt?: string;
+	/**
+	 * Launch `--agent` persona name. Marks the session as persona-owned so the
+	 * SDK captures the baseline tool set (what the session would have had
+	 * without the persona's `tools:` restriction) for restoration when a
+	 * non-agent session switch removes the persona.
+	 */
+	personaName?: string;
+	/**
+	 * The persona session's tool restriction came from an explicit CLI flag
+	 * (`--tools`/`--no-tools`), not the persona's frontmatter. When set, the
+	 * baseline for `restoreBaselineTools` is the explicit CLI tool set (so
+	 * leaving agent mode re-enables exactly the CLI list, not the full
+	 * registry); when unset, the baseline is the full registry minus
+	 * default-inactive tools (the persona's `tools:` restriction is lifted).
+	 * Set by `applyAgentPersonaOptions` from `explicit.toolsSet`.
+	 */
+	personaCliToolOverride?: boolean;
 	/**
 	 * Permit only caller-supplied SDK custom tools inside a restricted session.
 	 * They must still be named in {@link toolNames}; discovered extensions, MCP,
@@ -1392,7 +1438,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		options.customSystemPrompt !== undefined ||
 		options.appendSystemPrompt !== undefined ||
 		options.toolNames !== undefined ||
-		options.customTools !== undefined;
+		options.customTools !== undefined ||
+		// A persona changes the system-prompt and spawn cache shape even when
+		// it leaves tools/model/thinking untouched; the inherited fork key must
+		// not survive a --fork/--continue with --agent.
+		options.personaAppendPrompt !== undefined ||
+		options.spawns !== undefined;
 	const inheritedPromptCacheKey = forkCacheShapeChanged
 		? undefined
 		: sessionManager.getHeader()?.providerPromptCacheKey;
@@ -1487,6 +1538,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			: [];
 	let restoredSessionModelIndex = -1;
 	let restoredSessionThinkingLevel: ConfiguredThinkingLevel | undefined;
+	// A thinking level derived from the DEFERRED model pattern resolution (an
+	// explicit `:level` suffix on the actually selected pattern, or the
+	// carried level of a retry-fallback chain entry). Consulted at the top of
+	// `pickInitialThinkingLevel` — above the persona's frontmatter level and
+	// the restored/persisted session thinking — so the selected pattern's
+	// suffix keeps the same precedence as the immediate path's
+	// `options.thinkingLevel` seed, without clobbering a resolved
+	// `personaThinkingLevel` (codex #3760616694).
+	let selectedPatternThinkingLevel: ConfiguredThinkingLevel | undefined;
 	if (!hasExplicitModel && !model && sessionModelStrings.length > 0) {
 		logger.time("restoreSessionModel", () => {
 			let failedSessionModel: string | undefined;
@@ -1531,13 +1591,35 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const taskDepth = options.taskDepth ?? 0;
 
 	// Resolves the session/agent thinking level using the same precedence we
-	// apply at startup: explicit option → persisted session entry → restored
-	// model selector suffix → default role's explicit selector → selected
-	// model's defaultLevel → global settings default. Run again after extension
-	// role reclaim so the final model's own defaults aren't masked by an earlier
-	// fallback model's.
+	// apply at startup: explicit option → persona's deferred frontmatter level
+	// → persisted session entry → restored model selector suffix → default
+	// role's explicit selector → selected model's defaultLevel → global
+	// settings default. Run again after extension role reclaim so the final
+	// model's own defaults aren't masked by an earlier fallback model's.
 	const pickInitialThinkingLevel = (selectedModel: Model | undefined): ConfiguredThinkingLevel | undefined => {
 		let level = options.thinkingLevel;
+		// An explicit `:level` suffix on the ACTUALLY SELECTED deferred
+		// pattern is the more specific selector and wins over the persona's
+		// frontmatter `personaThinkingLevel` (mirroring the immediate path
+		// where a CLI `--model X:low` seeds `options.thinkingLevel` and beats
+		// the frontmatter level) — and over any restored/persisted session
+		// thinking, exactly like the immediate seed.
+		if (level === undefined && selectedPatternThinkingLevel !== undefined) {
+			level = selectedPatternThinkingLevel;
+		}
+		// The persona's frontmatter thinking level, deferred through model
+		// resolution: it applies only when the resolved deferred pattern has
+		// no explicit `:level` suffix (the suffix above wins). Consulted
+		// BEFORE the persisted/restored session entry so an explicit launch
+		// persona overrides the transcript's saved thinking on resume — the
+		// same precedence the immediate path gives `options.thinkingLevel`
+		// (which `applyAgentPersonaOptions` fills directly, and which always
+		// beats the restored entry). Resume WITHOUT an explicit launch
+		// persona keeps the restored entry (this field is only ever set for
+		// an explicit `--agent`).
+		if (level === undefined && options.personaThinkingLevel !== undefined) {
+			level = options.personaThinkingLevel;
+		}
 		if (level === undefined && hasExistingSession && hasThinkingEntry) {
 			level =
 				parseConfiguredThinkingLevel(existingSession.configuredThinkingLevel) ??
@@ -1651,6 +1733,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let hasRegistered = false;
 	const restrictToolNames = options.restrictToolNames === true;
 	const enableLsp = options.enableLsp ?? !restrictToolNames;
+	// Whether `enableLsp` was EXPLICITLY set at creation (e.g. `--no-lsp`).
+	// A restricted session (`--agent`/`--tools`/`--no-tools`) that did not
+	// pass `enableLsp` defaults it to false above — that is the restricted-
+	// session DEFAULT, not an explicit opt-out, and a live `/agent` switch to
+	// a persona whose frontmatter explicitly requests `lsp` must be able to
+	// register the tool (mirroring the launch path's `enableLsp !== false`
+	// guard in main.ts). An explicit `--no-lsp` still wins.
+	const enableLspExplicit = options.enableLsp !== undefined;
+	// The non-persona `hub` policy: a normal unrestricted session exposes
+	// `hub` when IRC is not explicitly disabled and spawning is enabled (the
+	// same `isIrcEnabled` capacity gate the task tool uses). There is no
+	// explicit `--no-irc` CLI flag; `enableIrc: false` is only ever set by
+	// internal callers (security coordinator, persisted revive), so the
+	// policy is simply 'spawning enabled'. The persona baseline uses this
+	// (not the restricted gate) so leaving agent mode restores `hub` exactly
+	// like a fresh non-persona session would have it.
+	const baselineHubEnabled = options.enableIrc !== false && isIrcEnabled(settings, taskDepth);
 	const lspReadOnly = options.lspReadOnly ?? restrictToolNames;
 	const asyncMaxJobs = Math.min(100, Math.max(1, settings.get("async.maxJobs") ?? 100));
 	// Only the first top-level session in a process owns an AsyncJobManager.
@@ -1710,12 +1809,42 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const disposeCallbacks = new Set<() => void>();
 		const activeToolNames = new Set<string>();
 		const toolRegistry = new Map<string, Tool & Pick<ToolDefinition, "defaultInactive">>();
-		const setActiveToolNames = (names: Iterable<string>): void => {
+		// Whether the last applied persona tool list omitted BOTH mutating
+		// built-ins (`write` and `edit`). Set by the persona-switch path
+		// (`applyPersonaTools` -> `applyActiveToolsByName` -> this closure) and
+		// cleared by any later apply that restores either name. It makes the
+		// Cursor `editWasGranted` floor REVOCABLE: a Cursor-created session that
+		// granted `edit` at launch keeps the native delete/download grant until a
+		// persona switch drops mutating capabilities, at which point the floor
+		// stops applying (codex #3762233472). Non-persona active-set mutations
+		// (plan/vibe/goal modes, MCP refresh, extension `setActiveTools`) pass no
+		// flag, so they never trip it — the live `write`/`edit` checks still
+		// govern those.
+		let personaDroppedMutation = false;
+		// Parallel `edit`-only signal: a persona whose tools list contains
+		// `write` but not `edit` leaves `personaDroppedMutation` false (write is
+		// a mutating tool), so the Cursor `editWasGranted` floor and the
+		// `pi_edit` override would both stay available even though the persona
+		// did not grant `edit`. This flag revokes the `pi_edit` override
+		// independently (codex #3818999447); `cursorCanMutateFiles` keeps using
+		// the broader `personaDroppedMutation` for write/delete.
+		let personaDroppedEdit = false;
+		const setActiveToolNames = (names: Iterable<string>, droppedMutation?: boolean, droppedEdit?: boolean): void => {
 			activeToolNames.clear();
 			for (const name of names) {
 				activeToolNames.add(name);
 			}
+			if (droppedMutation !== undefined) personaDroppedMutation = droppedMutation;
+			if (droppedEdit !== undefined) personaDroppedEdit = droppedEdit;
 		};
+		// `enableLsp` is a LIVE value, not the creation-time constant: a live
+		// `/agent` switch to a persona that explicitly requests `lsp` lifts the
+		// restricted-session default (see `registerBuiltInTools` below), and
+		// `LspTool.createIf` reads `session.enableLsp === false` to null out the
+		// factory — so the tool session must observe the lifted value or the
+		// registration would silently produce no tool. An explicit `--no-lsp`
+		// keeps it false forever.
+		let enableLspLive = enableLsp;
 		const toolSession: ToolSession = {
 			get cwd() {
 				return sessionManager.getCwd();
@@ -1729,11 +1858,27 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get additionalDirectories() {
 				return sessionManager.getAdditionalDirectories();
 			},
-			enableLsp,
+			get enableLsp() {
+				return enableLspLive;
+			},
 			lspReadOnly,
 			enableIrc: restrictToolNames ? false : options.enableIrc,
 			restrictToolNames,
+			// Persona launch path only: lets `createTools` lift `hub` through
+			// the restricted gate when the persona explicitly requests it
+			// (mirroring the wave-20 restore lift). Never set for subagents or
+			// direct `createTools` callers.
+			baselineHubEnabled: options.personaName ? baselineHubEnabled : undefined,
 			get hasEditTool() {
+				// Delegate to the live session once it exists (like `get skills()`):
+				// `restoreBaselineTools` re-activates edit when a read-only persona
+				// is left, and the launch-time closure would otherwise keep
+				// reporting the persona's restricted grant — hashlines would appear
+				// in AgentSession file mentions (SessionTools.hasEditTool, active-
+				// set based) but stay suppressed in ReadTool/GrepTool output (this
+				// closure). Before the session exists (during createTools), fall
+				// back to the launch-requested list.
+				if (session) return session.hasEditTool;
 				const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
 				return restrictToolNames
 					? requestedToolNames?.includes("edit") === true
@@ -1776,7 +1921,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// unrelated global ref. With no lifecycle, hub cancel falls back to
 			// dispose + unregister on the session's own registry.
 			agentLifecycle: options.agentRegistry ? undefined : () => AgentLifecycleManager.global(),
-			getSessionSpawns: () => options.spawns ?? "*",
+			getSessionSpawns: () => (session ? (session.getSessionSpawns() ?? "*") : (options.spawns ?? "*")),
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
 			getActiveModel: () => agent?.state.model ?? model,
@@ -1882,7 +2027,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			options.parentTaskPrefix ? { parentPrefix: options.parentTaskPrefix } : undefined,
 		);
 
-		// Create built-in tools (already wrapped with meta notice formatting)
+		// Create built-in tools (already wrapped with meta notice formatting).
+		// The `--agent` persona path expands the registry to every allowed
+		// built-in (active set stays restricted) so the SDK can capture a full
+		// baseline for `restoreBaselineTools`; subagents and plain `--tools`
+		// sessions keep the requested-only registry.
+		toolSession.expandRegistryToAllBuiltins = options.personaName !== undefined;
 		await logger.time("createAllTools", createTools, toolSession, options.toolNames);
 
 		// Restricted sessions cannot inherit or discover MCP capabilities.
@@ -2449,7 +2599,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					retryFallback && usageFallbackTriggered ? { ...retryFallback, pinned: true } : retryFallback;
 				modelFallbackMessage = undefined;
 				if (selectedExplicitThinkingLevel) {
-					restoredSessionThinkingLevel = selectedThinkingLevel;
+					selectedPatternThinkingLevel = selectedThinkingLevel;
 				}
 				thinkingLevel = pickInitialThinkingLevel(selectedModel);
 				autoThinking = thinkingLevel === AUTO_THINKING;
@@ -2463,11 +2613,34 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				break;
 			}
 			if (!model) {
-				const requested =
-					deferredModelPatterns.length === 1
-						? `"${deferredModelPatterns[0]}"`
-						: `one of ${deferredModelPatterns.map(pattern => `"${pattern}"`).join(", ")}`;
-				modelFallbackMessage = `Model ${requested} not found`;
+				// A persona's deferred model pattern that fails to resolve falls back
+				// to the startup-selected default the persona replaced (preserved in
+				// `modelPatternFallbackModel` by `applyAgentPersonaOptions`), matching
+				// the subagent path's parent-model fallback. An explicit `--model`
+				// pattern never carries the fallback, so its failure stays fatal.
+				if (options.modelPatternFallbackModel) {
+					model = options.modelPatternFallbackModel;
+					const requested =
+						deferredModelPatterns.length === 1
+							? `"${deferredModelPatterns[0]}"`
+							: `one of ${deferredModelPatterns.map(pattern => `"${pattern}"`).join(", ")}`;
+					modelFallbackMessage = `Model ${requested} not found. Using ${model.provider}/${model.id}`;
+					thinkingLevel = pickInitialThinkingLevel(model);
+					autoThinking = thinkingLevel === AUTO_THINKING;
+					effectiveThinkingLevel = concreteThinkingLevel(thinkingLevel);
+					effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
+						autoThinking
+							? resolveProvisionalAutoLevel(model)
+							: resolveThinkingLevelForModel(model, effectiveThinkingLevel),
+					);
+					preconnectModelHost(model.baseUrl);
+				} else {
+					const requested =
+						deferredModelPatterns.length === 1
+							? `"${deferredModelPatterns[0]}"`
+							: `one of ${deferredModelPatterns.map(pattern => `"${pattern}"`).join(", ")}`;
+					modelFallbackMessage = `Model ${requested} not found`;
+				}
 			}
 		}
 
@@ -2654,9 +2827,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		});
 		const toolContextStore = new ToolContextStore(getSessionContext);
 		toolSession.getToolContext = () => toolContextStore.getContext();
-		const setSessionActiveToolNames = (names: Iterable<string>): void => {
+		const setSessionActiveToolNames = (
+			names: Iterable<string>,
+			droppedMutation?: boolean,
+			droppedEdit?: boolean,
+		): void => {
 			const snapshot = Array.from(names);
-			setActiveToolNames(snapshot);
+			setActiveToolNames(snapshot, droppedMutation, droppedEdit);
 			toolContextStore.setToolNames(snapshot);
 		};
 		// Native built-in implementations backing same-tool `ctx.invokeTool`, so a tool that
@@ -2754,18 +2931,43 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		//
 		// The grant is captured here, independently of the session's provider:
 		// a session that starts on another provider can switch to Cursor later,
-		// and the roster is built once, at session creation.
-		const editWasGranted = toolRegistry.has("edit");
+		// and the roster is built once, at session creation. Reading the registry
+		// at frame time would see the switched-to state, not the grant.
+		// `createTools` now registers every allowed built-in for top-level
+		// persona sessions (so the baseline tool set can be restored), so
+		// registry presence no longer proves a grant — read the launch-requested
+		// list instead (issue #5680 escalation guard).
+		const launchRequestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
+		const editWasGranted =
+			launchRequestedToolNames === undefined ? toolRegistry.has("edit") : launchRequestedToolNames.includes("edit");
 		// Built on first use rather than eagerly: a session that never reaches
 		// Cursor never constructs it.
 		let cursorBridgeEditTool: AgentTool | undefined;
 		const getCursorBridgeEditTool = (): AgentTool | undefined => {
-			// Only when the session actually granted `edit`. `createTools` omits
-			// it entirely for a restricted tool set, and the bridge answers native
-			// frames that arrive regardless of the advertised catalog — so
-			// building one unconditionally would hand a read-only agent a
-			// mutating tool it was denied (the issue #5680 escalation).
-			if (!editWasGranted) return undefined;
+			// Only when the session actually granted `edit` AND the revocable
+			// floor still holds. `createTools` omits it entirely for a
+			// restricted tool set, and the bridge answers native frames that
+			// arrive regardless of the advertised catalog — so building one
+			// unconditionally would hand a read-only agent a mutating tool it
+			// was denied (the issue #5680 escalation).
+			//
+			// The launch grant alone is not enough: `executeTool` skips the
+			// live `isToolGranted` re-check when an override is present, so a
+			// `/agent` switch to a read-only persona (which sets
+			// `personaDroppedMutation` through the same `setActiveToolNames`
+			// closure `cursorCanMutateFiles` reads) must take the bridge edit
+			// tool away too. Same live floor as the native delete/download
+			// grant (codex #3762233472): the flag is cleared again by a switch
+			// back to a persona with `write` or `edit`. The `edit`-only signal
+			// `personaDroppedEdit` additionally revokes this override when the
+			// persona omits `edit` specifically (even if `write` keeps the broader
+			// mutation flag false) — codex #3818999447.
+			// A launch that did not grant `edit` (read-only `--tools`/`--no-tools`/persona)
+			// can still gain it via a live `/agent` switch to a persona whose `tools:`
+			// list includes `edit`; the live persona restriction records that grant, so
+			// consult it in addition to the launch-time floor (codex #3818999447).
+			const liveGrantedEdit = session?.getPersonaToolRestriction()?.has("edit") === true;
+			if ((!editWasGranted && !liveGrantedEdit) || personaDroppedEdit) return undefined;
 			cursorBridgeEditTool ??= createBridgeEditTool(toolSession, extensionRunner);
 			return cursorBridgeEditTool;
 		};
@@ -2773,8 +2975,43 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// reasoning, plus `write` may be auto-registered further down as an xdev
 		// transport. The exec bridge answers native `delete` and
 		// resource-download frames that mutate files without running a registry
-		// tool, so it needs the grant as the session actually made it.
-		const cursorCanMutateFiles = editWasGranted || toolRegistry.has("write");
+		// tool, so it needs the grant as the session actually made it. Same
+		// launch-requested-list provenance as `editWasGranted` above.
+		//
+		// The bridge is built once at session creation, but the grant must be
+		// LIVE: a `/agent` switch to a read-only persona drops write/edit from
+		// the active set, and a launch-time capture would keep the mutation
+		// permission true for the rest of the session (codex #3761853483). The
+		// function reads the SAME live enabled set `isToolGranted` uses — active
+		// top-level ∪ xd://-mounted — which every active-set mutation
+		// (createTools, applyActiveToolsByName, MCP refresh, plan/vibe/goal
+		// modes) funnels through the `setActiveToolNames` closure. Hashline
+		// `edit` stays advertised on Cursor (called as MCP; native StrReplace
+		// arrives as `editToolCall`), so the live checks cover both names; a
+		// read-only persona switch still denies on both because the persona's
+		// restricted list drops `edit` from the active set. The launch-requested
+		// list still decides the initial set.
+		//
+		// `editWasGranted` is the FLOOR: a Cursor-created session that granted
+		// `edit` at launch (but not `write`) keeps the mutation permission even
+		// if a persona restriction drops `edit` from the active set — the
+		// launch-requested list still recorded the grant, so the live set alone
+		// would drop it below what the session was given at launch (internal
+		// review, wave-22 P2). The floor is REVOCABLE: a persona switch that
+		// applies a tools list omitting both `write` and `edit` sets
+		// `personaDroppedMutation` (via the same `setActiveToolNames` closure
+		// that updates the live set), so a read-only persona takes the Cursor
+		// delete/download grant away even though the launch grant never entered
+		// the active set (codex #3762233472). Switching back to a persona with
+		// either mutating tool clears the flag and restores the floor. The
+		// floor does not weaken live revocation: a write-only session still
+		// loses the permission when `write` leaves the active set, because
+		// `editWasGranted` is false for it.
+		const cursorCanMutateFiles = (): boolean =>
+			(editWasGranted && !personaDroppedMutation) ||
+			activeToolNames.has("write") ||
+			activeToolNames.has("edit") ||
+			toolSession.xdev?.mountedNames.has("write") === true;
 
 		let writeRegistration: Promise<boolean> | undefined;
 		const ensureWriteRegistered = (): Promise<boolean> => {
@@ -2818,6 +3055,87 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			return goalRegistration;
 		};
 
+		// Live `/agent` persona switches register built-ins the launch registry
+		// omitted. A session started with `--tools`/`--no-tools` holds only the
+		// requested built-ins (no `expandRegistryToAllBuiltins` — `personaName`
+		// is undefined), so a persona whose `tools:` list names others would
+		// otherwise be silently dropped by `applyActiveToolsByName`'s registry
+		// lookup. Each missing tool is built through the SAME allowance gate the
+		// launch path uses (`isBuiltinToolAllowed`), so a tool the session
+		// settings deny (e.g. `bash.enabled: false`) stays unregistered.
+		// `personaRequestsLsp` is the live-switch equivalent of the launch
+		// path's `enableLsp !== false` guard (main.ts): a persona that
+		// EXPLICITLY lists `lsp` gets it even when the session's `enableLsp`
+		// is false ONLY because a restricted launch defaulted it (no explicit
+		// `--no-lsp`). An explicit `--no-lsp` still wins.
+		const registerBuiltInTools = async (
+			names: string[],
+			personaRequestsLsp = false,
+			personaRequestsHub = false,
+		): Promise<void> => {
+			const normalized = normalizeToolNames(names);
+			const missing = normalized.filter(
+				name => !toolRegistry.has(name) && (name in BUILTIN_TOOLS || name in HIDDEN_TOOLS),
+			);
+			if (missing.length === 0) return;
+			// Lift the session's LSP policy for the registration when the
+			// persona explicitly requests `lsp` and the session's `enableLsp`
+			// is false only because a restricted launch defaulted it. The
+			// tool session reads the live value, so `LspTool.createIf` (which
+			// nulls the factory on `session.enableLsp === false`) actually
+			// produces the tool. An explicit `--no-lsp` keeps it false.
+			const lspLifted = personaRequestsLsp && !enableLspExplicit && !enableLsp;
+			if (lspLifted) enableLspLive = true;
+			const evalRequested = missing.includes("eval");
+			const { allowEval } = await resolveEvalAllowance(toolSession, evalRequested);
+			const allowanceContext = {
+				settings: toolSession.settings,
+				restrictToolNames,
+				enableLsp: enableLspLive,
+				includeYield: options.requireYieldTool === true,
+				allowEval,
+				goalEnabled: toolSession.settings.get("goal.enabled"),
+				hasExplicitToolList: true,
+				taskDepth: toolSession.taskDepth,
+				enableIrc: toolSession.enableIrc,
+				prewalkArmed: toolSession.prewalkArmed,
+				getGoalModeState: toolSession.getGoalModeState,
+				getActiveModel: toolSession.getActiveModel,
+				getInspectImageModeOverride: toolSession.getInspectImageModeOverride,
+				externalThinkingActive:
+					toolSession.settings.get("externalThinking") && supportsExternalThinking(toolSession.getActiveModel?.()),
+			};
+			const allowed = missing.filter(name => isBuiltinToolAllowed(allowanceContext, name as BuiltinToolName));
+			// `hub` is gated on `restrictToolNames` and `enableIrc` in
+			// `isBuiltinToolAllowed`, both forced off for a restricted
+			// session, so the gate rejects it even when the baseline policy
+			// says a normal unrestricted session would have it. The baseline
+			// restore path (restoreBaselineTools) lifts it exactly like the
+			// LSP lift above: `personaRequestsHub` is only ever true when the
+			// non-persona hub policy (spawning enabled, IRC not explicitly
+			// disabled) holds, so the registration restores the tool a normal
+			// unrestricted session would have. An explicit `enableIrc: false`
+			// keeps `baselineHubEnabled` false, so this never fires for it.
+			const hubLifted = personaRequestsHub && baselineHubEnabled && missing.includes("hub");
+			if (hubLifted && !allowed.includes("hub")) allowed.push("hub");
+			if (allowed.length === 0) return;
+			const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
+			const results = await Promise.all(
+				allowed.map(async name => {
+					const factory = allTools[name];
+					const tool = await logger.time(`createTools:${name}:persona`, factory, toolSession);
+					return tool ? wrapToolWithMetaNotice(tool) : null;
+				}),
+			);
+			for (const tool of results) {
+				if (tool === null || toolRegistry.has(tool.name)) continue;
+				const native = tool;
+				toolRegistry.set(tool.name, new ExtensionToolWrapper(tool, extensionRunner) as Tool);
+				builtInRegistryToolNames.add(tool.name);
+				nativeToolsByName.set(tool.name, native);
+			}
+		};
+
 		// Existing staged/device paths need write registered before active-set assembly.
 		// Deferred MCP also registers it now, but refresh activates it only after a server connects.
 		// xd:// mounts never register write: xdev state only exists when the session
@@ -2852,6 +3170,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			},
 			readServerResource: (name, uri) => mcpManager.readServerResource(name, uri),
 		};
+		// Built once: the factory is a pure closure over the session; the LIVE
+		// grant check in the bridge options decides per frame whether it may run.
+		const bridgeGrepFactory = createBridgeGrepFactory(toolSession, extensionRunner);
 		const cursorExecHandlers = new CursorExecHandlers({
 			cwd,
 			// The session's cwd moves (`/cd`, resume, branch restore) while this
@@ -2864,6 +3185,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getCwd: () => sessionManager.getCwd(),
 			tools: toolRegistry,
 			getExecutableTool: resolveDeviceTool,
+			// The registry is widened to every allowed built-in for persona
+			// baseline capture (`expandRegistryToAllBuiltins`), so registry
+			// presence no longer proves a grant. Gate the bridge on the LIVE
+			// enabled set — active top-level ∪ xd://-mounted — which every
+			// active-set mutation (createTools, applyActiveToolsByName, MCP
+			// refresh, plan/vibe/goal modes) funnels through the same
+			// `setActiveToolNames` closure. A baseline-only `bash`/`write`
+			// registered for `restoreBaselineTools` is therefore rejected when
+			// a Cursor native frame names it, while a normal unrestricted
+			// session (every allowed built-in active) is unchanged.
+			isToolGranted: name => activeToolNames.has(name) || toolSession.xdev?.mountedNames.has(name) === true,
 			// `pi_edit` needs the `replace`-mode instance specifically, and the
 			// registry may still hold the session's own `edit` (any mode) when
 			// this session did not start on Cursor.
@@ -2875,14 +3207,29 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			setTodoPhases: phases => session.setTodoPhases(phases),
 			persistTodoPhases: phases => sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases }),
 			// `pi_grep` carries its own context width and match cap, which the
-			// shared grep instance fixed at construction cannot express. Gated on
-			// the grant: the factory builds a fresh tool and `executeTool` prefers
-			// it over the registry, so installing it unconditionally would let a
-			// session without `grep` search anyway.
-			createGrepTool: toolRegistry.has("grep") ? createBridgeGrepFactory(toolSession, extensionRunner) : undefined,
+			// shared grep instance fixed at construction cannot express. The
+			// factory builds a fresh tool and `executeTool` prefers it over the
+			// registry, so the grant must be checked LIVE at frame time, not at
+			// bridge construction: the bridge is built once at session creation,
+			// and a `/agent` switch that drops `grep` must revoke the override
+			// the moment it happens (codex #3762233481). Returning `undefined`
+			// makes `executeTool` fall through to the registry, where the live
+			// `isToolGranted` above rejects the frame. The registry is widened
+			// to every allowed built-in for persona baseline capture, so the
+			// gate reads the ACTIVE set, not registry presence — a read-only
+			// persona that never activated `grep` must not gain a search tool
+			// through the frame's own context/limit fields.
+			createGrepTool: options =>
+				activeToolNames.has("grep") || toolSession.xdev?.mountedNames.has("grep") === true
+					? bridgeGrepFactory(options)
+					: undefined,
 			// The native `delete` and resource-download frames mutate files
 			// without running a registry tool, so this grant is the only thing
-			// standing between a restricted session and a workspace write.
+			// standing between a restricted session and a workspace write. It is
+			// a LIVE function over the same active set as `isToolGranted`: a
+			// `/agent` switch to a read-only persona revokes the permission at
+			// frame time instead of keeping the launch-time capture (codex
+			// #3761853483).
 			allowDirectFileMutation: cursorCanMutateFiles,
 		});
 
@@ -2911,7 +3258,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				toolSession.contextFiles = contextFiles;
 				session.setAdvisorContextPrompt(formatAdvisorContextPrompt(contextFiles));
 			}
-			const memoryBackend = restrictToolNames ? undefined : await resolveMemoryBackend(settings);
+			// A LIVE `/agent` switch narrows an already-built unrestricted session
+			// to a persona's `tools:` list without toggling the creation-time
+			// `restrictToolNames` flag. The prompt rebuild must suppress the same
+			// affordances a launch `--agent` does (memory/auto-learn, AutoQA,
+			// Hub/IRC, MCP server guidance), so consult the session's live persona
+			// restriction in addition to the creation-time flag (codex #3763426057).
+			const livePersonaRestricted = session?.getPersonaToolRestriction?.() !== undefined;
+			const promptRestricted = restrictToolNames || livePersonaRestricted;
+			const memoryBackend = promptRestricted ? undefined : await resolveMemoryBackend(settings);
 			const memoryInstructions = memoryBackend
 				? await memoryBackend.buildDeveloperInstructions(agentDir, settings, session)
 				: undefined;
@@ -2929,7 +3284,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// session-start build — so a subagent that filtered them out, a mid-session
 			// enable that never built them, or a same-named custom tool while auto-learn
 			// is off all get no guidance.
-			const autoLearnInstructions = restrictToolNames
+			const autoLearnInstructions = promptRestricted
 				? undefined
 				: buildAutoLearnInstructions({
 						manageSkill: builtInToolNames.includes("manage_skill"),
@@ -2954,7 +3309,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						.trim(),
 				);
 			}
-			if (serverInstructions && serverInstructions.size > 0) {
+			if (serverInstructions && serverInstructions.size > 0 && !promptRestricted) {
 				appendParts.push(
 					"## MCP Server Instructions\n\nThe following instructions are provided by connected MCP servers. They are server-controlled and may not be verified.",
 				);
@@ -2974,10 +3329,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				tools,
 				nativeTools && !inlineToolDescriptors ? { mode: "compact", toolNames } : { mode: "full" },
 			);
-			if (options.appendSystemPrompt) {
-				appendPrompt = appendPrompt
-					? `${appendPrompt}\n\n${options.appendSystemPrompt}`
-					: options.appendSystemPrompt;
+			// Launch-time append (CLI/discovered file) and the live persona append
+			// are separate parts: a live switch must not replace the launch append
+			// (startup `applyAgentPersonaOptions` concatenates both, so restore and
+			// live switching must expose the same prompt).
+			// Pre-construction (the first build runs before `session` is assigned)
+			// the session's seeded persona channel is not yet readable, so fall
+			// back to the launch option; until the first live write the seeded
+			// value equals `options.personaAppendPrompt`, so the fallback only
+			// affects that first build. Once a live write HAS touched the session
+			// channel, it is authoritative EVEN when the value is `undefined`:
+			// coalescing an explicit clear (`setPersonaAppendPrompt(undefined)`)
+			// back to `options.personaAppendPrompt` would resurrect the launch
+			// persona's append after leaving a live persona.
+			const personaAppend = session?.isPersonaAppendPromptInitialized()
+				? session.getPersonaAppendPrompt()
+				: options.personaAppendPrompt;
+			const extraAppend = [options.appendSystemPrompt, personaAppend].filter(Boolean).join("\n\n");
+			if (extraAppend) {
+				appendPrompt = appendPrompt ? `${appendPrompt}\n\n${extraAppend}` : extraAppend;
 			}
 			const defaultPrompt = await buildSystemPromptInternal({
 				cwd: promptCwd,
@@ -3005,10 +3375,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				taskMaxConcurrency: settings.get("task.maxConcurrency"),
 				scoutAvailable: isScoutSpawnable(
 					settings.get("task.disabledAgents") as string[] | undefined,
-					options.spawns ?? "*",
+					session?.getSessionSpawns?.() ?? options.spawns ?? "*",
 				),
-				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0),
-				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
+				taskIrcEnabled: !promptRestricted && isIrcEnabled(settings, options.taskDepth ?? 0),
+				autoQaEnabled: !promptRestricted && isAutoQaEnabled(settings),
 				secretsEnabled,
 				workspaceTree: workspaceTreePromise,
 				includeWorkspaceTree,
@@ -3048,29 +3418,39 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			explicitlyRequestedToolNames.push("yield");
 		}
 		// Auto-learn builtins are force-included into the registry by `createTools`
-		// for enabled top-level sessions (tools/index.ts), but — like `yield` above —
-		// an explicit `toolNames` list would otherwise drop them from the ACTIVE set,
-		// leaving the nudge/guidance pointing at tools the model cannot call. Activate
-		// exactly the builtins createTools built (`builtInToolNames` — provenance, so a
-		// same-named custom/extension tool is never force-activated when auto-learn is
-		// off) to keep guidance, controller, and the active set consistent.
-		if (!restrictToolNames && explicitlyRequestedToolNames) {
-			for (const name of ["manage_skill", "learn"]) {
-				if (builtInToolNames.includes(name) && !explicitlyRequestedToolNames.includes(name)) {
-					explicitlyRequestedToolNames.push(name);
-				}
-			}
-		}
+		// for enabled top-level sessions (tools/index.ts), but an explicit
+		// `toolNames` list is the user's EXACT request — `--tools read` means
+		// "only read", and a persona's `tools: [read]` means the same. With
+		// `expandRegistryToAllBuiltins`, the registry is widened to every allowed
+		// built-in for baseline capture, so registry presence no longer proves the
+		// user asked for the tool; auto-activating manage_skill/learn from
+		// registry presence would leak write-capable tools into a read-only
+		// persona's active set. Only the launch-requested list decides: a tool the
+		// user named is already in the list (nothing to activate), and a tool they
+		// did not name stays out. (A same-named custom/extension tool is still
+		// never force-activated when auto-learn is off — the builtin would not be
+		// in the registry.)
 		// Checkpoint and rewind are a pair: `createTools` auto-includes the sister
 		// tool in the registry, but an explicit `toolNames` list would otherwise
 		// drop it from the ACTIVE set — leaving the agent able to checkpoint but
 		// unable to rewind (or vice versa). Mirror the pairing here. Unlike the
 		// manage_skill/learn mirror above, this is a safety pairing — it applies
-		// to restricted sessions too.
+		// to restricted sessions too. The trigger is the REQUESTED list, not
+		// registry presence: `createTools` now registers every allowed built-in
+		// for top-level persona sessions, so a registry hit no longer proves the
+		// user asked for one half of the pair.
 		if (explicitlyRequestedToolNames) {
-			if (builtInToolNames.includes("checkpoint") && !explicitlyRequestedToolNames.includes("rewind")) {
+			if (
+				explicitlyRequestedToolNames.includes("checkpoint") &&
+				!explicitlyRequestedToolNames.includes("rewind") &&
+				builtInToolNames.includes("rewind")
+			) {
 				explicitlyRequestedToolNames.push("rewind");
-			} else if (builtInToolNames.includes("rewind") && !explicitlyRequestedToolNames.includes("checkpoint")) {
+			} else if (
+				explicitlyRequestedToolNames.includes("rewind") &&
+				!explicitlyRequestedToolNames.includes("checkpoint") &&
+				builtInToolNames.includes("checkpoint")
+			) {
 				explicitlyRequestedToolNames.push("checkpoint");
 			}
 		}
@@ -3109,6 +3489,26 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				initialToolNames.push(name);
 			}
 		}
+
+		// The persona baseline is the tool set a normal UNRESTRICTED session
+		// would have: the full registry minus default-inactive tools and
+		// `goal`, plus `lsp` when the session's `enableLsp` is false only
+		// because the persona restriction defaulted it (the restricted-session
+		// DEFAULT, not an explicit `--no-lsp` — the wave-16
+		// `enableLspExplicit` discriminator). The launch registry omits `lsp`
+		// under that default (`createTools` gates it via
+		// `isBuiltinToolAllowed`), so the baseline must add it explicitly for
+		// `restoreBaselineTools` to re-enable it when agent mode is left.
+		const baselineLspEnabled = enableLsp || (!enableLspExplicit && settings.get("lsp.enabled"));
+		const personaBaselineToolNames = options.personaCliToolOverride
+			? (explicitlyRequestedToolNames ?? [])
+			: [
+					...[...new Set([...toolNamesFromRegistry, ...alwaysInclude])].filter(
+						name => toolRegistry.has(name) && !defaultInactiveToolNames.has(name) && name !== "goal",
+					),
+					...(baselineLspEnabled ? ["lsp"] : []),
+					...(baselineHubEnabled ? ["hub"] : []),
+				];
 
 		// Pre-register in the global agent registry BEFORE building the system prompt,
 		// so that subagents launched in the same parallel batch can see each other in
@@ -3153,6 +3553,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Mounting requires both transport halves in the granted set (`read xd://`
 		// discovers, `write xd://<tool>` executes); a session without either keeps
 		// every tool top-level instead of auto-granting the missing transport.
+		let baselineMountedToolNames: string[] | undefined;
 		if (toolSession.xdev) {
 			const topLevelToolNames: string[] = [];
 			const mountedNames: string[] = [];
@@ -3167,6 +3568,27 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			for (const name of mountedNames) toolSession.xdev.mountedNames.add(name);
 			initialToolNames = topLevelToolNames;
 			if (mountedNames.length > 0 && !initialToolNames.includes("write")) initialToolNames.push("write");
+			// Capture the baseline partition for `restoreBaselineTools`: the persona
+			// path's baseline (full registry) is restored with the same top-level/
+			// mounted split a fresh non-persona session would produce, so leaving a
+			// persona re-mounts the discoverable tools under `xd://` instead of
+			// pinning every baseline name top-level. The persona's own initial
+			// partition is NOT the baseline partition — a read-only persona mounts
+			// nothing, but the baseline (which includes read/write) would mount the
+			// discoverable builtins. When the tool restriction came from an explicit
+			// CLI flag (`--tools`/`--no-tools`), the baseline is the CLI list itself
+			// — leaving agent mode must re-enable exactly the CLI tools, not the
+			// full registry.
+			if (options.personaName) {
+				const baselineReadAvailable = personaBaselineToolNames.includes("read");
+				const baselineWriteAvailable = personaBaselineToolNames.includes("write");
+				baselineMountedToolNames = personaBaselineToolNames.filter(name => {
+					const tool = toolRegistry.get(name);
+					return (
+						tool !== undefined && baselineReadAvailable && baselineWriteAvailable && isMountableUnderXdev(tool)
+					);
+				});
+			}
 		}
 
 		setSessionActiveToolNames(initialToolNames);
@@ -3506,6 +3928,24 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			autoApprove: options.autoApprove,
 			scoutAllowedBySpawnPolicy: isScoutSpawnable(undefined, options.spawns ?? "*"),
 			evalKernelOwnerId,
+			// Launch `--agent` persona: seed the mutable persona channel (so a
+			// later `/agent` switch replaces the launch persona's prompt) and
+			// record the baseline tool set for restoration when a non-agent
+			// session switch removes the persona. The baseline is what the
+			// session would have had WITHOUT the persona's `tools:` restriction
+			// — the full registry minus default-inactive tools — NOT
+			// `initialToolNames`, which already reflects the restricted list.
+			// When the restriction came from an explicit CLI flag
+			// (`--tools`/`--no-tools`), the baseline is the CLI tool set itself:
+			// leaving agent mode must re-enable exactly the CLI list, not the
+			// full registry.
+			personaAppendPrompt: options.personaAppendPrompt,
+			spawns: options.spawns,
+			personaName: options.personaName,
+			baselineToolNames: options.personaName ? personaBaselineToolNames : undefined,
+			baselineMountedToolNames: options.personaName ? baselineMountedToolNames : undefined,
+			baselineLspEnabled: options.personaName ? baselineLspEnabled : undefined,
+			baselineHubEnabled: options.personaName ? baselineHubEnabled : undefined,
 			// Defined only for top-level sessions (creation is gated above).
 			// AgentSession uses this to decide whether it may dispose the global
 			// AsyncJobManager on teardown; subagents inherit the parent's and
@@ -3561,6 +4001,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			setActiveToolNames: setSessionActiveToolNames,
 			ensureWriteRegistered,
 			ensureGoalRegistered,
+			registerBuiltInTools,
 			getMcpServerInstructions: mcpManager
 				? () => {
 						const raw = mcpManager.getServerInstructions();
@@ -3662,6 +4103,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// Re-registration refreshes the implementation, but it must not reverse an
 					// explicit setActiveTools() decision that disabled the previous definition.
 					if (existingTool && !alreadyEnabled) return;
+					// A LIVE `/agent` switch narrowed the session to a persona's exact
+					// tool list; a late extension registration must not widen the active
+					// set past that grant (codex #3820966598). The tool is registered but
+					// not activated when the persona did not grant it.
+					const personaRestriction = session.getPersonaToolRestriction();
+					if (personaRestriction && !personaRestriction.has(name) && !alreadyEnabled) {
+						return;
+					}
 					const shouldMount =
 						!explicitlyRequested &&
 						toolSession.xdev !== undefined &&

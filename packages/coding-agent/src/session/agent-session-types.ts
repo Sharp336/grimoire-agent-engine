@@ -133,6 +133,48 @@ export interface AgentSessionConfig {
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	/** Initial session thinking selector. */
 	thinkingLevel?: ConfiguredThinkingLevel;
+	/**
+	 * Live persona system-prompt append (mutable channel). Seeded by the launch
+	 * `--agent` path so a later `/agent` switch REPLACES the launch persona's
+	 * prompt instead of stacking both.
+	 */
+	personaAppendPrompt?: string;
+	/**
+	 * Launch spawn policy (`"*"`, a comma list, or absent). Seeded into the
+	 * mutable spawn channel so a later `setSessionSpawns(null)` (persona
+	 * cleared) reads as unrestricted `"*"` instead of falling back to the
+	 * launch persona's restriction.
+	 */
+	spawns?: string;
+	/** Launch `--agent` persona name; marks the session as persona-owned. */
+	personaName?: string;
+	/** Baseline tool set captured at creation (without the persona's `tools:` restriction). */
+	baselineToolNames?: string[];
+	/**
+	 * Baseline `xd://`-mounted subset captured at creation (the names that were
+	 * presented as devices in the initial partition). `restoreBaselineTools`
+	 * restores the exact partition via `setActiveToolPresentation` so leaving a
+	 * persona re-mounts the same tools under `xd://` instead of pinning every
+	 * baseline name top-level.
+	 */
+	baselineMountedToolNames?: string[];
+	/**
+	 * Whether the persona baseline includes `lsp` even though the session's
+	 * `enableLsp` is false (the restricted-session DEFAULT, not an explicit
+	 * `--no-lsp`). The launch registry omits `lsp` under that default, so
+	 * `restoreBaselineTools` registers it on demand to restore the tool set a
+	 * normal unrestricted session would have.
+	 */
+	baselineLspEnabled?: boolean;
+	/**
+	 * Whether the persona baseline includes `hub` even though the session's
+	 * `restrictToolNames`/`enableIrc` (both forced off for a restricted
+	 * session) made the launch registry omit it. The non-persona hub policy
+	 * (spawning enabled, IRC not explicitly disabled) says a normal
+	 * unrestricted session would have `hub`, so `restoreBaselineTools`
+	 * registers it on demand to restore that tool set.
+	 */
+	baselineHubEnabled?: boolean;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); every later change, including retry-fallback recovery, is re-clamped to it. */
 	thinkingLevelCeiling?: Effort;
 	/** Retry chain ownership when startup selected one of its fallback entries. */
@@ -180,12 +222,43 @@ export interface AgentSessionConfig {
 	builtInToolNames?: Iterable<string>;
 	/** MCP names whose initial registry entries came from the manager snapshot. */
 	mcpManagerToolNames?: Iterable<string>;
-	/** Updates tool-session predicates from the live active tool set. */
-	setActiveToolNames?: (names: Iterable<string>) => void;
+	/**
+	 * Updates tool-session predicates from the live active tool set. The
+	 * optional second argument is the persona-switch signal: true when the
+	 * applied persona tools list omits both `write` and `edit` (the SDK's
+	 * Cursor `editWasGranted` floor becomes revocable), false when either
+	 * mutating tool is present again. Omitted for non-persona active-set
+	 * mutations, which must not touch the flag. The third argument is the
+	 * parallel `edit`-only signal: true when the persona omits `edit`
+	 * specifically (revokes the Cursor `pi_edit` override even when `write`
+	 * keeps `personaDroppedMutation` false), false when `edit` returns
+	 * (codex #3818999447).
+	 */
+	setActiveToolNames?: (names: Iterable<string>, droppedMutation?: boolean, droppedEdit?: boolean) => void;
 	/** Registers the write transport when runtime xdev mounts first need it. */
 	ensureWriteRegistered?: () => Promise<boolean>;
 	/** Registers the hidden `goal` tool when goal mode is enabled at runtime. */
 	ensureGoalRegistered?: () => Promise<boolean>;
+	/**
+	 * Registers built-in tools missing from the registry on demand (the live
+	 * `/agent` persona-switch path). The SDK wires this to a closure that
+	 * builds each missing built-in through the same allowance gate the launch
+	 * path uses, so a session started with a restricted registry (`--tools`/
+	 * `--no-tools`) can still activate a persona's `tools:` list.
+	 * `personaRequestsLsp` is true when the persona's `tools:` list explicitly
+	 * includes `lsp`; the closure then lets `lsp` through the gate when the
+	 * session's `enableLsp` is false only because a restricted launch defaulted
+	 * it (an explicit `--no-lsp` still wins). `personaRequestsHub` is true when
+	 * the baseline restore path needs `hub` under the non-persona hub policy
+	 * (spawning enabled, IRC not explicitly disabled); the closure then lets
+	 * `hub` through the gate that `restrictToolNames`/`enableIrc` would
+	 * otherwise close.
+	 */
+	registerBuiltInTools?: (
+		names: string[],
+		personaRequestsLsp?: boolean,
+		personaRequestsHub?: boolean,
+	) => Promise<void>;
 	/** Current session pre-LLM message transform pipeline. */
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	/** Provider request transform applied after message conversion. */

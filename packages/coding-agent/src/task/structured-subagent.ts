@@ -33,7 +33,7 @@ import {
 } from "./isolation-runner";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
-import { resolveSpawnPolicy } from "./spawn-policy";
+import { resolveEffectiveDefaultAgent, resolveSpawnPolicy } from "./spawn-policy";
 import {
 	type AgentDefinition,
 	type AgentProgress,
@@ -247,16 +247,38 @@ export async function resolveEffectiveSubagentPolicy(
 ): Promise<EffectiveSubagentPolicy> {
 	await request.session.settings.reloadFromDisk();
 	const spawnPolicy = resolveSpawnPolicy(request.session.getSessionSpawns());
-	const agentName = request.agent?.trim() || spawnPolicy.defaultAgent;
+	const rawAgentName = request.agent?.trim() || spawnPolicy.defaultAgent;
 	const planMode = request.session.getPlanModeState?.()?.enabled === true;
 	assertPlanControlsAllowed(request, planMode);
-	assertDepthAndSpawnAllowed(request, agentName);
+	assertDepthAndSpawnAllowed(request, rawAgentName);
 
 	const discovery = await discoverAgents(request.session.cwd);
+	// The raw policy default comes from the parent's `spawns` frontmatter and
+	// may name an agent that cannot actually be spawned (primary/unavailable,
+	// disabled, or not in the allowed list). Callers that bypass the task
+	// tool's own default derivation — notably eval's `agent({ prompt })` when
+	// `agent` is omitted — must fall back to the first spawnable agent from
+	// the discovered roster here, or the availability preflight below rejects
+	// the raw default even though a spawnable fallback exists.
+	const agentName =
+		request.agent?.trim() ||
+		(resolveEffectiveDefaultAgent(
+			spawnPolicy,
+			discovery.agents,
+			request.session.settings.get("task.disabledAgents"),
+		) ??
+			spawnPolicy.defaultAgent);
+	if (agentName !== rawAgentName) assertDepthAndSpawnAllowed(request, agentName);
 	const agent = getAgent(discovery.agents, agentName);
 	if (!agent) {
 		const available = discovery.agents.map(candidate => candidate.name).join(", ") || "none";
 		throw new StructuredSubagentError("preflight", `Unknown agent "${agentName}". Available: ${available}`);
+	}
+	if (agent.availability === "primary" || agent.availability === "unavailable") {
+		throw new StructuredSubagentError(
+			"preflight",
+			`Agent "${agentName}" is primary/main-session-only and cannot be spawned as a subagent.`,
+		);
 	}
 	const disabledAgents = request.session.settings.get("task.disabledAgents") as string[];
 	if (disabledAgents.includes(agentName)) {
