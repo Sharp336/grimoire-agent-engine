@@ -155,16 +155,29 @@ describe("resolveArchiveRoots", () => {
 
 describe("archiveDestinationExists", () => {
 	test("detects a gzip or legacy uncompressed destination", async () => {
+		const source = path.join(root, "sessions", "done.jsonl");
 		const destination = path.join(root, "archive", "done.jsonl.gz");
-		expect(await archiveDestinationExists(destination)).toBe(false);
+		expect(await archiveDestinationExists(source, destination)).toBe(false);
 
 		await fs.mkdir(path.dirname(destination), { recursive: true });
 		await Bun.write(destination, "gz");
-		expect(await archiveDestinationExists(destination)).toBe(true);
+		expect(await archiveDestinationExists(source, destination)).toBe(true);
 
 		await fs.unlink(destination);
 		await Bun.write(destination.slice(0, -".gz".length), "plain");
-		expect(await archiveDestinationExists(destination)).toBe(true);
+		expect(await archiveDestinationExists(source, destination)).toBe(true);
+	});
+
+	test("detects a leftover destination artifact directory when the source has artifacts", async () => {
+		const source = path.join(root, "sessions", "done.jsonl");
+		const destination = path.join(root, "archive", "done.jsonl.gz");
+		await fs.mkdir(source.slice(0, -".jsonl".length), { recursive: true });
+		await fs.mkdir(destination.slice(0, -".jsonl.gz".length), { recursive: true });
+
+		expect(await archiveDestinationExists(source, destination)).toBe(true);
+
+		await fs.rm(source.slice(0, -".jsonl".length), { recursive: true });
+		expect(await archiveDestinationExists(source, destination)).toBe(false);
 	});
 });
 

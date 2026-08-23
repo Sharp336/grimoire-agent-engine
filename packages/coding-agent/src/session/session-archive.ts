@@ -63,11 +63,14 @@ export function resolveArchiveRoots(input: {
 	return null;
 }
 
-export async function archiveDestinationExists(destinationPath: string): Promise<boolean> {
+export async function archiveDestinationExists(sourceSession: string, destinationPath: string): Promise<boolean> {
 	const legacyDestSession = destinationPath.endsWith(".gz")
 		? destinationPath.slice(0, -".gz".length)
 		: `${destinationPath}.gz`;
-	return (await pathExists(destinationPath)) || (await pathExists(legacyDestSession));
+	if ((await pathExists(destinationPath)) || (await pathExists(legacyDestSession))) return true;
+	const sourceArtifacts = sessionArtifactsPath(sourceSession);
+	const destArtifacts = sessionArtifactsPath(destinationPath);
+	return (await pathExists(sourceArtifacts)) && (await pathExists(destArtifacts));
 }
 
 export function sessionArtifactsPath(sessionPath: string): string {

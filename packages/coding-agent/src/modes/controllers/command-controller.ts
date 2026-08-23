@@ -1052,7 +1052,7 @@ export class CommandController {
 			this.ctx.showError("Cannot archive a session outside a sessions directory");
 			return;
 		}
-		if (await archiveDestinationExists(roots.destinationPath)) {
+		if (await archiveDestinationExists(sessionFile, roots.destinationPath)) {
 			this.ctx.showError("Archive destination already exists");
 			return;
 		}
