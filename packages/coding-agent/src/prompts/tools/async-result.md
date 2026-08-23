@@ -12,7 +12,8 @@
 {{/if}}<tail>
 {{escapeXml this.leftoverTail}}
 </tail>
-{{else}}{{escapeXml this.leftoverText}}
+{{else}}{{escapeXml this.leftoverText}}{{#if this.leftoverTruncated}}
+<suppressed reason="preview-limit" full-output="artifact://{{this.artifactId}}" />{{/if}}
 {{/if}}</output>
 Remaining output since the last progress update; earlier output was already delivered. Full output: artifact://{{this.artifactId}}{{else}}All output was already delivered as progress updates. Full output: artifact://{{this.artifactId}}{{/if}}{{#if this.terminalText}}
 <result>

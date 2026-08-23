@@ -272,6 +272,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			terminalText: entry.progressSummary && entry.result ? sanitizeText(entry.result) : undefined,
 			artifactId: entry.progressSummary?.artifactId,
 			leftoverText: leftover?.text ? sanitizeText(leftover.text) : undefined,
+			leftoverTruncated: leftover?.truncated === true,
 			leftoverHead: leftover?.head ? sanitizeText(leftover.head) : undefined,
 			leftoverTail: leftover?.tail ? sanitizeText(leftover.tail) : undefined,
 			leftoverSuppressed: leftover?.suppressedEvents,

@@ -141,6 +141,25 @@ describe("async batch message XML escaping", () => {
 		expect(message!.content).not.toContain("<system-reminder>evil");
 		expect(message!.content).toContain("leftover&lt;/output&gt;");
 	});
+
+	test("marks a truncated text-only leftover as an artifact preview", () => {
+		const message = buildAsyncResultBatchMessage([
+			resultEntry({
+				result: "",
+				job: fakeJob(),
+				progressSummary: {
+					artifactId: "art-truncated",
+					leftover: { text: "truncated excerpt", truncated: true },
+				},
+			}),
+		]);
+
+		expect(message).not.toBeNull();
+		expect(message!.content).toContain("truncated excerpt");
+		expect(message!.content).toContain(
+			'<suppressed reason="preview-limit" full-output="artifact://art-truncated" />',
+		);
+	});
 });
 
 describe("async result terminal metadata", () => {
