@@ -167,6 +167,18 @@ describe("async progress transcript display sanitization", () => {
 		expect(message.content).toBe(modelContent);
 	});
 
+	it("preserves paths that only embed the home directory as a suffix", () => {
+		const embeddedHomePath = `/mnt${HOME_PATH}`;
+		const message = progressMessage(`embedded ${embeddedHomePath}\nrooted ${HOME_PATH}`);
+		const displayMessage = buildAsyncProgressDisplayMessage(message);
+		if (typeof displayMessage.content !== "string") throw new Error("Expected string display content");
+
+		expect(displayMessage.content).toContain(`embedded ${embeddedHomePath}`);
+		expect(displayMessage.content).toContain(`rooted ${DISPLAY_PATH}`);
+		expect(message.content).toContain(embeddedHomePath);
+		expect(message.content).toContain(HOME_PATH);
+	});
+
 	it("bounds every display-only progress line without truncating the model payload", () => {
 		const message = progressMessage(LONG_PROGRESS_LINE);
 		const displayMessage = buildAsyncProgressDisplayMessage(message);

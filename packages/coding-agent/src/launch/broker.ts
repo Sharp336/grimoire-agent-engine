@@ -1623,12 +1623,20 @@ class DaemonBroker {
 
 	async #restart(name: string): Promise<DaemonRpcResult> {
 		const record = this.#record(name);
+		const wasTerminal = terminalState(record.snapshot.state);
 		record.monitorRestarting = true;
 		try {
 			await this.#stopRecord(record, 2_000);
 			await record.log?.close();
 			record.log = await DaemonLog.open(record.dir);
 			record.stopRequested = false;
+			// Terminal settlement completed and disposed the previous incarnation's
+			// monitor sinks. Relaunch under a fresh id so those retained registrations
+			// stay stale while next-start registrations bind to the new lifecycle.
+			if (wasTerminal) {
+				record.snapshot.id = crypto.randomUUID();
+				this.#bindOutputRegistrations(record);
+			}
 			await this.#launch(record);
 		} finally {
 			record.monitorRestarting = false;

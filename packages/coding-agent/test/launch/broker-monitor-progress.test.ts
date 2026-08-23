@@ -686,6 +686,119 @@ process.stdin.once("data", () => {
 		}
 	}, 20_000);
 
+	it("gives a terminal daemon restart a fresh monitor and artifact lifecycle", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-terminal-restart-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const scriptPath = path.join(projectDir, "service.ts");
+		const oldArtifactPath = path.join(tempDir.path(), "terminal-old.log");
+		const newArtifactPath = path.join(tempDir.path(), "terminal-new.log");
+		await Bun.write(scriptPath, 'process.stdout.write("FIRST_RUN\\n");\n');
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir, { progressBatchIntervalMs: 0 });
+		const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+		let oldMonitor: RawBrokerSocket | undefined;
+		let newMonitor: RawBrokerSocket | undefined;
+		try {
+			await client.request({ op: "ping" });
+			const token = (await Bun.file(path.join(runtimeDir, "broker.token")).text()).trim();
+			const register = (
+				id: string,
+				outputSubscriptionId: string,
+				subscription: Record<string, unknown>,
+			): string =>
+				`${JSON.stringify({
+					id,
+					token,
+					outputSubscriptionId,
+					outputSubscriptions: [subscription],
+					operation: { op: "ping" },
+				})}\n`;
+			const oldSubscription = {
+				id: "terminal-old-monitor",
+				name: "terminal-restart",
+				owner: "terminal-owner",
+				artifactPath: oldArtifactPath,
+			};
+			oldMonitor = await openRawBrokerSocket(endpoint);
+			oldMonitor.socket.write(register("register-old", "terminal-old-client", oldSubscription));
+			await oldMonitor.waitFor(message => message.id === "register-old");
+
+			const started = await client.request({
+				op: "start",
+				spec: {
+					name: "terminal-restart",
+					application: process.execPath,
+					args: [scriptPath],
+					env: {},
+					cwd: projectDir,
+					pty: false,
+					restart: "no",
+					persist: false,
+					detached: false,
+				},
+			});
+			if (started.op !== "start") throw new Error("unexpected start result");
+			await oldMonitor.waitFor(
+				message => message.event === "daemon-monitor-completed" && message.monitorId === oldSubscription.id,
+			);
+
+			await Bun.write(scriptPath, 'process.stdout.write("SECOND_RUN\\n");\n');
+			const newSubscription = {
+				id: "terminal-new-monitor",
+				name: "terminal-restart",
+				owner: "terminal-owner",
+				artifactPath: newArtifactPath,
+				startPending: true,
+			};
+			newMonitor = await openRawBrokerSocket(endpoint);
+			newMonitor.socket.write(register("register-new", "terminal-new-client", newSubscription));
+			await newMonitor.waitFor(message => message.id === "register-new");
+			expect(newMonitor.messages.some(message => message.monitorId === newSubscription.id)).toBeFalse();
+
+			const restarted = await client.request({ op: "restart", name: "terminal-restart" });
+			if (restarted.op !== "restart") throw new Error("unexpected restart result");
+			expect(restarted.daemon.id).not.toBe(started.daemon.id);
+			await newMonitor.waitFor(
+				message => message.event === "daemon-monitor-completed" && message.monitorId === newSubscription.id,
+			);
+
+			const oldNotifications = oldMonitor.messages.filter(message => message.monitorId === oldSubscription.id);
+			expect(oldNotifications.map(message => message.event)).toEqual([
+				"daemon-output",
+				"daemon-monitor-completed",
+			]);
+			expect(oldNotifications[0]?.text).toBe("FIRST_RUN");
+			expect(await Bun.file(oldArtifactPath).text()).toBe("FIRST_RUN\n");
+
+			const newNotifications = newMonitor.messages.filter(message => message.monitorId === newSubscription.id);
+			expect(newNotifications.map(message => message.event)).toEqual([
+				"daemon-output",
+				"daemon-monitor-completed",
+			]);
+			expect(newNotifications[0]).toMatchObject({
+				daemonId: restarted.daemon.id,
+				text: "SECOND_RUN",
+			});
+			expect(newNotifications[1]?.daemon).toMatchObject({
+				id: restarted.daemon.id,
+				state: "exited",
+				exitCode: 0,
+			});
+			expect(await Bun.file(newArtifactPath).text()).toBe("SECOND_RUN\n");
+		} finally {
+			oldMonitor?.socket.destroy();
+			newMonitor?.socket.destroy();
+			await client.request({ op: "stop", name: "terminal-restart", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
+
 	it("bounds socket previews while preserving the complete broker-written artifact", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-monitor-preview-");
 		const projectDir = path.join(tempDir.path(), "project");
