@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { mindshubModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
@@ -25,10 +28,14 @@ describe("mindshub provider support", () => {
 	test("registers built-in descriptor and default model", () => {
 		const descriptor = PROVIDER_DESCRIPTORS.find(item => item.providerId === "mindshub");
 		expect(descriptor).toBeDefined();
-		expect(descriptor?.defaultModel).toBe("sonnet");
+		// `mindshub_air` is covered by a new organization's included/free
+		// allowance; paid aliases like `sonnet` can stay disabled until the
+		// wallet is funded, so a fresh account's first default request must
+		// land on a model it can actually use.
+		expect(descriptor?.defaultModel).toBe("mindshub_air");
 		expect(descriptor?.dynamicModelsAuthoritative).toBe(true);
 		expect(descriptor?.catalogDiscovery?.envVars).toContain("MINDSHUB_API_KEY");
-		expect(DEFAULT_MODEL_PER_PROVIDER.mindshub).toBe("sonnet");
+		expect(DEFAULT_MODEL_PER_PROVIDER.mindshub).toBe("mindshub_air");
 	});
 
 	test("registers MindsHub in the OAuth/login provider selector", () => {
@@ -79,6 +86,17 @@ describe("mindshub provider support", () => {
 							provider: "openai",
 							family: "embed-small",
 						},
+						{
+							id: "retired-model",
+							label: "Retired Model",
+							object: "model",
+							created: 0,
+							enabled: false,
+							reasoning_efforts: null,
+							embedding: false,
+							provider: "openai",
+							family: "retired-model",
+						},
 					],
 				}),
 				{ status: 200, headers: { "Content-Type": "application/json" } },
@@ -99,6 +117,10 @@ describe("mindshub provider support", () => {
 		// Embedding-only rows are dropped: they serve `/v1/embeddings`, not chat.
 		expect(models?.some(model => model.id === "embed-small")).toBe(false);
 
+		// Org-disabled rows are unavailable for inference even though discovery
+		// still lists them, so they must not surface as selectable either.
+		expect(models?.some(model => model.id === "retired-model")).toBe(false);
+
 		const sonnet = models?.find(model => model.id === "sonnet");
 		expect(sonnet?.api).toBe("openai-completions");
 		expect(sonnet?.baseUrl).toBe("https://api.mindshub.ai/v1");
@@ -106,11 +128,59 @@ describe("mindshub provider support", () => {
 		expect(sonnet?.reasoning).toBe(true);
 		expect(sonnet?.input).toEqual(["text", "image"]);
 
+		// The restricted advertised ladder (no `minimal`/`xhigh`) must survive
+		// into an explicit `ThinkingConfig`, not collapse to a boolean and fall
+		// through to the generic inferred Anthropic ladder for the `sonnet`
+		// alias id.
+		if (!sonnet) throw new Error("sonnet model was not resolved");
+		const sonnetModel = buildModel(sonnet);
+		expect(getSupportedEfforts(sonnetModel)).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.Max]);
+		expect(sonnetModel.thinking?.defaultLevel).toBe(Effort.High);
+
 		// `reasoning_efforts: null` means the level isn't adjustable, not that
 		// the model never reasons (see docs/models.mdx#reasoning-effort).
 		const kimi = models?.find(model => model.id === "kimi");
 		expect(kimi?.name).toBe("Kimi K3");
 		expect(kimi?.reasoning).toBe(false);
+	});
+
+	test("filters out models the org has explicitly disabled", async () => {
+		const fetchMock: FetchImpl = vi.fn(
+			async () =>
+				new Response(
+					JSON.stringify({
+						object: "list",
+						data: [
+							{
+								id: "active-model",
+								label: "Active Model",
+								object: "model",
+								created: 0,
+								enabled: true,
+								embedding: false,
+								provider: "openai",
+								family: "active-model",
+							},
+							{
+								id: "disabled-model",
+								label: "Disabled Model",
+								object: "model",
+								created: 0,
+								enabled: false,
+								embedding: false,
+								provider: "openai",
+								family: "disabled-model",
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				),
+		);
+
+		const options = mindshubModelManagerOptions({ apiKey: "mindshub-test-key", fetch: fetchMock });
+		const models = await options.fetchDynamicModels?.();
+		expect(models?.some(model => model.id === "active-model")).toBe(true);
+		expect(models?.some(model => model.id === "disabled-model")).toBe(false);
 	});
 
 	test("discovery omits the Authorization header without an API key", async () => {

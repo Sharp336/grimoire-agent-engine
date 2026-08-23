@@ -5,9 +5,6 @@ import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 describe("mindshub login", () => {
 	it("opens the MindsHub console and validates against the models endpoint", async () => {
 		let authUrl: string | undefined;
-		let authInstructions: string | undefined;
-		let promptMessage: string | undefined;
-		let promptPlaceholder: string | undefined;
 
 		const fetchMock: FetchImpl = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
 			const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
@@ -23,20 +20,15 @@ describe("mindshub login", () => {
 		const apiKey = await loginMindsHub({
 			onAuth: info => {
 				authUrl = info.url;
-				authInstructions = info.instructions;
 			},
-			onPrompt: async prompt => {
-				promptMessage = prompt.message;
-				promptPlaceholder = prompt.placeholder;
-				return "mdb-test-key";
-			},
+			onPrompt: async () => "mdb-test-key",
 			fetch: fetchMock,
 		});
 
+		// The exact instructional/placeholder copy isn't a consumer contract —
+		// only the console URL, the auth header, the returned key, and the
+		// validation call are (see AGENTS.md's testing guidance).
 		expect(authUrl).toBe("https://console.mindshub.ai");
-		expect(authInstructions).toContain("Create or copy your MindsHub API key");
-		expect(promptMessage).toBe("Paste your MindsHub API key");
-		expect(promptPlaceholder).toBe("mdb_...");
 		expect(apiKey).toBe("mdb-test-key");
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});

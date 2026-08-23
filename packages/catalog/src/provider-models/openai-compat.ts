@@ -3005,6 +3005,41 @@ interface MindsHubModelRecord extends OpenAICompatibleModelRecord {
 	enabled?: unknown;
 	embedding?: unknown;
 	reasoning_efforts?: unknown;
+	default_reasoning_effort?: unknown;
+}
+
+/**
+ * MindsHub advertises a restricted effort ladder per model (e.g. `sonnet`
+ * only exposes `["low", "medium", "high", "max"]`, never `minimal`/`xhigh`).
+ * Build an explicit `ThinkingConfig` from the advertised values instead of
+ * letting the model fall through to identity-based inference — otherwise an
+ * alias id like `sonnet` would get the generic inferred Anthropic ladder
+ * (`minimal` … `xhigh`), which lets the UI offer efforts MindsHub rejects and
+ * hides `max`. Canonical ordering is reapplied regardless of wire order so
+ * the `ThinkingConfig.efforts` "least → most intensive" invariant holds.
+ */
+function mapMindshubThinking(record: MindsHubModelRecord): ThinkingConfig | undefined {
+	const advertised = new Set(
+		Array.isArray(record.reasoning_efforts)
+			? record.reasoning_efforts.filter(
+					(value): value is Effort =>
+						typeof value === "string" && (THINKING_EFFORTS as readonly string[]).includes(value),
+				)
+			: [],
+	);
+	if (advertised.size === 0) {
+		return undefined;
+	}
+	const efforts = THINKING_EFFORTS.filter(effort => advertised.has(effort));
+	const defaultLevel =
+		typeof record.default_reasoning_effort === "string" && advertised.has(record.default_reasoning_effort as Effort)
+			? (record.default_reasoning_effort as Effort)
+			: undefined;
+	return {
+		mode: "effort",
+		efforts,
+		...(defaultLevel && { defaultLevel }),
+	};
 }
 
 export function mindshubModelManagerOptions(
@@ -3022,15 +3057,23 @@ export function mindshubModelManagerOptions(
 				apiKey,
 				// The catalog also lists embedding-only rows (e.g. `embed-small`) for
 				// `/v1/embeddings`; they are not chat models and never carry the
-				// `chat.completions` capabilities the coding agent expects.
-				filterModel: (entry: OpenAICompatibleModelRecord) => (entry as MindsHubModelRecord).embedding !== true,
+				// `chat.completions` capabilities the coding agent expects. Rows the
+				// org has explicitly disabled (`enabled: false`) are unavailable for
+				// inference even though discovery still lists them, so they're
+				// dropped too — otherwise an unusable alias shows up as selectable
+				// and requests against it fail.
+				filterModel: (entry: OpenAICompatibleModelRecord) => {
+					const record = entry as MindsHubModelRecord;
+					return record.embedding !== true && record.enabled !== false;
+				},
 				mapModel: (entry: OpenAICompatibleModelRecord, defaults: ModelSpec<"openai-completions">) => {
 					const record = entry as MindsHubModelRecord;
-					const reasoningEfforts = Array.isArray(record.reasoning_efforts) ? record.reasoning_efforts : undefined;
+					const thinking = mapMindshubThinking(record);
 					return {
 						...defaults,
 						name: toModelName(record.label, defaults.name),
-						reasoning: (reasoningEfforts?.length ?? 0) > 0,
+						reasoning: thinking !== undefined,
+						...(thinking && { thinking }),
 						// Every catalog model accepts image parts (docs: "Image parts are
 						// accepted on every chat model").
 						input: ["text", "image"],

@@ -297,7 +297,12 @@ export const CATALOG_PROVIDERS = [
 	},
 	{
 		id: "mindshub",
-		defaultModel: "sonnet",
+		// A fresh org's included/free allowance applies to `mindshub_air`;
+		// paid aliases like `sonnet` can stay disabled until the wallet is
+		// funded, so `/login` succeeding wouldn't guarantee the first default
+		// request also succeeds. `mindshub_air` lets a good-faith new signup
+		// complete a request with no funding required.
+		defaultModel: "mindshub_air",
 		envVars: ["MINDSHUB_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => mindshubModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
