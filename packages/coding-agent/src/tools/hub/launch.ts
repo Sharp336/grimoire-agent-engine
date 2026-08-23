@@ -180,10 +180,7 @@ async function registerOutputSink(
 			return cleanupPromise;
 		},
 	};
-	const deliver = async (
-		notification: DaemonMonitorNotification,
-		waitForTerminalCompletion = true,
-	): Promise<void> => {
+	const deliver = async (notification: DaemonMonitorNotification, waitForTerminalCompletion = true): Promise<void> => {
 		if (!registration.active || session.isDisposed?.())
 			throw new Error("Session disposed before launch output delivery");
 		if (notification.event === "daemon-output") {
