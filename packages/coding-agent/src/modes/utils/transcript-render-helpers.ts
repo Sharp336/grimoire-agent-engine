@@ -36,7 +36,7 @@ function sanitizeAsyncProgressDisplayText(text: string): string {
 	if (!home) return truncateAsyncProgressDisplayLines(display);
 	const homePaths = home.includes("\\") ? [home, home.replaceAll("\\", "/")] : [home];
 	for (const homePath of homePaths) {
-		const homePrefix = new RegExp(`${escapeRegExp(homePath)}(?=$|[\\\\/])`, "g");
+		const homePrefix = new RegExp(`(?<![^\\s"'()\\[\\]{}<>=:;,|&/])${escapeRegExp(homePath)}(?=$|[\\\\/])`, "g");
 		display = display.replace(homePrefix, match => shortenPath(match, homePath));
 	}
 	return truncateAsyncProgressDisplayLines(display);

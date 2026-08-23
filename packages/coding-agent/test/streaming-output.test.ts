@@ -424,6 +424,25 @@ describe("OutputSink", () => {
 		expect(chunks).toEqual(["a", "b"]);
 	});
 
+	test("dispose delivers a throttled mirror tail before finalizing its artifact", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "disposed-mirror.log");
+		const chunks: string[] = [];
+		const sink = new OutputSink({
+			artifactPath,
+			artifactWriteMode: "mirror",
+			onChunk: chunk => chunks.push(chunk),
+			chunkThrottleMs: 60_000,
+		});
+
+		sink.push("first");
+		sink.push(" second");
+		await sink.dispose();
+
+		expect(chunks).toEqual(["first", " second"]);
+		expect(await Bun.file(artifactPath).text()).toBe("first second");
+	});
+
 	test("replace cancels a throttled tail and discards its pending preview", () => {
 		vi.useFakeTimers();
 		const chunks: string[] = [];

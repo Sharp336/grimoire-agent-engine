@@ -1245,6 +1245,21 @@ export class OutputSink {
 		this.#emitPendingChunkWith("", Date.now());
 	}
 
+	async #settleChunkDelivery(): Promise<void> {
+		// A caller may finish before the throttle window expires. Deliver that
+		// accepted tail, then wait for every serialized mirror flush/callback
+		// before closing the artifact they observe.
+		this.#flushPendingChunk();
+		await this.#chunkDeliveryTail;
+		if (this.#chunkDeliveryFailure) {
+			const { error } = this.#chunkDeliveryFailure;
+			this.#chunkDeliveryFailure = undefined;
+			logger.warn("Output preview delivery failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
 	#schedulePendingChunkFlush(): void {
 		if (this.#chunkThrottleMs <= 0 || this.#pendingChunkTimer) return;
 		const elapsed = Date.now() - this.#lastChunkTime;
@@ -1298,17 +1313,7 @@ export class OutputSink {
 		}
 		const noticeLine = notice ? `[${notice}]\n` : "";
 
-		// Flush any chunk still held back by the throttle so the live preview
-		// ends with the complete stream.
-		this.#flushPendingChunk();
-		await this.#chunkDeliveryTail;
-		if (this.#chunkDeliveryFailure) {
-			const { error } = this.#chunkDeliveryFailure;
-			this.#chunkDeliveryFailure = undefined;
-			logger.warn("Output preview delivery failed", {
-				error: error instanceof Error ? error.message : String(error),
-			});
-		}
+		await this.#settleChunkDelivery();
 		const totalLines = this.#sawData ? this.#totalLines + 1 : 0;
 
 		await this.#finalizeFile();
@@ -1416,7 +1421,7 @@ export class OutputSink {
 	 * leaked until a later unrelated read hits `EMFILE` (issue #6463).
 	 */
 	async dispose(): Promise<void> {
-		this.#clearPendingChunkTimer();
+		await this.#settleChunkDelivery();
 		await this.#finalizeFile();
 	}
 

@@ -73,6 +73,24 @@ describe("async progress transcript display sanitization", () => {
 		expect(message.content).toBe(modelContent);
 	});
 
+	it("shortens home paths in file URLs without matching embedded path suffixes or mutating the source", () => {
+		const fileUrl = `file://${HOME_PATH}`;
+		const embeddedPath = `/mnt${HOME_PATH}`;
+		const rawProgress = `artifact: ${fileUrl}\nmounted: ${embeddedPath}`;
+		const message = progressMessage(rawProgress);
+		const sourceContent = message.content;
+		const sourceDetails = JSON.stringify(message.details);
+
+		const displayMessage = buildAsyncProgressDisplayMessage(message);
+
+		expect(displayMessage.content).toContain(`file://${DISPLAY_PATH}`);
+		expect(displayMessage.content).toContain(embeddedPath);
+		expect(displayMessage.content).not.toContain(fileUrl);
+		expect(message.content).toBe(sourceContent);
+		expect(message.details?.jobs[0]?.text).toBe(rawProgress);
+		expect(JSON.stringify(message.details)).toBe(sourceDetails);
+	});
+
 	it("sanitizes tabs and home paths in a rebuilt transcript without changing the stored message", () => {
 		const message = progressMessage();
 		const modelContent = message.content;
