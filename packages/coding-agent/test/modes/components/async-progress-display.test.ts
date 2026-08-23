@@ -2,11 +2,15 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:
 import * as os from "node:os";
 import type { TUI } from "@oh-my-pi/pi-tui";
 import { resetSettingsForTest, Settings } from "../../../src/config/settings";
+import type { DaemonSnapshot } from "../../../src/launch/protocol";
 import { ChatTranscriptBuilder } from "../../../src/modes/components/chat-transcript-builder";
 import { TranscriptContainer } from "../../../src/modes/components/transcript-container";
 import { initTheme } from "../../../src/modes/theme/theme";
 import type { InteractiveModeContext } from "../../../src/modes/types";
-import { buildAsyncProgressDisplayMessage } from "../../../src/modes/utils/transcript-render-helpers";
+import {
+	buildAsyncProgressDisplayMessage,
+	buildLaunchCompletionBlock,
+} from "../../../src/modes/utils/transcript-render-helpers";
 import { UiHelpers } from "../../../src/modes/utils/ui-helpers";
 import {
 	type AsyncProgressDetails,
@@ -189,5 +193,41 @@ describe("async progress transcript display sanitization", () => {
 		expect(Bun.stringWidth(progressLine!)).toBeLessThanOrEqual(110);
 		expect(displayMessage.content).not.toContain(LONG_PROGRESS_LINE);
 		expect(message.content).toContain(LONG_PROGRESS_LINE);
+	});
+
+	it("sanitizes and bounds supervised-process names in completion rows", () => {
+		const longSuffix = "x".repeat(500);
+		const name = `web\t${HOME_PATH}\n${longSuffix}`;
+		const daemon: DaemonSnapshot = {
+			name,
+			id: "daemon-id",
+			state: "exited",
+			pid: 123,
+			createdAt: 1,
+			startedAt: 2,
+			exitedAt: 3,
+			exitCode: 0,
+			restartCount: 0,
+			outputBytes: 0,
+			owner: "owner-session",
+			persist: true,
+			detached: false,
+		};
+		const message = {
+			role: "custom",
+			customType: "launch-completion",
+			content: "",
+			display: true,
+			details: { daemons: [daemon] },
+			timestamp: Date.now(),
+		} satisfies CustomMessage<{ daemons: DaemonSnapshot[] }>;
+
+		const rendered = Bun.stripANSI(buildLaunchCompletionBlock(message).render(240).join("\n"));
+
+		expect(rendered).not.toContain("\t");
+		expect(rendered).not.toContain(HOME_PATH);
+		expect(rendered).toContain(DISPLAY_PATH);
+		expect(rendered).not.toContain(longSuffix);
+		expect(rendered).toContain("Supervised process completed");
 	});
 });

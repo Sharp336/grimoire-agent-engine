@@ -239,7 +239,8 @@ describe("AgentSession owner-routed async delivery", () => {
 			modelRegistry: new ModelRegistry(authStorage),
 			agentId: "SubAgent",
 		});
-		session.setLaunchMonitorActive("monitor-ambient", "ambient", true);
+		const monitorEpoch = session.captureLaunchProgressEpoch();
+		session.setLaunchMonitorActive("monitor-ambient", "ambient", true, monitorEpoch);
 		await session.prompt("start ambient monitoring");
 		const callsBeforeSettlement = mock.calls.length;
 		expect(session.hasPendingAsyncWork()).toBe(true);
@@ -251,7 +252,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(settled).toBe(false);
 		expect(mock.calls).toHaveLength(callsBeforeSettlement);
 
-		session.setLaunchMonitorActive("monitor-ambient", "ambient", false);
+		session.setLaunchMonitorActive("monitor-ambient", "ambient", false, monitorEpoch);
 		await settling;
 		expect(session.hasPendingAsyncWork()).toBe(false);
 		expect(mock.calls).toHaveLength(callsBeforeSettlement);
@@ -371,6 +372,116 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(observedText).not.toContain("QUEUED OLD AMBIENT EVENT");
 		expect(observedText).not.toContain("LATE OLD SESSION PROCESS EVENT");
 		expect(observedText).toContain("FRESH SESSION PROCESS EVENT");
+	});
+
+	it("fences process progress and completions while resetting the session context", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+		const oldMonitorEpoch = session.captureLaunchProgressEpoch();
+		session.setLaunchMonitorActive("monitor-reset", "ambient", true, oldMonitorEpoch);
+		const owner = sessionManager.getSessionId();
+		const completionDaemon = {
+			state: "exited",
+			createdAt: 1,
+			startedAt: 1,
+			exitedAt: 2,
+			exitCode: 0,
+			restartCount: 0,
+			outputBytes: 0,
+			owner,
+			persist: false,
+			detached: false,
+		} as const;
+
+		const refreshStarted = Promise.withResolvers<void>();
+		const releaseRefresh = Promise.withResolvers<void>();
+		vi.spyOn(session, "refreshBaseSystemPrompt").mockImplementation(async () => {
+			refreshStarted.resolve();
+			await releaseRefresh.promise;
+		});
+
+		const staleCompletion = session.queueLaunchCompletion({
+			event: "daemon-completed",
+			completionId: "old-reset-completion",
+			owner,
+			daemon: { ...completionDaemon, name: "old-reset-process", id: "old-daemon" },
+		});
+		const reset = session.resetSessionContext();
+		await refreshStarted.promise;
+		session.queueLaunchProgress(
+			{
+				event: "daemon-output",
+				monitorId: "monitor-reset",
+				name: "old-reset-process",
+				daemonId: "old-daemon",
+				seq: 1,
+				text: "OLD RESET PROCESS EVENT",
+				batchKind: "progress",
+				suppressedEvents: 0,
+			},
+			"ambient",
+			Date.now(),
+			oldMonitorEpoch,
+		);
+		// The completion was queued immediately before reset. Its old epoch is
+		// discovered only when the delayed yield flush crosses the reset boundary.
+		releaseRefresh.resolve();
+		await expect(reset).resolves.toEqual({ droppedCount: 0 });
+		const freshMonitorEpoch = session.captureLaunchProgressEpoch();
+
+		session.queueLaunchProgress(
+			{
+				event: "daemon-output",
+				monitorId: "monitor-reset",
+				name: "fresh-reset-process",
+				daemonId: "fresh-daemon",
+				seq: 2,
+				text: "FRESH RESET PROCESS EVENT",
+				batchKind: "progress",
+				suppressedEvents: 0,
+			},
+			"ambient",
+			Date.now(),
+			freshMonitorEpoch,
+		);
+		await session.queueLaunchCompletion({
+			event: "daemon-completed",
+			completionId: "fresh-reset-completion",
+			owner,
+			daemon: { ...completionDaemon, name: "fresh-reset-process", id: "fresh-daemon" },
+		});
+		await staleCompletion;
+		await session.waitForIdle();
+
+		const observedText = mock.calls
+			.flatMap(call =>
+				call.context.messages.flatMap(message =>
+					typeof message.content === "string"
+						? [message.content]
+						: message.content.flatMap(content => (content.type === "text" ? [content.text] : [])),
+				),
+			)
+			.join("\n");
+		expect(observedText).not.toContain("OLD RESET PROCESS EVENT");
+		expect(observedText).not.toContain("old-reset-process");
+		expect(observedText).toContain("FRESH RESET PROCESS EVENT");
+		expect(observedText).toContain("fresh-reset-process");
 	});
 
 	it("purges finished owned jobs when starting a new session", async () => {

@@ -188,11 +188,12 @@ export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolAc
 			daemon.exitedAt !== undefined && daemon.startedAt !== undefined
 				? formatDuration(daemon.exitedAt - daemon.startedAt)
 				: undefined;
+		const name = truncateToWidth(sanitizeAsyncProgressDisplayText(sanitizeText(daemon.name)), TRUNCATE_LENGTHS.TITLE);
 		const line = [
 			failed
 				? theme.fg("error", `${theme.status.error} Supervised process failed`)
 				: theme.fg("success", `${theme.status.done} Supervised process completed`),
-			theme.fg("accent", daemon.name),
+			theme.fg("accent", name),
 			daemon.exitCode !== undefined ? theme.fg("dim", `(exit ${daemon.exitCode})`) : undefined,
 			duration ? theme.fg("dim", `(${duration})`) : undefined,
 		]

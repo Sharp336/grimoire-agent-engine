@@ -97,6 +97,7 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 	// the surrounding sentences never fail these tests.
 	const BASH_ASYNC_MARKER = 'async: "auto"';
 	const HUB_PROGRESS_MARKER = 'op: "start"';
+	const HUB_POLLING_MARKER = "NEVER call `hub wait`";
 
 	function asyncProgressBlock(systemPrompt: string): string | undefined {
 		const start = systemPrompt.indexOf("<async-progress>");
@@ -122,6 +123,7 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 			// instructions must render inside the block.
 			expect(block).toContain(BASH_ASYNC_MARKER);
 			expect(block).toContain(HUB_PROGRESS_MARKER);
+			expect(block).toContain(HUB_POLLING_MARKER);
 		} finally {
 			await session.dispose();
 		}
@@ -135,12 +137,14 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 			if (block === undefined) throw new Error("Expected Hub-only <async-progress> block");
 			expect(block).not.toContain(BASH_ASYNC_MARKER);
 			expect(block).toContain(HUB_PROGRESS_MARKER);
+			expect(block).toContain(HUB_POLLING_MARKER);
 
 			await session.setActiveToolPresentation(["read", "bash"], []);
 			block = asyncProgressBlock(session.systemPrompt.join("\n\n"));
 			if (block === undefined) throw new Error("Expected Bash-only <async-progress> block");
 			expect(block).toContain(BASH_ASYNC_MARKER);
 			expect(block).not.toContain(HUB_PROGRESS_MARKER);
+			expect(block).not.toContain(HUB_POLLING_MARKER);
 
 			await session.setActiveToolPresentation(["read"], []);
 			expect(asyncProgressBlock(session.systemPrompt.join("\n\n"))).toBeUndefined();
@@ -150,6 +154,7 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 			if (block === undefined) throw new Error("Expected restored <async-progress> block");
 			expect(block).toContain(BASH_ASYNC_MARKER);
 			expect(block).toContain(HUB_PROGRESS_MARKER);
+			expect(block).toContain(HUB_POLLING_MARKER);
 		} finally {
 			await session.dispose();
 		}
@@ -162,6 +167,7 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 			if (block === undefined) throw new Error("Expected <async-progress> block");
 			expect(block).not.toContain(BASH_ASYNC_MARKER);
 			expect(block).toContain(HUB_PROGRESS_MARKER);
+			expect(block).toContain(HUB_POLLING_MARKER);
 		} finally {
 			await session.dispose();
 		}
@@ -201,6 +207,7 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 			expect(block).not.toContain(BASH_ASYNC_MARKER);
 			// Hub guidance is unaffected by the bash override.
 			expect(block).toContain(HUB_PROGRESS_MARKER);
+			expect(block).toContain(HUB_POLLING_MARKER);
 		} finally {
 			await session.dispose();
 		}
@@ -212,6 +219,7 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 			const block = asyncProgressBlock(session.systemPrompt.join("\n\n"));
 			if (block === undefined) throw new Error("Expected <async-progress> block");
 			expect(block).not.toContain(HUB_PROGRESS_MARKER);
+			expect(block).not.toContain(HUB_POLLING_MARKER);
 			// Bash guidance is unaffected by the hub override.
 			expect(block).toContain(BASH_ASYNC_MARKER);
 		} finally {

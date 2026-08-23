@@ -423,6 +423,10 @@ type MessageEndPersistenceSlot = {
 	release: () => void;
 };
 
+type SessionLaunchCompletionEntry = LaunchCompletionEntry & {
+	readonly epoch: number;
+};
+
 type PostPromptSkipReason = "aborted" | "stale-generation";
 
 type AgentContinueSkipReason =
@@ -589,6 +593,7 @@ export class AgentSession {
 	#unregisterAsyncProgressWakeQueue: (() => void) | undefined;
 	readonly #activeLaunchMonitors = new Set<string>();
 	#launchMonitorStateChanged = Promise.withResolvers<void>();
+	/** Conversation-boundary fence shared by monitored process progress and completions. */
 	#launchProgressBoundaryDepth = 0;
 	#launchProgressEpoch = 0;
 	/**
@@ -1456,9 +1461,11 @@ export class AgentSession {
 		// Progress queues must drain before terminal process completions. The broker
 		// flushes its final progress batch first; preserve that ordering when both
 		// kinds accumulate while the model is busy.
-		this.yieldQueue.register<LaunchCompletionEntry>(LAUNCH_COMPLETION_MESSAGE_TYPE, {
+		this.yieldQueue.register<SessionLaunchCompletionEntry>(LAUNCH_COMPLETION_MESSAGE_TYPE, {
 			isStale: entry =>
-				this.#isDisposed || !isLaunchCompletionOwner(entry.owner, this.sessionManager.getSessionId()),
+				this.#isDisposed ||
+				entry.epoch !== this.#launchProgressEpoch ||
+				!isLaunchCompletionOwner(entry.owner, this.sessionManager.getSessionId()),
 			build: buildLaunchCompletionBatchMessage,
 		});
 		if (this.#asyncJobManager && this.#agentId) {
@@ -4422,6 +4429,7 @@ export class AgentSession {
 		if (this.isStreaming || this.isBashRunning || this.isEvalRunning) return undefined;
 		const droppedCount = this.agent.state.messages.length;
 
+		using _launchProgressBoundary = this.#beginLaunchProgressBoundary();
 		// Tear down the same per-turn runtime state that newSession() resets across
 		// a conversation boundary, so work scheduled from the pre-reset turn cannot
 		// re-enter the cleared context:
@@ -6425,6 +6433,9 @@ export class AgentSession {
 
 	queueLaunchCompletion(notification: DaemonCompletionNotification): Promise<void> {
 		if (this.#isDisposed) return Promise.reject(new Error("Session disposed before launch completion delivery"));
+		// A terminal event observed inside a reset/switch boundary belongs to the
+		// process incarnation that boundary is evicting.
+		if (this.#launchProgressBoundaryDepth > 0) return Promise.resolve();
 		// Ambient monitor output queued while this owner sat idle would be
 		// skipped by the completion-triggered idle flush (its queue registers
 		// with `skipIdleFlush`) and would inject only on a later turn — after
@@ -6439,9 +6450,9 @@ export class AgentSession {
 		for (const entry of queuedProgress) {
 			this.yieldQueue.enqueue<AsyncProgressEntry>(ASYNC_PROGRESS_WAKE_QUEUE_KIND, entry);
 		}
-		const delivered = this.yieldQueue.enqueueWithReceipt<LaunchCompletionEntry>(
+		const delivered = this.yieldQueue.enqueueWithReceipt<SessionLaunchCompletionEntry>(
 			LAUNCH_COMPLETION_MESSAGE_TYPE,
-			notification,
+			{ ...notification, epoch: this.#launchProgressEpoch },
 		);
 		this.yieldQueue.requestIdleFlush();
 		return delivered;
@@ -6505,12 +6516,17 @@ export class AgentSession {
 		};
 	}
 
-	setLaunchMonitorActive(monitorId: string, _delivery: AsyncJobProgressDelivery, active: boolean, epoch: number): void {
+	setLaunchMonitorActive(
+		monitorId: string,
+		_delivery: AsyncJobProgressDelivery,
+		active: boolean,
+		epoch: number,
+	): void {
 		const wasActive = this.#activeLaunchMonitors.has(monitorId);
 		if (!active || epoch !== this.#launchProgressEpoch) {
 			this.#activeLaunchMonitors.delete(monitorId);
 		} else {
-			this.#activeLaunchMonitors.delete(monitorId);
+			this.#activeLaunchMonitors.add(monitorId);
 		}
 		if (wasActive === this.#activeLaunchMonitors.has(monitorId)) return;
 		this.#signalLaunchMonitorChanged();

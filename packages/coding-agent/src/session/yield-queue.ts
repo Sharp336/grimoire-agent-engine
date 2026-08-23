@@ -294,7 +294,10 @@ export class YieldQueue {
 					continue;
 				}
 				if (stale) {
-					entry.reject?.(new Error(`Yield queue entry became stale: ${kind}`));
+					// Staleness is an intentional context-boundary discard, not a
+					// delivery failure. Resolve receipts so upstream durable queues
+					// acknowledge the entry instead of replaying it into new context.
+					entry.resolve?.();
 					continue;
 				}
 			}
