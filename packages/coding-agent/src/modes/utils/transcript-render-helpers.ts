@@ -12,7 +12,6 @@ import type { DaemonSnapshot } from "../../launch/protocol";
 import {
 	ASYNC_PROGRESS_MESSAGE_TYPE,
 	type AsyncProgressDetails,
-	type AsyncProgressSourceType,
 	type AsyncResultDetails,
 } from "../../session/async-job-delivery";
 import {
