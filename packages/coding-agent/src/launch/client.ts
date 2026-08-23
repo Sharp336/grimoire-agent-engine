@@ -559,13 +559,19 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				continue;
 			}
 			if ("event" in message) {
+				const daemonId =
+					message.event === "daemon-completed" || message.event === "daemon-monitor-completed"
+						? message.daemon.id
+						: message.daemonId;
 				if (message.event === "daemon-completed") {
-					void this.#queueNotificationDelivery(message.daemon.id, `completion:${message.owner}`, async () => {
+					void this.#queueWireNotification(daemonId, () => {
 						if (this.#closed || generation !== this.#socketGeneration) return;
-						await this.#deliverCompletion(message, generation);
+						void this.#queueNotificationDelivery(daemonId, `completion:${message.owner}`, () =>
+							this.#deliverCompletion(message, generation),
+						);
 					});
 				} else {
-					void this.#deliverOutput(message, generation);
+					void this.#queueWireNotification(daemonId, () => this.#deliverOutput(message, generation));
 				}
 				continue;
 			}
@@ -585,6 +591,17 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				pending.reject(error instanceof Error ? error : new Error(String(error)));
 			}
 		}
+	}
+
+	#queueWireNotification(daemonId: string, deliver: () => Promise<void> | void): Promise<void> {
+		const previous = this.#notificationTails.get(daemonId);
+		const delivery = previous ? previous.then(deliver, deliver) : Promise.resolve().then(deliver);
+		this.#notificationTails.set(daemonId, delivery);
+		const cleanup = (): void => {
+			if (this.#notificationTails.get(daemonId) === delivery) this.#notificationTails.delete(daemonId);
+		};
+		void delivery.then(cleanup, cleanup);
+		return delivery;
 	}
 
 	#queueNotificationDelivery(daemonId: string, consumerId: string, deliver: () => Promise<void>): Promise<void> {

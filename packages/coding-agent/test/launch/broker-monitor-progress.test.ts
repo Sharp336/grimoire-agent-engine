@@ -3609,6 +3609,7 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		const completionStarted = Promise.withResolvers<void>();
 		const releaseCompletion = Promise.withResolvers<void>();
 		const completionDelivered = Promise.withResolvers<void>();
+		const monitorCompletionDelivered = Promise.withResolvers<void>();
 		const otherOutputDelivered = Promise.withResolvers<void>();
 		const deliveryOrder: string[] = [];
 		const unregisterCompletion = client.onCompletion("owner", async () => {
@@ -3628,7 +3629,11 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 				artifactPath: path.join(tempDir.path(), "wire-order-progress.log"),
 			},
 			async notification => {
-				if (notification.event !== "daemon-output") return;
+				if (notification.event === "daemon-monitor-completed") {
+					deliveryOrder.push("monitor-completion");
+					monitorCompletionDelivered.resolve();
+					return;
+				}
 				deliveryOrder.push("output:start");
 				outputStarted.resolve();
 				await releaseOutput.promise;
@@ -3701,10 +3706,23 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 					.join("\n")}\n`,
 			);
 			await probe;
-			await Promise.all([outputStarted.promise, completionStarted.promise]);
-			expect(deliveryOrder).toEqual(["output:start", "completion:start"]);
+			await outputStarted.promise;
+			expect(deliveryOrder).toEqual(["output:start"]);
 
 			releaseOutput.resolve();
+			await completionStarted.promise;
+			expect(deliveryOrder).toEqual(["output:start", "output:end", "completion:start"]);
+
+			brokerSocket.write(
+				`${JSON.stringify({
+					event: "daemon-monitor-completed",
+					monitorId: "monitor",
+					registrationId: outputRegistrationId,
+					daemon,
+				})}\n`,
+			);
+			await monitorCompletionDelivered.promise;
+			expect(deliveryOrder).toEqual(["output:start", "output:end", "completion:start", "monitor-completion"]);
 
 			brokerSocket.write(
 				`${JSON.stringify({
@@ -3721,14 +3739,21 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 				})}\n`,
 			);
 			await otherOutputDelivered.promise;
-			expect(deliveryOrder).toEqual(["output:start", "completion:start", "output:end", "other-output"]);
+			expect(deliveryOrder).toEqual([
+				"output:start",
+				"output:end",
+				"completion:start",
+				"monitor-completion",
+				"other-output",
+			]);
 
 			releaseCompletion.resolve();
 			await completionDelivered.promise;
 			expect(deliveryOrder).toEqual([
 				"output:start",
-				"completion:start",
 				"output:end",
+				"completion:start",
+				"monitor-completion",
 				"other-output",
 				"completion:end",
 			]);
