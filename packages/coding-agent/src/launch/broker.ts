@@ -84,25 +84,7 @@ const SIGNAL_NUMBER: Record<DaemonSignal, number> = {
 };
 
 const OUTPUT_RECONNECT_GRACE_MS = 30_000;
-/**
- * Bounds for the per-registration retain-until-ack notification buffer.
- * Notifications stay buffered after a locally successful write so a socket
- * that dies before the client reads the frame can be replayed on reconnect;
- * the client's cumulative `lastEpoch`/`lastSeq` ack prunes delivered entries.
- *
- * The effective limit is derived in the constructor from the reconnect grace
- * and the batch cadence: while a client is disconnected (up to
- * `outputReconnectGraceMs`) the batcher emits at most one notification per
- * `progressBatchIntervalMs` — rate-limited windows still produce an
- * artifact-only batch — so covering the whole grace window takes
- * ceil(grace / interval) entries (150 at the 30s / 200ms defaults), plus
- * headroom for the boundary batch and the terminal completion. The floor
- * keeps degenerate configurations replayable; the ceiling keeps a
- * pathological interval (e.g. 0) from retaining unbounded state.
- */
-const MONITOR_PENDING_MIN = 32;
-const MONITOR_PENDING_MAX = 2_048;
-const MONITOR_PENDING_HEADROOM = 8;
+const MAX_UNACKNOWLEDGED_OUTPUT_NOTIFICATIONS = 256;
 
 type DetachedOutputCursorPolicy = "preserve" | "reset";
 
@@ -168,6 +150,8 @@ interface OutputRegistration extends DaemonOutputWireSubscription {
 	pending: DaemonMonitorWireNotification[];
 	artifactSink: OutputSink;
 	offlineTimer?: NodeJS.Timeout;
+	/** Artifact persistence failed; retain only the terminal expiry until client cleanup. */
+	disabled?: boolean;
 	/** Model-facing line previews accumulated from this registration's attach point. */
 	progressPreview: ProgressPreviewAccumulator;
 	progressLines: ProgressLines;
@@ -469,7 +453,7 @@ class DaemonBroker {
 	readonly #restartBackoffBaseMs: number;
 	readonly #clientAuthTimeoutMs: number;
 	readonly #outputReconnectGraceMs: number;
-	readonly #monitorPendingLimit: number;
+	readonly #maxUnacknowledgedOutputNotifications: number;
 	readonly #records = new Map<string, ManagedDaemon>();
 	/**
 	 * Names reserved by an in-flight `start` before its record lands in
@@ -485,6 +469,7 @@ class DaemonBroker {
 	readonly #pendingCompletions = new Map<string, Map<string, DaemonCompletionNotification>>();
 	readonly #outputRegistrations = new Map<string, OutputRegistration>();
 	readonly #outputSubscriptionSyncTokens = new Map<string, symbol>();
+	readonly #subscriptionMutationQueues = new WeakMap<net.Socket, Promise<void>>();
 	readonly #progressBatcher: ProgressBatcher<MonitorProgressChunk>;
 	readonly #finished = Promise.withResolvers<void>();
 	readonly #sockets = new Set<net.Socket>();
@@ -501,6 +486,7 @@ class DaemonBroker {
 		clientAuthTimeoutMs: number,
 		progressBatchIntervalMs: number,
 		outputReconnectGraceMs: number,
+		maxUnacknowledgedOutputNotifications: number,
 	) {
 		this.#projectDir = projectDir;
 		this.#runtimeDir = runtimeDir;
@@ -510,13 +496,7 @@ class DaemonBroker {
 		this.#restartBackoffBaseMs = restartBackoffBaseMs;
 		this.#clientAuthTimeoutMs = clientAuthTimeoutMs;
 		this.#outputReconnectGraceMs = outputReconnectGraceMs;
-		this.#monitorPendingLimit = Math.min(
-			MONITOR_PENDING_MAX,
-			Math.max(
-				MONITOR_PENDING_MIN,
-				Math.ceil(outputReconnectGraceMs / Math.max(progressBatchIntervalMs, 1)) + MONITOR_PENDING_HEADROOM,
-			),
-		);
+		this.#maxUnacknowledgedOutputNotifications = maxUnacknowledgedOutputNotifications;
 		this.#progressBatcher = new ProgressBatcher<MonitorProgressChunk>(
 			(batchKey, batch) => this.#notifyOutput(batchKey, batch),
 			{
@@ -563,7 +543,15 @@ class DaemonBroker {
 		const outputDisposals: Promise<void>[] = [];
 		for (const registration of this.#outputRegistrations.values()) {
 			clearTimeout(registration.offlineTimer);
-			outputDisposals.push(registration.artifactSink.dispose());
+			outputDisposals.push(
+				registration.artifactSink.dispose().catch(error => {
+					logger.warn("Failed to dispose daemon monitor artifact sink", {
+						monitorId: registration.id,
+						name: registration.name,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}),
+			);
 		}
 		this.#outputRegistrations.clear();
 		this.#progressBatcher.dispose();
@@ -621,6 +609,11 @@ class DaemonBroker {
 			for (const [registrationKey, registration] of this.#outputRegistrations) {
 				if (registration.socket !== socket) continue;
 				registration.socket = undefined;
+				if (registration.disabled) {
+					clearTimeout(registration.offlineTimer);
+					registration.offlineTimer = undefined;
+					continue;
+				}
 				registration.offlineTimer = setTimeout(() => {
 					if (registration.socket || this.#outputRegistrations.get(registrationKey) !== registration) {
 						return;
@@ -642,85 +635,101 @@ class DaemonBroker {
 			id = request.id;
 			if (request.token !== this.#token) throw new Error("Daemon broker authentication failed");
 			onAuthenticated();
-			await this.#syncOutputSubscriptions(socket, request.outputSubscriptionId, request.outputSubscriptions);
-			for (const owner of request.completionUnsubscribes ?? []) {
-				const subscriptionId = this.#completionSubscriptions.get(owner);
-				if (
-					!this.#completionSubscriptions.has(owner) ||
-					(subscriptionId !== undefined && subscriptionId !== request.completionSubscriptionId)
-				) {
-					continue;
-				}
-				this.#ownerSockets.delete(owner);
-				this.#completionSubscriptions.delete(owner);
-				await this.#setRecordCompletionCapability(owner, false);
-				this.#pendingCompletions.delete(owner);
-			}
-			for (const completionId of request.completionAcks ?? []) {
-				for (const [owner, pending] of this.#pendingCompletions) {
-					const registration = this.#ownerSockets.get(owner);
-					if (
-						!registration ||
-						registration.socket !== socket ||
-						registration.subscriptionId !== request.completionSubscriptionId
-					) {
-						continue;
-					}
-					const completion = pending.get(completionId);
-					if (!completion) continue;
-					pending.delete(completionId);
-					if (pending.size === 0) this.#pendingCompletions.delete(owner);
-					const record = this.#records.get(completion.daemon.name);
-					const index = record?.pendingCompletions.findIndex(item => item.completionId === completionId) ?? -1;
-					if (record && index >= 0) {
-						record.pendingCompletions.splice(index, 1);
-						this.#persist(record);
-						await record.persistQueue;
-					}
-				}
-			}
-			if (publishesCompletionOwners(request)) {
-				const replayOwners = new Set(request.completionReplays ?? []);
-				const activeOwners = new Set(request.owners ?? []);
-				const detachedOwners = new Set(request.detachedOwners ?? []);
-				const advertisedOwners = new Set([...activeOwners, ...detachedOwners]);
-				for (const [owner, subscriptionId] of this.#completionSubscriptions) {
-					if (subscriptionId !== request.completionSubscriptionId || advertisedOwners.has(owner)) continue;
-					this.#ownerSockets.delete(owner);
-					this.#completionSubscriptions.delete(owner);
-					await this.#setRecordCompletionCapability(owner, false);
-					this.#pendingCompletions.delete(owner);
-				}
-				for (const owner of activeOwners) {
-					this.#completionSubscriptions.set(owner, request.completionSubscriptionId);
-					await this.#setRecordCompletionCapability(owner, true);
-					const previous = this.#ownerSockets.get(owner);
-					this.#ownerSockets.set(owner, {
-						socket,
-						subscriptionId: request.completionSubscriptionId,
-					});
-					if (previous?.socket === socket && !replayOwners.has(owner)) continue;
-					for (const completion of this.#pendingCompletions.get(owner)?.values() ?? []) {
-						socket.write(`${JSON.stringify(completion)}\n`);
-					}
-				}
-				for (const owner of detachedOwners) {
-					const subscriptionId = this.#completionSubscriptions.get(owner);
-					if (this.#completionSubscriptions.has(owner) && subscriptionId !== request.completionSubscriptionId) {
-						continue;
-					}
-					this.#completionSubscriptions.set(owner, request.completionSubscriptionId);
-					await this.#setRecordCompletionCapability(owner, true);
-					const registration = this.#ownerSockets.get(owner);
-					if (registration?.subscriptionId === request.completionSubscriptionId) this.#ownerSockets.delete(owner);
-				}
-			}
+			await this.#queueSubscriptionMutation(socket, () => this.#applySubscriptionMutations(socket, request));
 			const result = await this.#dispatch(request.operation);
 			socket.write(`${JSON.stringify({ id, ok: true, result })}\n`);
 			if (request.operation.op === "shutdown") setTimeout(() => void this.shutdown(), 10);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			socket.write(`${JSON.stringify({ id, ok: false, error: message })}\n`);
+		}
+	}
+
+	#queueSubscriptionMutation(socket: net.Socket, mutation: () => Promise<void>): Promise<void> {
+		const previous = this.#subscriptionMutationQueues.get(socket);
+		const queued = previous ? previous.then(mutation, mutation) : mutation();
+		this.#subscriptionMutationQueues.set(socket, queued);
+		const release = (): void => {
+			if (this.#subscriptionMutationQueues.get(socket) === queued) this.#subscriptionMutationQueues.delete(socket);
+		};
+		void queued.then(release, release);
+		return queued;
+	}
+
+	async #applySubscriptionMutations(socket: net.Socket, request: DaemonWireRequest): Promise<void> {
+		await this.#syncOutputSubscriptions(socket, request.outputSubscriptionId, request.outputSubscriptions);
+		if (socket.destroyed) return;
+		for (const owner of request.completionUnsubscribes ?? []) {
+			const subscriptionId = this.#completionSubscriptions.get(owner);
+			if (
+				!this.#completionSubscriptions.has(owner) ||
+				(subscriptionId !== undefined && subscriptionId !== request.completionSubscriptionId)
+			) {
+				continue;
+			}
+			this.#ownerSockets.delete(owner);
+			this.#completionSubscriptions.delete(owner);
+			await this.#setRecordCompletionCapability(owner, false);
+			this.#pendingCompletions.delete(owner);
+		}
+		for (const completionId of request.completionAcks ?? []) {
+			for (const [owner, pending] of this.#pendingCompletions) {
+				const registration = this.#ownerSockets.get(owner);
+				if (
+					!registration ||
+					registration.socket !== socket ||
+					registration.subscriptionId !== request.completionSubscriptionId
+				) {
+					continue;
+				}
+				const completion = pending.get(completionId);
+				if (!completion) continue;
+				pending.delete(completionId);
+				if (pending.size === 0) this.#pendingCompletions.delete(owner);
+				const record = this.#records.get(completion.daemon.name);
+				const index = record?.pendingCompletions.findIndex(item => item.completionId === completionId) ?? -1;
+				if (record && index >= 0) {
+					record.pendingCompletions.splice(index, 1);
+					this.#persist(record);
+					await record.persistQueue;
+				}
+			}
+		}
+		if (!publishesCompletionOwners(request)) return;
+		const replayOwners = new Set(request.completionReplays ?? []);
+		const activeOwners = new Set(request.owners ?? []);
+		const detachedOwners = new Set(request.detachedOwners ?? []);
+		const advertisedOwners = new Set([...activeOwners, ...detachedOwners]);
+		for (const [owner, subscriptionId] of this.#completionSubscriptions) {
+			if (subscriptionId !== request.completionSubscriptionId || advertisedOwners.has(owner)) continue;
+			this.#ownerSockets.delete(owner);
+			this.#completionSubscriptions.delete(owner);
+			await this.#setRecordCompletionCapability(owner, false);
+			this.#pendingCompletions.delete(owner);
+		}
+		for (const owner of activeOwners) {
+			const previous = this.#ownerSockets.get(owner);
+			this.#completionSubscriptions.set(owner, request.completionSubscriptionId);
+			this.#ownerSockets.set(owner, {
+				socket,
+				subscriptionId: request.completionSubscriptionId,
+			});
+			await this.#setRecordCompletionCapability(owner, true);
+			if (socket.destroyed) return;
+			if (previous?.socket === socket && !replayOwners.has(owner)) continue;
+			for (const completion of this.#pendingCompletions.get(owner)?.values() ?? []) {
+				socket.write(`${JSON.stringify(completion)}\n`);
+			}
+		}
+		for (const owner of detachedOwners) {
+			const subscriptionId = this.#completionSubscriptions.get(owner);
+			if (this.#completionSubscriptions.has(owner) && subscriptionId !== request.completionSubscriptionId) {
+				continue;
+			}
+			this.#completionSubscriptions.set(owner, request.completionSubscriptionId);
+			await this.#setRecordCompletionCapability(owner, true);
+			const registration = this.#ownerSockets.get(owner);
+			if (registration?.subscriptionId === request.completionSubscriptionId) this.#ownerSockets.delete(owner);
 		}
 	}
 
@@ -1028,8 +1037,12 @@ class DaemonBroker {
 	/** Fan raw bytes and their preview lines out to every registration monitoring this daemon incarnation. */
 	#forwardToMonitors(record: ManagedDaemon, raw: string, sanitized: string): void {
 		for (const registration of this.#outputRegistrations.values()) {
+			if (registration.disabled) continue;
 			if (registration.name !== record.snapshot.name) continue;
-			if (registration.daemonId === undefined) registration.daemonId = record.snapshot.id;
+			if (registration.daemonId === undefined) {
+				if (registration.startPending === true) continue;
+				registration.daemonId = record.snapshot.id;
+			}
 			if (registration.daemonId !== record.snapshot.id) continue;
 			registration.artifactSink.push(raw);
 			// Line fragments accumulate per registration from its attach point, so a
@@ -1043,7 +1056,7 @@ class DaemonBroker {
 	async #flushOutputProgress(record: ManagedDaemon): Promise<void> {
 		const flushes: Promise<void>[] = [];
 		for (const registration of this.#outputRegistrations.values()) {
-			if (registration.daemonId === record.snapshot.id) {
+			if (registration.daemonId === record.snapshot.id && !registration.disabled) {
 				flushes.push(this.#progressBatcher.flush(registration.batchKey));
 			}
 		}
@@ -1052,10 +1065,30 @@ class DaemonBroker {
 
 	async #finishOutputProgress(record: ManagedDaemon): Promise<void> {
 		const registrations = [...this.#outputRegistrations.values()].filter(
-			registration => registration.daemonId === record.snapshot.id,
+			registration => registration.daemonId === record.snapshot.id && !registration.disabled,
 		);
-		await Promise.all(registrations.map(registration => this.#progressBatcher.finish(registration.batchKey)));
-		await Promise.all(registrations.map(registration => registration.artifactSink.dispose()));
+		await Promise.all(
+			registrations.map(async registration => {
+				try {
+					await this.#progressBatcher.finish(registration.batchKey);
+				} catch (error) {
+					logger.warn("Failed to finish daemon monitor progress", {
+						monitorId: registration.id,
+						name: registration.name,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+				try {
+					await registration.artifactSink.dispose();
+				} catch (error) {
+					logger.warn("Failed to dispose daemon monitor artifact sink", {
+						monitorId: registration.id,
+						name: registration.name,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+			}),
+		);
 	}
 
 	async #syncOutputSubscriptions(
@@ -1111,7 +1144,7 @@ class DaemonBroker {
 						existing.socket = socket;
 						this.#pruneAcknowledgedOutput(existing, subscription);
 						const replayedTerminal = existing.pending.some(
-							notification => notification.event === "daemon-monitor-completed",
+							notification => notification.event !== "daemon-output",
 						);
 						// Retained notifications replay only across an actual socket change;
 						// on a steady-state envelope the client already holds them.
@@ -1121,6 +1154,7 @@ class DaemonBroker {
 							}
 						}
 						if (
+							!existing.disabled &&
 							record &&
 							existing.daemonId === record.snapshot.id &&
 							terminalState(record.snapshot.state) &&
@@ -1177,6 +1211,7 @@ class DaemonBroker {
 
 	#bindOutputRegistrations(record: ManagedDaemon): void {
 		for (const registration of this.#outputRegistrations.values()) {
+			if (registration.disabled) continue;
 			if (registration.name === record.snapshot.name && registration.daemonId === undefined) {
 				registration.daemonId = record.snapshot.id;
 				registration.startPending = undefined;
@@ -1195,14 +1230,36 @@ class DaemonBroker {
 	}
 
 	#sendMonitorNotification(registration: OutputRegistration, notification: DaemonMonitorWireNotification): void {
-		// Retain even after a locally successful write: the socket can die before
-		// the client reads the frame, and reconnect replays whatever the client's
-		// cumulative ack has not pruned. The buffer is bounded; overflow drops the
-		// oldest entries first (a terminal completion is always last).
-		registration.pending.push(notification);
-		if (registration.pending.length > this.#monitorPendingLimit) {
-			registration.pending.splice(0, registration.pending.length - this.#monitorPendingLimit);
+		// Retain until the client confirms sink delivery. Socket writes only prove
+		// that bytes entered the kernel buffer; trimming an unacknowledged prefix
+		// would make a reconnect lose progress already queued behind a slow sink.
+		// Once a live sink falls a bounded number of batches behind, stop delivery
+		// and preserve the complete stream in its artifact instead of growing both
+		// broker and client queues for the daemon's lifetime.
+		if (
+			notification.event === "daemon-output" &&
+			registration.pending.length >= this.#maxUnacknowledgedOutputNotifications
+		) {
+			registration.disabled = true;
+			this.#progressBatcher.clear(registration.batchKey);
+			void registration.artifactSink.dispose();
+			const expired: DaemonMonitorWireNotification = {
+				event: "daemon-monitor-expired",
+				monitorId: registration.id,
+				registrationId: registration.registrationId,
+				name: registration.name,
+				daemonId: notification.daemonId,
+			};
+			registration.pending = [expired];
+			this.#writeMonitorNotification(registration, expired);
+			logger.warn("Disabling daemon monitor after delivery backlog exceeded its limit", {
+				monitorId: registration.id,
+				name: registration.name,
+				limit: this.#maxUnacknowledgedOutputNotifications,
+			});
+			return;
 		}
+		registration.pending.push(notification);
 		this.#writeMonitorNotification(registration, notification);
 	}
 
@@ -1231,6 +1288,7 @@ class DaemonBroker {
 		// registration; dropping it keeps old-daemon output away from a monitor
 		// that reused the same client-scoped subscription id.
 		if (!registration) return;
+		if (registration.disabled) return;
 		const daemon = this.#records.get(registration.name)?.snapshot;
 		if (!daemon || daemon.id !== registration.daemonId) return;
 		const preview =
@@ -1241,10 +1299,33 @@ class DaemonBroker {
 						undefined,
 					);
 		const text = preview ? flattenPreviewText(preview) : "";
-		await registration.artifactSink.flushArtifact();
+		const key = outputRegistrationKey(registration.subscriptionId, registration.id);
+		try {
+			await registration.artifactSink.flushArtifact();
+		} catch (error) {
+			if (this.#outputRegistrations.get(key) === registration) {
+				registration.disabled = true;
+				clearTimeout(registration.offlineTimer);
+				registration.offlineTimer = undefined;
+				this.#progressBatcher.clear(registration.batchKey);
+				void registration.artifactSink.dispose();
+				this.#sendMonitorNotification(registration, {
+					event: "daemon-monitor-expired",
+					monitorId: registration.id,
+					registrationId: registration.registrationId,
+					name: registration.name,
+					daemonId: daemon.id,
+				});
+				logger.warn("Disabling daemon monitor after artifact persistence failed", {
+					monitorId: registration.id,
+					name: registration.name,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+			return;
+		}
 		// A replacement or same-name daemon can land while the artifact flush
 		// yields. Both registration and daemon incarnation must still match.
-		const key = outputRegistrationKey(registration.subscriptionId, registration.id);
 		if (
 			this.#outputRegistrations.get(key) !== registration ||
 			this.#records.get(registration.name)?.snapshot.id !== registration.daemonId
@@ -1272,7 +1353,7 @@ class DaemonBroker {
 	#notifyMonitorCompletion(record: ManagedDaemon, target?: OutputRegistration): void {
 		for (const registration of this.#outputRegistrations.values()) {
 			if (target && registration !== target) continue;
-			if (registration.name !== record.snapshot.name) continue;
+			if (registration.disabled || registration.name !== record.snapshot.name) continue;
 			if (registration.daemonId === undefined) {
 				if (registration.startPending === true) continue;
 				registration.daemonId = record.snapshot.id;
@@ -1450,7 +1531,7 @@ class DaemonBroker {
 		// The output read yields, so a concurrent refresh may settle this generation first.
 		if (generation !== record.generation || settledState(record.snapshot.state)) return;
 		for (const registration of this.#outputRegistrations.values()) {
-			if (registration.daemonId !== record.snapshot.id) continue;
+			if (registration.disabled || registration.daemonId !== record.snapshot.id) continue;
 			registration.progressLines.finish();
 			const finalPreview = registration.progressPreview.take();
 			if (finalPreview) this.#progressBatcher.push(registration.batchKey, { preview: finalPreview });
@@ -1924,6 +2005,8 @@ export interface DaemonBrokerStartOptions {
 	progressBatchIntervalMs?: number;
 	/** Grace for a disconnected monitor client to reconnect before its registration is dropped. */
 	outputReconnectGraceMs?: number;
+	/** Maximum retained monitor notifications awaiting client sink acknowledgement. */
+	maxUnacknowledgedOutputNotifications?: number;
 	/** Called after the broker endpoint is ready to accept authenticated requests. */
 	onListening?: () => void | Promise<void>;
 }
@@ -1959,6 +2042,13 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 		Number.isFinite(requestedOutputReconnectGraceMs) && requestedOutputReconnectGraceMs >= 0
 			? requestedOutputReconnectGraceMs
 			: OUTPUT_RECONNECT_GRACE_MS;
+	const requestedMaxUnacknowledgedOutputNotifications =
+		options.maxUnacknowledgedOutputNotifications ?? MAX_UNACKNOWLEDGED_OUTPUT_NOTIFICATIONS;
+	const maxUnacknowledgedOutputNotifications =
+		Number.isFinite(requestedMaxUnacknowledgedOutputNotifications) &&
+		requestedMaxUnacknowledgedOutputNotifications >= 1
+			? Math.floor(requestedMaxUnacknowledgedOutputNotifications)
+			: MAX_UNACKNOWLEDGED_OUTPUT_NOTIFICATIONS;
 	await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
 	const lease = await acquireBrokerLease(runtimeDir);
 	if (!lease) return;
@@ -1988,6 +2078,7 @@ export async function startDaemonBrokerFromEnvironment(options: DaemonBrokerStar
 		clientAuthTimeoutMs,
 		progressBatchIntervalMs,
 		outputReconnectGraceMs,
+		maxUnacknowledgedOutputNotifications,
 	);
 	const cancelCleanup = postmortem.register("daemon-broker", () => broker.shutdown());
 	try {

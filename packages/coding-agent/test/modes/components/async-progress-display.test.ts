@@ -84,7 +84,7 @@ describe("async progress transcript display sanitization", () => {
 
 		const displayMessage = buildAsyncProgressDisplayMessage(message);
 
-		expect(displayMessage.content).toContain(`file://${DISPLAY_PATH}`);
+		expect(displayMessage.content).toContain(`file:///${DISPLAY_PATH}`);
 		expect(displayMessage.content).toContain(embeddedPath);
 		expect(displayMessage.content).not.toContain(fileUrl);
 		expect(message.content).toBe(sourceContent);

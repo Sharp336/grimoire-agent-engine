@@ -233,6 +233,24 @@ describe("launch monitor notifications", () => {
 		});
 	});
 
+	it("decodes monitor expiry as a terminal registration event", () => {
+		expect(
+			parseDaemonWireMessage({
+				event: "daemon-monitor-expired",
+				monitorId: "monitor-1",
+				registrationId: "registration-1",
+				name: "web",
+				daemonId: "daemon-1",
+			}),
+		).toEqual({
+			event: "daemon-monitor-expired",
+			monitorId: "monitor-1",
+			registrationId: "registration-1",
+			name: "web",
+			daemonId: "daemon-1",
+		});
+	});
+
 	it.each([-1, 1.5])("rejects invalid output sequence %s", seq => {
 		expect(() =>
 			parseDaemonWireMessage({

@@ -209,8 +209,27 @@ export interface DaemonMonitorCompletionWireNotification extends DaemonMonitorCo
 	registrationId: string;
 }
 
-export type DaemonMonitorNotification = DaemonOutputNotification | DaemonMonitorCompletionNotification;
-export type DaemonMonitorWireNotification = DaemonOutputWireNotification | DaemonMonitorCompletionWireNotification;
+/** Terminal signal when a monitor is disabled and can no longer deliver output. */
+export interface DaemonMonitorExpiredNotification {
+	event: "daemon-monitor-expired";
+	monitorId: string;
+	name: string;
+	daemonId: string;
+}
+
+/** Socket form of monitor expiry, scoped to the exact advertised registration. */
+export interface DaemonMonitorExpiredWireNotification extends DaemonMonitorExpiredNotification {
+	registrationId: string;
+}
+
+export type DaemonMonitorNotification =
+	| DaemonOutputNotification
+	| DaemonMonitorCompletionNotification
+	| DaemonMonitorExpiredNotification;
+export type DaemonMonitorWireNotification =
+	| DaemonOutputWireNotification
+	| DaemonMonitorCompletionWireNotification
+	| DaemonMonitorExpiredWireNotification;
 export type DaemonWireMessage = DaemonWireResponse | DaemonCompletionNotification | DaemonMonitorWireNotification;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -473,6 +492,15 @@ export function parseDaemonWireMessage(value: unknown): DaemonWireMessage {
 			monitorId: stringValue(source.monitorId, "monitor completion.monitorId"),
 			registrationId: stringValue(source.registrationId, "monitor completion.registrationId"),
 			daemon: parseDaemonSnapshot(source.daemon),
+		};
+	}
+	if (source.event === "daemon-monitor-expired") {
+		return {
+			event: "daemon-monitor-expired",
+			monitorId: stringValue(source.monitorId, "monitor expiry.monitorId"),
+			registrationId: stringValue(source.registrationId, "monitor expiry.registrationId"),
+			name: stringValue(source.name, "monitor expiry.name"),
+			daemonId: stringValue(source.daemonId, "monitor expiry.daemonId"),
 		};
 	}
 	return parseDaemonWireResponse(value);

@@ -821,6 +821,10 @@ export class OutputSink {
 	#fileCreation?: Promise<void>;
 	/** Set once the spill file has been closed; guards double-close and post-finalize resurrection. */
 	#finalized = false;
+	/** First artifact persistence failure, retained until {@link flushArtifact} surfaces it. */
+	#artifactFailure?: { error: unknown };
+	/** Set only after the artifact has been flushed or finalized without error. */
+	#artifactAvailable = false;
 
 	readonly #artifactPath?: string;
 	readonly #artifactId?: string;
@@ -1063,8 +1067,13 @@ export class OutputSink {
 	 * `#artifactMaxBytes` on disk.
 	 */
 	#writeToFile(chunk: string): void {
+		if (this.#artifactFailure) return;
 		if (this.#fileReady && this.#file) {
-			this.#emitToSink(chunk);
+			try {
+				this.#emitToSink(chunk);
+			} catch (error) {
+				this.#recordArtifactFailure(error);
+			}
 			return;
 		}
 		// File sink not yet created — queue this chunk and kick off creation.
@@ -1182,7 +1191,8 @@ export class OutputSink {
 				}
 				this.#pendingFileWrites = undefined;
 			}
-		} catch {
+		} catch (error) {
+			this.#recordArtifactFailure(error);
 			try {
 				await this.#file?.sink?.end();
 			} catch {
@@ -1193,6 +1203,12 @@ export class OutputSink {
 			this.#pendingFileWrites = undefined;
 			this.#fileReady = false;
 		}
+	}
+
+	#recordArtifactFailure(error: unknown): unknown {
+		this.#artifactFailure ??= { error };
+		this.#artifactAvailable = false;
+		return this.#artifactFailure.error;
 	}
 
 	createInput(): WritableStream<Uint8Array | string> {
@@ -1409,7 +1425,7 @@ export class OutputSink {
 			columnDroppedBytes: this.#columnDroppedBytes > 0 ? this.#columnDroppedBytes : undefined,
 			columnTruncatedLines: this.#columnTruncatedLines > 0 ? this.#columnTruncatedLines : undefined,
 			columnMax: this.#columnTruncatedLines > 0 ? this.#maxColumns : undefined,
-			artifactId: this.#file?.artifactId,
+			artifactId: this.#artifactAvailable ? this.#file?.artifactId : undefined,
 		};
 	}
 
@@ -1434,20 +1450,21 @@ export class OutputSink {
 		}
 		// The tail/notice replay writes to the sink and can throw (e.g. a disk
 		// write error). Closing the descriptor MUST still happen — otherwise the
-		// fd leaks and the replay error masks the original tool error that put us
-		// on this path. Both failures are swallowed so dispose() never throws.
+		// fd leaks. Artifact persistence remains best-effort for final output, but
+		// an incomplete capture must never be advertised.
 		try {
 			this.#flushArtifactTailIfCapped();
-		} catch {
-			/* ignore */
+		} catch (error) {
+			this.#recordArtifactFailure(error);
 		} finally {
 			try {
 				await file.sink.end();
-			} catch {
-				/* ignore */
+			} catch (error) {
+				this.#recordArtifactFailure(error);
 			}
 			this.#closeAppendFd();
 		}
+		if (!this.#artifactFailure) this.#artifactAvailable = true;
 	}
 
 	/** Release the append-mode descriptor; Bun's fd writer never closes it. */
@@ -1473,13 +1490,23 @@ export class OutputSink {
 		await this.#finalizeFile();
 	}
 
-	/** Make mirrored bytes readable without closing the stable artifact. */
-	async flushArtifact(): Promise<void> {
-		if (this.#fileCreation) await this.#fileCreation.catch(() => undefined);
+	/** Make mirrored bytes readable and return the verified artifact id. */
+	async flushArtifact(): Promise<string | undefined> {
+		if (!this.#artifactPath) return undefined;
+		if (this.#fileCreation) await this.#fileCreation;
+		if (this.#artifactFailure) throw this.#artifactFailure.error;
+		const file = this.#file;
+		if (!file) {
+			const error = new Error(`Artifact sink unavailable: ${this.#artifactPath}`);
+			this.#recordArtifactFailure(error);
+			throw error;
+		}
 		try {
-			await this.#file?.sink.flush();
-		} catch {
-			/* Artifact persistence is best-effort, matching finalization. */
+			await file.sink.flush();
+			this.#artifactAvailable = true;
+			return file.artifactId;
+		} catch (error) {
+			throw this.#recordArtifactFailure(error);
 		}
 	}
 }
