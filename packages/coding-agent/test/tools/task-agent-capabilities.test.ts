@@ -25,6 +25,7 @@ describe("task agent capability descriptions", () => {
 			name: "x",
 			description: "x",
 			systemPrompt: "x",
+			source: "bundled",
 		};
 		expect(
 			isReadOnlyAgent({
