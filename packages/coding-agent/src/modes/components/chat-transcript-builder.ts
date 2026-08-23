@@ -31,8 +31,8 @@ import { theme } from "../theme/theme";
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
-	buildAsyncProgressDisplayMessage,
 	buildAsyncProgressBlock,
+	buildAsyncProgressDisplayMessage,
 	buildAsyncResultBlock,
 	buildFileMentionBlock,
 	buildIrcMessageCard,

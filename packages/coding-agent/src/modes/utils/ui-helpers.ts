@@ -57,8 +57,8 @@ import { createAssistantMessageComponent } from "./interactive-context-helpers";
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
-	buildAsyncProgressDisplayMessage,
 	buildAsyncProgressBlock,
+	buildAsyncProgressDisplayMessage,
 	buildAsyncResultBlock,
 	buildFileMentionBlock,
 	buildIrcMessageCard,
