@@ -150,6 +150,13 @@ export interface DaemonOutputSubscription {
 	lastEpoch?: string;
 	/** Client-managed cumulative ack: highest `seq` delivered for {@link lastEpoch}. */
 	lastSeq?: number;
+	/**
+	 * True while this registration targets the next daemon started with
+	 * {@link name}, rather than the current incarnation. The broker leaves it
+	 * unbound until that new record exists and never replays a prior terminal
+	 * record to it.
+	 */
+	startPending?: boolean;
 }
 
 /** Response envelope kept raw until matched with its pending operation. */
@@ -280,6 +287,10 @@ function outputSubscriptions(value: unknown): DaemonOutputSubscription[] {
 				source.lastSeq === undefined
 					? undefined
 					: nonNegativeInteger(source.lastSeq, `request.outputSubscriptions[${index}].lastSeq`),
+			startPending:
+				source.startPending === undefined
+					? undefined
+					: booleanValue(source.startPending, `request.outputSubscriptions[${index}].startPending`),
 		};
 	});
 }

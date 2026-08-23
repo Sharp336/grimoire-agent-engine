@@ -563,6 +563,133 @@ process.stdin.once("data", () => {
 		}
 	}, 20_000);
 
+	it("distinguishes terminal attachment from a subscription targeting a same-name replacement", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-reuse-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const firstScriptPath = path.join(projectDir, "first.ts");
+		const secondScriptPath = path.join(projectDir, "second.ts");
+		await Bun.write(firstScriptPath, `process.stdout.write("FIRST_RUN\\n");\n`);
+		await Bun.write(
+			secondScriptPath,
+			`process.stdin.setEncoding("utf8");
+process.stdin.resume();
+process.stdin.once("data", () => {
+	process.stdout.write("SECOND_RUN\\n");
+	process.exit(0);
+});
+`,
+		);
+		const artifactPath = path.join(tempDir.path(), "reuse-progress.log");
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir, { progressBatchIntervalMs: 0 });
+		const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+		let raw: RawBrokerSocket | undefined;
+		const spec = (application: string, args: string[]): DaemonSpec => ({
+			name: "reuse",
+			application,
+			args,
+			env: {},
+			cwd: projectDir,
+			pty: false,
+			restart: "no",
+			persist: false,
+			detached: false,
+		});
+		try {
+			await client.request({ op: "ping" });
+			const firstStart = await client.request({
+				op: "start",
+				spec: spec(process.execPath, [firstScriptPath]),
+			});
+			if (firstStart.op !== "start") throw new Error("unexpected start result");
+			const firstWait = await client.request({ op: "wait", name: "reuse", for: "exit", timeoutMs: 5_000 });
+			if (firstWait.op !== "wait") throw new Error("unexpected wait result");
+			expect(firstWait.timedOut).toBeFalse();
+
+			const token = (await Bun.file(path.join(runtimeDir, "broker.token")).text()).trim();
+			raw = await openRawBrokerSocket(endpoint);
+			const envelope = (
+				id: string,
+				outputSubscriptionId: string,
+				outputSubscriptions: Record<string, unknown>[],
+			): string =>
+				`${JSON.stringify({
+					id,
+					token,
+					outputSubscriptionId,
+					outputSubscriptions,
+					operation: { op: "ping" },
+				})}\n`;
+
+			const ordinarySubscription = {
+				id: "ordinary-terminal-monitor",
+				name: "reuse",
+				owner: "owner-1",
+				artifactPath: path.join(tempDir.path(), "ordinary-terminal.log"),
+			};
+			raw.socket.write(envelope("attach-terminal", "ordinary-client", [ordinarySubscription]));
+			await raw.waitFor(message => message.id === "attach-terminal");
+			const ordinaryCompletions = raw.messages.filter(
+				message =>
+					message.event === "daemon-monitor-completed" &&
+					message.monitorId === ordinarySubscription.id,
+			);
+			expect(ordinaryCompletions).toHaveLength(1);
+			expect(ordinaryCompletions[0]?.daemon).toMatchObject({ id: firstStart.daemon.id, state: "exited" });
+			raw.socket.write(envelope("detach-terminal", "ordinary-client", []));
+			await raw.waitFor(message => message.id === "detach-terminal");
+
+			const futureSubscription = {
+				id: "replacement-monitor",
+				name: "reuse",
+				owner: "owner-1",
+				artifactPath,
+				startPending: true,
+			};
+			raw.socket.write(envelope("attach-next-start", "future-client", [futureSubscription]));
+			await raw.waitFor(message => message.id === "attach-next-start");
+			expect(raw.messages.some(message => message.monitorId === futureSubscription.id)).toBeFalse();
+
+			const secondStart = await client.request({
+				op: "start",
+				spec: spec(process.execPath, [secondScriptPath]),
+			});
+			if (secondStart.op !== "start") throw new Error("unexpected start result");
+			expect(secondStart.daemon.id).not.toBe(firstStart.daemon.id);
+			await client.request({ op: "send", name: "reuse", data: "go\n" });
+			await raw.waitFor(
+				message =>
+					message.event === "daemon-monitor-completed" &&
+					message.monitorId === futureSubscription.id,
+			);
+
+			const replacementNotifications = raw.messages.filter(
+				message => message.monitorId === futureSubscription.id,
+			);
+			expect(replacementNotifications.map(message => message.event)).toEqual([
+				"daemon-output",
+				"daemon-monitor-completed",
+			]);
+			expect(replacementNotifications[0]?.text).toBe("SECOND_RUN");
+			expect(replacementNotifications[1]?.daemon).toMatchObject({
+				id: secondStart.daemon.id,
+				state: "exited",
+				exitCode: 0,
+			});
+			expect(await Bun.file(artifactPath).text()).toBe("SECOND_RUN\n");
+		} finally {
+			raw?.socket.destroy();
+			await client.request({ op: "stop", name: "reuse", timeoutMs: 2_000 }).catch(() => undefined);
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
+			setProcessName(previousTitle);
+		}
+	}, 20_000);
+
 	it("bounds socket previews while preserving the complete broker-written artifact", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-monitor-preview-");
 		const projectDir = path.join(tempDir.path(), "project");

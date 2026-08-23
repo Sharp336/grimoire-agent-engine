@@ -103,6 +103,46 @@ describe("launch logs compatibility", () => {
 		expect(request.outputSubscriptionId).toBe("output-subscription-1");
 	});
 
+	it("preserves the next-start target on output subscriptions", () => {
+		const request = parseDaemonWireRequest({
+			id: "request-1",
+			token: "token-1",
+			outputSubscriptions: [
+				{
+					id: "monitor-1",
+					name: "web",
+					owner: "session-owner",
+					artifactPath: "/tmp/monitor.log",
+					startPending: true,
+				},
+			],
+			outputSubscriptionId: "output-subscription-1",
+			operation: { op: "ping" },
+		});
+
+		expect(request.outputSubscriptions?.[0]?.startPending).toBeTrue();
+	});
+
+	it("rejects a non-boolean next-start target", () => {
+		expect(() =>
+			parseDaemonWireRequest({
+				id: "request-1",
+				token: "token-1",
+				outputSubscriptions: [
+					{
+						id: "monitor-1",
+						name: "web",
+						owner: "session-owner",
+						artifactPath: "/tmp/monitor.log",
+						startPending: "yes",
+					},
+				],
+				outputSubscriptionId: "output-subscription-1",
+				operation: { op: "ping" },
+			}),
+		).toThrow("request.outputSubscriptions[0].startPending must be a boolean");
+	});
+
 	it("decodes raw terminal text from an already-running legacy broker", () => {
 		const result = parseDaemonRpcResult(operation, { ...baseResult, terminalText: "progress\rready" });
 		if (result.op !== "logs") throw new Error("unexpected result");

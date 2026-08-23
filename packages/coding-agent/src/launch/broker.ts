@@ -1094,6 +1094,7 @@ class DaemonBroker {
 						clearTimeout(existing.offlineTimer);
 						existing.offlineTimer = undefined;
 						existing.owner = subscription.owner;
+						existing.startPending = subscription.startPending;
 						const reconnected = existing.socket !== socket;
 						existing.socket = socket;
 						this.#pruneAcknowledgedOutput(existing, subscription);
@@ -1112,7 +1113,8 @@ class DaemonBroker {
 							existing.daemonId === record.snapshot.id &&
 							terminalState(record.snapshot.state) &&
 							!record.monitorSettlementPending &&
-							!replayedTerminal
+							!replayedTerminal &&
+							existing.startPending !== true
 						) {
 							this.#notifyMonitorCompletion(record, existing);
 						}
@@ -1135,9 +1137,19 @@ class DaemonBroker {
 						this.#progressBatcher.clear(replaced.batchKey);
 						void replaced.artifactSink.dispose();
 					}
-					const registration = createOutputRegistration(subscription, socket, subscriptionId, record?.snapshot.id);
+					const registration = createOutputRegistration(
+						subscription,
+						socket,
+						subscriptionId,
+						subscription.startPending === true ? undefined : record?.snapshot.id,
+					);
 					this.#outputRegistrations.set(key, registration);
-					if (record && terminalState(record.snapshot.state) && !record.monitorSettlementPending) {
+					if (
+						record &&
+						terminalState(record.snapshot.state) &&
+						!record.monitorSettlementPending &&
+						subscription.startPending !== true
+					) {
 						this.#notifyMonitorCompletion(record, registration);
 					}
 				};
@@ -1155,6 +1167,7 @@ class DaemonBroker {
 		for (const registration of this.#outputRegistrations.values()) {
 			if (registration.name === record.snapshot.name && registration.daemonId === undefined) {
 				registration.daemonId = record.snapshot.id;
+				registration.startPending = undefined;
 			}
 		}
 	}
@@ -1241,7 +1254,10 @@ class DaemonBroker {
 		for (const registration of this.#outputRegistrations.values()) {
 			if (target && registration !== target) continue;
 			if (registration.name !== record.snapshot.name) continue;
-			if (registration.daemonId === undefined) registration.daemonId = record.snapshot.id;
+			if (registration.daemonId === undefined) {
+				if (registration.startPending === true) continue;
+				registration.daemonId = record.snapshot.id;
+			}
 			if (registration.daemonId !== record.snapshot.id) continue;
 			this.#sendMonitorNotification(registration, {
 				event: "daemon-monitor-completed",
