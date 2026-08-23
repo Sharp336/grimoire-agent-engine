@@ -547,4 +547,42 @@ describe("openai-completions convertMessages", () => {
 			},
 		]);
 	});
+	it("preserves image_url for the multimodal DeepSeek vision SKU", () => {
+		// deepseek-v4-flash-vision-exp is genuinely multimodal: the blanket
+		// DeepSeek text-only guard must not strip its image parts. Built inline
+		// because the bundled catalog does not carry the SKU yet.
+		const baseModel = getBundledModel("openai", "gpt-4o-mini") as Model<"openai-completions">;
+		const model: Model<"openai-completions"> = {
+			...baseModel,
+			id: "deepseek-v4-flash-vision-exp",
+			name: "DeepSeek V4 Flash Vision Exp",
+			provider: "deepseek" as Model<"openai-completions">["provider"],
+			baseUrl: "https://api.deepseek.com",
+			api: "openai-completions",
+			input: ["text", "image"],
+		};
+		const context: Context = {
+			messages: [
+				{
+					role: "user",
+					content: [
+						{ type: "text", text: "Describe this image" },
+						{ type: "image", data: "ZmFrZQ==", mimeType: "image/png" },
+					],
+					timestamp: Date.now(),
+				},
+			],
+		};
+
+		const messages = convertMessages(model, context, compat);
+
+		expect(messages).toHaveLength(1);
+		expect(messages[0].content).toEqual([
+			{ type: "text", text: "Describe this image" },
+			{
+				type: "image_url",
+				image_url: { url: "data:image/png;base64,ZmFrZQ==" },
+			},
+		]);
+	});
 });

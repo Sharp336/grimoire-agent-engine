@@ -77,8 +77,11 @@ export function isDashscopeCompatibleModeTextOnlyQwen(model: Model<"openai-compl
 export function isTextOnlyDeepSeek(model: Model<"openai-completions">): boolean {
 	const id = model.id.toLowerCase();
 	const name = (model.name ?? "").toLowerCase();
-	// DeepSeek OCR is a genuinely multimodal model served by Novita.
+	// DeepSeek OCR and the multimodal vision SKUs (deepseek-v4-flash-vision-exp,
+	// future -vision- ids) genuinely accept image_url parts; same marker as the
+	// catalog's deepseek mapModel heuristic.
 	if (id.includes("deepseek-ocr") || name.includes("deepseek-ocr")) return false;
+	if (id.includes("vision") || name.includes("vision")) return false;
 	return (
 		modelMatchesHost(model, "deepseekFamily") ||
 		isDeepseekModelIdOrName(model.id) ||
