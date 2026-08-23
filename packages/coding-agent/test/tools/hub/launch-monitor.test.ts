@@ -12,9 +12,9 @@ import type {
 	DaemonSpec,
 } from "../../../src/launch/protocol";
 import { DAEMON_OUTPUT_MONITOR_CAPABILITY } from "../../../src/launch/protocol";
-import { PROGRESS_PREVIEW_MAX_BYTES } from "../../../src/session/progress-preview";
 import type { ToolSession } from "../../../src/tools";
 import { executeLaunch } from "../../../src/tools/hub/launch";
+import { PREVIEW_LIMITS } from "../../../src/tools/render-utils";
 
 const OWNER = "owner-session";
 
@@ -972,7 +972,9 @@ describe("hub process output monitoring", () => {
 		await launch;
 
 		expect(order).toEqual(["progress", "terminal:exited", "resolved"]);
-		expect(Buffer.byteLength(deliveredProgress?.text ?? "", "utf8")).toBeLessThanOrEqual(PROGRESS_PREVIEW_MAX_BYTES);
+		expect(Buffer.byteLength(deliveredProgress?.text ?? "", "utf8")).toBeLessThanOrEqual(
+			PREVIEW_LIMITS.PROGRESS_BYTES,
+		);
 		expect(deliveredProgress).toMatchObject({
 			seq: batchCount,
 			suppressedEvents: batchCount,
