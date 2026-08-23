@@ -411,9 +411,12 @@ describe("OutputSink", () => {
 	});
 
 	test("mirror mode delivers a queued chunk with the stamp captured at entry", async () => {
+		const dir = await createTempDir();
 		let epoch = 0;
 		const deliveries: Array<{ chunk: string; stamp: number }> = [];
 		const sink = new OutputSink({
+			artifactPath: path.join(dir, "queued-mirror.log"),
+			artifactId: "queued-mirror",
 			artifactWriteMode: "mirror",
 			chunkStamp: () => epoch,
 			onChunk: (chunk, stamp) => deliveries.push({ chunk, stamp }),
