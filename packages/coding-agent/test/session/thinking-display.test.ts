@@ -1,5 +1,10 @@
-import { describe, expect, it } from "bun:test";
-import { canonicalizeMessage, formatThinkingForDisplay } from "@oh-my-pi/pi-coding-agent/utils/thinking-display";
+import { beforeEach, describe, expect, it } from "bun:test";
+import {
+	__foldWork,
+	__resetFoldWork,
+	canonicalizeMessage,
+	formatThinkingForDisplay,
+} from "@oh-my-pi/pi-coding-agent/utils/thinking-display";
 
 describe("canonicalizeMessage", () => {
 	it("returns empty string for undefined, empty, or whitespace-only", () => {
@@ -91,7 +96,7 @@ describe("formatThinkingForDisplay streaming performance", () => {
 	const texts: string[] = [];
 	{
 		// Monotonically growing stream; joined per tick so fixtures are flat
-		// strings and timing measures the formatter rather than lazy rope
+		// strings and counts measure the formatter rather than lazy rope
 		// flattening of `+=`-accumulated fixtures.
 		const parts: string[] = [];
 		for (let i = 0; i < TICKS; i++) {
@@ -99,37 +104,65 @@ describe("formatThinkingForDisplay streaming performance", () => {
 			texts.push(parts.join(""));
 		}
 	}
-	// Carries `<!--` so the raw-mode identity shortcut cannot skip poisoning
-	// the cache between timed calls.
+	const TOTAL_BYTES = texts[TICKS - 1]!.length;
+	// Carries `<!--` so the post-stream verification below recomputes from
+	// scratch instead of answering from the identity memo.
 	const DIRTY_PERF = "\u0000perf-dirty\u0000\n<!--";
 
-	// The forced-recompute baseline phases alone take multiple seconds
-	// (quadratic work by design); run well clear of bun's 5s default timeout.
-	it(`incremental append stream beats per-tick recompute over ${TICKS} ticks (raw + prose)`, () => {
+	beforeEach(() => {
+		__resetFoldWork();
+	});
+
+	it(`append stream folds at most delta + trailing partial per tick (${TICKS} ticks, raw + prose)`, () => {
 		for (const proseOnly of [false, true]) {
-			// JIT warm-up on a shorter prefix of the same stream.
-			for (let i = 0; i < 500; i++) {
-				formatThinkingForDisplay(DIRTY_PERF, proseOnly);
-				formatThinkingForDisplay(texts[i]!, proseOnly);
+			let partialBefore = 0;
+			let totalFolded = 0;
+			let overBoundTicks = 0;
+			let lastOut = "";
+			// Raw mode's comment gate: the first chunk carrying `<!--` flips
+			// noise filtering on, and since the preceding clean ticks ran the
+			// identity shortcut (checkpoint retired), that one transition tick
+			// recomputes the whole text — once per stream, derived from inputs.
+			let commentSeen = false;
+			let gateFlipTick = -1;
+			for (let t = 0; t < TICKS; t++) {
+				const chunk = CHUNKS[t % CHUNKS.length]!;
+				if (!commentSeen && chunk.includes("<!--")) {
+					gateFlipTick = t;
+					commentSeen = true;
+				}
+				__resetFoldWork();
+				lastOut = formatThinkingForDisplay(texts[t]!, proseOnly);
+				const folded = __foldWork();
+				// The resume seam sits at the previous text's trailing partial
+				// line, so one append call rescans exactly `delta + partial`
+				// bytes; anything beyond that region (barring the raw gate
+				// transition above) is a regression.
+				const bound = chunk.length + partialBefore + (!proseOnly && t === gateFlipTick ? texts[t]!.length : 0);
+				if (folded > bound) overBoundTicks++;
+				totalFolded += folded;
+				const nl = chunk.lastIndexOf("\n");
+				partialBefore = nl < 0 ? partialBefore + chunk.length : chunk.length - 1 - nl;
 			}
-			let sink = "";
-			let t0 = performance.now();
-			for (const text of texts) sink = formatThinkingForDisplay(text, proseOnly);
-			const incrementalMs = performance.now() - t0;
+			expect(overBoundTicks).toBe(0);
+			// Whole-stream contract O(total): each byte folded once plus the
+			// bounded re-folds of the trailing partial line.
+			expect(totalFolded).toBeLessThanOrEqual(3 * TOTAL_BYTES);
 			// The streamed result must match one cold recompute of the full text.
 			formatThinkingForDisplay(DIRTY_PERF, proseOnly);
-			expect(sink).toBe(formatThinkingForDisplay(texts[TICKS - 1]!, proseOnly));
-			// Pre-PR baseline: a forced full re-scan per tick.
-			t0 = performance.now();
-			for (const text of texts) {
-				formatThinkingForDisplay(DIRTY_PERF, proseOnly);
-				sink = formatThinkingForDisplay(text, proseOnly);
-			}
-			const recomputeMs = performance.now() - t0;
-			expect(incrementalMs).toBeLessThan(recomputeMs / 2);
-			expect(incrementalMs).toBeLessThan(2000);
+			expect(lastOut).toBe(formatThinkingForDisplay(texts[TICKS - 1]!, proseOnly));
 		}
-	}, 30000);
+	});
+
+	it("exact repeats answer from the identity memo with zero fold work", () => {
+		for (const proseOnly of [false, true]) {
+			const final = texts[TICKS - 1]!;
+			formatThinkingForDisplay(final, proseOnly);
+			__resetFoldWork();
+			for (let i = 0; i < 2000; i++) formatThinkingForDisplay(final, proseOnly);
+			expect(__foldWork()).toBe(0);
+		}
+	});
 });
 
 describe("formatThinkingForDisplay adversarial append detection", () => {
@@ -228,54 +261,53 @@ describe("formatThinkingForDisplay no-newline scaling", () => {
 		return texts;
 	};
 
-	it("growth stays cheaper than forced per-tick recompute and exact repeats stay memoized", () => {
-		for (const proseOnly of [false, true]) {
-			const texts = buildTexts(2400);
-			const final = texts[texts.length - 1]!;
-			for (const text of buildTexts(300)) {
-				formatThinkingForDisplay(POISON_NL, proseOnly);
-				formatThinkingForDisplay(text, proseOnly);
-			}
-			let sink = "";
-			let t0 = performance.now();
-			for (const text of texts) sink = formatThinkingForDisplay(text, proseOnly);
-			const growthMs = performance.now() - t0;
-			// Byte-identical through the cap transition.
-			formatThinkingForDisplay(POISON_NL, proseOnly);
-			expect(sink).toBe(formatThinkingForDisplay(final, proseOnly));
-			// Exact-repeat burst on the final (>cap) text: pure memo hits.
-			t0 = performance.now();
-			for (let i = 0; i < 2000; i++) formatThinkingForDisplay(final, proseOnly);
-			const repeatMs = performance.now() - t0;
-			// Ratio form: memo hits cost a fraction of one growth pass —
-			// robust under machine-load variance, unlike absolute bounds.
-			expect(repeatMs).toBeLessThan(growthMs / 4);
-			// Growth must not cost more than forcing a cold recompute per tick.
-			t0 = performance.now();
+	beforeEach(() => {
+		__resetFoldWork();
+	});
+
+	it("prose growth folds exactly the current text per call, across the resume cap", () => {
+		const specs: Array<{ ticks: number; chunk?: string }> = [
+			{ ticks: 2400 }, // ~12 KB of ~5-byte chunks: crosses the 8 KiB cap mid-run
+			{ ticks: 1200, chunk: "z".repeat(16) }, // ~19 KB of uniform oversized chunks
+		];
+		for (const spec of specs) {
+			const texts = buildTexts(spec.ticks, spec.chunk);
+			let offByHistory = 0;
+			let lastOut = "";
 			for (const text of texts) {
-				formatThinkingForDisplay(POISON_NL, proseOnly);
-				sink = formatThinkingForDisplay(text, proseOnly);
+				__resetFoldWork();
+				lastOut = formatThinkingForDisplay(text, true);
+				// No newline ever arrives, so the seam stays at byte 0: resumed
+				// calls rescan the whole text and past MAX_RESUME_PARTIAL_BYTES
+				// the retired checkpoint forces a full recompute — either way
+				// the count is exactly today's size, never cumulative history.
+				if (__foldWork() !== text.length) offByHistory++;
 			}
-			const baselineMs = performance.now() - t0;
-			expect(growthMs).toBeLessThan(baselineMs);
+			expect(offByHistory).toBe(0);
+			// Byte-identical through the cap transition.
+			formatThinkingForDisplay(POISON_NL, true);
+			expect(lastOut).toBe(formatThinkingForDisplay(texts[texts.length - 1]!, true));
 		}
 	});
 
-	it("per-tick cost scales linearly with text size, not quadratically", () => {
-		for (const proseOnly of [false, true]) {
-			const timed = (targetBytes: number) => {
-				const texts = buildTexts(1200, "z".repeat(Math.ceil(targetBytes / 1200)));
-				const t0 = performance.now();
-				for (const text of texts) formatThinkingForDisplay(text, proseOnly);
-				return performance.now() - t0;
-			};
-			timed(4096); // JIT warm-up
-			const smallMs = timed(12 * 1024);
-			const bigMs = timed(24 * 1024);
-			// Doubling the size must not quadruple the time; generous absolute
-			// ceiling only guards pathological blowup (load variance is 2-3x).
-			expect(bigMs).toBeLessThan(smallMs * 3.5 + 20);
-			expect(bigMs).toBeLessThan(10000);
+	it("exact repeats on the post-cap text are pure memo: zero fold work", () => {
+		const texts = buildTexts(2400);
+		const final = texts[texts.length - 1]!;
+		let out = "";
+		for (const text of texts) out = formatThinkingForDisplay(text, true);
+		formatThinkingForDisplay(POISON_NL, true);
+		expect(out).toBe(formatThinkingForDisplay(final, true));
+		__resetFoldWork();
+		for (let i = 0; i < 2000; i++) formatThinkingForDisplay(final, true);
+		// 2000 exact repeats re-fold not one byte.
+		expect(__foldWork()).toBe(0);
+	});
+
+	it("raw mode folds nothing for comment-free text (identity shortcut)", () => {
+		for (const text of buildTexts(50)) {
+			__resetFoldWork();
+			formatThinkingForDisplay(text, false);
+			expect(__foldWork()).toBe(0);
 		}
 	});
 });
