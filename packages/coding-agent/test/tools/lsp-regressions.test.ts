@@ -1812,9 +1812,10 @@ describe("lsp regressions", () => {
 		}
 	});
 
-	it("keeps existing markers ahead of Dart when both are present for workspace diagnostics", async () => {
-		// `pubspec.yaml` is checked last, so a polyglot root still resolves to the
-		// established checker rather than silently switching to `dart analyze`.
+	it("runs every detected checker when Dart and another marker are both present for workspace diagnostics", async () => {
+		// A polyglot root collects every marker instead of stopping at the first
+		// one, so both `cargo check` and `dart analyze` run and their output is
+		// combined rather than one language silently going unchecked.
 		const tempDir = TempDir.createSync("@omp-lsp-dart-polyglot-workspace-");
 		const spawnCalls: BunSpawnCall[] = [];
 		recordBunSpawn(spawnCalls);
@@ -1829,11 +1830,15 @@ describe("lsp regressions", () => {
 				file: "*",
 			});
 
-			expect(spawnCalls).toHaveLength(1);
-			expect(spawnCalls[0]?.cmd).toEqual(["cargo", "check", "--message-format=short"]);
+			expect(spawnCalls).toHaveLength(2);
+			expect(spawnCalls.map(call => call.cmd)).toEqual(
+				expect.arrayContaining([["cargo", "check", "--message-format=short"], ["dart", "analyze"]]),
+			);
 			const output = textResult(result);
 			expect(output).toContain("Rust (cargo check)");
-			expect(output).not.toContain("dart analyze");
+			expect(output).toContain("Dart (dart analyze)");
+			expect(output).toContain("=== Rust (cargo check) ===");
+			expect(output).toContain("=== Dart (dart analyze) ===");
 		} finally {
 			tempDir.removeSync();
 		}
