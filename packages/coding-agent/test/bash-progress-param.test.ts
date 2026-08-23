@@ -250,11 +250,142 @@ describe("bash progress parameter", () => {
 		await manager.waitForAll();
 		await manager.drainDeliveries({ timeoutMs: 10 });
 
+		const completedJob = manager.getJob(result.details?.async?.jobId ?? "");
+		expect(completedJob?.terminalTextProvenance).toBe("progress");
+
 		expect(events[0]).toBe("progress:after-promotion");
 		expect(events[1]).toContain("completion:");
 		expect(events[1]).toContain("before-promotion");
 		expect(events[1]).toContain("after-promotion");
 		expect(events.join("\n").match(/progress:before-promotion/g)).toBeNull();
+		await manager.dispose();
+	}, 10_000);
+
+	test("promotes after a mirror artifact failure instead of waiting for command exit", async () => {
+		using tempDir = TempDir.createSync("@omp-bash-auto-artifact-failure-");
+		const releasePath = path.join(tempDir.path(), "release");
+		const artifact = { id: "broken-auto-progress", path: path.join(tempDir.path(), "missing", "output.txt") };
+		const manager = new AsyncJobManager({});
+		const progress: string[] = [];
+		const completions: Array<{ text: string; job?: AsyncJob }> = [];
+		manager.registerProgressSink("Main", {
+			deliver: (_jobId, text) => {
+				progress.push(text);
+			},
+		});
+		manager.registerDeliverySink("Main", (_jobId, text, job) => {
+			completions.push({ text, job });
+		});
+		const session = makeSession(manager, { "bash.asyncAuto.inlineGraceMs": 20 });
+		session.allocateOutputArtifact = async () => artifact;
+		const tool = new BashTool(session);
+
+		const result = await tool.execute("broken-auto-progress-artifact", {
+			command:
+				"printf 'before-failure\\n'; " +
+				'while [ ! -f "$RELEASE" ]; do sleep 0.01; done; ' +
+				"printf 'after-failure\\n'",
+			env: { RELEASE: releasePath },
+			async: "auto",
+			progress: "wake",
+		});
+
+		expect(result.details?.async?.state).toBe("running");
+		expect(progress).toEqual([]);
+		await Bun.write(releasePath, "");
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 10 });
+
+		expect(completions).toHaveLength(1);
+		expect(completions[0]?.text).toContain("before-failure");
+		expect(completions[0]?.text).toContain("after-failure");
+		expect(completions[0]?.job?.progressArtifactId).toBeUndefined();
+		expect(await Bun.file(artifact.path).exists()).toBeFalse();
+		await manager.dispose();
+	}, 10_000);
+
+	test("freezes the foreground preview before a mirror-delayed post-boundary callback", async () => {
+		using tempDir = TempDir.createSync("@omp-bash-stable-promotion-preview-");
+		const releasePath = path.join(tempDir.path(), "release");
+		const manager = new AsyncJobManager({});
+		const progressEvents: string[] = [];
+		manager.registerProgressSink("Main", {
+			deliver: (_jobId, text) => {
+				progressEvents.push(text);
+			},
+		});
+		manager.registerDeliverySink("Main", () => {});
+
+		let reportPreview: ((text: string, details?: Record<string, unknown>) => void | Promise<void>) | undefined;
+		let reportAgentProgress: ((text: string, info?: AsyncJobProgressInfo) => void) | undefined;
+		const register = manager.register.bind(manager);
+		manager.register = (type, label, run, options) => {
+			reportPreview = options?.onProgress;
+			return register(
+				type,
+				label,
+				context => {
+					reportAgentProgress = context.reportAgentProgress;
+					return run(context);
+				},
+				options,
+			);
+		};
+
+		const deliveriesResumed = Promise.withResolvers<void>();
+		let postBoundaryCallbackRan = false;
+		const resumeDeliveries = manager.resumeDeliveries.bind(manager);
+		manager.resumeDeliveries = jobIds => {
+			resumeDeliveries(jobIds);
+			deliveriesResumed.resolve();
+		};
+		const activateProgressDelivery = manager.activateProgressDelivery.bind(manager);
+		manager.activateProgressDelivery = (jobId, delivery) => {
+			const activated = activateProgressDelivery(jobId, delivery);
+			queueMicrotask(() => {
+				postBoundaryCallbackRan = true;
+				void reportPreview?.("foreground\npost-boundary\n");
+				void deliveriesResumed.promise.then(() => reportAgentProgress?.("post-boundary"));
+			});
+			return activated;
+		};
+
+		const steering = new AbortController();
+		const tool = new BashTool(makeSession(manager, { "bash.asyncAuto.inlineGraceMs": 60_000 }));
+		const result = await tool.execute(
+			"auto-promote-stable-preview",
+			{
+				command: "printf 'foreground\\n'; while [ ! -f \"$RELEASE\" ]; do sleep 0.01; done",
+				env: { RELEASE: releasePath },
+				async: "auto",
+				progress: "wake",
+			},
+			undefined,
+			update => {
+				const text = update.content.find(block => block.type === "text")?.text ?? "";
+				if (text.includes("foreground")) steering.abort();
+			},
+			{
+				toolCall: {
+					batchId: "stable-promotion-preview",
+					index: 0,
+					total: 1,
+					toolCalls: [{ id: "auto-promote-stable-preview", name: "bash" }],
+					steeringSignal: steering.signal,
+				},
+			} as AgentToolContext,
+		);
+		const resultText = result.content.find(block => block.type === "text")?.text ?? "";
+
+		expect(result.details?.async?.state).toBe("running");
+		expect(postBoundaryCallbackRan).toBe(true);
+		expect(resultText).toContain("foreground");
+		expect(resultText).not.toContain("post-boundary");
+
+		await Bun.write(releasePath, "");
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 10 });
+		expect(progressEvents).toEqual(["post-boundary"]);
 		await manager.dispose();
 	}, 10_000);
 

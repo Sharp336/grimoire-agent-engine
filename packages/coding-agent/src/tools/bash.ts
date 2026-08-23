@@ -381,12 +381,19 @@ type ManagedBashJobCompletion =
 			error: unknown;
 	  };
 
+type ManagedBashJobPromotion =
+	| {
+			kind: "promoted";
+			foregroundPreview: string;
+	  }
+	| ManagedBashJobCompletion;
+
 interface ManagedBashJobHandle {
 	jobId: string;
 	completion: Promise<ManagedBashJobCompletion>;
 	getLatestText: () => string;
 	stopUpdates: () => void;
-	promote: (delivery?: AsyncJobProgressDelivery) => Promise<boolean>;
+	promote: (delivery?: AsyncJobProgressDelivery) => Promise<ManagedBashJobPromotion>;
 }
 
 function normalizeResultOutput(result: BashResult | BashInteractiveResult): string {
@@ -855,6 +862,11 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		};
 		let forwardUpdates = options.forwardUpdates;
 		const completion = Promise.withResolvers<ManagedBashJobCompletion>();
+		let settledCompletion: ManagedBashJobCompletion | undefined;
+		const settleCompletion = (outcome: ManagedBashJobCompletion): void => {
+			settledCompletion ??= outcome;
+			completion.resolve(outcome);
+		};
 
 		const jobId = manager.register(
 			"bash",
@@ -897,16 +909,13 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 							// the foreground preview.
 							chunkStamp: trackChunkDelivery,
 							onChunk: (chunk, stamp, artifactId) => {
-								try {
-									confirmedProgressArtifactId = artifactId;
-									tailBuffer.append(chunk);
-									latestText = tailBuffer.text();
-									void reportProgress(latestText, { async: { state: "running", jobId, type: "bash" } });
-									progressLines?.append(chunk, stamp);
-								} finally {
-									finishChunkDelivery();
-								}
+								confirmedProgressArtifactId = artifactId;
+								tailBuffer.append(chunk);
+								latestText = tailBuffer.text();
+								void reportProgress(latestText, { async: { state: "running", jobId, type: "bash" } });
+								progressLines?.append(chunk, stamp);
 							},
+							onChunkSettled: finishChunkDelivery,
 							onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 						});
 						confirmedProgressArtifactId = result.artifactId;
@@ -926,7 +935,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					// Hand the detailed result to the foreground auto-background
 					// waiter (which renders it, footer included) before deciding
 					// the job's terminal state.
-					completion.resolve({ kind: "completed", result: finalResult });
+					settleCompletion({ kind: "completed", result: finalResult });
 					if (finalResult.isError === true) {
 						// A non-zero exit is a completed command that failed. Re-enter
 						// the failure path so the job manager records it as failed and
@@ -949,7 +958,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				} catch (error) {
 					const message = error instanceof Error ? error.message : String(error);
 					latestText = message;
-					completion.resolve({ kind: "failed", error });
+					settleCompletion({ kind: "failed", error });
 					await reportProgress(message, {
 						...(exitCode === undefined ? {} : { exitCode }),
 						...(timedOut ? { timedOut: true } : {}),
@@ -988,21 +997,26 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				promotionRequested = true;
 				trackPromotionDeliveries = false;
 				const prePromotionDeliveries = chunkDeliveryBarrier;
-				// Mirror-mode artifact flushing and throttling can delay onChunk,
-				// which owns latestText. Drain those entry-time-stamped chunks
-				// through the inactive foreground gate before taking the preview
-				// and resetting/activating progress. A failed executor can dispose
-				// a held chunk, so its terminal completion also releases this wait.
-				await Promise.race([prePromotionDeliveries, completion.promise.then(() => undefined)]);
-				pendingChunkDeliveries.length = 0;
-				nextChunkDelivery = 0;
-				if (!delivery) {
+				try {
+					// Mirror-mode artifact flushing and throttling can delay onChunk,
+					// which owns latestText. Drain those entry-time-stamped chunks
+					// through the inactive foreground gate before taking an immutable
+					// preview snapshot and activating progress. OutputSink settles each
+					// token even if artifact persistence fails.
+					await Promise.race([prePromotionDeliveries, completion.promise.then(() => undefined)]);
+					const foregroundPreview = latestText;
+					pendingChunkDeliveries.length = 0;
+					nextChunkDelivery = 0;
+					if (settledCompletion) return settledCompletion;
+					if (delivery) {
+						progressSampler?.resetDisplay();
+						manager.activateProgressDelivery(jobId, delivery);
+						if (settledCompletion) return settledCompletion;
+					}
+					return { kind: "promoted", foregroundPreview };
+				} finally {
 					promotionRequested = false;
-					return false;
 				}
-				progressSampler?.reset();
-				promotionRequested = false;
-				return manager.activateProgressDelivery(jobId, delivery);
 			},
 		};
 	}
@@ -1221,7 +1235,13 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				throw new ToolAbortError(job.getLatestText() || "Command aborted");
 			}
 			job.stopUpdates();
-			await job.promote(progress);
+			const promotion = await job.promote(progress);
+			if (promotion.kind === "completed") {
+				return promotion.result;
+			}
+			if (promotion.kind === "failed") {
+				throw promotion.error;
+			}
 			autoBgManager.resumeDeliveries([job.jobId]);
 			// "steer": a queued user/peer message arrived mid-wait — background
 			// the command (it keeps running) so the message injects promptly.
@@ -1229,7 +1249,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				waitResult.kind === "steer"
 					? [...pendingNotices, "Backgrounded early to handle an incoming message; the command keeps running."]
 					: pendingNotices;
-			return this.#buildBackgroundStartResult(job.jobId, job.getLatestText(), timeoutSec, {
+			return this.#buildBackgroundStartResult(job.jobId, promotion.foregroundPreview, timeoutSec, {
 				requestedTimeoutSec,
 				notices,
 			});

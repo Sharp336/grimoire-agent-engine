@@ -25,6 +25,8 @@ export interface BashExecutorOptions {
 	 * a boundary (e.g. async promotion) that the sink delivered after it.
 	 */
 	chunkStamp?: () => number;
+	/** Invoked after each sampled chunk delivery settles, including failed mirror flushes. */
+	onChunkSettled?: (stamp: number) => void;
 	chunkThrottleMs?: number;
 	signal?: AbortSignal;
 	/** Session key suffix to isolate shell sessions per agent */
@@ -486,6 +488,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	const sink = new OutputSink({
 		onChunk: usePty ? undefined : options?.onChunk,
 		chunkStamp: options?.chunkStamp,
+		onChunkSettled: options?.onChunkSettled,
 		artifactPath: options?.artifactPath,
 		artifactId: options?.artifactId,
 		artifactWriteMode: options?.artifactWriteMode,

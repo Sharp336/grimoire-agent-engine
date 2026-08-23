@@ -81,7 +81,7 @@ export interface OutputSinkOptions {
 	 * writes still respect the budget. Default 0 = no per-line cap.
 	 */
 	maxColumns?: number;
-	onChunk?: (chunk: string, stamp: number) => void;
+	onChunk?: (chunk: string, stamp: number, artifactId?: string) => void;
 	/**
 	 * Sampled when a chunk's first byte enters the sink and passed to the
 	 * matching (possibly delayed) `onChunk` call. Mirror mode and chunk
@@ -90,6 +90,12 @@ export interface OutputSinkOptions {
 	 * such stale chunks. Deliveries default to stamp 0 when omitted.
 	 */
 	chunkStamp?: () => number;
+	/**
+	 * Invoked exactly once after the matching sampled `onChunk` delivery
+	 * succeeds or fails. Callers use this to release entry-time barriers even
+	 * when artifact flushing prevents `onChunk` from running.
+	 */
+	onChunkSettled?: (stamp: number) => void;
 	/** Minimum ms between onChunk calls. 0 = every chunk (default). */
 	chunkThrottleMs?: number;
 	/**
@@ -846,6 +852,7 @@ export class OutputSink {
 	readonly #headLimit: number;
 	readonly #onChunk?: (chunk: string, stamp: number) => void;
 	readonly #chunkStamp?: () => number;
+	readonly #onChunkSettled?: (stamp: number) => void;
 	readonly #chunkThrottleMs: number;
 	readonly #maxColumns: number;
 
@@ -875,6 +882,7 @@ export class OutputSink {
 			maxColumns = 0,
 			onChunk,
 			chunkStamp,
+			onChunkSettled,
 			chunkThrottleMs = 0,
 			artifactMaxBytes = ARTIFACT_DEFAULT_MAX_BYTES,
 			artifactHeadBytes = ARTIFACT_DEFAULT_HEAD_BYTES,
@@ -887,6 +895,7 @@ export class OutputSink {
 		this.#headLimit = Math.max(0, Math.min(headBytes, Math.floor(spillThreshold / 2)));
 		this.#maxColumns = Math.max(0, maxColumns);
 		this.#onChunk = onChunk;
+		this.#onChunkSettled = onChunkSettled;
 		this.#chunkStamp = chunkStamp;
 		this.#chunkThrottleMs = chunkThrottleMs;
 		this.#artifactMaxBytes = Math.max(0, artifactMaxBytes);
@@ -1289,15 +1298,23 @@ export class OutputSink {
 		const merged = this.#pendingChunk + chunk;
 		this.#pendingChunk = "";
 		if (this.#artifactWriteMode !== "mirror") {
-			this.#onChunk?.(merged, stamp);
+			try {
+				this.#onChunk?.(merged, stamp);
+			} finally {
+				this.#onChunkSettled?.(stamp);
+			}
 			return;
 		}
 		const deliver = async () => {
-			// push() finishes routing the raw chunk to the file before this microtask
-			// resumes, then flushArtifact makes it readable before model-facing progress.
-			await Promise.resolve();
-			await this.flushArtifact();
-			this.#onChunk?.(merged, stamp);
+			try {
+				// push() finishes routing the raw chunk to the file before this microtask
+				// resumes, then flushArtifact makes it readable before model-facing progress.
+				await Promise.resolve();
+				const artifactId = await this.flushArtifact();
+				this.#onChunk?.(merged, stamp, artifactId);
+			} finally {
+				this.#onChunkSettled?.(stamp);
+			}
 		};
 		const tail = this.#chunkDeliveryTail?.then(deliver, deliver) ?? deliver();
 		// Handle the rejection at creation: a preview failure between pushes must

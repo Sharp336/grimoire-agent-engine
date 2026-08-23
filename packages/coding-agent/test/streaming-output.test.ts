@@ -432,6 +432,33 @@ describe("OutputSink", () => {
 		]);
 	});
 
+	test("settles a sampled mirror delivery when artifact persistence fails", async () => {
+		const dir = await createTempDir();
+		const settled: number[] = [];
+		const deliveries: string[] = [];
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const sink = new OutputSink({
+				artifactPath: path.join(dir, "missing", "output.log"),
+				artifactId: "unavailable-artifact",
+				artifactWriteMode: "mirror",
+				chunkStamp: () => 7,
+				onChunk: chunk => deliveries.push(chunk),
+				onChunkSettled: stamp => settled.push(stamp),
+			});
+
+			sink.push("cannot persist");
+			const dumped = await sink.dump();
+
+			expect(deliveries).toEqual([]);
+			expect(settled).toEqual([7]);
+			expect(dumped.output).toBe("cannot persist");
+			expect(dumped.artifactId).toBeUndefined();
+		} finally {
+			warnSpy.mockRestore();
+		}
+	});
+
 	test("a throttle-held chunk keeps the stamp of its first held byte", async () => {
 		let epoch = 0;
 		const deliveries: Array<{ chunk: string; stamp: number }> = [];
