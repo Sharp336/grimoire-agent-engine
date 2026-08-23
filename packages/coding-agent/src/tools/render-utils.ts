@@ -732,8 +732,11 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 export function shortenEmbeddedPaths(text: string, homeDir = os.homedir()): string {
 	if (!homeDir) return text;
 	let shortened = text;
-	const homePaths = homeDir.includes("\\") ? [homeDir, homeDir.replaceAll("\\", "/")] : [homeDir];
-	const caseInsensitive = homeDir.includes("\\") || /^[A-Za-z]:\//.test(homeDir);
+	const isWindowsPath = homeDir.includes("\\") || /^(?:[A-Za-z]:\/|\/\/)/.test(homeDir);
+	const homePaths = isWindowsPath
+		? [...new Set([homeDir, homeDir.replaceAll("\\", "/"), homeDir.replaceAll("/", "\\")])]
+		: [homeDir];
+	const caseInsensitive = isWindowsPath;
 	const trailingBoundary = "(?=$|[\\\\/]|\\s|\\x1b|[\"'`()\\[\\]{}<>=:;,|&.!?]+(?=$|\\s))";
 	for (const homePath of homePaths) {
 		const homePrefix = new RegExp(

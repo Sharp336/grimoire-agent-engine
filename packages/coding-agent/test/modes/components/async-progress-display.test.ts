@@ -120,7 +120,7 @@ describe("async progress transcript display sanitization", () => {
 	});
 
 	it("shortens mixed-case Windows home paths without exposing the user directory", () => {
-		vi.spyOn(os, "homedir").mockReturnValue("C:\\Users\\Pedro");
+		vi.spyOn(os, "homedir").mockReturnValue("C:/Users/Pedro");
 		const backslashPath = "c:\\USERS\\pEdRo\\projects\\build.log";
 		const slashPath = "C:/users/PEDRO/projects/build.log";
 		const message = progressMessage(`native: ${backslashPath}\nportable: ${slashPath}`);
