@@ -637,8 +637,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	async #deliverOutput(message: DaemonMonitorWireNotification, generation: number): Promise<void> {
 		const entry = this.#outputSinks.get(message.monitorId);
 		if (!entry) return;
-		const notificationDaemonId =
-			message.event === "daemon-monitor-completed" ? message.daemon.id : message.daemonId;
+		const notificationDaemonId = message.event === "daemon-monitor-completed" ? message.daemon.id : message.daemonId;
 		const deliver = async (): Promise<void> => {
 			if (this.#closed || generation !== this.#socketGeneration) return;
 			if (this.#outputSinks.get(message.monitorId) !== entry) return;
