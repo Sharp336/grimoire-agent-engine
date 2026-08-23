@@ -394,9 +394,16 @@ export class SessionTools {
 		return [...(this.#xdev?.mountedNames ?? [])];
 	}
 
-	/** Whether the edit tool is registered. */
+	/**
+	 * Whether the edit tool is effectively granted: registered AND scoped into
+	 * the active set. `disallowedTools:` (or an enforced `tools:` allowlist)
+	 * keeps the registry entry but removes it from every active-set mutation,
+	 * so hashline anchors must be suppressed for the subagent (the
+	 * `resolveFileDisplayMode` contract). No-op for unrestricted sessions:
+	 * `#isToolScopedIn` admits everything then.
+	 */
 	get hasEditTool(): boolean {
-		return this.#toolRegistry.has("edit");
+		return this.#toolRegistry.has("edit") && this.#isToolScopedIn("edit");
 	}
 
 	/** Looks up a registered tool by name. */
