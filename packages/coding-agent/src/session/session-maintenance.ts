@@ -78,6 +78,19 @@ import {
 	resolveSpeculationMethod,
 } from "./compaction-methods";
 import { convertToLlm, stripImagesFromMessage } from "./messages";
+import {
+	findLatestResetBoundaryIdx,
+	foldedRegion,
+	heuristicPreservesUserMessage,
+	isRealUserMessageEntry,
+	readPreservedUserMessagesStore,
+	resolvePreservedUserMessageContextTokens,
+	resolvePreservedUserMessagePolicy,
+	selectPreservedUserMessages,
+	userMessageCandidates,
+	writePreservedUserMessagesStore,
+} from "./preserve-user-messages";
+import { classifyPreservedUserMessages } from "./preserve-user-messages-classifier";
 import { isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
 	resolveCompactionConfiguredTarget,
@@ -778,7 +791,7 @@ export class SessionMaintenance {
 				return await this.compact(customInstructions, options, selectedMethodIndex + 1, compactionAbortController);
 			}
 			const pathEntries = this.#host.sessionManager.getBranch();
-			const preparation = prepareCompaction(pathEntries, effectiveSettings, activeModel, this.#tokenizer);
+			const preparation = this.#prepareCompaction(pathEntries, effectiveSettings, activeModel);
 			if (!preparation) {
 				// Check why we can't compact
 				const lastEntry = pathEntries[pathEntries.length - 1];
@@ -870,7 +883,15 @@ export class SessionMaintenance {
 			// this method, allowing the configured preference order to continue.
 			let snapcompactResult: snapcompact.CompactionResult | undefined;
 			if (snapcompactReady) {
-				const maxFrames = this.#computeSnapcompactMaxFrames(preparation, effectiveSettings);
+				const preservedOverlayTokens = this.#preservedUserMessageOverlayTokens(
+					pathEntries,
+					{
+						firstKeptEntryId: preparation.firstKeptEntryId,
+						preserveData: compactionPrep.preserveData,
+					},
+					{ prospective: true },
+				);
+				const maxFrames = this.#computeSnapcompactMaxFrames(preparation, effectiveSettings, preservedOverlayTokens);
 				if (maxFrames < 1) {
 					logger.warn("Snapcompact skipped: kept history alone exceeds the context budget", {
 						model: this.#model?.id,
@@ -886,13 +907,17 @@ export class SessionMaintenance {
 					if (!shape) {
 						throw new Error("snapcompact shape was not resolved before rendering.");
 					}
-					snapcompactResult = await snapcompact.compact(preparation, {
+					const localResult = await snapcompact.compact(preparation, {
 						convertToLlm,
 						model: this.#model,
 						...(snapcompactShapeSetting === "auto" ? {} : { shape }),
 						maxFrames,
 						includeThinking: snapcompactIncludeThinking,
 					});
+					snapcompactResult = {
+						...localResult,
+						preserveData: { ...(compactionPrep.preserveData ?? {}), ...(localResult.preserveData ?? {}) },
+					};
 					const framePayloadBytes = this.#snapcompactFramePayloadBytes(snapcompactResult);
 					if (framePayloadBytes > snapcompact.FRAME_DATA_BYTES_BUDGET) {
 						logger.warn("Snapcompact exceeded the per-request frame payload budget", {
@@ -914,7 +939,7 @@ export class SessionMaintenance {
 						ctxWindow > 0
 							? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
 							: Number.POSITIVE_INFINITY;
-					if (this.#projectSnapcompactContextTokens(preparation, snapcompactResult) > budget) {
+					if (this.#projectSnapcompactContextTokens(pathEntries, preparation, snapcompactResult) > budget) {
 						logger.warn("Snapcompact still overflows the window after frame-budget sizing", {
 							model: this.#model?.id,
 						});
@@ -941,7 +966,7 @@ export class SessionMaintenance {
 				firstKeptEntryId = snapcompactResult.firstKeptEntryId;
 				tokensBefore = snapcompactResult.tokensBefore;
 				details = snapcompactResult.details;
-				preserveData = { ...(compactionPrep.preserveData ?? {}), ...(snapcompactResult.preserveData ?? {}) };
+				preserveData = snapcompactResult.preserveData;
 			} else {
 				codexCompaction = createCodexCompactionContext({
 					trigger: "manual",
@@ -1001,8 +1026,7 @@ export class SessionMaintenance {
 				});
 			}
 
-			compactionCommitted = true;
-			await this.#commitCompactionEntry({
+			const savedCompactionEntry = await this.#commitCompactionEntry({
 				summary,
 				shortSummary,
 				firstKeptEntryId,
@@ -1013,7 +1037,12 @@ export class SessionMaintenance {
 				method: fromExtension ? undefined : selectedMethod,
 				codexCompaction,
 				advisorResetReason: "compact",
+				signal: compactionAbortController.signal,
+				onAppended: () => {
+					compactionCommitted = true;
+				},
 			});
+			preserveData = savedCompactionEntry?.preserveData ?? preserveData;
 
 			const compactionResult: CompactionResult = {
 				summary,
@@ -1140,29 +1169,42 @@ export class SessionMaintenance {
 		const messageCount = entries.filter(e => e.type === "message").length;
 		if (messageCount < 2) throw new Error("Nothing to hand off (no messages yet)");
 		const compactionSettings = this.#host.settings.getGroup("compaction");
-		const preparation = prepareCompaction(
-			entries,
-			resolveMethodSettings(compactionSettings, "handoff"),
-			model,
-			this.#tokenizer,
-		);
+		const preparation = this.#prepareCompaction(entries, resolveMethodSettings(compactionSettings, "handoff"), model);
 		if (!preparation) throw new Error("Nothing to hand off (already compacted)");
-		const result = await this.#host.generateHandoffDocument(customInstructions, options);
-		if (!result) return undefined;
-		const { summary, details } = handoffSummaryFromDocument(result.document, preparation);
-		await this.#commitCompactionEntry({
-			summary,
-			shortSummary: undefined,
-			firstKeptEntryId: preparation.firstKeptEntryId,
-			tokensBefore: preparation.tokensBefore,
-			details,
-			fromExtension: false,
-			preserveData: undefined,
-			method: "handoff",
-			codexCompaction: undefined,
-			advisorResetReason: "handoff",
-		});
-		return result;
+		const handoffAbortController = new AbortController();
+		const signal = options?.signal
+			? AbortSignal.any([options.signal, handoffAbortController.signal])
+			: handoffAbortController.signal;
+		const cleanup = Promise.withResolvers<void>();
+		this.#compactionAbortController = handoffAbortController;
+		this.#manualCompactionCleanup = cleanup.promise;
+		try {
+			const result = await this.#host.generateHandoffDocument(customInstructions, { ...options, signal });
+			if (!result) return undefined;
+			const { summary, details } = handoffSummaryFromDocument(result.document, preparation);
+			await this.#commitCompactionEntry({
+				summary,
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details,
+				fromExtension: false,
+				preserveData: undefined,
+				method: "handoff",
+				codexCompaction: undefined,
+				advisorResetReason: "handoff",
+				signal,
+			});
+			return result;
+		} finally {
+			if (this.#compactionAbortController === handoffAbortController) {
+				this.#compactionAbortController = undefined;
+			}
+			if (this.#manualCompactionCleanup === cleanup.promise) {
+				this.#manualCompactionCleanup = undefined;
+			}
+			cleanup.resolve();
+		}
 	}
 
 	/**
@@ -1278,7 +1320,7 @@ export class SessionMaintenance {
 		const branch = this.#host.sessionManager.getBranch();
 		const snapshotLeafId = branch[branch.length - 1]?.id;
 		if (!snapshotLeafId) return clear();
-		const preparation = prepareCompaction(branch, effectiveSettings, model, this.#tokenizer);
+		const preparation = this.#prepareCompaction(branch, effectiveSettings, model);
 		if (!preparation) return clear();
 		const signal = run.controller.signal;
 		let armed: ArmedSpeculation;
@@ -1350,6 +1392,12 @@ export class SessionMaintenance {
 				contextTokensAtStart: contextTokens,
 			};
 		}
+		armed.result.preserveData = await this.#finalizePreservedUserMessagesLlmVerdict(
+			armed.result.preserveData,
+			branch,
+			armed.result.firstKeptEntryId,
+			signal,
+		);
 		if (signal.aborted || this.#speculation !== run) return;
 		run.armed = armed;
 		logger.debug("Speculative compaction armed", {
@@ -1404,6 +1452,157 @@ export class SessionMaintenance {
 		return this.#armedSpeculationValid(run.armed) ? run.armed : undefined;
 	}
 
+	#preservedUserMessagePolicy() {
+		return resolvePreservedUserMessagePolicy(this.#host.settings.getGroup("compaction"), this.#tokenizer);
+	}
+
+	/** Current transient overlay cost for status/context accounting. */
+	currentPreservedUserMessageOverlayTokens(): number {
+		const policy = this.#preservedUserMessagePolicy();
+		if (!policy) return 0;
+		if (!this.#host.messages().some(message => message.role === "compactionSummary")) return 0;
+		const branch = this.#host.sessionManager.getBranch();
+		const activeCompaction = getLatestCompactionEntry(branch);
+		if (!activeCompaction) return 0;
+		const selection = selectPreservedUserMessages(branch, activeCompaction, policy);
+		return resolvePreservedUserMessageContextTokens(
+			selection,
+			activeCompaction,
+			this.#model,
+			this.#host.settings.getGroup("compaction"),
+		);
+	}
+
+	/** Exact fixed cost of the transient overlay for a stored or prospective boundary. */
+	#preservedUserMessageOverlayTokens(
+		pathEntries: readonly SessionEntry[],
+		boundary: { id?: string; firstKeptEntryId: string; preserveData?: Record<string, unknown> },
+		options?: { prospective?: boolean },
+	): number {
+		const policy = this.#preservedUserMessagePolicy();
+		if (!policy) return 0;
+		const selection = selectPreservedUserMessages(pathEntries, boundary, policy, options);
+		return resolvePreservedUserMessageContextTokens(
+			selection,
+			boundary,
+			this.#model,
+			this.#host.settings.getGroup("compaction"),
+		);
+	}
+
+	/**
+	 * Prepare a cut while excluding the active preservation overlay from the
+	 * provider/local calibration ratio. The overlay is already in provider
+	 * usage but lies before the branch range that `prepareCompaction` estimates;
+	 * treating it as tokenizer drift needlessly collapses the kept tail.
+	 */
+	#prepareCompaction(
+		pathEntries: SessionEntry[],
+		settings: EngineCompactionSettings,
+		activeModel: Model | undefined,
+	): CompactionPreparation | undefined {
+		const activeCompaction = getLatestCompactionEntry(pathEntries);
+		const fixedPrefixTokens = activeCompaction
+			? this.#preservedUserMessageOverlayTokens(pathEntries, activeCompaction)
+			: 0;
+		return prepareCompaction(pathEntries, settings, activeModel, this.#tokenizer, { fixedPrefixTokens });
+	}
+
+	/**
+	 * When `compaction.keepUserMessages` uses the `"llm"` filter, classify only
+	 * newly folded user messages and carry the cumulative positive and negative
+	 * verdict coverage in compaction `preserveData`. Prior positive verdicts are
+	 * monotonic: later compactions cannot reclassify a kept instruction away.
+	 * The other filters (heuristic, pinned, all) are deterministic at rebuild
+	 * time and need no side request. A classification failure assigns the
+	 * heuristic verdict to that new batch so the feature degrades safely.
+	 */
+	async #finalizePreservedUserMessagesLlmVerdict(
+		preserveData: Record<string, unknown> | undefined,
+		pathEntries: SessionEntry[],
+		firstKeptEntryId: string,
+		signal: AbortSignal,
+	): Promise<Record<string, unknown> | undefined> {
+		if (signal.aborted) {
+			throw new CompactionCancelledError(undefined, { cause: signal.reason });
+		}
+		if (
+			this.#host.settings.get("compaction.keepUserMessages") !== true ||
+			this.#host.settings.get("compaction.keepUserMessagesFilter") !== "llm"
+		) {
+			return preserveData;
+		}
+		const epochIdx = findLatestResetBoundaryIdx(pathEntries);
+		const region = foldedRegion(pathEntries, epochIdx, firstKeptEntryId);
+		const candidates = userMessageCandidates(region);
+		const candidateIds = new Set(candidates.map(candidate => candidate.id));
+		const userEntriesById = new Map(region.filter(isRealUserMessageEntry).map(entry => [entry.id, entry] as const));
+		const priorStore = readPreservedUserMessagesStore(getLatestCompactionEntry(pathEntries)?.preserveData);
+		const incomingStore = readPreservedUserMessagesStore(preserveData);
+		const preserved = new Set<string>();
+		const classified = new Set<string>();
+		const collectIds = (ids: readonly string[] | undefined, target: Set<string>) => {
+			for (const id of ids ?? []) if (candidateIds.has(id)) target.add(id);
+		};
+		collectIds(priorStore?.preservedIds, preserved);
+		collectIds(incomingStore?.preservedIds, preserved);
+		collectIds(priorStore?.classifiedIds, classified);
+		collectIds(incomingStore?.classifiedIds, classified);
+
+		const unclassified = candidates.filter(candidate => !classified.has(candidate.id));
+		const mechanicallyPreserved = unclassified.filter(candidate => candidate.mechanicallyPreserved === true);
+		const candidatesForClassifier = unclassified.filter(candidate => candidate.mechanicallyPreserved !== true);
+		let newlyPreserved: string[] | undefined = [];
+		if (candidatesForClassifier.length > 0) {
+			try {
+				newlyPreserved = await classifyPreservedUserMessages(candidatesForClassifier, {
+					settings: this.#host.settings,
+					registry: this.#host.modelRegistry,
+					sessionId: this.#host.sessionId(),
+					completeImpl: async (requestModel, requestContext, requestOptions) => {
+						const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
+						return stream.result();
+					},
+					obfuscateTextForProvider: text => this.#host.obfuscateTextForProvider(text),
+					signal,
+				});
+			} catch (err) {
+				if (signal.aborted) {
+					throw new CompactionCancelledError(undefined, { cause: signal.reason });
+				}
+				newlyPreserved = undefined;
+				logger.warn("Preserved-user-messages classification failed; falling back to heuristic", {
+					sessionId: this.#host.sessionId(),
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
+		}
+		if (signal.aborted) {
+			throw new CompactionCancelledError(undefined, { cause: signal.reason });
+		}
+		const classifiedVerdict =
+			newlyPreserved ??
+			candidatesForClassifier.reduce((ids: string[], candidate) => {
+				const entry = userEntriesById.get(candidate.id);
+				if (entry && isRealUserMessageEntry(entry) && heuristicPreservesUserMessage(entry.message)) {
+					ids.push(candidate.id);
+				}
+				return ids;
+			}, []);
+		const verdict = new Set(mechanicallyPreserved.map(candidate => candidate.id));
+		for (const id of classifiedVerdict) verdict.add(id);
+		for (const id of verdict) {
+			if (candidateIds.has(id)) preserved.add(id);
+		}
+		for (const candidate of unclassified) classified.add(candidate.id);
+
+		return writePreservedUserMessagesStore(preserveData, {
+			version: 1,
+			preservedIds: candidates.filter(candidate => preserved.has(candidate.id)).map(candidate => candidate.id),
+			classifiedIds: candidates.filter(candidate => classified.has(candidate.id)).map(candidate => candidate.id),
+		});
+	}
+
 	/**
 	 * Append a compaction entry and run the shared post-commit sequence:
 	 * rebuild the display context, swap live agent messages, re-anchor stats,
@@ -1423,7 +1622,19 @@ export class SessionMaintenance {
 		providerReplayThroughEntryId?: string;
 		advisorResetReason: string;
 		detachExtensionEmit?: boolean;
+		signal: AbortSignal;
+		onAppended?: () => void;
 	}): Promise<CompactionEntry | undefined> {
+		const pathEntries = this.#host.sessionManager.getBranch();
+		const preserveData = await this.#finalizePreservedUserMessagesLlmVerdict(
+			args.preserveData,
+			pathEntries,
+			args.firstKeptEntryId,
+			args.signal,
+		);
+		if (args.signal.aborted) {
+			throw new CompactionCancelledError(undefined, { cause: args.signal.reason });
+		}
 		const entryId = this.#host.sessionManager.appendCompaction(
 			args.summary,
 			args.shortSummary,
@@ -1432,12 +1643,13 @@ export class SessionMaintenance {
 			{
 				details: args.details,
 				fromExtension: args.fromExtension,
-				preserveData: args.preserveData,
+				preserveData,
 				method: args.method,
 				providerReplayThroughEntryId: args.providerReplayThroughEntryId,
-				tokensAfter: this.#projectCompactedContextTokens(args),
+				tokensAfter: this.#projectCompactedContextTokens({ ...args, preserveData }),
 			},
 		);
+		args.onAppended?.();
 		const newEntries = this.#host.sessionManager.getEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
@@ -1500,7 +1712,8 @@ export class SessionMaintenance {
 		return (
 			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer) +
 			this.#tokenizer.countMessages(storedMessages, opts) +
-			this.#tokenizer.countMessages(pendingMessages, opts)
+			this.#tokenizer.countMessages(pendingMessages, opts) +
+			this.currentPreservedUserMessageOverlayTokens()
 		);
 	}
 
@@ -1528,8 +1741,7 @@ export class SessionMaintenance {
 		}
 		if (
 			pendingMidTurnDeadEnd &&
-			prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model, this.#tokenizer) ===
-				undefined
+			this.#prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model) === undefined
 		) {
 			// The prior tool loop already attempted the rescue and warned for this
 			// persisted oversized turn. Only a later persisted cut point makes a
@@ -1653,8 +1865,7 @@ export class SessionMaintenance {
 			// soon as one appears.
 			if (
 				!model ||
-				prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model, this.#tokenizer) ===
-					undefined
+				this.#prepareCompaction(this.#host.sessionManager.getBranch(), compactionSettings, model) === undefined
 			) {
 				return;
 			}
@@ -2251,7 +2462,11 @@ export class SessionMaintenance {
 	 * ~402k frame-token projection always overflows any sub-1M-token window
 	 * (issue #3247).
 	 */
-	#computeSnapcompactMaxFrames(preparation: CompactionPreparation, settings: EngineCompactionSettings): number {
+	#computeSnapcompactMaxFrames(
+		preparation: CompactionPreparation,
+		settings: EngineCompactionSettings,
+		preservedOverlayTokens: number,
+	): number {
 		const ctxWindow = this.#model?.contextWindow ?? 0;
 		if (ctxWindow <= 0) {
 			return Math.min(
@@ -2263,6 +2478,7 @@ export class SessionMaintenance {
 		const reserve = effectiveReserveTokens(ctxWindow, settings);
 		let baseTokens = computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer);
 		baseTokens += this.#tokenizer.countMessages(preparation.recentMessages);
+		baseTokens += preservedOverlayTokens;
 		const totalBudget = ctxWindow - reserve;
 		// Skip iff there is no headroom whatsoever; a text-only archive costs
 		// far less than the cap reserve below, so any positive residual is
@@ -2317,7 +2533,11 @@ export class SessionMaintenance {
 	 * lets the caller decide whether snapcompact brought the context under the
 	 * window or should fall back to an LLM summary.
 	 */
-	#projectSnapcompactContextTokens(preparation: CompactionPreparation, result: snapcompact.CompactionResult): number {
+	#projectSnapcompactContextTokens(
+		pathEntries: readonly SessionEntry[],
+		preparation: CompactionPreparation,
+		result: snapcompact.CompactionResult,
+	): number {
 		const archive = snapcompact.getPreservedArchive(result.preserveData);
 		const blocks = archive
 			? snapcompact.historyBlocks(archive, { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET })
@@ -2335,6 +2555,7 @@ export class SessionMaintenance {
 			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer) +
 			this.#tokenizer.countMessage(summaryMessage);
 		tokens += this.#tokenizer.countMessages(preparation.recentMessages);
+		tokens += this.#preservedUserMessageOverlayTokens(pathEntries, result, { prospective: true });
 		return tokens;
 	}
 
@@ -2363,8 +2584,10 @@ export class SessionMaintenance {
 		let tokens =
 			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer) +
 			this.#tokenizer.countMessage(summaryMessage);
+		const pathEntries = this.#host.sessionManager.getBranch();
+		tokens += this.#preservedUserMessageOverlayTokens(pathEntries, args);
 		let inKeptRegion = false;
-		for (const entry of this.#host.sessionManager.getBranch()) {
+		for (const entry of pathEntries) {
 			if (entry.id === args.firstKeptEntryId) inKeptRegion = true;
 			if (!inKeptRegion) continue;
 			if (entry.type === "message") tokens += this.#tokenizer.countMessage(entry.message);
@@ -2570,7 +2793,11 @@ export class SessionMaintenance {
 	 * Returns 0 when not even one frame fits that budget — the rebuild could
 	 * never create headroom, so the caller must not append it.
 	 */
-	#computeSnapcompactRescueMaxFrames(settings: EngineCompactionSettings, keptTailTokens: number): number {
+	#computeSnapcompactRescueMaxFrames(
+		settings: EngineCompactionSettings,
+		keptTailTokens: number,
+		preservedOverlayTokens: number,
+	): number {
 		const ctxWindow = this.#model?.contextWindow ?? 0;
 		if (ctxWindow <= 0) {
 			return Math.min(
@@ -2586,7 +2813,13 @@ export class SessionMaintenance {
 		const edgeCap = snapcompact.geometry(shape).capacity;
 		const textEdgeTokens = Math.ceil((2 * edgeCap * 1.15) / 4);
 		const SUMMARY_TEMPLATE_TOKENS = 2000;
-		const frameBudget = recoveryBandTokens - baseTokens - keptTailTokens - textEdgeTokens - SUMMARY_TEMPLATE_TOKENS;
+		const frameBudget =
+			recoveryBandTokens -
+			baseTokens -
+			keptTailTokens -
+			preservedOverlayTokens -
+			textEdgeTokens -
+			SUMMARY_TEMPLATE_TOKENS;
 		if (frameBudget < snapcompact.FRAME_TOKEN_ESTIMATE) return 0;
 		// Same hard caps as #computeSnapcompactMaxFrames: a threshold-derived
 		// count above the per-request payload or provider image budget would
@@ -2663,7 +2896,8 @@ export class SessionMaintenance {
 		if (!archive || archive.frames.length <= 1) return undefined;
 		const archiveText = snapcompact.archiveSourceText(archive);
 		if (!archiveText) return undefined;
-		const maxFrames = this.#computeSnapcompactRescueMaxFrames(settings, keptTailTokens);
+		const preservedOverlayTokens = this.#preservedUserMessageOverlayTokens(branchEntries, staleEntry);
+		const maxFrames = this.#computeSnapcompactRescueMaxFrames(settings, keptTailTokens, preservedOverlayTokens);
 		if (maxFrames < 1 || maxFrames >= archive.frames.length) return undefined;
 
 		const staleDetails = staleEntry.details as snapcompact.CompactionDetails | undefined;
@@ -2968,7 +3202,7 @@ export class SessionMaintenance {
 			const pathEntries = this.#host.sessionManager.getBranch();
 
 			let pathEntriesForCompaction = pathEntries;
-			let preparation = prepareCompaction(pathEntriesForCompaction, effectiveSettings, this.#model, this.#tokenizer);
+			let preparation = this.#prepareCompaction(pathEntriesForCompaction, effectiveSettings, this.#model);
 			if (!preparation) {
 				// prepareCompaction found nothing to summarize because the kept region
 				// is a single oversized recent turn — findCutPoint never cuts inside a
@@ -3018,12 +3252,7 @@ export class SessionMaintenance {
 								// branch has been rewritten either way.
 								rescueRewroteHistory = true;
 								pathEntriesForCompaction = this.#host.sessionManager.getBranch();
-								preparation = prepareCompaction(
-									pathEntriesForCompaction,
-									effectiveSettings,
-									this.#model,
-									this.#tokenizer,
-								);
+								preparation = this.#prepareCompaction(pathEntriesForCompaction, effectiveSettings, this.#model);
 								return preparation !== undefined;
 							},
 						});
@@ -3222,7 +3451,19 @@ export class SessionMaintenance {
 					});
 					snapcompactBlocker = `snapcompact disabled: unsupported characters for selected snapcompact font (${percent}%); trying the next preferred compaction method.`;
 				} else {
-					const maxFrames = this.#computeSnapcompactMaxFrames(preparation, effectiveSettings);
+					const preservedOverlayTokens = this.#preservedUserMessageOverlayTokens(
+						pathEntriesForCompaction,
+						{
+							firstKeptEntryId: preparation.firstKeptEntryId,
+							preserveData: compactionPrep.preserveData,
+						},
+						{ prospective: true },
+					);
+					const maxFrames = this.#computeSnapcompactMaxFrames(
+						preparation,
+						effectiveSettings,
+						preservedOverlayTokens,
+					);
 					if (maxFrames < 1) {
 						logger.warn("Snapcompact skipped: kept history alone exceeds the context budget", {
 							model: this.#model?.id,
@@ -3230,13 +3471,17 @@ export class SessionMaintenance {
 						snapcompactBlocker =
 							"snapcompact: kept history alone exceeds the context budget; trying the next preferred compaction method.";
 					} else {
-						snapcompactResult = await snapcompact.compact(preparation, {
+						const localResult = await snapcompact.compact(preparation, {
 							convertToLlm,
 							model: this.#model,
 							...(shapeSetting === "auto" ? {} : { shape }),
 							maxFrames,
 							includeThinking: snapcompactIncludeThinking,
 						});
+						snapcompactResult = {
+							...localResult,
+							preserveData: { ...(compactionPrep.preserveData ?? {}), ...(localResult.preserveData ?? {}) },
+						};
 						const framePayloadBytes = this.#snapcompactFramePayloadBytes(snapcompactResult);
 						if (framePayloadBytes > snapcompact.FRAME_DATA_BYTES_BUDGET) {
 							logger.warn("Snapcompact exceeded the per-request frame payload budget", {
@@ -3254,7 +3499,11 @@ export class SessionMaintenance {
 								ctxWindow > 0
 									? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
 									: Number.POSITIVE_INFINITY;
-							const projected = this.#projectSnapcompactContextTokens(preparation, snapcompactResult);
+							const projected = this.#projectSnapcompactContextTokens(
+								pathEntriesForCompaction,
+								preparation,
+								snapcompactResult,
+							);
 							if (projected > budget) {
 								logger.warn("Snapcompact still overflows the window after frame-budget sizing", {
 									model: this.#model?.id,
@@ -3309,7 +3558,7 @@ export class SessionMaintenance {
 				firstKeptEntryId = snapcompactResult.firstKeptEntryId;
 				tokensBefore = snapcompactResult.tokensBefore;
 				details = snapcompactResult.details;
-				preserveData = { ...(compactionPrep.preserveData ?? {}), ...(snapcompactResult.preserveData ?? {}) };
+				preserveData = snapcompactResult.preserveData;
 			} else {
 				const candidates = this.#getCompactionModelCandidates(
 					availableModels,
@@ -3624,8 +3873,6 @@ export class SessionMaintenance {
 			);
 			return COMPACTION_CHECK_NONE;
 		}
-
-		args.onCommitted();
 		const savedCompactionEntry = await this.#commitCompactionEntry({
 			summary: args.summary,
 			shortSummary: args.shortSummary,
@@ -3639,7 +3886,10 @@ export class SessionMaintenance {
 			providerReplayThroughEntryId: args.providerReplayThroughEntryId,
 			advisorResetReason: "auto-compaction",
 			detachExtensionEmit: detachPostCommit,
+			signal: autoCompactionSignal,
+			onAppended: args.onCommitted,
 		});
+		const preserveData = savedCompactionEntry?.preserveData ?? args.preserveData;
 
 		const result: CompactionResult = {
 			summary: args.summary,
@@ -3647,7 +3897,7 @@ export class SessionMaintenance {
 			firstKeptEntryId: args.firstKeptEntryId,
 			tokensBefore: args.tokensBefore,
 			details: args.details,
-			preserveData: snapcompact.stripPreservedArchive(args.preserveData),
+			preserveData: snapcompact.stripPreservedArchive(preserveData),
 		};
 		// Post-maintenance progress guard — evaluated BEFORE emitting
 		// auto_compaction_end so the TUI rebuild triggered by that event

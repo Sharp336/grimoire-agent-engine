@@ -79,6 +79,8 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		/** Seed a kept-recent entry between firstKeptEntryId and the archive —
 		 *  re-emitted by buildSessionContext, so the rescue budget must charge it. */
 		preArchiveKeptText?: string;
+		/** Seed a folded user message re-emitted by the preservation overlay. */
+		preservedUserText?: string;
 	}): Promise<void> {
 		tempDir = TempDir.createSync("@pi-snapcompact-frame-dead-end-");
 		sessionManager = SessionManager.inMemory(tempDir.path());
@@ -136,6 +138,13 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 		// the archive) a trailing snapcompact CompactionEntry as the LAST branch
 		// entry — the real prepareCompaction must hit its
 		// last-entry-is-compaction guard organically.
+		if (options.preservedUserText !== undefined) {
+			sessionManager.appendMessage({
+				role: "user",
+				content: options.preservedUserText,
+				timestamp: Date.now() - 1,
+			});
+		}
 		const userEntryId = sessionManager.appendMessage({
 			role: "user",
 			content: "hello",
@@ -182,6 +191,8 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 			settings: Settings.isolated({
 				"compaction.autoContinue": true,
 				"compaction.methodOrder": ["snapcompact", "soft"],
+				"compaction.keepUserMessages": options.preservedUserText !== undefined,
+				"compaction.keepUserMessagesFilter": "all",
 				// Fixed trigger so the rescue's threshold-derived frame budget is
 				// deterministic: band 0.8 × 60k = 48k minus base/edge reserves
 				// yields well under 16 frames — the rebuild must shrink.
@@ -492,6 +503,23 @@ describe("AgentSession snapcompact frame dead-end rescue", () => {
 				.filter(entry => entry.type === "compaction")
 				.map(entry => entry.id),
 		).toEqual(compactionIdsBefore);
+	});
+
+	it("bails when the preserved-user overlay leaves no frame budget", async () => {
+		await createSession({ frameCount: SEEDED_FRAME_COUNT, preservedUserText: "preserved ".repeat(16_000) });
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue(undefined);
+		vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		vi.spyOn(session.agent, "continue").mockResolvedValue();
+		vi.spyOn(session, "getContextUsage").mockReturnValue({ tokens: 190000, contextWindow: 200000, percent: 95 });
+		const shakeSpy = vi
+			.spyOn(session, "shake")
+			.mockResolvedValue({ mode: "elide", toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 });
+		const compactSpy = vi.spyOn(snapcompact, "compact");
+
+		await triggerMaintenance();
+
+		expect(compactSpy).not.toHaveBeenCalled();
+		expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: RESCUE_SHAKE_CONFIG }));
 	});
 
 	it("leaves an oversized non-archive tail to the elide tiers instead of rescuing the archive", async () => {

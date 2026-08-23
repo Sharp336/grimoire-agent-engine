@@ -28,6 +28,10 @@ import { encodeRpcFrame, MAX_RPC_FRAME_BYTES } from "@oh-my-pi/pi-coding-agent/m
 import { computeNonMessageTokens } from "@oh-my-pi/pi-coding-agent/modes/utils/context-usage";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import {
+	resolvePreservedUserMessagePolicy,
+	selectPreservedUserMessages,
+} from "@oh-my-pi/pi-coding-agent/session/preserve-user-messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 
@@ -180,6 +184,60 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		const worstCaseEdgeTokens = Math.ceil((2 * edgeCap) / 4) + 2000;
 		const fullProjection = baseTokens + (maxFrames ?? 0) * snapcompact.FRAME_TOKEN_ESTIMATE + worstCaseEdgeTokens;
 		expect(fullProjection).toBeLessThanOrEqual(budget);
+	});
+
+	it("charges the preserved-user overlay to frame sizing and persisted tokensAfter", async () => {
+		session.settings.set("compaction.keepUserMessages", true);
+		session.settings.set("compaction.keepUserMessagesFilter", "all");
+		const model = session.model;
+		if (!model) throw new Error("Expected model to be set on session");
+		const settings = session.settings.getGroup("compaction");
+		const branchEntries = sessionManager.getBranch();
+		const preparation = prepareCompaction(branchEntries, settings, model, session.agent.tokenizer);
+		if (!preparation) throw new Error("Expected non-empty preparation");
+		const overlayPolicy = resolvePreservedUserMessagePolicy(settings, session.agent.tokenizer);
+		if (!overlayPolicy) throw new Error("Expected preservation policy");
+		const overlay = selectPreservedUserMessages(
+			branchEntries,
+			{ firstKeptEntryId: preparation.firstKeptEntryId },
+			overlayPolicy,
+			{ prospective: true },
+		);
+		expect(overlay.tokenCount).toBeGreaterThan(0);
+
+		const compactSpy = vi.spyOn(snapcompact, "compact").mockResolvedValue({
+			summary: "stubbed snapcompact",
+			shortSummary: "stub",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: 100_000,
+			details: { readFiles: [], modifiedFiles: [] },
+			preserveData: {
+				[snapcompact.PRESERVE_KEY]: { frames: [], totalChars: 1000, truncatedChars: 0 },
+			},
+		});
+
+		await session.compact(undefined, { mode: "snapcompact" });
+
+		const maxFrames = compactSpy.mock.calls[0]?.[1]?.maxFrames;
+		if (maxFrames === undefined) throw new Error("Expected snapcompact maxFrames");
+		const contextWindow = model.contextWindow ?? 0;
+		const budget = contextWindow - effectiveReserveTokens(contextWindow, settings);
+		let fixedAndRecentTokens = computeNonMessageTokens(session, session.agent.tokenizer);
+		fixedAndRecentTokens += session.agent.tokenizer.countMessages(preparation.recentMessages);
+		fixedAndRecentTokens += overlay.tokenCount;
+		const edgeCapacity = snapcompact.geometry(snapcompact.resolveShape(model)).capacity;
+		const reservedSummaryTokens = Math.ceil((2 * edgeCapacity * 1.15) / 4) + 2000;
+		const fullFrameProjection =
+			fixedAndRecentTokens + maxFrames * snapcompact.FRAME_TOKEN_ESTIMATE + reservedSummaryTokens;
+		expect(fullFrameProjection).toBeLessThanOrEqual(budget);
+
+		const persisted = sessionManager.getEntries().findLast(entry => entry.type === "compaction");
+		if (persisted?.type !== "compaction") throw new Error("Expected persisted compaction entry");
+		const rebuiltTokens =
+			computeNonMessageTokens(session, session.agent.tokenizer) +
+			session.agent.tokenizer.countMessages(session.messages) +
+			overlay.tokenCount;
+		expect(persisted.tokensAfter).toBe(rebuiltTokens);
 	});
 
 	it("still invokes snapcompact with maxFrames=1 when residual headroom is below the summary-text reserve", async () => {

@@ -159,6 +159,7 @@ import {
 	USER_INTERRUPT_LABEL,
 	wrapSteeringForModel,
 } from "./session/messages";
+import { applyPreservedUserMessageOverlay, resolvePreservedUserMessagePolicy } from "./session/preserve-user-messages";
 import { clampProviderContextImages } from "./session/provider-image-budget";
 import {
 	expandDefaultRetryFallbackChains,
@@ -3212,7 +3213,33 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 
 		const transformContext = async (messages: AgentMessage[], _signal?: AbortSignal) => {
-			const withContext = await extensionRunner.emitContext(messages);
+			const activeAgent = agent;
+			const preservationEnabled = activeAgent !== undefined && settings.get("compaction.keepUserMessages");
+			const hasCompactionSummary =
+				preservationEnabled && messages.some(message => message.role === "compactionSummary");
+			const compactionSettings = hasCompactionSummary ? settings.getGroup("compaction") : undefined;
+			const preservationPolicy =
+				activeAgent && compactionSettings
+					? resolvePreservedUserMessagePolicy(compactionSettings, activeAgent.tokenizer)
+					: undefined;
+			let withPreservedUsers = messages;
+			if (preservationPolicy && compactionSettings) {
+				withPreservedUsers = applyPreservedUserMessageOverlay(
+					messages,
+					sessionManager.getBranch(),
+					preservationPolicy,
+					{
+						activeModel: activeAgent?.state.model,
+						compactionSettings,
+						normalizeSourceUserMessage: source => {
+							const converted = convertToLlm([source]);
+							const normalized = obfuscator?.hasSecrets() ? obfuscateMessages(obfuscator, converted) : converted;
+							return normalized.find(message => message.role === "user");
+						},
+					},
+				);
+			}
+			const withContext = await extensionRunner.emitContext(withPreservedUsers);
 			return wrapSteeringForModel(withContext);
 		};
 		// Per-request provider-context transforms. Obfuscate FIRST so secrets are

@@ -16,6 +16,8 @@ import {
 import { SecretObfuscator } from "@oh-my-pi/pi-coding-agent/secrets";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { readPreservedUserMessagesStore } from "@oh-my-pi/pi-coding-agent/session/preserve-user-messages";
+import * as preserveClassifierModule from "@oh-my-pi/pi-coding-agent/session/preserve-user-messages-classifier";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -158,6 +160,77 @@ describe("AgentSession handoff", () => {
 		expect(session.agent.state.messages.some(message => message.role === "compactionSummary")).toBe(true);
 		expect(events.filter(event => event.type === "auto_compaction_start")).toHaveLength(0);
 		expect(events.filter(event => event.type === "auto_compaction_end")).toHaveLength(0);
+	});
+
+	it("persists the LLM preservation verdict on a manual handoff", async () => {
+		session.settings.set("compaction.keepUserMessages", true);
+		session.settings.set("compaction.keepUserMessagesFilter", "llm");
+		const imageMessageId = sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }],
+			timestamp: Date.now(),
+		});
+		sessionManager.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "image received" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: {
+				input: 16,
+				output: 8,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 24,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now() + 1,
+		});
+		const classifierSpy = vi
+			.spyOn(preserveClassifierModule, "classifyPreservedUserMessages")
+			.mockImplementation(async candidates => candidates.map(candidate => candidate.id));
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("## Goal\nContinue with context");
+
+		await session.handoff();
+
+		expect(classifierSpy).toHaveBeenCalledTimes(1);
+		const candidateIds = (classifierSpy.mock.calls[0]?.[0] ?? []).map(candidate => candidate.id);
+		expect(candidateIds).not.toContain(imageMessageId);
+		const compaction = sessionManager.getBranch().at(-1);
+		if (compaction?.type !== "compaction") throw new Error("Expected handoff compaction entry");
+		const store = readPreservedUserMessagesStore(compaction.preserveData);
+		expect(new Set(store?.preservedIds)).toEqual(new Set([...candidateIds, imageMessageId]));
+		expect(new Set(store?.classifiedIds)).toEqual(new Set([...candidateIds, imageMessageId]));
+	});
+
+	it("holds prompts through classification and does not append when cancellation wins the commit race", async () => {
+		session.settings.set("compaction.keepUserMessages", true);
+		session.settings.set("compaction.keepUserMessagesFilter", "llm");
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("## Goal\nContinue with context");
+		const classifierEntered = Promise.withResolvers<void>();
+		const releaseClassifier = Promise.withResolvers<void>();
+		vi.spyOn(preserveClassifierModule, "classifyPreservedUserMessages").mockImplementation(async candidates => {
+			classifierEntered.resolve();
+			await releaseClassifier.promise;
+			return candidates.map(candidate => candidate.id);
+		});
+		const controller = new AbortController();
+		const compactionsBefore = sessionManager.getEntries().filter(entry => entry.type === "compaction").length;
+		const handoff = session.handoff(undefined, { signal: controller.signal });
+		await classifierEntered.promise;
+
+		const agentPrompt = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+		const queuedPrompt = session.prompt("wait for handoff cleanup");
+		for (let turn = 0; turn < 5; turn++) await Promise.resolve();
+		expect(agentPrompt).not.toHaveBeenCalled();
+
+		controller.abort("cancel before append");
+		releaseClassifier.resolve();
+		await expect(handoff).rejects.toBeInstanceOf(compactionModule.CompactionCancelledError);
+		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(compactionsBefore);
+		await queuedPrompt;
+		expect(agentPrompt).toHaveBeenCalledTimes(1);
 	});
 
 	it("runs handoff generation through the configured side stream function", async () => {

@@ -1179,6 +1179,7 @@ export class AgentSession {
 			modelRegistry: this.#modelRegistry,
 			model: () => this.model,
 			sessionId: () => this.sessionId,
+			transientOverlayTokens: () => this.#maintenance?.currentPreservedUserMessageOverlayTokens() ?? 0,
 		};
 		this.#stats = new SessionStatsTracker(statsHost);
 		const memoryHost: SessionMemoryHost = {
