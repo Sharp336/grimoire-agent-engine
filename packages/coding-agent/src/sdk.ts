@@ -1726,6 +1726,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const fileMutationVersions = new Map<string, number>();
 		const disposeCallbacks = new Set<() => void>();
 		const activeToolNames = new Set<string>();
+		// Construction-time grant probe: the registry and active set are still
+		// empty while `createTools` builds tools (ReadTool caches its description
+		// from `session.hasEditTool` then), and the startup active set is only
+		// seeded after that. Until then the getter answers from the requested
+		// scope; after `setSessionActiveToolNames` the live sets take over.
+		let activationApplied = false;
 		const toolRegistry = new Map<string, Tool & Pick<ToolDefinition, "defaultInactive">>();
 		const setActiveToolNames = (names: Iterable<string>): void => {
 			activeToolNames.clear();
@@ -1751,6 +1757,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			enableIrc: restrictToolNames ? false : options.enableIrc,
 			restrictToolNames,
 			get hasEditTool() {
+				if (!activationApplied) {
+					// Construction time: the registry and active set are still empty and
+					// ReadTool caches its description here. Answer from the requested
+					// scope, like the pre-scope getter, plus the disallow filter.
+					const requestedToolNames = options.toolNames
+						? normalizeToolNames(options.toolNames)
+						: undefined;
+					return restrictToolNames
+						? requestedToolNames?.includes("edit") === true
+						: (!requestedToolNames || requestedToolNames.includes("edit")) &&
+								!isToolDisallowed("edit", disallowedPatterns);
+				}
 				// Effective grant, not mere registration: the active set is filtered
 				// by `disallowedTools:` and an enforced `tools:` allowlist after
 				// `createTools` registers everything, so hashline anchors must
@@ -3011,7 +3029,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				let scopedInServerNames: Set<string> | undefined;
 				if (enforceToolAllowlist || disallowedPatterns.length > 0) {
 					scopedInServerNames = new Set();
-					const activeNames = new Set(toolNames);
+					// xd://-mounted MCP tools leave `toolNames` (presentation moves to
+					// `mountedNames`) while staying in the canonical `tools` map, so the
+					// enabled set is the union of both layers.
+					const activeNames = new Set([...toolNames, ...(toolSession.xdev?.mountedNames ?? [])]);
 					for (const [name, tool] of tools) {
 						if (!activeNames.has(name)) continue;
 						if (
@@ -3272,6 +3293,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 
 		setSessionActiveToolNames(initialToolNames);
+		// The active set is now final; the hasEditTool getter switches from the
+		// construction-time scope probe to the live sets from here on.
+		activationApplied = true;
 		const { systemPrompt } = await logger.time(
 			"buildSystemPrompt",
 			rebuildSystemPrompt,

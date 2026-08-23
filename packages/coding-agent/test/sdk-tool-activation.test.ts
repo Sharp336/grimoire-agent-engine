@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -27,6 +27,8 @@ import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-sessi
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { VIBE_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/vibe";
 import { logger, removeSyncWithRetries, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
+import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
+import { SERVER_INSTRUCTIONS } from "./fixtures/instructions-mcp";
 
 const toolActivationExtension: ExtensionFactory = pi => {
 	pi.registerTool({
@@ -59,6 +61,9 @@ const sdkCustomTool = {
 		return { content: [{ type: "text", text: "sdk custom" }] };
 	},
 } satisfies CustomTool;
+// Deferred-discovery MCP fixture used by the mounted-instructions regression:
+// a real stdio server exposing `mcp__instr_do_thing` with `SERVER_INSTRUCTIONS`.
+const FIXTURE_MCP_PATH = path.join(import.meta.dir, "fixtures", "instructions-mcp.ts");
 
 describe("createAgentSession defaultInactive tool activation", () => {
 	const tempDirs: string[] = [];
@@ -2559,6 +2564,44 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
+	it("renders hashline anchor guidance in the read description for unrestricted sessions", async () => {
+		// Regression for the construction-time edit grant: ReadTool caches its
+		// description while the registry and the startup active set are still
+		// empty, so the getter must answer from the requested scope then.
+		// Unrestricted sessions keep the hashline anchor instructions that the
+		// anchors their read results actually emit.
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession(baseOptions(tempDir));
+
+		try {
+			expect(session.getToolByName("read")?.description).toContain(
+				"Copy `[FILENAME#TAG]` for anchored edits; NEVER fabricate the tag",
+			);
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("suppresses hashline anchor guidance in the read description when edit is disallowed", async () => {
+		// Scoped counterpart of the construction-time grant regression: a
+		// disallow-only scope still removes the edit grant, so the cached read
+		// description must omit the anchor instructions even though it is
+		// rendered before the startup active set exists.
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			disallowedTools: ["edit"],
+		});
+
+		try {
+			expect(session.getToolByName("read")?.description).not.toContain(
+				"Copy `[FILENAME#TAG]` for anchored edits; NEVER fabricate the tag",
+			);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("renders report-issue guidance only for unrestricted sessions", async () => {
 		const normalDir = makeTempDir();
 		const restrictedDir = makeTempDir();
@@ -2875,4 +2918,74 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			await session.dispose();
 		}
 	});
+
+	it("keeps a mounted MCP server's instructions when a disallow-only scope admits its tools", async () => {
+		// Regression: an xd://-mounted MCP tool leaves the top-level active set
+		// (presentation moves to `mountedNames`) while staying enabled and
+		// callable via `write xd://<tool>`, so the instructions filter must
+		// count it. Before the fix the filter only saw `toolNames` and dropped
+		// the allowed server's instructions.
+		const originalAgentDir = getAgentDir();
+		const isolatedHome = path.join(os.tmpdir(), `pi-sdk-tool-activation-mcp-home-${Snowflake.next()}`);
+		fs.mkdirSync(isolatedHome, { recursive: true });
+		const isolatedAgentDir = path.join(isolatedHome, ".omp", "agent");
+		fs.mkdirSync(isolatedAgentDir, { recursive: true });
+		setAgentDir(isolatedAgentDir);
+		const homedirSpy = spyOn(os, "homedir").mockReturnValue(isolatedHome);
+
+		const tempDir = makeTempDir();
+		fs.writeFileSync(
+			path.join(tempDir, ".mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					instr: { type: "stdio", command: process.execPath, args: [FIXTURE_MCP_PATH] },
+				},
+			}),
+		);
+
+		try {
+			const { session } = await createAgentSession({
+				...baseOptions(tempDir),
+				enableMCP: true,
+				hasUI: true,
+				skipPythonPreflight: true,
+				// Scopes only the unrelated server, leaving the fixture server's
+				// tool granted (and, being discoverable, mounted under xd://).
+				disallowedTools: ["mcp__unrelated_*"],
+			});
+			try {
+				// The scope gate keeps the disallowed pattern inert for the fixture
+				// server, but its tool still lands in the registry only when
+				// deferred discovery connects — the first observable proof that the
+				// server came up.
+				const deadline = Date.now() + 12_000;
+				while (session.getToolByName("mcp__instr_do_thing") === undefined && Date.now() < deadline) {
+					await Bun.sleep(10);
+				}
+				expect(session.getToolByName("mcp__instr_do_thing")).toBeDefined();
+
+				// `refreshBaseSystemPrompt` is serialized FIFO on the same mutation
+				// queue as the discovery-triggered `refreshMCPTools`, so awaiting it
+				// proves the post-connection rebuild that would append the server's
+				// instructions has already committed. Regression: the rebuild's
+				// instructions filter used to drop the allowed server's text because
+				// its tool had moved from the top-level active set into the xd://
+				// mounted set (the filter only consulted `toolNames`).
+				await session.refreshBaseSystemPrompt();
+				const prompt = session.systemPrompt.join("\n");
+				expect(prompt).toContain(SERVER_INSTRUCTIONS);
+				// The granted fixture tool is mounted as an xd:// device, not
+				// top-level — exactly the state the instructions filter used to
+				// misread as scoped out.
+				expect(session.getActiveToolNames()).not.toContain("mcp__instr_do_thing");
+				expect(session.getMountedXdevToolNames()).toContain("mcp__instr_do_thing");
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			homedirSpy.mockRestore();
+			setAgentDir(originalAgentDir);
+			removeSyncWithRetries(isolatedHome);
+		}
+	}, 20_000);
 });
