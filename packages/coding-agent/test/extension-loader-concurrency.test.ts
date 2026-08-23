@@ -125,4 +125,61 @@ export default function okExtension() {
 		expect(result.extensions.map(ext => ext.path)).toEqual([okPath]);
 		expect(eventsGlobal[EVENTS_KEY]).toContain("ok:factory");
 	});
+
+	it("uses native module caching for manifest-declared modern ESM extensions", async () => {
+		writeModule(
+			"package.json",
+			JSON.stringify({ omp: { extensions: ["./src/index.ts"], compatibility: "modern-esm" } }),
+		);
+		const dependencyPath = writeModule("src/dependency.ts", `export const label = "modern-cached";`);
+		const extensionPath = writeModule(
+			"src/index.ts",
+			`import { label } from "./dependency"; export default function (pi) { pi.setLabel(label); }`,
+		);
+
+		const first = await loadExtensions([extensionPath], project!.path());
+		expect(first.errors).toEqual([]);
+		expect(first.extensions[0]?.label).toBe("modern-cached");
+
+		fs.writeFileSync(dependencyPath, `export const label = "modern-updated";`);
+		const second = await loadExtensions([extensionPath], project!.path());
+		expect(second.errors).toEqual([]);
+		expect(second.extensions[0]?.label).toBe("modern-cached");
+	});
+
+	it("does not inherit modern mode across a nested declaring manifest", async () => {
+		writeModule("package.json", JSON.stringify({ omp: { compatibility: "modern-esm" } }));
+		writeModule("nested/package.json", JSON.stringify({ omp: { extensions: ["./index.ts"] } }));
+		const dependencyPath = writeModule("nested/dependency.ts", `export const label = "nested-legacy";`);
+		const extensionPath = writeModule(
+			"nested/index.ts",
+			`import { label } from "./dependency"; export default function (pi) { pi.setLabel(label); }`,
+		);
+
+		const first = await loadExtensions([extensionPath], project!.path());
+		expect(first.extensions[0]?.label).toBe("nested-legacy");
+
+		fs.writeFileSync(dependencyPath, `export const label = "nested-updated";`);
+		const second = await loadExtensions([extensionPath], project!.path());
+		expect(second.errors).toEqual([]);
+		expect(second.extensions[0]?.label).toBe("nested-updated");
+	});
+
+	it("keeps extensions without modern metadata on the compatibility loader", async () => {
+		writeModule("package.json", JSON.stringify({ omp: { extensions: ["./index.ts"] } }));
+		const dependencyPath = writeModule("dependency.ts", `export const label = "legacy-reloaded";`);
+		const extensionPath = writeModule(
+			"index.ts",
+			`import { label } from "./dependency"; export default function (pi) { pi.setLabel(label); }`,
+		);
+
+		const first = await loadExtensions([extensionPath], project!.path());
+		expect(first.errors).toEqual([]);
+		expect(first.extensions[0]?.label).toBe("legacy-reloaded");
+
+		fs.writeFileSync(dependencyPath, `export const label = "legacy-updated";`);
+		const second = await loadExtensions([extensionPath], project!.path());
+		expect(second.errors).toEqual([]);
+		expect(second.extensions[0]?.label).toBe("legacy-updated");
+	});
 });
