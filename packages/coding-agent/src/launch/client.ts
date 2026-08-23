@@ -42,6 +42,9 @@ interface PendingRequest {
 interface OutputSinkRegistration {
 	subscription: DaemonOutputSubscription;
 	sink: (notification: DaemonMonitorNotification) => Promise<void> | void;
+	/** Resolves once the broker acknowledges this subscription and capability. */
+	resolveReady: () => void;
+	rejectReady: (error: Error) => void;
 	deliveryTail?: Promise<void>;
 	/** Connection generation whose rejected callback suppresses already-queued deliveries. */
 	failedDeliveryGeneration?: number;
@@ -66,6 +69,12 @@ export interface DaemonCompletionUnregisterOptions {
 	preservePending?: boolean;
 }
 
+/** Synchronous output detachment plus acknowledgement of broker publication. */
+export interface DaemonOutputUnregister {
+	(): void;
+	readonly ready: Promise<void>;
+}
+
 /** Persistent per-process connection to one project or global daemon broker. */
 export interface DaemonBrokerClient {
 	onCompletion(
@@ -73,14 +82,14 @@ export interface DaemonBrokerClient {
 		sink: (notification: DaemonCompletionNotification) => Promise<void> | void,
 	): (options?: DaemonCompletionUnregisterOptions) => void;
 	/**
-	 * Register a live output sink. Throws when the connected broker is known
-	 * (from a prior ping) to lack {@link DAEMON_OUTPUT_MONITOR_CAPABILITY};
-	 * callers that need a hard guarantee ping first and check capabilities.
+	 * Register a live output sink. {@link DaemonOutputUnregister.ready} settles
+	 * after the broker acknowledges both the subscription and output-monitor
+	 * capability negotiation.
 	 */
 	onOutput?(
 		subscription: DaemonOutputSubscription,
 		sink: (notification: DaemonMonitorNotification) => Promise<void> | void,
-	): () => void;
+	): DaemonOutputUnregister;
 	/** Canonical project directory or synthetic directory identifying a global scope. */
 	readonly projectDir: string;
 	request(operation: DaemonOperation, signal?: AbortSignal): Promise<DaemonRpcResult>;
@@ -130,6 +139,12 @@ function requestTimeoutMs(operation: DaemonOperation): number {
 		default:
 			return 30_000;
 	}
+}
+
+function outputMonitoringUnsupportedError(): Error {
+	return new Error(
+		"The running daemon broker does not support output monitoring; restart it with this omp build",
+	);
 }
 
 function openSocket(endpoint: string, timeoutMs: number): Promise<net.Socket> {
@@ -251,6 +266,9 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		clearTimeout(this.#completionReconnectTimer);
 		this.#completionReconnectTimer = undefined;
 		this.#socket?.destroy();
+		for (const registration of this.#outputSinks.values()) {
+			registration.rejectReady(new Error("Daemon broker client closed before output registration was acknowledged"));
+		}
 		this.#completionSinks.clear();
 		this.#outputSinks.clear();
 		this.#preservedCompletionOwners.clear();
@@ -287,27 +305,45 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	onOutput(
 		subscription: DaemonOutputSubscription,
 		sink: (notification: DaemonMonitorNotification) => Promise<void> | void,
-	): () => void {
+	): DaemonOutputUnregister {
+		const { promise: ready, resolve: resolveReady, reject: rejectReady } = Promise.withResolvers<void>();
+		// Callers may only need synchronous detachment. Mark the rejection
+		// observed without changing what consumers awaiting `ready` receive.
+		void ready.catch(() => undefined);
+		const registration: OutputSinkRegistration = {
+			subscription,
+			sink,
+			resolveReady: () => resolveReady(),
+			rejectReady: error => rejectReady(error),
+		};
+		const previous = this.#outputSinks.get(subscription.id);
+		if (previous) {
+			this.#outputSinks.delete(subscription.id);
+			previous.rejectReady(new Error("Daemon output registration was replaced before it was acknowledged"));
+		}
+
 		if (
 			this.#brokerCapabilities !== undefined &&
 			!this.#brokerCapabilities.includes(DAEMON_OUTPUT_MONITOR_CAPABILITY)
 		) {
-			throw new Error(
-				"The running daemon broker does not support output monitoring; restart it with this omp build",
-			);
+			rejectReady(outputMonitoringUnsupportedError());
+		} else {
+			this.#outputSinks.set(subscription.id, registration);
+			this.#publishSubscriptions();
 		}
-		this.#outputSinks.set(subscription.id, { subscription, sink });
-		this.#publishSubscriptions();
-		return () => {
+
+		const unregister = (): void => {
 			const current = this.#outputSinks.get(subscription.id);
-			if (current?.sink !== sink) return;
+			if (current !== registration) return;
 			this.#outputSinks.delete(subscription.id);
+			rejectReady(new Error("Daemon output registration was removed before it was acknowledged"));
 			if (this.#completionSinks.size === 0 && this.#outputSinks.size === 0 && this.#completionReconnectTimer) {
 				clearTimeout(this.#completionReconnectTimer);
 				this.#completionReconnectTimer = undefined;
 			}
 			this.#publishSubscriptions();
 		};
+		return Object.defineProperty(unregister, "ready", { value: ready }) as DaemonOutputUnregister;
 	}
 
 	/**
@@ -329,7 +365,37 @@ class SocketDaemonClient implements DaemonBrokerClient {
 
 	#publishSubscriptions(): void {
 		if (this.#closed) return;
-		void this.request({ op: "ping" }).catch(() => this.#scheduleCompletionReconnect());
+		const registrations = [...this.#outputSinks.entries()];
+		void this.request({ op: "ping" })
+			.then(result => {
+				if (
+					result.op !== "ping" ||
+					!result.capabilities?.includes(DAEMON_OUTPUT_MONITOR_CAPABILITY)
+				) {
+					const error = outputMonitoringUnsupportedError();
+					for (const [id, registration] of this.#outputSinks) {
+						this.#outputSinks.delete(id);
+						registration.rejectReady(error);
+					}
+					return;
+				}
+				for (const [id, registration] of registrations) {
+					if (this.#outputSinks.get(id) === registration) registration.resolveReady();
+				}
+			})
+			.catch(error => {
+				if (this.#closed) return;
+				if (!this.#socket || this.#socket.destroyed) {
+					this.#scheduleCompletionReconnect();
+					return;
+				}
+				const publicationError = error instanceof Error ? error : new Error(String(error));
+				for (const [id, registration] of registrations) {
+					if (this.#outputSinks.get(id) !== registration) continue;
+					this.#outputSinks.delete(id);
+					registration.rejectReady(publicationError);
+				}
+			});
 	}
 
 	#scheduleCompletionReconnect(): void {
@@ -403,6 +469,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	#bindSocket(socket: net.Socket): void {
 		const generation = ++this.#socketGeneration;
 		this.#socket = socket;
+		this.#brokerCapabilities = undefined;
 		this.#buffer = "";
 		socket.setEncoding("utf8");
 		socket.on("data", chunk => this.#onData(chunk, generation));

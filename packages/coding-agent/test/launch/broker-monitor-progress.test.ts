@@ -145,7 +145,9 @@ process.stdin.once("data", () => {
 		if (!unregister) throw new Error("Expected output monitoring support");
 
 		try {
-			// This ping publishes the subscription before start, closing the immediate-output race.
+			// Registration readiness is the broker acknowledgement that closes
+			// the immediate-output race without a caller-issued preflight ping.
+			await unregister.ready;
 			const ping = await client.request({ op: "ping" });
 			if (ping.op !== "ping") throw new Error("unexpected ping result");
 			expect(ping.capabilities).toContain(DAEMON_OUTPUT_MONITOR_CAPABILITY);
@@ -1691,13 +1693,17 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		}
 	}, 20_000);
 
-	it("rejects onOutput against a broker that lacks the output monitor capability", async () => {
+	it("rejects the first onOutput operation after a legacy broker acknowledges its capabilities", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-monitor-capability-");
 		const projectDir = path.join(tempDir.path(), "project");
 		const runtimeDir = path.join(tempDir.path(), "runtime");
 		await fs.mkdir(projectDir);
 		await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
 		const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+		type LegacyRequest = { id: string; outputSubscriptions?: unknown[] };
+		const requests: LegacyRequest[] = [];
+		const firstRequest = Promise.withResolvers<LegacyRequest>();
+		const acknowledgeCapabilities = Promise.withResolvers<void>();
 		// Pre-v4 broker: authenticates and answers pings but advertises no
 		// output-monitor capability.
 		const server = net.createServer(socket => {
@@ -1709,14 +1715,18 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 					const line = buffer.slice(0, newline);
 					buffer = buffer.slice(newline + 1);
 					if (line.trim()) {
-						const request = JSON.parse(line) as { id: string };
-						socket.write(
-							`${JSON.stringify({
-								id: request.id,
-								ok: true,
-								result: { op: "ping", projectDir, capabilities: [] },
-							})}\n`,
-						);
+						const request = JSON.parse(line) as LegacyRequest;
+						requests.push(request);
+						if (requests.length === 1) firstRequest.resolve(request);
+						void acknowledgeCapabilities.promise.then(() => {
+							socket.write(
+								`${JSON.stringify({
+									id: request.id,
+									ok: true,
+									result: { op: "ping", projectDir, capabilities: [] },
+								})}\n`,
+							);
+						});
 					}
 					newline = buffer.indexOf("\n");
 				}
@@ -1727,20 +1737,49 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		server.listen(endpoint, () => listening.resolve());
 		await listening.promise;
 		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const artifactPath = path.join(tempDir.path(), "capability-progress.log");
 		try {
+			const unregister = client.onOutput?.(
+				{ id: "capability-monitor", name: "anything", owner: "owner", artifactPath },
+				() => undefined,
+			);
+			if (!unregister) throw new Error("Expected output monitoring registration");
+			let readySettled = false;
+			void unregister.ready.then(
+				() => {
+					readySettled = true;
+				},
+				() => {
+					readySettled = true;
+				},
+			);
+			const published = await firstRequest.promise;
+			expect(published.outputSubscriptions).toEqual([
+				{ id: "capability-monitor", name: "anything", owner: "owner", artifactPath },
+			]);
+			await Promise.resolve();
+			expect(readySettled).toBeFalse();
+
+			const earlyUnregister = client.onOutput?.(
+				{ id: "early-monitor", name: "early", owner: "owner", artifactPath },
+				() => undefined,
+			);
+			if (!earlyUnregister) throw new Error("Expected output monitoring registration");
+			earlyUnregister();
+			earlyUnregister();
+			await expect(earlyUnregister.ready).rejects.toThrow(/removed before it was acknowledged/);
+			expect(readySettled).toBeFalse();
+
+			acknowledgeCapabilities.resolve();
+			await expect(unregister.ready).rejects.toThrow(/does not support output monitoring/);
+			expect(readySettled).toBeTrue();
+			unregister();
+			unregister();
+
 			await client.request({ op: "ping" });
-			expect(() =>
-				client.onOutput?.(
-					{
-						id: "capability-monitor",
-						name: "anything",
-						owner: "owner",
-						artifactPath: path.join(tempDir.path(), "capability-progress.log"),
-					},
-					() => undefined,
-				),
-			).toThrow(/does not support output monitoring/);
+			expect(requests.at(-1)?.outputSubscriptions).toEqual([]);
 		} finally {
+			acknowledgeCapabilities.resolve();
 			client.close();
 			const serverClosed = Promise.withResolvers<void>();
 			server.close(() => serverClosed.resolve());
