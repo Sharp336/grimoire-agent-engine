@@ -383,7 +383,7 @@ export class AsyncJobManager {
 				// progress call, so the completion delivery must read the
 				// executor's real exitCode/timedOut from here.
 				if (typeof outcome !== "string") this.#mergeSettledDetails(job, outcome.details);
-				if (job.status === "cancelled") {
+				if (this.#isCancelled(job)) {
 					job.resultText = text;
 					this.#scheduleEviction(id);
 					return;
@@ -392,7 +392,7 @@ export class AsyncJobManager {
 				// Cancellation may win while final progress is awaiting its
 				// asynchronous sink. Never overwrite that terminal state or
 				// enqueue a completion after cancel() returned true.
-				if (job.status === "cancelled") {
+				if (this.#isCancelled(job)) {
 					job.resultText = text;
 					this.#scheduleEviction(id);
 					return;
@@ -405,7 +405,7 @@ export class AsyncJobManager {
 				if (error instanceof AsyncJobRunError) this.#mergeSettledDetails(job, error.details);
 				const errorText = error instanceof Error ? error.message : String(error);
 				job.terminalTextProvenance = "terminal";
-				if (job.status === "cancelled") {
+				if (this.#isCancelled(job)) {
 					job.errorText = errorText;
 					this.#scheduleEviction(id);
 					return;
@@ -413,7 +413,7 @@ export class AsyncJobManager {
 				await this.#settleAgentProgress(job);
 				// Mirror the success-path guard: cancellation can occur while
 				// the failure waits for its final progress sink to drain.
-				if (job.status === "cancelled") {
+				if (this.#isCancelled(job)) {
 					job.errorText = errorText;
 					this.#scheduleEviction(id);
 					return;
@@ -432,6 +432,10 @@ export class AsyncJobManager {
 	#mergeSettledDetails(job: AsyncJob, details: Record<string, unknown> | undefined): void {
 		if (!details) return;
 		job.latestDetails = { ...job.latestDetails, ...details };
+	}
+
+	#isCancelled(job: AsyncJob): boolean {
+		return job.status === "cancelled";
 	}
 
 	/**
