@@ -133,7 +133,7 @@ export function buildAsyncProgressBlock(message: CustomOrHookMessage): ToolActiv
 		// Hub job ids are the model-supplied process name (arbitrary text): sanitize
 		// and bound like the preview lines below before it reaches the header.
 		const jobId = truncateToWidth(
-			replaceTabs(shortenPath(sanitizeText(job.jobId ?? "unknown"))),
+			sanitizeAsyncProgressDisplayText(sanitizeText(job.jobId ?? "unknown")),
 			TRUNCATE_LENGTHS.TITLE,
 		);
 		const elapsed = typeof job.elapsedMs === "number" ? formatDuration(job.elapsedMs) : undefined;
