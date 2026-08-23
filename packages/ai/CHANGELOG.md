@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [18.0.3] - 2026-08-23
+
+### Fixed
+
+- Fixed a Fireworks-hosted model aborting mid-generation with an HTTP 400 `Floating point NaN (not-a-number) is detected in generation` killing the turn instead of retrying; this model-side numerical fault is now classified transient and retried, matching the existing treatment of Copilot fleet-skew 400s ([#9458](https://github.com/can1357/oh-my-pi/issues/9458)).
+
+## [18.0.2] - 2026-08-23
+
+### Fixed
+
+- Fixed OpenAI-compatible completions hosts that stream content then terminate with the `[DONE]` sentinel while omitting (or `null`ing) `finish_reason` failing every turn with `OpenAI completions stream closed before a finish_reason was received`; a `[DONE]`-terminated stream now finalizes as a clean stop and only a genuine transport EOF (no `[DONE]`, no finish reason) surfaces the incomplete-stream error ([#9433](https://github.com/can1357/oh-my-pi/issues/9433)).
+
 ## [18.0.1] - 2026-08-23
 
 ### Changed
@@ -29,7 +41,6 @@
 
 - Added Amazon Bedrock Converse guardrail configuration with provider-scoped identifier, version, and trace settings.
 
-### Changed
 ## [18.0.0] - 2026-08-22
 
 ### Added
