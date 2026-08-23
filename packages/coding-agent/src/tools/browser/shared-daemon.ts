@@ -10,6 +10,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import { daemonClientForProject } from "../../launch/client";
 import { describeQuietly, stopQuietly, waitReady } from "../../launch/ensure";
@@ -41,6 +42,87 @@ export function sharedBrowserDaemonName(headless: boolean): string {
 
 function wsEndpointOf(snapshot: DaemonSnapshot | undefined): string | undefined {
 	return snapshot?.readyMatch?.match(/ws:\/\/\S+/)?.[0];
+}
+
+/**
+ * Whether a Chromium argv belongs to the shared browser daemon for
+ * `userDataDir`.
+ *
+ * The profile directory is the only identity that survives the launcher: it is
+ * derived from the broker runtime dir plus the daemon name, so it is stable
+ * across generations, exclusive to this project + headless-ness, and never
+ * shared with a user's own Chrome (which lives in the OS profile location).
+ * Matching on it is therefore precise in a way a pid never is — see
+ * {@link reapOrphanedSharedBrowsers}.
+ *
+ * Both the `--flag=value` and `--flag value` spellings are accepted because
+ * Chromium honours both, and the path is compared after normalisation so a
+ * trailing separator or mixed separators on Windows still match.
+ */
+export function matchesSharedBrowserProfile(args: readonly string[], userDataDir: string): boolean {
+	const target = path.resolve(userDataDir);
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (arg === undefined) continue;
+		let value: string | undefined;
+		if (arg.startsWith("--user-data-dir=")) {
+			value = arg.slice("--user-data-dir=".length);
+		} else if (arg === "--user-data-dir") {
+			value = args[i + 1];
+		}
+		if (value === undefined) continue;
+		const unquoted = value.replace(/^"(.*)"$/s, "$1");
+		if (unquoted.length > 0 && path.resolve(unquoted) === target) return true;
+	}
+	return false;
+}
+
+/**
+ * Kill Chromium trees left behind by an earlier generation of this shared
+ * browser daemon.
+ *
+ * When the daemon launcher dies but its Chromium tree does not — the daemon
+ * record settles `failed`/255 while Chrome keeps running — the broker cannot
+ * clean up after it: settling clears the record's pid, `stop` on a terminal
+ * record returns before terminating anything, and a pid-based kill would target
+ * the launcher that already exited rather than the tree that outlived it. So
+ * `ensureSharedBrowser` sees a terminal record, falls through to `op:"start"`,
+ * and stacks a second Chromium on top of the survivor. Repeated acquisitions
+ * then leak one headless Chromium each (issue #7900).
+ *
+ * This reaps by profile directory instead of by pid, which sidesteps that
+ * entirely: the survivors are found from the live process table, so there is no
+ * stale pid to resolve and no pid-reuse hazard, and it does not depend on the
+ * OS keeping a parent→child link (POSIX reparents orphans to init, Windows does
+ * not — matching on argv works on both).
+ *
+ * Only called on the replacement path, when no live daemon record exists, so a
+ * healthy shared browser is never in scope. Chromium already refuses to run two
+ * instances against one profile directory, so anything still holding this
+ * profile is by definition a leftover.
+ *
+ * Best effort: process enumeration is advisory and every failure is swallowed
+ * rather than blocking a browser acquisition.
+ *
+ * @returns the number of orphaned Chromium trees that were signalled.
+ */
+export function reapOrphanedSharedBrowsers(executablePath: string, userDataDir: string): number {
+	let reaped = 0;
+	try {
+		for (const candidate of Process.fromPath(executablePath)) {
+			try {
+				if (candidate.status() !== ProcessStatus.Running) continue;
+				if (!matchesSharedBrowserProfile(candidate.args(), userDataDir)) continue;
+				candidate.killTree();
+				reaped++;
+			} catch {
+				// A process that exits between enumeration and kill is the desired outcome.
+			}
+		}
+	} catch {
+		// Never fail an acquisition because the process table could not be read.
+	}
+	return reaped;
 }
 
 /** CDP liveness probe: the ws endpoint host must answer /json/version. */
@@ -95,6 +177,17 @@ export async function ensureSharedBrowser(opts: {
 			// matched): replace it rather than handing out a dead endpoint.
 			await stopQuietly(client, name, "Shared browser", opts.signal);
 			continue;
+		}
+		// No live record, so any Chromium still holding this daemon's profile is a
+		// tree that outlived its launcher. Reap it before starting a replacement,
+		// or every round of this loop stacks another one (issue #7900).
+		const orphans = reapOrphanedSharedBrowsers(launch.executablePath, userDataDir);
+		if (orphans > 0) {
+			logger.warn("Reaped orphaned shared browser process tree(s) before restart", {
+				name,
+				orphans,
+				state: existing?.state,
+			});
 		}
 		try {
 			const started = await client.request(
