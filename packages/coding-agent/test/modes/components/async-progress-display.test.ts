@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import * as os from "node:os";
 import type { TUI } from "@oh-my-pi/pi-tui";
 import { resetSettingsForTest, Settings } from "../../../src/config/settings";
 import { ChatTranscriptBuilder } from "../../../src/modes/components/chat-transcript-builder";
@@ -14,7 +15,10 @@ import {
 import type { CustomMessage } from "../../../src/session/messages";
 import type { SessionMessageEntry } from "../../../src/session/session-entries";
 
-const RAW_PROGRESS = "stdout\tvalue\nError:\tfailed";
+const HOME_PATH = `${os.homedir()}/projects/async-progress/build.log`;
+const DISPLAY_PATH = "~/projects/async-progress/build.log";
+const RAW_PROGRESS = `stdout\tvalue\nError:\tfailed at ${HOME_PATH}`;
+
 beforeAll(async () => {
 	await initTheme(false);
 });
@@ -43,9 +47,10 @@ function progressMessage(): CustomMessage<AsyncProgressDetails> {
 	return message;
 }
 
-describe("async progress transcript tab sanitization", () => {
-	it("replaces tabs at the live transcript display boundary without changing the model payload", () => {
+describe("async progress transcript display sanitization", () => {
+	it("sanitizes tabs and home paths in the live transcript without changing the model payload", () => {
 		const message = progressMessage();
+		const modelContent = message.content;
 		const chatContainer = new TranscriptContainer();
 		const ctx = {
 			chatContainer,
@@ -59,12 +64,16 @@ describe("async progress transcript tab sanitization", () => {
 		expect(rendered).not.toContain("\t");
 		expect(rendered).toContain("stdout   value");
 		expect(rendered).toContain("Error:   failed");
+		expect(rendered).not.toContain(HOME_PATH);
+		expect(rendered).toContain(DISPLAY_PATH);
 		expect(message.content).toContain(RAW_PROGRESS);
 		expect(message.details?.jobs[0]?.text).toBe(RAW_PROGRESS);
+		expect(message.content).toBe(modelContent);
 	});
 
-	it("replaces tabs when rebuilding a persisted transcript without changing the stored message", () => {
+	it("sanitizes tabs and home paths in a rebuilt transcript without changing the stored message", () => {
 		const message = progressMessage();
+		const modelContent = message.content;
 		const builder = new ChatTranscriptBuilder({
 			ui: {} as TUI,
 			cwd: "/workspace",
@@ -84,8 +93,11 @@ describe("async progress transcript tab sanitization", () => {
 		expect(rendered).not.toContain("\t");
 		expect(rendered).toContain("stdout   value");
 		expect(rendered).toContain("Error:   failed");
+		expect(rendered).not.toContain(HOME_PATH);
+		expect(rendered).toContain(DISPLAY_PATH);
 		expect(entry.message).toBe(message);
 		expect(message.content).toContain(RAW_PROGRESS);
 		expect(message.details?.jobs[0]?.text).toBe(RAW_PROGRESS);
+		expect(message.content).toBe(modelContent);
 	});
 });
