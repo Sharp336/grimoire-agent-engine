@@ -1,4 +1,5 @@
 import { isAnthropicServerToolHistoryBlock } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
+import { PRESERVE_KEY as SNAPCOMPACT_PRESERVE_KEY } from "@oh-my-pi/snapcompact";
 import {
 	type BlobStore,
 	externalizeImageDataSync,
@@ -58,6 +59,48 @@ function shouldExternalizeImagePayload(
 	if (!isImageDataPayload(value)) return false;
 	if (isBlobRef(value.data) || value.data.length < BLOB_EXTERNALIZE_THRESHOLD) return false;
 	return (key === TEXT_CONTENT_KEY && isImageBlock(value)) || key === "images";
+}
+
+/**
+ * Rendered snapcompact frames are the heaviest thing a session persists: every
+ * compaction archives its own set of base64 PNGs, and a long-lived journal ends
+ * up carrying (and re-parsing on every resume) tens of megabytes that only the
+ * newest archive on the active path is ever asked for.
+ *
+ * They are image payloads like any other, so they belong in the blob store.
+ */
+function externalizeSnapcompactFrames(archive: object, blobStore: BlobStore): object {
+	if (!("frames" in archive)) return archive;
+	const frames = archive.frames;
+	if (!Array.isArray(frames)) return archive;
+
+	let changed = false;
+	const externalized = frames.map(frame => {
+		if (!isImageDataPayload(frame) || isBlobRef(frame.data) || frame.data.length < BLOB_EXTERNALIZE_THRESHOLD) {
+			return frame;
+		}
+		changed = true;
+		return { ...frame, data: externalizeImageDataSync(blobStore, frame.data, frame.mimeType) };
+	});
+	return changed ? { ...archive, frames: externalized } : archive;
+}
+
+/**
+ * Externalize the frames of a compaction's snapcompact archive.
+ *
+ * Deliberately scoped to `CompactionEntry.preserveData[PRESERVE_KEY]` rather
+ * than keyed off the property name during the generic walk: only that slot is
+ * resolved back on the context-rebuild path, so a same-named field anywhere else
+ * — an extension detail, a structured tool payload — would keep a reference
+ * nothing knows how to read.
+ */
+function externalizeCompactionArchive(entry: FileEntry, blobStore: BlobStore): FileEntry {
+	if (entry.type !== "compaction" || !entry.preserveData) return entry;
+	const archive = entry.preserveData[SNAPCOMPACT_PRESERVE_KEY];
+	if (!archive || typeof archive !== "object") return entry;
+	const externalized = externalizeSnapcompactFrames(archive, blobStore);
+	if (externalized === archive) return entry;
+	return { ...entry, preserveData: { ...entry.preserveData, [SNAPCOMPACT_PRESERVE_KEY]: externalized } };
 }
 
 /** True for a non-empty string — marks signature/encrypted fields whose block must persist verbatim. */
@@ -289,5 +332,6 @@ function stripReplayedReasoningSignatures(entry: FileEntry): FileEntry {
 }
 
 export function prepareEntryForPersistence(entry: FileEntry, blobStore: BlobStore): FileEntry {
-	return truncateForPersistence(stripReplayedReasoningSignatures(entry), blobStore) as FileEntry;
+	const prepared = externalizeCompactionArchive(stripReplayedReasoningSignatures(entry), blobStore);
+	return truncateForPersistence(prepared, blobStore) as FileEntry;
 }

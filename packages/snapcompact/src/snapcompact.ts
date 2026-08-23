@@ -1763,10 +1763,25 @@ export function renderabilityProbeText(
 	return serialized;
 }
 
+/** Lazily priced frame payload: `bytes` is the base64 length the frame will
+ *  contribute, `read` materializes it. Lets a caller whose frames live outside
+ *  the entry (e.g. a blob store) pay only for the frames a budget keeps. */
+export interface LazyFrameData {
+	readonly bytes: number;
+	read(): string;
+}
+
 /** Options for reconstructing a persisted snapcompact archive into prompt blocks. */
 export interface HistoryBlockOptions {
 	/** Hard cap on image base64 bytes attached to one rebuilt provider request. */
 	maxFrameDataBytes?: number;
+	/**
+	 * Resolve an externally stored frame payload. Called once per frame in
+	 * newest-first budget order, so a frame the budget omits is never read.
+	 * `undefined` drops the frame: its payload is gone, and a storage reference
+	 * is not an image.
+	 */
+	resolveFrameData?: (data: string) => LazyFrameData | undefined;
 }
 
 function formatFrameDataBytes(bytes: number): string {
@@ -1777,9 +1792,10 @@ function formatFrameDataBytes(bytes: number): string {
 
 function imagesWithinBudget(
 	archive: Archive,
-	maxFrameDataBytes: number | undefined,
+	options: HistoryBlockOptions,
 ): { images: ImageContent[]; omittedFrames: number; omittedBytes: number } {
-	if (maxFrameDataBytes === undefined) {
+	const { maxFrameDataBytes, resolveFrameData } = options;
+	if (maxFrameDataBytes === undefined && !resolveFrameData) {
 		return { images: images(archive), omittedFrames: 0, omittedBytes: 0 };
 	}
 
@@ -1790,14 +1806,18 @@ function imagesWithinBudget(
 	for (let index = archive.frames.length - 1; index >= 0; index--) {
 		const frame = archive.frames[index];
 		if (!frame) continue;
-		const bytes = frame.data.length;
-		if (usedBytes + bytes > maxFrameDataBytes) {
+		const lazy = resolveFrameData?.(frame.data);
+		// Resolver present but payload gone: drop the frame outright. It is not
+		// an omitted-by-budget frame, so it stays out of the gap notice.
+		if (resolveFrameData && !lazy) continue;
+		const bytes = lazy ? lazy.bytes : frame.data.length;
+		if (maxFrameDataBytes !== undefined && usedBytes + bytes > maxFrameDataBytes) {
 			omittedFrames++;
 			omittedBytes += bytes;
 			continue;
 		}
 		usedBytes += bytes;
-		keptNewestFirst.push(frame);
+		keptNewestFirst.push(lazy ? { ...frame, data: lazy.read() } : frame);
 	}
 	keptNewestFirst.reverse();
 	return { images: images({ ...archive, frames: keptNewestFirst }), omittedFrames, omittedBytes };
@@ -1826,7 +1846,7 @@ export function images(archive: Archive): ImageContent[] {
  *  instead of persisted on the session entry. */
 export function historyBlocks(archive: Archive, options: HistoryBlockOptions = {}): (TextContent | ImageContent)[] {
 	const blocks: (TextContent | ImageContent)[] = [];
-	const budgeted = imagesWithinBudget(archive, options.maxFrameDataBytes);
+	const budgeted = imagesWithinBudget(archive, options);
 	const hasImages = budgeted.images.length > 0;
 	const hasOmittedImages = budgeted.omittedFrames > 0;
 	if (archive.textHead) {

@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
+import type { LazyFrameData } from "@oh-my-pi/snapcompact";
 
 const BLOB_PREFIX = "blob:sha256:";
 
@@ -166,6 +167,16 @@ export class BlobStore {
 		}
 	}
 
+	/** Stored byte length without reading the blob; null when it is absent. */
+	sizeSync(hash: string): number | null {
+		try {
+			return fs.statSync(path.join(this.dir, hash)).size;
+		} catch (err) {
+			if (isEnoent(err)) return null;
+			throw err;
+		}
+	}
+
 	/** Check if a blob exists. */
 	async has(hash: string): Promise<boolean> {
 		try {
@@ -292,4 +303,27 @@ export function resolveImageDataSync(blobStore: BlobStore, data: string): string
 		return data;
 	}
 	return buffer.toString("base64");
+}
+
+/** Base64 length of `bytes` raw bytes, including padding. */
+function base64Length(bytes: number): number {
+	return Math.ceil(bytes / 3) * 4;
+}
+
+/**
+ * Price a persisted frame payload for snapcompact's byte budget without reading
+ * it, and read it only when the budget keeps the frame. A blob-backed payload is
+ * priced from its stored size; an inline payload prices and reads as itself.
+ * Returns undefined when the blob is gone, so the caller drops the frame instead
+ * of handing a `blob:sha256:…` string to a provider as if it were an image.
+ */
+export function lazyImageDataSync(blobStore: BlobStore, data: string): LazyFrameData | undefined {
+	const hash = parseBlobRef(data);
+	if (!hash) return { bytes: data.length, read: () => data };
+	const size = blobStore.sizeSync(hash);
+	if (size === null) {
+		logger.warn("Blob not found for image reference", { hash });
+		return undefined;
+	}
+	return { bytes: base64Length(size), read: () => resolveImageDataSync(blobStore, data) };
 }
