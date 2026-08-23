@@ -410,7 +410,7 @@ export interface ToolSession {
 		epoch: number,
 		artifactId?: string,
 	): void;
-	/** Track wake monitors so subagent quiescence waits for their terminal event. */
+	/** Track live monitors so subagent quiescence waits for their terminal event. */
 	setLaunchMonitorActive?(monitorId: string, delivery: AsyncJobProgressDelivery, active: boolean, epoch: number): void;
 	/** Register cleanup that runs when this session is disposed; returns a handle that removes the cleanup. */
 	registerDisposeCallback?(callback: () => void): (() => void) | void;

@@ -587,7 +587,7 @@ export class AgentSession {
 	#unregisterAsyncProgressSink: (() => void) | undefined;
 	#unregisterAsyncProgressQueue: (() => void) | undefined;
 	#unregisterAsyncProgressWakeQueue: (() => void) | undefined;
-	readonly #activeLaunchWakeMonitors = new Set<string>();
+	readonly #activeLaunchMonitors = new Set<string>();
 	#launchMonitorStateChanged = Promise.withResolvers<void>();
 	#launchProgressBoundaryDepth = 0;
 	#launchProgressEpoch = 0;
@@ -1982,13 +1982,13 @@ export class AgentSession {
 
 	/**
 	 * Public view for run drivers: true while owner-scoped async work or an active
-	 * wake process monitor can re-wake this session. Active monitors belong here,
-	 * but not in {@link #hasPendingAsyncWake}: a subscription with no queued event
-	 * must keep a subagent alive without preventing its current model turn from
-	 * settling and making room for the future wake.
+	 * process monitor can still deliver output or terminal completion. Active
+	 * monitors belong here, but not in {@link #hasPendingAsyncWake}: a subscription
+	 * with no queued event must keep a subagent alive without preventing its
+	 * current model turn from settling and making room for future delivery.
 	 */
 	hasPendingAsyncWork(): boolean {
-		return this.#hasPendingAsyncWake() || this.#activeLaunchWakeMonitors.size > 0;
+		return this.#hasPendingAsyncWake() || this.#activeLaunchMonitors.size > 0;
 	}
 
 	/**
@@ -2007,7 +2007,7 @@ export class AgentSession {
 			await manager.drainDeliveries({ filter: { ownerId: this.#agentId } });
 		}
 		await this.waitForIdle();
-		if (this.#activeLaunchWakeMonitors.size > 0) await launchMonitorChanged;
+		if (this.#activeLaunchMonitors.size > 0) await launchMonitorChanged;
 		await this.waitForIdle();
 	}
 
@@ -6491,8 +6491,8 @@ export class AgentSession {
 	#beginLaunchProgressBoundary(): Disposable {
 		this.#launchProgressBoundaryDepth += 1;
 		this.#launchProgressEpoch += 1;
-		if (this.#activeLaunchWakeMonitors.size > 0) {
-			this.#activeLaunchWakeMonitors.clear();
+		if (this.#activeLaunchMonitors.size > 0) {
+			this.#activeLaunchMonitors.clear();
 			this.#signalLaunchMonitorChanged();
 		}
 		let active = true;
@@ -6505,14 +6505,14 @@ export class AgentSession {
 		};
 	}
 
-	setLaunchMonitorActive(monitorId: string, delivery: AsyncJobProgressDelivery, active: boolean, epoch: number): void {
-		const wasActive = this.#activeLaunchWakeMonitors.has(monitorId);
-		if (delivery !== "wake" || !active || epoch !== this.#launchProgressEpoch) {
-			this.#activeLaunchWakeMonitors.delete(monitorId);
+	setLaunchMonitorActive(monitorId: string, _delivery: AsyncJobProgressDelivery, active: boolean, epoch: number): void {
+		const wasActive = this.#activeLaunchMonitors.has(monitorId);
+		if (!active || epoch !== this.#launchProgressEpoch) {
+			this.#activeLaunchMonitors.delete(monitorId);
 		} else {
-			this.#activeLaunchWakeMonitors.add(monitorId);
+			this.#activeLaunchMonitors.delete(monitorId);
 		}
-		if (wasActive === this.#activeLaunchWakeMonitors.has(monitorId)) return;
+		if (wasActive === this.#activeLaunchMonitors.has(monitorId)) return;
 		this.#signalLaunchMonitorChanged();
 	}
 

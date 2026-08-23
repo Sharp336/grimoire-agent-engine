@@ -220,6 +220,43 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(session.hasPendingAsyncWork()).toBe(false);
 	});
 
+	it("keeps an ambient process monitor alive until its terminal cleanup", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "SubAgent",
+		});
+		session.setLaunchMonitorActive("monitor-ambient", "ambient", true);
+		await session.prompt("start ambient monitoring");
+		const callsBeforeSettlement = mock.calls.length;
+		expect(session.hasPendingAsyncWork()).toBe(true);
+		let settled = false;
+		const settling = session.settleAsyncWork().then(() => {
+			settled = true;
+		});
+		await Bun.sleep(1);
+		expect(settled).toBe(false);
+		expect(mock.calls).toHaveLength(callsBeforeSettlement);
+
+		session.setLaunchMonitorActive("monitor-ambient", "ambient", false);
+		await settling;
+		expect(session.hasPendingAsyncWork()).toBe(false);
+		expect(mock.calls).toHaveLength(callsBeforeSettlement);
+	});
+
 	it("fences old process progress while switching to another session", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-progress-switch-");
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
