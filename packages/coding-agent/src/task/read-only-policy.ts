@@ -36,6 +36,13 @@ export function isReadOnlyAgent(agent: AgentDefinition): boolean {
 	// filters. A MCP tool surviving this check is at worst classified non-read-only
 	// (fail-safe) — it can never turn a mutating MCP tool "read-only".
 	const patterns = agent.disallowedTools ?? [];
+	// A deny-all disallow (`disallowedTools: ["*"]`) without a `tools` list
+	// removes every non-hidden tool at runtime, leaving a protocol-only scope —
+	// the effective set is empty BECAUSE everything was stripped, so the agent
+	// is read-only (it cannot mutate anything). The inherited-tools case (no
+	// disallows, no allowlist) stays non-read-only: unknown inherited tools
+	// keep the fail-safe false.
+	if (patterns.some(pattern => pattern === "*")) return true;
 	const effective = agent.tools?.filter(tool => !isToolDisallowed(tool, patterns));
 	return !!effective?.length && effective.every(tool => READ_ONLY_TOOL_NAMES.has(tool));
 }

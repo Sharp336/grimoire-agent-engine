@@ -42,6 +42,9 @@ describe("task agent capability descriptions", () => {
 			}),
 		).toBe(false);
 		expect(isReadOnlyAgent({ ...base, tools: ["read", "write"] })).toBe(false);
+		// Deny-all without an allowlist strips every non-hidden tool at runtime:
+		// the protocol-only child can mutate nothing, so it classifies read-only.
+		expect(isReadOnlyAgent({ ...base, disallowedTools: ["*"] })).toBe(true);
 	});
 
 	it("disables read summarization for scout and librarian, leaves other agents summarizing", () => {

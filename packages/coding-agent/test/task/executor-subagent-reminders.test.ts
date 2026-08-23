@@ -854,6 +854,43 @@ describe("runSubprocess yield reminders", () => {
 		expect(callArgs.enforceToolAllowlist).toBeFalsy();
 		expect(callArgs.disallowedTools).toBeUndefined();
 	});
+	it("persists declaredTools without parent-owned tools", async () => {
+		// The live spawn strips parent-owned `todo` from the subagent's active
+		// set, but the declarative allowlist still names it. `declaredTools`
+		// (which cold revival scopes from) must carry the same parent-owned
+		// filter, or a revived generation would regain a capability the
+		// original deliberately lacked.
+		const session = createMockSession(({ emit }) => {
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "yield-parent-owned",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { ok: true } },
+				},
+				isError: false,
+			});
+		});
+		mockCreateAgentSession(session);
+		const appendSpy = vi.spyOn(session.sessionManager, "appendSessionInit");
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-parent-owned-todo",
+			agent: { ...baseAgent, tools: ["read", "todo"] },
+		});
+
+		expect(result.exitCode).toBe(0);
+		const initArgs = appendSpy.mock.calls[0][0] as {
+			enforceToolAllowlist?: boolean;
+			declaredTools?: string[];
+		};
+		expect(initArgs.enforceToolAllowlist).toBe(true);
+		// `hub` is auto-included for spawned agents; `todo` is parent-owned and
+		// stripped from both the active set and the persisted declaration.
+		expect(initArgs.declaredTools).toEqual(["read", "hub"]);
+	});
 });
 
 describe("runSubprocess telemetry propagation", () => {
