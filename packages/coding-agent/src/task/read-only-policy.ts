@@ -30,6 +30,11 @@ export function isReadOnlyAgent(agent: AgentDefinition): boolean {
 	// writable — and the parent uses this to decide whether it may assign
 	// edits to the child. Fail-safe: an empty effective set is NOT read-only
 	// (no declared tools means full inheritance).
+	// Name-only matching (no `mcpServerName` metadata): `AgentDefinition` carries
+	// declared tool names, not registry tool objects, so a capped-name MCP server
+	// needs an exact-name disallow here or relies on the sdk-level metadata-aware
+	// filters. A MCP tool surviving this check is at worst classified non-read-only
+	// (fail-safe) — it can never turn a mutating MCP tool "read-only".
 	const patterns = agent.disallowedTools ?? [];
 	const effective = agent.tools?.filter(tool => !isToolDisallowed(tool, patterns));
 	return !!effective?.length && effective.every(tool => READ_ONLY_TOOL_NAMES.has(tool));

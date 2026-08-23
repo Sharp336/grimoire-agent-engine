@@ -15,6 +15,7 @@ import {
 	testSetExtensionHandlerTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import { createMCPToolName } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
 import {
 	type CreateAgentSessionOptions,
@@ -25,10 +26,17 @@ import {
 } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { sanitizeMCPToolNamePart } from "@oh-my-pi/pi-coding-agent/tools/builtin-names";
 import { VIBE_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/vibe";
 import { logger, removeSyncWithRetries, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 import { getAgentDir, setAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import { SERVER_INSTRUCTIONS } from "./fixtures/instructions-mcp";
+
+// Server whose minted tool names exceed the 64-char cap: `createMCPToolName`
+// truncates the whole name and appends a hash suffix, so `mcp__<server>_*`
+// cannot match by name prefix and must match by `mcpServerName` ownership.
+const LONG_SERVER_NAME = "very long server name that gets truncated at the 64 character cap boundary for testing";
+const LONG_SERVER_DISALLOW_PATTERN = `mcp__${sanitizeMCPToolNamePart(LONG_SERVER_NAME, "server")}_*`;
 
 const toolActivationExtension: ExtensionFactory = pi => {
 	pi.registerTool({
@@ -2092,6 +2100,42 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			const active = session.getActiveToolNames();
 			expect(active).not.toContain("mcp__foo_bar");
 			expect(active).toContain("mcp__baz_qux");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("disallows a length-capped MCP tool by mcpServerName ownership", async () => {
+		// Regression for the 64-char minted-name cap: a server whose minted name is
+		// truncated + hash-suffixed no longer prefix-matches `mcp__<server>_*`, so
+		// the documented one-server disallow silently retained the tools. The
+		// session must match by `mcpServerName` ownership metadata instead.
+		const tempDir = makeTempDir();
+		const cappedName = createMCPToolName(LONG_SERVER_NAME, "query");
+		expect(cappedName.length).toBe(64);
+		const mcpProxy: CustomTool = {
+			name: cappedName,
+			label: "Capped MCP Tool",
+			description: `MCP proxy tool from ${LONG_SERVER_NAME}`,
+			parameters: type({}),
+			mcpServerName: LONG_SERVER_NAME,
+			mcpToolName: "query",
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			customTools: [mcpProxy],
+			// No write tool: custom tools surface top-level instead of mounting under xd://.
+			toolNames: ["read", "yield"],
+			disallowedTools: [LONG_SERVER_DISALLOW_PATTERN],
+		});
+
+		try {
+			expect(session.getActiveToolNames()).not.toContain(cappedName);
+			expect(session.getEnabledToolNames()).not.toContain(cappedName);
 		} finally {
 			await session.dispose();
 		}

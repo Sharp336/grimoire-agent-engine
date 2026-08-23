@@ -855,10 +855,19 @@ export class SessionTools {
 	 * {@link isToolScopedIn} predicate from builtin-names.
 	 */
 	#isToolScopedIn(name: string): boolean {
-		return isToolScopedIn(name, this.#disallowedToolPatterns, {
-			enforceToolAllowlist: this.#enforceToolAllowlist,
-			allowedToolNames: this.#allowedToolNames,
-		});
+		// Metadata-aware disallow: pass the registered tool's raw `mcpServerName`
+		// so `mcp__<server>_*` still matches length-capped minted names (a plain
+		// name-prefix match misses the truncated + hashed registry key).
+		const mcpServerName = (this.#toolRegistry.get(name) as { mcpServerName?: unknown } | undefined)?.mcpServerName;
+		return isToolScopedIn(
+			name,
+			this.#disallowedToolPatterns,
+			{
+				enforceToolAllowlist: this.#enforceToolAllowlist,
+				allowedToolNames: this.#allowedToolNames,
+			},
+			typeof mcpServerName === "string" ? mcpServerName : undefined,
+		);
 	}
 
 	#scopeActiveToolSelection(toolNames: string[]): string[] {

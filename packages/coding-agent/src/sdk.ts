@@ -1761,6 +1761,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// Construction time: the registry and active set are still empty and
 					// ReadTool caches its description here. Answer from the requested
 					// scope, like the pre-scope getter, plus the disallow filter.
+					// Name-only match: `edit` is a built-in with no MCP ownership metadata.
 					const requestedToolNames = options.toolNames ? normalizeToolNames(options.toolNames) : undefined;
 					return restrictToolNames
 						? requestedToolNames?.includes("edit") === true && !isToolDisallowed("edit", disallowedPatterns)
@@ -2797,11 +2798,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// additions — yield, auto-learn, checkpoint/rewind — never name
 		// `edit`/`write`/`grep`, so the raw request matches the finalized set.)
 		const cursorRequestedToolNames = new Set(normalizeToolNames(options.toolNames ?? []));
-		const cursorScopeAllows = (name: string): boolean =>
-			isToolScopedIn(name, disallowedPatterns, {
-				enforceToolAllowlist,
-				allowedToolNames: cursorRequestedToolNames,
-			});
+		const cursorScopeAllows = (name: string): boolean => {
+			// Metadata-aware disallow: pass the registered tool's raw `mcpServerName`
+			// so `mcp__<server>_*` still matches length-capped minted names (a plain
+			// name-prefix match misses the truncated + hashed registry key).
+			const mcpServerName = (toolRegistry.get(name) as { mcpServerName?: unknown } | undefined)?.mcpServerName;
+			return isToolScopedIn(
+				name,
+				disallowedPatterns,
+				{
+					enforceToolAllowlist,
+					allowedToolNames: cursorRequestedToolNames,
+				},
+				typeof mcpServerName === "string" ? mcpServerName : undefined,
+			);
+		};
 		const editWasGranted = toolRegistry.has("edit") && cursorScopeAllows("edit");
 		// Built on first use rather than eagerly: a session that never reaches
 		// Cursor never constructs it.
@@ -3033,14 +3044,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					const activeNames = new Set([...toolNames, ...(toolSession.xdev?.mountedNames ?? [])]);
 					for (const [name, tool] of tools) {
 						if (!activeNames.has(name)) continue;
+						// Metadata-aware disallow: pass the registered tool's raw
+						// `mcpServerName` so `mcp__<server>_*` still matches
+						// length-capped minted names (the name prefix alone is
+						// truncated + hashed and would silently retain the server).
+						const mcpServerName = (tool as { mcpServerName?: unknown }).mcpServerName;
 						if (
-							!isToolScopedIn(name, disallowedPatterns, {
-								enforceToolAllowlist,
-								allowedToolNames: explicitlyRequestedToolNameSet,
-							})
+							!isToolScopedIn(
+								name,
+								disallowedPatterns,
+								{
+									enforceToolAllowlist,
+									allowedToolNames: explicitlyRequestedToolNameSet,
+								},
+								typeof mcpServerName === "string" ? mcpServerName : undefined,
+							)
 						)
 							continue;
-						const mcpServerName = (tool as { mcpServerName?: unknown }).mcpServerName;
 						if (typeof mcpServerName === "string") scopedInServerNames.add(mcpServerName);
 					}
 				}
@@ -3194,6 +3214,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const xdevReadAvailable =
 			builtInRegistryToolNames.has("read") &&
 			(explicitlyRequestedToolNameSet === undefined || explicitlyRequestedToolNameSet.has("read")) &&
+			// Name-only match: built-in `read`/`write` have no MCP ownership metadata.
 			!isToolDisallowed("read", disallowedPatterns);
 		const xdevWriteAvailable =
 			builtInRegistryToolNames.has("write") &&
@@ -3222,8 +3243,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 		// Disallow patterns remove tools from the active set after the allowlist is
 		// applied (covers built-ins and any custom/extension/MCP tool not caught above).
+		// The registry's proxy objects carry `mcpServerName` (raw config server name),
+		// so `mcp__<server>_*` matches length-capped minted names by ownership too.
 		if (disallowedPatterns.length > 0) {
-			initialToolNames = initialToolNames.filter(name => !isToolDisallowed(name, disallowedPatterns));
+			initialToolNames = initialToolNames.filter(name => {
+				const mcpServerName = (toolRegistry.get(name) as { mcpServerName?: unknown } | undefined)?.mcpServerName;
+				return !isToolDisallowed(
+					name,
+					disallowedPatterns,
+					typeof mcpServerName === "string" ? mcpServerName : undefined,
+				);
+			});
 		}
 
 		// Pre-register in the global agent registry BEFORE building the system prompt,
@@ -3285,6 +3315,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (
 				mountedNames.length > 0 &&
 				!initialToolNames.includes("write") &&
+				// Name-only match: `write` is a built-in with no MCP ownership metadata.
 				!isToolDisallowed("write", disallowedPatterns)
 			)
 				initialToolNames.push("write");
@@ -3778,9 +3809,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				try {
 					// Subagent tool scoping: a tool outside the enforced allowlist or
 					// matching a disallow pattern stays registered but is never activated.
+					// The registration's `mcpServerName` is passed through so
+					// `mcp__<server>_*` matches length-capped minted names by ownership.
 					const scopedOut =
 						(enforceToolAllowlist && explicitlyRequestedToolNameSet?.has(name) === false) ||
-						isToolDisallowed(name, disallowedPatterns);
+						isToolDisallowed(name, disallowedPatterns, registered.definition.mcpServerName);
 					if (
 						((registered.definition.defaultInactive || registered.definition.hidden) && !explicitlyRequested) ||
 						scopedOut
