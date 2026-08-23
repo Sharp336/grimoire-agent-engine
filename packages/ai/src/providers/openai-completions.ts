@@ -93,6 +93,7 @@ import {
 	disableStrictToolsForScope,
 	getOpenAIPromptCacheKey,
 	getOpenAIStrictToolsScope,
+	getOpenRouterResponsesSessionId,
 	isCompiledGrammarTooLargeStrictError,
 	isOpenRouterAnthropicModel,
 	isStrictToolsDisabledForScope,
@@ -1742,7 +1743,12 @@ function buildParams(
 	applyChatCompletionsCompatPolicy(params, finalPolicy);
 	dropOpenRouterKimiForcedToolReasoning(params, model, finalPolicy);
 
-	applyOpenAIGatewayRouting(params, compat, cacheRetention !== "none");
+	applyOpenAIGatewayRouting(params, compat, cacheRetention !== "none", options);
+
+	// OpenRouter sticky sessions: send the same normalized id the Responses transport uses.
+	if (compat.isOpenRouterHost) {
+		params.session_id = getOpenRouterResponsesSessionId(options);
+	}
 
 	applyOpenAIExtraBody(params, compat.extraBody, {
 		dropThinkingWhenReasoningEffort: compat.dropThinkingWhenReasoningEffort,
