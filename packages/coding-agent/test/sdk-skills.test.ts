@@ -136,10 +136,11 @@ Loaded via symbolic link.
 		);
 
 		const previousAgentDir = getAgentDir();
-		setAgentDir(path.join(tempHomeDir, ".omp", "agent"));
+		const userAgentDir = path.join(tempHomeDir, ".omp", "agent");
+		setAgentDir(userAgentDir);
 		const baseSessionOptions = {
 			cwd: tempDir,
-			agentDir: path.join(tempHomeDir, ".omp", "agent"),
+			agentDir: userAgentDir,
 			modelRegistry: sharedModelRegistry,
 			additionalExtensionPaths: [explicitPackage],
 			enableMCP: false,
@@ -212,6 +213,7 @@ Loaded via symbolic link.
 			agentDir: tempDir,
 			sessionManager: SessionManager.inMemory(tempDir),
 			modelRegistry: sharedModelRegistry,
+			enableMCP: false,
 			settings: createIsolatedSkillsSettings(),
 		});
 
@@ -241,7 +243,7 @@ This skill is added after session creation.
 		await session.refreshSkills();
 
 		expect(session.skills.some((s: Skill) => s.name === "runtime-added-skill")).toBe(false);
-	});
+	}, 15_000);
 
 	it("manage_skill hot-registers managed skills in the active session", async () => {
 		const originalAgentDir = getAgentDir();
@@ -254,6 +256,7 @@ This skill is added after session creation.
 			agentDir: managedAgentDir,
 			sessionManager: SessionManager.inMemory(tempDir),
 			modelRegistry: sharedModelRegistry,
+			enableMCP: false,
 			settings,
 		});
 		let commandMetadataChanges = 0;

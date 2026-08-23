@@ -1,0 +1,1 @@
+Search the metadata for discovered skills by name or capability. Returns ranked `skill://...` URLs. Use `read` on a returned URL to load the full skill instructions. Searches only local discovered skills and does not fetch network content.

@@ -477,6 +477,24 @@ export class SelectorController {
 					this.ctx.showError(`Failed to apply personality: ${err}`);
 				});
 				break;
+			case "skills.enabled":
+			case "skills.enableSkillCommands":
+			case "skills.enableCodexUser":
+			case "skills.enableClaudeUser":
+			case "skills.enableClaudeProject":
+			case "skills.enablePiUser":
+			case "skills.enablePiProject":
+			case "skills.enableAgentsUser":
+			case "skills.enableAgentsProject":
+			case "skills.customDirectories":
+			case "skills.ignoredSkills":
+			case "skills.includeSkills":
+			case "skills.promptMode":
+			case "skills.promptSkills":
+				void this.ctx.refreshSkillState().catch(err => {
+					this.ctx.showError(`Failed to apply skill setting: ${err}`);
+				});
+				break;
 			case "tools.xdevDocs":
 				void this.ctx.session.refreshBaseSystemPrompt().catch(err => {
 					this.ctx.showError(`Failed to apply xd:// prompt docs setting: ${err}`);

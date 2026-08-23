@@ -6,6 +6,7 @@ import { type Skill as CapabilitySkill, skillCapability } from "@oh-my-pi/pi-cod
 import { getCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import { getWslWindowsHomeCandidate, runHostProbe } from "@oh-my-pi/pi-coding-agent/discovery/agents";
 import {
+	filterSkillsForPrompt,
 	type LoadSkillsResult,
 	loadSkills,
 	loadSkillsFromDir,
@@ -46,6 +47,48 @@ const DISABLE_ALL_BUILTIN_SKILLS = {
 } as const;
 
 describe("skills", () => {
+	function makeSkill(name: string, description: string, source: string, hide = false): Skill {
+		return {
+			name,
+			description,
+			filePath: `/tmp/${name}/SKILL.md`,
+			baseDir: `/tmp/${name}`,
+			source,
+			hide,
+		};
+	}
+
+	describe("skill prompt filtering", () => {
+		it("keeps native agent-directory skills in core mode", () => {
+			const skills = [
+				makeSkill("native-skill", "Native workflow", "native"),
+				makeSkill("agents-skill", "Agent-directory workflow", "agents"),
+				makeSkill("managed-skill", "Managed workflow", "omp-managed"),
+				makeSkill("local-skill", "Local workflow", "test"),
+			];
+
+			expect(filterSkillsForPrompt(skills, { promptMode: "core" }).map(skill => skill.name)).toEqual([
+				"native-skill",
+				"agents-skill",
+				"managed-skill",
+			]);
+			expect(skills).toHaveLength(4);
+		});
+
+		it("matches allowlisted skill names with globs", () => {
+			const skills = [
+				makeSkill("frontend-design", "UI", "test"),
+				makeSkill("frontend-testing", "Tests", "test"),
+				makeSkill("backend-design", "API", "test"),
+			];
+
+			expect(
+				filterSkillsForPrompt(skills, { promptMode: "allowlist", promptSkills: ["frontend-*"] }).map(
+					skill => skill.name,
+				),
+			).toEqual(["frontend-design", "frontend-testing"]);
+		});
+	});
 	describe("loadSkillsFromDir", () => {
 		let fixtureRoot: LoadSkillsResult;
 

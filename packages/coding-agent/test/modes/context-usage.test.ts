@@ -13,6 +13,7 @@ import {
 	type ContextBreakdown,
 	computeNonMessageBreakdown,
 	computeNonMessageTokens,
+	estimateSkillsTokens,
 	estimateToolSchemaTokens,
 	renderContextUsage,
 } from "@oh-my-pi/pi-coding-agent/modes/utils/context-usage";
@@ -221,8 +222,8 @@ describe("computeNonMessageBreakdown skills filtering", () => {
 	// First prompt block as rendered: only the visible skill appears.
 	const renderedPrompt = "You are an agent.\nSkills:\n- vis: small visible skill\n";
 
-	function session(tools: unknown[], skills: unknown[]) {
-		return { systemPrompt: [renderedPrompt], agent: { state: { tools } }, skills } as never;
+	function session(tools: unknown[], skills: unknown[], skillsSettings?: unknown) {
+		return { systemPrompt: [renderedPrompt], agent: { state: { tools } }, skills, skillsSettings } as never;
 	}
 
 	it("excludes hidden skills and does not clamp System prompt to 0", () => {
@@ -237,6 +238,48 @@ describe("computeNonMessageBreakdown skills filtering", () => {
 		const b = computeNonMessageBreakdown(session([], [hidden, visible]), tokenizer);
 		expect(b.skillsTokens).toBe(0);
 		expect(b.systemPromptTokens).toBe(computeNonMessageBreakdown(session([], []), tokenizer).systemPromptTokens);
+	});
+	it("counts only skills selected by core prompt mode", () => {
+		const native = {
+			name: "native",
+			description: "native skill",
+			filePath: "/s/native.md",
+			baseDir: "/s",
+			source: "native",
+		};
+		const local = {
+			name: "local",
+			description: "local skill",
+			filePath: "/s/local.md",
+			baseDir: "/s",
+			source: "test",
+		};
+		const b = computeNonMessageBreakdown(session([readTool], [native, local], { promptMode: "core" }), tokenizer);
+
+		expect(b.skillsTokens).toBe(estimateSkillsTokens([native], tokenizer));
+	});
+
+	it("counts only skills selected by the prompt allowlist", () => {
+		const selected = {
+			name: "selected-workflow",
+			description: "selected skill",
+			filePath: "/s/selected.md",
+			baseDir: "/s",
+			source: "test",
+		};
+		const omitted = {
+			name: "other-workflow",
+			description: "other skill",
+			filePath: "/s/other.md",
+			baseDir: "/s",
+			source: "test",
+		};
+		const b = computeNonMessageBreakdown(
+			session([readTool], [selected, omitted], { promptMode: "allowlist", promptSkills: ["selected-*"] }),
+			tokenizer,
+		);
+
+		expect(b.skillsTokens).toBe(estimateSkillsTokens([selected], tokenizer));
 	});
 });
 

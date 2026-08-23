@@ -27,6 +27,7 @@ export const BUILTIN_TOOL_NAMES = [
 	"recall",
 	"reflect",
 	"learn",
+	"skill_search",
 	"manage_skill",
 ] as const;
 

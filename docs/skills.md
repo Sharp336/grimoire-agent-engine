@@ -130,14 +130,19 @@ The `agents` provider (`.agent[s]/skills`) is the canonical OMP-native location 
 
 System prompt construction (`src/system-prompt.ts`) uses discovered skills as follows:
 
-- if `read` tool is available:
-  - include discovered skills list in prompt, excluding skills with `hide: true`
-- otherwise:
-  - omit discovered list
+- if `read` is not available, omit the discovered skills list
+- otherwise apply `skills.promptMode`:
+  - `all` (default): include every non-hidden discovered skill
+  - `core`: include skills from OMP-native providers (`native`, `agents`, and `omp-managed`)
+  - `allowlist`: include only names matching `skills.promptSkills` glob patterns
+- exclude skills with `hide: true` from every prompt mode
 
-`hide: true` does not disable the skill. Hidden skills are still loaded and remain reachable through `skill://<name>` and `/skill:<name>` when skill commands are enabled.
+Prompt filtering changes only system-prompt summaries. Discovery remains complete, so
+explicit `skill://` reads, `/skill:<name>` commands, and local `skill_search` can still
+use non-hidden skills that are not listed in the prompt.
 
-Task tool subagents receive the session's discovered/provided skills list via normal session creation; there is no per-task skill pinning override.
+`skill_search` searches local discovered skill metadata, returns ranked `skill://` URLs,
+and does not fetch network content. Use `read` on a returned URL to load full instructions.
 
 ### Interactive `/skill:<name>` commands
 

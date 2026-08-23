@@ -62,6 +62,7 @@ import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import type { PlanProposalHandler } from "./resolve";
 import { SecurityScanTool } from "./security-scan";
+import { SkillSearchTool } from "./skill-search";
 import { supportsExternalThinking, ThinkTool } from "./think";
 import { type TodoPhase, TodoTool } from "./todo";
 import { WriteTool } from "./write";
@@ -104,6 +105,7 @@ export * from "./report-tool-issue";
 export * from "./resolve";
 export * from "./review";
 export * from "./security-scan";
+export * from "./skill-search";
 export * from "./think";
 export * from "./todo";
 export * from "./tts";
@@ -455,6 +457,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	recall: MemoryRecallTool.createIf,
 	reflect: MemoryReflectTool.createIf,
 	learn: LearnTool.createIf,
+	skill_search: s => new SkillSearchTool(s),
 	manage_skill: ManageSkillTool.createIf,
 };
 
@@ -643,6 +646,11 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			return ["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "");
 		}
 		if (name === "memory_edit") return session.settings.get("memory.backend") === "mnemopi";
+		if (name === "skill_search")
+			return (
+				session.settings.get("skills.enabled") !== false &&
+				(requestedTools === undefined || requestedTools.includes("read"))
+			);
 		if (name === "manage_skill")
 			return (
 				session.settings.get("autolearn.enabled") &&

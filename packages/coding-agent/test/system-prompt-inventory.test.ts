@@ -609,6 +609,95 @@ describe("system prompt tool inventory", () => {
 
 		expect(text).toContain("- prompt-authoring: Prompt authoring workflow");
 	});
+	it("limits the system prompt to OMP-owned skills in core mode", async () => {
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [
+				{
+					name: "omp-native",
+					description: "OMP-native workflow",
+					filePath: path.join(tempDir, "omp-native", "SKILL.md"),
+					baseDir: path.join(tempDir, "omp-native"),
+					source: "native:user",
+					_source: {
+						provider: "native",
+						providerName: "OMP",
+						path: path.join(tempDir, "omp-native", "SKILL.md"),
+						level: "user",
+					},
+				},
+				{
+					name: "managed-workflow",
+					description: "Managed workflow",
+					filePath: path.join(tempDir, "managed-workflow", "SKILL.md"),
+					baseDir: path.join(tempDir, "managed-workflow"),
+					source: "omp-managed:user",
+					_source: {
+						provider: "omp-managed",
+						providerName: "Managed Skills",
+						path: path.join(tempDir, "managed-workflow", "SKILL.md"),
+						level: "user",
+					},
+				},
+				{
+					name: "claude-workflow",
+					description: "Claude workflow",
+					filePath: path.join(tempDir, "claude-workflow", "SKILL.md"),
+					baseDir: path.join(tempDir, "claude-workflow"),
+					source: "claude:user",
+					_source: {
+						provider: "claude",
+						providerName: "Claude Code",
+						path: path.join(tempDir, "claude-workflow", "SKILL.md"),
+						level: "user",
+					},
+				},
+			],
+			rules: [],
+			toolNames: ["read"],
+			tools: TOOLS,
+			skillsSettings: { promptMode: "core" },
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+
+		expect(text).toContain("omp-native");
+		expect(text).toContain("managed-workflow");
+		expect(text).not.toContain("claude-workflow");
+	});
+
+	it("limits the system prompt to configured skill patterns in allowlist mode", async () => {
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: tempDir,
+			contextFiles: [],
+			skills: [
+				{
+					name: "research-web",
+					description: "Research workflow",
+					filePath: path.join(tempDir, "research-web", "SKILL.md"),
+					baseDir: path.join(tempDir, "research-web"),
+					source: "native:user",
+				},
+				{
+					name: "frontend-design",
+					description: "Frontend workflow",
+					filePath: path.join(tempDir, "frontend-design", "SKILL.md"),
+					baseDir: path.join(tempDir, "frontend-design"),
+					source: "native:user",
+				},
+			],
+			rules: [],
+			toolNames: ["read"],
+			tools: TOOLS,
+			skillsSettings: { promptMode: "allowlist", promptSkills: ["research-*"] },
+			workspaceTree: { ...EMPTY_TREE, rootPath: tempDir },
+		});
+		const text = systemPrompt.join("\n\n");
+
+		expect(text).toContain("research-web");
+		expect(text).not.toContain("frontend-design");
+	});
 
 	it("omits skills when active tool names exclude read", async () => {
 		const { systemPrompt } = await buildSystemPrompt({

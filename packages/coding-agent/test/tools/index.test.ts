@@ -148,6 +148,22 @@ describe("createTools", () => {
 		expect(names).toEqual(["read", "write"]);
 	});
 
+	it("gates skill search on the skill setting and read access", async () => {
+		const withoutRead = await createTools(createTestSession(), ["skill_search"]);
+		expect(withoutRead.map(tool => tool.name)).toEqual([]);
+
+		const withRead = await createTools(createTestSession(), ["skill_search", "read"]);
+		expect(withRead.map(tool => tool.name)).toEqual(["skill_search", "read"]);
+
+		const disabled = await createTools(
+			createTestSession({
+				settings: createSettingsWithOverrides({ "skills.enabled": false }),
+			}),
+			["skill_search", "read"],
+		);
+		expect(disabled.map(tool => tool.name)).toEqual(["read"]);
+	});
+
 	it("creates xd:// presentation state without remounting explicitly requested built-ins", async () => {
 		const session = createTestSession();
 		const tools = await createTools(session, ["read", "lsp", "write"]);

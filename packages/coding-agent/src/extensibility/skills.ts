@@ -66,6 +66,55 @@ export function resetActiveSkillsForTests(): void {
 	activeSkills = [];
 }
 
+const CORE_SKILL_PROVIDERS: Record<string, true> = {
+	native: true,
+	agents: true,
+	[MANAGED_SKILLS_PROVIDER_ID]: true,
+};
+
+/**
+ * Select skill summaries for the system prompt without changing discovery.
+ * Explicit `skill://` loads, slash commands, and local search still use the
+ * complete active skill snapshot.
+ */
+export function filterSkillsForPrompt(
+	skills: readonly Skill[],
+	settings?: Pick<SkillsSettings, "promptMode" | "promptSkills">,
+): Skill[] {
+	const mode = settings?.promptMode ?? "all";
+	if (mode === "all") return [...skills];
+
+	if (mode === "core") {
+		return skills.filter(skill => {
+			const provider = skill._source?.provider ?? skill.source.split(":", 1)[0];
+			return CORE_SKILL_PROVIDERS[provider] === true;
+		});
+	}
+
+	const patterns = settings?.promptSkills ?? [];
+	if (patterns.length === 0) return [];
+	const globs = patterns.map(pattern => new Bun.Glob(pattern));
+	return skills.filter(skill => globs.some(glob => glob.match(skill.name)));
+}
+
+/**
+ * Skills actually listed in the rendered system prompt, composing
+ * {@link filterSkillsForPrompt} with the two renderer gates: the `read` tool
+ * must be present so the model can fetch skill content, and skills with
+ * frontmatter `hide: true` (still loadable via `skill://` and `/skill:<name>`)
+ * are excluded. Single source for the prompt renderer (system-prompt.ts) and
+ * context accounting (context-usage.ts) so both stay aligned with the
+ * provider-facing prompt.
+ */
+export function selectSkillsForPrompt(
+	skills: readonly Skill[],
+	hasReadTool: boolean,
+	settings?: Pick<SkillsSettings, "promptMode" | "promptSkills">,
+): Skill[] {
+	if (!hasReadTool) return [];
+	return filterSkillsForPrompt(skills, settings).filter(skill => skill.hide !== true);
+}
+
 /**
  * Whether `name` is already claimed by an active authored (non-managed) skill.
  *
