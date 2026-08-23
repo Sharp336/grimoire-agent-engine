@@ -13,9 +13,16 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 // ever extends the trailing partial line), the fold resumes at the stored
 // line boundary — only the appended suffix is re-scanned, reusing the
 // committed output and the fence state captured entering that line. Append
-// detection is O(last line): the seam byte must still sit right after a
-// newline and the previous partial line must persist verbatim at its offset;
-// anything else takes the full-recompute path. The last input line is always
+// detection is exact: the stored text must be a verbatim prefix of the
+// incoming text, checked with `startsWith` (memcmp speed, O(previous text)
+// per genuinely-new text — deterministic, no unchecked byte a stream switch
+// could hide in; the repeated renders within one tick are answered by the
+// identity memo without rescanning). Anything else takes the full-recompute
+// path. A partial line that grows past {@link MAX_RESUME_PARTIAL_BYTES} with
+// no newline (seam stuck at 0) would otherwise refold the entire text every
+// tick; past the cap the checkpoint is retired and the slot degrades to the
+// identity memo — the pre-incremental asymptotics for that pathological
+// shape, bounded per call. The last input line is always
 // re-folded (never committed), so its transient effects — comment-noise
 // skipping, the prose ellipsis — are replayed under the new context instead
 // of leaking into the committed prefix. The committed output keeps the last
@@ -55,14 +62,26 @@ interface DisplayCache {
 	startLineByte: number;
 	/** fold state ENTERING that last line — the resume point for appends */
 	state: FoldState;
+	/** whether the fold checkpoint in {@link state} is valid to resume from */
+	resumable: boolean;
 }
 
 function freshFoldState(): FoldState {
-	return { committed: "", hasTail: false, tailLine: "", tailBlankSep: "", tailPred: false, emitted: 0, inFence: false, fenceChar: "", fenceLen: 0 };
+	return {
+		committed: "",
+		hasTail: false,
+		tailLine: "",
+		tailBlankSep: "",
+		tailPred: false,
+		emitted: 0,
+		inFence: false,
+		fenceChar: "",
+		fenceLen: 0,
+	};
 }
 
 function freshDisplayCache(): DisplayCache {
-	return { text: "", value: "", hadComment: false, startLineByte: 0, state: freshFoldState() };
+	return { text: "", value: "", hadComment: false, startLineByte: 0, state: freshFoldState(), resumable: true };
 }
 
 const proseCache = freshDisplayCache();
@@ -79,6 +98,16 @@ export function canonicalizeMessage(text: string | null | undefined): string {
 	}
 	return "";
 }
+
+/**
+ * Resume cap: a trailing partial line longer than this retires the fold
+ * checkpoint. With no newline the seam sits at byte 0, so resuming would
+ * refold the entire text every tick — O(total)/tick, O(n²) per stream. Past
+ * the cap the slot falls back to the exact-key memo: O(1) on exact repeats,
+ * a full recompute on growth (the pre-incremental asymptotics for this
+ * pathological shape, bounded per call).
+ */
+const MAX_RESUME_PARTIAL_BYTES = 8192;
 
 // gpt-5.x reasoning summaries pad every summary part with an empty HTML
 // comment (`**Headline**\n\n<!-- -->`), streamed as a `<!--` delta followed by
@@ -97,32 +126,18 @@ function isCommentNoise(line: string, isLastLine: boolean): boolean {
 }
 
 /**
- * Whether `text` is an append of the previously formatted text. Verified in
- * O(last line): the stored seam must still sit right after a newline of
- * `text`, and the previous partial line must persist verbatim at its offset.
- * The prefix before the seam is a positional contract (streaming growth never
- * rewrites it) rather than something re-read on every tick; anchored
- * spot-checks (first byte, midpoint, trailing window) catch stream switches —
- * including the vacuous case where the previous text ended exactly at its
- * seam, leaving no partial line to compare.
+ * Whether `text` is an append of the previously formatted text: the stored
+ * text must be a verbatim prefix of `text`. Verified exactly with
+ * `startsWith` — its intrinsic compare runs at memcmp speed, and every byte
+ * of the previous text is checked, leaving no gap a stream switch could hide
+ * in (spot-check anchors were exploitable: texts crafted to match only at
+ * the sampled positions slipped through as false-positive appends). This
+ * reads O(previous text) per genuinely-new text; the repeated renders of one
+ * streaming tick never reach here — the identity memo answers them first.
  */
 function isAppend(cache: DisplayCache, text: string): boolean {
 	const prev = cache.text;
-	const seam = cache.startLineByte;
-	if (text.length < prev.length || prev.length === 0) return false;
-	if (seam > 0 && text.charCodeAt(seam - 1) !== 0x0a) return false;
-	for (let i = seam; i < prev.length; i++) {
-		if (text.charCodeAt(i) !== prev.charCodeAt(i)) return false;
-	}
-	if (seam > 0) {
-		if (text.charCodeAt(0) !== prev.charCodeAt(0)) return false;
-		const mid = seam >> 1;
-		if (text.charCodeAt(mid) !== prev.charCodeAt(mid)) return false;
-		for (let i = Math.max(1, seam - 32); i < seam; i++) {
-			if (text.charCodeAt(i) !== prev.charCodeAt(i)) return false;
-		}
-	}
-	return true;
+	return prev.length > 0 && text.startsWith(prev);
 }
 
 /** Fold one input line into the accumulator. Whitespace-only lines defer to the tail region. */
@@ -176,10 +191,13 @@ function renderFold(state: FoldState): string {
 export function formatThinkingForDisplay(text: string, proseOnly: boolean): string {
 	if (!text) return text;
 	const cache = proseOnly ? proseCache : rawCache;
+	// Identity memo first: the 2nd and 3rd renders of one streaming tick pass
+	// the same text and must not pay the prefix verification below.
+	if (text === cache.text) return cache.value;
 	let hasComment: boolean;
 	let fromByte: number;
 	let state: FoldState;
-	if (cache.text.length > 0 && text.length >= cache.text.length && isAppend(cache, text)) {
+	if (cache.resumable && isAppend(cache, text)) {
 		// Append: a `<!--` introduced by the suffix flips the noise gate, and a
 		// marker straddling the seam can start at most 3 bytes back — identical
 		// to rescanning the full text, at O(delta).
@@ -191,10 +209,20 @@ export function formatThinkingForDisplay(text: string, proseOnly: boolean): stri
 		fromByte = 0;
 		state = freshFoldState();
 	}
-	// Raw mode without comments is the identity (fences pass through verbatim),
-	// so skip the fold entirely, as the previous full-scan shortcut did.
-	if (!proseOnly && !hasComment) return text;
-	if (text === cache.text) return cache.value;
+	// Raw mode without comments is the identity (fences pass through
+	// verbatim), so skip the fold entirely, as the previous full-scan shortcut
+	// did. Record the slot but leave the checkpoint cleared/non-resumable: no
+	// fold state entering the last line was ever computed, so a later append
+	// must recompute from scratch rather than resume from a stale checkpoint.
+	if (!proseOnly && !hasComment) {
+		cache.text = text;
+		cache.value = text;
+		cache.hadComment = false;
+		cache.startLineByte = 0;
+		cache.state = freshFoldState();
+		cache.resumable = false;
+		return text;
+	}
 
 	const lines = text.slice(fromByte).split("\n");
 	const last = lines.length - 1;
@@ -251,6 +279,11 @@ export function formatThinkingForDisplay(text: string, proseOnly: boolean): stri
 	cache.value = formatted;
 	cache.hadComment = hasComment;
 	cache.startLineByte = text.lastIndexOf("\n") + 1;
+	// A trailing partial line past the cap means no newline ever arrived (the
+	// seam sits at 0 and resuming would refold the whole text every tick).
+	// Retire the checkpoint: later calls hit the identity memo on exact
+	// repeats and recompute fully on growth — bounded per call.
+	cache.resumable = text.length - cache.startLineByte <= MAX_RESUME_PARTIAL_BYTES;
 	return formatted;
 }
 
