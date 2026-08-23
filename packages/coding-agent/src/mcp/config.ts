@@ -44,6 +44,8 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 		requestIdFormat: server.requestIdFormat,
 		auth: server.auth,
 		oauth: server.oauth,
+		enabledTools: server.enabledTools,
+		disabledTools: server.disabledTools,
 	};
 
 	if (transport === "stdio") {

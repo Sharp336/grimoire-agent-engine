@@ -22,6 +22,8 @@ export * from "./oauth-discovery";
 export * from "./tool-bridge";
 // Tool cache
 export * from "./tool-cache";
+// Tool filter
+export * from "./tool-filter";
 // Transports
 export * from "./transports/http";
 export * from "./transports/stdio";

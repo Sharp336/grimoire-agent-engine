@@ -22,9 +22,11 @@ import { normalizeLocalScheme } from "../tools/path-utils";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { callTool } from "./client";
 import { renderMCPCall, renderMCPResult } from "./render";
+import { applyMCPToolFilter } from "./tool-filter";
 import type {
 	MCPAuthChallenge,
 	MCPContent,
+	MCPServerConfig,
 	MCPServerConnection,
 	MCPToolCallParams,
 	MCPToolCallResult,
@@ -476,6 +478,21 @@ export function parseMCPToolName(name: string): { serverName: string; toolName: 
 }
 
 /**
+ * Apply the server's tool filter and resolve surviving names to definitions.
+ */
+function filteredToolDefs(
+	byName: Map<string, MCPToolDefinition>,
+	serverName: string,
+	config: MCPServerConfig,
+): MCPToolDefinition[] {
+	return applyMCPToolFilter(serverName, {
+		toolNames: [...byName.keys()],
+		enabledTools: config.enabledTools,
+		disabledTools: config.disabledTools,
+	}).map(name => byName.get(name)!);
+}
+
+/**
  * CustomTool wrapping an MCP tool with an active connection.
  */
 export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
@@ -500,7 +517,10 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 
 	/** Create MCPTool instances for all tools from an MCP server connection */
 	static fromTools(connection: MCPServerConnection, tools: MCPToolDefinition[], reconnect?: MCPReconnect): MCPTool[] {
-		return tools.map(tool => new MCPTool(connection, tool, reconnect));
+		const byName = new Map(tools.map(tool => [tool.name, tool]));
+		return filteredToolDefs(byName, connection.name, connection.config).map(
+			tool => new MCPTool(connection, tool, reconnect),
+		);
 	}
 
 	constructor(
@@ -611,12 +631,16 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	/** Create DeferredMCPTool instances for all tools from an MCP server */
 	static fromTools(
 		serverName: string,
+		config: MCPServerConfig,
 		tools: MCPToolDefinition[],
 		getConnection: () => Promise<MCPServerConnection>,
 		source?: SourceMeta,
 		reconnect?: MCPReconnect,
 	): DeferredMCPTool[] {
-		return tools.map(tool => new DeferredMCPTool(serverName, tool, getConnection, source, reconnect));
+		const byName = new Map(tools.map(tool => [tool.name, tool]));
+		return filteredToolDefs(byName, serverName, config).map(
+			tool => new DeferredMCPTool(serverName, tool, getConnection, source, reconnect),
+		);
 	}
 
 	constructor(

@@ -35,6 +35,7 @@ import {
 	expandEnvVarsDeep,
 	loadFilesFromDir,
 	parseRequestIdFormat,
+	parseStringArray,
 	scanSkillsFromDir,
 } from "./helpers";
 import { listOmpExtensionRoots, type OmpExtensionRoot } from "./omp-extension-roots";
@@ -278,6 +279,8 @@ interface RawMcpServer {
 	enabled?: boolean;
 	timeout?: number;
 	requestIdFormat?: unknown;
+	enabledTools?: unknown;
+	disabledTools?: unknown;
 	command?: string;
 	args?: string[];
 	env?: Record<string, string>;
@@ -327,11 +330,15 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			// session cwd (MCP stdio spawning resolves relative values there).
 			const rooted = resolvePluginStdioPaths({ command: cfg.command, cwd: cfg.cwd }, root.path);
 			const requestIdFormat = parseRequestIdFormat(cfg.requestIdFormat);
+			const enabledTools = parseStringArray(cfg.enabledTools);
+			const disabledTools = parseStringArray(cfg.disabledTools);
 			items.push({
 				name: serverName,
 				...(cfg.enabled !== undefined && { enabled: cfg.enabled }),
 				...(cfg.timeout !== undefined && { timeout: cfg.timeout }),
 				...(requestIdFormat !== undefined && { requestIdFormat }),
+				...(enabledTools !== undefined && { enabledTools }),
+				...(disabledTools !== undefined && { disabledTools }),
 				...(rooted.command !== undefined && { command: rooted.command }),
 				...(cfg.args !== undefined && { args: cfg.args }),
 				...(cfg.env !== undefined && { env: cfg.env }),

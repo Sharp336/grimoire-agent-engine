@@ -82,6 +82,14 @@ interface MCPServerConfigBase {
 	requestIdFormat?: MCPRequestIdFormat;
 	/** Authentication configuration (optional) */
 	auth?: MCPAuthConfig;
+	/**
+	 * Allowlist of raw server-advertised tool names (literal or glob, e.g. `"search"`, `"channel_*"`); excluded tools never consume schema context.
+	 */
+	enabledTools?: string[];
+	/**
+	 * Denylist of raw server-advertised tool names (literal or glob); wins over `enabledTools` when both are set (deny subtracts from allow).
+	 */
+	disabledTools?: string[];
 	/** OAuth configuration for servers requiring explicit client credentials */
 	oauth?: {
 		clientId?: string;
