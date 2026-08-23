@@ -1592,6 +1592,11 @@ export class Markdown implements Component {
 		const next = value === true;
 		if (this.#transientRenderCache === next) return;
 		this.#transientRenderCache = next;
+		// The mode switch changes which normalization applies to the raw text
+		// (transient: replaceTabs; final: repairOrphanClosingFence(replaceTabs)),
+		// so a memo computed on the other mode's buffer must not be reused —
+		// re-derive on the next frame instead.
+		this.#appendOnlySinceLastScan = false;
 		this.invalidate();
 	}
 
