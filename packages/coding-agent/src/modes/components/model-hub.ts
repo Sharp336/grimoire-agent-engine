@@ -29,11 +29,11 @@ import {
 } from "@oh-my-pi/pi-tui";
 import type { ModelRegistry } from "../../config/model-registry";
 import { type ModelRoleLookup, type ResolvedModelRoleValue, resolveModelRoleValue } from "../../config/model-resolver";
+import { getKnownRoleIds, getRoleInfo } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
 import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../../thinking";
-import { collectForkKeptSelectors, filterOpencodeZenToFree, isProviderVisible } from "../fork-model-visibility";
+import { isModelVisible, isProviderVisible } from "../fork-model-visibility";
 import { theme } from "../theme/theme";
-import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
 import {
 	buildBrowserItems,
 	ModelBrowser,
@@ -326,17 +326,10 @@ export class ModelHubComponent implements Component {
 			}
 		}
 		allModels = allModels.filter(model => isProviderVisible(model.provider));
-		availableModels = availableModels.filter(model => isProviderVisible(model.provider));
-		const keepSelectors = collectForkKeptSelectors(
-			undefined,
-			this.#settings.get("modelRoles") as Record<string, string>,
-		);
-		allModels = filterOpencodeZenToFree(allModels, keepSelectors);
-		availableModels = filterOpencodeZenToFree(availableModels, keepSelectors);
+		availableModels = availableModels.filter(model => isModelVisible(model));
 
 		this.#reloadRoles(allModels, availableModels);
-
-		const storage = this.#settings.getStorage();
+		this.#buildRolesRows();
 		const mruOrder = storage?.getModelUsageOrder() ?? [];
 		this.#availableItems = buildBrowserItems(availableModels);
 		sortModelItems(this.#availableItems, { roles: this.#roles, mruOrder });

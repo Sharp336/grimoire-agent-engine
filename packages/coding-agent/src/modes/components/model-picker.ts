@@ -9,7 +9,7 @@ import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { Settings } from "../../config/settings";
 import type { ResolvedRoleModel } from "../../session/agent-session";
-import { collectForkKeptSelectors, filterOpencodeZenToFree, isProviderVisible } from "../fork-model-visibility";
+import { isModelVisible, isProviderVisible } from "../fork-model-visibility";
 import { theme } from "../theme/theme";
 import {
 	buildBrowserItems,
@@ -18,10 +18,6 @@ import {
 	resolveRoleAssignments,
 	sortModelItems,
 } from "./model-browser";
-import type { ScopedModelItem } from "./model-hub";
-import { bottomBorder, row, topBorder } from "./overlay-box";
-import { resolveSegmentPalette } from "./segment-track";
-
 export interface ModelPickerCallbacks {
 	/**
 	 * A model was chosen for a session-only switch. `selector` is `provider/id`.
@@ -156,20 +152,12 @@ export class ModelPickerComponent implements Component {
 				models = [];
 			}
 		}
-		models = models.filter(model => isProviderVisible(model.provider));
-		const keepSelectors = collectForkKeptSelectors(
-			this.#currentSelector ? new Set([this.#currentSelector]) : undefined,
-			this.#settings.get("modelRoles") as Record<string, string>,
-		);
-		models = filterOpencodeZenToFree(models, keepSelectors);
+		models = models.filter(model => isModelVisible(model));
 
 		const allModels =
 			this.#scopedModels.length > 0
 				? models
-				: filterOpencodeZenToFree(
-						this.#registry.getAll().filter(model => isProviderVisible(model.provider)),
-						keepSelectors,
-					);
+				: this.#registry.getAll().filter(model => isProviderVisible(model.provider));
 		const roles = resolveRoleAssignments(this.#settings, allModels, models);
 		const storage = this.#settings.getStorage();
 		const mruOrder = storage?.getModelUsageOrder() ?? [];
