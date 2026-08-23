@@ -734,9 +734,10 @@ export function shortenEmbeddedPaths(text: string, homeDir = os.homedir()): stri
 	let shortened = text;
 	const homePaths = homeDir.includes("\\") ? [homeDir, homeDir.replaceAll("\\", "/")] : [homeDir];
 	const caseInsensitive = homeDir.includes("\\") || /^[A-Za-z]:\//.test(homeDir);
+	const trailingBoundary = "(?=$|[\\\\/]|\\s|\\x1b|[\"'`()\\[\\]{}<>=:;,|&.!?]+(?=$|\\s))";
 	for (const homePath of homePaths) {
 		const homePrefix = new RegExp(
-			`(?<![\\p{L}\\p{N}_-])${RegExp.escape(homePath)}(?![\\p{L}\\p{N}_-])(?!\\.[\\p{L}\\p{N}_-])`,
+			`(?<![\\p{L}\\p{N}_-])${RegExp.escape(homePath)}${trailingBoundary}`,
 			caseInsensitive ? "giu" : "gu",
 		);
 		shortened = shortened.replace(homePrefix, "~");

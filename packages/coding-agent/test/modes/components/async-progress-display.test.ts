@@ -96,14 +96,14 @@ describe("async progress transcript display sanitization", () => {
 		const home = "/Users/alice";
 		vi.spyOn(os, "homedir").mockReturnValue(home);
 		const longerComponent = `${home}2/project`;
-		const dotSibling = `${home}.backup/log`;
+		const punctuationSiblings = [`${home}.backup/log`, `${home}@work/log`, `${home}+work/log`, `${home}$work/log`];
 		const embeddedPath = `/mnt${home}/project`;
 		const rawProgress = [
 			`space: ${home} next`,
 			`period: ${home}.`,
 			`backtick: \`${home}\``,
 			`longer: ${longerComponent}`,
-			`sibling: ${dotSibling}`,
+			...punctuationSiblings.map(sibling => `sibling: ${sibling}`),
 			`embedded: ${embeddedPath}`,
 		].join("\n");
 		const message = progressMessage(rawProgress);
@@ -114,7 +114,7 @@ describe("async progress transcript display sanitization", () => {
 		expect(displayMessage.content).toContain("period: ~.");
 		expect(displayMessage.content).toContain("backtick: `~`");
 		expect(displayMessage.content).toContain(`longer: ${longerComponent}`);
-		expect(displayMessage.content).toContain(`sibling: ${dotSibling}`);
+		for (const sibling of punctuationSiblings) expect(displayMessage.content).toContain(`sibling: ${sibling}`);
 		expect(displayMessage.content).toContain(`embedded: ${embeddedPath}`);
 		expect(message.content).toContain(rawProgress);
 	});
