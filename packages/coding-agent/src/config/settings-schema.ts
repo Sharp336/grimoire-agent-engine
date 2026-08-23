@@ -5145,7 +5145,12 @@ export const SETTINGS_SCHEMA = {
 			tab: "tasks",
 			group: "Commands & Skills",
 			label: "Prompt Skill Exposure",
-			description: "Choose which discovered skill summaries enter system prompts",
+			description:
+				"Choose all or core skill summaries. Configure allowlist mode and skills.promptSkills glob patterns in config.yml.",
+			options: [
+				{ value: "all", label: "All", description: "Include every visible discovered skill summary" },
+				{ value: "core", label: "Core", description: "Include built-in and managed skill summaries only" },
+			],
 		},
 	},
 

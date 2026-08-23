@@ -41,6 +41,17 @@ describe("skill_search tool", () => {
 		expect(text).not.toContain("# full skill body");
 	});
 
+	it("percent-encodes reserved characters in skill URLs", async () => {
+		const tool = makeTool([skill("ops#blue", "Operate the blue environment")]);
+
+		const result = await tool.execute("call-reserved-name", { query: "ops blue" });
+		const text = textOf(result);
+
+		expect(text).toContain("skill://ops%23blue");
+		expect(text).toContain("Use read with skill://ops%23blue");
+		expect(text).not.toContain("skill://ops#blue");
+	});
+
 	it("does not expose hidden skills through model search", async () => {
 		const tool = makeTool([skill("secret-workflow", "Private workflow", true)]);
 

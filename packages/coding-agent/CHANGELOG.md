@@ -4,6 +4,7 @@
 - Added prompt-scoped skill exposure settings (`skills.promptMode` and `skills.promptSkills`) plus local `skill_search` discovery over loaded metadata.
 - Fixed core skill prompt filtering to retain `.agent[s]` provider skills and aligned context usage accounting with the filtered prompt.
 - Serialized concurrent skill rediscovery so overlapping reloads cannot commit stale skill or prompt state.
+- Fixed live skill enable/disable changes to reconcile `skill_search`, encoded reserved characters in discovered skill URLs, and kept config-only allowlists out of the settings selector.
 
 ## [18.0.1] - 2026-08-23
 

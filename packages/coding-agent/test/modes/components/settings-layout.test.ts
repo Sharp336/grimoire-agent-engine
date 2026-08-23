@@ -80,6 +80,16 @@ describe("settings layout", () => {
 		expect(values).toEqual([...SETTINGS_SCHEMA["snapcompact.shape"].values]);
 	});
 
+	it("does not offer allowlist mode without an editable prompt-skill list", () => {
+		const def = getSettingsForTab("tasks").find(def => def.path === "skills.promptMode");
+
+		expect(def?.type).toBe("submenu");
+		if (def?.type !== "submenu") throw new Error("skills.promptMode should render as a submenu");
+		expect(def.options.map(option => option.value)).toEqual(["all", "core"]);
+		expect(def.description).toContain("config.yml");
+		expect(def.description).toContain("skills.promptSkills");
+	});
+
 	it("hides advisor dependent settings when advisor is disabled", () => {
 		const advisorDependentPaths: SettingPath[] = ["advisor.syncBacklog", "advisor.immuneTurns"];
 		const advisorDependentPathSet = new Set(advisorDependentPaths);

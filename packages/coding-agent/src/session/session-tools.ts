@@ -21,6 +21,7 @@ import { usesCodexTaskPrompt } from "../task/prompt-policy";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import { computerExposureMode } from "../tools/computer/exposure";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
+import { SkillSearchTool } from "../tools/skill-search";
 import { supportsExternalThinking } from "../tools/think";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
 import { isMountableUnderXdev, listXdevTools, type XdevState, xdevDocsFor, xdevEntries } from "../tools/xdev";
@@ -1187,8 +1188,41 @@ export class SessionTools {
 				setActiveSkills(this.#skills);
 			}
 		}
-		await this.refreshBaseSystemPrompt();
-		this.#host.notifyCommandMetadataChanged();
+
+		await this.runToolRegistryMutation(async () => {
+			const currentToolNames = this.getEnabledToolNames();
+			let nextToolNames = currentToolNames;
+			const skillSearch = this.#toolRegistry.get("skill_search");
+			const builtInSkillSearch = skillSearch !== undefined && this.#builtInToolNames.has("skill_search");
+			if (this.#host.settings.get("skills.enabled") === false) {
+				if (builtInSkillSearch && currentToolNames.includes("skill_search")) {
+					nextToolNames = currentToolNames.filter(name => name !== "skill_search");
+				}
+			} else {
+				const originalToolNames = this.#presentationPinnedToolNames;
+				const readAllowed =
+					currentToolNames.includes("read") &&
+					(originalToolNames === undefined ||
+						(originalToolNames.has("read") && originalToolNames.has("skill_search")));
+				if (readAllowed) {
+					if (!skillSearch) {
+						const tool = this.#wrapRuntimeTool(new SkillSearchTool(this) as AgentTool<any, any, any>);
+						this.#toolRegistry.set(tool.name, tool);
+						this.#builtInToolNames.add(tool.name);
+						nextToolNames = [...currentToolNames, tool.name];
+					} else if (builtInSkillSearch && !currentToolNames.includes("skill_search")) {
+						nextToolNames = [...currentToolNames, "skill_search"];
+					}
+				}
+			}
+
+			if (nextToolNames !== currentToolNames) {
+				await this.#applyActiveToolsByName(nextToolNames);
+			} else {
+				await this.#refreshBaseSystemPrompt();
+			}
+			this.#host.notifyCommandMetadataChanged();
+		});
 	}
 
 	/** Selects enabled tools, ignoring names absent from the registry. */

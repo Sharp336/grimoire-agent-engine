@@ -63,7 +63,7 @@ export function searchSkills(skills: readonly Skill[], query: string, limit = MA
 		.map(({ skill, score }) => ({
 			name: skill.name,
 			description: skill.description,
-			path: `skill://${skill.name}`,
+			path: `skill://${encodeURIComponent(skill.name)}`,
 			source: skill.source,
 			score,
 		}));

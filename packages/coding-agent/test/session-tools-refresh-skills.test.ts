@@ -4,6 +4,7 @@ import { Settings } from "../src/config/settings";
 import type { LoadSkillsResult, Skill } from "../src/extensibility/skills";
 import * as skillsModule from "../src/extensibility/skills";
 import { SessionTools, type SessionToolsHost } from "../src/session/session-tools";
+import { createTools, type ToolSession } from "../src/tools";
 
 type Deferred<T> = {
 	promise: Promise<T>;
@@ -33,9 +34,9 @@ type SessionToolsTestOptions = {
 
 function makeSessionTools(options: SessionToolsTestOptions = {}): SessionTools {
 	const settings = Settings.isolated({
-		"skills.enabled": true,
 		includeModelInPrompt: false,
 	});
+	settings.set("skills.enabled", true);
 	const host = {
 		agent: {
 			state: { tools: [] },
@@ -70,7 +71,97 @@ function makeSessionTools(options: SessionToolsTestOptions = {}): SessionTools {
 	});
 }
 
+type SkillToolSurface = {
+	settings: Settings;
+	registry: Map<string, AgentTool>;
+	sessionTools: SessionTools;
+};
+
+async function makeSkillToolSurface(skillsEnabled: boolean): Promise<SkillToolSurface> {
+	const settings = Settings.isolated({
+		"tools.xdev": false,
+		includeModelInPrompt: false,
+	});
+	settings.set("skills.enabled", skillsEnabled);
+	const toolSession = {
+		cwd: "/tmp/session",
+		hasUI: false,
+		getSessionFile: () => null,
+		getSessionSpawns: () => "*",
+		settings,
+		skills: [],
+		skipPythonPreflight: true,
+	} as unknown as ToolSession;
+	const initialTools = await createTools(toolSession, ["skill_search", "read"]);
+	const registry = toolSession.toolRegistry ?? new Map(initialTools.map(tool => [tool.name, tool]));
+	const agentState: { tools: AgentTool[] } = { tools: initialTools };
+	const host = {
+		agent: {
+			state: agentState,
+			setSystemPrompt: () => {},
+			setTools: (tools: AgentTool[]) => {
+				agentState.tools = tools;
+			},
+		} as unknown as Agent,
+		sessionManager: { getCwd: () => "/tmp/session" },
+		settings,
+		agentKind: () => "sub" as const,
+		model: () => undefined,
+		isDisposed: () => false,
+		isStreaming: () => false,
+		queuedMessageCount: () => 0,
+		planModeEnabled: () => false,
+		extensionRunner: () => undefined,
+		clientBridge: () => undefined,
+		modelRegistry: {},
+		memoryBackendSession: () => undefined,
+		clearInheritedProviderPromptCacheKey: () => undefined,
+		clearMemoryPromotionSnapshot: () => undefined,
+		captureMemoryPromotionSnapshot: () => undefined,
+		notifyCommandMetadataChanged: () => {},
+		localProtocolOptions: () => ({}),
+		getInspectImageModeOverride: () => undefined,
+		setInspectImageModeOverride: () => undefined,
+	} as unknown as SessionToolsHost;
+	const sessionTools = new SessionTools(host, {
+		toolRegistry: registry,
+		builtInToolNames: registry.keys(),
+		baseSystemPrompt: ["initial"],
+		rebuildSystemPrompt: async () => ({ systemPrompt: ["rebuilt"] }),
+		skillsReloadable: true,
+	});
+	return { settings, registry, sessionTools };
+}
+
 afterEach(() => vi.restoreAllMocks());
+
+describe("SessionTools.refreshSkills", () => {
+	it("adds skill_search to the active model-facing surface when skills are enabled at runtime", async () => {
+		vi.spyOn(skillsModule, "loadSkills").mockResolvedValue({ skills: [], warnings: [] });
+		const surface = await makeSkillToolSurface(false);
+
+		surface.settings.set("skills.enabled", true);
+		await surface.sessionTools.refreshSkills();
+
+		expect(surface.registry.has("skill_search")).toBe(true);
+		expect(surface.sessionTools.getActiveToolNames()).toContain("read");
+		expect(surface.sessionTools.getActiveToolNames()).toContain("skill_search");
+		expect(surface.sessionTools.getToolForEvalBridge("skill_search")).toBeDefined();
+	});
+
+	it("removes skill_search from the active model-facing surface when skills are disabled at runtime", async () => {
+		vi.spyOn(skillsModule, "loadSkills").mockResolvedValue({ skills: [], warnings: [] });
+		const surface = await makeSkillToolSurface(true);
+		expect(surface.sessionTools.getActiveToolNames()).toContain("skill_search");
+
+		surface.settings.set("skills.enabled", false);
+		await surface.sessionTools.refreshSkills();
+
+		expect(surface.registry.has("skill_search")).toBe(true);
+		expect(surface.sessionTools.getActiveToolNames()).not.toContain("skill_search");
+		expect(surface.sessionTools.getToolForEvalBridge("skill_search")).toBeUndefined();
+	});
+});
 
 describe("SessionTools.refreshSkills", () => {
 	it("serializes concurrent reloads and keeps completion order deterministic", async () => {
