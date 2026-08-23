@@ -536,7 +536,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			}
 			if ("event" in message) {
 				if (message.event === "daemon-completed") {
-					void this.#queueNotificationDelivery(message.daemon.id, message.owner, async () => {
+					void this.#queueNotificationDelivery(message.daemon.id, `completion:${message.owner}`, async () => {
 						if (this.#closed || generation !== this.#socketGeneration) return;
 						await this.#deliverCompletion(message);
 					});
@@ -563,19 +563,19 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		}
 	}
 
-	#queueNotificationDelivery(daemonId: string, owner: string, deliver: () => Promise<void>): Promise<void> {
-		let ownerTails = this.#notificationDeliveryTails.get(daemonId);
-		if (!ownerTails) {
-			ownerTails = new Map();
-			this.#notificationDeliveryTails.set(daemonId, ownerTails);
+	#queueNotificationDelivery(daemonId: string, consumerId: string, deliver: () => Promise<void>): Promise<void> {
+		let consumerTails = this.#notificationDeliveryTails.get(daemonId);
+		if (!consumerTails) {
+			consumerTails = new Map();
+			this.#notificationDeliveryTails.set(daemonId, consumerTails);
 		}
-		const previous = ownerTails.get(owner);
+		const previous = consumerTails.get(consumerId);
 		const delivery = previous ? previous.then(deliver, deliver) : deliver();
-		ownerTails.set(owner, delivery);
+		consumerTails.set(consumerId, delivery);
 		const cleanup = (): void => {
-			if (ownerTails.get(owner) !== delivery) return;
-			ownerTails.delete(owner);
-			if (ownerTails.size === 0) this.#notificationDeliveryTails.delete(daemonId);
+			if (consumerTails.get(consumerId) !== delivery) return;
+			consumerTails.delete(consumerId);
+			if (consumerTails.size === 0) this.#notificationDeliveryTails.delete(daemonId);
 		};
 		void delivery.then(cleanup, cleanup);
 		return delivery;
@@ -652,7 +652,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				this.#publishSubscriptions();
 			}
 		};
-		await this.#queueNotificationDelivery(notificationDaemonId, entry.subscription.owner, async () => {
+		await this.#queueNotificationDelivery(notificationDaemonId, `monitor:${entry.registrationId}`, async () => {
 			try {
 				await deliver();
 			} catch (error) {

@@ -264,7 +264,7 @@ process.stdin.once("data", () => {
 			{
 				id: "observer-monitor",
 				name: "consumer-order",
-				owner: "observer-owner",
+				owner: "daemon-owner",
 				artifactPath: path.join(tempDir.path(), "consumer-order.log"),
 			},
 			notification => {
