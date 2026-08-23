@@ -320,6 +320,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		subscription: DaemonOutputSubscription,
 		sink: (notification: DaemonMonitorNotification) => Promise<void> | void,
 	): DaemonOutputUnregister {
+		if (this.#closed) throw new Error("Daemon broker client is closed");
 		const { promise: ready, resolve, reject } = Promise.withResolvers<void>();
 		let readySettled = false;
 		// Callers may only need synchronous detachment. Mark the rejection

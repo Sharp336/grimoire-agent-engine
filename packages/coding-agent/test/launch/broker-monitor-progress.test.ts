@@ -108,6 +108,27 @@ async function openRawBrokerSocket(endpoint: string): Promise<RawBrokerSocket> {
 }
 
 describe("daemon broker live output monitoring", () => {
+	it("synchronously rejects output registration after the client is closed", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-closed-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir });
+		client.close();
+
+		expect(() =>
+			client.onOutput?.(
+				{
+					id: "closed-monitor",
+					name: "closed",
+					owner: "closed-owner",
+					artifactPath: path.join(tempDir.path(), "closed-progress.log"),
+				},
+				() => undefined,
+			),
+		).toThrow(/^Daemon broker client is closed$/);
+	});
+
 	it("captures immediate output, joins fragmented lines, flushes the final partial, then reports terminal state", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-monitor-");
 		const projectDir = path.join(tempDir.path(), "project");
