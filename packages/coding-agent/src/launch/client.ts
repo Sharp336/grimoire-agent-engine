@@ -210,6 +210,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	#completionReconnectTimer: NodeJS.Timeout | undefined;
 	#brokerCapabilities: string[] | undefined;
 	#socketGeneration = 0;
+	/** Serializes unsolicited frames from the current socket generation in wire order. */
+	#notificationTail: Promise<void> = Promise.resolve();
 
 	constructor(projectDir: string, runtimeDir: string, token: string, options: DaemonBrokerClientOptions) {
 		this.projectDir = projectDir;
@@ -289,6 +291,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	close(): void {
 		if (this.#closed) return;
 		this.#closed = true;
+		this.#socketGeneration++;
+		this.#notificationTail = Promise.resolve();
 		clearTimeout(this.#completionReconnectTimer);
 		this.#completionReconnectTimer = undefined;
 		this.#socket?.destroy();
@@ -501,6 +505,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	}
 
 	#bindSocket(socket: net.Socket): void {
+		this.#notificationTail = Promise.resolve();
 		const generation = ++this.#socketGeneration;
 		this.#socket = socket;
 		this.#brokerCapabilities = undefined;
@@ -511,7 +516,13 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			// The close handler rejects pending requests with one stable error.
 		});
 		socket.on("close", () => {
-			if (this.#socket === socket) this.#socket = undefined;
+			if (this.#socket === socket) {
+				this.#socket = undefined;
+				if (generation === this.#socketGeneration) {
+					this.#socketGeneration++;
+					this.#notificationTail = Promise.resolve();
+				}
+			}
 			this.#rejectPending(new Error("Daemon broker connection closed"));
 			this.#scheduleCompletionReconnect();
 		});
@@ -549,7 +560,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				if (message.event === "daemon-completed") {
 					void this.#queueNotificationDelivery(message.daemon.id, `completion:${message.owner}`, async () => {
 						if (this.#closed || generation !== this.#socketGeneration) return;
-						await this.#deliverCompletion(message);
+						await this.#deliverCompletion(message, generation);
 					});
 				} else {
 					void this.#deliverOutput(message, generation);
@@ -592,7 +603,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		return delivery;
 	}
 
-	async #deliverCompletion(message: DaemonCompletionNotification): Promise<void> {
+	async #deliverCompletion(message: DaemonCompletionNotification, generation: number): Promise<void> {
 		if (this.#seenCompletionIds.has(message.completionId)) {
 			this.#ackCompletion(message.completionId);
 			return;
@@ -615,7 +626,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				completionId: message.completionId,
 				error: error instanceof Error ? error.message : String(error),
 			});
-			this.#socket?.destroy();
+			if (generation === this.#socketGeneration) this.#socket?.destroy();
 		} finally {
 			this.#inFlightCompletionIds.delete(message.completionId);
 		}

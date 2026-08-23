@@ -3056,6 +3056,146 @@ process.stdin.on("data", chunk => process.stdout.write(chunk));
 		}
 	}, 20_000);
 
+	it("delivers final output before owner completion from the same socket chunk", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-monitor-wire-order-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
+		const endpoint = daemonBrokerEndpoint(projectDir, runtimeDir);
+		type WireRequest = { id: string; operation: { op: string } };
+		const requests: WireRequest[] = [];
+		const requestWaiters: Array<(request: WireRequest) => void> = [];
+		const connected = Promise.withResolvers<net.Socket>();
+		const server = net.createServer(socket => {
+			connected.resolve(socket);
+			let buffer = "";
+			socket.on("data", chunk => {
+				buffer += chunk.toString("utf8");
+				let newline = buffer.indexOf("\n");
+				while (newline !== -1) {
+					const line = buffer.slice(0, newline);
+					buffer = buffer.slice(newline + 1);
+					if (line.trim()) {
+						const request = JSON.parse(line) as WireRequest;
+						const waiter = requestWaiters.shift();
+						if (waiter) waiter(request);
+						else requests.push(request);
+					}
+					newline = buffer.indexOf("\n");
+				}
+			});
+		});
+		const listening = Promise.withResolvers<void>();
+		server.once("error", listening.reject);
+		server.listen(endpoint, () => listening.resolve());
+		await listening.promise;
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const nextRequest = (): Promise<WireRequest> => {
+			const request = requests.shift();
+			if (request) return Promise.resolve(request);
+			const { promise, resolve } = Promise.withResolvers<WireRequest>();
+			requestWaiters.push(resolve);
+			return promise;
+		};
+		const replyToPing = (socket: net.Socket, request: WireRequest): void => {
+			expect(request.operation.op).toBe("ping");
+			socket.write(
+				`${JSON.stringify({
+					id: request.id,
+					ok: true,
+					result: { op: "ping", projectDir, capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] },
+				})}\n`,
+			);
+		};
+		const outputStarted = Promise.withResolvers<void>();
+		const releaseOutput = Promise.withResolvers<void>();
+		const completionDelivered = Promise.withResolvers<void>();
+		const deliveryOrder: string[] = [];
+		const unregisterCompletion = client.onCompletion("owner", () => {
+			deliveryOrder.push("completion");
+			completionDelivered.resolve();
+		});
+		const brokerSocket = await connected.promise;
+		replyToPing(brokerSocket, await nextRequest());
+		const unregisterOutput = client.onOutput?.(
+			{
+				id: "monitor",
+				name: "service",
+				owner: "owner",
+				artifactPath: path.join(tempDir.path(), "wire-order-progress.log"),
+			},
+			async notification => {
+				if (notification.event !== "daemon-output") return;
+				deliveryOrder.push("output:start");
+				outputStarted.resolve();
+				await releaseOutput.promise;
+				deliveryOrder.push("output:end");
+			},
+		);
+		if (!unregisterOutput) throw new Error("Expected output monitoring registration");
+		replyToPing(brokerSocket, await nextRequest());
+		await unregisterOutput.ready;
+
+		try {
+			const probe = client.request({ op: "ping" });
+			const probeRequest = await nextRequest();
+			const daemon = {
+				name: "service",
+				id: "daemon",
+				state: "exited",
+				createdAt: 1,
+				startedAt: 1,
+				exitedAt: 2,
+				exitCode: 1,
+				restartCount: 0,
+				outputBytes: 5,
+				owner: "owner",
+				persist: false,
+				detached: false,
+			};
+			brokerSocket.write(
+				[
+					{
+						event: "daemon-output",
+						monitorId: "monitor",
+						name: "service",
+						daemonId: "daemon",
+						epoch: "epoch",
+						seq: 1,
+						text: "fatal",
+						batchKind: "progress",
+						suppressedEvents: 0,
+					},
+					{ event: "daemon-completed", completionId: "completion", owner: "owner", daemon },
+					{
+						id: probeRequest.id,
+						ok: true,
+						result: { op: "ping", projectDir, capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] },
+					},
+				]
+					.map(message => JSON.stringify(message))
+					.join("\n") + "\n",
+			);
+			await probe;
+			await outputStarted.promise;
+			expect(deliveryOrder).toEqual(["output:start"]);
+
+			releaseOutput.resolve();
+			await completionDelivered.promise;
+			expect(deliveryOrder).toEqual(["output:start", "output:end", "completion"]);
+		} finally {
+			releaseOutput.resolve();
+			unregisterOutput();
+			unregisterCompletion();
+			client.close();
+			brokerSocket.destroy();
+			const serverClosed = Promise.withResolvers<void>();
+			server.close(() => serverClosed.resolve());
+			await serverClosed.promise;
+		}
+	}, 20_000);
+
 	it("rejects the first onOutput operation after a legacy broker acknowledges its capabilities", async () => {
 		using tempDir = TempDir.createSync("@omp-launch-monitor-capability-");
 		const projectDir = path.join(tempDir.path(), "project");
