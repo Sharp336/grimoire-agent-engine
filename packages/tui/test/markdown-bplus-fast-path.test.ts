@@ -52,18 +52,27 @@ describe("B+ fast-tail paragraph re-wrap", () => {
 		);
 	});
 
-	it("style-bearing delta disarms fast path (no stale plain row)", () => {
-		const full = "plain text then *open emphasis";
-		const streaming = new Markdown("", 0, 0, THEME);
+	it("run-level default style disarms fast path (single ANSI run contract)", () => {
+		// With a run-level defaultTextStyle (color/italic — as streamed
+		// thinking and colored assistant content use), a splice would
+		// concatenate a pre-styled row with a separately styled delta: two
+		// ANSI runs where a cold render produces one. The fast path must not
+		// engage — every frame stays byte-identical to cold.
+		const full = "a styled streaming paragraph grows one character at a time";
+		const style = { color: (t: string) => `\x1b[35m${t}\x1b[39m`, italic: true };
+		const styledCold = (text: string, width: number): readonly string[] => {
+			clearRenderCache();
+			const out = new Markdown(text, 0, 0, THEME, style).render(width);
+			clearRenderCache();
+			return out;
+		};
+		const streaming = new Markdown("", 0, 0, THEME, style);
 		streaming.transientRenderCache = true;
-		for (let len = 1; len <= full.length; len += 2) {
+		for (let len = 1; len <= full.length; len += 1) {
 			const slice = full.slice(0, len);
 			clearRenderCache();
 			streaming.setText(slice);
-			const got = streaming.render(60);
-			// Byte-identical every frame; the frame that introduces `*` must
-			// re-lex (Tier-2), so the literal `*` shows (no stale plain row).
-			expect(got).toEqual(renderCold(slice, 60));
+			expect(streaming.render(60)).toEqual(styledCold(slice, 60));
 		}
 	});
 

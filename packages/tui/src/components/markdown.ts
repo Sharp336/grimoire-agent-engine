@@ -1946,10 +1946,20 @@ export class Markdown implements Component {
 		this.#cachedWidth = width;
 		this.#cachedLines = result;
 
-		// Record the last-row fast-path recipe (B+). Only transient streaming
-		// frames whose last content row came from a paragraph with a
-		// self-contained trailing row are eligible.
-		const fastEligible = this.transientRenderCache && contentLines.length > 0 && this.#lastTailKind === "paragraph";
+		const fastEligible =
+			this.transientRenderCache &&
+			contentLines.length > 0 &&
+			this.#lastTailKind === "paragraph" &&
+			// Run-level default styling (color/bold/italic/strikethrough/
+			// underline) disarms: the splice concatenates the captured styled
+			// row with a separately styled delta, which yields two ANSI runs
+			// where a cold full render yields one (byte-identity contract).
+			// bgColor is line-level in both paths and stays eligible.
+			!this.#defaultTextStyle?.color &&
+			!this.#defaultTextStyle?.bold &&
+			!this.#defaultTextStyle?.italic &&
+			!this.#defaultTextStyle?.strikethrough &&
+			!this.#defaultTextStyle?.underline;
 		if (fastEligible) {
 			this.#fastTailReady = true;
 			this.#fastTailLines = result;
