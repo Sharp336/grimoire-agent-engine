@@ -24,9 +24,17 @@ import { TranscriptContainer } from "../src/modes/components/transcript-containe
 import { initTheme } from "../src/modes/theme/theme";
 
 const WIDTH = 100;
-const SIZES = [500, 5000];
-const WARMUP = 20;
-const SAMPLES = 200;
+// Override for deeper flatness checks, e.g. BENCH_SIZES="500,5000,15000".
+const SIZES = (process.env.BENCH_SIZES ?? "500,5000")
+	.split(",")
+	.map(value => Number.parseInt(value, 10))
+	.filter(value => Number.isFinite(value) && value > 0);
+if (SIZES.length < 2) {
+	console.error('BENCH_SIZES must list at least two sizes, e.g. BENCH_SIZES="500,5000"');
+	process.exit(1);
+}
+const WARMUP = 40;
+const SAMPLES = 400;
 
 function makeMarkdownCorpus(targetGraphemes: number): string {
 	const para =

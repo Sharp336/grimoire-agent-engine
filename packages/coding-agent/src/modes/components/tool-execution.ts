@@ -35,7 +35,7 @@ import { isFramedBlockComponent, markFramedBlockComponent, renderStatusLine, Wid
 import { convertImageToPng } from "../../utils/image-loading";
 import { sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
 import { renderDiff } from "./diff";
-import { type AnimationFrame, trimBlankEdges } from "./transcript-container";
+import { type AnimationFrame, noteSealedTranscriptMutation, trimBlankEdges } from "./transcript-container";
 
 /**
  * Drop trailing removal/hunk-header lines that appear in a streaming diff
@@ -670,9 +670,11 @@ export class ToolExecutionComponent extends Container {
 		const partialResultPainted = this.#partialResultShapePainted;
 		this.#firstResultViewportRepaintShapePainted = false;
 		this.#partialResultShapePainted = false;
+		const wasFinalized = this.isTranscriptBlockFinalized();
 		this.#result = result;
 		this.#resultVersion++;
 		this.#blockVersion++;
+		if (wasFinalized) noteSealedTranscriptMutation();
 		this.#isPartial = isPartial;
 		this.#displaceableByToolName = displaceableToolName(this.#toolName, result, isPartial);
 		// When tool is complete, ensure args are marked complete so spinner stops
@@ -882,6 +884,7 @@ export class ToolExecutionComponent extends Container {
 	seal(): void {
 		if (this.#sealed) return;
 		this.#sealed = true;
+		noteSealedTranscriptMutation();
 		this.#blockVersion++;
 		this.#displaceableByToolName = undefined;
 		this.stopAnimation();
@@ -925,7 +928,10 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	setExpanded(expanded: boolean): void {
-		if (this.#expanded !== expanded) this.#blockVersion++;
+		if (this.#expanded !== expanded) {
+			if (this.isTranscriptBlockFinalized()) noteSealedTranscriptMutation();
+			this.#blockVersion++;
+		}
 		this.#expanded = expanded;
 		this.#updateDisplay();
 	}

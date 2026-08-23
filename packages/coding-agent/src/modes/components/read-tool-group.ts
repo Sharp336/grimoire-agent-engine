@@ -9,6 +9,7 @@ import { PREVIEW_LIMITS, shortenPath } from "../../tools/render-utils";
 import { fileHyperlink, renderCodeCell, tryResolveInternalUrlSync } from "../../tui";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import type { ToolExecutionHandle } from "./tool-execution";
+import { noteSealedTranscriptMutation } from "./transcript-container";
 import { formatUsageRow } from "./usage-row";
 
 /**
@@ -387,7 +388,10 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	 * turn aborted or ended), allowing the container to retire it as history.
 	 */
 	seal(): void {
-		if (!this.#sealed) this.#blockVersion++;
+		if (!this.#sealed) {
+			noteSealedTranscriptMutation();
+			this.#blockVersion++;
+		}
 		this.#sealed = true;
 	}
 
@@ -446,6 +450,7 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 		const entry = this.#entries.get(toolCallId);
 		if (!entry) return;
 		if (isPartial) return;
+		if (this.isTranscriptBlockFinalized()) noteSealedTranscriptMutation();
 		this.#blockVersion++;
 		const details = result.details as ReadToolResultDetails | undefined;
 		const suffixResolution = getSuffixResolution(details);
@@ -511,7 +516,10 @@ export class ReadToolGroupComponent extends Container implements ToolExecutionHa
 	}
 
 	setExpanded(expanded: boolean): void {
-		if (this.#expanded !== expanded) this.#blockVersion++;
+		if (this.#expanded !== expanded) {
+			if (this.isTranscriptBlockFinalized()) noteSealedTranscriptMutation();
+			this.#blockVersion++;
+		}
 		this.#expanded = expanded;
 		this.#updateDisplay();
 	}

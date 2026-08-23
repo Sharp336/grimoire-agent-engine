@@ -19,6 +19,7 @@ import { convertImageToPng } from "../../utils/image-loading";
 import { canonicalizeMessage, formatThinkingForDisplay, hasDisplayableThinking } from "../../utils/thinking-display";
 import { resolveAssistantErrorPresentation } from "../utils/transcript-render-helpers";
 import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cache-invalidation-marker";
+import { noteSealedTranscriptMutation } from "./transcript-container";
 
 /**
  * Max lines of a turn-ending provider error rendered inline in the transcript.
@@ -264,6 +265,7 @@ export class AssistantMessageComponent extends Container {
 		if (info) {
 			this.#markerSlot.addChild(new CacheInvalidationMarkerComponent(info));
 		}
+		if (this.#transcriptBlockFinalized) noteSealedTranscriptMutation();
 		this.#blockVersion++;
 	}
 
@@ -705,6 +707,7 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	updateContent(message: AssistantMessage, opts?: { transient?: boolean }): void {
+		if (this.#transcriptBlockFinalized) noteSealedTranscriptMutation();
 		this.#blockVersion++;
 		this.#lastMessage = message;
 		this.#lastUpdateTransient = opts?.transient === true;
