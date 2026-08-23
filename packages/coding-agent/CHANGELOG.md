@@ -6,6 +6,7 @@
 
 - Fixed snapcompact dead-end recovery resurrecting archives cleared by `/clear`.
 - Fixed context usage staying inflated after live tool outputs were pruned, while preserving cleared and provider-compacted source history.
+- Mid-turn compaction now keeps parallel tool results ordered and present exactly once in the next model request.
 
 ## [18.0.3] - 2026-08-23
 

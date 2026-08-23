@@ -270,7 +270,10 @@ export interface SessionMaintenanceHost {
 		terminalTextAnswer: boolean;
 		suppressContinuation: boolean;
 	}): boolean;
-	persistTurnMessagesForMidRunCompaction(context: AgentTurnEndContext | undefined): Promise<boolean>;
+	persistTurnMessagesForMidRunCompaction(
+		context: AgentTurnEndContext | undefined,
+		signal?: AbortSignal,
+	): Promise<boolean>;
 	findLastAssistantMessage(): AssistantMessage | undefined;
 	disconnectFromAgent(): void;
 	reconnectToAgent(): void;
@@ -1483,7 +1486,10 @@ export class SessionMaintenance {
 	 * floor the compaction decision respects so on-wire compression can never
 	 * suppress it.
 	 */
-	#estimateStoredContextTokens(pendingMessages: AgentMessage[] = []): number {
+	#estimateStoredContextTokens(
+		pendingMessages: AgentMessage[] = [],
+		storedMessages: AgentMessage[] = this.#host.messages(),
+	): number {
 		// Local counting is the whole point of this arm: provider usage is
 		// exactly what it must not trust. Exclude encrypted reasoning
 		// (thinkingSignature / redactedThinking) too — its local byte size
@@ -1493,7 +1499,7 @@ export class SessionMaintenance {
 		const opts = { excludeEncryptedReasoning: true } as const;
 		return (
 			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer) +
-			this.#tokenizer.countMessages(this.#host.messages(), opts) +
+			this.#tokenizer.countMessages(storedMessages, opts) +
 			this.#tokenizer.countMessages(pendingMessages, opts)
 		);
 	}
@@ -1613,7 +1619,11 @@ export class SessionMaintenance {
 		// a slow message_end listener leave the TUI "generating" with no provider
 		// request or tool running.
 		const billedContextTokens = calculateContextTokens(lastAssistant.usage);
-		const storedContextTokens = this.#estimateStoredContextTokens();
+		// activeMessages is the producer loop's authoritative snapshot. Agent.state
+		// consumes message_end events asynchronously and can still be missing this
+		// turn's tool results here; using it as the local floor is what made a huge
+		// read look small at this boundary and then explode the next provider call.
+		const storedContextTokens = this.#estimateStoredContextTokens([], activeMessages);
 		const contextTokens = compactionContextTokens(billedContextTokens, storedContextTokens);
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) {
 			this.maybeStartSpeculativeCompaction(contextTokens, contextWindow);
@@ -1630,7 +1640,7 @@ export class SessionMaintenance {
 			return;
 		}
 
-		if (!(await this.#host.persistTurnMessagesForMidRunCompaction(context))) return;
+		if (!(await this.#host.persistTurnMessagesForMidRunCompaction(context, signal))) return;
 		if (this.#midTurnCompactionDeadEnds.has(activeMessages)) {
 			// A prior boundary already ran the dead-end rescue and could not reduce
 			// this turn. Re-running the rescue and re-emitting its warning on every
@@ -1680,11 +1690,13 @@ export class SessionMaintenance {
 			this.#midTurnDeadEndPendingPrePrompt = true;
 		}
 
-		if (signal?.aborted) return;
-		const compactedMessages = this.#host.agent.state.messages;
-		if (compactedMessages !== activeMessages) {
-			activeMessages.splice(0, activeMessages.length, ...compactedMessages);
+		if (result.historyRewritten) {
+			const compactedMessages = this.#host.agent.state.messages;
+			if (compactedMessages !== activeMessages) {
+				activeMessages.splice(0, activeMessages.length, ...compactedMessages);
+			}
 		}
+		if (signal?.aborted) return;
 		logger.debug("Mid-run compaction ran between provider calls", {
 			contextTokens,
 			contextWindow,
@@ -3748,8 +3760,11 @@ export class SessionMaintenance {
 		if (deadEndWarning) {
 			this.#host.emitNotice("warning", deadEndWarning, "compaction");
 		}
-		if (continuationScheduled) return COMPACTION_CHECK_CONTINUATION;
-		return noProgressDeadEnd ? COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION : COMPACTION_CHECK_NONE;
+		if (continuationScheduled) return { ...COMPACTION_CHECK_CONTINUATION, historyRewritten: true };
+		return {
+			...(noProgressDeadEnd ? COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION : COMPACTION_CHECK_NONE),
+			historyRewritten: true,
+		};
 	}
 
 	/**
