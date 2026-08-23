@@ -633,9 +633,7 @@ process.stdin.once("data", () => {
 			raw.socket.write(envelope("attach-terminal", "ordinary-client", [ordinarySubscription]));
 			await raw.waitFor(message => message.id === "attach-terminal");
 			const ordinaryCompletions = raw.messages.filter(
-				message =>
-					message.event === "daemon-monitor-completed" &&
-					message.monitorId === ordinarySubscription.id,
+				message => message.event === "daemon-monitor-completed" && message.monitorId === ordinarySubscription.id,
 			);
 			expect(ordinaryCompletions).toHaveLength(1);
 			expect(ordinaryCompletions[0]?.daemon).toMatchObject({ id: firstStart.daemon.id, state: "exited" });
@@ -661,14 +659,10 @@ process.stdin.once("data", () => {
 			expect(secondStart.daemon.id).not.toBe(firstStart.daemon.id);
 			await client.request({ op: "send", name: "reuse", data: "go\n" });
 			await raw.waitFor(
-				message =>
-					message.event === "daemon-monitor-completed" &&
-					message.monitorId === futureSubscription.id,
+				message => message.event === "daemon-monitor-completed" && message.monitorId === futureSubscription.id,
 			);
 
-			const replacementNotifications = raw.messages.filter(
-				message => message.monitorId === futureSubscription.id,
-			);
+			const replacementNotifications = raw.messages.filter(message => message.monitorId === futureSubscription.id);
 			expect(replacementNotifications.map(message => message.event)).toEqual([
 				"daemon-output",
 				"daemon-monitor-completed",
