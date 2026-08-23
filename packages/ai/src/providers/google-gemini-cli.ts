@@ -514,33 +514,42 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 		let rawRequestDump: RawHttpRequestDump | undefined;
 
 		try {
-			const apiKeyRaw = options?.apiKey;
-			if (!apiKeyRaw) {
-				throw new AIError.ConfigurationError(
-					"Google Cloud Code Assist requires OAuth authentication. Use /login to authenticate.",
-				);
-			}
-
+			const strictProviderCall = options?.providerCallContext?.mode === "strict";
 			const isAntigravity = model.provider === "google-antigravity";
-			const parsedCredentials = parseGeminiCliCredentials(apiKeyRaw);
-			const { accessToken, projectId } = parsedCredentials;
-			// AuthStorage already refreshed credentials before threading them
-			// here (see {@link OAUTH_REFRESH_SKEW_MS}). If the credential lands
-			// expired we bail rather than POSTing a stale token; the next call
-			// — driven by AuthStorage's invalidate+retry path — will carry a
-			// fresh credential.
-			if (
-				shouldRefreshGeminiCliCredentials(parsedCredentials.expiresAt, isAntigravity) &&
-				parsedCredentials.expiresAt !== undefined &&
-				Date.now() >= parsedCredentials.expiresAt
-			) {
-				throw new AIError.OAuthError(
-					"OAuth token expired before request — please retry; AuthStorage will refresh on the next attempt.",
-					{ kind: "token-refresh", provider: model.provider },
-				);
+			let accessToken: string;
+			let projectId: string;
+			let accountEmail: string | undefined;
+			if (strictProviderCall) {
+				accessToken = "";
+				projectId = options.providerCallContext!.accountId;
+			} else {
+				const apiKeyRaw = options?.apiKey;
+				if (!apiKeyRaw) {
+					throw new AIError.ConfigurationError(
+						"Google Cloud Code Assist requires OAuth authentication. Use /login to authenticate.",
+					);
+				}
+
+				const parsedCredentials = parseGeminiCliCredentials(apiKeyRaw);
+				accountEmail = parsedCredentials.email;
+				({ accessToken, projectId } = parsedCredentials);
+				// AuthStorage already refreshed credentials before threading them
+				// here (see {@link OAUTH_REFRESH_SKEW_MS}). If the credential lands
+				// expired we bail rather than POSTing a stale token; the next call
+				// — driven by AuthStorage's invalidate+retry path — will carry a
+				// fresh credential.
+				if (
+					shouldRefreshGeminiCliCredentials(parsedCredentials.expiresAt, isAntigravity) &&
+					parsedCredentials.expiresAt !== undefined &&
+					Date.now() >= parsedCredentials.expiresAt
+				) {
+					throw new AIError.OAuthError(
+						"OAuth token expired before request — please retry; AuthStorage will refresh on the next attempt.",
+						{ kind: "token-refresh", provider: model.provider },
+					);
+				}
 			}
 			const baseUrl = model.baseUrl?.trim();
-			const strictProviderCall = options?.providerCallContext?.mode === "strict";
 			let endpoints: string[];
 			const providerState =
 				!strictProviderCall && isAntigravity
@@ -976,11 +985,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						const errorText = await response.text();
 						const validationUrl = extractGoogleValidationUrl(errorText);
 						const errorMessage = validationUrl
-							? formatGoogleValidationRequiredMessage(
-									validationUrl,
-									"retry your request",
-									parsedCredentials.email,
-								)
+							? formatGoogleValidationRequiredMessage(validationUrl, "retry your request", accountEmail)
 							: errorText;
 						throw new AIError.GeminiCliApiError(
 							`Cloud Code Assist API error (${response.status}): ${errorMessage}`,

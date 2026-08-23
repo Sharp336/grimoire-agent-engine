@@ -21,7 +21,7 @@ import { createAuthRetryKeyState, isApiKeyResolver, resolveNextAuthRetryKey } fr
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
-import { StrictProviderCallLifecycle } from "./provider-call-authority";
+import { StrictProviderCallGatewayLifecycle } from "./provider-call-gateway";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
 import type { MessageCreateParamsStreaming } from "./providers/anthropic-wire";
@@ -37,6 +37,7 @@ import type { GoogleVertexOptions } from "./providers/google-vertex";
 import { isKimiModel, streamKimi } from "./providers/kimi";
 import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
+import { NO_AUTH_SENTINEL } from "./providers/openai-shared";
 import { streamPiNative } from "./providers/pi-native-client";
 // Heavy provider stream functions are imported lazily via register-builtins,
 // which wraps each provider module in a dynamic import. This keeps the
@@ -1438,14 +1439,22 @@ function streamSimpleRequest<TApi extends Api>(
 		fetch: wrapFetchForProxy(debugOptions.fetch, model.provider),
 	} as SimpleStreamOptions;
 	const strictProviderCall = requestOptions.providerCallContext?.mode === "strict";
-	if (strictProviderCall && model.transport !== "pi-native" && !requestOptions.providerCallAuthority) {
-		throw new Error("Strict benchmark mode requires a provider-call authority before dispatch");
+	if (strictProviderCall && model.transport !== "pi-native" && !requestOptions.providerCallGateway) {
+		throw new Error("Strict benchmark mode requires a provider-call gateway before dispatch");
 	}
 	if (strictProviderCall && requestOptions.providerCallContext?.provider !== model.provider) {
-		throw new Error(`Provider-call authority provider mismatch: expected ${model.provider}`);
+		throw new Error(`Provider-call gateway provider mismatch: expected ${model.provider}`);
 	}
 	if (strictProviderCall && requestOptions.providerCallContext?.modelId !== model.id) {
-		throw new Error(`Provider-call authority model mismatch: expected ${model.id}`);
+		throw new Error(`Provider-call gateway model mismatch: expected ${model.id}`);
+	}
+	if (strictProviderCall && model.transport !== "pi-native") {
+		const lifecycle = new StrictProviderCallGatewayLifecycle(
+			model,
+			requestOptions,
+			requestOptions.providerCallGateway!,
+		);
+		requestOptions = lifecycle.options({ ...requestOptions, apiKey: NO_AUTH_SENTINEL });
 	}
 
 	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
@@ -1578,39 +1587,28 @@ function streamSimpleRequest<TApi extends Api>(
 		);
 	}
 
-	const providerCallLifecycle =
-		strictProviderCall && requestOptions.providerCallAuthority
-			? new StrictProviderCallLifecycle(model, requestOptions, requestOptions.providerCallAuthority)
-			: undefined;
-	if (providerCallLifecycle) requestOptions = providerCallLifecycle.options(requestOptions);
-	const finishProviderCall = (result: AssistantMessageEventStream): AssistantMessageEventStream =>
-		providerCallLifecycle ? providerCallLifecycle.wrap(result) : result;
-
 	// Check custom API registry (extension-provided APIs)
 	const customApiProvider = getCustomApi(model.api);
 	if (customApiProvider) {
-		return finishProviderCall(
-			withThinkingLoopGuard(model, requestOptions, opts =>
-				withProviderInFlightLimit(model, opts, () => customApiProvider.streamSimple(model, context, opts)),
-			),
+		return withThinkingLoopGuard(model, requestOptions, opts =>
+			withProviderInFlightLimit(model, opts, () => customApiProvider.streamSimple(model, context, opts)),
 		);
 	}
 
 	// Vertex AI uses Application Default Credentials, not API keys
 	if (model.api === "google-vertex") {
 		const providerOptions = mapOptionsForApi(model, requestOptions, undefined);
-		return finishProviderCall(stream(model, context, providerOptions));
+		return stream(model, context, providerOptions);
 	} else if (model.api === "bedrock-converse-stream") {
-		// Bedrock doesn't have any API keys instead it sources credentials from standard AWS env variables or from given AWS profile.
 		const providerOptions = mapOptionsForApi(model, requestOptions, undefined);
-		return finishProviderCall(stream(model, context, providerOptions));
+		return stream(model, context, providerOptions);
 	} else if (getProviderDefinition(model.provider)?.allowsMissingApiKey) {
 		const providerOptions = mapOptionsForApi(
 			model,
 			requestOptions,
 			typeof requestOptions.apiKey === "string" ? requestOptions.apiKey : getEnvApiKey(model.provider),
 		);
-		return finishProviderCall(stream(model, context, providerOptions));
+		return stream(model, context, providerOptions);
 	}
 
 	// The resolver form is handled by the wrapper above; only a static string
@@ -1621,16 +1619,13 @@ function streamSimpleRequest<TApi extends Api>(
 		throw new AIError.MissingApiKeyError(model.provider);
 	}
 
-	// GitLab Duo - wraps Anthropic/OpenAI behind GitLab AI Gateway direct access tokens
 	if (isGitLabDuoModel(model)) {
-		return finishProviderCall(
-			withThinkingLoopGuard(model, requestOptions, opts =>
-				withProviderInFlightLimit(model, opts, () =>
-					streamGitLabDuo(model, context, {
-						...opts,
-						apiKey,
-					}),
-				),
+		return withThinkingLoopGuard(model, requestOptions, opts =>
+			withProviderInFlightLimit(model, opts, () =>
+				streamGitLabDuo(model, context, {
+					...opts,
+					apiKey,
+				}),
 			),
 		);
 	}
@@ -1638,15 +1633,13 @@ function streamSimpleRequest<TApi extends Api>(
 	// GitLab Duo Workflow - IDE workflow protocol + WebSocket action bridge
 	if (model.api === "gitlab-duo-agent") {
 		// Does not route through withProviderInFlightLimit, so heal explicitly.
-		return finishProviderCall(
-			withThinkingLoopGuard(model, requestOptions, opts =>
-				healLeakedThinking(
-					model,
-					streamGitLabDuoWorkflow(model as Model<"gitlab-duo-agent">, context, {
-						...opts,
-						apiKey,
-					}),
-				),
+		return withThinkingLoopGuard(model, requestOptions, opts =>
+			healLeakedThinking(
+				model,
+				streamGitLabDuoWorkflow(model as Model<"gitlab-duo-agent">, context, {
+					...opts,
+					apiKey,
+				}),
 			),
 		);
 	}
@@ -1659,36 +1652,31 @@ function streamSimpleRequest<TApi extends Api>(
 		// thinking, so clamp disabled requests to the lowest supported effort
 		// (mirrors the mapOptionsForApi path every other provider takes).
 		const kimiOptions = normalizeMandatoryReasoningOptions(model, requestOptions);
-		return finishProviderCall(
-			withThinkingLoopGuard(model, kimiOptions, opts =>
-				withProviderInFlightLimit(model, opts, () =>
-					streamKimi(model as Model<"openai-completions">, context, {
-						...opts,
-						apiKey,
-						format: opts?.kimiApiFormat,
-					}),
-				),
+		return withThinkingLoopGuard(model, kimiOptions, opts =>
+			withProviderInFlightLimit(model, opts, () =>
+				streamKimi(model as Model<"openai-completions">, context, {
+					...opts,
+					apiKey,
+					format: opts?.kimiApiFormat,
+				}),
 			),
 		);
 	}
 
 	// Synthetic - route to dedicated handler that wraps OpenAI or Anthropic API
 	if (isSyntheticModel(model)) {
-		// Pass raw SimpleStreamOptions - streamSynthetic handles mapping internally.
-		return finishProviderCall(
-			withThinkingLoopGuard(model, requestOptions, opts =>
-				withProviderInFlightLimit(model, opts, () =>
-					streamSynthetic(model as Model<"openai-completions">, context, {
-						...opts,
-						apiKey,
-						format: opts?.syntheticApiFormat ?? "openai",
-					}),
-				),
+		return withThinkingLoopGuard(model, requestOptions, opts =>
+			withProviderInFlightLimit(model, opts, () =>
+				streamSynthetic(model as Model<"openai-completions">, context, {
+					...opts,
+					apiKey,
+					format: opts?.syntheticApiFormat ?? "openai",
+				}),
 			),
 		);
 	}
 	const providerOptions = mapOptionsForApi(model, requestOptions, apiKey);
-	return finishProviderCall(stream(model, context, providerOptions));
+	return stream(model, context, providerOptions);
 }
 
 export async function completeSimple<TApi extends Api>(

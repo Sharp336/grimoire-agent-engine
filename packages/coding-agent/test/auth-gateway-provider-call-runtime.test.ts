@@ -56,6 +56,7 @@ function context(overrides: Partial<ProviderCallContext> = {}): ProviderCallCont
 		mode: "strict",
 		configId: "kimi-k3-high",
 		taskReservationId: "11111111-1111-4111-8111-111111111111",
+		providerRouteAssignmentId: "11111111-1111-4111-8111-111111111112",
 		executionBindingId: "22222222-2222-4222-8222-222222222222",
 		podUid: "pod-uid",
 		callSequence: "1",

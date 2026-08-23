@@ -3,7 +3,8 @@ import { constants } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { withFileLock } from "@oh-my-pi/pi-utils/file-lock";
-import { assertNoDuplicateJsonKeys, providerCallReceiptRequestSha256 } from "./provider-call-authority";
+import { providerCallReceiptRequestSha256 } from "./provider-call-authority";
+import { assertNoDuplicateJsonKeys } from "./provider-call-gateway";
 import {
 	providerCallOriginAssignmentsEqual,
 	resolveProviderCallOriginBinding,
@@ -212,6 +213,7 @@ function hydrateContext(value: unknown, label: string): ProviderCallContext {
 			"mode",
 			"configId",
 			"taskReservationId",
+			"providerRouteAssignmentId",
 			"executionBindingId",
 			"podUid",
 			"callSequence",
@@ -257,6 +259,11 @@ function hydrateContext(value: unknown, label: string): ProviderCallContext {
 		mode: "strict",
 		configId: requireString(record.configId, `${label}.configId`),
 		taskReservationId: requireString(record.taskReservationId, `${label}.taskReservationId`, CANONICAL_UUID),
+		providerRouteAssignmentId: requireString(
+			record.providerRouteAssignmentId,
+			`${label}.providerRouteAssignmentId`,
+			CANONICAL_UUID,
+		),
 		executionBindingId: requireString(record.executionBindingId, `${label}.executionBindingId`, CANONICAL_UUID),
 		podUid: requireString(record.podUid, `${label}.podUid`),
 		callSequence: requireString(record.callSequence, `${label}.callSequence`, /^[1-9][0-9]*$/),

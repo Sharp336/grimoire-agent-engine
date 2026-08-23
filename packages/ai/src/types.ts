@@ -388,6 +388,7 @@ export interface ProviderCallContext {
 	mode: "strict";
 	configId: string;
 	taskReservationId: string;
+	providerRouteAssignmentId: string;
 	executionBindingId: string;
 	podUid: string;
 	callSequence: string;
@@ -412,13 +413,8 @@ export interface ProviderCallContext {
 }
 export type ProviderCallRequestMaterializationKind = "GENERIC_LIFECYCLE_FINAL" | "DEDICATED_CODEX_AUTHORITY_TRANSLATED";
 
-/** Fv13 worker identity adds the controller-owned route-assignment identifier to the existing strict context. */
-export type ProviderCallWorkerContext = ProviderCallContext & {
-	providerRouteAssignmentId: string;
-};
-
 export interface ProviderCallGatewayRequest {
-	context: ProviderCallWorkerContext;
+	context: ProviderCallContext;
 	requestMaterializationKind: ProviderCallRequestMaterializationKind;
 	sourceBody: Uint8Array;
 }
@@ -769,15 +765,8 @@ export interface StreamOptions {
 	 * Presence enables fail-closed provider-call lifecycle enforcement.
 	 */
 	providerCallContext?: ProviderCallContext;
-	/**
-	 * Local authority used to reserve the call and persist its terminal receipt.
-	 * This object is never serialized over pi-native.
-	 */
-	providerCallAuthority?: ProviderCallAuthority;
-	/** Credential selected and identity-bound by the trusted gateway; never serialized over pi-native. */
-	providerCallCredential?: ProviderCallCredential;
-	/** Durable per-execution journal and mutex; never serialized over pi-native. */
-	providerCallJournal?: ProviderCallJournal;
+	/** Same-Pod Fv13 gateway; strict dispatch never reads provider credentials or uses caller fetch. */
+	providerCallGateway?: ProviderCallGateway;
 	/** Server-controlled final URL plan validated before credential resolution; never serialized over pi-native. */
 	providerCallUrlPlan?: ProviderCallUrlPlan;
 	/**

@@ -10,7 +10,7 @@ import {
 	ProviderCallGatewayError,
 	UnixProviderCallGateway,
 } from "@oh-my-pi/pi-ai/provider-call-gateway";
-import type { ProviderCallWorkerContext } from "@oh-my-pi/pi-ai/types";
+import type { ProviderCallContext } from "@oh-my-pi/pi-ai/types";
 
 const OPERATION_ID = "11111111-1111-4111-8111-111111111111";
 const ROUTE_ASSIGNMENT_ID = "22222222-2222-4222-8222-222222222222";
@@ -42,7 +42,7 @@ function concat(...parts: Uint8Array[]): Uint8Array {
 	return result;
 }
 
-function context(): ProviderCallWorkerContext {
+function context(): ProviderCallContext {
 	return {
 		mode: "strict",
 		configId: "deepseek-v4-pro-0813-max-r3",
@@ -64,7 +64,7 @@ function context(): ProviderCallWorkerContext {
 		inputTokens: "1",
 		maxOutputTokens: "2",
 		expectedDimensions: [],
-		originAssignment: {} as ProviderCallWorkerContext["originAssignment"],
+		originAssignment: {} as ProviderCallContext["originAssignment"],
 	};
 }
 
@@ -240,7 +240,7 @@ describe("frozen Fv13 worker gateway ABI", () => {
 	});
 
 	it("derives the materialization domain from controller-owned route context", () => {
-		const dedicatedContext: ProviderCallWorkerContext = {
+		const dedicatedContext: ProviderCallContext = {
 			...context(),
 			codexAuthority: {
 				providerRouteAssignmentId: ROUTE_ASSIGNMENT_ID,

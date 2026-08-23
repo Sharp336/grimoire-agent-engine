@@ -77,6 +77,7 @@ function goldenContext(): ProviderCallContext {
 		mode: "strict",
 		configId: "sol-low",
 		taskReservationId: String(reservationInput.task_reservation_id),
+		providerRouteAssignmentId: "11111111-1111-4111-8111-111111111112",
 		executionBindingId: String(reservationInput.execution_binding_id),
 		podUid: String(reservationInput.pod_uid),
 		callSequence: String(reservationInput.call_sequence),

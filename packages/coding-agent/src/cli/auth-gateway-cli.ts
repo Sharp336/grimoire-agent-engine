@@ -837,9 +837,6 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		version: VERSION,
 		resolveModel: (id: string) => modelById.get(id),
 		listModels: () => modelById.values(),
-		providerCallAuthority: providerCallRuntime?.authority,
-		providerCallJournal: providerCallRuntime?.journal,
-		resolveProviderCallCredential: providerCallRuntime?.resolveCredential,
 		expectedProviderCallDynamics:
 			Object.keys(expectedProviderCallDynamics).length > 0 ? expectedProviderCallDynamics : undefined,
 		delegateCodexProviderCall: codexAuthorityRuntime?.delegate,

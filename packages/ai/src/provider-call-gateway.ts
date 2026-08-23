@@ -1,6 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import type { ProviderCallGateway, ProviderCallGatewayRequest, ProviderCallWorkerContext } from "./types";
+import {
+	assertProviderCallOrigin,
+	resolveProviderCallOriginBinding,
+	validateProviderCallOriginAssignment,
+} from "./provider-call-origin-manifest";
+import type {
+	Api,
+	FetchImpl,
+	Model,
+	ProviderCallContext,
+	ProviderCallGateway,
+	ProviderCallGatewayRequest,
+	SimpleStreamOptions,
+} from "./types";
 
 const encoder = new TextEncoder();
 const fatalDecoder = new TextDecoder("utf-8", { fatal: true });
@@ -256,7 +269,7 @@ function requireIdentifier(value: string, label: string): void {
 	if (!value || value.length > 1024 || hasLoneSurrogate(value)) throw new Error(`${label} is invalid`);
 }
 
-function validateWorkerContext(context: ProviderCallWorkerContext): void {
+function validateWorkerContext(context: ProviderCallContext): void {
 	for (const [label, value] of [
 		["task reservation id", context.taskReservationId],
 		["provider route assignment id", context.providerRouteAssignmentId],
@@ -268,6 +281,83 @@ function validateWorkerContext(context: ProviderCallWorkerContext): void {
 		requireIdentifier(value, `Provider-call ${label}`);
 	}
 	parseCallSequence(context.callSequence);
+}
+
+export function validateProviderCallContext(model: Model<Api>, context: ProviderCallContext): void {
+	if (context.mode !== "strict") throw new Error("Unsupported provider-call gateway mode");
+	if (context.provider !== model.provider)
+		throw new Error(`Provider-call gateway provider mismatch: expected ${model.provider}`);
+	if (context.modelId !== model.id) throw new Error(`Provider-call gateway model mismatch: expected ${model.id}`);
+	const expectedApiFamily =
+		model.api === "openai-completions"
+			? "openai-completions"
+			: model.api === "google-gemini-cli"
+				? "google-gemini-cli"
+				: model.api === "openai-responses" || model.api === "azure-openai-responses"
+					? "openai-responses"
+					: undefined;
+	if (!expectedApiFamily || context.apiFamily !== expectedApiFamily) {
+		throw new Error(`Provider-call gateway does not support API family ${model.api}`);
+	}
+	const assignment = validateProviderCallOriginAssignment(context.originAssignment);
+	const route = resolveProviderCallOriginBinding(assignment.config_id, assignment.route_ordinal);
+	if (
+		context.configId !== assignment.config_id ||
+		context.credentialGeneration !== assignment.credential_generation ||
+		route.provider !== context.provider ||
+		route.modelId !== context.modelId ||
+		route.apiFamily !== context.apiFamily
+	) {
+		throw new Error(`Provider-call origin assignment identity mismatch for ${context.configId}`);
+	}
+	validateWorkerContext(context);
+	for (const [name, value] of Object.entries({
+		configId: context.configId,
+		accountId: context.accountId,
+		credentialGeneration: context.credentialGeneration,
+		capabilityId: context.capabilityId,
+		snapshotId: context.snapshotId,
+		assignmentSha256: context.assignmentSha256,
+		tokenizerContractSha256: context.tokenizerContractSha256,
+		inputTokens: context.inputTokens,
+		maxOutputTokens: context.maxOutputTokens,
+	})) {
+		if (!value.trim()) throw new Error(`Provider-call gateway ${name} is required`);
+	}
+	const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+	for (const value of [
+		context.taskReservationId,
+		context.providerRouteAssignmentId,
+		context.executionBindingId,
+		context.idempotencyKey,
+		context.capabilityId,
+		context.snapshotId,
+	]) {
+		if (!uuid.test(value)) throw new Error("Provider-call gateway UUID fields must be lowercase canonical UUIDs");
+	}
+	if (!SHA256.test(context.assignmentSha256) || !SHA256.test(context.tokenizerContractSha256)) {
+		throw new Error("Provider-call assignment/tokenizer contract hash is invalid");
+	}
+	if (!/^(0|[1-9][0-9]*)$/.test(context.inputTokens) || !/^(0|[1-9][0-9]*)$/.test(context.maxOutputTokens)) {
+		throw new Error("Provider-call token counters must be canonical unsigned decimal strings");
+	}
+	if (context.expectedDimensions.length === 0) throw new Error("Provider-call gateway dimensions are required");
+	let previousKey: string | undefined;
+	for (const dimension of context.expectedDimensions) {
+		const key = `${dimension.dimension}\0${dimension.windowId}`;
+		const timestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/;
+		if (
+			!dimension.windowId ||
+			!/^[1-9][0-9]*$/.test(dimension.amount) ||
+			!/^[0-9]$/.test(dimension.unitScale) ||
+			(dimension.windowStart !== null && !timestamp.test(dimension.windowStart)) ||
+			(dimension.windowEnd !== null && !timestamp.test(dimension.windowEnd)) ||
+			(previousKey !== undefined && Buffer.compare(Buffer.from(previousKey), Buffer.from(key)) >= 0)
+		) {
+			throw new Error("Provider-call gateway dimension vector is invalid or unsorted");
+		}
+		previousKey = key;
+	}
 }
 
 interface WorkerRequestFrameInput extends ProviderCallGatewayRequest {
@@ -324,8 +414,16 @@ export function encodeProviderCallWorkerRequest(input: WorkerRequestFrameInput):
 }
 
 export function assertNoDuplicateJsonKeys(source: string): void {
-	if (source.includes("\ufeff") || source.includes("\r") || source.includes("\0"))
+	if (source.includes("\ufeff") || source.includes("\r") || source.includes("\0")) {
 		throw new Error("Forbidden JSON byte");
+	}
+	const canonicalIntegerFields = new Set([
+		"config_ordinal",
+		"route_ordinal",
+		"origin_descriptor_canonical_bytes",
+		"binding_descriptor_canonical_bytes",
+		"port",
+	]);
 	let offset = 0;
 	const skipWhitespace = (): void => {
 		while (/\s/.test(source[offset] ?? "")) offset++;
@@ -343,7 +441,7 @@ export function assertNoDuplicateJsonKeys(source: string): void {
 		}
 		throw new Error("Unterminated JSON string");
 	};
-	const parseValue = (): void => {
+	const parseValue = (field?: string): void => {
 		skipWhitespace();
 		const character = source[offset];
 		if (character === "{") {
@@ -361,7 +459,7 @@ export function assertNoDuplicateJsonKeys(source: string): void {
 				keys.add(key);
 				skipWhitespace();
 				if (source[offset++] !== ":") throw new Error("Expected JSON colon");
-				parseValue();
+				parseValue(key);
 				skipWhitespace();
 				const delimiter = source[offset++];
 				if (delimiter === "}") return;
@@ -390,6 +488,10 @@ export function assertNoDuplicateJsonKeys(source: string): void {
 		const start = offset;
 		while (offset < source.length && !/[\s,\]}]/.test(source[offset] ?? "")) offset++;
 		if (offset === start) throw new Error("Expected JSON scalar");
+		const scalar = source.slice(start, offset);
+		if (field && canonicalIntegerFields.has(field) && !/^(0|[1-9][0-9]*)$/.test(scalar)) {
+			throw new Error(`Noncanonical JSON integer: ${field}`);
+		}
 	};
 	parseValue();
 	skipWhitespace();
@@ -788,6 +890,114 @@ export class UnixProviderCallGateway implements ProviderCallGateway {
 			}).catch(error => fail(undefined, error instanceof Error ? error : new Error(String(error))));
 		});
 		return decodeProviderCallWorkerResponse(frame, workerOperationId);
+	}
+}
+
+const CREDENTIAL_HEADERS: ReadonlySet<string> = new Set([
+	"authorization",
+	"proxy-authorization",
+	"x-api-key",
+	"api-key",
+	"x-goog-api-key",
+	"cookie",
+	"set-cookie",
+]);
+const CREDENTIAL_QUERY: ReadonlySet<string> = new Set([
+	"access_token",
+	"api_key",
+	"apikey",
+	"authorization",
+	"key",
+	"token",
+]);
+
+async function requestBodyBytes(input: string | URL | Request, init?: RequestInit): Promise<Uint8Array> {
+	const body = init?.body;
+	if (typeof body === "string") return encoder.encode(body);
+	if (body instanceof Uint8Array) return body;
+	if (body instanceof ArrayBuffer) return new Uint8Array(body);
+	if (ArrayBuffer.isView(body)) return new Uint8Array(body.buffer, body.byteOffset, body.byteLength);
+	if (body === undefined || body === null) {
+		if (input instanceof Request && input.body) return new Uint8Array(await input.clone().arrayBuffer());
+		return new Uint8Array();
+	}
+	throw new Error("Strict provider-call gateway requires a deterministic byte request body");
+}
+
+function validateCredentialFreeRequest(
+	input: string | URL | Request,
+	init: RequestInit | undefined,
+	context: ProviderCallContext,
+): void {
+	const url = new URL(input instanceof Request ? input.url : input);
+	for (const key of url.searchParams.keys()) {
+		if (CREDENTIAL_QUERY.has(key.toLowerCase())) {
+			throw new Error(`Provider-call URL contains credential query field: ${key}`);
+		}
+	}
+	const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+	for (const [name] of headers) {
+		if (CREDENTIAL_HEADERS.has(name.toLowerCase())) {
+			throw new Error(`Provider-call request contains credential header: ${name}`);
+		}
+	}
+	const contentEncoding = headers.get("content-encoding");
+	if (contentEncoding !== null && contentEncoding !== "identity") {
+		throw new Error("Provider-call request Content-Encoding must be absent or exact identity");
+	}
+	assertProviderCallOrigin(context.originAssignment, url, headers);
+}
+
+/** Captures one final serialized generic body and delegates the complete call to the Fv13 gateway. */
+export class StrictProviderCallGatewayLifecycle {
+	readonly #context: ProviderCallContext;
+	readonly #gateway: ProviderCallGateway;
+	readonly #userOnPayload: SimpleStreamOptions["onPayload"];
+	#payloadShaped = false;
+	#fetchInvoked = false;
+
+	constructor(model: Model<Api>, options: SimpleStreamOptions, gateway: ProviderCallGateway) {
+		const context = options.providerCallContext;
+		if (!context) throw new Error("Provider-call gateway context is required");
+		validateProviderCallContext(model, context);
+		const route = resolveProviderCallOriginBinding(
+			context.originAssignment.config_id,
+			context.originAssignment.route_ordinal,
+		);
+		if (route.authorityOwner !== "generic-omp-auth-gateway") {
+			throw new Error("GPT provider calls must delegate to the dedicated Codex authority backend");
+		}
+		this.#context = context;
+		this.#gateway = gateway;
+		this.#userOnPayload = options.onPayload;
+	}
+
+	options(options: SimpleStreamOptions): SimpleStreamOptions {
+		const guardedFetch = this.#fetch.bind(this) as FetchImpl;
+		return { ...options, onPayload: this.#onPayload.bind(this), fetch: guardedFetch };
+	}
+
+	async #onPayload(payload: unknown, model?: Model<Api>): Promise<unknown> {
+		if (this.#payloadShaped) throw new Error("Provider-call payload shaping is single-use");
+		const replacement = await this.#userOnPayload?.(payload, model);
+		this.#payloadShaped = true;
+		return replacement === undefined ? payload : replacement;
+	}
+
+	async #fetch(input: string | URL | Request, init?: RequestInit): Promise<Response> {
+		if (this.#fetchInvoked) throw new Error("Provider-call gateway dispatch is single-use; retry rejected");
+		this.#fetchInvoked = true;
+		if (!this.#payloadShaped) throw new Error("Provider-call gateway requires final payload shaping before dispatch");
+		const body = await requestBodyBytes(input, init);
+		if (body.byteLength > MAX_WORKER_REQUEST_PAYLOAD_BYTES) {
+			throw new Error(`Provider-call request body exceeds ${MAX_WORKER_REQUEST_PAYLOAD_BYTES} bytes`);
+		}
+		validateCredentialFreeRequest(input, init, this.#context);
+		return this.#gateway.dispatch({
+			context: this.#context,
+			requestMaterializationKind: "GENERIC_LIFECYCLE_FINAL",
+			sourceBody: body,
+		});
 	}
 }
 

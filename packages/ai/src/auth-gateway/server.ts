@@ -25,7 +25,7 @@ import type { AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
 import { classifyGatewayError } from "../error/gateway";
 import { isUsageLimitOutcome } from "../error/rate-limit";
-import { assertNoDuplicateJsonKeys, validateProviderCallContext } from "../provider-call-authority";
+import { assertNoDuplicateJsonKeys, validateProviderCallContext } from "../provider-call-gateway";
 import {
 	assertProviderCallExpectedDynamics,
 	type ProviderCallExpectedDynamicsByConfig,
@@ -43,10 +43,7 @@ import type {
 	AssistantMessageEventStream,
 	Context,
 	Model,
-	ProviderCallAuthority,
-	ProviderCallContext,
-	ProviderCallCredential,
-	ProviderCallJournal,
+	ProviderCallGateway,
 	SimpleStreamOptions,
 } from "../types";
 import { deterministicUuid } from "../utils/deterministic-id";
@@ -93,16 +90,10 @@ export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
 	resolveModel: ModelResolver;
 	/** Optional supplier for `/v1/models` listing. Returns the full model array. */
 	listModels?: () => Iterable<Model<Api>>;
-	/** Controller client used to authorize strict pi-native provider calls. */
-	providerCallAuthority?: ProviderCallAuthority;
-	/** Durable per-binding journal required before strict provider egress. */
-	providerCallJournal?: ProviderCallJournal;
+	/** Sole runtime egress for generic strict provider calls. */
+	providerCallGateway?: ProviderCallGateway;
 	/** Backend-owned deployment expectations keyed by frozen config ID; strict calls fail closed when absent. */
 	expectedProviderCallDynamics?: ProviderCallExpectedDynamicsByConfig;
-	/** Server-only exact credential binding for the reviewed account and generation. */
-	resolveProviderCallCredential?: (
-		context: ProviderCallContext,
-	) => ProviderCallCredential | Promise<ProviderCallCredential>;
 	/** Sole semantic handoff for GPT routes. The generic gateway performs no local authority or credential work. */
 	delegateCodexProviderCall?: CodexAuthorityDelegate;
 }
@@ -686,14 +677,11 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 			return piNative.formatError(409, "provider_call_origin_mismatch", message);
 		}
 	}
-	if (
-		strictProviderCall &&
-		(!bootOpts.providerCallAuthority || !bootOpts.providerCallJournal || !bootOpts.resolveProviderCallCredential)
-	) {
+	if (strictProviderCall && !bootOpts.providerCallGateway) {
 		return piNative.formatError(
 			503,
-			"provider_call_authority_unavailable",
-			"Strict provider-call authority runtime unavailable",
+			"provider_call_gateway_unavailable",
+			"Strict provider-call gateway runtime unavailable",
 		);
 	}
 	// Pi-native already parsed `streamOpts.sessionId` (when set by the
@@ -705,16 +693,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	parsed.options.sessionId ??= sessionId;
 
 	let apiKey: string | undefined;
-	let providerCallCredential: ProviderCallCredential | undefined;
-	if (strictProviderCall) {
-		try {
-			providerCallCredential = await bootOpts.resolveProviderCallCredential!(parsed.options.providerCallContext!);
-			apiKey = providerCallCredential.apiKey;
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			return piNative.formatError(409, "provider_call_credential_mismatch", message);
-		}
-	} else {
+	if (!strictProviderCall) {
 		try {
 			apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
 				modelId: model.id,
@@ -744,9 +723,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		...parsed.options,
 		apiKey,
 		signal: strictProviderCall ? undefined : controller.signal,
-		providerCallAuthority: strictProviderCall ? bootOpts.providerCallAuthority : undefined,
-		providerCallCredential: strictProviderCall ? providerCallCredential : undefined,
-		providerCallJournal: strictProviderCall ? bootOpts.providerCallJournal : undefined,
+		providerCallGateway: strictProviderCall ? bootOpts.providerCallGateway : undefined,
 		providerCallUrlPlan,
 	};
 	if (!strictProviderCall) {
@@ -754,7 +731,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 			bootOpts.storage,
 			model,
 			sessionId,
-			apiKey,
+			apiKey!,
 			controller.signal,
 			"pi-native",
 			peer,
