@@ -4,6 +4,8 @@ import * as path from "node:path";
 import type { MnemopiOptions } from "@oh-my-pi/pi-mnemopi";
 import { getMemoriesDir, logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
+import * as git from "../utils/git";
+import * as jj from "../utils/jj";
 
 export type MnemopiLlmMode = "none" | "smol" | "remote";
 
@@ -122,8 +124,8 @@ export interface MnemopiBankScope {
  *
  * Mnemopi has no tag-filtered recall, so `per-project-tagged` maps to a
  * project-local write bank plus a shared recall-visible bank. The project
- * bank is derived purely from {@link cwd} — see {@link projectBank} for the
- * stability contract.
+ * bank is derived from {@link cwd}'s resolved primary project root — see
+ * {@link projectBank} for the stability contract.
  */
 export function computeMnemopiBankScope(
 	configured: string | undefined,
@@ -165,19 +167,71 @@ function sharedBank(configured: string | undefined): string {
 }
 
 /**
- * Derive the per-project bank id from `cwd` alone.
+ * Derive the per-project bank id from the resolved primary project root.
  *
- * Earlier versions resolved the enclosing git root before hashing, which
- * made the bank id unstable: removing or adding a `.git` anywhere above the
- * cwd repointed the same conversation directory to a different bank and
- * fragmented memories (#2412). The git lookup is gone here; the rescue path
- * for already-fragmented installs lives in {@link extendRecallWithLegacyBanks}.
+ * Earlier versions hashed the enclosing git root before it was resolved to a
+ * *primary* checkout, which made the bank id unstable: removing or adding a
+ * `.git` anywhere above the cwd repointed the same conversation directory to
+ * a different bank and fragmented memories (#2412). The fix at the time
+ * dropped git resolution entirely and hashed the raw cwd, which traded that
+ * instability for a worse one: every git worktree or jj workspace of the
+ * same repository got its own isolated bank.
+ *
+ * {@link resolveProjectRoot} restores git/jj resolution, but only ever
+ * widens to a *primary* checkout root (mirroring the Hindsight backend's
+ * `projectLabel` in `hindsight/bank.ts`), never to an arbitrary ancestor —
+ * a stray or unrelated `.git`/`.jj` above the project root still does not
+ * resolve to a repository unless it actually is one. Any bank a resolution
+ * change strands is recovered the same way #2412 fragmentation was: once
+ * every row in an orphaned bank tags the same cwd, `extendRecallWithLegacyBanks`
+ * widens recall to include it.
  */
 function projectBank(configured: string | undefined, cwd: string): string {
-	const projectRoot = path.resolve(cwd || ".");
+	const projectRoot = resolveProjectRoot(path.resolve(cwd || "."));
 	const project = projectBankSegment(projectRoot);
 	const base = sanitizeBankName(configured);
 	return limitBankName(base ? `${base}-${project}` : project);
+}
+
+/**
+ * Resolve the primary project root for bank derivation: the repository's
+ * primary checkout root, so every linked git worktree, colocated jj
+ * workspace (`jj workspace add --colocate` creates a real git worktree, so
+ * git resolution already covers it), and non-colocated jj workspace
+ * resolves to the same directory. Falls back to `directory` itself outside
+ * any repository, preserving the plain cwd-based behavior from #2412.
+ *
+ * Git is not always tried first: when `directory` sits inside a pure jj
+ * workspace nested under an unrelated *outer* Git checkout (the topology
+ * {@link jj.isPureJjRepo} documents as real), the jj workspace root is the
+ * nearer ancestor and must win, or the inner project would derive the
+ * outer checkout's bank and mix memories `per-project` is meant to isolate.
+ * {@link isNearerAncestor} performs the same nearest-root comparison
+ * `isPureJjRepo` uses, synchronously.
+ */
+function resolveProjectRoot(directory: string): string {
+	const gitRoot = git.repo.resolveSync(directory)?.repoRoot ?? null;
+	const jjRoot = jj.repo.rootSync(directory);
+	if (jjRoot !== null && (gitRoot === null || isNearerAncestor(jjRoot, gitRoot))) {
+		return jj.repo.primaryRootSync(directory) ?? directory;
+	}
+	return git.repo.primaryRootSync(directory) ?? jj.repo.primaryRootSync(directory) ?? directory;
+}
+
+/**
+ * Return `true` when `candidate` is a strict descendant of `other` — i.e.
+ * nearer to the queried directory. Both arguments must already be resolved
+ * absolute paths without a trailing separator.
+ */
+function isNearerAncestor(candidate: string, other: string): boolean {
+	const rel = path.relative(other, candidate);
+	if (rel === "" || rel === ".") return false;
+	// A literal ".." component means `path.relative` had to walk upward, i.e.
+	// `candidate` is not under `other` at all. A directory whose *name*
+	// happens to start with ".." (e.g. `..jj-project`) is a genuine
+	// descendant and must not be rejected by a bare `startsWith("..")` check.
+	if (rel === ".." || rel.startsWith(`..${path.sep}`)) return false;
+	return !path.isAbsolute(rel);
 }
 
 function projectBankSegment(projectRoot: string): string {
