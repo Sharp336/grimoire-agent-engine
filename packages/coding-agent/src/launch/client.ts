@@ -142,9 +142,7 @@ function requestTimeoutMs(operation: DaemonOperation): number {
 }
 
 function outputMonitoringUnsupportedError(): Error {
-	return new Error(
-		"The running daemon broker does not support output monitoring; restart it with this omp build",
-	);
+	return new Error("The running daemon broker does not support output monitoring; restart it with this omp build");
 }
 
 function openSocket(endpoint: string, timeoutMs: number): Promise<net.Socket> {
@@ -368,10 +366,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		const registrations = [...this.#outputSinks.entries()];
 		void this.request({ op: "ping" })
 			.then(result => {
-				if (
-					result.op !== "ping" ||
-					!result.capabilities?.includes(DAEMON_OUTPUT_MONITOR_CAPABILITY)
-				) {
+				if (result.op !== "ping" || !result.capabilities?.includes(DAEMON_OUTPUT_MONITOR_CAPABILITY)) {
 					const error = outputMonitoringUnsupportedError();
 					for (const [id, registration] of this.#outputSinks) {
 						this.#outputSinks.delete(id);
