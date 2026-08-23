@@ -299,12 +299,13 @@ describe("AsyncJobManager model progress", () => {
 		expect(completions).toEqual(["full result body"]);
 	});
 
-	test("classifies cumulative raw provenance from multiple delivered batches as progress", async () => {
+	test("classifies cumulative raw provenance with split surrogate pairs as progress", async () => {
 		vi.useFakeTimers();
 		const manager = new AsyncJobManager({});
 		const recorder = recordingSink();
 		manager.registerProgressSink("Main", recorder.sink);
-		const terminalSource = "first batch\nsecond batch\n\n";
+		const emoji = "😀";
+		const terminalSource = `first ${emoji} batch\nsecond batch\n\n`;
 		const terminalText = `${terminalSource}\nWall time: 1.23 seconds`;
 		const gate = Promise.withResolvers<{ text: string; terminalTextSource: string }>();
 		const reportedLines: ProgressLine[] = [];
@@ -327,13 +328,14 @@ describe("AsyncJobManager model progress", () => {
 		);
 		const sampler = await samplerReady.promise;
 
-		sampler.append("first batch\n");
+		sampler.append(`first ${emoji[0]}`);
+		sampler.append(`${emoji[1]} batch\n`);
 		vi.advanceTimersByTime(200);
-		expect(recorder.seen.map(item => item.text)).toEqual(["first batch"]);
+		expect(recorder.seen.map(item => item.text)).toEqual([`first ${emoji} batch`]);
 
 		sampler.append("second batch\n\n");
 		vi.advanceTimersByTime(200);
-		expect(recorder.seen.map(item => item.text)).toEqual(["first batch", "second batch"]);
+		expect(recorder.seen.map(item => item.text)).toEqual([`first ${emoji} batch`, "second batch"]);
 		expect(reportedLines.at(-1)?.streamProvenance).toEqual(progressStreamProvenanceForText(terminalSource));
 
 		gate.resolve({ text: terminalText, terminalTextSource: terminalSource });

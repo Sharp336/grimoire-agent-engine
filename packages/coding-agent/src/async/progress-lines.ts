@@ -40,6 +40,7 @@ export class ProgressLines {
 	#truncated = false;
 	#streamHash = crypto.createHash("sha256");
 	#streamCodeUnits = 0;
+	#pendingHighSurrogate = "";
 	#latestReportedStreamProvenance: ProgressStreamProvenance | undefined;
 
 	constructor(report: (line: ProgressLine) => void) {
@@ -86,6 +87,7 @@ export class ProgressLines {
 		this.#truncated = false;
 		this.#streamHash = crypto.createHash("sha256");
 		this.#streamCodeUnits = 0;
+		this.#pendingHighSurrogate = "";
 		this.#latestReportedStreamProvenance = undefined;
 	}
 
@@ -111,14 +113,35 @@ export class ProgressLines {
 	}
 
 	#appendStream(text: string): void {
-		this.#streamHash.update(text, "utf16le");
 		this.#streamCodeUnits += text.length;
+		if (text.length === 0) return;
+
+		let start = 0;
+		if (this.#pendingHighSurrogate) {
+			const startsWithLowSurrogate = text.charCodeAt(0) >= 0xdc00 && text.charCodeAt(0) <= 0xdfff;
+			this.#streamHash.update(
+				startsWithLowSurrogate ? `${this.#pendingHighSurrogate}${text[0]}` : this.#pendingHighSurrogate,
+				"utf16le",
+			);
+			this.#pendingHighSurrogate = "";
+			if (startsWithLowSurrogate) start = 1;
+		}
+
+		const lastCodeUnit = text.charCodeAt(text.length - 1);
+		const endsWithHighSurrogate = lastCodeUnit >= 0xd800 && lastCodeUnit <= 0xdbff;
+		const end = endsWithHighSurrogate ? text.length - 1 : text.length;
+		if (start < end) {
+			this.#streamHash.update(start === 0 && end === text.length ? text : text.slice(start, end), "utf16le");
+		}
+		if (endsWithHighSurrogate) this.#pendingHighSurrogate = text[text.length - 1];
 	}
 
 	#streamProvenance(): ProgressStreamProvenance {
+		const hash = this.#streamHash.copy();
+		if (this.#pendingHighSurrogate) hash.update(this.#pendingHighSurrogate, "utf16le");
 		return {
 			codeUnits: this.#streamCodeUnits,
-			sha256: this.#streamHash.copy().digest("base64"),
+			sha256: hash.digest("base64"),
 		};
 	}
 
