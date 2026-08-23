@@ -3014,7 +3014,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					const activeNames = new Set(toolNames);
 					for (const [name, tool] of tools) {
 						if (!activeNames.has(name)) continue;
-						if (!isToolScopedIn(name, disallowedPatterns, { enforceToolAllowlist, allowedToolNames: explicitlyRequestedToolNameSet }))
+						if (
+							!isToolScopedIn(name, disallowedPatterns, {
+								enforceToolAllowlist,
+								allowedToolNames: explicitlyRequestedToolNameSet,
+							})
+						)
 							continue;
 						const mcpServerName = (tool as { mcpServerName?: unknown }).mcpServerName;
 						if (typeof mcpServerName === "string") scopedInServerNames.add(mcpServerName);
