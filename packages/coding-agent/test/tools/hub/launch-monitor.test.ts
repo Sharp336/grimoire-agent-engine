@@ -953,6 +953,58 @@ describe("hub process output monitoring", () => {
 		expect(harness.unregisterCount()).toBe(2);
 	});
 
+	it("restores start-pending state when an overlapping replacement start fails", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		const firstStartEntered = Promise.withResolvers<void>();
+		const releaseFirstStart = Promise.withResolvers<void>();
+		let startCount = 0;
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			if (operation.op === "ping") {
+				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
+			}
+			if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`);
+			startCount++;
+			if (startCount === 1) {
+				firstStartEntered.resolve();
+				await releaseFirstStart.promise;
+				return { op: "start", daemon, readyTimedOut: false };
+			}
+			throw new Error(`Daemon ${daemon.name} is already running`);
+		});
+		const start = () =>
+			executeLaunch(harness.session, {
+				op: "start",
+				name: daemon.name,
+				application: process.execPath,
+				pty: false,
+				persist: true,
+				progress: "wake",
+			});
+
+		const first = start();
+		await firstStartEntered.promise;
+		await expect(start()).rejects.toThrow("already running");
+		const restored = harness.getSubscription();
+		expect(restored?.startPending).toBeTrue();
+
+		releaseFirstStart.resolve();
+		await first;
+		const sink = harness.getOutputSink();
+		if (!restored || !sink) throw new Error("Expected restored output subscription");
+		await sink({
+			event: "daemon-output",
+			monitorId: restored.id,
+			name: daemon.name,
+			daemonId: daemon.id,
+			seq: 1,
+			text: "first-start-output",
+			batchKind: "progress",
+			suppressedEvents: 0,
+		});
+		expect(harness.progress.map(item => item.notification.text)).toEqual(["first-start-output"]);
+	});
+
 	it("does not restore a monitor that completed during replacement artifact allocation", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);

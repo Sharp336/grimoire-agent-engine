@@ -82,6 +82,8 @@ interface OutputRegistration {
 	startedAt: number;
 	/** Daemon incarnation this monitor accepted; never rebound by process name. */
 	daemonId?: string;
+	/** Whether the broker must defer binding until a new start replaces the current record. */
+	binding: "start-pending" | "attached";
 	active: boolean;
 	/** Readiness of the initial broker publication for this registration. */
 	ready: Promise<void>;
@@ -93,6 +95,7 @@ interface OutputRegistration {
 	localStop: LocalStopLifecycle;
 	artifactId?: string;
 	cleanup: () => Promise<void>;
+	acquirePendingStart?: (delivery: AsyncJobProgressDelivery) => OutputLease;
 }
 
 const outputRegistrations = new WeakMap<ToolSession, Map<DaemonBrokerClient, Map<string, OutputRegistration>>>();
@@ -115,6 +118,9 @@ async function registerOutputSink(
 ): Promise<OutputLease | undefined> {
 	if (!session.queueLaunchProgress || !session.queueLaunchCompletion || !client.onOutput) return undefined;
 	const existing = outputRegistrations.get(session)?.get(client)?.get(name);
+	if (existing?.binding === "start-pending" && startPending) {
+		return existing.acquirePendingStart?.(delivery);
+	}
 	if (existing && !startPending) {
 		// Retune of a live monitor. The operation is still validating, so
 		// keep the prior delivery mode until retain(): output arriving
@@ -141,7 +147,10 @@ async function registerOutputSink(
 	const artifact = await session.allocateOutputArtifact?.("hub-progress");
 	if (!artifact?.id || !artifact.path) return undefined;
 	const current = outputRegistrations.get(session)?.get(client)?.get(name);
-	const replaceable = existing?.active === true && current === existing ? existing : undefined;
+	if (current?.active && current.binding === "start-pending" && startPending) {
+		return current.acquirePendingStart?.(delivery);
+	}
+	const replaceable = current?.active === true ? current : undefined;
 	const previous = replaceable
 		? {
 				owner: replaceable.owner,
@@ -188,6 +197,7 @@ async function registerOutputSink(
 		owner,
 		delivery,
 		daemonId,
+		binding: startPending ? "start-pending" : "attached",
 		startedAt: Date.now(),
 		active: true,
 		localStop: { state: "idle" },
@@ -291,6 +301,80 @@ async function registerOutputSink(
 	const outputUnregister = client.onOutput(subscription, sink);
 	unregisterOutput = outputUnregister;
 	registration.ready = outputUnregister.ready;
+	const bindDaemon = (boundDaemonId: string): void => {
+		registration.daemonId ??= boundDaemonId;
+		subscription.daemonId ??= boundDaemonId;
+	};
+	const flushSpeculative = async (): Promise<void> => {
+		const buffered = speculative;
+		speculative = undefined;
+		if (buffered && buffered.length > 0) {
+			speculativeFlush = (async () => {
+				for (const notification of buffered) await deliver(notification, false);
+			})().catch(error => {
+				logger.warn("Buffered launch monitor delivery failed", {
+					monitorId: id,
+					name,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
+		}
+		await speculativeFlush;
+	};
+	const restorePrevious = async (): Promise<void> => {
+		if (!previous) return;
+		const restored = await registerOutputSink(
+			session,
+			client,
+			name,
+			previous.owner,
+			previous.delivery,
+			false,
+			previous.daemonId,
+		);
+		await restored?.retain();
+	};
+	if (startPending) {
+		let pendingLeases = 0;
+		let startAccepted = false;
+		registration.acquirePendingStart = requestedDelivery => {
+			pendingLeases++;
+			let settled = false;
+			return {
+				registration,
+				bindDaemon,
+				retain: async () => {
+					if (settled) return;
+					settled = true;
+					pendingLeases--;
+					if (startAccepted || !registration.active) return;
+					startAccepted = true;
+					if (registration.delivery !== requestedDelivery) {
+						session.setLaunchMonitorActive?.(id, registration.delivery, false);
+						registration.delivery = requestedDelivery;
+						session.setLaunchMonitorActive?.(id, requestedDelivery, true);
+					}
+					registration.binding = "attached";
+					subscription.startPending = undefined;
+					await flushSpeculative();
+				},
+				reject: async () => {
+					if (settled) return;
+					settled = true;
+					pendingLeases--;
+					if (startAccepted || pendingLeases > 0 || !registration.active) return;
+					speculative = undefined;
+					await registration.cleanup();
+					await restorePrevious();
+				},
+			};
+		};
+		monitors.set(name, registration);
+		session.setLaunchMonitorActive?.(id, delivery, true);
+		unregisterDispose = session.registerDisposeCallback?.(() => void registration.cleanup());
+		unregisterSessionChange = session.registerSessionChangeCallback?.(() => void registration.cleanup());
+		return registration.acquirePendingStart(delivery);
+	}
 	monitors.set(name, registration);
 	session.setLaunchMonitorActive?.(id, delivery, true);
 	unregisterDispose = session.registerDisposeCallback?.(() => void registration.cleanup());
@@ -298,49 +382,16 @@ async function registerOutputSink(
 	let retained = false;
 	return {
 		registration,
-		bindDaemon: boundDaemonId => {
-			registration.daemonId ??= boundDaemonId;
-			subscription.daemonId ??= boundDaemonId;
-		},
+		bindDaemon,
 		retain: async () => {
-			// An ordinary attach is successful only once the broker has installed
-			// this sink. A monitored start is acknowledged by the subsequent
-			// start request, whose envelope advertises the same subscription.
-			if (!startPending) await registration.ready;
+			await registration.ready;
 			retained = true;
-			// The broker cleared its start-pending marker when the start replaced
-			// the record; stop advertising it on future reconnect envelopes too.
-			subscription.startPending = undefined;
-			const buffered = speculative;
-			speculative = undefined;
-			if (buffered && buffered.length > 0) {
-				speculativeFlush = (async () => {
-					for (const notification of buffered) await deliver(notification, false);
-				})().catch(error => {
-					logger.warn("Buffered launch monitor delivery failed", {
-						monitorId: id,
-						name,
-						error: error instanceof Error ? error.message : String(error),
-					});
-				});
-			}
-			await speculativeFlush;
+			await flushSpeculative();
 		},
 		reject: async () => {
 			speculative = undefined;
 			if (retained) return;
 			await registration.cleanup();
-			if (!previous) return;
-			const restored = await registerOutputSink(
-				session,
-				client,
-				name,
-				previous.owner,
-				previous.delivery,
-				false,
-				previous.daemonId,
-			);
-			await restored?.retain();
 		},
 	};
 }
