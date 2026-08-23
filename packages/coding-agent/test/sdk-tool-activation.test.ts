@@ -2601,6 +2601,26 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			await session.dispose();
 		}
 	});
+	it("suppresses hashline anchor guidance for restricted sessions when edit is disallowed", async () => {
+		// Restricted-branch construction probe: restrictToolNames + an explicit
+		// list naming edit still loses the grant when disallowedTools removes it —
+		// the requested-list check alone would cache anchors the session cannot use.
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["edit", "read"],
+			restrictToolNames: true,
+			disallowedTools: ["edit"],
+		});
+
+		try {
+			expect(session.getToolByName("read")?.description).not.toContain(
+				"Copy `[FILENAME#TAG]` for anchored edits; NEVER fabricate the tag",
+			);
+		} finally {
+			await session.dispose();
+		}
+	});
 
 	it("renders report-issue guidance only for unrestricted sessions", async () => {
 		const normalDir = makeTempDir();
