@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed snapcompact dead-end recovery resurrecting archives cleared by `/clear`.
+- Fixed context usage staying inflated after live tool outputs were pruned, while preserving cleared and provider-compacted source history.
 
 ## [18.0.3] - 2026-08-23
 

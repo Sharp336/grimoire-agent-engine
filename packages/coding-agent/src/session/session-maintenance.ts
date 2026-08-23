@@ -27,7 +27,6 @@ import {
 	type CompactionSettings as EngineCompactionSettings,
 	effectiveReserveTokens,
 	invalidateMessageCache,
-	isTranscriptUsageAnchor,
 	NativeCompactionError,
 	prepareCompaction,
 	RESCUE_SHAKE_CONFIG,
@@ -43,6 +42,7 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	DEFAULT_PRUNE_CONFIG,
+	type PrunedEntrySavings,
 	pruneSupersededToolResults,
 	pruneToolOutputs,
 	readToolSupersedeKey,
@@ -85,9 +85,10 @@ import {
 	resolveRoleModelFull,
 } from "./role-models";
 import type { SessionContext } from "./session-context";
-import { getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./session-context";
+import { getLatestCompactionEntry, getLiveContextRewriteStartIndex } from "./session-context";
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
+import type { AnchoredHistoryRewrite } from "./session-stats";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
 
@@ -284,7 +285,7 @@ export interface SessionMaintenanceHost {
 	syncTodoPhasesFromBranch(): void;
 	resetAdvisorRuntimes(reason?: string): void;
 	rebaseAfterCompaction(): void;
-	recordAnchoredHistoryRewrite(tokensRemoved: number): void;
+	recordAnchoredHistoryRewrite(rewrites: readonly AnchoredHistoryRewrite[]): void;
 	getContextBreakdown(options?: {
 		contextWindow?: number;
 		pendingMessages?: AgentMessage[];
@@ -406,9 +407,16 @@ export class SessionMaintenance {
 		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
 	}
 
+	#recordPrunedHistoryRewrite(prunedEntries: readonly PrunedEntrySavings[] | undefined): void {
+		if (!prunedEntries || prunedEntries.length === 0) return;
+		this.#host.recordAnchoredHistoryRewrite(
+			prunedEntries.map(({ entry, tokensSaved }) => ({ entry, tokensRemoved: tokensSaved })),
+		);
+	}
+
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const branchEntries = this.#host.sessionManager.getBranch();
-		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
+		const rewriteStartIndex = getLiveContextRewriteStartIndex(branchEntries);
 		const result = pruneToolOutputs(
 			branchEntries,
 			this.#tokenizer,
@@ -417,7 +425,7 @@ export class SessionMaintenance {
 				pruneUseless: this.#host.settings.getGroup("compaction").dropUseless,
 				// Cache-stable boundary: never re-write the warm, already-sent prefix
 				// (deep stale/age victims) or summarized-away entries every turn.
-				keepBoundaryId,
+				rewriteStartIndex,
 				cacheWarmSuffixTokens: PRUNE_CACHE_WARM_SUFFIX_TOKENS,
 			}),
 		);
@@ -425,6 +433,7 @@ export class SessionMaintenance {
 			return undefined;
 		}
 
+		this.#recordPrunedHistoryRewrite(result.prunedEntries);
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
@@ -451,7 +460,7 @@ export class SessionMaintenance {
 		const { supersedeReads, dropUseless } = this.#host.settings.getGroup("compaction");
 		if (!supersedeReads && !dropUseless) return undefined;
 		const branchEntries = this.#host.sessionManager.getBranch();
-		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
+		const rewriteStartIndex = getLiveContextRewriteStartIndex(branchEntries);
 		const result = pruneSupersededToolResults(
 			branchEntries,
 			this.#tokenizer,
@@ -461,7 +470,7 @@ export class SessionMaintenance {
 				protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools],
 				// Never re-write summarized-away entries; only flush the whole sent
 				// region once the cache is genuinely cold (idle exceeds the 1h TTL).
-				keepBoundaryId,
+				rewriteStartIndex,
 				idleFlushMs: PRUNE_IDLE_FLUSH_MS,
 			}),
 		);
@@ -469,6 +478,7 @@ export class SessionMaintenance {
 			return undefined;
 		}
 
+		this.#recordPrunedHistoryRewrite(result.prunedEntries);
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
@@ -479,21 +489,23 @@ export class SessionMaintenance {
 	}
 
 	/**
-	 * Strip image content blocks from every message on the current branch and
-	 * persist the rewrite. Walks `SessionManager.getBranch()` in place — both
+	 * Strip image content blocks from the live-context region of the current
+	 * branch and persist the rewrite. Walks `SessionManager.getBranch()` in place — both
 	 * `SessionMessageEntry.message` and `CustomMessageEntry.content` arrays
 	 * are mutated, then `rewriteEntries` durably commits the new shape. The
 	 * agent's runtime view is rebuilt from the freshly-mutated entries so any
 	 * provider sessions caching message identity (Codex Responses) are torn
 	 * down to force a clean replay on the next turn.
 	 *
-	 * No-op when the branch carries no images; returns `{ removed: 0 }` and
+	 * No-op when the live region carries no images; returns `{ removed: 0 }` and
 	 * skips the disk rewrite.
 	 */
 	async dropImages(): Promise<{ removed: number }> {
 		const branchEntries = this.#host.sessionManager.getBranch();
 		let removed = 0;
-		for (const entry of branchEntries) {
+		const rewriteStartIndex = getLiveContextRewriteStartIndex(branchEntries);
+		for (let index = rewriteStartIndex; index < branchEntries.length; index++) {
+			const entry = branchEntries[index];
 			if (entry.type === "message") {
 				removed += stripImagesFromMessage(entry.message);
 				continue;
@@ -551,7 +563,9 @@ export class SessionMaintenance {
 		if (mode === "thinking") {
 			const branchEntries = this.#host.sessionManager.getBranch();
 			let removed = 0;
-			for (const entry of branchEntries) {
+			const rewriteStartIndex = getLiveContextRewriteStartIndex(branchEntries);
+			for (let index = rewriteStartIndex; index < branchEntries.length; index++) {
+				const entry = branchEntries[index];
 				if (entry.type !== "message" || entry.message.role !== "assistant") continue;
 				const message = entry.message;
 				const kept = message.content.filter(
@@ -576,14 +590,13 @@ export class SessionMaintenance {
 		}
 
 		const branchEntries = this.#host.sessionManager.getBranch();
-		const latestCompaction = getLatestCompactionEntry(branchEntries);
+		const rewriteStartIndex = getLiveContextRewriteStartIndex(branchEntries);
 		const config = this.#withPlanProtection({
 			...(opts.config ?? AGGRESSIVE_SHAKE_CONFIG),
-			// Skip entries summarized away by the latest compaction — shaking them
-			// only churns persisted history with no prompt/cache effect. The cut is
-			// unconditional on the wire (see `buildSessionContext`), so a compaction
-			// the active model cannot replay still hides its prefix from the prompt.
-			keepBoundaryId: latestCompaction?.firstKeptEntryId,
+			// Only rewrite source entries represented directly in the live provider
+			// context. Remote payload originals and cleared history must remain intact
+			// for portable re-compaction and full-history recovery.
+			rewriteStartIndex,
 		});
 		const regions = collectShakeRegions(branchEntries, this.#tokenizer, config);
 		if (regions.length === 0) {
@@ -593,22 +606,11 @@ export class SessionMaintenance {
 		const artifactId = await this.#saveShakeArtifact(regions);
 		const replacements = regions.map((region, index) => this.#shakeElidePlaceholder(region, index, artifactId));
 
-		const hasRemoteReplacementHistory = getOpenAiRemoteCompactionPayload(latestCompaction) !== undefined;
-		const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
-		let anchorIndex = -1;
-		for (let index = branchEntries.length - 1; index > compactionIndex; index--) {
-			const entry = branchEntries[index];
-			if (entry.type !== "message" || !isTranscriptUsageAnchor(entry.message)) continue;
-			anchorIndex = index;
-			break;
-		}
-		const entryIndexes = new Map(branchEntries.map((entry, index) => [entry, index]));
-
 		let toolResultsDropped = 0;
 		let blocksDropped = 0;
 		let originalTokens = 0;
 		let replacementTokens = 0;
-		let anchoredTokensRemoved = 0;
+		const historyRewrites: AnchoredHistoryRewrite[] = [];
 		const items = regions.map((region, index) => {
 			if (region.kind === "toolResult") toolResultsDropped++;
 			else blocksDropped++;
@@ -616,19 +618,13 @@ export class SessionMaintenance {
 			const replacement = replacements[index];
 			const replacementTokenCount = replacement.length > 0 ? this.#tokenizer.countTokens(replacement) : 0;
 			replacementTokens += replacementTokenCount;
-			const entryIndex = entryIndexes.get(region.entry) ?? -1;
-			if (
-				entryIndex >= 0 &&
-				entryIndex < anchorIndex &&
-				(!hasRemoteReplacementHistory || entryIndex > compactionIndex)
-			) {
-				anchoredTokensRemoved += Math.max(0, region.tokens - replacementTokenCount);
-			}
+			const tokensRemoved = Math.max(0, region.tokens - replacementTokenCount);
+			if (tokensRemoved > 0) historyRewrites.push({ entry: region.entry, tokensRemoved });
 			return { region, replacement };
 		});
 
 		applyShakeRegions(items);
-		this.#host.recordAnchoredHistoryRewrite(anchoredTokensRemoved);
+		this.#host.recordAnchoredHistoryRewrite(historyRewrites);
 
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();

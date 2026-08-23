@@ -170,6 +170,53 @@ export function getOpenAiRemoteCompactionPayload(
 	};
 }
 
+/**
+ * First branch index that a context-reducing history rewrite may visit.
+ *
+ * The result is an inclusive index in `0..entries.length`. Callers pass it to
+ * the shared prune/shake engines so they never mutate persisted originals that
+ * the current provider context replaced:
+ *
+ * - `/clear`: the entry after the latest reset marker
+ * - local compaction: `firstKeptEntryId` (the kept tail is still sent)
+ * - remote compaction with replay: the entry after the inclusive replay point
+ * - opaque remote compaction: the entry after compaction (all prior entries are replaced)
+ *
+ * Malformed compaction references fail closed after the compaction marker so a
+ * maintenance pass cannot destroy originals that a later portable compaction
+ * may need to re-expand.
+ */
+export function getLiveContextRewriteStartIndex(entries: readonly SessionEntry[]): number {
+	let compactionIndex = -1;
+	let resetBoundaryIndex = -1;
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		if (resetBoundaryIndex < 0 && entry.type === "reset_boundary") resetBoundaryIndex = index;
+		if (entry.type === "compaction") {
+			compactionIndex = index;
+			break;
+		}
+	}
+
+	if (resetBoundaryIndex > compactionIndex) return resetBoundaryIndex + 1;
+	if (compactionIndex < 0) return 0;
+
+	const compaction = entries[compactionIndex] as CompactionEntry;
+	if (getOpenAiRemoteCompactionPayload(compaction)) {
+		const replayThroughId = compaction.providerReplayThroughEntryId;
+		if (replayThroughId) {
+			const replayThroughIndex = entries.findIndex(entry => entry.id === replayThroughId);
+			if (replayThroughIndex >= 0 && replayThroughIndex < compactionIndex) {
+				return replayThroughIndex + 1;
+			}
+		}
+		return compactionIndex + 1;
+	}
+
+	const firstKeptIndex = entries.findIndex(entry => entry.id === compaction.firstKeptEntryId);
+	return firstKeptIndex >= 0 && firstKeptIndex < compactionIndex ? firstKeptIndex : compactionIndex + 1;
+}
+
 export function buildSessionContext(
 	entries: SessionEntry[],
 	leafId?: string | null,

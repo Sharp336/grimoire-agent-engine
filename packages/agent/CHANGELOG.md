@@ -8,6 +8,9 @@
 ### Added
 
 - Compaction preparation can account for fixed prompt prefixes when calibrating recent-history retention.
+### Changed
+
+- Prune helpers now return per-entry token savings and accept an index boundary for context-visible history rewrites.
 
 ## [18.0.0] - 2026-08-22
 
