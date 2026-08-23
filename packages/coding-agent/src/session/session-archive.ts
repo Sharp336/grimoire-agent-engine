@@ -162,9 +162,9 @@ async function pathExists(target: string): Promise<boolean> {
 	}
 }
 
-async function collectJsonlFiles(root: string): Promise<string[]> {
+export async function collectGlobFiles(root: string, glob: Bun.Glob): Promise<string[]> {
 	try {
-		const files = await Array.fromAsync(JSONL_GLOB.scan(root), name => path.join(root, name));
+		const files = await Array.fromAsync(glob.scan(root), name => path.join(root, name));
 		files.sort();
 		return files;
 	} catch (error) {
@@ -174,7 +174,7 @@ async function collectJsonlFiles(root: string): Promise<string[]> {
 }
 
 async function listNestedSessionsReadOnly(artifactsRoot: string) {
-	const files = await collectJsonlFiles(artifactsRoot);
+	const files = await collectGlobFiles(artifactsRoot, JSONL_GLOB);
 	const dirs = [...new Set(files.map(file => path.dirname(file)))].sort();
 	const storage = new FileSessionStorage();
 	const sessions: SessionInfo[] = [];
