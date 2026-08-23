@@ -7,6 +7,7 @@ import {
 	type ProgressPreview,
 } from "../session/progress-preview";
 import { type ProgressBatch, ProgressBatcher, type ProgressReminder } from "./progress-batcher";
+import { type ProgressStreamProvenance, progressStreamProvenanceForText } from "./progress-lines";
 
 const DELIVERY_RETRY_BASE_MS = 500;
 const DELIVERY_RETRY_MAX_MS = 30_000;
@@ -80,9 +81,9 @@ export interface AsyncJob {
 	/** Stable artifact containing the complete raw output behind bounded progress previews. */
 	progressArtifactId?: string;
 	/**
-	 * Whether the terminal result is byte-identical to model-facing progress
-	 * already delivered (or folded into the completion leftover), or is
-	 * terminal-only content that must remain in the completion.
+	 * Whether the successful terminal result was derived from the exact raw
+	 * stream already covered by progress, or contains terminal-only
+	 * post-processing that must remain in the completion.
 	 */
 	terminalTextProvenance?: "progress" | "terminal";
 }
@@ -99,10 +100,36 @@ export interface AsyncJobProgressInfo {
 	truncated?: boolean;
 	suppressedEvents?: number;
 	reminder?: ProgressReminder;
+	/**
+	 * Fixed-size cumulative identity of the exact raw stream represented through
+	 * this sample. Producers should omit it when their preview is transformed.
+	 */
+	streamProvenance?: ProgressStreamProvenance;
 }
 
 interface AsyncJobProgressRecord extends AsyncJobProgressInfo {
 	text: string;
+}
+
+interface DeliveredAgentProgress {
+	/** Bounded model-facing batch text retained for legacy exact comparisons. */
+	text: string;
+	/** Cumulative raw-stream identity at the end of this delivered batch. */
+	streamProvenance?: ProgressStreamProvenance;
+}
+
+function laterStreamProvenance(
+	left: ProgressStreamProvenance | undefined,
+	right: ProgressStreamProvenance | undefined,
+): ProgressStreamProvenance | undefined {
+	if (!left) return right;
+	if (!right) return left;
+	return right.codeUnits >= left.codeUnits ? right : left;
+}
+
+function streamProvenanceMatchesText(provenance: ProgressStreamProvenance | undefined, text: string): boolean {
+	if (!provenance || provenance.codeUnits !== text.length) return false;
+	return provenance.sha256 === progressStreamProvenanceForText(text).sha256;
 }
 
 function mergeAsyncJobProgressRecords(
@@ -120,6 +147,7 @@ function mergeAsyncJobProgressRecords(
 		truncated: preview.truncated,
 		suppressedEvents: suppressedEvents || undefined,
 		reminder: right.reminder ?? left.reminder,
+		streamProvenance: laterStreamProvenance(left.streamProvenance, right.streamProvenance),
 	};
 }
 
@@ -138,6 +166,7 @@ function mergeAsyncJobProgressMetadata(
 		artifactId: kept.artifactId ?? displaced.artifactId,
 		truncated: kept.truncated === true || displaced.truncated === true || undefined,
 		suppressedEvents: suppressedEvents || undefined,
+		streamProvenance: laterStreamProvenance(kept.streamProvenance, displaced.streamProvenance),
 		reminder: kept.reminder ?? displaced.reminder,
 	};
 }
@@ -163,6 +192,12 @@ export interface AsyncJobProgressSink {
 export interface AsyncJobRunResult {
 	text: string;
 	details?: Record<string, unknown>;
+	/**
+	 * Pre-format source represented by `text`. Bash uses this to exclude
+	 * completion-only timing notices from raw-stream comparison while still
+	 * detecting minimizer, truncation, and other output transformations.
+	 */
+	terminalTextSource?: string;
 }
 
 /**
@@ -266,7 +301,7 @@ export class AsyncJobManager {
 	readonly #pollEscalation = new Map<string | undefined, PollEscalationState>();
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
 	readonly #progressSinks = new Map<string, AsyncJobProgressSink>();
-	readonly #lastDeliveredAgentProgress = new Map<string, string>();
+	readonly #lastDeliveredAgentProgress = new Map<string, DeliveredAgentProgress>();
 	readonly #progressBatcher = new ProgressBatcher<AsyncJobProgressRecord>(
 		(jobId, batch) => this.#deliverAgentProgress(jobId, batch),
 		{
@@ -380,6 +415,7 @@ export class AsyncJobManager {
 					},
 				});
 				const text = typeof outcome === "string" ? outcome : outcome.text;
+				const terminalTextSource = typeof outcome === "string" ? text : (outcome.terminalTextSource ?? text);
 				// Settlement metadata wins over the last reportProgress payload:
 				// tools overwrite latestDetails with render details on every
 				// progress call, so the completion delivery must read the
@@ -390,7 +426,7 @@ export class AsyncJobManager {
 					this.#scheduleEviction(id);
 					return;
 				}
-				await this.#settleAgentProgress(job, text);
+				await this.#settleAgentProgress(job, text, terminalTextSource);
 				// Cancellation may win while final progress is awaiting its
 				// asynchronous sink. Never overwrite that terminal state or
 				// enqueue a completion after cancel() returned true.
@@ -702,11 +738,18 @@ export class AsyncJobManager {
 		const deliveredText = batch.values.map(record => record.text).join("\n");
 		try {
 			await sink.deliver(jobId, deliveredText, job, batch.seq, info);
-			// Retain only the most recent bounded delivery until settlement so
-			// terminal content can be classified by exact provenance instead of
-			// status. Bash's minimized/post-processed result differs and remains;
-			// a byte-identical cumulative terminal report is not replayed.
-			this.#lastDeliveredAgentProgress.set(jobId, deliveredText);
+			// Retain fixed-size cumulative raw-stream provenance, plus only this
+			// bounded delivery for callers without provenance. Multi-batch Bash
+			// output can therefore be recognized despite line framing/newline
+			// normalization, while minimized or otherwise transformed output does
+			// not match and remains terminal-visible.
+			this.#lastDeliveredAgentProgress.set(jobId, {
+				text: deliveredText,
+				streamProvenance: batch.values.reduce<ProgressStreamProvenance | undefined>(
+					(latest, record) => laterStreamProvenance(latest, record.streamProvenance),
+					undefined,
+				),
+			});
 			// An ambient sink may only ENQUEUE this batch while the owner is
 			// idle; that still counts as delivered because the owner folds any
 			// still-queued ambient progress into the completion-triggered flush
@@ -733,7 +776,7 @@ export class AsyncJobManager {
 	 * Jobs whose progress never reached the agent keep the old flush so their
 	 * recorded output is not lost.
 	 */
-	async #settleAgentProgress(job: AsyncJob, terminalText?: string): Promise<void> {
+	async #settleAgentProgress(job: AsyncJob, terminalText?: string, terminalTextSource = terminalText): Promise<void> {
 		let pendingCoversTerminal = false;
 		if (
 			job.progressDelivery === undefined ||
@@ -754,12 +797,18 @@ export class AsyncJobManager {
 				job.completionLeftover = { ...preview, suppressedEvents: suppressedEvents || undefined };
 				pendingCoversTerminal =
 					terminalText !== undefined &&
-					(record?.text === terminalText || pending.values.some(value => value.text === terminalText));
+					terminalTextSource !== undefined &&
+					(streamProvenanceMatchesText(record?.streamProvenance, terminalTextSource) ||
+						record?.text === terminalText ||
+						pending.values.some(value => value.text === terminalText));
 			}
 		}
-		if (terminalText !== undefined) {
+		if (terminalText !== undefined && terminalTextSource !== undefined) {
+			const delivered = this.#lastDeliveredAgentProgress.get(job.id);
 			job.terminalTextProvenance =
-				pendingCoversTerminal || this.#lastDeliveredAgentProgress.get(job.id) === terminalText
+				pendingCoversTerminal ||
+				streamProvenanceMatchesText(delivered?.streamProvenance, terminalTextSource) ||
+				delivered?.text === terminalText
 					? "progress"
 					: "terminal";
 		}

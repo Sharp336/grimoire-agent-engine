@@ -7,6 +7,11 @@ import {
 	type AsyncJobProgressSink,
 } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import type { ProgressReminder } from "@oh-my-pi/pi-coding-agent/async/progress-batcher";
+import {
+	type ProgressLine,
+	ProgressLines,
+	progressStreamProvenanceForText,
+} from "@oh-my-pi/pi-coding-agent/async/progress-lines";
 
 function heldJob(manager: AsyncJobManager, ownerId = "Main", progressDelivery: AsyncJobProgressDelivery = "ambient") {
 	const gate = Promise.withResolvers<void>();
@@ -292,6 +297,52 @@ describe("AsyncJobManager model progress", () => {
 		expect(job.progressArtifactId).toBe("42");
 		expect(job.completionLeftover).toEqual({ text: "leftover line", truncated: false, suppressedEvents: undefined });
 		expect(completions).toEqual(["full result body"]);
+	});
+
+	test("classifies cumulative raw provenance from multiple delivered batches as progress", async () => {
+		vi.useFakeTimers();
+		const manager = new AsyncJobManager({});
+		const recorder = recordingSink();
+		manager.registerProgressSink("Main", recorder.sink);
+		const terminalSource = "first batch\nsecond batch\n\n";
+		const terminalText = `${terminalSource}\nWall time: 1.23 seconds`;
+		const gate = Promise.withResolvers<{ text: string; terminalTextSource: string }>();
+		const reportedLines: ProgressLine[] = [];
+		const samplerReady = Promise.withResolvers<ProgressLines>();
+		const jobId = manager.register(
+			"bash",
+			"cumulative progress",
+			async ({ reportAgentProgress }) => {
+				const sampler = new ProgressLines(line => {
+					reportedLines.push(line);
+					reportAgentProgress(line.text, {
+						artifactId: "cumulative-artifact",
+						streamProvenance: line.streamProvenance,
+					});
+				});
+				samplerReady.resolve(sampler);
+				return gate.promise;
+			},
+			{ ownerId: "Main", progressDelivery: "ambient" },
+		);
+		const sampler = await samplerReady.promise;
+
+		sampler.append("first batch\n");
+		vi.advanceTimersByTime(200);
+		expect(recorder.seen.map(item => item.text)).toEqual(["first batch"]);
+
+		sampler.append("second batch\n\n");
+		vi.advanceTimersByTime(200);
+		expect(recorder.seen.map(item => item.text)).toEqual(["first batch", "second batch"]);
+		expect(reportedLines.at(-1)?.streamProvenance).toEqual(progressStreamProvenanceForText(terminalSource));
+
+		gate.resolve({ text: terminalText, terminalTextSource: terminalSource });
+		await manager.waitForAll();
+
+		const job = manager.getJob(jobId)!;
+		expect(job.progressDeliveredCount).toBe(2);
+		expect(job.completionLeftover).toBeUndefined();
+		expect(job.terminalTextProvenance).toBe("progress");
 	});
 
 	test("carries upstream suppression metadata into the delivered batch", async () => {

@@ -1,6 +1,31 @@
+import * as crypto from "node:crypto";
+
+/**
+ * Fixed-size identity of the exact normalized stream consumed by
+ * {@link ProgressLines}. UTF-16 code units match JavaScript string equality
+ * while remaining invariant when a surrogate pair spans input chunks.
+ */
+export interface ProgressStreamProvenance {
+	codeUnits: number;
+	sha256: string;
+}
+
+export function progressStreamProvenanceForText(text: string): ProgressStreamProvenance {
+	return {
+		codeUnits: text.length,
+		sha256: crypto.createHash("sha256").update(text, "utf16le").digest("base64"),
+	};
+}
+
 export interface ProgressLine {
 	text: string;
 	truncated: boolean;
+	/**
+	 * Cumulative identity of the raw stream through this reported line. The
+	 * object advances through following blank records that are suppressed from
+	 * display, until another non-blank line is reported.
+	 */
+	streamProvenance: ProgressStreamProvenance;
 }
 
 /** Incrementally reports complete, non-empty output lines with bounded partial state. */
@@ -13,6 +38,9 @@ export class ProgressLines {
 	#head = "";
 	#tail = "";
 	#truncated = false;
+	#streamHash = crypto.createHash("sha256");
+	#streamCodeUnits = 0;
+	#latestReportedStreamProvenance: ProgressStreamProvenance | undefined;
 
 	constructor(report: (line: ProgressLine) => void) {
 		this.#report = report;
@@ -22,8 +50,11 @@ export class ProgressLines {
 		let start = 0;
 		let newline = chunk.indexOf("\n");
 		while (newline !== -1) {
-			this.#appendPartial(chunk.slice(start, newline));
-			this.#reportLine(this.#partial);
+			const segment = chunk.slice(start, newline);
+			this.#appendPartial(segment);
+			this.#appendStream(segment);
+			this.#appendStream("\n");
+			this.#reportLine(this.#partial, this.#streamProvenance());
 			this.#partial = "";
 			this.#head = "";
 			this.#tail = "";
@@ -31,14 +62,18 @@ export class ProgressLines {
 			start = newline + 1;
 			newline = chunk.indexOf("\n", start);
 		}
-		if (start < chunk.length) this.#appendPartial(chunk.slice(start));
+		if (start < chunk.length) {
+			const segment = chunk.slice(start);
+			this.#appendPartial(segment);
+			this.#appendStream(segment);
+		}
 	}
 
 	finish(): void {
 		if (this.#partial === "" && !this.#truncated) return;
 		const line = this.#partial;
 		this.#partial = "";
-		this.#reportLine(line);
+		this.#reportLine(line, this.#streamProvenance());
 		this.#head = "";
 		this.#tail = "";
 		this.#truncated = false;
@@ -49,6 +84,9 @@ export class ProgressLines {
 		this.#head = "";
 		this.#tail = "";
 		this.#truncated = false;
+		this.#streamHash = crypto.createHash("sha256");
+		this.#streamCodeUnits = 0;
+		this.#latestReportedStreamProvenance = undefined;
 	}
 
 	#appendPartial(segment: string): void {
@@ -72,10 +110,29 @@ export class ProgressLines {
 		this.#truncated = true;
 	}
 
-	#reportLine(rawLine: string): void {
+	#appendStream(text: string): void {
+		this.#streamHash.update(text, "utf16le");
+		this.#streamCodeUnits += text.length;
+	}
+
+	#streamProvenance(): ProgressStreamProvenance {
+		return {
+			codeUnits: this.#streamCodeUnits,
+			sha256: this.#streamHash.copy().digest("base64"),
+		};
+	}
+
+	#reportLine(rawLine: string, streamProvenance: ProgressStreamProvenance): void {
 		const preview = this.#truncated ? `${this.#head}${this.#tail}` : rawLine;
 		const line = preview.replace(/\r$/, "");
-		if (line.trim().length === 0) return;
-		this.#report({ text: line, truncated: this.#truncated });
+		if (line.trim().length === 0) {
+			if (this.#latestReportedStreamProvenance) {
+				this.#latestReportedStreamProvenance.codeUnits = streamProvenance.codeUnits;
+				this.#latestReportedStreamProvenance.sha256 = streamProvenance.sha256;
+			}
+			return;
+		}
+		this.#latestReportedStreamProvenance = streamProvenance;
+		this.#report({ text: line, truncated: this.#truncated, streamProvenance });
 	}
 }
