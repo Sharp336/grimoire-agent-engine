@@ -528,6 +528,72 @@ describe("hub process output monitoring", () => {
 		expect(harness.unregisterCount()).toBe(0);
 	});
 
+	it("drains every speculative batch before resolving a fast-terminal start", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+		const order: string[] = [];
+		const terminalReceipt = Promise.withResolvers<void>();
+		vi.spyOn(harness.session, "queueLaunchProgress").mockImplementation(notification => {
+			order.push(notification.text);
+		});
+		vi.spyOn(harness.session, "queueLaunchCompletion").mockImplementation(notification => {
+			order.push(`terminal:${notification.daemon.state}`);
+			return terminalReceipt.promise;
+		});
+		const exited: DaemonSnapshot = {
+			...daemon,
+			state: "exited",
+			pid: undefined,
+			exitedAt: 3,
+			exitCode: 0,
+		};
+		vi.spyOn(harness.client, "request").mockImplementation(async operation => {
+			if (operation.op === "ping") {
+				return { op: "ping", projectDir: process.cwd(), capabilities: [DAEMON_OUTPUT_MONITOR_CAPABILITY] };
+			}
+			if (operation.op !== "start") throw new Error(`Unexpected operation: ${operation.op}`);
+			const subscription = harness.getSubscription();
+			const sink = harness.getOutputSink();
+			if (!subscription || !sink) throw new Error("Expected output subscription");
+			for (const [index, text] of ["first", "second", "third", "fourth"].entries()) {
+				await sink({
+					event: "daemon-output",
+					monitorId: subscription.id,
+					name: daemon.name,
+					daemonId: daemon.id,
+					seq: index + 1,
+					text,
+					batchKind: "progress",
+					suppressedEvents: 0,
+				});
+			}
+			await sink({
+				event: "daemon-monitor-completed",
+				monitorId: subscription.id,
+				daemon: exited,
+				ownerNotified: false,
+			});
+			return { op: "start", daemon: exited, readyTimedOut: false };
+		});
+
+		await executeLaunch(harness.session, {
+			op: "start",
+			name: daemon.name,
+			application: process.execPath,
+			pty: false,
+			persist: true,
+			progress: "wake",
+		});
+		order.push("resolved");
+
+		expect(order).toEqual(["first", "second", "third", "fourth", "terminal:exited", "resolved"]);
+		expect(harness.unregisterCount()).toBe(1);
+		// A terminal receipt may wait for the current tool step to finish; it
+		// must not deadlock retention after the completion has been queued.
+		terminalReceipt.resolve();
+		await terminalReceipt.promise;
+	});
+
 	it("discards speculative progress when the start fails", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);

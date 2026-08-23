@@ -80,7 +80,7 @@ const outputRegistrations = new WeakMap<ToolSession, Map<DaemonBrokerClient, Map
 
 interface OutputLease {
 	registration: OutputRegistration;
-	retain(): void;
+	retain(): Promise<void>;
 	reject(): Promise<void>;
 }
 
@@ -102,7 +102,7 @@ async function registerOutputSink(
 		let settled = false;
 		return {
 			registration: existing,
-			retain: () => {
+			retain: async () => {
 				if (settled) return;
 				settled = true;
 				if (!existing.active || existing.delivery === delivery) return;
@@ -180,7 +180,10 @@ async function registerOutputSink(
 			return cleanupPromise;
 		},
 	};
-	const deliver = async (notification: DaemonMonitorNotification): Promise<void> => {
+	const deliver = async (
+		notification: DaemonMonitorNotification,
+		waitForTerminalCompletion = true,
+	): Promise<void> => {
 		if (!registration.active || session.isDisposed?.())
 			throw new Error("Session disposed before launch output delivery");
 		if (notification.event === "daemon-output") {
@@ -212,12 +215,27 @@ async function registerOutputSink(
 		// `Stopped …` result — synthesizing a completion would surface the same
 		// terminal state twice. Only stops from a DIFFERENT client synthesize.
 		if (registration.localStopRequested) return;
-		await session.queueLaunchCompletion?.({
+		const completion = session.queueLaunchCompletion?.({
 			event: "daemon-completed",
 			completionId: `monitor:${id}:${notification.daemon.id}:${notification.daemon.exitedAt ?? Date.now()}`,
 			owner,
 			daemon: notification.daemon,
 		});
+		if (waitForTerminalCompletion) {
+			await completion;
+		} else {
+			// Buffered terminal notifications were already accepted by the
+			// client sink while the start RPC was pending. Queue the completion
+			// after their preceding output, but do not wait for its delivery
+			// receipt: that receipt can require the current tool step to finish.
+			void completion?.catch(error => {
+				logger.warn("Buffered launch monitor completion delivery failed", {
+					monitorId: id,
+					name,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
+		}
 	};
 	// A start subscription is published before the launch request, so output
 	// arriving while that request is validating remains speculative: buffer it
@@ -243,7 +261,7 @@ async function registerOutputSink(
 	let retained = false;
 	return {
 		registration,
-		retain: () => {
+		retain: async () => {
 			retained = true;
 			// The broker cleared its start-pending marker when the start replaced
 			// the record; stop advertising it on future reconnect envelopes too.
@@ -252,7 +270,7 @@ async function registerOutputSink(
 			speculative = undefined;
 			if (buffered && buffered.length > 0) {
 				speculativeFlush = (async () => {
-					for (const notification of buffered) await deliver(notification);
+					for (const notification of buffered) await deliver(notification, false);
 				})().catch(error => {
 					logger.warn("Buffered launch monitor delivery failed", {
 						monitorId: id,
@@ -261,6 +279,7 @@ async function registerOutputSink(
 					});
 				});
 			}
+			await speculativeFlush;
 		},
 		reject: async () => {
 			speculative = undefined;
@@ -268,7 +287,7 @@ async function registerOutputSink(
 			await registration.cleanup();
 			if (!previous) return;
 			const restored = await registerOutputSink(session, client, name, previous.owner, previous.delivery, false);
-			restored?.retain();
+			await restored?.retain();
 		},
 	};
 }
@@ -718,7 +737,7 @@ export async function executeLaunch(
 			}
 			if (!outputLease) throw new ToolError("This session cannot accept process progress delivery");
 			outputLease.registration.startedAt = result.daemon.startedAt;
-			outputLease.retain();
+			await outputLease.retain();
 		}
 		const sessionOwner = session.getSessionId?.();
 		let resumedDaemonFound = false;
