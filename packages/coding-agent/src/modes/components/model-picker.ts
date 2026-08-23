@@ -9,7 +9,7 @@ import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { Settings } from "../../config/settings";
 import type { ResolvedRoleModel } from "../../session/agent-session";
-import { isModelVisible, isProviderVisible } from "../fork-model-visibility";
+import { isProviderVisible } from "../fork-model-visibility";
 import { theme } from "../theme/theme";
 import {
 	buildBrowserItems,
@@ -18,6 +18,10 @@ import {
 	resolveRoleAssignments,
 	sortModelItems,
 } from "./model-browser";
+import type { ScopedModelItem } from "./model-hub";
+import { bottomBorder, row, topBorder } from "./overlay-box";
+import { resolveSegmentPalette } from "./segment-track";
+
 export interface ModelPickerCallbacks {
 	/**
 	 * A model was chosen for a session-only switch. `selector` is `provider/id`.
@@ -152,7 +156,7 @@ export class ModelPickerComponent implements Component {
 				models = [];
 			}
 		}
-		models = models.filter(model => isModelVisible(model));
+		models = models.filter(model => isProviderVisible(model.provider));
 
 		const allModels =
 			this.#scopedModels.length > 0

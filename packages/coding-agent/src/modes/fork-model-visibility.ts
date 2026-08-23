@@ -1,4 +1,3 @@
-import type { Model } from "@oh-my-pi/pi-ai";
 import { getBundledProviders } from "@oh-my-pi/pi-catalog/models";
 import { CATALOG_PROVIDERS } from "@oh-my-pi/pi-catalog/provider-models";
 import { isBunTestRuntime } from "@oh-my-pi/pi-utils";
@@ -16,11 +15,4 @@ export function isProviderVisible(provider: string): boolean {
 	// Keep upstream UI fixtures provider-agnostic without modifying their tests.
 	if (isBunTestRuntime()) return true;
 	return !BUILT_IN_PROVIDERS.has(provider) || VISIBLE_BUILT_IN_PROVIDERS.has(provider);
-}
-
-export function isModelVisible(model: Model): boolean {
-	if (isBunTestRuntime()) return true;
-	if (!isProviderVisible(model.provider)) return false;
-	if (model.provider !== "opencode-zen") return true;
-	return model.cost.input === 0 && model.cost.output === 0;
 }

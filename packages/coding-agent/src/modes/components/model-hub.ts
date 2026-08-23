@@ -32,8 +32,9 @@ import { type ModelRoleLookup, type ResolvedModelRoleValue, resolveModelRoleValu
 import { getKnownRoleIds, getRoleInfo } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
 import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../../thinking";
-import { isModelVisible, isProviderVisible } from "../fork-model-visibility";
+import { isProviderVisible } from "../fork-model-visibility";
 import { theme } from "../theme/theme";
+import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
 import {
 	buildBrowserItems,
 	ModelBrowser,
@@ -326,10 +327,16 @@ export class ModelHubComponent implements Component {
 			}
 		}
 		allModels = allModels.filter(model => isProviderVisible(model.provider));
-		availableModels = availableModels.filter(model => isModelVisible(model));
+		availableModels = availableModels.filter(
+			model =>
+				isProviderVisible(model.provider) &&
+				(model.provider !== "opencode-zen" || (model.cost.input === 0 && model.cost.output === 0)),
+		);
 
 		this.#reloadRoles(allModels, availableModels);
 		this.#buildRolesRows();
+
+		const storage = this.#settings.getStorage();
 		const mruOrder = storage?.getModelUsageOrder() ?? [];
 		this.#availableItems = buildBrowserItems(availableModels);
 		sortModelItems(this.#availableItems, { roles: this.#roles, mruOrder });
