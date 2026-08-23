@@ -417,6 +417,8 @@ export class ToolExecutionComponent extends Container {
 	// Execution start on the presentation clock (performance.now domain, the
 	// same domain as AnimationFrame.now supplied by the transcript allocator).
 	#executionStartedAtNow: number | undefined;
+	// Epoch ms for live timeout footers. Distinct from the presentation clock.
+	#startedAtMs?: number;
 	// Wall clock captured whenever a task card is rebuilt.
 	#taskRenderNowMs = Date.now();
 	// Set on each `render()` when the last painted pending shape must be
@@ -524,6 +526,7 @@ export class ToolExecutionComponent extends Container {
 		if (this.#executionStarted) return;
 		this.#executionStarted = true;
 		this.#executionStartedAtNow = performance.now();
+		this.#startedAtMs = Date.now();
 		this.#argsComplete = true;
 		this.#updateSpinnerAnimation();
 		this.#schedulePreviewDiff();
@@ -1417,7 +1420,12 @@ export class ToolExecutionComponent extends Container {
 				// Pass raw output and expanded state - renderer handles width-aware truncation
 				const output = this.#getTextOutput().trimEnd();
 				context.output = output;
+				const detailsStarted = (this.#result.details as { startedAtMs?: unknown } | undefined)?.startedAtMs;
+				if (typeof detailsStarted === "number" && Number.isFinite(detailsStarted)) {
+					this.#startedAtMs = detailsStarted;
+				}
 			}
+			if (this.#startedAtMs !== undefined) context.startedAtMs = this.#startedAtMs;
 			context.expanded = this.#expanded;
 			context.previewLines = BASH_DEFAULT_PREVIEW_LINES;
 			context.timeout = normalizeTimeoutSeconds(this.#args?.timeout, 3600);
@@ -1426,6 +1434,15 @@ export class ToolExecutionComponent extends Container {
 			context.output = output;
 			context.expanded = this.#expanded;
 			context.previewLines = EVAL_DEFAULT_PREVIEW_LINES;
+			context.timeout = normalizeTimeoutSeconds(
+				this.#args?.timeout ?? (Array.isArray(this.#args?.cells) ? this.#args.cells[0]?.timeout : undefined),
+				3600,
+			);
+			const detailsStarted = (this.#result.details as { startedAtMs?: unknown } | undefined)?.startedAtMs;
+			if (typeof detailsStarted === "number" && Number.isFinite(detailsStarted)) {
+				this.#startedAtMs = detailsStarted;
+			}
+			if (this.#startedAtMs !== undefined) context.startedAtMs = this.#startedAtMs;
 		} else if (this.#toolName === "task") {
 			// Once a result snapshot exists the task renderer's `renderResult`
 			// draws every dispatched agent as a progress/result line, so tell

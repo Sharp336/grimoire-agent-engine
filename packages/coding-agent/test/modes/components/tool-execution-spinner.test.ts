@@ -81,6 +81,36 @@ describe("ToolExecutionComponent live preview spinners", () => {
 		}
 	});
 
+	it("ticks live bash results that show a timeout footer", () => {
+		vi.useFakeTimers();
+		const requestRender = vi.fn();
+		const requestComponentRender = vi.fn();
+		const component = new ToolExecutionComponent(
+			"bash",
+			{ command: "sleep 600", timeout: 1400 },
+			{},
+			undefined,
+			{ requestRender, requestComponentRender } as unknown as TUI,
+			process.cwd(),
+		);
+
+		try {
+			component.updateResult(
+				{
+					content: [{ type: "text", text: "waiting" }],
+					details: { timeoutSeconds: 1400, startedAtMs: Date.now() },
+				},
+				true,
+			);
+			requestRender.mockClear();
+			requestComponentRender.mockClear();
+			vi.advanceTimersByTime(500);
+			expect(requestComponentRender).toHaveBeenCalled();
+		} finally {
+			component.stopAnimation();
+		}
+	});
+
 	it("does not tick detached async bash result snapshots", () => {
 		vi.useFakeTimers();
 		const requestRender = vi.fn();
