@@ -13,7 +13,9 @@ import {
 	buildMiseUpgradeArgs,
 	buildNpmInstallArgs,
 	buildRenameCleanupPackages,
+	compareForkRelease,
 	downloadVerifiedBinary,
+	getLatestForkRelease,
 	type InstalledVersionVerification,
 	isMuslLinuxForTest,
 	type ManagerUpdateSteps,
@@ -563,7 +565,9 @@ describe("migrateRenamedInstall transaction", () => {
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		const { steps, calls } = scriptedSteps({ install: [0, 0], verify: [false, false] });
 
-		await expect(migrateRenamedInstall(release, steps)).rejects.toThrow("curl -fsSL https://omp.sh/install");
+		await expect(migrateRenamedInstall(release, steps)).rejects.toThrow(
+			"https://raw.githubusercontent.com/jchanghong023/oh-my-pi/main/scripts/install.sh",
+		);
 		expect(calls).toEqual(["install", "removeOld", "verify", "install", "verify"]);
 	});
 });
@@ -747,7 +751,7 @@ describe("update-cli bun cache pruning", () => {
 describe("update-cli release binary integrity", () => {
 	const tag = "v17.1.2";
 	const binaryName = "omp-linux-x64";
-	const url = `https://github.com/can1357/oh-my-pi/releases/download/${tag}/${binaryName}`;
+	const url = `https://github.com/jchanghong023/oh-my-pi/releases/download/${tag}/${binaryName}`;
 	const content = "verified binary";
 	const digest = `sha256:${createHash("sha256").update(content).digest("hex")}`;
 
@@ -1152,10 +1156,54 @@ describe("update-cli binary-only release gating", () => {
 	});
 });
 
+describe("fork release updates", () => {
+	it("resolves the latest version only from the fork GitHub release", async () => {
+		const requested: string[] = [];
+		const release = await getLatestForkRelease({
+			fetchImpl: async input => {
+				requested.push(String(input));
+				return Response.json({
+					tag_name: "v18.0.3-fork.42",
+					draft: false,
+					prerelease: false,
+				});
+			},
+		});
+
+		expect(requested).toEqual(["https://api.github.com/repos/jchanghong023/oh-my-pi/releases/latest"]);
+		expect(release).toEqual({
+			tag: "v18.0.3-fork.42",
+			version: "18.0.3",
+			dist: "binary",
+			packages: {
+				pkg: "@oh-my-pi/pi-coding-agent",
+				natives: "@oh-my-pi/pi-natives",
+			},
+		});
+	});
+
+	it("detects a newer fork build without requiring an upstream version bump", () => {
+		const latest = { tag: "v18.0.3-fork.42", version: "18.0.3" };
+
+		expect(compareForkRelease(latest, "v18.0.3-fork.41", "18.0.3")).toBeGreaterThan(0);
+		expect(compareForkRelease(latest, "v18.0.3-fork.42", "18.0.3")).toBe(0);
+		expect(compareForkRelease(latest, "v18.0.3-fork.43", "18.0.3")).toBeLessThan(0);
+	});
+
+	it("rejects upstream-style and malformed latest tags", async () => {
+		await expect(
+			getLatestForkRelease({
+				fetchImpl: async () =>
+					Response.json({ tag_name: "v18.0.4", draft: false, prerelease: false }),
+			}),
+		).rejects.toThrow("Invalid fork release tag");
+	});
+});
+
 describe("update-cli script-shim takeover", () => {
 	const version = "18.0.0";
 	const binaryName = "omp-windows-x64.exe";
-	const url = `https://github.com/can1357/oh-my-pi/releases/download/v${version}/${binaryName}`;
+	const url = `https://github.com/jchanghong023/oh-my-pi/releases/download/v${version}/${binaryName}`;
 
 	function makeFetch(content: string): (input: string | URL | Request) => Promise<Response> {
 		const digest = `sha256:${createHash("sha256").update(content).digest("hex")}`;
@@ -1323,7 +1371,7 @@ describe("update-cli script-shim takeover", () => {
 describe("update-cli concurrent binary updates", () => {
 	const version = "999.0.0";
 	const binaryName = "omp-linux-x64";
-	const url = `https://github.com/can1357/oh-my-pi/releases/download/v${version}/${binaryName}`;
+	const url = `https://github.com/jchanghong023/oh-my-pi/releases/download/v${version}/${binaryName}`;
 	const payload = Buffer.alloc(2048, 0x41);
 	const digest = `sha256:${createHash("sha256").update(payload).digest("hex")}`;
 

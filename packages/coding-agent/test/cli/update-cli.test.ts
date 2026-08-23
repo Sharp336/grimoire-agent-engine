@@ -11,11 +11,17 @@ describe("runUpdateCommand fetch cancellation", () => {
 
 	it("checks release metadata with a timeout signal", async () => {
 		let requestSignal: AbortSignal | undefined;
+		let requestUrl: string | undefined;
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		const fetchStub = Object.assign(
-			async (_input: FetchInput, init?: FetchInit) => {
+			async (input: FetchInput, init?: FetchInit) => {
+				requestUrl = String(input);
 				requestSignal = init?.signal ?? undefined;
-				return Response.json({ version: "999.0.0" });
+				return Response.json({
+					tag_name: "v999.0.0-fork.1",
+					draft: false,
+					prerelease: false,
+				});
 			},
 			{ preconnect: globalThis.fetch.preconnect },
 		);
@@ -24,6 +30,7 @@ describe("runUpdateCommand fetch cancellation", () => {
 		await runUpdateCommand({ force: false, check: true });
 
 		expect(requestSignal).toBeInstanceOf(AbortSignal);
+		expect(requestUrl).toBe("https://api.github.com/repos/jchanghong023/oh-my-pi/releases/latest");
 	});
 });
 

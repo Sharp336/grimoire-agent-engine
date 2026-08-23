@@ -23,7 +23,10 @@ import {
 	withTimeoutSignal,
 } from "../utils/fetch-timeout";
 
-const REPO = "can1357/oh-my-pi";
+const REPO = "jchanghong023/oh-my-pi";
+const INSTALL_SCRIPT_URL = `https://raw.githubusercontent.com/${REPO}/main/scripts/install.sh`;
+const INSTALL_SCRIPT_PS1_URL = `https://raw.githubusercontent.com/${REPO}/main/scripts/install.ps1`;
+const CURRENT_FORK_RELEASE_TAG = process.env.OMP_FORK_RELEASE_TAG;
 const PACKAGE = "@oh-my-pi/pi-coding-agent";
 const HOMEBREW_FORMULA = "can1357/tap/omp";
 const MISE_TOOL = "github:can1357/oh-my-pi";
@@ -98,6 +101,11 @@ export interface ReleaseInfo {
 	packages: ReleasePackages;
 }
 
+interface ForkReleaseVersion {
+	version: string;
+	build: bigint;
+}
+
 export interface ReleaseBinaryAsset {
 	url: string;
 	size: number;
@@ -108,6 +116,79 @@ type Fetch = (input: string | URL | Request, init?: RequestInit) => Promise<Resp
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
+}
+
+function parseForkReleaseTag(tag: string): ForkReleaseVersion | undefined {
+	const match = /^v(\d+\.\d+\.\d+)-fork\.(\d+)$/.exec(tag);
+	if (!match) return undefined;
+	return { version: match[1], build: BigInt(match[2]) };
+}
+
+/** Compare the latest fork release with the release embedded in this binary. */
+export function compareForkRelease(
+	latest: Pick<ReleaseInfo, "tag" | "version">,
+	currentTag: string | undefined = CURRENT_FORK_RELEASE_TAG,
+	currentVersion: string = VERSION,
+): number {
+	const latestFork = parseForkReleaseTag(latest.tag);
+	if (!latestFork || latestFork.version !== latest.version) {
+		throw new Error(`Invalid fork release tag: ${latest.tag}`);
+	}
+	const currentFork = currentTag ? parseForkReleaseTag(currentTag) : undefined;
+	if (currentFork) {
+		const versionComparison = compareVersions(latestFork.version, currentFork.version);
+		if (versionComparison !== 0) return versionComparison;
+		return latestFork.build === currentFork.build ? 0 : latestFork.build > currentFork.build ? 1 : -1;
+	}
+	const versionComparison = compareVersions(latestFork.version, currentVersion);
+	// An untagged source or older fork binary at the same package version predates
+	// the published fork build and should be allowed to move onto it once.
+	return versionComparison === 0 ? 1 : versionComparison;
+}
+
+/** Fetch the latest published binary release from this fork only. */
+export async function getLatestForkRelease(
+	options: { timeoutMs?: number; fetchImpl?: Fetch } = {},
+): Promise<ReleaseInfo> {
+	const timeoutMs = options.timeoutMs ?? RELEASE_METADATA_TIMEOUT_MS;
+	const fetchImpl = options.fetchImpl ?? fetch;
+	let response: Response;
+	try {
+		response = await fetchImpl(`${GITHUB_API}/repos/${REPO}/releases/latest`, {
+			headers: {
+				Accept: "application/vnd.github+json",
+				"X-GitHub-Api-Version": "2022-11-28",
+			},
+			signal: withTimeoutSignal(timeoutMs),
+		});
+	} catch (err) {
+		if (isTimeoutError(err)) {
+			throw new Error(`Timed out fetching fork release metadata after ${Math.round(timeoutMs / 1000)}s`, {
+				cause: err,
+			});
+		}
+		if (isUnsupportedProxyError(err)) throw new Error(unsupportedProxyMessage(), { cause: err });
+		throw err;
+	}
+	if (response.status === 403 || response.status === 429) {
+		throw new Error("GitHub API rate limit exceeded while fetching the latest fork release");
+	}
+	if (!response.ok) throw new Error(`Failed to fetch latest fork release: ${response.statusText}`);
+	const metadata: unknown = await response.json();
+	if (!isRecord(metadata) || typeof metadata.tag_name !== "string") {
+		throw new Error("Malformed fork release metadata: missing tag_name");
+	}
+	if (metadata.draft !== false || metadata.prerelease !== false) {
+		throw new Error(`Fork release ${metadata.tag_name} is not a published stable release`);
+	}
+	const parsed = parseForkReleaseTag(metadata.tag_name);
+	if (!parsed) throw new Error(`Invalid fork release tag: ${metadata.tag_name}`);
+	return {
+		tag: metadata.tag_name,
+		version: parsed.version,
+		dist: "binary",
+		packages: { ...CURRENT_PACKAGES },
+	};
 }
 
 /**
@@ -233,12 +314,11 @@ export function resolveReleaseBinaryAsset(
 }
 
 async function getReleaseBinaryAsset(
-	expectedVersion: string,
+	expectedTag: string,
 	binaryName: string,
 	fetchImpl: Fetch = fetch,
 	githubToken: string | undefined = $env.GITHUB_TOKEN || $env.GH_TOKEN,
 ): Promise<ReleaseBinaryAsset> {
-	const tag = `v${expectedVersion}`;
 	const headers: Record<string, string> = {
 		Accept: "application/vnd.github+json",
 		"X-GitHub-Api-Version": "2022-11-28",
@@ -247,7 +327,7 @@ async function getReleaseBinaryAsset(
 
 	let response: Response;
 	try {
-		response = await fetchImpl(`${GITHUB_API}/repos/${REPO}/releases/tags/${encodeURIComponent(tag)}`, {
+		response = await fetchImpl(`${GITHUB_API}/repos/${REPO}/releases/tags/${encodeURIComponent(expectedTag)}`, {
 			headers,
 			signal: withTimeoutSignal(RELEASE_METADATA_TIMEOUT_MS),
 		});
@@ -267,7 +347,7 @@ async function getReleaseBinaryAsset(
 		throw new Error(`Failed to fetch GitHub release metadata: ${response.statusText}`);
 	}
 
-	return resolveReleaseBinaryAsset(await response.json(), tag, binaryName);
+	return resolveReleaseBinaryAsset(await response.json(), expectedTag, binaryName);
 }
 
 export interface VerifiedBinaryDownloadOptions {
@@ -1481,7 +1561,7 @@ export async function migrateRenamedInstall(release: ReleaseInfo, steps: RenameM
 	}
 	if (!verification.ok) {
 		throw new Error(
-			`${formatVerificationFailure(verification, release.version)}; reinstall with: curl -fsSL https://omp.sh/install | sh`,
+			`${formatVerificationFailure(verification, release.version)}; reinstall with: ${installerHint()}`,
 		);
 	}
 	printVerifiedVersion(release.version);
@@ -1557,8 +1637,11 @@ function packageManagerUpdateSteps(manager: "bun" | "npm", release: ReleaseInfo)
 		repair: async launcherPath => {
 			// npm's script shims outrank `.exe` in PowerShell and Git Bash, so
 			// they must be retired rather than merely shadowed.
-			if (isWindowsScriptLauncherPath(launcherPath)) await updateViaShimTakeover(launcherPath, release.version);
-			else await updateViaBinaryAt(launcherPath, release.version);
+			if (isWindowsScriptLauncherPath(launcherPath)) {
+				await updateViaShimTakeover(launcherPath, release.version, { releaseTag: release.tag });
+			} else {
+				await updateViaBinaryAt(launcherPath, release.version, { releaseTag: release.tag });
+			}
 		},
 	};
 }
@@ -1674,6 +1757,7 @@ export async function updateViaBinaryAt(
 	expectedVersion: string,
 	options: {
 		binaryName?: string;
+		releaseTag?: string;
 		fetchImpl?: Fetch;
 		githubToken?: string;
 		verifyInstalledVersion?: typeof verifyInstalledVersion;
@@ -1692,7 +1776,12 @@ export async function updateViaBinaryAt(
 	const attempt = `${Date.now()}.${process.pid}.${updateAttemptSeq++}`;
 	const tempPath = `${targetPath}.${attempt}.new`;
 	const backupPath = `${targetPath}.${attempt}.bak`;
-	const asset = await getReleaseBinaryAsset(expectedVersion, binaryName, options.fetchImpl, options.githubToken);
+	const asset = await getReleaseBinaryAsset(
+		options.releaseTag ?? `v${expectedVersion}`,
+		binaryName,
+		options.fetchImpl,
+		options.githubToken,
+	);
 	console.log(chalk.dim(`Downloading ${binaryName}…`));
 	await downloadVerifiedBinary({
 		url: asset.url,
@@ -1767,6 +1856,7 @@ export async function updateViaShimTakeover(
 	expectedVersion: string,
 	options: {
 		binaryName?: string;
+		releaseTag?: string;
 		fetchImpl?: Fetch;
 		githubToken?: string;
 		verifyBinary?: typeof verifyBinaryAtPath;
@@ -1777,7 +1867,12 @@ export async function updateViaShimTakeover(
 	const exePath = path.join(launcherDir, `${APP_NAME}.exe`);
 	const attempt = `${Date.now()}.${process.pid}.${updateAttemptSeq++}`;
 	const tempPath = `${exePath}.${attempt}.new`;
-	const asset = await getReleaseBinaryAsset(expectedVersion, binaryName, options.fetchImpl, options.githubToken);
+	const asset = await getReleaseBinaryAsset(
+		options.releaseTag ?? `v${expectedVersion}`,
+		binaryName,
+		options.fetchImpl,
+		options.githubToken,
+	);
 	console.log(chalk.dim(`Downloading ${binaryName}…`));
 	await downloadVerifiedBinary({
 		url: asset.url,
@@ -1867,14 +1962,12 @@ export async function updateViaShimTakeover(
 /**
  * Platform-appropriate installer one-liner for recovery instructions.
  *
- * Forces the installer's binary mode (`--binary` / `-Binary`): the default
- * mode prefers a bun-based install whenever bun is present, which would send
- * a user recovering from a binary-only release straight back through bun.
+ * Forces the fork installer's binary mode (`--binary` / `-Binary`).
  */
 function installerHint(): string {
 	return process.platform === "win32"
-		? "& ([scriptblock]::Create((irm https://omp.sh/install.ps1))) -Binary"
-		: "curl -fsSL https://omp.sh/install | sh -s -- --binary";
+		? `& ([scriptblock]::Create((irm ${INSTALL_SCRIPT_PS1_URL}))) -Binary`
+		: `curl -fsSL ${INSTALL_SCRIPT_URL} | sh -s -- --binary`;
 }
 
 /** Persisted channel, or undefined when settings are unavailable (SDK/test embedding without `Settings.init()`). */
@@ -1903,22 +1996,23 @@ export async function runUpdateCommand(opts: {
 	check: boolean;
 	channel?: UpdateChannel;
 }): Promise<void> {
-	console.log(chalk.dim(`Current version: ${VERSION}`));
-	const persistedChannel = readPersistedChannel() ?? "stable";
-	const channel = opts.channel ?? persistedChannel;
-	const isChannelSwitch = opts.channel !== undefined && opts.channel !== persistedChannel;
-	if (channel === "canary") console.log(chalk.dim("Current channel: canary"));
+	console.log(chalk.dim(`Current version: ${CURRENT_FORK_RELEASE_TAG ?? VERSION}`));
+	if (opts.channel === "canary") {
+		console.error(chalk.red("This fork publishes only stable fork releases; --canary is unavailable."));
+		process.exit(1);
+	}
+	const isChannelSwitch = opts.channel === "stable" && readPersistedChannel() !== "stable";
 
-	// Check for updates
+	// Fork builds update exclusively from this fork's latest GitHub release.
 	let release: ReleaseInfo;
 	try {
-		release = await getLatestRelease({ channel });
+		release = await getLatestForkRelease();
 	} catch (err) {
 		console.error(chalk.red(`Failed to check for updates: ${err}`));
 		process.exit(1);
 	}
 
-	const comparison = compareVersions(release.version, VERSION);
+	const comparison = compareForkRelease(release);
 
 	if (comparison <= 0 && !opts.force && !isChannelSwitch) {
 		const icon = theme?.status?.success ?? "✔";
@@ -1927,15 +2021,11 @@ export async function runUpdateCommand(opts: {
 	}
 
 	if (isChannelSwitch) {
-		console.log(
-			chalk.yellow(
-				`Switching to ${channel} ${release.version}${comparison <= 0 ? ` (downgrade from ${VERSION})` : ""}`,
-			),
-		);
+		console.log(chalk.yellow(`Switching to stable fork release ${release.tag}`));
 	} else if (comparison > 0) {
-		console.log(chalk.cyan(`New version available: ${release.version}`));
+		console.log(chalk.cyan(`New fork release available: ${release.tag}`));
 	} else {
-		console.log(chalk.yellow(`Forcing reinstall of ${release.version}`));
+		console.log(chalk.yellow(`Forcing reinstall of ${release.tag}`));
 	}
 	if (release.packages.pkg !== PACKAGE) {
 		console.log(chalk.cyan(`The npm package moved to ${release.packages.pkg}; updating migrates this install.`));
@@ -1951,20 +2041,19 @@ export async function runUpdateCommand(opts: {
 	// symlink resolves to method "binary" and is replaced in place, keeping the
 	// same PATH entry live.
 	try {
-		const forceBinary = shouldForceBinaryUpdate(release);
+		const forceBinary = true;
 		const target = await resolveUpdateTarget({ allowPackageManagers: !forceBinary });
-		if (channel === "canary" && (target.method === "nix" || target.method === "brew" || target.method === "mise")) {
-			console.log(chalk.yellow("Canary updates are only supported for bun, npm, or binary installs."));
-			return;
-		}
 		if (target.method === "nix") {
 			console.log(chalk.yellow("This installation is managed by Nix and cannot update itself."));
 			console.log(chalk.dim("Update the flake input or profile that provides omp, then rebuild."));
 			return;
-		} else if (target.method === "brew") {
-			await updateViaHomebrew(release.version, opts.force);
-		} else if (target.method === "mise") {
-			await updateViaMise(release.version, opts.force);
+		} else if (target.method === "brew" || target.method === "mise") {
+			console.log(
+				chalk.yellow(
+					`This ${target.method} installation is managed by an upstream package definition and will not be updated. Reinstall the fork with: ${installerHint()}`,
+				),
+			);
+			return;
 		} else if (target.method === "bun" || target.method === "npm") {
 			if (forceBinary) {
 				// Reachable in forced mode only through a Windows script
@@ -1972,7 +2061,7 @@ export async function runUpdateCommand(opts: {
 				// skipped), so the launcher path is always known.
 				if (!target.path) throw new Error(`Could not resolve ${APP_NAME} launcher path in PATH`);
 				console.log(chalk.dim("This release ships as a standalone binary; replacing the script launcher."));
-				await updateViaShimTakeover(target.path, release.version);
+				await updateViaShimTakeover(target.path, release.version, { releaseTag: release.tag });
 				console.log(
 					chalk.yellow(
 						`This install is no longer managed by ${target.method}. Removing the old global package may delete this launcher; if it does, reinstall with: ${installerHint()}`,
@@ -1985,7 +2074,7 @@ export async function runUpdateCommand(opts: {
 			if (forceBinary && target.replacesSymlink) {
 				console.log(chalk.dim("Replacing the package-manager launcher with the standalone binary."));
 			}
-			await updateViaBinaryAt(target.path, release.version);
+			await updateViaBinaryAt(target.path, release.version, { releaseTag: release.tag });
 			if (forceBinary && target.replacesSymlink) {
 				console.log(
 					chalk.yellow(
@@ -1994,7 +2083,7 @@ export async function runUpdateCommand(opts: {
 				);
 			}
 		}
-		if (opts.channel) persistChannel(channel);
+		if (opts.channel === "stable") persistChannel("stable");
 	} catch (err) {
 		console.error(chalk.red(`Update failed: ${err}`));
 		process.exit(1);
@@ -2014,14 +2103,13 @@ ${chalk.bold("Options:")}
   -c, --check     Check for updates without installing
   -f, --force     Force reinstall even if up to date
   -l, --plugins   Update installed plugins
-  --canary        Switch to the canary channel and update
-  --stable        Switch back to the stable channel
+  --stable        Use the fork's stable release channel
 
 ${chalk.bold("Examples:")}
   ${APP_NAME} update              Update to latest version
   ${APP_NAME} update --check      Check if updates are available
   ${APP_NAME} update --force      Force reinstall
   ${APP_NAME} update -l           Update installed plugins
-  ${APP_NAME} update --canary    Switch to the canary channel and update
+  ${APP_NAME} update --stable    Update from the fork's stable release
 `);
 }

@@ -22,6 +22,8 @@ export interface CodingAgentCompileOptions {
 	readonly minifyIdentifiers?: boolean;
 	/** Disable Bun's built-in Darwin signing before the caller re-signs. */
 	readonly skipBuiltinCodesign?: boolean;
+	/** Fork release tag embedded for self-update comparisons. */
+	readonly forkReleaseTag?: string;
 }
 
 /**
@@ -42,6 +44,9 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 				"process.env.PI_COMPILED": JSON.stringify("true"),
 				"process.env.PI_TINY_TRANSFORMERS_VERSION": JSON.stringify(options.transformersVersion),
 				"process.env.PI_DOCS_EMBED": JSON.stringify((await buildDocsIndexPayload()).payload),
+				...(options.forkReleaseTag
+					? { "process.env.OMP_FORK_RELEASE_TAG": JSON.stringify(options.forkReleaseTag) }
+					: {}),
 			},
 			minify: {
 				identifiers: options.minifyIdentifiers ?? false,

@@ -263,29 +263,48 @@ install_binary() {
     fi
     echo "Using version: $LATEST"
 
-    mkdir -p "$INSTALL_DIR"
+    INSTALL_PATH="${INSTALL_DIR}/omp"
+    if [ -z "${PI_INSTALL_DIR:-}" ]; then
+        EXISTING_OMP="$(command -v omp 2>/dev/null || true)"
+        case "$EXISTING_OMP" in
+            /*)
+                if [ -f "$EXISTING_OMP" ] || [ -L "$EXISTING_OMP" ]; then
+                    INSTALL_PATH="$EXISTING_OMP"
+                    echo "Replacing existing omp at ${INSTALL_PATH}"
+                fi
+                ;;
+        esac
+    fi
+
+    TARGET_DIR="$(dirname "$INSTALL_PATH")"
+    mkdir -p "$TARGET_DIR"
+    TMP_BINARY="$(mktemp "${INSTALL_PATH}.download.XXXXXX")"
+    trap 'if [ -n "${TMP_BINARY:-}" ]; then rm -f "$TMP_BINARY"; fi' EXIT
     # Download binary
     BINARY_URL="https://github.com/${REPO}/releases/download/${LATEST}/${BINARY}"
     echo "Downloading ${BINARY}..."
-    curl -fsSL --connect-timeout 10 --speed-limit 1024 --speed-time 30 "$BINARY_URL" -o "${INSTALL_DIR}/omp"
-    chmod +x "${INSTALL_DIR}/omp"
+    curl -fsSL --connect-timeout 10 --speed-limit 1024 --speed-time 30 "$BINARY_URL" -o "$TMP_BINARY"
+    chmod +x "$TMP_BINARY"
 
     # Verify the freshly installed binary can actually start before reporting
     # success; never claim success for a download that cannot run.
-    if ! SMOKE_OUTPUT="$("${INSTALL_DIR}/omp" --version 2>&1)"; then
+    if ! SMOKE_OUTPUT="$("$TMP_BINARY" --version 2>&1)"; then
         echo ""
-        echo "✗ omp was downloaded to ${INSTALL_DIR}/omp but cannot start:"
+        echo "✗ The downloaded omp binary cannot start:"
         echo "$SMOKE_OUTPUT" | sed 's/^/    /'
         exit 1
     fi
 
+    mv -f "$TMP_BINARY" "$INSTALL_PATH"
+    TMP_BINARY=""
+
     echo ""
-    echo "✓ Installed omp to ${INSTALL_DIR}/omp"
+    echo "✓ Installed omp to ${INSTALL_PATH}"
 
     # Check if in PATH
     case ":$PATH:" in
-        *":$INSTALL_DIR:"*) echo "Run 'omp' to get started!" ;;
-        *) echo "Add ${INSTALL_DIR} to your PATH, then run 'omp'" ;;
+        *":$TARGET_DIR:"*) echo "Run 'omp' to get started!" ;;
+        *) echo "Add ${TARGET_DIR} to your PATH, then run 'omp'" ;;
     esac
 }
 

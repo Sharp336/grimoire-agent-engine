@@ -30,7 +30,7 @@ import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
 import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
-import { getLatestRelease } from "./cli/update-cli";
+import { compareForkRelease, getLatestForkRelease } from "./cli/update-cli";
 import { findConfigFile } from "./config";
 import { ModelRegistry } from "./config/model-registry";
 import {
@@ -121,14 +121,13 @@ export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string)
 	(parsedArgs.mode === "json" ? process.stderr : process.stdout).write(text);
 }
 
-async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
+async function checkForNewVersion(): Promise<string | undefined> {
 	if (!settings.get("startup.checkUpdate")) {
 		return;
 	}
 	try {
-		const channel = settings.get("update.channel");
-		const release = await getLatestRelease({ timeoutMs: 5_000, channel });
-		return Bun.semver.order(release.version, currentVersion) > 0 ? release.version : undefined;
+		const release = await getLatestForkRelease({ timeoutMs: 5_000 });
+		return compareForkRelease(release) > 0 ? release.tag : undefined;
 	} catch {
 		return undefined;
 	}
@@ -1963,7 +1962,7 @@ export async function runRootCommand(
 				stopStartupWatchdog();
 				await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined, eventBus, rpcInput);
 			} else if (isInteractive) {
-				const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
+				const versionCheckPromise = checkForNewVersion().catch(() => undefined);
 				const startupChangelog = await startupChangelogPromise;
 
 				const modelScopeNotification = buildModelScopeNotification(
