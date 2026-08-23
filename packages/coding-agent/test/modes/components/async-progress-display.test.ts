@@ -92,6 +92,30 @@ describe("async progress transcript display sanitization", () => {
 		expect(JSON.stringify(message.details)).toBe(sourceDetails);
 	});
 
+	it("shortens exact home paths at prose and code boundaries without matching longer components", () => {
+		const home = "/Users/alice";
+		vi.spyOn(os, "homedir").mockReturnValue(home);
+		const longerComponent = `${home}2/project`;
+		const embeddedPath = `/mnt${home}/project`;
+		const rawProgress = [
+			`space: ${home} next`,
+			`period: ${home}.`,
+			`backtick: \`${home}\``,
+			`longer: ${longerComponent}`,
+			`embedded: ${embeddedPath}`,
+		].join("\n");
+		const message = progressMessage(rawProgress);
+
+		const displayMessage = buildAsyncProgressDisplayMessage(message);
+
+		expect(displayMessage.content).toContain("space: ~ next");
+		expect(displayMessage.content).toContain("period: ~.");
+		expect(displayMessage.content).toContain("backtick: `~`");
+		expect(displayMessage.content).toContain(`longer: ${longerComponent}`);
+		expect(displayMessage.content).toContain(`embedded: ${embeddedPath}`);
+		expect(message.content).toContain(rawProgress);
+	});
+
 	it("shortens mixed-case Windows home paths without exposing the user directory", () => {
 		vi.spyOn(os, "homedir").mockReturnValue("C:\\Users\\Pedro");
 		const backslashPath = "c:\\USERS\\pEdRo\\projects\\build.log";
@@ -102,7 +126,7 @@ describe("async progress transcript display sanitization", () => {
 
 		expect(displayMessage.content).toContain("native: ~\\projects\\build.log");
 		expect(displayMessage.content).toContain("portable: ~/projects/build.log");
-		expect(displayMessage.content).not.toContain("users");
+		expect(displayMessage.content).not.toMatch(/[\\/]users[\\/]/i);
 		expect(message.content).toContain(backslashPath);
 		expect(message.content).toContain(slashPath);
 	});

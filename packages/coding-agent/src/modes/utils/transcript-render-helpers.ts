@@ -38,8 +38,8 @@ function sanitizeAsyncProgressDisplayText(text: string): string {
 	const caseInsensitive = home.includes("\\") || /^[A-Za-z]:\//.test(home);
 	for (const homePath of homePaths) {
 		const homePrefix = new RegExp(
-			`(?<![^\\s"'()\\[\\]{}<>=:;,|&/\\\\])${escapeRegExp(homePath)}(?=$|[\\\\/])`,
-			caseInsensitive ? "gi" : "g",
+			`(?<![\\p{L}\\p{N}_-])${escapeRegExp(homePath)}(?![\\p{L}\\p{N}_-])`,
+			caseInsensitive ? "giu" : "gu",
 		);
 		display = display.replace(homePrefix, "~");
 	}
