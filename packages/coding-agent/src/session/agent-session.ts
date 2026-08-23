@@ -410,6 +410,11 @@ type MessageEndPersistenceSlot = {
 	release: () => void;
 };
 
+type TurnEndReceiptSlot = {
+	readonly promise: Promise<void>;
+	resolve: () => void;
+};
+
 type PostPromptSkipReason = "aborted" | "stale-generation";
 
 type AgentContinueSkipReason =
@@ -606,6 +611,8 @@ export class AgentSession {
 	#turnIndex = 0;
 	#messageEndPersistenceTail: Promise<void> = Promise.resolve();
 	#pendingMessageEndPersistence = new Map<string, Promise<void>>();
+	#receivedTurnEnds = new WeakSet<AgentMessage>();
+	#pendingTurnEndReceipts = new WeakMap<AgentMessage, TurnEndReceiptSlot>();
 	#persistedMessageKeys: { anchor: string; keys: Set<string> } | undefined;
 
 	// Custom commands (TypeScript slash commands)
@@ -667,6 +674,7 @@ export class AgentSession {
 	// Cursor exec, TUI listeners) is held back. Without this, a client that resumes
 	// on `agent_end` can fire its next `prompt` before #promptWithMessage's finally
 	#promptGeneration = 0;
+	#deferredTerminalAdvisorReview: { generation: number; message: AgentMessage } | undefined = undefined;
 	#pendingAgentEndEmit: AgentSessionEvent | undefined;
 	#inFlightSettledCallbacks: Array<() => void | Promise<void>> = [];
 	#sessionStopContinuationCount = 0;
@@ -1172,6 +1180,7 @@ export class AgentSession {
 			modelRegistry: this.#modelRegistry,
 			model: () => this.model,
 			sessionId: () => this.sessionId,
+			transientOverlayTokens: () => this.#maintenance?.currentPreservedUserMessageOverlayTokens() ?? 0,
 		};
 		this.#stats = new SessionStatsTracker(statsHost);
 		const memoryHost: SessionMemoryHost = {
@@ -1246,6 +1255,24 @@ export class AgentSession {
 			}
 			this.#loopGuards.recordTurn(messages, context);
 			await this.#prewalk.advanceAtTurnEnd(messages, context);
+			if (signal?.aborted) return;
+			const compactBeforeGuidance =
+				this.settings.get("advisor.compactBeforeGuidance") && this.#advisors.isAdvisorActive();
+			if (compactBeforeGuidance && context?.willContinue) {
+				await this.#maintenance.maintainContextMidRun(messages, signal, context);
+				if (signal?.aborted) return;
+				await this.#advisors.onPrimaryTurnEnd(messages, true, signal);
+				return;
+			}
+			if (compactBeforeGuidance && context?.message.role === "assistant") {
+				if (context.message.stopReason !== "aborted" && context.message.stopReason !== "error") {
+					this.#deferredTerminalAdvisorReview = {
+						generation: this.#promptGeneration,
+						message: context.message,
+					};
+				}
+				return;
+			}
 			await this.#advisors.onPrimaryTurnEnd(messages, context?.willContinue, signal);
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
 		});
@@ -1576,7 +1603,8 @@ export class AgentSession {
 			schedulePostPromptTask: (task, options) => this.#schedulePostPromptTask(task, options),
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),
 			scheduleCompactionContinuation: options => this.#scheduleCompactionContinuation(options),
-			persistTurnMessagesForMidRunCompaction: context => this.#persistTurnMessagesForMidRunCompaction(context),
+			persistTurnMessagesForMidRunCompaction: (context, signal) =>
+				this.#persistTurnMessagesForMidRunCompaction(context, signal),
 			findLastAssistantMessage: () => this.#findLastAssistantMessage(),
 			disconnectFromAgent: () => this.#disconnectFromAgent(),
 			reconnectToAgent: () => this.#reconnectToAgent(),
@@ -1593,7 +1621,7 @@ export class AgentSession {
 			syncTodoPhasesFromBranch: () => this.#todo.syncFromBranch(),
 			resetAdvisorRuntimes: (reason?: string) => this.#advisors.resetAllRuntimes(reason),
 			rebaseAfterCompaction: () => this.#stats.rebaseAfterCompaction(),
-			recordAnchoredHistoryRewrite: tokensRemoved => this.#stats.recordAnchoredHistoryRewrite(tokensRemoved),
+			recordAnchoredHistoryRewrite: rewrites => this.#stats.recordAnchoredHistoryRewrite(rewrites),
 			getContextBreakdown: options => this.getContextBreakdown(options),
 			getContextUsage: options => this.getContextUsage(options),
 			shake: (mode, options) => this.shake(mode, options),
@@ -2221,6 +2249,7 @@ export class AgentSession {
 	 * the recovery wait always sees the in-flight handler and blocks until it — and
 	 * everything it schedules — settles. */
 	#dispatchAgentEvent = async (event: AgentEvent): Promise<void> => {
+		if (event.type === "turn_end") this.#recordTurnEndReceipt(event.message);
 		if (event.type === "tool_execution_end" && this.#isTerminalYieldToolResult(event)) {
 			const alreadyTerminated = this.#synchronouslyTerminatedYieldToolCallIds.delete(event.toolCallId);
 			if (!alreadyTerminated) {
@@ -2243,6 +2272,39 @@ export class AgentSession {
 			resolve();
 		}
 	};
+
+	#recordTurnEndReceipt(message: AgentMessage): void {
+		this.#receivedTurnEnds.add(message);
+		const pending = this.#pendingTurnEndReceipts.get(message);
+		if (!pending) return;
+		this.#pendingTurnEndReceipts.delete(message);
+		pending.resolve();
+	}
+
+	async #waitForTurnEndReceipt(message: AgentMessage, signal?: AbortSignal): Promise<boolean> {
+		if (this.#receivedTurnEnds.has(message)) return true;
+		if (signal?.aborted) return false;
+		const existing = this.#pendingTurnEndReceipts.get(message);
+		let receipt = existing?.promise;
+		if (!receipt) {
+			const pending = Promise.withResolvers<void>();
+			receipt = pending.promise;
+			this.#pendingTurnEndReceipts.set(message, pending);
+		}
+		if (!signal) {
+			await receipt;
+			return true;
+		}
+		const aborted = Promise.withResolvers<false>();
+		const onAbort = (): void => aborted.resolve(false);
+		signal.addEventListener("abort", onAbort, { once: true });
+		if (signal.aborted) onAbort();
+		try {
+			return await Promise.race([receipt.then(() => true as const), aborted.promise]);
+		} finally {
+			signal.removeEventListener("abort", onAbort);
+		}
+	}
 
 	#createMessageEndPersistenceSlot(message: AgentMessage): MessageEndPersistenceSlot | undefined {
 		const key = sessionMessagePersistenceKey(message);
@@ -2496,9 +2558,25 @@ export class AgentSession {
 		};
 	}
 
-	async #persistTurnMessagesForMidRunCompaction(context: AgentTurnEndContext | undefined): Promise<boolean> {
+	async #persistTurnMessagesForMidRunCompaction(
+		context: AgentTurnEndContext | undefined,
+		signal?: AbortSignal,
+	): Promise<boolean> {
 		if (!context) return true;
 		const turnMessages = [context.message, ...context.toolResults];
+		// onTurnEnd runs in the producer loop immediately after it queues turn_end,
+		// while Agent consumes events on a separate async iterator. During a real
+		// prompt, wait until that consumer reaches the same turn_end object. Event
+		// ordering guarantees it already appended every preceding message_end to
+		// Agent.state, and each AgentSession message_end handler synchronously
+		// installed its persistence slot before its first await. Unlike assistant
+		// message_end (which is cloned for consumers), turn_end carries the original
+		// assistant object, so the weak identity watermark is stable. Direct unit
+		// harnesses invoke the captured hook while Agent is idle and have no matching
+		// turn_end event; do not park those calls.
+		if (this.agent.state.isStreaming) {
+			if (!(await this.#waitForTurnEndReceipt(context.message, signal))) return false;
+		}
 		for (const message of turnMessages) {
 			await this.#waitForSessionMessagePersistence(message);
 		}
@@ -2875,6 +2953,7 @@ export class AgentSession {
 			// maintenance can emit agent_end, so preserve the state at settle entry.
 			const ttsrAbortPendingAtAgentEnd = this.#ttsr.abortPending;
 			const emitAgentEndNotification = async (options?: { willContinue?: boolean }) => {
+				await this.#deliverDeferredTerminalAdvisorReview(settledMessages, options?.willContinue);
 				this.#emitRunState("idle");
 				// Public agent_end is held out of the eager display pass and emitted
 				// here after maintenance routing, tagged isTerminal so subscribers can
@@ -3533,6 +3612,28 @@ export class AgentSession {
 			messages,
 			willContinue: options?.willContinue,
 		});
+	}
+
+	async #deliverDeferredTerminalAdvisorReview(
+		settledMessages: AgentMessage[],
+		willContinue: boolean | undefined,
+	): Promise<void> {
+		const deferred = this.#deferredTerminalAdvisorReview;
+		this.#deferredTerminalAdvisorReview = undefined;
+		if (
+			!deferred ||
+			deferred.generation !== this.#promptGeneration ||
+			!settledMessages.includes(deferred.message) ||
+			this.#abortInProgress ||
+			this.#isDisposed
+		) {
+			return;
+		}
+		await this.#advisors.onPrimaryTurnEnd(
+			[...this.agent.state.messages],
+			willContinue,
+			this.#postPromptTasksAbortController.signal,
+		);
 	}
 
 	/** @returns true when a hidden session_stop continuation turn was scheduled. */

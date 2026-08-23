@@ -215,8 +215,10 @@ describe("AgentSession shake", () => {
 			).toBeUndefined();
 		});
 
-		it("does not subtract remote-compacted entries omitted from the provider prompt", async () => {
+		it("preserves originals replaced by opaque remote compaction", async () => {
 			seedHeavyToolResult("X".repeat(20_000));
+			const [original] = branchToolResults();
+			const originalText = original.content.map(block => (block.type === "text" ? block.text : "")).join("");
 			const firstKeptEntryId = sessionManager.getBranch()[0]?.id;
 			if (!firstKeptEntryId) throw new Error("Expected seeded branch");
 			sessionManager.appendCompaction("remote summary", undefined, firstKeptEntryId, 10_000, {
@@ -241,7 +243,11 @@ describe("AgentSession shake", () => {
 
 			const result = await session.shake("elide");
 
-			expect(result.tokensFreed).toBeGreaterThan(0);
+			expect(result.toolResultsDropped).toBe(0);
+			expect(result.blocksDropped).toBe(0);
+			expect(result.tokensFreed).toBe(0);
+			expect(original.content.map(block => (block.type === "text" ? block.text : "")).join("")).toBe(originalText);
+			expect(original.prunedAt).toBeUndefined();
 			expect(session.getContextUsage()?.tokens).toBe(20_000);
 			const anchor = sessionManager
 				.getBranch()
@@ -253,6 +259,56 @@ describe("AgentSession shake", () => {
 			).toBeUndefined();
 		});
 
+		it("rewrites and credits history replayed after a remote snapshot", async () => {
+			const replayThroughEntryId = sessionManager.appendMessage({
+				role: "user",
+				content: "Snapshot request.",
+				timestamp: Date.now() - 4,
+			});
+			seedHeavyToolResult("X".repeat(20_000));
+			const [replayed] = branchToolResults();
+			sessionManager.appendCompaction("remote summary", undefined, replayThroughEntryId, 10_000, {
+				details: {},
+				providerReplayThroughEntryId: replayThroughEntryId,
+				preserveData: {
+					openaiRemoteCompaction: { provider: "openai", replacementHistory: [] },
+				},
+			});
+			const anchor: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: recentProtectedTail("post-compaction") }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: { ...usage, input: 20_000, totalTokens: 20_008 },
+				timestamp: Date.now(),
+			};
+			sessionManager.appendMessage(anchor);
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+			const result = await session.shake("elide");
+
+			expect(result.toolResultsDropped).toBe(1);
+			expect(result.tokensFreed).toBeGreaterThan(0);
+			expect(replayed.prunedAt).toBeDefined();
+			expect(anchor.contextSnapshot?.historyRewriteTokensRemoved).toBe(result.tokensFreed);
+			expect(session.getContextUsage()?.tokens).toBe(20_000 - result.tokensFreed);
+		});
+
+		it("does not report savings from cleared history", async () => {
+			seedHeavyToolResult("X".repeat(20_000));
+			const [cleared] = branchToolResults();
+			sessionManager.appendResetBoundary();
+			appendRecentProtectedTail();
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+
+			const result = await session.shake("elide");
+
+			expect(result.toolResultsDropped).toBe(0);
+			expect(result.blocksDropped).toBe(0);
+			expect(result.tokensFreed).toBe(0);
+			expect(cleared.prunedAt).toBeUndefined();
+		});
+
 		it("returns zero counts for an empty branch", async () => {
 			const result = await session.shake("elide");
 			expect(result.toolResultsDropped).toBe(0);
@@ -262,27 +318,44 @@ describe("AgentSession shake", () => {
 	});
 
 	describe("images", () => {
-		it("mirrors dropImages and reports the removed image count", async () => {
+		it("drops live images without rewriting cleared history", async () => {
 			const png: ImageContent = { type: "image", data: "iVBORw0KGgo", mimeType: "image/png" };
 			sessionManager.appendMessage({
 				role: "user",
-				content: [{ type: "text", text: "look" }, png],
+				content: [{ type: "text", text: "cleared image" }, png],
 				timestamp: Date.now(),
+			});
+			sessionManager.appendResetBoundary();
+			sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "live image" }, png],
+				timestamp: Date.now() + 1,
 			});
 
 			const result = await session.shake("images");
 
 			expect(result.mode).toBe("images");
 			expect(result.imagesDropped).toBe(1);
-			const branch = sessionManager.getBranch();
-			const userMsg = branch.find(e => e.type === "message" && (e.message as { role?: string }).role === "user");
-			const content = (userMsg as { message: { content: unknown } }).message.content as Array<{ type: string }>;
-			expect(content.some(b => b.type === "image")).toBe(false);
+			const users = sessionManager
+				.getBranch()
+				.flatMap(entry => (entry.type === "message" && entry.message.role === "user" ? [entry.message] : []));
+			expect(users).toHaveLength(2);
+			expect(Array.isArray(users[0].content) && users[0].content.some(block => block.type === "image")).toBe(true);
+			expect(Array.isArray(users[1].content) && users[1].content.some(block => block.type === "image")).toBe(false);
 		});
 	});
 
 	describe("thinking", () => {
-		it("drops both thinking variants, keeps empty turns empty, and refreshes persisted and runtime state", async () => {
+		it("drops live thinking while preserving cleared history", async () => {
+			const now = Date.now();
+			const cleared: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "thinking", thinking: "cleared reasoning" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage,
+				timestamp: now,
+			};
 			const mixed: AssistantMessage = {
 				role: "assistant",
 				content: [
@@ -293,7 +366,7 @@ describe("AgentSession shake", () => {
 				...apiInfo,
 				stopReason: "stop",
 				usage,
-				timestamp: Date.now(),
+				timestamp: now + 1,
 			};
 			const thinkingOnly: AssistantMessage = {
 				role: "assistant",
@@ -301,8 +374,10 @@ describe("AgentSession shake", () => {
 				...apiInfo,
 				stopReason: "stop",
 				usage,
-				timestamp: Date.now() + 1,
+				timestamp: now + 2,
 			};
+			sessionManager.appendMessage(cleared);
+			sessionManager.appendResetBoundary();
 			sessionManager.appendMessage(mixed);
 			sessionManager.appendMessage(thinkingOnly);
 			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
@@ -313,6 +388,7 @@ describe("AgentSession shake", () => {
 			const result = await session.shake("thinking");
 
 			expect(result.thinkingBlocksDropped).toBe(3);
+			expect(cleared.content.map(block => block.type)).toEqual(["thinking"]);
 			expect(mixed.content).toEqual([{ type: "text", text: "visible answer" }]);
 			expect(thinkingOnly.content).toEqual([]);
 			expect(tokenizer.countMessage(mixed)).toBeLessThan(tokensBefore);
@@ -332,8 +408,11 @@ describe("AgentSession shake", () => {
 					.flatMap(entry =>
 						entry.type === "message" && entry.message.role === "assistant" ? [entry.message] : [],
 					);
-				expect(persistedAssistants.flatMap(message => message.content.map(block => block.type))).toEqual(["text"]);
-				expect(persistedAssistants.some(message => message.content.length === 0)).toBe(true);
+				const persistedCleared = persistedAssistants.find(message => message.timestamp === cleared.timestamp);
+				const persistedLive = persistedAssistants.filter(message => message.timestamp !== cleared.timestamp);
+				expect(persistedCleared?.content.map(block => block.type)).toEqual(["thinking"]);
+				expect(persistedLive.flatMap(message => message.content.map(block => block.type))).toEqual(["text"]);
+				expect(persistedLive.some(message => message.content.length === 0)).toBe(true);
 			} finally {
 				await persisted.close();
 			}

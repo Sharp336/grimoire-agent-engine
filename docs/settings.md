@@ -373,12 +373,13 @@ The advisor is a second model that reviews each completed turn and can inject ad
 
 See [Advisor and WATCHDOG.md](./advisor-watchdog.md) for runtime behavior, `WATCHDOG.md` discovery, and bounded catch-up semantics.
 
-| Key                   | Type    | Default | Notes                                                                                                                                                |
-| --------------------- | ------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `advisor.enabled`     | boolean | `false` | Enable the advisor runtime when `modelRoles.advisor` resolves to an available model.                                                                 |
-| `task.agentAdvisor`   | record  | `{}`    | Per-agent subagent advisor: agent name → `"on"` / `"off"` / advisor model pattern. Overrides agent frontmatter `advisor`; configured from the `/agents` hub. |
-| `advisor.syncBacklog` | enum    | `off`   | Bounded advisor catch-up delay: `off`, `1`, `3`, or `5`. The primary waits up to 30 seconds only while advisor backlog is at or above the threshold. |
-| `advisor.immuneTurns` | number  | `3`     | After a `concern`/`blocker` interrupts, route further concerns/blockers as non-interrupting asides for this many completed primary turns.            |
+| Key                             | Type    | Default | Notes                                                                                                                                                   |
+| ------------------------------- | ------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `advisor.enabled`               | boolean | `false` | Enable the advisor runtime when `modelRoles.advisor` resolves to an available model.                                                                    |
+| `advisor.compactBeforeGuidance` | boolean | `false` | Run normal primary context maintenance before an active advisor captures the completed turn.                                                            |
+| `task.agentAdvisor`             | record  | `{}`    | Per-agent subagent advisor: agent name → `"on"` / `"off"` / advisor model pattern. Overrides agent frontmatter `advisor`; configured from the `/agents` hub. |
+| `advisor.syncBacklog`           | enum    | `off`   | Bounded advisor catch-up delay: `off`, `1`, `3`, or `5`. The primary waits up to 30 seconds only while advisor backlog is at or above the threshold.    |
+| `advisor.immuneTurns`           | number  | `3`     | After a `concern`/`blocker` interrupts, route further concerns/blockers as non-interrupting asides for this many completed primary turns.               |
 
 ### Thinking
 
@@ -635,6 +636,7 @@ memory:
 | `compaction.reserveTokens`    | number  | _(unset)_                                | Absolute reserve floor. When unset, the effective reserve is the larger of `16384` and 15% of the context window; if that default would leave no practical small-window budget, it falls back to the 15% reserve.                         |
 | `compaction.keepRecentTokens` | number  | `20000`                                  | Recent tokens always preserved.                                                                                                                                                                                                           |
 | `compaction.autoContinue`     | boolean | `true`                                   | Continue automatically after compaction.                                                                                                                                                                                                  |
+| `goal.injectAsUserMessage`    | boolean | `false`                                  | Queue tool-created goal objectives as ordinary user follow-ups after the current turn. Objectives entered through `/goal` already use the normal user-submission path and are not duplicated.                                       |
 | `memory.backend`              | enum    | `off`                                    | `off`, `local`, `hindsight`, `mnemopi`. Each backend has its own `hindsight.*` / `mnemopi.*` / `memories.*` tuning keys.                                                                                                                  |
 | `autolearn.enabled`           | boolean | `false`       | Experimental: after the agent stops, nudge it to capture lessons to memory and create/enhance isolated managed skills under `~/.omp/agent/managed-skills`. Enables the `manage_skill` tool (and `learn` when a memory backend is active). |
 | `autolearn.autoContinue`      | boolean | `false`       | When `autolearn.enabled`, auto-run one capture turn at stop (uses extra tokens). Off = a passive reminder rides your next turn.                                                                                                           |

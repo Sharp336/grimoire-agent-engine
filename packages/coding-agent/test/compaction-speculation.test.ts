@@ -7,6 +7,8 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CompactionMethod } from "@oh-my-pi/pi-coding-agent/session/compaction-methods";
+import { readPreservedUserMessagesStore } from "@oh-my-pi/pi-coding-agent/session/preserve-user-messages";
+import * as preserveClassifierModule from "@oh-my-pi/pi-coding-agent/session/preserve-user-messages-classifier";
 import { SessionMaintenance, type SessionMaintenanceHost } from "@oh-my-pi/pi-coding-agent/session/session-maintenance";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import * as snapcompactModule from "@oh-my-pi/snapcompact";
@@ -206,6 +208,32 @@ describe("async speculative compaction", () => {
 		expect(entry?.type === "compaction" ? entry.summary : undefined).toBe("armed summary");
 		expect(compactSpy).toHaveBeenCalledTimes(1);
 		expect(events).toEqual(expect.arrayContaining(["auto_compaction_start", "auto_compaction_end"]));
+	});
+
+	it("persists the LLM preservation verdict when an armed summary is committed", async () => {
+		maintenanceSettings.set("compaction.keepUserMessages", true);
+		maintenanceSettings.set("compaction.keepUserMessagesFilter", "llm");
+		const classifierSpy = vi
+			.spyOn(preserveClassifierModule, "classifyPreservedUserMessages")
+			.mockImplementation(async candidates => (candidates[0] ? [candidates[0].id] : []));
+		vi.spyOn(compactionModule, "compact").mockImplementation(async preparation => ({
+			summary: "armed summary with verdict",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			details: {},
+		}));
+
+		maintenance.maybeStartSpeculativeCompaction(SPECULATION_BAND_START, CONTEXT_WINDOW);
+		await waitForState("armed");
+		await maintenance.runAutoCompaction("threshold", false, false, false, { triggerContextTokens: THRESHOLD });
+
+		expect(classifierSpy).toHaveBeenCalledTimes(1);
+		const candidates = classifierSpy.mock.calls[0]?.[0] ?? [];
+		const entry = sessionManager.getEntries().findLast(item => item.type === "compaction");
+		if (entry?.type !== "compaction") throw new Error("Expected committed armed compaction");
+		const store = readPreservedUserMessagesStore(entry.preserveData);
+		expect(store?.preservedIds).toEqual(candidates[0] ? [candidates[0].id] : []);
+		expect(store?.classifiedIds).toEqual(candidates.map(candidate => candidate.id));
 	});
 
 	it("replays a user turn appended while remote compaction is in flight", async () => {

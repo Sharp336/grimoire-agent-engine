@@ -15,6 +15,7 @@ import type { Tokenizer } from "../tokenizer";
 import type { AgentMessage } from "../types";
 import type { CustomMessageEntry, SessionEntry, SessionMessageEntry } from "./entries";
 import { invalidateMessageCache } from "./message-cache";
+import { resolveHistoryRewriteStartIndex } from "./rewrite-boundary";
 import {
 	collectToolCallsById,
 	isArtifactRecoveryToolResult,
@@ -40,6 +41,8 @@ export interface ShakeConfig {
 	 * boundary — that is its job as a compaction-class reducer.
 	 */
 	keepBoundaryId?: string;
+	/** Inclusive entry index for context-visible rewrites. Takes precedence over {@link keepBoundaryId}. */
+	rewriteStartIndex?: number;
 }
 
 /** Auto-shake config: protects the live tail, conservative thresholds. */
@@ -318,13 +321,7 @@ export function collectShakeRegions(entries: SessionEntry[], tokenizer: Tokenize
 
 	// Entries before the compaction boundary are summarized away and never sent —
 	// shaking them only churns persisted history (no prompt/cache effect).
-	const boundaryIndex =
-		config.keepBoundaryId === undefined
-			? 0
-			: Math.max(
-					0,
-					entries.findIndex(entry => entry.id === config.keepBoundaryId),
-				);
+	const boundaryIndex = resolveHistoryRewriteStartIndex(entries, config.rewriteStartIndex, config.keepBoundaryId);
 
 	const regions: ShakeRegion[] = [];
 	for (let i = 0; i < n; i++) {

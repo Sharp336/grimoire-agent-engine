@@ -81,7 +81,11 @@ describe("settings layout", () => {
 	});
 
 	it("hides advisor dependent settings when advisor is disabled", () => {
-		const advisorDependentPaths: SettingPath[] = ["advisor.syncBacklog", "advisor.immuneTurns"];
+		const advisorDependentPaths: SettingPath[] = [
+			"advisor.syncBacklog",
+			"advisor.immuneTurns",
+			"advisor.compactBeforeGuidance",
+		];
 		const advisorDependentPathSet = new Set(advisorDependentPaths);
 		const defs = getSettingsForTab("model").filter(def => advisorDependentPathSet.has(def.path));
 
@@ -150,6 +154,65 @@ describe("settings layout", () => {
 		Settings.instance.set("retry.usageAwareFallback", true);
 		expect(defs[1]?.condition?.()).toBe(true);
 		expect(defs[2]?.condition?.()).toBe(true);
+	});
+
+	it("reveals preserved-user-message pruning controls and lower window sizes", () => {
+		const defs = getSettingsForTab("context");
+		const filter = defs.find(def => def.path === "compaction.keepUserMessagesFilter");
+		const keepFirst = defs.find(def => def.path === "compaction.keepFirstNMessages");
+		const keepLast = defs.find(def => def.path === "compaction.keepLastNMessages");
+		const pruneMode = defs.find(def => def.path === "compaction.pruneLongUserMessages");
+		const maxTokens = defs.find(def => def.path === "compaction.maxTokensPerUserMessage");
+		if (keepFirst?.type !== "submenu" || keepLast?.type !== "submenu") {
+			throw new Error("Keep-message windows should render as submenus");
+		}
+		if (pruneMode?.type !== "submenu" || maxTokens?.type !== "submenu") {
+			throw new Error("Long-user-message pruning controls should render as submenus");
+		}
+
+		expect(keepFirst.options.slice(0, 8).map(option => option.value)).toEqual([
+			"0",
+			"1",
+			"3",
+			"5",
+			"10",
+			"15",
+			"25",
+			"50",
+		]);
+		expect(keepLast.options.slice(0, 8).map(option => option.value)).toEqual([
+			"0",
+			"1",
+			"3",
+			"5",
+			"10",
+			"15",
+			"25",
+			"50",
+		]);
+		expect(pruneMode.options.map(option => option.value)).toEqual([
+			"no",
+			"middle-out",
+			"head-only",
+			"tail-only",
+			"exclude",
+		]);
+		expect(filter?.condition?.()).toBe(false);
+		expect(pruneMode.condition?.()).toBe(false);
+		expect(maxTokens.condition?.()).toBe(false);
+
+		Settings.instance.set("compaction.keepUserMessages", true);
+		expect(filter?.condition?.()).toBe(true);
+		expect(pruneMode.condition?.()).toBe(true);
+		expect(maxTokens.condition?.()).toBe(false);
+
+		Settings.instance.set("compaction.pruneLongUserMessages", "middle-out");
+		expect(maxTokens.condition?.()).toBe(true);
+
+		Settings.instance.set("compaction.keepUserMessages", false);
+		expect(filter?.condition?.()).toBe(false);
+		expect(pruneMode.condition?.()).toBe(false);
+		expect(maxTokens.condition?.()).toBe(false);
 	});
 
 	it("exposes ask.enabled as a boolean under Available Tools", () => {

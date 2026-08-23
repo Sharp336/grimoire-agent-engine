@@ -7,6 +7,13 @@ import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-b
 import type { FreshSessionResult, HandoffResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
+import {
+	findLatestResetBoundaryIdx,
+	isRealUserMessageEntry,
+	PIN_MARKER_CUSTOM_TYPE,
+	pinnedUserMessageIds,
+} from "../session/preserve-user-messages";
+import type { SessionEntry } from "../session/session-entries";
 import { resolveResumableSession } from "../session/session-listing";
 import { toggleSessionPin } from "../session/session-pins";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
@@ -125,6 +132,68 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		handleTui: async (_command, runtime) => {
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleDropCommand();
+		},
+	},
+	{
+		name: "pin-message",
+		description: "Pin the most recent user message for pinned-only compaction preservation",
+		handle: async (_command, runtime) => {
+			if (runtime.session.isStreaming) {
+				await runtime.output("Pinning is unavailable while a response is in progress.");
+				return commandConsumed();
+			}
+			const branch = runtime.sessionManager.getBranch();
+			const epochIdx = findLatestResetBoundaryIdx(branch);
+			let target: SessionEntry | undefined;
+			for (let i = branch.length - 1; i > epochIdx; i--) {
+				const entry = branch[i];
+				if (isRealUserMessageEntry(entry)) {
+					target = entry;
+					break;
+				}
+			}
+			if (!target) {
+				await runtime.output("No user message to pin.");
+				return commandConsumed();
+			}
+			runtime.sessionManager.appendCustomEntry(PIN_MARKER_CUSTOM_TYPE, {
+				messageId: target.id,
+				pinned: true,
+			});
+			await runtime.output("Pinned the most recent user message for pinned-only compaction preservation.");
+			return commandConsumed();
+		},
+	},
+	{
+		name: "unpin-message",
+		description: "Unpin the most recently pinned user message",
+		handle: async (_command, runtime) => {
+			if (runtime.session.isStreaming) {
+				await runtime.output("Unpinning is unavailable while a response is in progress.");
+				return commandConsumed();
+			}
+			const branch = runtime.sessionManager.getBranch();
+			const epochIdx = findLatestResetBoundaryIdx(branch);
+			const epoch = branch.slice(epochIdx + 1);
+			const pinned = pinnedUserMessageIds(epoch);
+			let targetMessageId: string | undefined;
+			for (let i = epoch.length - 1; i >= 0; i--) {
+				const entry = epoch[i];
+				if (isRealUserMessageEntry(entry) && pinned.has(entry.id)) {
+					targetMessageId = entry.id;
+					break;
+				}
+			}
+			if (!targetMessageId) {
+				await runtime.output("No pinned user message to unpin.");
+				return commandConsumed();
+			}
+			runtime.sessionManager.appendCustomEntry(PIN_MARKER_CUSTOM_TYPE, {
+				messageId: targetMessageId,
+				pinned: false,
+			});
+			await runtime.output("Unpinned the most recently pinned user message.");
+			return commandConsumed();
 		},
 	},
 	{

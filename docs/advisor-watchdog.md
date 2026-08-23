@@ -87,6 +87,8 @@ Reset clears the advisor's private in-memory transcript and rewinds its cursor. 
 
 When the advisor is enabled mid-session, the cursor seeds to the current primary transcript length. That avoids replaying the whole old conversation on the first enabled turn.
 
+With `advisor.compactBeforeGuidance: true`, OMP runs its normal primary context maintenance before an active advisor captures a completed turn. Continuing tool loops retain the existing mid-turn settings, speculation, and context-promotion behavior; terminal reviews wait for the normal post-turn recovery and compaction pipeline.
+
 ## Tools and isolation
 
 The advisor is a full agent with its own `Agent` instance and a distinct `ToolSession` whose id is suffixed `-advisor`. It does not share the primary agent's file snapshots, seen-lines tracking, conflict state, or summary cache.

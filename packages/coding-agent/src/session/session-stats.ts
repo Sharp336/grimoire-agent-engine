@@ -15,7 +15,8 @@ import {
 	type NonMessageTokenSource,
 } from "../modes/utils/context-usage";
 import type { ContextUsageBreakdown, SessionStats } from "./agent-session-types";
-import { getLatestCompactionEntry } from "./session-context";
+import { getLatestCompactionEntry, getLiveContextRewriteStartIndex } from "./session-context";
+import type { SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
 interface PendingContextSnapshot {
@@ -30,6 +31,32 @@ interface PendingContextSnapshot {
 	epoch: number;
 }
 
+interface BranchUsageAnchor {
+	entry: SessionMessageEntry;
+	index: number;
+}
+
+export interface AnchoredHistoryRewrite {
+	entry: SessionEntry;
+	tokensRemoved: number;
+}
+
+function findBranchUsageAnchor(entries: readonly SessionEntry[], afterIndex: number): BranchUsageAnchor | undefined {
+	for (let index = entries.length - 1; index > afterIndex; index--) {
+		const entry = entries[index];
+		if (entry.type !== "message" || !isTranscriptUsageAnchor(entry.message)) continue;
+		return { entry, index };
+	}
+	return undefined;
+}
+
+function latestResetBoundaryIndex(entries: readonly SessionEntry[]): number {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		if (entries[index].type === "reset_boundary") return index;
+	}
+	return -1;
+}
+
 /** Capabilities the stats tracker borrows from its owning session. */
 export interface SessionStatsTrackerHost {
 	session: NonMessageTokenSource;
@@ -38,6 +65,7 @@ export interface SessionStatsTrackerHost {
 	modelRegistry: ModelRegistry;
 	model(): Model | undefined;
 	sessionId(): string;
+	transientOverlayTokens(): number;
 }
 
 function correctedPromptTokens(assistant: AssistantMessage): number {
@@ -159,21 +187,17 @@ export class SessionStatsTracker {
 		const branchEntries = this.#host.sessionManager.getBranch();
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
 		const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
+		const contextBoundaryIndex = Math.max(compactionIndex, latestResetBoundaryIndex(branchEntries));
 		let usedTokens = 0;
 		let anchored = false;
 		const pendingMessages = options?.pendingMessages ?? [];
 		const pendingTokens = this.#tokenizer.countMessages(pendingMessages);
 		const pending = this.#pendingContextSnapshot;
 
-		let anchorEntry: SessionMessageEntry | undefined;
-		for (let index = branchEntries.length - 1; index > compactionIndex; index--) {
-			const entry = branchEntries[index];
-			if (entry.type !== "message" || !isTranscriptUsageAnchor(entry.message)) continue;
-			anchorEntry = entry;
-			break;
-		}
+		const anchorEntry = findBranchUsageAnchor(branchEntries, contextBoundaryIndex)?.entry;
 
 		const activeMessages = this.#host.agent.state.messages;
+		const overlayTokens = this.#host.transientOverlayTokens();
 		let anchorIndex = -1;
 		let anchorAssistant: AssistantMessage | undefined;
 		if (anchorEntry?.message.role === "assistant") {
@@ -235,7 +259,16 @@ export class SessionStatsTracker {
 			}
 		}
 		if (!anchored) {
-			usedTokens = currentNonMessageTokens + this.#tokenizer.countMessages(activeMessages) + pendingTokens;
+			usedTokens =
+				currentNonMessageTokens + this.#tokenizer.countMessages(activeMessages) + pendingTokens + overlayTokens;
+		} else if (overlayTokens > 0) {
+			const countOptions = { excludeEncryptedReasoning: true } as const;
+			const localFloor =
+				currentNonMessageTokens +
+				this.#tokenizer.countMessages(activeMessages, countOptions) +
+				this.#tokenizer.countMessages(pendingMessages, countOptions) +
+				overlayTokens;
+			usedTokens = Math.max(usedTokens, localFloor);
 		}
 		return {
 			contextWindow,
@@ -283,34 +316,43 @@ export class SessionStatsTracker {
 	 * Apply an estimated prompt-prefix reduction to the current provider anchor.
 	 *
 	 * History after the anchor is estimated live by {@link getContextBreakdown};
-	 * callers must pass only savings from entries already included in the
-	 * anchor's provider-reported prompt. Persisting the correction on the
-	 * assistant snapshot keeps reloads accurate, and the next successful
-	 * assistant response naturally replaces it with a fresh provider anchor.
+	 * entry-level rewrites let this tracker distinguish history already included
+	 * in the provider report from the locally-counted tail and from source entries
+	 * replaced by reset or remote-compaction boundaries. Persisting the correction
+	 * on the assistant snapshot keeps reloads accurate; the next successful
+	 * response naturally replaces it with a fresh provider anchor.
 	 */
-	recordAnchoredHistoryRewrite(tokensRemoved: number): void {
-		if (!Number.isFinite(tokensRemoved) || tokensRemoved <= 0) return;
-
+	recordAnchoredHistoryRewrite(rewrites: readonly AnchoredHistoryRewrite[]): void {
+		if (rewrites.length === 0) return;
 		const branchEntries = this.#host.sessionManager.getBranch();
 		const latestCompaction = getLatestCompactionEntry(branchEntries);
 		const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
-		for (let index = branchEntries.length - 1; index > compactionIndex; index--) {
-			const entry = branchEntries[index];
-			if (entry.type !== "message" || !isTranscriptUsageAnchor(entry.message)) continue;
-			const assistant = entry.message;
+		const rewriteStartIndex = getLiveContextRewriteStartIndex(branchEntries);
+		const contextBoundaryIndex = Math.max(compactionIndex, latestResetBoundaryIndex(branchEntries));
+		const anchor = findBranchUsageAnchor(branchEntries, contextBoundaryIndex);
+		if (!anchor) return;
 
-			if (!assistant.contextSnapshot) {
-				assistant.contextSnapshot = {
-					promptTokens: calculatePromptTokens(assistant.usage),
-					nonMessageTokens: computeNonMessageTokens(this.#host.session, this.#tokenizer),
-					compactionEpoch: this.#compactionEpoch,
-				};
-			}
-			const snapshot = assistant.contextSnapshot;
-			snapshot.historyRewriteTokensRemoved = (snapshot.historyRewriteTokensRemoved ?? 0) + Math.floor(tokensRemoved);
-			this.#contextUsageRevision++;
-			return;
+		const entryIndexes = new Map(branchEntries.map((entry, index) => [entry, index]));
+		let tokensRemoved = 0;
+		for (const rewrite of rewrites) {
+			if (!Number.isFinite(rewrite.tokensRemoved) || rewrite.tokensRemoved <= 0) continue;
+			const entryIndex = entryIndexes.get(rewrite.entry);
+			if (entryIndex === undefined || entryIndex < rewriteStartIndex || entryIndex >= anchor.index) continue;
+			tokensRemoved += rewrite.tokensRemoved;
 		}
+		if (tokensRemoved <= 0) return;
+
+		const assistant = anchor.entry.message as AssistantMessage;
+		if (!assistant.contextSnapshot) {
+			assistant.contextSnapshot = {
+				promptTokens: calculatePromptTokens(assistant.usage),
+				nonMessageTokens: computeNonMessageTokens(this.#host.session, this.#tokenizer),
+				compactionEpoch: this.#compactionEpoch,
+			};
+		}
+		const snapshot = assistant.contextSnapshot;
+		snapshot.historyRewriteTokensRemoved = (snapshot.historyRewriteTokensRemoved ?? 0) + Math.floor(tokensRemoved);
+		this.#contextUsageRevision++;
 	}
 
 	/** Sets or clears the in-flight context snapshot. */

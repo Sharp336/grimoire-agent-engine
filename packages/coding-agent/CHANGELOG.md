@@ -2,6 +2,28 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed snapcompact dead-end recovery resurrecting archives cleared by `/clear`.
+- Fixed context usage staying inflated after live tool outputs were pruned, while preserving cleared and provider-compacted source history.
+- Mid-turn compaction now keeps parallel tool results ordered and present exactly once in the next model request.
+- Advisor context resets no longer retain an aborted in-flight review in the fresh advisor transcript.
+### Added
+
+- Added `compaction.keepUserMessages`: selected user-authored messages can be transiently re-emitted after the active summary across every compaction strategy without changing stored or displayed history. Selection can keep all eligible messages, discard pure acknowledgments heuristically, use a durable tiny-model verdict, or require explicit `/pin-message`.
+- Added `compaction.keepFirstNMessages` and `compaction.keepLastNMessages` to cap selected preserved messages at either edge of folded history; filter-rejected messages do not consume window slots.
+- Added `compaction.pruneLongUserMessages` and `compaction.maxTokensPerUserMessage` to truncate or exclude oversized preserved messages before applying the first/last windows.
+
+### Fixed
+
+- Preserved user messages count toward context usage, compaction, and snapcompact budgets, preventing under-reported or oversized provider contexts and repeated maintenance attempts.
+### Added
+
+- Advisor guidance can optionally wait for primary context maintenance before reviewing each completed turn.
+### Added
+
+- Tool-created goal objectives can optionally be queued as ordinary user follow-ups without duplicating `/goal` input.
+
 ## [18.0.3] - 2026-08-23
 
 ### Added
