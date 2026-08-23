@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as os from "node:os";
 import type { TUI } from "@oh-my-pi/pi-tui";
 import { resetSettingsForTest, Settings } from "../../../src/config/settings";
@@ -32,6 +32,7 @@ beforeEach(async () => {
 
 afterEach(() => {
 	resetSettingsForTest();
+	vi.restoreAllMocks();
 });
 
 function progressMessage(text = RAW_PROGRESS): CustomMessage<AsyncProgressDetails> {
@@ -89,6 +90,21 @@ describe("async progress transcript display sanitization", () => {
 		expect(message.content).toBe(sourceContent);
 		expect(message.details?.jobs[0]?.text).toBe(rawProgress);
 		expect(JSON.stringify(message.details)).toBe(sourceDetails);
+	});
+
+	it("shortens mixed-case Windows home paths without exposing the user directory", () => {
+		vi.spyOn(os, "homedir").mockReturnValue("C:\\Users\\Pedro");
+		const backslashPath = "c:\\USERS\\pEdRo\\projects\\build.log";
+		const slashPath = "C:/users/PEDRO/projects/build.log";
+		const message = progressMessage(`native: ${backslashPath}\nportable: ${slashPath}`);
+
+		const displayMessage = buildAsyncProgressDisplayMessage(message);
+
+		expect(displayMessage.content).toContain("native: ~\\projects\\build.log");
+		expect(displayMessage.content).toContain("portable: ~/projects/build.log");
+		expect(displayMessage.content).not.toContain("users");
+		expect(message.content).toContain(backslashPath);
+		expect(message.content).toContain(slashPath);
 	});
 
 	it("sanitizes tabs and home paths in a rebuilt transcript without changing the stored message", () => {

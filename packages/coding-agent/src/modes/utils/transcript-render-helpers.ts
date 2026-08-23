@@ -18,7 +18,7 @@ import {
 	shouldRenderAbortReason,
 } from "../../session/messages";
 import { createIrcMessageCard } from "../../tools/hub";
-import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
+import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { ToolActivityContainer } from "../components/tool-activity";
 import { TranscriptBlock } from "../components/transcript-container";
@@ -35,9 +35,13 @@ function sanitizeAsyncProgressDisplayText(text: string): string {
 	const home = os.homedir();
 	if (!home) return truncateAsyncProgressDisplayLines(display);
 	const homePaths = home.includes("\\") ? [home, home.replaceAll("\\", "/")] : [home];
+	const caseInsensitive = home.includes("\\") || /^[A-Za-z]:\//.test(home);
 	for (const homePath of homePaths) {
-		const homePrefix = new RegExp(`(?<![^\\s"'()\\[\\]{}<>=:;,|&/])${escapeRegExp(homePath)}(?=$|[\\\\/])`, "g");
-		display = display.replace(homePrefix, match => shortenPath(match, homePath));
+		const homePrefix = new RegExp(
+			`(?<![^\\s"'()\\[\\]{}<>=:;,|&/\\\\])${escapeRegExp(homePath)}(?=$|[\\\\/])`,
+			caseInsensitive ? "gi" : "g",
+		);
+		display = display.replace(homePrefix, "~");
 	}
 	return truncateAsyncProgressDisplayLines(display);
 }
