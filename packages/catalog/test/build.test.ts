@@ -342,6 +342,18 @@ describe("xAI Responses reasoning-effort suppression", () => {
 		expect(oauth.supportsReasoningSummary).toBe(false);
 	});
 
+	it("preserves an explicit Responses reasoning-summary opt-out", () => {
+		const spec = {
+			...grokResponsesSpec("gpt-5.4"),
+			provider: "custom-openai-proxy",
+			baseUrl: "https://models.example.test/v1",
+			compat: { supportsReasoningSummary: false },
+		};
+
+		expect(buildOpenAIResponsesCompat(spec).supportsReasoningSummary).toBe(false);
+		expect(buildOpenAIResponsesCompat({ ...spec, compat: undefined }).supportsReasoningSummary).toBe(true);
+	});
+
 	it("suppresses penalty params on every first-party xAI Responses model", () => {
 		const reasoning = buildOpenAIResponsesCompat(grokResponsesSpec("grok-4.5", "xai"));
 		const nonReasoning = buildOpenAIResponsesCompat({

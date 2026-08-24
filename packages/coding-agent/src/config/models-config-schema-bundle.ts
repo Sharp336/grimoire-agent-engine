@@ -56,6 +56,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"alwaysSendMaxTokens?": "boolean",
 		"strictResponsesPairing?": "boolean",
 		"supportsImageDetailOriginal?": "boolean",
+		"supportsReasoningSummary?": "boolean",
 		// anthropic-messages compat flags (same `compat` slot, per-api interpretation)
 		"supportsContextManagement?": "boolean",
 		"supportsEagerToolInputStreaming?": "boolean",

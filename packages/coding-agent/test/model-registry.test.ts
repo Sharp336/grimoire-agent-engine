@@ -624,6 +624,7 @@ describe("ModelRegistry", () => {
 						api: "openai-codex-responses",
 						compat: {
 							supportsImageDetailOriginal: false,
+							supportsReasoningSummary: false,
 						},
 						remoteCompaction: {
 							enabled: true,
@@ -736,10 +737,11 @@ describe("ModelRegistry", () => {
 			expect(getReplayUnsignedThinking(registry.find("anthropic", "claude-sonnet-5"))).toBe(false);
 		});
 
-		test("custom Responses providers can disable original image detail", () => {
+		test("custom Responses providers preserve authored compatibility", () => {
 			const model = customResponsesCompat.find("cc-switch", "gpt-5.5");
 			const compat = getOpenAICompat(model);
 			expect(compat?.supportsImageDetailOriginal).toBe(false);
+			expect(compat?.supportsReasoningSummary).toBe(false);
 		});
 
 		test("custom Responses providers preserve compaction config", () => {

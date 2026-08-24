@@ -366,6 +366,12 @@ export interface OpenAICompat {
 	/** Whether request shaping may send reasoning params at all. Default: auto-detected (disabled for GitHub Copilot chat-completions). */
 	supportsReasoningParams?: boolean;
 	/**
+	 * Whether Responses requests may include `reasoning.summary`. Set false for
+	 * compatible proxies that accept reasoning but emit an incomplete summary
+	 * event stream. Defaults to true except on known incompatible hosts.
+	 */
+	supportsReasoningSummary?: boolean;
+	/**
 	 * Whether the endpoint accepts explicit sampling parameters (`temperature`,
 	 * `top_p`, `top_k`, `min_p`, penalties). OpenAI proprietary reasoning models
 	 * (o-series, gpt-5+) reject them with `400 Unsupported parameter:
@@ -705,6 +711,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "openRouterRouting"
 			| "isOpenRouterHost"
 			| "supportsStrictMode"
+			| "supportsReasoningSummary"
 			| "supportsLongPromptCacheRetention"
 			| "alwaysSendMaxTokens"
 			| "wireModelIdMode"
