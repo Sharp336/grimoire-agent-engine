@@ -36,6 +36,7 @@
 - Fixed fast tool completions leaving a permanent running summary that blocked transcript retirement and squeezed later tool output.
 - Fixed `omp git` hunk navigation (`alt+↓`/`alt+↑`) appearing to do nothing while the file sidebar had focus: the diff cursor band now stays visible (dimmed) when the pane is unfocused.
 - Fixed the git TUI sidebar jumping back to the top of the file list after staging or unstaging a file; selection now stays on the nearest remaining row
+- Fixed collab host UI requests raised before a writable guest joins being lost; up to 64 pending asks now replay to later writers ([#9031](https://github.com/can1357/oh-my-pi/pull/9031) by [@alphastorm](https://github.com/alphastorm)).
 
 ## [18.0.4] - 2026-08-24
 
