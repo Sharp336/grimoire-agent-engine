@@ -88,4 +88,42 @@ describe("MCPManager connection status events", () => {
 			await manager.disconnectAll();
 		}
 	});
+
+	it("surfaces a filter-empty failure (not connected) when tools/list lands after the startup window", async () => {
+		// A server whose initialize stalls past the 250 ms startup window
+		// resolves in the background continuation. When its filter excludes
+		// every advertised tool, that path must emit a `failed` status (not a
+		// silent `connected` with no tools) so the user sees the per-server error.
+		const manager = new MCPManager(workDir);
+		const events: McpConnectionStatusEvent[] = [];
+		const slowFiltered: MCPServerConfig = {
+			type: "stdio",
+			command: BUN_EXEC,
+			args: [FIXTURE_PATH, "--delay", "400"],
+			enabledTools: ["never_advertised"],
+		};
+
+		try {
+			const result = await manager.connectServers({ slow: slowFiltered }, {}, event => events.push(event));
+			// The synchronous result sees the server still pending (no error set).
+			expect(result.errors.has("slow")).toBe(false);
+			expect(result.connectedServers).not.toContain("slow");
+
+			// Wait for the background continuation to settle.
+			const deadline = Date.now() + 10_000;
+			while (Date.now() < deadline && !events.some(e => e.type === "failed" || e.type === "connected")) {
+				await Bun.sleep(25);
+			}
+
+			const terminal = events.filter(e => e.type === "failed" || e.type === "connected");
+			expect(terminal).toHaveLength(1);
+			expect(terminal[0].type).toBe("failed");
+			if (terminal[0].type === "failed") {
+				expect(terminal[0].serverName).toBe("slow");
+				expect(terminal[0].error).toMatch(/tool filter excludes all 45 advertised tools/);
+			}
+		} finally {
+			await manager.disconnectAll();
+		}
+	});
 });

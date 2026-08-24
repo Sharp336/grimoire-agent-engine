@@ -178,6 +178,20 @@ export function parseArrayOrCSV(value: unknown): string[] | undefined {
 }
 
 /**
+ * Parse a value that must be an array of non-empty strings.
+ *
+ * Unlike {@link parseArrayOrCSV}, a string input is rejected (not split on
+ * commas): entries may contain commas inside brace globs (e.g.
+ * `"{create,delete}_*"`), so a CSV split would silently break them. Non-string
+ * array items are dropped; an empty result yields undefined.
+ */
+export function parseStringArray(value: unknown): string[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const filtered = value.filter((item): item is string => typeof item === "string" && item.length > 0);
+	return filtered.length > 0 ? filtered : undefined;
+}
+
+/**
  * Build a canonical rule item from a markdown/markdown-frontmatter document.
  */
 export function buildRuleFromMarkdown(

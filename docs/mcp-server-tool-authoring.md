@@ -22,7 +22,7 @@ Config sources (.omp/.claude/.cursor/.vscode/mcp.json, mcp.json, etc.)
 - `stdio` (default when `type` missing): requires `command`, optional `args`, `env`, `cwd`
 - `http`: requires `url`, optional `headers`
 - `sse`: requires `url`, optional `headers` (kept for compatibility)
-- shared fields: `enabled`, `timeout`, `requestIdFormat` (`"number"` or `"string"`), `auth`, `oauth`
+- shared fields: `enabled`, `timeout`, `requestIdFormat` (`"number"` or `"string"`), `auth`, `oauth`, and the per-server tool filter fields `enabledTools` / `disabledTools` (allowlist/denylist of raw advertised tool names, globs allowed; denylist wins when both are set) (OMP-native configs only; translated configs ignore these — see mcp-config.md)
 
 `validateServerConfig()` (`src/mcp/config.ts`) enforces transport basics:
 

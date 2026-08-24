@@ -125,4 +125,44 @@ describe("standalone mcp.json oauth env expansion", () => {
 		});
 		expect(server?.auth).toBeUndefined();
 	});
+
+	test("parses enabledTools/disabledTools arrays, preserving brace globs", async () => {
+		await fs.writeFile(
+			path.join(tempDir, ".mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					slack: {
+						url: "https://slack.example.com/mcp",
+						enabledTools: ["search", "{create,delete}_*"],
+						disabledTools: ["schedule_message"],
+					},
+				},
+			}),
+		);
+
+		const [server] = await loadStandaloneMcpConfig(tempDir);
+		expect(server?.enabledTools).toEqual(["search", "{create,delete}_*"]);
+		expect(server?.disabledTools).toEqual(["schedule_message"]);
+	});
+
+	test("ignores non-array enabledTools/disabledTools values", async () => {
+		// The schema mandates arrays; a string is not comma-split so a brace
+		// glob can never be silently broken by CSV parsing.
+		await fs.writeFile(
+			path.join(tempDir, ".mcp.json"),
+			JSON.stringify({
+				mcpServers: {
+					slack: {
+						url: "https://slack.example.com/mcp",
+						enabledTools: "search,read",
+						disabledTools: "{create,delete}_*",
+					},
+				},
+			}),
+		);
+
+		const [server] = await loadStandaloneMcpConfig(tempDir);
+		expect(server?.enabledTools).toBeUndefined();
+		expect(server?.disabledTools).toBeUndefined();
+	});
 });

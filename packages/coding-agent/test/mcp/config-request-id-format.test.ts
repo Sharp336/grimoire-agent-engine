@@ -121,3 +121,38 @@ test('an explicit "number" is the default, so dedup collapses it with an unset a
 	// same connection and only one survives.
 	expect(Object.keys(configs)).toHaveLength(1);
 });
+
+test("differing enabledTools prevents equivalence dedup from collapsing two aliases", async () => {
+	const configs = await loadFrom(path.join(".omp", "mcp.json"), {
+		"fs-read": { type: "stdio", command: "/usr/bin/fs-mcp", enabledTools: ["read_file"] },
+		"fs-write": { type: "stdio", command: "/usr/bin/fs-mcp", enabledTools: ["write_file"] },
+	});
+
+	// Same command but different tool filters — both must survive so each
+	// filter subset reaches the model context. If dedup collapsed them, one
+	// server's selected tools would never be registered.
+	expect(Object.keys(configs).sort()).toEqual(["fs-read", "fs-write"]);
+	expect(configs["fs-read"]?.enabledTools).toEqual(["read_file"]);
+	expect(configs["fs-write"]?.enabledTools).toEqual(["write_file"]);
+});
+
+test("matching enabledTools and disabledTools still allows dedup to collapse aliases", async () => {
+	const configs = await loadFrom(path.join(".omp", "mcp.json"), {
+		"fs-a": { type: "stdio", command: "/usr/bin/fs-mcp", enabledTools: ["read_file"], disabledTools: ["dangerous"] },
+		"fs-b": { type: "stdio", command: "/usr/bin/fs-mcp", enabledTools: ["read_file"], disabledTools: ["dangerous"] },
+	});
+
+	// Identical transport AND identical filters → same connection, only one survives.
+	expect(Object.keys(configs)).toHaveLength(1);
+});
+test("filter sets with same members in different order or with duplicates collapse as one connection", async () => {
+	const configs = await loadFrom(path.join(".omp", "mcp.json"), {
+		"fs-a": { type: "stdio", command: "/usr/bin/fs-mcp", enabledTools: ["read_file", "write_file"] },
+		"fs-b": { type: "stdio", command: "/usr/bin/fs-mcp", enabledTools: ["write_file", "read_file", "read_file"] },
+	});
+
+	// Matching is set-based, so order and duplicates don't change behavior:
+	// both aliases expose the identical subset and must collapse to one
+	// connection (no duplicate tool schemas under two prefixes).
+	expect(Object.keys(configs)).toHaveLength(1);
+});
