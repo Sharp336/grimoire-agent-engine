@@ -1,3 +1,5 @@
+import { PREVIEW_LIMITS } from "../tools/render-utils";
+
 /**
  * Fixed-size identity of the exact normalized stream consumed by
  * {@link ProgressLines}. UTF-16 code units match JavaScript string equality
@@ -55,9 +57,8 @@ export interface ProgressLine {
 
 /** Incrementally reports complete, non-empty output lines with bounded partial state. */
 export class ProgressLines {
-	static readonly MAX_LINE_CHARS = 500;
-	static readonly #HEAD_CHARS = Math.floor(ProgressLines.MAX_LINE_CHARS / 2);
-	static readonly #TAIL_CHARS = ProgressLines.MAX_LINE_CHARS - ProgressLines.#HEAD_CHARS;
+	static readonly #HEAD_CHARS = Math.floor(PREVIEW_LIMITS.PROGRESS_LINE_CHARS / 2);
+	static readonly #TAIL_CHARS = PREVIEW_LIMITS.PROGRESS_LINE_CHARS - ProgressLines.#HEAD_CHARS;
 	readonly #report: (line: ProgressLine) => void;
 	#partial = "";
 	#head = "";
@@ -160,7 +161,7 @@ export class ProgressLines {
 					: `${boundedSlice(this.#tail, ProgressLines.#TAIL_CHARS - segment.length, true)}${segment}`;
 			return;
 		}
-		if (this.#partial.length + segment.length <= ProgressLines.MAX_LINE_CHARS) {
+		if (this.#partial.length + segment.length <= PREVIEW_LIMITS.PROGRESS_LINE_CHARS) {
 			this.#partial += segment;
 			return;
 		}

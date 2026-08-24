@@ -3931,7 +3931,7 @@ export class AgentSession {
 		return () => this.#runStateListeners.delete(listener);
 	}
 
-	/** Register cleanup that runs when this AgentSession adopts a different session ID. */
+	/** Register cleanup that runs when this AgentSession crosses a conversation or session boundary. */
 	registerSessionChangeCallback(callback: () => void): () => void {
 		this.#sessionChangeCallbacks.add(callback);
 		return () => this.#sessionChangeCallbacks.delete(callback);
@@ -4017,7 +4017,7 @@ export class AgentSession {
 			this.#observedSessionId = currentSessionId;
 		} else if (this.#observedSessionId !== currentSessionId) {
 			this.#observedSessionId = currentSessionId;
-			if (notifyChange) this.#notifySessionChangeCallbacks();
+			if (notifyChange) this.#notifyContextBoundaryCallbacks();
 		}
 		const sid = this.#activeProviderSessionId(sessionId);
 		this.agent.sessionId = sid;
@@ -4040,12 +4040,14 @@ export class AgentSession {
 		if (this.#advisors) this.#advisors.refreshProviderIdentity();
 	}
 
-	#notifySessionChangeCallbacks(): void {
-		for (const callback of [...this.#sessionChangeCallbacks]) {
+	#notifyContextBoundaryCallbacks(): void {
+		const callbacks = [...this.#sessionChangeCallbacks];
+		this.#sessionChangeCallbacks.clear();
+		for (const callback of callbacks) {
 			try {
 				callback();
 			} catch (error) {
-				logger.warn("Session change callback failed", { error: String(error) });
+				logger.warn("Context boundary cleanup failed", { error: String(error) });
 			}
 		}
 	}
@@ -6516,6 +6518,11 @@ export class AgentSession {
 	#beginLaunchProgressBoundary(): Disposable {
 		this.#launchProgressBoundaryDepth += 1;
 		this.#launchProgressEpoch += 1;
+		// Registrations own broker subscriptions and artifact resources in
+		// addition to active-monitor bookkeeping. Tear them down synchronously
+		// at every context boundary; their cleanup callbacks are idempotent and
+		// unregister themselves from this snapshotted iteration.
+		this.#notifyContextBoundaryCallbacks();
 		if (this.#activeLaunchMonitors.size > 0) {
 			this.#activeLaunchMonitors.clear();
 			this.#signalLaunchMonitorChanged();
@@ -8490,7 +8497,7 @@ export class AgentSession {
 			}
 			this.#bash.finishSessionTransition(bashTransition, true);
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
-				this.#notifySessionChangeCallbacks();
+				this.#notifyContextBoundaryCallbacks();
 			}
 			return true;
 		} catch (error) {

@@ -414,7 +414,7 @@ export interface ToolSession {
 	setLaunchMonitorActive?(monitorId: string, delivery: AsyncJobProgressDelivery, active: boolean, epoch: number): void;
 	/** Register cleanup that runs when this session is disposed; returns a handle that removes the cleanup. */
 	registerDisposeCallback?(callback: () => void): (() => void) | void;
-	/** Register cleanup that runs when this ToolSession adopts a different session ID. */
+	/** Register cleanup that runs when this ToolSession crosses a conversation or session boundary. */
 	registerSessionChangeCallback?(callback: () => void): (() => void) | void;
 	/** Queue late LSP diagnostics (arrived after an edit/write returned) to be shown
 	 *  in the transcript and delivered to the model at the next yield, like background

@@ -57,6 +57,7 @@ interface MonitorHarness {
 	active: Array<{ monitorId: string; delivery: string; active: boolean }>;
 	epochs: number[];
 	disposeCallbacks: Array<() => void>;
+	contextBoundaryCallbacks: Set<() => void>;
 	getOutputSink(): ((notification: DaemonMonitorNotification) => void | Promise<void>) | undefined;
 	getSubscription(): DaemonOutputSubscription | undefined;
 	unregisterCount(): number;
@@ -79,6 +80,7 @@ function createHarness(
 	const active: MonitorHarness["active"] = [];
 	const epochs: number[] = [];
 	const disposeCallbacks: Array<() => void> = [];
+	const contextBoundaryCallbacks = new Set<() => void>();
 	let outputSink: ((notification: DaemonMonitorNotification) => void | Promise<void>) | undefined;
 	let subscription: DaemonOutputSubscription | undefined;
 	let unregisters = 0;
@@ -143,7 +145,10 @@ function createHarness(
 		registerDisposeCallback: (callback: () => void) => {
 			disposeCallbacks.push(callback);
 		},
-		registerSessionChangeCallback: () => {},
+		registerSessionChangeCallback: (callback: () => void) => {
+			contextBoundaryCallbacks.add(callback);
+			return () => contextBoundaryCallbacks.delete(callback);
+		},
 	} as unknown as ToolSession;
 	return {
 		client,
@@ -153,6 +158,7 @@ function createHarness(
 		completions,
 		active,
 		disposeCallbacks,
+		contextBoundaryCallbacks,
 		epochs,
 		getOutputSink: () => outputSink,
 		getSubscription: () => subscription,
@@ -871,6 +877,26 @@ describe("hub process output monitoring", () => {
 		for (const dispose of harness.disposeCallbacks) dispose();
 
 		expect(harness.unregisterCount()).toBe(1);
+		expect(harness.requests.some(operation => operation.op === "stop")).toBeFalse();
+	});
+
+	it("context boundary cleanup disposes the output registration without stopping the process", async () => {
+		const harness = createHarness();
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+
+		await executeLaunch(harness.session, { op: "monitor", name: daemon.name, progress: "wake" });
+		const subscription = harness.getSubscription();
+		const cleanups = [...harness.contextBoundaryCallbacks];
+		if (!subscription || cleanups.length === 0) throw new Error("Expected context-bound output registration");
+
+		for (const cleanup of cleanups) cleanup();
+		for (const cleanup of cleanups) cleanup();
+
+		expect(harness.unregisterCount()).toBe(1);
+		expect(harness.registrationCount()).toBe(0);
+		expect(harness.getOutputSink()).toBeUndefined();
+		expect(harness.contextBoundaryCallbacks.size).toBe(0);
+		expect(harness.active.at(-1)).toEqual({ monitorId: subscription.id, delivery: "wake", active: false });
 		expect(harness.requests.some(operation => operation.op === "stop")).toBeFalse();
 	});
 

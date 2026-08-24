@@ -457,14 +457,18 @@ async function registerOutputSink(
 		cleanup: () => {
 			if (cleanupPromise) return cleanupPromise;
 			registration.active = false;
+			// Fence synchronous re-entry before unregistering broker/session
+			// callbacks; every underlying resource must be released at most once.
+			cleanupPromise = Promise.resolve();
 			session.setLaunchMonitorActive?.(id, registration.delivery, false, registration.epoch);
 			unregisterOutput();
 			unregisterDispose?.();
 			unregisterSessionChange?.();
-			monitors.delete(name);
-			if (monitors.size === 0) clients.delete(client);
-			if (clients.size === 0) outputRegistrations.delete(session);
-			cleanupPromise = Promise.resolve();
+			if (monitors.get(name) === registration) monitors.delete(name);
+			if (monitors.size === 0 && clients.get(client) === monitors) clients.delete(client);
+			if (clients.size === 0 && outputRegistrations.get(session) === clients) {
+				outputRegistrations.delete(session);
+			}
 			return cleanupPromise;
 		},
 	};

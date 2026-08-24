@@ -63,6 +63,8 @@ export const PREVIEW_LIMITS = {
 	OUTPUT_EXPANDED: 10,
 	/** UTF-8 bytes retained in progress previews */
 	PROGRESS_BYTES: 3_000,
+	/** UTF-16 code units retained from each reported progress line */
+	PROGRESS_LINE_CHARS: 500,
 	/** Computer script lines shown in collapsed view */
 	COMPUTER_CODE_COLLAPSED: 10,
 	/** Max hunks shown when collapsed (edit tool) */

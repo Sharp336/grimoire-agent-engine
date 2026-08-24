@@ -393,6 +393,14 @@ describe("AgentSession owner-routed async delivery", () => {
 			settings: Settings.isolated(),
 			modelRegistry: new ModelRegistry(authStorage),
 		});
+		const contextSessionId = sessionManager.getSessionId();
+		let staleRegistrationOpen = true;
+		let unregisterCleanup = (): void => {};
+		const cleanupRegistration = vi.fn(() => {
+			staleRegistrationOpen = false;
+			unregisterCleanup();
+		});
+		unregisterCleanup = session.registerSessionChangeCallback(cleanupRegistration);
 		const oldMonitorEpoch = session.captureLaunchProgressEpoch();
 		session.setLaunchMonitorActive("monitor-reset", "ambient", true, oldMonitorEpoch);
 		const owner = sessionManager.getSessionId();
@@ -424,6 +432,9 @@ describe("AgentSession owner-routed async delivery", () => {
 		});
 		const reset = session.resetSessionContext();
 		await refreshStarted.promise;
+		expect(sessionManager.getSessionId()).toBe(contextSessionId);
+		expect(cleanupRegistration).toHaveBeenCalledTimes(1);
+		expect(staleRegistrationOpen).toBe(false);
 		session.queueLaunchProgress(
 			{
 				event: "daemon-output",
