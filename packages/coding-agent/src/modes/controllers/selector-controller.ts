@@ -609,6 +609,11 @@ export class SelectorController {
 				this.ctx.rebuildChatFromMessages();
 				this.ctx.ui.resetDisplay();
 				break;
+			case "display.showSlashCommandIcons":
+				void this.ctx.refreshSlashCommandState().catch(err => {
+					this.ctx.showError(`Failed to refresh slash-command icons: ${err}`);
+				});
+				break;
 			case "tui.tight":
 				setTuiTight(value as boolean);
 				this.ctx.ui.invalidate();

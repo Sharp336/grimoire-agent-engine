@@ -714,6 +714,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"display.showSlashCommandIcons": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Slash Command Icons",
+			description: "Show type icons before slash-command autocomplete entries",
+		},
+	},
+
 	colorBlindMode: {
 		type: "boolean",
 		default: false,
