@@ -11,12 +11,14 @@ import { registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type Hook, hookCapability } from "../capability/hook";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
+import { type Rule, ruleCapability } from "../capability/rule";
 import { type Skill, skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
 import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
 import { legacyProviderAllowed } from "./agent-plugin-format";
 import {
+	buildRuleFromMarkdown,
 	type ClaudePluginRoot,
 	createSourceMeta,
 	expandEnvVarsDeep,
@@ -241,6 +243,49 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 		}
 	}
 	return { items, warnings };
+}
+
+// =============================================================================
+// Rules
+// =============================================================================
+
+/**
+ * Marketplace plugins ship rules in a conventional `rules/` directory.
+ *
+ * Unlike `skills`/`commands`, the Claude plugin manifest has no `rules` field,
+ * so there is no manifest-declared override to resolve — the default directory
+ * is the only source. Parsing goes through `buildRuleFromMarkdown` so plugin
+ * rules get the same frontmatter handling (globs, alwaysApply, conditions,
+ * scope) as every other rule provider.
+ *
+ * `--plugin-dir` roots are prepended by `listClaudePluginRoots` with highest
+ * precedence. Scope-sort only the remaining registry roots so project
+ * marketplace rules beat user ones without demoting explicit local plugin dirs
+ * (synthetic roots are `scope: "user"` and would otherwise lose).
+ */
+async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
+	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
+	const firstRegistry = roots.findIndex(root => root.marketplace !== "__local__");
+	const injected = firstRegistry === -1 ? roots : roots.slice(0, firstRegistry);
+	const registry = firstRegistry === -1 ? [] : roots.slice(firstRegistry);
+	const scopedRegistry = [...registry].sort((a, b) => {
+		if (a.scope === b.scope) return 0;
+		return a.scope === "project" ? -1 : 1;
+	});
+	const orderedRoots = [...injected, ...scopedRegistry];
+	const results = await Promise.all(
+		orderedRoots.map(root =>
+			loadFilesFromDir<Rule>(ctx, path.join(root.path, "rules"), PROVIDER_ID, root.scope, {
+				extensions: ["md", "mdc"],
+				transform: (name, content, filePath, source) =>
+					buildRuleFromMarkdown(name, content, filePath, source, { stripNamePattern: /\.(md|mdc)$/ }),
+			}),
+		),
+	);
+	return {
+		items: results.flatMap(r => r.items),
+		warnings: [...rootWarnings, ...results.flatMap(r => r.warnings ?? [])],
+	};
 }
 
 // =============================================================================
@@ -614,6 +659,14 @@ registerProvider<SlashCommand>(slashCommandCapability.id, {
 	description: "Load slash commands from Claude Code marketplace plugins",
 	priority: PRIORITY,
 	load: loadSlashCommands,
+});
+
+registerProvider<Rule>(ruleCapability.id, {
+	id: PROVIDER_ID,
+	displayName: DISPLAY_NAME,
+	description: "Load rules from Claude Code marketplace plugins",
+	priority: PRIORITY,
+	load: loadRules,
 });
 
 registerProvider<Hook>(hookCapability.id, {
