@@ -261,6 +261,7 @@ import {
 	semanticToolResult,
 } from "./checkpoint-entries";
 import type { ClientBridge } from "./client-bridge";
+import { formatCodeModeToolReference } from "./code-mode";
 import {
 	type CodexAutoRedeemCoordinator,
 	type CodexResetAction,
@@ -5361,12 +5362,25 @@ export class AgentSession {
 		// Capability gates, not the visible surface: a Code Mode partition keeps
 		// `task` and `ask` callable through the eval bridge after demoting them.
 		const capableToolNames = this.getEnabledToolNames();
+		const directToolNames = new Set(this.getActiveToolNames());
+		const planToolNames = ["ask", "write", "edit", "glob", "grep", "read", "task"] as const;
+		const toolRefs: Record<string, string> = Object.fromEntries(
+			planToolNames.map(name => {
+				const tool = this.#tools.registry.get(name);
+				return [
+					name,
+					formatCodeModeToolReference({
+						name,
+						wireName: tool?.customWireName,
+						direct: directToolNames.has(name),
+					}),
+				];
+			}),
+		);
 		const content = prompt.render(planModeActivePrompt, {
 			planFilePath: displayPlanPath,
 			planExists,
-			askToolName: "ask",
-			writeToolName: "write",
-			editToolName: "edit",
+			toolRefs,
 			askAvailable: capableToolNames.includes("ask"),
 			taskAvailable: capableToolNames.includes("task"),
 			isHashlineEditMode: this.#resolveActiveEditMode() === "hashline",
