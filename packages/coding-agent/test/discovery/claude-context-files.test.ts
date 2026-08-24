@@ -142,6 +142,19 @@ describe("Claude context file discovery", () => {
 		expect(result.items.find(file => file.path === topMd)?.depth).toBe(3);
 	});
 
+	test("does not re-emit the user file as a project entry when the walk passes through home", async () => {
+		const cwd = path.join(home, "proj", "src");
+		const userMd = path.join(home, ".claude", "CLAUDE.md");
+		const projectMd = path.join(home, "proj", "CLAUDE.md");
+		writeFile(userMd, "user context");
+		writeFile(projectMd, "project context");
+
+		const result = await loadClaudeContextFiles(makeContext(cwd, null));
+
+		expect(result.items.map(file => file.path)).toEqual([userMd, projectMd]);
+		expect(result.items.map(file => file.level)).toEqual(["user", "project"]);
+	});
+
 	test("loads the user-level file alongside project files", async () => {
 		const cwd = repo;
 		const userMd = path.join(home, ".claude", "CLAUDE.md");

@@ -140,7 +140,9 @@ const PROJECT_CONTEXT_FILE_NAMES = ["CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.lo
  * repository root (or the filesystem root when there is no repository): at
  * each directory, `CLAUDE.md`, `.claude/CLAUDE.md`, and `CLAUDE.local.md`
  * (appended after `CLAUDE.md`) are loaded, matching Claude Code's memory
- * file loading. Empty files are skipped.
+ * file loading. Empty files are skipped. The user file is excluded from
+ * the walk so it is not re-emitted as a project entry when the walk
+ * passes through the home directory.
  */
 export async function loadClaudeContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFile>> {
 	const items: ContextFile[] = [];
@@ -163,7 +165,9 @@ export async function loadClaudeContextFiles(ctx: LoadContext): Promise<LoadResu
 
 	let current = cwd;
 	while (true) {
-		const candidates = PROJECT_CONTEXT_FILE_NAMES.map(name => path.join(current, name));
+		const candidates = PROJECT_CONTEXT_FILE_NAMES.map(name => path.join(current, name)).filter(
+			candidate => !samePath(candidate, userClaudeMd),
+		);
 		const contents = await Promise.all(candidates.map(candidate => readFile(candidate)));
 		const found = contents
 			.map((content, index) => ({ path: candidates[index], content }))
