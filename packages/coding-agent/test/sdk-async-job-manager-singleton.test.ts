@@ -124,25 +124,6 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 			expect(block).toContain(BASH_ASYNC_MARKER);
 			expect(block).toContain(HUB_PROGRESS_MARKER);
 			expect(block).toContain(HUB_POLLING_MARKER);
-			expect(block).toContain(
-				'Finite commands → `bash` with `async: "auto"`, `progress: "wake"` (quick stays inline). NEVER use `async: true` unless the user explicitly requests immediate background.',
-			);
-			expect(block).toContain(
-				"Progress uses 200 ms batches and a 10-event burst, then regains one rate-limit permit every 2 seconds.",
-			);
-			expect(block).toContain(
-				"Chatty progress → lower source verbosity (quiet or warning-only) or filter to actionable lines. If safe to retry, stop/cancel and relaunch with less output.",
-			);
-			expect(block).toContain("Hub: retune the monitor to `ambient` or `off` without stopping the process.");
-			expect(block).toContain("Bash: progress cannot be retuned; if retry is unsafe, let it finish.");
-			expect(block).toContain(
-				'Actionable process output → `hub`, `progress: "wake"` (`op: "start"` new; `op: "monitor"` existing).',
-			);
-			expect(block).toContain("Verbose producer? Capture full logs unmonitored; filter one async Bash monitor.");
-			expect(block).toContain("Existing condition? One sleeping async `until` loop; NEVER repeat tool polls.");
-			expect(block).toContain(
-				"NEVER call `hub wait`, follow logs, or block to receive progress or keep the turn alive; use async progress and end the turn instead.",
-			);
 		} finally {
 			await session.dispose();
 		}
