@@ -1,9 +1,9 @@
+import type { HighlightColors as NativeHighlightColors } from "@oh-my-pi/pi-natives";
+import * as nativeNatives from "@oh-my-pi/pi-natives";
 import {
-	type HighlightColors as NativeHighlightColors,
 	HighlightStream as NativeHighlightStream,
 	highlightCode as nativeHighlightCode,
 	supportsLanguage as nativeSupportsLanguage,
-	warmHighlighter as nativeWarmHighlighter,
 } from "@oh-my-pi/pi-natives";
 import type { EditorTheme, MarkdownTheme, SelectListTheme, SettingsListTheme, SymbolTheme } from "@oh-my-pi/pi-tui";
 import chalk from "@oh-my-pi/pi-utils/chalk";
@@ -112,8 +112,8 @@ let highlighterWarmup: Promise<void> | undefined;
 export function warmHighlighter(): Promise<void> {
 	if (!highlighterWarmup) {
 		highlighterWarmup =
-			typeof nativeWarmHighlighter === "function"
-				? nativeWarmHighlighter().catch(() => undefined)
+			typeof nativeNatives.warmHighlighter === "function"
+				? nativeNatives.warmHighlighter().catch(() => undefined)
 				: Promise.resolve();
 	}
 	return highlighterWarmup;
