@@ -393,10 +393,15 @@ interface ImportedExtensionModule {
 	error: string | null;
 }
 
-async function readExtensionCompatibility(extensionPath: string): Promise<ExtensionCompatibility | undefined> {
+async function readExtensionCompatibility(
+	extensionPath: string,
+	manifestCache: Map<string, Promise<ExtensionManifest | null>>,
+): Promise<ExtensionCompatibility | undefined> {
 	const manifestPath = getExtensionManifestPath(extensionPath);
 	if (manifestPath) {
-		const manifest = await readExtensionManifest(manifestPath);
+		const cached = manifestCache.get(manifestPath) ?? readExtensionManifest(manifestPath);
+		manifestCache.set(manifestPath, cached);
+		const manifest = await cached;
 		return manifest?.compatibility === "modern-esm" || manifest?.compatibility === "legacy"
 			? manifest.compatibility
 			: undefined;
@@ -404,7 +409,10 @@ async function readExtensionCompatibility(extensionPath: string): Promise<Extens
 	const realPath = await fs.realpath(extensionPath).catch(() => extensionPath);
 	let directory = path.dirname(realPath);
 	while (true) {
-		const manifest = await readExtensionManifest(path.join(directory, "package.json"));
+		const candidatePath = path.join(directory, "package.json");
+		const cached = manifestCache.get(candidatePath) ?? readExtensionManifest(candidatePath);
+		manifestCache.set(candidatePath, cached);
+		const manifest = await cached;
 		if (manifest)
 			return manifest.compatibility === "modern-esm" || manifest.compatibility === "legacy"
 				? manifest.compatibility
@@ -415,10 +423,14 @@ async function readExtensionCompatibility(extensionPath: string): Promise<Extens
 	}
 }
 
-async function importExtensionModule(extensionPath: string, cwd: string): Promise<ImportedExtensionModule> {
+async function importExtensionModule(
+	extensionPath: string,
+	cwd: string,
+	manifestCache: Map<string, Promise<ExtensionManifest | null>>,
+): Promise<ImportedExtensionModule> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
 	try {
-		const compatibility = await readExtensionCompatibility(resolvedPath);
+		const compatibility = await readExtensionCompatibility(resolvedPath, manifestCache);
 		const module = (await withHostGuard(() =>
 			compatibility === "modern-esm" ? loadRuntimeModule(resolvedPath) : loadLegacyPiModule(resolvedPath),
 		)) as LoadedExtensionModule;
@@ -489,7 +501,9 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 	const resolvedEventBus = eventBus ?? new EventBus();
 	const runtime = new ExtensionRuntime();
 
-	const imported = await Promise.all(paths.map(extPath => importExtensionModule(extPath, cwd)));
+	const manifestCache = new Map<string, Promise<ExtensionManifest | null>>();
+
+	const imported = await Promise.all(paths.map(extPath => importExtensionModule(extPath, cwd, manifestCache)));
 
 	for (let i = 0; i < paths.length; i++) {
 		const extPath = paths[i]!;
