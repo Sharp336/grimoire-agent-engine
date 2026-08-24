@@ -24,10 +24,7 @@ const AUTH_URL = "https://opencode.ai/auth";
  *
  * @param providerName Display name used in the paste prompt.
  */
-export async function loginOpenCode(
-	options: OAuthController,
-	providerName: string,
-): Promise<string> {
+export async function loginOpenCode(options: OAuthController, providerName: string): Promise<string> {
 	if (!options.onPrompt) {
 		throw new AIError.OnPromptRequiredError(providerName);
 	}

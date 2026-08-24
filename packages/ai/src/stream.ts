@@ -60,7 +60,7 @@ import {
 	streamOpenAIResponses,
 } from "./providers/register-builtins";
 import { isSyntheticModel, streamSynthetic } from "./providers/synthetic";
-import { getProviderDefinition, providerAllowsMissingApiKey, PROVIDER_REGISTRY } from "./registry";
+import { getProviderDefinition, PROVIDER_REGISTRY, providerAllowsMissingApiKey } from "./registry";
 import { NO_AUTH_SENTINEL } from "./registry/types";
 import type {
 	Api,

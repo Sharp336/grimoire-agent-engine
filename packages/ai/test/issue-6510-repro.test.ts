@@ -35,10 +35,7 @@ const ZEN_ANTHROPIC_MODEL: Model<"anthropic-messages"> = buildModel({
 	maxTokens: 8_192,
 } as ModelSpec<"anthropic-messages">);
 
-const ZEN_FREE_ANTHROPIC_MODEL = getBundledModel(
-	"opencode-zen",
-	"minimax-m2.5-free",
-) as Model<"anthropic-messages">;
+const ZEN_FREE_ANTHROPIC_MODEL = getBundledModel("opencode-zen", "minimax-m2.5-free") as Model<"anthropic-messages">;
 
 describe("issue #6510 — opencode-zen Anthropic auth + context_management", () => {
 	it("authenticates Zen Claude models with X-Api-Key, not bearer-only", () => {

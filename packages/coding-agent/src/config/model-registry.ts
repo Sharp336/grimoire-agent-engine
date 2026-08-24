@@ -1927,9 +1927,7 @@ export class ModelRegistry {
 		const requested = new Set([...providers].map(provider => provider.trim().toLowerCase()).filter(Boolean));
 		const isModelAvailable = this.#createModelAvailabilityCheck();
 		if (this.#hasFullSnapshot) {
-			return this.#models.filter(
-				model => requested.has(model.provider.toLowerCase()) && isModelAvailable(model),
-			);
+			return this.#models.filter(model => requested.has(model.provider.toLowerCase()) && isModelAvailable(model));
 		}
 		const requestedProviders = new Set(
 			this.#knownStaticProviders().filter(provider => requested.has(provider.toLowerCase())),
