@@ -138,7 +138,7 @@ describe("extractRetryHint", () => {
 
 describe("extractRetryHint — absolute reset timestamps", () => {
 	// Zhipu Coding Plan 429 type=1308 body. The stamp carries no zone marker;
-	// it is Beijing wall-clock time (the domestic console's own clock).
+	// it is Beijing wall-clock time (the CN platform console's own clock).
 	const ZHIPU_1308 = "429 已达到 5 小时的使用上限。您的限额将在 2026-08-17 11:17:40 重置。 (type=1308)";
 
 	afterEach(() => {
@@ -163,6 +163,22 @@ describe("extractRetryHint — absolute reset timestamps", () => {
 				'{"code":"1308","message":"Usage limit reached for 5 hour. Your limit will reset at 2026-08-17 11:17:40"}',
 			),
 		).toBe(17 * 60_000 + 40_000 + 3_000);
+	});
+
+	// "will reset at" is generic English, so the Zhipu zone policy (+08:00
+	// read, stale→UTC reread) must not leak into other providers' bodies.
+	// Both attested Zhipu bodies carry a documented 13xx quota code; the EN
+	// wording joins the family only when one is present.
+	it("ignores an English reset stamp without a Zhipu 13xx error code", () => {
+		vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-08-17T03:00:00Z"));
+		expect(extractRetryHint(undefined, "Your limit will reset at 2026-08-17 11:17:40")).toBeUndefined();
+	});
+
+	it("keeps an ungated English stamp off the absolute path so relative hints apply", () => {
+		vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-08-17T03:00:00Z"));
+		expect(extractRetryHint(undefined, "Your limit will reset at 2026-08-17 11:17:40. Please retry in 5s")).toBe(
+			5_000,
+		);
 	});
 
 	it("ignores a stamp whose UTC reread is still past", () => {
@@ -208,6 +224,20 @@ describe("extractRetryHint — absolute reset timestamps", () => {
 		expect(extractRetryHint(undefined, "您的限额将在 2026-08-17 03:17:40Z 重置。")).toBeUndefined();
 	});
 
+	it("honors a lowercase zone marker instead of re-reading it as UTC+8", () => {
+		// The EN pattern matches case-insensitively, so a lowercase marker
+		// reaches the parser; it must be honored as UTC (8h17m40s + 3s grace),
+		// not dropped and re-read under the assumed +08:00 (17m40s — an 8h
+		// early wake).
+		vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-08-17T03:00:00Z"));
+		expect(
+			extractRetryHint(
+				undefined,
+				'{"code":"1308","message":"Usage limit reached for 5 hour. Your limit will reset at 2026-08-17 11:17:40 z"}',
+			),
+		).toBe(8 * 3_600_000 + 17 * 60_000 + 40_000 + 3_000);
+	});
+
 	it("ignores stamps beyond the sanity horizon", () => {
 		const nowMs = Date.parse("2026-08-17T03:00:00Z");
 		vi.spyOn(Date, "now").mockReturnValue(nowMs);
@@ -219,7 +249,14 @@ describe("extractRetryHint — absolute reset timestamps", () => {
 	});
 
 	it("ignores an out-of-calendar datetime rather than rolling over", () => {
+		// Date.parse normalizes instead of rejecting: month 13 is NaN, but
+		// 2026-02-30 rolls into March 2 and 2026-06-31 into July 1 — a rolled
+		// stamp must not schedule a wait off a date the server never stated.
+		vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-02-28T03:00:00Z"));
 		expect(extractRetryHint(undefined, "您的限额将在 2026-13-17 11:17:40 重置")).toBeUndefined();
+		expect(extractRetryHint(undefined, "您的限额将在 2026-02-30 11:17:40 重置")).toBeUndefined();
+		vi.spyOn(Date, "now").mockReturnValue(Date.parse("2026-06-29T03:00:00Z"));
+		expect(extractRetryHint(undefined, "您的限额将在 2026-06-31 11:17:40 重置")).toBeUndefined();
 	});
 	it("falls back to relative hints when the stamp yields no wait target", () => {
 		// The bracketed stamp outranks the generic hint only when it yields a

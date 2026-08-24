@@ -26,11 +26,15 @@ const ZHIPU_RESET_AT_DATETIME_SOURCE = String.raw`\d{4}-\d{1,2}-\d{1,2} \d{1,2}:
 // Zhipu ever starts stamping one it wins over the assumed zone below.
 const ZHIPU_RESET_AT_ZONE_SOURCE = String.raw`(?:\s*(?:Z|UTC|GMT|[+-]\d{2}:\d{2}|[+-]\d{4}|[+-]\d{2}))?`;
 const ZHIPU_RESET_AT_DATETIME_TOKEN =
-	/^(?<year>\d{4})-(?<month>\d{1,2})-(?<day>\d{1,2}) (?<hour>\d{1,2}):(?<minute>\d{2})(?::(?<second>\d{2}))?(?<zone>Z|UTC|GMT|[+-]\d{2}:\d{2}|[+-]\d{4}|[+-]\d{2})?$/;
-const ZHIPU_RESET_AT_DATETIME_SCANNER = new RegExp(ZHIPU_RESET_AT_DATETIME_SOURCE + ZHIPU_RESET_AT_ZONE_SOURCE);
+	/^(?<year>\d{4})-(?<month>\d{1,2})-(?<day>\d{1,2}) (?<hour>\d{1,2}):(?<minute>\d{2})(?::(?<second>\d{2}))?(?:\s*(?<zone>Z|UTC|GMT|[+-]\d{2}:\d{2}|[+-]\d{4}|[+-]\d{2}))?$/i;
+const ZHIPU_RESET_AT_DATETIME_SCANNER = new RegExp(ZHIPU_RESET_AT_DATETIME_SOURCE + ZHIPU_RESET_AT_ZONE_SOURCE, "i");
 const ZHIPU_CN_RESET_AT_PATTERN = new RegExp(
 	String.raw`您的限额将在[^\S\n]*${ZHIPU_RESET_AT_DATETIME_SOURCE}${ZHIPU_RESET_AT_ZONE_SOURCE}[^\S\n]*重置`,
+	"i",
 );
+// The documented Zhipu quota error codes (1308–1321): "… (type=1308)" on the
+// CN platform, {"code":"1308",…} on international.
+const ZHIPU_ERROR_CODE_PATTERN = /(?:type=|"code"\s*:\s*"?)13(?:0[89]|1[0-9]|2[01])\b/;
 const ZHIPU_EN_RESET_AT_PATTERN = new RegExp(
 	String.raw`\b(?:will\s+reset|resets)\s+at\s+${ZHIPU_RESET_AT_DATETIME_SOURCE}${ZHIPU_RESET_AT_ZONE_SOURCE}`,
 	"i",
@@ -81,7 +85,8 @@ const ZHIPU_RESET_AT_MAX_DELTA_MS = 7 * 24 * 60 * 60 * 1000;
  *    international 1308 JSON body) — absolute reset moments: +3s grace,
  *    explicit zone markers honored, bare stamps parsed as the server's
  *    UTC+8 with a stale-stamp UTC reread. The whole family is Zhipu
- *    attestation (see extractZhipuResetWaitMs).
+ *    attestation; the EN wording additionally requires a Zhipu 13xx
+ *    error code in the body (see parseZhipuResetStamp).
  *  - `Your quota will reset after 18h31m10s` / `10m15s` / `39s` (Google Gemini)
  *  - `Please retry in 250ms` / `Please retry in 12s` (Google Gemini)
  *  - `"retryDelay": "34.074824224s"` (Google Gemini JSON error detail)
@@ -223,13 +228,34 @@ function extractZhipuResetWaitMs(body: string): number | undefined {
 }
 
 function parseZhipuResetStamp(body: string): { resetAtMs: number; explicitZone: boolean } | undefined {
-	for (const pattern of [ZHIPU_CN_RESET_AT_PATTERN, ZHIPU_EN_RESET_AT_PATTERN]) {
+	// The CN wording is Chinese text only Zhipu emits, so it is its own
+	// marker. The EN wording is generic English ("will reset at"): it only
+	// joins the family when the body also carries a documented Zhipu quota
+	// code (1308–1321) — both attested bodies do. Otherwise a foreign
+	// provider's "will reset at <bare UTC stamp>" body would get the Zhipu
+	// +08:00 read and outrank that provider's own relative hints.
+	const patterns = ZHIPU_ERROR_CODE_PATTERN.test(body)
+		? [ZHIPU_CN_RESET_AT_PATTERN, ZHIPU_EN_RESET_AT_PATTERN]
+		: [ZHIPU_CN_RESET_AT_PATTERN];
+	for (const pattern of patterns) {
 		const span = pattern.exec(body);
 		if (!span) continue;
 		const datetime = ZHIPU_RESET_AT_DATETIME_SCANNER.exec(span[0]);
 		if (!datetime) continue;
 		const token = ZHIPU_RESET_AT_DATETIME_TOKEN.exec(datetime[0])?.groups;
 		if (!token) continue;
+		// Date.parse normalizes instead of rejecting — "2026-02-30" rolls
+		// into March 2 — so validate the calendar explicitly: a rolled stamp
+		// would schedule off a date the server never stated.
+		const month = Number(token.month);
+		const day = Number(token.day);
+		const hour = Number(token.hour);
+		const minute = Number(token.minute);
+		const second = token.second === undefined ? 0 : Number(token.second);
+		const daysInMonth = new Date(Date.UTC(Number(token.year), month, 0)).getUTCDate();
+		if (month < 1 || month > 12 || day < 1 || day > daysInMonth || hour > 23 || minute > 59 || second > 59) {
+			continue;
+		}
 		const pad2 = (value: string | number) => String(value).padStart(2, "0");
 		const zoneSuffix = zoneMarkerToIsoSuffix(token.zone, ZHIPU_RESET_AT_ZONE_SUFFIX);
 		const iso = `${token.year}-${pad2(token.month!)}-${pad2(token.day!)}T${pad2(token.hour!)}:${token.minute}:${token.second ?? "00"}${zoneSuffix}`;
@@ -238,12 +264,12 @@ function parseZhipuResetStamp(body: string): { resetAtMs: number; explicitZone: 
 	}
 	return undefined;
 }
-
 // Zone marker → ISO 8601 offset suffix. No marker → the caller's assumed
-// zone; Z / UTC / GMT → Z; ±HH, ±HHMM, ±HH:MM → ±HH:MM.
+// zone; Z / UTC / GMT (any case) → Z; ±HH, ±HHMM, ±HH:MM → ±HH:MM.
 function zoneMarkerToIsoSuffix(zone: string | undefined, assumedSuffix: string): string {
 	if (zone === undefined) return assumedSuffix;
-	if (zone === "Z" || zone === "UTC" || zone === "GMT") return "Z";
+	const marker = zone.toUpperCase();
+	if (marker === "Z" || marker === "UTC" || marker === "GMT") return "Z";
 	const digits = zone.slice(1).replace(":", "");
 	return `${zone[0]}${digits.slice(0, 2)}:${digits.slice(2) || "00"}`;
 }
