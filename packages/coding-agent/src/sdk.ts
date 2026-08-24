@@ -4090,6 +4090,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// `auto` matching the model's `code_mode_only` flag): the Agent above was
 		// handed the unrestricted `initialTools`, so without this the first and all
 		// subsequent turns would expose the full direct tool surface and omit
+		try {
+			await session.initializeCodeMode();
+		} catch (error) {
+			logger.warn("Code Mode initialization at session startup failed", { error: String(error) });
+		}
+
 		void deferredModelResolution?.then(discovered => {
 			if (!discovered || session.model) return;
 			void session.setModelTemporary(discovered.model, discovered.thinkingLevel).catch(error => {
