@@ -1400,7 +1400,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		: logger.time("discoverSlashCommands", discoverSlashCommands, cwd);
 	slashCommandsPromise.catch(() => {});
 	const customCommandsPromise =
-		options.disableExtensionDiscovery || options.restrictToolNames === true
+		options.disableExtensionDiscovery || (options.restrictToolNames === true && options.personaName === undefined)
 			? Promise.resolve<CustomCommandsLoadResult>({ commands: [], errors: [] })
 			: logger.time("discoverCustomCommands", loadCustomCommandsInternal, { cwd, agentDir });
 	customCommandsPromise.catch(() => {});
@@ -2133,7 +2133,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const builtInToolNames = [...toolRegistry.keys()];
 		let customToolPaths: ToolPathWithSource[] = [];
 		const inlineExtensions: ExtensionFactory[] = [];
-		if (!restrictToolNames) {
+		// A launch `--agent` persona loads custom tools and extensions (so a
+		// persona-granted extension tool can register and an extension-provided
+		// model can resolve) but the ACTIVE set stays restricted to the
+		// persona's `tools:` list — `alwaysInclude` below only widens the active
+		// set for unrestricted sessions (codex #3821198710).
+		if (!restrictToolNames || options.personaName !== undefined) {
 			// Add image tools when generation is enabled and either no explicit tool
 			// whitelist was given or it names `generate_image`. Unlike built-in tools
 			// (filtered in `createTools`), custom tools are force-activated via
@@ -2206,7 +2211,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// the flag and pre-resolved the result already reflects that choice.
 		let extensionPaths: string[];
 		let extensionsResult: LoadExtensionsResult;
-		if (restrictToolNames) {
+		if (restrictToolNames && options.personaName === undefined) {
 			// Allocate a session runtime without evaluating caller-provided extension
 			// instances, paths, or factories.
 			extensionPaths = [];
@@ -2258,7 +2263,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Process provider registrations queued during extension loading.
 		// This must happen before the runner is created so that models registered by
 		// extensions are available for model selection on session resume / fallback.
-		if (!restrictToolNames) {
+		// A launch `--agent` persona loads extensions (so extension-provided models
+		// resolve and persona-granted extension tools register) while keeping the
+		// ACTIVE set restricted — only the extension loading itself is gated on
+		// `restrictToolNames` for subagents/`--tools` sessions (codex #3821198710).
+		if (!restrictToolNames || options.personaName !== undefined) {
 			const activeExtensionSources = extensionsResult.extensions.map(extension => extension.path);
 			modelRegistry.syncExtensionSources(activeExtensionSources);
 			for (const sourceId of new Set(activeExtensionSources)) {
@@ -2825,7 +2834,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// resolution and tool construction, so command module I/O stays off the
 		// session-creation critical path.
 		const customCommandsResult = await customCommandsPromise;
-		if (!options.disableExtensionDiscovery && !restrictToolNames) {
+		if (!options.disableExtensionDiscovery && (!restrictToolNames || options.personaName !== undefined)) {
 			for (const { path, error } of customCommandsResult.errors) {
 				logger.error("Failed to load custom command", { path, error });
 			}
@@ -2889,10 +2898,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// stay unwrapped. The extension runner exposes it to re-registered tools via createContext.
 		const nativeToolsByName = new Map<string, Tool>(toolSession.xdev?.tools ?? undefined);
 
-		const registeredTools = restrictToolNames ? [] : extensionRunner.getAllRegisteredTools();
+		// A launch `--agent` persona keeps extension/custom tools in the REGISTRY
+		// (so a persona-granted tool by name can activate) while the active set
+		// stays restricted to the persona's `tools:` list — `alwaysInclude` below
+		// only widens the active set for unrestricted sessions (codex #3821198710).
+		const registeredTools =
+			restrictToolNames && options.personaName === undefined ? [] : extensionRunner.getAllRegisteredTools();
 		const initialRegisteredTools = new WeakSet(registeredTools);
 		const sdkCustomTools =
-			restrictToolNames && options.allowRestrictedCustomTools !== true
+			restrictToolNames && options.personaName === undefined && options.allowRestrictedCustomTools !== true
 				? []
 				: (options.customTools?.filter(tool => !isLegacyBuiltinToolDefinition(tool)) ?? []);
 		const sdkCustomToolNames = new Set(sdkCustomTools.map(tool => tool.name));
@@ -3991,6 +4005,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			personaAppendPrompt: options.personaAppendPrompt,
 			spawns: options.spawns,
 			personaName: options.personaName,
+			// Seed the launch persona's exact `tools:` grant so a late extension
+			// registration cannot widen the active set past it (the creation-time
+			// `restrictToolNames` flag no longer disables extension loading for
+			// personas — codex #3821198710). `explicitlyRequestedToolNames` is
+			// undefined for a persona without `tools:` (no restriction).
+			personaToolRestriction: options.personaName
+				? explicitlyRequestedToolNames
+					? new Set(explicitlyRequestedToolNames)
+					: undefined
+				: undefined,
 			baselineToolNames: options.personaName ? personaBaselineToolNames : undefined,
 			baselineMountedToolNames: options.personaName ? baselineMountedToolNames : undefined,
 			baselineLspEnabled: options.personaName ? baselineLspEnabled : undefined,
@@ -4195,7 +4219,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			scheduledToolRegistrations.set(registered, activation);
 			return activation;
 		};
-		if (!restrictToolNames) {
+		if (!restrictToolNames || options.personaName !== undefined) {
 			const unsubscribeToolRegistrations = extensionRunner.onToolRegistered(scheduleToolRegistration);
 			disposeCallbacks.add(unsubscribeToolRegistrations);
 

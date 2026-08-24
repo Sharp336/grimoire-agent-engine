@@ -105,6 +105,8 @@ interface SessionToolsOptions {
 	 * session (spawning enabled, IRC not explicitly disabled) would have.
 	 */
 	baselineHubEnabled?: boolean;
+	/** Launch `--agent` persona's exact `tools:` grant (see AgentSessionConfig). */
+	personaToolRestriction?: Set<string>;
 	rebuildSystemPrompt?: (
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
@@ -327,6 +329,9 @@ export class SessionTools {
 		this.#registerBuiltInTools = options.registerBuiltInTools;
 		this.#baselineLspEnabled = options.baselineLspEnabled === true;
 		this.#baselineHubEnabled = options.baselineHubEnabled === true;
+		this.#personaActiveToolRestriction = options.personaToolRestriction
+			? new Set(options.personaToolRestriction)
+			: undefined;
 		this.#rebuildSystemPrompt = options.rebuildSystemPrompt;
 		this.#getMcpServerInstructions = options.getMcpServerInstructions;
 		this.#xdev = options.xdev;

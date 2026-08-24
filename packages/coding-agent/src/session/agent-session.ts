@@ -1355,6 +1355,7 @@ export class AgentSession {
 			registerBuiltInTools: config.registerBuiltInTools,
 			baselineLspEnabled: config.baselineLspEnabled,
 			baselineHubEnabled: config.baselineHubEnabled,
+			personaToolRestriction: config.personaToolRestriction,
 			rebuildSystemPrompt: config.rebuildSystemPrompt,
 			getMcpServerInstructions: config.getMcpServerInstructions,
 			xdev: config.xdev,

@@ -10,6 +10,7 @@ import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -1585,4 +1586,79 @@ describe("launch persona first system prompt", () => {
 		expect(leftPrompt).not.toContain(PERSONA_PROMPT);
 		expect(leftPrompt).not.toContain(SECOND_PERSONA_PROMPT);
 	}, 20000);
+	it("loads extensions for a launch persona but keeps the active set restricted to the grant", async () => {
+		// P1 (codex #3821198710): `--agent` with a `tools:` list used to skip
+		// extension loading entirely (the subagent-style `restrictToolNames`
+		// branch), so a persona that grants an extension-defined tool by name
+		// could never use it at launch. Extensions must load (registry +
+		// providers) while the ACTIVE set stays restricted to the persona's
+		// exact `tools:` list.
+		await fs.writeFile(path.join(agentsDir, "ext-persona.md"), agentMd("ext-persona", ["tools: [read, ext_tool]"]));
+
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled anthropic/claude-sonnet-4-5 to exist");
+
+		const sessionManager = SessionManager.inMemory(projectDir);
+		const options: Parameters<typeof createAgentSession>[0] = {
+			cwd: projectDir,
+			agentDir: tempHome,
+			authStorage,
+			modelRegistry,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			model,
+			disableExtensionDiscovery: true,
+			extensions: [
+				pi => {
+					pi.registerTool({
+						name: "ext_tool",
+						label: "Extension Tool",
+						description: "Extension-registered tool granted by the persona.",
+						parameters: type({}),
+						async execute() {
+							return { content: [{ type: "text", text: "ext" }] };
+						},
+					});
+					pi.registerTool({
+						name: "other_tool",
+						label: "Other Tool",
+						description: "Extension-registered tool NOT granted by the persona.",
+						parameters: type({}),
+						async execute() {
+							return { content: [{ type: "text", text: "other" }] };
+						},
+					});
+				},
+			],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			toolNames: ["read", "write"],
+		};
+		const { agents } = await discovery.discoverAgents(projectDir, tempHome);
+		const agent = agents.find(candidate => candidate.name === "ext-persona");
+		expect(agent).toBeDefined();
+		applyAgentPersonaOptions(options, agent!, { modelSet: false, thinkingSet: false, toolsSet: false });
+		options.personaName = "ext-persona";
+
+		const result = await createAgentSession(options);
+		session = result.session;
+
+		// The persona-granted extension tool is ACTIVE; the un-granted one is
+		// registered but NOT active; the active set stays exactly the grant.
+		expect(session.getEnabledToolNames()).toEqual(["read", "ext_tool"]);
+		// The un-granted extension tool is still in the registry (so a later
+		// live switch to a persona that grants it can activate it).
+		expect(session.getAllToolNames()).toContain("other_tool");
+		// The baseline (leaving agent mode) is the full registry minus
+		// default-inactive tools — the extension tools included.
+		const baseline = session.getBaselineToolNames();
+		expect(baseline).toBeDefined();
+		expect(baseline).toContain("ext_tool");
+		expect(baseline).toContain("other_tool");
+	});
 });

@@ -148,6 +148,13 @@ export interface AgentSessionConfig {
 	spawns?: string;
 	/** Launch `--agent` persona name; marks the session as persona-owned. */
 	personaName?: string;
+	/**
+	 * Launch `--agent` persona's exact `tools:` grant. Seeded so a late
+	 * extension registration cannot widen the active set past the persona's
+	 * list (the creation-time `restrictToolNames` flag no longer disables
+	 * extension loading for personas — codex #3821198710).
+	 */
+	personaToolRestriction?: Set<string>;
 	/** Baseline tool set captured at creation (without the persona's `tools:` restriction). */
 	baselineToolNames?: string[];
 	/**
