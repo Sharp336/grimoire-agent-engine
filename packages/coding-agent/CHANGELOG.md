@@ -9,6 +9,8 @@
 - Added `q` shortcut to exit the git TUI
 - Added a third state to the git TUI whitespace toggle (`b`): beyond ignoring whitespace-only line changes, it hides formatting-only changes (indentation, line splits/joins, blank lines) and import-only changes in TypeScript/JavaScript, Rust, and Go
 - Compressed single-child directory chains in the sidebar tree view
+- Added `/undo [steps]`, `/revert`, and `/redo` for operator context rollback: the conversation rewinds to before chosen user turns via journal branching (silent in context, files and todos untouched), `/revert` offers a turn picker, and `/redo` restores the last undo while nothing has been appended since.
+- Added `omp gc --undo-tails [--keep-undo-tails N]` to prune the journal tails left behind by older `/undo` branches; dry-run by default, `--apply` to execute, sessions with a live owner process are skipped.
 
 ### Changed
 
@@ -55,8 +57,7 @@
 - Fixed Linux startup event loop delays caused by legacy extension cache fsync churn.
 - Fixed subagent advisors abandoning reviews on the final yield turn during session teardown.
 - Fixed `/todo` expand/collapse commands and corrected `/shake thinking` reporting.
-- Added `/undo [steps]`, `/revert`, and `/redo` for operator context rollback: the conversation rewinds to before chosen user turns via journal branching (silent in context, files and todos untouched), `/revert` offers a turn picker, and `/redo` restores the last undo while nothing has been appended since.
-- Added `omp gc --undo-tails [--keep-undo-tails N]` to prune the journal tails left behind by older `/undo` branches; dry-run by default, `--apply` to execute, sessions with a live owner process are skipped.
+
 
 ## [18.0.3] - 2026-08-23
 
