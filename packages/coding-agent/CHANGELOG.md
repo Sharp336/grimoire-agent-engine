@@ -12,6 +12,8 @@
 
 ### Changed
 
+- Codex GPT-5.6 `code_mode_only` models now default to catalog-driven Code Mode; set `providers.openai-codex.codeMode: off` to retain the full direct tool surface.
+
 - Made `omp git` stream file contents into an off-thread native differ, paint complete lines immediately, progressively apply syntax highlighting, and defer large commit file statistics until after the first interactive frame.
 - Added `r` shortcut to refresh the git state
 - Added `s`/`u` shortcuts to stage/unstage files directly from the sidebar
