@@ -3,6 +3,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
 import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
 import { toModelSpec } from "@oh-my-pi/pi-catalog/provider-models/bundled-references";
+import { resolveCommandCodeBaseUrl } from "@oh-my-pi/pi-catalog/provider-models/command-code";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ModelOverride } from "./models-config-schema";
 /** Provider override config (baseUrl, headers, apiKey, compat, transport) without custom models */
@@ -19,12 +20,18 @@ export interface ProviderOverride {
 	guardrailTrace?: Model<Api>["guardrailTrace"];
 }
 
+function resolveProviderOverrideBaseUrl<TApi extends Api>(model: Model<TApi>, baseUrl: string | undefined): string | undefined {
+	if (!baseUrl) return undefined;
+	return model.provider === "command-code" ? resolveCommandCodeBaseUrl(model.api, baseUrl) : baseUrl;
+}
+
 /**
  * Merge a freshly discovered model with the matching bundled/configured entry
  * (or a runtime provider override when no bundled entry exists).
  *
  * `baseUrl` resolution priority:
- *   1. User-set `providerOverride.baseUrl` (explicit override in models.json)
+ *   1. User-set `providerOverride.baseUrl` (explicit override in models.json),
+ *      normalized per wire for mixed-wire providers such as Command Code
  *   2. Discovered baseUrl (xiaomi `tp-` token-plan keys resolve to
  *      `token-plan-sgp.xiaomimimo.com` at discovery time)
  *   3. Existing bundled baseUrl (the host baked into `models.json`)
@@ -50,11 +57,12 @@ export function mergeDiscoveredModel<TApi extends Api>(
 	existing: Model<Api> | undefined,
 	providerOverride?: Pick<ProviderOverride, "baseUrl" | "compat" | "headers" | "remoteCompaction" | "transport">,
 ): Model<TApi> {
+	const overrideBaseUrl = resolveProviderOverrideBaseUrl(model, providerOverride?.baseUrl);
 	if (existing) {
 		const supportsTools = model.supportsTools ?? existing.supportsTools;
 		return buildModel({
 			...toModelSpec(model),
-			baseUrl: providerOverride?.baseUrl ?? model.baseUrl ?? existing.baseUrl,
+			baseUrl: overrideBaseUrl ?? model.baseUrl ?? existing.baseUrl,
 			headers: existing.headers ? { ...existing.headers, ...model.headers } : model.headers,
 			transport: providerOverride?.transport ?? existing.transport ?? model.transport,
 			remoteCompaction: mergeProviderRemoteCompactionConfig(
@@ -68,7 +76,7 @@ export function mergeDiscoveredModel<TApi extends Api>(
 	if (providerOverride) {
 		return buildModel({
 			...toModelSpec(model),
-			baseUrl: providerOverride.baseUrl ?? model.baseUrl,
+			baseUrl: overrideBaseUrl ?? model.baseUrl,
 			headers: providerOverride.headers ? { ...model.headers, ...providerOverride.headers } : model.headers,
 			...(providerOverride.transport !== undefined ? { transport: providerOverride.transport } : {}),
 			remoteCompaction: mergeProviderRemoteCompactionConfig(
