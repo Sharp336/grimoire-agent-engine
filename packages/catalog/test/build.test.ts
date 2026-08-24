@@ -4,7 +4,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
+import { buildAnthropicCompat, isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import { buildOpenAICompat, buildOpenAIResponsesCompat } from "@oh-my-pi/pi-catalog/compat/openai";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -45,6 +45,22 @@ function openrouterSpec(overrides: Partial<ModelSpec<"openrouter">> = {}): Model
 	};
 }
 
+function anthropicSpec(overrides: Partial<ModelSpec<"anthropic-messages">> = {}): ModelSpec<"anthropic-messages"> {
+	return {
+		id: "claude-sonnet-5",
+		name: "Claude Sonnet 5",
+		api: "anthropic-messages",
+		provider: "anthropic",
+		baseUrl: "https://api.anthropic.com",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 128_000,
+		...overrides,
+	};
+}
+
 describe("buildModel", () => {
 	it("resolves a complete compat record for an openai-completions spec with no compat", () => {
 		const model = buildModel(completionsSpec());
@@ -66,6 +82,14 @@ describe("buildModel", () => {
 		for (const model of generated) {
 			expect(JSON.parse(JSON.stringify(model)) as Model<Api>).toEqual(model);
 		}
+	});
+
+	it("defaults Anthropic context-management support on and preserves an explicit opt-out", () => {
+		expect(buildAnthropicCompat(anthropicSpec()).supportsContextManagement).toBe(true);
+		expect(
+			buildAnthropicCompat(anthropicSpec({ compat: { supportsContextManagement: false } }))
+				.supportsContextManagement,
+		).toBe(false);
 	});
 
 	it("lets sparse overrides win over detection and keeps the verbatim config", () => {
@@ -316,6 +340,18 @@ describe("xAI Responses reasoning-effort suppression", () => {
 		expect(oauth.supportsPenaltyAndStopParams).toBe(false);
 		expect(paid.supportsReasoningSummary).toBe(false);
 		expect(oauth.supportsReasoningSummary).toBe(false);
+	});
+
+	it("preserves an explicit Responses reasoning-summary opt-out", () => {
+		const spec = {
+			...grokResponsesSpec("gpt-5.4"),
+			provider: "custom-openai-proxy",
+			baseUrl: "https://models.example.test/v1",
+			compat: { supportsReasoningSummary: false },
+		};
+
+		expect(buildOpenAIResponsesCompat(spec).supportsReasoningSummary).toBe(false);
+		expect(buildOpenAIResponsesCompat({ ...spec, compat: undefined }).supportsReasoningSummary).toBe(true);
 	});
 
 	it("suppresses penalty params on every first-party xAI Responses model", () => {

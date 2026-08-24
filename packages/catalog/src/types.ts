@@ -366,6 +366,12 @@ export interface OpenAICompat {
 	/** Whether request shaping may send reasoning params at all. Default: auto-detected (disabled for GitHub Copilot chat-completions). */
 	supportsReasoningParams?: boolean;
 	/**
+	 * Whether Responses requests may include `reasoning.summary`. Set false for
+	 * compatible proxies that accept reasoning but emit an incomplete summary
+	 * event stream. Defaults to true except on known incompatible hosts.
+	 */
+	supportsReasoningSummary?: boolean;
+	/**
 	 * Whether the endpoint accepts explicit sampling parameters (`temperature`,
 	 * `top_p`, `top_k`, `min_p`, penalties). OpenAI proprietary reasoning models
 	 * (o-series, gpt-5+) reject them with `400 Unsupported parameter:
@@ -413,6 +419,13 @@ export interface OpenAICompat {
  * that proxy gateways (Vertex AI, AWS Bedrock-style fronts, etc.) reject.
  */
 export interface AnthropicCompat {
+	/**
+	 * Whether reasoning requests may include Anthropic's optional
+	 * `context_management` field and beta header. Set false for compatible
+	 * proxies that implement thinking but reject server-side context editing.
+	 * Defaults to true.
+	 */
+	supportsContextManagement?: boolean;
 	/**
 	 * Stream-watchdog idle-timeout fallback in ms for slow reasoning hosts.
 	 * Set to 0 to disable the inter-event idle watchdog entirely, matching
@@ -698,6 +711,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "openRouterRouting"
 			| "isOpenRouterHost"
 			| "supportsStrictMode"
+			| "supportsReasoningSummary"
 			| "supportsLongPromptCacheRetention"
 			| "alwaysSendMaxTokens"
 			| "wireModelIdMode"

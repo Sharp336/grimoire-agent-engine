@@ -188,16 +188,18 @@ function buildCoworkBetas(
 	agentRequest: boolean,
 	thinkingRequest: boolean,
 	disableStrictTools = false,
+	supportsContextManagement = true,
 ): readonly string[] {
 	// `context-1m-2025-08-07` is intentionally never advertised. OAuth
 	// subscription credentials have no long-context credit balance, so Anthropic
 	// hard-429s ("Usage credits are required for long context requests") on any
 	// beta-gated 1M model regardless of prompt size (#7238). Natively-1M models
 	// (e.g. claude-sonnet-5) serve their full window without the beta anyway.
-	if (!agentRequest && !disableStrictTools) return coworkUtilityBetaDefaults;
+	if (!agentRequest && !disableStrictTools && supportsContextManagement) return coworkUtilityBetaDefaults;
 	const betas: string[] = [];
 	for (const beta of agentRequest ? coworkAgentBetaDefaults : coworkUtilityBetaDefaults) {
 		if (disableStrictTools && beta === structuredOutputsBeta) continue;
+		if (!supportsContextManagement && beta === contextManagementBeta) continue;
 		betas.push(beta);
 	}
 	if (!agentRequest) return betas;
@@ -1932,6 +1934,7 @@ const streamAnthropicOnce = (
 					model.provider !== "github-copilot" &&
 					model.provider !== "google-vertex" &&
 					model.provider !== "opencode-zen" &&
+					model.compat.supportsContextManagement !== false &&
 					!extraBetas.includes(contextManagementBeta)
 				) {
 					extraBetas.push(contextManagementBeta);
@@ -3048,7 +3051,14 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		isCloudflareAiGateway: model.provider === "cloudflare-ai-gateway",
 		allowAnthropicHeaderOverrides: model.compat.allowAnthropicHeaderOverrides,
 		claudeCodeSessionId,
-		coworkBetas: oauthToken ? buildCoworkBetas(hasTools || thinkingEnabled, thinkingEnabled, disableStrictTools) : [],
+		coworkBetas: oauthToken
+			? buildCoworkBetas(
+					hasTools || thinkingEnabled,
+					thinkingEnabled,
+					disableStrictTools,
+					model.compat.supportsContextManagement !== false,
+				)
+			: [],
 	});
 
 	if (model.provider === "cloudflare-ai-gateway") {
@@ -3409,6 +3419,7 @@ function buildParams(
 		model.provider !== "github-copilot" &&
 		model.provider !== "google-vertex" &&
 		model.provider !== "opencode-zen" &&
+		model.compat.supportsContextManagement !== false &&
 		(thinking?.type === "adaptive" || thinking?.type === "enabled");
 	const contextManagement = shouldKeepThinkingContext
 		? { edits: [{ type: "clear_thinking_20251015" as const, keep: "all" as const }] }

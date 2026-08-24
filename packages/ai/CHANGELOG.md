@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added compatibility opt-outs for Anthropic proxies that reject optional `context_management` and OpenAI Responses proxies with incomplete reasoning-summary streams.
+
 ## [18.0.4] - 2026-08-24
 
 ### Fixed

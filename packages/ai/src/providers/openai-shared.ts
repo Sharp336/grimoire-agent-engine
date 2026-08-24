@@ -3618,6 +3618,11 @@ export function applyResponsesReasoningParams<P extends ResponseCreateParamsStre
 	includeEncryptedReasoning?: boolean,
 	omitReasoningEffort?: boolean,
 ): void {
+	const reasoningSummary = model.compat.supportsReasoningSummary
+		? options?.reasoningSummary
+		: options?.reasoning === undefined
+			? undefined
+			: null;
 	return applyResponsesCompatPolicy(
 		params,
 		resolveOpenAICompatPolicy(model, {
@@ -3628,7 +3633,7 @@ export function applyResponsesReasoningParams<P extends ResponseCreateParamsStre
 			includeEncryptedReasoning,
 			omitReasoningEffort,
 		}),
-		{ reasoningSummary: options?.reasoningSummary, mapEffort },
+		{ reasoningSummary, mapEffort },
 	);
 }
 
