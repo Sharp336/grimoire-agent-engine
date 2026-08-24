@@ -15,6 +15,11 @@
 ### Fixed
 
 - Fixed finalized transcript blocks rendering as runs of blank lines under viewport pressure: empty live blocks (hidden tool activity, content-less streaming blocks) no longer reserve viewport rows or emit blank rows ([#9483](https://github.com/can1357/oh-my-pi/issues/9483)).
+### Fixed
+
+- Fixed daemon broker idle shutdown closing newly accepted clients before their authentication request could be processed under load.
+- Fixed supervised image tunnels rejecting a published URL when the child exited between the startup poll's log read and exit check.
+
 ## [18.0.4] - 2026-08-24
 
 ### Added

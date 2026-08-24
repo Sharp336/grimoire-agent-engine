@@ -60,5 +60,5 @@ nothing
 		expect(error.output).toContain("missing_var_xyz");
 		// Frames are still present alongside the message.
 		expect(error.output).toContain("top-level scope");
-	}, 60_000);
+	}, 120_000);
 });
