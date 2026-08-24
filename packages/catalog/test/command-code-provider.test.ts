@@ -15,10 +15,12 @@ describe("Command Code provider", () => {
 		});
 	});
 
-	test("routes Anthropic models to messages and other models to chat completions", () => {
+	test("routes only Anthropic model identities to messages", () => {
 		expect(resolveCommandCodeApi("claude-opus-4-8")).toBe("anthropic-messages");
 		expect(resolveCommandCodeApi("anthropic/claude-sonnet-4-6")).toBe("anthropic-messages");
 		expect(resolveCommandCodeApi("gpt-5.5")).toBe("openai-completions");
+		expect(resolveCommandCodeApi("openai/gpt-5.5")).toBe("openai-completions");
+		expect(resolveCommandCodeApi("google/gemini-3.1-pro")).toBe("openai-completions");
 		expect(resolveCommandCodeApi("deepseek/deepseek-v4-flash")).toBe("openai-completions");
 	});
 
@@ -37,7 +39,7 @@ describe("Command Code provider", () => {
 		);
 	});
 
-	test("discovers one catalog while assigning the correct per-model base URL", async () => {
+	test("discovers one catalog while assigning the correct per-model base URL and reasoning", async () => {
 		const fetch = (async (input: unknown) => {
 			expect(String(input)).toBe("https://api.commandcode.ai/provider/v1/models");
 			return new Response(
@@ -64,6 +66,7 @@ describe("Command Code provider", () => {
 			api: "openai-completions",
 			baseUrl: "https://api.commandcode.ai/provider/v1",
 			provider: "command-code",
+			reasoning: true,
 		});
 	});
 });
