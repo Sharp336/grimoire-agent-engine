@@ -511,6 +511,17 @@ export async function refreshAgentDiscovery(cwd: string): Promise<void> {
 	}
 }
 
+/**
+ * The discovered `scout` definition for a cwd, or `undefined` when discovery
+ * has not run for it yet (no TaskTool created / no refresh). Surfaces that
+ * advertise the scout shortcut (system prompt, grep/glob/ast-grep tool
+ * descriptions, plan-mode context) read this to honor a project override that
+ * makes the bundled scout primary-only/unavailable.
+ */
+export function getDiscoveredScoutAgent(cwd: string): AgentDefinition | undefined {
+	return (discoverySnapshots.get(path.resolve(cwd)) ?? []).find(agent => agent.name === "scout");
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Tool Class
 // ═══════════════════════════════════════════════════════════════════════════
@@ -714,6 +725,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 */
 	static async create(session: ToolSession): Promise<TaskTool> {
 		const { agents } = await discoverAgentsForCreate(session.cwd);
+		// Publish the discovered roster to the shared snapshot so sibling
+		// surfaces (system prompt, grep/glob/ast-grep descriptions) can read
+		// the scout definition's availability synchronously.
+		discoverySnapshots.set(path.resolve(session.cwd), agents);
 		return new TaskTool(session, agents);
 	}
 

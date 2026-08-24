@@ -13,6 +13,7 @@ import { splitMemoryGlobPattern } from "../internal-urls/memory-protocol";
 import type { Theme } from "../modes/theme/theme";
 import globDescription from "../prompts/tools/glob.md" with { type: "text" };
 import { type TruncationResult, truncateHead } from "../session/streaming-output";
+import { getDiscoveredScoutAgent } from "../task";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import { Ellipsis, fileHyperlink, renderFileList, renderStatusLine, renderTreeList, truncateToWidth } from "../tui";
 import type { ToolSession } from ".";
@@ -123,6 +124,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 			scoutAvailable: isScoutSpawnable(
 				this.session.settings.get("task.disabledAgents") as string[] | undefined,
 				this.session.getSessionSpawns?.() ?? "*",
+				getDiscoveredScoutAgent(this.session.cwd),
 			),
 		});
 	}

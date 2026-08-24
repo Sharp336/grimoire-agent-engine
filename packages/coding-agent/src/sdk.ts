@@ -180,6 +180,7 @@ import {
 	loadProjectContextFiles as loadContextFilesInternal,
 	projectSystemPromptToolMetadata,
 } from "./system-prompt";
+import { getDiscoveredScoutAgent } from "./task";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
 import { isScoutSpawnable } from "./task/spawn-policy";
@@ -3419,6 +3420,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				scoutAvailable: isScoutSpawnable(
 					settings.get("task.disabledAgents") as string[] | undefined,
 					session?.getSessionSpawns?.() ?? options.spawns ?? "*",
+					getDiscoveredScoutAgent(promptCwd),
 				),
 				taskIrcEnabled: !promptRestricted && isIrcEnabled(settings, options.taskDepth ?? 0),
 				autoQaEnabled: !promptRestricted && isAutoQaEnabled(settings),
@@ -3969,7 +3971,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			initialAdvisorCosts,
 			settings,
 			autoApprove: options.autoApprove,
-			scoutAllowedBySpawnPolicy: isScoutSpawnable(undefined, options.spawns ?? "*"),
+			scoutAllowedBySpawnPolicy: isScoutSpawnable(
+				undefined,
+				options.spawns ?? "*",
+				getDiscoveredScoutAgent(sessionManager.getCwd()),
+			),
 			evalKernelOwnerId,
 			// Launch `--agent` persona: seed the mutable persona channel (so a
 			// later `/agent` switch replaces the launch persona's prompt) and
