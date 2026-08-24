@@ -18,8 +18,8 @@ import {
 	mergeAsyncProgressEntries,
 } from "@oh-my-pi/pi-coding-agent/session/async-job-delivery";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
-import { PROGRESS_PREVIEW_MAX_BYTES } from "@oh-my-pi/pi-coding-agent/session/progress-preview";
 import { YieldQueue } from "@oh-my-pi/pi-coding-agent/session/yield-queue";
+import { PREVIEW_LIMITS } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
 
 function fakeJob(overrides: Partial<AsyncJob> = {}): AsyncJob {
 	return {
@@ -443,7 +443,7 @@ describe("async progress coalescing", () => {
 		const custom = built!;
 		// Built message stays near the preview budget instead of materializing
 		// 500 windows (~25 KB of raw text).
-		expect(custom.content.length).toBeLessThan(PROGRESS_PREVIEW_MAX_BYTES + 2_000);
+		expect(custom.content.length).toBeLessThan(PREVIEW_LIMITS.PROGRESS_BYTES + 2_000);
 		// Folds that dropped middle content are reported as suppressed events…
 		expect(custom.details?.jobs[0]?.suppressedEvents ?? 0).toBeGreaterThan(0);
 		// …and the artifact link to the full stream survives.

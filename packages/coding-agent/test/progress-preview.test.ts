@@ -4,9 +4,9 @@ import {
 	buildProgressPreview,
 	flattenPreviewText,
 	mergeProgressPreviews,
-	PROGRESS_PREVIEW_MAX_BYTES,
 	ProgressPreviewAccumulator,
 } from "@oh-my-pi/pi-coding-agent/session/progress-preview";
+import { PREVIEW_LIMITS } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
 
 describe("progress preview line snapping", () => {
 	test("truncated head ends and tail begins on complete lines", () => {
@@ -18,7 +18,7 @@ describe("progress preview line snapping", () => {
 	});
 
 	test("single oversized line keeps the byte split", () => {
-		const preview = buildLineSnappedPreview("x".repeat(PROGRESS_PREVIEW_MAX_BYTES + 100));
+		const preview = buildLineSnappedPreview("x".repeat(PREVIEW_LIMITS.PROGRESS_BYTES + 100));
 		expect(preview.truncated).toBe(true);
 		expect(preview.head!.length).toBeGreaterThan(0);
 		expect(preview.tail!.length).toBeGreaterThan(0);
@@ -50,6 +50,13 @@ describe("progress preview line snapping", () => {
 		expect(mergeProgressPreviews(buildProgressPreview("", true), buildProgressPreview(""))).toEqual({
 			text: "",
 			truncated: true,
+		});
+	});
+
+	test("empty previews merge into an explicit empty preview", () => {
+		expect(mergeProgressPreviews({ text: "", truncated: false }, { truncated: false })).toEqual({
+			text: "",
+			truncated: false,
 		});
 	});
 

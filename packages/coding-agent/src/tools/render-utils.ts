@@ -61,6 +61,8 @@ export const PREVIEW_LIMITS = {
 	OUTPUT_COLLAPSED: 3,
 	/** Output preview lines in expanded view */
 	OUTPUT_EXPANDED: 10,
+	/** UTF-8 bytes retained in progress previews */
+	PROGRESS_BYTES: 3_000,
 	/** Computer script lines shown in collapsed view */
 	COMPUTER_CODE_COLLAPSED: 10,
 	/** Max hunks shown when collapsed (edit tool) */
@@ -744,7 +746,9 @@ export function shortenEmbeddedPaths(text: string, homeDir = os.homedir()): stri
 			`(?<![\\p{L}\\p{N}_-])${RegExp.escape(homePath)}${trailingBoundary}`,
 			caseInsensitive ? "giu" : "gu",
 		);
-		shortened = shortened.replace(homePrefix, "~");
+		shortened = shortened.replace(homePrefix, (_home, offset: number) =>
+			shortened.startsWith("file://", offset - "file://".length) ? "/~" : "~",
+		);
 	}
 	return shortened;
 }
