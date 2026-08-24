@@ -1673,7 +1673,7 @@ describe("nonblocking default model discovery", () => {
 		const startedAt = performance.now();
 		const refresh = vi.spyOn(modelRegistry, "refresh").mockImplementation(() => new Promise<void>(() => {}));
 		try {
-			const { session, modelFallbackMessage } = await createAgentSession({
+			const { session } = await createAgentSession({
 				cwd,
 				agentDir: cwd,
 				authStorage,
@@ -1694,7 +1694,7 @@ describe("nonblocking default model discovery", () => {
 			});
 			try {
 				expect(performance.now() - startedAt).toBeLessThan(2_000);
-				expect(session.model).toBeDefined();
+				expect(session.model).toBeUndefined();
 				expect(refresh).toHaveBeenCalled();
 			} finally {
 				await session.dispose();
@@ -1704,4 +1704,46 @@ describe("nonblocking default model discovery", () => {
 			authStorage.close();
 		}
 	});
+});
+
+test("does not accept an unrelated fallback before discovery resolves the configured default", async () => {
+	const fallback = getBundledModel("anthropic", "claude-sonnet-4-5");
+	if (!fallback) return;
+	const authStorage = createInMemoryAuthStorage();
+	authStorage.setRuntimeApiKey(fallback.provider, "test-key");
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "omp-default-discovery-race-"));
+	const settings = Settings.isolated();
+	settings.setModelRole("default", "runtime-provider/discovery-model");
+	const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
+	const release = Promise.withResolvers<void>();
+	const refresh = vi.spyOn(modelRegistry, "refresh").mockImplementation(async () => release.promise);
+	try {
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir: cwd,
+			authStorage,
+			modelRegistry,
+			settings,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+		});
+		expect(refresh).toHaveBeenCalled();
+		expect(session.model?.provider).not.toBe(fallback.provider);
+		await session.dispose();
+	} finally {
+		release.resolve();
+		refresh.mockRestore();
+		authStorage.close();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
 });
