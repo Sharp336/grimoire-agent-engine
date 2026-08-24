@@ -43,6 +43,7 @@ import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-pro
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import { INSPECT_IMAGE_MODES } from "../utils/inspect-image-mode";
 import { isSearchProviderId, SEARCH_PROVIDER_ORDER } from "../web/search/types";
+import { stringifyYamlConfig } from "./config-file";
 import {
 	type BashInterceptorRule,
 	type GroupPrefix,
@@ -2195,7 +2196,7 @@ export class Settings {
 			const handle = await fs.promises.open(tempPath, "wx", 0o600);
 			removeTemp = true;
 			try {
-				await handle.writeFile(YAML.stringify(settings, null, 2), "utf8");
+				await handle.writeFile(stringifyYamlConfig(settings), "utf8");
 				await handle.sync();
 			} finally {
 				await handle.close();
