@@ -288,7 +288,24 @@ function Install-Binary {
             throw "The downloaded omp binary cannot start: $SmokeOutput"
         }
 
-        Move-Item -Force $TempPath $OutPath
+        # Windows Defender and other scanners can briefly keep the executable
+        # locked after the smoke test. Retry the atomic move before failing.
+        $MoveAttempts = 20
+        for ($Attempt = 1; $Attempt -le $MoveAttempts; $Attempt++) {
+            try {
+                Move-Item -Force $TempPath $OutPath
+                break
+            } catch {
+                if ($Attempt -eq $MoveAttempts) {
+                    throw
+                }
+                if ($Attempt -eq 1) {
+                    Write-Host "Binary is temporarily locked; retrying install..." -ForegroundColor Yellow
+                }
+                Start-Sleep -Milliseconds 500
+            }
+        }
+
         if ($RetireScriptLaunchers) {
             foreach ($Name in @("omp", "omp.cmd", "omp.ps1", "omp.bat")) {
                 Remove-Item (Join-Path $TargetDir $Name) -Force -ErrorAction SilentlyContinue

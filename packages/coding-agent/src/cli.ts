@@ -407,6 +407,13 @@ export async function runCli(argv: string[]): Promise<void> {
 	// browser workers onto the same-realm inline fallback.
 	if (isProcessEntry) declareWorkerHostEntry();
 
+	// Load the selected profile's dotenv before applying the TLS default so an
+	// explicit NODE_USE_SYSTEM_CA=0/1 remains authoritative.
+	await import("@oh-my-pi/pi-utils/env");
+	if (process.env.NODE_USE_SYSTEM_CA === undefined) {
+		process.env.NODE_USE_SYSTEM_CA = "1";
+	}
+
 	// `PI_PROXY` must reach the bare global `fetch` before any provider call:
 	// OAuth refresh/login and usage probes never pass through
 	// `wrapFetchForProxy`, so without this they bypass the proxy and fail
