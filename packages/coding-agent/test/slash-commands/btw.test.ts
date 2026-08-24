@@ -52,3 +52,28 @@ describe("/btw slash command", () => {
 		expect(harness.handleBtwCommand).toHaveBeenCalledWith("");
 	});
 });
+
+describe("/updates slash command", () => {
+	const updateQuestion =
+		"Catch me up on the current work. Briefly cover what completed, what is in progress, " +
+		"blockers or risks, the strongest evidence, and the next concrete action.";
+
+	it("routes the default update question through the interactive btw handler", async () => {
+		const harness = createRuntime();
+
+		const handled = await executeBuiltinSlashCommand("/updates", harness.runtime);
+
+		expect(handled).toBe(true);
+		expect(harness.setText).toHaveBeenCalledWith("");
+		expect(harness.handleBtwCommand).toHaveBeenCalledWith(updateQuestion);
+	});
+
+	it("appends an optional focus to the update question", async () => {
+		const harness = createRuntime();
+
+		const handled = await executeBuiltinSlashCommand("/updates test failures", harness.runtime);
+
+		expect(handled).toBe(true);
+		expect(harness.handleBtwCommand).toHaveBeenCalledWith(`${updateQuestion} Focus especially on: test failures`);
+	});
+});

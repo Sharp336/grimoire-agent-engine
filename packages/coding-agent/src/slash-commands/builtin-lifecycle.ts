@@ -52,6 +52,10 @@ function formatWorkspaceDirectories(runtime: SlashCommandRuntime, note?: string)
 	return note ? `${note}\n${lines.join("\n")}` : lines.join("\n");
 }
 
+const SESSION_UPDATE_QUESTION =
+	"Catch me up on the current work. Briefly cover what completed, what is in progress, " +
+	"blockers or risks, the strongest evidence, and the next concrete action.";
+
 export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "ssh",
@@ -359,6 +363,19 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const question = command.text.slice(`/${command.name}`.length).trim();
+			runtime.ctx.editor.setText("");
+			await runtime.ctx.handleBtwCommand(question);
+		},
+	},
+	{
+		name: "updates",
+		icon: "question",
+		description: "Show a concise ephemeral update for the current session",
+		inlineHint: "[focus]",
+		allowArgs: true,
+		handleTui: async (command, runtime) => {
+			const focus = command.text.slice(`/${command.name}`.length).trim();
+			const question = focus ? `${SESSION_UPDATE_QUESTION} Focus especially on: ${focus}` : SESSION_UPDATE_QUESTION;
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleBtwCommand(question);
 		},
