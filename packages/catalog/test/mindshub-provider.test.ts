@@ -138,10 +138,46 @@ describe("mindshub provider support", () => {
 		expect(sonnetModel.thinking?.defaultLevel).toBe(Effort.High);
 
 		// `reasoning_efforts: null` means the level isn't adjustable, not that
-		// the model never reasons (see docs/models.mdx#reasoning-effort).
+		// the model never reasons (see docs/models.mdx#reasoning-effort). Kimi
+		// K3 reasons internally on every request with no tunable dial, so it
+		// must still be `reasoning: true` — just without a `thinking` surface —
+		// or `model.reasoning`-gated behavior (the model browser, etc.) would
+		// treat it as an ordinary chat model.
 		const kimi = models?.find(model => model.id === "kimi");
 		expect(kimi?.name).toBe("Kimi K3");
-		expect(kimi?.reasoning).toBe(false);
+		expect(kimi?.reasoning).toBe(true);
+		expect(kimi?.thinking).toBeUndefined();
+	});
+
+	test("a non-reasoning model with no advertised ladder and no fixed-reasoning family stays reasoning: false", async () => {
+		const fetchMock: FetchImpl = vi.fn(
+			async () =>
+				new Response(
+					JSON.stringify({
+						object: "list",
+						data: [
+							{
+								id: "gpt-nano",
+								label: "GPT 5.4 Nano",
+								object: "model",
+								created: 0,
+								enabled: true,
+								reasoning_efforts: null,
+								embedding: false,
+								provider: "openai",
+								family: "gpt-nano",
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				),
+		);
+
+		const options = mindshubModelManagerOptions({ apiKey: "mindshub-test-key", fetch: fetchMock });
+		const models = await options.fetchDynamicModels?.();
+		const gptNano = models?.find(model => model.id === "gpt-nano");
+		expect(gptNano?.reasoning).toBe(false);
+		expect(gptNano?.thinking).toBeUndefined();
 	});
 
 	test("filters out models the org has explicitly disabled", async () => {

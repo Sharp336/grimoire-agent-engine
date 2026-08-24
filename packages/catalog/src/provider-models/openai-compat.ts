@@ -3006,6 +3006,37 @@ interface MindsHubModelRecord extends OpenAICompatibleModelRecord {
 	embedding?: unknown;
 	reasoning_efforts?: unknown;
 	default_reasoning_effort?: unknown;
+	family?: unknown;
+}
+
+/**
+ * MindsHub aliases documented to reason internally on every request even
+ * though the catalog row has no adjustable ladder (`reasoning_efforts:
+ * null`). The wire shape has no separate boolean for this — `docs.mindshub.ai
+ * /models#reasoning-effort` calls out `mindshub_air` and `kimi` by name as
+ * reasoning without a tunable dial — so this allowlist is the only available
+ * signal, keyed on `family` (falling back to `id`, since `family` is only
+ * populated once the model has been classified) to track MindsHub's
+ * authoritative catalog rather than any particular alias spelling.
+ */
+const MINDSHUB_FIXED_REASONING_FAMILIES = new Set(["mindshub_air", "kimi"]);
+
+/**
+ * Whether a MindsHub row reasons at all, independent of whether it advertised
+ * a tunable effort ladder. An advertised ladder always implies reasoning; a
+ * `null` ladder can still mean a fixed/internal reasoner (see
+ * {@link MINDSHUB_FIXED_REASONING_FAMILIES}), so this must not collapse to
+ * `hasLadder` or models like `kimi` would be reported as ordinary chat models
+ * to `model.reasoning`-gated behavior (the model browser, etc).
+ */
+function mindshubReasons(record: MindsHubModelRecord, hasLadder: boolean): boolean {
+	if (hasLadder) return true;
+	const family = typeof record.family === "string" ? record.family : undefined;
+	const id = typeof record.id === "string" ? record.id : undefined;
+	return (
+		(family !== undefined && MINDSHUB_FIXED_REASONING_FAMILIES.has(family)) ||
+		(id !== undefined && MINDSHUB_FIXED_REASONING_FAMILIES.has(id))
+	);
 }
 
 /**
@@ -3072,7 +3103,7 @@ export function mindshubModelManagerOptions(
 					return {
 						...defaults,
 						name: toModelName(record.label, defaults.name),
-						reasoning: thinking !== undefined,
+						reasoning: mindshubReasons(record, thinking !== undefined),
 						...(thinking && { thinking }),
 						// Every catalog model accepts image parts (docs: "Image parts are
 						// accepted on every chat model").
