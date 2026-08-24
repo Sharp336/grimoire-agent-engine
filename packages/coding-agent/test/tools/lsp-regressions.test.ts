@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
@@ -280,6 +280,33 @@ function textResult(result: AgentToolResult<LspToolDetails>): string {
 		.map(block => block.text)
 		.join("\n");
 }
+
+/**
+ * `loadConfig` walks the user config directories (~/.omp/agent, ~/.pi/agent,
+ * ~/.claude), which resolve from os.homedir(). A developer with a real
+ * lsp.json there flips loadConfig off its auto-detect path onto the override
+ * path, where their rootMarkers replace the packaged ones — so these tests
+ * would assert against that machine's config instead of the defaults. Point
+ * HOME at an empty directory so every case sees a pristine environment.
+ */
+let lspHomeOverride: string | undefined;
+let lspOriginalHome: string | undefined;
+
+beforeEach(() => {
+	lspOriginalHome = process.env.HOME;
+	lspHomeOverride = fs.mkdtempSync(path.join(os.tmpdir(), "omp-lsp-test-home-"));
+	process.env.HOME = lspHomeOverride;
+	// Bun's os.homedir() reads the passwd entry rather than $HOME, so the env
+	// var alone does not redirect the config walk.
+	vi.spyOn(os, "homedir").mockReturnValue(lspHomeOverride);
+});
+
+afterEach(() => {
+	if (lspOriginalHome === undefined) delete process.env.HOME;
+	else process.env.HOME = lspOriginalHome;
+	if (lspHomeOverride) fs.rmSync(lspHomeOverride, { recursive: true, force: true });
+	lspHomeOverride = undefined;
+});
 
 describe("lsp regressions", () => {
 	afterEach(() => {
@@ -3792,7 +3819,13 @@ describe("lsp regressions", () => {
 						srv.exit(0);
 					}
 				});
-				const config: ServerConfig = { command: "roslyn-language-server", fileTypes: [".cs"], rootMarkers: [] };
+				const settings = { csharp: { analysis: { backgroundScope: "fullSolution" } } };
+				const config: ServerConfig = {
+					command: "roslyn-language-server",
+					fileTypes: [".cs"],
+					rootMarkers: [],
+					settings,
+				};
 				vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
 					servers: { csharp: config },
 					idleTimeoutMs: undefined,
@@ -3803,6 +3836,10 @@ describe("lsp regressions", () => {
 
 				expect(sawRustReload).toBe(false);
 				expect(textResult(result)).toContain("Reloaded csharp");
+				const configurationMessages = server.received.filter(
+					message => message.method === "workspace/didChangeConfiguration",
+				);
+				expect(configurationMessages.at(-1)?.params).toEqual({ settings });
 				expect(server.killed).toBe(false);
 			} finally {
 				vi.restoreAllMocks();
