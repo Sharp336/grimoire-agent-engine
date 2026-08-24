@@ -2562,36 +2562,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 			if (!model) {
 				const fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
-				let pick = pickDefaultAvailableModel(fallbackCandidates.filter(hasModelAuth));
-
-				// Cold-cache discovery race (issues #6114, #6162): a discovery
-				// provider (models.yml `openai-models-list`, LM Studio/Ollama/
-				// llama.cpp, or an openai-compat proxy) ships no static models, so
-				// the static+cached catalog resolved nothing above. Background
-				// discovery in main.ts fires only AFTER createAgentSession returns,
-				// so on a cache-cold boot the configured default stays unresolved
-				// and `pick` silently degrades to an unrelated authed provider's
-				// default (#6162) or "No models available" (#6114) — even though
-				// `omp models` (which awaits discovery) lists the model. Await one
-				// cache-aware discovery pass and retry when a default role is
-				// configured (must win over `pick`) or nothing resolved at all.
-				// The common path — role already resolved, or a `pick` with no
-				// configured default — never pays for it.
+				const pick = pickDefaultAvailableModel(fallbackCandidates.filter(hasModelAuth));
 				const defaultRoleConfigured = Boolean(settings.getModelRole("default"));
+				// Never block session creation on remote model discovery. Static
+				// and cached catalogs are sufficient to start; background refresh
+				// updates the registry after startup and the first request reports
+				// an invalid explicitly configured model normally.
 				if (
 					!hasExplicitModel &&
 					(defaultRoleConfigured || !pick) &&
 					modelRegistry.getDiscoverableProviders().length > 0
 				) {
-					await logger.time("resolveModelDiscoveryFallback", () => modelRegistry.refresh("online-if-uncached"));
-					if (!(await tryResolveDefaultRole()) && !model) {
-						const refreshedCandidates = await resolveAllowedModels(
-							modelRegistry,
-							settings,
-							modelMatchPreferences,
-						);
-						pick = pickDefaultAvailableModel(refreshedCandidates.filter(hasModelAuth));
-					}
+					void modelRegistry.refresh("online-if-uncached").catch(error => {
+						logger.warn("background model discovery failed", {
+							error: error instanceof Error ? error.message : String(error),
+						});
+					});
 				}
 
 				if (!model && pick) {
