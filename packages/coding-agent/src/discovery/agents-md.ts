@@ -10,34 +10,10 @@ import { registerProvider } from "../capability";
 import { type ContextFile, contextFileCapability } from "../capability/context-file";
 import { readFile } from "../capability/fs";
 import type { LoadContext, LoadResult } from "../capability/types";
-import { calculateDepth, createSourceMeta } from "./helpers";
+import { calculateDepth, createSourceMeta, isWithin, samePath } from "./helpers";
 
 const PROVIDER_ID = "agents-md";
 const DISPLAY_NAME = "AGENTS.md";
-
-/**
- * Compare paths while tolerating Windows drive casing.
- */
-function samePath(left: string, right: string): boolean {
-	const normalizedLeft = path.resolve(left);
-	const normalizedRight = path.resolve(right);
-	return process.platform === "win32"
-		? normalizedLeft.toLowerCase() === normalizedRight.toLowerCase()
-		: normalizedLeft === normalizedRight;
-}
-
-/**
- * Return whether `child` is at or below `parent`.
- */
-function isWithin(parent: string, child: string): boolean {
-	const normalizedParent = path.resolve(parent);
-	const normalizedChild = path.resolve(child);
-	const relative = path.relative(
-		process.platform === "win32" ? normalizedParent.toLowerCase() : normalizedParent,
-		process.platform === "win32" ? normalizedChild.toLowerCase() : normalizedChild,
-	);
-	return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
-}
 
 /**
  * Load standalone AGENTS.md files.

@@ -9,6 +9,7 @@
 - Added `q` shortcut to exit the git TUI
 - Added a third state to the git TUI whitespace toggle (`b`): beyond ignoring whitespace-only line changes, it hides formatting-only changes (indentation, line splits/joins, blank lines) and import-only changes in TypeScript/JavaScript, Rust, and Go
 - Compressed single-child directory chains in the sidebar tree view
+- Added ancestor walk-up for Claude context files: `CLAUDE.md`, `.claude/CLAUDE.md`, and `CLAUDE.local.md` are now discovered from the working directory up to the repository root (matching Claude Code's memory file loading), with multiple files in the same directory merged into a single entry and empty files skipped.
 
 ### Changed
 

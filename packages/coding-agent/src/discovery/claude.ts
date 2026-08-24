@@ -27,6 +27,7 @@ import {
 	expandEnvVarsDeep,
 	getExtensionNameFromPath,
 	loadFilesFromDir,
+	samePath,
 	scanSkillsFromDir,
 } from "./helpers";
 
@@ -128,15 +129,27 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 // Context Files (CLAUDE.md)
 // =============================================================================
 
-async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFile>> {
+/** Project-level Claude context candidates, checked per directory. */
+const PROJECT_CONTEXT_FILE_NAMES = ["CLAUDE.md", ".claude/CLAUDE.md", "CLAUDE.local.md"] as const;
+
+/**
+ * Load Claude Code context files.
+ *
+ * The user file is `~/.claude/CLAUDE.md` (or `$CLAUDE_CONFIG_DIR`). Project
+ * files are discovered by walking from the working directory up to the
+ * repository root (or the filesystem root when there is no repository): at
+ * each directory, `CLAUDE.md`, `.claude/CLAUDE.md`, and `CLAUDE.local.md`
+ * (appended after `CLAUDE.md`) are loaded, matching Claude Code's memory
+ * file loading. Empty files are skipped.
+ */
+export async function loadClaudeContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFile>> {
 	const items: ContextFile[] = [];
 	const warnings: string[] = [];
 
 	const userBase = getUserClaude(ctx);
 	const userClaudeMd = path.join(userBase, "CLAUDE.md");
-
 	const userContent = await readFile(userClaudeMd);
-	if (userContent !== null) {
+	if (userContent !== null && userContent !== "") {
 		items.push({
 			path: userClaudeMd,
 			content: userContent,
@@ -145,18 +158,34 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 		});
 	}
 
-	const projectBase = getProjectClaude(ctx);
-	const projectClaudeMd = path.join(projectBase, "CLAUDE.md");
-	const projectContent = await readFile(projectClaudeMd);
-	if (projectContent !== null) {
-		const depth = calculateDepth(ctx.cwd, path.dirname(projectBase), path.sep);
-		items.push({
-			path: projectClaudeMd,
-			content: projectContent,
-			level: "project",
-			depth,
-			_source: createSourceMeta(PROVIDER_ID, projectClaudeMd, "project"),
-		});
+	const cwd = path.resolve(ctx.cwd);
+	const boundary = ctx.repoRoot ? path.resolve(ctx.repoRoot) : path.parse(cwd).root;
+
+	let current = cwd;
+	while (true) {
+		const candidates = PROJECT_CONTEXT_FILE_NAMES.map(name => path.join(current, name));
+		const contents = await Promise.all(candidates.map(candidate => readFile(candidate)));
+		const found = contents
+			.map((content, index) => ({ path: candidates[index], content }))
+			.filter(entry => entry.content !== null && entry.content !== "");
+
+		if (found.length > 0) {
+			const anchor = found[0];
+			const mergedContent = found.map(entry => entry.content).join("\n\n");
+			const depth = calculateDepth(cwd, current, path.sep);
+			items.push({
+				path: anchor.path,
+				content: mergedContent,
+				level: "project",
+				depth,
+				_source: createSourceMeta(PROVIDER_ID, anchor.path, "project"),
+			});
+		}
+
+		if (samePath(current, boundary)) break;
+		const parent = path.dirname(current);
+		if (parent === current) break;
+		current = parent;
 	}
 
 	return { items, warnings };
@@ -532,7 +561,7 @@ registerProvider<ContextFile>(contextFileCapability.id, {
 	displayName: DISPLAY_NAME,
 	description: "Load CLAUDE.md files from .claude/ directories",
 	priority: PRIORITY,
-	load: loadContextFiles,
+	load: loadClaudeContextFiles,
 });
 
 registerProvider<Skill>(skillCapability.id, {
