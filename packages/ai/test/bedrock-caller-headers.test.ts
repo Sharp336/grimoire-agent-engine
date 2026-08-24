@@ -177,7 +177,7 @@ describe("Bedrock caller headers", () => {
 			expect(names.filter(name => name === field).length).toBeLessThanOrEqual(1);
 		}
 		expect(headers["content-type"]).toBe("application/json");
-		expect(headers["user-agent"]).toBe("Bazinga!");
+		expect(headers["user-agent"]).toBe("caller-agent");
 		// Ordinary caller headers still land, lower-cased.
 		expect(headers["x-trace"]).toBe("kept");
 	});
