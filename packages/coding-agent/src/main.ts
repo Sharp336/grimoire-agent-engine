@@ -103,6 +103,8 @@ import {
 	EMPTY_PERSONA_OVERRIDES,
 	isMainSessionPersonaUsable,
 	type PersonaExplicitOverrides,
+	rollbackPersonaSwitch,
+	snapshotPersonaSwitch,
 } from "./session/persona-apply";
 import { getRestorableSessionModels } from "./session/session-context";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
@@ -1145,7 +1147,7 @@ export function applyAgentPersonaOptions(
 		// every allowed built-in (sdk.ts `expandRegistryToAllBuiltins`, gated
 		// on `personaName`) so `restoreBaselineTools` can re-enable the
 		// non-persona builtins when agent mode is left.
-		const tools = mainSessionTools(agent.tools);
+		const tools = mainSessionTools(agent.tools, agent.spawns);
 		options.toolNames = tools;
 		options.restrictToolNames = true;
 		// A persona that EXPLICITLY requests the LSP tool must get it: the
@@ -1275,12 +1277,29 @@ export async function reconcilePersistedPersona(
 		const { agents } = await discoverAgents(sessionManager.getCwd());
 		agent = getAgent(agents, name);
 	} catch (error) {
+		// Discovery failure must not leave the target transcript under the
+		// source session's persona state: switchSession catches reconciler
+		// errors and still commits the target, so clear the persona-owned
+		// state for a coherent non-persona baseline (codex #3821198710).
 		logger.warn("Failed to discover agents during persona restore", { error: String(error) });
+		await session.restoreBaselineTools();
+		session.setSessionSpawns(null);
+		session.setPersonaAppendPrompt(undefined);
 		return;
 	}
 	const disabledAgents = (session.settings.get("task.disabledAgents") as string[] | undefined) ?? [];
 	if (isMainSessionPersonaUsable(agent, disabledAgents)) {
-		await applyPersonaToSession(session, agent, explicit);
+		const snapshot = snapshotPersonaSwitch(session);
+		try {
+			await applyPersonaToSession(session, agent, explicit);
+		} catch (error) {
+			try {
+				await rollbackPersonaSwitch(session, snapshot);
+			} catch (rollbackError) {
+				logger.warn("Failed to roll back persona reconcile", { error: String(rollbackError) });
+			}
+			throw error;
+		}
 	} else {
 		// The persisted persona is gone/disabled: clear the previous session's
 		// persona-owned state so it does not leak into this transcript.

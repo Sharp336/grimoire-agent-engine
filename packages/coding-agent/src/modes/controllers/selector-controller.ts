@@ -787,11 +787,20 @@ export class SelectorController {
 				// race the first (codex #3821146274).
 				if (switching) return;
 				switching = true;
-				// Await the persona transition before closing the overlay and
-				// restoring input focus so the next prompt cannot land on a
-				// partially applied or stale persona (codex #3818999442 / #3818955423).
-				await this.ctx.switchAgentPersona(agent.name);
-				done();
+				try {
+					// Await the persona transition before closing the overlay and
+					// restoring input focus so the next prompt cannot land on a
+					// partially applied or stale persona (codex #3818999442 / #3818955423).
+					await this.ctx.switchAgentPersona(agent.name);
+				} finally {
+					// A rejected switch (e.g. agent discovery failing on an
+					// unreadable extension directory) must still settle the
+					// picker: without this, the overlay stays focused while
+					// Enter/Esc are permanently ignored by the in-flight guards
+					// (codex #3821198710).
+					switching = false;
+					done();
+				}
 			},
 			onCancel: () => {
 				// Do not close the picker while a persona switch is in flight: the

@@ -1556,14 +1556,28 @@ export class SessionTools {
 		// rebuilt prompt restores the unrestricted affordances (codex #3763426057).
 		// A persona→persona switch calls this before `applyPersonaTools` re-sets
 		// the field, so the interim `undefined` is never observable.
-		this.#personaActiveToolRestriction = undefined;
+		//
+		// The restriction is cleared only AFTER the on-demand registrations and
+		// the presentation apply succeed: a failed restore (e.g. an LSP/hub
+		// factory or system-prompt rebuild rejection) must leave the still-active
+		// persona's restriction in place, or a later MCP/RPC tool refresh could
+		// activate tools the persona never granted (codex #3821198710).
+		const previousRestriction = this.#personaActiveToolRestriction;
 		if (this.#baselineLspEnabled && toolNames.includes("lsp") && !this.#toolRegistry.has("lsp")) {
 			await this.#registerBuiltInTools?.(["lsp"], true);
 		}
 		if (this.#baselineHubEnabled && toolNames.includes("hub") && !this.#toolRegistry.has("hub")) {
 			await this.#registerBuiltInTools?.(["hub"], false, true);
 		}
-		await this.setActiveToolPresentation(toolNames, mountedToolNames, undefined, undefined, false, false);
+		try {
+			await this.setActiveToolPresentation(toolNames, mountedToolNames, undefined, undefined, false, false);
+		} catch (error) {
+			// Restore the previous restriction so the failed restore does not
+			// leave the persona's tool gate open.
+			this.#personaActiveToolRestriction = previousRestriction;
+			throw error;
+		}
+		this.#personaActiveToolRestriction = undefined;
 	}
 
 	/**

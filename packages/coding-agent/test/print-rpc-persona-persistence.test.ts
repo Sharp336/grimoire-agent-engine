@@ -96,6 +96,16 @@ function makeFakeSession(
 		setModelTemporary: async () => {},
 		refreshBaseSystemPrompt: async () => {},
 		emitNotice: () => {},
+		getLastPersonaDroppedMutation: () => undefined,
+		getLastPersonaDroppedEdit: () => undefined,
+		getPersonaToolRestriction: () => undefined,
+		setPersonaToolRestriction: () => {},
+		getBaselineToolNames: () => undefined,
+		getBaselineMountedToolNames: () => undefined,
+		clearBaselineTools: () => {},
+		configuredThinkingLevel: () => undefined,
+		setActiveToolPresentation: async () => {},
+		isStreaming: false,
 	} as unknown as AgentSession & { state: typeof state };
 }
 
@@ -268,7 +278,7 @@ describe("runRootCommand — print/rpc persona persistence", () => {
 
 		// The persona's frontmatter is applied to the fresh session: tools,
 		// spawns, and prompt all reflect the re-discovered definition.
-		expect(session.getEnabledToolNames()).toEqual(["read", "write"]);
+		expect(session.getEnabledToolNames()).toEqual(["read", "write", "task"]);
 		expect(session.getSessionSpawns()).toBe("scout");
 		expect(session.getPersonaAppendPrompt()).toBe("You are the myagent persona.");
 		// No duplicate mode_change is appended on resume — only the persisted
@@ -298,7 +308,7 @@ describe("runRootCommand — print/rpc persona persistence", () => {
 
 		expect(setModelTemporary).toHaveBeenCalledTimes(1);
 		expect(setModelTemporary.mock.calls[0]?.[0]?.id).toBe("claude-haiku-4-5");
-		expect(fake.getEnabledToolNames()).toEqual(["read", "write"]);
+		expect(fake.getEnabledToolNames()).toEqual(["read", "write", "task"]);
 		expect(fake.getSessionSpawns()).toBe("scout");
 		expect(fake.getPersonaAppendPrompt()).toBe("You are the myagent persona.");
 	});
@@ -428,7 +438,7 @@ describe("runRootCommand — print/rpc persona persistence", () => {
 
 		// Explicit --model wins: the persona's haiku frontmatter is NOT applied.
 		expect(setModelTemporary).not.toHaveBeenCalled();
-		expect(fake.getEnabledToolNames()).toEqual(["read", "write"]);
+		expect(fake.getEnabledToolNames()).toEqual(["read", "write", "task"]);
 		expect(fake.getSessionSpawns()).toBe("scout");
 		expect(fake.getPersonaAppendPrompt()).toBe("You are the myagent persona.");
 	});

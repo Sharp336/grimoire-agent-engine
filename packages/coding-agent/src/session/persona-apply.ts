@@ -153,7 +153,7 @@ export async function applyPersonaToSession(
 		// `applyPersonaTools` registers built-ins the launch registry omitted
 		// (a `--tools`/`--no-tools` session holds only the requested set)
 		// before activating the persona's list.
-		await session.applyPersonaTools(mainSessionTools(agent.tools));
+		await session.applyPersonaTools(mainSessionTools(agent.tools, agent.spawns));
 	}
 	session.setSessionSpawns(spawnsToString(agent.spawns));
 	session.setPersonaAppendPrompt(agent.systemPrompt);

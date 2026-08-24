@@ -84,7 +84,7 @@ async function applyAgentPersonaToSession(
 	try {
 		await session.restoreBaselineTools();
 		if (agent.tools) {
-			await session.applyPersonaTools(mainSessionTools(agent.tools));
+			await session.applyPersonaTools(mainSessionTools(agent.tools, agent.spawns));
 		}
 		// ACP has no `#pendingModelSwitch` queue (that is an InteractiveMode
 		// field): mid-turn the model switch is skipped and surfaced as text

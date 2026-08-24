@@ -3125,12 +3125,34 @@ export class InteractiveMode implements InteractiveModeContext {
 			const { agents } = await discoverAgents(this.sessionManager.getCwd());
 			agent = getAgent(agents, name);
 		} catch (error) {
+			// Discovery failure (e.g. an unreadable configured extension
+			// directory) must not leave the target transcript under the source
+			// session's persona state: switchSession catches reconciler errors
+			// and still commits the target, so clear the persona-owned state
+			// for a coherent non-persona baseline (codex #3821198710). No-op
+			// on cold resume, where no persona is active yet.
 			logger.warn("Failed to discover agents during persona restore", { error: String(error) });
+			await this.#clearPersonaOwnedState();
 			return;
 		}
 		const disabledAgents = (this.session.settings.get("task.disabledAgents") as string[] | undefined) ?? [];
 		if (isMainSessionPersonaUsable(agent, disabledAgents)) {
-			await applyPersonaToSession(this.session, agent, explicit ?? EMPTY_PERSONA_OVERRIDES);
+			// Snapshot/rollback mirrors the live-switch path: a failed apply
+			// (e.g. setModelTemporary or the system-prompt rebuild rejecting)
+			// must restore the source session's persona state instead of
+			// leaving a partially applied persona in the committed target
+			// (codex #3821198710).
+			const snapshot = snapshotPersonaSwitch(this.session);
+			try {
+				await applyPersonaToSession(this.session, agent, explicit ?? EMPTY_PERSONA_OVERRIDES);
+			} catch (error) {
+				try {
+					await rollbackPersonaSwitch(this.session, snapshot);
+				} catch (rollbackError) {
+					logger.warn("Failed to roll back persona reconcile", { error: String(rollbackError) });
+				}
+				throw error;
+			}
 		} else {
 			// The persisted persona is gone/disabled: clear the previous session's
 			// persona-owned state so it does not leak into this transcript.
@@ -3270,7 +3292,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				// `applyPersonaTools` registers built-ins the launch registry
 				// omitted (a `--tools`/`--no-tools` session holds only the
 				// requested set) before activating the persona's list.
-				await this.session.applyPersonaTools(mainSessionTools(agent.tools));
+				await this.session.applyPersonaTools(mainSessionTools(agent.tools, agent.spawns));
 			}
 			await applyPersonaModelAndThinking(this.session, agent, EMPTY_PERSONA_OVERRIDES, {
 				queueModelSwitch: (model, thinkingLevel) => {

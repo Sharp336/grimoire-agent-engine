@@ -206,7 +206,7 @@ describe("InteractiveMode persona session restore", () => {
 			session = created.session;
 			await created.mode.init({ suppressWelcomeIntro: true });
 
-			expect(session.getEnabledToolNames()).toEqual(["read", "write"]);
+			expect(session.getEnabledToolNames()).toEqual(["read", "write", "task"]);
 			expect(session.model?.id).toBe("claude-haiku-4-5");
 			expect(session.configuredThinkingLevel()).toBe(Effort.High);
 			expect(session.getSessionSpawns()).toBe("scout");
@@ -424,7 +424,7 @@ describe("InteractiveMode persona session restore", () => {
 			session = created.session;
 			await created.mode.init({ suppressWelcomeIntro: true });
 
-			expect(session.getEnabledToolNames()).toEqual(["read", "write"]);
+			expect(session.getEnabledToolNames()).toEqual(["read", "write", "task"]);
 			expect(session.model?.id).toBe("claude-haiku-4-5");
 			expect(session.configuredThinkingLevel()).toBe(Effort.High);
 			expect(session.getSessionSpawns()).toBe("scout");
@@ -514,7 +514,7 @@ describe("InteractiveMode persona session restore", () => {
 			mode = created.mode;
 			session = created.session;
 			await created.mode.init({ suppressWelcomeIntro: true });
-			expect(session.getEnabledToolNames()).toEqual(["read", "write"]);
+			expect(session.getEnabledToolNames()).toEqual(["read", "write", "task"]);
 
 			// Edit the agent file: tools change from [read, write] to [read].
 			await fs.writeFile(
@@ -531,7 +531,7 @@ describe("InteractiveMode persona session restore", () => {
 			// fresh and the CURRENT definition applied.
 			await expect(session.switchSession(sessionFile)).resolves.toBe(true);
 
-			expect(session.getEnabledToolNames()).toEqual(["read"]);
+			expect(session.getEnabledToolNames()).toEqual(["read", "task"]);
 			expect(session.getPersonaAppendPrompt()).toBe("You are persona-test.");
 		},
 		{ timeout: 30_000 },
@@ -688,7 +688,7 @@ describe("InteractiveMode persona session restore", () => {
 			expect(session.model?.id).toBe("claude-sonnet-4-5");
 			expect(notices.some(notice => notice.level === "warning")).toBe(false);
 			// The rest of the persona still applies.
-			expect(session.getEnabledToolNames()).toEqual(["read", "write"]);
+			expect(session.getEnabledToolNames()).toEqual(["read", "write", "task"]);
 			expect(session.configuredThinkingLevel()).toBe(Effort.High);
 			expect(session.getPersonaAppendPrompt()).toBe("You are persona-test.");
 		},
@@ -733,7 +733,7 @@ describe("InteractiveMode persona session restore", () => {
 			// NOT a crash.
 			expect(session.model?.id).toBe("claude-sonnet-4-5");
 			// The rest of the persona still applies.
-			expect(session.getEnabledToolNames()).toEqual(["read", "write"]);
+			expect(session.getEnabledToolNames()).toEqual(["read", "write", "task"]);
 			expect(session.getPersonaAppendPrompt()).toBe("You are persona-test.");
 		},
 		{ timeout: 30_000 },
@@ -875,7 +875,7 @@ describe("InteractiveMode persona session restore", () => {
 		// runs (the launch path seeds the prompt channel; the spawn policy
 		// lives in the SDK options closure, so the session field is null until
 		// a live switch populates it).
-		expect(session.getEnabledToolNames()).toEqual(["read"]);
+		expect(session.getEnabledToolNames()).toEqual(["read", "task"]);
 		expect(session.getPersonaAppendPrompt()).toBe("You are persona-test.");
 		const baseline = session.getBaselineToolNames();
 		expect(baseline).toBeDefined();
@@ -1034,7 +1034,7 @@ describe("InteractiveMode persona session restore", () => {
 			// Init WITHOUT personaName: the reconcile path runs (no launch-persona
 			// short-circuit) and re-applies the persona from the first session file.
 			await created.mode.init({ suppressWelcomeIntro: true });
-			expect(session.getEnabledToolNames()).toEqual(["read"]);
+			expect(session.getEnabledToolNames()).toEqual(["read", "task"]);
 			expect(session.getSessionSpawns()).toBe("scout");
 			expect(session.getPersonaAppendPrompt()).toBe("You are persona-test.");
 			const baseline = session.getBaselineToolNames();
@@ -1098,7 +1098,7 @@ describe("InteractiveMode persona session restore", () => {
 
 			expect(session.getSessionSpawns()).toBe("scout");
 			expect(session.getPersonaAppendPrompt()).toBe("You are persona-test.");
-			expect(session.getEnabledToolNames()).toEqual(["read"]);
+			expect(session.getEnabledToolNames()).toEqual(["read", "task"]);
 		},
 		{ timeout: 30_000 },
 	);

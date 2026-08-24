@@ -150,7 +150,7 @@ describe("launch persona first system prompt", () => {
 		// [read] — no bash/write/MCP/extension/memory widening (subagent
 		// restrictToolNames semantics).
 		const enabled = session.getEnabledToolNames();
-		expect(enabled).toEqual(["read"]);
+		expect(enabled).toEqual(["read", "task"]);
 		// The persona's spawn policy is the session's spawn policy.
 		expect(session.getSessionSpawns()).toBe("scout");
 

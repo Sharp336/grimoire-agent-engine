@@ -1181,7 +1181,7 @@ describe("createAcpSessionFactory --agent persona", () => {
 		await factory(projectDir);
 
 		expect(captured).toHaveLength(1);
-		expect(captured[0].toolNames).toEqual(["read", "write"]);
+		expect(captured[0].toolNames).toEqual(["read", "write", "task"]);
 		// The persona's tool list is the EXACT active set (subagent
 		// restrictToolNames semantics) — no MCP/LSP/extension/memory widening.
 		expect(captured[0].restrictToolNames).toBe(true);
@@ -1212,7 +1212,7 @@ describe("createAcpSessionFactory --agent persona", () => {
 		await factory(projectDir);
 
 		expect(captured[0].modelPattern).toBeUndefined();
-		expect(captured[0].toolNames).toEqual(["read", "write"]);
+		expect(captured[0].toolNames).toEqual(["read", "write", "task"]);
 	});
 
 	it("settings-seeded baseOptions thinking does not suppress the persona's thinkingLevel", async () => {

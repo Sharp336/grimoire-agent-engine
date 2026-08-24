@@ -157,7 +157,7 @@ describe("--agent CLI flag", () => {
 
 		expect(options.modelPattern).toEqual(["anthropic/claude-sonnet-4-5"]);
 		expect(options.thinkingLevel).toBe(Effort.High);
-		expect(options.toolNames).toEqual(["read", "bash"]);
+		expect(options.toolNames).toEqual(["read", "bash", "task"]);
 		// The persona's tool list is applied as the EXACT active set (subagent
 		// restrictToolNames semantics) — no MCP/LSP/extension/memory widening.
 		expect(options.restrictToolNames).toBe(true);
