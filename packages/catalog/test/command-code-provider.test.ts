@@ -1,0 +1,53 @@
+import { describe, expect, test } from "bun:test";
+import { CATALOG_PROVIDERS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
+import {
+	commandCodeModelManagerOptions,
+	resolveCommandCodeApi,
+} from "@oh-my-pi/pi-catalog/provider-models/command-code";
+
+describe("Command Code provider", () => {
+	test("registers the documented API key env var with the legacy alias as fallback", () => {
+		const descriptor = CATALOG_PROVIDERS.find(provider => provider.id === "command-code");
+		expect(descriptor).toMatchObject({
+			envVars: ["COMMAND_CODE_API_KEY", "COMMANDCODE_API_KEY"],
+			dynamicModelsAuthoritative: true,
+		});
+	});
+
+	test("routes Anthropic models to messages and other models to chat completions", () => {
+		expect(resolveCommandCodeApi("claude-opus-4-8")).toBe("anthropic-messages");
+		expect(resolveCommandCodeApi("anthropic/claude-sonnet-4-6")).toBe("anthropic-messages");
+		expect(resolveCommandCodeApi("gpt-5.5")).toBe("openai-completions");
+		expect(resolveCommandCodeApi("deepseek/deepseek-v4-flash")).toBe("openai-completions");
+	});
+
+	test("discovers one catalog while assigning the correct per-model base URL", async () => {
+		const fetch = (async (input: RequestInfo | URL) => {
+			expect(String(input)).toBe("https://api.commandcode.ai/provider/v1/models");
+			return new Response(
+				JSON.stringify({
+					data: [
+						{ id: "claude-opus-4-8", object: "model" },
+						{ id: "gpt-5.5", object: "model" },
+					],
+				}),
+				{ status: 200, headers: { "content-type": "application/json" } },
+			);
+		}) as unknown as typeof globalThis.fetch;
+
+		const options = commandCodeModelManagerOptions({ apiKey: "test-key", fetch });
+		const models = (await options.fetchDynamicModels?.()) ?? [];
+		const byId = new Map(models.map(model => [model.id, model]));
+
+		expect(byId.get("claude-opus-4-8")).toMatchObject({
+			api: "anthropic-messages",
+			baseUrl: "https://api.commandcode.ai/provider",
+			provider: "command-code",
+		});
+		expect(byId.get("gpt-5.5")).toMatchObject({
+			api: "openai-completions",
+			baseUrl: "https://api.commandcode.ai/provider/v1",
+			provider: "command-code",
+		});
+	});
+});
