@@ -290,8 +290,9 @@ export class MnemosyneOssWorkerClient {
 		this.#pending.delete(id);
 		clearTimeout(pending.timer);
 		pending.removeAbort?.();
-		if (error) pending.reject(error);
-		else if (pending.cancellationError) pending.reject(pending.cancellationError);
+		if (pending.cancellationError) {
+			pending.reject(pending.mutation ? unknownMutationError(pending.cancellationError) : pending.cancellationError);
+		} else if (error) pending.reject(error);
 		else pending.resolve(result);
 	}
 
@@ -411,11 +412,16 @@ function buildWorkerEnvironment(
 	environment.MNEMOSYNE_DATA_DIR = temporaryConfigDir;
 	environment.MNEMOSYNE_FORCE_LOCAL = "1";
 	environment.MNEMOSYNE_AUTO_MIGRATE = context.auto_migrate ? "1" : "0";
-	environment.MNEMOSYNE_EMBEDDING_MODE = context.embedding_mode;
-	environment.MNEMOSYNE_EMBEDDING_MODEL = context.embedding_model ?? "";
-	environment.MNEMOSYNE_EMBEDDINGS_ENABLED = context.embedding_mode === "local" ? "1" : "0";
+	if (context.embedding_mode === "local") {
+		environment.MNEMOSYNE_EMBEDDING_MODEL = context.embedding_model ?? "";
+	} else {
+		environment.MNEMOSYNE_NO_EMBEDDINGS = "1";
+		environment.MNEMOSYNE_SKIP_EMBEDDINGS = "1";
+		environment.MNEMOSYNE_EMBEDDINGS_OFF = "1";
+		environment.MNEMOSYNE_EMBEDDING_MODEL = "";
+	}
 	environment.MNEMOSYNE_REMOTE_EMBEDDINGS = "";
-	environment.MNEMOSYNE_LLM_MODE = context.consolidation_mode;
+	environment.MNEMOSYNE_LLM_ENABLED = context.consolidation_mode === "local" ? "true" : "false";
 	environment.MNEMOSYNE_LLM_REPO = context.local_llm_repo ?? "";
 	environment.MNEMOSYNE_LLM_FILE = context.local_llm_file ?? "";
 	environment.MNEMOSYNE_REMOTE_LLM = "";

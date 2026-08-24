@@ -41,6 +41,7 @@ interface FakeWorkerOptions {
 	crashRemember?: boolean;
 	malformedStatus?: boolean;
 	statusDelayMs?: number;
+	rememberDelayMs?: number;
 }
 
 interface FakeWorker {
@@ -99,12 +100,27 @@ for line in sys.stdin:
         delay = OPTIONS.get("statusDelayMs", 0)
         if delay:
             time.sleep(delay / 1000)
-        result = {"runtime_data_dir": os.environ.get("MNEMOSYNE_DATA_DIR"), "sentinel": os.environ.get("MNEMOSYNE_SENTINEL_PROVIDER"), "inherited": os.environ.get("MNEMOSYNE_INHERITED"), "name": request.get("params", {}).get("name")}
+        result = {
+            "runtime_data_dir": os.environ.get("MNEMOSYNE_DATA_DIR"),
+            "sentinel": os.environ.get("MNEMOSYNE_SENTINEL_PROVIDER"),
+            "inherited": os.environ.get("MNEMOSYNE_INHERITED"),
+            "name": request.get("params", {}).get("name"),
+            "no_embeddings": os.environ.get("MNEMOSYNE_NO_EMBEDDINGS"),
+            "skip_embeddings": os.environ.get("MNEMOSYNE_SKIP_EMBEDDINGS"),
+            "embeddings_off": os.environ.get("MNEMOSYNE_EMBEDDINGS_OFF"),
+            "llm_enabled": os.environ.get("MNEMOSYNE_LLM_ENABLED"),
+            "embedding_mode": os.environ.get("MNEMOSYNE_EMBEDDING_MODE"),
+            "embeddings_enabled": os.environ.get("MNEMOSYNE_EMBEDDINGS_ENABLED"),
+            "llm_mode": os.environ.get("MNEMOSYNE_LLM_MODE"),
+        }
     elif method == "remember":
         with MUTATIONS.open("a") as stream:
             stream.write("remember\\n")
         if OPTIONS.get("crashRemember"):
             os._exit(19)
+        delay = OPTIONS.get("rememberDelayMs", 0)
+        if delay:
+            time.sleep(delay / 1000)
         result = {"id": "memory-1", "bank": "project-bank"}
     elif method == "recall":
         result = {"items": [{"id": "memory-1", "content": "remembered", "score": 1.0, "bank": "project-bank"}]}
@@ -120,9 +136,13 @@ for line in sys.stdin:
 	return { directory, executable, callsFile, mutationFile, markerFile };
 }
 
-function clientFor(fake: FakeWorker, timeoutMs = 500): MnemosyneOssWorkerClient {
+function clientFor(
+	fake: FakeWorker,
+	timeoutMs = 500,
+	context: MnemosyneOssWorkerContext = workerContext(path.join(path.resolve(fake.directory.path()), "shared-store")),
+): MnemosyneOssWorkerClient {
 	return new MnemosyneOssWorkerClient({
-		context: workerContext(path.join(path.resolve(fake.directory.path()), "shared-store")),
+		context,
 		cwd: path.resolve(fake.directory.path()),
 		executable: fake.executable,
 		requestTimeoutMs: timeoutMs,
@@ -172,11 +192,27 @@ it("passes one executable argv and an allowlisted local-only environment", async
 	try {
 		const fake = await fakeWorker();
 		const client = clientFor(fake);
-		const status = await client.request<{ runtime_data_dir: string; sentinel?: string; inherited?: string }>(
-			"status",
-		);
+		const status = await client.request<{
+			runtime_data_dir: string;
+			sentinel?: string;
+			inherited?: string;
+			no_embeddings?: string;
+			skip_embeddings?: string;
+			embeddings_off?: string;
+			llm_enabled?: string;
+			embedding_mode?: string;
+			embeddings_enabled?: string;
+			llm_mode?: string;
+		}>("status");
 		expect(status.sentinel).toBeNull();
 		expect(status.inherited).toBeNull();
+		expect(status.no_embeddings).toBe("1");
+		expect(status.skip_embeddings).toBe("1");
+		expect(status.embeddings_off).toBe("1");
+		expect(status.llm_enabled).toBe("false");
+		expect(status.embedding_mode).toBeNull();
+		expect(status.embeddings_enabled).toBeNull();
+		expect(status.llm_mode).toBeNull();
 		expect(status.runtime_data_dir).toContain("omp-mnemosyne-oss-config-");
 		expect((await lines(fake.callsFile)).filter(line => line === "initialize")).toHaveLength(1);
 		await client.shutdown();
@@ -225,6 +261,40 @@ it("times out and aborts in-flight SDK calls by terminating the child", async ()
 	setTimeout(() => controller.abort(), 20);
 	await expect(request).rejects.toThrow();
 	await aborted.shutdown();
+});
+
+it("enables local embeddings and LLM when the context requests local modes", async () => {
+	const fake = await fakeWorker();
+	const store = path.join(path.resolve(fake.directory.path()), "shared-store");
+	const client = clientFor(fake, 2_000, {
+		...workerContext(store),
+		embedding_mode: "local",
+		embedding_model: "local-model",
+		consolidation_mode: "local",
+		local_llm_repo: "org/model",
+		local_llm_file: "model.gguf",
+	});
+	const status = await client.request<{
+		no_embeddings?: string;
+		skip_embeddings?: string;
+		embeddings_off?: string;
+		llm_enabled?: string;
+	}>("status");
+	expect(status.no_embeddings).toBeNull();
+	expect(status.skip_embeddings).toBeNull();
+	expect(status.embeddings_off).toBeNull();
+	expect(status.llm_enabled).toBe("true");
+	await client.shutdown();
+});
+
+it("reports unknown mutation outcome when a write completes during cancel grace", async () => {
+	const fake = await fakeWorker({ rememberDelayMs: 100 });
+	const client = clientFor(fake, 2_000);
+	await expect(client.request("remember", { content: "once" }, { mutation: true, timeoutMs: 40 })).rejects.toThrow(
+		"operation outcome unknown",
+	);
+	expect(await lines(fake.mutationFile)).toEqual(["remember"]);
+	await client.shutdown();
 });
 
 it("never replays a mutation after an uncertain crash and lazily restarts for reads", async () => {

@@ -34,6 +34,11 @@
 ### Fixed
 
 - Mnemosyne OSS now stays inert when Python or the SDK cannot handshake, sleeps only the retain bank without forcing other sessions, and uses local consolidation only when a local LLM path is set.
+- `/memory enqueue` on Mnemosyne OSS now calls session-scoped SDK sleep (`dry_run`/`force` only), so consolidation no longer fails on an unsupported `all_sessions` argument.
+- Mnemosyne OSS lexical recall and heuristic consolidation now set the SDK disable flags (`MNEMOSYNE_NO_EMBEDDINGS` / `MNEMOSYNE_SKIP_EMBEDDINGS` / `MNEMOSYNE_EMBEDDINGS_OFF` and `MNEMOSYNE_LLM_ENABLED`) instead of ignored mode variables.
+- Cancelling a Mnemosyne OSS write during the worker grace window now reports that the mutation outcome is unknown, so the write is not retried.
+- `/memory clear` on Mnemosyne OSS no longer re-injects previously recalled memories into the next prompt.
+- Mnemosyne OSS install docs now point at an installable 4.x git source; current PyPI 3.x remains rejected.
 - Exact `memory://<id>` reads are available with `memory.backend=mnemopi` or `mnemosyne-oss`; Hindsight still points agents at `recall`/`reflect` instead of claiming the protocol is Mnemopi-only.
 - Fixed regional HTTP 401 data-residency errors during Codex chat, web search, and image generation requests by passing token residency metadata on requests.
 - Fixed macOS SSH ControlMaster socket creation failures caused by `sun_path` length limits when using named profiles.

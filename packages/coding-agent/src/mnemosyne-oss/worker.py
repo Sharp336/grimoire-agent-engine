@@ -337,7 +337,13 @@ class MnemosyneWorker:
         sleeper = getattr(memory, "sleep", None)
         if not callable(sleeper):
             raise RpcError(-32000, "Mnemosyne SDK does not support sleep")
-        return as_dict(call_sdk(sleeper, **params))
+        payload = params if isinstance(params, dict) else {}
+        kwargs = {}
+        if "dry_run" in payload:
+            kwargs["dry_run"] = payload["dry_run"]
+        if "force" in payload:
+            kwargs["force"] = payload["force"]
+        return as_dict(call_sdk(sleeper, **kwargs))
 
     def clear(self):
         bank = self.context["retain_bank"]

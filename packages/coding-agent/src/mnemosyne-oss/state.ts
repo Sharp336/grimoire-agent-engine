@@ -291,7 +291,7 @@ export class MnemosyneOssSessionState {
 		if (this.aliasOf) return;
 		await this.worker.request(
 			"sleep",
-			{ all_sessions: false, dry_run: false, force: false },
+			{ dry_run: false, force: false },
 			{ mutation: true, timeoutMs: this.config.sleepTimeoutMs },
 		);
 	}
@@ -314,6 +314,14 @@ export class MnemosyneOssSessionState {
 		const primary = this.#owner;
 		if (primary.aliasOf) return;
 		await primary.worker.request("clear", {}, { mutation: true });
+		primary.lastRecallSnippet = undefined;
+		primary.hasRecalledForFirstTurn = false;
+		primary.lastRetainedTurn = 0;
+		await persistRetentionCursor(primary.session, {
+			sessionId: primary.sessionId,
+			retainedThroughUserTurn: 0,
+			sourceId: `${primary.sessionId}:cleared`,
+		});
 		if (!primary.#workerFactory) return;
 		const oldWorker = primary.#worker;
 		await oldWorker.shutdown();

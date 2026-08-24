@@ -366,9 +366,37 @@ describe("Mnemosyne OSS backend", () => {
 		);
 		await mnemosyneOssBackend.enqueue("/tmp", "/tmp", session.session);
 		expect(fake.calls.find(call => call.method === "sleep")?.params).toEqual({
-			all_sessions: false,
 			dry_run: false,
 			force: false,
+		});
+	});
+
+	it("drops recalled memories from developer instructions after /memory clear", async () => {
+		const session = createSession();
+		const fake = createWorker();
+		const state = new MnemosyneOssSessionState({
+			sessionId: "session-1",
+			config,
+			session: session.session,
+			worker: fake.worker,
+		});
+		setMnemosyneOssSessionState(session.session, state);
+		state.lastRecallSnippet = "<memories>\nsecret that was deleted\n</memories>";
+		state.hasRecalledForFirstTurn = true;
+		state.lastRetainedTurn = 6;
+		await mnemosyneOssBackend.clear("/tmp", "/tmp", session.session);
+		const instructions = await mnemosyneOssBackend.buildDeveloperInstructions(
+			"/tmp",
+			Settings.isolated({}),
+			session.session,
+		);
+		expect(instructions).not.toContain("secret that was deleted");
+		expect(state.lastRecallSnippet).toBeUndefined();
+		expect(state.hasRecalledForFirstTurn).toBe(false);
+		expect(state.lastRetainedTurn).toBe(0);
+		expect(session.customEntries.at(-1)).toEqual({
+			customType: "mnemosyne-oss-retention-cursor",
+			data: { sessionId: "session-1", retainedThroughUserTurn: 0, sourceId: "session-1:cleared" },
 		});
 	});
 

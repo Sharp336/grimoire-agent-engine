@@ -6,14 +6,14 @@ This backend is separate from [Mnemopi](./mnemosyne-memory-backend.md). Legacy `
 
 ## Install
 
-Use Python 3.10 or newer. Install one of these into the interpreter selected by `mnemosyne-oss.executable`, your project virtual environment, or `PATH`:
+Use Python 3.10 or newer. This backend requires Mnemosyne SDK **major 4**. Current PyPI `mnemosyne-memory` (3.15.1) is rejected on purpose; install 4.x from upstream git into the interpreter selected by `mnemosyne-oss.executable`, your project virtual environment, or `PATH`:
 
 ```sh
-python -m pip install mnemosyne-memory
-python -m pip install 'mnemosyne-memory[embeddings]'
+python -m pip install 'mnemosyne-memory @ git+https://github.com/mnemosyne-oss/mnemosyne.git'
+python -m pip install 'mnemosyne-memory[embeddings] @ git+https://github.com/mnemosyne-oss/mnemosyne.git'
 ```
 
-The base package supports lexical recall. The embeddings extra permits local semantic recall. OMP does not install Python packages, parse an SDK CLI, use MCP, or fall back to another memory backend. A missing interpreter, package, supported method, or SDK major version leaves the backend inert with an actionable diagnostic. Tools and `/memory` commands then report that the backend is not initialised; OMP does not pretend the worker is live.
+Upstream `main` currently reports `4.0.0b1`. Pin a commit or tag once you have a known-good 4.x revision. The base package supports lexical recall. The embeddings extra permits local semantic recall. OMP does not install Python packages, parse an SDK CLI, use MCP, or fall back to another memory backend. A missing interpreter, package, supported method, or SDK major version leaves the backend inert with an actionable diagnostic. Tools and `/memory` commands then report that the backend is not initialised; OMP does not pretend the worker is live.
 
 ## Configuration
 
