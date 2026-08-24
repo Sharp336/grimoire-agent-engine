@@ -166,15 +166,8 @@ export function parseCSV(value: string): string[] {
  * Returns undefined if the result would be empty.
  */
 export function parseArrayOrCSV(value: unknown): string[] | undefined {
-	if (Array.isArray(value)) {
-		const filtered = value.filter((item): item is string => typeof item === "string");
-		return filtered.length > 0 ? filtered : undefined;
-	}
-	if (typeof value === "string") {
-		const parsed = parseCSV(value);
-		return parsed.length > 0 ? parsed : undefined;
-	}
-	return undefined;
+	const parsed = parseArrayOrCSVKeepEmpty(value);
+	return parsed && parsed.length > 0 ? parsed : undefined;
 }
 
 /**
