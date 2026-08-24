@@ -157,9 +157,9 @@ interface OutputRegistration extends DaemonOutputWireSubscription {
 	pending: DaemonMonitorWireNotification[];
 	artifactSink: OutputSink;
 	artifactDisposal?: Promise<void>;
-	/** Reconnect-grace cleanup for registrations without an attached live client. */
+	/** Reconnect/reap cleanup for registrations without an attached live client. */
 	offlineTimer?: NodeJS.Timeout;
-	/** Delivery is terminally expired; retain only its expiry until client cleanup. */
+	/** Delivery is terminally expired; retain only its expiry through one final reconnect grace. */
 	disabled?: boolean;
 	/** Model-facing line previews accumulated from this registration's attach point. */
 	progressPreview: ProgressPreviewAccumulator;
@@ -1088,6 +1088,7 @@ class DaemonBroker {
 		clearTimeout(registration.offlineTimer);
 		registration.offlineTimer = undefined;
 		this.#outputRegistrations.delete(registrationKey);
+		registration.pending.length = 0;
 		this.#progressBatcher.clear(registration.batchKey);
 		void this.#disposeOutputArtifact(registration);
 	}
@@ -1115,6 +1116,10 @@ class DaemonBroker {
 		// it instead of opening an append sink after an uncaptured output gap.
 		registration.pending = [expired];
 		this.#writeMonitorNotification(registration, expired);
+		// Bound the terminal tombstone to one additional reconnect grace. An
+		// exact-identity reconnect cancels this timer and consumes the expiry;
+		// otherwise the disabled branch above disposes the registration.
+		this.#scheduleOutputRegistrationCleanup(registrationKey, registration);
 	}
 
 	#scheduleOutputRegistrationCleanup(registrationKey: string, registration: OutputRegistration): void {
@@ -2056,7 +2061,7 @@ export interface DaemonBrokerStartOptions {
 	clientAuthTimeoutMs?: number;
 	/** Collection window for monitored output previews. */
 	progressBatchIntervalMs?: number;
-	/** Grace for a disconnected monitor client to reconnect before its registration is dropped. */
+	/** Grace for reconnect before capture expiry, then again before its offline tombstone is reaped. */
 	outputReconnectGraceMs?: number;
 	/** Maximum retained monitor notifications awaiting client sink acknowledgement. */
 	maxUnacknowledgedOutputNotifications?: number;
