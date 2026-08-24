@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an Anthropic compatibility opt-out for proxies that support reasoning but reject the optional `context_management` request field.
+
 ## [18.0.4] - 2026-08-24
 
 ### Fixed

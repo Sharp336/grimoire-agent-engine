@@ -414,6 +414,13 @@ export interface OpenAICompat {
  */
 export interface AnthropicCompat {
 	/**
+	 * Whether reasoning requests may include Anthropic's optional
+	 * `context_management` field and beta header. Set false for compatible
+	 * proxies that implement thinking but reject server-side context editing.
+	 * Defaults to true.
+	 */
+	supportsContextManagement?: boolean;
+	/**
 	 * Stream-watchdog idle-timeout fallback in ms for slow reasoning hosts.
 	 * Set to 0 to disable the inter-event idle watchdog entirely, matching
 	 * `OpenAICompat.streamIdleTimeoutMs`.

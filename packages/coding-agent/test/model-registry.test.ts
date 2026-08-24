@@ -599,6 +599,7 @@ describe("ModelRegistry", () => {
 						apiKey: "ANTHROPIC_PROXY_KEY",
 						api: "anthropic-messages",
 						compat: {
+							supportsContextManagement: false,
 							supportsEagerToolInputStreaming: true,
 							allowAnthropicHeaderOverrides: true,
 						},
@@ -700,9 +701,10 @@ describe("ModelRegistry", () => {
 			expect(compat?.cacheControlFormat).toBe("anthropic");
 		});
 
-		test("custom Anthropic providers can opt into eager tool input streaming", () => {
+		test("custom Anthropic providers preserve authored compatibility", () => {
 			const model = customAnthropicCompat.find("anthropic-proxy", "claude-haiku-4.5");
 			expect(model?.compat).toMatchObject({
+				supportsContextManagement: false,
 				supportsEagerToolInputStreaming: true,
 				allowAnthropicHeaderOverrides: true,
 			});

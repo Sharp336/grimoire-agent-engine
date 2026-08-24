@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `supportsContextManagement` metadata for Anthropic-compatible model endpoints.
+
 ## [18.0.4] - 2026-08-24
 
 ### Fixed
