@@ -988,6 +988,83 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		// A server filter narrows to that server alone.
 		expect((await handlers.listMcpResources({ server: "issues" })).map(r => r.uri)).toEqual(["issues://open"]);
 	});
+	it("filters resources of scoped-out servers from listing and reads", async () => {
+		// A scoped subagent (enforced allowlist / disallowedTools) must not reach
+		// a scoped-out server's resources: resource frames answer by server name
+		// and never run a registry tool, so the scope gate must apply here too.
+		const gatedTool = { name: "mcp__docs_list", mcpServerName: "docs" } as unknown as AgentTool;
+		const openTool = { name: "mcp__issues_list", mcpServerName: "issues" } as unknown as AgentTool;
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map([
+				["mcp__docs_list", gatedTool],
+				["mcp__issues_list", openTool],
+			]),
+			isToolExecutable: name => name === "mcp__issues_list",
+			mcpResources: {
+				serverNames: () => ["docs", "issues"],
+				getServerResources: async name =>
+					name === "docs"
+						? { resources: [{ uri: "docs://readme", name: "README" }] }
+						: { resources: [{ uri: "issues://open" }] },
+				readServerResource: async (name, uri) =>
+					({ contents: [{ uri, mimeType: "text/plain", text: `content from ${name}` }] }) as never,
+			},
+		});
+
+		expect((await handlers.listMcpResources({})).map(r => r.uri)).toEqual(["issues://open"]);
+		// A direct read of the scoped-out server is refused too.
+		expect(await handlers.readMcpResource({ server: "docs", uri: "docs://readme" })).toBeNull();
+		expect(await handlers.readMcpResource({ server: "issues", uri: "issues://open" })).not.toBeNull();
+	});
+
+	it("keeps all resources when no scope gate is configured", async () => {
+		// Unrestricted sessions (no isToolExecutable) must stay byte-identical:
+		// every connected server's resources remain listable and readable.
+		const tool = { name: "mcp__docs_list", mcpServerName: "docs" } as unknown as AgentTool;
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map([["mcp__docs_list", tool]]),
+			mcpResources: {
+				serverNames: () => ["docs"],
+				getServerResources: async () => ({ resources: [{ uri: "docs://readme", name: "README" }] }),
+				readServerResource: async () =>
+					({ contents: [{ uri: "docs://readme", mimeType: "text/plain", text: "ok" }] }) as never,
+			},
+		});
+
+		expect((await handlers.listMcpResources({})).map(r => r.uri)).toEqual(["docs://readme"]);
+		expect(await handlers.readMcpResource({ server: "docs", uri: "docs://readme" })).not.toBeNull();
+	});
+	it("keeps a resource-only server when the per-server predicate allows it", async () => {
+		// A resource-only server (advertises resources, no tools) has no
+		// registry tool to gate on. Under an MCP-targeting scope the handler
+		// consults the per-server predicate: a server its `mcp__` disallow
+		// patterns do not name stays listable/readable, one they name is
+		// stripped — while a server that owns tools is gated purely by
+		// `isToolExecutable`, never rescued by the predicate.
+		const gatedTool = { name: "mcp__docs_list", mcpServerName: "docs" } as unknown as AgentTool;
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map([["mcp__docs_list", gatedTool]]),
+			isToolExecutable: name => name === "mcp__unrelated",
+			allowToollessMcpServers: serverName => serverName !== "secrets",
+			mcpResources: {
+				serverNames: () => ["docs", "secrets", "notes"],
+				getServerResources: async name => ({ resources: [{ uri: `${name}://entry`, name }] }) as never,
+				readServerResource: async (name, uri) =>
+					({ contents: [{ uri, mimeType: "text/plain", text: `content from ${name}` }] }) as never,
+			},
+		});
+
+		// `docs` owns a tool the gate rejects: stripped despite the predicate.
+		// `secrets` is resource-only and the predicate rejects it: stripped.
+		// `notes` is resource-only and the predicate allows it: kept.
+		expect((await handlers.listMcpResources({})).map(r => r.uri)).toEqual(["notes://entry"]);
+		expect(await handlers.readMcpResource({ server: "docs", uri: "docs://entry" })).toBeNull();
+		expect(await handlers.readMcpResource({ server: "secrets", uri: "secrets://entry" })).toBeNull();
+		expect(await handlers.readMcpResource({ server: "notes", uri: "notes://entry" })).not.toBeNull();
+	});
 
 	it("waits for a server's catalog instead of reporting it empty", async () => {
 		// A server registers its tools before its resource catalog finishes
@@ -1923,5 +2000,60 @@ describe("CursorExecHandlers Pi frame translation", () => {
 		await handlers.piLs({ toolCallId: "c1", args: { path: "" } } as never);
 
 		expect(calls[0]).toEqual({ path: "." });
+	});
+});
+
+describe("CursorExecHandlers scope gate", () => {
+	let cwd: string;
+
+	beforeEach(async () => {
+		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-scope-test-"));
+	});
+
+	function mcpStub(name: string): Tool {
+		return {
+			name,
+			description: `${name} stub`,
+			parameters: type({}),
+			execute: async () => ({ content: [{ type: "text", text: "ok" }], details: {} }),
+		} as unknown as Tool;
+	}
+
+	it("refuses frame-driven MCP calls for names the scope gate rejects", async () => {
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([
+				["mcp__db_query", mcpStub("mcp__db_query")],
+				["mcp__other_call", mcpStub("mcp__other_call")],
+			]),
+			isToolExecutable: name => name === "mcp__db_query",
+		});
+
+		const rejected = await handlers.mcp({ toolName: "mcp__other_call", toolCallId: "s1", args: {} } as never);
+		expect(rejected.isError).toBe(true);
+
+		const allowed = await handlers.mcp({ toolName: "mcp__db_query", toolCallId: "s2", args: {} } as never);
+		expect(allowed.isError).toBeFalsy();
+	});
+});
+
+describe("CursorExecHandlers scope gate: streamed shell", () => {
+	it("refuses streamed shell frames when the scope gate rejects bash", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-scope-shell-"));
+		const handlers = new CursorExecHandlers({
+			cwd,
+			tools: new Map<string, Tool>([["bash", new BashTool(createTestSession(cwd)) as unknown as Tool]]),
+			isToolExecutable: () => false,
+		});
+
+		const result = await handlers.shellStream(
+			create(ShellArgsSchema, { toolCallId: "call-scope", command: "echo hi" }),
+			{
+				onStdout: () => {},
+				onStderr: () => {},
+			},
+		);
+		expect(result.isError).toBe(true);
+		expect(result.content).toEqual([{ type: "text", text: 'Tool "bash" not available' }]);
 	});
 });

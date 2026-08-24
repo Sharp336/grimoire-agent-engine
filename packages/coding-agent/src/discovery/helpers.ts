@@ -236,6 +236,7 @@ export interface ParsedAgentFields {
 	name: string;
 	description: string;
 	tools?: string[];
+	disallowedTools?: string[];
 	spawns?: string[] | "*";
 	model?: string[];
 	output?: unknown;
@@ -262,12 +263,18 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	}
 
 	let tools = parseArrayOrCSV(frontmatter.tools);
+	// An explicit empty array is a real (protocol-only) allowlist, not absence —
+	// preserve it so the executor keeps enforcement on downstream.
+	if (tools === undefined && Array.isArray(frontmatter.tools)) tools = [];
 	if (tools) tools = normalizeToolNames(tools);
 
 	// Subagents with explicit tool lists always need yield
 	if (tools && !tools.includes("yield")) {
 		tools = [...tools, "yield"];
 	}
+
+	let disallowedTools = parseArrayOrCSV(frontmatter.disallowedTools);
+	if (disallowedTools) disallowedTools = normalizeToolNames(disallowedTools);
 
 	// Parse spawns field (array, "*", or CSV)
 	let spawns: string[] | "*" | undefined;
@@ -320,6 +327,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		name,
 		description,
 		tools,
+		disallowedTools,
 		spawns,
 		model,
 		output,

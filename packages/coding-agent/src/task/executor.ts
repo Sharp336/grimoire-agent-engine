@@ -2779,13 +2779,18 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 	// Add tools if specified
 	let toolNames: string[] | undefined;
-	if (agent.tools && agent.tools.length > 0) {
+	if (Array.isArray(agent.tools)) {
 		toolNames = agent.tools;
 		// Auto-include task tool if spawns defined but task not in tools
 		if (agent.spawns !== undefined && !toolNames.includes("task") && !atMaxDepth) {
 			toolNames = [...toolNames, "task"];
 		}
 	}
+	// A declared `tools:` list is a hard allowlist for custom/extension/MCP tools
+	// too (not just built-ins) — an explicit empty list enforces down to the
+	// protocol tools; `disallowedTools:` removes matching names after.
+	const enforceToolAllowlist = Array.isArray(agent.tools);
+	const disallowedTools = agent.disallowedTools?.length ? agent.disallowedTools : undefined;
 
 	if (atMaxDepth && toolNames?.includes("task")) {
 		toolNames = toolNames.filter(name => name !== "task");
@@ -3113,6 +3118,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				thinkingLevel: effectiveThinkingLevel,
 				thinkingLevelCeiling: spawnEffortCeiling,
 				toolNames,
+				enforceToolAllowlist,
+				disallowedTools,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: options.restrictToolNames,
@@ -3259,6 +3266,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
+				enforceToolAllowlist: enforceToolAllowlist || undefined,
+				disallowedTools,
+				// The declarative allowlist minus parent-owned tools, not the enabled
+				// snapshot: tools that register after this snapshot (late extensions,
+				// MCP reconnects) must stay allowed for cold revival, while a
+				// parent-owned tool the live spawn stripped (`todo` outside prewalk)
+				// must not regain a capability the original generation lacked.
+				declaredTools: enforceToolAllowlist
+					? (toolNames ?? []).filter(name => !isParentOwnedTool(name))
+					: undefined,
 			});
 
 			abortSignal.addEventListener(

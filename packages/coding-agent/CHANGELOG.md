@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Subagents that declare `tools:` now receive exactly that tool list: custom, extension, and MCP proxy tools not named in it are excluded from the active set and the `xd://` catalog, instead of being force-included as before ([#8599](https://github.com/can1357/oh-my-pi/issues/8599)).
+
+### Added
+
+- Added per-subagent MCP and extension tool scoping: an agent definition's `tools:` list is now a hard allowlist for custom, extension, and MCP proxy tools, and a new `disallowedTools:` frontmatter field removes tools by name or `mcp__*` / `mcp__<server>_*` wildcard (the `<server>` is the sanitized tool-name prefix — a server named `db2` mints `mcp__db_query`, so the pattern is `mcp__db_*`). Hidden protocol tools (`yield`, `goal`, `think`) can never be disallowed. Subagents that do not declare `tools:` are unaffected; top-level sessions are unchanged ([#8599](https://github.com/can1357/oh-my-pi/issues/8599)).
 ### Added
 
 - Added side-by-side image and SVG previews to `omp git`, including local Git LFS object resolution and explicit placeholders for unavailable or unsupported binary content.
