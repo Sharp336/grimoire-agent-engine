@@ -1848,7 +1848,7 @@ describe("AskTool rich ask dialog", () => {
 			await tool.execute(
 				"call-degraded-bounded-help",
 				{
-					helpText: "\t  Plan\n first   setting " + "x".repeat(80),
+					helpText: `\t  Plan\n first   setting ${"x".repeat(80)}`,
 					questions: [{ id: "q1", question: "Q1?", options: [{ label: "Option A" }] }],
 				},
 				undefined,

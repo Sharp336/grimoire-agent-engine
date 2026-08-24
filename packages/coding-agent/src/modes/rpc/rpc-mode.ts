@@ -702,7 +702,6 @@ export function requestRpcDialog<T>(
 	return promise;
 }
 
-
 /**
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
