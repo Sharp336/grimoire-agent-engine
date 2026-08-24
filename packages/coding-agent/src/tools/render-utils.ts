@@ -61,6 +61,8 @@ export const PREVIEW_LIMITS = {
 	OUTPUT_COLLAPSED: 3,
 	/** Output preview lines in expanded view */
 	OUTPUT_EXPANDED: 10,
+	/** UTF-8 bytes retained in progress previews */
+	PROGRESS_BYTES: 3_000,
 	/** Computer script lines shown in collapsed view */
 	COMPUTER_CODE_COLLAPSED: 10,
 	/** Max hunks shown when collapsed (edit tool) */
@@ -723,6 +725,38 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 		}
 	}
 	return filePath;
+}
+
+/**
+ * Replace home-directory paths embedded in display text without matching a
+ * longer path component. Windows-style homes are matched case-insensitively.
+ */
+export function shortenEmbeddedPaths(text: string, homeDir = os.homedir()): string {
+	if (!homeDir) return text;
+	let shortened = text;
+	const isWindowsPath = homeDir.includes("\\") || /^(?:[A-Za-z]:\/|\/\/)/.test(homeDir);
+	const homePaths = isWindowsPath
+		? [...new Set([homeDir, homeDir.replaceAll("\\", "/"), homeDir.replaceAll("/", "\\")])]
+		: [homeDir];
+	const caseInsensitive = isWindowsPath;
+	const trailingBoundary =
+		"(?=$|[\\\\/]|\\s|\\x1b|&(?:quot|apos|gt);|[\"'`)\\]}>]|[\"'`()\\[\\]{}<>=:;,|&.!?]+(?=$|\\s))";
+	const uriPathContext = /[A-Za-z][A-Za-z\d+.-]*:\/\/[^\s"'`<>()[\]{}]*$/u;
+	for (const homePath of homePaths) {
+		const hasLeadingSeparator = /^[\\/]/.test(homePath);
+		const leadingBoundary = hasLeadingSeparator ? "" : "(?<![\\p{L}\\p{N}_-])";
+		const homePrefix = new RegExp(
+			`${leadingBoundary}${RegExp.escape(homePath)}${trailingBoundary}`,
+			caseInsensitive ? "giu" : "gu",
+		);
+		shortened = shortened.replace(homePrefix, (matchedHome, offset: number) => {
+			const prefix = shortened.slice(0, offset);
+			const uriPath = hasLeadingSeparator && uriPathContext.test(prefix);
+			if (!uriPath && /[\p{L}\p{N}_-]$/u.test(prefix)) return matchedHome;
+			return uriPath ? `${matchedHome[0]}~` : "~";
+		});
+	}
+	return shortened;
 }
 
 export function formatToolWorkingDirectory(workdir: string | undefined, projectDir: string): string | undefined {
