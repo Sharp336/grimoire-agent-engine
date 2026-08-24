@@ -529,6 +529,8 @@ export interface CreateAgentSessionOptions {
 	requireYieldTool?: boolean;
 	/** Task recursion depth (for subagent sessions). Default: 0 */
 	taskDepth?: number;
+	/** Whether this session runs inside an isolation worktree (nested isolation gate). */
+	isIsolated?: boolean;
 	/** Parent Hindsight state to alias for subagent memory tools. */
 	parentHindsightSessionState?: HindsightSessionState;
 	/** Parent Mnemopi state to alias for subagent memory tools. */
@@ -1755,6 +1757,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			requireYieldTool: options.requireYieldTool,
 			prewalkArmed: options.prewalk !== undefined,
 			taskDepth: options.taskDepth ?? 0,
+			isIsolated: options.isIsolated ?? false,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			sessionManager,
 			getEvalKernelOwnerId: () => evalKernelOwnerId,

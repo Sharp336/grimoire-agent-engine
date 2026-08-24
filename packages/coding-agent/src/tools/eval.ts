@@ -178,7 +178,9 @@ export interface EvalToolDescriptionOptions {
 	 * `false`/`""` hides `agent()`, and a comma list drives the advertised default.
 	 */
 	spawns?: boolean | string | null;
-	/** Advertise auto-backgrounding of long-running cells in the tool prompt. */
+	/** Whether `isolated`/`apply`/`merge` controls are offered in the prompt. */
+	isolationEnabled?: boolean;
+	/** Whether eval auto-backgrounding is enabled (hides the backgrounding controls in the prompt when off). */
 	autoBackgroundEnabled?: boolean;
 }
 
@@ -197,6 +199,7 @@ export function getEvalToolDescription(options: EvalToolDescriptionOptions = {})
 		spawns: spawnPolicy.enabled,
 		spawnDefaultAgent: spawnPolicy.defaultAgent,
 		spawnAllowedAgentsText: spawnPolicy.allowedPromptText,
+		isolationEnabled: options.isolationEnabled ?? true,
 	});
 }
 
@@ -336,6 +339,9 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				rb: backends.ruby,
 				jl: backends.julia,
 				spawns: sessionSpawns,
+				isolationEnabled:
+					this.session.settings.get("task.isolation.mode") !== "none" &&
+					(this.session.settings.get("task.isolation.allowNested") || !this.session.isIsolated),
 				autoBackgroundEnabled: this.session.settings.get("eval.autoBackground.enabled"),
 			});
 		}

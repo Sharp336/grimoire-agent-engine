@@ -232,6 +232,16 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 		if (hasTask) {
 			return "Top-level `task` is not part of the batch shape. Put the work in `tasks[]` items.";
 		}
+		if (params.isolated !== undefined && params.isolated !== false) {
+			// The batch shape carries isolation per item. Any top-level value
+			// other than the literal `false` (the schema-aware no-op) is a
+			// shape violation — including malformed affirmative values like
+			// `isolated: "true"` that slip through the lenient raw-args
+			// fallthrough. Rejecting here keeps `spawnParamsFor` from letting
+			// an item's `false` silently downgrade the malformed request
+			// before the nested-isolation preflight ever sees it.
+			return "Top-level `isolated` is not part of the batch shape. Set `isolated` per item in `tasks[]`.";
+		}
 		for (let i = 0; i < tasks.length; i++) {
 			const item = tasks[i];
 			if (!item || typeof item.task !== "string" || item.task.trim() === "") {
@@ -582,7 +592,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 
 	get parameters(): TaskToolSchemaInstance {
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
-		const isolationEnabled = !planMode && this.session.settings.get("task.isolation.mode") !== "none";
+		const isolationEnabled =
+			!planMode &&
+			this.session.settings.get("task.isolation.mode") !== "none" &&
+			(this.session.settings.get("task.isolation.allowNested") || !this.session.isIsolated);
 		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
 		return getTaskSchema({
 			isolationEnabled,
@@ -603,7 +616,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const isolationMode = this.session.settings.get("task.isolation.mode");
 		return renderDescription({
 			agents: discoverySnapshots.get(path.resolve(this.session.cwd)) ?? this.#discoveredAgents,
-			isolationEnabled: !planMode && isolationMode !== "none",
+			isolationEnabled:
+				!planMode &&
+				isolationMode !== "none" &&
+				(this.session.settings.get("task.isolation.allowNested") || !this.session.isIsolated),
 			applyIsolatedChanges: this.session.settings.get("task.isolation.apply"),
 			disabledAgents,
 			batchEnabled: this.#isBatchEnabled(),
