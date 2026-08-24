@@ -2573,8 +2573,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						.refresh("online-if-uncached")
 						.then(async () => {
 							if (model || hasExplicitModel) return;
-							await tryResolveDefaultRole();
-							if (!model && pick) model = pick;
+							const resolved = await tryResolveDefaultRole();
+							if (!resolved && pick) model = pick;
 						})
 						.catch(error => {
 							logger.warn("background model discovery failed", {
