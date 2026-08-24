@@ -101,7 +101,7 @@ export default function(pi) {
 		}
 	});
 
-	it("bypasses legacy graph reads for native extension packages", async () => {
+	it("loads native extension packages without compatibility rewrites", async () => {
 		const cwd = tempDir.absolute();
 		const extDir = path.join(cwd, "native-ext");
 		fs.mkdirSync(extDir, { recursive: true });
@@ -133,8 +133,60 @@ export default function(pi) {
 
 		expect(result.errors).toEqual([]);
 		expect(result.extensions[0]?.tools.has("native-tool")).toBe(true);
-		const realEntryPath = fs.realpathSync(entryPath);
-		expect(reads.get(realEntryPath) ?? 0).toBe(0);
+	});
+
+	it("reloads edited helpers across the native extension graph", async () => {
+		const cwd = tempDir.absolute();
+		const extDir = path.join(cwd, "native-reload");
+		fs.mkdirSync(extDir, { recursive: true });
+		fs.writeFileSync(path.join(extDir, "package.json"), JSON.stringify({ omp: { extensionLoader: "native" } }));
+		const helperPath = path.join(extDir, "helper.ts");
+		const entryPath = path.join(extDir, "index.ts");
+		fs.writeFileSync(helperPath, `export const toolName = "before";\n`);
+		fs.writeFileSync(
+			entryPath,
+			`import { toolName } from "./helper.ts";
+export default function(pi) {
+	pi.registerTool({
+		name: toolName,
+		label: toolName,
+		description: "Native reload tool",
+		parameters: pi.zod.object({}),
+		execute: async () => ({ content: [{ type: "text", text: toolName }] }),
+	});
+}
+`,
+		);
+
+		const before = await loadExtensions([entryPath], cwd);
+		expect(before.errors).toEqual([]);
+		expect(before.extensions[0]?.tools.has("before")).toBe(true);
+
+		fs.writeFileSync(helperPath, `export const toolName = "after";\n`);
+		const after = await loadExtensions([entryPath], cwd);
+
+		expect(after.errors).toEqual([]);
+		expect(after.extensions[0]?.tools.has("after")).toBe(true);
+		expect(after.extensions[0]?.tools.has("before")).toBe(false);
+	});
+
+	it("shares native package manifest reads across sibling entries", async () => {
+		const cwd = tempDir.absolute();
+		const extDir = path.join(cwd, "native-siblings");
+		fs.mkdirSync(extDir, { recursive: true });
+		const packageJsonPath = path.join(extDir, "package.json");
+		fs.writeFileSync(packageJsonPath, JSON.stringify({ omp: { extensionLoader: "native" } }));
+		const entries = ["first", "second"].map(name => {
+			const entryPath = path.join(extDir, `${name}.ts`);
+			fs.writeFileSync(entryPath, `export default function() {}\n`);
+			return entryPath;
+		});
+
+		const result = await loadExtensions(entries, cwd);
+
+		expect(result.errors).toEqual([]);
+		const realManifestPath = fs.realpathSync(packageJsonPath);
+		expect(reads.get(realManifestPath) ?? 0).toBe(1);
 	});
 
 	it("should read graph modules skipped by the initial import from disk at import time", async () => {

@@ -1178,16 +1178,22 @@ function toImportSpecifier(resolvedPath: string): string {
  * `node_modules` resolution. Host package rewrites (legacy
  * `@(scope)/pi-*`, TypeBox shim) always emit `file://` URLs because they resolve
  * to in-process host code that never changes between reloads.
+ *
+ * Native mode disables compatibility rewrites but retains relative graph-edge
+ * tagging, so every edited extension-owned module receives a fresh Bun identity.
  */
-async function rewriteLegacyExtensionSource(
+async function rewriteExtensionSource(
 	source: string,
 	importerPath: string,
 	mtimeTag: string | null = null,
 	resolvedImportMtimeTag: string | null = mtimeTag,
+	rewriteCompatibilitySpecifiers = true,
 ): Promise<string> {
-	// Compiled mode completes the override map from the build-supplied module
-	// keys on first use; every rewrite path must see the full map.
-	await ensureLegacyPiOverridesReady();
+	if (rewriteCompatibilitySpecifiers) {
+		// Compiled mode completes the override map from the build-supplied module
+		// keys on first use; every compatibility rewrite must see the full map.
+		await ensureLegacyPiOverridesReady();
+	}
 	const references = getExtensionSourceAnalysis(source, importerPath).references;
 	const replacements: Array<ExtensionSpecifierReference & { replacement: string }> = [];
 	for (const reference of references) {
@@ -1195,25 +1201,27 @@ async function rewriteLegacyExtensionSource(
 
 		const specifier = reference.specifier;
 		let replacement: string | null = null;
-		const remappedSpecifier = remapLegacyPiSpecifier(specifier);
-		if (remappedSpecifier) {
-			try {
-				replacement = toImportSpecifier(resolveCanonicalPiSpecifier(remappedSpecifier));
-			} catch {
-				// Compiled fallback may be absent from a malformed build. Continue to
-				// the extension's on-disk peer dependency resolution below.
+		if (rewriteCompatibilitySpecifiers) {
+			const remappedSpecifier = remapLegacyPiSpecifier(specifier);
+			if (remappedSpecifier) {
+				try {
+					replacement = toImportSpecifier(resolveCanonicalPiSpecifier(remappedSpecifier));
+				} catch {
+					// Compiled fallback may be absent from a malformed build. Continue to
+					// the extension's on-disk peer dependency resolution below.
+				}
 			}
-		}
-		if (!replacement && TYPEBOX_SHIM_PATH && (specifier === "typebox" || specifier === "@sinclair/typebox")) {
-			replacement = toImportSpecifier(TYPEBOX_SHIM_PATH);
-		}
-		if (!replacement && specifier.startsWith("#")) {
-			const resolved = packageImportPath(specifier, await resolvePackageImportSpecifier(specifier, importerPath));
-			if (resolved) replacement = toGraphImportSpecifier(resolved, resolvedImportMtimeTag);
-		}
-		if (!replacement && isBareExtensionDependencySpecifier(specifier)) {
-			const resolved = await resolveExtensionBareDependency(specifier, importerPath);
-			if (resolved) replacement = toGraphImportSpecifier(resolved, resolvedImportMtimeTag);
+			if (!replacement && TYPEBOX_SHIM_PATH && (specifier === "typebox" || specifier === "@sinclair/typebox")) {
+				replacement = toImportSpecifier(TYPEBOX_SHIM_PATH);
+			}
+			if (!replacement && specifier.startsWith("#")) {
+				const resolved = packageImportPath(specifier, await resolvePackageImportSpecifier(specifier, importerPath));
+				if (resolved) replacement = toGraphImportSpecifier(resolved, resolvedImportMtimeTag);
+			}
+			if (!replacement && isBareExtensionDependencySpecifier(specifier)) {
+				const resolved = await resolveExtensionBareDependency(specifier, importerPath);
+				if (resolved) replacement = toGraphImportSpecifier(resolved, resolvedImportMtimeTag);
+			}
 		}
 		if (!replacement && mtimeTag && /^\.\.?\//.test(specifier) && !specifier.includes("?")) {
 			replacement = `${specifier}?mtime=${mtimeTag}`;
@@ -1223,7 +1231,7 @@ async function rewriteLegacyExtensionSource(
 		}
 	}
 	const withImports = applySpecifierReplacements(source, replacements);
-	return rewriteExtensionSpecifiers(withImports, importerPath);
+	return rewriteCompatibilitySpecifiers ? rewriteExtensionSpecifiers(withImports, importerPath) : withImports;
 }
 
 /** Test seam for compiled-binary legacy extension source rewriting. */
@@ -1233,7 +1241,7 @@ export async function __rewriteLegacyExtensionSourceForTests(
 	mtimeTag: string | null = null,
 	resolvedImportMtimeTag: string | null = mtimeTag,
 ): Promise<string> {
-	return rewriteLegacyExtensionSource(source, importerPath, mtimeTag, resolvedImportMtimeTag);
+	return rewriteExtensionSource(source, importerPath, mtimeTag, resolvedImportMtimeTag);
 }
 
 /**
@@ -2220,7 +2228,10 @@ interface ExtensionModuleGraph {
  * synchronous bridge. Resolved ESM imports inside third-party dependencies
  * omit the reload tag so their importer paths stay query-free.
  */
-async function collectExtensionModules(entryRealPath: string): Promise<ExtensionModuleGraph> {
+async function collectExtensionModules(
+	entryRealPath: string,
+	rewriteCompatibilitySpecifiers = true,
+): Promise<ExtensionModuleGraph> {
 	const modules = new Map<string, string>();
 	const commonJsPaths = new Set<string>();
 	const synchronousSourcePaths = new Set<string>();
@@ -2253,12 +2264,9 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 		}
 		modules.set(file, source);
 		const analysis = getExtensionSourceAnalysis(source, file);
-		const sourceIsCommonJs = await isGraphOwnedCommonJsModule(
-			file,
-			entryRealPath,
-			analysis.sourceType,
-			inheritedModuleKind,
-		);
+		const sourceIsCommonJs =
+			rewriteCompatibilitySpecifiers &&
+			(await isGraphOwnedCommonJsModule(file, entryRealPath, analysis.sourceType, inheritedModuleKind));
 		if (sourceIsCommonJs) {
 			commonJsPaths.add(file);
 		}
@@ -2266,6 +2274,9 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 		const references = analysis.references;
 		for (const reference of references) {
 			const specifier = reference.specifier;
+			if (!rewriteCompatibilitySpecifiers && (reference.kind !== "import" || !specifier.startsWith("."))) {
+				continue;
+			}
 			try {
 				let resolved: string | null = null;
 				let nextCacheBustResolvedImports = cacheBustResolvedImports;
@@ -2415,7 +2426,7 @@ async function collectExtensionModules(entryRealPath: string): Promise<Extension
 		if (commonJsPaths.has(modulePath)) {
 			modules.set(modulePath, await rewriteExtensionSpecifiers(source, modulePath, true));
 		} else if (synchronousSourcePaths.has(modulePath)) {
-			modules.set(modulePath, await rewriteLegacyExtensionSource(source, modulePath));
+			modules.set(modulePath, await rewriteExtensionSource(source, modulePath));
 		}
 	}
 	return {
@@ -2600,6 +2611,7 @@ async function installExtensionGraphHook(
 	commonJsPaths: Set<string>,
 	synchronousSourcePaths: ReadonlySet<string>,
 	cacheBustResolvedImportModules: ReadonlySet<string>,
+	rewriteCompatibilitySpecifiers: boolean,
 ): Promise<{ asyncModules: Map<string, string> }> {
 	const asyncModules = new Map<string, string>();
 	for (const [modulePath, source] of modules) {
@@ -2641,7 +2653,13 @@ async function installExtensionGraphHook(
 							raw = await Bun.file(sourcePath).text();
 						}
 						return {
-							contents: await rewriteLegacyExtensionSource(raw, sourcePath, mtimeTag, resolvedImportMtimeTag),
+							contents: await rewriteExtensionSource(
+								raw,
+								sourcePath,
+								mtimeTag,
+								resolvedImportMtimeTag,
+								rewriteCompatibilitySpecifiers,
+							),
 							loader: getLoader(sourcePath),
 						};
 					})();
@@ -2702,13 +2720,16 @@ async function installExtensionGraphHook(
  * Returns a clearable handle to drop cached sources that weren't consumed
  * during the initial load; `undefined` when no new modules were discovered.
  */
-async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(): void } | undefined> {
+async function ensureExtensionGraphHook(
+	entryRealPath: string,
+	rewriteCompatibilitySpecifiers: boolean,
+): Promise<{ clear(): void } | undefined> {
 	const {
 		modules: currentModules,
 		commonJsPaths,
 		cacheBustResolvedImportModules: discoveredCacheBustModules,
 		synchronousSourcePaths,
-	} = await collectExtensionModules(entryRealPath);
+	} = await collectExtensionModules(entryRealPath, rewriteCompatibilitySpecifiers);
 	let cacheBustResolvedImportModules = extensionGraphCacheBustResolvedImportModules.get(entryRealPath);
 	if (!cacheBustResolvedImportModules) {
 		cacheBustResolvedImportModules = new Set<string>();
@@ -2729,7 +2750,7 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(
 			// hooks installed while it was synchronous still serve it from this
 			// map — keep the pre-rewritten bytes fresh instead of serving the
 			// stale snapshot from the walk that flagged it.
-			synchronousModuleSources.set(modulePath, await rewriteLegacyExtensionSource(source, modulePath));
+			synchronousModuleSources.set(modulePath, await rewriteExtensionSource(source, modulePath));
 		}
 	}
 	let hookedModules = extensionGraphHookModules.get(entryRealPath);
@@ -2764,6 +2785,7 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(
 			pendingCommonJsPaths,
 			pendingSynchronousSourcePaths,
 			cacheBustResolvedImportModules,
+			rewriteCompatibilitySpecifiers,
 		));
 		for (const modulePath of pendingModules.keys()) {
 			hookedModules.add(modulePath);
@@ -2782,25 +2804,26 @@ async function ensureExtensionGraphHook(entryRealPath: string): Promise<{ clear(
 }
 
 /**
- * Load a legacy Pi extension module from its real on-disk location.
+ * Load an extension module from its real on-disk location.
  *
  * The extension runs in place, so its `import.meta.url` is the real source file
- * and `__dirname`-relative `readFileSync` asset loads (HTML/CSS bundled next to
- * the entry) resolve exactly as they do under the original Pi runtime — no
- * temp-directory mirroring and no asset copying. An `onLoad` hook scoped to the
- * entry's source graph rewrites only host-resolved compatibility imports in the
- * extension's own source; everything else resolves natively.
+ * and `__dirname`-relative asset loads resolve without mirroring or copying.
+ * Both modes tag relative graph edges for same-process reloads. Legacy mode
+ * additionally rewrites compatibility imports; native mode leaves all other
+ * specifiers to Bun.
  */
-export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown> {
+async function loadExtensionModule(resolvedPath: string, rewriteCompatibilitySpecifiers: boolean): Promise<unknown> {
 	// Bun reports the realpath of a loaded module to `onLoad` and exposes it as
 	// `import.meta.url`. Resolve symlinks here too (macOS `/var`→`/private/var`,
 	// `bun link`/pnpm installs) so the rewrite filter matches the path Bun
 	// actually hands the hook.
 	const entryRealPath = await realpathOrSelf(path.resolve(resolvedPath));
-	await ensureLegacyPiOverridesReady();
-	const pendingSources = await ensureExtensionGraphHook(entryRealPath);
+	if (rewriteCompatibilitySpecifiers) {
+		await ensureLegacyPiOverridesReady();
+	}
+	const pendingSources = await ensureExtensionGraphHook(entryRealPath, rewriteCompatibilitySpecifiers);
 	try {
-		// Dynamic import is required: legacy extension entry paths are user/plugin supplied at runtime.
+		// Dynamic import is required: extension entry paths are user/plugin supplied at runtime.
 		// On POSIX, use the raw filesystem path so Bun keys the `?mtime`
 		// suffix as part of the module identity; Bun ignores query strings on
 		// `file://` specifiers, which would serve stale edited source.
@@ -2815,6 +2838,14 @@ export async function loadLegacyPiModule(resolvedPath: string): Promise<unknown>
 		// import time, not served from this load-time snapshot.
 		pendingSources?.clear();
 	}
+}
+
+export function loadNativeExtensionModule(resolvedPath: string): Promise<unknown> {
+	return loadExtensionModule(resolvedPath, false);
+}
+
+export function loadLegacyPiModule(resolvedPath: string): Promise<unknown> {
+	return loadExtensionModule(resolvedPath, true);
 }
 
 function getLoader(path: string): "js" | "jsx" | "ts" | "tsx" {

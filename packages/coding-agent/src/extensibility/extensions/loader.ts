@@ -31,7 +31,11 @@ import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
-import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
+import {
+	installLegacyPiSpecifierShim,
+	loadLegacyPiModule,
+	loadNativeExtensionModule,
+} from "../plugins/legacy-pi-compat";
 import { getAllPluginExtensionPaths } from "../plugins/loader";
 
 import { resolvePath, withHostGuard } from "../utils";
@@ -55,34 +59,39 @@ installLegacyPiSpecifierShim();
 
 type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 type LoadedExtensionModule = ExtensionFactory | { default?: ExtensionFactory };
-let nativeExtensionLoadTag = 0;
+type ExtensionLoaderManifestCache = Map<string, Promise<boolean | null>>;
 
-async function usesNativeExtensionLoader(resolvedPath: string): Promise<boolean> {
+async function readNativeExtensionLoader(packageJsonPath: string): Promise<boolean | null> {
+	try {
+		const pkg = (await Bun.file(packageJsonPath).json()) as {
+			omp?: { extensionLoader?: unknown };
+			pi?: { extensionLoader?: unknown };
+		};
+		return (pkg.omp ?? pkg.pi)?.extensionLoader === "native";
+	} catch (error) {
+		return isEnoent(error) || isEacces(error) || hasFsCode(error, "EPERM") ? null : false;
+	}
+}
+
+async function usesNativeExtensionLoader(
+	resolvedPath: string,
+	manifestCache: ExtensionLoaderManifestCache,
+): Promise<boolean> {
 	let directory = path.dirname(resolvedPath);
 	while (true) {
 		const packageJsonPath = path.join(directory, "package.json");
-		try {
-			const pkg = (await Bun.file(packageJsonPath).json()) as {
-				omp?: { extensionLoader?: unknown };
-				pi?: { extensionLoader?: unknown };
-			};
-			return (pkg.omp ?? pkg.pi)?.extensionLoader === "native";
-		} catch (error) {
-			if (!(isEnoent(error) || isEacces(error) || hasFsCode(error, "EPERM"))) {
-				return false;
-			}
+		let lookup = manifestCache.get(packageJsonPath);
+		if (!lookup) {
+			lookup = readNativeExtensionLoader(packageJsonPath);
+			manifestCache.set(packageJsonPath, lookup);
 		}
+		const native = await lookup;
+		if (native !== null) return native;
+
 		const parent = path.dirname(directory);
 		if (parent === directory) return false;
 		directory = parent;
 	}
-}
-
-async function loadNativeExtensionModule(resolvedPath: string): Promise<unknown> {
-	nativeExtensionLoadTag += 1;
-	// Runtime-supplied extension paths require dynamic import. Native packages
-	// bypass legacy graph collection and compatibility source rewriting.
-	return import(`${resolvedPath}?omp-native=${nativeExtensionLoadTag}`);
 }
 
 function getExtensionFactory(module: LoadedExtensionModule): ExtensionFactory | null {
@@ -413,11 +422,15 @@ interface ImportedExtensionModule {
 	error: string | null;
 }
 
-async function importExtensionModule(extensionPath: string, cwd: string): Promise<ImportedExtensionModule> {
+async function importExtensionModule(
+	extensionPath: string,
+	cwd: string,
+	manifestCache: ExtensionLoaderManifestCache,
+): Promise<ImportedExtensionModule> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
 	try {
 		const module = (await withHostGuard(() =>
-			usesNativeExtensionLoader(resolvedPath).then(native =>
+			usesNativeExtensionLoader(resolvedPath, manifestCache).then(native =>
 				native ? loadNativeExtensionModule(resolvedPath) : loadLegacyPiModule(resolvedPath),
 			),
 		)) as LoadedExtensionModule;
@@ -490,8 +503,9 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 	const errors: Array<{ path: string; error: string }> = [];
 	const resolvedEventBus = eventBus ?? new EventBus();
 	const runtime = new ExtensionRuntime();
+	const manifestCache: ExtensionLoaderManifestCache = new Map();
 
-	const imported = await Promise.all(paths.map(extPath => importExtensionModule(extPath, cwd)));
+	const imported = await Promise.all(paths.map(extPath => importExtensionModule(extPath, cwd, manifestCache)));
 
 	for (let i = 0; i < paths.length; i++) {
 		const extPath = paths[i]!;
