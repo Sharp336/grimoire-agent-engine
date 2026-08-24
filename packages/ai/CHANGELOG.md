@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed DeepSeek's official vision model `deepseek-v4-flash-vision-exp` having every image stripped from outbound Chat Completions requests: `isTextOnlyDeepSeek` (vision guard, introduced for legacy DeepSeek endpoints that reject `image_url` with HTTP 400) now exempts model IDs/names carrying the official `vision` marker, so images reach `api.deepseek.com` instead of being replaced by the non-vision placeholder. Text-only DeepSeek models with a misconfigured `input: [text, image]` remain scrubbed.
+
 ## [18.0.4] - 2026-08-24
 
 ### Fixed
