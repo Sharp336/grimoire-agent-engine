@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
-import * as fs from "node:fs/promises";
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { OutputSink } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
@@ -8,7 +8,7 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 const createdTempDirs: string[] = [];
 
 async function createTempDir(): Promise<string> {
-	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "output-sink-fd-"));
+	const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "output-sink-fd-"));
 	createdTempDirs.push(dir);
 	return dir;
 }
@@ -26,6 +26,20 @@ afterEach(async () => {
 // observe the fd being opened and then closed.
 function spill(sink: OutputSink): void {
 	sink.push(`${"x".repeat(64)}\n`);
+}
+
+function installArtifactSink(artifactPath: string, sink: Bun.FileSink): void {
+	const fd = fs.openSync(artifactPath, "w", 0o600);
+	vi.spyOn(fs, "openSync").mockImplementation(((source: fs.PathLike) => {
+		if (source !== artifactPath) throw new Error(`Unexpected artifact path: ${String(source)}`);
+		return fd;
+	}) as typeof fs.openSync);
+	const fakeFile = { writer: () => sink } as unknown as Bun.BunFile;
+	const realFile = Bun.file.bind(Bun);
+	vi.spyOn(Bun, "file").mockImplementation((source, options) => {
+		if (source === fd) return fakeFile;
+		return realFile(source as string, options);
+	});
 }
 
 describe("OutputSink fd lifecycle", () => {
@@ -105,13 +119,7 @@ describe("OutputSink fd lifecycle", () => {
 				return Promise.resolve(0);
 			},
 		} as unknown as Bun.FileSink;
-		const fakeFile = { writer: () => fakeSink } as unknown as Bun.BunFile;
-
-		const realFile = Bun.file.bind(Bun);
-		vi.spyOn(Bun, "file").mockImplementation((source, options) => {
-			if (source === artifactPath) return fakeFile;
-			return realFile(source as string, options);
-		});
+		installArtifactSink(artifactPath, fakeSink);
 
 		// Small on-disk cap so head fills, the rest overflows into the tail ring,
 		// and #flushArtifactTailIfCapped replays a truncation notice on close.
@@ -129,5 +137,91 @@ describe("OutputSink fd lifecycle", () => {
 		// not surface the replay error (it would mask the original tool error).
 		await expect(sink.dispose()).resolves.toBeUndefined();
 		expect(ended).toBe(true);
+	});
+
+	test("surfaces an artifact open failure without losing inline output or advertising the artifact", async () => {
+		const artifactPath = await createTempDir();
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "unavailable-open",
+			artifactWriteMode: "mirror",
+			artifactAppend: true,
+		});
+		sink.push("terminal output survives");
+
+		let openFailure: unknown;
+		try {
+			await sink.flushArtifact();
+		} catch (error) {
+			openFailure = error;
+		}
+		expect(openFailure).toBeDefined();
+		await expect(sink.flushArtifact()).rejects.toBe(openFailure);
+
+		const summary = await sink.dump();
+		expect(summary.output).toBe("terminal output survives");
+		expect(summary.artifactId).toBeUndefined();
+		await expect(sink.dispose()).resolves.toBeUndefined();
+	});
+
+	test("surfaces the first synchronous artifact write failure from flushArtifact", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "write-failure.txt");
+		const writeFailure = new Error("simulated artifact write failure");
+		const fakeSink = {
+			write(): number {
+				throw writeFailure;
+			},
+			flush(): Promise<number> {
+				throw new Error("later flush failure");
+			},
+			end(): Promise<number> {
+				return Promise.resolve(0);
+			},
+		} as unknown as Bun.FileSink;
+		installArtifactSink(artifactPath, fakeSink);
+
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "unavailable-write",
+			artifactWriteMode: "mirror",
+		});
+		sink.push("raw output survives");
+
+		await expect(sink.flushArtifact()).rejects.toBe(writeFailure);
+		const summary = await sink.dump();
+		expect(summary.output).toBe("raw output survives");
+		expect(summary.artifactId).toBeUndefined();
+	});
+
+	test("surfaces an artifact flush failure and never advertises the failed capture", async () => {
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "flush-failure.txt");
+		const flushFailure = new Error("simulated artifact flush failure");
+		const fakeSink = {
+			write(chunk: string): number {
+				return Buffer.byteLength(chunk, "utf-8");
+			},
+			flush(): Promise<number> {
+				return Promise.reject(flushFailure);
+			},
+			end(): Promise<number> {
+				return Promise.resolve(0);
+			},
+		} as unknown as Bun.FileSink;
+		installArtifactSink(artifactPath, fakeSink);
+
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "unavailable-flush",
+			artifactWriteMode: "mirror",
+		});
+		sink.push("inline output survives");
+
+		await expect(sink.flushArtifact()).rejects.toBe(flushFailure);
+		const summary = await sink.dump();
+		expect(summary.output).toBe("inline output survives");
+		expect(summary.artifactId).toBeUndefined();
+		await expect(sink.dispose()).resolves.toBeUndefined();
 	});
 });
