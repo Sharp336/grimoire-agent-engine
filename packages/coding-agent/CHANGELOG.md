@@ -39,6 +39,7 @@
 - Added bounded, rate-limited progress delivery for background jobs: batched previews with stable overflow artifacts, ambient and wake queues, and completion notices that carry exit status; inspired by Claude Code's Monitor tool ([#2762](https://github.com/can1357/oh-my-pi/issues/2762)).
 - Added Hub process monitoring modes (wake, ambient, off) to attach, retune, or detach live progress delivery without changing process lifetime.
 - Added Bash async: "auto": potentially slow finite commands run inline for a grace window and promote to a background job without restarting.
+- Added collapsible async progress in the transcript: progress blocks show the latest lines behind an "… N earlier lines" marker, expand with Ctrl+O, and completion rows report exit codes with failures in red.
 
 ### Fixed
 
@@ -76,17 +77,6 @@
 - Fixed Linux startup event loop delays caused by legacy extension cache fsync churn.
 - Fixed subagent advisors abandoning reviews on the final yield turn during session teardown.
 - Fixed `/todo` expand/collapse commands and corrected `/shake thinking` reporting.
-### Added
-
-- Added bounded, rate-limited progress delivery for background jobs: batched previews with stable overflow artifacts, ambient and wake queues, and completion notices that carry exit status; inspired by Claude Code's Monitor tool ([#2762](https://github.com/can1357/oh-my-pi/issues/2762)).
-- Added Hub process monitoring modes (wake, ambient, off) to attach, retune, or detach live progress delivery without changing process lifetime.
-- Added Bash async: "auto": potentially slow finite commands run inline for a grace window and promote to a background job without restarting.
-- Added collapsible async progress in the transcript: progress blocks show the latest lines behind an "… N earlier lines" marker, expand with Ctrl+O, and completion rows report exit codes with failures in red.
-
-### Fixed
-
-- Fixed daemon broker idle shutdown closing newly accepted clients before their authentication request could be processed under load.
-- Fixed supervised image tunnels rejecting a published URL when the child exited between the startup poll's log read and exit check.
 
 ## [18.0.3] - 2026-08-23
 
