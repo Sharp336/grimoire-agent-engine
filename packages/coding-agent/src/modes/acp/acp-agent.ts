@@ -88,6 +88,11 @@ import {
 	mapAgentSessionEventToAcpSessionUpdates,
 	normalizeReplayToolArguments,
 } from "./acp-event-mapper";
+import {
+	ACP_MESSAGE_TIMESTAMP_FORMAT,
+	ACP_MESSAGE_TIMESTAMP_META_KEY,
+	toAcpMessageTimestampMeta,
+} from "./acp-message-metadata";
 import { ACP_TERMINAL_AUTH_FLAG } from "./terminal-auth";
 
 const ACP_DEFAULT_MODE_ID = "default";
@@ -187,6 +192,7 @@ type ManagedSessionRecord = {
 type ReplayableMessage = {
 	role: string;
 	content?: unknown;
+	timestamp?: number;
 	errorMessage?: string;
 	toolCallId?: string;
 	toolName?: string;
@@ -656,6 +662,9 @@ export class AcpAgent implements Agent {
 			authMethods,
 			agentCapabilities: {
 				loadSession: true,
+				_meta: {
+					[ACP_MESSAGE_TIMESTAMP_META_KEY]: { format: ACP_MESSAGE_TIMESTAMP_FORMAT },
+				},
 				mcpCapabilities: {
 					http: true,
 					sse: true,
@@ -1500,6 +1509,7 @@ export class AcpAgent implements Agent {
 				sessionUpdate: "agent_message_chunk",
 				content: { type: "text", text },
 				messageId: record.liveMessageId,
+				...toAcpMessageTimestampMeta({ timestamp: lastAssistant.timestamp }),
 			},
 		});
 	}
@@ -1538,6 +1548,7 @@ export class AcpAgent implements Agent {
 				sessionUpdate: "agent_message_chunk",
 				content: { type: "text", text: errorMessage },
 				messageId: record.liveMessageId ?? crypto.randomUUID(),
+				...toAcpMessageTimestampMeta({ timestamp: lastAssistant.timestamp }),
 			},
 		});
 	}
@@ -2260,12 +2271,13 @@ export class AcpAgent implements Agent {
 			message.role === "custom" ||
 			message.role === "hookMessage"
 		) {
-			return this.#wrapReplayContent(
+			return this.#wrapReplayContent({
 				sessionId,
-				this.#extractReplayContent(message.content, undefined),
-				"user_message_chunk",
-				crypto.randomUUID(),
-			);
+				content: this.#extractReplayContent(message.content, undefined),
+				kind: "user_message_chunk",
+				messageId: crypto.randomUUID(),
+				timestamp: message.timestamp,
+			});
 		}
 		if (
 			message.role === "toolResult" &&
@@ -2291,12 +2303,13 @@ export class AcpAgent implements Agent {
 			message.role === "pythonExecution" ||
 			message.role === "compactionSummary"
 		) {
-			return this.#wrapReplayContent(
+			return this.#wrapReplayContent({
 				sessionId,
-				this.#extractReplayContent(message.content, undefined),
-				"user_message_chunk",
-				crypto.randomUUID(),
-			);
+				content: this.#extractReplayContent(message.content, undefined),
+				kind: "user_message_chunk",
+				messageId: crypto.randomUUID(),
+				timestamp: message.timestamp,
+			});
 		}
 		return [];
 	}
@@ -2310,6 +2323,7 @@ export class AcpAgent implements Agent {
 	): SessionNotification[] {
 		const notifications: SessionNotification[] = [];
 		const messageId = crypto.randomUUID();
+		const timestampMeta = toAcpMessageTimestampMeta({ timestamp: message.timestamp });
 		if (Array.isArray(message.content)) {
 			for (const item of message.content) {
 				if (typeof item !== "object" || item === null || !("type" in item)) {
@@ -2322,6 +2336,7 @@ export class AcpAgent implements Agent {
 							sessionUpdate: "agent_message_chunk",
 							content: { type: "text", text: item.text },
 							messageId,
+							...timestampMeta,
 						},
 					});
 					continue;
@@ -2339,6 +2354,7 @@ export class AcpAgent implements Agent {
 							sessionUpdate: "agent_message_chunk",
 							content: { type: "image", data: item.data, mimeType: item.mimeType },
 							messageId,
+							...timestampMeta,
 						},
 					});
 					continue;
@@ -2352,6 +2368,7 @@ export class AcpAgent implements Agent {
 							sessionUpdate: "agent_thought_chunk",
 							content: { type: "text", text: thinking },
 							messageId,
+							...timestampMeta,
 						},
 					});
 					continue;
@@ -2387,6 +2404,7 @@ export class AcpAgent implements Agent {
 					sessionUpdate: "agent_message_chunk",
 					content: { type: "text", text: message.errorMessage },
 					messageId,
+					...timestampMeta,
 				},
 			});
 		}
@@ -2446,18 +2464,27 @@ export class AcpAgent implements Agent {
 		return typeof value === "string" && value.length > 0 ? { path: value } : {};
 	}
 
-	#wrapReplayContent(
-		sessionId: string,
-		content: PromptRequest["prompt"],
-		kind: "agent_message_chunk" | "user_message_chunk",
-		messageId: string,
-	): SessionNotification[] {
+	#wrapReplayContent({
+		sessionId,
+		content,
+		kind,
+		messageId,
+		timestamp,
+	}: {
+		sessionId: string;
+		content: PromptRequest["prompt"];
+		kind: "agent_message_chunk" | "user_message_chunk";
+		messageId: string;
+		timestamp: number | undefined;
+	}): SessionNotification[] {
+		const timestampMeta = toAcpMessageTimestampMeta({ timestamp });
 		return content.map(block => ({
 			sessionId,
 			update: {
 				sessionUpdate: kind,
 				content: block,
 				messageId,
+				...timestampMeta,
 			},
 		}));
 	}

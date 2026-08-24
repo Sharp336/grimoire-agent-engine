@@ -106,8 +106,9 @@ class ReplayTestSession {
 }
 
 describe("ACP event mapper", () => {
-	it("attaches a stable messageId to live assistant chunks", () => {
-		const assistantMessage = makeAssistantMessage("chunk");
+	it("attaches stable message identity metadata to live assistant chunks", () => {
+		const timestamp = 1_725_000_000_123;
+		const assistantMessage = { ...makeAssistantMessage("chunk"), timestamp };
 		const getMessageId = (message: unknown): string | undefined =>
 			message === assistantMessage ? "a80f1ff7-4f0a-4e6b-9f09-c94857b62a4a" : undefined;
 
@@ -129,20 +130,33 @@ describe("ACP event mapper", () => {
 			"session-1",
 			{ getMessageId },
 		);
+		const imageUpdates = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "message_update",
+				message: assistantMessage,
+				assistantMessageEvent: {
+					type: "image_end",
+					content: { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" },
+				},
+			} as AgentSessionEvent,
+			"session-1",
+			{ getMessageId },
+		);
 
+		const updates = [...textUpdates, ...thoughtUpdates, ...imageUpdates];
 		expect(textUpdates).toHaveLength(1);
 		expect(thoughtUpdates).toHaveLength(1);
-		expectAcpNotifications([...textUpdates, ...thoughtUpdates]);
-		expect(textUpdates[0] ? getChunkMessageId(textUpdates[0]) : undefined).toBe(
-			"a80f1ff7-4f0a-4e6b-9f09-c94857b62a4a",
-		);
-		expect(thoughtUpdates[0] ? getChunkMessageId(thoughtUpdates[0]) : undefined).toBe(
-			"a80f1ff7-4f0a-4e6b-9f09-c94857b62a4a",
-		);
+		expect(imageUpdates).toHaveLength(1);
+		expectAcpNotifications(updates);
+		for (const update of updates) {
+			expect(getChunkMessageId(update)).toBe("a80f1ff7-4f0a-4e6b-9f09-c94857b62a4a");
+			expect(update.update._meta).toEqual({ "omp.sh/messageTimestamp": timestamp });
+		}
 	});
 
 	it("emits final assistant text when no text deltas were observed", () => {
-		const assistantMessage = makeAssistantMessage("final response");
+		const timestamp = 1_725_000_000_456;
+		const assistantMessage = { ...makeAssistantMessage("final response"), timestamp };
 		const progress = { textEmitted: false, thoughtEmitted: false };
 
 		const updates = mapAgentSessionEventToAcpSessionUpdates(
@@ -161,11 +175,28 @@ describe("ACP event mapper", () => {
 					sessionUpdate: "agent_message_chunk",
 					content: { type: "text", text: "final response" },
 					messageId: undefined,
+					_meta: { "omp.sh/messageTimestamp": timestamp },
 				},
 			},
 		]);
 		expectAcpNotifications(updates);
 		expect(progress.textEmitted).toBe(true);
+	});
+
+	it("omits malformed timestamps instead of emitting invalid ACP metadata", () => {
+		const assistantMessage = { ...makeAssistantMessage("chunk"), timestamp: Number.NaN };
+
+		const updates = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "message_update",
+				message: assistantMessage,
+				assistantMessageEvent: { type: "text_delta", delta: "chunk" },
+			} as AgentSessionEvent,
+			"session-1",
+		);
+
+		expect(updates).toHaveLength(1);
+		expect(updates[0]?.update._meta).toBeUndefined();
 	});
 
 	it("does not duplicate final assistant text after streaming deltas", () => {

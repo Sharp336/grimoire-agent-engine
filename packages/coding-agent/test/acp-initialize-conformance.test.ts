@@ -246,6 +246,9 @@ describe("ACP initialize conformance", () => {
 		expect(response.agentCapabilities).toEqual(
 			expect.objectContaining({
 				loadSession: true,
+				_meta: {
+					"omp.sh/messageTimestamp": { format: "unix-ms" },
+				},
 				mcpCapabilities: expect.objectContaining({ http: true, sse: true }),
 				promptCapabilities: expect.objectContaining({ embeddedContext: true, image: true }),
 				sessionCapabilities: expect.objectContaining({

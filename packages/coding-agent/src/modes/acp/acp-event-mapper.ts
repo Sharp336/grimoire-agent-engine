@@ -11,6 +11,7 @@ import type { AgentSessionEvent } from "../../session/agent-session";
 import { resolveToCwd } from "../../tools/path-utils";
 import type { TodoStatus } from "../../tools/todo";
 import { canonicalizeMessage } from "../../utils/thinking-display";
+import { toAcpMessageTimestampMeta } from "./acp-message-metadata";
 
 interface MessageProgress {
 	textEmitted: boolean;
@@ -312,6 +313,7 @@ function mapAssistantMessageUpdate(
 					sessionUpdate: "agent_message_chunk",
 					content: event.assistantMessageEvent.content,
 					messageId: options.getMessageId?.(event.message),
+					...toAcpMessageTimestampMeta({ timestamp: event.message.timestamp }),
 				}),
 			];
 		case "text_delta":
@@ -363,6 +365,7 @@ function mapAssistantMessageUpdate(
 			sessionUpdate,
 			content: { type: "text", text },
 			messageId,
+			...toAcpMessageTimestampMeta({ timestamp: event.message.timestamp }),
 		}),
 	];
 }
@@ -390,6 +393,7 @@ function mapAssistantMessageEnd(
 			sessionUpdate: "agent_message_chunk",
 			content: { type: "text", text },
 			messageId,
+			...toAcpMessageTimestampMeta({ timestamp: event.message.timestamp }),
 		}),
 	];
 }

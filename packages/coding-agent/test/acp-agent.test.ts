@@ -453,6 +453,11 @@ function getChunkMessageId(notification: SessionNotification): string | undefine
 	return typeof update.messageId === "string" ? update.messageId : undefined;
 }
 
+function getChunkMessageTimestamp(notification: SessionNotification): number | undefined {
+	const timestamp = notification.update._meta?.["omp.sh/messageTimestamp"];
+	return typeof timestamp === "number" ? timestamp : undefined;
+}
+
 function expectAcpNotifications(updates: SessionNotification[]): void {
 	for (const update of updates) {
 		expectAcpStructure(zSessionNotification, update);
@@ -1080,12 +1085,21 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
-	it("replays messageIds and returns turn usage for prompts", async () => {
+	it("preserves message identity metadata across replay and live prompts", async () => {
 		const harness = await createHarness();
 		const stored = new FakeAgentSession(harness.cwdA);
+		const userTimestamp = 1_725_000_001_000;
+		const assistantTimestamp = 1_725_000_002_000;
 		harness.sessions.push(stored);
-		stored.sessionManager.appendMessage({ role: "user", content: "hello", timestamp: Date.now() });
-		stored.sessionManager.appendMessage(makeAssistantMessage("reply", "reasoning"));
+		stored.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "hello" }],
+			timestamp: userTimestamp,
+		});
+		stored.sessionManager.appendMessage({
+			...makeAssistantMessage("reply", "reasoning"),
+			timestamp: assistantTimestamp,
+		});
 		await stored.sessionManager.ensureOnDisk();
 		await stored.sessionManager.flush();
 
@@ -1107,6 +1121,7 @@ describe("ACP agent", () => {
 				update.update.sessionUpdate === "agent_message_chunk" ||
 				update.update.sessionUpdate === "agent_thought_chunk",
 		);
+		const replayUserChunks = replayChunks.filter(update => update.update.sessionUpdate === "user_message_chunk");
 
 		expect(
 			replayChunks.every(
@@ -1114,6 +1129,8 @@ describe("ACP agent", () => {
 			),
 		).toBe(true);
 		expect(new Set(replayAssistantChunks.map(update => getChunkMessageId(update))).size).toBe(1);
+		expect(replayUserChunks.map(getChunkMessageTimestamp)).toEqual([userTimestamp]);
+		expect(new Set(replayAssistantChunks.map(getChunkMessageTimestamp))).toEqual(new Set([assistantTimestamp]));
 
 		const live = await harness.agent.newSession({ cwd: harness.cwdB, mcpServers: [] });
 		const response = await harness.agent.prompt({
@@ -1135,7 +1152,10 @@ describe("ACP agent", () => {
 		});
 		expect(
 			liveChunks.some(
-				update => typeof getChunkMessageId(update) === "string" && getChunkMessageId(update)!.length > 0,
+				update =>
+					typeof getChunkMessageId(update) === "string" &&
+					getChunkMessageId(update)!.length > 0 &&
+					typeof getChunkMessageTimestamp(update) === "number",
 			),
 		).toBe(true);
 
@@ -1196,7 +1216,11 @@ describe("ACP agent", () => {
 		// the agent_end flush: thinking streams, then the turn ends. No
 		// text_delta and no message_end ever reach this subscriber — the final
 		// text exists only on the agent_end payload.
-		const assistantMessage = makeAssistantMessage("Final visible answer.", "Considering the greeting.");
+		const timestamp = 1_725_000_003_000;
+		const assistantMessage = {
+			...makeAssistantMessage("Final visible answer.", "Considering the greeting."),
+			timestamp,
+		};
 		session.prompt = async (text: string): Promise<boolean> => {
 			session.promptCalls.push(text);
 			session.isStreaming = true;
@@ -1237,6 +1261,7 @@ describe("ACP agent", () => {
 		);
 		// Flushed answer belongs to the same live message as the thought chunk.
 		expect(getChunkMessageId(messageChunks[0]!)).toBe(getChunkMessageId(thoughtChunks[0]!)!);
+		expect(getChunkMessageTimestamp(messageChunks[0]!)).toBe(timestamp);
 		expectAcpNotifications(harness.updates);
 
 		harness.abortController.abort();
@@ -1307,10 +1332,12 @@ describe("ACP agent", () => {
 
 		const errorText =
 			"GitHub Copilot rejected this model (HTTP 400 model_not_supported) after retries. Try again in a few seconds.";
+		const timestamp = 1_725_000_004_000;
 		const failedMessage = {
 			...makeAssistantMessage(""),
 			stopReason: "error" as const,
 			errorMessage: errorText,
+			timestamp,
 		};
 		session.prompt = async (text: string): Promise<boolean> => {
 			session.promptCalls.push(text);
@@ -1334,6 +1361,7 @@ describe("ACP agent", () => {
 		);
 		expect(messageChunks).toHaveLength(1);
 		expect(messageChunks[0]?.update).toEqual(expect.objectContaining({ content: { type: "text", text: errorText } }));
+		expect(getChunkMessageTimestamp(messageChunks[0]!)).toBe(timestamp);
 		expectAcpNotifications(harness.updates);
 
 		harness.abortController.abort();
