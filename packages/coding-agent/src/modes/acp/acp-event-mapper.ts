@@ -22,6 +22,7 @@ interface AcpEventMapperOptions {
 	getMessageId?: (message: unknown) => string | undefined;
 	getMessageProgress?: (message: unknown) => MessageProgress | undefined;
 	getToolArgs?: (toolCallId: string) => unknown;
+	getToolMessageTimestamp?: (toolCallId: string) => number | undefined;
 	resolveImageData?: (data: string, mimeType: string | undefined) => string;
 	/**
 	 * Session cwd. Tool call locations sent to ACP clients must be absolute
@@ -221,13 +222,16 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			return mapAssistantMessageEnd(event, sessionId, options);
 		case "tool_execution_start": {
 			if (isInternalHubMessageTool(event.toolName, event.args)) return [];
-			const update = buildToolCallStartUpdate({
-				toolCallId: event.toolCallId,
-				toolName: event.toolName,
-				args: event.args,
-				intent: event.intent,
-				cwd: options.cwd,
-			});
+			const update = {
+				...buildToolCallStartUpdate({
+					toolCallId: event.toolCallId,
+					toolName: event.toolName,
+					args: event.args,
+					intent: event.intent,
+					cwd: options.cwd,
+				}),
+				...toAcpMessageTimestampMeta({ timestamp: options.getToolMessageTimestamp?.(event.toolCallId) }),
+			};
 			return [toSessionNotification(sessionId, update)];
 		}
 		case "tool_execution_update": {
@@ -241,6 +245,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 				toolCallId: event.toolCallId,
 				status: "in_progress",
 				rawOutput: event.partialResult,
+				...toAcpMessageTimestampMeta({ timestamp: options.getToolMessageTimestamp?.(event.toolCallId) }),
 			};
 			if (content.length > 0) {
 				update.content = content;
@@ -264,6 +269,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 				toolCallId: event.toolCallId,
 				status: event.isError ? "failed" : "completed",
 				rawOutput: event.result,
+				...toAcpMessageTimestampMeta({ timestamp: options.getToolMessageTimestamp?.(event.toolCallId) }),
 			};
 			if (content.length > 0) {
 				update.content = content;

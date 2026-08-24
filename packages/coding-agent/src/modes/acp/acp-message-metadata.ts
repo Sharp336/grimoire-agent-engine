@@ -2,6 +2,7 @@ import type { Meta } from "@oh-my-pi/pi-utils/acp";
 
 /** OMP extension carrying a message's authoritative Unix-epoch timestamp. */
 export const ACP_MESSAGE_TIMESTAMP_META_KEY = "omp.sh/messageTimestamp";
+/** Capability wire-format identifier for a numeric Unix-millisecond value. */
 export const ACP_MESSAGE_TIMESTAMP_FORMAT = "unix-ms";
 
 /**

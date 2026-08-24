@@ -1418,9 +1418,100 @@ describe("ACP agent", () => {
 		await Bun.sleep(0);
 	});
 
+	it("preserves the owning message timestamp for a live tool-only assistant turn", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId);
+		if (!session) throw new Error("session not registered");
+
+		const timestamp = 1_725_000_005_000;
+		const toolCall = {
+			type: "toolCall" as const,
+			id: "toolu_live_only",
+			name: "bash",
+			arguments: { command: "printf ok" },
+		};
+		const assistantMessage = {
+			...makeAssistantMessage(""),
+			content: [toolCall],
+			stopReason: "toolUse" as const,
+			timestamp,
+		};
+		session.prompt = async (text: string): Promise<boolean> => {
+			session.promptCalls.push(text);
+			session.isStreaming = true;
+			for (const listener of session.listeners()) {
+				listener({
+					type: "message_update",
+					message: assistantMessage,
+					assistantMessageEvent: { type: "toolcall_start", contentIndex: 0, partial: assistantMessage },
+				} as AgentSessionEvent);
+				listener({ type: "message_end", message: assistantMessage } as AgentSessionEvent);
+				listener({
+					type: "tool_execution_start",
+					toolCallId: toolCall.id,
+					toolName: toolCall.name,
+					args: toolCall.arguments,
+				} as AgentSessionEvent);
+				listener({
+					type: "tool_execution_update",
+					toolCallId: toolCall.id,
+					toolName: toolCall.name,
+					args: toolCall.arguments,
+					partialResult: { content: [{ type: "text", text: "running" }] },
+				} as AgentSessionEvent);
+				listener({
+					type: "tool_execution_end",
+					toolCallId: toolCall.id,
+					toolName: toolCall.name,
+					isError: false,
+					result: { content: [{ type: "text", text: "ok" }] },
+				} as AgentSessionEvent);
+			}
+			session.sessionManager.appendMessage(assistantMessage);
+			for (const listener of session.listeners()) {
+				listener({ type: "agent_end", messages: [assistantMessage] } as AgentSessionEvent);
+			}
+			session.isStreaming = false;
+			return true;
+		};
+
+		const response = await harness.agent.prompt({
+			sessionId: created.sessionId,
+			prompt: [{ type: "text", text: "Run the command" }],
+		});
+		expectAcpStructure(zPromptResponse, response);
+
+		const toolUpdates = harness.updates.filter(
+			notification =>
+				notification.sessionId === created.sessionId &&
+				"toolCallId" in notification.update &&
+				notification.update.toolCallId === toolCall.id,
+		);
+		expect(toolUpdates.map(notification => notification.update.sessionUpdate)).toEqual([
+			"tool_call",
+			"tool_call_update",
+			"tool_call_update",
+		]);
+		expect(toolUpdates.map(getChunkMessageTimestamp)).toEqual([timestamp, timestamp, timestamp]);
+		expect(
+			harness.updates.some(
+				notification =>
+					notification.sessionId === created.sessionId &&
+					(notification.update.sessionUpdate === "agent_message_chunk" ||
+						notification.update.sessionUpdate === "agent_thought_chunk"),
+			),
+		).toBe(false);
+		expectAcpNotifications(harness.updates);
+
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
 	it("replays assistant tool calls and matching results without duplicating the start", async () => {
 		const harness = await createHarness();
 		const stored = new FakeAgentSession(harness.cwdA);
+		const assistantTimestamp = 1_725_000_006_000;
 		harness.sessions.push(stored);
 		stored.sessionManager.appendMessage({ role: "user", content: "run tests", timestamp: Date.now() });
 		stored.sessionManager.appendMessage({
@@ -1445,7 +1536,7 @@ describe("ACP agent", () => {
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 			stopReason: "toolUse",
-			timestamp: Date.now(),
+			timestamp: assistantTimestamp,
 		});
 		stored.sessionManager.appendMessage({
 			role: "toolResult",
@@ -1453,7 +1544,7 @@ describe("ACP agent", () => {
 			toolName: "bash",
 			content: [{ type: "text", text: "tests passed" }],
 			isError: false,
-			timestamp: Date.now(),
+			timestamp: assistantTimestamp + 1_000,
 		});
 		await stored.sessionManager.ensureOnDisk();
 		await stored.sessionManager.flush();
@@ -1487,12 +1578,14 @@ describe("ACP agent", () => {
 			}),
 		);
 		expect(starts.some(update => "rawInput" in update && JSON.stringify(update.rawInput) === "{}")).toBe(false);
+		expect(starts[0]?._meta).toEqual({ "omp.sh/messageTimestamp": assistantTimestamp });
 		expect(completions).toHaveLength(1);
 		expect(completions[0]).toEqual(
 			expect.objectContaining({
 				content: expect.arrayContaining([{ type: "content", content: { type: "text", text: "tests passed" } }]),
 			}),
 		);
+		expect(completions[0]?._meta).toEqual({ "omp.sh/messageTimestamp": assistantTimestamp });
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
