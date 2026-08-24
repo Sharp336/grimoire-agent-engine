@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Command Code as a mixed-wire provider with authenticated model discovery and per-model Anthropic Messages/OpenAI Chat Completions routing.
+
 ## [18.0.4] - 2026-08-24
 
 ### Fixed
