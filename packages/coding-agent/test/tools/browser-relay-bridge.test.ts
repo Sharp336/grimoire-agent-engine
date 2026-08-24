@@ -598,4 +598,54 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send")[0]!.tabId).toBe(1);
 		expect(cdp.messages.find(m => m.id === cmdId)?.error).toBeUndefined();
 	});
+
+	it("re-arms the hello gate when a replacement socket connects before the old close is delivered", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		// A replacement extension socket reaches the relay before Bun delivers the
+		// old socket's close callback. `extConnected` swaps `#ext`; the later
+		// `extClosed(ext)` will be ignored because `#ext !== ext`. If the swap kept
+		// the old socket's `#extInfo`, `#forwardToTab`'s hello gate
+		// (`this.#ext && !this.#extInfo`) would be skipped and a surviving session's
+		// command would be forwarded onto the not-yet-recovered target.
+		const ext2 = new FakeExtSocket();
+		bridge.extConnected(ext2);
+		bridge.extClosed(ext); // out-of-order close for the replaced socket: ignored
+
+		// Command arrives in the gap before the replacement's hello lands. It must be
+		// held: no send RPC until recovery bookkeeping runs on the new hello.
+		const cmdId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: cmdId, sessionId: pageSession, method: "Runtime.evaluate" }));
+		await flush();
+		expect(ext2.rpcs("send")).toHaveLength(0);
+		expect(ext2.rpcs("attach")).toHaveLength(0);
+
+		// The replacement's hello arrives: recovery re-announces and re-attaches the
+		// tab, and only then does the held command drain to the live tab.
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "hello",
+				userAgent: "test",
+				browserVersion: "Chrome/151.0.0.0",
+				tabs: [tab({ tabId: 1, groupId: -1 })],
+				attachedTabIds: [],
+				recoverableTabIds: [1],
+			}),
+		);
+		await flush();
+		expect(ext2.rpcs("attach")).toHaveLength(1);
+		ack(bridge, ext2, "attach");
+		await flush();
+		ack(bridge, ext2, "send", { ok: true });
+		await flush();
+		expect(ext2.rpcs("send")).toHaveLength(1);
+		expect(ext2.rpcs("send")[0]!.tabId).toBe(1);
+		expect(cdp.messages.find(m => m.id === cmdId)?.error).toBeUndefined();
+	});
 });

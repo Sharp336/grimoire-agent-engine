@@ -216,6 +216,14 @@ export class RelayBridge {
 		if (this.#ext && this.#ext !== socket) {
 			this.#log("replacing extension socket");
 			this.#ext.close();
+			// The replacement's hello has not landed yet, so its handshake state is
+			// unknown until then. Drop the previous socket's `#extInfo` now: a later
+			// `extClosed(oldSocket)` is ignored (`this.#ext !== socket`), so this is
+			// the only point that clears the stale handshake. Without it,
+			// `#forwardToTab`'s hello gate (`this.#ext && !this.#extInfo`) still sees
+			// the old info and forwards a surviving-session command onto the
+			// not-yet-recovered target, which Chrome rejects after an orphan sweep.
+			this.#extInfo = null;
 		}
 		this.#ext = socket;
 	}
@@ -1011,7 +1019,9 @@ export class RelayBridge {
 	 */
 	#awaitHello(): Promise<void> {
 		if (this.#extInfo || !this.#ext) return Promise.resolve();
-		return new Promise<void>(resolve => this.#helloWaiters.push(resolve));
+		const { promise, resolve } = Promise.withResolvers<void>();
+		this.#helloWaiters.push(resolve);
+		return promise;
 	}
 
 	#rpc(req: RelayRpcRequest, timeoutMs = RPC_TIMEOUT_MS): Promise<unknown> {

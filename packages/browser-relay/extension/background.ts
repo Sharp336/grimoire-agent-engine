@@ -234,6 +234,15 @@ function refreshHello(): void {
 		};
 		entry.done = buildHello()
 			.then(hello => {
+				// Suppress a hello whose snapshot was invalidated before it could be
+				// sent. A guard detach that marks this refresh `dirty` in flight means
+				// `getTargets()` may predate the detach, so this hello can report a
+				// just-detached tab as still attached; `RelayBridge.#onHello()` would
+				// then preserve the stale session and start recovery, while the rebuilt
+				// follow-up hello clears `tab.attaching` and launches a competing
+				// attach. Skip the stale send and let the dirty rebuild below emit the
+				// single authoritative hello.
+				if (entry.dirty) return;
 				if (ws === socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(hello));
 			})
 			.finally(() => {
