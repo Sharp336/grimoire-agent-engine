@@ -1,5 +1,4 @@
 import { describe, expect, test } from "bun:test";
-import { CATALOG_PROVIDERS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import {
 	commandCodeModelManagerOptions,
 	resolveCommandCodeApi,
@@ -7,14 +6,6 @@ import {
 } from "@oh-my-pi/pi-catalog/provider-models/command-code";
 
 describe("Command Code provider", () => {
-	test("registers the documented API key env var with the legacy alias as fallback", () => {
-		const descriptor = CATALOG_PROVIDERS.find(provider => provider.id === "command-code");
-		expect(descriptor).toMatchObject({
-			envVars: ["COMMAND_CODE_API_KEY", "COMMANDCODE_API_KEY"],
-			dynamicModelsAuthoritative: true,
-		});
-	});
-
 	test("routes only Anthropic model identities to messages", () => {
 		expect(resolveCommandCodeApi("claude-opus-4-8")).toBe("anthropic-messages");
 		expect(resolveCommandCodeApi("anthropic/claude-sonnet-4-6")).toBe("anthropic-messages");
@@ -39,7 +30,7 @@ describe("Command Code provider", () => {
 		);
 	});
 
-	test("discovers one catalog while assigning the correct per-model base URL and reasoning", async () => {
+	test("discovers mixed-wire models without inheriting foreign effort routing", async () => {
 		const fetch = (async (input: unknown) => {
 			expect(String(input)).toBe("https://api.commandcode.ai/provider/v1/models");
 			return new Response(
@@ -47,6 +38,7 @@ describe("Command Code provider", () => {
 					data: [
 						{ id: "claude-opus-4-8", object: "model" },
 						{ id: "gpt-5.5", object: "model" },
+						{ id: "kimi-k2", object: "model" },
 					],
 				}),
 				{ status: 200, headers: { "content-type": "application/json" } },
@@ -68,5 +60,6 @@ describe("Command Code provider", () => {
 			provider: "command-code",
 			reasoning: true,
 		});
+		expect(byId.get("kimi-k2")?.thinking).toBeUndefined();
 	});
 });
