@@ -196,6 +196,22 @@ async function setBadge(connected) {
     await chrome.action.setBadgeBackgroundColor({ color: connected ? "#1a7f37" : "#8b8b8b" });
   } catch {}
 }
+var helloRefresh = null;
+function refreshHello() {
+  const socket = ws;
+  if (!socket || socket.readyState !== WebSocket.OPEN)
+    return;
+  if (helloRefresh?.socket === socket)
+    return;
+  const done = buildHello().then((hello) => {
+    if (ws === socket && socket.readyState === WebSocket.OPEN)
+      socket.send(JSON.stringify(hello));
+  }).finally(() => {
+    if (helloRefresh?.socket === socket)
+      helloRefresh = null;
+  });
+  helloRefresh = { socket, done };
+}
 async function buildHello() {
   await Promise.allSettled([...pendingAttaches]);
   await recoverableUpdates;
@@ -327,10 +343,7 @@ async function connect() {
     reconnectDelay = RECONNECT_MIN_MS;
     attachmentGuard.onConnected();
     setBadge(true);
-    buildHello().then((hello) => {
-      if (ws === socket && socket.readyState === WebSocket.OPEN)
-        socket.send(JSON.stringify(hello));
-    });
+    refreshHello();
     clearInterval(pingTimer ?? undefined);
     pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);
   };
@@ -365,8 +378,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
     return;
   attachmentGuard.untrack(source.tabId);
   if (guardDetachments.delete(source.tabId)) {
-    if (ws?.readyState === WebSocket.OPEN)
-      buildHello().then((hello) => post(hello));
+    refreshHello();
     return;
   }
   forgetRecoverable(source.tabId);

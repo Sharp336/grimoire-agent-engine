@@ -375,4 +375,49 @@ describe("RelayBridge tab grouping", () => {
 		expect(destroyed).toBeGreaterThan(0);
 		expect(created).toBeGreaterThan(0);
 	});
+
+	it("does not launch a second recovery attach when a hello races an in-flight one", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		await attachPage(bridge, ext, cdp, connId, 1);
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets" }));
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach" }));
+		await flush();
+
+		bridge.extClosed(ext);
+
+		// The reconnect hello arms a recovery attach that is still in flight.
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await flush();
+		expect(ext2.pending("attach")).toHaveLength(1);
+		const destroyedBeforeRace = cdp.messages.filter(m => m.method === "Target.targetDestroyed").length;
+
+		// A guard detach-refresh delivers a second hello for the same socket while
+		// that attach is unresolved. It must not clear `attaching` and start a
+		// competing attach whose "already attached" failure would retract the tab.
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "hello",
+				userAgent: "test",
+				browserVersion: "Chrome/151.0.0.0",
+				tabs: [tab({ tabId: 1, groupId: -1 })],
+				attachedTabIds: [],
+				recoverableTabIds: [1],
+			}),
+		);
+		await flush();
+		expect(ext2.rpcs("attach")).toHaveLength(1);
+
+		// The original attach succeeds and the recovered target survives: the
+		// racing hello added no retract of its own.
+		ack(bridge, ext2, "attach");
+		await flush();
+		expect(cdp.messages.filter(m => m.method === "Target.targetDestroyed")).toHaveLength(destroyedBeforeRace);
+		expect(cdp.messages.filter(m => m.method === "Target.attachedToTarget").length).toBeGreaterThan(0);
+	});
 });

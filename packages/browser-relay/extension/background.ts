@@ -193,6 +193,36 @@ async function setBadge(connected: boolean): Promise<void> {
 	}
 }
 
+let helloRefresh: { socket: WebSocket; done: Promise<void> } | null = null;
+
+/**
+ * Send a fresh hello for the live socket, coalescing concurrent callers.
+ *
+ * A guard detach can resolve during a fast reconnect while the new socket's
+ * `onopen` is already awaiting `buildHello()`. Firing a second hello from the
+ * detach handler lets both reach `RelayBridge.#onHello()` before the recovery
+ * attach settles; each hello clears `tab.attaching` and launches a separate
+ * `chrome.debugger.attach()`, so one loses the race as "already attached" and
+ * its failure retracts the target the other just recovered. `buildHello()`
+ * already waits for pending attaches to settle, so a single coalesced refresh
+ * captures the final attachment state. Coalescing is scoped to the live socket:
+ * a refresh already queued for a socket that has since been replaced never
+ * suppresses the replacement's own hello.
+ */
+function refreshHello(): void {
+	const socket = ws;
+	if (!socket || socket.readyState !== WebSocket.OPEN) return;
+	if (helloRefresh?.socket === socket) return;
+	const done = buildHello()
+		.then(hello => {
+			if (ws === socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(hello));
+		})
+		.finally(() => {
+			if (helloRefresh?.socket === socket) helloRefresh = null;
+		});
+	helloRefresh = { socket, done };
+}
+
 async function buildHello(): Promise<ExtToRelayMessage> {
 	// An attach requested by the previous socket can finish during a fast
 	// reconnect. Wait for it before taking the hello snapshot so the replacement
@@ -357,9 +387,7 @@ async function connect(): Promise<void> {
 		reconnectDelay = RECONNECT_MIN_MS;
 		attachmentGuard.onConnected();
 		void setBadge(true);
-		void buildHello().then(hello => {
-			if (ws === socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(hello));
-		});
+		refreshHello();
 		clearInterval(pingTimer ?? undefined);
 		pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);
 	};
@@ -401,8 +429,9 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 	if (guardDetachments.delete(source.tabId)) {
 		// A reconnect can win the race with the asynchronous guard detach. Do not
 		// report it as a user detach (which bans the tab); refresh hello so the
-		// relay can restore only this guard-authorized attachment.
-		if (ws?.readyState === WebSocket.OPEN) void buildHello().then(hello => post(hello));
+		// relay can restore only this guard-authorized attachment. Coalesce with
+		// the reconnect's own hello so a single recovery attach is launched.
+		refreshHello();
 		return;
 	}
 	void forgetRecoverable(source.tabId);
