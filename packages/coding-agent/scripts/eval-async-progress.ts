@@ -112,11 +112,19 @@ function parseArgs(argv: string[]): EvalConfig {
 	if (evalCase === "quick" && surfaceValue !== undefined && surface !== "bash") {
 		throw new Error("--case quick supports only --surface bash");
 	}
+	const model = valueFor("--model");
+	const runs = valueFor("--runs");
+	const timeoutMs = valueFor("--timeout-ms");
+	if (argv.includes("--model") && model === undefined) throw new Error("--model requires a value");
+	if (argv.includes("--runs") && runs === undefined) throw new Error("--runs requires a value");
+	if (argv.includes("--timeout-ms") && timeoutMs === undefined) {
+		throw new Error("--timeout-ms requires a value");
+	}
 	return {
 		case: evalCase,
-		model: valueFor("--model"),
-		runs: parsePositiveInteger("--runs", valueFor("--runs"), DEFAULT_RUNS),
-		timeoutMs: parsePositiveInteger("--timeout-ms", valueFor("--timeout-ms"), DEFAULT_TIMEOUT_MS),
+		model,
+		runs: parsePositiveInteger("--runs", runs, DEFAULT_RUNS),
+		timeoutMs: parsePositiveInteger("--timeout-ms", timeoutMs, DEFAULT_TIMEOUT_MS),
 		json: argv.includes("--json"),
 		surfaces: evalCase === "quick" ? ["bash"] : surface === "all" ? SURFACES : [surface],
 	};
@@ -319,7 +327,6 @@ async function runOnce(config: EvalConfig, surface: EvalSurface, run: number): P
 		};
 	} finally {
 		unsubscribe();
-		session.beginDispose();
 		if (surface === "hub") {
 			const hub = session.getToolByName("hub");
 			const names = new Set(
@@ -335,6 +342,7 @@ async function runOnce(config: EvalConfig, surface: EvalSurface, run: number): P
 				);
 			}
 		}
+		session.beginDispose();
 		await session.dispose();
 	}
 }
