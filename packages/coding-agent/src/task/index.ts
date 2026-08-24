@@ -27,7 +27,7 @@ import { TASK_EFFORTS, type TaskEffort } from "../thinking";
 import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/hub";
 import { formatBytes, formatDuration } from "../tools/render-utils";
-import { publishDiscoveredAgents } from "./discovery-snapshot";
+import { getDiscoveredAgents, publishDiscoveredAgents } from "./discovery-snapshot";
 import { isReadOnlyAgent } from "./read-only-policy";
 import {
 	DEFAULT_SPAWN_AGENT,
@@ -479,7 +479,6 @@ class TaskJobError extends Error {}
  * swap that binding, which invalidates both caches automatically.
  */
 const discoveryMemo = new Map<string, Promise<DiscoveryResult>>();
-const discoverySnapshots = new Map<string, AgentDefinition[]>();
 let discoveryMemoFn: typeof discoverAgents | undefined;
 
 function discoverAgentsForCreate(cwd: string): Promise<DiscoveryResult> {
@@ -487,7 +486,6 @@ function discoverAgentsForCreate(cwd: string): Promise<DiscoveryResult> {
 	if (discoveryMemoFn !== fn) {
 		discoveryMemoFn = fn;
 		discoveryMemo.clear();
-		discoverySnapshots.clear();
 	}
 	const key = path.resolve(cwd);
 	let pending = discoveryMemo.get(key);
@@ -597,6 +595,17 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	readonly mergeCallAndResult = true;
 	readonly #discoveredAgents: AgentDefinition[];
 	readonly #blockedAgent: string | undefined;
+
+	/**
+	 * The discovered agent roster for this session's cwd: the shared snapshot
+	 * when discovery has run (TaskTool.create / refreshAgentDiscovery publish
+	 * there), else the creation-time roster (test spies swap the discovery
+	 * binding, which clears the snapshot).
+	 */
+	#roster(): AgentDefinition[] {
+		const snapshot = getDiscoveredAgents(path.resolve(this.session.cwd));
+		return snapshot.length > 0 ? snapshot : this.#discoveredAgents;
+	}
 	/**
 	 * One semaphore per TaskTool instance (i.e. per session): bounds concurrent
 	 * subagents across parallel `task` calls within the session. Resized in
@@ -628,7 +637,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationMode = this.session.settings.get("task.isolation.mode");
 		return renderDescription({
-			agents: discoverySnapshots.get(path.resolve(this.session.cwd)) ?? this.#discoveredAgents,
+			agents: this.#roster(),
 			isolationEnabled: !planMode && isolationMode !== "none",
 			applyIsolatedChanges: this.session.settings.get("task.isolation.apply"),
 			disabledAgents,
@@ -665,7 +674,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 */
 	#effectiveDefaultAgent(): string {
 		const spawnPolicy = resolveSpawnPolicy(this.session.getSessionSpawns());
-		const agents = discoverySnapshots.get(path.resolve(this.session.cwd)) ?? this.#discoveredAgents;
+		const agents = this.#roster();
 		const disabledAgents = this.session.settings.get("task.disabledAgents") as string[];
 		const effective = resolveEffectiveDefaultAgent(spawnPolicy, agents, disabledAgents);
 		if (effective !== undefined) return effective;
@@ -788,9 +797,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// override that makes the bundled scout primary-only/unavailable must
 		// not leave the scout shortcut advertised in spawn advisories
 		// (structured-subagent preflight would reject every scout call).
-		const scoutAgent = (discoverySnapshots.get(path.resolve(this.session.cwd)) ?? this.#discoveredAgents).find(
-			agent => agent.name === "scout",
-		);
+		const scoutAgent = this.#roster().find(agent => agent.name === "scout");
 
 		if (!manager || asyncItems.length === 0) {
 			// Sync fallback: async execution disabled, orphaned host that never
