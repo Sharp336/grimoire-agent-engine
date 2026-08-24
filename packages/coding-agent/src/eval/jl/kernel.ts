@@ -89,7 +89,14 @@ async function probeJuliaKernelAvailability(
 
 	const result = await probeCandidates(
 		runtimes.map(runtime => ({
-			command: [runtime.juliaPath, "-e", "exit(0)"],
+			command: [
+				runtime.juliaPath,
+				"--startup-file=no",
+				"--history-file=no",
+				"--compile=min",
+				"-e",
+				"exit(0)",
+			],
 			env: runtime.env,
 			label: runtime.juliaPath,
 		})),
