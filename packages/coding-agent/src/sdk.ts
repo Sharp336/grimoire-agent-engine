@@ -575,6 +575,8 @@ export interface CreateAgentSessionOptions {
 
 	/** Whether UI is available (enables interactive tools like ask). Default: false */
 	hasUI?: boolean;
+	/** Wait for deferred discovery before returning to headless callers. */
+	awaitDeferredModel?: boolean;
 	/**
 	 * A human can answer synchronous prompts even without a terminal UI (e.g. an
 	 * ACP client rendering elicitation forms). Enables `ask` without enabling
@@ -1476,7 +1478,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}),
 	);
 	let model = options.model;
-	let deferredModelResolution: Promise<Model | undefined> | undefined;
+	let deferredModelResolution: Promise<{ model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined> | undefined;
 	let modelFallbackMessage: string | undefined;
 	let initialRetryFallback: InitialRetryFallbackState | undefined;
 	// Identify session model strings to restore in fallback order. We do an
@@ -2575,13 +2577,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						.then(async () => {
 							if (model || hasExplicitModel) return undefined;
 							const resolved = await tryResolveDefaultRole();
-							return resolved ? model : pick;
+							return resolved ? { model: model!, thinkingLevel } : pick ? { model: pick } : undefined;
 						})
 						.catch(error => {
 							logger.warn("background model discovery failed", {
 								error: error instanceof Error ? error.message : String(error),
 							});
-							return pick;
+							return pick ? { model: pick } : undefined;
 						});
 				} else if (pick) {
 					model = pick;
@@ -2597,6 +2599,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					patterns && patterns.length > 0
 						? `No model available matching enabledModels (${patterns.join(", ")}) with usable credentials. Configure auth for an allowed provider or adjust enabledModels.`
 						: "No models available. Use /login or set an API key environment variable. Then use /model to select a model.";
+			}
+		}
+		if (deferredModelResolution && options.awaitDeferredModel) {
+			const deferredModel = await deferredModelResolution;
+			if (deferredModel) {
+				model = deferredModel.model;
+				thinkingLevel = deferredModel.thinkingLevel ?? thinkingLevel;
+				modelFallbackMessage = undefined;
 			}
 		}
 
@@ -4080,22 +4090,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// `auto` matching the model's `code_mode_only` flag): the Agent above was
 		// handed the unrestricted `initialTools`, so without this the first and all
 		// subsequent turns would expose the full direct tool surface and omit
-		// `tool_namespaces_info` until an unrelated model/setting/tool-selection
-		// change reconciled.
-		try {
-			await session.initializeCodeMode();
-		} catch (error) {
-			logger.warn("Code Mode initialization at session startup failed", { error: String(error) });
-		}
-
 		void deferredModelResolution?.then(discovered => {
 			if (!discovered || session.model) return;
-			void session.setModelTemporary(discovered).catch(error => {
+			void session.setModelTemporary(discovered.model, discovered.thinkingLevel).catch(error => {
 				logger.warn("background model discovery model activation failed", {
 					error: error instanceof Error ? error.message : String(error),
 				});
 			});
 		});
+
 
 		return {
 			session,
