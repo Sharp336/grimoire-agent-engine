@@ -2626,7 +2626,7 @@ function openCodeModelManagerOptions(
 					});
 			},
 		},
-		...(apiKey && {
+		...((providerId === "opencode-zen" || apiKey) && {
 			fetchDynamicModels: () =>
 				fetchOpenAICompatibleModels<Api>({
 					api: "openai-completions",
@@ -2635,6 +2635,11 @@ function openCodeModelManagerOptions(
 					apiKey,
 					mapModel: (entry, defaults) => {
 						const reference = references.get(defaults.id);
+						// Anonymous Zen discovery may confirm only models whose pricing
+						// comes from the trusted bundled catalog. Generic discovery defaults
+						// unknown entries to zero cost, which would otherwise misclassify a
+						// newly listed paid model as anonymously callable.
+						if (providerId === "opencode-zen" && !apiKey && !reference) return null;
 						const name = toModelName(entry.name, reference?.name ?? defaults.name);
 						// Pins and bundled routing hints win over the metadata-only
 						// stencil fallback; the fallback never selects a transport.

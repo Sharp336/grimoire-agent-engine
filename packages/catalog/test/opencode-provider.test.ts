@@ -181,6 +181,20 @@ describe("OpenCode provider discovery", () => {
 		}
 	});
 
+	test("discovers the public Zen model list without sending authentication", async () => {
+		let authorization: string | null | undefined;
+		const options = opencodeZenModelManagerOptions({
+			fetch: async (_input, init) => {
+				authorization = new Headers(init?.headers).get("Authorization");
+				return modelListResponse(["big-pickle", "claude-opus-4-8", "untrusted-new-model"]);
+			},
+		});
+
+		const models = await options.fetchDynamicModels?.();
+		expect(authorization).toBeNull();
+		expect(models?.map(model => model.id).sort()).toEqual(["big-pickle", "claude-opus-4-8"]);
+	});
+
 	test("recovers muse-spark thinking levels from live OpenCode Go discovery", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-opencode-go-muse-"));
 		try {

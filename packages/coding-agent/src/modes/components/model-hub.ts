@@ -12,6 +12,7 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
+import { providerAllowsMissingApiKey } from "@oh-my-pi/pi-ai/registry";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getCatalogProviderEntry } from "@oh-my-pi/pi-catalog/provider-models";
 import {
@@ -337,7 +338,7 @@ export class ModelHubComponent implements Component {
 		availableModels = availableModels.filter(
 			model =>
 				isProviderVisible(model.provider) &&
-				(model.provider !== "opencode-zen" || (model.cost.input === 0 && model.cost.output === 0)),
+				(model.provider !== "opencode-zen" || providerAllowsMissingApiKey(model)),
 		);
 
 		this.#reloadRoles(allModels, availableModels);

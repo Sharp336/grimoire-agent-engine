@@ -4,6 +4,7 @@
 
 ### Changed
 
+- OpenCode Go now uses `OPENCODE_GO_API_KEY`, while OpenCode Zen free models work without login or authentication headers.
 - Fork installs now replace the active official launcher, and `omp update` uses only the latest `jchanghong023/oh-my-pi` GitHub Release, including successive fork builds at the same upstream package version.
 - Snapcompact frame archives now persist as blob references instead of inline base64, so a resumed session no longer materializes the frames of every past compaction. Only the archive the rebuilt context injects is read back, and within it only the frames the per-request byte budget keeps: a frame is priced from its stored blob size and read only if it fits. The gain scales with how frame-heavy a journal is. On a real 557 MiB journal whose frames are 41.7% of its bytes: journal 557 -> 325 MiB (-42%), retained JSC heap 1115 -> 653 MiB (-41%), resume 2.18 -> 0.99 s (-54%), and its 2454 frames store as 1640 unique blobs (117 MiB, so 442 MiB on disk in total); the extra 6 ms this moves into the context rebuild buys the 1.2 s saved on resume. A lighter 171.7 MiB journal with 30k entries shows journal -24%, heap 642.9 -> 479.9 MiB (-25%), resume 564 -> 374 ms (-34%). Journals written before this change keep working and convert on their next full rewrite.
 - Format streaming thinking blocks incrementally — O(1) per append tick instead of O(text²) full re-scan.

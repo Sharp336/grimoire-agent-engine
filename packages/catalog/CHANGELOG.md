@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- OpenCode Go now reads `OPENCODE_GO_API_KEY`, while OpenCode Zen discovers its public catalog without the former shared environment credential.
+
 ## [18.0.2] - 2026-08-23
 
 ### Fixed

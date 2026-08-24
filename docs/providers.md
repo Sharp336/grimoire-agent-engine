@@ -136,7 +136,8 @@ Each provider has one or more environment variables that supply a key when no st
 | `sakana`                         | `SAKANA_API_KEY`, then `FUGU_API_KEY`                                         |
 | `aimlapi`                        | `AIMLAPI_API_KEY`                                                             |
 | `gitlab-duo`, `gitlab-duo-agent` | `GITLAB_TOKEN`                                                                |
-| `opencode-zen`, `opencode-go`    | `OPENCODE_API_KEY`                                                            |
+| `opencode-go`                    | `OPENCODE_GO_API_KEY`                                                         |
+| `opencode-zen`                   | No environment variable; free models support anonymous requests               |
 | `firepass`                       | `FIREPASS_API_KEY`                                                            |
 | `wafer-serverless`               | `WAFER_SERVERLESS_API_KEY`                                                    |
 | `xiaomi`                         | `XIAOMI_API_KEY`                                                              |

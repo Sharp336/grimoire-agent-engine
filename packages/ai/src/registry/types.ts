@@ -22,6 +22,8 @@ export type KeyResolver = string | (() => string | undefined);
 
 /** Credentials are resolved by the provider transport rather than used as a bearer string. */
 export const AUTHENTICATED_SENTINEL = "<authenticated>";
+/** Model intentionally makes an unauthenticated request; transports must omit credential headers. */
+export const NO_AUTH_SENTINEL = "N/A";
 
 export interface PreparedProviderRequest {
 	readonly model: Model<Api>;
@@ -64,8 +66,8 @@ export interface ProviderDefinition {
 	readonly showInLoginList?: boolean;
 	// --- env-var fallback (the catalog table's `envVars` supplies plain names; set this only for computed resolvers) ---
 	readonly envKeys?: KeyResolver;
-	/** Provider transport can authenticate without a resolved API-key string. */
-	readonly allowsMissingApiKey?: boolean;
+	/** Provider transport can authenticate without a resolved API-key string, globally or for selected models. */
+	readonly allowsMissingApiKey?: boolean | ((model: Model<Api>) => boolean);
 	/** Provider-owned request shaping applied before generic API dispatch. */
 	readonly prepareRequest?: ProviderRequestPreparer;
 	/** Provider-owned projection from the generic simple-stream option bag. */

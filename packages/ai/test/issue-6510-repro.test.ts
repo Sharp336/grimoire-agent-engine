@@ -1,7 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { buildAnthropicClientOptions, streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
+import { NO_AUTH_SENTINEL } from "@oh-my-pi/pi-ai/registry";
 import type { Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 /**
  * Repro for #6510 — every Claude (`anthropic-messages`) model on the
@@ -33,6 +35,11 @@ const ZEN_ANTHROPIC_MODEL: Model<"anthropic-messages"> = buildModel({
 	maxTokens: 8_192,
 } as ModelSpec<"anthropic-messages">);
 
+const ZEN_FREE_ANTHROPIC_MODEL = getBundledModel(
+	"opencode-zen",
+	"minimax-m2.5-free",
+) as Model<"anthropic-messages">;
+
 describe("issue #6510 — opencode-zen Anthropic auth + context_management", () => {
 	it("authenticates Zen Claude models with X-Api-Key, not bearer-only", () => {
 		const options = buildAnthropicClientOptions({
@@ -45,6 +52,18 @@ describe("issue #6510 — opencode-zen Anthropic auth + context_management", () 
 		// header must not be sent (Zen's Anthropic gateway rejects it).
 		expect(options.apiKey).toBe("sk-zen-test");
 		expect(options.defaultHeaders.Authorization).toBeUndefined();
+	});
+
+	it("omits both Zen authentication headers for an anonymous free model", () => {
+		const options = buildAnthropicClientOptions({
+			model: ZEN_FREE_ANTHROPIC_MODEL,
+			apiKey: NO_AUTH_SENTINEL,
+			stream: true,
+		});
+
+		expect(options.apiKey).toBeNull();
+		expect(options.defaultHeaders.Authorization).toBeUndefined();
+		expect(options.defaultHeaders["X-Api-Key"]).toBeUndefined();
 	});
 
 	it("omits context_management and its beta on Zen thinking requests", async () => {
