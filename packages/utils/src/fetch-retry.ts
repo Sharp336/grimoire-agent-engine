@@ -1,17 +1,68 @@
 import { scheduler } from "node:timers/promises";
 
-// "reset after 1h2m3s" / "10m15s" / "39s"
+// Google Gemini (CloudCode proxy) 429 body: "Your quota will reset after 18h31m10s" / "10m15s" / "39s"
 const QUOTA_RESET_PATTERN = /reset after (?:(\d+)h)?(?:(\d+)m)?(\d+(?:\.\d+)?)s/i;
-// "Please retry in 250ms" / "Please retry in 12s"
+// Google Gemini 429 body: "Please retry in 250ms" / "Please retry in 12s"
 const PLEASE_RETRY_PATTERN = /Please retry in ([0-9.]+)(ms|s)/i;
-// JSON field: "retryDelay": "34.074824224s"
+// Google Gemini JSON error detail: "retryDelay": "34.074824224s"
 const RETRY_DELAY_FIELD_PATTERN = /"retryDelay":\s*"([0-9.]+)(ms|s)"/i;
-// "try again in 250ms" / "try again in 12s" / "try again in 12sec" /
-// "try again in 5 min" / "try again in ~158 min." / "try again in 2h" /
-// "try again in 90 minutes" / "try again in 1 hour"
+// Codex 429 body "try again in 250ms" / "try again in 12s"; ChatGPT OAuth
+// usage-limit body "You have hit your ChatGPT usage limit (pro plan). Try
+// again in ~158 min." (units: min/minutes/h/hours)
 const TRY_AGAIN_PATTERN = /try again in\s+~?\s*([0-9.]+)\s*(ms|sec|s|minutes?|mins?|m|hours?|hrs?|h)\b/i;
-// "Your limit will reset in 13 minutes" / "reset in 13 minutes" / "will reset in 2h"
+// Devin 403 account-scoped cap body: "Your limit will reset in 13 minutes"
 const WILL_RESET_IN_PATTERN = /(?:will\s+)?reset in\s+~?\s*([0-9.]+)\s*(ms|sec|s|minutes?|mins?|m|hours?|hrs?|h)\b/i;
+// Zhipu GLM Coding Plan quota errors (HTTP 429; Zhipu's error-code reference
+// documents the whole 1308–1321 series with the shared trailing clause) name
+// the reset moment as an absolute wall-clock stamp. CN platform
+// (docs.bigmodel.cn): "您的限额将在 2026-08-17 11:17:40 重置" (1308: "已达到
+// 5 小时的使用上限。您的限额将在 ${next_flush_time} 重置"). International
+// Z.AI returns the JSON body {"code":"1308","message":"Usage limit reached
+// for 5 hour. Your limit will reset at 2026-02-06 05:34:34"}. Everything in
+// this family — the wordings, the assumed zone, the reread fallback, the
+// horizon — is Zhipu attestation; nothing here is generic.
+const ZHIPU_RESET_AT_DATETIME_SOURCE = String.raw`\d{4}-\d{1,2}-\d{1,2} \d{1,2}:\d{2}(?::\d{2})?`;
+// Optional trailing zone marker. No attested body carries one today, but if
+// Zhipu ever starts stamping one it wins over the assumed zone below.
+const ZHIPU_RESET_AT_ZONE_SOURCE = String.raw`(?:\s*(?:Z|UTC|GMT|[+-]\d{2}:\d{2}|[+-]\d{4}|[+-]\d{2}))?`;
+const ZHIPU_RESET_AT_DATETIME_TOKEN =
+	/^(?<year>\d{4})-(?<month>\d{1,2})-(?<day>\d{1,2}) (?<hour>\d{1,2}):(?<minute>\d{2})(?::(?<second>\d{2}))?(?<zone>Z|UTC|GMT|[+-]\d{2}:\d{2}|[+-]\d{4}|[+-]\d{2})?$/;
+const ZHIPU_RESET_AT_DATETIME_SCANNER = new RegExp(ZHIPU_RESET_AT_DATETIME_SOURCE + ZHIPU_RESET_AT_ZONE_SOURCE);
+const ZHIPU_CN_RESET_AT_PATTERN = new RegExp(
+	String.raw`您的限额将在[^\S\n]*${ZHIPU_RESET_AT_DATETIME_SOURCE}${ZHIPU_RESET_AT_ZONE_SOURCE}[^\S\n]*重置`,
+);
+const ZHIPU_EN_RESET_AT_PATTERN = new RegExp(
+	String.raw`\b(?:will\s+reset|resets)\s+at\s+${ZHIPU_RESET_AT_DATETIME_SOURCE}${ZHIPU_RESET_AT_ZONE_SOURCE}`,
+	"i",
+);
+// The stamps documented today are bare wall-clock strings with no zone
+// marker; neither error-code reference states one. Zhipu support (ticket)
+// confirmed the stamp is server time in UTC+8, and advised treating
+// implausibly stale stamps as UTC — see the fallback in
+// extractZhipuResetWaitMs. Observed resets on the CN side match UTC+8, and
+// the international service is observed in Singapore time (also UTC+8) — so
+// bare stamps read as +08:00 unless they carry a zone marker of their own.
+const ZHIPU_RESET_AT_ZONE_SUFFIX = "+08:00";
+// Plausibility window for a past stamp in a freshly returned body: real
+// staleness is seconds, and one minute also absorbs client clock skew. A
+// bare stamp stale past it can't be a real boundary, so the server likely
+// returned UTC despite the confirmed UTC+8 (Zhipu support's fallback advice:
+// reread the stamp as UTC). A stamp past within it is a plausible
+// just-reset boundary: retry once it is a full window past (see
+// extractZhipuResetWaitMs).
+const ZHIPU_RESET_AT_STALE_MS = 60_000;
+// Grace over the stated boundary — generic: any provider naming an absolute
+// reset moment has reset jobs that land seconds late and clocks that skew
+// up to ~1s even on NTP hosts. Waking early just burns a retry attempt on
+// another 429 (the stamp then parses as past, falling back to exponential
+// backoff), and account-window waits run minutes or more — a 3s cushion is
+// free.
+const RESET_AT_BUFFER_MS = 3_000;
+// A stated reset further out than this is garbage, not a wait target: the
+// largest window Zhipu documents is the weekly quota (7-day codes
+// 1310/1317/1319/1321), so nothing past a week is a real boundary. This
+// also bounds the sleep below.
+const ZHIPU_RESET_AT_MAX_DELTA_MS = 7 * 24 * 60 * 60 * 1000;
 
 /**
  * Server-suggested retry delay extraction. Merges the patterns historically used
@@ -25,10 +76,17 @@ const WILL_RESET_IN_PATTERN = /(?:will\s+)?reset in\s+~?\s*([0-9.]+)\s*(ms|sec|s
  *  - `x-ratelimit-reset-after` (seconds)
  *
  * Body patterns:
- *  - `Your quota will reset after 18h31m10s` / `10m15s` / `39s`
- *  - `Please retry in 250ms` / `Please retry in 12s`
- *  - `"retryDelay": "34.074824224s"` (JSON error detail field)
- *  - `try again in 250ms` / `try again in 12s` / `try again in 5 min` / `try again in ~158 min`
+ *  - `您的限额将在 2026-08-17 11:17:40 重置` (GLM Coding Plan 429, codes
+ *    1308–1321) and `Your limit will reset at 2026-02-06 05:34:34` (Z.AI
+ *    international 1308 JSON body) — absolute reset moments: +3s grace,
+ *    explicit zone markers honored, bare stamps parsed as the server's
+ *    UTC+8 with a stale-stamp UTC reread. The whole family is Zhipu
+ *    attestation (see extractZhipuResetWaitMs).
+ *  - `Your quota will reset after 18h31m10s` / `10m15s` / `39s` (Google Gemini)
+ *  - `Please retry in 250ms` / `Please retry in 12s` (Google Gemini)
+ *  - `"retryDelay": "34.074824224s"` (Google Gemini JSON error detail)
+ *  - `try again in 250ms` / `try again in ~158 min` (Codex / ChatGPT OAuth)
+ *  - `Your limit will reset in 13 minutes` (Devin 403 account cap)
  *
  * Returns `undefined` if no signal is found.
  */
@@ -75,6 +133,12 @@ export function extractRetryHint(source: Response | Headers | null | undefined, 
 
 	if (!body) return undefined;
 
+	// Absolute reset moments are account windows like "reset after 18h31m10s"
+	// above, so they outrank the generic "retry in" hints below. Only the
+	// Zhipu GLM Coding Plan family is registered today; a future provider
+	// naming its own stamp gets its own family beside it.
+	const zhipuResetWaitMs = extractZhipuResetWaitMs(body);
+	if (zhipuResetWaitMs !== undefined) return zhipuResetWaitMs;
 	const quotaMatch = QUOTA_RESET_PATTERN.exec(body);
 	if (quotaMatch) {
 		const hours = quotaMatch[1] ? Number.parseInt(quotaMatch[1], 10) : 0;
@@ -124,6 +188,64 @@ function unitToMs(unit: string): number | undefined {
 		default:
 			return undefined;
 	}
+}
+
+/**
+ * Zhipu GLM Coding Plan stamp family (see the ZHIPU_RESET_AT_* patterns):
+ * the wait implied by an absolute reset moment named in the error body, or
+ * `undefined` when no registered wording brackets a usable datetime. The
+ * datetime must be bracketed by reset wording so unrelated embedded dates
+ * never become wait targets.
+ */
+function extractZhipuResetWaitMs(body: string): number | undefined {
+	const stamp = parseZhipuResetStamp(body);
+	if (!stamp) return undefined;
+	const deltaMs = stamp.resetAtMs - Date.now();
+	// A future stamp within the horizon is the wait target.
+	if (deltaMs > 0 && deltaMs <= ZHIPU_RESET_AT_MAX_DELTA_MS) return deltaMs + RESET_AT_BUFFER_MS;
+	// Just-past within the plausibility window (a plausible just-reset
+	// boundary): retry once the boundary is a full window past, plus grace —
+	// by then the boundary either took, or the fresh body's stamp is stale
+	// enough to reread as UTC below.
+	if (deltaMs <= 0 && deltaMs > -ZHIPU_RESET_AT_STALE_MS) {
+		return deltaMs + ZHIPU_RESET_AT_STALE_MS + RESET_AT_BUFFER_MS;
+	}
+	// Stale past the plausibility window. Bare stamps: Zhipu support's
+	// advice (ticket) — the confirmed +08:00 may be wrong for this server,
+	// so reread the same wall clock as UTC (8h later). An explicit zone has
+	// nothing to correct, as does a reread that is still past or beyond the
+	// horizon: return nothing.
+	if (!stamp.explicitZone && deltaMs <= -ZHIPU_RESET_AT_STALE_MS) {
+		const utcDeltaMs = deltaMs + 8 * 3_600_000;
+		if (utcDeltaMs > 0 && utcDeltaMs <= ZHIPU_RESET_AT_MAX_DELTA_MS) return utcDeltaMs + RESET_AT_BUFFER_MS;
+	}
+	return undefined;
+}
+
+function parseZhipuResetStamp(body: string): { resetAtMs: number; explicitZone: boolean } | undefined {
+	for (const pattern of [ZHIPU_CN_RESET_AT_PATTERN, ZHIPU_EN_RESET_AT_PATTERN]) {
+		const span = pattern.exec(body);
+		if (!span) continue;
+		const datetime = ZHIPU_RESET_AT_DATETIME_SCANNER.exec(span[0]);
+		if (!datetime) continue;
+		const token = ZHIPU_RESET_AT_DATETIME_TOKEN.exec(datetime[0])?.groups;
+		if (!token) continue;
+		const pad2 = (value: string | number) => String(value).padStart(2, "0");
+		const zoneSuffix = zoneMarkerToIsoSuffix(token.zone, ZHIPU_RESET_AT_ZONE_SUFFIX);
+		const iso = `${token.year}-${pad2(token.month!)}-${pad2(token.day!)}T${pad2(token.hour!)}:${token.minute}:${token.second ?? "00"}${zoneSuffix}`;
+		const resetAtMs = Date.parse(iso);
+		if (!Number.isNaN(resetAtMs)) return { resetAtMs, explicitZone: token.zone !== undefined };
+	}
+	return undefined;
+}
+
+// Zone marker → ISO 8601 offset suffix. No marker → the caller's assumed
+// zone; Z / UTC / GMT → Z; ±HH, ±HHMM, ±HH:MM → ±HH:MM.
+function zoneMarkerToIsoSuffix(zone: string | undefined, assumedSuffix: string): string {
+	if (zone === undefined) return assumedSuffix;
+	if (zone === "Z" || zone === "UTC" || zone === "GMT") return "Z";
+	const digits = zone.slice(1).replace(":", "");
+	return `${zone[0]}${digits.slice(0, 2)}:${digits.slice(2) || "00"}`;
 }
 
 export interface FetchWithRetryOptions extends RequestInit {
