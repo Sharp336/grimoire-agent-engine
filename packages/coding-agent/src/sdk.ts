@@ -2922,7 +2922,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				await mcpManager.ensureServerResources(name);
 				return mcpManager.getServerResources(name);
 			},
-			readServerResource: (name, uri) => {
+			readServerResource: async (name, uri) => {
 				// Same gate as the listing: a scoped-out server's resources are
 				// not readable, even by direct server address. The primary
 				// bridge's handler re-checks, but the advisor bridge shares this
