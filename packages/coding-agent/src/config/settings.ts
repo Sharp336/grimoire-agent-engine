@@ -372,8 +372,6 @@ export class Settings {
 	#modifiedProjectModelRoles = new Set<string>();
 	/** Individual global model roles modified during this session (for partial save) */
 	#modifiedGlobalModelRoles = new Set<string>();
-	/** Last observed effective profile state — lets `profiles` writes fire signals only when consumed state changed. */
-	#lastEffectiveProfileSnapshot: { active: string; roles: Record<string, string> | undefined } | undefined;
 	/** Changes whenever a live API mutates a persisted layer. */
 	#persistedMutationGeneration = 0;
 	/**
@@ -464,9 +462,6 @@ export class Settings {
 	static async loadIsolated(options: SettingsOptions = {}): Promise<Settings> {
 		const instance = new Settings(options);
 		await instance.#load();
-		// Baseline for effective-state signal comparison on the first
-		// profiles write (undefined would force a conservative fire).
-		instance.#lastEffectiveProfileSnapshot = instance.#effectiveProfileSnapshot();
 		return instance;
 	}
 
@@ -529,6 +524,9 @@ export class Settings {
 	 * Triggers hooks for settings that have side effects.
 	 */
 	set<P extends SettingPath>(path: P, value: SettingValue<P>): void {
+		// Local before-snapshot: profile signals compare effective state
+		// around THIS mutation, never a long-lived cache that can drift.
+		const profileBefore = path === "profiles" ? this.#effectiveProfileSnapshot() : undefined;
 		const prev = this.get(path);
 		const segments = path.split(".");
 		setByPath(this.#global, segments, value);
@@ -542,6 +540,9 @@ export class Settings {
 		const hook = SETTING_HOOKS[path];
 		if (hook) {
 			hook(next, prev);
+		}
+		if (profileBefore) {
+			this.#fireProfileSignalsIfNeeded(profileBefore);
 		}
 		this.#fireEffectiveSettingChanged(path, next, prev);
 	}
@@ -602,13 +603,6 @@ export class Settings {
 		if (path === "activeProfile") {
 			modelRolesSignal.fire();
 			activeProfileSignal.fire();
-		}
-		if (path === "profiles") {
-			// Raw `profiles` writes only matter to live consumers when the
-			// EFFECTIVE state (selected profile + its applied roles) changed.
-			// Editing an inactive profile must not reset the session model.
-			this.#fireProfileSignalsIfNeeded(this.#lastEffectiveProfileSnapshot);
-			this.#lastEffectiveProfileSnapshot = this.#effectiveProfileSnapshot();
 		}
 		if (CODE_MODE_SIGNAL_PATHS.includes(path)) {
 			codeModeSignal.fire();
@@ -711,6 +705,7 @@ export class Settings {
 				sessionAccent: this.get("statusLine.sessionAccent"),
 				activeProfile: this.getActiveProfile(),
 				profiles: this.getProfiles(),
+				profileState: this.#effectiveProfileSnapshot(),
 			};
 			const previousCodeModeValues = this.#codeModeSignalSnapshot();
 			const previousHookValues = new Map<SettingPath, unknown>();
@@ -749,21 +744,11 @@ export class Settings {
 					previousSignaledValues.sessionAccent,
 				);
 			}
-			const nextActiveProfile = this.getActiveProfile();
-			const selectionChanged = nextActiveProfile !== previousSignaledValues.activeProfile;
-			// Compare the effective overlay roles, not just the selected name:
-			// an external edit to the ACTIVE profile's roles must notify live
-			// consumers even when the profile name is unchanged. Inactive
-			// profile edits change neither and stay silent here.
-			const rolesChanged = !Bun.deepEquals(
-				this.resolveProfileModelRoles() ?? null,
-				this.#lastEffectiveProfileSnapshot?.roles ?? null,
-			);
-			if (selectionChanged || rolesChanged) {
-				modelRolesSignal.fire();
-				activeProfileSignal.fire();
-			}
-			this.#lastEffectiveProfileSnapshot = this.#effectiveProfileSnapshot();
+			// Local before/after comparison of EFFECTIVE profile state (name +
+			// overlay roles): an external edit to the ACTIVE profile's roles
+			// notifies live consumers even when the name is unchanged; inactive
+			// profile edits change neither and stay silent.
+			this.#fireProfileSignalsIfNeeded(previousSignaledValues.profileState);
 			this.#fireCodeModeChangeIfNeeded(previousCodeModeValues);
 			for (const [key, previous] of previousHookValues) {
 				const next = this.get(key);
@@ -793,7 +778,11 @@ export class Settings {
 		await this.flush();
 		this.#restoreRuntimeModelRoleOverrides();
 		const prevModelRoles = this.get("modelRoles");
-		const prevActiveProfile = this.getActiveProfile();
+		// Local before-snapshot of EFFECTIVE profile state: two projects can
+		// select the same profile name with different roles (including under a
+		// runtime --model-profile override), so a name-only comparison would
+		// silently skip the notification the default-model reconciler needs.
+		const prevProfileState = this.#effectiveProfileSnapshot();
 		const prevCodeModeValues = this.#codeModeSignalSnapshot();
 		this.#cwd = normalized;
 		if (this.#persist) {
@@ -801,7 +790,7 @@ export class Settings {
 		}
 		this.#rebuildMerged();
 		this.#fireEffectiveSettingChanged("modelRoles", this.get("modelRoles"), prevModelRoles);
-		this.#fireEffectiveSettingChanged("activeProfile", this.getActiveProfile(), prevActiveProfile);
+		this.#fireProfileSignalsIfNeeded(prevProfileState);
 		this.#fireCodeModeChangeIfNeeded(prevCodeModeValues);
 		this.#fireAllHooks();
 	}
@@ -2612,10 +2601,16 @@ export class Settings {
 	 * edits to INACTIVE profiles produce no notification, so editing an
 	 * unused profile can never reset the live session model.
 	 */
-	#effectiveProfileSnapshot(): { active: string; roles: Record<string, string> | undefined } {
+	#effectiveProfileSnapshot(): {
+		active: string;
+		roles: Record<string, string> | undefined;
+		defaultRole: string | undefined;
+	} {
+		const roles = this.resolveProfileModelRoles();
 		return {
 			active: this.getActiveProfile(),
-			roles: this.resolveProfileModelRoles(),
+			roles,
+			defaultRole: roles?.default,
 		};
 	}
 
@@ -2626,15 +2621,21 @@ export class Settings {
 	 * only inactive profiles were touched.
 	 */
 	#fireProfileSignalsIfNeeded(
-		before: { active: string; roles: Record<string, string> | undefined } | undefined,
+		before:
+			| { active: string; roles: Record<string, string> | undefined; defaultRole: string | undefined }
+			| undefined,
 	): void {
 		const after = this.#effectiveProfileSnapshot();
 		// No prior snapshot means this is the first profiles write we've seen:
 		// fire conservatively so consumers can't miss a real change.
 		const rolesChanged = !before || !Bun.deepEquals(before.roles ?? null, after.roles ?? null);
 		const activeChanged = !before || before.active !== after.active;
+		// The default-model reconciler subscribes to the active-profile signal,
+		// so it fires only when the SELECTION or the effective DEFAULT role
+		// changed — a smol/slow-only edit must not reset the session model.
+		const defaultChanged = !before || before.defaultRole !== after.defaultRole;
 		if (rolesChanged) modelRolesSignal.fire();
-		if (activeChanged || rolesChanged) activeProfileSignal.fire();
+		if (activeChanged || defaultChanged) activeProfileSignal.fire();
 	}
 
 	/**

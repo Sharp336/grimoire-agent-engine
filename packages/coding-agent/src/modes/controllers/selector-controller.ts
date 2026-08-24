@@ -780,7 +780,9 @@ export class SelectorController {
 			settings.getActiveProfile(),
 			action => {
 				this.#activeProfileManager = manager;
-				void this.#handleProfileManagerAction(action, settings, manager, done);
+				void this.#handleProfileManagerAction(action, settings, manager, done).catch((error: unknown) => {
+					this.ctx.showError(error instanceof Error ? error.message : String(error));
+				});
 			},
 		);
 		this.#activeProfileManager = manager;
@@ -818,16 +820,11 @@ export class SelectorController {
 			}
 			case "create": {
 				const created = await this.#promptProfileName();
-				if (!created) return; // cancelled — no shell profile written
-				// Continue directly into the role editor so creation ends with
-				// a complete profile; aborting leaves no empty shell behind.
-				const changed = await this.#editProfileRoles(settings, created, "global");
+				if (!created) return; // cancelled — nothing was ever written
+				// Draft-mode role editor: the profile persists only on a
+				// completed save, so cancellation leaves no shell behind.
+				const changed = await this.#editProfileRoles(settings, created, "global", true);
 				if (!changed) {
-					try {
-						await settings.removeProfile("global", created);
-					} catch {
-						// shell never existed if validation rejected the name
-					}
 					this.ctx.showStatus("Profile creation cancelled.");
 					manager.update(profilePickerEntries(settings), settings.getActiveProfile());
 					this.ctx.ui.requestRender();
@@ -901,17 +898,31 @@ export class SelectorController {
 	 * selector per role (empty keeps current, `null` clears it), then persists
 	 * one patch write at the end to the requested scope.
 	 */
-	async #editProfileRoles(settings: Settings, name: string, scope: "global" | "project"): Promise<boolean> {
-		const existing = settings.getProfile(name);
-		if (!existing) return false;
-		const roles: Record<string, string | null> = { ...(existing.modelRoles ?? {}) };
+	async #editProfileRoles(
+		settings: Settings,
+		name: string,
+		scope: "global" | "project",
+		draft = false,
+	): Promise<boolean> {
+		// Draft mode (create flow): the profile does not exist yet — start
+		// from empty roles and only persist on successful completion, so a
+		// cancelled creation leaves nothing on disk.
+		const existing = draft ? undefined : settings.getProfile(name);
+		if (!existing && !draft) return false;
+		const roles: Record<string, string | null> = { ...(existing?.modelRoles ?? {}) };
 		for (const role of ["default", "smol", "slow", "plan"]) {
 			const current = roles[role];
 			const entered = await this.#promptRoleValue(`${name}.${role}`, typeof current === "string" ? current : "");
 			if (entered === null) return false; // user aborted mid-edit
 			roles[role] = entered === "" ? null : entered;
 		}
-		await settings.setProfile(scope, name, { modelRoles: roles });
+		// Draft mode has no pre-existing roles to clear: empty input means
+		// "leave unset", so tombstones are stripped and a duplicate-name
+		// creation merges over the old definition without destroying it.
+		const modelRoles = draft
+			? Object.fromEntries(Object.entries(roles).filter(([, value]) => value !== null))
+			: roles;
+		await settings.setProfile(scope, name, { modelRoles });
 		return true;
 	}
 
