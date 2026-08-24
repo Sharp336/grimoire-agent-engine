@@ -27,6 +27,7 @@ import { TASK_EFFORTS, type TaskEffort } from "../thinking";
 import { truncateForPrompt } from "../tools/approval";
 import { isIrcEnabled } from "../tools/hub";
 import { formatBytes, formatDuration } from "../tools/render-utils";
+import { publishDiscoveredAgents } from "./discovery-snapshot";
 import { isReadOnlyAgent } from "./read-only-policy";
 import {
 	DEFAULT_SPAWN_AGENT,
@@ -507,19 +508,8 @@ export async function refreshAgentDiscovery(cwd: string): Promise<void> {
 	const pending = discoverAgentsForCreate(cwd);
 	const { agents } = await pending;
 	if (discoveryMemo.get(key) === pending) {
-		discoverySnapshots.set(key, agents);
+		publishDiscoveredAgents(key, agents);
 	}
-}
-
-/**
- * The discovered `scout` definition for a cwd, or `undefined` when discovery
- * has not run for it yet (no TaskTool created / no refresh). Surfaces that
- * advertise the scout shortcut (system prompt, grep/glob/ast-grep tool
- * descriptions, plan-mode context) read this to honor a project override that
- * makes the bundled scout primary-only/unavailable.
- */
-export function getDiscoveredScoutAgent(cwd: string): AgentDefinition | undefined {
-	return (discoverySnapshots.get(path.resolve(cwd)) ?? []).find(agent => agent.name === "scout");
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -728,7 +718,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		// Publish the discovered roster to the shared snapshot so sibling
 		// surfaces (system prompt, grep/glob/ast-grep descriptions) can read
 		// the scout definition's availability synchronously.
-		discoverySnapshots.set(path.resolve(session.cwd), agents);
+		publishDiscoveredAgents(path.resolve(session.cwd), agents);
 		return new TaskTool(session, agents);
 	}
 

@@ -11,7 +11,7 @@ import { recordFileSnapshot, recordSeenLinesFromBody } from "../edit/file-snapsh
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
 import astGrepDescription from "../prompts/tools/ast-grep.md" with { type: "text" };
-import { getDiscoveredScoutAgent } from "../task";
+import { getDiscoveredScoutAgent } from "../task/discovery-snapshot";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import { Ellipsis, fileHyperlink, renderStatusLine, renderTreeList, truncateToWidth } from "../tui";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";

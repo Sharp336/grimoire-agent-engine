@@ -28,7 +28,7 @@ import type { InternalResource, ResolveContext } from "../internal-urls/types";
 import type { Theme } from "../modes/theme/theme";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
 import { DEFAULT_MAX_COLUMN, type TruncationResult, truncateHead, truncateLine } from "../session/streaming-output";
-import { getDiscoveredScoutAgent } from "../task";
+import { getDiscoveredScoutAgent } from "../task/discovery-snapshot";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import {
 	Ellipsis,
