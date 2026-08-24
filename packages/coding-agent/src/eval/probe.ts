@@ -186,10 +186,10 @@ export async function probeCandidates(
 		try {
 			const probe = await runBoundedProbe(candidate.command, {
 				cwd,
-					env: candidate.env,
-					signal,
-					timeoutMs: remaining,
-					maxTimeoutMs: bound,
+				env: candidate.env,
+				signal,
+				timeoutMs: remaining,
+				maxTimeoutMs: bound,
 			});
 			if (probe.exitCode === 0) return { ok: true, index };
 			if (probe.aborted) return { ok: false, aborted: true, failures };
