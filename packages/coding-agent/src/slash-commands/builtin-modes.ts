@@ -142,6 +142,25 @@ async function switchAgentPersonaAcp(
 			runtime,
 		);
 	}
+	// Mirror `InteractiveMode.switchAgentPersona`'s mode guards: a persona
+	// switch replaces the active tool set, which would corrupt an active
+	// plan/goal/vibe mode (e.g. dropping the plan proposal tools while
+	// `getPlanModeState()` stays enabled). The live session state covers
+	// active modes; the persisted mode covers paused states (a paused plan
+	// clears the session state but persists `plan_paused`).
+	const persistedMode = runtime.sessionManager.buildSessionContext().mode;
+	const planActive =
+		runtime.session.getPlanModeState()?.enabled === true ||
+		persistedMode === "plan" ||
+		persistedMode === "plan_paused";
+	const goalActive =
+		runtime.session.getGoalModeState()?.enabled === true ||
+		persistedMode === "goal" ||
+		persistedMode === "goal_paused";
+	const vibeActive = runtime.session.getVibeModeState()?.enabled === true || persistedMode === "vibe";
+	if (planActive) return usage("Exit plan mode first.", runtime);
+	if (goalActive) return usage("Exit goal mode first.", runtime);
+	if (vibeActive) return usage("Exit vibe mode first.", runtime);
 	const failure = await applyAgentPersonaToSession(runtime.session, agent, name, runtime.output);
 	if (failure) {
 		return usage(failure, runtime);

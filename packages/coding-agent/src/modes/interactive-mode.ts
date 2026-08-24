@@ -2969,6 +2969,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	 * the live mode-entry paths (/plan, /vibe, /goal, /guided-goal) so a running
 	 * session switching out of agent mode never keeps the persona's prompt/spawn
 	 * policy or restricted tools. No-op unless a persona is currently active.
+	 *
+	 * Atomic: the spawns/prompt fields are cleared only AFTER the baseline
+	 * restoration succeeds, so a failed restore (e.g. a system-prompt rebuild
+	 * error) leaves the persona fully intact instead of a partially cleared
+	 * state (codex #3821198710).
 	 */
 	async #clearPersonaOwnedState(): Promise<void> {
 		// A persona is "currently active" when its mutable session state is
@@ -2983,12 +2988,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		const hadPersona =
 			this.session.getPersonaAppendPrompt() !== undefined || this.session.getSessionSpawns() !== null;
 		if (!hadPersona) return;
-		this.session.setSessionSpawns(null);
-		this.session.setPersonaAppendPrompt(undefined);
 		// Restore the pre-persona tool set (launch baseline or first-switch
 		// capture) so a restricted persona's `tools:` list does not leak into
-		// the unrelated mode.
+		// the unrelated mode. Runs BEFORE the spawns/prompt clear: if it fails,
+		// the persona state stays intact and the caller's error path (or the
+		// next reconcile) can retry instead of leaving a half-cleared persona.
 		await this.session.restoreBaselineTools();
+		this.session.setSessionSpawns(null);
+		this.session.setPersonaAppendPrompt(undefined);
 	}
 
 	/** Reconcile mode state from session entries on resume/switch. */

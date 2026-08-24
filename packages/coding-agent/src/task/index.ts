@@ -175,7 +175,16 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		readOnly: isReadOnlyAgent(agent),
 		blocking: agent.blocking === true,
 	}));
-	const scoutAvailable = isScoutSpawnable(options.disabledAgents, options.parentSpawns);
+	const scoutAvailable = isScoutSpawnable(
+		options.disabledAgents,
+		options.parentSpawns,
+		// The ORIGINAL roster (pre-filter): a project override that makes the
+		// bundled scout primary-only/unavailable must not leave the scout
+		// shortcut advertised (structured-subagent preflight would reject it).
+		// The filtered roster cannot serve here — scout is absent from it
+		// exactly when the availability check must fire.
+		options.agents.find(agent => agent.name === "scout"),
+	);
 	// The raw policy default comes from the parent's `spawns` frontmatter and
 	// may name an agent that cannot actually be spawned (primary/unavailable,
 	// disabled, or filtered out above). Derive the advertised default from the
@@ -770,6 +779,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			this.session.taskDepth ?? 0,
 		);
 		const ircEnabled = isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0);
+		// The discovered scout definition (availability-filtered): a project
+		// override that makes the bundled scout primary-only/unavailable must
+		// not leave the scout shortcut advertised in spawn advisories
+		// (structured-subagent preflight would reject every scout call).
+		const scoutAgent = (discoverySnapshots.get(path.resolve(this.session.cwd)) ?? this.#discoveredAgents).find(
+			agent => agent.name === "scout",
+		);
 
 		if (!manager || asyncItems.length === 0) {
 			// Sync fallback: async execution disabled, orphaned host that never
@@ -789,6 +805,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						scoutAvailable: isScoutSpawnable(
 							this.session.settings.get("task.disabledAgents") as string[] | undefined,
 							this.session.getSessionSpawns?.() ?? "*",
+							scoutAgent,
 						),
 					});
 			const result = await this.#executeSyncFanout(
@@ -826,6 +843,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					scoutAvailable: isScoutSpawnable(
 						this.session.settings.get("task.disabledAgents") as string[] | undefined,
 						this.session.getSessionSpawns?.() ?? "*",
+						scoutAgent,
 					),
 				});
 		// Returns a fresh result (copied content array, copied text part) rather

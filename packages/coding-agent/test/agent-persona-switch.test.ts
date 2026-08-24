@@ -944,6 +944,60 @@ describe("ACP /agent and /switch-agent handle paths", () => {
 		expect(session?.getPersonaAppendPrompt()).toBeUndefined();
 	});
 
+	it("rejects ACP persona switches while plan mode is active", async () => {
+		// Regression (codex #3821198710): the shared ACP/RPC handler applied
+		// the persona without the plan/goal/vibe guards InteractiveMode uses,
+		// letting a persona replace the active tool set (potentially dropping
+		// the plan proposal tools) while plan mode stayed enabled.
+		const runtime = createAcpRuntime();
+		session!.setPlanModeState({ enabled: true, planFilePath: "/tmp/plan.md" });
+
+		const result = await executeAcpBuiltinSlashCommand("/agent persona-test", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(session?.getPersonaAppendPrompt()).toBeUndefined();
+		expect(session?.getSessionSpawns()).toBeNull();
+		expect(session?.getEnabledToolNames()).toEqual(["read"]);
+		const entries = session?.sessionManager.getEntries() ?? [];
+		expect(entries.some(entry => entry.type === "mode_change" && entry.mode === "agent")).toBe(false);
+	});
+
+	it("rejects ACP persona switches while goal mode is active", async () => {
+		const runtime = createAcpRuntime();
+		session!.setGoalModeState({
+			enabled: true,
+			mode: "active",
+			goal: {
+				id: "g1",
+				objective: "Ship",
+				status: "active",
+				tokensUsed: 0,
+				timeUsedSeconds: 0,
+				createdAt: Date.now(),
+				updatedAt: Date.now(),
+			},
+		});
+
+		const result = await executeAcpBuiltinSlashCommand("/agent persona-test", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(session?.getPersonaAppendPrompt()).toBeUndefined();
+		const entries = session?.sessionManager.getEntries() ?? [];
+		expect(entries.some(entry => entry.type === "mode_change" && entry.mode === "agent")).toBe(false);
+	});
+
+	it("rejects ACP persona switches while vibe mode is active", async () => {
+		const runtime = createAcpRuntime();
+		session!.setVibeModeState({ enabled: true });
+
+		const result = await executeAcpBuiltinSlashCommand("/agent persona-test", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(session?.getPersonaAppendPrompt()).toBeUndefined();
+		const entries = session?.sessionManager.getEntries() ?? [];
+		expect(entries.some(entry => entry.type === "mode_change" && entry.mode === "agent")).toBe(false);
+	});
+
 	it("rolls back partial apply failures via the ACP handle", async () => {
 		const runtime = createAcpRuntime();
 		vi.spyOn(session!, "setModelTemporary").mockImplementationOnce(async () => {

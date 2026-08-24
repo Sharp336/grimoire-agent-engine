@@ -242,4 +242,40 @@ describe("task tool description scout gating", () => {
 		expect(tool.description).not.toContain("primary-only");
 		expect(tool.description).not.toContain("denied");
 	});
+
+	it("omits the scout shortcut when a project override makes scout primary-only", async () => {
+		// Regression (codex #3821198710): a project override like
+		// `mode: primary` removes scout from the spawnable roster, but the
+		// scout shortcut was still advertised from the disabled list + spawn
+		// policy alone — structured-subagent preflight would reject every
+		// scout call the prompt suggested.
+		vi.spyOn(taskDiscovery, "discoverAgents").mockResolvedValue({
+			agents: [
+				{
+					name: "scout",
+					description: "Read-only scout.",
+					systemPrompt: "Scout.",
+					source: "bundled",
+					availability: "primary",
+				},
+				{ name: "reviewer", description: "Reviewer.", systemPrompt: "Review.", source: "bundled" },
+			],
+			projectAgentsDir: null,
+		});
+		const settings = Settings.isolated({
+			"async.enabled": false,
+			"task.batch": true,
+			"task.isolation.mode": "none",
+		});
+		const tool = await TaskTool.create({
+			cwd: process.cwd(),
+			hasUI: false,
+			settings,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+		} as unknown as ToolSession);
+		// The scout shortcut guidance is dropped; the spawnable reviewer stays.
+		expect(tool.description).not.toContain("scout");
+		expect(tool.description).toContain("### reviewer");
+	});
 });

@@ -1284,9 +1284,12 @@ export async function reconcilePersistedPersona(
 	} else {
 		// The persisted persona is gone/disabled: clear the previous session's
 		// persona-owned state so it does not leak into this transcript.
+		// Restore the baseline FIRST: if the restoration fails, the persona
+		// state stays intact instead of leaving a half-cleared persona (the
+		// next reconcile can retry).
+		await session.restoreBaselineTools();
 		session.setSessionSpawns(null);
 		session.setPersonaAppendPrompt(undefined);
-		await session.restoreBaselineTools();
 		session.emitNotice("warning", `Agent "${name}" is no longer available. Restored model and thinking level.`);
 	}
 }

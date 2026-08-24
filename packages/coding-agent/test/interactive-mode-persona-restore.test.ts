@@ -1059,4 +1059,47 @@ describe("InteractiveMode persona session restore", () => {
 		},
 		{ timeout: 30_000 },
 	);
+
+	it(
+		"keeps the persona state intact when the baseline restoration fails during a live /plan entry",
+		async () => {
+			// Regression (codex #3821198710): #clearPersonaOwnedState used to
+			// clear the spawns/prompt BEFORE restoring the baseline, so a
+			// failed restoration (e.g. a system-prompt rebuild error) left a
+			// half-cleared persona — spawns/prompt gone while the restricted
+			// tools and the persisted `mode_change: agent` remained. The clear
+			// now runs only after the restoration succeeds.
+			await fs.writeFile(
+				path.join(agentsDir, "persona-test.md"),
+				agentMd("persona-test", [
+					"tools: [read]",
+					"model: anthropic/claude-haiku-4-5",
+					"thinkingLevel: high",
+					"spawns: [scout]",
+				]),
+			);
+			const sessionFile = path.join(tempHome, "persona.jsonl");
+			await writePersonaSession(sessionFile, projectDir, { name: "persona-test" });
+
+			const created = await resumePersonaSession(
+				Settings.isolated({ "compaction.enabled": false, "plan.enabled": true }),
+				sessionFile,
+				"persona-test",
+			);
+			mode = created.mode;
+			session = created.session;
+			await created.mode.init({ suppressWelcomeIntro: true });
+			expect(session.getSessionSpawns()).toBe("scout");
+			expect(session.getPersonaAppendPrompt()).toBe("You are persona-test.");
+
+			// The baseline restoration fails: the persona state must survive.
+			vi.spyOn(session, "restoreBaselineTools").mockRejectedValueOnce(new Error("prompt rebuild failed"));
+			await expect(created.mode.handlePlanModeCommand()).rejects.toThrow("prompt rebuild failed");
+
+			expect(session.getSessionSpawns()).toBe("scout");
+			expect(session.getPersonaAppendPrompt()).toBe("You are persona-test.");
+			expect(session.getEnabledToolNames()).toEqual(["read"]);
+		},
+		{ timeout: 30_000 },
+	);
 });

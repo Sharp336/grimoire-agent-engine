@@ -108,13 +108,21 @@ export function resolveEffectiveDefaultAgent(
 
 /**
  * Whether the `scout` agent is spawnable in a session: not disabled via
- * `task.disabledAgents`, and permitted by the session spawn policy.
+ * `task.disabledAgents`, permitted by the session spawn policy, and — when
+ * the discovered definition is supplied — not primary-only/unavailable (a
+ * project override like `mode: primary` makes the bundled scout
+ * unspawnable, and the task surface must not advertise a scout shortcut
+ * that structured-subagent preflight would reject).
  */
 export function isScoutSpawnable(
 	disabledAgents: readonly string[] | undefined,
 	spawns: string | boolean | null | undefined,
+	scoutAgent?: AgentDefinition | undefined,
 ): boolean {
 	if (disabledAgents?.includes("scout")) return false;
+	if (scoutAgent && (scoutAgent.availability === "primary" || scoutAgent.availability === "unavailable")) {
+		return false;
+	}
 	const policy = resolveSpawnPolicy(spawns);
 	if (!policy.enabled) return false;
 	return policy.allowedAgents === null || policy.allowedAgents.includes("scout");
