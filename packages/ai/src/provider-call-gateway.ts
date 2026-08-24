@@ -769,7 +769,7 @@ export interface UnixProviderCallGatewayOptions {
 	socketPath: string;
 }
 
-/** Fv13 same-Pod AF_UNIX SOCK_STREAM worker client. No controller or provider network path exists here. */
+/** Frozen TBPCW002/TBPCR003 same-Pod client. No controller or provider network path exists here. */
 export class UnixProviderCallGateway implements ProviderCallGateway {
 	readonly #socketPath: string;
 
@@ -948,7 +948,90 @@ function validateCredentialFreeRequest(
 	assertProviderCallOrigin(context.originAssignment, url, headers);
 }
 
-/** Captures one final serialized generic body and delegates the complete call to the Fv13 gateway. */
+function dedicatedCodexSourceBody(context: ProviderCallContext): Uint8Array {
+	const authority = context.codexAuthority;
+	if (!authority || typeof authority !== "object" || Array.isArray(authority)) {
+		throw new Error("Dedicated Codex gateway context is missing");
+	}
+	const keys = Object.keys(authority).sort();
+	if (
+		keys.join("\0") !==
+		[
+			"assignedAt",
+			"capabilitySetId",
+			"logicalBodyBase64",
+			"logicalContentType",
+			"logicalHeaders",
+			"providerRouteAssignmentId",
+			"solverEpoch",
+			"translationContractSha256",
+		].join("\0")
+	) {
+		throw new Error("Dedicated Codex gateway context is not the closed reviewed shape");
+	}
+	const timestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$/;
+	if (
+		authority.providerRouteAssignmentId !== context.providerRouteAssignmentId ||
+		!UUID_V4.test(authority.providerRouteAssignmentId) ||
+		!UUID_V4.test(authority.capabilitySetId) ||
+		!SHA256.test(authority.translationContractSha256) ||
+		!/^[1-9][0-9]*$/.test(authority.solverEpoch) ||
+		!timestamp.test(authority.assignedAt) ||
+		!Number.isFinite(Date.parse(authority.assignedAt)) ||
+		authority.logicalContentType !== "application/json"
+	) {
+		throw new Error("Dedicated Codex gateway context identity is invalid");
+	}
+	const headerKeys = Object.keys(authority.logicalHeaders).sort();
+	if (
+		headerKeys.some(name => name !== "accept" && name !== "content-type") ||
+		authority.logicalHeaders["content-type"] !== "application/json" ||
+		(authority.logicalHeaders.accept !== undefined && authority.logicalHeaders.accept !== "text/event-stream")
+	) {
+		throw new Error("Dedicated Codex logical headers are not the closed reviewed set");
+	}
+	const byteLength = canonicalBase64ByteLength(
+		authority.logicalBodyBase64,
+		MAX_WORKER_REQUEST_PAYLOAD_BYTES,
+		"Dedicated Codex logical body",
+	);
+	const body = decodeCanonicalBase64(
+		authority.logicalBodyBase64,
+		byteLength,
+		MAX_WORKER_REQUEST_PAYLOAD_BYTES,
+		"Dedicated Codex logical body",
+	);
+	const source = fatalDecoder.decode(body);
+	assertNoDuplicateJsonKeys(source);
+	const parsed = JSON.parse(source) as unknown;
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+		throw new Error("Dedicated Codex logical body must be a JSON object");
+	}
+	return body;
+}
+
+/** Dispatches the controller-translated dedicated Codex request through the same Unix worker gateway. */
+export function dispatchDedicatedCodexProviderCall(
+	model: Model<Api>,
+	context: ProviderCallContext,
+	gateway: ProviderCallGateway,
+): Promise<Response> {
+	validateProviderCallContext(model, context);
+	const route = resolveProviderCallOriginBinding(
+		context.originAssignment.config_id,
+		context.originAssignment.route_ordinal,
+	);
+	if (route.authorityOwner !== "dedicated-codex-backend") {
+		throw new Error("Generic provider routes cannot use dedicated Codex gateway dispatch");
+	}
+	return gateway.dispatch({
+		context,
+		requestMaterializationKind: "DEDICATED_CODEX_AUTHORITY_TRANSLATED",
+		sourceBody: dedicatedCodexSourceBody(context),
+	});
+}
+
+/** Captures one final serialized generic body and delegates the complete call to the Unix worker gateway. */
 export class StrictProviderCallGatewayLifecycle {
 	readonly #context: ProviderCallContext;
 	readonly #gateway: ProviderCallGateway;
@@ -965,7 +1048,7 @@ export class StrictProviderCallGatewayLifecycle {
 			context.originAssignment.route_ordinal,
 		);
 		if (route.authorityOwner !== "generic-omp-auth-gateway") {
-			throw new Error("GPT provider calls must delegate to the dedicated Codex authority backend");
+			throw new Error("GPT provider calls must use dedicated Codex gateway dispatch");
 		}
 		this.#context = context;
 		this.#gateway = gateway;

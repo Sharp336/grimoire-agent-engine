@@ -19,6 +19,7 @@ import type {
 	Context,
 	ModelSpec,
 	ProviderCallContext,
+	ProviderCallGatewayRequest,
 	Usage,
 } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -123,11 +124,12 @@ function expectedDynamics(
 function strictProviderCallContext(gpt = false, requestedConfigId?: string): ProviderCallContext {
 	const configId = requestedConfigId ?? (gpt ? "sol-low" : "deepseek-v4-pro-0813-max-r3");
 	const credentialGeneration = "generation";
+	const providerRouteAssignmentId = "00000000-0000-4000-8000-000000000003";
 	return {
 		mode: "strict",
 		configId,
 		taskReservationId: "00000000-0000-4000-8000-000000000001",
-		providerRouteAssignmentId: "00000000-0000-4000-8000-000000000003",
+		providerRouteAssignmentId,
 		executionBindingId: "00000000-0000-4000-8000-000000000002",
 		podUid: "pod-uid",
 		callSequence: "1",
@@ -154,6 +156,20 @@ function strictProviderCallContext(gpt = false, requestedConfigId?: string): Pro
 			},
 		],
 		originAssignment: strictOriginAssignment(configId, credentialGeneration),
+		...(gpt
+			? {
+					codexAuthority: {
+						providerRouteAssignmentId,
+						capabilitySetId: "00000000-0000-4000-8000-000000000006",
+						translationContractSha256: `sha256:${"2".repeat(64)}`,
+						solverEpoch: "1",
+						assignedAt: "2026-08-23T00:00:00.000000Z",
+						logicalContentType: "application/json" as const,
+						logicalHeaders: { accept: "text/event-stream", "content-type": "application/json" },
+						logicalBodyBase64: Buffer.from(JSON.stringify({ model: configId, stream: true })).toString("base64"),
+					},
+				}
+			: {}),
 	};
 }
 
@@ -558,11 +574,10 @@ describe("pi-native gateway cache controls", () => {
 		}
 	});
 
-	it("rejects each well-formed dynamic substitution before generic gateway or GPT delegation effects", async () => {
+	it("rejects each well-formed dynamic substitution before the shared gateway", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-dynamic-equality-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 		let gatewayCalls = 0;
-		let delegations = 0;
 		const dynamicFields = [
 			"capability_generation",
 			"credential_generation",
@@ -590,10 +605,6 @@ describe("pi-native gateway cache controls", () => {
 						throw new Error("must not dispatch");
 					},
 				},
-				async delegateCodexProviderCall() {
-					delegations++;
-					throw new Error("must not delegate");
-				},
 			});
 			try {
 				return await fetch(`${handle.url}/v1/pi/stream`, {
@@ -615,26 +626,65 @@ describe("pi-native gateway cache controls", () => {
 				for (const field of dynamicFields) expect((await exercise(gpt, field)).status, `${gpt}/${field}`).toBe(409);
 			}
 			expect(gatewayCalls).toBe(0);
-			expect(delegations).toBe(0);
 		} finally {
 			storage.close();
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
 
-	it("rejects GPT format routes before credential lookup when no controller assignment exists", async () => {
+	it("rejects a governed generic route without a controller assignment before any gateway or credential effect", async () => {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-generic-assignment-required-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		let gatewayCalls = 0;
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => DEEPSEEK_STRICT_MODEL,
+			version: "test",
+			providerCallGateway: {
+				async dispatch() {
+					gatewayCalls++;
+					throw new Error("must not dispatch without an assignment");
+				},
+			},
+		});
+		try {
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: DEEPSEEK_STRICT_MODEL.id,
+					context: baseContext,
+					options: {},
+					stream: true,
+				}),
+			});
+			expect(response.status).toBe(409);
+			expect(await response.text()).toContain("controller-materialized strict assignment");
+			expect(gatewayCalls).toBe(0);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects GPT format routes before gateway dispatch when no controller assignment exists", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-gpt-assignment-required-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
-		let delegates = 0;
+		let gatewayCalls = 0;
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
 			bearerTokens: ["test-token"],
 			storage,
 			resolveModel: () => GPT_STRICT_MODEL,
 			version: "test",
-			async delegateCodexProviderCall() {
-				delegates++;
-				throw new Error("must not delegate without an assignment");
+			providerCallGateway: {
+				async dispatch() {
+					gatewayCalls++;
+					throw new Error("must not dispatch without an assignment");
+				},
 			},
 		});
 		try {
@@ -648,7 +698,7 @@ describe("pi-native gateway cache controls", () => {
 			});
 			expect(response.status).toBe(409);
 			expect(await response.text()).toContain("controller-materialized strict assignment");
-			expect(delegates).toBe(0);
+			expect(gatewayCalls).toBe(0);
 		} finally {
 			await handle.close();
 			storage.close();
@@ -656,12 +706,11 @@ describe("pi-native gateway cache controls", () => {
 		}
 	});
 
-	it("delegates each of the 20 pinned GPT bindings exactly once without local authority or credentials", async () => {
+	it("dispatches each of the 20 pinned GPT bindings exactly once through the same gateway", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-codex-delegate-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 		const gptBindings = PROVIDER_CALL_ORIGIN_MANIFEST.routes.filter(route => route.provider === "gpt-proxy");
-		const delegatedBindings: Array<{ configId: string; modelSelector: string; tuple: string; binding: string }> = [];
-		let gatewayCalls = 0;
+		const gatewayRequests: ProviderCallGatewayRequest[] = [];
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
 			bearerTokens: ["test-token"],
@@ -670,24 +719,18 @@ describe("pi-native gateway cache controls", () => {
 			version: "test",
 			expectedProviderCallDynamics: expectedDynamics(gptBindings.map(binding => binding.configId)),
 			providerCallGateway: {
-				async dispatch() {
-					gatewayCalls++;
-					throw new Error("generic gateway must not dispatch GPT");
+				async dispatch(request) {
+					gatewayRequests.push(request);
+					expect(request.requestMaterializationKind).toBe("DEDICATED_CODEX_AUTHORITY_TRANSLATED");
+					expect(JSON.parse(new TextDecoder().decode(request.sourceBody))).toEqual({
+						model: request.context.configId,
+						stream: true,
+					});
+					return new Response('data: {"choices":[]}\\n\\ndata: [DONE]\\n\\n', {
+						status: 200,
+						headers: { "content-type": "text/event-stream" },
+					});
 				},
-			},
-			async delegateCodexProviderCall(delegation) {
-				delegatedBindings.push({
-					configId: delegation.assignment.config_id,
-					modelSelector: delegation.assignment.model_selector,
-					tuple: delegation.assignment.canonical_tuple_sha256,
-					binding: delegation.assignment.binding_descriptor_sha256,
-				});
-				expect(delegation.authorityOwner).toBe("dedicated-codex-backend");
-				expect(delegation.parsed.options.providerCallContext?.originAssignment).toEqual(delegation.assignment);
-				return new Response('data: {"choices":[]}\\n\\ndata: [DONE]\\n\\n', {
-					status: 200,
-					headers: { "content-type": "text/event-stream" },
-				});
 			},
 		});
 		try {
@@ -707,15 +750,10 @@ describe("pi-native gateway cache controls", () => {
 				expect(await response.text()).toContain("data: [DONE]");
 			}
 			expect(gptBindings).toHaveLength(20);
-			expect(delegatedBindings).toEqual(
-				gptBindings.map(binding => ({
-					configId: binding.configId,
-					modelSelector: binding.modelSelector,
-					tuple: binding.canonicalTupleSha256,
-					binding: binding.bindingDescriptor.sha256,
-				})),
+			expect(gatewayRequests).toHaveLength(20);
+			expect(gatewayRequests.map(request => request.context.originAssignment.config_id)).toEqual(
+				gptBindings.map(binding => binding.configId),
 			);
-			expect(gatewayCalls).toBe(0);
 
 			const mismatched = strictProviderCallContext(true);
 			mismatched.originAssignment = { ...mismatched.originAssignment, dns_host: "evil.invalid" };
@@ -730,8 +768,7 @@ describe("pi-native gateway cache controls", () => {
 				}),
 			});
 			expect(rejected.status).toBe(409);
-			expect(delegatedBindings).toHaveLength(20);
-			expect(gatewayCalls).toBe(0);
+			expect(gatewayRequests).toHaveLength(20);
 
 			const duplicateSource = JSON.stringify({
 				modelId: GPT_STRICT_MODEL.id,
@@ -749,7 +786,7 @@ describe("pi-native gateway cache controls", () => {
 				body: duplicated,
 			});
 			expect(duplicateRejected.status).toBe(400);
-			expect(delegatedBindings).toHaveLength(20);
+			expect(gatewayRequests).toHaveLength(20);
 
 			const noncanonicalInteger = duplicateSource.replace(/"config_ordinal":([0-9]+)/, '"config_ordinal":$1e0');
 			const noncanonicalRejected = await fetch(`${handle.url}/v1/pi/stream`, {
@@ -758,7 +795,7 @@ describe("pi-native gateway cache controls", () => {
 				body: noncanonicalInteger,
 			});
 			expect(noncanonicalRejected.status).toBe(400);
-			expect(delegatedBindings).toHaveLength(20);
+			expect(gatewayRequests).toHaveLength(20);
 		} finally {
 			await handle.close();
 			storage.close();

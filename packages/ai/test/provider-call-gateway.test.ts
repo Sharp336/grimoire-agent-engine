@@ -140,7 +140,7 @@ afterEach(async () => {
 	await Promise.all(roots.splice(0).map(root => rm(root, { recursive: true, force: true })));
 });
 
-describe("frozen Fv13 worker gateway ABI", () => {
+describe("frozen worker gateway ABI", () => {
 	it("encodes the exact TBPCW002 generic request frame", () => {
 		const payload = encoder.encode('{"z":1,"a":2}');
 		const frame = encodeProviderCallWorkerRequest({
@@ -263,7 +263,7 @@ describe("frozen Fv13 worker gateway ABI", () => {
 		).toThrow(/materialization kind/i);
 	});
 
-	it("surfaces only a catalog-exact Fv13 error object", () => {
+	it("surfaces only a catalog-exact frozen error object", () => {
 		const frame = selectedResultFrame(OPERATION_ID, "ERROR", "terminal-bench/provider-call-error/v2", {
 			schema: "terminal-bench/provider-call-error/v2",
 			code: "terminal_result_not_committed",

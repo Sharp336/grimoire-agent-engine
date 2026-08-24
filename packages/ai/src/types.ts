@@ -371,7 +371,7 @@ export interface ProviderCallCodexAuthorityContext {
 	logicalBodyBase64: string;
 }
 
-/** Credential-free, assignment-validated final provider URL planned before any authority effects. */
+/** Credential-free, assignment-validated final provider URL planned before Unix gateway dispatch. */
 export interface ProviderCallUrlPlan {
 	apiFamily: "openai-completions" | "openai-responses";
 	requestPathAndQuery: string;
@@ -381,8 +381,8 @@ export interface ProviderCallUrlPlan {
 /**
  * Credential-free controller identity for one semantic provider call.
  *
- * Strict mode permits exactly one physical provider egress. The context is
- * forwarded through pi-native, but the authority implementation never is.
+ * Strict mode permits exactly one physical provider egress. The context crosses
+ * pi-native, but the Unix gateway implementation never does.
  */
 export interface ProviderCallContext {
 	mode: "strict";
@@ -419,174 +419,9 @@ export interface ProviderCallGatewayRequest {
 	sourceBody: Uint8Array;
 }
 
-/** Same-Pod AF_UNIX gateway client. All durable authority, credentials, and provider egress remain gateway-owned. */
+/** Same-Pod AF_UNIX client. Durable capacity, credentials, and provider egress remain worker-owned. */
 export interface ProviderCallGateway {
 	dispatch(request: ProviderCallGatewayRequest): Promise<Response>;
-}
-
-/** Server-controlled credential material bound to the reviewed account/generation. */
-export interface ProviderCallCredential {
-	accountId: string;
-	credentialGeneration: string;
-	/** Provider-specific value used only for payload shaping (for example Google project metadata). */
-	apiKey: string;
-	/** Exact bearer inserted by the lifecycle only after a created-201 issue permit. */
-	bearerToken: string;
-}
-
-export interface ProviderCallReserveRequest {
-	context: ProviderCallContext;
-	provider: string;
-	model: string;
-	apiFamily: ProviderCallApiFamily;
-	httpMethod: string;
-	credentialFreeUrl: string;
-	contentType: string;
-	headers: ReadonlyArray<readonly [name: string, value: string]>;
-	/** Exact post-shaping in-memory payload; never sent to the authority service. */
-	payload: unknown;
-	body: Uint8Array;
-	canonicalRequest: Uint8Array;
-	requestSha256: string;
-	requestBodyBytes: string;
-}
-export interface ProviderCallRecoverRequest {
-	context: ProviderCallContext;
-	requestSha256: string;
-}
-
-export interface ProviderCallReservationReference {
-	reservationId: string;
-	disposition: "created";
-	callSequence: string;
-	idempotencyKey: string;
-	requestSha256: string;
-	issueAuthorizedAt: string;
-	/** Controller-owned capacity-assignment digest echoed unchanged by reserve/recovery. */
-	assignmentSha256: string;
-	/** Exact assignment echoed by reserve/recovery; every field must equal the controller materialization. */
-	originAssignment: ProviderCallOriginAssignment;
-}
-
-/** Plaintext issue authority is request-scoped and MUST NOT be serialized or journaled. */
-export interface ProviderCallReservation extends ProviderCallReservationReference {
-	issuePermit: string;
-}
-
-export interface ProviderCallRecoveredReceipt {
-	classification: "terminal_response" | "ambiguous_attempt";
-	receiptOperationId: string;
-	receiptSha256: string;
-	recordedAt: string;
-}
-
-export type ProviderCallRecoveryResult =
-	| { kind: "absent" }
-	| {
-			kind: "found";
-			state: "issue_authorized" | "terminal" | "ambiguous";
-			reservation: ProviderCallReservationReference;
-			receipt: ProviderCallRecoveredReceipt | null;
-	  };
-
-export type ProviderCallAmbiguityClass =
-	| "request_write_unknown"
-	| "premature_eof"
-	| "connection_lost"
-	| "gateway_crash_recovery"
-	| "response_incomplete"
-	| "usage_unknown"
-	| "authority_response_unknown"
-	| "worker_disconnect_gateway_failed";
-
-export type ProviderCallFailureClass =
-	| "none"
-	| "http_3xx"
-	| "http_4xx"
-	| "http_5xx"
-	| "rate_limited_429"
-	| "quota_exhausted"
-	| "auth_rejected"
-	| "provider_protocol";
-
-/** Canonical optional fixed-point usage value reported to provider-call authority. */
-export interface ProviderCallUsage {
-	unit: string;
-	coefficient: string;
-	scale: string;
-}
-
-export interface ProviderCallReceiptRequest {
-	context: ProviderCallContext;
-	reservation: ProviderCallReservationReference;
-	receiptOperationId: string;
-	classification: "terminal" | "ambiguous";
-	authorityOwner: "dedicated-codex-backend" | "generic-omp-auth-gateway";
-	backendEqualityResult: "MATCH";
-	providerRequestCount: 0 | 1;
-	retryCount: 0;
-	failoverCount: 0;
-	redirectFollowCount: 0;
-	finalClassification: "TERMINAL_RESPONSE" | "AMBIGUOUS_ATTEMPT";
-	drainState: "DRAINED" | "FROZEN";
-	providerStartedAt?: string;
-	providerFinishedAt: string;
-	httpStatus?: string;
-	providerRequestId?: string;
-	responseSha256?: string;
-	failureClass?: ProviderCallFailureClass;
-	providerErrorCode?: string;
-	retryAfterAt?: string;
-	actualDimensions?: ProviderCallDimension[];
-	providerUsage?: ProviderCallUsage;
-	ambiguityClass?: ProviderCallAmbiguityClass;
-	requestMayHaveReachedProvider?: boolean;
-	requestBytesWritten?: string;
-	responseBytesReceived?: string;
-}
-
-export interface ProviderCallReceiptSettlement {
-	dimension: ProviderCallDimensionName;
-	windowId: string;
-	reservedAmount: string;
-	actualAmount: string | null;
-	settlement: "released" | "consumed_until_window_end" | "held_ambiguous";
-}
-
-export interface ProviderCallReceiptAck {
-	disposition: "created" | "exact_replay";
-	reservationId: string;
-	state: "terminal" | "ambiguous";
-	receiptOperationId: string;
-	receiptSha256: string;
-	recordedAt: string;
-	settlements: ProviderCallReceiptSettlement[];
-	capabilityState: "ready" | "zero";
-	zeroReason: string;
-}
-
-export interface ProviderCallJournalLease {
-	executionBindingId: string;
-	callSequence: string;
-	idempotencyKey: string;
-	receiptOperationId: string;
-}
-
-export interface ProviderCallJournal {
-	begin(context: ProviderCallContext, reserveRequest?: ProviderCallReserveRequest): Promise<ProviderCallJournalLease>;
-	markReserveSent(lease: ProviderCallJournalLease): Promise<void>;
-	storeReservation(lease: ProviderCallJournalLease, reservation: ProviderCallReservationReference): Promise<void>;
-	storeProviderAttempt(lease: ProviderCallJournalLease, attemptedAt: string): Promise<void>;
-	storePendingReceipt(lease: ProviderCallJournalLease, receipt: ProviderCallReceiptRequest): Promise<void>;
-	completeReceipt(lease: ProviderCallJournalLease, acknowledgement: ProviderCallReceiptAck): Promise<void>;
-	recoverPendingReceipts(authority: ProviderCallAuthority): Promise<void>;
-	close(): Promise<void>;
-}
-
-export interface ProviderCallAuthority {
-	reserve(request: ProviderCallReserveRequest): Promise<ProviderCallReservation>;
-	recover(request: ProviderCallRecoverRequest): Promise<ProviderCallRecoveryResult>;
-	recordReceipt(receipt: ProviderCallReceiptRequest, issuePermit: string): Promise<ProviderCallReceiptAck>;
 }
 
 export interface RawSseEvent {
@@ -765,7 +600,7 @@ export interface StreamOptions {
 	 * Presence enables fail-closed provider-call lifecycle enforcement.
 	 */
 	providerCallContext?: ProviderCallContext;
-	/** Same-Pod Fv13 gateway; strict dispatch never reads provider credentials or uses caller fetch. */
+	/** Same-Pod TBPCW002/TBPCR003 gateway; strict dispatch never reads provider credentials or uses caller fetch. */
 	providerCallGateway?: ProviderCallGateway;
 	/** Server-controlled final URL plan validated before credential resolution; never serialized over pi-native. */
 	providerCallUrlPlan?: ProviderCallUrlPlan;

@@ -7,10 +7,10 @@ export * from "./auth-retry";
 export * from "./auth-storage";
 export * from "./error/rate-limit";
 export * from "./oneshot-retry";
-export * from "./provider-call-authority";
 export {
 	assertNoDuplicateJsonKeys,
 	decodeProviderCallWorkerResponse,
+	dispatchDedicatedCodexProviderCall,
 	encodeProviderCallWorkerRequest,
 	ProviderCallGatewayError,
 	ProviderCallGatewayStateError,
@@ -18,7 +18,6 @@ export {
 	type UnixProviderCallGatewayOptions,
 	validateProviderCallContext,
 } from "./provider-call-gateway";
-export * from "./provider-call-journal";
 export * from "./provider-call-origin-manifest";
 export * from "./provider-details";
 export * from "./providers/anthropic";

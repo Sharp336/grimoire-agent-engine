@@ -25,11 +25,15 @@ import type { AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
 import { classifyGatewayError } from "../error/gateway";
 import { isUsageLimitOutcome } from "../error/rate-limit";
-import { assertNoDuplicateJsonKeys, validateProviderCallContext } from "../provider-call-gateway";
+import {
+	assertNoDuplicateJsonKeys,
+	dispatchDedicatedCodexProviderCall,
+	validateProviderCallContext,
+} from "../provider-call-gateway";
 import {
 	assertProviderCallExpectedDynamics,
+	PROVIDER_CALL_ORIGIN_MANIFEST,
 	type ProviderCallExpectedDynamicsByConfig,
-	type ProviderCallOriginAssignment,
 	planOpenAIProviderCallUrl,
 	resolveProviderCallOriginBinding,
 } from "../provider-call-origin-manifest";
@@ -68,16 +72,6 @@ import { DEFAULT_AUTH_GATEWAY_BIND } from "./types";
 // ParsedFormatRequest / ParsedFormatOptions / FormatModule come from ./types.
 
 export type ModelResolver = (modelId: string) => Model<Api> | undefined;
-export interface CodexAuthorityDelegation {
-	authorityOwner: "dedicated-codex-backend";
-	assignment: ProviderCallOriginAssignment;
-	model: Model<Api>;
-	parsed: piNative.PiNativeParsedRequest;
-	/** Exact incoming pi-native JSON evidence; the generic gateway never translates or replays it. */
-	rawRequestBody: string;
-}
-
-export type CodexAuthorityDelegate = (delegation: CodexAuthorityDelegation) => Promise<Response>;
 
 export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
 	/** Source of credentials. Caller wires this to a broker-backed AuthStorage. */
@@ -90,12 +84,10 @@ export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
 	resolveModel: ModelResolver;
 	/** Optional supplier for `/v1/models` listing. Returns the full model array. */
 	listModels?: () => Iterable<Model<Api>>;
-	/** Sole runtime egress for generic strict provider calls. */
+	/** Sole runtime egress for every strict provider call, generic and dedicated. */
 	providerCallGateway?: ProviderCallGateway;
 	/** Backend-owned deployment expectations keyed by frozen config ID; strict calls fail closed when absent. */
 	expectedProviderCallDynamics?: ProviderCallExpectedDynamicsByConfig;
-	/** Sole semantic handoff for GPT routes. The generic gateway performs no local authority or credential work. */
-	delegateCodexProviderCall?: CodexAuthorityDelegate;
 }
 
 // `parseBind` lives in ../utils/parse-bind so the gateway and broker can't
@@ -111,10 +103,16 @@ const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
 // particular the Anthropic Claude-Code OAuth system-prompt prefix injection.
 // Every request now takes the translate path so credential-specific request
 // shaping always applies.)
+function isProviderCallGoverned(model: Model<Api>): boolean {
+	return PROVIDER_CALL_ORIGIN_MANIFEST.routes.some(
+		binding => binding.provider === model.provider && binding.modelId === model.id,
+	);
+}
 
 // Options the caller's wire format may carry but the resolved provider can't
 // honour are dropped silently in `buildStreamOptions`. We used to 400 here
 // (`Unsupported option: temperature for openai-codex-responses`), but every
+
 // realistic client (llm-git, openai SDK, anthropic SDK) bakes some of these
 // defaults in without knowing which model they'll resolve to. Failing loudly
 // just turned that into per-call config hell. Silent strip is what the
@@ -409,11 +407,11 @@ async function handleFormatEndpoint(
 	if (!model) {
 		return route.module.formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
 	}
-	if (model.provider === "gpt-proxy") {
+	if (isProviderCallGoverned(model)) {
 		return route.module.formatError(
 			409,
 			"provider_call_assignment_required",
-			"GPT routes require a controller-materialized strict assignment and dedicated Codex authority delegation",
+			"Authority-governed routes require a controller-materialized strict assignment and Unix worker gateway dispatch",
 		);
 	}
 
@@ -611,11 +609,11 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	if (!model) {
 		return piNative.formatError(404, "invalid_request_error", `Unknown model: ${parsed.modelId}`);
 	}
-	if (model.provider === "gpt-proxy" && parsed.options.providerCallContext?.mode !== "strict") {
+	if (isProviderCallGoverned(model) && parsed.options.providerCallContext?.mode !== "strict") {
 		return piNative.formatError(
 			409,
 			"provider_call_assignment_required",
-			"GPT routes require a controller-materialized strict assignment and dedicated Codex authority delegation",
+			"Authority-governed routes require a controller-materialized strict assignment and Unix worker gateway dispatch",
 		);
 	}
 	const strictProviderCall = parsed.options.providerCallContext?.mode === "strict";
@@ -638,24 +636,22 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		}
 	}
 	if (strictRoute?.authorityOwner === "dedicated-codex-backend") {
-		if (!bootOpts.delegateCodexProviderCall) {
+		if (!bootOpts.providerCallGateway) {
 			return piNative.formatError(
 				503,
-				"codex_authority_unavailable",
-				"Dedicated Codex authority backend unavailable",
+				"provider_call_gateway_unavailable",
+				"Strict provider-call gateway runtime unavailable",
 			);
 		}
 		try {
-			return await bootOpts.delegateCodexProviderCall({
-				authorityOwner: "dedicated-codex-backend",
-				assignment: parsed.options.providerCallContext!.originAssignment,
+			return await dispatchDedicatedCodexProviderCall(
 				model,
-				parsed,
-				rawRequestBody,
-			});
+				parsed.options.providerCallContext!,
+				bootOpts.providerCallGateway,
+			);
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			return piNative.formatError(502, "codex_authority_failed", message);
+			return piNative.formatError(502, "codex_gateway_failed", message);
 		}
 	}
 	let providerCallUrlPlan: SimpleStreamOptions["providerCallUrlPlan"];
