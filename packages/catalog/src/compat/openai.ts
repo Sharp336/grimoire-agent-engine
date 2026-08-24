@@ -22,6 +22,7 @@ import {
 	isKimiModelId,
 	isMimoModelIdOrName,
 	isOpenAISamplingRestrictedModelId,
+	isQwen38PlusTemplateEffortModelId,
 	isQwenModelId,
 } from "../identity/family";
 import type {
@@ -311,6 +312,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		modelMatchesHost(hostModel, "anthropic") || isClaudeModelId(spec.id) || isAnthropicNamespacedModelId(spec.id);
 	const isAlibaba = modelMatchesHost(hostModel, "alibabaDashscope");
 	const isNvidiaNim = modelMatchesHost(hostModel, "nvidia");
+	const isVenice = modelMatchesHost(hostModel, "venice");
 	const isQwen = isQwenModelId(spec.id);
 	// DeepSeek V4 (and other reasoning-capable DeepSeek models) reject follow-up requests in
 	// thinking mode unless prior assistant tool-call turns include `reasoning_content`. The
@@ -464,9 +466,9 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 			? "zai"
 			: isOpenRouter
 				? "openrouter"
-				: isQwen && isNvidiaNim
+				: isQwen && (isNvidiaNim || provider === "vllm")
 					? "qwen-chat-template"
-					: isQwen && isFireworks
+					: isQwen && (isFireworks || isVenice)
 						? "openai"
 						: isAlibaba || isQwen
 							? "qwen"
@@ -527,7 +529,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		// (issue #2299).
 		thinkingFormat,
 		kimiApiFormat: undefined,
-		reasoningDisableMode: resolveReasoningDisableMode(thinkingFormat),
+		reasoningDisableMode: isVenice ? "venice-disable-thinking" : resolveReasoningDisableMode(thinkingFormat),
 		omitReasoningEffort: false,
 		includeEncryptedReasoning: true,
 		filterReasoningHistory: isOpenRouter && isAnthropicModel,
@@ -587,6 +589,18 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		// parameter, so the flag stays a no-op outside the Qwen path.
 		qwenPreserveThinking:
 			(thinkingFormat === "qwen" || thinkingFormat === "qwen-chat-template") && isLocalOpenAICompatBackend,
+		// Qwen 3.8+ templates steer thinking depth via the `reasoning_effort`
+		// template kwarg (low/medium/xhigh, default xhigh); without routing the
+		// requested effort there, the enable_thinking toggle alone leaves the
+		// model at xhigh no matter what the user selects.
+		// Local-only like `qwenPreserveThinking`: first-party Qwen APIs
+		// (Dashscope, Qwen Portal) drive effort through their own OpenAI-style
+		// dialect, and local Ollama keeps its native effort vocabulary.
+		qwenTemplateReasoningEffort:
+			(thinkingFormat === "qwen" || thinkingFormat === "qwen-chat-template") &&
+			isLocalOpenAICompatBackend &&
+			provider !== "ollama" &&
+			isQwen38PlusTemplateEffortModelId(spec.id),
 		requiresAssistantContentForToolCalls: isKimiModel || isDirectDeepseekReasoning,
 		cacheControlFormat: isOpenRouter && spec.id.startsWith("anthropic/") ? "anthropic" : undefined,
 		supportsPromptCacheBreakpoints,
@@ -635,7 +649,9 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 			? "omit"
 			: isDirectDeepseekReasoning
 				? "zai-thinking-disabled"
-				: resolveReasoningDisableMode(compat.thinkingFormat);
+				: isVenice
+					? "venice-disable-thinking"
+					: resolveReasoningDisableMode(compat.thinkingFormat);
 	}
 	if (spec.compat?.omitReasoningEffort === undefined && !compat.supportsReasoningEffort) {
 		compat.omitReasoningEffort = true;
@@ -653,7 +669,9 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		const variant: ResolvedOpenAICompat = { ...compat };
 		applyCompatOverrides(variant, whenThinkingPolicy);
 		if (whenThinkingPolicy.reasoningDisableMode === undefined) {
-			variant.reasoningDisableMode = resolveReasoningDisableMode(variant.thinkingFormat);
+			variant.reasoningDisableMode = isVenice
+				? "venice-disable-thinking"
+				: resolveReasoningDisableMode(variant.thinkingFormat);
 		}
 		if (whenThinkingPolicy.omitReasoningEffort === undefined && !variant.supportsReasoningEffort) {
 			variant.omitReasoningEffort = true;
@@ -746,7 +764,7 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		disableReasoningOnForcedToolChoice: isKimiModel,
 		disableReasoningOnToolChoice: isDeepseekFamily && reasoningCapable && !isOpenRouter,
 		supportsToolChoice: true,
-		supportsForcedToolChoice: true,
+		supportsForcedToolChoice: spec.provider !== "opencode-go" && spec.provider !== "opencode-zen",
 		supportsNamedToolChoice: STRING_ONLY_NAMED_TOOL_CHOICE_PROVIDERS[spec.provider] !== true,
 		reasoningContentField: "reasoning_content",
 		requiresReasoningContentForToolCalls:
@@ -761,6 +779,7 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		// Responses-only; the Qwen `preserve_thinking` template knob lives on
 		// the chat-completions wire shape, never on Responses.
 		qwenPreserveThinking: false,
+		qwenTemplateReasoningEffort: false,
 		requiresThinkingAsText: false,
 		requiresMistralToolIds: false,
 		requiresToolResultName: false,
@@ -806,6 +825,18 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 	}
 	if (spec.compat?.omitReasoningEffort === undefined && !compat.supportsReasoningEffort) {
 		compat.omitReasoningEffort = true;
+	}
+	// xai-oauth cache/discovery rows written before a SKU joined the
+	// effort-capable allowlist still carry omitReasoningEffort: true. The
+	// allowlist is the live wire contract; do not let that stale flag hide
+	// the picker or strip reasoning.effort.
+	if (
+		spec.provider === "xai-oauth" &&
+		isGrokReasoningEffortCapable(id) &&
+		spec.compat?.supportsReasoningEffort !== false
+	) {
+		compat.supportsReasoningEffort = true;
+		compat.omitReasoningEffort = false;
 	}
 	return compat;
 }
