@@ -105,7 +105,7 @@ const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
 // shaping always applies.)
 function isProviderCallGoverned(model: Model<Api>): boolean {
 	return PROVIDER_CALL_ORIGIN_MANIFEST.routes.some(
-		binding => binding.provider === model.provider && binding.modelId === model.id,
+		binding => binding.provider === model.provider && binding.modelId === model.id && binding.apiFamily === model.api,
 	);
 }
 

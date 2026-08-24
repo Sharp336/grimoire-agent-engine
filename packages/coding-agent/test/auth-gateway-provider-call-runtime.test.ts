@@ -1,9 +1,17 @@
 import { describe, expect, it } from "bun:test";
+import { randomUUID } from "node:crypto";
+import { rm } from "node:fs/promises";
+import { join } from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { PROVIDER_CALL_ORIGIN_MANIFEST, UnixProviderCallGateway } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
-import { createProviderCallGatewayRuntimeFromEnv, indexModelsByRequestId } from "../src/cli/auth-gateway-cli";
+import { getConfigRootDir, refreshDirsFromEnv } from "@oh-my-pi/pi-utils";
+import {
+	createProviderCallGatewayRuntimeFromEnv,
+	indexModelsByRequestId,
+	runAuthGatewayCommand,
+} from "../src/cli/auth-gateway-cli";
 
 function expectedDynamicsJson(configIds: readonly string[]): string {
 	return JSON.stringify(
@@ -46,6 +54,19 @@ const KIMI_MODEL = buildModel({
 	maxTokens: 32_768,
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 } satisfies ModelSpec<"openai-completions">);
+
+const KIMI_API_COLLISION = buildModel({
+	id: "k3",
+	name: "Kimi K3 API Collision",
+	api: "openai-responses",
+	provider: "kimi-code",
+	baseUrl: "https://api.kimi.com/coding/v1",
+	reasoning: true,
+	input: ["text"],
+	contextWindow: 262_144,
+	maxTokens: 32_768,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+} satisfies ModelSpec<"openai-responses">);
 
 describe("production auth-gateway provider-call runtime", () => {
 	it("constructs one Unix gateway from only the reviewed nonsecret socket and immutable binding", () => {
@@ -102,6 +123,45 @@ describe("production auth-gateway provider-call runtime", () => {
 		).toThrow(/unknown-config|unknown config/i);
 	});
 
+	it("validates provider-call runtime before broker resolution or default token creation", async () => {
+		const envKeys = [
+			"PI_CONFIG_DIR",
+			"OMP_AUTH_BROKER_URL",
+			"OMP_AUTH_BROKER_TOKEN",
+			"OMP_PROVIDER_CALL_GATEWAY_SOCKET",
+			"OMP_PROVIDER_CALL_EXPECTED_DYNAMICS_JSON",
+		] as const;
+		const originalEnv = Object.fromEntries(envKeys.map(key => [key, process.env[key]]));
+		process.env.PI_CONFIG_DIR = `.omp-provider-call-validation-${randomUUID()}`;
+		process.env.OMP_AUTH_BROKER_URL = "http://127.0.0.1:1";
+		delete process.env.OMP_AUTH_BROKER_TOKEN;
+		process.env.OMP_PROVIDER_CALL_GATEWAY_SOCKET = "/run/omp/provider-call-worker.sock";
+		delete process.env.OMP_PROVIDER_CALL_EXPECTED_DYNAMICS_JSON;
+		refreshDirsFromEnv();
+		const configRoot = getConfigRootDir();
+		const tokenPath = join(configRoot, "auth-gateway.token");
+		try {
+			await expect(runAuthGatewayCommand({ action: "serve", flags: {} })).rejects.toThrow(
+				/incomplete provider-call gateway configuration/i,
+			);
+			expect(await Bun.file(tokenPath).exists()).toBe(false);
+
+			process.env.OMP_AUTH_BROKER_TOKEN = "configured-broker-token";
+			await expect(runAuthGatewayCommand({ action: "serve", flags: {} })).rejects.toThrow(
+				/incomplete provider-call gateway configuration/i,
+			);
+			expect(await Bun.file(tokenPath).exists()).toBe(false);
+		} finally {
+			for (const key of envKeys) {
+				const value = originalEnv[key];
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+			refreshDirsFromEnv();
+			await rm(configRoot, { recursive: true, force: true });
+		}
+	});
+
 	it("indexes governed generic and all frozen GPT routes without broker provider credentials", () => {
 		const bindings = PROVIDER_CALL_ORIGIN_MANIFEST.routes.filter(route => route.provider === "gpt-proxy");
 		expect(
@@ -117,8 +177,10 @@ describe("production auth-gateway provider-call runtime", () => {
 		expect(bindings.filter(binding => index.get(binding.configId) === GPT_MODEL)).toHaveLength(20);
 		expect(index.get("kimi-code/k3")).toBe(KIMI_MODEL);
 		expect(index.get("k3")).toBe(KIMI_MODEL);
-		expect(index.size).toBe(22);
+		expect(index.get(`${GPT_MODEL.provider}/${GPT_MODEL.id}`)).toBe(GPT_MODEL);
+		expect(index.size).toBe(23);
 		expect(index.has(GPT_MODEL.id)).toBe(false);
-		expect(index.has(`${GPT_MODEL.provider}/${GPT_MODEL.id}`)).toBe(false);
+		const collisionIndex = indexModelsByRequestId([GPT_MODEL, KIMI_API_COLLISION], new Set(), true);
+		expect(collisionIndex.has(`${KIMI_API_COLLISION.provider}/${KIMI_API_COLLISION.id}`)).toBe(false);
 	});
 });

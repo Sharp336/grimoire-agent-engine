@@ -33,10 +33,9 @@ import { notifyProviderResponse } from "../utils/provider-response";
 
 /**
  * Fields that must not cross the wire — either non-serializable (functions,
- * `AbortSignal`, the provider-session `Map`) or server-controlled
- * (`apiKey`, which the gateway injects from its own credential store; the
- * client's `apiKey` is the gateway *bearer*, sent in the `Authorization`
- * header rather than the request body).
+ * `AbortSignal`, the provider-session `Map`) or server-controlled credential
+ * and provider-call authority. The client's `apiKey` is the gateway bearer,
+ * sent in the `Authorization` header rather than the request body.
  */
 const NON_WIRE_KEYS = new Set<keyof SimpleStreamOptions>([
 	"signal",
@@ -50,6 +49,7 @@ const NON_WIRE_KEYS = new Set<keyof SimpleStreamOptions>([
 	"cursorOnToolResult",
 	"providerSessionState",
 	"providerCallGateway",
+	"providerCallUrlPlan",
 ]);
 const PI_NATIVE_STREAM_IDLE_TIMEOUT_ERROR = "pi-native stream stalled while waiting for the next event";
 const PI_NATIVE_STREAM_FIRST_EVENT_TIMEOUT_ERROR = "pi-native stream timed out while waiting for the first event";

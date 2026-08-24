@@ -1,10 +1,13 @@
 import { describe, expect, it } from "bun:test";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { ProviderCallGatewayStateError } from "@oh-my-pi/pi-ai/provider-call-gateway";
 import {
 	type ProviderCallOriginAssignment,
 	resolveProviderCallOriginBinding,
 } from "@oh-my-pi/pi-ai/provider-call-origin-manifest";
-import { streamSimple } from "@oh-my-pi/pi-ai/stream";
+import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type {
 	Context,
 	FetchImpl,
@@ -370,20 +373,40 @@ describe("strict provider-call gateway dispatch", () => {
 		expect(directFetches).toBe(0);
 	});
 
-	it("keeps concurrent strict streams to one isolated dispatch each", async () => {
-		const gateway = new RecordingGateway(request => openAiSse(request.context.modelId));
-		const messages = await Promise.all(
-			Array.from({ length: 8 }, (_, index) => {
-				const context = providerCallContext(OPENAI_MODEL, "deepseek-v4-pro-0813-max-r3", 0, {
-					callSequence: String(index + 1),
-					idempotencyKey: `00000000-0000-4000-8${String(index).padStart(3, "0")}-000000000003`,
-				});
-				return streamSimple(OPENAI_MODEL, MESSAGE_CONTEXT, strictOptions(context, gateway)).result();
-			}),
-		);
-		expect(messages.every(message => message.stopReason === "stop")).toBe(true);
-		expect(gateway.requests).toHaveLength(8);
-		expect(new Set(gateway.requests.map(request => request.context.callSequence)).size).toBe(8);
+	it("bypasses local in-flight leases so concurrent strict streams each reach the gateway", async () => {
+		const root = await mkdtemp(join(tmpdir(), "strict-gateway-inflight-"));
+		__providerInFlightForTesting.setRoot(root);
+		let active = 0;
+		let maxActive = 0;
+		const gateway = new RecordingGateway(async request => {
+			active++;
+			maxActive = Math.max(maxActive, active);
+			await Bun.sleep(20);
+			active--;
+			return openAiSse(request.context.modelId);
+		});
+		try {
+			const messages = await Promise.all(
+				Array.from({ length: 8 }, (_, index) => {
+					const context = providerCallContext(OPENAI_MODEL, "deepseek-v4-pro-0813-max-r3", 0, {
+						callSequence: String(index + 1),
+						idempotencyKey: `00000000-0000-4000-8${String(index).padStart(3, "0")}-000000000003`,
+					});
+					return streamSimple(OPENAI_MODEL, MESSAGE_CONTEXT, {
+						...strictOptions(context, gateway),
+						maxInFlightRequests: { [OPENAI_MODEL.provider]: 1 },
+					}).result();
+				}),
+			);
+			expect(messages.every(message => message.stopReason === "stop")).toBe(true);
+			expect(gateway.requests).toHaveLength(8);
+			expect(new Set(gateway.requests.map(request => request.context.callSequence)).size).toBe(8);
+			expect(maxActive).toBeGreaterThan(1);
+			expect(await readdir(root)).toEqual([]);
+		} finally {
+			__providerInFlightForTesting.setRoot(undefined);
+			await rm(root, { recursive: true, force: true });
+		}
 	});
 
 	it("rejects dedicated GPT routes before generic gateway dispatch", () => {

@@ -644,7 +644,9 @@ export const __providerInFlightForTesting = {
 	},
 };
 
-function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal" | "maxInFlightRequests">>(
+function withProviderInFlightLimit<
+	TOptions extends Pick<StreamOptions, "signal" | "maxInFlightRequests" | "providerCallContext">,
+>(
 	model: Model<Api>,
 	options: TOptions | undefined,
 	dispatch: () => AssistantMessageEventStream,
@@ -653,6 +655,7 @@ function withProviderInFlightLimit<TOptions extends Pick<StreamOptions, "signal"
 	// chokepoint — so the loop guard (which wraps this) sees healed events and all
 	// provider exits are covered by one wrap. Official first-party providers are
 	// exempt (see `healLeakedThinking`); healing is otherwise idempotent.
+	if (options?.providerCallContext?.mode === "strict") return healLeakedThinking(model, dispatch());
 	const limit = resolveProviderInFlightLimit(model.provider, options);
 	if (limit === undefined) return healLeakedThinking(model, dispatch());
 

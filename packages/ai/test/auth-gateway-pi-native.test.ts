@@ -263,6 +263,11 @@ describe("pi-native parseRequest", () => {
 				onSseEvent: () => {},
 				execHandlers: {},
 				providerSessionState: new Map(),
+				providerCallUrlPlan: {
+					apiFamily: "openai-completions",
+					requestPathAndQuery: "/v1/chat/completions",
+					url: "https://provider.invalid/v1/chat/completions",
+				},
 				notARealField: "ignored",
 			},
 		});
@@ -273,6 +278,7 @@ describe("pi-native parseRequest", () => {
 		expect("onPayload" in parsed.options).toBe(false);
 		expect("onResponse" in parsed.options).toBe(false);
 		expect("onSseEvent" in parsed.options).toBe(false);
+		expect("providerCallUrlPlan" in parsed.options).toBe(false);
 		expect("notARealField" in parsed.options).toBe(false);
 	});
 
@@ -294,7 +300,7 @@ describe("pi-native parseRequest", () => {
 		expect(parsed.options.acceptEmptyResponse).toBe(true);
 	});
 
-	it("forwards strict context but never accepts a serialized gateway implementation", () => {
+	it("forwards strict context but never accepts serialized gateway or URL-plan authority", () => {
 		const providerCallContext = strictProviderCallContext();
 		const parsed = parseRequest({
 			modelId: "openai/gpt-5",
@@ -302,10 +308,16 @@ describe("pi-native parseRequest", () => {
 			options: {
 				providerCallContext,
 				providerCallGateway: { socketPath: "forbidden" },
+				providerCallUrlPlan: {
+					apiFamily: "openai-completions",
+					requestPathAndQuery: "/v1/chat/completions",
+					url: "https://provider.invalid/v1/chat/completions",
+				},
 			},
 		});
 		expect(parsed.options.providerCallContext).toEqual(providerCallContext);
 		expect(parsed.options.providerCallGateway).toBeUndefined();
+		expect(parsed.options.providerCallUrlPlan).toBeUndefined();
 	});
 
 	it("forwards an explicit statefulResponses disablement to the native stream", () => {
@@ -670,6 +682,53 @@ describe("pi-native gateway cache controls", () => {
 		}
 	});
 
+	it("does not govern a catalog collision with the same provider and model id but a different API family", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-api-family-collision-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey(DEEPSEEK_STRICT_MODEL.provider, "test-key");
+		const mock = createMockModel({
+			provider: DEEPSEEK_STRICT_MODEL.provider,
+			id: DEEPSEEK_STRICT_MODEL.id,
+			responses: [{ content: ["collision remains ungoverned"] }],
+		});
+		let gatewayCalls = 0;
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["test-token"],
+			storage,
+			resolveModel: () => mock,
+			version: "test",
+			providerCallGateway: {
+				async dispatch() {
+					gatewayCalls++;
+					throw new Error("must not dispatch an API-family collision");
+				},
+			},
+		});
+		try {
+			const response = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: `${DEEPSEEK_STRICT_MODEL.provider}/${DEEPSEEK_STRICT_MODEL.id}`,
+					context: baseContext,
+					options: {},
+					stream: false,
+				}),
+			});
+			expect(response.status).toBe(200);
+			expect(JSON.stringify(await response.json())).toContain("collision remains ungoverned");
+			expect(mock.calls).toHaveLength(1);
+			expect(gatewayCalls).toBe(0);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+			clearCustomApis();
+		}
+	});
+
 	it("rejects GPT format routes before gateway dispatch when no controller assignment exists", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-gpt-assignment-required-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
@@ -706,16 +765,17 @@ describe("pi-native gateway cache controls", () => {
 		}
 	});
 
-	it("dispatches each of the 20 pinned GPT bindings exactly once through the same gateway", async () => {
+	it("dispatches the production provider/id key for all 20 pinned GPT bindings exactly once", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-pi-native-codex-delegate-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 		const gptBindings = PROVIDER_CALL_ORIGIN_MANIFEST.routes.filter(route => route.provider === "gpt-proxy");
+		const runtimeModelKey = `${GPT_STRICT_MODEL.provider}/${GPT_STRICT_MODEL.id}`;
 		const gatewayRequests: ProviderCallGatewayRequest[] = [];
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
 			bearerTokens: ["test-token"],
 			storage,
-			resolveModel: () => GPT_STRICT_MODEL,
+			resolveModel: modelKey => (modelKey === runtimeModelKey ? GPT_STRICT_MODEL : undefined),
 			version: "test",
 			expectedProviderCallDynamics: expectedDynamics(gptBindings.map(binding => binding.configId)),
 			providerCallGateway: {
@@ -736,7 +796,7 @@ describe("pi-native gateway cache controls", () => {
 		try {
 			for (const binding of gptBindings) {
 				const requestBody = JSON.stringify({
-					modelId: GPT_STRICT_MODEL.id,
+					modelId: runtimeModelKey,
 					context: baseContext,
 					options: { providerCallContext: strictProviderCallContext(true, binding.configId) },
 					stream: true,
@@ -761,7 +821,7 @@ describe("pi-native gateway cache controls", () => {
 				method: "POST",
 				headers: { Authorization: "Bearer test-token", "Content-Type": "application/json" },
 				body: JSON.stringify({
-					modelId: GPT_STRICT_MODEL.id,
+					modelId: runtimeModelKey,
 					context: baseContext,
 					options: { providerCallContext: mismatched },
 					stream: true,
@@ -771,7 +831,7 @@ describe("pi-native gateway cache controls", () => {
 			expect(gatewayRequests).toHaveLength(20);
 
 			const duplicateSource = JSON.stringify({
-				modelId: GPT_STRICT_MODEL.id,
+				modelId: runtimeModelKey,
 				context: baseContext,
 				options: { providerCallContext: strictProviderCallContext(true) },
 				stream: true,

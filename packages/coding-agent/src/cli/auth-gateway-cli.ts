@@ -236,8 +236,9 @@ export function createProviderCallGatewayRuntimeFromEnv(
 }
 
 /**
- * GPT routes are indexed by every frozen config selector only when the Unix
- * provider-call gateway is configured; no generic GPT credential is needed.
+ * GPT is indexed by its exact provider-qualified production key and every
+ * frozen config selector only when the Unix provider-call gateway is configured;
+ * no generic GPT credential is needed.
  */
 export function indexModelsByRequestId(
 	models: readonly Model<Api>[],
@@ -248,12 +249,12 @@ export function indexModelsByRequestId(
 	const governedGenericModels = new Set(
 		PROVIDER_CALL_ORIGIN_MANIFEST.routes
 			.filter(binding => binding.authorityOwner === "generic-omp-auth-gateway")
-			.map(binding => `${binding.provider}\0${binding.modelId}`),
+			.map(binding => `${binding.provider}\0${binding.modelId}\0${binding.apiFamily}`),
 	);
 	for (const model of models) {
 		if (model.provider === "gpt-proxy") continue;
 		const governedByWorker =
-			providerCallGatewayEnabled && governedGenericModels.has(`${model.provider}\0${model.id}`);
+			providerCallGatewayEnabled && governedGenericModels.has(`${model.provider}\0${model.id}\0${model.api}`);
 		if (!governedByWorker && !providersWithCreds.has(model.provider)) continue;
 		modelById.set(`${model.provider}/${model.id}`, model);
 		if (!modelById.has(model.id)) modelById.set(model.id, model);
@@ -263,6 +264,7 @@ export function indexModelsByRequestId(
 			model => model.provider === "gpt-proxy" && model.api === "openai-completions" && model.id === "gpt-5.6-sol",
 		);
 		if (!gptModel) throw new Error("Frozen GPT model is unavailable for dedicated Codex delegation");
+		modelById.set(`${gptModel.provider}/${gptModel.id}`, gptModel);
 		for (const binding of PROVIDER_CALL_ORIGIN_MANIFEST.routes) {
 			if (binding.provider === "gpt-proxy") modelById.set(binding.configId, gptModel);
 		}
@@ -271,6 +273,7 @@ export function indexModelsByRequestId(
 }
 
 async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
+	const providerCallRuntime = createProviderCallGatewayRuntimeFromEnv();
 	const brokerConfig = await resolveAuthBrokerConfig();
 	if (!brokerConfig) {
 		throw new Error(
@@ -279,7 +282,6 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	}
 	const bind = flags.bind ?? DEFAULT_AUTH_GATEWAY_BIND;
 	const gatewayToken = flags.noAuth ? null : await ensureToken();
-	const providerCallRuntime = createProviderCallGatewayRuntimeFromEnv();
 
 	// Build a broker-backed AuthStorage — same pattern as discoverAuthStorage()
 	// in sdk.ts. The gateway never touches local SQLite.

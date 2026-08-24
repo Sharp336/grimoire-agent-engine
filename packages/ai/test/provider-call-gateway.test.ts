@@ -207,6 +207,134 @@ describe("frozen worker gateway ABI", () => {
 		}
 	});
 
+	it("does not resolve a complete frame until the peer sends read EOF", async () => {
+		const path = await socketPath();
+		const server = Bun.listen<MockSocketState>({
+			unix: path,
+			allowHalfOpen: true,
+			data: { chunks: [], responded: false },
+			socket: {
+				open(socket) {
+					socket.data = { chunks: [], responded: false };
+				},
+				data(socket, chunk) {
+					socket.data.chunks.push(Buffer.from(chunk));
+					const request = Buffer.concat(socket.data.chunks);
+					if (socket.data.responded || request.byteLength < 88) return;
+					const headerLength = Number(new DataView(request.buffer, request.byteOffset + 8, 8).getBigUint64(0));
+					const payloadLength = Number(new DataView(request.buffer, request.byteOffset + 16, 8).getBigUint64(0));
+					if (request.byteLength !== 88 + headerLength + payloadLength) return;
+					socket.data.responded = true;
+					const header = JSON.parse(decoder.decode(request.subarray(88, 88 + headerLength))) as Record<
+						string,
+						unknown
+					>;
+					socket.write(responseFrame(String(header.worker_operation_id), encoder.encode("delayed-eof")));
+					setTimeout(() => socket.end(), 75);
+				},
+			},
+		});
+		try {
+			const gateway = new UnixProviderCallGateway({ socketPath: path });
+			let settled = false;
+			const pending = gateway
+				.dispatch({
+					context: context(),
+					requestMaterializationKind: "GENERIC_LIFECYCLE_FINAL",
+					sourceBody: encoder.encode("request"),
+				})
+				.finally(() => {
+					settled = true;
+				});
+			await Bun.sleep(25);
+			expect(settled).toBe(false);
+			expect(await (await pending).text()).toBe("delayed-eof");
+		} finally {
+			server.stop(true);
+		}
+	});
+
+	it("rejects trailing bytes appended after a delayed complete frame", async () => {
+		const path = await socketPath();
+		const server = Bun.listen<MockSocketState>({
+			unix: path,
+			allowHalfOpen: true,
+			data: { chunks: [], responded: false },
+			socket: {
+				open(socket) {
+					socket.data = { chunks: [], responded: false };
+				},
+				data(socket, chunk) {
+					socket.data.chunks.push(Buffer.from(chunk));
+					const request = Buffer.concat(socket.data.chunks);
+					if (socket.data.responded || request.byteLength < 88) return;
+					const headerLength = Number(new DataView(request.buffer, request.byteOffset + 8, 8).getBigUint64(0));
+					const payloadLength = Number(new DataView(request.buffer, request.byteOffset + 16, 8).getBigUint64(0));
+					if (request.byteLength !== 88 + headerLength + payloadLength) return;
+					socket.data.responded = true;
+					const header = JSON.parse(decoder.decode(request.subarray(88, 88 + headerLength))) as Record<
+						string,
+						unknown
+					>;
+					socket.write(responseFrame(String(header.worker_operation_id), encoder.encode("valid")));
+					setTimeout(() => socket.end(new Uint8Array([1])), 50);
+				},
+			},
+		});
+		try {
+			const gateway = new UnixProviderCallGateway({ socketPath: path });
+			await expect(
+				gateway.dispatch({
+					context: context(),
+					requestMaterializationKind: "GENERIC_LIFECYCLE_FINAL",
+					sourceBody: encoder.encode("request"),
+				}),
+			).rejects.toThrow(/trailing bytes/i);
+		} finally {
+			server.stop(true);
+		}
+	});
+
+	it("fails a complete response that never reaches peer EOF within the exchange bound", async () => {
+		const path = await socketPath();
+		const server = Bun.listen<MockSocketState>({
+			unix: path,
+			allowHalfOpen: true,
+			data: { chunks: [], responded: false },
+			socket: {
+				open(socket) {
+					socket.data = { chunks: [], responded: false };
+				},
+				data(socket, chunk) {
+					socket.data.chunks.push(Buffer.from(chunk));
+					const request = Buffer.concat(socket.data.chunks);
+					if (socket.data.responded || request.byteLength < 88) return;
+					const headerLength = Number(new DataView(request.buffer, request.byteOffset + 8, 8).getBigUint64(0));
+					const payloadLength = Number(new DataView(request.buffer, request.byteOffset + 16, 8).getBigUint64(0));
+					if (request.byteLength !== 88 + headerLength + payloadLength) return;
+					socket.data.responded = true;
+					const header = JSON.parse(decoder.decode(request.subarray(88, 88 + headerLength))) as Record<
+						string,
+						unknown
+					>;
+					socket.write(responseFrame(String(header.worker_operation_id), encoder.encode("no-eof")));
+				},
+			},
+		});
+		try {
+			const gateway = new UnixProviderCallGateway({ socketPath: path, timeoutMs: 50 });
+			await expect(
+				gateway.dispatch({
+					context: context(),
+					requestMaterializationKind: "GENERIC_LIFECYCLE_FINAL",
+					sourceBody: encoder.encode("request"),
+				}),
+			).rejects.toThrow(/timed out before peer EOF/i);
+		} finally {
+			server.stop(true);
+		}
+	});
+
 	it("rejects trailing response bytes instead of accepting an ambiguous frame", () => {
 		const frame = responseFrame(OPERATION_ID, encoder.encode("ok"), new Uint8Array([1]));
 		expect(() => decodeProviderCallWorkerResponse(frame, OPERATION_ID)).toThrow(/trailing|length/i);

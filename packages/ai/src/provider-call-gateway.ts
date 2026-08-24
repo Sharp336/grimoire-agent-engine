@@ -767,17 +767,26 @@ export function decodeProviderCallWorkerResponse(frame: Uint8Array, expectedWork
 
 export interface UnixProviderCallGatewayOptions {
 	socketPath: string;
+	/** Total connect/write/read bound. Defaults to 30 seconds. */
+	timeoutMs?: number;
 }
+const PROVIDER_CALL_GATEWAY_EXCHANGE_TIMEOUT_MS = 30_000;
 
 /** Frozen TBPCW002/TBPCR003 same-Pod client. No controller or provider network path exists here. */
 export class UnixProviderCallGateway implements ProviderCallGateway {
 	readonly #socketPath: string;
+	readonly #timeoutMs: number;
 
 	constructor(options: UnixProviderCallGatewayOptions) {
 		if (!options.socketPath || options.socketPath.includes("\0") || Buffer.byteLength(options.socketPath) > 107) {
 			throw new Error("Provider-call gateway socket path is invalid");
 		}
+		const timeoutMs = options.timeoutMs ?? PROVIDER_CALL_GATEWAY_EXCHANGE_TIMEOUT_MS;
+		if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0) {
+			throw new Error("Provider-call gateway timeout must be a positive integer");
+		}
 		this.#socketPath = options.socketPath;
+		this.#timeoutMs = timeoutMs;
 	}
 
 	async dispatch(request: ProviderCallGatewayRequest): Promise<Response> {
@@ -791,7 +800,7 @@ export class UnixProviderCallGateway implements ProviderCallGateway {
 				chunks: Buffer[];
 				received: number;
 				expectedResponseBytes?: number;
-				requestEnded: boolean;
+				requestWritten: boolean;
 				settled: boolean;
 			}
 			const state: ExchangeState = {
@@ -800,11 +809,17 @@ export class UnixProviderCallGateway implements ProviderCallGateway {
 				partOffset: 0,
 				chunks: [],
 				received: 0,
-				requestEnded: false,
+				requestWritten: false,
 				settled: false,
 			};
+			let activeSocket: Bun.Socket<ExchangeState> | undefined;
+			const timeout = setTimeout(() => {
+				fail(activeSocket, new Error("Provider-call gateway exchange timed out before peer EOF"));
+			}, this.#timeoutMs);
+			timeout.unref();
 			const fail = (socket: Bun.Socket<ExchangeState> | undefined, error: Error): void => {
 				if (state.settled) return;
+				clearTimeout(timeout);
 				state.settled = true;
 				socket?.terminate();
 				reject(error);
@@ -815,13 +830,18 @@ export class UnixProviderCallGateway implements ProviderCallGateway {
 					fail(socket, new Error("Provider-call gateway closed before the exact response frame was complete"));
 					return;
 				}
+				clearTimeout(timeout);
 				state.settled = true;
 				const response = Buffer.concat(state.chunks, state.received);
 				socket.shutdown();
 				resolve(response);
 			};
 			const flush = (socket: Bun.Socket<ExchangeState>): void => {
-				if (state.requestEnded) return;
+				if (state.settled) {
+					socket.terminate();
+					return;
+				}
+				if (state.requestWritten) return;
 				while (state.partIndex < state.parts.length) {
 					const part = state.parts[state.partIndex];
 					const written = socket.write(part, state.partOffset, part.byteLength - state.partOffset);
@@ -834,10 +854,7 @@ export class UnixProviderCallGateway implements ProviderCallGateway {
 					state.partIndex++;
 					state.partOffset = 0;
 				}
-				state.requestEnded = true;
-				setTimeout(() => {
-					if (!state.settled) socket.shutdown(true);
-				}, 0);
+				state.requestWritten = true;
 			};
 			void Bun.connect<ExchangeState>({
 				unix: this.#socketPath,
@@ -845,7 +862,10 @@ export class UnixProviderCallGateway implements ProviderCallGateway {
 				data: state,
 				socket: {
 					binaryType: "buffer",
-					open: flush,
+					open(socket) {
+						activeSocket = socket;
+						flush(socket);
+					},
 					drain: flush,
 					data(socket, chunk) {
 						state.received += chunk.byteLength;
@@ -873,9 +893,7 @@ export class UnixProviderCallGateway implements ProviderCallGateway {
 						}
 					},
 					end(socket) {
-						// Bun reports the local SHUT_WR as `end` on some versions.
-						// Only a nonempty, complete response can be a remote EOF.
-						if (state.received > 0) finish(socket);
+						finish(socket);
 					},
 					close(socket) {
 						finish(socket);

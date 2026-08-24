@@ -210,6 +210,11 @@ describe("streamPiNative request shape", () => {
 			},
 			onSseEvent: () => undefined,
 			providerSessionState: new Map(),
+			providerCallUrlPlan: {
+				apiFamily: "openai-completions",
+				requestPathAndQuery: "/v1/chat/completions",
+				url: "https://provider.invalid/v1/chat/completions",
+			},
 			maxTokens: 1024,
 		});
 		await stream.result();
@@ -222,6 +227,7 @@ describe("streamPiNative request shape", () => {
 		expect("onResponse" in body.options).toBe(false);
 		expect("onSseEvent" in body.options).toBe(false);
 		expect("providerSessionState" in body.options).toBe(false);
+		expect("providerCallUrlPlan" in body.options).toBe(false);
 		// And the legitimate options survive
 		expect(body.options.maxTokens).toBe(1024);
 		expect(responseMetadata).toMatchObject({
