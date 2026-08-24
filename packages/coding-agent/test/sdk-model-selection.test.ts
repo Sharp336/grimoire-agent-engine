@@ -1662,3 +1662,46 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		expect(cliOptions.model?.id).toBe(scopedTarget.id);
 	});
 });
+
+describe("nonblocking default model discovery", () => {
+	test("does not await remote discovery before creating a session", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "omp-nonblocking-discovery-"));
+		const authStorage = createInMemoryAuthStorage();
+		const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
+		const settings = Settings.isolated();
+		settings.setModelRole("default", "missing-provider/missing-model");
+		const startedAt = performance.now();
+		const refresh = vi.spyOn(modelRegistry, "refresh").mockImplementation(() => new Promise<void>(() => {}));
+		try {
+			const { session, modelFallbackMessage } = await createAgentSession({
+				cwd,
+				agentDir: cwd,
+				authStorage,
+				modelRegistry,
+				settings,
+				sessionManager: SessionManager.inMemory(),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				rules: [],
+				preloadedCustomToolPaths: [],
+				toolNames: ["read"],
+			});
+			try {
+				expect(performance.now() - startedAt).toBeLessThan(2_000);
+				expect(session.model).toBeDefined();
+				expect(refresh).toHaveBeenCalled();
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			refresh.mockRestore();
+			authStorage.close();
+		}
+	});
+});
