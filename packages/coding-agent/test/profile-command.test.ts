@@ -11,7 +11,7 @@ import { resetSettingsForTest, Settings } from "../src/config/settings";
 import { activateProfile, profilePickerEntries } from "../src/slash-commands/helpers/profile-command";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
-const YAML = (await import("bun")).YAML;
+const YAML = Bun.YAML;
 
 describe("/profile", () => {
 	let settingsState: SettingsTestState | undefined;

@@ -8,7 +8,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { expandRoleAlias } from "../src/config/model-resolver";
-import { resetSettingsForTest, Settings } from "../src/config/settings";
+import { onModelRolesChanged, resetSettingsForTest, Settings } from "../src/config/settings";
 import {
 	type ProfileMutation,
 	parseProfileMutation,
@@ -16,7 +16,7 @@ import {
 } from "../src/slash-commands/helpers/profile-command";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
-const YAML = (await import("bun")).YAML;
+const YAML = Bun.YAML;
 
 describe("Profile mutation API", () => {
 	let settingsState: SettingsTestState | undefined;
@@ -203,7 +203,7 @@ describe("Profile mutation API", () => {
 			expect(s.getModelRole("default")).toBe("model-a");
 
 			let fired = 0;
-			const { onModelRolesChanged } = await import("../src/config/settings");
+
 			onModelRolesChanged(() => {
 				fired++;
 			});

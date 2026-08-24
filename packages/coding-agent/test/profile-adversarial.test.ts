@@ -11,7 +11,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { expandRoleAlias } from "../src/config/model-resolver";
-import { resetSettingsForTest, Settings } from "../src/config/settings";
+import { onActiveProfileChanged, onModelRolesChanged, resetSettingsForTest, Settings } from "../src/config/settings";
 import {
 	type ProfileMutation,
 	parseProfileMutation,
@@ -19,7 +19,7 @@ import {
 } from "../src/slash-commands/helpers/profile-command";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
-const YAML = (await import("bun")).YAML;
+const YAML = Bun.YAML;
 
 describe("Profiles adversarial coverage", () => {
 	let settingsState: SettingsTestState | undefined;
@@ -168,7 +168,7 @@ describe("Profiles adversarial coverage", () => {
 			writeGlobal({ ...RICH, activeProfile: "cheap" });
 			const s = await load();
 			let modelRoleSignals = 0;
-			const { onModelRolesChanged } = await import("../src/config/settings");
+
 			const unsub = onModelRolesChanged(() => {
 				modelRoleSignals++;
 			});
@@ -196,7 +196,7 @@ describe("Profiles adversarial coverage", () => {
 			const s = await load();
 			let roleSignals = 0;
 			let profileSignals = 0;
-			const { onModelRolesChanged, onActiveProfileChanged } = await import("../src/config/settings");
+
 			const unsubs = [onModelRolesChanged(() => roleSignals++), onActiveProfileChanged(() => profileSignals++)];
 			try {
 				await s.setProfile("global", "cheap", { modelRoles: { smol: "provider/hot-smol" } });
@@ -207,7 +207,7 @@ describe("Profiles adversarial coverage", () => {
 				expect(s.getModelRole("smol")).toBe("provider/hot-smol");
 				expect(expandRoleAlias("@smol", s)).toBe("provider/hot-smol");
 			} finally {
-				unsubs.forEach(u => u());
+				for (const unsub of unsubs) unsub();
 			}
 		});
 
@@ -215,7 +215,7 @@ describe("Profiles adversarial coverage", () => {
 			writeGlobal({ ...RICH, activeProfile: "cheap" });
 			const s = await load();
 			let profileSignals = 0;
-			const { onActiveProfileChanged } = await import("../src/config/settings");
+
 			const unsub = onActiveProfileChanged(() => profileSignals++);
 			try {
 				await s.removeProfile("global", "cheap");
@@ -286,7 +286,7 @@ describe("Profiles adversarial coverage", () => {
 			});
 			const s = await load();
 			await s.setProfile("project", "shared", { modelRoles: { smol: "provider/proj-smol" } });
-			expect((readProject()!.profiles as Record<string, never>)["shared"]).toBeDefined();
+			expect((readProject()!.profiles as Record<string, never>).shared).toBeDefined();
 			const globalProfiles = readGlobal().profiles as Record<
 				string,
 				{ description?: string; modelRoles?: Record<string, string> }

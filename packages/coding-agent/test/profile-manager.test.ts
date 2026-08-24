@@ -20,8 +20,8 @@ beforeAll(async () => {
 
 function entries(): ProfilePickerEntry[] {
 	return [
-		{ name: "cheap", description: "Low cost" },
-		{ name: "advanced", description: "Max capability" },
+		{ name: "cheap", description: "Low cost", definedIn: ["global"] },
+		{ name: "advanced", description: "Max capability", definedIn: ["project"] },
 	];
 }
 
@@ -47,14 +47,19 @@ describe("ProfileManagerComponent", () => {
 		expect(actions.at(-1)).toEqual({ kind: "select", name: "off" });
 	});
 
-	test("E emits edit for the selected profile", () => {
+	test("E emits edit for the selected profile at its defining scope", () => {
 		const { actions } = drive(["e"], "cheap");
-		expect(actions).toEqual([{ kind: "edit", name: "cheap" }]);
+		expect(actions).toEqual([{ kind: "edit", name: "cheap", scope: "global" }]);
 	});
 
-	test("D emits delete for the selected profile", () => {
+	test("D emits delete for the selected profile at its defining scope", () => {
 		const { actions } = drive(["d"], "cheap");
-		expect(actions).toEqual([{ kind: "delete", name: "cheap" }]);
+		expect(actions).toEqual([{ kind: "delete", name: "cheap", scope: "global" }]);
+	});
+
+	test("project-defined rows target project scope", () => {
+		const { actions } = drive(["e"], "advanced");
+		expect(actions).toEqual([{ kind: "edit", name: "advanced", scope: "project" }]);
 	});
 
 	test("N emits create regardless of selection", () => {
@@ -84,10 +89,10 @@ describe("ProfileManagerComponent", () => {
 	test("update() keeps the cursor on the previously selected profile", () => {
 		const actions: ProfileManagerAction[] = [];
 		const manager = new ProfileManagerComponent(entries(), "advanced", action => actions.push(action));
-		manager.update([...entries(), { name: "coding" }], "advanced");
+		manager.update([...entries(), { name: "coding", definedIn: ["global"] }], "advanced");
 		// After the refresh the cursor is still on advanced, so E targets it.
 		manager.handleInput("e");
-		expect(actions).toEqual([{ kind: "edit", name: "advanced" }]);
+		expect(actions).toEqual([{ kind: "edit", name: "advanced", scope: "project" }]);
 	});
 
 	test("selectProfile moves the cursor so the next Enter selects that row", () => {

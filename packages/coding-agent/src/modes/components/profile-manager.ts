@@ -29,13 +29,15 @@ export interface ProfilePickerEntry {
 	name: string;
 	/** Description shown on the row (profile description or role count). */
 	description?: string;
+	/** Config layers defining this profile; empty for action rows. */
+	definedIn: Array<"global" | "project" | "overlay">;
 }
 
 /** What the selected manager row means to the caller. */
 export type ProfileManagerAction =
 	| { kind: "select"; name: string }
-	| { kind: "edit"; name: string }
-	| { kind: "delete"; name: string }
+	| { kind: "edit"; name: string; scope: "global" | "project" }
+	| { kind: "delete"; name: string; scope: "global" | "project" }
 	| { kind: "create" }
 	| { kind: "cancel" };
 
@@ -79,9 +81,15 @@ export class ProfileManagerComponent extends OverlayPanel {
 		const items: SelectItem[] = [];
 		for (const entry of profileEntries) {
 			const active = entry.name === this.#currentProfile;
+			const scopeTag =
+				entry.definedIn.length > 1
+					? ` ${theme.fg("dim", `[${entry.definedIn.join("+")}]`)}`
+					: entry.definedIn.length === 1 && entry.definedIn[0] !== "global"
+						? ` ${theme.fg("dim", `[${entry.definedIn[0]}]`)}`
+						: "";
 			items.push({
 				value: entry.name,
-				label: `${active ? theme.fg("accent", "●") : " "} ${entry.name}`,
+				label: `${active ? theme.fg("accent", "●") : " "} ${entry.name}${scopeTag}`,
 				description: entry.description,
 			});
 		}
@@ -170,6 +178,17 @@ export class ProfileManagerComponent extends OverlayPanel {
 		this.#rebuild();
 	}
 
+	/**
+	 * Scope a mutation should target for a row: the effective definition.
+	 * Project wins over global when both define the same name (project has
+	 * higher precedence), so the row the user sees is the one that is edited.
+	 */
+	#mutationScope(name: string): "global" | "project" {
+		const entry = this.#entries.find(candidate => candidate.name === name);
+		if (entry?.definedIn.includes("project")) return "project";
+		return "global";
+	}
+
 	handleInput(keyData: string): void {
 		if (this.#promptForm) {
 			this.#promptForm.handleInput(keyData);
@@ -177,11 +196,11 @@ export class ProfileManagerComponent extends OverlayPanel {
 		}
 		const selected = this.#selectedName();
 		if (matchesKey(keyData, "e") && selected && !isActionRow(selected)) {
-			this.#onAction({ kind: "edit", name: selected });
+			this.#onAction({ kind: "edit", name: selected, scope: this.#mutationScope(selected) });
 			return;
 		}
 		if (matchesKey(keyData, "d") && selected && !isActionRow(selected)) {
-			this.#onAction({ kind: "delete", name: selected });
+			this.#onAction({ kind: "delete", name: selected, scope: this.#mutationScope(selected) });
 			return;
 		}
 		if (matchesKey(keyData, "n")) {

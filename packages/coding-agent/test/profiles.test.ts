@@ -10,7 +10,7 @@ import { expandRoleAlias } from "../src/config/model-resolver";
 import { resetSettingsForTest, Settings } from "../src/config/settings";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
-const YAML = (await import("bun")).YAML;
+const YAML = Bun.YAML;
 
 describe("Profiles", () => {
 	let settingsState: SettingsTestState | undefined;

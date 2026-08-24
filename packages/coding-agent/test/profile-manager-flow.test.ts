@@ -45,10 +45,10 @@ test("manager flow: rows render and full create/edit/delete cycle works", async 
 	manager.selectProfile("coding");
 
 	manager.handleInput("e");
-	expect(actions.at(-1)).toEqual({ kind: "edit", name: "coding" });
+	expect(actions.at(-1)).toEqual({ kind: "edit", name: "coding", scope: "global" });
 
 	manager.handleInput("d");
-	expect(actions.at(-1)).toEqual({ kind: "delete", name: "coding" });
+	expect(actions.at(-1)).toEqual({ kind: "delete", name: "coding", scope: "global" });
 	await settings.removeProfile("global", "coding");
 
 	// Deleting the row under the cursor moves focus to the first surviving
@@ -64,4 +64,39 @@ test("manager flow: rows render and full create/edit/delete cycle works", async 
 	manager.handleInput("\x1b");
 	expect(actions.at(-1)).toEqual({ kind: "cancel" });
 	expect(settings.getActiveProfile()).toBe("");
+});
+
+test("manager scope targeting: project-only rows edit/delete at project scope", async () => {
+	resetSettingsForTest();
+	const temp = TempDir.createSync("@pi-tui-mgr-proj-");
+	const projAgentDir = temp.join("agent");
+	const projectDir = temp.join("project");
+	fs.mkdirSync(projAgentDir, { recursive: true });
+	fs.mkdirSync(projectDir, { recursive: true });
+	fs.mkdirSync(`${projectDir}/.omp`, { recursive: true });
+	await Bun.write(`${projAgentDir}/config.yml`, "modelRoles:\n  default: provider/base\n");
+	await Bun.write(
+		`${projectDir}/.omp/config.yml`,
+		"profiles:\n  projonly:\n    description: project-owned\n    modelRoles:\n      default: provider/proj\n",
+	);
+	const settings = await Settings.loadIsolated({ cwd: projectDir, agentDir: projAgentDir });
+
+	const actions: ProfileManagerAction[] = [];
+	const manager = new ProfileManagerComponent(profilePickerEntries(settings), "", a => actions.push(a));
+	manager.selectProfile("projonly");
+	manager.handleInput("e");
+	expect(actions.at(-1)).toEqual({ kind: "edit", name: "projonly", scope: "project" });
+	manager.handleInput("d");
+	expect(actions.at(-1)).toEqual({ kind: "delete", name: "projonly", scope: "project" });
+	// Dual-scope name: project definition is effective (higher precedence),
+	// so the manager must target project even though global also defines it.
+	await settings.setProfile("project", "shared", { modelRoles: { smol: "provider/p" } });
+	await settings.setProfile("global", "shared", { modelRoles: { default: "provider/g" } });
+	manager.update(profilePickerEntries(settings), "");
+	manager.selectProfile("shared");
+	manager.handleInput("e");
+	expect(actions.at(-1)).toEqual({ kind: "edit", name: "shared", scope: "project" });
+	// Scope tag is visible on the row so dual definitions are not ambiguous.
+	expect(manager.render(80).join("\n")).toContain("[global+project]");
+	await temp.remove();
 });

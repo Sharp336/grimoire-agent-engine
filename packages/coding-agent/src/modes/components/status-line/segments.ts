@@ -165,10 +165,12 @@ const modelSegment: StatusLineSegment = {
 		let content = theme.fg("statusLineModel", withIcon(modelIcon, modelName));
 		// Active profile indicator: a compact `profile:<name>` prefix that only
 		// appears while a model-role profile is active, so the status line stays
-		// clean for the default configuration.
+		// clean for the default configuration. The name comes from user YAML,
+		// so it is sanitized and width-bounded like every other status field.
 		const activeProfile = ctx.session.settings?.getActiveProfile?.() ?? "";
 		if (activeProfile) {
-			content = theme.fg("dim", `${theme.sep.dot}profile:${activeProfile}`) + content;
+			const safeProfile = truncateToWidth(sanitizeStatusText(activeProfile), TRUNCATE_LENGTHS.SHORT);
+			content = theme.fg("dim", `${theme.sep.dot}profile:${safeProfile}`) + content;
 		}
 
 		// Advisor symbol, colored by the worst status in the roster:

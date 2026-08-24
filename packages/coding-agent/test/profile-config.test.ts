@@ -17,7 +17,14 @@ import { resetSettingsForTest, Settings } from "../src/config/settings";
 import { activateProfile, profilePickerEntries } from "../src/slash-commands/helpers/profile-command";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
-const YAML = (await import("bun")).YAML;
+const YAML = Bun.YAML;
+
+/** Shape asserted against parsed on-disk YAML in this suite. */
+interface ParsedConfig {
+	profiles?: Record<string, { description?: string; modelRoles?: Record<string, string> }>;
+	modelRoles?: Record<string, string>;
+	activeProfile?: string;
+}
 
 describe("agent-managed profile configuration", () => {
 	let settingsState: SettingsTestState | undefined;
@@ -64,16 +71,16 @@ describe("agent-managed profile configuration", () => {
 			expect(s.getProfile("cheap")?.description).toBe("Low cost");
 			expect(s.getModelRole("default")).toBe("prov/base"); // inactive: base wins
 
-			const onDisk = <any>YAML.parse(await Bun.file(globalConfigPath()).text());
-			expect(onDisk.profiles.cheap.modelRoles.default).toBe("prov/cheap-main");
+			const onDisk = <ParsedConfig>YAML.parse(await Bun.file(globalConfigPath()).text());
+			expect(onDisk.profiles!.cheap.modelRoles!.default).toBe("prov/cheap-main");
 		});
 
 		test("creates a project-scoped profile in .omp/config.yml", async () => {
 			const s = await load({});
 			await s.setProfile("project", "repo-only", { modelRoles: { slow: "prov/repo-slow" } });
 
-			const onDisk = <any>YAML.parse(await Bun.file(projectConfigPath()).text());
-			expect(onDisk.profiles["repo-only"].modelRoles.slow).toBe("prov/repo-slow");
+			const onDisk = <ParsedConfig>YAML.parse(await Bun.file(projectConfigPath()).text());
+			expect(onDisk.profiles!["repo-only"].modelRoles!.slow).toBe("prov/repo-slow");
 			expect(s.getProfile("repo-only")?.modelRoles?.slow).toBe("prov/repo-slow");
 
 			// Global file untouched.
@@ -109,9 +116,9 @@ describe("agent-managed profile configuration", () => {
 			expect(s.getProfile("other")?.modelRoles?.default).toBe("prov/o"); // sibling intact
 			expect(s.getGlobalModelRole("default")).toBe("prov/base"); // base intact
 
-			const onDisk = <any>YAML.parse(await Bun.file(globalConfigPath()).text());
-			expect(onDisk.modelRoles.default).toBe("prov/base");
-			expect(onDisk.profiles.other).toBeDefined();
+			const onDisk = <ParsedConfig>YAML.parse(await Bun.file(globalConfigPath()).text());
+			expect(onDisk.modelRoles!.default).toBe("prov/base");
+			expect(onDisk.profiles!.other).toBeDefined();
 		});
 
 		test("updating description preserves modelRoles", async () => {
@@ -126,9 +133,9 @@ describe("agent-managed profile configuration", () => {
 			for (let i = 0; i < 5; i++) {
 				await s.setProfile("global", "cheap", { modelRoles: { smol: `prov/iter${i}` } });
 			}
-			const onDisk = <any>YAML.parse(await Bun.file(globalConfigPath()).text());
-			expect(onDisk.profiles.cheap.modelRoles.smol).toBe("prov/iter4");
-			expect(onDisk.profiles.cheap.modelRoles.default).toBe("prov/c1");
+			const onDisk = <ParsedConfig>YAML.parse(await Bun.file(globalConfigPath()).text());
+			expect(onDisk.profiles!.cheap.modelRoles!.smol).toBe("prov/iter4");
+			expect(onDisk.profiles!.cheap.modelRoles!.default).toBe("prov/c1");
 			expect(YAML.stringify(onDisk)).toBeTypeOf("string");
 		});
 
@@ -206,7 +213,7 @@ describe("agent-managed profile configuration", () => {
 		test("persistent global activation writes activeProfile to disk", async () => {
 			const s = await load(CFG);
 			await s.setActiveProfile("global", "p");
-			const onDisk = <any>YAML.parse(await Bun.file(globalConfigPath()).text());
+			const onDisk = <ParsedConfig>YAML.parse(await Bun.file(globalConfigPath()).text());
 			expect(onDisk.activeProfile).toBe("p");
 			expect(s.getModelRole("default")).toBe("prov/pd");
 		});
@@ -216,7 +223,7 @@ describe("agent-managed profile configuration", () => {
 			await s.setActiveProfile("runtime", "p");
 			expect(s.getActiveProfile()).toBe("p");
 			expect(s.getModelRole("default")).toBe("prov/pd");
-			const onDisk = <any>YAML.parse(await Bun.file(globalConfigPath()).text());
+			const onDisk = <ParsedConfig>YAML.parse(await Bun.file(globalConfigPath()).text());
 			expect(onDisk.activeProfile).toBe("");
 		});
 

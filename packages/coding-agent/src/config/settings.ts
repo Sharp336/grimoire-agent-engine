@@ -372,6 +372,8 @@ export class Settings {
 	#modifiedProjectModelRoles = new Set<string>();
 	/** Individual global model roles modified during this session (for partial save) */
 	#modifiedGlobalModelRoles = new Set<string>();
+	/** Last observed effective profile state — lets `profiles` writes fire signals only when consumed state changed. */
+	#lastEffectiveProfileSnapshot: { active: string; roles: Record<string, string> | undefined } | undefined;
 	/** Changes whenever a live API mutates a persisted layer. */
 	#persistedMutationGeneration = 0;
 	/**
@@ -459,9 +461,13 @@ export class Settings {
 	/**
 	 * Load a persisted settings instance without touching the global singleton.
 	 */
-	static loadIsolated(options: SettingsOptions = {}): Promise<Settings> {
+	static async loadIsolated(options: SettingsOptions = {}): Promise<Settings> {
 		const instance = new Settings(options);
-		return instance.#load();
+		await instance.#load();
+		// Baseline for effective-state signal comparison on the first
+		// profiles write (undefined would force a conservative fire).
+		instance.#lastEffectiveProfileSnapshot = instance.#effectiveProfileSnapshot();
+		return instance;
 	}
 
 	/**
@@ -593,10 +599,16 @@ export class Settings {
 		if (path === "modelRoles") {
 			modelRolesSignal.fire();
 		}
-		if (path === "activeProfile" || path === "profiles") {
-			// Profile changes alter the effective model roles for every consumer.
+		if (path === "activeProfile") {
 			modelRolesSignal.fire();
 			activeProfileSignal.fire();
+		}
+		if (path === "profiles") {
+			// Raw `profiles` writes only matter to live consumers when the
+			// EFFECTIVE state (selected profile + its applied roles) changed.
+			// Editing an inactive profile must not reset the session model.
+			this.#fireProfileSignalsIfNeeded(this.#lastEffectiveProfileSnapshot);
+			this.#lastEffectiveProfileSnapshot = this.#effectiveProfileSnapshot();
 		}
 		if (CODE_MODE_SIGNAL_PATHS.includes(path)) {
 			codeModeSignal.fire();
@@ -738,14 +750,20 @@ export class Settings {
 				);
 			}
 			const nextActiveProfile = this.getActiveProfile();
-			if (
-				nextActiveProfile !== previousSignaledValues.activeProfile ||
-				!Bun.deepEquals(this.getProfiles(), previousSignaledValues.profiles)
-			) {
-				// Profile selection or definitions changed on disk; consumers
-				// (live default model, status line) re-resolve through the signal.
-				this.#fireEffectiveSettingChanged("activeProfile", nextActiveProfile, previousSignaledValues.activeProfile);
+			const selectionChanged = nextActiveProfile !== previousSignaledValues.activeProfile;
+			// Compare the effective overlay roles, not just the selected name:
+			// an external edit to the ACTIVE profile's roles must notify live
+			// consumers even when the profile name is unchanged. Inactive
+			// profile edits change neither and stay silent here.
+			const rolesChanged = !Bun.deepEquals(
+				this.resolveProfileModelRoles() ?? null,
+				this.#lastEffectiveProfileSnapshot?.roles ?? null,
+			);
+			if (selectionChanged || rolesChanged) {
+				modelRolesSignal.fire();
+				activeProfileSignal.fire();
 			}
+			this.#lastEffectiveProfileSnapshot = this.#effectiveProfileSnapshot();
 			this.#fireCodeModeChangeIfNeeded(previousCodeModeValues);
 			for (const [key, previous] of previousHookValues) {
 				const next = this.get(key);
@@ -2551,12 +2569,19 @@ export class Settings {
 		return this.getProfile(name) !== undefined ? name : "";
 	}
 
-	/** Merged profile definitions (global + project + overlay layers). */
+	/**
+	 * Merged profile definitions (global + project + overlay layers). Built
+	 * with a null-prototype record so inherited keys (`toString`,
+	 * `constructor`, `__proto__`, …) can never masquerade as profiles.
+	 */
 	getProfiles(): Record<string, ProfileDefinition> {
 		const profiles = getByPath(this.#merged, ["profiles"]);
 		if (!isRecord(profiles)) return {};
-		const result: Record<string, ProfileDefinition> = {};
+		const result: Record<string, ProfileDefinition> = Object.create(null);
 		for (const [name, value] of Object.entries(profiles)) {
+			// Prototype-collision keys (hand-written YAML can carry `__proto__`
+			// as an own property) are never profiles — writes reject them too.
+			if (name === "__proto__" || name === "constructor" || name === "hasOwnProperty") continue;
 			if (isRecord(value)) result[name] = value as unknown as ProfileDefinition;
 		}
 		return result;
@@ -2565,7 +2590,8 @@ export class Settings {
 	/** Effective definition of one profile, or undefined when it does not exist. */
 	getProfile(name: string): ProfileDefinition | undefined {
 		if (name === "") return undefined;
-		return this.getProfiles()[name];
+		const profiles = this.getProfiles();
+		return Object.hasOwn(profiles, name) ? profiles[name] : undefined;
 	}
 
 	/**
@@ -2578,6 +2604,38 @@ export class Settings {
 	}
 
 	// ── Agent-managed profile configuration ─────────────────────────────
+
+	/**
+	 * Snapshot of the effective profile state that live consumers observe:
+	 * the selected name plus the overlay roles actually applied. Used to
+	 * decide whether a `profiles` mutation must fire change signals — raw
+	 * edits to INACTIVE profiles produce no notification, so editing an
+	 * unused profile can never reset the live session model.
+	 */
+	#effectiveProfileSnapshot(): { active: string; roles: Record<string, string> | undefined } {
+		return {
+			active: this.getActiveProfile(),
+			roles: this.resolveProfileModelRoles(),
+		};
+	}
+
+	/**
+	 * Compare a before-snapshot with current state and fire signals exactly
+	 * when consumed state changed: role changes fire the modelRoles signal;
+	 * a selection change also fires the active-profile signal. No-op when
+	 * only inactive profiles were touched.
+	 */
+	#fireProfileSignalsIfNeeded(
+		before: { active: string; roles: Record<string, string> | undefined } | undefined,
+	): void {
+		const after = this.#effectiveProfileSnapshot();
+		// No prior snapshot means this is the first profiles write we've seen:
+		// fire conservatively so consumers can't miss a real change.
+		const rolesChanged = !before || !Bun.deepEquals(before.roles ?? null, after.roles ?? null);
+		const activeChanged = !before || before.active !== after.active;
+		if (rolesChanged) modelRolesSignal.fire();
+		if (activeChanged || rolesChanged) activeProfileSignal.fire();
+	}
 
 	/**
 	 * Persist a profile definition at a specific scope. Creates the profile
@@ -2598,6 +2656,9 @@ export class Settings {
 	): Promise<ProfileDefinition> {
 		validateProfileName(name);
 		validateProfileDefinition(definition);
+		// Effective state before the write: signals fire only when this
+		// snapshot actually changes (see #fireProfileSignalsIfNeeded).
+		const before = this.#effectiveProfileSnapshot();
 		if (scope === "global") {
 			const current = getByPath(this.#global, ["profiles"]);
 			const merged: Record<string, unknown> = isRecord(current) ? { ...current } : {};
@@ -2621,10 +2682,12 @@ export class Settings {
 				await this.#writeYamlAtomically(writePath, projectSettings);
 			});
 			invalidateCapabilityFsCache(path.join(this.#cwd, ".omp", "config.yml"));
-			// Reload the project layer through the real path so the merged view,
-			// caches, and change signals all observe the new definition.
+			// Reload the project layer through the real path so the merged view
+			// and caches observe the new definition; signals fire only if the
+			// effective profile state changed (project mutations bypass `set`).
 			this.#project = await this.#loadProjectSettings();
 			this.#rebuildMerged();
+			this.#fireProfileSignalsIfNeeded(before);
 		}
 		return structuredClone(this.getProfile(name) ?? definition);
 	}
@@ -2638,6 +2701,7 @@ export class Settings {
 	 */
 	async removeProfile(scope: "global" | "project", name: string): Promise<void> {
 		validateProfileName(name);
+		const before = this.#effectiveProfileSnapshot();
 		if (scope === "global") {
 			const current = getByPath(this.#global, ["profiles"]);
 			if (!isRecord(current) || !isRecord(current[name])) {
@@ -2674,13 +2738,16 @@ export class Settings {
 			invalidateCapabilityFsCache(path.join(this.#cwd, ".omp", "config.yml"));
 			this.#project = await this.#loadProjectSettings();
 			this.#rebuildMerged();
+			this.#fireProfileSignalsIfNeeded(before);
 		}
 	}
 
 	/**
-	 * Activate a profile persistently at a scope ("runtime" keeps the existing
-	 * ephemeral override semantics — see {@link override}). Persistent
-	 * activation validates that the profile exists in the merged view first.
+	 * Activate a profile persistently at a specific scope ("runtime" keeps
+	 * the existing ephemeral override semantics — see {@link override}).
+	 * Persistent activation validates that the profile exists in the merged
+	 * view first, then writes ONLY the selected scope's config file:
+	 * "global" → `~/.omp/agent/config.yml`, "project" → `<cwd>/.omp/config.yml`.
 	 */
 	async setActiveProfile(scope: "global" | "project" | "runtime", name: string): Promise<void> {
 		if (scope === "runtime") {
@@ -2692,6 +2759,24 @@ export class Settings {
 		}
 		if (name !== "" && name !== "off" && this.getProfile(name) === undefined) {
 			throw new Error(`Unknown profile: ${name}`);
+		}
+		const prevActive = this.getActiveProfile();
+		if (scope === "project") {
+			const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
+			fs.mkdirSync(path.dirname(projectConfigPath), { recursive: true });
+			await this.#withYamlWriteLock(projectConfigPath, async writePath => {
+				const loaded =
+					(await this.#loadYamlIfPresentForWriteLocked(projectConfigPath, writePath)) ??
+					(this.#quarantinedYamlTargets.has(projectConfigPath) ? structuredClone(this.#projectFileSettings) : {});
+				setByPath(loaded, ["activeProfile"], name);
+				await this.#writeYamlAtomically(writePath, loaded);
+			});
+			invalidateCapabilityFsCache(projectConfigPath);
+			this.#persistedMutationGeneration++;
+			this.#project = await this.#loadProjectSettings();
+			this.#rebuildMerged();
+			this.#fireEffectiveSettingChanged("activeProfile", this.getActiveProfile(), prevActive);
+			return;
 		}
 		this.set("activeProfile", name);
 		await this.flush();
@@ -2960,13 +3045,17 @@ const liveSettingsInstances = new Set<WeakRef<Settings>>();
 let globalInstance: Settings | null = null;
 let globalInstancePromise: Promise<Settings> | null = null;
 let boundSettingsInstance: Settings | null = null;
-let boundSettingsMethods = new Map<PropertyKey, unknown>();
+const boundSettingsMethods = new Map<PropertyKey, unknown>();
 
 function clearBoundSettingsMethods(): void {
 	boundSettingsInstance = null;
-	boundSettingsMethods = new Map<PropertyKey, unknown>();
+	boundSettingsMethods.clear();
 }
 
+/**
+ * Whether the global settings singleton has been initialized. Exported
+ * domain concept used as a guard across many modules.
+ */
 export function isSettingsInitialized(): boolean {
 	return globalInstance !== null;
 }
@@ -3023,8 +3112,9 @@ export const settings = new Proxy({} as Settings, {
 /**
  * Validate a profile name for agent-driven configuration writes. Profile
  * names are user-facing keys, not filesystem paths, but they must be
- * non-empty strings that cannot collide with the `off` sentinel or confuse
- * YAML tooling.
+ * non-empty strings restricted to a safe character set that cannot collide
+ * with the `off` / `+create` manager sentinels, object prototype keys, or
+ * confuse YAML tooling.
  */
 function validateProfileName(name: string): void {
 	const trimmed = typeof name === "string" ? name.trim() : "";
@@ -3033,8 +3123,16 @@ function validateProfileName(name: string): void {
 			`Invalid profile name: ${JSON.stringify(name)}. Names must be non-empty without surrounding whitespace.`,
 		);
 	}
-	if (trimmed === "off") {
-		throw new Error('"off" is reserved for deactivating profiles and cannot be a profile name.');
+	if (trimmed === "off" || trimmed === "+create") {
+		throw new Error(`"${trimmed}" is reserved for profile-manager actions and cannot be a profile name.`);
+	}
+	if (trimmed === "__proto__" || trimmed === "constructor" || trimmed === "hasOwnProperty") {
+		throw new Error(`Profile name "${trimmed}" collides with an object prototype key and is not allowed.`);
+	}
+	if (!/^[\w.:@/-]+$/.test(trimmed)) {
+		throw new Error(
+			`Invalid profile name: ${JSON.stringify(name)}. Use letters, digits, and . _ - : @ / characters only.`,
+		);
 	}
 	if (trimmed.length > 128) {
 		throw new Error("Profile name exceeds 128 characters.");
@@ -3055,7 +3153,7 @@ function validateProfileDefinition(definition: ProfileDefinition): void {
 		throw new Error("Profile definition must be an object.");
 	}
 	if (definition.description !== undefined && typeof definition.description !== "string") {
-		throw new Error("Profile description must be a string.");
+		throw new Error("Profile description must be a string when present.");
 	}
 	if (definition.modelRoles !== undefined) {
 		if (!isRecord(definition.modelRoles)) {

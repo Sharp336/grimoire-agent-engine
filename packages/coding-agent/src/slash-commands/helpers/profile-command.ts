@@ -192,46 +192,51 @@ function mutationError(error: unknown): string {
 /**
  * Profile activation shared by `/profile` and the profile picker.
  *
- * Profile selection is persisted through the normal settings system
- * (`activeProfile`), so switching is a configuration-layer change: the base
- * modelRoles are never rewritten. `off` (or "") disables the active profile.
- * Returns a user-facing status message, or an error string prefixed with
- * "Unknown profile" when the profile does not exist.
+ * Interactive selection is a RUNTIME override (`settings.override`), not a
+ * persisted write: it outranks any global/project `activeProfile` for this
+ * session and never rewrites either config file. `off` (or "") clears the
+ * runtime selection so lower persistent layers become effective again.
+ * Persistent selection is the explicit `setActiveProfile("global"|"project")`
+ * API. Returns a user-facing status message, or an error string prefixed
+ * with "Unknown profile" when the profile does not exist.
  */
 export function activateProfile(settings: Settings, name: string): string {
 	const trimmed = name.trim();
 	if (trimmed === "" || trimmed === "off") {
 		const wasActive = settings.getActiveProfile() !== "";
-		settings.set("activeProfile", "");
+		settings.override("activeProfile", "");
 		return wasActive ? "Profile disabled — normal model-role configuration restored." : "No active profile.";
 	}
 	if (settings.getProfile(trimmed) === undefined) {
 		return `Unknown profile: ${trimmed}. Configure profiles in settings (activeProfile/profiles).`;
 	}
 	const previous = settings.getActiveProfile();
-	settings.set("activeProfile", trimmed);
+	settings.override("activeProfile", trimmed);
 	return previous === trimmed ? `Profile ${trimmed} is already active.` : `Profile ${trimmed} active.`;
 }
 
 /** Roster shown by the bare `/profile` selector: every configured profile plus "off". */
-export function profilePickerEntries(settings: Settings): { name: string; description?: string }[] {
-	const profiles = settings.getProfiles();
-	const entries: { name: string; description?: string }[] = [];
-	for (const name of Object.keys(profiles)) {
-		const definition = profiles[name];
-		const roles = definition?.modelRoles;
+export function profilePickerEntries(
+	settings: Settings,
+): { name: string; description?: string; definedIn: Array<"global" | "project" | "overlay"> }[] {
+	const snapshot = settings.describeProfiles();
+	const entries: { name: string; description?: string; definedIn: Array<"global" | "project" | "overlay"> }[] = [];
+	for (const name of Object.keys(snapshot.profiles)) {
+		const info = snapshot.profiles[name];
+		const roles = info?.modelRoles;
 		const roleCount = roles ? Object.keys(roles).length : 0;
 		entries.push({
 			name,
 			description:
-				typeof definition?.description === "string" && definition.description !== ""
-					? definition.description
+				typeof info?.description === "string" && info.description !== ""
+					? info.description
 					: roleCount > 0
 						? `${roleCount} model role${roleCount === 1 ? "" : "s"}`
 						: undefined,
+			definedIn: [...(info?.definedIn ?? [])],
 		});
 	}
 	entries.sort((a, b) => a.name.localeCompare(b.name));
-	entries.push({ name: "off", description: "Disable the active profile" });
+	entries.push({ name: "off", description: "Disable the active profile", definedIn: [] });
 	return entries;
 }

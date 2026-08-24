@@ -818,7 +818,21 @@ export class SelectorController {
 			}
 			case "create": {
 				const created = await this.#promptProfileName();
-				if (!created) return; // cancelled or failed inline
+				if (!created) return; // cancelled — no shell profile written
+				// Continue directly into the role editor so creation ends with
+				// a complete profile; aborting leaves no empty shell behind.
+				const changed = await this.#editProfileRoles(settings, created, "global");
+				if (!changed) {
+					try {
+						await settings.removeProfile("global", created);
+					} catch {
+						// shell never existed if validation rejected the name
+					}
+					this.ctx.showStatus("Profile creation cancelled.");
+					manager.update(profilePickerEntries(settings), settings.getActiveProfile());
+					this.ctx.ui.requestRender();
+					return;
+				}
 				this.ctx.showStatus(`Profile ${created} created.`);
 				manager.update(profilePickerEntries(settings), settings.getActiveProfile());
 				manager.selectProfile(created);
@@ -826,17 +840,17 @@ export class SelectorController {
 				return;
 			}
 			case "edit": {
-				const changed = await this.#editProfileRoles(settings, action.name);
-				if (changed) this.ctx.showStatus(`Profile ${action.name} updated.`);
+				const changed = await this.#editProfileRoles(settings, action.name, action.scope);
+				if (changed) this.ctx.showStatus(`Profile ${action.name} updated (${action.scope}).`);
 				manager.update(profilePickerEntries(settings), settings.getActiveProfile());
 				this.ctx.ui.requestRender();
 				return;
 			}
 			case "delete": {
-				const scope = "global"; // manager edits live in the global config
+				const scope = action.scope;
 				const confirmed = await this.ctx.showHookConfirm(
 					"Delete Profile",
-					`Delete profile "${action.name}"? Its model-role overlay is removed from ${scope} config.\nBase modelRoles are not touched.`,
+					`Delete profile "${action.name}" from ${scope} config? Its model-role overlay is removed.\nBase modelRoles and other scopes are not touched.`,
 				);
 				if (!confirmed) {
 					this.ctx.showStatus("Delete cancelled");
@@ -844,7 +858,7 @@ export class SelectorController {
 				}
 				try {
 					await settings.removeProfile(scope, action.name);
-					this.ctx.showStatus(`Profile ${action.name} deleted.`);
+					this.ctx.showStatus(`Profile ${action.name} deleted from ${scope} config.`);
 				} catch (error) {
 					this.ctx.showError(error instanceof Error ? error.message : String(error));
 				}
@@ -876,18 +890,8 @@ export class SelectorController {
 		};
 		const restore = this.#swapOverlayBody(form, input, () => finish(undefined));
 		input.onSubmit = value => {
-			void (async () => {
-				const name = value.trim();
-				if (!name) return;
-				try {
-					// Write an empty shell first so validation errors surface
-					// inline; roles are filled by the edit flow next.
-					await this.ctx.settings.setProfile("global", name, { description: "" });
-					finish(name);
-				} catch (error) {
-					form.showError(error instanceof Error ? error.message : String(error));
-				}
-			})();
+			const name = value.trim();
+			if (name) finish(name);
 		};
 		return await promise;
 	}
@@ -895,9 +899,9 @@ export class SelectorController {
 	/**
 	 * Role-by-role editor: cycles through the standard roles, prompting for a
 	 * selector per role (empty keeps current, `null` clears it), then persists
-	 * one patch write at the end.
+	 * one patch write at the end to the requested scope.
 	 */
-	async #editProfileRoles(settings: Settings, name: string): Promise<boolean> {
+	async #editProfileRoles(settings: Settings, name: string, scope: "global" | "project"): Promise<boolean> {
 		const existing = settings.getProfile(name);
 		if (!existing) return false;
 		const roles: Record<string, string | null> = { ...(existing.modelRoles ?? {}) };
@@ -907,7 +911,7 @@ export class SelectorController {
 			if (entered === null) return false; // user aborted mid-edit
 			roles[role] = entered === "" ? null : entered;
 		}
-		await settings.setProfile("global", name, { modelRoles: roles });
+		await settings.setProfile(scope, name, { modelRoles: roles });
 		return true;
 	}
 
