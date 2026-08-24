@@ -7,9 +7,9 @@
  */
 import * as path from "node:path";
 import { $flag, Snowflake } from "@oh-my-pi/pi-utils";
-import { $ } from "bun";
 import { Settings } from "../../config/settings";
 import { BaseKernel, getRemainingTimeMs, type KernelStartOptions } from "../kernel-base";
+import { type BackendProbeOptions, probeCandidates } from "../probe";
 import type { KernelDisplayOutput } from "../py/display";
 import { hostHasInheritableConsole, shouldDetachKernel, shouldHideKernelWindow } from "../py/spawn-options";
 import { stageRunnerScript } from "../runner-cache";
@@ -30,7 +30,8 @@ export type { KernelDisplayOutput };
 const TRACE_IPC = $flag("PI_JULIA_IPC_TRACE");
 
 const SHUTDOWN_GRACE_MS = 1_000;
-const STARTUP_TIMEOUT_MS = 15_000; // Julia compile/warmup can be slightly slower
+const JULIA_PROBE_TIMEOUT_MS = 30_000;
+const STARTUP_TIMEOUT_MS = 30_000; // Julia compile/warmup can be slow on cold or contended hosts
 const INTERRUPT_ESCALATION_MS = 5_000;
 
 export interface KernelExecuteOptions {
@@ -59,21 +60,23 @@ const availabilityCache = new Map<string, Promise<JuliaKernelAvailability>>();
 export async function checkJuliaKernelAvailability(
 	cwd: string,
 	interpreter?: string,
+	options?: BackendProbeOptions,
 ): Promise<JuliaKernelAvailability> {
 	const cacheKey = `${path.resolve(cwd)}::${interpreter ?? ""}`;
-	let cached = availabilityCache.get(cacheKey);
-	if (!cached) {
-		cached = probeJuliaKernelAvailability(cwd, interpreter);
-		availabilityCache.set(cacheKey, cached);
-	}
-	const result = await cached;
-	if (!result.ok) {
-		availabilityCache.delete(cacheKey);
-	}
+	const cached = availabilityCache.get(cacheKey);
+	if (cached) return await cached;
+	// Probe controls belong to one caller. Do not share an in-flight promise:
+	// aborting one eval must not cancel a concurrent session's availability check.
+	const result = await probeJuliaKernelAvailability(cwd, interpreter, options);
+	if (result.ok) availabilityCache.set(cacheKey, Promise.resolve(result));
 	return result;
 }
 
-async function probeJuliaKernelAvailability(cwd: string, interpreter?: string): Promise<JuliaKernelAvailability> {
+async function probeJuliaKernelAvailability(
+	cwd: string,
+	interpreter?: string,
+	probeOpts?: BackendProbeOptions,
+): Promise<JuliaKernelAvailability> {
 	const { env: shellEnv } = (await Settings.init()).getShellConfig();
 	const baseEnv = filterEnv(shellEnv);
 	const runtimes = enumerateJuliaRuntimes(cwd, baseEnv, interpreter);
@@ -85,23 +88,30 @@ async function probeJuliaKernelAvailability(cwd: string, interpreter?: string): 
 		};
 	}
 
-	const failures: string[] = [];
-	for (const runtime of runtimes) {
-		try {
-			const probe = await $`${runtime.juliaPath} -e "exit(0)"`.quiet().nothrow().cwd(cwd).env(runtime.env);
-			if (probe.exitCode === 0) {
-				return { ok: true, juliaPath: runtime.juliaPath, runtime };
-			}
-			failures.push(`${runtime.juliaPath} (exit code ${probe.exitCode})`);
-		} catch (err) {
-			failures.push(`${runtime.juliaPath} (${err instanceof Error ? err.message : String(err)})`);
-		}
+	const result = await probeCandidates(
+		runtimes.map(runtime => ({
+			command: [runtime.juliaPath, "--startup-file=no", "--history-file=no", "--compile=min", "-e", "exit(0)"],
+			env: runtime.env,
+			label: runtime.juliaPath,
+		})),
+		{
+			cwd,
+			signal: probeOpts?.signal,
+			timeoutMs: probeOpts?.timeoutMs,
+			maxTimeoutMs: JULIA_PROBE_TIMEOUT_MS,
+		},
+	);
+	if (result.ok) {
+		const runtime = runtimes[result.index];
+		return { ok: true, juliaPath: runtime.juliaPath, runtime };
 	}
-
+	if (result.aborted) {
+		return { ok: false, juliaPath: runtimes[0].juliaPath, reason: "Julia availability probe was cancelled." };
+	}
 	return {
 		ok: false,
 		juliaPath: runtimes[0].juliaPath,
-		reason: `No working Julia interpreter found. Tried: ${failures.join("; ")}`,
+		reason: `No working Julia interpreter found. Tried: ${result.failures.join("; ")}`,
 	};
 }
 

@@ -59,14 +59,17 @@ function requestUrl(input: string | URL | Request): string {
 
 async function withUpdateNetworkDiagnostics<T>(fn: () => Promise<T>): Promise<T> {
 	const originalFetch = globalThis.fetch;
-	globalThis.fetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-		try {
-			return await originalFetch(input, init);
-		} catch (error) {
-			logNetworkFailure(requestUrl(input), error);
-			throw error;
-		}
-	};
+	globalThis.fetch = Object.assign(
+		async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			try {
+				return await originalFetch(input, init);
+			} catch (error) {
+				logNetworkFailure(requestUrl(input), error);
+				throw error;
+			}
+		},
+		{ preconnect: originalFetch.preconnect },
+	);
 	try {
 		return await fn();
 	} finally {
