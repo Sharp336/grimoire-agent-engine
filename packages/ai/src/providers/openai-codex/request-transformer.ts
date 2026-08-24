@@ -481,6 +481,9 @@ export async function transformRequestBody(
 				body.reasoning.context = options.reasoningContext;
 			}
 		}
+		if (!model.compat.supportsReasoningSummary) {
+			delete body.reasoning.summary;
+		}
 	} else {
 		delete body.reasoning;
 	}

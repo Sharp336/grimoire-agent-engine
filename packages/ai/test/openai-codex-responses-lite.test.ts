@@ -179,7 +179,7 @@ describe("openai-codex optional response controls", () => {
 			compat: { ...base.compatConfig, supportsReasoningSummary: false },
 		} as ModelSpec<"openai-codex-responses">);
 
-		const body = await transformRequestBody({ model: model.id }, model, {
+		const body = await transformRequestBody({ model: model.id, reasoning: { summary: "auto" } }, model, {
 			reasoningEffort: "medium",
 			reasoningSummary: "detailed",
 		});
