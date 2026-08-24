@@ -1455,6 +1455,57 @@ interface StreamPrefixLineCache extends RenderSignature {
 	tokenCount: number;
 	lines: readonly string[];
 }
+/**
+ * Per-token row cache for the *unfrozen tail* (PoC H). The tail re-lexes every
+ * streaming frame, but the token sequence is prefix-stable under append-only
+ * growth: only the last block token grows, and a closed block's raw bytes and
+ * token type never change once later text arrives (a growing structure — open
+ * fence, lazy list, setext underline — is always the last token; when it
+ * closes, later appends cannot re-segment it). Cached rows are therefore
+ * byte-identical to a fresh render of the same token, and splicing them skips
+ * the O(tail) styled-text + wrap cost that remains after the lex is skipped.
+ *
+ * Validity gates (checked on every reuse):
+ *  - signature equality (width, padding, theme probes — same set as the
+ *    prefix cache) and token-list alignment (`tokenStart` matches the frozen
+ *    prefix count);
+ *  - token raw equality against the cached snapshot (string equality, so the
+ *    cache works both with reused token objects and with a fresh lex that
+ *    re-produces the same raw text);
+ *  - `nextTypes[i]`: `#renderToken` decides trailing spacing rows from the
+ *    next token's type, so a cached row is only valid while the following
+ *    token keeps the type it had when the row was produced;
+ *  - token type: `table` tokens are never cached — their layout depends on
+ *    the whole token and the width budget, and the splice path is not
+ *    covered by the byte-identity suite, so they stay conservative.
+ *    `code` tokens are cacheable: the open-fence highlight stream is
+ *    deterministic on the cumulative token text, and whole-block highlight
+ *    fidelity applies only to fences that already have a closing fence.
+ */
+interface TailRowCache extends RenderSignature {
+	tokenStart: number;
+	// Upper bound (exclusive) of absolute token indices covered by `rows`.
+	cachedThrough: number;
+	// Per-token final content rows (1:1 with the rendered content lines),
+	// indexed relative to `tokenStart`; undefined for uncacheable tokens.
+	rows: (readonly string[] | undefined)[];
+	// Raw snapshot per token (string value gate).
+	raws: (string | undefined)[];
+	// type of token[i+1] when the rows were produced (blank/spacing gate).
+	nextTypes: (string | undefined)[];
+}
+/**
+ * Mutable per-token record collector passed to #renderContentLines while
+ * rendering the streaming tail. The render loop fills `raws`/`nextTypes`
+ * per token as it goes and stores each token's final content rows into
+ * `rows` (relative to the render's `start`), so the tail cache can splice byte-identical
+ * rows for every token whose raw text and following-token type match.
+ */
+interface TailRenderRecorder {
+	rows: (readonly string[] | undefined)[];
+	raws: (string | undefined)[];
+	nextTypes: (string | undefined)[];
+}
 interface StreamingHighlightCache extends RenderSignature {
 	lang: string | undefined;
 	text: string;
@@ -1500,6 +1551,11 @@ export class Markdown implements Component {
 	#streamPrefixText?: string;
 	#streamPrefixTokens?: Token[];
 	#streamPrefixLineCache?: StreamPrefixLineCache;
+	// PoC H: per-token row cache for the unfrozen tail. Invalidated together
+	// with the prefix cache (width/signature changes, non-append edits) — see
+	// the blank-replacement branch of setText and the fallback branch of
+	// #lexTokens.
+	#tailRowCache?: TailRowCache;
 	// True while #renderStreamingContentLines renders the frozen token range:
 	// frozen code blocks highlight even in transient mode so their bytes match
 	// the finalized render (they render once into the prefix line cache, so
@@ -1550,6 +1606,7 @@ export class Markdown implements Component {
 			this.#streamPrefixText = undefined;
 			this.#streamPrefixTokens = undefined;
 			this.#streamPrefixLineCache = undefined;
+			this.#tailRowCache = undefined;
 		}
 		this.invalidate();
 		return true;
@@ -1602,6 +1659,7 @@ export class Markdown implements Component {
 			this.#streamPrefixText = undefined;
 			this.#streamPrefixTokens = undefined;
 			this.#streamPrefixLineCache = undefined;
+			this.#tailRowCache = undefined;
 		}
 		return tokens;
 	}
@@ -1623,6 +1681,7 @@ export class Markdown implements Component {
 			this.#streamPrefixText = undefined;
 			this.#streamPrefixTokens = undefined;
 			this.#streamPrefixLineCache = undefined;
+			this.#tailRowCache = undefined;
 		}
 	}
 
@@ -1741,7 +1800,7 @@ export class Markdown implements Component {
 		const stableText = this.#streamPrefixText;
 		const stableTokenCount = this.#streamPrefixTokens?.length ?? 0;
 		if (stableText === undefined || stableTokenCount === 0 || !normalizedText.startsWith(stableText)) {
-			return this.#renderContentLines(tokens, 0, tokens.length, contentWidth, signature);
+			return this.#renderStreamingTail(tokens, 0, contentWidth, signature);
 		}
 
 		const contentLines: string[] = [];
@@ -1774,7 +1833,7 @@ export class Markdown implements Component {
 		};
 
 		if (renderedUntil < tokens.length) {
-			contentLines.push(...this.#renderContentLines(tokens, renderedUntil, tokens.length, contentWidth, signature));
+			contentLines.push(...this.#renderStreamingTail(tokens, renderedUntil, contentWidth, signature));
 		}
 
 		return contentLines;
@@ -1802,17 +1861,115 @@ export class Markdown implements Component {
 		return cache;
 	}
 
+	/**
+	 * Render the unfrozen tail, splicing byte-identical rows from
+	 * {@link #tailRowCache} for every token whose raw text and following-token
+	 * type still match the cached snapshot. The splice reuses the exact content
+	 * lines a fresh render would produce — the row offsets are implicit in the
+	 * array order, so no offset recomputation is needed. The growing last token
+	 * is never spliced (its raw text always differs); it renders fresh and is
+	 * recorded again, so the cache trails the stream by one token.
+	 */
+	#renderStreamingTail(tokens: Token[], start: number, contentWidth: number, signature: RenderSignature): string[] {
+		const out: string[] = [];
+		let spliceEnd = start;
+		const cache = this.#tailRowCache;
+		if (cache !== undefined) {
+			spliceEnd = this.#tailSpliceEnd(cache, start, signature, tokens);
+			for (let i = start; i < spliceEnd; i++) {
+				out.push(...cache.rows[i - start]!);
+			}
+		}
+
+		const recorder: TailRenderRecorder = {
+			rows: new Array(tokens.length - spliceEnd).fill(undefined),
+			raws: new Array(tokens.length - spliceEnd).fill(undefined),
+			nextTypes: new Array(tokens.length - spliceEnd).fill(undefined),
+		};
+		const fresh = this.#renderContentLines(tokens, spliceEnd, tokens.length, contentWidth, signature, recorder);
+		out.push(...fresh);
+
+		// Refresh the cache: keep entries for spliced tokens (their raws stay
+		// valid), overlay the fresh entries, and re-derive the contiguous
+		// covered prefix (splicing stops at the first uncacheable or
+		// changed token). All arrays are tail-relative (index 0 = token
+		// `start`), so a mostly-frozen document allocates only for the
+		// unfrozen tail instead of the whole token list every frame.
+		const tailCount = tokens.length - start;
+		const rows: (readonly string[] | undefined)[] = new Array(tailCount).fill(undefined);
+		const raws: (string | undefined)[] = new Array(tailCount).fill(undefined);
+		const nextTypes: (string | undefined)[] = new Array(tailCount).fill(undefined);
+		if (cache !== undefined && cache.tokenStart === start) {
+			for (let i = start; i < Math.min(cache.cachedThrough, spliceEnd); i++) {
+				rows[i - start] = cache.rows[i - start];
+				raws[i - start] = cache.raws[i - start];
+				nextTypes[i - start] = cache.nextTypes[i - start];
+			}
+		}
+		for (let i = spliceEnd; i < tokens.length; i++) {
+			rows[i - start] = recorder.rows[i - spliceEnd];
+			raws[i - start] = recorder.raws[i - spliceEnd];
+			nextTypes[i - start] = recorder.nextTypes[i - spliceEnd];
+		}
+		let cachedThrough = start;
+		while (cachedThrough < tokens.length && rows[cachedThrough - start] !== undefined) cachedThrough++;
+		this.#tailRowCache = {
+			...signature,
+			tokenStart: start,
+			cachedThrough,
+			rows,
+			raws,
+			nextTypes,
+		};
+		return out;
+	}
+
+	// Longest cache-spliceable prefix: every cached row from `start` up to
+	// (but not including) the returned index is byte-identical to a fresh
+	// render of the same token. Stops at the first uncacheable token (rows
+	// undefined), the first token whose raw text changed (the growing tail
+	// token), or a following-token type change.
+	#tailSpliceEnd(cache: TailRowCache, start: number, signature: RenderSignature, tokens: Token[]): number {
+		if (cache.tokenStart !== start) return start;
+		if (cache.width !== signature.width) return start;
+		if (cache.paddingX !== signature.paddingX) return start;
+		if (cache.paddingY !== signature.paddingY) return start;
+		if (cache.codeBlockIndent !== signature.codeBlockIndent) return start;
+		if (cache.themeId !== signature.themeId) return start;
+		if (cache.defaultTextStyleId !== signature.defaultTextStyleId) return start;
+		if (cache.imageProtocol !== signature.imageProtocol) return start;
+		if (cache.hyperlinks !== signature.hyperlinks) return start;
+		if (cache.textSizing !== signature.textSizing) return start;
+		if (cache.bgColorProbe !== signature.bgColorProbe) return start;
+		if (cache.headingProbe !== signature.headingProbe) return start;
+		const limit = Math.min(cache.cachedThrough, tokens.length);
+		for (let i = start; i < limit; i++) {
+			if (cache.rows[i - start] === undefined) return i; // uncacheable token stops the splice
+			const cachedRaw = cache.raws[i - start];
+			const token = tokens[i];
+			if (cachedRaw === undefined || token === undefined) return start;
+			if (token.raw !== cachedRaw) return i; // changed/growing token: fresh-render from here
+			if ((tokens[i + 1]?.type ?? undefined) !== cache.nextTypes[i - start]) return i;
+		}
+		return limit;
+	}
+
 	#renderContentLines(
 		tokens: Token[],
 		start: number,
 		end: number,
 		contentWidth: number,
 		signature: RenderSignature,
+		tailRecorder?: TailRenderRecorder,
 	): string[] {
 		const wrappedLines: RenderedLine[] = [];
+		// Wrapped-row span per absolute token index. Call-local: stale values
+		// are never read across renders.
+		const tokenWrappedRowCounts: number[] = [];
 		for (let i = start; i < end; i++) {
 			const token = tokens[i];
 			const nextToken = tokens[i + 1];
+			const tokenWrappedRowStart = wrappedLines.length;
 			const renderedTokenLines = this.#renderToken(token, contentWidth, nextToken?.type);
 			for (const renderedRow of renderedTokenLines) {
 				// Lists wrap while their structural prefixes are still available, so
@@ -1831,6 +1988,7 @@ export class Markdown implements Component {
 					}
 				}
 			}
+			tokenWrappedRowCounts[i] = wrappedLines.length - tokenWrappedRowStart;
 		}
 
 		const leftMargin = padding(signature.paddingX);
@@ -1873,6 +2031,36 @@ export class Markdown implements Component {
 				const visibleLen = visibleWidth(lineWithMargins);
 				const paddingNeeded = Math.max(0, signature.width - visibleLen);
 				contentLines.push(lineWithMargins + padding(paddingNeeded));
+			}
+		}
+
+		// PoC H: record per-token row slices for the tail cache. The pad pass
+		// maps every wrapped row to exactly one content line (structural blanks
+		// after OSC 66 sized headings are pushed unpadded but still present), so
+		// slicing by the per-token wrap spans recovers each token's exact rows.
+		if (tailRecorder !== undefined) {
+			const rows = tailRecorder.rows;
+			const raws = tailRecorder.raws;
+			const nextTypes = tailRecorder.nextTypes;
+			let wrappedStart = 0;
+			let contentCursor = 0;
+			for (let i = start; i < end; i++) {
+				const token = tokens[i]!;
+				const wrappedEnd = wrappedStart + tokenWrappedRowCounts[i]!;
+				const rowCount = wrappedEnd - wrappedStart;
+				raws[i - start] = token.raw;
+				nextTypes[i - start] = tokens[i + 1]?.type;
+				// Tables are never cached: their layout depends on the whole
+				// token and the width budget, and the splice path is not
+				// covered by the byte-identity suite. Keep the raw/nextTypes
+				// gates but drop rows.
+				if (token.type === "table") {
+					rows[i - start] = undefined;
+				} else {
+					rows[i - start] = contentLines.slice(contentCursor, contentCursor + rowCount);
+				}
+				contentCursor += rowCount;
+				wrappedStart = wrappedEnd;
 			}
 		}
 

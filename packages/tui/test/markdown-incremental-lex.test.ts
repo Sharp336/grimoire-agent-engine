@@ -95,6 +95,18 @@ const MIXED = (() => {
 	return out;
 })();
 
+const TABLE = (() => {
+	// Table rows stream in as the tail grows: a growing table in the unfrozen
+	// tail must render byte-identically (the tail row cache excludes `table`
+	// tokens, so these frames exercise the exclusion path under
+	// assertIdenticalGrowthTransient).
+	const para = "Intro paragraph before the table streams in, with a `code span` and **bold** for flavor. ";
+	let out = `${para}\n\n| col_a | col_b |\n| ----- | ----- |\n`;
+	for (let i = 1; i <= 4; i++) out += `| row_${i}_a | row_${i}_b |\n`;
+	out += "\n\nTrailing prose after the table keeps growing with more sentences.";
+	return out;
+})();
+
 describe("Markdown incremental streaming lex (E2)", () => {
 	it("prose growth is byte-identical to full lex", () => {
 		assertIdenticalGrowth(PROSE);
@@ -126,6 +138,10 @@ describe("Markdown incremental streaming lex (E2)", () => {
 
 	it("transient render-prefix cache: mixed multi-section split render is byte-identical", () => {
 		assertIdenticalGrowthTransient(MIXED, 80, 29);
+	});
+
+	it("transient render-prefix cache: table growing in the tail is byte-identical", () => {
+		assertIdenticalGrowthTransient(TABLE, 60, 7);
 	});
 
 	it("a width change mid-stream still matches a cold render at the new width", () => {
