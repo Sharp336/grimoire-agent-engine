@@ -6,6 +6,7 @@ import {
 	findTrailingSlashCommandStart,
 	midPromptSkillTokenMatches,
 	SKILL_NAMESPACE,
+	scoreCommandTextMatch,
 } from "../autocomplete";
 import { BracketedPasteHandler, decodeReencodedPasteControls } from "../bracketed-paste";
 import { canonicalKeyId, getKeybindings, type KeybindingsManager } from "../keybindings";
@@ -1416,8 +1417,10 @@ export class Editor implements Component, Focusable {
 					if (!this.#autocompletePrefixMatchesCursorText(currentTextBeforeCursor, selected)) {
 						// Autocomplete is stale. For a stale slash-command popup, Tab does
 						// what a refreshed popup would: apply the fresh top-ranked completion
-						// for the live token (#9637 review). Otherwise silently cancel; Tab
-						// has no fallback action here.
+						// for the live token (#9637 review), then chain into argument
+						// completions the same way the fresh-selection path below does.
+						// Otherwise silently cancel; Tab has no fallback action here.
+						const shouldChainSlashCommandAutocomplete = this.#isSlashCommandNameAutocompleteSelection();
 						if (!this.#isStaleSlashCommandPopup() || !this.#applySyncSlashCompletion(currentTextBeforeCursor)) {
 							this.#cancelAutocomplete();
 							return;
@@ -1426,6 +1429,9 @@ export class Editor implements Component, Focusable {
 						this.onAutocompleteUpdate?.();
 						if (this.onChange) {
 							this.onChange(this.getText());
+						}
+						if (shouldChainSlashCommandAutocomplete && this.#isCompletedSlashCommandAtCursor()) {
+							void this.#tryTriggerAutocomplete();
 						}
 						return;
 					}
@@ -3348,8 +3354,15 @@ export class Editor implements Component, Focusable {
 					// `log` outranks usage-heavy `login` for the token `log`). Only accept
 					// when a fresh sync ranking for the live token still selects this item;
 					// otherwise the accept paths re-derive the completion via
-					// #applySyncSlashCompletion.
-					const fresh = this.#autocompleteProvider?.trySyncSlashCompletion?.(currentTextBeforeCursor);
+					// #applySyncSlashCompletion. Providers without the optional sync ranker
+					// (extension wrappers delegating only the required provider methods)
+					// keep the older text-match acceptance: name/alias match against the
+					// selection, no fuzzy description hits.
+					const provider = this.#autocompleteProvider;
+					if (!provider?.trySyncSlashCompletion) {
+						return !!item && scoreCommandTextMatch(token.slice(1).toLowerCase(), item.value.toLowerCase()) > 0;
+					}
+					const fresh = provider.trySyncSlashCompletion(currentTextBeforeCursor);
 					return !!item && !!fresh && fresh.items.length > 0 && fresh.items[0]!.value === item.value;
 				}
 			}

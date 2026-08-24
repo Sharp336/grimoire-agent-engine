@@ -1091,4 +1091,72 @@ describe("Editor fast-typing autocomplete race (stale popup accepted over typed 
 		expect(editor.getText()).toBe("/log ");
 		expect(editor.isShowingAutocomplete()).toBe(false);
 	});
+
+	// Extension wrappers delegating only the required provider methods hide the
+	// optional trySyncSlashCompletion ranker; the accept paths must fall back to
+	// the older text-match acceptance instead of rejecting everything (#9637
+	// review).
+	class RankerlessWrapper implements AutocompleteProvider {
+		constructor(readonly inner: CombinedAutocompleteProvider) {}
+		getSuggestions(
+			lines: string[],
+			cursorLine: number,
+			cursorCol: number,
+			signal?: AbortSignal,
+		): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
+			return this.inner.getSuggestions(lines, cursorLine, cursorCol, signal);
+		}
+		applyCompletion(lines: string[], cursorLine: number, cursorCol: number, item: AutocompleteItem, prefix: string) {
+			return this.inner.applyCompletion(lines, cursorLine, cursorCol, item, prefix);
+		}
+	}
+
+	it("keeps text-match acceptance for providers without the sync ranker", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(new RankerlessWrapper(createUsageRankedProvider()));
+		let submitted = "";
+		editor.onSubmit = text => {
+			submitted = text;
+		};
+
+		editor.handleInput("/");
+		await untilAutocompleteShown(editor); // popup selects "loop" via usage
+
+		// "lo" prefix-matches the stale selection; without a sync ranker the old
+		// acceptance behavior applies it rather than canceling.
+		for (const char of "lo") editor.handleInput(char);
+		editor.handleInput("\r");
+
+		expect(submitted).toBe("/loop");
+	});
+
+	it("chains into argument completions after a stale-Tab fresh completion", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider(
+				[
+					{
+						name: "model",
+						description: "Pick the model",
+						getArgumentCompletions: async () => [{ value: "sonnet", label: "sonnet" }],
+					},
+					{ name: "mood", description: "Set the mood" },
+				],
+				"/tmp",
+				{ commandUsage: name => (name === "model" ? 10 : 0) },
+			),
+		);
+
+		editor.handleInput("/");
+		await untilAutocompleteShown(editor); // popup selects "model" via usage
+
+		// Stale popup: "mode" outruns the debounce; the fresh ranking still picks
+		// model, applies it with its trailing space, and must reopen autocomplete
+		// for the command's arguments instead of requiring a second Tab.
+		for (const char of "mode") editor.handleInput(char);
+		editor.handleInput("\t");
+
+		expect(editor.getText()).toBe("/model ");
+		await untilAutocompleteShown(editor);
+	});
 });
