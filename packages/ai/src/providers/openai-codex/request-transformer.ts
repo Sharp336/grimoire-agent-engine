@@ -169,7 +169,11 @@ function getReasoningConfig(
 	// `undefined` means "default on" — matching `applyResponsesCompatPolicy`
 	// on the plain Responses path — and only an explicit `null` (the caller
 	// hiding thinking) opts out.
-	if (options.reasoningSummary !== null && supportsCodexReasoningSummary(model.id)) {
+	if (
+		model.compat.supportsReasoningSummary &&
+		options.reasoningSummary !== null &&
+		supportsCodexReasoningSummary(model.id)
+	) {
 		config.summary = options.reasoningSummary ?? "auto";
 	}
 	return config;
