@@ -444,4 +444,42 @@ describe("RelayBridge tab grouping", () => {
 		expect(attaches).toHaveLength(1);
 		expect(attaches[0]!.tabId).toBe(1);
 	});
+
+	it("keeps a bare attachToTarget holder's page session usable across recovery and detaches on close", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		// Bare holder: only Target.attachToTarget, no setDiscoverTargets/setAutoAttach.
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.extClosed(ext);
+
+		// Reconnect: the tab is recoverable (guard detach), so the bridge re-attaches.
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await flush();
+		expect(ext2.rpcs("attach")).toHaveLength(1);
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		// The holder's original page session survived the root swap: its next
+		// command routes to the freshly attached tab instead of "Unknown session id".
+		const cmdId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: cmdId, sessionId: pageSession, method: "Runtime.evaluate" }));
+		ack(bridge, ext2, "send", { ok: true });
+		await flush();
+		const reply = cdp.messages.find(m => m.id === cmdId);
+		expect(reply?.error).toBeUndefined();
+		expect(ext2.rpcs("send")).toHaveLength(1);
+		expect(ext2.rpcs("send")[0]!.tabId).toBe(1);
+
+		// Closing the sole holder now detaches the debugger — the session was never
+		// orphaned, so the attachment is reclaimable and the infobar clears.
+		bridge.cdpClosed(connId);
+		await flush();
+		expect(ext2.rpcs("detach")).toHaveLength(1);
+		expect(ext2.rpcs("detach")[0]!.tabId).toBe(1);
+	});
 });

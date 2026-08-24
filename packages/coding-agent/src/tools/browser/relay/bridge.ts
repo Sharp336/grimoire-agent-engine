@@ -306,11 +306,21 @@ export class RelayBridge {
 				this.#onTabDetached(tab.tabId, "detached_while_disconnected");
 				continue;
 			}
-			// A guard detach creates a fresh Chrome root session. Retract every
-			// pseudo/real child tied to the old root before re-announcing the tab.
-			// Force the attachment: this tab is still claimed by a surviving session
-			// holder, so recovery must re-attach even if no connection auto-attaches.
-			this.#retractTab(tab);
+			// A guard detach creates a fresh Chrome root session, so every real child
+			// session (OOPIF/worker) tied to the old root must be torn down. But a
+			// bare Target.attachToTarget holder — one that never enabled
+			// setAutoAttach or setDiscoverTargets — keeps a long-lived page
+			// pseudo-session routed by tabId (not the old Chrome root id), so it
+			// stays valid across the re-attach and Chrome never re-emits a
+			// replacement for it. Preserve those page sessions through the retract:
+			// dropping them makes the holder's next command fail "Unknown session
+			// id", and with no session left in `conn.sessions` `cdpClosed` can no
+			// longer detach the debugger — re-orphaning the very attachment this
+			// recovery is restoring.
+			const preserve = [...this.#conns.values()].filter(
+				conn => !conn.autoAttach && !conn.discover && conn.sessionsForTab(tab.tabId, "page").length > 0,
+			);
+			this.#retractTab(tab, preserve);
 			this.#announceTab(tab, true);
 		}
 		this.#syncGrouping();
@@ -826,20 +836,28 @@ export class RelayBridge {
 		}
 	}
 
-	/** Tear a tab out of every downstream connection (closed, detached, or now ineligible). */
-	#retractTab(tab: TabState): void {
+	/**
+	 * Tear a tab out of every downstream connection (closed, detached, or now
+	 * ineligible). Connections in `keepPageSessions` retain their page
+	 * pseudo-session: a bare attachToTarget holder routes by tabId, so its
+	 * session survives a Chrome root swap and must not be destroyed on recovery.
+	 */
+	#retractTab(tab: TabState, keepPageSessions: CdpConnection[] = []): void {
 		for (const realSession of tab.realSessions) this.#realSessionTabs.delete(realSession);
 		tab.realSessions.clear();
 		for (const conn of this.#conns.values()) {
+			const preservePages = keepPageSessions.includes(conn);
 			const tabSessions = conn.sessionsForTab(tab.tabId, "tab");
-			for (const pageSession of conn.sessionsForTab(tab.tabId, "page")) {
-				conn.sessions.delete(pageSession);
-				this.#emit(
-					conn,
-					"Target.detachedFromTarget",
-					{ sessionId: pageSession, targetId: pageTargetId(tab.tabId) },
-					tabSessions[0],
-				);
+			if (!preservePages) {
+				for (const pageSession of conn.sessionsForTab(tab.tabId, "page")) {
+					conn.sessions.delete(pageSession);
+					this.#emit(
+						conn,
+						"Target.detachedFromTarget",
+						{ sessionId: pageSession, targetId: pageTargetId(tab.tabId) },
+						tabSessions[0],
+					);
+				}
 			}
 			for (const tabSession of tabSessions) {
 				conn.sessions.delete(tabSession);
