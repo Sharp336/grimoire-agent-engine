@@ -20,6 +20,9 @@
 - Fixed daemon broker idle shutdown closing newly accepted clients before their authentication request could be processed under load.
 - Fixed supervised image tunnels rejecting a published URL when the child exited between the startup poll's log read and exit check.
 
+### Added
+
+- Fenced code blocks now expose a clickable `copy` link that copies their original source text.
 ## [18.0.4] - 2026-08-24
 
 ### Added
