@@ -135,6 +135,12 @@ export interface RpcAvailableCommandsUpdateFrame {
 	commands: RpcAvailableSlashCommand[];
 }
 
+/** Text printed by a builtin slash command, emitted as the command runs. */
+export interface RpcCommandOutputFrame {
+	type: "command_output";
+	text: string;
+}
+
 export interface RpcPromptResultFrame {
 	type: "prompt_result";
 	id?: string;

@@ -23,6 +23,7 @@ import type {
 	RpcAvailableCommandsUpdateFrame,
 	RpcAvailableSlashCommand,
 	RpcCommand,
+	RpcCommandOutputFrame,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
 	RpcHandoffResult,
@@ -76,6 +77,8 @@ export type RpcSubagentLifecycleListener = (payload: RpcSubagentLifecycleFrame["
 export type RpcSubagentProgressListener = (payload: RpcSubagentProgressFrame["payload"]) => void;
 export type RpcSubagentEventListener = (payload: RpcSubagentEventFrame["payload"]) => void;
 export type RpcAvailableCommandsUpdateListener = (commands: RpcAvailableSlashCommand[]) => void;
+export type RpcExtensionUiRequestListener = (request: RpcExtensionUIRequest) => void;
+export type RpcCommandOutputListener = (text: string) => void;
 
 export interface RpcClientToolContext<TDetails = unknown> {
 	toolCallId: string;
@@ -190,6 +193,11 @@ function isRpcAvailableCommandsUpdateFrame(value: unknown): value is RpcAvailabl
 	return value.type === "available_commands_update" && Array.isArray(value.commands);
 }
 
+function isRpcCommandOutputFrame(value: unknown): value is RpcCommandOutputFrame {
+	if (!isRecord(value)) return false;
+	return value.type === "command_output" && typeof value.text === "string";
+}
+
 function isRpcHostToolCallRequest(value: unknown): value is RpcHostToolCallRequest {
 	if (!isRecord(value)) return false;
 	return (
@@ -259,7 +267,8 @@ export class RpcClient {
 	#pendingHostToolCalls = new Map<string, { controller: AbortController }>();
 	#requestId = 0;
 	#protocolVersion: RpcProtocolVersion = 1;
-	#extensionUiListeners: Set<(req: RpcExtensionUIRequest) => void> = new Set();
+	#extensionUiListeners: Set<RpcExtensionUiRequestListener> = new Set();
+	#commandOutputListeners: Set<RpcCommandOutputListener> = new Set();
 	#abortController = new AbortController();
 
 	constructor(private options: RpcClientOptions = {}) {
@@ -536,6 +545,39 @@ export class RpcClient {
 	onAvailableCommandsUpdate(listener: RpcAvailableCommandsUpdateListener): () => void {
 		this.#availableCommandsUpdateListeners.add(listener);
 		return () => this.#availableCommandsUpdateListeners.delete(listener);
+	}
+
+	/**
+	 * Subscribe to extension UI requests emitted by the RPC server.
+	 *
+	 * Tool approval reaches a host through this channel: the tool wrapper asks
+	 * with `uiContext.select(prompt, ["Approve", "Deny"])`, so it arrives as an
+	 * ordinary `extension_ui_request` rather than a frame of its own. Every
+	 * blocking method (`select`, `confirm`, `input`, `editor`) must be answered
+	 * with {@link respondToExtensionUi}; the approval dialog carries no timeout,
+	 * so an unanswered request stalls the turn indefinitely.
+	 */
+	onExtensionUiRequest(listener: RpcExtensionUiRequestListener): () => void {
+		this.#extensionUiListeners.add(listener);
+		return () => this.#extensionUiListeners.delete(listener);
+	}
+
+	/**
+	 * Answer a pending extension UI request.
+	 *
+	 * Responses carrying an unknown or already-settled id are discarded by the
+	 * server, so answering twice is harmless.
+	 */
+	respondToExtensionUi(response: RpcExtensionUIResponse): void {
+		this.#writeFrame(response);
+	}
+
+	/**
+	 * Subscribe to text printed by builtin slash commands.
+	 */
+	onCommandOutput(listener: RpcCommandOutputListener): () => void {
+		this.#commandOutputListeners.add(listener);
+		return () => this.#commandOutputListeners.delete(listener);
 	}
 
 	/**
@@ -1077,6 +1119,13 @@ export class RpcClient {
 		if (isRpcAvailableCommandsUpdateFrame(data)) {
 			for (const listener of this.#availableCommandsUpdateListeners) {
 				listener(data.commands);
+			}
+			return;
+		}
+
+		if (isRpcCommandOutputFrame(data)) {
+			for (const listener of this.#commandOutputListeners) {
+				listener(data.text);
 			}
 			return;
 		}
