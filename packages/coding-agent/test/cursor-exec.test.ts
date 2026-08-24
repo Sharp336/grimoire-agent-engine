@@ -1036,6 +1036,35 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 		expect((await handlers.listMcpResources({})).map(r => r.uri)).toEqual(["docs://readme"]);
 		expect(await handlers.readMcpResource({ server: "docs", uri: "docs://readme" })).not.toBeNull();
 	});
+	it("keeps a resource-only server when the per-server predicate allows it", async () => {
+		// A resource-only server (advertises resources, no tools) has no
+		// registry tool to gate on. Under an MCP-targeting scope the handler
+		// consults the per-server predicate: a server its `mcp__` disallow
+		// patterns do not name stays listable/readable, one they name is
+		// stripped — while a server that owns tools is gated purely by
+		// `isToolExecutable`, never rescued by the predicate.
+		const gatedTool = { name: "mcp__docs_list", mcpServerName: "docs" } as unknown as AgentTool;
+		const handlers = new CursorExecHandlers({
+			cwd: ".",
+			tools: new Map([["mcp__docs_list", gatedTool]]),
+			isToolExecutable: name => name === "mcp__unrelated",
+			allowToollessMcpServers: serverName => serverName !== "secrets",
+			mcpResources: {
+				serverNames: () => ["docs", "secrets", "notes"],
+				getServerResources: async name => ({ resources: [{ uri: `${name}://entry`, name }] }) as never,
+				readServerResource: async (name, uri) =>
+					({ contents: [{ uri, mimeType: "text/plain", text: `content from ${name}` }] }) as never,
+			},
+		});
+
+		// `docs` owns a tool the gate rejects: stripped despite the predicate.
+		// `secrets` is resource-only and the predicate rejects it: stripped.
+		// `notes` is resource-only and the predicate allows it: kept.
+		expect((await handlers.listMcpResources({})).map(r => r.uri)).toEqual(["notes://entry"]);
+		expect(await handlers.readMcpResource({ server: "docs", uri: "docs://entry" })).toBeNull();
+		expect(await handlers.readMcpResource({ server: "secrets", uri: "secrets://entry" })).toBeNull();
+		expect(await handlers.readMcpResource({ server: "notes", uri: "notes://entry" })).not.toBeNull();
+	});
 
 	it("waits for a server's catalog instead of reporting it empty", async () => {
 		// A server registers its tools before its resource catalog finishes

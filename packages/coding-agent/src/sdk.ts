@@ -224,7 +224,13 @@ import {
 	xdevDocsAll,
 	xdevEntries,
 } from "./tools";
-import { isMCPToolName, isToolDisallowed, isToolScopedIn, normalizeToolNames } from "./tools/builtin-names";
+import {
+	isMCPToolName,
+	isToolDisallowed,
+	isToolScopedIn,
+	mcpDisallowTargetsServer,
+	normalizeToolNames,
+} from "./tools/builtin-names";
 import { ToolContextStore } from "./tools/context";
 import { isIrcEnabled } from "./tools/hub";
 import { getImageGenTools } from "./tools/image-gen";
@@ -2945,18 +2951,27 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// live connections have any. Built once: the advisor bridges answer from
 		// the same connections the primary does.
 		// A resource-only server (advertises resources, no tools) has no registry
-		// entry to gate on. Keep it available unless the scope itself targets MCP
-		// access (an enforced allowlist — the subagent declared no MCP tools — or
-		// an `mcp__` disallow pattern): an unrelated `disallowedTools: [bash]`
-		// must not silently strip a server's resources.
-		const scopeTargetsMcp = enforceToolAllowlist || disallowedPatterns.some(pattern => pattern.startsWith("mcp__"));
+		// entry to gate on. Keep it unless the scope targets THIS server: an
+		// enforced allowlist (the subagent declared no MCP tools) or an `mcp__`
+		// disallow pattern naming it (`mcp__*` or `mcp__<server>_*`) strips it,
+		// while an unrelated `disallowedTools: [bash]` or a pattern for a
+		// different server must not silently remove its resources.
+		const resourceOnlyServerAllowed = (serverName: string): boolean =>
+			!enforceToolAllowlist && !mcpDisallowTargetsServer(disallowedPatterns, serverName);
+		// A server that owns registry tools is gated purely by `hasOwnedTool`
+		// (at least one tool scoped in); the per-server predicate applies only
+		// to resource-only servers (no owned registry tool at all).
+		const ownsAnyTool = (serverName: string): boolean =>
+			Array.from(toolRegistry.values()).some(
+				tool => (tool as { mcpServerName?: unknown }).mcpServerName === serverName,
+			);
 		const cursorMcpResources: CursorMcpResourceAdapter | undefined = mcpManager && {
 			serverNames: () =>
 				mcpManager.getConnectedServers().filter(name => {
 					const hasOwnedTool = mcpServerScopedIn(toolRegistry.values(), cursorScopeAllows, name);
-					// Resource-only servers have no owned tool; keep them when the
-					// scope does not target MCP access at all.
-					return hasOwnedTool || !scopeTargetsMcp;
+					// Resource-only servers have no owned tool; keep them when
+					// the scope does not target this server.
+					return hasOwnedTool || (!ownsAnyTool(name) && resourceOnlyServerAllowed(name));
 				}),
 			getServerResources: async name => {
 				// The manager registers a server's tools before its background
@@ -2971,8 +2986,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// bridge's handler re-checks, but the advisor bridge shares this
 				// adapter and has no handler-level gate. Resource-only servers
 				// (no owned tool) stay readable when the scope does not target
-				// MCP access at all.
-				if (!mcpServerScopedIn(toolRegistry.values(), cursorScopeAllows, name) && scopeTargetsMcp) return undefined;
+				// this server.
+				if (
+					!mcpServerScopedIn(toolRegistry.values(), cursorScopeAllows, name) &&
+					(ownsAnyTool(name) || !resourceOnlyServerAllowed(name))
+				) {
+					return undefined;
+				}
 				return mcpManager.readServerResource(name, uri);
 			},
 		};
@@ -3000,9 +3020,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					? (name: string): boolean => cursorScopeAllows(name)
 					: undefined,
 			// Resource-only servers (no owned tool) stay readable when the scope
-			// does not target MCP access; the handler gate must agree with the
-			// adapter's `scopeTargetsMcp` decision.
-			allowToollessMcpServers: !scopeTargetsMcp,
+			// does not target this server; the handler gate must agree with the
+			// adapter's per-server filtering.
+			allowToollessMcpServers: resourceOnlyServerAllowed,
 			getToolContext: () => toolContextStore.getContext(),
 			mcpResources: cursorMcpResources,
 			emitEvent: event => cursorEventEmitter?.(event),
@@ -3111,7 +3131,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// unrelated disallow (`disallowedTools: [bash]`) must not strip a
 				// resource-only server's instructions (no owned tool to match) — it
 				// keeps every server's instructions, byte-identical to unrestricted.
-				if (scopeTargetsMcp) {
+				if (enforceToolAllowlist || disallowedPatterns.some(pattern => pattern.startsWith("mcp__"))) {
 					scopedInServerNames = new Set();
 					// xd://-mounted MCP tools leave `toolNames` (presentation moves to
 					// `mountedNames`) while staying in the canonical `tools` map, so the
@@ -3141,7 +3161,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				}
 				const keptServerInstructions: [string, string][] = [];
 				for (const [srvName, srvInstructions] of serverInstructions) {
-					if (scopedInServerNames && !scopedInServerNames.has(srvName)) continue;
+					if (scopedInServerNames) {
+						// A server with owned tools is kept only when at least one is
+						// scoped in. A resource-only server (no owned registry tool)
+						// has no ownership entry; keep it when the scope does not
+						// target THIS server — an unrelated disallow
+						// (`disallowedTools: [bash]`) or a pattern for a different
+						// server must not strip its instructions, while `mcp__*` or
+						// `mcp__<server>_*` naming it must (matching the Cursor
+						// resource adapter's per-server gate).
+						const ownsAnyTool = Array.from(tools.values()).some(
+							tool => (tool as { mcpServerName?: unknown }).mcpServerName === srvName,
+						);
+						if (ownsAnyTool ? !scopedInServerNames.has(srvName) : !resourceOnlyServerAllowed(srvName)) continue;
+					}
 					keptServerInstructions.push([srvName, srvInstructions]);
 				}
 				if (keptServerInstructions.length > 0) {

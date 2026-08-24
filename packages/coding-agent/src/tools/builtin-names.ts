@@ -109,6 +109,26 @@ function mcpWildcardServerSegment(pattern: string): string | undefined {
 }
 
 /**
+ * Whether a disallow pattern set targets a whole MCP server by name: the
+ * blanket `mcp__*` or a bare `mcp__<server>_*` wildcard whose server segment
+ * matches {@link sanitizeMCPToolNamePart} of the raw server name. Used to
+ * decide whether a resource-only server (advertises resources, no tools — no
+ * registry tool to gate on) is scoped out: an unrelated disallow
+ * (`disallowedTools: [bash]`) or a pattern for a different server must not
+ * strip its resources/instructions, while `mcp__*` or `mcp__<server>_*`
+ * naming it must.
+ */
+export function mcpDisallowTargetsServer(patterns: readonly string[], serverName: string): boolean {
+	const sanitized = sanitizeMCPToolNamePart(serverName, "server");
+	for (const pattern of patterns) {
+		if (pattern === "mcp__*") return true;
+		const serverSegment = mcpWildcardServerSegment(pattern);
+		if (serverSegment !== undefined && serverSegment === sanitized) return true;
+	}
+	return false;
+}
+
+/**
  * Match a tool name against disallow patterns: a trailing `*` is a prefix
  * wildcard (`mcp__*` = all MCP tools, `mcp__<server>_*` = one server), any
  * other pattern matches the exact name.

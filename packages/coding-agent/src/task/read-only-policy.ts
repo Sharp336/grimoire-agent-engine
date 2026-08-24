@@ -28,8 +28,7 @@ export function isReadOnlyAgent(agent: AgentDefinition): boolean {
 	// mutating tool (e.g. `tools: [read, write]` + `disallowedTools: [write]`),
 	// leaving a read-only scope that the declared list alone would mark
 	// writable — and the parent uses this to decide whether it may assign
-	// edits to the child. Fail-safe: an empty effective set is NOT read-only
-	// (no declared tools means full inheritance).
+	// edits to the child.
 	// Name-only matching (no `mcpServerName` metadata): `AgentDefinition` carries
 	// declared tool names, not registry tool objects, so a capped-name MCP server
 	// needs an exact-name disallow here or relies on the sdk-level metadata-aware
@@ -43,6 +42,13 @@ export function isReadOnlyAgent(agent: AgentDefinition): boolean {
 	// disallows, no allowlist) stays non-read-only: unknown inherited tools
 	// keep the fail-safe false.
 	if (patterns.some(pattern => pattern === "*")) return true;
-	const effective = agent.tools?.filter(tool => !isToolDisallowed(tool, patterns));
-	return !!effective?.length && effective.every(tool => READ_ONLY_TOOL_NAMES.has(tool));
+	// No explicit allowlist means full inheritance: the child may inherit
+	// mutating tools, so it is never read-only (fail-safe).
+	if (agent.tools === undefined) return false;
+	// An explicit allowlist whose post-disallow effective set is empty is a
+	// protocol-only scope: the child can call no tool at all, so it cannot
+	// mutate anything and classifies read-only. A non-empty effective set is
+	// read-only iff every surviving tool is read-only.
+	const effective = agent.tools.filter(tool => !isToolDisallowed(tool, patterns));
+	return effective.every(tool => READ_ONLY_TOOL_NAMES.has(tool));
 }

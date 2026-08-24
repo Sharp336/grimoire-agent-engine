@@ -46,6 +46,28 @@ describe("task agent capability descriptions", () => {
 		// the protocol-only child can mutate nothing, so it classifies read-only.
 		expect(isReadOnlyAgent({ ...base, disallowedTools: ["*"] })).toBe(true);
 	});
+	it("classifies an empty effective allowlist as read-only", () => {
+		// An explicit `tools: []` is a hard allowlist (discovery preserves it):
+		// the child can call no tool at all, so it must not be advertised as
+		// writable. Same for an allowlist whose every tool is disallowed.
+		const base: AgentDefinition = {
+			name: "x",
+			description: "x",
+			systemPrompt: "x",
+			source: "bundled",
+		};
+		expect(isReadOnlyAgent({ ...base, tools: [] })).toBe(true);
+		expect(
+			isReadOnlyAgent({
+				...base,
+				tools: ["write"],
+				disallowedTools: ["write"],
+			}),
+		).toBe(true);
+		// No allowlist at all still means full inheritance: unknown inherited
+		// tools keep the fail-safe non-read-only classification.
+		expect(isReadOnlyAgent({ ...base, disallowedTools: ["write"] })).toBe(false);
+	});
 
 	it("disables read summarization for scout and librarian, leaves other agents summarizing", () => {
 		const agents = loadBundledAgents();

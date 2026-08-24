@@ -3,6 +3,7 @@ import { createMCPToolName } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import {
 	isToolDisallowed,
 	isToolScopedIn,
+	mcpDisallowTargetsServer,
 	sanitizeMCPToolNamePart,
 } from "@oh-my-pi/pi-coding-agent/tools/builtin-names";
 
@@ -114,5 +115,30 @@ describe("isToolScopedIn", () => {
 
 	test("hidden protocol tools stay scoped in under an enforced allowlist with metadata", () => {
 		expect(isToolScopedIn("yield", ["*"], { enforceToolAllowlist: true }, LONG_SERVER_NAME)).toBe(true);
+	});
+});
+describe("mcpDisallowTargetsServer", () => {
+	test("blanket mcp__* targets every server", () => {
+		expect(mcpDisallowTargetsServer(["mcp__*"], "foo")).toBe(true);
+		expect(mcpDisallowTargetsServer(["mcp__*"], "bar")).toBe(true);
+	});
+
+	test("bare mcp__<server>_* targets only the server whose sanitized segment matches", () => {
+		expect(mcpDisallowTargetsServer(["mcp__foo_*"], "foo")).toBe(true);
+		expect(mcpDisallowTargetsServer(["mcp__foo_*"], "bar")).toBe(false);
+		// Raw config names sanitize exactly like minted tool-name prefixes.
+		expect(mcpDisallowTargetsServer(["mcp__db_*"], "DB2")).toBe(true);
+		expect(mcpDisallowTargetsServer(["mcp__foo_bar_*"], "Foo Bar")).toBe(true);
+		// A capped server name still matches through the sanitized segment.
+		expect(mcpDisallowTargetsServer([LONG_SERVER_PATTERN], LONG_SERVER_NAME)).toBe(true);
+	});
+
+	test("unrelated patterns never target a server", () => {
+		expect(mcpDisallowTargetsServer(["bash"], "foo")).toBe(false);
+		expect(mcpDisallowTargetsServer([], "foo")).toBe(false);
+		// A tool-prefix wildcard is not a server wildcard.
+		expect(mcpDisallowTargetsServer(["mcp__foo_query*"], "foo")).toBe(false);
+		// An exact tool name is not a server target.
+		expect(mcpDisallowTargetsServer(["mcp__foo_query"], "foo")).toBe(false);
 	});
 });
