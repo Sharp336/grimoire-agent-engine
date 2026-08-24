@@ -1,7 +1,7 @@
 import { fetchOpenAICompatibleModels } from "../discovery/openai-compatible";
 import { getBundledModelReferenceIndex } from "../identity/bundled";
 import { isAnthropicNamespacedModelId, isClaudeModelId } from "../identity/family";
-import { resolveModelReference } from "../identity/reference";
+import { inheritReferenceThinking, resolveModelReference } from "../identity/reference";
 import type { ModelManagerOptions } from "../model-manager";
 import type { Api, ModelSpec } from "../types";
 import type { ModelManagerConfig } from "./descriptor-types";
@@ -34,7 +34,7 @@ export function resolveCommandCodeApi(modelId: string): Api {
 function mapCommandCodeModel(defaults: ModelSpec<Api>, baseUrl?: string): ModelSpec<Api> {
 	const reference = resolveModelReference(defaults.id, getBundledModelReferenceIndex());
 	const api = resolveCommandCodeApi(defaults.id);
-	const sameWireReference = reference?.api === api ? reference : undefined;
+	const thinking = inheritReferenceThinking(defaults.thinking, reference, "command-code");
 	return {
 		...defaults,
 		name: reference?.name ?? defaults.name,
@@ -48,9 +48,9 @@ function mapCommandCodeModel(defaults: ModelSpec<Api>, baseUrl?: string): ModelS
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: reference?.contextWindow ?? defaults.contextWindow,
 		maxTokens: reference?.maxTokens ?? defaults.maxTokens,
-		// Explicit thinking metadata may encode transport-specific fields, so
-		// only copy it when the reference already uses the same wire API.
-		...(sameWireReference?.thinking ? { thinking: sameWireReference.thinking } : {}),
+		// Wire-model aliases such as effortRouting are provider-specific. Keep
+		// discovery-provided thinking, but never inherit another provider's routing.
+		...(thinking ? { thinking } : {}),
 	};
 }
 
