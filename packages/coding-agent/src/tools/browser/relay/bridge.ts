@@ -721,12 +721,21 @@ export class RelayBridge {
 			this.#emit(conn, "Target.targetCreated", { targetInfo: this.#tabInfo(tab, tab.attached) });
 			this.#emit(conn, "Target.targetCreated", { targetInfo: this.#pageInfo(tab, tab.attached) });
 		}
-		for (const conn of this.#conns.values()) {
-			if (!conn.autoAttach) continue;
-			void this.#ensureAttached(tab).then(ok => {
-				if (ok) this.#emitTabAttached(conn, tab);
-			});
-		}
+		const autoAttachConns = [...this.#conns.values()].filter(conn => conn.autoAttach);
+		if (autoAttachConns.length === 0) return;
+		void this.#ensureAttached(tab).then(ok => {
+			if (!ok) {
+				// Reattachment failed (DevTools or another debugger claimed the tab
+				// during the outage). Mirror the Target.setAutoAttach path and retract
+				// the just-announced target so a discovering client never retains a
+				// recreated target it can neither initialize nor drive.
+				this.#retractTab(tab);
+				return;
+			}
+			for (const conn of autoAttachConns) {
+				if (this.#conns.has(conn.id)) this.#emitTabAttached(conn, tab);
+			}
+		});
 	}
 
 	// ---- tab grouping -----------------------------------------------------------

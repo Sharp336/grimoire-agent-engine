@@ -234,8 +234,13 @@ async function attachTab(tabId: number, socket: WebSocket): Promise<void> {
 		// The relay that requested this attachment disappeared while Chrome was
 		// still resolving attach(). Its pending RPC was rejected by RelayBridge,
 		// so no downstream session can own the resulting debugger attachment.
+		// Mark the cleanup detach as guard-internal: a replacement socket may
+		// already be live, and an unmarked onDetach would post a user-style
+		// `detached` that bans the tab and drops its recovery bit instead of
+		// letting the surviving relay reconcile it from the next hello.
 		if (ws !== socket) {
-			await chrome.debugger.detach({ tabId }).catch(() => {});
+			guardDetachments.add(tabId);
+			await chrome.debugger.detach({ tabId }).catch(() => guardDetachments.delete(tabId));
 			return;
 		}
 		attachmentGuard.track(tabId);
@@ -316,6 +321,30 @@ function scheduleReconnect(): void {
 	const delay = reconnectDelay;
 	reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
 	setTimeout(() => void connect(), delay);
+}
+
+/**
+ * Seed the guard from attachments that survived a service-worker restart and,
+ * when the relay is still unreachable, arm an orphan sweep independent of a
+ * successful connection. Without this, a worker recreated during a relay outage
+ * only re-seeds the guard inside `buildHello()` (which runs after `onopen`), so
+ * a failed reconnect calls `onDisconnected()` on an empty guard and never
+ * reclaims the surviving `chrome.debugger` infobar.
+ */
+async function reconcileOrphans(): Promise<void> {
+	const targets = await chrome.debugger.getTargets().catch(() => []);
+	let seeded = false;
+	for (const target of targets) {
+		if (target.attached && target.tabId !== undefined) {
+			attachmentGuard.track(target.tabId);
+			seeded = true;
+		}
+	}
+	// A live/pending socket owns reconciliation via hello; only arm a
+	// standalone sweep when nothing is connecting to reclaim these tabs.
+	if (seeded && !(ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))) {
+		attachmentGuard.onDisconnected();
+	}
 }
 
 async function connect(): Promise<void> {
@@ -410,10 +439,17 @@ chrome.storage.onChanged.addListener((_changes, areaName) => {
 });
 
 chrome.action.onClicked.addListener(() => void chrome.runtime.openOptionsPage());
-chrome.runtime.onInstalled.addListener(() => void connect());
-chrome.runtime.onStartup.addListener(() => void connect());
+chrome.runtime.onInstalled.addListener(() => {
+	void reconcileOrphans();
+	void connect();
+});
+chrome.runtime.onStartup.addListener(() => {
+	void reconcileOrphans();
+	void connect();
+});
 // Clean teardown: detach any tab we still own before the worker is suspended,
 // so the debugger infobar never survives the extension going idle.
 chrome.runtime.onSuspend.addListener(() => attachmentGuard.onSuspend());
 
+void reconcileOrphans();
 void connect();

@@ -229,7 +229,8 @@ async function attachTab(tabId, socket) {
   try {
     await pending;
     if (ws !== socket) {
-      await chrome.debugger.detach({ tabId }).catch(() => {});
+      guardDetachments.add(tabId);
+      await chrome.debugger.detach({ tabId }).catch(() => guardDetachments.delete(tabId));
       return;
     }
     attachmentGuard.track(tabId);
@@ -301,6 +302,19 @@ function scheduleReconnect() {
   const delay = reconnectDelay;
   reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
   setTimeout(() => void connect(), delay);
+}
+async function reconcileOrphans() {
+  const targets = await chrome.debugger.getTargets().catch(() => []);
+  let seeded = false;
+  for (const target of targets) {
+    if (target.attached && target.tabId !== undefined) {
+      attachmentGuard.track(target.tabId);
+      seeded = true;
+    }
+  }
+  if (seeded && !(ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))) {
+    attachmentGuard.onDisconnected();
+  }
 }
 async function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))
@@ -384,7 +398,14 @@ chrome.storage.onChanged.addListener((_changes, areaName) => {
   connect();
 });
 chrome.action.onClicked.addListener(() => void chrome.runtime.openOptionsPage());
-chrome.runtime.onInstalled.addListener(() => void connect());
-chrome.runtime.onStartup.addListener(() => void connect());
+chrome.runtime.onInstalled.addListener(() => {
+  reconcileOrphans();
+  connect();
+});
+chrome.runtime.onStartup.addListener(() => {
+  reconcileOrphans();
+  connect();
+});
 chrome.runtime.onSuspend.addListener(() => attachmentGuard.onSuspend());
+reconcileOrphans();
 connect();

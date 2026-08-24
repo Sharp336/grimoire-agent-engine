@@ -342,4 +342,37 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("attach")).toHaveLength(0);
 		expect(cdp.messages.some(message => message.method === "Target.detachedFromTarget")).toBe(true);
 	});
+
+	it("retracts the recovery target when the guard-authorized reattach fails", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		await attachPage(bridge, ext, cdp, connId, 1);
+		// Discover + auto-attach so the reconnect path announces and re-attaches.
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets" }));
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach" }));
+		await flush();
+
+		bridge.extClosed(ext);
+
+		// The tab survived the outage recoverably, but reattachment fails (e.g.
+		// DevTools claimed the tab). The bridge must retract the just-announced
+		// target instead of leaving puppeteer holding a target it cannot drive.
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await flush();
+		const created = cdp.messages.filter(m => m.method === "Target.targetCreated").length;
+		const attach = ext2.pending("attach");
+		expect(attach).toHaveLength(1);
+		bridge.extMessage(ext2, JSON.stringify({ t: "rpcResult", id: attach[0]!.id, ok: false, error: "busy" }));
+		ext2.markAcked(attach[0]!.id);
+		await flush();
+
+		// The failed reattach retracts the re-announced target.
+		const destroyed = cdp.messages.filter(m => m.method === "Target.targetDestroyed").length;
+		expect(destroyed).toBeGreaterThan(0);
+		expect(created).toBeGreaterThan(0);
+	});
 });

@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed browser-relay reconnects failing to re-attach tabs that still had live session holders after the extension's orphan sweep detached them, so an extension/service-worker restart no longer strands active relay-controlled tabs in a permanently detached state until the next manual claim ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+- Fixed a recoverable tab that fails to re-attach after an outage (for example, DevTools claimed it) leaving a discovering Puppeteer client holding an undrivable recreated target: the relay bridge now retracts the re-announced target when the guard-authorized reattach fails, matching the `Target.setAutoAttach` path ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
 ### Added
 
 - Added side-by-side image and SVG previews to `omp git`, including local Git LFS object resolution and explicit placeholders for unavailable or unsupported binary content.
