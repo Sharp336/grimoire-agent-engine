@@ -113,9 +113,12 @@ describe("generate_image tool gating", () => {
 		expect(names).not.toContain("generate_image");
 	});
 
-	it("excludes generate_image under --no-tools (empty whitelist)", async () => {
+	it("exposes no work tools under --no-tools (empty whitelist)", async () => {
 		const names = await activeToolNames(Settings.isolated({}), []);
 		expect(names).not.toContain("generate_image");
+		for (const name of ["read", "write", "edit", "bash", "eval", "glob", "grep", "task", "web_search", "hub"]) {
+			expect(names).not.toContain(name);
+		}
 	});
 
 	it("respects generate_image.enabled=false even when requested", async () => {

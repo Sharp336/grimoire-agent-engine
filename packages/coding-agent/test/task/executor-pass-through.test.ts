@@ -161,6 +161,7 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.rules).toBeUndefined();
 		expect(forwarded?.preloadedExtensionPaths).toBeUndefined();
 		expect(forwarded?.preloadedCustomToolPaths).toBeUndefined();
+		expect(forwarded?.toolNames).toBeUndefined();
 	});
 
 	it("records the spawning agent as parentAgentId, distinct from the child's own id and prefix", async () => {
@@ -261,6 +262,21 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(result.exitCode).toBe(0);
 		expect(Object.hasOwn(result, "structuredOutput")).toBe(false);
 	});
+	it("treats an explicit empty tools list as a restriction", async () => {
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, tools: [] },
+			id: "subagent-no-tools",
+		});
+
+		expect(result.exitCode).toBe(0);
+		// The executor preserves the explicit restriction. It adds hub for an
+		// unrestricted child; createAgentSession supplies yield so it can return.
+		expect(spy.mock.calls[0]?.[0]?.toolNames).toEqual(["hub"]);
+	});
 
 	it("caps caller-requested effort at task.maxEffort", async () => {
 		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
@@ -284,6 +300,14 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		// The ceiling itself rides into the session so retry-fallback recovery
 		// can re-clamp to it after model swaps.
 		expect(spy.mock.calls[0]?.[0]?.thinkingLevelCeiling).toBe(Effort.Low);
+		expect(result.modelReceipt).toEqual({
+			requestedEffort: "hi",
+			requestedModel: ["@task"],
+			requestedRole: "task",
+			resolvedModel: `${model.provider}/${model.id}`,
+			resolvedEffort: Effort.Low,
+			overrides: ["effort-clamped"],
+		});
 	});
 
 	it("rejects a spawn when task.maxEffort is below the model floor", async () => {
