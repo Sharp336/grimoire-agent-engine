@@ -218,6 +218,53 @@ describe("runEvalAgent", () => {
 		expect(runSpy.mock.calls[0]?.[0].agent.name).toBe("reviewer");
 	});
 
+	it("falls back to a spawnable agent when the eval default is primary-only", async () => {
+		// Regression (codex #3754895373): agent({ prompt }) with `agent` omitted
+		// must not fail preflight when the parent's spawns frontmatter names a
+		// primary-only agent first — the effective default falls back to the
+		// first spawnable agent from the discovered roster.
+		mockAgents([
+			{
+				name: "primary-only",
+				description: "Main-session only.",
+				systemPrompt: "Primary.",
+				source: "bundled",
+				availability: "primary",
+			},
+			taskAgent,
+		]);
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options =>
+			singleResult(options, {
+				output: options.agent.name,
+			}),
+		);
+
+		const result = await runEvalAgent({ prompt: "hello" }, { session: makeSession({ spawns: "primary-only,task" }) });
+
+		expect(result.text).toBe("task");
+		expect(runSpy.mock.calls[0]?.[0].agent.name).toBe("task");
+	});
+
+	it("rejects when every allowed spawn is primary-only and no fallback exists", async () => {
+		// Control: with no spawnable agent in the roster the raw policy default
+		// is kept and the availability preflight rejects.
+		mockAgents([
+			{
+				name: "primary-only",
+				description: "Main-session only.",
+				systemPrompt: "Primary.",
+				source: "bundled",
+				availability: "primary",
+			},
+		]);
+		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));
+
+		await expect(
+			runEvalAgent({ prompt: "hello" }, { session: makeSession({ spawns: "primary-only" }) }),
+		).rejects.toThrow('Agent "primary-only" is primary/main-session-only and cannot be spawned as a subagent.');
+		expect(runSpy).not.toHaveBeenCalled();
+	});
+
 	it("honors task.maxRecursionDepth without an eval-specific ceiling", async () => {
 		mockAgents();
 		const runSpy = vi.spyOn(taskExecutor, "runSubprocess").mockImplementation(async options => singleResult(options));

@@ -992,6 +992,12 @@ export class AgentSession {
 		this.#codeModeState = config.codeModeState ?? {};
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
+		this.#personaAppendPrompt = config.personaAppendPrompt;
+		this.#sessionSpawns = config.spawns;
+		this.#baselineToolNames = config.baselineToolNames;
+		this.#baselineMountedToolNames = config.baselineMountedToolNames;
+		this.#baselineLspEnabled = config.baselineLspEnabled === true;
+		this.#baselineHubEnabled = config.baselineHubEnabled === true;
 		this.#modelRegistry = config.modelRegistry;
 		this.#codexResetCoordinator = config.codexResetCoordinator ?? defaultCodexAutoRedeemCoordinator;
 		const bashHost: BashRunnerHost = {
@@ -1346,6 +1352,10 @@ export class AgentSession {
 			presentationPinnedToolNames: config.presentationPinnedToolNames,
 			ensureWriteRegistered: config.ensureWriteRegistered,
 			ensureGoalRegistered: config.ensureGoalRegistered,
+			registerBuiltInTools: config.registerBuiltInTools,
+			baselineLspEnabled: config.baselineLspEnabled,
+			baselineHubEnabled: config.baselineHubEnabled,
+			personaToolRestriction: config.personaToolRestriction,
 			rebuildSystemPrompt: config.rebuildSystemPrompt,
 			getMcpServerInstructions: config.getMcpServerInstructions,
 			xdev: config.xdev,
@@ -1777,6 +1787,133 @@ export class AgentSession {
 
 	setSessionSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
 		this.#sessionSwitchReconciler = reconciler ?? undefined;
+	}
+
+	/** Live persona spawn policy (`"*"`, a comma list, or null for the launch default). */
+	#sessionSpawns: string | null | undefined;
+
+	/** Live persona system-prompt append, overriding the launch-time `appendSystemPrompt`. */
+	#personaAppendPrompt: string | undefined;
+
+	/**
+	 * Whether a live write (`setPersonaAppendPrompt`) has touched the persona
+	 * channel since construction. The launch seeding (`config.personaAppendPrompt`)
+	 * does not count: the SDK's system-prompt build falls back to
+	 * `options.personaAppendPrompt` until the first live write, then trusts the
+	 * session channel exclusively — INCLUDING an explicit clear, which must not
+	 * resurrect the launch append (see `rebuildSystemPrompt` in sdk.ts).
+	 */
+	#personaAppendPromptInitialized = false;
+
+	/**
+	 * Tool set the session would have had WITHOUT the launch persona's `tools:`
+	 * restriction (captured at creation). Restored when a non-agent session
+	 * switch removes the persona.
+	 */
+	#baselineToolNames: string[] | undefined;
+	/**
+	 * Baseline `xd://`-mounted subset (captured at creation alongside
+	 * `#baselineToolNames`). `restoreBaselineTools` passes it to
+	 * `setActiveToolPresentation` so the restored partition matches the
+	 * baseline: names that were mounted stay mount-eligible, names that were
+	 * top-level stay pinned — instead of `setActiveToolsByName` pinning every
+	 * baseline name top-level and losing the xdev presentation.
+	 */
+	#baselineMountedToolNames: string[] | undefined;
+	/**
+	 * Whether the persona baseline includes `lsp` even though the session's
+	 * `enableLsp` is false (the restricted-session DEFAULT, not an explicit
+	 * `--no-lsp`). `restoreBaselineTools` registers `lsp` on demand when set.
+	 */
+	#baselineLspEnabled: boolean;
+	/**
+	 * Whether the persona baseline includes `hub` even though the session's
+	 * `restrictToolNames`/`enableIrc` (both forced off for a restricted
+	 * session) made the launch registry omit it. `restoreBaselineTools`
+	 * registers `hub` on demand when set, restoring the tool a normal
+	 * unrestricted session (spawning enabled, IRC not explicitly disabled)
+	 * would have.
+	 */
+	#baselineHubEnabled: boolean;
+
+	getSessionSpawns(): string | null {
+		return this.#sessionSpawns ?? null;
+	}
+
+	setSessionSpawns(spawns: string | null): void {
+		this.#sessionSpawns = spawns;
+	}
+
+	getPersonaAppendPrompt(): string | undefined {
+		return this.#personaAppendPrompt;
+	}
+	setPersonaAppendPrompt(prompt: string | undefined): void {
+		this.#personaAppendPrompt = prompt;
+		this.#personaAppendPromptInitialized = true;
+	}
+
+	/** Whether `setPersonaAppendPrompt` has run since construction (launch seeding excluded). */
+	isPersonaAppendPromptInitialized(): boolean {
+		return this.#personaAppendPromptInitialized;
+	}
+
+	/** Baseline tool set captured at creation (without the persona's `tools:` restriction). */
+	getBaselineToolNames(): string[] | undefined {
+		return this.#baselineToolNames;
+	}
+
+	/** Baseline `xd://`-mounted subset captured at creation (paired with `getBaselineToolNames`). */
+	getBaselineMountedToolNames(): string[] | undefined {
+		return this.#baselineMountedToolNames;
+	}
+
+	/**
+	 * Capture the baseline tool set (first persona application only). The
+	 * launch `--agent` path seeds it at creation; a live `/agent` switch
+	 * captures the pre-persona set on first use so leaving agent mode restores
+	 * the original tools rather than the previous persona's.
+	 */
+	setBaselineToolNames(names: string[]): void {
+		if (this.#baselineToolNames === undefined) {
+			this.#baselineToolNames = [...names];
+		}
+	}
+
+	/**
+	 * Capture the baseline `xd://`-mounted subset (first persona application
+	 * only), paired with {@link setBaselineToolNames}. The launch `--agent`
+	 * path seeds it at creation; a live `/agent` switch captures the
+	 * pre-persona mounted names so leaving agent mode restores the exact
+	 * partition.
+	 */
+	setBaselineMountedToolNames(names: string[]): void {
+		if (this.#baselineMountedToolNames === undefined) {
+			this.#baselineMountedToolNames = [...names];
+		}
+	}
+
+	/**
+	 * Clear the first-write baseline capture (both the top-level tool set and
+	 * the paired `xd://`-mounted subset). Used by the live `/agent` rollback: a
+	 * failed FIRST switch must not leave the first-write-only baseline
+	 * populated, or a later successful switch no-ops and leaving agent mode
+	 * restores the stale failed-attempt tools instead of the real pre-persona
+	 * set. The two fields are always captured/cleared together.
+	 */
+	clearBaselineTools(): void {
+		this.#baselineToolNames = undefined;
+		this.#baselineMountedToolNames = undefined;
+	}
+
+	/** Restore the baseline tool set (leaving agent mode). */
+	async restoreBaselineTools(): Promise<void> {
+		if (!this.#baselineToolNames) return;
+		// Restore the exact top-level versus `xd://` partition captured at
+		// creation: `setActiveToolsByName` would pin every baseline name as the
+		// runtime selection (via `#runtimeSelectedToolNames`), preventing
+		// `applyActiveToolsByName` from mounting the discoverable tools that a
+		// fresh non-persona session presents under `xd://`.
+		await this.#tools.restoreBaselineTools(this.#baselineToolNames, this.#baselineMountedToolNames ?? []);
 	}
 
 	/** Provider-scoped mutable state store for transport/session caches. */
@@ -4717,6 +4854,72 @@ export class AgentSession {
 	}
 
 	/**
+	 * Selects enabled tools, ignoring names absent from the registry.
+	 * `personaDroppedMutation` is the persona-switch signal forwarded to the
+	 * SDK's revocable-floor flag (see {@link applyPersonaTools}); rollback
+	 * paths pass the pre-switch snapshot so a failed switch restores it.
+	 */
+	setActiveToolsByName(
+		toolNames: string[],
+		personaDroppedMutation?: boolean,
+		personaDroppedEdit?: boolean,
+	): Promise<void> {
+		return this.#tools.setActiveToolsByName(toolNames, personaDroppedMutation, personaDroppedEdit);
+	}
+
+	/**
+	 * Activates a persona's tool list, registering any built-in missing from
+	 * the registry first (see {@link SessionTools.applyPersonaTools}).
+	 */
+	applyPersonaTools(toolNames: string[]): Promise<void> {
+		return this.#tools.applyPersonaTools(toolNames);
+	}
+
+	/**
+	 * Last persona-switch signal forwarded to the SDK (see
+	 * {@link applyPersonaTools}). Rollback paths snapshot this before a
+	 * persona apply and pass it back to `setActiveToolsByName` so a failed
+	 * switch restores the exact pre-switch SDK `personaDroppedMutation`
+	 * flag instead of leaving it stale.
+	 */
+	getLastPersonaDroppedMutation(): boolean | undefined {
+		return this.#tools.getLastPersonaDroppedMutation();
+	}
+
+	/** Parallel `edit`-only signal (codex #3818999447); rollback paths snapshot and restore it. */
+	getLastPersonaDroppedEdit(): boolean | undefined {
+		return this.#tools.getLastPersonaDroppedEdit();
+	}
+
+	/**
+	 * The exact tool list a LIVE `/agent` switch narrowed the session to, or
+	 * `undefined` when no persona restriction is in effect (see
+	 * {@link SessionTools.getPersonaToolRestriction}). The SDK's prompt rebuild
+	 * consults this so a live-switched persona suppresses the same affordances a
+	 * launch `--agent` does (codex #3763426057).
+	 */
+	getPersonaToolRestriction(): Set<string> | undefined {
+		return this.#tools.getPersonaToolRestriction();
+	}
+
+	/** Sets or clears the live persona restriction (switchSession re-capture + failed-switch rollback). */
+	setPersonaToolRestriction(value: Set<string> | undefined): void {
+		this.#tools.setPersonaToolRestriction(value);
+	}
+
+	/**
+	 * Set the persona-switch signal (the SDK's `personaDroppedMutation` flag
+	 * and the SessionTools mirror) without touching the active tool set. Used
+	 * by `switchSession` to clear the flag when the baseline is re-captured
+	 * for a different transcript (the previous session's read-only persona
+	 * revocation must not carry over), and to restore the exact pre-switch
+	 * value when the switch rolls back.
+	 */
+	setPersonaDroppedMutation(value: boolean, editValue?: boolean): void {
+		this.#tools.setPersonaDroppedMutation(value, editValue);
+	}
+
+	/**
 	 * Applies Code Mode at session startup: when the initial model activates
 	 * it (`codeMode` `on`, or `auto` matching a `code_mode_only` catalog flag),
 	 * the initial tool surface is routed through the Code Mode-aware path so
@@ -4739,19 +4942,23 @@ export class AgentSession {
 		return this.#codeModeState.namespacesInfo;
 	}
 
-	/** Selects enabled tools, ignoring names absent from the registry. */
-	setActiveToolsByName(toolNames: string[]): Promise<void> {
-		return this.#tools.setActiveToolsByName(toolNames);
-	}
-
 	/** Restores an exact top-level versus `xd://` tool partition. */
 	setActiveToolPresentation(
 		toolNames: string[],
 		mountedToolNames: string[],
 		forcePromptRefresh = false,
 		signal?: AbortSignal,
+		personaDroppedMutation?: boolean,
+		personaDroppedEdit?: boolean,
 	): Promise<void> {
-		return this.#tools.setActiveToolPresentation(toolNames, mountedToolNames, forcePromptRefresh, signal);
+		return this.#tools.setActiveToolPresentation(
+			toolNames,
+			mountedToolNames,
+			forcePromptRefresh,
+			signal,
+			personaDroppedMutation,
+			personaDroppedEdit,
+		);
 	}
 
 	/**
@@ -8069,6 +8276,11 @@ export class AgentSession {
 		const previousAutoResolvedLevel = this.autoResolvedThinkingLevel();
 		const previousServiceTierByFamily = this.serviceTierByFamily;
 		const previousTools = [...this.agent.state.tools];
+		const previousBaselineToolNames = this.#baselineToolNames;
+		const previousBaselineMountedToolNames = this.#baselineMountedToolNames;
+		const previousPersonaDroppedMutation = this.getLastPersonaDroppedMutation();
+		const previousPersonaDroppedEdit = this.getLastPersonaDroppedEdit();
+		const previousPersonaToolRestriction = this.getPersonaToolRestriction();
 		const previousBaseSystemPrompt = this.#tools.baseSystemPrompt;
 		const previousSystemPrompt = this.agent.state.systemPrompt;
 		const previousBaseSystemPromptBeforeMemoryPromotion = this.#memory.promotionSnapshot;
@@ -8103,6 +8315,38 @@ export class AgentSession {
 				this.#freshProviderSessionId = undefined;
 				this.#clearInheritedProviderPromptCacheKey();
 				this.#adoptInheritedProviderPromptCacheKey();
+				// The persona baseline is captured once (first-write guard in
+				// setBaselineToolNames) and describes the tool set the PREVIOUS
+				// logical session would have had without its persona's `tools:`
+				// restriction. Reusing this AgentSession for a different
+				// transcript must re-capture it for the new session, or
+				// restoreBaselineTools() keeps restoring the stale baseline
+				// (e.g. a launch persona's `--tools read`) into the target.
+				// Re-capture the target's normal tool set from the registry
+				// (mirroring the SDK's launch baseline computation) so every
+				// reconciler path lands on the new transcript's full tool set:
+				// the non-agent and unavailable-persona paths call
+				// restoreBaselineTools() directly, and the agent path's
+				// first-write-guarded setBaselineToolNames(getEnabledToolNames())
+				// no-ops, keeping this registry-derived baseline instead of the
+				// source persona's restricted active set.
+				if (this.#baselineToolNames !== undefined) {
+					const baseline = this.#tools.computeBaselineToolNames();
+					this.#baselineToolNames = baseline.names;
+					this.#baselineMountedToolNames = baseline.mounted;
+					// The baseline re-capture belongs to the TARGET transcript: the
+					// previous logical session's read-only persona revoked the Cursor
+					// `editWasGranted` floor, and that revocation must not carry over
+					// (the reconciler below re-signals the target's real persona
+					// state, or the baseline restore clears the flag anyway).
+					this.setPersonaDroppedMutation(false);
+					// The source session's live persona restriction must not leak
+					// into the target transcript's interim window (before the
+					// reconciler re-applies or clears persona state) — an MCP
+					// refresh during the switch would otherwise filter against the
+					// stale source restriction (codex #3819553918).
+					this.setPersonaToolRestriction(undefined);
+				}
 			}
 			this.#syncAgentSessionId(undefined, false);
 			this.#memory.rekeyForCurrentSessionId();
@@ -8251,6 +8495,19 @@ export class AgentSession {
 			this.#syncAgentSessionId(previousSessionState.sessionId, false);
 			this.#memory.rekeyForCurrentSessionId();
 			this.agent.setTools(previousTools);
+			this.#baselineToolNames = previousBaselineToolNames;
+			this.#baselineMountedToolNames = previousBaselineMountedToolNames;
+			// The re-capture above cleared the persona-switch flag for the
+			// target; a rollback must restore the exact pre-switch value so the
+			// SDK's `personaDroppedMutation` flag (and with it the Cursor
+			// `editWasGranted` floor) stays faithful to the session we are
+			// unwinding back to (mirrors the live `/agent` rollback).
+			if (previousPersonaDroppedMutation !== undefined) {
+				this.setPersonaDroppedMutation(previousPersonaDroppedMutation, previousPersonaDroppedEdit);
+			}
+			// Restore the pre-switch persona restriction so a stale target/source
+			// restriction does not leak into the unwound session (codex #3819553918).
+			this.setPersonaToolRestriction(previousPersonaToolRestriction);
 			this.#tools.setBaseSystemPrompt(previousBaseSystemPrompt);
 			this.#memory.restorePromotionSnapshot(previousBaseSystemPromptBeforeMemoryPromotion);
 			this.agent.setSystemPrompt(previousSystemPrompt);

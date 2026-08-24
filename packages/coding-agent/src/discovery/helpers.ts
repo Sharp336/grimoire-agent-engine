@@ -18,6 +18,7 @@ import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { resolveClaudePaths } from "../config/claude-paths";
 import type { MCPRequestIdFormat } from "../mcp/types";
+import type { AgentAvailability } from "../task/types";
 import { type ConfiguredThinkingLevel, parseConfiguredThinkingLevel } from "../thinking";
 import { normalizeToolNames } from "../tools/builtin-names";
 
@@ -235,6 +236,7 @@ export function parseModelList(value: unknown): string[] | undefined {
 export interface ParsedAgentFields {
 	name: string;
 	description: string;
+	availability?: AgentAvailability;
 	tools?: string[];
 	spawns?: string[] | "*";
 	model?: string[];
@@ -247,6 +249,39 @@ export interface ParsedAgentFields {
 	prewalk?: boolean | string;
 	/** `true` = advise with the default advisor-role model; string = advise with that model pattern. */
 	advisor?: boolean | string;
+}
+
+/**
+ * Parse agent availability from OpenCode/Copilot frontmatter.
+ *
+ * Availability is the INTERSECTION of two independent schemas' allowed role
+ * sets:
+ *   - Copilot: `user-invocable: false` forbids main use;
+ *     `disable-model-invocation: true` forbids subagent spawning.
+ *   - OpenCode `mode`: "primary" forbids subagent use; "subagent" forbids
+ *     main use; "all"/absent restrict neither role.
+ * An agent serves a role only when BOTH schemas admit it. Contradictory
+ * schemas (e.g. `mode: primary` + `user-invocable: false`, or `mode:
+ * subagent` + `disable-model-invocation: true`) have an empty intersection,
+ * so they resolve to "unavailable" and are rejected from every entry path.
+ * Absent both → "all" (backward compatible).
+ */
+function parseAgentAvailability(frontmatter: Record<string, unknown>): AgentAvailability {
+	const userInvocable = parseBoolean(frontmatter.userInvocable);
+	const disableModelInvocation = parseBoolean(frontmatter.disableModelInvocation);
+	const mode = frontmatter.mode;
+
+	// Main-session selectable: Copilot does not forbid user invocation AND
+	// OpenCode mode does not restrict to subagent-only.
+	const mainUsable = userInvocable !== false && mode !== "subagent";
+	// Subagent-spawnable: Copilot does not disable model invocation AND
+	// OpenCode mode does not restrict to primary-only.
+	const spawnable = disableModelInvocation !== true && mode !== "primary";
+
+	if (mainUsable && spawnable) return "all";
+	if (mainUsable) return "primary";
+	if (spawnable) return "subagent";
+	return "unavailable";
 }
 
 /**
@@ -269,7 +304,11 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		tools = [...tools, "yield"];
 	}
 
-	// Parse spawns field (array, "*", or CSV)
+	// Parse spawns field (array, "*", or CSV). An EXPLICIT empty list (or
+	// empty string) is the disabled policy — distinct from an omitted field,
+	// which the backward-compat inference below may widen to "*" when tools
+	// includes task. `parseArrayOrCSV` collapses empty input to undefined, so
+	// preserve the empty array here (codex #3821198710).
 	let spawns: string[] | "*" | undefined;
 	if (frontmatter.spawns === "*") {
 		spawns = "*";
@@ -277,9 +316,13 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		const trimmed = frontmatter.spawns.trim();
 		if (trimmed === "*") {
 			spawns = "*";
+		} else if (trimmed === "") {
+			spawns = [];
 		} else {
 			spawns = parseArrayOrCSV(trimmed);
 		}
+	} else if (Array.isArray(frontmatter.spawns) && frontmatter.spawns.length === 0) {
+		spawns = [];
 	} else {
 		spawns = parseArrayOrCSV(frontmatter.spawns);
 	}
@@ -319,6 +362,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	return {
 		name,
 		description,
+		availability: parseAgentAvailability(frontmatter),
 		tools,
 		spawns,
 		model,

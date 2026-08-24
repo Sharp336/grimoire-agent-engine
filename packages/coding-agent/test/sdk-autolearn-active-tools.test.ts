@@ -64,11 +64,36 @@ describe("createAgentSession auto-learn tool activation", () => {
 		return session.getActiveToolNames();
 	}
 
-	it("activates force-included manage_skill in a restricted top-level session", async () => {
+	it("does NOT auto-activate manage_skill for an explicit toolNames list", async () => {
+		// An explicit `toolNames` list is the user's EXACT request — `--tools
+		// read` means "only read". With `expandRegistryToAllBuiltins` the
+		// registry is widened to every allowed built-in for baseline capture,
+		// so registry presence no longer proves the user asked for the tool;
+		// auto-activating manage_skill/learn from registry presence would leak
+		// write-capable tools into a read-only persona's active set. Only the
+		// launch-requested list decides.
 		const names = await activeToolNames(Settings.isolated({ "autolearn.enabled": true }));
 		expect(names).toContain("read");
-		// Built by createTools' force-include AND activated by the SDK's explicit-list
-		// re-inclusion, so guidance/controller point at a callable tool.
+		expect(names).not.toContain("manage_skill");
+		expect(names).not.toContain("learn");
+	});
+
+	it("activates manage_skill in a default session (no explicit toolNames) when auto-learn is on", async () => {
+		// No explicit list: the default discovery path builds every allowed
+		// built-in, so manage_skill is present and active — guidance/controller
+		// point at a callable tool.
+		const { session } = await createAgentSession({
+			cwd: registryDir,
+			agentDir: registryDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "autolearn.enabled": true }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+		});
+		sessions.push(session);
+		const names = session.getActiveToolNames();
+		expect(names).toContain("read");
 		expect(names).toContain("manage_skill");
 	});
 

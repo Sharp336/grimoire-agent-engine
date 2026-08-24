@@ -1422,13 +1422,25 @@ export function resolveModelFromSettings(options: {
 }
 
 /**
+ * Result of resolving a list of override patterns to the first matching model.
+ * `explicitThinkingLevel` is true only when the SELECTED (first matching)
+ * pattern carried an explicit `:level` suffix.
+ */
+export type ResolvedModelOverride = {
+	model?: Model<Api>;
+	thinkingLevel?: ConfiguredThinkingLevel;
+	explicitThinkingLevel: boolean;
+	warning?: string;
+};
+
+/**
  * Resolve a list of override patterns to the first matching model.
  */
 export function resolveModelOverride(
 	modelPatterns: string[],
 	modelRegistry: ModelLookupRegistry,
 	settings?: Settings,
-): { model?: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel; explicitThinkingLevel: boolean; warning?: string } {
+): ResolvedModelOverride {
 	if (modelPatterns.length === 0) return { explicitThinkingLevel: false };
 	const availableModels = modelRegistry.getAvailable();
 	const matchPreferences = getModelMatchPreferences(settings);

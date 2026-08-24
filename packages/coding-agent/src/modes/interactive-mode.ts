@@ -110,6 +110,15 @@ import {
 import type { CompactMode } from "../session/compact-modes";
 import type { ForeignSessionSource } from "../session/foreign-session-store";
 import { HistoryStorage } from "../session/history-storage";
+import {
+	applyPersonaModelAndThinking,
+	applyPersonaToSession,
+	EMPTY_PERSONA_OVERRIDES,
+	isMainSessionPersonaUsable,
+	type PersonaExplicitOverrides,
+	rollbackPersonaSwitch,
+	snapshotPersonaSwitch,
+} from "../session/persona-apply";
 import type { SessionContext } from "../session/session-context";
 import { getRecentSessions } from "../session/session-listing";
 import type { SessionManager } from "../session/session-manager";
@@ -118,8 +127,11 @@ import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } fr
 import { formatDuration } from "../slash-commands/helpers/format";
 import { STTController, type SttState } from "../stt";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
+import { mainSessionTools, spawnsToString } from "../task/agent-tools";
+import { discoverAgents, getAgent } from "../task/discovery";
 import { labelEchoesHandle } from "../task/label";
 import { agentTypeBadge, formatTaskId } from "../task/render";
+import type { AgentDefinition } from "../task/types";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import { tinyTitleClient } from "../tiny/title-client";
 import type { LspStartupServerInfo } from "../tools";
@@ -1282,8 +1294,25 @@ export class InteractiveMode implements InteractiveModeContext {
 			await this.#liveCommandController.stop();
 			await this.#quiesceVibeForSessionSwitch();
 		});
-		this.session.setSessionSwitchReconciler?.(() => this.#reconcileModeFromSession({ preserveActiveGoal: true }));
-		await logger.time("InteractiveMode.init:reconcileMode", () => this.#reconcileModeFromSession());
+		this.session.setSessionSwitchReconciler?.(() =>
+			this.#reconcileModeFromSession({
+				preserveActiveGoal: true,
+				// An in-process switchSession carries no CLI flags: the persona
+				// applies fully (all-false explicit state), matching the live
+				// `/agent` switch behavior.
+				explicit: { modelSet: false, thinkingSet: false, toolsSet: false },
+			}),
+		);
+		// A launch `--agent` persona is already applied to the session at creation
+		// (buildSessionOptions). Reconcile must not re-enter a restored plan/goal/
+		// vibe mode or another agent's mode on top of it — the transcript would
+		// claim the persona while the session runs under the restored mode.
+		await logger.time("InteractiveMode.init:reconcileMode", () =>
+			this.#reconcileModeFromSession({
+				personaName: options.personaName,
+				explicit: options.explicitPersonaOverrides,
+			}),
+		);
 
 		// Brand-new sessions optionally start in plan mode when the user has made it
 		// the startup default. "Brand-new" means the resolved branch carries no
@@ -1298,7 +1327,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// execution handoff clear never get dragged back into plan mode. #enterPlanMode
 		// is idempotent and self-guards against an already-active plan/goal mode; it
 		// does not check plan.enabled itself.
-		if (shouldEnterPlanModeOnStartup(this.sessionManager, this.session.settings)) {
+		if (!options.personaName && shouldEnterPlanModeOnStartup(this.sessionManager, this.session.settings)) {
 			await this.#enterPlanMode();
 		}
 
@@ -2933,8 +2962,48 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	/**
+	 * Clear persona-owned session state (spawns, persona prompt append, and the
+	 * persona's restricted tool set) back to the pre-persona baseline. Shared by
+	 * the reconcile paths (non-agent target session, gone/disabled persona) and
+	 * the live mode-entry paths (/plan, /vibe, /goal, /guided-goal) so a running
+	 * session switching out of agent mode never keeps the persona's prompt/spawn
+	 * policy or restricted tools. No-op unless a persona is currently active.
+	 *
+	 * Atomic: the spawns/prompt fields are cleared only AFTER the baseline
+	 * restoration succeeds, so a failed restore (e.g. a system-prompt rebuild
+	 * error) leaves the persona fully intact instead of a partially cleared
+	 * state (codex #3821198710).
+	 */
+	async #clearPersonaOwnedState(): Promise<void> {
+		// A persona is "currently active" when its mutable session state is
+		// present: every persona apply path (launch `--agent`, live `/agent`
+		// switch, resume reconcile) sets the spawn policy and the persona prompt
+		// append together, and this helper clears them together. The baseline
+		// tool set stays populated after a persona is left (first-write
+		// capture), so an unconditional restore would re-apply the stale
+		// pre-persona tool set and discard tools activated since (e.g. MCP
+		// tools) when a later /plan, /goal, /vibe, or /guided-goal runs from a
+		// normal session.
+		const hadPersona =
+			this.session.getPersonaAppendPrompt() !== undefined || this.session.getSessionSpawns() !== null;
+		if (!hadPersona) return;
+		// Restore the pre-persona tool set (launch baseline or first-switch
+		// capture) so a restricted persona's `tools:` list does not leak into
+		// the unrelated mode. Runs BEFORE the spawns/prompt clear: if it fails,
+		// the persona state stays intact and the caller's error path (or the
+		// next reconcile) can retry instead of leaving a half-cleared persona.
+		await this.session.restoreBaselineTools();
+		this.session.setSessionSpawns(null);
+		this.session.setPersonaAppendPrompt(undefined);
+	}
+
 	/** Reconcile mode state from session entries on resume/switch. */
-	async #reconcileModeFromSession(options?: { preserveActiveGoal?: boolean }): Promise<void> {
+	async #reconcileModeFromSession(options?: {
+		preserveActiveGoal?: boolean;
+		personaName?: string;
+		explicit?: PersonaExplicitOverrides;
+	}): Promise<void> {
 		const vibeScopeAlreadySuspended = this.#vibeScopeSuspendedForSwitch;
 		this.#vibeScopeSuspendedForSwitch = false;
 		const sessionContext = this.sessionManager.buildSessionContext();
@@ -2956,6 +3025,20 @@ export class InteractiveMode implements InteractiveModeContext {
 		const vibeToolsetLostToTeardown = this.vibeModeEnabled && !preserveVibe;
 		await this.#clearTransientModeState({ preserveVibe, vibeScopeAlreadySuspended });
 		await VibeSessionRegistry.global().rehydrate(vibeSession);
+		// A launch `--agent` persona is already applied at session creation;
+		// skip every mode-restoration branch so a restored plan/goal/vibe mode
+		// or another agent's mode cannot override it (the mode_change entry is
+		// appended after init by the caller).
+		if (options?.personaName) return;
+		// A non-agent target session must not inherit the previous session's
+		// persona-owned state (tools, spawns, prompt append). Runs for EVERY
+		// non-agent target mode (goal/vibe/plan/none) — the goal/vibe branches
+		// return before the fall-through reset below. Skipped for a same-session
+		// vibe reload (preserveVibe): the session is the same, so its persona
+		// state and vibe toolset must stay intact.
+		if (sessionContext.mode !== "agent" && !preserveVibe) {
+			await this.#clearPersonaOwnedState();
+		}
 		const goalEnabled = this.session.settings.get("goal.enabled");
 		if (!goalEnabled && (sessionContext.mode === "goal" || sessionContext.mode === "goal_paused")) {
 			this.session.goalRuntime.clearAccounting();
@@ -3000,6 +3083,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 			return;
 		}
+		if (sessionContext.mode === "agent") {
+			await this.#reconcilePersonaFromSession(sessionContext.modeData, options?.explicit);
+			return;
+		}
 		if (!this.session.settings.get("plan.enabled")) {
 			// Clear stale plan/plan_paused mode so re-enabling the setting
 			// later doesn't unexpectedly restore an old plan session.
@@ -3015,6 +3102,71 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.planModePaused = true;
 			this.#planModeHasEntered = true;
 			this.#updatePlanModeStatus();
+		}
+	}
+
+	/**
+	 * Re-apply a persisted agent persona on resume/switch. The persona is
+	 * re-discovered fresh and its CURRENT definition is applied (tools, model,
+	 * thinking, spawns, system-prompt append). When the agent is gone, changed to
+	 * `subagent`, or disabled, the previous session's persona-owned state
+	 * (spawns, prompt append, restricted tools) is cleared back to the baseline
+	 * and a warning is emitted — model+thinking are already restored by the
+	 * existing `model_change`/`thinking_level_change` flow in switchSession.
+	 */
+	async #reconcilePersonaFromSession(
+		data: Record<string, unknown> | undefined,
+		explicit?: PersonaExplicitOverrides,
+	): Promise<void> {
+		const name = data?.name as string | undefined;
+		if (!name) return;
+		let agent: AgentDefinition | undefined;
+		try {
+			const { agents } = await discoverAgents(this.sessionManager.getCwd());
+			agent = getAgent(agents, name);
+		} catch (error) {
+			// Discovery failure (e.g. an unreadable configured extension
+			// directory) must not leave the target transcript under the source
+			// session's persona state: switchSession catches reconciler errors
+			// and still commits the target, so clear the persona-owned state
+			// for a coherent non-persona baseline (codex #3821198710). No-op
+			// on cold resume, where no persona is active yet.
+			logger.warn("Failed to discover agents during persona restore", { error: String(error) });
+			await this.#clearPersonaOwnedState();
+			return;
+		}
+		const disabledAgents = (this.session.settings.get("task.disabledAgents") as string[] | undefined) ?? [];
+		if (isMainSessionPersonaUsable(agent, disabledAgents)) {
+			// Snapshot/rollback mirrors the live-switch path, with one
+			// reconcile-specific difference: switchSession catches reconciler
+			// errors and still commits the target, so restoring the SOURCE
+			// persona's snapshot wholesale would leave the committed target
+			// running the source persona's tools, spawns, and prompt. Restore
+			// the snapshot's model/thinking (the target transcript's restored
+			// values) and then clear the persona-owned state to a coherent
+			// non-persona baseline instead (codex #3821198710).
+			const snapshot = snapshotPersonaSwitch(this.session);
+			try {
+				await applyPersonaToSession(this.session, agent, explicit ?? EMPTY_PERSONA_OVERRIDES);
+			} catch (error) {
+				try {
+					await rollbackPersonaSwitch(this.session, snapshot);
+					await this.#clearPersonaOwnedState();
+				} catch (rollbackError) {
+					logger.warn("Failed to clear persona state after reconcile failure", {
+						error: String(rollbackError),
+					});
+				}
+				throw error;
+			}
+		} else {
+			// The persisted persona is gone/disabled: clear the previous session's
+			// persona-owned state so it does not leak into this transcript.
+			await this.#clearPersonaOwnedState();
+			this.session.emitNotice(
+				"warning",
+				`Agent "${name}" is no longer available. Restored model and thinking level.`,
+			);
 		}
 	}
 
@@ -3034,6 +3186,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Exit vibe mode first.");
 			return;
 		}
+
+		await this.#clearPersonaOwnedState();
 
 		this.planModePaused = false;
 
@@ -3093,6 +3247,96 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#updatePlanModeStatus();
 		this.sessionManager.appendModeChange("plan", { planFilePath });
 		this.showStatus(`Plan mode enabled. Plan file: ${planFilePath}`);
+	}
+
+	/**
+	 * Live-switch the main session to a discovered agent persona: tools, model,
+	 * thinking level, spawns, and system-prompt append all come from the agent's
+	 * current definition. Persists a `mode_change` entry (`mode: "agent"`,
+	 * `data: { name }`) so resume re-applies the persona. On failure, every
+	 * applied change is rolled back (mirrors plan-mode rollback).
+	 */
+	async switchAgentPersona(name: string): Promise<void> {
+		if (this.planModeEnabled || this.planModePaused) {
+			this.showWarning("Exit plan mode first.");
+			return;
+		}
+		if (this.goalModeEnabled || this.goalModePaused) {
+			this.showWarning("Exit goal mode first.");
+			return;
+		}
+		if (this.vibeModeEnabled) {
+			this.showWarning("Exit vibe mode first.");
+			return;
+		}
+		const { agents } = await discoverAgents(this.sessionManager.getCwd());
+		const agent = getAgent(agents, name);
+		if (!agent) {
+			this.showError(`Unknown agent: ${name}`);
+			return;
+		}
+		if (agent.availability === "subagent" || agent.availability === "unavailable") {
+			this.showError(`Agent "${name}" is subagent-only and cannot be used as the main-session persona.`);
+			return;
+		}
+		if ((this.session.settings.get("task.disabledAgents") as string[] | undefined)?.includes(name)) {
+			this.showError(`Agent "${name}" is disabled in settings (task.disabledAgents).`);
+			return;
+		}
+
+		// Snapshot every pre-switch value a failed attempt must restore
+		// (per-field rationale on snapshotPersonaSwitch); also seeds this
+		// attempt's first-write baseline.
+		const snapshot = snapshotPersonaSwitch(this.session);
+
+		try {
+			// Clear the previous persona's restricted tools before applying the
+			// new persona's (no-op on first apply: the baseline is the current
+			// set; on persona→persona it is the original pre-persona set).
+			await this.session.restoreBaselineTools();
+			if (agent.tools) {
+				// `applyPersonaTools` registers built-ins the launch registry
+				// omitted (a `--tools`/`--no-tools` session holds only the
+				// requested set) before activating the persona's list.
+				await this.session.applyPersonaTools(mainSessionTools(agent.tools, agent.spawns));
+			}
+			await applyPersonaModelAndThinking(this.session, agent, EMPTY_PERSONA_OVERRIDES, {
+				queueModelSwitch: (model, thinkingLevel) => {
+					this.#pendingModelSwitch = { model, thinkingLevel };
+					this.#pendingPlanModelSwitch = false;
+				},
+				onModelPatternUnresolved: () =>
+					this.showWarning(`Agent "${name}" model pattern did not resolve; keeping current model.`),
+			});
+			this.session.setSessionSpawns(spawnsToString(agent.spawns));
+			this.session.setPersonaAppendPrompt(agent.systemPrompt);
+			await this.session.refreshBaseSystemPrompt();
+		} catch (error) {
+			try {
+				// A queued persona model switch must not survive a failed apply —
+				// otherwise flushPendingModelSwitch would clobber the restored model.
+				this.#pendingModelSwitch = undefined;
+				this.#pendingPlanModelSwitch = false;
+				// Restore the pre-switch state exactly (presentation, signals,
+				// restriction, model/thinking, spawns, prompt, baseline).
+				await rollbackPersonaSwitch(this.session, snapshot, {
+					queueModelSwitch: (model, thinkingLevel) => {
+						this.#pendingModelSwitch = { model, thinkingLevel };
+						this.#pendingPlanModelSwitch = false;
+					},
+				});
+			} catch (rollbackError) {
+				logger.warn("Failed to roll back agent persona switch", { error: String(rollbackError) });
+			}
+			this.showError(
+				`Failed to switch to agent persona "${name}": ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return;
+		}
+
+		this.sessionManager.appendModeChange("agent", { name });
+		this.showStatus(`Switched to agent persona: ${name}`);
+		this.statusLine.invalidate();
 	}
 
 	async #restorePlanPreviousModel(prev: { model: Model; thinkingLevel?: ConfiguredThinkingLevel }): Promise<void> {
@@ -3214,6 +3458,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Exit vibe mode first.");
 			return;
 		}
+		await this.#clearPersonaOwnedState();
 		const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
 		const goalTools = [...new Set([...previousTools, "goal"])];
 		this.#goalModePreviousTools = previousTools;
@@ -3877,6 +4122,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
+		await this.#clearPersonaOwnedState();
+
 		const vibeRegistry = VibeSessionRegistry.global();
 		const ownerScope = vibeRegistry.ownerScope(this.#vibeParentSession());
 		vibeRegistry.activateScope(ownerScope);
@@ -4027,6 +4274,8 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.showWarning("Resume the current goal first, or drop it before setting a new objective.");
 				return false;
 			}
+
+			await this.#clearPersonaOwnedState();
 
 			// Expose the goal tool for the interview so the agent can finish by
 			// calling `goal create`. Record the pre-interview toolset first: the
@@ -5386,6 +5635,13 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showModelSelector(options?: { temporaryOnly?: boolean }): void {
 		this.#selectorController.showModelSelector(options);
+	}
+
+	async showAgentPersonaSelector(): Promise<void> {
+		// Await agent discovery so the slash-command dispatcher reports
+		// completion only after the picker is mounted; a detached `void` would
+		// let the next prompt land before the selector is visible (codex #3821083048).
+		await this.#selectorController.showAgentPersonaSelector();
 	}
 
 	showPluginSelector(mode?: "install" | "uninstall"): void {

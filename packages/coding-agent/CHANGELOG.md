@@ -4,6 +4,13 @@
 
 ### Added
 
+- Added `--agent <name>` CLI flag, `/agent <name>`, and `/switch-agent` slash commands to apply a discovered agent definition's frontmatter (tools, model, thinking, spawns, system prompt) as the main-session persona; explicit `--model`/`--tools`/`--thinking` flags take precedence. Persona identity persists via `mode_change` and is re-applied from the current agent definition on resume, falling back to model+thinking with a warning when the agent is unavailable. OpenCode `mode: primary|subagent|all` and Copilot `user-invocable`/`disable-model-invocation` frontmatter control availability. Closes [#6836](https://github.com/can1357/oh-my-pi/issues/6836), [#5306](https://github.com/can1357/oh-my-pi/issues/5306), [#7056](https://github.com/can1357/oh-my-pi/issues/7056).
+
+### Fixed
+
+- Fixed the Cursor exec bridge's file-mutation grant (`allowDirectFileMutation`) being captured at launch time: a session that started with write/edit active kept the permission after a live `/agent` switch to a read-only persona, so the native `delete` frame and MCP `download_path` resource reads could still remove or write workspace files. The grant is now derived from the session's LIVE active tool set at frame time, so it follows persona switches in both directions.
+- Fixed agent-persona edge cases: live `/plan`/`/vibe`/`/goal`/`/guided-goal` from an agent persona now clear the persona's spawns/prompt/restricted tools; a resumed session with an unresolvable persona `model:` falls back to the transcript's saved model; a deferred CLI `--model` thinking suffix wins over the persona's frontmatter `thinkingLevel`; live `/agent` switches register persona-requested built-ins on restricted-registry sessions; session switches re-capture the persona baseline for the target transcript.
+- Fixed ACP `/agent` switches applying a persona while plan/goal/vibe mode was active (the mode guards now mirror the interactive path), made persona-state clearing atomic (a failed baseline restoration leaves the persona intact instead of half-cleared), and stopped advertising the scout shortcut when a project override makes scout primary-only/unavailable.
 - Added side-by-side image and SVG previews to `omp git`, including local Git LFS object resolution and explicit placeholders for unavailable or unsupported binary content.
 - Added the `omp if-bench` command: a zero-tool instruction-following and working-memory benchmark that drives one cached conversation per model, adding one more glyph array action every turn while a `nya{1,N}` directive moves through the prompt, with a live turn-ladder board and a ranked scoreboard
 - Added `q` shortcut to exit the git TUI

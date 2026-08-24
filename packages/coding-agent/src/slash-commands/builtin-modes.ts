@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { logger } from "@oh-my-pi/pi-utils";
 import {
 	expandRoleAlias,
 	formatModelString,
@@ -9,12 +10,28 @@ import type { SettingPath, Settings } from "../config/settings";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
+import {
+	applyPersonaModelAndThinking,
+	EMPTY_PERSONA_OVERRIDES,
+	isMainSessionPersonaUsable,
+	rollbackPersonaSwitch,
+	snapshotPersonaSwitch,
+} from "../session/persona-apply";
+import { mainSessionTools, spawnsToString } from "../task/agent-tools";
+import { discoverAgents, getAgent } from "../task/discovery";
+import type { AgentDefinition } from "../task/types";
 import type { ComputerTool } from "../tools/computer";
 import { computerExposureMode } from "../tools/computer/exposure";
 import type { InspectImageMode } from "../utils/inspect-image-mode";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
-import type { ParsedSlashCommand, SlashCommandSpec, TuiSlashCommandRuntime } from "./types";
+import type {
+	ParsedSlashCommand,
+	SlashCommandResult,
+	SlashCommandRuntime,
+	SlashCommandSpec,
+	TuiSlashCommandRuntime,
+} from "./types";
 
 export function refreshStatusLine(ctx: InteractiveModeContext): void {
 	ctx.statusLine.invalidate();
@@ -47,6 +64,110 @@ async function runWithDetachedModeDraft(
 		}
 		runtime.ctx.showError(error instanceof Error ? error.message : String(error));
 	}
+}
+
+/**
+ * Apply a discovered agent's frontmatter to a session (tools, model, thinking,
+ * spawns, system-prompt append) with snapshot/rollback, mirroring
+ * `InteractiveMode.switchAgentPersona`. Shared by the `/agent` and
+ * `/switch-agent` ACP/text handlers so both paths get the same atomicity.
+ * Returns a human-readable error message on failure (state already rolled back),
+ * or `null` on success.
+ */
+async function applyAgentPersonaToSession(
+	session: AgentSession,
+	agent: AgentDefinition,
+	name: string,
+	output: (text: string) => Promise<void> | void,
+): Promise<string | null> {
+	const snapshot = snapshotPersonaSwitch(session);
+	try {
+		await session.restoreBaselineTools();
+		if (agent.tools) {
+			await session.applyPersonaTools(mainSessionTools(agent.tools, agent.spawns));
+		}
+		// ACP has no `#pendingModelSwitch` queue (that is an InteractiveMode
+		// field): mid-turn the model switch is skipped and surfaced as text
+		// instead of silently dropped.
+		await applyPersonaModelAndThinking(session, agent, EMPTY_PERSONA_OVERRIDES, {
+			deferModelSwitchWhileStreaming: () =>
+				output(
+					`Agent "${name}" model switch deferred: the session is mid-turn. Re-run /agent ${name} when idle to apply the model.`,
+				),
+			onModelPatternUnresolved: () =>
+				output(`Agent "${name}" model pattern did not resolve; keeping current model.`),
+		});
+		session.setSessionSpawns(spawnsToString(agent.spawns));
+		session.setPersonaAppendPrompt(agent.systemPrompt);
+		await session.refreshBaseSystemPrompt();
+	} catch (error) {
+		try {
+			await rollbackPersonaSwitch(session, snapshot);
+		} catch (rollbackError) {
+			logger.warn("Failed to roll back agent persona switch", { error: String(rollbackError) });
+		}
+		return `Failed to switch to agent persona "${name}": ${errorMessage(error)}`;
+	}
+	return null;
+}
+
+/**
+ * Shared ACP/text-mode handler for `/agent` and `/switch-agent`: validate the
+ * named agent, apply the persona with rollback, and persist the identity.
+ */
+async function switchAgentPersonaAcp(
+	command: ParsedSlashCommand,
+	runtime: SlashCommandRuntime,
+	usageText: string,
+): Promise<SlashCommandResult> {
+	const name = command.args.trim();
+	if (!name) {
+		return usage(usageText, runtime);
+	}
+	const { agents } = await discoverAgents(runtime.cwd);
+	const agent = getAgent(agents, name);
+	if (!agent) {
+		return usage(`Unknown agent: ${name}`, runtime);
+	}
+	const availabilityBlocked = agent.availability === "subagent" || agent.availability === "unavailable";
+	if (
+		!isMainSessionPersonaUsable(agent, (runtime.settings.get("task.disabledAgents") as string[] | undefined) ?? [])
+	) {
+		// Same reason split as before the shared predicate: the two rejections
+		// carry distinct operator-facing messages.
+		return usage(
+			availabilityBlocked
+				? `Agent "${name}" is subagent-only and cannot be used as the main-session persona.`
+				: `Agent "${name}" is disabled in settings (task.disabledAgents).`,
+			runtime,
+		);
+	}
+	// Mirror `InteractiveMode.switchAgentPersona`'s mode guards: a persona
+	// switch replaces the active tool set, which would corrupt an active
+	// plan/goal/vibe mode (e.g. dropping the plan proposal tools while
+	// `getPlanModeState()` stays enabled). The live session state covers
+	// active modes; the persisted mode covers paused states (a paused plan
+	// clears the session state but persists `plan_paused`).
+	const persistedMode = runtime.sessionManager.buildSessionContext().mode;
+	const planActive =
+		runtime.session.getPlanModeState()?.enabled === true ||
+		persistedMode === "plan" ||
+		persistedMode === "plan_paused";
+	const goalActive =
+		runtime.session.getGoalModeState()?.enabled === true ||
+		persistedMode === "goal" ||
+		persistedMode === "goal_paused";
+	const vibeActive = runtime.session.getVibeModeState()?.enabled === true || persistedMode === "vibe";
+	if (planActive) return usage("Exit plan mode first.", runtime);
+	if (goalActive) return usage("Exit goal mode first.", runtime);
+	if (vibeActive) return usage("Exit vibe mode first.", runtime);
+	const failure = await applyAgentPersonaToSession(runtime.session, agent, name, runtime.output);
+	if (failure) {
+		return usage(failure, runtime);
+	}
+	runtime.sessionManager.appendModeChange("agent", { name });
+	await runtime.output(`Switched to agent persona: ${name}`);
+	return commandConsumed();
 }
 
 /** `/fast status` label for the active model: "on" when its family is priority, else "off". */
@@ -386,6 +507,44 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showModelSelector();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "agent",
+		description: "Switch the main-session agent persona",
+		inlineHint: "<name>",
+		allowArgs: true,
+		handle: (command, runtime) => switchAgentPersonaAcp(command, runtime, "Usage: /agent <name>"),
+		handleTui: async (command, runtime) => {
+			const name = command.args.trim();
+			if (!name) {
+				runtime.ctx.showWarning("Usage: /agent <name>");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			await runtime.ctx.switchAgentPersona(name);
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "switch-agent",
+		description: "Switch the main-session agent persona",
+		inlineHint: "[name]",
+		allowArgs: true,
+		handle: (command, runtime) => switchAgentPersonaAcp(command, runtime, "Usage: /switch-agent [name]"),
+		handleTui: async (command, runtime) => {
+			const name = command.args.trim();
+			if (name) {
+				// Await the persona transition so the slash-command dispatcher
+				// reports completion only after agent discovery, tool replacement,
+				// model switching, and prompt rebuilding have settled — a detached
+				// `void` would let the next prompt land on a partially applied or
+				// stale persona (codex #3818999442). Mirrors the `/agent` handler.
+				await runtime.ctx.switchAgentPersona(name);
+			} else {
+				await runtime.ctx.showAgentPersonaSelector();
+			}
 			runtime.ctx.editor.setText("");
 		},
 	},

@@ -232,6 +232,26 @@ export interface ToolSession {
 	 * required yield tool). Suppresses automatic tool-set expansion.
 	 */
 	restrictToolNames?: boolean;
+	/**
+	 * Register every allowed built-in in the registry even when an explicit
+	 * tool list is given (the `--agent` persona launch path). The ACTIVE set
+	 * stays restricted to the requested names; the fuller registry lets the
+	 * SDK capture a baseline tool set for `restoreBaselineTools` when the
+	 * persona is left. Never set for subagents or direct `createTools`
+	 * callers — their returned array IS their active set.
+	 */
+	expandRegistryToAllBuiltins?: boolean;
+	/**
+	 * Whether the persona baseline includes `hub` — the non-persona hub
+	 * policy (spawning enabled, IRC not explicitly disabled) as computed by
+	 * the SDK (`baselineHubEnabled`). The launch registry omits `hub`
+	 * whenever the session is restricted (`restrictToolNames`/`enableIrc`
+	 * forced off), so the persona launch path uses this to let a persona
+	 * that EXPLICITLY requests `hub` through the gate exactly like the
+	 * wave-20 restore path lifts it on demand (`personaRequestsHub`). Only
+	 * ever set by the SDK's persona launch path.
+	 */
+	baselineHubEnabled?: boolean;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
 	/** Get shared eval executor session ID. Subagents inherit this to share JS/Python/Ruby/Julia state. */
@@ -266,8 +286,19 @@ export interface ToolSession {
 	getCodeModeDirectToolNames?: () => readonly string[] | undefined;
 	/** Return whether a built-in tool is active in this turn's tool set. */
 	isToolActive?: (name: string) => boolean;
-	/** Update the active built-in tool predicate when a session changes tools mid-run. */
-	setActiveToolNames?: (names: Iterable<string>) => void;
+	/**
+	 * Update the active built-in tool predicate when a session changes tools
+	 * mid-run. The optional second argument is the persona-switch signal: true
+	 * when the applied persona tools list omits both `write` and `edit` (the
+	 * SDK's Cursor `editWasGranted` floor becomes revocable), false when
+	 * either mutating tool is present again. Omitted for non-persona active-set
+	 * mutations, which must not touch the flag. The third argument is the
+	 * parallel `edit`-only signal: true when the applied persona tools list
+	 * omits `edit` specifically (even if `write` keeps the broader mutation
+	 * flag false), revoking the Cursor `pi_edit` override on its own
+	 * (codex #3818999447).
+	 */
+	setActiveToolNames?: (names: Iterable<string>, droppedMutation?: boolean, droppedEdit?: boolean) => void;
 	/** Canonical map containing every registered tool exactly once. */
 	toolRegistry?: Map<string, Tool>;
 	/** `xd://` presentation state backed by {@link toolRegistry}. */
@@ -466,25 +497,19 @@ export const HIDDEN_TOOLS: Record<HiddenToolName, ToolFactory> = {
 
 export type ToolName = BuiltinToolName;
 
+/** Result of the eval backend allowance resolution (preflight included). */
+export interface EvalAllowance {
+	/** Whether the eval tool may be exposed (any backend reachable). */
+	allowEval: boolean;
+}
+
 /**
- * Create tools from BUILTIN_TOOLS registry.
+ * Resolve whether the eval tool may be exposed for a session, running the
+ * per-backend kernel preflight when eval is requested and JS is disabled.
+ * Probes are cached per cwd + interpreter, so repeated calls (e.g. a live
+ * persona switch re-gating a launch-restricted registry) are cheap.
  */
-export async function createTools(session: ToolSession, toolNames?: string[]): Promise<Tool[]> {
-	const restrictToolNames = session.restrictToolNames === true;
-	const includeYield = session.requireYieldTool === true;
-	const enableLsp = session.enableLsp ?? true;
-	const requestedTools = restrictToolNames
-		? normalizeToolNames(toolNames ?? [])
-		: toolNames && toolNames.length > 0
-			? normalizeToolNames(toolNames)
-			: undefined;
-	const goalEnabled = session.settings.get("goal.enabled");
-	const goalModeActive = !restrictToolNames && goalEnabled && session.getGoalModeState?.()?.enabled === true;
-	const externalThinkingActive =
-		session.settings.get("externalThinking") && supportsExternalThinking(session.getActiveModel?.());
-	if (goalModeActive && requestedTools && !requestedTools.includes("goal")) {
-		requestedTools.push("goal");
-	}
+export async function resolveEvalAllowance(session: ToolSession, evalRequested: boolean): Promise<EvalAllowance> {
 	const backends = resolveEvalBackends(session);
 	const allowPython = backends.python;
 	const allowJs = backends.js;
@@ -497,7 +522,6 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	let pythonAvailable = true;
 	let rubyAvailable = true;
 	let juliaAvailable = true;
-	const evalRequested = requestedTools === undefined || requestedTools.includes("eval");
 	if (!skipEvalPreflight && !allowJs && evalRequested) {
 		if (allowPython) {
 			const availability = await logger.time(
@@ -532,13 +556,128 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			}
 		}
 	}
-
 	const effectivePythonAllowed = allowPython && pythonAvailable;
 	const effectiveRubyAllowed = allowRuby && rubyAvailable;
 	const effectiveJuliaAllowed = allowJulia && juliaAvailable;
 	// Eval is exposed whenever any backend is reachable. A backend may be
 	// unreachable, in which case eval dispatches exclusively to the others.
-	const allowEval = effectivePythonAllowed || allowJs || effectiveRubyAllowed || effectiveJuliaAllowed;
+	return {
+		allowEval: effectivePythonAllowed || allowJs || effectiveRubyAllowed || effectiveJuliaAllowed,
+	};
+}
+
+/** Session surface the built-in allowance gate reads (a subset of ToolSession). */
+export interface BuiltinToolAllowanceContext {
+	settings: Settings;
+	restrictToolNames: boolean;
+	enableLsp: boolean;
+	includeYield: boolean;
+	allowEval: boolean;
+	goalEnabled: boolean;
+	/** True when the caller supplied an explicit tool list (subagent/persona/--tools). */
+	hasExplicitToolList: boolean;
+	taskDepth?: number;
+	enableIrc?: boolean;
+	prewalkArmed?: boolean;
+	getGoalModeState?: () => GoalModeState | undefined;
+	getActiveModel?: () => Model | undefined;
+	getInspectImageModeOverride?: () => InspectImageMode | undefined;
+	/** Whether the current model can suppress native reasoning while scratchpad thoughts are active. */
+	externalThinkingActive: boolean;
+}
+
+/**
+ * Whether a built-in tool may be registered/activated for a session, given the
+ * precomputed allowance context. Shared by the launch path (`createTools`) and
+ * the live persona-switch path (sdk.ts `registerBuiltInTools`) so a tool the
+ * launch registry omitted is gated identically when a `/agent` switch
+ * registers it on demand.
+ */
+export function isBuiltinToolAllowed(session: BuiltinToolAllowanceContext, name: string): boolean {
+	// Never in the default set. Explicitly activatable while goal.enabled and
+	// no goal record exists yet — /guided-goal enables it so the agent can
+	// finish the interview with `goal create`, which turns goal mode on. Once
+	// a goal record exists, only an enabled goal keeps the tool: a completed
+	// (exiting) or paused goal must stop advertising it on the next rebuild.
+	if (name === "goal") {
+		if (!session.goalEnabled || session.restrictToolNames) return false;
+		const goalState = session.getGoalModeState?.();
+		return goalState === undefined || goalState.enabled === true || goalState.goal.status === "dropped";
+	}
+	if (name === "lsp") return session.enableLsp && session.settings.get("lsp.enabled");
+	if (name === "bash") return session.settings.get("bash.enabled");
+	if (name === "eval") return session.allowEval;
+	if (name === "debug") return session.settings.get("debug.enabled");
+	if (name === "todo")
+		return (!session.includeYield || session.prewalkArmed === true) && session.settings.get("todo.enabled");
+	if (name === "glob") return session.settings.get("glob.enabled");
+	if (name === "grep") return session.settings.get("grep.enabled");
+	if (name === "github") return session.settings.get("github.enabled");
+	if (name === "ast_grep") return session.settings.get("astGrep.enabled");
+	if (name === "ast_edit") return session.settings.get("astEdit.enabled");
+	if (name === "inspect_image") return isInspectImageToolActive(session);
+	if (name === "web_search") return session.settings.get("web_search.enabled");
+	if (name === "security_scan") return session.settings.get("security.enabled");
+	if (name === "think") return session.externalThinkingActive;
+	if (name === "ask") return session.settings.get("ask.enabled");
+	if (name === "browser") return session.settings.get("browser.enabled");
+	if (name === "computer") return session.settings.get("computer.enabled");
+	if (name === "checkpoint" || name === "rewind")
+		return (
+			session.settings.get("checkpoint.enabled") && ((session.taskDepth ?? 0) === 0 || session.hasExplicitToolList)
+		);
+	if (name === "hub") {
+		return (
+			!session.restrictToolNames &&
+			session.enableIrc !== false &&
+			isIrcEnabled(session.settings, session.taskDepth ?? 0)
+		);
+	}
+	if (name === "retain" || name === "recall" || name === "reflect") {
+		return ["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "");
+	}
+	if (name === "memory_edit") return session.settings.get("memory.backend") === "mnemopi";
+	if (name === "manage_skill")
+		return (
+			session.settings.get("autolearn.enabled") && ((session.taskDepth ?? 0) === 0 || session.hasExplicitToolList)
+		);
+	if (name === "learn") {
+		return (
+			session.settings.get("autolearn.enabled") &&
+			((session.taskDepth ?? 0) === 0 || session.hasExplicitToolList) &&
+			["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "")
+		);
+	}
+	if (name === "task") {
+		return canSpawnAtDepth(session.settings.get("task.maxRecursionDepth") ?? 2, session.taskDepth ?? 0);
+	}
+	return true;
+}
+
+/**
+ * Create tools from BUILTIN_TOOLS registry.
+ */
+export async function createTools(session: ToolSession, toolNames?: string[]): Promise<Tool[]> {
+	const restrictToolNames = session.restrictToolNames === true;
+	const includeYield = session.requireYieldTool === true;
+	const enableLsp = session.enableLsp ?? true;
+	const requestedTools = restrictToolNames
+		? normalizeToolNames(toolNames ?? [])
+		: toolNames && toolNames.length > 0
+			? normalizeToolNames(toolNames)
+			: undefined;
+	const goalEnabled = session.settings.get("goal.enabled");
+	const goalModeActive = !restrictToolNames && goalEnabled && session.getGoalModeState?.()?.enabled === true;
+	const externalThinkingActive =
+		session.settings.get("externalThinking") && supportsExternalThinking(session.getActiveModel?.());
+	if (goalModeActive && requestedTools && !requestedTools.includes("goal")) {
+		requestedTools.push("goal");
+	}
+	// Eval tool is enabled if ANY backend is reachable. JS needs no preflight, so
+	// we only probe Python/Ruby/Julia when JS is disabled — otherwise allowEval is
+	// already true and per-backend availability is checked at first invocation.
+	const evalRequested = requestedTools === undefined || requestedTools.includes("eval");
+	const { allowEval } = await resolveEvalAllowance(session, evalRequested);
 
 	// Checkpoint and rewind are a pair: listing one without the other strands
 	// the agent (it can checkpoint but not rewind, or vice versa). Auto-include
@@ -600,71 +739,50 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		}
 	}
 	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
-	const isToolAllowed = (name: string) => {
-		// Never in the default set. Explicitly activatable while goal.enabled and
-		// no goal record exists yet — /guided-goal enables it so the agent can
-		// finish the interview with `goal create`, which turns goal mode on. Once
-		// a goal record exists, only an enabled goal keeps the tool: a completed
-		// (exiting) or paused goal must stop advertising it on the next rebuild.
-		if (name === "goal") {
-			if (!goalEnabled || restrictToolNames) return false;
-			const goalState = session.getGoalModeState?.();
-			return goalState === undefined || goalState.enabled === true || goalState.goal.status === "dropped";
-		}
-		if (name === "lsp") return enableLsp && session.settings.get("lsp.enabled");
-		if (name === "bash") return session.settings.get("bash.enabled");
-		if (name === "eval") return allowEval;
-		if (name === "debug") return session.settings.get("debug.enabled");
-		if (name === "todo")
-			return (!includeYield || session.prewalkArmed === true) && session.settings.get("todo.enabled");
-		if (name === "glob") return session.settings.get("glob.enabled");
-		if (name === "grep") return session.settings.get("grep.enabled");
-		if (name === "github") return session.settings.get("github.enabled");
-		if (name === "ast_grep") return session.settings.get("astGrep.enabled");
-		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
-		if (name === "inspect_image") return isInspectImageToolActive(session);
-		if (name === "web_search") return session.settings.get("web_search.enabled");
-		if (name === "security_scan") return session.settings.get("security.enabled");
-		if (name === "think") return externalThinkingActive;
-		if (name === "ask") return session.settings.get("ask.enabled");
-		if (name === "browser") return session.settings.get("browser.enabled");
-		if (name === "computer") return session.settings.get("computer.enabled");
-		if (name === "checkpoint" || name === "rewind")
-			return (
-				session.settings.get("checkpoint.enabled") &&
-				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined)
-			);
-		if (name === "hub") {
-			return (
-				!restrictToolNames && session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)
-			);
-		}
-		if (name === "retain" || name === "recall" || name === "reflect") {
-			return ["hindsight", "mnemopi"].includes(session.settings.get("memory.backend") ?? "");
-		}
-		if (name === "memory_edit") return session.settings.get("memory.backend") === "mnemopi";
-		if (name === "manage_skill")
-			return (
-				session.settings.get("autolearn.enabled") &&
-				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined)
-			);
-		if (name === "learn") {
-			return (
-				session.settings.get("autolearn.enabled") &&
-				((session.taskDepth ?? 0) === 0 || requestedTools !== undefined) &&
-				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "")
-			);
-		}
-		if (name === "task") {
-			return canSpawnAtDepth(session.settings.get("task.maxRecursionDepth") ?? 2, session.taskDepth ?? 0);
-		}
-		return true;
+	const allowanceContext: BuiltinToolAllowanceContext = {
+		settings: session.settings,
+		restrictToolNames,
+		enableLsp,
+		includeYield,
+		allowEval,
+		goalEnabled,
+		hasExplicitToolList: requestedTools !== undefined,
+		taskDepth: session.taskDepth,
+		enableIrc: session.enableIrc,
+		prewalkArmed: session.prewalkArmed,
+		getGoalModeState: session.getGoalModeState,
+		getActiveModel: session.getActiveModel,
+		getInspectImageModeOverride: session.getInspectImageModeOverride,
+		externalThinkingActive,
 	};
+	const isToolAllowed = (name: string) => isBuiltinToolAllowed(allowanceContext, name);
 	if (includeYield && requestedTools && !requestedTools.includes("yield")) {
 		requestedTools.push("yield");
 	}
 
-	const filteredRequestedTools = requestedTools?.filter(name => name in allTools && isToolAllowed(name));
+	// A main-session persona that EXPLICITLY requests `hub` must get it at
+	// launch: `isBuiltinToolAllowed` rejects `hub` whenever
+	// `restrictToolNames` is true (and `enableIrc` is forced off for a
+	// restricted session), so the filter below would silently drop the
+	// persona's exact request — while a later live `/agent` switch to the
+	// same persona CAN enable it (the wave-20 restore path lifts hub on
+	// demand via `personaRequestsHub && baselineHubEnabled`). Mirror that
+	// lift here: it fires only for the SDK's persona launch path
+	// (`expandRegistryToAllBuiltins`, gated on `personaName`) when the
+	// persona names `hub` AND the non-persona hub policy holds (spawning
+	// enabled, IRC not explicitly disabled — the SDK's `baselineHubEnabled`).
+	// An explicit `enableIrc: false` keeps `baselineHubEnabled` false, so
+	// this never fires for it; a persona without `hub` in its tools list is
+	// untouched (the restricted gate stays closed for the expansion).
+	const hubLifted =
+		session.expandRegistryToAllBuiltins === true &&
+		requestedTools?.includes("hub") === true &&
+		session.baselineHubEnabled === true;
+
+	const filteredRequestedTools = requestedTools?.filter(name => {
+		if (name === "hub" && hubLifted) return true;
+		return name in allTools && isToolAllowed(name);
+	});
 	const baseEntries =
 		filteredRequestedTools !== undefined
 			? filteredRequestedTools.map(name => [name, allTools[name]] as const)
@@ -695,6 +813,44 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	session.toolRegistry = toolRegistry;
 	const builtInNames = new Set(tools.map(tool => tool.name));
 	for (const tool of tools) toolRegistry.set(tool.name, tool);
+
+	// A top-level session with an explicit tool list — the `--agent` persona
+	// path — keeps the ACTIVE set restricted to the requested names (with
+	// `restrictToolNames` semantics, exactly like a subagent spawn), but the
+	// REGISTRY must still hold every allowed built-in so the SDK can capture a
+	// full baseline for `restoreBaselineTools` when the persona is left.
+	// Without this, `toolNamesFromRegistry` (sdk.ts) is the restricted set and
+	// tools like bash/write that were never registered cannot be re-enabled.
+	// Gated on the explicit `expandRegistryToAllBuiltins` flag (set only by the
+	// persona launch path in sdk.ts): direct `createTools` callers and subagents
+	// keep the requested-only registry — their returned array IS their active
+	// set, and a subagent's explicit whitelist must never be silently widened.
+	// The expansion runs even when the filtered list is EMPTY (e.g. a persona
+	// whose `tools: [computer]` normalizes to nothing because computer.enabled
+	// is false, or a copied subagent list stripping down to only yield/goal):
+	// the active set stays empty, but the registry must still hold the full
+	// builtin set so the SDK captures a baseline that `restoreBaselineTools`
+	// can re-enable when the persona is left.
+	if (session.expandRegistryToAllBuiltins === true && filteredRequestedTools !== undefined) {
+		const registeredNames = new Set(tools.map(tool => tool.name));
+		const extraEntries = Object.entries(BUILTIN_TOOLS).filter(
+			([name]) => !registeredNames.has(name) && isToolAllowed(name),
+		);
+		if (extraEntries.length > 0) {
+			const extraResults = await Promise.all(
+				extraEntries.map(async ([name, factory]) => {
+					const tool = await logger.time(`createTools:${name}`, factory as ToolFactory, session);
+					return tool ? wrapToolWithMetaNotice(tool) : null;
+				}),
+			);
+			for (const tool of extraResults) {
+				if (tool === null) continue;
+				tools.push(tool);
+				toolRegistry.set(tool.name, tool);
+				builtInNames.add(tool.name);
+			}
+		}
+	}
 
 	// Ordinary sessions use xd:// for discoverable built-ins, custom tools, and
 	// MCP tools. Structured children must expose only their host-provided names,

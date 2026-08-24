@@ -83,6 +83,30 @@ interface SessionToolsOptions {
 	ensureWriteRegistered?: () => Promise<boolean>;
 	/** Registers the hidden `goal` tool when goal mode is enabled at runtime. */
 	ensureGoalRegistered?: () => Promise<boolean>;
+	/** Registers built-in tools missing from the registry on demand (live persona switch). */
+	registerBuiltInTools?: (
+		names: string[],
+		personaRequestsLsp?: boolean,
+		personaRequestsHub?: boolean,
+	) => Promise<void>;
+	/**
+	 * Whether the persona baseline includes `lsp` even though the session's
+	 * `enableLsp` is false (the restricted-session DEFAULT, not an explicit
+	 * `--no-lsp`). The launch registry omits `lsp` under that default, so
+	 * `restoreBaselineTools` must register it on demand to restore the tool
+	 * set a normal unrestricted session would have.
+	 */
+	baselineLspEnabled?: boolean;
+	/**
+	 * Whether the persona baseline includes `hub` even though the session's
+	 * `restrictToolNames`/`enableIrc` (both forced off for a restricted
+	 * session) made the launch registry omit it. `restoreBaselineTools` must
+	 * register it on demand to restore the tool set a normal unrestricted
+	 * session (spawning enabled, IRC not explicitly disabled) would have.
+	 */
+	baselineHubEnabled?: boolean;
+	/** Launch `--agent` persona's exact `tools:` grant (see AgentSessionConfig). */
+	personaToolRestriction?: Set<string>;
 	rebuildSystemPrompt?: (
 		toolNames: string[],
 		tools: Map<string, AgentTool>,
@@ -90,7 +114,16 @@ interface SessionToolsOptions {
 	) => Promise<{ systemPrompt: string[]; xdevCatalogNames?: readonly string[] }>;
 	getMcpServerInstructions?: () => Map<string, string> | undefined;
 	xdev?: XdevState;
-	setActiveToolNames?: (names: Iterable<string>) => void;
+	/**
+	 * Updates tool-session predicates from the live active tool set. The
+	 * optional second argument is the persona-switch signal: true when the
+	 * applied persona tools list omits both `write` and `edit` (the SDK's
+	 * Cursor `editWasGranted` floor becomes revocable), false when either
+	 * mutating tool is present again. Omitted for non-persona active-set
+	 * mutations, which must not touch the flag. The third argument is the
+	 * parallel `edit`-only signal (codex #3818999447).
+	 */
+	setActiveToolNames?: (names: Iterable<string>, droppedMutation?: boolean, droppedEdit?: boolean) => void;
 	baseSystemPrompt: string[];
 	skills?: Skill[];
 	skillWarnings?: SkillWarning[];
@@ -246,11 +279,29 @@ export class SessionTools {
 	#setActiveToolNames: SessionToolsOptions["setActiveToolNames"];
 	#ensureWriteRegistered: SessionToolsOptions["ensureWriteRegistered"];
 	#ensureGoalRegistered: SessionToolsOptions["ensureGoalRegistered"];
+	#registerBuiltInTools: SessionToolsOptions["registerBuiltInTools"];
+	#baselineLspEnabled: boolean;
+	#baselineHubEnabled: boolean;
 	#skills: Skill[];
 	#skillWarnings: SkillWarning[];
 	#skillsSettings: SkillsSettings | undefined;
 	#skillsReloadable: boolean;
 	#acpPermissionDecisions = new Map<string, "allow_always" | "reject_always">();
+	/** Last persona-switch signal forwarded to the SDK (see {@link applyPersonaTools}); restored on apply rollback. Starts `false` to match the SDK's launch state (floor holds). */
+	#lastPersonaDroppedMutation: boolean | undefined = false;
+	/** Parallel `edit`-only signal mirror (see {@link #lastPersonaDroppedMutation}); revokes the Cursor `pi_edit` override when a persona omits `edit` (codex #3818999447). */
+	#lastPersonaDroppedEdit: boolean | undefined = false;
+	/**
+	 * The exact tool list a LIVE `/agent` switch narrowed the session to, or
+	 * `undefined` when no persona restriction is in effect (a launch `--agent`
+	 * uses the creation-time `restrictToolNames` flag instead; an unrestricted
+	 * persona or a left persona has none). Set by {@link applyPersonaTools} and
+	 * cleared by {@link restoreBaselineTools} / the persona-clear paths so a later
+	 * MCP refresh does not widen the active set past the persona's grant (codex
+	 * #3819553918) and the rebuilt prompt suppresses affordances a launch
+	 * `--agent` would (codex #3763426057).
+	 */
+	#personaActiveToolRestriction: Set<string> | undefined;
 
 	constructor(host: SessionToolsHost, options: SessionToolsOptions) {
 		this.#host = host;
@@ -275,6 +326,12 @@ export class SessionTools {
 		this.#presentationPinnedToolNames = options.presentationPinnedToolNames;
 		this.#ensureWriteRegistered = options.ensureWriteRegistered;
 		this.#ensureGoalRegistered = options.ensureGoalRegistered;
+		this.#registerBuiltInTools = options.registerBuiltInTools;
+		this.#baselineLspEnabled = options.baselineLspEnabled === true;
+		this.#baselineHubEnabled = options.baselineHubEnabled === true;
+		this.#personaActiveToolRestriction = options.personaToolRestriction
+			? new Set(options.personaToolRestriction)
+			: undefined;
 		this.#rebuildSystemPrompt = options.rebuildSystemPrompt;
 		this.#getMcpServerInstructions = options.getMcpServerInstructions;
 		this.#xdev = options.xdev;
@@ -384,7 +441,13 @@ export class SessionTools {
 
 	/** Whether the edit tool is registered. */
 	get hasEditTool(): boolean {
-		return this.#toolRegistry.has("edit");
+		// `createTools` now registers every allowed built-in for top-level
+		// persona sessions (so the baseline tool set can be restored), so
+		// registry presence no longer proves a grant. The true grant is
+		// top-level ACTIVE presence: a read-only persona never activates edit,
+		// and `restoreBaselineTools` re-activates it when the persona is left.
+		// (edit is `essential` loadMode, so it is never xd://-mounted.)
+		return this.getActiveToolNames().includes("edit");
 	}
 
 	/** Looks up a registered tool by name. */
@@ -501,6 +564,42 @@ export class SessionTools {
 	/** Names of every registered tool. */
 	getAllToolNames(): string[] {
 		return Array.from(this.#toolRegistry.keys());
+	}
+
+	/**
+	 * Compute the tool set a fresh non-persona session on this registry would
+	 * have: every registered tool except `goal` and default-inactive tools,
+	 * partitioned into the top-level versus `xd://` presentation the SDK's
+	 * launch baseline uses. Mirrors the SDK's baseline computation
+	 * (`toolNamesFromRegistry` minus `defaultInactiveToolNames` minus `goal`,
+	 * with the same read/write-gated mount partition) so a session switch can
+	 * re-capture the baseline for the new transcript. When the session's
+	 * `enableLsp` is false only because a restricted launch defaulted it (the
+	 * persona baseline policy), `lsp` is included even though the launch
+	 * registry omitted it — a normal unrestricted session would have it. The
+	 * same applies to `hub` under the non-persona hub policy (spawning
+	 * enabled, IRC not explicitly disabled).
+	 */
+	computeBaselineToolNames(): { names: string[]; mounted: string[] } {
+		const names = Array.from(this.#toolRegistry.keys()).filter(
+			name => name !== "goal" && !this.#isDefaultInactiveTool(name),
+		);
+		if (this.#baselineLspEnabled && !names.includes("lsp")) names.push("lsp");
+		if (this.#baselineHubEnabled && !names.includes("hub")) names.push("hub");
+		const readAvailable = names.includes("read");
+		const writeAvailable = names.includes("write");
+		const mounted = this.#xdev
+			? names.filter(name => {
+					const tool = this.#toolRegistry.get(name);
+					return tool !== undefined && readAvailable && writeAvailable && isMountableUnderXdev(tool);
+				})
+			: [];
+		return { names, mounted };
+	}
+
+	#isDefaultInactiveTool(name: string): boolean {
+		const tool = this.#toolRegistry.get(name);
+		return (tool as { defaultInactive?: boolean } | undefined)?.defaultInactive === true;
 	}
 
 	/**
@@ -819,15 +918,43 @@ export class SessionTools {
 		);
 	}
 
-	/** Applies an enabled tool set and reconciles its `xd://` partition. */
-	applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
+	/**
+	 * Applies an enabled tool set and reconciles its `xd://` partition.
+	 * `personaDroppedMutation` is the persona-switch signal: `true` when the
+	 * applied persona tools list omits both `write` and `edit`, `false` when
+	 * either is present again, and `undefined` for non-persona active-set
+	 * mutations (which must not touch the SDK's revocable-floor flag). The
+	 * signal is forwarded VERBATIM (not recomputed from the names) so a
+	 * rollback can restore the exact pre-switch value, and the mirror is
+	 * only updated when a signal is passed.
+	 */
+	applyActiveToolsByName(
+		toolNames: string[],
+		forcePromptRefresh = false,
+		signal?: AbortSignal,
+		personaDroppedMutation?: boolean,
+		personaDroppedEdit?: boolean,
+	): Promise<void> {
 		return this.runToolRegistryMutation(
-			() => this.#applyActiveToolsByName(toolNames, forcePromptRefresh, signal),
+			() =>
+				this.#applyActiveToolsByName(
+					toolNames,
+					forcePromptRefresh,
+					signal,
+					personaDroppedMutation,
+					personaDroppedEdit,
+				),
 			signal,
 		);
 	}
 
-	async #applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
+	async #applyActiveToolsByName(
+		toolNames: string[],
+		forcePromptRefresh = false,
+		signal?: AbortSignal,
+		personaDroppedMutation?: boolean,
+		personaDroppedEdit?: boolean,
+	): Promise<void> {
 		signal?.throwIfAborted();
 		toolNames = normalizeToolNames(toolNames);
 		const codeMode = resolveCodeMode({
@@ -934,13 +1061,35 @@ export class SessionTools {
 		}
 		const previousMounted = new Set(this.#xdev?.mountedNames ?? []);
 		const previousActiveToolNames = this.getActiveToolNames();
+		const previousPersonaDroppedMutation = this.#lastPersonaDroppedMutation;
+		const previousPersonaDroppedEdit = this.#lastPersonaDroppedEdit;
 		const previousEnabledToolNames = this.#enabledToolNames;
 		const previousCodeModeDirectToolNames = this.#codeModeDirectToolNames;
 		const previousToolPredicateNames = this.#toolPredicateNames;
 		this.#enabledToolNames = new Set([...validToolNames, ...mountNames]);
 		this.#setMountedNames(mountNames);
 		this.#toolPredicateNames = codeMode.active ? [...this.#enabledToolNames] : appliedNames;
-		this.#setActiveToolNames?.(this.#toolPredicateNames);
+		// The persona-switch signal rides the same closure that updates the
+		// live set: `applyPersonaTools` is the only caller that passes it, so
+		// every persona switch funnels through here while non-persona
+		// active-set mutations (plan/vibe/goal modes, MCP refresh, extension
+		// `setActiveTools`) leave the SDK's `personaDroppedMutation` flag
+		// untouched. True = the applied list omits both `write` and `edit`
+		// (revokes the Cursor `editWasGranted` floor, codex #3762233472);
+		// false = either mutating tool is present again (restores it).
+		// The passed signal is forwarded VERBATIM rather than recomputed from
+		// the names: a rollback re-applies the pre-switch snapshot, which can
+		// differ from what the restored names would recompute to (a Cursor
+		// edit-only session's restored `[]` would recompute to `true` and
+		// keep the floor revoked). The mirror is only updated when a signal
+		// is passed, so it stays a faithful mirror of the SDK flag.
+		if (personaDroppedMutation !== undefined) {
+			this.#lastPersonaDroppedMutation = personaDroppedMutation;
+			this.#lastPersonaDroppedEdit = personaDroppedEdit;
+			this.#setActiveToolNames?.(validToolNames, personaDroppedMutation, personaDroppedEdit);
+		} else {
+			this.#setActiveToolNames?.(this.#toolPredicateNames);
+		}
 		// The eval tool advertises whatever stays direct, including a plan-mode
 		// transport `write`, so the applied partition lands before the rebuild
 		// reads the tool descriptions.
@@ -979,18 +1128,30 @@ export class SessionTools {
 		} catch (error) {
 			this.#setMountedNames(previousMounted);
 			this.#toolPredicateNames = previousToolPredicateNames;
-			this.#setActiveToolNames?.(previousToolPredicateNames ?? previousActiveToolNames);
+			this.#setActiveToolNames?.(
+				previousToolPredicateNames ?? previousActiveToolNames,
+				previousPersonaDroppedMutation,
+				previousPersonaDroppedEdit,
+			);
 			this.#enabledToolNames = previousEnabledToolNames;
 			this.#codeModeDirectToolNames = previousCodeModeDirectToolNames;
+			this.#lastPersonaDroppedMutation = previousPersonaDroppedMutation;
+			this.#lastPersonaDroppedEdit = previousPersonaDroppedEdit;
 			throw error;
 		}
 
 		if (this.#host.isDisposed()) {
 			this.#setMountedNames(previousMounted);
 			this.#toolPredicateNames = previousToolPredicateNames;
-			this.#setActiveToolNames?.(previousToolPredicateNames ?? previousActiveToolNames);
+			this.#setActiveToolNames?.(
+				previousToolPredicateNames ?? previousActiveToolNames,
+				previousPersonaDroppedMutation,
+				previousPersonaDroppedEdit,
+			);
 			this.#enabledToolNames = previousEnabledToolNames;
 			this.#codeModeDirectToolNames = previousCodeModeDirectToolNames;
+			this.#lastPersonaDroppedMutation = previousPersonaDroppedMutation;
+			this.#lastPersonaDroppedEdit = previousPersonaDroppedEdit;
 			return;
 		}
 
@@ -1197,7 +1358,11 @@ export class SessionTools {
 	}
 
 	/** Selects enabled tools, ignoring names absent from the registry. */
-	setActiveToolsByName(toolNames: string[]): Promise<void> {
+	setActiveToolsByName(
+		toolNames: string[],
+		personaDroppedMutation?: boolean,
+		personaDroppedEdit?: boolean,
+	): Promise<void> {
 		return this.runToolRegistryMutation(async () => {
 			const normalized = normalizeToolNames(toolNames);
 			// Transport-write eligibility keys off the *current* active set: an ordinary
@@ -1206,8 +1371,114 @@ export class SessionTools {
 				normalized,
 				this.#xdev?.mountedNames ?? new Set(),
 				this.getActiveToolNames().includes("write"),
+				personaDroppedMutation,
+				undefined,
+				undefined,
+				personaDroppedEdit,
 			);
 		});
+	}
+
+	/**
+	 * Activates a persona's tool list, registering any built-in missing from
+	 * the registry first. A session launched with a restricted registry
+	 * (`--tools`/`--no-tools`) only holds the requested built-ins, so a live
+	 * `/agent` switch to a persona whose `tools:` list names others would
+	 * otherwise silently drop them (the registry lookup in
+	 * {@link applyActiveToolsByName} skips unknown names). The SDK's
+	 * `registerBuiltInTools` closure builds the missing tools through the same
+	 * allowance gate the launch path uses. A persona that explicitly lists
+	 * `lsp` is flagged so the closure can let it through the gate when the
+	 * session's `enableLsp` is false only because a restricted launch
+	 * defaulted it (an explicit `--no-lsp` still wins). A persona that
+	 * explicitly lists `hub` is flagged the same way so the closure's
+	 * `hubLifted` lift fires when the non-persona hub policy holds
+	 * (spawning enabled, IRC not explicitly disabled — the SDK's
+	 * `baselineHubEnabled`); otherwise `hub` would be silently dropped on
+	 * a live `/agent` switch even though the launch path honors it.
+	 */
+	async applyPersonaTools(toolNames: string[]): Promise<void> {
+		const normalized = normalizeToolNames(toolNames);
+		const missing = normalized.filter(name => !this.#toolRegistry.has(name));
+		if (missing.length > 0) {
+			await this.#registerBuiltInTools?.(missing, normalized.includes("lsp"), normalized.includes("hub"));
+		}
+		// Record the persona's exact grant so a later MCP refresh does not widen
+		// the active set past it (codex #3819553918) and the rebuilt prompt
+		// suppresses affordances a launch `--agent` would (codex #3763426057).
+		// `applyPersonaTools` is only called with an explicit `tools:` list, so
+		// every live `/agent` switch with a tool restriction activates this; an
+		// unrestricted persona (no `tools:`) never calls it and leaves the field
+		// unset.
+		this.#personaActiveToolRestriction = new Set(normalized);
+		// The persona-switch signal: a persona whose tools list omits BOTH
+		// mutating built-ins revokes the Cursor `editWasGranted` floor (codex
+		// #3762233472); a persona with either one restores it. The parallel
+		// `edit`-only signal revokes the Cursor `pi_edit` override when the
+		// persona omits `edit` specifically — even if `write` keeps the broader
+		// mutation flag false (codex #3818999447). `applyActiveToolsByName`
+		// forwards both flags to the SDK's `setActiveToolNames` closure.
+		await this.setActiveToolsByName(
+			normalized,
+			!normalized.includes("write") && !normalized.includes("edit"),
+			!normalized.includes("edit"),
+		);
+	}
+	/**
+	 * Last persona-switch signal forwarded to the SDK (see
+	 * {@link applyPersonaTools}). Rollback paths snapshot this before a
+	 * persona apply and pass it back to `setActiveToolsByName` so a failed
+	 * switch restores the exact pre-switch SDK `personaDroppedMutation`
+	 * flag instead of leaving it stale.
+	 */
+	getLastPersonaDroppedMutation(): boolean | undefined {
+		return this.#lastPersonaDroppedMutation;
+	}
+
+	/** Parallel `edit`-only signal mirror (codex #3818999447); rollback paths snapshot and restore it. */
+	getLastPersonaDroppedEdit(): boolean | undefined {
+		return this.#lastPersonaDroppedEdit;
+	}
+
+	/**
+	 * The exact tool list a LIVE `/agent` switch narrowed the session to, or
+	 * `undefined` when no persona restriction is in effect. The SDK's prompt
+	 * rebuild and MCP refresh consult this so a live-switched persona gets the
+	 * same affordance suppression and refresh filtering a launch `--agent` does
+	 * (codex #3763426057 / #3819553918).
+	 */
+	getPersonaToolRestriction(): Set<string> | undefined {
+		return this.#personaActiveToolRestriction;
+	}
+
+	/**
+	 * Sets or clears the live persona restriction without restoring tools.
+	 * `switchSession` clears it (target transcript re-applies its own), and a
+	 * failed `/agent` switch rollback restores the pre-switch value so the
+	 * failed persona's restriction does not leak (codex #3819553918).
+	 */
+	setPersonaToolRestriction(value: Set<string> | undefined): void {
+		this.#personaActiveToolRestriction = value ? new Set(value) : undefined;
+	}
+
+	/**
+	 * Set the persona-switch signal (`#lastPersonaDroppedMutation` and the
+	 * SDK's `personaDroppedMutation` flag) without touching the active tool
+	 * set. Used by {@link AgentSession.setPersonaDroppedMutation} when a
+	 * session switch re-captures the baseline for a different transcript:
+	 * the previous logical session's read-only persona revoked the Cursor
+	 * `editWasGranted` floor, and the revocation must not carry over to the
+	 * target. `false` clears the flag; `true` (rollback of a clear) sets it.
+	 */
+	setPersonaDroppedMutation(value: boolean, editValue?: boolean): void {
+		this.#lastPersonaDroppedMutation = value;
+		// The `edit`-only signal clears/sets in lockstep: a baseline re-capture
+		// that clears the mutation floor (target transcript is not read-only)
+		// also clears the `pi_edit` revocation, and a rollback restores both
+		// (codex #3818999447).
+		const edit = editValue ?? value;
+		this.#lastPersonaDroppedEdit = edit;
+		this.#setActiveToolNames?.(this.getActiveToolNames(), value, edit);
 	}
 
 	/**
@@ -1226,12 +1497,20 @@ export class SessionTools {
 	 *
 	 * Delegates the actual apply through {@link applyActiveToolsByName} and restores
 	 * the prior runtime selection if that apply throws.
+	 *
+	 * `personaDroppedMutation` is the persona-switch signal forwarded VERBATIM (see
+	 * {@link applyActiveToolsByName}); undefined leaves the SDK flag untouched, and
+	 * `false` clears it (used by {@link restoreBaselineTools}: leaving agent mode
+	 * re-activates the pre-persona tool set, so a read-only persona's revocation of
+	 * the Cursor `editWasGranted` floor no longer applies).
 	 */
 	setActiveToolPresentation(
 		toolNames: string[],
 		mountedToolNames: string[],
 		forcePromptRefresh = false,
 		signal?: AbortSignal,
+		personaDroppedMutation?: boolean,
+		personaDroppedEdit?: boolean,
 	): Promise<void> {
 		return this.runToolRegistryMutation(async () => {
 			const normalized = normalizeToolNames(toolNames);
@@ -1241,10 +1520,69 @@ export class SessionTools {
 				normalized,
 				new Set(normalizeToolNames(mountedToolNames)),
 				normalized.includes("write"),
+				personaDroppedMutation,
 				forcePromptRefresh,
 				signal,
+				personaDroppedEdit,
 			);
 		}, signal);
+	}
+
+	/**
+	 * Restore the persona baseline (leaving agent mode), registering `lsp`
+	 * and `hub` on demand first. The launch registry omits `lsp` when the
+	 * session's `enableLsp` is false only because a restricted launch
+	 * defaulted it, and omits `hub` whenever the session is restricted
+	 * (`restrictToolNames`/`enableIrc` forced off), so the baseline names
+	 * them but the registry lacks them — without the registration,
+	 * `applyActiveToolsByName`'s registry lookup would silently drop them and
+	 * the restored set would miss the tools a normal unrestricted session
+	 * has. `personaRequestsLsp`/`personaRequestsHub` are passed so the SDK's
+	 * registration closure lifts the restricted-session defaults exactly like
+	 * the live `/agent` switch path (an explicit `--no-lsp` keeps
+	 * `baselineLspEnabled` false, and an explicit `enableIrc: false` keeps
+	 * `baselineHubEnabled` false, so these never fire for them).
+	 *
+	 * The restore is the persona-leave path (agent mode exited, non-agent
+	 * session switched to, or a gone/disabled persona on resume): it
+	 * re-activates the pre-persona tool set, so the read-only persona's
+	 * revocation of the Cursor `editWasGranted` floor no longer applies. The
+	 * SDK's `personaDroppedMutation` flag is therefore cleared with an
+	 * explicit `false` signal — without it, `applyActiveToolsByName` passes
+	 * no signal and the flag stays `true`, permanently revoking the native
+	 * delete/download grant on a Cursor session that granted `edit` at launch
+	 * (de-novo review P1). A persona→persona switch funnels through here
+	 * too: the subsequent `applyPersonaTools` re-signals the NEW persona's
+	 * state, so the interim `false` is never observable.
+	 */
+	async restoreBaselineTools(toolNames: string[], mountedToolNames: string[]): Promise<void> {
+		// Leaving agent mode drops the persona restriction so a later MCP refresh
+		// can activate connected manager tools again (codex #3819553918) and the
+		// rebuilt prompt restores the unrestricted affordances (codex #3763426057).
+		// A persona→persona switch calls this before `applyPersonaTools` re-sets
+		// the field, so the interim `undefined` is never observable.
+		//
+		// The restriction is cleared only AFTER the on-demand registrations and
+		// the presentation apply succeed: a failed restore (e.g. an LSP/hub
+		// factory or system-prompt rebuild rejection) must leave the still-active
+		// persona's restriction in place, or a later MCP/RPC tool refresh could
+		// activate tools the persona never granted (codex #3821198710).
+		const previousRestriction = this.#personaActiveToolRestriction;
+		if (this.#baselineLspEnabled && toolNames.includes("lsp") && !this.#toolRegistry.has("lsp")) {
+			await this.#registerBuiltInTools?.(["lsp"], true);
+		}
+		if (this.#baselineHubEnabled && toolNames.includes("hub") && !this.#toolRegistry.has("hub")) {
+			await this.#registerBuiltInTools?.(["hub"], false, true);
+		}
+		try {
+			await this.setActiveToolPresentation(toolNames, mountedToolNames, undefined, undefined, false, false);
+		} catch (error) {
+			// Restore the previous restriction so the failed restore does not
+			// leave the persona's tool gate open.
+			this.#personaActiveToolRestriction = previousRestriction;
+			throw error;
+		}
+		this.#personaActiveToolRestriction = undefined;
 	}
 
 	/**
@@ -1256,8 +1594,10 @@ export class SessionTools {
 		normalized: string[],
 		mounted: ReadonlySet<string>,
 		writeSelected: boolean,
+		personaDroppedMutation?: boolean,
 		forcePromptRefresh = false,
 		signal?: AbortSignal,
+		personaDroppedEdit?: boolean,
 	): Promise<void> {
 		const transportWriteActive =
 			writeSelected &&
@@ -1270,14 +1610,29 @@ export class SessionTools {
 			normalized.filter(name => !mounted.has(name) && !(name === "write" && transportWriteActive)),
 		);
 		try {
-			await this.#applyActiveToolsByName(normalized, forcePromptRefresh, signal);
+			await this.applyActiveToolsByName(
+				normalized,
+				forcePromptRefresh,
+				signal,
+				personaDroppedMutation,
+				personaDroppedEdit,
+			);
 		} catch (error) {
 			this.#runtimeSelectedToolNames = previousRuntimeSelectedToolNames;
 			throw error;
 		}
 	}
 
-	/** Replaces memory-backend tools while preserving unrelated selections. */
+	/**
+	 * Replaces memory-backend tools while preserving unrelated selections.
+	 *
+	 * A live `/agent` persona with an explicit `tools:` grant narrows the
+	 * session durably (see {@link applyPersonaTools}); a later backend switch
+	 * (`/set memory.backend …`) must not widen the active set past that grant,
+	 * so new backend tools are registered but activate only when the persona
+	 * granted them — the same durable-restriction rule the MCP and RPC host
+	 * refresh paths enforce.
+	 */
 	replaceMemoryTools(tools: AgentTool[]): Promise<void> {
 		return this.runToolRegistryMutation(async () => {
 			const removed = new Set<string>(MEMORY_BACKEND_TOOL_NAMES.filter(name => this.#builtInToolNames.has(name)));
@@ -1287,6 +1642,7 @@ export class SessionTools {
 				this.#builtInToolNames.delete(name);
 			}
 
+			const restriction = this.#personaActiveToolRestriction;
 			for (const tool of tools) {
 				if (!MEMORY_BACKEND_TOOL_NAMES.some(name => name === tool.name) || this.#toolRegistry.has(tool.name)) {
 					continue;
@@ -1294,7 +1650,9 @@ export class SessionTools {
 				const wrapped = this.#wrapRuntimeTool(tool);
 				this.#toolRegistry.set(wrapped.name, wrapped);
 				this.#builtInToolNames.add(wrapped.name);
-				nextActive.push(wrapped.name);
+				if (!restriction || restriction.has(wrapped.name)) {
+					nextActive.push(wrapped.name);
+				}
 			}
 			await this.#applyActiveToolsByName([...new Set(nextActive)]);
 		});
@@ -1707,16 +2065,29 @@ export class SessionTools {
 			this.#toolRegistry.set(tool.name, tool);
 			if (managerToolSet.has(tool)) this.#mcpManagerToolNames.add(tool.name);
 		}
-
 		// Connected manager tools become active immediately. Extension-owned MCP
 		// tools retain their prior selection while both sets share one registry.
+		// A LIVE `/agent` switch with an explicit `tools:` list narrows the
+		// session to that grant (see {@link applyPersonaTools}); a later MCP
+		// refresh must not widen the active set past it, so connected manager
+		// tools (and retained extension MCP tools) activate only when the persona
+		// granted them. A launch `--agent` restriction is enforced at creation
+		// time (`restrictToolNames` disables MCP entirely) and never reaches here
+		// (codex #3819553918).
+		const restriction = this.#personaActiveToolRestriction;
 		const retainedActiveExtensionToolNames = previousActiveMcpToolNames.filter(
-			name => this.#extensionMcpTools.has(name) && this.#toolRegistry.has(name),
+			name =>
+				this.#extensionMcpTools.has(name) &&
+				this.#toolRegistry.has(name) &&
+				(!restriction || restriction.has(name)),
 		);
+		const activeManagerToolNames = restriction
+			? [...this.#mcpManagerToolNames].filter(name => restriction.has(name))
+			: [...this.#mcpManagerToolNames];
 		const nextActive = [
 			...new Set([
 				...this.#getActiveNonMCPToolNames(),
-				...this.#mcpManagerToolNames,
+				...activeManagerToolNames,
 				...retainedActiveExtensionToolNames,
 			]),
 		];
@@ -1776,7 +2147,15 @@ export class SessionTools {
 			name => previousRpcHostToolNames.has(name) && this.#rpcHostToolNames.has(name),
 		);
 		const autoActivatedRpcToolNames = rpcTools
-			.filter(tool => !tool.hidden && !previousRpcHostToolNames.has(tool.name))
+			.filter(
+				tool =>
+					!tool.hidden &&
+					!previousRpcHostToolNames.has(tool.name) &&
+					// A LIVE `/agent` persona restriction must not be widened by a
+					// late RPC host tool refresh: auto-activate only tools the
+					// persona granted (codex #3821083022).
+					(!this.#personaActiveToolRestriction || this.#personaActiveToolRestriction.has(tool.name)),
+			)
 			.map(tool => tool.name);
 		try {
 			await this.#applyActiveToolsByName(

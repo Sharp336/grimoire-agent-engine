@@ -63,6 +63,7 @@ import {
 	toResetUsageAccounts,
 } from "../../slash-commands/helpers/reset-usage";
 import { toSessionPinAccounts } from "../../slash-commands/helpers/session-pin";
+import { discoverAgents } from "../../task/discovery";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -84,6 +85,7 @@ import { repo } from "../../utils/git";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
 import { type AdvisorConfigDeps, AdvisorConfigOverlayComponent } from "../components/advisor-config";
 import { AgentHubOverlayComponent } from "../components/agent-hub";
+import { AgentPersonaPickerComponent } from "../components/agent-persona-picker";
 import { AgentsHubComponent } from "../components/agents-hub";
 import { AssistantMessageComponent } from "../components/assistant-message";
 import { CopySelectorComponent } from "../components/copy-selector";
@@ -752,6 +754,69 @@ export class SelectorController {
 			return;
 		}
 		this.#showModelHub({});
+	}
+
+	/**
+	 * `/switch-agent` persona picker: a bottom-anchored overlay listing
+	 * main-selectable discovered agents (availability !== "subagent", not in
+	 * `task.disabledAgents`). Selecting an entry live-switches the persona;
+	 * Esc closes without changes.
+	 */
+	async showAgentPersonaSelector(): Promise<void> {
+		const { agents } = await discoverAgents(this.ctx.sessionManager.getCwd());
+		const disabled = new Set((this.ctx.settings.get("task.disabledAgents") as string[] | undefined) ?? []);
+		const selectable = agents.filter(
+			agent =>
+				agent.availability !== "subagent" && agent.availability !== "unavailable" && !disabled.has(agent.name),
+		);
+
+		let overlayHandle: OverlayHandle | undefined;
+		let closed = false;
+		const done = () => {
+			if (closed) return;
+			closed = true;
+			overlayHandle?.hide();
+			this.focusActiveEditorArea();
+			this.ctx.ui.requestRender();
+		};
+		let switching = false;
+		const picker = new AgentPersonaPickerComponent(this.ctx.ui, selectable, {
+			onPick: async agent => {
+				// In-flight guard: a second Enter while the first persona switch is
+				// pending must not start a concurrent switch whose snapshots/rollback
+				// race the first (codex #3821146274).
+				if (switching) return;
+				switching = true;
+				try {
+					// Await the persona transition before closing the overlay and
+					// restoring input focus so the next prompt cannot land on a
+					// partially applied or stale persona (codex #3818999442 / #3818955423).
+					await this.ctx.switchAgentPersona(agent.name);
+				} finally {
+					// A rejected switch (e.g. agent discovery failing on an
+					// unreadable extension directory) must still settle the
+					// picker: without this, the overlay stays focused while
+					// Enter/Esc are permanently ignored by the in-flight guards
+					// (codex #3821198710).
+					switching = false;
+					done();
+				}
+			},
+			onCancel: () => {
+				// Do not close the picker while a persona switch is in flight: the
+				// async transition must settle before input is restored (codex #3821198710).
+				if (switching) return;
+				done();
+			},
+		});
+		overlayHandle = this.ctx.ui.showOverlay(picker, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+		});
+		this.ctx.ui.setFocus(picker);
+		this.ctx.ui.requestRender();
 	}
 
 	/**

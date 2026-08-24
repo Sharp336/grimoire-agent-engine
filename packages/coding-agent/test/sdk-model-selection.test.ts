@@ -13,7 +13,7 @@ import { getModelMatchPreferences, resolveModelScope } from "@oh-my-pi/pi-coding
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildSessionOptions as buildCliSessionOptions } from "@oh-my-pi/pi-coding-agent/main";
 import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
-import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
@@ -501,6 +501,378 @@ describe("createAgentSession deferred model pattern resolution", () => {
 				rules: [],
 				preloadedCustomToolPaths: [],
 				toolNames: ["read"],
+			});
+
+			try {
+				expect(session.model?.provider).toBe("runtime-provider");
+				expect(session.model?.id).toBe("runtime-fallback-model");
+				expect(session.thinkingLevel).toBe(Effort.High);
+				expect(modelFallbackMessage).toBeUndefined();
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			exitSpy.mockRestore();
+		}
+	});
+
+	test("deferred role-alias --model suffix wins over the persona's frontmatter thinkingLevel", async () => {
+		// Regression (codex wave-14 P2): `--agent <persona with thinkingLevel:
+		// low>` + `--model @review:high` (a role alias deferred until
+		// extensions register) used to let the persona's frontmatter
+		// `thinkingLevel` clobber the CLI suffix. `modelSuffixThinking` was
+		// derived from the RESOLVED model, which is undefined pre-extension,
+		// so the suffix was invisible to `applyAgentPersonaOptions` and the
+		// frontmatter level won in `pickInitialThinkingLevel`. The suffix must
+		// be read from the selector SYNTAX so a deferred pattern still counts
+		// as an explicit CLI override.
+		fs.mkdirSync(path.join(tempDir, ".omp", "agents"), { recursive: true });
+		fs.writeFileSync(
+			path.join(tempDir, ".omp", "agents", "deferred-suffix-persona.md"),
+			[
+				"---",
+				"name: deferred-suffix-persona",
+				"description: Persona with a low frontmatter thinking level.",
+				"thinkingLevel: low",
+				"---",
+				"You are the deferred suffix persona.",
+			].join("\n"),
+		);
+		const settings = Settings.isolated();
+		settings.setModelRole("review", "runtime-provider/runtime-fallback-model");
+		const authStorage = await AuthStorage.create(path.join(tempDir, "suffix-persona-auth.db"));
+		authStoragesToClose.push(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "suffix-persona-models.yml"));
+		const parsed = parseArgs(["--cwd", tempDir, "--agent", "deferred-suffix-persona", "--model", "@review:high"]);
+		const exitSpy = vi.spyOn(process, "exit").mockImplementation((code?: number | string | null) => {
+			throw new Error(`buildSessionOptions unexpectedly exited with ${code}`);
+		});
+		try {
+			const cliOptions = await buildCliSessionOptions(
+				parsed,
+				[],
+				SessionManager.inMemory(),
+				modelRegistry,
+				settings,
+			);
+			expect(cliOptions.modelPattern).toBe("@review:high");
+			// The CLI suffix is explicit: the persona's frontmatter
+			// `thinkingLevel: low` must NOT be applied.
+			expect(cliOptions.thinkingLevel).toBeUndefined();
+
+			const { session, modelFallbackMessage } = await createAgentSession({
+				...cliOptions,
+				cwd: tempDir,
+				agentDir: tempDir,
+				authStorage,
+				modelRegistry,
+				settings,
+				disableExtensionDiscovery: true,
+				extensions: [providerExtension],
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+			});
+
+			try {
+				expect(session.model?.provider).toBe("runtime-provider");
+				expect(session.model?.id).toBe("runtime-fallback-model");
+				expect(session.thinkingLevel).toBe(Effort.High);
+				expect(modelFallbackMessage).toBeUndefined();
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			exitSpy.mockRestore();
+		}
+	});
+
+	test("deferred role-alias --model without a suffix keeps the persona's frontmatter thinkingLevel", async () => {
+		// Control: `--model @review` (no suffix) is not an explicit thinking
+		// override, so the persona's frontmatter `thinkingLevel: low` applies.
+		fs.mkdirSync(path.join(tempDir, ".omp", "agents"), { recursive: true });
+		fs.writeFileSync(
+			path.join(tempDir, ".omp", "agents", "deferred-suffix-persona.md"),
+			[
+				"---",
+				"name: deferred-suffix-persona",
+				"description: Persona with a low frontmatter thinking level.",
+				"thinkingLevel: low",
+				"---",
+				"You are the deferred suffix persona.",
+			].join("\n"),
+		);
+		const settings = Settings.isolated();
+		settings.setModelRole("review", "runtime-provider/runtime-fallback-model");
+		const authStorage = await AuthStorage.create(path.join(tempDir, "suffix-persona-control-auth.db"));
+		authStoragesToClose.push(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "suffix-persona-control-models.yml"));
+		const parsed = parseArgs(["--cwd", tempDir, "--agent", "deferred-suffix-persona", "--model", "@review"]);
+		const exitSpy = vi.spyOn(process, "exit").mockImplementation((code?: number | string | null) => {
+			throw new Error(`buildSessionOptions unexpectedly exited with ${code}`);
+		});
+		try {
+			const cliOptions = await buildCliSessionOptions(
+				parsed,
+				[],
+				SessionManager.inMemory(),
+				modelRegistry,
+				settings,
+			);
+			expect(cliOptions.modelPattern).toBe("@review");
+			expect(cliOptions.thinkingLevel).toBe(Effort.Low);
+
+			const { session, modelFallbackMessage } = await createAgentSession({
+				...cliOptions,
+				cwd: tempDir,
+				agentDir: tempDir,
+				authStorage,
+				modelRegistry,
+				settings,
+				disableExtensionDiscovery: true,
+				extensions: [providerExtension],
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+			});
+
+			try {
+				expect(session.model?.provider).toBe("runtime-provider");
+				expect(session.model?.id).toBe("runtime-fallback-model");
+				expect(session.thinkingLevel).toBe(Effort.Low);
+				expect(modelFallbackMessage).toBeUndefined();
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			exitSpy.mockRestore();
+		}
+	});
+
+	test("literal model id ending in :high is not a thinking suffix against a persona", async () => {
+		// Regression (internal review P2): `--agent <persona with thinkingLevel:
+		// low>` + `--model nanogpt/coding-router:high` — a REAL bundled literal
+		// model whose id ends in a strict thinking-level token — used to be
+		// misread as a CLI thinking suffix, suppressing the persona's frontmatter
+		// `thinkingLevel`. The catalog stores this id WITH the provider prefix
+		// (`"nanogpt/coding-router:high"`), so the registry's provider-index
+		// lookup (`find("nanogpt", "coding-router:high")`) misses it and the
+		// syntactic suffix check fired. The literal id is part of the model, NOT
+		// a CLI thinking override: the persona's frontmatter `thinkingLevel: low`
+		// must apply.
+		const literalModel = getBundledModel("nanogpt", "nanogpt/coding-router:high");
+		if (!literalModel) {
+			throw new Error("Expected bundled nanogpt literal :high model");
+		}
+		fs.mkdirSync(path.join(tempDir, ".omp", "agents"), { recursive: true });
+		fs.writeFileSync(
+			path.join(tempDir, ".omp", "agents", "literal-suffix-persona.md"),
+			[
+				"---",
+				"name: literal-suffix-persona",
+				"description: Persona with a low frontmatter thinking level.",
+				"thinkingLevel: low",
+				"---",
+				"You are the literal suffix persona.",
+			].join("\n"),
+		);
+		const settings = Settings.isolated();
+		const authStorage = await AuthStorage.create(path.join(tempDir, "literal-suffix-auth.db"));
+		authStoragesToClose.push(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "literal-suffix-models.yml"));
+		const parsed = parseArgs([
+			"--cwd",
+			tempDir,
+			"--agent",
+			"literal-suffix-persona",
+			"--model",
+			"nanogpt/coding-router:high",
+		]);
+		const exitSpy = vi.spyOn(process, "exit").mockImplementation((code?: number | string | null) => {
+			throw new Error(`buildSessionOptions unexpectedly exited with ${code}`);
+		});
+		try {
+			const cliOptions = await buildCliSessionOptions(
+				parsed,
+				[],
+				SessionManager.inMemory(),
+				modelRegistry,
+				settings,
+			);
+			// The literal model resolved with NO thinking suffix: the persona's
+			// frontmatter `thinkingLevel: low` must be applied.
+			expect(cliOptions.model?.provider).toBe("nanogpt");
+			expect(cliOptions.model?.id).toBe("nanogpt/coding-router:high");
+			expect(cliOptions.thinkingLevel).toBe(Effort.Low);
+
+			const { session, modelFallbackMessage } = await createAgentSession({
+				...cliOptions,
+				cwd: tempDir,
+				agentDir: tempDir,
+				authStorage,
+				modelRegistry,
+				settings,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+			});
+
+			try {
+				expect(session.model?.provider).toBe("nanogpt");
+				expect(session.model?.id).toBe("nanogpt/coding-router:high");
+				expect(session.thinkingLevel).toBe(Effort.Low);
+				expect(modelFallbackMessage).toBeUndefined();
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			exitSpy.mockRestore();
+		}
+	});
+
+	test("non-literal :high suffix still wins over the persona's frontmatter thinkingLevel", async () => {
+		// Control: `--model anthropic/claude-sonnet-4-5:high` — no literal model
+		// with that id exists, so `:high` IS a thinking suffix and must beat the
+		// persona's frontmatter `thinkingLevel: low` (wave-14 behavior).
+		fs.mkdirSync(path.join(tempDir, ".omp", "agents"), { recursive: true });
+		fs.writeFileSync(
+			path.join(tempDir, ".omp", "agents", "literal-suffix-persona.md"),
+			[
+				"---",
+				"name: literal-suffix-persona",
+				"description: Persona with a low frontmatter thinking level.",
+				"thinkingLevel: low",
+				"---",
+				"You are the literal suffix persona.",
+			].join("\n"),
+		);
+		const settings = Settings.isolated();
+		const authStorage = await AuthStorage.create(path.join(tempDir, "literal-suffix-control-auth.db"));
+		authStoragesToClose.push(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "literal-suffix-control-models.yml"));
+		const parsed = parseArgs([
+			"--cwd",
+			tempDir,
+			"--agent",
+			"literal-suffix-persona",
+			"--model",
+			"anthropic/claude-sonnet-4-5:high",
+		]);
+		const exitSpy = vi.spyOn(process, "exit").mockImplementation((code?: number | string | null) => {
+			throw new Error(`buildSessionOptions unexpectedly exited with ${code}`);
+		});
+		try {
+			const cliOptions = await buildCliSessionOptions(
+				parsed,
+				[],
+				SessionManager.inMemory(),
+				modelRegistry,
+				settings,
+			);
+			// The CLI suffix is explicit: the persona's frontmatter
+			// `thinkingLevel: low` must NOT be applied.
+			expect(cliOptions.model?.provider).toBe("anthropic");
+			expect(cliOptions.model?.id).toBe("claude-sonnet-4-5");
+			expect(cliOptions.thinkingLevel).toBe(Effort.High);
+
+			const { session, modelFallbackMessage } = await createAgentSession({
+				...cliOptions,
+				cwd: tempDir,
+				agentDir: tempDir,
+				authStorage,
+				modelRegistry,
+				settings,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+			});
+
+			try {
+				expect(session.model?.provider).toBe("anthropic");
+				expect(session.model?.id).toBe("claude-sonnet-4-5");
+				expect(session.thinkingLevel).toBe(Effort.High);
+				expect(modelFallbackMessage).toBeUndefined();
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			exitSpy.mockRestore();
+		}
+	});
+
+	test("role-alias :high suffix still wins over the persona's frontmatter thinkingLevel", async () => {
+		// Control: `--model @review:high` (a role alias with a suffix) is an
+		// explicit CLI thinking override and must beat the persona's frontmatter
+		// `thinkingLevel: low` (wave-14 behavior). The alias has no `/`, so the
+		// literal-model pre-check skips it and the syntactic suffix check fires.
+		fs.mkdirSync(path.join(tempDir, ".omp", "agents"), { recursive: true });
+		fs.writeFileSync(
+			path.join(tempDir, ".omp", "agents", "literal-suffix-persona.md"),
+			[
+				"---",
+				"name: literal-suffix-persona",
+				"description: Persona with a low frontmatter thinking level.",
+				"thinkingLevel: low",
+				"---",
+				"You are the literal suffix persona.",
+			].join("\n"),
+		);
+		const settings = Settings.isolated();
+		settings.setModelRole("review", "runtime-provider/runtime-fallback-model");
+		const authStorage = await AuthStorage.create(path.join(tempDir, "literal-suffix-role-auth.db"));
+		authStoragesToClose.push(authStorage);
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "literal-suffix-role-models.yml"));
+		const parsed = parseArgs(["--cwd", tempDir, "--agent", "literal-suffix-persona", "--model", "@review:high"]);
+		const exitSpy = vi.spyOn(process, "exit").mockImplementation((code?: number | string | null) => {
+			throw new Error(`buildSessionOptions unexpectedly exited with ${code}`);
+		});
+		try {
+			const cliOptions = await buildCliSessionOptions(
+				parsed,
+				[],
+				SessionManager.inMemory(),
+				modelRegistry,
+				settings,
+			);
+			expect(cliOptions.modelPattern).toBe("@review:high");
+			// The CLI suffix is explicit: the persona's frontmatter
+			// `thinkingLevel: low` must NOT be applied.
+			expect(cliOptions.thinkingLevel).toBeUndefined();
+
+			const { session, modelFallbackMessage } = await createAgentSession({
+				...cliOptions,
+				cwd: tempDir,
+				agentDir: tempDir,
+				authStorage,
+				modelRegistry,
+				settings,
+				disableExtensionDiscovery: true,
+				extensions: [providerExtension],
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
 			});
 
 			try {

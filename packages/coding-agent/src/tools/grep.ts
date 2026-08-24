@@ -28,6 +28,7 @@ import type { InternalResource, ResolveContext } from "../internal-urls/types";
 import type { Theme } from "../modes/theme/theme";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
 import { DEFAULT_MAX_COLUMN, type TruncationResult, truncateHead, truncateLine } from "../session/streaming-output";
+import { getDiscoveredScoutAgent } from "../task/discovery-snapshot";
 import { isScoutSpawnable } from "../task/spawn-policy";
 import {
 	Ellipsis,
@@ -923,6 +924,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 			scoutAvailable: isScoutSpawnable(
 				this.session.settings.get("task.disabledAgents") as string[] | undefined,
 				this.session.getSessionSpawns?.() ?? "*",
+				getDiscoveredScoutAgent(this.session.cwd),
 			),
 		});
 	}
