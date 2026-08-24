@@ -265,10 +265,15 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			case "list": {
 				const messaging = this.#messaging();
 				if (!messaging) return hubErrorResult("Peer messaging is unavailable in this session.", { op: "list" });
-				return executeList(messaging.registry, messaging.senderId, {
-					status: params.status,
-					limit: params.limit,
-				});
+				return executeList(
+					messaging.registry,
+					messaging.senderId,
+					{
+						status: params.status,
+						limit: params.limit,
+					},
+					this.session.getSessionFile(),
+				);
 			}
 			case "send": {
 				const toPeer = params.to?.trim();

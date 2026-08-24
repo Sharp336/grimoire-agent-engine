@@ -390,14 +390,17 @@ export async function ensurePersistedRoster(
 		await existing.pending;
 		return root;
 	}
-	const pending = registerPersistedSubagents(registry, root).catch(error => {
-		const current = persistedRosterLatches.get(registry);
-		if (current?.root === root) persistedRosterLatches.delete(registry);
-		logger.warn("Persisted agent roster scan failed; using in-memory peers", {
-			rootSessionFile: root,
-			error: rosterScanError(error),
+	const previous = existing?.pending ?? Promise.resolve();
+	const pending = previous
+		.then(() => registerPersistedSubagents(registry, root, { hydrateHistory: false }))
+		.catch(error => {
+			const current = persistedRosterLatches.get(registry);
+			if (current?.root === root) persistedRosterLatches.delete(registry);
+			logger.warn("Persisted agent roster scan failed; using in-memory peers", {
+				rootSessionFile: root,
+				error: rosterScanError(error),
+			});
 		});
-	});
 	persistedRosterLatches.set(registry, { root, pending });
 	await pending;
 	return root;
@@ -407,17 +410,26 @@ export async function ensurePersistedRoster(
 export async function registerPersistedSubagents(
 	registry: AgentRegistry,
 	sessionFile: string | null | undefined,
-	options: { shouldContinue?: () => boolean } = {},
+	options: { shouldContinue?: () => boolean; hydrateHistory?: boolean } = {},
 ): Promise<void> {
 	if (!sessionFile?.endsWith(".jsonl")) return;
 	const shouldContinue = options.shouldContinue ?? (() => true);
+	const hydrateHistory = options.hydrateHistory ?? true;
 	if (!shouldContinue()) return;
 	const vibeOwnedIds = await readPersistedVibeChildIds(sessionFile, shouldContinue);
 	if (!shouldContinue()) return;
 	const root = sessionFile.slice(0, -6);
 	const transcripts: PersistedTranscript[] = [];
-	await registerPersistedSubagentsFromDir(registry, root, undefined, vibeOwnedIds, transcripts, shouldContinue);
-	if (!shouldContinue()) return;
+	await registerPersistedSubagentsFromDir(
+		registry,
+		root,
+		undefined,
+		vibeOwnedIds,
+		transcripts,
+		shouldContinue,
+		sessionFile,
+	);
+	if (!hydrateHistory || !shouldContinue()) return;
 	let nextTranscript = 0;
 	const workers = Array.from({ length: Math.min(4, transcripts.length) }, async () => {
 		for (;;) {
@@ -440,6 +452,7 @@ async function registerPersistedSubagentsFromDir(
 	vibeOwnedIds: ReadonlySet<string>,
 	transcripts: PersistedTranscript[],
 	shouldContinue: () => boolean,
+	rootSessionFile: string,
 ): Promise<void> {
 	if (!shouldContinue()) return;
 	let entries: fs.Dirent[];
@@ -498,11 +511,19 @@ async function registerPersistedSubagentsFromDir(
 					createdAt: metadata.createdAt,
 					lastActivity: metadata.lastActivity,
 				});
+			} else if (existing) {
+				transcripts.push({
+					id: advisorId,
+					sessionFile,
+					createdAt: existing.createdAt,
+					lastActivity: existing.lastActivity,
+				});
 			}
 			continue;
 		}
 		const id = entry.name.slice(0, -6);
-		if (vibeOwnedIds.has(id) && registry.get(id)?.sessionFile !== sessionFile) continue;
+		const existing = registry.get(id);
+		if (vibeOwnedIds.has(id) && existing?.sessionFile !== sessionFile) continue;
 		let tombstoned = false;
 		try {
 			await fs.promises.access(getAgentTombstonePath(sessionFile));
@@ -511,22 +532,41 @@ async function registerPersistedSubagentsFromDir(
 			if ((error as NodeJS.ErrnoException).code !== "ENOENT") continue;
 		}
 		if (!shouldContinue()) return;
-		if (!registry.get(id)) {
+		const replaceable =
+			existing !== undefined &&
+			existing.kind === "sub" &&
+			existing.status === "parked" &&
+			existing.session === null &&
+			typeof existing.sessionFile === "string" &&
+			!sessionFileBelongsToRoot(existing.sessionFile, rootSessionFile);
+		if (existing && !replaceable) {
+			if (existing.sessionFile === sessionFile) {
+				transcripts.push({
+					id,
+					sessionFile,
+					createdAt: existing.createdAt,
+					lastActivity: existing.lastActivity,
+				});
+			}
+		} else {
+			const expected = existing ?? null;
 			const metadata = await readPersistedAgentMetadata(sessionFile);
 			if (!shouldContinue()) return;
 			// Metadata reads yield. A spawn may claim the id while this scan is
 			// inspecting the file; never replace that live generation with a
 			// transcript-derived parked ref.
-			const unclaimed = !registry.get(id);
+			const current = registry.get(id);
+			const stillUnclaimed = expected === null && !current;
+			const stillReplaceable =
+				expected !== null && current === expected && current.status === "parked" && current.session === null;
 			// SessionManager.open writes title+session before createAgentSession
 			// claims the id. Parking that stub makes the spawn's expectedAgentRef:null
 			// CAS fail with "already owned by another session generation".
-			if (unclaimed && metadata.incomplete && !tombstoned) continue;
-			if (unclaimed) {
-				registry.register({
+			if ((stillUnclaimed || stillReplaceable) && !(metadata.incomplete && !tombstoned)) {
+				const input = {
 					id,
 					displayName: id,
-					kind: "sub",
+					kind: "sub" as const,
 					parentId: parentId ?? MAIN_AGENT_ID,
 					session: null,
 					sessionFile,
@@ -534,15 +574,18 @@ async function registerPersistedSubagentsFromDir(
 					createdAt: metadata.createdAt,
 					lastActivity: metadata.lastActivity,
 					history: metadata.history,
-					status: tombstoned ? "aborted" : "parked",
-				});
-				const ref = registry.get(id);
-				transcripts.push({
-					id,
-					sessionFile,
-					createdAt: ref?.createdAt,
-					lastActivity: ref?.lastActivity,
-				});
+					status: tombstoned ? ("aborted" as const) : ("parked" as const),
+				};
+				const vacated = stillUnclaimed || (expected !== null && registry.unregister(id, expected));
+				if (vacated && registry.registerIfAvailable(input, null)) {
+					const ref = registry.get(id);
+					transcripts.push({
+						id,
+						sessionFile,
+						createdAt: ref?.createdAt,
+						lastActivity: ref?.lastActivity,
+					});
+				}
 			}
 		}
 		await registerPersistedSubagentsFromDir(
@@ -552,6 +595,7 @@ async function registerPersistedSubagentsFromDir(
 			vibeOwnedIds,
 			transcripts,
 			shouldContinue,
+			rootSessionFile,
 		);
 	}
 }

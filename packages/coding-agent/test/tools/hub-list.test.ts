@@ -1,9 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { HistoryProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/history-protocol";
+import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { ensurePersistedRoster, registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { renderIrcPeerRoster } from "@oh-my-pi/pi-coding-agent/task/executor";
@@ -53,11 +56,11 @@ function listText(result: { content: Array<{ type: string; text?: string }> }): 
 	return text;
 }
 
-function makeToolSession(registry: AgentRegistry, agentId: string): ToolSession {
+function makeToolSession(registry: AgentRegistry, agentId: string, sessionFile: string | null = null): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: false,
-		getSessionFile: () => null,
+		getSessionFile: () => sessionFile,
 		getSessionSpawns: () => "*",
 		settings: Settings.isolated(),
 		agentRegistry: registry,
@@ -513,6 +516,373 @@ describe("hub list", () => {
 			AgentLifecycleManager.resetGlobalForTests();
 			IrcBus.resetGlobalForTests();
 		}
+	});
+});
+
+describe("hub list session authority", () => {
+	it("uses HubTool getSessionFile when Main's registry ref still points at the old root", async () => {
+		using tempDir = TempDir.createSync("@omp-hub-stale-main-");
+		const firstSession = path.join(tempDir.path(), "first.jsonl");
+		const secondSession = path.join(tempDir.path(), "second.jsonl");
+		await Bun.write(firstSession, `${sessionHeader("first")}\n`);
+		await Bun.write(secondSession, `${sessionHeader("second")}\n`);
+		await writeParkedTranscript(path.join(tempDir.path(), "first", "FirstWorker.jsonl"), "first-worker", "first");
+		await writeParkedTranscript(path.join(tempDir.path(), "second", "SecondWorker.jsonl"), "second-worker", "second");
+
+		const registry = new AgentRegistry();
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: MAIN_AGENT_ID,
+			kind: "main",
+			session: null,
+			sessionFile: firstSession,
+			status: "running",
+		});
+		const tool = new HubTool(makeToolSession(registry, MAIN_AGENT_ID, secondSession));
+		const listed = await tool.execute("list-switch", { op: "list", status: "parked" });
+		if (!listed.details || !("peers" in listed.details)) throw new Error("Expected list details");
+		expect(listed.details.peers?.map(peer => peer.id)).toEqual(["SecondWorker"]);
+		expect(listText(listed)).not.toContain("FirstWorker");
+		expect(registry.get(MAIN_AGENT_ID)?.sessionFile).toBe(firstSession);
+	});
+
+	it("replaces a detached old-root parked sub so send and history target the current file", async () => {
+		AgentRegistry.resetGlobalForTests();
+		AgentLifecycleManager.resetGlobalForTests();
+		IrcBus.resetGlobalForTests();
+		try {
+			using tempDir = TempDir.createSync("@omp-hub-replace-current-");
+			const firstSession = path.join(tempDir.path(), "first.jsonl");
+			const secondSession = path.join(tempDir.path(), "second.jsonl");
+			const oldWorker = path.join(tempDir.path(), "first", "Worker.jsonl");
+			const newWorker = path.join(tempDir.path(), "second", "Worker.jsonl");
+			await Bun.write(firstSession, `${sessionHeader("first")}\n`);
+			await Bun.write(secondSession, `${sessionHeader("second")}\n`);
+			await Bun.write(
+				oldWorker,
+				`${[
+					sessionHeader("old-worker"),
+					JSON.stringify({
+						type: "session_init",
+						id: "si-old",
+						parentId: null,
+						timestamp: "2026-08-13T17:14:49.000Z",
+						systemPrompt: "review",
+						task: "old-secret-task-body",
+						tools: ["read"],
+					}),
+					JSON.stringify({
+						type: "message",
+						id: "old-user",
+						parentId: null,
+						timestamp: "2026-08-13T17:14:50.000Z",
+						message: { role: "user", content: "old-secret-user-line", timestamp: 1 },
+					}),
+				].join("\n")}\n`,
+			);
+			await Bun.write(
+				newWorker,
+				`${[
+					sessionHeader("worker"),
+					JSON.stringify({
+						type: "session_init",
+						id: "si-new",
+						parentId: null,
+						timestamp: "2026-08-13T17:14:49.000Z",
+						systemPrompt: "review",
+						task: "new-current-task-body",
+						tools: ["read"],
+					}),
+					JSON.stringify({
+						type: "message",
+						id: "new-user",
+						parentId: null,
+						timestamp: "2026-08-13T17:14:50.000Z",
+						message: { role: "user", content: "new-current-user-line", timestamp: 1 },
+					}),
+				].join("\n")}\n`,
+			);
+
+			const registry = AgentRegistry.global();
+			registry.register({
+				id: MAIN_AGENT_ID,
+				displayName: MAIN_AGENT_ID,
+				kind: "main",
+				session: null,
+				sessionFile: firstSession,
+				status: "running",
+			});
+			registry.register({
+				id: "Worker",
+				displayName: "task",
+				kind: "sub",
+				session: null,
+				sessionFile: oldWorker,
+				status: "parked",
+				activity: "old-secret-task-body",
+			});
+
+			const tool = new HubTool(makeToolSession(registry, MAIN_AGENT_ID, secondSession));
+			const listed = await tool.execute("list-replace", { op: "list", status: "parked" });
+			if (!listed.details || !("peers" in listed.details)) throw new Error("Expected list details");
+			expect(registry.get("Worker")?.sessionFile).toBe(newWorker);
+			expect(listed.details.peers?.map(peer => peer.id)).toEqual(["Worker"]);
+
+			const history = await new HistoryProtocolHandler().resolve(parseInternalUrl("history://Worker"));
+			expect(history.sourcePath).toBe(newWorker);
+			expect(history.content).toContain("new-current-user-line");
+			expect(history.content).not.toContain("old-secret-user-line");
+
+			const delivered: string[] = [];
+			const revived = {
+				isStreaming: false,
+				deliverIrcMessage: async (msg: { body: string }) => {
+					delivered.push(msg.body);
+					return "woken";
+				},
+			} as unknown as AgentSession;
+			AgentLifecycleManager.global().adopt("Worker", {
+				idleTtlMs: 0,
+				revive: async () => revived,
+			});
+			const sent = await executeSend(
+				{ registry, senderId: MAIN_AGENT_ID, settings: Settings.isolated() },
+				{ to: "Worker", message: "wake current" },
+			);
+			expect(sent.isError).toBeFalsy();
+			expect(sent.details?.receipts).toEqual([{ to: "Worker", outcome: "revived" }]);
+			expect(delivered).toEqual(["wake current"]);
+		} finally {
+			AgentRegistry.resetGlobalForTests();
+			AgentLifecycleManager.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+		}
+	});
+
+	it("preserves live, aborted, advisor, vibe-owned, and nested same-root collisions", async () => {
+		using tempDir = TempDir.createSync("@omp-hub-preserve-collisions-");
+		const dir = tempDir.path();
+		const currentSession = path.join(dir, "current.jsonl");
+		const oldLive = path.join(dir, "old", "LiveTwin.jsonl");
+		const oldIdle = path.join(dir, "old", "IdleTwin.jsonl");
+		const oldDead = path.join(dir, "old", "DeadTwin.jsonl");
+		const oldAdvisor = path.join(dir, "old", "AdvisorTwin.jsonl");
+		const oldVibe = path.join(dir, "old", "VibeKid.jsonl");
+		await Bun.write(
+			currentSession,
+			`${[
+				sessionHeader("current"),
+				JSON.stringify({
+					type: "custom",
+					customType: "vibe-session-lifecycle",
+					data: {
+						version: 1,
+						id: "VibeKid",
+						ownerId: MAIN_AGENT_ID,
+						parentSessionId: "current",
+						action: "spawn",
+						cli: "fast",
+						agent: "task",
+						childSessionFile: "VibeKid.jsonl",
+						createdAt: 1,
+					},
+				}),
+			].join("\n")}\n`,
+		);
+		await writeParkedTranscript(path.join(dir, "current", "LiveTwin.jsonl"), "live", "steal-live");
+		await writeParkedTranscript(path.join(dir, "current", "IdleTwin.jsonl"), "idle", "steal-idle");
+		await writeParkedTranscript(path.join(dir, "current", "DeadTwin.jsonl"), "dead", "steal-dead");
+		await writeParkedTranscript(path.join(dir, "current", "AdvisorTwin.jsonl"), "advisor", "steal-advisor");
+		await writeParkedTranscript(path.join(dir, "current", "VibeKid.jsonl"), "vibe", "steal-vibe");
+		await writeParkedTranscript(path.join(dir, "current", "Outer.jsonl"), "outer", "outer-visible-task");
+		await writeParkedTranscript(path.join(dir, "current", "Outer", "Outer.jsonl"), "nested", "nested-steal-task");
+
+		const registry = new AgentRegistry();
+		const liveSession = {} as AgentSession;
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: MAIN_AGENT_ID,
+			kind: "main",
+			session: null,
+			sessionFile: currentSession,
+			status: "running",
+		});
+		registry.register({
+			id: "LiveTwin",
+			displayName: "task",
+			kind: "sub",
+			session: liveSession,
+			sessionFile: oldLive,
+			status: "running",
+		});
+		registry.register({
+			id: "IdleTwin",
+			displayName: "task",
+			kind: "sub",
+			session: liveSession,
+			sessionFile: oldIdle,
+			status: "idle",
+		});
+		registry.register({
+			id: "DeadTwin",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile: oldDead,
+			status: "aborted",
+		});
+		registry.register({
+			id: "AdvisorTwin",
+			displayName: "advisor",
+			kind: "advisor",
+			session: null,
+			sessionFile: oldAdvisor,
+			status: "parked",
+		});
+		registry.register({
+			id: "VibeKid",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile: oldVibe,
+			status: "parked",
+		});
+
+		await executeList(registry, MAIN_AGENT_ID, { status: "parked" }, currentSession);
+		expect(registry.get("LiveTwin")?.status).toBe("running");
+		expect(registry.get("LiveTwin")?.session).toBe(liveSession);
+		expect(registry.get("LiveTwin")?.sessionFile).toBe(oldLive);
+		expect(registry.get("IdleTwin")?.status).toBe("idle");
+		expect(registry.get("IdleTwin")?.sessionFile).toBe(oldIdle);
+		expect(registry.get("DeadTwin")?.status).toBe("aborted");
+		expect(registry.get("DeadTwin")?.sessionFile).toBe(oldDead);
+		expect(registry.get("AdvisorTwin")?.kind).toBe("advisor");
+		expect(registry.get("AdvisorTwin")?.sessionFile).toBe(oldAdvisor);
+		expect(registry.get("VibeKid")?.sessionFile).toBe(oldVibe);
+		expect(registry.get("Outer")?.sessionFile).toBe(path.join(dir, "current", "Outer.jsonl"));
+		expect(registry.get("Outer")?.activity).toContain("outer-visible-task");
+		expect(registry.get("Outer")?.activity).not.toContain("nested-steal-task");
+	});
+
+	it("does not replace through an incomplete stub or a spawn that claims the id mid-scan", async () => {
+		using tempDir = TempDir.createSync("@omp-hub-no-replace-race-");
+		const dir = tempDir.path();
+		const currentSession = path.join(dir, "current.jsonl");
+		const oldIncomplete = path.join(dir, "old", "IncompleteTwin.jsonl");
+		const oldRace = path.join(dir, "old", "RaceTwin.jsonl");
+		const newRace = path.join(dir, "current", "RaceTwin.jsonl");
+		await Bun.write(currentSession, `${sessionHeader("current")}\n`);
+		await writeParkedTranscript(oldIncomplete, "old-incomplete", "keep-old-incomplete");
+		await writeParkedTranscript(oldRace, "old-race", "keep-old-race");
+		await Bun.write(path.join(dir, "current", "IncompleteTwin.jsonl"), `${sessionHeader("incomplete")}\n`);
+		await writeParkedTranscript(newRace, "race", "steal-race");
+
+		const registry = new AgentRegistry();
+		const liveSession = {} as AgentSession;
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: MAIN_AGENT_ID,
+			kind: "main",
+			session: null,
+			sessionFile: currentSession,
+			status: "running",
+		});
+		const incomplete = registry.register({
+			id: "IncompleteTwin",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile: oldIncomplete,
+			status: "parked",
+		});
+		const parkedRace = registry.register({
+			id: "RaceTwin",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile: oldRace,
+			status: "parked",
+		});
+		const originalGet = registry.get.bind(registry);
+		let injectClaim = true;
+		registry.get = id => {
+			const current = originalGet(id);
+			if (id === "RaceTwin" && injectClaim && current === parkedRace) {
+				injectClaim = false;
+				queueMicrotask(() => {
+					registry.unregister("RaceTwin", parkedRace);
+					registry.register({
+						id: "RaceTwin",
+						displayName: "task",
+						kind: "sub",
+						session: liveSession,
+						sessionFile: newRace,
+						status: "running",
+					});
+				});
+			}
+			return current;
+		};
+
+		await executeList(registry, MAIN_AGENT_ID, { status: "parked" }, currentSession);
+		expect(originalGet("IncompleteTwin")).toBe(incomplete);
+		expect(originalGet("IncompleteTwin")?.sessionFile).toBe(oldIncomplete);
+		expect(originalGet("RaceTwin")?.status).toBe("running");
+		expect(originalGet("RaceTwin")?.session).toBe(liveSession);
+	});
+
+	it("keeps ensurePersistedRoster metadata-only and hydrates on a later explicit register", async () => {
+		using tempDir = TempDir.createSync("@omp-hub-hydrate-later-");
+		const dir = tempDir.path();
+		const sessionFile = path.join(dir, "main.jsonl");
+		const workerFile = path.join(dir, "main", "Worker.jsonl");
+		await Bun.write(sessionFile, `${sessionHeader("main")}\n`);
+		await Bun.write(
+			workerFile,
+			`${[
+				sessionHeader("worker"),
+				JSON.stringify({
+					type: "session_init",
+					id: "si-worker",
+					parentId: null,
+					timestamp: "2026-08-13T17:14:49.000Z",
+					systemPrompt: "review",
+					task: "hydrate later",
+					tools: ["read"],
+				}),
+				JSON.stringify({
+					type: "message",
+					id: "a1",
+					parentId: "si-worker",
+					timestamp: "2026-08-13T17:14:50.000Z",
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "done" }],
+						provider: "anthropic",
+						model: "claude-sonnet-5",
+						stopReason: "stop",
+						usage: { input: 10, output: 20, totalTokens: 30, cost: { total: 0.5 } },
+					},
+				}),
+			].join("\n")}\n`,
+		);
+
+		const registry = new AgentRegistry();
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: MAIN_AGENT_ID,
+			kind: "main",
+			session: null,
+			sessionFile,
+			status: "running",
+		});
+		await ensurePersistedRoster(registry, sessionFile);
+		expect(registry.get("Worker")?.sessionFile).toBe(workerFile);
+		expect(registry.get("Worker")?.history?.metrics).toBeUndefined();
+
+		await registerPersistedSubagents(registry, sessionFile);
+		expect(registry.get("Worker")?.history?.metrics?.tokens).toBe(30);
+		expect(registry.get("Worker")?.history?.metrics?.requests).toBe(1);
 	});
 });
 

@@ -158,8 +158,12 @@ export async function executeList(
 	registry: AgentRegistry,
 	senderId: string,
 	params: HubListParams = {},
+	sessionFileHint?: string | null,
 ): Promise<AgentToolResult<CoordinationDetails>> {
-	const rootSessionFile = await ensurePersistedRoster(registry, registry.get(senderId)?.sessionFile);
+	const rootSessionFile = await ensurePersistedRoster(
+		registry,
+		sessionFileHint ?? registry.get(senderId)?.sessionFile,
+	);
 	const refs = registry
 		.list()
 		.filter(ref => isAddressablePeer(ref, senderId) && isCurrentSessionRosterRef(ref, rootSessionFile));

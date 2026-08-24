@@ -13,6 +13,8 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { expandPromptTemplate, type PromptTemplate } from "@oh-my-pi/pi-coding-agent/config/prompt-templates";
 import { expandSlashCommand, type FileSlashCommand } from "@oh-my-pi/pi-coding-agent/extensibility/slash-commands";
+import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { renderIrcPeerRoster } from "@oh-my-pi/pi-coding-agent/task/executor";
 import { parseCommandArgs, substituteArgs } from "@oh-my-pi/pi-coding-agent/utils/command-args";
 import { prompt } from "@oh-my-pi/pi-utils";
 
@@ -395,17 +397,43 @@ describe("renderYieldSchema", () => {
 describe("subagent peer roster prompt", () => {
 	const templatePath = path.resolve(import.meta.dir, "../src/prompts/system/subagent-system-prompt.md");
 
-	test("documents parked archaeology and revival when a live roster is present", async () => {
+	test("production prompt includes live peers and omits parked identity and activity", async () => {
+		const registry = new AgentRegistry();
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: MAIN_AGENT_ID,
+			kind: "main",
+			session: null,
+			status: "running",
+		});
+		registry.register({
+			id: "LiveWorker",
+			displayName: "implementer",
+			kind: "sub",
+			session: null,
+			status: "running",
+			activity: "editing auth.ts",
+		});
+		registry.register({
+			id: "ParkedSecretId",
+			displayName: "secret parked label",
+			kind: "sub",
+			session: null,
+			status: "parked",
+			activity: "reviewing classified.diff",
+		});
+
 		const templateSource = await fs.readFile(templatePath, "utf-8");
+		const ircPeers = await renderIrcPeerRoster("Child", registry);
 		const rendered = prompt.render(templateSource, {
 			agent: "test-agent",
 			ircSelfId: "Child",
-			ircPeers: "- `LiveWorker` — task (sub, running)\n1 parked peer(s) omitted.",
+			ircPeers,
 		});
 		expect(rendered).toContain("LiveWorker");
-		expect(rendered).toContain('status:"parked"');
-		expect(rendered).toContain("history://");
-		expect(rendered).toContain("agent://");
-		expect(rendered).toContain("never parked names");
+		expect(rendered).toContain("editing auth.ts");
+		expect(rendered).not.toContain("ParkedSecretId");
+		expect(rendered).not.toContain("secret parked label");
+		expect(rendered).not.toContain("reviewing classified.diff");
 	});
 });
