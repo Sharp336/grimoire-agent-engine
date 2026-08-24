@@ -3170,10 +3170,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						// server must not strip its instructions, while `mcp__*` or
 						// `mcp__<server>_*` naming it must (matching the Cursor
 						// resource adapter's per-server gate).
-						const ownsAnyTool = Array.from(tools.values()).some(
-							tool => (tool as { mcpServerName?: unknown }).mcpServerName === srvName,
-						);
-						if (ownsAnyTool ? !scopedInServerNames.has(srvName) : !resourceOnlyServerAllowed(srvName)) continue;
+						if (ownsAnyTool(srvName) ? !scopedInServerNames.has(srvName) : !resourceOnlyServerAllowed(srvName)) {
+							continue;
+						}
 					}
 					keptServerInstructions.push([srvName, srvInstructions]);
 				}
