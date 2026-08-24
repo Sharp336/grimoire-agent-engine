@@ -101,6 +101,42 @@ export default function(pi) {
 		}
 	});
 
+	it("bypasses legacy graph reads for native extension packages", async () => {
+		const cwd = tempDir.absolute();
+		const extDir = path.join(cwd, "native-ext");
+		fs.mkdirSync(extDir, { recursive: true });
+		fs.writeFileSync(
+			path.join(extDir, "package.json"),
+			JSON.stringify({
+				omp: {
+					extensionLoader: "native",
+					extensions: ["./index.ts"],
+				},
+			}),
+		);
+		const entryPath = path.join(extDir, "index.ts");
+		fs.writeFileSync(
+			entryPath,
+			`export default function(pi) {
+	pi.registerTool({
+		name: "native-tool",
+		label: "native-tool",
+		description: "Native extension tool",
+		parameters: pi.zod.object({}),
+		execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+	});
+}
+`,
+		);
+
+		const result = await loadExtensions([entryPath], cwd);
+
+		expect(result.errors).toEqual([]);
+		expect(result.extensions[0]?.tools.has("native-tool")).toBe(true);
+		const realEntryPath = fs.realpathSync(entryPath);
+		expect(reads.get(realEntryPath) ?? 0).toBe(0);
+	});
+
 	it("should read graph modules skipped by the initial import from disk at import time", async () => {
 		const cwd = tempDir.absolute();
 		const extDir = path.join(cwd, "ext");

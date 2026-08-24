@@ -38,6 +38,8 @@ export interface PluginManifest {
 	hooks?: string;
 	/** Extension entry points (relative paths from package root) */
 	extensions?: string[];
+	/** Load declared extensions without legacy Pi compatibility graph rewriting */
+	extensionLoader?: "native";
 	/** Command files (relative paths from package root) */
 	commands?: string[];
 

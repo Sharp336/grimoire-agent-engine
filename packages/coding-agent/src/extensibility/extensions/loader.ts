@@ -55,6 +55,35 @@ installLegacyPiSpecifierShim();
 
 type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 type LoadedExtensionModule = ExtensionFactory | { default?: ExtensionFactory };
+let nativeExtensionLoadTag = 0;
+
+async function usesNativeExtensionLoader(resolvedPath: string): Promise<boolean> {
+	let directory = path.dirname(resolvedPath);
+	while (true) {
+		const packageJsonPath = path.join(directory, "package.json");
+		try {
+			const pkg = (await Bun.file(packageJsonPath).json()) as {
+				omp?: { extensionLoader?: unknown };
+				pi?: { extensionLoader?: unknown };
+			};
+			return (pkg.omp ?? pkg.pi)?.extensionLoader === "native";
+		} catch (error) {
+			if (!(isEnoent(error) || isEacces(error) || hasFsCode(error, "EPERM"))) {
+				return false;
+			}
+		}
+		const parent = path.dirname(directory);
+		if (parent === directory) return false;
+		directory = parent;
+	}
+}
+
+async function loadNativeExtensionModule(resolvedPath: string): Promise<unknown> {
+	nativeExtensionLoadTag += 1;
+	// Runtime-supplied extension paths require dynamic import. Native packages
+	// bypass legacy graph collection and compatibility source rewriting.
+	return import(`${resolvedPath}?omp-native=${nativeExtensionLoadTag}`);
+}
 
 function getExtensionFactory(module: LoadedExtensionModule): ExtensionFactory | null {
 	const candidate = typeof module === "function" ? module : module.default;
@@ -387,7 +416,11 @@ interface ImportedExtensionModule {
 async function importExtensionModule(extensionPath: string, cwd: string): Promise<ImportedExtensionModule> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
 	try {
-		const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath))) as LoadedExtensionModule;
+		const module = (await withHostGuard(() =>
+			usesNativeExtensionLoader(resolvedPath).then(native =>
+				native ? loadNativeExtensionModule(resolvedPath) : loadLegacyPiModule(resolvedPath),
+			),
+		)) as LoadedExtensionModule;
 		const factory = getExtensionFactory(module);
 
 		if (typeof factory !== "function") {

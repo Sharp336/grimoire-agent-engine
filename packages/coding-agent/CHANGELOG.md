@@ -17,6 +17,7 @@
 - Added `s`/`u` shortcuts to stage/unstage files directly from the sidebar
 - Added `space` shortcut as page down in the diff pane
 - Expanded `omp git` keyboard navigation: `alt+↓`/`alt+↑` jump hunks and roll into the adjacent file at the edges, `]`/`[` switch files, `←`/`→` collapse/expand sidebar directories, `enter` opens the selected file, vim motions (`j`/`k`/`h`/`l`/`g`/`G`) work in both panes, `1`–`4` pick a diff view directly, and `c` jumps to the commit form.
+- Added an `omp.extensionLoader: "native"` package-manifest opt-in that skips legacy Pi graph scanning and compatibility rewriting for OMP-native extensions.
 
 ### Fixed
 
