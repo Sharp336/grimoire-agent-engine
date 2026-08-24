@@ -437,6 +437,8 @@ export interface InteractiveModeContext {
 	showHistorySearch(): void;
 	showExtensionsDashboard(): void;
 	showAgentsDashboard(): void;
+	/** Open the fullscreen git UI, optionally pinned to a revision (`/git <rev>`). */
+	showGitUi(revision?: string): void;
 	showModelSelector(options?: { temporaryOnly?: boolean }): void;
 	/** Open the `/switch-agent` persona picker overlay (awaits agent discovery). */
 	showAgentPersonaSelector(): Promise<void>;
