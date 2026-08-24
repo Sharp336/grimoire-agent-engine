@@ -420,4 +420,28 @@ describe("RelayBridge tab grouping", () => {
 		expect(cdp.messages.filter(m => m.method === "Target.targetDestroyed")).toHaveLength(destroyedBeforeRace);
 		expect(cdp.messages.filter(m => m.method === "Target.attachedToTarget").length).toBeGreaterThan(0);
 	});
+
+	it("reattaches a recoverable tab for a session holder that never enabled auto-attach", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		// The holder drives the tab through Target.attachToTarget only — no
+		// setDiscoverTargets / setAutoAttach, so autoAttachConns stays empty.
+		await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.extClosed(ext);
+
+		// The tab survived the outage recoverably (guard detach). Recovery must
+		// restore the Chrome attachment even though no connection auto-attaches,
+		// or the holder's next command lands on a detached tab.
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await flush();
+
+		const attaches = ext2.rpcs("attach");
+		expect(attaches).toHaveLength(1);
+		expect(attaches[0]!.tabId).toBe(1);
+	});
 });

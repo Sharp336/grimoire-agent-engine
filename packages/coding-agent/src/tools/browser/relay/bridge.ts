@@ -307,10 +307,11 @@ export class RelayBridge {
 				continue;
 			}
 			// A guard detach creates a fresh Chrome root session. Retract every
-			// pseudo/real child tied to the old root before re-announcing the tab;
-			// auto-attached clients then rebuild only after ensureAttached resolves.
+			// pseudo/real child tied to the old root before re-announcing the tab.
+			// Force the attachment: this tab is still claimed by a surviving session
+			// holder, so recovery must re-attach even if no connection auto-attaches.
 			this.#retractTab(tab);
-			this.#announceTab(tab);
+			this.#announceTab(tab, true);
 		}
 		this.#syncGrouping();
 		this.#log("extension connected", { tabs: this.#tabs.size, version: msg.browserVersion });
@@ -714,7 +715,7 @@ export class RelayBridge {
 		}
 	}
 
-	#announceTab(tab: TabState): void {
+	#announceTab(tab: TabState, forceAttach = false): void {
 		tab.announced = true;
 		for (const conn of this.#conns.values()) {
 			if (!conn.discover) continue;
@@ -722,7 +723,14 @@ export class RelayBridge {
 			this.#emit(conn, "Target.targetCreated", { targetInfo: this.#pageInfo(tab, tab.attached) });
 		}
 		const autoAttachConns = [...this.#conns.values()].filter(conn => conn.autoAttach);
-		if (autoAttachConns.length === 0) return;
+		// Ensure the underlying debugger attachment whenever a client actually needs
+		// it: auto-attach connections expect a replacement session, and recovery of a
+		// still-claimed tab (forceAttach, set by #onHello) must restore the Chrome
+		// attachment even when no connection uses setAutoAttach — e.g. a holder that
+		// attached through Target.attachToTarget. Otherwise the guard-authorized tab
+		// is re-announced but left detached, and the holder's next command fails with
+		// no live attachment behind it.
+		if (autoAttachConns.length === 0 && !forceAttach) return;
 		void this.#ensureAttached(tab).then(ok => {
 			if (!ok) {
 				// Reattachment failed (DevTools or another debugger claimed the tab
