@@ -115,6 +115,40 @@ describe("formatSessionHistoryMarkdown", () => {
 		expect(output).toContain("→ grep() ⇒ ok · 1 line");
 	});
 
+	it("keeps retained text for a fitting source-truncated async-progress entry (no head/tail split)", () => {
+		const output = formatSessionHistoryMarkdown([
+			{
+				role: "custom",
+				customType: "async-progress",
+				content: "",
+				details: {
+					jobs: [{ jobId: "bash_1", text: "tick 12\ntick 13", truncated: true, artifactId: "art-9" }],
+				},
+				timestamp: 1,
+			},
+		]);
+		expect(output).toContain("bash_1: tick 12 tick 13");
+		expect(output).toContain("[full output: artifact://art-9]");
+	});
+
+	it("joins a genuine async-progress head/tail split with the elision marker", () => {
+		const output = formatSessionHistoryMarkdown([
+			{
+				role: "custom",
+				customType: "async-progress",
+				content: "",
+				details: {
+					jobs: [
+						{ jobId: "bash_2", head: "first lines", tail: "last lines", truncated: true, artifactId: "art-10" },
+					],
+				},
+				timestamp: 1,
+			},
+		]);
+		expect(output).toContain("bash_2: first lines … last lines");
+		expect(output).toContain("[full output: artifact://art-10]");
+	});
+
 	it("renders find paths without falling back to JSON arguments", () => {
 		const output = formatSessionHistoryMarkdown([
 			{

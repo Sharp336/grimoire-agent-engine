@@ -36,6 +36,19 @@
 - Fixed fast tool completions leaving a permanent running summary that blocked transcript retirement and squeezed later tool output.
 - Fixed `omp git` hunk navigation (`alt+↓`/`alt+↑`) appearing to do nothing while the file sidebar had focus: the diff cursor band now stays visible (dimmed) when the pane is unfocused.
 - Fixed the git TUI sidebar jumping back to the top of the file list after staging or unstaging a file; selection now stays on the nearest remaining row
+- Added bounded, rate-limited progress delivery for background jobs: batched previews with stable overflow artifacts, ambient and wake queues, and completion notices that carry exit status; inspired by Claude Code's Monitor tool ([#2762](https://github.com/can1357/oh-my-pi/issues/2762)).
+- Added Hub process monitoring modes (wake, ambient, off) to attach, retune, or detach live progress delivery without changing process lifetime.
+- Added Bash async: "auto": potentially slow finite commands run inline for a grace window and promote to a background job without restarting.
+- Added collapsible async progress in the transcript: progress blocks show the latest lines behind an "… N earlier lines" marker, expand with Ctrl+O, and completion rows report exit codes with failures in red.
+
+### Changed
+
+- Session `/dump` output now labels system notices with readable titles and fences their raw payloads as XML.
+
+### Fixed
+
+- Fixed daemon broker idle shutdown closing newly accepted clients before their authentication request could be processed under load.
+- Fixed supervised image tunnels rejecting a published URL when the child exited between the startup poll's log read and exit check.
 
 ## [18.0.4] - 2026-08-24
 
