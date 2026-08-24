@@ -1326,13 +1326,14 @@ export class MCPManager {
 
 		// Replace tools from this server
 		this.#replaceServerTools(name, customTools);
-		// A configured filter that excludes every advertised tool leaves the
-		// server connected with zero tools; report it as a failure (consistent
-		// with the initial-connect path) instead of a silent empty refresh.
+		// When tools pass the filter again, emit `connected` so the status
+		// handler clears the server from its failed list.
 		const filterMsg =
 			customTools.length === 0 ? mcpFilterEmptyMessage(name, connection.config, serverTools.length) : null;
 		if (filterMsg) {
 			this.#emitConnectionStatus({ type: "failed", serverName: name, error: filterMsg });
+		} else {
+			this.#emitConnectionStatus({ type: "connected", serverName: name });
 		}
 		await this.#onToolsChanged?.(this.#tools);
 	}
