@@ -79,6 +79,7 @@ import { type Effort, streamSimple } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { MacOSPowerAssertion } from "@oh-my-pi/pi-natives";
 import {
@@ -99,6 +100,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { type AdvisorConfig, type AdvisorRuntimeStatus, loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
+import { reset as resetCapabilities } from "../capability";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
 import type { ResolvedModelRoleValue } from "../config/model-resolver";
@@ -114,7 +116,7 @@ import {
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import { getFileSnapshotStore } from "../edit/file-snapshot-store";
 import type { PythonResult } from "../eval/py/executor";
-import type { BashResult } from "../exec/bash-executor";
+import type { BashPtyOptions, BashResult } from "../exec/bash-executor";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
 import type { CustomTool } from "../extensibility/custom-tools/types";
@@ -1344,6 +1346,7 @@ export class AgentSession {
 			mcpManagerToolNames: config.mcpManagerToolNames,
 			presentationPinnedToolNames: config.presentationPinnedToolNames,
 			ensureWriteRegistered: config.ensureWriteRegistered,
+			ensureGoalRegistered: config.ensureGoalRegistered,
 			rebuildSystemPrompt: config.rebuildSystemPrompt,
 			getMcpServerInstructions: config.getMcpServerInstructions,
 			xdev: config.xdev,
@@ -2222,6 +2225,7 @@ export class AgentSession {
 		if (event.type === "tool_execution_end" && this.#isTerminalYieldToolResult(event)) {
 			const alreadyTerminated = this.#synchronouslyTerminatedYieldToolCallIds.delete(event.toolCallId);
 			if (!alreadyTerminated) {
+				this.#advisors.prepareForTerminalYieldAdvisorDrain();
 				this.#markTerminalYieldToolCall(event.toolCallId);
 				this.agent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
 			}
@@ -2460,6 +2464,13 @@ export class AgentSession {
 	 * run into hidden continuity context for the next turn. Short fragments are
 	 * omitted; `convertToLlm` still strips their incomplete thinking from replay.
 	 *
+	 * Skipped for anthropic-dialect targets: the continuity quote replays the
+	 * model's own reasoning as conversation text, which Anthropic's
+	 * `reasoning_extraction` classifier refuses (verified live against Fable 5 —
+	 * the quoted fragment trips it even inside a full agentic request on
+	 * OAuth/subscription auth). transform-messages already drops the unsigned
+	 * trailing run from replay, so nothing else is lost.
+	 *
 	 * The original thinking stays on the assistant message so live render, reload,
 	 * and display-reset rebuilds keep showing it.
 	 */
@@ -2467,6 +2478,7 @@ export class AgentSession {
 		message: AssistantMessage,
 	): CustomMessage<InterruptedThinkingDetails> | undefined {
 		if (message.stopReason !== "aborted" || !isUserInterruptAbort(message)) return undefined;
+		if (preferredDialect(this.agent.state.model?.id ?? message.model) === "anthropic") return undefined;
 		const demoted = demoteInterruptedThinking(message);
 		if (!demoted || demoted.reasoning.length < INTERRUPTED_THINKING_MIN_CHARS) return undefined;
 		const interruptedAt = Date.now();
@@ -2533,6 +2545,9 @@ export class AgentSession {
 			this.#prunedTerminalRefusal = undefined;
 			this.#emitRunState("running");
 		}
+		// This must happen before event fan-out awaits: streamed tool-call deltas
+		// can otherwise queue validation that a delayed turn-start reset erases.
+		if (event.type === "turn_start") this.#streamingEditGuard.reset();
 		// Step the mid-run todo counter synchronously, BEFORE any await in this
 		// handler. The agent loop's next-turn `getAsideMessages` poll can run
 		// before queued microtasks drain, so `#takeMidRunTodoNudge` MUST see the
@@ -2640,6 +2655,7 @@ export class AgentSession {
 		}
 
 		if (event.type === "turn_start") {
+			this.#advisors.onPrimaryTurnStart();
 			const usage = this.getSessionStats().tokens;
 			this.#goalRuntime.onTurnStart(`turn-${++this.#goalTurnCounter}`, {
 				input: usage.input,
@@ -2672,10 +2688,7 @@ export class AgentSession {
 			}
 		}
 
-		if (event.type === "turn_start") {
-			this.#streamingEditGuard.reset();
-			this.#ttsr.onTurnStart();
-		}
+		if (event.type === "turn_start") this.#ttsr.onTurnStart();
 
 		if (event.type === "turn_end") this.#ttsr.onTurnEnd();
 		// Finalize the tool-choice queue's in-flight yield after tools have executed.
@@ -3008,6 +3021,14 @@ export class AgentSession {
 			let compactionResult = COMPACTION_CHECK_NONE;
 			let checkedCompaction = false;
 			if (activeGoal) {
+				// Payload rejections get a pre-compaction chain consult; checkCompaction()'s overflow path commits a remedy before returning (#9235).
+				if (AIError.isPayloadRejection(msg) && this.#recovery.isHardErrorFallbackEligible(msg)) {
+					const didRetry = await this.#recovery.handleRetryableError(msg, { hardErrorFallback: true });
+					if (didRetry) {
+						await emitAgentEndNotification({ willContinue: true });
+						return;
+					}
+				}
 				maintenanceRoute("active-goal-pre-empt-checkCompaction");
 				const compactionTask = this.#maintenance.checkCompaction(msg);
 				this.#trackPostPromptTask(compactionTask);
@@ -3015,6 +3036,13 @@ export class AgentSession {
 				checkedCompaction = true;
 				const compactionContinues = compactionResult.deferredHandoff || compactionResult.continuationScheduled;
 				if (compactionContinues || compactionResult.automaticContinuationBlocked) {
+					// Early return skips the error tail; persist the terminal 413 so the JSONL records why the goal stopped (#9235).
+					if (
+						compactionResult.automaticContinuationBlocked &&
+						(AIError.isPayloadRejection(msg) || !AIError.isContextOverflow(msg, this.model?.contextWindow ?? 0))
+					) {
+						await this.#recovery.persistTerminalEmptyErrorTurn(msg);
+					}
 					maintenanceRoute("active-goal-pre-empt-compaction-handled", {
 						deferredHandoff: compactionResult.deferredHandoff,
 						continuationScheduled: compactionResult.continuationScheduled,
@@ -3117,6 +3145,9 @@ export class AgentSession {
 				const compactionTask = this.#maintenance.checkCompaction(msg);
 				this.#trackPostPromptTask(compactionTask);
 				compactionResult = await compactionTask;
+			}
+			if (compactionResult.automaticContinuationBlocked && AIError.isPayloadRejection(msg)) {
+				await this.#recovery.persistTerminalEmptyErrorTurn(msg);
 			}
 			await this.#recovery.onErrorSettledWithoutRetry(msg, compactionResult);
 			// Stop-time todo reconciliation only fires at a text-only final stop. A run
@@ -3414,6 +3445,7 @@ export class AgentSession {
 				result: ctx.result,
 			})
 		) {
+			this.#advisors.prepareForTerminalYieldAdvisorDrain();
 			this.#markTerminalYieldToolCall(ctx.toolCall.id);
 			this.#synchronouslyTerminatedYieldToolCallIds.add(ctx.toolCall.id);
 			this.agent.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
@@ -4337,6 +4369,9 @@ export class AgentSession {
 		// pre-reset history.
 		this.sessionManager.appendResetBoundary();
 
+		resetCapabilities();
+		await this.refreshBaseSystemPrompt();
+
 		return { droppedCount };
 	}
 
@@ -4603,6 +4638,11 @@ export class AgentSession {
 	/** Names currently authorized through the eval bridge. */
 	getEvalBridgeToolNames(): string[] {
 		return this.#tools.getEvalBridgeToolNames();
+	}
+
+	/** Tools left directly model-visible by Code Mode; undefined when inactive. */
+	getCodeModeDirectToolNames(): readonly string[] | undefined {
+		return this.#tools.getCodeModeDirectToolNames();
 	}
 
 	/** Whether a registry entry came from a built-in factory. */
@@ -5209,6 +5249,10 @@ export class AgentSession {
 	setSlashCommands(slashCommands: FileSlashCommand[]): void {
 		this.#slashCommands = [...slashCommands];
 	}
+	/** File-based slash commands discovered at session construction (or last set). */
+	get slashCommands(): ReadonlyArray<FileSlashCommand> {
+		return this.#slashCommands;
+	}
 
 	/** Custom commands (TypeScript slash commands and MCP prompts) */
 	get customCommands(): ReadonlyArray<LoadedCustomCommand> {
@@ -5284,15 +5328,17 @@ export class AgentSession {
 				: sessionPlanUrl;
 
 		const planExists = fs.existsSync(resolvedPlanPath);
-		const activeToolNames = this.getActiveToolNames();
+		// Capability gates, not the visible surface: a Code Mode partition keeps
+		// `task` and `ask` callable through the eval bridge after demoting them.
+		const capableToolNames = this.getEnabledToolNames();
 		const content = prompt.render(planModeActivePrompt, {
 			planFilePath: displayPlanPath,
 			planExists,
 			askToolName: "ask",
 			writeToolName: "write",
 			editToolName: "edit",
-			askAvailable: activeToolNames.includes("ask"),
-			taskAvailable: activeToolNames.includes("task"),
+			askAvailable: capableToolNames.includes("ask"),
+			taskAvailable: capableToolNames.includes("task"),
 			isHashlineEditMode: this.#resolveActiveEditMode() === "hashline",
 			reentry: state.reentry ?? false,
 			iterative: state.workflow === "iterative",
@@ -6765,8 +6811,10 @@ export class AgentSession {
 	 * Generate an automatic session title tied to this session's lifecycle.
 	 * Input and replan callers share the signal so disposal cancels provider and
 	 * local-worker requests instead of leaving background inference alive.
+	 * `customSystemPrompt` swaps the title prompt for special-purpose titling
+	 * (e.g. plan-save filename topics) without touching the session override.
 	 */
-	generateTitle(firstMessage: string): Promise<string | null> {
+	generateTitle(firstMessage: string, customSystemPrompt?: string): Promise<string | null> {
 		return generateSessionTitle(
 			firstMessage,
 			this.#modelRegistry,
@@ -6774,7 +6822,7 @@ export class AgentSession {
 			this.sessionId,
 			this.model,
 			provider => this.agent.metadataForProvider(provider),
-			this.#titleSystemPrompt,
+			customSystemPrompt ?? this.#titleSystemPrompt,
 			this.#titleGenerationAbortController.signal,
 		);
 	}
@@ -6989,8 +7037,14 @@ export class AgentSession {
 			this.#advisors.resetSessionState();
 			advisorRecordersDetached = false;
 			this.#reconnectToAgent();
-			// The workspace-roots block must reflect the new session's directory set,
-			// not the previous session's — refresh before the next turn goes out.
+			// Drop the process-lifetime context-file cache so the rebuild re-reads
+			// AGENTS.md and friends from disk: the user may have edited them since
+			// the previous session started, and refreshBaseSystemPrompt() re-runs
+			// discovery but would otherwise hit stale cached bytes (issue #9273).
+			// The workspace-roots block must also reflect the new session's
+			// directory set, not the previous session's — refresh before the next
+			// turn goes out.
+			resetCapabilities();
 			await this.refreshBaseSystemPrompt();
 
 			// Emit session_switch event with reason "new" to hooks
@@ -7698,7 +7752,7 @@ export class AgentSession {
 	executeBash(
 		command: string,
 		onChunk?: (chunk: string) => void,
-		options?: { excludeFromContext?: boolean; useUserShell?: boolean },
+		options?: { excludeFromContext?: boolean; useUserShell?: boolean; pty?: BashPtyOptions },
 	): Promise<BashResult> {
 		return this.#bash.executeBash(command, onChunk, options);
 	}
