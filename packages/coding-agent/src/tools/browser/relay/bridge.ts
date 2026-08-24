@@ -299,15 +299,18 @@ export class RelayBridge {
 		for (const tab of this.#tabs.values()) {
 			tab.attached = attachedNow.has(tab.tabId);
 			tab.attaching = null;
-			// Only guard-initiated detachments are safe to reverse. A missing
-			// attachment can also mean the user clicked Chrome's Cancel button while
-			// the extension socket was down; that explicit opt-out must survive the
-			// reconnect even when the relay still has session holders.
-			if (!tab.attached && recoverableNow.has(tab.tabId) && this.#sessionHolders(tab.tabId).length > 0) {
-				void this.#ensureAttached(tab).then(ok => {
-					if (!ok) this.#onTabDetached(tab.tabId, "reattach_failed");
-				});
+			if (tab.attached || this.#sessionHolders(tab.tabId).length === 0) continue;
+			if (!recoverableNow.has(tab.tabId)) {
+				// The user detached while the extension socket was down. Invalidate
+				// the relay's stale sessions without fighting the explicit opt-out.
+				this.#onTabDetached(tab.tabId, "detached_while_disconnected");
+				continue;
 			}
+			// A guard detach creates a fresh Chrome root session. Retract every
+			// pseudo/real child tied to the old root before re-announcing the tab;
+			// auto-attached clients then rebuild only after ensureAttached resolves.
+			this.#retractTab(tab);
+			this.#announceTab(tab);
 		}
 		this.#syncGrouping();
 		this.#log("extension connected", { tabs: this.#tabs.size, version: msg.browserVersion });
@@ -695,18 +698,7 @@ export class RelayBridge {
 		const eligible = this.#eligible(tab);
 		this.#syncTabGrouping(tab);
 		if (eligible && !tab.announced) {
-			tab.announced = true;
-			for (const conn of this.#conns.values()) {
-				if (!conn.discover) continue;
-				this.#emit(conn, "Target.targetCreated", { targetInfo: this.#tabInfo(tab, tab.attached) });
-				this.#emit(conn, "Target.targetCreated", { targetInfo: this.#pageInfo(tab, tab.attached) });
-			}
-			for (const conn of this.#conns.values()) {
-				if (!conn.autoAttach) continue;
-				void this.#ensureAttached(tab).then(ok => {
-					if (ok) this.#emitTabAttached(conn, tab);
-				});
-			}
+			this.#announceTab(tab);
 			return;
 		}
 		if (!eligible && tab.announced) {
@@ -719,6 +711,21 @@ export class RelayBridge {
 				this.#emit(conn, "Target.targetInfoChanged", { targetInfo: this.#tabInfo(tab, tab.attached) });
 				this.#emit(conn, "Target.targetInfoChanged", { targetInfo: this.#pageInfo(tab, tab.attached) });
 			}
+		}
+	}
+
+	#announceTab(tab: TabState): void {
+		tab.announced = true;
+		for (const conn of this.#conns.values()) {
+			if (!conn.discover) continue;
+			this.#emit(conn, "Target.targetCreated", { targetInfo: this.#tabInfo(tab, tab.attached) });
+			this.#emit(conn, "Target.targetCreated", { targetInfo: this.#pageInfo(tab, tab.attached) });
+		}
+		for (const conn of this.#conns.values()) {
+			if (!conn.autoAttach) continue;
+			void this.#ensureAttached(tab).then(ok => {
+				if (ok) this.#emitTabAttached(conn, tab);
+			});
 		}
 	}
 

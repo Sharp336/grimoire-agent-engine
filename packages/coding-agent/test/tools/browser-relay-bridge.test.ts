@@ -280,7 +280,7 @@ describe("RelayBridge tab grouping", () => {
 		// disconnect, so the next hello reports groupId -1 for every tab.
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
-		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })]);
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { attachedTabIds: [1] });
 		const groups = ext2.rpcs("group");
 		expect(groups).toHaveLength(1);
 		expect(groups[0]!.tabIds).toEqual([1]);
@@ -292,7 +292,11 @@ describe("RelayBridge tab grouping", () => {
 		connect(bridge, ext, [tab({ tabId: 1 })]);
 		const cdp = new FakeCdpSocket();
 		const connId = bridge.cdpConnected(cdp);
-		await claimTab(bridge, ext, cdp, connId, 1);
+		const oldPageSession = await attachPage(bridge, ext, cdp, connId, 1);
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets" }));
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach" }));
+		await flush();
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId: oldPageSession, method: "OMP.claimTarget" }));
 		ack(bridge, ext, "group", { grouped: { "1": 42 } });
 		await flush();
 
@@ -300,11 +304,25 @@ describe("RelayBridge tab grouping", () => {
 
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		const staleCommandId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: staleCommandId, sessionId: oldPageSession, method: "Runtime.evaluate" }),
+		);
 		await flush();
 
 		const attaches = ext2.rpcs("attach");
 		expect(attaches).toHaveLength(1);
 		expect(attaches[0]!.tabId).toBe(1);
+		expect(ext2.rpcs("send")).toHaveLength(0);
+		expect(cdp.messages.find(message => message.id === staleCommandId)?.error).toEqual({
+			code: -32000,
+			message: `Unknown session id ${oldPageSession}`,
+		});
+
+		ack(bridge, ext2, "attach");
+		await flush();
+		expect(cdp.messages.filter(message => message.method === "Target.attachedToTarget")).toHaveLength(3);
 	});
 
 	it("preserves a user's debugger detach while disconnected", async () => {
@@ -322,5 +340,6 @@ describe("RelayBridge tab grouping", () => {
 		await flush();
 
 		expect(ext2.rpcs("attach")).toHaveLength(0);
+		expect(cdp.messages.some(message => message.method === "Target.detachedFromTarget")).toBe(true);
 	});
 });
