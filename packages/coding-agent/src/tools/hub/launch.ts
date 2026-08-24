@@ -859,7 +859,6 @@ function registerCompletionSink(
 		};
 		owners.set(owner, registration);
 		unregisterDispose = session.registerDisposeCallback?.(() => cleanup(true));
-
 	}
 	const activeRegistration = registration;
 	activeRegistration.inFlight++;

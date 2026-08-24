@@ -159,7 +159,7 @@ interface OutputRegistration extends DaemonOutputWireSubscription {
 	artifactDisposal?: Promise<void>;
 	/** Reconnect-grace cleanup for registrations without an attached live client. */
 	offlineTimer?: NodeJS.Timeout;
-	/** Artifact persistence failed; retain only the terminal expiry until client cleanup. */
+	/** Delivery is terminally expired; retain only its expiry until client cleanup. */
 	disabled?: boolean;
 	/** Model-facing line previews accumulated from this registration's attach point. */
 	progressPreview: ProgressPreviewAccumulator;
@@ -203,9 +203,8 @@ function createOutputRegistration(
 		artifactSink: new OutputSink({
 			artifactPath: subscription.artifactPath,
 			artifactWriteMode: "mirror",
-			// A republish after the offline grace expired re-creates the sink on
-			// the same artifact path; append so capture behind already-delivered
-			// artifact links survives (a fresh path starts empty either way).
+			// Fresh registrations may deliberately reuse an artifact path; append
+			// so bytes behind already-delivered artifact links survive.
 			artifactAppend: true,
 		}),
 		progressPreview,
@@ -1093,13 +1092,38 @@ class DaemonBroker {
 		void this.#disposeOutputArtifact(registration);
 	}
 
+	#expireOfflineOutputRegistration(registrationKey: string, registration: OutputRegistration): void {
+		if (this.#outputRegistrations.get(registrationKey) !== registration) return;
+		// A registration already disabled for another terminal reason has already
+		// advertised its expiry; once its reconnect grace elapses it can be dropped.
+		// An unbound start-pending registration has no daemon output gap to preserve.
+		if (registration.disabled || registration.daemonId === undefined) {
+			this.#disposeOutputRegistration(registrationKey, registration);
+			return;
+		}
+		registration.disabled = true;
+		this.#progressBatcher.clear(registration.batchKey);
+		void this.#disposeOutputArtifact(registration);
+		const expired: DaemonMonitorWireNotification = {
+			event: "daemon-monitor-expired",
+			monitorId: registration.id,
+			registrationId: registration.registrationId,
+			name: registration.name,
+			daemonId: registration.daemonId,
+		};
+		// Preserve only the terminal expiry. A same-identity republish must consume
+		// it instead of opening an append sink after an uncaptured output gap.
+		registration.pending = [expired];
+		this.#writeMonitorNotification(registration, expired);
+	}
+
 	#scheduleOutputRegistrationCleanup(registrationKey: string, registration: OutputRegistration): void {
 		clearTimeout(registration.offlineTimer);
 		const timer = setTimeout(() => {
 			if (registration.offlineTimer !== timer) return;
 			registration.offlineTimer = undefined;
 			if (registration.socket && !registration.socket.destroyed) return;
-			this.#disposeOutputRegistration(registrationKey, registration);
+			this.#expireOfflineOutputRegistration(registrationKey, registration);
 		}, this.#outputReconnectGraceMs);
 		registration.offlineTimer = timer;
 		timer.unref();
@@ -1346,9 +1370,11 @@ class DaemonBroker {
 			}
 			return;
 		}
-		// A replacement or same-name daemon can land while the artifact flush
-		// yields. Both registration and daemon incarnation must still match.
+		// Replacement, terminal expiry, or a same-name daemon can land while the
+		// artifact flush yields. Delivery must still be live and bound to this
+		// registration and daemon incarnation.
 		if (
+			registration.disabled ||
 			this.#outputRegistrations.get(key) !== registration ||
 			this.#records.get(registration.name)?.snapshot.id !== registration.daemonId
 		) {
