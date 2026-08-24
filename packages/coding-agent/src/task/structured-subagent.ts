@@ -201,10 +201,17 @@ function createPlanModeAgent(agent: AgentDefinition): AgentDefinition {
 function assertPlanControlsAllowed(request: StructuredSubagentRequest, planMode: boolean): void {
 	if (!planMode) return;
 	const isolation = request.isolation;
-	if (
-		isolation &&
-		(Object.hasOwn(isolation, "requested") || Object.hasOwn(isolation, "apply") || Object.hasOwn(isolation, "merge"))
-	) {
+	if (!isolation) return;
+	// Only affirmative controls are prohibited: an explicit `false` (e.g. a
+	// schema-aware caller emitting `isolated: false`) is a no-op requesting
+	// the default non-isolated behavior plan mode already enforces, and must
+	// not fail the call. The no-isolation wire schema keeps rejecting
+	// `isolated: true`, so a genuine request still surfaces this error via
+	// the lenient raw-args fallthrough.
+	const requested = isolation.requested === true;
+	const apply = isolation.apply === true;
+	const merge = isolation.merge !== undefined;
+	if (requested || apply || merge) {
 		throw new StructuredSubagentError(
 			"preflight",
 			"Subagent isolation, apply, and merge controls are unavailable in plan mode.",
@@ -294,11 +301,31 @@ export async function resolveEffectiveSubagentPolicy(
 	// child's inherited retry-fallback chain is keyed off the role.
 	const { patterns: modelOverride, role: modelRole } = resolveAgentModelSelection(modelResolution);
 	const isolationMode = request.session.settings.get("task.isolation.mode");
+	// Reject malformed affirmative isolation values (e.g. `isolated: "true"`)
+	// that slip through lenient raw-args fallthrough — a non-boolean truthy
+	// value must not silently downgrade to non-isolated.
+	if (
+		request.isolation &&
+		request.isolation.requested !== undefined &&
+		request.isolation.requested !== true &&
+		request.isolation.requested !== false
+	) {
+		throw new StructuredSubagentError(
+			"preflight",
+			`Invalid value for \`isolated\`: expected boolean, got ${typeof request.isolation.requested}.`,
+		);
+	}
 	const isIsolated = request.isolation?.requested === true;
 	if (isIsolated && isolationMode === "none") {
 		throw new StructuredSubagentError(
 			"preflight",
 			`Subagent isolated execution requires task.isolation.mode to be set; current mode is "none".`,
+		);
+	}
+	if (isIsolated && request.session.isIsolated && !request.session.settings.get("task.isolation.allowNested")) {
+		throw new StructuredSubagentError(
+			"preflight",
+			"Subagent isolated execution inside an already-isolated agent requires task.isolation.allowNested to be enabled.",
 		);
 	}
 	return {
@@ -402,6 +429,7 @@ function buildExecutorOptions(
 		detached: request.detached,
 		id,
 		taskDepth: session.taskDepth ?? 0,
+		isIsolated: session.isIsolated === true,
 		invokedAt: request.invokedAt,
 		acquiredAt: request.acquiredAt,
 		modelOverride: policy.modelOverride,

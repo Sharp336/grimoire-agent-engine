@@ -345,6 +345,14 @@ export interface ExecutorOptions {
 	/** Exact provider credential resolver inherited from the parent session. */
 	getApiKey?: CreateAgentSessionOptions["getApiKey"];
 	worktree?: string;
+	/**
+	 * Whether the spawning session itself runs inside an isolation worktree.
+	 * A non-isolated child of an isolated parent still executes inside the
+	 * parent's worktree (`cwd`), so the child session must inherit the marker —
+	 * otherwise it would expose `isolated` to its own children and let a nested
+	 * `isolated: true` bypass the `task.isolation.allowNested` gate.
+	 */
+	isIsolated?: boolean;
 	agent: AgentDefinition;
 	task: string;
 	assignment?: string;
@@ -3117,6 +3125,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				prewalk,
 				spawns: spawnsEnv,
 				taskDepth: childDepth,
+				isIsolated: worktree !== undefined || options.isIsolated === true,
 				parentHindsightSessionState: options.parentHindsightSessionState,
 				parentMnemopiSessionState: options.parentMnemopiSessionState,
 				parentTaskPrefix: id,
@@ -3231,6 +3240,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
+				isIsolated: worktree !== undefined || options.isIsolated === true,
 			});
 
 			abortSignal.addEventListener(

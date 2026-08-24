@@ -159,13 +159,22 @@ describe("structured subagent primitive", () => {
 		expect(policy.enableIrc).toBe(false);
 
 		vi.restoreAllMocks();
-		const discover = vi.spyOn(discoveryModule, "discoverAgents");
+		const discover = vi
+			.spyOn(discoveryModule, "discoverAgents")
+			.mockResolvedValue({ agents: [AGENT], projectAgentsDir: null });
+		await expect(
+			resolveEffectiveSubagentPolicy(
+				request({ session: session({ planMode: true }), isolation: { requested: true } }),
+			),
+		).rejects.toThrow("isolation, apply, and merge controls are unavailable in plan mode");
+		expect(discover).not.toHaveBeenCalled();
+		// An explicit `false` control is a no-op (requests the default
+		// non-isolated behavior plan mode already enforces) and must pass.
 		await expect(
 			resolveEffectiveSubagentPolicy(
 				request({ session: session({ planMode: true }), isolation: { requested: false } }),
 			),
-		).rejects.toThrow("isolation, apply, and merge controls are unavailable in plan mode");
-		expect(discover).not.toHaveBeenCalled();
+		).resolves.toBeDefined();
 	});
 	it("reloads model roles before resolving an agent added during the session", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-task-hot-reload-"));
