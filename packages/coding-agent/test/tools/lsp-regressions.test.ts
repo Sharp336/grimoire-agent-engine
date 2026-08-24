@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as os from "node:os";
@@ -56,9 +56,11 @@ import DEFAULTS from "../../src/lsp/defaults.json" with { type: "json" };
 import { renderResult as renderLocalResult } from "../../src/lsp/render";
 import { getLanguageFromPath } from "../../src/utils/lang-from-path";
 
+const lspTestSettings = Settings.isolated();
+
 /** Minimal LSP tool session: production always supplies `settings`; these tests only need cwd + a default settings stub. */
 function makeLspSession(cwd: string): ToolSession {
-	return { cwd, settings: Settings.isolated() } as ToolSession;
+	return { cwd, settings: lspTestSettings } as ToolSession;
 }
 
 interface RpcMessage {
@@ -278,6 +280,33 @@ function textResult(result: AgentToolResult<LspToolDetails>): string {
 		.map(block => block.text)
 		.join("\n");
 }
+
+/**
+ * `loadConfig` walks the user config directories (~/.omp/agent, ~/.pi/agent,
+ * ~/.claude), which resolve from os.homedir(). A developer with a real
+ * lsp.json there flips loadConfig off its auto-detect path onto the override
+ * path, where their rootMarkers replace the packaged ones — so these tests
+ * would assert against that machine's config instead of the defaults. Point
+ * HOME at an empty directory so every case sees a pristine environment.
+ */
+let lspHomeOverride: string | undefined;
+let lspOriginalHome: string | undefined;
+
+beforeEach(() => {
+	lspOriginalHome = process.env.HOME;
+	lspHomeOverride = fs.mkdtempSync(path.join(os.tmpdir(), "omp-lsp-test-home-"));
+	process.env.HOME = lspHomeOverride;
+	// Bun's os.homedir() reads the passwd entry rather than $HOME, so the env
+	// var alone does not redirect the config walk.
+	vi.spyOn(os, "homedir").mockReturnValue(lspHomeOverride);
+});
+
+afterEach(() => {
+	if (lspOriginalHome === undefined) delete process.env.HOME;
+	else process.env.HOME = lspOriginalHome;
+	if (lspHomeOverride) fs.rmSync(lspHomeOverride, { recursive: true, force: true });
+	lspHomeOverride = undefined;
+});
 
 describe("lsp regressions", () => {
 	afterEach(() => {
@@ -1598,17 +1627,24 @@ describe("lsp regressions", () => {
 			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["test-lsp", server]]);
 			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
 
-			setTimeout(() => {
-				client.diagnostics.set(otherUri, { diagnostics: [otherDiagnostic], version: 1 });
-				client.diagnosticsVersion += 1;
-			}, 20);
-			setTimeout(() => {
-				client.diagnostics.set(targetUri, {
-					diagnostics: [],
-					version: client.openFiles.get(targetUri)?.version ?? 2,
-				});
-				client.diagnosticsVersion += 1;
-			}, 80);
+			let poll = 0;
+			vi.spyOn(Bun, "sleep").mockImplementation(async () => {
+				poll++;
+				if (poll === 1) {
+					client.diagnostics.set(otherUri, { diagnostics: [otherDiagnostic], version: 1 });
+					client.diagnosticsVersion += 1;
+					return;
+				}
+				if (poll === 2) {
+					client.diagnostics.set(targetUri, {
+						diagnostics: [],
+						version: client.openFiles.get(targetUri)?.version ?? 2,
+					});
+					client.diagnosticsVersion += 1;
+					return;
+				}
+				throw new Error("waitForDiagnostics polled after the fresh target publish");
+			});
 
 			const tool = new LspTool(makeLspSession(tempDir.path()));
 			const result = await tool.execute("diag-stale", {
@@ -3398,13 +3434,17 @@ describe("lsp regressions", () => {
 			projectLoaded: Promise.resolve(),
 			resolveProjectLoaded: () => {},
 		};
-		expect(lspClient.sendRequest(client, "test/method", {}, undefined, 25)).rejects.toThrow(/after 25ms/);
+		vi.useFakeTimers();
+		try {
+			const request = lspClient.sendRequest(client, "test/method", {}, undefined, 25);
+			vi.advanceTimersByTime(25);
+			await expect(request).rejects.toThrow(/after 25ms/);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("sendRequest uses the signal as the deadline when no explicit timeout is set", async () => {
-		// With a signal but no explicit timeoutMs, the per-request 30s default
-		// MUST NOT fire — the signal owns the deadline. Otherwise `timeout: 60`
-		// on the LSP tool got truncated to 30000ms.
 		const client: LspClient = {
 			name: "test-lsp",
 			cwd: process.cwd(),
@@ -3424,15 +3464,14 @@ describe("lsp regressions", () => {
 			projectLoaded: Promise.resolve(),
 			resolveProjectLoaded: () => {},
 		};
-		const signal = AbortSignal.timeout(20);
-		expect(lspClient.sendRequest(client, "test/method", {}, signal)).rejects.toThrow();
-		// If the per-request 30s timer had fired, the message would say "after 30000ms".
-		// We assert the negative: the rejection came from the signal, not the timer.
-		try {
-			await lspClient.sendRequest(client, "test/method", {}, AbortSignal.timeout(20));
-		} catch (err) {
-			expect(String(err)).not.toContain("30000ms");
-		}
+		const controller = new AbortController();
+		const reason = new Error("caller deadline");
+		const request = lspClient.sendRequest(client, "test/method", {}, controller.signal);
+		controller.abort(reason);
+
+		// The exact caller reason proves the signal owned the deadline rather than
+		// the per-request 30s fallback.
+		await expect(request).rejects.toBe(reason);
 	});
 
 	it("rename_file skips the LSP loop when no configured server handles the file extension", async () => {
@@ -3491,9 +3530,9 @@ describe("lsp regressions", () => {
 			const loadConfigSpy = vi
 				.spyOn(lspConfig, "loadConfig")
 				.mockImplementation(() => configs.shift() ?? configs[0]);
-			const client = { proc: { kill: vi.fn() } } as unknown as LspClient;
+			const client = { proc: { kill: vi.fn() }, config: server } as unknown as LspClient;
 			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
-			vi.spyOn(lspClient, "sendRequest").mockResolvedValue(null);
+			vi.spyOn(lspClient, "sendNotification").mockResolvedValue(undefined);
 
 			const tool = new LspTool(makeLspSession(tempDir.path()));
 			const initial = await tool.execute("reload-redetect-status", { action: "status" });
@@ -3628,8 +3667,8 @@ describe("lsp regressions", () => {
 
 	describe("reload cancellation and truthful teardown (#6369)", () => {
 		// A JSON-RPC error response the client maps to isMethodNotFoundError, so a
-		// non-rust server falls through from `rust-analyzer/reloadWorkspace` to the
-		// generic `workspace/didChangeConfiguration` reload.
+		// rust-analyzer server whose reloadWorkspace is unsupported falls through
+		// to the generic `workspace/didChangeConfiguration` reload.
 		const methodNotFound = (id: RpcMessage["id"]): RpcMessage => ({
 			jsonrpc: "2.0",
 			id,
@@ -3650,7 +3689,7 @@ describe("lsp regressions", () => {
 					// rust-analyzer/reloadWorkspace is left pending: only the caller
 					// signal decides its fate.
 				});
-				const config: ServerConfig = { command: "fake-reload-cancel-req", fileTypes: [".ts"], rootMarkers: [] };
+				const config: ServerConfig = { command: "rust-analyzer", fileTypes: [".ts"], rootMarkers: [] };
 				vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { fake: config }, idleTimeoutMs: undefined });
 
 				const tool = new LspTool(makeLspSession(tempDir.path()));
@@ -3687,7 +3726,7 @@ describe("lsp regressions", () => {
 						srv.exit(0);
 					}
 				});
-				const config: ServerConfig = { command: "fake-reload-cancel-fb", fileTypes: [".ts"], rootMarkers: [] };
+				const config: ServerConfig = { command: "rust-analyzer", fileTypes: [".ts"], rootMarkers: [] };
 				vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { fake: config }, idleTimeoutMs: undefined });
 
 				const tool = new LspTool(makeLspSession(tempDir.path()));
@@ -3708,6 +3747,7 @@ describe("lsp regressions", () => {
 					if (message.method === "initialize") {
 						srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
 					} else if (message.method === "rust-analyzer/reloadWorkspace") {
+						expect(message.params).toBeUndefined();
 						srv.send(methodNotFound(message.id));
 					} else if (message.method === "shutdown") {
 						srv.send({ jsonrpc: "2.0", id: message.id, result: null });
@@ -3715,7 +3755,7 @@ describe("lsp regressions", () => {
 						srv.exit(0);
 					}
 				});
-				const config: ServerConfig = { command: "fake-reload-fallback", fileTypes: [".ts"], rootMarkers: [] };
+				const config: ServerConfig = { command: "rust-analyzer", fileTypes: [".ts"], rootMarkers: [] };
 				vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { fake: config }, idleTimeoutMs: undefined });
 
 				const tool = new LspTool(makeLspSession(tempDir.path()));
@@ -3746,13 +3786,60 @@ describe("lsp regressions", () => {
 						srv.exit(0);
 					}
 				});
-				const config: ServerConfig = { command: "fake-reload-fallback-code", fileTypes: [".ts"], rootMarkers: [] };
+				const config: ServerConfig = { command: "rust-analyzer", fileTypes: [".ts"], rootMarkers: [] };
 				vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: { fake: config }, idleTimeoutMs: undefined });
 
 				const tool = new LspTool(makeLspSession(tempDir.path()));
 				const result = await tool.execute("reload-fallback-code", { action: "reload", file: "*" });
 
 				expect(textResult(result)).toContain("Reloaded fake");
+				expect(server.killed).toBe(false);
+			} finally {
+				vi.restoreAllMocks();
+				await lspClient.shutdownAll();
+				tempDir.removeSync();
+			}
+		});
+
+		it("does not send rust-analyzer/reloadWorkspace to a non-rust server that crashes on it (#8571)", async () => {
+			const tempDir = TempDir.createSync("@omp-lsp-reload-non-rust-");
+			try {
+				let sawRustReload = false;
+				const server = installFakeLsp((message, srv) => {
+					if (message.method === "initialize") {
+						srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+					} else if (message.method === "rust-analyzer/reloadWorkspace") {
+						// Roslyn crashes the whole process instead of replying -32601
+						// (dotnet/roslyn#84890); the gate must never let us send this.
+						sawRustReload = true;
+						srv.exit(82);
+					} else if (message.method === "shutdown") {
+						srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+					} else if (message.method === "exit") {
+						srv.exit(0);
+					}
+				});
+				const settings = { csharp: { analysis: { backgroundScope: "fullSolution" } } };
+				const config: ServerConfig = {
+					command: "roslyn-language-server",
+					fileTypes: [".cs"],
+					rootMarkers: [],
+					settings,
+				};
+				vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+					servers: { csharp: config },
+					idleTimeoutMs: undefined,
+				});
+
+				const tool = new LspTool(makeLspSession(tempDir.path()));
+				const result = await tool.execute("reload-non-rust", { action: "reload", file: "*" });
+
+				expect(sawRustReload).toBe(false);
+				expect(textResult(result)).toContain("Reloaded csharp");
+				const configurationMessages = server.received.filter(
+					message => message.method === "workspace/didChangeConfiguration",
+				);
+				expect(configurationMessages.at(-1)?.params).toEqual({ settings });
 				expect(server.killed).toBe(false);
 			} finally {
 				vi.restoreAllMocks();
@@ -3921,27 +4008,22 @@ describe("lsp regressions", () => {
 			// Server accepts spawn but never answers the `initialize` request.
 			// Pre-fix, `getOrCreateClient` swallowed the signal and only bailed
 			// after the 30s `DEFAULT_REQUEST_TIMEOUT_MS` fallback fired.
-			installFakeLsp(() => {});
+			const server = installFakeLsp(() => {});
 
 			const tempDir = TempDir.createSync("@omp-lsp-init-abort-");
 			try {
 				const controller = new AbortController();
-				const timer = setTimeout(() => controller.abort(), 100);
+				const reason = new Error("caller deadline");
 				const config: ServerConfig = {
 					command: "fake-lsp-init-abort",
 					fileTypes: ["ts"],
 					rootMarkers: [],
 				};
 
-				const start = Date.now();
-				await expect(
-					lspClient.getOrCreateClient(config, tempDir.path(), undefined, controller.signal),
-				).rejects.toBeInstanceOf(Error);
-				const elapsed = Date.now() - start;
-				clearTimeout(timer);
-				// The signal fired at 100ms. Allow a wide margin, but the pre-fix
-				// path only bailed after 30s.
-				expect(elapsed).toBeLessThan(2_000);
+				const pending = lspClient.getOrCreateClient(config, tempDir.path(), undefined, controller.signal);
+				await server.waitFor(message => message.method === "initialize");
+				controller.abort(reason);
+				await expect(pending).rejects.toBe(reason);
 			} finally {
 				await lspClient.shutdownAll();
 				tempDir.removeSync();
@@ -3949,26 +4031,26 @@ describe("lsp regressions", () => {
 		});
 
 		it("does not negative-cache caller-aborted initialize attempts", async () => {
-			installFakeLsp(() => {});
+			const server = installFakeLsp(() => {});
 
 			const tempDir = TempDir.createSync("@omp-lsp-init-abort-cache-");
 			try {
 				const controller = new AbortController();
-				const timer = setTimeout(() => controller.abort(), 100);
 				const config: ServerConfig = {
 					command: "fake-lsp-init-abort-cache",
 					fileTypes: ["ts"],
 					rootMarkers: [],
 				};
 
-				await expect(
-					lspClient.getOrCreateClient(config, tempDir.path(), undefined, controller.signal),
-				).rejects.toBeInstanceOf(Error);
-				clearTimeout(timer);
+				const pending = lspClient.getOrCreateClient(config, tempDir.path(), undefined, controller.signal);
+				await server.waitFor(message => message.method === "initialize");
+				controller.abort();
+				await expect(pending).rejects.toBeInstanceOf(Error);
 
-				await expect(lspClient.getOrCreateClient(config, tempDir.path(), 25)).rejects.not.toThrow(
-					"failed to initialize recently",
-				);
+				const probeSignal = AbortSignal.abort(new Error("probe only"));
+				await expect(
+					lspClient.getOrCreateClient(config, tempDir.path(), undefined, probeSignal),
+				).rejects.not.toThrow("failed to initialize recently");
 			} finally {
 				await lspClient.shutdownAll();
 				tempDir.removeSync();
@@ -4081,6 +4163,7 @@ describe("lsp regressions", () => {
 			let exitCode: number | null = null;
 			let killed = false;
 			let flushGate: Promise<void> = Promise.resolve();
+			let onFlush: (() => void) | undefined;
 
 			const frame = (message: RpcMessage): Uint8Array => {
 				const content = JSON.stringify(message);
@@ -4132,6 +4215,7 @@ describe("lsp regressions", () => {
 						return typeof chunk === "string" ? Buffer.byteLength(chunk, "utf-8") : chunk.byteLength;
 					},
 					flush: async () => {
+						onFlush?.();
 						await flushGate;
 						return 0;
 					},
@@ -4164,30 +4248,27 @@ describe("lsp regressions", () => {
 
 				// Wedge every subsequent flush: sink.flush() now awaits a promise
 				// that never settles, mirroring a server that stopped draining stdin.
+				const flushStarted = Promise.withResolvers<void>();
+				onFlush = flushStarted.resolve;
 				flushGate = new Promise<void>(() => {});
 
 				const controller = new AbortController();
-				const timer = setTimeout(() => controller.abort(), 100);
-
-				const start = Date.now();
-				await expect(
-					lspClient.sendNotification(
-						client,
-						"textDocument/didOpen",
-						{
-							textDocument: {
-								uri: "file:///tmp/x.ts",
-								languageId: "typescript",
-								version: 1,
-								text: "",
-							},
+				const notification = lspClient.sendNotification(
+					client,
+					"textDocument/didOpen",
+					{
+						textDocument: {
+							uri: "file:///tmp/x.ts",
+							languageId: "typescript",
+							version: 1,
+							text: "",
 						},
-						controller.signal,
-					),
-				).rejects.toBeInstanceOf(Error);
-				const elapsed = Date.now() - start;
-				clearTimeout(timer);
-				expect(elapsed).toBeLessThan(2_000);
+					},
+					controller.signal,
+				);
+				await flushStarted.promise;
+				controller.abort();
+				await expect(notification).rejects.toBeInstanceOf(Error);
 
 				// Teardown contract: an aborted write kills the client so the
 				// next `getOrCreateClient` spawns a fresh server instead of

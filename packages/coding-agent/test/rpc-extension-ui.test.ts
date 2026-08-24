@@ -5,7 +5,65 @@ import {
 	requestRpcSelect,
 } from "@oh-my-pi/pi-coding-agent/modes/rpc/rpc-mode";
 
+function requireRequest(frame: object | undefined): { id: string } {
+	if (!frame || !("id" in frame)) {
+		throw new Error("Expected the RPC dialog request to carry an id");
+	}
+	const id = frame.id;
+	if (typeof id !== "string") throw new Error("Expected the RPC dialog request id to be a string");
+	return { id };
+}
+
+function resolveSelection(pendingRequests: Map<string, PendingExtensionRequest>, id: string, value: string): void {
+	const request = pendingRequests.get(id);
+	if (!request) throw new Error(`Expected pending RPC dialog request ${id}`);
+	request.resolve({ type: "extension_ui_response", id, value });
+}
+
 describe("RPC extension UI", () => {
+	it("keeps the label-only wire shape for bare options", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const result = requestRpcSelect(pendingRequests, output, "Action", ["Keep", "Deploy"]);
+		const request = requireRequest(output.mock.calls[0]?.[0]);
+
+		expect(output).toHaveBeenCalledWith({
+			type: "extension_ui_request",
+			id: request.id,
+			method: "select",
+			title: "Action",
+			options: ["Keep", "Deploy"],
+			timeout: undefined,
+		});
+
+		resolveSelection(pendingRequests, request.id, "Keep");
+		expect(await result).toBe("Keep");
+	});
+
+	it("emits aligned descriptions and resolves with the selected label", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const result = requestRpcSelect(pendingRequests, output, "Action", [
+			"Keep",
+			{ label: "Deploy", description: " Push to production " },
+			{ label: "Preview", description: "   " },
+		]);
+		const request = requireRequest(output.mock.calls[0]?.[0]);
+
+		expect(output).toHaveBeenCalledWith({
+			type: "extension_ui_request",
+			id: request.id,
+			method: "select",
+			title: "Action",
+			options: ["Keep", "Deploy", "Preview"],
+			optionDetails: [{}, { description: "Push to production" }, {}],
+			timeout: undefined,
+		});
+
+		resolveSelection(pendingRequests, request.id, "Deploy");
+		expect(await result).toBe("Deploy");
+	});
+
 	it("carries optional selector help text to the RPC client", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();
@@ -16,55 +74,20 @@ describe("RPC extension UI", () => {
 			["Research first", "Proceed directly"],
 			{ helpText: "Turn off Plan-First Suggestions in /settings → Tasks → Modes." },
 		);
-		const request = output.mock.calls[0]?.[0] as Record<string, unknown> | undefined;
-		if (!request || typeof request.id !== "string") {
-			throw new Error("Expected the RPC select request to carry an id");
-		}
+		const request = requireRequest(output.mock.calls[0]?.[0]);
 
-		expect(request).toEqual({
+		expect(output).toHaveBeenCalledWith({
 			type: "extension_ui_request",
 			id: request.id,
 			method: "select",
 			title: "How would you like me to continue?",
 			options: ["Research first", "Proceed directly"],
+			timeout: undefined,
 			helpText: "Turn off Plan-First Suggestions in /settings → Tasks → Modes.",
 		});
 
-		const pending = pendingRequests.get(request.id);
-		if (!pending) throw new Error("Expected a pending RPC select request");
-		pending.resolve({
-			type: "extension_ui_response",
-			id: request.id,
-			value: "Research first",
-		});
+		resolveSelection(pendingRequests, request.id, "Research first");
 		expect(await result).toBe("Research first");
-	});
-
-	it("keeps selector RPC requests unchanged when help text is absent", async () => {
-		const pendingRequests = new Map<string, PendingExtensionRequest>();
-		const output = vi.fn<(frame: object) => void>();
-		const result = requestRpcSelect(pendingRequests, output, "Continue?", ["Yes", "No"]);
-		const request = output.mock.calls[0]?.[0] as Record<string, unknown> | undefined;
-		if (!request || typeof request.id !== "string") {
-			throw new Error("Expected the RPC select request to carry an id");
-		}
-
-		expect(request).toEqual({
-			type: "extension_ui_request",
-			id: request.id,
-			method: "select",
-			title: "Continue?",
-			options: ["Yes", "No"],
-		});
-
-		const pending = pendingRequests.get(request.id);
-		if (!pending) throw new Error("Expected a pending RPC select request");
-		pending.resolve({
-			type: "extension_ui_response",
-			id: request.id,
-			value: "Yes",
-		});
-		expect(await result).toBe("Yes");
 	});
 
 	it("cancels the remote dialog when its signal aborts", async () => {

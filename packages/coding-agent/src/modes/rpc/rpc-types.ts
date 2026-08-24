@@ -373,6 +373,10 @@ export type RpcSessionEventFrame = AgentSessionEvent | RpcSubagentFrame;
 // ============================================================================
 // Extension UI Events (stdout)
 // ============================================================================
+/** Positional presentation metadata for an RPC select option. */
+export interface RpcExtensionUISelectOptionDetail {
+	description?: string;
+}
 
 /** Emitted when an extension needs user input */
 export type RpcExtensionUIRequest =
@@ -382,6 +386,7 @@ export type RpcExtensionUIRequest =
 			method: "select";
 			title: string;
 			options: string[];
+			optionDetails?: RpcExtensionUISelectOptionDetail[];
 			timeout?: number;
 			helpText?: string;
 	  }

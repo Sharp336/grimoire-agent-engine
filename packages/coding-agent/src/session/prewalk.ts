@@ -11,6 +11,7 @@ import prewalkChecklistPrompt from "../prompts/system/prewalk-checklist.md" with
 import prewalkContinuePrompt from "../prompts/system/prewalk-continue.md" with { type: "text" };
 import prewalkPlanPrompt from "../prompts/system/prewalk-plan.md" with { type: "text" };
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop } from "../thinking";
+import { isMCPToolName } from "../tools/builtin-names";
 import type { PlanProposalHandler } from "../tools/resolve";
 import { ToolError } from "../tools/tool-errors";
 import type { PlanYolo, Prewalk } from "./agent-session-types";
@@ -70,8 +71,10 @@ export interface PrewalkCoordinatorHost {
 		mountedToolNames: string[],
 		forcePromptRefresh?: boolean,
 	): Promise<void>;
+	runToolRegistryMutation<T>(mutation: () => Promise<T>): Promise<T>;
 	getActiveToolNames(): string[];
 	getEnabledToolNames(): string[];
+	getSelectedMCPToolNames(): string[];
 	getMountedXdevToolNames(): string[];
 	hasBuiltInTool(name: string): boolean;
 	getPlanModeState(): PlanModeState | undefined;
@@ -96,7 +99,7 @@ export class PrewalkCoordinator {
 	#continuePending = false;
 	#todoSeen = false;
 	#planYolo: PlanYolo | undefined;
-	#planYoloPreviousTools: string[] | undefined;
+	#planYoloPreviousNonMCPPresentation: { enabled: string[]; mounted: string[] } | undefined;
 	#planYoloArmed = false;
 
 	constructor(host: PrewalkCoordinatorHost, options: PrewalkCoordinatorOptions = {}) {
@@ -253,27 +256,36 @@ export class PrewalkCoordinator {
 	async armPlanYoloIfNeeded(): Promise<void> {
 		if (!this.#planYolo || this.#planYoloArmed) return;
 		this.#planYoloArmed = true;
-		const previousTools = this.#planYoloPreviousTools ?? this.#host.getEnabledToolNames();
-		const previousMountedTools = this.#host.getMountedXdevToolNames();
 		const previousPlanModeState = this.#host.getPlanModeState();
-		const augmentations = this.#host.hasBuiltInTool("write") ? ["write"] : [];
 		this.#host.setPlanModeState({
 			enabled: true,
 			planFilePath: this.#host.getPlanReferencePath() || "local://PLAN.md",
 			workflow: "parallel",
 		});
 		try {
-			await this.#host.setActiveToolPresentation(
-				[...new Set([...previousTools, ...augmentations])],
-				previousMountedTools,
-				true,
-			);
+			const previousPresentation = await this.#host.runToolRegistryMutation(async () => {
+				const enabledTools = this.#host.getEnabledToolNames();
+				const mountedTools = this.#host.getMountedXdevToolNames();
+				const snapshot = this.#planYoloPreviousNonMCPPresentation ?? {
+					enabled: enabledTools.filter(name => !isMCPToolName(name)),
+					mounted: mountedTools.filter(name => !isMCPToolName(name)),
+				};
+				const liveMCP = this.#host.getSelectedMCPToolNames();
+				const liveMountedMCP = mountedTools.filter(isMCPToolName);
+				const augmentations = this.#host.hasBuiltInTool("write") ? ["write"] : [];
+				await this.#host.setActiveToolPresentation(
+					[...new Set([...snapshot.enabled, ...liveMCP, ...augmentations])],
+					[...new Set([...snapshot.mounted, ...liveMountedMCP])],
+					true,
+				);
+				return snapshot;
+			});
+			this.#planYoloPreviousNonMCPPresentation = previousPresentation;
 		} catch (error) {
 			this.#host.setPlanModeState(previousPlanModeState);
 			this.#planYoloArmed = false;
 			throw error;
 		}
-		this.#planYoloPreviousTools = previousTools;
 		this.#host.setPlanProposalHandler(title => this.#finalizePlanYoloProposal(title));
 	}
 
@@ -284,11 +296,20 @@ export class PrewalkCoordinator {
 	 * instead of treating the augmented plan tool set as the new baseline.
 	 */
 	async resetPlanYoloForNewSession(): Promise<void> {
-		const previousTools = this.#planYoloPreviousTools;
+		const previousPresentation = this.#planYoloPreviousNonMCPPresentation;
 		this.#planYoloArmed = false;
 		this.#host.setPlanModeState(undefined);
-		if (previousTools) await this.#host.setActiveToolsByName(previousTools);
-		this.#planYoloPreviousTools = undefined;
+		if (previousPresentation) {
+			await this.#host.runToolRegistryMutation(async () => {
+				const liveMCP = this.#host.getSelectedMCPToolNames();
+				const liveMountedMCP = this.#host.getMountedXdevToolNames().filter(isMCPToolName);
+				await this.#host.setActiveToolPresentation(
+					[...new Set([...previousPresentation.enabled, ...liveMCP])],
+					[...new Set([...previousPresentation.mounted, ...liveMountedMCP])],
+				);
+			});
+		}
+		this.#planYoloPreviousNonMCPPresentation = undefined;
 	}
 
 	#scrubPlanNudge(liveMessages: AgentMessage[]): void {
@@ -319,16 +340,25 @@ export class PrewalkCoordinator {
 			listPlanFiles: () => listPlanFiles({ localProtocolOptions: this.#host.localProtocolOptions() }),
 		});
 		this.#host.setPlanModeState(undefined);
-		const previousTools = this.#planYoloPreviousTools;
+		const previousPresentation = this.#planYoloPreviousNonMCPPresentation;
 		try {
-			if (previousTools) await this.#host.setActiveToolsByName(previousTools);
+			if (previousPresentation) {
+				await this.#host.runToolRegistryMutation(async () => {
+					const liveMCP = this.#host.getSelectedMCPToolNames();
+					const liveMountedMCP = this.#host.getMountedXdevToolNames().filter(isMCPToolName);
+					await this.#host.setActiveToolPresentation(
+						[...new Set([...previousPresentation.enabled, ...liveMCP])],
+						[...new Set([...previousPresentation.mounted, ...liveMountedMCP])],
+					);
+				});
+			}
 		} catch (error) {
 			this.#host.setPlanModeState(state);
 			throw error;
 		}
 		this.#host.setPlanProposalHandler(null);
 		this.#planYolo = undefined;
-		this.#planYoloPreviousTools = undefined;
+		this.#planYoloPreviousNonMCPPresentation = undefined;
 		await this.#host.setModelTemporary(planYolo.target, planYolo.thinkingLevel, { ephemeral: true });
 		this.#host.emitNotice(
 			"info",

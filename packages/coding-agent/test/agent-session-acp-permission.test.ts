@@ -5,7 +5,7 @@
  * `ClientBridge.requestPermission`, while regular file-editing tools keep the same no-approval
  * behavior they have in the TUI.
  */
-import { afterEach, beforeEach, expect, it, spyOn } from "bun:test";
+import { afterAll, afterEach, beforeAll, expect, it, spyOn } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockModelOptions } from "@oh-my-pi/pi-ai/providers/mock";
@@ -156,13 +156,16 @@ async function createSessionWithMockModel(
 	return sess;
 }
 
-beforeEach(() => {
+beforeAll(() => {
 	tempDir = TempDir.createSync("@pi-acp-permission-test-");
 });
 
 afterEach(async () => {
 	await session?.dispose();
 	session = undefined;
+});
+
+afterAll(async () => {
 	await tempDir.remove();
 });
 
@@ -181,6 +184,20 @@ it("allow_once: calls bridge once and executes the underlying tool", async () =>
 	const wrappedBash = session.agent.state.tools.find(t => t.name === "bash");
 
 	await wrappedBash!.execute("call-1", { command: "echo hi" }, undefined, undefined as never, undefined as never);
+
+	expect(permissionSpy).toHaveBeenCalledTimes(1);
+	expect(bashTool.executeCalls).toBe(1);
+});
+
+it("eval bridge dispatch uses the same ACP gate as a direct tool call", async () => {
+	const bashTool = makeFakeTool("bash");
+	const bridge = makeBridge({ outcome: "selected", optionId: "allow_once", kind: "allow_once" });
+	const permissionSpy = spyOn(bridge, "requestPermission");
+	session = await createSession([bashTool], bridge);
+
+	await session.setActiveToolsByName(["bash"]);
+	const bridgedBash = session.getToolForEvalBridge("bash");
+	await bridgedBash!.execute("call-bridge", { command: "echo hi" }, undefined, undefined as never, undefined as never);
 
 	expect(permissionSpy).toHaveBeenCalledTimes(1);
 	expect(bashTool.executeCalls).toBe(1);
