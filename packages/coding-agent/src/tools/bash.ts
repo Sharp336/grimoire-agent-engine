@@ -1009,8 +1009,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					nextChunkDelivery = 0;
 					if (settledCompletion) return settledCompletion;
 					if (delivery) {
+						const foregroundStreamProvenance = progressSampler?.streamProvenance;
 						progressSampler?.resetDisplay();
-						manager.activateProgressDelivery(jobId, delivery);
+						manager.activateProgressDelivery(jobId, delivery, foregroundStreamProvenance);
 						if (settledCompletion) return settledCompletion;
 					}
 					return { kind: "promoted", foregroundPreview };

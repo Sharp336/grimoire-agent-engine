@@ -261,6 +261,42 @@ describe("bash progress parameter", () => {
 		await manager.dispose();
 	}, 10_000);
 
+	test("records foreground-only output provenance when auto-promoted", async () => {
+		const manager = new AsyncJobManager({});
+		const progress: string[] = [];
+		manager.registerProgressSink("Main", {
+			deliver: (_jobId, text) => {
+				progress.push(text);
+			},
+		});
+		manager.registerDeliverySink("Main", () => {});
+		const tool = new BashTool(
+			makeSession(manager, {
+				"bash.autoBackground.thresholdMs": 2_000,
+				"bash.asyncAuto.inlineGraceMs": 200,
+			}),
+		);
+
+		const result = await tool.execute("auto-promote-foreground-only", {
+			command: "printf 'foreground-only\\n'; sleep 0.5",
+			async: "auto",
+			progress: "wake",
+		});
+
+		expect(result.details?.async?.state).toBe("running");
+		expect(result.content).toContainEqual(
+			expect.objectContaining({ type: "text", text: expect.stringContaining("foreground-only") }),
+		);
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 10 });
+
+		const completedJob = manager.getJob(result.details?.async?.jobId ?? "");
+		expect(completedJob?.terminalTextProvenance).toBe("progress");
+		expect(completedJob?.progressDeliveredCount).toBe(1);
+		expect(progress).toEqual([]);
+		await manager.dispose();
+	}, 10_000);
+
 	test("promotes after a mirror artifact failure instead of waiting for command exit", async () => {
 		using tempDir = TempDir.createSync("@omp-bash-auto-artifact-failure-");
 		const releasePath = path.join(tempDir.path(), "release");
@@ -340,8 +376,8 @@ describe("bash progress parameter", () => {
 			deliveriesResumed.resolve();
 		};
 		const activateProgressDelivery = manager.activateProgressDelivery.bind(manager);
-		manager.activateProgressDelivery = (jobId, delivery) => {
-			const activated = activateProgressDelivery(jobId, delivery);
+		manager.activateProgressDelivery = (jobId, delivery, foregroundStreamProvenance) => {
+			const activated = activateProgressDelivery(jobId, delivery, foregroundStreamProvenance);
 			queueMicrotask(() => {
 				postBoundaryCallbackRan = true;
 				void reportPreview?.("foreground\npost-boundary\n");

@@ -83,6 +83,11 @@ export class ProgressLines {
 		return this.#epoch;
 	}
 
+	get streamProvenance(): ProgressStreamProvenance | undefined {
+		if (this.#streamCodeUnits === 0) return undefined;
+		return this.#streamProvenance();
+	}
+
 	append(chunk: string, epoch?: number): void {
 		if (epoch !== undefined && epoch !== this.#epoch) return;
 		let start = 0;
