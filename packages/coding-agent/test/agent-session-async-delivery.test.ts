@@ -374,7 +374,7 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(observedText).toContain("FRESH SESSION PROCESS EVENT");
 	});
 
-	it("fences process progress and completions while resetting the session context", async () => {
+	it("preserves monitors after a failed fork and fences them across context reset", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
 		const agent = new Agent({
@@ -401,6 +401,12 @@ describe("AgentSession owner-routed async delivery", () => {
 			unregisterCleanup();
 		});
 		unregisterCleanup = session.registerSessionChangeCallback(cleanupRegistration);
+		const fork = vi.spyOn(sessionManager, "fork").mockResolvedValue(undefined);
+		await expect(session.fork()).resolves.toBe(false);
+		expect(sessionManager.getSessionId()).toBe(contextSessionId);
+		expect(cleanupRegistration).not.toHaveBeenCalled();
+		expect(staleRegistrationOpen).toBe(true);
+		fork.mockRestore();
 		const oldMonitorEpoch = session.captureLaunchProgressEpoch();
 		session.setLaunchMonitorActive("monitor-reset", "ambient", true, oldMonitorEpoch);
 		const owner = sessionManager.getSessionId();

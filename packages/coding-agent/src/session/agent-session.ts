@@ -7327,7 +7327,6 @@ export class AgentSession {
 				return false;
 			}
 		}
-		using _launchProgressBoundary = this.#beginLaunchProgressBoundary();
 
 		await this.#bash.flushPending();
 		// Flush current session to ensure all entries are written
@@ -7352,6 +7351,7 @@ export class AgentSession {
 				this.#bash.finishSessionTransition(bashTransition, false);
 				return false;
 			}
+			using _launchProgressBoundary = this.#beginLaunchProgressBoundary();
 			this.#bash.markSessionTransition(bashTransition);
 			this.#bash.finishSessionTransition(bashTransition, true);
 			// The fork clones the transcript and keeps this recovery state running

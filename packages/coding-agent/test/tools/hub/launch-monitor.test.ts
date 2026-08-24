@@ -59,6 +59,7 @@ interface MonitorHarness {
 	disposeCallbacks: Array<() => void>;
 	contextBoundaryCallbacks: Set<() => void>;
 	getOutputSink(): ((notification: DaemonMonitorNotification) => void | Promise<void>) | undefined;
+	getCompletionSink(): ((notification: DaemonCompletionNotification) => void | Promise<void>) | undefined;
 	getSubscription(): DaemonOutputSubscription | undefined;
 	unregisterCount(): number;
 	registrationCount(): number;
@@ -82,12 +83,18 @@ function createHarness(
 	const disposeCallbacks: Array<() => void> = [];
 	const contextBoundaryCallbacks = new Set<() => void>();
 	let outputSink: ((notification: DaemonMonitorNotification) => void | Promise<void>) | undefined;
+	let completionSink: ((notification: DaemonCompletionNotification) => void | Promise<void>) | undefined;
 	let subscription: DaemonOutputSubscription | undefined;
 	let unregisters = 0;
 	const registrations = new Set<string>();
 	const client = {
 		projectDir: process.cwd(),
-		onCompletion: () => () => {},
+		onCompletion: (_owner: string, sink: (notification: DaemonCompletionNotification) => void | Promise<void>) => {
+			completionSink = sink;
+			return () => {
+				if (completionSink === sink) completionSink = undefined;
+			};
+		},
 		onOutput: (
 			registered: DaemonOutputSubscription,
 			sink: (notification: DaemonMonitorNotification) => void | Promise<void>,
@@ -161,6 +168,7 @@ function createHarness(
 		contextBoundaryCallbacks,
 		epochs,
 		getOutputSink: () => outputSink,
+		getCompletionSink: () => completionSink,
 		getSubscription: () => subscription,
 		unregisterCount: () => unregisters,
 		registrationCount: () => registrations.size,
@@ -895,6 +903,7 @@ describe("hub process output monitoring", () => {
 		expect(harness.unregisterCount()).toBe(1);
 		expect(harness.registrationCount()).toBe(0);
 		expect(harness.getOutputSink()).toBeUndefined();
+		expect(harness.getCompletionSink()).toBeUndefined();
 		expect(harness.contextBoundaryCallbacks.size).toBe(0);
 		expect(harness.active.at(-1)).toEqual({ monitorId: subscription.id, delivery: "wake", active: false });
 		expect(harness.requests.some(operation => operation.op === "stop")).toBeFalse();
