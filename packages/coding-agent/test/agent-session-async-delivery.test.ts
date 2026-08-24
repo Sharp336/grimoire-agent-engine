@@ -374,6 +374,183 @@ describe("AgentSession owner-routed async delivery", () => {
 		expect(observedText).toContain("FRESH SESSION PROCESS EVENT");
 	});
 
+	it("keeps launch subscriptions usable across switch rollback and commits their boundary on retry", async () => {
+		using tempDir = TempDir.createSync("@omp-launch-progress-switch-rollback-");
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
+		sessionManager.appendMessage({ role: "user", content: "old session", timestamp: 1 });
+		await sessionManager.flush();
+		const previousSessionFile = sessionManager.getSessionFile();
+		if (!previousSessionFile) throw new Error("Expected previous session file");
+		const previousOwner = sessionManager.getSessionId();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+		});
+
+		const targetManager = SessionManager.create(tempDir.path(), tempDir.path());
+		targetManager.appendMessage({ role: "user", content: "target session", timestamp: 2 });
+		await targetManager.flush();
+		const targetFile = targetManager.getSessionFile();
+		if (!targetFile) throw new Error("Expected target session file");
+		await targetManager.close();
+
+		const outputCleanup = vi.fn();
+		const completionCleanup = vi.fn();
+		session.registerSessionChangeCallback(outputCleanup);
+		session.registerSessionChangeCallback(completionCleanup);
+		const previousEpoch = session.captureLaunchProgressEpoch();
+		const queueLaunchCompletion = session.queueLaunchCompletion.bind(session) as (
+			notification: DaemonCompletionNotification,
+			epoch?: number,
+		) => Promise<void>;
+		let rollbackCompletion: Promise<void> | undefined;
+		const failure = new Error("synthetic target load failure");
+		vi.spyOn(sessionManager, "setSessionFile").mockImplementationOnce(async () => {
+			session.queueLaunchProgress(
+				{
+					event: "daemon-output",
+					monitorId: "rollback-monitor",
+					name: "rollback-process",
+					daemonId: "rollback-daemon",
+					seq: 1,
+					text: "ROLLBACK PROCESS EVENT",
+					batchKind: "progress",
+					suppressedEvents: 0,
+				},
+				"ambient",
+				Date.now(),
+				previousEpoch,
+			);
+			rollbackCompletion = queueLaunchCompletion(
+				{
+					event: "daemon-completed",
+					completionId: "rollback-completion",
+					owner: previousOwner,
+					daemon: {
+						name: "rollback-process",
+						id: "rollback-daemon",
+						state: "exited",
+						createdAt: 1,
+						startedAt: 1,
+						exitedAt: 2,
+						exitCode: 0,
+						restartCount: 0,
+						outputBytes: 0,
+						owner: previousOwner,
+						persist: false,
+						detached: false,
+					},
+				},
+				previousEpoch,
+			);
+			throw failure;
+		});
+
+		await expect(session.switchSession(targetFile)).rejects.toBe(failure);
+		expect(session.sessionFile).toBe(previousSessionFile);
+		expect(session.captureLaunchProgressEpoch()).toBe(previousEpoch);
+		expect(outputCleanup).not.toHaveBeenCalled();
+		expect(completionCleanup).not.toHaveBeenCalled();
+		if (!rollbackCompletion) throw new Error("Expected rollback completion receipt");
+		await rollbackCompletion;
+		await session.sendUserMessage("inspect rollback");
+
+		let successfulOldCompletion: Promise<void> | undefined;
+		session.setSessionBeforeSwitchReconciler(async () => {
+			session.queueLaunchProgress(
+				{
+					event: "daemon-output",
+					monitorId: "successful-old-monitor",
+					name: "successful-old-process",
+					daemonId: "successful-old-daemon",
+					seq: 1,
+					text: "SUCCESSFUL SWITCH OLD EVENT",
+					batchKind: "progress",
+					suppressedEvents: 0,
+				},
+				"ambient",
+				Date.now(),
+				previousEpoch,
+			);
+			successfulOldCompletion = queueLaunchCompletion(
+				{
+					event: "daemon-completed",
+					completionId: "successful-old-completion",
+					owner: previousOwner,
+					daemon: {
+						name: "successful-old-process",
+						id: "successful-old-daemon",
+						state: "exited",
+						createdAt: 1,
+						startedAt: 1,
+						exitedAt: 2,
+						exitCode: 0,
+						restartCount: 0,
+						outputBytes: 0,
+						owner: previousOwner,
+						persist: false,
+						detached: false,
+					},
+				},
+				previousEpoch,
+			);
+		});
+
+		await expect(session.switchSession(targetFile)).resolves.toBe(true);
+		expect(session.sessionFile).toBe(targetFile);
+		expect(outputCleanup).toHaveBeenCalledTimes(1);
+		expect(completionCleanup).toHaveBeenCalledTimes(1);
+		expect(session.captureLaunchProgressEpoch()).toBe(previousEpoch + 1);
+		if (!successfulOldCompletion) throw new Error("Expected successful-switch completion receipt");
+		await successfulOldCompletion;
+
+		const freshEpoch = session.captureLaunchProgressEpoch();
+		session.queueLaunchProgress(
+			{
+				event: "daemon-output",
+				monitorId: "fresh-monitor",
+				name: "fresh-process",
+				daemonId: "fresh-daemon",
+				seq: 1,
+				text: "FRESH SWITCH EVENT",
+				batchKind: "progress",
+				suppressedEvents: 0,
+			},
+			"ambient",
+			Date.now(),
+			freshEpoch,
+		);
+		await session.sendUserMessage("inspect successful switch");
+
+		const observedText = mock.calls
+			.flatMap(call =>
+				call.context.messages.flatMap(message =>
+					typeof message.content === "string"
+						? [message.content]
+						: message.content.flatMap(content => (content.type === "text" ? [content.text] : [])),
+				),
+			)
+			.join("\n");
+		expect(observedText).toContain("ROLLBACK PROCESS EVENT");
+		expect(observedText).toContain("rollback-process");
+		expect(observedText).not.toContain("SUCCESSFUL SWITCH OLD EVENT");
+		expect(observedText).not.toContain("successful-old-process");
+		expect(observedText).toContain("FRESH SWITCH EVENT");
+	});
+
 	it("preserves monitors after a failed fork and fences them across context reset", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });

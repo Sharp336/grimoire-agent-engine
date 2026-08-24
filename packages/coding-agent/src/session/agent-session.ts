@@ -609,6 +609,8 @@ export class AgentSession {
 	#launchMonitorStateChanged = Promise.withResolvers<void>();
 	/** Conversation-boundary fence shared by monitored process progress and completions. */
 	#launchProgressBoundaryDepth = 0;
+	/** Defers queued launch delivery while a different-session switch is still reversible. */
+	#launchProgressTransitionDepth = 0;
 	#launchProgressEpoch = 0;
 	/**
 	 * Async-delivery generation, bumped on every session transition that evicts
@@ -1293,7 +1295,7 @@ export class AgentSession {
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
 		});
 		this.yieldQueue = new YieldQueue({
-			isStreaming: () => this.isStreaming,
+			isStreaming: () => this.isStreaming || this.#launchProgressTransitionDepth > 0,
 			injectIdle: async messages => {
 				const first = messages[0];
 				if (!first) return;
@@ -6537,6 +6539,24 @@ export class AgentSession {
 		};
 	}
 
+	#beginLaunchProgressTransition(): Disposable {
+		this.#launchProgressTransitionDepth += 1;
+		let active = true;
+		return {
+			[Symbol.dispose]: () => {
+				if (!active) return;
+				active = false;
+				this.#launchProgressTransitionDepth -= 1;
+				if (this.#launchProgressTransitionDepth === 0) {
+					// Progress/completions observed during a reversible switch stay
+					// queued. Rollback delivers them to the restored context; commit
+					// makes their old epoch stale before this flush can run.
+					this.yieldQueue.requestIdleFlush();
+				}
+			},
+		};
+	}
+
 	setLaunchMonitorActive(
 		monitorId: string,
 		_delivery: AsyncJobProgressDelivery,
@@ -8289,7 +8309,7 @@ export class AgentSession {
 		}
 
 		this.#disconnectFromAgent();
-		using _launchProgressBoundary = switchingToDifferentSession ? this.#beginLaunchProgressBoundary() : undefined;
+		using _launchProgressTransition = switchingToDifferentSession ? this.#beginLaunchProgressTransition() : undefined;
 		await this.abort({ goalReason: "internal" });
 		await this.#sessionBeforeSwitchReconciler?.();
 
@@ -8467,6 +8487,22 @@ export class AgentSession {
 			if (switchingToDifferentSession || didReloadConversationChange) {
 				this.#clearSessionScopedToolState();
 			}
+			// Load the target ledger before committing the switch: this read can
+			// reject, in which case the old launch subscriptions and epoch must
+			// remain intact for the rollback context.
+			const restoredAdvisorCosts = switchingToDifferentSession
+				? await loadAdvisorTranscriptCosts(this.sessionFile)
+				: undefined;
+
+			// Commit after the last awaited operation whose failure rolls the
+			// session back, but before reconnecting target-context activity. The
+			// provisional transition above has kept old launch deliveries queued;
+			// advancing the epoch now stales them and synchronously unregisters
+			// their old-context broker subscriptions.
+			using _launchProgressBoundary = switchingToDifferentSession ? this.#beginLaunchProgressBoundary() : undefined;
+			if (restoredAdvisorCosts) {
+				this.#advisors.restoreCost(restoredAdvisorCosts);
+			}
 			this.#reconnectToAgent();
 			try {
 				await this.#sessionSwitchReconciler?.();
@@ -8492,11 +8528,8 @@ export class AgentSession {
 			// rolled it back. The target's own advisor transcripts are the record of what
 			// it already spent, so a session with history resumes with its total instead
 			// of restarting at zero.
-			if (switchingToDifferentSession) {
-				this.#advisors.restoreCost(await loadAdvisorTranscriptCosts(this.sessionFile));
-			}
 			this.#bash.finishSessionTransition(bashTransition, true);
-			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
+			if (!switchingToDifferentSession && previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
 				this.#notifyContextBoundaryCallbacks();
 			}
 			return true;
