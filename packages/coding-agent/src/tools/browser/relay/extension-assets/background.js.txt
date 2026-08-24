@@ -212,6 +212,8 @@ function refreshHello() {
       done: Promise.resolve()
     };
     entry.done = buildHello().then((hello) => {
+      if (entry.dirty)
+        return;
       if (ws === socket && socket.readyState === WebSocket.OPEN)
         socket.send(JSON.stringify(hello));
     }).finally(() => {
