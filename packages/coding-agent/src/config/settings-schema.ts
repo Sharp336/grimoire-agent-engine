@@ -4679,6 +4679,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tools.xdevPromote": {
+		type: "array",
+		default: EMPTY_STRING_ARRAY,
+		ui: {
+			tab: "tools",
+			group: "Discovery & MCP",
+			label: "xd:// Promoted Tools",
+			description:
+				'Tools to keep top-level instead of mounting under xd:// while xd:// Tools is on (for example "lsp" or "mcp__context_resolve_library_id"). A single name or comma-separated string (for example "lsp, ast_grep") is accepted and split into the tool-name list. MCP names use the sanitized minted form (server/tool parts lowercased, non-alphanumerics replaced with underscores). Promotion only changes presentation; tools must still be enabled through their normal settings. No-op when xd:// Tools is off.',
+		},
+	},
+
 	// MCP
 	"mcp.enableProjectConfig": {
 		type: "boolean",

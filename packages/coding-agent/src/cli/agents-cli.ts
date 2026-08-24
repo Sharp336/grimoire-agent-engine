@@ -64,6 +64,9 @@ function toFrontmatter(agent: AgentDefinition): Record<string, unknown> {
 	if (agent.thinkingLevel) frontmatter.thinkingLevel = agent.thinkingLevel;
 	if (agent.output !== undefined) frontmatter.output = agent.output;
 	if (agent.blocking) frontmatter.blocking = true;
+	// `!== undefined` (not truthiness) so an explicit empty list — which clears
+	// the inherited tools.xdevPromote — survives the round-trip.
+	if (agent.xdevPromote !== undefined) frontmatter.xdevPromote = agent.xdevPromote;
 
 	return frontmatter;
 }

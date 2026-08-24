@@ -33,12 +33,14 @@ import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolLo
 import { type Tool as AiTool, jsonSchemaToTypeScript, toolWireSchema, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { type Component, Container, Text } from "@oh-my-pi/pi-tui";
 import { parseStreamingJson } from "@oh-my-pi/pi-utils";
+import { parseArrayOrCSV } from "../discovery/helpers";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { XD_URL_PREFIX } from "../internal-urls/xd-protocol";
 import { parseMCPToolName } from "../mcp/tool-bridge";
 import type { Theme } from "../modes/theme/theme";
 import { truncateHeadBytes } from "../session/streaming-output";
 import { resolveToolTier, type ToolTier } from "./approval";
+import { normalizeToolNames } from "./builtin-names";
 import { renderDefaultToolExecution } from "./default-renderer";
 import type { Tool } from "./index";
 import { replaceTabs } from "./render-utils";
@@ -76,13 +78,31 @@ export type XdevDocsMode = "inline" | "builtins" | "catalog";
 /**
  * Whether an enabled tool is presented under `xd://` (rather than top-level)
  * while the `xd://` transport is active. Discoverable tools mount unless they
- * are pinned top-level by {@link XDEV_KEEP_TOP_LEVEL} or carry the transport
- * itself ({@link XDEV_TRANSPORT_TOOLS}); essential tools never do. The caller
- * gates this on the transport being active.
+ * are pinned top-level by {@link XDEV_KEEP_TOP_LEVEL}, carry the transport
+ * itself ({@link XDEV_TRANSPORT_TOOLS}), or are user-promoted via
+ * `tools.xdevPromote` / agent `xdevPromote` frontmatter; essential tools never
+ * do. The caller gates this on the transport being active.
  */
-export function isMountableUnderXdev(tool: { name: string; loadMode?: ToolLoadMode }): boolean {
+export function isMountableUnderXdev(
+	tool: { name: string; loadMode?: ToolLoadMode },
+	promoted?: ReadonlySet<string>,
+): boolean {
 	if (tool.name in XDEV_TRANSPORT_TOOLS || tool.name in XDEV_KEEP_TOP_LEVEL) return false;
+	if (promoted?.has(tool.name)) return false;
 	return tool.loadMode === "discoverable";
+}
+
+/** Compile a `tools.xdevPromote` value into a normalized lookup. Accepts a
+ *  list or a single tool name / comma-separated string — a hand-edited scalar
+ *  like `tools.xdevPromote: lsp` promotes that tool rather than being
+ *  dropped; non-string values are ignored so bad config cannot break
+ *  mounting. Minted MCP tool names are lowercase (`createMCPToolName`), so
+ *  uppercase `mcp__` candidates are folded here — and only here — leaving
+ *  shared {@link normalizeToolName} semantics untouched for other callers. */
+export function compileXdevPromoteSet(names: readonly unknown[] | string | undefined): ReadonlySet<string> | undefined {
+	const parsed = parseArrayOrCSV(names);
+	if (!parsed) return undefined;
+	return new Set(normalizeToolNames(parsed).map(name => (/^mcp__/i.test(name) ? name.toLowerCase() : name)));
 }
 
 /** Dispatch metadata carried on write-tool details for renderer delegation. */

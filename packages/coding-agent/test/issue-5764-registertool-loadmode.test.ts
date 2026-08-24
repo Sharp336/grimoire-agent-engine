@@ -12,11 +12,12 @@ import { CustomToolAdapter } from "@oh-my-pi/pi-coding-agent/extensibility/custo
 import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { RegisteredToolAdapter } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { BUILTIN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { normalizeToolName } from "@oh-my-pi/pi-coding-agent/tools/builtin-names";
 import {
 	defaultLoadModeForToolName,
 	ESSENTIAL_BUILTIN_TOOL_NAMES,
 } from "@oh-my-pi/pi-coding-agent/tools/essential-tools";
-import { isMountableUnderXdev } from "@oh-my-pi/pi-coding-agent/tools/xdev";
+import { compileXdevPromoteSet, isMountableUnderXdev } from "@oh-my-pi/pi-coding-agent/tools/xdev";
 
 function makeSession(): ToolSession {
 	return {
@@ -40,6 +41,41 @@ describe("issue #5764: registerTool loadMode default", () => {
 		expect(isMountableUnderXdev({ name: "write", loadMode: "discoverable" })).toBe(false);
 		// A genuinely discoverable tool still mounts.
 		expect(isMountableUnderXdev({ name: "lsp", loadMode: "discoverable" })).toBe(true);
+	});
+
+	it("promotion keeps a discoverable tool top-level without touching pinned names", () => {
+		// Promoted discoverable tools never mount; unpromoted ones still do.
+		expect(isMountableUnderXdev({ name: "ast_edit", loadMode: "discoverable" }, new Set(["ast_edit"]))).toBe(false);
+		expect(isMountableUnderXdev({ name: "ast_grep", loadMode: "discoverable" }, new Set(["ast_edit"]))).toBe(true);
+		// Promotion cannot override transport/pinned names: read and write stay
+		// top-level regardless, and todo/grep stay pinned even when promoted.
+		expect(isMountableUnderXdev({ name: "write", loadMode: "discoverable" }, new Set(["write"]))).toBe(false);
+		expect(isMountableUnderXdev({ name: "todo", loadMode: "discoverable" }, new Set(["todo"]))).toBe(false);
+	});
+
+	it("tolerates malformed tools.xdevPromote config values", () => {
+		// A hand-edited scalar (`tools.xdevPromote: lsp`) promotes that single
+		// tool instead of crashing mounting; objects/numbers are dropped.
+		expect(compileXdevPromoteSet("lsp" as unknown as string[])).toEqual(new Set(["lsp"]));
+		expect(compileXdevPromoteSet("LSP, ast_grep" as unknown as string[])).toEqual(new Set(["lsp", "ast_grep"]));
+		expect(compileXdevPromoteSet({ lsp: true } as unknown as string[])).toBeUndefined();
+		expect(compileXdevPromoteSet([42] as unknown as string[])).toBeUndefined();
+		// Mixed lists keep the valid names, normalized case-insensitively.
+		expect(compileXdevPromoteSet(["LSP", 42])).toEqual(new Set(["lsp"]));
+		expect(compileXdevPromoteSet([])).toBeUndefined();
+		expect(compileXdevPromoteSet(undefined)).toBeUndefined();
+	});
+
+	it("folds uppercase mcp__ promote candidates without touching shared normalization", () => {
+		// Minted MCP tool names are lowercase; folding uppercase user input is
+		// scoped to the compiled promote set, so an UPPERCASE mcp__ entry in
+		// xdevPromote still promotes the minted name...
+		const promoted = compileXdevPromoteSet(["MCP__Context_Resolve"]);
+		expect(promoted).toEqual(new Set(["mcp__context_resolve"]));
+		expect(isMountableUnderXdev({ name: "mcp__context_resolve", loadMode: "discoverable" }, promoted)).toBe(false);
+		// ...while the same entry elsewhere (e.g. `tools:` frontmatter) does
+		// not newly match — normalizeToolName keeps upstream case semantics.
+		expect(normalizeToolName("MCP__Context_Resolve")).toBe("MCP__Context_Resolve");
 	});
 
 	it("defaults omitted loadMode to essential for essential built-in names, discoverable otherwise", () => {

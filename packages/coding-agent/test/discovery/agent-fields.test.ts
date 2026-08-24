@@ -160,6 +160,63 @@ describe("parseAgentFields", () => {
 	test("returns undefined readSummarize when field absent", () => {
 		expect(parseAgentFields({ name: "scout", description: "desc" })?.readSummarize).toBeUndefined();
 	});
+
+	test("normalizes and dedupes xdevPromote names, preserving mcp__ case", () => {
+		// Builtin names fold via the canonical map; mcp__ names pass through
+		// unchanged here — uppercase folding happens only when the promote set
+		// is compiled (compileXdevPromoteSet), not in shared normalization.
+		expect(
+			parseAgentFields({
+				name: "scout",
+				description: "desc",
+				xdevPromote: ["LSP", "mcp__Context7_Resolve", "lsp"],
+			})?.xdevPromote,
+		).toEqual(["lsp", "mcp__Context7_Resolve"]);
+	});
+
+	test("keeps uppercase mcp__ tools entries from newly matching minted names", () => {
+		// Shared `tools:` allowlist semantics are untouched: a non-builtin
+		// name passes through normalizeToolNames verbatim, so an uppercase
+		// mcp__ entry cannot start matching the lowercase minted tool name.
+		expect(parseAgentFields({ name: "scout", description: "desc", tools: ["MCP__Context_Resolve"] })?.tools).toEqual([
+			"MCP__Context_Resolve",
+			"yield",
+		]);
+	});
+
+	test("parses xdevPromote from CSV string", () => {
+		expect(
+			parseAgentFields({
+				name: "scout",
+				description: "desc",
+				xdevPromote: "lsp, mcp__context7_resolve_library_id",
+			})?.xdevPromote,
+		).toEqual(["lsp", "mcp__context7_resolve_library_id"]);
+	});
+
+	test("returns undefined xdevPromote when field absent, [] when explicitly empty", () => {
+		// Absent inherits the global tools.xdevPromote...
+		expect(parseAgentFields({ name: "scout", description: "desc" })?.xdevPromote).toBeUndefined();
+		// ...while an explicit empty value clears it ([] is distinguishable from absent).
+		expect(parseAgentFields({ name: "scout", description: "desc", xdevPromote: [] })?.xdevPromote).toEqual([]);
+		expect(parseAgentFields({ name: "scout", description: "desc", xdevPromote: "" })?.xdevPromote).toEqual([]);
+	});
+
+	test("ignores malformed xdevPromote values instead of clearing the inherited promotion", () => {
+		// false / 0 / objects are not documented empty forms; they must be
+		// treated as absent (undefined) so a parent's tools.xdevPromote
+		// survives, not as an explicit empty override.
+		expect(parseAgentFields({ name: "scout", description: "desc", xdevPromote: false })?.xdevPromote).toBeUndefined();
+		expect(parseAgentFields({ name: "scout", description: "desc", xdevPromote: 0 })?.xdevPromote).toBeUndefined();
+		expect(
+			parseAgentFields({ name: "scout", description: "desc", xdevPromote: { a: 1 } })?.xdevPromote,
+		).toBeUndefined();
+		expect(
+			parseAgentFields({ name: "scout", description: "desc", xdevPromote: [false, 1] })?.xdevPromote,
+		).toBeUndefined();
+		// Whitespace-only strings still count as the documented empty form.
+		expect(parseAgentFields({ name: "scout", description: "desc", xdevPromote: "  " })?.xdevPromote).toEqual([]);
+	});
 	test("parses prewalk from boolean frontmatter", () => {
 		expect(parseAgentFields({ name: "worker", description: "desc", prewalk: true })?.prewalk).toBe(true);
 		expect(parseAgentFields({ name: "worker", description: "desc", prewalk: false })?.prewalk).toBe(false);

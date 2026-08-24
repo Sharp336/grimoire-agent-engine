@@ -65,7 +65,7 @@ import { SecurityScanTool } from "./security-scan";
 import { supportsExternalThinking, ThinkTool } from "./think";
 import { type TodoPhase, TodoTool } from "./todo";
 import { WriteTool } from "./write";
-import { isMountableUnderXdev, type XdevState } from "./xdev";
+import { compileXdevPromoteSet, isMountableUnderXdev, type XdevState } from "./xdev";
 import { YieldTool } from "./yield";
 
 export * from "../edit";
@@ -706,11 +706,12 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const xdevEnabled =
 		!restrictToolNames && session.settings.get("tools.xdev") && tools.some(tool => tool.name === "write");
 	const mountBuiltinTools = requestedTools === undefined;
+	const xdevPromoted = compileXdevPromoteSet(session.settings.get("tools.xdevPromote"));
 	if (xdevEnabled) {
 		const mountedNames = new Set<string>();
 		const kept: Tool[] = [];
 		for (const tool of tools) {
-			const mountable = mountBuiltinTools && isMountableUnderXdev(tool) && tool.name in BUILTIN_TOOLS;
+			const mountable = mountBuiltinTools && isMountableUnderXdev(tool, xdevPromoted) && tool.name in BUILTIN_TOOLS;
 			if (mountable) mountedNames.add(tool.name);
 			else kept.push(tool);
 		}

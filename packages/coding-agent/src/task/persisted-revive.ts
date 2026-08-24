@@ -81,12 +81,15 @@ export function createPersistedSubagentReviverFactory(
 			taskDepth++;
 			parentId = registry.get(parentId)?.parentId;
 		}
-		// Rebuild the same advisor opt-in the original spawn resolved: `"on"` =
-		// advisor-role model, anything else = the explicit pattern stamped onto
-		// this session's `modelRoles.advisor`. Absent = unadvised (the
-		// createSubagentSettings default).
 		const subagentSettings = createSubagentSettings(ctx.settings, {
 			...(init.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
+			// `undefined` (absent) inherits the global tools.xdevPromote; an
+			// explicitly empty list clears it, remounting everything under xd://.
+			...(init.xdevPromote !== undefined ? { "tools.xdevPromote": init.xdevPromote } : undefined),
+			// Rebuild the same advisor opt-in the original spawn resolved: `"on"` =
+			// advisor-role model, anything else = the explicit pattern stamped onto
+			// this session's `modelRoles.advisor`. Absent = unadvised (the
+			// createSubagentSettings default).
 			...(init.advisor
 				? {
 						"advisor.enabled": true,
