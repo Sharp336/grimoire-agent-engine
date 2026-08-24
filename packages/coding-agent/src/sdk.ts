@@ -1727,6 +1727,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			toolRegistry,
 			hasUI: options.hasUI ?? false,
 			canPromptUser: options.interactivePrompts ?? options.hasUI ?? false,
+			processProgressMode: "session",
 			getApiKey: options.getApiKey,
 			get additionalDirectories() {
 				return sessionManager.getAdditionalDirectories();
@@ -1794,9 +1795,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			recordEvalSubagentUsage: output => sessionManager.recordEvalSubagentOutput(output),
 			getClientBridge: () => session?.clientBridge,
 			queueDeferredDiagnostics: entry => session?.yieldQueue.enqueue(LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE, entry),
-			queueLaunchCompletion: notification =>
-				session?.queueLaunchCompletion(notification) ??
+			queueLaunchCompletion: (notification, epoch) =>
+				session?.queueLaunchCompletion(notification, epoch) ??
 				Promise.reject(new Error("Session unavailable for launch completion delivery")),
+			captureLaunchProgressEpoch: () => session?.captureLaunchProgressEpoch() ?? 0,
+			queueLaunchProgress: (notification, delivery, startedAt, epoch, artifactId) =>
+				session?.queueLaunchProgress(notification, delivery, startedAt, epoch, artifactId),
+			discardLaunchProgress: (monitorId, epoch) => session?.discardLaunchProgress(monitorId, epoch),
+			setLaunchMonitorActive: (monitorId, delivery, active, epoch) =>
+				session?.setLaunchMonitorActive(monitorId, delivery, active, epoch),
 			registerDisposeCallback: callback => {
 				disposeCallbacks.add(callback);
 				return () => disposeCallbacks.delete(callback);
@@ -3052,6 +3059,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				),
 				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0),
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
+				// Gate on both built-in provenance and the live active-tool projection.
+				// An extension can replace a same-named built-in (see the
+				// wrappedExtensionTools override loop above), while runtime activation can
+				// remove a real built-in. In either case the async:"auto"/progress guidance
+				// must not describe a tool schema the model cannot currently call.
+				asyncProgress: {
+					bash:
+						settings.get("async.enabled") &&
+						scopedAsyncJobManager !== undefined &&
+						builtInRegistryToolNames.has("bash") &&
+						toolNames.includes("bash"),
+					hub: settings.get("launch.enabled") && builtInRegistryToolNames.has("hub") && toolNames.includes("hub"),
+				},
 				secretsEnabled,
 				workspaceTree: workspaceTreePromise,
 				includeWorkspaceTree,
@@ -3483,13 +3503,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			},
 			hasEditTool: true,
 			requireYieldTool: false,
+			processProgressMode: "unavailable",
 			getSessionId: () => {
 				const id = sessionManager.getSessionId?.();
 				return id ? `${id}-advisor` : null;
 			},
-			queueLaunchCompletion: notification =>
-				session?.queueLaunchCompletion(notification) ??
+			queueLaunchCompletion: (notification, epoch) =>
+				session?.queueLaunchCompletion(notification, epoch) ??
 				Promise.reject(new Error("Session unavailable for launch completion delivery")),
+			captureLaunchProgressEpoch: () => session?.captureLaunchProgressEpoch() ?? 0,
+			queueLaunchProgress: (notification, delivery, startedAt, epoch, artifactId) =>
+				session?.queueLaunchProgress(notification, delivery, startedAt, epoch, artifactId),
+			discardLaunchProgress: (monitorId, epoch) => session?.discardLaunchProgress(monitorId, epoch),
+			setLaunchMonitorActive: (monitorId, delivery, active, epoch) =>
+				session?.setLaunchMonitorActive(monitorId, delivery, active, epoch),
 			getAgentId: () => "advisor",
 			// The primary's availability signals are wrong for advisors: their tool
 			// slate is filtered separately at runtime (default read/grep/glob, no

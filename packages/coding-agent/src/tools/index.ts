@@ -2,7 +2,7 @@ import type { Clipboard, InMemorySnapshotStore } from "@oh-my-pi/hashline";
 import type { AgentOptions, AgentTelemetryConfig, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { FetchImpl, ImageContent, Model, ServiceTierByFamily, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { AsyncJobManager } from "../async/job-manager";
+import type { AsyncJobManager, AsyncJobProgressDelivery } from "../async/job-manager";
 import type { Rule } from "../capability/rule";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
@@ -16,7 +16,7 @@ import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
-import type { DaemonCompletionNotification } from "../launch/protocol";
+import type { DaemonCompletionNotification, DaemonOutputNotification } from "../launch/protocol";
 import { LspTool } from "../lsp";
 import type { MCPManager } from "../mcp";
 import type { MnemopiSessionState } from "../mnemopi/state";
@@ -154,6 +154,8 @@ export interface DeferredDiagnosticsEntry {
 }
 
 /** Session context for tool factories */
+export type ProcessProgressMode = "session" | "unavailable";
+
 export interface ToolSession {
 	/** Current working directory */
 	cwd: string;
@@ -163,6 +165,13 @@ export interface ToolSession {
 	hasUI: boolean;
 	/** Whether `ask` can reach a human. Defaults to `hasUI`. */
 	canPromptUser?: boolean;
+	/**
+	 * Delivery surface for supervised-process progress. `session` routes monitor
+	 * events through this ToolSession's own queue; `unavailable` forbids monitored
+	 * start/monitor operations while leaving unmonitored process operations intact.
+	 * An omitted mode is treated as unavailable.
+	 */
+	processProgressMode?: ProcessProgressMode;
 	/** Whether this session has begun disposal. */
 	isDisposed?: () => boolean;
 	/**
@@ -398,11 +407,25 @@ export interface ToolSession {
 
 	/** Queue a hidden message to be injected at the next agent turn. */
 	queueDeferredMessage?(message: CustomMessage): void;
-	/** Queue a broker supervised-process completion for the owning session. */
-	queueLaunchCompletion?(notification: DaemonCompletionNotification): Promise<void>;
+	/** Queue a broker supervised-process completion for the owning session under its captured launch epoch. */
+	queueLaunchCompletion?(notification: DaemonCompletionNotification, epoch: number): Promise<void>;
+	/** Capture the session generation that owns a supervised-process incarnation. */
+	captureLaunchProgressEpoch?(): number;
+	/** Queue a live supervised-process output batch for the owning session. */
+	queueLaunchProgress?(
+		notification: DaemonOutputNotification,
+		delivery: AsyncJobProgressDelivery,
+		startedAt: number,
+		epoch: number,
+		artifactId?: string,
+	): void;
+	/** Discard queued process progress produced by a detached broker output registration. */
+	discardLaunchProgress?(monitorId: string, epoch: number): void;
+	/** Track live monitors so subagent quiescence waits for their terminal event. */
+	setLaunchMonitorActive?(monitorId: string, delivery: AsyncJobProgressDelivery, active: boolean, epoch: number): void;
 	/** Register cleanup that runs when this session is disposed; returns a handle that removes the cleanup. */
 	registerDisposeCallback?(callback: () => void): (() => void) | void;
-	/** Register cleanup that runs when this ToolSession adopts a different session ID. */
+	/** Register cleanup that runs when this ToolSession crosses a conversation or session boundary. */
 	registerSessionChangeCallback?(callback: () => void): (() => void) | void;
 	/** Queue late LSP diagnostics (arrived after an edit/write returned) to be shown
 	 *  in the transcript and delivered to the model at the next yield, like background
