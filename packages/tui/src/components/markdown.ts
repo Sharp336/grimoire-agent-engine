@@ -1825,6 +1825,7 @@ export class Markdown implements Component {
 		this.#cachedWidth = undefined;
 		this.#cachedLines = undefined;
 	}
+
 	get transientRenderCache(): boolean {
 		return this.#transientRenderCache;
 	}
