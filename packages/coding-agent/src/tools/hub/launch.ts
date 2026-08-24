@@ -364,6 +364,7 @@ async function registerOutputSink(
 				bindDaemon,
 				retain: async () => {
 					if (settled) return;
+					await registration.ready;
 					settled = true;
 					pendingLeases--;
 					if (captureLaunchProgressEpoch() !== registration.epoch) {

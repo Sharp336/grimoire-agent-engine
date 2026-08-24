@@ -217,6 +217,34 @@ describe("hub process output monitoring", () => {
 		expect(harness.epochs).toEqual([17, 17]);
 	});
 
+	it("rolls back a monitored start when subscription publication fails after launch", async () => {
+		const publication = Promise.withResolvers<void>();
+		const harness = createHarness(undefined, publication.promise);
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
+
+		const starting = executeLaunch(harness.session, {
+			op: "start",
+			name: daemon.name,
+			application: process.execPath,
+			progress: "wake",
+		});
+		await drainMicrotasks();
+		expect(harness.requests.map(operation => operation.op)).toEqual(["ping", "start"]);
+		expect(harness.registrationCount()).toBe(1);
+
+		publication.reject(new Error("publication failed"));
+		await expect(starting).rejects.toThrow("publication failed");
+
+		expect(harness.getSubscription()).toBeUndefined();
+		expect(harness.getOutputSink()).toBeUndefined();
+		expect(harness.unregisterCount()).toBe(1);
+		expect(harness.registrationCount()).toBe(0);
+		expect(harness.active).toEqual([
+			{ monitorId: expect.any(String), delivery: "wake", active: true },
+			{ monitorId: expect.any(String), delivery: "wake", active: false },
+		]);
+	});
+
 	it("validates a monitored start before advertising its subscription", async () => {
 		const harness = createHarness();
 		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(harness.client);
