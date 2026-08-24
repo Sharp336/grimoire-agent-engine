@@ -5,6 +5,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as pluginCli from "@oh-my-pi/pi-coding-agent/cli/plugin-cli";
+import { createDownloadProgressReporter } from "@oh-my-pi/pi-coding-agent/cli/progress-reporter";
 import * as updateCli from "@oh-my-pi/pi-coding-agent/cli/update-cli";
 import {
 	buildBunInstallArgs,
@@ -744,6 +745,70 @@ describe("update-cli bun cache pruning", () => {
 	});
 });
 
+describe("update-cli download progress", () => {
+	it("renders throttled byte progress on TTY output", () => {
+		let now = 0;
+		const writes: string[] = [];
+		const progress = createDownloadProgressReporter(
+			"Downloading omp",
+			100,
+			{
+				isTTY: true,
+				write(text) {
+					writes.push(text);
+					return true;
+				},
+			},
+			() => now,
+		);
+
+		progress.update(0);
+		now = 100;
+		progress.update(50);
+		now = 1_000;
+		progress.update(50);
+		progress.update(100);
+		progress.finish();
+
+		expect(writes).toHaveLength(4);
+		expect(writes[0]).toContain("0%");
+		expect(writes[1]).toContain("50%");
+		expect(writes[2]).toContain("100B / 100B");
+		expect(writes[3]).toBe("\n");
+	});
+
+	it("emits periodic lines for non-TTY output", () => {
+		let now = 0;
+		const writes: string[] = [];
+		const progress = createDownloadProgressReporter(
+			"Downloading omp",
+			100,
+			{
+				isTTY: false,
+				write(text) {
+					writes.push(text);
+					return true;
+				},
+			},
+			() => now,
+		);
+
+		progress.update(0);
+		now = 500;
+		progress.update(50);
+		now = 1_000;
+		progress.update(50);
+		progress.update(100);
+		progress.finish();
+
+		expect(writes).toHaveLength(3);
+		expect(writes[0]).toContain("0%");
+		expect(writes[1]).toContain("50%");
+		expect(writes[2]).toContain("100B / 100B");
+		expect(writes.every(write => write.endsWith("\n"))).toBe(true);
+	});
+});
+
 describe("update-cli release binary integrity", () => {
 	const tag = "v17.1.2";
 	const binaryName = "omp-linux-x64";
@@ -768,6 +833,46 @@ describe("update-cli release binary integrity", () => {
 			],
 		};
 	}
+	it("reports binary download progress during an update", async () => {
+		const dir = await makeTempDir();
+		const targetPath = path.join(dir, binaryName);
+		const installed = "#!/bin/sh\necho omp/17.0.8\n";
+		const nextBinary = "#!/bin/sh\necho omp/17.1.2\n";
+		const nextDigest = `sha256:${createHash("sha256").update(nextBinary).digest("hex")}`;
+		await Bun.write(targetPath, installed);
+		await fs.chmod(targetPath, 0o755);
+
+		const writes: string[] = [];
+		spyOn(process.stdout, "write").mockImplementation((chunk: string | Uint8Array) => {
+			writes.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk));
+			return true;
+		});
+		const fetchImpl = async (input: string | URL | Request): Promise<Response> => {
+			const requestUrl = String(input);
+			if (requestUrl.startsWith("https://api.github.com/")) {
+				return new Response(
+					JSON.stringify(
+						releaseAsset({
+							size: Buffer.byteLength(nextBinary),
+							digest: nextDigest,
+						}),
+					),
+				);
+			}
+			if (requestUrl === url) return new Response(nextBinary);
+			throw new Error(`Unexpected request: ${requestUrl}`);
+		};
+
+		await updateViaBinaryAt(targetPath, "17.1.2", {
+			binaryName,
+			fetchImpl,
+			verifyInstalledVersion: async () => ({ ok: true, actual: "17.1.2", path: targetPath }),
+		});
+
+		const output = writes.join("");
+		expect(output).toContain(`Downloading ${binaryName}`);
+		expect(output).toContain("100%");
+	});
 
 	it("selects an uploaded asset with a valid SHA-256 digest", () => {
 		expect(resolveReleaseBinaryAsset(releaseAsset(), tag, binaryName)).toEqual({
@@ -810,6 +915,7 @@ describe("update-cli release binary integrity", () => {
 	it("writes a download only after its size and digest match", async () => {
 		const dir = await makeTempDir();
 		const targetPath = path.join(dir, binaryName);
+		const progress: number[] = [];
 
 		await downloadVerifiedBinary({
 			url,
@@ -817,10 +923,12 @@ describe("update-cli release binary integrity", () => {
 			expectedSize: Buffer.byteLength(content),
 			expectedDigest: digest,
 			fetchImpl: async () => new Response(content),
+			onProgress: received => progress.push(received),
 		});
 
 		expect(await Bun.file(targetPath).text()).toBe(content);
 		expect((await fs.stat(targetPath)).mode & 0o777).toBe(0o755);
+		expect(progress.at(-1)).toBe(Buffer.byteLength(content));
 	});
 
 	it("aborts the response stream as soon as it exceeds the expected size", async () => {
