@@ -22,7 +22,7 @@ describe("Command Code provider", () => {
 	});
 
 	test("discovers one catalog while assigning the correct per-model base URL", async () => {
-		const fetch = (async (input: RequestInfo | URL) => {
+		const fetch = (async (input: unknown) => {
 			expect(String(input)).toBe("https://api.commandcode.ai/provider/v1/models");
 			return new Response(
 				JSON.stringify({
