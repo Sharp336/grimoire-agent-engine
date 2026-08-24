@@ -22,6 +22,7 @@ import {
 	unsupportedProxyMessage,
 	withTimeoutSignal,
 } from "../utils/fetch-timeout";
+import { createDownloadProgressReporter } from "./progress-reporter";
 
 const REPO = "can1357/oh-my-pi";
 const PACKAGE = "@oh-my-pi/pi-coding-agent";
@@ -276,6 +277,7 @@ export interface VerifiedBinaryDownloadOptions {
 	expectedSize: number;
 	expectedDigest: string;
 	fetchImpl?: Fetch;
+	onProgress?: (received: number) => void;
 }
 
 /**
@@ -316,6 +318,7 @@ export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOpti
 				return;
 			}
 			hash.update(chunk);
+			options.onProgress?.(size);
 			callback(null, chunk);
 		},
 	});
@@ -337,6 +340,28 @@ export async function downloadVerifiedBinary(options: VerifiedBinaryDownloadOpti
 		}
 		if (isUnsupportedProxyError(err)) throw new Error(unsupportedProxyMessage(), { cause: err });
 		throw err;
+	}
+}
+
+async function downloadReleaseBinary(
+	asset: ReleaseBinaryAsset,
+	targetPath: string,
+	binaryName: string,
+	fetchImpl?: Fetch,
+): Promise<void> {
+	const progress = createDownloadProgressReporter(`Downloading ${binaryName}`, asset.size);
+	progress.update(0);
+	try {
+		await downloadVerifiedBinary({
+			url: asset.url,
+			targetPath,
+			expectedSize: asset.size,
+			expectedDigest: asset.digest,
+			fetchImpl,
+			onProgress: progress.update,
+		});
+	} finally {
+		progress.finish();
 	}
 }
 
@@ -1693,14 +1718,7 @@ export async function updateViaBinaryAt(
 	const tempPath = `${targetPath}.${attempt}.new`;
 	const backupPath = `${targetPath}.${attempt}.bak`;
 	const asset = await getReleaseBinaryAsset(expectedVersion, binaryName, options.fetchImpl, options.githubToken);
-	console.log(chalk.dim(`Downloading ${binaryName}…`));
-	await downloadVerifiedBinary({
-		url: asset.url,
-		targetPath: tempPath,
-		expectedSize: asset.size,
-		expectedDigest: asset.digest,
-		fetchImpl: options.fetchImpl,
-	});
+	await downloadReleaseBinary(asset, tempPath, binaryName, options.fetchImpl);
 	console.log(chalk.dim(`Verified ${asset.digest}`));
 
 	// Serialize the target swap and stale-artifact sweep per target so two
@@ -1778,14 +1796,7 @@ export async function updateViaShimTakeover(
 	const attempt = `${Date.now()}.${process.pid}.${updateAttemptSeq++}`;
 	const tempPath = `${exePath}.${attempt}.new`;
 	const asset = await getReleaseBinaryAsset(expectedVersion, binaryName, options.fetchImpl, options.githubToken);
-	console.log(chalk.dim(`Downloading ${binaryName}…`));
-	await downloadVerifiedBinary({
-		url: asset.url,
-		targetPath: tempPath,
-		expectedSize: asset.size,
-		expectedDigest: asset.digest,
-		fetchImpl: options.fetchImpl,
-	});
+	await downloadReleaseBinary(asset, tempPath, binaryName, options.fetchImpl);
 	console.log(chalk.dim(`Verified ${asset.digest}`));
 	const forwarded: Array<{ launcher: string; original: string }> = [];
 	const stuck: string[] = [];
