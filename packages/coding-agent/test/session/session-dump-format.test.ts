@@ -182,6 +182,31 @@ describe("formatSessionDumpText markdown-headings transcript", () => {
 		expect(out).not.toContain("<|start|>");
 	});
 
+	it("fences system notices under a readable title without breaking on nested code fences", () => {
+		const notice = `<system-notice>
+Background job completed with:
+\`\`\`sh
+printf 'done\\n'
+\`\`\`
+</system-notice>`;
+		const out = formatSessionDumpText({
+			messages: [
+				{
+					role: "custom",
+					customType: "async-progress",
+					content: notice,
+					display: true,
+					attribution: "agent",
+					timestamp: 1,
+				},
+			],
+		});
+
+		expect(out).toContain("## System Notice: Async Progress");
+		expect(out).toContain(`\`\`\`\`xml\n${notice}\n\`\`\`\``);
+		expect(out).not.toContain("## async-progress");
+	});
+
 	it("does not nest a thinking block that already carries a literal <thinking> envelope (#2700)", () => {
 		const out = formatSessionDumpText({
 			messages: [

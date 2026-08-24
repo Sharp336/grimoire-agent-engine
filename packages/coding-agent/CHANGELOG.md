@@ -41,6 +41,10 @@
 - Added Bash async: "auto": potentially slow finite commands run inline for a grace window and promote to a background job without restarting.
 - Added collapsible async progress in the transcript: progress blocks show the latest lines behind an "… N earlier lines" marker, expand with Ctrl+O, and completion rows report exit codes with failures in red.
 
+### Changed
+
+- Session `/dump` output now labels system notices with readable titles and fences their raw payloads as XML.
+
 ### Fixed
 
 - Fixed daemon broker idle shutdown closing newly accepted clients before their authentication request could be processed under load.
