@@ -88,6 +88,11 @@ import {
 	mapAgentSessionEventToAcpSessionUpdates,
 	normalizeReplayToolArguments,
 } from "./acp-event-mapper";
+import {
+	ACP_MESSAGE_TIMESTAMP_FORMAT,
+	ACP_MESSAGE_TIMESTAMP_META_KEY,
+	toAcpMessageTimestampMeta,
+} from "./acp-message-metadata";
 import { ACP_TERMINAL_AUTH_FLAG } from "./terminal-auth";
 
 const ACP_DEFAULT_MODE_ID = "default";
@@ -175,6 +180,7 @@ type ManagedSessionRecord = {
 	liveMessageId: string | undefined;
 	liveMessageProgress: { textEmitted: boolean; thoughtEmitted: boolean } | undefined;
 	toolArgsById: Map<string, unknown>;
+	toolMessageTimestamps: Map<string, number>;
 	extensionsConfigured: boolean;
 	// Installed inside `#scheduleBootstrapUpdates` (post-race-guard); released
 	// in `#disposeSessionRecord`. Lives independent of any prompt turn.
@@ -187,6 +193,7 @@ type ManagedSessionRecord = {
 type ReplayableMessage = {
 	role: string;
 	content?: unknown;
+	timestamp?: number;
 	errorMessage?: string;
 	toolCallId?: string;
 	toolName?: string;
@@ -200,6 +207,12 @@ type ReplayableToolItem = {
 	name?: unknown;
 	arguments?: unknown;
 	input?: unknown;
+};
+
+type ReplayToolState = {
+	callIds: Set<string>;
+	argsByCallId: Map<string, unknown>;
+	timestampsByCallId: Map<string, number>;
 };
 
 type MCPConfigMap = {
@@ -656,6 +669,9 @@ export class AcpAgent implements Agent {
 			authMethods,
 			agentCapabilities: {
 				loadSession: true,
+				_meta: {
+					[ACP_MESSAGE_TIMESTAMP_META_KEY]: { format: ACP_MESSAGE_TIMESTAMP_FORMAT },
+				},
 				mcpCapabilities: {
 					http: true,
 					sse: true,
@@ -1336,6 +1352,7 @@ export class AcpAgent implements Agent {
 			liveMessageId: undefined,
 			liveMessageProgress: undefined,
 			toolArgsById: new Map(),
+			toolMessageTimestamps: new Map(),
 			extensionsConfigured: false,
 			closedError: undefined,
 			promptEventHandlers: new Set(),
@@ -1424,6 +1441,7 @@ export class AcpAgent implements Agent {
 			getMessageId: message => this.#getLiveMessageId(record, message),
 			getMessageProgress: message => this.#getLiveMessageProgress(record, message),
 			getToolArgs: toolCallId => record.toolArgsById.get(toolCallId),
+			getToolMessageTimestamp: toolCallId => record.toolMessageTimestamps.get(toolCallId),
 			cwd: record.session.sessionManager.getCwd(),
 			resolveImageData: resolveImageDataForAcp,
 		})) {
@@ -1442,6 +1460,7 @@ export class AcpAgent implements Agent {
 		}
 		if (event.type === "tool_execution_end") {
 			record.toolArgsById.delete(event.toolCallId);
+			record.toolMessageTimestamps.delete(event.toolCallId);
 		}
 		this.#clearLiveAssistantMessageAfterEvent(record, event);
 
@@ -1452,6 +1471,7 @@ export class AcpAgent implements Agent {
 			await this.#waitForAcpPromptIdle(record);
 			record.liveMessageId = undefined;
 			record.liveMessageProgress = undefined;
+			record.toolMessageTimestamps.clear();
 			this.#finishPrompt(record, {
 				stopReason: this.#resolveStopReason(event, promptTurn.cancelRequested),
 				usage: this.#buildTurnUsage(promptTurn.usageBaseline, record.session.sessionManager.getUsageStatistics()),
@@ -1500,6 +1520,7 @@ export class AcpAgent implements Agent {
 				sessionUpdate: "agent_message_chunk",
 				content: { type: "text", text },
 				messageId: record.liveMessageId,
+				...toAcpMessageTimestampMeta({ timestamp: lastAssistant.timestamp }),
 			},
 		});
 	}
@@ -1538,6 +1559,7 @@ export class AcpAgent implements Agent {
 				sessionUpdate: "agent_message_chunk",
 				content: { type: "text", text: errorMessage },
 				messageId: record.liveMessageId ?? crypto.randomUUID(),
+				...toAcpMessageTimestampMeta({ timestamp: lastAssistant.timestamp }),
 			},
 		});
 	}
@@ -1558,10 +1580,17 @@ export class AcpAgent implements Agent {
 
 	#prepareLiveAssistantMessage(record: ManagedSessionRecord, event: AgentSessionEvent): void {
 		if (
-			(event.type === "message_start" || event.type === "message_update" || event.type === "message_end") &&
-			event.message.role === "assistant" &&
-			(event.type === "message_start" || !record.liveMessageId || !record.liveMessageProgress)
+			(event.type !== "message_start" && event.type !== "message_update" && event.type !== "message_end") ||
+			event.message.role !== "assistant"
 		) {
+			return;
+		}
+		for (const content of event.message.content) {
+			if (content.type === "toolCall") {
+				record.toolMessageTimestamps.set(content.id, event.message.timestamp);
+			}
+		}
+		if (event.type === "message_start" || !record.liveMessageId || !record.liveMessageProgress) {
 			record.liveMessageId = crypto.randomUUID();
 			record.liveMessageProgress = { textEmitted: false, thoughtEmitted: false };
 		}
@@ -2229,15 +2258,17 @@ export class AcpAgent implements Agent {
 
 	async #replaySessionHistory(record: ManagedSessionRecord): Promise<void> {
 		const cwd = record.session.sessionManager.getCwd();
-		const replayedToolCallIds = new Set<string>();
-		const replayedToolCallArgs = new Map<string, unknown>();
+		const replayTools: ReplayToolState = {
+			callIds: new Set(),
+			argsByCallId: new Map(),
+			timestampsByCallId: new Map(),
+		};
 		for (const message of record.session.sessionManager.buildSessionContext().messages as ReplayableMessage[]) {
 			for (const notification of this.#messageToReplayNotifications(
 				record.session.sessionId,
 				message,
 				cwd,
-				replayedToolCallIds,
-				replayedToolCallArgs,
+				replayTools,
 			)) {
 				await this.#connection.sessionUpdate(notification);
 			}
@@ -2248,11 +2279,10 @@ export class AcpAgent implements Agent {
 		sessionId: string,
 		message: ReplayableMessage,
 		cwd: string,
-		replayedToolCallIds: Set<string>,
-		replayedToolCallArgs: Map<string, unknown>,
+		replayTools: ReplayToolState,
 	): SessionNotification[] {
 		if (message.role === "assistant") {
-			return this.#replayAssistantMessage(sessionId, message, cwd, replayedToolCallIds, replayedToolCallArgs);
+			return this.#replayAssistantMessage(sessionId, message, cwd, replayTools);
 		}
 		if (
 			message.role === "user" ||
@@ -2260,12 +2290,13 @@ export class AcpAgent implements Agent {
 			message.role === "custom" ||
 			message.role === "hookMessage"
 		) {
-			return this.#wrapReplayContent(
+			return this.#wrapReplayContent({
 				sessionId,
-				this.#extractReplayContent(message.content, undefined),
-				"user_message_chunk",
-				crypto.randomUUID(),
-			);
+				content: this.#extractReplayContent(message.content, undefined),
+				kind: "user_message_chunk",
+				messageId: crypto.randomUUID(),
+				timestamp: message.timestamp,
+			});
 		}
 		if (
 			message.role === "toolResult" &&
@@ -2281,8 +2312,9 @@ export class AcpAgent implements Agent {
 					toolName: message.toolName,
 				},
 				{
-					includeStart: !replayedToolCallIds.has(message.toolCallId),
-					toolArgs: replayedToolCallArgs.get(message.toolCallId),
+					includeStart: !replayTools.callIds.has(message.toolCallId),
+					toolArgs: replayTools.argsByCallId.get(message.toolCallId),
+					messageTimestamp: replayTools.timestampsByCallId.get(message.toolCallId) ?? message.timestamp,
 				},
 			);
 		}
@@ -2291,12 +2323,13 @@ export class AcpAgent implements Agent {
 			message.role === "pythonExecution" ||
 			message.role === "compactionSummary"
 		) {
-			return this.#wrapReplayContent(
+			return this.#wrapReplayContent({
 				sessionId,
-				this.#extractReplayContent(message.content, undefined),
-				"user_message_chunk",
-				crypto.randomUUID(),
-			);
+				content: this.#extractReplayContent(message.content, undefined),
+				kind: "user_message_chunk",
+				messageId: crypto.randomUUID(),
+				timestamp: message.timestamp,
+			});
 		}
 		return [];
 	}
@@ -2305,11 +2338,11 @@ export class AcpAgent implements Agent {
 		sessionId: string,
 		message: ReplayableMessage,
 		cwd: string,
-		replayedToolCallIds: Set<string>,
-		replayedToolCallArgs: Map<string, unknown>,
+		replayTools: ReplayToolState,
 	): SessionNotification[] {
 		const notifications: SessionNotification[] = [];
 		const messageId = crypto.randomUUID();
+		const timestampMeta = toAcpMessageTimestampMeta({ timestamp: message.timestamp });
 		if (Array.isArray(message.content)) {
 			for (const item of message.content) {
 				if (typeof item !== "object" || item === null || !("type" in item)) {
@@ -2322,6 +2355,7 @@ export class AcpAgent implements Agent {
 							sessionUpdate: "agent_message_chunk",
 							content: { type: "text", text: item.text },
 							messageId,
+							...timestampMeta,
 						},
 					});
 					continue;
@@ -2339,6 +2373,7 @@ export class AcpAgent implements Agent {
 							sessionUpdate: "agent_message_chunk",
 							content: { type: "image", data: item.data, mimeType: item.mimeType },
 							messageId,
+							...timestampMeta,
 						},
 					});
 					continue;
@@ -2352,6 +2387,7 @@ export class AcpAgent implements Agent {
 							sessionUpdate: "agent_thought_chunk",
 							content: { type: "text", text: thinking },
 							messageId,
+							...timestampMeta,
 						},
 					});
 					continue;
@@ -2363,6 +2399,9 @@ export class AcpAgent implements Agent {
 					typeof toolItem.name === "string"
 				) {
 					const args = this.#buildReplayAssistantToolArgs(toolItem);
+					if (message.timestamp !== undefined) {
+						replayTools.timestampsByCallId.set(toolItem.id, message.timestamp);
+					}
 					notifications.push(
 						...mapAgentSessionEventToAcpSessionUpdates(
 							{
@@ -2372,11 +2411,14 @@ export class AcpAgent implements Agent {
 								args,
 							},
 							sessionId,
-							{ cwd },
+							{
+								cwd,
+								getToolMessageTimestamp: toolCallId => replayTools.timestampsByCallId.get(toolCallId),
+							},
 						),
 					);
-					replayedToolCallIds.add(toolItem.id);
-					replayedToolCallArgs.set(toolItem.id, args);
+					replayTools.callIds.add(toolItem.id);
+					replayTools.argsByCallId.set(toolItem.id, args);
 				}
 			}
 		}
@@ -2387,6 +2429,7 @@ export class AcpAgent implements Agent {
 					sessionUpdate: "agent_message_chunk",
 					content: { type: "text", text: message.errorMessage },
 					messageId,
+					...timestampMeta,
 				},
 			});
 		}
@@ -2407,9 +2450,11 @@ export class AcpAgent implements Agent {
 		sessionId: string,
 		cwd: string,
 		message: Required<Pick<ReplayableMessage, "toolCallId" | "toolName">> & ReplayableMessage,
-		options: { includeStart?: boolean; toolArgs?: unknown } = {},
+		options: { includeStart?: boolean; toolArgs?: unknown; messageTimestamp?: number } = {},
 	): SessionNotification[] {
 		const args = this.#buildReplayToolArgs(message.details);
+		const getToolMessageTimestamp = (toolCallId: string): number | undefined =>
+			toolCallId === message.toolCallId ? options.messageTimestamp : undefined;
 		const startEvent: AgentSessionEvent = {
 			type: "tool_execution_start",
 			toolCallId: message.toolCallId,
@@ -2430,12 +2475,16 @@ export class AcpAgent implements Agent {
 		const notifications = mapAgentSessionEventToAcpSessionUpdates(endEvent, sessionId, {
 			cwd,
 			getToolArgs: toolCallId => (toolCallId === message.toolCallId ? options.toolArgs : undefined),
+			getToolMessageTimestamp,
 			resolveImageData: (data, _mimeType) => resolveImageDataSync(this.#blobs, data),
 		});
 		if (options.includeStart === false) {
 			return notifications;
 		}
-		return [...mapAgentSessionEventToAcpSessionUpdates(startEvent, sessionId, { cwd }), ...notifications];
+		return [
+			...mapAgentSessionEventToAcpSessionUpdates(startEvent, sessionId, { cwd, getToolMessageTimestamp }),
+			...notifications,
+		];
 	}
 
 	#buildReplayToolArgs(details: unknown): { path?: string } {
@@ -2446,18 +2495,27 @@ export class AcpAgent implements Agent {
 		return typeof value === "string" && value.length > 0 ? { path: value } : {};
 	}
 
-	#wrapReplayContent(
-		sessionId: string,
-		content: PromptRequest["prompt"],
-		kind: "agent_message_chunk" | "user_message_chunk",
-		messageId: string,
-	): SessionNotification[] {
+	#wrapReplayContent({
+		sessionId,
+		content,
+		kind,
+		messageId,
+		timestamp,
+	}: {
+		sessionId: string;
+		content: PromptRequest["prompt"];
+		kind: "agent_message_chunk" | "user_message_chunk";
+		messageId: string;
+		timestamp: number | undefined;
+	}): SessionNotification[] {
+		const timestampMeta = toAcpMessageTimestampMeta({ timestamp });
 		return content.map(block => ({
 			sessionId,
 			update: {
 				sessionUpdate: kind,
 				content: block,
 				messageId,
+				...timestampMeta,
 			},
 		}));
 	}

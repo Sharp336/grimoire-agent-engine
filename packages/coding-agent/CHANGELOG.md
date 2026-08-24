@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- ACP clients can now receive authoritative message timestamps during live streaming and session replay ([#9581](https://github.com/can1357/oh-my-pi/pull/9581) by [@AlexDochioiu](https://github.com/AlexDochioiu)).
+
 ## [18.0.4] - 2026-08-24
 
 ### Added

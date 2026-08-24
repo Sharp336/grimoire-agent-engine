@@ -11,6 +11,7 @@ import type { AgentSessionEvent } from "../../session/agent-session";
 import { resolveToCwd } from "../../tools/path-utils";
 import type { TodoStatus } from "../../tools/todo";
 import { canonicalizeMessage } from "../../utils/thinking-display";
+import { toAcpMessageTimestampMeta } from "./acp-message-metadata";
 
 interface MessageProgress {
 	textEmitted: boolean;
@@ -21,6 +22,7 @@ interface AcpEventMapperOptions {
 	getMessageId?: (message: unknown) => string | undefined;
 	getMessageProgress?: (message: unknown) => MessageProgress | undefined;
 	getToolArgs?: (toolCallId: string) => unknown;
+	getToolMessageTimestamp?: (toolCallId: string) => number | undefined;
 	resolveImageData?: (data: string, mimeType: string | undefined) => string;
 	/**
 	 * Session cwd. Tool call locations sent to ACP clients must be absolute
@@ -220,13 +222,16 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 			return mapAssistantMessageEnd(event, sessionId, options);
 		case "tool_execution_start": {
 			if (isInternalHubMessageTool(event.toolName, event.args)) return [];
-			const update = buildToolCallStartUpdate({
-				toolCallId: event.toolCallId,
-				toolName: event.toolName,
-				args: event.args,
-				intent: event.intent,
-				cwd: options.cwd,
-			});
+			const update = {
+				...buildToolCallStartUpdate({
+					toolCallId: event.toolCallId,
+					toolName: event.toolName,
+					args: event.args,
+					intent: event.intent,
+					cwd: options.cwd,
+				}),
+				...toAcpMessageTimestampMeta({ timestamp: options.getToolMessageTimestamp?.(event.toolCallId) }),
+			};
 			return [toSessionNotification(sessionId, update)];
 		}
 		case "tool_execution_update": {
@@ -240,6 +245,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 				toolCallId: event.toolCallId,
 				status: "in_progress",
 				rawOutput: event.partialResult,
+				...toAcpMessageTimestampMeta({ timestamp: options.getToolMessageTimestamp?.(event.toolCallId) }),
 			};
 			if (content.length > 0) {
 				update.content = content;
@@ -263,6 +269,7 @@ export function mapAgentSessionEventToAcpSessionUpdates(
 				toolCallId: event.toolCallId,
 				status: event.isError ? "failed" : "completed",
 				rawOutput: event.result,
+				...toAcpMessageTimestampMeta({ timestamp: options.getToolMessageTimestamp?.(event.toolCallId) }),
 			};
 			if (content.length > 0) {
 				update.content = content;
@@ -312,6 +319,7 @@ function mapAssistantMessageUpdate(
 					sessionUpdate: "agent_message_chunk",
 					content: event.assistantMessageEvent.content,
 					messageId: options.getMessageId?.(event.message),
+					...toAcpMessageTimestampMeta({ timestamp: event.message.timestamp }),
 				}),
 			];
 		case "text_delta":
@@ -363,6 +371,7 @@ function mapAssistantMessageUpdate(
 			sessionUpdate,
 			content: { type: "text", text },
 			messageId,
+			...toAcpMessageTimestampMeta({ timestamp: event.message.timestamp }),
 		}),
 	];
 }
@@ -390,6 +399,7 @@ function mapAssistantMessageEnd(
 			sessionUpdate: "agent_message_chunk",
 			content: { type: "text", text },
 			messageId,
+			...toAcpMessageTimestampMeta({ timestamp: event.message.timestamp }),
 		}),
 	];
 }
