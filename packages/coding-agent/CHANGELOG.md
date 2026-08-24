@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the Jina Reader fetch backend so `JINA_API_KEY` and stored `jina` credentials are sent as bearer auth when configured.
+
 ## [18.0.4] - 2026-08-24
 
 ### Added

@@ -1,7 +1,19 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { renderHtmlToText } from "@oh-my-pi/pi-coding-agent/tools/fetch";
 import { asGlobalFetch } from "../helpers/fetch-mock";
+
+const originalJinaApiKey = Bun.env.JINA_API_KEY;
+
+beforeEach(() => {
+	delete Bun.env.JINA_API_KEY;
+});
+
+afterEach(() => {
+	if (originalJinaApiKey === undefined) delete Bun.env.JINA_API_KEY;
+	else Bun.env.JINA_API_KEY = originalJinaApiKey;
+});
 
 /**
  * Regression test for #1449: a stalled Jina reader request must not prevent
@@ -117,6 +129,62 @@ describe("renderHtmlToText: Jina response validation", () => {
 		expect(result).toEqual({ content: markdown, ok: true, method: "jina" });
 		expect(requestHeaders?.get("accept")).toBe("text/markdown");
 		expect(requestHeaders?.get("x-no-cache")).toBe("true");
+		expect(requestHeaders?.get("authorization")).toBeNull();
+	});
+
+	it("forwards stored Jina credentials to reader requests", async () => {
+		const settings = Settings.isolated({ "providers.fetch": "jina" });
+		const markdown = `# Extracted article\n\n${"Substantive reader content. ".repeat(8)}`.trim();
+		let requestHeaders: Headers | undefined;
+		const fetchMock = asGlobalFetch((_input, init) => {
+			requestHeaders = new Headers(init?.headers);
+			return new Response(`Title: Example\nURL Source: https://example.com/article\nMarkdown Content:\n${markdown}`);
+		});
+		const storage = {
+			listAuthCredentials: () => [
+				{
+					id: 1,
+					credential: { type: "api_key", key: "stored-jina-key" },
+				},
+			],
+		} as unknown as AgentStorage;
+
+		const result = await renderHtmlToText(
+			"https://example.com/article",
+			"<html><body>short</body></html>",
+			1,
+			settings,
+			undefined,
+			storage,
+			fetchMock,
+		);
+
+		expect(result).toEqual({ content: markdown, ok: true, method: "jina" });
+		expect(requestHeaders?.get("authorization")).toBe("Bearer stored-jina-key");
+	});
+
+	it("forwards JINA_API_KEY to reader requests", async () => {
+		Bun.env.JINA_API_KEY = "env-jina-key";
+		const settings = Settings.isolated({ "providers.fetch": "jina" });
+		const markdown = `# Extracted article\n\n${"Substantive reader content. ".repeat(8)}`.trim();
+		let requestHeaders: Headers | undefined;
+		const fetchMock = asGlobalFetch((_input, init) => {
+			requestHeaders = new Headers(init?.headers);
+			return new Response(`Title: Example\nURL Source: https://example.com/article\nMarkdown Content:\n${markdown}`);
+		});
+
+		const result = await renderHtmlToText(
+			"https://example.com/article",
+			"<html><body>short</body></html>",
+			1,
+			settings,
+			undefined,
+			null,
+			fetchMock,
+		);
+
+		expect(result).toEqual({ content: markdown, ok: true, method: "jina" });
+		expect(requestHeaders?.get("authorization")).toBe("Bearer env-jina-key");
 	});
 
 	for (const { label, readerBody, headers } of [
