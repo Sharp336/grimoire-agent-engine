@@ -123,9 +123,24 @@ describe("per-server MCP tool filtering", () => {
 			args: [CHANGE_FIXTURE_PATH],
 			enabledTools: [FIRST_TOOL],
 		};
-		await manager.connectServers({ change: changeConfig }, {});
-		await manager.refreshServerTools("change");
-		await waitForRegistered(manager, []);
+		// The refresh path emits through the connection-status listeners, not
+		// the connectServers onStatus callback.
+		const statusEvents: McpConnectionStatusEvent[] = [];
+		const unsubscribe = manager.addConnectionStatusListener(event => statusEvents.push(event));
+		try {
+			await manager.connectServers({ change: changeConfig }, {});
+			// Wait for the initial connect to register alpha before refreshing:
+			// refreshServerTools no-ops while the connection is still pending.
+			await waitForRegistered(manager, [FIRST_TOOL]);
+			await manager.refreshServerTools("change");
+			await waitForRegistered(manager, []);
+			// The refresh that empties the filtered set must surface a per-server
+			// failure (consistent with the initial-connect path), not a silent
+			// empty refresh.
+			expect(statusEvents.some(e => e.type === "failed" && e.serverName === "change")).toBe(true);
+		} finally {
+			unsubscribe();
+		}
 	});
 
 	it("reports a server whose filter excludes every tool without failing the batch", async () => {

@@ -716,22 +716,14 @@ export class MCPManager {
 			for (const task of connectionTasks) {
 				const { name } = task;
 				if (task.tracked.status === "fulfilled") {
-					const value = task.tracked.value;
-					if (!value) continue;
-					const { connection, serverTools } = value;
+					if (!task.tracked.value) continue;
 					connectedServers.add(name);
-					const reconnect = () => this.reconnectServer(name);
-					const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
-					this.#replaceServerTools(name, customTools);
-					// The filter excluded every advertised tool (MCPTool.fromTools
-					// already logged the detail); surface it as a per-server error
-					// so the user sees why the server contributes no tools.
-					const filterMsg =
-						customTools.length === 0 ? mcpFilterEmptyMessage(name, task.config, serverTools.length) : null;
-					if (filterMsg) {
-						errors.set(name, filterMsg);
-						reportedErrors.add(name);
-					}
+					// The background continuation (registered before Promise.race)
+					// runs before this loop for servers that resolved within the
+					// startup window, so it already registered tools and surfaced
+					// any filter-empty failure as a `failed` status event. Nothing
+					// further to do here — re-registering would double-apply the
+					// tool filter (duplicate logs) and double-report the failure.
 				} else if (task.tracked.status === "rejected") {
 					const message =
 						task.tracked.reason instanceof Error ? task.tracked.reason.message : String(task.tracked.reason);
@@ -1184,7 +1176,21 @@ export class MCPManager {
 			try {
 				const connection = await this.#connectAndWireServer(name, config, source, reconnectEpoch);
 				logger.debug("MCP reconnected", { path: `mcp:${name}`, tools: connection.tools?.length ?? 0 });
-				this.#emitConnectionStatus({ type: "connected", serverName: name });
+				// A configured filter that excludes every advertised tool leaves
+				// the server connected with zero tools; report it as a failure
+				// (consistent with the initial-connect path) instead of a
+				// misleading "connected". #connectAndWireServer already replaced
+				// this server's tools, so an empty registry entry means the
+				// filter excluded everything.
+				const filterMsg =
+					!this.#tools.some(tool => tool.mcpServerName === name)
+						? mcpFilterEmptyMessage(name, config, connection.tools?.length ?? 0)
+						: null;
+				if (filterMsg) {
+					this.#emitConnectionStatus({ type: "failed", serverName: name, error: filterMsg });
+				} else {
+					this.#emitConnectionStatus({ type: "connected", serverName: name });
+				}
 				return connection;
 			} catch (error) {
 				if (this.#epoch !== reconnectEpoch) {
@@ -1321,6 +1327,14 @@ export class MCPManager {
 
 		// Replace tools from this server
 		this.#replaceServerTools(name, customTools);
+		// A configured filter that excludes every advertised tool leaves the
+		// server connected with zero tools; report it as a failure (consistent
+		// with the initial-connect path) instead of a silent empty refresh.
+		const filterMsg =
+			customTools.length === 0 ? mcpFilterEmptyMessage(name, connection.config, serverTools.length) : null;
+		if (filterMsg) {
+			this.#emitConnectionStatus({ type: "failed", serverName: name, error: filterMsg });
+		}
 		await this.#onToolsChanged?.(this.#tools);
 	}
 
