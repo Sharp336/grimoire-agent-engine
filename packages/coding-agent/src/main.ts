@@ -1289,14 +1289,27 @@ export async function reconcilePersistedPersona(
 	}
 	const disabledAgents = (session.settings.get("task.disabledAgents") as string[] | undefined) ?? [];
 	if (isMainSessionPersonaUsable(agent, disabledAgents)) {
+		// Snapshot/rollback mirrors the live-switch path, with one
+		// reconcile-specific difference: switchSession catches reconciler
+		// errors and still commits the target, so restoring the SOURCE
+		// persona's snapshot wholesale would leave the committed target
+		// running the source persona's tools, spawns, and prompt. Restore
+		// the snapshot's model/thinking (the target transcript's restored
+		// values) and then clear the persona-owned state to a coherent
+		// non-persona baseline instead (codex #3821198710).
 		const snapshot = snapshotPersonaSwitch(session);
 		try {
 			await applyPersonaToSession(session, agent, explicit);
 		} catch (error) {
 			try {
 				await rollbackPersonaSwitch(session, snapshot);
+				await session.restoreBaselineTools();
+				session.setSessionSpawns(null);
+				session.setPersonaAppendPrompt(undefined);
 			} catch (rollbackError) {
-				logger.warn("Failed to roll back persona reconcile", { error: String(rollbackError) });
+				logger.warn("Failed to clear persona state after reconcile failure", {
+					error: String(rollbackError),
+				});
 			}
 			throw error;
 		}

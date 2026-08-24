@@ -304,7 +304,11 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		tools = [...tools, "yield"];
 	}
 
-	// Parse spawns field (array, "*", or CSV)
+	// Parse spawns field (array, "*", or CSV). An EXPLICIT empty list (or
+	// empty string) is the disabled policy — distinct from an omitted field,
+	// which the backward-compat inference below may widen to "*" when tools
+	// includes task. `parseArrayOrCSV` collapses empty input to undefined, so
+	// preserve the empty array here (codex #3821198710).
 	let spawns: string[] | "*" | undefined;
 	if (frontmatter.spawns === "*") {
 		spawns = "*";
@@ -312,9 +316,13 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		const trimmed = frontmatter.spawns.trim();
 		if (trimmed === "*") {
 			spawns = "*";
+		} else if (trimmed === "") {
+			spawns = [];
 		} else {
 			spawns = parseArrayOrCSV(trimmed);
 		}
+	} else if (Array.isArray(frontmatter.spawns) && frontmatter.spawns.length === 0) {
+		spawns = [];
 	} else {
 		spawns = parseArrayOrCSV(frontmatter.spawns);
 	}

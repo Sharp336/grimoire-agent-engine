@@ -3137,19 +3137,25 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		const disabledAgents = (this.session.settings.get("task.disabledAgents") as string[] | undefined) ?? [];
 		if (isMainSessionPersonaUsable(agent, disabledAgents)) {
-			// Snapshot/rollback mirrors the live-switch path: a failed apply
-			// (e.g. setModelTemporary or the system-prompt rebuild rejecting)
-			// must restore the source session's persona state instead of
-			// leaving a partially applied persona in the committed target
-			// (codex #3821198710).
+			// Snapshot/rollback mirrors the live-switch path, with one
+			// reconcile-specific difference: switchSession catches reconciler
+			// errors and still commits the target, so restoring the SOURCE
+			// persona's snapshot wholesale would leave the committed target
+			// running the source persona's tools, spawns, and prompt. Restore
+			// the snapshot's model/thinking (the target transcript's restored
+			// values) and then clear the persona-owned state to a coherent
+			// non-persona baseline instead (codex #3821198710).
 			const snapshot = snapshotPersonaSwitch(this.session);
 			try {
 				await applyPersonaToSession(this.session, agent, explicit ?? EMPTY_PERSONA_OVERRIDES);
 			} catch (error) {
 				try {
 					await rollbackPersonaSwitch(this.session, snapshot);
+					await this.#clearPersonaOwnedState();
 				} catch (rollbackError) {
-					logger.warn("Failed to roll back persona reconcile", { error: String(rollbackError) });
+					logger.warn("Failed to clear persona state after reconcile failure", {
+						error: String(rollbackError),
+					});
 				}
 				throw error;
 			}

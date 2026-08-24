@@ -1102,4 +1102,54 @@ describe("InteractiveMode persona session restore", () => {
 		},
 		{ timeout: 30_000 },
 	);
+	it(
+		"clears to a coherent non-persona baseline when the persona apply fails during a session switch",
+		async () => {
+			// Wave-21 P2 (codex #3821198710): switchSession catches reconciler
+			// errors and still commits the target, so a failed persona apply
+			// must NOT leave the committed target under the SOURCE persona's
+			// snapshot (tools/spawns/prompt). The reconcile now clears the
+			// persona-owned state to a coherent non-persona baseline instead.
+			await fs.writeFile(
+				path.join(agentsDir, "persona-test.md"),
+				agentMd("persona-test", [
+					"tools: [read, write]",
+					"model: anthropic/claude-haiku-4-5",
+					"thinkingLevel: high",
+					"spawns: [scout]",
+				]),
+			);
+			const sessionFile = path.join(tempHome, "persona.jsonl");
+			await writePersonaSession(sessionFile, projectDir, { name: "persona-test" });
+			// Target session with the same persona (mode "agent").
+			const targetFile = path.join(tempHome, "target.jsonl");
+			await writePersonaSession(targetFile, projectDir, { name: "persona-test" });
+
+			const created = await resumePersonaSession(
+				Settings.isolated({ "compaction.enabled": false }),
+				sessionFile,
+				"persona-test",
+			);
+			mode = created.mode;
+			session = created.session;
+			await created.mode.init({ suppressWelcomeIntro: true });
+			expect(session.getSessionSpawns()).toBe("scout");
+			expect(session.getPersonaAppendPrompt()).toBe("You are persona-test.");
+
+			// The persona apply fails during the switch reconcile (the final
+			// system-prompt rebuild rejects). switchSession catches the error
+			// and still commits the target.
+			vi.spyOn(session, "refreshBaseSystemPrompt").mockRejectedValueOnce(new Error("prompt rebuild failed"));
+			await expect(session.switchSession(targetFile)).resolves.toBe(true);
+
+			// The committed target must NOT run the source persona's state:
+			// the reconcile cleared spawns/prompt and restored the baseline.
+			expect(session.getSessionSpawns()).toBeNull();
+			expect(session.getPersonaAppendPrompt()).toBeUndefined();
+			const baseline = session.getBaselineToolNames();
+			expect(baseline).toEqual(expect.arrayContaining(["read", "write", "bash"]));
+			expect(session.getEnabledToolNames()).toEqual(expect.arrayContaining(baseline!));
+		},
+		{ timeout: 30_000 },
+	);
 });

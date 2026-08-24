@@ -198,4 +198,19 @@ describe("parseAgentFields", () => {
 		expect(parseAgentFields({ name: "worker", description: "desc", advisor: "  " })?.advisor).toBeUndefined();
 		expect(parseAgentFields({ name: "worker", description: "desc" })?.advisor).toBeUndefined();
 	});
+	test("preserves an explicit empty spawns list as the disabled policy", () => {
+		// `spawns: []` must NOT be widened to "*" by the tools-includes-task
+		// backward-compat inference: an explicit empty list forbids spawning
+		// (codex #3821198710).
+		expect(parseAgentFields({ name: "worker", description: "desc", spawns: [], tools: ["task"] })?.spawns).toEqual(
+			[],
+		);
+		expect(parseAgentFields({ name: "worker", description: "desc", spawns: "", tools: ["task"] })?.spawns).toEqual(
+			[],
+		);
+		// An OMITTED spawns field with tools including task still infers "*".
+		expect(parseAgentFields({ name: "worker", description: "desc", tools: ["task"] })?.spawns).toBe("*");
+		// A non-empty list parses normally.
+		expect(parseAgentFields({ name: "worker", description: "desc", spawns: ["scout"] })?.spawns).toEqual(["scout"]);
+	});
 });
