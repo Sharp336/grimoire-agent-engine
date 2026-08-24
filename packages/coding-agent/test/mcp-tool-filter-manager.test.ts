@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
+import type { McpConnectionStatusEvent } from "@oh-my-pi/pi-coding-agent/mcp/startup-events";
 import type { MCPStdioServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { manyToolName } from "./fixtures/many-tools-mcp";
 import { FIRST_TOOL } from "./fixtures/tool-list-change-mcp";
@@ -128,12 +129,29 @@ describe("per-server MCP tool filtering", () => {
 	});
 
 	it("reports a server whose filter excludes every tool without failing the batch", async () => {
+		const events: McpConnectionStatusEvent[] = [];
 		const result = await manager.connectServers(
 			{ empty: config({ enabledTools: ["never_advertised"] }), many: config() },
 			{},
+			event => events.push(event),
 		);
-		expect(result.errors.has("empty")).toBe(true);
-		expect(result.errors.get("empty")).toMatch(/excludes all 45 advertised tools/);
+		// The filter-empty failure surfaces either synchronously in the errors
+		// map (server resolved within the 250 ms startup window) or as a
+		// background `failed` status event (server slower than the window).
+		const deadline = Date.now() + 10_000;
+		while (
+			Date.now() < deadline &&
+			!result.errors.has("empty") &&
+			!events.some(e => e.type === "failed" && e.serverName === "empty")
+		) {
+			await Bun.sleep(25);
+		}
+		const failedEvent = events.find(
+			(e): e is Extract<McpConnectionStatusEvent, { type: "failed" }> =>
+				e.type === "failed" && e.serverName === "empty",
+		);
+		const message = result.errors.get("empty") ?? failedEvent?.error;
+		expect(message).toMatch(/excludes all 45 advertised tools/);
 		// The sibling server still connects and contributes its tools.
 		await waitForRegistered(
 			manager,
