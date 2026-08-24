@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `volcengine` catalog provider for Volcengine Ark pay-as-you-go: key-scoped `/api/v3/models` discovery that drops retired and non-chat SKUs, Ark's binary `thinking: { type }` reasoning contract, and a bundled seed of the documented Doubao Seed, DeepSeek, and GLM SKUs.
+
 ## [18.0.4] - 2026-08-24
 
 ### Fixed

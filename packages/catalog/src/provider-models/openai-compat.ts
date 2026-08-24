@@ -4793,6 +4793,190 @@ export function qianfanModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 18b. Volcengine Ark
+// ---------------------------------------------------------------------------
+
+const VOLCENGINE_BASE_URL = "https://ark.cn-beijing.volces.com/api/v3";
+
+/**
+ * Ark keeps every model it has ever served in `GET /api/v3/models` and marks
+ * the dead ones through `status`: `Shutdown` rows 404 on invocation and
+ * `Retiring` rows are scheduled to. Only unmarked rows are callable, so the
+ * ~130-row catalog collapses to the live slice (~40 rows) before mapping.
+ */
+const VOLCENGINE_RETIRED_MODEL_STATUSES = new Set(["Shutdown", "Retiring"]);
+
+/**
+ * Ark tags every row with a coarse `task_type`; only text-generating rows
+ * belong in a chat catalog. Image/video/3D/embedding/ASR SKUs live on separate
+ * endpoints (`/images/generations`, `/contents/generations/tasks`, …) and 400
+ * on `/chat/completions`.
+ */
+const VOLCENGINE_CHAT_TASK_TYPES = new Set(["TextGeneration", "VisualQuestionAnswering"]);
+
+/**
+ * Ark bills in CNY and publishes no USD tariff, so per-token rates stay unset
+ * rather than baked in at an arbitrary exchange rate — the same choice the
+ * other CNY-billed first-party providers in this catalog make (`qianfan`,
+ * `zhipu-coding-plan`, `alibaba-token-plan`).
+ *
+ * Limits, modalities and the reasoning flag come from `GET /api/v3/models`
+ * (`token_limits`, `modalities.input_modalities`, `token_limits.
+ * max_reasoning_token_length`), captured 2026-08-24 against
+ * `ark.cn-beijing.volces.com`. Live discovery is authoritative and replaces
+ * this seed as soon as a key is present; the seed only keeps the descriptor's
+ * `defaultModel` resolvable on a fresh install before discovery lands.
+ */
+export const VOLCENGINE_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "doubao-seed-2-1-pro-260628",
+		name: "Doubao-Seed-2.1-pro",
+		api: "openai-completions",
+		provider: "volcengine",
+		baseUrl: VOLCENGINE_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 262_144,
+		maxTokens: 262_144,
+		thinking: { mode: "effort", efforts: [...THINKING_EFFORTS] },
+	},
+	{
+		id: "doubao-seed-2-1-turbo-260628",
+		name: "Doubao-Seed-2.1-turbo",
+		api: "openai-completions",
+		provider: "volcengine",
+		baseUrl: VOLCENGINE_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 262_144,
+		maxTokens: 262_144,
+		thinking: { mode: "effort", efforts: [...THINKING_EFFORTS] },
+	},
+	{
+		id: "doubao-seed-evolving",
+		name: "Doubao-Seed-Evolving",
+		api: "openai-completions",
+		provider: "volcengine",
+		baseUrl: VOLCENGINE_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 262_144,
+		thinking: { mode: "effort", efforts: [...THINKING_EFFORTS] },
+	},
+	{
+		id: "deepseek-v4-pro-ga-260813",
+		name: "DeepSeek-V4-Pro",
+		api: "openai-completions",
+		provider: "volcengine",
+		baseUrl: VOLCENGINE_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 393_216,
+		thinking: { mode: "effort", efforts: [...THINKING_EFFORTS] },
+	},
+	{
+		id: "glm-5-2-260617",
+		name: "GLM-5.2",
+		api: "openai-completions",
+		provider: "volcengine",
+		baseUrl: VOLCENGINE_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_048_576,
+		maxTokens: 131_072,
+		thinking: { mode: "effort", efforts: [...THINKING_EFFORTS] },
+	},
+];
+
+interface VolcengineTokenLimits {
+	context_window?: unknown;
+	max_output_token_length?: unknown;
+	max_reasoning_token_length?: unknown;
+}
+
+function volcengineTokenLimits(entry: OpenAICompatibleModelRecord): VolcengineTokenLimits {
+	return isRecord(entry.token_limits) ? (entry.token_limits as VolcengineTokenLimits) : {};
+}
+
+/** Ark rows that can actually take a `/chat/completions` call. */
+function isLiveVolcengineChatModel(entry: OpenAICompatibleModelRecord): boolean {
+	if (typeof entry.status === "string" && VOLCENGINE_RETIRED_MODEL_STATUSES.has(entry.status)) {
+		return false;
+	}
+	// Ark's older shared-weight rows (`qwen3-*`, `glm-4-5-air-*`) carry neither
+	// `task_type` nor `token_limits`, only a `features.tools` block. Accept them
+	// on that signal so discovery does not silently drop callable chat models.
+	const taskTypes = entry.task_type;
+	if (Array.isArray(taskTypes)) {
+		return taskTypes.some(task => typeof task === "string" && VOLCENGINE_CHAT_TASK_TYPES.has(task));
+	}
+	const features = isRecord(entry.features) ? entry.features : undefined;
+	return isRecord(features?.tools);
+}
+
+/**
+ * Map one Ark `/models` row onto a catalog spec. Ark reports limits under
+ * `token_limits` rather than the OpenAI-ish `context_length` /
+ * `max_completion_tokens` that {@link mapWithBundledReference} reads, and
+ * exposes reasoning support as `token_limits.max_reasoning_token_length`, so
+ * both are recovered here. Vision support follows
+ * `modalities.input_modalities`; pricing is never synthesized (see
+ * {@link VOLCENGINE_STATIC_MODELS}).
+ */
+function mapVolcengineModel(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> {
+	const model = mapWithBundledReference(entry, defaults, reference);
+	const limits = volcengineTokenLimits(entry);
+	const reasoning = toPositiveNumber(limits.max_reasoning_token_length, 0) > 0 || Boolean(reference?.reasoning);
+	return {
+		...model,
+		reasoning,
+		...(reasoning && !model.thinking && { thinking: { mode: "effort", efforts: [...THINKING_EFFORTS] } }),
+		input: isRecord(entry.modalities)
+			? toInputCapabilities((entry.modalities as { input_modalities?: unknown }).input_modalities)
+			: model.input,
+		contextWindow: toPositiveNumber(limits.context_window, model.contextWindow),
+		maxTokens: toPositiveNumber(limits.max_output_token_length, model.maxTokens),
+	};
+}
+
+export interface VolcengineModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Builds the Volcengine Ark pay-as-you-go manager. `GET /api/v3/models` is
+ * key-scoped and enumerates exactly what the account may call, so live
+ * discovery is authoritative over the bundled seed.
+ */
+export function volcengineModelManagerOptions(
+	config?: VolcengineModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "volcengine",
+		defaultBaseUrl: VOLCENGINE_BASE_URL,
+		config,
+		requireApiKey: true,
+		dynamicModelsAuthoritative: true,
+		filterModel: entry => isLiveVolcengineChatModel(entry),
+		mapModel: mapVolcengineModel,
+	});
+}
+
+// ---------------------------------------------------------------------------
 // 19. Cloudflare AI Gateway
 // ---------------------------------------------------------------------------
 

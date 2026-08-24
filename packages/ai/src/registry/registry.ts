@@ -66,6 +66,7 @@ import { umansProvider } from "./umans";
 import { veniceProvider } from "./venice";
 import { vercelAiGatewayProvider } from "./vercel-ai-gateway";
 import { vllmProvider } from "./vllm";
+import { volcengineProvider } from "./volcengine";
 import { waferServerlessProvider } from "./wafer-serverless";
 import { xaiProvider } from "./xai";
 import { xaiOauthProvider } from "./xai-oauth";
@@ -130,6 +131,7 @@ const ALL = [
 	huggingfaceProvider,
 	perplexityProvider,
 	qianfanProvider,
+	volcengineProvider,
 	veniceProvider,
 	siliconflowProvider,
 	siliconflowCnProvider,

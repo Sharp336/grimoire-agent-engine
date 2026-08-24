@@ -297,6 +297,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 	const isCerebras = modelMatchesHost(hostModel, "cerebras");
 	const isZai = modelMatchesHost(hostModel, "zai");
 	const isZhipu = modelMatchesHost(hostModel, "zhipu");
+	const isVolcengineArk = modelMatchesHost(hostModel, "volcengineArk");
 	const supportsZaiReasoningEffort = (isZai || isZhipu) && isGlm52ReasoningEffortModelId(spec.id);
 	const isKilo = modelMatchesHost(hostModel, "kilo");
 	const isKimiModel = isKimiModelId(spec.id);
@@ -424,6 +425,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 			isGrok ||
 			isZai ||
 			isZhipu ||
+			isVolcengineArk ||
 			isCopilotHost ||
 			isZenmuxHost);
 
@@ -462,7 +464,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 					? "openrouter"
 					: "raw";
 	const thinkingFormat: ResolvedOpenAISharedCompat["thinkingFormat"] =
-		(isMoonshotKimi && !isMoonshotKimiK3) || isZai || isZhipu || isXiaomiMimo
+		(isMoonshotKimi && !isMoonshotKimiK3) || isZai || isZhipu || isXiaomiMimo || isVolcengineArk
 			? "zai"
 			: isOpenRouter
 				? "openrouter"

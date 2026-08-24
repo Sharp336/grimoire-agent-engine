@@ -1,5 +1,6 @@
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { toFirepassWireModelId, toFireworksWireModelId } from "@oh-my-pi/pi-catalog/fireworks-model-id";
+import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { isGlm52ReasoningEffortModelId, isKimiK3ModelId } from "@oh-my-pi/pi-catalog/identity";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
@@ -1185,9 +1186,9 @@ function isZaiReasoningEffortDialect(model: Model<"openai-completions">, compat:
  * Provider-specific Chat Completions output clamp.
  *
  * Most OpenAI-compatible endpoints retain the conservative 64k ceiling from
- * {@link resolveOpenAIOutputTokenParam}. Z.AI/GLM-5.2 reasoning and native
- * Moonshot K3 explicitly accept their full advertised model caps, so those
- * routes clamp to `model.maxTokens` instead.
+ * {@link resolveOpenAIOutputTokenParam}. Z.AI/GLM-5.2 reasoning, native
+ * Moonshot K3, and Volcengine Ark explicitly accept their full advertised
+ * model caps, so those routes clamp to `model.maxTokens` instead.
  */
 export function resolveOpenAICompletionsOutputClamp(
 	model: Model<"openai-completions">,
@@ -1197,6 +1198,15 @@ export function resolveOpenAICompletionsOutputClamp(
 		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
 	}
 	if (model.provider === "moonshot" && isKimiK3ModelId(model.id)) {
+		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
+	}
+	// Ark publishes a per-model `max_output_token_length` (262,144 on Doubao
+	// Seed 2.1, 393,216 on the DeepSeek V4 routes) and enforces it exactly:
+	// `max_completion_tokens: 262144` is accepted on doubao-seed-2-1-turbo and
+	// 262145 is rejected with InvalidParameter. Discovery carries that value
+	// into `model.maxTokens`, so the generic 64k ceiling would silently cut
+	// every Ark route to a quarter of its advertised output window.
+	if (modelMatchesHost(model, "volcengineArk")) {
 		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
 	}
 	return undefined;

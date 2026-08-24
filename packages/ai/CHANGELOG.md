@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the Volcengine Ark (火山方舟) pay-as-you-go provider (`volcengine`), authenticated with `ARK_API_KEY` against `https://ark.cn-beijing.volces.com/api/v3`.
+- Volcengine Ark requests now clamp output tokens to the model's advertised `max_output_token_length` (262,144 on Doubao Seed 2.1, 393,216 on the DeepSeek V4 routes) instead of the conservative 64k OpenAI-compatible ceiling.
+
 ## [18.0.4] - 2026-08-24
 
 ### Fixed

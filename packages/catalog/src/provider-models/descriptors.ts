@@ -53,6 +53,7 @@ import {
 	veniceModelManagerOptions,
 	vercelAiGatewayModelManagerOptions,
 	vllmModelManagerOptions,
+	volcengineModelManagerOptions,
 	waferServerlessModelManagerOptions,
 	xaiModelManagerOptions,
 	xaiOAuthModelManagerOptions,
@@ -467,6 +468,14 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["VLLM_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => vllmModelManagerOptions(config),
 		catalogDiscovery: { label: "vLLM", allowUnauthenticated: true },
+	},
+	{
+		id: "volcengine",
+		defaultModel: "doubao-seed-2-1-pro-260628",
+		envVars: ["ARK_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => volcengineModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Volcengine Ark" },
 	},
 	{
 		id: "wafer-serverless",

@@ -40,6 +40,11 @@ export const KNOWN_HOSTS = {
 	cerebras: { providers: ["cerebras"], urlMarkers: ["cerebras.ai"] },
 	zai: { providers: ["zai"], urlMarkers: ["api.z.ai"] },
 	zhipu: { providers: ["zhipu-coding-plan"], urlMarkers: ["open.bigmodel.cn"] },
+	/**
+	 * Volcengine Ark (火山方舟). `thinking: { type }` on `/api/v3`, so it shares
+	 * the z.ai-style reasoning encoding rather than plain `reasoning_effort`.
+	 */
+	volcengineArk: { providers: ["volcengine"], urlMarkers: ["ark.cn-beijing.volces.com"] },
 	kilo: { providers: ["kilo"], urlMarkers: ["api.kilo.ai"] },
 	alibabaDashscope: {
 		providers: ["alibaba-coding-plan", "alibaba-token-plan"],
