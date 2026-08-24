@@ -536,6 +536,8 @@ Computer settings are captured when the desktop controller is created. A model s
 ```yaml
 bash:
   enabled: true
+  asyncAuto:
+    inlineGraceMs: 1000
   autoBackground:
     enabled: true
     thresholdMs: 60000
@@ -559,9 +561,10 @@ lsp:
 | Key                               | Type    | Default   | Notes                                                                                                                                                       |
 | --------------------------------- | ------- | --------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `bash.enabled`                    | boolean | `true`    | Enable the bash tool.                                                                                                                                       |
+| `bash.asyncAuto.inlineGraceMs`    | number  | `1000`    | How long explicit `async: "auto"` calls remain inline before promotion to a background job. `0` promotes immediately.                                       |
 | `launch.enabled`                  | boolean | `true`    | Enable the launch tool for shared long-running project processes.                                                                                           |
 | `bash.autoBackground.enabled`     | boolean | `true`   | Auto-background long-running commands.                                                                                                                      |
-| `bash.autoBackground.thresholdMs` | number  | `60000`   | Threshold before auto-backgrounding.                                                                                                                        |
+| `bash.autoBackground.thresholdMs` | number  | `60000`   | Threshold before auto-backgrounding unmarked Bash calls.                                                                                                    |
 | `eval.py`                         | boolean | `true`    | Python eval backend. `PI_PY=0` disables for the process.                                                                                                    |
 | `eval.js`                         | boolean | `true`    | JavaScript eval backend. `PI_JS=0` disables for the process.                                                                                                |
 | `python.kernelMode`               | enum    | `session` | `session` (persistent kernel) or `per-call`.                                                                                                                |

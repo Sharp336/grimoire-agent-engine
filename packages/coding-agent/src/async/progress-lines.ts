@@ -1,5 +1,3 @@
-import * as crypto from "node:crypto";
-
 /**
  * Fixed-size identity of the exact normalized stream consumed by
  * {@link ProgressLines}. UTF-16 code units match JavaScript string equality
@@ -13,7 +11,7 @@ export interface ProgressStreamProvenance {
 export function progressStreamProvenanceForText(text: string): ProgressStreamProvenance {
 	return {
 		codeUnits: text.length,
-		sha256: crypto.createHash("sha256").update(text, "utf16le").digest("base64"),
+		sha256: new Bun.CryptoHasher("sha256").update(text, "utf16le").digest("base64"),
 	};
 }
 /** Keep at most `maxChars` UTF-16 code units from either edge, moving inward rather than splitting a surrogate pair. */
@@ -65,16 +63,28 @@ export class ProgressLines {
 	#head = "";
 	#tail = "";
 	#truncated = false;
-	#streamHash = crypto.createHash("sha256");
+	#streamHash = new Bun.CryptoHasher("sha256");
 	#streamCodeUnits = 0;
 	#pendingHighSurrogate = "";
 	#latestReportedStreamProvenance: ProgressStreamProvenance | undefined;
+	#epoch = 0;
 
 	constructor(report: (line: ProgressLine) => void) {
 		this.#report = report;
 	}
 
-	append(chunk: string): void {
+	/**
+	 * Current boundary generation. Feeds whose chunk delivery can lag (e.g.
+	 * mirror-mode sinks that flush an artifact before notifying) capture this
+	 * value when a chunk enters the pipeline and pass it back to `append` so
+	 * chunks that predate a `resetDisplay()` boundary are discarded on arrival.
+	 */
+	get epoch(): number {
+		return this.#epoch;
+	}
+
+	append(chunk: string, epoch?: number): void {
+		if (epoch !== undefined && epoch !== this.#epoch) return;
 		let start = 0;
 		let newline = chunk.indexOf("\n");
 		while (newline !== -1) {
@@ -106,13 +116,37 @@ export class ProgressLines {
 		this.#tail = "";
 		this.#truncated = false;
 	}
-
-	reset(): void {
+	/**
+	 * Marks a display boundary while preserving the cumulative raw-stream
+	 * provenance used to deduplicate terminal output. Stale stamped chunks are
+	 * ignored, and an unfinished foreground fragment is not replayed after the
+	 * boundary.
+	 */
+	resetDisplay(): void {
+		this.#epoch++;
 		this.#partial = "";
 		this.#head = "";
 		this.#tail = "";
 		this.#truncated = false;
-		this.#streamHash = crypto.createHash("sha256");
+	}
+	/**
+	 * Marks a display boundary and returns the cumulative stream identity shared
+	 * with following suppressed blank records. Callers can retain this object to
+	 * recognize output already shown before the boundary even when later blank
+	 * records advance the raw stream without producing another progress line.
+	 */
+	resetDisplayAndCaptureProvenance(): ProgressStreamProvenance | undefined {
+		this.resetDisplay();
+		if (this.#streamCodeUnits === 0) return undefined;
+		const streamProvenance = this.#streamProvenance();
+		this.#latestReportedStreamProvenance = streamProvenance;
+		return streamProvenance;
+	}
+
+	/** Clear both display state and cumulative stream provenance. */
+	reset(): void {
+		this.resetDisplay();
+		this.#streamHash = new Bun.CryptoHasher("sha256");
 		this.#streamCodeUnits = 0;
 		this.#pendingHighSurrogate = "";
 		this.#latestReportedStreamProvenance = undefined;
