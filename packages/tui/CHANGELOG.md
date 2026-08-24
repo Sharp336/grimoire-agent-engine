@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Renamed TerminalFrameProvider.resetHistory to beginHistoryReplay
+
+### Fixed
+
+- Fixed graceful terminal shutdown leaving eligible finalized output in the mutable viewport instead of retiring it before shell handoff.
+
 ## [18.0.4] - 2026-08-24
 
 ### Changed
