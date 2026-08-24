@@ -2564,20 +2564,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				const fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
 				const pick = pickDefaultAvailableModel(fallbackCandidates.filter(hasModelAuth));
 				const defaultRoleConfigured = Boolean(settings.getModelRole("default"));
-				// Never block session creation on remote model discovery. Static
-				// and cached catalogs are sufficient to start; background refresh
-				// updates the registry after startup and the first request reports
-				// an invalid explicitly configured model normally.
+				// Do not block startup on remote discovery. When a configured default
+				// is discovery-only, keep the session unselected rather than replacing
+				// the requested role with an unrelated provider fallback.
 				if (
 					!hasExplicitModel &&
 					(defaultRoleConfigured || !pick) &&
 					modelRegistry.getDiscoverableProviders().length > 0
 				) {
-					void modelRegistry.refresh("online-if-uncached").catch(error => {
-						logger.warn("background model discovery failed", {
-							error: error instanceof Error ? error.message : String(error),
+					void modelRegistry
+						.refresh("online-if-uncached")
+						.then(async () => {
+							if (model || hasExplicitModel) return;
+							await tryResolveDefaultRole();
+						})
+						.catch(error => {
+							logger.warn("background model discovery failed", {
+								error: error instanceof Error ? error.message : String(error),
+							});
 						});
-					});
 				}
 
 				if (!model && pick) {
