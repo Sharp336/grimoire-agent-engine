@@ -26,8 +26,8 @@
 					"max"
 				]
 			},
-			"tokenizer": "deepseek-v3",
 			"requiresGlyphTokenization": false,
+			"tokenizer": "deepseek-v3",
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -103,8 +103,8 @@
 					"max"
 				]
 			},
-			"tokenizer": "deepseek-v3",
 			"requiresGlyphTokenization": false,
+			"tokenizer": "deepseek-v3",
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -262,8 +262,8 @@
 					"xhigh"
 				]
 			},
-			"tokenizer": "kimi-k2",
 			"requiresGlyphTokenization": false,
+			"tokenizer": "kimi-k2",
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -585,8 +585,8 @@
 					"high"
 				]
 			},
-			"tokenizer": "qwen3",
 			"requiresGlyphTokenization": false,
+			"tokenizer": "qwen3",
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -664,8 +664,8 @@
 					"max"
 				]
 			},
-			"tokenizer": "glm5",
 			"requiresGlyphTokenization": false,
+			"tokenizer": "glm5",
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -32167,7 +32167,6 @@
 		},
 		"claude-mythos-5": {
 			"id": "claude-mythos-5",
-			"requiresGlyphTokenization": true,
 			"name": "Claude Mythos 5",
 			"api": "anthropic-messages",
 			"provider": "anthropic",
@@ -32196,8 +32195,8 @@
 				],
 				"supportsDisplay": true
 			},
+			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v5-sonnet",
-			"supportsComputerUse": false,
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
@@ -32214,7 +32213,7 @@
 				"replayUnsignedThinking": false,
 				"escapeBuiltinToolNames": false
 			},
-			"supportsComputerUseConfig": false
+			"supportsComputerUse": false
 		},
 		"claude-opus-4-0": {
 			"id": "claude-opus-4-0",
@@ -46047,7 +46046,7 @@
 					"high": "cursor-grok-4.5-high"
 				}
 			},
-			"requestModelId": "cursor-grok-4.5-low",
+			"requestModelId": "cursor-grok-4.5-medium",
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"supportsComputerUseConfig": false
@@ -46085,7 +46084,7 @@
 					"high": "cursor-grok-4.5-high-fast"
 				}
 			},
-			"requestModelId": "cursor-grok-4.5-low-fast",
+			"requestModelId": "cursor-grok-4.5-medium-fast",
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"supportsComputerUseConfig": false
@@ -46125,7 +46124,7 @@
 					"xhigh": "cursor-grok-4.6-xhigh"
 				}
 			},
-			"requestModelId": "cursor-grok-4.6-low",
+			"requestModelId": "cursor-grok-4.6-medium",
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"supportsComputerUseConfig": false
@@ -46165,7 +46164,7 @@
 					"xhigh": "cursor-grok-4.6-xhigh-fast"
 				}
 			},
-			"requestModelId": "cursor-grok-4.6-low-fast",
+			"requestModelId": "cursor-grok-4.6-medium-fast",
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"supportsComputerUseConfig": false
@@ -49273,7 +49272,6 @@
 			},
 			"tokenizer": "glm5",
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -49321,7 +49319,7 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": true
 			},
-			"supportsComputerUseConfig": false
+			"supportsComputerUse": false
 		},
 		"gpt-oss-120b": {
 			"id": "gpt-oss-120b",
@@ -49755,7 +49753,6 @@
 			},
 			"tokenizer": "kimi-k2",
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -49805,7 +49802,7 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": true
 			},
-			"supportsComputerUseConfig": false
+			"supportsComputerUse": false
 		},
 		"kimi-k2.7-code": {
 			"id": "kimi-k2.7-code",
@@ -49925,7 +49922,6 @@
 			},
 			"tokenizer": "kimi-k2",
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -49974,7 +49970,7 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": true
 			},
-			"supportsComputerUseConfig": false
+			"supportsComputerUse": false
 		},
 		"kimi-k3": {
 			"id": "kimi-k3",
@@ -65569,9 +65565,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.065,
-				"output": 0.18,
-				"cacheRead": 0.02,
+				"input": 0.04,
+				"output": 0.08,
+				"cacheRead": 0.008,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -72806,7 +72802,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
-			"maxTokens": 384000,
+			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -72878,9 +72874,9 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.44,
-				"output": 1.32,
-				"cacheRead": 0.014,
+				"input": 0.22,
+				"output": 0.66,
+				"cacheRead": 0.007,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -75874,8 +75870,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.05,
-				"output": 0.25,
+				"input": 0.042,
+				"output": 0.22,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -81031,7 +81027,7 @@
 				"cacheRead": 0.06,
 				"cacheWrite": 0
 			},
-			"contextWindow": 204800,
+			"contextWindow": 196608,
 			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
@@ -94565,8 +94561,8 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 131072,
-			"maxTokens": 8192,
+			"contextWindow": 40960,
+			"maxTokens": 16384,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -96158,7 +96154,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
-			"maxTokens": 65536,
+			"maxTokens": 262144,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -96395,7 +96391,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
-			"maxTokens": 65536,
+			"maxTokens": 262144,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -96790,7 +96786,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
-			"maxTokens": 262144,
+			"maxTokens": 81920,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -99964,6 +99960,74 @@
 			},
 			"supportsComputerUse": false
 		},
+		"tencent/hy-mt2-7b": {
+			"id": "tencent/hy-mt2-7b",
+			"name": "Hy-MT2-7B",
+			"api": "openai-completions",
+			"provider": "kilo",
+			"baseUrl": "https://api.kilo.ai/api/gateway",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": null,
+			"maxTokens": null,
+			"requiresGlyphTokenization": false,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": false,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": false,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false
+			},
+			"supportsComputerUse": false
+		},
 		"tencent/hy3": {
 			"id": "tencent/hy3",
 			"name": "Hy3",
@@ -99975,9 +100039,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.132,
-				"output": 0.528,
-				"cacheRead": 0.033,
+				"input": 0.14,
+				"output": 0.58,
+				"cacheRead": 0.035,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
@@ -100487,8 +100551,8 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1024000,
-			"maxTokens": 1024000,
+			"contextWindow": 32768,
+			"maxTokens": 32768,
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compat": {
@@ -129041,6 +129105,85 @@
 			},
 			"supportsComputerUseConfig": false
 		},
+		"Gemma-4-31B-MeroMero-v2": {
+			"id": "Gemma-4-31B-MeroMero-v2",
+			"name": "Gemma 4 31B MeroMero v2",
+			"api": "openai-completions",
+			"provider": "nanogpt",
+			"baseUrl": "https://nano-gpt.com/api/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.08,
+				"output": 0.33,
+				"cacheRead": 0.04,
+				"cacheWrite": 0
+			},
+			"contextWindow": 65536,
+			"maxTokens": 32768,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			},
+			"requiresGlyphTokenization": false,
+			"supportsComputerUse": false,
+			"compat": {
+				"supportsStore": true,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": false,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": false,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false
+			}
+		},
 		"Gemma-4-31B-Musica-v1": {
 			"id": "Gemma-4-31B-Musica-v1",
 			"name": "Gemma-4-31B-Musica-v1",
@@ -132130,10 +132273,10 @@
 				"image"
 			],
 			"cost": {
-				"input": 1.5,
-				"output": 9,
-				"cacheRead": 0.15,
-				"cacheWrite": 0
+				"input": 0.375,
+				"output": 1.875,
+				"cacheRead": 0.0375,
+				"cacheWrite": 0.020833
 			},
 			"contextWindow": 1048576,
 			"maxTokens": 65536,
@@ -132195,8 +132338,7 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
-			},
-			"supportsComputerUseConfig": false
+			}
 		},
 		"google/gemini-flash-lite-latest": {
 			"id": "google/gemini-flash-lite-latest",
@@ -132464,6 +132606,75 @@
 					"xhigh"
 				]
 			},
+			"requiresGlyphTokenization": false,
+			"supportsComputerUse": false,
+			"compat": {
+				"supportsStore": true,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": false,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": false,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false
+			}
+		},
+		"google/gemma-4-26b-a4b-uncensored": {
+			"id": "google/gemma-4-26b-a4b-uncensored",
+			"name": "Gemma 4 26B A4B Uncensored",
+			"api": "openai-completions",
+			"provider": "nanogpt",
+			"baseUrl": "https://nano-gpt.com/api/v1",
+			"reasoning": false,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.08,
+				"output": 0.33,
+				"cacheRead": 0.04,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 32768,
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compat": {
@@ -152126,6 +152337,85 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
+			"maxTokens": 32768,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			},
+			"requiresGlyphTokenization": false,
+			"supportsComputerUse": false,
+			"compat": {
+				"supportsStore": true,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": false,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": false,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false
+			}
+		},
+		"ornith-ai/ornith-1.5-9b": {
+			"id": "ornith-ai/ornith-1.5-9b",
+			"name": "Ornith 1.5 9B",
+			"api": "openai-completions",
+			"provider": "nanogpt",
+			"baseUrl": "https://nano-gpt.com/api/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.05,
+				"output": 0.1,
+				"cacheRead": 0.025,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
 			"maxTokens": 32768,
 			"thinking": {
 				"mode": "effort",
@@ -178788,7 +179078,7 @@
 		},
 		"minimax/minimax-m2.7": {
 			"id": "minimax/minimax-m2.7",
-			"name": "MiniMax-M2.7",
+			"name": "MiniMax M2.7",
 			"api": "openai-completions",
 			"provider": "novita",
 			"baseUrl": "https://api.novita.ai/openai/v1",
@@ -184958,6 +185248,83 @@
 				"dropThinkingWhenReasoningEffort": false
 			}
 		},
+		"deepseek-ai/deepseek-v4-flash-0731": {
+			"id": "deepseek-ai/deepseek-v4-flash-0731",
+			"name": "DeepSeek V4 Flash 0731",
+			"api": "openai-completions",
+			"provider": "nvidia",
+			"baseUrl": "https://integrate.api.nvidia.com/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 384000,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"high",
+					"max"
+				]
+			},
+			"requiresGlyphTokenization": false,
+			"tokenizer": "deepseek-v3",
+			"supportsComputerUse": false,
+			"compat": {
+				"supportsStore": true,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": true,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": true,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true,
+				"requiresReasoningContentForAllAssistantTurns": true,
+				"allowsSyntheticReasoningContentForToolCalls": false,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": true,
+				"streamMarkupHealingPattern": "dsml",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false
+			}
+		},
 		"deepseek-ai/deepseek-v4-pro": {
 			"id": "deepseek-ai/deepseek-v4-pro",
 			"name": "DeepSeek V4 Pro",
@@ -189952,6 +190319,95 @@
 				"streamIdleTimeoutMs": 300000,
 				"stripDeepseekSpecialTokens": false,
 				"streamMarkupHealingPattern": "kimi",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false
+			}
+		},
+		"moonshotai/kimi-k3": {
+			"id": "moonshotai/kimi-k3",
+			"name": "Kimi K3",
+			"api": "openai-completions",
+			"provider": "nvidia",
+			"baseUrl": "https://integrate.api.nvidia.com/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 131072,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"high",
+					"max"
+				],
+				"defaultLevel": "max",
+				"effortMap": {
+					"max": "max"
+				},
+				"requiresEffort": true
+			},
+			"requiresGlyphTokenization": false,
+			"tokenizer": "kimi-k2",
+			"supportsComputerUse": false,
+			"compat": {
+				"supportsStore": true,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": false,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {
+					"minimal": "low",
+					"medium": "high",
+					"xhigh": "max",
+					"max": "max"
+				},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": true,
+				"disableReasoningOnForcedToolChoice": true,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": true,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"toolSchemaFlavor": "moonshot-mfjs",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
 				"reasoningDeltasMayBeCumulative": false,
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
@@ -202316,11 +202772,9 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
 					"low",
-					"medium",
 					"high",
-					"xhigh"
+					"max"
 				]
 			},
 			"requiresGlyphTokenization": false,
@@ -204846,12 +205300,11 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
 					"low",
-					"medium",
 					"high",
-					"xhigh"
-				]
+					"max"
+				],
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -213107,12 +213560,11 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
 					"low",
-					"medium",
 					"high",
-					"xhigh"
-				]
+					"max"
+				],
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -213235,11 +213687,14 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
 					"low",
 					"medium",
-					"high"
-				]
+					"high",
+					"xhigh",
+					"max"
+				],
+				"defaultLevel": "high",
+				"requiresEffort": true
 			},
 			"tokenizer": "claude-v3",
 			"requiresGlyphTokenization": true,
@@ -213564,9 +214019,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.065,
-				"output": 0.18,
-				"cacheRead": 0.02,
+				"input": 0.04,
+				"output": 0.08,
+				"cacheRead": 0.008,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1310720,
@@ -213658,11 +214113,12 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
 					"low",
 					"medium",
 					"high"
-				]
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -213742,11 +214198,12 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
 					"low",
 					"medium",
 					"high"
-				]
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -214079,11 +214536,13 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
 					"low",
 					"medium",
-					"high"
-				]
+					"high",
+					"xhigh"
+				],
+				"defaultLevel": "high",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -214162,11 +214621,12 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
 					"low",
-					"medium",
-					"high"
-				]
+					"high",
+					"max"
+				],
+				"defaultLevel": "max",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -215529,7 +215989,9 @@
 					"high",
 					"xhigh",
 					"max"
-				]
+				],
+				"defaultLevel": "high",
+				"requiresEffort": true
 			},
 			"tokenizer": "claude-v5-sonnet",
 			"requiresGlyphTokenization": true,
@@ -215616,7 +216078,9 @@
 					"high",
 					"xhigh",
 					"max"
-				]
+				],
+				"defaultLevel": "high",
+				"requiresEffort": true
 			},
 			"tokenizer": "claude-v5-sonnet",
 			"requiresGlyphTokenization": true,
@@ -220267,9 +220731,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.06706000000000001,
-				"output": 0.13412000000000002,
-				"cacheRead": 0.013412,
+				"input": 0.0574,
+				"output": 0.1148,
+				"cacheRead": 0.011479999999999999,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -220350,13 +220814,13 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.08,
-				"output": 0.18,
-				"cacheRead": 0.016,
+				"input": 0.14,
+				"output": 0.28,
+				"cacheRead": 0.028,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1310720,
-			"maxTokens": 384000,
+			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -220599,9 +221063,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.413772,
-				"output": 0.827544,
-				"cacheRead": 0.034481000000000005,
+				"input": 0.526176,
+				"output": 1.052352,
+				"cacheRead": 0.043848000000000005,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -220680,9 +221144,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 1.1880000000000002,
-				"output": 3.564,
-				"cacheRead": 0.039599999999999996,
+				"input": 1.122,
+				"output": 3.366,
+				"cacheRead": 0.037399999999999996,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -221931,6 +222395,7 @@
 					"medium",
 					"high"
 				],
+				"defaultLevel": "medium",
 				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
@@ -222016,6 +222481,7 @@
 					"medium",
 					"high"
 				],
+				"defaultLevel": "medium",
 				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
@@ -222267,6 +222733,7 @@
 					"medium",
 					"high"
 				],
+				"defaultLevel": "minimal",
 				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
@@ -222427,6 +222894,7 @@
 					"medium",
 					"high"
 				],
+				"defaultLevel": "minimal",
 				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
@@ -222508,8 +222976,10 @@
 				"mode": "effort",
 				"efforts": [
 					"low",
+					"medium",
 					"high"
 				],
+				"defaultLevel": "medium",
 				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
@@ -222591,8 +223061,10 @@
 				"mode": "effort",
 				"efforts": [
 					"low",
+					"medium",
 					"high"
 				],
+				"defaultLevel": "medium",
 				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
@@ -222674,8 +223146,10 @@
 				"mode": "effort",
 				"efforts": [
 					"low",
+					"medium",
 					"high"
 				],
+				"defaultLevel": "medium",
 				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
@@ -222761,6 +223235,7 @@
 					"medium",
 					"high"
 				],
+				"defaultLevel": "medium",
 				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
@@ -222846,6 +223321,7 @@
 					"medium",
 					"high"
 				],
+				"defaultLevel": "minimal",
 				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
@@ -222931,6 +223407,7 @@
 					"medium",
 					"high"
 				],
+				"defaultLevel": "minimal",
 				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
@@ -223016,6 +223493,7 @@
 					"medium",
 					"high"
 				],
+				"defaultLevel": "medium",
 				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
@@ -223101,6 +223579,7 @@
 					"medium",
 					"high"
 				],
+				"defaultLevel": "medium",
 				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
@@ -223186,6 +223665,7 @@
 					"medium",
 					"high"
 				],
+				"defaultLevel": "medium",
 				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
@@ -223266,11 +223746,11 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
 					"low",
 					"medium",
 					"high"
 				],
+				"defaultLevel": "medium",
 				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
@@ -223351,11 +223831,11 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
 					"low",
 					"medium",
 					"high"
 				],
+				"defaultLevel": "medium",
 				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
@@ -224846,11 +225326,11 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high"
-				]
+					"high",
+					"xhigh"
+				],
+				"defaultLevel": "high",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -226217,8 +226697,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.3,
-				"output": 1.1,
+				"input": 0.35,
+				"output": 1.5,
 				"cacheRead": 0.04,
 				"cacheWrite": 0
 			},
@@ -226227,11 +226707,13 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
 					"low",
 					"medium",
-					"high"
-				]
+					"high",
+					"xhigh"
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -226314,8 +226796,11 @@
 					"minimal",
 					"low",
 					"medium",
-					"high"
-				]
+					"high",
+					"xhigh"
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -226398,8 +226883,11 @@
 					"minimal",
 					"low",
 					"medium",
-					"high"
-				]
+					"high",
+					"xhigh"
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -226482,8 +226970,11 @@
 					"minimal",
 					"low",
 					"medium",
-					"high"
-				]
+					"high",
+					"xhigh"
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"compat": {
@@ -226957,7 +227448,7 @@
 		},
 		"minimax/minimax-m2.7": {
 			"id": "minimax/minimax-m2.7",
-			"name": "MiniMax-M2.7",
+			"name": "MiniMax M2.7",
 			"api": "openrouter",
 			"provider": "openrouter",
 			"baseUrl": "https://openrouter.ai/api/v1",
@@ -226966,9 +227457,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.3,
-				"output": 1.2,
-				"cacheRead": 0.06,
+				"input": 0.24,
+				"output": 0.96,
+				"cacheRead": 0.048,
 				"cacheWrite": 0
 			},
 			"contextWindow": 204800,
@@ -229572,9 +230063,9 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.5415,
-				"output": 2.2800000000000002,
-				"cacheRead": 0.09119999999999999,
+				"input": 0.95,
+				"output": 4,
+				"cacheRead": 0.16,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
@@ -229924,7 +230415,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
-			"maxTokens": 131072,
+			"maxTokens": 1048576,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -233700,7 +234191,9 @@
 					"low",
 					"medium",
 					"high"
-				]
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -234120,7 +234613,9 @@
 					"low",
 					"medium",
 					"high"
-				]
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -234204,7 +234699,9 @@
 					"low",
 					"medium",
 					"high"
-				]
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -234288,7 +234785,9 @@
 					"low",
 					"medium",
 					"high"
-				]
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -234372,7 +234871,9 @@
 					"low",
 					"medium",
 					"high"
-				]
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -234452,11 +234953,10 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
-					"low",
-					"medium",
 					"high"
-				]
+				],
+				"defaultLevel": "high",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -234536,11 +235036,10 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
-					"low",
-					"medium",
 					"high"
-				]
+				],
+				"defaultLevel": "high",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -234624,7 +235123,9 @@
 					"low",
 					"medium",
 					"high"
-				]
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -234863,11 +235364,12 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
 					"low",
 					"medium",
 					"high"
-				]
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -234947,11 +235449,13 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
 					"low",
 					"medium",
-					"high"
-				]
+					"high",
+					"xhigh"
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -235360,7 +235864,9 @@
 					"medium",
 					"high",
 					"xhigh"
-				]
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -235440,11 +235946,12 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"low",
 					"medium",
 					"high",
 					"xhigh"
-				]
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -235524,11 +236031,12 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"low",
 					"medium",
 					"high",
 					"xhigh"
-				]
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -236270,11 +236778,12 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"low",
 					"medium",
 					"high",
 					"xhigh"
-				]
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -236354,11 +236863,12 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"low",
 					"medium",
 					"high",
 					"xhigh"
-				]
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -236607,11 +237117,12 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"low",
 					"medium",
 					"high",
 					"xhigh"
-				]
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"contextPromotionTarget": "openrouter/openai/gpt-5.4",
 			"requiresGlyphTokenization": false,
@@ -236692,11 +237203,12 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"low",
 					"medium",
 					"high",
 					"xhigh"
-				]
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"contextPromotionTarget": "openrouter/openai/gpt-5.4",
 			"requiresGlyphTokenization": false,
@@ -238103,7 +238615,7 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.03,
+				"input": 0.037,
 				"output": 0.16999999999999998,
 				"cacheRead": 0.03,
 				"cacheWrite": 0
@@ -238116,7 +238628,9 @@
 					"low",
 					"medium",
 					"high"
-				]
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -238362,7 +238876,9 @@
 					"low",
 					"medium",
 					"high"
-				]
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -239029,11 +239545,9 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
-					"low",
-					"medium",
 					"high"
 				],
+				"defaultLevel": "high",
 				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
@@ -239113,11 +239627,9 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
-					"low",
-					"medium",
 					"high"
 				],
+				"defaultLevel": "high",
 				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
@@ -239707,11 +240219,9 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
-					"low",
-					"medium",
 					"high"
 				],
+				"defaultLevel": "high",
 				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
@@ -239792,11 +240302,9 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
-					"low",
-					"medium",
 					"high"
 				],
+				"defaultLevel": "high",
 				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
@@ -242283,13 +242791,13 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.13,
-				"output": 0.52,
+				"input": 0.12,
+				"output": 0.5,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
 			"contextWindow": 131072,
-			"maxTokens": 8192,
+			"maxTokens": 16384,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -244317,7 +244825,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
-			"maxTokens": 65536,
+			"maxTokens": 262144,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -244566,13 +245074,13 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.39,
-				"output": 2.34,
+				"input": 0.5,
+				"output": 3.5999999999999996,
 				"cacheRead": 0.3,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
-			"maxTokens": 65536,
+			"maxTokens": 262144,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -244991,13 +245499,13 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.6,
-				"output": 3.5999999999999996,
+				"input": 0.32,
+				"output": 3.1999999999999997,
 				"cacheRead": 0.12,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
-			"maxTokens": 262144,
+			"maxTokens": 81920,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -245847,11 +246355,12 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
 					"low",
 					"medium",
-					"high"
-				]
+					"xhigh"
+				],
+				"defaultLevel": "xhigh",
+				"requiresEffort": true
 			},
 			"tokenizer": "qwen3",
 			"requiresGlyphTokenization": false,
@@ -245922,8 +246431,8 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.44999999999999996,
-				"output": 3.1999999999999997,
+				"input": 0.39999999999999997,
+				"output": 3,
 				"cacheRead": 0.049999999999999996,
 				"cacheWrite": 0
 			},
@@ -246020,8 +246529,11 @@
 					"minimal",
 					"low",
 					"medium",
-					"high"
-				]
+					"high",
+					"xhigh"
+				],
+				"defaultLevel": "xhigh",
+				"requiresEffort": true
 			},
 			"tokenizer": "qwen3",
 			"requiresGlyphTokenization": false,
@@ -246409,11 +246921,12 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high"
-				]
+					"high",
+					"xhigh",
+					"max"
+				],
+				"defaultLevel": "xhigh",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -246725,11 +247238,12 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
 					"low",
-					"medium",
-					"high"
-				]
+					"high",
+					"max"
+				],
+				"defaultLevel": "max",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"compat": {
@@ -246974,11 +247488,12 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
 					"low",
 					"medium",
 					"high"
-				]
+				],
+				"defaultLevel": "medium",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -247459,7 +247974,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 1024000,
-			"maxTokens": 1024000,
+			"maxTokens": 32768,
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compat": {
@@ -247528,9 +248043,9 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.95,
+				"input": 1,
 				"output": 4.05,
-				"cacheRead": 0.16,
+				"cacheRead": 0.16999999999999998,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -249192,11 +249707,12 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
 					"low",
 					"medium",
 					"high"
-				]
+				],
+				"defaultLevel": "high",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -249276,11 +249792,13 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
-					"minimal",
 					"low",
 					"medium",
-					"high"
-				]
+					"high",
+					"xhigh"
+				],
+				"defaultLevel": "high",
+				"requiresEffort": true
 			},
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -251904,9 +252422,8 @@
 				},
 				"requiresEffort": true
 			},
-			"tokenizer": "kimi-k2",
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
+			"tokenizer": "kimi-k2",
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -251960,7 +252477,7 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
 			},
-			"supportsComputerUseConfig": false
+			"supportsComputerUse": false
 		},
 		"hf:nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4": {
 			"id": "hf:nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
@@ -251991,7 +252508,6 @@
 				]
 			},
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -252039,7 +252555,7 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
 			},
-			"supportsComputerUseConfig": false
+			"supportsComputerUse": false
 		},
 		"hf:openai/gpt-oss-120b": {
 			"id": "hf:openai/gpt-oss-120b",
@@ -252068,7 +252584,6 @@
 				]
 			},
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -252116,7 +252631,7 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
 			},
-			"supportsComputerUseConfig": false
+			"supportsComputerUse": false
 		},
 		"hf:Qwen/Qwen3.6-27B": {
 			"id": "hf:Qwen/Qwen3.6-27B",
@@ -252146,9 +252661,8 @@
 					"high"
 				]
 			},
-			"tokenizer": "qwen3",
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
+			"tokenizer": "qwen3",
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -252196,7 +252710,7 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
 			},
-			"supportsComputerUseConfig": false
+			"supportsComputerUse": false
 		},
 		"hf:Qwen/Qwen3.8-27B": {
 			"id": "hf:Qwen/Qwen3.8-27B",
@@ -252306,7 +252820,6 @@
 				]
 			},
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -252354,7 +252867,7 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
 			},
-			"supportsComputerUseConfig": false
+			"supportsComputerUse": false
 		},
 		"hf:zai-org/GLM-5.2": {
 			"id": "hf:zai-org/GLM-5.2",
@@ -252384,9 +252897,8 @@
 					"max"
 				]
 			},
-			"tokenizer": "glm5",
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
+			"tokenizer": "glm5",
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -252434,7 +252946,7 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
 			},
-			"supportsComputerUseConfig": false
+			"supportsComputerUse": false
 		},
 		"syn:large:text": {
 			"id": "syn:large:text",
@@ -255885,59 +256397,6 @@
 			"compatConfig": {
 				"escapeBuiltinToolNames": true
 			}
-		},
-		"umans-qwen3.8-27b-lab": {
-			"id": "umans-qwen3.8-27b-lab",
-			"requiresGlyphTokenization": false,
-			"name": "Umans Qwen3.8 27B (lab)",
-			"api": "anthropic-messages",
-			"provider": "umans",
-			"baseUrl": "https://api.code.umans.ai",
-			"reasoning": true,
-			"thinking": {
-				"mode": "budget",
-				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high",
-					"xhigh"
-				]
-			},
-			"input": [
-				"text",
-				"image"
-			],
-			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
-			},
-			"contextWindow": 262144,
-			"maxTokens": 131071,
-			"tokenizer": "qwen3",
-			"supportsComputerUse": false,
-			"compat": {
-				"officialEndpoint": false,
-				"signingEndpoint": false,
-				"disableStrictTools": false,
-				"disableAdaptiveThinking": false,
-				"allowAnthropicHeaderOverrides": false,
-				"supportsEagerToolInputStreaming": false,
-				"supportsLongCacheRetention": false,
-				"supportsMidConversationSystem": false,
-				"supportsForcedToolChoice": true,
-				"supportsSamplingParams": true,
-				"requiresToolResultId": false,
-				"requiresThinkingEnabled": false,
-				"replayUnsignedThinking": true,
-				"escapeBuiltinToolNames": true
-			},
-			"supportsComputerUseConfig": false,
-			"compatConfig": {
-				"escapeBuiltinToolNames": true
-			}
 		}
 	},
 	"venice": {
@@ -255983,7 +256442,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -256062,7 +256521,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -256140,7 +256599,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -256208,7 +256667,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -256288,7 +256747,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -256369,7 +256828,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -256449,7 +256908,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -256529,7 +256988,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -256609,7 +257068,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -256690,7 +257149,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -256770,7 +257229,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -256851,7 +257310,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -256931,7 +257390,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -257011,7 +257470,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -257092,7 +257551,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -257172,7 +257631,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -257252,7 +257711,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -257332,7 +257791,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -257412,7 +257871,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -257493,7 +257952,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -257569,7 +258028,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -257646,7 +258105,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -257723,7 +258182,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -257800,7 +258259,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -257877,7 +258336,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -257954,7 +258413,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -258023,7 +258482,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -258095,7 +258554,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -258167,7 +258626,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -258239,7 +258698,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -258311,7 +258770,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -258380,7 +258839,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -258450,7 +258909,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -258520,7 +258979,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -258593,7 +259052,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -258665,7 +259124,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -258737,7 +259196,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -258808,8 +259267,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -258880,8 +259339,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -258949,8 +259408,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -259018,8 +259477,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -259090,8 +259549,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -259162,8 +259621,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -259234,8 +259693,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -259307,7 +259766,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -259387,7 +259846,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -259466,7 +259925,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -259545,7 +260004,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -259624,7 +260083,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -259703,7 +260162,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -259782,7 +260241,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -259859,7 +260318,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -259929,7 +260388,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -259998,7 +260457,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -260077,7 +260536,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -260156,7 +260615,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -260224,7 +260683,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -260293,7 +260752,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -260373,7 +260832,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -260441,7 +260900,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -260510,7 +260969,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -260582,7 +261041,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -260662,7 +261121,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -260741,7 +261200,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -260820,7 +261279,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -260899,7 +261358,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -260979,7 +261438,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -261057,7 +261516,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -261126,7 +261585,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -261209,7 +261668,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -261289,7 +261748,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -261370,7 +261829,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -261451,7 +261910,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -261532,7 +261991,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -261622,7 +262081,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -261711,7 +262170,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -261780,7 +262239,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -261848,7 +262307,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -261926,7 +262385,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -262003,7 +262462,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -262081,7 +262540,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -262158,7 +262617,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -262237,7 +262696,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -262317,7 +262776,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -262386,7 +262845,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -262466,7 +262925,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -262534,7 +262993,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -262611,7 +263070,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -262680,7 +263139,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -262758,7 +263217,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -262836,7 +263295,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -262915,7 +263374,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -262984,7 +263443,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -263053,7 +263512,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -263131,7 +263590,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -263210,7 +263669,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -263289,7 +263748,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -263368,7 +263827,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -263447,7 +263906,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -263526,7 +263985,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -263605,7 +264064,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -263684,7 +264143,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -263763,7 +264222,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -263842,7 +264301,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -263921,7 +264380,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -264000,7 +264459,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -264079,7 +264538,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -264158,7 +264617,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -264236,7 +264695,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -264313,8 +264772,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -264391,8 +264850,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -264469,8 +264928,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -264546,8 +265005,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -264624,8 +265083,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -264702,8 +265161,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -264770,8 +265229,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -264848,8 +265307,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -264925,8 +265384,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -265004,8 +265463,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -265082,8 +265541,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -265160,8 +265619,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -265238,8 +265697,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -265316,8 +265775,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -265384,8 +265843,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -265453,8 +265912,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -265521,8 +265980,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -265590,8 +266049,8 @@
 				"requiresAssistantAfterToolResult": false,
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
-				"thinkingFormat": "qwen",
-				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -265670,7 +266129,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -265749,7 +266208,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -265827,7 +266286,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -265896,7 +266355,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -265966,7 +266425,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -266035,7 +266494,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -266115,7 +266574,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -266194,7 +266653,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -266273,7 +266732,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -266353,7 +266812,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -266431,7 +266890,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -266509,7 +266968,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -266587,7 +267046,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -266666,7 +267125,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -266745,7 +267204,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -266824,7 +267283,7 @@
 				"requiresThinkingAsText": false,
 				"requiresMistralToolIds": false,
 				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
+				"reasoningDisableMode": "venice-disable-thinking",
 				"omitReasoningEffort": false,
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -272153,7 +272612,7 @@
 		"minimax/minimax-m2.7": {
 			"id": "minimax/minimax-m2.7",
 			"requiresGlyphTokenization": false,
-			"name": "MiniMax-M2.7",
+			"name": "MiniMax M2.7",
 			"api": "anthropic-messages",
 			"provider": "vercel-ai-gateway",
 			"baseUrl": "https://ai-gateway.vercel.sh",
@@ -273575,8 +274034,55 @@
 				"cacheRead": 0.01,
 				"cacheWrite": 0
 			},
-			"contextWindow": 262144,
-			"maxTokens": 131072,
+			"contextWindow": 1000000,
+			"maxTokens": 32768,
+			"thinking": {
+				"mode": "budget",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			},
+			"compat": {
+				"officialEndpoint": false,
+				"signingEndpoint": false,
+				"disableStrictTools": false,
+				"disableAdaptiveThinking": false,
+				"allowAnthropicHeaderOverrides": false,
+				"supportsEagerToolInputStreaming": false,
+				"supportsLongCacheRetention": false,
+				"supportsMidConversationSystem": false,
+				"supportsForcedToolChoice": true,
+				"supportsSamplingParams": true,
+				"requiresToolResultId": false,
+				"requiresThinkingEnabled": false,
+				"replayUnsignedThinking": true,
+				"escapeBuiltinToolNames": false
+			},
+			"supportsComputerUse": false
+		},
+		"nvidia/nemotron-3.5-lightning-free": {
+			"id": "nvidia/nemotron-3.5-lightning-free",
+			"name": "Nemotron 3.5 Lightning 30B (Free)",
+			"api": "anthropic-messages",
+			"provider": "vercel-ai-gateway",
+			"baseUrl": "https://ai-gateway.vercel.sh",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 32768,
+			"requiresGlyphTokenization": false,
 			"thinking": {
 				"mode": "budget",
 				"efforts": [
@@ -282382,7 +282888,15 @@
 				"input": 1.25,
 				"output": 2.5,
 				"cacheRead": 0.2,
-				"cacheWrite": 0
+				"cacheWrite": 0,
+				"longContext": {
+					"inputThreshold": 200000,
+					"inputThresholdInclusive": true,
+					"input": 2.5,
+					"output": 5,
+					"cacheRead": 0.4,
+					"cacheWrite": 0
+				}
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 30000,
@@ -282459,7 +282973,15 @@
 				"input": 1.25,
 				"output": 2.5,
 				"cacheRead": 0.2,
-				"cacheWrite": 0
+				"cacheWrite": 0,
+				"longContext": {
+					"inputThreshold": 200000,
+					"inputThresholdInclusive": true,
+					"input": 2.5,
+					"output": 5,
+					"cacheRead": 0.4,
+					"cacheWrite": 0
+				}
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 30000,
@@ -282536,7 +283058,15 @@
 				"input": 2,
 				"output": 6,
 				"cacheRead": 0.2,
-				"cacheWrite": 0
+				"cacheWrite": 0,
+				"longContext": {
+					"inputThreshold": 200000,
+					"inputThresholdInclusive": true,
+					"input": 4,
+					"output": 12,
+					"cacheRead": 0.4,
+					"cacheWrite": 0
+				}
 			},
 			"contextWindow": 2000000,
 			"maxTokens": 30000,
@@ -282613,7 +283143,15 @@
 				"input": 2,
 				"output": 6,
 				"cacheRead": 0.2,
-				"cacheWrite": 0
+				"cacheWrite": 0,
+				"longContext": {
+					"inputThreshold": 200000,
+					"inputThresholdInclusive": true,
+					"input": 4,
+					"output": 12,
+					"cacheRead": 0.4,
+					"cacheWrite": 0
+				}
 			},
 			"contextWindow": 2000000,
 			"maxTokens": 30000,
@@ -282690,7 +283228,15 @@
 				"input": 2,
 				"output": 6,
 				"cacheRead": 0.2,
-				"cacheWrite": 0
+				"cacheWrite": 0,
+				"longContext": {
+					"inputThreshold": 200000,
+					"inputThresholdInclusive": true,
+					"input": 4,
+					"output": 12,
+					"cacheRead": 0.4,
+					"cacheWrite": 0
+				}
 			},
 			"contextWindow": 2000000,
 			"maxTokens": 30000,
@@ -282781,7 +283327,15 @@
 				"input": 1.25,
 				"output": 2.5,
 				"cacheRead": 0.2,
-				"cacheWrite": 0
+				"cacheWrite": 0,
+				"longContext": {
+					"inputThreshold": 200000,
+					"inputThresholdInclusive": true,
+					"input": 2.5,
+					"output": 5,
+					"cacheRead": 0.4,
+					"cacheWrite": 0
+				}
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 30000,
@@ -282875,7 +283429,15 @@
 				"input": 2,
 				"output": 6,
 				"cacheRead": 0.3,
-				"cacheWrite": 0
+				"cacheWrite": 0,
+				"longContext": {
+					"inputThreshold": 200000,
+					"inputThresholdInclusive": true,
+					"input": 4,
+					"output": 12,
+					"cacheRead": 0.6,
+					"cacheWrite": 0
+				}
 			},
 			"contextWindow": 500000,
 			"maxTokens": 500000,
@@ -282969,7 +283531,15 @@
 				"input": 2,
 				"output": 6,
 				"cacheRead": 0.5,
-				"cacheWrite": 0
+				"cacheWrite": 0,
+				"longContext": {
+					"inputThreshold": 200000,
+					"inputThresholdInclusive": true,
+					"input": 4,
+					"output": 12,
+					"cacheRead": 1,
+					"cacheWrite": 0
+				}
 			},
 			"contextWindow": 500000,
 			"maxTokens": 500000,
@@ -283136,7 +283706,15 @@
 				"input": 1,
 				"output": 2,
 				"cacheRead": 0.2,
-				"cacheWrite": 0
+				"cacheWrite": 0,
+				"longContext": {
+					"inputThreshold": 200000,
+					"inputThresholdInclusive": true,
+					"input": 2,
+					"output": 4,
+					"cacheRead": 0.4,
+					"cacheWrite": 0
+				}
 			},
 			"contextWindow": 256000,
 			"maxTokens": 256000,
@@ -283365,15 +283943,22 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
+				"input": 1.25,
+				"output": 2.5,
+				"cacheRead": 0.2,
+				"cacheWrite": 0,
+				"longContext": {
+					"inputThreshold": 200000,
+					"inputThresholdInclusive": true,
+					"input": 2.5,
+					"output": 5,
+					"cacheRead": 0.4,
+					"cacheWrite": 0
+				}
 			},
 			"contextWindow": 2000000,
 			"maxTokens": 2000000,
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -283425,7 +284010,7 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"promptCacheSessionHeader": "x-grok-conv-id"
 			},
-			"supportsComputerUseConfig": false,
+			"supportsComputerUse": false,
 			"compatConfig": {
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -283446,15 +284031,22 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
+				"input": 1.25,
+				"output": 2.5,
+				"cacheRead": 0.2,
+				"cacheWrite": 0,
+				"longContext": {
+					"inputThreshold": 200000,
+					"inputThresholdInclusive": true,
+					"input": 2.5,
+					"output": 5,
+					"cacheRead": 0.4,
+					"cacheWrite": 0
+				}
 			},
 			"contextWindow": 2000000,
 			"maxTokens": 2000000,
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -283506,7 +284098,7 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"promptCacheSessionHeader": "x-grok-conv-id"
 			},
-			"supportsComputerUseConfig": false,
+			"supportsComputerUse": false,
 			"compatConfig": {
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -283526,10 +284118,18 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
+				"input": 2,
+				"output": 6,
+				"cacheRead": 0.2,
+				"cacheWrite": 0,
+				"longContext": {
+					"inputThreshold": 200000,
+					"inputThresholdInclusive": true,
+					"input": 4,
+					"output": 12,
+					"cacheRead": 0.4,
+					"cacheWrite": 0
+				}
 			},
 			"contextWindow": 2000000,
 			"maxTokens": 2000000,
@@ -283547,7 +284147,6 @@
 					"minimal": "low"
 				}
 			},
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -283597,16 +284196,16 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"promptCacheSessionHeader": "x-grok-conv-id"
 			},
-			"supportsComputerUseConfig": false,
+			"supportsComputerUse": false,
 			"compatConfig": {
+				"reasoningEffortMap": {
+					"minimal": "low"
+				},
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
 				"supportsImageDetailOriginal": false,
 				"omitReasoningEffort": false,
-				"supportsReasoningEffort": true,
-				"reasoningEffortMap": {
-					"minimal": "low"
-				}
+				"supportsReasoningEffort": true
 			}
 		},
 		"grok-4.3": {
@@ -283621,10 +284220,18 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
+				"input": 1.25,
+				"output": 2.5,
+				"cacheRead": 0.2,
+				"cacheWrite": 0,
+				"longContext": {
+					"inputThreshold": 200000,
+					"inputThresholdInclusive": true,
+					"input": 2.5,
+					"output": 5,
+					"cacheRead": 0.4,
+					"cacheWrite": 0
+				}
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 1000000,
@@ -283641,7 +284248,6 @@
 					"minimal": "low"
 				}
 			},
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -283693,18 +284299,18 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"promptCacheSessionHeader": "x-grok-conv-id"
 			},
-			"supportsComputerUseConfig": false,
+			"supportsComputerUse": false,
 			"compatConfig": {
-				"includeEncryptedReasoning": true,
-				"filterReasoningHistory": false,
-				"supportsImageDetailOriginal": false,
-				"omitReasoningEffort": false,
-				"supportsReasoningEffort": true,
 				"reasoningEffortMap": {
 					"minimal": "low",
 					"xhigh": "high",
 					"max": "high"
-				}
+				},
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"supportsImageDetailOriginal": false,
+				"omitReasoningEffort": false,
+				"supportsReasoningEffort": true
 			}
 		},
 		"grok-4.5": {
@@ -283719,10 +284325,18 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
+				"input": 2,
+				"output": 6,
+				"cacheRead": 0.3,
+				"cacheWrite": 0,
+				"longContext": {
+					"inputThreshold": 200000,
+					"inputThresholdInclusive": true,
+					"input": 4,
+					"output": 12,
+					"cacheRead": 0.6,
+					"cacheWrite": 0
+				}
 			},
 			"contextWindow": 500000,
 			"maxTokens": 500000,
@@ -283739,7 +284353,6 @@
 					"minimal": "low"
 				}
 			},
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -283791,18 +284404,18 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"promptCacheSessionHeader": "x-grok-conv-id"
 			},
-			"supportsComputerUseConfig": false,
+			"supportsComputerUse": false,
 			"compatConfig": {
-				"includeEncryptedReasoning": true,
-				"filterReasoningHistory": false,
-				"supportsImageDetailOriginal": false,
-				"omitReasoningEffort": false,
-				"supportsReasoningEffort": true,
 				"reasoningEffortMap": {
 					"minimal": "low",
 					"xhigh": "high",
 					"max": "high"
-				}
+				},
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"supportsImageDetailOriginal": false,
+				"omitReasoningEffort": false,
+				"supportsReasoningEffort": true
 			}
 		},
 		"grok-4.6": {
@@ -283817,10 +284430,18 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
+				"input": 2,
+				"output": 6,
+				"cacheRead": 0.5,
+				"cacheWrite": 0,
+				"longContext": {
+					"inputThreshold": 200000,
+					"inputThresholdInclusive": true,
+					"input": 4,
+					"output": 12,
+					"cacheRead": 1,
+					"cacheWrite": 0
+				}
 			},
 			"contextWindow": 500000,
 			"maxTokens": 500000,
@@ -283838,7 +284459,6 @@
 					"minimal": "low"
 				}
 			},
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -283888,16 +284508,16 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"promptCacheSessionHeader": "x-grok-conv-id"
 			},
-			"supportsComputerUseConfig": false,
+			"supportsComputerUse": false,
 			"compatConfig": {
+				"reasoningEffortMap": {
+					"minimal": "low"
+				},
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
 				"supportsImageDetailOriginal": false,
 				"omitReasoningEffort": false,
-				"supportsReasoningEffort": true,
-				"reasoningEffortMap": {
-					"minimal": "low"
-				}
+				"supportsReasoningEffort": true
 			}
 		},
 		"grok-build": {
@@ -283912,15 +284532,22 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
+				"input": 1.25,
+				"output": 2.5,
+				"cacheRead": 0.2,
+				"cacheWrite": 0,
+				"longContext": {
+					"inputThreshold": 200000,
+					"inputThresholdInclusive": true,
+					"input": 2.5,
+					"output": 5,
+					"cacheRead": 0.4,
+					"cacheWrite": 0
+				}
 			},
 			"contextWindow": 512000,
 			"maxTokens": 512000,
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -283972,7 +284599,7 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"promptCacheSessionHeader": "x-grok-conv-id"
 			},
-			"supportsComputerUseConfig": false,
+			"supportsComputerUse": false,
 			"compatConfig": {
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -283993,15 +284620,22 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
+				"input": 1,
+				"output": 2,
+				"cacheRead": 0.2,
+				"cacheWrite": 0,
+				"longContext": {
+					"inputThreshold": 200000,
+					"inputThresholdInclusive": true,
+					"input": 2,
+					"output": 4,
+					"cacheRead": 0.4,
+					"cacheWrite": 0
+				}
 			},
 			"contextWindow": 256000,
 			"maxTokens": 256000,
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -284053,7 +284687,7 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"promptCacheSessionHeader": "x-grok-conv-id"
 			},
-			"supportsComputerUseConfig": false,
+			"supportsComputerUse": false,
 			"compatConfig": {
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -284073,15 +284707,22 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
+				"input": 1.25,
+				"output": 2.5,
+				"cacheRead": 0.2,
+				"cacheWrite": 0,
+				"longContext": {
+					"inputThreshold": 200000,
+					"inputThresholdInclusive": true,
+					"input": 2.5,
+					"output": 5,
+					"cacheRead": 0.4,
+					"cacheWrite": 0
+				}
 			},
 			"contextWindow": 200000,
 			"maxTokens": 200000,
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -284133,7 +284774,7 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"promptCacheSessionHeader": "x-grok-conv-id"
 			},
-			"supportsComputerUseConfig": false,
+			"supportsComputerUse": false,
 			"compatConfig": {
 				"includeEncryptedReasoning": true,
 				"filterReasoningHistory": false,
@@ -286222,7 +286863,6 @@
 		},
 		"glm-5.3": {
 			"id": "glm-5.3",
-			"requiresGlyphTokenization": false,
 			"name": "GLM-5.3",
 			"api": "anthropic-messages",
 			"provider": "zai",
@@ -286249,6 +286889,7 @@
 				"defaultLevel": "max",
 				"requiresEffort": true
 			},
+			"requiresGlyphTokenization": false,
 			"tokenizer": "glm5",
 			"supportsComputerUse": false,
 			"compat": {

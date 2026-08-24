@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $which, hasFsCode, isEisdir, isEnoent, isEnotdir, Snowflake } from "@oh-my-pi/pi-utils";
+import { $which, hasFsCode, isEacces, isEisdir, isEnoent, isEnotdir, Snowflake } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import {
 	parseDiffHunks as parseCommitDiffHunks,
@@ -88,10 +88,15 @@ export interface CommitAuthor {
 export interface CommitDetails {
 	readonly author: CommitAuthor;
 	readonly message: string;
+	/** Comma-free parent SHAs; empty for a root commit. */
+	readonly parents: readonly string[];
+	/** Full commit SHA. */
+	readonly sha: string;
 }
 
 export interface CommitOptions {
 	readonly allowEmpty?: boolean;
+	readonly amend?: boolean;
 	readonly author?: CommitAuthor;
 	readonly files?: readonly string[];
 	readonly signal?: AbortSignal;
@@ -696,6 +701,10 @@ async function writeTempPatch(content: string): Promise<string> {
 
 type EntryType = "directory" | "file";
 
+function isPermissionError(err: unknown): boolean {
+	return isEacces(err) || hasFsCode(err, "EPERM");
+}
+
 function shouldRetry(err: unknown, n: number) {
 	if (isEnoent(err) || isEisdir(err) || isEnotdir(err) || hasFsCode(err, "ENFILE") || hasFsCode(err, "EMFILE"))
 		return false;
@@ -708,8 +717,8 @@ function shouldRetry(err: unknown, n: number) {
  * Bounded retry for synchronous I/O against `EINTR`. POSIX permits short syscalls
  * to be interrupted by signals; when that happens libc traditionally retries.
  * Node's sync wrappers surface the raw `EINTR` so we replicate the retry locally.
- * Any other error (and persistent EINTR after `EINTR_MAX_RETRIES`) is rethrown
- * for the caller's normal "optional metadata" classifier to handle.
+ * Path absence, path-type mismatches, descriptor exhaustion, and exhausted
+ * `EINTR` retries return `null`. Other errors are rethrown.
  */
 const EINTR_MAX_RETRIES = 3;
 function retryOnEintrSync<T>(op: () => T): T | null {
@@ -863,8 +872,13 @@ function resolveRepositorySync(startDir: string): GitRepository | null {
 		const gitEntryPath = path.join(current, ".git");
 		const entryType = getEntryTypeSync(gitEntryPath);
 		if (entryType) {
-			const repository = resolveRepoFromEntrySync(current, gitEntryPath, entryType);
-			if (repository) return repository;
+			try {
+				const repository = resolveRepoFromEntrySync(current, gitEntryPath, entryType);
+				if (repository) return repository;
+			} catch (err) {
+				if (entryType === "file" && isPermissionError(err)) return null;
+				throw err;
+			}
 		}
 		const parent = path.dirname(current);
 		if (parent === current) return null;
@@ -878,8 +892,13 @@ async function resolveRepository(startDir: string): Promise<GitRepository | null
 		const gitEntryPath = path.join(current, ".git");
 		const entryType = await getEntryType(gitEntryPath);
 		if (entryType) {
-			const repository = await resolveRepoFromEntry(current, gitEntryPath, entryType);
-			if (repository) return repository;
+			try {
+				const repository = await resolveRepoFromEntry(current, gitEntryPath, entryType);
+				if (repository) return repository;
+			} catch (err) {
+				if (entryType === "file" && isPermissionError(err)) return null;
+				throw err;
+			}
 		}
 		const parent = path.dirname(current);
 		if (parent === current) return null;
@@ -1428,6 +1447,7 @@ export async function commit(cwd: string, message: string, options: CommitOption
 		if (options.author.date) args.push(`--date=${options.author.date}`);
 	}
 	if (options.allowEmpty) args.push("--allow-empty");
+	if (options.amend) args.push("--amend");
 	if (options.files?.length) args.push("--", ...options.files);
 	return runChecked(cwd, args, { signal: options.signal, stdin: message });
 }
@@ -1738,14 +1758,16 @@ export const show = Object.assign(
 
 /** Read commit message and author metadata for replay/rewrite flows. */
 export async function commitDetails(cwd: string, revision: string, signal?: AbortSignal): Promise<CommitDetails> {
-	const raw = await runText(cwd, ["show", "-s", "--format=%an%x00%ae%x00%aI%x00%B", revision], {
+	const raw = await runText(cwd, ["show", "-s", "--format=%H%x00%P%x00%an%x00%ae%x00%aI%x00%B", revision], {
 		readOnly: true,
 		signal,
 	});
-	const [name = "", email = "", date = "", ...messageParts] = raw.split("\0");
+	const [sha = "", parentsRaw = "", name = "", email = "", date = "", ...messageParts] = raw.split("\0");
 	return {
 		author: { date, email, name },
 		message: messageParts.join("\0").replace(/\n$/, ""),
+		parents: parentsRaw.split(" ").filter(Boolean),
+		sha,
 	};
 }
 
