@@ -100,6 +100,8 @@ export type DaemonOperation =
 	| { op: "shutdown" };
 
 /** Typed broker result decoded before it reaches tool code. */
+export type DaemonRestartIncarnation = "continued" | "replaced" | "unknown";
+
 export type DaemonRpcResult =
 	| { op: "ping"; projectDir: string; capabilities?: string[] }
 	| { op: "start"; daemon: DaemonSnapshot; readyTimedOut: boolean }
@@ -119,7 +121,7 @@ export type DaemonRpcResult =
 	| { op: "wait"; daemon: DaemonSnapshot; matched?: string; timedOut: boolean }
 	| { op: "send"; daemon: DaemonSnapshot }
 	| { op: "stop"; daemon: DaemonSnapshot }
-	| { op: "restart"; daemon: DaemonSnapshot }
+	| { op: "restart"; daemon: DaemonSnapshot; incarnation: DaemonRestartIncarnation }
 	| { op: "describe"; daemon: DaemonSnapshot; spec: DaemonSpec }
 	| { op: "shutdown" };
 
@@ -283,6 +285,13 @@ function progressBatchKind(value: unknown): ProgressBatchKind {
 	const kind = stringValue(value, "output.batchKind");
 	if (kind === "progress" || kind === "artifact-only" || kind === "suppression-summary") return kind;
 	throw new Error(`Unknown progress batch kind: ${kind}`);
+}
+
+function restartIncarnation(value: unknown): DaemonRestartIncarnation {
+	if (value === undefined) return "unknown";
+	const incarnation = stringValue(value, "result.incarnation");
+	if (incarnation === "continued" || incarnation === "replaced" || incarnation === "unknown") return incarnation;
+	throw new Error(`Unknown restart incarnation: ${incarnation}`);
 }
 
 function progressReminder(value: unknown): ProgressReminder | undefined {
@@ -632,7 +641,11 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 		case "stop":
 			return { op: "stop", daemon: parseDaemonSnapshot(source.daemon) };
 		case "restart":
-			return { op: "restart", daemon: parseDaemonSnapshot(source.daemon) };
+			return {
+				op: "restart",
+				daemon: parseDaemonSnapshot(source.daemon),
+				incarnation: restartIncarnation(source.incarnation),
+			};
 		case "describe":
 			return {
 				op: "describe",

@@ -282,7 +282,7 @@ Stealth's on by default, so pages see a normal user instead of a headless bot. T
 **Coordination**
 
 - `task` — fan out subagents in parallel, optionally workspace-isolated.
-- `hub` — message live agents, wait on or cancel background jobs, and supervise long-running processes.
+- `hub` — message live agents, control background jobs, and supervise long-running processes with optional output notifications.
 - `todo` — ordered mutations over the session todo list with phase tracking.
 - `ask` — structured follow-up questions for interactive runs.
 
