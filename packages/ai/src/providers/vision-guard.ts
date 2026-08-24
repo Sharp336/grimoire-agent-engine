@@ -66,6 +66,15 @@ export function isDashscopeCompatibleModeTextOnlyQwen(model: Model<"openai-compl
 }
 
 /**
+ * Multimodal markers that opt a DeepSeek SKU out of the text-only guard below.
+ *
+ * `deepseek-ocr` is served by Novita; `*vision*` covers the catalog's
+ * `deepseek-v4-flash-vision-exp` (issue #9623) and any future vision SKU that
+ * carries the marker in its id or display name.
+ */
+const DEEPSEEK_MULTIMODAL_MARKERS = ["deepseek-ocr", "vision"] as const;
+
+/**
  * Detect known text-only DeepSeek models served via OpenAI-compatible Chat
  * Completions endpoints whose server-side deserializers reject `image_url`
  * content parts with HTTP 400 (`unknown variant \`image_url\`, expected \`text\``).
@@ -73,12 +82,16 @@ export function isDashscopeCompatibleModeTextOnlyQwen(model: Model<"openai-compl
  * Used as a defensive override in `convertMessages` so misconfigured model
  * definitions or user overrides (e.g. `models.yml` claiming `input: [text, image]`)
  * do not crash the session with an unrecoverable 400.
+ *
+ * DeepSeek now ships genuinely multimodal SKUs, so an explicit multimodal
+ * marker in the id or name opts out of the blanket rule — otherwise the guard
+ * strips images from a model the bundled catalog itself declares as
+ * `input: [text, image]` (issue #9623).
  */
 export function isTextOnlyDeepSeek(model: Model<"openai-completions">): boolean {
 	const id = model.id.toLowerCase();
 	const name = (model.name ?? "").toLowerCase();
-	// DeepSeek OCR is a genuinely multimodal model served by Novita.
-	if (id.includes("deepseek-ocr") || name.includes("deepseek-ocr")) return false;
+	if (DEEPSEEK_MULTIMODAL_MARKERS.some(marker => id.includes(marker) || name.includes(marker))) return false;
 	return (
 		modelMatchesHost(model, "deepseekFamily") ||
 		isDeepseekModelIdOrName(model.id) ||
