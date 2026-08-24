@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Friendli GLM reasoning models now select effort tiers correctly instead of collapsing to identical requests.
+
 ## [18.0.4] - 2026-08-24
 
 ### Fixed

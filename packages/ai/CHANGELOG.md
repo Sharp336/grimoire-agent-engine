@@ -28,6 +28,7 @@
 ### Changed
 
 - Broker-backed startup no longer blocks on a broker round trip when the encrypted snapshot cache is fresh: the credential store starts from the cached snapshot and the background snapshot stream revalidates immediately (stale-while-revalidate). First launches and expired caches still fail fast with the actionable broker error.
+- Friendli GLM-5.2 reasoning models now emit `reasoning_effort` alongside the `chat_template_kwargs.enable_thinking` toggle, so the high/max effort selection no longer collapses to a single wire body. The gate is not model-specific: a discovered `thinking.efforts` ladder from `/v1/models` is authoritative for any Friendli reasoning model, with the GLM-5.2+ identity check as a fallback for custom configs without discovery data.
 
 ### Fixed
 
