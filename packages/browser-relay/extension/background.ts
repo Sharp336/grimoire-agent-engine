@@ -27,6 +27,42 @@ const ORPHAN_GRACE_MS = 30_000;
 let ws: WebSocket | null = null;
 let reconnectDelay = RECONNECT_MIN_MS;
 let pingTimer: NodeJS.Timeout | null = null;
+const pendingAttaches = new Set<Promise<void>>();
+const guardDetachments = new Set<number>();
+
+const RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
+const recoverableTabIds = new Set<number>();
+const recoverableReady = chrome.storage.session
+	.get({ [RECOVERABLE_TAB_IDS_KEY]: [] })
+	.then(stored => {
+		const ids = stored[RECOVERABLE_TAB_IDS_KEY];
+		if (!Array.isArray(ids)) return;
+		for (const id of ids) {
+			if (typeof id === "number") recoverableTabIds.add(id);
+		}
+	})
+	.catch(() => {});
+let recoverableUpdates: Promise<void> = recoverableReady;
+
+function updateRecoverable(update: () => void): Promise<void> {
+	recoverableUpdates = recoverableUpdates.then(async () => {
+		update();
+		await chrome.storage.session.set({ [RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds] }).catch(() => {});
+	});
+	return recoverableUpdates;
+}
+
+function rememberRecoverable(tabIds: number[]): Promise<void> {
+	return updateRecoverable(() => {
+		for (const tabId of tabIds) recoverableTabIds.add(tabId);
+	});
+}
+
+function forgetRecoverable(tabId: number): Promise<void> {
+	return updateRecoverable(() => {
+		recoverableTabIds.delete(tabId);
+	});
+}
 
 /**
  * The extension owns its `chrome.debugger` attachments: it outlives the relay,
@@ -39,7 +75,11 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 	setTimer: (fn, ms) => setTimeout(fn, ms),
 	clearTimer: handle => clearTimeout(handle),
 	detachAll: tabIds => {
-		for (const tabId of tabIds) void chrome.debugger.detach({ tabId }).catch(() => {});
+		void rememberRecoverable(tabIds);
+		for (const tabId of tabIds) {
+			guardDetachments.add(tabId);
+			void chrome.debugger.detach({ tabId }).catch(() => guardDetachments.delete(tabId));
+		}
 	},
 });
 
@@ -154,6 +194,11 @@ async function setBadge(connected: boolean): Promise<void> {
 }
 
 async function buildHello(): Promise<ExtToRelayMessage> {
+	// An attach requested by the previous socket can finish during a fast
+	// reconnect. Wait for it before taking the hello snapshot so the replacement
+	// relay learns the real attachment state instead of stranding the tab.
+	await Promise.allSettled([...pendingAttaches]);
+	await recoverableUpdates;
 	const [tabs, targets] = await Promise.all([chrome.tabs.query({}), chrome.debugger.getTargets()]);
 	const snapshots: TabSnapshot[] = [];
 	for (const tab of tabs) {
@@ -162,7 +207,13 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 	}
 	const attachedTabIds: number[] = [];
 	for (const target of targets) {
-		if (target.attached && target.tabId !== undefined) attachedTabIds.push(target.tabId);
+		if (target.attached && target.tabId !== undefined) {
+			attachedTabIds.push(target.tabId);
+			// Re-seed ownership after an MV3 worker restart. Without this, the
+			// next relay outage has nothing to sweep even though Chrome retained
+			// this extension's debugger attachment.
+			attachmentGuard.track(target.tabId);
+		}
 	}
 	const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
 	return {
@@ -171,18 +222,38 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 		browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
 		tabs: snapshots,
 		attachedTabIds,
+		recoverableTabIds: [...recoverableTabIds],
 	};
 }
 
-async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>): Promise<unknown> {
+async function attachTab(tabId: number, socket: WebSocket): Promise<void> {
+	const pending = chrome.debugger.attach({ tabId }, "1.3");
+	pendingAttaches.add(pending);
+	try {
+		await pending;
+		// The relay that requested this attachment disappeared while Chrome was
+		// still resolving attach(). Its pending RPC was rejected by RelayBridge,
+		// so no downstream session can own the resulting debugger attachment.
+		if (ws !== socket) {
+			await chrome.debugger.detach({ tabId }).catch(() => {});
+			return;
+		}
+		attachmentGuard.track(tabId);
+		await forgetRecoverable(tabId);
+	} finally {
+		pendingAttaches.delete(pending);
+	}
+}
+
+async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>, socket: WebSocket): Promise<unknown> {
 	switch (msg.op) {
 		case "attach":
-			await chrome.debugger.attach({ tabId: msg.tabId }, "1.3");
-			attachmentGuard.track(msg.tabId);
+			await attachTab(msg.tabId, socket);
 			return {};
 		case "detach":
 			await chrome.debugger.detach({ tabId: msg.tabId });
 			attachmentGuard.untrack(msg.tabId);
+			await forgetRecoverable(msg.tabId);
 			return {};
 		case "send":
 			return await chrome.debugger.sendCommand(
@@ -213,7 +284,7 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>): Promise<un
 	}
 }
 
-function handleRelayMessage(raw: string): void {
+function handleRelayMessage(socket: WebSocket, raw: string): void {
 	let msg: RelayToExtMessage;
 	try {
 		msg = JSON.parse(raw) as RelayToExtMessage;
@@ -221,10 +292,23 @@ function handleRelayMessage(raw: string): void {
 		return;
 	}
 	if (msg.t === "pong") return;
-	void runRpc(msg)
-		.then(result => post({ t: "rpcResult", id: msg.id, ok: true, result }))
+	void runRpc(msg, socket)
+		.then(result => {
+			if (ws === socket && socket.readyState === WebSocket.OPEN) {
+				socket.send(JSON.stringify({ t: "rpcResult", id: msg.id, ok: true, result } satisfies ExtToRelayMessage));
+			}
+		})
 		.catch((err: unknown) => {
-			post({ t: "rpcResult", id: msg.id, ok: false, error: err instanceof Error ? err.message : String(err) });
+			if (ws === socket && socket.readyState === WebSocket.OPEN) {
+				socket.send(
+					JSON.stringify({
+						t: "rpcResult",
+						id: msg.id,
+						ok: false,
+						error: err instanceof Error ? err.message : String(err),
+					} satisfies ExtToRelayMessage),
+				);
+			}
 		});
 }
 
@@ -244,12 +328,14 @@ async function connect(): Promise<void> {
 		reconnectDelay = RECONNECT_MIN_MS;
 		attachmentGuard.onConnected();
 		void setBadge(true);
-		void buildHello().then(hello => post(hello));
+		void buildHello().then(hello => {
+			if (ws === socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(hello));
+		});
 		clearInterval(pingTimer ?? undefined);
 		pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);
 	};
 	socket.onmessage = event => {
-		if (typeof event.data === "string") handleRelayMessage(event.data);
+		if (typeof event.data === "string") handleRelayMessage(socket, event.data);
 	};
 	socket.onclose = () => {
 		if (ws !== socket) return;
@@ -281,6 +367,16 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 	// non-attachable target, or Chrome tore it down); stop tracking it so a
 	// later orphan sweep never tries to detach a tab we no longer own.
 	attachmentGuard.untrack(source.tabId);
+	// Guard detachments remain recoverable for a surviving relay session. Every
+	// other detach is a Chrome/user decision and revokes any stale recovery bit.
+	if (guardDetachments.delete(source.tabId)) {
+		// A reconnect can win the race with the asynchronous guard detach. Do not
+		// report it as a user detach (which bans the tab); refresh hello so the
+		// relay can restore only this guard-authorized attachment.
+		if (ws?.readyState === WebSocket.OPEN) void buildHello().then(hello => post(hello));
+		return;
+	}
+	void forgetRecoverable(source.tabId);
 	post({ t: "detached", tabId: source.tabId, reason });
 });
 
@@ -295,6 +391,7 @@ chrome.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => {
 });
 
 chrome.tabs.onRemoved.addListener(tabId => {
+	void forgetRecoverable(tabId);
 	post({ t: "tabRemoved", tabId });
 });
 

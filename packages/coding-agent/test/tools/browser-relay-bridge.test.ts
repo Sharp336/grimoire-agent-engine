@@ -54,7 +54,12 @@ function tab(overrides: Partial<TabSnapshot> & { tabId: number }): TabSnapshot {
 	};
 }
 
-function connect(bridge: RelayBridge, socket: FakeExtSocket, tabs: TabSnapshot[]): void {
+function connect(
+	bridge: RelayBridge,
+	socket: FakeExtSocket,
+	tabs: TabSnapshot[],
+	options: { attachedTabIds?: number[]; recoverableTabIds?: number[] } = {},
+): void {
 	bridge.extConnected(socket);
 	bridge.extMessage(
 		socket,
@@ -63,7 +68,8 @@ function connect(bridge: RelayBridge, socket: FakeExtSocket, tabs: TabSnapshot[]
 			userAgent: "test",
 			browserVersion: "Chrome/151.0.0.0",
 			tabs,
-			attachedTabIds: [],
+			attachedTabIds: options.attachedTabIds ?? [],
+			recoverableTabIds: options.recoverableTabIds ?? [],
 		}),
 	);
 }
@@ -293,11 +299,28 @@ describe("RelayBridge tab grouping", () => {
 		bridge.extClosed(ext);
 
 		const ext2 = new FakeExtSocket();
-		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })]);
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
 		await flush();
 
 		const attaches = ext2.rpcs("attach");
 		expect(attaches).toHaveLength(1);
 		expect(attaches[0]!.tabId).toBe(1);
+	});
+
+	it("preserves a user's debugger detach while disconnected", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.extClosed(ext);
+
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1 })]);
+		await flush();
+
+		expect(ext2.rpcs("attach")).toHaveLength(0);
 	});
 });

@@ -44,6 +44,8 @@ export type ExtToRelayMessage =
 			tabs: TabSnapshot[];
 			/** Tabs that already have a `chrome.debugger` attachment (relay reconciles after a service-worker restart). */
 			attachedTabIds: number[];
+			/** Tabs detached by the extension's orphan guard and therefore safe to restore for surviving sessions. */
+			recoverableTabIds?: number[];
 	  }
 	| { t: "cdpEvent"; tabId: number; sessionId?: string; method: string; params?: Record<string, unknown> }
 	| { t: "detached"; tabId: number; reason: string }

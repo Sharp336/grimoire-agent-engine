@@ -288,6 +288,7 @@ export class RelayBridge {
 		this.#extInfo = { userAgent: msg.userAgent, browserVersion: msg.browserVersion };
 		const seen = new Set<number>();
 		const attachedNow = new Set(msg.attachedTabIds);
+		const recoverableNow = new Set(msg.recoverableTabIds ?? []);
 		for (const snap of msg.tabs) {
 			seen.add(snap.tabId);
 			this.#onTabUpsert(snap, { silent: true });
@@ -298,9 +299,11 @@ export class RelayBridge {
 		for (const tab of this.#tabs.values()) {
 			tab.attached = attachedNow.has(tab.tabId);
 			tab.attaching = null;
-			// A service-worker restart or orphan sweep can drop attachments while
-			// downstream connections still hold sessions: restore them best-effort.
-			if (!tab.attached && this.#sessionHolders(tab.tabId).length > 0) {
+			// Only guard-initiated detachments are safe to reverse. A missing
+			// attachment can also mean the user clicked Chrome's Cancel button while
+			// the extension socket was down; that explicit opt-out must survive the
+			// reconnect even when the relay still has session holders.
+			if (!tab.attached && recoverableNow.has(tab.tabId) && this.#sessionHolders(tab.tabId).length > 0) {
 				void this.#ensureAttached(tab).then(ok => {
 					if (!ok) this.#onTabDetached(tab.tabId, "reattach_failed");
 				});
