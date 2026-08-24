@@ -315,6 +315,35 @@ class ProtocolParsingTests(unittest.TestCase):
             ({}, {"description": "Push to production"}),
         )
 
+    def test_parse_select_request_preserves_option_details_and_help_text(
+        self,
+    ) -> None:
+        notification = parse_notification(
+            {
+                "type": "extension_ui_request",
+                "id": "ui-plan-first-details",
+                "method": "select",
+                "title": "How would you like me to continue?",
+                "options": ["Research first", "Proceed directly"],
+                "optionDetails": [
+                    {},
+                    {"description": "Skip research and start implementation"},
+                ],
+                "helpText": (
+                    "Turn off Plan-First Suggestions in /settings → Tasks → Modes."
+                ),
+            }
+        )
+
+        self.assertIsInstance(notification, ExtensionUiRequest)
+        self.assertEqual(
+            (notification.option_details, notification.help_text),
+            (
+                ({}, {"description": "Skip research and start implementation"}),
+                "Turn off Plan-First Suggestions in /settings → Tasks → Modes.",
+            ),
+        )
+
     def test_extension_ui_request_preserves_positional_constructor(self) -> None:
         request = ExtensionUiRequest(
             "ui-legacy", "confirm", "Confirm", None, "Continue?"

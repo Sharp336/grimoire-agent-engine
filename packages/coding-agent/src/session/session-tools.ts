@@ -700,6 +700,17 @@ export class SessionTools {
 		return this.getEnabledToolNames().filter(name => isMCPToolName(name) && this.#toolRegistry.has(name));
 	}
 
+	/** Enabled MCP tools partitioned from their current load-mode metadata. */
+	getSelectedMCPToolPresentation(): { enabled: string[]; mounted: string[] } {
+		const enabled = this.getSelectedMCPToolNames();
+		const mounted = enabled.filter(name => {
+			const tool = this.#toolRegistry.get(name);
+			if (tool === undefined || !isMountableUnderXdev(tool)) return false;
+			return tool.approval !== "write" && tool.approval !== "exec";
+		});
+		return { enabled, mounted };
+	}
+
 	/**
 	 * Wrap a tool with a permission-gate proxy when an ACP client is connected.
 	 * Only wraps tools whose name is in PERMISSION_REQUIRED_TOOLS and only when
@@ -827,7 +838,12 @@ export class SessionTools {
 		);
 	}
 
-	async #applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
+	async #applyActiveToolsByName(
+		toolNames: string[],
+		forcePromptRefresh = false,
+		signal?: AbortSignal,
+		exactMountedToolNames?: ReadonlySet<string>,
+	): Promise<void> {
 		signal?.throwIfAborted();
 		toolNames = normalizeToolNames(toolNames);
 		const codeMode = resolveCodeMode({
@@ -860,14 +876,12 @@ export class SessionTools {
 		const xdevWriteAvailable = builtInWriteAvailable && selectedTools.some(({ name }) => name === "write");
 		const isPresentationPinned = (name: string): boolean =>
 			this.#presentationPinnedToolNames?.has(name) === true || this.#runtimeSelectedToolNames?.has(name) === true;
-		const mountCandidates = selectedTools.filter(
-			({ name, tool }) =>
-				this.#xdev !== undefined &&
-				xdevReadAvailable &&
-				xdevWriteAvailable &&
-				!isPresentationPinned(name) &&
-				isMountableUnderXdev(tool),
-		);
+		const mountCandidates = selectedTools.filter(({ name, tool }) => {
+			if (this.#xdev === undefined || isPresentationPinned(name) || !isMountableUnderXdev(tool)) return false;
+			return exactMountedToolNames === undefined
+				? xdevReadAvailable && xdevWriteAvailable
+				: exactMountedToolNames.has(name);
+		});
 		const mountNames = new Set(mountCandidates.map(({ name }) => name));
 		// Demoted tools stay reachable through the eval bridge, so nothing is
 		// mounted under xd:// while code mode restricts the direct surface.
@@ -888,7 +902,7 @@ export class SessionTools {
 			builtInWriteAvailable = writeRegistration ? (await untilAborted(signal, writeRegistration)) === true : false;
 			if (builtInWriteAvailable) this.#builtInToolNames.add("write");
 		}
-		if (transportNeeded && builtInWriteAvailable) {
+		if (transportNeeded && builtInWriteAvailable && (exactMountedToolNames === undefined || xdevWriteAvailable)) {
 			const write = this.#toolRegistry.get("write");
 			if (write && !validToolNames.includes("write")) {
 				tools.push(this.#wrapToolForAcpPermission(write));
@@ -1232,6 +1246,7 @@ export class SessionTools {
 		mountedToolNames: string[],
 		forcePromptRefresh = false,
 		signal?: AbortSignal,
+		forceMountedPartition = false,
 	): Promise<void> {
 		return this.runToolRegistryMutation(async () => {
 			const normalized = normalizeToolNames(toolNames);
@@ -1243,6 +1258,7 @@ export class SessionTools {
 				normalized.includes("write"),
 				forcePromptRefresh,
 				signal,
+				forceMountedPartition,
 			);
 		}, signal);
 	}
@@ -1258,6 +1274,7 @@ export class SessionTools {
 		writeSelected: boolean,
 		forcePromptRefresh = false,
 		signal?: AbortSignal,
+		exactPartition = false,
 	): Promise<void> {
 		const transportWriteActive =
 			writeSelected &&
@@ -1270,7 +1287,12 @@ export class SessionTools {
 			normalized.filter(name => !mounted.has(name) && !(name === "write" && transportWriteActive)),
 		);
 		try {
-			await this.#applyActiveToolsByName(normalized, forcePromptRefresh, signal);
+			await this.#applyActiveToolsByName(
+				normalized,
+				forcePromptRefresh,
+				signal,
+				exactPartition ? mounted : undefined,
+			);
 		} catch (error) {
 			this.#runtimeSelectedToolNames = previousRuntimeSelectedToolNames;
 			throw error;

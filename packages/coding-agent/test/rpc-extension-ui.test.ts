@@ -90,6 +90,33 @@ describe("RPC extension UI", () => {
 		expect(await result).toBe("Research first");
 	});
 
+	it("emits option details and help text together on one select frame", async () => {
+		const pendingRequests = new Map<string, PendingExtensionRequest>();
+		const output = vi.fn<(frame: object) => void>();
+		const result = requestRpcSelect(
+			pendingRequests,
+			output,
+			"How would you like me to continue?",
+			["Research first", { label: "Proceed directly", description: "Skip research and start implementation" }],
+			{ helpText: "Turn off Plan-First Suggestions in /settings → Tasks → Modes." },
+		);
+		const request = requireRequest(output.mock.calls[0]?.[0]);
+
+		expect(output).toHaveBeenCalledWith({
+			type: "extension_ui_request",
+			id: request.id,
+			method: "select",
+			title: "How would you like me to continue?",
+			options: ["Research first", "Proceed directly"],
+			optionDetails: [{}, { description: "Skip research and start implementation" }],
+			timeout: undefined,
+			helpText: "Turn off Plan-First Suggestions in /settings → Tasks → Modes.",
+		});
+
+		resolveSelection(pendingRequests, request.id, "Proceed directly");
+		expect(await result).toBe("Proceed directly");
+	});
+
 	it("cancels the remote dialog when its signal aborts", async () => {
 		const pendingRequests = new Map<string, PendingExtensionRequest>();
 		const output = vi.fn<(frame: object) => void>();

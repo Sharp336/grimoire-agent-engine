@@ -500,6 +500,35 @@ describe("AgentSession plan-mode convergence", () => {
 		expect(harness.session.getActiveToolNames()).toEqual(["read"]);
 	});
 
+	it("restores live essential and discoverable MCP tools when PlanYolo commits a new session", async () => {
+		const harness = await createPlanSession([{ content: ["planning"] }], {
+			planYolo: true,
+			xdev: true,
+		});
+		await harness.session.prompt("make a plan");
+		await harness.session.waitForIdle();
+		expect(harness.session.getPlanModeState()?.enabled).toBe(true);
+
+		const contextTool = makeMcpTool("mcp__context_query_docs", "essential");
+		const chromeTool = makeMcpTool("mcp__chrome_devtools_list_pages", "discoverable");
+		await harness.session.refreshMCPTools([contextTool, chromeTool]);
+
+		expect(await harness.session.newSession()).toBe(true);
+		expect({
+			planMode: harness.session.getPlanModeState(),
+			proposalHandler: harness.session.peekPlanProposalHandler(),
+			activeTools: harness.session.getActiveToolNames(),
+			mountedTools: harness.session.getMountedXdevToolNames(),
+			selectedMcpTools: harness.session.getSelectedMCPToolNames(),
+		}).toEqual({
+			planMode: undefined,
+			proposalHandler: undefined,
+			activeTools: ["read", "mcp__context_query_docs"],
+			mountedTools: ["mcp__chrome_devtools_list_pages"],
+			selectedMcpTools: ["mcp__context_query_docs", "mcp__chrome_devtools_list_pages"],
+		});
+	});
+
 	it("keeps the replacement retryable when committed PlanYolo tool restoration fails", async () => {
 		const activeToolApplyGate = { fail: false };
 		const harness = await createPlanSession([{ content: ["planning A"] }, { content: ["planning B"] }], {

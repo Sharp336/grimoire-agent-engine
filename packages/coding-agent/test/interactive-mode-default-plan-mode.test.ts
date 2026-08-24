@@ -56,6 +56,7 @@ function createExtensionRunnerCapture(
 		getRegisteredCommands: () => [],
 		getCommandDiagnostics: () => [],
 		getShortcuts: () => [],
+		getComposerShapes: () => [],
 		setToolApprovalPreviewWaiter: (_waiter: (toolCallId: string) => Promise<void>) => () => {},
 	} as unknown as NonNullable<AgentSessionConfig["extensionRunner"]>;
 }

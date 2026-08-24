@@ -1526,7 +1526,7 @@ describe("AskDialogComponent", () => {
 			};
 
 			const questionTab = renderLines();
-			expectFrame(questionTab, "Space/Enter toggle");
+			expectFrame(questionTab, "Space toggle · Enter submit");
 			expect(questionTab.some(line => line.includes("Option A"))).toBe(true);
 
 			component.handleInput(TAB);

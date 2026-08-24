@@ -518,8 +518,9 @@ export class AgentSession {
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	#pendingNextTurnMessages: CustomMessage[] = [];
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
-	/** Blocks the next provider turn until a failed committed reset can rebuild its base prompt. */
-	#resetContextPromptRefreshPending = false;
+	/** Monotonic owner token for a committed reset's prompt-refresh obligation. */
+	#resetContextPromptRefreshGeneration = 0;
+	#resetContextPromptRefreshPendingGeneration: number | undefined;
 	#resetContextPromptRefreshInFlight: Promise<void> | undefined;
 	#queuedMessageDrainScheduled = false;
 	#planModeState: PlanModeState | undefined;
@@ -1047,13 +1048,19 @@ export class AgentSession {
 			configuredThinkingLevel: () => this.configuredThinkingLevel(),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			setModelTemporary: (model, thinkingLevel, options) => this.setModelTemporary(model, thinkingLevel, options),
-			setActiveToolsByName: names => this.setActiveToolsByName(names),
-			setActiveToolPresentation: (toolNames, mountedToolNames, forcePromptRefresh) =>
-				this.setActiveToolPresentation(toolNames, mountedToolNames, forcePromptRefresh),
+			setActiveToolPresentation: (toolNames, mountedToolNames, forcePromptRefresh, forceMountedPartition) =>
+				this.setActiveToolPresentation(
+					toolNames,
+					mountedToolNames,
+					forcePromptRefresh,
+					undefined,
+					forceMountedPartition,
+				),
 			runToolRegistryMutation: mutation => this.runToolRegistryMutation(mutation),
 			getActiveToolNames: () => this.getActiveToolNames(),
 			getEnabledToolNames: () => this.getEnabledToolNames(),
 			getSelectedMCPToolNames: () => this.getSelectedMCPToolNames(),
+			getSelectedMCPToolPresentation: () => this.getSelectedMCPToolPresentation(),
 			getMountedXdevToolNames: () => this.getMountedXdevToolNames(),
 			hasBuiltInTool: name => this.hasBuiltInTool(name),
 			getPlanModeState: () => this.getPlanModeState(),
@@ -4336,7 +4343,7 @@ export class AgentSession {
 			// calls, and error state. agent.reset() keeps the model and system prompt.
 			this.agent.reset();
 			committed = true;
-			this.#resetContextPromptRefreshPending = true;
+			this.#resetContextPromptRefreshPendingGeneration = ++this.#resetContextPromptRefreshGeneration;
 			const result = { droppedCount };
 			this.#pendingNextTurnMessages = [];
 			this.#scheduledHiddenNextTurnGeneration = undefined;
@@ -4745,6 +4752,11 @@ export class AgentSession {
 		return this.#tools.getSelectedMCPToolNames();
 	}
 
+	/** Enabled MCP tools partitioned from their current load-mode metadata. */
+	getSelectedMCPToolPresentation(): { enabled: string[]; mounted: string[] } {
+		return this.#tools.getSelectedMCPToolPresentation();
+	}
+
 	#applyActiveToolsByName(toolNames: string[]): Promise<void> {
 		return this.#tools.applyActiveToolsByName(toolNames);
 	}
@@ -4788,8 +4800,15 @@ export class AgentSession {
 		mountedToolNames: string[],
 		forcePromptRefresh = false,
 		signal?: AbortSignal,
+		forceMountedPartition = false,
 	): Promise<void> {
-		return this.#tools.setActiveToolPresentation(toolNames, mountedToolNames, forcePromptRefresh, signal);
+		return this.#tools.setActiveToolPresentation(
+			toolNames,
+			mountedToolNames,
+			forcePromptRefresh,
+			signal,
+			forceMountedPartition,
+		);
 	}
 
 	/**
@@ -4861,28 +4880,33 @@ export class AgentSession {
 
 	/** Rebuilds the stable base prompt for the current tools and model. */
 	async refreshBaseSystemPrompt(): Promise<void> {
+		const resetGeneration = this.#resetContextPromptRefreshPendingGeneration;
 		await this.#tools.refreshBaseSystemPrompt();
-		this.#resetContextPromptRefreshPending = false;
+		if (resetGeneration !== undefined && this.#resetContextPromptRefreshPendingGeneration === resetGeneration) {
+			this.#resetContextPromptRefreshPendingGeneration = undefined;
+		}
 	}
 
 	/**
 	 * Satisfies a committed reset's prompt-refresh obligation exactly once for
 	 * all provider entry paths. A failed attempt leaves the obligation pending;
-	 * concurrent callers share the same attempt instead of queueing rebuilds.
+	 * concurrent callers share the same attempt for a generation instead of
+	 * queueing duplicate rebuilds.
 	 */
 	async #ensureResetContextPromptRefresh(signal?: AbortSignal): Promise<void> {
-		if (!this.#resetContextPromptRefreshPending) return;
-		signal?.throwIfAborted();
-		let attempt = this.#resetContextPromptRefreshInFlight;
-		if (!attempt) {
-			attempt = this.refreshBaseSystemPrompt();
-			this.#resetContextPromptRefreshInFlight = attempt;
-		}
-		try {
-			await attempt;
-		} finally {
-			if (this.#resetContextPromptRefreshInFlight === attempt) {
-				this.#resetContextPromptRefreshInFlight = undefined;
+		while (this.#resetContextPromptRefreshPendingGeneration !== undefined) {
+			signal?.throwIfAborted();
+			let attempt = this.#resetContextPromptRefreshInFlight;
+			if (!attempt) {
+				attempt = this.refreshBaseSystemPrompt();
+				this.#resetContextPromptRefreshInFlight = attempt;
+			}
+			try {
+				await attempt;
+			} finally {
+				if (this.#resetContextPromptRefreshInFlight === attempt) {
+					this.#resetContextPromptRefreshInFlight = undefined;
+				}
 			}
 		}
 		signal?.throwIfAborted();

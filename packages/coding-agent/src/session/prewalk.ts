@@ -65,16 +65,17 @@ export interface PrewalkCoordinatorHost {
 		thinkingLevel?: ConfiguredThinkingLevel,
 		options?: { ephemeral?: boolean },
 	): Promise<void>;
-	setActiveToolsByName(names: string[]): Promise<void>;
 	setActiveToolPresentation(
 		toolNames: string[],
 		mountedToolNames: string[],
 		forcePromptRefresh?: boolean,
+		forceMountedPartition?: boolean,
 	): Promise<void>;
 	runToolRegistryMutation<T>(mutation: () => Promise<T>): Promise<T>;
 	getActiveToolNames(): string[];
 	getEnabledToolNames(): string[];
 	getSelectedMCPToolNames(): string[];
+	getSelectedMCPToolPresentation(): { enabled: string[]; mounted: string[] };
 	getMountedXdevToolNames(): string[];
 	hasBuiltInTool(name: string): boolean;
 	getPlanModeState(): PlanModeState | undefined;
@@ -301,11 +302,12 @@ export class PrewalkCoordinator {
 		this.#host.setPlanModeState(undefined);
 		if (previousPresentation) {
 			await this.#host.runToolRegistryMutation(async () => {
-				const liveMCP = this.#host.getSelectedMCPToolNames();
-				const liveMountedMCP = this.#host.getMountedXdevToolNames().filter(isMCPToolName);
+				const liveMCP = this.#host.getSelectedMCPToolPresentation();
 				await this.#host.setActiveToolPresentation(
-					[...new Set([...previousPresentation.enabled, ...liveMCP])],
-					[...new Set([...previousPresentation.mounted, ...liveMountedMCP])],
+					[...new Set([...previousPresentation.enabled, ...liveMCP.enabled])],
+					[...new Set([...previousPresentation.mounted, ...liveMCP.mounted])],
+					false,
+					true,
 				);
 			});
 		}

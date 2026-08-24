@@ -9,6 +9,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { AgentSession, CommittedResetSessionContextError } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionMemory } from "@oh-my-pi/pi-coding-agent/session/session-memory";
 
 const STALE_FIRST_TURN_GUIDANCE = "## First-Response Planning Check\n\nStale guidance";
 const REBUILT_SYSTEM_PROMPT = "Rebuilt prompt without first-turn guidance";
@@ -16,6 +17,7 @@ const REBUILT_SYSTEM_PROMPT = "Rebuilt prompt without first-turn guidance";
 interface RebuildGate {
 	calls: number;
 	error?: Error;
+	onRebuild?: (call: number) => Promise<void>;
 }
 
 interface ResetHarness {
@@ -76,6 +78,7 @@ function createResetHarness(): ResetHarness {
 		modelRegistry: { getApiKey: async () => "test-key" } as never,
 		rebuildSystemPrompt: async () => {
 			gate.calls++;
+			await gate.onRebuild?.(gate.calls);
 			if (gate.error) throw gate.error;
 			return { systemPrompt: [REBUILT_SYSTEM_PROMPT] };
 		},
@@ -150,6 +153,35 @@ describe("AgentSession committed context reset failures", () => {
 
 		expect(harness.gate.calls).toBe(2);
 		expect(harness.providerSystemPrompts).toEqual([[REBUILT_SYSTEM_PROMPT]]);
+	});
+
+	it("keeps a reset refresh pending when an older refresh completes after the reset commits", async () => {
+		const harness = createResetHarness();
+		appendPriorTurn(harness);
+		const staleRefreshStarted = Promise.withResolvers<void>();
+		const releaseStaleRefresh = Promise.withResolvers<void>();
+		const resetMemoryStarted = Promise.withResolvers<void>();
+		const releaseResetMemory = Promise.withResolvers<void>();
+		harness.gate.onRebuild = async call => {
+			if (call !== 1) return;
+			staleRefreshStarted.resolve();
+			await releaseStaleRefresh.promise;
+		};
+		vi.spyOn(SessionMemory.prototype, "resetContextForNewTranscript").mockImplementation(async () => {
+			resetMemoryStarted.resolve();
+			await releaseResetMemory.promise;
+		});
+
+		const staleRefresh = harness.session.refreshBaseSystemPrompt();
+		await staleRefreshStarted.promise;
+		const reset = harness.session.resetSessionContext();
+		await resetMemoryStarted.promise;
+		releaseStaleRefresh.resolve();
+		await staleRefresh;
+		releaseResetMemory.resolve();
+		await reset;
+
+		expect(harness.gate.calls).toBe(2);
 	});
 
 	it("refreshes exactly once before an agent-initiated provider turn", async () => {
