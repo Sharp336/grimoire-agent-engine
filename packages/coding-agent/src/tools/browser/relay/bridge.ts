@@ -160,6 +160,8 @@ export class RelayBridge {
 	>();
 	/** Real child session id → owning tab, learned from `Target.attachedToTarget` events. */
 	#realSessionTabs = new Map<string, number>();
+	/** Waiters released when the next extension hello completes (or the socket drops). */
+	#helloWaiters: Array<() => void> = [];
 	#log: (message: string, data?: Record<string, unknown>) => void;
 	/** Tab-group appearance for driven tabs; null disables grouping. */
 	#group: { title: string; color: string } | null;
@@ -239,6 +241,13 @@ export class RelayBridge {
 			tab.ompGroupId = undefined;
 		}
 		this.#groupQueue.length = 0;
+		// A fresh socket may reconnect and deliver its hello; a command that raced
+		// in during the gap should re-evaluate against the reconnect state rather
+		// than block forever. Wake current waiters — #forwardToTab re-checks
+		// readiness and either proceeds or re-waits on the next socket.
+		const waiters = this.#helloWaiters;
+		this.#helloWaiters = [];
+		for (const wake of waiters) wake();
 	}
 
 	extMessage(socket: RelaySocket, raw: string): void {
@@ -326,6 +335,12 @@ export class RelayBridge {
 		}
 		this.#syncGrouping();
 		this.#log("extension connected", { tabs: this.#tabs.size, version: msg.browserVersion });
+		// Release any commands that arrived on surviving sessions after the socket
+		// reopened but before this hello was processed — recovery bookkeeping
+		// (retract/reattach, tab.attaching) is now in place, so they route correctly.
+		const waiters = this.#helloWaiters;
+		this.#helloWaiters = [];
+		for (const wake of waiters) wake();
 	}
 
 	// ---- downstream (puppeteer) lifecycle -------------------------------------
@@ -423,12 +438,18 @@ export class RelayBridge {
 			this.#reply(conn, msg, {});
 			return;
 		}
-		// A preserved page session can outlive a Chrome root swap: recovery
-		// re-announces the tab and arms a debugger reattach (#ensureAttached sets
-		// `tab.attaching`) that resolves asynchronously. Forwarding a command
-		// before that attach acknowledges would race chrome.debugger.attach() and
-		// Chrome can reject the command as unattached. Wait for the in-flight
-		// attach to settle first so preserved holders always land on a live tab.
+		// A preserved page session can outlive a Chrome root swap. Two ordering
+		// hazards follow a reconnect, both of which would forward this command onto
+		// a detached Chrome target and get it rejected:
+		//   1. The replacement socket has opened but its hello has not reached the
+		//      bridge yet, so recovery bookkeeping (retract/reattach) has not run and
+		//      `tab.attaching` is still null — the attach-gate below would be skipped.
+		//   2. The hello ran and armed a debugger reattach (#ensureAttached sets
+		//      `tab.attaching`) that resolves asynchronously; forwarding now would
+		//      race chrome.debugger.attach().
+		// Gate on the hello first (so recovery state exists), then on the resulting
+		// attach promise, so preserved holders always land on a live tab.
+		if (this.#ext && !this.#extInfo) await this.#awaitHello();
 		const tab = this.#tabs.get(tabId);
 		if (tab?.attaching) await tab.attaching;
 		try {
@@ -980,6 +1001,17 @@ export class RelayBridge {
 
 	#emit(conn: CdpConnection, method: string, params: Record<string, unknown>, sessionId?: string): void {
 		conn.socket.send(JSON.stringify({ sessionId, method, params }));
+	}
+
+	/**
+	 * Resolve once the current extension socket completes its hello handshake, or
+	 * immediately if the socket dropped (the caller re-checks and either proceeds
+	 * or errors). Used to hold a surviving session's command through the window
+	 * between a reconnect opening and its hello landing.
+	 */
+	#awaitHello(): Promise<void> {
+		if (this.#extInfo || !this.#ext) return Promise.resolve();
+		return new Promise<void>(resolve => this.#helloWaiters.push(resolve));
 	}
 
 	#rpc(req: RelayRpcRequest, timeoutMs = RPC_TIMEOUT_MS): Promise<unknown> {

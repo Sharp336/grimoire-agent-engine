@@ -551,4 +551,51 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send")[0]!.tabId).toBe(1);
 		expect(cdp.messages.find(m => m.id === cmdId)?.error).toBeUndefined();
 	});
+
+	it("holds a preserved session's command until the reconnect hello arrives", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.extClosed(ext);
+
+		// The replacement socket has opened but its hello has NOT been delivered yet,
+		// so recovery bookkeeping has not run and `tab.attaching` is still null.
+		const ext2 = new FakeExtSocket();
+		bridge.extConnected(ext2);
+
+		// A surviving session's command arrives in this gap. It must not be forwarded
+		// to the (still detached) target: no send RPC until the hello lands.
+		const cmdId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: cmdId, sessionId: pageSession, method: "Runtime.evaluate" }));
+		await flush();
+		expect(ext2.rpcs("send")).toHaveLength(0);
+		expect(ext2.rpcs("attach")).toHaveLength(0);
+
+		// The hello arrives: recovery re-announces the tab, arms the reattach, and the
+		// held command proceeds only after both the hello and the attach complete.
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "hello",
+				userAgent: "test",
+				browserVersion: "Chrome/151.0.0.0",
+				tabs: [tab({ tabId: 1, groupId: -1 })],
+				attachedTabIds: [],
+				recoverableTabIds: [1],
+			}),
+		);
+		await flush();
+		expect(ext2.rpcs("attach")).toHaveLength(1);
+		ack(bridge, ext2, "attach");
+		await flush();
+		ack(bridge, ext2, "send", { ok: true });
+		await flush();
+		expect(ext2.rpcs("send")).toHaveLength(1);
+		expect(ext2.rpcs("send")[0]!.tabId).toBe(1);
+		expect(cdp.messages.find(m => m.id === cmdId)?.error).toBeUndefined();
+	});
 });
