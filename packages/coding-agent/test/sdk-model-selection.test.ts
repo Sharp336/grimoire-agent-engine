@@ -1671,7 +1671,8 @@ describe("nonblocking default model discovery", () => {
 		const settings = Settings.isolated();
 		settings.setModelRole("default", "missing-provider/missing-model");
 		const startedAt = performance.now();
-		const refresh = vi.spyOn(modelRegistry, "refresh").mockImplementation(() => new Promise<void>(() => {}));
+		const refreshPending = Promise.withResolvers<void>();
+		const refresh = vi.spyOn(modelRegistry, "refresh").mockImplementation(() => refreshPending.promise);
 		try {
 			const { session } = await createAgentSession({
 				cwd,
@@ -1701,7 +1702,9 @@ describe("nonblocking default model discovery", () => {
 			}
 		} finally {
 			refresh.mockRestore();
+			refreshPending.resolve();
 			authStorage.close();
+			fs.rmSync(cwd, { recursive: true, force: true });
 		}
 	});
 });

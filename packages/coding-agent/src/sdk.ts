@@ -1476,6 +1476,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}),
 	);
 	let model = options.model;
+	let deferredModelResolution: Promise<Model | undefined> | undefined;
 	let modelFallbackMessage: string | undefined;
 	let initialRetryFallback: InitialRetryFallbackState | undefined;
 	// Identify session model strings to restore in fallback order. We do an
@@ -2569,17 +2570,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					(defaultRoleConfigured || !pick) &&
 					modelRegistry.getDiscoverableProviders().length > 0;
 				if (canDiscoverDefault) {
-					void modelRegistry
+					deferredModelResolution = modelRegistry
 						.refresh("online-if-uncached")
 						.then(async () => {
-							if (model || hasExplicitModel) return;
+							if (model || hasExplicitModel) return undefined;
 							const resolved = await tryResolveDefaultRole();
-							if (!resolved && pick) model = pick;
+							return resolved ? model : pick;
 						})
 						.catch(error => {
 							logger.warn("background model discovery failed", {
 								error: error instanceof Error ? error.message : String(error),
 							});
+							return pick;
 						});
 				} else if (pick) {
 					model = pick;
@@ -4085,6 +4087,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		} catch (error) {
 			logger.warn("Code Mode initialization at session startup failed", { error: String(error) });
 		}
+
+		void deferredModelResolution?.then(discovered => {
+			if (!discovered || session.model) return;
+			void session.setModelTemporary(discovered).catch(error => {
+				logger.warn("background model discovery model activation failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
+		});
 
 		return {
 			session,
