@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/login anysearch` and `ANYSEARCH_API_KEY` credential discovery.
+
 ## [18.0.4] - 2026-08-24
 
 ### Fixed
