@@ -3,6 +3,7 @@ import { CATALOG_PROVIDERS } from "@oh-my-pi/pi-catalog/provider-models/descript
 import {
 	commandCodeModelManagerOptions,
 	resolveCommandCodeApi,
+	resolveCommandCodeBaseUrl,
 } from "@oh-my-pi/pi-catalog/provider-models/command-code";
 
 describe("Command Code provider", () => {
@@ -19,6 +20,21 @@ describe("Command Code provider", () => {
 		expect(resolveCommandCodeApi("anthropic/claude-sonnet-4-6")).toBe("anthropic-messages");
 		expect(resolveCommandCodeApi("gpt-5.5")).toBe("openai-completions");
 		expect(resolveCommandCodeApi("deepseek/deepseek-v4-flash")).toBe("openai-completions");
+	});
+
+	test("normalizes provider overrides per wire", () => {
+		expect(resolveCommandCodeBaseUrl("anthropic-messages", "https://proxy.example/provider/v1")).toBe(
+			"https://proxy.example/provider",
+		);
+		expect(resolveCommandCodeBaseUrl("openai-completions", "https://proxy.example/provider/v1")).toBe(
+			"https://proxy.example/provider/v1",
+		);
+		expect(resolveCommandCodeBaseUrl("anthropic-messages", "https://proxy.example/provider")).toBe(
+			"https://proxy.example/provider",
+		);
+		expect(resolveCommandCodeBaseUrl("openai-completions", "https://proxy.example/provider")).toBe(
+			"https://proxy.example/provider/v1",
+		);
 	});
 
 	test("discovers one catalog while assigning the correct per-model base URL", async () => {
