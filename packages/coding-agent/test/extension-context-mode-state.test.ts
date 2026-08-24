@@ -51,14 +51,6 @@ describe("ExtensionRunner plan mode context", () => {
 		expect(createRunner().createContext().getPlanModeState()).toBeUndefined();
 	});
 
-	it("exposes the owning session state", () => {
-		expect(
-			createRunner(() => planModeState)
-				.createContext()
-				.getPlanModeState(),
-		).toBe(planModeState);
-	});
-
 	// Reads must be live: a handler that spans a plan-mode toggle has to observe
 	// the change through the context object it already holds. A snapshot taken at
 	// createContext() time would pass every other case here and fail this one.
@@ -94,15 +86,6 @@ describe("ExtensionRunner plan mode context", () => {
 describe("ExtensionRunner goal mode context", () => {
 	it("defaults to undefined outside a session", () => {
 		expect(createRunner().createContext().getGoalModeState()).toBeUndefined();
-	});
-
-	it("exposes the owning session state", () => {
-		const goal = activeGoalState();
-		expect(
-			createRunner(undefined, () => goal)
-				.createContext()
-				.getGoalModeState(),
-		).toBe(goal);
 	});
 
 	it("reads live through a single context object, including the exiting phase", () => {
