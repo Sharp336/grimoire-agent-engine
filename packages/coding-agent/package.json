@@ -39,6 +39,7 @@
     "fix": "biome check --write --unsafe . && bun run format-prompts",
     "fmt": "biome format --write . && bun run format-prompts",
     "format-prompts": "bun scripts/format-prompts.ts",
+    "eval:async-progress": "bun scripts/eval-async-progress.ts",
     "gen:tool-views": "bun --cwd=../collab-web run gen:tool-views",
     "gen:bundle": "bun scripts/bundle-dist.ts",
     "gen:native": "bun --cwd=../natives run gen:native",
