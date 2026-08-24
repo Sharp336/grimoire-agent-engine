@@ -73,6 +73,8 @@
 - Fixed joined collaboration guests becoming inconsistent with the host after host-side compaction.
 - Fixed `hub list` and child peer rosters counting parked agents from stale root sessions; the persisted roster now scopes to the current root, retries transient filesystem faults, and renders live rows through the production subagent prompt template with a truthful omitted count.
 - Fixed skill discovery not finding skills nested one namespace level deep (e.g. `skills/<namespace>/<skill>/SKILL.md`).
+- Extension-contributed skill paths (`resources_discover`) are now honored at session start and `/reload-plugins`.
+- Fixed freshly created task subagents missing extension-contributed skills that print, RPC, and TUI sessions already receive at startup.
 
 ## [18.0.6] - 2026-08-26
 

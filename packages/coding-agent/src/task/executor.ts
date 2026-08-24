@@ -3428,6 +3428,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				while (pendingExtensionMessages.length > 0) {
 					await awaitAbortable(Promise.all(pendingExtensionMessages.splice(0)));
 				}
+				// Same post-session_start snapshot as print/RPC/TUI sessions
+				// (runtime-init): extension-contributed skill directories from
+				// resources_discover must reach freshly created task subagents too,
+				// not only revived ones (which route through initializeExtensions).
+				await awaitAbortable(session.discoverStartupSkillPaths());
 			}
 
 			unsubscribe = monitor.attach(session);
