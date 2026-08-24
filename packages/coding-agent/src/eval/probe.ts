@@ -31,8 +31,10 @@ export const DEFAULT_PROBE_TIMEOUT_MS = 10_000;
 export interface BackendProbeOptions {
 	/** Aborts the probe when the parent turn is cancelled. */
 	signal?: AbortSignal;
-	/** Wall-clock ceiling in ms; clamped to {@link DEFAULT_PROBE_TIMEOUT_MS}. */
+	/** Requested wall-clock ceiling in ms. */
 	timeoutMs?: number;
+	/** Backend-specific upper bound; defaults to {@link DEFAULT_PROBE_TIMEOUT_MS}. */
+	maxTimeoutMs?: number;
 }
 
 /** Outcome of a single bounded probe spawn. */
@@ -61,12 +63,13 @@ export interface BoundedProbeSpawnOptions extends BackendProbeOptions {
  */
 export async function runBoundedProbe(
 	command: string[],
-	{ cwd, env, signal, timeoutMs }: BoundedProbeSpawnOptions,
+	{ cwd, env, signal, timeoutMs, maxTimeoutMs }: BoundedProbeSpawnOptions,
 ): Promise<BoundedProbeResult> {
 	if (signal?.aborted) {
 		return { exitCode: null, timedOut: false, aborted: true };
 	}
-	const bound = Math.min(timeoutMs && timeoutMs > 0 ? timeoutMs : DEFAULT_PROBE_TIMEOUT_MS, DEFAULT_PROBE_TIMEOUT_MS);
+	const ceiling = maxTimeoutMs && maxTimeoutMs > 0 ? maxTimeoutMs : DEFAULT_PROBE_TIMEOUT_MS;
+	const bound = Math.min(timeoutMs && timeoutMs > 0 ? timeoutMs : ceiling, ceiling);
 	const detached = process.platform !== "win32";
 	const proc = Bun.spawn(command, {
 		cwd,
@@ -164,9 +167,10 @@ export type CandidateProbeResult = { ok: true; index: number } | { ok: false; ab
  */
 export async function probeCandidates(
 	candidates: ProbeCandidate[],
-	{ cwd, signal, timeoutMs }: BackendProbeOptions & { cwd: string },
+	{ cwd, signal, timeoutMs, maxTimeoutMs }: BackendProbeOptions & { cwd: string },
 ): Promise<CandidateProbeResult> {
-	const bound = Math.min(timeoutMs && timeoutMs > 0 ? timeoutMs : DEFAULT_PROBE_TIMEOUT_MS, DEFAULT_PROBE_TIMEOUT_MS);
+	const ceiling = maxTimeoutMs && maxTimeoutMs > 0 ? maxTimeoutMs : DEFAULT_PROBE_TIMEOUT_MS;
+	const bound = Math.min(timeoutMs && timeoutMs > 0 ? timeoutMs : ceiling, ceiling);
 	const deadline = Date.now() + bound;
 	const failures: string[] = [];
 	for (let index = 0; index < candidates.length; index++) {
@@ -182,9 +186,10 @@ export async function probeCandidates(
 		try {
 			const probe = await runBoundedProbe(candidate.command, {
 				cwd,
-				env: candidate.env,
-				signal,
-				timeoutMs: remaining,
+					env: candidate.env,
+					signal,
+					timeoutMs: remaining,
+					maxTimeoutMs: bound,
 			});
 			if (probe.exitCode === 0) return { ok: true, index };
 			if (probe.aborted) return { ok: false, aborted: true, failures };

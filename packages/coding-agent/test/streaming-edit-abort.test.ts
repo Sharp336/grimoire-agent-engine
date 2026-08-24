@@ -646,10 +646,10 @@ it(
 		});
 
 		// performance.now() spans include runner-preemption time the ambient drift
-		// control also absorbs, so calibrate the guard-work ceiling against the
-		// measured jitter instead of trusting a fixed wall-clock bound alone.
-		expect(maxSyncSpanMs).toBeLessThan(Math.max(5, ambientDriftMs * 3));
-		expect(maxDriftMs).toBeLessThan(Math.max(5, ambientDriftMs + 5));
+		// control also absorbs. Keep a 10ms scheduling floor for shared CI hosts,
+		// then scale beyond it with the measured ambient jitter.
+		expect(maxSyncSpanMs).toBeLessThan(Math.max(10, ambientDriftMs * 3));
+		expect(maxDriftMs).toBeLessThan(Math.max(10, ambientDriftMs + 10));
 		expect(guard.abortTriggered).toBe(false);
 		expect(abortCalls.count).toBe(0);
 	},

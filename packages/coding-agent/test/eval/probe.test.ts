@@ -22,6 +22,17 @@ describe("runBoundedProbe", () => {
 		expect(Date.now() - start).toBeLessThan(5_000);
 	});
 
+	test("honors a backend-specific probe ceiling when no smaller timeout is supplied", async () => {
+		const start = Date.now();
+		const result = await runBoundedProbe(HANG, {
+			cwd: process.cwd(),
+			env: baseEnv(),
+			maxTimeoutMs: 300,
+		});
+		expect(result).toEqual({ exitCode: null, timedOut: true, aborted: false });
+		expect(Date.now() - start).toBeLessThan(5_000);
+	});
+
 	test("force-kills a probe that ignores SIGTERM when its timeout expires", async () => {
 		const start = Date.now();
 		const result = await runBoundedProbe(IGNORE_TERM, {
