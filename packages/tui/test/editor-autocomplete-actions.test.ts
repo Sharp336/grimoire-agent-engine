@@ -952,3 +952,98 @@ describe("Editor autocomplete invalidation on destructive edits (issue #4295)", 
 		expect(submitted).toBe("hello");
 	});
 });
+
+describe("Editor fast-typing autocomplete race (stale popup accepted over typed text)", () => {
+	/** Popup provider whose `/`-popup ranks `loop` first via usage counts. */
+	function createUsageRankedProvider(): CombinedAutocompleteProvider {
+		return new CombinedAutocompleteProvider(
+			[
+				{ name: "login", description: "Authenticate" },
+				{ name: "loop", description: "Loop the current request" },
+			],
+			"/tmp",
+			{ commandUsage: name => (name === "loop" ? 10 : 0) },
+		);
+	}
+
+	it("submits what was typed, not the stale popup selection, when typing outruns the debounced refresh", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(createUsageRankedProvider());
+		let submitted = "";
+		editor.onSubmit = text => {
+			submitted = text;
+		};
+
+		editor.handleInput("/");
+		await untilAutocompleteShown(editor);
+
+		// Type the rest of the command and press Enter within the same task, so the
+		// 100 ms debounced popup refresh never fires and the popup still shows the
+		// matches for the bare "/" prefix (selected: "loop" via usage ranking).
+		for (const char of "login") editor.handleInput(char);
+		editor.handleInput("\r");
+
+		expect(submitted).toBe("/login");
+	});
+
+	it("still accepts the popup selection when the typed token continues to match it", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(createUsageRankedProvider());
+		let submitted = "";
+		editor.onSubmit = text => {
+			submitted = text;
+		};
+
+		editor.handleInput("/");
+		await untilAutocompleteShown(editor);
+
+		for (const char of "loop") editor.handleInput(char);
+		editor.handleInput("\r");
+
+		expect(submitted).toBe("/loop");
+	});
+
+	it("does not paste the stale popup selection on Tab after divergent typing", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(createUsageRankedProvider());
+
+		editor.handleInput("/");
+		await untilAutocompleteShown(editor);
+
+		for (const char of "login") editor.handleInput(char);
+		editor.handleInput("\t");
+
+		expect(editor.getText()).toBe("/login");
+		expect(editor.isShowingAutocomplete()).toBe(false);
+	});
+
+	it("rejects a stale selection whose description fuzzy-matches the divergent token", async () => {
+		// Production shape of the race: the popup's rendered description (here
+		// "Login: choose provider") fuzzy-contains the typed token ("loop" matches
+		// via the o's in "choose" and the p in "provider"), so a description-aware
+		// accept-time guard would still accept the stale item and submit /login.
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider(
+				[
+					{ name: "loop", description: "Toggle loop mode" },
+					{ name: "login", description: "Login: choose provider" },
+				],
+				"/tmp",
+				{ commandUsage: name => (name === "login" ? 10 : 0) },
+			),
+		);
+		let submitted = "";
+		editor.onSubmit = text => {
+			submitted = text;
+		};
+
+		editor.handleInput("/");
+		await untilAutocompleteShown(editor);
+
+		for (const char of "loop") editor.handleInput(char);
+		editor.handleInput("\r");
+
+		expect(submitted).toBe("/loop");
+	});
+});

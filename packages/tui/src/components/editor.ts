@@ -6,6 +6,7 @@ import {
 	findTrailingSlashCommandStart,
 	midPromptSkillTokenMatches,
 	SKILL_NAMESPACE,
+	slashCommandTokenMatches,
 } from "../autocomplete";
 import { BracketedPasteHandler, decodeReencodedPasteControls } from "../bracketed-paste";
 import { canonicalKeyId, getKeybindings, type KeybindingsManager } from "../keybindings";
@@ -3275,11 +3276,15 @@ export class Editor implements Component, Focusable {
 	 * - Path branch is safe when the prefix is still a live suffix of the text; the
 	 *   provider's default slice at `cursorCol - prefix.length` then hits the right span.
 	 * - Slash branch re-anchors when both the prefix and the current text carry a
-	 *   leading slash command and the current slash token is clean (no whitespace or
-	 *   inner slash), matching `applyCompletion`'s slash-branch guard. It only
-	 *   engages for command-shaped selections: absolute-path completions (`/tmp/fo`
-	 *   via the no-command-match fall-through) share the leading-slash prefix shape
-	 *   but must use the live-suffix path rule so the apply slice stays anchored.
+	 *   leading slash command, the current slash token is clean (no whitespace or
+	 *   inner slash), and the token still matches the selection itself, matching
+	 *   `applyCompletion`'s slash-branch guard. It only engages for command-shaped
+	 *   selections: absolute-path completions (`/tmp/fo` via the no-command-match
+	 *   fall-through) share the leading-slash prefix shape but must use the
+	 *   live-suffix path rule so the apply slice stays anchored. The token-match
+	 *   requirement rejects popups left stale by fast typing (prefix `/lo`, token
+	 *   `/login`), which `applyCompletion` would otherwise rewrite with the stale
+	 *   selection; Enter then falls through to the sync completion path.
 	 * - Mid-prompt skill branch re-anchors when the popup item is a skill and the
 	 *   current text still ends in a matching trailing slash token, preventing a
 	 *   stale selection from replacing a newer skill prefix.
@@ -3313,7 +3318,14 @@ export class Editor implements Component, Focusable {
 			const currentLeadingStart = findLeadingSlashCommandStart(currentTextBeforeCursor);
 			if (currentLeadingStart !== null) {
 				const token = currentTextBeforeCursor.slice(currentLeadingStart);
-				if (!token.includes(" ") && !token.slice(1).includes("/")) return true;
+				if (!token.includes(" ") && !token.slice(1).includes("/")) {
+					// Fast typing can outrun the 100 ms debounced popup refresh: the popup
+					// still shows matches for a shorter prefix while the live token has
+					// already diverged. Only accept when the live token still matches the
+					// selection itself, so `/login` typed past a `/lo` popup submits
+					// `/login` instead of the stale `/loop` selection.
+					return slashCommandTokenMatches(token.slice(1).toLowerCase(), item);
+				}
 			}
 			return false;
 		}

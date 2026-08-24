@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed graceful terminal shutdown leaving eligible finalized output in the mutable viewport instead of retiring it before shell handoff.
+- Fixed fast typing beating the debounced autocomplete refresh into submitting the stale popup selection: typing `/login` quickly after the `/lo` popup opened submitted `/loop` instead; Enter now only accepts a selection whose command name still matches the typed token and otherwise re-derives the completion from the live text.
 
 ## [18.0.4] - 2026-08-24
 

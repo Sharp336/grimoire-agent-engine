@@ -442,6 +442,24 @@ export function midPromptSkillTokenMatches(lowerToken: string, name: string, des
 	return lowerName.startsWith(SKILL_NAMESPACE) && lowerName.slice(SKILL_NAMESPACE.length).startsWith(lowerToken);
 }
 
+/**
+ * Whether a submitted slash-command popup selection is still consistent with the
+ * live slash token at the cursor. Typing can outrun the debounced popup refresh,
+ * leaving the popup rendered for a shorter prefix while the token has already
+ * diverged (`/lo` popup, `/login` typed); accepting such a selection rewrites the
+ * typed token with the stale match (submitting `/loop` instead of `/login`).
+ * Uses the name/alias text matching from `buildSlashCommandCompletions`, and
+ * deliberately NOT its fuzzy-description matching: display descriptions fuzzy-
+ * match far too broadly at accept time (`loop` matches "Login: choose provider"),
+ * so a selection whose own value no longer matches the typed token is treated as
+ * stale. Callers re-derive the completion from the live token on rejection; that
+ * path applies the full ranking, including description matches.
+ */
+export function slashCommandTokenMatches(lowerToken: string, item: { value: string } | null | undefined): boolean {
+	if (!item) return false;
+	return scoreCommandTextMatch(lowerToken, item.value.toLowerCase()) > 0;
+}
+
 function buildMidPromptSkillCompletions(commands: CommandEntry[], lowerPrefix: string): AutocompleteItem[] {
 	return buildSlashCommandCompletions(
 		commands.filter(cmd => {
