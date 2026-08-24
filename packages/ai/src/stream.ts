@@ -60,7 +60,8 @@ import {
 	streamOpenAIResponses,
 } from "./providers/register-builtins";
 import { isSyntheticModel, streamSynthetic } from "./providers/synthetic";
-import { getProviderDefinition, PROVIDER_REGISTRY } from "./registry";
+import { getProviderDefinition, PROVIDER_REGISTRY, providerAllowsMissingApiKey } from "./registry";
+import { NO_AUTH_SENTINEL } from "./registry/types";
 import type {
 	Api,
 	AssistantMessage,
@@ -944,16 +945,17 @@ function streamDispatch<TApi extends Api>(
 	const providerModel = prepared?.model ?? (model as Model<Api>);
 	const preparedOptions = prepared?.options ?? (requestOptions as StreamOptions);
 	const apiKey = preparedOptions.apiKey || getEnvApiKey(providerModel.provider);
-	if (!apiKey) {
+	if (!apiKey && !providerAllowsMissingApiKey(providerModel)) {
 		throw new AIError.MissingApiKeyError(providerModel.provider);
 	}
+	const resolvedApiKey = apiKey || NO_AUTH_SENTINEL;
 	const providerOptions = isGoogleVertexAuthenticatedModel(providerModel)
 		? {
 				...preparedOptions,
 				apiKey: "vertex-adc",
 				fetch: createVertexAuthenticatedFetch(preparedOptions),
 			}
-		: { ...preparedOptions, apiKey };
+		: { ...preparedOptions, apiKey: resolvedApiKey };
 
 	const api: Api = providerModel.api;
 	switch (api) {
@@ -1551,7 +1553,7 @@ function streamSimpleRequest<TApi extends Api>(
 				return;
 			}
 			if (lastKey === undefined) {
-				if (getProviderDefinition(model.provider)?.allowsMissingApiKey) {
+				if (providerAllowsMissingApiKey(model as Model<Api>)) {
 					const failure = await runAttempt();
 					if (failure) emitFailure(failure);
 					return;
@@ -1616,7 +1618,7 @@ function streamSimpleRequest<TApi extends Api>(
 		// Bedrock doesn't have any API keys instead it sources credentials from standard AWS env variables or from given AWS profile.
 		const providerOptions = mapOptionsForApi(model, requestOptions, undefined);
 		return stream(model, context, providerOptions);
-	} else if (getProviderDefinition(model.provider)?.allowsMissingApiKey) {
+	} else if (providerAllowsMissingApiKey(model as Model<Api>)) {
 		const providerOptions = mapOptionsForApi(
 			model,
 			requestOptions,

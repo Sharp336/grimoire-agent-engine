@@ -1270,7 +1270,7 @@ OpenCode Go provides access to multi-provider subscription models (including Kim
 - **`X-Api-Key` Auth Normalization**: In `packages/ai/src/providers/anthropic.ts` (lines 3045–3046), when `model.provider === "opencode-go"`, the transport deletes auto-generated `Authorization` Bearer headers so `AnthropicMessagesClient` emits `X-Api-Key`. Bearer-only requests to OpenCode Anthropic endpoints fail with HTTP `401 Missing API key` (#6510).
 
 ### Auth & usage
-- **API Key Login Flow**: `opencodeGoProvider` (`packages/ai/src/registry/opencode-go.ts`) lazy-imports `loginOpenCode` from `packages/ai/src/registry/oauth/opencode.ts`. It directs the user to `https://opencode.ai/auth` via `onAuth`, prompts for the API key via `onPrompt`, and returns the trimmed key stored under `OPENCODE_API_KEY`.
+- **API Key Login Flow**: `opencodeGoProvider` (`packages/ai/src/registry/opencode-go.ts`) lazy-imports `loginOpenCode` from `packages/ai/src/registry/oauth/opencode.ts`. It directs the user to `https://opencode.ai/auth` via `onAuth`, prompts for the API key via `onPrompt`, and returns the trimmed key. Manual configuration uses `OPENCODE_GO_API_KEY`.
 - **Rolling Spend Windows**: `opencodeGoUsageProvider` (`packages/ai/src/usage/opencode-go.ts`) tracks OMP-observed request costs across three rolling time windows: `rolling-5h` ($12 / 5 hours), `weekly` ($30 / 7 days), and `monthly` ($60 / 30 days). Costs are aggregated from `ctx.listUsageCosts` via `sumWindowCosts` to compute fractional usage, reset timestamps (`resetsAt`), and limit statuses (`ok`, `warning` at >=80%, `exhausted` at >=100%).
 
 ### Catalog model handling
@@ -1286,9 +1286,8 @@ OpenCode Zen (`opencode-zen`) is a subscription service providing access to mult
 - **Aliased Reasoning Models (`big-pickle`)**: The model ID `big-pickle` is an OpenCode Zen DeepSeek reasoning alias recognized via `isOpenCodeDeepseekAlias` in `packages/catalog/src/compat/openai.ts` and `packages/catalog/src/model-thinking.ts`. It is classified as part of `isDeepseekFamily`, enforcing strict `reasoning_content` replay during thinking tool-call turns.
 
 ### Auth & usage
-- **API Key Manual Auth**: Configured via the `OPENCODE_API_KEY` environment variable (`CATALOG_PROVIDERS` descriptor in `packages/catalog/src/provider-models/descriptors.ts`).
-- **Interactive CLI Login Flow**: `opencodeZenProvider.login` (`packages/ai/src/registry/opencode-zen.ts`) lazily invokes `loginOpenCode` in `packages/ai/src/registry/oauth/opencode.ts`. Despite residing under `oauth/`, it is an API key prompt flow: it opens `https://opencode.ai/auth` in the browser and prompts the user to paste their API key.
-- **Wire Authentication**: Credentials across both Anthropic and OpenAI-compatible protocol endpoints are passed via `X-Api-Key` headers rather than standard Bearer tokens.
+- **Anonymous Free Models**: `opencodeZenProvider` (`packages/ai/src/registry/opencode-zen.ts`) admits zero-priced Zen models without a credential. Their requests use the shared no-auth sentinel internally, which both OpenAI-compatible and Anthropic transports strip from the wire, so no authentication header is sent. Zen has no environment variable or interactive login and is omitted from `/login`; paid models remain unavailable without an explicit credential override.
+- **Wire Authentication**: When a real credential is configured, Anthropic-compatible requests use `X-Api-Key`; anonymous free-model requests omit both `X-Api-Key` and `Authorization`.
 
 ### Catalog model handling
 - **Descriptor & Options**: Catalog entry `opencode-zen` (`packages/catalog/src/provider-models/descriptors.ts`) sets `defaultModel: "claude-opus-4-8"`, `dynamicModelsAuthoritative: true`, and instantiates `opencodeZenModelManagerOptions` from `packages/catalog/src/provider-models/openai-compat.ts`.

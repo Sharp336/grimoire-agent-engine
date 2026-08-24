@@ -51,6 +51,21 @@ describe("ModelRegistry runtime discovery", () => {
 		authStorage = await AuthStorage.create(":memory:");
 	});
 
+	test("exposes OpenCode Zen free models anonymously without unlocking paid models", async () => {
+		const registry = new ModelRegistry(authStorage, modelsJsonPath);
+		const free = registry.find("opencode-zen", "big-pickle");
+		const paid = registry.find("opencode-zen", "claude-opus-4-8");
+		expect(free).toBeDefined();
+		expect(paid).toBeDefined();
+		expect(registry.hasConfiguredAuth(free!)).toBe(true);
+		expect(registry.hasConfiguredAuth(paid!)).toBe(false);
+		expect(registry.getAvailable()).toContainEqual(free!);
+		expect(registry.getAvailable()).not.toContainEqual(paid!);
+		expect(await registry.getApiKey(free!)).toBe(kNoAuth);
+		expect(await registry.getApiKeyForProvider("opencode-zen", undefined, { modelId: free!.id })).toBe(kNoAuth);
+		expect(await registry.getApiKey(paid!)).toBeUndefined();
+	});
+
 	afterEach(() => {
 		resetSettingsForTest();
 		if (originalOllamaBaseUrl === undefined) {

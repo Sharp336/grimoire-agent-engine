@@ -4,7 +4,7 @@ import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-reg
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
-import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
+import { getProviderDefinition, providerAllowsMissingApiKey } from "@oh-my-pi/pi-ai/registry";
 import type {
 	Api,
 	Context,
@@ -1904,18 +1904,17 @@ export class ModelRegistry {
 	 * per provider instead of once per model, which matters when filtering the
 	 * full bundled catalog (thousands of models, ~50 providers).
 	 */
-	#createProviderAvailabilityCheck(): (provider: string) => boolean {
+	#createModelAvailabilityCheck(): (model: Model<Api>) => boolean {
 		const disabledProviders = getDisabledProviderIdsFromSettings(this.#settings);
 		const byProvider = new Map<string, boolean>();
-		return provider => {
-			let available = byProvider.get(provider);
-			if (available === undefined) {
-				available =
-					!disabledProviders.has(provider) &&
-					(this.#keylessProviders.has(provider) || this.authStorage.hasAuth(provider));
-				byProvider.set(provider, available);
+		return model => {
+			const provider = model.provider;
+			if (disabledProviders.has(provider)) return false;
+			if (providerAllowsMissingApiKey(model)) return true;
+			if (!byProvider.has(provider)) {
+				byProvider.set(provider, this.#keylessProviders.has(provider) || this.authStorage.hasAuth(provider));
 			}
-			return available;
+			return byProvider.get(provider) ?? false;
 		};
 	}
 
@@ -1926,18 +1925,14 @@ export class ModelRegistry {
 	 */
 	getAvailableForProviders(providers: ReadonlySet<string>): Model<Api>[] {
 		const requested = new Set([...providers].map(provider => provider.trim().toLowerCase()).filter(Boolean));
-		const isProviderAvailable = this.#createProviderAvailabilityCheck();
+		const isModelAvailable = this.#createModelAvailabilityCheck();
 		if (this.#hasFullSnapshot) {
-			return this.#models.filter(
-				model => requested.has(model.provider.toLowerCase()) && isProviderAvailable(model.provider),
-			);
+			return this.#models.filter(model => requested.has(model.provider.toLowerCase()) && isModelAvailable(model));
 		}
-		const availableProviders = new Set(
-			this.#knownStaticProviders().filter(
-				provider => requested.has(provider.toLowerCase()) && isProviderAvailable(provider),
-			),
+		const requestedProviders = new Set(
+			this.#knownStaticProviders().filter(provider => requested.has(provider.toLowerCase())),
 		);
-		return this.#composeStaticModels(availableProviders);
+		return this.#composeStaticModels(requestedProviders).filter(isModelAvailable);
 	}
 
 	/**
@@ -1974,6 +1969,7 @@ export class ModelRegistry {
 		return (
 			isCommandConfigValue(keyConfig) ||
 			this.#keylessProviders.has(model.provider) ||
+			providerAllowsMissingApiKey(model) ||
 			this.authStorage.hasResolvableAuth(model.provider)
 		);
 	}
@@ -2052,7 +2048,10 @@ export class ModelRegistry {
 	): Promise<string | undefined> {
 		const commandKey = this.#resolveCommandBackedApiKey(model.provider);
 		if (commandKey.configured) return commandKey.value;
-		if (this.#keylessProviders.has(model.provider) && !this.authStorage.hasAuth(model.provider)) {
+		if (
+			(this.#keylessProviders.has(model.provider) || providerAllowsMissingApiKey(model)) &&
+			!this.authStorage.hasAuth(model.provider)
+		) {
 			return kNoAuth;
 		}
 		return this.authStorage.getApiKey(model.provider, sessionId, {
@@ -2093,7 +2092,11 @@ export class ModelRegistry {
 			options?.forceRefresh ? { forceCommandRefresh: true } : undefined,
 		);
 		if (commandKey.configured) return commandKey.value;
-		if (this.#keylessProviders.has(provider) && !this.authStorage.hasAuth(provider)) {
+		const model = options?.modelId ? this.find(provider, options.modelId) : undefined;
+		if (
+			(this.#keylessProviders.has(provider) || (model !== undefined && providerAllowsMissingApiKey(model))) &&
+			!this.authStorage.hasAuth(provider)
+		) {
 			return kNoAuth;
 		}
 		return this.authStorage.getApiKey(provider, sessionId, {

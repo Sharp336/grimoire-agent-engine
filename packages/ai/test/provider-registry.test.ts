@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
-import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai/registry";
+import { PASTE_CODE_LOGIN_PROVIDERS, providerAllowsMissingApiKey } from "@oh-my-pi/pi-ai/registry";
 import {
 	getOAuthProviders,
 	refreshOAuthToken,
@@ -11,6 +11,7 @@ import {
 import * as anthropicOauth from "@oh-my-pi/pi-ai/registry/oauth/anthropic";
 import type { OAuthCredentials, OAuthProvider } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 const FIXTURE_SOURCE = "provider-registry-test";
 const ENV_KEYS = [
@@ -20,6 +21,8 @@ const ENV_KEYS = [
 	"XAI_OAUTH_TOKEN",
 	"UMANS_AI_CODING_PLAN_API_KEY",
 	"LLAMA_CPP_API_KEY",
+	"OPENCODE_API_KEY",
+	"OPENCODE_GO_API_KEY",
 	"WANDB_API_KEY",
 ] as const;
 const originalEnv = new Map(ENV_KEYS.map(key => [key, Bun.env[key]]));
@@ -61,6 +64,19 @@ describe("provider registry auth surface", () => {
 		expect(getEnvApiKey("coreweave")).toBe("coreweave-env");
 	});
 
+	test("separates OpenCode Go auth from anonymous Zen free models", () => {
+		Bun.env.OPENCODE_API_KEY = "legacy-shared-key";
+		delete Bun.env.OPENCODE_GO_API_KEY;
+
+		expect(getEnvApiKey("opencode-go")).toBeUndefined();
+		expect(getEnvApiKey("opencode-zen")).toBeUndefined();
+		expect(providerAllowsMissingApiKey(getBundledModel("opencode-zen", "big-pickle")!)).toBe(true);
+		expect(providerAllowsMissingApiKey(getBundledModel("opencode-zen", "claude-opus-4-8")!)).toBe(false);
+
+		Bun.env.OPENCODE_GO_API_KEY = "go-env-key";
+		expect(getEnvApiKey("opencode-go")).toBe("go-env-key");
+	});
+
 	test("login list contains loginable providers and excludes env-only model providers", () => {
 		const ids = getOAuthProviders().map(provider => provider.id);
 		expect(ids).toContain("zenmux");
@@ -68,6 +84,8 @@ describe("provider registry auth surface", () => {
 		expect(ids).toContain("exa");
 		expect(ids).toContain("umans");
 		expect(ids).toContain("llama.cpp");
+		expect(ids).toContain("opencode-go");
+		expect(ids).not.toContain("opencode-zen");
 		// openai has no interactive login flow.
 		expect(ids).not.toContain("openai");
 	});

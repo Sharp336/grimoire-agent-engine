@@ -19,6 +19,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
+import { NO_AUTH_SENTINEL } from "../registry/types";
 import { getEnvApiKey, OUTPUT_FALLBACK_BUFFER } from "../stream";
 import type {
 	AnthropicFallbackContent,
@@ -3068,12 +3069,13 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	// OpenCode Go/Zen and Umans validate Anthropic-compatible API-key auth
 	// through `X-Api-Key`; bearer-only requests reach the endpoint but fail auth
 	// with `401 Missing API key` (#6510). Drop the auto-built `Authorization`
-	// header and keep `apiKey` so the client emits `X-Api-Key`.
+	// header and keep a real `apiKey` so the client emits `X-Api-Key`; the
+	// no-auth sentinel used by anonymous Zen models suppresses that header too.
 	if (model.provider === "opencode-go" || model.provider === "opencode-zen" || model.provider === "umans") {
 		delete defaultHeaders.Authorization;
 		return {
 			isOAuthToken: false,
-			apiKey,
+			apiKey: apiKey === NO_AUTH_SENTINEL ? null : apiKey,
 			authToken: null,
 			baseURL: baseUrl,
 			maxRetries: 5,

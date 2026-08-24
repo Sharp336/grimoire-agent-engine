@@ -30,7 +30,7 @@ export function getExtraHelpText(): string {
   UMANS_AI_CODING_PLAN_API_KEY - Umans AI Coding Plan models
   UMANS_WEBSEARCH_PROVIDER    - Umans gateway web search backend (native or exa)
   MINIMAX_API_KEY            - MiniMax models
-  OPENCODE_API_KEY           - OpenCode Zen/OpenCode Go models
+  OPENCODE_GO_API_KEY        - OpenCode Go models (OpenCode Zen free models need no key)
   CURSOR_ACCESS_TOKEN        - Cursor AI models
   AI_GATEWAY_API_KEY         - Vercel AI Gateway
   WAFER_SERVERLESS_API_KEY   - Wafer Serverless (pay-as-you-go)

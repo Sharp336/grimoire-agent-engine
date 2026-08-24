@@ -1,6 +1,15 @@
 # Changelog
 
 ## [Unreleased]
+
+### Breaking Changes
+
+- Removed OpenCode Zen from the public `OAuthProvider` type and interactive login API; its free models now use anonymous access.
+
+### Changed
+
+- OpenCode Zen free models now work anonymously without an authentication header, and Zen no longer requires interactive login.
+
 ### Fixed
 
 - Fixed DeepSeek vision SKUs (`deepseek-v4-flash-vision-exp`, any `-vision-` id) losing image input after the text-only DeepSeek guard: genuinely multimodal ids now keep `image_url` parts while text-only DeepSeek endpoints still strip them.

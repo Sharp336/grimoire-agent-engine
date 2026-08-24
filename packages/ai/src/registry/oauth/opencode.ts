@@ -1,9 +1,9 @@
 /**
- * OpenCode login flow, shared by the OpenCode Zen and OpenCode Go providers.
+ * OpenCode Go login flow.
  *
- * Both are subscription services whose API keys are issued from the same
- * OpenCode Zen console at https://opencode.ai/auth — OpenCode Go keys are
- * minted there after subscribing to Go (see https://opencode.ai/docs/go).
+ * OpenCode Go API keys are issued from the OpenCode Zen console at
+ * https://opencode.ai/auth after subscribing to Go (see
+ * https://opencode.ai/docs/go).
  * This is not OAuth; it's a simple paste-the-API-key flow:
  * 1. Open browser to https://opencode.ai/auth
  * 2. User logs in (and subscribes to Go, for OpenCode Go) and copies the key
@@ -15,25 +15,16 @@ import type { OAuthController } from "./types";
 
 const AUTH_URL = "https://opencode.ai/auth";
 
-/** Fallback display name when a provider doesn't pass its own. */
-const DEFAULT_PROVIDER_NAME = "OpenCode Zen";
-
 /**
- * Log in to an OpenCode subscription provider.
+ * Log in to OpenCode Go.
  *
  * Opens the browser to the OpenCode Zen console, prompts the user to paste
  * their API key, and returns it directly (not OAuthCredentials — this isn't
  * OAuth).
  *
- * @param providerName Display name of the provider being connected
- *   ("OpenCode Zen" or "OpenCode Go"). Used verbatim in the paste prompt so
- *   the CLI reflects the provider the user actually selected instead of always
- *   asking for a Zen key.
+ * @param providerName Display name used in the paste prompt.
  */
-export async function loginOpenCode(
-	options: OAuthController,
-	providerName: string = DEFAULT_PROVIDER_NAME,
-): Promise<string> {
+export async function loginOpenCode(options: OAuthController, providerName: string): Promise<string> {
 	if (!options.onPrompt) {
 		throw new AIError.OnPromptRequiredError(providerName);
 	}

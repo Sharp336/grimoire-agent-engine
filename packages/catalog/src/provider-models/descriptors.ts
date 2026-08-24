@@ -354,15 +354,15 @@ export const CATALOG_PROVIDERS = [
 	{
 		id: "opencode-go",
 		defaultModel: "kimi-k2.7-code",
-		envVars: ["OPENCODE_API_KEY"],
+		envVars: ["OPENCODE_GO_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => opencodeGoModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
 	},
 	{
 		id: "opencode-zen",
 		defaultModel: "claude-opus-4-8",
-		envVars: ["OPENCODE_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => opencodeZenModelManagerOptions(config),
+		allowUnauthenticated: true,
 		dynamicModelsAuthoritative: true,
 	},
 	{

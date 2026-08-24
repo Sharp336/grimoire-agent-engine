@@ -1,4 +1,5 @@
 import type { KnownProvider } from "@oh-my-pi/pi-catalog";
+import type { Api, Model } from "../types";
 import { aiandProvider } from "./aiand";
 import { aimlApiProvider } from "./aimlapi";
 import { alibabaCodingPlanProvider } from "./alibaba-coding-plan";
@@ -169,6 +170,12 @@ const BY_ID = new Map<string, ProviderDefinition>(ALL.map(p => [p.id, p] as [str
 
 export function getProviderDefinition(id: string): ProviderDefinition | undefined {
 	return BY_ID.get(id);
+}
+
+/** Whether a provider permits this specific model request without an API key. */
+export function providerAllowsMissingApiKey(model: Model<Api>): boolean {
+	const policy = getProviderDefinition(model.provider)?.allowsMissingApiKey;
+	return typeof policy === "function" ? policy(model) : policy === true;
 }
 
 /** Compile-time completeness: every catalog chat-model provider must have a registry definition. */

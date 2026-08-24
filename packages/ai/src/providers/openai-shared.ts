@@ -35,6 +35,7 @@ import {
 	USER_AGENT,
 } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+import { NO_AUTH_SENTINEL } from "../registry/types";
 import {
 	type Api,
 	type AssistantMessage,
@@ -125,7 +126,7 @@ import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVi
  * Bearer …`) rather than forwarding the sentinel on the wire. See #6188; the
  * google-vertex and amazon-bedrock transports apply the same guard inline.
  */
-export const NO_AUTH_SENTINEL = "N/A";
+export { NO_AUTH_SENTINEL } from "../registry/types";
 
 export interface OpenAIModelIdentity {
 	provider: string;
