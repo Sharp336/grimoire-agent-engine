@@ -5415,11 +5415,27 @@ export class AgentSession {
 
 	#buildVibeModeMessage(): CustomMessage | null {
 		if (!this.#vibeModeState?.enabled) return null;
+		const directToolNames = new Set(this.getActiveToolNames());
+		const vibeToolNames = ["read", "todo", "vibe_spawn", "vibe_send", "vibe_wait", "vibe_kill", "vibe_list"];
+		const toolRefs = Object.fromEntries(
+			vibeToolNames.map(name => {
+				const tool = this.#tools.registry.get(name);
+				return [
+					name,
+					formatCodeModeToolReference({
+						name,
+						wireName: tool?.customWireName,
+						direct: directToolNames.has(name),
+					}),
+				];
+			}),
+		);
 		return {
 			role: "custom",
 			customType: "vibe-mode-context",
 			content: prompt.render(vibeModeActivePrompt, {
 				todoAvailable: this.getActiveToolNames().includes("todo"),
+				toolRefs,
 			}),
 			display: false,
 			attribution: "agent",
