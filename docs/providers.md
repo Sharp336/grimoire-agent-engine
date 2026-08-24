@@ -127,6 +127,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `zhipu-coding-plan`              | `ZHIPU_API_KEY`                                                               |
 | `umans`                          | `UMANS_AI_CODING_PLAN_API_KEY`                                                |
 | `qianfan`                        | `QIANFAN_API_KEY`                                                             |
+| `volcengine`                     | `ARK_API_KEY`                                                                 |
 | `qwen-portal`                    | `QWEN_OAUTH_TOKEN`, then `QWEN_PORTAL_API_KEY`                                |
 | `synthetic`                      | `SYNTHETIC_API_KEY`                                                           |
 | `minimax-code`                   | `MINIMAX_CODE_API_KEY`                                                        |

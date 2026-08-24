@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the Volcengine Ark (火山方舟) pay-as-you-go provider (`volcengine`), authenticated with `ARK_API_KEY` against `https://ark.cn-beijing.volces.com/api/v3`.
+
 ## [18.0.4] - 2026-08-24
 
 ### Fixed

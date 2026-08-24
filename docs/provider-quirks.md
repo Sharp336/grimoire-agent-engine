@@ -1334,6 +1334,24 @@ Qianfan (Baidu Cloud) provides access to Baidu's hosted model family via an Open
 - **Model Options**: `qianfanModelManagerOptions` (`packages/catalog/src/provider-models/openai-compat.ts`) constructs `openai-completions` options bound to `https://qianfan.baidubce.com/v2` via `createSimpleOpenAICompletionsOptions`.
 - **Bundled Models**: Static model specifications in `packages/catalog/src/models.json` define Qianfan models (e.g. `deepseek-v3.2` with `reasoning: true` and `baseUrl: "https://qianfan.baidubce.com/v2"`).
 
+## Volcengine Ark (`volcengine`)
+Volcengine Ark (火山方舟) serves ByteDance's Doubao Seed family plus third-party weights (DeepSeek, GLM, Qwen) from an OpenAI-compatible endpoint at `https://ark.cn-beijing.volces.com/api/v3`, using the OpenAI Chat Completions transport. This is the pay-as-you-go Ark API keyed by `ARK_API_KEY`; the Ark subscription endpoints (`/api/coding`, `/api/plan`) are separate products with their own credentials and are not covered here. Entry points: `packages/ai/src/registry/volcengine.ts` (`volcengineProvider`, `loginVolcengine`), `packages/catalog/src/provider-models/descriptors.ts` (`CATALOG_PROVIDERS`), and `packages/catalog/src/provider-models/openai-compat.ts` (`volcengineModelManagerOptions`, `VOLCENGINE_STATIC_MODELS`).
+
+### Special casings
+- **Binary thinking block**: Host matching (`volcengineArk` in `packages/catalog/src/hosts.ts`, matching `ark.cn-beijing.volces.com`) resolves `thinkingFormat: "zai"` and therefore `reasoningDisableMode: "zai-thinking-disabled"` (`packages/catalog/src/compat/openai.ts`). Ark gates reasoning through `thinking: { type: "enabled" | "disabled" }`, not an effort-only dialect: `thinking: { type: "auto" }` is rejected with `InvalidParameter` on Doubao Seed 2.1. `reasoning_effort` is accepted alongside the block and does steer depth (`minimal`/`none` return `reasoning_tokens: 0`), so `supportsReasoningEffort` stays true and both fields are emitted together.
+- **Reasoning replay**: Reasoning arrives as `message.reasoning_content` (streamed as `delta.reasoning_content`), the default `reasoningContentField`; responses also carry an opaque `encrypted_content` that omp ignores.
+- **Retired rows in `/models`**: Ark's model listing returns its full historical catalog (~130 rows) and marks dead SKUs with `status: "Shutdown"` or `"Retiring"`; those ids 404 on invocation. Discovery drops them, along with image/video/3D/embedding/ASR SKUs, which answer on their own endpoints rather than `/chat/completions`.
+- **Per-account activation**: Models must be activated in the Ark console before use. An unactivated id fails with `404 ModelNotOpen` even though `/models` lists it.
+
+### Auth & usage
+- **API Key Authentication & Validation**: Authenticates via `ARK_API_KEY` or stored credentials, using keys of the form `ark-...` created at `https://console.volcengine.com/ark/region:ark+cn-beijing/apiKey`. The CLI login flow (`loginVolcengine` in `packages/ai/src/registry/volcengine.ts`) validates credentials with `createApiKeyLogin` against `https://ark.cn-beijing.volces.com/api/v3/models`.
+- **Usage & Quotas**: Standard OpenAI Chat Completions usage accounting applies; Ark reports cached prompt tokens under `usage.prompt_tokens_details.cached_tokens` and reasoning tokens under `usage.completion_tokens_details.reasoning_tokens`.
+
+### Catalog model handling
+- **Provider Descriptor**: Configured in `CATALOG_PROVIDERS` with `defaultModel: "doubao-seed-2-1-pro-260628"`, `envVars: ["ARK_API_KEY"]`, `dynamicModelsAuthoritative: true`, and catalog discovery label `"Volcengine Ark"`. The listing is key-scoped — it enumerates what the account may call — so live discovery replaces the bundled slice.
+- **Model Options**: `volcengineModelManagerOptions` builds `openai-completions` options bound to `https://ark.cn-beijing.volces.com/api/v3`, filtering to live chat rows and mapping Ark's `token_limits` (`context_window`, `max_output_token_length`, `max_reasoning_token_length`) and `modalities.input_modalities`.
+- **Bundled Models**: `VOLCENGINE_STATIC_MODELS` seeds the documented pay-as-you-go SKUs into `packages/catalog/src/models.json` so a regeneration without `ARK_API_KEY` still resolves the descriptor's `defaultModel`. Ark bills in CNY and publishes no USD tariff, so per-token rates stay zeroed rather than converted at an arbitrary exchange rate — the same choice `qianfan`, `zhipu-coding-plan`, and `alibaba-token-plan` make.
+
 ## Qwen Portal (`qwen-portal`)
 Qwen Portal provides access to Qwen hosted models via an OpenAI-compatible endpoint at `https://portal.qwen.ai/v1`. It uses the OpenAI Chat Completions transport for model execution and tool calling.
 

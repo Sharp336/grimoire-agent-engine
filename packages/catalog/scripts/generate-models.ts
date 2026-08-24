@@ -52,6 +52,7 @@ import {
 	projectOpenAIProReasoningAliases,
 	SAKANA_FUGU_STATIC_MODELS,
 	stripFireworksDeepSeekThinkingToggle,
+	VOLCENGINE_STATIC_MODELS,
 } from "../src/provider-models/openai-compat";
 import { type OpenAICodexAccount, openaiCodexModelManagerOptions } from "../src/provider-models/special";
 import type { Api, Model, ModelSpec } from "../src/types";
@@ -599,6 +600,14 @@ async function generateModels() {
 	// at boot. If live `/v1/models` discovery succeeds, it is authoritative.
 	if (!authoritativeCatalogProviders.has("gmi-cloud")) {
 		allModels.push(...GMI_CLOUD_STATIC_MODELS);
+	}
+	// Seed the documented Volcengine Ark pay-as-you-go models so a regen without
+	// an `ARK_API_KEY` still resolves the descriptor's `defaultModel` and leaves
+	// the provider selectable on a fresh install. Ark's `/api/v3/models` is
+	// key-scoped and authoritative (it lists exactly what the account activated),
+	// so a credentialed generation replaces the seed outright.
+	if (!authoritativeCatalogProviders.has("volcengine")) {
+		allModels.push(...VOLCENGINE_STATIC_MODELS);
 	}
 	// Seed the GitLab Duo Agent fallback model so a fresh install (no credentialed
 	// dynamic discovery/cache yet) still surfaces the provider's default model in the
