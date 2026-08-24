@@ -12,6 +12,7 @@
 
 ### Changed
 
+- Task spawns now expose typed effort and timeout controls plus requested and resolved model receipts in results.
 - Made `omp git` stream file contents into an off-thread native differ, paint complete lines immediately, progressively apply syntax highlighting, and defer large commit file statistics until after the first interactive frame.
 - Added `r` shortcut to refresh the git state
 - Added `s`/`u` shortcuts to stage/unstage files directly from the sidebar
