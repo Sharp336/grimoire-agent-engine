@@ -1182,10 +1182,9 @@ export class MCPManager {
 				// misleading "connected". #connectAndWireServer already replaced
 				// this server's tools, so an empty registry entry means the
 				// filter excluded everything.
-				const filterMsg =
-					!this.#tools.some(tool => tool.mcpServerName === name)
-						? mcpFilterEmptyMessage(name, config, connection.tools?.length ?? 0)
-						: null;
+				const filterMsg = !this.#tools.some(tool => tool.mcpServerName === name)
+					? mcpFilterEmptyMessage(name, config, connection.tools?.length ?? 0)
+					: null;
 				if (filterMsg) {
 					this.#emitConnectionStatus({ type: "failed", serverName: name, error: filterMsg });
 				} else {
