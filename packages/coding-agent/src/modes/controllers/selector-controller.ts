@@ -3,8 +3,8 @@ import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
-import type { Component, OverlayHandle, ResizeScrollbackMode } from "@oh-my-pi/pi-tui";
-import { Loader, Spacer, setTuiTight, Text } from "@oh-my-pi/pi-tui";
+import type { Component, OverlayHandle, ResizeScrollbackMode, SgrMouseEvent } from "@oh-my-pi/pi-tui";
+import { Container, Loader, type SelectItem, SelectList, Spacer, setTuiTight, Text } from "@oh-my-pi/pi-tui";
 import { getAgentDbPath, getAgentDir, getProjectDir, normalizePathForComparison } from "@oh-my-pi/pi-utils";
 import {
 	type AdvisorConfigScope,
@@ -87,6 +87,7 @@ import { AgentHubOverlayComponent } from "../components/agent-hub";
 import { AgentsHubComponent } from "../components/agents-hub";
 import { AssistantMessageComponent } from "../components/assistant-message";
 import { CopySelectorComponent } from "../components/copy-selector";
+import { DynamicBorder } from "../components/dynamic-border";
 import { ExtensionDashboard } from "../components/extensions";
 import { listLiveToolRecords, liveToolRecordFromSession } from "../components/extensions/live-tool-session";
 import { HistorySearchComponent } from "../components/history-search";
@@ -99,6 +100,7 @@ import { PluginSelectorComponent } from "../components/plugin-selector";
 import { ReadToolGroupComponent } from "../components/read-tool-group";
 import { ResetUsageSelectorComponent } from "../components/reset-usage-selector";
 import { renderSegmentTrack } from "../components/segment-track";
+import { routeSelectListMouseWithTopBorder } from "../components/select-list-mouse-routing";
 import { SessionAccountSelectorComponent } from "../components/session-account-selector";
 import { SessionSelectorComponent, type SessionSelectorOptions } from "../components/session-selector";
 import { SettingsSelectorComponent } from "../components/settings-selector";
@@ -107,6 +109,7 @@ import { TranscriptBlock } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
 import { UserMessageSelectorComponent } from "../components/user-message-selector";
 import type { SessionObserverRegistry } from "../session-observer-registry";
+import { getSelectListTheme } from "../theme/theme";
 import { buildCopyTargets } from "../utils/copy-targets";
 
 const MANUAL_LOGIN_PROMPT = "Paste the authorization code (or full redirect URL), then press Enter:";
@@ -346,6 +349,35 @@ export class SelectorController {
 			this.ctx.ui.setFocus(overlay);
 			this.ctx.ui.requestRender();
 		})();
+	}
+
+	showRevertTurnSelector(): void {
+		const turns = this.ctx.session.getUserTurns?.() ?? [];
+		if (turns.length === 0) {
+			this.ctx.showError("No user turns to revert to");
+			return;
+		}
+		this.showSelector(done => {
+			const selector = new RevertTurnSelectorComponent(
+				turns,
+				async entryId => {
+					done();
+					const result = await this.ctx.session.userUndoTo(entryId);
+					if (result.ok) {
+						this.ctx.rebuildChatFromMessages();
+						this.ctx.showStatus(`Reverted — dropped ${result.droppedTurns} turn(s) (files untouched)`);
+					} else {
+						this.ctx.showError(result.error ?? "Revert failed");
+					}
+					this.ctx.ui.requestRender();
+				},
+				() => {
+					done();
+					this.ctx.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector.getSelectList() };
+		});
 	}
 
 	showHistorySearch(): void {
@@ -2182,5 +2214,39 @@ export class SelectorController {
 		} else {
 			showReadyHub();
 		}
+	}
+}
+
+export interface RevertTurn {
+	entryId: string;
+	timestamp: string;
+	preview: string;
+}
+
+/** Pick a user turn to rewind to (context only — files untouched). */
+export class RevertTurnSelectorComponent extends Container {
+	#selectList: SelectList;
+
+	constructor(turns: RevertTurn[], onSelect: (entryId: string) => void, onCancel: () => void) {
+		super();
+		const items: SelectItem[] = [...turns].reverse().map(turn => ({
+			value: turn.entryId,
+			label: turn.preview,
+			description: new Date(turn.timestamp).toLocaleString(),
+		}));
+		this.addChild(new DynamicBorder());
+		this.#selectList = new SelectList(items, Math.min(items.length, 12), getSelectListTheme());
+		this.#selectList.onSelect = item => onSelect(item.value as string);
+		this.#selectList.onCancel = () => onCancel();
+		this.addChild(this.#selectList);
+		this.addChild(new DynamicBorder());
+	}
+
+	getSelectList(): SelectList {
+		return this.#selectList;
+	}
+
+	routeMouse(event: SgrMouseEvent, line: number, col: number): void {
+		routeSelectListMouseWithTopBorder(this.#selectList, event, line, col);
 	}
 }
