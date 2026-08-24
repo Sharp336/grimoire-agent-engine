@@ -1,9 +1,10 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
-import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
+import { logger, prompt, setProjectDir } from "@oh-my-pi/pi-utils";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
+import sessionUpdatePrompt from "../prompts/system/session-update.md" with { type: "text" };
 import type { FreshSessionResult, HandoffResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { USER_INTERRUPT_LABEL } from "../session/messages";
@@ -51,10 +52,6 @@ function formatWorkspaceDirectories(runtime: SlashCommandRuntime, note?: string)
 	const lines = ["Workspace directories:", `  ${cwd} (working directory)`, ...additional.map(d => `  ${d}`)];
 	return note ? `${note}\n${lines.join("\n")}` : lines.join("\n");
 }
-
-const SESSION_UPDATE_QUESTION =
-	"Catch me up on the current work. Briefly cover what completed, what is in progress, " +
-	"blockers or risks, the strongest evidence, and the next concrete action.";
 
 export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
@@ -375,7 +372,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
 			const focus = command.text.slice(`/${command.name}`.length).trim();
-			const question = focus ? `${SESSION_UPDATE_QUESTION} Focus especially on: ${focus}` : SESSION_UPDATE_QUESTION;
+			const question = prompt.render(sessionUpdatePrompt, { focus }).trim();
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleBtwCommand(question);
 		},
