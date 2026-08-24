@@ -40,8 +40,8 @@ import subagentAsyncPendingTemplate from "../prompts/system/subagent-async-pendi
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
-import { ensurePersistedRoster } from "../registry/persisted-agents";
+import { AgentRegistry } from "../registry/agent-registry";
+import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../registry/persisted-agents";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
 import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-session";
 import type { ArtifactManager } from "../session/artifacts";
@@ -279,11 +279,18 @@ function installSubagentRetryFallbackChain(args: {
 	return role;
 }
 
-function formatIrcPeerRoster(registry: AgentRegistry, selfId: string): string {
+function formatIrcPeerRoster(registry: AgentRegistry, selfId: string, rootSessionFile?: string): string {
 	const live = registry.listVisibleTo(selfId);
 	let parkedCount = 0;
 	for (const ref of registry.list()) {
-		if (ref.id !== selfId && ref.kind !== "advisor" && ref.status === "parked") parkedCount++;
+		if (
+			ref.id !== selfId &&
+			ref.kind !== "advisor" &&
+			ref.status === "parked" &&
+			isCurrentSessionRosterRef(ref, rootSessionFile)
+		) {
+			parkedCount++;
+		}
 	}
 	const lines: string[] = [];
 	if (live.length === 0) {
@@ -309,9 +316,11 @@ function formatIrcPeerRoster(registry: AgentRegistry, selfId: string): string {
 export async function renderIrcPeerRoster(
 	selfId: string,
 	registry: AgentRegistry = AgentRegistry.global(),
+	sessionFileHint?: string | null,
 ): Promise<string> {
-	await ensurePersistedRoster(registry, registry.get(selfId)?.sessionFile ?? registry.get(MAIN_AGENT_ID)?.sessionFile);
-	return formatIrcPeerRoster(registry, selfId);
+	const hint = sessionFileHint ?? registry.get(selfId)?.sessionFile;
+	const root = await ensurePersistedRoster(registry, hint);
+	return formatIrcPeerRoster(registry, selfId, root);
 }
 
 function withAbortTimeout<T>(
@@ -3108,6 +3117,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			const { normalized: normalizedOutputSchema } = normalizeSchema(outputSchema);
+			let ircPeers = "";
 
 			// Captured by the lifecycle reviver: rebuilding an equivalent session from
 			// the same JSONL file re-invokes createAgentSession with the exact options
@@ -3154,7 +3164,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						worktree: worktree ?? "",
 						outputSchema: normalizedOutputSchema,
 						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
-						ircPeers: ircEnabled ? formatIrcPeerRoster(AgentRegistry.global(), id) : "",
+						ircPeers,
 						ircSelfId: ircEnabled ? id : "",
 					});
 					return defaultPrompt.length === 0
@@ -3193,11 +3203,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 			sessionOpenedAt = performance.now();
 			if (ircEnabled) {
-				await ensurePersistedRoster(
+				ircPeers = await renderIrcPeerRoster(
+					id,
 					AgentRegistry.global(),
-					AgentRegistry.global().get(MAIN_AGENT_ID)?.sessionFile ??
-						AgentRegistry.global().get(id)?.sessionFile ??
-						sessionFile,
+					sessionManager.getSessionFile() ?? sessionFile,
 				);
 			}
 
@@ -3231,11 +3240,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						reopened.adoptArtifactManager(options.parentArtifactManager);
 					}
 					if (ircEnabled) {
-						await ensurePersistedRoster(
+						ircPeers = await renderIrcPeerRoster(
+							id,
 							AgentRegistry.global(),
-							AgentRegistry.global().get(MAIN_AGENT_ID)?.sessionFile ??
-								AgentRegistry.global().get(id)?.sessionFile ??
-								sessionFile,
+							reopened.getSessionFile() ?? sessionFile,
 						);
 					}
 					const { session: revived } = await createAgentSession(

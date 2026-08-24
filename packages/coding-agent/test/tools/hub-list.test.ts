@@ -265,6 +265,31 @@ describe("hub list", () => {
 		});
 	});
 
+	it("keeps actionable peers available when persisted roster IO is invalid", async () => {
+		const registry = new AgentRegistry();
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: MAIN_AGENT_ID,
+			kind: "main",
+			session: null,
+			sessionFile: "\0invalid.jsonl",
+			status: "running",
+		});
+		registry.register({
+			id: "LiveWorker",
+			displayName: "task",
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			session: null,
+			status: "idle",
+		});
+
+		const result = await executeList(registry, MAIN_AGENT_ID);
+		if (!result.details) throw new Error("Expected coordination details");
+		expect(result.details.peers?.map(peer => peer.id)).toEqual(["LiveWorker"]);
+		expect(result.details.counts?.idle).toBe(1);
+	});
+
 	it("schema rejects aborted and advisor list filters", () => {
 		const tool = new HubTool(makeToolSession(new AgentRegistry(), MAIN_AGENT_ID));
 		expect(() => tool.parameters.assert({ op: "list", status: "aborted" })).toThrow();
@@ -330,6 +355,54 @@ describe("hub list", () => {
 		]);
 		expect(listText(parked)).toContain("Worker");
 		expect(listText(parked)).toContain("parked");
+	});
+
+	it("rescans and scopes parked peers when one registry switches root sessions", async () => {
+		using tempDir = TempDir.createSync("@omp-hub-list-session-switch-");
+		const firstSession = path.join(tempDir.path(), "first.jsonl");
+		const secondSession = path.join(tempDir.path(), "second.jsonl");
+		await Bun.write(firstSession, `${sessionHeader("first")}\n`);
+		await Bun.write(secondSession, `${sessionHeader("second")}\n`);
+		await writeParkedTranscript(path.join(tempDir.path(), "first", "FirstWorker.jsonl"), "first-worker", "first");
+		await writeParkedTranscript(path.join(tempDir.path(), "second", "SecondWorker.jsonl"), "second-worker", "second");
+
+		const registry = new AgentRegistry();
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: MAIN_AGENT_ID,
+			kind: "main",
+			session: null,
+			sessionFile: firstSession,
+			status: "running",
+		});
+		const first = await executeList(registry, MAIN_AGENT_ID, { status: "parked" });
+		if (!first.details) throw new Error("Expected coordination details");
+		expect(first.details.peers?.map(peer => peer.id)).toEqual(["FirstWorker"]);
+
+		const hintedRoster = await renderIrcPeerRoster("HintedChild", registry, secondSession);
+		expect(hintedRoster).toContain("1 parked peer(s) omitted");
+		expect(registry.get("SecondWorker")).toBeDefined();
+		expect(hintedRoster).not.toContain("FirstWorker");
+		expect(hintedRoster).not.toContain("SecondWorker");
+		registry.unregister(MAIN_AGENT_ID);
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: MAIN_AGENT_ID,
+			kind: "main",
+			session: null,
+			sessionFile: secondSession,
+			status: "running",
+		});
+		const second = await executeList(registry, MAIN_AGENT_ID, { status: "parked" });
+		if (!second.details) throw new Error("Expected coordination details");
+		expect(second.details.peers?.map(peer => peer.id)).toEqual(["SecondWorker"]);
+		expect(second.details.counts?.parked).toBe(1);
+		expect(registry.get("FirstWorker")).toBeDefined();
+
+		const promptRoster = await renderIrcPeerRoster(MAIN_AGENT_ID, registry, secondSession);
+		expect(promptRoster).toContain("1 parked peer(s) omitted");
+		expect(promptRoster).not.toContain("FirstWorker");
+		expect(promptRoster).not.toContain("SecondWorker");
 	});
 
 	it("counts a disk-only parked sibling when a live sibling is already in memory", async () => {

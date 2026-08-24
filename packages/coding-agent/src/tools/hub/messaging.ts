@@ -17,7 +17,7 @@ import type { RenderResultOptions } from "../../extensibility/custom-tools/types
 import { IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../../irc/bus";
 import type { Theme } from "../../modes/theme/theme";
 import { type AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
-import { ensurePersistedRoster } from "../../registry/persisted-agents";
+import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../../registry/persisted-agents";
 import { canSpawnAtDepth } from "../../task/types";
 import { Ellipsis, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
 import {
@@ -60,9 +60,21 @@ function resolveHubListLimit(limit: number | undefined): number {
 	return Math.min(Math.max(1, Math.floor(limit)), MAX_HUB_LIST_LIMIT);
 }
 
-function selectListRefs(registry: AgentRegistry, senderId: string, status: HubListStatus | undefined) {
+function selectListRefs(
+	registry: AgentRegistry,
+	senderId: string,
+	status: HubListStatus | undefined,
+	rootSessionFile: string | undefined,
+) {
 	if (status === "parked") {
-		return registry.list().filter(ref => isAddressablePeer(ref, senderId) && ref.status === "parked");
+		return registry
+			.list()
+			.filter(
+				ref =>
+					isAddressablePeer(ref, senderId) &&
+					ref.status === "parked" &&
+					isCurrentSessionRosterRef(ref, rootSessionFile),
+			);
 	}
 	const live = registry.listVisibleTo(senderId);
 	return status ? live.filter(ref => ref.status === status) : live;
@@ -147,10 +159,12 @@ export async function executeList(
 	senderId: string,
 	params: HubListParams = {},
 ): Promise<AgentToolResult<CoordinationDetails>> {
-	await ensurePersistedRoster(registry, registry.get(senderId)?.sessionFile);
-	const refs = registry.list();
+	const rootSessionFile = await ensurePersistedRoster(registry, registry.get(senderId)?.sessionFile);
+	const refs = registry
+		.list()
+		.filter(ref => isAddressablePeer(ref, senderId) && isCurrentSessionRosterRef(ref, rootSessionFile));
 
-	const selected = selectListRefs(registry, senderId, params.status);
+	const selected = selectListRefs(registry, senderId, params.status, rootSessionFile);
 	selected.sort(
 		(a, b) =>
 			(LIST_STATUS_ORDER[a.status] ?? 9) - (LIST_STATUS_ORDER[b.status] ?? 9) || b.lastActivity - a.lastActivity,
