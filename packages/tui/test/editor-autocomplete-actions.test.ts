@@ -1013,7 +1013,7 @@ describe("Editor fast-typing autocomplete race (stale popup accepted over typed 
 		for (const char of "login") editor.handleInput(char);
 		editor.handleInput("\t");
 
-		expect(editor.getText()).toBe("/login");
+		expect(editor.getText()).toBe("/login ");
 		expect(editor.isShowingAutocomplete()).toBe(false);
 	});
 
@@ -1045,5 +1045,50 @@ describe("Editor fast-typing autocomplete race (stale popup accepted over typed 
 		editor.handleInput("\r");
 
 		expect(submitted).toBe("/loop");
+	});
+
+	// Exact-command-vs-longer-command ranking race (#9637 review): the bare "/"
+	// popup selects the usage-heavy longer command, but the typed token is an
+	// exact match for the shorter one; accept must follow the fresh ranking.
+	function createOverlappingCommandsProvider(): CombinedAutocompleteProvider {
+		return new CombinedAutocompleteProvider(
+			[
+				{ name: "log", description: "Show the conversation log" },
+				{ name: "login", description: "Authenticate" },
+			],
+			"/tmp",
+			{ commandUsage: name => (name === "login" ? 10 : 0) },
+		);
+	}
+
+	it("Enter applies the fresh top-ranked command when the stale selection merely prefix-matches", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(createOverlappingCommandsProvider());
+		let submitted = "";
+		editor.onSubmit = text => {
+			submitted = text;
+		};
+
+		editor.handleInput("/");
+		await untilAutocompleteShown(editor); // popup selects "login" via usage
+
+		for (const char of "log") editor.handleInput(char);
+		editor.handleInput("\r");
+
+		expect(submitted).toBe("/log");
+	});
+
+	it("Tab applies the fresh top-ranked command when the stale selection merely prefix-matches", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(createOverlappingCommandsProvider());
+
+		editor.handleInput("/");
+		await untilAutocompleteShown(editor); // popup selects "login" via usage
+
+		for (const char of "log") editor.handleInput(char);
+		editor.handleInput("\t");
+
+		expect(editor.getText()).toBe("/log ");
+		expect(editor.isShowingAutocomplete()).toBe(false);
 	});
 });

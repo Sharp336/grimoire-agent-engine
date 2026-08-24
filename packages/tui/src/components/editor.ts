@@ -6,7 +6,6 @@ import {
 	findTrailingSlashCommandStart,
 	midPromptSkillTokenMatches,
 	SKILL_NAMESPACE,
-	slashCommandTokenMatches,
 } from "../autocomplete";
 import { BracketedPasteHandler, decodeReencodedPasteControls } from "../bracketed-paste";
 import { canonicalKeyId, getKeybindings, type KeybindingsManager } from "../keybindings";
@@ -1415,8 +1414,19 @@ export class Editor implements Component, Focusable {
 					const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
 					const currentTextBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
 					if (!this.#autocompletePrefixMatchesCursorText(currentTextBeforeCursor, selected)) {
-						// Autocomplete is stale - silently cancel; Tab has no fallback action here.
+						// Autocomplete is stale. For a stale slash-command popup, Tab does
+						// what a refreshed popup would: apply the fresh top-ranked completion
+						// for the live token (#9637 review). Otherwise silently cancel; Tab
+						// has no fallback action here.
+						if (!this.#isStaleSlashCommandPopup() || !this.#applySyncSlashCompletion(currentTextBeforeCursor)) {
+							this.#cancelAutocomplete();
+							return;
+						}
 						this.#cancelAutocomplete();
+						this.onAutocompleteUpdate?.();
+						if (this.onChange) {
+							this.onChange(this.getText());
+						}
 						return;
 					}
 					if (selected && this.#autocompleteProvider) {
@@ -1463,7 +1473,12 @@ export class Editor implements Component, Focusable {
 					const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
 					const currentTextBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
 					if (!this.#autocompletePrefixMatchesCursorText(currentTextBeforeCursor, selected)) {
-						// Autocomplete is stale - cancel and fall through to normal submission
+						// Autocomplete is stale. For a stale slash-command popup, re-derive
+						// the completion from the live token (fresh ranking, #9637 review)
+						// before submitting; then cancel and fall through in both cases.
+						if (this.#isStaleSlashCommandPopup()) {
+							this.#applySyncSlashCompletion(currentTextBeforeCursor);
+						}
 						this.#cancelAutocomplete();
 					} else {
 						if (selected && this.#autocompleteProvider) {
@@ -1491,7 +1506,12 @@ export class Editor implements Component, Focusable {
 					const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
 					const currentTextBeforeCursor = currentLine.slice(0, this.#state.cursorCol);
 					if (!this.#autocompletePrefixMatchesCursorText(currentTextBeforeCursor, selected)) {
-						// Autocomplete is stale - cancel and fall through to normal submission
+						// Autocomplete is stale. For a stale slash-command popup, re-derive
+						// the completion from the live token (fresh ranking, #9637 review);
+						// then cancel and fall through to normal submission.
+						if (this.#isStaleSlashCommandPopup()) {
+							this.#applySyncSlashCompletion(currentTextBeforeCursor);
+						}
 						this.#cancelAutocomplete();
 					} else {
 						if (selected && this.#autocompleteProvider) {
@@ -3276,15 +3296,17 @@ export class Editor implements Component, Focusable {
 	 * - Path branch is safe when the prefix is still a live suffix of the text; the
 	 *   provider's default slice at `cursorCol - prefix.length` then hits the right span.
 	 * - Slash branch re-anchors when both the prefix and the current text carry a
-	 *   leading slash command, the current slash token is clean (no whitespace or
-	 *   inner slash), and the token still matches the selection itself, matching
-	 *   `applyCompletion`'s slash-branch guard. It only engages for command-shaped
-	 *   selections: absolute-path completions (`/tmp/fo` via the no-command-match
-	 *   fall-through) share the leading-slash prefix shape but must use the
-	 *   live-suffix path rule so the apply slice stays anchored. The token-match
-	 *   requirement rejects popups left stale by fast typing (prefix `/lo`, token
-	 *   `/login`), which `applyCompletion` would otherwise rewrite with the stale
-	 *   selection; Enter then falls through to the sync completion path.
+	 *   leading slash command and the current slash token is clean (no whitespace
+	 *   or inner slash), matching `applyCompletion`'s slash-branch guard. It only
+	 *   engages for command-shaped selections: absolute-path completions
+	 *   (`/tmp/fo` via the no-command-match fall-through) share the leading-slash
+	 *   prefix shape but must use the live-suffix path rule so the apply slice
+	 *   stays anchored. A positive text match against the stale selection is not
+	 *   sufficient (issue #9637 review): the live token may rank a different
+	 *   command first (exact `log` outranks usage-heavy `login` for token `log`),
+	 *   so acceptance requires a fresh sync ranking for the live token to still
+	 *   select the same item; otherwise the accept paths re-derive the completion
+	 *   from the live token via #applySyncSlashCompletion.
 	 * - Mid-prompt skill branch re-anchors when the popup item is a skill and the
 	 *   current text still ends in a matching trailing slash token, preventing a
 	 *   stale selection from replacing a newer skill prefix.
@@ -3320,11 +3342,15 @@ export class Editor implements Component, Focusable {
 				const token = currentTextBeforeCursor.slice(currentLeadingStart);
 				if (!token.includes(" ") && !token.slice(1).includes("/")) {
 					// Fast typing can outrun the 100 ms debounced popup refresh: the popup
-					// still shows matches for a shorter prefix while the live token has
-					// already diverged. Only accept when the live token still matches the
-					// selection itself, so `/login` typed past a `/lo` popup submits
-					// `/login` instead of the stale `/loop` selection.
-					return slashCommandTokenMatches(token.slice(1).toLowerCase(), item);
+					// still shows the ranking for a shorter prefix while the live token has
+					// already diverged. A positive text match against the stale selection is
+					// not enough — the live token may rank a different command first (exact
+					// `log` outranks usage-heavy `login` for the token `log`). Only accept
+					// when a fresh sync ranking for the live token still selects this item;
+					// otherwise the accept paths re-derive the completion via
+					// #applySyncSlashCompletion.
+					const fresh = this.#autocompleteProvider?.trySyncSlashCompletion?.(currentTextBeforeCursor);
+					return !!item && !!fresh && fresh.items.length > 0 && fresh.items[0]!.value === item.value;
 				}
 			}
 			return false;
@@ -3335,6 +3361,42 @@ export class Editor implements Component, Focusable {
 		}
 
 		return currentTextBeforeCursor.endsWith(this.#autocompletePrefix);
+	}
+
+	/**
+	 * Whether the open popup is a stale leading-slash command popup (not a
+	 * path completion sharing the leading-slash prefix shape). Only these
+	 * popups re-derive their completion via #applySyncSlashCompletion.
+	 */
+	#isStaleSlashCommandPopup(): boolean {
+		return findLeadingSlashCommandStart(this.#autocompletePrefix) !== null && !this.#selectedCompletionIsPath();
+	}
+
+	/**
+	 * Apply the fresh top-ranked slash-command completion for the live
+	 * text-before-cursor, re-deriving what a refreshed popup would rank first.
+	 * Used by the Tab/Enter accept paths when the popup is stale (typing outran
+	 * the debounced refresh): instead of accepting the stale selection or
+	 * canceling outright, the accept does exactly what a refreshed popup would
+	 * have done. Returns false when no command matches the live token.
+	 */
+	#applySyncSlashCompletion(currentTextBeforeCursor: string): boolean {
+		const provider = this.#autocompleteProvider;
+		if (!provider?.trySyncSlashCompletion) return false;
+		const sync = provider.trySyncSlashCompletion(currentTextBeforeCursor);
+		if (!sync || sync.items.length === 0) return false;
+		const result = provider.applyCompletion(
+			this.#state.lines,
+			this.#state.cursorLine,
+			this.#state.cursorCol,
+			sync.items[0]!,
+			sync.prefix,
+		);
+		this.#state.lines = result.lines;
+		this.#state.cursorLine = result.cursorLine;
+		this.#setCursorCol(result.cursorCol);
+		result.onApplied?.();
+		return true;
 	}
 
 	/**
