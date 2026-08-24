@@ -5,6 +5,7 @@
 ### Added
 
 - Added `omp usage clients` to report per-client token usage recorded by the auth broker, including the machine and application responsible for usage by provider. Supports `--days` and `--json` output.
+- Extension API: `api.agents` — list/get/ensureLive/prompt for named registry agents.
 
 ### Changed
 
