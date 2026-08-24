@@ -720,10 +720,18 @@ export class MCPManager {
 					connectedServers.add(name);
 					// The background continuation (registered before Promise.race)
 					// runs before this loop for servers that resolved within the
-					// startup window, so it already registered tools and surfaced
-					// any filter-empty failure as a `failed` status event. Nothing
-					// further to do here — re-registering would double-apply the
-					// tool filter (duplicate logs) and double-report the failure.
+					// startup window, so it already registered tools and emitted
+					// the status event. Record the filter-empty failure in the
+					// errors map too — headless callers derive their reported
+					// failures solely from result.errors. The registry check
+					// avoids re-applying the filter (no duplicate logs).
+					const filterMsg = !this.#tools.some(tool => tool.mcpServerName === name)
+						? mcpFilterEmptyMessage(name, task.config, task.tracked.value.serverTools.length)
+						: null;
+					if (filterMsg) {
+						errors.set(name, filterMsg);
+						reportedErrors.add(name);
+					}
 				} else if (task.tracked.status === "rejected") {
 					const message =
 						task.tracked.reason instanceof Error ? task.tracked.reason.message : String(task.tracked.reason);
