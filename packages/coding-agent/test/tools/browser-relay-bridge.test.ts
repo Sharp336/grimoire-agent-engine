@@ -482,4 +482,73 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("detach")).toHaveLength(1);
 		expect(ext2.rpcs("detach")[0]!.tabId).toBe(1);
 	});
+
+	it("preserves a page session for a holder that enabled setDiscoverTargets but not auto-attach", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		// Discovery + manual attachToTarget, but no setAutoAttach: the holder still
+		// owns a long-lived page pseudo-session routed by tabId, and Chrome mints no
+		// replacement on recovery. Preservation must not be gated on `discover`.
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets" }));
+		await flush();
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.extClosed(ext);
+
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await flush();
+		expect(ext2.rpcs("attach")).toHaveLength(1);
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		// The preserved page session survives the root swap: its next command routes
+		// to the reattached tab instead of failing "Unknown session id".
+		const cmdId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: cmdId, sessionId: pageSession, method: "Runtime.evaluate" }));
+		ack(bridge, ext2, "send", { ok: true });
+		await flush();
+		const reply = cdp.messages.find(m => m.id === cmdId);
+		expect(reply?.error).toBeUndefined();
+		expect(ext2.rpcs("send")).toHaveLength(1);
+		expect(ext2.rpcs("send")[0]!.tabId).toBe(1);
+	});
+
+	it("holds a preserved session's command until the recovery attach acknowledges", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.extClosed(ext);
+
+		// Recovery arms a debugger reattach that has NOT been acknowledged yet, so
+		// `tab.attaching` is still pending when the holder's next command arrives.
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await flush();
+		expect(ext2.rpcs("attach")).toHaveLength(1);
+
+		// Command sent while the attach is in flight: the bridge must not forward the
+		// send RPC concurrently with chrome.debugger.attach(), or Chrome may reject it
+		// as unattached. No send should be issued until the attach acknowledges.
+		const cmdId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: cmdId, sessionId: pageSession, method: "Runtime.evaluate" }));
+		await flush();
+		expect(ext2.rpcs("send")).toHaveLength(0);
+
+		// Once the attach acknowledges, the held command drains to the live tab.
+		ack(bridge, ext2, "attach");
+		await flush();
+		ack(bridge, ext2, "send", { ok: true });
+		await flush();
+		expect(ext2.rpcs("send")).toHaveLength(1);
+		expect(ext2.rpcs("send")[0]!.tabId).toBe(1);
+		expect(cdp.messages.find(m => m.id === cmdId)?.error).toBeUndefined();
+	});
 });

@@ -307,18 +307,19 @@ export class RelayBridge {
 				continue;
 			}
 			// A guard detach creates a fresh Chrome root session, so every real child
-			// session (OOPIF/worker) tied to the old root must be torn down. But a
-			// bare Target.attachToTarget holder — one that never enabled
-			// setAutoAttach or setDiscoverTargets — keeps a long-lived page
-			// pseudo-session routed by tabId (not the old Chrome root id), so it
-			// stays valid across the re-attach and Chrome never re-emits a
-			// replacement for it. Preserve those page sessions through the retract:
-			// dropping them makes the holder's next command fail "Unknown session
-			// id", and with no session left in `conn.sessions` `cdpClosed` can no
-			// longer detach the debugger — re-orphaning the very attachment this
-			// recovery is restoring.
+			// session (OOPIF/worker) tied to the old root must be torn down. But any
+			// Target.attachToTarget holder that never enabled setAutoAttach keeps a
+			// long-lived page pseudo-session routed by tabId (not the old Chrome root
+			// id), so it stays valid across the re-attach and Chrome never re-emits a
+			// replacement for it. This holds whether or not the holder also called
+			// setDiscoverTargets: only auto-attach clients expect a freshly minted
+			// replacement session (via the autoAttachConns path below). Preserve those
+			// page sessions through the retract: dropping them makes the holder's next
+			// command fail "Unknown session id", and with no session left in
+			// `conn.sessions` `cdpClosed` can no longer detach the debugger —
+			// re-orphaning the very attachment this recovery is restoring.
 			const preserve = [...this.#conns.values()].filter(
-				conn => !conn.autoAttach && !conn.discover && conn.sessionsForTab(tab.tabId, "page").length > 0,
+				conn => !conn.autoAttach && conn.sessionsForTab(tab.tabId, "page").length > 0,
 			);
 			this.#retractTab(tab, preserve);
 			this.#announceTab(tab, true);
@@ -422,6 +423,14 @@ export class RelayBridge {
 			this.#reply(conn, msg, {});
 			return;
 		}
+		// A preserved page session can outlive a Chrome root swap: recovery
+		// re-announces the tab and arms a debugger reattach (#ensureAttached sets
+		// `tab.attaching`) that resolves asynchronously. Forwarding a command
+		// before that attach acknowledges would race chrome.debugger.attach() and
+		// Chrome can reject the command as unattached. Wait for the in-flight
+		// attach to settle first so preserved holders always land on a live tab.
+		const tab = this.#tabs.get(tabId);
+		if (tab?.attaching) await tab.attaching;
 		try {
 			const result = await this.#rpc({
 				op: "send",
