@@ -183,6 +183,7 @@ export class ExtensionUiController {
 				this.ctx.sessionManager.appendLabelChange(targetId, label);
 			},
 			getActiveTools: () => this.ctx.session.getEnabledToolNames(),
+			getToolReference: name => this.ctx.session.getToolReference(name),
 			getAllTools: () => this.ctx.session.getAllToolInfos(),
 			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
 			setModel: async model => {
@@ -416,6 +417,7 @@ export class ExtensionUiController {
 				this.ctx.sessionManager.appendLabelChange(targetId, label);
 			},
 			getActiveTools: () => this.ctx.session.getEnabledToolNames(),
+			getToolReference: name => this.ctx.session.getToolReference(name),
 			getAllTools: () => this.ctx.session.getAllToolInfos(),
 			setActiveTools: toolNames => this.ctx.session.setActiveToolsByName(toolNames),
 			setModel: async model => {
