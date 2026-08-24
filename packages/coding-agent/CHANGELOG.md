@@ -23,6 +23,10 @@
 ### Added
 
 - Fenced code blocks now expose a clickable `copy` link that copies their original source text.
+### Fixed
+
+- Fixed kernel sessions failing to recover when a dead kernel reports cancellation instead of throwing.
+
 ## [18.0.4] - 2026-08-24
 
 ### Added
