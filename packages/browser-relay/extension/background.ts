@@ -193,7 +193,7 @@ async function setBadge(connected: boolean): Promise<void> {
 	}
 }
 
-let helloRefresh: { socket: WebSocket; done: Promise<void> } | null = null;
+let helloRefresh: { socket: WebSocket; done: Promise<void>; dirty: boolean } | null = null;
 
 /**
  * Send a fresh hello for the live socket, coalescing concurrent callers.
@@ -208,19 +208,47 @@ let helloRefresh: { socket: WebSocket; done: Promise<void> } | null = null;
  * captures the final attachment state. Coalescing is scoped to the live socket:
  * a refresh already queued for a socket that has since been replaced never
  * suppresses the replacement's own hello.
+ *
+ * A concurrent caller cannot simply be dropped, though: the in-flight refresh
+ * may have already snapshotted `getTargets()` before the newer detach/attach
+ * landed, so its hello would report the just-detached tab as still attached and
+ * `RelayBridge.#onHello()` would preserve the stale session instead of
+ * recovering it. Rather than dropping the request, mark the active refresh
+ * dirty and rebuild once it settles, so the follow-up hello reflects the final
+ * attachment state.
  */
 function refreshHello(): void {
 	const socket = ws;
 	if (!socket || socket.readyState !== WebSocket.OPEN) return;
-	if (helloRefresh?.socket === socket) return;
-	const done = buildHello()
-		.then(hello => {
-			if (ws === socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(hello));
-		})
-		.finally(() => {
-			if (helloRefresh?.socket === socket) helloRefresh = null;
-		});
-	helloRefresh = { socket, done };
+	if (helloRefresh?.socket === socket) {
+		// A refresh is already running for this socket; its snapshot may predate
+		// this change. Rebuild after it settles instead of discarding the refresh.
+		helloRefresh.dirty = true;
+		return;
+	}
+	const startRefresh = (): void => {
+		const entry: { socket: WebSocket; done: Promise<void>; dirty: boolean } = {
+			socket,
+			dirty: false,
+			done: Promise.resolve(),
+		};
+		entry.done = buildHello()
+			.then(hello => {
+				if (ws === socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(hello));
+			})
+			.finally(() => {
+				if (helloRefresh !== entry) return;
+				if (entry.dirty && ws === socket && socket.readyState === WebSocket.OPEN) {
+					// A refresh arrived while this one was in flight; its snapshot may be
+					// stale, so rebuild to capture the change it observed.
+					startRefresh();
+				} else {
+					helloRefresh = null;
+				}
+			});
+		helloRefresh = entry;
+	};
+	startRefresh();
 }
 
 async function buildHello(): Promise<ExtToRelayMessage> {

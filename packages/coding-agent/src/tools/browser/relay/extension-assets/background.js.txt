@@ -201,16 +201,31 @@ function refreshHello() {
   const socket = ws;
   if (!socket || socket.readyState !== WebSocket.OPEN)
     return;
-  if (helloRefresh?.socket === socket)
+  if (helloRefresh?.socket === socket) {
+    helloRefresh.dirty = true;
     return;
-  const done = buildHello().then((hello) => {
-    if (ws === socket && socket.readyState === WebSocket.OPEN)
-      socket.send(JSON.stringify(hello));
-  }).finally(() => {
-    if (helloRefresh?.socket === socket)
-      helloRefresh = null;
-  });
-  helloRefresh = { socket, done };
+  }
+  const startRefresh = () => {
+    const entry = {
+      socket,
+      dirty: false,
+      done: Promise.resolve()
+    };
+    entry.done = buildHello().then((hello) => {
+      if (ws === socket && socket.readyState === WebSocket.OPEN)
+        socket.send(JSON.stringify(hello));
+    }).finally(() => {
+      if (helloRefresh !== entry)
+        return;
+      if (entry.dirty && ws === socket && socket.readyState === WebSocket.OPEN) {
+        startRefresh();
+      } else {
+        helloRefresh = null;
+      }
+    });
+    helloRefresh = entry;
+  };
+  startRefresh();
 }
 async function buildHello() {
   await Promise.allSettled([...pendingAttaches]);
