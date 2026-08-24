@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed DeepSeek vision SKUs (`deepseek-v4-flash-vision-exp`, any `-vision-` id) losing image input after the text-only DeepSeek guard: genuinely multimodal ids now keep `image_url` parts while text-only DeepSeek endpoints still strip them.
+
 
 ### Breaking Changes
 
