@@ -421,6 +421,7 @@ export interface InteractiveModeContext {
 	/** Open the fullscreen git UI, optionally pinned to a revision (`/git <rev>`). */
 	showGitUi(revision?: string): void;
 	showModelSelector(options?: { temporaryOnly?: boolean }): void;
+	showProfileSelector(): void;
 	showPluginSelector(mode?: "install" | "uninstall"): void;
 	showUserMessageSelector(): void;
 	showCopySelector(): void;

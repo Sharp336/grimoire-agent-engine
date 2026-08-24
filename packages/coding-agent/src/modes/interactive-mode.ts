@@ -60,6 +60,7 @@ import { formatModelString, type ResolvedModelRoleValue } from "../config/model-
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import {
 	isSettingsInitialized,
+	onActiveProfileChanged,
 	onModelRolesChanged,
 	onStatusLineSessionAccentChanged,
 	Settings,
@@ -1339,6 +1340,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#eventBusUnsubscribers.push(
 			onModelRolesChanged(() => {
 				void this.#reapplyPlanModeModelOnRoleChange();
+			}),
+		);
+		this.#eventBusUnsubscribers.push(
+			onActiveProfileChanged(() => {
+				void this.#reapplyDefaultModelOnProfileChange();
 			}),
 		);
 		this.#eventBusUnsubscribers.push(
@@ -2818,6 +2824,33 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		await this.#applyPlanModelTransition(this.session.model, resolved);
+	}
+
+	/**
+	 * When the active profile changes mid-session, re-resolve the default role
+	 * and switch the live session model to it (deferred while streaming, like
+	 * the plan-role reconciler). Plan mode keeps its own plan-role path via
+	 * `onModelRolesChanged`; profile switches arrive through the active-profile
+	 * signal and must also re-point the main model.
+	 */
+	async #reapplyDefaultModelOnProfileChange(): Promise<void> {
+		if (this.planModeEnabled) return;
+		const resolved = this.session.resolveRoleModelWithThinking("default");
+		if (!resolved.model) return;
+		if (this.session.isStreaming) {
+			this.#pendingModelSwitch = { model: resolved.model, thinkingLevel: resolved.thinkingLevel };
+			this.#pendingPlanModelSwitch = false;
+			return;
+		}
+		try {
+			await this.session.setModelTemporary(resolved.model, resolved.thinkingLevel);
+			this.statusLine.invalidate();
+			this.updateEditorBorderColor();
+		} catch (error) {
+			this.showWarning(
+				`Could not switch to the profile's default model: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 	}
 
 	/**
@@ -5386,6 +5419,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showModelSelector(options?: { temporaryOnly?: boolean }): void {
 		this.#selectorController.showModelSelector(options);
+	}
+
+	showProfileSelector(): void {
+		this.#selectorController.showProfileSelector();
 	}
 
 	showPluginSelector(mode?: "install" | "uninstall"): void {

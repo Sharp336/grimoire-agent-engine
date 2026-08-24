@@ -4,7 +4,7 @@ import { PASTE_CODE_LOGIN_PROVIDERS } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import type { Component, OverlayHandle, ResizeScrollbackMode } from "@oh-my-pi/pi-tui";
-import { Loader, Spacer, setTuiTight, Text } from "@oh-my-pi/pi-tui";
+import { Input, Loader, Spacer, setTuiTight, Text } from "@oh-my-pi/pi-tui";
 import { getAgentDbPath, getAgentDir, getProjectDir, normalizePathForComparison } from "@oh-my-pi/pi-utils";
 import {
 	type AdvisorConfigScope,
@@ -21,7 +21,7 @@ import {
 	resolveModelRoleValue,
 } from "../../config/model-resolver";
 import { getRoleInfo } from "../../config/model-roles";
-import { settings } from "../../config/settings";
+import { type Settings, settings } from "../../config/settings";
 import { disableProvider, enableProvider } from "../../discovery";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
@@ -57,6 +57,7 @@ import { SessionManager } from "../../session/session-manager";
 import { loadPinnedSessionIds } from "../../session/session-pins";
 import { FileSessionStorage } from "../../session/session-storage";
 import { type LogoutAccount, toLogoutAccounts } from "../../slash-commands/helpers/logout";
+import { activateProfile, profilePickerEntries } from "../../slash-commands/helpers/profile-command";
 import {
 	describeRedeemOutcome,
 	type ResetUsageAccount,
@@ -96,6 +97,7 @@ import { ModelHubComponent, type ModelRoleSelectionScope } from "../components/m
 import { ModelPickerComponent } from "../components/model-picker";
 import { OAuthSelectorComponent } from "../components/oauth-selector";
 import { PluginSelectorComponent } from "../components/plugin-selector";
+import { ProfileFormPanel, type ProfileManagerAction, ProfileManagerComponent } from "../components/profile-manager";
 import { ReadToolGroupComponent } from "../components/read-tool-group";
 import { ResetUsageSelectorComponent } from "../components/reset-usage-selector";
 import { renderSegmentTrack } from "../components/segment-track";
@@ -753,6 +755,206 @@ export class SelectorController {
 		}
 		this.#showModelHub({});
 	}
+
+	/**
+	 * Floating Profile Manager (bare `/profile`): lists configured profiles,
+	 * "Off", and a create action. Enter activates; E edits roles in place;
+	 * D deletes with confirmation; N opens the creation form. All mutations
+	 * go through the structured Settings profile API and refresh the overlay
+	 * in place — no need to leave the TUI.
+	 */
+	showProfileSelector(): void {
+		const settings = this.ctx.settings;
+		let overlayHandle: OverlayHandle | undefined;
+		let closed = false;
+		const done = () => {
+			if (closed) return;
+			closed = true;
+			overlayHandle?.hide();
+			this.focusActiveEditorArea();
+			this.ctx.ui.requestRender();
+		};
+
+		const manager = new ProfileManagerComponent(
+			profilePickerEntries(settings),
+			settings.getActiveProfile(),
+			action => {
+				this.#activeProfileManager = manager;
+				void this.#handleProfileManagerAction(action, settings, manager, done);
+			},
+		);
+		this.#activeProfileManager = manager;
+
+		overlayHandle = this.ctx.ui.showOverlay(manager, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+		});
+		this.ctx.ui.setFocus(manager);
+		this.ctx.ui.requestRender();
+	}
+
+	async #handleProfileManagerAction(
+		action: ProfileManagerAction,
+		settings: Settings,
+		manager: ProfileManagerComponent,
+		done: () => void,
+	): Promise<void> {
+		switch (action.kind) {
+			case "cancel":
+				done();
+				return;
+			case "select": {
+				const message = activateProfile(settings, action.name);
+				if (message?.startsWith("Unknown profile")) {
+					this.ctx.showError(message);
+					return;
+				}
+				this.ctx.showStatus(message ?? "No active profile.");
+				manager.update(profilePickerEntries(settings), settings.getActiveProfile());
+				this.ctx.ui.requestRender();
+				return;
+			}
+			case "create": {
+				const created = await this.#promptProfileName();
+				if (!created) return; // cancelled or failed inline
+				this.ctx.showStatus(`Profile ${created} created.`);
+				manager.update(profilePickerEntries(settings), settings.getActiveProfile());
+				manager.selectProfile(created);
+				this.ctx.ui.requestRender();
+				return;
+			}
+			case "edit": {
+				const changed = await this.#editProfileRoles(settings, action.name);
+				if (changed) this.ctx.showStatus(`Profile ${action.name} updated.`);
+				manager.update(profilePickerEntries(settings), settings.getActiveProfile());
+				this.ctx.ui.requestRender();
+				return;
+			}
+			case "delete": {
+				const scope = "global"; // manager edits live in the global config
+				const confirmed = await this.ctx.showHookConfirm(
+					"Delete Profile",
+					`Delete profile "${action.name}"? Its model-role overlay is removed from ${scope} config.\nBase modelRoles are not touched.`,
+				);
+				if (!confirmed) {
+					this.ctx.showStatus("Delete cancelled");
+					return;
+				}
+				try {
+					await settings.removeProfile(scope, action.name);
+					this.ctx.showStatus(`Profile ${action.name} deleted.`);
+				} catch (error) {
+					this.ctx.showError(error instanceof Error ? error.message : String(error));
+				}
+				manager.update(profilePickerEntries(settings), settings.getActiveProfile());
+				this.ctx.ui.requestRender();
+				return;
+			}
+		}
+	}
+	/**
+	 * Inline name prompt for a new profile. Resolves the created name on
+	 * success, or undefined when cancelled/empty (no profile is written).
+	 */
+	async #promptProfileName(): Promise<string | undefined> {
+		const { promise, resolve } = Promise.withResolvers<string | undefined>();
+		const input = new Input();
+		const form = new ProfileFormPanel("New Profile");
+		form.addChild(new Text(theme.fg("muted", "Profile name (letters, digits, dashes, underscores)."), 0, 0));
+		form.addChild(new Spacer(1));
+		form.addChild(input);
+		form.addChild(new Spacer(1));
+		form.addChild(new Text(theme.fg("dim", "  Enter create · Esc cancel"), 0, 0));
+		let settled = false;
+		const finish = (value: string | undefined) => {
+			if (settled) return;
+			settled = true;
+			restore();
+			resolve(value);
+		};
+		const restore = this.#swapOverlayBody(form, input, () => finish(undefined));
+		input.onSubmit = value => {
+			void (async () => {
+				const name = value.trim();
+				if (!name) return;
+				try {
+					// Write an empty shell first so validation errors surface
+					// inline; roles are filled by the edit flow next.
+					await this.ctx.settings.setProfile("global", name, { description: "" });
+					finish(name);
+				} catch (error) {
+					form.showError(error instanceof Error ? error.message : String(error));
+				}
+			})();
+		};
+		return await promise;
+	}
+
+	/**
+	 * Role-by-role editor: cycles through the standard roles, prompting for a
+	 * selector per role (empty keeps current, `null` clears it), then persists
+	 * one patch write at the end.
+	 */
+	async #editProfileRoles(settings: Settings, name: string): Promise<boolean> {
+		const existing = settings.getProfile(name);
+		if (!existing) return false;
+		const roles: Record<string, string | null> = { ...(existing.modelRoles ?? {}) };
+		for (const role of ["default", "smol", "slow", "plan"]) {
+			const current = roles[role];
+			const entered = await this.#promptRoleValue(`${name}.${role}`, typeof current === "string" ? current : "");
+			if (entered === null) return false; // user aborted mid-edit
+			roles[role] = entered === "" ? null : entered;
+		}
+		await settings.setProfile("global", name, { modelRoles: roles });
+		return true;
+	}
+
+	/** Single-line prompt bound to the live overlay; resolves on submit/cancel. */
+	async #promptRoleValue(label: string, current: string): Promise<string | null> {
+		const { promise, resolve } = Promise.withResolvers<string | null>();
+		const input = new Input();
+		const form = new ProfileFormPanel(label);
+		form.addChild(new Text(theme.fg("muted", "provider/model or @role · empty clears · Esc aborts edit"), 0, 0));
+		form.addChild(new Spacer(1));
+		if (current) input.setValue(current);
+		form.addChild(input);
+		form.addChild(new Spacer(1));
+		form.addChild(new Text(theme.fg("dim", "  Enter save · Esc abort"), 0, 0));
+		let settled = false;
+		const finish = (value: string | null) => {
+			if (settled) return;
+			settled = true;
+			restore();
+			resolve(value);
+		};
+		const restore = this.#swapOverlayBody(form, input, () => finish(null));
+		input.onSubmit = value => finish(value.trim());
+		return await promise;
+	}
+
+	/**
+	 * Replace the manager overlay's interactive body with a prompt form and
+	 * hand keyboard focus to it. Returns a restore function that brings back
+	 * the manager list and its focus. `onDismiss` runs when the host cancels
+	 * via Escape on the form itself.
+	 */
+	#swapOverlayBody(form: ProfileFormPanel, focusTarget: Input, onDismiss: () => void): () => void {
+		const manager = this.#activeProfileManager;
+		if (!manager) return () => {};
+		form.onCancel = onDismiss;
+		manager.showPrompt(form);
+		this.ctx.ui.setFocus(focusTarget);
+		this.ctx.ui.requestRender();
+		return () => {
+			manager.closePrompt();
+			this.ctx.ui.setFocus(manager);
+			this.ctx.ui.requestRender();
+		};
+	}
+
+	#activeProfileManager: ProfileManagerComponent | undefined;
 
 	/**
 	 * Compact session-only model picker (alt+p / `/switch`): a floating

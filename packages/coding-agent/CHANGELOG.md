@@ -78,6 +78,7 @@
 - Added provider-wide Amazon Bedrock guardrail settings to models configuration, including custom models.
 - Added the `/pin` slash command to pin and unpin sessions so they stay at the top of the `--resume` picker UI.
 - Optional edit parse-regression capture appends the before/after content, model, variant, and arguments to `~/.omp/agent/edit-blackbox.jsonl` when `edit.blackbox.enabled` is enabled.
+- Added model-role Profiles (activeProfile/profiles settings, /profile command, --model-profile flag)
 
 ### Changed
 

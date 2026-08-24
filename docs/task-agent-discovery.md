@@ -208,6 +208,8 @@ For task dispatch, model precedence is:
 
 Role aliases in either of the first two sources are expanded through `modelRoles`. The shared eval bridge can also supply an invocation-local model override ahead of the settings override; the task wire schema does not expose that field.
 
+Subagent role resolution consumes the effective model roles as resolved for the parent session, so the active profile (selected by `activeProfile` or `--model-profile`) governs which concrete model a task subagent uses. Role aliases such as `@smol`, `@slow`, `@plan`, and `@task` expand through the active profile's `modelRoles` when one is applied; roles the profile does not set fall through to the base `modelRoles`.
+
 Runtime output schema precedence is:
 
 1. the task item's explicit `outputSchema`

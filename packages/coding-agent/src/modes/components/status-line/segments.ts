@@ -163,6 +163,14 @@ const modelSegment: StatusLineSegment = {
 		// `statusLineModel` is aliased to `accent` in many themes, so the badge
 		// uses status colors to stay visibly distinct from the model name color.
 		let content = theme.fg("statusLineModel", withIcon(modelIcon, modelName));
+		// Active profile indicator: a compact `profile:<name>` prefix that only
+		// appears while a model-role profile is active, so the status line stays
+		// clean for the default configuration.
+		const activeProfile = ctx.session.settings?.getActiveProfile?.() ?? "";
+		if (activeProfile) {
+			content = theme.fg("dim", `${theme.sep.dot}profile:${activeProfile}`) + content;
+		}
+
 		// Advisor symbol, colored by the worst status in the roster:
 		// success = all running, warning = quota-exhausted, error = failed,
 		// dim = everything paused/no-model. Per-advisor detail lives in
