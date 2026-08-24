@@ -79,6 +79,11 @@ export function isTextOnlyDeepSeek(model: Model<"openai-completions">): boolean 
 	const name = (model.name ?? "").toLowerCase();
 	// DeepSeek OCR is a genuinely multimodal model served by Novita.
 	if (id.includes("deepseek-ocr") || name.includes("deepseek-ocr")) return false;
+	// `deepseek-v4-flash-vision-exp` and other DeepSeek SKUs whose id/name
+	// carry a multimodal `vision` marker are genuinely vision-capable on the
+	// upstream endpoint. The family-level guard below must not strip images
+	// from them; only known text-only DeepSeek models should be guarded.
+	if (id.includes("vision") || name.includes("vision")) return false;
 	return (
 		modelMatchesHost(model, "deepseekFamily") ||
 		isDeepseekModelIdOrName(model.id) ||
