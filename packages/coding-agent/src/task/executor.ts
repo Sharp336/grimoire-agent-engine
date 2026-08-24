@@ -3019,6 +3019,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					id,
 				),
 			);
+			let receiptAuthFallbackUsed = authFallbackUsed;
+
 			if (modelResolutionWarning) {
 				logger.warn("Subagent model resolution warning", {
 					warning: modelResolutionWarning,
@@ -3062,7 +3064,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					model,
 					undefined,
 					undefined,
-					authFallbackUsed,
+					receiptAuthFallbackUsed,
 					false,
 				);
 			}
@@ -3097,7 +3099,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				model,
 				effortLevel,
 				unclampedEffort,
-				authFallbackUsed,
+				receiptAuthFallbackUsed,
 				true,
 			);
 			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
@@ -3278,7 +3280,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager, null));
 			let session: AgentSession;
 			try {
-				({ session } = await awaitAbortable(sessionPromise));
+				const created = await awaitAbortable(sessionPromise);
+				session = created.session;
+				receiptAuthFallbackUsed ||= created.modelPatternAuthFallbackUsed === true;
 			} catch (err) {
 				// Abort raced session startup. The session may still resolve later
 				// holding live LSP/MCP child processes — dispose it when it does so
@@ -3287,6 +3291,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				throw err;
 			}
 			sessionCreatedAt = performance.now();
+			// Receipt reconciliation can reject a newly discovered model, so hand
+			// ownership to the monitor before validating its effort ceiling.
+			monitor.setActiveSession(session);
 
 			// `createAgentSession` retries deferred patterns after extension and
 			// provider discovery. Rebuild the receipt from the session's actual
@@ -3301,7 +3308,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						deferredModel,
 						undefined,
 						undefined,
-						authFallbackUsed,
+						receiptAuthFallbackUsed,
 						false,
 					);
 				}
@@ -3320,7 +3327,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					deferredModel,
 					deferredEffortLevel,
 					deferredUnclampedEffort,
-					authFallbackUsed,
+					receiptAuthFallbackUsed,
 					true,
 				);
 				const serving = session.servingModel;
@@ -3332,7 +3339,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				}
 			}
 
-			monitor.setActiveSession(session);
 			// Run-state notifications precede deferrable wire-level `agent_end`,
 			// so adopted keep-alive lifecycle cannot get stuck during prompt unwind.
 			AgentRegistry.global().syncSessionStatus(id, session);
