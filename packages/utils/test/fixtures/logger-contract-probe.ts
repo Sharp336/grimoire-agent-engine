@@ -40,15 +40,15 @@ switch (scenario) {
 			nan: Number.NaN,
 		};
 		context[hidden] = "omitted";
-		logger.info("context-matrix", context);
-		logger.warn("reserved-primary", {
+		logger.error("context-matrix", context);
+		logger.error("reserved-primary", {
 			before: "first",
 			message: "metadata-message",
 			level: "context-level",
 			timestamp: "context-timestamp",
 			after: "last",
 		});
-		logger.debug("reserved-falsy", { message: "", after: true });
+		logger.error("reserved-falsy", { message: "", after: true });
 
 		const cause = new Error("downstream");
 		cause.stack = "CAUSE_STACK";
@@ -64,16 +64,16 @@ switch (scenario) {
 	case "format-tokens": {
 		logger.setTransports({ console: false, file: primaryDir });
 		for (const token of ["s", "c", "d", "j", "i", "f", "o", "O", "%"]) {
-			logger.info(`token-%${token}`, { value: 7 });
+			logger.error(`token-%${token}`, { value: 7 });
 		}
-		logger.info("non-token-%q", { value: 7 });
+		logger.error("non-token-%q", { value: 7 });
 		interface TokenCircularContext extends Record<string, unknown> {
 			self?: TokenCircularContext;
 		}
 		const circular: TokenCircularContext = { kind: "circular" };
 		circular.self = circular;
-		logger.info("circular-%s", circular);
-		logger.info("bigint-%d", { value: 1n });
+		logger.error("circular-%s", circular);
+		logger.error("bigint-%d", { value: 1n });
 		disableTransports();
 		break;
 	}
@@ -104,12 +104,12 @@ switch (scenario) {
 		break;
 	}
 	case "default-file":
-		logger.info("mode-default", { mode: "default" });
+		logger.error("mode-default", { mode: "default" });
 		disableTransports();
 		break;
 	case "file-only":
 		logger.setTransports({ console: false, file: primaryDir });
-		logger.info("mode-file", { mode: "file" });
+		logger.error("mode-file", { mode: "file" });
 		disableTransports();
 		break;
 	case "console-only":
@@ -119,7 +119,7 @@ switch (scenario) {
 		break;
 	case "both":
 		logger.setTransports({ console: true, file: primaryDir });
-		logger.info("mode-both", { mode: "both" });
+		logger.error("mode-both", { mode: "both" });
 		disableTransports();
 		break;
 	case "disabled-reenable": {
@@ -131,7 +131,7 @@ switch (scenario) {
 		const setReturn = logger.setTransports({ console: false, file: false });
 		const logReturn = logger.warn("mode-disabled", disabledContext);
 		logger.setTransports({ console: false, file: primaryDir });
-		logger.warn("mode-reenabled", { mode: "file" });
+		logger.error("mode-reenabled", { mode: "file" });
 		const disposeReturn = dispose();
 		disableTransports();
 		writeResult({
@@ -143,14 +143,14 @@ switch (scenario) {
 	}
 	case "reconfigure":
 		logger.setTransports({ console: false, file: primaryDir });
-		logger.info("directory-a", { destination: "a" });
+		logger.error("directory-a", { destination: "a" });
 		logger.setTransports({ console: false, file: secondaryDir });
-		logger.info("directory-b", { destination: "b" });
+		logger.error("directory-b", { destination: "b" });
 		disableTransports();
 		break;
 	case "reconfigure-failure": {
 		logger.setTransports({ console: false, file: primaryDir });
-		logger.info("before-failed-reconfigure");
+		logger.error("before-failed-reconfigure");
 		const blockerPath = path.join(secondaryDir, "not-a-directory");
 		fs.writeFileSync(blockerPath, "blocked");
 		let reconfigureThrew = false;
@@ -174,12 +174,12 @@ switch (scenario) {
 	}
 	case "burst-close":
 		logger.setTransports({ console: false, file: primaryDir });
-		for (let index = 0; index < 1_000; index++) logger.info("burst-close", { index });
+		for (let index = 0; index < 1_000; index++) logger.error("burst-close", { index });
 		disableTransports();
 		break;
 	case "burst-natural":
 		logger.setTransports({ console: false, file: primaryDir });
-		for (let index = 0; index < 1_000; index++) logger.info("burst-natural", { index });
+		for (let index = 0; index < 1_000; index++) logger.error("burst-natural", { index });
 		break;
 	case "sink-order": {
 		logger.setTransports({ console: true, file: false });
@@ -207,7 +207,7 @@ switch (scenario) {
 		logger.setTransports({ console: false, file: primaryDir });
 		for (const [index, date] of dates.entries()) {
 			process.env.OMP_LOGGER_TEST_NOW = date;
-			logger.info(`date-${index + 1}`);
+			logger.error(`date-${index + 1}`);
 			await Bun.sleep(10);
 		}
 		disableTransports();
@@ -215,10 +215,10 @@ switch (scenario) {
 	}
 	case "size-rotation":
 		logger.setTransports({ console: false, file: primaryDir });
-		logger.info("size-nine-mib", { payload: "x".repeat(9 * 1024 * 1024) });
-		logger.info("size-half-mib", { payload: "y".repeat(512 * 1024) });
-		logger.info("size-crosses-ten-mib", { payload: "z".repeat(1024 * 1024) });
-		logger.info("rotation-trigger");
+		logger.error("size-nine-mib", { payload: "x".repeat(9 * 1024 * 1024) });
+		logger.error("size-half-mib", { payload: "y".repeat(512 * 1024) });
+		logger.error("size-crosses-ten-mib", { payload: "z".repeat(1024 * 1024) });
+		logger.error("rotation-trigger");
 		disableTransports();
 		break;
 	default:

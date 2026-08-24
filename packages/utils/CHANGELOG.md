@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Log files now contain only error-level entries.
+
 ## [18.0.1] - 2026-08-23
 
 ### Fixed
