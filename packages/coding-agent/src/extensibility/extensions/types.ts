@@ -736,9 +736,10 @@ export interface BeforeProviderRequestEvent {
 /**
  * Fired before the provider HTTP call, carrying the CALLER-SUPPLIED request
  * headers (`StreamOptions.headers`). Handlers mutate `headers` in place; the
- * return value is ignored. Additions reach the request; provider auth and
- * defaults are assembled downstream and can be neither read nor replaced. See
- * `docs/extensions.md` for the full contract.
+ * return value is ignored. Additions reach the request as caller headers.
+ * Provider auth is assembled downstream and is never exposed; handler edits to
+ * credential header names are discarded. Other keys follow each provider's
+ * `StreamOptions.headers` merge. See `docs/extensions.md` for the full contract.
  */
 export interface BeforeProviderHeadersEvent {
 	type: "before_provider_headers";

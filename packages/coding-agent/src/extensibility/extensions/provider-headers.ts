@@ -4,12 +4,14 @@
  *
  * Applied at the stream-fn boundary, so it carries the CALLER-SUPPLIED headers
  * (`options.headers`) — not the provider's assembled map. Providers merge this
- * object into the headers they build, so additions here reach the request, while
- * auth and provider defaults are generated downstream and are neither visible
- * nor removable. Not removable is ENFORCED rather than assumed: providers
+ * object into the headers they build, so additions here reach the request as
+ * caller headers. Provider auth is generated downstream and is never visible.
+ * Removability of credential names is ENFORCED rather than assumed: providers
  * disagree about whether caller headers outrank generated auth, so edits to the
  * credential headers are reverted in `emitBeforeProviderHeaders` (see
  * `PROVIDER_AUTH_HEADERS`) instead of being left to each provider's precedence.
+ * Other keys, including `Content-Type`, are forwarded and follow each provider's
+ * existing merge — some spread caller headers last.
  *
  * That is the intended contract, not a limitation to route around: exposing the
  * assembled map would give every installed extension the provider credential.

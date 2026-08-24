@@ -128,8 +128,8 @@ const EXTENSION_HANDLER_ABORTED = Symbol("extensionHandlerAborted");
  * Provider credentials, which a `before_provider_headers` handler must not be
  * able to set, replace, or clear.
  *
- * The event's contract says provider auth is generated downstream and is neither
- * visible nor removable. Visibility held on its own, but removability did not:
+ * The event's contract says provider auth is generated downstream and is never
+ * visible. Visibility held on its own, but removability did not:
  * providers disagree about precedence, so a handler writing `Authorization` could
  * suppress the real credential. OpenAI merges caller headers and then only does
  * `headers.Authorization ??= …`, so a caller-set value means the API key is never
