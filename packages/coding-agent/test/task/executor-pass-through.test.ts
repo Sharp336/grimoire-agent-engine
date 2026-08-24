@@ -403,3 +403,86 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(initSpy).toHaveBeenCalledWith(expect.objectContaining({ modelRole: "reviewer" }));
 	});
 });
+
+describe("runSubprocess per-agent service-tier overrides", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("applies the exact named override to the effective model selected by task policy", async () => {
+		const effectiveModel = getBundledModel("openai-codex", "gpt-5.6-sol");
+		const definitionModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!effectiveModel || !definitionModel) throw new Error("Expected bundled service-tier models to exist");
+		const settings = Settings.isolated({
+			"tier.subagent": "priority",
+			"task.agentServiceTierOverrides": { scout: "scale" },
+		});
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "scout", model: [`${definitionModel.provider}/${definitionModel.id}`] },
+			modelOverride: [`${effectiveModel.provider}/${effectiveModel.id}`],
+			id: "subagent-agent-service-tier-effective-model",
+			settings,
+			modelRegistry: createModelRegistry(effectiveModel),
+		});
+
+		expect(result.exitCode).toBe(0);
+		const childSettings = spy.mock.calls[0]?.[0]?.settings;
+		expect(childSettings?.get("tier.openai")).toBe("scale");
+		expect(childSettings?.get("tier.anthropic")).toBe("none");
+		expect(childSettings?.get("tier.google")).toBe("none");
+	});
+
+	it("preserves tier.subagent when the exact case-sensitive agent entry is absent", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!model) throw new Error("Expected gpt-5.6-sol model to exist");
+		const settings = Settings.isolated({
+			"tier.subagent": "flex",
+			"task.agentServiceTierOverrides": { Scout: "priority" },
+		});
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "scout", model: [`${model.provider}/${model.id}`] },
+			id: "subagent-agent-service-tier-absent",
+			settings,
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(0);
+		const childSettings = spy.mock.calls[0]?.[0]?.settings;
+		expect(childSettings?.get("tier.openai")).toBe("flex");
+		expect(childSettings?.get("tier.anthropic")).toBe("none");
+		expect(childSettings?.get("tier.google")).toBe("flex");
+	});
+
+	it("lets an unsupported concrete override beat the global tier without crossing families", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const settings = Settings.isolated({
+			"tier.subagent": "priority",
+			"task.agentServiceTierOverrides": { reviewer: "scale" },
+		});
+		const session = yieldEmittingSession();
+		const spy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+
+		const result = await runSubprocess({
+			...baseOptions,
+			agent: { ...baseAgent, name: "reviewer", model: [`${model.provider}/${model.id}`] },
+			id: "subagent-agent-service-tier-family-validation",
+			settings,
+			modelRegistry: createModelRegistry(model),
+		});
+
+		expect(result.exitCode).toBe(0);
+		const childSettings = spy.mock.calls[0]?.[0]?.settings;
+		expect(childSettings?.get("tier.openai")).toBe("none");
+		expect(childSettings?.get("tier.anthropic")).toBe("none");
+		expect(childSettings?.get("tier.google")).toBe("none");
+	});
+});
