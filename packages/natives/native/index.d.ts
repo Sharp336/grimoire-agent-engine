@@ -253,6 +253,48 @@ export declare class Shell {
 }
 
 /**
+ * Dedicated writer thread for one terminal fd.
+ *
+ * Constructed by the TUI's `ProcessTerminal` around stdout. The fd is
+ * `dup(2)`'d at construction and closed on drop, so later manipulation of the
+ * original descriptor does not affect the pump.
+ */
+export declare class TtyWriter {
+  /**
+   * Start a pump thread for `fd` (typically 1). Fails on non-Unix hosts and
+   * when the descriptor cannot be duplicated.
+   */
+  constructor(fd: number)
+  /**
+   * Enqueue terminal output; never blocks. Returns the total bytes now
+   * pending (including this chunk).
+   *
+   * Reads the JS string as UTF-16 through the thread's scratch arena and
+   * transcodes it with `xutf` straight into the shared back buffer, so a
+   * warm writer costs no per-call heap allocation.
+   */
+  write(data: string): number
+  /** Bytes accepted but not yet written to the terminal. */
+  pending(): number
+  /** True once a write failed (dead PTY); queued output has been dropped. */
+  get dead(): boolean
+  /**
+   * Block the calling thread until the queue drains, the writer dies, or
+   * `timeout_ms` elapses. Returns true when fully drained. Exit paths only.
+   */
+  flushSync(timeoutMs: number): boolean
+  /**
+   * Flush (bounded by `flush_timeout_ms`), stop the pump thread, and join it.
+   *
+   * A pump stuck in a blocked `write(2)` (stalled-but-alive PTY consumer)
+   * cannot be joined without freezing the caller: when the bounded flush
+   * times out the thread is detached instead and its dup'd fd is leaked —
+   * closing it under a blocked write would race kernel fd reuse.
+   */
+  stop(flushTimeoutMs: number): void
+}
+
+/**
  * Install the bounded Tokio runtime napi-rs adopts for async exports and the
  * bounded Rayon global pool used by native parallel iterators.
  *
@@ -297,7 +339,7 @@ export declare function __ompInstallTokioRuntime(): void
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV17_4_4(): void
+export declare function __piNativesV18_0_4(): void
 
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
@@ -1422,22 +1464,25 @@ export declare enum MacOSAppearance {
  *
  * Returns `null` when no confident correction exists or the service is
  * unavailable.
+ * On macOS, the lookup runs on the dedicated spelling thread.
  */
-export declare function macOSAutocorrectWord(text: string, start: number, length: number): string | null
+export declare function macOSAutocorrectWord(text: string, start: number, length: number): Promise<string | null>
 
 /**
  * Find every misspelled word using the active macOS dictionaries.
  *
  * Returns an empty list when Apple's spelling service is unavailable.
+ * On macOS, the check runs on the dedicated spelling thread.
  */
-export declare function macOSCheckSpelling(text: string): Array<SpellingRange>
+export declare function macOSCheckSpelling(text: string): Promise<Array<SpellingRange>>
 
 /**
  * Return macOS dictionary completions for one partial-word range.
  *
  * Returns an empty list when Apple's spelling service is unavailable.
+ * On macOS, the lookup runs on the dedicated spelling thread.
  */
-export declare function macOSCompleteWord(text: string, start: number, length: number): Array<string>
+export declare function macOSCompleteWord(text: string, start: number, length: number): Promise<Array<string>>
 
 /**
  * Options for starting a macOS power assertion.
@@ -1470,8 +1515,9 @@ export declare function macOSSpellCheckerAvailable(): boolean
  * Return macOS replacement guesses for one misspelled-word range.
  *
  * Returns an empty list when Apple's spelling service is unavailable.
+ * On macOS, the lookup runs on the dedicated spelling thread.
  */
-export declare function macOSSpellingGuesses(text: string, start: number, length: number): Array<string>
+export declare function macOSSpellingGuesses(text: string, start: number, length: number): Promise<Array<string>>
 
 /** A single match in the content. */
 export interface Match {

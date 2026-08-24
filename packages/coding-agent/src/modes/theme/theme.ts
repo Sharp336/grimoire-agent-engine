@@ -136,12 +136,16 @@ export function initThemeSync(
 	lightTheme?: string,
 ): void {
 	const name = configureTheme(symbolPreset, colorBlindMode, darkTheme, lightTheme);
+	const options: CreateThemeOptions = {
+		symbolPresetOverride: currentSymbolPresetOverride,
+		colorBlindMode: currentColorBlindMode,
+	};
 	try {
-		theme = loadThemeSync(name, getCurrentThemeOptions());
+		theme = loadThemeSync(name, options);
 	} catch (error) {
 		logger.debug("Theme loading failed, falling back to dark theme", { error: String(error) });
 		currentThemeName = "dark";
-		theme = loadThemeSync("dark", getCurrentThemeOptions());
+		theme = loadThemeSync("dark", options);
 	}
 }
 

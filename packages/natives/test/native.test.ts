@@ -39,16 +39,24 @@ import {
 const addonUrl = new URL("../native/index.js", import.meta.url).href;
 
 describe("macOS spelling", () => {
-	it("reports platform capability and uses UTF-16 ranges", () => {
+	it("reports platform capability and uses UTF-16 ranges", async () => {
 		const nonsense = "qzxvplmokn";
 		if (process.platform !== "darwin") {
 			expect(macOSSpellCheckerAvailable()).toBeFalse();
-			expect(macOSCheckSpelling(nonsense)).toEqual([]);
+			expect(await macOSCheckSpelling(nonsense)).toEqual([]);
 			return;
 		}
 
 		expect(macOSSpellCheckerAvailable()).toBeTrue();
-		expect(macOSCheckSpelling(nonsense)).toContainEqual({ start: 0, length: nonsense.length });
+		expect(await macOSCheckSpelling(nonsense)).toContainEqual({ start: 0, length: nonsense.length });
+	});
+	it("returns only word spans, never the whole-string orthography result", async () => {
+		if (process.platform !== "darwin") return;
+		// With automatic language identification, checkString: also yields an
+		// orthography result spanning the entire string; leaking it as a typo
+		// range doubled editor text under the undercurl renderer.
+		const text = "hello qzxvplmokn world ";
+		expect(await macOSCheckSpelling(text)).toEqual([{ start: 6, length: 10 }]);
 	});
 });
 

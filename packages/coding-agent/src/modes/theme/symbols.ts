@@ -86,6 +86,7 @@ export type SymbolKey =
 	| "icon.git"
 	| "icon.branch"
 	| "icon.pr"
+	| "icon.pin"
 	| "icon.tokens"
 	| "icon.context"
 	| "icon.cost"
@@ -348,7 +349,8 @@ export type SlashCommandIconName =
 	| "tools"
 	| "rule"
 	| "skill"
-	| "mcp";
+	| "mcp"
+	| "pin";
 
 const UNICODE_SYMBOLS: SymbolMap = {
 	// Status
@@ -429,6 +431,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"icon.git": "⎇",
 	"icon.branch": "⑂",
 	"icon.pr": "⤴",
+	"icon.pin": "📌",
 	"icon.tokens": "🪙",
 	"icon.context": "◫",
 	"icon.cost": "💲",
@@ -759,6 +762,8 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.branch": "\uf126",
 	// pick:  (nf-cod-git_pull_request) | alt:  (nf-oct-git_pull_request)
 	"icon.pr": "\uea64",
+	// pick:  (nf-fa-thumb_tack) | alt:  󰐃
+	"icon.pin": "\uf08d",
 	// pick:  | alt: ⊛ ◍ 
 	"icon.tokens": "\ue26b",
 	// pick:  | alt: ◫ ▦
@@ -960,7 +965,7 @@ const NERD_SYMBOLS: SymbolMap = {
 	"lang.java": "\u{E738}",
 	"lang.c": "\u{E61E}",
 	"lang.cpp": "\u{E61D}",
-	"lang.csharp": "\u{E7BC}",
+	"lang.csharp": "\u{E7B2}",
 	"lang.ruby": "\u{E791}",
 	"lang.julia": "\u{E624}",
 	"lang.php": "\u{E608}",
@@ -1111,6 +1116,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"icon.git": "git:",
 	"icon.branch": "@",
 	"icon.pr": "PR",
+	"icon.pin": "*",
 	"icon.tokens": "tok:",
 	"icon.context": "ctx:",
 	"icon.cost": "$",

@@ -208,6 +208,14 @@ export class Theme {
 		if (hex === undefined) throw new Error(`Unknown theme color: ${color}`);
 		return hex || (this.isLight ? "#000000" : "#e5e5e7");
 	}
+	/**
+	 * Get the resolved CSS hex string for a background theme color.
+	 */
+	getBgHex(color: ThemeBg): string {
+		const hex = this.#hexBgColors[color];
+		if (hex === undefined) throw new Error(`Unknown theme background color: ${color}`);
+		return hex || (this.isLight ? "#ffffff" : "#000000");
+	}
 
 	/**
 	 * Get all foreground and background theme colors as CSS hex strings.
@@ -513,6 +521,7 @@ export class Theme {
 			git: this.#symbols["icon.git"],
 			branch: this.#symbols["icon.branch"],
 			pr: this.#symbols["icon.pr"],
+			pin: this.#symbols["icon.pin"],
 			tokens: this.#symbols["icon.tokens"],
 			context: this.#symbols["icon.context"],
 			cost: this.#symbols["icon.cost"],
@@ -620,6 +629,7 @@ export class Theme {
 			rule: this.#symbols["icon.extensionRule"],
 			skill: this.#symbols["icon.extensionSkill"],
 			mcp: this.#symbols["icon.extensionMcp"],
+			pin: this.#symbols["icon.pin"],
 		};
 	}
 

@@ -36,6 +36,23 @@ class ThrowingStartTerminal extends CountingTerminal {
 		throw new Error("terminal start failed");
 	}
 }
+class InputTrackingTerminal extends CountingTerminal {
+	startOptions: { deferInput?: boolean } | undefined;
+	inputEnables = 0;
+	override start(
+		onInput: (data: string) => void,
+		onResize: () => void,
+		_onDisconnect?: () => void,
+		options?: { deferInput?: boolean },
+	): void {
+		this.startOptions = options;
+		super.start(onInput, onResize);
+	}
+
+	enableInput(): void {
+		this.inputEnables += 1;
+	}
+}
 
 describe("Composer prepaint", () => {
 	let settings: Settings;
@@ -50,7 +67,6 @@ describe("Composer prepaint", () => {
 			composerShape: settings.get("composer.shape") ?? "box",
 			showHardwareCursor: settings.get("showHardwareCursor"),
 			maxInlineImages: settings.get("tui.maxInlineImages"),
-			scrollbackRebuild: settings.get("tui.scrollbackRebuild"),
 			resizeScrollback: settings.get("tui.resizeScrollback"),
 			imeSafeCursor: settings.get("tui.imeSafeCursor"),
 			autocompleteMaxVisible: settings.get("autocompleteMaxVisible"),
@@ -337,7 +353,6 @@ describe("Composer prepaint", () => {
 			composerShape: getDefault("composer.shape") ?? "box",
 			showHardwareCursor: getDefault("showHardwareCursor"),
 			maxInlineImages: getDefault("tui.maxInlineImages"),
-			scrollbackRebuild: getDefault("tui.scrollbackRebuild"),
 			resizeScrollback: getDefault("tui.resizeScrollback"),
 			imeSafeCursor: getDefault("tui.imeSafeCursor"),
 			autocompleteMaxVisible: getDefault("autocompleteMaxVisible"),
@@ -402,22 +417,14 @@ describe("Composer prepaint", () => {
 				providerName: "anthropic",
 				recentSessions: [{ name: "prior work", timeAgo: "5m ago" }],
 			},
-			status: {
-				shape: "box",
-				borderColor: { prefix: "\u001b[34m", suffix: "\u001b[39m" },
-				topBorder: { content: "cached model · branch", width: 21 },
-				bottomLines: [],
-			},
 		});
 		composer.start();
 		await terminal.waitForRender(() =>
 			terminal.getViewport().some(row => Bun.stripANSI(row).includes("Welcome back!")),
 		);
-		expect(composer.editor.render(80).join("\n")).toContain("\u001b[34m");
 		const prepaintRows = terminal.getViewport().map(row => Bun.stripANSI(row));
 		expect(prepaintRows.join("\n")).toContain("Claude Fable 5");
 		expect(prepaintRows.join("\n")).toContain("anthropic");
-		expect(prepaintRows.join("\n")).toContain("cached model · branch");
 		const prepaintEditorRow = prepaintRows.findLastIndex(row => row.startsWith("╭"));
 
 		terminal.sendInput("draft message");
@@ -440,18 +447,10 @@ describe("Composer prepaint", () => {
 			vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
 			const realTopBorder = vi
 				.spyOn(mode.statusLine, "getTopBorder")
-				.mockReturnValue({ content: "real incomplete", width: 15, revision: 1 });
-			const hydrating = vi.spyOn(mode.statusLine, "isHydrating").mockReturnValue(true);
+				.mockReturnValue({ content: "real status bar", width: 15, revision: 1 });
 			terminal.sendInput(" between");
 			expect(mode.editor.getExpandedText()).toBe("draft message between");
 			await terminal.waitForRender();
-			expect(mode.editor.render(80).join("\n")).toContain("\u001b[34m");
-			const handoffOutput = terminal
-				.getViewport()
-				.map(row => Bun.stripANSI(row))
-				.join("\n");
-			expect(handoffOutput).toContain("cached model · branch");
-			expect(handoffOutput).not.toContain("real incomplete");
 			await mode.init({ suppressWelcomeIntro: true });
 			await terminal.waitForRender();
 
@@ -463,20 +462,11 @@ describe("Composer prepaint", () => {
 				.join("\n");
 			const modelName = testSession.session.model?.name ?? "";
 			expect(output).toContain(modelName);
-			expect(output).toContain("cached model · branch");
-			expect(output).not.toContain("real incomplete");
-			hydrating.mockReturnValue(false);
-			realTopBorder.mockReturnValue({ content: "real complete *18 ?5", width: 20, revision: 2 });
+			realTopBorder.mockReturnValue({ content: "real status bar *18 ?5", width: 21, revision: 2 });
 			mode.ui.requestRender();
 			await terminal.waitForRender(() =>
-				terminal.getViewport().some(row => Bun.stripANSI(row).includes("real complete *18 ?5")),
+				terminal.getViewport().some(row => Bun.stripANSI(row).includes("real status bar *18 ?5")),
 			);
-			const completedOutput = terminal
-				.getViewport()
-				.map(row => Bun.stripANSI(row))
-				.join("\n");
-			expect(completedOutput).toContain("real complete *18 ?5");
-			expect(completedOutput).not.toContain("real incomplete");
 			const welcomeMatches = (output.match(/Welcome back!/g) || []).length;
 			expect(welcomeMatches).toBe(1);
 			const adoptedEditorRow = terminal
@@ -515,7 +505,6 @@ describe("Composer prepaint", () => {
 			composerShape: "box",
 			showHardwareCursor: config.showHardwareCursor,
 			maxInlineImages: config.maxInlineImages,
-			scrollbackRebuild: config.scrollbackRebuild,
 			resizeScrollback: config.resizeScrollback,
 			imeSafeCursor: config.imeSafeCursor,
 			autocompleteMaxVisible: config.autocompleteMaxVisible,
@@ -564,5 +553,50 @@ describe("Composer prepaint", () => {
 			.map(r => Bun.stripANSI(r))
 			.join("\n");
 		expect(output).toContain("rust-analyzer");
+	});
+	it("transfers the in-flight recent-session load across composer ownership", async () => {
+		const terminal = new CountingTerminal(80, 32);
+		const load = Promise.withResolvers<Array<{ name: string; timeAgo: string }>>();
+		beginStartupComposer({
+			preferences: config,
+			terminal,
+			version: "9.9.9",
+			cache: false,
+			recentSessions: () => load.promise,
+		});
+
+		const lease = takeStartupComposerLease();
+		expect(lease).toBeDefined();
+		const rows = [{ name: "already loading", timeAgo: "just now" }];
+		load.resolve(rows);
+		expect(await lease?.recentSessions).toEqual(rows);
+		lease?.dispose();
+	});
+	it("defers raw input until resolved settings arrive, adoption as fallback", async () => {
+		// Regression contract: losing the deferral re-blinds typing during the
+		// startup module-load stall; losing the enable leaves the keyboard dead
+		// for the whole session.
+		const terminal = new InputTrackingTerminal(80, 32);
+		beginStartupComposer({ preferences: config, terminal, version: "9.9.9", cache: false });
+		expect(terminal.startOptions?.deferInput).toBeTrue();
+		expect(terminal.inputEnables).toBe(0);
+
+		applyStartupComposerPreferences({ ...config, theme: {} });
+		expect(terminal.inputEnables).toBe(1);
+
+		// Adoption after preferences must not double-enable…
+		const lease = takeStartupComposerLease();
+		lease?.adopt();
+		expect(terminal.inputEnables).toBe(1);
+		lease?.composer.ui.stop();
+	});
+
+	it("adoption enables raw input when settings never resolved", () => {
+		const terminal = new InputTrackingTerminal(80, 32);
+		beginStartupComposer({ preferences: config, terminal, version: "9.9.9", cache: false });
+		const lease = takeStartupComposerLease();
+		lease?.adopt();
+		expect(terminal.inputEnables).toBe(1);
+		lease?.composer.ui.stop();
 	});
 });

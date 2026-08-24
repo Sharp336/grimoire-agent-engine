@@ -1,16 +1,21 @@
 import {
 	type Component,
 	Container,
-	type EditorTopBorder,
+	isInsideTerminalMultiplexer,
 	ProcessTerminal,
 	type ResizeScrollbackMode,
 	Spacer,
+	sliceWithWidth,
 	type Terminal,
+	type TerminalFramePlan,
+	type TerminalFrameProvider,
 	TUI,
-	truncateToWidth,
+	type TUIOptions,
+	type ViewportSize,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { CustomEditor } from "./components/custom-editor";
+import { type AnimationFrame, TranscriptContainer } from "./components/transcript-container";
 import { type LspServerInfo, type RecentSession, WelcomeComponent } from "./components/welcome";
 import { getEditorTheme, initThemeSync, theme } from "./theme/theme";
 
@@ -22,7 +27,6 @@ export interface ComposerPreferences {
 	readonly composerShape: string;
 	readonly showHardwareCursor: boolean;
 	readonly maxInlineImages: number;
-	readonly scrollbackRebuild: boolean;
 	readonly resizeScrollback: ResizeScrollbackMode;
 	readonly imeSafeCursor: boolean;
 	readonly autocompleteMaxVisible: number;
@@ -37,8 +41,7 @@ export const COMPOSER_DEFAULTS: ComposerPreferences = {
 	composerShape: "box",
 	showHardwareCursor: true,
 	maxInlineImages: 8,
-	scrollbackRebuild: false,
-	resizeScrollback: "append",
+	resizeScrollback: "rebuild",
 	imeSafeCursor: false,
 	autocompleteMaxVisible: 10,
 	spellingTypoDetection: true,
@@ -55,25 +58,13 @@ export interface ComposerWelcomeUpdate {
 	readonly lspServers?: readonly LspServerInfo[];
 }
 
-/** Last resolved status-line chrome reused speculatively on the next first frame. */
-export interface ComposerStatusSnapshot {
-	readonly shape: string;
-	readonly borderColor?: {
-		readonly prefix: string;
-		readonly suffix: string;
-	};
-	readonly topBorder?: {
-		readonly content: string;
-		readonly width: number;
-	};
-	readonly bottomLines: readonly string[];
-}
 /** Optional dependencies and initial state for a standalone composer. */
 export interface ComposerOptions {
 	readonly terminal?: Terminal;
+	/** Extra TUI construction options (render scheduler injection for tests and `omp render`). */
+	readonly tuiOptions?: TUIOptions;
 	readonly preferences?: Partial<ComposerPreferences>;
 	readonly welcome?: ComposerWelcomeUpdate;
-	readonly status?: ComposerStatusSnapshot;
 	readonly exit?: (code: number) => void;
 	readonly now?: () => number;
 }
@@ -82,34 +73,25 @@ export interface ComposerOptions {
 export interface ComposerStartOptions {
 	readonly clearScrollback?: boolean;
 	readonly playWelcomeIntro?: boolean;
+	/**
+	 * Paint without owning stdin: the tty keeps cooked-mode echo/editing so
+	 * typing stays visible while startup module loading blocks the event loop.
+	 * {@link Composer.enableInput} later switches to raw input and replays the
+	 * kernel-buffered keystrokes into the editor.
+	 */
+	readonly deferInput?: boolean;
 }
 
+/** Mount slot for the session-aware status component below the editor. */
 class StatusHost implements Component {
-	#lines: readonly string[] = [];
-	#rendered: readonly string[] = [];
-	#width = -1;
 	#component: Component | undefined;
-	#ready: (() => boolean) | undefined;
 
-	setLines(lines: readonly string[]): void {
-		this.#lines = lines;
-		this.#width = -1;
-	}
-
-	setComponent(component: Component, ready: () => boolean): void {
+	setComponent(component: Component): void {
 		this.#component = component;
-		this.#ready = ready;
 	}
 
 	render(width: number): readonly string[] {
-		const realLines = this.#component?.render(width);
-		if (realLines && (this.#lines.length === 0 || this.#ready?.())) return realLines;
-		if (width === this.#width) return this.#rendered;
-		const rendered: string[] = [];
-		for (const line of this.#lines) rendered.push(truncateToWidth(line, width));
-		this.#rendered = rendered;
-		this.#width = width;
-		return rendered;
+		return this.#component?.render(width) ?? [];
 	}
 }
 /**
@@ -117,7 +99,7 @@ class StatusHost implements Component {
  * It owns the terminal, welcome header, and editor; InteractiveMode later supplies authoritative
  * data and mounts the session-aware runtime children without replacing the visible header.
  */
-export class Composer {
+export class Composer implements TerminalFrameProvider {
 	/** Terminal renderer shared with InteractiveMode after adoption. */
 	readonly ui: TUI;
 	#editor: CustomEditor;
@@ -136,8 +118,30 @@ export class Composer {
 	#headerBefore: readonly Component[] = [];
 	#headerAfter: readonly Component[] = [];
 	#runtimeChildren: readonly Component[] = [];
-	#statusSnapshot: ComposerStatusSnapshot | undefined;
 	#runtimeMounted = false;
+	// Composer-owned history id space. Transcript batch ids restart across
+	// container clears/swaps; the composer translates them into one monotonic
+	// sequence the terminal's accepted-id watermark can trust.
+	#nextHistoryId = 1;
+	#offeredHistory:
+		| {
+				id: number;
+				rows: readonly string[];
+				source: "header" | { transcript: TranscriptContainer; transcriptId: number };
+		  }
+		| undefined;
+	// The welcome header retires to terminal history exactly once, after the
+	// intro settles; until then it renders as mutable viewport chrome.
+	#headerRetired = false;
+	// Exact hard rows accepted into native history. Resize-alt paints reflow
+	// these rows rather than recomposing the header, because a wider terminal
+	// never joins hard tip wraps that were committed at the original width.
+	#retiredHeaderRows: readonly string[] | undefined;
+	// Hard-row prefix currently above the native viewport. The first resize
+	// frame may pull part of it down before the normal buffer is borrowed.
+	#retiredHeaderStart = 0;
+	#resizeRetiredHeaderStart: number | undefined;
+	#lastNormalRows = 0;
 	#lastInterruptAt = 0;
 	#started = false;
 	#stopped = false;
@@ -148,12 +152,15 @@ export class Composer {
 		this.#exit = options.exit ?? (code => process.exit(code));
 		this.#now = options.now ?? Date.now;
 		this.#preferences = { ...COMPOSER_DEFAULTS, ...options.preferences };
-		this.#statusSnapshot = options.status;
 		this.#applyWelcomeUpdate(options.welcome ?? {});
 
-		this.ui = new TUI(options.terminal ?? new ProcessTerminal(), this.#preferences.showHardwareCursor);
+		this.ui = new TUI(
+			options.terminal ?? new ProcessTerminal(),
+			this.#preferences.showHardwareCursor,
+			options.tuiOptions,
+		);
+		this.ui.setFrameProvider(this);
 		this.ui.setMaxInlineImages(this.#preferences.maxInlineImages);
-		this.ui.setScrollbackRebuild(this.#preferences.scrollbackRebuild);
 		this.ui.setResizeScrollback(this.#preferences.resizeScrollback);
 
 		this.#editor = new CustomEditor(getEditorTheme());
@@ -171,22 +178,173 @@ export class Composer {
 		} catch {
 			// Extension-defined styles arrive with the session; InteractiveMode reapplies them.
 		}
-		this.#applyStatusSnapshot();
 		// Emergency controls stay active until InteractiveMode installs configured bindings.
 		this.editor.setActionKeys("app.clear", ["ctrl+c"]);
 		this.editor.setActionKeys("app.exit", ["ctrl+d"]);
 		this.editor.onClear = () => this.#handleInterrupt();
 		this.editor.onExit = () => this.#requestExit(0);
-		this.editor.setShimmerRepaintHandler(() => this.ui.requestDirectWrite(this.editor));
+		this.editor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(this.editor));
 
 		if (!this.#preferences.quiet) this.#ensureWelcome();
 		this.#rebuildHeader();
 		this.ui.addChild(this.#header);
 		this.ui.addChild(this.#bootstrapInputGap);
-		this.ui.enableScopedInputRender(this.editor);
 		this.ui.addChild(this.editor);
 		this.ui.addChild(this.#statusHost);
 		this.ui.setFocus(this.editor);
+	}
+	/** Compose the bounded mutable viewport and the next ordered history append. */
+	renderFrame(viewport: ViewportSize): TerminalFramePlan {
+		if (!this.#started || this.#stopped) return { viewport: [] };
+		const width = Math.max(1, viewport.columns);
+		const rows = Math.max(0, viewport.rows);
+		if (this.#resizeRetiredHeaderStart !== undefined) {
+			this.#retiredHeaderStart = this.#resizeRetiredHeaderStart;
+			this.#resizeRetiredHeaderStart = undefined;
+		}
+		this.#lastNormalRows = rows;
+		const roots = this.#runtimeMounted
+			? [...this.#runtimeChildren, this.#statusHost]
+			: [this.#header, this.#bootstrapInputGap, this.editor, this.#statusHost];
+		const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
+		if (transcriptIndex < 0) {
+			return { viewport: this.#renderRoots(roots, width).slice(-rows) };
+		}
+		const transcript = roots[transcriptIndex] as TranscriptContainer;
+		const preRoots = this.#renderRoots(roots.slice(0, transcriptIndex), width);
+		const after = this.#renderRoots(roots.slice(transcriptIndex + 1), width);
+		// Offer history under capacity pressure only: blocks stay live (and keep
+		// reflowing to the current width) while the screen has room. A batch
+		// leaves the mutable viewport in the same frame it is appended, so its
+		// rows are never painted twice.
+		const history = this.#offerHistory(transcript, width, rows, preRoots.length + after.length);
+		const headerVisible = !this.#headerRetired && this.#offeredHistory?.source !== "header";
+		const headerRows = headerVisible ? this.#header.render(width) : [];
+		const before = [...headerRows, ...preRoots];
+		const now = performance.now();
+		const frame: AnimationFrame = { now, tick: Math.floor(now / 80) };
+		const active = transcript.renderViewport(width, Math.max(0, rows - before.length - after.length), frame);
+		const composed = [...before, ...active, ...after];
+		if (history !== undefined && this.#offeredHistory?.source === "header") {
+			const visibleHeaderRows = Math.max(0, rows - composed.length);
+			this.#retiredHeaderStart = Math.max(0, history.rows.length - visibleHeaderRows);
+		}
+		return {
+			history,
+			viewport: composed.length <= rows ? composed : composed.slice(-rows),
+		};
+	}
+
+	/** Retire an accepted terminal history batch (header, then transcript prefixes). */
+	acknowledgeHistory(id: number): void {
+		const offered = this.#offeredHistory;
+		if (offered === undefined || offered.id !== id) return;
+		if (offered.source === "header") {
+			this.#headerRetired = true;
+			this.#retiredHeaderRows = offered.rows;
+		} else {
+			offered.source.transcript.acknowledgeFinalizedBatch(offered.source.transcriptId);
+		}
+		this.#offeredHistory = undefined;
+	}
+
+	/** Render the semantic transcript tail while the terminal borrows its resize buffer. */
+	renderResizeFrame(viewport: ViewportSize): readonly string[] {
+		if (!this.#started || this.#stopped) return [];
+		const width = Math.max(1, viewport.columns);
+		const rows = Math.max(0, viewport.rows);
+		const tail = this.#runtimeMounted
+			? this.#renderRoots([...this.#runtimeChildren, this.#statusHost], width)
+			: this.#renderRoots([this.#bootstrapInputGap, this.editor, this.#statusHost], width);
+		let header: readonly string[];
+		if (this.#headerRetired) {
+			this.#resizeRetiredHeaderStart ??= Math.max(
+				0,
+				this.#retiredHeaderStart - Math.max(0, rows - this.#lastNormalRows),
+			);
+			header = this.#reflowRetiredHeader(width, this.#resizeRetiredHeaderStart);
+		} else {
+			header = this.#header.render(width);
+		}
+		const rendered = [...header, ...tail];
+		return rendered.length <= rows ? rendered : rendered.slice(rendered.length - rows);
+	}
+
+	/** Re-offer the complete finalized prefix after a display reset or resize replay. */
+	resetHistory(): void {
+		this.#offeredHistory = undefined;
+		this.#headerRetired = false;
+		this.#retiredHeaderRows = undefined;
+		this.#retiredHeaderStart = 0;
+		this.#resizeRetiredHeaderStart = undefined;
+		for (const child of this.#runtimeChildren) {
+			if (child instanceof TranscriptContainer) child.resetRetirement();
+		}
+	}
+
+	/** Header retires first, then finalized transcript prefixes, one batch at a time. */
+	#offerHistory(
+		transcript: TranscriptContainer,
+		width: number,
+		rows: number,
+		chromeRows: number,
+	): { id: number; rows: readonly string[] } | undefined {
+		if (this.#offeredHistory !== undefined) {
+			return { id: this.#offeredHistory.id, rows: this.#offeredHistory.rows };
+		}
+		if (!this.#headerRetired) {
+			const welcome = this.#welcome;
+			if (welcome !== undefined && !welcome.isTranscriptBlockFinalized()) return undefined;
+			// The header stays live viewport chrome until the screen fills; then it
+			// retires first so transcript prefixes can follow in order.
+			const headerRows = this.#header.render(width).length;
+			const liveRows = transcript.liveRowCount(width);
+			if (headerRows + chromeRows + liveRows <= rows) return undefined;
+			this.#offeredHistory = {
+				id: this.#nextHistoryId++,
+				rows: [...this.#header.render(width), ""],
+				source: "header",
+			};
+			return { id: this.#offeredHistory.id, rows: this.#offeredHistory.rows };
+		}
+		const batch = transcript.peekFinalizedBatch(width, Math.max(0, rows - chromeRows));
+		if (batch === undefined) return undefined;
+		this.#offeredHistory = {
+			id: this.#nextHistoryId++,
+			rows: batch.rows,
+			source: { transcript, transcriptId: batch.id },
+		};
+		return { id: this.#offeredHistory.id, rows: this.#offeredHistory.rows };
+	}
+
+	#renderRoots(roots: readonly Component[], width: number): string[] {
+		const rows: string[] = [];
+		for (const root of roots) rows.push(...root.render(width));
+		return rows;
+	}
+
+	/** Reflow accepted hard rows exactly as the restored terminal buffer will. */
+	#reflowRetiredHeader(width: number, start: number): string[] {
+		const lines = this.#retiredHeaderRows;
+		if (!lines) return [];
+		if (isInsideTerminalMultiplexer()) return lines.slice(start);
+		const reflowed: string[] = [];
+		const columns = Math.max(1, width);
+		for (let index = start; index < lines.length; index++) {
+			const line = lines[index]!;
+			const lineWidth = visibleWidth(line);
+			if (lineWidth === 0) {
+				reflowed.push("");
+				continue;
+			}
+			for (let column = 0; column < lineWidth; ) {
+				let slice = sliceWithWidth(line, column, columns, true);
+				if (slice.width === 0) slice = sliceWithWidth(line, column, columns);
+				reflowed.push(slice.text);
+				column += Math.max(1, slice.width);
+			}
+		}
+		return reflowed;
 	}
 
 	/** Live editor whose draft survives startup and session adoption. */
@@ -208,8 +366,13 @@ export class Composer {
 	start(options: ComposerStartOptions = {}): void {
 		if (this.#started || this.#stopped) return;
 		this.#started = true;
-		this.ui.start({ clearScrollback: options.clearScrollback === true });
+		this.ui.start({ clearScrollback: options.clearScrollback === true, deferInput: options.deferInput === true });
 		if (options.playWelcomeIntro !== false) this.playWelcomeIntro();
+	}
+	/** Take raw-input ownership after a deferred-input start. Idempotent. */
+	enableInput(): void {
+		if (this.#stopped) return;
+		this.ui.enableInput();
 	}
 
 	/** Apply settings changes without replacing the editor or welcome component. */
@@ -226,8 +389,7 @@ export class Composer {
 		this.ui.setShowHardwareCursor(this.#preferences.showHardwareCursor);
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.ui.setMaxInlineImages(this.#preferences.maxInlineImages);
-		this.ui.setScrollbackRebuild(this.#preferences.scrollbackRebuild);
-		this.ui.setResizeScrollback(this.#preferences.resizeScrollback);
+		if (update.resizeScrollback !== undefined) this.ui.setResizeScrollback(update.resizeScrollback);
 		this.editor.setImeSafeCursorLayout(this.#preferences.imeSafeCursor);
 		this.editor.setAutocompleteMaxVisible(this.#preferences.autocompleteMaxVisible);
 		this.editor.setSpellingFeatures({
@@ -235,8 +397,6 @@ export class Composer {
 			autocomplete: this.#preferences.spellingAutocomplete,
 			autocorrect: this.#preferences.spellingAutocorrect,
 		});
-		this.#applyStatusSnapshot();
-
 		if (this.#preferences.quiet) {
 			this.#welcome?.stopIntro();
 			this.#welcome = undefined;
@@ -280,26 +440,9 @@ export class Composer {
 		this.#editor = editor;
 	}
 
-	/** Replace the speculative status chrome before the session-aware status line mounts. */
-	setStatusSnapshot(snapshot: ComposerStatusSnapshot | undefined): void {
-		this.#statusSnapshot = snapshot;
-		this.#statusHost.setLines(snapshot?.shape === this.#preferences.composerShape ? snapshot.bottomLines : []);
-		if (!this.#runtimeMounted) this.#applyStatusSnapshot();
-		this.ui.requestRender();
-	}
-
-	/** Keep speculative status rows mounted until the real status component finishes hydrating. */
-	setStatusComponent(component: Component, ready: () => boolean): void {
-		this.#statusHost.setComponent(component, ready);
-	}
-
-	/** Render the cached top-border segments at the current editor width. */
-	getSpeculativeTopBorder(availableWidth: number): EditorTopBorder | undefined {
-		const snapshot = this.#statusSnapshot;
-		const border = snapshot?.shape === this.#preferences.composerShape ? snapshot.topBorder : undefined;
-		if (!border) return undefined;
-		const content = truncateToWidth(border.content, availableWidth);
-		return { content, width: visibleWidth(content) };
+	/** Mount the session-aware status component into the slot below the editor. */
+	setStatusComponent(component: Component): void {
+		this.#statusHost.setComponent(component);
 	}
 
 	/** Mount or replace session-aware root children while preserving the header and status hosts. */
@@ -356,23 +499,6 @@ export class Composer {
 			this.#recentSessions,
 			this.#lspServers,
 		);
-	}
-
-	#applyStatusSnapshot(): void {
-		const snapshot = this.#statusSnapshot;
-		if (!snapshot || snapshot.shape !== this.#preferences.composerShape) {
-			this.editor.setTopBorderProvider(undefined);
-			this.#statusHost.setLines([]);
-			return;
-		}
-		if (snapshot.borderColor) {
-			const { prefix, suffix } = snapshot.borderColor;
-			this.editor.borderColor = text => `${prefix}${text}${suffix}`;
-		}
-		this.editor.setTopBorderProvider(
-			snapshot.topBorder ? availableWidth => this.getSpeculativeTopBorder(availableWidth) : undefined,
-		);
-		this.#statusHost.setLines(snapshot.bottomLines);
 	}
 
 	#rebuildHeader(): void {

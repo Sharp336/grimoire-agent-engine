@@ -2,27 +2,82 @@
 
 ## [Unreleased]
 
-### Breaking Changes
-
-- Changed `EditorTextAssistProvider.tryAutocorrect` signature to receive editor state instead of raw text
-- Changed `Editor.decorateText` signature to provide line and column context instead of raw text string
-
-### Added
-
-- Added spelling suggestion support; implement `getWordReplacements` to provide word choices
-- Added `ctrl+.` keybinding to trigger spelling suggestions
-- Added `EditorTextAssistProvider` to support independent word completion and autocorrection
-- Added icon support to autocomplete and select lists, with customizable theming
-- `MarkdownTheme.createHighlightStream` lets themes supply a stateful incremental highlighter; streaming Markdown now syntax-highlights the completed lines of any open code fence (previously only diff/patch fences), and a fence highlights whole-block as soon as it closes
-- `SelectList` layouts accept `maxDescriptionRows` to cap wrapped descriptions with a trailing ellipsis
-- `CombinedAutocompleteProvider` accepts a `commandUsage` callback that ranks equal-score slash matches by usage frequency
-- `Editor.viewportRowsProvider` lets hosts clamp the autocomplete dropdown to the live terminal height
+## [18.0.4] - 2026-08-24
 
 ### Changed
 
-- Increased default autocomplete dropdown height from 5 to 10 items
-- Changed the test `VirtualTerminal` engine from ghostty-web to `kitty-vt-wasm` (kitty's real screen.c/vt-parser.c). Retires the ghostty-web 0.4 crash workarounds (combining-mark input stripping, event-log replay/compaction, allocator-exhaustion engine rotation, full-clear ED3 recreate), gives the render-stress oracles exact default-color detection from typed cell snapshots, and lets full-clear/ED3 repaints exercise the engine natively instead of being masked by an engine recreate.
-- Added `Editor.setTheme()` so an adopted editor can switch from its lightweight startup theme to the configured interactive theme without replacing the editor or losing its draft.
+- Significantly improved streaming Markdown rendering performance by caching unchanged rows, resuming boundary walks, and inspecting only text deltas for guard scans and OSC 8 normalization.
+
+### Fixed
+
+- Fixed TUI aborting when syntax highlighting fails during Markdown rendering by falling back to unhighlighted text.
+- Fixed Korean IME cursor drift in Orca by properly matching two-cell Hangul Compatibility Jamo rendering.
+
+## [18.0.3] - 2026-08-23
+
+### Fixed
+
+- Fixed inline images vanishing from the transcript and scrollback when the session exits: stop no longer deletes transmitted Kitty images from the terminal's graphics store.
+
+## [18.0.2] - 2026-08-23
+
+### Fixed
+
+- Fixed visible history being erased when enlarging the terminal.
+
+## [18.0.1] - 2026-08-23
+
+### Added
+
+- Collapsed individual skill commands into a `/skill:` namespace entry to declutter suggestions
+- Added `TUI.renderNow()` for terminal-safe synchronous priority frames that retain resize debounce, output-backlog, and image deferral safeguards.
+
+### Changed
+
+- Improved slash command autocompletion to chain suggestions after selecting a namespace
+- Replaced the native-scrollback inference API (`NativeScrollback*` interfaces and the scrollback rebuild/resize settings hooks) with explicit `TerminalFramePlan` history batches.
+- Post-resize repaints now recover the reflowed viewport anchor with a cursor-position report (DSR) instead of trusting stale grid coordinates, so a settled resize no longer duplicates the editor/status rows on screen.
+- History appends that overflow the screen erase the old live viewport first, so a scroll can only push committed rows and blanks into scrollback, never an unfinished frame.
+
+### Fixed
+
+- Fixed consecutive prompt submissions being skipped by persistent history, allowing the latest project metadata to replace the previous entry without duplicating editor navigation history.
+- Fixed the history drain stalling on idle screens: accepting a batch now pumps the next frame, so a large resumed transcript retires to terminal history instead of pinning the live viewport in its emergency aggregate.
+- Fixed fuzzy matching so a qualifying whole-word hit is not hidden by an earlier mid-word occurrence ([#8465](https://github.com/can1357/oh-my-pi/pull/8465) by [@Mustaqeem66](https://github.com/Mustaqeem66)).
+- Fixed stray characters appearing in the terminal viewport during title updates
+- Fixed editor input lag when autocomplete providers are slow by keeping only the latest pending lookup.
+- Fixed pasting an image in kitty occasionally spraying base64 text into the composer alongside the image attachment: a kitty OSC 5522 clipboard packet torn by the incomplete-escape flush is now discarded up to its terminator instead of being replayed as keystrokes.
+- Fixed Kitty OSC 66 headings activating before the host explicitly enables text sizing.
+- Markdown streaming renderer now scans only the mutable tail (not the full document) for reference-link definitions and CR on every frame, eliminating the O(n²) `RegExp.test` cost that accounted for ~26% CPU during active streaming ([#9048](https://github.com/can1357/oh-my-pi/issues/9048)).
+
+## [18.0.0] - 2026-08-22
+
+### Breaking Changes
+
+- Changed native macOS spelling and completion functions to return Promises.
+- Updated `EditorTextAssistProvider.tryAutocorrect` signature to receive editor state instead of raw text.
+- Updated `Editor.decorateText` signature to provide line and column context instead of raw text.
+
+### Added
+
+- Added `EditorTextAssistProvider` with spelling suggestion support (`ctrl+.`), word replacement choices, and async autocorrection handling.
+- Added `Terminal.pendingOutputBytes` and an output-backpressure render gate to drop stale frames on slow terminals.
+- Added `deferInput` startup option and `enableInput()` across `Terminal`, `TUI`, and `TUIStartOptions` to improve startup responsiveness.
+- Added icon support and customizable theming to autocomplete and select lists.
+- Added `MarkdownTheme.createHighlightStream` for incremental syntax highlighting of completed lines in streaming Markdown code blocks.
+- Added `maxDescriptionRows` option to `SelectList` layouts to truncate wrapped descriptions with an ellipsis.
+- Added `commandUsage` ranking callback support to `CombinedAutocompleteProvider` to prioritize frequently used slash commands.
+- Added `Editor.viewportRowsProvider` to constrain autocomplete dropdowns within the available terminal height.
+- Added `Editor.setTheme()` to dynamically change themes without recreating the editor or losing draft content.
+
+### Changed
+
+- Adjusted word completion to skip appending a trailing space when the following character is punctuation.
+- Increased default autocomplete dropdown height from 5 to 10 items.
+
+### Fixed
+
+- Fixed TUI freezing during large repaints on slow or occluded terminals by moving stdout writes to an off-thread writer.
 
 ## [17.4.4] - 2026-08-22
 

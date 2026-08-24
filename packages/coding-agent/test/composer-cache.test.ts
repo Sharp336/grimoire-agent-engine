@@ -7,7 +7,6 @@ import {
 	readComposerStartupCache,
 	writeComposerLspCache,
 	writeComposerRecentSessionsCache,
-	writeComposerStatusCache,
 	writeComposerUiCache,
 	writeComposerWelcomeCache,
 } from "@oh-my-pi/pi-coding-agent/modes/composer-cache";
@@ -23,12 +22,6 @@ describe("composer startup cache", () => {
 			const preferences = { ...COMPOSER_DEFAULTS, composerShape: "rail", autocompleteMaxVisible: 7 };
 			const recentSessions = [{ name: "cached work", timeAgo: "3m ago" }];
 			const lspServers = [{ name: "rust-analyzer", status: "connecting" as const, fileTypes: [".rs"] }];
-			const status = {
-				shape: "rail",
-				borderColor: { prefix: "\u001b[34m", suffix: "\u001b[39m" },
-				topBorder: { content: "model · branch", width: 14 },
-				bottomLines: ["tokens 42%"],
-			};
 			await Promise.all([
 				writeComposerUiCache(cwd, preferences, {
 					symbolPreset: "ascii",
@@ -38,7 +31,6 @@ describe("composer startup cache", () => {
 				}),
 				writeComposerRecentSessionsCache(cwd, recentSessions),
 				writeComposerLspCache(cwd, lspServers),
-				writeComposerStatusCache(cwd, status),
 				writeComposerWelcomeCache(cwd, { modelName: "Claude Fable 5", providerName: "anthropic" }),
 			]);
 
@@ -53,7 +45,6 @@ describe("composer startup cache", () => {
 				welcome: { modelName: "Claude Fable 5", providerName: "anthropic" },
 				recentSessions,
 				lspServers,
-				status,
 			});
 			expect(readComposerStartupCache(otherCwd)).toEqual({
 				preferences: undefined,
@@ -61,7 +52,6 @@ describe("composer startup cache", () => {
 				welcome: undefined,
 				recentSessions: [],
 				lspServers: [],
-				status: undefined,
 			});
 			const jsonl: unknown = Bun.JSONL.parse(await Bun.file(path.join(cacheDir, "recent-sessions.jsonl")).text());
 			expect(jsonl).toEqual(recentSessions);

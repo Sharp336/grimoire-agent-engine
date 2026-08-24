@@ -445,6 +445,12 @@ export class CustomEditor extends Editor {
 	 */
 	constructor(...args: readonly unknown[]) {
 		super(pickEditorTheme(args));
+		const requestTextAssistRepaint = (): void => {
+			this.invalidate();
+			this.#requestShimmerRepaint?.();
+		};
+		this.#spelling.onUpdate = requestTextAssistRepaint;
+		this.onTextAssistApplied = requestTextAssistRepaint;
 		this.setTextAssistProvider(this.#spelling);
 		if (args[0] instanceof TUI) this.tui = args[0];
 	}
