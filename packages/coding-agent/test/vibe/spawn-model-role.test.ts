@@ -114,7 +114,8 @@ describe("vibe worker spawn model role", () => {
 			"good",
 			Settings.isolated({
 				modelRoles: { default: "anthropic/opus", task: "anthropic/sonnet" },
-			}), true
+			}),
+			true,
 		);
 
 		expect(options.isIsolated).toBe(true);
