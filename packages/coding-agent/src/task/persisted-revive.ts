@@ -113,44 +113,55 @@ export function createPersistedSubagentReviverFactory(
 			const restrictToolNames = init.restrictToolNames === true;
 			const mcpManager = restrictToolNames ? undefined : MCPManager.instance();
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
-			const { session } = await createAgentSession({
-				cwd: ctx.session.sessionManager.getCwd(),
-				authStorage: ctx.authStorage,
-				modelRegistry: ctx.modelRegistry,
-				...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
-				modelPatternAuthFallback: init.resolvedModel,
-				settings: subagentSettings,
-				sessionManager: reopened,
-				agentId: ref.id,
-				agentDisplayName: ref.displayName,
-				parentTaskPrefix: ref.id,
-				parentAgentId: ref.parentId,
-				expectedAgentRef: expectedRef,
-				taskDepth,
-				toolNames: init.tools,
-				outputSchema: init.outputSchema,
-				outputSchemaMode: init.outputSchemaMode,
-				restrictToolNames: restrictToolNames || undefined,
-				requireYieldTool: true,
-				systemPrompt: () => [init.systemPrompt],
-				// Old files predate persisted spawns: deny re-spawning rather than let
-				// createAgentSession default to wildcard ("*").
-				spawns: init.spawns ?? "",
-				hasUI: false,
-				enableLsp: restrictToolNames ? false : ctx.enableLsp,
-				...(restrictToolNames
-					? {
-							enableIrc: false,
-							enableMCP: false,
-							preloadedExtensionPaths: [],
-							preloadedCustomToolPaths: [],
-						}
-					: {
-							enableMCP: !mcpManager,
-							mcpManager,
-							customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
-						}),
-			});
+			// The factory can reject before constructing an AgentSession (e.g.
+			// expected registry generation gone) and does not dispose an
+			// externally supplied manager — close the reopened manager so its
+			// live-pid owner claim does not pin the session against undo-tail
+			// gc in the parent.
+			let session: Awaited<ReturnType<typeof createAgentSession>>["session"];
+			try {
+				({ session } = await createAgentSession({
+					cwd: ctx.session.sessionManager.getCwd(),
+					authStorage: ctx.authStorage,
+					modelRegistry: ctx.modelRegistry,
+					...(persistedModelPattern ? { modelPattern: persistedModelPattern } : {}),
+					modelPatternAuthFallback: init.resolvedModel,
+					settings: subagentSettings,
+					sessionManager: reopened,
+					agentId: ref.id,
+					agentDisplayName: ref.displayName,
+					parentTaskPrefix: ref.id,
+					parentAgentId: ref.parentId,
+					expectedAgentRef: expectedRef,
+					taskDepth,
+					toolNames: init.tools,
+					outputSchema: init.outputSchema,
+					outputSchemaMode: init.outputSchemaMode,
+					restrictToolNames: restrictToolNames || undefined,
+					requireYieldTool: true,
+					systemPrompt: () => [init.systemPrompt],
+					// Old files predate persisted spawns: deny re-spawning rather than let
+					// createAgentSession default to wildcard ("*").
+					spawns: init.spawns ?? "",
+					hasUI: false,
+					enableLsp: restrictToolNames ? false : ctx.enableLsp,
+					...(restrictToolNames
+						? {
+								enableIrc: false,
+								enableMCP: false,
+								preloadedExtensionPaths: [],
+								preloadedCustomToolPaths: [],
+							}
+						: {
+								enableMCP: !mcpManager,
+								mcpManager,
+								customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+							}),
+				}));
+			} catch (err) {
+				void reopened.close().catch(() => {});
+				throw err;
+			}
 			// Clamp the active set to the persisted list: createAgentSession's
 			// `alwaysInclude` can re-add non-defaultInactive extension/custom tools
 			// the original run didn't carry. Unknown/missing names are ignored.
