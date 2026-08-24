@@ -2,23 +2,18 @@ import { fetchOpenAICompatibleModels } from "../discovery/openai-compatible";
 import { getBundledModelReferenceIndex } from "../identity/bundled";
 import { resolveModelReference } from "../identity/reference";
 import type { ModelManagerOptions } from "../model-manager";
-import type { Api, FetchImpl, ModelSpec } from "../types";
+import type { Api, ModelSpec } from "../types";
+import type { ModelManagerConfig } from "./descriptor-types";
 
 const COMMAND_CODE_PROVIDER_BASE_URL = "https://api.commandcode.ai/provider";
-const COMMAND_CODE_DISCOVERY_BASE_URL = `${COMMAND_CODE_PROVIDER_BASE_URL}/v1`;
-
-export interface CommandCodeModelManagerConfig {
-	apiKey?: string;
-	baseUrl?: string;
-	fetch?: FetchImpl;
-}
 
 function normalizeBasePath(baseUrl: string | undefined): string {
 	const value = (baseUrl ?? COMMAND_CODE_PROVIDER_BASE_URL).trim().replace(/\/+$/, "");
 	return value.endsWith("/v1") ? value.slice(0, -3) : value;
 }
 
-function baseUrlForApi(api: Api, basePath: string): string {
+export function resolveCommandCodeBaseUrl(api: Api, baseUrl?: string): string {
+	const basePath = normalizeBasePath(baseUrl);
 	return api === "anthropic-messages" ? basePath : `${basePath}/v1`;
 }
 
@@ -40,7 +35,7 @@ export function resolveCommandCodeApi(modelId: string): Api {
 		: "openai-completions";
 }
 
-function mapCommandCodeModel(defaults: ModelSpec<Api>, basePath: string): ModelSpec<Api> {
+function mapCommandCodeModel(defaults: ModelSpec<Api>, baseUrl?: string): ModelSpec<Api> {
 	const reference = resolveModelReference(defaults.id, getBundledModelReferenceIndex());
 	const api = resolveCommandCodeApi(defaults.id);
 	const sameWireReference = reference?.api === api ? reference : undefined;
@@ -49,8 +44,8 @@ function mapCommandCodeModel(defaults: ModelSpec<Api>, basePath: string): ModelS
 		name: reference?.name ?? defaults.name,
 		api,
 		provider: "command-code",
-		baseUrl: baseUrlForApi(api, basePath),
-		reasoning: reference?.reasoning ?? defaults.reasoning,
+		baseUrl: resolveCommandCodeBaseUrl(api, baseUrl),
+		reasoning: sameWireReference?.reasoning ?? defaults.reasoning,
 		input: reference?.input ?? defaults.input,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: reference?.contextWindow ?? defaults.contextWindow,
@@ -59,12 +54,9 @@ function mapCommandCodeModel(defaults: ModelSpec<Api>, basePath: string): ModelS
 	};
 }
 
-export function commandCodeModelManagerOptions(
-	config?: CommandCodeModelManagerConfig,
-): ModelManagerOptions<Api> {
+export function commandCodeModelManagerOptions(config?: ModelManagerConfig): ModelManagerOptions<Api> {
 	const apiKey = config?.apiKey;
-	const basePath = normalizeBasePath(config?.baseUrl);
-	const discoveryBaseUrl = baseUrlForApi("openai-completions", basePath);
+	const discoveryBaseUrl = resolveCommandCodeBaseUrl("openai-completions", config?.baseUrl);
 
 	return {
 		providerId: "command-code",
@@ -76,11 +68,9 @@ export function commandCodeModelManagerOptions(
 					provider: "command-code",
 					baseUrl: discoveryBaseUrl,
 					apiKey,
-					mapModel: (_entry, defaults) => mapCommandCodeModel(defaults, basePath),
+					mapModel: (_entry, defaults) => mapCommandCodeModel(defaults, config?.baseUrl),
 					fetch: config?.fetch,
 				}),
 		}),
 	};
 }
-
-export const COMMAND_CODE_DEFAULT_BASE_URL = COMMAND_CODE_DISCOVERY_BASE_URL;
