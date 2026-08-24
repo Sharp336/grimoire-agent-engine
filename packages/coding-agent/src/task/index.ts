@@ -232,15 +232,14 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 		if (hasTask) {
 			return "Top-level `task` is not part of the batch shape. Put the work in `tasks[]` items.";
 		}
-		if (params.isolated === true) {
-			// The batch shape carries isolation per item. An affirmative
-			// top-level `isolated: true` on a batch call is a shape violation
-			// (stale flat-form caller mixed with the batch shape): the
-			// no-isolation wire schema rejects an explicit `true`, and the
-			// lenient fallthrough must not let an item's `false` silently
-			// downgrade the top-level request. A literal `false` is the
-			// default-behavior no-op (some providers materialize optional
-			// booleans as `false`) and passes through unchanged.
+		if (params.isolated !== undefined && params.isolated !== false) {
+			// The batch shape carries isolation per item. Any top-level value
+			// other than the literal `false` (the schema-aware no-op) is a
+			// shape violation — including malformed affirmative values like
+			// `isolated: "true"` that slip through the lenient raw-args
+			// fallthrough. Rejecting here keeps `spawnParamsFor` from letting
+			// an item's `false` silently downgrade the malformed request
+			// before the nested-isolation preflight ever sees it.
 			return "Top-level `isolated` is not part of the batch shape. Set `isolated` per item in `tasks[]`.";
 		}
 		for (let i = 0; i < tasks.length; i++) {

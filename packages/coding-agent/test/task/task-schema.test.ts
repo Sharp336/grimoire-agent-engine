@@ -258,4 +258,28 @@ describe("nested isolation gating", () => {
 		expect(text).not.toContain("Top-level `isolated` is not part of the batch shape.");
 		expect(text).toContain("Unknown agent");
 	});
+	it("rejects a malformed top-level `isolated` on the batch wrapper even when items carry isolated: false", async () => {
+		// A type-invalid but affirmative top-level value (e.g. `isolated:
+		// "true"`) slips through the lenient raw-args fallthrough. Runtime must
+		// reject any top-level value other than the literal `false` so
+		// `spawnParamsFor` cannot let an item's `false` silently downgrade the
+		// malformed request before the nested-isolation preflight sees it.
+		const session = {
+			...nestedSession(),
+			settings: Settings.isolated({
+				"task.isolation.mode": "auto",
+				"task.batch": true,
+			}),
+		} as unknown as ToolSession;
+		mockAgents([taskDefinition]);
+		const tool = await TaskTool.create(session);
+
+		const result = await tool.execute("tool-call", {
+			context: "ctx",
+			tasks: [{ task: "x", isolated: false }],
+			isolated: "true",
+		});
+		const text = result.content.find(part => part.type === "text")?.text ?? "";
+		expect(text).toContain("Top-level `isolated` is not part of the batch shape.");
+	});
 });
