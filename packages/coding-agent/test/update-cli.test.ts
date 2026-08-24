@@ -776,6 +776,29 @@ describe("update-cli download progress", () => {
 		expect(writes[2]).toContain("100B / 100B");
 		expect(writes[3]).toBe("\n");
 	});
+	it("bounds TTY progress to the output width", () => {
+		const writes: string[] = [];
+		const progress = createDownloadProgressReporter(
+			"Downloading omp-linux-musl-arm64",
+			123_456_789,
+			{
+				isTTY: true,
+				columns: 80,
+				write(text) {
+					writes.push(text);
+					return true;
+				},
+			},
+			() => 1_000,
+		);
+
+		progress.update(123_456_789);
+
+		const rendered = Bun.stripANSI(writes[0]!)
+			.replace(/^\r/, "")
+			.replace(/\x1b\[K$/, "");
+		expect(Bun.stringWidth(rendered)).toBeLessThanOrEqual(79);
+	});
 
 	it("emits periodic lines for non-TTY output", () => {
 		let now = 0;
@@ -806,6 +829,30 @@ describe("update-cli download progress", () => {
 		expect(writes[1]).toContain("50%");
 		expect(writes[2]).toContain("100B / 100B");
 		expect(writes.every(write => write.endsWith("\n"))).toBe(true);
+	});
+	it("throttles updates when the total size is zero", () => {
+		let now = 0;
+		const writes: string[] = [];
+		const progress = createDownloadProgressReporter(
+			"Downloading omp",
+			0,
+			{
+				isTTY: false,
+				write(text) {
+					writes.push(text);
+					return true;
+				},
+			},
+			() => now,
+		);
+
+		progress.update(0);
+		now = 100;
+		progress.update(0);
+		expect(writes).toHaveLength(1);
+		now = 1_000;
+		progress.update(0);
+		expect(writes).toHaveLength(2);
 	});
 });
 

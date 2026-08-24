@@ -1,3 +1,4 @@
+import { Ellipsis, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { formatBytes } from "@oh-my-pi/pi-utils";
 
 const BAR_WIDTH = 16;
@@ -5,6 +6,7 @@ const BAR_WIDTH = 16;
 /** Minimal output contract used by the interactive progress reporter. */
 export interface ProgressOutput {
 	isTTY?: boolean;
+	columns?: number;
 	write(text: string): boolean;
 }
 
@@ -64,7 +66,13 @@ export interface DownloadProgressReporter {
 	finish(): void;
 }
 
-function formatDownloadProgress(label: string, received: number, total: number, elapsedMs: number): string {
+function formatDownloadProgress(
+	label: string,
+	received: number,
+	total: number,
+	elapsedMs: number,
+	maxWidth?: number,
+): string {
 	const ratio = total > 0 ? Math.min(received / total, 1) : 0;
 	const filled = Math.round(ratio * DOWNLOAD_BAR_WIDTH);
 	const bar = `${"█".repeat(filled)}${"░".repeat(DOWNLOAD_BAR_WIDTH - filled)}`;
@@ -72,9 +80,17 @@ function formatDownloadProgress(label: string, received: number, total: number, 
 		.toString()
 		.padStart(3, " ")}%`;
 	const rate = elapsedMs > 0 ? formatBytes((received * 1_000) / elapsedMs) : "0B";
-	return `${label} [${bar}] ${percent} ${formatBytes(received)} / ${formatBytes(total)} ${rate}/s`;
+	const line = `${label} [${bar}] ${percent} ${formatBytes(received)} / ${formatBytes(total)} ${rate}/s`;
+	return maxWidth === undefined ? line : truncateToWidth(line, maxWidth, Ellipsis.Omit);
 }
 
+function getDownloadProgressWidth(output: ProgressOutput): number | undefined {
+	if (output.isTTY !== true) return undefined;
+	const columns = output.columns;
+	const terminalWidth =
+		typeof columns === "number" && Number.isFinite(columns) && columns > 0 ? Math.trunc(columns) : 120;
+	return Math.max(1, terminalWidth - 1);
+}
 export function createDownloadProgressReporter(
 	label: string,
 	total: number,
@@ -82,6 +98,7 @@ export function createDownloadProgressReporter(
 	now: () => number = Date.now,
 ): DownloadProgressReporter {
 	const interactive = output.isTTY === true;
+	const maxWidth = getDownloadProgressWidth(output);
 	const boundedTotal = Math.max(total, 0);
 	const startedAt = now();
 	let lastRenderedAt = Number.NEGATIVE_INFINITY;
@@ -91,7 +108,7 @@ export function createDownloadProgressReporter(
 	const render = (force = false): void => {
 		const currentTime = now();
 		if (!force && currentTime - lastRenderedAt < DOWNLOAD_PROGRESS_INTERVAL_MS) return;
-		const line = formatDownloadProgress(label, received, boundedTotal, currentTime - startedAt);
+		const line = formatDownloadProgress(label, received, boundedTotal, currentTime - startedAt, maxWidth);
 		output.write(interactive ? `\r${line}\x1b[K` : `${line}\n`);
 		lastRenderedAt = currentTime;
 		rendered = true;
@@ -100,7 +117,7 @@ export function createDownloadProgressReporter(
 	return {
 		update(nextReceived) {
 			received = Math.max(received, Math.min(nextReceived, boundedTotal));
-			render(received >= boundedTotal);
+			render(boundedTotal > 0 && received >= boundedTotal);
 		},
 		finish() {
 			if (interactive && rendered) output.write("\n");
