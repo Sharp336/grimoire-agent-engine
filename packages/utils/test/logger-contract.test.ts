@@ -95,7 +95,7 @@ function expectedLine(
 }
 
 describe("central logger byte contract", () => {
-	test("pins levels, metadata normalization, key order, timestamp, errors, pid, and EOL", async () => {
+	test("writes only errors to files and pins metadata normalization, key order, timestamp, pid, and EOL", async () => {
 		const result = await runScenario("matrix");
 		expect(result.stdout).toBe("");
 		expect(result.stderr).toBe("");
@@ -103,10 +103,7 @@ describe("central logger byte contract", () => {
 		expect(log.name).toBe(`omp.2026-01-01.${result.pid}.log`);
 		const expected = [
 			expectedLine(result.pid, "error", "level-error", { ordinal: 1 }),
-			expectedLine(result.pid, "warn", "level-warn", { ordinal: 2 }),
-			expectedLine(result.pid, "info", "level-info", { ordinal: 3 }),
-			expectedLine(result.pid, "debug", "level-debug", { ordinal: 4 }),
-			expectedLine(result.pid, "info", "context-matrix", {
+			expectedLine(result.pid, "error", "context-matrix", {
 				stringValue: "text",
 				numberValue: 7,
 				booleanValue: false,
@@ -115,8 +112,8 @@ describe("central logger byte contract", () => {
 				infinity: null,
 				nan: null,
 			}),
-			expectedLine(result.pid, "warn", "reserved-primary metadata-message", { before: "first", after: "last" }),
-			expectedLine(result.pid, "debug", "reserved-falsy", { after: true }),
+			expectedLine(result.pid, "error", "reserved-primary metadata-message", { before: "first", after: "last" }),
+			expectedLine(result.pid, "error", "reserved-falsy", { after: true }),
 			expectedLine(result.pid, "error", "error-matrix", {
 				error: {
 					name: "CustomError",
@@ -149,10 +146,10 @@ describe("central logger byte contract", () => {
 			"token-%%",
 		];
 		const expected = [
-			...tokenMessages.map(message => expectedLine(result.pid, "info", message)),
-			expectedLine(result.pid, "info", "non-token-%q", { value: 7 }),
-			expectedLine(result.pid, "info", "circular-%s"),
-			expectedLine(result.pid, "info", "bigint-%d"),
+			...tokenMessages.map(message => expectedLine(result.pid, "error", message)),
+			expectedLine(result.pid, "error", "non-token-%q", { value: 7 }),
+			expectedLine(result.pid, "error", "circular-%s"),
+			expectedLine(result.pid, "error", "bigint-%d"),
 		].join("");
 		expect((await readSingleLog(result.primaryDir)).text).toBe(expected);
 	});
@@ -180,12 +177,12 @@ describe("central logger transport lifecycle", () => {
 		expect(result.stderr).toBe("");
 		const defaultLogsDir = path.join(result.primaryDir, ".omp", "logs");
 		const log = await readSingleLog(defaultLogsDir);
-		expect(log.text).toBe(expectedLine(result.pid, "info", "mode-default", { mode: "default" }));
+		expect(log.text).toBe(expectedLine(result.pid, "error", "mode-default", { mode: "default" }));
 	});
 
 	test("emits file-only, console-only, and dual modes exactly once", async () => {
 		const fileOnly = await runScenario("file-only");
-		const fileLine = expectedLine(fileOnly.pid, "info", "mode-file", { mode: "file" });
+		const fileLine = expectedLine(fileOnly.pid, "error", "mode-file", { mode: "file" });
 		expect(fileOnly.stdout).toBe("");
 		expect(fileOnly.stderr).toBe("");
 		expect((await readSingleLog(fileOnly.primaryDir)).text).toBe(fileLine);
@@ -197,7 +194,7 @@ describe("central logger transport lifecycle", () => {
 		expect(await logFileNames(consoleOnly.primaryDir)).toEqual([]);
 
 		const both = await runScenario("both");
-		const bothLine = expectedLine(both.pid, "info", "mode-both", { mode: "both" });
+		const bothLine = expectedLine(both.pid, "error", "mode-both", { mode: "both" });
 		expect(both.stdout).toBe(bothLine);
 		expect(both.stderr).toBe("");
 		expect((await readSingleLog(both.primaryDir)).text).toBe(bothLine);
@@ -208,7 +205,7 @@ describe("central logger transport lifecycle", () => {
 		expect(result.stdout).toBe("");
 		expect(result.stderr).toBe("");
 		expect((await readSingleLog(result.primaryDir)).text).toBe(
-			expectedLine(result.pid, "warn", "mode-reenabled", { mode: "file" }),
+			expectedLine(result.pid, "error", "mode-reenabled", { mode: "file" }),
 		);
 		const payload = JSON.parse(await fs.readFile(result.resultPath, "utf8")) as {
 			disabledSinkSameContext: boolean;
@@ -223,10 +220,10 @@ describe("central logger transport lifecycle", () => {
 		expect(result.stdout).toBe("");
 		expect(result.stderr).toBe("");
 		expect((await readSingleLog(result.primaryDir)).text).toBe(
-			expectedLine(result.pid, "info", "directory-a", { destination: "a" }),
+			expectedLine(result.pid, "error", "directory-a", { destination: "a" }),
 		);
 		expect((await readSingleLog(result.secondaryDir)).text).toBe(
-			expectedLine(result.pid, "info", "directory-b", { destination: "b" }),
+			expectedLine(result.pid, "error", "directory-b", { destination: "b" }),
 		);
 	});
 
@@ -235,7 +232,7 @@ describe("central logger transport lifecycle", () => {
 		expect(result.stdout).toBe("");
 		expect(result.stderr).toBe("");
 		expect((await readSingleLog(result.primaryDir)).text).toBe(
-			expectedLine(result.pid, "info", "before-failed-reconfigure"),
+			expectedLine(result.pid, "error", "before-failed-reconfigure"),
 		);
 		expect(await logFileNames(result.secondaryDir)).toEqual([]);
 		const payload = JSON.parse(await fs.readFile(result.resultPath, "utf8")) as {
@@ -287,7 +284,7 @@ describe("DailyRotateFile option and retention contract", () => {
 			const day = offset + 2;
 			const timestamp = `2026-01-0${day}T22:04:05.006-05:00`;
 			expect(await fs.readFile(path.join(result.primaryDir, name), "utf8")).toBe(
-				expectedLine(result.pid, "info", `date-${day}`, {}, timestamp),
+				expectedLine(result.pid, "error", `date-${day}`, {}, timestamp),
 			);
 		}
 
@@ -314,7 +311,7 @@ describe("DailyRotateFile option and retention contract", () => {
 		const basePath = path.join(result.primaryDir, baseName);
 		const baseStat = await fs.stat(basePath);
 		const recordSize = (message: string, payloadSize: number): number =>
-			`{"timestamp":"${fixedTimestamp}","level":"info","pid":${result.pid},"message":"${message}","payload":"`
+			`{"timestamp":"${fixedTimestamp}","level":"error","pid":${result.pid},"message":"${message}","payload":"`
 				.length +
 			payloadSize +
 			`"}${os.EOL}`.length;
@@ -325,7 +322,7 @@ describe("DailyRotateFile option and retention contract", () => {
 		expect(baseStat.size).toBe(expectedBytes);
 		expect(baseStat.size).toBeGreaterThan(10 * 1024 * 1024);
 		expect(await fs.readFile(path.join(result.primaryDir, rotatedName), "utf8")).toBe(
-			expectedLine(result.pid, "info", "rotation-trigger"),
+			expectedLine(result.pid, "error", "rotation-trigger"),
 		);
 		const audit = JSON.parse(
 			await fs.readFile(path.join(result.primaryDir, `.omp.${result.pid}-audit.json`), "utf8"),

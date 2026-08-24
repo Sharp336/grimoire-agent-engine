@@ -64,7 +64,7 @@ describe("logger with no transports", () => {
 		logger.setTransports({ file: false, console: false });
 		// Re-attaching a transport must clear the silent flag set above.
 		logger.setTransports({ file: tempDir, console: false });
-		logger.warn("no-transports-resume-fixture");
+		logger.error("no-transports-resume-fixture");
 
 		let found = false;
 		for (let i = 0; i < 40 && !found; i++) {

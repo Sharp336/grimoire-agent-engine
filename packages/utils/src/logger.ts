@@ -1,10 +1,11 @@
 /**
  * Centralized logger for omp.
  *
- * Default: rotating `~/.omp/logs/omp.<DATE>.<PID>.log`, no console output (writing
- * to stdout/stderr would corrupt the TUI). Long-running headless services
- * (the auth broker, etc.) call {@link setTransports} to swap in a console
- * transport so a process supervisor (pm2, journald, k8s) captures the logs.
+ * Default: error entries in rotating `~/.omp/logs/omp.<DATE>.<PID>.log`, no
+ * console output (writing to stdout/stderr would corrupt the TUI). Long-running
+ * headless services (the auth broker, etc.) call {@link setTransports} to swap
+ * in a console transport so a process supervisor (pm2, journald, k8s) captures
+ * the logs.
  *
  * Each entry includes `process.pid` so concurrent omp instances stay
  * traceable.
@@ -276,11 +277,11 @@ function getLocalTransports(): LocalTransports {
 
 function emitLocally(level: LogLevel, message: string, context: Record<string, unknown> | undefined): void {
 	const transports = getLocalTransports();
-	const info = normalizeLogInfo(level, message, context);
-	if (!transports.file && !transports.console) return;
+	if (!transports.console && (!transports.file || level !== "error")) return;
 
+	const info = normalizeLogInfo(level, message, context);
 	const line = formatLogInfo(info);
-	if (transports.file) transports.file.write(line);
+	if (transports.file && level === "error") transports.file.write(line);
 	if (transports.console) fs.writeSync(1, `${formatLogInfo(info)}${os.EOL}`);
 }
 
