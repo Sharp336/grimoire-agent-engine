@@ -77,6 +77,8 @@ import {
 	TASK_SUBAGENT_EVENT_CHANNEL,
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
+	type TaskModelOverrideReason,
+	type TaskModelReceipt,
 	type TaskToolDetails,
 	type YieldItem,
 } from "./types";
@@ -2127,6 +2129,12 @@ interface FinalizeRunArgs {
 	modelOverride?: string | string[];
 	/** Explicit pre-expansion model role alias selected for this run. */
 	modelRole?: string;
+	/**
+	 * Resolution-time model decision for this run, captured by the spawn path
+	 * once the model resolved. Complete except for `model-retry-fallback`, which
+	 * only the settled run knows; {@link finalizeRunResult} appends it.
+	 */
+	modelReceipt?: TaskModelReceipt;
 	outputSchema?: unknown;
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
@@ -2144,6 +2152,58 @@ interface FinalizeRunArgs {
 	followUpTurn?: boolean;
 	sessionFile?: string;
 	startTime: number;
+}
+
+/** Build the one terminal record of a spawn's model decision. */
+function buildTaskModelReceipt(
+	modelPatterns: string[],
+	requestedRole: string | undefined,
+	requestedEffort: TaskEffort | undefined,
+	model: Model | undefined,
+	effortLevel: TaskModelReceipt["resolvedEffort"],
+	unclampedEffort: TaskModelReceipt["resolvedEffort"],
+	authFallbackUsed: boolean,
+	effortResolved: boolean,
+): TaskModelReceipt | undefined {
+	if (
+		model === undefined &&
+		modelPatterns.length === 0 &&
+		requestedRole === undefined &&
+		requestedEffort === undefined
+	) {
+		return undefined;
+	}
+	const overrides: TaskModelOverrideReason[] = [];
+	if (modelPatterns.length > 0 && model === undefined) overrides.push("model-unresolved");
+	if (authFallbackUsed) overrides.push("model-auth-fallback");
+	if (effortResolved && model && requestedEffort !== undefined && effortLevel === undefined) {
+		overrides.push("effort-unsupported");
+	}
+	if (effortResolved && model && unclampedEffort !== undefined && effortLevel !== unclampedEffort) {
+		overrides.push("effort-clamped");
+	}
+	const receipt: TaskModelReceipt = {};
+	if (requestedEffort !== undefined) receipt.requestedEffort = requestedEffort;
+	if (modelPatterns.length > 0) receipt.requestedModel = modelPatterns;
+	if (requestedRole !== undefined) receipt.requestedRole = requestedRole;
+	if (model) receipt.resolvedModel = formatModelStringWithRouting(model);
+	if (model && effortLevel !== undefined) receipt.resolvedEffort = effortLevel;
+	if (overrides.length > 0) receipt.overrides = overrides;
+	return receipt;
+}
+/**
+ * Seal a resolution-time model receipt with the one divergence only a settled
+ * run can report: a runtime retry fallback served a turn on some other model
+ * than the one resolution picked. Returns the receipt unchanged (no copy) when
+ * no fallback served, which is the common case.
+ */
+function sealModelReceipt(
+	receipt: TaskModelReceipt | undefined,
+	resolvedModelIsFallback: boolean | undefined,
+): TaskModelReceipt | undefined {
+	if (!receipt || resolvedModelIsFallback !== true) return receipt;
+	const overrides: TaskModelOverrideReason[] = [...(receipt.overrides ?? []), "model-retry-fallback"];
+	return { ...receipt, overrides };
 }
 
 /**
@@ -2289,6 +2349,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		modelRole,
 		resolvedModel: progress.resolvedModel,
 		resolvedModelIsFallback: progress.resolvedModelIsFallback,
+		modelReceipt: sealModelReceipt(args.modelReceipt, progress.resolvedModelIsFallback),
 		error: exitCode !== 0 && stderr ? stderr : undefined,
 		aborted: wasAborted,
 		abortReason: finalAbortReason,
@@ -2777,9 +2838,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
 	const ircEnabled = options.enableIrc !== false && isIrcEnabled(subagentSettings, childDepth);
 
-	// Add tools if specified
+	// An agent definition's `tools` list is a restriction whenever it is present:
+	// an explicit `[]` means no tools, only an absent list falls through to the
+	// session's default toolset. That distinction is what makes a measurable
+	// no-tool worker profile expressible (issue #9647). The child still gets
+	// `yield` (createAgentSession's `requireYieldTool`) so it can terminate, and
+	// `hub` below unless the caller restricted the list.
 	let toolNames: string[] | undefined;
-	if (agent.tools && agent.tools.length > 0) {
+	if (agent.tools) {
 		toolNames = agent.tools;
 		// Auto-include task tool if spawns defined but task not in tools
 		if (agent.spawns !== undefined && !toolNames.includes("task") && !atMaxDepth) {
@@ -2815,6 +2881,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 	const lspEnabled = enableLsp ?? true;
 	const skipPythonPreflight = Array.isArray(toolNames) && !toolNames.includes("eval");
+	// Resolution-time model decision, filled in by `runSubagent` once the model
+	// resolves and read by `finalizeRunResult` after the run settles. Stays
+	// undefined when setup aborts before resolution, so the result carries no
+	// receipt rather than a half-filled one.
+	let modelReceipt: TaskModelReceipt | undefined;
 
 	const monitor = createSubagentRunMonitor({
 		index,
@@ -2948,6 +3019,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					id,
 				),
 			);
+			let receiptAuthFallbackUsed = authFallbackUsed;
+
 			if (modelResolutionWarning) {
 				logger.warn("Subagent model resolution warning", {
 					warning: modelResolutionWarning,
@@ -2979,13 +3052,28 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (model?.contextWindow && model.contextWindow > 0) {
 				progress.contextWindow = model.contextWindow;
 			}
+			const spawnEffortCeiling = options.effort !== undefined ? settings.get("task.maxEffort") : undefined;
+			const requestedRole = modelRole ?? resolveExplicitModelRole(modelPatterns, subagentSettings);
+			if (model && options.effort !== undefined && spawnEffortCeiling !== undefined) {
+				// Preserve the request and resolved model before ceiling validation: that
+				// mapping can reject a model whose effort floor exceeds the ceiling.
+				modelReceipt = buildTaskModelReceipt(
+					modelPatterns,
+					requestedRole,
+					options.effort,
+					model,
+					undefined,
+					undefined,
+					receiptAuthFallbackUsed,
+					false,
+				);
+			}
 			// Caller-requested coarse effort maps onto the resolved model's
 			// supported range, then respects the operator-configured ceiling.
 			// Undefined (no effort, or no controllable effort surface) falls
 			// through to the normal selectors below.
 			// The ceiling outlives initial resolution: it rides into the session so
 			// retry-fallback recovery can never clamp effort back up past it.
-			const spawnEffortCeiling = options.effort !== undefined ? settings.get("task.maxEffort") : undefined;
 			const effortLevel =
 				options.effort !== undefined
 					? resolveTaskEffortLevel(model, options.effort, spawnEffortCeiling)
@@ -2997,6 +3085,23 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						? formatModelSelectorValue(formatModelStringWithRouting(model), displayLevel)
 						: formatModelStringWithRouting(model);
 			}
+			// The ceiling-clamp check re-runs the same pure mapping without a
+			// ceiling rather than reimplementing it; it is skipped entirely when no
+			// effort was requested, so the common spawn pays nothing.
+			const unclampedEffort =
+				options.effort !== undefined && spawnEffortCeiling !== undefined
+					? resolveTaskEffortLevel(model, options.effort)
+					: undefined;
+			modelReceipt = buildTaskModelReceipt(
+				modelPatterns,
+				requestedRole,
+				options.effort,
+				model,
+				effortLevel,
+				unclampedEffort,
+				receiptAuthFallbackUsed,
+				true,
+			);
 			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
 			// model pattern > agent-definition default (e.g. task's `auto`) >
 			// pattern-derived level.
@@ -3175,7 +3280,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager, null));
 			let session: AgentSession;
 			try {
-				({ session } = await awaitAbortable(sessionPromise));
+				const created = await awaitAbortable(sessionPromise);
+				session = created.session;
+				receiptAuthFallbackUsed ||= created.modelPatternAuthFallbackUsed === true;
 			} catch (err) {
 				// Abort raced session startup. The session may still resolve later
 				// holding live LSP/MCP child processes — dispose it when it does so
@@ -3184,8 +3291,54 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				throw err;
 			}
 			sessionCreatedAt = performance.now();
-
+			// Receipt reconciliation can reject a newly discovered model, so hand
+			// ownership to the monitor before validating its effort ceiling.
 			monitor.setActiveSession(session);
+
+			// `createAgentSession` retries deferred patterns after extension and
+			// provider discovery. Rebuild the receipt from the session's actual
+			// model, not the model-less provisional mapping used to start it.
+			const deferredModel = model === undefined ? session.model : undefined;
+			if (deferredModel) {
+				if (options.effort !== undefined && spawnEffortCeiling !== undefined) {
+					modelReceipt = buildTaskModelReceipt(
+						modelPatterns,
+						requestedRole,
+						options.effort,
+						deferredModel,
+						undefined,
+						undefined,
+						receiptAuthFallbackUsed,
+						false,
+					);
+				}
+				const deferredEffortLevel =
+					options.effort !== undefined
+						? resolveTaskEffortLevel(deferredModel, options.effort, spawnEffortCeiling)
+						: undefined;
+				const deferredUnclampedEffort =
+					options.effort !== undefined && spawnEffortCeiling !== undefined
+						? resolveTaskEffortLevel(deferredModel, options.effort)
+						: undefined;
+				modelReceipt = buildTaskModelReceipt(
+					modelPatterns,
+					requestedRole,
+					options.effort,
+					deferredModel,
+					deferredEffortLevel,
+					deferredUnclampedEffort,
+					receiptAuthFallbackUsed,
+					true,
+				);
+				const serving = session.servingModel;
+				if (serving) {
+					progress.resolvedModel = serving.selector;
+					progress.resolvedModelIsFallback = serving.isFallback;
+				} else {
+					progress.resolvedModel = formatModelStringWithRouting(deferredModel);
+				}
+			}
+
 			// Run-state notifications precede deferrable wire-level `agent_end`,
 			// so adopted keep-alive lifecycle cannot get stuck during prompt unwind.
 			AgentRegistry.global().syncSessionStatus(id, session);
@@ -3524,6 +3677,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		assignment,
 		modelOverride,
 		modelRole,
+		modelReceipt,
 		outputSchema,
 		outputSchemaMode: options.outputSchemaMode,
 		outputSchemaSource: options.outputSchemaSource,

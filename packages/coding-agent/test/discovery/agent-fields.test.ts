@@ -97,6 +97,21 @@ describe("parseAgentFields", () => {
 		expect(fields?.tools).toEqual(["glob", "grep", "yield"]);
 	});
 
+	test("keeps an explicitly empty tools list distinct from an absent one", () => {
+		// `tools: []` is a restriction (issue #9647): the executor gives an absent
+		// list the default toolset, so the two must not collapse together. `yield`
+		// still rides along, or the agent could never return a result.
+		expect(parseAgentFields({ name: "quiet", description: "desc", tools: [] })?.tools).toEqual(["yield"]);
+		expect(parseAgentFields({ name: "quiet", description: "desc" })?.tools).toBeUndefined();
+		expect(parseAgentFields({ name: "quiet", description: "desc", tools: null })?.tools).toBeUndefined();
+	});
+
+	test("treats a non-empty unusable tools list as absent", () => {
+		// Invalid entries are not a declaration of zero tools. Reading them as `[]`
+		// would silently disarm the agent.
+		expect(parseAgentFields({ name: "reviewer", description: "desc", tools: [7, {}] })?.tools).toBeUndefined();
+	});
+
 	test("parses autoloadSkills from array frontmatter", () => {
 		const fields = parseAgentFields({
 			name: "oracle",

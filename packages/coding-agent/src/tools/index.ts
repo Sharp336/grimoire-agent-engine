@@ -473,11 +473,15 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const restrictToolNames = session.restrictToolNames === true;
 	const includeYield = session.requireYieldTool === true;
 	const enableLsp = session.enableLsp ?? true;
-	const requestedTools = restrictToolNames
-		? normalizeToolNames(toolNames ?? [])
-		: toolNames && toolNames.length > 0
-			? normalizeToolNames(toolNames)
-			: undefined;
+	// A `toolNames` list is a restriction whenever it is present, even when empty:
+	// `[]` builds no tools, and only an absent list means "no restriction" and
+	// builds the default registry (issue #9647). `createAgentSession` already
+	// narrows the ACTIVE set from an empty explicit list, so this is about the
+	// registry: an explicit `[]` (`--no-tools`, a zero-tool agent profile) no
+	// longer constructs every builtin just to leave them all inactive, and no
+	// longer pays the eval-kernel preflight for an `eval` nobody asked for.
+	// A restricted session has no default set, so an absent list there is empty.
+	const requestedTools = toolNames ? normalizeToolNames(toolNames) : restrictToolNames ? [] : undefined;
 	const goalEnabled = session.settings.get("goal.enabled");
 	const goalModeActive = !restrictToolNames && goalEnabled && session.getGoalModeState?.()?.enabled === true;
 	const externalThinkingActive =

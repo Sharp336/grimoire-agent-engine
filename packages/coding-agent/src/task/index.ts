@@ -1515,6 +1515,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						charSize: formatBytes(result.outputMeta.charCount),
 					}
 				: undefined,
+			modelReceipt: result.modelReceipt,
 			mergeSummary,
 		});
 

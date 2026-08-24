@@ -261,7 +261,12 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		return null;
 	}
 
-	let tools = parseArrayOrCSV(frontmatter.tools);
+	// An explicit empty `tools: []` is a restriction, not an absent field: the
+	// executor gives absence the default set. Check this YAML list form before
+	// `parseArrayOrCSV` collapses it to undefined. A non-empty invalid list stays
+	// absent, so unusable input cannot silently disarm an agent (issue #9647).
+	const declaredEmptyTools = Array.isArray(frontmatter.tools) && frontmatter.tools.length === 0;
+	let tools = declaredEmptyTools ? [] : parseArrayOrCSV(frontmatter.tools);
 	if (tools) tools = normalizeToolNames(tools);
 
 	// Subagents with explicit tool lists always need yield
