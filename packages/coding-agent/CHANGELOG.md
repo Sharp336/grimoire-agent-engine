@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `advisor.steerLevel` to choose the minimum advisor severity that makes the primary agent read and respond to advice across in-progress and completed turns; `blocker` remains the default, while `concern` includes concerns and blockers ([#9074](https://github.com/can1357/oh-my-pi/issues/9074)).
+
 ## [18.0.4] - 2026-08-24
 
 ### Added
@@ -306,7 +310,6 @@
 - `/retry` and `/handoff` now work over ACP, so editor clients (Zed) list them and can run them instead of sending the text to the model.
 - Added `qwenTemplateReasoningEffort` to the `models.yml` `compat` schema, so the auto-enabled Qwen 3.8+ template effort dialect (`chat_template_kwargs.reasoning_effort`) can be switched off per provider/model for strict local servers that reject unknown `chat_template_kwargs`.
 - Extensions can provide a normalized `usage` provider through `pi.registerProvider()`. Its reports now flow through AuthStorage caching, history, and usage displays, and the override is removed when the extension provider is unregistered.
-- Added `advisor.steerLevel` to choose the minimum advisor severity that makes the primary agent read and respond to advice across in-progress and completed turns; `blocker` remains the default, while `concern` includes concerns and blockers ([#9074](https://github.com/can1357/oh-my-pi/issues/9074)).
 
 ## [17.4.0] - 2026-08-20
 

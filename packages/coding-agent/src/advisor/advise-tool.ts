@@ -251,7 +251,7 @@ export class AdviseTool implements AgentTool<typeof adviseSchema, AdviseDetails>
 
 	/** Run one note through the escalation-rank dedupe and, if it passes, route it
 	 *  to the primary. Returns true when the note was actually delivered. Shared by
-	 *  the live path (`execute`) and the deferred flush (`beginUpdate(false)`). */
+	 *  the live path (`execute`) and the completed-update deferred flush. */
 	#deliver(note: string, severity?: AdviseDetails["severity"]): boolean {
 		const key = advisorNoteDedupeKey(note);
 		const rank = advisorSeverityRank(severity);

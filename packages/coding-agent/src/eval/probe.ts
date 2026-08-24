@@ -19,8 +19,11 @@
  * the probe down instead of leaking the subprocess.
  */
 
-/** Wall-clock ceiling for a runtime-availability probe when no smaller bound is supplied. */
-export const DEFAULT_PROBE_TIMEOUT_MS = 10_000;
+/**
+ * Wall-clock ceiling for a runtime-availability probe when no smaller bound is supplied.
+ * Cold Julia startup can exceed ten seconds on CPU-constrained runners.
+ */
+export const DEFAULT_PROBE_TIMEOUT_MS = 20_000;
 
 /**
  * Cancellation controls threaded from the eval tool through
