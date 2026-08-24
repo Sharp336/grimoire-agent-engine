@@ -749,7 +749,7 @@ function registerCompletionSink(
 		registration = { inFlight: 0, retained: false, active: true, cleanup };
 		owners.set(owner, registration);
 		unregisterDispose = session.registerDisposeCallback?.(() => cleanup(true));
-		unregisterSessionChange = session.registerSessionChangeCallback?.(() => cleanup(true));
+		unregisterSessionChange = session.registerSessionChangeCallback?.(() => cleanup());
 	}
 	registration.inFlight++;
 	let settled = false;

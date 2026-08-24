@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import type { DaemonBrokerClient } from "../../../src/launch/client";
+import type { DaemonBrokerClient, DaemonCompletionUnregisterOptions } from "../../../src/launch/client";
 import * as daemonClient from "../../../src/launch/client";
 import type {
 	DaemonCompletionNotification,
@@ -55,6 +55,7 @@ interface MonitorHarness {
 	}>;
 	completions: DaemonCompletionNotification[];
 	active: Array<{ monitorId: string; delivery: string; active: boolean }>;
+	completionPreservePending: boolean[];
 	epochs: number[];
 	disposeCallbacks: Array<() => void>;
 	contextBoundaryCallbacks: Set<() => void>;
@@ -79,6 +80,7 @@ function createHarness(
 	const progress: MonitorHarness["progress"] = [];
 	const completions: DaemonCompletionNotification[] = [];
 	const active: MonitorHarness["active"] = [];
+	const completionPreservePending: boolean[] = [];
 	const epochs: number[] = [];
 	const disposeCallbacks: Array<() => void> = [];
 	const contextBoundaryCallbacks = new Set<() => void>();
@@ -91,7 +93,8 @@ function createHarness(
 		projectDir: process.cwd(),
 		onCompletion: (_owner: string, sink: (notification: DaemonCompletionNotification) => void | Promise<void>) => {
 			completionSink = sink;
-			return () => {
+			return (options?: DaemonCompletionUnregisterOptions) => {
+				completionPreservePending.push(options?.preservePending === true);
 				if (completionSink === sink) completionSink = undefined;
 			};
 		},
@@ -164,6 +167,7 @@ function createHarness(
 		progress,
 		completions,
 		active,
+		completionPreservePending,
 		disposeCallbacks,
 		contextBoundaryCallbacks,
 		epochs,
@@ -886,6 +890,7 @@ describe("hub process output monitoring", () => {
 
 		expect(harness.unregisterCount()).toBe(1);
 		expect(harness.requests.some(operation => operation.op === "stop")).toBeFalse();
+		expect(harness.completionPreservePending).toEqual([true]);
 	});
 
 	it("context boundary cleanup disposes the output registration without stopping the process", async () => {
@@ -904,6 +909,7 @@ describe("hub process output monitoring", () => {
 		expect(harness.registrationCount()).toBe(0);
 		expect(harness.getOutputSink()).toBeUndefined();
 		expect(harness.getCompletionSink()).toBeUndefined();
+		expect(harness.completionPreservePending).toEqual([false]);
 		expect(harness.contextBoundaryCallbacks.size).toBe(0);
 		expect(harness.active.at(-1)).toEqual({ monitorId: subscription.id, delivery: "wake", active: false });
 		expect(harness.requests.some(operation => operation.op === "stop")).toBeFalse();
