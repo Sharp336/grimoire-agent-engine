@@ -2929,8 +2929,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// adapter and has no handler-level gate. Resource-only servers
 				// (no owned tool) stay readable when the scope does not target
 				// MCP access at all.
-				if (!mcpServerScopedIn(toolRegistry.values(), cursorScopeAllows, name) && scopeTargetsMcp)
-					return undefined;
+				if (!mcpServerScopedIn(toolRegistry.values(), cursorScopeAllows, name) && scopeTargetsMcp) return undefined;
 				return mcpManager.readServerResource(name, uri);
 			},
 		};
@@ -2957,6 +2956,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				enforceToolAllowlist || disallowedPatterns.length > 0
 					? (name: string): boolean => cursorScopeAllows(name)
 					: undefined,
+			// Resource-only servers (no owned tool) stay readable when the scope
+			// does not target MCP access; the handler gate must agree with the
+			// adapter's `scopeTargetsMcp` decision.
+			allowToollessMcpServers: !scopeTargetsMcp,
 			getToolContext: () => toolContextStore.getContext(),
 			mcpResources: cursorMcpResources,
 			emitEvent: event => cursorEventEmitter?.(event),
@@ -3027,8 +3030,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				? undefined
 				: buildAutoLearnInstructions({
 						manageSkill:
-							builtInToolNames.includes("manage_skill") &&
-							!isToolDisallowed("manage_skill", disallowedPatterns),
+							builtInToolNames.includes("manage_skill") && !isToolDisallowed("manage_skill", disallowedPatterns),
 						learn: builtInToolNames.includes("learn") && !isToolDisallowed("learn", disallowedPatterns),
 					});
 			const appendParts: string[] = [];
@@ -3062,7 +3064,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// Unrestricted sessions (no disallow list, no enforced allowlist) keep
 				// every connected server's instructions, byte-identical to before.
 				let scopedInServerNames: Set<string> | undefined;
-				if (enforceToolAllowlist || disallowedPatterns.length > 0) {
+				// Ownership filtering runs only when the scope targets MCP access: an
+				// unrelated disallow (`disallowedTools: [bash]`) must not strip a
+				// resource-only server's instructions (no owned tool to match) — it
+				// keeps every server's instructions, byte-identical to unrestricted.
+				if (scopeTargetsMcp) {
 					scopedInServerNames = new Set();
 					// xd://-mounted MCP tools leave `toolNames` (presentation moves to
 					// `mountedNames`) while staying in the canonical `tools` map, so the

@@ -72,6 +72,14 @@ interface CursorExecBridgeOptions {
 	 */
 	isToolExecutable?: (name: string) => boolean;
 	/**
+	 * Whether a scope that does NOT target MCP access may still read
+	 * resource-only servers (advertise resources, no tools). Such servers have
+	 * no registry tool to satisfy {@link isToolExecutable}, so without this the
+	 * handler gate would strip them under any disallow-only scope. The
+	 * adapter's own filtering and this handler gate must agree.
+	 */
+	allowToollessMcpServers?: boolean;
+	/**
 	 * The `replace`-mode `edit` instance `pi_edit` must run, when the session
 	 * granted `edit` at all.
 	 *
@@ -485,7 +493,13 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 	 * sanitized name prefix), mirroring the instructions filter.
 	 */
 	#serverScopedIn(serverName: string): boolean {
-		return mcpServerScopedIn(this.options.tools.values(), this.options.isToolExecutable, serverName);
+		const gate = this.options.isToolExecutable;
+		if (!gate) return true;
+		const hasOwnedTool = mcpServerScopedIn(this.options.tools.values(), gate, serverName);
+		// Resource-only servers (no owned tool) survive scopes that do not
+		// target MCP access (`allowToollessMcpServers`); MCP-targeting scopes
+		// strip them, matching the adapter's `scopeTargetsMcp` semantics.
+		return hasOwnedTool || this.options.allowToollessMcpServers === true;
 	}
 
 	/**
