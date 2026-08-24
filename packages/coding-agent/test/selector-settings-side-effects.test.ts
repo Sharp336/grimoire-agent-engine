@@ -185,18 +185,6 @@ describe("selector setting side effects", () => {
 		});
 	}
 
-	it("refreshes slash-command autocomplete when icon visibility changes", async () => {
-		const refreshSlashCommandState = vi.fn(async () => {});
-		const controller = new SelectorController({
-			refreshSlashCommandState,
-			showError: vi.fn(),
-		} as unknown as InteractiveModeContext);
-
-		controller.handleSettingChange("display.showSlashCommandIcons", false);
-		await Promise.resolve();
-
-		expect(refreshSlashCommandState).toHaveBeenCalledTimes(1);
-	});
 	it("clears stale default role thinking when auto is selected", async () => {
 		const testTheme = await getThemeByName("dark");
 		if (!testTheme) throw new Error("Failed to load dark theme for model selector test");

@@ -276,24 +276,4 @@ describe("prompt action autocomplete", () => {
 
 		expect(provider.trySyncSlashCompletion("hello")).toBeNull();
 	});
-
-	it("removes icons from slash-command suggestions when command icons are disabled", async () => {
-		const provider = createPromptActionAutocompleteProvider({
-			commands: [{ name: "settings", description: "Open settings", icon: "🎛" }],
-			basePath: "/tmp",
-			showSlashCommandIcons: false,
-			keybindings: AppKeybindingsManager.inMemory(),
-			copyCurrentLine: () => {},
-			copyPrompt: () => {},
-			undo: () => {},
-			moveCursorToMessageEnd: () => {},
-			moveCursorToMessageStart: () => {},
-			moveCursorToLineStart: () => {},
-			moveCursorToLineEnd: () => {},
-		});
-
-		const result = await provider.getSuggestions(["/"], 0, 1);
-
-		expect(result?.items.find(item => item.value === "settings")?.icon).toBeUndefined();
-	});
 });

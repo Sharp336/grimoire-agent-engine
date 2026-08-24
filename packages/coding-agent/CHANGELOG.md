@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an Appearance setting to hide type icons before slash-command autocomplete entries ([#9380](https://github.com/can1357/oh-my-pi/pull/9380) by [@ian139](https://github.com/ian139)).
+
 ## [18.0.4] - 2026-08-24
 
 ### Added
@@ -78,7 +82,6 @@
 - Added provider-wide Amazon Bedrock guardrail settings to models configuration, including custom models.
 - Added the `/pin` slash command to pin and unpin sessions so they stay at the top of the `--resume` picker UI.
 - Optional edit parse-regression capture appends the before/after content, model, variant, and arguments to `~/.omp/agent/edit-blackbox.jsonl` when `edit.blackbox.enabled` is enabled.
-- Added an Appearance setting to hide type icons before slash-command autocomplete entries.
 
 ### Changed
 

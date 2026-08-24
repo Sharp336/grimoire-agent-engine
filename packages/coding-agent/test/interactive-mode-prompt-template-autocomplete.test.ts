@@ -14,6 +14,7 @@ import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { PromptTemplate } from "@oh-my-pi/pi-coding-agent/config/prompt-templates";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -76,6 +77,7 @@ describe("InteractiveMode prompt-template autocomplete (#2462)", () => {
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
+		Settings.instance.set("display.showSlashCommandIcons", true);
 		mode?.stop();
 		await session?.dispose();
 		mode = undefined;
@@ -220,5 +222,45 @@ describe("InteractiveMode prompt-template autocomplete (#2462)", () => {
 		// Builtin `/model` owns the `/models` alias. The colliding template is filtered
 		// out so autocomplete follows the interactive slash-command resolution path.
 		expect(matches.filter(name => name === "models")).toHaveLength(1);
+	});
+
+	it("applies slash-command icon visibility through live provider rebuilds", async () => {
+		const created = createHarness([]);
+		const providerWaiters: Array<(provider: AutocompleteProvider) => void> = [];
+		vi.spyOn(created.mode.editor, "setAutocompleteProvider").mockImplementation(provider => {
+			providerWaiters.shift()?.(provider);
+		});
+		const nextProvider = (): Promise<AutocompleteProvider> => {
+			const { promise, resolve } = Promise.withResolvers<AutocompleteProvider>();
+			providerWaiters.push(resolve);
+			return promise;
+		};
+		const controller = new SelectorController(created.mode);
+
+		const initialProviderPromise = nextProvider();
+		await created.mode.refreshSlashCommandState(tempDir.path());
+		const initialProvider = await initialProviderPromise;
+		const initialSettings = (await fetchSlashItems(initialProvider, "/settings")).find(
+			item => item.value === "settings",
+		);
+		expect(initialSettings?.icon).toBeDefined();
+
+		const hiddenProviderPromise = nextProvider();
+		Settings.instance.set("display.showSlashCommandIcons", false);
+		controller.handleSettingChange("display.showSlashCommandIcons", false);
+		const hiddenProvider = await hiddenProviderPromise;
+		const hiddenSettings = (await fetchSlashItems(hiddenProvider, "/settings")).find(
+			item => item.value === "settings",
+		);
+		expect(hiddenSettings?.icon).toBeUndefined();
+
+		const restoredProviderPromise = nextProvider();
+		Settings.instance.set("display.showSlashCommandIcons", true);
+		controller.handleSettingChange("display.showSlashCommandIcons", true);
+		const restoredProvider = await restoredProviderPromise;
+		const restoredSettings = (await fetchSlashItems(restoredProvider, "/settings")).find(
+			item => item.value === "settings",
+		);
+		expect(restoredSettings?.icon).toBe(initialSettings?.icon);
 	});
 });
