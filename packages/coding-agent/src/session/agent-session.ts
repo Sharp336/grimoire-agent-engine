@@ -605,6 +605,8 @@ export class AgentSession {
 	#unregisterAsyncProgressSink: (() => void) | undefined;
 	#unregisterAsyncProgressQueue: (() => void) | undefined;
 	#unregisterAsyncProgressWakeQueue: (() => void) | undefined;
+	readonly #activeLaunchMonitors = new Set<string>();
+	#launchMonitorStateChanged = Promise.withResolvers<void>();
 	/** Conversation-boundary fence shared by monitored process progress and completions. */
 	#launchProgressBoundaryDepth = 0;
 	#launchProgressEpoch = 0;
@@ -981,7 +983,11 @@ export class AgentSession {
 		const pending = this.#pendingAgentEndEmit;
 		if (!pending) return;
 		this.#pendingAgentEndEmit = undefined;
-		this.#emit(pending);
+		const event =
+			pending.type === "agent_end" && pending.isTerminal !== false && this.#hasPendingAsyncWake()
+				? { ...pending, isTerminal: false }
+				: pending;
+		this.#emit(event);
 	}
 
 	/**
@@ -1323,13 +1329,6 @@ export class AgentSession {
 				}
 			},
 		});
-		this.yieldQueue.register<SessionLaunchCompletionEntry>(LAUNCH_COMPLETION_MESSAGE_TYPE, {
-			isStale: entry =>
-				this.#isDisposed ||
-				entry.epoch !== this.#launchProgressEpoch ||
-				!isLaunchCompletionOwner(entry.owner, this.sessionManager.getSessionId()),
-			build: buildLaunchCompletionBatchMessage,
-		});
 		// Background-job completions / late diagnostics are pulled into the run at
 		// each step boundary as non-interrupting asides. Peer IRCs share the aside
 		// injection boundary, but also expose a non-consuming interrupt peek so
@@ -1473,7 +1472,16 @@ export class AgentSession {
 				build: buildAsyncProgressBatchMessage,
 			},
 		);
-
+		// Progress queues must drain before terminal process completions. The broker
+		// flushes its final progress batch first; preserve that ordering when both
+		// kinds accumulate while the model is busy.
+		this.yieldQueue.register<SessionLaunchCompletionEntry>(LAUNCH_COMPLETION_MESSAGE_TYPE, {
+			isStale: entry =>
+				this.#isDisposed ||
+				entry.epoch !== this.#launchProgressEpoch ||
+				!isLaunchCompletionOwner(entry.owner, this.sessionManager.getSessionId()),
+			build: buildLaunchCompletionBatchMessage,
+		});
 		if (this.#asyncJobManager && this.#agentId) {
 			const manager = this.#asyncJobManager;
 			this.yieldQueue.register<AsyncResultEntry>("async-result", {
@@ -1483,7 +1491,8 @@ export class AgentSession {
 			this.#unregisterAsyncProgressSink = manager.registerProgressSink(this.#agentId, {
 				deliver: (jobId, text, job, seq, info) => this.#deliverAsyncJobProgress(jobId, text, job, seq, info),
 				acknowledge: jobId => {
-					const matchesJob = (entry: AsyncProgressEntry) => entry.jobId === jobId;
+					const managedJobSourceKey = asyncProgressSourceKey({ jobId });
+					const matchesJob = (entry: AsyncProgressEntry) => asyncProgressSourceKey(entry) === managedJobSourceKey;
 					this.yieldQueue.take<AsyncProgressEntry>(ASYNC_PROGRESS_MESSAGE_TYPE, matchesJob);
 					this.yieldQueue.take<AsyncProgressEntry>(ASYNC_PROGRESS_WAKE_QUEUE_KIND, matchesJob);
 				},
@@ -1975,7 +1984,8 @@ export class AgentSession {
 	 */
 	#hasPendingAsyncWake(): boolean {
 		const manager = this.#asyncJobManager;
-		const queuedWake = this.yieldQueue.has(ASYNC_PROGRESS_WAKE_QUEUE_KIND);
+		const queuedWake =
+			this.yieldQueue.has(ASYNC_PROGRESS_WAKE_QUEUE_KIND) || this.yieldQueue.has(LAUNCH_COMPLETION_MESSAGE_TYPE);
 		if (!manager) return queuedWake;
 		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
 		return (
@@ -1992,11 +2002,14 @@ export class AgentSession {
 	}
 
 	/**
-	 * Public view of the pending-async-wake state for run drivers: true while
-	 * owner-scoped async work can still re-wake this session's run.
+	 * Public view for run drivers: true while owner-scoped async work or an active
+	 * process monitor can still deliver output or terminal completion. Active
+	 * monitors belong here, but not in {@link #hasPendingAsyncWake}: a subscription
+	 * with no queued event must keep a subagent alive without preventing its
+	 * current model turn from settling and making room for future delivery.
 	 */
 	hasPendingAsyncWork(): boolean {
-		return this.#hasPendingAsyncWake();
+		return this.#hasPendingAsyncWake() || this.#activeLaunchMonitors.size > 0;
 	}
 
 	/**
@@ -2008,10 +2021,14 @@ export class AgentSession {
 	 * jobs.
 	 */
 	async settleAsyncWork(): Promise<void> {
+		const launchMonitorChanged = this.#launchMonitorStateChanged.promise;
 		const manager = this.#asyncJobManager;
-		if (!manager || !this.#agentId) return;
-		await manager.waitForOwnerJobs(this.#agentId, { excludeSuppressed: true });
-		await manager.drainDeliveries({ filter: { ownerId: this.#agentId } });
+		if (manager && this.#agentId) {
+			await manager.waitForOwnerJobs(this.#agentId, { excludeSuppressed: true });
+			await manager.drainDeliveries({ filter: { ownerId: this.#agentId } });
+		}
+		await this.waitForIdle();
+		if (this.#activeLaunchMonitors.size > 0) await launchMonitorChanged;
 		await this.waitForIdle();
 	}
 
@@ -6433,6 +6450,20 @@ export class AgentSession {
 		// A terminal event observed inside a reset/switch boundary belongs to the
 		// process incarnation that boundary is evicting.
 		if (this.#launchProgressBoundaryDepth > 0) return Promise.resolve();
+		// Ambient monitor output queued while this owner sat idle would be
+		// skipped by the completion-triggered idle flush (its queue registers
+		// with `skipIdleFlush`) and would inject only on a later turn — after
+		// the terminal notification for the process it belongs to. Promote it
+		// to the wake queue, which registers ahead of launch-completion, so the
+		// flush injects the remaining output before the completion. Mirrors the
+		// async-job completion path in #deliverAsyncJobResult.
+		const queuedProgress = this.yieldQueue.take<AsyncProgressEntry>(
+			ASYNC_PROGRESS_MESSAGE_TYPE,
+			entry => entry.source?.type === "process" && entry.source.id === notification.daemon.id,
+		);
+		for (const entry of queuedProgress) {
+			this.yieldQueue.enqueue<AsyncProgressEntry>(ASYNC_PROGRESS_WAKE_QUEUE_KIND, entry);
+		}
 		const delivered = this.yieldQueue.enqueueWithReceipt<SessionLaunchCompletionEntry>(
 			LAUNCH_COMPLETION_MESSAGE_TYPE,
 			{ ...notification, epoch: this.#launchProgressEpoch },
@@ -6473,11 +6504,22 @@ export class AgentSession {
 			suppressedEvents: notification.suppressedEvents || undefined,
 			reminder: notification.reminder,
 		});
+		this.#signalLaunchMonitorChanged();
+	}
+
+	#signalLaunchMonitorChanged(): void {
+		const changed = this.#launchMonitorStateChanged;
+		this.#launchMonitorStateChanged = Promise.withResolvers<void>();
+		changed.resolve();
 	}
 
 	#beginLaunchProgressBoundary(): Disposable {
 		this.#launchProgressBoundaryDepth += 1;
 		this.#launchProgressEpoch += 1;
+		if (this.#activeLaunchMonitors.size > 0) {
+			this.#activeLaunchMonitors.clear();
+			this.#signalLaunchMonitorChanged();
+		}
 		let active = true;
 		return {
 			[Symbol.dispose]: () => {
@@ -6486,6 +6528,22 @@ export class AgentSession {
 				this.#launchProgressBoundaryDepth -= 1;
 			},
 		};
+	}
+
+	setLaunchMonitorActive(
+		monitorId: string,
+		_delivery: AsyncJobProgressDelivery,
+		active: boolean,
+		epoch: number,
+	): void {
+		const wasActive = this.#activeLaunchMonitors.has(monitorId);
+		if (!active || epoch !== this.#launchProgressEpoch) {
+			this.#activeLaunchMonitors.delete(monitorId);
+		} else {
+			this.#activeLaunchMonitors.add(monitorId);
+		}
+		if (wasActive === this.#activeLaunchMonitors.has(monitorId)) return;
+		this.#signalLaunchMonitorChanged();
 	}
 
 	#queueHiddenNextTurnMessage(message: CustomMessage, triggerTurn: boolean): void {
