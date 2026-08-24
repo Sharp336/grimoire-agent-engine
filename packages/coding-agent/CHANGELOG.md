@@ -9,6 +9,7 @@
 - Added `q` shortcut to exit the git TUI
 - Added a third state to the git TUI whitespace toggle (`b`): beyond ignoring whitespace-only line changes, it hides formatting-only changes (indentation, line splits/joins, blank lines) and import-only changes in TypeScript/JavaScript, Rust, and Go
 - Compressed single-child directory chains in the sidebar tree view
+- Added Vertex AI credential support to the Gemini `web_search` provider while preserving OAuth and API key precedence
 
 ### Changed
 
