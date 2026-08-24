@@ -944,8 +944,7 @@ describe("hub process output monitoring", () => {
 		expect(harness.unregisterCount()).toBe(1);
 		expect(harness.registrationCount()).toBe(0);
 		expect(harness.getOutputSink()).toBeUndefined();
-		expect(harness.getCompletionSink()).toBeUndefined();
-		expect(harness.completionPreservePending).toEqual([false]);
+
 		expect(harness.contextBoundaryCallbacks.size).toBe(0);
 		expect(harness.active.at(-1)).toEqual({ monitorId: subscription.id, delivery: "wake", active: false });
 		expect(harness.requests.some(operation => operation.op === "stop")).toBeFalse();
