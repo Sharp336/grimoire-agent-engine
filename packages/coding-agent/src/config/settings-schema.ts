@@ -559,6 +559,22 @@ export const SETTINGS_SCHEMA = {
 			condition: "advisorEnabled",
 		},
 	},
+	"advisor.steerLevel": {
+		type: "enum",
+		values: ["blocker", "concern"] as const,
+		default: "blocker",
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Steer Level",
+			description: "Minimum advisor severity that makes the primary agent read the note and respond.",
+			options: [
+				{ value: "blocker", label: "Blocker", description: "Only blockers force a response. Default." },
+				{ value: "concern", label: "Concern", description: "Concerns and blockers force a response." },
+			],
+			condition: "advisorEnabled",
+		},
+	},
 	"advisor.immuneTurns": {
 		type: "number",
 		default: 3,

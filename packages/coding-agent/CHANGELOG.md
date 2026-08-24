@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `advisor.steerLevel` to choose the minimum advisor severity that makes the primary agent read and respond to advice across in-progress and completed turns; `blocker` remains the default, while `concern` includes concerns and blockers ([#9074](https://github.com/can1357/oh-my-pi/issues/9074)).
+
 ## [18.0.4] - 2026-08-24
 
 ### Added

@@ -105,9 +105,9 @@ The `advise` tool accepts one note and an optional severity:
 
 | Severity        | Delivery                                                                                                                                                             | Intended use                                                                 |
 | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------- |
-| omitted / `nit` | Non-interrupting aside, batched into the primary transcript at the next step boundary.                                                                               | Cleanup, simplification, low-risk edge cases.                                |
-| `concern`       | Interrupting steering message when the delivery constraints below permit it. A late terminal-answer `concern` is preserved as a visible card instead.                | Material risk, likely wrong direction, missing constraint, hallucinated API. |
-| `blocker`       | Interrupting steering message when the delivery constraints below permit it. Unlike a `concern`, a terminal answer alone does not prevent it from triggering a turn. | Continuing would clearly waste work or produce broken output.                |
+| omitted / `nit` | Non-interrupting aside, batched into the primary transcript at the next step boundary. | Cleanup, simplification, low-risk edge cases. |
+| `concern` | Steering message when `advisor.steerLevel` is `concern`; otherwise deferred during in-progress reviews, then routed non-interruptingly or preserved visibly after a terminal answer. | Material risk, likely wrong direction, missing constraint, hallucinated API. |
+| `blocker` | Always meets the steering threshold. Interrupts a live turn or triggers an idle turn when delivery constraints permit. | Continuing would clearly waste work or produce broken output. |
 
 Accepted notes are rendered into the primary transcript as XML-escaped `<advisory>` elements. Named roster advisors add an `advisor` attribute:
 
@@ -135,7 +135,7 @@ So the advisor can steer and resume a run the agent ended on its own **while it 
 
 `advisor.immuneTurns` limits interruption frequency. After the advisor successfully delivers a `concern` or `blocker` through the steering channel, later concerns/blockers are routed as non-interrupting asides until the configured number of primary turns has completed. The default is `3`. `nit` notes are unchanged, and advice raised while user-interrupt auto-resume suppression is active is still preserved instead of restarting a stopped run.
 
-While an advisor update is reviewing work still in progress, `AdviseTool` withholds `nit` and `concern` calls; only a `blocker` may interrupt partial work. The tool also suppresses the same whitespace-normalized note at an equal or lower severity while allowing a real escalation (`nit` → `concern` → `blocker`).
+While an advisor update is reviewing work still in progress, `AdviseTool` defers advice below `advisor.steerLevel` and automatically releases it on the next completed update. The default `blocker` level therefore admits only blockers immediately; `concern` admits both concerns and blockers. Nits remain non-interrupting. The same threshold controls completed-turn delivery: an admitted concern can trigger a new primary turn, while a concern below the threshold is preserved as a visible card after a terminal answer. The tool also suppresses the same whitespace-normalized note at an equal or lower severity while allowing a real escalation (`nit` → `concern` → `blocker`).
 
 ### Emission guard
 
@@ -146,7 +146,7 @@ Each advisor has its own `AdvisorEmissionGuard` (`src/advisor/emission-guard.ts`
 3. **Exact-text dedupe.** Any normalized note already accepted by this advisor in this session is dropped. The FIFO history holds at most 4096 entries.
 4. **Per-update rate limit.** At most one note per advisor model `prompt()` cycle is accepted. Suppressed noise never consumes the budget.
 
-Guard-level suppression is invisible to the model because `AdviseTool` has already returned `Recorded.`. The tool's earlier equal-or-lower-severity duplicate check is intentionally visible as `Duplicate advice ignored.`; in-progress non-blockers return `Recorded.` without routing.
+Guard-level suppression is invisible to the model because `AdviseTool` has already returned `Recorded.`. The tool's earlier equal-or-lower-severity duplicate check is intentionally visible as `Duplicate advice ignored.`; in-progress advice below the steering threshold returns `Deferred` and is queued for the next completed update.
 
 The guard's full state — dedupe history and per-update gate — clears on every advisor reset (compaction, session switch, `/new`), so a re-primed reviewer can re-raise issues it already raised against the rewritten transcript.
 

@@ -158,6 +158,7 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	// they do opt in they get the default tuning rather than the user's local tuning.
 	"advisor.enabled",
 	"advisor.syncBacklog",
+	"advisor.steerLevel",
 	"advisor.immuneTurns",
 	"tier.advisor",
 ];

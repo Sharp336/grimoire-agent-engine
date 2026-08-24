@@ -43,6 +43,12 @@ const mockYieldParameters = type({
 	"type?": "unknown",
 });
 
+const mockStepParameters = type({});
+
+interface MockStepDetails {
+	status: "success";
+}
+
 const ADVISOR_TYPE = "advisor";
 
 interface ParkedHarness {
@@ -148,6 +154,19 @@ describe("AgentSession advisor auto-resume suppression", () => {
 					details,
 				};
 			},
+		};
+	}
+
+	function createMockStepTool(): AgentTool<typeof mockStepParameters, MockStepDetails> {
+		return {
+			name: "fixture_step",
+			label: "Fixture Step",
+			description: "Complete one deterministic fixture step",
+			parameters: mockStepParameters,
+			execute: async () => ({
+				content: [{ type: "text", text: "Fixture step completed." }],
+				details: { status: "success" },
+			}),
 		};
 	}
 
@@ -336,6 +355,94 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		expect(persisted.at(-1)).toContain("Fixture verdict confirmed");
 		expect(advisorMock.calls.length).toBeGreaterThanOrEqual(1);
 		expect(mock.calls.length).toBe(1);
+	});
+
+	it("wakes the primary to respond to a late concern at the concern steering level", async () => {
+		const { session, mock } = await createCompletedAdvisorSession();
+		session.settings.override("advisor.steerLevel", "concern");
+
+		await session.prompt("read five fixture files and answer with exactly one line");
+		await session.waitForIdle();
+		expect(mock.calls).toHaveLength(1);
+
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisor = session.getAdvisorAgent();
+		if (!advisor) throw new Error("Expected advisor agent to be live");
+
+		await advisor.prompt("inspect the completed turn");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(2);
+		expect(JSON.stringify(session.agent.state.messages)).toContain("Fixture verdict confirmed");
+		expect(JSON.stringify(session.agent.state.messages)).toContain("CHANGED VERDICT");
+	});
+
+	it("threads the concern steering level through an in-progress advisor update", async () => {
+		const concern = "The active primary step is using the wrong fixture.";
+		const secondPrimaryCallStarted = Promise.withResolvers<void>();
+		let continuationCalls = 0;
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const primaryMock = createMockModel({
+			responses: [
+				{
+					content: [{ type: "toolCall", name: "fixture_step", arguments: {} }],
+					stopReason: "toolUse",
+				},
+			],
+			handler: () => {
+				continuationCalls++;
+				if (continuationCalls === 1) {
+					secondPrimaryCallStarted.resolve();
+					return { content: ["STALE COMPLETION"], stopReason: "stop", delayMs: 1000 };
+				}
+				return { content: ["CORRECTED AFTER CONCERN"], stopReason: "stop" };
+			},
+		});
+		const advisorMock = createMockModel({
+			responses: [
+				async () => {
+					await secondPrimaryCallStarted.promise;
+					return {
+						content: [{ type: "toolCall", name: "advise", arguments: { note: concern, severity: "concern" } }],
+					};
+				},
+				{ content: [], stopReason: "stop" },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [createMockStepTool()] },
+			streamFn: primaryMock.stream,
+		});
+		const settings = Settings.isolated({
+			"advisor.steerLevel": "concern",
+			"compaction.enabled": false,
+			"retry.enabled": false,
+		});
+		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorStreamFn: advisorMock.stream,
+		});
+
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		await session.prompt("complete the fixture step");
+		await session.waitForIdle();
+		session.setAdvisorEnabled(false);
+
+		expect(advisorMock.calls.length).toBeGreaterThanOrEqual(1);
+		expect(JSON.stringify(advisorMock.calls[0]?.context.messages)).toContain("[in progress — more steps follow]");
+		expect(primaryMock.calls.length).toBeGreaterThanOrEqual(3);
+		expect(JSON.stringify(session.agent.state.messages)).toContain(concern);
+		expect(JSON.stringify(session.agent.state.messages)).toContain("CORRECTED AFTER CONCERN");
 	});
 
 	it("waits for preserved advisor card hooks and persistence before reporting catch-up", async () => {
