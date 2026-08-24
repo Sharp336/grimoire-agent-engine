@@ -371,7 +371,7 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		inlineHint: "[focus]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
-			const focus = command.text.slice(`/${command.name}`.length).trim();
+			const focus = command.args.trim();
 			const question = prompt.render(sessionUpdatePrompt, { focus }).trim();
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleBtwCommand(question);

@@ -64,10 +64,10 @@ describe("/updates slash command", () => {
 		expect(harness.handleBtwCommand).toHaveBeenCalledTimes(1);
 	});
 
-	it("appends an optional focus to the update question", async () => {
+	it("accepts a colon-separated optional focus", async () => {
 		const harness = createRuntime();
 
-		const handled = await executeBuiltinSlashCommand("/updates test failures", harness.runtime);
+		const handled = await executeBuiltinSlashCommand("/updates:test failures", harness.runtime);
 
 		expect(handled).toBe(true);
 		expect(harness.handleBtwCommand).toHaveBeenCalledWith(expect.stringContaining("test failures"));
