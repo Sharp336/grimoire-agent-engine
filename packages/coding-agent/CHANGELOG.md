@@ -458,6 +458,9 @@
 ### Changed
 
 - Updated the default model for XAI_API_KEY (xai) and SuperGrok OAuth (xai-oauth) to grok-4.6. Automatic model selection continues to prefer paid xai/grok-4.6 when only XAI_API_KEY is set, with xai-oauth/grok-4.6 still available explicitly.
+### Added
+
+- Final assistant replies now render in a visually distinct bubble: the last message of a completed turn (no tool timeline, `stopReason: stop`) gets a `finalAnswerBg`/`finalAnswerText` themed background with an accent marker, and user messages get a prompt indicator. Theme tokens are optional — absent keys fall back to `userMessageBg`/`text` — so existing themes work unchanged ([#8155](https://github.com/can1357/oh-my-pi/pull/8155)).
 
 ### Fixed
 
