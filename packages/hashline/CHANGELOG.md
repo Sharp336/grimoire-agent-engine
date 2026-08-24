@@ -18,6 +18,10 @@
 
 - Fixed an issue where single-line replacements echoing attributes or decorators (such as `#[napi]` or `@Injectable()`) could lead to silently duplicated annotations.
 - Increased the default snapshot-store path capacity from 30 to 256 to prevent early tags in wide sessions from aging out and triggering misleading "hash is not from this session" errors.
+### Added
+
+- `buildCompactDiffPreview` now reports per-hunk line-shift deltas (`renumbers: RenumberDelta[]` on `CompactDiffPreview`), keyed to original line numbering so consumers can compose them for follow-up edits below or between hunks ([#8603](https://github.com/can1357/oh-my-pi/issues/8603)).
+- Patch results surface `replacementEchoes: ReplacementEcho[]` on no-drift applies: the original first/last line of each concrete `PUT N.=M` range. Drift-recovery paths emit none.
 
 ## [17.3.3] - 2026-08-14
 
