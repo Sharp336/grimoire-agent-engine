@@ -21,6 +21,12 @@ import type { ToolSession } from "../../tools";
 import { routeWriteThroughBridge } from "../../tools/acp-bridge";
 import { assertEditableFile } from "../../tools/auto-generated-guard";
 import {
+	deleteFileWithFallback,
+	hasFileWriteFallback,
+	isPermissionDeniedError,
+	writeFileWithFallback,
+} from "../../tools/file-write-fallback";
+import {
 	invalidateFsScanAfterDelete,
 	invalidateFsScanAfterRename,
 	invalidateFsScanAfterWrite,
@@ -29,6 +35,7 @@ import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd } from "../../tools/path-utils";
 import { enforcePlanModeWrite, resolvePlanPath } from "../../tools/plan-mode-guard";
 import { ToolError } from "../../tools/tool-errors";
+import type { AppliedEditObserver } from "../blackbox";
 import {
 	ApplyPatchError,
 	type DiffHunk,
@@ -111,6 +118,26 @@ export interface ApplyPatchOptions {
 // Default File System
 // ═══════════════════════════════════════════════════════════════════════════
 
+/**
+ * Create a patch target's parent directory, tolerating a permission denial when a
+ * file-write fallback is registered.
+ *
+ * `apply_patch` mkdirs the parent before writing, so under a sandbox that denies
+ * the out-of-tree path this throws before the write — and therefore before
+ * {@link writeFileWithFallback} — is ever reached, leaving the fallback unable to
+ * broker a `create` or a rename-move into a new directory. Swallowing only a
+ * permission denial, and only with a handler installed, hands control to the write,
+ * which reports the denial through the seam. Without a handler the error propagates
+ * exactly as before.
+ */
+async function mkdirAllowingFallback(dir: string): Promise<void> {
+	try {
+		await fs.promises.mkdir(dir, { recursive: true });
+	} catch (error) {
+		if (!hasFileWriteFallback() || !isPermissionDeniedError(error)) throw error;
+	}
+}
+
 /** Default filesystem implementation using Bun APIs */
 export const defaultFileSystem: FileSystem = {
 	async exists(path: string): Promise<boolean> {
@@ -123,13 +150,13 @@ export const defaultFileSystem: FileSystem = {
 		return fs.promises.readFile(path);
 	},
 	async write(path: string, content: string): Promise<void> {
-		await Bun.write(path, await serializeEditFileText(path, path, content));
+		await writeFileWithFallback(path, await serializeEditFileText(path, path, content));
 	},
 	async delete(path: string): Promise<void> {
-		await fs.promises.unlink(path);
+		await deleteFileWithFallback(path);
 	},
 	async mkdir(path: string): Promise<void> {
-		await fs.promises.mkdir(path, { recursive: true });
+		await mkdirAllowingFallback(path);
 	},
 };
 
@@ -1692,6 +1719,8 @@ export interface ExecutePatchSingleOptions {
 	allowCreateOverwrite?: boolean;
 	writethrough: WritethroughCallback;
 	beginDeferredDiagnosticsForPath: (path: string) => WritethroughDeferredHandle;
+	/** Observes a committed content transition before result snapshots are pruned. */
+	onApplied?: AppliedEditObserver;
 }
 
 class LspFileSystem implements FileSystem {
@@ -1753,7 +1782,7 @@ class LspFileSystem implements FileSystem {
 	}
 
 	async delete(path: string): Promise<void> {
-		await this.#getFile(path).unlink();
+		await deleteFileWithFallback(path, this.#getFile(path));
 		if (this.session.enableLsp ?? true) {
 			await notifyWorkspaceWatchedFiles(
 				this.session.cwd,
@@ -1764,7 +1793,7 @@ class LspFileSystem implements FileSystem {
 	}
 
 	async mkdir(path: string): Promise<void> {
-		await fs.promises.mkdir(path, { recursive: true });
+		await mkdirAllowingFallback(path);
 	}
 
 	getDiagnostics(): FileDiagnosticsResult | undefined {
@@ -1807,6 +1836,7 @@ export async function executePatchSingle(
 		allowCreateOverwrite,
 		writethrough,
 		beginDeferredDiagnosticsForPath,
+		onApplied,
 	} = options;
 	const { op: rawOp, rename, diff } = params;
 
@@ -1935,6 +1965,13 @@ export async function executePatchSingle(
 
 	const oldText = result.change.type !== "create" ? result.change.oldContent : undefined;
 	const newText = result.change.type !== "delete" ? result.change.newContent : undefined;
+	if (oldText !== undefined && newText !== undefined) {
+		await onApplied?.({
+			path: result.change.newPath ?? resolvedPath,
+			prev: oldText,
+			next: newText,
+		});
+	}
 
 	return {
 		content: [{ type: "text", text: resultText }],
