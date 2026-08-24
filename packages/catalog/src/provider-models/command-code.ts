@@ -1,5 +1,6 @@
 import { fetchOpenAICompatibleModels } from "../discovery/openai-compatible";
 import { getBundledModelReferenceIndex } from "../identity/bundled";
+import { isAnthropicNamespacedModelId, isClaudeModelId } from "../identity/family";
 import { resolveModelReference } from "../identity/reference";
 import type { ModelManagerOptions } from "../model-manager";
 import type { Api, ModelSpec } from "../types";
@@ -17,20 +18,15 @@ export function resolveCommandCodeBaseUrl(api: Api, baseUrl?: string): string {
 	return api === "anthropic-messages" ? basePath : `${basePath}/v1`;
 }
 
-function isAnthropicModelId(id: string): boolean {
-	const normalized = id.toLowerCase();
-	return normalized.includes("claude") || normalized.includes("anthropic");
-}
-
 /**
  * Command Code exposes one model list but two wire protocols:
- * Anthropic models use `/provider/v1/messages`, while every other model uses
- * `/provider/v1/chat/completions`. Sending a model to the wrong endpoint is a
- * hard 400, so routing is resolved per discovered model.
+ * Anthropic model identities use `/provider/v1/messages`, while every other
+ * model uses `/provider/v1/chat/completions`. Routing must be based on the
+ * discovered model id itself, not whichever reseller reference wins metadata
+ * lookup, because the same GPT/Gemini id can appear on Anthropic-shaped gateways.
  */
 export function resolveCommandCodeApi(modelId: string): Api {
-	const reference = resolveModelReference(modelId, getBundledModelReferenceIndex());
-	return reference?.api === "anthropic-messages" || isAnthropicModelId(modelId)
+	return isClaudeModelId(modelId) || isAnthropicNamespacedModelId(modelId)
 		? "anthropic-messages"
 		: "openai-completions";
 }
@@ -45,11 +41,15 @@ function mapCommandCodeModel(defaults: ModelSpec<Api>, baseUrl?: string): ModelS
 		api,
 		provider: "command-code",
 		baseUrl: resolveCommandCodeBaseUrl(api, baseUrl),
-		reasoning: sameWireReference?.reasoning ?? defaults.reasoning,
+		// Reasoning is an intrinsic model capability; buildModel derives the
+		// Command Code transport's wire controls from the new API/id pair.
+		reasoning: reference?.reasoning ?? defaults.reasoning,
 		input: reference?.input ?? defaults.input,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: reference?.contextWindow ?? defaults.contextWindow,
 		maxTokens: reference?.maxTokens ?? defaults.maxTokens,
+		// Explicit thinking metadata may encode transport-specific fields, so
+		// only copy it when the reference already uses the same wire API.
 		...(sameWireReference?.thinking ? { thinking: sameWireReference.thinking } : {}),
 	};
 }
