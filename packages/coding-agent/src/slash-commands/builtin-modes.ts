@@ -6,7 +6,7 @@ import {
 	getModelMatchPreferences,
 	resolveCliModel,
 } from "../config/model-resolver";
-import type { SettingPath } from "../config/settings";
+import type { SettingPath, Settings } from "../config/settings";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
@@ -59,6 +59,32 @@ function formatFastModeStatus(session: AgentSession): string {
 	if (!model || !serviceTierFamily(model)) return "off";
 	const state = session.fastModeState();
 	return state === "active" ? "on" : state;
+}
+
+/** `/extended-context status` label for the premium long-context window setting. */
+function formatExtendedContextStatus(settings: Settings): string {
+	return settings.get("extendedContext") ? "on" : "off";
+}
+
+/** Applies an `/extended-context` argument and returns its operator feedback. */
+function applyExtendedContextCommand(settings: Settings, args: string): string | undefined {
+	const arg = args.trim().toLowerCase();
+	const current = settings.get("extendedContext");
+	if (!arg || arg === "toggle") {
+		const enabled = !current;
+		settings.set("extendedContext", enabled);
+		return `Extended context ${enabled ? "enabled" : "disabled"}.`;
+	}
+	if (arg === "on") {
+		settings.set("extendedContext", true);
+		return "Extended context enabled.";
+	}
+	if (arg === "off") {
+		settings.set("extendedContext", false);
+		return "Extended context disabled.";
+	}
+	if (arg === "status") return `Extended context is ${formatExtendedContextStatus(settings)}.`;
+	return undefined;
 }
 
 /** Detailed, session-effective `/computer status` diagnostics. */
@@ -159,6 +185,7 @@ export function formatTokenCount(value: number): string {
 export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "security",
+		icon: "shield",
 		description: "Plan, run, inspect, import, and compare OMP-native security scans",
 		allowArgs: true,
 		acpInputHint: "<plan|scan|status|cancel|scans|show|import|export|validate|compare|disposition>",
@@ -179,6 +206,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "settings",
+		icon: "settings",
 		description: "Open settings menu",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showSettingsSelector();
@@ -188,6 +216,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "setup",
 		aliases: ["providers"],
+		icon: "gear",
 		description: "Open provider setup",
 		allowArgs: true,
 		subcommands: [{ name: "providers", description: "Configure sign-in and web search providers" }],
@@ -204,6 +233,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "plan",
+		icon: "plan",
 		description: "Toggle plan mode (agent plans before executing)",
 		inlineHint: "[prompt]",
 		allowArgs: true,
@@ -224,6 +254,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "plan-review",
+		icon: "plan",
 		description: "Re-open the plan review for the latest plan (plan mode only)",
 		getTuiAutocompleteDescription: runtime =>
 			runtime.ctx.planModeEnabled ? "Plan review: available" : "Plan review: plan mode inactive",
@@ -234,6 +265,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "vibe",
+		icon: "wave",
 		description: "Toggle vibe mode (direct persistent fast/good worker sessions; read-only toolset)",
 		inlineHint: "[prompt]",
 		allowArgs: true,
@@ -251,6 +283,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "goal",
+		icon: "goal",
 		description: "Toggle goal mode (persistent autonomous objective for this session)",
 		subcommands: [
 			{ name: "set", description: "Set or replace the goal", usage: "<objective>" },
@@ -276,6 +309,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "guided-goal",
+		icon: "compass",
 		description: "Have the agent interview you in chat, then set up goal mode",
 		inlineHint: "[rough objective]",
 		allowArgs: true,
@@ -287,6 +321,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "loop",
+		icon: "loop",
 		description:
 			"Toggle loop mode. While enabled, the next prompt you send re-submits after every yield. Esc cancels the current iteration; /loop again to disable.",
 		inlineHint: "[count|duration] [prompt]",
@@ -308,6 +343,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "queue",
+		icon: "inbox",
 		description: "Queue a message for after the agent yields",
 		inlineHint: "<message>",
 		allowArgs: true,
@@ -318,6 +354,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "model",
 		aliases: ["models"],
+		icon: "model",
 		description: "Switch model for this session",
 		acpDescription: "Show current model selection",
 		getTuiAutocompleteDescription: runtime => {
@@ -361,6 +398,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "switch",
+		icon: "swap",
 		description: "Switch model for this session (same as alt+p)",
 		getTuiAutocompleteDescription: runtime => {
 			const model = runtime.ctx.session.model;
@@ -373,6 +411,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "fast",
+		icon: "fast",
 		description: "Toggle priority service tier (OpenAI service_tier=priority, Anthropic speed=fast)",
 		acpDescription: "Toggle fast mode",
 		acpInputHint: "[on|off|status]",
@@ -441,7 +480,35 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "extended-context",
+		icon: "expand",
+		description: "Toggle premium long-context windows",
+		acpDescription: "Toggle extended context",
+		acpInputHint: "[on|off|status]",
+		subcommands: [
+			{ name: "on", description: "Enable premium long-context windows" },
+			{ name: "off", description: "Use standard-pricing context windows" },
+			{ name: "status", description: "Show extended context status" },
+		],
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime =>
+			`Extended context: ${formatExtendedContextStatus(runtime.ctx.settings)}`,
+		handle: async (command, runtime) => {
+			const output = applyExtendedContextCommand(runtime.settings, command.args);
+			if (!output) return usage("Usage: /extended-context [on|off|status]", runtime);
+			await runtime.output(output);
+			return commandConsumed();
+		},
+		handleTui: (command, runtime) => {
+			const output = applyExtendedContextCommand(runtime.ctx.settings, command.args);
+			refreshStatusLine(runtime.ctx);
+			runtime.ctx.showStatus(output ?? "Usage: /extended-context [on|off|status]");
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "computer",
+		icon: "computer",
 		description: "Toggle the native computer-use tool for this session",
 		acpDescription: "Toggle computer use",
 		acpInputHint: "[on|off|status]",
@@ -486,6 +553,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "vision",
+		icon: "eye",
 		description: "Control the inspect_image vision-delegation tool for this session",
 		acpDescription: "Toggle vision delegation",
 		acpInputHint: "[on|off|auto|status]",
@@ -527,6 +595,7 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "prewalk",
+		icon: "prewalk",
 		description: "Switch to a fast/cheap model at the next action (works even without --prewalk)",
 		acpDescription: "Prewalk at the next action",
 		handle: async (_command, runtime) => {

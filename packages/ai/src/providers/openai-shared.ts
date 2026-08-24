@@ -25,12 +25,14 @@ import {
 	$env,
 	classifyJsonPrefix,
 	extractHttpStatusFromError,
+	isRecord,
 	logger,
 	parseImageMetadata,
 	parseStreamingJson,
 	parseStreamingJsonThrottled,
 	stringifyJson,
 	structuredCloneJSON,
+	USER_AGENT,
 } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import {
@@ -314,6 +316,10 @@ export function resolveOpenAIRequestSetup(
 
 	if (options.defaultBaseUrl !== undefined) {
 		baseUrl = baseUrl ?? ($env.OPENAI_BASE_URL?.trim() || options.defaultBaseUrl);
+	}
+	// Attribute xAI traffic as omp unless a User-Agent is already set.
+	if (model.provider === "xai" || model.provider === "xai-oauth") {
+		setHeaderIfAbsent(headers, "User-Agent", USER_AGENT);
 	}
 	const requestHeaders = { ...headers };
 	// A keyless provider (`auth: none` in models.yml) resolves to the `N/A`
@@ -739,17 +745,27 @@ export interface OpenAIExtraBodyOptions {
 }
 
 /**
- * Merge a compat/options `extraBody` blob into the request params. When
- * `dropThinkingWhenReasoningEffort` is set and `reasoning_effort` is present,
- * delete the conflicting `thinking` toggle (Fireworks rejects both together).
+ * Merge a compat/options `extraBody` blob into the request params. An encoded
+ * Venice disable signal takes precedence over static `venice_parameters`, so
+ * an explicit per-turn Thinking Off selection cannot be re-enabled by config.
+ * When `dropThinkingWhenReasoningEffort` is set and `reasoning_effort` is
+ * present, delete the conflicting `thinking` toggle (Fireworks rejects both).
  */
 export function applyOpenAIExtraBody<P extends object>(
-	params: P,
+	params: P & { venice_parameters?: Record<string, unknown> },
 	extraBody: Record<string, unknown> | undefined,
 	options?: OpenAIExtraBodyOptions,
 ): void {
 	if (!extraBody) return;
+	const encodedVeniceParameters = params.venice_parameters;
 	Object.assign(params, extraBody);
+	if (encodedVeniceParameters?.disable_thinking === true) {
+		const configuredVeniceParameters = extraBody.venice_parameters;
+		params.venice_parameters = {
+			...(isRecord(configuredVeniceParameters) ? configuredVeniceParameters : {}),
+			...encodedVeniceParameters,
+		};
+	}
 	if (options?.dropThinkingWhenReasoningEffort) {
 		const shaped = params as { reasoning_effort?: unknown; thinking?: unknown };
 		if (shaped.reasoning_effort !== undefined) {
@@ -760,10 +776,10 @@ export function applyOpenAIExtraBody<P extends object>(
 
 /**
  * Chat Completions streaming request body shaped by the OpenAI-family providers.
- * Extends the vendored SDK params with the compat dialect fields pi-ai emits
- * (binary `thinking`, Qwen `enable_thinking`/`chat_template_kwargs`, nested
- * `reasoning`, gateway `provider`/`providerOptions`, sampling extras). Lives in
- * the shared module beside the request-shaping helpers that mutate it.
+ * (binary `thinking`, Qwen `enable_thinking`/`chat_template_kwargs`, Venice
+ * `venice_parameters`, nested `reasoning`, gateway `provider`/`providerOptions`,
+ * sampling extras). Lives in the shared module beside the request-shaping
+ * helpers that mutate it.
  */
 export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, "reasoning_effort" | "service_tier"> & {
 	top_k?: number;
@@ -772,8 +788,9 @@ export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, 
 	thinking?: { type: "enabled" | "disabled"; effort?: string; keep?: "all" };
 	enable_thinking?: boolean;
 	preserve_thinking?: boolean;
-	chat_template_kwargs?: { enable_thinking?: boolean; preserve_thinking?: boolean };
+	chat_template_kwargs?: { enable_thinking?: boolean; preserve_thinking?: boolean; reasoning_effort?: string };
 	reasoning?: { effort?: string } | { enabled: false };
+	venice_parameters?: { disable_thinking?: boolean; [key: string]: unknown };
 	reasoning_effort?: string | null;
 	service_tier?: ServiceTier;
 	tool_stream?: boolean;
@@ -866,6 +883,29 @@ function isImplicitDisableWhenNotRequested(disableMode: OpenAIReasoningDisableMo
 		disableMode === "zai-thinking-disabled" ||
 		disableMode === "qwen-enable-thinking-false" ||
 		disableMode === "qwen-template-false"
+	);
+}
+
+/**
+ * Whether a redundant `tool_choice: "auto"` should be dropped to keep
+ * reasoning alive. Hosts with `disableReasoningOnToolChoice` (DeepSeek family
+ * on e.g. Fireworks) silently turn reasoning off whenever any `tool_choice`
+ * is present. "auto" is already the provider default, so omitting it is
+ * wire-neutral for tool selection; forced and "none" choices are semantic and
+ * still win over reasoning (#1207).
+ */
+export function shouldDropAutoToolChoiceForReasoning(
+	model: Pick<Model, "reasoning">,
+	compat: { disableReasoningOnToolChoice: boolean },
+	toolChoice: unknown,
+	options: { reasoning?: string; disableReasoning?: boolean } | undefined,
+): boolean {
+	return (
+		toolChoice === "auto" &&
+		compat.disableReasoningOnToolChoice &&
+		Boolean(model.reasoning) &&
+		options?.reasoning !== undefined &&
+		!options.disableReasoning
 	);
 }
 
@@ -1001,6 +1041,9 @@ function encodeChatCompletionsDisabledReasoning(
 				enabled: false,
 			};
 			break;
+		case "venice-disable-thinking":
+			params.venice_parameters = { ...params.venice_parameters, disable_thinking: true };
+			break;
 		default:
 			delete params.reasoning;
 			break;
@@ -1074,12 +1117,34 @@ export function applyChatCompletionsCompatPolicy(params: OpenAICompletionsParams
 				break;
 			case "qwen-enable-thinking-false":
 				params.enable_thinking = true;
+				// Qwen 3.8+ templates steer thinking depth via the
+				// `reasoning_effort` kwarg (low/medium/xhigh, template default
+				// xhigh) — without it every effort selection lands on xhigh.
+				// Twin emission mirrors `preserve_thinking` above: newer
+				// llama.cpp builds map the top-level OpenAI field into the
+				// template, older builds and Alibaba-style local servers read
+				// only the kwargs copy. The `qwen-chat-template` dialect (NIM,
+				// vLLM/SGLang) rides kwargs alone — NIM's request schema
+				// rejects unknown top-level fields (#2299).
+				if (policy.compat.qwenTemplateReasoningEffort && reasoning.wireEffort !== undefined) {
+					params.reasoning_effort = reasoning.wireEffort;
+					params.chat_template_kwargs = {
+						...params.chat_template_kwargs,
+						reasoning_effort: reasoning.wireEffort,
+					};
+				}
 				break;
 			case "qwen-template-false":
 				// Spread so the `preserve_thinking` kwarg hoisted above
 				// survives the merge — a bare `{ enable_thinking: true }`
 				// would clobber it.
-				params.chat_template_kwargs = { ...params.chat_template_kwargs, enable_thinking: true };
+				params.chat_template_kwargs = {
+					...params.chat_template_kwargs,
+					enable_thinking: true,
+					...(policy.compat.qwenTemplateReasoningEffort && reasoning.wireEffort !== undefined
+						? { reasoning_effort: reasoning.wireEffort }
+						: {}),
+				};
 				break;
 			case "openrouter-enabled-false":
 				if (reasoning.wireEffort !== undefined) {
@@ -1525,6 +1590,77 @@ export function repairOrphanResponsesToolCalls(input: ResponseInput): ResponseIn
 	return repaired;
 }
 
+type ResponsesBatchItemKind = "call" | "output" | "assistant-message" | "other";
+
+/** Classify a Responses input item for tool-call/output batch normalization. */
+function classifyResponsesBatchItem(item: object): ResponsesBatchItemKind {
+	const type = "type" in item ? item.type : undefined;
+	if (responsesToolCallKind(type) !== undefined) return "call";
+	if (responsesToolOutputKind(type) !== undefined) return "output";
+	const role = "role" in item ? item.role : undefined;
+	if (type === "message" && role === "assistant") return "assistant-message";
+	return "other";
+}
+
+/**
+ * Relocate assistant `message` items wedged inside a tool-call → tool-output
+ * batch to before the batch, yielding canonical `message(s) → calls → outputs`
+ * order. Idempotent; returns the same array reference when nothing moves.
+ *
+ * OpenAI's Responses API pairs tool outputs by `call_id` and tolerates any item
+ * order, but stricter gateways (notably opencode-go's "Console Go") reject a
+ * shape where an assistant message interrupts a `function_call` →
+ * `function_call_output` run, 400ing with `No tool output found for tool call …`
+ * (naming a random call of the batch on each retry). This arises whenever a
+ * model streams a trailing text / demoted-thinking block *after* its tool calls:
+ * the block-encode path preserves stream order, emitting the message between the
+ * calls and the outputs appended afterward. Moving the already-model-owned
+ * message ahead of its call batch keeps content identical while satisfying the
+ * strict validator. See #8789.
+ */
+export function hoistInterleavedResponsesToolBatchMessages<T extends object>(items: readonly T[]): T[] {
+	const moved = new Set<number>();
+	const insertBefore = new Map<number, number[]>();
+	for (let index = 0; index < items.length; index++) {
+		if (classifyResponsesBatchItem(items[index]) !== "output") continue;
+		// Only anchor on the first output of a run.
+		if (index > 0 && classifyResponsesBatchItem(items[index - 1]) === "output") continue;
+		// Walk back over the batch body (calls interleaved with assistant messages).
+		let start = index;
+		let sawCall = false;
+		const messageIndexes: number[] = [];
+		while (start > 0) {
+			const kind = classifyResponsesBatchItem(items[start - 1]);
+			if (kind === "call") {
+				sawCall = true;
+			} else if (kind === "assistant-message") {
+				messageIndexes.push(start - 1);
+			} else {
+				break;
+			}
+			start -= 1;
+		}
+		// Nothing to hoist unless a message actually sits among the calls.
+		if (!sawCall || messageIndexes.length === 0) continue;
+		messageIndexes.reverse();
+		const target = insertBefore.get(start) ?? [];
+		for (const messageIndex of messageIndexes) {
+			moved.add(messageIndex);
+			target.push(messageIndex);
+		}
+		insertBefore.set(start, target);
+	}
+	if (moved.size === 0) return items.slice();
+	const result: T[] = [];
+	for (let index = 0; index < items.length; index++) {
+		const pending = insertBefore.get(index);
+		if (pending) for (const messageIndex of pending) result.push(items[messageIndex]);
+		if (moved.has(index)) continue;
+		result.push(items[index]);
+	}
+	return result;
+}
+
 /**
  * Some Responses backends (notably GitHub Copilot) reject the OpenAI image
  * `detail: "original"` value with a 400. When the model does not advertise
@@ -1537,6 +1673,18 @@ function clampResponsesImageDetail(
 ): ResponseInputImage["detail"] {
 	const resolved = detail ?? "auto";
 	return resolved === "original" && !supportsImageDetailOriginal ? "auto" : resolved;
+}
+
+function convertResponsesInputImage(image: ImageContent, supportsImageDetailOriginal: boolean): ResponseInputImage {
+	const detail = clampResponsesImageDetail(image.detail, supportsImageDetailOriginal);
+	if (image.providerFile?.provider === "openai" && image.providerFile.id) {
+		return { type: "input_image", detail, file_id: image.providerFile.id };
+	}
+	return {
+		type: "input_image",
+		detail,
+		image_url: image.url ?? `data:${image.mimeType};base64,${image.data}`,
+	};
 }
 
 export function convertResponsesInputContent(
@@ -1568,11 +1716,7 @@ export function convertResponsesInputContent(
 		} satisfies ResponseInputText);
 	}
 	for (const item of imageBlocks) {
-		normalizedContent.push({
-			type: "input_image",
-			detail: clampResponsesImageDetail(item.detail, supportsImageDetailOriginal),
-			image_url: `data:${item.mimeType};base64,${item.data}`,
-		} satisfies ResponseInputImage);
+		normalizedContent.push(convertResponsesInputImage(item, supportsImageDetailOriginal));
 	}
 	if (omittedImages) {
 		normalizedContent.push({
@@ -1926,7 +2070,8 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 		msgIndex++;
 	}
 
-	const withRepairedOutputs = options.repairOrphanOutputs ? repairOrphanResponsesToolOutputs(messages) : messages;
+	const hoisted = hoistInterleavedResponsesToolBatchMessages(messages);
+	const withRepairedOutputs = options.repairOrphanOutputs ? repairOrphanResponsesToolOutputs(hoisted) : hoisted;
 	const withRepairedCalls = repairOrphanResponsesToolCalls(withRepairedOutputs);
 	return stripUnpairedOpenAIResponsesComputerReasoningIdsForReplay(withRepairedCalls);
 }
@@ -2246,11 +2391,7 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	];
 	for (const block of toolResult.content) {
 		if (block.type === "image") {
-			contentParts.push({
-				type: "input_image",
-				detail: clampResponsesImageDetail(block.detail, supportsImageDetailOriginal),
-				image_url: `data:${block.mimeType};base64,${block.data}`,
-			} satisfies ResponseInputImage);
+			contentParts.push(convertResponsesInputImage(block, supportsImageDetailOriginal));
 		}
 	}
 	const imageMessage = { role: "user", content: contentParts } satisfies ResponseInput[number];
@@ -2270,6 +2411,17 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
  * each decoder's existing behavior byte-for-byte.
  */
 type ResponsesToolCallBlock = ToolCall & { [kStreamingPartialJson]: string; [kStreamingLastParseLen]?: number };
+
+function ensureReasoningSummaryPart(
+	item: ResponseReasoningItem,
+	summaryIndex: number,
+): ResponseReasoningItem["summary"][number] {
+	item.summary = item.summary || [];
+	while (item.summary.length <= summaryIndex) {
+		item.summary.push({ type: "summary_text", text: "" });
+	}
+	return item.summary[summaryIndex]!;
+}
 
 export function appendReasoningSummaryPart(
 	item: ResponseReasoningItem,
@@ -2358,13 +2510,42 @@ export function appendReasoningSummaryTextDelta(
 	stream: AssistantMessageEventStream,
 	output: AssistantMessage,
 	contentIndex: number,
+	summaryIndex = 0,
 ): void {
-	item.summary = item.summary || [];
-	const lastPart = item.summary[item.summary.length - 1];
-	if (!lastPart) return;
+	const part = ensureReasoningSummaryPart(item, summaryIndex);
 	block.thinking += delta;
-	lastPart.text += delta;
+	part.text += delta;
 	stream.push({ type: "thinking_delta", contentIndex, delta, partial: output });
+}
+
+/**
+ * Applies a completed reasoning-summary snapshot, including providers that omit
+ * the preceding summary-part event.
+ */
+export function applyReasoningSummaryTextDone(
+	item: ResponseReasoningItem,
+	block: ThinkingContent,
+	text: string,
+	summaryIndex: number,
+	stream: AssistantMessageEventStream,
+	output: AssistantMessage,
+	contentIndex: number,
+): void {
+	const part = ensureReasoningSummaryPart(item, summaryIndex);
+	const previous = part.text;
+	part.text = text;
+	if (!text || text === previous) return;
+	if (!block.thinking) {
+		block.thinking = text;
+		stream.push({ type: "thinking_delta", contentIndex, delta: text, partial: output });
+		return;
+	}
+	if (text.startsWith(block.thinking)) {
+		const delta = text.slice(block.thinking.length);
+		if (!delta) return;
+		block.thinking += delta;
+		stream.push({ type: "thinking_delta", contentIndex, delta, partial: output });
+	}
 }
 
 export function appendReasoningSummaryPartDone(
@@ -2899,6 +3080,20 @@ export async function processResponsesStream<TApi extends Api>(
 					entry.item,
 					entry.block,
 					event.delta,
+					stream,
+					output,
+					contentIndexOf(entry.block),
+					event.summary_index,
+				);
+			}
+		} else if (event.type === "response.reasoning_summary_text.done") {
+			const entry = lookupOpenItem(event);
+			if (entry?.item.type === "reasoning" && entry.block.type === "thinking") {
+				applyReasoningSummaryTextDone(
+					entry.item,
+					entry.block,
+					event.text,
+					event.summary_index,
 					stream,
 					output,
 					contentIndexOf(entry.block),
@@ -3600,6 +3795,17 @@ const ITEM_LIFECYCLE_EXCLUDE_MAP = {
 };
 
 /**
+ * Replay sanitization strips output item IDs from message/function/custom
+ * assistant items. A live transcript rebuilt from the corresponding agent
+ * message may still retain that ID; it is output-only identity, while call_id
+ * remains the semantic tool/result pairing key.
+ */
+const REPLAY_SANITIZED_ITEM_EXCLUDE_MAP = {
+	status: true,
+	id: true,
+};
+
+/**
  * Strict-prefix delta for stateful `previous_response_id` chaining (used by the
  * platform Responses provider and the Codex provider on both transports):
  * returns the input items the current request appends beyond the previous
@@ -3626,7 +3832,12 @@ export function buildResponsesDeltaInput<TItem extends ResponseInputItem | Input
 	for (const series of [previous.input, previousResponseItems]) {
 		if (!series) continue;
 		for (const item of series) {
-			if (deepEqualsWithout(item, current.input[index], ITEM_LIFECYCLE_EXCLUDE_MAP)) {
+			const type = item.type;
+			const omitKeys =
+				type === "message" || type === "function_call" || type === "custom_tool_call"
+					? REPLAY_SANITIZED_ITEM_EXCLUDE_MAP
+					: ITEM_LIFECYCLE_EXCLUDE_MAP;
+			if (deepEqualsWithout(item, current.input[index], omitKeys)) {
 				index++;
 			} else {
 				return null;
