@@ -20,7 +20,7 @@ import { loadImageAttachmentInput, webpExclusionForModel } from "../utils/image-
 import type { ToolSession } from ".";
 import {
 	buildTextResult,
-	GITHUB_HOST,
+	defaultGhHost,
 	ghApiHostArgs,
 	normalizeOptionalString,
 	parseRepoRef,
@@ -294,7 +294,9 @@ async function executeFileRead(
 		throw new ToolError(`GitHub path '${filePath}' is not a file.`);
 	}
 
-	const fallbackSourceUrl = `https://${ref.host ?? GITHUB_HOST}/${ref.slug}/blob/${encodeURIComponent(branch ?? "HEAD")}/${endpointPath}`;
+	// A host-less ref went to gh's default host, so the link has to match it.
+	const fallbackHost = ref.host ?? defaultGhHost();
+	const fallbackSourceUrl = `https://${fallbackHost}/${ref.slug}/blob/${encodeURIComponent(branch ?? "HEAD")}/${endpointPath}`;
 	const sourceUrl = response.html_url || fallbackSourceUrl;
 	if (response.encoding !== "base64" || typeof response.content !== "string") {
 		const size =

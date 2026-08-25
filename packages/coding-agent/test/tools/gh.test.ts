@@ -1724,6 +1724,37 @@ describe("github tool on a GitHub Enterprise host", () => {
 		);
 	});
 
+	it("keeps github.com on the checkout's identity when GH_HOST names another host", async () => {
+		process.env.GH_HOST = "ghe.example.com";
+		// Stripping the host here would hand `gh` a bare ref and send a
+		// github.com checkout's lookups to the enterprise instance.
+		vi.spyOn(git.github, "text").mockResolvedValue("https://github.com/acme/widgets\n");
+		await expect(resolveDefaultRepoMemoized(`/tmp/gh-default-host-retained-${Date.now()}`)).resolves.toBe(
+			"github.com/acme/widgets",
+		);
+	});
+
+	it("file_read links a bare repo to the host its request went to", async () => {
+		process.env.GH_HOST = "ghe.example.com";
+		vi.spyOn(git.github, "json").mockResolvedValue({
+			type: "file",
+			encoding: "none",
+			size: 2 * 1024 * 1024,
+		} as never);
+		const tool = new GithubTool(createSession("/tmp/gh-default-host-file-read"));
+
+		const result = await tool.execute("file-read", {
+			op: "file_read",
+			repo: "acme/widgets",
+			path: "docs/readme.md",
+		});
+
+		// The request carried no --hostname, so it hit GH_HOST; the fallback link
+		// must name the same instance rather than github.com.
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+		expect(text).toContain("https://ghe.example.com/acme/widgets/blob/HEAD/docs/readme.md");
+	});
+
 	it("file_read passes the host as a flag and keeps it out of the API path", async () => {
 		const jsonSpy = vi.spyOn(git.github, "json").mockResolvedValue({
 			type: "file",

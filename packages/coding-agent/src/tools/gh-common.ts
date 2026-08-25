@@ -91,16 +91,17 @@ export function ghApiHostArgs(ref: GhRepoRef): string[] {
 const REPO_URL_PATTERN = /^https?:\/\/([^/]+)\/([^/]+)\/([^/?#]+)/;
 
 /**
- * `https://HOST/OWNER/REPO` → the repository's identity: `OWNER/REPO` on
- * github.com, `HOST/OWNER/REPO` anywhere else. Used for the session
- * checkout, whose identity should read the way users write it.
+ * `https://HOST/OWNER/REPO` → the repository's identity. The host is dropped
+ * only when it is the one `gh` would have assumed anyway, so a bare identity
+ * can never be redirected: with `GH_HOST` set elsewhere, even a github.com
+ * checkout keeps its host.
  */
 export function repoFromUrl(value: string | undefined): string | undefined {
 	const match = REPO_URL_PATTERN.exec(value?.trim() ?? "");
 	if (!match) return undefined;
 	const host = match[1].toLowerCase();
 	const slug = `${match[2]}/${match[3]}`;
-	return host === GITHUB_HOST ? slug : formatRepoRef(host, slug);
+	return host === defaultGhHost() ? slug : formatRepoRef(host, slug);
 }
 
 export const PR_URL_PATTERN = /^https:\/\/([^/]+)\/([^/]+\/[^/]+)\/pull\/(\d+)(?:\/.*)?$/;
