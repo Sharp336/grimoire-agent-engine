@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Codex GPT-5.6 `code_mode_only` models now default to catalog-driven Code Mode; set `providers.openai-codex.codeMode: off` to retain the full direct tool surface.
+
+### Fixed
+
+- Fixed Code Mode and bundled workflow prompts advertising bridge-only tools as direct provider calls across system, Plan, Goal, Vibe, orchestration, review, init, autoresearch, and security validation flows.
+- Fixed ACP Plan Mode tool reconciliation by restoring the pre-plan enabled selection after approval.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added
@@ -23,15 +32,6 @@
 - Improved `omp git` responsiveness with immediate file rendering, progressive syntax highlighting, and deferred large-commit statistics.
 - Documented that `retry.maxDelayMs: 0` permits provider-requested quota waits to continue until automatic retry, rather than enforcing a wait ceiling.
 - Expanded git TUI navigation and file-management shortcuts, including refresh, stage/unstage, directory operations, hunk and file navigation, pane movement, diff-view selection, commit-form access, and paging.
-- Standardized completed edit results on hashline-style path and numbered-preview output across edit modes.
-- Codex GPT-5.6 `code_mode_only` models now default to catalog-driven Code Mode; set `providers.openai-codex.codeMode: off` to retain the full direct tool surface.
-
-- Made `omp git` stream file contents into an off-thread native differ, paint complete lines immediately, progressively apply syntax highlighting, and defer large commit file statistics until after the first interactive frame.
-- Added `r` shortcut to refresh the git state
-- Added `s`/`u` shortcuts to stage/unstage files directly from the sidebar
-- Made `space` (and `s`/`u`) in the git TUI sidebar stage/unstage whole directories; `enter`/`←`/`→` keep folding the tree
-- Added `space` shortcut as page down in the diff pane
-- Expanded `omp git` keyboard navigation: `alt+↓`/`alt+↑` jump hunks and roll into the adjacent file at the edges, `]`/`[` switch files, `←`/`→` collapse/expand sidebar directories, `enter` opens the selected file, vim motions (`j`/`k`/`h`/`l`/`g`/`G`) work in both panes, `1`–`4` pick a diff view directly, and `c` jumps to the commit form.
 
 ### Fixed
 
@@ -76,18 +76,6 @@
 - Fixed completed assistant replies disappearing from the live transcript under viewport pressure.
 - Accelerated SHA-2 and SHA-3 checksums on supported ARM64 hardware.
 - Fixed large MCP tool payloads being stored redundantly on disk.
-- Fixed the welcome screen staying at its original width after a terminal resize; a settled rebuild now recomposes it at the new width like the rest of the transcript.
-- Fixed `omp if-bench` ending an Anthropic model's run on a transient `Refusal (cyber)` classification; the cyber classifier is stochastic near the threshold, so a refused turn is now retried with a fresh session (up to 3 attempts) before it is scored as a run-ending provider failure.
-- Fixed streamed assistant responses crashing when a later provider delta revised earlier Markdown; assistant output now stays mutable until finalization.
-- Fixed an orphaned foreground tool card surviving a later agent turn and pinning the entire transcript outside native scrollback; new turns now seal abandoned cards while preserving background-task updates.
-- Fixed resize and display replays to include naturally emitted active-head rows in one atomic bottom-first transaction without rewinding lifecycle state, while graceful shutdown still drains every eligible final suffix.
-- Fixed terminal resizes lagging on large transcripts: the transient resize repaint now renders only the visible tail instead of the entire committed transcript per resize event.
-- Fixed cache-miss dividers crashing completed streamed assistant messages after stable rows had entered native history; cache-miss status now trails the assistant output.
-- Fixed quitting re-streaming the entire committed transcript when a resize-triggered scrollback replay was still pending; shutdown now flushes only genuinely un-retired rows.
-- Fixed Code Mode system, Plan Mode, and eager-task prompts advertising bridge-only tools as direct provider calls.
-- Fixed fast tool completions leaving a permanent running summary that blocked transcript retirement and squeezed later tool output.
-- Fixed `omp git` hunk navigation (`alt+↓`/`alt+↑`) appearing to do nothing while the file sidebar had focus: the diff cursor band now stays visible (dimmed) when the pane is unfocused.
-- Fixed the git TUI sidebar jumping back to the top of the file list after staging or unstaging a file; selection now stays on the nearest remaining row
 
 ## [18.0.4] - 2026-08-24
 
