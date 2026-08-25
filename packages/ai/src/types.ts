@@ -37,6 +37,8 @@ import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { isOpenAIModelId } from "@oh-my-pi/pi-catalog/identity/family";
 import type { Api, FetchImpl, KnownApi, Model, Provider, ThinkingBudgets, Usage } from "@oh-my-pi/pi-catalog/types";
 import type { ApiKey } from "./auth-retry";
+import type { CacheKeepalivePolicy } from "./cache/keepalive";
+import type { CacheRetention } from "./cache/types";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
 import type { FallbackParam, StopDetails } from "./providers/anthropic-wire";
@@ -118,8 +120,11 @@ export type ToolChoice =
 	| { type: "tool"; name: string }
 	| { type: "computer" };
 
-// Base options all providers share
-export type CacheRetention = "none" | "short" | "long";
+// Base options all providers share.
+// `CacheRetention` lives in `./cache/types` so this module has no circular type
+// import back through `./cache/keepalive`; re-exported so the long-standing
+// `@oh-my-pi/pi-ai` import path keeps working.
+export type { CacheRetention };
 
 /**
  * Service tier hint for processing priority / cost control. These are the
@@ -413,15 +418,30 @@ export interface StreamOptions {
 	apiKey?: string;
 	cacheRetention?: CacheRetention;
 	/**
-	 * Keep Anthropic's 5-minute prompt cache warm across bounded idle gaps.
+	 * Keep the provider's short-lived prompt cache warm across bounded idle gaps.
 	 *
 	 * This is an ownership flag, not a general provider default: exactly one
 	 * primary agent loop sharing `providerSessionState` should enable it.
 	 * Side-channel and advisor requests must leave it unset.
+	 *
+	 * Historically Anthropic-only, hence the name; it now gates every provider with
+	 * a verifiable keepalive shape (see `cache/keepalive.ts`). Kept as-is so existing
+	 * callers keep working. On its own it preserves the legacy behavior exactly:
+	 * at most {@link LEGACY_CACHE_KEEPALIVE_MAX_TOUCHES} touches, no economic gating.
+	 * Supply {@link cacheKeepalivePolicy} to get lease-driven, cost-aware behavior.
 	 */
 	anthropicCacheRefresh?: boolean;
 	/** @internal Marks a replay-only Anthropic request that must use non-streaming `max_tokens: 0`. */
 	anthropicCacheRefreshRequest?: boolean;
+	/**
+	 * Cost-aware policy layered on top of {@link anthropicCacheRefresh}.
+	 *
+	 * Without it the keepalive is a blind watchdog: it fires a fixed number of touches
+	 * after every assistant message, including the final one of a turn nobody will
+	 * resume. With it, each touch must first clear an economic gate, and the chain
+	 * lives exactly as long as it is worth more than it costs.
+	 */
+	cacheKeepalivePolicy?: CacheKeepalivePolicy;
 	/**
 	 * Additional headers to include in provider requests.
 	 * These are merged on top of model-defined headers.

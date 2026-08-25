@@ -4,6 +4,7 @@
 
 ### Added
 
+- The provider prompt cache is now kept warm across long idle gaps while background work is still running, so a session that dispatches subagents and waits no longer re-pays the whole prefix as a cache write when results land; keeping it warm stops as soon as the work finishes or the spend stops being worth it.
 - Added an explicit append-only transcript declaration and width-independent stable-row API for components that can guarantee an immutable history prefix across later updates.
 - Added `:img` read selector to rasterize local SVG/SVGZ files for vision input.
 - Added side-by-side image and SVG previews to `omp git`, including local Git LFS object resolution and explicit placeholders for unavailable or unsupported binary content.
@@ -25,6 +26,8 @@
 
 ### Fixed
 
+- Fixed MCP server instructions being appended to the system prompt in connect order while the prompt-rebuild signature sorted them, so a server reconnect that only changed ordering silently rewrote the system prompt on the next unrelated rebuild and invalidated the whole provider prefix cache.
+- Fixed the prompt-rebuild signature ignoring tool input schemas, so a tool whose schema changed while its name, label, and description stayed the same skipped the rebuild and sent a system prompt that no longer matched the tools on the wire.
 - Fixed the welcome screen staying at its original width after a terminal resize; a settled rebuild now recomposes it at the new width like the rest of the transcript.
 - Fixed `omp if-bench` ending an Anthropic model's run on a transient `Refusal (cyber)` classification; the cyber classifier is stochastic near the threshold, so a refused turn is now retried with a fresh session (up to 3 attempts) before it is scored as a run-ending provider failure.
 - Fixed streamed assistant responses crashing when a later provider delta revised earlier Markdown; assistant output now stays mutable until finalization.

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exported `resolveTokenCost` so callers pricing a prefix can resolve the active context-length tier instead of reading the base rate.
+
 ## [18.0.4] - 2026-08-24
 
 ### Fixed

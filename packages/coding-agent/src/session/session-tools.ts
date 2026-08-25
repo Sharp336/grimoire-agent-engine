@@ -171,6 +171,161 @@ export function projectMountedMCPXdevGuidance(routes: Iterable<MountedMCPToolRou
 	return { mappings, hasOmittedMappings };
 }
 
+/** Exactly the tool fields {@link computeAppliedToolSignature} reads. */
+export interface AppliedToolSignatureTool {
+	readonly name: string;
+	readonly label?: string;
+	readonly description?: string;
+	readonly customWireName?: string;
+	/** Wire-visible JSON input schema (TypeBox schemas are plain JSON-Schema objects). */
+	readonly parameters?: object;
+}
+
+export interface AppliedToolSignatureInputs {
+	/** Active tool names in the order the prompt renders them. */
+	readonly toolNames: readonly string[];
+	/** The tools rendered into the prompt, in the same order. */
+	readonly tools: readonly AppliedToolSignatureTool[];
+	/** Code Mode direct keep-set, or undefined when Code Mode is off. */
+	readonly directToolNames?: readonly string[];
+	/** Mounted xd:// tools feeding the bounded MCP route projection. */
+	readonly mountedTools: Iterable<MountedMCPToolRouteSource>;
+	/** Per-server MCP instruction text, or undefined when no MCP manager is attached. */
+	readonly serverInstructions?: ReadonlyMap<string, string>;
+}
+
+/**
+ * Per-tool wire-schema digests, keyed on the schema object's identity.
+ *
+ * The signature is recomputed on every prompt-rebuild check, and tool schemas
+ * are large TypeBox objects built once per tool and thereafter reused by
+ * reference — re-serializing them on each call would be pure waste. Keying on
+ * the schema object rather than the tool name is what keeps the cache honest:
+ * a tool that swaps in a *new* schema object (MCP catalog refresh, extension
+ * reload, a settings-driven schema) gets a fresh digest, while a `WeakMap`
+ * lets retired tools' schemas be collected.
+ */
+const toolSchemaDigests = new WeakMap<object, string>();
+
+/**
+ * Serialize a JSON-Schema value with object keys sorted recursively and ARRAY
+ * ORDER PRESERVED: key order is not observable on the wire, but the order of
+ * `required`, `enum`, `anyOf`, and `prefixItems` is. Values `JSON.stringify`
+ * cannot represent are handled the same way it handles them, so the digest
+ * changes exactly when the serialized schema does. Schemas are acyclic — a
+ * cyclic one could not be sent to a provider in the first place.
+ */
+function stableSchemaJson(value: unknown): string {
+	if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
+	if (Array.isArray(value)) return `[${value.map(stableSchemaJson).join(",")}]`;
+	const record = value as Record<string, unknown>;
+	const fields: string[] = [];
+	for (const key of Object.keys(record).sort()) {
+		const field = record[key];
+		// Skip exactly what `JSON.stringify` drops from an object body.
+		if (field === undefined || typeof field === "function" || typeof field === "symbol") continue;
+		fields.push(`${JSON.stringify(key)}:${stableSchemaJson(field)}`);
+	}
+	return `{${fields.join(",")}}`;
+}
+
+function toolSchemaDigest(tool: AppliedToolSignatureTool): string {
+	const schema = tool.parameters;
+	if (schema === undefined) return "";
+	const cached = toolSchemaDigests.get(schema);
+	if (cached !== undefined) return cached;
+	const digest = Bun.hash(stableSchemaJson(schema)).toString(36);
+	toolSchemaDigests.set(schema, digest);
+	return digest;
+}
+
+/**
+ * Compose a stable signature for the inputs that `rebuildSystemPrompt` reads.
+ * Two calls producing identical signatures are guaranteed to produce identical
+ * system prompt bytes, so the rebuild can be skipped.
+ *
+ * The signature covers:
+ *   1. Active tool names in order (the prompt renders them in this order).
+ *   2. Active tool labels, descriptions, and wire-visible names — all are
+ *      rendered into the prompt body (see `system-prompt.md` `{{label}}: \`{{name}}\``
+ *      and `toolPromptNames` in `buildSystemPrompt`). The wire name comes from
+ *      `tool.customWireName` and overrides the internal name on the model wire
+ *      (e.g. `edit` exposes itself as `apply_patch` to GPT-5 in apply_patch mode);
+ *      a stale wire name would desync prompt guidance from actual tool routing.
+ *   3. The bounded mounted-MCP projection: escaped original-name labels,
+ *      actual `xd://` paths, and the omission flag in catalog order. These are
+ *      the exact values rendered by the global transport guidance; catalog
+ *      churn wholly behind the fallback does not change the prompt.
+ *   4. MCP server instructions text (per server), since `rebuildSystemPrompt`
+ *      embeds these in the appended prompt under "## MCP Server Instructions".
+ *      A server upgrade can change instructions while keeping tools identical.
+ *   5. A digest of each tool's wire input schema, in the same order. The
+ *      rendered tool inventory and the provider tool array both carry the
+ *      schema, so a tool whose JSON schema changes while its name, label, and
+ *      description stay put (an MCP server upgrade, a settings-driven
+ *      parameter) must still rebuild.
+ *
+ * Settings-driven tool metadata is covered automatically: built-in tools that
+ * depend on settings expose `description`/`label` via getters (see `TaskTool`,
+ * `SearchToolBm25Tool`, `EditTool`), and the signature reads them live on every
+ * call - so a settings flip that mutates the rendered string differs the signature
+ * the next time {@link SessionTools.applyActiveToolsByName} runs. Do not refactor
+ * `describeTool` to cache per-tool strings without preserving this property.
+ *
+ * Inputs NOT covered: memory instructions read from disk; and SDK-init-time
+ * closure constants in `sdk.ts` (`inlineToolDescriptors`, `eagerTasks`,
+ * `intentField`, `mcpDiscoveryEnabled`, `secretsEnabled`). The
+ * closure-captured ones cannot change at runtime regardless of skip behavior.
+ * For everything else, callers must explicitly call
+ * {@link SessionTools.refreshBaseSystemPrompt} after side-effecting changes;
+ * see the memory hooks and {@link SessionTools.syncAfterModelChange}.
+ *
+ * The calendar date is deliberately NOT part of the signature: the date/cwd
+ * reminder rides on the first user turn at request time (`date-cwd-reminder`),
+ * so a session spanning midnight must NOT rebuild a prompt that no longer
+ * embeds the date — the reminder picks up the new day on its own.
+ */
+export function computeAppliedToolSignature(inputs: AppliedToolSignatureInputs): string {
+	// Order-preserving join: any reorder must produce a different signature so
+	// the rebuild fires and the new tool list reaches the API.
+	const nameSegment = inputs.toolNames.join("\u0001");
+	const describeTool = (tool: AppliedToolSignatureTool): string =>
+		`${tool.name}=${tool.label ?? ""}|${tool.description ?? ""}|${tool.customWireName ?? ""}`;
+	const descriptionSegment = inputs.tools.map(describeTool).join("\u0002");
+	const schemaSegment = inputs.tools.map(toolSchemaDigest).join("\u0005");
+	const mountedMCPProjection = projectMountedMCPXdevGuidance(collectMountedMCPToolRoutes(inputs.mountedTools));
+	const mountedMCPRouteSegment =
+		JSON.stringify({
+			mappings: mountedMCPProjection.mappings.map(mapping => [mapping.label, mapping.path] as const),
+			hasOmittedMappings: mountedMCPProjection.hasOmittedMappings,
+		}) ?? "{}";
+	const serverInstructions = inputs.serverInstructions;
+	let instructionsSegment = "";
+	if (serverInstructions && serverInstructions.size > 0) {
+		// Sort by server name so transport flap order does not perturb the
+		// signature. `renderMCPServerInstructions` in `sdk.ts` emits the rendered
+		// section in the same order, so the bytes cannot drift from what this
+		// signature admits — change one sort and you must change the other.
+		const entries: string[] = [];
+		for (const [server, instructions] of serverInstructions) {
+			entries.push(`${server}=${instructions}`);
+		}
+		entries.sort();
+		instructionsSegment = entries.join("\u0006");
+	}
+	// The non-MCP remainder of the xd:// inventory is deliberately NOT part
+	// of the signature: its mount/unmount announces itself through
+	// `#notifyXdevMountDelta` rather than rewriting the system prompt, keeping
+	// the provider cache prefix byte-stable. Mounted MCP routes are the narrow
+	// exception above, bounded to the exact projection rendered in the global
+	// route guidance so churn wholly behind its fallback does not rebuild.
+	// Direct Code Mode names render the restricted tool inventory, so a
+	// `codeModeDirectTools` change must rebuild even when the enabled set is
+	// unchanged.
+	const directSegment = inputs.directToolNames === undefined ? "" : `\u0004${inputs.directToolNames.join("\u0001")}`;
+	return `${nameSegment}\u0003${descriptionSegment}\u0007${instructionsSegment}\u0008${mountedMCPRouteSegment}${directSegment}\u000b${schemaSegment}`;
+}
+
 const XDEV_MOUNT_NOTICE_MESSAGE_TYPE = "xdev-mount-notice";
 
 /**
@@ -964,7 +1119,13 @@ export class SessionTools {
 						})
 					: appliedTools;
 				const directToolNames = codeMode.active ? appliedNames : undefined;
-				const signature = this.#computeAppliedToolSignature(promptToolNames, promptTools, directToolNames);
+				const signature = computeAppliedToolSignature({
+					toolNames: promptToolNames,
+					tools: promptTools,
+					directToolNames,
+					mountedTools: this.#xdev ? listXdevTools(this.#xdev) : [],
+					serverInstructions: this.#getMcpServerInstructions?.(),
+				});
 				if (forcePromptRefresh || signature !== this.#lastAppliedToolSignature) {
 					const built = await untilAborted(
 						signal,
@@ -1528,7 +1689,13 @@ export class SessionTools {
 		const promptTools = promptToolNames
 			.map(name => this.#toolRegistry.get(name))
 			.filter((tool): tool is AgentTool => tool != null);
-		this.#lastAppliedToolSignature = this.#computeAppliedToolSignature(promptToolNames, promptTools, directToolNames);
+		this.#lastAppliedToolSignature = computeAppliedToolSignature({
+			toolNames: promptToolNames,
+			tools: promptTools,
+			directToolNames,
+			mountedTools: this.#xdev ? listXdevTools(this.#xdev) : [],
+			serverInstructions: this.#getMcpServerInstructions?.(),
+		});
 	}
 
 	/** Applies one-turn memory prompt injection before an agent run. */
@@ -1569,85 +1736,6 @@ export class SessionTools {
 			});
 			return this.#baseSystemPrompt;
 		}
-	}
-
-	/**
-	 * Compose a stable signature for the inputs that `rebuildSystemPrompt` reads.
-	 * Two calls producing identical signatures are guaranteed to produce identical
-	 * system prompt bytes, so the rebuild can be skipped.
-	 *
-	 * The signature covers:
-	 *   1. Active tool names in order (the prompt renders them in this order).
-	 *   2. Active tool labels, descriptions, and wire-visible names — all are
-	 *      rendered into the prompt body (see `system-prompt.md` `{{label}}: \`{{name}}\``
-	 *      and `toolPromptNames` in `buildSystemPrompt`). The wire name comes from
-	 *      `tool.customWireName` and overrides the internal name on the model wire
-	 *      (e.g. `edit` exposes itself as `apply_patch` to GPT-5 in apply_patch mode);
-	 *      a stale wire name would desync prompt guidance from actual tool routing.
-	 *   3. The bounded mounted-MCP projection: escaped original-name labels,
-	 *      actual `xd://` paths, and the omission flag in catalog order. These are
-	 *      the exact values rendered by the global transport guidance; catalog
-	 *      churn wholly behind the fallback does not change the prompt.
-	 *   4. MCP server instructions text (per server), since `rebuildSystemPrompt`
-	 *      embeds these in the appended prompt under "## MCP Server Instructions".
-	 *      A server upgrade can change instructions while keeping tools identical.
-	 *
-	 * Settings-driven tool metadata is covered automatically: built-in tools that
-	 * depend on settings expose `description`/`label` via getters (see `TaskTool`,
-	 * `SearchToolBm25Tool`, `EditTool`), and the signature reads them live on every
-	 * call - so a settings flip that mutates the rendered string differs the signature
-	 * the next time {@link applyActiveToolsByName} runs. Do not refactor `describeTool`
-	 * to cache per-tool strings without preserving this property.
-	 *
-	 * Inputs NOT covered: tool input schemas; memory instructions read from disk;
-	 * and SDK-init-time closure constants in `sdk.ts` (`inlineToolDescriptors`,
-	 * `eagerTasks`, `intentField`, `mcpDiscoveryEnabled`, `secretsEnabled`). The
-	 * closure-captured ones cannot change at runtime regardless of skip behavior.
-	 * For everything else, callers must explicitly call {@link refreshBaseSystemPrompt}
-	 * after side-effecting changes; see the memory hooks and {@link syncAfterModelChange}.
-	 *
-	 * The calendar date is deliberately NOT part of the signature: the date/cwd
-	 * reminder rides on the first user turn at request time (`date-cwd-reminder`),
-	 * so a session spanning midnight must NOT rebuild a prompt that no longer
-	 * embeds the date — the reminder picks up the new day on its own.
-	 */
-	#computeAppliedToolSignature(toolNames: string[], tools: AgentTool[], directToolNames?: readonly string[]): string {
-		// Order-preserving join: any reorder must produce a different signature so
-		// the rebuild fires and the new tool list reaches the API.
-		const nameSegment = toolNames.join("\u0001");
-		const describeTool = (tool: AgentTool): string =>
-			`${tool.name}=${tool.label ?? ""}|${tool.description ?? ""}|${tool.customWireName ?? ""}`;
-		const descriptionSegment = tools.map(describeTool).join("\u0002");
-		const mountedMCPProjection = projectMountedMCPXdevGuidance(
-			collectMountedMCPToolRoutes(this.#xdev ? listXdevTools(this.#xdev) : []),
-		);
-		const mountedMCPRouteSegment =
-			JSON.stringify({
-				mappings: mountedMCPProjection.mappings.map(mapping => [mapping.label, mapping.path] as const),
-				hasOmittedMappings: mountedMCPProjection.hasOmittedMappings,
-			}) ?? "{}";
-		const serverInstructions = this.#getMcpServerInstructions?.();
-		let instructionsSegment = "";
-		if (serverInstructions && serverInstructions.size > 0) {
-			// Sort by server name so transport flap order does not perturb the signature.
-			const entries: string[] = [];
-			for (const [server, instructions] of serverInstructions) {
-				entries.push(`${server}=${instructions}`);
-			}
-			entries.sort();
-			instructionsSegment = entries.join("\u0006");
-		}
-		// The non-MCP remainder of the xd:// inventory is deliberately NOT part
-		// of the signature: its mount/unmount announces itself through
-		// `#notifyXdevMountDelta` rather than rewriting the system prompt, keeping
-		// the provider cache prefix byte-stable. Mounted MCP routes are the narrow
-		// exception above, bounded to the exact projection rendered in the global
-		// route guidance so churn wholly behind its fallback does not rebuild.
-		// Direct Code Mode names render the restricted tool inventory, so a
-		// `codeModeDirectTools` change must rebuild even when the enabled set is
-		// unchanged.
-		const directSegment = directToolNames === undefined ? "" : `\u0004${directToolNames.join("\u0001")}`;
-		return `${nameSegment}\u0003${descriptionSegment}\u0007${instructionsSegment}\u0008${mountedMCPRouteSegment}${directSegment}`;
 	}
 
 	/**

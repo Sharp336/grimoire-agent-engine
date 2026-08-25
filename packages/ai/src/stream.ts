@@ -14,10 +14,32 @@ import {
 	resolveWireModelId,
 } from "@oh-my-pi/pi-catalog/model-thinking";
 import { CATALOG_PROVIDERS, type ProviderCatalogEntry } from "@oh-my-pi/pi-catalog/provider-models";
+import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
 import { CODEX_BASE_URL } from "@oh-my-pi/pi-catalog/wire/codex";
-import { $env, $pickenv, getProviderInFlightRoot, isEnoent, logger, withExtraCaFetch } from "@oh-my-pi/pi-utils";
+import {
+	$env,
+	$pickenv,
+	getProviderInFlightRoot,
+	isEnoent,
+	isRecord,
+	logger,
+	withExtraCaFetch,
+} from "@oh-my-pi/pi-utils";
 import { getCustomApi } from "./api-registry";
 import { createAuthRetryKeyState, isApiKeyResolver, resolveNextAuthRetryKey } from "./auth-retry";
+import {
+	CACHE_KEEPALIVE_STATE_KEY,
+	type CacheKeepalivePolicy,
+	type CacheKeepaliveShape,
+	classifyCacheOutcome,
+	DEFAULT_CACHE_KEEPALIVE_MAX_TOUCHES,
+	evaluateWarm,
+	LEGACY_CACHE_KEEPALIVE_MAX_TOUCHES,
+	nextWarmDeadlineMs,
+	resolveCacheKeepaliveShape,
+	type WarmDecision,
+	warmRatesForPrefix,
+} from "./cache";
 import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
@@ -1150,21 +1172,67 @@ function emitBufferedEvents(stream: AssistantMessageEventStream, events: Assista
 	}
 }
 
-const ANTHROPIC_CACHE_TTL_MS = 5 * 60_000;
-const ANTHROPIC_CACHE_REFRESH_LEAD_MS = 15_000;
-const ANTHROPIC_CACHE_REFRESH_LIMIT = 3;
-const ANTHROPIC_CACHE_REFRESH_STATE_KEY = "anthropic-cache-refresh";
+/** Nominal short-cache lifetime assumed when no learned TTL is supplied. */
+const CACHE_KEEPALIVE_NOMINAL_TTL_S = 300;
+/**
+ * Network margin reserved before nominal expiry. With `CACHE_KEEPALIVE_NOMINAL_TTL_S`
+ * and `CACHE_KEEPALIVE_WARM_FRACTION` this reproduces the historical 285s schedule
+ * exactly: `min(300 * 0.95, 300 - 15) = 285`.
+ */
+const CACHE_KEEPALIVE_MARGIN_S = 15;
+const CACHE_KEEPALIVE_WARM_FRACTION = 0.95;
 
-interface AnthropicCacheRefreshPlan {
-	refresh(controller: AbortController): Promise<number | undefined>;
+interface CacheKeepalivePlan {
+	/**
+	 * Issue one bounded touch. Resolves to what the provider reported, or `undefined`
+	 * only when the request never produced a response at all (transport error, abort).
+	 *
+	 * A touch that ran but did NOT verify still resolves, so telemetry can record the
+	 * outcome that matters most — `miss-rebuilt` means the entry was gone and we just
+	 * paid full write price to rebuild it. Reporting that as "no result" would hide the
+	 * single most expensive thing the keepalive can do.
+	 */
+	touch(controller: AbortController): Promise<CacheKeepaliveTouchResult | undefined>;
 }
 
-class AnthropicCacheRefreshState implements ProviderSessionState {
+interface CacheKeepaliveTouchResult {
+	touchedAtMs: number;
+	cacheRead: number;
+	cacheWrite: number;
+	costUsd: number;
+	/**
+	 * True only for `cacheRead > 0 && cacheWrite === 0` — the entry was present and
+	 * reused. The chain continues only on a verified touch; anything else means we can
+	 * no longer claim the cache is warm.
+	 */
+	verified: boolean;
+}
+
+/**
+ * Keeps one physical provider cache entry warm across an idle gap.
+ *
+ * Two modes:
+ * - **legacy** (no {@link CacheKeepalivePolicy}): a fixed budget of
+ *   {@link LEGACY_CACHE_KEEPALIVE_MAX_TOUCHES} touches, no cost reasoning. Byte-for-byte
+ *   the behavior that shipped before, so existing callers are unaffected.
+ * - **policy**: every touch must first clear {@link evaluateWarm}. The chain then lives
+ *   as long as it is worth more than it costs, which is both longer than 3 touches when
+ *   the prefix is expensive and background work is alive, and *zero* touches when the
+ *   turn is genuinely over.
+ */
+class CacheKeepaliveState implements ProviderSessionState {
 	#controller: AbortController | undefined;
 	#generation = 0;
-	#plan: AnthropicCacheRefreshPlan | undefined;
-	#refreshesRemaining = 0;
+	#plan: CacheKeepalivePlan | undefined;
+	#touchesRemaining = 0;
+	#touchIndex = 0;
+	#cumulativeCostUsd = 0;
+	#lastTouchAtMs = 0;
 	#timer: NodeJS.Timeout | undefined;
+	#policy: CacheKeepalivePolicy | undefined;
+	#cost: ModelCost | undefined;
+	#warmOutputTokens = 0;
+	#fingerprint = "";
 
 	cancel(): void {
 		this.#generation++;
@@ -1175,13 +1243,21 @@ class AnthropicCacheRefreshState implements ProviderSessionState {
 		this.#controller?.abort();
 		this.#controller = undefined;
 		this.#plan = undefined;
-		this.#refreshesRemaining = 0;
+		this.#touchesRemaining = 0;
+		this.#touchIndex = 0;
+		this.#cumulativeCostUsd = 0;
 	}
 
-	arm(plan: AnthropicCacheRefreshPlan, cacheTouchedAtMs: number): void {
+	arm(plan: CacheKeepalivePlan, cacheTouchedAtMs: number, config: CacheKeepaliveArmConfig): void {
 		this.cancel();
 		this.#plan = plan;
-		this.#refreshesRemaining = ANTHROPIC_CACHE_REFRESH_LIMIT;
+		this.#policy = config.policy;
+		this.#cost = config.cost;
+		this.#warmOutputTokens = config.warmOutputTokens;
+		this.#fingerprint = config.fingerprint;
+		this.#touchesRemaining = config.policy
+			? (config.policy.maxTouches ?? DEFAULT_CACHE_KEEPALIVE_MAX_TOUCHES)
+			: LEGACY_CACHE_KEEPALIVE_MAX_TOUCHES;
 		this.#schedule(cacheTouchedAtMs, this.#generation);
 	}
 
@@ -1190,56 +1266,129 @@ class AnthropicCacheRefreshState implements ProviderSessionState {
 	}
 
 	#schedule(cacheTouchedAtMs: number, generation: number): void {
-		const refreshAtMs = cacheTouchedAtMs + ANTHROPIC_CACHE_TTL_MS - ANTHROPIC_CACHE_REFRESH_LEAD_MS;
+		this.#lastTouchAtMs = cacheTouchedAtMs;
+		const ttlS = this.#policy?.ttlSeconds ?? CACHE_KEEPALIVE_NOMINAL_TTL_S;
+		// Jitter is intentionally 0 here: the deadline must stay deterministic for a
+		// single session. Spreading concurrent sessions is a fleet concern and belongs
+		// with whoever supplies a policy.
+		const touchAtMs = nextWarmDeadlineMs({
+			lastTouchAtMs: cacheTouchedAtMs,
+			ttlS,
+			latencyP95S: 0,
+			warmFraction: CACHE_KEEPALIVE_WARM_FRACTION,
+			minimumMarginS: CACHE_KEEPALIVE_MARGIN_S,
+			jitterFraction: 0,
+			jitterKey: this.#fingerprint,
+		});
 		this.#timer = setTimeout(
 			() => {
 				this.#timer = undefined;
-				void this.#refresh(generation);
+				void this.#touch(generation);
 			},
-			Math.max(0, refreshAtMs - Date.now()),
+			Math.max(0, touchAtMs - Date.now()),
 		);
 		this.#timer.unref?.();
 	}
 
-	async #refresh(generation: number): Promise<void> {
+	/** Decide whether the next touch is worth issuing. `undefined` means "no policy, just go". */
+	#decide(): WarmDecision | undefined {
+		const policy = this.#policy;
+		const cost = this.#cost;
+		if (!policy || !cost) return undefined;
+		const prefixTokens = policy.prefixTokens();
+		return evaluateWarm({
+			prefixTokens,
+			// Resolve the context-length tier against the actual prefix: on a
+			// long-context model, pricing a 400k-token prefix at the short-context rate
+			// understates both the avoided loss and the touch cost.
+			rates: warmRatesForPrefix(cost, prefixTokens),
+			// Read fresh: background work finishing is what should end the chain.
+			resumeProbability: policy.resumeProbability(),
+			cumulativeWarmCostUsd: this.#cumulativeCostUsd,
+			warmOutputTokens: this.#warmOutputTokens,
+		});
+	}
+
+	#report(decision: WarmDecision | undefined, result: CacheKeepaliveTouchResult | undefined): void {
+		const policy = this.#policy;
+		if (!policy?.onDecision || !decision) return;
+		try {
+			policy.onDecision({
+				fingerprint: this.#fingerprint,
+				decision,
+				outcome: result
+					? classifyCacheOutcome({
+							ok: true,
+							cacheRead: result.cacheRead,
+							cacheWrite: result.cacheWrite,
+							inputTokens: 0,
+						})
+					: undefined,
+				idleSeconds: Math.max(0, (Date.now() - this.#lastTouchAtMs) / 1000),
+				cacheRead: result?.cacheRead ?? 0,
+				cacheWrite: result?.cacheWrite ?? 0,
+				costUsd: result?.costUsd ?? 0,
+				touchIndex: this.#touchIndex,
+				at: Date.now(),
+			});
+		} catch (error) {
+			logger.debug("cache keepalive onDecision threw", { error: String(error) });
+		}
+	}
+
+	async #touch(generation: number): Promise<void> {
 		const plan = this.#plan;
-		if (generation !== this.#generation || !plan || this.#refreshesRemaining <= 0) return;
+		if (generation !== this.#generation || !plan || this.#touchesRemaining <= 0) return;
+
+		this.#touchIndex++;
+		const decision = this.#decide();
+		if (decision && !decision.shouldWarm) {
+			// Economically pointless: report why and let the entry expire.
+			this.#report(decision, undefined);
+			this.#plan = undefined;
+			this.#touchesRemaining = 0;
+			return;
+		}
 
 		const controller = new AbortController();
 		this.#controller = controller;
-		let cacheTouchedAtMs: number | undefined;
+		let result: CacheKeepaliveTouchResult | undefined;
 		try {
-			cacheTouchedAtMs = await plan.refresh(controller);
+			result = await plan.touch(controller);
 		} catch (error) {
 			if (generation === this.#generation && !controller.signal.aborted) {
-				logger.debug("Anthropic prompt-cache refresh failed", { error: String(error) });
+				logger.debug("prompt-cache keepalive touch failed", { error: String(error) });
 			}
 		}
 		if (generation !== this.#generation) return;
 
 		this.#controller = undefined;
-		if (cacheTouchedAtMs === undefined) {
+		this.#report(decision, result);
+		// A touch that ran still costs money, verified or not — bill it before deciding.
+		if (result) this.#cumulativeCostUsd += result.costUsd;
+		if (!result?.verified) {
+			// Either nothing came back, or the provider rebuilt the entry rather than
+			// reading it. Never pretend the cache is still warm.
 			this.#plan = undefined;
-			this.#refreshesRemaining = 0;
+			this.#touchesRemaining = 0;
 			return;
 		}
 
-		this.#refreshesRemaining--;
-		if (this.#refreshesRemaining <= 0) {
+		this.#touchesRemaining--;
+		if (this.#touchesRemaining <= 0) {
 			this.#plan = undefined;
 			return;
 		}
-		this.#schedule(cacheTouchedAtMs, generation);
+		this.#schedule(result.touchedAtMs, generation);
 	}
 }
 
-function supportsAnthropicCacheRefresh<TApi extends Api>(model: Model<TApi>): boolean {
-	return (
-		model.api === "anthropic-messages" &&
-		model.provider === "anthropic" &&
-		model.transport !== "pi-native" &&
-		isLeakedThinkingHealExempt(model)
-	);
+interface CacheKeepaliveArmConfig {
+	policy: CacheKeepalivePolicy | undefined;
+	/** Rate card source; the context tier is resolved per decision against the prefix. */
+	cost: ModelCost | undefined;
+	warmOutputTokens: number;
+	fingerprint: string;
 }
 
 function isAnthropicRefreshPayload(payload: unknown): payload is MessageCreateParamsStreaming {
@@ -1294,33 +1443,164 @@ function isAnthropicThinkingActive(model: Model<Api>, payload: MessageCreatePara
 	return model.thinking?.mode === "anthropic-adaptive" && payload.output_config?.effort != null;
 }
 
-function createAnthropicCacheRefreshPlan<TApi extends Api>(
+/** Bedrock Converse bodies carry their output budget under `inferenceConfig`. */
+interface BedrockKeepalivePayload {
+	inferenceConfig?: { maxTokens?: number };
+	system?: unknown;
+	messages?: unknown;
+	/** Where Bedrock carries Anthropic's `thinking` block. */
+	additionalModelRequestFields?: unknown;
+}
+
+/**
+ * True when a Bedrock Converse body asks for thinking.
+ *
+ * Covers both shapes the provider emits: adaptive
+ * (`{ thinking: { type: "adaptive" }, output_config: { effort } }`) and explicit budget
+ * (`{ thinking: { type: "enabled", budget_tokens } }`).
+ */
+function isBedrockThinkingActive(payload: BedrockKeepalivePayload): boolean {
+	const fields = payload.additionalModelRequestFields;
+	if (!isRecord(fields)) return false;
+	const thinking = fields.thinking;
+	if (!isRecord(thinking)) return false;
+	return thinking.type !== "disabled";
+}
+
+/** Everything a touch needs, resolved once at arm time from the captured wire body. */
+interface CacheKeepaliveTouchSpec {
+	/** The captured body with its output budget bounded; replayed verbatim otherwise. */
+	boundedPayload: unknown;
+	/** Anthropic non-streaming `max_tokens: 0` replay. */
+	zeroOutput: boolean;
+	/** Output budget for the touch request. */
+	maxTokens: number;
+	/** Whether the touch may abort at the first generated block. */
+	mayAbortAtGeneration: boolean;
+	/** Output tokens the touch is billed for; fed to the economic gate. */
+	warmOutputTokens: number;
+}
+
+/** True when any block in a Bedrock Converse body carries a `cachePoint` marker. */
+function hasBedrockCachePoint(payload: BedrockKeepalivePayload): boolean {
+	if (Array.isArray(payload.system) && payload.system.some(block => isRecord(block) && "cachePoint" in block)) {
+		return true;
+	}
+	if (!Array.isArray(payload.messages)) return false;
+	return payload.messages.some(
+		message =>
+			isRecord(message) &&
+			Array.isArray(message.content) &&
+			message.content.some(block => isRecord(block) && "cachePoint" in block),
+	);
+}
+
+/**
+ * Resolve how to bound a touch for `shape`, or `undefined` when the captured body is
+ * not a recognizable cacheable request for it.
+ *
+ * `undefined` is the fail-closed path: better to never keep an entry warm than to
+ * replay a body we do not understand.
+ */
+function prepareCacheKeepaliveTouch(
+	model: Model<Api>,
+	shape: CacheKeepaliveShape,
+	payload: unknown,
+): CacheKeepaliveTouchSpec | undefined {
+	if (shape.kind === "zero-output") {
+		if (!isAnthropicRefreshPayload(payload) || !hasShortAnthropicMessageBreakpoint(payload)) return undefined;
+		// `max_tokens: 0` is rejected while thinking is active, so that variant streams
+		// and bails at the first generated block instead. Anthropic reports usage on
+		// `message_start`, so aborting still yields the cache counters.
+		if (isAnthropicThinkingActive(model, payload)) {
+			return {
+				boundedPayload: payload,
+				zeroOutput: false,
+				maxTokens: payload.max_tokens,
+				mayAbortAtGeneration: true,
+				warmOutputTokens: payload.max_tokens,
+			};
+		}
+		return {
+			boundedPayload: { ...payload, max_tokens: 0 },
+			zeroOutput: true,
+			maxTokens: 0,
+			mayAbortAtGeneration: false,
+			warmOutputTokens: 0,
+		};
+	}
+
+	if (!isRecord(payload)) return undefined;
+	const bedrock = payload as BedrockKeepalivePayload;
+	// No `cachePoint` in the body means this request created no entry to keep warm.
+	if (!hasBedrockCachePoint(bedrock)) return undefined;
+	// Fail closed when thinking is active, because neither way of bounding the touch is
+	// sound on Bedrock:
+	//
+	// - Budget mode puts `thinking.budget_tokens` in `additionalModelRequestFields`
+	//   (`providers/amazon-bedrock.ts:1113-1119`), and Anthropic requires
+	//   `max_tokens > budget_tokens`, so `maxTokens: 1` is rejected outright.
+	// - Adaptive mode carries no explicit budget
+	//   (`providers/amazon-bedrock.ts:1092-1099`), so honoring it means draining a whole
+	//   thinking response — and unlike Anthropic native, Bedrock cannot be cut short early
+	//   because its cache counters only arrive in the trailing `metadata` event.
+	//
+	// Stripping `thinking` would make the replay differ from the cached request by more
+	// than output bounding, which is exactly what a keepalive must never do. Declining is
+	// the honest outcome: the entry simply expires.
+	if (isBedrockThinkingActive(bedrock)) return undefined;
+	return {
+		boundedPayload: { ...payload, inferenceConfig: { ...bedrock.inferenceConfig, maxTokens: shape.maxTokens } },
+		zeroOutput: false,
+		maxTokens: shape.maxTokens,
+		// Never abort — see the drain rule on `createCacheKeepalivePlan`.
+		mayAbortAtGeneration: false,
+		warmOutputTokens: shape.maxTokens,
+	};
+}
+
+/**
+ * Build the bounded touch for one armed chain.
+ *
+ * `spec.mayAbortAtGeneration` is the load-bearing difference between providers:
+ *
+ * - Anthropic reports usage on `message_start`, so a thinking-active touch may abort
+ *   at the first generated block and still learn whether the entry was read.
+ * - Bedrock must be **drained to `done`**. It fills `cacheRead`/`cacheWrite` only from
+ *   the trailing `metadata` event (`providers/amazon-bedrock.ts:735-744`), so cutting
+ *   the stream at content start would discard the only proof a hit occurred and every
+ *   touch would read as unverified. `providers/amazon-bedrock.ts:575` also converts an
+ *   aborted signal into a thrown `AbortError`, surfacing as an outright failure. The
+ *   bounded `maxTokens` keeps the drained body to a single token.
+ */
+function createCacheKeepalivePlan<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	options: SimpleStreamOptions | undefined,
-	payload: MessageCreateParamsStreaming,
-): AnthropicCacheRefreshPlan {
-	const thinkingEnabled = isAnthropicThinkingActive(model, payload);
+	spec: CacheKeepaliveTouchSpec,
+): CacheKeepalivePlan {
 	return {
-		async refresh(controller) {
+		async touch(controller) {
 			let cacheRead = 0;
 			let cacheWrite = 0;
-			let cacheTouchedAtMs: number | undefined;
+			let costUsd = 0;
+			let touchedAtMs: number | undefined;
 			let canceledAfterGenerationStarted = false;
 			const response = streamSimpleRequest(model, context, {
 				...options,
 				acceptEmptyResponse: true,
-				anthropicCacheRefreshRequest: !thinkingEnabled,
+				anthropicCacheRefreshRequest: spec.zeroOutput,
 				cacheRetention: "short",
-				maxTokens: thinkingEnabled ? options?.maxTokens : 0,
-				onPayload: () => ({
-					...payload,
-					max_tokens: thinkingEnabled ? payload.max_tokens : 0,
-				}),
+				maxTokens: spec.maxTokens,
+				onPayload: () => spec.boundedPayload,
 				onResponse: () => {
-					cacheTouchedAtMs = Date.now();
+					touchedAtMs = Date.now();
 				},
 				onSseEvent: undefined,
+				// A touch is not a turn: never let it inherit the keepalive flags and
+				// recurse into arming another chain.
+				anthropicCacheRefresh: false,
+				cacheKeepalivePolicy: undefined,
 				signal: controller.signal,
 			});
 
@@ -1333,11 +1613,10 @@ function createAnthropicCacheRefreshPlan<TApi extends Api>(
 				if (event.type === "done") {
 					cacheRead = event.message.usage.cacheRead;
 					cacheWrite = event.message.usage.cacheWrite;
-					return cacheTouchedAtMs !== undefined && cacheRead > 0 && cacheWrite === 0
-						? cacheTouchedAtMs
-						: undefined;
+					costUsd = event.message.usage.cost.total;
+					break;
 				}
-				if (thinkingEnabled && isAnthropicGenerationEvent(event)) {
+				if (spec.mayAbortAtGeneration && isAnthropicGenerationEvent(event)) {
 					canceledAfterGenerationStarted = true;
 					controller.abort();
 					break;
@@ -1351,12 +1630,23 @@ function createAnthropicCacheRefreshPlan<TApi extends Api>(
 					if (!controller.signal.aborted) throw error;
 				}
 			}
-			return cacheTouchedAtMs !== undefined && cacheRead > 0 && cacheWrite === 0 ? cacheTouchedAtMs : undefined;
+			// The verified-touch rule: a read with no write proves the entry was present
+			// and reused. Anything else — including HTTP 200 with no telemetry at all —
+			// ends the chain rather than pretending the cache is still warm.
+			//
+			// Report the counters even when unverified. `miss-rebuilt` means the entry was
+			// gone and this touch just paid full write price to recreate it; that is the
+			// single most expensive thing the keepalive can do, so it must reach telemetry
+			// rather than vanish as "no result". Only a request that never produced a
+			// response at all resolves to `undefined`.
+			if (touchedAtMs === undefined) return undefined;
+			const verified = cacheRead > 0 && cacheWrite === 0;
+			return { touchedAtMs, cacheRead, cacheWrite, costUsd, verified };
 		},
 	};
 }
 
-function streamSimpleWithAnthropicCacheRefresh<TApi extends Api>(
+function streamSimpleWithCacheKeepalive<TApi extends Api>(
 	model: Model<TApi>,
 	context: Context,
 	options: SimpleStreamOptions | undefined,
@@ -1366,27 +1656,30 @@ function streamSimpleWithAnthropicCacheRefresh<TApi extends Api>(
 		return streamSimpleRequest(model, context, options);
 	}
 
-	const existingState = providerSessionState.get(ANTHROPIC_CACHE_REFRESH_STATE_KEY);
-	if (existingState instanceof AnthropicCacheRefreshState) {
+	const existingState = providerSessionState.get(CACHE_KEEPALIVE_STATE_KEY);
+	if (existingState instanceof CacheKeepaliveState) {
 		existingState.cancel();
 	} else if (existingState) {
 		return streamSimpleRequest(model, context, options);
 	}
-	if (!supportsAnthropicCacheRefresh(model) || resolveCacheRetention(options.cacheRetention) !== "short") {
+	// A `long` (1h) entry outlives any plausible idle gap, and `none` never creates one.
+	const shape = resolveCacheKeepaliveShape(model, isLeakedThinkingHealExempt(model));
+	if (!shape || resolveCacheRetention(options.cacheRetention) !== "short") {
 		return streamSimpleRequest(model, context, options);
 	}
 
-	const refreshState = existingState ?? new AnthropicCacheRefreshState();
-	if (!existingState) providerSessionState.set(ANTHROPIC_CACHE_REFRESH_STATE_KEY, refreshState);
+	const keepaliveState = existingState ?? new CacheKeepaliveState();
+	if (!existingState) providerSessionState.set(CACHE_KEEPALIVE_STATE_KEY, keepaliveState);
 
 	let cacheTouchedAtMs: number | undefined;
-	let capturedPayload: MessageCreateParamsStreaming | undefined;
+	let capturedPayload: unknown;
 	const inner = streamSimpleRequest(model, context, {
 		...options,
 		onPayload: async (payload, payloadModel) => {
 			const replacement = await options?.onPayload?.(payload, payloadModel);
-			const finalPayload = replacement ?? payload;
-			if (isAnthropicRefreshPayload(finalPayload)) capturedPayload = finalPayload;
+			// Capture what actually goes on the wire, including any hook's replacement:
+			// a touch must replay the same bytes the provider cached.
+			capturedPayload = replacement ?? payload;
 			return replacement;
 		},
 		onResponse: async (response, responseModel) => {
@@ -1395,30 +1688,36 @@ function streamSimpleWithAnthropicCacheRefresh<TApi extends Api>(
 		},
 	});
 	const outer = new AssistantMessageEventStream();
-	const armRefresh = (message: AssistantMessage): void => {
+	const armKeepalive = (message: AssistantMessage): void => {
 		if (
 			message.stopReason === "error" ||
 			message.stopReason === "aborted" ||
+			// No cache activity at all means there is no entry to keep warm.
 			message.usage.cacheRead + message.usage.cacheWrite <= 0 ||
-			cacheTouchedAtMs === undefined ||
-			capturedPayload === undefined ||
-			!hasShortAnthropicMessageBreakpoint(capturedPayload)
+			cacheTouchedAtMs === undefined
 		) {
 			return;
 		}
-		refreshState.arm(createAnthropicCacheRefreshPlan(model, context, options, capturedPayload), cacheTouchedAtMs);
+		const spec = prepareCacheKeepaliveTouch(model, shape, capturedPayload);
+		if (!spec) return;
+		keepaliveState.arm(createCacheKeepalivePlan(model, context, options, spec), cacheTouchedAtMs, {
+			policy: options.cacheKeepalivePolicy,
+			cost: model.cost,
+			warmOutputTokens: spec.warmOutputTokens,
+			fingerprint: options.promptCacheKey ?? options.sessionId ?? model.id,
+		});
 	};
 
 	void (async () => {
 		try {
 			for await (const event of inner) {
-				if (event.type === "done") armRefresh(event.message);
+				if (event.type === "done") armKeepalive(event.message);
 				outer.push(event);
 				if (outer.done) return;
 			}
 			if (!outer.done) {
 				const result = await inner.result();
-				armRefresh(result);
+				armKeepalive(result);
 				outer.end(result);
 			}
 		} catch (error) {
@@ -1434,7 +1733,7 @@ export function streamSimple<TApi extends Api>(
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
 	if (!model.requiresGlyphTokenization) {
-		return streamSimpleWithAnthropicCacheRefresh(model, context, options);
+		return streamSimpleWithCacheKeepalive(model, context, options);
 	}
 	const codec = applyGlyphCodec(context);
 	const execHandlers = options?.cursorExecHandlers ?? options?.execHandlers;
@@ -1447,7 +1746,7 @@ export function streamSimple<TApi extends Api>(
 					execHandlers: wrappedExecHandlers,
 					cursorExecHandlers: wrappedExecHandlers,
 				};
-	return codec.wrap(streamSimpleWithAnthropicCacheRefresh(model, codec.context, wireOptions));
+	return codec.wrap(streamSimpleWithCacheKeepalive(model, codec.context, wireOptions));
 }
 
 function streamSimpleRequest<TApi extends Api>(

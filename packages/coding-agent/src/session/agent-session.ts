@@ -76,6 +76,7 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import { type Effort, streamSimple } from "@oh-my-pi/pi-ai";
+import { CACHE_KEEPALIVE_STATE_KEY } from "@oh-my-pi/pi-ai/cache/keepalive";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
@@ -1924,6 +1925,27 @@ export class AgentSession {
 	 */
 	hasPendingAsyncWork(): boolean {
 		return this.#hasPendingAsyncWake();
+	}
+
+	/**
+	 * True while this agent owns background work that is still running, regardless of
+	 * whether its delivery is suppressed.
+	 *
+	 * Deliberately not {@link hasPendingAsyncWork}: that answers "will the loop re-wake on
+	 * its own?" and excludes deliveries a live `hub` wait has suppressed. A prompt-cache
+	 * lease asks a different question — "is work still running that this session will resume
+	 * from?" — and a blocking `hub` wait is the strongest possible yes: the session is
+	 * parked mid-turn and will replay the exact same prefix the moment the wait returns.
+	 */
+	hasRunningOwnedAsyncWork(): boolean {
+		const manager = this.#asyncJobManager;
+		if (!manager) return false;
+		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
+		return (
+			manager.getRunningJobs(ownerFilter).length > 0 ||
+			manager.hasPendingDeliveries(ownerFilter) ||
+			this.yieldQueue.has(ASYNC_RESULT_MESSAGE_TYPE)
+		);
 	}
 
 	/**
@@ -7576,10 +7598,36 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * Single choke point every history-rewriting maintenance path funnels through
+	 * (compaction apply, shake, drop-images, rewind, compaction rebuild), so it also
+	 * carries the provider-agnostic prompt-cache work; only the transport close below is
+	 * Codex-specific.
+	 */
 	#closeCodexProviderSessionsForHistoryRewrite(): void {
+		this.#cancelCacheKeepalive("history rewrite");
 		const currentModel = this.model;
 		if (currentModel?.api !== "openai-codex-responses") return;
 		this.#closeProviderSessionsForModelSwitch(currentModel, currentModel);
+	}
+
+	/**
+	 * End the prompt-cache keepalive chain. A keepalive must never outlive the prefix it
+	 * protects: once the next request is guaranteed to send different bytes (compacted
+	 * history, a new model, a rebuilt transcript) the cached entry is unreachable, so every
+	 * further touch is spend against something nobody can read. Dropping the state also
+	 * un-anchors the chain, so the next real request that reports cache activity arms a
+	 * fresh one against the new prefix.
+	 */
+	#cancelCacheKeepalive(reason: string): void {
+		const state = this.#providerSessionState.get(CACHE_KEEPALIVE_STATE_KEY);
+		if (!state) return;
+		this.#providerSessionState.delete(CACHE_KEEPALIVE_STATE_KEY);
+		try {
+			state.close();
+		} catch (error) {
+			logger.warn("Failed to cancel prompt-cache keepalive", { reason, error: String(error) });
+		}
 	}
 
 	#resetCodexProviderAfterCompaction(compaction: CodexCompactionContext): void {
@@ -7630,6 +7678,11 @@ export class AgentSession {
 	}
 
 	#closeProviderSessionsForModelSwitch(currentModel: Model, nextModel: Model): void {
+		// Every caller is a transition that replaces the wire prefix — a real model change,
+		// a Codex history rewrite, or a stale-replay reset — so the prompt-cache keepalive
+		// dies here too, whatever provider armed it. Nothing on the ordinary
+		// assistant-message path reaches this method, so the self-re-arming chain survives.
+		this.#cancelCacheKeepalive("model switch");
 		const providerKeys = new Set<string>();
 		if (currentModel.api === "openai-codex-responses" || nextModel.api === "openai-codex-responses") {
 			providerKeys.add("openai-codex-responses");

@@ -43,7 +43,16 @@ export function getBundledModels(provider: GeneratedProvider): Model<Api>[] {
 	const models = getProviderModels(provider);
 	return models ? (Array.from(models.values()) as Model<Api>[]) : [];
 }
-function resolveTokenCost(cost: ModelCost, promptInputTokens: number): TokenCost {
+
+/**
+ * Rate card in force for a prompt of `promptInputTokens`: the long-context tier
+ * once the prompt reaches its threshold, otherwise the base card.
+ *
+ * Exported so callers that price something other than a completed `Usage` record
+ * — e.g. the prompt-cache keepalive, which prices a *hypothetical* resume — read
+ * the same tier the billing helpers below would apply, instead of `cost.input`.
+ */
+export function resolveTokenCost(cost: ModelCost, promptInputTokens: number): TokenCost {
 	const longContext = cost.longContext;
 	if (!longContext) return cost;
 	const reachesThreshold =

@@ -104,7 +104,11 @@ test("EvalTool omits tools the model can still call directly", () => {
 		hasUI: false,
 		getSessionFile: () => null,
 		settings: Settings.isolated(),
-		toolRegistry: new Map([
+		// Annotated because the two entries' `parameters` schemas have different shapes:
+		// left to inference, the Map's value type is pinned by whichever entry TypeScript
+		// resolves first and the other is then rejected. The session is cast to
+		// `ToolSession` below anyway, so the loose value type costs nothing here.
+		toolRegistry: new Map<string, { name: string; parameters: unknown }>([
 			["read", read],
 			["write", write],
 		]),

@@ -24,6 +24,7 @@ import {
 	getOpenAIStreamFirstEventTimeoutMs,
 	getOpenAIStreamIdleTimeoutMs,
 } from "../utils/idle-iterator";
+import { notifyProviderResponse } from "../utils/provider-response";
 import { sanitizeSchemaForOllama, toolWireSchema } from "../utils/schema";
 import {
 	getStreamMarkupHealingPattern,
@@ -617,6 +618,13 @@ const streamOllamaOnce = (
 			} finally {
 				watchdog.clear();
 			}
+			// Fires for every status the instant the `Response` exists — before the
+			// `!response.ok` branch and the body guard below. `after_provider_response`
+			// is response metadata, so gating it on 2xx would hide 401/429/5xx from the
+			// handlers that most need them. Ollama surfaces no request-id header, so the
+			// argument is omitted rather than guessed. The body is untouched here, so
+			// `captureHttpErrorResponse` and `readJsonl` below still see a full stream.
+			await notifyProviderResponse(options, response, model);
 			if (!response.ok) {
 				capturedErrorResponse = await captureHttpErrorResponse(response);
 				throw new AIError.OllamaApiError(`HTTP ${response.status} from ${baseUrl}/api/chat`, response.status, {

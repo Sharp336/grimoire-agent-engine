@@ -31,6 +31,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { extractGoogleValidationUrl, formatGoogleValidationRequiredMessage } from "../utils/google-validation";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
+import { notifyProviderResponse } from "../utils/provider-response";
 // Refresh is the sole responsibility of AuthStorage (broker-aware, single-flighted);
 // the stream provider trusts the access token threaded through `options.apiKey`.
 import { normalizeSchemaForCCA } from "../utils/schema";
@@ -961,6 +962,14 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						watchdog.clear();
 					}
 
+					// Fires for every status the instant the `Response` exists — before
+					// the `!response.ok` branch below, which may `continue` to the next
+					// endpoint without ever throwing. Gating on 2xx would hide both the
+					// 401/429 an extension needs and the silent endpoint failover.
+					// Cloud Code Assist surfaces no request-id header, so that argument
+					// is omitted rather than guessed; the body stays unread here.
+					await notifyProviderResponse(options, response, model);
+
 					if (!response.ok) {
 						if (AIError.isTransientStatus(response.status)) {
 							if (!isLastEndpoint) {
@@ -1009,6 +1018,10 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 								body: requestBodyJson,
 								signal: options?.signal,
 							});
+
+							// The empty-stream replay is its own provider response, so it
+							// gets its own event — again before the `.ok` check.
+							await notifyProviderResponse(options, currentResponse, model);
 
 							if (!currentResponse.ok) {
 								const retryErrorText = await currentResponse.text();

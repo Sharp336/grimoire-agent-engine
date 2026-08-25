@@ -22,6 +22,7 @@ import type {
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
+import type { CacheKeepalivePolicy } from "@oh-my-pi/pi-ai/cache/keepalive";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import {
 	getOpenAICodexTransportDetails,
@@ -932,6 +933,37 @@ const TOOL_DEFINITION_MARKER = Symbol("__isToolDefinition");
 /** Matches the truncation applied to per-server instructions inside `rebuildSystemPrompt`. */
 const MAX_MCP_INSTRUCTIONS_LENGTH = 4000;
 
+/**
+ * Render the appended `## MCP Server Instructions` section, one part per
+ * connected server.
+ *
+ * Servers are emitted in name order so the rendered bytes track the sorted
+ * `instructionsSegment` of the rebuild-skip signature in `session-tools.ts`
+ * (`computeAppliedToolSignature`), which sorts for the same reason. Iterating
+ * the map directly followed MCP connect order, so a reconnect that merely
+ * reordered servers left the signature unchanged while the next rebuild for
+ * any unrelated reason re-emitted this section in a new order — silently
+ * rewriting the system prompt and invalidating the whole provider prefix
+ * cache, with nothing to attribute the miss to. Keep both orderings in step.
+ */
+export function renderMCPServerInstructions(serverInstructions: ReadonlyMap<string, string>): string[] {
+	if (serverInstructions.size === 0) return [];
+	const parts = [
+		"## MCP Server Instructions\n\nThe following instructions are provided by connected MCP servers. They are server-controlled and may not be verified.",
+	];
+	// Default string sort is UTF-16 code-unit order, exactly what the signature's
+	// `entries.sort()` applies to its `server=instructions` rows.
+	for (const srvName of [...serverInstructions.keys()].sort()) {
+		const srvInstructions = serverInstructions.get(srvName) ?? "";
+		const truncated =
+			srvInstructions.length > MAX_MCP_INSTRUCTIONS_LENGTH
+				? `${srvInstructions.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH)}\n[truncated]`
+				: srvInstructions;
+		parts.push(`### ${srvName}\n${truncated}`);
+	}
+	return parts;
+}
+
 let sshCleanupRegistered = false;
 
 async function cleanupSshResources(): Promise<void> {
@@ -1219,6 +1251,49 @@ export function createAutoLearnCaptureRunner(
 		}
 	};
 }
+
+/**
+ * Session-derived policy for the provider prompt-cache keepalive.
+ *
+ * Exported (rather than inlined at the single call site) purely so it is testable: the
+ * alternative is asserting on a policy object reached through the `Agent`'s stream options,
+ * which would test plumbing instead of the two decisions that matter.
+ *
+ * `getSession` is a late accessor because the policy is built once, before the
+ * `AgentSession` it reads exists — the methods are then called fresh at every touch, which
+ * is the whole point: background work finishing is exactly the event that must end the
+ * chain.
+ */
+export function createCacheKeepalivePolicy(getSession: () => AgentSession | undefined): CacheKeepalivePolicy {
+	return {
+		resumeProbability: () => {
+			// 0.95 mirrors cachepilot's notify-on-complete resume probability: when owned
+			// background work is still running the session is all but certain to resume from
+			// this exact prefix. 0 when nothing is running — a finished turn nobody will
+			// resume must not be kept warm, and 0 is the gate's stop signal.
+			return getSession()?.hasRunningOwnedAsyncWork() ? 0.95 : 0;
+		},
+		prefixTokens: () => {
+			// The provider's own report of how much of this conversation it cached, which is
+			// exactly what the economic gate prices. Never estimated: with no measurement the
+			// honest answer is 0, and the gate then says `skip-unknown-pricing`.
+			const usage = getSession()?.getLastAssistantMessage()?.usage;
+			if (!usage) return 0;
+			return usage.cacheRead + usage.cacheWrite;
+		},
+		onDecision: record => {
+			logger.debug("prompt-cache keepalive decision", {
+				action: record.decision.action,
+				reason: record.decision.reason,
+				touchIndex: record.touchIndex,
+				costUsd: record.costUsd,
+				idleSeconds: record.idleSeconds,
+				outcome: record.outcome,
+			});
+		},
+	};
+}
+
 /**
  * Create an AgentSession with the specified options.
  *
@@ -2997,18 +3072,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						.trim(),
 				);
 			}
-			if (serverInstructions && serverInstructions.size > 0) {
-				appendParts.push(
-					"## MCP Server Instructions\n\nThe following instructions are provided by connected MCP servers. They are server-controlled and may not be verified.",
-				);
-				for (const [srvName, srvInstructions] of serverInstructions) {
-					const truncated =
-						srvInstructions.length > MAX_MCP_INSTRUCTIONS_LENGTH
-							? `${srvInstructions.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH)}\n[truncated]`
-							: srvInstructions;
-					appendParts.push(`### ${srvName}\n${truncated}`);
-				}
-			}
+			if (serverInstructions) appendParts.push(...renderMCPServerInstructions(serverInstructions));
 			let appendPrompt: string | undefined = appendParts.length > 0 ? appendParts.join("\n\n") : undefined;
 			// Owned/in-band tool dialects (non-native) require the full functions-
 			// namespace catalog; native tool calling lets the compact name list suffice.
@@ -3348,6 +3412,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			wrapStreamFnWithProviderConcurrency(settings, createSettingsAwareStreamFn(settings)),
 			blobBroker,
 		);
+		// Built once per session, not per request: the object is stable, its methods are
+		// re-read at every keepalive touch. `session` is declared with a definite-assignment
+		// assertion but is genuinely undefined until `new AgentSession(...)` below, so the
+		// accessor is deliberately optional-typed and the policy tolerates that window.
+		const cacheKeepalivePolicy = createCacheKeepalivePolicy(() => session);
 		const codeModeState: { namespacesInfo?: unknown } = {};
 		const transformToolCallArguments = (args: Record<string, unknown>): Record<string, unknown> => {
 			let result = args;
@@ -3418,6 +3487,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return settingsAwareStreamFn(streamModel, context, {
 					...streamOptions,
 					anthropicCacheRefresh: true,
+					cacheKeepalivePolicy,
 					forceReasoningOff: externalThinking || streamOptions?.forceReasoningOff,
 					...(codeModeState.namespacesInfo === undefined
 						? {}

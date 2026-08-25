@@ -62,6 +62,14 @@
       "types": "./src/error/index.ts",
       "import": "./src/error/index.ts"
     },
+    "./cache": {
+      "types": "./src/cache/index.ts",
+      "import": "./src/cache/index.ts"
+    },
+    "./cache/*": {
+      "types": "./src/cache/*.ts",
+      "import": "./src/cache/*.ts"
+    },
     "./*": {
       "types": "./src/*.ts",
       "import": "./src/*.ts"

@@ -41,6 +41,7 @@ import {
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
 import { armPreResponseTimeout, getStreamFirstEventTimeoutMs } from "../utils/idle-iterator";
+import { notifyProviderResponse } from "../utils/provider-response";
 import { toolWireSchema } from "../utils/schema/wire";
 import { invalidateAwsCredentialCache, resolveAwsCredentials } from "./aws-credentials";
 import { decodeEventStream } from "./aws-eventstream";
@@ -477,6 +478,15 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			} finally {
 				watchdog.clear();
 			}
+
+			// `after_provider_response` is response *metadata*, so it fires for every
+			// status the instant the `Response` exists — before the `!response.ok`
+			// branch below and before the body guard. Gating it on 2xx would hide
+			// 401/403/429/5xx from exactly the handlers that need them (credential
+			// invalidation, rate-limit backoff). `notifyProviderResponse` reads only
+			// status and headers and never touches the body, so the error paths below
+			// still consume `response.text()` and throw unchanged.
+			await notifyProviderResponse(options, response, model, response.headers.get("x-amzn-requestid"));
 
 			if (!response.ok) {
 				if (!bearerToken && (response.status === 401 || response.status === 403)) {

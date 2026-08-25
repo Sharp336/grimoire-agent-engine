@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Prompt-cache keepalive now covers Amazon Bedrock, which reports cache-read/cache-write tokens but was previously excluded, so a Bedrock session paid a full cache write on every resume after a >5-minute idle gap.
+- Prompt-cache keepalive is now cost-aware: a `cacheKeepalivePolicy` gates each touch on whether the avoided rebuild is worth more than the touch, so the chain lasts as long as it pays for itself instead of stopping at a fixed 3 touches, and issues no touch at all once nothing will resume the session.
+- Added `@oh-my-pi/pi-ai/cache`: cache identity fingerprints, outcome classification, an economic warm controller, evidence-based TTL learning, and keepalive deadline scheduling.
+
+### Fixed
+
+- Fixed `after_provider_response` never firing for Amazon Bedrock, Ollama, and the Gemini CLI provider, so extensions could not observe those responses at all; it now fires for every status, including 401/403/429, before the provider throws.
+
 ## [18.0.4] - 2026-08-24
 
 ### Fixed
