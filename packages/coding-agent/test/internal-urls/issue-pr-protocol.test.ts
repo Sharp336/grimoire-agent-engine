@@ -378,6 +378,33 @@ describe("pr:// protocol handler", () => {
 		expect(bare.notes?.[0]).toMatch(/^Cached:/);
 	});
 
+	it("keeps github.com rows separate from the host GH_HOST names", async () => {
+		const spy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+			if (args.some(arg => arg.endsWith("/comments"))) {
+				return [] as never;
+			}
+			return prPayload(81, "pr body") as never;
+		});
+
+		const saved = process.env.GH_HOST;
+		process.env.GH_HOST = "ghe.example.com";
+		try {
+			const router = InternalUrlRouter.instance();
+			await router.resolve("pr://owner/example/81");
+			// The bare form above belongs to ghe.example.com, so github.com's #81
+			// is a different pull request and must be fetched, not served from it.
+			const explicit = await router.resolve("pr://github.com/owner/example/81");
+			expect(explicit.notes?.[0]).toBe("Fetched live");
+			expect(spy).toHaveBeenCalledTimes(4);
+		} finally {
+			if (saved === undefined) {
+				delete process.env.GH_HOST;
+			} else {
+				process.env.GH_HOST = saved;
+			}
+		}
+	});
+
 	it("rejects a host-prefixed URL that names no repository", async () => {
 		const router = InternalUrlRouter.instance();
 		await expect(InternalUrlRouter.instance().resolve("pr://ghe.example.com/owner")).rejects.toThrow(

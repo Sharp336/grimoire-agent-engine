@@ -182,9 +182,14 @@ export function parseIssueUrl(value: string | undefined): { repo?: string; issue
 	};
 }
 
-/** The host `gh` will send a ref to when the ref itself names none. */
+/** The host `gh` falls back to for any ref that names none. */
+export function defaultGhHost(): string {
+	return (process.env.GH_HOST || GITHUB_HOST).toLowerCase();
+}
+
+/** The host `gh` will send a ref to, whether or not the ref names one. */
 function effectiveHost(ref: GhRepoRef): string {
-	return (ref.host || process.env.GH_HOST || GITHUB_HOST).toLowerCase();
+	return ref.host?.toLowerCase() ?? defaultGhHost();
 }
 
 /**
