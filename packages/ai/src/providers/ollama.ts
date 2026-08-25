@@ -618,13 +618,6 @@ const streamOllamaOnce = (
 			} finally {
 				watchdog.clear();
 			}
-			// Fires for every status the instant the `Response` exists — before the
-			// `!response.ok` branch and the body guard below. `after_provider_response`
-			// is response metadata, so gating it on 2xx would hide 401/429/5xx from the
-			// handlers that most need them. Ollama surfaces no request-id header, so the
-			// argument is omitted rather than guessed. The body is untouched here, so
-			// `captureHttpErrorResponse` and `readJsonl` below still see a full stream.
-			await notifyProviderResponse(options, response, model);
 			if (!response.ok) {
 				capturedErrorResponse = await captureHttpErrorResponse(response);
 				throw new AIError.OllamaApiError(`HTTP ${response.status} from ${baseUrl}/api/chat`, response.status, {
@@ -636,6 +629,18 @@ const streamOllamaOnce = (
 					headers: response.headers,
 				});
 			}
+			// `after_provider_response` fires only for a response that will actually be
+			// streamed: after the `!response.ok` branch and after the body guard. That
+			// matches `anthropic.ts` and the OpenAI providers, which notify after a
+			// helper (`getAnthropicStreamResponse` / `postOpenAIStream`) has already
+			// thrown on any non-2xx, so no extension has ever observed an error status
+			// through this event. Also firing on 401/429/5xx is a strictly broader
+			// contract — useful, but it has to be adopted uniformly across every
+			// provider in its own change rather than diverging in three of them.
+			// Ollama surfaces no request-id header, so the argument is omitted rather
+			// than guessed. The body is untouched here, so `readJsonl` below still sees
+			// a full stream.
+			await notifyProviderResponse(options, response, model);
 			stream.push({ type: "start", partial: output });
 			for await (const chunk of readJsonl<OllamaChatChunk>(response.body)) {
 				if (chunk.message?.thinking) {

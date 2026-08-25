@@ -4,26 +4,34 @@
  * The keepalive spends real money replaying a cached prefix, so the session must answer one
  * question honestly: is work still running that this session will resume from? That is NOT
  * the same question `hasPendingAsyncWork()` answers, and the difference is the whole reason
- * `hasRunningOwnedAsyncWork()` exists.
+ * `hasRunningOwnedAsyncWork()` and `willResumeFromCurrentPrefix()` exist. The last describe
+ * covers the other side of the same coin: how much money the keepalive is allowed to spend
+ * by default.
  */
 import { afterEach, describe, expect, it } from "bun:test";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import * as path from "node:path";
+import { type } from "@oh-my-pi/omptype";
+import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { CACHE_KEEPALIVE_STATE_KEY } from "@oh-my-pi/pi-ai/cache/keepalive";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Usage } from "@oh-my-pi/pi-catalog/types";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createCacheKeepalivePolicy } from "@oh-my-pi/pi-coding-agent/sdk";
+import { createAgentSession, createCacheKeepalivePolicy } from "@oh-my-pi/pi-coding-agent/sdk";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { TempDir } from "@oh-my-pi/pi-utils";
+
+registerMockApi();
 
 interface Harness {
 	session: AgentSession;
 	manager: AsyncJobManager;
+	mock: MockModel;
 	calls: () => number;
 }
 
@@ -44,14 +52,18 @@ describe("prompt-cache keepalive session wiring", () => {
 	async function createHarness(options?: {
 		agentId?: string;
 		usage?: Partial<Omit<Usage, "cost">>;
+		tools?: AgentTool[];
+		mock?: MockModel;
 	}): Promise<Harness> {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
-		const mock = createMockModel({
-			handler: () => ({ content: ["Done"], usage: options?.usage }),
-		});
+		const mock =
+			options?.mock ??
+			createMockModel({
+				handler: () => ({ content: ["Done"], usage: options?.usage }),
+			});
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			initialState: { model, systemPrompt: ["Test"], tools: options?.tools ?? [] },
 			convertToLlm,
 			streamFn: mock.stream,
 		});
@@ -69,7 +81,7 @@ describe("prompt-cache keepalive session wiring", () => {
 			ownedAsyncJobManager: manager,
 		});
 		sessions.push(session);
-		return { session, manager, calls: () => mock.calls.length };
+		return { session, manager, mock, calls: () => mock.calls.length };
 	}
 
 	it("stays armed while an owned job runs under a blocking hub wait, where hasPendingAsyncWork() is false", async () => {
@@ -159,6 +171,54 @@ describe("prompt-cache keepalive session wiring", () => {
 		manager.unwatchJobs(["policy-job"]);
 		manager.acknowledgeDeliveries(["policy-job"]);
 		manager.evictCompletedJobs({ ownerId: "Main" });
+		expect(policy.resumeProbability()).toBe(0);
+	});
+
+	it("keeps the lease priced while a long FOREGROUND tool call runs with no async job in sight", async () => {
+		// Failure mode: `resumeProbability()` reads only the async-job manager, so an agent
+		// parked in a synchronous 20-minute build or test run reports 0 — the chain stops, the
+		// entry expires, and the very next request (the one that reads the tool's output) pays
+		// a full cache rebuild. The tool's own runtime is precisely the gap the keepalive is
+		// for.
+		const toolRunning = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const build: AgentTool = {
+			name: "slow_build",
+			label: "Slow Build",
+			description: "A foreground build that outlives the cache TTL",
+			parameters: type({}),
+			execute: async () => {
+				toolRunning.resolve();
+				await release.promise;
+				return { content: [{ type: "text" as const, text: "build ok" }] };
+			},
+		};
+		const mock = createMockModel({
+			responses: [{ content: [{ type: "toolCall", name: "slow_build", arguments: {} }] }],
+			handler: () => ({ content: ["Done"] }),
+		});
+		const { session, manager } = await createHarness({ tools: [build], mock });
+		const policy = createCacheKeepalivePolicy(() => session);
+
+		const turn = session.sendUserMessage("build it");
+		await toolRunning.promise;
+
+		// Nothing background is in play: no running job, no queued delivery. This is the
+		// state that used to price the lease at 0.
+		expect(manager.getRunningJobs({ ownerId: "Main" })).toHaveLength(0);
+		expect(session.hasRunningOwnedAsyncWork()).toBe(false);
+		// The loop is still mid-turn and will issue the tool-result request the moment the
+		// build returns, so the prefix is certain to be reused.
+		expect(session.willResumeFromCurrentPrefix()).toBe(true);
+		expect(policy.resumeProbability()).toBeCloseTo(0.95, 10);
+
+		release.resolve();
+		await turn;
+
+		// And a genuinely finished turn still stops the chain: the in-flight leg must not
+		// latch, or every session would keep paying for a prefix nobody will read again.
+		expect(session.isStreaming).toBe(false);
+		expect(session.willResumeFromCurrentPrefix()).toBe(false);
 		expect(policy.resumeProbability()).toBe(0);
 	});
 
@@ -260,5 +320,67 @@ describe("prompt-cache keepalive session wiring", () => {
 		const policy = createCacheKeepalivePolicy(() => undefined);
 		expect(policy.resumeProbability()).toBe(0);
 		expect(policy.prefixTokens()).toBe(0);
+	});
+});
+
+/**
+ * The economic lease replaces a fixed 3-touch budget (~19 minutes) with up to 24 touches
+ * (~114 minutes) of billed replays, so it must not arrive as the default. These drive the
+ * real `createAgentSession` wiring and inspect the options that reach the provider.
+ */
+describe("prompt-cache keepalive opt-in", () => {
+	async function policyReachingProvider(cacheKeepalive?: "legacy" | "economic"): Promise<unknown> {
+		using dir = TempDir.createSync("@omp-cache-keepalive-optin-");
+		const auth = await AuthStorage.create(path.join(dir.path(), "auth.db"));
+		try {
+			auth.setRuntimeApiKey("mock", "test-key");
+			const mock = createMockModel({ id: "keepalive-optin", handler: () => ({ content: ["Done"] }) });
+			const { session } = await createAgentSession({
+				cwd: dir.path(),
+				agentDir: dir.path(),
+				authStorage: auth,
+				modelRegistry: new ModelRegistry(auth, path.join(dir.path(), "models.yml")),
+				model: mock,
+				settings: Settings.isolated({
+					"compaction.enabled": false,
+					"todo.enabled": false,
+					"retry.enabled": false,
+					...(cacheKeepalive === undefined ? {} : { "providers.cacheKeepalive": cacheKeepalive }),
+				}),
+				sessionManager: SessionManager.inMemory(dir.path()),
+				disableExtensionDiscovery: true,
+				enableMCP: false,
+				enableLsp: false,
+				skills: [],
+				rules: [],
+				contextFiles: [],
+			});
+			try {
+				await session.prompt("hello");
+				expect(mock.calls).not.toHaveLength(0);
+				return mock.calls[0]?.options?.cacheKeepalivePolicy;
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			auth.close();
+		}
+	}
+
+	it("defaults to legacy, so an unconfigured install keeps the fixed 3-touch budget", async () => {
+		// THE failure mode this setting exists for: shipping the lease unconditionally raises
+		// every session's keepalive spend — 24 billed touches where there were 3 — with no
+		// maintainer decision recorded anywhere.
+		expect(Settings.isolated().get("providers.cacheKeepalive")).toBe("legacy");
+		// No policy in the provider options means `CacheKeepaliveState.arm` takes the
+		// LEGACY_CACHE_KEEPALIVE_MAX_TOUCHES branch, which is the pre-existing behavior.
+		expect(await policyReachingProvider()).toBeUndefined();
+	});
+
+	it("supplies the policy only when the setting opts in", async () => {
+		// The other half: an opt-in nobody can turn on is just a removal. The policy has to
+		// reach the provider layer when asked for.
+		expect(await policyReachingProvider("legacy")).toBeUndefined();
+		expect(await policyReachingProvider("economic")).toBeDefined();
 	});
 });

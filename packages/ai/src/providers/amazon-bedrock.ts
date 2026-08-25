@@ -479,15 +479,6 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				watchdog.clear();
 			}
 
-			// `after_provider_response` is response *metadata*, so it fires for every
-			// status the instant the `Response` exists — before the `!response.ok`
-			// branch below and before the body guard. Gating it on 2xx would hide
-			// 401/403/429/5xx from exactly the handlers that need them (credential
-			// invalidation, rate-limit backoff). `notifyProviderResponse` reads only
-			// status and headers and never touches the body, so the error paths below
-			// still consume `response.text()` and throw unchanged.
-			await notifyProviderResponse(options, response, model, response.headers.get("x-amzn-requestid"));
-
 			if (!response.ok) {
 				if (!bearerToken && (response.status === 401 || response.status === 403)) {
 					// Stale cached credentials (e.g. rotated session keys in ~/.aws/credentials) —
@@ -504,6 +495,18 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				);
 			}
 			if (!response.body) throw new AIError.BedrockApiError("Bedrock response has no body", response.status);
+
+			// `after_provider_response` fires only for a response that will actually be
+			// streamed: after the `!response.ok` branch and after the body guard. That
+			// matches `anthropic.ts` and the OpenAI providers, which notify after a
+			// helper (`getAnthropicStreamResponse` / `postOpenAIStream`) has already
+			// thrown on any non-2xx, so no extension has ever observed an error status
+			// through this event. Also firing on 401/403/429/5xx is a strictly broader
+			// contract — useful, but it has to be adopted uniformly across every
+			// provider in its own change rather than diverging in three of them.
+			// `notifyProviderResponse` reads only status and headers, never the body,
+			// so the stream below still sees a full body.
+			await notifyProviderResponse(options, response, model, response.headers.get("x-amzn-requestid"));
 
 			// Track first event for the abort/diagnostic path (currently informational).
 			for await (const message of decodeEventStream(response.body)) {

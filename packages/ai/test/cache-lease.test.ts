@@ -61,17 +61,19 @@ describe("nextWarmDeadlineMs", () => {
 		expect(deadline).toBeLessThan(lastTouchAtMs + ttlS * 1000);
 	});
 
-	it("never schedules in the past when the ttl is shorter than the margin", () => {
-		// Catches a missing floor at 0: ttl 5 with a 10s margin gives a negative
-		// offset, which would mark the lease permanently overdue.
+	it("returns no deadline when the ttl cannot clear the round-trip margin", () => {
+		// Catches the zero-delay timer spin. This used to clamp the offset to 0 and return
+		// `lastTouchAtMs` — permanently due — so a scheduler that reschedules after every
+		// verified touch spun a 0ms timer forever, spending the keepalive budget on touches
+		// that could never arrive inside the entry's remaining life. With a ttl of 5s
+		// against a 10s margin there is no useful deadline, and saying so is the only
+		// answer that terminates.
 		const lastTouchAtMs = Date.UTC(2026, 7, 25);
-		const deadline = nextWarmDeadlineMs({
-			lastTouchAtMs,
-			ttlS: 5,
-			jitterKey: "degenerate-ttl",
-		});
-		expect(deadline).toBeGreaterThanOrEqual(lastTouchAtMs);
-		expect(deadline).toBeLessThan(lastTouchAtMs + 5_000);
+		expect(nextWarmDeadlineMs({ lastTouchAtMs, ttlS: 5, jitterKey: "degenerate-ttl" })).toBeUndefined();
+		// Boundary: ttl exactly equal to the margin leaves zero usable offset too.
+		expect(
+			nextWarmDeadlineMs({ lastTouchAtMs, ttlS: DEFAULT_MINIMUM_MARGIN_S, latencyP95S: 0, jitterKey: "at-margin" }),
+		).toBeUndefined();
 	});
 
 	it("applies the documented defaults when optional inputs are omitted", () => {

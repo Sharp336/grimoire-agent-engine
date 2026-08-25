@@ -17,8 +17,8 @@
 //
 // Timing note: these tests never sleep. The keepalive re-schedules itself from inside the
 // async completion of the previous touch, so the observable signal is the policy's own
-// `onDecision` callback; every wait below is a promise resolved by that callback. A short
-// real `ttlSeconds` compresses the interval so the suite runs in milliseconds.
+// `onDecision` callback; every wait below is a promise resolved by that callback. The
+// interval itself is compressed by `FAST_TTL_SECONDS`.
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { streamSimple } from "@oh-my-pi/pi-ai";
 import type { CacheKeepaliveRecord } from "@oh-my-pi/pi-ai/cache/keepalive";
@@ -29,8 +29,22 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
 const PREFIX_TOKENS = 120_000;
-/** Compressed so the real scheduler is exercised without a perceptible wait. */
-const FAST_TTL_SECONDS = 0.05;
+/**
+ * Round-trip margin the keepalive scheduler applies (`CACHE_KEEPALIVE_MARGIN_S` in
+ * `src/stream.ts`); duplicated here because the interval below is derived from it.
+ */
+const KEEPALIVE_MARGIN_S = 15;
+/**
+ * TTL chosen so the scheduler's own arithmetic — `min(ttl * 0.95, ttl - margin)` — yields
+ * a 20ms interval, exercising the real timer path without a perceptible wait.
+ *
+ * The compression comes from putting the TTL just *above* the margin rather than below
+ * it: a TTL the margin swallows now yields no deadline at all (the anti-spin contract on
+ * `nextWarmDeadlineMs`), so it can no longer be abused to make a suite fast.
+ */
+const FAST_TTL_SECONDS = KEEPALIVE_MARGIN_S + 0.02;
+/** What `FAST_TTL_SECONDS` resolves to: `min(14.269, 0.02)` seconds. */
+const TOUCH_INTERVAL_MS = 20;
 
 const context: Context = { messages: [{ role: "user", content: "keep this prefix warm", timestamp: 1 }] };
 
@@ -165,11 +179,12 @@ interface Harness {
 	/**
 	 * Resolves after several compressed touch intervals with no decision reported.
 	 *
-	 * Absence is the contract in exactly one test — "no chain was armed" — and it has no
-	 * signal to await by construction, so this is the one place a real delay is warranted
-	 * (the rule against wall-clock waits in tests allows it when deterministic control
-	 * cannot express the assertion). `FAST_TTL_SECONDS` is 50ms, so this costs ~250ms and
-	 * would observe a touch many times over if one had been scheduled.
+	 * Absence is the contract in a couple of tests — "no chain was armed", "no touch was
+	 * schedulable" — and it has no signal to await by construction, so this is the one
+	 * place a real delay is warranted (the rule against wall-clock waits in tests allows
+	 * it when deterministic control cannot express the assertion). The interval is 20ms,
+	 * so this costs ~100ms and would observe a touch several times over if one had been
+	 * scheduled.
 	 */
 	awaitNoDecision(): Promise<void>;
 	states: Map<string, ProviderSessionState>;
@@ -199,7 +214,7 @@ function harness(frames: (callIndex: number) => readonly Uint8Array[]): Harness 
 			return promise;
 		},
 		async awaitNoDecision() {
-			await Bun.sleep(FAST_TTL_SECONDS * 1000 * 5);
+			await Bun.sleep(TOUCH_INTERVAL_MS * 5);
 		},
 		record(record) {
 			decisions.push(record);
@@ -224,6 +239,14 @@ interface DriveOverrides {
 	maxTouches?: number;
 	model?: Model<"bedrock-converse-stream">;
 	reasoning?: Effort;
+	/** Overrides the compressed TTL; used to drive the un-schedulable case. */
+	ttlSeconds?: number;
+	/** Stands in for the session's physical cache fingerprint. */
+	fingerprint?: () => string | undefined;
+	/** Omitted by default, so the routing-key fallback is what the other tests exercise. */
+	promptCacheKey?: string;
+	/** Drives the pre-policy caller: `anthropicCacheRefresh` on, no `cacheKeepalivePolicy`. */
+	withoutPolicy?: boolean;
 }
 
 async function drive(instance: Harness, overrides: DriveOverrides = {}): Promise<void> {
@@ -238,13 +261,19 @@ async function drive(instance: Harness, overrides: DriveOverrides = {}): Promise
 			anthropicCacheRefresh: true,
 			providerSessionState: instance.states,
 			sessionId: "bedrock-keepalive-session",
-			cacheKeepalivePolicy: {
-				resumeProbability: () => overrides.resumeProbability ?? 0.95,
-				prefixTokens: () => overrides.prefixTokens ?? PREFIX_TOKENS,
-				maxTouches: overrides.maxTouches ?? 8,
-				ttlSeconds: FAST_TTL_SECONDS,
-				onDecision: instance.record,
-			},
+			promptCacheKey: overrides.promptCacheKey,
+			...(overrides.withoutPolicy
+				? {}
+				: {
+						cacheKeepalivePolicy: {
+							resumeProbability: () => overrides.resumeProbability ?? 0.95,
+							prefixTokens: () => overrides.prefixTokens ?? PREFIX_TOKENS,
+							maxTouches: overrides.maxTouches ?? 8,
+							ttlSeconds: overrides.ttlSeconds ?? FAST_TTL_SECONDS,
+							onDecision: instance.record,
+							...(overrides.fingerprint === undefined ? {} : { fingerprint: overrides.fingerprint }),
+						},
+					}),
 		},
 	);
 	for await (const _event of stream) {
@@ -262,16 +291,35 @@ afterEach(() => {
 });
 
 describe("resolveCacheKeepaliveShape", () => {
+	/** A policy-bearing caller, i.e. one that opted into cost-aware keepalive. */
+	const optedIn = { officialAnthropicEndpoint: false, economicPolicySupplied: true };
+
 	it("offers a bounded-stream touch for an explicit-cache Bedrock model", () => {
 		// Bedrock has no non-streaming route and rejects maxTokens 0 (AWS documents
 		// InferenceConfiguration.maxTokens as "Minimum value of 1").
-		expect(resolveCacheKeepaliveShape(bedrockModel(), false)).toEqual({ kind: "bounded-stream", maxTokens: 1 });
+		expect(resolveCacheKeepaliveShape(bedrockModel(), optedIn)).toEqual({
+			kind: "bounded-stream",
+			maxTokens: 1,
+		});
+	});
+
+	it("declines Bedrock entirely when no policy opted into the expansion", () => {
+		// Bedrock support is new. A caller with no policy is asking for the behavior that
+		// shipped before, and that behavior was Anthropic-only — so answering with a shape
+		// here would newly bill LEGACY_CACHE_KEEPALIVE_MAX_TOUCHES touches per turn on the
+		// configuration that opted out.
+		expect(
+			resolveCacheKeepaliveShape(bedrockModel(), {
+				officialAnthropicEndpoint: false,
+				economicPolicySupplied: false,
+			}),
+		).toBeUndefined();
 	});
 
 	it("declines a Bedrock model that never emits cache checkpoints", () => {
 		// `automatic` writes no cachePoint, so there is no entry to keep warm and a touch
 		// would be pure spend.
-		expect(resolveCacheKeepaliveShape(bedrockModel("automatic"), false)).toBeUndefined();
+		expect(resolveCacheKeepaliveShape(bedrockModel("automatic"), optedIn)).toBeUndefined();
 	});
 
 	it("declines a provider with no verifiable cache telemetry", () => {
@@ -287,7 +335,9 @@ describe("resolveCacheKeepaliveShape", () => {
 			contextWindow: 128_000,
 			maxTokens: 8_192,
 		});
-		expect(resolveCacheKeepaliveShape(openai, true)).toBeUndefined();
+		expect(
+			resolveCacheKeepaliveShape(openai, { officialAnthropicEndpoint: true, economicPolicySupplied: true }),
+		).toBeUndefined();
 	});
 });
 
@@ -401,5 +451,78 @@ describe("Bedrock prompt-cache keepalive", () => {
 		await instance.awaitNoDecision();
 		expect(instance.decisions).toHaveLength(0);
 		expect(instance.bodies).toHaveLength(1);
+	});
+
+	it("issues no touch at all when the believed ttl cannot clear the round-trip margin", async () => {
+		const instance = harness(() => converseFrames(PREFIX_TOKENS, 0));
+		// Regression for a zero-delay timer spin. A learned profile that observed early
+		// eviction (or any caller-supplied short TTL) puts `ttlSeconds` under the
+		// scheduler's 15s round-trip margin. The deadline arithmetic used to clamp to 0 and
+		// return the last touch instant, so the state re-armed a 0ms timer after every
+		// verified touch: a hot loop that spends the entire keepalive budget on touches
+		// that cannot land inside the entry's remaining life. Refusing to schedule is the
+		// only terminating answer.
+		await drive(instance, { ttlSeconds: 1 });
+
+		await instance.awaitNoDecision();
+		expect(instance.decisions).toHaveLength(0);
+		// The priming request only: no touch, and above all not an unbounded run of them.
+		expect(instance.bodies).toHaveLength(1);
+	});
+
+	it("files decisions under the physical fingerprint the policy supplies", async () => {
+		const instance = harness(() => converseFrames(PREFIX_TOKENS, 0));
+		// Regression for keying the chain on the routing key. `promptCacheKey`/`sessionId`
+		// identify where a request is routed, not the entry it reads, so touches keyed on
+		// them file evidence under a different clock than the ordinary observations for the
+		// same physical entry — and a later hit or miss can no longer measure its idle age
+		// against the preceding touch. A supplied fingerprint must win over both.
+		await drive(instance, {
+			fingerprint: () => "sha256:physical-entry",
+			promptCacheKey: "routing-key-that-must-not-win",
+		});
+		await instance.awaitDecisions(2);
+
+		expect(instance.decisions.map(record => record.fingerprint)).toEqual([
+			"sha256:physical-entry",
+			"sha256:physical-entry",
+		]);
+	});
+
+	it("falls back to the routing key while the session has no fingerprint yet", async () => {
+		const instance = harness(() => converseFrames(PREFIX_TOKENS, 0));
+		// The fingerprint is only known once the arming turn's message is complete, which is
+		// after the chain arms, so `undefined` is a real state and must not blank the record.
+		await drive(instance, { fingerprint: () => undefined, promptCacheKey: "route-42" });
+		await instance.awaitDecisions(1);
+
+		expect(instance.decisions[0]?.fingerprint).toBe("route-42");
+	});
+
+	it("arms nothing for a Bedrock caller that supplied no policy, and still arms for one that did", async () => {
+		// Failure mode: an opt-out that keeps billing a provider which previously had no
+		// keepalive at all. Bedrock coverage is new; before it, the keepalive gated on
+		// Anthropic-only support, so a Bedrock session issued zero touches. Resolving a
+		// bounded-stream shape regardless of the policy made the no-policy path fall through
+		// to LEGACY_CACHE_KEEPALIVE_MAX_TOUCHES — three NEW billed requests per turn for the
+		// caller that explicitly asked for the old behavior. The opt-in has to cover provider
+		// expansion, not only touch cadence.
+		const withoutPolicy = harness(() => converseFrames(PREFIX_TOKENS, 0));
+		await drive(withoutPolicy, { withoutPolicy: true });
+
+		// The state is installed only once a shape resolved, so its absence proves no chain
+		// exists and therefore that no touch can ever fire — not merely that none has yet.
+		expect(withoutPolicy.states.get(CACHE_KEEPALIVE_STATE_KEY)).toBeUndefined();
+		expect(withoutPolicy.bodies).toHaveLength(1);
+
+		// Positive control: the same model with a policy still arms and touches, so the gate
+		// is about the opt-in rather than about Bedrock support regressing.
+		const withPolicy = harness(() => converseFrames(PREFIX_TOKENS, 0));
+		await drive(withPolicy);
+		await withPolicy.awaitDecisions(1);
+
+		expect(withPolicy.states.get(CACHE_KEEPALIVE_STATE_KEY)).toBeDefined();
+		expect(withPolicy.decisions[0]?.decision.action).toBe("warm");
+		expect(withPolicy.bodies.length).toBeGreaterThanOrEqual(2);
 	});
 });

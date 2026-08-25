@@ -1303,11 +1303,19 @@ export function createCacheKeepalivePolicy(
 
 	return {
 		resumeProbability: () => {
-			// 0.95 mirrors cachepilot's notify-on-complete resume probability: when owned
-			// background work is still running the session is all but certain to resume from
-			// this exact prefix. 0 when nothing is running — a finished turn nobody will
-			// resume must not be kept warm, and 0 is the gate's stop signal.
-			return getSession()?.hasRunningOwnedAsyncWork() ? 0.95 : 0;
+			// 0.95 mirrors cachepilot's notify-on-complete resume probability: while work
+			// this session will resume from is still live — owned background jobs, or a turn
+			// parked in a foreground tool — it is all but certain to replay this exact
+			// prefix. 0 when nothing is live: a finished turn nobody will resume must not be
+			// kept warm, and 0 is the gate's stop signal.
+			return getSession()?.willResumeFromCurrentPrefix() ? 0.95 : 0;
+		},
+		fingerprint: () => {
+			// The physical cache entry the last request read or wrote, so a touch's rows and
+			// that request's row share one clock and the idle gap between them is
+			// differenceable. `undefined` before the first observation (or for a session that
+			// records none), which the keepalive covers with its routing-key fallback.
+			return getSession()?.lastRecordedCacheFingerprint;
 		},
 		prefixTokens: () => {
 			// The provider's own report of how much of this conversation it cached, which is
@@ -1366,6 +1374,13 @@ export function createCacheKeepalivePolicy(
 			// the provider — so there is no outcome to classify and nothing to learn. Only
 			// issued touches become evidence.
 			if (record.outcome === undefined) return;
+			// Same gate the session applies to its own request rows: with no file under the
+			// sessions directory this is an in-memory SDK embedding or a temp-dir test
+			// fixture, and neither may append to the user's data directory. Two sinks feeding
+			// one journal have to agree, or the keepalive writes rows the session next to it
+			// refuses to. The profile read above is left alone — reading learned evidence is
+			// what makes even an ephemeral chain schedule sanely.
+			if (getSession()?.cacheTelemetryEligible() !== true) return;
 			void store.recordObservation({
 				at: record.at,
 				kind: "touch",
@@ -3509,6 +3524,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// re-read at every keepalive touch. `session` is declared with a definite-assignment
 		// assertion but is genuinely undefined until `new AgentSession(...)` below, so the
 		// accessor is deliberately optional-typed and the policy tolerates that window.
+		// Whether it is handed to the provider layer at all is decided per request from
+		// `providers.cacheKeepalive` (see streamFn below), so the toggle takes effect without
+		// rebuilding the session.
 		const cacheKeepalivePolicy = createCacheKeepalivePolicy(() => session);
 		const codeModeState: { namespacesInfo?: unknown } = {};
 		const transformToolCallArguments = (args: Record<string, unknown>): Record<string, unknown> => {
@@ -3580,7 +3598,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return settingsAwareStreamFn(streamModel, context, {
 					...streamOptions,
 					anthropicCacheRefresh: true,
-					cacheKeepalivePolicy,
+					// Opt-in. Omitting the policy leaves the provider layer on its legacy fixed
+					// budget — 3 touches, ~19 minutes of cover, no cost reasoning. Supplying it
+					// converts the keepalive into an economically gated lease of up to 24 touches
+					// (~114 minutes), so a session idling or working for an hour issues many more
+					// billed keepalive requests than before. That is a change to how often a
+					// session spends money, so it waits for an explicit setting instead of
+					// arriving as the default.
+					...(settings.get("providers.cacheKeepalive") === "economic" ? { cacheKeepalivePolicy } : {}),
 					forceReasoningOff: externalThinking || streamOptions?.forceReasoningOff,
 					...(codeModeState.namespacesInfo === undefined
 						? {}

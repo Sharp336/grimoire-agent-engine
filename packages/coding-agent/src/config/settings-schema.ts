@@ -5655,6 +5655,31 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
+	"providers.cacheKeepalive": {
+		type: "enum",
+		values: ["legacy", "economic"] as const,
+		default: "legacy",
+		ui: {
+			tab: "providers",
+			group: "Protocol",
+			label: "Prompt Cache Keep-Alive",
+			description:
+				"How idle prompt-cache entries are kept warm. Legacy replays the cached prefix a fixed 3 times after a turn (~19 minutes of cover) with no cost reasoning. Economic keeps replaying it for as long as a gate says the touch costs less than rebuilding the entry — up to 24 touches, ~114 minutes — so a session that stays idle or busy for an hour issues many more billed keep-alive requests than Legacy does.",
+			options: [
+				{
+					value: "legacy",
+					label: "Legacy",
+					description: "Fixed 3-touch budget after each turn (recommended)",
+				},
+				{
+					value: "economic",
+					label: "Economic",
+					description:
+						"Keep warm while it is cheaper than a rebuild: much longer cover, and correspondingly more billed keep-alive requests",
+				},
+			],
+		},
+	},
 
 	"providers.streamFirstEventTimeoutSeconds": {
 		type: "number",

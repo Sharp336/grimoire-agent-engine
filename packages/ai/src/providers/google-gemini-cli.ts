@@ -962,14 +962,6 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						watchdog.clear();
 					}
 
-					// Fires for every status the instant the `Response` exists — before
-					// the `!response.ok` branch below, which may `continue` to the next
-					// endpoint without ever throwing. Gating on 2xx would hide both the
-					// 401/429 an extension needs and the silent endpoint failover.
-					// Cloud Code Assist surfaces no request-id header, so that argument
-					// is omitted rather than guessed; the body stays unread here.
-					await notifyProviderResponse(options, response, model);
-
 					if (!response.ok) {
 						if (AIError.isTransientStatus(response.status)) {
 							if (!isLastEndpoint) {
@@ -991,6 +983,24 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 							{ headers: response.headers },
 						);
 					}
+
+					// `after_provider_response` fires only for a response that will
+					// actually be streamed: after the `!response.ok` branch, which for a
+					// transient status may `continue` to the next endpoint without ever
+					// throwing. Placing it here is what keeps the event at exactly one
+					// per logical request — a notify before the gate fires once per
+					// failover attempt, and a notify after `streamResponse` would fire
+					// after the body was already consumed. It also matches
+					// `anthropic.ts` and the OpenAI providers, which notify after a
+					// helper (`getAnthropicStreamResponse` / `postOpenAIStream`) has
+					// already thrown on any non-2xx, so no extension has ever observed
+					// an error status through this event. Also firing on 401/429/5xx is
+					// a strictly broader contract — useful, but it has to be adopted
+					// uniformly across every provider in its own change rather than
+					// diverging in three of them. Cloud Code Assist surfaces no
+					// request-id header, so that argument is omitted rather than
+					// guessed; the body stays unread here.
+					await notifyProviderResponse(options, response, model);
 
 					const requestUrl = response.url;
 					let currentResponse = response;
@@ -1019,10 +1029,6 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 								signal: options?.signal,
 							});
 
-							// The empty-stream replay is its own provider response, so it
-							// gets its own event — again before the `.ok` check.
-							await notifyProviderResponse(options, currentResponse, model);
-
 							if (!currentResponse.ok) {
 								const retryErrorText = await currentResponse.text();
 								throw new AIError.GeminiCliApiError(
@@ -1031,6 +1037,11 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 									{ headers: currentResponse.headers },
 								);
 							}
+
+							// The empty-stream replay is a second HTTP response that will
+							// itself be streamed, so it gets its own event — under the same
+							// post-success rule as the main path above.
+							await notifyProviderResponse(options, currentResponse, model);
 						}
 
 						const streamed = await streamResponse(currentResponse);

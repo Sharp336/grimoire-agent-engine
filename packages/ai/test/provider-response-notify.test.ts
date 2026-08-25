@@ -1,17 +1,36 @@
-// `after_provider_response` (docs/extensions.md:293) is documented as firing
-// "after a provider response is received, before its stream body is consumed",
-// with no provider exclusions. Regression: amazon-bedrock, ollama, and
+// `after_provider_response` fires for a provider response that is about to be
+// streamed. Regression it defends: amazon-bedrock, ollama, and
 // google-gemini-cli each held a real `Response` and never called
-// `notifyProviderResponse`, so every response from those providers was invisible
-// to extensions — including the 401/402/429 that credential and rate-limit
-// handlers exist to see.
+// `notifyProviderResponse` at all, so successful responses from those providers
+// were invisible to extensions.
 //
-// Two contracts are defended per provider:
-//  1. a 2xx response fires exactly one event carrying status + lowercased
-//     headers, and the provider still produces its normal result afterwards
-//     (i.e. the notification did not consume the body);
-//  2. a non-2xx response STILL fires the event, before the provider surfaces the
-//     failure. A "fire only after `response.ok`" fix passes (1) and fails (2).
+// The firing point is deliberately *after* the `!response.ok` branch and after
+// any body guard, which is where `anthropic.ts` and the two OpenAI providers
+// already sit: they notify only once `getAnthropicStreamResponse` /
+// `postOpenAIStream` has returned, and those helpers throw on any non-2xx. So no
+// provider in the tree has ever surfaced a 401/403/429/5xx through this event.
+//
+// THE EXPECTATION BELOW CHANGED DELIBERATELY. An earlier revision of this file
+// asserted the opposite — that these three providers fire on error statuses too,
+// placing the call before the `.ok` gate so credential and rate-limit handlers
+// could observe them. That is a strictly broader and arguably better contract,
+// but adopting it in three providers while anthropic/openai-completions/
+// openai-responses stay success-only means an extension sees 429 from Bedrock and
+// nothing from Anthropic. Uniform pre-gate firing across every provider is the
+// rejected alternative: worth doing, but as its own change with every provider
+// migrated together, not as a divergence introduced here.
+//
+// Three contracts are defended per provider:
+//  1. a 2xx response fires exactly one event carrying status, lowercased
+//     headers, the threaded model and the request id, and the provider still
+//     produces its full assistant message (so notification did not consume the
+//     body);
+//  2. a non-2xx response fires NO event, and the failure is still surfaced. A
+//     regression that moves the call back above the `.ok` gate fails this;
+//  3. (google-gemini-cli) exactly one event per logical request even when the
+//     endpoint-failover loop burns an endpoint. A notify above the gate fires
+//     once per attempted endpoint, because a transient status there `continue`s
+//     to the next endpoint without throwing.
 import { describe, expect, it } from "bun:test";
 import { streamBedrock } from "@oh-my-pi/pi-ai/providers/amazon-bedrock";
 import { crc32 } from "@oh-my-pi/pi-ai/providers/aws-eventstream";
@@ -35,9 +54,9 @@ interface Recorder {
  * constructed, before any provider code runs, so such a flag can never be observed
  * false on a 2xx fixture and is vacuous on an error fixture with a string body.
  *
- * The contract is instead pinned by two assertions that cannot pass accidentally:
- * the event fires on a non-2xx status *before* the provider throws, and the 2xx run
- * still produces its full assistant message (so notification did not consume the body).
+ * What pins the contract instead: the 2xx run still produces its full assistant
+ * message (so the notification did not consume the body), and the error runs still
+ * surface their status while firing nothing.
  */
 function recorder(): Recorder {
 	const rec: Recorder = {
@@ -70,10 +89,10 @@ function utf8(text: string): Uint8Array {
 	return new TextEncoder().encode(text);
 }
 
-// A 429 is a retryable status, so `fetchWithRetry` would replay it (and fire one
-// event per attempt). A `retry-after` beyond the caller's delay cap makes it
-// return the first response immediately, keeping the "exactly once" assertion
-// about ordering rather than about retry counts.
+// A 429 is a retryable status, so `fetchWithRetry` would replay it. A `retry-after`
+// beyond the caller's delay cap makes it return the first response immediately, so
+// the "no event fired" assertion is about the gate and not about how many attempts
+// happened to be made.
 const RATE_LIMIT_HEADERS = { "retry-after": "3600", "X-Amzn-RequestId": "req-429" };
 
 // ---------------------------------------------------------------------------
@@ -181,37 +200,44 @@ describe("amazon-bedrock after_provider_response", () => {
 		expect(result.usage?.input).toBe(12);
 	});
 
-	// Load-bearing case: a "fire after !response.ok" fix would never reach here,
-	// hiding rate limits from the handlers that back off on them.
-	it("fires on a 429 before surfacing the rate-limit failure", async () => {
+	// Load-bearing case: a regression that moves the notify above the `!response.ok`
+	// branch fires here, diverging from anthropic/openai. The failure must still be
+	// surfaced with its status, so the assertion cannot pass by the provider
+	// swallowing the response.
+	it("fires no event on a 429 and still surfaces the rate-limit failure", async () => {
 		const rec = recorder();
 		const result = await runBedrock(
 			() => new Response('{"message":"Too many requests"}', { status: 429, headers: RATE_LIMIT_HEADERS }),
 			rec,
 		);
 
-		expect(rec.calls).toHaveLength(1);
-		expect(rec.calls[0]?.status).toBe(429);
-		expect(rec.calls[0]?.headers["retry-after"]).toBe("3600");
-		expect(rec.calls[0]?.requestId).toBe("req-429");
+		expect(rec.calls).toHaveLength(0);
 		expect(result.stopReason).toBe("error");
 		expect(result.errorStatus).toBe(429);
 	});
 
-	// Same rule for auth: a credential handler must see the 401.
-	it("fires on a 401 before surfacing the auth failure", async () => {
+	// Same rule for auth: the credential-invalidation path runs without an event.
+	it("fires no event on a 401 and still surfaces the auth failure", async () => {
 		const rec = recorder();
 		const result = await runBedrock(
 			() => new Response('{"message":"The security token is invalid"}', { status: 401 }),
 			rec,
 		);
 
-		expect(rec.calls).toHaveLength(1);
-		expect(rec.calls[0]?.status).toBe(401);
-		// The error path reads `response.text()` only after the event fired.
-		expect(rec.calls[0]?.requestId).toBeNull();
+		expect(rec.calls).toHaveLength(0);
 		expect(result.stopReason).toBe("error");
 		expect(result.errorStatus).toBe(401);
+	});
+
+	// The body guard sits between the `.ok` check and the notify, so a 200 with no
+	// body must not fire either — otherwise an extension would be told a stream is
+	// coming that the provider immediately rejects.
+	it("fires no event on a 200 with no body", async () => {
+		const rec = recorder();
+		const result = await runBedrock(() => new Response(null, { status: 204 }), rec);
+
+		expect(rec.calls).toHaveLength(0);
+		expect(result.stopReason).toBe("error");
 	});
 });
 
@@ -271,28 +297,23 @@ describe("ollama after_provider_response", () => {
 		expect(result.stopReason).toBe("stop");
 	});
 
-	// A "fire after the `!response.ok` branch" fix would never fire here.
-	it("fires on a 429 before surfacing the rate-limit failure", async () => {
+	it("fires no event on a 429 and still surfaces the rate-limit failure", async () => {
 		const rec = recorder();
 		const result = await runOllama(
 			() => new Response('{"error":"busy"}', { status: 429, headers: { "retry-after": "3600" } }),
 			rec,
 		);
 
-		expect(rec.calls).toHaveLength(1);
-		expect(rec.calls[0]?.status).toBe(429);
-		expect(rec.calls[0]?.headers["retry-after"]).toBe("3600");
+		expect(rec.calls).toHaveLength(0);
 		expect(result.stopReason).toBe("error");
 		expect(result.errorStatus).toBe(429);
 	});
 
-	it("fires on a 401 before surfacing the auth failure", async () => {
+	it("fires no event on a 401 and still surfaces the auth failure", async () => {
 		const rec = recorder();
 		const result = await runOllama(() => new Response('{"error":"unauthorized"}', { status: 401 }), rec);
 
-		expect(rec.calls).toHaveLength(1);
-		expect(rec.calls[0]?.status).toBe(401);
-		// `captureHttpErrorResponse` reads the body only after the event fired.
+		expect(rec.calls).toHaveLength(0);
 		expect(result.stopReason).toBe("error");
 		expect(result.errorStatus).toBe(401);
 	});
@@ -325,9 +346,11 @@ function geminiModel(): Model<"google-gemini-cli"> {
 	});
 }
 
-function runGemini(response: () => Response, rec: Recorder): Promise<AssistantMessage> {
-	const fetchMock: FetchImpl = async () => response();
-	return streamGoogleGeminiCli(geminiModel(), context, {
+const ANTIGRAVITY_DAILY_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
+const ANTIGRAVITY_SANDBOX_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com";
+
+function runGemini(model: Model<"google-gemini-cli">, fetchMock: FetchImpl, rec: Recorder): Promise<AssistantMessage> {
+	return streamGoogleGeminiCli(model, context, {
 		apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
 		fetch: fetchMock,
 		// Caps the retry delay so a `retry-after` hint returns the 429 response
@@ -341,7 +364,8 @@ describe("google-gemini-cli after_provider_response", () => {
 	it("fires exactly once on a 2xx response and still streams the body", async () => {
 		const rec = recorder();
 		const result = await runGemini(
-			() =>
+			geminiModel(),
+			async () =>
 				new Response(streamOf(GEMINI_OK_CHUNKS), {
 					status: 200,
 					headers: { "Content-Type": "text/event-stream" },
@@ -360,34 +384,74 @@ describe("google-gemini-cli after_provider_response", () => {
 		expect(result.stopReason).toBe("stop");
 	});
 
-	// Gemini's `!response.ok` branch can `continue` to the next endpoint without
-	// throwing at all, so gating the event on 2xx would hide both the rate limit
-	// and the silent failover.
-	it("fires on a 429 before surfacing the rate-limit failure", async () => {
+	it("fires no event on a 429 and still surfaces the rate-limit failure", async () => {
 		const rec = recorder();
 		const result = await runGemini(
-			() =>
-				new Response('{"error":{"message":"rate limited"}}', { status: 429, headers: { "retry-after": "3600" } }),
+			geminiModel(),
+			async () =>
+				new Response('{"error":{"message":"rate limited"}}', {
+					status: 429,
+					headers: { "retry-after": "3600" },
+				}),
 			rec,
 		);
 
-		expect(rec.calls).toHaveLength(1);
-		expect(rec.calls[0]?.status).toBe(429);
-		expect(rec.calls[0]?.headers["retry-after"]).toBe("3600");
+		expect(rec.calls).toHaveLength(0);
 		expect(result.stopReason).toBe("error");
 		expect(result.errorStatus).toBe(429);
 	});
 
-	it("fires on a 401 before surfacing the auth failure", async () => {
+	it("fires no event on a 401 and still surfaces the auth failure", async () => {
 		const rec = recorder();
 		const result = await runGemini(
-			() => new Response('{"error":{"message":"invalid credentials"}}', { status: 401 }),
+			geminiModel(),
+			async () => new Response('{"error":{"message":"invalid credentials"}}', { status: 401 }),
 			rec,
 		);
 
-		expect(rec.calls).toHaveLength(1);
-		expect(rec.calls[0]?.status).toBe(401);
+		expect(rec.calls).toHaveLength(0);
 		expect(result.stopReason).toBe("error");
 		expect(result.errorStatus).toBe(401);
+	});
+
+	// The regression a misplaced notify causes here is *duplication*, not silence:
+	// a transient status on a non-final endpoint `continue`s the loop without
+	// throwing, so a notify above the `.ok` gate fires once per burnt endpoint and
+	// an extension counting responses double-counts one logical request.
+	it("fires exactly once per logical request when the failover loop burns an endpoint", async () => {
+		const rec = recorder();
+		const requested: string[] = [];
+		const fetchMock: FetchImpl = async input => {
+			const url = input instanceof Request ? input.url : input.toString();
+			requested.push(url);
+			if (url.startsWith(ANTIGRAVITY_DAILY_ENDPOINT)) {
+				return new Response('{"error":{"message":"unavailable"}}', { status: 503 });
+			}
+			return new Response(streamOf(GEMINI_OK_CHUNKS), {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		};
+
+		// The Antigravity provider is the only google-gemini-cli shape with more than
+		// one endpoint (`[daily, sandbox]` in the default "auto" mode), so it is the
+		// only way to exercise the failover loop that a misplaced notify multiplies.
+		const model = buildModel({
+			...geminiModel(),
+			provider: "google-antigravity",
+			baseUrl: ANTIGRAVITY_DAILY_ENDPOINT,
+		});
+		const result = await runGemini(model, fetchMock, rec);
+
+		// Both endpoints really were attempted — otherwise "exactly once" would be
+		// vacuously true because no failover happened.
+		expect(requested).toHaveLength(2);
+		expect(requested[0]?.startsWith(ANTIGRAVITY_DAILY_ENDPOINT)).toBe(true);
+		expect(requested[1]?.startsWith(ANTIGRAVITY_SANDBOX_ENDPOINT)).toBe(true);
+
+		expect(rec.calls).toHaveLength(1);
+		expect(rec.calls[0]?.status).toBe(200);
+		expect(result.content).toMatchObject([{ type: "text", text: "gemini ok" }]);
+		expect(result.stopReason).toBe("stop");
 	});
 });

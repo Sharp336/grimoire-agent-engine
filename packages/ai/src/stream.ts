@@ -1214,7 +1214,10 @@ interface CacheKeepaliveTouchResult {
  * Two modes:
  * - **legacy** (no {@link CacheKeepalivePolicy}): a fixed budget of
  *   {@link LEGACY_CACHE_KEEPALIVE_MAX_TOUCHES} touches, no cost reasoning. Byte-for-byte
- *   the behavior that shipped before, so existing callers are unaffected.
+ *   the behavior that shipped before, and it stays that way because
+ *   {@link resolveCacheKeepaliveShape} answers with a shape for the providers added since
+ *   *only* when a policy is supplied — so this mode is still reachable by exactly one
+ *   thing, the Anthropic zero-output replay that already shipped.
  * - **policy**: every touch must first clear {@link evaluateWarm}. The chain then lives
  *   as long as it is worth more than it costs, which is both longer than 3 touches when
  *   the prefix is expensive and background work is alive, and *zero* touches when the
@@ -1232,7 +1235,15 @@ class CacheKeepaliveState implements ProviderSessionState {
 	#policy: CacheKeepalivePolicy | undefined;
 	#cost: ModelCost | undefined;
 	#warmOutputTokens = 0;
-	#fingerprint = "";
+	/**
+	 * The fingerprint of the entry this chain protects, resolved per use.
+	 *
+	 * Never resolved at arm time: a session that supplies the physical cache fingerprint
+	 * records it when the turn's message completes, which happens after the stream that
+	 * arms this chain hands over its `done` event — so an arm-time read would file every
+	 * touch under the *previous* turn's entry.
+	 */
+	#fingerprint: () => string = () => "";
 
 	cancel(): void {
 		this.#generation++;
@@ -1278,8 +1289,18 @@ class CacheKeepaliveState implements ProviderSessionState {
 			warmFraction: CACHE_KEEPALIVE_WARM_FRACTION,
 			minimumMarginS: CACHE_KEEPALIVE_MARGIN_S,
 			jitterFraction: 0,
-			jitterKey: this.#fingerprint,
+			jitterKey: this.#fingerprint(),
 		});
+		if (touchAtMs === undefined) {
+			// The believed retention cannot clear the round-trip margin, so no touch issued
+			// from here could arrive while the entry is still alive. End the chain: the
+			// alternative is a deadline of `cacheTouchedAtMs` — permanently due — which
+			// re-fires a zero-delay timer after every verified touch and spends the whole
+			// budget on coverage it can never buy.
+			this.#plan = undefined;
+			this.#touchesRemaining = 0;
+			return;
+		}
 		this.#timer = setTimeout(
 			() => {
 				this.#timer = undefined;
@@ -1314,7 +1335,7 @@ class CacheKeepaliveState implements ProviderSessionState {
 		if (!policy?.onDecision || !decision) return;
 		try {
 			policy.onDecision({
-				fingerprint: this.#fingerprint,
+				fingerprint: this.#fingerprint(),
 				decision,
 				outcome: result
 					? classifyCacheOutcome({
@@ -1388,7 +1409,12 @@ interface CacheKeepaliveArmConfig {
 	/** Rate card source; the context tier is resolved per decision against the prefix. */
 	cost: ModelCost | undefined;
 	warmOutputTokens: number;
-	fingerprint: string;
+	/**
+	 * Resolves the identity of the entry being kept warm, called per use rather than
+	 * once: the physical fingerprint is only known after the arming turn's message is
+	 * complete.
+	 */
+	fingerprint: () => string;
 }
 
 function isAnthropicRefreshPayload(payload: unknown): payload is MessageCreateParamsStreaming {
@@ -1496,6 +1522,23 @@ function hasBedrockCachePoint(payload: BedrockKeepalivePayload): boolean {
 }
 
 /**
+ * Output tokens a thinking-active Anthropic touch is *priced* at.
+ *
+ * That touch cannot ask for `max_tokens: 0` — Anthropic rejects a zero budget while
+ * thinking is on — so it streams and aborts at the FIRST generation event. What it
+ * actually emits is the handful of tokens Anthropic already reports on `message_start`,
+ * which is why this is a small constant and not the request's `max_tokens`: that number
+ * is the ceiling the request *permits* (64k-128k on current Claude models), not output
+ * the touch ever buys. Pricing the ceiling added ~$1-$3 of imaginary output to every
+ * decision, so {@link evaluateWarm} refused cache reads that cost cents and the
+ * keepalive was effectively disabled for reasoning-enabled sessions — the default.
+ *
+ * Rounded up rather than down: under-pricing a touch would let the gate approve one
+ * that does not pay for itself, which is the failure the gate exists to prevent.
+ */
+const ANTHROPIC_THINKING_TOUCH_OUTPUT_TOKENS = 8;
+
+/**
  * Resolve how to bound a touch for `shape`, or `undefined` when the captured body is
  * not a recognizable cacheable request for it.
  *
@@ -1518,7 +1561,8 @@ function prepareCacheKeepaliveTouch(
 				zeroOutput: false,
 				maxTokens: payload.max_tokens,
 				mayAbortAtGeneration: true,
-				warmOutputTokens: payload.max_tokens,
+				// Priced by what the abort actually buys, never by `payload.max_tokens`.
+				warmOutputTokens: ANTHROPIC_THINKING_TOUCH_OUTPUT_TOKENS,
 			};
 		}
 		return {
@@ -1608,6 +1652,15 @@ function createCacheKeepalivePlan<TApi extends Api>(
 				if ("partial" in event) {
 					cacheRead = event.partial.usage.cacheRead;
 					cacheWrite = event.partial.usage.cacheWrite;
+					// Bill from partial usage too, not just from `done`. A thinking-active touch
+					// aborts at the first generation event and never reaches `done`, but its
+					// cache read is fully billed by then (Anthropic prices `message_start`
+					// usage). Reading the cost only from `done` left `costUsd` at 0 on exactly
+					// that path, so cumulative spend never accrued, `evaluateWarm` could never
+					// reach `economic-stop`, and the advertised termination bound silently
+					// degraded to the `maxTouches` safety net. `done` still overwrites this
+					// below whenever the touch gets there, so it stays authoritative.
+					costUsd = event.partial.usage.cost.total;
 				}
 				if (event.type === "error") return undefined;
 				if (event.type === "done") {
@@ -1663,7 +1716,12 @@ function streamSimpleWithCacheKeepalive<TApi extends Api>(
 		return streamSimpleRequest(model, context, options);
 	}
 	// A `long` (1h) entry outlives any plausible idle gap, and `none` never creates one.
-	const shape = resolveCacheKeepaliveShape(model, isLeakedThinkingHealExempt(model));
+	const shape = resolveCacheKeepaliveShape(model, {
+		officialAnthropicEndpoint: isLeakedThinkingHealExempt(model),
+		// Providers the keepalive gained after Anthropic are opt-in: a caller with no policy
+		// is asking for the pre-policy behavior, which for those providers was no keepalive.
+		economicPolicySupplied: options.cacheKeepalivePolicy !== undefined,
+	});
 	if (!shape || resolveCacheRetention(options.cacheRetention) !== "short") {
 		return streamSimpleRequest(model, context, options);
 	}
@@ -1704,7 +1762,16 @@ function streamSimpleWithCacheKeepalive<TApi extends Api>(
 			policy: options.cacheKeepalivePolicy,
 			cost: model.cost,
 			warmOutputTokens: spec.warmOutputTokens,
-			fingerprint: options.promptCacheKey ?? options.sessionId ?? model.id,
+			// Prefer the physical cache entry over the routing key. `promptCacheKey` and
+			// `sessionId` say where a request is *routed*, not which entry it reads, so
+			// keying touches on them files evidence under a different clock than the
+			// ordinary observations recorded for the same entry — and a later hit or miss
+			// can then no longer measure its idle age against the preceding touch, which is
+			// the whole point of the persisted TTL evidence. Lazily resolved: the session
+			// only knows the fingerprint after this turn's message completes, which is
+			// strictly after this callback runs.
+			fingerprint: () =>
+				options.cacheKeepalivePolicy?.fingerprint?.() ?? options.promptCacheKey ?? options.sessionId ?? model.id,
 		});
 	};
 

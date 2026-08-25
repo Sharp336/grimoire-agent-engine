@@ -1953,6 +1953,27 @@ export class AgentSession {
 	}
 
 	/**
+	 * True while this session is all but certain to issue another request from the prefix
+	 * it is holding: owned background work is still running, or a turn is still in flight.
+	 *
+	 * The in-flight leg is what keeps a long FOREGROUND tool call eligible — a build or a
+	 * test run that outlives the cache TTL. {@link hasRunningOwnedAsyncWork} inspects only
+	 * the async-job manager and the yield queue, so such a turn reports nothing running
+	 * even though the agent loop is parked in a tool and will send the next request the
+	 * moment it returns; leasing on that predicate alone drops the entry immediately before
+	 * the request that would have read it, and the tool's own runtime is exactly the gap
+	 * the keepalive exists to cover.
+	 *
+	 * A third predicate rather than a widening of {@link hasPendingAsyncWork} or
+	 * {@link hasRunningOwnedAsyncWork}: run drivers and the subagent quiescence barrier
+	 * poll those to tell a scheduling pause from terminal completion, and a mid-turn
+	 * session is precisely the state they must still be able to read as "no async work".
+	 */
+	willResumeFromCurrentPrefix(): boolean {
+		return this.isStreaming || this.hasRunningOwnedAsyncWork();
+	}
+
+	/**
 	 * Settle one generation of owner-scoped async work: wait for running owner
 	 * jobs to finish, deliver their queued results (which enqueue async-result
 	 * follow-ups on this session's yield queue), and wait for the injected
@@ -2436,6 +2457,48 @@ export class AgentSession {
 	}
 
 	/**
+	 * Whether cache telemetry may append rows for this session.
+	 *
+	 * Public because the keepalive's touch sink (`createCacheKeepalivePolicy` in `sdk.ts`)
+	 * has to gate on the SAME decision as {@link #recordCacheObservation}: two sinks
+	 * feeding one journal under different rules is how an in-memory SDK embedding or a
+	 * temp-dir test fixture ends up writing into the user's data directory through the
+	 * keepalive while its own request rows are correctly refused.
+	 */
+	cacheTelemetryEligible(): boolean {
+		// Only observe genuine user sessions. A session with no file on disk is in-memory
+		// (SDK embedding), and a file outside the configured sessions directory is a test
+		// fixture in a temp dir — neither should append to the user's data directory. The
+		// snapcompact-savings journal gates on the session file alone; this additionally
+		// scopes by location, because a suite that constructs thousands of real-file
+		// sessions would otherwise pay a file append per assistant message and leave
+		// hundreds of KiB behind in `~/.omp`.
+		const sessionFile = this.sessionManager.getSessionFile();
+		if (!sessionFile) return false;
+		const sessionsRoot = path.resolve(getSessionsDir());
+		const resolvedSessionFile = path.resolve(sessionFile);
+		return resolvedSessionFile === sessionsRoot || resolvedSessionFile.startsWith(`${sessionsRoot}${path.sep}`);
+	}
+
+	#lastRecordedCacheFingerprint: string | undefined;
+
+	/**
+	 * Fingerprint of the physical cache entry this session most recently filed a request
+	 * observation for — i.e. the entry the last provider call read or wrote.
+	 *
+	 * The keepalive reads this per touch so its rows land under the same fingerprint as
+	 * the request that created the entry. Keying touches on the session/provider routing
+	 * key instead would file them against a clock no request ever writes, and the idle age
+	 * between a touch and the next hit — the only TTL evidence the journal collects — could
+	 * never be differenced. `undefined` until a request is observed, and again after any
+	 * turn that could not be observed, which is the window the keepalive's routing-key
+	 * fallback covers.
+	 */
+	get lastRecordedCacheFingerprint(): string | undefined {
+		return this.#lastRecordedCacheFingerprint;
+	}
+
+	/**
 	 * Record how this assistant turn resolved against the provider's prefix cache.
 	 *
 	 * This is the important half of cache telemetry: keepalive touches only ever observe
@@ -2450,22 +2513,16 @@ export class AgentSession {
 	 * profile), or `retention: "none"`, which creates no entry to observe at all.
 	 */
 	async #recordCacheObservation(assistantMsg: AssistantMessage): Promise<void> {
+		// Any turn this cannot key honestly also invalidates the remembered fingerprint. The
+		// keepalive would otherwise file touches for the entry THIS turn created under the
+		// previous turn's key — most plausibly after a retry-fallback model switch, where the
+		// live entry belongs to a model that never wrote the remembered one. `undefined` hands
+		// the keepalive back to its routing-key fallback, which is wrong-but-honest rather
+		// than confidently mis-keyed.
+		this.#lastRecordedCacheFingerprint = undefined;
 		const model = this.model;
 		if (!model) return;
-		// Only observe genuine user sessions. A session with no file on disk is in-memory
-		// (SDK embedding), and a file outside the configured sessions directory is a test
-		// fixture in a temp dir — neither should append to the user's data directory. The
-		// snapcompact-savings journal gates on the session file alone; this additionally
-		// scopes by location, because a suite that constructs thousands of real-file
-		// sessions would otherwise pay a file append per assistant message and leave
-		// hundreds of KiB behind in `~/.omp`.
-		const sessionFile = this.sessionManager.getSessionFile();
-		if (!sessionFile) return;
-		const sessionsRoot = path.resolve(getSessionsDir());
-		const resolvedSessionFile = path.resolve(sessionFile);
-		if (resolvedSessionFile !== sessionsRoot && !resolvedSessionFile.startsWith(`${sessionsRoot}${path.sep}`)) {
-			return;
-		}
+		if (!this.cacheTelemetryEligible()) return;
 		// The message names who actually served it; the live model supplies the endpoint.
 		// Mixing the two across a mid-turn model switch would file this observation under
 		// the wrong route, so disagreement means skip.
@@ -2503,10 +2560,15 @@ export class AgentSession {
 			historyHash: orderedHash(this.#cacheHistoryParts(assistantMsg)),
 		};
 
+		// Held for the keepalive: a touch replays exactly this request's payload, so its
+		// rows must be filed under this same entry rather than under a routing key.
+		const fingerprint = cacheFingerprint(identity);
+		this.#lastRecordedCacheFingerprint = fingerprint;
+
 		await cacheTelemetryStore().recordObservation({
 			at: assistantMsg.timestamp,
 			kind: "request",
-			fingerprint: cacheFingerprint(identity),
+			fingerprint,
 			routeKey: route.routeKey,
 			outcome: classifyCacheOutcome({
 				// An errored or aborted turn observed nothing about the cache, whatever its
@@ -2528,7 +2590,19 @@ export class AgentSession {
 	}
 
 	/**
-	 * Ordered identity of the messages in the region the provider caches.
+	 * Ordered identity of the messages the observed REQUEST carried — the region the
+	 * provider caches — which is everything before {@link assistantMsg}, the response that
+	 * request produced.
+	 *
+	 * The cut is the point. By `message_end` agent-core has already appended
+	 * {@link assistantMsg} (and steering or a tool result may have landed after it), so
+	 * digesting the live message list would name a prefix no request ever sent: a future
+	 * one. Nothing else ever observes that prefix — the keepalive replays the request's own
+	 * payload, and the next request carries a longer history — so such a row has no
+	 * matching prior clock and contributes no idle-age evidence, which is the only thing
+	 * TTL learning consumes. `indexOf` rather than dropping the tail because the ended
+	 * message is not guaranteed to be last; absent from the list means it was not appended
+	 * yet, and the live list is then already exactly the request's history.
 	 *
 	 * APPROXIMATION, stated precisely: these are per-message identity keys, not the wire
 	 * bytes. The exact cacheable prefix is only knowable after `convertMessagesToLlm` plus
@@ -2549,19 +2623,16 @@ export class AgentSession {
 	 */
 	#cacheHistoryParts(assistantMsg: AssistantMessage): string[] {
 		const messages = this.messages;
+		const observed = messages.indexOf(assistantMsg);
+		const end = observed === -1 ? messages.length : observed;
 		const parts: string[] = [];
-		for (let index = 0; index < messages.length; index++) {
+		for (let index = 0; index < end; index++) {
 			const message = messages[index];
 			// Roles outside the persistence path (hook, custom, bash/python execution) have
 			// no stable key but do reach the wire, so they contribute their position rather
 			// than being dropped — omitting them would collide two histories that differ
 			// only by an injected message.
 			parts.push(sessionMessagePersistenceKey(message) ?? `${message.role}#${index}`);
-		}
-		// The ended message is normally already the tail of agent state; append it when it
-		// is not, so the digest never depends on that timing.
-		if (messages[messages.length - 1] !== assistantMsg) {
-			parts.push(sessionMessagePersistenceKey(assistantMsg) ?? `assistant#${messages.length}`);
 		}
 		return parts;
 	}

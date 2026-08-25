@@ -52,8 +52,19 @@ export function leaseJitter(jitterKey: string, jitterFraction: number): number {
 	return (unit * 2 - 1) * jitterFraction;
 }
 
-/** Epoch ms at which a keepalive touch should fire. */
-export function nextWarmDeadlineMs(inputs: LeaseDeadlineInputs): number {
+/**
+ * Epoch ms at which a keepalive touch should fire, or `undefined` when this lease has
+ * no useful deadline.
+ *
+ * `undefined` means the TTL cannot clear the round-trip margin (`ttlS <= marginS`), so
+ * a touch issued at any instant would arrive after the entry is already gone. That is
+ * reachable from a supplied policy TTL and from a learned profile that observed early
+ * eviction. Clamping the offset to 0 instead would place the deadline at
+ * `lastTouchAtMs`, i.e. permanently due: a caller that reschedules after every touch
+ * would spin a zero-delay timer forever, burning the keepalive budget without ever
+ * buying coverage.
+ */
+export function nextWarmDeadlineMs(inputs: LeaseDeadlineInputs): number | undefined {
 	const {
 		lastTouchAtMs,
 		ttlS,
@@ -67,7 +78,9 @@ export function nextWarmDeadlineMs(inputs: LeaseDeadlineInputs): number {
 	// The touch itself takes a round trip, so it must be issued far enough before
 	// expiry that a p95-slow request still arrives while the entry is alive.
 	const marginS = Math.max(minimumMarginS, latencyP95S * 2);
-	const safeOffsetS = Math.max(0, Math.min(ttlS * warmFraction, ttlS - marginS));
+	const safeOffsetS = Math.min(ttlS * warmFraction, ttlS - marginS);
+	// `!(x > 0)` rather than `x <= 0` so a non-finite TTL is refused too.
+	if (!(safeOffsetS > 0)) return undefined;
 
 	// Jitter multiplies the *interval*, never the absolute epoch. Upstream
 	// cachepilot computed `safeDeadlineEpoch * (1 + jitter)`; against a real

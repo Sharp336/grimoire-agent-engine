@@ -62,9 +62,9 @@ export const DEFAULT_CACHE_KEEPALIVE_MAX_TOUCHES = 24;
 /** One keepalive decision — fired or skipped — as handed to telemetry. */
 export interface CacheKeepaliveRecord {
 	/**
-	 * Stable identity of the lease being kept warm: the cache fingerprint once
-	 * identity is plumbed through the stream layer, otherwise the prompt-cache key
-	 * or session id.
+	 * Identity of the lease being kept warm: the physical cache fingerprint when the
+	 * policy supplies one via {@link CacheKeepalivePolicy.fingerprint}, otherwise the
+	 * routing key (prompt-cache key or session id).
 	 */
 	fingerprint: string;
 	/** Why the touch was or was not issued, with every number that produced it. */
@@ -114,6 +114,12 @@ export interface CacheKeepalivePolicy {
 	 * (`resolveTtl`) supplies its estimate here.
 	 */
 	ttlSeconds?: number;
+	/**
+	 * The physical cache entry the armed chain protects, so touches and ordinary
+	 * requests file evidence under the same clock. Falls back to the routing key when
+	 * the session cannot supply one.
+	 */
+	fingerprint?(): string | undefined;
 }
 
 /**
@@ -133,24 +139,41 @@ export type CacheKeepaliveShape = { kind: "zero-output" } | { kind: "bounded-str
  */
 const BEDROCK_MINIMUM_MAX_TOKENS = 1;
 
-/**
- * Resolve how — or whether — {@link model} can be kept warm.
- *
- * `officialAnthropicEndpoint` is supplied by the caller rather than recomputed
- * here: deciding whether an Anthropic model resolves to the first-party endpoint
- * means mirroring Foundry redirection and the `ANTHROPIC_BASE_URL` gateway
- * fallback, which `stream.ts` already owns for the leaked-thinking heal. Passing
- * the answer in keeps exactly one such URL predicate in the codebase. The flag is
- * ignored for every non-Anthropic api.
- */
+/** What the caller must tell {@link resolveCacheKeepaliveShape} about its own request. */
+export interface CacheKeepaliveShapeInputs {
+	/**
+	 * Whether the model resolves to Anthropic's first-party endpoint.
+	 *
+	 * Supplied by the caller rather than recomputed here: deciding that means mirroring
+	 * Foundry redirection and the `ANTHROPIC_BASE_URL` gateway fallback, which `stream.ts`
+	 * already owns for the leaked-thinking heal. Passing the answer in keeps exactly one
+	 * such URL predicate in the codebase. Ignored for every non-Anthropic api.
+	 */
+	officialAnthropicEndpoint: boolean;
+	/**
+	 * Whether the caller supplied a {@link CacheKeepalivePolicy}.
+	 *
+	 * Gates every provider the keepalive learned to cover *after* Anthropic. The Anthropic
+	 * zero-output replay predates the policy and stays unconditional, but a caller with no
+	 * policy is asking for the behavior that shipped before it — and before it, a Bedrock
+	 * session had no keepalive whatsoever. Answering with a shape anyway would fall back to
+	 * {@link LEGACY_CACHE_KEEPALIVE_MAX_TOUCHES} and newly bill three touches per turn on
+	 * the very configuration that opted out.
+	 */
+	economicPolicySupplied: boolean;
+}
+
+/** Resolve how — or whether — {@link model} can be kept warm. */
 export function resolveCacheKeepaliveShape(
 	model: Model<Api>,
-	officialAnthropicEndpoint: boolean,
+	inputs: CacheKeepaliveShapeInputs,
 ): CacheKeepaliveShape | undefined {
 	if (model.api === "anthropic-messages") {
 		if (model.provider !== "anthropic" || model.transport === "pi-native") return undefined;
-		return officialAnthropicEndpoint ? { kind: "zero-output" } : undefined;
+		return inputs.officialAnthropicEndpoint ? { kind: "zero-output" } : undefined;
 	}
+	// Provider expansion is opt-in; see `economicPolicySupplied`.
+	if (!inputs.economicPolicySupplied) return undefined;
 	if (model.api === "bedrock-converse-stream") {
 		const compat = model.compat as Model<"bedrock-converse-stream">["compat"];
 		return compat.promptCacheMode === "explicit"

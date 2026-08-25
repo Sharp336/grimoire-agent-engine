@@ -2,11 +2,11 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { resolveTtl } from "@oh-my-pi/pi-ai/cache";
+import { cacheFingerprint, orderedHash, resolveTtl, structuralHash } from "@oh-my-pi/pi-ai/cache";
 import type { CacheKeepaliveRecord } from "@oh-my-pi/pi-ai/cache/keepalive";
-import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -17,10 +17,13 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
 	type CacheObservation,
 	CacheTelemetryStore,
+	cacheTelemetryStore,
 	resolveCacheTelemetryRoute,
 } from "@oh-my-pi/pi-coding-agent/session/cache-telemetry";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { sessionMessagePersistenceKey } from "@oh-my-pi/pi-coding-agent/session/turn-persistence";
+import { getSessionsDir } from "@oh-my-pi/pi-utils";
 
 /**
  * The journal path is injected rather than stubbed through `getStatsDbPath`: the store
@@ -266,6 +269,74 @@ describe("cache telemetry store", () => {
 });
 
 /**
+ * Rows the SESSION records, captured off the process-wide store the recorder reaches for.
+ *
+ * Spied rather than injected because `#recordCacheObservation` deliberately uses the shared
+ * instance — the `idleSeconds` clock lives there and two stores would each see half the
+ * observations. The spy both captures the rows and keeps the real journal untouched, and
+ * `settled` awaits the recorder's own call instead of a wall-clock delay: the append is
+ * fire-and-forget from the `message_end` handler, so there is nothing else to await.
+ */
+function captureRequestObservations(session: AgentSession): {
+	rows: CacheObservation[];
+	snapshots: AgentMessage[][];
+	settled: (count: number) => Promise<void>;
+	restore: () => void;
+} {
+	const rows: CacheObservation[] = [];
+	const snapshots: AgentMessage[][] = [];
+	const waiters: Array<() => void> = [];
+	const store = cacheTelemetryStore();
+	const spy = spyOn(store, "recordObservation").mockImplementation(async observation => {
+		rows.push(observation);
+		// The recorder reaches this call with no await since it digested the history, so this
+		// is exactly the message list the fingerprint was computed against.
+		snapshots.push([...session.messages]);
+		for (const resolve of waiters.splice(0)) resolve();
+	});
+	return {
+		rows,
+		snapshots,
+		settled: async count => {
+			while (rows.length < count) {
+				const { promise, resolve } = Promise.withResolvers<void>();
+				waiters.push(resolve);
+				await promise;
+			}
+		},
+		restore: () => spy.mockRestore(),
+	};
+}
+
+/**
+ * The fingerprint a request carrying exactly `messages` must be filed under.
+ *
+ * Rebuilt from the same primitives the session uses rather than compared against another
+ * recorded row: the point of the assertion is that the recorded key names the request's own
+ * prefix, and only an independently computed expectation can pin that. Every non-history
+ * dimension is fixed by the harness — no OAuth account (so an empty `authScope`), no pinned
+ * prompt-cache key, no tools — so the history digest is what varies.
+ */
+function fingerprintOver(session: AgentSession, messages: AgentMessage[]): string {
+	const model = session.model!;
+	const route = resolveCacheTelemetryRoute(model, "auto")!;
+	return cacheFingerprint({
+		provider: model.provider,
+		api: model.api,
+		modelId: model.id,
+		endpoint: route.endpoint,
+		retention: route.retention,
+		authScope: "",
+		promptCacheKey: "",
+		systemHash: orderedHash(session.systemPrompt),
+		toolsHash: structuralHash([]),
+		historyHash: orderedHash(
+			messages.map((message, index) => sessionMessagePersistenceKey(message) ?? `${message.role}#${index}`),
+		),
+	});
+}
+
+/**
  * The store working in isolation does not prove the keepalive consults it. These drive the
  * real policy object against a real `AgentSession`, with an injected store so nothing
  * touches `~/.omp`.
@@ -279,21 +350,41 @@ describe("cache telemetry keepalive wiring", () => {
 		for (const authStorage of authStorages.splice(0)) authStorage.close();
 	});
 
-	async function createSession(): Promise<AgentSession> {
-		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5")!;
-		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+	/**
+	 * `SessionManager.inMemory()` has no file on disk, which the session (rightly) treats as
+	 * ineligible for telemetry. Most of these tests are about what the keepalive records, not
+	 * about that gate, so the session file is reported inside the real sessions directory — a
+	 * string-only decision, so no such file is created and no journal but the injected one is
+	 * ever written.
+	 *
+	 * `model` makes the MockModel the session's OWN model rather than a stand-in stream behind
+	 * a bundled one. The per-request recorder skips any turn whose provider/model disagrees
+	 * with the live model (a retry-fallback switch), so only that shape reaches it at all.
+	 */
+	async function createSession(options?: { eligible?: boolean; model?: MockModel }): Promise<AgentSession> {
+		const mock = options?.model ?? createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const model = options?.model ?? getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
-			initialState: { model: bundled, systemPrompt: ["Test"], tools: [] },
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
 			convertToLlm,
 			streamFn: mock.stream,
 		});
 		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		// The session validates a key for its OWN model's provider before prompting, so a
+		// MockModel-backed session needs one too.
+		authStorage.setRuntimeApiKey("mock", "test-key");
+		const sessionManager = SessionManager.inMemory();
+		if (options?.eligible !== false) {
+			spyOn(sessionManager, "getSessionFile").mockReturnValue(
+				path.join(getSessionsDir(), "project", "cache-telemetry.jsonl"),
+			);
+		}
 		const session = new AgentSession({
 			agent,
-			sessionManager: SessionManager.inMemory(),
+			sessionManager,
 			settings: Settings.isolated(),
 			modelRegistry: new ModelRegistry(authStorage),
 			agentId: "Main",
@@ -446,5 +537,102 @@ describe("cache telemetry keepalive wiring", () => {
 		policy.onDecision?.(decision());
 		await store.settle();
 		expect(await store.readObservations()).toEqual([]);
+	});
+
+	it("refuses touch rows for a session the request recorder also refuses", async () => {
+		// Failure mode: the two observation sinks disagree, so an in-memory SDK embedding or a
+		// temp-dir test fixture — whose own request rows are correctly dropped — still appends
+		// keepalive rows to the user's data directory.
+		const session = await createSession({ eligible: false });
+		const store = new CacheTelemetryStore(await tmpJournal());
+		const policy = createCacheKeepalivePolicy(() => session, store);
+
+		expect(session.cacheTelemetryEligible()).toBe(false);
+		policy.onDecision?.(decision());
+		await store.settle();
+		expect(await store.readObservations()).toEqual([]);
+
+		// Same session, same decision, now reporting a file under the sessions directory: the
+		// row appears, so the empty result above is the gate and not a broken sink.
+		spyOn(session.sessionManager, "getSessionFile").mockReturnValue(
+			path.join(getSessionsDir(), "project", "eligible.jsonl"),
+		);
+		expect(session.cacheTelemetryEligible()).toBe(true);
+		policy.onDecision?.(decision());
+		await store.settle();
+		expect(await store.readObservations()).toHaveLength(1);
+	});
+
+	it("keys touches on the physical cache entry the last request was filed under", async () => {
+		// Failure mode: touches key on `promptCacheKey ?? sessionId` — a routing key no
+		// request row ever carries — so the gap between the request that wrote the entry and
+		// the touches keeping it warm can never be differenced, and the journal's TTL evidence
+		// is unusable.
+		const model = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const session = await createSession({ model });
+		const store = new CacheTelemetryStore(await tmpJournal());
+		const policy = createCacheKeepalivePolicy(() => session, store);
+		const recorded = captureRequestObservations(session);
+		try {
+			// Nothing observed yet: `undefined` hands the keepalive back to its routing-key
+			// fallback rather than inventing a fingerprint.
+			expect(policy.fingerprint?.()).toBeUndefined();
+
+			await session.sendUserMessage("hello");
+			await recorded.settled(1);
+
+			const requestFingerprint = recorded.rows[0]?.fingerprint;
+			expect(requestFingerprint).toBeTruthy();
+			expect(policy.fingerprint?.()).toBe(requestFingerprint);
+
+			// A turn the recorder cannot key drops the remembered value instead of leaving it
+			// stale: here the live model no longer matches the one that served the turn (the
+			// retry-fallback shape), so the entry the chain now protects was never the one
+			// behind `requestFingerprint`. Reporting the old key would file touches against a
+			// different physical entry.
+			await session.setModelTemporary(getBundledModel("anthropic", "claude-opus-4-5")!);
+			await session.sendUserMessage("after the switch");
+			expect(recorded.rows).toHaveLength(1);
+			expect(policy.fingerprint?.()).toBeUndefined();
+		} finally {
+			recorded.restore();
+		}
+	});
+
+	it("fingerprints a request over its own history, never over the response it produced", async () => {
+		// Failure mode: `#cacheHistoryParts` digests the live message list at `message_end`,
+		// which already contains the assistant message being observed. The row then names a
+		// prefix no request ever sent, so nothing else ever observes that entry and the row
+		// carries no idle-age evidence — the one thing TTL learning consumes.
+		const model = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const session = await createSession({ model });
+		const recorded = captureRequestObservations(session);
+		try {
+			await session.sendUserMessage("first");
+			await recorded.settled(1);
+			await session.sendUserMessage("second");
+			await recorded.settled(2);
+
+			const [first, second] = recorded.snapshots;
+			// Both turns were observed with their own assistant message already appended.
+			expect(first?.filter(message => message.role === "assistant")).toHaveLength(1);
+			expect(second?.filter(message => message.role === "assistant")).toHaveLength(2);
+
+			// Turn N is keyed over exactly N-1 assistant messages: the history its request
+			// actually carried.
+			const firstRequest = first!.slice(0, -1);
+			const secondRequest = second!.slice(0, -1);
+			expect(firstRequest.filter(message => message.role === "assistant")).toHaveLength(0);
+			expect(secondRequest.filter(message => message.role === "assistant")).toHaveLength(1);
+			expect(recorded.rows[0]?.fingerprint).toBe(fingerprintOver(session, firstRequest));
+			expect(recorded.rows[1]?.fingerprint).toBe(fingerprintOver(session, secondRequest));
+
+			// The digest does move between turns — the keys are not degenerate.
+			expect(recorded.rows[0]?.fingerprint).not.toBe(recorded.rows[1]?.fingerprint);
+			// And it is not the buggy value: the digest of the full list, response included.
+			expect(recorded.rows[1]?.fingerprint).not.toBe(fingerprintOver(session, second!));
+		} finally {
+			recorded.restore();
+		}
 	});
 });
