@@ -3350,12 +3350,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// is won, not when it joins the queue. Outside, a request aborted while
 		// queued would still have run every handler, and a handler minting a
 		// short-lived or timestamped header would have minted it at queue time.
-		const settingsAwareStreamFn = wrapStreamFnWithBlobUrlFallback(
-			wrapStreamFnWithProviderConcurrency(
-				settings,
-				wrapStreamFnWithProviderHeaders(extensionRunner, createSettingsAwareStreamFn(settings)),
+		// Blob-url fallback retries the inner StreamFn before content is emitted;
+		// it must sit INSIDE the header hook so a fallback does not re-run
+		// before_provider_headers (once per request, not per transport attempt).
+		const settingsAwareStreamFn = wrapStreamFnWithProviderConcurrency(
+			settings,
+			wrapStreamFnWithProviderHeaders(
+				extensionRunner,
+				wrapStreamFnWithBlobUrlFallback(createSettingsAwareStreamFn(settings), blobBroker),
 			),
-			blobBroker,
 		);
 		const codeModeState: { namespacesInfo?: unknown } = {};
 		const transformToolCallArguments = (args: Record<string, unknown>): Record<string, unknown> => {

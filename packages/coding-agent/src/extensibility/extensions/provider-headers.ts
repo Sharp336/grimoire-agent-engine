@@ -21,9 +21,11 @@
  * ORDERING: this wrapper is composed INSIDE the per-provider concurrency limiter
  * (see `sdk.ts`), so handlers run once the request holds its slot rather than
  * when it joins the queue. A request aborted while queued therefore never runs
- * them. The cross-process cap in `packages/ai` (`maxInFlightRequests`) still
- * sits below this boundary — closing that gap would mean reaching the
- * coding-agent's runner from the provider library, which the layering forbids.
+ * them. Blob-url fallback retries sit INSIDE this wrapper so a transport
+ * fallback does not re-run the hook. The cross-process cap in `packages/ai`
+ * (`maxInFlightRequests`) still sits below this boundary — closing that gap
+ * would mean reaching the coding-agent's runner from the provider library,
+ * which the layering forbids.
  *
  * ONCE PER REQUEST, not per HTTP attempt. `streamSimple` re-enters itself on an
  * auth-refresh retry, and transports retry below that, so several attempts can

@@ -124,4 +124,24 @@ describe("wrapStreamFnWithProviderHeaders", () => {
 			(await second)?.end();
 		}
 	});
+
+	// Blob-url fallback retries the inner StreamFn before content is emitted.
+	// That retry wrapper must sit INSIDE the header hook: if it wrapped the hook,
+	// each fallback would re-run before_provider_headers and break the
+	// once-per-request contract.
+	it("runs handlers once when the inner transport retries before emitting content", async () => {
+		const { runner, seen } = fakeRunner(true);
+		const { base, calls } = recordingBase();
+		const retryOnce = (inner: StreamFn): StreamFn => async (model, context, options) => {
+			await inner(model, context, options);
+			return inner(model, context, options);
+		};
+
+		await wrapStreamFnWithProviderHeaders(runner, retryOnce(base))(model, context, { headers: { "x-a": "1" } });
+
+		expect(seen).toHaveLength(1);
+		expect(calls).toHaveLength(2);
+		expect(calls[0]).toEqual({ "x-a": "1" });
+		expect(calls[1]).toEqual({ "x-a": "1" });
+	});
 });
