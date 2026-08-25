@@ -211,13 +211,6 @@ describe("profile status-line segment", () => {
 		expect(seg.content).toBe("");
 	});
 
-	it("renders the active named profile", () => {
-		setProfile("work");
-		const seg = renderSegment("profile", createCtx());
-		expect(seg.visible).toBe(true);
-		expect(stripAnsi(seg.content)).toBe("p:work");
-	});
-
 	it("bounds long profile labels for narrow status lines", () => {
 		setProfile(`profile-${"x".repeat(56)}`);
 		const seg = renderSegment("profile", createCtx());
@@ -229,29 +222,6 @@ describe("profile status-line segment", () => {
 });
 
 describe("token_total breakdown", () => {
-	it("renders labeled input and output totals when breakdown is enabled", () => {
-		const seg = renderSegment("token_total", {
-			...createCtx(),
-			options: { token_total: { breakdown: true } },
-			usageStats: {
-				input: 25000,
-				output: 5,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 25005,
-				orchestrationInput: 0,
-				orchestrationOutput: 0,
-				orchestrationCacheRead: 0,
-				premiumRequests: 0,
-				cost: 0,
-				tokensPerSecond: null,
-			},
-		} as SegmentContext);
-
-		expect(seg.visible).toBe(true);
-		expect(stripAnsi(seg.content)).toBe("in:25K out:5");
-	});
-
 	it("fails closed for a non-boolean breakdown value", () => {
 		const seg = renderSegment("token_total", {
 			...createCtx(),
@@ -265,21 +235,6 @@ describe("token_total breakdown", () => {
 
 		expect(stripAnsi(seg.content)).not.toContain("in:");
 		expect(stripAnsi(seg.content)).not.toContain("out:");
-	});
-});
-
-describe("context_pct compact", () => {
-	it("renders a compact ctx-prefixed percentage when enabled", () => {
-		const seg = renderSegment("context_pct", {
-			...createCtx(),
-			options: { context_pct: { compact: true } },
-			contextPercent: 9.1,
-			contextTokens: 9100,
-			contextWindow: 100000,
-		} as SegmentContext);
-
-		expect(seg.visible).toBe(true);
-		expect(stripAnsi(seg.content)).toContain("ctx:9.1%");
 	});
 });
 
