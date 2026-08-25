@@ -32,12 +32,19 @@ describe("profile report", () => {
 		expect(report.length).toBeLessThanOrEqual(120);
 	});
 
-	it("finds the sole Anthropic account before the session routes to it", () => {
+	it("shows the active Anthropic OAuth identity", () => {
 		const authStorage = {
-			getOAuthAccountIdentity: () => undefined,
-			listOAuthAccounts: () => [{ position: 0, credentialId: 1, email: "person@example.com" }],
+			getOAuthAccountIdentity: () => ({ email: "person@example.com" }),
 		} as unknown as AuthStorage;
 		expect(resolveProfileAnthropicIdentity(authStorage, "session-1")?.email).toBe("person@example.com");
+	});
+
+	it("does not infer an active account from stored OAuth credentials", () => {
+		const authStorage = {
+			getOAuthAccountIdentity: () => undefined,
+			listOAuthAccounts: () => [{ position: 0, credentialId: 1, email: "stored@example.com" }],
+		} as unknown as AuthStorage;
+		expect(resolveProfileAnthropicIdentity(authStorage, "session-1")).toBeUndefined();
 	});
 
 	it("states when the profile has no Anthropic login", () => {

@@ -24,10 +24,7 @@ export function resolveProfileAnthropicIdentity(
 	authStorage: AuthStorage,
 	sessionId: string,
 ): OAuthAccountIdentity | undefined {
-	const active = authStorage.getOAuthAccountIdentity("anthropic", sessionId);
-	if (active) return active;
-	const accounts = authStorage.listOAuthAccounts("anthropic", sessionId);
-	return accounts.length === 1 ? accounts[0] : undefined;
+	return authStorage.getOAuthAccountIdentity("anthropic", sessionId);
 }
 
 export function getProfileReport(authStorage: AuthStorage, sessionId: string): string {
