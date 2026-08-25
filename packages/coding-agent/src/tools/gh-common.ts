@@ -16,14 +16,6 @@ export function normalizeBlock(value: string | null | undefined): string {
 	return (value ?? "").replaceAll("\r\n", "\n").replaceAll("\r", "\n").replaceAll("\t", "    ").trimEnd();
 }
 
-/**
- * A full repo/issue/PR URL. `gh` derives host, repo, and number from such an
- * identifier itself, so callers must not also pass `--repo`.
- */
-export function looksLikeGitHubUrl(value: string | undefined): boolean {
-	return value?.startsWith("https://") ?? false;
-}
-
 export function normalizeOptionalString(value: string | null | undefined): string | undefined {
 	const normalized = value?.trim();
 	return normalized ? normalized : undefined;
@@ -49,7 +41,9 @@ export function requireNonEmpty(value: string | null | undefined, label: string)
 }
 
 export function appendRepoFlag(args: string[], repo: string | undefined, identifier?: string): void {
-	if (!repo || looksLikeGitHubUrl(identifier)) {
+	// A full URL identifier already names host, repo, and number; `gh` derives
+	// all three from it and rejects a competing `--repo`.
+	if (!repo || identifier?.startsWith("https://")) {
 		return;
 	}
 

@@ -326,6 +326,36 @@ describe("pr:// protocol handler", () => {
 		expect(resource.notes).toContain("Diff: pr://ghe.example.com/owner/example/77/diff");
 	});
 
+	it("routes a single-label host prefix by shape", async () => {
+		const spy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+			if (args.includes("/repos/owner/example/pulls/77/comments")) {
+				return [] as never;
+			}
+			return prPayload(77, "pr body") as never;
+		});
+
+		const router = InternalUrlRouter.instance();
+		// `ghe` carries no dot, so the number position is what separates
+		// `<host>/<owner>/<repo>/<n>` from `<owner>/<repo>/<n>/diff`.
+		const resource = await router.resolve("pr://ghe/owner/example/77");
+
+		const viewArgs = spy.mock.calls[0]?.[1] as string[];
+		expect(viewArgs[viewArgs.indexOf("--repo") + 1]).toBe("ghe/owner/example");
+		expect(resource.notes).toContain("Diff: pr://ghe/owner/example/77/diff");
+	});
+
+	it("keeps the bare diff form out of the host-prefix branch", async () => {
+		const spy = vi.spyOn(git.github, "text").mockResolvedValue(makePrDiff([{ name: "a.ts", adds: 1, dels: 0 }]));
+
+		const router = InternalUrlRouter.instance();
+		const resource = await router.resolve("pr://owner/example/77/diff/1");
+
+		// `owner` is not a host here: the diff slice belongs to owner/example#77.
+		const diffArgs = spy.mock.calls[0]?.[1] as string[];
+		expect(diffArgs[diffArgs.indexOf("--repo") + 1]).toBe("owner/example");
+		expect(resource.content).toContain("a.ts");
+	});
+
 	it("treats a redundant github.com prefix as the bare slug", async () => {
 		const spy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
 			if (args.includes("/repos/owner/example/pulls/79/comments")) {

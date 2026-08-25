@@ -14,7 +14,8 @@
  * - `issue://owner/repo/123` / `pr://owner/repo/123` — fully qualified single
  *   item.
  * - `pr://ghe.example.com/owner/repo/123` — same, on a GitHub Enterprise host;
- *   any of the shapes above may carry a `<host>/` prefix.
+ *   any shape above may carry a `<host>/` prefix. A host with no dot (`ghe`) is
+ *   recognized only in this numbered form.
  * - `issue://owner/repo/123?comments=0` — single item, comments suppressed.
  * - `issue://owner/repo?state=closed&limit=20` — list options pass through to
  *   `gh`.
@@ -126,16 +127,24 @@ function parseUrl(url: InternalUrl, scheme: Scheme): Parsed {
 		}
 	}
 
-	// A dotted first segment is a GitHub Enterprise host: owner names are
-	// alphanumeric-plus-hyphen, so `pr://ghe.example.com/owner/repo/7` can only
-	// be host-qualified. Shift it out so the shapes below stay two-segment.
+	// Detect a leading `<host>/` prefix. A dotted first segment can only be a
+	// host, because GitHub owner names are alphanumeric-plus-hyphen, so dotted
+	// hosts work with every shape below. A single-label host (`ghe`,
+	// `localhost`) is only recognizable from the item number's position, so it
+	// is accepted in the numbered form alone — `<host>/<owner>/<repo>` with no
+	// number is indistinguishable from `<owner>/<repo>/<bad-number>`, and
+	// keeping the latter's error beats guessing.
 	let repoHost: string | undefined;
-	if (host.includes(".")) {
-		if (parts.length < 2) {
-			throw new Error(
-				`Invalid ${scheme}:// URL. Expected ${scheme}://<host>/<owner>/<repo> or ${scheme}://<host>/<owner>/<repo>/<number>`,
-			);
-		}
+	const dottedHost = host.includes(".");
+	if (dottedHost && parts.length < 2) {
+		throw new Error(
+			`Invalid ${scheme}:// URL. Expected ${scheme}://<host>/<owner>/<repo> or ${scheme}://<host>/<owner>/<repo>/<number>`,
+		);
+	}
+	const hostPrefixed = dottedHost
+		? parts.length >= 2
+		: parts.length >= 3 && parsePositiveDecimalInt(parts[2]) !== undefined;
+	if (hostPrefixed) {
 		repoHost = host;
 		host = parts[0] ?? "";
 		parts = parts.slice(1);
