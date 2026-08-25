@@ -3,22 +3,23 @@ import type { ExtensionAPI, OAuthLoginCallbacks, ProviderModelConfig } from "@oh
 /**
  * omp-merge-gateway-provider
  *
- * Registers Merge Gateway (https://docs.merge.dev/merge-gateway/get-started) as
- * two omp model providers so any Gateway route can be selected from /model:
+ * Registers Merge Gateway (https://docs.merge.dev/merge-gateway/get-started)
+ * as a single omp model provider so any Gateway route can be selected from
+ * /model through one MERGE_GATEWAY_API_KEY.
  *
- *   - "merge-gateway"           OpenAI-compatible wire (`/v1/openai/chat/completions`)
- *   - "merge-gateway-anthropic" Anthropic-compatible wire (`/v1/messages`)
+ * One provider serves both wires because omp resolves `baseUrl` and `api`
+ * per model (`modelDef.baseUrl ?? providerBaseUrl`, custom-models.ts):
  *
- * Two registrations are required because the two wires need different base URLs:
- * omp's openai-completions client appends `/chat/completions` to the base URL,
- * while its anthropic client builds `${baseURL}/v1/messages` with no stripping.
+ *   - default                       OpenAI-compatible wire (/v1/openai/chat/completions)
+ *   - first-party anthropic routes  Anthropic-compatible wire (/v1/messages)
+ *
  * The Anthropic wire preserves signed thinking blocks across multi-round tool
- * loops (Gateway drops unsigned blocks on replay), so Claude routes get their
- * own provider registration.
+ * loops (Gateway drops unsigned blocks on replay), so first-party Claude
+ * routes are pinned to it. `reasoning_effort` is suppressed on OpenAI-wire
+ * models because Gateway forwards it and some vendors reject it.
  */
 
-const PROVIDER_OPENAI = "merge-gateway";
-const PROVIDER_ANTHROPIC = "merge-gateway-anthropic";
+const PROVIDER = "merge-gateway";
 const OPENAI_BASE_URL = "https://api-gateway.merge.dev/v1/openai";
 const ANTHROPIC_BASE_URL = "https://api-gateway.merge.dev";
 const CATALOG_BASE = "https://api-gateway.merge.dev/v1";
@@ -63,7 +64,7 @@ interface CatalogPage {
 
 /**
  * Merge Gateway routing-policy model. Gateway picks the real model per request;
- * omp only uses these fields for context accounting.
+ * omp only uses these fields for context accounting. Rides the OpenAI wire.
  */
 export function makeDefaultRoutingEntry(): ProviderModelConfig {
 	return {
@@ -74,6 +75,7 @@ export function makeDefaultRoutingEntry(): ProviderModelConfig {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 200_000,
 		maxTokens: 32_000,
+		baseUrl: OPENAI_BASE_URL,
 	};
 }
 
@@ -101,6 +103,10 @@ export function pickVendor(entry: CatalogModel): { id: string; vendor: CatalogVe
  * kept only when a vendor route is available AND it supports tool calling AND
  * its output includes "text" — which excludes embeddings and image/audio/video
  * generation models.
+ *
+ * First-party `anthropic` routes are pinned to the Anthropic-compatible wire
+ * (signed thinking blocks); everything else rides the OpenAI-compatible wire
+ * with `supportsReasoningEffort` disabled.
  */
 export function mapCatalogEntry(entry: CatalogModel): ProviderModelConfig | null {
 	const picked = pickVendor(entry);
@@ -109,7 +115,7 @@ export function mapCatalogEntry(entry: CatalogModel): ProviderModelConfig | null
 	if (caps.supports_tool_calling !== true) return null;
 	if (!(caps.output ?? []).includes("text")) return null;
 	const input: ("text" | "image")[] = (caps.input ?? []).includes("image") ? ["text", "image"] : ["text"];
-	return {
+	const model: ProviderModelConfig = {
 		id: entry.model,
 		name: entry.display_name ?? entry.model,
 		reasoning: caps.supports_reasoning === true,
@@ -123,6 +129,14 @@ export function mapCatalogEntry(entry: CatalogModel): ProviderModelConfig | null
 		contextWindow: picked.vendor.context_window ?? 128_000,
 		maxTokens: picked.vendor.max_output_tokens ?? 16_384,
 	};
+	if (picked.id === "anthropic") {
+		model.api = "anthropic-messages";
+		model.baseUrl = ANTHROPIC_BASE_URL;
+	} else {
+		model.baseUrl = OPENAI_BASE_URL;
+		model.compat = { supportsReasoningEffort: false };
+	}
+	return model;
 }
 
 /** Fetch every raw catalog entry, following the cursor envelope. */
@@ -156,31 +170,10 @@ async function fetchRawCatalog(apiKey: string): Promise<CatalogModel[]> {
  * routing-policy entry so the picker stays usable pre-auth; with a key pages
  * through the catalog and maps every tool-callable text model.
  */
-export async function fetchCatalog(apiKey: string | undefined): Promise<ProviderModelConfig[]> {
+export async function fetchModels(apiKey: string | undefined): Promise<ProviderModelConfig[]> {
 	if (!apiKey) return [makeDefaultRoutingEntry()];
 	const entries = await fetchRawCatalog(apiKey);
 	const models = entries.map(mapCatalogEntry).filter(m => m !== null);
-	models.push(makeDefaultRoutingEntry());
-	return models;
-}
-
-/**
- * Anthropic wire: only Claude routes served by the first-party `anthropic`
- * vendor (plus the routing entry). The id prefix alone is not enough —
- * `anthropic/…` models can be backed by bedrock, and first-party routes are
- * what guarantee signed thinking blocks survive multi-round tool loops.
- */
-export async function fetchAnthropicWireModels(apiKey: string | undefined): Promise<ProviderModelConfig[]> {
-	if (!apiKey) return [makeDefaultRoutingEntry()];
-	const entries = await fetchRawCatalog(apiKey);
-	const models: ProviderModelConfig[] = [];
-	for (const entry of entries) {
-		if (!entry.model.startsWith("anthropic/")) continue;
-		const picked = pickVendor(entry);
-		if (picked?.id !== "anthropic") continue;
-		const mapped = mapCatalogEntry(entry);
-		if (mapped) models.push(mapped);
-	}
 	models.push(makeDefaultRoutingEntry());
 	return models;
 }
@@ -211,29 +204,24 @@ export async function login(callbacks: OAuthLoginCallbacks): Promise<string> {
 }
 
 /**
- * Register both providers. apiKey is set only when the env var is actually
- * defined: omp resolves apiKey as env-var-name-or-literal, and passing the name
- * while the var is unset would store the bogus literal "MERGE_GATEWAY_API_KEY".
- * When unset, users authenticate once via /login (static key; no refresh).
+ * Register the provider. apiKey is set only when the env var is actually
+ * defined: omp resolves apiKey as env-var-name-or-literal, and passing the
+ * name while the var is unset would store the bogus literal
+ * "MERGE_GATEWAY_API_KEY". When unset, users authenticate once via /login
+ * (static key; no refresh).
+ *
+ * No provider-level baseUrl: omp's provider transport override wins over
+ * per-model baseUrl (`override.baseUrl ?? entry.baseUrl`), so a provider
+ * default would clobber the Anthropic-wire routes. Every model therefore
+ * carries its own wire-specific baseUrl.
  */
 export default function (pi: ExtensionAPI): void {
 	const apiKeyConfig = process.env[ENV_VAR] ? ENV_VAR : undefined;
 
-	pi.registerProvider(PROVIDER_OPENAI, {
-		baseUrl: OPENAI_BASE_URL,
+	pi.registerProvider(PROVIDER, {
 		...(apiKeyConfig ? { apiKey: apiKeyConfig } : {}),
 		api: "openai-completions",
-		// Gateway forwards reasoning_effort and some vendors reject it.
-		compat: { supportsReasoningEffort: false },
 		oauth: { name: "Merge Gateway", login },
-		fetchDynamicModels: fetchCatalog,
-	});
-
-	pi.registerProvider(PROVIDER_ANTHROPIC, {
-		baseUrl: ANTHROPIC_BASE_URL,
-		...(apiKeyConfig ? { apiKey: apiKeyConfig } : {}),
-		api: "anthropic-messages",
-		oauth: { name: "Merge Gateway (Anthropic wire)", login },
-		fetchDynamicModels: fetchAnthropicWireModels,
+		fetchDynamicModels: fetchModels,
 	});
 }
