@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Exported `resolveProject` and `resolveLocation` from `@oh-my-pi/pi-ai/providers/google-vertex`, exposing env-driven Vertex AI project (`GOOGLE_CLOUD_PROJECT`/`GCP_PROJECT`/`GCLOUD_PROJECT`) and location (`GOOGLE_VERTEX_LOCATION`/`GOOGLE_CLOUD_LOCATION`/`VERTEX_LOCATION`) resolution.
 
 ## [18.0.4] - 2026-08-24
 

@@ -92,9 +92,9 @@ describe("searchGemini tools serialization", () => {
 		} as const;
 	}
 
-	it("treats a standard Google developer API key as available", () => {
+	it("treats a standard Google developer API key as available", async () => {
 		const provider = new GeminiProvider();
-		expect(provider.isAvailable(apiKeyAuthStorage)).toBe(true);
+		expect(await provider.isAvailable(apiKeyAuthStorage)).toBe(true);
 	});
 
 	it("routes API key auth through the developer API with Google Search grounding", async () => {
@@ -139,7 +139,7 @@ describe("searchGemini tools serialization", () => {
 		} as unknown as AuthStorage;
 		const fetchMock = mockGeminiFetch(DEVELOPER_SSE_RESPONSE);
 
-		expect(new GeminiProvider().isAvailable(gatewayAuthStorage)).toBe(true);
+		expect(await new GeminiProvider().isAvailable(gatewayAuthStorage)).toBe(true);
 		await searchGemini({
 			...makeParams("gateway"),
 			authStorage: gatewayAuthStorage,
@@ -348,6 +348,7 @@ describe("searchGemini Vertex AI", () => {
 		"GOOGLE_VERTEX_LOCATION",
 		"GOOGLE_CLOUD_LOCATION",
 		"VERTEX_LOCATION",
+		"GOOGLE_GEMINI_BASE_URL",
 	] as const;
 	let originalVertexEnv: Record<(typeof VERTEX_ENV_KEYS)[number], string | undefined>;
 	let capturedRequest: CapturedRequest | null = null;
@@ -531,6 +532,34 @@ describe("searchGemini Vertex AI", () => {
 		);
 		expect(capturedRequest?.headers["x-goog-api-key"]).toBe("test-gemini-api-key");
 	});
+	it("falls back to Vertex ADC when GOOGLE_GEMINI_BASE_URL is malformed", async () => {
+		Bun.env.GOOGLE_GEMINI_BASE_URL = "not-a-url";
+		setVertexEnv();
+		const provider = new GeminiProvider();
+		expect(await provider.isAvailable(noAuthStorage)).toBe(true);
+
+		const fetchMock = mockVertexFetch();
+		await searchGemini({
+			query: "vertex despite bad base url",
+			authStorage: noAuthStorage,
+			fetch: fetchMock,
+		});
+
+		expect(capturedRequest?.url).toBe(
+			"https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1/publishers/google/models/gemini-2.5-flash:streamGenerateContent?alt=sse",
+		);
+	});
+
+	it("surfaces the Developer endpoint error when no auth arm can serve", async () => {
+		Bun.env.GOOGLE_GEMINI_BASE_URL = "not-a-url";
+		await expect(
+			searchGemini({
+				query: "no arms",
+				authStorage: noAuthStorage,
+				fetch: mockVertexFetch(),
+			}),
+		).rejects.toThrow("GOOGLE_GEMINI_BASE_URL must be a valid absolute URL");
+	});
 
 	it("redacts the Vertex access token from error text", async () => {
 		setVertexEnv();
@@ -568,18 +597,18 @@ describe("searchGemini Vertex AI", () => {
 		expect((thrown as Error).message).toContain("400");
 	});
 
-	it("requires a local credential source, project, and location for availability", () => {
+	it("requires a local credential source, project, and location for availability", async () => {
 		const provider = new GeminiProvider();
-		expect(provider.isAvailable(noAuthStorage)).toBe(false);
+		expect(await provider.isAvailable(noAuthStorage)).toBe(false);
 
 		Bun.env.GOOGLE_CLOUD_ACCESS_TOKEN = "test-vertex-token";
-		expect(provider.isAvailable(noAuthStorage)).toBe(false);
+		expect(await provider.isAvailable(noAuthStorage)).toBe(false);
 
 		Bun.env.GOOGLE_CLOUD_PROJECT = "test-project";
-		expect(provider.isAvailable(noAuthStorage)).toBe(false);
+		expect(await provider.isAvailable(noAuthStorage)).toBe(false);
 
 		Bun.env.GOOGLE_CLOUD_LOCATION = "us-central1";
-		expect(provider.isAvailable(noAuthStorage)).toBe(true);
+		expect(await provider.isAvailable(noAuthStorage)).toBe(true);
 	});
 
 	it("requires GOOGLE_APPLICATION_CREDENTIALS to reference an existing file", async () => {
@@ -592,10 +621,10 @@ describe("searchGemini Vertex AI", () => {
 			const adcPath = path.join(tmpDir, "adc.json");
 			await Bun.write(adcPath, JSON.stringify({ type: "authorized_user" }));
 			Bun.env.GOOGLE_APPLICATION_CREDENTIALS = adcPath;
-			expect(provider.isAvailable(noAuthStorage)).toBe(true);
+			expect(await provider.isAvailable(noAuthStorage)).toBe(true);
 
 			Bun.env.GOOGLE_APPLICATION_CREDENTIALS = path.join(tmpDir, "missing.json");
-			expect(provider.isAvailable(noAuthStorage)).toBe(false);
+			expect(await provider.isAvailable(noAuthStorage)).toBe(false);
 		} finally {
 			await fs.rm(tmpDir, { recursive: true, force: true });
 		}
