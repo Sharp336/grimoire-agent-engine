@@ -277,7 +277,7 @@ export class ModelHubComponent implements Component {
 		// the synchronous hydration above.
 		if (this.#scopedModels.length === 0) {
 			this.#registry
-				.refresh("offline")
+				.refresh("online-if-uncached")
 				.then(() => this.#syncFromRegistryState())
 				.then(() => this.#reprobeHiddenOptionalProviders())
 				.catch(error => {
