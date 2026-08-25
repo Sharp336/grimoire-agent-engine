@@ -3514,6 +3514,148 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("rename_file reports an unreadable source as a read failure, not a missing path", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-rename-source-eacces-");
+		try {
+			const sourceFile = path.join(tempDir.path(), "locked.ts");
+			const destFile = path.join(tempDir.path(), "renamed.ts");
+			await Bun.write(sourceFile, "export const a = 1;\n");
+
+			// EACCES is not ENOENT: the file is there, we just can't read it.
+			const realStat = fs.promises.stat;
+			vi.spyOn(fs.promises, "stat").mockImplementation((async (target: fs.PathLike) => {
+				if (target === sourceFile) {
+					throw Object.assign(new Error(`permission denied: ${sourceFile}\tsecret`), {
+						code: "EACCES",
+						path: sourceFile,
+						syscall: "stat",
+					});
+				}
+				return await realStat(target);
+			}) as typeof fs.promises.stat);
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const result = await tool.execute("rename-source-eacces", {
+				action: "rename_file",
+				file: sourceFile,
+				new_name: destFile,
+				timeout: 5,
+			});
+
+			const output = textResult(result);
+			expect(output).toContain("cannot read source path locked.ts: EACCES during stat");
+			expect(output).not.toContain(tempDir.path());
+			expect(output).not.toContain("\t");
+			expect(output).not.toContain("does not exist");
+			expect(result.details).toMatchObject({ action: "rename_file", success: false });
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
+	it("rename_file refuses to rename when the destination cannot be inspected", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-rename-dest-eacces-");
+		try {
+			const sourceFile = path.join(tempDir.path(), "old.ts");
+			const destFile = path.join(tempDir.path(), "new.ts");
+			await Bun.write(sourceFile, "export const a = 1;\n");
+
+			// A failed destination probe never established that the path is free,
+			// so treating it as absent would rename onto a file we cannot see.
+			const realStat = fs.promises.stat;
+			vi.spyOn(fs.promises, "stat").mockImplementation((async (target: fs.PathLike) => {
+				if (target === destFile) {
+					throw Object.assign(new Error(`permission denied: ${destFile}\tsecret`), {
+						code: "EACCES",
+						path: destFile,
+						syscall: "stat",
+					});
+				}
+				return await realStat(target);
+			}) as typeof fs.promises.stat);
+
+			const tool = new LspTool(makeLspSession(tempDir.path()));
+			const result = await tool.execute("rename-dest-eacces", {
+				action: "rename_file",
+				file: sourceFile,
+				new_name: destFile,
+				timeout: 5,
+			});
+
+			const output = textResult(result);
+			expect(output).toContain("cannot read destination path new.ts: EACCES during stat");
+			expect(output).not.toContain(tempDir.path());
+			expect(output).not.toContain("\t");
+			expect(result.details).toMatchObject({ action: "rename_file", success: false });
+			expect(fs.existsSync(sourceFile)).toBe(true);
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
+	it("rename_file treats a dangling destination symlink as an existing path", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-rename-dangling-dest-");
+		try {
+			const sourceFile = path.join(tempDir.path(), "old.ts");
+			const destFile = path.join(tempDir.path(), "dangling.ts");
+			await Bun.write(sourceFile, "export const a = 1;\n");
+			const sourceStat = await fs.promises.stat(sourceFile);
+			const realLstat = fs.promises.lstat;
+			const lstatSpy = vi.spyOn(fs.promises, "lstat").mockImplementation((async (target: fs.PathLike) => {
+				if (target === destFile) return sourceStat;
+				return await realLstat(target);
+			}) as typeof fs.promises.lstat);
+
+			const result = await new LspTool(makeLspSession(tempDir.path())).execute("rename-dangling-dest", {
+				action: "rename_file",
+				file: sourceFile,
+				new_name: destFile,
+				timeout: 5,
+			});
+
+			expect(textResult(result)).toContain("destination already exists: dangling.ts");
+			expect(lstatSpy).toHaveBeenCalledWith(destFile);
+			expect(fs.existsSync(sourceFile)).toBe(true);
+			expect(fs.existsSync(destFile)).toBe(false);
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
+	it("shortens an outside-cwd Windows home path before separator normalization", async () => {
+		if (!lspHomeOverride) throw new Error("Expected isolated home");
+		const cwd = path.join(lspHomeOverride, "project");
+		const sourceFile = path.join(lspHomeOverride, "other", "locked.ts");
+		const destFile = path.join(lspHomeOverride, "other", "renamed.ts");
+		fs.mkdirSync(path.dirname(sourceFile), { recursive: true });
+		fs.mkdirSync(cwd, { recursive: true });
+		await Bun.write(sourceFile, "export const a = 1;\n");
+		const realStat = fs.promises.stat;
+		vi.spyOn(fs.promises, "stat").mockImplementation((async (target: fs.PathLike) => {
+			if (target === sourceFile) {
+				throw Object.assign(new Error(`permission denied: ${sourceFile}`), {
+					code: "EACCES",
+					path: sourceFile,
+					syscall: "stat",
+				});
+			}
+			return await realStat(target);
+		}) as typeof fs.promises.stat);
+
+		const result = await new LspTool(makeLspSession(cwd)).execute("rename-home-eacces", {
+			action: "rename_file",
+			file: sourceFile,
+			new_name: destFile,
+			timeout: 5,
+		});
+		const output = textResult(result);
+		expect(output).toContain("cannot read source path ~");
+		expect(output).not.toContain(lspHomeOverride);
+	});
+
 	it("workspace reload rediscovers LSP servers after an empty config was cached", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-reload-redetect-");
 		try {
