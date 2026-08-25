@@ -217,6 +217,20 @@ function applyGlobalModelsDevFallback(
 		) {
 			return model;
 		}
+		// ClinePass free-tier entries arrive manager-complete: enriched from the
+		// bundled upstream reference and carrying a tier-marked name. The same-id
+		// overlay would overwrite their names with the reference's display name
+		// (dropping the "(free)" marker) and flip reasoning from unrelated
+		// same-id data, diverging the bundle from the runtime roster. Their raw
+		// wire tag marks them as manager-complete. (`.api` equality narrows the
+		// generic, making the compat field access sound.)
+		if (
+			model.provider === "cline-pass" &&
+			model.api === "openai-completions" &&
+			(model as ModelSpec<"openai-completions">).compat?.wireModelIdMode === "raw"
+		) {
+			return model;
+		}
 		const reference = globalReferences.get(model.id);
 		if (!reference) {
 			return model;

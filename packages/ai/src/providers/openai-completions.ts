@@ -3,6 +3,7 @@ import { isKimiModelId } from "@oh-my-pi/pi-catalog/identity";
 import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
+import { clinePassClientHeaders } from "@oh-my-pi/pi-catalog/wire/cline-pass";
 import { $env, logger, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
@@ -79,12 +80,12 @@ import {
 	resolveOpenAIReasoningEffortFallback,
 } from "./openai-reasoning-fallback";
 import {
-	applyChatCompletionsCompatPolicy,
+	applyChatCompletionsReasoningParams,
 	applyChatCompletionsToolStream,
 	applyOpenAIExtraBody,
 	applyOpenAIGatewayRouting,
 	applyOpenAIServiceTier,
-	applyOpenRouterReportedCost,
+	applyProviderReportedCost,
 	applyWireModelIdTransform,
 	calculateOpenAIUsageAccounting,
 	clearOpenAIStrictToolsState,
@@ -1438,7 +1439,13 @@ function createRequestSetup(
 		// Provider auth/header overlay: Kimi-code hosts require shared client
 		// attribution headers prepended before caller headers. Kept here (not in
 		// the shared helper) because it is provider-specific request setup.
-		prependHeaders: model.provider === "kimi-code" ? getKimiCommonHeaders : undefined,
+		// ClinePass sends the mirrored Cline CLI identity; documented in wire/cline-pass.ts.
+		prependHeaders:
+			model.provider === "kimi-code"
+				? getKimiCommonHeaders
+				: model.provider === "cline-pass"
+					? () => clinePassClientHeaders(promptCacheSessionId)
+					: undefined,
 		alibabaCodingPlanAuth: true,
 		azureChatCompletions: { apiVersion, deploymentName },
 	});
@@ -1745,7 +1752,7 @@ function buildParams(
 	}
 	applyChatCompletionsToolStream(params, model, compat);
 
-	applyChatCompletionsCompatPolicy(params, finalPolicy);
+	applyChatCompletionsReasoningParams(params, model, compat, { ...options, toolChoice: params.tool_choice });
 	dropOpenRouterKimiForcedToolReasoning(params, model, finalPolicy);
 
 	applyOpenAIGatewayRouting(params, compat, cacheRetention !== "none");
@@ -1804,7 +1811,7 @@ export function parseChunkUsage(
 		...(premiumRequests !== undefined ? { premiumRequests } : {}),
 	};
 	calculateCost(model, usage);
-	applyOpenRouterReportedCost(model, usage, rawUsage);
+	applyProviderReportedCost(model, usage, rawUsage);
 	return usage;
 }
 

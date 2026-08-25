@@ -19,6 +19,8 @@ type ChatCompletionsValidation = {
 	provider: string;
 	baseUrl: string;
 	model: string;
+	maxTokensField?: "max_tokens" | "max_completion_tokens";
+	maxTokens?: number;
 };
 
 type AnthropicMessagesValidation = {
@@ -97,6 +99,8 @@ export function createApiKeyLogin(config: ApiKeyLoginConfig): (options: OAuthCon
 					apiKey: trimmed,
 					baseUrl: config.validation.baseUrl,
 					model: config.validation.model,
+					maxTokensField: config.validation.maxTokensField,
+					maxTokens: config.validation.maxTokens,
 					signal: options.signal,
 					fetch: options.fetch,
 				});

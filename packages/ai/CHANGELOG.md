@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added API-key authentication for ClinePass through the official `CLINE_API_KEY` variable, including account-route validation and rolling quota-window reporting in `omp usage` ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
+- ClinePass login now validates the API key against the `/users/me` account identity route instead of a probe chat completion, so roster churn cannot break sign-in and validation no longer consumes subscription quota ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
+- ClinePass failures now surface actionable messages: subscription-window and free-tier limit markers classify as usage limits (fail fast, rotate sibling credentials), while not-subscribed, organization-account, and roster-rotation `model not found` responses are rewritten with recovery guidance ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
+- ClinePass requests now mirror the official Cline CLI's client-identity headers (with Cline's blessing), unlocking roster entries the gateway restricts to Cline product surfaces — including free-tier `deepseek/deepseek-v4-flash`. A surface-gate 403 is classified as per-model client policy rather than a credential failure, so it no longer rotates sibling keys ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
+- Updated ClinePass requests to use the current Cline client identity and stable task ids, per-model reasoning and Qwen cache controls, and gateway-reported billed costs ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
+
 ## [18.0.5] - 2026-08-25
 
 ### Breaking Changes
