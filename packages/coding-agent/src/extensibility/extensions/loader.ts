@@ -31,7 +31,7 @@ import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
-import { loadRuntimeModule } from "../module-loader";
+import { loadRuntimeModule, loadValidationModule } from "../module-loader";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 import { getAllPluginExtensionPaths, getExtensionManifestPath } from "../plugins/loader";
 
@@ -391,6 +391,7 @@ interface ImportedExtensionModule {
 	factory: ExtensionFactory | null;
 	resolvedPath: string;
 	error: string | null;
+	cleanup?: () => Promise<void>;
 }
 
 async function readExtensionCompatibility(
@@ -431,24 +432,30 @@ async function importExtensionModule(
 ): Promise<ImportedExtensionModule> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
 	const compatibility = await readExtensionCompatibility(resolvedPath, manifestCache);
+	let cleanup: (() => Promise<void>) | undefined;
 	try {
-		const module = (await withHostGuard(() =>
-			compatibility === "modern-esm" ? loadRuntimeModule(resolvedPath, cacheBust) : loadLegacyPiModule(resolvedPath),
-		)) as LoadedExtensionModule;
+		const module = (await withHostGuard(async () => {
+			if (compatibility === "modern-esm" && cacheBust) {
+				const loaded = await loadValidationModule(resolvedPath, cacheBust);
+				cleanup = loaded.cleanup;
+				return loaded.module;
+			}
+			return compatibility === "modern-esm" ? loadRuntimeModule(resolvedPath) : loadLegacyPiModule(resolvedPath);
+		})) as LoadedExtensionModule;
 		const factory = getExtensionFactory(module);
 		if (typeof factory !== "function")
 			return {
 				factory: null,
 				resolvedPath,
 				error: `Extension does not export a valid factory function: ${extensionPath}`,
+				cleanup,
 			};
-		return { factory, resolvedPath, error: null };
+		return { factory, resolvedPath, error: null, cleanup };
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
-		return { factory: null, resolvedPath, error: `Failed to load extension: ${message}` };
+		return { factory: null, resolvedPath, error: `Failed to load extension: ${message}`, cleanup };
 	}
 }
-
 async function bindExtension(
 	extensionPath: string,
 	imported: ImportedExtensionModule,
@@ -458,17 +465,19 @@ async function bindExtension(
 ): Promise<{ extension: Extension | null; error: string | null }> {
 	const factory = imported.factory;
 	if (imported.error !== null || factory === null) {
+		await imported.cleanup?.();
 		return { extension: null, error: imported.error };
 	}
 	try {
 		const extension = createExtension(extensionPath, imported.resolvedPath);
 		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
 		await withHostGuard(() => runExtensionFactory(factory, api, runtime));
-
 		return { extension, error: null };
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		return { extension: null, error: `Failed to load extension: ${message}` };
+	} finally {
+		await imported.cleanup?.();
 	}
 }
 

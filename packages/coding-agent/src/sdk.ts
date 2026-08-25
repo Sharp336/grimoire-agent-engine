@@ -2614,7 +2614,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						: "No models available. Use /login or set an API key environment variable. Then use /model to select a model.";
 			}
 		}
-		if (deferredModelResolution && (options.awaitDeferredModel || options.hasUI === undefined)) {
+		if (deferredModelResolution && (options.awaitDeferredModel || options.hasUI !== true)) {
 			const deferredModel = await deferredModelResolution;
 			if (deferredModel) {
 				model = deferredModel.model;
