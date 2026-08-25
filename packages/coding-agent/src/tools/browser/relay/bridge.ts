@@ -87,6 +87,8 @@ class TabState {
 	/** Whether targets for this tab were announced to discovering connections. */
 	announced = false;
 	attaching: Promise<boolean> | null = null;
+	/** Relay-initiated detach in flight; reattach serializes behind it. */
+	detaching: Promise<void> | null = null;
 	/** True after the relay put this tab in the omp group; `ompGroupId` holds that group. */
 	grouped = false;
 	/** Group RPC in flight — suppresses duplicate requests from load-time tabUpdated bursts. */
@@ -209,10 +211,19 @@ export class RelayBridge {
 
 	// ---- extension lifecycle -------------------------------------------------
 
+	#rejectPendingExtensionRpcs(message: string): void {
+		for (const pending of this.#pendingRpc.values()) {
+			clearTimeout(pending.timer);
+			pending.reject(new Error(message));
+		}
+		this.#pendingRpc.clear();
+	}
+
 	/** A new extension socket connected; replaces any previous one. */
 	extConnected(socket: RelaySocket): void {
 		if (this.#ext && this.#ext !== socket) {
 			this.#log("replacing extension socket");
+			this.#rejectPendingExtensionRpcs("relay extension replaced");
 			this.#ext.close();
 		}
 		this.#ext = socket;
@@ -222,11 +233,7 @@ export class RelayBridge {
 		if (this.#ext !== socket) return;
 		this.#ext = null;
 		this.#extInfo = null;
-		for (const pending of this.#pendingRpc.values()) {
-			clearTimeout(pending.timer);
-			pending.reject(new Error("relay extension disconnected"));
-		}
-		this.#pendingRpc.clear();
+		this.#rejectPendingExtensionRpcs("relay extension disconnected");
 		for (const tab of this.#tabs.values()) {
 			tab.attached = false;
 			tab.attaching = null;
@@ -267,7 +274,7 @@ export class RelayBridge {
 				this.#onCdpEvent(msg.tabId, msg.sessionId, msg.method, msg.params);
 				return;
 			case "detached":
-				this.#onTabDetached(msg.tabId, msg.reason);
+				this.#onTabDetached(msg.tabId, msg.reason, msg.relayInitiated === true);
 				return;
 			case "tabCreated":
 				this.#onTabUpsert(msg.tab);
@@ -303,7 +310,7 @@ export class RelayBridge {
 			// connections still hold sessions: restore them best-effort.
 			if (wasAttached && !tab.attached && this.#sessionHolders(tab.tabId).length > 0) {
 				void this.#ensureAttached(tab).then(ok => {
-					if (!ok) this.#onTabDetached(tab.tabId, "reattach_failed");
+					if (!ok) this.#onTabDetached(tab.tabId, "reattach_failed", false);
 				});
 			}
 		}
@@ -337,14 +344,7 @@ export class RelayBridge {
 		}
 		conn.claims.clear();
 		// Drop the debugger (and its infobar) from tabs nobody drives anymore.
-		for (const tabId of touched) {
-			if (this.#sessionHolders(tabId).length > 0) continue;
-			const tab = this.#tabs.get(tabId);
-			if (tab?.attached) {
-				tab.attached = false;
-				void this.#rpc({ op: "detach", tabId }).catch(() => {});
-			}
-		}
+		for (const tabId of touched) this.#detachIfUnheld(tabId);
 		this.#log("cdp client closed", { conn: connId });
 	}
 
@@ -653,9 +653,13 @@ export class RelayBridge {
 		}
 	}
 
-	#onTabDetached(tabId: number, reason: string): void {
+	#onTabDetached(tabId: number, reason: string, relayInitiated: boolean): void {
 		const tab = this.#tabs.get(tabId);
 		if (!tab) return;
+		// Explicit source attribution comes from the extension that executed
+		// chrome.debugger.detach, so socket replacement cannot confuse this
+		// with a user cancellation or mutate an unrelated attach promise.
+		if (relayInitiated) return;
 		this.#log("tab detached", { tabId, reason });
 		tab.attached = false;
 		tab.attaching = null;
@@ -841,6 +845,28 @@ export class RelayBridge {
 		conn.sessions.delete(sessionId);
 		const targetId = ref.kind === "tab" ? tabTargetId(ref.tabId) : pageTargetId(ref.tabId);
 		this.#emit(conn, "Target.detachedFromTarget", { sessionId, targetId }, parentSessionId);
+		// An explicit release of the last session must drop the attachment too,
+		// or it outlives every downstream session: the infobar stays up, and
+		// dismissing it bans the tab for the rest of the epoch.
+		this.#detachIfUnheld(ref.tabId);
+	}
+
+	/**
+	 * Release the tab's chrome.debugger attachment once no downstream session
+	 * holds it. Inert while the long-lived registry connection still holds one.
+	 */
+	#detachIfUnheld(tabId: number): void {
+		if (this.#sessionHolders(tabId).length > 0) return;
+		const tab = this.#tabs.get(tabId);
+		if (!tab?.attached) return;
+		tab.attached = false;
+		const done = this.#rpc({ op: "detach", tabId })
+			.then(() => {})
+			.catch(() => {})
+			.finally(() => {
+				if (tab.detaching === done) tab.detaching = null;
+			});
+		tab.detaching = done;
 	}
 
 	/** Connections currently holding any session on a tab. */
@@ -863,6 +889,9 @@ export class RelayBridge {
 	}
 
 	async #ensureAttached(tab: TabState): Promise<boolean> {
+		// The extension emits the detach echo before resolving the RPC. Awaiting
+		// prevents a replacement attach racing either operation.
+		while (tab.detaching) await tab.detaching;
 		if (tab.attached) return true;
 		if (tab.banned || !this.#ext) return false;
 		if (tab.attaching) return await tab.attaching;
