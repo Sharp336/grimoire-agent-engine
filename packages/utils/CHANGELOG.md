@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `stableStringifyJson` for deterministic serialization of nested JSON-shaped data.
+
 ## [18.0.4] - 2026-08-24
 
 ### Added

@@ -26,6 +26,7 @@ import {
 	refreshFile,
 	sendNotification,
 	sendRequest,
+	shutdownStaleClients,
 	waitForProjectLoaded,
 } from "./client";
 import { getLinterClient } from "./clients";
@@ -1029,6 +1030,15 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			configCache.delete(this.session.cwd);
 			const refreshedConfig = getConfig(this.session.cwd);
 			const servers = getLspServers(refreshedConfig);
+			// Identity-aware client keys make a changed server resolve to a fresh
+			// client below, but the process spawned from the superseded config
+			// would stay registered and running otherwise (#8384). This also
+			// clears every old client when the refreshed config removes all servers.
+			const stopped = await shutdownStaleClients(
+				this.session.cwd,
+				servers.map(([, serverConfig]) => serverConfig),
+				signal,
+			);
 			if (servers.length === 0) {
 				return {
 					content: [{ type: "text", text: "No language server found for this action" }],
@@ -1036,6 +1046,11 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				};
 			}
 			const outputs: string[] = [];
+			if (stopped.length > 0) {
+				outputs.push(
+					"Stopped " + stopped.length + " server(s) with superseded configuration: " + stopped.join(", "),
+				);
+			}
 			for (const [workspaceServerName, workspaceServerConfig] of servers) {
 				throwIfAborted(signal);
 				clearInitializationFailure(workspaceServerConfig, this.session.cwd);
