@@ -352,7 +352,8 @@ async function readPersistedVibeChildIds(sessionFile: string, shouldContinue: ()
 			{ shouldContinue },
 		);
 		return ids;
-	} catch {
+	} catch (error) {
+		if (isFilesystemError(error)) throw error;
 		return new Set();
 	}
 }
@@ -562,7 +563,7 @@ async function registerPersistedSubagentsFromDir(
 			await fs.promises.access(getAgentTombstonePath(sessionFile));
 			tombstoned = true;
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") continue;
+			if (isFilesystemError(error)) throw error;
 		}
 		if (!shouldContinue()) return;
 		const replaceable =

@@ -6,7 +6,7 @@ import { HistoryProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/
 import { parseInternalUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/parse";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
-import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import { AgentRegistry, getAgentTombstonePath, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { ensurePersistedRoster, registerPersistedSubagents } from "@oh-my-pi/pi-coding-agent/registry/persisted-agents";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { CURRENT_SESSION_VERSION } from "@oh-my-pi/pi-coding-agent/session/session-entries";
@@ -352,6 +352,105 @@ describe("hub list", () => {
 			expect(listText(second)).not.toContain("ParkedScout");
 		} finally {
 			readdirSpy.mockRestore();
+		}
+	});
+
+	it("retries persisted roster scan after a root transcript read failure", async () => {
+		using tempDir = TempDir.createSync("@omp-hub-list-vibe-read-retry-");
+		const dir = tempDir.path();
+		const sessionFile = path.join(dir, "main.jsonl");
+		const transcriptFile = path.join(dir, "main", "ParkedScout.jsonl");
+		await fs.promises.mkdir(sessionFile);
+		await writeParkedTranscript(transcriptFile, "parked", "reviewing classified.diff");
+
+		const registry = new AgentRegistry();
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: MAIN_AGENT_ID,
+			kind: "main",
+			session: null,
+			sessionFile,
+			status: "running",
+		});
+
+		const first = await executeList(registry, MAIN_AGENT_ID);
+		if (!first.details) throw new Error("Expected coordination details");
+		expect(first.isError).toBeFalsy();
+		expect(first.details.counts).toEqual({
+			running: 0,
+			idle: 0,
+			parked: 0,
+			shown: 0,
+			truncated: 0,
+		});
+		expect(registry.get("ParkedScout")).toBeUndefined();
+
+		await fs.promises.rmdir(sessionFile);
+		await Bun.write(sessionFile, `${sessionHeader("main")}\n`);
+
+		const second = await executeList(registry, MAIN_AGENT_ID);
+		if (!second.details) throw new Error("Expected coordination details");
+		expect(second.isError).toBeFalsy();
+		expect(second.details.counts).toEqual({
+			running: 0,
+			idle: 0,
+			parked: 1,
+			shown: 0,
+			truncated: 0,
+		});
+		expect(registry.get("ParkedScout")?.status).toBe("parked");
+		expect(listText(second)).not.toContain("ParkedScout");
+	});
+
+	it("retries persisted roster scan after a tombstone access failure", async () => {
+		using tempDir = TempDir.createSync("@omp-hub-list-tombstone-retry-");
+		const dir = tempDir.path();
+		const sessionFile = path.join(dir, "main.jsonl");
+		const transcriptFile = path.join(dir, "main", "ParkedScout.jsonl");
+		await Bun.write(sessionFile, `${sessionHeader("main")}\n`);
+		await writeParkedTranscript(transcriptFile, "parked", "reviewing classified.diff");
+
+		const registry = new AgentRegistry();
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: MAIN_AGENT_ID,
+			kind: "main",
+			session: null,
+			sessionFile,
+			status: "running",
+		});
+
+		const accessSpy = spyOn(fs.promises, "access").mockImplementationOnce(async target => {
+			expect(target).toBe(getAgentTombstonePath(transcriptFile));
+			throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+		});
+		try {
+			const first = await executeList(registry, MAIN_AGENT_ID);
+			if (!first.details) throw new Error("Expected coordination details");
+			expect(first.isError).toBeFalsy();
+			expect(first.details.counts).toEqual({
+				running: 0,
+				idle: 0,
+				parked: 0,
+				shown: 0,
+				truncated: 0,
+			});
+			expect(registry.get("ParkedScout")).toBeUndefined();
+
+			const second = await executeList(registry, MAIN_AGENT_ID);
+			if (!second.details) throw new Error("Expected coordination details");
+			expect(second.isError).toBeFalsy();
+			expect(second.details.counts).toEqual({
+				running: 0,
+				idle: 0,
+				parked: 1,
+				shown: 0,
+				truncated: 0,
+			});
+			expect(registry.get("ParkedScout")?.status).toBe("parked");
+			expect(listText(second)).not.toContain("ParkedScout");
+		} finally {
+			accessSpy.mockRestore();
 		}
 	});
 
