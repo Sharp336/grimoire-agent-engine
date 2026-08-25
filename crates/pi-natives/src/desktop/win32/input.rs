@@ -182,20 +182,20 @@ mod background {
 				VK_UP, VkKeyScanW,
 			},
 			WindowsAndMessaging::{
-				GA_ROOT, GetAncestor, GetClassNameW, GetGUIThreadInfo, GetWindowThreadProcessId,
-				GUITHREADINFO, IsWindow, PostMessageW, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK,
-				WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP,
-				WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN,
-				WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+				AttachThreadInput, GA_ROOT, GetAncestor, GetClassNameW, GetFocus, GetGUIThreadInfo,
+				GetWindowThreadProcessId, GUITHREADINFO, IsWindow, PostMessageW, WM_CHAR, WM_KEYDOWN,
+				WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK,
+				WM_MBUTTONDOWN, WM_MBUTTONUP, WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL,
+				WM_RBUTTONDBLCLK, WM_RBUTTONDOWN, WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
 			},
 		},
 	};
-
 	use super::{CoreResult, DesktopError, KeyName, Modifiers, MouseButton, PointerEvent};
 	use crate::desktop::win32::{
 		capture,
 		delivery::{EventKind, would_be_silently_dropped},
 	};
+	use windows_sys::Win32::System::Threading::GetCurrentThreadId;
 
 	const MK_LBUTTON: usize = 0x0001;
 	const MK_RBUTTON: usize = 0x0002;
@@ -247,28 +247,44 @@ mod background {
 	/// exact window holding keyboard focus. Classic applications host their input
 	/// sink in a child control (Notepad's edit control); posting characters to the
 	/// frame silently loses them.
+	///
+	/// `GetFocus` cannot see other threads' focus directly, so this briefly attaches
+	/// the calling thread to the target's input queue to read it. Caret-less custom
+	/// controls are covered by that path; the GUI-thread caret/active windows and the
+	/// frame remain as validated fallbacks.
 	fn input_sink(top_level: HWND) -> HWND {
+		let rooted = |candidate: HWND| {
+			// SAFETY: IsWindow and GetAncestor are pure queries on returned handles.
+			!candidate.is_null()
+				&& unsafe { IsWindow(candidate) != 0 }
+				&& unsafe { GetAncestor(candidate, GA_ROOT) } == top_level
+		};
 		// SAFETY: pure query on a validated handle; the process id is not needed.
 		let thread = unsafe { GetWindowThreadProcessId(top_level, std::ptr::null_mut()) };
 		if thread == 0 {
 			return top_level;
 		}
+		// SAFETY: attach/detach is the documented pattern for reading another
+		// thread's focus state; the attached section covers a single scalar read.
+		let current = unsafe { GetCurrentThreadId() };
+		if unsafe { AttachThreadInput(current, thread, 1) } != 0 {
+			// SAFETY: after attaching, both threads share one input queue, so this
+			// returns the target queue's focused window.
+			let focus = unsafe { GetFocus() };
+			unsafe { AttachThreadInput(current, thread, 0) };
+			if rooted(focus) {
+				return focus;
+			}
+		}
 		// SAFETY: info is fully initialized before the call and read afterwards.
 		let mut info: GUITHREADINFO = unsafe { zeroed() };
 		info.cbSize = size_of::<GUITHREADINFO>() as u32;
 		// SAFETY: GetGUIThreadInfo only writes through the provided pointer.
-		if unsafe { GetGUIThreadInfo(thread, &mut info) } == 0 {
-			return top_level;
-		}
-		for candidate in [info.hwndCaret, info.hwndActive] {
-			if candidate.is_null() {
-				continue;
-			}
-			// SAFETY: IsWindow and GetAncestor are pure queries on returned handles.
-			let rooted =
-				unsafe { IsWindow(candidate) != 0 && GetAncestor(candidate, GA_ROOT) == top_level };
-			if rooted {
-				return candidate;
+		if unsafe { GetGUIThreadInfo(thread, &mut info) } != 0 {
+			for candidate in [info.hwndCaret, info.hwndActive] {
+				if rooted(candidate) {
+					return candidate;
+				}
 			}
 		}
 		top_level
@@ -466,9 +482,8 @@ mod background {
 	}
 
 	struct KeyEmitter {
-		hwnd:       HWND,
-		alt_depth:  u8,
-		emit_chars: bool,
+		hwnd:      HWND,
+		alt_depth: u8,
 	}
 	impl KeyEmitter {
 		fn transition(&mut self, vk: u16, down: bool) -> CoreResult<()> {
@@ -520,17 +535,6 @@ mod background {
 				}
 			}
 			self.transition(vk, down)?;
-			if down && self.emit_chars {
-				if let KeyName::Char(character) = key {
-					// SAFETY-equivalent: post() validates delivery; this mirrors the
-					// WM_CHAR the target's own TranslateMessage pass would synthesize
-					// for a real keystroke landing on this window.
-					let mut units = [0u16; 2];
-					for &unit in character.encode_utf16(&mut units).iter() {
-						post(self.hwnd, WM_CHAR, usize::from(unit), 1)?;
-					}
-				}
-			}
 			if !down {
 				for modifier in modifiers.into_iter().flatten().rev() {
 					self.transition(modifier, false)?;
@@ -545,7 +549,7 @@ mod background {
 		modifiers: Modifiers,
 		operation: impl FnOnce() -> CoreResult<()>,
 	) -> CoreResult<()> {
-		let mut emitter = KeyEmitter { hwnd, alt_depth: 0, emit_chars: false };
+		let mut emitter = KeyEmitter { hwnd, alt_depth: 0 };
 		let mut held = Vec::with_capacity(4);
 		for key in super::modifier_keys(modifiers) {
 			if let Err(error) = emitter.key(key, true) {
@@ -570,14 +574,19 @@ mod background {
 
 	pub(super) fn key_chord(id: &str, keys: &[KeyName]) -> CoreResult<()> {
 		let hwnd = hwnd(id)?;
-		let combo = keys.len() > 1 || keys.iter().any(|key| key.is_modifier());
-		let kind = if combo {
-			EventKind::KeyCombo
-		} else {
-			EventKind::Keystroke
-		};
-		ensure_delivery(id, hwnd, kind)?;
-		let mut emitter = KeyEmitter { hwnd: input_sink(hwnd), alt_depth: 0, emit_chars: !combo };
+		ensure_delivery(
+			id,
+			hwnd,
+			if keys.len() > 1 || keys.iter().any(|key| key.is_modifier()) {
+				EventKind::KeyCombo
+			} else {
+				EventKind::Keystroke
+			},
+		)?;
+		// Route to the focused child window so the target's own TranslateMessage
+		// pass synthesizes characters for printable keys; posting to the frame
+		// loses them.
+		let mut emitter = KeyEmitter { hwnd: input_sink(hwnd), alt_depth: 0 };
 		let mut held = Vec::with_capacity(keys.len());
 		for &key in keys {
 			if let Err(error) = emitter.key(key, true) {

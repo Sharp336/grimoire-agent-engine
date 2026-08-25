@@ -9,7 +9,7 @@
 
 ### Fixed
 
-- Fixed Windows background keyboard input being silently dropped by classic applications: posted characters and keystrokes now target the focused child window (resolved via `GetGUIThreadInfo`) instead of the frame window, and unmodified single-character key chords synthesize the matching `WM_CHAR`.
+- Fixed Windows background keyboard input being silently dropped by classic applications: posted characters and keystrokes now target the window that actually holds keyboard focus (resolved via a brief input-queue attach, with GUI-thread caret/active windows as fallbacks) instead of the frame window.
 
 ## [18.0.3] - 2026-08-23
 
