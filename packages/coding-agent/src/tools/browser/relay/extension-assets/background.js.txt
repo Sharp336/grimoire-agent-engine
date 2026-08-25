@@ -270,7 +270,13 @@ async function attachTab(tabId, socket) {
     await pending;
     if (ws !== socket) {
       guardDetachments.add(tabId);
-      await chrome.debugger.detach({ tabId }).catch(() => guardDetachments.delete(tabId));
+      await chrome.debugger.detach({ tabId }).catch(async () => {
+        guardDetachments.delete(tabId);
+        const targets = await chrome.debugger.getTargets().catch(() => []);
+        if (targets.some((target) => target.tabId === tabId && target.attached)) {
+          attachmentGuard.track(tabId);
+        }
+      });
       return;
     }
     attachmentGuard.track(tabId);

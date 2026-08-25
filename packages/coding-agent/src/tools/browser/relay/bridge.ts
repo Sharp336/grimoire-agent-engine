@@ -396,7 +396,7 @@ export class RelayBridge {
 				conn => !conn.autoAttach && conn.sessionsForTab(tab.tabId, "page").length > 0,
 			);
 			this.#retractTab(tab, preserve);
-			this.#announceTab(tab, true);
+			this.#announceTab(tab, true, preserve);
 		}
 		this.#syncGrouping();
 		this.#log("extension connected", { tabs: this.#tabs.size, version: msg.browserVersion });
@@ -973,10 +973,15 @@ export class RelayBridge {
 		}
 	}
 
-	#announceTab(tab: TabState, forceAttach = false): void {
+	#announceTab(tab: TabState, forceAttach = false, keepPageSessions: CdpConnection[] = []): void {
 		tab.announced = true;
 		for (const conn of this.#conns.values()) {
 			if (!conn.discover) continue;
+			// A connection whose page session was preserved through the paired
+			// #retractTab never saw a Target.targetDestroyed, so re-announcing here
+			// would duplicate a targetCreated for a target it still holds. Skip it:
+			// its consumer-visible page lifecycle is unbroken by design.
+			if (keepPageSessions.includes(conn)) continue;
 			this.#emit(conn, "Target.targetCreated", { targetInfo: this.#tabInfo(tab, tab.attached) });
 			this.#emit(conn, "Target.targetCreated", { targetInfo: this.#pageInfo(tab, tab.attached) });
 		}
@@ -1153,7 +1158,7 @@ export class RelayBridge {
 				conn.sessions.delete(tabSession);
 				this.#emit(conn, "Target.detachedFromTarget", { sessionId: tabSession, targetId: tabTargetId(tab.tabId) });
 			}
-			if (conn.discover && tab.announced) {
+			if (conn.discover && tab.announced && !preservePages) {
 				this.#emit(conn, "Target.targetDestroyed", { targetId: pageTargetId(tab.tabId) });
 				this.#emit(conn, "Target.targetDestroyed", { targetId: tabTargetId(tab.tabId) });
 			}

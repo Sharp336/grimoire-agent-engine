@@ -537,6 +537,37 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send")[0]!.tabId).toBe(1);
 	});
 
+	it("does not destroy/recreate a preserved page target for a discovering holder on recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		// Discovery + manual attachToTarget without auto-attach: the page session is
+		// preserved across the guard-detach root swap. A CDP client treats
+		// Target.targetDestroyed as the page closing, so preserving the raw session
+		// while still firing destroy/recreate for the same page breaks the
+		// consumer-visible page lifecycle. The recovery must suppress both the
+		// targetDestroyed and the paired targetCreated for the preserved connection.
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setDiscoverTargets" }));
+		await flush();
+		await attachPage(bridge, ext, cdp, connId, 1);
+
+		const destroyedBefore = cdp.messages.filter(m => m.method === "Target.targetDestroyed").length;
+		const createdBefore = cdp.messages.filter(m => m.method === "Target.targetCreated").length;
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await flush();
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		// No lifecycle churn for the preserved page target on this connection.
+		expect(cdp.messages.filter(m => m.method === "Target.targetDestroyed")).toHaveLength(destroyedBefore);
+		expect(cdp.messages.filter(m => m.method === "Target.targetCreated")).toHaveLength(createdBefore);
+	});
+
 	it("holds a preserved session's command until the recovery attach acknowledges", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

@@ -322,7 +322,20 @@ async function attachTab(tabId: number, socket: WebSocket): Promise<void> {
 		// letting the surviving relay reconcile it from the next hello.
 		if (ws !== socket) {
 			guardDetachments.add(tabId);
-			await chrome.debugger.detach({ tabId }).catch(() => guardDetachments.delete(tabId));
+			await chrome.debugger.detach({ tabId }).catch(async () => {
+				guardDetachments.delete(tabId);
+				// The cleanup detach rejected. If Chrome still reports the tab
+				// attached, nothing else tracks it: the requesting socket is gone, so
+				// no downstream session and no guard entry hold it, and if the relay
+				// stays unavailable no later hello reseeds the guard. Mirror the guard
+				// sweep's failure path and re-track only when the attachment truly
+				// survived, so a subsequent sweep reclaims it instead of leaving the
+				// debugger infobar orphaned indefinitely.
+				const targets = await chrome.debugger.getTargets().catch(() => []);
+				if (targets.some(target => target.tabId === tabId && target.attached)) {
+					attachmentGuard.track(tabId);
+				}
+			});
 			return;
 		}
 		attachmentGuard.track(tabId);
