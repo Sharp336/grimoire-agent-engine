@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `merge-gateway` example extension registering Merge Gateway (api-gateway.merge.dev) as a model provider: live catalog discovery via the official `merge-gateway-sdk`, per-model OpenAI/Anthropic wire routing, and `/login` paste-key validation.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added

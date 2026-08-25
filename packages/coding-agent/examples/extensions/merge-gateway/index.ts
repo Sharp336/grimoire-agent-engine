@@ -1,3 +1,4 @@
+import { APIError, MergeGateway } from "merge-gateway-sdk";
 import type { ExtensionAPI, OAuthLoginCallbacks, ProviderModelConfig } from "@oh-my-pi/pi-coding-agent";
 
 /**
@@ -17,12 +18,16 @@ import type { ExtensionAPI, OAuthLoginCallbacks, ProviderModelConfig } from "@oh
  * loops (Gateway drops unsigned blocks on replay), so first-party Claude
  * routes are pinned to it. `reasoning_effort` is suppressed on OpenAI-wire
  * models because Gateway forwards it and some vendors reject it.
+ *
+ * Catalog discovery and key validation go through the official
+ * `merge-gateway-sdk` client (auth header, request timeout, typed errors),
+ * per https://docs.merge.dev/merge-gateway and the gateway-implement guide.
  */
 
 const PROVIDER = "merge-gateway";
+/** The SDK's default base URL; pinned here so the OpenAI-wire surface matches. */
 const OPENAI_BASE_URL = "https://api-gateway.merge.dev/v1/openai";
 const ANTHROPIC_BASE_URL = "https://api-gateway.merge.dev";
-const CATALOG_BASE = "https://api-gateway.merge.dev/v1";
 const ENV_VAR = "MERGE_GATEWAY_API_KEY";
 
 /** Page size for `GET /models` (Gateway caps at 500). */
@@ -30,7 +35,12 @@ const CATALOG_PAGE_LIMIT = 500;
 /** Hard stop for pagination so a broken cursor cannot loop forever. */
 const CATALOG_MAX_PAGES = 20;
 
-/** One execution-vendor entry inside a catalog model's `vendors` map. */
+/**
+ * One execution-vendor entry inside a catalog model's `vendors` map. Field
+ * names follow the live REST catalog; several are optional because the
+ * official SDK models a flatter shape than the wire currently returns, and
+ * this parser accepts both.
+ */
 interface CatalogVendor {
 	context_window?: number;
 	max_output_tokens?: number;
@@ -62,22 +72,8 @@ interface CatalogPage {
 	next_cursor?: string | null;
 }
 
-/**
- * Merge Gateway routing-policy model. Gateway picks the real model per request;
- * omp only uses these fields for context accounting. Rides the OpenAI wire.
- */
-export function makeDefaultRoutingEntry(): ProviderModelConfig {
-	return {
-		id: "default_routing",
-		name: "Merge Gateway (routing policy)",
-		reasoning: false,
-		input: ["text"],
-		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 200_000,
-		maxTokens: 32_000,
-		baseUrl: OPENAI_BASE_URL,
-	};
-}
+/** Sink for non-fatal discovery warnings (wired to pi.logger by the factory). */
+export type WarnSink = (message: string) => void;
 
 /**
  * Pick the execution vendor that will serve a catalog model: prefer the
@@ -139,57 +135,84 @@ export function mapCatalogEntry(entry: CatalogModel): ProviderModelConfig | null
 	return model;
 }
 
+function describeError(error: unknown): string {
+	if (error instanceof APIError) {
+		return `${error.name}: ${error.message}`;
+	}
+	return error instanceof Error ? error.message : String(error);
+}
+
 /** Fetch every raw catalog entry, following the cursor envelope. */
-async function fetchRawCatalog(apiKey: string): Promise<CatalogModel[]> {
+async function fetchRawCatalog(apiKey: string, warn: WarnSink): Promise<CatalogModel[]> {
+	const client = new MergeGateway({ apiKey });
 	const entries: CatalogModel[] = [];
 	let cursor: string | undefined;
 	for (let page = 0; page < CATALOG_MAX_PAGES; page++) {
-		const url = new URL(`${CATALOG_BASE}/models`);
-		url.searchParams.set("limit", String(CATALOG_PAGE_LIMIT));
-		if (cursor) url.searchParams.set("cursor", cursor);
-		const res = await fetch(url, { headers: { Authorization: `Bearer ${apiKey}` } });
-		if (!res.ok) {
-			const body = (await res.text().catch(() => "")).slice(0, 200);
-			throw new Error(`Merge Gateway model discovery failed: HTTP ${res.status}${body ? ` — ${body}` : ""}`);
-		}
-		const pageData = (await res.json()) as CatalogPage;
+		const pageData = (await client.models.list({
+			limit: CATALOG_PAGE_LIMIT,
+			cursor,
+		})) as unknown as CatalogPage;
 		entries.push(...(pageData.data ?? []));
 		if (pageData.has_more === false || !pageData.next_cursor) return entries;
 		cursor = pageData.next_cursor;
 	}
 	// Cursor never terminated within the cap: keep what we have rather than
-	// silently dropping the request on the floor, but say so.
-	console.error(
-		`[merge-gateway] catalog exceeded ${CATALOG_MAX_PAGES} pages; showing the first ${entries.length} models`,
-	);
+	// silently dropping the request on the floor, but say so through the
+	// logger — never stderr/stdout, discovery can run while a TUI/RPC session
+	// is rendering.
+	warn(`catalog exceeded ${CATALOG_MAX_PAGES} pages; showing the first ${entries.length} models`);
 	return entries;
 }
 
 /**
- * Discover the live model catalog from Gateway. Without a key returns only the
- * routing-policy entry so the picker stays usable pre-auth; with a key pages
- * through the catalog and maps every tool-callable text model.
+ * Discover the live model catalog from Gateway. Without a key returns an
+ * empty list — the picker simply shows nothing until the user authenticates.
+ * With a key, pages through the catalog and maps every tool-callable text
+ * model. `warn` receives non-fatal notices; omp wires it to its logger.
  */
-export async function fetchModels(apiKey: string | undefined): Promise<ProviderModelConfig[]> {
-	if (!apiKey) return [makeDefaultRoutingEntry()];
-	const entries = await fetchRawCatalog(apiKey);
-	const models = entries.map(mapCatalogEntry).filter(m => m !== null);
-	models.push(makeDefaultRoutingEntry());
-	return models;
+export async function fetchModels(
+	apiKey: string | undefined,
+	warn: WarnSink = () => {},
+): Promise<ProviderModelConfig[]> {
+	if (!apiKey) return [];
+	try {
+		const entries = await fetchRawCatalog(apiKey, warn);
+		return entries.map(mapCatalogEntry).filter(m => m !== null);
+	} catch (error) {
+		throw new Error(`Merge Gateway model discovery failed: ${describeError(error)}`);
+	}
 }
 
-/** Cheap key probe: a single model request validates the key (401/403 ⇒ bad). */
-export async function validateKey(key: string): Promise<void> {
+export interface ValidateOptions {
+	/** Aborts the probe — wired to the /login flow's cancel signal. */
+	signal?: AbortSignal;
+	/** Request seam override — the /login flow supplies its own. */
+	fetch?: typeof fetch;
+}
+
+/**
+ * Cheap key probe: a single model request validates the key. Error messages
+ * mirror the documented Gateway error taxonomy (401 invalid key, 402 budget
+ * exhausted, 429 rate limited). Honors the caller's signal and fetch seam so
+ * cancelling /login aborts an in-flight probe.
+ */
+export async function validateKey(key: string, options: ValidateOptions = {}): Promise<void> {
 	const trimmed = key.trim();
 	if (!trimmed) throw new Error("No API key provided");
-	const res = await fetch(`${CATALOG_BASE}/models?limit=1`, {
+	const doFetch = options.fetch ?? fetch;
+	const res = await doFetch(`${OPENAI_BASE_URL.replace(/\/openai$/, "")}/models?limit=1`, {
 		headers: { Authorization: `Bearer ${trimmed}` },
+		signal: options.signal,
 	});
 	if (res.status === 401 || res.status === 403) {
 		throw new Error("Invalid Merge Gateway API key");
 	}
+	if (res.status === 402) {
+		throw new Error("Merge Gateway budget exhausted (HTTP 402): upgrade or raise your spend limit.");
+	}
 	if (!res.ok) {
-		throw new Error(`Merge Gateway key validation failed: HTTP ${res.status}`);
+		const body = (await res.text().catch(() => "")).slice(0, 200);
+		throw new Error(`Merge Gateway key validation failed: HTTP ${res.status}${body ? ` — ${body}` : ""}`);
 	}
 }
 
@@ -199,7 +222,10 @@ export async function login(callbacks: OAuthLoginCallbacks): Promise<string> {
 		message: "Paste your Merge Gateway API key",
 		placeholder: "mg_…",
 	});
-	await validateKey(pasted);
+	await validateKey(pasted.trim(), {
+		signal: callbacks.signal,
+		fetch: callbacks.fetch ?? fetch,
+	});
 	return pasted.trim();
 }
 
@@ -222,6 +248,6 @@ export default function (pi: ExtensionAPI): void {
 		...(apiKeyConfig ? { apiKey: apiKeyConfig } : {}),
 		api: "openai-completions",
 		oauth: { name: "Merge Gateway", login },
-		fetchDynamicModels: fetchModels,
+		fetchDynamicModels: (apiKey: string | undefined) => fetchModels(apiKey, m => pi.logger.warn(m)),
 	});
 }

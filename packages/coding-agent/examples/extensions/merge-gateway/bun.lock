@@ -1,0 +1,15 @@
+{
+  "lockfileVersion": 1,
+  "configVersion": 1,
+  "workspaces": {
+    "": {
+      "name": "pi-extension-merge-gateway",
+      "dependencies": {
+        "merge-gateway-sdk": "0.4.0",
+      },
+    },
+  },
+  "packages": {
+    "merge-gateway-sdk": ["merge-gateway-sdk@0.4.0", "", { "peerDependencies": { "zod": "^4.0.0" }, "optionalPeers": ["zod"] }, "sha512-ODqQqOa/JJow1BWJjJxHWFcqKh/7cr61SwJ8qNxPCzsxuMfxv6+VkjnO+GmDFtmm5X4ehV2oR8UkRKuQJun9hQ=="],
+  }
+}

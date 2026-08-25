@@ -3,6 +3,9 @@
 	"version": "1.0.0",
 	"description": "Merge Gateway (merge.dev) model provider — registers the Gateway catalog as selectable omp models",
 	"type": "module",
+	"dependencies": {
+		"merge-gateway-sdk": "0.4.0"
+	},
 	"omp": {
 		"extensions": [
 			"./index.ts"
