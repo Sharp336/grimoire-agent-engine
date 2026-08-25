@@ -234,4 +234,39 @@ process.exit(1);
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
 	});
+
+	it("completes through the sidecar without loading transformers", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-afm-"));
+		try {
+			const sidecar = writeFakeSidecar(
+				dir,
+				bunSidecar(`
+process.stdout.write(JSON.stringify({ text: "yes" }) + "\\n");
+`),
+			);
+			process.env[AFM_CORE_SIDECAR_ENV] = sidecar;
+
+			const outbound: TinyTitleWorkerOutbound[] = [];
+			let inbound: ((message: TinyTitleWorkerInbound) => void) | undefined;
+			const seen = Promise.withResolvers<void>();
+			startTinyTitleWorker({
+				send(message) {
+					outbound.push(message);
+					if (message.type === "completion" || message.type === "error") seen.resolve();
+				},
+				onMessage(handler) {
+					inbound = handler;
+					return () => {
+						inbound = undefined;
+					};
+				},
+			});
+			inbound?.({ type: "complete", id: "4", modelKey: "afm-core", prompt: "did the model stop unexpectedly?" });
+			await seen.promise;
+			expect(outbound.some(message => message.type === "completion" && message.text === "yes")).toBe(true);
+			expect(outbound.some(message => message.type === "error")).toBe(false);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
 });

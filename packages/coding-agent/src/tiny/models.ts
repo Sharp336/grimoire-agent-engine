@@ -187,6 +187,17 @@ export const TINY_MEMORY_LOCAL_MODELS = [
 		description: "Fastest load; solid all-rounder, slightly noisier extraction labels.",
 		contextNote: "Use when local startup cost is the priority.",
 	},
+	{
+		key: "afm-core",
+		engine: "foundation-models",
+		repo: "apple.SystemLanguageModel",
+		dtype: "q4",
+		label: "AFM 3 Core",
+		description:
+			"On-device Apple Foundation Model (macOS). OS-owned weights; download is a readiness probe, not a Hugging Face fetch.",
+		contextNote: "Darwin only. Fail closed when Apple Intelligence is off or the model is not ready.",
+		unsupportedReason: process.platform === "darwin" ? undefined : "Apple Foundation Models is macOS-only",
+	},
 ] as const satisfies readonly TinyTitleLocalModelSpec[];
 
 export const TINY_MEMORY_MODEL_VALUES = [
@@ -196,6 +207,7 @@ export const TINY_MEMORY_MODEL_VALUES = [
 	"gemma-3-1b",
 	"qwen2.5-1.5b",
 	"lfm2-1.2b",
+	"afm-core",
 ] as const;
 
 export type TinyMemoryModelKey = (typeof TINY_MEMORY_MODEL_VALUES)[number];
@@ -261,7 +273,7 @@ export function isTinyLocalModelKey(value: string): value is TinyLocalModelKey {
 /** Combined local model registry (title + memory) for the shared tiny-models CLI. */
 export const TINY_LOCAL_MODELS = [
 	...TINY_TITLE_LOCAL_MODELS,
-	...TINY_MEMORY_LOCAL_MODELS,
+	...TINY_MEMORY_LOCAL_MODELS.filter(spec => spec.key !== "afm-core"),
 ] as const satisfies readonly TinyTitleLocalModelSpec[];
 
 /**
