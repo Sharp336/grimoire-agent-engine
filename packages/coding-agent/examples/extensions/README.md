@@ -58,6 +58,12 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 | `pirate.ts`            | Demonstrates `systemPromptAppend` to dynamically modify system prompt |
 | `custom-compaction.ts` | Custom compaction that summarizes entire conversation                 |
 
+### Model Providers
+
+| Extension        | Description                                                                                |
+| ---------------- | ------------------------------------------------------------------------------------------ |
+| `merge-gateway/` | Registers [Merge Gateway](https://docs.merge.dev/merge-gateway/get-started) as a provider: live model catalog via `registerProvider` + `fetchDynamicModels`, `/login` paste-key flow, per-vendor cost/context metadata |
+
 ### External Dependencies
 
 | Extension         | Description                                                               |

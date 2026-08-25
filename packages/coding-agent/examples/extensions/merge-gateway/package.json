@@ -1,0 +1,11 @@
+{
+	"name": "pi-extension-merge-gateway",
+	"version": "1.0.0",
+	"description": "Merge Gateway (merge.dev) model provider — registers the Gateway catalog as selectable omp models",
+	"type": "module",
+	"omp": {
+		"extensions": [
+			"./index.ts"
+		]
+	}
+}
