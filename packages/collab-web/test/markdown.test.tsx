@@ -51,4 +51,67 @@ describe("Transcript Markdown", () => {
 		expect(html).not.toContain("&lt;/advisory&gt;");
 	});
 
+	it("renders dollar and bracket math delimiters through KaTeX", () => {
+		const html = renderMarkdown("Inline $x^2$ and \\(y^2\\).\n\n$$\na^2\n$$\n\n\\[\nb^2\n\\]");
+
+		expect(html).toContain('<annotation encoding="application/x-tex">x^2</annotation>');
+		expect(html).toContain('<annotation encoding="application/x-tex">y^2</annotation>');
+		expect(html).toContain('<annotation encoding="application/x-tex">a^2</annotation>');
+		expect(html).toContain('<annotation encoding="application/x-tex">b^2</annotation>');
+		expect(html.match(/class="katex-display"/g)).toHaveLength(2);
+	});
+
+	it("renders a multiline matrix product as one display equation", () => {
+		const html = renderMarkdown(
+			"A matrix product:\n$$\n\\begin{pmatrix} a & b \\\\ c & d \\end{pmatrix}\n\\begin{pmatrix} x \\\\ y \\end{pmatrix}\n=\n\\begin{pmatrix} ax + by \\\\ cx + dy \\end{pmatrix}\n$$",
+		);
+
+		expect(html).toContain('class="katex-display"');
+		expect(html).toContain("\\begin{pmatrix} ax + by");
+		expect(html).not.toContain("<p>$$");
+	});
+
+	it("leaves currency, escaped dollars, code, and unfinished math literal", () => {
+		const html = renderMarkdown(
+			"Prices are $20 and $30. Escaped: \\$5. Code: `$x$`. Streaming: $x. Paren: \\(x. Bracket: \\[y.",
+		);
+
+		expect(html).toContain("Prices are $20 and $30.");
+		expect(html).toContain("Escaped: $5.");
+		expect(html).toContain("Code: <code>$x$</code>.");
+		expect(html).toContain("Streaming: $x");
+		expect(html).toContain("Paren: \\(x");
+		expect(html).toContain("Bracket: \\[y");
+		expect(html).not.toContain('class="katex"');
+	});
+
+	it("renders valid dollar math after rejected dollar openers", () => {
+		const html = renderMarkdown("Cost $20; formula $x^2$. Streaming $unfinished then $y^2$.");
+
+		expect(html).toContain('<annotation encoding="application/x-tex">x^2</annotation>');
+		expect(html).toContain('<annotation encoding="application/x-tex">y^2</annotation>');
+		expect(html.match(/class="katex"/g)).toHaveLength(2);
+	});
+
+	it("keeps a false-positive display opener in one paragraph", () => {
+		const html = renderMarkdown("before\n\\[\nx");
+
+		expect(html.match(/<p>/g)).toHaveLength(1);
+		expect(html).toContain("before<br>\\[<br>x");
+	});
+
+	it("bounds user-controlled KaTeX dimensions", () => {
+		const html = renderMarkdown("$\\rule{1em}{1000000em}$");
+
+		expect(html).toContain("height:20em");
+		expect(html).not.toContain("height:1000000em");
+	});
+
+	it("does not grant KaTeX trusted-link commands", () => {
+		const html = renderMarkdown("$\\href{javascript:alert(1)}{click}$");
+
+		expect(html).toContain('class="katex"');
+		expect(html).not.toContain('href="javascript:');
+	});
+
 });

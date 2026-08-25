@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added KaTeX rendering for inline and display math in collab transcripts, supporting `$…$`, `$$…$$`, `\(…\)`, and `\[…\]` delimiters.
+
+### Fixed
+
+- Bounded explicit KaTeX dimensions and preserved unfinished bracket-delimited math while transcripts stream.
+
 ## [17.3.8] - 2026-08-19
 
 ### Fixed

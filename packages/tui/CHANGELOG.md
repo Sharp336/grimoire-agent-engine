@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserved unfinished `\(` and `\[` math delimiters while Markdown content streams.
+
 ## [18.0.5] - 2026-08-25
 
 ### Breaking Changes

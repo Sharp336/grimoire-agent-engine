@@ -232,6 +232,10 @@
 	word-break: keep-all;
 }
 
+.tr-md .katex-display {
+	overflow-x: auto;
+}
+
 .tr-md > :first-child {
 	margin-top: 0;
 }

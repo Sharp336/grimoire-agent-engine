@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added parsing utilities for dollar- and bracket-delimited Markdown math.
+
+### Fixed
+
+- Block tokenizer extension `start` hints now interrupt paragraphs and rejoin false-positive clips, matching Marked extension behavior.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added

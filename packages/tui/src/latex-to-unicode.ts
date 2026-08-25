@@ -1,4 +1,7 @@
+import { inlineMathSpanEnd, tokenizeMathSpan } from "@oh-my-pi/pi-utils/math-delimiters";
 import { TERMINAL } from "./terminal-capabilities";
+
+export { inlineMathSpanEnd };
 
 // LaTeX → Unicode/ANSI converter.
 //
@@ -1923,95 +1926,25 @@ export function renderMathInText(text: string): string {
 	const conv = (inner: string): string => latexToUnicode(inner).replace(NEWLINES, " ");
 	let out = "";
 	let i = 0;
-	const n = text.length;
-	while (i < n) {
-		const c = text[i];
-		if (c === "\\") {
-			const d = text[i + 1];
-			if (d === "\\") {
-				// Escaped backslash: emit verbatim so a following `(`/`[` is plain text.
-				out += "\\\\";
-				i += 2;
-				continue;
-			}
-			if (d === "(") {
-				const close = text.indexOf("\\)", i + 2);
-				if (close !== -1) {
-					out += conv(text.slice(i + 2, close));
-					i = close + 2;
-					continue;
-				}
-			} else if (d === "[") {
-				const close = text.indexOf("\\]", i + 2);
-				if (close !== -1) {
-					out += conv(text.slice(i + 2, close));
-					i = close + 2;
-					continue;
-				}
-			} else if (d === "$") {
-				out += "$";
-				i += 2;
-				continue;
-			}
-			out += c;
-			i++;
+	while (i < text.length) {
+		const span = tokenizeMathSpan(text.slice(i));
+		if (span) {
+			out += span.complete ? conv(span.text) : span.raw;
+			i += span.raw.length;
 			continue;
 		}
-		if (c === "$") {
-			if (text[i + 1] === "$") {
-				const close = text.indexOf("$$", i + 2);
-				if (close !== -1 && text.slice(i + 2, close).trim().length > 0) {
-					out += conv(text.slice(i + 2, close));
-					i = close + 2;
-					continue;
-				}
-				out += "$$";
-				i += 2;
-				continue;
-			}
-			const close = inlineMathSpanEnd(text, i);
-			if (close !== -1) {
-				out += conv(text.slice(i + 1, close));
-				i = close + 1;
-				continue;
-			}
+		if (text[i] === "\\" && text[i + 1] === "$") {
 			out += "$";
-			i++;
+			i += 2;
 			continue;
 		}
-		out += c;
+		if (text[i] === "\\" && text[i + 1] === "\\") {
+			out += "\\\\";
+			i += 2;
+			continue;
+		}
+		out += text[i];
 		i++;
 	}
 	return renderBareMathInText(out);
-}
-
-/**
- * Index of the `$` that closes an inline math span opened at `open` (the index
- * of the opening `$`), or -1 when the run is not inline math. Applies pandoc's
- * anti-currency heuristics: the opener must not be followed by whitespace, the
- * closer must not be preceded by whitespace nor followed by a digit, `\$` is a
- * literal dollar, and the span may not span a newline. Shared by
- * `renderMathInText` and the markdown math tokenizer so the rule has one home.
- */
-export function inlineMathSpanEnd(text: string, open: number): number {
-	const after = text[open + 1];
-	if (after === undefined || after === " " || after === "\t" || after === "\n" || after === "$") {
-		return -1;
-	}
-	for (let j = open + 1; j < text.length; j++) {
-		const ch = text[j];
-		if (ch === "\\") {
-			j++;
-			continue;
-		}
-		if (ch === "\n") return -1;
-		if (ch === "$") {
-			const prev = text[j - 1];
-			if (prev === " " || prev === "\t") return -1;
-			const next = text[j + 1];
-			if (next !== undefined && next >= "0" && next <= "9") continue; // currency: keep scanning
-			return text.slice(open + 1, j).trim().length > 0 ? j : -1;
-		}
-	}
-	return -1;
 }

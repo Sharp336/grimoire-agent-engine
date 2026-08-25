@@ -895,6 +895,7 @@ function parseList(lines: string[], index: number, lexer: Lexer): { token: Token
 function blockTokens(src: string, lexer: Lexer, output: Token[]): Token[] {
 	const lines = lineArray(src);
 	let i = 0;
+	let lastParagraphClipped = false;
 	while (i < lines.length) {
 		const remaining = lines.slice(i).join("");
 		let custom: Tokens.Generic | undefined;
@@ -906,8 +907,14 @@ function blockTokens(src: string, lexer: Lexer, output: Token[]): Token[] {
 			output.push(custom);
 			let consumed = custom.raw.length;
 			while (i < lines.length && consumed > 0) {
-				consumed -= lines[i]!.length;
-				i++;
+				const current = lines[i]!;
+				if (consumed < current.length) {
+					lines[i] = current.slice(consumed);
+					consumed = 0;
+				} else {
+					consumed -= current.length;
+					i++;
+				}
 			}
 			continue;
 		}
@@ -1069,8 +1076,13 @@ function blockTokens(src: string, lexer: Lexer, output: Token[]): Token[] {
 				continue;
 			}
 		}
-		let raw = line;
-		i++;
+		let extensionStart = remaining.length;
+		const afterFirstCharacter = remaining.slice(1);
+		for (const extension of lexer.extensions.block) {
+			const at = extension.start?.call({ lexer }, afterFirstCharacter);
+			if (typeof at === "number" && at >= 0 && at + 1 < extensionStart) extensionStart = at + 1;
+		}
+		let raw = "";
 		// An indented code block cannot interrupt a paragraph (CommonMark lazy
 		// continuation): a line indented by at least 4 spaces directly attached to
 		// paragraph text stays inside the paragraph, bypassing every block-start
@@ -1078,18 +1090,41 @@ function blockTokens(src: string, lexer: Lexer, output: Token[]): Token[] {
 		// blank line the indent is no longer attached, so it still opens an
 		// indented code block.
 		let prevBlankish = false;
+		let paragraphClipped = false;
 		while (i < lines.length) {
+			if (raw.length >= extensionStart) {
+				paragraphClipped = true;
+				break;
+			}
 			const next = lines[i]!;
-			const indented = next.trim() !== "" && /^ {4}/.test(next);
-			if (indented ? prevBlankish : isBlockStart(lines, i)) break;
+			if (raw.length > 0) {
+				const indented = next.trim() !== "" && /^ {4}/.test(next);
+				if (indented ? prevBlankish : isBlockStart(lines, i)) break;
+			}
+			const available = extensionStart - raw.length;
+			if (next.length > available) {
+				raw += next.slice(0, available);
+				lines[i] = next.slice(available);
+				paragraphClipped = true;
+				break;
+			}
 			prevBlankish = next.trim() === "";
 			raw += next;
 			i++;
 		}
 		const text = stripFinalNewline(raw);
-		const tokens: Token[] = [];
-		lexer.inline(text, tokens);
-		output.push({ type: "paragraph", raw, text, tokens });
+		const previous = output.at(-1);
+		if (lastParagraphClipped && previous?.type === "paragraph") {
+			previous.raw += (previous.raw.endsWith("\n") ? "" : "\n") + raw;
+			previous.text += `\n${text}`;
+			previous.tokens = [];
+			lexer.inline(previous.text, previous.tokens);
+		} else {
+			const tokens: Token[] = [];
+			lexer.inline(text, tokens);
+			output.push({ type: "paragraph", raw, text, tokens });
+		}
+		lastParagraphClipped = paragraphClipped;
 	}
 	return output;
 }

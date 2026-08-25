@@ -1,6 +1,7 @@
 import { Marked } from "@oh-my-pi/pi-utils/marked";
 import type { ReactNode } from "react";
 import { memo, useMemo } from "react";
+import { mathExtension } from "./math";
 
 function escapeHtml(s: string): string {
 	return s
@@ -73,6 +74,7 @@ const md = new Marked({
 	},
 	breaks: true,
 });
+md.use(mathExtension);
 
 export const Markdown = memo(function Markdown({ text }: { text: string }): ReactNode {
 	const html = useMemo(() => {

@@ -173,5 +173,49 @@ describe("marked compatibility", () => {
 			{ type: "latexBlock", raw: "$$\ny^2\n$$\n", text: "y^2" },
 		]);
 		expect(marked.parse("before $x_i$\n\n$$\ny^2\n$$\n")).toBe("<p>before <i>x_i</i></p>\n<math>y^2</math>\n");
+		expect(marked.parse("before $x_i$\n$$\ny^2\n$$\n")).toBe("<p>before <i>x_i</i></p>\n<math>y^2</math>\n");
+		expect(marked.parse("before\n$$\nunclosed")).toBe("<p>before\n$$\nunclosed</p>\n");
+	});
+
+	test("clips paragraphs at exact block extension start offsets", () => {
+		const inlineBlock: TokenizerAndRendererExtension = {
+			name: "inlineBlock",
+			level: "block",
+			start(src) {
+				const index = src.indexOf("@@");
+				return index === -1 ? undefined : index;
+			},
+			tokenizer(src) {
+				return src.startsWith("@@") ? { type: "inlineBlock", raw: "@@" } : undefined;
+			},
+			renderer() {
+				return "<block></block>\n";
+			},
+		};
+		const marked = new Marked().use({ extensions: [inlineBlock] });
+
+		expect(marked.parse("before @@ after")).toBe("<p>before </p>\n<block></block>\n<p> after</p>\n");
+	});
+
+	test("rejoins paragraphs after a false-positive bracket-math start hint", () => {
+		const bracketBlock: TokenizerAndRendererExtension = {
+			name: "bracketBlock",
+			level: "block",
+			start(src) {
+				const index = src.indexOf("\\[\n");
+				return index === -1 ? undefined : index;
+			},
+			tokenizer() {
+				return undefined;
+			},
+			renderer() {
+				return "";
+			},
+		};
+		const marked = new Marked().use({ extensions: [bracketBlock] });
+
+		expect([...marked.lexer("before\n\\[\nx")].map(token => [token.type, token.raw])).toEqual([
+			["paragraph", "before\n\\[\nx"],
+		]);
 	});
 });

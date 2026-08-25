@@ -89,6 +89,13 @@ describe("latexToUnicode symbol fixes", () => {
 	});
 });
 
+describe("renderMathInText delimited math", () => {
+	it("ignores escaped bracket closers inside a span", () => {
+		const inner = String.raw`a \\) b`;
+		expect(renderMathInText(String.raw`\(a \\) b\)`)).toBe(latexToUnicode(inner).replace(/\r?\n/g, " "));
+	});
+});
+
 describe("renderMathInText bare-environment handling", () => {
 	it("converts a bare math environment without $$ delimiters", () => {
 		const out = renderMathInText("\\begin{align}\na &= b + c \\\\\nx &= y\n\\end{align}");

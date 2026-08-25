@@ -75,6 +75,11 @@ describe("Markdown math rendering", () => {
 		expect(line).toBe("it costs $5 and $10 total");
 	});
 
+	it("preserves unfinished bracket math while streaming", () => {
+		const [line] = renderLines("Streaming: \\(x and \\[y");
+		expect(line).toBe("Streaming: \\(x and \\[y");
+	});
+
 	it("renderInlineMarkdown converts inline math", () => {
 		const out = stripVTControlCharacters(renderInlineMarkdown("energy $E=mc^2$ here", defaultMarkdownTheme));
 		expect(out).toBe("energy E=mc² here");
