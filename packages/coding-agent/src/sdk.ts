@@ -2627,6 +2627,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						: resolveThinkingLevelForModel(model!, effectiveThinkingLevel),
 				);
 				modelFallbackMessage = undefined;
+			} else {
+				modelFallbackMessage =
+					"No models available. Use /login or set an API key environment variable. Then use /model to select a model.";
 			}
 		}
 
@@ -4117,8 +4120,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}
 
 		void deferredModelResolution?.then(async discovered => {
-			if (!discovered || session.model) return;
+			if (!discovered || session.model || session.isDisposed) return;
 			try {
+				if (session.isDisposed) return;
 				const deferredInlineToolDescriptors = shouldInlineToolDescriptors(
 					settings.get("inlineToolDescriptors"),
 					discovered.model.id,
