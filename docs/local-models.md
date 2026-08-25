@@ -82,8 +82,8 @@ fallback is used when that role is unset.
 | SmolLM2-135M  | Too small                           |
 | flan-t5-small | Rejected — just echoes the input    |
 
-**Shipped local options**: `lfm2-350m`, `qwen3-0.6b`, `gemma-270m`, `qwen2.5-0.5b`, `lfm2-700m`.
-**Default setting**: `online`. The default local download for `omp tiny-models` is `lfm2-700m`.
+**Shipped local options**: `lfm2-350m`, `qwen3-0.6b`, `gemma-270m`, `qwen2.5-0.5b`, `lfm2-700m`, and Darwin-only `afm-core` (Apple SystemLanguageModel; OS-owned weights, not ONNX).
+**Default setting**: `online`. The default local download for `omp tiny-models` is `lfm2-700m`. `omp tiny-models download afm-core` installs the bundled Apple Silicon sidecar (or compiles one when that triple is absent) and probes Apple Intelligence readiness; it does not download weights.
 
 ## Task 2: Mnemopi memory (`providers.memoryModel`)
 

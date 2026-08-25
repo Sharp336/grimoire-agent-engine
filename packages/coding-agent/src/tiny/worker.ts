@@ -19,12 +19,15 @@ import {
 	sendProgress,
 	type TransformersRuntimeMetadata,
 } from "../subprocess/worker-runtime";
+import { completeAfmCore, foundationModelsUnavailableReason, isAfmModelNotReady, probeAfmCore } from "./apple-fm";
 import { buildCompletionPrompt } from "./completion-prompt";
 import { resolveTinyModelDevicePreference, type TinyModelDevice, tinyModelDeviceLoadOrder } from "./device";
 import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "./dtype";
 import { formatTitleUserMessage } from "./message-preproc";
 import {
 	getTinyLocalModelSpec,
+	getTinyTitleModelSpec,
+	isFoundationModelsSpec,
 	type TinyLocalModelKey,
 	type TinyTitleLocalModelKey,
 	type TinyTitleLocalModelSpec,
@@ -258,6 +261,10 @@ async function generateTitle(
 	message: string,
 	systemPrompt?: string,
 ): Promise<string | null> {
+	const spec = getTinyTitleModelSpec(modelKey);
+	if (isFoundationModelsSpec(spec)) {
+		return generateTitleFromFoundationModels(transport, requestId, modelKey, spec, message, systemPrompt);
+	}
 	const generator = await loadPipeline(modelKey, transport, requestId);
 	const promptText = buildPrompt(generator, message, systemPrompt);
 	const transformers = await loadTransformersRuntime(
@@ -274,6 +281,62 @@ async function generateTitle(
 		stopping_criteria: createStopOnTextCriteria(transformers, generator.tokenizer, TITLE_CLOSE),
 	})) as TextGenerationStringOutput;
 	return extractTinyTitle(output[0]?.generated_text ?? "", message);
+}
+
+async function generateTitleFromFoundationModels(
+	transport: TinyTitleTransport,
+	requestId: string,
+	modelKey: TinyTitleLocalModelKey,
+	spec: TinyTitleLocalModelSpec,
+	message: string,
+	systemPrompt?: string,
+): Promise<string | null> {
+	const blocked = foundationModelsUnavailableReason(spec);
+	if (blocked) throw new Error(`${modelKey} is unavailable: ${blocked}`);
+	transport.send({
+		type: "progress",
+		id: requestId,
+		event: { modelKey, status: "initiate", name: spec.repo },
+	});
+	try {
+		const text = await completeAfmCore({
+			instructions: systemPrompt?.trim() || TINY_TITLE_SYSTEM_PROMPT,
+			prompt: formatTitleUserMessage(message),
+		});
+		transport.send({
+			type: "progress",
+			id: requestId,
+			event: { modelKey, status: "ready", task: "text-generation", model: spec.repo },
+		});
+		return extractTinyTitle(text, message);
+	} catch (error) {
+		if (isAfmModelNotReady(error)) return null;
+		throw error;
+	}
+}
+
+async function probeFoundationModels(
+	transport: TinyTitleTransport,
+	requestId: string,
+	modelKey: TinyLocalModelKey,
+	spec: TinyTitleLocalModelSpec,
+): Promise<void> {
+	const blocked = foundationModelsUnavailableReason(spec);
+	if (blocked) throw new Error(`${modelKey} is unavailable: ${blocked}`);
+	transport.send({
+		type: "progress",
+		id: requestId,
+		event: { modelKey, status: "initiate", name: spec.repo },
+	});
+	const status = await probeAfmCore();
+	if (!status.available) {
+		throw new Error(status.reason ?? "Apple Foundation Model unavailable");
+	}
+	transport.send({
+		type: "progress",
+		id: requestId,
+		event: { modelKey, status: "ready", task: "text-generation", model: spec.repo },
+	});
 }
 
 /**
@@ -322,7 +385,12 @@ async function handleQueuedRequest(
 ): Promise<void> {
 	try {
 		if (request.type === "download") {
-			await loadPipeline(request.modelKey, transport, request.id);
+			const spec = getTinyLocalModelSpec(request.modelKey);
+			if (isFoundationModelsSpec(spec)) {
+				await probeFoundationModels(transport, request.id, request.modelKey, spec);
+			} else {
+				await loadPipeline(request.modelKey, transport, request.id);
+			}
 			transport.send({ type: "downloaded", id: request.id });
 			return;
 		}
