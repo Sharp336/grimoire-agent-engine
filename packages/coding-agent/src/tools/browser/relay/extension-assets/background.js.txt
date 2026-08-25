@@ -104,7 +104,13 @@ var attachmentGuard = new AttachmentGuard({
     rememberRecoverable(tabIds);
     for (const tabId of tabIds) {
       guardDetachments.add(tabId);
-      chrome.debugger.detach({ tabId }).catch(() => guardDetachments.delete(tabId));
+      chrome.debugger.detach({ tabId }).catch(async () => {
+        guardDetachments.delete(tabId);
+        const targets = await chrome.debugger.getTargets().catch(() => []);
+        if (targets.some((target) => target.tabId === tabId && target.attached)) {
+          attachmentGuard.track(tabId);
+        }
+      });
     }
   }
 });

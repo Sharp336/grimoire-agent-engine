@@ -1454,4 +1454,88 @@ describe("RelayBridge attachment release", () => {
 			active.messages.filter(m => m.sessionId === activeSession && m.method === "Runtime.executionContextCreated"),
 		).toHaveLength(1);
 	});
+
+	it("keeps a preserved page session across a second reconnect racing a recovery attach", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		// Bare holder: only Target.attachToTarget, so its page session must survive.
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.extClosed(ext);
+
+		// First reconnect arms a forced recovery attach that is still in flight.
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await flush();
+		expect(ext2.pending("attach")).toHaveLength(1);
+
+		// A second extension reconnect replaces ext2 before its attach resolves.
+		// extConnected rejects the in-flight attach with ExtensionReplacedError, so
+		// #ensureAttached resolves false — but this is a transport swap, not a real
+		// attach failure, so the recovery continuation must NOT retract the
+		// preserved page session.
+		const ext3 = new FakeExtSocket();
+		connect(bridge, ext3, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await flush();
+
+		// ext3's hello re-runs reconciliation and re-attaches the still-held tab.
+		expect(ext3.pending("attach")).toHaveLength(1);
+		ack(bridge, ext3, "attach");
+		await flush();
+
+		// The holder's original page session survived both reconnects: its command
+		// routes to the freshly attached tab instead of "Unknown session id".
+		const cmdId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: cmdId, sessionId: pageSession, method: "Runtime.evaluate" }));
+		ack(bridge, ext3, "send", { ok: true });
+		await flush();
+		const reply = cdp.messages.find(m => m.id === cmdId);
+		expect(reply?.error).toBeUndefined();
+		expect(ext3.rpcs("send").some(rpc => rpc.tabId === 1)).toBe(true);
+	});
+
+	it("falls back to best-effort reattach when a legacy hello omits recovery metadata", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.extClosed(ext);
+
+		// A legacy extension (pre-orphan-guard) reconnects: its hello reports the
+		// tab as no longer attached and omits `recoverableTabIds` entirely. Absent
+		// metadata must be treated as the legacy restart case (best-effort
+		// reattach), not as a user detach that bans the tab and drops the session.
+		const legacy = new FakeExtSocket();
+		bridge.extConnected(legacy);
+		bridge.extMessage(
+			legacy,
+			JSON.stringify({
+				t: "hello",
+				userAgent: "test",
+				browserVersion: "Chrome/120.0.0.0",
+				tabs: [tab({ tabId: 1, groupId: -1 })],
+				attachedTabIds: [],
+				// no recoverableTabIds field
+			}),
+		);
+		await flush();
+
+		// The bridge re-attaches best-effort instead of tearing down the session.
+		expect(legacy.pending("attach")).toHaveLength(1);
+		ack(bridge, legacy, "attach");
+		await flush();
+
+		const cmdId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: cmdId, sessionId: pageSession, method: "Runtime.evaluate" }));
+		ack(bridge, legacy, "send", { ok: true });
+		await flush();
+		const reply = cdp.messages.find(m => m.id === cmdId);
+		expect(reply?.error).toBeUndefined();
+	});
 });

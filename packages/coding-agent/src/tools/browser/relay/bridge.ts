@@ -344,6 +344,13 @@ export class RelayBridge {
 		this.#extInfo = { userAgent: msg.userAgent, browserVersion: msg.browserVersion };
 		const seen = new Set<number>();
 		const attachedNow = new Set(msg.attachedTabIds);
+		// An older extension predates the orphan guard and omits `recoverableTabIds`
+		// entirely. Absent metadata is not the same as an explicitly empty recovery
+		// list: with no signal either way we must not treat a dropped-but-held
+		// attachment as a user detach (banning the tab). Fall back to the legacy
+		// best-effort reattach for absent metadata; only an explicit list lets us
+		// distinguish a real user detach from a guard detach.
+		const hasRecoveryMetadata = msg.recoverableTabIds !== undefined;
 		const recoverableNow = new Set(msg.recoverableTabIds ?? []);
 		for (const snap of msg.tabs) {
 			seen.add(snap.tabId);
@@ -356,6 +363,17 @@ export class RelayBridge {
 			tab.attached = attachedNow.has(tab.tabId);
 			tab.attaching = null;
 			if (tab.attached || this.#sessionHolders(tab.tabId).length === 0) continue;
+			if (!hasRecoveryMetadata) {
+				// Legacy extension without orphan-guard metadata: a service-worker
+				// restart can drop attachments while downstream connections still
+				// hold sessions. Restore them best-effort — the same behavior this
+				// reconciliation replaced — instead of misreading a dropped hold as a
+				// user detach.
+				void this.#ensureAttached(tab).then(ok => {
+					if (!ok) this.#onTabDetached(tab.tabId, "reattach_failed", false);
+				});
+				continue;
+			}
 			if (!recoverableNow.has(tab.tabId)) {
 				// The user detached while the extension socket was down. Invalidate
 				// the relay's stale sessions without fighting the explicit opt-out.
@@ -971,8 +989,23 @@ export class RelayBridge {
 		// is re-announced but left detached, and the holder's next command fails with
 		// no live attachment behind it.
 		if (autoAttachConns.length === 0 && !forceAttach) return;
+		// Capture the socket driving this recovery. If it is replaced (or dropped)
+		// while the attach is in flight, the replacement's hello re-runs
+		// reconciliation, so a `false` here is a retryable transport swap — not a
+		// terminal attach failure — and must not retract preserved sessions.
+		const ext = this.#ext;
 		void this.#ensureAttached(tab).then(ok => {
 			if (!ok) {
+				if (this.#ext !== ext) {
+					// The extension socket was replaced (or closed) mid-attach: the
+					// RPC rejected with ExtensionReplacedError, not a real attach
+					// failure. Retracting now would delete a preserved bare
+					// Target.attachToTarget page session before the replacement hello
+					// can recover it, permanently stranding the holder on
+					// "Unknown session id". Leave the sessions for that hello's
+					// reconciliation to restore.
+					return;
+				}
 				// Reattachment failed (DevTools or another debugger claimed the tab
 				// during the outage). Mirror the Target.setAutoAttach path and retract
 				// the just-announced target so a discovering client never retains a

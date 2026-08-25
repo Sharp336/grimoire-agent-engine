@@ -81,7 +81,19 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 		void rememberRecoverable(tabIds);
 		for (const tabId of tabIds) {
 			guardDetachments.add(tabId);
-			void chrome.debugger.detach({ tabId }).catch(() => guardDetachments.delete(tabId));
+			void chrome.debugger.detach({ tabId }).catch(async () => {
+				guardDetachments.delete(tabId);
+				// The detach rejected. If Chrome still reports the tab attached, the
+				// #sweep() that fired this already dropped it from the guard's tracked
+				// set, so no later reconnect failure would retry it and the debugger
+				// attachment (and its infobar) would stay orphaned. Re-track only when
+				// the attachment truly survived so a subsequent sweep reclaims it;
+				// otherwise the onDetach listener already forgot it.
+				const targets = await chrome.debugger.getTargets().catch(() => []);
+				if (targets.some(target => target.tabId === tabId && target.attached)) {
+					attachmentGuard.track(tabId);
+				}
+			});
 		}
 	},
 });
