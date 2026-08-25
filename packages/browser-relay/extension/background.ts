@@ -29,6 +29,9 @@ let reconnectDelay = RECONNECT_MIN_MS;
 let pingTimer: NodeJS.Timeout | null = null;
 const pendingAttaches = new Set<Promise<void>>();
 const guardDetachments = new Set<number>();
+// Tabs the relay explicitly asked us to detach. onDetach reports these as
+// relay-initiated so the bridge doesn't misclassify them as user cancellations.
+const relayInitiatedDetachTabs = new Set<number>();
 
 const RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
 const recoverableTabIds = new Set<number>();
@@ -323,10 +326,16 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>, socket: Web
 			await attachTab(msg.tabId, socket);
 			return {};
 		case "detach":
-			await chrome.debugger.detach({ tabId: msg.tabId });
-			attachmentGuard.untrack(msg.tabId);
-			await forgetRecoverable(msg.tabId);
-			return {};
+			relayInitiatedDetachTabs.add(msg.tabId);
+			try {
+				await chrome.debugger.detach({ tabId: msg.tabId });
+				attachmentGuard.untrack(msg.tabId);
+				await forgetRecoverable(msg.tabId);
+				return {};
+			} catch (error) {
+				relayInitiatedDetachTabs.delete(msg.tabId);
+				throw error;
+			}
 		case "send":
 			return await chrome.debugger.sendCommand(
 				msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId },
@@ -471,8 +480,11 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 		refreshHello();
 		return;
 	}
+	// A relay-requested detach is attributed explicitly so the bridge can
+	// reconcile the stale snapshot instead of treating it as a user cancel.
+	const relayInitiated = relayInitiatedDetachTabs.delete(source.tabId);
 	void forgetRecoverable(source.tabId);
-	post({ t: "detached", tabId: source.tabId, reason });
+	post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
 });
 
 chrome.tabs.onCreated.addListener(tab => {

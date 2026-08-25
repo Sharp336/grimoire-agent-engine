@@ -65,6 +65,7 @@ var reconnectDelay = RECONNECT_MIN_MS;
 var pingTimer = null;
 var pendingAttaches = new Set;
 var guardDetachments = new Set;
+var relayInitiatedDetachTabs = new Set;
 var RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
 var recoverableTabIds = new Set;
 var recoverableReady = chrome.storage.session.get({ [RECOVERABLE_TAB_IDS_KEY]: [] }).then((stored) => {
@@ -278,10 +279,16 @@ async function runRpc(msg, socket) {
       await attachTab(msg.tabId, socket);
       return {};
     case "detach":
-      await chrome.debugger.detach({ tabId: msg.tabId });
-      attachmentGuard.untrack(msg.tabId);
-      await forgetRecoverable(msg.tabId);
-      return {};
+      relayInitiatedDetachTabs.add(msg.tabId);
+      try {
+        await chrome.debugger.detach({ tabId: msg.tabId });
+        attachmentGuard.untrack(msg.tabId);
+        await forgetRecoverable(msg.tabId);
+        return {};
+      } catch (error) {
+        relayInitiatedDetachTabs.delete(msg.tabId);
+        throw error;
+      }
     case "send":
       return await chrome.debugger.sendCommand(msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId }, msg.method, msg.params);
     case "createTab": {
@@ -398,8 +405,9 @@ chrome.debugger.onDetach.addListener((source, reason) => {
     refreshHello();
     return;
   }
+  const relayInitiated = relayInitiatedDetachTabs.delete(source.tabId);
   forgetRecoverable(source.tabId);
-  post({ t: "detached", tabId: source.tabId, reason });
+  post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
 });
 chrome.tabs.onCreated.addListener((tab) => {
   const snap = snapshot(tab);
