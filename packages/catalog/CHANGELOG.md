@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed native Devin families with independent Thinking and 1M Context axes losing wire variants or advertising the wrong context window; each context lane now preserves its complete off/effort routing and server-selected default ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+
 ## [18.0.5] - 2026-08-25
 
 ### Added
@@ -144,6 +148,17 @@
 - Fixed Codex Daybreak Blue and Red model discovery reporting zero token prices, which incorrectly labeled the models as free in the model picker.
 - Fixed Baseten's moonshotai/Kimi-K3 catalog metadata so its low/high/max thinking levels are available.
 - Fixed opencode-go/deepseek-v4-flash Responses requests sending forced named tool_choice selectors that are rejected while thinking mode is active.
+
+### Added
+
+- Devin discovery now announces the native `chisel` client and display slots, filters internal configs, reads server pricing/capability/output-limit metadata, exposes the router config as `adaptive`, and collapses server-declared effort families onto each family's native default wire uid ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Added Devin selector aliases for the native short and dotted model names, plus static SWE-1.6 seeds so the provider default resolves before credential-scoped discovery runs ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Added optional `description`, `isNew`, `isBeta`, and `isRecommended` model metadata, populated from Devin's `GetCliModelConfigs` so discovered Cascade models keep the server's blurb and badges ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+
+### Fixed
+
+- Stripped the image modality from Devin's `swe-1-6`/`swe-1-6-fast`: their configs advertise `supports_images` but the backend silently drops inline images (verified live against every other Cascade model), so clients now engage their text-only image fallback instead of losing attachments ([#6072](https://github.com/can1357/oh-my-pi/issues/6072)).
+- Devin discovery now logs a warning when the backend returns an empty native catalog, the failure signature of a stale pinned CLI identity ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 
 ## [17.3.4] - 2026-08-14
 

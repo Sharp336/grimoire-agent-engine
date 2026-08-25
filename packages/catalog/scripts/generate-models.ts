@@ -54,7 +54,11 @@ import {
 	stripFireworksDeepSeekThinkingToggle,
 	YOLO_AUTO_STATIC_MODELS,
 } from "../src/provider-models/openai-compat";
-import { type OpenAICodexAccount, openaiCodexModelManagerOptions } from "../src/provider-models/special";
+import {
+	DEVIN_STATIC_MODELS,
+	type OpenAICodexAccount,
+	openaiCodexModelManagerOptions,
+} from "../src/provider-models/special";
 import type { Api, Model, ModelSpec } from "../src/types";
 import { cleanModelName } from "../src/utils";
 import { collapseEffortVariantsAcrossProviders } from "../src/variant-collapse";
@@ -82,6 +86,18 @@ const packageRoot = path.join(import.meta.dir, "..");
  */
 const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litellm"]);
 const RETIRED_PROVIDERS = new Set(["wafer-pass", "wandb"]);
+/**
+ * Credential-scoped catalogs (Devin's Cascade roster is gated per account/team
+ * via `allowed_model_uids`). Fetching them during generation would bake one
+ * private account's entitlements into the shared bundle, and those rows then
+ * survive forever as previous-snapshot zombies: a later regen without that
+ * credential can never mark the provider authoritative to prune them. These
+ * providers are never fetched at generation time and their previous-snapshot
+ * rows are dropped — the curated static seed is the only bundled surface, and
+ * runtime discovery is authoritative per credential (mirrors the GitLab Duo
+ * fallback-only policy below).
+ */
+const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin"]);
 
 async function resolveProviderApiKey(providerId: string, catalog: CatalogDiscoveryConfig): Promise<string | undefined> {
 	for (const envVar of catalog.envVars ?? []) {
@@ -504,7 +520,9 @@ async function generateModels() {
 	const modelsDevModels = await loadModelsDevData();
 	const catalogProviderDescriptors = PROVIDER_DESCRIPTORS.filter(
 		(descriptor): descriptor is CatalogProviderDescriptor =>
-			isCatalogDescriptor(descriptor) && !DISCOVERY_ONLY_PROVIDERS.has(descriptor.providerId),
+			isCatalogDescriptor(descriptor) &&
+			!DISCOVERY_ONLY_PROVIDERS.has(descriptor.providerId) &&
+			!CREDENTIAL_SCOPED_PROVIDERS.has(descriptor.providerId),
 	);
 	const catalogProviderModelBatches = await Promise.all(
 		catalogProviderDescriptors.map(async descriptor => ({
@@ -621,6 +639,12 @@ async function generateModels() {
 	if (!authoritativeCatalogProviders.has("gitlab-duo-agent")) {
 		allModels.push(buildGitLabDuoWorkflowFallbackModel());
 	}
+	// Seed Devin's SWE-1.6 lanes. Cascade's catalog is credential-scoped, so it
+	// is never fetched during generation (CREDENTIAL_SCOPED_PROVIDERS) and the
+	// seed is the entire bundled surface: the descriptor's `swe-1-6`
+	// default must resolve synchronously at boot, before credential-scoped
+	// runtime discovery replaces the seed with the account's live catalog.
+	allModels.push(...DEVIN_STATIC_MODELS);
 	// Seed Fireworks "Fast" serving-path variants (`<id>-fast`). Fast routers are
 	// not enumerated by the serverless control-plane list, so discovery never
 	// surfaces them; the seed projects each base entry into a fast variant.
@@ -672,6 +696,7 @@ async function generateModels() {
 			if (
 				!fetchedKeys.has(`${model.provider}/${model.id}`) &&
 				!DISCOVERY_ONLY_PROVIDERS.has(model.provider) &&
+				!CREDENTIAL_SCOPED_PROVIDERS.has(model.provider) &&
 				// Yolo-Auto's documented static seed is the complete fallback
 				// catalog; never resurrect retired ids from the previous snapshot.
 				model.provider !== "yolo-auto" &&

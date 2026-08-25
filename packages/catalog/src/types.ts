@@ -141,6 +141,15 @@ export interface Usage {
 		webSearch?: number;
 		webFetch?: number;
 	};
+	/** Provider-reported credit meter values for credit-based billing APIs. */
+	credits?: {
+		/** Uncommitted per-response credit cost, when reported. */
+		cost?: number;
+		/** Final committed credit cost, when reported. */
+		committedCost?: number;
+		/** Final committed ACU cost, when reported. */
+		acuCost?: number;
+	};
 	cost: {
 		input: number;
 		output: number;
@@ -792,6 +801,13 @@ export interface DevinCompat {
 	 * effort) instead of a fabricated minimal/low/medium/high ladder.
 	 */
 	trustExplicitThinkingOnly?: boolean;
+	/**
+	 * Server-side router model. Providers must resolve the router through
+	 * `AssignModel` and send the returned assignment JWT with the chat request.
+	 */
+	modelRouter?: boolean;
+	/** Whether the upstream model supports native parallel tool calls. */
+	supportsParallelToolCalls?: boolean;
 }
 
 /** Fully-resolved devin-agent compat view. */
@@ -993,6 +1009,17 @@ export interface Model<TApi extends Api = Api> {
 	remoteCompaction?: RemoteCompactionConfig<TApi>;
 	/** Provider-assigned priority value (lower = higher priority). */
 	priority?: number;
+	/**
+	 * Provider-supplied one-line blurb for this model. Set only when an upstream
+	 * ships one (Devin's `GetCliModelConfigs`); never synthesized locally.
+	 */
+	description?: string;
+	/** Upstream marks this model as newly released. */
+	isNew?: boolean;
+	/** Upstream marks this model as beta / preview quality. */
+	isBeta?: boolean;
+	/** Upstream marks this model as one of its recommended picks. */
+	isRecommended?: boolean;
 	/** Canonical thinking capability metadata for this model. */
 	thinking?: ThinkingConfig;
 	/**

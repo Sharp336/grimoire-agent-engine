@@ -55986,16 +55986,15 @@
 		}
 	},
 	"devin": {
-		"swe-1-6-slow": {
-			"id": "swe-1-6-slow",
-			"name": "SWE-1.6 Slow",
+		"swe-1-6": {
+			"id": "swe-1-6",
+			"name": "SWE-1.6",
 			"api": "devin-agent",
 			"provider": "devin",
 			"baseUrl": "https://server.codeium.com",
 			"reasoning": true,
 			"input": [
-				"text",
-				"image"
+				"text"
 			],
 			"supportsTools": true,
 			"cost": {
@@ -56005,12 +56004,33 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 200000,
-			"maxTokens": 64000,
-			"requiresGlyphTokenization": false,
+			"maxTokens": 128000,
 			"compat": {
-				"trustExplicitThinkingOnly": true
+				"supportsParallelToolCalls": true
+			}
+		},
+		"swe-1-6-fast": {
+			"id": "swe-1-6-fast",
+			"name": "SWE-1.6 Fast",
+			"api": "devin-agent",
+			"provider": "devin",
+			"baseUrl": "https://server.codeium.com",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"supportsTools": true,
+			"cost": {
+				"input": 0.3,
+				"output": 1.5,
+				"cacheRead": 0.03,
+				"cacheWrite": 0
 			},
-			"supportsComputerUse": false
+			"contextWindow": 200000,
+			"maxTokens": 128000,
+			"compat": {
+				"supportsParallelToolCalls": true
+			}
 		}
 	},
 	"firepass": {
