@@ -352,6 +352,7 @@ export async function runCli(argv: string[]): Promise<void> {
 		const hasProfileEnv = process.env.OMP_PROFILE !== undefined || process.env.PI_PROFILE !== undefined;
 		if (extracted.profile !== undefined) {
 			setProfile(extracted.profile);
+			if (getActiveProfile() === undefined) process.env.OMP_PROFILE = "";
 			setExplicitProfileSelection({ profile: getActiveProfile(), source: "cli" });
 		} else if (hasProfileEnv) {
 			// Environment selectors are explicit even when empty: OMP_PROFILE=""
@@ -359,6 +360,7 @@ export async function runCli(argv: string[]): Promise<void> {
 			// Module-load resolution swallows invalid values until this error boundary,
 			// so validate and apply them again here before profile-scoped imports.
 			setProfile(resolveProfileEnv(process.env.OMP_PROFILE, process.env.PI_PROFILE));
+			if (getActiveProfile() === undefined) process.env.OMP_PROFILE = "";
 			setExplicitProfileSelection({ profile: getActiveProfile(), source: "environment" });
 		} else if (extracted.command === "profile" || extracted.aliasName !== undefined) {
 			// Profile management must remain available even when the current folder is

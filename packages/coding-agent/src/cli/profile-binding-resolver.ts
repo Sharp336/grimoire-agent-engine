@@ -9,7 +9,7 @@ import {
 	relativePathWithinRoot,
 } from "@oh-my-pi/pi-utils/dirs";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
-import { resolveGitRepository } from "@oh-my-pi/pi-utils/git-repository";
+import { type GitRepository, resolveGitRepository } from "@oh-my-pi/pi-utils/git-repository";
 
 export const PROFILE_BINDINGS_VERSION = 1;
 const PROFILE_BINDINGS_FILENAME = "profile-bindings.json";
@@ -116,11 +116,11 @@ export async function resolveBindingTarget(inputPath: string): Promise<BindingTa
 		throw new Error(`Cannot bind folder ${absolutePath}: ${error instanceof Error ? error.message : String(error)}`);
 	}
 
-	const repository = await resolveGitRepository(absolutePath);
-	if (!repository) return { kind: "directory", path: normalizePathForComparison(absolutePath) };
+	const folder = normalizePathForComparison(absolutePath);
+	const repository = await resolveGitRepository(folder);
+	if (!repository) return { kind: "directory", path: folder };
 
 	const repoRoot = normalizePathForComparison(repository.repoRoot);
-	const folder = normalizePathForComparison(absolutePath);
 	const subpath = relativePathWithinRoot(repoRoot, folder) ?? undefined;
 	return {
 		kind: "git-common-dir",
@@ -142,13 +142,30 @@ export async function assertProfileExists(profile: string): Promise<void> {
 	throw new Error(`OMP profile "${normalized}" does not exist. Start it once with: omp --profile ${normalized}`);
 }
 
-function gitBindingMatches(binding: ProfileBinding, commonDir: string, repoRoot: string, folder: string): boolean {
-	if (binding.kind !== "git-common-dir" || binding.path !== commonDir) return false;
-	if (!binding.subpath) return pathIsWithin(repoRoot, folder);
+function gitBindingRoot(binding: ProfileBinding, commonDir: string, repoRoot: string): string | null {
+	if (binding.kind !== "git-common-dir" || binding.path !== commonDir) return null;
+	if (!binding.subpath) return repoRoot;
 	const bindingRoot = normalizePathForComparison(
 		path.resolve(repoRoot, ...binding.subpath.replaceAll("\\", "/").split("/")),
 	);
-	return pathIsWithin(repoRoot, bindingRoot) && pathIsWithin(bindingRoot, folder);
+	return pathIsWithin(repoRoot, bindingRoot) ? bindingRoot : null;
+}
+
+async function enclosingGitRepositories(folder: string): Promise<GitRepository[]> {
+	const repositories: GitRepository[] = [];
+	const seen = new Set<string>();
+	let searchFrom = folder;
+	while (true) {
+		const repository = await resolveGitRepository(searchFrom);
+		if (!repository) return repositories;
+		const key = `${normalizePathForComparison(repository.commonDir)}\0${normalizePathForComparison(repository.repoRoot)}`;
+		if (seen.has(key)) return repositories;
+		seen.add(key);
+		repositories.push(repository);
+		const parent = path.dirname(repository.repoRoot);
+		if (parent === repository.repoRoot) return repositories;
+		searchFrom = parent;
+	}
 }
 
 export async function resolveProfileBindingFromData(
@@ -157,15 +174,18 @@ export async function resolveProfileBindingFromData(
 ): Promise<ResolvedProfileBinding | null> {
 	if (data.bindings.length === 0) return null;
 	const folder = normalizePathForComparison(path.resolve(inputPath));
-	const repository = await resolveGitRepository(folder);
-	if (repository) {
+	const gitMatches: Array<{ binding: ProfileBinding; root: string }> = [];
+	for (const repository of await enclosingGitRepositories(folder)) {
 		const commonDir = normalizePathForComparison(repository.commonDir);
 		const repoRoot = normalizePathForComparison(repository.repoRoot);
-		const gitBinding = data.bindings
-			.filter(binding => gitBindingMatches(binding, commonDir, repoRoot, folder))
-			.sort((left, right) => (right.subpath?.length ?? 0) - (left.subpath?.length ?? 0))[0];
-		if (gitBinding) return { binding: gitBinding, profile: normalizeProfileName(gitBinding.profile) };
+		for (const binding of data.bindings) {
+			const root = gitBindingRoot(binding, commonDir, repoRoot);
+			if (root && pathIsWithin(root, folder)) gitMatches.push({ binding, root });
+		}
 	}
+	gitMatches.sort((left, right) => right.root.length - left.root.length);
+	const gitBinding = gitMatches[0]?.binding;
+	if (gitBinding) return { binding: gitBinding, profile: normalizeProfileName(gitBinding.profile) };
 	const directoryBinding = data.bindings
 		.filter(binding => binding.kind === "directory" && pathIsWithin(binding.path, folder))
 		.sort((left, right) => right.path.length - left.path.length)[0];

@@ -19,6 +19,19 @@ describe("profile report", () => {
 		).toBe("Using profile claude-1 · Anthropic account: person@example.com");
 	});
 
+	it("shows a signed-in fallback when Anthropic provides no email", () => {
+		expect(formatProfileReport("claude-1", { accountId: "account-123" })).toBe(
+			"Using profile claude-1 · Anthropic account: account-123",
+		);
+	});
+
+	it("sanitizes and bounds account identity text", () => {
+		const report = formatProfileReport("claude-1", { email: `person@example.com\nINJECTED\t${"x".repeat(200)}` });
+		expect(report).not.toContain("\n");
+		expect(report).not.toContain("\t");
+		expect(report.length).toBeLessThanOrEqual(120);
+	});
+
 	it("finds the sole Anthropic account before the session routes to it", () => {
 		const authStorage = {
 			getOAuthAccountIdentity: () => undefined,

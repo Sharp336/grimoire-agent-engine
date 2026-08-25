@@ -39,7 +39,8 @@ export default class Profile extends Command {
 	async run(): Promise<void> {
 		const { args, flags } = await this.parse(Profile);
 		const action = args.action as ProfileAction;
-		if (action !== "bind" && args.path !== undefined) {
+		const isList = action === "list" || action === "list-bindings";
+		if ((action !== "bind" && args.path !== undefined) || (isList && args.value !== undefined)) {
 			throw new Error(`Too many arguments for omp profile ${action}`);
 		}
 		await runProfileCommand({
