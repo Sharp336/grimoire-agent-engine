@@ -63,7 +63,11 @@ async function copyAbsentPackages(source: string, target: string): Promise<void>
 			await copyAbsentPackages(s, t);
 			continue;
 		}
-		if (!(await pathExists(t))) await fs.cp(s, t, { recursive: true, verbatimSymlinks: true });
+		if (await pathExists(t)) {
+			if (!(await fs.realpath(t).catch(() => undefined))) await fs.rm(t, { recursive: true, force: true });
+			else continue;
+		}
+		await fs.cp(s, t, { recursive: true, verbatimSymlinks: true });
 	}
 }
 async function pathExists(target: string): Promise<boolean> {

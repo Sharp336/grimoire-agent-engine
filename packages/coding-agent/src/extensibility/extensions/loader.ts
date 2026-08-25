@@ -520,14 +520,15 @@ export async function loadExtensions(
 
 	const manifestCache = new Map<string, Promise<ExtensionManifest | null>>();
 
-	let validationGraph: Promise<ValidationGraph> | undefined;
+	const validationGraphs = new Map<string, Promise<ValidationGraph>>();
 	const getValidationGraph = (resolvedPath: string): Promise<ValidationGraph> => {
 		if (!options?.cacheBust) throw new Error("Validation graph requested without cache bust");
-		if (!validationGraph)
-			validationGraph = findValidationPackageRoot(resolvedPath).then(root =>
-				createValidationGraph(root, options.cacheBust!),
-			);
-		return validationGraph;
+		let graph = validationGraphs.get(resolvedPath);
+		if (!graph) {
+			graph = findValidationPackageRoot(resolvedPath).then(root => createValidationGraph(root, options.cacheBust!));
+			validationGraphs.set(resolvedPath, graph);
+		}
+		return graph;
 	};
 	let imported: ImportedExtensionModule[];
 	try {
@@ -537,8 +538,7 @@ export async function loadExtensions(
 			),
 		);
 	} catch (error) {
-		const graph = await validationGraph;
-		await graph?.cleanup();
+		for (const graph of await Promise.all(validationGraphs.values())) await graph.cleanup();
 		throw error;
 	}
 	for (let i = 0; i < paths.length; i++) {
@@ -555,7 +555,7 @@ export async function loadExtensions(
 		}
 	}
 
-	await (await validationGraph)?.cleanup();
+	for (const graph of await Promise.all(validationGraphs.values())) await graph.cleanup();
 	return {
 		extensions,
 		errors,
