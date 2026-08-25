@@ -898,8 +898,8 @@ describe("ExtensionRunner", () => {
 
 			// A caller's own auth header survives; the handler's attempt to change it does not.
 			const headers = await runner.emitBeforeProviderHeaders({ authorization: "Bearer caller-owned" });
-			expect(headers["authorization"]).toBe("Bearer caller-owned");
-			expect(headers["Authorization"]).toBeUndefined();
+			expect(headers.authorization).toBe("Bearer caller-owned");
+			expect(headers.Authorization).toBeUndefined();
 			expect(headers["x-goog-api-key"]).toBeUndefined();
 			// Everything else the handler set still lands.
 			expect(headers["x-trace"]).toBe("kept");
