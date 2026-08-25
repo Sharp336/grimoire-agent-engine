@@ -2952,7 +2952,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// `auto` enforces the per-model policy (inline for Gemini, off otherwise);
 		// like the rest of the prune machinery this is fixed for the session, so a
 		// mid-session model switch keeps the start-time decision.
-		const inlineToolDescriptors = shouldInlineToolDescriptors(settings.get("inlineToolDescriptors"), model?.id);
+		let inlineToolDescriptors = shouldInlineToolDescriptors(settings.get("inlineToolDescriptors"), model?.id);
 		const eagerTasks = settings.get("task.eager") !== "default";
 		const eagerTasksAlways = settings.get("task.eager") === "always";
 		const intentField = $flag("PI_INTENT_TRACING", settings.get("tools.intentTracing")) ? INTENT_FIELD : undefined;
@@ -4124,6 +4124,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					settings.get("inlineToolDescriptors"),
 					discovered.model.id,
 				);
+				inlineToolDescriptors = deferredInlineToolDescriptors;
 				agent.setPruneToolDescriptions(deferredInlineToolDescriptors);
 				session.setPruneToolDescriptions(deferredInlineToolDescriptors);
 				agent.setDialect(resolveDialect(settings.get("tools.format"), discovered.model));

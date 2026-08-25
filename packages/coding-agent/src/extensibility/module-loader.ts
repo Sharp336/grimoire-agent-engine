@@ -6,45 +6,48 @@ export interface ValidationModule {
 	module: unknown;
 	cleanup(): Promise<void>;
 }
-
-/** Runtime-selected module loading boundary for user and plugin modules. */
-export async function loadRuntimeModule(modulePath: string, cacheBust = ""): Promise<unknown> {
-	if (!cacheBust) return import(modulePath);
-	const loaded = await loadValidationModule(modulePath, cacheBust);
-	return loaded.module;
+export interface ValidationGraph {
+	load(modulePath: string): Promise<unknown>;
+	cleanup(): Promise<void>;
 }
 
+export async function loadRuntimeModule(modulePath: string, cacheBust = ""): Promise<unknown> {
+	if (!cacheBust) return import(modulePath);
+	const graph = await createValidationGraph(await findPackageRoot(modulePath), cacheBust);
+	return graph.load(modulePath);
+}
 export async function loadValidationModule(modulePath: string, cacheBust: string): Promise<ValidationModule> {
-	const root = await findPackageRoot(modulePath);
+	const graph = await createValidationGraph(await findPackageRoot(modulePath), cacheBust);
+	return { module: await graph.load(modulePath), cleanup: graph.cleanup };
+}
+export async function createValidationGraph(root: string, cacheBust: string): Promise<ValidationGraph> {
 	const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-module-validation-"));
 	try {
 		await fs.cp(root, tempRoot, { recursive: true, verbatimSymlinks: true });
 		const hoisted = await findNodeModules(path.dirname(root));
 		if (hoisted) await copyAbsentPackages(hoisted, path.join(tempRoot, "node_modules"));
-		const copiedPath = path.join(tempRoot, path.relative(root, modulePath));
-		const module = await import(`${copiedPath}?${cacheBust}`);
-		return { module, cleanup: () => fs.rm(tempRoot, { recursive: true, force: true }) };
+		return {
+			load: modulePath => import(`${path.join(tempRoot, path.relative(root, modulePath))}?${cacheBust}`),
+			cleanup: () => fs.rm(tempRoot, { recursive: true, force: true }),
+		};
 	} catch (error) {
 		await fs.rm(tempRoot, { recursive: true, force: true });
 		throw error;
 	}
 }
-
 async function copyAbsentPackages(source: string, target: string): Promise<void> {
 	await fs.mkdir(target, { recursive: true });
 	for (const entry of await fs.readdir(source)) {
 		if (entry === ".bin") continue;
-		const sourcePath = path.join(source, entry);
-		const targetPath = path.join(target, entry);
-		if (entry.startsWith("@") && (await directoryExists(sourcePath))) {
-			await copyAbsentPackages(sourcePath, targetPath);
+		const s = path.join(source, entry);
+		const t = path.join(target, entry);
+		if (entry.startsWith("@") && (await directoryExists(s))) {
+			await copyAbsentPackages(s, t);
 			continue;
 		}
-		if (!(await pathExists(targetPath)))
-			await fs.cp(sourcePath, targetPath, { recursive: true, verbatimSymlinks: true });
+		if (!(await pathExists(t))) await fs.cp(s, t, { recursive: true, verbatimSymlinks: true });
 	}
 }
-
 async function pathExists(target: string): Promise<boolean> {
 	try {
 		await fs.lstat(target);
@@ -53,7 +56,6 @@ async function pathExists(target: string): Promise<boolean> {
 		return false;
 	}
 }
-
 async function directoryExists(directory: string): Promise<boolean> {
 	try {
 		return (await fs.stat(directory)).isDirectory();
@@ -61,7 +63,6 @@ async function directoryExists(directory: string): Promise<boolean> {
 		return false;
 	}
 }
-
 async function findPackageRoot(modulePath: string): Promise<string> {
 	let directory = path.dirname(modulePath);
 	while (true) {
@@ -75,7 +76,6 @@ async function findPackageRoot(modulePath: string): Promise<string> {
 		}
 	}
 }
-
 async function findNodeModules(start: string): Promise<string | undefined> {
 	let directory = start;
 	while (true) {
