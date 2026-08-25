@@ -1,6 +1,6 @@
 import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
-import { parseSSE } from "../../../mcp/json-rpc";
+import { callMCP } from "../../../mcp/json-rpc";
 import type { SearchResponse } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
 import {
@@ -32,6 +32,12 @@ interface ParallelSourcePolicy {
 	include_domains?: string[];
 	exclude_domains?: string[];
 	after_date?: string;
+}
+
+interface ParallelMcpToolResult {
+	structuredContent?: unknown;
+	content?: Array<{ type: string; text?: string }>;
+	isError?: boolean;
 }
 
 const RECENCY_DAYS: Record<NonNullable<SearchParams["recency"]>, number> = {
@@ -82,59 +88,42 @@ async function searchWithPublicMcp(
 	},
 	sessionId?: string,
 ): Promise<ParallelSearchResult> {
-	const response = await (params.fetch ?? fetch)(PARALLEL_MCP_URL, {
-		method: "POST",
-		headers: {
-			"Content-Type": "application/json",
-			Accept: "application/json, text/event-stream",
-			"User-Agent": USER_AGENT,
-		},
-		body: JSON.stringify({
-			jsonrpc: "2.0",
-			id: Math.random().toString(36).slice(2),
-			method: "tools/call",
-			params: {
-				name: "web_search",
-				arguments: {
-					objective,
-					search_queries: queries,
-					...(sessionId && { session_id: sessionId }),
-					...(params.modelName && params.modelName.length <= 100 && { model_name: params.modelName }),
-				},
+	const mcpResponse = await callMCP<ParallelMcpToolResult>(
+		PARALLEL_MCP_URL,
+		"tools/call",
+		{
+			name: "web_search",
+			arguments: {
+				objective,
+				search_queries: queries,
+				...(sessionId && { session_id: sessionId }),
+				...(params.modelName && params.modelName.length <= 100 && { model_name: params.modelName }),
 			},
-		}),
-		signal: withHardTimeout(params.signal, params.timeoutMs),
-	});
+		},
+		{
+			fetch: params.fetch,
+			headers: { "User-Agent": USER_AGENT },
+			signal: withHardTimeout(params.signal, params.timeoutMs),
+			onHttpError(response, errorText) {
+				const classified = classifyProviderHttpError("parallel", response.status, errorText);
+				if (classified) return classified;
+				if (response.status === 429) {
+					return new SearchProviderError(
+						"parallel",
+						"parallel: MCP rate limit reached (429); configure a Parallel API key for higher limits",
+						response.status,
+					);
+				}
+				return new SearchProviderError(
+					"parallel",
+					`Parallel MCP request failed (${response.status}): ${errorText}`,
+					response.status,
+				);
+			},
+			onParseError: () => new SearchProviderError("parallel", "Failed to parse Parallel MCP response"),
+		},
+	);
 
-	if (!response.ok) {
-		const errorText = await response.text();
-		const classified = classifyProviderHttpError("parallel", response.status, errorText);
-		if (classified) throw classified;
-		if (response.status === 429) {
-			throw new SearchProviderError(
-				"parallel",
-				"parallel: MCP rate limit reached (429); configure a Parallel API key for higher limits",
-				response.status,
-			);
-		}
-		throw new SearchProviderError(
-			"parallel",
-			`Parallel MCP request failed (${response.status}): ${errorText}`,
-			response.status,
-		);
-	}
-
-	const mcpResponse = parseSSE(await response.text()) as {
-		result?: {
-			structuredContent?: unknown;
-			content?: Array<{ type: string; text?: string }>;
-			isError?: boolean;
-		};
-		error?: { message: string };
-	} | null;
-	if (!mcpResponse) {
-		throw new SearchProviderError("parallel", "Failed to parse Parallel MCP response");
-	}
 	if (mcpResponse.error) {
 		throw new SearchProviderError("parallel", `Parallel MCP error: ${mcpResponse.error.message}`);
 	}

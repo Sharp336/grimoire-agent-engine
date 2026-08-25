@@ -4,6 +4,7 @@
  * Lightweight utilities for calling MCP servers directly via HTTP
  * without maintaining persistent connections.
  */
+import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 
 /** Hard ceiling on a single MCP HTTP request when the caller provides no signal. */
@@ -66,6 +67,10 @@ export interface JsonRpcResponse<T = unknown> {
 /** Options controlling a single MCP JSON-RPC HTTP request. */
 export interface CallMcpOptions {
 	signal?: AbortSignal;
+	fetch?: FetchImpl;
+	headers?: Record<string, string>;
+	onHttpError?: (response: Response, body: string) => Error;
+	onParseError?: (responseText: string) => Error;
 }
 
 /**
@@ -90,17 +95,21 @@ export async function callMCP<T = unknown>(
 		params: params ?? {},
 	};
 
-	const response = await fetch(url, {
+	const response = await (options?.fetch ?? fetch)(url, {
 		method: "POST",
 		headers: {
 			"Content-Type": "application/json",
 			Accept: "application/json, text/event-stream",
+			...options?.headers,
 		},
 		body: JSON.stringify(body),
 		signal: options?.signal ?? AbortSignal.timeout(MCP_DEFAULT_TIMEOUT_MS),
 	});
 
 	if (!response.ok) {
+		if (options?.onHttpError) {
+			throw options.onHttpError(response, await response.text());
+		}
 		const errorMsg = `MCP request failed: ${response.status} ${response.statusText}`;
 		logger.error(errorMsg, { url: redactUrlForLog(url), method, params });
 		throw new Error(errorMsg);
@@ -115,7 +124,7 @@ export async function callMCP<T = unknown>(
 			method,
 			responseText: text.slice(0, 500),
 		});
-		throw new Error("Failed to parse MCP response");
+		throw options?.onParseError?.(text) ?? new Error("Failed to parse MCP response");
 	}
 
 	return result;
