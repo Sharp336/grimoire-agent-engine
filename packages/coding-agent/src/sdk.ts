@@ -2620,6 +2620,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (deferredModelResolution && (options.awaitDeferredModel || options.hasUI !== true || hasExistingSession)) {
 			const deferredModel = await deferredModelResolution;
 			if (deferredModel) {
+				model = deferredModel.model;
 				modelSelectionGeneration += 1;
 				thinkingLevel = deferredModel.thinkingLevel ?? thinkingLevel;
 				autoThinking = thinkingLevel === AUTO_THINKING;
@@ -2630,9 +2631,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						: resolveThinkingLevelForModel(model!, effectiveThinkingLevel),
 				);
 				modelFallbackMessage = undefined;
-			} else {
-				modelFallbackMessage =
-					"No models available. Use /login or set an API key environment variable. Then use /model to select a model.";
 			}
 		}
 
