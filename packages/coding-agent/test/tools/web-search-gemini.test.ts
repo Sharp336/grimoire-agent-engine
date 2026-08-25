@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
+import { __resetVertexTokenCache } from "@oh-my-pi/pi-ai/providers/google-auth";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { GeminiProvider, searchGemini } from "@oh-my-pi/pi-coding-agent/web/search/providers/gemini";
 import { SearchProviderError } from "@oh-my-pi/pi-coding-agent/web/search/types";
@@ -559,6 +560,48 @@ describe("searchGemini Vertex AI", () => {
 				fetch: mockVertexFetch(),
 			}),
 		).rejects.toThrow("GOOGLE_GEMINI_BASE_URL must be a valid absolute URL");
+	});
+
+	it("applies the search timeout to Vertex token acquisition", async () => {
+		__resetVertexTokenCache();
+		const tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-vertex-adc-"));
+		try {
+			const adcPath = path.join(tmpDir, "adc.json");
+			await Bun.write(
+				adcPath,
+				JSON.stringify({
+					type: "authorized_user",
+					client_id: "client-id",
+					client_secret: "client-secret",
+					refresh_token: "refresh-token",
+				}),
+			);
+			Bun.env.GOOGLE_APPLICATION_CREDENTIALS = adcPath;
+			Bun.env.GOOGLE_CLOUD_PROJECT = "test-project";
+			Bun.env.GOOGLE_CLOUD_LOCATION = "us-central1";
+
+			const startedAt = Date.now();
+			let thrown: unknown;
+			try {
+				await searchGemini({
+					query: "hanging token exchange",
+					authStorage: noAuthStorage,
+					timeoutMs: 50,
+					// The token endpoint never answers; only the composed deadline
+					// unwinds the call (the helper's own ceiling is 30s).
+					fetch: () => new Promise<Response>(() => {}),
+				});
+			} catch (error) {
+				thrown = error;
+			}
+
+			expect(Date.now() - startedAt).toBeLessThan(5000);
+			expect(thrown).toBeInstanceOf(SearchProviderError);
+			expect((thrown as Error).message).toContain("Gemini Vertex AI auth failed");
+		} finally {
+			__resetVertexTokenCache();
+			await fs.rm(tmpDir, { recursive: true, force: true });
+		}
 	});
 
 	it("redacts the Vertex access token from error text", async () => {

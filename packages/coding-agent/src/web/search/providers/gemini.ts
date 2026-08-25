@@ -696,7 +696,7 @@ async function callGeminiVertexSearch(
 	const location = resolveLocation();
 	let accessToken: string;
 	try {
-		accessToken = await getVertexAccessToken({ signal, fetch: fetchImpl });
+		accessToken = await getVertexAccessToken({ signal: withHardTimeout(signal, timeoutMs), fetch: fetchImpl });
 	} catch (error) {
 		throw new SearchProviderError(
 			"gemini",
