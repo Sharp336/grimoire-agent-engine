@@ -499,7 +499,7 @@ const costSegment: StatusLineSegment = {
 			}
 			billingParts.push(`${billingParts.length ? "+ " : ""}${limitParts.join(theme.sep.dot)} (adv)`);
 		} else if (advisorCost) {
-			billingParts.push(`${billingParts.length ? "+ " : ""}${formatAdvisorSpend(advisorCost, advisorUsingSubscription, theme)}`);
+			billingParts.push(`${billingParts.length ? "+ " : ""}${formatAdvisorSpend(advisorCost, advisorUsingSubscription, theme)} (adv)`);
 		}
 
 		return { content: theme.fg("statusLineCost", billingParts.join(" ")), visible: true };
