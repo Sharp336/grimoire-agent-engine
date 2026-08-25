@@ -41,7 +41,7 @@ import {
 	resolveModelRoleValue,
 	resolveModelScope,
 	type ScopedModel,
-	sameScopedModelSet,
+	sameScopedModelSequence,
 	toSessionScopedModels,
 } from "./config/model-resolver";
 
@@ -821,7 +821,7 @@ export async function rebuildScopedModelsAfterDiscovery(
 		activeSettings,
 	);
 	const mapped = toSessionScopedModels(rebuilt, activeSettings);
-	if (mapped.length === 0 || sameScopedModelSet(session.scopedModels, mapped)) return;
+	if (mapped.length === 0 || sameScopedModelSequence(session.scopedModels, mapped)) return;
 	session.setScopedModels(mapped);
 }
 
