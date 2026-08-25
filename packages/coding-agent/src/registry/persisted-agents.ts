@@ -122,6 +122,21 @@ function assistantMetrics(message: Record<string, unknown>): AssistantMetrics {
 	};
 }
 
+/**
+ * Distinguish a filesystem open/read fault (EACCES/EMFILE/EIO — any coded
+ * errno except ENOENT) from content incompleteness. Malformed and truncated
+ * JSONL records never surface as errors: the stream visitor skips them
+ * in-band. ENOENT is the tolerated optional-file race (a transcript listed by
+ * readdir can vanish before its metadata is read). So a coded non-ENOENT
+ * error means the read itself failed and must propagate — dropping the
+ * roster latch so the next call retries — instead of masquerading as an
+ * incomplete transcript.
+ */
+function isFilesystemError(error: unknown): boolean {
+	const code = (error as NodeJS.ErrnoException | null)?.code;
+	return typeof code === "string" && code !== "ENOENT";
+}
+
 async function readPersistedAgentHistory(
 	transcript: PersistedTranscript,
 	shouldContinue: () => boolean,
@@ -158,7 +173,12 @@ async function readPersistedAgentHistory(
 			},
 			{ shouldContinue },
 		);
-	} catch {
+	} catch (error) {
+		// Malformed and truncated records are skipped in-band; a vanished file
+		// (ENOENT) degrades to empty history. Any other filesystem fault is
+		// transient and surfaces to the caller instead of masquerading as a
+		// transcript with no history.
+		if (isFilesystemError(error)) throw error;
 		return {};
 	}
 
@@ -239,7 +259,14 @@ async function readPersistedAgentHistory(
  * multi-megabyte historical transcript just to populate one roster row.
  */
 async function readPersistedAgentMetadata(sessionFile: string): Promise<PersistedAgentMetadata> {
-	const stat = fs.promises.stat(sessionFile).catch(() => undefined);
+	const stat = fs.promises.stat(sessionFile).catch(error => {
+		// A transcript listed by readdir can vanish before its metadata is read
+		// (session switch or compaction): ENOENT is the tolerated optional-file
+		// race. Any other stat failure (EACCES/EMFILE/EIO) is a filesystem fault
+		// that must surface so the roster latch drops and the next call retries.
+		if (isFilesystemError(error)) throw error;
+		return undefined;
+	});
 	const artifactBase = sessionFile.slice(0, -".jsonl".length);
 	const outputPath = `${artifactBase}.md`;
 	const patchPath = `${artifactBase}.patch`;
@@ -291,9 +318,14 @@ async function readPersistedAgentMetadata(sessionFile: string): Promise<Persiste
 			},
 			{ maxRecords: MAX_METADATA_LINES },
 		);
-	} catch {
-		// A readable transcript is still useful even when its optional metadata
-		// prefix is malformed.
+	} catch (error) {
+		// Malformed and truncated records are skipped in-band by the stream
+		// visitor, so the only errors reaching this catch are filesystem
+		// faults. ENOENT races degrade to an incomplete record; transient
+		// faults (EACCES/EMFILE/EIO) surface so the roster latch drops and the
+		// next call retries. A readable transcript with a malformed metadata
+		// prefix still yields what it can.
+		if (isFilesystemError(error)) throw error;
 	}
 	const [file, [hasOutput, hasPatch]] = await Promise.all([stat, artifactFiles]);
 	return {

@@ -355,6 +355,130 @@ describe("hub list", () => {
 		}
 	});
 
+	it("drops the latch and re-reads after a transient metadata read failure", async () => {
+		for (const code of ["EMFILE", "EACCES"] as const) {
+			using tempDir = TempDir.createSync(`@omp-hub-list-metadata-${code}-`);
+			const dir = tempDir.path();
+			const sessionFile = path.join(dir, "main.jsonl");
+			await Bun.write(sessionFile, `${sessionHeader("main")}\n`);
+			const transcriptFile = path.join(dir, "main", "ParkedScout.jsonl");
+			await writeParkedTranscript(transcriptFile, "parked", "reviewing classified.diff");
+
+			const registry = new AgentRegistry();
+			registry.register({
+				id: MAIN_AGENT_ID,
+				displayName: MAIN_AGENT_ID,
+				kind: "main",
+				session: null,
+				sessionFile,
+				status: "running",
+			});
+			registry.register({
+				id: "LiveWorker",
+				displayName: "task",
+				kind: "sub",
+				parentId: MAIN_AGENT_ID,
+				session: null,
+				status: "idle",
+			});
+
+			const statSpy = spyOn(fs.promises, "stat").mockRejectedValueOnce(
+				Object.assign(new Error(code === "EMFILE" ? "too many open files" : "permission denied"), { code }),
+			);
+			try {
+				const first = await executeList(registry, MAIN_AGENT_ID);
+				if (!first.details) throw new Error("Expected coordination details");
+				expect(first.isError).toBeFalsy();
+				expect(first.details.peers?.map(peer => peer.id)).toEqual(["LiveWorker"]);
+				expect(first.details.counts).toEqual({
+					running: 0,
+					idle: 1,
+					parked: 0,
+					shown: 1,
+					truncated: 0,
+				});
+				expect(registry.get("ParkedScout")).toBeUndefined();
+				expect(listText(first)).not.toContain("ParkedScout");
+
+				// The failed scan must not latch: the next call re-reads the same
+				// transcript and registers it as parked.
+				const second = await executeList(registry, MAIN_AGENT_ID);
+				if (!second.details) throw new Error("Expected coordination details");
+				expect(second.isError).toBeFalsy();
+				expect(second.details.peers?.map(peer => peer.id)).toEqual(["LiveWorker"]);
+				expect(second.details.counts).toEqual({
+					running: 0,
+					idle: 1,
+					parked: 1,
+					shown: 1,
+					truncated: 0,
+				});
+				expect(registry.get("ParkedScout")?.status).toBe("parked");
+				expect(listText(second)).not.toContain("ParkedScout");
+			} finally {
+				statSpy.mockRestore();
+			}
+		}
+	});
+
+	it("tolerates a transcript vanishing between readdir and its metadata read", async () => {
+		using tempDir = TempDir.createSync("@omp-hub-list-metadata-enoent-race-");
+		const dir = tempDir.path();
+		const sessionFile = path.join(dir, "main.jsonl");
+		const transcriptFile = path.join(dir, "main", "ParkedScout.jsonl");
+		await Bun.write(sessionFile, `${sessionHeader("main")}\n`);
+		await writeParkedTranscript(transcriptFile, "parked", "reviewing classified.diff");
+
+		const registry = new AgentRegistry();
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: MAIN_AGENT_ID,
+			kind: "main",
+			session: null,
+			sessionFile,
+			status: "running",
+		});
+		registry.register({
+			id: "LiveWorker",
+			displayName: "task",
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			session: null,
+			status: "idle",
+		});
+
+		const accessSpy = spyOn(fs.promises, "access").mockImplementationOnce(async () => {
+			// The transcript existed when readdir listed it; it is gone by the
+			// time the metadata read runs (session switch or compaction).
+			await fs.promises.rm(transcriptFile);
+			throw Object.assign(new Error("no such file or directory"), { code: "ENOENT" });
+		});
+		try {
+			const first = await executeList(registry, MAIN_AGENT_ID);
+			if (!first.details) throw new Error("Expected coordination details");
+			expect(first.isError).toBeFalsy();
+			expect(first.details.counts).toEqual({
+				running: 0,
+				idle: 1,
+				parked: 0,
+				shown: 1,
+				truncated: 0,
+			});
+			expect(registry.get("ParkedScout")).toBeUndefined();
+
+			// ENOENT is a stable state, not a transient fault: the completed
+			// scan latches, so a reappearing transcript is not re-scanned.
+			await writeParkedTranscript(transcriptFile, "parked", "reviewing classified.diff");
+			const second = await executeList(registry, MAIN_AGENT_ID);
+			if (!second.details) throw new Error("Expected coordination details");
+			expect(second.isError).toBeFalsy();
+			expect(second.details.counts?.parked).toBe(0);
+			expect(registry.get("ParkedScout")).toBeUndefined();
+		} finally {
+			accessSpy.mockRestore();
+		}
+	});
+
 	it("latches an empty persisted roster when the optional subagent directory is missing", async () => {
 		using tempDir = TempDir.createSync("@omp-hub-list-enoent-latch-");
 		const dir = tempDir.path();
