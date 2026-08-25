@@ -96,7 +96,7 @@ async function searchWithPublicMcp(
 			arguments: {
 				objective,
 				search_queries: queries,
-				...(sessionId && { session_id: sessionId }),
+				...(sessionId && sessionId.length <= 100 && { session_id: sessionId }),
 				...(params.modelName && params.modelName.length <= 100 && { model_name: params.modelName }),
 			},
 		},
