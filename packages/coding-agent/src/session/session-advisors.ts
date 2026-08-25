@@ -42,6 +42,7 @@ import {
 	type AdvisorAgent,
 	type AdvisorConfig,
 	AdvisorEmissionGuard,
+	AdvisorLoopGuard,
 	type AdvisorMessageDetails,
 	type AdvisorNote,
 	AdvisorOutputQuarantinedError,
@@ -874,10 +875,30 @@ export class SessionAdvisors {
 				serviceTierResolver: advisorServiceTierResolver,
 			});
 			advisorAgent.setDisableReasoning(shouldDisableReasoning(advisorThinkingLevel));
+			let advisorLoopGuardStopped = false;
+			// The advisor's own loop needs the same repeated-tool-call bound the
+			// primary gets from `LoopGuards`; nothing else stops it reissuing one
+			// failing call until the update is abandoned.
+			const advisorLoopGuard = new AdvisorLoopGuard({
+				settings: this.#host.settings,
+				name: advisorName,
+				liveMessages: () => advisorAgent.state.messages,
+				appendMessage: message => advisorAgent.appendMessage(message),
+				abort: reason => {
+					advisorLoopGuardStopped = true;
+					advisorAgent.abort(reason);
+				},
+			});
+			advisorAgent.setOnTurnEnd((messages, signal, context) => {
+				if (signal?.aborted) return;
+				advisorLoopGuard.recordTurn(messages, context);
+			});
 
 			const advisorAgentFacade: AdvisorAgent = {
 				prompt: async input => {
 					let quarantined: string | undefined;
+					advisorLoopGuard.reset();
+					advisorLoopGuardStopped = false;
 					try {
 						quarantinedAdvisorOutput = undefined;
 						// Multi-message input (candidate 4) must serialize deterministically
@@ -893,6 +914,12 @@ export class SessionAdvisors {
 						else await advisorAgent.prompt(input);
 						quarantined = quarantinedAdvisorOutput;
 					} finally {
+						if (advisorLoopGuardStopped) {
+							// A loop guard stop is a deliberate, bounded silent review, not
+							// a provider failure for AdvisorRuntime to retry/fallback.
+							advisorAgent.state.error = undefined;
+							advisorLoopGuardStopped = false;
+						}
 						quarantinedAdvisorOutput = undefined;
 						currentAdvisorInput = "";
 					}
@@ -900,6 +927,8 @@ export class SessionAdvisors {
 				},
 				abort: reason => advisorAgent.abort(reason),
 				reset: () => {
+					advisorLoopGuard.reset();
+					advisorLoopGuardStopped = false;
 					advisorAgent.reset();
 					appendOnlyContext.log.clear();
 				},
