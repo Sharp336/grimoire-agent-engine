@@ -521,10 +521,12 @@ export async function loadExtensions(
 	const manifestCache = new Map<string, Promise<ExtensionManifest | null>>();
 
 	let validationGraph: Promise<ValidationGraph> | undefined;
-	const getValidationGraph = async (resolvedPath: string): Promise<ValidationGraph> => {
+	const getValidationGraph = (resolvedPath: string): Promise<ValidationGraph> => {
 		if (!options?.cacheBust) throw new Error("Validation graph requested without cache bust");
 		if (!validationGraph)
-			validationGraph = createValidationGraph(await findValidationPackageRoot(resolvedPath), options.cacheBust);
+			validationGraph = findValidationPackageRoot(resolvedPath).then(root =>
+				createValidationGraph(root, options.cacheBust!),
+			);
 		return validationGraph;
 	};
 	let imported: ImportedExtensionModule[];
