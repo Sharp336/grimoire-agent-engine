@@ -70,7 +70,8 @@ export const TINY_TITLE_LOCAL_MODELS = [
 		label: "AFM 3 Core",
 		description:
 			"On-device Apple Foundation Model (macOS). OS-owned weights; download is a readiness probe, not a Hugging Face fetch.",
-		contextNote: "Darwin only. Fail closed when Apple Intelligence is off or the model is not ready.",
+		contextNote:
+			"Darwin only. Session context is SystemLanguageModel.contextSize (4096 on 26.x, live _contextSize on 27+; 8192 for AFM 3 on this class of Mac). Fail closed when Apple Intelligence is off or the model is not ready.",
 		unsupportedReason: process.platform === "darwin" ? undefined : "Apple Foundation Models is macOS-only",
 	},
 ] as const satisfies readonly TinyTitleLocalModelSpec[];
@@ -195,7 +196,8 @@ export const TINY_MEMORY_LOCAL_MODELS = [
 		label: "AFM 3 Core",
 		description:
 			"On-device Apple Foundation Model (macOS). OS-owned weights; download is a readiness probe, not a Hugging Face fetch.",
-		contextNote: "Darwin only. Fail closed when Apple Intelligence is off or the model is not ready.",
+		contextNote:
+			"Darwin only. Session context is SystemLanguageModel.contextSize (4096 on 26.x, live _contextSize on 27+; 8192 for AFM 3 on this class of Mac). Fail closed when Apple Intelligence is off or the model is not ready.",
 		unsupportedReason: process.platform === "darwin" ? undefined : "Apple Foundation Models is macOS-only",
 	},
 ] as const satisfies readonly TinyTitleLocalModelSpec[];
