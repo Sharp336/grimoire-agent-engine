@@ -27,6 +27,7 @@ export async function createValidationGraph(root: string, cacheBust: string): Pr
 	const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-module-validation-"));
 	const hoisted = await findNodeModules(path.dirname(root));
 	try {
+		await fs.cp(root, tempRoot, { recursive: true, verbatimSymlinks: true });
 		if (hoisted) await copyAbsentPackages(hoisted, path.join(tempRoot, "node_modules"));
 		await repairDependencySymlinks(path.join(tempRoot, "node_modules"));
 		return {
