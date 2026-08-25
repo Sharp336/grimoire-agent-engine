@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, setSystemTime, vi } from "
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import type { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { searchWithParallel } from "@oh-my-pi/pi-coding-agent/web/parallel";
-import { searchParallel } from "@oh-my-pi/pi-coding-agent/web/search/providers/parallel";
+import { ParallelProvider, searchParallel } from "@oh-my-pi/pi-coding-agent/web/search/providers/parallel";
 
 describe("Parallel web search", () => {
 	const fakeStorage = {
@@ -129,6 +129,199 @@ describe("Parallel web search", () => {
 				ageSeconds: expect.any(Number),
 			},
 		]);
+	});
+
+	it("keeps credential-free Parallel out of the auto chain while allowing explicit selection", () => {
+		delete process.env.PARALLEL_API_KEY;
+		const provider = new ParallelProvider();
+
+		expect(provider.isAvailable(fakeAuthStorage)).toBe(false);
+		expect(provider.isExplicitlyAvailable(fakeAuthStorage)).toBe(true);
+	});
+
+	it("uses anonymous MCP and maps structured results when Parallel has no credential", async () => {
+		delete process.env.PARALLEL_API_KEY;
+		let capturedUrl: string | undefined;
+		let capturedHeaders: Record<string, string> | undefined;
+		const fetchMock: FetchImpl = (url, init) => {
+			capturedUrl = url.toString();
+			capturedHeaders = init?.headers as Record<string, string> | undefined;
+			capturedRequestBody = JSON.parse(init?.body as string);
+			return Promise.resolve(
+				new Response(
+					JSON.stringify({
+						jsonrpc: "2.0",
+						id: "parallel-mcp-test",
+						result: {
+							structuredContent: {
+								search_id: "search-parallel-mcp",
+								results: [
+									{
+										title: "Free Parallel result",
+										url: "https://parallel.ai/example",
+										publish_date: "2026-08-01",
+										excerpts: ["Public MCP excerpt"],
+									},
+									{ title: "Extra result", url: "https://parallel.ai/extra", excerpts: [] },
+								],
+							},
+						},
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				),
+			);
+		};
+
+		const result = await searchParallel(
+			{ query: "free web search", num_results: 1, fetch: fetchMock },
+			fakeAuthStorage,
+		);
+
+		expect(capturedUrl).toBe("https://search.parallel.ai/mcp");
+		expect(capturedHeaders).toEqual({
+			"Content-Type": "application/json",
+			Accept: "application/json, text/event-stream",
+		});
+		expect(capturedRequestBody).toEqual({
+			jsonrpc: "2.0",
+			id: expect.any(String),
+			method: "tools/call",
+			params: {
+				name: "web_search",
+				arguments: {
+					objective: "free web search",
+					search_queries: ["free web search"],
+				},
+			},
+		});
+		expect(result).toEqual({
+			provider: "parallel",
+			requestId: "search-parallel-mcp",
+			sources: [
+				{
+					title: "Free Parallel result",
+					url: "https://parallel.ai/example",
+					snippet: "Public MCP excerpt",
+					publishedDate: "2026-08-01",
+					ageSeconds: expect.any(Number),
+				},
+			],
+		});
+	});
+
+	it("parses SSE MCP text content after skipping non-JSON content blocks", async () => {
+		delete process.env.PARALLEL_API_KEY;
+		const payload = {
+			search_id: "search-parallel-mcp-text",
+			results: [{ title: "Text result", url: "https://example.com/text", excerpts: ["Text excerpt"] }],
+		};
+		const fetchMock: FetchImpl = () =>
+			Promise.resolve(
+				new Response(
+					`event: message\ndata: ${JSON.stringify({
+						jsonrpc: "2.0",
+						id: "parallel-mcp-text",
+						result: {
+							content: [
+								{ type: "text", text: "Search completed successfully." },
+								{ type: "text", text: JSON.stringify(payload) },
+							],
+						},
+					})}\n\n`,
+					{ status: 200, headers: { "Content-Type": "text/event-stream" } },
+				),
+			);
+
+		const result = await searchParallel({ query: "text fallback", fetch: fetchMock }, fakeAuthStorage);
+
+		expect(result.requestId).toBe("search-parallel-mcp-text");
+		expect(result.sources).toEqual([
+			{
+				title: "Text result",
+				url: "https://example.com/text",
+				snippet: "Text excerpt",
+				publishedDate: undefined,
+				ageSeconds: undefined,
+			},
+		]);
+	});
+
+	it("preserves authenticated REST precedence for a stored key without an environment key", async () => {
+		delete process.env.PARALLEL_API_KEY;
+		const storedAuthStorage = {
+			...fakeAuthStorage,
+			async getApiKey() {
+				return "stored-parallel-key";
+			},
+			hasAuth() {
+				return true;
+			},
+			resolver() {
+				return async () => "stored-parallel-key";
+			},
+		} as unknown as AuthStorage;
+		let capturedUrl: string | undefined;
+		let capturedHeaders: Record<string, string> | undefined;
+		const fetchMock: FetchImpl = (url, init) => {
+			capturedUrl = url.toString();
+			capturedHeaders = init?.headers as Record<string, string> | undefined;
+			return Promise.resolve(
+				new Response(JSON.stringify({ search_id: "search-stored-key", results: [] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				}),
+			);
+		};
+
+		await searchParallel({ query: "stored credential", fetch: fetchMock }, storedAuthStorage);
+
+		expect(capturedUrl).toBe("https://api.parallel.ai/v1beta/search");
+		expect(capturedHeaders).toMatchObject({
+			"x-api-key": "stored-parallel-key",
+			"parallel-beta": "search-extract-2025-10-10",
+		});
+	});
+
+	it("surfaces anonymous MCP JSON-RPC errors as Parallel provider errors", async () => {
+		delete process.env.PARALLEL_API_KEY;
+		const fetchMock = mockFetch({
+			jsonrpc: "2.0",
+			id: "parallel-mcp-error",
+			error: { code: -32602, message: "Search query was rejected" },
+		});
+
+		await expect(searchParallel({ query: "invalid", fetch: fetchMock }, fakeAuthStorage)).rejects.toMatchObject({
+			provider: "parallel",
+			message: expect.stringContaining("Search query was rejected"),
+		});
+	});
+
+	it("surfaces anonymous MCP tool errors as Parallel provider errors", async () => {
+		delete process.env.PARALLEL_API_KEY;
+		const fetchMock = mockFetch({
+			jsonrpc: "2.0",
+			id: "parallel-mcp-tool-error",
+			result: {
+				isError: true,
+				content: [{ type: "text", text: "Parallel search is temporarily unavailable" }],
+			},
+		});
+
+		await expect(searchParallel({ query: "unavailable", fetch: fetchMock }, fakeAuthStorage)).rejects.toMatchObject({
+			provider: "parallel",
+			message: "Parallel search is temporarily unavailable",
+		});
+	});
+
+	it("explains anonymous MCP rate limits and preserves the HTTP status", async () => {
+		delete process.env.PARALLEL_API_KEY;
+		const fetchMock: FetchImpl = () => Promise.resolve(new Response("rate limited", { status: 429 }));
+
+		await expect(searchParallel({ query: "limited", fetch: fetchMock }, fakeAuthStorage)).rejects.toMatchObject({
+			provider: "parallel",
+			status: 429,
+			message: expect.stringContaining("configure a Parallel API key"),
+		});
 	});
 
 	it("maps site: directives onto source_policy.include_domains and strips them from the query", async () => {

@@ -1,4 +1,5 @@
 import { type ApiKey, type AuthStorage, type FetchImpl, getEnvApiKey, withAuth } from "@oh-my-pi/pi-ai";
+import { parseSSE } from "../../../mcp/json-rpc";
 import type { SearchResponse } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
 import {
@@ -18,6 +19,7 @@ import { classifyProviderHttpError, toSearchSources, withHardTimeout } from "./u
 
 const DEFAULT_NUM_RESULTS = 10;
 const MAX_NUM_RESULTS = 40;
+const PARALLEL_MCP_URL = "https://search.parallel.ai/mcp";
 
 /** Query-string caps for Parallel: natural-language objective, no field operators. */
 const PARALLEL_QUERY_SYNTAX = { phrases: true, negation: true, or: true } as const;
@@ -66,6 +68,91 @@ function toSourcePolicy(parsed: StructuredQuery, recency?: SearchParams["recency
 	return policy.include_domains || policy.exclude_domains || policy.after_date ? policy : undefined;
 }
 
+async function searchWithPublicMcp(
+	objective: string,
+	queries: string[],
+	params: {
+		signal?: AbortSignal;
+		timeoutMs?: number;
+		fetch?: FetchImpl;
+	},
+): Promise<ParallelSearchResult> {
+	const response = await (params.fetch ?? fetch)(PARALLEL_MCP_URL, {
+		method: "POST",
+		headers: {
+			"Content-Type": "application/json",
+			Accept: "application/json, text/event-stream",
+		},
+		body: JSON.stringify({
+			jsonrpc: "2.0",
+			id: Math.random().toString(36).slice(2),
+			method: "tools/call",
+			params: {
+				name: "web_search",
+				arguments: {
+					objective,
+					search_queries: queries,
+				},
+			},
+		}),
+		signal: withHardTimeout(params.signal, params.timeoutMs),
+	});
+
+	if (!response.ok) {
+		const errorText = await response.text();
+		const classified = classifyProviderHttpError("parallel", response.status, errorText);
+		if (classified) throw classified;
+		if (response.status === 429) {
+			throw new SearchProviderError(
+				"parallel",
+				"parallel: MCP rate limit reached (429); configure a Parallel API key for higher limits",
+				response.status,
+			);
+		}
+		throw new SearchProviderError(
+			"parallel",
+			`Parallel MCP request failed (${response.status}): ${errorText}`,
+			response.status,
+		);
+	}
+
+	const mcpResponse = parseSSE(await response.text()) as {
+		result?: {
+			structuredContent?: unknown;
+			content?: Array<{ type: string; text?: string }>;
+			isError?: boolean;
+		};
+		error?: { message: string };
+	} | null;
+	if (!mcpResponse) {
+		throw new SearchProviderError("parallel", "Failed to parse Parallel MCP response");
+	}
+	if (mcpResponse.error) {
+		throw new SearchProviderError("parallel", `Parallel MCP error: ${mcpResponse.error.message}`);
+	}
+	if (mcpResponse.result?.isError) {
+		const message = mcpResponse.result.content
+			?.find(item => item.type === "text" && typeof item.text === "string")
+			?.text?.trim();
+		throw new SearchProviderError("parallel", message || "Parallel MCP returned an error");
+	}
+	if (mcpResponse.result?.structuredContent !== undefined) {
+		return parseParallelSearchPayload(mcpResponse.result.structuredContent, { parseMetadata: false });
+	}
+	for (const item of mcpResponse.result?.content ?? []) {
+		if (item.type !== "text" || typeof item.text !== "string") continue;
+		let payload: unknown;
+		try {
+			payload = JSON.parse(item.text);
+		} catch {
+			continue;
+		}
+		return parseParallelSearchPayload(payload, { parseMetadata: false });
+	}
+
+	throw new SearchProviderError("parallel", "Parallel MCP search returned an unexpected response shape.");
+}
+
 async function searchWithAuthStorage(
 	objective: string,
 	queries: string[],
@@ -80,9 +167,7 @@ async function searchWithAuthStorage(
 ): Promise<ParallelSearchResult> {
 	const apiKey = await authStorage.getApiKey("parallel", sessionId, { signal: params.signal });
 	if (!apiKey) {
-		throw new ParallelApiError(
-			"Parallel credentials not found. Set PARALLEL_API_KEY or login with 'omp /login parallel'.",
-		);
+		return searchWithPublicMcp(objective, queries, params);
 	}
 
 	// Drive the (already-present) credential through the central force-refresh /
@@ -180,6 +265,10 @@ export class ParallelProvider extends SearchProvider {
 
 	isAvailable(authStorage: AuthStorage) {
 		return !!getEnvApiKey("parallel") || authStorage.hasAuth("parallel");
+	}
+
+	override isExplicitlyAvailable(_authStorage: AuthStorage): boolean {
+		return true;
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {
