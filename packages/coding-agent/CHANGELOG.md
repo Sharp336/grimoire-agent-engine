@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added immutable host-owned selected-agent provenance, bound to the selected definition's origin, canonical location, and exact parser input, to discovered definitions, persisted subagent revivals, lifecycle events, and `SingleResult`, plus extension APIs for resolving the authoritative winning definition and identifying the current manifest package without consumer path heuristics.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added

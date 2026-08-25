@@ -20,13 +20,17 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
+import { getConfigAgentDirName, logger } from "@oh-my-pi/pi-utils";
 import { isProviderEnabled } from "../capability";
-import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
+import { findAllNearestProjectConfigDirs } from "../config";
 import { listClaudePluginRoots } from "../discovery/helpers";
 import { listOmpExtensionRoots } from "../discovery/omp-extension-roots";
+import {
+	createAgentDefinitionIdentityFromOrigin,
+	createAgentDefinitionOriginIdentity,
+} from "./agent-definition-identity";
 import { loadBundledAgents, parseAgent } from "./agents";
-import type { AgentDefinition, AgentSource } from "./types";
+import type { AgentDefinition, AgentDefinitionIdentity, AgentDefinitionOriginKind, AgentSource } from "./types";
 
 const TASK_AGENT_CONFIG_SOURCE = ".omp";
 
@@ -39,21 +43,42 @@ export interface DiscoveryResult {
 /**
  * Load agents from a directory.
  */
-async function loadAgentsFromDir(dir: string, source: AgentSource): Promise<AgentDefinition[]> {
+interface AgentDirectory {
+	dir: string;
+	source: AgentSource;
+	originKind: AgentDefinitionOriginKind;
+	originRoot: string;
+}
+
+async function loadAgentsFromDir(directory: AgentDirectory): Promise<AgentDefinition[]> {
+	const { dir, source, originKind, originRoot } = directory;
 	const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
-	const files = entries
+	const agentFiles = entries
 		.filter(entry => (entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".md"))
-		.sort((a, b) => a.name.localeCompare(b.name))
-		.map(file => {
-			const filePath = path.join(dir, file.name);
-			return fs
-				.readFile(filePath, "utf-8")
-				.then(content => parseAgent(filePath, content, source, "warn"))
-				.catch(error => {
-					logger.warn("Failed to read agent file", { filePath, error });
-					return null;
-				});
-		});
+		.sort((a, b) => a.name.localeCompare(b.name));
+	if (agentFiles.length === 0) return [];
+
+	const origin = await createAgentDefinitionOriginIdentity(originKind, originRoot).catch(error => {
+		for (const file of agentFiles) {
+			logger.warn("Failed to read agent file", { filePath: path.join(dir, file.name), error });
+		}
+		return null;
+	});
+	if (!origin) return [];
+
+	const files = agentFiles.map(file => {
+		const filePath = path.join(dir, file.name);
+		return fs
+			.readFile(filePath, "utf-8")
+			.then(async content => {
+				const identity = await createAgentDefinitionIdentityFromOrigin(origin, filePath, content);
+				return parseAgent(filePath, content, source, "warn", identity);
+			})
+			.catch(error => {
+				logger.warn("Failed to read agent file", { filePath, error });
+				return null;
+			});
+	});
 
 	return (await Promise.all(files)).filter(Boolean) as AgentDefinition[];
 }
@@ -70,12 +95,13 @@ async function loadAgentsFromDir(dir: string, source: AgentSource): Promise<Agen
 export async function discoverAgents(cwd: string, home: string = os.homedir()): Promise<DiscoveryResult> {
 	const resolvedCwd = path.resolve(cwd);
 
-	const userDirs = getConfigDirs("agents", { project: false })
-		.filter(entry => entry.source === TASK_AGENT_CONFIG_SOURCE)
-		.map(entry => ({
-			...entry,
-			path: path.resolve(entry.path),
-		}));
+	const userDirs = [
+		{
+			path: path.resolve(home, getConfigAgentDirName(), "agents"),
+			source: TASK_AGENT_CONFIG_SOURCE,
+			level: "user" as const,
+		},
+	];
 
 	const projectDirs = findAllNearestProjectConfigDirs("agents", resolvedCwd)
 		.filter(entry => entry.source === TASK_AGENT_CONFIG_SOURCE)
@@ -84,11 +110,19 @@ export async function discoverAgents(cwd: string, home: string = os.homedir()): 
 			path: path.resolve(entry.path),
 		}));
 
-	const orderedDirs: Array<{ dir: string; source: AgentSource }> = [];
+	const orderedDirs: AgentDirectory[] = [];
 	const project = projectDirs[0];
-	if (project) orderedDirs.push({ dir: project.path, source: "project" });
+	if (project) {
+		orderedDirs.push({
+			dir: project.path,
+			source: "project",
+			originKind: "project",
+			originRoot: path.dirname(project.path),
+		});
+	}
 	const user = userDirs[0];
-	if (user) orderedDirs.push({ dir: user.path, source: "user" });
+	if (user)
+		orderedDirs.push({ dir: user.path, source: "user", originKind: "user", originRoot: path.dirname(user.path) });
 
 	// OMP extension-package agents/ dirs. `listOmpExtensionRoots` returns roots in
 	// source-precedence order (CLI > project `extensions:` settings > user
@@ -101,7 +135,12 @@ export async function discoverAgents(cwd: string, home: string = os.homedir()): 
 		? await listOmpExtensionRoots({ cwd: resolvedCwd, home, repoRoot: null })
 		: [];
 	for (const root of extensionRoots) {
-		orderedDirs.push({ dir: path.join(root.path, "agents"), source: root.level });
+		orderedDirs.push({
+			dir: path.join(root.path, "agents"),
+			source: root.level,
+			originKind: "extension",
+			originRoot: root.path,
+		});
 	}
 
 	// Load agents from Claude Code marketplace plugins (respects disabledProviders)
@@ -114,17 +153,20 @@ export async function discoverAgents(cwd: string, home: string = os.homedir()): 
 	});
 	for (const plugin of sortedPluginRoots) {
 		const agentsDir = path.join(plugin.path, "agents");
-		orderedDirs.push({ dir: agentsDir, source: plugin.scope === "project" ? "project" : "user" });
+		orderedDirs.push({
+			dir: agentsDir,
+			source: plugin.scope === "project" ? "project" : "user",
+			originKind: "claude-marketplace",
+			originRoot: plugin.path,
+		});
 	}
 
 	const seen = new Set<string>();
-	const loadedAgents = (await Promise.all(orderedDirs.map(({ dir, source }) => loadAgentsFromDir(dir, source))))
-		.flat()
-		.filter(agent => {
-			if (seen.has(agent.name)) return false;
-			seen.add(agent.name);
-			return true;
-		});
+	const loadedAgents = (await Promise.all(orderedDirs.map(loadAgentsFromDir))).flat().filter(agent => {
+		if (seen.has(agent.name)) return false;
+		seen.add(agent.name);
+		return true;
+	});
 
 	const bundledAgents = loadBundledAgents().filter(agent => {
 		if (seen.has(agent.name)) return false;
@@ -142,4 +184,27 @@ export async function discoverAgents(cwd: string, home: string = os.homedir()): 
  */
 export function getAgent(agents: AgentDefinition[], name: string): AgentDefinition | undefined {
 	return agents.find(a => a.name === name);
+}
+
+/** Resolve the exact winning definition identity through authoritative host discovery and precedence. */
+export async function resolveAgentDefinitionIdentity(
+	cwd: string,
+	name: string,
+	home: string = os.homedir(),
+): Promise<AgentDefinitionIdentity | undefined> {
+	return (await resolveAgentDefinitionIdentities(cwd, [name], home))[name];
+}
+
+/** Resolve multiple winning identities through one authoritative discovery snapshot. */
+export async function resolveAgentDefinitionIdentities(
+	cwd: string,
+	names: readonly string[],
+	home: string = os.homedir(),
+): Promise<Readonly<Record<string, AgentDefinitionIdentity>>> {
+	const requested = new Set(names);
+	const identities = Object.create(null) as Record<string, AgentDefinitionIdentity>;
+	for (const agent of (await discoverAgents(cwd, home)).agents) {
+		if (requested.has(agent.name) && agent.identity) identities[agent.name] = agent.identity;
+	}
+	return Object.freeze(identities);
 }
