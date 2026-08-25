@@ -19,6 +19,7 @@ import {
 	cerebrasModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
 	coreWeaveModelManagerOptions,
+	deepinfraModelManagerOptions,
 	deepseekModelManagerOptions,
 	firepassModelManagerOptions,
 	fireworksModelManagerOptions,
@@ -149,6 +150,14 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["CURSOR_ACCESS_TOKEN"],
 		createModelManagerOptions: (config: ModelManagerConfig) => cursorModelManagerOptions(config),
 		catalogDiscovery: { label: "Cursor", envVars: ["CURSOR_API_KEY"], oauthProvider: "cursor" },
+	},
+	{
+		id: "deepinfra",
+		defaultModel: "deepseek-ai/DeepSeek-V4-Flash-0731",
+		envVars: ["DEEPINFRA_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => deepinfraModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "DeepInfra", allowUnauthenticated: true },
 	},
 	{
 		id: "deepseek",
@@ -413,7 +422,7 @@ export const CATALOG_PROVIDERS = [
 	},
 	{
 		id: "synthetic",
-		defaultModel: "hf:zai-org/GLM-5.1",
+		defaultModel: "hf:zai-org/GLM-5.2",
 		envVars: ["SYNTHETIC_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => syntheticModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
