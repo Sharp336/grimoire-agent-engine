@@ -261,6 +261,7 @@ import {
 	semanticToolResult,
 } from "./checkpoint-entries";
 import type { ClientBridge } from "./client-bridge";
+import { formatCodeModeToolReference } from "./code-mode";
 import {
 	type CodexAutoRedeemCoordinator,
 	type CodexResetAction,
@@ -4645,6 +4646,18 @@ export class AgentSession {
 		return this.#tools.getActiveToolNames();
 	}
 
+	/** Formats a model-facing reference for a registered session tool. */
+	getToolReference(name: string): string {
+		const direct = this.getActiveToolNames().includes(name);
+		if (!direct && this.getMountedXdevToolNames().includes(name)) return name;
+		const tool = this.#tools.registry.get(name);
+		return formatCodeModeToolReference({
+			name,
+			wireName: tool?.customWireName,
+			direct,
+		});
+	}
+
 	/** Enabled top-level and discoverable tool names. */
 	getEnabledToolNames(): string[] {
 		return this.#tools.getEnabledToolNames();
@@ -5361,12 +5374,25 @@ export class AgentSession {
 		// Capability gates, not the visible surface: a Code Mode partition keeps
 		// `task` and `ask` callable through the eval bridge after demoting them.
 		const capableToolNames = this.getEnabledToolNames();
+		const directToolNames = new Set(this.getActiveToolNames());
+		const planToolNames = ["ask", "write", "edit", "glob", "grep", "read", "task"] as const;
+		const toolRefs: Record<string, string> = Object.fromEntries(
+			planToolNames.map(name => {
+				const tool = this.#tools.registry.get(name);
+				return [
+					name,
+					formatCodeModeToolReference({
+						name,
+						wireName: tool?.customWireName,
+						direct: directToolNames.has(name),
+					}),
+				];
+			}),
+		);
 		const content = prompt.render(planModeActivePrompt, {
 			planFilePath: displayPlanPath,
 			planExists,
-			askToolName: "ask",
-			writeToolName: "write",
-			editToolName: "edit",
+			toolRefs,
 			askAvailable: capableToolNames.includes("ask"),
 			taskAvailable: capableToolNames.includes("task"),
 			isHashlineEditMode: this.#resolveActiveEditMode() === "hashline",
@@ -5401,11 +5427,27 @@ export class AgentSession {
 
 	#buildVibeModeMessage(): CustomMessage | null {
 		if (!this.#vibeModeState?.enabled) return null;
+		const directToolNames = new Set(this.getActiveToolNames());
+		const vibeToolNames = ["read", "todo", "vibe_spawn", "vibe_send", "vibe_wait", "vibe_kill", "vibe_list"];
+		const toolRefs = Object.fromEntries(
+			vibeToolNames.map(name => {
+				const tool = this.#tools.registry.get(name);
+				return [
+					name,
+					formatCodeModeToolReference({
+						name,
+						wireName: tool?.customWireName,
+						direct: directToolNames.has(name),
+					}),
+				];
+			}),
+		);
 		return {
 			role: "custom",
 			customType: "vibe-mode-context",
 			content: prompt.render(vibeModeActivePrompt, {
 				todoAvailable: this.getActiveToolNames().includes("todo"),
+				toolRefs,
 			}),
 			display: false,
 			attribution: "agent",
@@ -5493,10 +5535,26 @@ export class AgentSession {
 			// The contract is entirely about `task` subagent dispatch; without the
 			// task tool the notice would demand an unavailable capability.
 			if (enabledToolNames.includes("task")) {
+				const activeToolNames = new Set(this.getActiveToolNames());
+				const mountedXdevToolNames = new Set(this.getMountedXdevToolNames());
+				const toolRefs = Object.fromEntries(
+					enabledToolNames.map(name => {
+						const tool = this.#tools.registry.get(name);
+						const reference =
+							mountedXdevToolNames.has(name) && !tool
+								? name
+								: formatCodeModeToolReference({
+										name,
+										wireName: tool?.customWireName,
+										direct: activeToolNames.has(name),
+									});
+						return [name, reference] as const;
+					}),
+				);
 				keywordNotices.push({
 					role: "custom",
 					customType: "orchestrate-notice",
-					content: renderOrchestrateNotice({ tools: enabledToolNames }),
+					content: renderOrchestrateNotice({ tools: enabledToolNames, toolRefs }),
 					display: false,
 					attribution: "user",
 					timestamp,
@@ -5569,7 +5627,9 @@ export class AgentSession {
 			// Try file-based slash commands (markdown files from commands/ directories)
 			// Only if text still starts with "/" (wasn't transformed by custom command)
 			if (text.startsWith("/")) {
-				text = expandSlashCommand(text, this.#slashCommands);
+				text = expandSlashCommand(text, this.#slashCommands, {
+					toolRefs: { task: this.getToolReference("task") },
+				});
 			}
 		}
 
@@ -6133,6 +6193,7 @@ export class AgentSession {
 		const ctx = {
 			...baseCtx,
 			hasQueuedMessages: baseCtx.hasPendingMessages,
+			getToolReference: (name: string) => this.getToolReference(name),
 		} as unknown as HookCommandContext;
 
 		try {

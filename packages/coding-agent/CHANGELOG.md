@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Codex GPT-5.6 `code_mode_only` models now default to catalog-driven Code Mode; set `providers.openai-codex.codeMode: off` to retain the full direct tool surface.
+
+### Fixed
+
+- Fixed Code Mode and bundled workflow prompts advertising bridge-only tools as direct provider calls across system, Plan, Goal, Vibe, orchestration, review, init, autoresearch, and security validation flows.
+- Fixed ACP Plan Mode tool reconciliation by restoring the pre-plan enabled selection after approval.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added
