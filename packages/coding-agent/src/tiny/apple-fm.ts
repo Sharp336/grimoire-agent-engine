@@ -62,16 +62,20 @@ export function resolveBundledSidecarPath(assetPath: string, moduleDir: string =
 	return path.resolve(moduleDir, assetPath);
 }
 
-function bundledSidecarPath(): string | undefined {
+async function bundledSidecarPath(): Promise<string | undefined> {
 	const bundled = BUNDLED_SIDECARS[swiftTargetTriple()];
 	if (!bundled || bundled.identity !== cacheIdentity()) return undefined;
 	const file = resolveBundledSidecarPath(bundled.file);
-	return fs.existsSync(file) ? file : undefined;
+	return (await Bun.file(file).exists()) ? file : undefined;
 }
 
-function publishSidecar(srcPath: string, destPath: string): void {
+async function publishSidecar(srcPath: string, destPath: string): Promise<void> {
 	const tmpPath = `${destPath}.${process.pid}.copy`;
-	fs.copyFileSync(srcPath, tmpPath);
+	const bytes = Buffer.from(await Bun.file(srcPath).arrayBuffer());
+	if (bytes.byteLength === 0) {
+		throw new Error(`bundled AFM sidecar is empty: ${srcPath}`);
+	}
+	fs.writeFileSync(tmpPath, bytes);
 	fs.chmodSync(tmpPath, 0o755);
 	fs.renameSync(tmpPath, destPath);
 }
@@ -124,11 +128,11 @@ export async function ensureAfmSidecar(): Promise<string> {
 		binPath,
 		async () => {
 			if (fs.existsSync(binPath) && fs.existsSync(stampPath)) return binPath;
-			const bundled = bundledSidecarPath();
+			const bundled = await bundledSidecarPath();
 			const tmpPath = path.join(dir, `omp-apple-fm.${process.pid}.${hash}.tmp`);
 			try {
 				if (bundled) {
-					publishSidecar(bundled, binPath);
+					await publishSidecar(bundled, binPath);
 				} else {
 					fs.writeFileSync(srcPath, sidecarSource);
 					compileSidecar(srcPath, tmpPath);
