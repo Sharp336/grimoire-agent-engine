@@ -170,10 +170,17 @@ export type CacheKeepaliveBound =
 	| {
 			kind: "candidates";
 			/**
-			 * Ordered property paths into the captured body. The first path ALREADY PRESENT
-			 * is overwritten; a body carrying none of them arms nothing, because introducing
-			 * a limit the original request never sent makes the replay a different request
-			 * rather than a bounded one.
+			 * Every property path that counts as this api's output limit — a set of accepted
+			 * spellings, not a priority list. Exactly one of them may be declared in the
+			 * captured body: that one is overwritten.
+			 *
+			 * A body declaring none arms nothing, because introducing a limit the original
+			 * request never sent makes the replay a different request rather than a bounded
+			 * one. A body declaring TWO also arms nothing: the untouched field may be the cap
+			 * the provider actually honors, so bounding one and shipping it would let a touch
+			 * verify as a cache hit while having generated a whole completion. Which alias
+			 * wins is the provider's business, so ambiguity declines rather than guesses, and
+			 * order here therefore decides nothing.
 			 *
 			 * More than one entry means the provider picks between spellings per model:
 			 * `openai-completions` sends `max_tokens` or `max_completion_tokens`
@@ -187,7 +194,7 @@ export type CacheKeepaliveBound =
 			/**
 			 * Wire format unknown — a custom api registered through `registerCustomApi`.
 			 * Nothing here may guess a path for a format it has never seen, so the field is
-			 * discovered from the payload against `stream.ts`'s documented priority list.
+			 * discovered from the payload, under the same exactly-one rule.
 			 */
 			kind: "discover";
 	  };
@@ -279,8 +286,9 @@ const API_KEEPALIVE: Readonly<Record<KnownApi, ApiKeepaliveEntry | null>> = {
 	"openai-completions": { bound: candidates(["max_tokens"], ["max_completion_tokens"]) },
 	"openai-responses": { bound: candidates(["max_output_tokens"]) },
 	"azure-openai-responses": { bound: candidates(["max_output_tokens"]) },
-	// Either wire format, decided per process by `PI_OPENROUTER_RESPONSES`; the
-	// first-present rule picks whichever one the captured body actually used.
+	// Either wire format, decided per process by `PI_OPENROUTER_RESPONSES`, so all three
+	// spellings are accepted — a given body declares exactly one of them, and a body
+	// carrying more than one is ambiguous and gets no touch.
 	openrouter: { bound: candidates(["max_output_tokens"], ["max_tokens"], ["max_completion_tokens"]) },
 	// EXCLUDED: the Codex backend refuses caller-supplied output caps, and the request
 	// transformer deletes both `max_output_tokens` and `max_completion_tokens` before the
@@ -352,14 +360,17 @@ export function resolveCacheKeepaliveShape(
 }
 
 /**
- * Output-limit fields scanned for `bound.kind === "discover"`, in priority order.
+ * Every output-limit field recognized when `bound.kind === "discover"`.
  *
  * Only reached for an api registered through `registerCustomApi`, whose wire format
  * nothing in this repo has seen. Every entry is a field this repo builds for some known
  * api, plus the raw Gemini REST spelling (`generationConfig.maxOutputTokens`) that a
  * custom api speaking Google's HTTP format sends directly rather than through
- * `paramsToWireBody`. The first path actually present in the body is the one bounded; a
- * body carrying none of them arms nothing.
+ * `paramsToWireBody`.
+ *
+ * A set rather than a priority order: the body must declare exactly one of these to be
+ * bounded. None arms nothing, and so does more than one — an unknown format is the case
+ * where guessing which alias the server honors is least defensible.
  */
 const DISCOVERABLE_OUTPUT_LIMIT_PATHS: readonly (readonly string[])[] = [
 	["max_tokens"],

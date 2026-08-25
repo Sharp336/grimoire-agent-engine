@@ -101,8 +101,8 @@ describe("keepalive shape per api, with a policy supplied", () => {
 	});
 
 	it("accepts either OpenAI completions spelling", () => {
-		// The provider picks per model, so both spellings are candidates and the
-		// first-present rule resolves it against the captured body.
+		// The provider picks per model, so both spellings are accepted; a given body declares
+		// exactly one of them, and one declaring both is ambiguous and declines.
 		expect(boundedPaths(shapeWithPolicy(modelFor("openai-completions")))).toEqual([
 			["max_tokens"],
 			["max_completion_tokens"],
@@ -249,10 +249,12 @@ describe("bounding a captured payload", () => {
 		expect(bounded("openrouter", { max_output_tokens: 256 })).toEqual({ max_output_tokens: 1 });
 	});
 
-	it("picks whichever candidate spelling the body actually used", () => {
+	it("bounds the one spelling the body declared, whichever of the accepted set it is", () => {
+		// Not an ordering rule: the accepted paths are a set, and the body's single
+		// declaration is what gets bounded regardless of where it sits in that set.
 		expect(bounded("openai-completions", { max_completion_tokens: 900 })).toEqual({ max_completion_tokens: 1 });
-		// OpenRouter's order prefers the Responses spelling, but a Completions body has
-		// only the other one.
+		// `max_tokens` is listed second for OpenRouter and first for completions, and both
+		// bodies bound correctly — so position genuinely carries no meaning.
 		expect(bounded("openrouter", { max_tokens: 900 })).toEqual({ max_tokens: 1 });
 	});
 
