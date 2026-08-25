@@ -31,7 +31,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import type { CacheOutcome, CacheRetention, TtlProfile } from "@oh-my-pi/pi-ai/cache";
 import { emptyTtlProfile, normalizeEndpoint, observeTtl, routeProfileKey } from "@oh-my-pi/pi-ai/cache";
 import { resolveCacheRetention } from "@oh-my-pi/pi-ai/utils";
-import { getStatsDbPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { getStatsDbPath, isEnoent, isRecord, logger, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 
 /** Which of the two observation sources produced a row. */
 export type CacheObservationKind = "request" | "touch";
@@ -281,11 +281,16 @@ export class CacheTelemetryStore {
 			text = boundary === -1 ? "" : text.slice(boundary + 1);
 		}
 
+		let malformed = 0;
 		const rows: CacheObservation[] = [];
-		for (const line of text.split("\n")) {
-			if (!line.trim()) continue;
-			const row = parseObservation(line);
+		// Framing is `parseJsonlLenient`'s job (it drives `Bun.JSONL.parseChunk` and skips
+		// torn or corrupt records); this loop only validates the parsed values.
+		for (const value of parseJsonlLenient<unknown>(text, { onMalformedRecord: () => (malformed += 1) })) {
+			const row = toObservation(value);
 			if (row !== undefined) rows.push(row);
+		}
+		if (malformed > 0) {
+			logger.debug("cache telemetry: skipped malformed journal records", { malformed });
 		}
 		this.#cache = { key, rows };
 		return rows;
@@ -308,21 +313,16 @@ const KNOWN_CACHE_OUTCOMES: Record<CacheOutcome, true> = {
 const OBSERVATION_COUNTERS = ["cacheRead", "cacheWrite", "inputTokens", "costUsd"] as const;
 
 /**
- * Parse one line, or `undefined` when it cannot be trusted.
+ * Validate one already-parsed record, or `undefined` when it cannot be trusted.
  *
- * Both a torn final line (the process died mid-append) and a corrupted line fail
- * `JSON.parse`, but a line can also parse and still be unusable — a row missing its
- * outcome would fold into a profile as garbage. Every field the fold reads is
- * therefore checked, and a row that fails any check is skipped rather than repaired.
+ * Framing failures — a torn final line from a process that died mid-append, or a
+ * corrupted record — are handled upstream by `parseJsonlLenient`. A record can still
+ * parse cleanly and be unusable, though: a row missing its outcome would fold into a
+ * profile as garbage. Every field the fold reads is therefore checked here, and a row
+ * that fails any check is skipped rather than repaired.
  */
-function parseObservation(line: string): CacheObservation | undefined {
-	let value: unknown;
-	try {
-		value = JSON.parse(line);
-	} catch {
-		return undefined;
-	}
-	if (typeof value !== "object" || value === null) return undefined;
+function toObservation(value: unknown): CacheObservation | undefined {
+	if (!isRecord(value)) return undefined;
 	const row = value as Partial<CacheObservation>;
 	if (typeof row.at !== "number" || !Number.isFinite(row.at)) return undefined;
 	if (row.kind !== "request" && row.kind !== "touch") return undefined;
