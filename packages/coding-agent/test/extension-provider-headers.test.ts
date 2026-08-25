@@ -132,10 +132,12 @@ describe("wrapStreamFnWithProviderHeaders", () => {
 	it("runs handlers once when the inner transport retries before emitting content", async () => {
 		const { runner, seen } = fakeRunner(true);
 		const { base, calls } = recordingBase();
-		const retryOnce = (inner: StreamFn): StreamFn => async (model, context, options) => {
-			await inner(model, context, options);
-			return inner(model, context, options);
-		};
+		const retryOnce =
+			(inner: StreamFn): StreamFn =>
+			async (model, context, options) => {
+				await inner(model, context, options);
+				return inner(model, context, options);
+			};
 
 		await wrapStreamFnWithProviderHeaders(runner, retryOnce(base))(model, context, { headers: { "x-a": "1" } });
 
