@@ -408,6 +408,54 @@ describe("hub list", () => {
 		expect(promptRoster).not.toContain("SecondWorker");
 	});
 
+	it("climbs more than nine nested session levels to count a parked top-level sibling", async () => {
+		using tempDir = TempDir.createSync("@omp-hub-list-deep-nest-");
+		const dir = tempDir.path();
+		const sessionFile = path.join(dir, "main.jsonl");
+		await Bun.write(sessionFile, `${sessionHeader("main")}\n`);
+		await writeParkedTranscript(path.join(dir, "main", "ParkedScout.jsonl"), "parked", "reviewing classified.diff");
+
+		let nestedDir = path.join(dir, "main");
+		let deepSessionFile = sessionFile;
+		for (let level = 1; level <= 10; level++) {
+			deepSessionFile = path.join(nestedDir, `L${level}.jsonl`);
+			await Bun.write(deepSessionFile, `${sessionHeader(`L${level}`)}\n`);
+			nestedDir = path.join(nestedDir, `L${level}`);
+		}
+
+		const registry = new AgentRegistry();
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: MAIN_AGENT_ID,
+			kind: "main",
+			session: null,
+			sessionFile,
+			status: "running",
+		});
+		registry.register({
+			id: "DeepChild",
+			displayName: "task",
+			kind: "sub",
+			parentId: "L9",
+			session: null,
+			sessionFile: deepSessionFile,
+			status: "idle",
+		});
+
+		const listed = await executeList(registry, "DeepChild");
+		if (!listed.details) throw new Error("Expected coordination details");
+		expect(listed.details.counts?.parked).toBe(1);
+		expect(listed.details.peers?.map(peer => peer.id)).toEqual([MAIN_AGENT_ID]);
+		expect(listText(listed)).not.toContain("ParkedScout");
+		expect(registry.get("ParkedScout")?.status).toBe("parked");
+
+		const roster = await renderIrcPeerRoster("DeepChild", registry, deepSessionFile);
+		expect(roster).toContain("1 parked peer(s) omitted");
+		expect(roster).toContain("`Main`");
+		expect(roster).not.toContain("ParkedScout");
+		expect(roster).not.toContain("reviewing classified.diff");
+	});
+
 	it("counts a disk-only parked sibling when a live sibling is already in memory", async () => {
 		using tempDir = TempDir.createSync("@omp-hub-list-live-disk-");
 		const dir = tempDir.path();

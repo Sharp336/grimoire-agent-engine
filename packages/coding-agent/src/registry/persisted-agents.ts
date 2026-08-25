@@ -337,12 +337,11 @@ async function resolveRootSessionFile(registry: AgentRegistry, hint?: string | n
 				})();
 	if (candidate === undefined) return undefined;
 	let current = path.resolve(candidate);
-	for (let depth = 0; depth < 8; depth++) {
+	for (;;) {
 		const parentFile = `${path.dirname(current)}.jsonl`;
-		if (!(await Bun.file(parentFile).exists())) return current;
+		if (parentFile === current || !(await Bun.file(parentFile).exists())) return current;
 		current = parentFile;
 	}
-	return current;
 }
 
 function rosterScanError(error: unknown): string {
