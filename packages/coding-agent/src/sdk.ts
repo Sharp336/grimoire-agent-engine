@@ -2579,7 +2579,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						.then(async () => {
 							if (model || hasExplicitModel) return undefined;
 							const resolved = await tryResolveDefaultRole();
-							if (resolved) return { model: model!, thinkingLevel };
+							const resolvedModel = model;
+							model = undefined;
+							if (resolved) return { model: resolvedModel!, thinkingLevel };
 							const refreshedCandidates = await resolveAllowedModels(
 								modelRegistry,
 								settings,
