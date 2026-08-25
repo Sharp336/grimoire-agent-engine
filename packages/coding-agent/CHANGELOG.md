@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Corrected `checkpoint` and `rewind` in Codex Code Mode. Sessions can rewind and yield normally.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added
