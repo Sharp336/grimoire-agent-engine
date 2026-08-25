@@ -1,26 +1,18 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
-import { normalizePathForComparison, removeWithRetries } from "@oh-my-pi/pi-utils";
-import { $ } from "bun";
+import { normalizePathForComparison, TempDir } from "@oh-my-pi/pi-utils";
 import {
 	bindProfileToFolder,
 	listProfileBindings,
 	resolveProfileBinding,
 	unbindProfileFromFolder,
 } from "../src/cli/profile-bindings";
+import * as git from "../src/utils/git";
 
 const repoRoot = path.resolve(import.meta.dir, "..", "..", "..");
 const cliEntry = path.join(repoRoot, "packages", "coding-agent", "src", "cli.ts");
-const tempRoots: string[] = [];
-
-async function makeTempRoot(): Promise<string> {
-	const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-profile-bindings-"));
-	tempRoots.push(root);
-	return root;
-}
 
 async function readStream(stream: ReadableStream<Uint8Array>): Promise<string> {
 	return new Response(stream).text();
@@ -51,13 +43,10 @@ async function runCliCommand(
 	return { stdout, stderr };
 }
 
-afterEach(async () => {
-	await Promise.all(tempRoots.splice(0).map(root => removeWithRetries(root)));
-});
-
 describe("folder profile bindings", () => {
 	it("selects the bound profile from a nested directory and removes it through the same public commands", async () => {
-		const root = await makeTempRoot();
+		using tempDir = TempDir.createSync("@omp-profile-bindings-");
+		const root = tempDir.path();
 		const folder = path.join(root, "workspace");
 		const nested = path.join(folder, "packages", "api");
 		const bindingsPath = path.join(root, "config", "profile-bindings.json");
@@ -75,7 +64,8 @@ describe("folder profile bindings", () => {
 	});
 
 	it("uses one binding for a repository and its linked worktrees", async () => {
-		const root = await makeTempRoot();
+		using tempDir = TempDir.createSync("@omp-profile-bindings-");
+		const root = tempDir.path();
 		const repository = path.join(root, "repository");
 		const worktree = path.join(root, "linked-worktree");
 		const bindingsPath = path.join(root, "config", "profile-bindings.json");
@@ -85,12 +75,12 @@ describe("folder profile bindings", () => {
 		await fs.mkdir(siblingFolder, { recursive: true });
 		await Bun.write(path.join(boundFolder, "README.md"), "work\n");
 		await Bun.write(path.join(siblingFolder, "README.md"), "personal\n");
-		await $`git init -q ${repository}`.quiet();
-		await $`git -C ${repository} config user.email test@example.com`.quiet();
-		await $`git -C ${repository} config user.name Test`.quiet();
-		await $`git -C ${repository} add .`.quiet();
-		await $`git -C ${repository} commit -qm initial`.quiet();
-		await $`git -C ${repository} worktree add -q ${worktree}`.quiet();
+		await git.init(repository, { initialBranch: "main" });
+		await git.config.set(repository, "user.email", "test@example.com");
+		await git.config.set(repository, "user.name", "Test");
+		await git.stage.files(repository);
+		await git.commit(repository, "initial");
+		await git.worktree.add(repository, worktree, "HEAD", { detach: true });
 
 		const binding = await bindProfileToFolder("default", boundFolder, bindingsPath);
 		const resolved = await resolveProfileBinding(path.join(worktree, "packages", "work"), bindingsPath);
@@ -102,21 +92,23 @@ describe("folder profile bindings", () => {
 	});
 
 	it("inherits an outer repository binding inside a nested repository", async () => {
-		const root = await makeTempRoot();
+		using tempDir = TempDir.createSync("@omp-profile-bindings-");
+		const root = tempDir.path();
 		const outer = path.join(root, "outer");
 		const inner = path.join(outer, "packages", "inner");
 		const bindingsPath = path.join(root, "config", "profile-bindings.json");
 		await fs.mkdir(inner, { recursive: true });
-		await $`git init -q ${outer}`.quiet();
+		await git.init(outer, { initialBranch: "main" });
 		const binding = await bindProfileToFolder("default", outer, bindingsPath);
-		await $`git init -q ${inner}`.quiet();
+		await git.init(inner, { initialBranch: "main" });
 
 		expect((await resolveProfileBinding(inner, bindingsPath))?.binding).toEqual(binding);
 	});
 
 	it("binds a symlinked external folder without widening to the containing repository", async () => {
 		if (process.platform === "win32") return;
-		const root = await makeTempRoot();
+		using tempDir = TempDir.createSync("@omp-profile-bindings-");
+		const root = tempDir.path();
 		const repository = path.join(root, "repository");
 		const external = path.join(root, "external");
 		const link = path.join(repository, "external-link");
@@ -124,7 +116,7 @@ describe("folder profile bindings", () => {
 		const bindingsPath = path.join(root, "config", "profile-bindings.json");
 		await fs.mkdir(external, { recursive: true });
 		await fs.mkdir(sibling, { recursive: true });
-		await $`git init -q ${repository}`.quiet();
+		await git.init(repository, { initialBranch: "main" });
 		await fs.symlink(external, link, "dir");
 
 		const binding = await bindProfileToFolder("default", link, bindingsPath);
@@ -133,7 +125,8 @@ describe("folder profile bindings", () => {
 	});
 
 	it("fails clearly when the bindings file is malformed", async () => {
-		const root = await makeTempRoot();
+		using tempDir = TempDir.createSync("@omp-profile-bindings-");
+		const root = tempDir.path();
 		const bindingsPath = path.join(root, "profile-bindings.json");
 		await Bun.write(bindingsPath, "not-json");
 
@@ -143,7 +136,8 @@ describe("folder profile bindings", () => {
 	it.each(["../outside", "..\\outside", "nested/../../outside"])(
 		"rejects a Git binding subpath that escapes its checkout: %s",
 		async subpath => {
-			const root = await makeTempRoot();
+			using tempDir = TempDir.createSync("@omp-profile-bindings-");
+			const root = tempDir.path();
 			const bindingsPath = path.join(root, "profile-bindings.json");
 			await Bun.write(
 				bindingsPath,
@@ -160,13 +154,14 @@ describe("folder profile bindings", () => {
 
 describe("profile binding commands", () => {
 	it("binds, shows, lists, and removes a folder through the CLI", async () => {
-		const root = await makeTempRoot();
+		using tempDir = TempDir.createSync("@omp-profile-bindings-");
+		const root = tempDir.path();
 		const home = path.join(root, "home");
 		const repository = path.join(root, "repository");
 		await fs.mkdir(path.join(home, ".omp", "profiles", "work", "agent"), { recursive: true });
 		await fs.mkdir(path.join(home, ".omp", "profiles", "personal", "agent"), { recursive: true });
 		await fs.mkdir(repository, { recursive: true });
-		await $`git init -q ${repository}`.quiet();
+		await git.init(repository, { initialBranch: "main" });
 
 		await runCliCommand(["profile", "bind", "work", repository], home, root);
 		const shown = await runCliCommand(["profile", "show", repository, "--json"], home, root);
@@ -195,14 +190,16 @@ describe("profile binding commands", () => {
 	}, 30_000);
 
 	it("rejects positional arguments for profile list", async () => {
-		const root = await makeTempRoot();
+		using tempDir = TempDir.createSync("@omp-profile-bindings-");
+		const root = tempDir.path();
 		await expect(runCliCommand(["profile", "list", "unexpected"], path.join(root, "home"), root)).rejects.toThrow(
 			"Too many arguments for omp profile list",
 		);
 	});
 
 	it("does not use a folder binding to satisfy --alias", async () => {
-		const root = await makeTempRoot();
+		using tempDir = TempDir.createSync("@omp-profile-bindings-");
+		const root = tempDir.path();
 		const home = path.join(root, "home");
 		const bindingsPath = path.join(home, ".omp", "profile-bindings.json");
 		await fs.mkdir(path.dirname(bindingsPath), { recursive: true });
@@ -222,20 +219,23 @@ describe("profile binding commands", () => {
 
 describe("profile binding bootstrap", () => {
 	it("loads the profile bound to --cwd before profile-scoped environment imports", async () => {
-		const root = await makeTempRoot();
+		using tempDir = TempDir.createSync("@omp-profile-bindings-");
+		const root = tempDir.path();
 		const home = path.join(root, "home");
 		const repository = path.join(root, "repository");
 		const profileRoot = path.join(home, ".omp", "profiles", "work");
 		await fs.mkdir(repository, { recursive: true });
 		await fs.mkdir(path.join(home, ".omp", "agent"), { recursive: true });
 		await fs.mkdir(path.join(profileRoot, "agent"), { recursive: true });
-		await $`git init -q ${repository}`.quiet();
-		const commonDir = (await $`git -C ${repository} rev-parse --path-format=absolute --git-common-dir`.text()).trim();
+		await git.init(repository, { initialBranch: "main" });
+		const commonDir = await git.repo.commonDir(repository);
+		if (!commonDir) throw new Error("Git common directory not found");
+		const bindingPath = normalizePathForComparison(commonDir);
 		await Bun.write(
 			path.join(home, ".omp", "profile-bindings.json"),
 			JSON.stringify({
 				version: 1,
-				bindings: [{ kind: "git-common-dir", path: commonDir, profile: "work" }],
+				bindings: [{ kind: "git-common-dir", path: bindingPath, profile: "work" }],
 			}),
 		);
 		await Bun.write(path.join(home, ".omp", "agent", ".env"), "OMP_FOLDER_PROFILE_SENTINEL=default\n");
@@ -293,20 +293,21 @@ describe("profile binding bootstrap", () => {
 	])(
 		"preserves explicit default selection when a CLI process re-enters: $name",
 		async ({ parentArgs, env }) => {
-			const root = await makeTempRoot();
+			using tempDir = TempDir.createSync("@omp-profile-bindings-");
+			const root = tempDir.path();
 			const home = path.join(root, "home");
 			const repository = path.join(root, "repository");
 			const profileRoot = path.join(home, ".omp", "profiles", "work");
 			await fs.mkdir(repository, { recursive: true });
 			await fs.mkdir(path.join(home, ".omp", "agent"), { recursive: true });
 			await fs.mkdir(path.join(profileRoot, "agent"), { recursive: true });
-			await $`git init -q ${repository}`.quiet();
-			const commonDir = (
-				await $`git -C ${repository} rev-parse --path-format=absolute --git-common-dir`.text()
-			).trim();
+			await git.init(repository, { initialBranch: "main" });
+			const commonDir = await git.repo.commonDir(repository);
+			if (!commonDir) throw new Error("Git common directory not found");
+			const bindingPath = normalizePathForComparison(commonDir);
 			await Bun.write(
 				path.join(home, ".omp", "profile-bindings.json"),
-				JSON.stringify({ version: 1, bindings: [{ kind: "git-common-dir", path: commonDir, profile: "work" }] }),
+				JSON.stringify({ version: 1, bindings: [{ kind: "git-common-dir", path: bindingPath, profile: "work" }] }),
 			);
 			await Bun.write(path.join(home, ".omp", "agent", ".env"), "OMP_REENTRY_SENTINEL=default\n");
 			await Bun.write(path.join(profileRoot, "agent", ".env"), "OMP_REENTRY_SENTINEL=work\n");

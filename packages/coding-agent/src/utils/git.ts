@@ -103,6 +103,11 @@ export interface CommitDetails {
 	readonly sha: string;
 }
 
+export interface InitOptions {
+	readonly initialBranch?: string;
+	readonly signal?: AbortSignal;
+}
+
 export interface CommitOptions {
 	readonly allowEmpty?: boolean;
 	readonly amend?: boolean;
@@ -1303,6 +1308,17 @@ export const diff = Object.assign(
 );
 
 // ════════════════════════════════════════════════════════════════════════════
+// API: repository setup
+// ════════════════════════════════════════════════════════════════════════════
+
+/** Initialize a repository in an existing directory. */
+export async function init(cwd: string, options: InitOptions = {}): Promise<void> {
+	const args = ["init", "--quiet"];
+	if (options.initialBranch) args.push(`--initial-branch=${options.initialBranch}`);
+	await runEffect(cwd, args, { signal: options.signal });
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // API: status
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -2362,6 +2378,18 @@ export const head = {
 // ════════════════════════════════════════════════════════════════════════════
 
 export const repo = {
+	/** Resolve the repository common directory shared by linked worktrees. */
+	async commonDir(cwd: string, signal?: AbortSignal): Promise<string | null> {
+		const repository = await resolveRepository(cwd);
+		if (repository) return repository.commonDir;
+		const result = await git(cwd, ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
+			readOnly: true,
+			signal,
+		});
+		if (result.exitCode !== 0) return null;
+		return result.stdout.trim() || null;
+	},
+
 	/** Resolve the repository root (may be a worktree root). */
 	async root(cwd: string, signal?: AbortSignal): Promise<string | null> {
 		const repository = await resolveRepository(cwd);
