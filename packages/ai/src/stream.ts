@@ -1042,7 +1042,7 @@ function isRetryableThinkingLoop(message: AssistantMessage): boolean {
 	return (
 		message.stopReason === "error" &&
 		message.content.length === 0 &&
-		(AIError.is(message.errorId, AIError.Flag.ThinkingLoop) || AIError.is(message.errorId, AIError.Flag.Transient))
+		AIError.is(message.errorId, AIError.Flag.ThinkingLoop)
 	);
 }
 
