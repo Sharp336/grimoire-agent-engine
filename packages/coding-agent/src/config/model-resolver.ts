@@ -16,7 +16,7 @@
  */
 
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-ai";
+import { type Api, Effort, type KnownProvider, type Model, type ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
@@ -297,6 +297,43 @@ function cloneModelWithRequestedId(model: Model<Api>, requestedId: string): Mode
 	};
 }
 
+const OPENROUTER_PROVIDER = "openrouter";
+const OPENROUTER_PRESET_PREFIX = "@preset/";
+
+function isOpenRouterPresetModelId(modelId: string): boolean {
+	const trimmed = modelId.trim();
+	if (!trimmed.toLowerCase().startsWith(OPENROUTER_PRESET_PREFIX)) return false;
+	const slug = trimmed.slice(OPENROUTER_PRESET_PREFIX.length);
+	return slug.length > 0 && !slug.includes(":") && !slug.includes("@") && !slug.includes("/");
+}
+
+function resolveOpenRouterPresetModel(modelId: string, availableModels: readonly Model<Api>[]): Model<Api> | undefined {
+	const requestedId = modelId.trim();
+	if (!isOpenRouterPresetModelId(requestedId)) return undefined;
+
+	const template = availableModels.find(model => model.provider.toLowerCase() === OPENROUTER_PROVIDER);
+	if (!template) return undefined;
+
+	const presetId = `${OPENROUTER_PRESET_PREFIX}${requestedId.slice(OPENROUTER_PRESET_PREFIX.length)}`;
+	return buildModel({
+		id: presetId,
+		requestModelId: presetId,
+		name: presetId,
+		api: "openrouter",
+		provider: OPENROUTER_PROVIDER,
+		baseUrl: template.baseUrl,
+		reasoning: true,
+		thinking: {
+			mode: "budget",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+		},
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: null,
+		maxTokens: null,
+	} satisfies ModelSpec<"openrouter">);
+}
+
 const AMAZON_BEDROCK_PROVIDER = "amazon-bedrock";
 const BEDROCK_INFERENCE_PROFILE_ARN =
 	/^arn:aws(?:-[a-z]+)*:bedrock:[a-z0-9-]+:[0-9]*:(?:application-inference-profile|inference-profile)\/[a-z0-9][a-z0-9._:-]*$/i;
@@ -452,6 +489,9 @@ export function resolveProviderModelReference(
 			return cloneModelWithRequestedId(fallback, modelId);
 		}
 	}
+
+	const preset = resolveOpenRouterPresetModel(modelId, availableModels);
+	if (preset) return preset;
 
 	return undefined;
 }
@@ -637,6 +677,13 @@ function findExactModelReferenceMatch(modelReference: string, availableModels: M
 	const trimmedReference = modelReference.trim();
 	if (!trimmedReference) {
 		return undefined;
+	}
+
+	// A bare `@preset/{slug}` is an OpenRouter account-side preset reference
+	// (no provider prefix). Route it to the openrouter provider so the upstream
+	// routing base (`@preset/free` from `@preset/free@cerebras`) can re-resolve.
+	if (trimmedReference.toLowerCase().startsWith(OPENROUTER_PRESET_PREFIX)) {
+		return resolveProviderModelReference(OPENROUTER_PROVIDER, trimmedReference, availableModels);
 	}
 
 	const slashIndex = trimmedReference.indexOf("/");

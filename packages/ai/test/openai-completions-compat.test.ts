@@ -2344,6 +2344,18 @@ describe("applyOpenRouterRoutingVariant", () => {
 	it("appends the variant when the id has no slash separator", () => {
 		expect(applyOpenRouterRoutingVariant("opaque-id", "nitro")).toBe("opaque-id:nitro");
 	});
+
+	it("does not append routing variants to OpenRouter preset ids", () => {
+		expect(applyOpenRouterRoutingVariant("@preset/free", "nitro")).toBe("@preset/free");
+		expect(applyOpenRouterRoutingVariant("@preset/free", "floor")).toBe("@preset/free");
+		expect(applyOpenRouterRoutingVariant("@PRESET/free", "nitro")).toBe("@PRESET/free");
+		expect(applyOpenRouterRoutingVariant("openai/gpt-4@preset/email-copywriter", "exacto")).toBe(
+			"openai/gpt-4@preset/email-copywriter",
+		);
+		expect(applyOpenRouterRoutingVariant("anthropic/claude-haiku-latest", "nitro")).toBe(
+			"anthropic/claude-haiku-latest:nitro",
+		);
+	});
 });
 
 describe("anthropic cache control for OpenAI-compatible chat completions", () => {

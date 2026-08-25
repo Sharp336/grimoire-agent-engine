@@ -103,7 +103,7 @@ import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } fro
 import { reset as resetCapabilities } from "../capability";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
-import type { ResolvedModelRoleValue } from "../config/model-resolver";
+import { type ResolvedModelRoleValue, resolveProviderModelReference } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
@@ -8145,6 +8145,9 @@ export class AgentSession {
 					const provider = targetModelStr.slice(0, slashIdx);
 					const modelId = targetModelStr.slice(slashIdx + 1);
 					match = availableModels.find(m => m.provider === provider && m.id === modelId);
+					if (!match) {
+						match = resolveProviderModelReference(provider, modelId, availableModels);
+					}
 					if (match) break;
 				}
 				if (match) {
