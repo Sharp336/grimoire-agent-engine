@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Kept `checkpoint` and `rewind` on the direct tool surface under Codex Code Mode; routed through the eval bridge they were invisible to the session's checkpoint state machine, leaving sessions unable to rewind or yield.
+- Corrected `checkpoint` and `rewind` in Codex Code Mode. Sessions can rewind and yield normally.
 
 ## [18.0.5] - 2026-08-25
 

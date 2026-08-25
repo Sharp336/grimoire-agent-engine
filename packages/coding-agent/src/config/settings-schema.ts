@@ -618,7 +618,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Services",
 			label: "Codex Code Mode",
 			description:
-				"Route Codex code_mode_only models (GPT-5.6) through the eval tool as a programmatic execution surface: the direct tool surface collapses to eval/ask/todo and every other session tool is invoked from eval cells. Mirrors codex-rs Code Mode. 'auto' follows the model catalog flag.",
+				"Route Codex code_mode_only models (GPT-5.6) through eval. The direct tools are eval, ask, todo, checkpoint, and rewind. Use eval cells for other session tools. Mirrors codex-rs Code Mode. 'auto' follows the model catalog flag.",
 		},
 	},
 
@@ -630,7 +630,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Services",
 			label: "Codex Code Mode Direct Tools",
 			description:
-				"Extra tool names to keep directly callable alongside eval/ask/todo when Codex Code Mode is active.",
+				"Extra direct tools for Codex Code Mode. The standard direct tools are eval, ask, todo, checkpoint, and rewind.",
 		},
 	},
 
