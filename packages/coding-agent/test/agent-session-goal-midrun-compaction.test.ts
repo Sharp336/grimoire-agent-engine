@@ -543,7 +543,8 @@ describe("AgentSession mid-run threshold compaction", () => {
 		expect(providerOutcome).toBe("dispatched");
 		expect(promptOutcome).toBe("settled");
 		expect(compactSpy).toHaveBeenCalledTimes(1);
-		if (shakeSpy) expect(shakeSpy).toHaveBeenCalledTimes(1);
+		// Bounded at the conservative pass plus one escalated retry — not a loop.
+		if (shakeSpy) expect(shakeSpy).toHaveBeenCalledTimes(2);
 		expect(observedContexts[1].join("\n")).toContain("MID-RUN-COMPACTED-WITHOUT-WAITING-ON-LIFECYCLE");
 	});
 

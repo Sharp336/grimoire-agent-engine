@@ -25,6 +25,7 @@ import {
 	createCompactionSummaryMessage,
 	DEFAULT_SHAKE_CONFIG,
 	type CompactionSettings as EngineCompactionSettings,
+	ESCALATED_SHAKE_CONFIG,
 	effectiveReserveTokens,
 	invalidateMessageCache,
 	isTranscriptUsageAnchor,
@@ -3866,7 +3867,8 @@ export class SessionMaintenance {
 				);
 				return COMPACTION_CHECK_NONE;
 			}
-			const reclaimed = result.toolResultsDropped + result.blocksDropped > 0;
+			let reclaimed = result.toolResultsDropped + result.blocksDropped > 0;
+			let tokensFreed = result.tokensFreed;
 			// Detect the dead-loop reported in issues #2119/#2275: the threshold check
 			// fires, shake runs, but residual context is still above the configured
 			// threshold. The next agent_end would re-trigger shake, which has nothing
@@ -3889,22 +3891,60 @@ export class SessionMaintenance {
 			// even though the post-prune history is already inside the recovery band.
 			const contextWindow = this.#model?.contextWindow ?? 0;
 			const compactionSettings = this.#host.settings.getGroup("compaction");
-			let stillOverThreshold = false;
-			if (contextWindow > 0) {
+			const stillOverThreshold = (): boolean => {
+				if (contextWindow <= 0) return false;
 				if (typeof triggerContextTokens === "number" && Number.isFinite(triggerContextTokens)) {
-					const correctedTokens = Math.max(0, triggerContextTokens - result.tokensFreed);
+					const correctedTokens = Math.max(0, triggerContextTokens - tokensFreed);
 					const thresholdTokens = resolveThresholdTokens(contextWindow, compactionSettings);
 					const recoveryBand = Math.floor(thresholdTokens * COMPACTION_RECOVERY_BAND);
-					stillOverThreshold = correctedTokens > recoveryBand;
-				} else {
-					const postShakeTokens = this.#host.getContextUsage({ contextWindow })?.tokens ?? 0;
-					stillOverThreshold = shouldCompact(postShakeTokens, contextWindow, compactionSettings);
+					return correctedTokens > recoveryBand;
+				}
+				const postShakeTokens = this.#host.getContextUsage({ contextWindow })?.tokens ?? 0;
+				return shouldCompact(postShakeTokens, contextWindow, compactionSettings);
+			};
+			const wouldFallBack = (): boolean =>
+				reason !== "idle" && ((reason === "overflow" && !reclaimed) || stillOverThreshold());
+
+			let shouldFallBack = wouldFallBack();
+			if (shouldFallBack) {
+				// Falling through here is expensive: snapcompact re-encodes history
+				// into images (lossy, spends the media budget, rewrites the whole
+				// prompt cache) and handoff costs a model call. The conservative pass
+				// is usually out of *reach* rather than out of material — once earlier
+				// shakes have elided old history, the only eligible regions left sit
+				// inside its 16k protected tail. So try one deeper pass first: free,
+				// reversible via the artifact link, and still protecting the artifact
+				// recovery reads the agent needs to get elided content back. One
+				// attempt only, no loop; "idle" never reaches here.
+				const escalated = await this.#host.shake("elide", { config: ESCALATED_SHAKE_CONFIG, signal });
+				if (signal.aborted) {
+					await this.#emitLifecycleEvent(
+						{
+							type: "auto_compaction_end",
+							action,
+							result: undefined,
+							aborted: true,
+							willRetry: false,
+						},
+						detachPostCommit,
+					);
+					return COMPACTION_CHECK_NONE;
+				}
+				if (escalated.toolResultsDropped + escalated.blocksDropped > 0) {
+					reclaimed = true;
+					tokensFreed += escalated.tokensFreed;
+					shouldFallBack = wouldFallBack();
+					logger.debug("Auto-shake escalated past the conservative protect window", {
+						tokensFreed: escalated.tokensFreed,
+						toolResultsDropped: escalated.toolResultsDropped,
+						blocksDropped: escalated.blocksDropped,
+						resolved: !shouldFallBack,
+					});
 				}
 			}
-			const shouldFallBack = reason !== "idle" && ((reason === "overflow" && !reclaimed) || stillOverThreshold);
 			if (shouldFallBack) {
 				const errorMessage = reclaimed
-					? `Auto-shake reclaimed ~${result.tokensFreed} tokens but context is still above the threshold; trying the next preferred compaction method.`
+					? `Auto-shake reclaimed ~${tokensFreed} tokens but context is still above the threshold; trying the next preferred compaction method.`
 					: "Auto-shake found nothing eligible to drop; trying the next preferred compaction method.";
 				await this.#emitLifecycleEvent(
 					{

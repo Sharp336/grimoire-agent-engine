@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { Agent, type AgentMessage, RESCUE_SHAKE_CONFIG, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
+import { DEFAULT_SHAKE_CONFIG, ESCALATED_SHAKE_CONFIG } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -644,9 +645,10 @@ describe("AgentSession shake", () => {
 			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
 			await session.waitForIdle();
 
-			// Shake fires once. The pre-fix bug auto-continued, which would re-trigger shake
-			// on the next agent_end. The fix replaces that loop with a one-shot fallback.
-			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			// One maintenance pass: the conservative config then the escalated one. The
+			// pre-fix bug auto-continued, which would re-trigger shake on the next
+			// agent_end. The fix replaces that loop with a one-shot fallback.
+			expect(shakeSpy).toHaveBeenCalledTimes(2);
 
 			const shakeEnd = events.find(
 				e => e.type === "auto_compaction_end" && (e as { action?: string }).action === "shake",
@@ -655,6 +657,114 @@ describe("AgentSession shake", () => {
 			expect(shakeEnd?.errorMessage).toMatch(/trying the next preferred compaction method/i);
 
 			// Fallback enters the context-full path so the situation actually resolves.
+			const fullStart = events.find(
+				e => e.type === "auto_compaction_start" && (e as { action?: string }).action === "context-full",
+			);
+			expect(fullStart).toBeDefined();
+		});
+
+		it("escalates past the protect window before advancing when the conservative pass reclaims nothing", async () => {
+			session.settings.set("compaction.methodOrder", ["shake", "soft"]);
+			session.settings.set("compaction.thresholdPercent", 1);
+			session.settings.set("contextPromotion.enabled", false);
+
+			// The tail-only-eligible state: the 16k protect window hides everything
+			// that is left, so the conservative pass reclaims nothing. Advancing here
+			// would spend a lossy snapcompact (or a paid handoff) on work the free
+			// escalated pass can still do.
+			const shakeSpy = vi.spyOn(session, "shake").mockImplementation(async (_mode, opts) => ({
+				mode: "elide" as const,
+				toolResultsDropped: opts?.config === ESCALATED_SHAKE_CONFIG ? 1 : 0,
+				blocksDropped: 0,
+				tokensFreed: opts?.config === ESCALATED_SHAKE_CONFIG ? 10_000 : 0,
+			}));
+
+			const assistantMessage: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "trigger" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: {
+					input: 10_000,
+					output: 1_000,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 11_000,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: Date.now(),
+			};
+			session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+			await session.waitForIdle();
+
+			// Conservative pass, then exactly one escalated pass — no loop.
+			expect(shakeSpy.mock.calls.map(call => call[1]?.config)).toEqual([
+				DEFAULT_SHAKE_CONFIG,
+				ESCALATED_SHAKE_CONFIG,
+			]);
+
+			// The escalated savings brought context inside the recovery band, so the
+			// paid tier is never reached.
+			const fullStart = events.find(
+				e => e.type === "auto_compaction_start" && (e as { action?: string }).action === "context-full",
+			);
+			expect(fullStart).toBeUndefined();
+
+			// Both passes live inside one lifecycle pair.
+			expect(events.filter(e => e.type === "auto_compaction_start")).toHaveLength(1);
+			const end = events.filter(e => e.type === "auto_compaction_end") as Array<{
+				errorMessage?: string;
+				skipped?: boolean;
+			}>;
+			expect(end).toHaveLength(1);
+			expect(end[0].errorMessage).toBeUndefined();
+			expect(end[0].skipped).toBe(false);
+		});
+
+		it("advances anyway when the escalated pass reclaims too little to clear the threshold", async () => {
+			session.settings.set("compaction.methodOrder", ["shake", "soft"]);
+			session.settings.set("compaction.thresholdPercent", 1);
+			session.settings.set("contextPromotion.enabled", false);
+
+			const shakeSpy = vi.spyOn(session, "shake").mockImplementation(async (_mode, opts) => ({
+				mode: "elide" as const,
+				toolResultsDropped: opts?.config === ESCALATED_SHAKE_CONFIG ? 1 : 0,
+				blocksDropped: 0,
+				tokensFreed: opts?.config === ESCALATED_SHAKE_CONFIG ? 500 : 0,
+			}));
+
+			const assistantMessage: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "trigger" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: {
+					input: 10_000,
+					output: 1_000,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 11_000,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: Date.now(),
+			};
+			session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+			await session.waitForIdle();
+
+			expect(shakeSpy).toHaveBeenCalledTimes(2);
+
+			// The escalated savings are credited to the fall-through decision, so the
+			// notice reports what was actually reclaimed instead of "nothing eligible".
+			const shakeEnd = events.find(
+				e => e.type === "auto_compaction_end" && (e as { action?: string }).action === "shake",
+			) as { errorMessage?: string; skipped?: boolean } | undefined;
+			expect(shakeEnd?.errorMessage).toBe(
+				"Auto-shake reclaimed ~500 tokens but context is still above the threshold; trying the next preferred compaction method.",
+			);
+			expect(shakeEnd?.skipped).toBe(false);
+
 			const fullStart = events.find(
 				e => e.type === "auto_compaction_start" && (e as { action?: string }).action === "context-full",
 			);
@@ -698,7 +808,8 @@ describe("AgentSession shake", () => {
 			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
 			await session.waitForIdle();
 
-			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			// Conservative pass plus the one escalated retry that precedes fall-through.
+			expect(shakeSpy).toHaveBeenCalledTimes(2);
 
 			const shakeEnd = events.find(
 				e => e.type === "auto_compaction_end" && (e as { action?: string }).action === "shake",
@@ -823,7 +934,8 @@ describe("AgentSession shake", () => {
 
 			await session.prompt("small pending prompt", { skipCompactionCheck: true });
 
-			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			// Conservative pass plus the one escalated retry that precedes fall-through.
+			expect(shakeSpy).toHaveBeenCalledTimes(2);
 			expect(compactSpy).toHaveBeenCalled();
 			const fullStart = events.find(
 				event => event.type === "auto_compaction_start" && (event as { action?: string }).action === "context-full",
