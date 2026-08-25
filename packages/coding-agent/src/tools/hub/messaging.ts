@@ -733,7 +733,7 @@ function renderListResult(details: Partial<CoordinationDetails>, expanded: boole
 	const rosterCounts = details.counts;
 	if (peers.length === 0) {
 		const meta =
-			rosterCounts && rosterCounts.parked > 0
+			rosterCounts && rosterCounts.running + rosterCounts.idle + rosterCounts.parked > 0
 				? [
 						`${rosterCounts.running} running`,
 						`${rosterCounts.idle} idle`,

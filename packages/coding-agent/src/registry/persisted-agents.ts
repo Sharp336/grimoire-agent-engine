@@ -457,8 +457,10 @@ async function registerPersistedSubagentsFromDir(
 	let entries: fs.Dirent[];
 	try {
 		entries = await fs.promises.readdir(dir, { withFileTypes: true });
-	} catch {
-		return;
+	} catch (error) {
+		const code = (error as NodeJS.ErrnoException).code;
+		if (code === "ENOENT" || code === "ENOTDIR") return;
+		throw error;
 	}
 	if (!shouldContinue()) return;
 	let entriesSinceYield = 0;

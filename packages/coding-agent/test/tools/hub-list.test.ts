@@ -1,4 +1,5 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { HistoryProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/history-protocol";
@@ -291,6 +292,110 @@ describe("hub list", () => {
 		if (!result.details) throw new Error("Expected coordination details");
 		expect(result.details.peers?.map(peer => peer.id)).toEqual(["LiveWorker"]);
 		expect(result.details.counts?.idle).toBe(1);
+	});
+
+	it("retries persisted roster scan after a transient readdir failure", async () => {
+		using tempDir = TempDir.createSync("@omp-hub-list-readdir-retry-");
+		const dir = tempDir.path();
+		const sessionFile = path.join(dir, "main.jsonl");
+		await Bun.write(sessionFile, `${sessionHeader("main")}\n`);
+		await writeParkedTranscript(path.join(dir, "main", "ParkedScout.jsonl"), "parked", "reviewing classified.diff");
+
+		const registry = new AgentRegistry();
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: MAIN_AGENT_ID,
+			kind: "main",
+			session: null,
+			sessionFile,
+			status: "running",
+		});
+		registry.register({
+			id: "LiveWorker",
+			displayName: "task",
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			session: null,
+			status: "idle",
+		});
+
+		const readdirSpy = spyOn(fs.promises, "readdir").mockRejectedValueOnce(
+			Object.assign(new Error("too many open files"), { code: "EMFILE" }),
+		);
+		try {
+			const first = await executeList(registry, MAIN_AGENT_ID);
+			if (!first.details) throw new Error("Expected coordination details");
+			expect(first.isError).toBeFalsy();
+			expect(first.details.peers?.map(peer => peer.id)).toEqual(["LiveWorker"]);
+			expect(first.details.counts).toEqual({
+				running: 0,
+				idle: 1,
+				parked: 0,
+				shown: 1,
+				truncated: 0,
+			});
+			expect(registry.get("ParkedScout")).toBeUndefined();
+			expect(listText(first)).not.toContain("ParkedScout");
+
+			const second = await executeList(registry, MAIN_AGENT_ID);
+			if (!second.details) throw new Error("Expected coordination details");
+			expect(second.isError).toBeFalsy();
+			expect(second.details.peers?.map(peer => peer.id)).toEqual(["LiveWorker"]);
+			expect(second.details.counts).toEqual({
+				running: 0,
+				idle: 1,
+				parked: 1,
+				shown: 1,
+				truncated: 0,
+			});
+			expect(registry.get("ParkedScout")?.status).toBe("parked");
+			expect(listText(second)).not.toContain("ParkedScout");
+		} finally {
+			readdirSpy.mockRestore();
+		}
+	});
+
+	it("latches an empty persisted roster when the optional subagent directory is missing", async () => {
+		using tempDir = TempDir.createSync("@omp-hub-list-enoent-latch-");
+		const dir = tempDir.path();
+		const sessionFile = path.join(dir, "main.jsonl");
+		await Bun.write(sessionFile, `${sessionHeader("main")}\n`);
+
+		const registry = new AgentRegistry();
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: MAIN_AGENT_ID,
+			kind: "main",
+			session: null,
+			sessionFile,
+			status: "running",
+		});
+		registry.register({
+			id: "LiveWorker",
+			displayName: "task",
+			kind: "sub",
+			parentId: MAIN_AGENT_ID,
+			session: null,
+			status: "idle",
+		});
+
+		const first = await executeList(registry, MAIN_AGENT_ID);
+		if (!first.details) throw new Error("Expected coordination details");
+		expect(first.isError).toBeFalsy();
+		expect(first.details.counts).toEqual({
+			running: 0,
+			idle: 1,
+			parked: 0,
+			shown: 1,
+			truncated: 0,
+		});
+
+		await writeParkedTranscript(path.join(dir, "main", "ParkedScout.jsonl"), "parked", "reviewing classified.diff");
+		const second = await executeList(registry, MAIN_AGENT_ID);
+		if (!second.details) throw new Error("Expected coordination details");
+		expect(second.isError).toBeFalsy();
+		expect(second.details.counts?.parked).toBe(0);
+		expect(registry.get("ParkedScout")).toBeUndefined();
 	});
 
 	it("schema rejects aborted and advisor list filters", () => {
