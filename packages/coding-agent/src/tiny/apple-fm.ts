@@ -75,27 +75,32 @@ async function publishSidecar(srcPath: string, destPath: string): Promise<void> 
 	if (bytes.byteLength === 0) {
 		throw new Error(`bundled AFM sidecar is empty: ${srcPath}`);
 	}
-	fs.writeFileSync(tmpPath, bytes);
-	fs.chmodSync(tmpPath, 0o755);
+	await Bun.write(tmpPath, bytes);
+	await fs.promises.chmod(tmpPath, 0o755);
 	fs.renameSync(tmpPath, destPath);
 }
 
-function compileSidecar(srcPath: string, binPath: string): void {
+async function compileSidecar(srcPath: string, binPath: string): Promise<void> {
 	const target = swiftTargetTriple();
-	const result = Bun.spawnSync({
+	const proc = Bun.spawn({
 		cmd: ["xcrun", "--sdk", "macosx", "swiftc", "-O", "-parse-as-library", "-target", target, "-o", binPath, srcPath],
 		stdout: "pipe",
 		stderr: "pipe",
 	});
-	if (result.exitCode !== 0) {
-		const stderr = new TextDecoder().decode(result.stderr).trim();
+	const [, stderr, exitCode] = await Promise.all([
+		new Response(proc.stdout).text(),
+		new Response(proc.stderr).text(),
+		proc.exited,
+	]);
+	if (exitCode !== 0) {
+		const detail = stderr.trim();
 		throw new Error(
-			stderr
-				? `failed to compile Apple Foundation Models sidecar: ${stderr}`
+			detail
+				? `failed to compile Apple Foundation Models sidecar: ${detail}`
 				: "failed to compile Apple Foundation Models sidecar (xcrun swiftc)",
 		);
 	}
-	fs.chmodSync(binPath, 0o755);
+	await fs.promises.chmod(binPath, 0o755);
 }
 
 /**
@@ -107,7 +112,7 @@ function compileSidecar(srcPath: string, binPath: string): void {
 export async function ensureAfmSidecar(): Promise<string> {
 	const override = sidecarOverride();
 	if (override) {
-		if (!fs.existsSync(override)) {
+		if (!(await Bun.file(override).exists())) {
 			throw new Error(`OMP_APPLE_FM_SIDECAR does not exist: ${override}`);
 		}
 		return override;
@@ -117,29 +122,29 @@ export async function ensureAfmSidecar(): Promise<string> {
 	}
 
 	const dir = sidecarCacheDir();
-	fs.mkdirSync(dir, { recursive: true });
+	await fs.promises.mkdir(dir, { recursive: true });
 	const hash = cacheIdentity();
 	const srcPath = path.join(dir, "sidecar.swift");
 	const binPath = path.join(dir, "omp-apple-fm");
 	const stampPath = path.join(dir, `omp-apple-fm.${hash}`);
-	if (fs.existsSync(binPath) && fs.existsSync(stampPath)) return binPath;
+	if ((await Bun.file(binPath).exists()) && (await Bun.file(stampPath).exists())) return binPath;
 
 	return await withFileLock(
 		binPath,
 		async () => {
-			if (fs.existsSync(binPath) && fs.existsSync(stampPath)) return binPath;
+			if ((await Bun.file(binPath).exists()) && (await Bun.file(stampPath).exists())) return binPath;
 			const bundled = await bundledSidecarPath();
 			const tmpPath = path.join(dir, `omp-apple-fm.${process.pid}.${hash}.tmp`);
 			try {
 				if (bundled) {
 					await publishSidecar(bundled, binPath);
 				} else {
-					fs.writeFileSync(srcPath, sidecarSource);
-					compileSidecar(srcPath, tmpPath);
+					await Bun.write(srcPath, sidecarSource);
+					await compileSidecar(srcPath, tmpPath);
 					fs.renameSync(tmpPath, binPath);
 				}
 			} catch (error) {
-				fs.rmSync(tmpPath, { force: true });
+				await fs.promises.rm(tmpPath, { force: true });
 				if (!bundled) {
 					throw new Error(
 						`${error instanceof Error ? error.message : String(error)}. afm-core needs the bundled Apple Silicon sidecar or Xcode/CLT to compile one.`,
@@ -148,15 +153,15 @@ export async function ensureAfmSidecar(): Promise<string> {
 				throw error;
 			}
 			try {
-				for (const entry of new Bun.Glob("omp-apple-fm.*").scanSync({ cwd: dir, onlyFiles: true })) {
+				for await (const entry of new Bun.Glob("omp-apple-fm.*").scan({ cwd: dir, onlyFiles: true })) {
 					if (entry !== `omp-apple-fm.${hash}` && !entry.endsWith(".tmp") && !entry.endsWith(".lock")) {
-						fs.rmSync(path.join(dir, entry), { force: true });
+						await fs.promises.rm(path.join(dir, entry), { force: true });
 					}
 				}
 			} catch {
 				// Cache cleanup is best-effort.
 			}
-			fs.writeFileSync(stampPath, `${hash}\n`);
+			await Bun.write(stampPath, `${hash}\n`);
 			return binPath;
 		},
 		{ retries: 120, retryDelayMs: 250 },
