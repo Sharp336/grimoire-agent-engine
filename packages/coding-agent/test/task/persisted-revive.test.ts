@@ -188,6 +188,34 @@ describe("persisted subagent revival", () => {
 		expect(activeToolNames).toEqual([["read", "yield"]]);
 	});
 
+	it("disposes the constructed session when post-factory revival setup fails", async () => {
+		const cwd = makeTempDir("@pi-revive-setup-fail-");
+		const sessionFile = await createPersistedSession(cwd);
+		const managerFile = path.join(cwd, "revive-setup-fail.jsonl");
+		const manager = SessionManager.create(cwd, cwd);
+		await manager.setSessionFile(managerFile);
+		vi.spyOn(SessionManager, "open").mockImplementation(async () => manager);
+		const dispose = vi.fn(async () => undefined);
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			const session = {
+				getMountedXdevToolNames: () => [],
+				setActiveToolsByName: async () => {
+					throw new Error("active-tool clamp failed");
+				},
+				dispose,
+			};
+			return { session } as unknown as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await expect(reviver(ref)).rejects.toThrow("active-tool clamp failed");
+		// The caller never received the session, so the reviver must dispose
+		// it (which also closes the reopened manager) rather than leak both.
+		expect(dispose).toHaveBeenCalledTimes(1);
+	});
+
 	it("closes the reopened manager when the session factory rejects during revival", async () => {
 		const cwd = makeTempDir("@pi-revive-factory-reject-");
 		const sessionFile = await createPersistedSession(cwd);
