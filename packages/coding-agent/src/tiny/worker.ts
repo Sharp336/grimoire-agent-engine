@@ -310,7 +310,14 @@ async function generateTitleFromFoundationModels(
 		});
 		return extractTinyTitle(text, message);
 	} catch (error) {
-		if (isAfmModelNotReady(error)) return null;
+		if (isAfmModelNotReady(error)) {
+			transport.send({
+				type: "progress",
+				id: requestId,
+				event: { modelKey, status: "error", name: spec.repo },
+			});
+			return null;
+		}
 		throw error;
 	}
 }
@@ -360,6 +367,7 @@ async function generateCompletion(
 			const text = await completeAfmCore({
 				instructions: systemPrompt?.trim() ?? "",
 				prompt: promptText,
+				maxTokens,
 			});
 			const generated = text.trim();
 			return generated === "" ? null : generated;

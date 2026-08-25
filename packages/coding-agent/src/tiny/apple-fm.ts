@@ -208,12 +208,17 @@ export async function probeAfmCore(): Promise<AfmStatus> {
 	};
 }
 
-export async function completeAfmCore(input: { instructions?: string; prompt: string }): Promise<string> {
+export async function completeAfmCore(input: {
+	instructions?: string;
+	prompt: string;
+	maxTokens?: number;
+}): Promise<string> {
 	const payload = await runSidecar(
 		["complete"],
 		JSON.stringify({
 			instructions: input.instructions ?? "",
 			prompt: input.prompt,
+			...(input.maxTokens !== undefined ? { maxTokens: input.maxTokens } : {}),
 		}),
 	);
 	const text = payload.text?.trim() ?? "";

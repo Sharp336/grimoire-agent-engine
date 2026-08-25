@@ -86,7 +86,7 @@ if (cmd === "status") {
 const raw = await Bun.stdin.text();
 const req = JSON.parse(raw);
 if (!req.prompt) throw new Error("missing prompt");
-process.stdout.write(JSON.stringify({ text: "<title>Fix login button</title>" }) + "\\n");
+process.stdout.write(JSON.stringify({ text: req.maxTokens ? String(req.maxTokens) : "<title>Fix login button</title>" }) + "\\n");
 `),
 			);
 			process.env[AFM_CORE_SIDECAR_ENV] = sidecar;
@@ -94,6 +94,7 @@ process.stdout.write(JSON.stringify({ text: "<title>Fix login button</title>" })
 			await expect(completeAfmCore({ instructions: "title", prompt: "fix the login button" })).resolves.toBe(
 				"<title>Fix login button</title>",
 			);
+			await expect(completeAfmCore({ prompt: "classify", maxTokens: 16 })).resolves.toBe("16");
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}
@@ -229,6 +230,7 @@ process.exit(1);
 			inbound?.({ type: "generate", id: "3", modelKey: "afm-core", message: "fix the login button" });
 			await seen.promise;
 			expect(outbound.some(message => message.type === "title" && message.title === null)).toBe(true);
+			expect(outbound.some(message => message.type === "progress" && message.event.status === "error")).toBe(true);
 			expect(outbound.some(message => message.type === "error")).toBe(false);
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
@@ -241,6 +243,9 @@ process.exit(1);
 			const sidecar = writeFakeSidecar(
 				dir,
 				bunSidecar(`
+const raw = await Bun.stdin.text();
+const req = JSON.parse(raw);
+if (req.maxTokens !== 16) throw new Error("missing maxTokens");
 process.stdout.write(JSON.stringify({ text: "yes" }) + "\\n");
 `),
 			);
@@ -261,7 +266,13 @@ process.stdout.write(JSON.stringify({ text: "yes" }) + "\\n");
 					};
 				},
 			});
-			inbound?.({ type: "complete", id: "4", modelKey: "afm-core", prompt: "did the model stop unexpectedly?" });
+			inbound?.({
+				type: "complete",
+				id: "4",
+				modelKey: "afm-core",
+				prompt: "did the model stop unexpectedly?",
+				maxTokens: 16,
+			});
 			await seen.promise;
 			expect(outbound.some(message => message.type === "completion" && message.text === "yes")).toBe(true);
 			expect(outbound.some(message => message.type === "error")).toBe(false);
