@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { resolveModels } from "@oh-my-pi/pi-coding-agent/cli/tiny-models-cli";
 import { getTinyLocalModelSpec, isFoundationModelsSpec } from "@oh-my-pi/pi-coding-agent/tiny/models";
 import type { TinyTitleWorkerInbound, TinyTitleWorkerOutbound } from "@oh-my-pi/pi-coding-agent/tiny/title-protocol";
@@ -22,10 +22,10 @@ afterEach(() => {
 });
 
 function writeFakeSidecar(dir: string, script: string): string {
-	const path = join(dir, "fake-afm");
-	writeFileSync(path, script);
-	chmodSync(path, 0o755);
-	return path;
+	const sidecar = path.join(dir, "fake-afm");
+	fs.writeFileSync(sidecar, script);
+	fs.chmodSync(sidecar, 0o755);
+	return sidecar;
 }
 
 function bunSidecar(body: string): string {
@@ -66,14 +66,14 @@ describe("afm-core title registry", () => {
 
 	it("resolves a Bun file-loader emit against the module dir, not cwd", () => {
 		expect(resolveBundledSidecarPath("./omp-apple-fm-py3pdx4g.", "/pkg/dist")).toBe(
-			join("/pkg/dist", "omp-apple-fm-py3pdx4g."),
+			path.join("/pkg/dist", "omp-apple-fm-py3pdx4g."),
 		);
 	});
 });
 
 describe("AFM sidecar runner", () => {
 	it("probes and completes through an env-overridden sidecar", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "omp-afm-"));
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-afm-"));
 		try {
 			const sidecar = writeFakeSidecar(
 				dir,
@@ -95,12 +95,12 @@ process.stdout.write(JSON.stringify({ text: "<title>Fix login button</title>" })
 				"<title>Fix login button</title>",
 			);
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			fs.rmSync(dir, { recursive: true, force: true });
 		}
 	});
 
 	it("surfaces sidecar error payloads", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "omp-afm-"));
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-afm-"));
 		try {
 			const sidecar = writeFakeSidecar(
 				dir,
@@ -112,14 +112,14 @@ process.exit(1);
 			process.env[AFM_CORE_SIDECAR_ENV] = sidecar;
 			await expect(probeAfmCore()).rejects.toThrow("apple_fm_failed: modelNotReady");
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			fs.rmSync(dir, { recursive: true, force: true });
 		}
 	});
 });
 
 describe("tiny worker AFM titles", () => {
 	it("generates a title without loading transformers", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "omp-afm-"));
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-afm-"));
 		try {
 			const sidecar = writeFakeSidecar(
 				dir,
@@ -161,12 +161,12 @@ process.stdout.write(JSON.stringify({ text: "<title>Fix login button</title>" })
 			expect(outbound.some(message => message.type === "title" && message.title === "Fix login button")).toBe(true);
 			expect(outbound.some(message => message.type === "error")).toBe(false);
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			fs.rmSync(dir, { recursive: true, force: true });
 		}
 	});
 
 	it("treats download as a readiness probe", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "omp-afm-"));
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-afm-"));
 		try {
 			const sidecar = writeFakeSidecar(
 				dir,
@@ -195,12 +195,12 @@ process.stdout.write(JSON.stringify({ available: true, contextSize: 8192 }) + "\
 			await seen.promise;
 			expect(outbound.some(message => message.type === "downloaded" && message.id === "2")).toBe(true);
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			fs.rmSync(dir, { recursive: true, force: true });
 		}
 	});
 
 	it("returns no title on modelNotReady instead of a worker error", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "omp-afm-"));
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-afm-"));
 		try {
 			const sidecar = writeFakeSidecar(
 				dir,
@@ -231,7 +231,7 @@ process.exit(1);
 			expect(outbound.some(message => message.type === "title" && message.title === null)).toBe(true);
 			expect(outbound.some(message => message.type === "error")).toBe(false);
 		} finally {
-			rmSync(dir, { recursive: true, force: true });
+			fs.rmSync(dir, { recursive: true, force: true });
 		}
 	});
 });

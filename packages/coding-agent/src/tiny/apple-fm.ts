@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getTinyModelsCacheDir } from "@oh-my-pi/pi-utils";
@@ -50,12 +49,7 @@ function swiftTargetTriple(): string {
 }
 
 function cacheIdentity(): string {
-	return createHash("sha256")
-		.update(sidecarSource)
-		.update("\0")
-		.update(swiftTargetTriple())
-		.digest("hex")
-		.slice(0, 16);
+	return Bun.hash(`${sidecarSource}\0${swiftTargetTriple()}`).toString(16);
 }
 
 const BUNDLED_SIDECARS: Record<string, { file: string; identity: string }> = {
