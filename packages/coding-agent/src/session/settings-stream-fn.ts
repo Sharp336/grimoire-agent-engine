@@ -59,7 +59,8 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 		const usesOpenAIReasoningSummaries =
 			supportsReasoningSummary &&
 			((model.api === "openai-responses" && isOfficialOpenAIEndpoint(model.provider, model.baseUrl)) ||
-				(model.api === "azure-openai-responses" && model.provider === "azure") ||
+				(model.api === "azure-openai-responses" &&
+					(model.provider === "azure" || model.provider === "azure-openai")) ||
 				(model.api === "openai-codex-responses" &&
 					model.provider === "openai-codex" &&
 					isOfficialCodexApiUrl(model.baseUrl)));

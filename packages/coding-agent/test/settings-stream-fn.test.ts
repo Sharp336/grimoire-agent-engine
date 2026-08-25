@@ -38,6 +38,11 @@ const stubResponsesModel = {
 	baseUrl: "https://api.openai.com/v1",
 	compat: reasoningSummaryCompat,
 } as unknown as Model;
+const stubAzureOpenAIResponsesModel = {
+	api: "azure-openai-responses",
+	provider: "azure-openai",
+	compat: reasoningSummaryCompat,
+} as unknown as Model;
 const stubCompatibleResponsesModel = {
 	api: "openai-responses",
 	provider: "ollama",
@@ -129,6 +134,7 @@ describe("createSettingsAwareStreamFn", () => {
 
 		wrapped(stubCodexModel, stubContext, undefined);
 		wrapped(stubResponsesModel, stubContext, undefined);
+		wrapped(stubAzureOpenAIResponsesModel, stubContext, undefined);
 		wrapped(stubCompatibleResponsesModel, stubContext, undefined);
 		wrapped(stubOpenAICompatibleResponsesModel, stubContext, undefined);
 		wrapped(stubCompatibleCodexModel, stubContext, undefined);
@@ -138,12 +144,13 @@ describe("createSettingsAwareStreamFn", () => {
 
 		expect(calls[0]?.options?.reasoningSummary).toBe("detailed");
 		expect(calls[1]?.options?.reasoningSummary).toBe("detailed");
-		expect(calls[2]?.options?.reasoningSummary).toBeUndefined();
+		expect(calls[2]?.options?.reasoningSummary).toBe("detailed");
 		expect(calls[3]?.options?.reasoningSummary).toBeUndefined();
 		expect(calls[4]?.options?.reasoningSummary).toBeUndefined();
 		expect(calls[5]?.options?.reasoningSummary).toBeUndefined();
 		expect(calls[6]?.options?.reasoningSummary).toBeUndefined();
 		expect(calls[7]?.options?.reasoningSummary).toBeUndefined();
+		expect(calls[8]?.options?.reasoningSummary).toBeUndefined();
 	});
 
 	it("lets omitThinking suppress configured and caller-supplied OpenAI summaries", () => {
