@@ -3,7 +3,7 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import { getSupportedEfforts, requireSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { mindshubModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
@@ -77,6 +77,17 @@ describe("mindshub provider support", () => {
 							family: "kimi",
 						},
 						{
+							id: "mindshub_air",
+							label: "MindsHub Air",
+							object: "model",
+							created: 0,
+							enabled: true,
+							reasoning_efforts: null,
+							embedding: false,
+							provider: "mindshub",
+							family: "mindshub_air",
+						},
+						{
 							id: "embed-small",
 							label: "Text Embedding 3 (small)",
 							object: "model",
@@ -147,6 +158,27 @@ describe("mindshub provider support", () => {
 		expect(kimi?.name).toBe("Kimi K3");
 		expect(kimi?.reasoning).toBe(true);
 		expect(kimi?.thinking).toBeUndefined();
+
+		// The raw mapper output alone doesn't prove runtime behavior:
+		// `resolveModelThinking` (invoked by `buildModel`, and transitively by
+		// discovery's `normalizeModelList`) treats an absent `thinking` on a
+		// `reasoning: true` model as "derive one from identity" unless the
+		// model's resolved compat opts out via `trustExplicitThinkingOnly`.
+		// Without that opt-out, `kimi`/`mindshub_air` would surface the
+		// generic openai-completions minimal..xhigh ladder at runtime despite
+		// the mapper's `thinking: undefined` — exactly the gap the prior fix
+		// missed. Assert against the *built* model for both fixed-reasoning
+		// aliases: still `reasoning: true`, but no selectable effort and no
+		// effort the picker/request path could send.
+		for (const alias of ["kimi", "mindshub_air"] as const) {
+			const spec = models?.find(model => model.id === alias);
+			if (!spec) throw new Error(`${alias} model was not resolved`);
+			const built = buildModel(spec);
+			expect(built.reasoning).toBe(true);
+			expect(built.thinking).toBeUndefined();
+			expect(getSupportedEfforts(built)).toEqual([]);
+			expect(() => requireSupportedEffort(built, Effort.High)).toThrow();
+		}
 	});
 
 	test("a non-reasoning model with no advertised ladder and no fixed-reasoning family stays reasoning: false", async () => {

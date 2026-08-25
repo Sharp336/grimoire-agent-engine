@@ -3100,11 +3100,30 @@ export function mindshubModelManagerOptions(
 				mapModel: (entry: OpenAICompatibleModelRecord, defaults: ModelSpec<"openai-completions">) => {
 					const record = entry as MindsHubModelRecord;
 					const thinking = mapMindshubThinking(record);
+					const reasoning = mindshubReasons(record, thinking !== undefined);
+					// `kimi`/`mindshub_air` reason on every request but expose no
+					// tunable dial (`reasoning_efforts: null` —
+					// MINDSHUB_FIXED_REASONING_FAMILIES). Leaving `thinking`
+					// undefined alone is not enough: `resolveModelThinking` treats
+					// an absent `thinking` on a `reasoning: true` model as "infer
+					// one from identity" and would hand the built model the generic
+					// openai-completions minimal..xhigh ladder, letting the picker
+					// offer (and send) effort values these aliases reject.
+					// `trustExplicitThinkingOnly` is the same escape hatch
+					// devin-agent uses for its own no-ladder reasoners — it tells
+					// `resolveModelThinking` to trust the explicit (absent) surface
+					// as-is and skip inference, so `reasoning: true` +
+					// `thinking: undefined` survives through `buildModel` instead of
+					// collapsing into a fabricated ladder. See #9355 review thread.
+					const isFixedReasoner = reasoning && thinking === undefined;
 					return {
 						...defaults,
 						name: toModelName(record.label, defaults.name),
-						reasoning: mindshubReasons(record, thinking !== undefined),
+						reasoning,
 						...(thinking && { thinking }),
+						...(isFixedReasoner && {
+							compat: { ...defaults.compat, trustExplicitThinkingOnly: true },
+						}),
 						// Every catalog model accepts image parts (docs: "Image parts are
 						// accepted on every chat model").
 						input: ["text", "image"],
