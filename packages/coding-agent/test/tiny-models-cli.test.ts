@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import { resolveModels, runTinyModelsCommand } from "@oh-my-pi/pi-coding-agent/cli/tiny-models-cli";
-import { TINY_LOCAL_MODELS } from "@oh-my-pi/pi-coding-agent/tiny/models";
+import { isFoundationModelsSpec, TINY_LOCAL_MODELS } from "@oh-my-pi/pi-coding-agent/tiny/models";
 import { tinyTitleClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 
 afterEach(() => {
@@ -18,9 +18,9 @@ describe("tiny-models download model resolution", () => {
 		const all = resolveModels("all");
 		for (const key of unsupported) expect(all).not.toContain(key);
 
-		const usable = TINY_LOCAL_MODELS.filter(spec => !("unsupportedReason" in spec) || !spec.unsupportedReason).map(
-			spec => spec.key,
-		);
+		const usable = TINY_LOCAL_MODELS.filter(
+			spec => !("unsupportedReason" in spec && spec.unsupportedReason) && !isFoundationModelsSpec(spec),
+		).map(spec => spec.key);
 		for (const key of usable) expect(all).toContain(key);
 	});
 
