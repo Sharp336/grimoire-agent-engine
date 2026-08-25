@@ -3,6 +3,7 @@ import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import type { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { searchWithParallel } from "@oh-my-pi/pi-coding-agent/web/parallel";
 import { ParallelProvider, searchParallel } from "@oh-my-pi/pi-coding-agent/web/search/providers/parallel";
+import { USER_AGENT } from "@oh-my-pi/pi-utils";
 
 describe("Parallel web search", () => {
 	const fakeStorage = {
@@ -181,6 +182,7 @@ describe("Parallel web search", () => {
 		expect(capturedHeaders).toEqual({
 			"Content-Type": "application/json",
 			Accept: "application/json, text/event-stream",
+			"User-Agent": USER_AGENT,
 		});
 		expect(capturedRequestBody).toEqual({
 			jsonrpc: "2.0",
@@ -206,6 +208,83 @@ describe("Parallel web search", () => {
 					ageSeconds: expect.any(Number),
 				},
 			],
+		});
+	});
+
+	it("preserves domain and date search operators when using anonymous MCP", async () => {
+		delete process.env.PARALLEL_API_KEY;
+		const fetchMock = mockFetch({
+			jsonrpc: "2.0",
+			id: "parallel-mcp-filtered",
+			result: { structuredContent: { search_id: "search-parallel-mcp-filtered", results: [] } },
+		});
+
+		await searchParallel(
+			{
+				query: '"web api" -legacy site:parallel.ai -site:reddit.com after:2025-06-01 before:2026-01-01',
+				recency: "day",
+				fetch: fetchMock,
+			},
+			fakeAuthStorage,
+		);
+
+		expect(capturedRequestBody).toMatchObject({
+			params: {
+				name: "web_search",
+				arguments: {
+					objective: '"web api" -legacy',
+					search_queries: [
+						'"web api" -legacy site:parallel.ai -site:reddit.com after:2025-06-01 before:2026-01-01',
+					],
+				},
+			},
+		});
+	});
+
+	it("sends trusted session and active model metadata with anonymous MCP searches", async () => {
+		delete process.env.PARALLEL_API_KEY;
+		const fetchMock = mockFetch({
+			jsonrpc: "2.0",
+			id: "parallel-mcp-metadata",
+			result: { structuredContent: { search_id: "search-parallel-mcp-metadata", results: [] } },
+		});
+
+		await new ParallelProvider().search({
+			query: "session-aware search",
+			systemPrompt: "",
+			authStorage: fakeAuthStorage,
+			sessionId: "stable-session-123",
+			modelName: "claude-opus-4.7",
+			fetch: fetchMock,
+		});
+
+		expect(capturedRequestBody).toMatchObject({
+			params: {
+				arguments: {
+					objective: "session-aware search",
+					search_queries: ["session-aware search"],
+					session_id: "stable-session-123",
+					model_name: "claude-opus-4.7",
+				},
+			},
+		});
+	});
+
+	it("omits overlong model identifiers instead of truncating their identity", async () => {
+		delete process.env.PARALLEL_API_KEY;
+		const fetchMock = mockFetch({
+			jsonrpc: "2.0",
+			id: "parallel-mcp-model-limit",
+			result: { structuredContent: { search_id: "search-parallel-mcp-model-limit", results: [] } },
+		});
+
+		await searchParallel({ query: "model metadata", modelName: "m".repeat(101), fetch: fetchMock }, fakeAuthStorage);
+
+		expect(capturedRequestBody).toMatchObject({
+			params: { arguments: { objective: "model metadata", search_queries: ["model metadata"] } },
+		});
+		expect(capturedRequestBody).not.toMatchObject({
+			params: { arguments: { model_name: expect.any(String) } },
 		});
 	});
 

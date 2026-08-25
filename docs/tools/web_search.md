@@ -194,7 +194,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
     - Output: `sources`, `requestId`.
   - **Parallel** — `packages/coding-agent/src/web/search/providers/parallel.ts`, `packages/coding-agent/src/web/parallel.ts`
     - Availability: an env or `agent.db` credential for `parallel` admits it to the automatic chain. Explicit selection, either by listing `parallel` in `providers.webSearchOrder` or running `omp q --provider parallel "your query"`, also works without a credential.
-    - Querying: authenticated requests POST `https://api.parallel.ai/v1beta/search` with `objective=query`, `search_queries=[query]`, `mode:"fast"`, `max_chars_per_result: 10000`, and beta header `search-extract-2025-10-10`. Without a credential, explicit requests use the free public MCP endpoint `https://search.parallel.ai/mcp` and call `web_search` with `objective` and `search_queries`.
+    - Querying: authenticated requests POST `https://api.parallel.ai/v1beta/search` with `objective=query`, `search_queries=[query]`, `mode:"fast"`, `max_chars_per_result: 10000`, and beta header `search-extract-2025-10-10`. Without a credential, explicit requests call `web_search` at `https://search.parallel.ai/mcp` with `objective`, operator-preserving `search_queries`, and the current session ID and exact active model ID when available. MCP requests identify the client as `omp/<version>`.
     - There is no provider fan-out here despite the name; the current adapter always sends a one-element `search_queries` array.
     - `limit` and `num_search_results` are collapsed together before dispatch, clamped to `1..40`, default `10`.
     - Output: `sources`, `requestId`.

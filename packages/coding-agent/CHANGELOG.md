@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added keyless Parallel web search when the provider is explicitly selected ([#9770](https://github.com/can1357/oh-my-pi/pull/9770) by [@georgeatparallel](https://github.com/georgeatparallel)).
+
 ## [18.0.5] - 2026-08-25
 
 ### Added
