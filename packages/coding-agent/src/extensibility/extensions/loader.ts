@@ -434,7 +434,7 @@ async function importExtensionModule(
 	cwd: string,
 	manifestCache: Map<string, Promise<ExtensionManifest | null>>,
 	cacheBust?: string,
-	validationGraph?: Promise<ValidationGraph>,
+	validationGraph?: (resolvedPath: string) => Promise<ValidationGraph>,
 ): Promise<ImportedExtensionModule> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
 	const compatibility = await readExtensionCompatibility(resolvedPath, manifestCache);
@@ -442,7 +442,7 @@ async function importExtensionModule(
 	try {
 		const module = (await withHostGuard(async () => {
 			if (compatibility === "modern-esm" && cacheBust) {
-				const graph = await validationGraph!;
+				const graph = await validationGraph!(resolvedPath);
 				const loaded = { module: await graph.load(resolvedPath), cleanup: graph.cleanup };
 				cleanup = loaded.cleanup;
 				return loaded.module;
@@ -520,14 +520,19 @@ export async function loadExtensions(
 
 	const manifestCache = new Map<string, Promise<ExtensionManifest | null>>();
 
-	const validationGraph =
-		options?.cacheBust && paths.length > 0
-			? createValidationGraph(await findValidationPackageRoot(paths[0]!), options.cacheBust)
-			: undefined;
+	let validationGraph: Promise<ValidationGraph> | undefined;
+	const getValidationGraph = async (resolvedPath: string): Promise<ValidationGraph> => {
+		if (!options?.cacheBust) throw new Error("Validation graph requested without cache bust");
+		if (!validationGraph)
+			validationGraph = createValidationGraph(await findValidationPackageRoot(resolvedPath), options.cacheBust);
+		return validationGraph;
+	};
 	let imported: ImportedExtensionModule[];
 	try {
 		imported = await Promise.all(
-			paths.map(extPath => importExtensionModule(extPath, cwd, manifestCache, options?.cacheBust, validationGraph)),
+			paths.map(extPath =>
+				importExtensionModule(extPath, cwd, manifestCache, options?.cacheBust, getValidationGraph),
+			),
 		);
 	} catch (error) {
 		const graph = await validationGraph;
