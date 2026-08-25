@@ -7,6 +7,10 @@
 - Added asynchronous, size-bounded SVG-to-PNG rasterization for terminal media previews.
 - Added `DiffStream` for incremental text/byte ingestion, direct asynchronous file opening, stable-prefix progress, off-thread exact Myers runs/unified hunks, and asynchronous syntax-grammar warmup.
 
+### Fixed
+
+- Fixed Windows background keyboard input being silently dropped by classic applications: posted characters and keystrokes now target the focused child window (resolved via `GetGUIThreadInfo`) instead of the frame window, and unmodified single-character key chords synthesize the matching `WM_CHAR`.
+
 ## [18.0.3] - 2026-08-23
 
 ### Fixed

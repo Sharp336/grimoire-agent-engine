@@ -167,6 +167,7 @@ fn global_key_chord(input: &mut Enigo, keys: &[KeyName]) -> CoreResult<()> {
 
 mod background {
 	use std::ffi::c_void;
+	use std::mem::{size_of, zeroed};
 
 	use windows_sys::Win32::{
 		Foundation::{GetLastError, HWND, LPARAM, POINT, WPARAM},
@@ -181,7 +182,8 @@ mod background {
 				VK_UP, VkKeyScanW,
 			},
 			WindowsAndMessaging::{
-				GetClassNameW, IsWindow, PostMessageW, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK,
+				GA_ROOT, GetAncestor, GetClassNameW, GetGUIThreadInfo, GetWindowThreadProcessId,
+				GUITHREADINFO, IsWindow, PostMessageW, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK,
 				WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MBUTTONDBLCLK, WM_MBUTTONDOWN, WM_MBUTTONUP,
 				WM_MOUSEHWHEEL, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_RBUTTONDBLCLK, WM_RBUTTONDOWN,
 				WM_RBUTTONUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
@@ -237,6 +239,39 @@ mod background {
 			)));
 		}
 		Ok(())
+	}
+
+	/// Resolves the window that owns keyboard input for `top_level`.
+	///
+	/// Posted messages bypass the target's message loop, so they must land on the
+	/// exact window holding keyboard focus. Classic applications host their input
+	/// sink in a child control (Notepad's edit control); posting characters to the
+	/// frame silently loses them.
+	fn input_sink(top_level: HWND) -> HWND {
+		// SAFETY: pure query on a validated handle; the process id is not needed.
+		let thread = unsafe { GetWindowThreadProcessId(top_level, std::ptr::null_mut()) };
+		if thread == 0 {
+			return top_level;
+		}
+		// SAFETY: info is fully initialized before the call and read afterwards.
+		let mut info: GUITHREADINFO = unsafe { zeroed() };
+		info.cbSize = size_of::<GUITHREADINFO>() as u32;
+		// SAFETY: GetGUIThreadInfo only writes through the provided pointer.
+		if unsafe { GetGUIThreadInfo(thread, &mut info) } == 0 {
+			return top_level;
+		}
+		for candidate in [info.hwndCaret, info.hwndActive] {
+			if candidate.is_null() {
+				continue;
+			}
+			// SAFETY: IsWindow and GetAncestor are pure queries on returned handles.
+			let rooted =
+				unsafe { IsWindow(candidate) != 0 && GetAncestor(candidate, GA_ROOT) == top_level };
+			if rooted {
+				return candidate;
+			}
+		}
+		top_level
 	}
 
 	fn post(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> CoreResult<()> {
@@ -431,8 +466,9 @@ mod background {
 	}
 
 	struct KeyEmitter {
-		hwnd:      HWND,
-		alt_depth: u8,
+		hwnd:       HWND,
+		alt_depth:  u8,
+		emit_chars: bool,
 	}
 	impl KeyEmitter {
 		fn transition(&mut self, vk: u16, down: bool) -> CoreResult<()> {
@@ -484,6 +520,17 @@ mod background {
 				}
 			}
 			self.transition(vk, down)?;
+			if down && self.emit_chars {
+				if let KeyName::Char(character) = key {
+					// SAFETY-equivalent: post() validates delivery; this mirrors the
+					// WM_CHAR the target's own TranslateMessage pass would synthesize
+					// for a real keystroke landing on this window.
+					let mut units = [0u16; 2];
+					for &unit in character.encode_utf16(&mut units).iter() {
+						post(self.hwnd, WM_CHAR, usize::from(unit), 1)?;
+					}
+				}
+			}
 			if !down {
 				for modifier in modifiers.into_iter().flatten().rev() {
 					self.transition(modifier, false)?;
@@ -498,7 +545,7 @@ mod background {
 		modifiers: Modifiers,
 		operation: impl FnOnce() -> CoreResult<()>,
 	) -> CoreResult<()> {
-		let mut emitter = KeyEmitter { hwnd, alt_depth: 0 };
+		let mut emitter = KeyEmitter { hwnd, alt_depth: 0, emit_chars: false };
 		let mut held = Vec::with_capacity(4);
 		for key in super::modifier_keys(modifiers) {
 			if let Err(error) = emitter.key(key, true) {
@@ -523,13 +570,14 @@ mod background {
 
 	pub(super) fn key_chord(id: &str, keys: &[KeyName]) -> CoreResult<()> {
 		let hwnd = hwnd(id)?;
-		let kind = if keys.len() > 1 || keys.iter().any(|key| key.is_modifier()) {
+		let combo = keys.len() > 1 || keys.iter().any(|key| key.is_modifier());
+		let kind = if combo {
 			EventKind::KeyCombo
 		} else {
 			EventKind::Keystroke
 		};
 		ensure_delivery(id, hwnd, kind)?;
-		let mut emitter = KeyEmitter { hwnd, alt_depth: 0 };
+		let mut emitter = KeyEmitter { hwnd: input_sink(hwnd), alt_depth: 0, emit_chars: !combo };
 		let mut held = Vec::with_capacity(keys.len());
 		for &key in keys {
 			if let Err(error) = emitter.key(key, true) {
@@ -554,11 +602,12 @@ mod background {
 	pub(super) fn type_text(id: &str, text: &str) -> CoreResult<()> {
 		let hwnd = hwnd(id)?;
 		ensure_delivery(id, hwnd, EventKind::TextInput)?;
+		let sink = input_sink(hwnd);
 		for character in text.chars() {
 			let character = if character == '\n' { '\r' } else { character };
 			let mut units = [0; 2];
 			for &unit in character.encode_utf16(&mut units).iter() {
-				post(hwnd, WM_CHAR, usize::from(unit), 1)?;
+				post(sink, WM_CHAR, usize::from(unit), 1)?;
 			}
 		}
 		Ok(())
