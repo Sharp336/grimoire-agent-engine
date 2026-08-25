@@ -16,6 +16,7 @@ import {
 import { reset as resetCapabilities } from "../../capability";
 import { showGitOverlay } from "../../cli/git-tui";
 import {
+	createScopeAwareModelResolver,
 	formatModelSelectorValue,
 	resolveAdvisorRoleSelection,
 	resolveModelRoleValue,
@@ -298,6 +299,7 @@ export class SelectorController {
 			const advisorRoleSel = resolveAdvisorRoleSelection(
 				this.ctx.settings,
 				this.ctx.session.modelRegistry.getAvailable(),
+				(provider, modelId) => this.ctx.session.modelRegistry.find(provider, modelId),
 			);
 			const defaultAdvisorModel = advisorRoleSel?.model;
 			const deps: AdvisorConfigDeps = {
@@ -996,10 +998,17 @@ export class SelectorController {
 								exposesPersistedFallback
 							) {
 								const scopedModels = this.ctx.session.scopedModels.map(sm => sm.model);
+								const scopeFiltered =
+									scopedModels.length > 0 || (this.ctx.settings.get("enabledModels")?.length ?? 0) > 0;
 								const availableModels =
 									scopedModels.length > 0 ? scopedModels : this.ctx.session.getAvailableModels();
 								const resolved = resolveModelRoleValue(fallbackRoleValue, availableModels, {
 									settings: this.ctx.settings,
+									resolveProviderModelReference: createScopeAwareModelResolver(
+										this.ctx.session.modelRegistry,
+										availableModels,
+										scopeFiltered,
+									),
 								});
 								if (resolved.model) {
 									const fallbackModel = resolved.model;

@@ -1,9 +1,11 @@
 import { describe, expect, test } from "bun:test";
-import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
+import type { Api, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
 import {
+	createScopeAwareModelResolver,
 	expandRoleAlias,
 	extractExplicitThinkingSelector,
 	filterAvailableModelsByEnabledPatterns,
@@ -21,6 +23,7 @@ import {
 	resolveModelOverride,
 	resolveModelRoleValue,
 	resolveModelScope,
+	resolveProviderModelReference,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { DEFAULT_MODEL_ROLE_ALIAS, LEGACY_MODEL_ROLE_ALIAS_PREFIX } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -1556,6 +1559,130 @@ describe("resolveCliModel", () => {
 		expect(result.model?.id).toBe("z-ai/glm-4.7-20251222:nitro");
 	});
 
+	test("resolves OpenRouter preset selectors to a cloned catalog model", () => {
+		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
+
+		const result = resolveCliModel({
+			cliModel: "openrouter/@preset/custom-openrouter-preset",
+			modelRegistry: registry,
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.api).toBe("openrouter");
+		const compat = result.model?.compat;
+		expect(compat && "wireModelIdMode" in compat ? compat.wireModelIdMode : undefined).toBe("openrouter");
+		expect(result.model?.id).toBe("@preset/custom-openrouter-preset");
+		expect(result.model?.requestModelId).toBe("@preset/custom-openrouter-preset");
+		expect(result.model?.thinking?.efforts).toContain(Effort.High);
+		expect(result.model?.contextWindow).toBeGreaterThan(0);
+		expect(result.model?.maxTokens).toBeGreaterThan(0);
+		expect(result.model?.reasoning).toBe(true);
+		// Presets are unknown-modality virtual references; the default stays
+		// text-only so a text-only routed model is not forced to accept images
+		// (a vision preset opts in via a per-model override on the preset id).
+		expect(result.model?.input).toEqual(["text"]);
+		expect(result.selector).toBe("openrouter/@preset/custom-openrouter-preset");
+	});
+
+	test("resolves an OpenRouter preset selector with an uppercase prefix", () => {
+		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
+
+		const result = resolveCliModel({
+			cliModel: "openrouter/@PRESET/custom-openrouter-preset",
+			modelRegistry: registry,
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.id).toBe("@preset/custom-openrouter-preset");
+		expect(result.model?.requestModelId).toBe("@preset/custom-openrouter-preset");
+	});
+
+	test("parses thinking suffixes after OpenRouter preset selectors", () => {
+		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
+
+		const result = resolveCliModel({
+			cliModel: "openrouter/@preset/custom-openrouter-preset:high",
+			modelRegistry: registry,
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.id).toBe("@preset/custom-openrouter-preset");
+		expect(result.model?.requestModelId).toBe("@preset/custom-openrouter-preset");
+		expect(result.thinkingLevel).toBe(Effort.High);
+	});
+
+	test("parses thinking suffixes with separate --provider/--model flags", () => {
+		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
+
+		const result = resolveCliModel({
+			cliProvider: "openrouter",
+			cliModel: "@preset/custom-openrouter-preset:high",
+			modelRegistry: registry,
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.id).toBe("@preset/custom-openrouter-preset");
+		expect(result.model?.requestModelId).toBe("@preset/custom-openrouter-preset");
+		expect(result.thinkingLevel).toBe(Effort.High);
+	});
+
+	test("resolves an explicit OpenRouter provider with a bare preset id", () => {
+		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
+
+		const result = resolveCliModel({
+			cliProvider: "openrouter",
+			cliModel: "@preset/custom-openrouter-preset",
+			modelRegistry: registry,
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.id).toBe("@preset/custom-openrouter-preset");
+		expect(result.model?.requestModelId).toBe("@preset/custom-openrouter-preset");
+	});
+
+	test("rejects an empty @preset/ selector", () => {
+		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
+
+		const result = resolveCliModel({
+			cliModel: "openrouter/@preset/",
+			modelRegistry: registry,
+		});
+
+		expect(result.model).toBeUndefined();
+		expect(result.error).toContain("not found");
+	});
+
+	test("does not resolve a preset selector when no openrouter model is available", () => {
+		const registry = { getAll: () => mockModels, getAvailable: () => mockModels } as unknown as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
+
+		const result = resolveCliModel({
+			cliModel: "openrouter/@preset/custom-openrouter-preset",
+			modelRegistry: registry,
+		});
+
+		expect(result.model).toBeUndefined();
+		expect(result.error).toContain("not found");
+	});
+
 	test("accepts Bedrock inference profile ARNs and preserves thinking suffixes", () => {
 		const defaultBedrockModel = createBedrockDefaultModel();
 		const profileArn = "arn:aws:bedrock:us-east-2:1234567890:application-inference-profile/company-opus-48";
@@ -2040,6 +2167,27 @@ describe("provider routing selector (@upstream)", () => {
 		expect(result.selector).toBe("openrouter/z-ai/glm-4.7@cerebras");
 		expect(openRouterOnly(result.model)).toEqual(["cerebras"]);
 	});
+
+	test("resolveCliModel routes an OpenRouter preset through @upstream", () => {
+		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
+		const result = resolveCliModel({
+			cliModel: "openrouter/@preset/custom-openrouter-preset@cerebras",
+			modelRegistry: registry,
+		});
+		expect(result.error).toBeUndefined();
+		expect(result.model?.id).toBe("@preset/custom-openrouter-preset");
+		expect(result.selector).toBe("openrouter/@preset/custom-openrouter-preset@cerebras");
+		expect(openRouterOnly(result.model)).toEqual(["cerebras"]);
+	});
+
+	test("routes an OpenRouter preset through an @upstream slug (parseModelPattern)", () => {
+		const result = parseModelPattern("openrouter/@preset/custom-openrouter-preset@cerebras", allModels);
+		expect(result.model?.id).toBe("@preset/custom-openrouter-preset");
+		expect(result.upstream).toBe("cerebras");
+		expect(openRouterOnly(result.model)).toEqual(["cerebras"]);
+	});
 });
 
 describe("filterAvailableModelsByEnabledPatterns", () => {
@@ -2243,5 +2391,181 @@ describe("effort-tier variant aliases", () => {
 	test("consumed X-thinking twins resolve via the grammar fallback", () => {
 		expect(parseModelPattern("venice/kimi-k2-thinking", variantModels).model?.id).toBe("kimi-k2");
 		expect(parseModelPattern("kimi-k2-thinking", variantModels).model?.id).toBe("kimi-k2");
+	});
+});
+
+describe("resolveProviderModelReference OpenRouter preset fallback", () => {
+	test("synthesizes a preset model from an available OpenRouter provider row", () => {
+		const result = resolveProviderModelReference("openrouter", "@preset/custom-openrouter-preset", allModels);
+		expect(result).toBeDefined();
+		expect(result?.provider).toBe("openrouter");
+		expect(result?.id).toBe("@preset/custom-openrouter-preset");
+		expect(result?.requestModelId).toBe("@preset/custom-openrouter-preset");
+		expect(result?.thinking?.efforts).toContain(Effort.High);
+	});
+
+	test("returns undefined when no OpenRouter provider row is available", () => {
+		const result = resolveProviderModelReference("openrouter", "@preset/custom-openrouter-preset", mockModels);
+		expect(result).toBeUndefined();
+	});
+
+	test("returns undefined for empty @preset/ id", () => {
+		expect(resolveProviderModelReference("openrouter", "@preset/", allModels)).toBeUndefined();
+		expect(resolveProviderModelReference("openrouter", "@preset", allModels)).toBeUndefined();
+	});
+
+	test("rejects preset slugs that contain selector delimiters", () => {
+		expect(
+			resolveProviderModelReference("openrouter", "@preset/custom-openrouter-preset@cerebras", allModels),
+		).toBeUndefined();
+		expect(
+			resolveProviderModelReference("openrouter", "@preset/custom-openrouter-preset:high", allModels),
+		).toBeUndefined();
+	});
+
+	test("never inherits per-model transport metadata from an OpenRouter row", () => {
+		const template = buildModel({
+			id: "z-ai/glm-4.7",
+			name: "GLM 4.7",
+			api: "openrouter",
+			provider: "openrouter",
+			baseUrl: "https://gateway.example/v1",
+			// These are row-level transport headers (modelOverrides.targeted): the
+			// preset must not copy them, or every preset request would carry a
+			// header that was scoped to one catalog model.
+			headers: { "X-Custom-Model-Header": "value" },
+			transport: "pi-native",
+			reasoning: true,
+			thinking: { mode: "budget", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] },
+			input: ["text"],
+			cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		} as ModelSpec<"openrouter">);
+
+		const result = resolveProviderModelReference("openrouter", "@preset/custom-openrouter-preset", [template]);
+		expect(result?.baseUrl).toBe("https://gateway.example/v1");
+		expect(result?.headers).toBeUndefined();
+		expect(result?.transport).toBeUndefined();
+	});
+
+	test("preserves provider-level transport fields from provider settings", () => {
+		const template = buildModel({
+			id: "z-ai/glm-4.7",
+			name: "GLM 4.7",
+			api: "openrouter",
+			provider: "openrouter",
+			baseUrl: "https://gateway.example/v1",
+			headers: { "X-Custom-Model-Header": "value" },
+			reasoning: true,
+			thinking: { mode: "budget", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] },
+			input: ["text"],
+			cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		} as ModelSpec<"openrouter">);
+		const settings = {
+			baseUrl: "https://provider.example/v1",
+			headers: { "X-Provider-Header": "value" },
+			compat: { disableStrictTools: true },
+			remoteCompaction: { enabled: true, api: "openai-responses" },
+			transport: "pi-native",
+		} as const;
+
+		const result = resolveProviderModelReference(
+			"openrouter",
+			"@preset/custom-openrouter-preset",
+			[template],
+			settings,
+		);
+		expect(result?.baseUrl).toBe("https://provider.example/v1");
+		expect(result?.headers).toEqual({ "X-Provider-Header": "value" });
+		expect(result?.transport).toBe("pi-native");
+		// Per-model row header never leaks through, even with settings present.
+		expect(result?.headers?.["X-Custom-Model-Header"]).toBeUndefined();
+		expect((result?.compatConfig as { disableStrictTools?: boolean } | undefined)?.disableStrictTools).toBe(true);
+		expect(result?.remoteCompaction).toMatchObject({ enabled: true, api: "openai-responses" });
+	});
+
+	test("keeps a usable context window so proactive compaction can trigger", () => {
+		// A null sentinel disables SessionMaintenance's compaction threshold
+		// (it gates on `contextWindow > 0`), forcing overflow/recovery to the
+		// upstream limit instead of compacting first. Presets must carry a
+		// positive window.
+		const result = resolveProviderModelReference("openrouter", "@preset/custom-openrouter-preset", allModels);
+		expect(result?.contextWindow).toBeGreaterThan(0);
+		expect(result?.maxTokens).toBeGreaterThan(0);
+	});
+
+	test("does not resolve an excluded non-preset catalog model through the registry resolver", () => {
+		// `enabledModels` permits `openrouter/model-a` but a role names
+		// `openrouter/model-b`. The registry resolver must not leak the
+		// excluded `model-b` (present in the full catalog, absent from the
+		// candidate set) — only preset ids may use the registry resolver.
+		const modelA = buildModel({
+			id: "model-a",
+			name: "model-a",
+			api: "openrouter",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		} as ModelSpec<"openrouter">);
+		const modelB = buildModel({
+			id: "model-b",
+			name: "model-b",
+			api: "openrouter",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		} as ModelSpec<"openrouter">);
+
+		const resolver = () => modelB;
+		const result = parseModelPattern("openrouter/model-b", [modelA], undefined, undefined, resolver);
+		expect(result.model).toBeUndefined();
+	});
+
+	test("resolveModelFromString resolves a preset through the registry resolver", () => {
+		const resolver = (provider: string, modelId: string) =>
+			resolveProviderModelReference(provider, modelId, allModels);
+		const result = resolveModelFromString(
+			"openrouter/@preset/custom-openrouter-preset",
+			allModels,
+			undefined,
+			resolver,
+		);
+		expect(result?.provider).toBe("openrouter");
+		expect(result?.id).toBe("@preset/custom-openrouter-preset");
+	});
+
+	test("keeps preset resolution within the enabled-models scope", () => {
+		const preset = resolveProviderModelReference("openrouter", "@preset/custom-openrouter-preset", allModels);
+		expect(preset).toBeDefined();
+		const registry = { find: () => preset };
+		// Scope-filtered, preset NOT in the candidate set → not admitted.
+		const filtered = createScopeAwareModelResolver(registry, [allModels[0]!], true);
+		expect(filtered?.("openrouter", "@preset/custom-openrouter-preset")).toBeUndefined();
+		// Scope-filtered, preset admitted (present in the candidate set) → returned.
+		const admitted = createScopeAwareModelResolver(registry, [preset!], true);
+		expect(admitted?.("openrouter", "@preset/custom-openrouter-preset")).toBe(preset);
+		// Unfiltered scope → returned regardless of candidate set.
+		const unfiltered = createScopeAwareModelResolver(registry, [], false);
+		expect(unfiltered?.("openrouter", "@preset/custom-openrouter-preset")).toBe(preset);
+	});
+
+	test("defaults presets to text-only so a text-only routed model is not forced to accept images", () => {
+		// Presets never know the routed upstream's modality. Defaulting to
+		// image-capable would turn attachments on a text-only model into wire
+		// errors; a vision preset opts in via a per-model override on the preset
+		// id (ModelRegistry.find applies `modelOverrides` to the preset).
+		const result = resolveProviderModelReference("openrouter", "@preset/custom-openrouter-preset", allModels);
+		expect(result?.input).toEqual(["text"]);
 	});
 });

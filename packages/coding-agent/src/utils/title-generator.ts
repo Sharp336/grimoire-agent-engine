@@ -112,7 +112,9 @@ function getTitleModel(registry: ModelRegistry, settings: Settings, currentModel
 	const availableModels = registry.getAvailable();
 	if (availableModels.length === 0) return undefined;
 
-	const titleModel = resolveRoleSelection(["tiny", "commit", "smol"], settings, availableModels)?.model;
+	const titleModel = resolveRoleSelection(["tiny", "commit", "smol"], settings, availableModels, (provider, modelId) =>
+		registry.find(provider, modelId),
+	)?.model;
 	if (titleModel) return titleModel;
 
 	if (currentModel) return currentModel;

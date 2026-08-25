@@ -630,7 +630,11 @@ export class SessionAdvisors {
 					continue;
 				}
 			} else {
-				const sel = resolveAdvisorRoleSelection(this.#host.settings, this.#host.modelRegistry.getAvailable());
+				const sel = resolveAdvisorRoleSelection(
+					this.#host.settings,
+					this.#host.modelRegistry.getAvailable(),
+					(provider, modelId) => this.#host.modelRegistry.find(provider, modelId),
+				);
 				if (!sel) {
 					this.#advisorStatuses.set(slug, { name: config.name, status: "no_model" });
 					if (emitWarnings) {
@@ -1749,7 +1753,11 @@ export class SessionAdvisors {
 		if (this.#advisors.length > 0) {
 			return this.#advisors.some(a => this.#host.modelRegistry.isUsingOAuth(a.model));
 		}
-		const sel = resolveAdvisorRoleSelection(this.#host.settings, this.#host.modelRegistry.getAvailable());
+		const sel = resolveAdvisorRoleSelection(
+			this.#host.settings,
+			this.#host.modelRegistry.getAvailable(),
+			(provider, modelId) => this.#host.modelRegistry.find(provider, modelId),
+		);
 		return sel ? this.#host.modelRegistry.isUsingOAuth(sel.model) : false;
 	}
 	/**

@@ -2113,7 +2113,13 @@ export class SessionMaintenance {
 		addCandidate(preferredModel ?? undefined);
 		for (const role of MODEL_ROLE_IDS) {
 			addCandidate(
-				resolveRoleModelFull(this.#host.settings, role, availableModels, preferredModel ?? undefined).model,
+				resolveRoleModelFull(
+					this.#host.settings,
+					role,
+					availableModels,
+					preferredModel ?? undefined,
+					(provider, modelId) => this.#host.modelRegistry.find(provider, modelId),
+				).model,
 			);
 		}
 

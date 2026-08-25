@@ -7,6 +7,7 @@
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import type { ModelRegistry } from "../../config/model-registry";
+import { createScopeAwareModelResolver } from "../../config/model-resolver";
 import type { Settings } from "../../config/settings";
 import type { ResolvedRoleModel } from "../../session/agent-session";
 import { theme } from "../theme/theme";
@@ -156,8 +157,14 @@ export class ModelPickerComponent implements Component {
 			}
 		}
 
-		const allModels = this.#scopedModels.length > 0 ? models : this.#registry.getAll();
-		const roles = resolveRoleAssignments(this.#settings, allModels, models);
+		const scoped = this.#scopedModels.length > 0;
+		const allModels = scoped ? models : this.#registry.getAll();
+		const roles = resolveRoleAssignments(
+			this.#settings,
+			allModels,
+			models,
+			createScopeAwareModelResolver(this.#registry, models, scoped),
+		);
 		const storage = this.#settings.getStorage();
 		const mruOrder = storage?.getModelUsageOrder() ?? [];
 		this.#modelItems = buildBrowserItems(models);

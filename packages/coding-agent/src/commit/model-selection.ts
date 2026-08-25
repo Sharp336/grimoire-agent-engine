@@ -41,9 +41,16 @@ export async function resolvePrimaryModel(
 ): Promise<ResolvedCommitModel> {
 	const available = modelRegistry.getAvailable();
 	const matchPreferences = getModelMatchPreferences(settings);
+	const resolveReference = modelRegistry.find
+		? (provider: string, modelId: string) => modelRegistry.find!(provider, modelId)
+		: undefined;
 	const resolved = override
-		? resolveModelRoleValue(override, available, { settings, matchPreferences })
-		: resolveRoleSelection(["commit", "smol", ...MODEL_ROLE_IDS], settings, available);
+		? resolveModelRoleValue(override, available, {
+				settings,
+				matchPreferences,
+				resolveProviderModelReference: resolveReference,
+			})
+		: resolveRoleSelection(["commit", "smol", ...MODEL_ROLE_IDS], settings, available, resolveReference);
 	const model = resolved?.model;
 	if (!model) {
 		throw new Error("No model available for commit generation");
@@ -66,7 +73,12 @@ export async function resolveSmolModel(
 	fallbackApiKey: ApiKey,
 ): Promise<ResolvedCommitModel> {
 	const available = modelRegistry.getAvailable();
-	const resolvedSmol = resolveRoleSelection(["smol"], settings, available);
+	const resolvedSmol = resolveRoleSelection(
+		["smol"],
+		settings,
+		available,
+		modelRegistry.find ? (provider, modelId) => modelRegistry.find!(provider, modelId) : undefined,
+	);
 	if (resolvedSmol?.model) {
 		const apiKey = await modelRegistry.getApiKey(resolvedSmol.model);
 		if (apiKey) {

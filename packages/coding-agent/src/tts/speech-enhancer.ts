@@ -76,6 +76,7 @@ export class SpeechEnhancer {
 			const model = resolveModelRoleValue("@tiny", registry.getAvailable(), {
 				settings,
 				matchPreferences: getModelMatchPreferences(settings),
+				resolveProviderModelReference: (provider, modelId) => registry.find(provider, modelId),
 			}).model;
 			if (!model) return null;
 			const apiKey = await registry.getApiKey(model, sessionId);

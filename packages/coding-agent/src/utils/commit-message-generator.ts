@@ -59,6 +59,7 @@ function getSmolModelCandidates(
 	const configuredSmol = resolveModelRoleValue(settings.getModelRole("smol"), availableModels, {
 		settings,
 		matchPreferences,
+		resolveProviderModelReference: (provider, modelId) => registry.find(provider, modelId),
 	});
 	addCandidate(configuredSmol.model, concreteThinkingLevel(configuredSmol.thinkingLevel));
 

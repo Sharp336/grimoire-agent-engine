@@ -58,6 +58,7 @@ import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode
 import { shouldInlineToolDescriptors } from "./config/inline-tool-descriptors-mode";
 import { isAuthenticated, kNoAuth, ModelRegistry } from "./config/model-registry";
 import {
+	createScopeAwareModelResolver,
 	formatModelSelectorValue,
 	formatModelString,
 	formatModelStringWithRouting,
@@ -69,6 +70,7 @@ import {
 	resolveCliModel,
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
+	resolveProviderModelReference,
 } from "./config/model-resolver";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
@@ -1469,10 +1471,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			? modelRegistry.getAvailableForProviders(explicitDefaultProviders)
 			: resolveAllowedModels(modelRegistry, settings, modelMatchPreferences),
 	);
+	const modelScopeFiltered = (settings.get("enabledModels")?.length ?? 0) > 0;
+	const scopeAwareReference = createScopeAwareModelResolver(modelRegistry, allowedModels, modelScopeFiltered);
 	let defaultRoleSpec = logger.time("resolveDefaultModelRole", () =>
 		resolveModelRoleValue(defaultRoleValue, allowedModels, {
 			settings,
 			matchPreferences: modelMatchPreferences,
+			resolveProviderModelReference: scopeAwareReference,
 		}),
 	);
 	let model = options.model;
@@ -1503,8 +1508,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					failedSessionModel ??= sessionModelStr;
 					continue;
 				}
-
-				const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
+				const restoredModel =
+					modelRegistry.find(parsedModel.provider, parsedModel.id) ??
+					resolveProviderModelReference(parsedModel.provider, parsedModel.id, modelRegistry.getAll());
 				if (restoredModel && hasModelAuth(restoredModel)) {
 					model = restoredModel;
 					restoredSessionModelIndex = i;
@@ -2262,6 +2268,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 			const allModels = modelRegistry.getAll();
 			const availableModels = modelRegistry.getAvailable();
+			// Registry-backed resolution so a deferred OpenRouter `@preset/…`
+			// fallback in this function still carries provider settings and
+			// preset-specific `modelOverrides`, matching startup paths that
+			// already resolve through the registry.
+			const resolveReference = modelRegistry.find
+				? (provider: string, modelId: string) => modelRegistry.find!(provider, modelId)
+				: undefined;
 			const expandedModelPatterns = deferredModelPatterns.flatMap(pattern =>
 				pattern.split(",").flatMap(selector => {
 					const trimmedSelector = selector.trim();
@@ -2292,9 +2305,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							modelLookup: modelRegistry,
 						};
 						const originalSelector = resolved.configuredPatterns[0];
-						const availableOriginal = parseModelPattern(originalSelector, availableModels, matchPreferences);
+						const availableOriginal = parseModelPattern(
+							originalSelector,
+							availableModels,
+							matchPreferences,
+							undefined,
+							resolveReference,
+						);
 						const originalModel =
-							availableOriginal.model ?? parseModelPattern(originalSelector, allModels, matchPreferences).model;
+							availableOriginal.model ??
+							parseModelPattern(originalSelector, allModels, matchPreferences, undefined, resolveReference)
+								.model;
 						const chainKey = resolveRetryFallbackChainKey(
 							fallbackContext,
 							originalSelector,
@@ -2337,14 +2358,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				}),
 			);
 			const resolutionModels = expandedModelPatterns.some(
-				({ pattern }) => parseModelPattern(pattern, availableModels, matchPreferences).model,
+				({ pattern }) =>
+					parseModelPattern(pattern, availableModels, matchPreferences, undefined, resolveReference).model,
 			)
 				? availableModels
 				: allModels;
 			let usageFallbackTriggered = false;
 			for (let patternIndex = 0; patternIndex < expandedModelPatterns.length; patternIndex += 1) {
 				const { pattern, retryFallback } = expandedModelPatterns[patternIndex];
-				const primary = parseModelPattern(pattern, resolutionModels, matchPreferences);
+				const primary = parseModelPattern(pattern, resolutionModels, matchPreferences, undefined, resolveReference);
 				if (!primary.model || (retryFallback && !hasModelAuth(primary.model))) continue;
 				let hasUsageFallbackCandidate = false;
 				for (
@@ -2356,6 +2378,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						expandedModelPatterns[candidateIndex].pattern,
 						resolutionModels,
 						matchPreferences,
+						undefined,
+						resolveReference,
 					);
 					if (candidate.model && hasModelAuth(candidate.model)) {
 						hasUsageFallbackCandidate = true;
@@ -2427,6 +2451,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							options.modelPatternAuthFallback,
 							resolutionModels,
 							matchPreferences,
+							undefined,
+							resolveReference,
 						);
 						if (fallback.model) {
 							const fallbackKey = await modelRegistry.getApiKey(fallback.model);
@@ -2447,7 +2473,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					const seenSelectors = new Set<string>([primarySelector]);
 					const fallbackSelectors: string[] = [];
 					for (const fallbackEntry of expandedModelPatterns.slice(patternIndex + 1)) {
-						const fallback = parseModelPattern(fallbackEntry.pattern, resolutionModels, matchPreferences);
+						const fallback = parseModelPattern(
+							fallbackEntry.pattern,
+							resolutionModels,
+							matchPreferences,
+							undefined,
+							resolveReference,
+						);
 						if (!fallback.model) continue;
 						const fallbackSelector = formatModelSelectorValue(
 							formatModelStringWithRouting(fallback.model),
@@ -2534,9 +2566,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// Re-resolve the allowed set: extension factories and discovery
 				// refreshes above may have registered models not visible earlier.
 				const fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
+				const scopeAwareFallbackReference = createScopeAwareModelResolver(
+					modelRegistry,
+					fallbackCandidates,
+					modelScopeFiltered,
+				);
 				const reResolvedRoleSpec = resolveModelRoleValue(settings.getModelRole("default"), fallbackCandidates, {
 					settings,
 					matchPreferences: modelMatchPreferences,
+					resolveProviderModelReference: scopeAwareFallbackReference,
 				});
 				if (!reResolvedRoleSpec.model) return false;
 				defaultRoleSpec = reResolvedRoleSpec;

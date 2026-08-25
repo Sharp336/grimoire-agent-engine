@@ -184,12 +184,23 @@ export class ModelControls {
 		this.#serviceTierByFamily = tiers;
 	}
 	resolveRoleModel(role: string): Model | undefined {
-		return resolveRoleModelFull(this.#host.settings, role, this.#host.modelRegistry.getAvailable(), this.#model)
-			.model;
+		return resolveRoleModelFull(
+			this.#host.settings,
+			role,
+			this.#host.modelRegistry.getAvailable(),
+			this.#model,
+			(provider, modelId) => this.#host.modelRegistry.find(provider, modelId),
+		).model;
 	}
 
 	resolveRoleModelWithThinking(role: string): ResolvedModelRoleValue {
-		return resolveRoleModelFull(this.#host.settings, role, this.#host.modelRegistry.getAvailable(), this.#model);
+		return resolveRoleModelFull(
+			this.#host.settings,
+			role,
+			this.#host.modelRegistry.getAvailable(),
+			this.#model,
+			(provider, modelId) => this.#host.modelRegistry.find(provider, modelId),
+		);
 	}
 
 	resolveTemporaryModelThinkingLevel(model: Model): ConfiguredThinkingLevel | undefined {
@@ -204,6 +215,7 @@ export class ModelControls {
 			const resolved = resolveModelRoleValue(roleValue, availableModels, {
 				settings: this.#host.settings,
 				matchPreferences,
+				resolveProviderModelReference: (provider, modelId) => this.#host.modelRegistry.find(provider, modelId),
 			});
 			if (!resolved.explicitThinkingLevel || resolved.thinkingLevel === undefined || !resolved.model) continue;
 			if (modelsAreEqual(resolved.model, model)) return resolved.thinkingLevel;
@@ -334,6 +346,7 @@ export class ModelControls {
 			const resolved = resolveModelRoleValue(roleModelStr, availableModels, {
 				settings: this.#host.settings,
 				matchPreferences,
+				resolveProviderModelReference: (provider, modelId) => this.#host.modelRegistry.find(provider, modelId),
 			});
 			if (!resolved.model) continue;
 
@@ -484,7 +497,9 @@ export class ModelControls {
 		const all = this.#host.modelRegistry.getAvailable();
 		const patterns = this.#host.settings.get("enabledModels");
 		if (!patterns || patterns.length === 0) return all;
-		return filterAvailableModelsByEnabledPatterns(all, patterns, this.#host.settings);
+		return filterAvailableModelsByEnabledPatterns(all, patterns, this.#host.settings, (provider, modelId) =>
+			this.#host.modelRegistry.find(provider, modelId),
+		);
 	}
 
 	// =========================================================================

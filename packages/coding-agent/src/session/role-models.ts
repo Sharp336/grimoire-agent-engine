@@ -69,6 +69,7 @@ export function resolveRoleModelFull(
 	role: string,
 	availableModels: Model[],
 	currentModel: Model | undefined,
+	resolveProviderModelReference?: (provider: string, modelId: string) => Model | undefined,
 ): ResolvedModelRoleValue {
 	const roleModelStr =
 		role === "default"
@@ -81,5 +82,6 @@ export function resolveRoleModelFull(
 	return resolveModelRoleValue(roleModelStr, availableModels, {
 		settings,
 		matchPreferences: getModelMatchPreferences(settings),
+		resolveProviderModelReference,
 	});
 }

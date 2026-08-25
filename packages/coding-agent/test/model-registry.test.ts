@@ -239,6 +239,109 @@ describe("ModelRegistry", () => {
 		});
 	});
 
+	describe("OpenRouter preset provider-scoped settings", () => {
+		let presetRegistry: ModelRegistry;
+		beforeAll(() => {
+			presetRegistry = readonlyRegistry({
+				providers: {
+					openrouter: {
+						baseUrl: "https://gateway.example/v1",
+						headers: { "X-Provider-Header": "provider-value" },
+						compat: { supportsUsageInStreaming: false },
+						disableStrictTools: true,
+						remoteCompaction: {
+							enabled: true,
+							api: "openai-responses",
+							endpoint: "https://gateway.example/v1/responses/provider-compact",
+							model: "provider-compact",
+						},
+						transport: "pi-native",
+						modelOverrides: {
+							"anthropic/claude-sonnet-4": { headers: { "X-Custom-Model-Header": "value" } },
+						},
+					},
+				},
+			});
+		});
+
+		test("preset uses provider headers, never per-model override headers", () => {
+			const preset = presetRegistry.find("openrouter", "@preset/custom-openrouter-preset");
+			expect(preset).toBeDefined();
+			expect(preset?.provider).toBe("openrouter");
+			expect(preset?.headers).toEqual({ "X-Provider-Header": "provider-value" });
+			expect(preset?.headers?.["X-Custom-Model-Header"]).toBeUndefined();
+		});
+
+		test("preset carries provider transport settings", () => {
+			const preset = presetRegistry.find("openrouter", "@preset/custom-openrouter-preset");
+			expect(preset?.baseUrl).toBe("https://gateway.example/v1");
+			expect(preset?.transport).toBe("pi-native");
+		});
+
+		test("preset carries provider compat and compaction settings", () => {
+			const preset = presetRegistry.find("openrouter", "@preset/custom-openrouter-preset");
+			const compat = preset?.compatConfig as
+				| { disableStrictTools?: boolean; supportsUsageInStreaming?: boolean }
+				| undefined;
+			expect(compat?.disableStrictTools).toBe(true);
+			expect(compat?.supportsUsageInStreaming).toBe(false);
+			expect(preset?.remoteCompaction).toMatchObject({
+				enabled: true,
+				api: "openai-responses",
+				endpoint: "https://gateway.example/v1/responses/provider-compact",
+				model: "provider-compact",
+			});
+		});
+
+		test("preset retains provider settings with a case-varied provider spelling", () => {
+			const preset = presetRegistry.find("OPENROUTER", "@preset/custom-openrouter-preset");
+			expect(preset).toBeDefined();
+			expect(preset?.baseUrl).toBe("https://gateway.example/v1");
+			expect(preset?.headers).toEqual({ "X-Provider-Header": "provider-value" });
+			expect(preset?.transport).toBe("pi-native");
+			const compat = preset?.compatConfig as { disableStrictTools?: boolean } | undefined;
+			expect(compat?.disableStrictTools).toBe(true);
+		});
+
+		test("preset override can enable image input for a vision-capable routed model", () => {
+			const visionRegistry = readonlyRegistry({
+				providers: {
+					openrouter: {
+						baseUrl: "https://gateway.example/v1",
+						modelOverrides: {
+							"@preset/custom-openrouter-preset": { input: ["text", "image"] },
+						},
+					},
+				},
+			});
+			const preset = visionRegistry.find("openrouter", "@preset/custom-openrouter-preset");
+			expect(preset).toBeDefined();
+			expect(preset?.input).toEqual(["text", "image"]);
+		});
+
+		test("getProviderOverride materializes live header values", () => {
+			const prior = Bun.env.OMP_TEST_HEADER;
+			Bun.env.OMP_TEST_HEADER = "from-env";
+			try {
+				const registry = readonlyRegistry({
+					providers: {
+						openrouter: {
+							baseUrl: "https://gateway.example/v1",
+							headers: { "X-Env": "OMP_TEST_HEADER" },
+						},
+					},
+				});
+				// Config-only override: header sources must be materialized (env/`!cmd`
+				// resolved) before consumers read them, never raw `models.yml` placeholders.
+				expect(registry.getProviderOverride("openrouter")?.headers?.["X-Env"]).toBe("from-env");
+				expect(registry.getProviderHeaders("openrouter")?.["X-Env"]).toBe("from-env");
+			} finally {
+				if (prior === undefined) delete Bun.env.OMP_TEST_HEADER;
+				else Bun.env.OMP_TEST_HEADER = prior;
+			}
+		});
+	});
+
 	describe("Bedrock inference profile ARN fallback", () => {
 		let registry: ModelRegistry;
 		beforeAll(() => {

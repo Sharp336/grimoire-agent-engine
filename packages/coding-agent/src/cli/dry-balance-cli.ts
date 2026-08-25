@@ -17,6 +17,7 @@ import { formatDuration, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import {
+	createScopeAwareModelResolver,
 	formatModelString,
 	getModelMatchPreferences,
 	resolveAllowedModels,
@@ -72,6 +73,7 @@ export interface DryBalanceModelRegistry {
 	authStorage: DryBalanceAuthStorage;
 	getAll(): Model<Api>[];
 	getAvailable(): Model<Api>[];
+	find?: (provider: string, modelId: string) => Model<Api> | undefined;
 	getApiKey(model: Model<Api>, sessionId?: string): Promise<string | undefined>;
 }
 
@@ -570,9 +572,11 @@ async function resolveDryBalanceModel(
 		);
 	}
 
+	const modelScopeFiltered = (settings?.get("enabledModels")?.length ?? 0) > 0;
 	const defaultRoleSpec = resolveModelRoleValue(settings?.getModelRole("default"), allowedModels, {
 		settings,
 		matchPreferences: preferences,
+		resolveProviderModelReference: createScopeAwareModelResolver(modelRegistry, allowedModels, modelScopeFiltered),
 	});
 	if (defaultRoleSpec.model) {
 		return { model: defaultRoleSpec.model, warning: defaultRoleSpec.warning };

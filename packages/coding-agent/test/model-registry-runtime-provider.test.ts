@@ -191,6 +191,63 @@ describe("ModelRegistry runtime provider registration", () => {
 		expectProviderHeader(registry, providerName, runtimeHeader, undefined);
 	});
 
+	test("case-varied preset lookup preserves merged config → runtime provider settings", async () => {
+		// Config override for openrouter.
+		fs.writeFileSync(
+			modelsJsonPath,
+			JSON.stringify({
+				providers: {
+					openrouter: {
+						baseUrl: "https://config-gateway.example/v1",
+						headers: { "X-Provider-Header": "config-value" },
+						compat: { supportsUsageInStreaming: false },
+						disableStrictTools: true,
+						remoteCompaction: {
+							enabled: true,
+							api: "openai-responses",
+							endpoint: "https://config-gateway.example/v1/responses/provider-compact",
+							model: "provider-compact",
+						},
+						transport: "pi-native",
+					},
+				},
+			}),
+		);
+		await registry.refresh("offline");
+		// Runtime override: runtime wins on the shared header key, both keys present.
+		registry.registerProvider(
+			"openrouter",
+			{
+				baseUrl: "https://runtime-gateway.example/v1",
+				headers: { "X-Provider-Header": "runtime-wins", "X-Runtime-Header": "runtime" },
+			},
+			"ext://runtime",
+		);
+
+		const override = registry.getProviderOverride("OPENROUTER");
+		expect(override?.baseUrl).toBe("https://runtime-gateway.example/v1");
+		expect(override?.headers?.["X-Provider-Header"]).toBe("runtime-wins");
+		expect(override?.headers?.["X-Runtime-Header"]).toBe("runtime");
+		// Config-only fields survive a partial runtime override.
+		expect(override?.transport).toBe("pi-native");
+		expect((override?.compat as { disableStrictTools?: boolean } | undefined)?.disableStrictTools).toBe(true);
+		expect((override?.compat as { supportsUsageInStreaming?: boolean } | undefined)?.supportsUsageInStreaming).toBe(
+			false,
+		);
+		expect(override?.remoteCompaction).toMatchObject({
+			enabled: true,
+			api: "openai-responses",
+			model: "provider-compact",
+		});
+
+		// The case-varied selector resolves the preset with the merged settings.
+		const preset = registry.find("OPENROUTER", "@preset/custom-openrouter-preset");
+		expect(preset).toBeDefined();
+		expect(preset?.baseUrl).toBe("https://runtime-gateway.example/v1");
+		expect(preset?.headers?.["X-Provider-Header"]).toBe("runtime-wins");
+		expect(preset?.transport).toBe("pi-native");
+	});
+
 	test("registerProvider keeps runtime header objects live for request-time reads", () => {
 		const providerHeaders: Record<string, string> = { "X-Request-ID": "request-1" };
 		const modelHeaders: Record<string, string> = { "X-Message-ID": "message-1" };

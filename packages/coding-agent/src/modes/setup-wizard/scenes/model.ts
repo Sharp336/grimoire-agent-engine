@@ -70,7 +70,9 @@ class ModelSceneController implements SetupSceneController {
 	#syncModels(): void {
 		const registry = this.host.ctx.session.modelRegistry;
 		const available = registry.getAvailable();
-		const roles = resolveRoleAssignments(this.host.ctx.settings, registry.getAll(), available);
+		const roles = resolveRoleAssignments(this.host.ctx.settings, registry.getAll(), available, (provider, modelId) =>
+			registry.find(provider, modelId),
+		);
 		const storage = this.host.ctx.settings.getStorage();
 		const items = buildBrowserItems(available);
 		sortModelItems(items, { roles, mruOrder: storage?.getModelUsageOrder() ?? [] });

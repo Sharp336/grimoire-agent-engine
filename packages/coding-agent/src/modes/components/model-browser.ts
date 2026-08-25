@@ -67,6 +67,7 @@ export function resolveRoleAssignments(
 	settings: Settings,
 	allModels: ReadonlyArray<Model>,
 	autoCandidates: ReadonlyArray<Model>,
+	resolveProviderModelReference?: (provider: string, modelId: string) => Model | undefined,
 ): RoleAssignments {
 	const resolvedThinkingLevel = (
 		role: string,
@@ -91,7 +92,11 @@ export function resolveRoleAssignments(
 		const roleValue = settings.getModelRole(role);
 		if (!roleValue) continue;
 		configuredRoles.add(role);
-		const resolved = resolveModelRoleValue(roleValue, catalog, { settings, matchPreferences });
+		const resolved = resolveModelRoleValue(roleValue, catalog, {
+			settings,
+			matchPreferences,
+			resolveProviderModelReference,
+		});
 		if (resolved.model) {
 			roles[role] = {
 				model: resolved.model,
@@ -105,7 +110,11 @@ export function resolveRoleAssignments(
 		const candidates = [...autoCandidates];
 		for (const role of knownRoles) {
 			if (configuredRoles.has(role)) continue;
-			const resolved = resolveModelRoleValue(`pi/${role}`, candidates, { settings, matchPreferences });
+			const resolved = resolveModelRoleValue(`pi/${role}`, candidates, {
+				settings,
+				matchPreferences,
+				resolveProviderModelReference,
+			});
 			if (!resolved.model) continue;
 			roles[role] = {
 				model: resolved.model,

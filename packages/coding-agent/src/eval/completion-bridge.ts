@@ -76,7 +76,9 @@ function resolveTierModel(tier: CompletionTier, session: ToolSession): Model<Api
 	const resolve = (pattern: string | undefined): Model<Api> | undefined => {
 		if (!pattern) return undefined;
 		const expanded = expandRoleAlias(pattern, session.settings);
-		return resolveModelFromString(expanded, available, matchPreferences);
+		return resolveModelFromString(expanded, available, matchPreferences, (provider, modelId) =>
+			modelRegistry.find(provider, modelId),
+		);
 	};
 
 	if (tier === "default") {

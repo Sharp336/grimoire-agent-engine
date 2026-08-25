@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- OpenRouter routing variants (`:nitro`/`:floor`/`:online`/`:exacto`) are no longer appended to `@preset/` model ids, in any casing.
+
 ## [18.0.4] - 2026-08-24
 
 ### Fixed

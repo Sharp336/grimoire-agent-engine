@@ -16,8 +16,9 @@
  */
 
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Api, Effort, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-ai";
+import type { Api, KnownProvider, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { modelMatchesHost } from "@oh-my-pi/pi-catalog/hosts";
 import { buildModelProviderPriorityRank } from "@oh-my-pi/pi-catalog/identity";
 import { stripThinkingVariantToken } from "@oh-my-pi/pi-catalog/identity/family";
@@ -36,7 +37,9 @@ import {
 	parseThinkingLevel,
 	resolveThinkingLevelForModel,
 } from "../thinking";
-import { isAuthenticated, kNoAuth, type ModelRegistry } from "./model-registry";
+import { createLiveConfigHeaders } from "./model-config-values";
+import { DISCOVERY_DEFAULT_CONTEXT_WINDOW, DISCOVERY_DEFAULT_MAX_TOKENS } from "./model-discovery";
+import { isAuthenticated, kNoAuth, type ModelRegistry, type ProviderOverride } from "./model-registry";
 import {
 	DEFAULT_MODEL_ROLE_ALIAS,
 	formatModelRoleAlias,
@@ -297,6 +300,74 @@ function cloneModelWithRequestedId(model: Model<Api>, requestedId: string): Mode
 	};
 }
 
+const OPENROUTER_PROVIDER = "openrouter";
+const OPENROUTER_PRESET_PREFIX = "@preset/";
+
+function isOpenRouterPresetModelId(modelId: string): boolean {
+	const trimmed = modelId.trim();
+	if (!trimmed.toLowerCase().startsWith(OPENROUTER_PRESET_PREFIX)) return false;
+	const slug = trimmed.slice(OPENROUTER_PRESET_PREFIX.length);
+	return slug.length > 0 && !slug.includes(":") && !slug.includes("@") && !slug.includes("/");
+}
+
+function resolveOpenRouterPresetModel(
+	modelId: string,
+	availableModels: readonly Model<Api>[],
+	providerOverride?: ProviderOverride,
+): Model<Api> | undefined {
+	const requestedId = modelId.trim();
+	if (!isOpenRouterPresetModelId(requestedId)) return undefined;
+
+	// The catalog row is only an existence check and canonical baseUrl fallback:
+	// all transport metadata (headers/auth, transport, compat, remoteCompaction)
+	// comes from the provider-level override, never from a specific row, because
+	// `modelOverrides` attach per-model transport to individual catalog rows and
+	// the first row would leak them into every preset request.
+	const template = availableModels.find(model => model.provider.toLowerCase() === OPENROUTER_PROVIDER);
+	if (!template && !providerOverride) return undefined;
+	const baseUrl = providerOverride?.baseUrl ?? template?.baseUrl;
+	if (!baseUrl) return undefined;
+	const headers = createLiveConfigHeaders([providerOverride?.headers], {
+		authHeader: providerOverride?.authHeader,
+		apiKeyConfig: providerOverride?.apiKey,
+	});
+
+	const presetId = `${OPENROUTER_PRESET_PREFIX}${requestedId.slice(OPENROUTER_PRESET_PREFIX.length)}`;
+	return buildModel({
+		id: presetId,
+		requestModelId: presetId,
+		name: presetId,
+		api: "openrouter",
+		provider: OPENROUTER_PROVIDER,
+		baseUrl,
+		...(headers ? { headers } : {}),
+		...(providerOverride?.transport !== undefined ? { transport: providerOverride.transport } : {}),
+		...(providerOverride?.compat ? { compat: providerOverride.compat as ModelSpec<"openrouter">["compat"] } : {}),
+		...(providerOverride?.remoteCompaction
+			? { remoteCompaction: providerOverride.remoteCompaction as ModelSpec<"openrouter">["remoteCompaction"] }
+			: {}),
+		reasoning: true,
+		thinking: {
+			mode: "budget",
+			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+		},
+		// Presets route to an arbitrary upstream model whose window/modality is
+		// unknown at synthesis time. A `null` window disables proactive
+		// compaction (SessionMaintenance gates on `contextWindow > 0`), so use
+		// the same conservative window defaults as discovery for unknown-window
+		// models. Modality stays text-only by default: the routed upstream may
+		// be text-only, and declaring image capability universally would turn
+		// attachments on such a preset into wire errors. A vision-capable preset
+		// opts in by configuring a per-model override for the preset id
+		// (e.g. `modelOverrides` with `input: ["text", "image"]`), which
+		// `ModelRegistry.find` applies to the synthesized preset.
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: DISCOVERY_DEFAULT_CONTEXT_WINDOW,
+		maxTokens: DISCOVERY_DEFAULT_MAX_TOKENS,
+	} satisfies ModelSpec<"openrouter">);
+}
+
 const AMAZON_BEDROCK_PROVIDER = "amazon-bedrock";
 const BEDROCK_INFERENCE_PROFILE_ARN =
 	/^arn:aws(?:-[a-z]+)*:bedrock:[a-z0-9-]+:[0-9]*:(?:application-inference-profile|inference-profile)\/[a-z0-9][a-z0-9._:-]*$/i;
@@ -406,6 +477,7 @@ export function resolveProviderModelReference(
 	provider: string,
 	modelId: string,
 	availableModels: readonly Model<Api>[],
+	providerOverride?: ProviderOverride,
 ): Model<Api> | undefined {
 	const normalizedProvider = provider.trim().toLowerCase();
 	const normalizedModelId = modelId.trim().toLowerCase();
@@ -453,6 +525,9 @@ export function resolveProviderModelReference(
 		}
 	}
 
+	const preset = resolveOpenRouterPresetModel(modelId, availableModels, providerOverride);
+	if (preset) return preset;
+
 	return undefined;
 }
 
@@ -465,8 +540,35 @@ export interface ModelMatchPreferences {
 	deprioritizeProviders?: string[];
 }
 
-export type ModelLookupRegistry = Pick<ModelRegistry, "getAvailable">;
-type CliModelRegistry = Pick<ModelRegistry, "getAll" | "getAvailable">;
+export type ModelLookupRegistry = Pick<ModelRegistry, "getAvailable"> & Partial<Pick<ModelRegistry, "find">>;
+export type ModelReferenceResolver = (provider: string, modelId: string) => Model<Api> | undefined;
+
+/**
+ * Build a registry-backed resolver that refuses models outside an
+ * `enabledModels` candidate scope. When `scopeFiltered` is true, a resolved
+ * model (e.g. a synthetic `@preset/…`) is only returned when it is already in
+ * `candidateSet` — an admitted preset is added there by
+ * `includeSyntheticAllowedModels`, so set membership is the authoritative
+ * scope check and an unadmitted preset cannot leak past `enabledModels`.
+ */
+export function createScopeAwareModelResolver(
+	registry: { find?: (provider: string, modelId: string) => Model<Api> | undefined },
+	candidateSet: readonly Model<Api>[],
+	scopeFiltered: boolean,
+): ModelReferenceResolver | undefined {
+	const find = registry.find?.bind(registry);
+	if (!find) return undefined;
+	return (provider, modelId) => {
+		const resolved = find(provider, modelId);
+		if (!resolved) return undefined;
+		if (scopeFiltered && !candidateSet.some(m => m.provider === resolved.provider && m.id === resolved.id)) {
+			return undefined;
+		}
+		return resolved;
+	};
+}
+
+type CliModelRegistry = Pick<ModelRegistry, "getAll" | "getAvailable"> & Partial<Pick<ModelRegistry, "find">>;
 type InitialModelRegistry = Pick<ModelRegistry, "getAvailable" | "find">;
 type RestorableModelRegistry = Pick<ModelRegistry, "getAvailable" | "find" | "getApiKey">;
 
@@ -476,11 +578,13 @@ interface ModelPreferenceContext {
 	providerPriorityRank: Map<string, number>;
 	deprioritizedProviders: Set<string>;
 	modelOrder: Map<string, number>;
+	resolveProviderModelReference?: ModelReferenceResolver;
 }
 
 function buildPreferenceContext(
 	availableModels: Model<Api>[],
 	preferences: ModelMatchPreferences | undefined,
+	resolveProviderModelReference?: ModelReferenceResolver,
 ): ModelPreferenceContext {
 	const modelUsageRank = new Map<string, number>();
 	const providerUsageRank = new Map<string, number>();
@@ -502,7 +606,14 @@ function buildPreferenceContext(
 		modelOrder.set(formatModelString(availableModels[i]), i);
 	}
 
-	return { modelUsageRank, providerUsageRank, providerPriorityRank, deprioritizedProviders, modelOrder };
+	return {
+		modelUsageRank,
+		providerUsageRank,
+		providerPriorityRank,
+		deprioritizedProviders,
+		modelOrder,
+		resolveProviderModelReference,
+	};
 }
 
 export function getModelMatchPreferences(
@@ -633,10 +744,23 @@ function isProviderLockedCrossMatch(pattern: string, matchedModel: Model<Api>): 
 /**
  * Find an exact explicit provider/model match.
  */
-function findExactModelReferenceMatch(modelReference: string, availableModels: Model<Api>[]): Model<Api> | undefined {
+function findExactModelReferenceMatch(
+	modelReference: string,
+	availableModels: Model<Api>[],
+	resolveReference?: ModelReferenceResolver,
+): Model<Api> | undefined {
 	const trimmedReference = modelReference.trim();
 	if (!trimmedReference) {
 		return undefined;
+	}
+
+	// A bare `@preset/{slug}` is an OpenRouter account-side preset reference
+	// (no provider prefix). Route it to the openrouter provider so the upstream
+	// routing base (`@preset/free` from `@preset/free@cerebras`) can re-resolve.
+	if (trimmedReference.toLowerCase().startsWith(OPENROUTER_PRESET_PREFIX)) {
+		return resolveReference && availableModels.some(model => model.provider.toLowerCase() === OPENROUTER_PROVIDER)
+			? resolveReference(OPENROUTER_PROVIDER, trimmedReference)
+			: resolveProviderModelReference(OPENROUTER_PROVIDER, trimmedReference, availableModels);
 	}
 
 	const slashIndex = trimmedReference.indexOf("/");
@@ -644,6 +768,19 @@ function findExactModelReferenceMatch(modelReference: string, availableModels: M
 		const provider = trimmedReference.substring(0, slashIndex).trim();
 		const modelId = trimmedReference.substring(slashIndex + 1).trim();
 		if (provider && modelId) {
+			// The registry resolver applies ONLY to preset ids: presets are
+			// synthetic (never in `availableModels`) and carry provider settings
+			// + `modelOverrides`. For any catalog model, keep the candidate-
+			// authoritative array resolver so `enabledModels` exclusions hold
+			// (e.g. `openrouter/model-a` enabled, role `openrouter/model-b`
+			// must NOT resolve the excluded `model-b` via the full catalog).
+			const isPreset = modelId.trim().toLowerCase().startsWith(OPENROUTER_PRESET_PREFIX);
+			if (isPreset) {
+				return resolveReference &&
+					availableModels.some(model => model.provider.toLowerCase() === provider.toLowerCase())
+					? resolveReference(provider, modelId)
+					: resolveProviderModelReference(provider, modelId, availableModels);
+			}
 			return resolveProviderModelReference(provider, modelId, availableModels);
 		}
 	}
@@ -671,7 +808,11 @@ function matchModel(
 	context: ModelPreferenceContext,
 	options?: { exactOnly?: boolean },
 ): Model<Api> | undefined {
-	const exactRefMatch = findExactModelReferenceMatch(modelPattern, availableModels);
+	const exactRefMatch = findExactModelReferenceMatch(
+		modelPattern,
+		availableModels,
+		context.resolveProviderModelReference,
+	);
 	if (exactRefMatch) {
 		return exactRefMatch;
 	}
@@ -925,11 +1066,12 @@ export function parseModelPattern(
 	availableModels: Model<Api>[],
 	preferences?: ModelMatchPreferences,
 	options?: { allowInvalidThinkingSelectorFallback?: boolean },
+	resolveProviderModelReference?: ModelReferenceResolver,
 ): ParsedModelResult {
 	return matchPatternWithContext(
 		pattern,
 		availableModels,
-		buildPreferenceContext(availableModels, preferences),
+		buildPreferenceContext(availableModels, preferences, resolveProviderModelReference),
 		options,
 	);
 }
@@ -1287,7 +1429,12 @@ export interface ResolvedModelRoleValue {
 export function resolveModelRoleValue(
 	roleValue: string | undefined,
 	availableModels: Model<Api>[],
-	options?: { settings?: Settings; roleLookup?: ModelRoleLookup; matchPreferences?: ModelMatchPreferences },
+	options?: {
+		settings?: Settings;
+		roleLookup?: ModelRoleLookup;
+		matchPreferences?: ModelMatchPreferences;
+		resolveProviderModelReference?: ModelReferenceResolver;
+	},
 ): ResolvedModelRoleValue {
 	if (!roleValue) {
 		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: undefined };
@@ -1308,7 +1455,11 @@ export function resolveModelRoleValue(
 	// Build the O(n) preference context (model-order map over all available
 	// models) once and reuse it across every fallback pattern instead of
 	// rebuilding it per pattern inside parseModelPattern.
-	const preferenceContext = buildPreferenceContext(availableModels, matchPreferences);
+	const preferenceContext = buildPreferenceContext(
+		availableModels,
+		matchPreferences,
+		options?.resolveProviderModelReference,
+	);
 	for (const [patternIndex, effectivePattern] of effectivePatterns.entries()) {
 		const resolved = matchPatternWithContext(effectivePattern, availableModels, preferenceContext);
 		if (resolved.model) {
@@ -1382,6 +1533,7 @@ export function resolveModelFromString(
 	value: string,
 	available: Model<Api>[],
 	matchPreferences?: ModelMatchPreferences,
+	resolveProviderModelReference?: ModelReferenceResolver,
 ): Model<Api> | undefined {
 	const exact = available.find(model => `${model.provider}/${model.id}` === value);
 	if (exact) return exact;
@@ -1393,7 +1545,7 @@ export function resolveModelFromString(
 		const parsedExact = available.find(model => model.provider === parsed.provider && model.id === parsed.id);
 		if (parsedExact) return parsedExact;
 	}
-	return parseModelPattern(value, available, matchPreferences).model;
+	return parseModelPattern(value, available, matchPreferences, undefined, resolveProviderModelReference).model;
 }
 
 /**
@@ -1432,6 +1584,9 @@ export function resolveModelOverride(
 	if (modelPatterns.length === 0) return { explicitThinkingLevel: false };
 	const availableModels = modelRegistry.getAvailable();
 	const matchPreferences = getModelMatchPreferences(settings);
+	const resolveReference = modelRegistry.find
+		? (provider: string, modelId: string) => modelRegistry.find!(provider, modelId)
+		: undefined;
 	let warning: string | undefined;
 	for (const pattern of modelPatterns) {
 		const {
@@ -1442,6 +1597,7 @@ export function resolveModelOverride(
 		} = resolveModelRoleValue(pattern, availableModels, {
 			settings,
 			matchPreferences,
+			resolveProviderModelReference: resolveReference,
 		});
 		if (model) {
 			return { model, thinkingLevel, explicitThinkingLevel, warning: patternWarning };
@@ -1522,12 +1678,14 @@ export function resolveRoleSelection(
 	roles: readonly string[],
 	settings: Settings,
 	availableModels: Model<Api>[],
+	resolveProviderModelReference?: ModelReferenceResolver,
 ): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
 	const matchPreferences = getModelMatchPreferences(settings);
 	for (const role of roles) {
 		const resolved = resolveModelRoleValue(settings.getModelRole(role), availableModels, {
 			settings,
 			matchPreferences,
+			resolveProviderModelReference,
 		});
 		if (resolved.model) {
 			return { model: resolved.model, thinkingLevel: resolved.thinkingLevel };
@@ -1547,10 +1705,12 @@ export function resolveRoleSelection(
 export function resolveAdvisorRoleSelection(
 	settings: Settings,
 	availableModels: Model<Api>[],
+	resolveProviderModelReference?: ModelReferenceResolver,
 ): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
 	const resolved = resolveModelRoleValue(formatModelRoleAlias("advisor"), availableModels, {
 		settings,
 		matchPreferences: getModelMatchPreferences(settings),
+		resolveProviderModelReference,
 	});
 	return resolved.model ? { model: resolved.model, thinkingLevel: resolved.thinkingLevel } : undefined;
 }
@@ -1568,12 +1728,15 @@ export function resolveAdvisorRoleSelection(
  */
 export async function resolveModelScope(
 	patterns: string[],
-	modelRegistry: Pick<ModelRegistry, "getAvailable">,
+	modelRegistry: Pick<ModelRegistry, "getAvailable"> & Partial<Pick<ModelRegistry, "find">>,
 	preferences?: ModelMatchPreferences,
 	settings?: Settings,
 ): Promise<ScopedModel[]> {
 	const availableModels = modelRegistry.getAvailable();
-	const context = buildPreferenceContext(availableModels, preferences);
+	const resolveReference = modelRegistry.find
+		? (provider: string, modelId: string) => modelRegistry.find!(provider, modelId)
+		: undefined;
+	const context = buildPreferenceContext(availableModels, preferences, resolveReference);
 	const scopedModels: ScopedModel[] = [];
 	const addScopedModel = (model: Model<Api>, thinkingLevel: ThinkingLevel | undefined, explicit: boolean) => {
 		if (scopedModels.some(sm => modelsAreEqual(sm.model, model))) return;
@@ -1613,7 +1776,11 @@ export async function resolveModelScope(
 		// entry exactly like `--model` would pick. (Bare `*` stays a match-all
 		// glob above; scope semantics, not the default-role alias.)
 		if (settings && modelRoleAliasPrefixLength(pattern) !== undefined) {
-			const resolved = resolveModelRoleValue(pattern, availableModels, { settings, matchPreferences: preferences });
+			const resolved = resolveModelRoleValue(pattern, availableModels, {
+				settings,
+				matchPreferences: preferences,
+				resolveProviderModelReference: resolveReference,
+			});
 			if (resolved.warning) logger.warn(resolved.warning);
 			if (!resolved.model) {
 				logger.warn(`No models match pattern "${pattern}"`);
@@ -1706,10 +1873,11 @@ export function filterAvailableModelsByEnabledPatterns(
 	available: Model<Api>[],
 	patterns: readonly string[],
 	settings?: Settings,
+	resolveProviderModelReference?: ModelReferenceResolver,
 ): Model<Api>[] {
 	if (patterns.length === 0) return available;
 
-	const context = buildPreferenceContext(available, undefined);
+	const context = buildPreferenceContext(available, undefined, resolveProviderModelReference);
 	const allowedModels: Model<Api>[] = [];
 	const addAllowed = (model: Model<Api>) => {
 		allowedModels.push(model);
@@ -1725,7 +1893,10 @@ export function filterAvailableModelsByEnabledPatterns(
 
 		// Mirror resolveModelScope: role aliases resolve to the role's model.
 		if (settings && modelRoleAliasPrefixLength(pattern) !== undefined) {
-			const { model } = resolveModelRoleValue(pattern, available, { settings });
+			const { model } = resolveModelRoleValue(pattern, available, {
+				settings,
+				resolveProviderModelReference,
+			});
 			if (model) addAllowed(model);
 			continue;
 		}
@@ -1743,9 +1914,10 @@ function findExactCliModel(
 	allModels: Model<Api>[],
 	availableModels: Model<Api>[],
 	options?: { catalogFallback?: boolean },
+	resolveProviderModelReference?: ModelReferenceResolver,
 ): Model<Api> | undefined {
 	// Explicit provider/id references stay authoritative against the full catalog.
-	const referenced = findExactModelReferenceMatch(selector, allModels);
+	const referenced = findExactModelReferenceMatch(selector, allModels, resolveProviderModelReference);
 	if (referenced) return referenced;
 
 	// Flat-id (or full-selector-string) matches prefer authenticated providers,
@@ -1820,6 +1992,9 @@ export function resolveCliModel(options: {
 	}
 
 	const availableModels = preferredModels ?? modelRegistry.getAvailable();
+	const resolveReference = modelRegistry.find
+		? (provider: string, modelId: string) => modelRegistry.find!(provider, modelId)
+		: undefined;
 	const providerMap = new Map<string, string>();
 	for (const model of allModels) {
 		providerMap.set(model.provider.toLowerCase(), model.provider);
@@ -1837,7 +2012,13 @@ export function resolveCliModel(options: {
 
 	const trimmedModel = cliModel.trim();
 	if (!provider) {
-		const exact = findExactCliModel(trimmedModel, allModels, availableModels, { catalogFallback: false });
+		const exact = findExactCliModel(
+			trimmedModel,
+			allModels,
+			availableModels,
+			{ catalogFallback: false },
+			resolveReference,
+		);
 		if (exact) {
 			return {
 				model: exact,
@@ -1853,7 +2034,13 @@ export function resolveCliModel(options: {
 			MAX_THINKING_SUFFIX_OPTIONS,
 		);
 		if (exactThinkingLevel) {
-			const exactSuffixed = findExactCliModel(exactBase, allModels, availableModels, { catalogFallback: false });
+			const exactSuffixed = findExactCliModel(
+				exactBase,
+				allModels,
+				availableModels,
+				{ catalogFallback: false },
+				resolveReference,
+			);
 			if (exactSuffixed) {
 				return {
 					model: exactSuffixed,
@@ -1889,12 +2076,14 @@ export function resolveCliModel(options: {
 			const availableResolved = resolveModelRoleValue(roleSelector, availableModels, {
 				settings,
 				matchPreferences: preferences,
+				resolveProviderModelReference: resolveReference,
 			});
 			const resolved = availableResolved.model
 				? availableResolved
 				: resolveModelRoleValue(roleSelector, allModels, {
 						settings,
 						matchPreferences: preferences,
+						resolveProviderModelReference: resolveReference,
 					});
 			if (resolved.model) {
 				return {
@@ -1942,7 +2131,9 @@ export function resolveCliModel(options: {
 	}
 
 	if (provider) {
-		const exactProviderMatch = resolveProviderModelReference(provider, pattern, allModels);
+		const exactProviderMatch = resolveReference
+			? resolveReference(provider, pattern)
+			: resolveProviderModelReference(provider, pattern, allModels);
 		if (exactProviderMatch) {
 			return {
 				model: exactProviderMatch,
@@ -1955,13 +2146,25 @@ export function resolveCliModel(options: {
 	}
 
 	const candidates = provider ? allModels.filter(model => model.provider === provider) : availableModels;
-	let parsed = parseModelPattern(pattern, candidates, preferences, {
-		allowInvalidThinkingSelectorFallback: false,
-	});
-	if (!parsed.model && !provider) {
-		parsed = parseModelPattern(pattern, allModels, preferences, {
+	let parsed = parseModelPattern(
+		pattern,
+		candidates,
+		preferences,
+		{
 			allowInvalidThinkingSelectorFallback: false,
-		});
+		},
+		resolveReference,
+	);
+	if (!parsed.model && !provider) {
+		parsed = parseModelPattern(
+			pattern,
+			allModels,
+			preferences,
+			{
+				allowInvalidThinkingSelectorFallback: false,
+			},
+			resolveReference,
+		);
 	}
 	const { model, thinkingLevel, warning, upstream } = parsed;
 
@@ -2151,10 +2354,13 @@ export async function findSmolModel(
 ): Promise<Model<Api> | undefined> {
 	const availableModels = modelRegistry.getAvailable();
 	if (availableModels.length === 0) return undefined;
+	const resolveReference = modelRegistry.find
+		? (provider: string, modelId: string) => modelRegistry.find!(provider, modelId)
+		: undefined;
 
 	// 1. Try saved model from settings
 	if (savedModel) {
-		const match = resolveModelFromString(savedModel, availableModels, undefined);
+		const match = resolveModelFromString(savedModel, availableModels, undefined, resolveReference);
 		if (match) return match;
 	}
 
@@ -2165,7 +2371,7 @@ export async function findSmolModel(
 		if (providerMatch) return providerMatch;
 
 		// Try exact match first
-		const exactMatch = parseModelPattern(pattern, availableModels, undefined).model;
+		const exactMatch = parseModelPattern(pattern, availableModels, undefined, undefined, resolveReference).model;
 		if (exactMatch) return exactMatch;
 
 		// Try fuzzy match (substring)
@@ -2191,17 +2397,20 @@ export async function findSlowModel(
 ): Promise<Model<Api> | undefined> {
 	const availableModels = modelRegistry.getAvailable();
 	if (availableModels.length === 0) return undefined;
+	const resolveReference = modelRegistry.find
+		? (provider: string, modelId: string) => modelRegistry.find!(provider, modelId)
+		: undefined;
 
 	// 1. Try saved model from settings
 	if (savedModel) {
-		const match = resolveModelFromString(savedModel, availableModels, undefined);
+		const match = resolveModelFromString(savedModel, availableModels, undefined, resolveReference);
 		if (match) return match;
 	}
 
 	// 2. Try priority chain
 	for (const pattern of MODEL_PRIO.slow) {
 		// Try exact match first
-		const exactMatch = parseModelPattern(pattern, availableModels, undefined).model;
+		const exactMatch = parseModelPattern(pattern, availableModels, undefined, undefined, resolveReference).model;
 		if (exactMatch) return exactMatch;
 
 		// Try fuzzy match (substring)

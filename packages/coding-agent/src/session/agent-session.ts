@@ -103,7 +103,7 @@ import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } fro
 import { reset as resetCapabilities } from "../capability";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
-import type { ResolvedModelRoleValue } from "../config/model-resolver";
+import { type ResolvedModelRoleValue, resolveProviderModelReference } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import { buildServiceTierByFamily } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
@@ -8145,6 +8145,28 @@ export class AgentSession {
 					const provider = targetModelStr.slice(0, slashIdx);
 					const modelId = targetModelStr.slice(slashIdx + 1);
 					match = availableModels.find(m => m.provider === provider && m.id === modelId);
+					if (!match) {
+						// A preset is synthesized (absent from `getAvailable()`), so a
+						// configured `modelOverrides` entry on its id must be applied
+						// during restore too. Resolve through the registry's `find` (which
+						// applies `#applyPresetOverride`) for presets whose provider is in
+						// the available set; otherwise fall back to the candidate-
+						// authoritative array resolver so an unavailable provider is never
+						// silently restored.
+						const isPreset = modelId.trim().toLowerCase().startsWith("@preset/");
+						const providerAvailable = availableModels.some(
+							m => m.provider.toLowerCase() === provider.toLowerCase(),
+						);
+						match =
+							isPreset && providerAvailable
+								? this.#modelRegistry.find(provider, modelId)
+								: resolveProviderModelReference(
+										provider,
+										modelId,
+										availableModels,
+										this.#modelRegistry.getProviderOverride(provider),
+									);
+					}
 					if (match) break;
 				}
 				if (match) {

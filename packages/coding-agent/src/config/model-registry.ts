@@ -101,6 +101,7 @@ import {
 	withRuntimeDynamicModelsTimeout,
 } from "./model-provider-discovery";
 
+export type { ProviderOverride } from "./model-patch";
 export { mergeDiscoveredModel } from "./model-patch";
 export {
 	isAuthenticated,
@@ -1763,6 +1764,35 @@ export class ModelRegistry {
 		});
 	}
 
+	/**
+	 * Apply a configured per-model override to a synthesized preset model.
+	 * Presets are virtual references, so `#applyModelOverrides` (which runs over
+	 * catalog rows) never reaches them; honoring `modelOverrides` for the preset
+	 * id lets a user opt into capabilities the neutral default omits (e.g.
+	 * `input: ["text", "image"]` for a vision-capable routed preset).
+	 */
+	#applyPresetOverride(provider: string, modelId: string, preset: Model<Api>): Model<Api> {
+		if (!modelId.trim().toLowerCase().startsWith("@preset/")) return preset;
+		const normalizedProvider = provider.trim().toLowerCase();
+		const normalizedModelId = modelId.trim().toLowerCase();
+		let overrides: Map<string, ModelOverride> | undefined;
+		for (const [key, map] of this.#modelOverrides) {
+			if (key.toLowerCase() === normalizedProvider) {
+				overrides = map;
+				break;
+			}
+		}
+		if (!overrides) return preset;
+		let override: ModelOverride | undefined;
+		for (const [key, value] of overrides) {
+			if (key.toLowerCase() === normalizedModelId) {
+				override = value;
+				break;
+			}
+		}
+		return override ? applyModelOverride(preset, override) : preset;
+	}
+
 	#mergeProviderOverride(baseOverride: ProviderOverride | undefined, override: ProviderOverride): ProviderOverride {
 		return {
 			baseUrl: override.baseUrl ?? baseOverride?.baseUrl,
@@ -2080,7 +2110,14 @@ export class ModelRegistry {
 	 * Find a model by provider and ID.
 	 */
 	find(provider: string, modelId: string): Model<Api> | undefined {
-		return resolveProviderModelReference(provider, modelId, this.#modelsForProviderLookup(provider));
+		const resolved = resolveProviderModelReference(
+			provider,
+			modelId,
+			this.#modelsForProviderLookup(provider),
+			this.getProviderOverride(provider),
+		);
+		if (!resolved) return resolved;
+		return this.#applyPresetOverride(provider, modelId, resolved);
 	}
 
 	/**
@@ -2093,10 +2130,45 @@ export class ModelRegistry {
 	 * Get provider-level headers without including per-model overrides.
 	 */
 	getProviderHeaders(provider: string): Record<string, string> | undefined {
-		return createLiveConfigHeaders([
-			this.#providerOverrides.get(provider)?.headers,
-			this.#runtimeProviderOverrides.get(provider)?.headers,
-		]);
+		// getProviderOverride already folds config + runtime overrides (runtime
+		// winning) case-insensitively; expose the merged headers directly.
+		return this.getProviderOverride(provider)?.headers;
+	}
+
+	/**
+	 * Get the merged provider-level override (config overrides merged with
+	 * runtime-registered overrides, runtime winning) — `baseUrl`, `headers`,
+	 * `apiKey`/`authHeader`, `compat`, `remoteCompaction`, `transport`, and
+	 * guardrail fields — without any per-model `modelOverrides`. Used to
+	 * synthesize virtual model references (e.g. OpenRouter `@preset/` ids) so
+	 * they carry the provider's transport configuration but never inherit
+	 * metadata that `modelOverrides` attached to individual catalog rows.
+	 */
+	getProviderOverride(provider: string): ProviderOverride | undefined {
+		const normalized = provider.trim().toLowerCase();
+		// Provider keys are stored verbatim (as configured/registered); selectors
+		// reach here with the caller's spelling, so match case-insensitively —
+		// e.g. `OPENROUTER/@preset/free` must find the `openrouter` override.
+		const findOverride = (map: Map<string, ProviderOverride>): ProviderOverride | undefined => {
+			const exact = map.get(normalized);
+			if (exact) return exact;
+			for (const [key, value] of map) {
+				if (key.toLowerCase() === normalized) return value;
+			}
+			return undefined;
+		};
+		const baseOverride = findOverride(this.#providerOverrides);
+		const runtimeOverride = findOverride(this.#runtimeProviderOverrides);
+		if (!baseOverride && !runtimeOverride) return undefined;
+		const merged = this.#mergeProviderOverride(baseOverride, runtimeOverride ?? {});
+		// Materialize live header values (env vars / `!command` expressions) and
+		// fold authHeader/apiKey into an `Authorization` header BEFORE consumers
+		// read them — `getProviderHeaders`/`getApiKeyAndHeaders` and preset
+		// synthesis must never see raw `models.yml` placeholders.
+		return {
+			...merged,
+			headers: mergeAuthHeaderSources([merged.headers], merged.authHeader, merged.apiKey),
+		};
 	}
 
 	/**
