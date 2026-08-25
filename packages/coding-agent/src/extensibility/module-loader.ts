@@ -17,12 +17,28 @@ export async function loadRuntimeModule(modulePath: string, cacheBust = ""): Pro
 export async function loadValidationModule(modulePath: string, cacheBust: string): Promise<ValidationModule> {
 	const root = await findPackageRoot(modulePath);
 	const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-module-validation-"));
-	await fs.cp(root, tempRoot, { recursive: true, verbatimSymlinks: true });
-	const nodeModules = await findNodeModules(root);
-	if (nodeModules) await fs.symlink(nodeModules, path.join(tempRoot, "node_modules"), "dir");
-	const copiedPath = path.join(tempRoot, path.relative(root, modulePath));
-	const module = await import(`${copiedPath}?${cacheBust}`);
-	return { module, cleanup: () => fs.rm(tempRoot, { recursive: true, force: true }) };
+	try {
+		await fs.cp(root, tempRoot, { recursive: true, verbatimSymlinks: true });
+		if (!(await directoryExists(path.join(root, "node_modules")))) {
+			const hoisted = await findNodeModules(path.dirname(root));
+			if (hoisted)
+				await fs.cp(hoisted, path.join(tempRoot, "node_modules"), { recursive: true, verbatimSymlinks: true });
+		}
+		const copiedPath = path.join(tempRoot, path.relative(root, modulePath));
+		const module = await import(`${copiedPath}?${cacheBust}`);
+		return { module, cleanup: () => fs.rm(tempRoot, { recursive: true, force: true }) };
+	} catch (error) {
+		await fs.rm(tempRoot, { recursive: true, force: true });
+		throw error;
+	}
+}
+
+async function directoryExists(directory: string): Promise<boolean> {
+	try {
+		return (await fs.stat(directory)).isDirectory();
+	} catch {
+		return false;
+	}
 }
 
 async function findPackageRoot(modulePath: string): Promise<string> {
@@ -39,17 +55,13 @@ async function findPackageRoot(modulePath: string): Promise<string> {
 	}
 }
 
-async function findNodeModules(root: string): Promise<string | undefined> {
-	let directory = root;
+async function findNodeModules(start: string): Promise<string | undefined> {
+	let directory = start;
 	while (true) {
 		const candidate = path.join(directory, "node_modules");
-		try {
-			await fs.access(candidate);
-			return candidate;
-		} catch {
-			const parent = path.dirname(directory);
-			if (parent === directory) return undefined;
-			directory = parent;
-		}
+		if (await directoryExists(candidate)) return candidate;
+		const parent = path.dirname(directory);
+		if (parent === directory) return undefined;
+		directory = parent;
 	}
 }

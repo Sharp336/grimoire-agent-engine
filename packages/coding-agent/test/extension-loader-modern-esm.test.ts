@@ -12,16 +12,21 @@ describe("extension compatibility dispatch", () => {
 		tempDir = undefined;
 	});
 
-	test("loads modern-esm extensions without legacy graph preparation", async () => {
+	test("loads modern-esm extensions with native module caching", async () => {
 		tempDir = TempDir.createSync("@omp-modern-esm-");
 		fs.writeFileSync(
 			path.join(tempDir.path(), "package.json"),
 			JSON.stringify({ type: "module", omp: { compatibility: "modern-esm" } }),
 		);
-		fs.writeFileSync(path.join(tempDir.path(), "extension.ts"), 'export default pi => pi.setLabel("modern");\n');
-		const result = await loadExtensions([path.join(tempDir.path(), "extension.ts")], tempDir.path());
-		expect(result.errors).toEqual([]);
-		expect(result.extensions).toHaveLength(1);
+		fs.writeFileSync(path.join(tempDir.path(), "state.ts"), "export const value = { count: 0 };\n");
+		fs.writeFileSync(
+			path.join(tempDir.path(), "extension.ts"),
+			' import { value } from "./state.ts"; export default pi => { value.count += 1; pi.setLabel(String(value.count)); };\n',
+		);
+		const first = await loadExtensions([path.join(tempDir.path(), "extension.ts")], tempDir.path());
+		const second = await loadExtensions([path.join(tempDir.path(), "extension.ts")], tempDir.path());
+		expect(first.extensions[0]?.label).toBe("1");
+		expect(second.extensions[0]?.label).toBe("2");
 	});
 
 	test("keeps extensions without modern metadata on the legacy path", async () => {
