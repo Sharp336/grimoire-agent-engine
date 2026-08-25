@@ -501,6 +501,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 				rules: [],
 				preloadedCustomToolPaths: [],
 				toolNames: ["read"],
+				hasUI: true,
 			});
 
 			try {
@@ -560,6 +561,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 				rules: [],
 				preloadedCustomToolPaths: [],
 				toolNames: ["read"],
+				hasUI: true,
 			});
 
 			try {
@@ -616,6 +618,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 				rules: [],
 				preloadedCustomToolPaths: [],
 				toolNames: ["read"],
+				hasUI: true,
 			});
 
 			try {
@@ -673,6 +676,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 				rules: [],
 				preloadedCustomToolPaths: [],
 				toolNames: ["read"],
+				hasUI: true,
 			});
 
 			try {
@@ -1692,6 +1696,7 @@ describe("nonblocking default model discovery", () => {
 				rules: [],
 				preloadedCustomToolPaths: [],
 				toolNames: ["read"],
+				hasUI: true,
 			});
 			try {
 				expect(performance.now() - startedAt).toBeLessThan(2_000);
@@ -1739,6 +1744,7 @@ test("does not accept an unrelated fallback before discovery resolves the config
 			rules: [],
 			preloadedCustomToolPaths: [],
 			toolNames: ["read"],
+			hasUI: true,
 		});
 		expect(refresh).toHaveBeenCalled();
 		expect(session.model?.provider).not.toBe(fallback.provider);

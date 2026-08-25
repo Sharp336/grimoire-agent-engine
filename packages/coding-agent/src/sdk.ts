@@ -2619,6 +2619,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (deferredModel) {
 				model = deferredModel.model;
 				thinkingLevel = deferredModel.thinkingLevel ?? thinkingLevel;
+				autoThinking = thinkingLevel === AUTO_THINKING;
+				effectiveThinkingLevel = concreteThinkingLevel(thinkingLevel);
+				effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
+					autoThinking
+						? resolveProvisionalAutoLevel(model!)
+						: resolveThinkingLevelForModel(model!, effectiveThinkingLevel),
+				);
 				modelFallbackMessage = undefined;
 			}
 		}
