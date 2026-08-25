@@ -1478,7 +1478,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}),
 	);
 	let model = options.model;
-	let deferredModelResolution: Promise<{ model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined> | undefined;
+	let deferredModelResolution:
+		| Promise<{ model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined>
+		| undefined;
 	let modelFallbackMessage: string | undefined;
 	let initialRetryFallback: InitialRetryFallbackState | undefined;
 	// Identify session model strings to restore in fallback order. We do an
@@ -2577,7 +2579,16 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						.then(async () => {
 							if (model || hasExplicitModel) return undefined;
 							const resolved = await tryResolveDefaultRole();
-							return resolved ? { model: model!, thinkingLevel } : pick ? { model: pick } : undefined;
+							if (resolved) return { model: model!, thinkingLevel };
+							const refreshedCandidates = await resolveAllowedModels(
+								modelRegistry,
+								settings,
+								modelMatchPreferences,
+							);
+							const refreshedPick = pickDefaultAvailableModel(refreshedCandidates.filter(hasModelAuth));
+							return refreshedPick
+								? { model: refreshedPick, thinkingLevel: pickInitialThinkingLevel(refreshedPick) }
+								: undefined;
 						})
 						.catch(error => {
 							logger.warn("background model discovery failed", {
@@ -4106,7 +4117,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				});
 			});
 		});
-
 
 		return {
 			session,

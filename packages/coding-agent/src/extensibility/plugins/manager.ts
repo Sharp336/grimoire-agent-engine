@@ -13,6 +13,7 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import { loadExtensions } from "../extensions/loader";
+import { loadRuntimeModule } from "../module-loader";
 import { refreshBunGitCache } from "./bun-git-cache";
 import { type GitSource, parseGitUrl } from "./git-url";
 import { resolvePluginManifestEntries, setExtensionManifestPath } from "./loader";
@@ -392,10 +393,16 @@ export class PluginManager {
 		const errors: string[] = [];
 		const loadable: string[] = [];
 		for (const { entry, resolvedPath, manifestPath } of declaredEntries) {
-			if (resolvedPath === null) errors.push(`${entry}: declared extension entry not found on disk`);
-			else {
-				loadable.push(resolvedPath);
-				setExtensionManifestPath(resolvedPath, manifestPath);
+			if (resolvedPath === null) {
+				errors.push(`${entry}: declared extension entry not found on disk`);
+				continue;
+			}
+			loadable.push(resolvedPath);
+			setExtensionManifestPath(resolvedPath, manifestPath);
+			try {
+				await loadRuntimeModule(resolvedPath, `plugin-validation=${Date.now()}-${Math.random()}`);
+			} catch (error) {
+				errors.push(`${resolvedPath}: ${error instanceof Error ? error.message : String(error)}`);
 			}
 		}
 		if (loadable.length > 0) {
