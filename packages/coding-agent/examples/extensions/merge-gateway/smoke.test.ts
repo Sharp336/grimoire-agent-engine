@@ -206,6 +206,20 @@ describe("validateKey / login", () => {
 		await expect(login({ onPrompt: async () => "mg_key", signal: controller.signal } as never)).rejects.toThrow();
 	});
 
+	test(
+		"times out a stalled probe with a clear message",
+		async () => {
+			globalThis.fetch = mock(
+				async (_input: unknown, init?: RequestInit): Promise<Response> =>
+					new Promise<Response>((_resolve, reject) => {
+						init?.signal?.addEventListener("abort", () => reject(new Error("The operation was aborted")));
+					}),
+			) as unknown as typeof fetch;
+			await expect(validateKey("mg_key")).rejects.toThrow(/timed out after 15s/);
+		},
+		20_000,
+	);
+
 	test("rejects an empty paste before any network call", async () => {
 		await expect(login({ onPrompt: async () => "   " } as never)).rejects.toThrow("No API key provided");
 	});

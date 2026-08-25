@@ -30,6 +30,8 @@ const OPENAI_BASE_URL = "https://api-gateway.merge.dev/v1/openai";
 const ANTHROPIC_BASE_URL = "https://api-gateway.merge.dev";
 const ENV_VAR = "MERGE_GATEWAY_API_KEY";
 
+/** Bound the /login key probe so a stalled Gateway cannot block the dialog. */
+const KEY_PROBE_TIMEOUT_MS = 15_000;
 /** Page size for `GET /models` (Gateway caps at 500). */
 const CATALOG_PAGE_LIMIT = 500;
 /** Hard stop for pagination so a broken cursor cannot loop forever. */
@@ -200,10 +202,23 @@ export async function validateKey(key: string, options: ValidateOptions = {}): P
 	const trimmed = key.trim();
 	if (!trimmed) throw new Error("No API key provided");
 	const doFetch = options.fetch ?? fetch;
-	const res = await doFetch(`${OPENAI_BASE_URL.replace(/\/openai$/, "")}/models?limit=1`, {
-		headers: { Authorization: `Bearer ${trimmed}` },
-		signal: options.signal,
-	});
+	// Bounded probe: combine the login-flow cancel signal with a local timeout
+	// so a stalled Gateway can never hold the /login dialog open indefinitely.
+	const timeoutSignal = AbortSignal.timeout(KEY_PROBE_TIMEOUT_MS);
+	const signal = options.signal ? AbortSignal.any([options.signal, timeoutSignal]) : timeoutSignal;
+	let res: Response;
+	try {
+		res = await doFetch(`${OPENAI_BASE_URL.replace(/\/openai$/, "")}/models?limit=1`, {
+			headers: { Authorization: `Bearer ${trimmed}` },
+			signal,
+		});
+	} catch (error) {
+		if (options.signal?.aborted) throw error; // user cancelled — surface as-is
+		if (timeoutSignal.aborted) {
+			throw new Error(`Merge Gateway key validation timed out after ${KEY_PROBE_TIMEOUT_MS / 1000}s`);
+		}
+		throw error;
+	}
 	if (res.status === 401 || res.status === 403) {
 		throw new Error("Invalid Merge Gateway API key");
 	}
