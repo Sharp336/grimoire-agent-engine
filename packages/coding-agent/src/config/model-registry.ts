@@ -1104,6 +1104,16 @@ export class ModelRegistry {
 			});
 			this.#keylessProviders.add("lm-studio");
 		}
+		if (!configuredProviders.has("hetzner") && !disabledProviders.has("hetzner")) {
+			this.#discoverableProviders.push({
+				provider: "hetzner",
+				api: "openai-completions",
+				baseUrl: "https://inference.hetzner.com/api/v1",
+				discovery: { type: "openai-completions" },
+				optional: true,
+			});
+			this.#keylessProviders.add("hetzner");
+		}
 	}
 
 	#loadCustomModels(): CustomModelsResult {

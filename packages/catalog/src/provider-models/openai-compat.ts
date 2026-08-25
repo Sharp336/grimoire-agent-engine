@@ -1150,6 +1150,96 @@ export function groqModelManagerOptions(config?: GroqModelManagerConfig): ModelM
 }
 
 // ---------------------------------------------------------------------------
+// 2b. Hetzner Inference API
+// ---------------------------------------------------------------------------
+
+const HETZNER_BASE_URL = "https://inference.hetzner.com/api/v1";
+
+export interface HetznerModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+	headers?: SimpleProviderDiscoveryHeaders;
+}
+
+/**
+ * Hetzner Inference API model manager: OpenAI-compatible chat completions.
+ * Free during experimental phase. Provides Qwen models with vision support.
+ */
+function createHetznerStaticModel(
+	id: string,
+	name: string,
+	contextWindow: number,
+	input: ModelSpec<"openai-completions">["input"],
+): ModelSpec<"openai-completions"> {
+	return {
+		id,
+		name,
+		api: "openai-completions",
+		provider: "hetzner",
+		baseUrl: HETZNER_BASE_URL,
+		reasoning: false,
+		input: [...input],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow,
+		maxTokens: null,
+	};
+}
+
+/**
+ * Hetzner Inference API models (experimental, free). Bundled so the provider is
+ * usable when generation and first boot have no live key.
+ * The `/v1/models` response is authoritative once discovery runs.
+ */
+export const HETZNER_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	createHetznerStaticModel("Qwen/Qwen3.6-35B-A3B-FP8", "Qwen3.6 35B A3B FP8", 262_144, ["text", "image"]),
+	createHetznerStaticModel("Qwen3.8-27B", "Qwen3.8 27B", 262_144, ["text", "image"]),
+];
+
+const HETZNER_STATIC_MODEL_IDS = HETZNER_STATIC_MODELS.map(model => model.id);
+
+function mapHetznerModel(
+	_entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	reference: ModelSpec<"openai-completions"> | undefined,
+): ModelSpec<"openai-completions"> {
+	if (reference) return reference;
+	return defaults;
+}
+
+/**
+ * Hetzner Inference API model manager: OpenAI-compatible chat completions.
+ * Free during experimental phase. Provides Qwen models with vision support.
+ */
+export function hetznerModelManagerOptions(
+	config?: HetznerModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? HETZNER_BASE_URL;
+	const references = createBundledReferenceMap<"openai-completions">(
+		"hetzner" as Parameters<typeof getBundledModels>[0],
+	);
+	return {
+		providerId: "hetzner",
+		staticModels: HETZNER_STATIC_MODELS,
+		dynamicModelsAuthoritative: true,
+		dropCachedModelIdsOnStaticMismatch: HETZNER_STATIC_MODEL_IDS,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "hetzner",
+					baseUrl,
+					apiKey,
+					...(config?.headers && { headers: resolveSimpleProviderHeaders(config.headers) }),
+					fetch: config?.fetch,
+					mapModel: (entry, defaults) => mapHetznerModel(entry, defaults, references.get(defaults.id)),
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 3. Cerebras
 // ---------------------------------------------------------------------------
 

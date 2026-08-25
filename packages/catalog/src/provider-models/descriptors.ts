@@ -26,6 +26,7 @@ import {
 	githubCopilotModelManagerOptions,
 	gmiCloudModelManagerOptions,
 	groqModelManagerOptions,
+	hetznerModelManagerOptions,
 	huggingfaceModelManagerOptions,
 	kiloModelManagerOptions,
 	kimiCodeModelManagerOptions,
@@ -240,6 +241,15 @@ export const CATALOG_PROVIDERS = [
 		defaultModel: "openai/gpt-oss-120b",
 		envVars: ["GROQ_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => groqModelManagerOptions(config),
+	},
+	{
+		id: "hetzner",
+		defaultModel: "Qwen/Qwen3.6-35B-A3B-FP8",
+		envVars: ["HETZNER_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => hetznerModelManagerOptions(config),
+		allowUnauthenticated: true,
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Hetzner Inference", allowUnauthenticated: true },
 	},
 	{
 		id: "huggingface",

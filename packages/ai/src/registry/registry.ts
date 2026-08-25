@@ -27,6 +27,7 @@ import { googleAntigravityProvider } from "./google-antigravity";
 import { googleGeminiCliProvider } from "./google-gemini-cli";
 import { googleVertexProvider } from "./google-vertex";
 import { groqProvider } from "./groq";
+import { hetznerProvider } from "./hetzner";
 import { huggingfaceProvider } from "./huggingface";
 import { kagiProvider } from "./kagi";
 import { kiloProvider } from "./kilo";
@@ -157,6 +158,7 @@ const ALL = [
 	googleProvider,
 	googleVertexProvider,
 	groqProvider,
+	hetznerProvider,
 	mistralProvider,
 	minimaxProvider,
 	amazonBedrockProvider,
