@@ -139,7 +139,7 @@ Of the runnable options, the registry marks `lfm2-1.2b` as the recommended local
 `gemma-3-1b` favors consolidation quality, while `qwen2.5-1.5b` favors fine-grained extraction.
 
 **Configured local options**: `llama3.2:3b`, `qwen3-1.7b` (currently disabled as described above),
-`gemma-3-1b`, `qwen2.5-1.5b`, `lfm2-1.2b`.
+`gemma-3-1b`, `qwen2.5-1.5b`, `lfm2-1.2b`, and Darwin-only `afm-core` (Apple SystemLanguageModel; OS default, Advanced when present; not scored on this extract set).
 **Default setting**: `online`.
 
 ### Known Mnemopi parser bugs (surfaced by these experiments)
@@ -156,4 +156,4 @@ Of the runnable options, the registry marks `lfm2-1.2b` as the recommended local
 - The memory local path applies the refined recipes (line-format + small-talk-guarded extraction
   prompt, hardened consolidation prompt) via Mnemopi prompt overrides; the **online path is
   unchanged**.
-- `providers.autoThinkingModel` uses the same shipped local options as `providers.memoryModel`.
+- `providers.autoThinkingModel` and `providers.unexpectedStopModel` use the same shipped local options as `providers.memoryModel`.
