@@ -2593,6 +2593,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (modelFallbackMessage) {
 					modelFallbackMessage += `. Using ${model.provider}/${model.id}`;
 				}
+			} else if (deferredModelResolution) {
+				modelFallbackMessage = undefined;
 			} else {
 				const patterns = settings.get("enabledModels");
 				modelFallbackMessage =

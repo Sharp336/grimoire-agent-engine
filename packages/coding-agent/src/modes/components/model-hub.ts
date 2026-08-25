@@ -279,7 +279,6 @@ export class ModelHubComponent implements Component {
 			this.#registry
 				.refresh("online")
 				.then(() => this.#syncFromRegistryState())
-				.then(() => this.#reprobeHiddenOptionalProviders())
 				.catch(error => {
 					this.#configError = error instanceof Error ? error.message : String(error);
 				})
