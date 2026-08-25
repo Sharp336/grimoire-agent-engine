@@ -158,6 +158,10 @@ async function searchWithPublicMcp(
 		return parseParallelSearchPayload(payload, { parseMetadata: false });
 	}
 
+	if (mcpResponse.result) {
+		return parseParallelSearchPayload({ results: [] }, { parseMetadata: false });
+	}
+
 	throw new SearchProviderError("parallel", "Parallel MCP search returned an unexpected response shape.");
 }
 
@@ -237,8 +241,10 @@ export async function searchParallel(
 	const parsed = params.parsedQuery ?? parseSearchQuery(params.query);
 	// Directives are removed only where Parallel has a native equivalent.
 	const query = parsed.hasDirectives ? formatQuery(parsed, PARALLEL_QUERY_SYNTAX) : params.query;
-	const mcpQuery = parsed.hasDirectives ? formatQuery(parsed, PARALLEL_MCP_QUERY_SYNTAX) : params.query;
 	const sourcePolicy = toSourcePolicy(parsed, params.recency);
+	const rawMcpQuery = parsed.hasDirectives ? formatQuery(parsed, PARALLEL_MCP_QUERY_SYNTAX) : params.query;
+	const mcpQuery =
+		!parsed.after && sourcePolicy?.after_date ? `${rawMcpQuery} after:${sourcePolicy.after_date}` : rawMcpQuery;
 
 	try {
 		const result = await searchWithAuthStorage(

@@ -241,6 +241,34 @@ describe("Parallel web search", () => {
 		});
 	});
 
+	it("maps recency onto an after: operator when using anonymous MCP", async () => {
+		delete process.env.PARALLEL_API_KEY;
+		setSystemTime(new Date("2026-08-10T12:00:00Z"));
+		try {
+			const fetchMock = mockFetch({
+				jsonrpc: "2.0",
+				id: "parallel-mcp-recency",
+				result: { structuredContent: { search_id: "search-parallel-mcp-recency", results: [] } },
+			});
+
+			await searchParallel(
+				{ query: "recent api changes site:parallel.ai", recency: "week", fetch: fetchMock },
+				fakeAuthStorage,
+			);
+
+			expect(capturedRequestBody).toMatchObject({
+				params: {
+					arguments: {
+						objective: "recent api changes",
+						search_queries: ["recent api changes site:parallel.ai after:2026-08-03"],
+					},
+				},
+			});
+		} finally {
+			setSystemTime();
+		}
+	});
+
 	it("sends trusted session and active model metadata with anonymous MCP searches", async () => {
 		delete process.env.PARALLEL_API_KEY;
 		const fetchMock = mockFetch({
@@ -323,6 +351,21 @@ describe("Parallel web search", () => {
 				ageSeconds: undefined,
 			},
 		]);
+	});
+
+	it("returns no results when a successful MCP response contains no JSON payload", async () => {
+		delete process.env.PARALLEL_API_KEY;
+		const fetchMock = mockFetch({
+			jsonrpc: "2.0",
+			id: "parallel-mcp-no-results",
+			result: { content: [{ type: "text", text: "No results found for this query." }] },
+		});
+
+		await expect(searchParallel({ query: "unlikely search", fetch: fetchMock }, fakeAuthStorage)).resolves.toEqual({
+			provider: "parallel",
+			requestId: "",
+			sources: [],
+		});
 	});
 
 	it("preserves authenticated REST precedence for a stored key without an environment key", async () => {
