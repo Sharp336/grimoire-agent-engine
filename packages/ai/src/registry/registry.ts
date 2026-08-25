@@ -66,6 +66,8 @@ import { umansProvider } from "./umans";
 import { veniceProvider } from "./venice";
 import { vercelAiGatewayProvider } from "./vercel-ai-gateway";
 import { vllmProvider } from "./vllm";
+import { volcengineAgentPlanProvider } from "./volcengine-agent-plan";
+import { volcengineCodingPlanProvider } from "./volcengine-coding-plan";
 import { waferServerlessProvider } from "./wafer-serverless";
 import { xaiProvider } from "./xai";
 import { xaiOauthProvider } from "./xai-oauth";
@@ -162,6 +164,8 @@ const ALL = [
 	amazonBedrockProvider,
 	bedrockMantleProvider,
 	gmiCloudProvider,
+	volcengineAgentPlanProvider,
+	volcengineCodingPlanProvider,
 ];
 
 export type RegistryDef = (typeof ALL)[number];
