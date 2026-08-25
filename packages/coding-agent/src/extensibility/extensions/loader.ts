@@ -31,7 +31,12 @@ import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
-import { createValidationGraph, loadRuntimeModule } from "../module-loader";
+import {
+	createValidationGraph,
+	findValidationPackageRoot,
+	loadRuntimeModule,
+	type ValidationGraph,
+} from "../module-loader";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 import { getAllPluginExtensionPaths, getExtensionManifestPath } from "../plugins/loader";
 
@@ -429,7 +434,7 @@ async function importExtensionModule(
 	cwd: string,
 	manifestCache: Map<string, Promise<ExtensionManifest | null>>,
 	cacheBust?: string,
-	validationGraph?: ReturnType<typeof createValidationGraph>,
+	validationGraph?: Promise<ValidationGraph>,
 ): Promise<ImportedExtensionModule> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
 	const compatibility = await readExtensionCompatibility(resolvedPath, manifestCache);
@@ -466,10 +471,7 @@ async function bindExtension(
 	runtime: IExtensionRuntime,
 ): Promise<{ extension: Extension | null; error: string | null }> {
 	const factory = imported.factory;
-	if (imported.error !== null || factory === null) {
-		await imported.cleanup?.();
-		return { extension: null, error: imported.error };
-	}
+	if (imported.error !== null || factory === null) return { extension: null, error: imported.error };
 	try {
 		const extension = createExtension(extensionPath, imported.resolvedPath);
 		const api = new ConcreteExtensionAPI(PiCodingAgent, extension, runtime, cwd, eventBus);
@@ -478,8 +480,6 @@ async function bindExtension(
 	} catch (err) {
 		const message = err instanceof Error ? err.message : String(err);
 		return { extension: null, error: `Failed to load extension: ${message}` };
-	} finally {
-		await imported.cleanup?.();
 	}
 }
 
@@ -522,7 +522,7 @@ export async function loadExtensions(
 
 	const validationGraph =
 		options?.cacheBust && paths.length > 0
-			? createValidationGraph(path.dirname(paths[0]!), options.cacheBust)
+			? createValidationGraph(await findValidationPackageRoot(paths[0]!), options.cacheBust)
 			: undefined;
 	let imported: ImportedExtensionModule[];
 	try {
@@ -548,6 +548,7 @@ export async function loadExtensions(
 		}
 	}
 
+	await (await validationGraph)?.cleanup();
 	return {
 		extensions,
 		errors,

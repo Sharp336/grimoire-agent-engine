@@ -10,6 +10,9 @@ export interface ValidationGraph {
 	load(modulePath: string): Promise<unknown>;
 	cleanup(): Promise<void>;
 }
+export async function findValidationPackageRoot(modulePath: string): Promise<string> {
+	return findPackageRoot(modulePath);
+}
 
 export async function loadRuntimeModule(modulePath: string, cacheBust = ""): Promise<unknown> {
 	if (!cacheBust) return import(modulePath);
