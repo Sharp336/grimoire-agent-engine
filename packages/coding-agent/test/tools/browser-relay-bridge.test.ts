@@ -970,7 +970,7 @@ describe("RelayBridge attachment release", () => {
 		const sessionId = await attachPage(bridge, ext, cdp, connId, 1);
 
 		const replacement = new FakeExtSocket();
-		connect(bridge, replacement, [tab({ tabId: 1 })]);
+		connect(bridge, replacement, [tab({ tabId: 1 })], { recoverableTabIds: [1] });
 		expect(replacement.pending("attach")).toHaveLength(1);
 		reject(bridge, replacement, "attach", "debugger unavailable");
 		await flush();
