@@ -106,12 +106,13 @@ function readProfileFromEnvSafe(): string | undefined {
 	}
 }
 
-function getBaseConfigRoot(): string {
+/** Get the profile-independent config root directory (~/.omp). */
+export function getBaseConfigRootDir(): string {
 	return path.join(os.homedir(), getConfigDirName());
 }
 
 function getProfileConfigRoot(profile: string | undefined): string {
-	const root = getBaseConfigRoot();
+	const root = getBaseConfigRootDir();
 	return profile ? path.join(root, "profiles", profile) : root;
 }
 
@@ -877,7 +878,7 @@ export function getDaemonRuntimeDir(projectDir: string): string {
 
 /** Root directory containing every machine-global daemon service scope. */
 export function getGlobalDaemonRuntimeRoot(): string {
-	return path.join(getBaseConfigRoot(), "run", "daemons", "global");
+	return path.join(getBaseConfigRootDir(), "run", "daemons", "global");
 }
 
 /** Get a profile-independent runtime directory for a machine-global daemon service. */
@@ -964,7 +965,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  */
 export function getInstallId(): string {
 	if (cachedInstallId) return cachedInstallId;
-	const filePath = path.join(getBaseConfigRoot(), INSTALL_ID_FILE);
+	const filePath = path.join(getBaseConfigRootDir(), INSTALL_ID_FILE);
 
 	let observedInvalid = false;
 	try {

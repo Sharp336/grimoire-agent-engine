@@ -116,6 +116,7 @@ import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { formatDuration } from "../slash-commands/helpers/format";
+import { getProfileReport } from "../slash-commands/helpers/profile-report";
 import { STTController, type SttState } from "../stt";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { labelEchoesHandle } from "../task/label";
@@ -1162,22 +1163,26 @@ export class InteractiveMode implements InteractiveModeContext {
 			headerBefore.push(new Text(theme.fg("warning", `Warning: ${warning}`), 1, 0), new Spacer(1));
 		}
 		const headerAfter: Component[] = [];
-		if (!startupQuiet && this.#startupChangelog && settings.get("startup.changelogMode") !== "hidden") {
-			headerAfter.push(
-				new DynamicBorder(),
-				new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0),
-				new Spacer(1),
-			);
-			if (settings.get("startup.changelogMode") === "summary") {
-				const summary = formatStartupChangelogSummary(this.#startupChangelog).replace(
-					/\/changelog(?: full)?/g,
-					command => theme.bold(command),
+		if (!startupQuiet) {
+			const profileReport = getProfileReport(this.session.modelRegistry.authStorage, this.session.sessionId);
+			headerAfter.push(new Text(theme.fg("dim", profileReport), 1, 0), new Spacer(1));
+			if (this.#startupChangelog && settings.get("startup.changelogMode") !== "hidden") {
+				headerAfter.push(
+					new DynamicBorder(),
+					new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0),
+					new Spacer(1),
 				);
-				headerAfter.push(new Text(summary, 1, 0));
-			} else {
-				headerAfter.push(new Markdown(this.#startupChangelog.markdown?.trim() ?? "", 1, 0, getMarkdownTheme()));
+				if (settings.get("startup.changelogMode") === "summary") {
+					const summary = formatStartupChangelogSummary(this.#startupChangelog).replace(
+						/\/changelog(?: full)?/g,
+						command => theme.bold(command),
+					);
+					headerAfter.push(new Text(summary, 1, 0));
+				} else {
+					headerAfter.push(new Markdown(this.#startupChangelog.markdown?.trim() ?? "", 1, 0, getMarkdownTheme()));
+				}
+				headerAfter.push(new Spacer(1), new DynamicBorder());
 			}
-			headerAfter.push(new Spacer(1), new DynamicBorder());
 		}
 		this.composer.setHeaderExtras(headerBefore, headerAfter);
 		this.statusLine.watchBranch(() => {

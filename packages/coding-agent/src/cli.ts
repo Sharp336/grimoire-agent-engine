@@ -14,6 +14,7 @@ try {
  * CLI entry point — registers all commands explicitly and delegates to the
  * lightweight CLI runner from pi-utils.
  */
+import * as path from "node:path";
 import { parentPort } from "node:worker_threads";
 import type { CliConfig, CommandMetadata } from "@oh-my-pi/pi-utils/cli";
 import {
@@ -29,7 +30,9 @@ import { setProcessName } from "@oh-my-pi/pi-utils/process-name";
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
 import { BLOB_BROKER_WORKER_ARG } from "./blob-broker/protocol";
 import { installProfileAlias, resolveProfileAliasCommandFromProcess } from "./cli/profile-alias";
+import { resolveExistingProfileBinding } from "./cli/profile-binding-resolver";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
+import { setExplicitProfileSelection } from "./cli/profile-selection";
 import { startJsEvalProcess } from "./eval/js/process-entry";
 import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbound } from "./eval/js/worker-protocol";
 import { DAEMON_BROKER_WORKER_ARG } from "./launch/protocol";
@@ -343,23 +346,37 @@ async function runTinyWorker(): Promise<void> {
 export async function runCli(argv: string[]): Promise<void> {
 	let resolvedArgv = argv;
 	try {
+		setExplicitProfileSelection(undefined);
 		const extracted = extractProfileFlags(resolvedArgv);
 		resolvedArgv = extracted.argv;
+		const hasProfileEnv = process.env.OMP_PROFILE !== undefined || process.env.PI_PROFILE !== undefined;
 		if (extracted.profile !== undefined) {
 			setProfile(extracted.profile);
-		} else {
-			// No explicit --profile: activate any OMP_PROFILE/PI_PROFILE inherited
-			// from the environment. Module-load resolution deliberately swallows an
-			// invalid value to avoid an uncaught throw before this try/catch is in
-			// scope (see `readProfileFromEnvSafe` in dirs.ts), and callers may set
-			// OMP_PROFILE after importing this module (profile aliases/tests). Surfacing
-			// validation here turns `OMP_PROFILE=.. omp --version` into a clean error;
-			// calling setProfile keeps every later path helper on the env-selected
-			// profile instead of the default agent directory.
+			if (getActiveProfile() === undefined) process.env.OMP_PROFILE = "";
+			setExplicitProfileSelection({ profile: getActiveProfile(), source: "cli" });
+		} else if (hasProfileEnv) {
+			// Environment selectors are explicit even when empty: OMP_PROFILE=""
+			// deliberately selects the default profile and suppresses folder bindings.
+			// Module-load resolution swallows invalid values until this error boundary,
+			// so validate and apply them again here before profile-scoped imports.
 			setProfile(resolveProfileEnv(process.env.OMP_PROFILE, process.env.PI_PROFILE));
+			if (getActiveProfile() === undefined) process.env.OMP_PROFILE = "";
+			setExplicitProfileSelection({ profile: getActiveProfile(), source: "environment" });
+		} else if (extracted.command === "profile" || extracted.aliasName !== undefined) {
+			// Profile management must remain available even when the current folder is
+			// bound to a missing profile, so it can inspect, replace, or remove the binding.
+			// Alias validation must retain its explicit-profile requirement too.
+			setProfile(undefined);
+		} else {
+			const launchCwd = extracted.cwd ? path.resolve(process.cwd(), extracted.cwd) : process.cwd();
+			const bound = await resolveExistingProfileBinding(launchCwd);
+			setProfile(bound?.profile);
+		}
+		if (extracted.command === "profile" && extracted.cwd) {
+			process.chdir(path.resolve(process.cwd(), extracted.cwd));
 		}
 		if (extracted.aliasName !== undefined) {
-			const profile = extracted.profile ?? getActiveProfile();
+			const profile = extracted.profile ?? (hasProfileEnv ? getActiveProfile() : undefined);
 			if (!profile) {
 				throw new Error("--alias requires --profile <name> or OMP_PROFILE");
 			}
