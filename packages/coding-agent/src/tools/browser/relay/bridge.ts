@@ -1098,20 +1098,22 @@ export class RelayBridge {
 			} else {
 				// The page session survives, but the Chrome root it was riding was
 				// swapped by the guard detach, so its Runtime domain is no longer
-				// enabled. Roll the preserved session's Runtime bookkeeping back to
-				// the pristine state: otherwise a later `Runtime.enable` early-returns
-				// on the stale `enabled` flag without re-cycling the fresh root, and
-				// the retained `runtimeContexts` suppress the reused context ids as
-				// already announced — the recovered client goes silent. Resetting to
-				// `default` (and bumping the epoch to abandon any in-flight enable)
-				// makes the next enable re-drive the root and replay live contexts.
+				// enabled. Clear each preserved session's stale context bookkeeping and
+				// abandon any in-flight enable; the reused root context ids would
+				// otherwise be suppressed as already announced and the recovered client
+				// goes silent. A session that had `Runtime.enable`d must also drop back
+				// to `default` so its next `Runtime.enable` re-cycles the fresh root
+				// instead of early-returning on the stale `enabled` flag. A session that
+				// explicitly sent `Runtime.disable` keeps that per-session opt-out:
+				// resetting it to `default` would re-subject it to the legacy root
+				// fan-out even though its client never re-enabled the domain.
 				for (const pageSession of conn.sessionsForTab(tab.tabId, "page")) {
 					const ref = conn.sessions.get(pageSession);
 					if (!ref) continue;
-					ref.runtimeState = "default";
 					ref.runtimeContexts.clear();
 					ref.runtimeEnabling = null;
 					ref.runtimeEpoch++;
+					if (ref.runtimeState === "enabled") ref.runtimeState = "default";
 				}
 			}
 			for (const tabSession of tabSessions) {

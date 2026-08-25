@@ -1389,4 +1389,69 @@ describe("RelayBridge attachment release", () => {
 			cdp.messages.filter(m => m.sessionId === pageSession && m.method === "Runtime.executionContextCreated"),
 		).toHaveLength(2);
 	});
+
+	it("keeps a preserved session's Runtime.disable opt-out across recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+
+		// A preserved bare holder that explicitly disabled Runtime.
+		const disabled = new FakeCdpSocket();
+		const disabledConn = bridge.cdpConnected(disabled);
+		const disabledSession = await attachPage(bridge, ext, disabled, disabledConn, 1);
+		bridge.cdpMessage(
+			disabledConn,
+			JSON.stringify({ id: ++msgSeq, sessionId: disabledSession, method: "Runtime.disable" }),
+		);
+		await flush();
+
+		// A second holder that keeps Runtime enabled, so root Runtime events keep flowing.
+		const active = new FakeCdpSocket();
+		const activeConn = bridge.cdpConnected(active);
+		const activeSession = await attachPage(bridge, ext, active, activeConn, 1);
+
+		// Recovery: socket drops, replacement reconnects, both page sessions preserved.
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await flush();
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		// The active holder re-enables Runtime after recovery; the root cycles and a
+		// context is announced.
+		bridge.cdpMessage(
+			activeConn,
+			JSON.stringify({ id: ++msgSeq, sessionId: activeSession, method: "Runtime.enable" }),
+		);
+		await flush();
+		ack(bridge, ext2, "send"); // Runtime.disable leg
+		await flush();
+		const context = {
+			context: {
+				id: 42,
+				origin: "https://example.com",
+				name: "",
+				uniqueId: "context-42",
+				auxData: { isDefault: true, type: "default", frameId: "frame-1" },
+			},
+		};
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({ t: "cdpEvent", tabId: 1, method: "Runtime.executionContextCreated", params: context }),
+		);
+		ack(bridge, ext2, "send"); // Runtime.enable leg
+		await flush();
+
+		// The disabled session's opt-out survived recovery: it must NOT receive the
+		// root context event, while the active session does.
+		expect(
+			disabled.messages.filter(
+				m => m.sessionId === disabledSession && m.method === "Runtime.executionContextCreated",
+			),
+		).toHaveLength(0);
+		expect(
+			active.messages.filter(m => m.sessionId === activeSession && m.method === "Runtime.executionContextCreated"),
+		).toHaveLength(1);
+	});
 });
