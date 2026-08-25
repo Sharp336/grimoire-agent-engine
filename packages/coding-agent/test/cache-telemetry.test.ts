@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { cacheFingerprint, orderedHash, resolveTtl, structuralHash } from "@oh-my-pi/pi-ai/cache";
+import { cacheFingerprint, MIN_CACHE_FOOTPRINT, orderedHash, resolveTtl, structuralHash } from "@oh-my-pi/pi-ai/cache";
 import type { CacheKeepaliveRecord } from "@oh-my-pi/pi-ai/cache/keepalive";
 import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -656,7 +656,10 @@ describe("cache telemetry keepalive wiring", () => {
 		// request row ever carries — so the gap between the request that wrote the entry and
 		// the touches keeping it warm can never be differenced, and the journal's TTL evidence
 		// is unusable.
-		const model = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		// Above `MIN_CACHE_FOOTPRINT`: a request reporting zero input tokens is not a shape any
+		// provider produces, and a sub-threshold zero/zero turn is deliberately not recorded
+		// at all — this test is about which entry a row is keyed to, so it needs a row.
+		const model = createMockModel({ handler: () => ({ content: ["Done"], usage: { input: 8_192 } }) });
 		const session = await createSession({ model });
 		const store = new CacheTelemetryStore(await tmpJournal());
 		const policy = createCacheKeepalivePolicy(() => session, store);
@@ -692,7 +695,7 @@ describe("cache telemetry keepalive wiring", () => {
 		// which already contains the assistant message being observed. The row then names a
 		// prefix no request ever sent, so nothing else ever observes that entry and the row
 		// carries no idle-age evidence — the one thing TTL learning consumes.
-		const model = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const model = createMockModel({ handler: () => ({ content: ["Done"], usage: { input: 8_192 } }) });
 		const session = await createSession({ model });
 		const recorded = captureRequestObservations(session);
 		try {
@@ -719,6 +722,63 @@ describe("cache telemetry keepalive wiring", () => {
 			expect(recorded.rows[0]?.fingerprint).not.toBe(recorded.rows[1]?.fingerprint);
 			// And it is not the buggy value: the digest of the full list, response included.
 			expect(recorded.rows[1]?.fingerprint).not.toBe(fingerprintOver(session, second!));
+		} finally {
+			recorded.restore();
+		}
+	});
+
+	it("drops a successful zero/zero turn below the caching floor, and keeps one above it", async () => {
+		// Failure mode: a short conversation reports neither a cache read nor a write because
+		// the prefix was never big enough to cache. Filed as `success-unverified`, every such
+		// row costs the route 0.05 confidence in `observeTtl` while carrying no information —
+		// so a handful of them erases what real hits and misses earned, drops the route under
+		// the 0.7 learned gate, and no learned TTL can ever be selected again.
+		const belowModel = createMockModel({
+			handler: () => ({ content: ["Done"], usage: { input: MIN_CACHE_FOOTPRINT - 1 } }),
+		});
+		const belowSession = await createSession({ model: belowModel });
+		const below = captureRequestObservations(belowSession);
+		try {
+			await belowSession.sendUserMessage("hi");
+			expect(below.rows).toHaveLength(0);
+			// And the remembered key stays unset, so a later touch cannot file evidence under
+			// an entry that has no observation of its own to difference against.
+			expect(belowSession.lastRecordedCacheFingerprint).toBeUndefined();
+		} finally {
+			below.restore();
+		}
+
+		// Positive control, and the reason the gate is on size rather than on silence: at the
+		// floor the same zero/zero reading IS evidence — the provider should have cached this
+		// prefix and did not — so it must still be recorded.
+		const atModel = createMockModel({
+			handler: () => ({ content: ["Done"], usage: { input: MIN_CACHE_FOOTPRINT } }),
+		});
+		const atSession = await createSession({ model: atModel });
+		const at = captureRequestObservations(atSession);
+		try {
+			await atSession.sendUserMessage("hi");
+			await at.settled(1);
+			expect(at.rows[0]?.outcome).toBe("success-unverified");
+			expect(atSession.lastRecordedCacheFingerprint).toBe(at.rows[0]?.fingerprint);
+		} finally {
+			at.restore();
+		}
+	});
+
+	it("records a sub-threshold turn that did report cache activity", async () => {
+		// The gate must key on the absence of counters, not on prefix size alone: a provider
+		// that reports a read over a small prefix has told us something real, and dropping it
+		// would discard genuine evidence.
+		const model = createMockModel({
+			handler: () => ({ content: ["Done"], usage: { input: 8, cacheRead: 64 } }),
+		});
+		const session = await createSession({ model });
+		const recorded = captureRequestObservations(session);
+		try {
+			await session.sendUserMessage("hi");
+			await recorded.settled(1);
+			expect(recorded.rows[0]?.outcome).toBe("confirmed-hit");
 		} finally {
 			recorded.restore();
 		}

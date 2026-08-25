@@ -1,15 +1,13 @@
 import type { Usage } from "@oh-my-pi/pi-ai";
+// `MIN_CACHE_FOOTPRINT` is the floor below which a zero `cacheRead` is expected rather
+// than a reset: tiny contexts, and providers under the cacheable-prefix minimum. Shared
+// with the cache-telemetry layer, which uses the same floor to decide whether a zero/zero
+// reading carries any information, so the two cannot drift apart on what "too small to
+// have been cached" means.
+import { MIN_CACHE_FOOTPRINT } from "@oh-my-pi/pi-ai/cache";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import { theme } from "../../modes/theme/theme";
-
-/**
- * Minimum prefix the previous turn must have READ back from cache before a
- * collapse on the current turn counts as an invalidation. Filters out tiny
- * contexts and providers below the cacheable-prefix floor, where a zero
- * `cacheRead` is expected rather than a reset.
- */
-const MIN_CACHE_FOOTPRINT = 2048;
 
 /** A prompt-cache invalidation detected from a turn's usage. */
 export interface CacheInvalidation {

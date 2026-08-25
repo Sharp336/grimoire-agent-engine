@@ -15,13 +15,15 @@ import type { CacheOutcome } from "./types";
  * providers do not cache prefixes this small, so the absence of cache tokens is
  * expected rather than a miss.
  *
- * Mirrors `MIN_CACHE_FOOTPRINT` in
- * `packages/coding-agent/src/modes/components/cache-invalidation-marker.ts:12`.
+ * The single definition of that floor. `cache-invalidation-marker.ts` reads it to
+ * decide whether a collapsed `cacheRead` is a real invalidation, and the session's
+ * observation recorder reads it to drop sub-threshold silence instead of filing it as
+ * `success-unverified` — which `observeTtl` would charge confidence for, letting short
+ * conversations erase the evidence real hits and misses earned.
  *
- * Exported for callers deciding whether a zero/zero reading is worth recording.
  * Classification itself is deliberately NOT gated on it: prompt size cannot turn an
  * unverified result into a verified one, it only tells you how surprising the
- * silence is.
+ * silence is. That decision belongs to whoever is about to persist the row.
  */
 export const MIN_CACHE_FOOTPRINT = 2048;
 

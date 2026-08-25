@@ -77,7 +77,13 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { type Effort, streamSimple } from "@oh-my-pi/pi-ai";
 import type { CacheIdentity } from "@oh-my-pi/pi-ai/cache";
-import { cacheFingerprint, classifyCacheOutcome, orderedHash, structuralHash } from "@oh-my-pi/pi-ai/cache";
+import {
+	cacheFingerprint,
+	classifyCacheOutcome,
+	MIN_CACHE_FOOTPRINT,
+	orderedHash,
+	structuralHash,
+} from "@oh-my-pi/pi-ai/cache";
 import { CACHE_KEEPALIVE_STATE_KEY } from "@oh-my-pi/pi-ai/cache/keepalive";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
@@ -2560,8 +2566,32 @@ export class AgentSession {
 			historyHash: orderedHash(this.#cacheHistoryParts(assistantMsg)),
 		};
 
+		const outcome = classifyCacheOutcome({
+			// An errored or aborted turn observed nothing about the cache, whatever its
+			// usage block claims — `classifyCacheOutcome` maps that to `failed`, which
+			// `observeTtl` correctly refuses to learn from.
+			ok: assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "aborted",
+			cacheRead: usage.cacheRead,
+			cacheWrite: usage.cacheWrite,
+			inputTokens: usage.input,
+		});
+
+		// A successful request that reports neither a read nor a write, over a prefix too
+		// small for any provider to have cached, is silence where silence is EXPECTED — the
+		// case `MIN_CACHE_FOOTPRINT` exists to name. Recording it is not merely noise:
+		// `observeTtl` docks `TTL_CONFIDENCE_DELTA_UNVERIFIED` (-0.05) for every
+		// `success-unverified` row, so a handful of short conversations on a route erases
+		// the confidence real hits and misses earned, drags it under the 0.7 learned gate,
+		// and the route can never select a learned TTL again. Above the floor the same
+		// silence IS informative — the provider should have cached and did not — so only the
+		// sub-threshold case is dropped.
+		if (outcome === "success-unverified" && usage.input < MIN_CACHE_FOOTPRINT) return;
+
 		// Held for the keepalive: a touch replays exactly this request's payload, so its
-		// rows must be filed under this same entry rather than under a routing key.
+		// rows must be filed under this same entry rather than under a routing key. Assigned
+		// only once the row is certain to be written, so the name stays honest: a touch must
+		// never file evidence under an entry that has no observation of its own to difference
+		// against.
 		const fingerprint = cacheFingerprint(identity);
 		this.#lastRecordedCacheFingerprint = fingerprint;
 
@@ -2570,15 +2600,7 @@ export class AgentSession {
 			kind: "request",
 			fingerprint,
 			routeKey: route.routeKey,
-			outcome: classifyCacheOutcome({
-				// An errored or aborted turn observed nothing about the cache, whatever its
-				// usage block claims — `classifyCacheOutcome` maps that to `failed`, which
-				// `observeTtl` correctly refuses to learn from.
-				ok: assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "aborted",
-				cacheRead: usage.cacheRead,
-				cacheWrite: usage.cacheWrite,
-				inputTokens: usage.input,
-			}),
+			outcome,
 			cacheRead: usage.cacheRead,
 			cacheWrite: usage.cacheWrite,
 			inputTokens: usage.input,
