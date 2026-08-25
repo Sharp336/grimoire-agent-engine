@@ -31,7 +31,7 @@ import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { EventBus } from "../../utils/event-bus";
 import * as TypeBox from "../legacy-typebox";
-import { loadRuntimeModule, loadValidationModule } from "../module-loader";
+import { createValidationGraph, loadRuntimeModule } from "../module-loader";
 import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
 import { getAllPluginExtensionPaths, getExtensionManifestPath } from "../plugins/loader";
 
@@ -429,6 +429,7 @@ async function importExtensionModule(
 	cwd: string,
 	manifestCache: Map<string, Promise<ExtensionManifest | null>>,
 	cacheBust?: string,
+	validationGraph?: ReturnType<typeof createValidationGraph>,
 ): Promise<ImportedExtensionModule> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
 	const compatibility = await readExtensionCompatibility(resolvedPath, manifestCache);
@@ -436,7 +437,8 @@ async function importExtensionModule(
 	try {
 		const module = (await withHostGuard(async () => {
 			if (compatibility === "modern-esm" && cacheBust) {
-				const loaded = await loadValidationModule(resolvedPath, cacheBust);
+				const graph = await validationGraph!;
+				const loaded = { module: await graph.load(resolvedPath), cleanup: graph.cleanup };
 				cleanup = loaded.cleanup;
 				return loaded.module;
 			}
@@ -518,9 +520,20 @@ export async function loadExtensions(
 
 	const manifestCache = new Map<string, Promise<ExtensionManifest | null>>();
 
-	const imported = await Promise.all(
-		paths.map(extPath => importExtensionModule(extPath, cwd, manifestCache, options?.cacheBust)),
-	);
+	const validationGraph =
+		options?.cacheBust && paths.length > 0
+			? createValidationGraph(path.dirname(paths[0]!), options.cacheBust)
+			: undefined;
+	let imported: ImportedExtensionModule[];
+	try {
+		imported = await Promise.all(
+			paths.map(extPath => importExtensionModule(extPath, cwd, manifestCache, options?.cacheBust, validationGraph)),
+		);
+	} catch (error) {
+		const graph = await validationGraph;
+		await graph?.cleanup();
+		throw error;
+	}
 	for (let i = 0; i < paths.length; i++) {
 		const extPath = paths[i]!;
 		const { extension, error } = await bindExtension(extPath, imported[i]!, cwd, resolvedEventBus, runtime);

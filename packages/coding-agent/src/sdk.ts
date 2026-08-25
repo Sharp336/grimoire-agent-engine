@@ -4119,14 +4119,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		void deferredModelResolution?.then(async discovered => {
 			if (!discovered || session.model) return;
 			try {
-				await session.setModelTemporary(discovered.model, discovered.thinkingLevel);
 				const deferredInlineToolDescriptors = shouldInlineToolDescriptors(
 					settings.get("inlineToolDescriptors"),
 					discovered.model.id,
 				);
 				inlineToolDescriptors = deferredInlineToolDescriptors;
+				session.setModelToolPolicy(deferredInlineToolDescriptors);
 				agent.setPruneToolDescriptions(deferredInlineToolDescriptors);
-				session.setPruneToolDescriptions(deferredInlineToolDescriptors);
+				await session.setModelTemporary(discovered.model, discovered.thinkingLevel);
 				agent.setDialect(resolveDialect(settings.get("tools.format"), discovered.model));
 				await session.initializeCodeMode();
 			} catch (error) {

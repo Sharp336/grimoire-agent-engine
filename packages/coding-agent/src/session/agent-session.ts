@@ -7174,6 +7174,10 @@ export class AgentSession {
 		this.#pruneToolDescriptions = prune;
 	}
 
+	setModelToolPolicy(pruneToolDescriptions: boolean): void {
+		this.#pruneToolDescriptions = pruneToolDescriptions;
+	}
+
 	/** Cycles the scoped model set, or all available models when no scope exists. */
 	cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
 		return this.#models.cycleModel(direction);
