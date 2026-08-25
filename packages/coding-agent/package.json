@@ -52,7 +52,7 @@
     "@oh-my-pi/omp-stats": "catalog:",
     "@oh-my-pi/omptype": "catalog:",
     "@oh-my-pi/pi-agent-core": "catalog:",
-    "@oh-my-pi/pi-ai": "catalog:",
+    "@oh-my-pi/pi-ai": "https://github.com/fabiomcarneiro/oh-my-pi/releases/download/v18.0.4-modern-esm-3476bb5515-r2/omp-corrected-pi-ai-18.0.4-r1.tgz",
     "@oh-my-pi/pi-catalog": "catalog:",
     "@oh-my-pi/pi-mnemopi": "catalog:",
     "@oh-my-pi/pi-natives": "catalog:",
