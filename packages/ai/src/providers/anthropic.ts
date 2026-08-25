@@ -1929,6 +1929,7 @@ const streamAnthropicOnce = (
 				if (
 					model.reasoning &&
 					options?.thinkingEnabled &&
+					model.compat.supportsContextManagement &&
 					model.provider !== "github-copilot" &&
 					model.provider !== "google-vertex" &&
 					model.provider !== "opencode-zen" &&
@@ -3406,6 +3407,7 @@ function buildParams(
 	// (#6510) — same rationale as Copilot.
 	const shouldKeepThinkingContext =
 		!options?.client &&
+		model.compat.supportsContextManagement &&
 		model.provider !== "github-copilot" &&
 		model.provider !== "google-vertex" &&
 		model.provider !== "opencode-zen" &&

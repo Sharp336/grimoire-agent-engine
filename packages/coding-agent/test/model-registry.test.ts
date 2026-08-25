@@ -601,6 +601,7 @@ describe("ModelRegistry", () => {
 						compat: {
 							supportsEagerToolInputStreaming: true,
 							allowAnthropicHeaderOverrides: true,
+							supportsContextManagement: false,
 						},
 						models: [
 							{
@@ -705,6 +706,7 @@ describe("ModelRegistry", () => {
 			expect(model?.compat).toMatchObject({
 				supportsEagerToolInputStreaming: true,
 				allowAnthropicHeaderOverrides: true,
+				supportsContextManagement: false,
 			});
 		});
 

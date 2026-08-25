@@ -508,6 +508,14 @@ export interface AnthropicCompat {
 	 * {@link ResolvedAnthropicCompat.officialEndpoint}.
 	 */
 	signingEndpoint?: boolean;
+	/**
+	 * Whether the endpoint supports Anthropic's `context_management` field
+	 * (`context_management.edits[clear_thinking_20251015]`) and companion
+	 * `context-management-2025-06-27` beta header. Gateways fronting AWS Bedrock
+	 * or older Anthropic-compatible proxies reject `context_management` with
+	 * a 400 error. Default: true.
+	 */
+	supportsContextManagement?: boolean;
 }
 
 /**

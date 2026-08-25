@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `supportsContextManagement` to `AnthropicCompat` and `ResolvedAnthropicCompat` (defaulting to `true`) so Anthropic-compatible proxies can disable the `context_management` field via `models.yml` ([#9686](https://github.com/can1357/oh-my-pi/issues/9686)).
+
 ## [18.0.4] - 2026-08-24
 
 ### Fixed
