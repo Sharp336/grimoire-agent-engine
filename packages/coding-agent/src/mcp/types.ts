@@ -115,6 +115,8 @@ export interface MCPHttpServerConfig extends MCPServerConfigBase {
 	type: "http";
 	url: string;
 	headers?: Record<string, string>;
+	/** Skip TLS certificate verification (self-signed / internal CA endpoints). */
+	insecureTls?: boolean;
 	/**
 	 * `origin-locked`: configured headers are literal package data pinned to the
 	 * configured URL's origin (Agent Plugins §7.2.1) — never expanded, never
@@ -128,6 +130,8 @@ export interface MCPSseServerConfig extends MCPServerConfigBase {
 	type: "sse";
 	url: string;
 	headers?: Record<string, string>;
+	/** Skip TLS certificate verification (self-signed / internal CA endpoints). */
+	insecureTls?: boolean;
 	/** See {@link MCPHttpServerConfig.headerPolicy}. */
 	headerPolicy?: "origin-locked";
 }

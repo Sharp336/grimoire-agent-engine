@@ -110,6 +110,7 @@ export class HttpTransport implements MCPTransport {
 			init,
 			{ generated: withVersion, configured },
 			this.config.headerPolicy === "origin-locked",
+			this.config.insecureTls === true,
 		);
 	}
 

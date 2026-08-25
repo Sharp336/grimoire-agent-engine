@@ -174,6 +174,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				cwd: serverConfig.cwd as string | undefined,
 				url: serverConfig.url as string | undefined,
 				headers: serverConfig.headers as Record<string, string> | undefined,
+				insecureTls: serverConfig.insecureTls === true,
 				auth: serverConfig.auth as
 					| {
 							type: "oauth" | "apikey";

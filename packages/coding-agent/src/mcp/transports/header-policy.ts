@@ -98,9 +98,11 @@ export async function mcpFetch(
 	init: MCPFetchInit,
 	sources: MCPHeaderSources,
 	originLocked: boolean,
+	insecureTls?: boolean,
 ): Promise<Response> {
+	const tls = insecureTls ? { tls: { rejectUnauthorized: false } } : {};
 	if (!originLocked) {
-		return fetch(url, { ...init, headers: mergeMCPHeaders(sources) });
+		return fetch(url, { ...init, ...tls, headers: mergeMCPHeaders(sources) });
 	}
 
 	const configuredOrigin = new URL(url).origin;
@@ -108,7 +110,7 @@ export async function mcpFetch(
 	for (let hop = 0; hop <= MAX_REDIRECT_HOPS; hop++) {
 		const attachConfigured = new URL(currentUrl).origin === configuredOrigin;
 		const headers = mergeMCPHeaders(attachConfigured ? sources : { generated: sources.generated });
-		const response = await fetch(currentUrl, { ...init, headers, redirect: "manual" });
+		const response = await fetch(currentUrl, { ...init, ...tls, headers, redirect: "manual" });
 		if (!REDIRECT_STATUSES[response.status]) return response;
 
 		const location = response.headers.get("Location");

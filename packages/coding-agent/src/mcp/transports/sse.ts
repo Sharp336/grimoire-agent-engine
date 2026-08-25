@@ -54,6 +54,7 @@ export class LegacySseTransport implements MCPTransport {
 			init,
 			{ generated, configured: this.#config.headers },
 			this.#config.headerPolicy === "origin-locked",
+			this.#config.insecureTls === true,
 		);
 	}
 
