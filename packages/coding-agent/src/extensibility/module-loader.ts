@@ -25,10 +25,10 @@ export async function loadValidationModule(modulePath: string, cacheBust: string
 }
 export async function createValidationGraph(root: string, cacheBust: string): Promise<ValidationGraph> {
 	const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-module-validation-"));
+	const hoisted = await findNodeModules(path.dirname(root));
 	try {
-		await fs.cp(root, tempRoot, { recursive: true, verbatimSymlinks: true });
-		const hoisted = await findNodeModules(path.dirname(root));
 		if (hoisted) await copyAbsentPackages(hoisted, path.join(tempRoot, "node_modules"));
+		await repairDependencySymlinks(path.join(tempRoot, "node_modules"));
 		return {
 			load: modulePath => import(`${path.join(tempRoot, path.relative(root, modulePath))}?${cacheBust}`),
 			cleanup: () => fs.rm(tempRoot, { recursive: true, force: true }),
@@ -36,6 +36,20 @@ export async function createValidationGraph(root: string, cacheBust: string): Pr
 	} catch (error) {
 		await fs.rm(tempRoot, { recursive: true, force: true });
 		throw error;
+	}
+	async function repairDependencySymlinks(directory: string): Promise<void> {
+		for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
+			const target = path.join(directory, entry.name);
+			if (entry.isSymbolicLink()) {
+				const resolved = await fs.realpath(target).catch(() => undefined);
+				if (resolved) {
+					await fs.unlink(target);
+					await fs.cp(resolved, target, { recursive: true, verbatimSymlinks: true });
+				}
+				continue;
+			}
+			if (entry.isDirectory() && entry.name !== ".bin") await repairDependencySymlinks(target);
+		}
 	}
 }
 async function copyAbsentPackages(source: string, target: string): Promise<void> {
