@@ -114,6 +114,7 @@ export type AnthropicHeaderOptions = {
 	coworkBetas?: readonly string[];
 	/** Allow explicit fingerprint headers to replace OAuth defaults on non-official endpoints. */
 	allowAnthropicHeaderOverrides?: boolean;
+	supportsContextManagement?: boolean;
 };
 
 export function normalizeAnthropicBaseUrl(baseUrl?: string): string | undefined {
@@ -188,16 +189,18 @@ function buildCoworkBetas(
 	agentRequest: boolean,
 	thinkingRequest: boolean,
 	disableStrictTools = false,
+	supportsContextManagement = true,
 ): readonly string[] {
 	// `context-1m-2025-08-07` is intentionally never advertised. OAuth
 	// subscription credentials have no long-context credit balance, so Anthropic
 	// hard-429s ("Usage credits are required for long context requests") on any
 	// beta-gated 1M model regardless of prompt size (#7238). Natively-1M models
 	// (e.g. claude-sonnet-5) serve their full window without the beta anyway.
-	if (!agentRequest && !disableStrictTools) return coworkUtilityBetaDefaults;
+	if (!agentRequest && !disableStrictTools && supportsContextManagement) return coworkUtilityBetaDefaults;
 	const betas: string[] = [];
 	for (const beta of agentRequest ? coworkAgentBetaDefaults : coworkUtilityBetaDefaults) {
 		if (disableStrictTools && beta === structuredOutputsBeta) continue;
+		if (!supportsContextManagement && beta === contextManagementBeta) continue;
 		betas.push(beta);
 	}
 	if (!agentRequest) return betas;
@@ -247,8 +250,9 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 	const incomingApiKey = getHeaderCaseInsensitive(options.modelHeaders, "X-Api-Key");
 	// Cowork's beta profile is part of the OAuth fingerprint; API-key requests
 	// default to extras only, matching the streaming path.
+	const supportsContextManagement = options.supportsContextManagement ?? true;
 	const betaHeader = buildBetaHeader(
-		options.coworkBetas ?? (oauthToken ? buildCoworkBetas(true, true) : []),
+		options.coworkBetas ?? (oauthToken ? buildCoworkBetas(true, true, false, supportsContextManagement) : []),
 		extraBetas,
 	);
 	const acceptHeader = oauthToken ? "application/json" : stream ? "text/event-stream" : "application/json";
@@ -1929,6 +1933,7 @@ const streamAnthropicOnce = (
 				if (
 					model.reasoning &&
 					options?.thinkingEnabled &&
+					model.compat.supportsContextManagement &&
 					model.provider !== "github-copilot" &&
 					model.provider !== "google-vertex" &&
 					model.provider !== "opencode-zen" &&
@@ -3047,10 +3052,17 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		),
 		isCloudflareAiGateway: model.provider === "cloudflare-ai-gateway",
 		allowAnthropicHeaderOverrides: model.compat.allowAnthropicHeaderOverrides,
+		supportsContextManagement: compat.supportsContextManagement,
 		claudeCodeSessionId,
-		coworkBetas: oauthToken ? buildCoworkBetas(hasTools || thinkingEnabled, thinkingEnabled, disableStrictTools) : [],
+		coworkBetas: oauthToken
+			? buildCoworkBetas(
+					hasTools || thinkingEnabled,
+					thinkingEnabled,
+					disableStrictTools,
+					compat.supportsContextManagement,
+				)
+			: [],
 	});
-
 	if (model.provider === "cloudflare-ai-gateway") {
 		return {
 			isOAuthToken: false,
@@ -3406,6 +3418,7 @@ function buildParams(
 	// (#6510) — same rationale as Copilot.
 	const shouldKeepThinkingContext =
 		!options?.client &&
+		model.compat.supportsContextManagement &&
 		model.provider !== "github-copilot" &&
 		model.provider !== "google-vertex" &&
 		model.provider !== "opencode-zen" &&

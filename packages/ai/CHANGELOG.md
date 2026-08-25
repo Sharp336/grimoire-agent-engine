@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `supportsContextManagement` compat option for `anthropic-messages` providers to allow disabling `context_management` payloads and the companion `context-management-2025-06-27` beta header on proxies that do not support them ([#9686](https://github.com/can1357/oh-my-pi/issues/9686)).
+
 ## [18.0.4] - 2026-08-24
 
 ### Fixed

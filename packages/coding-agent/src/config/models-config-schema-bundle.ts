@@ -61,6 +61,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"allowAnthropicHeaderOverrides?": "boolean",
 		"requiresToolResultId?": "boolean",
 		"replayUnsignedThinking?": "boolean",
+		"supportsContextManagement?": "boolean",
 	} as const;
 
 	const OpenAICompatFieldsSchema = type(OpenAICompatFields);

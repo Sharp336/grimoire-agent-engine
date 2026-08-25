@@ -547,7 +547,8 @@ Provider-level `compat` is the baseline; per-model `compat` is deep-merged on to
 For `anthropic-messages` models the runtime uses a separate `AnthropicCompat` shape
 (`packages/catalog/src/types.ts`). The `models.yml` schema exposes the strict-tools opt-out as a
 top-level provider field plus `requiresToolResultId`, `replayUnsignedThinking`,
-`supportsEagerToolInputStreaming`, and `allowAnthropicHeaderOverrides` in `compat`. Other
+`supportsEagerToolInputStreaming`, `supportsContextManagement`, and
+`allowAnthropicHeaderOverrides` in `compat`. Other
 Anthropic-side knobs are supplied by built-in catalog metadata and are not configurable here.
 
 ### Bedrock compatibility (`bedrock-converse-stream`)
