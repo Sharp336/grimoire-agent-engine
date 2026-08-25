@@ -699,6 +699,125 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send")[0]!.tabId).toBe(1);
 		expect(cdp.messages.find(m => m.id === cmdId)?.error).toBeUndefined();
 	});
+
+	it("re-cycles Runtime for a preserved session that re-enables before the reconnect hello", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { attachedTabIds: [1] });
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		// Enable Runtime on the live session so `ref.runtimeState` becomes "enabled".
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId: pageSession, method: "Runtime.enable" }));
+		await flush();
+		expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Runtime.disable"]);
+		ack(bridge, ext, "send");
+		await flush();
+		expect(ext.pending("send").map(rpc => rpc.method)).toEqual(["Runtime.enable"]);
+		ack(bridge, ext, "send");
+		await flush();
+
+		// Extension drops, replacement socket opens, but its hello has NOT landed —
+		// recovery bookkeeping has not run, so `ref.runtimeState` is still "enabled".
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		bridge.extConnected(ext2);
+
+		// The preserved holder repeats Runtime.enable in this window. The stale
+		// "enabled" state must NOT short-circuit into an early ack: the fresh root
+		// will come up with Runtime disabled, so the bridge must gate on the hello,
+		// observe the recovery reset to "default", and re-cycle the root.
+		const enableId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: enableId, sessionId: pageSession, method: "Runtime.enable" }));
+		await flush();
+		expect(ext2.rpcs("send")).toHaveLength(0);
+		expect(cdp.messages.find(m => m.id === enableId)).toBeUndefined();
+
+		// Hello arrives: recovery retracts/re-announces the preserved session (resetting
+		// its runtime state) and arms the reattach.
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "hello",
+				userAgent: "test",
+				browserVersion: "Chrome/151.0.0.0",
+				tabs: [tab({ tabId: 1, groupId: -1 })],
+				attachedTabIds: [],
+				recoverableTabIds: [1],
+			}),
+		);
+		await flush();
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		// The held enable now drives a real disable+enable cycle on the fresh root
+		// instead of a spurious early success.
+		expect(ext2.pending("send").map(rpc => rpc.method)).toEqual(["Runtime.disable"]);
+		ack(bridge, ext2, "send");
+		await flush();
+		expect(ext2.pending("send").map(rpc => rpc.method)).toEqual(["Runtime.enable"]);
+		ack(bridge, ext2, "send");
+		await flush();
+		expect(cdp.messages.find(m => m.id === enableId)?.error).toBeUndefined();
+		expect(cdp.messages.find(m => m.id === enableId)?.result).toEqual({});
+	});
+
+	it("holds a preserved command across a second reconnect until the latest attach settles", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })], { attachedTabIds: [1] });
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		// First reconnect arms attach A (in flight, not yet acknowledged).
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await flush();
+		expect(ext2.rpcs("attach")).toHaveLength(1);
+
+		// A surviving-session command arrives while attach A is pending.
+		const cmdId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: cmdId, sessionId: pageSession, method: "Runtime.evaluate" }));
+		await flush();
+		expect(ext2.rpcs("send")).toHaveLength(0);
+
+		// A SECOND reconnect replaces the socket before attach A settles. This rejects
+		// the in-flight attach A (ExtensionReplacedError) so `tab.attaching` clears —
+		// but forwarding now would race attach B on the new socket. The command must
+		// keep waiting for the new hello + attach B, not fire on the stale settle.
+		const ext3 = new FakeExtSocket();
+		bridge.extConnected(ext3);
+		await flush();
+		expect(ext3.rpcs("send")).toHaveLength(0);
+		expect(ext3.rpcs("attach")).toHaveLength(0);
+
+		// New hello arms attach B; still no forward until B acknowledges.
+		bridge.extMessage(
+			ext3,
+			JSON.stringify({
+				t: "hello",
+				userAgent: "test",
+				browserVersion: "Chrome/151.0.0.0",
+				tabs: [tab({ tabId: 1, groupId: -1 })],
+				attachedTabIds: [],
+				recoverableTabIds: [1],
+			}),
+		);
+		await flush();
+		expect(ext3.rpcs("attach")).toHaveLength(1);
+		expect(ext3.rpcs("send")).toHaveLength(0);
+
+		ack(bridge, ext3, "attach");
+		await flush();
+		ack(bridge, ext3, "send", { ok: true });
+		await flush();
+		expect(ext3.rpcs("send")).toHaveLength(1);
+		expect(ext3.rpcs("send")[0]!.tabId).toBe(1);
+		expect(cdp.messages.find(m => m.id === cmdId)?.error).toBeUndefined();
+	});
 });
 
 describe("RelayBridge Runtime sessions", () => {

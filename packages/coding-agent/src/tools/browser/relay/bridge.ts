@@ -498,6 +498,15 @@ export class RelayBridge {
 			await this.#forwardToTab(conn, msg, ref.tabId, undefined);
 			return;
 		}
+		// A preserved page session can repeat `Runtime.enable` in the reconnect
+		// window — after the replacement socket opened but before its hello lands.
+		// At that point `ref.runtimeState` still reflects the pre-outage `enabled`,
+		// so the fast path below would ack without re-cycling; recovery then resets
+		// the fresh root (Runtime disabled) and drops this ref back to `default`,
+		// leaving the client silently un-enabled with no execution-context events.
+		// Gate on the hello first so recovery bookkeeping runs and the state read
+		// below is current.
+		if (this.#ext && !this.#extInfo) await this.#awaitHello();
 		// A pipelined duplicate must await the in-flight enable, never ack early:
 		// the root cycle may still fail, and success must trail the context replay.
 		if (ref.runtimeEnabling) {
@@ -577,10 +586,9 @@ export class RelayBridge {
 		// can drive Runtime.enable before the replacement hello lands or before the
 		// recovery attach resolves. These are direct `send` RPCs, so without the gate
 		// Chrome receives Runtime.disable/enable on a still-detached target and
-		// rejects the initialization. Wait for the hello (so recovery state exists)
-		// then the resulting attach before cycling.
-		if (this.#ext && !this.#extInfo) await this.#awaitHello();
-		if (tab.attaching) await tab.attaching;
+		// rejects the initialization. Wait for the tab to settle (hello + attach,
+		// looping across any socket swap) before cycling.
+		await this.#awaitTabReady(tab.tabId);
 		await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.disable" });
 		await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.enable" });
 	}
@@ -620,11 +628,11 @@ export class RelayBridge {
 		//   2. The hello ran and armed a debugger reattach (#ensureAttached sets
 		//      `tab.attaching`) that resolves asynchronously; forwarding now would
 		//      race chrome.debugger.attach().
-		// Gate on the hello first (so recovery state exists), then on the resulting
-		// attach promise, so preserved holders always land on a live tab.
-		if (this.#ext && !this.#extInfo) await this.#awaitHello();
-		const tab = this.#tabs.get(tabId);
-		if (tab?.attaching) await tab.attaching;
+		// A third, compounding hazard: while we await attach A a *second* socket can
+		// replace the connection and arm a new hello + attach B. Awaiting only A and
+		// then sending would still race B's chrome.debugger.attach(). Loop until the
+		// tab settles against the current socket (hello delivered, attach quiesced).
+		await this.#awaitTabReady(tabId);
 		try {
 			const result = await this.#rpc({
 				op: "send",
@@ -1321,6 +1329,34 @@ export class RelayBridge {
 		const { promise, resolve } = Promise.withResolvers<void>();
 		this.#helloWaiters.push(resolve);
 		return promise;
+	}
+
+	/**
+	 * Hold until a tab is safe to forward to: the current extension socket has
+	 * completed its hello (recovery bookkeeping has run) and any armed debugger
+	 * reattach has settled. Loops because a socket can be replaced mid-wait —
+	 * awaiting a single hello/attach pair would still race the *next* socket's
+	 * chrome.debugger.attach(). Each iteration re-reads `#extInfo`/`tab.attaching`
+	 * against the latest socket; it settles once neither a pending hello nor a
+	 * pending attach remains (or the extension is gone, in which case the caller's
+	 * RPC fails fast rather than hanging).
+	 */
+	async #awaitTabReady(tabId: number): Promise<void> {
+		// Bounded so a pathological reconnect storm can't spin forever; each real
+		// swap resolves one hello + one attach, so this comfortably exceeds any
+		// realistic burst before falling through to let the RPC surface the error.
+		for (let i = 0; i < 100; i++) {
+			if (this.#ext && !this.#extInfo) {
+				await this.#awaitHello();
+				continue;
+			}
+			const tab = this.#tabs.get(tabId);
+			if (tab?.attaching) {
+				await tab.attaching;
+				continue;
+			}
+			return;
+		}
 	}
 
 	#rpc(req: RelayRpcRequest, timeoutMs = RPC_TIMEOUT_MS): Promise<unknown> {
