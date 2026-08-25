@@ -79,7 +79,19 @@ describe("ExtensionRunner plan mode context", () => {
 		expect(ctx.getPlanModeState()).toBeUndefined();
 
 		current = planModeState;
-		expect(ctx.getPlanModeState()).toBe(planModeState);
+		expect(ctx.getPlanModeState()?.enabled).toBe(true);
+		expect(ctx.getPlanModeState()?.planFilePath).toBe("local://feature-plan.md");
+	});
+
+	it("returns a snapshot so mutating the result does not change session state", () => {
+		const current: PlanModeState = { ...planModeState };
+		const ctx = createRunner(() => current).createContext();
+		const seen = ctx.getPlanModeState();
+		expect(seen).toBeDefined();
+		seen!.enabled = false;
+		seen!.planFilePath = "tampered";
+		expect(current).toEqual(planModeState);
+		expect(ctx.getPlanModeState()).toEqual(planModeState);
 	});
 });
 
@@ -108,7 +120,14 @@ describe("ExtensionRunner goal mode context", () => {
 			() => goal,
 		).createContext();
 
-		expect(ctx.getPlanModeState()).toBe(planModeState);
-		expect(ctx.getGoalModeState()).toBe(goal);
+		expect(ctx.getPlanModeState()?.planFilePath).toBe("local://feature-plan.md");
+		expect(ctx.getGoalModeState()?.goal.id).toBe(goal.goal.id);
+
+		const seenGoal = ctx.getGoalModeState();
+		expect(seenGoal).toBeDefined();
+		seenGoal!.mode = "exiting";
+		seenGoal!.goal.objective = "tampered";
+		expect(ctx.getGoalModeState()?.mode).toBe("active");
+		expect(ctx.getGoalModeState()?.goal.objective).toBe("Ship the release");
 	});
 });

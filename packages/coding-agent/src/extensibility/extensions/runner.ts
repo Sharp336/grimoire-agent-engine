@@ -435,6 +435,15 @@ interface ToolRegistrationScope {
 	closed: boolean;
 }
 
+/** Copy so an extension mutating the returned object cannot change session state. */
+function snapshotPlanModeState(state: PlanModeState | undefined): PlanModeState | undefined {
+	return state ? { ...state } : undefined;
+}
+
+function snapshotGoalModeState(state: GoalModeState | undefined): GoalModeState | undefined {
+	return state ? { ...state, goal: { ...state.goal } } : undefined;
+}
+
 export class ExtensionRunner {
 	#uiContext: ExtensionUIContext;
 	#mode: ExtensionMode = "print";
@@ -1168,8 +1177,8 @@ export class ExtensionRunner {
 			getContextUsage: () => this.#getContextUsageFn(),
 			compact: instructionsOrOptions => this.#compactFn(instructionsOrOptions),
 			getAsyncJobSnapshot: () => this.#getAsyncJobSnapshotFn(),
-			getPlanModeState: () => this.#getPlanModeStateFn(),
-			getGoalModeState: () => this.#getGoalModeStateFn(),
+			getPlanModeState: () => snapshotPlanModeState(this.#getPlanModeStateFn()),
+			getGoalModeState: () => snapshotGoalModeState(this.#getGoalModeStateFn()),
 			hasUI: this.hasUI(),
 			cwd: this.cwd,
 			sessionManager: this.sessionManager,

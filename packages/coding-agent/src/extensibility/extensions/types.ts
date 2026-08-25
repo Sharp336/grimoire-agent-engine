@@ -463,9 +463,9 @@ export interface ExtensionContext {
 	getContextUsage(): ContextUsage | undefined;
 	/** Get a read-only snapshot of async jobs owned by this session. */
 	getAsyncJobSnapshot(): AsyncJobSnapshot | null;
-	/** Get this session's plan mode state (if active). Read live per call. */
+	/** Get this session's plan mode state (if active). Live per call; the object is a snapshot. */
 	getPlanModeState(): PlanModeState | undefined;
-	/** Get this session's goal mode state (if active or exiting). Read live per call. */
+	/** Get this session's goal mode state (if active or exiting). Live per call; the object is a snapshot. */
 	getGoalModeState(): GoalModeState | undefined;
 	/** Compact the session context (interactive mode shows UI). */
 	compact(instructionsOrOptions?: string | CompactOptions): Promise<void>;
