@@ -758,7 +758,12 @@ export type OpenAICompletionsParams = Omit<ChatCompletionCreateParamsStreaming, 
 	thinking?: { type: "enabled" | "disabled"; effort?: string; keep?: "all" };
 	enable_thinking?: boolean;
 	preserve_thinking?: boolean;
-	chat_template_kwargs?: { enable_thinking?: boolean; preserve_thinking?: boolean; reasoning_effort?: string };
+	chat_template_kwargs?: {
+		enable_thinking?: boolean;
+		thinking?: boolean;
+		preserve_thinking?: boolean;
+		reasoning_effort?: string;
+	};
 	reasoning?: { effort?: string } | { enabled: false };
 	venice_parameters?: { disable_thinking?: boolean; [key: string]: unknown };
 	reasoning_effort?: string | null;
@@ -852,7 +857,8 @@ function isImplicitDisableWhenNotRequested(disableMode: OpenAIReasoningDisableMo
 	return (
 		disableMode === "zai-thinking-disabled" ||
 		disableMode === "qwen-enable-thinking-false" ||
-		disableMode === "qwen-template-false"
+		disableMode === "qwen-template-false" ||
+		disableMode === "chat-template-thinking-false"
 	);
 }
 
@@ -1006,6 +1012,9 @@ function encodeChatCompletionsDisabledReasoning(
 		case "qwen-template-false":
 			params.chat_template_kwargs = { ...params.chat_template_kwargs, enable_thinking: false };
 			break;
+		case "chat-template-thinking-false":
+			params.chat_template_kwargs = { ...params.chat_template_kwargs, thinking: false };
+			break;
 		case "openrouter-enabled-false":
 			(params as typeof params & { reasoning?: { effort?: string } | { enabled: false } }).reasoning = {
 				enabled: false,
@@ -1114,6 +1123,13 @@ export function applyChatCompletionsCompatPolicy(params: OpenAICompletionsParams
 					...(policy.compat.qwenTemplateReasoningEffort && reasoning.wireEffort !== undefined
 						? { reasoning_effort: reasoning.wireEffort }
 						: {}),
+				};
+				break;
+			case "chat-template-thinking-false":
+				params.chat_template_kwargs = {
+					...params.chat_template_kwargs,
+					thinking: true,
+					...(reasoning.wireEffort !== undefined ? { reasoning_effort: reasoning.wireEffort } : {}),
 				};
 				break;
 			case "openrouter-enabled-false":
