@@ -12,7 +12,6 @@ import {
 	logger,
 } from "@oh-my-pi/pi-utils";
 import { resolveActiveProjectRegistryPath } from "../../discovery/helpers";
-import { loadExtensions } from "../extensions/loader";
 import { refreshBunGitCache } from "./bun-git-cache";
 import { type GitSource, parseGitUrl } from "./git-url";
 import { resolvePluginManifestEntries, setExtensionManifestPath } from "./loader";
