@@ -560,6 +560,8 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		// DeepSeek V4 and Xiaomi MiMo reject synthetic reasoning_content placeholders (".") on tool-call turns.
 		// Kimi and OpenRouter accept them when actual reasoning is unavailable.
 		allowsSyntheticReasoningContentForToolCalls: (!isDeepseekFamily || !spec.reasoning) && !isXiaomiMimo,
+		// Declared so spec-level overrides can set it; "''" is the shared default.
+		syntheticReasoningContentFallback: undefined,
 		// Local llama.cpp-style servers re-tokenize the entire chat-template
 		// prompt each request; Qwen3 / DeepSeek-R1 / GLM templates reconstruct
 		// the prior assistant turn's `<think>` block from `reasoning_content`,

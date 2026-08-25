@@ -1,6 +1,7 @@
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { ANTHROPIC_THINKING } from "@oh-my-pi/pi-catalog/effort";
 import * as AIError from "../error";
-import { ANTHROPIC_THINKING, mapAnthropicToolChoice } from "../stream";
+import { mapAnthropicToolChoice } from "../stream";
 import type { Api, Context, FetchImpl, Model, ModelSpec, SimpleStreamOptions } from "../types";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { createProviderErrorMessage } from "./error-message";
