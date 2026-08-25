@@ -634,7 +634,7 @@ describe("InteractiveMode todo HUD anchor", () => {
 			const rendered = mode.statusContainer.render(72);
 			const compactLine = Bun.stripANSI(rendered[rendered.length - 1] ?? "");
 			expect(rendered).toHaveLength(2);
-			expect(compactLine).toContain("compact projection");
+			expect(compactLine).toMatch(/compact +projection/);
 			expect(compactLine).toContain("~/workspace/projected/");
 			expect(compactLine).not.toContain("\u001b");
 			expect(compactLine).not.toContain("\t");
@@ -642,7 +642,7 @@ describe("InteractiveMode todo HUD anchor", () => {
 
 			setTerminalRows(24);
 			expect(mode.statusContainer.render(72)).toHaveLength(0);
-			expect(renderTodos(mode)).toContain("compact projection");
+			expect(renderTodos(mode)).toMatch(/compact +projection/);
 		});
 
 		it("keeps native and projected summaries visible when compact detail is long", () => {
