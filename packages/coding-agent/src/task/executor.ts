@@ -302,13 +302,8 @@ function formatIrcPeerRoster(registry: AgentRegistry, selfId: string, rootSessio
 			);
 		}
 	}
-	if (live.some(peer => peer.status === "idle")) {
-		lines.push("Idle peers are not gone: messaging them wakes them.");
-	}
 	if (parkedCount > 0) {
-		lines.push(
-			`${parkedCount} parked peer(s) omitted. Query with \`hub\` op:"list" status:"parked"; send to a known id, \`history://<id>\`, or \`agent://<id>\` still works.`,
-		);
+		lines.push(`${parkedCount} parked peer(s) omitted.`);
 	}
 	return lines.join("\n");
 }

@@ -415,6 +415,13 @@ describe("subagent peer roster prompt", () => {
 			activity: "editing auth.ts",
 		});
 		registry.register({
+			id: "IdleReviewer",
+			displayName: "reviewer",
+			kind: "sub",
+			session: null,
+			status: "idle",
+		});
+		registry.register({
 			id: "ParkedSecretId",
 			displayName: "secret parked label",
 			kind: "sub",
@@ -432,6 +439,12 @@ describe("subagent peer roster prompt", () => {
 		});
 		expect(rendered).toContain("LiveWorker");
 		expect(rendered).toContain("editing auth.ts");
+		expect(rendered).toContain("IdleReviewer");
+		expect(rendered).toContain("1 parked peer(s) omitted");
+		expect(rendered).toContain("Idle peers are not gone: messaging them wakes them.");
+		expect(rendered).toContain('status:"parked"');
+		expect(rendered).toContain("history://");
+		expect(rendered).toContain("agent://");
 		expect(rendered).not.toContain("ParkedSecretId");
 		expect(rendered).not.toContain("secret parked label");
 		expect(rendered).not.toContain("reviewing classified.diff");
