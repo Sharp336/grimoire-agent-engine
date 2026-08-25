@@ -196,6 +196,8 @@ interface OpenCodeMCPConfig {
 	headers?: Record<string, string>;
 	enabled?: boolean;
 	timeout?: number;
+	/** `false` disables OpenCode's OAuth auto-detection; OMP has no equivalent. */
+	oauth?: { scope?: string } | false;
 }
 
 function stringArray(value: unknown): string[] | undefined {
@@ -304,6 +306,16 @@ function buildMCPServer(name: string, serverConfig: OpenCodeMCPConfig, source: O
 	const command = normalizeCommand(serverConfig.command, serverConfig.args);
 	const env = stringRecord(serverConfig.environment) ?? stringRecord(serverConfig.env);
 
+	// OpenCode's singular `oauth.scope` is the same space-separated authorization
+	// scope string as the canonical `oauth.scopes`. `oauth: false` carries no
+	// scope, so it maps to no OAuth config at all. An empty `scope` is preserved
+	// rather than dropped: like `oauth.scopes: ""` it suppresses the `scope`
+	// parameter, which is a different request than sending discovered scopes.
+	const scopes =
+		typeof serverConfig.oauth === "object" && typeof serverConfig.oauth?.scope === "string"
+			? serverConfig.oauth.scope.trim()
+			: undefined;
+
 	return {
 		name,
 		command: command.command,
@@ -311,6 +323,7 @@ function buildMCPServer(name: string, serverConfig: OpenCodeMCPConfig, source: O
 		env,
 		url: typeof serverConfig.url === "string" ? serverConfig.url : undefined,
 		headers: serverConfig.headers && typeof serverConfig.headers === "object" ? serverConfig.headers : undefined,
+		oauth: scopes === undefined ? undefined : { scopes },
 		enabled: serverConfig.enabled,
 		timeout: typeof serverConfig.timeout === "number" ? serverConfig.timeout : undefined,
 		transport,

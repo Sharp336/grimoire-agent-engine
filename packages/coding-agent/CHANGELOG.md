@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an `oauth.scopes` field to per-server MCP configuration that takes precedence over the scopes discovered from authorization-server or protected-resource metadata (and over a `scope` embedded in the provider's authorization URL), so an MCP server behind a general-purpose corporate IdP can request its own resource-bound scope instead of the tenant-wide `scopes_supported` list the resource rejects; `""` sends no `scope` parameter at all ([#7841](https://github.com/can1357/oh-my-pi/issues/7841))
+- Codex `[mcp_servers.<name>] scopes` and OpenCode `mcp.<name>.oauth.scope` now import into `oauth.scopes` instead of being dropped ([#7841](https://github.com/can1357/oh-my-pi/issues/7841))
+
+### Fixed
+
+- Fixed OAuth scopes entered in the `/mcp add` wizard being used for that one authorization and then discarded, so `/mcp reauth` fell back to the discovered scopes the user had replaced; the wizard now records them as `oauth.scopes` ([#7841](https://github.com/can1357/oh-my-pi/issues/7841))
+
 ## [18.0.5] - 2026-08-25
 
 ### Added
