@@ -76,6 +76,8 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import { type Effort, streamSimple } from "@oh-my-pi/pi-ai";
+import type { CacheIdentity } from "@oh-my-pi/pi-ai/cache";
+import { cacheFingerprint, classifyCacheOutcome, orderedHash, structuralHash } from "@oh-my-pi/pi-ai/cache";
 import { CACHE_KEEPALIVE_STATE_KEY } from "@oh-my-pi/pi-ai/cache/keepalive";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
@@ -88,6 +90,7 @@ import {
 	escapeXmlText,
 	formatDuration,
 	getAgentDbPath,
+	getSessionsDir,
 	isBunTestRuntime,
 	isEnoent,
 	isInteractiveHost,
@@ -254,6 +257,7 @@ import {
 	buildAsyncResultBatchMessage,
 } from "./async-job-delivery";
 import { BashRunner, type BashRunnerHost } from "./bash-runner";
+import { cacheTelemetryStore, resolveCacheTelemetryRoute } from "./cache-telemetry";
 import {
 	checkpointStartedAtFromEntry,
 	completedRewindFromEntry,
@@ -275,7 +279,7 @@ import {
 	shouldEvaluateCodexAutoRedeem,
 	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
-import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
+import { credentialPinHash, recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
 import {
 	collectPendingToolCalls,
@@ -2432,6 +2436,137 @@ export class AgentSession {
 	}
 
 	/**
+	 * Record how this assistant turn resolved against the provider's prefix cache.
+	 *
+	 * This is the important half of cache telemetry: keepalive touches only ever observe
+	 * idle gaps the keepalive itself created, whereas every ordinary request reports
+	 * `usage.cacheRead` / `usage.cacheWrite` — which is exactly what
+	 * `classifyCacheOutcome` consumes — so miss attribution for normal traffic comes from
+	 * here.
+	 *
+	 * Silent no-op rather than a throw on every path it cannot key honestly: no model, a
+	 * model that no longer matches the one that served the turn (a retry-fallback switch,
+	 * where attributing this usage to the live model's route would corrupt that route's
+	 * profile), or `retention: "none"`, which creates no entry to observe at all.
+	 */
+	async #recordCacheObservation(assistantMsg: AssistantMessage): Promise<void> {
+		const model = this.model;
+		if (!model) return;
+		// Only observe genuine user sessions. A session with no file on disk is in-memory
+		// (SDK embedding), and a file outside the configured sessions directory is a test
+		// fixture in a temp dir — neither should append to the user's data directory. The
+		// snapcompact-savings journal gates on the session file alone; this additionally
+		// scopes by location, because a suite that constructs thousands of real-file
+		// sessions would otherwise pay a file append per assistant message and leave
+		// hundreds of KiB behind in `~/.omp`.
+		const sessionFile = this.sessionManager.getSessionFile();
+		if (!sessionFile) return;
+		const sessionsRoot = path.resolve(getSessionsDir());
+		const resolvedSessionFile = path.resolve(sessionFile);
+		if (resolvedSessionFile !== sessionsRoot && !resolvedSessionFile.startsWith(`${sessionsRoot}${path.sep}`)) {
+			return;
+		}
+		// The message names who actually served it; the live model supplies the endpoint.
+		// Mixing the two across a mid-turn model switch would file this observation under
+		// the wrong route, so disagreement means skip.
+		if (model.provider !== assistantMsg.provider || model.id !== assistantMsg.model) return;
+		const route = resolveCacheTelemetryRoute(model, this.settings.get("providers.cacheRetention"));
+		if (!route) return;
+
+		const usage = assistantMsg.usage;
+		const account = this.#modelRegistry.authStorage.getOAuthAccountIdentity(model.provider, this.sessionId);
+		const identity: CacheIdentity = {
+			provider: model.provider,
+			api: model.api,
+			modelId: model.id,
+			endpoint: route.endpoint,
+			retention: route.retention,
+			// Opaque digest of the serving account, reusing the credential-pin hash so a
+			// cache entry and its pin agree on what "same account" means. `""` when the
+			// provider authenticates with an API key rather than an OAuth account: there is
+			// then no account identity to scope by, and inventing one would split a single
+			// physical entry per process.
+			authScope: account === undefined ? "" : (credentialPinHash(model.provider, account) ?? ""),
+			// Only an explicitly pinned key is part of identity. Providers that expose no
+			// such field (Anthropic, Bedrock — content-addressed and account-scoped) match
+			// on content alone, so synthesizing the session id here would shard one physical
+			// entry per session and no route could ever accumulate evidence.
+			promptCacheKey: this.agent.promptCacheKey ?? "",
+			systemHash: orderedHash(this.systemPrompt),
+			toolsHash: structuralHash(
+				this.agent.state.tools.map(tool => ({
+					name: tool.name,
+					description: tool.description,
+					parameters: toolWireSchema(tool),
+				})),
+			),
+			historyHash: orderedHash(this.#cacheHistoryParts(assistantMsg)),
+		};
+
+		await cacheTelemetryStore().recordObservation({
+			at: assistantMsg.timestamp,
+			kind: "request",
+			fingerprint: cacheFingerprint(identity),
+			routeKey: route.routeKey,
+			outcome: classifyCacheOutcome({
+				// An errored or aborted turn observed nothing about the cache, whatever its
+				// usage block claims — `classifyCacheOutcome` maps that to `failed`, which
+				// `observeTtl` correctly refuses to learn from.
+				ok: assistantMsg.stopReason !== "error" && assistantMsg.stopReason !== "aborted",
+				cacheRead: usage.cacheRead,
+				cacheWrite: usage.cacheWrite,
+				inputTokens: usage.input,
+			}),
+			cacheRead: usage.cacheRead,
+			cacheWrite: usage.cacheWrite,
+			inputTokens: usage.input,
+			costUsd: usage.cost.total,
+			// Left to the store: it differences against the previous observation of this
+			// same fingerprint, which is the gap TTL learning needs.
+			sessionId: this.sessionId,
+		});
+	}
+
+	/**
+	 * Ordered identity of the messages in the region the provider caches.
+	 *
+	 * APPROXIMATION, stated precisely: these are per-message identity keys, not the wire
+	 * bytes. The exact cacheable prefix is only knowable after `convertMessagesToLlm` plus
+	 * the provider's own breakpoint placement and any per-request snapcompact imaging —
+	 * an async, whole-history conversion that cannot run on every `message_end`.
+	 *
+	 * Sound for keying because keying needs exactly two properties, and this has both:
+	 * the same message sequence always produces the same digest (the keys are drawn from
+	 * immutable per-message metadata), and a different sequence produces a different one
+	 * (keys carry timestamp plus role-specific discriminators, and `orderedHash` is
+	 * order-sensitive and netstring-framed, so appending a turn always changes it). That
+	 * is what stops turn N's entry from being mistaken for turn N+1's.
+	 *
+	 * What it does NOT distinguish: two requests over the same message set whose wire
+	 * bytes differ anyway (a snapcompacted prefix vs an unimaged one). Those share a
+	 * fingerprint here while being separate physical entries, which can blend two idle
+	 * gaps into one profile. It costs precision, never correctness of the route.
+	 */
+	#cacheHistoryParts(assistantMsg: AssistantMessage): string[] {
+		const messages = this.messages;
+		const parts: string[] = [];
+		for (let index = 0; index < messages.length; index++) {
+			const message = messages[index];
+			// Roles outside the persistence path (hook, custom, bash/python execution) have
+			// no stable key but do reach the wire, so they contribute their position rather
+			// than being dropped — omitting them would collide two histories that differ
+			// only by an injected message.
+			parts.push(sessionMessagePersistenceKey(message) ?? `${message.role}#${index}`);
+		}
+		// The ended message is normally already the tail of agent state; append it when it
+		// is not, so the digest never depends on that timing.
+		if (messages[messages.length - 1] !== assistantMsg) {
+			parts.push(sessionMessagePersistenceKey(assistantMsg) ?? `assistant#${messages.length}`);
+		}
+		return parts;
+	}
+
+	/**
 	 * Builds the transient checkpoint-active reminder for a successful
 	 * checkpoint tool result, or undefined otherwise. The reminder is queued as
 	 * steering synchronously in the message_end handler (before any await), so
@@ -2827,6 +2962,10 @@ export class AgentSession {
 					this.sessionId,
 					assistantMsg.provider,
 				);
+				// Attribute this request against the physical provider cache entry it read
+				// or rebuilt. Fire-and-forget: `recordObservation` never rejects, and a
+				// journal append must not add latency to the end of a turn.
+				void this.#recordCacheObservation(assistantMsg);
 			}
 			if (event.message.role === "toolResult") {
 				const { toolName, toolCallId, isError, content } = event.message;

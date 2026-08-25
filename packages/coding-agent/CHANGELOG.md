@@ -5,6 +5,7 @@
 ### Added
 
 - The provider prompt cache is now kept warm across long idle gaps while background work is still running, so a session that dispatches subagents and waits no longer re-pays the whole prefix as a cache write when results land; keeping it warm stops as soon as the work finishes or the spend stops being worth it.
+- Prompt-cache outcomes are now recorded per request to `cache-observations.jsonl` beside `stats.db`, and the observed retention learned from them replaces the nominal 5-minute guess when scheduling the next keep-warm touch. Hashes and token counts only; bounded reads with self-rotation, and only for real on-disk sessions.
 - Added an explicit append-only transcript declaration and width-independent stable-row API for components that can guarantee an immutable history prefix across later updates.
 - Added `:img` read selector to rasterize local SVG/SVGZ files for vision input.
 - Added side-by-side image and SVG previews to `omp git`, including local Git LFS object resolution and explicit placeholders for unavailable or unsupported binary content.

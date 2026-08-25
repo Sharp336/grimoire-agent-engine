@@ -23,6 +23,7 @@ import type {
 } from "@oh-my-pi/pi-ai";
 import { resolveApiKeyOnce } from "@oh-my-pi/pi-ai/auth-retry";
 import type { CacheKeepalivePolicy } from "@oh-my-pi/pi-ai/cache/keepalive";
+import { resolveTtl } from "@oh-my-pi/pi-ai/cache/ttl";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import {
 	getOpenAICodexTransportDetails,
@@ -150,6 +151,12 @@ import {
 import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewalk } from "./session/agent-session";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
+import {
+	type CacheTelemetryRoute,
+	type CacheTelemetryStore,
+	cacheTelemetryStore,
+	resolveCacheTelemetryRoute,
+} from "./session/cache-telemetry";
 import { withDateCwdReminder } from "./session/date-cwd-reminder";
 import { createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
 import {
@@ -1253,6 +1260,14 @@ export function createAutoLearnCaptureRunner(
 }
 
 /**
+ * Nominal short-cache lifetime, used until a route has enough evidence to beat it.
+ * Mirrors `CACHE_KEEPALIVE_NOMINAL_TTL_S` in `packages/ai/src/stream.ts:1176`, which is
+ * what the keepalive falls back to when a policy omits `ttlSeconds` — so a session with
+ * no learned profile schedules exactly as it did before this loop existed.
+ */
+const CACHE_KEEPALIVE_DEFAULT_TTL_S = 300;
+
+/**
  * Session-derived policy for the provider prompt-cache keepalive.
  *
  * Exported (rather than inlined at the single call site) purely so it is testable: the
@@ -1263,8 +1278,29 @@ export function createAutoLearnCaptureRunner(
  * `AgentSession` it reads exists — the methods are then called fresh at every touch, which
  * is the whole point: background work finishing is exactly the event that must end the
  * chain.
+ *
+ * `store` defaults to the process-wide journal and is injectable for the same reason
+ * `createSnapcompactSavingsRecorder` takes its path: a test must be able to exercise the
+ * telemetry loop without writing to the user's real `~/.omp`.
  */
-export function createCacheKeepalivePolicy(getSession: () => AgentSession | undefined): CacheKeepalivePolicy {
+export function createCacheKeepalivePolicy(
+	getSession: () => AgentSession | undefined,
+	store: CacheTelemetryStore = cacheTelemetryStore(),
+): CacheKeepalivePolicy {
+	// Learned TTL for the route of the last armed chain. Held as a resolved number so
+	// the `ttlSeconds` getter stays synchronous — the journal read that produces it is
+	// async and happens at most once per armed chain, below.
+	let learnedTtlS: number | undefined;
+	let learnedRouteKey: string | undefined;
+	let refreshingRouteKey: string | undefined;
+
+	const currentRoute = (): CacheTelemetryRoute | undefined => {
+		const session = getSession();
+		const model = session?.model;
+		if (!model) return undefined;
+		return resolveCacheTelemetryRoute(model, session.settings.get("providers.cacheRetention"));
+	};
+
 	return {
 		resumeProbability: () => {
 			// 0.95 mirrors cachepilot's notify-on-complete resume probability: when owned
@@ -1281,6 +1317,19 @@ export function createCacheKeepalivePolicy(getSession: () => AgentSession | unde
 			if (!usage) return 0;
 			return usage.cacheRead + usage.cacheWrite;
 		},
+		/**
+		 * A learned TTL only takes effect on the NEXT armed chain, which is correct:
+		 * the running chain already computed its deadline against the generation fence
+		 * it armed with, and moving that deadline mid-flight would invalidate the fence
+		 * — the touch would fire against a generation the chain no longer owns.
+		 */
+		get ttlSeconds(): number {
+			const route = currentRoute();
+			// A route we have not read a profile for resolves to the nominal default,
+			// which is exactly what the keepalive uses when `ttlSeconds` is omitted.
+			if (route === undefined || route.routeKey !== learnedRouteKey) return CACHE_KEEPALIVE_DEFAULT_TTL_S;
+			return learnedTtlS ?? CACHE_KEEPALIVE_DEFAULT_TTL_S;
+		},
 		onDecision: record => {
 			logger.debug("prompt-cache keepalive decision", {
 				action: record.decision.action,
@@ -1289,6 +1338,50 @@ export function createCacheKeepalivePolicy(getSession: () => AgentSession | unde
 				costUsd: record.costUsd,
 				idleSeconds: record.idleSeconds,
 				outcome: record.outcome,
+			});
+			const route = currentRoute();
+			if (route === undefined) return;
+
+			// `touchIndex === 1` is the first decision of an armed chain, so this reads the
+			// journal once per chain rather than once per touch.
+			if (record.touchIndex === 1 && route.routeKey !== refreshingRouteKey) {
+				refreshingRouteKey = route.routeKey;
+				void store.loadProfile(route.routeKey).then(
+					profile => {
+						refreshingRouteKey = undefined;
+						learnedRouteKey = route.routeKey;
+						const resolved = resolveTtl({ profile, defaultS: CACHE_KEEPALIVE_DEFAULT_TTL_S });
+						// Only a `learned` result replaces the default. `hint`/`default` are not
+						// observations, and pinning them here would freeze a guess as if measured.
+						learnedTtlS = resolved.source === "learned" ? resolved.ttlS : undefined;
+					},
+					err => {
+						refreshingRouteKey = undefined;
+						logger.debug("prompt-cache keepalive: TTL profile read failed", { err: String(err) });
+					},
+				);
+			}
+
+			// A skipped decision observed nothing about the entry — the touch never went to
+			// the provider — so there is no outcome to classify and nothing to learn. Only
+			// issued touches become evidence.
+			if (record.outcome === undefined) return;
+			void store.recordObservation({
+				at: record.at,
+				kind: "touch",
+				fingerprint: record.fingerprint,
+				routeKey: route.routeKey,
+				outcome: record.outcome,
+				cacheRead: record.cacheRead,
+				cacheWrite: record.cacheWrite,
+				// The keepalive prices its touches from the cached prefix, not from a
+				// reported input-token count, so this reading is genuinely unavailable here.
+				inputTokens: 0,
+				costUsd: record.costUsd,
+				// The chain measures the entry's true age itself, including for the first
+				// touch where the journal has no predecessor to difference against.
+				idleSeconds: record.idleSeconds,
+				sessionId: getSession()?.sessionId ?? "",
 			});
 		},
 	};
