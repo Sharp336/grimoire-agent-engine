@@ -5,6 +5,7 @@
  * the official ChatGPT backend for OAuth logins.
  */
 import {
+	type ApiKeyResolver,
 	type AuthStorage,
 	type FetchImpl,
 	type Model,
@@ -791,34 +792,64 @@ export async function searchCodex(params: SearchParams): Promise<SearchResponse>
 			},
 		);
 	} else {
-		const seed = await findCodexAuth(params.authStorage, params.sessionId, params.signal);
-		if (!seed) {
-			throw new Error(
-				"No Codex OAuth credentials found. Login with 'omp /login openai-codex' to enable Codex web search.",
+		const runtimeResolver = params.modelRegistry?.getRuntimeOAuthResolver("openai-codex");
+		if (runtimeResolver) {
+			let currentAccess: OAuthAccess | undefined;
+			const bearerResolver: ApiKeyResolver = async context => {
+				currentAccess = await runtimeResolver(context);
+				return currentAccess?.accessToken;
+			};
+			result = await withAuth(
+				bearerResolver,
+				accessToken => {
+					const accountId = currentAccess?.accountId ?? getCodexAccountId(accessToken);
+					if (!accountId) {
+						throw new Error("Codex OAuth credential is missing a ChatGPT account id");
+					}
+					return runCodexSearchCandidates({
+						auth: { accessToken, accountId },
+						params,
+						query,
+						modelCandidates,
+						modelWasConfigured: configuredModel !== undefined,
+						transport,
+					});
+				},
+				{
+					signal: params.signal,
+					missingKeyMessage: "Codex runtime OAuth credentials are unavailable.",
+				},
+			);
+		} else {
+			const seed = await findCodexAuth(params.authStorage, params.sessionId, params.signal);
+			if (!seed) {
+				throw new Error(
+					"No Codex OAuth credentials found. Login with 'omp /login openai-codex' to enable Codex web search.",
+				);
+			}
+
+			result = await withOAuthAccess(
+				params.authStorage,
+				"openai-codex",
+				access => {
+					// A refreshed/rotated credential can carry a different bearer and
+					// ChatGPT account id than the seed used to select the first attempt.
+					const accountId = access.accountId ?? getCodexAccountId(access.accessToken);
+					if (!accountId) {
+						throw new Error("Codex OAuth credential is missing a ChatGPT account id");
+					}
+					return runCodexSearchCandidates({
+						auth: { accessToken: access.accessToken, accountId },
+						params,
+						query,
+						modelCandidates,
+						modelWasConfigured: configuredModel !== undefined,
+						transport,
+					});
+				},
+				{ sessionId: params.sessionId, signal: params.signal, seed: seed.access },
 			);
 		}
-
-		result = await withOAuthAccess(
-			params.authStorage,
-			"openai-codex",
-			access => {
-				// A refreshed/rotated credential can carry a different bearer and
-				// ChatGPT account id than the seed used to select the first attempt.
-				const accountId = access.accountId ?? getCodexAccountId(access.accessToken);
-				if (!accountId) {
-					throw new Error("Codex OAuth credential is missing a ChatGPT account id");
-				}
-				return runCodexSearchCandidates({
-					auth: { accessToken: access.accessToken, accountId },
-					params,
-					query,
-					modelCandidates,
-					modelWasConfigured: configuredModel !== undefined,
-					transport,
-				});
-			},
-			{ sessionId: params.sessionId, signal: params.signal, seed: seed.access },
-		);
 	}
 
 	let sources = result.sources;

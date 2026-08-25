@@ -48,7 +48,9 @@ export function createApiKeyResolver(
 	registry: Pick<ApiKeyResolverRegistry, "getApiKeyForProvider" | "authStorage">,
 	provider: string,
 	options: ApiKeyResolverOptions = {},
+	runtimeResolver?: ApiKeyResolver,
 ): ApiKeyResolver {
+	if (runtimeResolver) return runtimeResolver;
 	const { sessionId, baseUrl, modelId } = options;
 	return async ({ lastChance, error, signal, previousKey }) => {
 		if (error === undefined) {

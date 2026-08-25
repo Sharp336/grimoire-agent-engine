@@ -34,11 +34,14 @@ export interface ApiKeyResolveContext {
 	signal?: AbortSignal;
 }
 
+/** Resolves a credential value through the bounded auth retry context. */
+export type AuthResolver<T> = (ctx: ApiKeyResolveContext) => Promise<T | undefined> | T | undefined;
+
 /**
  * Resolves the API key to send for a request, retried through the a/b/c policy
  * described on {@link ApiKeyResolveContext}.
  */
-export type ApiKeyResolver = (ctx: ApiKeyResolveContext) => Promise<string | undefined> | string | undefined;
+export type ApiKeyResolver = AuthResolver<string>;
 
 /** A static bearer string, or a {@link ApiKeyResolver} that mints/rotates one. */
 export type ApiKey = string | ApiKeyResolver;

@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import type { ApiKeyResolver, FetchImpl, UsageProvider } from "@oh-my-pi/pi-ai";
+import type { ApiKeyResolver, AuthResolver, FetchImpl, OAuthAccess, UsageProvider } from "@oh-my-pi/pi-ai";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
@@ -130,6 +130,9 @@ function guardrailOverrideFields(override: ProviderOverride): Partial<ModelSpec<
 	return fields;
 }
 
+/** Structured OAuth resolver registered by an extension for one provider. */
+export type RuntimeOAuthResolver = AuthResolver<OAuthAccess>;
+
 /** Result of loading custom models config. */
 interface CustomModelsResult {
 	models?: CustomModelOverlay[];
@@ -216,6 +219,8 @@ export class ModelRegistry {
 	// models registered by extensions survive the model selector's offline reload.
 	#runtimeModelOverlays: CustomModelOverlay[] = [];
 	#runtimeProviderApiKeys: Map<string, string> = new Map();
+	#runtimeProviderApiKeyResolvers: Map<string, ApiKeyResolver> = new Map();
+	#runtimeProviderOAuthResolvers: Map<string, RuntimeOAuthResolver> = new Map();
 	#runtimeProviderOverrides: Map<string, ProviderOverride> = new Map();
 	// Credential-aware model projections registered via
 	// `registerProvider({ oauth: { modifyModels } })`. Persisted for the same
@@ -1969,7 +1974,10 @@ export class ModelRegistry {
 			if (available === undefined) {
 				available =
 					!disabledProviders.has(provider) &&
-					(this.#keylessProviders.has(provider) || this.authStorage.hasAuth(provider));
+					(this.#runtimeProviderApiKeyResolvers.has(provider) ||
+						this.#runtimeProviderOAuthResolvers.has(provider) ||
+						this.#keylessProviders.has(provider) ||
+						this.authStorage.hasAuth(provider));
 				byProvider.set(provider, available);
 			}
 			return available;
@@ -2029,6 +2037,8 @@ export class ModelRegistry {
 	hasConfiguredAuth(model: Model<Api>): boolean {
 		const keyConfig = this.#customProviderApiKeys.get(model.provider);
 		return (
+			this.#runtimeProviderApiKeyResolvers.has(model.provider) ||
+			this.#runtimeProviderOAuthResolvers.has(model.provider) ||
 			isCommandConfigValue(keyConfig) ||
 			this.#keylessProviders.has(model.provider) ||
 			this.authStorage.hasResolvableAuth(model.provider)
@@ -2145,6 +2155,11 @@ export class ModelRegistry {
 		sessionId?: string,
 		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
 	): Promise<string | undefined> {
+		const runtimeResolver = this.#runtimeProviderApiKeyResolvers.get(provider);
+		if (runtimeResolver) {
+			const error = options?.forceRefresh ? new Error("API key refresh requested") : undefined;
+			return runtimeResolver({ lastChance: false, error, signal: options?.signal });
+		}
 		const commandKey = this.#resolveCommandBackedApiKey(
 			provider,
 			options?.forceRefresh ? { forceCommandRefresh: true } : undefined,
@@ -2173,13 +2188,23 @@ export class ModelRegistry {
 	resolver(target: string | ApiKeyResolverModel, optionsOrSessionId?: ApiKeyResolverOptions | string): ApiKeyResolver {
 		const options = typeof optionsOrSessionId === "string" ? { sessionId: optionsOrSessionId } : optionsOrSessionId;
 		if (typeof target === "string") {
-			return createApiKeyResolver(this, target, options);
+			return createApiKeyResolver(this, target, options, this.#runtimeProviderApiKeyResolvers.get(target));
 		}
-		return createApiKeyResolver(this, target.provider, {
-			...options,
-			baseUrl: target.baseUrl,
-			modelId: target.id,
-		});
+		return createApiKeyResolver(
+			this,
+			target.provider,
+			{
+				...options,
+				baseUrl: target.baseUrl,
+				modelId: target.id,
+			},
+			this.#runtimeProviderApiKeyResolvers.get(target.provider),
+		);
+	}
+
+	/** Return the extension-owned structured OAuth resolver for a provider. */
+	getRuntimeOAuthResolver(provider: string): RuntimeOAuthResolver | undefined {
+		return this.#runtimeProviderOAuthResolvers.get(provider);
 	}
 
 	async #peekApiKeyForProvider(provider: string): Promise<string | undefined> {
@@ -2200,6 +2225,8 @@ export class ModelRegistry {
 
 	#clearRuntimeProviderState(providerName: string): void {
 		this.#runtimeProviderApiKeys.delete(providerName);
+		this.#runtimeProviderApiKeyResolvers.delete(providerName);
+		this.#runtimeProviderOAuthResolvers.delete(providerName);
 		this.#runtimeProviderOverrides.delete(providerName);
 		this.#runtimeModelOverlays = this.#runtimeModelOverlays.filter(overlay => overlay.provider !== providerName);
 		this.#runtimeModelManagers.delete(providerName);
@@ -2287,6 +2314,7 @@ export class ModelRegistry {
 				apiKey: config.apiKey,
 				api: config.api,
 				oauthConfigured: Boolean(config.oauth),
+				resolverConfigured: Boolean(config.resolveApiKey || config.resolveOAuth),
 				models: (config.models ?? []) as ProviderValidationModel[],
 			},
 			"runtime-register",
@@ -2330,6 +2358,12 @@ export class ModelRegistry {
 			this.#reloadStaticModels();
 		}
 
+		if (config.resolveApiKey) {
+			this.#runtimeProviderApiKeyResolvers.set(providerName, config.resolveApiKey);
+		}
+		if (config.resolveOAuth) {
+			this.#runtimeProviderOAuthResolvers.set(providerName, config.resolveOAuth);
+		}
 		// Extension usage providers override built-ins/configured resolvers for the
 		// provider lifetime. #clearRuntimeProviderState removes this override when
 		// the owning extension is unregistered or replaced.
@@ -2541,6 +2575,8 @@ export class ModelRegistry {
 export interface ProviderConfigInput {
 	baseUrl?: string;
 	apiKey?: string;
+	resolveApiKey?: ApiKeyResolver;
+	resolveOAuth?: RuntimeOAuthResolver;
 	api?: Api;
 	streamSimple?: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
 	headers?: Record<string, string>;
