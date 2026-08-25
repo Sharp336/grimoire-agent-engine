@@ -2,9 +2,16 @@
 
 ## [Unreleased]
 
+## [18.0.5] - 2026-08-25
+
 ### Added
 
-- Added Command Code as a mixed-wire provider with authenticated model discovery and per-model Anthropic Messages/OpenAI Chat Completions routing ([#9564](https://github.com/can1357/oh-my-pi/pull/9564) by [@himomohi](https://github.com/himomohi)).
+- Added built-in DeepInfra provider support (`deepinfra`, `DEEPINFRA_API_KEY`) with live model discovery, including chat models, context windows, pricing, cache-read pricing, vision input, and reasoning-effort capabilities.
+- Added built-in Yolo-Auto provider support with the flat-rate `deepseek-flash-v4` model and live model discovery.
+
+### Fixed
+
+- Fixed the Synthetic provider’s default model to use `hf:zai-org/GLM-5.2` instead of the retired `hf:zai-org/GLM-5.1`.
 
 ## [18.0.4] - 2026-08-24
 
