@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/updates [optional focus]` to request an ephemeral `/btw` recap of completed work, current progress, blockers, evidence, and the next action.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added
@@ -16,7 +20,6 @@
 - Added Yolo-Auto to `/login` and documented the `YOLO_AUTO_API_KEY` environment variable.
 - Updated the OpenRouter `/login` flow to support browser-based sign-in and automatic API-key provisioning, while retaining support for pasted `sk-or-…` keys.
 - Added DeepInfra support for the `image_gen` and `tts` tools, including provider selection and MP3 or WAV output for text-to-speech.
-- Added `/updates [optional focus]` to request an ephemeral `/btw` recap of completed work, current progress, blockers, evidence, and the next action.
 
 ### Changed
 
