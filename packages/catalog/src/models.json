@@ -16,7 +16,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1048576,
+			"contextWindow": 1000000,
 			"maxTokens": 393216,
 			"thinking": {
 				"mode": "effort",
@@ -28,6 +28,7 @@
 			},
 			"requiresGlyphTokenization": false,
 			"tokenizer": "deepseek-v3",
+			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -74,8 +75,7 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
-			},
-			"supportsComputerUse": false
+			}
 		},
 		"deepseek-ai/deepseek-v4-pro": {
 			"id": "deepseek-ai/deepseek-v4-pro",
@@ -93,7 +93,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1048576,
+			"contextWindow": 1000000,
 			"maxTokens": 393216,
 			"thinking": {
 				"mode": "effort",
@@ -105,6 +105,7 @@
 			},
 			"requiresGlyphTokenization": false,
 			"tokenizer": "deepseek-v3",
+			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -151,8 +152,7 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
-			},
-			"supportsComputerUse": false
+			}
 		},
 		"google/gemma-4-31b-it": {
 			"id": "google/gemma-4-31b-it",
@@ -184,6 +184,7 @@
 				]
 			},
 			"requiresGlyphTokenization": false,
+			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -230,8 +231,89 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
+			}
+		},
+		"moonshotai/kimi-k2.6": {
+			"id": "moonshotai/kimi-k2.6",
+			"name": "Kimi K2.6",
+			"api": "openai-completions",
+			"provider": "aiand",
+			"baseUrl": "https://api.aiand.com/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.85,
+				"output": 3.5,
+				"cacheRead": 0,
+				"cacheWrite": 0
 			},
-			"supportsComputerUse": false
+			"contextWindow": 262144,
+			"maxTokens": 262144,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			},
+			"requiresGlyphTokenization": false,
+			"tokenizer": "kimi-k2",
+			"supportsComputerUse": false,
+			"compat": {
+				"supportsStore": true,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": false,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": true,
+				"disableReasoningOnForcedToolChoice": true,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": true,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"toolSchemaFlavor": "moonshot-mfjs",
+				"streamIdleTimeoutMs": 300000,
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "kimi",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false
+			}
 		},
 		"moonshotai/kimi-k2.7-code": {
 			"id": "moonshotai/kimi-k2.7-code",
@@ -264,6 +346,7 @@
 			},
 			"requiresGlyphTokenization": false,
 			"tokenizer": "kimi-k2",
+			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -311,8 +394,7 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
-			},
-			"supportsComputerUse": false
+			}
 		},
 		"moonshotai/kimi-k3": {
 			"id": "moonshotai/kimi-k3",
@@ -508,6 +590,7 @@
 				]
 			},
 			"requiresGlyphTokenization": false,
+			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -554,8 +637,7 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
-			},
-			"supportsComputerUse": false
+			}
 		},
 		"qwen/qwen3.6-27b": {
 			"id": "qwen/qwen3.6-27b",
@@ -569,13 +651,13 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.32,
-				"output": 3.2,
+				"input": 0,
+				"output": 0,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
-			"maxTokens": 262144,
+			"maxTokens": 81920,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -587,6 +669,7 @@
 			},
 			"requiresGlyphTokenization": false,
 			"tokenizer": "qwen3",
+			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -633,12 +716,11 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
-			},
-			"supportsComputerUse": false
+			}
 		},
-		"zai-org/glm-5.2": {
-			"id": "zai-org/glm-5.2",
-			"name": "GLM 5.2",
+		"zai-org/glm-5.1": {
+			"id": "zai-org/glm-5.1",
+			"name": "GLM 5.1",
 			"api": "openai-completions",
 			"provider": "aiand",
 			"baseUrl": "https://api.aiand.com/v1",
@@ -647,12 +729,12 @@
 				"text"
 			],
 			"cost": {
-				"input": 1,
-				"output": 4,
+				"input": 1.4,
+				"output": 4.4,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1048576,
+			"contextWindow": 202752,
 			"maxTokens": 131072,
 			"thinking": {
 				"mode": "effort",
@@ -661,11 +743,12 @@
 					"low",
 					"medium",
 					"high",
-					"max"
+					"xhigh"
 				]
 			},
 			"requiresGlyphTokenization": false,
 			"tokenizer": "glm5",
+			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -712,8 +795,86 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
+			}
+		},
+		"zai-org/glm-5.2": {
+			"id": "zai-org/glm-5.2",
+			"name": "GLM 5.2",
+			"api": "openai-completions",
+			"provider": "aiand",
+			"baseUrl": "https://api.aiand.com/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 1,
+				"output": 4,
+				"cacheRead": 0,
+				"cacheWrite": 0
 			},
-			"supportsComputerUse": false
+			"contextWindow": 1000000,
+			"maxTokens": 131072,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"max"
+				]
+			},
+			"requiresGlyphTokenization": false,
+			"tokenizer": "glm5",
+			"supportsComputerUse": false,
+			"compat": {
+				"supportsStore": true,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": false,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": false,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false
+			}
 		}
 	},
 	"aimlapi": {
@@ -26689,7 +26850,8 @@
 				"promptCacheMode": "explicit",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 2048,
-				"promptCacheMaximumCheckpoints": 4
+				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true
 			},
 			"supportsComputerUse": false
 		},
@@ -26718,7 +26880,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			},
 			"supportsComputerUse": false
 		},
@@ -26747,7 +26910,8 @@
 				"promptCacheMode": "explicit",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
-				"promptCacheMaximumCheckpoints": 4
+				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true
 			},
 			"supportsComputerUse": false
 		},
@@ -26776,7 +26940,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			},
 			"supportsComputerUse": false
 		},
@@ -26805,7 +26970,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			},
 			"supportsComputerUse": false
 		},
@@ -26834,7 +27000,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			},
 			"supportsComputerUse": false
 		},
@@ -26874,6 +27041,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -26914,6 +27082,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -26954,6 +27123,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -26994,6 +27164,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 512,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -27034,6 +27205,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -27073,6 +27245,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -27112,6 +27285,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -27152,6 +27326,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -27192,6 +27367,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 512,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -27231,6 +27407,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -27270,6 +27447,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -27310,6 +27488,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -27336,7 +27515,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			},
 			"supportsComputerUse": false
 		},
@@ -27363,7 +27543,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			},
 			"supportsComputerUse": false
 		},
@@ -27402,6 +27583,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -27440,6 +27622,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -27477,6 +27660,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			},
 			"supportsComputerUse": false
@@ -27506,7 +27690,8 @@
 				"promptCacheMode": "explicit",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 2048,
-				"promptCacheMaximumCheckpoints": 4
+				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true
 			},
 			"supportsComputerUse": false
 		},
@@ -27535,7 +27720,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			},
 			"supportsComputerUse": false
 		},
@@ -27564,7 +27750,8 @@
 				"promptCacheMode": "explicit",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
-				"promptCacheMaximumCheckpoints": 4
+				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true
 			},
 			"supportsComputerUse": false
 		},
@@ -27593,7 +27780,8 @@
 				"promptCacheMode": "explicit",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
-				"promptCacheMaximumCheckpoints": 4
+				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true
 			},
 			"supportsComputerUse": false
 		},
@@ -27622,7 +27810,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			},
 			"supportsComputerUse": false
 		},
@@ -27651,7 +27840,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			},
 			"supportsComputerUse": false
 		},
@@ -27680,7 +27870,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			},
 			"supportsComputerUse": false
 		},
@@ -27721,6 +27912,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -27760,6 +27952,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -27799,6 +27992,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -27837,6 +28031,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			},
 			"supportsComputerUse": false
@@ -27877,6 +28072,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -27916,6 +28112,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -27956,6 +28153,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -27996,6 +28194,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -28036,6 +28235,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 512,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -28074,6 +28274,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			},
 			"supportsComputerUse": false
@@ -28114,6 +28315,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -28153,6 +28355,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -28193,6 +28396,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -28231,6 +28435,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -28271,6 +28476,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -28310,6 +28516,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -28349,6 +28556,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -28388,6 +28596,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -28428,6 +28637,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -28468,6 +28678,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -28508,6 +28719,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 512,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -28546,6 +28758,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			},
 			"supportsComputerUse": false
@@ -28586,6 +28799,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -28625,6 +28839,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -28665,6 +28880,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -28680,15 +28896,22 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.22,
-				"output": 1.32,
-				"cacheRead": 0.022,
-				"cacheWrite": 0.275
+				"input": 0.2,
+				"output": 1.2,
+				"cacheRead": 0.02,
+				"cacheWrite": 0.25,
+				"longContext": {
+					"inputThreshold": 272000,
+					"input": 0.4,
+					"output": 1.8,
+					"cacheRead": 0.04,
+					"cacheWrite": 0.5
+				}
 			},
 			"contextWindow": 1050000,
 			"maxTokens": 128000,
 			"thinking": {
-				"mode": "budget",
+				"mode": "effort",
 				"efforts": [
 					"low",
 					"medium",
@@ -28700,10 +28923,11 @@
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compat": {
-				"promptCacheMode": "none",
+				"promptCacheMode": "automatic",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": false,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -28719,15 +28943,22 @@
 				"image"
 			],
 			"cost": {
-				"input": 5.5,
-				"output": 33,
-				"cacheRead": 0.55,
-				"cacheWrite": 6.875
+				"input": 5,
+				"output": 30,
+				"cacheRead": 0.5,
+				"cacheWrite": 6.25,
+				"longContext": {
+					"inputThreshold": 272000,
+					"input": 10,
+					"output": 45,
+					"cacheRead": 1,
+					"cacheWrite": 12.5
+				}
 			},
 			"contextWindow": 1050000,
 			"maxTokens": 128000,
 			"thinking": {
-				"mode": "budget",
+				"mode": "effort",
 				"efforts": [
 					"low",
 					"medium",
@@ -28739,10 +28970,11 @@
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compat": {
-				"promptCacheMode": "none",
+				"promptCacheMode": "automatic",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": false,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -28758,15 +28990,22 @@
 				"image"
 			],
 			"cost": {
-				"input": 2.2,
-				"output": 13.2,
-				"cacheRead": 0.22,
-				"cacheWrite": 2.75
+				"input": 2,
+				"output": 12,
+				"cacheRead": 0.2,
+				"cacheWrite": 2.5,
+				"longContext": {
+					"inputThreshold": 272000,
+					"input": 4,
+					"output": 18,
+					"cacheRead": 0.4,
+					"cacheWrite": 5
+				}
 			},
 			"contextWindow": 1050000,
 			"maxTokens": 128000,
 			"thinking": {
-				"mode": "budget",
+				"mode": "effort",
 				"efforts": [
 					"low",
 					"medium",
@@ -28778,10 +29017,11 @@
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compat": {
-				"promptCacheMode": "none",
+				"promptCacheMode": "automatic",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": false,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -28810,7 +29050,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"google.gemma-3-4b-it": {
@@ -28838,7 +29079,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"jp.anthropic.claude-haiku-4-5-20251001-v1:0": {
@@ -28877,6 +29119,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -28917,6 +29160,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -28957,6 +29201,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -28996,6 +29241,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -29035,6 +29281,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -29075,6 +29322,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -29101,7 +29349,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			},
 			"supportsComputerUse": false
 		},
@@ -29129,7 +29378,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"meta.llama3-1-8b-instruct-v1:0": {
@@ -29156,7 +29406,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"minimax.minimax-m2": {
@@ -29194,6 +29445,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -29232,6 +29484,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -29270,6 +29523,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -29297,7 +29551,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"mistral.magistral-small-2509": {
@@ -29335,6 +29590,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -29362,7 +29618,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"mistral.ministral-3-3b-instruct": {
@@ -29390,7 +29647,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"mistral.ministral-3-8b-instruct": {
@@ -29417,7 +29675,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"mistral.mistral-large-2402-v1:0": {
@@ -29443,7 +29702,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			},
 			"supportsComputerUse": false
 		},
@@ -29472,7 +29732,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"mistral.pixtral-large-2502-v1:0": {
@@ -29500,7 +29761,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"mistral.voxtral-mini-3b-2507": {
@@ -29527,7 +29789,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"mistral.voxtral-small-24b-2507": {
@@ -29554,7 +29817,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"moonshot.kimi-k2-thinking": {
@@ -29593,6 +29857,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -29632,6 +29897,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -29660,7 +29926,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"nvidia.nemotron-nano-3-30b": {
@@ -29697,6 +29964,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -29724,7 +29992,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"nvidia.nemotron-super-3-120b": {
@@ -29761,6 +30030,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -29798,6 +30068,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -29835,6 +30106,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -29872,6 +30144,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -29909,6 +30182,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -29936,7 +30210,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"openai.gpt-oss-safeguard-20b": {
@@ -29963,7 +30238,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"qwen.qwen3-235b-a22b-2507-v1:0": {
@@ -29990,7 +30266,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"qwen.qwen3-32b-v1:0": {
@@ -30027,6 +30304,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -30054,7 +30332,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"qwen.qwen3-coder-480b-a35b-v1:0": {
@@ -30081,7 +30360,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"qwen.qwen3-coder-next": {
@@ -30118,6 +30398,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -30145,7 +30426,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"qwen.qwen3-vl-235b-a22b": {
@@ -30173,7 +30455,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"us-gov.anthropic.claude-fable-5": {
@@ -30213,6 +30496,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -30252,6 +30536,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -30291,6 +30576,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -30330,6 +30616,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -30369,6 +30656,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -30409,6 +30697,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -30449,6 +30738,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -30489,6 +30779,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 512,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -30528,6 +30819,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -30567,6 +30859,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -30607,6 +30900,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -30635,7 +30929,8 @@
 				"promptCacheMode": "explicit",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
-				"promptCacheMaximumCheckpoints": 4
+				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true
 			}
 		},
 		"us.amazon.nova-micro-v1:0": {
@@ -30662,7 +30957,8 @@
 				"promptCacheMode": "explicit",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
-				"promptCacheMaximumCheckpoints": 4
+				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true
 			}
 		},
 		"us.amazon.nova-premier-v1:0": {
@@ -30699,6 +30995,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			},
 			"supportsComputerUse": false
@@ -30728,7 +31025,8 @@
 				"promptCacheMode": "explicit",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
-				"promptCacheMaximumCheckpoints": 4
+				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true
 			}
 		},
 		"us.anthropic.claude-3-7-sonnet-20250219-v1:0": {
@@ -30756,7 +31054,8 @@
 				"promptCacheMode": "explicit",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
-				"promptCacheMaximumCheckpoints": 4
+				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true
 			},
 			"supportsComputerUse": false
 		},
@@ -30797,6 +31096,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -30836,6 +31136,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -30875,6 +31176,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -30913,6 +31215,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			},
 			"supportsComputerUse": false
@@ -30953,6 +31256,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -30992,6 +31296,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -31032,6 +31337,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -31072,6 +31378,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -31112,6 +31419,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 512,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -31150,6 +31458,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			},
 			"supportsComputerUse": false
@@ -31190,6 +31499,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -31229,6 +31539,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 1024,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -31269,6 +31580,7 @@
 				"supportsLongPromptCacheRetention": true,
 				"promptCacheMinimumTokens": 4096,
 				"promptCacheMaximumCheckpoints": 4,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 900000
 			}
 		},
@@ -31307,6 +31619,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -31334,7 +31647,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			},
 			"supportsComputerUse": false
 		},
@@ -31361,7 +31675,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			},
 			"supportsComputerUse": false
 		},
@@ -31388,7 +31703,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			},
 			"supportsComputerUse": false
 		},
@@ -31416,7 +31732,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			},
 			"supportsComputerUse": false
 		},
@@ -31444,7 +31761,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"us.meta.llama4-maverick-17b-instruct-v1:0": {
@@ -31472,7 +31790,8 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
 			}
 		},
 		"us.meta.llama4-scout-17b-instruct-v1:0": {
@@ -31500,7 +31819,149 @@
 				"promptCacheMode": "none",
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
-				"promptCacheMaximumCheckpoints": 0
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true
+			}
+		},
+		"us.openai.gpt-5.6-luna": {
+			"id": "us.openai.gpt-5.6-luna",
+			"name": "GPT-5.6 Luna (US)",
+			"api": "bedrock-converse-stream",
+			"provider": "amazon-bedrock",
+			"baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.22,
+				"output": 1.32,
+				"cacheRead": 0.022,
+				"cacheWrite": 0.275,
+				"longContext": {
+					"inputThreshold": 272000,
+					"input": 0.44,
+					"output": 1.98,
+					"cacheRead": 0.044,
+					"cacheWrite": 0.55
+				}
+			},
+			"contextWindow": 1050000,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"medium",
+					"high",
+					"xhigh",
+					"max"
+				]
+			},
+			"requiresGlyphTokenization": false,
+			"supportsComputerUse": false,
+			"compat": {
+				"promptCacheMode": "automatic",
+				"supportsLongPromptCacheRetention": false,
+				"promptCacheMinimumTokens": 0,
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": false,
+				"streamIdleTimeoutMs": 600000
+			}
+		},
+		"us.openai.gpt-5.6-sol": {
+			"id": "us.openai.gpt-5.6-sol",
+			"name": "GPT-5.6 Sol (US)",
+			"api": "bedrock-converse-stream",
+			"provider": "amazon-bedrock",
+			"baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 5.5,
+				"output": 33,
+				"cacheRead": 0.55,
+				"cacheWrite": 6.875,
+				"longContext": {
+					"inputThreshold": 272000,
+					"input": 11,
+					"output": 49.5,
+					"cacheRead": 1.1,
+					"cacheWrite": 13.75
+				}
+			},
+			"contextWindow": 1050000,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"medium",
+					"high",
+					"xhigh",
+					"max"
+				]
+			},
+			"requiresGlyphTokenization": false,
+			"supportsComputerUse": false,
+			"compat": {
+				"promptCacheMode": "automatic",
+				"supportsLongPromptCacheRetention": false,
+				"promptCacheMinimumTokens": 0,
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": false,
+				"streamIdleTimeoutMs": 600000
+			}
+		},
+		"us.openai.gpt-5.6-terra": {
+			"id": "us.openai.gpt-5.6-terra",
+			"name": "GPT-5.6 Terra (US)",
+			"api": "bedrock-converse-stream",
+			"provider": "amazon-bedrock",
+			"baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 2.2,
+				"output": 13.2,
+				"cacheRead": 0.22,
+				"cacheWrite": 2.75,
+				"longContext": {
+					"inputThreshold": 272000,
+					"input": 4.4,
+					"output": 19.8,
+					"cacheRead": 0.44,
+					"cacheWrite": 5.5
+				}
+			},
+			"contextWindow": 1050000,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"medium",
+					"high",
+					"xhigh",
+					"max"
+				]
+			},
+			"requiresGlyphTokenization": false,
+			"supportsComputerUse": false,
+			"compat": {
+				"promptCacheMode": "automatic",
+				"supportsLongPromptCacheRetention": false,
+				"promptCacheMinimumTokens": 0,
+				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": false,
+				"streamIdleTimeoutMs": 600000
 			}
 		},
 		"writer.palmyra-x4-v1:0": {
@@ -31537,6 +31998,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -31574,6 +32036,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -31612,6 +32075,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -31650,6 +32114,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -31687,6 +32152,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -31724,6 +32190,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		},
@@ -31762,6 +32229,7 @@
 				"supportsLongPromptCacheRetention": false,
 				"promptCacheMinimumTokens": 0,
 				"promptCacheMaximumCheckpoints": 0,
+				"supportsSamplingParams": true,
 				"streamIdleTimeoutMs": 600000
 			}
 		}
@@ -32197,6 +32665,7 @@
 			},
 			"requiresGlyphTokenization": true,
 			"tokenizer": "claude-v5-sonnet",
+			"supportsComputerUse": false,
 			"compat": {
 				"officialEndpoint": true,
 				"signingEndpoint": true,
@@ -32212,8 +32681,7 @@
 				"requiresThinkingEnabled": false,
 				"replayUnsignedThinking": false,
 				"escapeBuiltinToolNames": false
-			},
-			"supportsComputerUse": false
+			}
 		},
 		"claude-opus-4-0": {
 			"id": "claude-opus-4-0",
@@ -84156,7 +84624,7 @@
 		},
 		"inclusionai/ling-2.6-1t": {
 			"id": "inclusionai/ling-2.6-1t",
-			"name": "Ling-2.6-1T",
+			"name": "Ling 2.6 1T",
 			"api": "openai-completions",
 			"provider": "kilo",
 			"baseUrl": "https://api.kilo.ai/api/gateway",
@@ -84173,7 +84641,6 @@
 			"contextWindow": 262144,
 			"maxTokens": 32768,
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -84220,7 +84687,8 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"inclusionai/ling-2.6-1t:free": {
 			"id": "inclusionai/ling-2.6-1t:free",
@@ -84293,7 +84761,7 @@
 		},
 		"inclusionai/ling-2.6-flash": {
 			"id": "inclusionai/ling-2.6-flash",
-			"name": "Ling-2.6-flash",
+			"name": "Ling 2.6 Flash",
 			"api": "openai-completions",
 			"provider": "kilo",
 			"baseUrl": "https://api.kilo.ai/api/gateway",
@@ -84310,7 +84778,6 @@
 			"contextWindow": 262144,
 			"maxTokens": 32768,
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -84357,7 +84824,8 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"inclusionai/ling-2.6-flash:free": {
 			"id": "inclusionai/ling-2.6-flash:free",
@@ -84656,7 +85124,7 @@
 		},
 		"inclusionai/ring-2.6-1t": {
 			"id": "inclusionai/ring-2.6-1t",
-			"name": "Ring-2.6-1T",
+			"name": "Ring 2.6 1T",
 			"api": "openai-completions",
 			"provider": "kilo",
 			"baseUrl": "https://api.kilo.ai/api/gateway",
@@ -84683,7 +85151,6 @@
 				]
 			},
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -84730,7 +85197,8 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"inclusionai/ring-2.6-1t:free": {
 			"id": "inclusionai/ring-2.6-1t:free",
@@ -87437,7 +87905,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": null,
+			"contextWindow": 163840,
 			"maxTokens": null,
 			"requiresGlyphTokenization": false,
 			"compat": {
@@ -87505,7 +87973,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": null,
+			"contextWindow": 163840,
 			"maxTokens": null,
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -87890,7 +88358,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": null,
+			"contextWindow": 16384,
 			"maxTokens": null,
 			"requiresGlyphTokenization": false,
 			"compat": {
@@ -88888,7 +89356,7 @@
 		},
 		"mistralai/devstral-2512": {
 			"id": "mistralai/devstral-2512",
-			"name": "Devstral 2 2512",
+			"name": "Devstral 2",
 			"api": "openai-completions",
 			"provider": "kilo",
 			"baseUrl": "https://api.kilo.ai/api/gateway",
@@ -88897,13 +89365,13 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.4,
-				"output": 2,
-				"cacheRead": 0.025,
+				"input": 0.44,
+				"output": 2.2,
+				"cacheRead": 0.044,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
-			"maxTokens": 65536,
+			"maxTokens": 262144,
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compat": {
@@ -88952,8 +89420,7 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
-			},
-			"supportsComputerUseConfig": false
+			}
 		},
 		"mistralai/devstral-medium": {
 			"id": "mistralai/devstral-medium",
@@ -90077,9 +90544,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.019,
-				"output": 0.03,
-				"cacheRead": 0,
+				"input": 0.165,
+				"output": 0.165,
+				"cacheRead": 0.0165,
 				"cacheWrite": 0
 			},
 			"contextWindow": 131072,
@@ -90429,9 +90896,9 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.075,
-				"output": 0.2,
-				"cacheRead": 0,
+				"input": 0.11,
+				"output": 0.33,
+				"cacheRead": 0.011,
 				"cacheWrite": 0
 			},
 			"contextWindow": 128000,
@@ -105280,10 +105747,10 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.5,
-				"output": 3,
-				"cacheRead": 0.1,
-				"cacheWrite": 0.625
+				"input": 0.425,
+				"output": 2.55,
+				"cacheRead": 0.085,
+				"cacheWrite": 0.53125
 			},
 			"contextWindow": 262144,
 			"maxTokens": 131072,
@@ -107621,9 +108088,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.14,
-				"output": 0.58,
-				"cacheRead": 0.035,
+				"input": 0.132,
+				"output": 0.528,
+				"cacheRead": 0.033,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
@@ -129030,9 +129497,9 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.44,
-				"output": 1.32,
-				"cacheRead": 0.014,
+				"input": 0.22,
+				"output": 0.66,
+				"cacheRead": 0.007,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -169871,7 +170338,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": null,
+			"contextWindow": 131072,
 			"maxTokens": null,
 			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
@@ -184637,6 +185104,85 @@
 			},
 			"supportsComputerUseConfig": false
 		},
+		"deepseek/deepseek-v4-flash-vision-exp": {
+			"id": "deepseek/deepseek-v4-flash-vision-exp",
+			"name": "DeepSeek V4 Flash Vision Exp",
+			"api": "openai-completions",
+			"provider": "novita",
+			"baseUrl": "https://api.novita.ai/openai/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.44,
+				"output": 1.32,
+				"cacheRead": 0.028,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 393216,
+			"supportsTools": true,
+			"requiresGlyphTokenization": false,
+			"tokenizer": "deepseek-v3",
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"high",
+					"max"
+				]
+			},
+			"compat": {
+				"supportsStore": true,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": true,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": true,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true,
+				"requiresReasoningContentForAllAssistantTurns": true,
+				"allowsSyntheticReasoningContentForToolCalls": false,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false
+			},
+			"supportsComputerUse": false
+		},
 		"deepseek/deepseek-v4-pro": {
 			"id": "deepseek/deepseek-v4-pro",
 			"name": "DeepSeek V4 Pro",
@@ -185310,146 +185856,6 @@
 			},
 			"supportsComputerUseConfig": false
 		},
-		"inclusionai/ling-2.6-1t": {
-			"id": "inclusionai/ling-2.6-1t",
-			"name": "Ling-2.6-1T",
-			"api": "openai-completions",
-			"provider": "novita",
-			"baseUrl": "https://api.novita.ai/openai/v1",
-			"reasoning": false,
-			"input": [
-				"text"
-			],
-			"cost": {
-				"input": 0.3,
-				"output": 2.5,
-				"cacheRead": 0.06,
-				"cacheWrite": 0
-			},
-			"contextWindow": 262144,
-			"maxTokens": 32768,
-			"supportsTools": true,
-			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
-			"compat": {
-				"supportsStore": true,
-				"supportsDeveloperRole": false,
-				"supportsMultipleSystemMessages": false,
-				"supportsReasoningEffort": true,
-				"supportsReasoningParams": true,
-				"supportsSamplingParams": true,
-				"supportsPenaltyAndStopParams": true,
-				"reasoningEffortMap": {},
-				"supportsUsageInStreaming": true,
-				"alwaysSendMaxTokens": false,
-				"disableReasoningOnForcedToolChoice": false,
-				"disableReasoningOnToolChoice": false,
-				"supportsToolChoice": true,
-				"supportsForcedToolChoice": true,
-				"supportsNamedToolChoice": true,
-				"maxTokensField": "max_completion_tokens",
-				"requiresToolResultName": false,
-				"requiresAssistantAfterToolResult": false,
-				"requiresThinkingAsText": false,
-				"requiresMistralToolIds": false,
-				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
-				"omitReasoningEffort": false,
-				"includeEncryptedReasoning": true,
-				"filterReasoningHistory": false,
-				"reasoningContentField": "reasoning_content",
-				"requiresReasoningContentForToolCalls": false,
-				"requiresReasoningContentForAllAssistantTurns": false,
-				"allowsSyntheticReasoningContentForToolCalls": true,
-				"replayReasoningContent": false,
-				"qwenPreserveThinking": false,
-				"qwenTemplateReasoningEffort": false,
-				"requiresAssistantContentForToolCalls": false,
-				"supportsPromptCacheBreakpoints": false,
-				"isOpenRouterHost": false,
-				"wireModelIdMode": "raw",
-				"isVercelGatewayHost": false,
-				"supportsStrictMode": false,
-				"toolStrictMode": "mixed",
-				"stripDeepseekSpecialTokens": false,
-				"streamMarkupHealingPattern": "thinking",
-				"reasoningDeltasMayBeCumulative": false,
-				"emptyLengthFinishIsContextError": false,
-				"usesOpenAIToolCallIdLimit": false,
-				"dropThinkingWhenReasoningEffort": false
-			},
-			"supportsComputerUseConfig": false
-		},
-		"inclusionai/ling-2.6-flash": {
-			"id": "inclusionai/ling-2.6-flash",
-			"name": "Ling-2.6-flash",
-			"api": "openai-completions",
-			"provider": "novita",
-			"baseUrl": "https://api.novita.ai/openai/v1",
-			"reasoning": false,
-			"input": [
-				"text"
-			],
-			"cost": {
-				"input": 0.1,
-				"output": 0.3,
-				"cacheRead": 0.02,
-				"cacheWrite": 0
-			},
-			"contextWindow": 262144,
-			"maxTokens": 32768,
-			"supportsTools": true,
-			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
-			"compat": {
-				"supportsStore": true,
-				"supportsDeveloperRole": false,
-				"supportsMultipleSystemMessages": false,
-				"supportsReasoningEffort": true,
-				"supportsReasoningParams": true,
-				"supportsSamplingParams": true,
-				"supportsPenaltyAndStopParams": true,
-				"reasoningEffortMap": {},
-				"supportsUsageInStreaming": true,
-				"alwaysSendMaxTokens": false,
-				"disableReasoningOnForcedToolChoice": false,
-				"disableReasoningOnToolChoice": false,
-				"supportsToolChoice": true,
-				"supportsForcedToolChoice": true,
-				"supportsNamedToolChoice": true,
-				"maxTokensField": "max_completion_tokens",
-				"requiresToolResultName": false,
-				"requiresAssistantAfterToolResult": false,
-				"requiresThinkingAsText": false,
-				"requiresMistralToolIds": false,
-				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
-				"omitReasoningEffort": false,
-				"includeEncryptedReasoning": true,
-				"filterReasoningHistory": false,
-				"reasoningContentField": "reasoning_content",
-				"requiresReasoningContentForToolCalls": false,
-				"requiresReasoningContentForAllAssistantTurns": false,
-				"allowsSyntheticReasoningContentForToolCalls": true,
-				"replayReasoningContent": false,
-				"qwenPreserveThinking": false,
-				"qwenTemplateReasoningEffort": false,
-				"requiresAssistantContentForToolCalls": false,
-				"supportsPromptCacheBreakpoints": false,
-				"isOpenRouterHost": false,
-				"wireModelIdMode": "raw",
-				"isVercelGatewayHost": false,
-				"supportsStrictMode": false,
-				"toolStrictMode": "mixed",
-				"stripDeepseekSpecialTokens": false,
-				"streamMarkupHealingPattern": "thinking",
-				"reasoningDeltasMayBeCumulative": false,
-				"emptyLengthFinishIsContextError": false,
-				"usesOpenAIToolCallIdLimit": false,
-				"dropThinkingWhenReasoningEffort": false
-			},
-			"supportsComputerUseConfig": false
-		},
 		"inclusionai/ling-3.0-flash": {
 			"id": "inclusionai/ling-3.0-flash",
 			"name": "Ling-3.0-flash",
@@ -185548,86 +185954,6 @@
 			},
 			"contextWindow": 262144,
 			"maxTokens": 32768,
-			"supportsTools": true,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high",
-					"xhigh"
-				]
-			},
-			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
-			"compat": {
-				"supportsStore": true,
-				"supportsDeveloperRole": false,
-				"supportsMultipleSystemMessages": false,
-				"supportsReasoningEffort": true,
-				"supportsReasoningParams": true,
-				"supportsSamplingParams": true,
-				"supportsPenaltyAndStopParams": true,
-				"reasoningEffortMap": {},
-				"supportsUsageInStreaming": true,
-				"alwaysSendMaxTokens": false,
-				"disableReasoningOnForcedToolChoice": false,
-				"disableReasoningOnToolChoice": false,
-				"supportsToolChoice": true,
-				"supportsForcedToolChoice": true,
-				"supportsNamedToolChoice": true,
-				"maxTokensField": "max_completion_tokens",
-				"requiresToolResultName": false,
-				"requiresAssistantAfterToolResult": false,
-				"requiresThinkingAsText": false,
-				"requiresMistralToolIds": false,
-				"thinkingFormat": "openai",
-				"reasoningDisableMode": "lowest-effort",
-				"omitReasoningEffort": false,
-				"includeEncryptedReasoning": true,
-				"filterReasoningHistory": false,
-				"reasoningContentField": "reasoning_content",
-				"requiresReasoningContentForToolCalls": false,
-				"requiresReasoningContentForAllAssistantTurns": false,
-				"allowsSyntheticReasoningContentForToolCalls": true,
-				"replayReasoningContent": false,
-				"qwenPreserveThinking": false,
-				"qwenTemplateReasoningEffort": false,
-				"requiresAssistantContentForToolCalls": false,
-				"supportsPromptCacheBreakpoints": false,
-				"isOpenRouterHost": false,
-				"wireModelIdMode": "raw",
-				"isVercelGatewayHost": false,
-				"supportsStrictMode": false,
-				"toolStrictMode": "mixed",
-				"stripDeepseekSpecialTokens": false,
-				"streamMarkupHealingPattern": "thinking",
-				"reasoningDeltasMayBeCumulative": false,
-				"emptyLengthFinishIsContextError": false,
-				"usesOpenAIToolCallIdLimit": false,
-				"dropThinkingWhenReasoningEffort": false
-			},
-			"supportsComputerUseConfig": false
-		},
-		"inclusionai/ring-2.6-1t": {
-			"id": "inclusionai/ring-2.6-1t",
-			"name": "Ring-2.6-1T",
-			"api": "openai-completions",
-			"provider": "novita",
-			"baseUrl": "https://api.novita.ai/openai/v1",
-			"reasoning": true,
-			"input": [
-				"text"
-			],
-			"cost": {
-				"input": 0.3,
-				"output": 2.5,
-				"cacheRead": 0.06,
-				"cacheWrite": 0
-			},
-			"contextWindow": 262144,
-			"maxTokens": 65536,
 			"supportsTools": true,
 			"thinking": {
 				"mode": "effort",
@@ -194993,7 +195319,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": null,
+			"contextWindow": 163840,
 			"maxTokens": null,
 			"requiresGlyphTokenization": false,
 			"compat": {
@@ -209215,7 +209541,6 @@
 			},
 			"contextPromotionTarget": "openai-codex/gpt-5.5",
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -209261,7 +209586,8 @@
 				"reasoningDeltasMayBeCumulative": false,
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"gpt-5.4": {
 			"id": "gpt-5.4",
@@ -209300,7 +209626,6 @@
 				]
 			},
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -209346,7 +209671,8 @@
 				"reasoningDeltasMayBeCumulative": false,
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"gpt-5.4-mini": {
 			"id": "gpt-5.4-mini",
@@ -209385,7 +209711,6 @@
 				]
 			},
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -209431,7 +209756,8 @@
 				"reasoningDeltasMayBeCumulative": false,
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"gpt-5.5": {
 			"id": "gpt-5.5",
@@ -209471,7 +209797,6 @@
 			},
 			"contextPromotionTarget": "openai-codex/gpt-5.4",
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -209517,7 +209842,8 @@
 				"reasoningDeltasMayBeCumulative": false,
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"gpt-5.6-luna": {
 			"id": "gpt-5.6-luna",
@@ -209566,7 +209892,6 @@
 				]
 			},
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -209612,7 +209937,8 @@
 				"reasoningDeltasMayBeCumulative": false,
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"gpt-5.6-sol": {
 			"id": "gpt-5.6-sol",
@@ -209661,7 +209987,6 @@
 				]
 			},
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -209707,7 +210032,8 @@
 				"reasoningDeltasMayBeCumulative": false,
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"gpt-5.6-terra": {
 			"id": "gpt-5.6-terra",
@@ -209756,7 +210082,6 @@
 				]
 			},
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -209802,7 +210127,8 @@
 				"reasoningDeltasMayBeCumulative": false,
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false
-			}
+			},
+			"supportsComputerUse": false
 		},
 		"gpt-daybreak-blue-latest": {
 			"id": "gpt-daybreak-blue-latest",
@@ -209844,7 +210170,6 @@
 				]
 			},
 			"requiresGlyphTokenization": false,
-			"supportsComputerUse": false,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -209890,7 +210215,8 @@
 				"reasoningDeltasMayBeCumulative": false,
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false
-			}
+			},
+			"supportsComputerUse": false
 		}
 	},
 	"opencode": {
@@ -211942,6 +212268,131 @@
 					"supportsStrictMode": false,
 					"toolStrictMode": "mixed",
 					"toolSchemaFlavor": "moonshot-mfjs",
+					"stripDeepseekSpecialTokens": false,
+					"streamMarkupHealingPattern": "thinking",
+					"reasoningDeltasMayBeCumulative": false,
+					"emptyLengthFinishIsContextError": false,
+					"usesOpenAIToolCallIdLimit": false,
+					"dropThinkingWhenReasoningEffort": false
+				}
+			}
+		},
+		"longcat-2.0": {
+			"id": "longcat-2.0",
+			"name": "LongCat-2.0",
+			"api": "openai-completions",
+			"provider": "opencode-go",
+			"baseUrl": "https://opencode.ai/zen/go/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.3,
+				"output": 1.2,
+				"cacheRead": 0.006,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 131072,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			},
+			"requiresGlyphTokenization": false,
+			"supportsComputerUse": false,
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": false,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": false,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false,
+				"whenThinking": {
+					"supportsStore": false,
+					"supportsDeveloperRole": false,
+					"supportsMultipleSystemMessages": false,
+					"supportsReasoningEffort": true,
+					"supportsReasoningParams": true,
+					"supportsSamplingParams": true,
+					"supportsPenaltyAndStopParams": true,
+					"reasoningEffortMap": {},
+					"supportsUsageInStreaming": true,
+					"alwaysSendMaxTokens": false,
+					"disableReasoningOnForcedToolChoice": false,
+					"disableReasoningOnToolChoice": false,
+					"supportsToolChoice": true,
+					"supportsForcedToolChoice": true,
+					"supportsNamedToolChoice": true,
+					"maxTokensField": "max_completion_tokens",
+					"requiresToolResultName": false,
+					"requiresAssistantAfterToolResult": false,
+					"requiresThinkingAsText": false,
+					"requiresMistralToolIds": false,
+					"thinkingFormat": "openai",
+					"reasoningDisableMode": "lowest-effort",
+					"omitReasoningEffort": false,
+					"includeEncryptedReasoning": true,
+					"filterReasoningHistory": false,
+					"reasoningContentField": "reasoning_content",
+					"requiresReasoningContentForToolCalls": true,
+					"requiresReasoningContentForAllAssistantTurns": false,
+					"allowsSyntheticReasoningContentForToolCalls": false,
+					"replayReasoningContent": false,
+					"qwenPreserveThinking": false,
+					"qwenTemplateReasoningEffort": false,
+					"requiresAssistantContentForToolCalls": false,
+					"supportsPromptCacheBreakpoints": false,
+					"isOpenRouterHost": false,
+					"wireModelIdMode": "raw",
+					"isVercelGatewayHost": false,
+					"supportsStrictMode": false,
+					"toolStrictMode": "mixed",
 					"stripDeepseekSpecialTokens": false,
 					"streamMarkupHealingPattern": "thinking",
 					"reasoningDeltasMayBeCumulative": false,
@@ -228313,9 +228764,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.0574,
-				"output": 0.1148,
-				"cacheRead": 0.011479999999999999,
+				"input": 0.056,
+				"output": 0.112,
+				"cacheRead": 0.0112,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -228396,9 +228847,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.14,
-				"output": 0.28,
-				"cacheRead": 0.028,
+				"input": 0.0658,
+				"output": 0.1316,
+				"cacheRead": 0.01316,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1310720,
@@ -228645,9 +229096,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.526176,
-				"output": 1.052352,
-				"cacheRead": 0.043848000000000005,
+				"input": 0.522174,
+				"output": 1.044348,
+				"cacheRead": 0.043514500000000005,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -232344,7 +232795,7 @@
 		},
 		"inclusionai/ling-2.6-1t": {
 			"id": "inclusionai/ling-2.6-1t",
-			"name": "Ling-2.6-1T",
+			"name": "Ling 2.6 1T",
 			"api": "openrouter",
 			"provider": "openrouter",
 			"baseUrl": "https://openrouter.ai/api/v1",
@@ -232492,7 +232943,7 @@
 		},
 		"inclusionai/ling-2.6-flash": {
 			"id": "inclusionai/ling-2.6-flash",
-			"name": "Ling-2.6-flash",
+			"name": "Ling 2.6 Flash",
 			"api": "openrouter",
 			"provider": "openrouter",
 			"baseUrl": "https://openrouter.ai/api/v1",
@@ -232889,7 +233340,7 @@
 		},
 		"inclusionai/ring-2.6-1t": {
 			"id": "inclusionai/ring-2.6-1t",
-			"name": "Ring-2.6-1T",
+			"name": "Ring 2.6 1T",
 			"api": "openrouter",
 			"provider": "openrouter",
 			"baseUrl": "https://openrouter.ai/api/v1",
@@ -235039,9 +235490,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.24,
-				"output": 0.96,
-				"cacheRead": 0.048,
+				"input": 0.3,
+				"output": 1.2,
+				"cacheRead": 0.06,
 				"cacheWrite": 0
 			},
 			"contextWindow": 204800,
@@ -235355,7 +235806,7 @@
 		},
 		"mistralai/devstral-2512": {
 			"id": "mistralai/devstral-2512",
-			"name": "Devstral 2 2512",
+			"name": "Devstral 2",
 			"api": "openrouter",
 			"baseUrl": "https://openrouter.ai/api/v1",
 			"provider": "openrouter",
@@ -235364,9 +235815,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.39999999999999997,
-				"output": 2,
-				"cacheRead": 0.04,
+				"input": 0.44,
+				"output": 2.2,
+				"cacheRead": 0.044,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
@@ -237559,9 +238010,9 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.44999999999999996,
-				"output": 2.25,
-				"cacheRead": 0.07,
+				"input": 0.6,
+				"output": 3,
+				"cacheRead": 0.09999999999999999,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
@@ -237821,7 +238272,7 @@
 			"cost": {
 				"input": 0.67,
 				"output": 3.4,
-				"cacheRead": 0.16999999999999998,
+				"cacheRead": 0.19,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
@@ -250294,7 +250745,7 @@
 				"cacheRead": 0.09999999999999999,
 				"cacheWrite": 0
 			},
-			"contextWindow": 262144,
+			"contextWindow": 131072,
 			"maxTokens": 32768,
 			"thinking": {
 				"mode": "effort",
@@ -259972,9 +260423,169 @@
 		}
 	},
 	"synthetic": {
+		"hf:MiniMaxAI/MiniMax-M3": {
+			"id": "hf:MiniMaxAI/MiniMax-M3",
+			"name": "MiniMax-M3",
+			"api": "openai-completions",
+			"provider": "synthetic",
+			"baseUrl": "https://api.synthetic.new/openai/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.6,
+				"output": 1.2,
+				"cacheRead": 0.6,
+				"cacheWrite": 0
+			},
+			"contextWindow": 524288,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			},
+			"requiresGlyphTokenization": false,
+			"supportsComputerUse": false,
+			"compat": {
+				"supportsStore": true,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": false,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": false,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": true,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false
+			}
+		},
+		"hf:moonshotai/Kimi-K2.7-Code": {
+			"id": "hf:moonshotai/Kimi-K2.7-Code",
+			"name": "Kimi K2.7 Code",
+			"api": "openai-completions",
+			"provider": "synthetic",
+			"baseUrl": "https://api.synthetic.new/openai/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.95,
+				"output": 4,
+				"cacheRead": 0.95,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			},
+			"requiresGlyphTokenization": false,
+			"tokenizer": "kimi-k2",
+			"supportsComputerUse": false,
+			"compat": {
+				"supportsStore": true,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": false,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": true,
+				"disableReasoningOnForcedToolChoice": true,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": true,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": false,
+				"toolStrictMode": "mixed",
+				"toolSchemaFlavor": "moonshot-mfjs",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "kimi",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false
+			}
+		},
 		"hf:moonshotai/Kimi-K3": {
 			"id": "hf:moonshotai/Kimi-K3",
-			"name": "moonshotai/Kimi-K3",
+			"name": "Kimi K3",
 			"api": "openai-completions",
 			"provider": "synthetic",
 			"baseUrl": "https://api.synthetic.new/openai/v1",
@@ -260006,6 +260617,7 @@
 			},
 			"requiresGlyphTokenization": false,
 			"tokenizer": "kimi-k2",
+			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -260058,12 +260670,11 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
-			},
-			"supportsComputerUse": false
+			}
 		},
 		"hf:nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4": {
 			"id": "hf:nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
-			"name": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4",
+			"name": "Nemotron 3 Super 120B A12B",
 			"api": "openai-completions",
 			"provider": "synthetic",
 			"baseUrl": "https://api.synthetic.new/openai/v1",
@@ -260074,7 +260685,7 @@
 			"cost": {
 				"input": 0.3,
 				"output": 1,
-				"cacheRead": 0.06,
+				"cacheRead": 0.3,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
@@ -260090,6 +260701,7 @@
 				]
 			},
 			"requiresGlyphTokenization": false,
+			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -260136,12 +260748,11 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
-			},
-			"supportsComputerUse": false
+			}
 		},
 		"hf:openai/gpt-oss-120b": {
 			"id": "hf:openai/gpt-oss-120b",
-			"name": "openai/gpt-oss-120b",
+			"name": "GPT OSS 120B",
 			"api": "openai-completions",
 			"provider": "synthetic",
 			"baseUrl": "https://api.synthetic.new/openai/v1",
@@ -260152,11 +260763,11 @@
 			"cost": {
 				"input": 0.1,
 				"output": 0.1,
-				"cacheRead": 0.02,
+				"cacheRead": 0.1,
 				"cacheWrite": 0
 			},
 			"contextWindow": 131072,
-			"maxTokens": 65536,
+			"maxTokens": 32768,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -260166,6 +260777,7 @@
 				]
 			},
 			"requiresGlyphTokenization": false,
+			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -260212,12 +260824,11 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
-			},
-			"supportsComputerUse": false
+			}
 		},
 		"hf:Qwen/Qwen3.6-27B": {
 			"id": "hf:Qwen/Qwen3.6-27B",
-			"name": "Qwen/Qwen3.6-27B",
+			"name": "Qwen3.6 27B",
 			"api": "openai-completions",
 			"provider": "synthetic",
 			"baseUrl": "https://api.synthetic.new/openai/v1",
@@ -260228,8 +260839,8 @@
 			],
 			"cost": {
 				"input": 0.45,
-				"output": 2.2,
-				"cacheRead": 0.09,
+				"output": 3.6,
+				"cacheRead": 0.45,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
@@ -260245,6 +260856,7 @@
 			},
 			"requiresGlyphTokenization": false,
 			"tokenizer": "qwen3",
+			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
@@ -260291,8 +260903,7 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
-			},
-			"supportsComputerUse": false
+			}
 		},
 		"hf:Qwen/Qwen3.8-27B": {
 			"id": "hf:Qwen/Qwen3.8-27B",
@@ -260375,7 +260986,7 @@
 		},
 		"hf:zai-org/GLM-4.7-Flash": {
 			"id": "hf:zai-org/GLM-4.7-Flash",
-			"name": "zai-org/GLM-4.7-Flash",
+			"name": "GLM-4.7-Flash",
 			"api": "openai-completions",
 			"provider": "synthetic",
 			"baseUrl": "https://api.synthetic.new/openai/v1",
@@ -260386,7 +260997,7 @@
 			"cost": {
 				"input": 0.1,
 				"output": 0.5,
-				"cacheRead": 0.02,
+				"cacheRead": 0.1,
 				"cacheWrite": 0
 			},
 			"contextWindow": 196608,
@@ -260402,6 +261013,7 @@
 				]
 			},
 			"requiresGlyphTokenization": false,
+			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -260448,12 +261060,11 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
-			},
-			"supportsComputerUse": false
+			}
 		},
 		"hf:zai-org/GLM-5.2": {
 			"id": "hf:zai-org/GLM-5.2",
-			"name": "zai-org/GLM-5.2",
+			"name": "GLM-5.2",
 			"api": "openai-completions",
 			"provider": "synthetic",
 			"baseUrl": "https://api.synthetic.new/openai/v1",
@@ -260462,9 +261073,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 1,
-				"output": 3,
-				"cacheRead": 0.16,
+				"input": 1.4,
+				"output": 4.4,
+				"cacheRead": 1.4,
 				"cacheWrite": 0
 			},
 			"contextWindow": 524288,
@@ -260481,6 +261092,7 @@
 			},
 			"requiresGlyphTokenization": false,
 			"tokenizer": "glm5",
+			"supportsComputerUse": false,
 			"compat": {
 				"supportsStore": true,
 				"supportsDeveloperRole": false,
@@ -260527,8 +261139,7 @@
 				"emptyLengthFinishIsContextError": false,
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
-			},
-			"supportsComputerUse": false
+			}
 		},
 		"syn:large:text": {
 			"id": "syn:large:text",
@@ -291540,7 +292151,6 @@
 			},
 			"contextWindow": 2000000,
 			"maxTokens": 2000000,
-			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -291592,6 +292202,7 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"promptCacheSessionHeader": "x-grok-conv-id"
 			},
+			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compatConfig": {
 				"includeEncryptedReasoning": true,
@@ -291628,7 +292239,6 @@
 			},
 			"contextWindow": 2000000,
 			"maxTokens": 2000000,
-			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -291680,6 +292290,7 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"promptCacheSessionHeader": "x-grok-conv-id"
 			},
+			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compatConfig": {
 				"includeEncryptedReasoning": true,
@@ -291715,20 +292326,6 @@
 			},
 			"contextWindow": 2000000,
 			"maxTokens": 2000000,
-			"requiresGlyphTokenization": false,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high",
-					"xhigh"
-				],
-				"effortMap": {
-					"minimal": "low"
-				}
-			},
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -291778,6 +292375,20 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"promptCacheSessionHeader": "x-grok-conv-id"
 			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				],
+				"effortMap": {
+					"minimal": "low"
+				}
+			},
+			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compatConfig": {
 				"reasoningEffortMap": {
@@ -291817,19 +292428,6 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 1000000,
-			"requiresGlyphTokenization": false,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high"
-				],
-				"effortMap": {
-					"minimal": "low"
-				}
-			},
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -291881,6 +292479,19 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"promptCacheSessionHeader": "x-grok-conv-id"
 			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				],
+				"effortMap": {
+					"minimal": "low"
+				}
+			},
+			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compatConfig": {
 				"reasoningEffortMap": {
@@ -291922,19 +292533,6 @@
 			},
 			"contextWindow": 500000,
 			"maxTokens": 500000,
-			"requiresGlyphTokenization": false,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high"
-				],
-				"effortMap": {
-					"minimal": "low"
-				}
-			},
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -291986,6 +292584,19 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"promptCacheSessionHeader": "x-grok-conv-id"
 			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				],
+				"effortMap": {
+					"minimal": "low"
+				}
+			},
+			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compatConfig": {
 				"reasoningEffortMap": {
@@ -292027,20 +292638,6 @@
 			},
 			"contextWindow": 500000,
 			"maxTokens": 500000,
-			"requiresGlyphTokenization": false,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high",
-					"xhigh"
-				],
-				"effortMap": {
-					"minimal": "low"
-				}
-			},
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -292090,6 +292687,20 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"promptCacheSessionHeader": "x-grok-conv-id"
 			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				],
+				"effortMap": {
+					"minimal": "low"
+				}
+			},
+			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compatConfig": {
 				"reasoningEffortMap": {
@@ -292114,22 +292725,13 @@
 				"image"
 			],
 			"cost": {
-				"input": 1.25,
-				"output": 2.5,
-				"cacheRead": 0.2,
-				"cacheWrite": 0,
-				"longContext": {
-					"inputThreshold": 200000,
-					"inputThresholdInclusive": true,
-					"input": 2.5,
-					"output": 5,
-					"cacheRead": 0.4,
-					"cacheWrite": 0
-				}
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
 			},
 			"contextWindow": 512000,
 			"maxTokens": 512000,
-			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -292181,6 +292783,7 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"promptCacheSessionHeader": "x-grok-conv-id"
 			},
+			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compatConfig": {
 				"includeEncryptedReasoning": true,
@@ -292217,7 +292820,6 @@
 			},
 			"contextWindow": 256000,
 			"maxTokens": 256000,
-			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -292269,6 +292871,7 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"promptCacheSessionHeader": "x-grok-conv-id"
 			},
+			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compatConfig": {
 				"includeEncryptedReasoning": true,
@@ -292289,22 +292892,13 @@
 				"text"
 			],
 			"cost": {
-				"input": 1.25,
-				"output": 2.5,
-				"cacheRead": 0.2,
-				"cacheWrite": 0,
-				"longContext": {
-					"inputThreshold": 200000,
-					"inputThresholdInclusive": true,
-					"input": 2.5,
-					"output": 5,
-					"cacheRead": 0.4,
-					"cacheWrite": 0
-				}
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
 			},
 			"contextWindow": 200000,
 			"maxTokens": 200000,
-			"requiresGlyphTokenization": false,
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsStrictMode": false,
@@ -292356,6 +292950,7 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"promptCacheSessionHeader": "x-grok-conv-id"
 			},
+			"requiresGlyphTokenization": false,
 			"supportsComputerUse": false,
 			"compatConfig": {
 				"includeEncryptedReasoning": true,
@@ -294489,8 +295084,7 @@
 				"requiresThinkingEnabled": false,
 				"replayUnsignedThinking": true,
 				"escapeBuiltinToolNames": false
-			},
-			"supportsComputerUseConfig": false
+			}
 		},
 		"glm-5v-turbo": {
 			"id": "glm-5v-turbo",
@@ -298865,6 +299459,85 @@
 			},
 			"supportsComputerUse": false
 		},
+		"google/gemma-4-31b-it": {
+			"id": "google/gemma-4-31b-it",
+			"name": "Gemma 4 31B IT",
+			"api": "openai-completions",
+			"provider": "zenmux",
+			"baseUrl": "https://zenmux.ai/api/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 262144,
+			"requiresGlyphTokenization": false,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high",
+					"xhigh"
+				]
+			},
+			"compat": {
+				"supportsStore": true,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": true,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "openai",
+				"reasoningDisableMode": "lowest-effort",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": false,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": true,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false
+			},
+			"supportsComputerUse": false
+		},
 		"inclusionai/ling-1t": {
 			"id": "inclusionai/ling-1t",
 			"name": "Ling-1T",
@@ -298936,7 +299609,7 @@
 		},
 		"inclusionai/ling-2.6-1t": {
 			"id": "inclusionai/ling-2.6-1t",
-			"name": "Ling-2.6-1T",
+			"name": "Ling 2.6 1T",
 			"api": "openai-completions",
 			"provider": "zenmux",
 			"baseUrl": "https://zenmux.ai/api/v1",
@@ -299004,7 +299677,7 @@
 		},
 		"inclusionai/ling-2.6-flash": {
 			"id": "inclusionai/ling-2.6-flash",
-			"name": "Ling-2.6-flash",
+			"name": "Ling 2.6 Flash",
 			"api": "openai-completions",
 			"provider": "zenmux",
 			"baseUrl": "https://zenmux.ai/api/v1",
@@ -306502,6 +307175,84 @@
 				"usesOpenAIToolCallIdLimit": false,
 				"dropThinkingWhenReasoningEffort": false
 			}
+		},
+		"qwen/qwen3.8-2.4t-a95b": {
+			"id": "qwen/qwen3.8-2.4t-a95b",
+			"name": "Qwen3.8 2.4T A95B",
+			"api": "openai-completions",
+			"provider": "zenmux",
+			"baseUrl": "https://zenmux.ai/api/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 2,
+				"output": 6,
+				"cacheRead": 0.17,
+				"cacheWrite": 2.5
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 131072,
+			"requiresGlyphTokenization": false,
+			"tokenizer": "qwen3",
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"minimal",
+					"low",
+					"medium",
+					"high"
+				]
+			},
+			"compat": {
+				"supportsStore": false,
+				"supportsDeveloperRole": false,
+				"supportsMultipleSystemMessages": false,
+				"supportsReasoningEffort": true,
+				"supportsReasoningParams": true,
+				"supportsSamplingParams": true,
+				"supportsPenaltyAndStopParams": true,
+				"reasoningEffortMap": {},
+				"supportsUsageInStreaming": true,
+				"alwaysSendMaxTokens": false,
+				"disableReasoningOnForcedToolChoice": false,
+				"disableReasoningOnToolChoice": false,
+				"supportsToolChoice": true,
+				"supportsForcedToolChoice": true,
+				"supportsNamedToolChoice": true,
+				"maxTokensField": "max_completion_tokens",
+				"requiresToolResultName": false,
+				"requiresAssistantAfterToolResult": false,
+				"requiresThinkingAsText": false,
+				"requiresMistralToolIds": false,
+				"thinkingFormat": "qwen",
+				"reasoningDisableMode": "qwen-enable-thinking-false",
+				"omitReasoningEffort": false,
+				"includeEncryptedReasoning": true,
+				"filterReasoningHistory": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": false,
+				"requiresReasoningContentForAllAssistantTurns": false,
+				"allowsSyntheticReasoningContentForToolCalls": true,
+				"replayReasoningContent": false,
+				"qwenPreserveThinking": false,
+				"qwenTemplateReasoningEffort": false,
+				"requiresAssistantContentForToolCalls": false,
+				"supportsPromptCacheBreakpoints": false,
+				"isOpenRouterHost": false,
+				"wireModelIdMode": "raw",
+				"isVercelGatewayHost": false,
+				"supportsStrictMode": true,
+				"toolStrictMode": "mixed",
+				"stripDeepseekSpecialTokens": false,
+				"streamMarkupHealingPattern": "thinking",
+				"reasoningDeltasMayBeCumulative": false,
+				"emptyLengthFinishIsContextError": false,
+				"usesOpenAIToolCallIdLimit": false,
+				"dropThinkingWhenReasoningEffort": false
+			},
+			"supportsComputerUse": false
 		},
 		"qwen/qwen3.8-27b": {
 			"id": "qwen/qwen3.8-27b",

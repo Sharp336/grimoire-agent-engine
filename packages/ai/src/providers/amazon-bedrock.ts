@@ -20,6 +20,7 @@ import type {
 	CacheRetention,
 	Context,
 	Model,
+	RedactedThinkingContent,
 	StopReason,
 	StreamFunction,
 	StreamOptions,
@@ -52,13 +53,23 @@ import { transformMessages } from "./transform-messages";
  * `signRequest` would sign the caller's value but return its own, so the signature
  * would not match what goes on the wire.
  */
-const SIGNER_OWNED_HEADERS = new Set(["host", "x-amz-date", "x-amz-content-sha256", "x-amz-security-token"]);
+const SIGNER_OWNED_HEADERS: Record<string, true> = {
+	host: true,
+	"x-amz-date": true,
+	"x-amz-content-sha256": true,
+	"x-amz-security-token": true,
+};
 
 /** Headers the Bedrock request sets itself; a caller copy in any casing duplicates them. */
 // `content-length` included: the fetch layer recomputes it from the serialized
 // body, so a caller value would be signed but not sent, and AWS rejects the
 // mismatch.
-const BEDROCK_RESERVED_HEADERS = new Set(["content-type", "accept", "authorization", "content-length"]);
+const BEDROCK_RESERVED_HEADERS: Record<string, true> = {
+	"content-type": true,
+	accept: true,
+	authorization: true,
+	"content-length": true,
+};
 
 export type BedrockThinkingDisplay = "summarized" | "omitted";
 
@@ -83,6 +94,12 @@ export interface BedrockOptions extends StreamOptions {
 	toolChoice?: "auto" | "any" | "none" | { type: "tool"; name: string };
 	/* See https://docs.aws.amazon.com/bedrock/latest/userguide/inference-reasoning.html for supported models. */
 	reasoning?: Effort;
+	/**
+	 * Explicit off-signal for GPT-5.6+ effort-mode reasoning. Omitting `reasoning` leaves the
+	 * model's own default reasoning behavior in place (it reasons unless told otherwise); this
+	 * forces `additionalModelRequestFields.reasoning.effort` to `"none"` instead.
+	 */
+	disableReasoning?: boolean;
 	/* Custom token budgets per thinking level. Overrides default budgets. */
 	thinkingBudgets?: ThinkingBudgets;
 	/* Only supported by Claude 4.x models, see https://docs.aws.amazon.com/bedrock/latest/userguide/claude-messages-extended-thinking.html#claude-messages-extended-thinking-tool-use-interleaved */
@@ -187,7 +204,7 @@ function resolveBedrockRegion(modelId: string, options: BedrockOptions): string 
 	return ambient || guardrailRegion || "us-east-1";
 }
 
-type Block = (TextContent | ThinkingContent | ToolCall) & {
+type Block = (TextContent | ThinkingContent | RedactedThinkingContent | ToolCall) & {
 	[kStreamingBlockIndex]?: number;
 	[kStreamingPartialJson]?: string;
 	[kStreamingLastParseLen]?: number;
@@ -224,9 +241,12 @@ interface ToolResultBlockWire {
 interface ReasoningBlockWire {
 	reasoningContent: { reasoningText: { text: string; signature?: string } };
 }
+interface RedactedReasoningBlockWire {
+	reasoningContent: { redactedContent: string };
+}
 
 type UserContent = TextBlockWire | ImageBlockWire | ToolResultBlockWire | CachePoint;
-type AssistantContent = TextBlockWire | ToolUseBlockWire | ReasoningBlockWire;
+type AssistantContent = TextBlockWire | ToolUseBlockWire | ReasoningBlockWire | RedactedReasoningBlockWire;
 type SystemContent = TextBlockWire | CachePoint;
 
 interface WireMessage {
@@ -297,7 +317,7 @@ interface ContentBlockDeltaEvent {
 	delta?: {
 		text?: string;
 		toolUse?: { input?: string };
-		reasoningContent?: { text?: string; signature?: string };
+		reasoningContent?: { text?: string; signature?: string; redactedContent?: string };
 	};
 }
 interface ContentBlockStopEvent {
@@ -358,9 +378,13 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			const sentinelInjected = toolPlan.sentinelInjected;
 			let additionalModelRequestFields = buildAdditionalModelRequestFields(model, options);
 
-			// Bedrock rejects thinking + forced tool_choice ("any" or specific tool).
-			// When tool_choice forces tool use, disable thinking to avoid API errors.
-			if (toolConfig?.toolChoice && additionalModelRequestFields) {
+			// Bedrock rejects thinking + forced tool_choice ("any" or specific tool). When
+			// tool_choice forces tool use, disable thinking to avoid API errors. GPT-5.6's
+			// effort mode is exempt: verified live, it accepts `reasoning.effort` alongside
+			// both `toolChoice.any` and `toolChoice.tool` (HTTP 200), and stripping the field
+			// here would silently drop an explicit `effort: "none"` and bill for reasoning
+			// the caller disabled.
+			if (toolConfig?.toolChoice && additionalModelRequestFields && model.thinking?.mode !== "effort") {
 				const tc = toolConfig.toolChoice;
 				if (tc.any || tc.tool) additionalModelRequestFields = undefined;
 			}
@@ -368,11 +392,9 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			let commandInput: ConverseStreamRequest = {
 				messages: convertedMessages,
 				system: buildSystemPrompt(context.systemPrompt, promptCachePolicy),
-				inferenceConfig: {
-					maxTokens: options.maxTokens,
-					temperature: options.temperature,
-					topP: options.topP,
-				},
+				inferenceConfig: model.compat.supportsSamplingParams
+					? { maxTokens: options.maxTokens, temperature: options.temperature, topP: options.topP }
+					: { maxTokens: options.maxTokens },
 				toolConfig,
 				guardrailConfig: buildGuardrailConfig(options),
 				additionalModelRequestFields,
@@ -415,7 +437,7 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			const callerHeaders: Record<string, string> = {};
 			for (const [name, value] of Object.entries(options?.headers ?? {})) {
 				const field = name.toLowerCase();
-				if (SIGNER_OWNED_HEADERS.has(field) || BEDROCK_RESERVED_HEADERS.has(field)) continue;
+				if (SIGNER_OWNED_HEADERS[field] || BEDROCK_RESERVED_HEADERS[field]) continue;
 				callerHeaders[field] = value;
 			}
 			const baseHeaders: Record<string, string> = {
@@ -698,6 +720,23 @@ function handleContentBlockDelta(
 		}
 		stream.push({ type: "toolcall_delta", contentIndex: index, delta: delta.toolUse.input || "", partial: output });
 	} else if (delta?.reasoningContent) {
+		if (delta.reasoningContent.redactedContent) {
+			// Opaque reasoning: GPT-5.6 on Converse never returns readable reasoning (verified:
+			// `reasoning.summary`/`generate_summary` still yield only `redactedContent`), so
+			// there is nothing to stream. Carry the blob so the next turn can replay it.
+			if (block?.type === "redactedThinking") {
+				block.data += delta.reasoningContent.redactedContent;
+			} else if (!block) {
+				const newBlock: Block = {
+					type: "redactedThinking",
+					data: delta.reasoningContent.redactedContent,
+					[kStreamingBlockIndex]: contentBlockIndex,
+				};
+				output.content.push(newBlock);
+			}
+			return;
+		}
+
 		let thinkingBlock = block;
 		let thinkingIndex = index;
 
@@ -911,6 +950,12 @@ function convertMessages(
 								contentBlocks.push({ text: renderDemotedThinking(model.id, c.thinking) });
 							}
 							break;
+						case "redactedThinking":
+							// Native-only opaque reasoning; `transformMessages` already dropped it on any
+							// cross-model hop.
+							if (c.data.trim().length === 0) continue;
+							contentBlocks.push({ reasoningContent: { redactedContent: c.data } });
+							break;
 						default:
 							throw new AIError.ValidationError("Unknown assistant content type");
 					}
@@ -1068,10 +1113,20 @@ function buildAdditionalModelRequestFields(
 	model: Model<"bedrock-converse-stream">,
 	options: BedrockOptions,
 ): Record<string, unknown> | undefined {
-	const reasoning = options.reasoning;
-	if (!reasoning || !model.reasoning) return undefined;
-
 	const mode = model.thinking?.mode;
+	if (mode === "effort") {
+		if (!model.reasoning) return undefined;
+		// GPT-5.6 on Converse reasons by default when the field is absent, so an explicit
+		// off MUST be sent as `none`; a caller with no preference leaves the field out.
+		if (options.disableReasoning) return { reasoning: { effort: "none" } };
+		if (!options.reasoning) return undefined;
+		const level = requireSupportedEffort(model, options.reasoning);
+		return { reasoning: { effort: model.thinking?.effortMap?.[level] ?? level } };
+	}
+
+	if (!options.reasoning || !model.reasoning) return undefined;
+	const reasoning = options.reasoning;
+
 	if (mode === "anthropic-adaptive") {
 		const effort = mapEffortToAnthropicAdaptiveEffort(model, reasoning);
 		// Starting with Claude Opus 4.7 and Claude Fable/Mythos 5, Anthropic switched

@@ -54,6 +54,128 @@ export const CLOUDFLARE_FALLBACK_MODEL: ModelSpec<"anthropic-messages"> = {
 	maxTokens: 64000,
 };
 
+const BEDROCK_RUNTIME_BASE_URL = "https://bedrock-runtime.us-east-1.amazonaws.com";
+
+/**
+ * OpenAI GPT-5.6 on the Bedrock Converse endpoint. AWS supports only the `us.` (Geo CRIS)
+ * and `global.` (Global CRIS) inference profiles here — in-Region inference and the `eu.`
+ * profile are not offered, and the bare `openai.gpt-5.6-*` id is rejected outright ("on-demand
+ * throughput isn't supported"). Global CRIS bills ~9% under Geo, so the two prefixes carry
+ * separate rates. Pricing per the AWS model cards
+ * (model-card-openai-gpt-56-{luna,sol,terra}.html); context window is 1M with a 272K price
+ * break.
+ */
+export const AMAZON_BEDROCK_GPT_56_MODELS: readonly ModelSpec<"bedrock-converse-stream">[] = [
+	{
+		id: "us.openai.gpt-5.6-luna",
+		name: "GPT-5.6 Luna (US)",
+		api: "bedrock-converse-stream",
+		provider: "amazon-bedrock",
+		baseUrl: BEDROCK_RUNTIME_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: {
+			input: 0.22,
+			output: 1.32,
+			cacheRead: 0.022,
+			cacheWrite: 0.275,
+			longContext: { inputThreshold: 272_000, input: 0.44, output: 1.98, cacheRead: 0.044, cacheWrite: 0.55 },
+		},
+		contextWindow: 1_050_000,
+		maxTokens: 128_000,
+	},
+	{
+		id: "us.openai.gpt-5.6-terra",
+		name: "GPT-5.6 Terra (US)",
+		api: "bedrock-converse-stream",
+		provider: "amazon-bedrock",
+		baseUrl: BEDROCK_RUNTIME_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: {
+			input: 2.2,
+			output: 13.2,
+			cacheRead: 0.22,
+			cacheWrite: 2.75,
+			longContext: { inputThreshold: 272_000, input: 4.4, output: 19.8, cacheRead: 0.44, cacheWrite: 5.5 },
+		},
+		contextWindow: 1_050_000,
+		maxTokens: 128_000,
+	},
+	{
+		id: "us.openai.gpt-5.6-sol",
+		name: "GPT-5.6 Sol (US)",
+		api: "bedrock-converse-stream",
+		provider: "amazon-bedrock",
+		baseUrl: BEDROCK_RUNTIME_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: {
+			input: 5.5,
+			output: 33,
+			cacheRead: 0.55,
+			cacheWrite: 6.875,
+			longContext: { inputThreshold: 272_000, input: 11, output: 49.5, cacheRead: 1.1, cacheWrite: 13.75 },
+		},
+		contextWindow: 1_050_000,
+		maxTokens: 128_000,
+	},
+	{
+		id: "global.openai.gpt-5.6-luna",
+		name: "GPT-5.6 Luna (Global)",
+		api: "bedrock-converse-stream",
+		provider: "amazon-bedrock",
+		baseUrl: BEDROCK_RUNTIME_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: {
+			input: 0.2,
+			output: 1.2,
+			cacheRead: 0.02,
+			cacheWrite: 0.25,
+			longContext: { inputThreshold: 272_000, input: 0.4, output: 1.8, cacheRead: 0.04, cacheWrite: 0.5 },
+		},
+		contextWindow: 1_050_000,
+		maxTokens: 128_000,
+	},
+	{
+		id: "global.openai.gpt-5.6-terra",
+		name: "GPT-5.6 Terra (Global)",
+		api: "bedrock-converse-stream",
+		provider: "amazon-bedrock",
+		baseUrl: BEDROCK_RUNTIME_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: {
+			input: 2,
+			output: 12,
+			cacheRead: 0.2,
+			cacheWrite: 2.5,
+			longContext: { inputThreshold: 272_000, input: 4, output: 18, cacheRead: 0.4, cacheWrite: 5 },
+		},
+		contextWindow: 1_050_000,
+		maxTokens: 128_000,
+	},
+	{
+		id: "global.openai.gpt-5.6-sol",
+		name: "GPT-5.6 Sol (Global)",
+		api: "bedrock-converse-stream",
+		provider: "amazon-bedrock",
+		baseUrl: BEDROCK_RUNTIME_BASE_URL,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: {
+			input: 5,
+			output: 30,
+			cacheRead: 0.5,
+			cacheWrite: 6.25,
+			longContext: { inputThreshold: 272_000, input: 10, output: 45, cacheRead: 1, cacheWrite: 12.5 },
+		},
+		contextWindow: 1_050_000,
+		maxTokens: 128_000,
+	},
+];
+
 /**
  * `stencil.so` currently lists `jp.anthropic.claude-opus-5`, but AWS's own
  * Bedrock model card documents only `anthropic.claude-opus-5` plus the `us.`,
@@ -77,8 +199,11 @@ const BEDROCK_MANTLE_OPENAI_MODEL_IDS: Record<string, true> = {
 };
 
 /**
- * models.dev exposes these Responses-only models under amazon-bedrock, whose
- * descriptor uses Converse. The working Mantle rows come from the static seed.
+ * models.dev exposes these bare `openai.gpt-5.4/5.5/5.6-*` ids under amazon-bedrock, but
+ * bedrock-runtime rejects the bare id outright ("on-demand throughput isn't supported") — it
+ * serves GPT-5.6 only through the `us.`/`global.` inference profiles seeded in
+ * `AMAZON_BEDROCK_GPT_56_MODELS` above, and has no verified profile for 5.4/5.5 at all. The
+ * working Mantle rows come from their own static seed.
  */
 export function dropBedrockMantleOpenAIModels(models: readonly ModelSpec[]): ModelSpec[] {
 	return models.filter(model => !(model.provider === "amazon-bedrock" && BEDROCK_MANTLE_OPENAI_MODEL_IDS[model.id]));

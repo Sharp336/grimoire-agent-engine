@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Native API mismatches in workspace development now fail at startup instead of crashing later when newly declared functions or enum variants are used.
 ### Added
 
 - Added asynchronous, size-bounded SVG-to-PNG rasterization for terminal media previews.

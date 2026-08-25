@@ -766,6 +766,12 @@ function inferThinkingControlMode<TApi extends Api>(
 					return "anthropic-budget-effort";
 				}
 			}
+			// GPT-5.6+ on Bedrock Converse takes `additionalModelRequestFields.reasoning.effort`.
+			// Verified against bedrock-runtime: a flat `reasoning_effort` and Anthropic's `thinking`
+			// object are both rejected with `unknown_parameter`.
+			if (parsedModel.family === "openai" && semverGte(parsedModel.version, "5.6")) {
+				return "effort";
+			}
 			return "budget";
 
 		default:

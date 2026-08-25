@@ -58,6 +58,7 @@ import type { Api, Model, ModelSpec } from "../src/types";
 import { cleanModelName } from "../src/utils";
 import { collapseEffortVariantsAcrossProviders } from "../src/variant-collapse";
 import {
+	AMAZON_BEDROCK_GPT_56_MODELS,
 	applyAntigravityPricingFallback,
 	applyCanonicalLimitFallback,
 	applyGeneratedModelPolicies,
@@ -684,6 +685,9 @@ async function generateModels() {
 	if (!authoritativeCatalogProviders.has("alibaba-token-plan")) {
 		allModels.unshift(...ALIBABA_TOKEN_PLAN_STATIC_MODELS);
 	}
+	// amazon-bedrock has no discovery; upstream metadata ships only the `global.` GPT-5.6 ids
+	// and prices them at Geo rates. Prepend so the AWS-card seed wins deduplication.
+	allModels.unshift(...AMAZON_BEDROCK_GPT_56_MODELS);
 	allModels = applyUmansPricingFallback(allModels, modelsDevModels);
 	allModels = applyPremiumMultiplierOverrides(allModels);
 	allModels = applyXaiCatalogPricing(allModels);

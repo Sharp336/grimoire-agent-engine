@@ -163,6 +163,7 @@ describe("Bedrock caller headers", () => {
 					// Recomputed by the fetch layer from the serialized body, so a caller
 					// value would be signed but never sent.
 					"Content-Length": "999",
+					"User-Agent": "caller-agent",
 					"X-Trace": "kept",
 				},
 			});
@@ -172,10 +173,11 @@ describe("Bedrock caller headers", () => {
 		const headers = seen.headers ?? {};
 		const names = Object.keys(headers).map(name => name.toLowerCase());
 		// Each field appears exactly once, whatever casing the caller used.
-		for (const field of ["content-type", "accept", "host", "content-length"]) {
+		for (const field of ["content-type", "accept", "host", "content-length", "user-agent"]) {
 			expect(names.filter(name => name === field).length).toBeLessThanOrEqual(1);
 		}
 		expect(headers["content-type"]).toBe("application/json");
+		expect(headers["user-agent"]).toBe("caller-agent");
 		// Ordinary caller headers still land, lower-cased.
 		expect(headers["x-trace"]).toBe("kept");
 	});

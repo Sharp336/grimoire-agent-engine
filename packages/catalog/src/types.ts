@@ -531,6 +531,12 @@ export interface BedrockCompat {
 	 */
 	promptCacheMaximumCheckpoints?: number;
 	/**
+	 * Whether `inferenceConfig.temperature` / `topP` are accepted. OpenAI GPT-5.6 on
+	 * Converse rejects both with HTTP 400 "This model doesn't support the temperature
+	 * field."
+	 */
+	supportsSamplingParams?: boolean;
+	/**
 	 * Stream-watchdog idle-timeout fallback in ms; 0 disables the idle watchdog.
 	 * Undefined defers to `PI_STREAM_IDLE_TIMEOUT_MS`, then the legacy
 	 * `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS` alias, then the 300s default.
@@ -544,6 +550,7 @@ export interface ResolvedBedrockCompat {
 	supportsLongPromptCacheRetention: boolean;
 	promptCacheMinimumTokens: number;
 	promptCacheMaximumCheckpoints: number;
+	supportsSamplingParams: boolean;
 	/**
 	 * Stream-watchdog idle-timeout fallback in ms for hosts with no keepalive
 	 * events; 0 disables the idle watchdog. Undefined defers to
