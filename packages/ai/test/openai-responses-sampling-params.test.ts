@@ -35,8 +35,8 @@ const ctx: Context = {
 	messages: [{ role: "user", content: "ping", timestamp: Date.now() }],
 };
 
-async function drain(
-	model: Model<"openai-responses">,
+async function drain<TApi extends "openai-responses" | "azure-openai-responses">(
+	model: Model<TApi>,
 	options: SimpleStreamOptions = {},
 ): Promise<Record<string, unknown>> {
 	const { fetchMock, captured } = mockSseFetch();
@@ -83,6 +83,24 @@ describe("openai-responses sampling-param gating (#5606)", () => {
 describe("openai-responses reasoning-summary defaults", () => {
 	it("omits the summary field for an unconfigured official OpenAI reasoning request", async () => {
 		const model = getBundledModel("openai", "gpt-5.4") as Model<"openai-responses">;
+
+		const body = await drain(model, { reasoning: Effort.High });
+
+		expect(body.reasoning).toEqual({ effort: "high" });
+	});
+	it("omits the summary field for the Azure OpenAI provider alias", async () => {
+		const model: Model<"azure-openai-responses"> = buildModel({
+			id: "gpt-5.4",
+			name: "GPT-5.4 on Azure OpenAI",
+			api: "azure-openai-responses",
+			provider: "azure-openai",
+			baseUrl: "https://example.openai.azure.com/openai/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400_000,
+			maxTokens: 128_000,
+		});
 
 		const body = await drain(model, { reasoning: Effort.High });
 

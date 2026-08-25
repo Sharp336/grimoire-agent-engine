@@ -1876,7 +1876,7 @@ function resolveOpenAiReasoningSummary<TApi extends Api>(
 	if (requested === undefined) {
 		const suppressImplicitSummary =
 			(model.api === "openai-responses" && model.provider === "openai" && isOfficialOpenAIApiUrl(model.baseUrl)) ||
-			(model.api === "azure-openai-responses" && model.provider === "azure");
+			(model.api === "azure-openai-responses" && (model.provider === "azure" || model.provider === "azure-openai"));
 		return suppressImplicitSummary ? null : undefined;
 	}
 	const isCodexModel = isOpenAICodexModelId(model.id);
