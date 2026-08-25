@@ -89,8 +89,10 @@ export function parseProfileMutation(args: string): ProfileMutation | { error: s
 				: usageError("delete <name> [--project]");
 		}
 		default:
-			// A bare word is a direct activation request (existing behavior).
-			return head;
+			// Direct activation is exactly `/profile <name>` — one token. Any
+			// trailing argument is a typo or unsupported flag, not part of a
+			// profile name, and must not silently activate.
+			return rest.length === 0 ? head : usageError("<name>");
 	}
 }
 

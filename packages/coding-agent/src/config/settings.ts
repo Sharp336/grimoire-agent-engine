@@ -43,6 +43,7 @@ import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-pro
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import { INSPECT_IMAGE_MODES } from "../utils/inspect-image-mode";
 import { isSearchProviderId, SEARCH_PROVIDER_ORDER } from "../web/search/types";
+import { expandRoleAlias } from "./model-resolver";
 import {
 	type BashInterceptorRule,
 	type GroupPrefix,
@@ -2584,6 +2585,18 @@ export class Settings {
 	}
 
 	/**
+	 * The profile definition exactly as stored at one scope, without merged
+	 * inherited fields. Editors use this to persist only scope-local
+	 * overrides so inherited roles from other layers are never materialized.
+	 */
+	getScopeLocalProfile(scope: "global" | "project", name: string): ProfileDefinition | undefined {
+		if (name === "") return undefined;
+		const layer = scope === "global" ? this.#global : this.#projectSettingsForMerge();
+		const raw = getByPath(layer, ["profiles", name]);
+		return isRecord(raw) ? (structuredClone(raw) as unknown as ProfileDefinition) : undefined;
+	}
+
+	/**
 	 * The active profile's model-role overlay (profile name → role selectors),
 	 * or undefined when no profile is active. Exposed for tests and diagnostics.
 	 */
@@ -2610,7 +2623,9 @@ export class Settings {
 		return {
 			active: this.getActiveProfile(),
 			roles,
-			defaultRole: roles?.default,
+			// Resolved model, not the raw selector: `default: "@smol"` must
+			// register as a default change when the smol role changes.
+			defaultRole: expandRoleAlias(this.getModelRole("default") ?? "", this),
 		};
 	}
 
@@ -2661,14 +2676,37 @@ export class Settings {
 		// snapshot actually changes (see #fireProfileSignalsIfNeeded).
 		const before = this.#effectiveProfileSnapshot();
 		if (scope === "global") {
-			const current = getByPath(this.#global, ["profiles"]);
-			const merged: Record<string, unknown> = isRecord(current) ? { ...current } : {};
-			merged[name] = deepMergeProfileDefinition(merged[name], definition);
-			this.set("profiles", merged as SettingValue<"profiles">);
-			await this.flush();
+			const configPath = this.#configPath;
+			if (!configPath) {
+				// In-memory instance: no file to lock; mutate the layer directly.
+				const current = getByPath(this.#global, ["profiles"]);
+				const merged: Record<string, unknown> = isRecord(current) ? { ...current } : {};
+				merged[name] = deepMergeProfileDefinition(merged[name], definition);
+				this.set("profiles", merged as SettingValue<"profiles">);
+				await this.flush();
+				return structuredClone(this.getProfile(name) ?? definition);
+			}
+			// Merge against FRESH file content under the write lock: a stale
+			// in-memory `profiles` record must never overwrite profiles another
+			// process wrote after this instance loaded.
+			await this.#withYamlWriteLock(configPath, async writePath => {
+				const loaded = (await this.#loadYamlIfPresentForWriteLocked(configPath, writePath)) ?? {};
+				const currentProfiles = getByPath(loaded, ["profiles"]);
+				const mergedProfiles: Record<string, unknown> = isRecord(currentProfiles)
+					? structuredClone(currentProfiles)
+					: {};
+				mergedProfiles[name] = deepMergeProfileDefinition(mergedProfiles[name], definition);
+				setByPath(loaded, ["profiles"], mergedProfiles);
+				await this.#writeYamlAtomically(writePath, loaded);
+			});
+			invalidateCapabilityFsCache(configPath);
+			this.#persistedMutationGeneration++;
+			this.#global = (await this.#loadYamlIfPresentForStartup(configPath)) ?? {};
+			this.#rebuildMerged();
+			this.#fireProfileSignalsIfNeeded(before);
 		} else {
 			const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
-			fs.mkdirSync(path.dirname(projectConfigPath), { recursive: true });
+			await fs.promises.mkdir(path.dirname(projectConfigPath), { recursive: true });
 			await this.#withYamlWriteLock(projectConfigPath, async writePath => {
 				const loaded = await this.#loadYamlIfPresentForWriteLocked(projectConfigPath, writePath);
 				const projectSettings =
@@ -2704,19 +2742,46 @@ export class Settings {
 		validateProfileName(name);
 		const before = this.#effectiveProfileSnapshot();
 		if (scope === "global") {
-			const current = getByPath(this.#global, ["profiles"]);
-			if (!isRecord(current) || !isRecord(current[name])) {
-				throw new Error(`Profile "${name}" does not exist in global config.`);
+			const configPath = this.#configPath;
+			if (!configPath) {
+				const current = getByPath(this.#global, ["profiles"]);
+				if (!isRecord(current) || !isRecord(current[name])) {
+					throw new Error(`Profile "${name}" does not exist in global config.`);
+				}
+				const merged: Record<string, unknown> = { ...current };
+				delete merged[name];
+				// Deactivate only if the global selection points at the deleted profile.
+				const globalActive = getByPath(this.#global, ["activeProfile"]);
+				if (globalActive === name) this.set("activeProfile", "");
+				this.set("profiles", merged as SettingValue<"profiles">);
+				// Persist synchronously: callers (slash commands, agents) read back
+				// from disk and must not observe the deleted profile after return.
+				await this.flush();
+				return;
 			}
-			const merged: Record<string, unknown> = { ...current };
-			delete merged[name];
-			// Deactivate only if the global selection points at the deleted profile.
-			const globalActive = getByPath(this.#global, ["activeProfile"]);
-			if (globalActive === name) this.set("activeProfile", "");
-			this.set("profiles", merged as SettingValue<"profiles">);
-			// Persist synchronously: callers (slash commands, agents) read back
-			// from disk and must not observe the deleted profile after return.
-			await this.flush();
+			// Delete against FRESH file content under the write lock so a
+			// sibling profile another process added after this instance loaded
+			// survives; only the requested profile (and a same-scope selection
+			// pointing at it) is touched.
+			await this.#withYamlWriteLock(configPath, async writePath => {
+				const loaded = (await this.#loadYamlIfPresentForWriteLocked(configPath, writePath)) ?? {};
+				const currentProfiles = getByPath(loaded, ["profiles"]);
+				if (!isRecord(currentProfiles) || !isRecord(currentProfiles[name])) {
+					throw new Error(`Profile "${name}" does not exist in global config.`);
+				}
+				const mergedProfiles = structuredClone(currentProfiles);
+				delete mergedProfiles[name];
+				setByPath(loaded, ["profiles"], mergedProfiles);
+				if (getByPath(loaded, ["activeProfile"]) === name) {
+					setByPath(loaded, ["activeProfile"], "");
+				}
+				await this.#writeYamlAtomically(writePath, loaded);
+			});
+			invalidateCapabilityFsCache(configPath);
+			this.#persistedMutationGeneration++;
+			this.#global = (await this.#loadYamlIfPresentForStartup(configPath)) ?? {};
+			this.#rebuildMerged();
+			this.#fireProfileSignalsIfNeeded(before);
 		} else {
 			const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
 			await this.#withYamlWriteLock(projectConfigPath, async writePath => {
@@ -2764,7 +2829,7 @@ export class Settings {
 		const prevActive = this.getActiveProfile();
 		if (scope === "project") {
 			const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
-			fs.mkdirSync(path.dirname(projectConfigPath), { recursive: true });
+			await fs.promises.mkdir(path.dirname(projectConfigPath), { recursive: true });
 			await this.#withYamlWriteLock(projectConfigPath, async writePath => {
 				const loaded =
 					(await this.#loadYamlIfPresentForWriteLocked(projectConfigPath, writePath)) ??
@@ -2795,7 +2860,11 @@ export class Settings {
 			}
 		}
 		const effectiveModelRoles: Record<string, string> = {};
-		for (const role of Object.keys(baseModelRoles)) {
+		// Union of base roles and the active profile's roles: a profile can
+		// introduce roles the base config never mentions (e.g. profile-only
+		// `slow`), and consumers of this snapshot must see them resolved.
+		const roleKeys = new Set([...Object.keys(baseModelRoles), ...Object.keys(this.resolveProfileModelRoles() ?? {})]);
+		for (const role of roleKeys) {
 			const effective = this.getModelRole(role);
 			if (effective) effectiveModelRoles[role] = effective;
 		}

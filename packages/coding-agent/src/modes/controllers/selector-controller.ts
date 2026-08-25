@@ -886,6 +886,9 @@ export class SelectorController {
 			resolve(value);
 		};
 		const restore = this.#swapOverlayBody(form, input, () => finish(undefined));
+		// The Input holds keyboard focus, so Esc must cancel through it —
+		// the form-level handler never sees the key.
+		input.onEscape = () => finish(undefined);
 		input.onSubmit = value => {
 			const name = value.trim();
 			if (name) finish(name);
@@ -909,19 +912,39 @@ export class SelectorController {
 		// cancelled creation leaves nothing on disk.
 		const existing = draft ? undefined : settings.getProfile(name);
 		if (!existing && !draft) return false;
-		const roles: Record<string, string | null> = { ...(existing?.modelRoles ?? {}) };
+		// Layered scopes: prompts show the EFFECTIVE value the user experiences,
+		// but only scope-LOCAL overrides are persisted. Inherited roles are
+		// never materialized into the edited scope.
+		const local = draft ? undefined : settings.getScopeLocalProfile(scope, name);
+		const localRoles = local?.modelRoles ?? {};
+		const changes: Record<string, string | null> = {};
 		for (const role of ["default", "smol", "slow", "plan"]) {
-			const current = roles[role];
-			const entered = await this.#promptRoleValue(`${name}.${role}`, typeof current === "string" ? current : "");
+			const localValue = localRoles[role];
+			const effectiveValue = existing?.modelRoles?.[role];
+			const display = typeof effectiveValue === "string" ? effectiveValue : "";
+			const inherited = typeof localValue !== "string" && typeof effectiveValue === "string";
+			const entered = await this.#promptRoleValue(
+				`${name}.${role}${inherited ? theme.fg("dim", " (inherited)") : ""}`,
+				display,
+			);
 			if (entered === null) return false; // user aborted mid-edit
-			roles[role] = entered === "" ? null : entered;
+			if (entered === display) continue; // unchanged — never touch it
+			if (entered === "") {
+				// Clear: only meaningful for a locally-defined role (tombstone
+				// removes the local override so the value falls through to
+				// other layers). Inherited roles are simply left alone.
+				if (typeof localValue === "string") changes[role] = null;
+				continue;
+			}
+			changes[role] = entered;
 		}
+		if (!draft && Object.keys(changes).length === 0) return false; // nothing changed
 		// Draft mode has no pre-existing roles to clear: empty input means
 		// "leave unset", so tombstones are stripped and a duplicate-name
 		// creation merges over the old definition without destroying it.
 		const modelRoles = draft
-			? Object.fromEntries(Object.entries(roles).filter(([, value]) => value !== null))
-			: roles;
+			? Object.fromEntries(Object.entries(changes).filter(([, value]) => value !== null))
+			: changes;
 		await settings.setProfile(scope, name, { modelRoles });
 		return true;
 	}
@@ -945,6 +968,8 @@ export class SelectorController {
 			resolve(value);
 		};
 		const restore = this.#swapOverlayBody(form, input, () => finish(null));
+		// Focused-input Esc: same reasoning as the name prompt.
+		input.onEscape = () => finish(null);
 		input.onSubmit = value => finish(value.trim());
 		return await promise;
 	}

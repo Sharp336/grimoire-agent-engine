@@ -21,7 +21,7 @@ const YAML = Bun.YAML;
 /** Wait until `cond` is true or the timeout elapses (async action chains). */
 async function until(cond: () => boolean, what: string): Promise<void> {
 	for (let i = 0; i < 200 && !cond(); i++) {
-		await new Promise(resolve => setTimeout(resolve, 5));
+		await Bun.sleep(5);
 	}
 	expect(cond(), `timed out waiting for ${what}`).toBe(true);
 }
@@ -130,7 +130,7 @@ describe("profile create flow (controller-level)", () => {
 		// Esc routes through the swapped-in prompt form's onCancel → abort.
 		manager.handleInput("\x1b");
 		await until(() => inputs().length >= 2 && focusTargets.at(-1) === manager, "editor aborted");
-		await new Promise(resolve => setTimeout(resolve, 20));
+		await Bun.sleep(20);
 		expect(settings.getProfile("ghost")).toBeUndefined();
 		expect(globalDisk().profiles).toBeUndefined(); // nothing persisted
 	});
@@ -162,6 +162,31 @@ describe("profile create flow (controller-level)", () => {
 		await until(() => errorMessages.length > 0, "validation error surfaced");
 		expect(errorMessages[0]).toContain("bad name!");
 		expect(settings.getProfile("bad name!")).toBeUndefined();
+		expect(globalDisk().profiles).toBeUndefined();
+	});
+
+	test("Esc on the focused name input cancels creation immediately", async () => {
+		const manager = makeController();
+		manager.handleInput("n");
+		const nameInput = await waitInput(1, "name prompt");
+		// The Input owns focus: Esc must cancel through its own handler.
+		expect(typeof nameInput.onEscape).toBe("function");
+		nameInput.onEscape?.();
+		// Deterministic: the manager regains focus when the prompt unwinds.
+		await until(() => focusTargets.at(-1) === manager, "manager refocused");
+		expect(settings.getProfile("anything")).toBeUndefined();
+		expect(globalDisk().profiles).toBeUndefined();
+	});
+
+	test("Esc on a focused role input aborts the editor with nothing written", async () => {
+		const manager = makeController();
+		manager.handleInput("n");
+		(await waitInput(1, "name prompt")).onSubmit?.("escaper");
+		const roleInput = await waitInput(2, "first role prompt");
+		expect(typeof roleInput.onEscape).toBe("function");
+		roleInput.onEscape?.(); // abort mid-editor
+		await until(() => focusTargets.at(-1) === manager, "editor unwound");
+		expect(settings.getProfile("escaper")).toBeUndefined();
 		expect(globalDisk().profiles).toBeUndefined();
 	});
 });
