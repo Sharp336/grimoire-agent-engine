@@ -182,18 +182,23 @@ export function parseIssueUrl(value: string | undefined): { repo?: string; issue
 	};
 }
 
+/** The host `gh` will send a ref to when the ref itself names none. */
+function effectiveHost(ref: GhRepoRef): string {
+	return (ref.host || process.env.GH_HOST || GITHUB_HOST).toLowerCase();
+}
+
 /**
- * Case-insensitive repo comparison. Hosts are compared only when both sides
- * name one: a host-less ref means "wherever `gh` resolves it", so it must not
- * be declared a mismatch against the same slug on a named host.
+ * Case-insensitive repo comparison over the instance each ref actually
+ * resolves to. A host-less ref is not a wildcard: `gh` sends it to `GH_HOST`,
+ * so comparing slugs alone would call a bare `owner/repo` the same repository
+ * as `ghe.example.com/owner/repo` and let a caller act on one while the
+ * request goes to the other.
  */
 export function githubRepoSlugEquals(left: string | undefined, right: string): boolean {
 	if (left === undefined) return false;
 	const leftRef = parseRepoRef(left);
 	const rightRef = parseRepoRef(right);
-	if (leftRef.host && rightRef.host && leftRef.host.toLowerCase() !== rightRef.host.toLowerCase()) {
-		return false;
-	}
+	if (effectiveHost(leftRef) !== effectiveHost(rightRef)) return false;
 	return leftRef.slug.toLowerCase() === rightRef.slug.toLowerCase();
 }
 

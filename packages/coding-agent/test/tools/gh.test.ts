@@ -44,6 +44,9 @@ process.env.GIT_ASKPASS = "true";
 // `$XDG_CONFIG_HOME/git/config` even after we pin `GIT_CONFIG_GLOBAL`. Clear
 // it so the override is absolute.
 delete process.env.XDG_CONFIG_HOME;
+// A developer's `GH_HOST` is the host `gh` would send a host-less repo to, so
+// leaving it set would change what these tests consider the same repository.
+delete process.env.GH_HOST;
 
 function createSession(
 	cwd: string = "/tmp/test",
@@ -1766,6 +1769,44 @@ describe("github tool on a GitHub Enterprise host", () => {
 		const args = (jsonSpy.mock.calls[0]?.[1] ?? []) as string[];
 		expect(args).toContain("/repos/acme/widgets/actions/runs/12");
 		expect(args[args.indexOf("--hostname") + 1]).toBe("ghe.example.com");
+	});
+
+	it("run_watch refuses to infer a commit for a bare repo that resolves elsewhere", async () => {
+		// The bare `repo` goes to github.com (no GH_HOST), so the enterprise
+		// checkout's HEAD says nothing about the runs being watched.
+		vi.spyOn(git.github, "text").mockResolvedValue(`${ENTERPRISE_URL}\n`);
+		const jsonSpy = vi.spyOn(git.github, "json");
+		const tool = new GithubTool(createSession(`/tmp/gh-enterprise-mismatch-${Date.now()}`));
+
+		await expect(tool.execute("run-watch", { op: "run_watch", repo: "acme/widgets" })).rejects.toThrow(
+			"current checkout is ghe.example.com/acme/widgets",
+		);
+		expect(jsonSpy).not.toHaveBeenCalled();
+	});
+
+	it("run_watch accepts a bare repo when GH_HOST names the checkout's host", async () => {
+		process.env.GH_HOST = "ghe.example.com";
+		try {
+			vi.spyOn(git.github, "text").mockResolvedValue(`${ENTERPRISE_URL}\n`);
+			vi.spyOn(git.branch, "current").mockResolvedValue("main");
+			vi.spyOn(git.head, "sha").mockResolvedValue("c215f3a91217c215f3a91217c215f3a91217c215");
+			const abort = new AbortController();
+			const jsonSpy = vi.spyOn(git.github, "json").mockImplementation((async () => {
+				abort.abort();
+				return { workflow_runs: [] };
+			}) as unknown as typeof git.github.json);
+			const tool = new GithubTool(createSession(`/tmp/gh-enterprise-ghhost-${Date.now()}`));
+
+			await tool.execute("run-watch", { op: "run_watch", repo: "acme/widgets" }, abort.signal).catch(() => {});
+
+			// Guard passed: the watch reached its first poll, and the caller's bare
+			// repo is left host-less so `gh` applies the same GH_HOST.
+			const args = (jsonSpy.mock.calls[0]?.[1] ?? []) as string[];
+			expect(args).toContain("/repos/acme/widgets/actions/runs");
+			expect(args).not.toContain("--hostname");
+		} finally {
+			delete process.env.GH_HOST;
+		}
 	});
 });
 
