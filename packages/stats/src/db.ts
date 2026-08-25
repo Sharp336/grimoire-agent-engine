@@ -807,8 +807,14 @@ export function getStatsByAgentType(cutoff?: number): AgentTypeStats[] {
 
 /**
  * Get time series data.
+ * @param origin - Bucket anchor (ms); 0 keeps Unix-epoch alignment.
  */
-export function getTimeSeries(hours = 24, cutoff?: number | null, bucketMs = 60 * 60 * 1000): TimeSeriesPoint[] {
+export function getTimeSeries(
+	hours = 24,
+	cutoff?: number | null,
+	bucketMs = 60 * 60 * 1000,
+	origin = 0,
+): TimeSeriesPoint[] {
 	if (!db) return [];
 
 	const hasCutoff = cutoff !== null;
@@ -816,7 +822,7 @@ export function getTimeSeries(hours = 24, cutoff?: number | null, bucketMs = 60 
 
 	const stmt = db.prepare(`
 		SELECT
-			(timestamp / ?) * ? as bucket,
+			((timestamp - ?) / ?) * ? + ? as bucket,
 			COUNT(*) as requests,
 			SUM(CASE WHEN stop_reason = 'error' THEN 1 ELSE 0 END) as errors,
 			SUM(total_tokens) as tokens,
@@ -828,8 +834,8 @@ export function getTimeSeries(hours = 24, cutoff?: number | null, bucketMs = 60 
 	`);
 
 	const rows = hasCutoff
-		? (stmt.all(bucketMs, bucketMs, seriesCutoff) as any[])
-		: (stmt.all(bucketMs, bucketMs) as any[]);
+		? (stmt.all(origin, bucketMs, bucketMs, origin, seriesCutoff) as any[])
+		: (stmt.all(origin, bucketMs, bucketMs, origin) as any[]);
 	return rows.map(row => ({
 		timestamp: row.bucket,
 		requests: row.requests,
@@ -844,11 +850,13 @@ export function getTimeSeries(hours = 24, cutoff?: number | null, bucketMs = 60 
  */
 /**
  * Get daily model usage time series data for the last N days.
+ * @param origin - Bucket anchor (ms); 0 keeps Unix-epoch alignment.
  */
 export function getModelTimeSeries(
 	days = 14,
 	cutoff?: number | null,
 	bucketMs = 24 * 60 * 60 * 1000,
+	origin = 0,
 ): ModelTimeSeriesPoint[] {
 	if (!db) return [];
 
@@ -857,7 +865,7 @@ export function getModelTimeSeries(
 
 	const stmt = db.prepare(`
 		SELECT
-			(timestamp / ?) * ? as bucket,
+			((timestamp - ?) / ?) * ? + ? as bucket,
 			model,
 			provider,
 			COUNT(*) as requests
@@ -867,7 +875,9 @@ export function getModelTimeSeries(
 		ORDER BY bucket ASC
 	`);
 
-	const rowsRaw = hasCutoff ? stmt.all(bucketMs, bucketMs, seriesCutoff) : stmt.all(bucketMs, bucketMs);
+	const rowsRaw = hasCutoff
+		? stmt.all(origin, bucketMs, bucketMs, origin, seriesCutoff)
+		: stmt.all(origin, bucketMs, bucketMs, origin);
 	const rows = rowsRaw as Array<{ bucket: number; model: string; provider: string; requests: number }>;
 	return rows.map(row => ({
 		timestamp: row.bucket,
@@ -977,11 +987,13 @@ export function getProviderHourlyBurn(cutoff?: number | null): ProviderHourlyPoi
 
 /**
  * Get token/cost time series grouped by provider (bucketed like the model series).
+ * @param origin - Bucket anchor (ms); 0 keeps Unix-epoch alignment.
  */
 export function getProviderTimeSeries(
 	days = 14,
 	cutoff?: number | null,
 	bucketMs = 24 * 60 * 60 * 1000,
+	origin = 0,
 ): ProviderTimeSeriesPoint[] {
 	if (!db) return [];
 
@@ -990,7 +1002,7 @@ export function getProviderTimeSeries(
 
 	const stmt = db.prepare(`
 		SELECT
-			(timestamp / ?) * ? as bucket,
+			((timestamp - ?) / ?) * ? + ? as bucket,
 			provider,
 			SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) as total_tokens,
 			SUM(cost_total) as cost,
@@ -1002,7 +1014,9 @@ export function getProviderTimeSeries(
 		ORDER BY bucket ASC
 	`);
 
-	const rowsRaw = hasCutoff ? stmt.all(bucketMs, bucketMs, seriesCutoff) : stmt.all(bucketMs, bucketMs);
+	const rowsRaw = hasCutoff
+		? stmt.all(origin, bucketMs, bucketMs, origin, seriesCutoff)
+		: stmt.all(origin, bucketMs, bucketMs, origin);
 	const rows = rowsRaw as Array<{
 		bucket: number;
 		provider: string;
@@ -1023,11 +1037,13 @@ export function getProviderTimeSeries(
 
 /**
  * Get daily model performance time series data for the last N days.
+ * @param origin - Bucket anchor (ms); 0 keeps Unix-epoch alignment.
  */
 export function getModelPerformanceSeries(
 	days = 14,
 	cutoff?: number | null,
 	bucketMs = 24 * 60 * 60 * 1000,
+	origin = 0,
 ): ModelPerformancePoint[] {
 	if (!db) return [];
 
@@ -1036,7 +1052,7 @@ export function getModelPerformanceSeries(
 
 	const stmt = db.prepare(`
 		SELECT
-			(timestamp / ?) * ? as bucket,
+			((timestamp - ?) / ?) * ? + ? as bucket,
 			model,
 			provider,
 			COUNT(*) as requests,
@@ -1048,7 +1064,9 @@ export function getModelPerformanceSeries(
 		ORDER BY bucket ASC
 	`);
 
-	const rowsRaw = hasCutoff ? stmt.all(bucketMs, bucketMs, seriesCutoff) : stmt.all(bucketMs, bucketMs);
+	const rowsRaw = hasCutoff
+		? stmt.all(origin, bucketMs, bucketMs, origin, seriesCutoff)
+		: stmt.all(origin, bucketMs, bucketMs, origin);
 	const rows = rowsRaw as Array<{
 		bucket: number;
 		model: string;
@@ -1150,23 +1168,34 @@ export function getMessageById(id: number): MessageStats | null {
 	const row = stmt.get(id);
 	return row ? rowToMessageStats(row) : null;
 }
-export function getRequestsPaginated(limit: number, offset: number): { items: MessageStats[]; total: number } {
+export function getRequestsPaginated(
+	limit: number,
+	offset: number,
+	cutoff?: number | null,
+): { items: MessageStats[]; total: number } {
 	if (!db) return { items: [], total: 0 };
-	const countRow = db.prepare("SELECT COUNT(*) as total FROM messages").get() as { total: number };
+	const hasCutoff = cutoff !== undefined && cutoff !== null;
+	const countRow = hasCutoff
+		? (db.prepare("SELECT COUNT(*) as total FROM messages WHERE timestamp >= ?").get(cutoff) as { total: number })
+		: (db.prepare("SELECT COUNT(*) as total FROM messages").get() as { total: number });
 	const total = countRow?.total ?? 0;
 	const stmt = db.prepare(`
 		SELECT * FROM messages
+		${hasCutoff ? "WHERE timestamp >= ?" : ""}
 		ORDER BY timestamp DESC
 		LIMIT ? OFFSET ?
 	`);
-	const items = (stmt.all(limit, offset) as any[]).map(rowToMessageStats);
+	const items = ((hasCutoff ? stmt.all(cutoff, limit, offset) : stmt.all(limit, offset)) as any[]).map(
+		rowToMessageStats,
+	);
 	return { items, total };
 }
 
 /**
  * Get daily cost time series data for the last N days, broken down by model.
+ * @param origin - Bucket anchor (ms); 0 keeps Unix-epoch alignment.
  */
-export function getCostTimeSeries(days = 90, cutoff?: number | null): CostTimeSeriesPoint[] {
+export function getCostTimeSeries(days = 90, cutoff?: number | null, origin = 0): CostTimeSeriesPoint[] {
 	if (!db) return [];
 
 	const hasCutoff = cutoff !== null;
@@ -1174,7 +1203,7 @@ export function getCostTimeSeries(days = 90, cutoff?: number | null): CostTimeSe
 
 	const stmt = db.prepare(`
 		SELECT
-			(timestamp / 86400000) * 86400000 as bucket,
+			((timestamp - ?) / 86400000) * 86400000 + ? as bucket,
 			model,
 			provider,
 			SUM(cost_total) as cost,
@@ -1190,7 +1219,7 @@ export function getCostTimeSeries(days = 90, cutoff?: number | null): CostTimeSe
 		ORDER BY bucket ASC
 	`);
 
-	const rows = (hasCutoff ? stmt.all(seriesCutoff) : stmt.all()) as CostTimeSeriesRow[];
+	const rows = (hasCutoff ? stmt.all(origin, origin, seriesCutoff) : stmt.all(origin, origin)) as CostTimeSeriesRow[];
 	return rows.map(row => ({
 		timestamp: row.bucket,
 		model: row.model,
@@ -1867,11 +1896,13 @@ export function getToolStatsByModel(cutoff?: number): ToolModelStats[] {
 
 /**
  * Get tool-call time series (one point per bucket per tool).
+ * @param origin - Bucket anchor (ms); 0 keeps Unix-epoch alignment.
  */
 export function getToolTimeSeries(
 	days = 14,
 	cutoff?: number | null,
 	bucketMs = 24 * 60 * 60 * 1000,
+	origin = 0,
 ): ToolTimeSeriesPoint[] {
 	if (!db) return [];
 
@@ -1880,7 +1911,7 @@ export function getToolTimeSeries(
 
 	const stmt = db.prepare(`
 		SELECT
-			(timestamp / ?) * ? as bucket,
+			((timestamp - ?) / ?) * ? + ? as bucket,
 			tool_name,
 			COUNT(*) as calls,
 			SUM(CASE WHEN is_error = 1 THEN 1 ELSE 0 END) as errors
@@ -1890,7 +1921,9 @@ export function getToolTimeSeries(
 		ORDER BY bucket ASC
 	`);
 
-	const rowsRaw = hasCutoff ? stmt.all(bucketMs, bucketMs, seriesCutoff) : stmt.all(bucketMs, bucketMs);
+	const rowsRaw = hasCutoff
+		? stmt.all(origin, bucketMs, bucketMs, origin, seriesCutoff)
+		: stmt.all(origin, bucketMs, bucketMs, origin);
 	const rows = rowsRaw as Array<{ bucket: number; tool_name: string; calls: number; errors: number }>;
 	return rows.map(row => ({
 		timestamp: row.bucket,
