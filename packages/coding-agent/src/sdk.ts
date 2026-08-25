@@ -2594,7 +2594,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 							logger.warn("background model discovery failed", {
 								error: error instanceof Error ? error.message : String(error),
 							});
-							return pick ? { model: pick } : undefined;
+							return pick ? { model: pick, thinkingLevel: pickInitialThinkingLevel(pick) } : undefined;
 						});
 				} else if (pick) {
 					model = pick;

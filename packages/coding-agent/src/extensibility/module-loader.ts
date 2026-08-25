@@ -19,10 +19,16 @@ export async function loadValidationModule(modulePath: string, cacheBust: string
 	const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-module-validation-"));
 	try {
 		await fs.cp(root, tempRoot, { recursive: true, verbatimSymlinks: true });
-		if (!(await directoryExists(path.join(root, "node_modules")))) {
-			const hoisted = await findNodeModules(path.dirname(root));
-			if (hoisted)
-				await fs.cp(hoisted, path.join(tempRoot, "node_modules"), { recursive: true, verbatimSymlinks: true });
+		const hoisted = await findNodeModules(path.dirname(root));
+		if (hoisted) {
+			const target = path.join(tempRoot, ".omp-hoisted-node_modules");
+			await fs.cp(hoisted, target, { recursive: true, verbatimSymlinks: true });
+			await fs.cp(target, path.join(tempRoot, "node_modules"), {
+				recursive: true,
+				force: false,
+				verbatimSymlinks: true,
+			});
+			await fs.rm(target, { recursive: true, force: true });
 		}
 		const copiedPath = path.join(tempRoot, path.relative(root, modulePath));
 		const module = await import(`${copiedPath}?${cacheBust}`);
