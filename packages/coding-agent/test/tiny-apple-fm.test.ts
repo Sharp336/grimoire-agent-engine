@@ -276,6 +276,7 @@ process.exit(1);
 			inbound?.({ type: "generate", id: "5", modelKey: "afm-core", message: "fix the login button" });
 			await seen.promise;
 			expect(outbound.some(message => message.type === "title" && message.title === null)).toBe(true);
+			expect(outbound.some(message => message.type === "progress" && message.event.status === "error")).toBe(false);
 			expect(outbound.some(message => message.type === "error")).toBe(false);
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });

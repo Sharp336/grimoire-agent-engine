@@ -22,6 +22,7 @@ import {
 import {
 	completeAfmCore,
 	foundationModelsUnavailableReason,
+	isAfmModelNotReady,
 	isAfmRequestScopedFailure,
 	probeAfmCore,
 } from "./apple-fm";
@@ -315,11 +316,19 @@ async function generateTitleFromFoundationModels(
 		});
 		return extractTinyTitle(text, message);
 	} catch (error) {
-		if (isAfmRequestScopedFailure(error)) {
+		if (isAfmModelNotReady(error)) {
 			transport.send({
 				type: "progress",
 				id: requestId,
 				event: { modelKey, status: "error", name: spec.repo },
+			});
+			return null;
+		}
+		if (isAfmRequestScopedFailure(error)) {
+			transport.send({
+				type: "progress",
+				id: requestId,
+				event: { modelKey, status: "ready", task: "text-generation", model: spec.repo },
 			});
 			return null;
 		}
