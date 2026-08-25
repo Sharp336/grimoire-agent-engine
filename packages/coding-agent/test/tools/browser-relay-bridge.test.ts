@@ -1316,4 +1316,77 @@ describe("RelayBridge attachment release", () => {
 		await flush();
 		expect(cdp.messages.filter(message => message.id === enableId && "result" in message)).toHaveLength(1);
 	});
+
+	it("re-cycles Runtime for a preserved session that had it enabled before recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		// Bare attachToTarget holder: routes by tabId, so its page session is
+		// preserved across a guard-detach root swap.
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		// Enable Runtime before recovery: the root cycles and a live context replays.
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId: pageSession, method: "Runtime.enable" }));
+		await flush();
+		ack(bridge, ext, "send"); // Runtime.disable leg
+		await flush();
+		const context = {
+			context: {
+				id: 17,
+				origin: "https://example.com",
+				name: "",
+				uniqueId: "context-17",
+				auxData: { isDefault: true, type: "default", frameId: "frame-1" },
+			},
+		};
+		bridge.extMessage(
+			ext,
+			JSON.stringify({ t: "cdpEvent", tabId: 1, method: "Runtime.executionContextCreated", params: context }),
+		);
+		ack(bridge, ext, "send"); // Runtime.enable leg
+		await flush();
+		expect(
+			cdp.messages.filter(m => m.sessionId === pageSession && m.method === "Runtime.executionContextCreated"),
+		).toHaveLength(1);
+
+		// Recovery: the socket drops and a replacement reconnects. The tab is
+		// recoverable, so the page session is preserved across the fresh Chrome
+		// root — but that new root's Runtime domain is NOT enabled.
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await flush();
+		expect(ext2.rpcs("attach")).toHaveLength(1);
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		// The recovered client re-enables Runtime. Because the preserved session's
+		// stale `enabled` state and context bookkeeping were rolled back on retract,
+		// this must actually re-cycle the fresh root (disable/enable) rather than
+		// ack early on the stale flag.
+		const reEnableId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: reEnableId, sessionId: pageSession, method: "Runtime.enable" }));
+		await flush();
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Runtime.disable"]);
+		ack(bridge, ext2, "send"); // Runtime.disable leg
+		await flush();
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Runtime.disable", "Runtime.enable"]);
+		ack(bridge, ext2, "send"); // Runtime.enable leg
+		await flush();
+		expect(cdp.messages.filter(m => m.id === reEnableId && "result" in m)).toHaveLength(1);
+
+		// A reused context id after recovery must reach the client again: the old
+		// per-session `runtimeContexts` was cleared, so it is no longer suppressed
+		// as already announced.
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({ t: "cdpEvent", tabId: 1, method: "Runtime.executionContextCreated", params: context }),
+		);
+		await flush();
+		expect(
+			cdp.messages.filter(m => m.sessionId === pageSession && m.method === "Runtime.executionContextCreated"),
+		).toHaveLength(2);
+	});
 });
