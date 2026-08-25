@@ -73,6 +73,20 @@ export const RESCUE_SHAKE_CONFIG: ShakeConfig = {
 	protectedTools: [...AGGRESSIVE_SHAKE_CONFIG.protectedTools, isArtifactRecoveryToolResult],
 };
 
+/**
+ * Auto-compaction escalation: the manual preset's reach with its recent tail
+ * kept, tried once when the conservative pass is about to fall through to a
+ * lossy or paid compaction method. Artifact recovery reads stay protected —
+ * automatic mode must never elide the reads used to recover already-elided
+ * content, which is what separates this from {@link AGGRESSIVE_SHAKE_CONFIG}.
+ */
+export const ESCALATED_SHAKE_CONFIG: ShakeConfig = {
+	...RESCUE_SHAKE_CONFIG,
+	// Unlike rescue, this runs before the situation is a dead end, so the live
+	// tail the agent is currently working from stays intact (#7776).
+	protectTokens: AGGRESSIVE_SHAKE_CONFIG.protectTokens,
+};
+
 /** Rough token cost of a placeholder line; used only for the savings gate. */
 const PLACEHOLDER_TOKEN_ESTIMATE = 16;
 

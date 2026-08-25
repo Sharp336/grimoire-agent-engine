@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `ESCALATED_SHAKE_CONFIG`, a shake preset with the manual preset's reach that keeps the live tail and artifact recovery reads protected, for callers that need one deeper pass before falling back to a costlier compaction method ([#9705](https://github.com/can1357/oh-my-pi/pull/9705) by [@srobroek](https://github.com/srobroek)).
+
 ## [18.0.4] - 2026-08-24
 
 ### Changed

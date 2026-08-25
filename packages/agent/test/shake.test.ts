@@ -7,6 +7,7 @@ import {
 	applyShakeRegions,
 	collectShakeRegions,
 	DEFAULT_SHAKE_CONFIG,
+	ESCALATED_SHAKE_CONFIG,
 	RESCUE_SHAKE_CONFIG,
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, TextContent, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
@@ -237,6 +238,44 @@ describe("shake config presets", () => {
 		const regions = collectShakeRegions([recent], tokenizer, RESCUE_SHAKE_CONFIG);
 		expect(regions).toHaveLength(1);
 		expect(regions[0].entry).toBe(recent);
+	});
+
+	test("escalated preset reaches the regions the auto preset's protect window hides", () => {
+		// The state automatic compaction gets stuck in once earlier shakes have
+		// elided old history: every remaining eligible result sits inside the auto
+		// preset's 16k window, so it reclaims nothing and the caller would advance
+		// to a lossy or paid method. 12 × ~980 tokens keeps the whole branch under
+		// 16k while leaving the oldest entries outside the escalated 4k tail.
+		const entries: SessionEntry[] = [];
+		for (let index = 0; index < 12; index++) {
+			entries.push(messageEntry(toolResultMessage("bash", `row ${index} payload `.repeat(280))));
+		}
+		expect(collectShakeRegions(entries, tokenizer, DEFAULT_SHAKE_CONFIG)).toHaveLength(0);
+
+		const escalated = collectShakeRegions(entries, tokenizer, ESCALATED_SHAKE_CONFIG);
+		const savings = escalated.reduce((total, region) => total + region.tokens, 0);
+		// Worth the pass: more than the savings floor the auto preset never met.
+		expect(savings).toBeGreaterThan(DEFAULT_SHAKE_CONFIG.minSavings);
+		// The live tail survives — escalation is not the dead-end rescue.
+		expect(escalated.map(region => region.entry)).not.toContain(entries[entries.length - 1]);
+	});
+
+	test("escalated preset keeps the artifact recovery reads the manual preset drops", () => {
+		const call = messageEntry(
+			assistantMessage([{ type: "toolCall", id: "tc-artifact", name: "read", arguments: { path: "artifact://7" } }]),
+		);
+		const recovery = messageEntry(toolResultMessage("read", "recovered ".repeat(600), { toolCallId: "tc-artifact" }));
+		// Pushes the recovery read out of the 4k tail both presets share, so the
+		// protected-tools list is the only thing that can still separate them.
+		const tail = messageEntry(toolResultMessage("bash", "tail row payload ".repeat(1_500)));
+		const entries = [call, recovery, tail];
+
+		expect(collectShakeRegions(entries, tokenizer, ESCALATED_SHAKE_CONFIG).map(region => region.entry)).not.toContain(
+			recovery,
+		);
+		expect(collectShakeRegions(entries, tokenizer, AGGRESSIVE_SHAKE_CONFIG).map(region => region.entry)).toContain(
+			recovery,
+		);
 	});
 
 	test("empty branch yields no regions", () => {
