@@ -134,6 +134,7 @@ import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memor
 import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
 import type { MnemopiSessionState } from "./mnemopi/state";
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
+import planFirstSuggestionsPrompt from "./prompts/system/plan-first-suggestions.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
@@ -165,7 +166,7 @@ import {
 	type RetryFallbackResolutionContext,
 	resolveRetryFallbackChainKey,
 } from "./session/retry-fallback-chains";
-import { getRestorableSessionModels } from "./session/session-context";
+import { getRestorableSessionModels, isFreshSessionContext } from "./session/session-context";
 import { SessionManager } from "./session/session-manager";
 import { collectMountedMCPToolRoutes, projectMountedMCPXdevGuidance } from "./session/session-tools";
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
@@ -930,6 +931,7 @@ function isLegacyBuiltinToolDefinition(tool: CustomTool | ToolDefinition): boole
 const TOOL_DEFINITION_MARKER = Symbol("__isToolDefinition");
 /** Matches the truncation applied to per-server instructions inside `rebuildSystemPrompt`. */
 const MAX_MCP_INSTRUCTIONS_LENGTH = 4000;
+const PLAN_FIRST_SUGGESTIONS_PROMPT = planFirstSuggestionsPrompt.trim();
 
 let sshCleanupRegistered = false;
 
@@ -2937,6 +2939,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const eagerTasksAlways = settings.get("task.eager") === "always";
 		const intentField = $flag("PI_INTENT_TRACING", settings.get("tools.intentTracing")) ? INTENT_FIELD : undefined;
 		const includeWorkspaceTree = settings.get("includeWorkspaceTree") ?? false;
+		const planDefaultOnStartup = settings.get("plan.defaultOnStartup");
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
@@ -2959,10 +2962,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				: undefined;
 
 			// Build combined append prompt: memory instructions + auto-learn guidance
-			// + mounted MCP route guidance + optional MCP server instructions. For UI
-			// sessions MCP discovery is deferred, so the initial registry and
-			// `getServerInstructions()` are empty until the background connect
-			// completes; the rebuild that `refreshMCPTools` triggers post-discovery
+			// + first-response plan suggestions + mounted MCP route guidance + optional
+			// MCP server instructions. For UI sessions, MCP discovery is deferred, so
+			// the initial registry and `getServerInstructions()` are empty until the
+			// background connect completes; the rebuild that `refreshMCPTools` triggers
 			// then picks up the mounted routes and any connected-server instructions.
 			const serverInstructions = mcpManager?.getServerInstructions();
 			// Drive guidance off the auto-learn BUILTINS that createTools actually built
@@ -2980,6 +2983,22 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			const appendParts: string[] = [];
 			if (memoryInstructions) appendParts.push(memoryInstructions);
 			if (autoLearnInstructions) appendParts.push(autoLearnInstructions);
+			const currentSessionIsFresh = isFreshSessionContext(
+				hasSession ? session.messages : existingSession.messages,
+				sessionManager.getBranch(),
+			);
+			if (
+				agentKind === "main" &&
+				currentSessionIsFresh &&
+				(!hasSession ? !planDefaultOnStartup : !session.getPlanModeState()?.enabled) &&
+				(!hasSession || !session.getGoalModeState()?.enabled) &&
+				settings.get("plan.enabled") &&
+				settings.get("plan.suggestBeforeSubstantialWork") &&
+				builtInRegistryToolNames.has("ask") &&
+				toolNames.includes("ask")
+			) {
+				appendParts.push(PLAN_FIRST_SUGGESTIONS_PROMPT);
+			}
 			const projection = projectMountedMCPXdevGuidance(
 				collectMountedMCPToolRoutes(toolSession.xdev ? listXdevTools(toolSession.xdev) : []),
 			);

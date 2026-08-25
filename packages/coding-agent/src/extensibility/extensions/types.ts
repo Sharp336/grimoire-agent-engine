@@ -201,7 +201,7 @@ export interface ExtensionUIDialogOptions {
 	onRight?: () => void;
 	/** Invoked when user presses the external editor shortcut in select dialogs */
 	onExternalEditor?: () => void;
-	/** Optional footer hint text rendered by interactive selector */
+	/** Optional help text rendered in an interactive dialog footer */
 	helpText?: string;
 	/** Render a leading radio/checkbox marker before each markable option in
 	 *  select dialogs (matches the ask transcript). "radio" fills the cursor row

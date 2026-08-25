@@ -85,6 +85,8 @@ const ORIGINAL_QUESTIONS = [
 	},
 ];
 
+const HELP_TEXT = "Turn off Plan-First Suggestions in /settings → Tasks → Modes.";
+
 /** Assistant message whose only content is a single `toolCall` block. */
 function toolCallMsg(toolCallId: string, toolName: string, args: Record<string, unknown>) {
 	return {
@@ -148,7 +150,9 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 			// u1 -> a1(ask toolCall) -> tr1(stale answer) -> a2(next reply, leaf)
 			sessionManager.appendMessage(userMsg("please deploy"));
 			const askCallId = "ask-call-1";
-			sessionManager.appendMessage(toolCallMsg(askCallId, "ask", { questions: ORIGINAL_QUESTIONS }));
+			sessionManager.appendMessage(
+				toolCallMsg(askCallId, "ask", { questions: ORIGINAL_QUESTIONS, helpText: HELP_TEXT }),
+			);
 			const tr1Id = sessionManager.appendMessage(
 				toolResultMsg(askCallId, "ask", "User selected: staging", staleAnswerResult().details),
 			);
@@ -161,6 +165,7 @@ describe("AgentSession tree navigation onto an ask toolResult", () => {
 			expect(result.reopenAsk).toBeDefined();
 			expect(result.reopenAsk?.toolCallId).toBe(askCallId);
 			expect(result.reopenAsk?.questions).toEqual(ORIGINAL_QUESTIONS);
+			expect(result.reopenAsk?.input).toEqual({ questions: ORIGINAL_QUESTIONS, helpText: HELP_TEXT });
 			// Nothing was mutated: the leaf is exactly where it was before probing.
 			expect(sessionManager.getLeafId()).toBe(leafBeforeProbe);
 		} finally {

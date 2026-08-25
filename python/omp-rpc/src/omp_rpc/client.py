@@ -42,6 +42,7 @@ from .protocol import (
     MessageUpdateEvent,
     ModelCycleResult,
     ModelInfo,
+    NewSessionResult,
     ReadyEvent,
     RetryFallbackAppliedEvent,
     RetryFallbackSucceededEvent,
@@ -75,6 +76,7 @@ from .protocol import (
     parse_compaction_result,
     parse_model_cycle_result,
     parse_model_info,
+    parse_new_session_result,
     parse_notification,
     parse_session_state,
     parse_session_stats,
@@ -982,8 +984,8 @@ class RpcClient:
         )
         return Path(str(payload["path"]))
 
-    def new_session(self, parent_session: str | None = None) -> CancellationResult:
-        return parse_cancellation_result(
+    def new_session(self, parent_session: str | None = None) -> NewSessionResult:
+        return parse_new_session_result(
             self._request("new_session", parentSession=parent_session)
         )
 

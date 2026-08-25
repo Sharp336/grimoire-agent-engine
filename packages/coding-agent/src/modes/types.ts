@@ -237,6 +237,10 @@ export interface InteractiveModeContext {
 
 	// Lifecycle
 	init(options?: InteractiveModeInitOptions): Promise<void>;
+	/** Reconcile controller mode state after AgentSession commits a replacement transcript. */
+	reconcileModeAfterNewSession(): Promise<void>;
+	/** Reconcile controller mode state when a new-session attempt fails. */
+	reconcileModeAfterFailedNewSession(replacementCommitted: boolean): Promise<void>;
 	playWelcomeIntro(): void;
 	shutdown(): Promise<void>;
 	checkShutdownRequested(): Promise<void>;

@@ -4,7 +4,7 @@ import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings
 import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AskDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/ask-dialog";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { setKeybindings } from "@oh-my-pi/pi-tui";
+import { setKeybindings, visibleWidth } from "@oh-my-pi/pi-tui";
 
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
@@ -1430,6 +1430,119 @@ describe("AskDialogComponent", () => {
 
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option A"]);
+	});
+
+	it("renders custom help below keyboard controls without changing the submitted result", () => {
+		const helpText = "Turn off Plan-First Suggestions in /settings → Tasks → Modes.";
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "plan_first",
+					question: "How should I proceed?",
+					options: [{ label: "Create a plan" }, { label: "Proceed directly" }],
+					recommended: 0,
+				},
+			],
+			{ onSubmit, onCancel: vi.fn(), onPrompt: vi.fn() },
+			{ helpText },
+		);
+
+		const lines = component.render(80).map(line => stripVTControlCharacters(line));
+		expect(lines.at(-3)).toContain("Enter select");
+		expect(lines.at(-3)).toContain("Ctrl+G cancel");
+		expect(lines.at(-2)).toContain(helpText);
+		expect(lines.at(-1)).not.toContain(helpText);
+
+		component.handleInput(ENTER);
+		expect(onSubmit.mock.calls[0]?.[0]).toEqual({
+			kind: "submit",
+			results: [
+				{
+					id: "plan_first",
+					question: "How should I proceed?",
+					options: ["Create a plan", "Proceed directly"],
+					multi: false,
+					selectedOptions: ["Create a plan"],
+					customInput: undefined,
+					note: undefined,
+					timedOut: undefined,
+				},
+			],
+		});
+	});
+
+	it("truncates custom help safely in a narrow dialog", () => {
+		const component = new AskDialogComponent(
+			[{ id: "q1", question: "Choose one?", options: [{ label: "Option A" }] }],
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+			{ helpText: "This help text is intentionally much wider than the dialog." },
+		);
+
+		const lines = component.render(24);
+		expect(lines.every(line => visibleWidth(line) === 24)).toBe(true);
+		expect(stripVTControlCharacters(lines.at(-2) ?? "")).toContain("…");
+	});
+
+	it("preserves the prior height and one-row footer when custom help is absent", () => {
+		const component = new AskDialogComponent(
+			[{ id: "q1", question: "Choose one?", options: [{ label: "Option A" }] }],
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		const lines = component.render(80).map(line => stripVTControlCharacters(line));
+		expect(lines).toHaveLength(12);
+		expect(lines.at(-3)?.startsWith("├")).toBe(true);
+		expect(lines.at(-2)).toContain("Enter select");
+		expect(lines.at(-2)).toContain("Ctrl+G cancel");
+		expect(lines.at(-1)?.startsWith("╰")).toBe(true);
+	});
+
+	it("shrinks the scrollable body to fit a 12-row terminal on question and Submit tabs", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 12 });
+		try {
+			const helpText = "Choose every applicable option.";
+			const component = new AskDialogComponent(
+				[
+					{
+						id: "q1",
+						question: "Which options apply?",
+						options: [{ label: "Option A" }, { label: "Option B" }],
+						multi: true,
+					},
+				],
+				{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+				{ helpText },
+			);
+			const renderLines = (): string[] => component.render(80).map(line => stripVTControlCharacters(line));
+			const expectFrame = (lines: string[], keyboardHint: string): void => {
+				expect(lines).toHaveLength(12);
+				expect(lines.length).toBeLessThanOrEqual(process.stdout.rows);
+				expect(lines.at(0)?.startsWith("╭")).toBe(true);
+				expect(lines.at(-3)).toContain(keyboardHint);
+				expect(lines.at(-2)).toContain(helpText);
+				expect(lines.at(-1)?.startsWith("╰")).toBe(true);
+			};
+
+			const questionTab = renderLines();
+			expectFrame(questionTab, "Space toggle · Enter submit");
+			expect(questionTab.some(line => line.includes("Option A"))).toBe(true);
+
+			component.handleInput(TAB);
+			const submitTab = renderLines();
+			expectFrame(submitTab, "Enter submit");
+			expect(submitTab).toHaveLength(questionTab.length);
+			expect(submitTab.some(line => line.includes("unanswered"))).toBe(true);
+
+			component.handleInput(DOWN);
+			const scrolledSubmitTab = renderLines();
+			expectFrame(scrolledSubmitTab, "Enter submit");
+			expect(scrolledSubmitTab.slice(4, -4).some(line => line.includes("Submit"))).toBe(true);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
 	});
 
 	it("keeps a fixed spawn-time height across tabs, clamped to 70% of the terminal", () => {

@@ -27,6 +27,7 @@ import { buildSkillPromptMessage, parseSkillInvocation } from "../../extensibili
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
+import { CommittedNewSessionTransitionError } from "../../session/agent-session-types";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
@@ -53,6 +54,7 @@ import type {
 	RpcHostUriCancelRequest,
 	RpcHostUriRequest,
 	RpcHostUriResult,
+	RpcNewSessionResult,
 	RpcResponse,
 	RpcSessionState,
 	RpcSubagentSubscriptionLevel,
@@ -106,7 +108,7 @@ export type RpcSessionChangeCommand = Extract<
 >;
 
 export type RpcSessionChangeResult =
-	| { type: "new_session"; data: { cancelled: boolean } }
+	| { type: "new_session"; data: RpcNewSessionResult }
 	| { type: "switch_session"; data: { cancelled: boolean } }
 	| { type: "branch"; data: { text: string; cancelled: boolean } };
 
@@ -474,9 +476,15 @@ export async function handleRpcSessionChange(
 	switch (command.type) {
 		case "new_session": {
 			const options = command.parentSession ? { parentSession: command.parentSession } : undefined;
-			const cancelled = !(await session.newSession(options));
-			if (!cancelled) subagentRegistry?.clear();
-			return { type: "new_session", data: { cancelled } };
+			let data: RpcNewSessionResult;
+			try {
+				data = { cancelled: !(await session.newSession(options)) };
+			} catch (error) {
+				if (!(error instanceof CommittedNewSessionTransitionError)) throw error;
+				data = { cancelled: false, postCommitError: error.message };
+			}
+			if (!data.cancelled) subagentRegistry?.clear();
+			return { type: "new_session", data };
 		}
 
 		case "switch_session": {
@@ -572,6 +580,7 @@ export function requestRpcSelect(
 			title,
 			options: labels,
 			...(optionDetails ? { optionDetails } : {}),
+			...(dialogOptions?.helpText === undefined ? {} : { helpText: dialogOptions.helpText }),
 			timeout: dialogOptions?.timeout,
 		},
 		response => parseValueDialogResponse(response, dialogOptions),
@@ -692,6 +701,7 @@ export function requestRpcDialog<T>(
 	output({ type: "extension_ui_request", id, ...request } as RpcExtensionUIRequest);
 	return promise;
 }
+
 /**
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.

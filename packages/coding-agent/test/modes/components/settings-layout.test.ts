@@ -60,6 +60,36 @@ describe("settings layout", () => {
 		}
 	});
 
+	it("exposes plan-first suggestions as enabled by default and allows disabling them", () => {
+		const path = "plan.suggestBeforeSubstantialWork";
+		const def = getSettingsForTab("tasks").find(def => def.path === path);
+
+		expect(SETTINGS_SCHEMA[path]).toMatchObject({
+			type: "boolean",
+			default: true,
+			ui: {
+				tab: "tasks",
+				group: "Modes",
+				label: "Plan-First Suggestions",
+				condition: "planModeEnabled",
+			},
+		});
+		expect(def).toMatchObject({
+			type: "boolean",
+			tab: "tasks",
+			group: "Modes",
+			label: "Plan-First Suggestions",
+		});
+		expect(Settings.instance.get(path)).toBe(true);
+		expect(def?.condition?.()).toBe(true);
+
+		Settings.instance.set(path, false);
+		expect(Settings.instance.get(path)).toBe(false);
+
+		Settings.instance.set("plan.enabled", false);
+		expect(def?.condition?.()).toBe(false);
+	});
+
 	it("exposes native terminal progress in the appearance settings menu", () => {
 		const def = getSettingsForTab("appearance").find(def => def.path === "terminal.showProgress");
 

@@ -4753,6 +4753,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"plan.suggestBeforeSubstantialWork": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Plan-First Suggestions",
+			description: "Ask whether to create a plan before substantial work in a fresh session",
+			condition: "planModeEnabled",
+		},
+	},
+
 	"goal.enabled": {
 		type: "boolean",
 		default: true,

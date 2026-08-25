@@ -1,5 +1,5 @@
 import type { Component, OverlayHandle, TUI } from "@oh-my-pi/pi-tui";
-import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
+import { Container, replaceTabs, Spacer, Text } from "@oh-my-pi/pi-tui";
 import type { CollabUiRequestDraft, CollabUiSelectItem } from "@oh-my-pi/pi-wire";
 import { KeybindingsManager } from "../../config/keybindings";
 import type {
@@ -29,6 +29,7 @@ import { HookInputComponent } from "../../modes/components/hook-input";
 import { HookSelectorComponent, type HookSelectorSlider } from "../../modes/components/hook-selector";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext, InteractiveSelectorDialogOptions } from "../../modes/types";
+import { CommittedNewSessionTransitionError } from "../../session/agent-session-types";
 import { normalizeCustomMessagePayload, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { setExtensionTerminalTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 
@@ -36,6 +37,12 @@ const MAX_WIDGET_LINES = 10;
 const ASK_OTHER_OPTION = "Other (type your own)";
 const ASK_CHAT_OPTION = "Chat about this";
 const ASK_NEXT_OPTION = "Next →";
+
+function guestAskSelectHelpText(controls: string, supplementary: string | undefined): string {
+	if (supplementary === undefined) return controls;
+	const normalized = replaceTabs(supplementary).replace(/\s+/g, " ").trim();
+	return normalized ? `${controls}\n${normalized}` : controls;
+}
 
 interface CollabDialogWinner {
 	source: "local" | "remote";
@@ -229,14 +236,23 @@ export class ExtensionUiController {
 				// Create new session
 				this.clearExtensionTerminalInputListeners();
 				this.clearHookWidgets();
-				const success = await this.ctx.session.newSession({ parentSession: options?.parentSession });
+				let committedError: CommittedNewSessionTransitionError | undefined;
+				let success: boolean;
+				try {
+					success = await this.ctx.session.newSession({ parentSession: options?.parentSession });
+				} catch (error) {
+					if (!(error instanceof CommittedNewSessionTransitionError)) throw error;
+					committedError = error;
+					success = true;
+				}
 				if (!success) {
 					return { cancelled: true };
 				}
 				setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
 
-				// Call setup callback if provided
-				if (options?.setup) {
+				// Setup belongs to a fully reconciled session. A committed failure
+				// still clears the old transcript below, then rejects to the extension.
+				if (!committedError && options?.setup) {
 					await options.setup(this.ctx.sessionManager);
 				}
 
@@ -246,12 +262,17 @@ export class ExtensionUiController {
 				this.ctx.clearTransientSessionUi();
 				this.ctx.resetTranscript();
 
-				this.ctx.present([
-					new Spacer(1),
-					new Text(`${theme.fg("accent", `${theme.status.success} New session started`)}`, 1, 1),
-				]);
+				if (committedError) {
+					this.ctx.showError(committedError.message);
+				} else {
+					this.ctx.present([
+						new Spacer(1),
+						new Text(`${theme.fg("accent", `${theme.status.success} New session started`)}`, 1, 1),
+					]);
+				}
 				await this.ctx.reloadTodos();
 				this.ctx.ui.requestRender(true, { clearScrollback: true });
+				if (committedError) throw committedError;
 
 				return { cancelled: false };
 			},
@@ -462,13 +483,22 @@ export class ExtensionUiController {
 				// Create new session
 				this.clearExtensionTerminalInputListeners();
 				this.clearHookWidgets();
-				const success = await this.ctx.session.newSession({ parentSession: options?.parentSession });
+				let committedError: CommittedNewSessionTransitionError | undefined;
+				let success: boolean;
+				try {
+					success = await this.ctx.session.newSession({ parentSession: options?.parentSession });
+				} catch (error) {
+					if (!(error instanceof CommittedNewSessionTransitionError)) throw error;
+					committedError = error;
+					success = true;
+				}
 				if (!success) {
 					return { cancelled: true };
 				}
 
-				// Call setup callback if provided
-				if (options?.setup) {
+				// Setup belongs to a fully reconciled session. A committed failure
+				// still clears the old transcript below, then rejects to the extension.
+				if (!committedError && options?.setup) {
 					await options.setup(this.ctx.sessionManager);
 				}
 
@@ -476,12 +506,17 @@ export class ExtensionUiController {
 				this.ctx.clearTransientSessionUi();
 				this.ctx.resetTranscript();
 
-				this.ctx.present([
-					new Spacer(1),
-					new Text(`${theme.fg("accent", `${theme.status.success} New session started`)}`, 1, 1),
-				]);
+				if (committedError) {
+					this.ctx.showError(committedError.message);
+				} else {
+					this.ctx.present([
+						new Spacer(1),
+						new Text(`${theme.fg("accent", `${theme.status.success} New session started`)}`, 1, 1),
+					]);
+				}
 				await this.ctx.reloadTodos();
 				this.ctx.ui.requestRender(true, { clearScrollback: true });
+				if (committedError) throw committedError;
 
 				return { cancelled: false };
 			},
@@ -624,9 +659,11 @@ export class ExtensionUiController {
 		const localWinner = this.#showLocalAskDialog(questions, { ...dialogOptions, signal: localSignal }).then(
 			(value): CollabAskDialogWinner => ({ source: "local", value }),
 		);
-		const remoteWinner: Promise<CollabAskDialogWinner> = this.#runGuestAskDialog(questions, remoteSignal).then(
-			result => (result === "unavailable" ? localWinner : { source: "remote", value: result }),
-		);
+		const remoteWinner: Promise<CollabAskDialogWinner> = this.#runGuestAskDialog(
+			questions,
+			remoteSignal,
+			dialogOptions?.helpText,
+		).then(result => (result === "unavailable" ? localWinner : { source: "remote", value: result }));
 		const winner = await Promise.race([localWinner, remoteWinner]);
 		if (winner.source === "remote") localAbort.abort();
 		else remoteAbort.abort();
@@ -708,6 +745,7 @@ export class ExtensionUiController {
 					timeout: dialogOptions?.timeout,
 					onTimeout: dialogOptions?.onTimeout,
 					tui: this.ctx.ui,
+					helpText: dialogOptions?.helpText,
 					inputGuard,
 				},
 			);
@@ -767,10 +805,11 @@ export class ExtensionUiController {
 	async #runGuestAskDialog(
 		questions: ExtensionAskDialogQuestion[],
 		signal: AbortSignal,
+		supplementaryHelpText: string | undefined,
 	): Promise<ExtensionAskDialogResult | "unavailable" | undefined> {
 		const results: ExtensionAskDialogResultItem[] = [];
 		for (const question of questions) {
-			const result = await this.#runGuestAskQuestion(question, signal);
+			const result = await this.#runGuestAskQuestion(question, signal, supplementaryHelpText);
 			if (result === "unavailable" || result === undefined) return result;
 			if (result === "chat") return { kind: "chat" };
 			results.push(result);
@@ -781,6 +820,7 @@ export class ExtensionUiController {
 	async #runGuestAskQuestion(
 		question: ExtensionAskDialogQuestion,
 		signal: AbortSignal,
+		supplementaryHelpText: string | undefined,
 	): Promise<ExtensionAskDialogResultItem | "chat" | "unavailable" | undefined> {
 		const selected = new Set<string>();
 		let customInput: string | undefined;
@@ -809,9 +849,12 @@ export class ExtensionUiController {
 						selectionMarker: "checkbox",
 						checkedIndices,
 						markableCount: question.options.length,
-						helpText: hasAnswer
-							? "up/down navigate  enter toggle  Next → continue  esc cancel"
-							: "up/down navigate  enter toggle  esc cancel",
+						helpText: guestAskSelectHelpText(
+							hasAnswer
+								? "up/down navigate  enter toggle  Next → continue  esc cancel"
+								: "up/down navigate  enter toggle  esc cancel",
+							supplementaryHelpText,
+						),
 					},
 					signal,
 				);
@@ -849,7 +892,7 @@ export class ExtensionUiController {
 						initialIndex,
 						selectionMarker: "radio",
 						markableCount: question.options.length,
-						helpText: "up/down navigate  enter select  esc cancel",
+						helpText: guestAskSelectHelpText("up/down navigate  enter select  esc cancel", supplementaryHelpText),
 					},
 					signal,
 				);

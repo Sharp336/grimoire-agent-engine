@@ -158,6 +158,12 @@ export interface RpcChunkFrame {
 	data: string;
 }
 
+export interface RpcNewSessionResult {
+	cancelled: boolean;
+	/** Present when the replacement committed but post-commit transition work failed. */
+	postCommitError?: string;
+}
+
 export interface RpcHandoffResult {
 	savedPath?: string;
 }
@@ -209,7 +215,7 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "follow_up"; success: true }
 	| { id?: string; type: "response"; command: "abort"; success: true }
 	| { id?: string; type: "response"; command: "abort_and_prompt"; success: true }
-	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
+	| { id?: string; type: "response"; command: "new_session"; success: true; data: RpcNewSessionResult }
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
@@ -382,6 +388,7 @@ export type RpcExtensionUIRequest =
 			options: string[];
 			optionDetails?: RpcExtensionUISelectOptionDetail[];
 			timeout?: number;
+			helpText?: string;
 	  }
 	| { type: "extension_ui_request"; id: string; method: "confirm"; title: string; message: string; timeout?: number }
 	| {

@@ -18,11 +18,13 @@
 import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { Ellipsis, replaceTabs, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { getConfigRootDir, logger } from "@oh-my-pi/pi-utils";
 import type { AgentHubRemote, AgentHubRemoteTranscript } from "../modes/components/agent-hub";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
+import { CommittedNewSessionTransitionError } from "../session/agent-session-types";
 import type { SessionEntry } from "../session/session-entries";
 import { shouldDisableReasoning, toReasoningEffort } from "../thinking";
 import { setSessionTerminalTitle } from "../utils/title-generator";
@@ -66,6 +68,17 @@ const WELCOME_TIMEOUT_MS = 30_000;
  * in under two seconds with comfortable headroom.
  */
 const SNAPSHOT_PROGRESS_TIMEOUT_MS = 30_000;
+function guestUiSelectHelpText(helpText: string | undefined, terminalColumns: number): string | undefined {
+	if (helpText === undefined) return undefined;
+	const [controls = "", ...supplementaryParts] = helpText.split(/\r?\n/);
+	const width = Math.max(1, terminalColumns - 2);
+	const truncate = (text: string): string =>
+		visibleWidth(text) <= width ? text : truncateToWidth(text, width, Ellipsis.Unicode);
+	if (supplementaryParts.length === 0) return truncate(controls);
+	const supplementary = replaceTabs(supplementaryParts.join(" ")).replace(/\s+/g, " ").trim();
+	return supplementary ? `${truncate(controls)}\n${truncate(supplementary)}` : truncate(controls);
+}
+
 const TRANSCRIPT_TIMEOUT_MS = 20_000;
 
 type WelcomeFrame = Extract<CollabFrame, { t: "welcome" }>;
@@ -342,7 +355,7 @@ export class CollabGuestLink {
 				return;
 			}
 			this.#ctx.showStatus(`Collab session ended (${reason})`);
-			void this.#restoreLocalSession();
+			this.#restoreLocalSessionAfterRemoteEnd();
 		};
 		socket.connect();
 		// Cover the connect phase too: if the relay blackholes the WebSocket
@@ -371,8 +384,18 @@ export class CollabGuestLink {
 	/** User-initiated leave (or post-disconnect cleanup): restore the previous session. */
 	async leave(_reason: string): Promise<void> {
 		if (this.#left) return;
-		this.#socket?.close();
-		await this.#restoreLocalSession();
+		const socket = this.#socket;
+		const restore = this.#restoreLocalSession();
+		// #restoreLocalSession marks the link left synchronously before its first
+		// await, so the close callback cannot start a competing fire-and-forget restore.
+		socket?.close();
+		try {
+			await restore;
+		} catch (error) {
+			// The replacement UI already rendered this committed failure. Do not
+			// leak it through the TUI editor's fire-and-forget submit callback.
+			if (!(error instanceof CommittedNewSessionTransitionError)) throw error;
+		}
 	}
 
 	sendPrompt(text: string, images?: ImageContent[]): void {
@@ -546,7 +569,7 @@ export class CollabGuestLink {
 			case "bye": {
 				this.#ctx.showStatus(`Collab session ended (${frame.reason})`);
 				this.#socket?.close();
-				void this.#restoreLocalSession();
+				this.#restoreLocalSessionAfterRemoteEnd();
 				break;
 			}
 			case "error":
@@ -658,6 +681,8 @@ export class CollabGuestLink {
 		if (this.#readOnly || this.#pendingUiRequests.has(request.reqId)) return;
 		const abort = new AbortController();
 		this.#pendingUiRequests.set(request.reqId, abort);
+		const helpText =
+			request.kind === "select" ? guestUiSelectHelpText(request.helpText, this.#ctx.ui.terminal.columns) : undefined;
 		const dialog =
 			request.kind === "select"
 				? this.#ctx.showHookSelector(request.title, request.options, {
@@ -666,7 +691,7 @@ export class CollabGuestLink {
 						selectionMarker: request.selectionMarker,
 						checkedIndices: request.checkedIndices,
 						markableCount: request.markableCount,
-						helpText: request.helpText,
+						helpText,
 					})
 				: this.#ctx.showHookEditor(request.title, request.prefill, { signal: abort.signal });
 		dialog
@@ -725,6 +750,16 @@ export class CollabGuestLink {
 			this.#ctx.loadingAnimation = undefined;
 		}
 	}
+	#restoreLocalSessionAfterRemoteEnd(): void {
+		void this.#restoreLocalSession().catch(error => {
+			logger.warn("collab guest failed to restore local session after remote end", { error: String(error) });
+			if (!(error instanceof CommittedNewSessionTransitionError)) {
+				this.#ctx.showError(
+					`Failed to restore local session: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		});
+	}
 
 	async #restoreLocalSession(): Promise<void> {
 		if (this.#left) return;
@@ -743,7 +778,13 @@ export class CollabGuestLink {
 			await this.#ctx.handleResumeSession(this.#returnSessionFile);
 			return;
 		}
-		await this.#ctx.session.newSession();
+		let committedError: CommittedNewSessionTransitionError | undefined;
+		try {
+			await this.#ctx.session.newSession();
+		} catch (error) {
+			if (!(error instanceof CommittedNewSessionTransitionError)) throw error;
+			committedError = error;
+		}
 		setSessionTerminalTitle(this.#ctx.sessionManager.getSessionName(), this.#ctx.sessionManager.getCwd());
 		this.#ctx.statusLine.invalidate();
 		this.#ctx.statusLine.resetActiveTime();
@@ -752,6 +793,10 @@ export class CollabGuestLink {
 		await this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
 		await this.#ctx.reloadTodos();
 		this.#ctx.ui.requestRender(true, { clearScrollback: true });
+		if (committedError) {
+			this.#ctx.showError(committedError.message);
+			throw committedError;
+		}
 	}
 
 	#updateStatusSegment(): void {

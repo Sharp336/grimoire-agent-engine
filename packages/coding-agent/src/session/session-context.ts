@@ -111,6 +111,15 @@ export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEnt
 	return null;
 }
 
+/**
+ * Whether the active branch is eligible for first-response-only behavior.
+ * Resolved summary messages make resumed branches non-fresh, while a durable
+ * reset boundary keeps `/clear` distinct from the new session created by `/new`.
+ */
+export function isFreshSessionContext(messages: readonly AgentMessage[], branch: readonly SessionEntry[]): boolean {
+	return messages.length === 0 && !branch.some(entry => entry.type === "reset_boundary");
+}
+
 export interface BuildSessionContextOptions {
 	/**
 	 * Build the display transcript instead of the LLM context. By default this

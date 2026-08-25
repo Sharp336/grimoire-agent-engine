@@ -899,6 +899,11 @@ class CancellationResult:
 
 
 @dataclass(slots=True, frozen=True)
+class NewSessionResult(CancellationResult):
+    post_commit_error: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
 class BranchMessage:
     entry_id: str
     text: str
@@ -955,6 +960,7 @@ class ExtensionUiRequest:
     method: ExtensionUiMethod
     title: str | None = None
     options: tuple[str, ...] | None = None
+    help_text: str | None = field(default=None, kw_only=True)
     message: str | None = None
     option_details: tuple[JsonObject, ...] | None = field(default=None, kw_only=True)
     placeholder: str | None = None
@@ -1502,6 +1508,14 @@ def parse_cancellation_result(payload: JsonObject | None) -> CancellationResult:
     return CancellationResult(cancelled=bool((payload or {}).get("cancelled", False)))
 
 
+def parse_new_session_result(payload: JsonObject | None) -> NewSessionResult:
+    payload = payload or {}
+    return NewSessionResult(
+        cancelled=bool(payload.get("cancelled", False)),
+        post_commit_error=_optional_str(payload, "postCommitError"),
+    )
+
+
 def parse_branch_result(payload: JsonObject | None) -> BranchResult:
     payload = payload or {}
     return BranchResult(
@@ -1574,6 +1588,7 @@ def parse_extension_ui_request(payload: JsonObject) -> ExtensionUiRequest:
         options=_tuple_of_strings(
             payload.get("options"), field="extension_ui_request.options"
         ),
+        help_text=_optional_str(payload, "helpText"),
         option_details=_optional_json_objects(
             payload.get("optionDetails"), field="extension_ui_request.optionDetails"
         ),

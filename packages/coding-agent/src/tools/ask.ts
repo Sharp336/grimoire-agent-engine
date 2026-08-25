@@ -77,23 +77,27 @@ const QuestionItem = arkType({
 
 const askSchema = arkType({
 	questions: QuestionItem.array().atLeastLength(1).describe("questions to ask"),
+	"helpText?": arkType("string").describe(
+		"optional supplementary footer text shown below questionnaire keyboard controls",
+	),
 });
 
 export type AskToolInput = typeof askSchema.infer;
 
 /**
- * Recover a validated `questions` payload from a persisted `ask` toolCall's
- * `arguments`. Used by `/tree` re-answer (issue #5642): selecting a past
- * `ask` toolResult re-opens the picker with the *original* questions, so the
- * new answer branches as a sibling instead of mutating the old one. Runs the
- * same schema the live tool call validated against — legacy/corrupted
- * persisted args fail closed (`undefined`) rather than feeding malformed
- * data back into the picker.
+ * Recover a complete validated `ask` input from a persisted tool call.
+ * `/tree` re-answer uses the same schema as live execution so legacy or
+ * corrupted arguments fail closed instead of reaching the picker.
  */
-export function recoverAskQuestions(toolCallArguments: unknown): AskToolInput["questions"] | undefined {
+export function recoverAskInput(toolCallArguments: unknown): AskToolInput | undefined {
 	const parsed = askSchema(toolCallArguments);
 	if (parsed instanceof arkType.errors) return undefined;
-	return parsed.questions;
+	return parsed;
+}
+
+/** Recover only the validated questions for callers that do not replay the full Ask input. */
+export function recoverAskQuestions(toolCallArguments: unknown): AskToolInput["questions"] | undefined {
+	return recoverAskInput(toolCallArguments)?.questions;
 }
 
 /** Result for a single question */
@@ -418,6 +422,7 @@ interface AskSingleQuestionOptions {
 	signal?: AbortSignal;
 	initialSelection?: Pick<SelectionResult, "selectedOptions" | "customInput" | "note">;
 	navigation?: NavigationControls;
+	helpText?: string;
 }
 
 interface UIContext {
@@ -456,7 +461,7 @@ async function askSingleQuestion(
 	multi: boolean,
 	options: AskSingleQuestionOptions = {},
 ): Promise<SelectionResult> {
-	const { recommended, timeout, signal, initialSelection, navigation } = options;
+	const { recommended, timeout, signal, initialSelection, navigation, helpText: supplementaryHelpText } = options;
 	const doneLabel = getDoneOptionLabel();
 	let selectedOptions = [...(initialSelection?.selectedOptions ?? [])];
 	let customInput = initialSelection?.customInput;
@@ -474,9 +479,20 @@ async function askSingleQuestion(
 			timeoutTriggered = true;
 		};
 		let navigationAction: "back" | "forward" | undefined;
-		const helpText = navigation
+		const controlsHelpText = navigation
 			? "up/down navigate  enter select  ←/→ question  esc cancel"
 			: "up/down navigate  enter select  esc cancel";
+		const normalizedSupplementaryHelpText =
+			supplementaryHelpText === undefined
+				? undefined
+				: clampLineToWidth(
+						replaceTabs(supplementaryHelpText).replace(/\s+/g, " ").trim(),
+						Math.max(1, (process.stdout.columns ?? 80) - 2),
+					);
+		const helpText =
+			normalizedSupplementaryHelpText === undefined
+				? controlsHelpText
+				: `${controlsHelpText}\n${normalizedSupplementaryHelpText}`;
 		const timeoutMs = typeof timeout === "number" && timeout > 0 ? timeout : undefined;
 		const timeoutController = timeoutMs === undefined ? undefined : new AbortController();
 		const dialogSignal =
@@ -909,7 +925,11 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 							...(q.multi !== undefined ? { multi: q.multi } : {}),
 							...(q.recommended !== undefined ? { recommended: q.recommended } : {}),
 						})),
-						{ timeout: timeout ?? undefined, signal },
+						{
+							timeout: timeout ?? undefined,
+							signal,
+							...(params.helpText !== undefined ? { helpText: params.helpText } : {}),
+						},
 					);
 				const richResult = signal ? await untilAborted(signal, showRichDialog) : await showRichDialog();
 				if (!richResult) {
@@ -1008,6 +1028,7 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 						signal,
 						initialSelection: options?.previous,
 						navigation: options?.navigation,
+						...(params.helpText !== undefined ? { helpText: params.helpText } : {}),
 					},
 				);
 				return { optionLabels, selectedOptions, customInput, note, navigation, cancelled, timedOut };

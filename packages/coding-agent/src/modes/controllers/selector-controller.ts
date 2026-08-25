@@ -42,7 +42,7 @@ import {
 	theme,
 } from "../../modes/theme/theme";
 import type { InteractiveModeContext } from "../../modes/types";
-import type { SessionOAuthAccountList } from "../../session/agent-session-types";
+import { CommittedNewSessionTransitionError, type SessionOAuthAccountList } from "../../session/agent-session-types";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
 import {
 	createForeignSessionStore,
@@ -509,6 +509,12 @@ export class SelectorController {
 			case "tools.xdevDocs":
 				void this.ctx.session.refreshBaseSystemPrompt().catch(err => {
 					this.ctx.showError(`Failed to apply xd:// prompt docs setting: ${err}`);
+				});
+				break;
+			case "plan.enabled":
+			case "plan.suggestBeforeSubstantialWork":
+				void this.ctx.session.refreshBaseSystemPrompt().catch(err => {
+					this.ctx.showError(`Failed to apply plan-first setting: ${err}`);
 				});
 				break;
 			case "memory.backend":
@@ -1372,7 +1378,7 @@ export class SelectorController {
 						// re-open the picker with the original questions first, then
 						// complete the navigation as a new sibling branch (issue #5642).
 						if (result.reopenAsk) {
-							const reanswer = await this.#reanswerAsk(result.reopenAsk.questions);
+							const reanswer = await this.#reanswerAsk(result.reopenAsk.input);
 							if (!reanswer) {
 								this.ctx.showStatus("Re-answer cancelled");
 								return;
@@ -1488,13 +1494,13 @@ export class SelectorController {
 	}
 
 	/**
-	 * Re-open the `ask` picker with the original `questions` (issue #5642):
-	 * runs a standalone `AskTool.execute()` outside a normal agent turn,
-	 * reusing the same picker/dialog primitives a live `ask` tool call gets.
-	 * Returns `undefined` when the user cancels — mirrors `navigateTree`'s
-	 * cancellation contract instead of throwing.
+	 * Re-open the `ask` picker with the complete original validated input
+	 * (issue #5642). This runs a standalone `AskTool.execute()` outside a
+	 * normal agent turn and reuses the same picker/dialog primitives as a live
+	 * `ask` call. Returns `undefined` when the user cancels, mirroring
+	 * `navigateTree`'s cancellation contract instead of throwing.
 	 */
-	async #reanswerAsk(questions: AskToolInput["questions"]): Promise<AgentToolResult<AskToolDetails> | undefined> {
+	async #reanswerAsk(input: AskToolInput): Promise<AgentToolResult<AskToolDetails> | undefined> {
 		const uiContext = this.ctx.getToolUIContext();
 		if (!uiContext) {
 			this.ctx.showError("Ask tool UI is not ready");
@@ -1512,7 +1518,7 @@ export class SelectorController {
 		const context = this.ctx.session.buildAskReanswerContext(uiContext);
 		let result: AgentToolResult<AskToolDetails>;
 		try {
-			result = await askTool.execute("tree-reanswer", { questions }, undefined, undefined, context);
+			result = await askTool.execute("tree-reanswer", input, undefined, undefined, context);
 		} catch (error) {
 			if (error instanceof ToolAbortError) return undefined;
 			throw error;
@@ -1679,7 +1685,15 @@ export class SelectorController {
 			return true;
 		}
 
-		const detached = await this.ctx.session.newSession();
+		let committedError: CommittedNewSessionTransitionError | undefined;
+		let detached: boolean;
+		try {
+			detached = await this.ctx.session.newSession();
+		} catch (error) {
+			if (!(error instanceof CommittedNewSessionTransitionError)) throw error;
+			committedError = error;
+			detached = true;
+		}
 		if (!detached) {
 			return false;
 		}
@@ -1693,6 +1707,7 @@ export class SelectorController {
 		await this.ctx.renderInitialMessages({ clearTerminalHistory: true });
 		await this.ctx.reloadTodos();
 		this.ctx.ui.requestRender(true, { clearScrollback: true });
+		if (committedError) throw committedError;
 		return true;
 	}
 

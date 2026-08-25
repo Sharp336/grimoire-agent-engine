@@ -31,6 +31,7 @@ import type {
 	RpcHostToolDefinition,
 	RpcHostToolResult,
 	RpcHostToolUpdate,
+	RpcNewSessionResult,
 	RpcResponse,
 	RpcSessionState,
 	RpcSubagentEventFrame,
@@ -595,9 +596,9 @@ export class RpcClient {
 	/**
 	 * Start a new session, optionally with parent tracking.
 	 * @param parentSession - Optional parent session path for lineage tracking
-	 * @returns Object with `cancelled: true` if an extension cancelled the new session
+	 * @returns Cancellation state and optional `postCommitError` for a replacement that committed with an error
 	 */
-	async newSession(parentSession?: string): Promise<{ cancelled: boolean }> {
+	async newSession(parentSession?: string): Promise<RpcNewSessionResult> {
 		const response = await this.#send({ type: "new_session", parentSession });
 		return this.#getData(response);
 	}

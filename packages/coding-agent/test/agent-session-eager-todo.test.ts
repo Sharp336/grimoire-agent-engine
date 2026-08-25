@@ -1,5 +1,6 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, TextContent, ToolCall } from "@oh-my-pi/pi-ai";
@@ -8,6 +9,7 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AgentSession, type AgentSessionConfig } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -15,6 +17,7 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TodoTool } from "@oh-my-pi/pi-coding-agent/tools";
 import { setInteractiveHost, TempDir } from "@oh-my-pi/pi-utils";
+import planFirstSuggestionsPrompt from "../src/prompts/system/plan-first-suggestions.md" with { type: "text" };
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 type ObservedPromptCall = {
@@ -104,12 +107,22 @@ describe("AgentSession eager todo enforcement", () => {
 	let sharedModelRegistry: ModelRegistry;
 	const observedCalls: ObservedPromptCall[] = [];
 
+	type HarnessTools = {
+		builtInAsk?: boolean;
+		externalThink?: boolean;
+		planFirstGuidance?: boolean;
+		beforeAgentStartSystemPrompt?: string[];
+	};
+
 	async function createSession(
 		settingsOverride: Record<string, unknown> = {},
 		sessionOverride: Partial<AgentSessionConfig> = {},
+		harnessTools: HarnessTools = {},
 	): Promise<void> {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+		const model = harnessTools.externalThink
+			? getBundledModel("openai", "gpt-5")
+			: getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected the harness model to exist");
 
 		const modelRegistry = sharedModelRegistry;
 		const settings = Settings.isolated({
@@ -139,13 +152,33 @@ describe("AgentSession eager todo enforcement", () => {
 			parameters: type({}),
 			execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
 		};
+		const optionalTools: AgentTool[] = [];
+		if (harnessTools.builtInAsk) {
+			optionalTools.push({
+				name: "ask",
+				label: "Ask",
+				description: "Mock built-in ask tool",
+				parameters: type({}),
+				execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+			});
+		}
+		if (harnessTools.externalThink) {
+			optionalTools.push({
+				name: "think",
+				label: "Think",
+				description: "Mock private think tool",
+				parameters: type({}),
+				execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+			});
+		}
+		const tools = [todoTool as unknown as AgentTool, mockBashTool, ...optionalTools];
 
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
 				model,
-				systemPrompt: ["Test"],
-				tools: [todoTool, mockBashTool],
+				systemPrompt: harnessTools.planFirstGuidance ? ["Test", planFirstSuggestionsPrompt.trim()] : ["Test"],
+				tools,
 				messages: [],
 			},
 			convertToLlm,
@@ -176,10 +209,7 @@ describe("AgentSession eager todo enforcement", () => {
 			},
 		});
 
-		const toolRegistry = new Map<string, AgentTool>([
-			[todoTool.name, todoTool as unknown as AgentTool],
-			[mockBashTool.name, mockBashTool],
-		]);
+		const toolRegistry = new Map<string, AgentTool>(tools.map(tool => [tool.name, tool]));
 
 		session = new AgentSession({
 			agent,
@@ -187,6 +217,13 @@ describe("AgentSession eager todo enforcement", () => {
 			settings,
 			modelRegistry,
 			toolRegistry,
+			builtInToolNames: harnessTools.builtInAsk ? ["ask"] : undefined,
+			extensionRunner: harnessTools.beforeAgentStartSystemPrompt
+				? ({
+						emitBeforeAgentStart: async () => ({ systemPrompt: harnessTools.beforeAgentStartSystemPrompt }),
+						emit: async () => undefined,
+					} as unknown as ExtensionRunner)
+				: undefined,
 			...sessionOverride,
 		});
 	}
@@ -194,12 +231,13 @@ describe("AgentSession eager todo enforcement", () => {
 	async function recreateSession(
 		settingsOverride: Record<string, unknown> = {},
 		sessionOverride: Partial<AgentSessionConfig> = {},
+		harnessTools: HarnessTools = {},
 	): Promise<void> {
 		await session.dispose();
 		streamCallCount = 0;
 		scriptedResponses = [];
 		observedCalls.length = 0;
-		await createSession(settingsOverride, sessionOverride);
+		await createSession(settingsOverride, sessionOverride, harnessTools);
 	}
 
 	function waitForSessionName(expected: string): Promise<void> {
@@ -217,6 +255,7 @@ describe("AgentSession eager todo enforcement", () => {
 		sharedDir = TempDir.createSync("@pi-agent-session-eager-todo-shared-");
 		sharedAuthStorage = await AuthStorage.create(path.join(sharedDir.path(), "auth.db"));
 		sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
+		sharedAuthStorage.setRuntimeApiKey("openai", "test-key");
 		sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir.path(), "models.yml"));
 	});
 
@@ -512,6 +551,166 @@ describe("AgentSession eager todo enforcement", () => {
 			lastMessageRole: "user",
 			lastMessageText: "actually skip that, just fix the typo",
 		});
+	});
+
+	it("lets plan-first guidance precede eager todo forcing on a fresh interactive session", async () => {
+		await recreateSession({}, {}, { builtInAsk: true, planFirstGuidance: true });
+
+		await session.prompt("Build a project dashboard with authentication and reports");
+
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.toolChoice).toBeUndefined();
+		expect(observedCalls[0]?.toolNames).toEqual(["todo", "bash", "ask"]);
+		expect(observedCalls[0]?.messageRoles).toEqual(["user"]);
+	});
+
+	it("keeps plan-first guidance ahead of eager todo after enabling the next-session startup default", async () => {
+		await recreateSession({}, {}, { builtInAsk: true, planFirstGuidance: true });
+		session.settings.set("plan.defaultOnStartup", true);
+
+		await session.prompt("Build a project dashboard with authentication and reports");
+
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.toolChoice).toBeUndefined();
+		expect(observedCalls[0]?.messageRoles).toEqual(["user"]);
+	});
+
+	it("keeps eager todo forcing after /clear resets an existing conversation", async () => {
+		await recreateSession({}, {}, { builtInAsk: true, planFirstGuidance: true });
+		await session.prompt("What changed?");
+		expect(observedCalls).toHaveLength(1);
+
+		await session.resetSessionContext();
+		observedCalls.length = 0;
+		await session.prompt("Build a project dashboard with authentication and reports");
+
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.toolChoice).toBe("todo");
+		expect(observedCalls[0]?.messageRoles).toEqual(["developer", "user"]);
+	});
+
+	it("keeps eager todo forcing when the effective prompt omits plan-first guidance", async () => {
+		await recreateSession({}, {}, { builtInAsk: true });
+
+		await session.prompt("Build a project dashboard with authentication and reports");
+
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.toolChoice).toBe("todo");
+		expect(observedCalls[0]?.messageRoles).toEqual(["developer", "user"]);
+	});
+	it("keeps eager todo forcing when before_agent_start removes plan-first guidance", async () => {
+		await recreateSession(
+			{},
+			{},
+			{
+				builtInAsk: true,
+				planFirstGuidance: true,
+				beforeAgentStartSystemPrompt: ["Extension replacement"],
+			},
+		);
+
+		await session.prompt("Build a project dashboard with authentication and reports");
+
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.toolChoice).toBe("todo");
+		expect(observedCalls[0]?.messageRoles).toEqual(["developer", "user"]);
+	});
+
+	it("keeps eager todo forcing when startup plan mode was configured but later cleared", async () => {
+		await recreateSession({ "plan.defaultOnStartup": true }, {}, { builtInAsk: true });
+
+		await session.prompt("Build a project dashboard with authentication and reports");
+
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.toolChoice).toBe("todo");
+		expect(observedCalls[0]?.toolNames).toEqual(["todo", "bash", "ask"]);
+		expect(observedCalls[0]?.messageRoles).toEqual(["developer", "user"]);
+	});
+
+	it("lets plan-first guidance precede external thinking forcing on a fresh interactive session", async () => {
+		await recreateSession(
+			{ externalThinking: true, "todo.eager": "default" },
+			{},
+			{ builtInAsk: true, externalThink: true, planFirstGuidance: true },
+		);
+
+		await session.prompt("Build a project dashboard with authentication and reports");
+
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.toolChoice).toBeUndefined();
+		expect(observedCalls[0]?.toolNames).toEqual(["todo", "bash", "ask", "think"]);
+		expect(observedCalls[0]?.messageRoles).toEqual(["user"]);
+	});
+	it("keeps external thinking forcing when before_agent_start removes plan-first guidance", async () => {
+		await recreateSession(
+			{ externalThinking: true, "todo.eager": "default" },
+			{},
+			{
+				builtInAsk: true,
+				externalThink: true,
+				planFirstGuidance: true,
+				beforeAgentStartSystemPrompt: ["Extension replacement"],
+			},
+		);
+
+		await session.prompt("Build a project dashboard with authentication and reports");
+
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.toolChoice).toBe("think");
+		expect(observedCalls[0]?.messageRoles).toEqual(["user"]);
+	});
+
+	it("does not force external thinking on synthetic turns", async () => {
+		await recreateSession({ externalThinking: true, "todo.eager": "default" }, {}, { externalThink: true });
+
+		await session.prompt("Continue after the approved plan", { synthetic: true });
+
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.toolChoice).toBeUndefined();
+		expect(observedCalls[0]?.messageRoles).toEqual(["developer"]);
+	});
+
+	it("uses an in-flight refreshed base prompt for the next turn", async () => {
+		const rebuildStarted = Promise.withResolvers<void>();
+		const releaseRebuild = Promise.withResolvers<void>();
+		await recreateSession(
+			{},
+			{
+				rebuildSystemPrompt: async () => {
+					rebuildStarted.resolve();
+					await releaseRebuild.promise;
+					return { systemPrompt: ["Test", planFirstSuggestionsPrompt.trim()], xdevCatalogNames: [] };
+				},
+			},
+			{ builtInAsk: true },
+		);
+
+		const apiKeyChecked = Promise.withResolvers<void>();
+		vi.spyOn(session.modelRegistry, "getApiKey").mockImplementation(async () => {
+			apiKeyChecked.resolve();
+			return "test-key";
+		});
+
+		session.settings.set("plan.suggestBeforeSubstantialWork", false);
+		expect(session.settings.get("plan.suggestBeforeSubstantialWork")).toBe(false);
+		session.settings.set("plan.suggestBeforeSubstantialWork", true);
+		expect(session.settings.get("plan.suggestBeforeSubstantialWork")).toBe(true);
+		expect(session.settings.get("plan.enabled")).toBe(true);
+		expect(session.getActiveToolNames()).toContain("ask");
+		expect(session.messages).toHaveLength(0);
+		const refresh = session.refreshBaseSystemPrompt();
+		await rebuildStarted.promise;
+		const prompt = session.prompt("Build a project dashboard with authentication and reports");
+		await apiKeyChecked.promise;
+		for (let turn = 0; turn < 100 && observedCalls.length === 0; turn++) {
+			await scheduler.yield();
+		}
+
+		expect(observedCalls).toHaveLength(0);
+		releaseRebuild.resolve();
+		await Promise.all([refresh, prompt]);
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.toolChoice).toBeUndefined();
 	});
 
 	it("prepends the eager todo reminder without forcing the todo tool when todo.eager is preferred", async () => {

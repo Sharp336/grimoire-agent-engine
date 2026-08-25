@@ -13,6 +13,7 @@ import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TodoTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import planFirstSuggestionsPrompt from "../src/prompts/system/plan-first-suggestions.md" with { type: "text" };
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 type ObservedPromptCall = {
@@ -85,6 +86,7 @@ describe("AgentSession eager task prelude", () => {
 		agentId?: string,
 		taskWireName?: string,
 		agentKind?: "main" | "sub",
+		planFirstGuidance = false,
 	): Harness {
 		const observedCalls: ObservedPromptCall[] = [];
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -117,6 +119,16 @@ describe("AgentSession eager task prelude", () => {
 			parameters: type({}),
 			execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
 		};
+		const optionalTools: AgentTool[] = [];
+		if (planFirstGuidance) {
+			optionalTools.push({
+				name: "ask",
+				label: "Ask",
+				description: "Mock built-in ask tool",
+				parameters: type({}),
+				execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
+			});
+		}
 		const todoEnabled = settings.get("todo.enabled") === true;
 		const toolSession: ToolSession = {
 			cwd: tempDir.path(),
@@ -127,15 +139,15 @@ describe("AgentSession eager task prelude", () => {
 		};
 		const todoTool = todoEnabled ? new TodoTool(toolSession) : undefined;
 		const tools: AgentTool[] = todoTool
-			? [todoTool as unknown as AgentTool, mockTaskTool, mockBashTool]
-			: [mockTaskTool, mockBashTool];
+			? [todoTool as unknown as AgentTool, mockTaskTool, mockBashTool, ...optionalTools]
+			: [mockTaskTool, mockBashTool, ...optionalTools];
 
 		let session: AgentSession;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: {
 				model,
-				systemPrompt: ["Test"],
+				systemPrompt: planFirstGuidance ? ["Test", planFirstSuggestionsPrompt.trim()] : ["Test"],
 				tools,
 				messages: [],
 			},
@@ -164,11 +176,7 @@ describe("AgentSession eager task prelude", () => {
 			},
 		});
 
-		const toolRegistry = new Map<string, AgentTool>([
-			[mockTaskTool.name, mockTaskTool],
-			[mockBashTool.name, mockBashTool],
-		]);
-		if (todoTool) toolRegistry.set(todoTool.name, todoTool as unknown as AgentTool);
+		const toolRegistry = new Map<string, AgentTool>(tools.map(tool => [tool.name, tool]));
 
 		session = new AgentSession({
 			agent,
@@ -178,6 +186,7 @@ describe("AgentSession eager task prelude", () => {
 			toolRegistry,
 			agentId,
 			agentKind,
+			builtInToolNames: planFirstGuidance ? ["ask"] : undefined,
 		});
 
 		const harness = { session, observedCalls, authStorage };
@@ -200,6 +209,23 @@ describe("AgentSession eager task prelude", () => {
 		expect(observedCalls[0]?.messageTexts[0]).not.toContain("refactor the parser across modules");
 	});
 
+	it("lets plan-first guidance own the opening turn before eager task", async () => {
+		const { session, observedCalls } = await createHarness({}, undefined, undefined, undefined, true);
+		const prompt = "Build a project dashboard with authentication and reports";
+
+		await session.prompt(prompt);
+
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]).toEqual({
+			toolChoice: undefined,
+			toolNames: ["task", "bash", "ask"],
+			messageRoles: ["user"],
+			messageTexts: [prompt],
+			lastMessageRole: "user",
+			lastMessageText: prompt,
+		});
+	});
+
 	it("skips eager task prelude for prompts ending with a question mark", async () => {
 		const { session, observedCalls } = createHarness();
 
@@ -218,6 +244,17 @@ describe("AgentSession eager task prelude", () => {
 		expect(observedCalls).toHaveLength(1);
 		expect(observedCalls[0]?.messageRoles).toEqual(["user"]);
 		expect(observedCalls[0]?.messageTexts).toEqual(["refactor the parser now!"]);
+	});
+
+	it("skips eager task prelude for synthetic turns", async () => {
+		const { session, observedCalls } = await createHarness();
+
+		await session.prompt("Continue after the approved plan", { synthetic: true });
+
+		expect(observedCalls).toHaveLength(1);
+		expect(observedCalls[0]?.toolChoice).toBeUndefined();
+		expect(observedCalls[0]?.messageRoles).toEqual(["developer"]);
+		expect(observedCalls[0]?.messageTexts).toEqual(["Continue after the approved plan"]);
 	});
 
 	it("skips eager task prelude for subsequent user messages", async () => {

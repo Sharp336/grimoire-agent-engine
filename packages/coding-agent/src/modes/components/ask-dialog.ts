@@ -95,6 +95,7 @@ interface AskDialogInputGuard {
 interface AskDialogOptions {
 	timeout?: number;
 	onTimeout?: () => void;
+	helpText?: string;
 	tui?: TUI;
 	inputGuard?: AskDialogInputGuard;
 }
@@ -483,12 +484,13 @@ export class AskDialogComponent implements Component {
 		// outgrows it scrolls.
 		const totalRows = this.#dialogHeight(innerWidth, process.stdout.rows || 40);
 		const headerLines = this.#renderHeader(innerWidth);
-		// topBorder(1) + header(N) + divider(1) + divider(1) + footer(1) +
-		// bottomBorder(1) = N + 5 fixed rows outside the body. Without the
-		// bottomBorder term the dialog overflowed the viewport by one row
-		// (PRRT_kwDOQxs0bc6OFbDY).
-		const fixedRows = 1 + headerLines.length + 1 + 1 + 1 + 1;
-		const bodyRows = Math.max(MIN_BODY_ROWS, totalRows - fixedRows);
+		const helpText = this.#renderHelpText(innerWidth);
+		// topBorder(1) + header(N) + divider(1) + divider(1) +
+		// keyboardFooter(1) + optionalHelpFooter(0|1) + bottomBorder(1)
+		// = N + 5|6 fixed rows outside the body.
+		const fixedRows = headerLines.length + (helpText === undefined ? 5 : 6);
+		// MIN_BODY_ROWS sizes the natural panel; the terminal-height cap wins here.
+		const bodyRows = Math.max(1, totalRows - fixedRows);
 		this.#bodyRows = bodyRows;
 		const bodyLines = this.#isSubmitTab()
 			? this.#renderSubmitBody(innerWidth, bodyRows)
@@ -501,6 +503,7 @@ export class AskDialogComponent implements Component {
 			...bodyLines.lines.map(line => row(line, width)),
 			divider(width),
 			row(theme.fg("dim", footer), width),
+			...(helpText === undefined ? [] : [row(theme.fg("dim", helpText), width)]),
 			bottomBorder(width),
 		];
 	}
@@ -519,7 +522,7 @@ export class AskDialogComponent implements Component {
 	 *  size is stable for the dialog's lifetime at a given terminal size. */
 	#measureHeight(width: number, termRows: number): number {
 		const maxHeight = Math.max(MIN_DIALOG_ROWS, Math.floor(termRows * DIALOG_HEIGHT_RATIO));
-		const chrome = 5; // topBorder + divider + divider + footer + bottomBorder
+		const chrome = this.options.helpText === undefined ? 5 : 6;
 		const tabBarRows = this.#hasSubmitTab() ? 1 : 0;
 		const mdTheme = getMarkdownTheme();
 		let needed = MIN_DIALOG_ROWS;
@@ -598,6 +601,11 @@ export class AskDialogComponent implements Component {
 		if (!question) return lines;
 		lines.push(...renderQuestionTitle(question, width));
 		return lines;
+	}
+
+	#renderHelpText(width: number): string | undefined {
+		if (this.options.helpText === undefined) return undefined;
+		return truncateToWidth(normalizedInlineInput(this.options.helpText), Math.max(1, width), Ellipsis.Unicode);
 	}
 
 	#footerHintText(indicator: string): string {

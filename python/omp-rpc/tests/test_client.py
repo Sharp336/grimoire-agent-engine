@@ -14,6 +14,7 @@ import unittest
 
 from omp_rpc import (
     AgentEndEvent,
+    NewSessionResult,
     RpcClient,
     RpcCommandError,
     RpcConcurrencyError,
@@ -389,7 +390,11 @@ FAKE_SERVER = textwrap.dedent(
         elif command_type == "export_html":
             respond(request_id, "export_html", {"path": command.get("outputPath") or "/tmp/session.html"})
         elif command_type == "new_session":
-            respond(request_id, "new_session", {"cancelled": False})
+            respond(
+                request_id,
+                "new_session",
+                {"cancelled": False, "postCommitError": "model restore failed"},
+            )
         elif command_type == "switch_session":
             respond(request_id, "switch_session", {"cancelled": False})
         elif command_type == "branch":
@@ -1196,6 +1201,8 @@ class RpcClientTests(unittest.TestCase):
             self.assertEqual(str(exported), "/tmp/custom.html")
 
             new_session = client.new_session()
+            self.assertIsInstance(new_session, NewSessionResult)
+            self.assertEqual(new_session.post_commit_error, "model restore failed")
             switched = client.switch_session("/tmp/session.jsonl")
             self.assertFalse(new_session.cancelled)
             self.assertFalse(switched.cancelled)

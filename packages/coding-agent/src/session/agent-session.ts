@@ -169,6 +169,7 @@ import goalTodoContextPrompt from "../prompts/goals/goal-todo-context.md" with {
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import checkpointActiveNoticeTemplate from "../prompts/system/checkpoint-active-notice.md" with { type: "text" };
 import interruptedThinkingTemplate from "../prompts/system/interrupted-thinking.md" with { type: "text" };
+import planFirstSuggestionsPrompt from "../prompts/system/plan-first-suggestions.md" with { type: "text" };
 import planModeActivePrompt from "../prompts/system/plan-mode-active.md" with { type: "text" };
 import planModeReferencePrompt from "../prompts/system/plan-mode-reference.md" with { type: "text" };
 import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool-decision-reminder.md" with {
@@ -195,7 +196,7 @@ import { isLowSignalTitleInput } from "../tiny/text";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
 import type { ImageAttachmentEntry } from "../tools";
 import { resolveApproval } from "../tools/approval";
-import { type AskToolDetails, type AskToolInput, recoverAskQuestions } from "../tools/ask";
+import { type AskToolDetails, type AskToolInput, recoverAskInput } from "../tools/ask";
 import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
 import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
@@ -222,28 +223,30 @@ import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
 import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events";
-import type {
-	AgentSessionConfig,
-	AgentSessionDisposeOptions,
-	AsyncJobSnapshot,
-	CommandMetadataChangedListener,
-	ContextUsageBreakdown,
-	DroppedPrompt,
-	FollowUpOptions,
-	FreshSessionResult,
-	HandoffResult,
-	ModelCycleResult,
-	Prewalk,
-	PromptOptions,
-	ResetSessionContextResult,
-	ResolvedRoleModel,
-	RestoredQueuedMessage,
-	RoleModelCycle,
-	RoleModelCycleResult,
-	SessionHandoffOptions,
-	SessionOAuthAccountList,
-	SessionStats,
-	UsageFallbackConfirmer,
+import {
+	type AgentSessionConfig,
+	type AgentSessionDisposeOptions,
+	type AsyncJobSnapshot,
+	type CommandMetadataChangedListener,
+	CommittedNewSessionTransitionError,
+	CommittedResetSessionContextError,
+	type ContextUsageBreakdown,
+	type DroppedPrompt,
+	type FollowUpOptions,
+	type FreshSessionResult,
+	type HandoffResult,
+	type ModelCycleResult,
+	type Prewalk,
+	type PromptOptions,
+	type ResetSessionContextResult,
+	type ResolvedRoleModel,
+	type RestoredQueuedMessage,
+	type RoleModelCycle,
+	type RoleModelCycleResult,
+	type SessionHandoffOptions,
+	type SessionOAuthAccountList,
+	type SessionStats,
+	type UsageFallbackConfirmer,
 } from "./agent-session-types";
 import { writeArtifact } from "./artifacts";
 import {
@@ -253,7 +256,7 @@ import {
 	type AsyncResultEntry,
 	buildAsyncResultBatchMessage,
 } from "./async-job-delivery";
-import { BashRunner, type BashRunnerHost } from "./bash-runner";
+import { BashRunner, type BashRunnerHost, type BashSessionTransition } from "./bash-runner";
 import {
 	checkpointStartedAtFromEntry,
 	completedRewindFromEntry,
@@ -330,8 +333,12 @@ import {
 } from "./queued-messages";
 import type { ServingModel } from "./retry-fallback-chains";
 import { type AdvisorStats, SessionAdvisors, type SessionAdvisorsHost } from "./session-advisors";
-import type { BuildSessionContextOptions, SessionContext } from "./session-context";
-import { getRestorableSessionModels } from "./session-context";
+import {
+	type BuildSessionContextOptions,
+	getRestorableSessionModels,
+	isFreshSessionContext,
+	type SessionContext,
+} from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
 import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
@@ -512,6 +519,10 @@ export class AgentSession {
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	#pendingNextTurnMessages: CustomMessage[] = [];
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
+	/** Monotonic owner token for a committed reset's prompt-refresh obligation. */
+	#resetContextPromptRefreshGeneration = 0;
+	#resetContextPromptRefreshPendingGeneration: number | undefined;
+	#resetContextPromptRefreshInFlight: Promise<void> | undefined;
 	#queuedMessageDrainScheduled = false;
 	#planModeState: PlanModeState | undefined;
 	/** Session-scoped `/vision` override; undefined = follow persisted `inspect_image.mode`. */
@@ -625,7 +636,7 @@ export class AgentSession {
 	#usagePreflightReadyForNextModelCall = false;
 	#usagePreflightReadyModel: Model | undefined;
 	#detachUsageBeforeQueueDequeue: (() => void) | undefined;
-	#detachUsageBeforeModelCall: (() => void) | undefined;
+	#detachBeforeModelCall: (() => void) | undefined;
 
 	#transformContext: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	#onPayload: SimpleStreamOptions["onPayload"] | undefined;
@@ -1042,13 +1053,19 @@ export class AgentSession {
 			configuredThinkingLevel: () => this.configuredThinkingLevel(),
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			setModelTemporary: (model, thinkingLevel, options) => this.setModelTemporary(model, thinkingLevel, options),
-			setActiveToolsByName: names => this.setActiveToolsByName(names),
-			setActiveToolPresentation: (toolNames, mountedToolNames) =>
-				this.setActiveToolPresentation(toolNames, mountedToolNames),
+			setActiveToolPresentation: (toolNames, mountedToolNames, forcePromptRefresh, forceMountedPartition) =>
+				this.setActiveToolPresentation(
+					toolNames,
+					mountedToolNames,
+					forcePromptRefresh,
+					undefined,
+					forceMountedPartition,
+				),
 			runToolRegistryMutation: mutation => this.runToolRegistryMutation(mutation),
 			getActiveToolNames: () => this.getActiveToolNames(),
 			getEnabledToolNames: () => this.getEnabledToolNames(),
 			getSelectedMCPToolNames: () => this.getSelectedMCPToolNames(),
+			getSelectedMCPToolPresentation: () => this.getSelectedMCPToolPresentation(),
 			getMountedXdevToolNames: () => this.getMountedXdevToolNames(),
 			hasBuiltInTool: name => this.hasBuiltInTool(name),
 			getPlanModeState: () => this.getPlanModeState(),
@@ -1157,7 +1174,11 @@ export class AgentSession {
 				throw new DOMException("Usage preflight cancelled", "AbortError");
 			}
 		});
-		this.#detachUsageBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
+		this.#detachBeforeModelCall = this.agent.addBeforeModelCallHook(async signal => {
+			// This is the lowest shared boundary for user prompts, agent-initiated
+			// prompts, scheduled/direct continuations, recovery, and idle yield
+			// injection. It runs before Agent re-reads state.systemPrompt.
+			await this.#ensureResetContextPromptRefresh(signal);
 			if (!this.settings.get("retry.usageAwareFallback")) return;
 			if (this.#usagePreflightReadyForNextModelCall) {
 				const checkedModel = this.#usagePreflightReadyModel;
@@ -1782,6 +1803,17 @@ export class AgentSession {
 
 	setSessionSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
 		this.#sessionSwitchReconciler = reconciler ?? undefined;
+	}
+
+	/**
+	 * Optional UI reconciliation at the AgentSession new-session boundary.
+	 * Headless callers leave this unset. InteractiveMode installs one callback,
+	 * so every interactive caller observes the same committed/failed outcome.
+	 */
+	#newSessionTransitionReconciler: ((outcome: { committed: boolean }) => Promise<void>) | undefined;
+
+	setNewSessionTransitionReconciler(reconciler: ((outcome: { committed: boolean }) => Promise<void>) | null): void {
+		this.#newSessionTransitionReconciler = reconciler ?? undefined;
 	}
 
 	/** Provider-scoped mutable state store for transport/session caches. */
@@ -4017,8 +4049,8 @@ export class AgentSession {
 		this.#usagePreflightReadyForNextModelCall = false;
 		this.#detachUsageBeforeQueueDequeue?.();
 		this.#detachUsageBeforeQueueDequeue = undefined;
-		this.#detachUsageBeforeModelCall?.();
-		this.#detachUsageBeforeModelCall = undefined;
+		this.#detachBeforeModelCall?.();
+		this.#detachBeforeModelCall = undefined;
 		this.#memory.cancelLocalMemoryStartup();
 		this.#titleGenerationAbortController.abort();
 		this.#abortAutolearnCapture();
@@ -4330,6 +4362,7 @@ export class AgentSession {
 	 *
 	 * Returns `undefined` without mutating anything while a response is
 	 * streaming or a foreground bash/python execution is in flight.
+	 * @throws {CommittedResetSessionContextError} when the reset committed but post-commit work failed
 	 */
 	async resetSessionContext(): Promise<ResetSessionContextResult | undefined> {
 		// Refuse while a response streams OR a foreground user bash/python
@@ -4355,59 +4388,71 @@ export class AgentSession {
 		await this.#cancelPostPromptTasks();
 		this.#cancelOwnAsyncJobs();
 
-		// Drop the conversation: messages, queued steers/follow-ups, pending tool
-		// calls, and error state. agent.reset() keeps the model and system prompt.
-		this.agent.reset();
-		this.#pendingNextTurnMessages = [];
-		this.#scheduledHiddenNextTurnGeneration = undefined;
-		// Reset the session_stop continuation chain: the queued continuation
-		// message is gone with the conversation, but the counters would otherwise
-		// carry over, so the next post-reset turn is reported to hooks as part of
-		// the old chain and can hit SESSION_STOP_CONTINUATION_CAP early (mirrors
-		// abort()/newSession()).
-		this.#resetSessionStopContinuationState();
+		let committed = false;
+		try {
+			// Drop the conversation: messages, queued steers/follow-ups, pending tool
+			// calls, and error state. agent.reset() keeps the model and system prompt.
+			this.agent.reset();
+			committed = true;
+			this.#resetContextPromptRefreshPendingGeneration = ++this.#resetContextPromptRefreshGeneration;
+			const result = { droppedCount };
+			this.#pendingNextTurnMessages = [];
+			this.#scheduledHiddenNextTurnGeneration = undefined;
+			// Reset the session_stop continuation chain: the queued continuation
+			// message is gone with the conversation, but the counters would otherwise
+			// carry over, so the next post-reset turn is reported to hooks as part of
+			// the old chain and can hit SESSION_STOP_CONTINUATION_CAP early (mirrors
+			// abort()/newSession()).
+			this.#resetSessionStopContinuationState();
 
-		// Drop checkpoint/rewind runtime state and deferred tool directives
-		// alongside the messages that carried them: the checkpoint tool result is
-		// gone from agent.state, so an intact #checkpointState would otherwise
-		// force a rewind onto the pre-reset transcript on the next turn (mirrors
-		// newSession()).
-		this.#clearCheckpointRuntimeState();
-		this.#clearSessionScopedToolState();
+			// Drop checkpoint/rewind runtime state and deferred tool directives
+			// alongside the messages that carried them: the checkpoint tool result is
+			// gone from agent.state, so an intact #checkpointState would otherwise
+			// force a rewind onto the pre-reset transcript on the next turn (mirrors
+			// newSession()).
+			this.#clearCheckpointRuntimeState();
+			this.#clearSessionScopedToolState();
 
-		// Rotate provider-side session state so a provider that keeps conversation
-		// history server-side starts a brand-new exchange rather than resuming the
-		// context we just dropped (mirrors freshSession()).
-		this.#closeAllProviderSessions("reset context");
-		this.#freshProviderSessionId = Bun.randomUUIDv7();
-		this.#syncAgentSessionId();
-		this.#memory.rekeyForCurrentSessionId();
-		this.agent.appendOnlyContext?.invalidateForModelChange();
+			// Rotate provider-side session state so a provider that keeps conversation
+			// history server-side starts a brand-new exchange rather than resuming the
+			// context we just dropped (mirrors freshSession()).
+			this.#closeAllProviderSessions("reset context");
+			this.#freshProviderSessionId = Bun.randomUUIDv7();
+			this.#syncAgentSessionId();
+			this.#memory.rekeyForCurrentSessionId();
+			this.agent.appendOnlyContext?.invalidateForModelChange();
 
-		// Re-arm the approved-plan reference: the reset dropped the plan-approved
-		// prompt/reference from agent.state, so mark it unsent (preserving the
-		// path — the plan file on disk is still the active plan) to let
-		// #buildPlanReferenceMessage re-read and re-inject it on the next turn.
-		// Mirrors the sent-flag reset newSession() and compaction perform after a
-		// history rewrite (issue #1246).
-		this.#planReferenceSent = false;
+			// Re-arm the approved-plan reference: the reset dropped the plan-approved
+			// prompt/reference from agent.state, so mark it unsent (preserving the
+			// path — the plan file on disk is still the active plan) to let
+			// #buildPlanReferenceMessage re-read and re-inject it on the next turn.
+			// Mirrors the sent-flag reset newSession() and compaction perform after a
+			// history rewrite (issue #1246).
+			this.#planReferenceSent = false;
 
-		// Re-prime the advisors across the conversation boundary and undo any
-		// memory promotion so the next turn rebuilds from the base system prompt.
-		this.#advisors.resetSessionState();
-		await this.#memory.resetContextForNewTranscript();
+			// Record the durable boundary before any reset work that can rebuild the
+			// base prompt. The collapsed live transcript and model context start after
+			// the latest boundary, while the on-disk record and transcript:true export
+			// keep the full pre-reset history.
+			this.sessionManager.appendResetBoundary();
 
-		// Record a durable boundary on the persisted branch. The collapsed live
-		// transcript and the model-context rebuild start emission after the latest
-		// boundary, so a rebuild across a `/clear` (theme change, focus attach,
-		// on-disk record and the plain `transcript:true` export path keep the full
-		// pre-reset history.
-		this.sessionManager.appendResetBoundary();
-
-		resetCapabilities();
-		await this.refreshBaseSystemPrompt();
-
-		return { droppedCount };
+			// Re-prime the advisors, undo memory promotion, then rebuild even when the
+			// selected memory backend performs no prompt refresh. agent.reset() keeps
+			// the old system prompt, so /clear must explicitly remove first-turn-only
+			// guidance before it returns. Reset capability discovery before memory can
+			// trigger that rebuild so the refreshed prompt observes current context files.
+			this.#advisors.resetSessionState();
+			resetCapabilities();
+			await this.#memory.resetContextForNewTranscript();
+			await this.#ensureResetContextPromptRefresh();
+			return result;
+		} catch (error) {
+			if (!committed) throw error;
+			const result = { droppedCount };
+			throw error instanceof CommittedResetSessionContextError
+				? error
+				: new CommittedResetSessionContextError(result, error);
+		}
 	}
 
 	// =========================================================================
@@ -4758,6 +4803,11 @@ export class AgentSession {
 		return this.#tools.getSelectedMCPToolNames();
 	}
 
+	/** Enabled MCP tools partitioned from their current load-mode metadata. */
+	getSelectedMCPToolPresentation(): { enabled: string[]; mounted: string[] } {
+		return this.#tools.getSelectedMCPToolPresentation();
+	}
+
 	#applyActiveToolsByName(toolNames: string[]): Promise<void> {
 		return this.#tools.applyActiveToolsByName(toolNames);
 	}
@@ -4801,8 +4851,15 @@ export class AgentSession {
 		mountedToolNames: string[],
 		forcePromptRefresh = false,
 		signal?: AbortSignal,
+		forceMountedPartition = false,
 	): Promise<void> {
-		return this.#tools.setActiveToolPresentation(toolNames, mountedToolNames, forcePromptRefresh, signal);
+		return this.#tools.setActiveToolPresentation(
+			toolNames,
+			mountedToolNames,
+			forcePromptRefresh,
+			signal,
+			forceMountedPartition,
+		);
 	}
 
 	/**
@@ -4873,8 +4930,37 @@ export class AgentSession {
 	}
 
 	/** Rebuilds the stable base prompt for the current tools and model. */
-	refreshBaseSystemPrompt(): Promise<void> {
-		return this.#tools.refreshBaseSystemPrompt();
+	async refreshBaseSystemPrompt(): Promise<void> {
+		const resetGeneration = this.#resetContextPromptRefreshPendingGeneration;
+		await this.#tools.refreshBaseSystemPrompt();
+		if (resetGeneration !== undefined && this.#resetContextPromptRefreshPendingGeneration === resetGeneration) {
+			this.#resetContextPromptRefreshPendingGeneration = undefined;
+		}
+	}
+
+	/**
+	 * Satisfies a committed reset's prompt-refresh obligation exactly once for
+	 * all provider entry paths. A failed attempt leaves the obligation pending;
+	 * concurrent callers share the same attempt for a generation instead of
+	 * queueing duplicate rebuilds.
+	 */
+	async #ensureResetContextPromptRefresh(signal?: AbortSignal): Promise<void> {
+		while (this.#resetContextPromptRefreshPendingGeneration !== undefined) {
+			signal?.throwIfAborted();
+			let attempt = this.#resetContextPromptRefreshInFlight;
+			if (!attempt) {
+				attempt = this.refreshBaseSystemPrompt();
+				this.#resetContextPromptRefreshInFlight = attempt;
+			}
+			try {
+				await attempt;
+			} finally {
+				if (this.#resetContextPromptRefreshInFlight === attempt) {
+					this.#resetContextPromptRefreshInFlight = undefined;
+				}
+			}
+		}
+		signal?.throwIfAborted();
 	}
 
 	#buildSystemPromptForAgentStart(promptText: string): Promise<string[]> {
@@ -5611,21 +5697,6 @@ export class AgentSession {
 			return true;
 		}
 
-		// Skip eager preludes when the user has already queued a directive
-		const hasPendingUserDirective = this.#toolChoiceQueue.inspect().includes("user-force");
-		const activeModel = this.agent.state.model;
-		const externalThinkingToolChoice =
-			!options?.synthetic &&
-			!hasPendingUserDirective &&
-			this.settings.get("externalThinking") &&
-			this.getEnabledToolNames().includes("think") &&
-			supportsExternalThinking(activeModel)
-				? buildNamedToolChoice("think", activeModel)
-				: undefined;
-		const eagerTodoPrelude =
-			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTodoPrelude(expandedText) : undefined;
-		const eagerTaskPrelude =
-			!options?.synthetic && !hasPendingUserDirective ? this.#todo.createEagerTaskPrelude(expandedText) : undefined;
 		const normalizedImages = await this.#normalizeImagesForModel(options?.images);
 
 		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
@@ -5639,37 +5710,19 @@ export class AgentSession {
 			: undefined;
 
 		const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
-		if (externalThinkingToolChoice) {
-			this.#toolChoiceQueue.pushOnce(externalThinkingToolChoice, {
-				label: "external-thinking",
-				now: true,
-			});
-		}
 		const message = options?.synthetic
 			? { role: "developer" as const, content: userContent, attribution: promptAttribution, timestamp: Date.now() }
 			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: Date.now() };
 
-		const preludeMessages: AgentMessage[] = [];
-		if (eagerTodoPrelude) {
-			if (eagerTodoPrelude.toolChoice) {
-				this.#toolChoiceQueue.pushOnce(eagerTodoPrelude.toolChoice, {
-					label: "eager-todo",
-				});
-			}
-			preludeMessages.push(eagerTodoPrelude.message);
-		}
-		if (eagerTaskPrelude) {
-			preludeMessages.push(eagerTaskPrelude);
-		}
-
 		let dispatched = false;
+
 		try {
 			dispatched = await this.#promptWithMessage(message, expandedText, {
 				...options,
 				images: normalizedImages,
 				prependMessages:
-					preludeMessages.length > 0 || keywordNotices.length > 0 || imageDescriptionNotice
-						? [...preludeMessages, ...keywordNotices, ...(imageDescriptionNotice ? [imageDescriptionNotice] : [])]
+					keywordNotices.length > 0 || imageDescriptionNotice
+						? [...keywordNotices, ...(imageDescriptionNotice ? [imageDescriptionNotice] : [])]
 						: undefined,
 			});
 		} finally {
@@ -5820,7 +5873,7 @@ export class AgentSession {
 
 			await this.#prewalk.armPlanYoloIfNeeded();
 
-			// Build messages array (session context, eager todo prelude, then active prompt message)
+			// Build messages array (session context, turn preludes, then active prompt message)
 			const messages: AgentMessage[] = [];
 			const planReferenceMessage = await this.#buildPlanReferenceMessage?.();
 			if (planReferenceMessage) {
@@ -5838,6 +5891,7 @@ export class AgentSession {
 			if (vibeModeMessage) {
 				messages.push(vibeModeMessage);
 			}
+			const turnPreludeMessageIndex = messages.length;
 			if (options?.prependMessages) {
 				messages.push(...options.prependMessages);
 			}
@@ -5852,7 +5906,7 @@ export class AgentSession {
 			// never an agent-initiated continuation. Reserve its pre-user position,
 			// but consume it only after before_agent_start determines whether the
 			// final provider prompt still carries the base xd:// catalog.
-			const xdevMountNoticeIndex = messages.length;
+			let xdevMountNoticeIndex = messages.length;
 			messages.push(message);
 			// Inject any pending "nextTurn" messages as context alongside the user message
 			for (const msg of this.#pendingNextTurnMessages) {
@@ -5882,6 +5936,7 @@ export class AgentSession {
 			await this.#memory.transition;
 			if ((this.#isDisposed && !disposingBeforeTransition) || this.#promptGeneration !== generation) return false;
 			const beforeAgentStartSystemPrompt = await this.#buildSystemPromptForAgentStart(expandedText);
+			let finalTurnSystemPrompt = beforeAgentStartSystemPrompt;
 
 			let baseXdevCatalogDelivered = true;
 			// Emit before_agent_start extension event
@@ -5920,6 +5975,7 @@ export class AgentSession {
 				if (result?.systemPrompt !== undefined) {
 					baseXdevCatalogDelivered = false;
 					this.#tools.setTurnSystemPromptOverride(result.systemPrompt);
+					finalTurnSystemPrompt = result.systemPrompt;
 				} else {
 					this.#tools.clearTurnSystemPromptOverride();
 					this.agent.setSystemPrompt(beforeAgentStartSystemPrompt);
@@ -5927,6 +5983,61 @@ export class AgentSession {
 			} else {
 				this.#tools.clearTurnSystemPromptOverride();
 				this.agent.setSystemPrompt(beforeAgentStartSystemPrompt);
+			}
+
+			// Resolve plan-first precedence from the prompt that will reach the
+			// provider. A before_agent_start replacement can remove the base
+			// guidance, in which case eager todo, eager task, or external thinking
+			// must retain the first turn instead of all three being suppressed.
+			const userTurn = message.role === "user";
+			const turnHasPendingUserDirective = this.#toolChoiceQueue.inspect().includes("user-force");
+			const currentSessionIsFresh = isFreshSessionContext(this.messages, this.sessionManager.getBranch());
+			const planFirstSuggestionHasPriority =
+				finalTurnSystemPrompt.some(part => part.includes(planFirstSuggestionsPrompt.trim())) &&
+				this.#agentKind === "main" &&
+				currentSessionIsFresh &&
+				!this.#planModeState?.enabled &&
+				this.settings.get("plan.suggestBeforeSubstantialWork") &&
+				this.settings.get("plan.enabled") &&
+				this.#tools.hasBuiltInTool("ask") &&
+				this.getActiveToolNames().includes("ask");
+			const activeModel = this.agent.state.model;
+			const externalThinkingToolChoice =
+				userTurn &&
+				!planFirstSuggestionHasPriority &&
+				!turnHasPendingUserDirective &&
+				this.settings.get("externalThinking") &&
+				this.getEnabledToolNames().includes("think") &&
+				supportsExternalThinking(activeModel)
+					? buildNamedToolChoice("think", activeModel)
+					: undefined;
+			if (externalThinkingToolChoice) {
+				this.#toolChoiceQueue.pushOnce(externalThinkingToolChoice, {
+					label: "external-thinking",
+					now: true,
+				});
+			}
+			const eagerTodoPrelude =
+				userTurn && !planFirstSuggestionHasPriority && !turnHasPendingUserDirective
+					? this.#todo.createEagerTodoPrelude(expandedText)
+					: undefined;
+			const eagerTaskPrelude =
+				userTurn && !planFirstSuggestionHasPriority && !turnHasPendingUserDirective
+					? this.#todo.createEagerTaskPrelude(expandedText)
+					: undefined;
+			if (eagerTodoPrelude) {
+				if (eagerTodoPrelude.toolChoice) {
+					this.#toolChoiceQueue.pushOnce(eagerTodoPrelude.toolChoice, {
+						label: "eager-todo",
+					});
+				}
+				messages.splice(turnPreludeMessageIndex, 0, eagerTodoPrelude.message);
+				xdevMountNoticeIndex++;
+			}
+			if (eagerTaskPrelude) {
+				const eagerTaskMessageIndex = turnPreludeMessageIndex + (eagerTodoPrelude ? 1 : 0);
+				messages.splice(eagerTaskMessageIndex, 0, eagerTaskPrelude);
+				xdevMountNoticeIndex++;
 			}
 
 			// Bail out if a newer abort/prompt cycle has started since we began setup
@@ -6993,6 +7104,7 @@ export class AgentSession {
 	 * Listeners are preserved and will continue receiving events.
 	 * @param options - Optional initial messages and parent session path
 	 * @returns true if completed, false if cancelled by hook
+	 * @throws {CommittedNewSessionTransitionError} when the replacement committed but post-commit work failed
 	 */
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("start a new session");
@@ -7010,18 +7122,30 @@ export class AgentSession {
 			}
 		}
 
-		this.#disconnectFromAgent();
 		let advisorRecordersDetached = false;
-		await this.abort();
-		this.#cancelOwnAsyncJobs();
-		this.#closeAllProviderSessions("new session");
-		await this.#bash.flushPending();
-		const bashTransition = this.#bash.beginSessionTransition({ persistDetached: options?.drop !== true });
+		let bashTransition: BashSessionTransition | undefined;
 		let sessionTransitioned = false;
+		let committedPlanYoloResetError: unknown;
+		let committedReconcileError: unknown;
+		let committedReconcileFailed = false;
+		let previousAgentMessages: AgentMessage[] | undefined;
+		let reconciliationAttempted = false;
+		const reconcileNewSessionTransition = async (committed: boolean): Promise<void> => {
+			if (reconciliationAttempted) return;
+			reconciliationAttempted = true;
+			await this.#newSessionTransitionReconciler?.({ committed });
+		};
 		try {
+			this.#disconnectFromAgent();
+			await this.abort();
+			this.#cancelOwnAsyncJobs();
+			this.#closeAllProviderSessions("new session");
+			await this.#bash.flushPending();
+			bashTransition = this.#bash.beginSessionTransition({ persistDetached: options?.drop !== true });
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
 			try {
+				previousAgentMessages = this.agent.state.messages.slice();
 				this.agent.reset();
 				if (options?.drop && previousSessionFile) {
 					try {
@@ -7036,14 +7160,32 @@ export class AgentSession {
 					...options,
 					additionalDirectories: this.settings.get("workspace.additionalDirectories"),
 				});
+				sessionTransitioned = true;
+				previousAgentMessages = undefined;
 				this.#bash.markSessionTransition(bashTransition);
 				// The new session owns the transcript from here, so the previous
 				// conversation's advisor spend is retired with it. Clearing at the commit
 				// point keeps the status line honest even if a later step below throws.
 				this.#advisors.clearCost();
-				sessionTransitioned = true;
+				// The session manager has committed the replacement transcript.
+				// Transient plan and goal states belong to the outgoing transcript. Clear them only
+				// after the session manager commits the replacement. A pre-commit failure
+				// keeps the outgoing session's post-abort mode state in place.
+				try {
+					await this.#prewalk.resetPlanYoloForNewSession();
+				} catch (error) {
+					committedPlanYoloResetError = error;
+				}
+				this.setPlanModeState(undefined);
+				this.setPlanProposalHandler(null);
+				this.setGoalModeState(undefined);
+				this.#goalRuntime.clearAccounting();
+				this.#goalTurnCounter = 0;
 			} finally {
-				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
+				if (bashTransition) {
+					this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
+					bashTransition = undefined;
+				}
 			}
 
 			this.#clearSessionScopedToolState();
@@ -7077,6 +7219,12 @@ export class AgentSession {
 			// turn goes out.
 			resetCapabilities();
 			await this.refreshBaseSystemPrompt();
+			try {
+				await reconcileNewSessionTransition(true);
+			} catch (error) {
+				committedReconcileError = error;
+				committedReconcileFailed = true;
+			}
 
 			// Emit session_switch event with reason "new" to hooks
 			if (this.#extensionRunner) {
@@ -7086,13 +7234,37 @@ export class AgentSession {
 					previousSessionFile,
 				});
 			}
-
+			if (committedReconcileFailed) throw committedReconcileError;
+			if (committedPlanYoloResetError) throw committedPlanYoloResetError;
 			return true;
+		} catch (error) {
+			if (!sessionTransitioned && previousAgentMessages) {
+				this.agent.replaceMessages(previousAgentMessages);
+			}
+			if (this.#newSessionTransitionReconciler) {
+				try {
+					await reconcileNewSessionTransition(sessionTransitioned);
+				} catch (reconcileError) {
+					logger.warn("Failed to reconcile mode after new session failure", {
+						error: String(reconcileError),
+					});
+				}
+			}
+			if (sessionTransitioned) {
+				throw error instanceof CommittedNewSessionTransitionError
+					? error
+					: new CommittedNewSessionTransitionError(error);
+			}
+			throw error;
 		} finally {
 			if (advisorRecordersDetached) {
 				if (sessionTransitioned) this.#advisors.resetSessionState();
 				else this.#advisors.reattachRecorderFeeds();
 			}
+			if (bashTransition && !sessionTransitioned) {
+				this.#bash.finishSessionTransition(bashTransition, false);
+			}
+			this.#reconnectToAgent();
 		}
 	}
 
@@ -8645,12 +8817,17 @@ export class AgentSession {
 		/**
 		 * Set when `targetId` is an `ask` toolResult, `options.allowAskReopen`
 		 * was set, and `options.reanswerAskResult` was not supplied: nothing was
-		 * mutated. The caller must re-open the ask picker with these
-		 * `questions`, then call `navigateTree(targetId, { ...options,
+		 * mutated. The caller must re-open the ask picker with the validated
+		 * `input`, then call `navigateTree(targetId, { ...options,
 		 * reanswerAskResult })` with the produced result to actually branch
 		 * (issue #5642).
 		 */
-		reopenAsk?: { toolCallId: string; questions: AskToolInput["questions"] };
+		reopenAsk?: {
+			toolCallId: string;
+			input: AskToolInput;
+			/** Original questions retained for callers that only consume this established field. */
+			questions: AskToolInput["questions"];
+		};
 		/**
 		 * `true` when this call committed a new sibling answer for an `ask`
 		 * re-answer (`reanswerAskResult` was applied). The interactive caller
@@ -8703,9 +8880,9 @@ export class AgentSession {
 			targetEntry.message.toolName === "ask"
 		) {
 			const toolCallId = targetEntry.message.toolCallId;
-			const questions = this.#recoverAskReanswerQuestions(targetEntry.parentId, toolCallId);
-			if (questions) {
-				return { cancelled: false, reopenAsk: { toolCallId, questions } };
+			const input = this.#recoverAskReanswerInput(targetEntry.parentId, toolCallId);
+			if (input) {
+				return { cancelled: false, reopenAsk: { toolCallId, input, questions: input.questions } };
 			}
 			// Original arguments couldn't be recovered (corrupted/legacy session
 			// data) — fall through to a plain leaf move so navigation still works.
@@ -8952,20 +9129,17 @@ export class AgentSession {
 
 	/**
 	 * Look up the `ask` toolCall's persisted `arguments` and validate them
-	 * back into `questions`, for `/tree` `ask` re-answer (issue #5642). Walks
-	 * up from the toolResult's parent past any interleaved ancestor entries
-	 * — sibling toolResults from other tool calls in the same turn (`ask`
-	 * runs `exclusive`, which only serializes *execution*, not persistence
-	 * order — roboomp review on #5895), and bookkeeping entries such as the
-	 * `tool_execution_start` custom entry `#recordToolExecutionStart()`
-	 * appends before every toolResult in real persisted sessions (chatgpt-codex
-	 * review on #5895) — until it finds the assistant entry that actually
-	 * emitted `toolCallId`. Stops at a `user` message (turn boundary) or a
-	 * dead end. Returns `undefined` when no ancestor entry holds a matching
-	 * `ask` toolCall, or the arguments can't be resolved — the caller falls
-	 * back to a plain leaf move rather than opening a picker with bad data.
+	 * back into a complete input for `/tree` re-answer (issue #5642). Walks up
+	 * from the toolResult's parent past any interleaved ancestor entries —
+	 * sibling toolResults from other tool calls in the same turn (`ask` runs
+	 * `exclusive`, which only serializes execution, not persistence order) and
+	 * bookkeeping entries such as `tool_execution_start` — until it finds the
+	 * assistant entry that emitted `toolCallId`. Stops at a `user` message
+	 * (turn boundary) or a dead end. Returns `undefined` when no ancestor holds
+	 * a matching `ask` toolCall or its arguments fail validation, so callers
+	 * fall back to a plain leaf move.
 	 */
-	#recoverAskReanswerQuestions(parentId: string | null, toolCallId: string): AskToolInput["questions"] | undefined {
+	#recoverAskReanswerInput(parentId: string | null, toolCallId: string): AskToolInput | undefined {
 		let current = parentId;
 		while (current !== null) {
 			const entry = this.sessionManager.getEntry(current);
@@ -8980,7 +9154,7 @@ export class AgentSession {
 					const args = this.#obfuscator?.hasSecrets()
 						? deobfuscateToolArguments(this.#obfuscator, toolCall.arguments)
 						: toolCall.arguments;
-					return recoverAskQuestions(args);
+					return recoverAskInput(args);
 				}
 				if (entry.message.role === "user") return undefined;
 			}
