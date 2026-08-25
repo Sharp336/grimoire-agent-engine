@@ -60,6 +60,7 @@ import { formatModelString, type ResolvedModelRoleValue } from "../config/model-
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import {
 	isSettingsInitialized,
+	onActiveProfileChanged,
 	onModelRolesChanged,
 	onStatusLineSessionAccentChanged,
 	Settings,
@@ -191,6 +192,7 @@ import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { TanCommandController } from "./controllers/tan-command-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
 import { imageReferenceHyperlink, materializeImageReferenceLinks } from "./image-references";
+import { LatestWinsExecutor } from "./latest-wins-executor";
 import {
 	consumeLoopLimitIteration,
 	createLoopLimitRuntime,
@@ -729,6 +731,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#pendingModelSwitch: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
 	/** Whether #pendingModelSwitch was queued by the live plan-role reconciler. */
 	#pendingPlanModelSwitch = false;
+	/** Latest-wins serialization for profile-driven model switches. */
+	#profileSwitches = new LatestWinsExecutor();
 	#planModeHasEntered = false;
 	#planReviewOverlay: PlanReviewOverlay | undefined;
 	#planReviewOverlayHandle: OverlayHandle | undefined;
@@ -1339,6 +1343,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#eventBusUnsubscribers.push(
 			onModelRolesChanged(() => {
 				void this.#reapplyPlanModeModelOnRoleChange();
+			}),
+		);
+		this.#eventBusUnsubscribers.push(
+			onActiveProfileChanged(() => {
+				void this.#reapplyDefaultModelOnProfileChange();
 			}),
 		);
 		this.#eventBusUnsubscribers.push(
@@ -2818,6 +2827,42 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		await this.#applyPlanModelTransition(this.session.model, resolved);
+	}
+
+	/**
+	 * When the active profile changes mid-session, re-resolve the default role
+	 * and switch the live session model to it (deferred while streaming, like
+	 * the plan-role reconciler). Plan mode keeps its own plan-role path via
+	 * `onModelRolesChanged`; profile switches arrive through the active-profile
+	 * signal and must also re-point the main model.
+	 */
+	async #reapplyDefaultModelOnProfileChange(): Promise<void> {
+		if (this.planModeEnabled) return;
+		// Latest-selection-wins: rapid profile switches must not race through
+		// setModelTemporary (it commits state mid-flight, so an older switch
+		// finishing last would clobber a newer selection). LatestWinsExecutor
+		// skips superseded queued switches and re-applies the newest request
+		// after any in-flight one, so the final state always converges to the
+		// most recent selection.
+		const resolved = this.session.resolveRoleModelWithThinking("default");
+		const model = resolved.model;
+		if (!model) return;
+		if (this.session.isStreaming) {
+			this.#pendingModelSwitch = { model, thinkingLevel: resolved.thinkingLevel };
+			this.#pendingPlanModelSwitch = false;
+			return;
+		}
+		try {
+			await this.#profileSwitches.run(async () => {
+				await this.session.setModelTemporary(model, resolved.thinkingLevel);
+				this.statusLine.invalidate();
+				this.updateEditorBorderColor();
+			});
+		} catch (error) {
+			this.showWarning(
+				`Could not switch to the profile's default model: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
 	}
 
 	/**
@@ -5386,6 +5431,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showModelSelector(options?: { temporaryOnly?: boolean }): void {
 		this.#selectorController.showModelSelector(options);
+	}
+
+	showProfileSelector(): void {
+		this.#selectorController.showProfileSelector();
 	}
 
 	showPluginSelector(mode?: "install" | "uninstall"): void {
