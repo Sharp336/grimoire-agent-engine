@@ -931,6 +931,10 @@ export class Agent {
 		this.#dialect = dialect;
 	}
 
+	setPruneToolDescriptions(prune: boolean) {
+		this.#pruneToolDescriptions = prune;
+	}
+
 	setThinkingLevel(l: Effort | undefined) {
 		this.#state.thinkingLevel = l;
 	}

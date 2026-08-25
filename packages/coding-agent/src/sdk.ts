@@ -2614,7 +2614,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						: "No models available. Use /login or set an API key environment variable. Then use /model to select a model.";
 			}
 		}
-		if (deferredModelResolution && (options.awaitDeferredModel || options.hasUI !== true)) {
+		if (deferredModelResolution && (options.awaitDeferredModel || options.hasUI !== true || hasExistingSession)) {
 			const deferredModel = await deferredModelResolution;
 			if (deferredModel) {
 				model = deferredModel.model;
@@ -4120,6 +4120,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (!discovered || session.model) return;
 			try {
 				await session.setModelTemporary(discovered.model, discovered.thinkingLevel);
+				const deferredInlineToolDescriptors = shouldInlineToolDescriptors(
+					settings.get("inlineToolDescriptors"),
+					discovered.model.id,
+				);
+				agent.setPruneToolDescriptions(deferredInlineToolDescriptors);
+				session.setPruneToolDescriptions(deferredInlineToolDescriptors);
 				agent.setDialect(resolveDialect(settings.get("tools.format"), discovered.model));
 				await session.initializeCodeMode();
 			} catch (error) {
