@@ -4,6 +4,7 @@
 
 ### Added
 
+- Fenced code blocks now expose a clickable `copy` link that copies their original source text.
 - Added an explicit append-only transcript declaration and width-independent stable-row API for components that can guarantee an immutable history prefix across later updates.
 - Added `:img` read selector to rasterize local SVG/SVGZ files for vision input.
 - Added side-by-side image and SVG previews to `omp git`, including local Git LFS object resolution and explicit placeholders for unavailable or unsupported binary content.
