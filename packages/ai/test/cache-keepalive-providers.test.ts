@@ -131,8 +131,12 @@ describe("keepalive shape per api, with a policy supplied", () => {
 		]);
 	});
 
-	it("bounds Ollama on num_predict", () => {
-		expect(boundedPaths(shapeWithPolicy(modelFor("ollama-chat")))).toEqual([["options", "num_predict"]]);
+	it("declines Ollama, which reports no cache activity for a chain to arm on", () => {
+		// The failure mode this pins is a table row that looks like coverage and is dead:
+		// `stream.ts` only arms when a response reports `cacheRead + cacheWrite > 0`, and
+		// this provider hardcodes both to zero. A bounded shape here would advertise a
+		// keepalive that can never issue a single touch.
+		expect(shapeWithPolicy(modelFor("ollama-chat"))).toBeUndefined();
 	});
 
 	it("declines the three transports with no replayable JSON body", () => {
@@ -179,7 +183,6 @@ describe("keepalive shape without a policy (the default legacy mode)", () => {
 			"google-generative-ai",
 			"google-vertex",
 			"google-gemini-cli",
-			"ollama-chat",
 		];
 		for (const api of learned) {
 			const model = modelFor(api, { compat: { promptCacheMode: "explicit" } });
@@ -237,9 +240,7 @@ describe("bounding a captured payload", () => {
 		expect(bounded("google-gemini-cli", { request: { generationConfig: { maxOutputTokens: 512 } } })).toEqual({
 			request: { generationConfig: { maxOutputTokens: 1 } },
 		});
-		expect(bounded("ollama-chat", { options: { num_predict: 256, temperature: 0.2 } })).toEqual({
-			options: { num_predict: 1, temperature: 0.2 },
-		});
+		expect(bounded("openrouter", { max_output_tokens: 256 })).toEqual({ max_output_tokens: 1 });
 	});
 
 	it("picks whichever candidate spelling the body actually used", () => {
@@ -249,12 +250,37 @@ describe("bounding a captured payload", () => {
 		expect(bounded("openrouter", { max_tokens: 900 })).toEqual({ max_tokens: 1 });
 	});
 
+	it("declines a body declaring more than one output limit", () => {
+		// Regression. Bounding the first alias and returning left the other one intact, and
+		// the provider is free to honor whichever it prefers — so a touch that verified as a
+		// cache hit could have generated a whole completion while the economic gate had
+		// priced it at one token. These bodies are reachable from ordinary config: a
+		// user-supplied `extraBody` is merged into the params with `Object.assign`.
+		expect(bounded("openai-completions", { max_tokens: 4096, max_completion_tokens: 900 })).toBeUndefined();
+		expect(
+			bounded("openrouter", { max_output_tokens: 512, max_tokens: 4096, max_completion_tokens: 900 }),
+		).toBeUndefined();
+		// An explicit `null` is a declaration of "no cap", so it conflicts rather than being
+		// treated as an absence next to a real number.
+		expect(bounded("openrouter", { max_output_tokens: null, max_tokens: 4096 })).toBeUndefined();
+		// A custom api gets the same rule across the discovered set.
+		expect(bounded("acme-custom-api", { max_tokens: 4096, options: { num_predict: 64 } })).toBeUndefined();
+		// Non-vacuity: an `undefined` leaf is not a declaration, since it never reaches the
+		// wire — the body still has exactly one real limit and is bounded normally.
+		expect(bounded("openai-completions", { max_tokens: undefined, max_completion_tokens: 900 })).toEqual({
+			max_tokens: undefined,
+			max_completion_tokens: 1,
+		});
+	});
+
 	it("never invents a limit the request did not send", () => {
 		// Failure mode: a replay carrying a field the original lacked is answering a
 		// question the provider was never asked, and whatever it cached was cached for the
 		// body without it.
 		expect(bounded("openai-responses", { model: "m", input: [] })).toBeUndefined();
-		expect(bounded("ollama-chat", { model: "m", options: { temperature: 0.2 } })).toBeUndefined();
+		// Parent object present, numeric leaf absent — the nested-path variant of the same
+		// rule, which a flat-key check would miss.
+		expect(bounded("google-generative-ai", { config: { temperature: 0.2 } })).toBeUndefined();
 		// `null` is the wire spelling of "no cap" on the Responses family, so it is a
 		// declaration too, not an absence to fill in.
 		expect(bounded("openai-responses", { max_output_tokens: null })).toBeUndefined();
@@ -308,7 +334,14 @@ describe("bounding a captured payload", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The property the whole widening rests on.
+// End-to-end arming, and the property the whole widening rests on.
+//
+// Everything above resolves shapes and bounds bodies in isolation, which is not
+// coverage on its own: `stream.ts` only arms a chain when the response reports
+// `cacheRead + cacheWrite > 0`, so a provider that never populates those counters
+// yields a perfectly-bounded body that nothing ever replays. That is exactly how
+// `ollama-chat` sat in the table looking supported while being dead. These tests drive
+// the real stream per wire family and assert a touch actually goes out.
 // ---------------------------------------------------------------------------
 
 const stateMaps: Array<Map<string, ProviderSessionState>> = [];
@@ -352,6 +385,117 @@ function completionsChunks(cachedTokens: number): Array<Record<string, unknown>>
 		},
 	];
 }
+
+/** A Gemini SSE stop chunk reporting `cachedContentTokenCount`. */
+function googleChunk(cachedTokens: number): Record<string, unknown> {
+	return {
+		candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }],
+		usageMetadata: {
+			promptTokenCount: PREFIX_TOKENS,
+			candidatesTokenCount: 1,
+			totalTokenCount: PREFIX_TOKENS + 1,
+			cachedContentTokenCount: cachedTokens,
+		},
+	};
+}
+
+/**
+ * An Anthropic Messages SSE turn reporting `cache_read_input_tokens`.
+ *
+ * Framed with `event:` lines and no `[DONE]` sentinel, which is what this provider's
+ * parser reads — the OpenAI/Gemini framing above is not interchangeable.
+ */
+function anthropicResponse(cacheRead: number): Response {
+	const usage = (output: number) => ({
+		input_tokens: 4,
+		output_tokens: output,
+		cache_read_input_tokens: cacheRead,
+		cache_creation_input_tokens: 0,
+	});
+	const events: Array<Record<string, unknown>> = [
+		{ type: "message_start", message: { id: "msg_probe", usage: usage(0) } },
+		{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+		{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "ok" } },
+		{ type: "content_block_stop", index: 0 },
+		{ type: "message_delta", delta: { stop_reason: "end_turn" }, usage: usage(1) },
+		{ type: "message_stop" },
+	];
+	const body = `${events.map(event => `event: ${String(event.type)}\ndata: ${JSON.stringify(event)}`).join("\n\n")}\n\n`;
+	return new Response(body, { status: 200, headers: { "content-type": "text/event-stream" } });
+}
+
+/**
+ * Prime one turn with a cache-bearing response and return every body that reached the
+ * wire, once the first keepalive decision has been reported.
+ */
+async function primeAndTouch(
+	model: Model<Api>,
+	respond: (callIndex: number) => Response,
+): Promise<Record<string, unknown>[]> {
+	const bodies: Record<string, unknown>[] = [];
+	const { promise, resolve } = Promise.withResolvers<void>();
+	const fetchMock: FetchImpl = async (_input, init) => {
+		bodies.push(JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown>);
+		return respond(bodies.length);
+	};
+	const states = new Map<string, ProviderSessionState>();
+	stateMaps.push(states);
+	const stream = streamSimple(
+		model,
+		{ messages: [{ role: "user", content: "keep warm", timestamp: 1 }] },
+		{
+			fetch: fetchMock,
+			apiKey: "probe-key",
+			maxTokens: 4096,
+			cacheRetention: "short",
+			anthropicCacheRefresh: true,
+			providerSessionState: states,
+			sessionId: `arming-${model.api}`,
+			cacheKeepalivePolicy: {
+				resumeProbability: () => 0.95,
+				prefixTokens: () => PREFIX_TOKENS,
+				ttlSeconds: KEEPALIVE_MARGIN_S + 0.02,
+				maxTouches: 1,
+				onDecision: () => resolve(),
+			},
+		},
+	);
+	for await (const _event of stream) {
+		// Drain the priming response before the idle gap begins.
+	}
+	await stream.result();
+	await promise;
+	return bodies;
+}
+
+describe("a touch actually reaches the wire, per counter implementation", () => {
+	it("arms on Gemini's cachedContentTokenCount and bounds the wire body", async () => {
+		// `google-shared.ts` is its own cache-counter implementation, and the bound is
+		// resolved against the hook's `config.maxOutputTokens` while the wire body carries
+		// `generationConfig.maxOutputTokens` — so this also proves the bound survives the
+		// params-to-wire transformation rather than being lost in it.
+		const model = modelFor("google-generative-ai", {
+			provider: "google",
+			baseUrl: "https://generativelanguage.googleapis.com",
+		});
+		const bodies = await primeAndTouch(model, callIndex =>
+			sseResponse([googleChunk(callIndex === 1 ? PREFIX_TOKENS : 0)]),
+		);
+		expect(bodies).toHaveLength(2);
+		const generationConfig = bodies[1]?.generationConfig as Record<string, unknown> | undefined;
+		expect(generationConfig?.maxOutputTokens).toBe(1);
+	});
+
+	it("arms an Anthropic-compatible gateway on the bounded path", async () => {
+		// The first-party endpoint takes the `zero-output` replay; a reseller speaking the
+		// same wire format is the only api that reaches `max_tokens: 1`, and it was never
+		// exercised end to end.
+		const model = modelFor("anthropic-messages", { provider: "openrouter", baseUrl: "https://gateway.example/v1" });
+		const bodies = await primeAndTouch(model, callIndex => anthropicResponse(callIndex === 1 ? PREFIX_TOKENS : 0));
+		expect(bodies).toHaveLength(2);
+		expect(bodies[1]?.max_tokens).toBe(1);
+	});
+});
 
 describe("attempting an unverifiable provider is self-limiting", () => {
 	it("issues exactly one touch when the provider cannot confirm the entry was read", async () => {

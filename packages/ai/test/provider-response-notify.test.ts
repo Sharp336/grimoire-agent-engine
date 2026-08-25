@@ -34,6 +34,7 @@
 import { describe, expect, it } from "bun:test";
 import { streamBedrock } from "@oh-my-pi/pi-ai/providers/amazon-bedrock";
 import { crc32 } from "@oh-my-pi/pi-ai/providers/aws-eventstream";
+import { streamGoogle } from "@oh-my-pi/pi-ai/providers/google";
 import { streamGoogleGeminiCli } from "@oh-my-pi/pi-ai/providers/google-gemini-cli";
 import { streamOllama } from "@oh-my-pi/pi-ai/providers/ollama";
 import type { Api, AssistantMessage, Context, FetchImpl, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai/types";
@@ -453,5 +454,67 @@ describe("google-gemini-cli after_provider_response", () => {
 		expect(rec.calls[0]?.status).toBe(200);
 		expect(result.content).toMatchObject([{ type: "text", text: "gemini ok" }]);
 		expect(result.stopReason).toBe("stop");
+	});
+});
+
+function googleModel(): Model<"google-generative-ai"> {
+	return buildModel({
+		id: "gemini-2.5-flash",
+		name: "Gemini 2.5 Flash",
+		api: "google-generative-ai",
+		provider: "google",
+		baseUrl: "https://generativelanguage.googleapis.com",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 65_536,
+	});
+}
+
+const GOOGLE_OK_BODY = `data: ${JSON.stringify({
+	candidates: [{ content: { parts: [{ text: "google ok" }] }, finishReason: "STOP" }],
+})}\n\n`;
+
+function runGoogle(fetchMock: FetchImpl, rec: Recorder): Promise<AssistantMessage> {
+	return streamGoogle(googleModel(), context, {
+		apiKey: "key",
+		fetch: fetchMock,
+		onResponse: rec.onResponse,
+	}).result();
+}
+
+describe("google-generative-ai after_provider_response", () => {
+	it("fires exactly once on a 2xx response and still streams the body", async () => {
+		// Regression: this provider was the last one never wiring the notification at all,
+		// so extensions could not observe a single Gemini or Vertex response — and the
+		// prompt-cache keepalive, which arms only on an observed response, was dead here.
+		const rec = recorder();
+		const result = await runGoogle(
+			async () => new Response(GOOGLE_OK_BODY, { status: 200, headers: { "Content-Type": "text/event-stream" } }),
+			rec,
+		);
+
+		expect(rec.calls).toHaveLength(1);
+		expect(rec.calls[0]?.status).toBe(200);
+		expect(rec.calls[0]?.headers["content-type"]).toBe("text/event-stream");
+		expect(rec.models[0]).toBe("gemini-2.5-flash");
+		// The body was still fully consumable after the event fired.
+		expect(result.content).toMatchObject([{ type: "text", text: "google ok" }]);
+		expect(result.stopReason).toBe("stop");
+	});
+
+	it("fires no event on a 429 and still surfaces the failure", async () => {
+		// Matches the convention the other providers settled on: success-only, so an
+		// extension never sees a response whose body it cannot read.
+		const rec = recorder();
+		const result = await runGoogle(
+			async () =>
+				new Response('{"error":{"message":"rate limited"}}', { status: 429, headers: { "retry-after": "3600" } }),
+			rec,
+		);
+
+		expect(rec.calls).toHaveLength(0);
+		expect(result.stopReason).toBe("error");
 	});
 });

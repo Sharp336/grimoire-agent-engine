@@ -1637,6 +1637,16 @@ function createCacheKeepalivePlan<TApi extends Api>(
 				// recurse into arming another chain.
 				anthropicCacheRefresh: false,
 				cacheKeepalivePolicy: undefined,
+				// Nor may it join the OpenAI Responses server-side conversation. A touch
+				// replays the priming request's own history, so the delta against the live
+				// chain baseline is empty — which sends
+				// `buildOpenAIResponsesChainedParams` down its reset branch and wipes
+				// `lastResponseId`/`lastParams` (`providers/openai-responses.ts:325-328`).
+				// The touch then succeeds and installs ITS response id as the chain head
+				// (`:863`), so the next real turn would chain from a discarded 1-token reply
+				// — server-side conversation and all. A keepalive must be invisible to
+				// everything except the cache clock, so it opts out of chaining entirely.
+				statefulResponses: false,
 				signal: controller.signal,
 			});
 

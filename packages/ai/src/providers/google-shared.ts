@@ -27,6 +27,7 @@ import { shouldSendServiceTier } from "../types";
 import { normalizeSystemPrompts } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import type { RawHttpRequestDump } from "../utils/http-inspector";
+import { notifyProviderResponse } from "../utils/provider-response";
 import { normalizeSchemaForCCA, normalizeSchemaForGoogle, toolWireSchema } from "../utils/schema";
 import type {
 	Content,
@@ -1016,6 +1017,16 @@ export function streamGoogleGenAI<T extends "google-generative-ai" | "google-ver
 						kind: "empty-body",
 					});
 				}
+				// Post-success, immediately before the body is consumed — the same placement as
+				// every other provider, so an extension sees one `after_provider_response` per
+				// response it can actually read. The Gemini REST and Vertex endpoints surface no
+				// request-id header, so that argument is omitted rather than guessed, and the
+				// body stays unread here.
+				//
+				// Load-bearing beyond observability: the prompt-cache keepalive arms only when
+				// a response was observed, so without this both `google-generative-ai` and
+				// `google-vertex` reported cache tokens that nothing could ever act on.
+				await notifyProviderResponse(options, response, model);
 				return response.body as ReadableStream<Uint8Array>;
 			};
 			// A regional Vertex endpoint 404s for models published only on the

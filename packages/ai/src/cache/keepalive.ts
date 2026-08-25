@@ -280,7 +280,17 @@ const API_KEEPALIVE: Readonly<Record<KnownApi, ApiKeepaliveEntry | null>> = {
 	// Cloud Code Assist nests the whole GenerateContent request one level down
 	// (`providers/google-gemini-cli.ts:421-438`).
 	"google-gemini-cli": { bound: candidates(["request", "generationConfig", "maxOutputTokens"]) },
-	"ollama-chat": { bound: candidates(["options", "num_predict"]) },
+	// EXCLUDED: the arming gate in `stream.ts` requires the response to report cache
+	// activity (`usage.cacheRead + usage.cacheWrite > 0`), and this provider never reports
+	// any — it hardcodes both counters to zero and its `done` path only ever assigns
+	// `usage.input` from `prompt_eval_count` (`providers/ollama.ts:390-391,728`). A row
+	// here would be a bounded body that nothing can ever arm.
+	//
+	// Not worth adding the counter to reach it, either: Ollama's prompt cache is KV state
+	// inside a local process, so `cost` is zero and the economic gate would price the
+	// avoided rebuild at zero and refuse every touch. Reviving this needs a provider that
+	// reports cache tokens AND a cost model where keeping them warm is worth something.
+	"ollama-chat": null,
 	// EXCLUDED: the hook receives a protobuf `StreamUnifiedChatRequest` message
 	// (`providers/cursor.ts:5356`), not the wire bytes, and that message carries no
 	// output-limit field at all — so a touch could not be bounded.
@@ -343,6 +353,9 @@ const DISCOVERABLE_OUTPUT_LIMIT_PATHS: readonly (readonly string[])[] = [
 	["config", "maxOutputTokens"],
 	["generationConfig", "maxOutputTokens"],
 	["request", "generationConfig", "maxOutputTokens"],
+	// Ollama's spelling. `ollama-chat` itself is excluded above for reporting no cache
+	// counters, but a custom api speaking its wire format is a different server that may
+	// report them, and it still has to clear the same arming gate to be touched.
 	["options", "num_predict"],
 ];
 
@@ -510,10 +523,24 @@ function reasonToDeclineBoundedTouch(
  * Bound `payload`'s existing output limit to `shape.maxTokens`, or `undefined` when this
  * body must not be replayed at all.
  *
- * `undefined` is the fail-closed path, and it is returned for exactly two reasons: the
- * body declares a reasoning budget the bound cannot clear
- * ({@link reasonToDeclineBoundedTouch}), or it carries no output-limit field to overwrite
- * — inventing one would make the replay a different request.
+ * `undefined` is the fail-closed path, returned for three reasons: the body declares a
+ * reasoning budget the bound cannot clear ({@link reasonToDeclineBoundedTouch}); it
+ * carries no output-limit field to overwrite, since inventing one would make the replay a
+ * different request; or it declares MORE THAN ONE of them.
+ *
+ * That last case is why this counts every candidate instead of overwriting the first one
+ * it finds. The aliases are not mutually exclusive on the wire: a user-configured
+ * `extraBody` is merged with `Object.assign` (`providers/openai-shared.ts:731`), so
+ * `max_tokens` can land beside the `max_completion_tokens` the provider built, and
+ * OpenRouter has three spellings in play. Bounding one while another survives leaves the
+ * provider free to honor the untouched cap, so a *verified* hit could replay a whole
+ * completion while the economic gate priced it at one token — the exact unfalsifiable
+ * spend this design exists to prevent. Which alias wins is the provider's business, not
+ * something to guess at, so ambiguity declines and the entry simply expires.
+ *
+ * "Declared" means a leaf that is not `undefined`, so an explicit `null` — the Responses
+ * family's spelling of "no cap" — counts as a declaration and conflicts, rather than
+ * being silently overwritten or ignored.
  */
 export function boundCacheKeepalivePayload(
 	api: Api,
@@ -526,11 +553,19 @@ export function boundCacheKeepalivePayload(
 		return undefined;
 	}
 	const paths = shape.bound.kind === "candidates" ? shape.bound.paths : DISCOVERABLE_OUTPUT_LIMIT_PATHS;
-	for (const path of paths) {
-		const bounded = replaceExistingNumericLeaf(payload, path, shape.maxTokens);
-		if (bounded) return bounded;
+	const declared = paths.filter(path => readAtPath(payload, path) !== undefined);
+	if (declared.length !== 1) {
+		if (declared.length > 1) {
+			logger.debug("prompt-cache keepalive declined a bounded touch", {
+				api,
+				reason: "more than one output limit declared",
+				fields: declared.map(path => path.join(".")),
+			});
+		}
+		return undefined;
 	}
-	return undefined;
+	// Still numeric-checked: the single declaration may be `null` or a non-number.
+	return replaceExistingNumericLeaf(payload, declared[0]!, shape.maxTokens);
 }
 
 /**

@@ -4,13 +4,13 @@
 
 ### Added
 
-- Prompt-cache keepalive now attempts every provider with a replayable request body — the OpenAI Completions and Responses families, Azure, OpenRouter, Amazon Bedrock, the Google and Gemini CLI APIs, Ollama, Anthropic-compatible gateways, and custom APIs registered through `registerCustomApi`, whose output limit is discovered from the request rather than assumed. Previously only Anthropic's first-party endpoint was covered, so every other provider paid a full cache write on each resume after an idle gap. A provider that reports no cache telemetry costs a single bounded request and is then left alone. Coverage beyond Anthropic is opt-in: without a supplied `cacheKeepalivePolicy` the keepalive stays Anthropic-only and issues exactly the touches it did before.
+- Prompt-cache keepalive now attempts every provider with a replayable request body — the OpenAI Completions and Responses families, Azure, OpenRouter, Amazon Bedrock, the Google, Vertex and Gemini CLI APIs, Anthropic-compatible gateways, and custom APIs registered through `registerCustomApi`, whose output limit is discovered from the request rather than assumed. Previously only Anthropic's first-party endpoint was covered, so every other provider paid a full cache write on each resume after an idle gap. A provider that reports no cache telemetry costs a single bounded request and is then left alone; one that reports none at all, such as Ollama, is never touched. Coverage beyond Anthropic is opt-in: without a supplied `cacheKeepalivePolicy` the keepalive stays Anthropic-only and issues exactly the touches it did before.
 - Prompt-cache keepalive is now cost-aware: a `cacheKeepalivePolicy` gates each touch on whether the avoided rebuild is worth more than the touch, so the chain lasts as long as it pays for itself instead of stopping at a fixed 3 touches, and issues no touch at all once nothing will resume the session.
 - Added `@oh-my-pi/pi-ai/cache`: cache identity fingerprints, outcome classification, an economic warm controller, evidence-based TTL learning, and keepalive deadline scheduling.
 
 ### Fixed
 
-- Fixed `after_provider_response` never firing for Amazon Bedrock, Ollama, and the Gemini CLI provider, so extensions could not observe those responses at all; it now fires for every status, including 401/403/429, before the provider throws.
+- Fixed `after_provider_response` never firing for Amazon Bedrock, Ollama, the Gemini CLI provider, and the Google and Vertex APIs, so extensions could not observe those responses at all. Every provider now fires it once per response it can actually read, immediately before the body is consumed.
 
 ## [18.0.4] - 2026-08-24
 

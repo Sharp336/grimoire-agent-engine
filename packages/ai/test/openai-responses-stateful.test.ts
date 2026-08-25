@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { streamSimple } from "@oh-my-pi/pi-ai";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { Context, FetchImpl, Model, ModelSpec, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -23,7 +24,7 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-function createStatefulSse(text: string, responseId: string): Response {
+function createStatefulSse(text: string, responseId: string, cachedTokens = 0): Response {
 	const events = [
 		{ type: "response.created", response: { id: responseId } },
 		{
@@ -47,7 +48,12 @@ function createStatefulSse(text: string, responseId: string): Response {
 			response: {
 				id: responseId,
 				status: "completed",
-				usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } },
+				usage: {
+					input_tokens: 5,
+					output_tokens: 3,
+					total_tokens: 8,
+					input_tokens_details: { cached_tokens: cachedTokens },
+				},
 			},
 		},
 	];
@@ -737,5 +743,79 @@ describe("openai-responses stateful chaining", () => {
 		expect(sentRequests[1]!.store).toBe(false);
 		expect(sentRequests[1]!.previous_response_id).toBeUndefined();
 		expect((sentRequests[1]!.input as unknown[]).length).toBeGreaterThan(1);
+	});
+});
+
+describe("prompt-cache keepalive and the response chain", () => {
+	it("leaves the next turn chained to the priming response, not to a keepalive touch", async () => {
+		// Regression. A keepalive touch replays the priming request's own history, so its
+		// delta against the live chain baseline is empty — which drove
+		// `buildOpenAIResponsesChainedParams` into `resetOpenAIResponsesChainState`, wiping
+		// `lastResponseId`, and the touch then installed its OWN response id as the chain
+		// head. The next real turn chained from a discarded 1-token reply, inheriting it as
+		// an assistant turn in the server-side conversation. A touch must be invisible to
+		// everything but the cache clock, so it opts out of chaining.
+		const sentRequests: Array<Record<string, unknown>> = [];
+		const fetchMock: FetchImpl = vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+			sentRequests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+			// A cache read on every response, so the keepalive has an entry to keep warm.
+			return createStatefulSse(`Answer ${sentRequests.length}`, `resp_${sentRequests.length}`, 4096);
+		}) as FetchImpl;
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const touched = Promise.withResolvers<void>();
+		const options = {
+			apiKey: "test-key",
+			sessionId: "keepalive-chain-session",
+			providerSessionState,
+			statefulResponses: true,
+			fetch: fetchMock,
+			// The keepalive only runs against short-lived entries, and coverage beyond
+			// Anthropic requires a supplied policy.
+			cacheRetention: "short" as const,
+			anthropicCacheRefresh: true,
+			cacheKeepalivePolicy: {
+				resumeProbability: () => 0.95,
+				prefixTokens: () => 120_000,
+				// Just above the scheduler's 15s round-trip margin, so the first touch is due
+				// in ~20ms of real time.
+				ttlSeconds: 15.02,
+				maxTouches: 1,
+				onDecision: () => touched.resolve(),
+			},
+		};
+
+		const systemPrompt = ["You are a helpful assistant."];
+		const firstUser = { role: "user" as const, content: "First question", timestamp: 1000 };
+		const firstResponse = await streamSimple(model, { systemPrompt, messages: [firstUser] }, options).result();
+		expect(firstResponse.stopReason).toBe("stop");
+
+		// Wait for the touch itself rather than a guessed delay.
+		await touched.promise;
+		expect(sentRequests).toHaveLength(2);
+		// The touch: the priming body replayed with its output bounded, and no chaining.
+		expect(sentRequests[1]?.max_output_tokens).toBe(1);
+		expect(sentRequests[1]?.previous_response_id).toBeUndefined();
+
+		const secondResponse = await streamSimple(
+			model,
+			{
+				systemPrompt,
+				messages: [firstUser, firstResponse, { role: "user", content: "Second question", timestamp: 1001 }],
+			},
+			options,
+		).result();
+		expect(secondResponse.stopReason).toBe("stop");
+
+		// The assertion: the next real turn still chains from the priming response, and
+		// sends only the new user message. `resp_2` is the touch — chaining from it, or
+		// replaying the whole transcript because the baseline was wiped, are the two
+		// failures this pins.
+		expect(sentRequests).toHaveLength(3);
+		expect(sentRequests[2]?.previous_response_id).toBe("resp_1");
+		const deltaInput = sentRequests[2]?.input as Array<{ role?: string }>;
+		expect(deltaInput).toHaveLength(1);
+		expect(JSON.stringify(deltaInput)).toContain("Second question");
+
+		for (const state of providerSessionState.values()) state.close();
 	});
 });
