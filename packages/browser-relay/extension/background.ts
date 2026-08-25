@@ -470,9 +470,14 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 	// non-attachable target, or Chrome tore it down); stop tracking it so a
 	// later orphan sweep never tries to detach a tab we no longer own.
 	attachmentGuard.untrack(source.tabId);
-	// Guard detachments remain recoverable for a surviving relay session. Every
-	// other detach is a Chrome/user decision and revokes any stale recovery bit.
-	if (guardDetachments.delete(source.tabId)) {
+	// A user cancellation can race the orphan sweep: the guard calls
+	// chrome.debugger.detach() and adds the tab to guardDetachments, but Chrome
+	// then delivers the user's own Cancel as this onDetach. Trust Chrome's reason
+	// over the in-memory marker — "canceled_by_user" is the user revoking the
+	// attachment, so clear any stale guard/recovery bit and report it as a real
+	// user detach (which bans the tab) instead of silently reattaching it.
+	const guardMarked = guardDetachments.delete(source.tabId);
+	if (guardMarked && reason !== "canceled_by_user") {
 		// A reconnect can win the race with the asynchronous guard detach. Do not
 		// report it as a user detach (which bans the tab); refresh hello so the
 		// relay can restore only this guard-authorized attachment. Coalesce with

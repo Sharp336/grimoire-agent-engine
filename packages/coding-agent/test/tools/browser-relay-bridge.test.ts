@@ -1230,4 +1230,90 @@ describe("RelayBridge attachment release", () => {
 			),
 		).toEqual([]);
 	});
+
+	it("rechecks holders after a forced recovery attach when the sole holder disconnected mid-attach", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		// Bare attachToTarget holder: no setAutoAttach, so recovery uses the forced
+		// attach path (autoAttachConns empty, forceAttach true).
+		await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.extClosed(ext);
+
+		// Reconnect: the tab is recoverable, so onHello arms a forced recovery attach.
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await flush();
+		expect(ext2.pending("attach")).toHaveLength(1);
+
+		// The sole preserved holder disconnects while the recovery attach is still in
+		// flight. detachIfUnheld runs now, but tab.attached is still false, so it
+		// returns without detaching — leaving the attach to complete unheld.
+		bridge.cdpClosed(connId);
+		await flush();
+		expect(ext2.rpcs("detach")).toHaveLength(0);
+
+		// The attach succeeds. With no holder left, the recovery continuation must
+		// recheck and detach immediately so the debugger attachment (and its infobar)
+		// is not orphaned until a later relay outage.
+		ack(bridge, ext2, "attach");
+		await flush();
+		expect(ext2.rpcs("detach").map(rpc => rpc.tabId)).toEqual([1]);
+	});
+
+	it("gates a preserved session's Runtime.enable on the reconnect hello and recovery attach", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.extClosed(ext);
+
+		// Replacement socket opened but its hello has NOT landed yet: recovery
+		// bookkeeping (retract/reattach, tab.attaching) has not run.
+		const ext2 = new FakeExtSocket();
+		bridge.extConnected(ext2);
+
+		// A preserved page session drives Runtime.enable in this gap. The root
+		// disable/enable cycle issues direct `send` RPCs; without the hello gate they
+		// would hit a still-detached target and Chrome would reject the init.
+		const enableId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: enableId, sessionId: pageSession, method: "Runtime.enable" }));
+		await flush();
+		expect(ext2.rpcs("send")).toHaveLength(0);
+		expect(ext2.rpcs("attach")).toHaveLength(0);
+
+		// The hello lands: recovery re-announces the tab and arms the reattach. The
+		// Runtime cycle must still wait on the attach before sending disable/enable.
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "hello",
+				userAgent: "test",
+				browserVersion: "Chrome/151.0.0.0",
+				tabs: [tab({ tabId: 1, groupId: -1 })],
+				attachedTabIds: [],
+				recoverableTabIds: [1],
+			}),
+		);
+		await flush();
+		expect(ext2.rpcs("attach")).toHaveLength(1);
+		expect(ext2.rpcs("send")).toHaveLength(0);
+
+		// Attach acknowledges: only now does the root Runtime cycle proceed.
+		ack(bridge, ext2, "attach");
+		await flush();
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Runtime.disable"]);
+		ack(bridge, ext2, "send"); // Runtime.disable leg
+		await flush();
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Runtime.disable", "Runtime.enable"]);
+		ack(bridge, ext2, "send"); // Runtime.enable leg
+		await flush();
+		expect(cdp.messages.filter(message => message.id === enableId && "result" in message)).toHaveLength(1);
+	});
 });

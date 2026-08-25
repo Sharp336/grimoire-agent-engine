@@ -555,6 +555,14 @@ export class RelayBridge {
 	}
 
 	async #cycleRuntime(tab: TabState): Promise<void> {
+		// Same reconnect ordering hazard as #forwardToTab: a preserved page session
+		// can drive Runtime.enable before the replacement hello lands or before the
+		// recovery attach resolves. These are direct `send` RPCs, so without the gate
+		// Chrome receives Runtime.disable/enable on a still-detached target and
+		// rejects the initialization. Wait for the hello (so recovery state exists)
+		// then the resulting attach before cycling.
+		if (this.#ext && !this.#extInfo) await this.#awaitHello();
+		if (tab.attaching) await tab.attaching;
 		await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.disable" });
 		await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.enable" });
 	}
@@ -975,6 +983,13 @@ export class RelayBridge {
 			for (const conn of autoAttachConns) {
 				if (this.#conns.has(conn.id)) this.#emitTabAttached(conn, tab);
 			}
+			// A preserved holder can disconnect while this forced recovery attach is
+			// in flight: cdpClosed()'s #detachIfUnheld then runs while tab.attached is
+			// still false and returns without detaching. Recheck now that the
+			// attachment is live (auto-attach sessions, if any, were just minted
+			// above) so a tab nobody holds anymore doesn't keep an orphaned debugger
+			// attachment and its infobar.
+			this.#detachIfUnheld(tab.tabId);
 		});
 	}
 

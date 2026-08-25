@@ -401,7 +401,8 @@ chrome.debugger.onDetach.addListener((source, reason) => {
   if (source.tabId === undefined)
     return;
   attachmentGuard.untrack(source.tabId);
-  if (guardDetachments.delete(source.tabId)) {
+  const guardMarked = guardDetachments.delete(source.tabId);
+  if (guardMarked && reason !== "canceled_by_user") {
     refreshHello();
     return;
   }
