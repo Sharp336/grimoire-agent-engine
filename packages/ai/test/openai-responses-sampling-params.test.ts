@@ -107,6 +107,25 @@ describe("openai-responses reasoning-summary defaults", () => {
 		expect(body.reasoning).toEqual({ effort: "high" });
 	});
 
+	it("forwards summary-only requests without inventing a reasoning effort", async () => {
+		const model: Model<"openai-responses"> = buildModel({
+			id: "gpt-5-pro",
+			name: "GPT-5 Pro",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400_000,
+			maxTokens: 128_000,
+		});
+
+		const body = await drain(model, { reasoningSummary: "detailed" });
+
+		expect(body.reasoning).toEqual({ summary: "detailed" });
+	});
+
 	it("omits explicitly requested summaries when endpoint compatibility disables them", async () => {
 		const model: Model<"openai-responses"> = buildModel({
 			id: "gpt-5.4",
