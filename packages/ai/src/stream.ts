@@ -1210,6 +1210,14 @@ interface CacheKeepaliveTouchResult {
 }
 
 /**
+ * {@link CacheKeepaliveState.decide} answer meaning caller-supplied policy code threw.
+ *
+ * Deliberately distinct from `undefined`, which means "no policy, just go": conflating the
+ * two would make a throwing `prefixTokens()` issue the very touch nobody could price.
+ */
+const CACHE_KEEPALIVE_POLICY_FAILED = Symbol("cache-keepalive-policy-failed");
+
+/**
  * Keeps one physical provider cache entry warm across an idle gap.
  *
  * Two modes:
@@ -1267,19 +1275,94 @@ class CacheKeepaliveState implements ProviderSessionState {
 		this.#cost = config.cost;
 		this.#warmOutputTokens = config.warmOutputTokens;
 		this.#fingerprint = config.fingerprint;
-		this.#touchesRemaining = config.policy
-			? (config.policy.maxTouches ?? DEFAULT_CACHE_KEEPALIVE_MAX_TOUCHES)
-			: LEGACY_CACHE_KEEPALIVE_MAX_TOUCHES;
-		this.#schedule(cacheTouchedAtMs, this.#generation);
+		// Every caller-supplied read in this method sits inside one try. `arm` runs inline on
+		// the priming turn's `done` event, so an escaping throw would fail the real response
+		// — the one thing a keepalive must never do. Both `maxTouches` and `ttlReady` may be
+		// accessors, so reading them is running caller code.
+		let ttlReady: Promise<unknown> | undefined;
+		try {
+			this.#touchesRemaining = config.policy
+				? (config.policy.maxTouches ?? DEFAULT_CACHE_KEEPALIVE_MAX_TOUCHES)
+				: LEGACY_CACHE_KEEPALIVE_MAX_TOUCHES;
+			ttlReady = config.policy?.ttlReady;
+		} catch (error) {
+			this.#abandon("armConfig", error);
+			return;
+		}
+		// `#schedule` reads the policy too, and contains its own failures the same way.
+		//
+		// A policy may still be loading the learned TTL it wants this lease scheduled from
+		// (the coding-agent reads it off disk). Scheduling now would silently use the
+		// nominal lifetime and, on a route whose real retention is shorter, place the touch
+		// after the entry has already expired — rebuilding the cache and ending the chain,
+		// which is exactly the outcome the learned value exists to avoid. So wait for it.
+		//
+		// Deferring costs no coverage: the deadline is computed from `cacheTouchedAtMs`,
+		// captured when the response arrived, so it is absolute and does not slide with the
+		// time spent waiting here.
+		if (ttlReady === undefined) {
+			this.#schedule(cacheTouchedAtMs, this.#generation);
+			return;
+		}
+		const generation = this.#generation;
+		// `Promise.resolve` rather than `ttlReady.then(...)`: the value is caller-supplied and
+		// may be a thenable whose `then` is itself an accessor. Assimilation reads it inside a
+		// microtask, so a throw there becomes a rejection this handler owns instead of a
+		// synchronous throw escaping into the pump.
+		void Promise.resolve(ttlReady).then(
+			() => {
+				if (generation !== this.#generation) return;
+				this.#schedule(cacheTouchedAtMs, generation);
+			},
+			(error: unknown) => {
+				// A lease whose TTL evidence failed to load could still be scheduled from the
+				// nominal value, but the policy that owns the value is the one that broke, so
+				// the same termination rule as any other policy failure applies.
+				if (generation !== this.#generation) return;
+				this.#abandon("ttlReady", error);
+			},
+		);
 	}
 
 	close(): void {
 		this.cancel();
 	}
 
+	/**
+	 * End the chain because caller-supplied policy code threw, answering the sentinel so a
+	 * caller in the middle of a decision can bail.
+	 *
+	 * Terminating beats retrying: a policy that cannot price this touch cannot be trusted
+	 * to price the next one either, and rescheduling would spend real money on a decision
+	 * nobody computed. The release is exactly the one a `should-not-warm` decision performs
+	 * — plan cleared, budget zeroed, no timer pending — because the alternative is the
+	 * wedge this guards against: a lease left armed with no pending timer, which never
+	 * touches again and never releases its state.
+	 */
+	#abandon(stage: string, error: unknown): typeof CACHE_KEEPALIVE_POLICY_FAILED {
+		logger.debug("cache keepalive policy callback threw; ending chain", { stage, error: String(error) });
+		if (this.#timer !== undefined) {
+			clearTimeout(this.#timer);
+			this.#timer = undefined;
+		}
+		this.#plan = undefined;
+		this.#touchesRemaining = 0;
+		return CACHE_KEEPALIVE_POLICY_FAILED;
+	}
+
 	#schedule(cacheTouchedAtMs: number, generation: number): void {
 		this.#lastTouchAtMs = cacheTouchedAtMs;
-		const ttlS = this.#policy?.ttlSeconds ?? CACHE_KEEPALIVE_NOMINAL_TTL_S;
+		let ttlS: number;
+		let jitterKey: string;
+		try {
+			// Both reads reach caller-supplied code: `ttlSeconds` is a policy getter, and the
+			// fingerprint resolver closes over the policy's own `fingerprint()`.
+			ttlS = this.#policy?.ttlSeconds ?? CACHE_KEEPALIVE_NOMINAL_TTL_S;
+			jitterKey = this.#fingerprint();
+		} catch (error) {
+			this.#abandon("schedule", error);
+			return;
+		}
 		// Jitter is intentionally 0 here: the deadline must stay deterministic for a
 		// single session. Spreading concurrent sessions is a fleet concern and belongs
 		// with whoever supplies a policy.
@@ -1290,7 +1373,7 @@ class CacheKeepaliveState implements ProviderSessionState {
 			warmFraction: CACHE_KEEPALIVE_WARM_FRACTION,
 			minimumMarginS: CACHE_KEEPALIVE_MARGIN_S,
 			jitterFraction: 0,
-			jitterKey: this.#fingerprint(),
+			jitterKey,
 		});
 		if (touchAtMs === undefined) {
 			// The believed retention cannot clear the round-trip margin, so no touch issued
@@ -1305,30 +1388,42 @@ class CacheKeepaliveState implements ProviderSessionState {
 		this.#timer = setTimeout(
 			() => {
 				this.#timer = undefined;
-				void this.#touch(generation);
+				// Every policy-supplied call inside `#touch` is contained, so a rejection here
+				// means an internal invariant broke — but a bare `void` would still surface it
+				// as an unhandled rejection AND leave the lease armed with no pending timer.
+				void this.#touch(generation).catch(error => this.#abandon("touch", error));
 			},
 			Math.max(0, touchAtMs - Date.now()),
 		);
 		this.#timer.unref?.();
 	}
 
-	/** Decide whether the next touch is worth issuing. `undefined` means "no policy, just go". */
-	#decide(): WarmDecision | undefined {
+	/**
+	 * Decide whether the next touch is worth issuing.
+	 *
+	 * `undefined` means "no policy, just go"; {@link CACHE_KEEPALIVE_POLICY_FAILED} means
+	 * caller-supplied code threw and the lease is already released.
+	 */
+	#decide(): WarmDecision | typeof CACHE_KEEPALIVE_POLICY_FAILED | undefined {
 		const policy = this.#policy;
 		const cost = this.#cost;
 		if (!policy || !cost) return undefined;
-		const prefixTokens = policy.prefixTokens();
-		return evaluateWarm({
-			prefixTokens,
-			// Resolve the context-length tier against the actual prefix: on a
-			// long-context model, pricing a 400k-token prefix at the short-context rate
-			// understates both the avoided loss and the touch cost.
-			rates: warmRatesForPrefix(cost, prefixTokens),
-			// Read fresh: background work finishing is what should end the chain.
-			resumeProbability: policy.resumeProbability(),
-			cumulativeWarmCostUsd: this.#cumulativeCostUsd,
-			warmOutputTokens: this.#warmOutputTokens,
-		});
+		try {
+			const prefixTokens = policy.prefixTokens();
+			return evaluateWarm({
+				prefixTokens,
+				// Resolve the context-length tier against the actual prefix: on a
+				// long-context model, pricing a 400k-token prefix at the short-context rate
+				// understates both the avoided loss and the touch cost.
+				rates: warmRatesForPrefix(cost, prefixTokens),
+				// Read fresh: background work finishing is what should end the chain.
+				resumeProbability: policy.resumeProbability(),
+				cumulativeWarmCostUsd: this.#cumulativeCostUsd,
+				warmOutputTokens: this.#warmOutputTokens,
+			});
+		} catch (error) {
+			return this.#abandon("decide", error);
+		}
 	}
 
 	#report(decision: WarmDecision | undefined, result: CacheKeepaliveTouchResult | undefined): void {
@@ -1354,7 +1449,11 @@ class CacheKeepaliveState implements ProviderSessionState {
 				at: Date.now(),
 			});
 		} catch (error) {
-			logger.debug("cache keepalive onDecision threw", { error: String(error) });
+			// Telemetry is advisory, so a throwing `onDecision` — or a throwing `fingerprint`
+			// reached through it — does not end the chain here. A broken fingerprint still
+			// terminates it at the next `#schedule`, which needs the same value and treats a
+			// throw there as fatal.
+			logger.debug("cache keepalive telemetry callback threw", { error: String(error) });
 		}
 	}
 
@@ -1364,6 +1463,9 @@ class CacheKeepaliveState implements ProviderSessionState {
 
 		this.#touchIndex++;
 		const decision = this.#decide();
+		// A policy failure has already released the lease; falling through would issue the
+		// touch its own decision could not price.
+		if (decision === CACHE_KEEPALIVE_POLICY_FAILED) return;
 		if (decision && !decision.shouldWarm) {
 			// Economically pointless: report why and let the entry expire.
 			this.#report(decision, undefined);

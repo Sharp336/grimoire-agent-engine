@@ -123,6 +123,22 @@ export interface CacheKeepalivePolicy {
 	 */
 	ttlSeconds?: number;
 	/**
+	 * Resolves once {@link ttlSeconds} reflects whatever evidence this policy intends to
+	 * use, for a policy that loads it asynchronously.
+	 *
+	 * Supplying it makes arming wait: the first lease of a process would otherwise be
+	 * scheduled from the nominal lifetime while the learned value was still being read,
+	 * and on a route whose real retention is shorter that places the touch after the
+	 * entry has already expired — rebuilding the cache and ending the chain, which is
+	 * the outcome the learned value exists to prevent. Waiting costs no coverage,
+	 * because the deadline is computed from when the response arrived rather than from
+	 * when it is scheduled.
+	 *
+	 * Omit it once resolved, so later leases in the same session schedule immediately.
+	 * A rejection ends the chain, like any other failure in policy-supplied code.
+	 */
+	ttlReady?: Promise<unknown>;
+	/**
 	 * The physical cache entry the armed chain protects, so touches and ordinary
 	 * requests file evidence under the same clock. Falls back to the routing key when
 	 * the session cannot supply one.

@@ -151,6 +151,33 @@ describe("applied tool signature", () => {
 		expect(signatureFor([swappedRequired])).not.toBe(signatureFor([twoRequired]));
 	});
 
+	it("gives distinct signatures to schema values that reach the provider as distinct bytes", () => {
+		// The schema digest is the central `structuralHash` from `@oh-my-pi/pi-ai/cache`
+		// rather than a second canonicalizer local to this file. Sharing it is only safe
+		// because it is injective: every primitive carries a type tag and every
+		// variable-length piece is length-prefixed. A re-forked serializer that drops
+		// those (bare `String(value)`, unquoted keys, unprefixed concatenation) would let
+		// two schemas the provider sees as different bytes collide on one signature — the
+		// rebuild is skipped and the model is handed the wrong schema for the rest of the
+		// session. Only the schema field varies below, so any collision is the digest's.
+		const withDefault = (fallback: unknown): AppliedToolSignatureTool => ({
+			...SEARCH_TOOL,
+			parameters: { type: "object", properties: { filter: { type: "string", default: fallback } } },
+		});
+		const variants = [
+			withDefault(null),
+			withDefault("null"),
+			withDefault(0),
+			withDefault("0"),
+			withDefault(false),
+			withDefault(["a", "b"]),
+			withDefault([["a", "b"]]),
+			withDefault({ a: "b" }),
+		];
+		const signatures = new Set(variants.map(tool => signatureFor([tool])));
+		expect(signatures.size).toBe(variants.length);
+	});
+
 	it("differs when the tool array is reordered", () => {
 		// Tool order is render order, so a reorder must rebuild. Pre-fix this passed
 		// through the name segment; it now also pins that the appended schema segment

@@ -3,11 +3,17 @@
 // The keepalive originally covered two providers: Anthropic's first-party endpoint and
 // Bedrock. It now attempts every api with a replayable JSON body and an output-limit
 // field to overwrite. That widening is only defensible because the attempt is
-// self-limiting, and the last test in this file is what proves it: a provider that
-// reports no cache telemetry costs exactly ONE bounded request, because the
-// verified-touch rule (`cacheRead > 0 && cacheWrite === 0`) ends the chain on the first
-// unverified touch. Without that property, attempting an unknown provider would be an
-// unfalsifiable money burn rather than a cheap probe.
+// self-limiting, and the last test in this file is what proves it: a provider whose touch
+// reports no cache read costs exactly ONE bounded request, because the verified-touch rule
+// (`cacheRead > 0 && cacheWrite === 0`) ends the chain on the first unverified touch.
+// Without that property, attempting an unknown provider would be an unfalsifiable money
+// burn rather than a cheap probe.
+//
+// Note the rule is stricter than `classifyCacheOutcome`, deliberately. That helper calls
+// any `cacheRead > 0` a `confirmed-hit`, treating a simultaneous write as the tail of the
+// prefix being extended. For a *touch* a write is disqualifying: it means the entry had
+// already expired and this request rebuilt it, so the touch proved nothing about the
+// window it was supposed to measure.
 //
 // This file is deliberately explicit per api rather than looping a fixture: it is the
 // document that says what the supported surface IS, so a reader must be able to see
@@ -499,11 +505,15 @@ describe("a touch actually reaches the wire, per counter implementation", () => 
 
 describe("attempting an unverifiable provider is self-limiting", () => {
 	it("issues exactly one touch when the provider cannot confirm the entry was read", async () => {
-		// THE load-bearing test for the widening. An implicit-cache provider reports no
-		// cache-write counter, so a touch classifies `success-unverified` and the chain
-		// must end there. If it did not, attempting an unknown provider would be an
-		// unfalsifiable money burn instead of a one-request probe — which is the entire
-		// argument for covering providers this repo has never verified.
+		// THE load-bearing test for the widening. This provider reports a cache read on the
+		// priming request but none on the touch, which is the shape of implicit caching whose
+		// telemetry cannot confirm a touch landed — so the touch classifies
+		// `success-unverified` and the chain must end there. (A missing *write* counter would
+		// not do this: `cacheRead > 0 && cacheWrite === 0` is exactly the verified case, which
+		// is what OpenAI and Google normally report.) If the chain did not end, attempting an
+		// unknown provider would be an unfalsifiable money burn instead of a one-request
+		// probe — which is the entire argument for covering providers this repo has never
+		// verified.
 		const decisions: CacheKeepaliveRecord[] = [];
 		const { promise, resolve } = Promise.withResolvers<void>();
 		const bodies: Record<string, unknown>[] = [];

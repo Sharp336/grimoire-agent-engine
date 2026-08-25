@@ -1,6 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Agent, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+import { structuralHash } from "@oh-my-pi/pi-ai/cache";
 import { isRecord, logger, prompt, stringProperty, untilAborted } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
 import type { ModelRegistry } from "../config/model-registry";
@@ -208,33 +209,26 @@ export interface AppliedToolSignatureInputs {
 const toolSchemaDigests = new WeakMap<object, string>();
 
 /**
- * Serialize a JSON-Schema value with object keys sorted recursively and ARRAY
- * ORDER PRESERVED: key order is not observable on the wire, but the order of
- * `required`, `enum`, `anyOf`, and `prefixItems` is. Values `JSON.stringify`
- * cannot represent are handled the same way it handles them, so the digest
- * changes exactly when the serialized schema does. Schemas are acyclic — a
- * cyclic one could not be sent to a provider in the first place.
+ * Digest a tool's wire input schema with the central structural hash.
+ *
+ * {@link structuralHash} is exactly the discipline this signature needs: object
+ * keys are sorted recursively (key order is not observable on the wire, so a
+ * re-serialized schema must not force a rebuild — that rebuild is itself a
+ * prefix-cache miss) while ARRAY ORDER IS PRESERVED, because the order of
+ * `required`, `enum`, `anyOf`, and `prefixItems` *is* wire-visible. It is also
+ * injective over every JSON value a schema can hold, so two schemas that reach
+ * the provider as different bytes can never share a digest — the direction this
+ * signature's contract depends on. (It is strictly finer than `JSON.stringify`
+ * on `undefined`-valued keys and `NaN`/`Infinity`, which can only cause a
+ * redundant rebuild, never a skipped one.) Schemas are acyclic: a cyclic one
+ * could not be sent to a provider in the first place.
  */
-function stableSchemaJson(value: unknown): string {
-	if (value === null || typeof value !== "object") return JSON.stringify(value) ?? "null";
-	if (Array.isArray(value)) return `[${value.map(stableSchemaJson).join(",")}]`;
-	const record = value as Record<string, unknown>;
-	const fields: string[] = [];
-	for (const key of Object.keys(record).sort()) {
-		const field = record[key];
-		// Skip exactly what `JSON.stringify` drops from an object body.
-		if (field === undefined || typeof field === "function" || typeof field === "symbol") continue;
-		fields.push(`${JSON.stringify(key)}:${stableSchemaJson(field)}`);
-	}
-	return `{${fields.join(",")}}`;
-}
-
 function toolSchemaDigest(tool: AppliedToolSignatureTool): string {
 	const schema = tool.parameters;
 	if (schema === undefined) return "";
 	const cached = toolSchemaDigests.get(schema);
 	if (cached !== undefined) return cached;
-	const digest = Bun.hash(stableSchemaJson(schema)).toString(36);
+	const digest = structuralHash(schema);
 	toolSchemaDigests.set(schema, digest);
 	return digest;
 }

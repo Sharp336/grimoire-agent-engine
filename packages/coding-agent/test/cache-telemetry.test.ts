@@ -465,33 +465,29 @@ describe("cache telemetry keepalive wiring", () => {
 		expect(await store.readObservations()).toEqual([]);
 	});
 
-	it("schedules against the nominal default until the route has learned evidence, then against the learned TTL", async () => {
-		// THE test for this work: the loop must actually change a keepalive decision.
-		// Without it, every primitive can be wired and the schedule still never moves.
-		const session = await createSession();
-		const journal = await tmpJournal();
-		const route = resolveCacheTelemetryRoute(session.model!, "auto")!;
-
-		// Four confirmed hits at 150s idle: enough samples AND enough confidence for
-		// `resolveTtl` to prefer the learned interval over the 300s nominal lifetime.
+	/** Seed `count` confirmed hits at `idleSeconds` on `routeKey` — enough for `resolveTtl` to learn. */
+	async function seedLearnedRoute(journal: string, routeKey: string, idleSeconds: number, count = 4): Promise<void> {
 		await fs.mkdir(path.dirname(journal), { recursive: true });
-		const seeded = Array.from({ length: 4 }, (_unused, index) =>
+		const seeded = Array.from({ length: count }, (_unused, index) =>
 			JSON.stringify(
 				observation({
 					at: BASE_AT + index,
 					kind: "request",
-					routeKey: route.routeKey,
+					routeKey,
 					outcome: "confirmed-hit",
-					idleSeconds: 150,
+					idleSeconds,
 				}),
 			),
 		);
 		await Bun.write(journal, `${seeded.join("\n")}\n`);
+	}
 
-		// Capture the profile read the policy performs so the test awaits that exact promise
-		// instead of a wall-clock delay. The `.then` handler inside the policy was attached
-		// first, so it has already run once this promise resolves.
-		const store = new CacheTelemetryStore(journal);
+	/**
+	 * Wrap `loadProfile` so a test can await the policy's own read instead of a wall-clock
+	 * delay, and count reads. The policy attached its `.then` first, so its handler has
+	 * already run once the captured promise resolves.
+	 */
+	function captureProfileReads(store: CacheTelemetryStore): Array<Promise<unknown>> {
 		const reads: Array<Promise<unknown>> = [];
 		const loadProfile = store.loadProfile.bind(store);
 		spyOn(store, "loadProfile").mockImplementation(routeKey => {
@@ -499,41 +495,133 @@ describe("cache telemetry keepalive wiring", () => {
 			reads.push(read);
 			return read;
 		});
+		return reads;
+	}
+
+	it("has the learned TTL ready before the first lease arms, and re-reads once per armed chain", async () => {
+		// THE regression this eager read exists for: with the profile fetched only from
+		// `onDecision`, the FIRST chain of every process computes its deadline from the 300s
+		// nominal lifetime, because the first decision does not happen until that
+		// default-derived timer fires (~285s). On a route whose learned TTL is shorter, the
+		// entry is already gone by then — the touch rebuilds the cache at full write price
+		// and ends the chain — so the persisted evidence can only ever help a later chain
+		// that may never occur. The learned value must be readable BEFORE any decision.
+		const session = await createSession();
+		const journal = await tmpJournal();
+		const route = resolveCacheTelemetryRoute(session.model!, "auto")!;
+		await seedLearnedRoute(journal, route.routeKey, 150);
+
+		const store = new CacheTelemetryStore(journal);
+		const reads = captureProfileReads(store);
 		const policy = createCacheKeepalivePolicy(() => session, store);
 
-		// Before any chain has armed, no profile has been read, so the policy reports the
-		// same nominal lifetime the keepalive uses when `ttlSeconds` is omitted.
-		expect(policy.ttlSeconds).toBe(300);
+		// Nothing read yet, so the getter reports `undefined` rather than inventing a
+		// number — the provider layer then uses its own nominal lifetime.
+		expect(policy.ttlSeconds).toBeUndefined();
+		expect(policy.ttlReady).toBeUndefined();
 
-		// Arming a chain (touchIndex 1) is what triggers the single profile read.
-		policy.onDecision?.(decision({ fingerprint: "chain-1" }));
+		// What the request path does, before the stream it issues arms a chain.
+		policy.prefetchTtlProfile();
 		expect(reads).toHaveLength(1);
-		await reads[0];
 
-		// The learned lower bound, not the default: the feedback loop is closed.
+		// The load-bearing half. Starting the read is not enough on its own: the response
+		// could arrive first, and arming would then schedule from the nominal lifetime and
+		// place the first touch after a short-retention entry had already expired. `ttlReady`
+		// is what the provider layer waits on, so it MUST be observable while the read is
+		// still in flight — asserted here before anything is awaited.
+		const ready = policy.ttlReady;
+		expect(ready).toBeDefined();
+
+		await ready;
+
+		// Populated with no `onDecision` ever having run: this is the value the FIRST lease
+		// is armed with, and arming could not have run earlier because it waits on `ready`.
+		expect(policy.ttlSeconds).toBe(150);
+		// Cleared once settled, so later leases in this session schedule without waiting.
+		expect(policy.ttlReady).toBeUndefined();
+
+		// A further request on the same route must not re-read: the prefetch is idempotent,
+		// so priming per request costs one journal read per route, not one per request.
+		policy.prefetchTtlProfile();
+		expect(reads).toHaveLength(1);
+
+		// Arming a chain still refreshes exactly once, which is how evidence appended since
+		// the prefetch reaches the schedule.
+		policy.onDecision?.(decision({ fingerprint: "chain-1" }));
+		expect(reads).toHaveLength(2);
+		await reads[1];
 		expect(policy.ttlSeconds).toBe(150);
 
 		// Later touches in the SAME chain must not re-read: that is the "once per armed
 		// chain" bound, and without it every touch would re-parse the journal.
 		policy.onDecision?.(decision({ fingerprint: "chain-1", touchIndex: 2 }));
 		policy.onDecision?.(decision({ fingerprint: "chain-1", touchIndex: 3 }));
-		expect(reads).toHaveLength(1);
-
-		// A newly armed chain does read again — that is how evidence recorded since the
-		// last chain reaches the schedule.
-		policy.onDecision?.(decision({ fingerprint: "chain-2", touchIndex: 1 }));
 		expect(reads).toHaveLength(2);
+
+		// A newly armed chain does read again.
+		policy.onDecision?.(decision({ fingerprint: "chain-2", touchIndex: 1 }));
+		expect(reads).toHaveLength(3);
 	});
 
-	it("falls back to the nominal default when there is no session to resolve a route from", async () => {
+	it("reports no TTL for a route with no persisted evidence", async () => {
+		// Failure mode: a prefetch that resolves to "no profile" pins the nominal default as
+		// if it had been measured, which would make an unlearned route indistinguishable
+		// from a route genuinely learned at 300s and freeze a guess into the schedule.
+		const session = await createSession();
+		const store = new CacheTelemetryStore(await tmpJournal());
+		const reads = captureProfileReads(store);
+		const policy = createCacheKeepalivePolicy(() => session, store);
+
+		policy.prefetchTtlProfile();
+		expect(reads).toHaveLength(1);
+		await reads[0];
+
+		expect(policy.ttlSeconds).toBeUndefined();
+	});
+
+	it("prefetches nothing for a session the request recorder also refuses", async () => {
+		// Failure mode: the eager read is a new filesystem touch on the request path, and an
+		// in-memory SDK embedding — which files no rows at all — must not acquire one.
+		const session = await createSession({ eligible: false });
+		const journal = await tmpJournal();
+		const route = resolveCacheTelemetryRoute(session.model!, "auto")!;
+		await seedLearnedRoute(journal, route.routeKey, 150);
+
+		const store = new CacheTelemetryStore(journal);
+		const reads = captureProfileReads(store);
+		const policy = createCacheKeepalivePolicy(() => session, store);
+
+		expect(session.cacheTelemetryEligible()).toBe(false);
+		policy.prefetchTtlProfile();
+		expect(reads).toEqual([]);
+		expect(policy.ttlSeconds).toBeUndefined();
+		// Nothing was written either, so the seeded rows are all the journal holds.
+		await store.settle();
+		expect(await store.readObservations()).toHaveLength(4);
+
+		// Same session reporting a file under the sessions directory does prefetch, so the
+		// empty result above is the gate and not a broken hook.
+		spyOn(session.sessionManager, "getSessionFile").mockReturnValue(
+			path.join(getSessionsDir(), "project", "eligible.jsonl"),
+		);
+		policy.prefetchTtlProfile();
+		expect(reads).toHaveLength(1);
+		await reads[0];
+		expect(policy.ttlSeconds).toBe(150);
+	});
+
+	it("reports no TTL when there is no session to resolve a route from", async () => {
 		// Failure mode: the policy is built before the session exists, so a getter that
 		// assumed one would throw into the keepalive's scheduling path.
 		const store = new CacheTelemetryStore(await tmpJournal());
+		const reads = captureProfileReads(store);
 		const policy = createCacheKeepalivePolicy(() => undefined, store);
 
-		expect(policy.ttlSeconds).toBe(300);
-		// And a decision arriving in that window is dropped rather than filed under a
-		// fabricated route.
+		expect(policy.ttlSeconds).toBeUndefined();
+		// And no route means nothing to prefetch, rather than a read keyed on a fabricated one.
+		policy.prefetchTtlProfile();
+		expect(reads).toEqual([]);
+		// A decision arriving in that window is likewise dropped rather than filed.
 		policy.onDecision?.(decision());
 		await store.settle();
 		expect(await store.readObservations()).toEqual([]);

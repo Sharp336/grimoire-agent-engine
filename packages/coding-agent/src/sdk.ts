@@ -1268,6 +1268,28 @@ export function createAutoLearnCaptureRunner(
 const CACHE_KEEPALIVE_DEFAULT_TTL_S = 300;
 
 /**
+ * Session-derived keepalive policy plus the request-path hook that primes it.
+ *
+ * The extra member is deliberately outside {@link CacheKeepalivePolicy}: the provider
+ * layer must never depend on being primed — it only ever reads the policy — while the
+ * caller that issues requests is the only place that knows a chain is about to be armed.
+ */
+export interface SessionCacheKeepalivePolicy extends CacheKeepalivePolicy {
+	/**
+	 * Start reading this route's persisted TTL profile, if it is not already known.
+	 *
+	 * Fire-and-forget and idempotent per route. MUST be called on the request path:
+	 * the chain a request arms computes its first deadline from {@link ttlSeconds} the
+	 * moment that request's stream completes, so a read started here is the only one
+	 * that can bound the FIRST lease. A read started later (from `onDecision`) cannot:
+	 * the first decision only happens once the default-derived deadline has already
+	 * fired, by which point a learned shorter TTL has been ignored for the whole chain
+	 * it was learned for.
+	 */
+	prefetchTtlProfile(): void;
+}
+
+/**
  * Session-derived policy for the provider prompt-cache keepalive.
  *
  * Exported (rather than inlined at the single call site) purely so it is testable: the
@@ -1286,13 +1308,20 @@ const CACHE_KEEPALIVE_DEFAULT_TTL_S = 300;
 export function createCacheKeepalivePolicy(
 	getSession: () => AgentSession | undefined,
 	store: CacheTelemetryStore = cacheTelemetryStore(),
-): CacheKeepalivePolicy {
-	// Learned TTL for the route of the last armed chain. Held as a resolved number so
-	// the `ttlSeconds` getter stays synchronous — the journal read that produces it is
-	// async and happens at most once per armed chain, below.
+): SessionCacheKeepalivePolicy {
+	// Learned TTL for the route the last profile read resolved. Held as a resolved number
+	// so the `ttlSeconds` getter stays synchronous — the journal read that produces it is
+	// async and is started from `prefetchTtlProfile` / `onDecision`, never awaited here.
 	let learnedTtlS: number | undefined;
 	let learnedRouteKey: string | undefined;
 	let refreshingRouteKey: string | undefined;
+	// The in-flight read, surfaced as `ttlReady` so arming waits for it instead of
+	// scheduling the first lease from the nominal lifetime. Deliberately resolves in BOTH
+	// branches below rather than rejecting on a read failure: a missing or unreadable
+	// profile means "no evidence", which the nominal lifetime already covers, and rejecting
+	// would end a chain that has nothing wrong with it. It means "this value is now as good
+	// as it is going to get", not "the read succeeded".
+	let pendingRead: Promise<void> | undefined;
 
 	const currentRoute = (): CacheTelemetryRoute | undefined => {
 		const session = getSession();
@@ -1301,7 +1330,49 @@ export function createCacheKeepalivePolicy(
 		return resolveCacheTelemetryRoute(model, session.settings.get("providers.cacheRetention"));
 	};
 
+	/**
+	 * Read `route`'s profile into {@link learnedTtlS}. `force` is what keeps the cost at
+	 * one read per armed chain plus one per new route: the request path calls this on every
+	 * request and must not re-read a route it already resolved, while `onDecision` forces
+	 * exactly one refresh per chain so a long-lived session keeps learning.
+	 */
+	const refreshProfile = (route: CacheTelemetryRoute, force: boolean): void => {
+		// A read for this route is already in flight; a second would answer the same bytes.
+		if (route.routeKey === refreshingRouteKey) return;
+		if (!force && route.routeKey === learnedRouteKey) return;
+		refreshingRouteKey = route.routeKey;
+		const read = store.loadProfile(route.routeKey).then(
+			profile => {
+				refreshingRouteKey = undefined;
+				learnedRouteKey = route.routeKey;
+				const resolved = resolveTtl({ profile, defaultS: CACHE_KEEPALIVE_DEFAULT_TTL_S });
+				// Only a `learned` result replaces the default. `hint`/`default` are not
+				// observations, and pinning them here would freeze a guess as if measured.
+				learnedTtlS = resolved.source === "learned" ? resolved.ttlS : undefined;
+			},
+			err => {
+				refreshingRouteKey = undefined;
+				logger.debug("prompt-cache keepalive: TTL profile read failed", { err: String(err) });
+			},
+		);
+		pendingRead = read;
+		void read.then(() => {
+			// Clear only if no later read replaced it, so `ttlReady` tracks the live one.
+			if (pendingRead === read) pendingRead = undefined;
+		});
+	};
+
 	return {
+		prefetchTtlProfile: () => {
+			const route = currentRoute();
+			if (route === undefined) return;
+			// Same eligibility gate the observation sinks use: an in-memory SDK embedding or
+			// a session outside the sessions directory files no rows, so it has no persisted
+			// evidence of its own to prefetch, and a speculative read on its request path
+			// would only add filesystem work to a session that can never benefit.
+			if (getSession()?.cacheTelemetryEligible() !== true) return;
+			refreshProfile(route, false);
+		},
 		resumeProbability: () => {
 			// 0.95 mirrors cachepilot's notify-on-complete resume probability: while work
 			// this session will resume from is still live — owned background jobs, or a turn
@@ -1326,17 +1397,35 @@ export function createCacheKeepalivePolicy(
 			return usage.cacheRead + usage.cacheWrite;
 		},
 		/**
-		 * A learned TTL only takes effect on the NEXT armed chain, which is correct:
-		 * the running chain already computed its deadline against the generation fence
-		 * it armed with, and moving that deadline mid-flight would invalidate the fence
-		 * — the touch would fire against a generation the chain no longer owns.
+		 * The learned TTL for the current route, or `undefined` when none is known yet —
+		 * the provider layer then schedules from its nominal lifetime, exactly as it does
+		 * for a policy that omits this member. Never guesses and never awaits: the value
+		 * is produced by {@link SessionCacheKeepalivePolicy.prefetchTtlProfile}, which the
+		 * request path starts before the chain this request arms reads it here.
+		 *
+		 * A profile that lands mid-chain only takes effect on the NEXT armed chain, which
+		 * is correct: the running chain already computed its deadline against the
+		 * generation fence it armed with, and moving that deadline mid-flight would
+		 * invalidate the fence — the touch would fire against a generation the chain no
+		 * longer owns.
 		 */
-		get ttlSeconds(): number {
+		get ttlSeconds(): number | undefined {
 			const route = currentRoute();
-			// A route we have not read a profile for resolves to the nominal default,
-			// which is exactly what the keepalive uses when `ttlSeconds` is omitted.
-			if (route === undefined || route.routeKey !== learnedRouteKey) return CACHE_KEEPALIVE_DEFAULT_TTL_S;
-			return learnedTtlS ?? CACHE_KEEPALIVE_DEFAULT_TTL_S;
+			if (route === undefined || route.routeKey !== learnedRouteKey) return undefined;
+			return learnedTtlS;
+		},
+		/**
+		 * The in-flight profile read, so the provider layer waits for the learned TTL rather
+		 * than arming the first lease of the process from its nominal lifetime — the
+		 * regression this closes is a route whose real retention is shorter than nominal,
+		 * where the first touch then lands after the entry has already expired.
+		 *
+		 * `undefined` once nothing is pending, which is the common case: the request path
+		 * primes the read before issuing the request, so by the time that request's chain
+		 * arms the read has usually already resolved and later leases never wait at all.
+		 */
+		get ttlReady(): Promise<unknown> | undefined {
+			return pendingRead;
 		},
 		onDecision: record => {
 			logger.debug("prompt-cache keepalive decision", {
@@ -1350,25 +1439,10 @@ export function createCacheKeepalivePolicy(
 			const route = currentRoute();
 			if (route === undefined) return;
 
-			// `touchIndex === 1` is the first decision of an armed chain, so this reads the
-			// journal once per chain rather than once per touch.
-			if (record.touchIndex === 1 && route.routeKey !== refreshingRouteKey) {
-				refreshingRouteKey = route.routeKey;
-				void store.loadProfile(route.routeKey).then(
-					profile => {
-						refreshingRouteKey = undefined;
-						learnedRouteKey = route.routeKey;
-						const resolved = resolveTtl({ profile, defaultS: CACHE_KEEPALIVE_DEFAULT_TTL_S });
-						// Only a `learned` result replaces the default. `hint`/`default` are not
-						// observations, and pinning them here would freeze a guess as if measured.
-						learnedTtlS = resolved.source === "learned" ? resolved.ttlS : undefined;
-					},
-					err => {
-						refreshingRouteKey = undefined;
-						logger.debug("prompt-cache keepalive: TTL profile read failed", { err: String(err) });
-					},
-				);
-			}
+			// `touchIndex === 1` is the first decision of an armed chain, so this re-reads the
+			// journal once per chain rather than once per touch. Forced, because the point is
+			// to pick up evidence appended since the prefetch resolved.
+			if (record.touchIndex === 1) refreshProfile(route, true);
 
 			// A skipped decision observed nothing about the entry — the touch never went to
 			// the provider — so there is no outcome to classify and nothing to learn. Only
@@ -3595,6 +3669,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					settings.get("externalThinking") &&
 					agent.state.tools.some(tool => tool.name === "think") &&
 					supportsExternalThinking(streamModel);
+				const economicKeepalive = settings.get("providers.cacheKeepalive") === "economic";
+				// Start the learned-TTL read here, on the request path. The chain this request
+				// arms computes its first deadline from `policy.ttlSeconds` as soon as this
+				// stream completes, so this is the last moment a read can still bound the FIRST
+				// lease; deferring it to `onDecision` means the first decision only happens
+				// after the default-derived deadline already fired. Fire-and-forget: it never
+				// delays the request, and an unresolved read simply leaves the nominal TTL.
+				if (economicKeepalive) cacheKeepalivePolicy.prefetchTtlProfile();
 				return settingsAwareStreamFn(streamModel, context, {
 					...streamOptions,
 					anthropicCacheRefresh: true,
@@ -3605,7 +3687,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// billed keepalive requests than before. That is a change to how often a
 					// session spends money, so it waits for an explicit setting instead of
 					// arriving as the default.
-					...(settings.get("providers.cacheKeepalive") === "economic" ? { cacheKeepalivePolicy } : {}),
+					...(economicKeepalive ? { cacheKeepalivePolicy } : {}),
 					forceReasoningOff: externalThinking || streamOptions?.forceReasoningOff,
 					...(codeModeState.namespacesInfo === undefined
 						? {}
