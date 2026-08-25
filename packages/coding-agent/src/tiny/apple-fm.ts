@@ -39,6 +39,17 @@ export function isAfmModelNotReady(error: unknown): boolean {
 	return /\bmodelNotReady\b/.test(text);
 }
 
+/** Prompt/guardrail failures must not disable AFM for later titles. */
+const AFM_TERMINAL_AVAILABILITY = /\b(deviceNotEligible|appleIntelligenceNotEnabled|unsupported_os|unavailable)\b/;
+
+export function isAfmRequestScopedFailure(error: unknown): boolean {
+	const text = error instanceof Error ? error.message : String(error);
+	if (isAfmModelNotReady(error)) return true;
+	if (/Apple Foundation Models sidecar returned empty text/.test(text)) return true;
+	if (!/\bapple_fm_failed\b/.test(text)) return false;
+	return !AFM_TERMINAL_AVAILABILITY.test(text);
+}
+
 function sidecarCacheDir(): string {
 	return path.join(getTinyModelsCacheDir(), "apple-fm");
 }

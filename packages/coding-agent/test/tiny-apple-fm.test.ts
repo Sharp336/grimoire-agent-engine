@@ -9,6 +9,7 @@ import {
 	AFM_CORE_SIDECAR_ENV,
 	completeAfmCore,
 	foundationModelsUnavailableReason,
+	isAfmRequestScopedFailure,
 	probeAfmCore,
 	resolveBundledSidecarPath,
 } from "../src/tiny/apple-fm";
@@ -68,6 +69,14 @@ describe("afm-core title registry", () => {
 		expect(resolveBundledSidecarPath("./omp-apple-fm-py3pdx4g.", "/pkg/dist")).toBe(
 			path.join("/pkg/dist", "omp-apple-fm-py3pdx4g."),
 		);
+	});
+
+	it("treats generation failures as request-scoped and availability faults as terminal", () => {
+		expect(isAfmRequestScopedFailure(new Error("apple_fm_failed: modelNotReady"))).toBe(true);
+		expect(isAfmRequestScopedFailure(new Error("apple_fm_failed: Generation was refused"))).toBe(true);
+		expect(isAfmRequestScopedFailure(new Error("Apple Foundation Models sidecar returned empty text"))).toBe(true);
+		expect(isAfmRequestScopedFailure(new Error("apple_fm_failed: deviceNotEligible"))).toBe(false);
+		expect(isAfmRequestScopedFailure(new Error("failed to compile Apple Foundation Models sidecar"))).toBe(false);
 	});
 });
 
@@ -232,6 +241,78 @@ process.exit(1);
 			expect(outbound.some(message => message.type === "title" && message.title === null)).toBe(true);
 			expect(outbound.some(message => message.type === "progress" && message.event.status === "error")).toBe(true);
 			expect(outbound.some(message => message.type === "error")).toBe(false);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps prompt-specific AFM failures request-scoped", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-afm-"));
+		try {
+			const sidecar = writeFakeSidecar(
+				dir,
+				bunSidecar(`
+process.stdout.write(JSON.stringify({ error: "apple_fm_failed", reason: "Generation was refused" }) + "\\n");
+process.exit(1);
+`),
+			);
+			process.env[AFM_CORE_SIDECAR_ENV] = sidecar;
+
+			const outbound: TinyTitleWorkerOutbound[] = [];
+			let inbound: ((message: TinyTitleWorkerInbound) => void) | undefined;
+			const seen = Promise.withResolvers<void>();
+			startTinyTitleWorker({
+				send(message) {
+					outbound.push(message);
+					if (message.type === "title" || message.type === "error") seen.resolve();
+				},
+				onMessage(handler) {
+					inbound = handler;
+					return () => {
+						inbound = undefined;
+					};
+				},
+			});
+			inbound?.({ type: "generate", id: "5", modelKey: "afm-core", message: "fix the login button" });
+			await seen.promise;
+			expect(outbound.some(message => message.type === "title" && message.title === null)).toBe(true);
+			expect(outbound.some(message => message.type === "error")).toBe(false);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("still fails the worker on permanent AFM unavailability", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-afm-"));
+		try {
+			const sidecar = writeFakeSidecar(
+				dir,
+				bunSidecar(`
+process.stdout.write(JSON.stringify({ error: "apple_fm_failed", reason: "deviceNotEligible" }) + "\\n");
+process.exit(1);
+`),
+			);
+			process.env[AFM_CORE_SIDECAR_ENV] = sidecar;
+
+			const outbound: TinyTitleWorkerOutbound[] = [];
+			let inbound: ((message: TinyTitleWorkerInbound) => void) | undefined;
+			const seen = Promise.withResolvers<void>();
+			startTinyTitleWorker({
+				send(message) {
+					outbound.push(message);
+					if (message.type === "title" || message.type === "error") seen.resolve();
+				},
+				onMessage(handler) {
+					inbound = handler;
+					return () => {
+						inbound = undefined;
+					};
+				},
+			});
+			inbound?.({ type: "generate", id: "6", modelKey: "afm-core", message: "fix the login button" });
+			await seen.promise;
+			expect(outbound.some(message => message.type === "error")).toBe(true);
+			expect(outbound.some(message => message.type === "title")).toBe(false);
 		} finally {
 			fs.rmSync(dir, { recursive: true, force: true });
 		}

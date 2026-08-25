@@ -19,7 +19,12 @@ import {
 	sendProgress,
 	type TransformersRuntimeMetadata,
 } from "../subprocess/worker-runtime";
-import { completeAfmCore, foundationModelsUnavailableReason, isAfmModelNotReady, probeAfmCore } from "./apple-fm";
+import {
+	completeAfmCore,
+	foundationModelsUnavailableReason,
+	isAfmRequestScopedFailure,
+	probeAfmCore,
+} from "./apple-fm";
 import { buildCompletionPrompt } from "./completion-prompt";
 import { resolveTinyModelDevicePreference, type TinyModelDevice, tinyModelDeviceLoadOrder } from "./device";
 import { resolveTinyModelDtypeOverride, type TinyModelDtype } from "./dtype";
@@ -310,7 +315,7 @@ async function generateTitleFromFoundationModels(
 		});
 		return extractTinyTitle(text, message);
 	} catch (error) {
-		if (isAfmModelNotReady(error)) {
+		if (isAfmRequestScopedFailure(error)) {
 			transport.send({
 				type: "progress",
 				id: requestId,
@@ -372,7 +377,7 @@ async function generateCompletion(
 			const generated = text.trim();
 			return generated === "" ? null : generated;
 		} catch (error) {
-			if (isAfmModelNotReady(error)) return null;
+			if (isAfmRequestScopedFailure(error)) return null;
 			throw error;
 		}
 	}
