@@ -10,6 +10,7 @@ import {
 	type FetchImpl,
 	getCustomApi,
 	type Model,
+	type OAuthAccess,
 } from "@oh-my-pi/pi-ai";
 import { getOAuthProviders, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
@@ -579,6 +580,30 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(registry.authStorage.hasAuth("runtime-provider")).toBe(true);
 
 		delete process.env.TEST_RUNTIME_KEY;
+	});
+
+	test("extension runtime resolvers own bearer and structured OAuth resolution", async () => {
+		const providerName = "openai-codex";
+		const model = registry.getAll().find(candidate => candidate.provider === providerName);
+		if (!model) throw new Error("expected bundled OpenAI Codex model");
+		const resolveApiKey = vi.fn(() => "runtime-access");
+		const oauthAccess: OAuthAccess = {
+			accessToken: "runtime-access",
+			accountId: "runtime-account",
+			email: "runtime@example.com",
+		};
+		const resolveOAuth = vi.fn(() => oauthAccess);
+
+		registry.registerProvider(providerName, { resolveApiKey, resolveOAuth }, "ext://runtime");
+
+		expect(registry.hasConfiguredAuth(model)).toBe(true);
+		expect(await registry.resolver(providerName)({ lastChance: false, error: undefined })).toBe("runtime-access");
+		expect(await registry.getRuntimeOAuthResolver(providerName)?.({ lastChance: false, error: undefined })).toEqual(
+			oauthAccess,
+		);
+
+		registry.clearSourceRegistrations("ext://runtime");
+		expect(registry.getRuntimeOAuthResolver(providerName)).toBeUndefined();
 	});
 
 	test("extension-registered custom API handler survives model refresh", async () => {

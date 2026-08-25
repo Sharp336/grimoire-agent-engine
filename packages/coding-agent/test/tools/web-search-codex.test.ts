@@ -307,6 +307,44 @@ describe("searchCodex model selection", () => {
 		expect(result.sources).toEqual([{ title: "Example Article", url: "https://example.com/article" }]);
 	});
 
+	it("uses extension runtime OAuth for the official Codex endpoint", async () => {
+		const getOAuthAccess = vi.fn(() => {
+			throw new Error("stored OAuth must not be consulted");
+		});
+		const runtimeOAuth = vi.fn(() => ({
+			accessToken: "runtime-oauth-token",
+			accountId: "runtime-account",
+			email: "runtime@example.com",
+		}));
+		const runtimeRegistry = {
+			find() {
+				return undefined;
+			},
+			getProviderBaseUrl() {
+				return undefined;
+			},
+			getProviderHeaders() {
+				return undefined;
+			},
+			getRuntimeOAuthResolver() {
+				return runtimeOAuth;
+			},
+		} as unknown as ModelRegistry;
+
+		const result = await searchCodex({
+			...makeSearchParams("runtime OAuth search", mockCodexFetch("gpt-5.6-luna")),
+			authStorage: { getOAuthAccess } as unknown as AuthStorage,
+			modelRegistry: runtimeRegistry,
+		});
+
+		const headers = new Headers(capturedRequest?.headers);
+		expect(headers.get("authorization")).toBe("Bearer runtime-oauth-token");
+		expect(headers.get("chatgpt-account-id")).toBe("runtime-account");
+		expect(runtimeOAuth).toHaveBeenCalledWith({ lastChance: false, error: undefined, signal: undefined });
+		expect(getOAuthAccess).not.toHaveBeenCalled();
+		expect(result.sources).toEqual([{ title: "Example Article", url: "https://example.com/article" }]);
+	});
+
 	it("applies the configured request timeout to Codex search", async () => {
 		const timeoutSignal = new AbortController().signal;
 		const timeoutSpy = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timeoutSignal);

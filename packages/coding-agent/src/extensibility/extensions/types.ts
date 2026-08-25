@@ -22,6 +22,7 @@ import type {
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
 	Api,
+	ApiKeyResolver,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	Context,
@@ -52,7 +53,7 @@ import type {
 } from "@oh-my-pi/pi-tui";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { KeybindingsManager } from "../../config/keybindings";
-import type { ModelRegistry } from "../../config/model-registry";
+import type { ModelRegistry, RuntimeOAuthResolver } from "../../config/model-registry";
 import type { EditToolDetails } from "../../edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
@@ -1538,8 +1539,12 @@ export interface ExtensionAPI {
 export interface ProviderConfig {
 	/** Base URL for the API endpoint. Required when defining models. */
 	baseUrl?: string;
-	/** API key or environment variable name. Required when defining models unless oauth is provided. */
+	/** API key or environment variable name. Required when defining models unless a resolver or OAuth is provided. */
 	apiKey?: string;
+	/** Runtime bearer resolver. Takes precedence over command, config, and stored credentials. */
+	resolveApiKey?: ApiKeyResolver;
+	/** Runtime structured OAuth resolver for identity-aware transports such as Codex web search. */
+	resolveOAuth?: RuntimeOAuthResolver;
 	/** API type identifier. Required when registering streamSimple or when models don't specify one. */
 	api?: Api;
 	/** Custom streaming function for non-built-in APIs. */
