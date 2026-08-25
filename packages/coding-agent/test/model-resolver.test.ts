@@ -21,6 +21,7 @@ import {
 	resolveModelOverride,
 	resolveModelRoleValue,
 	resolveModelScope,
+	resolveProviderModelReference,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { DEFAULT_MODEL_ROLE_ALIAS, LEGACY_MODEL_ROLE_ALIAS_PREFIX } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -1556,6 +1557,109 @@ describe("resolveCliModel", () => {
 		expect(result.model?.id).toBe("z-ai/glm-4.7-20251222:nitro");
 	});
 
+	test("resolves OpenRouter preset selectors to a cloned catalog model", () => {
+		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
+
+		const result = resolveCliModel({
+			cliModel: "openrouter/@preset/free",
+			modelRegistry: registry,
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.api).toBe("openrouter");
+		const compat = result.model?.compat;
+		expect(compat && "wireModelIdMode" in compat ? compat.wireModelIdMode : undefined).toBe("openrouter");
+		expect(result.model?.id).toBe("@preset/free");
+		expect(result.model?.requestModelId).toBe("@preset/free");
+		expect(result.model?.thinking?.efforts).toContain(Effort.High);
+		expect(result.model?.contextWindow).toBeNull();
+		expect(result.model?.maxTokens).toBeNull();
+		expect(result.model?.reasoning).toBe(true);
+		expect(result.model?.input).toEqual(["text"]);
+		expect(result.selector).toBe("openrouter/@preset/free");
+	});
+
+	test("resolves an OpenRouter preset selector with an uppercase prefix", () => {
+		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
+
+		const result = resolveCliModel({
+			cliModel: "openrouter/@PRESET/free",
+			modelRegistry: registry,
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.id).toBe("@preset/free");
+		expect(result.model?.requestModelId).toBe("@preset/free");
+	});
+
+	test("parses thinking suffixes after OpenRouter preset selectors", () => {
+		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
+
+		const result = resolveCliModel({
+			cliModel: "openrouter/@preset/free:high",
+			modelRegistry: registry,
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.id).toBe("@preset/free");
+		expect(result.model?.requestModelId).toBe("@preset/free");
+		expect(result.thinkingLevel).toBe(Effort.High);
+	});
+
+	test("resolves an explicit OpenRouter provider with a bare preset id", () => {
+		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
+
+		const result = resolveCliModel({
+			cliProvider: "openrouter",
+			cliModel: "@preset/free",
+			modelRegistry: registry,
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.id).toBe("@preset/free");
+		expect(result.model?.requestModelId).toBe("@preset/free");
+	});
+
+	test("rejects an empty @preset/ selector", () => {
+		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
+
+		const result = resolveCliModel({
+			cliModel: "openrouter/@preset/",
+			modelRegistry: registry,
+		});
+
+		expect(result.model).toBeUndefined();
+		expect(result.error).toContain("not found");
+	});
+
+	test("does not resolve a preset selector when no openrouter model is available", () => {
+		const registry = { getAll: () => mockModels, getAvailable: () => mockModels } as unknown as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
+
+		const result = resolveCliModel({
+			cliModel: "openrouter/@preset/free",
+			modelRegistry: registry,
+		});
+
+		expect(result.model).toBeUndefined();
+		expect(result.error).toContain("not found");
+	});
+
 	test("accepts Bedrock inference profile ARNs and preserves thinking suffixes", () => {
 		const defaultBedrockModel = createBedrockDefaultModel();
 		const profileArn = "arn:aws:bedrock:us-east-2:1234567890:application-inference-profile/company-opus-48";
@@ -2040,6 +2144,17 @@ describe("provider routing selector (@upstream)", () => {
 		expect(result.selector).toBe("openrouter/z-ai/glm-4.7@cerebras");
 		expect(openRouterOnly(result.model)).toEqual(["cerebras"]);
 	});
+
+	test("resolveCliModel routes an OpenRouter preset through @upstream", () => {
+		const registry = { getAll: () => allModels, getAvailable: () => allModels } as unknown as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
+		const result = resolveCliModel({ cliModel: "openrouter/@preset/free@cerebras", modelRegistry: registry });
+		expect(result.error).toBeUndefined();
+		expect(result.model?.id).toBe("@preset/free");
+		expect(result.selector).toBe("openrouter/@preset/free@cerebras");
+		expect(openRouterOnly(result.model)).toEqual(["cerebras"]);
+	});
 });
 
 describe("filterAvailableModelsByEnabledPatterns", () => {
@@ -2243,5 +2358,31 @@ describe("effort-tier variant aliases", () => {
 	test("consumed X-thinking twins resolve via the grammar fallback", () => {
 		expect(parseModelPattern("venice/kimi-k2-thinking", variantModels).model?.id).toBe("kimi-k2");
 		expect(parseModelPattern("kimi-k2-thinking", variantModels).model?.id).toBe("kimi-k2");
+	});
+});
+
+describe("resolveProviderModelReference OpenRouter preset fallback", () => {
+	test("synthesizes a preset model from an available OpenRouter provider row", () => {
+		const result = resolveProviderModelReference("openrouter", "@preset/free", allModels);
+		expect(result).toBeDefined();
+		expect(result?.provider).toBe("openrouter");
+		expect(result?.id).toBe("@preset/free");
+		expect(result?.requestModelId).toBe("@preset/free");
+		expect(result?.thinking?.efforts).toContain(Effort.High);
+	});
+
+	test("returns undefined when no OpenRouter provider row is available", () => {
+		const result = resolveProviderModelReference("openrouter", "@preset/free", mockModels);
+		expect(result).toBeUndefined();
+	});
+
+	test("returns undefined for empty @preset/ id", () => {
+		expect(resolveProviderModelReference("openrouter", "@preset/", allModels)).toBeUndefined();
+		expect(resolveProviderModelReference("openrouter", "@preset", allModels)).toBeUndefined();
+	});
+
+	test("rejects preset slugs that contain selector delimiters", () => {
+		expect(resolveProviderModelReference("openrouter", "@preset/free@cerebras", allModels)).toBeUndefined();
+		expect(resolveProviderModelReference("openrouter", "@preset/free:high", allModels)).toBeUndefined();
 	});
 });

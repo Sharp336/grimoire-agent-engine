@@ -69,6 +69,7 @@ import {
 	resolveCliModel,
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
+	resolveProviderModelReference,
 } from "./config/model-resolver";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
@@ -1503,8 +1504,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					failedSessionModel ??= sessionModelStr;
 					continue;
 				}
-
-				const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
+				const restoredModel =
+					modelRegistry.find(parsedModel.provider, parsedModel.id) ??
+					resolveProviderModelReference(parsedModel.provider, parsedModel.id, modelRegistry.getAll());
 				if (restoredModel && hasModelAuth(restoredModel)) {
 					model = restoredModel;
 					restoredSessionModelIndex = i;

@@ -547,6 +547,7 @@ export function isOpenRouterAnthropicModel(model: OpenAIModelIdentity): boolean 
  */
 export function applyOpenRouterRoutingVariant(modelId: string, variant: string | undefined): string {
 	if (!variant) return modelId;
+	if (modelId.toLowerCase().includes("@preset/")) return modelId;
 	const lastSlash = modelId.lastIndexOf("/");
 	const lastColon = modelId.lastIndexOf(":");
 	if (lastColon > lastSlash) return modelId;
