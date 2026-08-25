@@ -4,7 +4,7 @@
 
 ### Added
 
-- Prompt-cache keepalive now covers Amazon Bedrock, which reports cache-read/cache-write tokens but was previously excluded, so a Bedrock session paid a full cache write on every resume after a >5-minute idle gap. Coverage beyond Anthropic is opt-in: without a supplied `cacheKeepalivePolicy` the keepalive stays Anthropic-only and issues exactly the touches it did before.
+- Prompt-cache keepalive now attempts every provider with a replayable request body — the OpenAI Completions and Responses families, Azure, OpenRouter, Amazon Bedrock, the Google and Gemini CLI APIs, Ollama, Anthropic-compatible gateways, and custom APIs registered through `registerCustomApi`, whose output limit is discovered from the request rather than assumed. Previously only Anthropic's first-party endpoint was covered, so every other provider paid a full cache write on each resume after an idle gap. A provider that reports no cache telemetry costs a single bounded request and is then left alone. Coverage beyond Anthropic is opt-in: without a supplied `cacheKeepalivePolicy` the keepalive stays Anthropic-only and issues exactly the touches it did before.
 - Prompt-cache keepalive is now cost-aware: a `cacheKeepalivePolicy` gates each touch on whether the avoided rebuild is worth more than the touch, so the chain lasts as long as it pays for itself instead of stopping at a fixed 3 touches, and issues no touch at all once nothing will resume the session.
 - Added `@oh-my-pi/pi-ai/cache`: cache identity fingerprints, outcome classification, an economic warm controller, evidence-based TTL learning, and keepalive deadline scheduling.
 

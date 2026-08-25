@@ -300,6 +300,7 @@ describe("resolveCacheKeepaliveShape", () => {
 		expect(resolveCacheKeepaliveShape(bedrockModel(), optedIn)).toEqual({
 			kind: "bounded-stream",
 			maxTokens: 1,
+			bound: { kind: "candidates", paths: [["inferenceConfig", "maxTokens"]] },
 		});
 	});
 
@@ -322,23 +323,9 @@ describe("resolveCacheKeepaliveShape", () => {
 		expect(resolveCacheKeepaliveShape(bedrockModel("automatic"), optedIn)).toBeUndefined();
 	});
 
-	it("declines a provider with no verifiable cache telemetry", () => {
-		const openai = buildModel({
-			id: "gpt-5.6",
-			name: "gpt",
-			api: "openai-responses",
-			provider: "openai",
-			baseUrl: "https://api.openai.com",
-			reasoning: false,
-			input: ["text"],
-			cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 0 },
-			contextWindow: 128_000,
-			maxTokens: 8_192,
-		});
-		expect(
-			resolveCacheKeepaliveShape(openai, { officialAnthropicEndpoint: true, economicPolicySupplied: true }),
-		).toBeUndefined();
-	});
+	// The per-api coverage matrix — every `KnownApi` plus a custom one, with and without a
+	// policy — lives in `cache-keepalive-providers.test.ts`. Only the Bedrock rows are
+	// asserted here, next to the transport behavior they gate.
 });
 
 describe("Bedrock prompt-cache keepalive", () => {

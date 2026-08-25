@@ -28,6 +28,7 @@ import {
 import { getCustomApi } from "./api-registry";
 import { createAuthRetryKeyState, isApiKeyResolver, resolveNextAuthRetryKey } from "./auth-retry";
 import {
+	boundCacheKeepalivePayload,
 	CACHE_KEEPALIVE_STATE_KEY,
 	type CacheKeepalivePolicy,
 	type CacheKeepaliveShape,
@@ -1478,21 +1479,6 @@ interface BedrockKeepalivePayload {
 	additionalModelRequestFields?: unknown;
 }
 
-/**
- * True when a Bedrock Converse body asks for thinking.
- *
- * Covers both shapes the provider emits: adaptive
- * (`{ thinking: { type: "adaptive" }, output_config: { effort } }`) and explicit budget
- * (`{ thinking: { type: "enabled", budget_tokens } }`).
- */
-function isBedrockThinkingActive(payload: BedrockKeepalivePayload): boolean {
-	const fields = payload.additionalModelRequestFields;
-	if (!isRecord(fields)) return false;
-	const thinking = fields.thinking;
-	if (!isRecord(thinking)) return false;
-	return thinking.type !== "disabled";
-}
-
 /** Everything a touch needs, resolved once at arm time from the captured wire body. */
 interface CacheKeepaliveTouchSpec {
 	/** The captured body with its output budget bounded; replayed verbatim otherwise. */
@@ -1544,6 +1530,15 @@ const ANTHROPIC_THINKING_TOUCH_OUTPUT_TOKENS = 8;
  *
  * `undefined` is the fail-closed path: better to never keep an entry warm than to
  * replay a body we do not understand.
+ *
+ * Only two providers publish a request-side "this created a cache entry" marker, and
+ * both are checked here because they catch the no-entry case before a touch is armed at
+ * all. Everywhere else caching is implicit and no such marker exists — so nothing is
+ * invented for it. The arming precondition for those providers is the response's own
+ * `usage.cacheRead + usage.cacheWrite > 0`, checked by
+ * {@link streamSimpleWithCacheKeepalive} before this runs: the provider stating it
+ * cached something is stronger evidence than any wire heuristic, which is why attempting
+ * an implicit-cache provider is not speculative.
  */
 function prepareCacheKeepaliveTouch(
 	model: Model<Api>,
@@ -1575,26 +1570,23 @@ function prepareCacheKeepaliveTouch(
 	}
 
 	if (!isRecord(payload)) return undefined;
-	const bedrock = payload as BedrockKeepalivePayload;
-	// No `cachePoint` in the body means this request created no entry to keep warm.
-	if (!hasBedrockCachePoint(bedrock)) return undefined;
-	// Fail closed when thinking is active, because neither way of bounding the touch is
-	// sound on Bedrock:
-	//
-	// - Budget mode puts `thinking.budget_tokens` in `additionalModelRequestFields`
-	//   (`providers/amazon-bedrock.ts:1113-1119`), and Anthropic requires
-	//   `max_tokens > budget_tokens`, so `maxTokens: 1` is rejected outright.
-	// - Adaptive mode carries no explicit budget
-	//   (`providers/amazon-bedrock.ts:1092-1099`), so honoring it means draining a whole
-	//   thinking response — and unlike Anthropic native, Bedrock cannot be cut short early
-	//   because its cache counters only arrive in the trailing `metadata` event.
-	//
-	// Stripping `thinking` would make the replay differ from the cached request by more
-	// than output bounding, which is exactly what a keepalive must never do. Declining is
-	// the honest outcome: the entry simply expires.
-	if (isBedrockThinkingActive(bedrock)) return undefined;
+	// Bedrock's explicit marker: no `cachePoint` in the body means this request created no
+	// entry to keep warm. Cheap, and it fails before the economic gate ever prices a touch.
+	if (model.api === "bedrock-converse-stream" && !hasBedrockCachePoint(payload as BedrockKeepalivePayload)) {
+		return undefined;
+	}
+	// Anthropic's explicit marker, on the reseller/gateway endpoints that get a bounded
+	// replay rather than the first-party `zero-output` one.
+	if (
+		model.api === "anthropic-messages" &&
+		!hasShortAnthropicMessageBreakpoint(payload as MessageCreateParamsStreaming)
+	) {
+		return undefined;
+	}
+	const boundedPayload = boundCacheKeepalivePayload(model.api, shape, payload);
+	if (!boundedPayload) return undefined;
 	return {
-		boundedPayload: { ...payload, inferenceConfig: { ...bedrock.inferenceConfig, maxTokens: shape.maxTokens } },
+		boundedPayload,
 		zeroOutput: false,
 		maxTokens: shape.maxTokens,
 		// Never abort — see the drain rule on `createCacheKeepalivePlan`.
