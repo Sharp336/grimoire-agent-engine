@@ -376,35 +376,31 @@ function resolveManifestEntryFiles(joined: string, expandDirectory: boolean): st
 	} catch {
 		return [];
 	}
-	if (!stats.isDirectory()) {
-		return [joined];
-	}
-	if (expandDirectory) {
-		return resolveDirectoryEntries(joined);
-	}
+	if (!stats.isDirectory()) return [joined];
+	if (expandDirectory) return resolveDirectoryEntries(joined);
 	const index = findDirectoryIndex(joined);
 	return index ? [index] : [];
 }
 
-/**
- * Generic path resolver for plugin manifest entries (tools, hooks, commands, extensions).
- * Handles both single-string and string[] base entries, plus feature-specific entries.
- */
-function resolvePluginPaths(plugin: InstalledPlugin, key: "tools" | "hooks" | "commands" | "extensions"): string[] {
-	const resolved: string[] = [];
-	for (const entry of resolvePluginManifestEntries(plugin, key)) {
-		if (entry.resolvedPath) resolved.push(entry.resolvedPath);
+function nearestManifestPath(filePath: string, fallback: string): string {
+	let directory = path.dirname(filePath);
+	while (true) {
+		const candidate = path.join(directory, "package.json");
+		try {
+			fs.statSync(candidate);
+			return candidate;
+		} catch {
+			const parent = path.dirname(directory);
+			if (parent === directory) return fallback;
+			directory = parent;
+		}
 	}
-	return resolved;
 }
 
-/**
- * Declared manifest entries paired with their resolved file path. Returns one
- * record per declared entry — base entries first, then enabled-feature entries
- * — so callers (e.g. install-time validation) can detect manifest entries that
- * point at missing files instead of silently skipping them like
- * {@link resolvePluginPaths} does.
- */
+function resolvePluginPaths(plugin: InstalledPlugin, key: "tools" | "hooks" | "commands" | "extensions"): string[] {
+	return resolvePluginManifestEntries(plugin, key).flatMap(entry => (entry.resolvedPath ? [entry.resolvedPath] : []));
+}
+
 export function resolvePluginManifestEntries(
 	plugin: InstalledPlugin,
 	key: "tools" | "hooks" | "commands" | "extensions",
@@ -412,38 +408,31 @@ export function resolvePluginManifestEntries(
 	const declared: Array<{ entry: string; resolvedPath: string | null; manifestPath: string }> = [];
 	const manifest = plugin.manifest;
 	const manifestPath = path.join(plugin.path, "package.json");
-
 	const expandDirectory = key === "extensions";
-	const resolveEntry = (
-		entry: string,
-	): Array<{ entry: string; resolvedPath: string | null; manifestPath: string }> => {
+	const resolveEntry = (entry: string) => {
 		const files = resolveManifestEntryFiles(path.join(plugin.path, entry), expandDirectory);
 		return files.length > 0
-			? files.map(resolvedPath => ({ entry, resolvedPath, manifestPath }))
+			? files.map(resolvedPath => ({
+					entry,
+					resolvedPath,
+					manifestPath: key === "extensions" ? nearestManifestPath(resolvedPath, manifestPath) : manifestPath,
+				}))
 			: [{ entry, resolvedPath: null, manifestPath }];
 	};
-
 	const base = manifest[key];
-	if (base) {
-		const entries = Array.isArray(base) ? base : [base];
-		for (const entry of entries) declared.push(...resolveEntry(entry));
-	}
-
+	if (base) for (const entry of Array.isArray(base) ? base : [base]) declared.push(...resolveEntry(entry));
 	if (manifest.features && plugin.enabledFeatures) {
 		const enabledSet = new Set(plugin.enabledFeatures);
-		for (const [featName, feat] of Object.entries(manifest.features)) {
-			if (!enabledSet.has(featName) || !feat[key]) continue;
-			for (const entry of feat[key]) declared.push(...resolveEntry(entry));
-		}
+		for (const [featName, feat] of Object.entries(manifest.features))
+			if (enabledSet.has(featName) && feat[key])
+				for (const entry of feat[key]) declared.push(...resolveEntry(entry));
 	} else if (manifest.features && plugin.enabledFeatures === null) {
-		for (const feat of Object.values(manifest.features)) {
-			if (!feat.default || !feat[key]) continue;
-			for (const entry of feat[key]) declared.push(...resolveEntry(entry));
-		}
+		for (const feat of Object.values(manifest.features))
+			if (feat.default && feat[key]) for (const entry of feat[key]) declared.push(...resolveEntry(entry));
 	}
-
 	return declared;
 }
+
 export function resolvePluginToolPaths(plugin: InstalledPlugin): string[] {
 	return resolvePluginPaths(plugin, "tools");
 }
