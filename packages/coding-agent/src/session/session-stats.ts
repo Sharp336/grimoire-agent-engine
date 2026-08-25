@@ -99,14 +99,16 @@ export class SessionStatsTracker {
 			if (message.role === "assistant") {
 				const assistant = message;
 				toolCalls += assistant.content.filter(content => content.type === "toolCall").length;
-				totalInput += assistant.usage.input;
-				totalOutput += assistant.usage.output;
-				totalReasoning += assistant.usage.reasoningTokens ?? 0;
-				totalCacheRead += assistant.usage.cacheRead;
-				totalCacheWrite += assistant.usage.cacheWrite;
-				totalTokens += assistant.usage.totalTokens;
-				totalPremiumRequests += assistant.usage.premiumRequests ?? 0;
-				totalCost += assistant.usage.cost.total;
+				if (assistant.usage) {
+					totalInput += assistant.usage.input;
+					totalOutput += assistant.usage.output;
+					totalReasoning += assistant.usage.reasoningTokens ?? 0;
+					totalCacheRead += assistant.usage.cacheRead;
+					totalCacheWrite += assistant.usage.cacheWrite;
+					totalTokens += assistant.usage.totalTokens;
+					totalPremiumRequests += assistant.usage.premiumRequests ?? 0;
+					totalCost += assistant.usage.cost.total;
+				}
 			}
 			if (message.role === "toolResult" && message.toolName === "task") {
 				const usage = taskToolUsage(message.details);

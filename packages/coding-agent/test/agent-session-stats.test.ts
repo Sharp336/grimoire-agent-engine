@@ -177,4 +177,49 @@ describe("AgentSession session stats", () => {
 			await candidateSession.dispose();
 		}
 	});
+
+	it("computes stats safely when assistant messages lack usage", () => {
+		const model = modelRegistry.getAll().find(candidate => candidate.contextWindow && candidate.contextWindow > 0);
+		if (!model?.contextWindow) {
+			throw new Error("Expected bundled model with a context window");
+		}
+
+		const messages: Message[] = [
+			{
+				role: "user",
+				content: "Hello",
+				timestamp: 1,
+			},
+			{
+				role: "assistant",
+				content: [{ type: "text", text: "Not logged in · Please run /login" }],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				stopReason: "stop",
+				timestamp: 2,
+			} as AssistantMessage,
+		];
+
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages,
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+		});
+
+		const stats = session.getSessionStats();
+		expect(stats.assistantMessages).toBe(1);
+		expect(stats.tokens.input).toBe(0);
+		expect(stats.tokens.output).toBe(0);
+		expect(stats.tokens.total).toBe(0);
+	});
 });
