@@ -1478,6 +1478,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}),
 	);
 	let model = options.model;
+	let modelSelectionGeneration = 0;
 	let deferredModelResolution:
 		| Promise<{ model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined>
 		| undefined;
@@ -2619,7 +2620,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (deferredModelResolution && (options.awaitDeferredModel || options.hasUI !== true || hasExistingSession)) {
 			const deferredModel = await deferredModelResolution;
 			if (deferredModel) {
-				model = deferredModel.model;
+				modelSelectionGeneration += 1;
 				thinkingLevel = deferredModel.thinkingLevel ?? thinkingLevel;
 				autoThinking = thinkingLevel === AUTO_THINKING;
 				effectiveThinkingLevel = concreteThinkingLevel(thinkingLevel);
@@ -4121,8 +4122,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			logger.warn("Code Mode initialization at session startup failed", { error: String(error) });
 		}
 
+		const deferredGeneration = modelSelectionGeneration;
 		void deferredModelResolution?.then(async discovered => {
-			if (!discovered || session.model || session.isDisposed) return;
+			if (!discovered || session.model || session.isDisposed || modelSelectionGeneration !== deferredGeneration)
+				return;
 			try {
 				if (session.isDisposed) return;
 				const deferredInlineToolDescriptors = shouldInlineToolDescriptors(
@@ -4132,6 +4135,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				inlineToolDescriptors = deferredInlineToolDescriptors;
 				session.setModelToolPolicy(deferredInlineToolDescriptors);
 				agent.setPruneToolDescriptions(deferredInlineToolDescriptors);
+				if (modelSelectionGeneration !== deferredGeneration || session.model || session.isDisposed) return;
 				await session.setModelTemporary(discovered.model, discovered.thinkingLevel);
 				agent.setDialect(resolveDialect(settings.get("tools.format"), discovered.model));
 				await session.initializeCodeMode();

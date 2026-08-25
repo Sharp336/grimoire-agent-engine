@@ -419,7 +419,10 @@ async function readExtensionCompatibility(
 		const cached = manifestCache.get(candidatePath) ?? readExtensionManifest(candidatePath);
 		manifestCache.set(candidatePath, cached);
 		const manifest = await cached;
-		if (manifest)
+		if (
+			manifest &&
+			(manifest.extensions || manifest.themes || manifest.skills || manifest.compatibility !== undefined)
+		)
 			return manifest.compatibility === "modern-esm" || manifest.compatibility === "legacy"
 				? manifest.compatibility
 				: undefined;
@@ -538,7 +541,8 @@ export async function loadExtensions(
 			),
 		);
 	} catch (error) {
-		for (const graph of await Promise.all(validationGraphs.values())) await graph.cleanup();
+		for (const result of await Promise.allSettled(validationGraphs.values()))
+			if (result.status === "fulfilled") await result.value.cleanup();
 		throw error;
 	}
 	for (let i = 0; i < paths.length; i++) {
