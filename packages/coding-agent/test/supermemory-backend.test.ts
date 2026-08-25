@@ -55,12 +55,22 @@ function makeSession(
 		}
 		return serialized;
 	};
+	let collapsedStart = 0;
+	let serializedBranch = toSessionEntries(activeBranchEntries);
 	const session = {
 		agentKind,
 		sessionId: providerSessionId,
 		sessionManager: {
 			getEntries: () => toSessionEntries(entries),
-			getBranch: () => toSessionEntries(activeBranchEntries),
+			getBranch: () => (serializedBranch = toSessionEntries(activeBranchEntries)),
+			buildSessionContext: (options?: { keepDanglingToolCalls?: boolean }) => ({
+				messages: serializedBranch
+					.slice(collapsedStart)
+					.map(entry => (options?.keepDanglingToolCalls ? entry.message : structuredClone(entry.message))),
+				models: {},
+				injectedTtsrRules: [],
+				mode: "none",
+			}),
 			getCwd: () => cwd,
 			getSessionId: () => transcriptId,
 		},
@@ -78,6 +88,9 @@ function makeSession(
 		},
 		setTranscriptId(nextTranscriptId: string) {
 			transcriptId = nextTranscriptId;
+		},
+		setCollapsedStart(index: number) {
+			collapsedStart = index;
 		},
 		listenerCount: () => listeners.size,
 	};
@@ -163,6 +176,35 @@ describe("supermemoryBackend", () => {
 			{ signal: controller.signal },
 		);
 		expect(search.mock.calls[0]![0].signal).toBe(controller.signal);
+		await supermemoryBackend.disposeSession?.(session as never);
+	});
+
+	it("normalizes extension search limits while respecting the provider minimum and caller-visible bound", async () => {
+		const session = makeSession();
+		const results = Array.from({ length: 4 }, (_, index) => ({
+			id: `m${index}`,
+			content: `result ${index}`,
+		}));
+		const search = vi
+			.spyOn(SupermemoryClient.prototype, "search")
+			.mockResolvedValue({ results, total: results.length });
+		await supermemoryBackend.start({
+			session: session as never,
+			settings: configuredSettings({ "supermemory.recallLimit": 4 }),
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+		const context = { agentDir: "/tmp", cwd: "/tmp/supermemory-project", session: session as never };
+
+		const fractional = await supermemoryBackend.search(context, "fractional", { limit: 1.9 });
+		const negative = await supermemoryBackend.search(context, "negative", { limit: -3 });
+		const notANumber = await supermemoryBackend.search(context, "NaN", { limit: Number.NaN });
+
+		expect(search.mock.calls.map(([input]) => input.limit)).toEqual([2, 2, 2]);
+		expect(fractional).toMatchObject({ count: 1, items: [{ id: "m0" }] });
+		expect(negative).toMatchObject({ count: 0, items: [] });
+		expect(notANumber).toMatchObject({ count: 0, items: [] });
 		await supermemoryBackend.disposeSession?.(session as never);
 	});
 
@@ -482,10 +524,41 @@ describe("supermemoryBackend", () => {
 		session.emit({ type: "agent_end", messages: [] });
 		await Promise.resolve();
 		expect(create).not.toHaveBeenCalled();
+		await supermemoryBackend.beforeTranscriptReplace?.(session as never);
+		expect(create).not.toHaveBeenCalled();
 
 		await supermemoryBackend.enqueue?.("/tmp", "/tmp/supermemory-project", session as never);
 		expect(create).toHaveBeenCalledTimes(1);
 		expect(create.mock.calls[0]![0]).toMatchObject({ content: expect.stringContaining("User: manual turn") });
+		await supermemoryBackend.disposeSession?.(session as never);
+	});
+
+	it("retains only post-boundary turns after an in-place session context reset", async () => {
+		const entries: Entry[] = [
+			{ role: "user", text: "pre-clear question" },
+			{ role: "assistant", text: "pre-clear answer" },
+		];
+		const session = makeSession(entries);
+		const create = vi
+			.spyOn(SupermemoryClient.prototype, "createDocument")
+			.mockResolvedValue({ id: "doc-after-boundary", status: "queued" });
+		await supermemoryBackend.start({
+			session: session as never,
+			settings: configuredSettings({ "supermemory.retainEveryNTurns": 1 }),
+			modelRegistry: {} as never,
+			agentDir: "/tmp",
+			taskDepth: 0,
+		});
+
+		expect(supermemoryBackend.resetSession?.(session as never)).toBe(true);
+		session.setCollapsedStart(entries.length);
+		entries.push({ role: "user", text: "post-clear question" }, { role: "assistant", text: "post-clear answer" });
+		session.emit({ type: "agent_end", messages: [] });
+		await supermemoryBackend.enqueue?.("/tmp", "/tmp/supermemory-project", session as never);
+
+		expect(create).toHaveBeenCalledTimes(1);
+		expect(create.mock.calls[0]![0].content).toContain("User: post-clear question");
+		expect(create.mock.calls[0]![0].content).not.toContain("pre-clear");
 		await supermemoryBackend.disposeSession?.(session as never);
 	});
 

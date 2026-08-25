@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import * as os from "node:os";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -89,6 +90,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 		focusedSession = undefined;
 		session.setTodoPhases([]);
 		session.clearTodoProjections();
+		Object.defineProperty(mode.ui.terminal, "rows", { get: () => 24, configurable: true });
 		mode.setTodos([]);
 		vi.useRealTimers();
 		vi.restoreAllMocks();
@@ -273,6 +275,11 @@ describe("InteractiveMode todo HUD persistence", () => {
 		expect(renderTodos(mode)).not.toContain("main-projection");
 		expect(renderTodos(mode)).toContain("Focused native task");
 		expect(renderTodos(mode)).not.toContain("Main native task");
+		Object.defineProperty(mode.ui.terminal, "rows", { get: () => 15, configurable: true });
+		const focusedCompactStatus = Bun.stripANSI(mode.statusContainer.render(120).join("\n"));
+		expect(focusedCompactStatus).toContain("focused-projection");
+		expect(focusedCompactStatus).not.toContain("main-projection");
+		Object.defineProperty(mode.ui.terminal, "rows", { get: () => 24, configurable: true });
 
 		await mode.unfocusSession();
 		expect(renderTodos(mode)).toContain("main-projection");
@@ -423,6 +430,7 @@ describe("InteractiveMode todo HUD anchor", () => {
 	});
 
 	afterEach(() => {
+		session.clearTodoProjections();
 		mode.setTodos([]);
 		vi.useRealTimers();
 		vi.restoreAllMocks();
@@ -603,7 +611,60 @@ describe("InteractiveMode todo HUD anchor", () => {
 			expect(lastLine.startsWith(" ")).toBe(true);
 		});
 
-		it("places compact todo on the right side of the active loader / intent spinner", () => {
+		it("keeps projection-only work sanitized and bounded in compact mode", () => {
+			setTerminalRows(15);
+			const longPath = path.join(os.homedir(), "workspace", "projected", "x".repeat(120));
+			session.setTodoProjection("compact\tprojection\u001b[2J", [
+				{
+					id: "compact-phase",
+					name: "Compact phase",
+					tasks: [
+						{ id: "active", content: `${longPath}\nnext\tstep`, status: "in_progress" },
+						...Array.from({ length: 20 }, (_, index) => ({
+							id: `pending-${index}`,
+							content: `Pending projected task ${index}`,
+							status: "pending" as const,
+						})),
+					],
+				},
+			]);
+			mode.refreshTodoProjections();
+
+			expect(mode.todoContainer.render(72)).toHaveLength(0);
+			const rendered = mode.statusContainer.render(72);
+			const compactLine = Bun.stripANSI(rendered[rendered.length - 1] ?? "");
+			expect(rendered).toHaveLength(2);
+			expect(compactLine).toContain("compact projection");
+			expect(compactLine).toContain("~/workspace/projected/");
+			expect(compactLine).not.toContain("\u001b");
+			expect(compactLine).not.toContain("\t");
+			expect(Bun.stringWidth(compactLine)).toBeLessThanOrEqual(72);
+
+			setTerminalRows(24);
+			expect(mode.statusContainer.render(72)).toHaveLength(0);
+			expect(renderTodos(mode)).toContain("compact projection");
+		});
+
+		it("keeps native and projected summaries visible when compact detail is long", () => {
+			setTerminalRows(15);
+			mode.setTodos([{ name: "Native", tasks: [{ content: "Native task", status: "in_progress" }] }]);
+			session.setTodoProjection(`projected-${"x".repeat(120)}`, [
+				{
+					id: "projected-phase",
+					name: "Projected phase",
+					tasks: [{ id: "projected-task", content: "Projected task", status: "in_progress" }],
+				},
+			]);
+			mode.refreshTodoProjections();
+
+			const rendered = mode.statusContainer.render(72);
+			const compactLine = Bun.stripANSI(rendered[rendered.length - 1] ?? "");
+			expect(compactLine).toContain("projected-");
+			expect(compactLine).toContain("TODO");
+			expect(Bun.stringWidth(compactLine)).toBeLessThanOrEqual(72);
+		});
+
+		it("keeps native and projected summaries beside the active loader", () => {
 			setTerminalRows(14);
 			mode.setTodos([
 				{
@@ -614,6 +675,14 @@ describe("InteractiveMode todo HUD anchor", () => {
 					],
 				},
 			]);
+			session.setTodoProjection(`loader-projection-${"x".repeat(120)}`, [
+				{
+					id: "loader-phase",
+					name: "Loader phase",
+					tasks: [{ id: "loader-task", content: "Projected loader task", status: "in_progress" }],
+				},
+			]);
+			mode.refreshTodoProjections();
 
 			mode.ensureLoadingAnimation();
 			mode.setWorkingMessage("Reading src/index.ts (esc to interrupt)");
@@ -625,9 +694,10 @@ describe("InteractiveMode todo HUD anchor", () => {
 			const lastLine = Bun.stripANSI(rendered[rendered.length - 1] ?? "");
 			// Left side has the intent spinner/message
 			expect(lastLine).toContain("Reading src/index.ts");
-			// Right side has the compact todo
-			expect(lastLine).toContain("TODO 0/2");
-			expect(lastLine).toContain("Inspect server");
+			// Right side preserves both compact work sources within its collision budget.
+			expect(lastLine).toContain("loader-projection-");
+			expect(lastLine).toContain("TODO");
+			expect(lastLine).toContain("Inspect");
 			// Left message comes before right todo
 			expect(lastLine.indexOf("Reading src/index.ts")).toBeLessThan(lastLine.indexOf("TODO 0/2"));
 		});

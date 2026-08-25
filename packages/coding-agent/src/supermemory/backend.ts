@@ -115,8 +115,19 @@ function formatSearch(items: SupermemorySearchItem[]): string | undefined {
 }
 
 function activeBranchMessages(session: AgentSession) {
+	const branch = session.sessionManager.getBranch();
+	const entriesByMessage = new Map<AgentMessage, (typeof branch)[number]>();
+	for (const entry of branch) {
+		if (entry.type === "message") entriesByMessage.set(entry.message, entry);
+	}
 	const messages = [];
-	for (const entry of session.sessionManager.getBranch()) {
+	for (const displayMessage of session.sessionManager.buildSessionContext({
+		transcript: true,
+		collapseCompactedHistory: true,
+		keepDanglingToolCalls: true,
+	}).messages) {
+		const entry = entriesByMessage.get(displayMessage);
+		if (!entry) continue;
 		const message = extractHindsightMessage(entry);
 		if (message) messages.push({ ...message, entryId: entry.id });
 	}
@@ -544,7 +555,9 @@ async function searchWithState(
 				items: [],
 				message: "Supermemory is unavailable or unconfigured.",
 			};
-		const resultLimit = Math.min(options?.limit ?? scope.config.recallLimit, scope.config.recallLimit);
+		const requestedLimit = options?.limit ?? scope.config.recallLimit;
+		const normalizedLimit = Number.isFinite(requestedLimit) ? Math.max(0, Math.trunc(requestedLimit)) : 0;
+		const resultLimit = Math.min(normalizedLimit, scope.config.recallLimit);
 		const response = await scope.client.search({
 			q: query,
 			containerTag: scope.containerTag,
@@ -873,10 +886,15 @@ async function waitForRetention(state: SupermemorySessionState, bounded = false)
 	}
 }
 
-async function flushRetentionTail(state: SupermemorySessionState, session: AgentSession, cwd: string): Promise<void> {
+async function flushRetentionTail(
+	state: SupermemorySessionState,
+	session: AgentSession,
+	cwd: string,
+	explicit = false,
+): Promise<void> {
 	if (!state.automatic || state.disposed) return;
 	const scope = await refreshStateForOperation(state, cwd, session);
-	if (!scope || state.disposed) return;
+	if (!scope || state.disposed || (!explicit && !scope.config.autoRetain)) return;
 	requestAutomaticRetention(state, session, true);
 	for (;;) {
 		const clearing = containerState(scope.coordinatorKey).clearing;
@@ -1091,7 +1109,7 @@ export const supermemoryBackend: MemoryBackend &
 	async enqueue(_agentDir, cwd, session): Promise<void> {
 		const state = session && sessionStates.get(session);
 		if (!state || !session) return;
-		await flushRetentionTail(state, session, cwd || session.sessionManager.getCwd());
+		await flushRetentionTail(state, session, cwd || session.sessionManager.getCwd(), true);
 	},
 
 	async status(context: MemoryBackendOperationContext): Promise<MemoryBackendStatus> {
