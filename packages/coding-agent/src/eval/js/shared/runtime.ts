@@ -15,6 +15,11 @@ import { JAVASCRIPT_PRELUDE_SOURCE } from "./prelude";
 import { wrapCode } from "./rewrite-imports";
 import type { JsDisplayOutput, JsStatusEvent } from "./types";
 
+export interface RuntimeCallIdentity {
+	siteId: string;
+	occurrence: number;
+}
+
 /**
  * Per-run callbacks. Runtime globals resolve these from AsyncLocalStorage so
  * overlapping async cells can route output/tool calls back to their own run.
@@ -22,7 +27,7 @@ import type { JsDisplayOutput, JsStatusEvent } from "./types";
 export interface RuntimeHooks {
 	onText(chunk: string): void;
 	onDisplay(output: JsDisplayOutput): void;
-	callTool(name: string, args: unknown): Promise<unknown>;
+	callTool(name: string, args: unknown, identity?: RuntimeCallIdentity): Promise<unknown>;
 }
 
 /**
@@ -52,6 +57,7 @@ export interface RunContext {
 	runId: string;
 	hooks: RuntimeHooks;
 	cwd: string;
+	callOccurrences: Map<string, number>;
 	finalExpressionSet: boolean;
 	finalExpressionValue: unknown;
 }
@@ -91,12 +97,65 @@ const PRELUDE_GLOBAL_KEYS = [
 	"pipeline",
 	"log",
 	"phase",
+	"__omp_with_call_site__",
 	"budget",
 	"__pool",
 	"read",
 	"write",
 	"env",
 ];
+
+export type ShadowSnapshot = Readonly<{
+	revision: number;
+	values: Readonly<Record<string, unknown>>;
+}>;
+
+export function shadowSnapshotDigest(snapshot: ShadowSnapshot): string {
+	return String(Bun.hash(JSON.stringify(snapshot.values)));
+}
+
+const SHADOW_SNAPSHOT_MAX_DEPTH = 16;
+const SHADOW_SNAPSHOT_MAX_NODES = 2_000;
+const SHADOW_SNAPSHOT_MAX_STRING_BYTES = 8 * 1024 * 1024;
+
+function copyShadowValue(
+	value: unknown,
+	depth: number,
+	state: { nodes: number; bytes: number; seen: Set<object> },
+): unknown | undefined {
+	if (depth > SHADOW_SNAPSHOT_MAX_DEPTH || ++state.nodes > SHADOW_SNAPSHOT_MAX_NODES) return undefined;
+	if (value === null || typeof value === "boolean") return value;
+	if (typeof value === "number") return Number.isFinite(value) ? value : undefined;
+	if (typeof value === "string") {
+		state.bytes += Buffer.byteLength(value);
+		return state.bytes <= SHADOW_SNAPSHOT_MAX_STRING_BYTES ? value : undefined;
+	}
+	if (typeof value !== "object" || util.types.isProxy(value) || state.seen.has(value)) return undefined;
+	state.seen.add(value);
+	try {
+		if (Array.isArray(value)) {
+			const copied: unknown[] = [];
+			for (const item of value) {
+				const next = copyShadowValue(item, depth + 1, state);
+				if (next === undefined) return undefined;
+				copied.push(next);
+			}
+			return copied;
+		}
+		if (Object.getPrototypeOf(value) !== Object.prototype) return undefined;
+		const copied: Record<string, unknown> = {};
+		for (const key of Object.keys(value)) {
+			const descriptor = Object.getOwnPropertyDescriptor(value, key);
+			if (!descriptor || !("value" in descriptor)) return undefined;
+			const next = copyShadowValue(descriptor.value, depth + 1, state);
+			if (next === undefined) return undefined;
+			copied[key] = next;
+		}
+		return copied;
+	} finally {
+		state.seen.delete(value);
+	}
+}
 
 function isStrictBase64(s: string): boolean {
 	if (s.length === 0 || s.length % 4 !== 0) return false;
@@ -190,9 +249,25 @@ export class JsRuntime {
 	readonly sessionId: string;
 	#env: Map<string, string>;
 	#als = new AsyncLocalStorage<RunContext>();
+	#callSiteAls = new AsyncLocalStorage<RuntimeCallIdentity>();
 	#moduleLoader: LocalModuleLoader;
 	#localRoots: Record<string, string>;
+	#namespaceRevision = 0;
+	#initialGlobalKeys = new Set<string>();
 
+	snapshotUserGlobals(): ShadowSnapshot {
+		this.#activateGlobals("snapshot user globals");
+		const values: Record<string, unknown> = {};
+		const snapshotState = { nodes: 0, bytes: 0, seen: new Set<object>() };
+		for (const key of Object.getOwnPropertyNames(globalThis)) {
+			if (this.#ownedGlobalKeys.has(key) || this.#initialGlobalKeys.has(key)) continue;
+			const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+			if (!descriptor || !("value" in descriptor)) continue;
+			const copied = copyShadowValue(descriptor.value, 0, snapshotState);
+			if (copied !== undefined) values[key] = copied;
+		}
+		return Object.freeze({ revision: this.#namespaceRevision, values: Object.freeze(values) });
+	}
 	constructor(opts: RuntimeOptions) {
 		this.#cwd = opts.initialCwd;
 		this.#session = { cwd: opts.initialCwd, sessionId: opts.sessionId };
@@ -206,6 +281,7 @@ export class JsRuntime {
 			localRoots: () => this.#localRoots,
 			emitStatus: event => this.#activeHooks("emitStatus")?.onDisplay({ type: "status", event }),
 		});
+		this.#initialGlobalKeys = new Set(Object.getOwnPropertyNames(globalThis));
 		this.#install(opts.extraGlobals);
 	}
 
@@ -246,6 +322,7 @@ export class JsRuntime {
 		options: { runId?: string; cwd?: string } = {},
 	): Promise<unknown> {
 		this.#activateGlobals("run code");
+		this.#namespaceRevision++;
 		const leaveRun = enterGlobalRun(this.#globalOwner, "run code");
 		const context: RunContext = {
 			runId: options.runId ?? crypto.randomUUID(),
@@ -253,6 +330,7 @@ export class JsRuntime {
 			cwd: options.cwd ?? this.#cwd,
 			finalExpressionSet: false,
 			finalExpressionValue: undefined,
+			callOccurrences: new Map(),
 		};
 		try {
 			return await this.#als.run(context, async () => {
@@ -360,10 +438,17 @@ export class JsRuntime {
 		const injected: Record<string, unknown> = {
 			__omp_session__: this.#session,
 			__omp_helpers__: this.helpers,
+			__omp_with_call_site__: <T>(siteId: string, action: () => T): T => {
+				const context = this.#als.getStore();
+				if (!context) return action();
+				const occurrence = context.callOccurrences.get(siteId) ?? 0;
+				context.callOccurrences.set(siteId, occurrence + 1);
+				return this.#callSiteAls.run({ siteId, occurrence }, action);
+			},
 			__omp_call_tool__: async (name: string, args: unknown) => {
 				const hooks = this.#activeHooks("tool");
 				if (!hooks) return undefined;
-				return surfaceBridgedToolImages(await hooks.callTool(name, args), hooks);
+				return surfaceBridgedToolImages(await hooks.callTool(name, args, this.#callSiteAls.getStore()), hooks);
 			},
 			__omp_import__: async (source: string, options?: ImportCallOptions) => {
 				const resolved = await this.#moduleLoader.resolveForRun(this.#activeCwd(), source);

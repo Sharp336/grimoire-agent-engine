@@ -87,9 +87,14 @@ interface KernelSessionRegistryDescriptor<
 	validateKernel?: (session: TSession, kernel: TKernel) => boolean;
 }
 
-interface KernelSessionRegistry<TOptions extends KernelSessionRegistryOptions, TResult> {
+interface KernelSessionRegistry<
+	TOptions extends KernelSessionRegistryOptions,
+	TResult,
+	TSession extends KernelSession<RegistryKernel>,
+> {
 	disposeAll(): Promise<void>;
 	disposeByOwner(ownerId: string): Promise<void>;
+	getPresentSession(cwd: string, options: TOptions): TSession | undefined;
 	executeOnSession(code: string, cwd: string, options: TOptions): Promise<TResult>;
 }
 
@@ -131,7 +136,7 @@ export function createKernelSessionRegistry<
 	TSession extends KernelSession<TKernel>,
 >(
 	descriptor: KernelSessionRegistryDescriptor<TKernel, TOptions, TResult, TSession>,
-): KernelSessionRegistry<TOptions, TResult> {
+): KernelSessionRegistry<TOptions, TResult, TSession> {
 	const sessions = new Map<string, TSession>();
 	const startingSessions = new Map<string, StartingKernelSession<TSession>>();
 	const resettingSessions = new Map<string, Promise<void>>();
@@ -420,6 +425,18 @@ export function createKernelSessionRegistry<
 		return retryKernel;
 	}
 
+	function getPresentSession(cwd: string, options: TOptions): TSession | undefined {
+		const sessionId = options.sessionId ?? `session:${cwd}`;
+		const sessionKey = resolveOwnerScopedSessionKey({
+			baseKey: descriptor.buildSessionKey(sessionId, cwd, options.interpreter),
+			ownerId: options.kernelOwnerId,
+			reset: false,
+			hasSession: key => sessions.has(key),
+			getOwners: key => sessions.get(key),
+		});
+		return sessions.get(sessionKey);
+	}
+
 	async function executeOnSession(code: string, cwd: string, options: TOptions): Promise<TResult> {
 		const sessionId = options.sessionId ?? `session:${cwd}`;
 		const sessionKey = resolveOwnerScopedSessionKey({
@@ -497,5 +514,5 @@ export function createKernelSessionRegistry<
 		return retryResult;
 	}
 
-	return { disposeAll, disposeByOwner, executeOnSession };
+	return { disposeAll, disposeByOwner, executeOnSession, getPresentSession };
 }

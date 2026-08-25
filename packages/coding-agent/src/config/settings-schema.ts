@@ -4552,6 +4552,46 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tools.speculativeExecution.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Execution",
+			label: "Experimental Speculative Execution",
+			description:
+				"Start discard-safe local reads and isolated staged write/edit transactions before the model finishes streaming, including reads projected from retained JavaScript and Python eval cells. Writes commit only after source revalidation; Eval Auto-Background must be disabled for shadow execution, and nested completion spend has a separate opt-in.",
+		},
+	},
+	"tools.speculativeExecution.evalCompletions.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			group: "Execution",
+			label: "Speculative Eval Completions",
+			description:
+				"Allow projected eval completion() calls to spend provider tokens after the outer eval call is final but before its cell starts.",
+		},
+	},
+
+	"tools.speculativeExecution.maxInFlight": {
+		type: "number",
+		default: 2,
+		ui: {
+			tab: "tools",
+			group: "Execution",
+			label: "Speculative Execution Concurrency",
+			description: "Maximum number of experimental discard-safe operations allowed to run before normal dispatch.",
+			options: [
+				{ value: "1", label: "1 operation" },
+				{ value: "2", label: "2 operations" },
+				{ value: "3", label: "3 operations" },
+				{ value: "4", label: "4 operations" },
+			],
+		},
+	},
+
 	"tools.maxTimeout": {
 		type: "number",
 		default: 0,

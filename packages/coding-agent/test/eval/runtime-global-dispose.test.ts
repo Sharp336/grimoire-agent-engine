@@ -1,5 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { JsRuntime, type RuntimeHooks } from "@oh-my-pi/pi-coding-agent/eval/js/shared/runtime";
+import {
+	JsRuntime,
+	type RuntimeCallIdentity,
+	type RuntimeHooks,
+	shadowSnapshotDigest,
+} from "@oh-my-pi/pi-coding-agent/eval/js/shared/runtime";
 
 const GLOBAL_KEYS = ["__omp_import__", "read"] as const;
 
@@ -70,6 +75,80 @@ describe("JsRuntime global disposal", () => {
 			first.dispose();
 			second.dispose();
 			restoreGlobals(before);
+		}
+	});
+
+	it("snapshots only JSON-safe globals published after runtime initialization", async () => {
+		const globals = globalThis as Record<string, unknown>;
+		const runtime = new JsRuntime({ initialCwd: process.cwd(), sessionId: "shadow-snapshot" });
+		try {
+			globals.shadowSnapshotProbe = { nested: ["safe"] };
+			globals.shadowSnapshotUnsupported = () => undefined;
+
+			expect(runtime.snapshotUserGlobals()).toEqual({
+				revision: 0,
+				values: { shadowSnapshotProbe: { nested: ["safe"] } },
+			});
+
+			await runtime.run("undefined;", undefined, hooks);
+			expect(runtime.snapshotUserGlobals().revision).toBe(1);
+		} finally {
+			delete globals.shadowSnapshotProbe;
+			delete globals.shadowSnapshotUnsupported;
+			runtime.dispose();
+		}
+	});
+
+	it("bounds shadow snapshot string data across the whole retained namespace", () => {
+		const globals = globalThis as Record<string, unknown>;
+		const runtime = new JsRuntime({ initialCwd: process.cwd(), sessionId: "shadow-snapshot-budget" });
+		try {
+			globals.shadowSnapshotBudgetA = "a".repeat(5 * 1024 * 1024);
+			globals.shadowSnapshotBudgetB = "b".repeat(5 * 1024 * 1024);
+			const values = runtime.snapshotUserGlobals().values;
+			expect(values.shadowSnapshotBudgetA).toBe(globals.shadowSnapshotBudgetA);
+			expect(values.shadowSnapshotBudgetB).toBeUndefined();
+		} finally {
+			delete globals.shadowSnapshotBudgetA;
+			delete globals.shadowSnapshotBudgetB;
+			runtime.dispose();
+		}
+	});
+
+	it("changes the snapshot digest when retained state changes", async () => {
+		const runtime = new JsRuntime({ initialCwd: process.cwd(), sessionId: "shadow-digest" });
+		const globals = globalThis as Record<string, unknown>;
+		try {
+			globals.shadowDigestProbe = "before";
+			const before = shadowSnapshotDigest(runtime.snapshotUserGlobals());
+			globals.shadowDigestProbe = "after";
+			expect(shadowSnapshotDigest(runtime.snapshotUserGlobals())).not.toBe(before);
+		} finally {
+			delete globals.shadowDigestProbe;
+			runtime.dispose();
+		}
+	});
+
+	it("tags repeated tool calls with source-stable site occurrences", async () => {
+		const runtime = new JsRuntime({ initialCwd: process.cwd(), sessionId: "runtime-call-identity" });
+		const identities: Array<RuntimeCallIdentity | undefined> = [];
+		const code = "for (let index = 0; index < 2; index++) await tool.read({ path: String(index) });";
+		try {
+			await runtime.run(code, "identity.ts", {
+				onText: () => {},
+				onDisplay: () => {},
+				callTool: async (_name, _args, identity) => {
+					identities.push(identity);
+					return "";
+				},
+			});
+			const siteId = `js:${code.indexOf("tool.read")}`;
+			expect(identities).toEqual([
+				{ siteId, occurrence: 0 },
+				{ siteId, occurrence: 1 },
+			]);
+		} finally {
+			runtime.dispose();
 		}
 	});
 

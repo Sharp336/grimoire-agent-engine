@@ -115,6 +115,119 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 		}
 	});
 
+	it("preserves awaited arguments in calls named like speculative bridge operations", async () => {
+		using tempDir = TempDir.createSync("@python-runner-call-site-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			const result = await executePythonWithKernel(
+				kernel,
+				[
+					"async def resolve_value():",
+					"    return 'preserved'",
+					"completion = lambda value: value",
+					"completion(await resolve_value())",
+				].join("\n"),
+			);
+			expect(result.exitCode).toBe(0);
+			expect(result.output).toContain("preserved");
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("captures a JSON-safe retained namespace without running another cell", async () => {
+		using tempDir = TempDir.createSync("@python-runner-shadow-snapshot-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			await executePythonWithKernel(kernel, "shadow_snapshot_value = {'nested': ['safe']}");
+			const snapshot = await kernel.snapshotUserNamespace();
+			expect(snapshot?.values.shadow_snapshot_value).toEqual({ nested: ["safe"] });
+			expect(snapshot?.revision).toBeGreaterThan(0);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("atomically rejects stale Python snapshots without executing the cell", async () => {
+		using tempDir = TempDir.createSync("@python-runner-shadow-admission-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			await executePythonWithKernel(kernel, "atomic_stale_guard = 1");
+			const snapshot = await kernel.snapshotUserNamespace();
+			if (!snapshot) throw new Error("expected retained Python snapshot");
+			await executePythonWithKernel(kernel, "atomic_stale_guard = 2");
+			await expect(kernel.executeIfSnapshotMatches("atomic_stale_guard = 3", snapshot)).resolves.toBeNull();
+			expect((await kernel.snapshotUserNamespace())?.values.atomic_stale_guard).toBe(2);
+
+			const current = await kernel.snapshotUserNamespace();
+			if (!current) throw new Error("expected current Python snapshot");
+			await expect(kernel.executeIfSnapshotMatches("atomic_stale_guard = 4", current)).resolves.toMatchObject({
+				status: "ok",
+			});
+			expect((await kernel.snapshotUserNamespace())?.values.atomic_stale_guard).toBe(4);
+
+			const racingSnapshot = await kernel.snapshotUserNamespace();
+			if (!racingSnapshot) throw new Error("expected racing Python snapshot");
+			const normalRun = kernel.execute(
+				["import asyncio", "await asyncio.sleep(0.05)", "atomic_race_guard = 1"].join("\n"),
+			);
+			await expect(kernel.executeIfSnapshotMatches("atomic_race_guard = 2", racingSnapshot)).resolves.toBeNull();
+			expect((await normalRun).status).toBe("ok");
+			expect((await kernel.snapshotUserNamespace())?.values.atomic_race_guard).toBe(1);
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("projects source-stable Python operations without executing candidate code", async () => {
+		using tempDir = TempDir.createSync("@python-runner-shadow-plan-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			await expect(kernel.shadowPlan('tool.read({"path": "src/a.py"})')).resolves.toMatchObject({
+				operations: [
+					{
+						kind: "tool",
+						call: {
+							id: "py:0::0",
+							siteId: "py:0",
+							name: "read",
+							args: {
+								kind: "object",
+								entries: [{ key: "path", value: { kind: "literal", value: "src/a.py" } }],
+							},
+							dependencies: [],
+						},
+					},
+				],
+			});
+			const loop = await kernel.shadowPlan(
+				["for path in ['a', 'b']:", "    await tool.read({'path': path})"].join("\n"),
+			);
+			expect(loop?.operations.map(operation => operation.call.dynamicPath)).toEqual([["loop:0"], ["loop:1"]]);
+			expect(loop?.controls).toEqual([expect.objectContaining({ kind: "loop", iterations: 2 })]);
+			const parallel = await kernel.shadowPlan(
+				'parallel([lambda: tool.read({"path": "a"}), lambda: tool.read({"path": "b"})])',
+			);
+			if (!parallel) throw new Error("expected projected Python parallel plan");
+			expect(parallel.operations.map(operation => operation.call.dynamicPath)).toEqual([
+				["parallel:0"],
+				["parallel:1"],
+			]);
+			expect(parallel.controls).toEqual([
+				expect.objectContaining({
+					kind: "join",
+					operationIds: parallel.operations.map(operation => operation.call.id),
+				}),
+			]);
+			const eagerParallel = await kernel.shadowPlan(
+				'parallel([tool.read({"path": "a"}), tool.read({"path": "b"})])',
+			);
+			expect(eagerParallel?.operations).toEqual([]);
+			expect(eagerParallel?.barrier?.reason).toBe("unsupported Python statement");
+		} finally {
+			await kernel.shutdown();
+		}
+	});
 	it("emits an error frame when user code raises", async () => {
 		using tempDir = TempDir.createSync("@python-runner-error-");
 		const kernel = await PythonKernel.start({ cwd: tempDir.path() });

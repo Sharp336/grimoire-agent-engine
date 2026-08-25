@@ -6,14 +6,19 @@ import { EVAL_AGENT_BRIDGE_NAME, runEvalAgent } from "../agent-bridge";
 import { EVAL_BUDGET_BRIDGE_NAME, type EvalBudgetResult, runEvalBudget } from "../budget-bridge";
 import { EVAL_COMPLETION_BRIDGE_NAME, runEvalCompletion } from "../completion-bridge";
 import { EVAL_CONCURRENCY_BRIDGE_NAME, type EvalConcurrencyResult, runEvalConcurrency } from "../concurrency-bridge";
+import type { EvalShadowCellSession } from "../speculation/cell-session";
+import { getActiveEvalShadowCell } from "../speculation/runtime-context";
+import type { RuntimeCallIdentity } from "./shared/runtime";
 import type { JsStatusEvent } from "./shared/types";
 
 export type { JsStatusEvent } from "./shared/types";
 
-interface ToolBridgeOptions {
+export interface ToolBridgeOptions {
 	session: ToolSession;
 	signal?: AbortSignal;
 	emitStatus?: (event: JsStatusEvent) => void;
+	identity?: RuntimeCallIdentity;
+	shadowCell?: EvalShadowCellSession;
 }
 
 type ToolValue =
@@ -107,8 +112,39 @@ function summarizeToolResult(
 	}
 }
 
+export function bridgeValueFromToolResult(
+	name: string,
+	args: unknown,
+	result: AgentToolResult,
+	emitStatus?: (event: JsStatusEvent) => void,
+): ToolValue {
+	const textBlocks = result.content.filter(
+		(content): content is { type: "text"; text: string } =>
+			content.type === "text" && typeof content.text === "string",
+	);
+	const imageBlocks = result.content.filter(
+		(content): content is { type: "image"; mimeType: string; data: string } =>
+			content.type === "image" && typeof content.mimeType === "string" && typeof content.data === "string",
+	);
+	const text = textBlocks.map(block => block.text).join("");
+	const hasError = toolResultHasError(result);
+	emitStatus?.(summarizeToolResult(name, args, result, text, hasError));
+	if (result.details === undefined && imageBlocks.length === 0 && !hasError) return text;
+	const value: Exclude<ToolValue, string> = { text, details: result.details };
+	if (imageBlocks.length > 0) {
+		value.images = imageBlocks.map(block => ({ mimeType: block.mimeType, data: block.data }));
+	}
+	if (hasError) value.hasError = true;
+	return value;
+}
+
 export async function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
 	if (name === EVAL_COMPLETION_BRIDGE_NAME) {
+		const shadowCell = options.shadowCell ?? getActiveEvalShadowCell();
+		if (shadowCell && options.identity) {
+			const claimed = await shadowCell.claim("completion", args, options.identity, Number.MAX_SAFE_INTEGER);
+			if (claimed) return bridgeValueFromToolResult("completion", args, claimed, options.emitStatus);
+		}
 		return await runEvalCompletion(args, options);
 	}
 	if (name === EVAL_AGENT_BRIDGE_NAME) {
@@ -122,6 +158,11 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	}
 	const tool = getTool(options.session, name);
 	const normalizedArgs = normalizeArgs(args);
+	const shadowCell = options.shadowCell ?? getActiveEvalShadowCell();
+	if (shadowCell && options.identity) {
+		const claimed = await shadowCell.claim(name, normalizedArgs, options.identity, Number.MAX_SAFE_INTEGER);
+		if (claimed) return bridgeValueFromToolResult(name, normalizedArgs, claimed, options.emitStatus);
+	}
 	const toolCallId = `js-${name}-${crypto.randomUUID()}`;
 	try {
 		const result = await tool.execute(
@@ -131,34 +172,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 			undefined,
 			options.session.getToolContext?.(),
 		);
-		const textBlocks = result.content.filter(
-			(content): content is { type: "text"; text: string } =>
-				content.type === "text" && typeof content.text === "string",
-		);
-		const imageBlocks = result.content.filter(
-			(content): content is { type: "image"; mimeType: string; data: string } =>
-				content.type === "image" && typeof content.mimeType === "string" && typeof content.data === "string",
-		);
-		const text = textBlocks.map(block => block.text).join("");
-		const hasError = toolResultHasError(result);
-		options.emitStatus?.(summarizeToolResult(name, normalizedArgs, result, text, hasError));
-		if (result.details === undefined && imageBlocks.length === 0 && !hasError) {
-			return text;
-		}
-		const value: Exclude<ToolValue, string> = {
-			text,
-			details: result.details,
-		};
-		if (imageBlocks.length > 0) {
-			value.images = imageBlocks.map(block => ({
-				mimeType: block.mimeType,
-				data: block.data,
-			}));
-		}
-		if (hasError) {
-			value.hasError = true;
-		}
-		return value;
+		return bridgeValueFromToolResult(name, normalizedArgs, result, options.emitStatus);
 	} catch (error) {
 		options.emitStatus?.({
 			op: name,

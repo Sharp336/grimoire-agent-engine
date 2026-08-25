@@ -14,7 +14,10 @@ import {
 	ISOLATION_BASELINE_MAX_CONTENT_BYTES,
 	IsolationBaselineTooLargeError,
 	mergeTaskBranches,
+	openSpeculativePalTransaction,
 	parseIsolationMode,
+	SPECULATIVE_PAL_MAX_TARGET_BYTES,
+	SpeculativePalTargetTooLargeError,
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
 import * as jj from "@oh-my-pi/pi-coding-agent/utils/jj";
@@ -73,6 +76,44 @@ describe("worktree isolation helpers", () => {
 		expect(parseIsolationMode("block-clone")).toBe(natives.IsoBackendKind.WindowsBlockClone);
 		expect(parseIsolationMode("rcopy")).toBe(natives.IsoBackendKind.Rcopy);
 		expect(parseIsolationMode("worktree")).toBe(natives.IsoBackendKind.Rcopy);
+	});
+
+	it("stages a target in PAL without mutating its source and rejects stale source evidence", async () => {
+		const repo = await createGitRepo();
+		await runGit(repo, ["config", "user.email", "test@example.com"]);
+		await runGit(repo, ["config", "user.name", "Test User"]);
+		const source = path.join(repo, "note.txt");
+		await fs.writeFile(source, "before\n");
+		await runGit(repo, ["add", "note.txt"]);
+		await runGit(repo, ["commit", "-q", "-m", "init"]);
+
+		const transaction = await openSpeculativePalTransaction(repo, "speculative-target", ["note.txt"]);
+		try {
+			const sandbox = transaction.targets.get(source);
+			if (!sandbox) throw new Error("PAL transaction did not map its target");
+			await fs.writeFile(sandbox, "staged\n");
+			expect(await fs.readFile(source, "utf8")).toBe("before\n");
+			expect(await transaction.verify()).toBe(true);
+
+			await fs.writeFile(source, "changed\n");
+			expect(await transaction.verify()).toBe(false);
+			await transaction.restore();
+			expect(await fs.readFile(source, "utf8")).toBe("before\n");
+			expect(await transaction.verify()).toBe(true);
+		} finally {
+			await transaction.close();
+		}
+	});
+
+	it("refuses an unbounded speculative PAL rollback snapshot", async () => {
+		const repo = await createGitRepo();
+		const target = path.join(repo, "large.bin");
+		await fs.writeFile(target, "");
+		await fs.truncate(target, SPECULATIVE_PAL_MAX_TARGET_BYTES + 1);
+
+		await expect(openSpeculativePalTransaction(repo, "oversized-target", [target])).rejects.toBeInstanceOf(
+			SpeculativePalTargetTooLargeError,
+		);
 	});
 
 	// Regression for #8939: baseline capture buffered every untracked byte into
