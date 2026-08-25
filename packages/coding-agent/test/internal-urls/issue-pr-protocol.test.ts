@@ -356,7 +356,7 @@ describe("pr:// protocol handler", () => {
 		expect(resource.content).toContain("a.ts");
 	});
 
-	it("treats a redundant github.com prefix as the bare slug", async () => {
+	it("shares one cache row with the bare form while still pinning github.com", async () => {
 		const spy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
 			if (args.includes("/repos/owner/example/pulls/79/comments")) {
 				return [] as never;
@@ -365,12 +365,17 @@ describe("pr:// protocol handler", () => {
 		});
 
 		const router = InternalUrlRouter.instance();
-		await router.resolve("pr://owner/example/79");
 		const prefixed = await router.resolve("pr://github.com/owner/example/79");
+		// An explicit host reaches `gh`, which would otherwise resolve a
+		// host-less --repo against GH_HOST.
+		const viewArgs = spy.mock.calls[0]?.[1] as string[];
+		expect(viewArgs[viewArgs.indexOf("--repo") + 1]).toBe("github.com/owner/example");
 
-		// Same cache row: the prefixed form must not fetch again.
+		const bare = await router.resolve("pr://owner/example/79");
+		// Both spellings key the same row, so the bare form is a cache hit.
 		expect(spy).toHaveBeenCalledTimes(2);
-		expect(prefixed.notes?.[0]).toMatch(/^Cached:/);
+		expect(prefixed.notes?.[0]).toBe("Fetched live");
+		expect(bare.notes?.[0]).toMatch(/^Cached:/);
 	});
 
 	it("rejects a host-prefixed URL that names no repository", async () => {

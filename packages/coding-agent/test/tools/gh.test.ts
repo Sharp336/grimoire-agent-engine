@@ -1461,7 +1461,8 @@ echo ok
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
 
 			expect(text).toContain("# GitHub Actions Run #77");
-			expect(text).toContain("Repository: owner/repo");
+			// The run URL named a host, so the repo keeps it.
+			expect(text).toContain("Repository: github.com/owner/repo");
 			expect(text).toContain("### test [failure]");
 			expect(text).toContain("delta");
 			expect(text).toContain("epsilon");
@@ -1769,14 +1770,27 @@ describe("github tool on a GitHub Enterprise host", () => {
 });
 
 describe("GitHub URL parsing", () => {
-	it("keeps an enterprise host in the parsed repo and drops a github.com one", () => {
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
+	it("keeps the host a full URL names so the request cannot drift to another instance", () => {
 		expect(parsePullRequestUrl("https://ghe.example.com/acme/widgets/pull/7")).toEqual({
 			repo: "ghe.example.com/acme/widgets",
 			prNumber: 7,
 		});
+		// A host-less repo is resolved by `gh` against GH_HOST, so an explicit
+		// github.com must survive parsing too.
 		expect(parseIssueUrl("https://github.com/acme/widgets/issues/7")).toEqual({
-			repo: "acme/widgets",
+			repo: "github.com/acme/widgets",
 			issueNumber: 7,
 		});
+	});
+
+	it("leaves the session checkout's github.com identity bare", () => {
+		vi.spyOn(git.github, "text").mockResolvedValue("https://github.com/acme/widgets\n");
+		return expect(resolveDefaultRepoMemoized(`/tmp/gh-canonical-identity-${Date.now()}`)).resolves.toBe(
+			"acme/widgets",
+		);
 	});
 });

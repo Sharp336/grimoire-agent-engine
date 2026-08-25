@@ -22,6 +22,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getGithubCacheDbPath, logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
+import { GITHUB_HOST } from "./gh-common";
 import { ToolAbortError } from "./tool-errors";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -202,7 +203,7 @@ const authKeyMemo = new Map<string, AuthKeyMemoEntry>();
  * The DB stores only a hash, never the token or hosts.yml contents. If no
  * credential source is visible, callers should pass `null` to bypass caching.
  */
-export function resolveGithubCacheAuthKey(host: string = process.env.GH_HOST || "github.com"): string | undefined {
+export function resolveGithubCacheAuthKey(host: string = process.env.GH_HOST || GITHUB_HOST): string | undefined {
 	const hostsPath = path.join(getGhConfigDir(), "hosts.yml");
 	let envSig = "";
 	for (const name of AUTH_KEY_TOKEN_ENV_VARS) {
@@ -242,8 +243,13 @@ export function resolveGithubCacheAuthKey(host: string = process.env.GH_HOST || 
 	return value;
 }
 
+/**
+ * Row identity for a repo. An explicit `github.com/` prefix is dropped so the
+ * host-qualified and bare spellings of the same repository share one row.
+ */
 function normalizeRepo(repo: string): string {
-	return repo.toLowerCase();
+	const lower = repo.toLowerCase();
+	return lower.startsWith(`${GITHUB_HOST}/`) ? lower.slice(GITHUB_HOST.length + 1) : lower;
 }
 
 export function getCached<T = unknown>(
