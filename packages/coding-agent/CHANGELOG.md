@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Vertex AI credential support to the Gemini `web_search` provider.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added
