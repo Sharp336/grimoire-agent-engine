@@ -5,11 +5,11 @@ import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import type {
 	NamespacedTodoProjection,
 	TodoProjectionPhase,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/todo-projection";
-import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import {
 	ACP_BOOTSTRAP_RACE_GUARD_MS,

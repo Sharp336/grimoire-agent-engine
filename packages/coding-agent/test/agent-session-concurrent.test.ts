@@ -21,7 +21,6 @@ import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { GoalRuntime } from "@oh-my-pi/pi-coding-agent/goals/runtime";
-import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
@@ -63,7 +62,6 @@ afterAll(() => {
 
 describe("AgentSession concurrent prompt guard", () => {
 	let session: AgentSession;
-	let sessionManager: SessionManager;
 	let tempDir: string;
 
 	beforeEach(() => {
@@ -84,7 +82,6 @@ describe("AgentSession concurrent prompt guard", () => {
 		vi.restoreAllMocks();
 		AsyncJobManager.resetForTests();
 	});
-
 
 	it("continues a main session from session_stop feedback before settling", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;

@@ -213,7 +213,6 @@ describe("InteractiveMode todo HUD persistence", () => {
 		expect(renderTodos(mode)).not.toContain("done task");
 	});
 
-
 	it("renders projection changes from the session focused through Agent Hub", async () => {
 		await replaceMode(-1);
 		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});

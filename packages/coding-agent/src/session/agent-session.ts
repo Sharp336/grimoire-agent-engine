@@ -6251,11 +6251,7 @@ export class AgentSession {
 				images: normalizedImages,
 				prependMessages:
 					preludeMessages.length > 0 || keywordNotices.length > 0 || imageDescriptionNotice
-						? [
-								...preludeMessages,
-								...keywordNotices,
-								...(imageDescriptionNotice ? [imageDescriptionNotice] : []),
-							]
+						? [...preludeMessages, ...keywordNotices, ...(imageDescriptionNotice ? [imageDescriptionNotice] : [])]
 						: undefined,
 				inFlightReservation: admissionReservation,
 			});
