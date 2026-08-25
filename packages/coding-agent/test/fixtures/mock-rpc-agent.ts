@@ -93,6 +93,13 @@ for await (const raw of console) {
 				continue;
 			}
 			if (Bun.env.MOCK_RPC_IGNORE_COMMANDS === "1") continue;
+			if (frame.type === "extension_ui_response") {
+				// Echoed so a test can observe that the answer reached the server,
+				// rather than only that the client wrote it to stdin.
+				writeFrame({ type: "command_output", text: `ui_response:${JSON.stringify(frame)}` });
+				continue;
+			}
+
 			const id = typeof frame.id === "string" ? frame.id : undefined;
 			if (frame.type === "negotiate_protocol" && frame.protocolVersion === 2) {
 				writeFrame({
@@ -180,6 +187,19 @@ for await (const raw of console) {
 					data,
 				});
 				continue;
+			}
+
+			if (Bun.env.MOCK_RPC_EXTENSION_UI === "1" && frame.type === "get_state") {
+				writeFrame({
+					type: "extension_ui_request",
+					id: "mock-ui-1",
+					method: "confirm",
+					title: "mock confirm",
+					message: "answer me",
+				});
+			}
+			if (Bun.env.MOCK_RPC_COMMAND_OUTPUT === "1" && frame.type === "get_state") {
+				writeFrame({ type: "command_output", text: "mock command output" });
 			}
 
 			writeFrame({

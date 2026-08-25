@@ -556,6 +556,12 @@ export class RpcClient {
 	 * blocking method (`select`, `confirm`, `input`, `editor`) must be answered
 	 * with {@link respondToExtensionUi}; the approval dialog carries no timeout,
 	 * so an unanswered request stalls the turn indefinitely.
+	 *
+	 * {@link login} installs its own scoped listener for the duration of the auth
+	 * flow, so a persistent listener registered here also sees the `open_url` and
+	 * `input` requests that flow emits. Answering them from both is harmless — the
+	 * server discards a response whose id has already settled — but a host that
+	 * drives its own login UI may want to ignore requests while login is running.
 	 */
 	onExtensionUiRequest(listener: RpcExtensionUiRequestListener): () => void {
 		this.#extensionUiListeners.add(listener);
