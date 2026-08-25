@@ -599,7 +599,7 @@ export async function executePrCreate(
 			output
 				.split("\n")
 				.map(line => line.trim())
-				.find(line => line.startsWith("https://github.com/")) ?? output.trim();
+				.find(line => line.startsWith("https://")) ?? output.trim();
 		const parsed = parsePullRequestUrl(url);
 		const resolvedRepo = repo ?? parsed.repo;
 

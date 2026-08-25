@@ -16,8 +16,12 @@ export function normalizeBlock(value: string | null | undefined): string {
 	return (value ?? "").replaceAll("\r\n", "\n").replaceAll("\r", "\n").replaceAll("\t", "    ").trimEnd();
 }
 
+/**
+ * A full repo/issue/PR URL. `gh` derives host, repo, and number from such an
+ * identifier itself, so callers must not also pass `--repo`.
+ */
 export function looksLikeGitHubUrl(value: string | undefined): boolean {
-	return value?.startsWith("https://github.com/") ?? false;
+	return value?.startsWith("https://") ?? false;
 }
 
 export function normalizeOptionalString(value: string | null | undefined): string | undefined {
@@ -52,10 +56,54 @@ export function appendRepoFlag(args: string[], repo: string | undefined, identif
 	args.push("--repo", repo);
 }
 
-export const REPO_API_URL_PREFIX = "https://api.github.com/repos/";
+/** Canonical host; repos there stay unqualified so slugs keep their familiar shape. */
+export const GITHUB_HOST = "github.com";
 
-export const PR_URL_PATTERN = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)(?:\/.*)?$/;
-export const ISSUE_URL_PATTERN = /^https:\/\/github\.com\/([^/]+\/[^/]+)\/issues\/(\d+)(?:\/.*)?$/;
+/**
+ * A repository in the GitHub CLI's `[HOST/]OWNER/REPO` form. Only GitHub
+ * Enterprise repos carry a `host`; `gh` resolves an unqualified slug against
+ * `GH_HOST`, which defaults to github.com.
+ */
+export interface GhRepoRef {
+	/** Enterprise host, or undefined for github.com. */
+	host?: string;
+	/** `OWNER/REPO`, never host-qualified. */
+	slug: string;
+}
+
+/** Split `[HOST/]OWNER/REPO`; anything with another shape is taken as a slug. */
+export function parseRepoRef(repo: string): GhRepoRef {
+	const firstSlash = repo.indexOf("/");
+	if (firstSlash < 0) return { slug: repo };
+	const secondSlash = repo.indexOf("/", firstSlash + 1);
+	if (secondSlash < 0 || repo.includes("/", secondSlash + 1)) return { slug: repo };
+	return { host: repo.slice(0, firstSlash), slug: repo.slice(firstSlash + 1) };
+}
+
+/** Join a host and `OWNER/REPO` into the form `--repo` accepts. */
+export function formatRepoRef(host: string | undefined, slug: string): string {
+	return !host || host === GITHUB_HOST ? slug : `${host}/${slug}`;
+}
+
+/**
+ * `gh api` endpoint paths carry no host, so an enterprise ref has to name its
+ * host with a flag instead.
+ */
+export function ghApiHostArgs(ref: GhRepoRef): string[] {
+	return ref.host ? ["--hostname", ref.host] : [];
+}
+
+const REPO_URL_PATTERN = /^https?:\/\/([^/]+)\/([^/]+)\/([^/?#]+)/;
+
+/** `https://HOST/OWNER/REPO` → `[HOST/]OWNER/REPO`. */
+export function repoFromUrl(value: string | undefined): string | undefined {
+	const match = REPO_URL_PATTERN.exec(value?.trim() ?? "");
+	if (!match) return undefined;
+	return formatRepoRef(match[1], `${match[2]}/${match[3]}`);
+}
+
+export const PR_URL_PATTERN = /^https:\/\/([^/]+)\/([^/]+\/[^/]+)\/pull\/(\d+)(?:\/.*)?$/;
+export const ISSUE_URL_PATTERN = /^https:\/\/([^/]+)\/([^/]+\/[^/]+)\/issues\/(\d+)(?:\/.*)?$/;
 
 export async function requireCurrentGitBranch(cwd: string, signal?: AbortSignal): Promise<string> {
 	const branch = await git.branch.current(cwd, signal);
@@ -105,8 +153,8 @@ export function parsePullRequestUrl(value: string | undefined): { repo?: string;
 	}
 
 	return {
-		repo: match[1],
-		prNumber: Number(match[2]),
+		repo: formatRepoRef(match[1], match[2]),
+		prNumber: Number(match[3]),
 	};
 }
 
@@ -128,8 +176,8 @@ export function parseIssueUrl(value: string | undefined): { repo?: string; issue
 	const match = normalized.match(ISSUE_URL_PATTERN);
 	if (!match) return {};
 	return {
-		repo: match[1],
-		issueNumber: Number(match[2]),
+		repo: formatRepoRef(match[1], match[2]),
+		issueNumber: Number(match[3]),
 	};
 }
 
@@ -143,6 +191,26 @@ export function githubRepoSlugEquals(left: string | undefined, right: string): b
 		if (leftCode !== rightCode) return false;
 	}
 	return true;
+}
+
+/**
+ * Ask `gh` which repository the checkout points at, as `[HOST/]OWNER/REPO`.
+ *
+ * `nameWithOwner` alone would drop the host, and `gh` resolves a host-less
+ * `--repo` against `GH_HOST` (github.com by default) — so an enterprise
+ * checkout would silently be looked up on github.com. The repo URL carries
+ * the host `gh` itself resolved from the remote.
+ */
+async function resolveRepoFromCwd(cwd: string, signal?: AbortSignal): Promise<string> {
+	const url = requireNonEmpty(
+		await git.github.text(cwd, ["repo", "view", "--json", "url", "-q", ".url"], signal),
+		"repo",
+	);
+	const repo = repoFromUrl(url);
+	if (!repo) {
+		throw new ToolError(`GitHub CLI returned an unrecognized repository URL: ${url}`);
+	}
+	return repo;
 }
 
 export async function resolveGitHubRepo(
@@ -163,18 +231,13 @@ export async function resolveGitHubRepo(
 		return runRepo;
 	}
 
-	const resolved = await git.github.text(
-		cwd,
-		["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-		signal,
-	);
-	return requireNonEmpty(resolved, "repo");
+	return resolveRepoFromCwd(cwd, signal);
 }
 
 /**
- * Process-lifetime cache of `gh repo view --json nameWithOwner` lookups keyed
- * by absolute cwd. Avoids repeated `gh` chatter when the same protocol handler
- * or tool call resolves the default repo many times in a row.
+ * Process-lifetime cache of `gh repo view` lookups keyed by absolute cwd.
+ * Avoids repeated `gh` chatter when the same protocol handler or tool call
+ * resolves the default repo many times in a row.
  *
  * The shared lookup is intentionally **not** bound to any caller's
  * AbortSignal. Cancelling one caller would otherwise kill the underlying
@@ -194,15 +257,7 @@ export async function resolveDefaultRepoMemoized(cwd: string, signal?: AbortSign
 		pending = (async () => {
 			// No caller signal: this lookup is shared across every concurrent
 			// waiter on the same cwd.
-			const resolved = await git.github.text(cwd, [
-				"repo",
-				"view",
-				"--json",
-				"nameWithOwner",
-				"-q",
-				".nameWithOwner",
-			]);
-			const value = requireNonEmpty(resolved, "repo");
+			const value = await resolveRepoFromCwd(cwd);
 			DEFAULT_REPO_RESOLVED.set(key, value);
 			return value;
 		})();

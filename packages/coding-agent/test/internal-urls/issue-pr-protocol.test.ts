@@ -303,6 +303,53 @@ describe("pr:// protocol handler", () => {
 			/Invalid issue:\/\/ URL: empty or unsafe path segment/,
 		);
 	});
+
+	it("routes pr://<host>/<owner>/<repo>/<n> at that host", async () => {
+		const spy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+			if (args.includes("/repos/owner/example/pulls/77/comments")) {
+				return [] as never;
+			}
+			return prPayload(77, "pr body") as never;
+		});
+
+		const router = InternalUrlRouter.instance();
+		const resource = await router.resolve("pr://ghe.example.com/owner/example/77");
+
+		expect(resource.content).toContain("# Pull Request #77: PR #77");
+		// `gh pr view` takes `[HOST/]OWNER/REPO` in --repo…
+		const viewArgs = spy.mock.calls[0]?.[1] as string[];
+		expect(viewArgs[viewArgs.indexOf("--repo") + 1]).toBe("ghe.example.com/owner/example");
+		// …while `gh api` paths cannot carry a host, so it rides as a flag.
+		const apiArgs = spy.mock.calls[1]?.[1] as string[];
+		expect(apiArgs).toContain("/repos/owner/example/pulls/77/comments");
+		expect(apiArgs[apiArgs.indexOf("--hostname") + 1]).toBe("ghe.example.com");
+		expect(resource.notes).toContain("Diff: pr://ghe.example.com/owner/example/77/diff");
+	});
+
+	it("treats a redundant github.com prefix as the bare slug", async () => {
+		const spy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+			if (args.includes("/repos/owner/example/pulls/79/comments")) {
+				return [] as never;
+			}
+			return prPayload(79, "pr body") as never;
+		});
+
+		const router = InternalUrlRouter.instance();
+		await router.resolve("pr://owner/example/79");
+		const prefixed = await router.resolve("pr://github.com/owner/example/79");
+
+		// Same cache row: the prefixed form must not fetch again.
+		expect(spy).toHaveBeenCalledTimes(2);
+		expect(prefixed.notes?.[0]).toMatch(/^Cached:/);
+	});
+
+	it("rejects a host-prefixed URL that names no repository", async () => {
+		const router = InternalUrlRouter.instance();
+		await expect(InternalUrlRouter.instance().resolve("pr://ghe.example.com/owner")).rejects.toThrow(
+			/Invalid pr:\/\/ URL/,
+		);
+		await expect(router.resolve("issue://ghe.example.com")).rejects.toThrow(/Invalid issue:\/\/ URL/);
+	});
 });
 
 describe("pr://.../diff family", () => {
