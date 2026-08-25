@@ -2614,7 +2614,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						: "No models available. Use /login or set an API key environment variable. Then use /model to select a model.";
 			}
 		}
-		if (deferredModelResolution && options.awaitDeferredModel) {
+		if (
+			deferredModelResolution &&
+			(options.awaitDeferredModel || (options.hasUI === undefined && options.settings === undefined))
+		) {
 			const deferredModel = await deferredModelResolution;
 			if (deferredModel) {
 				model = deferredModel.model;
@@ -4109,13 +4112,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			logger.warn("Code Mode initialization at session startup failed", { error: String(error) });
 		}
 
-		void deferredModelResolution?.then(discovered => {
+		void deferredModelResolution?.then(async discovered => {
 			if (!discovered || session.model) return;
-			void session.setModelTemporary(discovered.model, discovered.thinkingLevel).catch(error => {
+			try {
+				await session.setModelTemporary(discovered.model, discovered.thinkingLevel);
+				agent.setDialect(resolveDialect(settings.get("tools.format"), discovered.model));
+				await session.initializeCodeMode();
+			} catch (error) {
 				logger.warn("background model discovery model activation failed", {
 					error: error instanceof Error ? error.message : String(error),
 				});
-			});
+			}
 		});
 
 		return {

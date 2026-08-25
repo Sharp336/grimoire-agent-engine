@@ -425,26 +425,18 @@ async function readExtensionCompatibility(
 
 async function importExtensionModule(
 	extensionPath: string,
-	cwd: string,
 	manifestCache: Map<string, Promise<ExtensionManifest | null>>,
+	cacheBust?: string,
 ): Promise<ImportedExtensionModule> {
-	const resolvedPath = resolvePath(extensionPath, cwd);
+	const resolvedPath = extensionPath;
+	const compatibility = await readExtensionCompatibility(extensionPath, manifestCache);
 	try {
-		const compatibility = await readExtensionCompatibility(resolvedPath, manifestCache);
 		const module = (await withHostGuard(() =>
-			compatibility === "modern-esm" ? loadRuntimeModule(resolvedPath) : loadLegacyPiModule(resolvedPath),
+			compatibility === "modern-esm" ? loadRuntimeModule(resolvedPath, cacheBust) : loadLegacyPiModule(resolvedPath),
 		)) as LoadedExtensionModule;
-		const factory = getExtensionFactory(module);
-		if (typeof factory !== "function")
-			return {
-				factory: null,
-				resolvedPath,
-				error: `Extension does not export a valid factory function: ${extensionPath}`,
-			};
-		return { factory, resolvedPath, error: null };
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		return { factory: null, resolvedPath, error: `Failed to load extension: ${message}` };
+		return { factory: getExtensionFactory(module), resolvedPath, error: null };
+	} catch (error) {
+		return { factory: null, resolvedPath, error: formatExtensionError(error) };
 	}
 }
 
@@ -495,7 +487,12 @@ export async function loadExtensionFromFactory(
  * sequentially in the original path order, so registration semantics
  * (last-wins collisions, shared runtime flag defaults) stay deterministic.
  */
-export async function loadExtensions(paths: string[], cwd: string, eventBus?: EventBus): Promise<LoadExtensionsResult> {
+export async function loadExtensions(
+	paths: string[],
+	cwd: string,
+	eventBus?: EventBus,
+	options?: { cacheBust?: string },
+): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
 	const resolvedEventBus = eventBus ?? new EventBus();
@@ -503,8 +500,9 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 
 	const manifestCache = new Map<string, Promise<ExtensionManifest | null>>();
 
-	const imported = await Promise.all(paths.map(extPath => importExtensionModule(extPath, cwd, manifestCache)));
-
+	const imported = await Promise.all(
+		paths.map(extPath => importExtensionModule(extPath, manifestCache, options?.cacheBust)),
+	);
 	for (let i = 0; i < paths.length; i++) {
 		const extPath = paths[i]!;
 		const { extension, error } = await bindExtension(extPath, imported[i]!, cwd, resolvedEventBus, runtime);

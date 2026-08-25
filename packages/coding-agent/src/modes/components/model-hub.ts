@@ -226,8 +226,6 @@ export class ModelHubComponent implements Component {
 	// the sidebar because discovery found nothing at their endpoint (#2761).
 	// Rebuilt on every sidebar build; consumed by the once-per-open re-probe.
 	#hiddenOptionalProviders = new Set<string>();
-	/** Providers already re-probed by {@link ModelHubComponent.#reprobeHiddenOptionalProviders} this hub open. */
-	#reprobedHiddenProviders = new Set<string>();
 
 	// Frame geometry from the last render, for mouse hit-testing (the
 	// fullscreen overlay paints from screen row 0, so mouse rows map 1:1).
@@ -731,14 +729,6 @@ export class ModelHubComponent implements Component {
 	 * repopulates the registry and the sync resurfaces its tab. Endpoints
 	 * still down keep their "unavailable" state and stay hidden.
 	 */
-	#reprobeHiddenOptionalProviders(): void {
-		if (this.#scopedModels.length > 0) return;
-		for (const provider of this.#hiddenOptionalProviders) {
-			if (this.#reprobedHiddenProviders.has(provider)) continue;
-			this.#reprobedHiddenProviders.add(provider);
-			void this.#refreshProviderInBackground(provider);
-		}
-	}
 
 	#formatDiscoveryAge(fetchedAt: number | undefined): string | undefined {
 		if (!fetchedAt) return undefined;

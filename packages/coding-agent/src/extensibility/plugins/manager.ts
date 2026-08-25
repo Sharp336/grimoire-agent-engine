@@ -13,7 +13,6 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import { loadExtensions } from "../extensions/loader";
-import { loadRuntimeModule } from "../module-loader";
 import { refreshBunGitCache } from "./bun-git-cache";
 import { type GitSource, parseGitUrl } from "./git-url";
 import { resolvePluginManifestEntries, setExtensionManifestPath } from "./loader";
@@ -399,14 +398,11 @@ export class PluginManager {
 			}
 			loadable.push(resolvedPath);
 			setExtensionManifestPath(resolvedPath, manifestPath);
-			try {
-				await loadRuntimeModule(resolvedPath, `plugin-validation=${Date.now()}-${Math.random()}`);
-			} catch (error) {
-				errors.push(`${resolvedPath}: ${error instanceof Error ? error.message : String(error)}`);
-			}
 		}
 		if (loadable.length > 0) {
-			const result = await loadExtensions(loadable, this.#cwd);
+			const result = await loadExtensions(loadable, this.#cwd, undefined, {
+				cacheBust: `plugin-validation=${Date.now()}-${Math.random()}`,
+			});
 			for (const failure of result.errors) errors.push(`${failure.path}: ${failure.error}`);
 		}
 		if (errors.length > 0)

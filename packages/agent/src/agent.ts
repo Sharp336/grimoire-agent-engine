@@ -927,6 +927,10 @@ export class Agent {
 		this.#syncTokenizer(model);
 	}
 
+	setDialect(dialect: Dialect | undefined) {
+		this.#dialect = dialect;
+	}
+
 	setThinkingLevel(l: Effort | undefined) {
 		this.#state.thinkingLevel = l;
 	}
