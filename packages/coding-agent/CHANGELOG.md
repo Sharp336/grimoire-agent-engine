@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/updates [optional focus]` to request an ephemeral `/btw` recap of completed work, current progress, blockers, evidence, and the next action.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added

@@ -52,3 +52,24 @@ describe("/btw slash command", () => {
 		expect(harness.handleBtwCommand).toHaveBeenCalledWith("");
 	});
 });
+
+describe("/updates slash command", () => {
+	it("routes the default update question through the interactive btw handler", async () => {
+		const harness = createRuntime();
+
+		const handled = await executeBuiltinSlashCommand("/updates", harness.runtime);
+
+		expect(handled).toBe(true);
+		expect(harness.setText).toHaveBeenCalledWith("");
+		expect(harness.handleBtwCommand).toHaveBeenCalledTimes(1);
+	});
+
+	it("accepts a colon-separated optional focus", async () => {
+		const harness = createRuntime();
+
+		const handled = await executeBuiltinSlashCommand("/updates:test failures", harness.runtime);
+
+		expect(handled).toBe(true);
+		expect(harness.handleBtwCommand).toHaveBeenCalledWith(expect.stringContaining("test failures"));
+	});
+});
