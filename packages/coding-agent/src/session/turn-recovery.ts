@@ -206,6 +206,7 @@ export class TurnRecovery {
 	#emptyStopRetryCount = 0;
 	#unexpectedStopRetryCount = 0;
 	#acceptTerminalEmptyStopForPrompt = false;
+	#silentEmptyStopFallbackArmed = false;
 	// Three fields sit near the word "serve" and are deliberately distinct:
 	// `#activeRetryFallback.served` gates the one-shot `retry_fallback_succeeded`
 	// event for the current arm, `#fallbackRouted` says how the CURRENT model was
@@ -328,6 +329,7 @@ export class TurnRecovery {
 		this.#emptyStopRetryCount = 0;
 		this.#unexpectedStopRetryCount = 0;
 		this.#acceptTerminalEmptyStopForPrompt = false;
+		this.#silentEmptyStopFallbackArmed = false;
 	}
 
 	/** Sets whether one terminal empty stop is accepted for the current prompt. */
@@ -703,6 +705,52 @@ export class TurnRecovery {
 				finalError =
 					"Assistant returned empty stop after retry cap; try switching models or `/shake images` to remove archived frames";
 			}
+			const zeroBilled =
+				!providerEmptyOutput &&
+				assistantMessage.content.length === 0 &&
+				assistantMessage.usage.input === 0 &&
+				assistantMessage.usage.output === 0 &&
+				assistantMessage.usage.cacheRead === 0 &&
+				assistantMessage.usage.cacheWrite === 0 &&
+				outputTokensExcludingKnownReasoning === 0;
+
+			// Zero-billed empty stops are upstream dispatch failures laundered into a
+			// clean HTTP-200 stop (#9415): nothing was ever dispatched, so no usage
+			// bucket is nonzero. Promote ONCE per run, BEFORE the terminal
+			// `auto_retry_end` emission, so the user never sees the retry-cap banner:
+			// the synthetic retriable error flows through handleRetryableError where
+			// retry.modelFallback / fallbackChains pick a healthy provider silently.
+			// The synthetic object keeps the original turn untouched — the original is
+			// dropped durably either way, and pending-error bookkeeping references the
+			// object that handleRetryableError persists.
+			if (
+				zeroBilled &&
+				!this.#silentEmptyStopFallbackArmed &&
+				this.#host.settings.get("features.silentEmptyStopFallback")
+			) {
+				this.#silentEmptyStopFallbackArmed = true;
+				logger.warn("Promoting zero-billed empty stop to retriable error for silent model fallback", {
+					attempts,
+					model: assistantMessage.model,
+					provider: assistantMessage.provider,
+				});
+				const synthetic: AssistantMessage = {
+					...assistantMessage,
+					stopReason: "error",
+					errorMessage: finalError,
+					errorId: AIError.create(AIError.Flag.EmptyResponse | AIError.Flag.Transient),
+				};
+				await this.#dropAssistantTurnDurably(assistantMessage);
+				const didRetry = await this.handleRetryableError(synthetic, { allowModelFallback: true });
+				if (didRetry) {
+					this.#emptyStopRetryCount = 0;
+					return "continue";
+				}
+				// No chain or budget could take over: fall through to the visible
+				// terminal settle below rather than looping against the same pipe.
+				this.#silentEmptyStopFallbackArmed = false;
+			}
+
 			assistantMessage.errorMessage = finalError;
 			if (providerEmptyOutput) assistantMessage.errorId = AIError.create();
 			logger.warn(finalError, {
