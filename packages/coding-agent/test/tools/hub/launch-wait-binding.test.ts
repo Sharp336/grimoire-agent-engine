@@ -127,8 +127,8 @@ describe("hub process wait binding", () => {
 		expect((result.details?.daemon as { state?: string } | undefined)?.state).toBe("ready");
 	});
 
-	it("classifies stale-id and wrong-owner refusals with their messages", async () => {
-		const refusals: Array<{ code: "stale-id" | "wrong-owner"; message: string }> = [
+	it("classifies stale-id, wrong-owner, and upgrade-required refusals with their messages", async () => {
+		const refusals: Array<{ code: "stale-id" | "wrong-owner" | "upgrade-required"; message: string }> = [
 			{
 				code: "stale-id",
 				message:
@@ -137,6 +137,11 @@ describe("hub process wait binding", () => {
 			{
 				code: "wrong-owner",
 				message: "Daemon web is owned by session session-a; only the owning session may wait on it.",
+			},
+			{
+				code: "upgrade-required",
+				message:
+					"Daemon web wait binds generation id daemon-1, which the running broker does not support (it predates protocol v2 and would silently ignore the id).",
 			},
 		];
 		for (const refusal of refusals) {
@@ -165,18 +170,14 @@ describe("hub process wait binding", () => {
 		}
 	});
 
-	it("pins the model-facing `for` schema text to auto semantics, never a false default exit", () => {
+	it("keeps the `for` schema structural: the ready/exit enum plus the auto description", () => {
 		const wire = toolWireSchema(new HubTool(makeSession())) as {
-			properties?: { for?: { description?: string } };
+			properties?: { for?: { enum?: unknown; description?: string } };
 		};
-		// This description is the exact text the model sees in the tool schema:
-		// an omitted `for` is auto (already-ready returns immediately, a
-		// ready-less one-shot waits for exit), never a default exit wait.
-		expect(wire.properties?.for?.description).toBe(
-			"wait with name: lifecycle condition; omitted = auto: already-ready returns immediately, a ready-less one-shot waits for exit, otherwise waits for readiness or exit",
-		);
-		// The explicit values survive alongside the auto description.
-		expect(JSON.stringify(wire.properties?.for)).toContain('"exit"');
-		expect(JSON.stringify(wire.properties?.for)).toContain('"ready"');
+		// Structural contract the broker parses and the model sees: exactly the
+		// two conditions, and the description still advertises the auto default
+		// for an omitted `for` — never a false default exit wait.
+		expect(wire.properties?.for?.enum).toEqual(["ready", "exit"]);
+		expect(wire.properties?.for?.description).toContain("auto");
 	});
 });

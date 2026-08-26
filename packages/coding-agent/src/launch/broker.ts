@@ -12,6 +12,7 @@ import { hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./pres
 import {
 	DAEMON_IDLE_GRACE_ENV,
 	DAEMON_PROJECT_DIR_ENV,
+	DAEMON_PROTOCOL_VERSION,
 	DAEMON_PTY_COLUMNS,
 	DAEMON_PTY_ROWS,
 	DAEMON_RUNTIME_DIR_ENV,
@@ -561,7 +562,7 @@ class DaemonBroker {
 	async #dispatch(operation: DaemonOperation): Promise<DaemonRpcResult> {
 		switch (operation.op) {
 			case "ping":
-				return { op: "ping", projectDir: this.#projectDir };
+				return { op: "ping", projectDir: this.#projectDir, protocolVersion: DAEMON_PROTOCOL_VERSION };
 			case "start":
 				return this.#start(operation.spec, operation.owner);
 			case "list": {
@@ -1115,6 +1116,17 @@ class DaemonBroker {
 				throw new Error(`Invalid wait regex: ${error instanceof Error ? error.message : String(error)}`);
 			}
 		}
+		// The wait binds to the generation that owns the validated id. The moment
+		// that generation exits into restart — or a relaunch rotates the id — the
+		// wait must refuse instead of continuing against the replacement process:
+		// an exit wait would otherwise span generations, and a ready/pattern wait
+		// could succeed on later-generation output and return a different id.
+		const boundGeneration = record.generation;
+		const boundId = operation.id;
+		const generationLeft = (): boolean =>
+			record.generation !== boundGeneration ||
+			record.snapshot.id !== boundId ||
+			record.snapshot.state === "restarting";
 		// Readiness was actually observed: the sticky readyAt survives a fast
 		// ready→exit, a live "ready" state, or a "running" daemon with no ready spec.
 		const readyObserved = (): boolean =>
@@ -1129,6 +1141,9 @@ class DaemonBroker {
 		const autoReady = (): boolean =>
 			hasReadySpec && (record.snapshot.readyAt !== undefined || record.snapshot.state === "ready");
 		const condition = (): boolean => {
+			// Wake on generation rotation so the refusal below fires immediately
+			// instead of polling against the replacement process.
+			if (generationLeft()) return true;
 			if (pattern) {
 				const match = pattern.exec(record.readinessBuffer);
 				if (!match) return false;
@@ -1151,6 +1166,19 @@ class DaemonBroker {
 			return terminalState(record.snapshot.state);
 		};
 		const woke = condition() || (await this.#waitUntil(record, condition, operation.timeoutMs));
+		if (generationLeft()) {
+			const rotated = record.generation !== boundGeneration || record.snapshot.id !== boundId;
+			throw new Error(
+				encodeDaemonWaitReject({
+					code: "stale-id",
+					message: rotated
+						? `Daemon ${operation.name} generation rotated while the wait was active: id ${boundId} ` +
+							`was replaced by ${record.snapshot.id}. Re-bind with the current id.`
+						: `Daemon ${operation.name} exited and is restarting while the wait was active; id ${boundId} ` +
+							"belongs to the exited generation. Re-read the id from start/restart/describe/ps and re-bind.",
+				}),
+			);
+		}
 		// A for:"ready" wait that woke on a terminal exit without ever observing
 		// readiness is still "not ready" — surface it as timed out so callers and the
 		// renderer don't chain work against a dead process.

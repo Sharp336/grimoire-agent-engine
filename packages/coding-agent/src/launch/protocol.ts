@@ -17,6 +17,17 @@ export const DAEMON_RUNTIME_DIR_ENV = "OMP_DAEMON_RUNTIME_DIR";
 /** Optional environment key overriding last-client shutdown grace. */
 export const DAEMON_IDLE_GRACE_ENV = "OMP_DAEMON_IDLE_GRACE_MS";
 
+/** Current broker protocol version, announced in every `ping` result. */
+export const DAEMON_PROTOCOL_VERSION = 2;
+
+/**
+ * First protocol version whose brokers support wait generation binding: the
+ * `wait` `id`/`owner` fields and the omitted-`for` auto condition. Brokers at
+ * or above this version answer `ping` with `protocolVersion`; older brokers
+ * omit it (they ignore `id` and require an explicit `for`).
+ */
+export const DAEMON_WAIT_BINDING_PROTOCOL_VERSION = 2;
+
 /** Stable lifecycle states exposed by the launch tool. */
 export type DaemonState = "starting" | "running" | "ready" | "restarting" | "stopping" | "exited" | "failed";
 
@@ -71,7 +82,7 @@ export interface DaemonSnapshot {
 export type DaemonSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT" | "SIGKILL";
 
 /** Classified `wait` refusals: the wait cannot be enforced, so it returns instead of blocking. */
-export type DaemonWaitRejectCode = "missing-daemon" | "missing-id" | "stale-id" | "wrong-owner";
+export type DaemonWaitRejectCode = "missing-daemon" | "missing-id" | "stale-id" | "wrong-owner" | "upgrade-required";
 
 export interface DaemonWaitReject {
 	code: DaemonWaitRejectCode;
@@ -143,7 +154,7 @@ export type DaemonOperation =
 
 /** Typed broker result decoded before it reaches tool code. */
 export type DaemonRpcResult =
-	| { op: "ping"; projectDir: string }
+	| { op: "ping"; projectDir: string; protocolVersion?: number }
 	| { op: "start"; daemon: DaemonSnapshot; readyTimedOut: boolean }
 	| { op: "list"; daemons: DaemonSnapshot[] }
 	| {
@@ -169,6 +180,8 @@ export type DaemonRpcResult =
 export interface DaemonWireRequest {
 	id: string;
 	token: string;
+	/** Client protocol version (`DAEMON_PROTOCOL_VERSION`); ignored by pre-handshake brokers. */
+	protocolVersion?: number;
 	owners?: string[];
 	detachedOwners?: string[];
 	completionEvents?: boolean;
@@ -337,6 +350,10 @@ export function parseDaemonWireRequest(value: unknown): DaemonWireRequest {
 	return {
 		id: stringValue(source.id, "request.id"),
 		token: stringValue(source.token, "request.token"),
+		protocolVersion:
+			source.protocolVersion === undefined
+				? undefined
+				: numberValue(source.protocolVersion, "request.protocolVersion"),
 		owners: source.owners === undefined ? undefined : stringArray(source.owners, "request.owners"),
 		detachedOwners:
 			source.detachedOwners === undefined ? undefined : stringArray(source.detachedOwners, "request.detachedOwners"),
@@ -455,7 +472,14 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 	const source = record(value, `${operation.op} result`);
 	switch (operation.op) {
 		case "ping":
-			return { op: "ping", projectDir: stringValue(source.projectDir, "result.projectDir") };
+			return {
+				op: "ping",
+				projectDir: stringValue(source.projectDir, "result.projectDir"),
+				protocolVersion:
+					source.protocolVersion === undefined
+						? undefined
+						: numberValue(source.protocolVersion, "result.protocolVersion"),
+			};
 		case "start":
 			return {
 				op: "start",

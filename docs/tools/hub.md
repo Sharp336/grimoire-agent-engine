@@ -106,6 +106,8 @@ Every `start`/`restart` returns the daemon `id` in its result text (`id=<uuid>`)
 - `for` omitted (auto): an already-ready daemon returns its ready snapshot immediately; a running one-shot (no ready spec) or a still-starting daemon waits for readiness or exit. `for: "ready"` waits for readiness; `for: "exit"` waits for exit even when the daemon is already ready.
 - A bound wait that times out stays a normal result carrying the daemon snapshot (including the current id), so a retry can re-bind or stop instead of starting an unbound wait.
 - Steering an in-flight wait aborts the wait only — the daemon and its process are untouched.
+- The bound generation exiting into `restarting` (a restart policy re-launch) while the wait is in flight → immediate stale-id refusal: the wait never continues against — or succeeds on — the replacement process. Re-bind with the current id after the restart.
+- A stale broker (left over from a CLI version that predates generation binding, kept alive by persistent/detached daemons) → immediate classified `upgrade-required` refusal for id-bound or auto waits. The stale broker is never restarted or killed by the client; legacy-shaped waits (explicit `for`, no `id`) still pass through, and other ops (`ps`/`logs`/`stop`/…) keep working. Stop the old broker (or the daemons keeping it alive) to restore the new semantics.
 
 ## Logs, input, signals (processes)
 ```json
@@ -129,7 +131,7 @@ Unchanged from the former `launch` tool: the first process op starts a detached 
 ## Errors
 - Most validation/availability failures are text results with `isError: true`: messaging unavailable, missing `to`/`message`, self-send (`Cannot send a message to yourself.`), `await` with `to:"all"`, `to`+`name` on one send, missing `ids` on `cancel`, and launch disabled. The async-disabled `jobs`/`cancel` response is an exception: it returns `Async execution is disabled; no background jobs are available.` with an empty job list and no `isError` flag.
 - Launch validation (missing `name`/`application`, bad `ready.port`, unsupported key) throws `ToolError`, exactly as before.
-- Process `wait` binding refusals (missing/stale `id`, unknown daemon, wrong owner) are immediate `isError` results with a classified message; a task agent's bare job `wait` is likewise refused immediately. Explicit `wait ids=[...]` that match nothing visible return `No matching jobs found for IDs: ...` immediately, never a hang.
+- Process `wait` binding refusals (missing/stale `id`, unknown daemon, wrong owner, upgrade-required against a stale broker) are immediate `isError` results with a classified message; a task agent's bare job `wait` is likewise refused immediately. Explicit `wait ids=[...]` that match nothing visible return `No matching jobs found for IDs: ...` immediately, never a hang.
 - A `wait` timeout is a normal result (`waited: null` or an all-running snapshot flagged `useless`), never an error.
 - Per-recipient delivery failures surface as `failed` receipts; `send` is `isError` only when nothing was delivered.
 

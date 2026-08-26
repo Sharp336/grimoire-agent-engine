@@ -3,7 +3,9 @@
 
 ### Fixed
 
-- Fixed `hub wait` schema text falsely advertising a default exit wait: the model-facing description of an omitted `for` now states the auto condition (an already-ready daemon returns immediately; a ready-less one-shot waits for exit), with a test pinning the exact text.
+- Fixed `hub wait` schema text falsely advertising a default exit wait: the model-facing description of an omitted `for` now states the auto condition (an already-ready daemon returns immediately; a ready-less one-shot waits for exit), with schema tests asserting the structural ready/exit enum and the auto-wait description.
+- Fixed bound `hub wait` continuing across generations when a restart policy re-launched the daemon mid-wait: when the bound generation exits into `restarting` or its id rotates, the wait now refuses immediately with a classified stale-id refusal instead of polling against — or succeeding on — the replacement process.
+- Fixed new CLI sessions talking to a daemon broker left over from a previous version (kept alive by persistent/detached daemons): the client now negotiates the broker protocol version on connect and refuses wait operations that need generation binding or the omitted-`for` auto condition with a classified `upgrade-required` result. The stale broker is never restarted or killed by the client, and legacy-shaped waits (explicit `for`, no `id`) still pass through unchanged.
 
 ## [18.0.5] - 2026-08-25
 

@@ -19,6 +19,7 @@ import { createDaemonBrokerClient, type DaemonBrokerClient, DaemonBrokerRejected
 import {
 	DAEMON_IDLE_GRACE_ENV,
 	DAEMON_PROJECT_DIR_ENV,
+	DAEMON_PROTOCOL_VERSION,
 	DAEMON_RUNTIME_DIR_ENV,
 	type DaemonSnapshot,
 	type DaemonSpec,
@@ -70,6 +71,58 @@ function oneShotSpec(name: string, cwd: string): DaemonSpec {
 		cwd,
 		pty: false,
 		restart: "no",
+		persist: false,
+		detached: false,
+	};
+}
+
+/** Restart-always daemon that prints READY, then exits with code 3 after ~350 ms. */
+function restartingReadySpec(name: string, cwd: string): DaemonSpec {
+	return {
+		name,
+		application: process.execPath,
+		args: ["-e", "process.stdout.write('READY\\n'); setTimeout(() => process.exit(3), 350)"],
+		env: {},
+		cwd,
+		pty: false,
+		ready: { log: "READY", timeoutMs: 5_000 },
+		restart: "always",
+		persist: false,
+		detached: false,
+	};
+}
+
+/**
+ * Restart-always daemon whose first generation prints `firstOutput` (default
+ * "booting", i.e. never ready) and exits with code 1 after `exitDelayMs`;
+ * once the test writes "ok" into `markerPath`, the next generation prints
+ * `okOutput` and stays alive. Lets a test arm the replacement generation's
+ * behavior before the restart timer fires.
+ */
+function markerDaemonSpec(
+	name: string,
+	cwd: string,
+	markerPath: string,
+	okOutput: string,
+	exitDelayMs: number,
+	firstOutput = "booting\n",
+): DaemonSpec {
+	return {
+		name,
+		application: process.execPath,
+		args: [
+			"-e",
+			`const fs = require('fs'); ` +
+				`const marker = process.env.OMP_TEST_MARKER; ` +
+				`const ok = marker && fs.existsSync(marker) && fs.readFileSync(marker, 'utf8').trim() === 'ok'; ` +
+				`if (ok) { process.stdout.write(${JSON.stringify(okOutput)}); setInterval(() => {}, 1000); } ` +
+				`else { process.stdout.write(${JSON.stringify(firstOutput)}); setTimeout(() => process.exit(1), ${exitDelayMs}); }`,
+		],
+		env: { OMP_TEST_MARKER: markerPath },
+		cwd,
+		pty: false,
+		ready: { log: "READY", timeoutMs: 5_000 },
+		restart: "always",
 		persist: false,
 		detached: false,
 	};
@@ -377,7 +430,7 @@ describe("daemon wait generation binding", () => {
 		}
 	}, 20_000);
 
-	it("aborting an in-flight bound wait never kills the daemon", async () => {
+	it("refuses an in-flight exit wait when its bound generation enters restart", async () => {
 		using tempDir = TempDir.createSync("@omp-wait-bind-");
 		const projectDir = path.join(tempDir.path(), "project");
 		const runtimeDir = path.join(tempDir.path(), "runtime");
@@ -387,30 +440,173 @@ describe("daemon wait generation binding", () => {
 		const previousTitle = process.title;
 		const broker = startBroker(projectDir, runtimeDir);
 		try {
-			const started = await client.request({ op: "start", spec: readySpec("shell", projectDir) });
+			const started = await client.request({
+				op: "start",
+				spec: restartingReadySpec("proxy", projectDir),
+				owner: "session-a",
+			});
+			if (started.op !== "start") throw new Error("unexpected start result");
+			const boundId = started.daemon.id;
+
+			// The bound generation exits ~350 ms later and the restart policy
+			// re-launches it: the wait must refuse at that rotation instead of
+			// spanning generations against the replacement process. Real child
+			// exit + real socket round-trip — fake timers cannot drive them.
+			const startedAt = Date.now();
+			const error = await client
+				.request({ op: "wait", name: "proxy", id: boundId, for: "exit", timeoutMs: 30_000 })
+				.then(
+					() => null,
+					(e: unknown) => e,
+				);
+			const elapsed = Date.now() - startedAt;
+
+			expect(error).not.toBeNull();
+			expect(rejectOf(error).code).toBe("stale-id");
+			// The refusal is the rotation, not the 30 s wait window.
+			expect(elapsed).toBeLessThan(15_000);
+		} finally {
+			await shutdown(client, broker, "proxy");
+			process.title = previousTitle;
+		}
+	}, 20_000);
+
+	it("refuses an in-flight ready wait when its bound generation restarts instead of accepting the replacement", async () => {
+		using tempDir = TempDir.createSync("@omp-wait-bind-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const markerPath = path.join(projectDir, "marker.txt");
+
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir);
+		try {
+			// Generation 1 never reaches readiness and exits; generation 2
+			// (marker armed) becomes ready — the unbound-poller bug let the wait
+			// succeed on the replacement's readiness and return its id.
+			const startPending = client.request({
+				op: "start",
+				// The first generation must still be alive when the wait binds, so
+				// the describe below races against its 600 ms exit.
+				spec: markerDaemonSpec("gate", projectDir, markerPath, "READY\n", 600),
+			});
+			await Bun.sleep(100);
+			const described = await client.request({ op: "describe", name: "gate" });
+			if (described.op !== "describe") throw new Error("unexpected describe result");
+			const boundId = described.daemon.id;
+
+			const startedAt = Date.now();
+			const waitPending = client
+				.request({ op: "wait", name: "gate", id: boundId, for: "ready", timeoutMs: 10_000 })
+				.then(
+					() => null,
+					(e: unknown) => e,
+				);
+			await Bun.write(markerPath, "ok\n");
+
+			const error = await waitPending;
+			const elapsed = Date.now() - startedAt;
+			const started = await startPending;
 			if (started.op !== "start") throw new Error("unexpected start result");
 
-			const controller = new AbortController();
-			const pending = client.request(
-				{
-					op: "wait",
-					name: "shell",
-					id: started.daemon.id,
-					for: "exit",
-					timeoutMs: 30_000,
-				},
-				controller.signal,
-			);
-			setTimeout(() => controller.abort(), 150);
-			await expect(pending).rejects.toThrow(/aborted/);
-
-			// The abort interrupted only the wait: the daemon is still alive.
-			const listed = await client.request({ op: "list" });
-			if (listed.op !== "list") throw new Error("unexpected list result");
-			const shell = listed.daemons.find(daemon => daemon.name === "shell") as DaemonSnapshot | undefined;
-			expect(shell?.state).toBe("ready");
+			// The bound generation really died and was replaced...
+			expect(started.daemon.id).not.toBe(boundId);
+			// ...and the wait refused at that rotation instead of accepting the
+			// replacement generation's readiness.
+			expect(error).not.toBeNull();
+			expect(rejectOf(error).code).toBe("stale-id");
+			expect(elapsed).toBeLessThan(5_000);
 		} finally {
-			await shutdown(client, broker, "shell");
+			await shutdown(client, broker, "gate");
+			process.title = previousTitle;
+		}
+	}, 20_000);
+
+	it("refuses an in-flight pattern wait when its bound generation restarts instead of matching the replacement's output", async () => {
+		using tempDir = TempDir.createSync("@omp-wait-bind-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+		const markerPath = path.join(projectDir, "marker.txt");
+
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir);
+		try {
+			// Generation 1 prints READY and exits; generation 2 (marker armed)
+			// prints the awaited VERSION 2 — the unbound-poller bug matched the
+			// replacement's output and returned its id.
+			const started = await client.request({
+				op: "start",
+				// The first generation prints READY (so `start` returns its id
+				// quickly) but never the awaited pattern, then exits; the marker
+				// makes the replacement print VERSION 2.
+				spec: markerDaemonSpec("versioned", projectDir, markerPath, "VERSION 2\n", 400, "READY\n"),
+			});
+			if (started.op !== "start") throw new Error("unexpected start result");
+			const boundId = started.daemon.id;
+
+			const startedAt = Date.now();
+			const waitPending = client
+				.request({ op: "wait", name: "versioned", id: boundId, pattern: "VERSION 2", timeoutMs: 10_000 })
+				.then(
+					() => null,
+					(e: unknown) => e,
+				);
+			await Bun.write(markerPath, "ok\n");
+
+			const error = await waitPending;
+			const elapsed = Date.now() - startedAt;
+
+			expect(error).not.toBeNull();
+			expect(rejectOf(error).code).toBe("stale-id");
+			// The refusal happened at the rotation — before the replacement
+			// generation could print the pattern it was waiting for.
+			expect(elapsed).toBeLessThan(5_000);
+
+			// Integrity: the restart really happened and rotated the id, so the
+			// test would catch the old bug of matching the later generation.
+			let rotated: DaemonSnapshot | undefined;
+			const deadline = Date.now() + 5_000;
+			while (Date.now() < deadline) {
+				const listed = await client.request({ op: "list" });
+				if (listed.op === "list") {
+					const current = listed.daemons.find(daemon => daemon.name === "versioned");
+					if (current && current.id !== boundId) {
+						rotated = current;
+						break;
+					}
+				}
+				await Bun.sleep(100);
+			}
+			expect(rotated?.id).toBeDefined();
+			expect(rotated?.id).not.toBe(boundId);
+		} finally {
+			await shutdown(client, broker, "versioned");
+			process.title = previousTitle;
+		}
+	}, 20_000);
+
+	it("negotiates the current protocol version with a real broker", async () => {
+		using tempDir = TempDir.createSync("@omp-wait-bind-");
+		const projectDir = path.join(tempDir.path(), "project");
+		const runtimeDir = path.join(tempDir.path(), "runtime");
+		await fs.mkdir(projectDir);
+
+		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir);
+		try {
+			const ping = await client.request({ op: "ping" });
+			if (ping.op !== "ping") throw new Error("unexpected ping result");
+			// The client handshake ran before the request; the broker announces
+			// the protocol version the wait binding gate keys on.
+			expect(ping.protocolVersion).toBe(DAEMON_PROTOCOL_VERSION);
+		} finally {
+			await client.request({ op: "shutdown" }).catch(() => undefined);
+			client.close();
+			await broker;
 			process.title = previousTitle;
 		}
 	}, 20_000);

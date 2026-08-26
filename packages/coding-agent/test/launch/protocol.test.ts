@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+	DAEMON_PROTOCOL_VERSION,
 	type DaemonOperation,
 	decodeDaemonWaitReject,
 	encodeDaemonWaitReject,
@@ -151,10 +152,44 @@ describe("wait generation binding protocol", () => {
 	});
 
 	it("round-trips classified wait rejections and ignores unrelated errors", () => {
-		for (const code of ["missing-daemon", "missing-id", "stale-id", "wrong-owner"] as const) {
+		for (const code of ["missing-daemon", "missing-id", "stale-id", "wrong-owner", "upgrade-required"] as const) {
 			const encoded = encodeDaemonWaitReject({ code, message: `${code} happened` });
 			expect(decodeDaemonWaitReject(encoded)).toEqual({ code, message: `${code} happened` });
 		}
 		expect(decodeDaemonWaitReject("Unknown daemon web")).toBeUndefined();
+	});
+});
+
+describe("broker protocol version handshake", () => {
+	it("preserves the client protocol version on wire requests", () => {
+		const request = parseDaemonWireRequest({
+			id: "request-1",
+			token: "token-1",
+			protocolVersion: DAEMON_PROTOCOL_VERSION,
+			operation: { op: "list" },
+		});
+		expect(request.protocolVersion).toBe(DAEMON_PROTOCOL_VERSION);
+	});
+
+	it("decodes an upgraded ping result and a legacy ping without a version", () => {
+		expect(
+			parseDaemonRpcResult({ op: "ping" }, { projectDir: "p", protocolVersion: DAEMON_PROTOCOL_VERSION }),
+		).toEqual({ op: "ping", projectDir: "p", protocolVersion: DAEMON_PROTOCOL_VERSION });
+		expect(parseDaemonRpcResult({ op: "ping" }, { projectDir: "p" })).toEqual({
+			op: "ping",
+			projectDir: "p",
+			protocolVersion: undefined,
+		});
+	});
+
+	it("rejects a non-number protocol version", () => {
+		expect(() =>
+			parseDaemonWireRequest({
+				id: "request-1",
+				token: "token-1",
+				protocolVersion: "2",
+				operation: { op: "list" },
+			}),
+		).toThrow("request.protocolVersion must be a finite number");
 	});
 });
