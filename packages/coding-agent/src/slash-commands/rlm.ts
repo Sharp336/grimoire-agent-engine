@@ -1,5 +1,5 @@
 import { prompt } from "@oh-my-pi/pi-utils";
-import { resolveLocalUrlToPath } from "../internal-urls/local-protocol";
+import { LocalProtocolHandler, resolveLocalUrlToPath } from "../internal-urls/local-protocol";
 import rlmTemplate from "../prompts/rlm.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { resolveEvalBackends } from "../tools/eval-backends";
@@ -44,7 +44,15 @@ export async function handleRlmCommand(
 	// only a reference the model loads from inside the eval sandbox. The
 	// load-instruction prose itself lives in rlm.md (never build prompts in
 	// code), rendered with the externalized-payload variables below.
-	const localProtocolOptions = {
+	//
+	// Resolve through the same canonical mapping the eval backends use
+	// (LocalProtocolHandler.resolveOptions()) rather than hand-rolling one
+	// from sessionManager: an SDK host that supplies a custom
+	// localProtocolOptions override on createAgentSession registers it as a
+	// process-wide override that eval's local:// resolution honors — writing
+	// through a different mapping would point the rendered `read("local://…")`
+	// instruction at a root the eval sandbox never reads from.
+	const localProtocolOptions = LocalProtocolHandler.resolveOptions() ?? {
 		getArtifactsDir: () => runtime.sessionManager.getArtifactsDir(),
 		getSessionId: () => runtime.sessionManager.getSessionId(),
 	};

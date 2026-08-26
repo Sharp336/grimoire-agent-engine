@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import type { AcpBuiltinSlashCommandResult, SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 
@@ -102,6 +103,29 @@ describe("/rlm slash command", () => {
 
 		expect(result).toEqual({ consumed: true });
 		expect(h.output).toHaveBeenCalledWith(expect.stringContaining("requires the Python or JavaScript eval backend"));
+	});
+
+	it("writes through a process-wide localProtocolOptions override (SDK host with a custom local root)", async () => {
+		const h = acpRuntime({ enabled: true });
+		tempDirs.push(h.artifactsDir);
+		const overrideDir = fs.mkdtempSync(path.join(os.tmpdir(), "rlm-override-"));
+		tempDirs.push(overrideDir);
+		LocalProtocolHandler.setOverride({
+			getArtifactsDir: () => overrideDir,
+			getSessionId: () => "override-session",
+		});
+		try {
+			const result = await executeAcpBuiltinSlashCommand("/rlm summarize the report", h.runtime);
+			const prompt = promptOf(result);
+			const match = prompt.match(/local:\/\/(rlm-input-[\w.-]+\.txt)/);
+			expect(match).not.toBeNull();
+			// Written under the override's artifacts dir, not the session's own —
+			// this is what eval's local:// resolution will read from too.
+			const overriddenPath = path.join(overrideDir, "local", match?.[1] ?? "");
+			expect(fs.readFileSync(overriddenPath, "utf-8")).toBe("summarize the report");
+		} finally {
+			LocalProtocolHandler.resetOverrideForTests();
+		}
 	});
 
 	it("still returns a prompt when invoked without arguments", async () => {
