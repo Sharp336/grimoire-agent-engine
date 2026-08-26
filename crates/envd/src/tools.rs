@@ -1806,58 +1806,6 @@ pub(crate) fn production_registry<
 	let ask_presenter = PresenterSlot::new(
 		ask_presenter.unwrap_or_else(|| Arc::new(omp_tools::ask::HeadlessPresenter)),
 	);
-	registry.protect_core_claims([
-		"read",
-		"write",
-		"shell",
-		"edit",
-		"glob",
-		"eval",
-		"task",
-		"hub",
-		"browser",
-		"learn",
-		"manage_skill",
-		"computer",
-		"lsp",
-		"debug",
-	]);
-	for name in [
-		"read",
-		"edit",
-		"shell",
-		"grep",
-		"glob",
-		"write",
-		"eval",
-		"todo",
-		"ask",
-		"fetch",
-		"web_search",
-		"think",
-		"goal",
-		"yield",
-		"checkpoint",
-		"rewind",
-		"hub",
-		"browser",
-		"github",
-		"image_gen",
-		"tts",
-		"report_issue",
-		"vibe",
-		"retain",
-		"recall",
-		"reflect",
-		"memory_edit",
-		"learn",
-		"manage_skill",
-		"lsp",
-		"debug",
-		"computer",
-	] {
-		ensure_name_absent(&registry, name)?;
-	}
 	for dynamic in dynamic_tools {
 		dynamic.register(&mut registry)?;
 	}
@@ -2360,6 +2308,11 @@ pub(crate) fn production_registry<
 		eval:       eval_identity,
 	})
 	.map_err(|error| EnvdError::WorkerDeclaration(Str::from(error.to_string())))?;
+	let slot_names = registry
+		.roster()
+		.filter_map(|(name, presentation)| (presentation == Presentation::Slot).then(|| name.clone()))
+		.collect::<Vec<_>>();
+	registry.protect_core_claims(slot_names);
 	let flattened_slots = if policy == ToolsPolicy::ToolOnly {
 		let mut slots = Vec::new();
 		for registration in workers.registrations() {
@@ -2391,7 +2344,6 @@ pub(crate) fn production_registry<
 		if flattened_slots.is_some() {
 			spec.name = Str::from(spec.name.as_str().replace('/', "_"));
 		}
-		ensure_name_absent(&registry, &spec.name)?;
 		registry.register_worker(
 			spec,
 			if flattened_slots.is_some() {
@@ -2565,13 +2517,6 @@ fn preflight_python_eval(
 	python_engine()?;
 	ProcessEvalExec::production(host, interrupt_grace, blobs)
 		.map_err(|error| EnvdError::Eval(Str::from(error.to_string())))
-}
-
-fn ensure_name_absent(registry: &Registry, name: &str) -> Result<(), EnvdError> {
-	if registry.live_identity(name).is_some() {
-		return Err(EnvdError::DuplicateToolName(Str::from(name)));
-	}
-	Ok(())
 }
 
 const fn core_claims() -> Claims {
