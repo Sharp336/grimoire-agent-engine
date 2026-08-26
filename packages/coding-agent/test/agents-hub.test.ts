@@ -14,6 +14,9 @@ import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-regis
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentsHubComponent } from "@oh-my-pi/pi-coding-agent/modes/components/agents-hub";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
+import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
+import type { PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import * as discovery from "@oh-my-pi/pi-coding-agent/task/discovery";
 import type { TUI } from "@oh-my-pi/pi-tui";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
@@ -219,5 +222,63 @@ describe("AgentsHub configuration strips", () => {
 		hub.handleInput("\x1b"); // close strip
 		expect(strip()).not.toContain("dev →");
 		expect(cancelled()).toBe(false);
+	});
+});
+
+describe("AgentsHub agent creation", () => {
+	test("marks the agent-creation architect prompt as agent-attributed", async () => {
+		mockAgents();
+		const prompts: Array<{ text: string; options?: PromptOptions }> = [];
+		// The hub kicks the architect off without awaiting it, so the test awaits the
+		// call itself rather than sleeping for a duration that would race under load.
+		const prompted = Promise.withResolvers<void>();
+		const session = {
+			// Throwing right after the call keeps the assertion on attribution alone:
+			// the architect's response parsing is a separate contract.
+			prompt: async (text: string, options?: PromptOptions) => {
+				prompts.push({ text, options });
+				prompted.resolve();
+				throw new Error("stop after prompt attribution");
+			},
+			subscribe: () => () => {},
+			dispose: async () => {},
+		};
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
+			session,
+		} as unknown as CreateAgentSessionResult);
+		// Built here rather than via createHub: the architect awaits
+		// `modelRegistry.refresh()`, which the shared read-only registryStub does not
+		// expose, and the resulting throw would be swallowed into the create-flow
+		// error banner instead of reaching the prompt.
+		const modelRegistry = {
+			authStorage: {} as never,
+			refresh: async () => {},
+			getAvailable: () => [sonnet],
+		} as unknown as ModelRegistry;
+		const hub = await AgentsHubComponent.create(
+			tuiStub,
+			tempCwd,
+			Settings.isolated(),
+			{ modelRegistry },
+			{ onCancel: () => {} },
+		);
+		const strip = () => hub.render(120).join("\n").replace(ANSI_PATTERN, "");
+		const type = (text: string) => {
+			for (const char of text) hub.handleInput(char);
+		};
+
+		// Three rows down from the default selection reaches the trailing
+		// "+ New agent…" row for the three mocked agents; Enter opens the editor.
+		// Asserted rather than assumed so a row-order change fails here instead of
+		// timing out on a prompt that never arrives.
+		for (let i = 0; i < 3; i++) hub.handleInput("\x1b[B");
+		expect(strip()).toContain("New agent…");
+		hub.handleInput("\r");
+		type("Generate a release-notes agent");
+		hub.handleInput("\x11"); // ctrl+q = app.message.followUp submits the description
+		await prompted.promise;
+
+		expect(prompts).toHaveLength(1);
+		expect(prompts[0]?.options).toMatchObject({ attribution: "agent", expandPromptTemplates: false });
 	});
 });

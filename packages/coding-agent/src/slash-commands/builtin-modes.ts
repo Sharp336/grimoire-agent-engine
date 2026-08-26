@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { serviceTierFamily } from "@oh-my-pi/pi-ai";
 import {
 	expandRoleAlias,
 	formatModelString,
@@ -49,9 +50,15 @@ async function runWithDetachedModeDraft(
 	}
 }
 
-/** `/fast status` label for the active model: "on" when its family is priority, else "off". */
+/** `/fast status` label for the active model: "on" when the next request uses priority on a
+ *  family `/fast` can control, "blocked" when priority is requested but the provider or
+ *  account refuses it. Fireworks priority is a separate `providers.fireworksTier` knob
+ *  `/fast off`/toggle cannot clear, so a Fireworks-only tier never reports "on" here. */
 function formatFastModeStatus(session: AgentSession): string {
-	return session.isFastModeEnabled() ? "on" : "off";
+	const model = session.model;
+	if (!model || !serviceTierFamily(model)) return "off";
+	const state = session.fastModeState();
+	return state === "active" ? "on" : state;
 }
 
 /** `/extended-context status` label for the premium long-context window setting. */
