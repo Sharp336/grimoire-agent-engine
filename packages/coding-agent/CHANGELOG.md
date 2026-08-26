@@ -396,6 +396,10 @@
 ## [17.4.0] - 2026-08-20
 
 ### Added
+- Added `qwenTemplateReasoningEffort` to the `models.yml` `compat` schema, so the auto-enabled Qwen 3.8+ template effort dialect (`chat_template_kwargs.reasoning_effort`) can be switched off per provider/model for strict local servers that reject unknown `chat_template_kwargs`.
+
+### Changed
+- `/settings` rows can now carry a risk note: a warning glyph on the row plus a warning-colored line above the description. `External Thinking` (`externalThinking`, `--external-thinking`) is the first user — providers have flagged the request shape it produces as abuse, up to account-level enforcement, so both the settings entry and `--help` now say so.
 
 - `/cleanse` (and `omp cleanse`) — run the checker/repair loop in-session, with a live status board of running checkers, repair subagents, and token/cost totals.
 - `omp ps` — interactive monitor for daemon-supervised background processes.
@@ -431,6 +435,9 @@
 - `top` builtin accepts single-dash macOS flags such as `-pid` and `-stats`.
 - GNU/BSD compat sweep across built-in shell utilities (`timeout`, `diff`, `find`, `date`, `tail`, `head`, `rg`, `stat`, `truncate`, `cksum`, `sleep`, `which`, `nohup`, `kill`).
 
+### Fixed
+- Fixed an issue where explicitly passing an importance of `1` to mnemon was incorrectly scaled to `5`
+- Fixed `mnemon` executable resolution to fail loudly if an explicitly configured path does not exist, instead of silently falling back to a binary found on `PATH`
 ## [17.3.8] - 2026-08-19
 
 - Fixed unquoted internal URLs in `bash` commands consuming adjacent shell operators into the resolved filesystem path.
@@ -438,6 +445,18 @@
 ### Added
 
 - Added `providers.cacheRetention` setting (`/settings` → Providers → Protocol) to control prompt-cache retention per request: `auto` keeps the provider default (Anthropic: 5m entries with idle keep-alive refreshes), `short` forces 5m, `long` restores 1h TTLs where supported and disables the keep-alive refresh loop, `none` disables prompt caching.
+- Added `memory.backend: mnemon`, a native [Mnemon](https://github.com/mnemon-dev/mnemon) CLI backend against `~/.mnemon`. It occupies the same host slot as Mnemopi (`recall` / `retain`, `/memory stats`, first-turn silent recall, compaction context) without using the Mnemopi SQLite schema. Silent recall is high-score only. `/memory clear` is refused. `reflect` and `memory_edit` stay Mnemopi/Hindsight-only. Do not point `mnemopi.dbPath` at `~/.mnemon`.
+- Added host `link` for `memory.backend: mnemon` (`id1`/`id2`/`type`/`weight`, including `supersedes`). `retain` now returns the new insight id and link candidates so the graph loop can close without dropping to the CLI. `supersedes` falls back to `causal` on CLIs that reject the fifth edge type.
+
+- Added host `related` and `forget` for `memory.backend: mnemon`. `retain` now accepts `category`, `importance`, and `entities` instead of hardcoding `context`/`3`. `recall` accepts optional `limit`.
+
+
+
+### Fixed
+
+- Fixed `/memory stats` crashing on `memory.backend: mnemon` (`undefined is not an object (evaluating 'this.status')`) when the TUI extracted the unbound hook.
+- Fixed `memory.backend: mnemon` host tools so `link` / `related` / `forget` mount and unmount on backend switch, `link` is write-tier, secret scans cover every persisted save field, and abort/timeout waits for the CLI child to exit.
+
 
 ### Changed
 
@@ -494,6 +513,7 @@
 - Fixed `/mcp reauth` refusing to run the OAuth flow for HTTP MCP servers that allow unauthenticated `initialize` but require auth for `tools/call`; endpoint discovery now runs against the server URL before giving up ([#8922](https://github.com/can1357/oh-my-pi/issues/8922)).
 
 ## [17.3.7] - 2026-08-17
+
 
 ### Changed
 
