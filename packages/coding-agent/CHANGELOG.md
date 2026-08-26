@@ -74,7 +74,6 @@
 ### Added
 
 - Added an ask dialog preview side panel, expandable option descriptions (`→`/`←`), number-key jumps to options, and `/` filtering for long option lists.
-- Added mouse support to the ask dialog: wheel scrolling in either pane, click to focus an option, and click again to select it.
 
 ### Changed
 

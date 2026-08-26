@@ -9,7 +9,6 @@ import { CURSOR_MARKER, setKeybindings } from "@oh-my-pi/pi-tui";
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
 const PAGE_DOWN = "\x1b[6~";
-const PAGE_UP = "\x1b[5~";
 const ENTER = "\n";
 const CANCEL = "\x07";
 const SPACE = " ";
@@ -1213,71 +1212,6 @@ describe("AskDialogComponent", () => {
 		}
 	});
 
-	it("scrolls the side preview facet without changing selection", () => {
-		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
-		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 24 });
-		try {
-			const previewLines = Array.from({ length: 80 }, (_, index) => {
-				if (index === 0) return "PREVIEW-FIRST";
-				if (index === 40) return "PREVIEW-MIDDLE";
-				if (index === 79) return "PREVIEW-LAST";
-				return `preview-line-${index}`;
-			});
-			const questions: ExtensionAskDialogQuestion[] = [
-				{
-					id: "q1",
-					question: "Inspect the preview?",
-					options: [{ label: "Plain" }, { label: "Alpha", preview: `\`\`\`\n${previewLines.join("\n")}\n\`\`\`` }],
-				},
-			];
-			const component = new AskDialogComponent(questions, {
-				onSubmit: vi.fn(),
-				onCancel: vi.fn(),
-				onPrompt: vi.fn(),
-			});
-
-			component.handleInput(DOWN);
-			let out = render(component);
-			expect(out).toContain("PREVIEW-FIRST");
-			expect(out).not.toContain("PREVIEW-MIDDLE");
-			expect(out).not.toContain("PREVIEW-LAST");
-			expect(out).toContain("❯ 2 ○ Alpha");
-
-			// Wheel over the preview facet (right of the divider) scrolls preview only.
-			const frame = component.render(80);
-			const previewRow = frame.findIndex(line => line.includes("PREVIEW-FIRST"));
-			expect(previewRow).toBeGreaterThanOrEqual(0);
-			const previewCol = stripVTControlCharacters(frame[previewRow] ?? "").lastIndexOf("PREVIEW-FIRST") + 2;
-			for (let i = 0; i < 38; i++) {
-				component.handleInput(`\x1b[<65;${previewCol};${previewRow + 1}M`);
-			}
-			out = render(component);
-			expect(out).toContain("❯ 2 ○ Alpha");
-			expect(out).toContain("PREVIEW-MIDDLE");
-			expect(out).not.toContain("PREVIEW-FIRST");
-
-			for (let i = 0; i < 80; i++) {
-				component.handleInput(`\x1b[<65;${previewCol};${previewRow + 1}M`);
-			}
-			out = render(component);
-			expect(out).toContain("❯ 2 ○ Alpha");
-			expect(out).toContain("PREVIEW-LAST");
-
-			for (let i = 0; i < 80; i++) {
-				component.handleInput(`\x1b[<64;${previewCol};${previewRow + 1}M`);
-			}
-			out = render(component);
-			expect(out).toContain("PREVIEW-FIRST");
-			// PAGE_UP is list paging; selection must remain on Alpha.
-			component.handleInput(PAGE_UP);
-			out = render(component);
-			expect(out).toContain("❯ 2 ○ Alpha");
-		} finally {
-			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
-			else Reflect.deleteProperty(process.stdout, "rows");
-		}
-	});
-
 	it("keeps a selected inline preview visible when its row fits the viewport", () => {
 		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
 		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 24 });
@@ -1660,6 +1594,39 @@ describe("AskDialogComponent", () => {
 		expect(expanded).toContain("NARROW-PREVIEW-TEXT");
 	});
 
+	it("reveals a preview longer than the side facet through the expanded row when split", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const preview = Array.from({ length: 40 }, (_, index) => `PREVIEW-LINE-${index + 1}`).join("\n");
+			const component = new AskDialogComponent(
+				[{ id: "q1", question: "Pick?", options: [{ label: "Alpha", preview }, { label: "Bravo" }] }],
+				{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+			);
+			// Wide enough for the side facet, which is a fixed-height glance: the
+			// tail lines are unreachable until the row is expanded.
+			const glance = stripVTControlCharacters(component.render(120).join("\n"));
+			expect(glance).toContain("PREVIEW-LINE-1");
+			expect(glance).not.toContain("PREVIEW-LINE-40");
+			expect(glance).toContain("more lines");
+			component.handleInput(RIGHT);
+			const expanded = stripVTControlCharacters(component.render(120).join("\n"));
+			// Expanding moves the whole preview into the scrollable list, so the
+			// keyboard can now page to the tail the fixed facet could never show.
+			expect(expanded).toContain("PREVIEW-LINE-1");
+			let reached = expanded.includes("PREVIEW-LINE-40");
+			for (let page = 0; page < 12 && !reached; page++) {
+				component.handleInput(PAGE_DOWN);
+				reached = stripVTControlCharacters(component.render(120).join("\n")).includes("PREVIEW-LINE-40");
+			}
+			expect(reached).toBe(true);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+
 	it("jumps focus to the nth visible row with digit keys", () => {
 		const questions: ExtensionAskDialogQuestion[] = [
 			{
@@ -1815,7 +1782,7 @@ describe("AskDialogComponent", () => {
 		}
 	});
 
-	it("activates the focused row on a second click and keeps a single cursor marker", () => {
+	it("keeps a single cursor marker on the focused row and submits it on Enter", () => {
 		const onSubmit = vi.fn();
 		const questions: ExtensionAskDialogQuestion[] = [
 			{
@@ -1838,12 +1805,7 @@ describe("AskDialogComponent", () => {
 			line => stripVTControlCharacters(line).includes("CURSOR-PREVIEW") && line.includes(CURSOR_MARKER),
 		);
 		expect(previewOnly).toHaveLength(0);
-
-		const alphaRow = frame.findIndex(
-			line => stripVTControlCharacters(line).includes("❯") && stripVTControlCharacters(line).includes("Alpha"),
-		);
-		expect(alphaRow).toBeGreaterThanOrEqual(0);
-		component.handleInput(`\x1b[<0;4;${alphaRow + 1}M`);
+		component.handleInput(ENTER);
 		expect(onSubmit).toHaveBeenCalledTimes(1);
 		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Alpha"]);
 	});
@@ -1960,32 +1922,6 @@ describe("AskDialogComponent", () => {
 			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
 			else Reflect.deleteProperty(process.stdout, "rows");
 		}
-	});
-
-	it("list wheel moves the focused cursor among one-line options", () => {
-		const questions: ExtensionAskDialogQuestion[] = [
-			{
-				id: "q1",
-				question: "Pick?",
-				options: [{ label: "Option A" }, { label: "Option B" }, { label: "Option C" }],
-			},
-		];
-		const component = new AskDialogComponent(questions, {
-			onSubmit: vi.fn(),
-			onCancel: vi.fn(),
-			onPrompt: vi.fn(),
-		});
-		const frame = component.render(80);
-		const optionRow = frame.findIndex(line => stripVTControlCharacters(line).includes("Option A"));
-		expect(optionRow).toBeGreaterThan(-1);
-		component.routeMouse(
-			{ button: 64, col: 4, row: optionRow, release: false, wheel: 1, motion: false, leftClick: false },
-			optionRow,
-			4,
-		);
-		const after = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
-		expect(after).toContain("❯ 2");
-		expect(after).toContain("Option B");
 	});
 
 	it("pins the cancel hint when the footer overflows at a narrow width", () => {

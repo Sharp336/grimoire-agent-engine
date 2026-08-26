@@ -6,14 +6,11 @@ import {
 	getKeybindings,
 	Input,
 	Markdown,
-	type MouseRoutable,
 	matchesKey,
 	padding,
 	renderInlineMarkdown,
 	replaceTabs,
-	routeSgrMouseInput,
 	ScrollView,
-	type SgrMouseEvent,
 	type Tab,
 	TabBar,
 	Text,
@@ -116,7 +113,6 @@ interface QuestionState {
 	noteRowKey: string | undefined;
 	cursorIndex: number;
 	scrollOffset: number;
-	previewScrollOffset: number;
 	expandedRowKey: string | undefined;
 	manualScroll: boolean;
 	timedOut: boolean;
@@ -134,12 +130,6 @@ interface PreviewSegment {
 	kind: "markdown" | "code";
 	text: string;
 	language: string | undefined;
-}
-
-interface RowHitZone {
-	startLine: number;
-	endLine: number;
-	rowIndex: number;
 }
 
 type PreviewRenderCache = Map<string, Map<number, readonly string[]>>;
@@ -318,7 +308,9 @@ function previewFacetWidths(innerWidth: number): { listWidth: number; previewWid
 
 function countedMoreCue(hidden: number): string {
 	const glyph = theme.nav.expand || "▾";
-	return theme.fg("dim", `${glyph} ${hidden} more lines`);
+	// Name the key that reveals the rest: the facet cannot scroll, so a bare
+	// count would advertise unread lines with no way to reach them.
+	return theme.fg("dim", `${glyph} ${hidden} more lines · ${askActionKey("app.ask.expand")} expand`);
 }
 
 function truncateFooter(parts: string[], maxWidth: number): string {
@@ -373,7 +365,7 @@ function normalizeDialogQuestions(questions: ExtensionAskDialogQuestion[]): Exte
 	return out;
 }
 
-export class AskDialogComponent implements Component, Focusable, MouseRoutable {
+export class AskDialogComponent implements Component, Focusable {
 	focused = false;
 	#states: QuestionState[];
 	#activeTabIndex = 0;
@@ -401,15 +393,6 @@ export class AskDialogComponent implements Component, Focusable, MouseRoutable {
 	#hiddenDescriptionLines = 0;
 	#suppressedPreview = false;
 	#footerWidth = 80;
-	#bodyRowStart = 0;
-	#bodyRowCount = 0;
-	#tabRowStart = 0;
-	#tabRowCount = 0;
-	#listFacetWidth = 0;
-	#splitActive = false;
-	#filterRowCount = 0;
-	#rowHits: RowHitZone[] = [];
-	#lastPreviewLineCount = 0;
 
 	constructor(
 		questions: ExtensionAskDialogQuestion[],
@@ -427,7 +410,6 @@ export class AskDialogComponent implements Component, Focusable, MouseRoutable {
 				noteRowKey: undefined,
 				cursorIndex: clamp(recommended ?? 0, 0, maxIndex),
 				scrollOffset: 0,
-				previewScrollOffset: 0,
 				expandedRowKey: undefined,
 				manualScroll: false,
 				timedOut: false,
@@ -476,12 +458,6 @@ export class AskDialogComponent implements Component, Focusable, MouseRoutable {
 
 	handleInput(keyData: string): void {
 		if (this.#closed || this.#promptActive) return;
-		if (keyData.startsWith("\x1b[<")) {
-			routeSgrMouseInput(keyData, event => {
-				this.routeMouse(event, event.row, event.col);
-			});
-			return;
-		}
 		// Reset the inactivity countdown on any key that reaches past the
 		// closed/prompt guards, matching HookSelector/HookInput semantics.
 		this.#countdown?.reset();
@@ -537,79 +513,6 @@ export class AskDialogComponent implements Component, Focusable, MouseRoutable {
 		this.#handleQuestionInput(keyData);
 	}
 
-	routeMouse(event: SgrMouseEvent, line: number, col: number): void {
-		if (this.#closed || this.#promptActive) return;
-		this.#countdown?.reset();
-		const contentColInset = 2;
-		const innerCol = col - contentColInset;
-		const tabLine = line - this.#tabRowStart;
-		const overTabs = this.#tabRowCount > 0 && tabLine >= 0 && tabLine < this.#tabRowCount;
-		const bodyLine = line - this.#bodyRowStart;
-		const overBody = bodyLine >= 0 && bodyLine < this.#bodyRowCount;
-
-		if (event.wheel !== null) {
-			if (!overBody || this.#isSubmitTab()) return;
-			// The filter bottom bar is not part of the list; wheel over it must
-			// not drive list scrolling.
-			const listRowCount = this.#bodyRowCount - this.#filterRowCount;
-			const listLine = bodyLine;
-			if (this.#splitActive && innerCol >= this.#listFacetWidth + 1) {
-				const active = this.#activeQuestionState();
-				if (!active) return;
-				// Preview facet spans the full body (title + content), so clamp
-				// against the whole body budget; the bottom filter row keeps the
-				// preview continuous on its right side.
-				const previewBodyRows = Math.max(1, this.#bodyRowCount - 1);
-				active.state.previewScrollOffset = clamp(
-					active.state.previewScrollOffset + event.wheel,
-					0,
-					Math.max(0, this.#lastPreviewLineCount - previewBodyRows),
-				);
-				this.#requestRender();
-				return;
-			}
-			if (listLine >= 0 && listLine < listRowCount) {
-				const active = this.#activeQuestionState();
-				if (!active) return;
-				const rows = this.#visibleRows(active.question);
-				active.state.cursorIndex = clamp(active.state.cursorIndex + event.wheel, 0, Math.max(0, rows.length - 1));
-				active.state.manualScroll = false;
-				this.#requestRender();
-			}
-			return;
-		}
-
-		if (!event.leftClick) return;
-
-		if (overTabs && this.#tabBar) {
-			const tab = this.#tabBar.tabAt(tabLine, innerCol);
-			if (tab) {
-				if (tab.id === "submit") this.#setActiveTab(this.#submitTabIndex());
-				else this.#setActiveTab(Number.parseInt(tab.id, 10));
-				this.#requestRender();
-			}
-			return;
-		}
-
-		if (!overBody || this.#isSubmitTab()) return;
-		if (bodyLine >= this.#bodyRowCount - this.#filterRowCount) return;
-		if (this.#splitActive && innerCol >= this.#listFacetWidth + 1) return;
-
-		const listLine = bodyLine;
-		const hit = this.#rowHits.find(zone => listLine >= zone.startLine && listLine < zone.endLine);
-		if (!hit) return;
-		const active = this.#activeQuestionState();
-		if (!active) return;
-		const wasFocused = active.state.cursorIndex === hit.rowIndex;
-		active.state.cursorIndex = hit.rowIndex;
-		active.state.manualScroll = false;
-		if (wasFocused) {
-			this.#activateFocusedRow(active.question, active.state, active.question.multi ? "space" : "enter");
-		} else {
-			this.#requestRender();
-		}
-	}
-
 	render(width: number): readonly string[] {
 		// Keep the proxied draft's cursor visible while it owns input (the editor
 		// renders as the next sibling in the same container, so this lands in the
@@ -642,12 +545,8 @@ export class AskDialogComponent implements Component, Focusable, MouseRoutable {
 		const out: string[] = [
 			splitChrome ? topBorderSplit(width, this.#titleText(), splitSidebar) : topBorder(width, this.#titleText()),
 		];
-		this.#tabRowStart = this.#hasSubmitTab() ? out.length : -1;
-		this.#tabRowCount = this.#hasSubmitTab() ? 1 : 0;
 		out.push(...headerLines.map(line => row(line, width)));
 		out.push(splitChrome ? dividerSplit(width, splitSidebar) : divider(width));
-		this.#bodyRowStart = out.length;
-		this.#bodyRowCount = bodyRows;
 		const bodyLines = this.#isSubmitTab()
 			? this.#renderSubmitBody(innerWidth, bodyRows)
 			: this.#renderQuestionBody(innerWidth, bodyRows);
@@ -1122,10 +1021,7 @@ export class AskDialogComponent implements Component, Focusable, MouseRoutable {
 	): RenderedList {
 		const mdTheme = getMarkdownTheme();
 		const { listWidth, previewWidth, split } = previewFacetWidths(width);
-		this.#splitActive = split;
-		this.#listFacetWidth = listWidth;
 		const filterRows = this.#filterOpen ? 1 : 0;
-		this.#filterRowCount = filterRows;
 		const listRows = Math.max(1, rows - filterRows);
 		const declareCursor = this.focused && !this.#promptActive;
 
@@ -1164,7 +1060,11 @@ export class AskDialogComponent implements Component, Focusable, MouseRoutable {
 				});
 				allLines.push(...rendered.lines);
 				if (isFocused) hidden = rendered.hiddenDescriptionLines;
-				if (isFocused && rowExpanded && !split && option?.preview?.trim()) {
+				// The side facet is a fixed-height glance, so `expand` is the only
+				// way to read a preview longer than that window. Inline it in both
+				// layouts: in split mode the facet keeps showing the head while the
+				// expanded row carries the full text.
+				if (isFocused && rowExpanded && option?.preview?.trim()) {
 					const previewWidthInner = Math.max(1, contentWidth - ASK_ROW_PREFIX_COLUMNS);
 					const indent = padding(ASK_ROW_PREFIX_COLUMNS);
 					for (const line of renderCachedPreview(this.#previewCache, option.preview, previewWidthInner)) {
@@ -1209,18 +1109,7 @@ export class AskDialogComponent implements Component, Focusable, MouseRoutable {
 		const listWindow = [...scrollView.render(listWidth)];
 		while (listWindow.length < listRows) listWindow.push("");
 
-		this.#rowHits = [];
-		for (let index = 0; index < rowItems.length; index++) {
-			const start = lineStartByRow[index] ?? 0;
-			const end = lineStartByRow[index + 1] ?? allLines.length;
-			const visibleStart = Math.max(0, start - state.scrollOffset);
-			const visibleEnd = Math.min(listRows, end - state.scrollOffset);
-			if (visibleEnd > visibleStart) {
-				this.#rowHits.push({ startLine: visibleStart, endLine: visibleEnd, rowIndex: index });
-			}
-		}
-
-		const previewLines = this.#renderPreviewFacet(question, state, focusedRow, previewWidth, rows, split);
+		const previewLines = this.#renderPreviewFacet(question, focusedRow, previewWidth, rows, split);
 
 		const body: string[] = [];
 		const filterBar: string[] = [];
@@ -1265,14 +1154,12 @@ export class AskDialogComponent implements Component, Focusable, MouseRoutable {
 
 	#renderPreviewFacet(
 		question: ExtensionAskDialogQuestion,
-		state: QuestionState,
 		focusedRow: QuestionRow | undefined,
 		previewWidth: number,
 		rows: number,
 		split: boolean,
 	): string[] {
 		if (!split || previewWidth <= 0) {
-			this.#lastPreviewLineCount = 0;
 			return Array.from({ length: rows }, () => "");
 		}
 		const option = focusedRow?.kind === "option" ? question.options[focusedRow.optionIndex ?? -1] : undefined;
@@ -1281,14 +1168,10 @@ export class AskDialogComponent implements Component, Focusable, MouseRoutable {
 		const bodyBudget = Math.max(0, rows - 1);
 		const previewText = option?.preview?.trim() ? option.preview : "";
 		const content = previewText ? [...renderCachedPreview(this.#previewCache, previewText, previewWidth)] : [];
-		this.#lastPreviewLineCount = content.length;
-		const maxOffset = Math.max(0, content.length - bodyBudget);
-		state.previewScrollOffset = clamp(state.previewScrollOffset, 0, maxOffset);
 		const out: string[] = [fit(titleLine, previewWidth)];
 		if (bodyBudget === 0) return out.slice(0, rows);
-		const offset = state.previewScrollOffset;
-		const window = content.slice(offset, offset + bodyBudget);
-		const hiddenBelow = Math.max(0, content.length - (offset + window.length));
+		const window = content.slice(0, bodyBudget);
+		const hiddenBelow = Math.max(0, content.length - window.length);
 		if (hiddenBelow > 0 && window.length > 0) {
 			// Replace the last visible row with a counted overflow cue so the
 			// facet height stays fixed while still advertising unread lines.
