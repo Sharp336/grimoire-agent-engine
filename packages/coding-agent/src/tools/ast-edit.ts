@@ -171,8 +171,8 @@ export interface AstEditToolDetails {
 	parseErrors?: string[];
 	/** Total parse error count before {@link PARSE_ERRORS_LIMIT} capping. Omitted when no errors. */
 	parseErrorsTotal?: number;
-	/** Guidance emitted when a PHP member-shaped pattern cannot match at the parser's top level. */
-	zeroMatchHint?: string;
+	/** Guidance emitted when a PHP member-shaped operation needs a contextual selector. */
+	patternHint?: string;
 	scopePath?: string;
 	files?: string[];
 	fileReplacements?: Array<{ path: string; count: number }>;
@@ -329,7 +329,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			});
 
 			const { errors: cappedParseErrors, total: parseErrorsTotal } = capParseErrors(result.parseErrors);
-			const zeroMatchHint = result.totalReplacements === 0 ? phpMemberWrapperHint(ops) : undefined;
+			const patternHint = phpMemberWrapperHint(ops);
 			const formatPath = (filePath: string): string =>
 				formatResultPath(filePath, isDirectory, resolvedSearchPath, this.session.cwd);
 
@@ -357,7 +357,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				applied: result.applied,
 				limitReached: result.limitReached,
 				...(cappedParseErrors.length > 0 ? { parseErrors: cappedParseErrors, parseErrorsTotal } : {}),
-				...(zeroMatchHint ? { zeroMatchHint } : {}),
+				...(patternHint ? { patternHint } : {}),
 				scopePath,
 				searchPath: resolvedSearchPath,
 				cwd: this.session.cwd,
@@ -366,7 +366,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			};
 
 			if (result.totalReplacements === 0) {
-				const hintMessage = zeroMatchHint ? `\n${zeroMatchHint}` : "";
+				const hintMessage = patternHint ? `\n${patternHint}` : "";
 				const parseMessage = cappedParseErrors.length
 					? `\n${formatParseErrors(cappedParseErrors, parseErrorsTotal).join("\n")}`
 					: "";
@@ -451,6 +451,9 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				path: filePath,
 				count: fileReplacementCounts.get(filePath) ?? 0,
 			}));
+			if (patternHint) {
+				outputLines.push("", patternHint);
+			}
 			if (result.limitReached) {
 				outputLines.push("", "Limit reached; narrow paths.");
 			}
@@ -519,6 +522,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 							...(cappedApplyParseErrors.length > 0
 								? { parseErrors: cappedApplyParseErrors, parseErrorsTotal: applyParseErrorsTotal }
 								: {}),
+							...(patternHint ? { patternHint } : {}),
 							scopePath,
 							files: appliedFileList,
 							fileReplacements: appliedFileReplacements,
@@ -660,7 +664,7 @@ export const astEditToolRenderer = {
 			// The "0 replacements" count already rides on the status line; only parse
 			// errors and actionable hints are worth a body.
 			const bodyLines: string[] = [];
-			if (details?.zeroMatchHint) bodyLines.push(uiTheme.fg("muted", details.zeroMatchHint));
+			if (details?.patternHint) bodyLines.push(uiTheme.fg("muted", details.patternHint));
 			appendParseErrorsBulletList(bodyLines, details?.parseErrors, uiTheme, details?.parseErrorsTotal);
 			if (bodyLines.length === 0) return new Text(header, 0, 0);
 			return framedBlock(uiTheme, width => {
@@ -713,12 +717,16 @@ export const astEditToolRenderer = {
 			.map(indices => indices.map(index => styledLines[index]!));
 
 		const badge = { label: "proposed", color: "warning" as const };
+		const hasPatternHint = Boolean(details?.patternHint);
 		const header = renderStatusLine(
-			{ icon: limitReached ? "warning" : "success", title: "AST Edit", description, badge, meta },
+			{ icon: limitReached || hasPatternHint ? "warning" : "success", title: "AST Edit", description, badge, meta },
 			uiTheme,
 		);
 
 		const extraLines: string[] = [];
+		if (details?.patternHint) {
+			extraLines.push(uiTheme.fg("warning", details.patternHint));
+		}
 		if (limitReached) {
 			extraLines.push(uiTheme.fg("warning", "limit reached; narrow path"));
 		}
@@ -735,7 +743,7 @@ export const astEditToolRenderer = {
 			return {
 				header,
 				sections: bodyLines.length > 0 ? [{ lines: bodyLines }] : [],
-				state: options.isPartial ? "pending" : "success",
+				state: options.isPartial ? "pending" : hasPatternHint ? "warning" : "success",
 				borderColor: "borderMuted",
 				width,
 			};

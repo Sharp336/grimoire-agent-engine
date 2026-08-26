@@ -104,10 +104,10 @@ class Example {
 				paths: [filePath],
 			});
 			const text = result.content.find(content => content.type === "text")?.text ?? "";
-			const details = result.details as { totalReplacements?: number; zeroMatchHint?: string } | undefined;
+			const details = result.details as { totalReplacements?: number; patternHint?: string } | undefined;
 
 			expect(details?.totalReplacements).toBe(0);
-			expect(details?.zeroMatchHint).toContain("selector");
+			expect(details?.patternHint).toContain("selector");
 			expect(text).toContain("class $_ { … }");
 			expect(text).toContain("method_declaration");
 
@@ -137,6 +137,48 @@ class Example {
 			expect(updated).toContain("protected function greet");
 			expect(updated).toContain("protected function keep");
 			expect(updated).not.toContain("public function");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("surfaces PHP member guidance when another batch rewrite matches", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-php-batch-"));
+		try {
+			const filePath = path.join(tempDir, "Example.php");
+			await Bun.write(
+				filePath,
+				`<?php
+legacy($value);
+class Example {
+	public function greet($name) {
+		return $name;
+	}
+}
+`,
+			);
+
+			const tools = await createTools(createTestSession(tempDir), ["ast_edit"]);
+			const tool = tools.find(entry => entry.name === "ast_edit");
+			expect(tool).toBeDefined();
+
+			const result = await tool!.execute("ast-edit-php-batch", {
+				ops: [
+					{
+						pat: "public function $NAME($$$ARGS) { $$$BODY }",
+						out: "protected function $NAME($$$ARGS) { $$$BODY }",
+					},
+					{ pat: "legacy($ARG)", out: "modern($ARG)" },
+				],
+				paths: [filePath],
+			});
+			const text = result.content.find(content => content.type === "text")?.text ?? "";
+			const details = result.details as { totalReplacements?: number; patternHint?: string } | undefined;
+
+			expect(details?.totalReplacements).toBe(1);
+			expect(details?.patternHint).toContain("method_declaration");
+			expect(text).toContain("modern($value)");
+			expect(text).toContain("method_declaration");
 		} finally {
 			await removeWithRetries(tempDir);
 		}
