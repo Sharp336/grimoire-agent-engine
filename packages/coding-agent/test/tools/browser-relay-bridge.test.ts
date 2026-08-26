@@ -698,6 +698,51 @@ describe("RelayBridge tab grouping", () => {
 		expect(cdp.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
+	it("keeps the shared root disabled when another preserved session issued the latest disable", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const first = new FakeCdpSocket();
+		const firstConn = bridge.cdpConnected(first);
+		const firstSession = await attachPage(bridge, ext, first, firstConn, 1);
+		const second = new FakeCdpSocket();
+		const secondConn = bridge.cdpConnected(second);
+		const secondSession = await attachPage(bridge, ext, second, secondConn, 1);
+
+		bridge.cdpMessage(firstConn, JSON.stringify({ id: ++msgSeq, sessionId: firstSession, method: "Network.enable" }));
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+		bridge.cdpMessage(
+			secondConn,
+			JSON.stringify({ id: ++msgSeq, sessionId: secondSession, method: "Network.disable" }),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "shared-root recovery attach");
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		// Network.disable changed the one shared Chrome root, so recovery must not
+		// replay the stale Network.enable journaled by the other pseudo-session.
+		expect(ext2.rpcs("send")).toHaveLength(0);
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			firstConn,
+			JSON.stringify({ id: commandId, sessionId: firstSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.getCookies"]);
+		ack(bridge, ext2, "send", { cookies: [] });
+		await flush();
+		expect(first.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+	});
+
 	it("replays persistent user-agent overrides for a preserved session across recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
@@ -750,6 +795,51 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send")).toHaveLength(2);
 	});
 
+	it("restarts subscription replay when the extension socket is replaced mid-restore", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		for (const method of ["Network.enable", "Page.enable"]) {
+			bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId: pageSession, method }));
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+		}
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "first recovery attach");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "first interrupted replay command");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable"]);
+
+		// Replace the socket without acknowledging Network.enable. Chrome still
+		// reports the debugger attached, so only restorePending can trigger a retry.
+		const ext3 = new FakeExtSocket();
+		connect(bridge, ext3, [tab({ tabId: 1 })], { attachedTabIds: [1], recoverableTabIds: [1] });
+		await waitFor(() => ext3.rpcs("send").length === 1, "restarted Network replay");
+		expect(ext3.rpcs("attach")).toHaveLength(0);
+		expect(ext3.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable"]);
+		ack(bridge, ext3, "send");
+		await waitFor(() => ext3.rpcs("send").length === 2, "restarted Page replay");
+		expect(ext3.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable", "Page.enable"]);
+		ack(bridge, ext3, "send");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: commandId, sessionId: pageSession, method: "Page.getFrameTree" }));
+		await flush();
+		expect(ext3.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable", "Page.enable", "Page.getFrameTree"]);
+		ack(bridge, ext3, "send", { frameTree: {} });
+		await flush();
+		expect(cdp.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+	});
+
 	it("holds a preserved session's command until the reconnect hello arrives", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
@@ -795,6 +885,56 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send")).toHaveLength(1);
 		expect(ext2.rpcs("send")[0]!.tabId).toBe(1);
 		expect(cdp.messages.find(m => m.id === cmdId)?.error).toBeUndefined();
+	});
+
+	it("rejects a queued command when recovery replaces its auto-attach page session", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const oldPageSession = await attachPage(bridge, ext, cdp, connId, 1);
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, method: "Target.setAutoAttach" }));
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		bridge.extConnected(ext2);
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: commandId,
+				sessionId: oldPageSession,
+				method: "Page.navigate",
+				params: { url: "https://example.com/side-effect" },
+			}),
+		);
+		await flush();
+		expect(ext2.rpcs("send")).toHaveLength(0);
+
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "hello",
+				userAgent: "test",
+				browserVersion: "Chrome/151.0.0.0",
+				tabs: [tab({ tabId: 1 })],
+				attachedTabIds: [],
+				recoverableTabIds: [1],
+			}),
+		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "auto-attach recovery RPC");
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		// The hello retracted oldPageSession and minted replacement auto-attach
+		// state. The queued Page.navigate must not execute against the fresh root.
+		expect(ext2.rpcs("send")).toHaveLength(0);
+		expect(cdp.messages.find(message => message.id === commandId)?.error).toEqual({
+			code: -32000,
+			message: `Unknown session id ${oldPageSession}`,
+		});
 	});
 
 	it("re-arms the hello gate when a replacement socket connects before the old close is delivered", async () => {

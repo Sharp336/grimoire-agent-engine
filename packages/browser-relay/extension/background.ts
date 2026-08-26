@@ -28,6 +28,8 @@ let ws: WebSocket | null = null;
 let reconnectDelay = RECONNECT_MIN_MS;
 let pingTimer: NodeJS.Timeout | null = null;
 const pendingAttaches = new Set<Promise<void>>();
+const pendingAttachTabs = new Set<number>();
+const canceledPendingAttachTabs = new Set<number>();
 const guardDetachments = new Set<number>();
 // Tabs the relay explicitly asked us to detach. onDetach reports these as
 // relay-initiated so the bridge doesn't misclassify them as user cancellations.
@@ -320,6 +322,7 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 }
 
 async function attachTab(tabId: number, socket: WebSocket): Promise<void> {
+	pendingAttachTabs.add(tabId);
 	const pending = chrome.debugger.attach({ tabId }, "1.3");
 	pendingAttaches.add(pending);
 	try {
@@ -350,8 +353,18 @@ async function attachTab(tabId: number, socket: WebSocket): Promise<void> {
 			return;
 		}
 		await trackAttachments([tabId]);
+		if (canceledPendingAttachTabs.delete(tabId)) {
+			// onDetach ran while the recovery marker was being persisted. Undo the
+			// delayed track and fail the RPC: returning success would make the bridge
+			// mint a session for a Chrome root the user already canceled.
+			attachmentGuard.untrack(tabId);
+			await forgetRecoverable(tabId);
+			throw new Error("debugger attachment detached before attach completed");
+		}
 	} finally {
 		pendingAttaches.delete(pending);
+		pendingAttachTabs.delete(tabId);
+		canceledPendingAttachTabs.delete(tabId);
 	}
 }
 
@@ -526,6 +539,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 	// A relay-requested detach is attributed explicitly so the bridge can
 	// reconcile the stale snapshot instead of treating it as a user cancel.
 	const relayInitiated = relayInitiatedDetachTabs.delete(source.tabId);
+	if (!relayInitiated && pendingAttachTabs.has(source.tabId)) canceledPendingAttachTabs.add(source.tabId);
 	void forgetRecoverable(source.tabId);
 	post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
 });

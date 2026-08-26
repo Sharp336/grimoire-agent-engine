@@ -57,8 +57,6 @@ interface SessionRef {
 	runtimeEnabling: Promise<void> | null;
 	/** Monotonic ownership token for enable rollback and replay. */
 	runtimeEpoch: number;
-	/** Root-domain subscriptions that must survive a guard-authorized root swap. */
-	readonly subscriptions: Map<string, RootSubscription>;
 }
 
 interface RootSubscription {
@@ -139,6 +137,10 @@ class TabState {
 	runtimeGeneration = 0;
 	/** Replays preserved page-session subscriptions after a guard-authorized attach. */
 	restoring: Promise<void> | null = null;
+	/** Recovery replay must complete, including after an extension socket replacement. */
+	restorePending = false;
+	/** Effective state of subscription commands executed on the shared Chrome root. */
+	readonly subscriptions = new Map<string, RootSubscription>();
 
 	constructor(
 		readonly tabId: number,
@@ -375,16 +377,29 @@ export class RelayBridge {
 		for (const tab of this.#tabs.values()) {
 			tab.attached = attachedNow.has(tab.tabId);
 			tab.attaching = null;
-			if (tab.attached || this.#sessionHolders(tab.tabId).length === 0) continue;
+			tab.restoring = null;
+			const holders = this.#sessionHolders(tab.tabId);
+			const preserve = holders.filter(conn => !conn.autoAttach && conn.sessionsForTab(tab.tabId, "page").length > 0);
+			if (tab.attached) {
+				if (tab.restorePending) {
+					// A socket replacement can interrupt replay after Chrome accepted only
+					// part of it. The replacement hello still reports the debugger attached,
+					// so resume the pending journal instead of treating the root as ready.
+					if (preserve.length === 0) tab.subscriptions.clear();
+					this.#startTabRecovery(tab, false, preserve);
+				}
+				continue;
+			}
+			if (holders.length === 0) continue;
 			if (!hasRecoveryMetadata) {
 				// Legacy extension without orphan-guard metadata: a service-worker
 				// restart can drop attachments while downstream connections still
 				// hold sessions. Restore them best-effort — the same behavior this
 				// reconciliation replaced — instead of misreading a dropped hold as a
 				// user detach.
-				void this.#ensureAttached(tab).then(ok => {
-					if (!ok) this.#onTabDetached(tab.tabId, "reattach_failed", false);
-				});
+				tab.restorePending = preserve.length > 0;
+				this.#retractTab(tab, preserve);
+				this.#announceTab(tab, true, preserve);
 				continue;
 			}
 			if (!recoverableNow.has(tab.tabId)) {
@@ -405,9 +420,7 @@ export class RelayBridge {
 			// command fail "Unknown session id", and with no session left in
 			// `conn.sessions` `cdpClosed` can no longer detach the debugger —
 			// re-orphaning the very attachment this recovery is restoring.
-			const preserve = [...this.#conns.values()].filter(
-				conn => !conn.autoAttach && conn.sessionsForTab(tab.tabId, "page").length > 0,
-			);
+			tab.restorePending = preserve.length > 0;
 			this.#retractTab(tab, preserve);
 			this.#announceTab(tab, true, preserve);
 		}
@@ -521,6 +534,10 @@ export class RelayBridge {
 		// the state read below is current and an enabled fast-path cannot outrun the
 		// fresh root's Runtime.enable.
 		await this.#awaitTabReady(ref.tabId);
+		if (conn.sessions.get(sessionId) !== ref) {
+			this.#replyError(conn, msg, `Unknown session id ${sessionId}`);
+			return;
+		}
 		// A pipelined duplicate must await the in-flight enable, never ack early:
 		// the root cycle may still fail, and success must trail the context replay.
 		if (ref.runtimeEnabling) {
@@ -627,13 +644,6 @@ export class RelayBridge {
 			this.#reply(conn, msg, {});
 			return;
 		}
-		// Relay-private claim: the omp tab worker marks the page it was spawned
-		// to drive. Never forwarded — real Chrome rejects the unknown method.
-		if (msg.method === "OMP.claimTarget") {
-			this.#claimTab(conn, tabId);
-			this.#reply(conn, msg, {});
-			return;
-		}
 		// A preserved page session can outlive a Chrome root swap. Two ordering
 		// hazards follow a reconnect, both of which would forward this command onto
 		// a detached Chrome target and get it rejected:
@@ -648,6 +658,19 @@ export class RelayBridge {
 		// then sending would still race B's chrome.debugger.attach(). Loop until the
 		// tab settles against the current socket (hello delivered, attach quiesced).
 		await this.#awaitTabReady(tabId);
+		if (!this.#forwardingSessionIsCurrent(conn, msg, tabId, realSessionId, pageRef)) {
+			this.#replyError(conn, msg, `Unknown session id ${String(msg.sessionId)}`);
+			return;
+		}
+		// Relay-private claim: the omp tab worker marks the page it was spawned
+		// to drive. Never forwarded — real Chrome rejects the unknown method. It
+		// still waits for recovery and revalidates above so a retracted auto-attach
+		// session cannot claim the tab after a replacement hello.
+		if (msg.method === "OMP.claimTarget") {
+			this.#claimTab(conn, tabId);
+			this.#reply(conn, msg, {});
+			return;
+		}
 		try {
 			const result = await this.#rpc({
 				op: "send",
@@ -656,24 +679,42 @@ export class RelayBridge {
 				method: msg.method,
 				params: msg.params,
 			});
-			if (pageRef) this.#recordSubscription(pageRef, msg);
+			if (!this.#forwardingSessionIsCurrent(conn, msg, tabId, realSessionId, pageRef)) {
+				this.#replyError(conn, msg, `Unknown session id ${String(msg.sessionId)}`);
+				return;
+			}
+			if (pageRef) this.#recordSubscription(tabId, msg);
 			this.#reply(conn, msg, (result as Record<string, unknown> | undefined) ?? {});
 		} catch (err) {
 			this.#replyError(conn, msg, err instanceof Error ? err.message : String(err));
 		}
 	}
 
-	/** Remember successful root-session subscriptions for guard recovery replay. */
-	#recordSubscription(ref: SessionRef, msg: CdpCommand): void {
+	#forwardingSessionIsCurrent(
+		conn: CdpConnection,
+		msg: CdpCommand,
+		tabId: number,
+		realSessionId: string | undefined,
+		pageRef: SessionRef | undefined,
+	): boolean {
+		if (pageRef) return typeof msg.sessionId === "string" && conn.sessions.get(msg.sessionId) === pageRef;
+		if (realSessionId) return this.#realSessionTabs.get(realSessionId) === tabId;
+		return true;
+	}
+
+	/** Remember successful commands that changed the shared Chrome root state. */
+	#recordSubscription(tabId: number, msg: CdpCommand): void {
+		const tab = this.#tabs.get(tabId);
+		if (!tab) return;
 		const separator = msg.method.indexOf(".");
 		const domain = separator > 0 ? msg.method.slice(0, separator) : "";
 		const command = separator > 0 ? msg.method.slice(separator + 1) : "";
 		if (domain && domain !== "Runtime" && (command === "enable" || command === "disable")) {
 			const key = `${domain}.enable`;
 			if (command === "disable") {
-				ref.subscriptions.delete(key);
+				tab.subscriptions.delete(key);
 			} else {
-				ref.subscriptions.set(key, {
+				tab.subscriptions.set(key, {
 					method: msg.method,
 					params: msg.params,
 					sequence: ++this.#subscriptionSeq,
@@ -700,7 +741,7 @@ export class RelayBridge {
 				// fresh root after a guard-authorized swap no longer carries it. Record
 				// latest-wins so recovery replays the current override rather than
 				// letting the fingerprint change mid-session.
-				ref.subscriptions.set(msg.method, {
+				tab.subscriptions.set(msg.method, {
 					method: msg.method,
 					params: msg.params,
 					sequence: ++this.#subscriptionSeq,
@@ -710,10 +751,10 @@ export class RelayBridge {
 				return;
 		}
 		if (!enabled) {
-			ref.subscriptions.delete(msg.method);
+			tab.subscriptions.delete(msg.method);
 			return;
 		}
-		ref.subscriptions.set(msg.method, {
+		tab.subscriptions.set(msg.method, {
 			method: msg.method,
 			params: msg.params,
 			sequence: ++this.#subscriptionSeq,
@@ -1075,12 +1116,19 @@ export class RelayBridge {
 		// is re-announced but left detached, and the holder's next command fails with
 		// no live attachment behind it.
 		if (autoAttachConns.length === 0 && !forceAttach) return;
+		this.#startTabRecovery(tab, true, keepPageSessions);
+	}
+
+	/** Attach if needed, replay pending root state, then expose replacement sessions. */
+	#startTabRecovery(tab: TabState, attach: boolean, keepPageSessions: CdpConnection[]): void {
+		const autoAttachConns = [...this.#conns.values()].filter(conn => conn.autoAttach);
 		// Capture the socket driving this recovery. If it is replaced (or dropped)
 		// while the attach is in flight, the replacement's hello re-runs
 		// reconciliation, so a `false` here is a retryable transport swap — not a
 		// terminal attach failure — and must not retract preserved sessions.
 		const ext = this.#ext;
-		const restoring = this.#ensureAttached(tab).then(async ok => {
+		const restoring = (async () => {
+			const ok = !attach || (await this.#ensureAttached(tab));
 			if (!ok) {
 				if (this.#ext !== ext) {
 					// The extension socket was replaced (or closed) mid-attach: the
@@ -1096,13 +1144,17 @@ export class RelayBridge {
 				// during the outage). Mirror the Target.setAutoAttach path and retract
 				// the just-announced target so a discovering client never retains a
 				// recreated target it can neither initialize nor drive.
+				tab.restorePending = false;
 				this.#retractTab(tab);
 				return;
 			}
-			if (keepPageSessions.length > 0) {
+			if (tab.restorePending) {
 				try {
-					await this.#restorePreservedSubscriptions(tab, keepPageSessions);
+					await this.#restorePreservedSubscriptions(tab, keepPageSessions, ext);
 				} catch (err) {
+					// A replacement keeps the journal pending. Its hello restarts the
+					// complete replay even when Chrome still reports the root attached,
+					// repairing interruptions such as Runtime.disable without enable.
 					if (this.#ext !== ext || err instanceof ExtensionReplacedError) return;
 					this.#log("subscription recovery failed", {
 						tabId: tab.tabId,
@@ -1112,10 +1164,12 @@ export class RelayBridge {
 					// contract. Surface a real session teardown instead of leaving the
 					// client silently subscribed to domains that are disabled on Chrome's
 					// fresh root.
+					tab.restorePending = false;
 					this.#retractTab(tab);
 					this.#detachIfUnheld(tab.tabId);
 					return;
 				}
+				tab.restorePending = false;
 			}
 			for (const conn of autoAttachConns) {
 				if (this.#conns.has(conn.id)) this.#emitTabAttached(conn, tab);
@@ -1127,7 +1181,7 @@ export class RelayBridge {
 			// above) so a tab nobody holds anymore doesn't keep an orphaned debugger
 			// attachment and its infobar.
 			this.#detachIfUnheld(tab.tabId);
-		});
+		})();
 		const task = restoring.finally(() => {
 			if (tab.restoring === task) tab.restoring = null;
 		});
@@ -1135,7 +1189,11 @@ export class RelayBridge {
 	}
 
 	/** Restore root-domain state promised by page sessions preserved across recovery. */
-	async #restorePreservedSubscriptions(tab: TabState, conns: CdpConnection[]): Promise<void> {
+	async #restorePreservedSubscriptions(
+		tab: TabState,
+		conns: CdpConnection[],
+		expectedExt: RelaySocket | null,
+	): Promise<void> {
 		const refs: SessionRef[] = [];
 		for (const conn of conns) {
 			for (const pageSession of conn.sessionsForTab(tab.tabId, "page")) {
@@ -1144,20 +1202,29 @@ export class RelayBridge {
 			}
 		}
 		if (refs.some(ref => ref.runtimeState === "enabled")) {
+			this.#assertExtensionCurrent(expectedExt);
 			await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.disable" });
+			this.#assertExtensionCurrent(expectedExt);
 			await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.enable" });
+			this.#assertExtensionCurrent(expectedExt);
 			tab.rootRuntimeEnabled = true;
 		}
-		const subscriptions = refs.flatMap(ref => [...ref.subscriptions.values()]);
+		const subscriptions = [...tab.subscriptions.values()];
 		subscriptions.sort((a, b) => a.sequence - b.sequence);
 		for (const subscription of subscriptions) {
+			this.#assertExtensionCurrent(expectedExt);
 			await this.#rpc({
 				op: "send",
 				tabId: tab.tabId,
 				method: subscription.method,
 				params: subscription.params,
 			});
+			this.#assertExtensionCurrent(expectedExt);
 		}
+	}
+
+	#assertExtensionCurrent(expected: RelaySocket | null): void {
+		if (this.#ext !== expected) throw new ExtensionReplacedError();
 	}
 
 	// ---- tab grouping -----------------------------------------------------------
@@ -1247,6 +1314,10 @@ export class RelayBridge {
 	 * session survives a Chrome root swap and must not be destroyed on recovery.
 	 */
 	#retractTab(tab: TabState, keepPageSessions: CdpConnection[] = []): void {
+		if (keepPageSessions.length === 0) {
+			tab.subscriptions.clear();
+			tab.restorePending = false;
+		}
 		const staleRealSessions = [...tab.realSessions];
 		for (const realSession of staleRealSessions) this.#realSessionTabs.delete(realSession);
 		tab.realSessions.clear();
@@ -1305,7 +1376,6 @@ export class RelayBridge {
 			runtimeContexts: new Set(),
 			runtimeEnabling: null,
 			runtimeEpoch: 0,
-			subscriptions: new Map(),
 		});
 		return sessionId;
 	}
@@ -1331,6 +1401,8 @@ export class RelayBridge {
 		const tab = this.#tabs.get(tabId);
 		if (!tab?.attached) return;
 		tab.attached = false;
+		tab.restorePending = false;
+		tab.subscriptions.clear();
 		this.#resetRuntime(tab);
 		tab.reattachedAfterDetach = false;
 		const done = this.#rpc({ op: "detach", tabId })
