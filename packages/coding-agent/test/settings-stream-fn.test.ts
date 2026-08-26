@@ -24,8 +24,54 @@ function captureBase(): { fn: StreamFn; calls: Array<{ options?: SimpleStreamOpt
 }
 
 const stubModel = {} as unknown as Model;
-const stubCodexModel = { api: "openai-codex-responses" } as unknown as Model;
-const stubResponsesModel = { api: "openai-responses" } as unknown as Model;
+const reasoningSummaryCompat = { supportsReasoningSummary: true };
+const unsupportedReasoningSummaryCompat = { supportsReasoningSummary: false };
+const stubCodexModel = {
+	api: "openai-codex-responses",
+	provider: "openai-codex",
+	baseUrl: "https://chatgpt.com/backend-api",
+	compat: reasoningSummaryCompat,
+} as unknown as Model;
+const stubResponsesModel = {
+	api: "openai-responses",
+	provider: "openai",
+	baseUrl: "https://api.openai.com/v1",
+	compat: reasoningSummaryCompat,
+} as unknown as Model;
+const stubAzureOpenAIResponsesModel = {
+	api: "azure-openai-responses",
+	provider: "azure-openai",
+	compat: reasoningSummaryCompat,
+} as unknown as Model;
+const stubCompatibleResponsesModel = {
+	api: "openai-responses",
+	provider: "ollama",
+	compat: reasoningSummaryCompat,
+} as unknown as Model;
+const stubOpenAICompatibleResponsesModel = {
+	api: "openai-responses",
+	provider: "openai",
+	baseUrl: "https://gateway.example/v1",
+	compat: reasoningSummaryCompat,
+} as unknown as Model;
+const stubCompatibleCodexModel = {
+	api: "openai-codex-responses",
+	provider: "openai-codex",
+	baseUrl: "https://gateway.example/codex",
+	compat: reasoningSummaryCompat,
+} as unknown as Model;
+const stubUnsupportedResponsesModel = {
+	api: "openai-responses",
+	provider: "openai",
+	baseUrl: "https://gateway.example/v1",
+	compat: unsupportedReasoningSummaryCompat,
+} as unknown as Model;
+const stubUnsupportedCodexModel = {
+	api: "openai-codex-responses",
+	provider: "openai-codex",
+	baseUrl: "https://gateway.example/codex",
+	compat: unsupportedReasoningSummaryCompat,
+} as unknown as Model;
 const stubContext = { messages: [], tools: [], systemPrompt: [] } as unknown as Context;
 
 describe("createSettingsAwareStreamFn", () => {
@@ -79,6 +125,49 @@ describe("createSettingsAwareStreamFn", () => {
 		wrapped(stubModel, stubContext, undefined);
 
 		expect(calls[0]?.options?.hideThinkingSummary).toBe(true);
+	});
+
+	it("forwards configured OpenAI reasoning summaries only to capable Responses-family providers", () => {
+		const settings = Settings.isolated({ openaiReasoningSummary: "detailed" });
+		const { fn: base, calls } = captureBase();
+		const wrapped = createSettingsAwareStreamFn(settings, base);
+
+		wrapped(stubCodexModel, stubContext, undefined);
+		wrapped(stubResponsesModel, stubContext, undefined);
+		wrapped(stubAzureOpenAIResponsesModel, stubContext, undefined);
+		wrapped(stubCompatibleResponsesModel, stubContext, undefined);
+		wrapped(stubOpenAICompatibleResponsesModel, stubContext, undefined);
+		wrapped(stubCompatibleCodexModel, stubContext, undefined);
+		wrapped(stubUnsupportedResponsesModel, stubContext, undefined);
+		wrapped(stubUnsupportedCodexModel, stubContext, undefined);
+		wrapped(stubModel, stubContext, undefined);
+
+		expect(calls[0]?.options?.reasoningSummary).toBe("detailed");
+		expect(calls[1]?.options?.reasoningSummary).toBe("detailed");
+		expect(calls[2]?.options?.reasoningSummary).toBe("detailed");
+		expect(calls[3]?.options?.reasoningSummary).toBeUndefined();
+		expect(calls[4]?.options?.reasoningSummary).toBeUndefined();
+		expect(calls[5]?.options?.reasoningSummary).toBeUndefined();
+		expect(calls[6]?.options?.reasoningSummary).toBeUndefined();
+		expect(calls[7]?.options?.reasoningSummary).toBeUndefined();
+		expect(calls[8]?.options?.reasoningSummary).toBeUndefined();
+	});
+
+	it("lets omitThinking suppress configured and caller-supplied OpenAI summaries", () => {
+		const settings = Settings.isolated({
+			omitThinking: true,
+			openaiReasoningSummary: "detailed",
+		});
+		const { fn: base, calls } = captureBase();
+		const wrapped = createSettingsAwareStreamFn(settings, base);
+
+		wrapped(stubCodexModel, stubContext, {
+			hideThinkingSummary: false,
+			reasoningSummary: "auto",
+		});
+
+		expect(calls[0]?.options?.hideThinkingSummary).toBe(true);
+		expect(calls[0]?.options?.reasoningSummary).toBeNull();
 	});
 
 	it("applies Codex text verbosity only when settings or caller options configure it", () => {

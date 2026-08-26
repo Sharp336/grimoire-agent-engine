@@ -663,6 +663,7 @@
 - Fixed retry-fallback selection switching to a fallback model with a context window too small to hold the current session context.
 - Fixed OpenCode discovery ignoring `opencode.jsonc` files and rejecting comments in `opencode.json`.
 - Fixed WSL2 startup hanging forever when the Windows interop pipe is wedged: the WSL host-home discovery probes (`cmd.exe`, `wslpath`) now run under a 500ms hard timeout and fall back to the Linux `$HOME`/`~/.omp` candidates ([#8402](https://github.com/can1357/oh-my-pi/issues/8402)).
+- Added an OpenAI reasoning-summary setting with provider-default, none, auto, concise, and detailed modes, allowing supported Responses and Codex models to opt back into visible reasoning titles without restoring incompatible request defaults globally. ([#8006](https://github.com/can1357/oh-my-pi/issues/8006))
 
 ## [17.2.15] - 2026-08-12
 

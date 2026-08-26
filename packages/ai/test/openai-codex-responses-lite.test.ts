@@ -129,13 +129,11 @@ function createCodexFetchMock(sse: string, onRequest: (captured: CapturedCodexRe
 }
 
 describe("openai-codex optional response controls", () => {
-	it("defaults reasoning.summary on and forwards explicit controls", async () => {
+	it("preserves provider-default summary omission and forwards explicit controls", async () => {
 		const model = createCodexModel("gpt-5.5");
 
-		// The backend emits no reasoning summaries at all unless `summary` is
-		// sent, so an unset `reasoningSummary` must still request one.
 		const defaulted = await transformRequestBody({ model: model.id }, model, { reasoningEffort: "medium" });
-		expect(defaulted.reasoning).toEqual({ effort: "medium", summary: "auto" });
+		expect(defaulted.reasoning).toEqual({ effort: "medium" });
 		expect("context" in (defaulted.reasoning ?? {})).toBe(false);
 		expect("text" in defaulted).toBe(false);
 		expect("stream_options" in defaulted).toBe(false);
@@ -155,6 +153,23 @@ describe("openai-codex optional response controls", () => {
 		expect("stream_options" in explicit).toBe(false);
 	});
 
+	it("forwards a supported summary request without synthesizing effort", async () => {
+		const model = createCodexModel("gpt-5.5");
+		const transformed = await transformRequestBody({ model: model.id }, model, {
+			reasoningSummary: "detailed",
+		});
+
+		expect(transformed.reasoning).toEqual({ summary: "detailed" });
+	});
+
+	it("omits unsupported summary-only requests without emitting an empty reasoning object", async () => {
+		const model = createCodexModel("gpt-5.3-codex");
+		const transformed = await transformRequestBody({ model: model.id }, model, {
+			reasoningSummary: "detailed",
+		});
+
+		expect(transformed.reasoning).toBeUndefined();
+	});
 	it("omits reasoning.summary when explicitly suppressed", async () => {
 		const model = createCodexModel("gpt-5.5");
 		const suppressed = await transformRequestBody({ model: model.id }, model, {
@@ -174,6 +189,17 @@ describe("openai-codex optional response controls", () => {
 		expect(body.reasoning).toEqual({ effort: "none" });
 	});
 
+	it("omits reasoning.summary when endpoint compatibility disables it", async () => {
+		const model = createCodexModel("gpt-5.5", { compat: { supportsReasoningSummary: false } });
+		const transformed = await transformRequestBody({ model: model.id }, model, {
+			reasoningEffort: "medium",
+			reasoningSummary: "detailed",
+		});
+
+		expect(transformed.reasoning).toEqual({ effort: "medium" });
+		expect("stream_options" in transformed).toBe(false);
+	});
+
 	it("forces reasoning.context to all_turns for Responses Lite", async () => {
 		const model = createCodexModel("gpt-5.5");
 
@@ -187,7 +213,7 @@ describe("openai-codex optional response controls", () => {
 			responsesLite: true,
 			reasoningContext: "current_turn",
 		});
-		expect(noneEffort.reasoning).toEqual({ effort: "none", summary: "auto", context: "all_turns" });
+		expect(noneEffort.reasoning).toEqual({ effort: "none", context: "all_turns" });
 
 		const plainRequest = await transformRequestBody({ model: model.id }, model, {
 			responsesLite: false,

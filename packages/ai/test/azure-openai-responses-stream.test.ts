@@ -1,10 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { streamSimple } from "@oh-my-pi/pi-ai";
 import {
 	type AzureOpenAIResponsesOptions,
 	streamAzureOpenAIResponses,
 } from "@oh-my-pi/pi-ai/providers/azure-openai-responses";
-import type { Context, FetchImpl, Model, ModelSpec, Tool } from "@oh-my-pi/pi-ai/types";
+import type { Context, FetchImpl, Model, ModelSpec, SimpleStreamOptions, Tool } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
 const azureModel: Model<"azure-openai-responses"> = buildModel({
 	id: "gpt-5-mini",
@@ -17,6 +19,46 @@ const azureModel: Model<"azure-openai-responses"> = buildModel({
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 	contextWindow: 400000,
 	maxTokens: 128000,
+});
+
+const legacyAzureCodexModel: Model<"azure-openai-responses"> = buildModel({
+	id: "gpt-5.3-codex",
+	name: "GPT-5.3 Codex",
+	api: "azure-openai-responses",
+	provider: "azure",
+	baseUrl: azureModel.baseUrl,
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 400_000,
+	maxTokens: 128_000,
+});
+
+const versionlessAzureCodexModel: Model<"azure-openai-responses"> = buildModel({
+	id: "codex-mini",
+	name: "Codex Mini",
+	api: "azure-openai-responses",
+	provider: "azure",
+	baseUrl: azureModel.baseUrl,
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 200_000,
+	maxTokens: 100_000,
+});
+
+const incompatibleAzureCodexModel: Model<"azure-openai-responses"> = buildModel({
+	id: "gpt-5.6-codex",
+	name: "GPT-5.6 Codex",
+	api: "azure-openai-responses",
+	provider: "azure",
+	baseUrl: azureModel.baseUrl,
+	reasoning: true,
+	input: ["text"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 400_000,
+	maxTokens: 128_000,
+	compat: { supportsReasoningSummary: false },
 });
 
 function createAbortedSignal(): AbortSignal {
@@ -38,6 +80,33 @@ function createSseResponse(events: unknown[]): Response {
 		status: 200,
 		headers: { "content-type": "text/event-stream" },
 	});
+}
+
+async function captureAzureCodexPayload(
+	options: Pick<SimpleStreamOptions, "reasoning" | "reasoningSummary">,
+	model = legacyAzureCodexModel,
+): Promise<Record<string, unknown>> {
+	let capturedBody: Record<string, unknown> | undefined;
+	const fetchMock: FetchImpl = async (_input, init) => {
+		capturedBody = typeof init?.body === "string" ? (JSON.parse(init.body) as Record<string, unknown>) : undefined;
+		return createSseResponse([
+			{
+				type: "response.completed",
+				response: {
+					status: "completed",
+					usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+				},
+			},
+		]);
+	};
+
+	await streamSimple(
+		model,
+		{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
+		{ apiKey: "test-key", fetch: fetchMock, ...options },
+	).result();
+	if (!capturedBody) throw new Error("Azure Responses request body was not captured");
+	return capturedBody;
 }
 
 function createAssistantMessage(text: string, textSignature?: string) {
@@ -93,6 +162,58 @@ describe("azure openai responses streaming", () => {
 			{ role: "system", content: "Second instruction" },
 			{ role: "user", content: [{ type: "input_text", text: "Say hello" }] },
 		]);
+	});
+
+	it("omits explicitly requested summaries for legacy Azure Codex models", async () => {
+		const payload = await captureAzureCodexPayload({
+			reasoning: Effort.High,
+			reasoningSummary: "detailed",
+		});
+
+		expect(payload.reasoning).toEqual({ effort: "high" });
+	});
+
+	it("omits the summary field for an unconfigured legacy Azure Codex reasoning request", async () => {
+		const payload = await captureAzureCodexPayload({ reasoning: Effort.High });
+
+		expect(payload.reasoning).toEqual({ effort: "high" });
+	});
+
+	it("does not synthesize reasoning effort when only an unsupported summary is requested", async () => {
+		const payload = await captureAzureCodexPayload({ reasoningSummary: "detailed" });
+
+		expect(payload.reasoning).toBeUndefined();
+	});
+
+	it("omits explicitly requested summaries for versionless Azure Codex models", async () => {
+		const payload = await captureAzureCodexPayload(
+			{ reasoning: Effort.High, reasoningSummary: "detailed" },
+			versionlessAzureCodexModel,
+		);
+
+		expect(payload.reasoning).toEqual({ effort: "high" });
+	});
+
+	it("omits explicitly requested summaries when endpoint compatibility disables them", async () => {
+		const payload = await captureAzureCodexPayload(
+			{ reasoning: Effort.High, reasoningSummary: "detailed" },
+			incompatibleAzureCodexModel,
+		);
+		expect(payload.reasoning).toEqual({ effort: "high" });
+	});
+
+	it("omits requested summaries when Azure routes through a compatible gateway", async () => {
+		const payload = await captureAzurePayload(
+			{ messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }] },
+			legacyAzureCodexModel,
+			{
+				azureBaseUrl: "https://gateway.example/openai/v1",
+				reasoning: "high",
+				reasoningSummary: "detailed",
+			},
+		);
+
+		expect(payload.reasoning).toEqual({ effort: "high" });
 	});
 
 	it("sends an async onPayload replacement body", async () => {

@@ -196,6 +196,8 @@ export interface OpenAICompat {
 	supportsMultipleSystemMessages?: boolean;
 	/** Whether the provider supports `reasoning_effort`. Default: auto-detected from URL. */
 	supportsReasoningEffort?: boolean;
+	/** Whether Responses requests accept `reasoning.summary`. Default: true; set false for incompatible endpoints. */
+	supportsReasoningSummary?: boolean;
 	/** Optional mapping from pi-ai reasoning levels to provider/model-specific `reasoning_effort` values. */
 	reasoningEffortMap?: Partial<Record<Effort, string>>;
 	/** Whether the provider supports `stream_options: { include_usage: true }` for token usage in streaming responses. Default: true. */
@@ -668,6 +670,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			OpenAICompat,
 			| "supportsDeveloperRole"
 			| "supportsReasoningEffort"
+			| "supportsReasoningSummary"
 			| "reasoningEffortMap"
 			| "supportsReasoningParams"
 			| "supportsSamplingParams"

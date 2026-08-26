@@ -2,16 +2,17 @@
  * Settings-aware stream wrapper shared by the main agent (sdk.ts) and the
  * advisor agent (AgentSession.#buildAdvisorRuntime).
  *
- * verbosity, stream watchdog budgets, per-provider in-flight caps, and the loop
- * guard out of `Settings`
- * per request, layering them onto whatever options the caller passed. Before
+ * It reads provider routing, OpenAI response controls, stream watchdog budgets,
+ * per-provider in-flight caps, and the loop guard from `Settings` per request,
+ * layering them onto whatever options the caller passed. Before
  * this helper existed, advisor turns called bare `streamSimple` while the main
  * turn went through an inline closure that read these settings — so an advisor on
  * OpenRouter never saw `providers.openrouterVariant`, breaking sticky routing
  * and OpenRouter response-cache hits across advisor calls.
  */
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
-import { type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
+import { isOfficialCodexApiUrl, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
+import { isOfficialOpenAIEndpoint } from "@oh-my-pi/pi-catalog/compat/openai";
 import { isAnthropicFableOrMythosModel } from "@oh-my-pi/pi-catalog/identity";
 import { type Settings, validateProviderMaxInFlightRequests } from "../config/settings";
 
@@ -25,7 +26,9 @@ function timeoutSecondsToMs(value: number): number | undefined {
  * Build a {@link StreamFn} that reads provider routing/guard settings from
  * `settings` per call and forwards to `base` (defaults to `streamSimple`).
  *
- * Caller-supplied `streamOptions` always win — the helper only fills holes.
+ * Caller-supplied `streamOptions` win when filling ordinary settings. The
+ * cross-provider `omitThinking` suppressor is the deliberate exception: once
+ * enabled, a per-call summary option cannot turn provider summaries back on.
  */
 export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn = streamSimple): StreamFn {
 	return (model, context, streamOptions) => {
@@ -47,6 +50,33 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 		// implicitly disables the short-entry keep-alive refresh loop).
 		const cacheRetentionSetting = settings.get("providers.cacheRetention");
 		const cacheRetention = cacheRetentionSetting === "auto" ? undefined : cacheRetentionSetting;
+		const supportsReasoningSummary =
+			(model.api === "openai-responses" ||
+				model.api === "azure-openai-responses" ||
+				model.api === "openai-codex-responses") &&
+			model.compat !== undefined &&
+			(!("supportsReasoningSummary" in model.compat) || model.compat.supportsReasoningSummary !== false);
+		const usesOpenAIReasoningSummaries =
+			supportsReasoningSummary &&
+			((model.api === "openai-responses" && isOfficialOpenAIEndpoint(model.provider, model.baseUrl)) ||
+				(model.api === "azure-openai-responses" &&
+					(model.provider === "azure" || model.provider === "azure-openai")) ||
+				(model.api === "openai-codex-responses" &&
+					model.provider === "openai-codex" &&
+					isOfficialCodexApiUrl(model.baseUrl)));
+		const summarySetting = settings.get("openaiReasoningSummary");
+		const configuredReasoningSummary =
+			!usesOpenAIReasoningSummaries || summarySetting === "provider-default"
+				? undefined
+				: summarySetting === "none"
+					? null
+					: summarySetting;
+		const hideThinkingSummary = settings.get("omitThinking") || streamOptions?.hideThinkingSummary === true;
+		const reasoningSummary = hideThinkingSummary
+			? null
+			: streamOptions?.reasoningSummary !== undefined
+				? streamOptions.reasoningSummary
+				: configuredReasoningSummary;
 		const streamFirstEventTimeoutMs = timeoutSecondsToMs(settings.get("providers.streamFirstEventTimeoutSeconds"));
 		const streamIdleTimeoutMs = timeoutSecondsToMs(settings.get("providers.streamIdleTimeoutSeconds"));
 		// Server-side fallback (opt-in): when the user enables it AND the
@@ -67,6 +97,7 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 			antigravityEndpointMode: streamOptions?.antigravityEndpointMode ?? antigravityEndpointMode,
 			textVerbosity: streamOptions?.textVerbosity ?? textVerbosity,
 			cacheRetention: streamOptions?.cacheRetention ?? cacheRetention,
+			reasoningSummary,
 			streamFirstEventTimeoutMs: streamOptions?.streamFirstEventTimeoutMs ?? streamFirstEventTimeoutMs,
 			streamIdleTimeoutMs: streamOptions?.streamIdleTimeoutMs ?? streamIdleTimeoutMs,
 			maxRetryDelayMs: streamOptions?.maxRetryDelayMs ?? settings.get("retry.maxDelayMs"),
@@ -78,7 +109,7 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 				checkAssistantContent: settings.get("model.loopGuard.checkAssistantContent"),
 				...streamOptions?.loopGuard,
 			},
-			hideThinkingSummary: streamOptions?.hideThinkingSummary ?? settings.get("omitThinking"),
+			hideThinkingSummary,
 			...(fallbacks !== undefined ? { fallbacks } : {}),
 		};
 		return base(model, context, merged);

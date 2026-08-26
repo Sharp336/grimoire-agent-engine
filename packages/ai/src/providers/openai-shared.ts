@@ -3599,27 +3599,29 @@ export function applyResponsesCompatPolicy<P extends ResponseCreateParamsStreami
 		return;
 	}
 
-	if (reasoning.requestedEffort !== undefined || options?.reasoningSummary !== undefined) {
-		if (reasoning.omitReasoningEffort) {
-			if (options?.reasoningSummary !== undefined && options.reasoningSummary !== null) {
-				type ReasoningParam = NonNullable<ResponseCreateParamsStreaming["reasoning"]>;
-				params.reasoning = { summary: options.reasoningSummary || "auto" } as P["reasoning"] & ReasoningParam;
-			}
-			return;
+	type ReasoningParam = NonNullable<ResponseCreateParamsStreaming["reasoning"]>;
+	if (reasoning.requestedEffort === undefined) {
+		if (options?.reasoningSummary != null) {
+			params.reasoning = { summary: options.reasoningSummary || "auto" } as P["reasoning"] & ReasoningParam;
 		}
-
-		const requested = reasoning.requestedEffort ?? "medium";
-		const wireEffort = reasoning.wireEffort ?? options?.mapEffort?.(requested) ?? requested;
-		type ReasoningParam = NonNullable<ResponseCreateParamsStreaming["reasoning"]>;
-		const reasoningParams: ReasoningParam = {
-			effort: wireEffort as ReasoningParam["effort"],
-		};
-		if (options?.reasoningSummary !== null) {
-			reasoningParams.summary = options?.reasoningSummary || "auto";
-		}
-		params.reasoning = reasoningParams as P["reasoning"];
 		return;
 	}
+	if (reasoning.omitReasoningEffort) {
+		if (options?.reasoningSummary != null) {
+			params.reasoning = { summary: options.reasoningSummary || "auto" } as P["reasoning"] & ReasoningParam;
+		}
+		return;
+	}
+
+	const requested = reasoning.requestedEffort;
+	const wireEffort = reasoning.wireEffort ?? options?.mapEffort?.(requested) ?? requested;
+	const reasoningParams: ReasoningParam = {
+		effort: wireEffort as ReasoningParam["effort"],
+	};
+	if (options?.reasoningSummary !== null) {
+		reasoningParams.summary = options?.reasoningSummary || "auto";
+	}
+	params.reasoning = reasoningParams as P["reasoning"];
 }
 
 /**
@@ -3644,7 +3646,10 @@ export function applyResponsesReasoningParams<P extends ResponseCreateParamsStre
 			includeEncryptedReasoning,
 			omitReasoningEffort,
 		}),
-		{ reasoningSummary: options?.reasoningSummary, mapEffort },
+		{
+			reasoningSummary: model.compat.supportsReasoningSummary !== false ? options?.reasoningSummary : null,
+			mapEffort,
+		},
 	);
 }
 

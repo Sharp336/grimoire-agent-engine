@@ -620,6 +620,12 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	 * Useful when the UI hides thinking blocks anyway and the summary is wasted bandwidth.
 	 */
 	hideThinkingSummary?: boolean;
+	/**
+	 * OpenAI Responses/Codex reasoning-summary level. `undefined` preserves the
+	 * provider/model default; `null` suppresses summaries. Ignored by APIs that
+	 * do not expose OpenAI reasoning-summary controls.
+	 */
+	reasoningSummary?: "auto" | "concise" | "detailed" | null;
 	/** OpenAI Responses/Codex `text.verbosity` response detail level. */
 	textVerbosity?: "low" | "medium" | "high";
 	/** Custom token budgets for thinking levels (token-based providers only) */

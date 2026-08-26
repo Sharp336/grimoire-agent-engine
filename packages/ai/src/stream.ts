@@ -6,6 +6,7 @@ import { scheduler } from "node:timers/promises";
 import { isOfficialAnthropicApiUrl } from "@oh-my-pi/pi-catalog/compat/anthropic";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { isVertexExpressOpenAIUrl, isVertexRawPredictUrl, resolveVertexEndpointHost } from "@oh-my-pi/pi-catalog/hosts";
+import { isOpenAICodexModelId, supportsCodexReasoningSummary } from "@oh-my-pi/pi-catalog/identity";
 import {
 	defaultSupportedEffort,
 	mapEffortToAnthropicAdaptiveEffort,
@@ -1866,6 +1867,26 @@ function resolveGoogleThinkingOff<TApi extends Api>(model: Model<TApi>): NonNull
 	return thinking;
 }
 
+function resolveOpenAiReasoningSummary<TApi extends Api>(
+	model: Model<TApi>,
+	options?: SimpleStreamOptions,
+): SimpleStreamOptions["reasoningSummary"] {
+	if (options?.hideThinkingSummary) return null;
+	const requested = options?.reasoningSummary;
+	if (requested === undefined) {
+		const suppressImplicitSummary =
+			(model.api === "openai-responses" && model.provider === "openai" && isOfficialOpenAIApiUrl(model.baseUrl)) ||
+			(model.api === "azure-openai-responses" && (model.provider === "azure" || model.provider === "azure-openai"));
+		return suppressImplicitSummary ? null : undefined;
+	}
+	const isCodexModel = isOpenAICodexModelId(model.id);
+	return isCodexModel && !supportsCodexReasoningSummary(model.id)
+		? options?.reasoning === undefined
+			? undefined
+			: null
+		: requested;
+}
+
 const castApi = <TApi extends Api>(api: OptionsForApi<TApi>): OptionsForApi<Api> => api as OptionsForApi<Api>;
 
 /**
@@ -2112,7 +2133,7 @@ function mapOptionsForApi<TApi extends Api>(
 					reasoning: resolveOpenAiReasoningEffort(model, options),
 					toolChoice: mapOpenAiToolChoice(options?.toolChoice),
 					serviceTier: options?.serviceTier,
-					reasoningSummary: options?.hideThinkingSummary ? null : undefined,
+					reasoningSummary: resolveOpenAiReasoningSummary(model, options),
 					openrouterVariant: options?.openrouterVariant,
 					maxTokensExplicit: rawOptions?.maxTokens !== undefined,
 					disableReasoning: options?.disableReasoning,
@@ -2151,7 +2172,7 @@ function mapOptionsForApi<TApi extends Api>(
 				reasoning: resolveOpenAiReasoningEffort(model, options),
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
 				serviceTier: options?.serviceTier,
-				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
+				reasoningSummary: resolveOpenAiReasoningSummary(model, options),
 				openrouterVariant: options?.openrouterVariant,
 				maxTokensExplicit: rawOptions?.maxTokens !== undefined,
 				disableReasoning: options?.disableReasoning,
@@ -2167,7 +2188,7 @@ function mapOptionsForApi<TApi extends Api>(
 				reasoning: resolveOpenAiReasoningEffort(model, options),
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
 				serviceTier: options?.serviceTier,
-				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
+				reasoningSummary: resolveOpenAiReasoningSummary(model, options),
 				promptCache: options?.promptCache,
 				statefulResponses: options?.statefulResponses,
 				disableReasoning: options?.disableReasoning || options?.forceReasoningOff,
@@ -2182,7 +2203,7 @@ function mapOptionsForApi<TApi extends Api>(
 				serviceTier: options?.serviceTier,
 				preferWebsockets: options?.preferWebsockets,
 				codexCompaction: options?.codexCompaction,
-				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
+				reasoningSummary: resolveOpenAiReasoningSummary(model, options),
 				textVerbosity: options?.textVerbosity,
 				forceReasoningOff: options?.forceReasoningOff,
 			});

@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
-import type { Context, FetchImpl, Model } from "@oh-my-pi/pi-ai/types";
+import type { Context, FetchImpl, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 function mockSseFetch(): { fetchMock: FetchImpl; captured: Record<string, unknown> } {
@@ -33,9 +35,9 @@ const ctx: Context = {
 	messages: [{ role: "user", content: "ping", timestamp: Date.now() }],
 };
 
-async function drain(
-	model: Model<"openai-responses">,
-	options: { forceReasoningOff?: boolean } = {},
+async function drain<TApi extends "openai-responses" | "azure-openai-responses">(
+	model: Model<TApi>,
+	options: SimpleStreamOptions = {},
 ): Promise<Record<string, unknown>> {
 	const { fetchMock, captured } = mockSseFetch();
 	const stream = streamSimple(model, ctx, { apiKey: "k", fetch: fetchMock, temperature: 0, ...options });
@@ -75,5 +77,72 @@ describe("openai-responses sampling-param gating (#5606)", () => {
 		const model = getBundledModel("openai", "gpt-5") as Model<"openai-responses">;
 		const body = await drain(model, { forceReasoningOff: true });
 		expect(body.reasoning).toEqual({ effort: "none" });
+	});
+});
+
+describe("openai-responses reasoning-summary defaults", () => {
+	it("omits the summary field for an unconfigured official OpenAI reasoning request", async () => {
+		const model = getBundledModel("openai", "gpt-5.4") as Model<"openai-responses">;
+
+		const body = await drain(model, { reasoning: Effort.High });
+
+		expect(body.reasoning).toEqual({ effort: "high" });
+	});
+	it("omits the summary field for the Azure OpenAI provider alias", async () => {
+		const model: Model<"azure-openai-responses"> = buildModel({
+			id: "gpt-5.4",
+			name: "GPT-5.4 on Azure OpenAI",
+			api: "azure-openai-responses",
+			provider: "azure-openai",
+			baseUrl: "https://example.openai.azure.com/openai/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400_000,
+			maxTokens: 128_000,
+		});
+
+		const body = await drain(model, { reasoning: Effort.High });
+
+		expect(body.reasoning).toEqual({ effort: "high" });
+	});
+
+	it("forwards summary-only requests without inventing a reasoning effort", async () => {
+		const model: Model<"openai-responses"> = buildModel({
+			id: "gpt-5-pro",
+			name: "GPT-5 Pro",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400_000,
+			maxTokens: 128_000,
+		});
+
+		const body = await drain(model, { reasoningSummary: "detailed" });
+
+		expect(body.reasoning).toEqual({ summary: "detailed" });
+	});
+
+	it("omits explicitly requested summaries when endpoint compatibility disables them", async () => {
+		const model: Model<"openai-responses"> = buildModel({
+			id: "gpt-5.4",
+			name: "GPT-5.4 via incompatible gateway",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://gateway.example/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 400_000,
+			maxTokens: 128_000,
+			compat: { supportsReasoningSummary: false },
+		});
+
+		const body = await drain(model, { reasoning: Effort.High, reasoningSummary: "detailed" });
+
+		expect(body.reasoning).toEqual({ effort: "high" });
 	});
 });

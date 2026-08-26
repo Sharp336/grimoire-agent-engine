@@ -620,6 +620,45 @@ describe("openai-codex streaming", () => {
 		expect(capturedText).toEqual({ verbosity: "low" });
 	});
 
+	it("forwards SimpleStreamOptions reasoningSummary into supported Codex request bodies", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const token = createCodexTestToken();
+		const context = createCodexTestContext();
+		const model = {
+			...createCodexTestModel("https://chatgpt.com/backend-api"),
+			id: "gpt-5.6-sol",
+			name: "GPT-5.6 Sol",
+			preferWebsockets: false,
+			useResponsesLite: true,
+		};
+		let capturedBody: Record<string, unknown> | undefined;
+		const fetchMock: FetchImpl = async (_input, init) => {
+			capturedBody = JSON.parse(decodeCodexRequestBody(init?.body)) as Record<string, unknown>;
+			return new Response(createCompletedCodexSse("Hello"), {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		};
+
+		await withEnv({ PI_CODEX_CONCURRENT_SUMMARIES: "1" }, async () => {
+			const result = await streamSimple(model, context, {
+				apiKey: token,
+				fetch: fetchMock,
+				reasoning: Effort.XHigh,
+				reasoningSummary: "detailed",
+			}).result();
+
+			expect(result.stopReason).toBe("stop");
+			expect(capturedBody?.reasoning).toEqual({
+				effort: "xhigh",
+				summary: "detailed",
+				context: "all_turns",
+			});
+			expect(capturedBody?.stream_options).toEqual({ reasoning_summary_delivery: "sequential_cutoff" });
+		});
+	});
+
 	it("omits optional response controls from default SimpleStreamOptions", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
