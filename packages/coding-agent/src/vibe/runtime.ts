@@ -92,10 +92,9 @@ export interface VibeParentSession {
 		>;
 	asyncJobManager?: AsyncJobManager;
 	settings: ToolSession["settings"];
-	getActiveModelString?: () => string | undefined;
 	getModelString?: () => string | undefined;
+	dispatchSkillDependency?: ToolSession["dispatchSkillDependency"];
 }
-
 type VibeTombstoneReason = "explicit-kill" | "mode-exit" | "spawn-failed" | "unrecoverable";
 
 interface VibeLifecycleBase {
