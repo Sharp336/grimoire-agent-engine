@@ -2186,6 +2186,78 @@ describe("RelayBridge attachment release", () => {
 		).toHaveLength(1);
 	});
 
+	it("restores root Runtime for a preserved default session across recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+
+		const defaultHolder = new FakeCdpSocket();
+		const defaultConn = bridge.cdpConnected(defaultHolder);
+		const defaultSession = await attachPage(bridge, ext, defaultHolder, defaultConn, 1);
+
+		const disabledHolder = new FakeCdpSocket();
+		const disabledConn = bridge.cdpConnected(disabledHolder);
+		const disabledSession = await attachPage(bridge, ext, disabledHolder, disabledConn, 1);
+		bridge.cdpMessage(
+			disabledConn,
+			JSON.stringify({ id: ++msgSeq, sessionId: disabledSession, method: "Runtime.enable" }),
+		);
+		await waitFor(() => ext.rpcs("send").length === 1, "Runtime.disable leg");
+		ack(bridge, ext, "send");
+		await waitFor(() => ext.rpcs("send").length === 2, "Runtime.enable leg");
+		ack(bridge, ext, "send");
+		await waitFor(
+			() => disabledHolder.messages.some(message => "result" in message && message.id === msgSeq),
+			"Runtime.enable ack",
+		);
+		bridge.cdpMessage(
+			disabledConn,
+			JSON.stringify({ id: ++msgSeq, sessionId: disabledSession, method: "Runtime.disable" }),
+		);
+		await flush();
+
+		// Recovery preserves both sessions. The explicit disable remains a per-session
+		// opt-out, but the default session still depended on the pre-detach root
+		// Runtime fan-out and needs the fresh root re-enabled.
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "Runtime.disable recovery leg");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Runtime.disable"]);
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.rpcs("send").length === 2, "Runtime.enable recovery leg");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Runtime.disable", "Runtime.enable"]);
+
+		const context = {
+			context: {
+				id: 42,
+				origin: "https://example.com",
+				name: "",
+				uniqueId: "context-42",
+				auxData: { isDefault: true, type: "default", frameId: "frame-1" },
+			},
+		};
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({ t: "cdpEvent", tabId: 1, method: "Runtime.executionContextCreated", params: context }),
+		);
+		ack(bridge, ext2, "send");
+		await flush();
+
+		expect(
+			defaultHolder.messages.filter(
+				message => message.sessionId === defaultSession && message.method === "Runtime.executionContextCreated",
+			),
+		).toHaveLength(1);
+		expect(
+			disabledHolder.messages.filter(
+				message => message.sessionId === disabledSession && message.method === "Runtime.executionContextCreated",
+			),
+		).toHaveLength(0);
+	});
+
 	it("keeps a preserved page session across a second reconnect racing a recovery attach", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

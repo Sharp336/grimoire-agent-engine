@@ -132,6 +132,8 @@ class TabState {
 	readonly runtimeContexts = new Map<number, Record<string, unknown>>();
 	/** Whether the shared root Runtime domain has been enabled by the bridge. */
 	rootRuntimeEnabled = false;
+	/** Root Runtime was enabled before a detach and must be restored for default sessions. */
+	restoreRootRuntime = false;
 	rootRuntimeEnabling: Promise<void> | null = null;
 	/** Invalidates an in-flight Runtime enable when the debugger detaches. */
 	runtimeGeneration = 0;
@@ -271,7 +273,10 @@ export class RelayBridge {
 	extConnected(socket: RelaySocket): void {
 		if (this.#ext && this.#ext !== socket) {
 			this.#log("replacing extension socket");
-			for (const tab of this.#tabs.values()) this.#resetRuntime(tab);
+			for (const tab of this.#tabs.values()) {
+				if (tab.rootRuntimeEnabled) tab.restoreRootRuntime = true;
+				this.#resetRuntime(tab);
+			}
 			this.#rejectPendingExtensionRpcs(new ExtensionReplacedError());
 			this.#ext.close();
 			// The replacement's hello has not landed yet, so its handshake state is
@@ -292,6 +297,7 @@ export class RelayBridge {
 		this.#extInfo = null;
 		this.#rejectPendingExtensionRpcs(new Error("relay extension disconnected"));
 		for (const tab of this.#tabs.values()) {
+			if (tab.rootRuntimeEnabled) tab.restoreRootRuntime = true;
 			tab.attached = false;
 			tab.attaching = null;
 			tab.restoring = null;
@@ -1067,6 +1073,7 @@ export class RelayBridge {
 		tab.attached = false;
 		tab.attaching = null;
 		this.#resetRuntime(tab);
+		tab.restoreRootRuntime = false;
 		tab.banned = true;
 		// The user dismissed the debugger infobar (or the attach was torn
 		// down): release the tab's omp-group membership too.
@@ -1237,7 +1244,10 @@ export class RelayBridge {
 				if (ref) refs.push(ref);
 			}
 		}
-		if (refs.some(ref => ref.runtimeState === "enabled")) {
+		const needsRuntimeRestore =
+			refs.some(ref => ref.runtimeState === "enabled") ||
+			(tab.restoreRootRuntime && refs.some(ref => ref.runtimeState === "default"));
+		if (needsRuntimeRestore) {
 			this.#assertExtensionCurrent(expectedExt);
 			await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.disable" });
 			this.#assertExtensionCurrent(expectedExt);
@@ -1245,6 +1255,7 @@ export class RelayBridge {
 			this.#assertExtensionCurrent(expectedExt);
 			tab.rootRuntimeEnabled = true;
 		}
+		tab.restoreRootRuntime = false;
 		const subscriptions = [...tab.subscriptions.values()];
 		subscriptions.sort((a, b) => a.sequence - b.sequence);
 		for (const subscription of subscriptions) {
@@ -1353,6 +1364,7 @@ export class RelayBridge {
 		if (keepPageSessions.length === 0) {
 			tab.subscriptions.clear();
 			tab.restorePending = false;
+			tab.restoreRootRuntime = false;
 		}
 		const staleRealSessions = [...tab.realSessions];
 		for (const realSession of staleRealSessions) this.#realSessionTabs.delete(realSession);
