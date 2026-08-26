@@ -1,5 +1,5 @@
-import * as http2 from "node:http2";
 import { type } from "@oh-my-pi/omptype";
+import { acquireCursorH2, buildCursorUnaryHeaders, type CursorH2Lease } from "@oh-my-pi/pi-ai/providers/cursor";
 import { isKimiK3ModelId } from "../identity";
 import { bareModelId, parseGlmModel, semverGte } from "../identity/classify";
 import { getBundledModels } from "../models";
@@ -9,7 +9,6 @@ import { GetUsableModelsRequestSchema, GetUsableModelsResponseSchema } from "./c
 import { create, fromBinary, toBinary } from "./protobuf";
 
 const CURSOR_DEFAULT_BASE_URL = "https://api2.cursor.sh";
-const CURSOR_DEFAULT_CLIENT_VERSION = "cli-2026.02.13-41ac335";
 const CURSOR_GET_USABLE_MODELS_PATH = "/agent.v1.AgentService/GetUsableModels";
 
 const DEFAULT_CONTEXT_WINDOW = 200_000;
@@ -82,7 +81,7 @@ export interface CursorModelDiscoveryOptions {
 	apiKey: string;
 	/** Optional Cursor API base URL override. */
 	baseUrl?: string;
-	/** Optional client version override sent as `x-cursor-client-version`. */
+	/** Optional client version override sent as `x-cursor-client-version`; defaults to the shared `CURSOR_CLIENT_VERSION`. */
 	clientVersion?: string;
 	/** Optional request timeout in milliseconds. */
 	timeoutMs?: number;
@@ -125,17 +124,6 @@ export async function fetchCursorUsableModels(
 	}
 }
 
-function buildRequestHeaders(options: CursorModelDiscoveryOptions): Record<string, string> {
-	return {
-		"content-type": "application/proto",
-		te: "trailers",
-		authorization: `Bearer ${options.apiKey}`,
-		"x-ghost-mode": "true",
-		"x-cursor-client-version": options.clientVersion ?? CURSOR_DEFAULT_CLIENT_VERSION,
-		"x-cursor-client-type": "cli",
-	};
-}
-
 /** HTTP/2 transport required by Cursor API (HTTP/1.1 is rejected with 464). */
 async function fetchViaHttp2(
 	baseUrl: string,
@@ -143,51 +131,58 @@ async function fetchViaHttp2(
 	options: CursorModelDiscoveryOptions,
 	timeoutMs: number,
 ): Promise<Uint8Array | null> {
-	const { promise, resolve } = Promise.withResolvers<Uint8Array | null>();
-	const client = http2.connect(baseUrl);
-	const timer = setTimeout(() => {
-		client.destroy();
-		resolve(null);
-	}, timeoutMs);
-
-	client.on("error", () => {
-		clearTimeout(timer);
-		resolve(null);
-	});
-
-	const req = client.request({
-		":method": "POST",
-		":path": CURSOR_GET_USABLE_MODELS_PATH,
-		...buildRequestHeaders(options),
-	});
-
-	const chunks: Buffer[] = [];
-	req.on("data", (chunk: Buffer) => chunks.push(chunk));
-	req.on("end", () => {
-		clearTimeout(timer);
-		client.close();
-		resolve(new Uint8Array(Buffer.concat(chunks)));
-	});
-	req.on("error", () => {
-		clearTimeout(timer);
-		client.close();
-		resolve(null);
-	});
-	req.on("response", headers => {
-		const status = Number(headers[":status"] ?? 0);
-		if (status < 200 || status >= 300) {
-			clearTimeout(timer);
-			client.close();
-			resolve(null);
-		}
-	});
-
-	if (body.length > 0) {
-		req.end(Buffer.from(body));
-	} else {
-		req.end();
+	const timeout = AbortSignal.timeout(timeoutMs);
+	try {
+		const acquisition = await acquireCursorH2({
+			baseUrl,
+			requestPath: CURSOR_GET_USABLE_MODELS_PATH,
+			headers: buildCursorUnaryHeaders({
+				apiKey: options.apiKey,
+				clientVersion: options.clientVersion,
+			}),
+			provider: "cursor",
+			signal: timeout,
+		});
+		if (!acquisition.ok) return null;
+		return await readUnaryResponse(acquisition.lease, body, timeout);
+	} catch {
+		return null;
 	}
+}
 
+async function readUnaryResponse(
+	lease: CursorH2Lease,
+	body: Uint8Array,
+	signal: AbortSignal,
+): Promise<Uint8Array | null> {
+	const { request, release } = lease;
+	if (request.closed || request.destroyed) {
+		release();
+		return null;
+	}
+	const { promise, resolve } = Promise.withResolvers<Uint8Array | null>();
+	let settled = false;
+	const finish = (value: Uint8Array | null): void => {
+		if (settled) return;
+		settled = true;
+		release();
+		resolve(value);
+	};
+	const chunks: Buffer[] = [];
+	request.on("data", (chunk: Buffer) => chunks.push(chunk));
+	request.on("end", () => finish(new Uint8Array(Buffer.concat(chunks))));
+	request.on("error", () => finish(null));
+	request.on("response", (headers: { ":status"?: unknown }) => {
+		const status = Number(headers[":status"] ?? 0);
+		if (status < 200 || status >= 300) finish(null);
+	});
+	if (signal.aborted) {
+		finish(null);
+		return promise;
+	}
+	signal.addEventListener("abort", () => finish(null), { once: true });
+	if (body.length > 0) request.end(Buffer.from(body));
+	else request.end();
 	return promise;
 }
 

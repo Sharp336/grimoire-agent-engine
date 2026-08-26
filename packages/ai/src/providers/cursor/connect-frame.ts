@@ -1,5 +1,6 @@
 import { gunzipSync } from "node:zlib";
 import * as AIError from "../../error";
+import { formatConnectEndStreamError } from "../connect-error-detail";
 
 /**
  * Connect v1 streaming envelope framing, per
@@ -32,6 +33,20 @@ export const MAX_CONNECT_FRAME_PAYLOAD = 16 * 1024 * 1024;
 
 /** A protocol-level violation of the Connect envelope grammar. */
 export class ConnectProtocolError extends AIError.ProviderResponseError {}
+
+/**
+ * Connect end-stream JSON error. `message` is the classification prefix
+ * (`Connect error ${code}: ${message}`); `diagnosticMessage` carries details
+ * the recovery classifier must not see.
+ */
+export class ConnectEndStreamError extends ConnectProtocolError {
+	readonly diagnosticMessage: string;
+
+	constructor(classificationMessage: string, diagnosticMessage: string) {
+		super(classificationMessage, { kind: "envelope" });
+		this.diagnosticMessage = diagnosticMessage;
+	}
+}
 
 export interface ConnectDataFrame {
 	kind: "data";
@@ -86,8 +101,11 @@ function parseEndStreamFrame(payload: Uint8Array): Error | null {
 	}
 	const code = "code" in error && typeof error.code === "string" && error.code ? error.code : "unknown";
 	const message =
-		"message" in error && typeof error.message === "string" && error.message ? error.message : "Unknown error";
-	return new ConnectProtocolError(`Connect error ${code}: ${decodePercentEncoded(message)}`, { kind: "envelope" });
+		"message" in error && typeof error.message === "string" && error.message
+			? decodePercentEncoded(error.message)
+			: "Unknown error";
+	const classificationMessage = `Connect error ${code}: ${message}`;
+	return new ConnectEndStreamError(classificationMessage, formatConnectEndStreamError(error));
 }
 
 /**

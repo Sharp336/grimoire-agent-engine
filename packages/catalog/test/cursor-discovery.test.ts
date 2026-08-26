@@ -153,12 +153,13 @@ function requireTcpAddress(address: string | net.AddressInfo | null): net.Addres
 	return address;
 }
 
-function startCursorDiscoveryServer(body: Uint8Array): Promise<string> {
+function startCursorDiscoveryServer(body: Uint8Array, seenHeaders?: http2.IncomingHttpHeaders[]): Promise<string> {
 	const { promise, resolve, reject } = Promise.withResolvers<string>();
 	const srv = http2.createServer();
 	servers.add(srv);
 	srv.once("error", reject);
-	srv.on("stream", (stream: http2.ServerHttp2Stream) => {
+	srv.on("stream", (stream: http2.ServerHttp2Stream, headers: http2.IncomingHttpHeaders) => {
+		seenHeaders?.push(headers);
 		stream.respond({ ":status": 200, "content-type": "application/proto" });
 		stream.end(Buffer.from(body));
 	});
@@ -377,6 +378,29 @@ describe("fetchCursorUsableModels", () => {
 				cursorMaxMode: true,
 				contextWindow: 1_000_000,
 			}),
+		]);
+	});
+
+	it("pins the shared client version on the wire and forwards explicit overrides", async () => {
+		const seen: http2.IncomingHttpHeaders[] = [];
+		const response = create(GetUsableModelsResponseSchema, {
+			models: [create(ModelDetailsSchema, { modelId: "claude-opus-4-8-high-fast" })],
+		});
+		const url = await startCursorDiscoveryServer(toBinary(GetUsableModelsResponseSchema, response), seen);
+
+		const defaulted = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
+		const overridden = await fetchCursorUsableModels({
+			apiKey: "test-token",
+			baseUrl: url,
+			clientVersion: "cli-0000.00.00-override",
+			timeoutMs: 1_000,
+		});
+
+		expect(defaulted).toEqual([expect.objectContaining({ id: "claude-opus-4-8-high-fast" })]);
+		expect(overridden).toEqual(defaulted);
+		expect(seen.map(headers => headers["x-cursor-client-version"])).toEqual([
+			"cli-2026.08.11-e8db854",
+			"cli-0000.00.00-override",
 		]);
 	});
 });

@@ -1,5 +1,5 @@
 import type * as http2 from "node:http2";
-import { mapH2TransportError } from "../cursor";
+import * as AIError from "../../error";
 import { type ConnectFrame, ConnectFrameDecoder } from "./connect-frame";
 import * as h2Pool from "./h2-pool";
 import { buildCursorRunHeaders } from "./headers";
@@ -11,6 +11,54 @@ export interface CursorTransportAttempt {
 	frames(): AsyncIterable<ConnectFrame>;
 	trailers(): Promise<http2.IncomingHttpHeaders>;
 	close(): void;
+	/**
+	 * Response headers once the peer sends them; resolves `{}` when the stream
+	 * ends without any. Optional: the HTTP/1.1 bridge does not surface them.
+	 * The request-debug response log consumes this to preserve the pre-pool
+	 * `request.on("response")` behavior without re-owning the stream.
+	 */
+	responseHeaders?(): Promise<http2.IncomingHttpHeaders>;
+}
+
+/**
+ * Minimal outbound frame sink the provider hands to the exec/kv/interaction
+ * helpers below the transport region (`handleServerMessage`,
+ * `sendExecClientMessage`, `handleInteractionQuery`, ...). The single heartbeat
+ * timer is rearmed inside the sink so every client frame — heartbeat, tool
+ * result, interaction reply — satisfies the "server sees a client frame within
+ * 5 s" invariant without a second timer. Implemented by the transport attempt
+ * owner in cursor.ts; the helpers only ever call `write`.
+ */
+export interface CursorFrameSink {
+	write(frame: Buffer): unknown;
+}
+
+/**
+ * Maps an opaque HTTP/2 negotiation failure into an actionable error.
+ *
+ * bun only opens an HTTP/2 session when TLS-ALPN negotiates `h2`. Behind a
+ * TLS-intercepting proxy that strips ALPN (e.g. Zscaler), the handshake yields
+ * no `h2` protocol and bun throws `ERR_HTTP2_ERROR: h2 is not supported`. The
+ * Cursor run RPC is HTTP/2-only (the ALB rejects HTTP/1.1 with 464), so there
+ * is no h1 fallback the way model discovery has one — the run simply cannot
+ * proceed. Replace the opaque message with one that names the cause and points
+ * at the `providers.cursor.baseUrl` workaround.
+ *
+ * Non-ALPN errors pass through untouched.
+ */
+export function mapH2TransportError(error: unknown, baseUrl: string): unknown {
+	const code = (error as { code?: unknown } | null)?.code;
+	const message = error instanceof Error ? error.message : String(error);
+	if (code === "ERR_HTTP2_ERROR" && /h2 is not supported/i.test(message)) {
+		return new AIError.ProviderResponseError(
+			`Cursor run transport could not negotiate HTTP/2 with ${baseUrl}: "h2 is not supported". ` +
+				"This host serves the run RPC over HTTP/2 only, and the TLS handshake did not negotiate " +
+				"h2 via ALPN — typically an ALPN-stripping TLS-intercepting proxy (e.g. Zscaler). " +
+				"Front the provider with a local HTTP/2 bridge and set providers.cursor.baseUrl to it.",
+			{ provider: "cursor", kind: "runtime", cause: error },
+		);
+	}
+	return error;
 }
 
 /**
@@ -70,7 +118,10 @@ function wrapH2Lease(lease: h2Pool.CursorH2Lease): CursorTransportAttempt {
 	const decoder = new ConnectFrameDecoder({ acceptCompressed: true });
 	const trailersResult = Promise.withResolvers<http2.IncomingHttpHeaders>();
 	void trailersResult.promise.catch(() => {});
+	const responseResult = Promise.withResolvers<http2.IncomingHttpHeaders>();
+	void responseResult.promise.catch(() => {});
 	let trailersSettled = false;
+	let responseSettled = false;
 	let closed = false;
 
 	const settleTrailers = (headers: http2.IncomingHttpHeaders): void => {
@@ -83,11 +134,26 @@ function wrapH2Lease(lease: h2Pool.CursorH2Lease): CursorTransportAttempt {
 		trailersSettled = true;
 		trailersResult.reject(cause instanceof Error ? cause : new Error(String(cause)));
 	};
+	const settleResponse = (headers: http2.IncomingHttpHeaders): void => {
+		if (responseSettled) return;
+		responseSettled = true;
+		responseResult.resolve(headers);
+	};
 
+	request.on("response", headers => settleResponse(headers));
 	request.on("trailers", headers => settleTrailers(headers));
-	request.on("end", () => settleTrailers({}));
-	request.on("error", error => failTrailers(error));
-	request.on("close", () => settleTrailers({}));
+	request.on("end", () => {
+		settleResponse({});
+		settleTrailers({});
+	});
+	request.on("error", error => {
+		settleResponse({});
+		failTrailers(error);
+	});
+	request.on("close", () => {
+		settleResponse({});
+		settleTrailers({});
+	});
 
 	return {
 		write(frame: Buffer): void {
@@ -97,6 +163,7 @@ function wrapH2Lease(lease: h2Pool.CursorH2Lease): CursorTransportAttempt {
 			return iterateH2Frames(request, decoder);
 		},
 		trailers: () => trailersResult.promise,
+		responseHeaders: () => responseResult.promise,
 		close(): void {
 			if (closed) return;
 			closed = true;

@@ -3,6 +3,7 @@ import {
 	CONNECT_FLAG_COMPRESSED,
 	CONNECT_FLAG_END_STREAM,
 	CONNECT_FLAG_RESERVED_MASK,
+	type ConnectFrame,
 	ConnectFrameDecoder,
 	ConnectProtocolError,
 	encodeConnectFrame,
