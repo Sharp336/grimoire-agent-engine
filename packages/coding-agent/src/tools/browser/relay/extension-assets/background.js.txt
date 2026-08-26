@@ -273,31 +273,34 @@ async function buildHello() {
 }
 async function attachTab(tabId, socket) {
   pendingAttachTabs.add(tabId);
-  const pending = chrome.debugger.attach({ tabId }, "1.3");
+  const pending = attachTabOperation(tabId, socket);
   pendingAttaches.add(pending);
   try {
     await pending;
-    if (ws !== socket) {
-      guardDetachments.add(tabId);
-      await chrome.debugger.detach({ tabId }).catch(async () => {
-        guardDetachments.delete(tabId);
-        const targets = await chrome.debugger.getTargets().catch(() => []);
-        if (targets.some((target) => target.tabId === tabId && target.attached)) {
-          trackAttachments([tabId]);
-        }
-      });
-      return;
-    }
-    await trackAttachments([tabId]);
-    if (canceledPendingAttachTabs.delete(tabId)) {
-      attachmentGuard.untrack(tabId);
-      await forgetRecoverable(tabId);
-      throw new Error("debugger attachment detached before attach completed");
-    }
   } finally {
     pendingAttaches.delete(pending);
     pendingAttachTabs.delete(tabId);
     canceledPendingAttachTabs.delete(tabId);
+  }
+}
+async function attachTabOperation(tabId, socket) {
+  await chrome.debugger.attach({ tabId }, "1.3");
+  if (ws !== socket) {
+    guardDetachments.add(tabId);
+    await chrome.debugger.detach({ tabId }).catch(async () => {
+      guardDetachments.delete(tabId);
+      const targets = await chrome.debugger.getTargets().catch(() => []);
+      if (targets.some((target) => target.tabId === tabId && target.attached)) {
+        trackAttachments([tabId]);
+      }
+    });
+    return;
+  }
+  await trackAttachments([tabId]);
+  if (canceledPendingAttachTabs.delete(tabId)) {
+    attachmentGuard.untrack(tabId);
+    await forgetRecoverable(tabId);
+    throw new Error("debugger attachment detached before attach completed");
   }
 }
 async function runRpc(msg, socket) {

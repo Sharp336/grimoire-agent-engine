@@ -400,6 +400,10 @@ export class RelayBridge {
 			const holders = this.#sessionHolders(tab.tabId);
 			const preserve = holders.filter(conn => !conn.autoAttach && conn.sessionsForTab(tab.tabId).length > 0);
 			if (tab.attached) {
+				if (holders.length === 0 && recoverableNow.has(tab.tabId)) {
+					this.#detachIfUnheld(tab.tabId);
+					continue;
+				}
 				if (tab.restorePending && !sameSocketReplay) {
 					// A socket replacement can interrupt replay after Chrome accepted only
 					// part of it. The replacement hello still reports the debugger attached,

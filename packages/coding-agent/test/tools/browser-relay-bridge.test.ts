@@ -409,6 +409,19 @@ describe("RelayBridge tab grouping", () => {
 		expect(cdp.messages.some(message => message.method === "Target.detachedFromTarget")).toBe(true);
 	});
 
+	it("detaches an inherited debugger attachment when no downstream session holds it", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+
+		// A fresh relay process can inherit a debugger attachment from a previous
+		// process during the extension's recovery grace window, but no downstream
+		// client in this process owns it.
+		connect(bridge, ext, [tab({ tabId: 1 })], { attachedTabIds: [1], recoverableTabIds: [1] });
+		await flush();
+
+		expect(ext.rpcs("detach").map(rpc => rpc.tabId)).toEqual([1]);
+	});
+
 	it("retracts the recovery target when the guard-authorized reattach fails", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
