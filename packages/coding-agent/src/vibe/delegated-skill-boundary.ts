@@ -87,10 +87,13 @@ export function validateSkillDispatchResult(
 	skill: string,
 	correlationId?: string,
 ): SkillDispatchResult | null {
+	const hasCorrelation = value && typeof value === "object" && "correlationId" in value;
 	if (
 		!value ||
 		typeof value !== "object" ||
-		(!hasExactKeys(value, RESULT_KEYS) && !hasExactKeys(value, [...RESULT_KEYS, "correlationId"]))
+		(!hasCorrelation && correlationId !== undefined) ||
+		(hasCorrelation && !hasExactKeys(value, [...RESULT_KEYS, "correlationId"])) ||
+		(!hasCorrelation && !hasExactKeys(value, RESULT_KEYS))
 	)
 		return null;
 	const result = value as Record<string, unknown>;
@@ -100,7 +103,12 @@ export function validateSkillDispatchResult(
 		!["success", "partial", "failed"].includes(String(result.status)) ||
 		typeof result.evidence !== "string" ||
 		!result.evidence.trim() ||
-		result.evidence.length > 8192
+		result.evidence.length > 8192 ||
+		(hasCorrelation &&
+			(typeof result.correlationId !== "string" ||
+				!result.correlationId ||
+				result.correlationId.length > 256 ||
+				/[\0\r\n]/.test(result.correlationId)))
 	)
 		return null;
 	if (correlationId !== undefined && result.correlationId !== correlationId) return null;

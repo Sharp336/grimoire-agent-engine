@@ -114,3 +114,49 @@ describe("delegated skill boundary", () => {
 		).toBe(false);
 	});
 });
+test("accepts production-shaped correlated success evidence", async () => {
+	const cache = new Map();
+	let resumed = 0;
+	const correlated = { ...success, correlationId: "parent:gap-analysis:--dalio" };
+	const result = await coordinateDelegatedSkillDependency(
+		JSON.stringify(valid),
+		async () => correlated,
+		async payload => {
+			resumed++;
+			expect(payload.correlationId).toBe(correlated.correlationId);
+		},
+		cache,
+	);
+	expect(result.result?.status).toBe("success");
+	expect(resumed).toBe(1);
+});
+test("scopes idempotency by worker prefix", async () => {
+	const cache = new Map();
+	let calls = 0;
+	const dispatch = async () => {
+		calls++;
+		return success;
+	};
+	await coordinateDelegatedSkillDependency(
+		JSON.stringify(valid),
+		dispatch,
+		async () => {},
+		cache,
+		"owner:parent:worker-a",
+	);
+	await coordinateDelegatedSkillDependency(
+		JSON.stringify(valid),
+		dispatch,
+		async () => {},
+		cache,
+		"owner:parent:worker-a",
+	);
+	await coordinateDelegatedSkillDependency(
+		JSON.stringify(valid),
+		dispatch,
+		async () => {},
+		cache,
+		"owner:parent:worker-b",
+	);
+	expect(calls).toBe(2);
+});
