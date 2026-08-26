@@ -26,10 +26,10 @@ import {
 	refreshFile,
 	sendNotification,
 	sendRequest,
+	shutdownAll,
 	waitForProjectLoaded,
 } from "./client";
 import { getLinterClient } from "./clients";
-import { getServersForFile } from "./config";
 import {
 	BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	formatLocationWithContext,
@@ -54,15 +54,17 @@ import {
 } from "./edits";
 import { detectLspmux } from "./lspmux";
 import {
+	clearFileConfigCache,
 	configCache,
 	getConfig,
-	getLspServerForFile,
 	getLspServers,
-	getLspServersForFile,
+	invalidateFileConfigs,
 	isMethodNotFoundError,
 	isProjectAwareLspServer,
 	LSP_READONLY_ACTIONS,
+	type ResolvedFileServer,
 	reloadServer,
+	resolveFileLspServers,
 } from "./servers";
 import {
 	type CodeAction,
@@ -102,7 +104,21 @@ import {
 	symbolKindToIcon,
 	uriToFile,
 } from "./utils";
+import { resolveLspCeiling } from "./workspace";
 import { runWorkspaceDiagnostics } from "./workspace-diagnostics";
+
+/**
+ * Structured "configured but not installed" message for a file-driven server
+ * entry. Distinct from "No language server found" (markers absent): the
+ * project markers matched, only the binary is missing, and clone files never
+ * fall back to $PATH or the founder checkout.
+ */
+function missingServerMessage(fileServer: ResolvedFileServer, fileDisplay: string): string {
+	if (fileServer.ceilingKind === "git") {
+		return `${fileDisplay}: language server ${fileServer.name} not installed in clone ${fileServer.ceiling} (searched ${fileServer.workspaceRoot}/node_modules/.bin and ${fileServer.ceiling}/node_modules/.bin). Not using PATH or founder.`;
+	}
+	return `${fileDisplay}: language server ${fileServer.name} not installed (searched ${fileServer.workspaceRoot}/node_modules/.bin and ${fileServer.ceiling}/node_modules/.bin; not using PATH)`;
+}
 
 const MAX_RENAME_PAIRS = 1000;
 
@@ -287,14 +303,16 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				};
 			}
 
-			const detailed = targets.length > 1 || truncatedGlobTargets;
-			const diagnosticsWaitTimeoutMs = detailed
-				? Math.min(BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS, timeoutSec * 1000)
-				: Math.min(SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS, timeoutSec * 1000);
 			const results: string[] = [];
 			const allServerNames = new Set<string>();
 			let totalServerAttempts = 0;
 			let totalServerSuccesses = 0;
+			let totalMissingServers = 0;
+			let totalUnresolvedTargets = 0;
+			const detailed = targets.length > 1 || truncatedGlobTargets;
+			const diagnosticsWaitTimeoutMs = detailed
+				? Math.min(BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS, timeoutSec * 1000)
+				: Math.min(SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS, timeoutSec * 1000);
 			if (truncatedGlobTargets) {
 				results.push(
 					`${theme.status.warning} Pattern matched more than ${MAX_GLOB_DIAGNOSTIC_TARGETS} files; showing first ${MAX_GLOB_DIAGNOSTIC_TARGETS}. Narrow the glob or use workspace diagnostics.`,
@@ -304,33 +322,67 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			for (const target of targets) {
 				throwIfAborted(signal);
 				const resolved = resolveToCwd(target, this.session.cwd);
-				const servers = getServersForFile(config, resolved);
-				if (servers.length === 0) {
-					results.push(`${theme.status.error} ${target}: No language server found`);
+				const fileResolution = resolveFileLspServers(resolved, this.session.cwd);
+				if (fileResolution.ceiling.escaped) {
+					totalUnresolvedTargets++;
+					results.push(
+						`${theme.status.error} ${target}: refused: file resolves outside its repository/worktree boundary (${fileResolution.ceiling.path})`,
+					);
 					continue;
 				}
+							const servers = fileResolution.servers;
+			if (servers.length === 0) {
+				totalUnresolvedTargets++;
+				if (!detailed && targets.length === 1 && fileResolution.ceiling.kind === "session") {
+					// Session-owned single files keep the legacy plain message.
+					return {
+						content: [{ type: "text", text: "No language server found" }],
+						details: { action, serverName: "", success: false, request: params },
+					};
+				}
+				// Markers absent inside the ceiling: the server is simply not
+				// configured for this file. Kept distinct from the
+				// markers-present-but-binary-missing case below.
+				const hint =
+					fileResolution.ceiling.kind === "session"
+						? ""
+						: ` (no project markers inside ${fileResolution.ceiling.path})`;
+				results.push(`${theme.status.error} ${target}: No language server found${hint}`);
+				continue;
+			}
 
 				const uri = fileToUri(resolved);
 				const relPath = formatPathRelativeToCwd(resolved, this.session.cwd);
 				const allDiagnostics: Diagnostic[] = [];
 				const failedServers: string[] = [];
+				const missingServers: string[] = [];
 				let succeededServers = 0;
 
 				// Query all applicable servers for this file
-				for (const [serverName, serverConfig] of servers) {
+				for (const fileServer of servers) {
+					const serverName = fileServer.name;
+					const serverConfig = fileServer.config;
 					allServerNames.add(serverName);
+					if (fileServer.missingBinary) {
+						// Markers matched but the binary cannot be resolved inside
+						// the project: a structured miss, never a PATH/founder
+						// fallback and never a silent "no server".
+						missingServers.push(missingServerMessage(fileServer, target));
+						totalMissingServers++;
+						continue;
+					}
 					totalServerAttempts++;
 					try {
 						throwIfAborted(signal);
 						if (serverConfig.createClient) {
-							const linterClient = getLinterClient(serverName, serverConfig, this.session.cwd);
+							const linterClient = getLinterClient(serverName, serverConfig, fileServer.workspaceRootReal);
 							const diagnostics = await linterClient.lint(resolved, signal);
 							allDiagnostics.push(...diagnostics);
 							succeededServers++;
 							totalServerSuccesses++;
 							continue;
 						}
-						const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+						const client = await getOrCreateClient(serverConfig, fileServer.workspaceRootReal, undefined, signal);
 						if (isProjectAwareLspServer(serverConfig)) {
 							await waitForProjectLoaded(client, signal);
 							throwIfAborted(signal);
@@ -376,6 +428,17 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 				if (!detailed && targets.length === 1) {
 					if (succeededServers === 0) {
+						if (missingServers.length > 0) {
+							return {
+								content: [{ type: "text", text: missingServers.join("\n") }],
+								details: {
+									action,
+									serverName: Array.from(allServerNames).join(", "),
+									success: false,
+									request: params,
+								},
+							};
+						}
 						return {
 							content: [
 								{
@@ -393,7 +456,12 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 								? `OK\n${theme.status.warning} some servers failed: ${failedServers.join(", ")}`
 								: "OK";
 						return {
-							content: [{ type: "text", text }],
+							content: [
+								{
+									type: "text",
+									text: missingServers.length > 0 ? `${text}\n${missingServers.join("\n")}` : text,
+								},
+							],
 							details: { action, serverName: Array.from(allServerNames).join(", "), success: true },
 						};
 					}
@@ -403,6 +471,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					let output = `${summary}:\n${formatGroupedDiagnosticMessages(formatted)}`;
 					if (failedServers.length > 0) {
 						output += `\n${theme.status.warning} some servers failed: ${failedServers.join(", ")}`;
+					}
+					if (missingServers.length > 0) {
+						output += `\n${missingServers.join("\n")}`;
 					}
 					return {
 						content: [{ type: "text", text: output }],
@@ -432,12 +503,19 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						results.push(`${theme.status.warning} ${relPath}: some servers failed (${failedServers.join(", ")})`);
 					}
 				}
+				if (missingServers.length > 0) {
+					results.push(...missingServers);
+				}
 			}
 
 			const allServersFailed = totalServerAttempts > 0 && totalServerSuccesses === 0;
 			return {
 				content: [{ type: "text", text: results.join("\n") }],
-				details: { action, serverName: Array.from(allServerNames).join(", "), success: !allServersFailed },
+				details: {
+					action,
+					serverName: Array.from(allServerNames).join(", "),
+					success: !allServersFailed && totalMissingServers === 0 && totalUnresolvedTargets === 0,
+				},
 			};
 		}
 
@@ -524,12 +602,19 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			// rename used to stack up willRenameFiles requests against irrelevant
 			// language servers and hit the wall-clock timeout. A server only has
 			// something useful to say about a rename if it understands one of the
-			// affected file extensions.
-			const allLspServers = getLspServers(config);
+			// affected file extensions. Resolution is per file so clone-local
+			// paths attach their own workspace server (never the session cwd).
 			const relevantNames = new Set<string>();
+			const relevantConfigs = new Map<string, ServerConfig>();
+			const relevantRoots = new Map<string, string>();
 			const collectRelevant = (filePath: string) => {
-				for (const [name] of getLspServersForFile(config, filePath)) {
-					relevantNames.add(name);
+				const fileResolution = resolveFileLspServers(filePath, this.session.cwd);
+				if (fileResolution.ceiling.escaped) return;
+				for (const entry of fileResolution.servers) {
+					if (entry.missingBinary || entry.config.createClient) continue;
+					relevantNames.add(entry.name);
+					relevantConfigs.set(entry.name, entry.config);
+					relevantRoots.set(entry.name, entry.workspaceRootReal);
 				}
 			};
 			collectRelevant(source);
@@ -538,7 +623,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				collectRelevant(uriToFile(pair.oldUri));
 				collectRelevant(uriToFile(pair.newUri));
 			}
-			const servers = allLspServers.filter(([name]) => relevantNames.has(name));
+			const servers = Array.from(relevantConfigs.entries());
 			const respondingServers = new Set<string>();
 			const perServerEdits: Array<{ serverName: string; edit: WorkspaceEdit }> = [];
 			const serverNotes: string[] = [];
@@ -553,7 +638,12 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				throwIfAborted(signal);
 				let client: LspClient;
 				try {
-					client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+					client = await getOrCreateClient(
+						serverConfig,
+						relevantRoots.get(serverName) ?? this.session.cwd,
+						undefined,
+						signal,
+					);
 					if (isProjectAwareLspServer(serverConfig)) {
 						await waitForProjectLoaded(client, signal);
 					}
@@ -745,7 +835,12 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 			for (const [serverName, serverConfig] of servers) {
 				try {
-					const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+					const client = await getOrCreateClient(
+						serverConfig,
+						relevantRoots.get(serverName) ?? this.session.cwd,
+						undefined,
+						signal,
+					);
 					for (const { oldUri } of pairs) {
 						if (client.openFiles.has(oldUri)) {
 							await sendNotification(client, "textDocument/didClose", { textDocument: { uri: oldUri } }, signal);
@@ -780,21 +875,38 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		}
 
 		if (action === "capabilities") {
-			let serverList: Array<[string, ServerConfig]>;
+			const capabilityServers: Array<{ name: string; config: ServerConfig; root: string }> = [];
 			if (file && file !== "*") {
 				const resolved = resolveToCwd(file, this.session.cwd);
-				serverList = getLspServersForFile(config, resolved);
-				if (serverList.length === 0) {
+				const fileResolution = resolveFileLspServers(resolved, this.session.cwd);
+				if (fileResolution.ceiling.escaped) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `No language server found for this file (it resolves outside ${fileResolution.ceiling.path})`,
+							},
+						],
+						details: { action, success: false, request: params },
+					};
+				}
+				for (const entry of fileResolution.servers) {
+					if (entry.missingBinary) continue;
+					capabilityServers.push({ name: entry.name, config: entry.config, root: entry.workspaceRootReal });
+				}
+				if (capabilityServers.length === 0) {
 					return {
 						content: [{ type: "text", text: "No language server found for this file" }],
 						details: { action, success: false, request: params },
 					};
 				}
 			} else {
-				serverList = getLspServers(config);
+				for (const [name, serverConfig] of getLspServers(config)) {
+					capabilityServers.push({ name, config: serverConfig, root: this.session.cwd });
+				}
 			}
 
-			if (serverList.length === 0) {
+			if (capabilityServers.length === 0) {
 				return {
 					content: [{ type: "text", text: "No language servers configured" }],
 					details: { action, success: false, request: params },
@@ -803,10 +915,10 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 			const sections: string[] = [];
 			const respondingServers = new Set<string>();
-			for (const [serverName, serverConfig] of serverList) {
+			for (const { name: serverName, config: serverConfig, root } of capabilityServers) {
 				throwIfAborted(signal);
 				try {
-					const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+					const client = await getOrCreateClient(serverConfig, root, undefined, signal);
 					respondingServers.add(serverName);
 					const caps = client.serverCapabilities ?? {};
 					sections.push(`${serverName}:`);
@@ -846,16 +958,40 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			}
 
 			let chosenServer: [string, ServerConfig] | null = null;
+			let chosenRoot = this.session.cwd;
 			let resolvedTarget: string | null = null;
 			if (file && file !== "*") {
 				resolvedTarget = resolveToCwd(file, this.session.cwd);
-				chosenServer = getLspServerForFile(config, resolvedTarget);
-				if (!chosenServer) {
+				const fileResolution = resolveFileLspServers(resolvedTarget, this.session.cwd);
+				if (fileResolution.ceiling.escaped) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `No language server found for this file (it resolves outside ${fileResolution.ceiling.path})`,
+							},
+						],
+						details: { action, success: false, request: params },
+					};
+				}
+				const entry =
+					fileResolution.servers.find(s => !s.missingBinary && !s.config.createClient && !s.config.isLinter) ??
+					fileResolution.servers.find(s => !s.missingBinary);
+				if (!entry) {
+					const missing = fileResolution.servers.find(s => s.missingBinary);
+					if (missing) {
+						return {
+							content: [{ type: "text", text: missingServerMessage(missing, file) }],
+							details: { action, success: false, request: params },
+						};
+					}
 					return {
 						content: [{ type: "text", text: "No language server found for this file" }],
 						details: { action, success: false, request: params },
 					};
 				}
+				chosenServer = [entry.name, entry.config];
+				chosenRoot = entry.workspaceRootReal;
 			} else {
 				const all = getLspServers(config);
 				if (all.length === 0) {
@@ -892,7 +1028,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			}
 
 			try {
-				const client = await getOrCreateClient(chosenConfig, this.session.cwd, undefined, signal);
+				const client = await getOrCreateClient(chosenConfig, chosenRoot, undefined, signal);
 				if (resolvedTarget) {
 					await ensureFileOpen(client, resolvedTarget, signal);
 				}
@@ -1022,16 +1158,30 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 		if (action === "reload" && (isWorkspace || !resolvedFile)) {
 			// `reload *` is the user's explicit request to re-read config from
-			// disk. Drop the per-cwd cache entry so `.omp/lsp.json`, root markers,
-			// and plugin configs added after the first LSP call become visible —
-			// otherwise `getConfig` returns the first observation for the rest of
-			// the process lifetime (#3546).
-			configCache.delete(this.session.cwd);
+			// disk. Drop EVERY config cache entry (session + file-scoped) and
+			// shut down every live client this process started — a session
+			// launched in ~/projects may hold clone-local servers, and only a
+			// full teardown lets the next LSP call cold-start against fresh
+			// config everywhere (#3546). Single-file reload keeps other clones
+			// untouched.
+			configCache.clear();
+			clearFileConfigCache();
+			await shutdownAll();
 			const refreshedConfig = getConfig(this.session.cwd);
 			const servers = getLspServers(refreshedConfig);
 			if (servers.length === 0) {
+				// The session config legitimately has no servers (e.g. a
+				// conductor session in ~/projects); the refresh itself still
+				// happened — every config cache was cleared and all clients
+				// torn down, so the next LSP call on any file re-reads config
+				// from disk (including clone-local workspaces).
 				return {
-					content: [{ type: "text", text: "No language server found for this action" }],
+					content: [
+						{
+							type: "text",
+							text: "No language server found for this action (config caches cleared and clients restarted; the next LSP call re-reads config from disk)",
+						},
+					],
 					details: { action, success: false, request: params },
 				};
 			}
@@ -1061,20 +1211,56 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			};
 		}
 
-		const serverInfo = resolvedFile ? getLspServerForFile(config, resolvedFile) : null;
-		if (!serverInfo) {
+		// `reload <file>` re-reads config from disk: drop this file's workspace
+		// cache entries BEFORE resolution so a previously-missing clone-local
+		// binary is retried immediately. (Unresolved configs are never cached
+		// anyway, so a clone-local install is picked up by the next diagnostics
+		// call without any reload.)
+		if (action === "reload" && resolvedFile) {
+			invalidateFileConfigs(resolveLspCeiling(resolvedFile, this.session.cwd));
+		}
+		const fileResolution = resolvedFile ? resolveFileLspServers(resolvedFile, this.session.cwd) : null;
+		if (fileResolution?.ceiling.escaped) {
+			return {
+				content: [
+					{
+						type: "text",
+						text: `No language server found for this action (file resolves outside ${fileResolution.ceiling.path})`,
+					},
+				],
+				details: { action, success: false },
+			};
+		}
+		const fileServer = fileResolution
+			? (fileResolution.servers.find(s => !s.missingBinary && !s.config.createClient && !s.config.isLinter) ??
+				fileResolution.servers.find(s => !s.missingBinary))
+			: null;
+		if (!fileServer) {
+			const missing = fileResolution?.servers.find(s => s.missingBinary);
+			if (missing && resolvedFile) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: missingServerMessage(missing, formatPathRelativeToCwd(resolvedFile, this.session.cwd)),
+						},
+					],
+					details: { action, success: false },
+				};
+			}
 			return {
 				content: [{ type: "text", text: "No language server found for this action" }],
 				details: { action, success: false },
 			};
 		}
+		const serverName = fileServer.name;
+		const serverConfig = fileServer.config;
+		const clientRoot = fileServer.workspaceRootReal;
 
-		const [serverName, serverConfig] = serverInfo;
-
-		if (action === "reload") clearInitializationFailure(serverConfig, this.session.cwd);
+		if (action === "reload") clearInitializationFailure(serverConfig, clientRoot);
 
 		try {
-			const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
+			const client = await getOrCreateClient(serverConfig, clientRoot, undefined, signal);
 			const targetFile = resolvedFile;
 			const isRustAnalyzerServer = isRustAnalyzerClient(client) || serverName === "rust-analyzer";
 			const needsProjectIndex =

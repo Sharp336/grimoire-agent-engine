@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import { throwIfAborted } from "../tools/tool-errors";
 import {
@@ -14,9 +16,10 @@ import {
 	syncContent,
 	WARMUP_TIMEOUT_MS,
 } from "./client";
-import { getServersForFile, type LspConfig, loadConfig } from "./config";
+import { getDefaultServerConfigs, getServersForFile, type LspConfig, loadConfig } from "./config";
 import { MUX_RESTART_METHOD } from "./mux/protocol";
 import type { LspClient, ServerConfig } from "./types";
+import { findWorkspaceRoot, type LspCeiling, type LspCeilingKind, resolveLspCeiling } from "./workspace";
 
 /**
  * LSP actions that do not mutate the workspace or language-server state.
@@ -202,6 +205,169 @@ export function getConfig(cwd: string): LspConfig {
 	}
 	setIdleTimeout(config.idleTimeoutMs);
 	return config;
+}
+
+// =============================================================================
+// File-driven workspace resolution
+// =============================================================================
+
+/** One candidate language server resolved for a concrete file. */
+export interface ResolvedFileServer {
+	/** Server key in the config (e.g. "typescript-language-server"). */
+	name: string;
+	/** Server config; `resolvedCommand` is set when the binary resolved inside the project. */
+	config: ServerConfig;
+	/** Nearest marker-having project root for this server, inside the ceiling (logical path). */
+	workspaceRoot: string;
+	/** realpath(workspaceRoot): the canonical identity basis for clientKey, mux projectDir, rootUri, and workspaceFolders. */
+	workspaceRootReal: string;
+	/** The bounded discovery boundary the root was found under. */
+	ceiling: string;
+	ceilingKind: LspCeilingKind;
+	/** Root markers matched but the command could not be resolved inside the project ($PATH excluded for clones). */
+	missingBinary: boolean;
+}
+
+export interface FileLspResolution {
+	ceiling: LspCeiling;
+	servers: ResolvedFileServer[];
+}
+
+/**
+ * Cache config per workspace root + ceiling for file-driven discovery. Never
+ * keyed by session cwd, so sibling clones with the same marker layout get
+ * independent configs and binary policies.
+ */
+export const fileConfigCache = new Map<string, LspConfig>();
+
+/** realpath of a workspace root; falls back to the resolved path when the root does not exist. */
+export function canonicalRoot(root: string): string {
+	try {
+		return fs.realpathSync(root);
+	} catch {
+		return path.resolve(root);
+	}
+}
+
+/**
+ * Load (and cache) the LSP config for a workspace root discovered under a
+ * ceiling. Clone ceilings resolve binaries from the workspace root and the
+ * clone only — never $PATH — and require the resolved binary to realpath
+ * inside the clone (a node_modules symlink into a sibling clone or the
+ * founder checkout fails closed as missing-in-clone).
+ *
+ * Resolved configs cache normally. A miss for the looked-up server (markers
+ * matched but the binary does not resolve inside the project) is never
+ * cached: the next lookup re-checks the clone, so a clone-local install is
+ * picked up without any reload.
+ */
+export function getFileConfig(root: string, ceiling: LspCeiling, forServer?: string): LspConfig {
+	const key = `${root}\u0000${ceiling.path}\u0000${ceiling.kind}`;
+	let config = fileConfigCache.get(key);
+	if (config && forServer !== undefined && config.unresolved?.[forServer]) {
+		// The cached config reports this server as missing; re-check the
+		// project so a clone-local install is observed on the next call.
+		fileConfigCache.delete(key);
+		config = undefined;
+	}
+	if (!config) {
+		const allowPath = ceiling.kind === "session";
+		config = loadConfig(root, {
+			localRoots: [root, ceiling.path],
+			allowPath,
+			containmentRoot: allowPath ? undefined : ceiling.path,
+		});
+		if (forServer === undefined || !config.unresolved?.[forServer]) {
+			fileConfigCache.set(key, config);
+		}
+	}
+	setIdleTimeout(config.idleTimeoutMs);
+	return config;
+}
+
+/** Drop every file-scoped config cache entry for one ceiling (single-file reload keeps other clones). */
+export function invalidateFileConfigs(ceiling: LspCeiling): void {
+	const suffix = `\u0000${ceiling.path}\u0000${ceiling.kind}`;
+	for (const key of [...fileConfigCache.keys()]) {
+		if (key.endsWith(suffix)) fileConfigCache.delete(key);
+	}
+}
+
+/** Drop every file-scoped config cache entry (reload * full refresh). */
+export function clearFileConfigCache(): void {
+	fileConfigCache.clear();
+}
+
+/**
+ * Resolve the language servers that apply to a concrete file, each with the
+ * workspace identity it must be attached to.
+ *
+ * Files inside the session cwd keep the session-scoped config and identity —
+ * the session is the project the user launched. Files outside it are
+ * discovered per file: a git ceiling (an independent clone) bounds the marker
+ * walk to the work tree and restricts binary resolution to the clone, so
+ * sibling /tmp checkouts and the founder project never share a server.
+ *
+ * Markers absent inside the ceiling => no servers (not configured). Markers
+ * present but the binary unresolvable inside the project => a `missingBinary`
+ * entry, so callers can report a structured miss instead of collapsing it
+ * into "No language server found".
+ */
+export function resolveFileLspServers(filePath: string, sessionCwd: string): FileLspResolution {
+	const ceiling = resolveLspCeiling(filePath, sessionCwd);
+	if (ceiling.escaped) return { ceiling, servers: [] };
+
+	if (ceiling.kind === "session") {
+		const config = getConfig(sessionCwd);
+		const root = canonicalRoot(sessionCwd);
+		return {
+			ceiling,
+			servers: getServersForFile(config, filePath).map(([name, serverConfig]) => ({
+				name,
+				config: serverConfig,
+				workspaceRoot: sessionCwd,
+				workspaceRootReal: root,
+				ceiling: ceiling.path,
+				ceilingKind: ceiling.kind,
+				missingBinary: false,
+			})),
+		};
+	}
+
+			// Clone / stray-file discovery: per-server nearest marker root inside the
+		// ceiling, config loaded at that root with clone-local binary resolution.
+		// The candidate name keeps an unresolved miss from being cached, so a
+		// later clone-local install is observed on the next call.
+		const candidates = getServersForFile({ servers: getDefaultServerConfigs() }, filePath);
+		const servers: ResolvedFileServer[] = [];
+		for (const [name, candidate] of candidates) {
+			const root = findWorkspaceRoot(filePath, ceiling, candidate.rootMarkers);
+			if (root === null) continue;
+			const config = getFileConfig(root, ceiling, name);
+		const serverConfig = config.servers[name];
+		if (serverConfig) {
+			servers.push({
+				name,
+				config: serverConfig,
+				workspaceRoot: root,
+				workspaceRootReal: canonicalRoot(root),
+				ceiling: ceiling.path,
+				ceilingKind: ceiling.kind,
+				missingBinary: false,
+			});
+		} else if (config.unresolved?.[name]) {
+			servers.push({
+				name,
+				config: config.unresolved[name],
+				workspaceRoot: root,
+				workspaceRootReal: canonicalRoot(root),
+				ceiling: ceiling.path,
+				ceilingKind: ceiling.kind,
+				missingBinary: true,
+			});
+		}
+	}
+	return { ceiling, servers };
 }
 
 function isCustomLinter(serverConfig: ServerConfig): boolean {
