@@ -183,7 +183,7 @@ export class ExtensionUiController {
 			},
 			...createExtensionAgentActions({
 				scopeAgentId: this.ctx.session.getAgentId() ?? MAIN_AGENT_ID,
-				scopeSessionFile: this.ctx.sessionManager?.getSessionFile?.() ?? null,
+				getScopeSessionFile: () => this.ctx.sessionManager?.getSessionFile?.() ?? null,
 			}),
 			setLabel: (targetId, label) => {
 				this.ctx.sessionManager.appendLabelChange(targetId, label);
@@ -420,7 +420,7 @@ export class ExtensionUiController {
 			},
 			...createExtensionAgentActions({
 				scopeAgentId: this.ctx.session.getAgentId() ?? MAIN_AGENT_ID,
-				scopeSessionFile: this.ctx.sessionManager?.getSessionFile?.() ?? null,
+				getScopeSessionFile: () => this.ctx.sessionManager?.getSessionFile?.() ?? null,
 			}),
 			setLabel: (targetId, label) => {
 				this.ctx.sessionManager.appendLabelChange(targetId, label);
