@@ -41,7 +41,7 @@ strategy to the existing compaction machinery (see `docs/compaction.md`), not a 
    agent's own tools over the loopback bridge — exactly the surface `llm_query()` needs.
 2. **Sub-instances already exist.** The recursive `task` primitive
    (`packages/coding-agent/src/task/index.ts`, `executor.ts`, `structured-subagent.ts`) is the
-   "call a sub-instance of itself" step. Recursion is already budgeted via `maxRecursionDepth`
+   "call a sub-instance of itself" step. Recursion is already budgeted via `task.maxRecursionDepth`
    in `packages/coding-agent/src/config/settings-schema.ts`.
 3. **The pain is real.** Long-context failures today surface as compaction timeouts
    (e.g. subagent `input exceeds context window` errors) — see also the demand for lossless
@@ -70,7 +70,7 @@ features):
    scanning/search primitives rather than introducing new ones.
 
 4. **Recursion budget as a config knob.**
-   Extend/align the recursion limit with the existing `maxRecursionDepth` so RLM sub-queries
+   Extend/align the recursion limit with the existing `task.maxRecursionDepth` so RLM sub-queries
    are bounded and observable (progress surfaced in the subagent HUD).
 
 ## Key implementation files (proposed touch points)
