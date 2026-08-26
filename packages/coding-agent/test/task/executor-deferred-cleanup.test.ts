@@ -87,6 +87,7 @@ function mockSession(opts: {
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
 		hasPendingAsyncWork: () => false,
 		getAsyncJobSnapshot: () => ({ running: [], recent: [] }),
+		getTodoProjections: () => [],
 		settleAsyncWork: async () => {},
 		abort: opts.abort ?? (async () => {}),
 		dispose: opts.dispose ?? (async () => {}),
