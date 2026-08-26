@@ -2,7 +2,7 @@
 
 pub mod finalize;
 
-use std::{error, path::PathBuf, sync::Arc};
+use std::{io, mem, path::PathBuf, sync::Arc};
 
 use omp_agent::{
 	Agent, AgentEvent, AgentKind, AgentRunSummary, AgentState, AgentStatus, AgentTree, ApprovalBook,
@@ -12,7 +12,8 @@ use omp_catalog::{ModelKey, ProviderId, snapshot};
 use omp_core::{SecretString, Str, sf};
 use omp_inference::Registry as InferenceRegistry;
 use omp_proto::thread::v1::Item;
-use omp_sdk::{SessionHandle, SessionIdentity, SessionRuntime};
+use omp_sdk::{SessionHandle, SessionHandleError, SessionIdentity, SessionRuntime};
+use omp_settings::manager::SettingsManagerError;
 use omp_storage::transcript::{
 	ModelChange as JournalModelChange, ModelId as JournalModelId, ModelRef as JournalModelRef,
 	ProviderId as JournalProviderId,
@@ -20,11 +21,73 @@ use omp_storage::transcript::{
 
 use self::finalize::{FinalizerBudget, FinalizerReport, HeadlessFinalizerHandle};
 /// Typed failure while composing or mutating a headless session.
+///
+/// Every variant names the composition step that failed and carries the
+/// step's own error typed as its source. Sources stay inline (never boxed),
+/// so `chat::ChatError` at 120 bytes is the floor-setter of the enum's size:
+/// slimming `ChatError`/`SettingsManagerError` shrinks the pinned bound below.
 #[derive(Debug, thiserror::Error)]
 pub enum HeadlessError {
-	/// A typed authority used by headless composition failed.
-	#[error("headless session composition failed")]
-	Composition(#[source] Box<dyn error::Error + Send + Sync + 'static>),
+	/// The project root could not be canonicalized.
+	#[error("could not canonicalize the project root")]
+	CanonicalProject(#[source] chat::ChatError),
+	/// The embedded model catalog snapshot could not be decoded.
+	#[error("embedded model catalog is unavailable")]
+	EmbeddedCatalog(#[source] &'static snapshot::SnapshotError),
+	/// The requested model selector could not be resolved against the catalog.
+	#[error("could not resolve model selector")]
+	ResolveModelSelector(#[source] chat::ChatError),
+	/// Session settings could not be loaded.
+	#[error(transparent)]
+	Settings(#[from] SettingsManagerError),
+	/// The project state directory path could not be derived.
+	#[error("could not derive the project state directory")]
+	ProjectStateDirectory(#[source] io::Error),
+	/// A session state directory could not be created.
+	#[error("could not create session state directory")]
+	EnsureStateDirectory(#[source] chat::ChatError),
+	/// The project environment authority failed to start or connect.
+	#[error(transparent)]
+	Environment(#[from] omp_envd::EnvdError),
+	/// The durable session could not be opened, resumed, or forked.
+	#[error("could not open session")]
+	OpenSession(#[source] chat::ChatError),
+	/// The shared SDK session blueprint could not be planned.
+	#[error("could not plan the session blueprint")]
+	SessionBlueprint(#[source] chat::ChatError),
+	/// The initial agent snapshot could not be projected.
+	#[error("could not project the agent snapshot")]
+	AgentSnapshot(#[source] chat::ChatError),
+	/// Cross-process loop revival failed.
+	#[error(transparent)]
+	Revival(#[from] omp_agent::RevivalError),
+	/// The production inference stack could not be assembled.
+	#[error(transparent)]
+	ProductionInference(#[from] RegistryError),
+	/// The in-process turn authority could not be constructed.
+	#[error(transparent)]
+	TurnClient(#[from] omp_agent::Error),
+	/// Durable regime activations could not be recovered.
+	#[error("could not recover regimes")]
+	RecoverRegimes(#[source] omp_agent::AgentError),
+	/// The initial regime could not be started.
+	#[error("could not start regime")]
+	StartRegime(#[source] omp_agent::AgentError),
+	/// The main agent node could not be registered in the tree.
+	#[error(transparent)]
+	RegisterAgent(#[from] omp_agent::SpawnRefusal),
+	/// The durable session handle could not be launched.
+	#[error("could not launch the session")]
+	LaunchSession(#[source] SessionHandleError),
+	/// A validated session model override could not be journaled.
+	#[error("could not journal the model override")]
+	ModelOverride(#[source] omp_agent::ControlError),
+	/// The session title could not be journaled.
+	#[error("could not journal the session title")]
+	SetTitle(#[source] omp_agent::ControlError),
+	/// No model in the embedded catalog can be selected for a revived session.
+	#[error("no selectable model is available to resume")]
+	NoSelectableModel,
 	/// The requested model selector was not present in the embedded catalog.
 	#[error("unknown model `{0}`")]
 	UnknownModel(Str),
@@ -33,15 +96,15 @@ pub enum HeadlessError {
 	MissingRoute(Str),
 }
 
-fn composition(error: impl error::Error + Send + Sync + 'static) -> HeadlessError {
-	HeadlessError::Composition(Box::new(error))
-}
-
-use std::mem;
+const _: () = assert!(
+	mem::size_of::<HeadlessError>() <= 128,
+	"HeadlessError must stay at the natural ChatError-derived size; slim \
+	 ChatError/SettingsManagerError to shrink this"
+);
 
 use omp_envd::exthost::lifecycle::{HeadlessLifecycleSink, HeadlessLifecycleSubscription};
 use omp_proto::inference::{v1, v1::response_format};
-use tokio::io;
+use tokio::io::AsyncWrite;
 
 use crate::{
 	bridges::{AgentGoalBinding, AgentGoalControl, InferenceBridge, builtin},
@@ -49,8 +112,8 @@ use crate::{
 	discovery,
 	modes::RegimeHandle,
 	registry::{
-		InferenceSessionOverrides, ProductionInference, production_inference_for_session,
-		production_redemption_authority,
+		InferenceSessionOverrides, ProductionInference, RegistryError,
+		production_inference_for_session, production_redemption_authority,
 	},
 	rulebook,
 	settings::current,
@@ -94,15 +157,14 @@ pub struct HeadlessSessionOptions {
 
 /// Single owner of every authority needed by a non-interactive agent loop.
 ///
-/// Field order is deliberate: the Agent and its cloned Environment client are
-/// dropped before the project Environment authority.
+/// The project Environment must outlive every authority that borrows it, so
+/// those owners are grouped in one `EnvironmentBound` field declared before
+/// `_environment`; Rust drops fields in declaration order, which keeps the
+/// Environment — still declared last — the final drop.
 pub struct HeadlessSession {
-	session:             SessionHandle,
-	advisor_parent:      Arc<chat::ChatParentHost<InProcTurnClient>>,
 	advise_queue:        omp_agent::advisor::AdvisorAdviceQueue,
 	state:               AgentState,
 	control:             omp_agent::ControlSender,
-	env:                 omp_env::EnvClient,
 	regimes:             Arc<RegimeHandle>,
 	tree:                Arc<AgentTree>,
 	events:              Option<EventSubscription>,
@@ -116,8 +178,20 @@ pub struct HeadlessSession {
 	session_id:          Str,
 	initial_items:       Vec<Item>,
 	_inference_registry: InferenceRegistry,
-	_edit_repair_task:   Option<tokio::task::JoinHandle<()>>,
+	environment_bound:   EnvironmentBound,
 	_environment:        omp_envd::ProjectEnvironment,
+}
+
+/// Every authority that borrows the project Environment.
+///
+/// Held in one field so the Environment cannot be dropped first: this struct
+/// is declared before `_environment`, and Rust drops fields in declaration
+/// order.
+struct EnvironmentBound {
+	session:           SessionHandle,
+	advisor_parent:    Arc<chat::ChatParentHost<InProcTurnClient>>,
+	env:               omp_env::EnvClient,
+	_edit_repair_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl HeadlessSession {
@@ -145,15 +219,17 @@ impl HeadlessSession {
 		options: HeadlessSessionOptions,
 		registry_override: Option<Arc<omp_tool::Registry>>,
 	) -> Result<Self, HeadlessError> {
-		let root = chat::canonical_project(&options.project).map_err(composition)?;
-		let catalog = snapshot::Catalog::try_embedded().map_err(composition)?;
-		let model =
-			chat::resolve_model_selector(catalog, options.model.as_str()).map_err(composition)?;
-		let settings = current(&data_dir).map_err(composition)?;
-		let state_dir = omp_env::project_state::directory(&data_dir, &root).map_err(composition)?;
+		let root =
+			chat::canonical_project(&options.project).map_err(HeadlessError::CanonicalProject)?;
+		let catalog = snapshot::Catalog::try_embedded().map_err(HeadlessError::EmbeddedCatalog)?;
+		let model = chat::resolve_model_selector(catalog, options.model.as_str())
+			.map_err(HeadlessError::ResolveModelSelector)?;
+		let settings = current(&data_dir)?;
+		let state_dir = omp_env::project_state::directory(&data_dir, &root)
+			.map_err(HeadlessError::ProjectStateDirectory)?;
 		let sessions_dir = state_dir.join("sessions");
-		chat::ensure_state_directory(&state_dir).map_err(composition)?;
-		chat::ensure_state_directory(&sessions_dir).map_err(composition)?;
+		chat::ensure_state_directory(&state_dir).map_err(HeadlessError::EnsureStateDirectory)?;
+		chat::ensure_state_directory(&sessions_dir).map_err(HeadlessError::EnsureStateDirectory)?;
 		let search = Arc::new(InferenceBridge::default());
 		let goal_control = AgentGoalControl::default();
 		let advise_queue = omp_agent::advisor::AdvisorAdviceQueue::default();
@@ -174,8 +250,7 @@ impl HeadlessSession {
 			settings.runtime_durations().interrupt_grace,
 			bridges,
 		)
-		.await
-		.map_err(composition)?;
+		.await?;
 		let grant = omp_env::InvocationGrant::unrestricted();
 		let grant = if options.pty_denied {
 			grant.deny_pty()
@@ -198,7 +273,7 @@ impl HeadlessSession {
 			registry.as_ref(),
 			Some(environment.sessions_index()),
 		)
-		.map_err(composition)?;
+		.map_err(HeadlessError::OpenSession)?;
 		let blueprint = chat::session_blueprint(
 			model.as_str(),
 			catalog,
@@ -207,12 +282,12 @@ impl HeadlessSession {
 			&session.id,
 			Arc::clone(&registry),
 		)
-		.map_err(composition)?;
-		let mut snapshot = chat::agent_snapshot(&blueprint, catalog, None).map_err(composition)?;
+		.map_err(HeadlessError::SessionBlueprint)?;
+		let mut snapshot =
+			chat::agent_snapshot(&blueprint, catalog, None).map_err(HeadlessError::AgentSnapshot)?;
 		if options.resume.is_some() || options.fork.is_some() {
 			let journal_path = sessions_dir.join(format!("{}.jsonl", session.id.as_str()));
-			let revived = omp_agent::revive_existing(&journal_path, session.journal, snapshot)
-				.map_err(composition)?;
+			let revived = omp_agent::revive_existing(&journal_path, session.journal, snapshot)?;
 			session.journal = revived.journal;
 			session.initial_items = revived.live_items;
 			snapshot = revived.snapshot;
@@ -222,6 +297,18 @@ impl HeadlessSession {
 				snapshot.turn.params.model =
 					format!("{}/{}", model.model.provider.0, model.model.model.0);
 			}
+			if !chat::model_selector_is_selectable(catalog, &snapshot.turn.params.model) {
+				let saved = snapshot.turn.params.model.clone();
+				let fallback =
+					chat::fallback_model_selector(catalog).ok_or(HeadlessError::NoSelectableModel)?;
+				snapshot.turn.params.model = fallback.as_str().to_owned();
+				eprintln!(
+					"Session model `{saved}` is unavailable; resumed with `{fallback}` without \
+					 changing the session pin."
+				);
+			}
+			snapshot.reasoning_dialect =
+				chat::interrupted_reasoning_dialect(catalog, &snapshot.turn.params.model);
 		}
 		snapshot.compaction = settings.compaction.method_order();
 		snapshot.unexpected_stop = settings.interaction.unexpected_stop_detection;
@@ -252,14 +339,11 @@ impl HeadlessSession {
 				usage_fetchers:        Some(environment.usage_fetchers()),
 			},
 		)
-		.await
-		.map_err(composition)?;
+		.await?;
 		let _ = search.bind(inference.clone());
 		let _ = environment.github_credentials().bind(credential_authority);
 		environment.bind_mcp_oauth(mcp_authority, mcp_oauth);
-		let client = InProcTurnClient::new(inference)
-			.await
-			.map_err(composition)?;
+		let client = InProcTurnClient::new(inference).await?;
 		let tree = Arc::new(AgentTree::standard(8));
 		let advisor_parent = Arc::new(chat::ChatParentHost::new_with_tree(
 			client.clone(),
@@ -301,7 +385,7 @@ impl HeadlessSession {
 		let control = agent.control();
 		agent
 			.recover_regimes(omp_agent::core_regime, now_ms())
-			.map_err(composition)?;
+			.map_err(HeadlessError::RecoverRegimes)?;
 		if let Some(spec_id) = options.initial_regime
 			&& agent
 				.arbiter()
@@ -321,7 +405,7 @@ impl HeadlessSession {
 			}
 			let _ = agent
 				.start_regime(spec, regime, omp_agent::StartOptions { now_ms: now_ms(), queue: false })
-				.map_err(composition)?;
+				.map_err(HeadlessError::StartRegime)?;
 		}
 		let modes = Arc::new(RegimeHandle::new());
 		let goal_binding = goal_control.bind(Arc::clone(&modes), control.clone());
@@ -334,16 +418,14 @@ impl HeadlessSession {
 			snapshot.prompt_source = modes.prompt_source(Arc::clone(&snapshot.prompt_source));
 		});
 		agent.set_continuation_source(modes.clone());
-		let node = tree
-			.register(
-				session.id.clone(),
-				sf!("Main"),
-				AgentKind::Main,
-				None,
-				session.id.clone(),
-				Budget::default(),
-			)
-			.map_err(composition)?;
+		let node = tree.register(
+			session.id.clone(),
+			sf!("Main"),
+			AgentKind::Main,
+			None,
+			session.id.clone(),
+			Budget::default(),
+		)?;
 		node.set_status(AgentStatus::Running);
 		let session_handle = blueprint
 			.launch(
@@ -351,7 +433,7 @@ impl HeadlessSession {
 				SessionRuntime::from_agent(agent),
 				None,
 			)
-			.map_err(composition)?;
+			.map_err(HeadlessError::LaunchSession)?;
 		let events = session_handle.subscribe_lossless();
 		let (lifecycle, lifecycle_events) = HeadlessLifecycleSink::new(options.session_generation);
 		let approval_book = Arc::new(ApprovalBook::new());
@@ -359,12 +441,9 @@ impl HeadlessSession {
 		environment
 			.bind_approval_authority(Some(Arc::clone(&approval_book)), Some(approval_route.clone()));
 		Ok(Self {
-			session: session_handle,
-			advisor_parent,
 			advise_queue,
 			state,
 			control,
-			env,
 			regimes: modes,
 			tree,
 			events: Some(events),
@@ -378,7 +457,12 @@ impl HeadlessSession {
 			session_id: session.id,
 			initial_items: session.initial_items,
 			_inference_registry: inference_registry,
-			_edit_repair_task: edit_repair_task,
+			environment_bound: EnvironmentBound {
+				session: session_handle,
+				advisor_parent,
+				env,
+				_edit_repair_task: edit_repair_task,
+			},
 			_environment: environment,
 		})
 	}
@@ -389,7 +473,7 @@ impl HeadlessSession {
 		items: impl IntoIterator<Item = Item>,
 		turn_id: TurnId,
 	) -> Result<AgentRunSummary, omp_sdk::SessionHandleError> {
-		self.session.submit(items, turn_id).await
+		self.environment_bound.session.submit(items, turn_id).await
 	}
 
 	/// Rewinds and resubmits the latest durable user turn.
@@ -397,7 +481,11 @@ impl HeadlessSession {
 		&self,
 		turn_id: TurnId,
 	) -> Result<Option<(Vec<Item>, Str, AgentRunSummary)>, omp_sdk::SessionHandleError> {
-		self.session.retry_last_turn(turn_id).await
+		self
+			.environment_bound
+			.session
+			.retry_last_turn(turn_id)
+			.await
 	}
 
 	/// Executes and durably commits one manual compaction.
@@ -405,7 +493,7 @@ impl HeadlessSession {
 		&self,
 		request: omp_agent::ManualCompactionRequest,
 	) -> Result<omp_agent::ManualCompactionOutcome, omp_sdk::SessionHandleError> {
-		self.session.compact_manual(request).await
+		self.environment_bound.session.compact_manual(request).await
 	}
 
 	/// Returns the durable session identifier.
@@ -416,7 +504,7 @@ impl HeadlessSession {
 	/// Returns the session-local parent authority used by persistent advisor
 	/// children.
 	pub fn advisor_parent(&self) -> Arc<chat::ChatParentHost<InProcTurnClient>> {
-		Arc::clone(&self.advisor_parent)
+		Arc::clone(&self.environment_bound.advisor_parent)
 	}
 
 	/// Clone-shared session queue backing the environment's `advise@1` device.
@@ -442,7 +530,7 @@ impl HeadlessSession {
 
 	/// Returns the Environment client owned alongside the agent.
 	pub const fn env(&self) -> &omp_env::EnvClient {
-		&self.env
+		&self.environment_bound.env
 	}
 
 	/// Binds or clears the session-scoped ACP terminal execution capability.
@@ -477,8 +565,9 @@ impl HeadlessSession {
 	/// Applies a validated session-only model override and records it in the
 	/// owning v4 journal before changing the live snapshot.
 	pub async fn set_model(&self, selector: &str) -> Result<(), HeadlessError> {
-		let catalog = snapshot::Catalog::try_embedded().map_err(composition)?;
-		let model = chat::resolve_model_selector(catalog, selector).map_err(composition)?;
+		let catalog = snapshot::Catalog::try_embedded().map_err(HeadlessError::EmbeddedCatalog)?;
+		let model = chat::resolve_model_selector(catalog, selector)
+			.map_err(HeadlessError::ResolveModelSelector)?;
 		let spec = catalog
 			.model(ModelKey::from_ref(model.as_str()))
 			.ok_or_else(|| HeadlessError::UnknownModel(Str::new(selector)))?;
@@ -499,7 +588,7 @@ impl HeadlessSession {
 				fallback: false,
 			})
 			.await
-			.map_err(composition)?;
+			.map_err(HeadlessError::ModelOverride)?;
 		self
 			.state
 			.update(|snapshot| snapshot.turn.params.model = model.to_string());
@@ -536,7 +625,7 @@ impl HeadlessSession {
 
 	/// Interrupts the active caller submission without waiting for settlement.
 	pub fn interrupt(&self) {
-		self.session.interrupt();
+		self.environment_bound.session.interrupt();
 	}
 
 	/// Returns a cheap interrupt-only capable clone of the durable handle.
@@ -544,7 +633,7 @@ impl HeadlessSession {
 	/// Protocol hosts use this before borrowing the session mutably for a
 	/// submission so cancellation never contends on their session mutex.
 	pub fn interrupt_handle(&self) -> SessionHandle {
-		self.session.clone()
+		self.environment_bound.session.clone()
 	}
 
 	/// Records a user-visible session title through the sole journal owner.
@@ -553,7 +642,7 @@ impl HeadlessSession {
 			.control
 			.set_title(now_ms(), title)
 			.await
-			.map_err(composition)?;
+			.map_err(HeadlessError::SetTitle)?;
 		Ok(())
 	}
 
@@ -571,6 +660,7 @@ impl HeadlessSession {
 		let (spec, regime) =
 			omp_agent::core_regime(spec_id).expect("headless command names a built-in regime");
 		let (receipt, entries) = self
+			.environment_bound
 			.session
 			.start_regime(spec, regime, omp_agent::StartOptions { now_ms: now_ms(), queue })
 			.await?;
@@ -580,7 +670,11 @@ impl HeadlessSession {
 
 	/// Stops an active regime on the actor-owned regime set.
 	pub async fn stop_regime(&self, activation: Str) -> Result<bool, omp_sdk::SessionHandleError> {
-		let (removed, entries) = self.session.stop_regime(activation, now_ms()).await?;
+		let (removed, entries) = self
+			.environment_bound
+			.session
+			.stop_regime(activation, now_ms())
+			.await?;
 		self.regimes.sync_records(&entries);
 		Ok(removed)
 	}
@@ -627,26 +721,26 @@ impl HeadlessSession {
 
 	/// Disposes the live session without running mode-specific finalizers.
 	pub(crate) async fn dispose(&mut self) {
-		let _ = self.session.dispose().await;
+		let _ = self.environment_bound.session.dispose().await;
 	}
 
 	/// Runs ordered bounded finalization. Dropping this session afterward
 	/// disposes the agent and Environment last.
 	pub async fn finalize<W>(&mut self, stdout: &mut W, budget: FinalizerBudget) -> FinalizerReport
 	where
-		W: io::AsyncWrite + Unpin,
+		W: AsyncWrite + Unpin,
 	{
 		let report = mem::take(&mut self.finalizer)
 			.finalize(stdout, budget)
 			.await;
-		let _ = self.session.dispose().await;
+		let _ = self.environment_bound.session.dispose().await;
 		report
 	}
 
 	/// Publishes an additional event through the session's generation-stamped
 	/// event bus. Intended for typed mode transitions owned by protocol hosts.
 	pub fn publish(&self, event: AgentEvent) {
-		self.session.publish(event);
+		self.environment_bound.session.publish(event);
 	}
 }
 
@@ -659,4 +753,42 @@ fn now_ms() -> u64 {
 		.as_millis()
 		.try_into()
 		.unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn dropped_session_without_finalize_leaves_environment_reopenable() {
+		let scratch = tempfile::tempdir().expect("scratch directory");
+		let data_dir = scratch.path().join("data");
+		let root = scratch.path().join("project");
+		std::fs::create_dir_all(&root).expect("project root");
+		let options = HeadlessSessionOptions {
+			project:               root,
+			additional_roots:      Box::new([]),
+			model:                 Str::from("apple-intelligence/apple-intelligence"),
+			initial_regime:        None,
+			initial_prompt_slot:   None,
+			plan_handoff:          None,
+			resume:                None,
+			fork:                  None,
+			py_eval:               false,
+			approval_mode:         None,
+			pty_denied:            false,
+			credential_provider:   None,
+			api_key:               None,
+			prompt_cache_affinity: None,
+			session_generation:    1,
+		};
+		let first = HeadlessSession::open(data_dir.clone(), options.clone())
+			.await
+			.expect("first session opens");
+		drop(first);
+		let second = HeadlessSession::open(data_dir, options)
+			.await
+			.expect("second session opens on the same project root");
+		drop(second);
+	}
 }
