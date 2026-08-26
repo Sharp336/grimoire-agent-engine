@@ -268,14 +268,17 @@ describe("createAgentSession MCP server instructions (deferred UI)", () => {
 			// instead of shipping their full schemas top-level.
 			// Real stdio discovery is fire-and-forget with no completion signal;
 			// fake timers cannot drive the child-process handshake.
+			// Mount state lands before the awaited system-prompt rebuild while
+			// agent tools land after it, so poll for the whole applied selection
+			// (mounted MCP tool AND transport write) — not the mount alone.
 			const deadline = Date.now() + 12_000;
 			let mountedNames = session.getXdevToolEntries().map(entry => entry.name);
-			while (!mountedNames.includes(MCP_TOOL_NAME) && Date.now() < deadline) {
+			let activeNames = session.getActiveToolNames();
+			while ((!mountedNames.includes(MCP_TOOL_NAME) || !activeNames.includes("write")) && Date.now() < deadline) {
 				await Bun.sleep(10);
 				mountedNames = session.getXdevToolEntries().map(entry => entry.name);
+				activeNames = session.getActiveToolNames();
 			}
-
-			const activeNames = session.getActiveToolNames();
 			expect(activeNames).toContain("read");
 			expect(activeNames).toContain("write");
 			expect(activeNames).not.toContain(MCP_TOOL_NAME);
