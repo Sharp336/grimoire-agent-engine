@@ -1038,7 +1038,54 @@ export function projectOpenAIProReasoningAliases(models: readonly ModelSpec<Api>
 }
 
 // ---------------------------------------------------------------------------
-// 1b. GMI Cloud
+// 1b. FreePI
+// ---------------------------------------------------------------------------
+
+const FREEPI_BASE_URL = "https://sponsored-api-pilot-production.up.railway.app/api/v1";
+
+/**
+ * FreePI currently exposes one closed-alpha model. Keep a bundled seed so the
+ * provider's default remains selectable when catalog generation has no API
+ * key; authenticated `/models` discovery replaces this list authoritatively.
+ */
+export const FREEPI_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	{
+		id: "deepseek/deepseek-v4-flash",
+		name: "DeepSeek V4 Flash",
+		api: "openai-completions",
+		provider: "freepi",
+		baseUrl: FREEPI_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1048576,
+		maxTokens: 384000,
+		thinking: { mode: "effort", efforts: [Effort.Low, Effort.High, Effort.Max] },
+	},
+];
+
+export interface FreePIModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function freepiModelManagerOptions(
+	config?: FreePIModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createOpenAICompatibleModelManagerOptions({
+		api: "openai-completions",
+		providerId: "freepi",
+		defaultBaseUrl: FREEPI_BASE_URL,
+		config,
+		dynamicModelsAuthoritative: true,
+		requireApiKey: true,
+		mapModel: mapWithBundledReference,
+	});
+}
+
+// ---------------------------------------------------------------------------
+// 1c. GMI Cloud
 // ---------------------------------------------------------------------------
 
 const GMI_CLOUD_BASE_URL = "https://api.gmi-serving.com/v1";

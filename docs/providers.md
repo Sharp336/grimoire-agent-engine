@@ -150,6 +150,9 @@ Each provider has one or more environment variables that supply a key when no st
 | `llama.cpp`                      | `LLAMA_CPP_API_KEY` (only when the server requires auth)                      |
 | `vllm`                           | `VLLM_API_KEY` (optional for an unauthenticated local server)                 |
 | `yolo-auto`                      | `YOLO_AUTO_API_KEY`                                                            |
+| `freepi`                         | `FREEPI_API_KEY`                                                              |
+
+> **Warning — FreePI closed alpha:** Raw traces may include prompts, source code, terminal output, diffs, and tool calls. FreePI says it may retain these traces indefinitely and makes no routine deletion promise. Do not send secrets or private code. The built-in model is `deepseek/deepseek-v4-flash`; get an API key at [freepi.ai/account](https://freepi.ai/account).
 
 OAuth-backed providers such as `anthropic`, `github-copilot`, `cursor`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `wafer-serverless`, `google-gemini-cli`, and `google-antigravity` are normally reached through `/login` rather than an environment variable. See [Environment variables](./environment-variables.md) for search-tool and configuration variables not listed here.
 
