@@ -1,4 +1,5 @@
 import { prompt } from "@oh-my-pi/pi-utils";
+import { resolveLocalUrlToPath } from "../internal-urls/local-protocol";
 import rlmTemplate from "../prompts/rlm.md" with { type: "text" };
 import { commandConsumed } from "./helpers/parse";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "./types";
@@ -20,5 +21,21 @@ export async function handleRlmCommand(
 		);
 		return commandConsumed();
 	}
-	return { prompt: prompt.render(rlmTemplate, { request: command.args }).trim() };
+	const args = command.args.trim();
+	if (!args) {
+		return { prompt: prompt.render(rlmTemplate, { request: "(no request text provided)" }).trim() };
+	}
+	// Externalize the inline payload into a session-local file instead of
+	// interpolating it into the prompt: the whole point of RLM is to keep
+	// oversized input out of the model's context, so the prompt must carry
+	// only a reference the model loads from inside the eval sandbox.
+	const localProtocolOptions = {
+		getArtifactsDir: () => runtime.sessionManager.getArtifactsDir(),
+		getSessionId: () => runtime.sessionManager.getSessionId(),
+	};
+	const inputUrl = `local://rlm-input-${Date.now()}.txt`;
+	const inputPath = resolveLocalUrlToPath(inputUrl, localProtocolOptions);
+	await Bun.write(inputPath, args);
+	const request = `The user's inline request text (${args.length} chars) has been externalized to \`${inputUrl}\`. Load it in the eval sandbox (e.g. \`context = read("${inputUrl}")\`) before probing/chunking it — do not ask the operator to repaste it.`;
+	return { prompt: prompt.render(rlmTemplate, { request }).trim() };
 }

@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
-import type { SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
+import type { AcpBuiltinSlashCommandResult, SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 
 const DISABLE_MESSAGE =
 	"RLM mode is disabled. Enable it via the rlm.enabled setting (e.g. omp config set rlm.enabled true).";
@@ -12,13 +15,26 @@ function acpRuntime(options?: { enabled?: boolean }) {
 	} as unknown as SlashCommandRuntime["settings"];
 	const get = vi.spyOn(settings, "get");
 	const output = vi.fn();
-	const runtime = { settings, output } as unknown as SlashCommandRuntime;
-	return { get, output, runtime };
+	const artifactsDir = fs.mkdtempSync(path.join(os.tmpdir(), "rlm-test-"));
+	const sessionManager = {
+		getArtifactsDir: () => artifactsDir,
+		getSessionId: () => "test-session",
+	} as unknown as SlashCommandRuntime["sessionManager"];
+	const runtime = { settings, output, sessionManager } as unknown as SlashCommandRuntime;
+	return { get, output, runtime, artifactsDir };
+}
+
+function promptOf(result: AcpBuiltinSlashCommandResult): string {
+	if (!result || !("prompt" in result)) throw new Error("expected a { prompt } result");
+	return result.prompt;
 }
 
 describe("/rlm slash command", () => {
+	const tempDirs: string[] = [];
+
 	afterEach(() => {
 		vi.restoreAllMocks();
+		for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 	});
 
 	it("outputs the enable hint and consumes the command when rlm.enabled is false", async () => {
@@ -40,19 +56,28 @@ describe("/rlm slash command", () => {
 		expect(h.output).toHaveBeenCalledTimes(1);
 	});
 
-	it("returns a prompt containing the request when rlm.enabled is true", async () => {
+	it("externalizes the inline request to a local:// file instead of inlining it", async () => {
 		const h = acpRuntime({ enabled: true });
+		tempDirs.push(h.artifactsDir);
 
 		const result = await executeAcpBuiltinSlashCommand("/rlm summarize the report", h.runtime);
 
 		expect(h.get).toHaveBeenCalledWith("rlm.enabled");
 		expect(h.output).not.toHaveBeenCalled();
 		expect(result).not.toEqual({ consumed: true });
-		const prompt = (result as { prompt: string }).prompt;
-		expect(prompt).toContain("summarize the report");
+		const prompt = promptOf(result);
+		// The raw request text must NOT be inlined into the prompt — only a
+		// local:// reference the model loads from inside the eval sandbox.
+		expect(prompt).not.toContain("summarize the report");
+		expect(prompt).toContain("local://rlm-input-");
 		expect(prompt).toContain("llm_query");
 		expect(prompt).toContain("rlm_query");
 		expect(prompt).toContain("task.maxRecursionDepth");
+
+		const match = prompt.match(/local:\/\/(rlm-input-[\w.-]+\.txt)/);
+		expect(match).not.toBeNull();
+		const writtenPath = path.join(h.artifactsDir, "local", match?.[1] ?? "");
+		expect(fs.readFileSync(writtenPath, "utf-8")).toBe("summarize the report");
 	});
 
 	it("still returns a prompt when invoked without arguments", async () => {
@@ -60,7 +85,7 @@ describe("/rlm slash command", () => {
 
 		const result = await executeAcpBuiltinSlashCommand("/rlm", h.runtime);
 
-		const prompt = (result as { prompt: string }).prompt;
+		const prompt = promptOf(result);
 		expect(prompt).toContain("RLM mode");
 		expect(h.output).not.toHaveBeenCalled();
 	});

@@ -259,6 +259,7 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		const rx = new RegExp(pattern, typeof flags === "string" ? flags : "");
 		const out = [];
 		for (const [index, line] of __splitlines(text).entries()) {
+			rx.lastIndex = 0;
 			if (rx.test(line)) out.push(`L${index + 1}: ${line.replace(/\s+$/, "")}`);
 		}
 		return out;
