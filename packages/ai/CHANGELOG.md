@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Cursor replay rejecting sessions with orphaned tool results while preserving their output as assistant context.
+
 ## [18.0.6] - 2026-08-26
 
 ### Added

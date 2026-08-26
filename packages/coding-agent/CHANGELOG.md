@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Cursor-only sessions becoming permanently unusable after replaying orphaned async tool results.
+
 ## [18.0.6] - 2026-08-26
 
 ### Added
