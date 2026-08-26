@@ -23,6 +23,7 @@ import {
 	normalizeKernelSessionCwd,
 	requireRemainingKernelTimeoutMs,
 } from "../kernel-session-registry";
+import type { PythonShadowPlan } from "./kernel";
 import {
 	checkPythonKernelAvailability,
 	type KernelDisplayOutput,
@@ -386,6 +387,23 @@ export async function disposeAllKernelSessions(): Promise<void> {
 
 export async function disposeKernelSessionsByOwner(ownerId: string): Promise<void> {
 	await sessionRegistry.disposeByOwner(ownerId);
+}
+
+/** Projects against an already-retained, idle Python session without starting a kernel. */
+export async function shadowPlanPythonIfPresent(options: {
+	cwd: string;
+	sessionId: string;
+	kernelOwnerId?: string;
+	code: string;
+	timeoutMs?: number;
+}): Promise<PythonShadowPlan | null> {
+	const cwd = normalizeKernelSessionCwd(options.cwd);
+	const session = sessionRegistry.getPresentSession(cwd, {
+		sessionId: options.sessionId,
+		kernelOwnerId: options.kernelOwnerId,
+	});
+	if (!session?.kernel.isAlive()) return null;
+	return await session.kernel.shadowPlan(options.code, options.timeoutMs);
 }
 
 export async function executePythonWithKernel(

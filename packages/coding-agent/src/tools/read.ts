@@ -1,12 +1,17 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { splitAddressableFileLines } from "@oh-my-pi/hashline";
+import { type InMemorySnapshotStore, splitAddressableFileLines } from "@oh-my-pi/hashline";
 import { type } from "@oh-my-pi/omptype";
 import type {
 	AgentTool,
 	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
+	SpeculativePhysicalOutcome,
+	ToolSpeculationAssessment,
+	ToolSpeculationCommitContext,
+	ToolSpeculationDiscardContext,
+	ToolSpeculationExecutionContext,
 	ToolTier,
 } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
@@ -608,6 +613,61 @@ function appendRepeatReadHint(session: ToolSession, path: string, result: AgentT
 	block.text += `\n\n[You have received this identical output ${entry.count} times. Re-reading '${path}' will not change it — use a narrower selector (path:A-B), or proceed with the edit.]`;
 }
 
+const LOCAL_READ_SPECULATION_INELIGIBLE: ToolSpeculationAssessment = {
+	eligible: false,
+	reason: "read target is not a speculation-safe local path",
+};
+
+async function assessLocalReadSpeculation(
+	cwd: string,
+	args: Readonly<Record<string, unknown>>,
+): Promise<ToolSpeculationAssessment> {
+	if (typeof args.path !== "string") return LOCAL_READ_SPECULATION_INELIGIBLE;
+	const target = splitPathAndSel(args.path);
+	if (
+		target.sel !== undefined ||
+		args.path.startsWith("www.") ||
+		/^[a-z][a-z0-9+.-]*:\/\//i.test(args.path) ||
+		args.path.includes(":") ||
+		args.path.includes("?") ||
+		args.path.includes("#")
+	) {
+		return LOCAL_READ_SPECULATION_INELIGIBLE;
+	}
+	try {
+		const workspacePath = await fs.realpath(cwd);
+		const resolvedPath = await fs.realpath(path.resolve(cwd, args.path));
+		const workspaceRelativePath = path.relative(workspacePath, resolvedPath);
+		if (
+			workspaceRelativePath.length === 0 ||
+			workspaceRelativePath === ".." ||
+			workspaceRelativePath.startsWith(`..${path.sep}`) ||
+			path.isAbsolute(workspaceRelativePath)
+		) {
+			return LOCAL_READ_SPECULATION_INELIGIBLE;
+		}
+		const targetStat = await fs.stat(resolvedPath);
+		if (targetStat.isDirectory()) return LOCAL_READ_SPECULATION_INELIGIBLE;
+		if (!targetStat.isFile()) return LOCAL_READ_SPECULATION_INELIGIBLE;
+		if (await readImageMetadata(resolvedPath)) return LOCAL_READ_SPECULATION_INELIGIBLE;
+		const bytes = await Bun.file(resolvedPath).slice(0, BINARY_SNIFF_BYTES).bytes();
+		const header = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+		if (
+			isProbablyBinaryHeader(header) ||
+			header.subarray(0, 5).toString("ascii") === "%PDF-" ||
+			header.subarray(0, 16).toString("ascii") === "SQLite format 3\u0000"
+		) {
+			return LOCAL_READ_SPECULATION_INELIGIBLE;
+		}
+		return {
+			eligible: true,
+			effect: { kind: "local_read", resources: [{ scheme: "file", path: resolvedPath, access: "read" }] },
+		};
+	} catch {
+		return LOCAL_READ_SPECULATION_INELIGIBLE;
+	}
+}
+
 /**
  * Read tool implementation.
  *
@@ -631,6 +691,25 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	}
 	readonly strict = true;
 
+	readonly speculation = {
+		finalized: {
+			assess: ({ args }: { args: Readonly<Record<string, unknown>> }) =>
+				assessLocalReadSpeculation(this.session.cwd, args),
+			execute: (context: ToolSpeculationExecutionContext, signal: AbortSignal) =>
+				this.#executeSpeculativeRead(context, signal),
+			commit: (context: ToolSpeculationCommitContext, outcome: SpeculativePhysicalOutcome) =>
+				this.#commitSpeculativeRead(context, outcome),
+			discard: (context: ToolSpeculationDiscardContext) => {
+				const execution = this.#speculativeReadExecutions.get(context.toolCall.id);
+				if (execution) execution.discarded = true;
+				this.#speculativeReads.delete(context.toolCall.id);
+			},
+		},
+	};
+
+	#speculativeReads = new Map<string, { store: InMemorySnapshotStore; snapshotKey: string }>();
+
+	#speculativeReadExecutions = new Map<string, { discarded: boolean }>();
 	readonly #autoResizeImages: boolean;
 	readonly #defaultLimit: number;
 	#inspectImageActive: boolean;
@@ -643,6 +722,56 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		);
 		this.#inspectImageActive = this.#resolveInspectImageAvailability();
 		this.description = this.#renderDescription();
+	}
+
+	async #executeSpeculativeRead(
+		context: ToolSpeculationExecutionContext,
+		signal: AbortSignal,
+	): Promise<SpeculativePhysicalOutcome> {
+		if (context.effect.kind !== "local_read" || context.effect.resources.length !== 1) {
+			throw new Error("Invalid speculative read operation");
+		}
+		const execution = { discarded: false };
+		this.#speculativeReadExecutions.set(context.toolCall.id, execution);
+		try {
+			const speculativeSession = Object.create(this.session) as ToolSession;
+			Object.defineProperty(speculativeSession, "fileSnapshotStore", {
+				value: undefined,
+				writable: true,
+				configurable: true,
+			});
+			const store = getFileSnapshotStore(speculativeSession);
+			const speculativeTool = new ReadTool(speculativeSession);
+			const result = await speculativeTool.#executeInner(context.toolCall.id, context.args as ReadParams, signal);
+			const snapshotKey = canonicalSnapshotKey(context.effect.resources[0].path);
+			if (!signal.aborted && !execution.discarded && store.head(snapshotKey)) {
+				this.#speculativeReads.set(context.toolCall.id, { store, snapshotKey });
+			}
+			return { kind: "result", result, isError: result.isError === true };
+		} finally {
+			if (this.#speculativeReadExecutions.get(context.toolCall.id) === execution) {
+				this.#speculativeReadExecutions.delete(context.toolCall.id);
+			}
+		}
+	}
+
+	async #commitSpeculativeRead(
+		context: ToolSpeculationCommitContext,
+		outcome: SpeculativePhysicalOutcome,
+	): Promise<AgentToolResult<unknown>> {
+		try {
+			if (outcome.kind !== "result") throw new Error("Speculative read produced a staged outcome");
+			const staged = this.#speculativeReads.get(context.toolCall.id);
+			if (staged) {
+				const snapshot = staged.store.head(staged.snapshotKey);
+				if (snapshot) {
+					getFileSnapshotStore(this.session).record(staged.snapshotKey, snapshot.text, snapshot.seenLines);
+				}
+			}
+			return outcome.result;
+		} finally {
+			this.#speculativeReads.delete(context.toolCall.id);
+		}
 	}
 
 	/**

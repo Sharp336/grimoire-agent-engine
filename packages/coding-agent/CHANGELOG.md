@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in speculative execution for host-authorized local reads and nested JavaScript or Python eval reads, with a separate opt-in for nested completion calls.
+
 ## [18.0.6] - 2026-08-26
 
 ### Added

@@ -33,6 +33,8 @@ export type StreamFn = (
 
 /** Called once an aside has been inserted into the agent's live context. */
 export const ASIDE_MESSAGE_COMMIT = Symbol("aside-message-commit");
+/** Symbol-keyed handoff for one finalized, tool-owned stream speculation session. */
+export const SPECULATIVE_STREAM_SESSION = Symbol("speculative-stream-session");
 /** Called when an aside was drained but the agent loop ended before inserting it. */
 export const ASIDE_MESSAGE_DISCARD = Symbol("aside-message-discard");
 
@@ -337,6 +339,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	transformToolCallArguments?: (args: Record<string, unknown>, toolName: string) => Record<string, unknown>;
 	/**
+	 * Opt-in speculative execution for finalized, discard-safe tool calls.
+	 *
+	 * Candidates remain invisible until ordinary dispatch commits their result.
+	 */
+	speculativeToolExecution?: SpeculativeToolExecutionConfig;
+	/**
 	 * Resolve a tool call whose name matched no advertised tool (including
 	 * `customWireName` aliases). Lets hosts route calls to tools they expose
 	 * through side transports (e.g. `xd://` device mounts) instead of failing
@@ -563,6 +571,210 @@ export interface ToolCallContext {
 /** A single tool-call content block emitted by an assistant message. */
 export type AgentToolCall = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
 
+export interface SpeculativeResourceAccess {
+	scheme: "file";
+	path: string;
+	access: "read" | "write";
+}
+
+export interface SpeculativeEgress {
+	authority: string;
+	origins: readonly SpeculativeInformationOrigin[];
+}
+
+export type SpeculativeInformationOrigin =
+	| { kind: "provider_literal" }
+	| { kind: "persistent_state" }
+	| { kind: "local_read"; resource: string }
+	| { kind: "remote_read"; authority: string }
+	| { kind: "model_completion"; provider: string; authority: string };
+
+export interface HttpsGetSpeculationTransport {
+	url: string;
+	headers: Readonly<Record<string, string>>;
+	credentials: "omit";
+	cache: "no-store";
+	redirect: "error";
+}
+
+export type ToolSpeculationEffect =
+	| { kind: "pure" }
+	| { kind: "local_read"; resources: readonly SpeculativeResourceAccess[] }
+	| {
+			kind: "remote_read";
+			transport: HttpsGetSpeculationTransport;
+			egress: readonly SpeculativeEgress[];
+	  }
+	| {
+			kind: "model_completion";
+			provider: string;
+			model: string;
+			baseUrl: string;
+			egress: readonly SpeculativeEgress[];
+	  }
+	| { kind: "reversible_write"; isolation: "pal"; resources: readonly SpeculativeResourceAccess[] }
+	| { kind: "irreversible_write"; reason: string };
+
+export type ToolSpeculationAssessment =
+	| { eligible: false; reason: string }
+	| { eligible: true; effect: ToolSpeculationEffect };
+
+/** Immutable finalized call data provided to a tool-owned policy. */
+export interface ToolSpeculationAssessmentContext {
+	toolCall: AgentToolCall;
+	args: Readonly<Record<string, unknown>>;
+}
+
+export interface ToolSpeculationExecutionContext extends ToolSpeculationAssessmentContext {
+	effect: ToolSpeculationEffect;
+}
+
+export interface ToolSpeculationCommitContext extends ToolSpeculationExecutionContext {
+	physicalOutcome: SpeculativePhysicalOutcome;
+}
+
+export interface ToolSpeculationDiscardContext extends ToolSpeculationExecutionContext {
+	reason: string;
+}
+
+export type SpeculativePhysicalOutcome =
+	| { kind: "result"; result: AgentToolResult<unknown>; isError: boolean }
+	| { kind: "staged"; token: unknown };
+
+export interface SpeculativeToolReference {
+	name: string;
+	approval?: ToolApproval;
+	formatApprovalDetails?: (args: unknown) => string | string[] | undefined;
+}
+
+export interface SpeculativeOperationContext extends ToolSpeculationExecutionContext {
+	tool: SpeculativeToolReference;
+	candidateId: string;
+	source: "direct" | "eval_shadow";
+	dependencies: readonly string[];
+}
+
+export interface SpeculativeCommitContext extends SpeculativeOperationContext {
+	physicalOutcome: SpeculativePhysicalOutcome;
+}
+
+export interface SpeculativeDiscardContext extends SpeculativeOperationContext {
+	reason: string;
+}
+
+export type SpeculativeAuthorization =
+	| { allowed: false; reason: string }
+	| { allowed: true; deferBeforeToolCall?: boolean };
+
+export type SpeculativeHostOutcome = SpeculativePhysicalOutcome;
+
+export type SpeculativeCommitDecision =
+	| { kind: "committed"; result: AgentToolResult<unknown> }
+	| { kind: "fallback"; reason: string; restored: boolean }
+	| { kind: "failed"; error: unknown };
+
+export interface SpeculativeExecutionHost {
+	authorize(context: SpeculativeOperationContext): SpeculativeAuthorization | Promise<SpeculativeAuthorization>;
+	execute?(
+		context: SpeculativeOperationContext,
+		executeDefault: () => Promise<SpeculativePhysicalOutcome>,
+	): Promise<SpeculativeHostOutcome>;
+	validate?(context: SpeculativeCommitContext): boolean | Promise<boolean>;
+	commit?(
+		context: SpeculativeCommitContext,
+		commitDefault: () => Promise<AgentToolResult<unknown>>,
+	): Promise<SpeculativeCommitDecision>;
+	discard?(context: SpeculativeDiscardContext): void | Promise<void>;
+	close?(reason: string): void | Promise<void>;
+}
+
+export interface ToolSpeculationStreamContext {
+	readonly coordinator: SpeculativeOperationSink;
+	readonly parentToolCallId: string;
+}
+
+/** One dependency-aware child operation projected by a streamed outer tool. */
+export interface SpeculativeChildDefinition {
+	candidateId: string;
+	parentToolCallId: string;
+	dependencies: readonly string[];
+	toolCall: AgentToolCall;
+	tool: AgentTool;
+	source: "eval_shadow";
+	virtualDurationMs?: number;
+}
+
+/** Opaque ownership handle returned after agent-core validates and authorizes a child. */
+export interface SpeculativeChildHandle {
+	readonly candidateId: string;
+	readonly fingerprint: string;
+	readonly effect: ToolSpeculationEffect;
+	readonly outcome: Promise<SpeculativePhysicalOutcome>;
+	commit(actualArgs: Readonly<Record<string, unknown>>): Promise<AgentToolResult<unknown> | undefined>;
+	discard(reason: string): Promise<void>;
+}
+
+export interface ToolSpeculationStreamSession {
+	/** True when the tool owns claim routing and does not need an AgentToolContext attachment. */
+	readonly contextIndependent?: boolean;
+	update(toolCall: AgentToolCall, partialJson?: string): void | Promise<void>;
+	finalize(context: ToolSpeculationAssessmentContext): void | Promise<void>;
+	commit(): void | Promise<void>;
+	discard(reason: string): void | Promise<void>;
+}
+
+export interface SpeculativeOperationSink {
+	readonly maxInFlight: number;
+	admit(definition: SpeculativeChildDefinition): Promise<SpeculativeChildHandle | undefined>;
+	close(reason: string): void | Promise<void>;
+}
+
+export interface ToolSpeculationPolicy {
+	finalized?: {
+		assess(context: ToolSpeculationAssessmentContext): ToolSpeculationAssessment | Promise<ToolSpeculationAssessment>;
+		execute(context: ToolSpeculationExecutionContext, signal: AbortSignal): Promise<SpeculativePhysicalOutcome>;
+		commit?(
+			context: ToolSpeculationCommitContext,
+			outcome: SpeculativePhysicalOutcome,
+		): Promise<AgentToolResult<unknown>>;
+		discard?(context: ToolSpeculationDiscardContext): void | Promise<void>;
+	};
+	stream?: {
+		open(
+			context: ToolSpeculationStreamContext,
+		): ToolSpeculationStreamSession | Promise<ToolSpeculationStreamSession | undefined>;
+	};
+}
+
+/** Diagnostic information for one speculative operation. */
+export interface SpeculativeToolTelemetry {
+	source: "direct" | "eval_shadow";
+	candidateId: string;
+	parentToolCallId?: string;
+	toolName: string;
+	effectKind: ToolSpeculationEffect["kind"];
+	candidateStartedAt?: number;
+	candidateFinishedAt?: number;
+	dispatchReachedAt?: number;
+	dependencyCount: number;
+	queueMs?: number;
+	executionDurationMs?: number;
+	overlapMs?: number;
+	outcome: "committed" | "discarded" | "ineligible" | "fingerprint_mismatch" | "aborted" | "commit_conflict";
+	reason?: string;
+	staged: boolean;
+	resourceCount: number;
+	egressAuthority?: string;
+}
+
+/** Opt-in configuration for discard-safe speculative tool execution. */
+export interface SpeculativeToolExecutionConfig {
+	enabled: boolean;
+	maxInFlight?: number;
+	host?: SpeculativeExecutionHost;
+	onTelemetry?: (event: SpeculativeToolTelemetry) => void;
+}
+
 /**
  * Result returned from `beforeToolCall`.
  *
@@ -746,7 +958,8 @@ export type ToolApproval = ToolApprovalDecision | ((args: unknown) => ToolApprov
  * Apps can extend via declaration merging.
  */
 export interface AgentToolContext {
-	// Empty by default - apps extend via declaration merging
+	/** Present only while the matching outer tool owns its finalized stream session. */
+	[SPECULATIVE_STREAM_SESSION]?: ToolSpeculationStreamSession;
 }
 
 export type AgentToolExecFn<TParameters extends TSchema = TSchema, TDetails = any, TTheme = unknown> = (
@@ -778,6 +991,12 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	 * - function: resolved per call from the (raw, pre-validation) arguments
 	 */
 	concurrency?: "shared" | "exclusive" | ((args: Partial<Static<TParameters>>) => "shared" | "exclusive");
+
+	/**
+	 * Declares the bounded, validated effect of a finalized call that may execute
+	 * before ordinary dispatch commits its result.
+	 */
+	speculation?: ToolSpeculationPolicy;
 	/** If true, argument validation errors are non-fatal: raw args are passed to execute() instead of returning an error to the LLM. */
 	lenientArgValidation?: boolean;
 	/**

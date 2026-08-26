@@ -9,7 +9,9 @@
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
-import { callSessionTool, type JsStatusEvent } from "../js/tool-bridge";
+import type { RuntimeCallIdentity } from "../js/shared/runtime";
+import { bridgeValueFromToolResult, callSessionTool, type JsStatusEvent } from "../js/tool-bridge";
+import type { EvalShadowCellSession } from "../speculation/cell-session";
 
 export interface PyToolBridgeEntry {
 	toolSession: ToolSession;
@@ -26,6 +28,7 @@ export interface PyToolBridgeEntry {
 	 * cell on top of a still-running, abort-insensitive merge.
 	 */
 	shieldedSignal?: AbortSignal;
+	shadowCell?: EvalShadowCellSession;
 	emitStatus?: (event: JsStatusEvent) => void;
 	abortRequested?: () => boolean;
 }
@@ -63,14 +66,25 @@ let serverPromise: Promise<BridgeServer> | null = null;
  * matters for tools that ignore the signal, keeping the kernel unwinding
  * promptly instead of being hard-killed.
  */
-async function callSessionToolPromptOnAbort(name: string, args: unknown, entry: PyToolBridgeEntry): Promise<unknown> {
+async function callSessionToolPromptOnAbort(
+	name: string,
+	args: unknown,
+	entry: PyToolBridgeEntry,
+	identity?: RuntimeCallIdentity,
+): Promise<unknown> {
 	if (entry.abortRequested?.()) {
 		throw new Error(`bridge call ${JSON.stringify(name)} aborted: eval cell was interrupted`);
+	}
+	if (entry.shadowCell && identity) {
+		const logicalName = name === "__completion__" ? "completion" : name;
+		const claimed = await entry.shadowCell.claim(logicalName, args, identity, Number.MAX_SAFE_INTEGER);
+		if (claimed) return bridgeValueFromToolResult(logicalName, args, claimed, entry.emitStatus);
 	}
 	const call = callSessionTool(name, args, {
 		session: entry.toolSession,
 		signal: entry.signal,
 		emitStatus: entry.emitStatus,
+		identity,
 	});
 	const signal = entry.shieldedSignal ?? entry.signal;
 	if (!signal) return await call;
@@ -105,9 +119,15 @@ async function startServer(): Promise<BridgeServer> {
 				return new Response("Forbidden", { status: 403 });
 			}
 
-			let body: { session?: unknown; run?: unknown; name?: unknown; args?: unknown };
+			let body: { session?: unknown; run?: unknown; name?: unknown; args?: unknown; identity?: unknown };
 			try {
-				body = (await req.json()) as { session?: unknown; run?: unknown; name?: unknown; args?: unknown };
+				body = (await req.json()) as {
+					session?: unknown;
+					run?: unknown;
+					name?: unknown;
+					args?: unknown;
+					identity?: unknown;
+				};
 			} catch {
 				return Response.json({ ok: false, error: "Invalid JSON body" }, { status: 400 });
 			}
@@ -127,7 +147,20 @@ async function startServer(): Promise<BridgeServer> {
 			}
 
 			try {
-				const value = await callSessionToolPromptOnAbort(name, body.args, entry);
+				const identityRecord =
+					body.identity && typeof body.identity === "object" && !Array.isArray(body.identity)
+						? body.identity
+						: undefined;
+				const siteId =
+					identityRecord && "siteId" in identityRecord && typeof identityRecord.siteId === "string"
+						? identityRecord.siteId
+						: undefined;
+				const occurrence =
+					identityRecord && "occurrence" in identityRecord && typeof identityRecord.occurrence === "number"
+						? identityRecord.occurrence
+						: undefined;
+				const identity = siteId !== undefined && occurrence !== undefined ? { siteId, occurrence } : undefined;
+				const value = await callSessionToolPromptOnAbort(name, body.args, entry, identity);
 				return Response.json({ ok: true, value });
 			} catch (err) {
 				return Response.json({

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in host authorization and exact-once streamed child execution for speculative local reads, constrained anonymous HTTPS GET effects, and nested eval operations.
+
 ## [18.0.5] - 2026-08-25
 
 ### Fixed

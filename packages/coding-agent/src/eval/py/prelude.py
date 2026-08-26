@@ -4,7 +4,7 @@ from __future__ import annotations
 if "__omp_prelude_loaded__" not in globals():
     __omp_prelude_loaded__ = True
     from pathlib import Path
-    import os, json, math, re
+    import contextvars, os, json, math, re
     from urllib.parse import unquote
 
     INTENT_FIELD = "i"
@@ -382,6 +382,22 @@ if "__omp_prelude_loaded__" not in globals():
     # host-owned loopback endpoint must always connect directly.
     _BRIDGE_OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
+    _OMP_CALL_IDENTITY = contextvars.ContextVar("omp_call_identity", default=None)
+    _OMP_CALL_OCCURRENCES = contextvars.ContextVar("omp_call_occurrences", default=None)
+
+    def __omp_with_call_site__(site_id: str, action):
+        occurrences = dict(_OMP_CALL_OCCURRENCES.get() or {})
+        occurrence = occurrences.get(site_id, 0)
+        occurrences[site_id] = occurrence + 1
+        _OMP_CALL_OCCURRENCES.set(occurrences)
+        token = _OMP_CALL_IDENTITY.set(
+            {"siteId": site_id, "occurrence": occurrence}
+        )
+        try:
+            return action()
+        finally:
+            _OMP_CALL_IDENTITY.reset(token)
+
     def _bridge_call(name: str, args: dict):
         """POST one request to the host tool bridge and return its `value`."""
         base, token, session = _tool_proxy_from_env()
@@ -391,9 +407,16 @@ if "__omp_prelude_loaded__" not in globals():
             if callable(_run_id_getter)
             else globals().get("__omp_run_id__")
         )
-        payload = json.dumps(
-            {"session": session, "run": _run_id, "name": name, "args": args}
-        ).encode("utf-8")
+        payload = {
+            "session": session,
+            "run": _run_id,
+            "name": name,
+            "args": args,
+        }
+        identity = _OMP_CALL_IDENTITY.get()
+        if identity is not None:
+            payload["identity"] = identity
+        payload = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             f"{base}/v1/tool",
             data=payload,

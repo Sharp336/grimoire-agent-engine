@@ -7,6 +7,7 @@ import {
 	agentLoopDetailed,
 	TERMINAL_TOOL_RESULT_ABORT_REASON,
 } from "@oh-my-pi/pi-agent-core/agent-loop";
+import { SpeculativeOperationCoordinator } from "@oh-my-pi/pi-agent-core/speculative-execution";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -14,11 +15,14 @@ import type {
 	AgentMessage,
 	AgentTool,
 	AgentToolContext,
+	SpeculativeToolTelemetry,
 	ToolCallContext,
+	ToolSpeculationEffect,
 } from "@oh-my-pi/pi-agent-core/types";
-import { ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD } from "@oh-my-pi/pi-agent-core/types";
+import { ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD, SPECULATIVE_STREAM_SESSION } from "@oh-my-pi/pi-agent-core/types";
 import type { AssistantMessage, AssistantMessageEvent, Context, Message, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
+import { kCursorExecResolved, setStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { createAssistantMessage, createUserMessage } from "./helpers";
@@ -5154,5 +5158,649 @@ describe("agentLoop kCursorExecResolved (issue #4348)", () => {
 		if (executionStarts[0]?.type !== "tool_execution_start") throw new Error("expected tool_execution_start");
 		expect(executionStarts[0].toolCallId).toBe("runnable-1");
 		expect(executionStarts[0].toolName).toBe("echo");
+	});
+});
+
+describe("speculative tool execution", () => {
+	it("requires host authorization before a remote GET may start early", async () => {
+		const schema = type({ url: "string" });
+		const telemetry: SpeculativeToolTelemetry[] = [];
+		let providerDone = false;
+		let executionStartedAfterDone = false;
+		let executions = 0;
+		const tool: AgentTool<typeof schema> = {
+			name: "anonymous_get",
+			label: "Anonymous GET",
+			description: "Read one public URL",
+			parameters: schema,
+			speculation: {
+				finalized: {
+					assess: ({ args }) =>
+						args.url === "https://example.test/"
+							? {
+									eligible: true,
+									effect: {
+										kind: "remote_read",
+										transport: {
+											url: "https://example.test/",
+											headers: {
+												accept: "application/json",
+												"cache-control": "no-store",
+												pragma: "no-cache",
+											},
+											credentials: "omit",
+											cache: "no-store",
+											redirect: "error",
+										},
+										egress: [],
+									},
+								}
+							: { eligible: false, reason: "unexpected URL" },
+					async execute() {
+						return { kind: "result", result: { content: [{ type: "text", text: "HTTP 200" }] }, isError: false };
+					},
+				},
+			},
+			async execute() {
+				executions++;
+				executionStartedAfterDone = providerDone;
+				return { content: [{ type: "text", text: "HTTP 200" }] };
+			},
+		};
+		const mock = createMockModel({ responses: [] });
+		let turn = 0;
+		const streamFn = () => {
+			const response = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				if (turn++ === 0) {
+					const toolCall = {
+						type: "toolCall" as const,
+						id: "remote-1",
+						name: "anonymous_get",
+						arguments: { url: "https://example.test/" },
+					};
+					const partial = createAssistantMessage([toolCall], "toolUse");
+					response.push({ type: "start", partial });
+					response.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+					providerDone = true;
+					response.push({ type: "done", reason: "toolUse", message: partial });
+					return;
+				}
+				const partial = createAssistantMessage([{ type: "text", text: "done" }], "stop");
+				response.push({ type: "start", partial });
+				response.push({ type: "done", reason: "stop", message: partial });
+			});
+			return response;
+		};
+
+		await agentLoop(
+			[createUserMessage("fetch")],
+			{ systemPrompt: [""], messages: [], tools: [tool] },
+			{
+				model: mock.model,
+				convertToLlm: identityConverter,
+				speculativeToolExecution: { enabled: true, onTelemetry: event => telemetry.push(event) },
+			},
+			undefined,
+			streamFn,
+		).result();
+
+		expect(executions).toBe(1);
+		expect(executionStartedAfterDone).toBe(true);
+		expect(telemetry).toContainEqual(
+			expect.objectContaining({
+				outcome: "ineligible",
+				reason: "effect requires host authorization",
+				toolName: "anonymous_get",
+				candidateId: "remote-1",
+			}),
+		);
+	});
+
+	it("rejects malformed remote effects before invoking the host", async () => {
+		const schema = type({});
+		const validEffect = {
+			kind: "remote_read",
+			transport: {
+				url: "https://example.test/",
+				headers: { accept: "application/json", "cache-control": "no-store", pragma: "no-cache" },
+				credentials: "omit",
+				cache: "no-store",
+				redirect: "error",
+			},
+			egress: [],
+		} as const;
+		const malformedEffects: unknown[] = [
+			{ ...validEffect, transport: { ...validEffect.transport, url: "http://example.test/" } },
+			{ ...validEffect, transport: { ...validEffect.transport, url: "https://user@example.test/" } },
+			{ ...validEffect, transport: { ...validEffect.transport, url: "https://example.test/#fragment" } },
+			{
+				...validEffect,
+				transport: { ...validEffect.transport, headers: { ...validEffect.transport.headers, cookie: "blocked" } },
+			},
+			{
+				...validEffect,
+				transport: {
+					...validEffect.transport,
+					headers: { ...validEffect.transport.headers, Accept: "application/json" },
+				},
+			},
+			{
+				...validEffect,
+				transport: {
+					...validEffect.transport,
+					headers: { ...validEffect.transport.headers, accept: "value\r\ninjected" },
+				},
+			},
+			{
+				...validEffect,
+				transport: {
+					...validEffect.transport,
+					headers: { accept: "application/json", "cache-control": "no-store" },
+				},
+			},
+			{ ...validEffect, transport: { ...validEffect.transport, credentials: "include" } },
+			{ ...validEffect, transport: { ...validEffect.transport, cache: "reload" } },
+			{ ...validEffect, transport: { ...validEffect.transport, redirect: "follow" } },
+			{ ...validEffect, transport: { ...validEffect.transport, proxy: "system" } },
+		];
+
+		for (const effect of malformedEffects) {
+			let hostCalls = 0;
+			let executions = 0;
+			const telemetry: string[] = [];
+			const tool: AgentTool<typeof schema> = {
+				name: "remote",
+				label: "Remote",
+				description: "Remote test tool",
+				parameters: schema,
+				speculation: {
+					finalized: {
+						assess: () => ({ eligible: true, effect: effect as ToolSpeculationEffect }),
+						async execute() {
+							return { kind: "result", result: { content: [{ type: "text", text: "ok" }] }, isError: false };
+						},
+					},
+				},
+				async execute() {
+					executions++;
+					return { content: [{ type: "text", text: "ok" }] };
+				},
+			};
+			const mock = createMockModel({
+				responses: [
+					{ content: [{ type: "toolCall", id: "remote-1", name: "remote", arguments: {} }] },
+					{ content: ["done"] },
+				],
+			});
+
+			await agentLoop(
+				[createUserMessage("run")],
+				{ systemPrompt: [""], messages: [], tools: [tool] },
+				{
+					model: mock.model,
+					convertToLlm: identityConverter,
+					speculativeToolExecution: {
+						enabled: true,
+						host: {
+							authorize: () => {
+								hostCalls++;
+								return { allowed: true };
+							},
+						},
+						onTelemetry: event => {
+							if (event.outcome === "ineligible") telemetry.push(event.reason ?? "");
+						},
+					},
+				},
+				undefined,
+				mock.stream,
+			).result();
+
+			expect(hostCalls).toBe(0);
+			expect(executions).toBe(1);
+			expect(telemetry).toContain("invalid or irreversible speculation effect");
+		}
+	});
+	it("opens, updates, and finalizes a stream policy before final call admission", async () => {
+		const schema = type({ value: "string" });
+		const calls: string[] = [];
+		const tool: AgentTool<typeof schema> = {
+			name: "streamed",
+			label: "Streamed",
+			description: "Records speculative stream lifecycle",
+			parameters: schema,
+			speculation: {
+				stream: {
+					open: ({ parentToolCallId }) => {
+						calls.push(`open:${parentToolCallId}`);
+						return {
+							update: (toolCall, partialJson) => {
+								calls.push(`update:${toolCall.id}:${partialJson}`);
+							},
+							finalize: ({ toolCall }) => {
+								calls.push(`finalize:${toolCall.id}`);
+							},
+							commit: () => {
+								calls.push("commit");
+							},
+							discard: reason => {
+								calls.push(`discard:${reason}`);
+							},
+						};
+					},
+				},
+			},
+			async execute(_toolCallId, _args, _signal, _onUpdate, context) {
+				calls.push("execute");
+				await context?.[SPECULATIVE_STREAM_SESSION]?.commit();
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+		let turn = 0;
+		const streamFn = () => {
+			const response = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				if (turn++ === 0) {
+					const streamingToolCall = {
+						type: "toolCall" as const,
+						id: "stream-1",
+						name: "streamed",
+						arguments: {},
+					};
+					setStreamingPartialJson(streamingToolCall, '{"value":"ok"}');
+					const streamingPartial = createAssistantMessage([streamingToolCall], "toolUse");
+					const toolCall = {
+						type: "toolCall" as const,
+						id: "stream-1",
+						name: "streamed",
+						arguments: { value: "ok" },
+					};
+					const finalPartial = createAssistantMessage([toolCall], "toolUse");
+					response.push({ type: "start", partial: streamingPartial });
+					response.push({ type: "toolcall_start", contentIndex: 0, partial: streamingPartial });
+					response.push({ type: "toolcall_delta", contentIndex: 0, delta: '"ok"}', partial: streamingPartial });
+					response.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: finalPartial });
+					response.push({ type: "done", reason: "toolUse", message: finalPartial });
+					return;
+				}
+				const partial = createAssistantMessage([{ type: "text", text: "done" }], "stop");
+				response.push({ type: "start", partial });
+				response.push({ type: "done", reason: "stop", message: partial });
+			});
+			return response;
+		};
+
+		await agentLoop(
+			[createUserMessage("stream")],
+			{ systemPrompt: [""], messages: [], tools: [tool] },
+			{
+				model: createMockModel({ responses: [] }).model,
+				convertToLlm: identityConverter,
+				getToolContext: () => ({}),
+				speculativeToolExecution: { enabled: true },
+			},
+			undefined,
+			streamFn,
+		).result();
+
+		expect(calls).toEqual([
+			"open:stream-1",
+			'update:stream-1:{"value":"ok"}',
+			"finalize:stream-1",
+			"execute",
+			"commit",
+		]);
+	});
+
+	it("reconciles streamed calls when the provider iterator ends without a final event", async () => {
+		const schema = type({ value: "string" });
+		const discarded: string[] = [];
+		const tool: AgentTool<typeof schema> = {
+			name: "streamed",
+			label: "Streamed",
+			description: "Records speculative stream cleanup",
+			parameters: schema,
+			speculation: {
+				stream: {
+					open: () => ({
+						update() {},
+						finalize() {},
+						commit() {},
+						discard: reason => {
+							discarded.push(reason);
+						},
+					}),
+				},
+			},
+			async execute() {
+				throw new Error("the trailing response removed this tool call");
+			},
+		};
+		const streamingToolCall = {
+			type: "toolCall" as const,
+			id: "removed-stream",
+			name: "streamed",
+			arguments: {},
+		};
+		setStreamingPartialJson(streamingToolCall, '{"value":"discard"}');
+		const streamingPartial = createAssistantMessage([streamingToolCall], "toolUse");
+		const finalizedToolCall = { ...streamingToolCall, arguments: { value: "discard" } };
+		const events: AssistantMessageEvent[] = [
+			{ type: "start", partial: streamingPartial },
+			{ type: "toolcall_start", contentIndex: 0, partial: streamingPartial },
+			{ type: "toolcall_delta", contentIndex: 0, delta: '"discard"}', partial: streamingPartial },
+			{ type: "toolcall_end", contentIndex: 0, toolCall: finalizedToolCall, partial: streamingPartial },
+		];
+		const cursorResolvedToolCall = { ...finalizedToolCall, [kCursorExecResolved]: true as const };
+		const trailingMessages = [
+			createAssistantMessage([{ type: "text", text: "finished without the call" }], "stop"),
+			createAssistantMessage([cursorResolvedToolCall], "stop"),
+		];
+		for (const trailing of trailingMessages) {
+			const previousDiscardCount = discarded.length;
+			const streamFn = () => {
+				let index = 0;
+				return {
+					result: async () => trailing,
+					[Symbol.asyncIterator]: () => ({
+						next: async (): Promise<IteratorResult<AssistantMessageEvent>> =>
+							index < events.length ? { done: false, value: events[index++] } : { done: true, value: undefined },
+					}),
+				} as AssistantMessageEventStream;
+			};
+
+			await agentLoop(
+				[createUserMessage("stream")],
+				{ systemPrompt: [""], messages: [], tools: [tool] },
+				{
+					model: createMockModel({ responses: [] }).model,
+					convertToLlm: identityConverter,
+					getToolContext: () => ({}),
+					speculativeToolExecution: { enabled: true },
+				},
+				undefined,
+				streamFn,
+			).result();
+
+			expect(discarded.slice(previousDiscardCount)).toEqual(["final outer tool call changed"]);
+		}
+	});
+
+	it("invalidates failed descendants without discarding independent siblings", async () => {
+		const schema = type({ name: "string" });
+		const executions: string[] = [];
+		const tool: AgentTool<typeof schema> = {
+			name: "shadow",
+			label: "Shadow",
+			description: "Exercises dependency scheduling",
+			parameters: schema,
+			speculation: {
+				finalized: {
+					assess: () => ({ eligible: true, effect: { kind: "pure" } }),
+					async execute({ args }) {
+						const name = args.name as string;
+						executions.push(name);
+						if (name === "parent") throw new Error("parent failed");
+						return { kind: "result", result: { content: [{ type: "text", text: name }] }, isError: false };
+					},
+				},
+			},
+			async execute() {
+				throw new Error("ordinary execution is not part of this scheduler test");
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const loopConfig: AgentLoopConfig = {
+			model: createMockModel({ responses: [] }).model,
+			convertToLlm: identityConverter,
+		};
+		const coordinator = new SpeculativeOperationCoordinator(
+			{ enabled: true, maxInFlight: 2 },
+			{ context, loopConfig },
+		);
+		const makeCall = (id: string, name: string) => ({
+			type: "toolCall" as const,
+			id,
+			name: "shadow",
+			arguments: { name },
+		});
+		const parent = await coordinator.admit({
+			candidateId: "parent",
+			parentToolCallId: "eval-1",
+			dependencies: [],
+			toolCall: makeCall("parent-call", "parent"),
+			tool,
+			source: "eval_shadow",
+		});
+		const child = await coordinator.admit({
+			candidateId: "child",
+			parentToolCallId: "eval-1",
+			dependencies: ["parent"],
+			toolCall: makeCall("child-call", "child"),
+			tool,
+			source: "eval_shadow",
+		});
+		const sibling = await coordinator.admit({
+			candidateId: "sibling",
+			parentToolCallId: "eval-1",
+			dependencies: [],
+			toolCall: makeCall("sibling-call", "sibling"),
+			tool,
+			source: "eval_shadow",
+		});
+		await coordinator.finalizeAdmissions();
+
+		await expect(parent?.outcome).rejects.toThrow("parent failed");
+		await expect(child?.outcome).rejects.toThrow("dependency parent did not settle successfully");
+		await expect(sibling?.outcome).resolves.toEqual({
+			kind: "result",
+			result: { content: [{ type: "text", text: "sibling" }] },
+			isError: false,
+		});
+		expect(executions).toEqual(["parent", "sibling"]);
+		await coordinator.close("test complete");
+	});
+
+	it("shares maxInFlight across dependency-aware child operations", async () => {
+		const schema = type({ index: "number" });
+		let running = 0;
+		let peak = 0;
+		const gate = Promise.withResolvers<void>();
+		const tool: AgentTool<typeof schema> = {
+			name: "bounded",
+			label: "Bounded",
+			description: "Measures speculative concurrency",
+			parameters: schema,
+			speculation: {
+				finalized: {
+					assess: () => ({ eligible: true, effect: { kind: "pure" } }),
+					async execute() {
+						running++;
+						peak = Math.max(peak, running);
+						await gate.promise;
+						running--;
+						return { kind: "result", result: { content: [] }, isError: false };
+					},
+				},
+			},
+			async execute() {
+				throw new Error("ordinary execution is not part of this scheduler test");
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const loopConfig: AgentLoopConfig = {
+			model: createMockModel({ responses: [] }).model,
+			convertToLlm: identityConverter,
+		};
+		const coordinator = new SpeculativeOperationCoordinator(
+			{ enabled: true, maxInFlight: 2 },
+			{ context, loopConfig },
+		);
+		const handles = await Promise.all(
+			Array.from({ length: 5 }, (_, index) =>
+				coordinator.admit({
+					candidateId: `candidate-${index}`,
+					parentToolCallId: "eval-1",
+					dependencies: [],
+					toolCall: {
+						type: "toolCall",
+						id: `call-${index}`,
+						name: "bounded",
+						arguments: { index },
+					},
+					tool,
+					source: "eval_shadow",
+				}),
+			),
+		);
+		await coordinator.finalizeAdmissions();
+		expect(running).toBe(2);
+		gate.resolve();
+		await Promise.all(handles.map(handle => handle?.outcome));
+		expect(peak).toBe(2);
+		await coordinator.close("test complete");
+	});
+
+	it("does not spend a speculative completion before final admission", async () => {
+		const schema = type({ prompt: "string" });
+		let executions = 0;
+		const tool: AgentTool<typeof schema> = {
+			name: "completion",
+			label: "Completion",
+			description: "Exercises completion dispatch gating",
+			parameters: schema,
+			speculation: {
+				finalized: {
+					assess: () => ({
+						eligible: true,
+						effect: {
+							kind: "model_completion",
+							provider: "example",
+							model: "example-model",
+							baseUrl: "https://api.example/",
+							egress: [{ authority: "https://api.example", origins: [{ kind: "provider_literal" }] }],
+						},
+					}),
+					async execute() {
+						executions++;
+						return { kind: "result", result: { content: [] }, isError: false };
+					},
+				},
+			},
+			async execute() {
+				throw new Error("ordinary execution is not part of this scheduler test");
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const loopConfig: AgentLoopConfig = {
+			model: createMockModel({ responses: [] }).model,
+			convertToLlm: identityConverter,
+		};
+		const coordinator = new SpeculativeOperationCoordinator(
+			{ enabled: true, host: { authorize: () => ({ allowed: true }) } },
+			{ context, loopConfig },
+		);
+		const handle = await coordinator.admit({
+			candidateId: "completion-1",
+			parentToolCallId: "eval-1",
+			dependencies: [],
+			toolCall: {
+				type: "toolCall",
+				id: "completion-1",
+				name: "completion",
+				arguments: { prompt: "hello" },
+			},
+			tool,
+			source: "eval_shadow",
+		});
+		expect(handle).toBeDefined();
+		coordinator.registerStreamSession("eval-1", {
+			update() {},
+			finalize() {},
+			commit() {},
+			discard() {},
+		});
+		const outerEvalCall = { type: "toolCall" as const, id: "eval-1", name: "eval", arguments: {} };
+		await coordinator.streamSession("eval-1")?.finalize({ toolCall: outerEvalCall, args: {} });
+		expect(executions).toBe(0);
+		await coordinator.reconcileFinalCalls(new Map([[outerEvalCall.id, outerEvalCall]]));
+		expect(executions).toBe(0);
+		await coordinator.finalizeAdmissions();
+		await handle?.outcome;
+		expect(executions).toBe(1);
+		await coordinator.close("test complete");
+	});
+
+	it("normalizes non-positive maxInFlight values so admitted work cannot deadlock", async () => {
+		const schema = type({});
+		const tool: AgentTool<typeof schema> = {
+			name: "bounded",
+			label: "Bounded",
+			description: "Runs one bounded candidate",
+			parameters: schema,
+			speculation: {
+				finalized: {
+					assess: () => ({ eligible: true, effect: { kind: "pure" } }),
+					async execute() {
+						return { kind: "result", result: { content: [{ type: "text", text: "done" }] }, isError: false };
+					},
+				},
+			},
+			async execute() {
+				throw new Error("ordinary execution is not part of this scheduler test");
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const coordinator = new SpeculativeOperationCoordinator(
+			{ enabled: true, maxInFlight: 0 },
+			{
+				context,
+				loopConfig: {
+					model: createMockModel({ responses: [] }).model,
+					convertToLlm: identityConverter,
+				},
+			},
+		);
+		const handle = await coordinator.admit({
+			candidateId: "bounded-1",
+			parentToolCallId: "eval-1",
+			dependencies: [],
+			toolCall: { type: "toolCall", id: "bounded-1", name: "bounded", arguments: {} },
+			tool,
+			source: "eval_shadow",
+		});
+		await coordinator.finalizeAdmissions();
+
+		expect(
+			await Promise.race([handle?.outcome.then(() => "completed"), Bun.sleep(100).then(() => "timed-out")]),
+		).toBe("completed");
+		await coordinator.close("test complete");
+	});
+
+	it("keeps the session-scoped host open when a turn coordinator closes", async () => {
+		let closeCalls = 0;
+		const coordinator = new SpeculativeOperationCoordinator(
+			{
+				enabled: true,
+				host: {
+					authorize: () => ({ allowed: true }),
+					close: () => {
+						closeCalls++;
+					},
+				},
+			},
+			{
+				context: { systemPrompt: [""], messages: [], tools: [] },
+				loopConfig: {
+					model: createMockModel({ responses: [] }).model,
+					convertToLlm: identityConverter,
+				},
+			},
+		);
+
+		await coordinator.close("turn complete");
+
+		expect(closeCalls).toBe(0);
 	});
 });

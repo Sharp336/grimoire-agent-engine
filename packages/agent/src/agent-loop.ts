@@ -34,6 +34,7 @@ import * as AIError from "@oh-my-pi/pi-ai/error";
 import {
 	type CursorExecResolvedCarrier,
 	copyCursorExecResolved,
+	getStreamingPartialJson,
 	kCursorExecResolved,
 } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import {
@@ -50,6 +51,7 @@ import { logger, sanitizeText, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { agentPauseGate } from "./pause";
 import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
+import { SpeculativeOperationCoordinator } from "./speculative-execution";
 import {
 	type AgentTelemetry,
 	failChatSpan,
@@ -84,9 +86,13 @@ import type {
 	SteeringQueueState,
 	StreamFn,
 } from "./types";
-import { ASIDE_MESSAGE_COMMIT, ASIDE_MESSAGE_DISCARD, isSoftToolRequirement } from "./types";
+import {
+	ASIDE_MESSAGE_COMMIT,
+	ASIDE_MESSAGE_DISCARD,
+	isSoftToolRequirement,
+	SPECULATIVE_STREAM_SESSION,
+} from "./types";
 import { yieldIfDue } from "./utils/yield";
-
 /** Stop-details marker for a provider error after assistant content/tool args already streamed. */
 export const STREAM_INTERRUPTED_AFTER_CONTENT_STOP_DETAIL = "stream_interrupted_after_content";
 
@@ -1340,6 +1346,7 @@ async function runLoopBody(
 
 				const toolResults: ToolResultMessage[] = [];
 				if (softNonCompliant && softRequiredTool !== undefined) {
+					SpeculativeOperationCoordinator.discardForMessage(message, "soft tool requirement deferred execution");
 					if (softRequirementState.escalations >= MAX_SOFT_TOOL_ESCALATIONS) {
 						throw new Error(
 							`Soft tool requirement '${softRequiredTool}' was not satisfied after ${MAX_SOFT_TOOL_ESCALATIONS} forced turns; aborting to avoid an unbounded force loop.`,
@@ -1388,6 +1395,11 @@ async function runLoopBody(
 						newMessages.push(result);
 					}
 				} else if (toolCalls.length > 0) {
+					SpeculativeOperationCoordinator.discardForMessage(
+						message,
+						deadlinePassed ? "deadline exceeded before dispatch" : "final message was not runnable",
+						deadlinePassed ? "aborted" : "discarded",
+					);
 					// Turn ended on a non-runnable reason (`length` truncation) or deadline was exceeded
 					// but left toolCall blocks behind. pair each with a placeholder result.
 					const skipReason = deadlinePassed ? "aborted" : message.stopReason === "length" ? "length" : "skipped";
@@ -1715,7 +1727,17 @@ async function streamAssistantResponse(
 			let partialMessage: AssistantMessage | null = null;
 			let addedPartial = false;
 			const completedToolCallIds = new Set<string>();
+			const speculationConfig =
+				config.speculativeToolExecution?.enabled === true ? config.speculativeToolExecution : undefined;
+			const speculationCoordinator = speculationConfig
+				? new SpeculativeOperationCoordinator(speculationConfig, {
+						context,
+						loopConfig: config,
+						signal: requestSignal,
+					})
+				: undefined;
 
+			let providerStreamSettled = false;
 			const responseIterator = response[Symbol.asyncIterator]();
 			const finishAbortedStream = async (): Promise<AssistantMessage> => {
 				try {
@@ -1724,6 +1746,7 @@ async function streamAssistantResponse(
 				} catch {
 					// Provider cancellation failures cannot change the committed aborted message.
 				}
+				await speculationCoordinator?.discardAll("run aborted", "aborted");
 				const aborted = emitAbortedAssistantMessage(
 					partialMessage,
 					addedPartial,
@@ -1765,7 +1788,10 @@ async function streamAssistantResponse(
 					} else {
 						next = await responseIterator.next();
 					}
-					if (next.done) break;
+					if (next.done) {
+						providerStreamSettled = true;
+						break;
+					}
 
 					const event = next.value;
 					if (event.type === "done" || event.type === "error") {
@@ -1808,6 +1834,35 @@ async function streamAssistantResponse(
 								await prepareToolCallDispatch(finalMessage, context, config, requestSignal),
 							);
 						}
+						if (speculationCoordinator) {
+							if (
+								requestSignal?.aborted ||
+								finalMessage.stopReason === "error" ||
+								finalMessage.stopReason === "aborted" ||
+								finalMessage.stopReason === "length"
+							) {
+								await speculationCoordinator.discardAll(
+									requestSignal?.aborted
+										? "run aborted"
+										: `final message stop reason: ${finalMessage.stopReason}`,
+									requestSignal?.aborted ? "aborted" : "discarded",
+								);
+							} else {
+								await speculationCoordinator.reconcileFinalCalls(
+									new Map(
+										finalMessage.content
+											.filter(
+												(content): content is AgentToolCall =>
+													content.type === "toolCall" &&
+													(content as CursorExecResolvedCarrier)[kCursorExecResolved] !== true,
+											)
+											.map(toolCall => [toolCall.id, toolCall]),
+									),
+								);
+								await speculationCoordinator.finalizeAdmissions();
+								speculationCoordinator.attach(finalMessage);
+							}
+						}
 						if (addedPartial) {
 							context.messages[context.messages.length - 1] = finalMessage;
 						} else {
@@ -1817,6 +1872,7 @@ async function streamAssistantResponse(
 							stream.push({ type: "message_start", message: snapshotAssistantMessage(finalMessage) });
 						}
 						stream.push({ type: "message_end", message: snapshotAssistantMessage(finalMessage) });
+						providerStreamSettled = true;
 						await finishChat(finalMessage);
 						return finalMessage;
 					}
@@ -1862,8 +1918,61 @@ async function streamAssistantResponse(
 						case "toolcall_delta":
 						case "toolcall_end":
 							if (partialMessage) {
+								if (event.type === "toolcall_start" && speculationCoordinator) {
+									speculationCoordinator.register(event.contentIndex);
+									const toolCall = event.partial.content[event.contentIndex];
+									if (toolCall?.type === "toolCall") {
+										const tool = context.tools?.find(candidate => candidate.name === toolCall.name);
+										try {
+											const session = await tool?.speculation?.stream?.open({
+												coordinator: speculationCoordinator,
+												parentToolCallId: toolCall.id,
+											});
+											if (session) {
+												if (!speculationCoordinator.registerStreamSession(toolCall.id, session)) {
+													await session.discard("stream speculation coordinator rejected session");
+												}
+											}
+										} catch {
+											await speculationCoordinator.discardStreamSession(
+												toolCall.id,
+												"stream speculation policy failed to open",
+											);
+										}
+									}
+								}
+								if (event.type === "toolcall_delta") {
+									const toolCall = event.partial.content[event.contentIndex];
+									if (toolCall?.type === "toolCall") {
+										try {
+											await speculationCoordinator
+												?.streamSession(toolCall.id)
+												?.update(toolCall, getStreamingPartialJson(toolCall));
+										} catch {
+											await speculationCoordinator?.discardStreamSession(
+												toolCall.id,
+												"stream speculation update failed",
+											);
+										}
+									}
+								}
 								if (event.type === "toolcall_end") {
 									completedToolCallIds.add(event.toolCall.id);
+									const session = speculationCoordinator?.streamSession(event.toolCall.id);
+									try {
+										await session?.finalize({
+											toolCall: event.toolCall,
+											args:
+												event.toolCall.arguments && typeof event.toolCall.arguments === "object"
+													? (event.toolCall.arguments as Record<string, unknown>)
+													: {},
+										});
+									} catch {
+										await speculationCoordinator?.discardStreamSession(
+											event.toolCall.id,
+											"stream speculation finalize failed",
+										);
+									}
 								}
 								partialMessage = event.partial;
 								context.messages[context.messages.length - 1] = partialMessage;
@@ -1879,11 +1988,17 @@ async function streamAssistantResponse(
 									message: messageSnapshot,
 								});
 							}
+							if (event.type === "toolcall_end" && speculationCoordinator && speculationConfig) {
+								speculationCoordinator.admitFinalized(context, event.toolCall, config, requestSignal);
+							}
 							break;
 					}
 				}
 			} finally {
 				detachAbortListener?.();
+				if (!providerStreamSettled) {
+					await speculationCoordinator?.discardAll("provider stream failed", "aborted");
+				}
 			}
 
 			let trailing = await response.result();
@@ -1905,11 +2020,39 @@ async function streamAssistantResponse(
 				}
 			}
 			trailing = snapshotAssistantMessage(trailing);
+			if (speculationCoordinator) {
+				if (
+					requestSignal?.aborted ||
+					trailing.stopReason === "error" ||
+					trailing.stopReason === "aborted" ||
+					trailing.stopReason === "length"
+				) {
+					await speculationCoordinator.discardAll(
+						requestSignal?.aborted ? "run aborted" : `final message stop reason: ${trailing.stopReason}`,
+						requestSignal?.aborted ? "aborted" : "discarded",
+					);
+				} else {
+					await speculationCoordinator.reconcileFinalCalls(
+						new Map(
+							trailing.content
+								.filter(
+									(content): content is AgentToolCall =>
+										content.type === "toolCall" &&
+										(content as CursorExecResolvedCarrier)[kCursorExecResolved] !== true,
+								)
+								.map(toolCall => [toolCall.id, toolCall]),
+						),
+					);
+					await speculationCoordinator.finalizeAdmissions();
+					speculationCoordinator.attach(trailing);
+				}
+			}
 			if (addedPartial) {
 				context.messages[context.messages.length - 1] = trailing;
 				stream.push({ type: "message_end", message: snapshotAssistantMessage(trailing) });
 			}
 			await finishChat(trailing);
+			providerStreamSettled = true;
 			return trailing;
 		});
 	} catch (err) {
@@ -2298,6 +2441,7 @@ async function executeToolCalls(
 	const preparedDispatch =
 		preparedDispatchByMessage.get(assistantMessage) ??
 		(await prepareToolCallDispatch(assistantMessage, currentContext, config, signal));
+	const speculationCoordinator = SpeculativeOperationCoordinator.take(assistantMessage);
 
 	const records = toolCalls.map(toolCall => {
 		const prepared = preparedDispatch.get(toolCall.id) ?? {
@@ -2528,40 +2672,61 @@ async function executeToolCalls(
 					: effectiveArgs;
 				record.args = executionArgs;
 
-				// The cooperative steering signal rides the loop-owned
-				// ToolCallContext (surfacing as `ctx.toolCall.steeringSignal`):
-				// AgentToolContext itself is app-built via declaration merging, so
-				// the loop cannot construct or extend one structurally.
-				const toolContext = getToolContext
-					? getToolContext({
-							batchId,
-							index,
-							total: toolCalls.length,
-							toolCalls: toolCallInfos,
-							steeringSignal: steeringSoftController.signal,
-							providerMetadata: toolCall.providerMetadata,
-						})
+				const speculativeOutcome = speculationCoordinator
+					? await speculationCoordinator.claim(tool, toolCall, executionArgs)
 					: undefined;
-				executionStarted = true;
-				const rawResult = await tool.execute(
-					toolCall.id,
-					executionArgs,
-					record.signal,
-					partialResult => {
-						stream.push({
-							type: "tool_execution_update",
-							toolCallId: toolCall.id,
-							toolName: toolCall.name,
-							args: executionArgs,
-							partialResult: coerceToolResult(partialResult).result,
-						});
-					},
-					toolContext,
-				);
-				completedToolExecution = true;
-				const coerced = coerceToolResult(rawResult);
-				result = coerced.result;
-				if (coerced.malformed || result.isError) isError = true;
+				if (speculativeOutcome) {
+					result = speculativeOutcome.result;
+					isError = speculativeOutcome.isError;
+					completedToolExecution = true;
+					executionStarted = true;
+				}
+
+				if (!completedToolExecution) {
+					// The cooperative steering signal rides the loop-owned
+					// ToolCallContext (surfacing as `ctx.toolCall.steeringSignal`):
+					// AgentToolContext itself is app-built via declaration merging, so
+					// the loop cannot construct or extend one structurally.
+					const streamSession = speculationCoordinator?.takeStreamSession(toolCall.id);
+					const toolContext = getToolContext?.({
+						batchId,
+						index,
+						total: toolCalls.length,
+						toolCalls: toolCallInfos,
+						steeringSignal: steeringSoftController.signal,
+						providerMetadata: toolCall.providerMetadata,
+					});
+					if (streamSession && toolContext) {
+						toolContext[SPECULATIVE_STREAM_SESSION] = streamSession;
+					} else if (streamSession && !streamSession.contextIndependent) {
+						await streamSession.discard("outer tool context cannot carry stream speculation");
+					}
+					executionStarted = true;
+					let rawResult: unknown;
+					try {
+						rawResult = await tool.execute(
+							toolCall.id,
+							executionArgs,
+							record.signal,
+							partialResult => {
+								stream.push({
+									type: "tool_execution_update",
+									toolCallId: toolCall.id,
+									toolName: toolCall.name,
+									args: executionArgs,
+									partialResult: coerceToolResult(partialResult).result,
+								});
+							},
+							toolContext,
+						);
+					} finally {
+						await streamSession?.discard("outer tool completed without committing stream speculation");
+					}
+					completedToolExecution = true;
+					const coerced = coerceToolResult(rawResult);
+					result = coerced.result;
+					if (coerced.malformed || result.isError) isError = true;
+				}
 			} catch (e) {
 				caughtError = e;
 				result = {
@@ -2762,6 +2927,7 @@ async function executeToolCalls(
 			emitToolResult(record, createSkippedToolResult(interruptState.source, false), true);
 		}
 	}
+	await speculationCoordinator?.discardAll("candidate was not dispatched");
 
 	return { toolResults: emittedToolResults };
 }
