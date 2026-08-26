@@ -17,6 +17,7 @@ import { removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
 
 interface FakeAcpBuiltinSession {
 	fastMode: boolean;
+	fastModeActive: boolean;
 	forcedToolChoice: string | undefined;
 	isStreaming: boolean;
 	sessionFile: string | undefined;
@@ -28,6 +29,7 @@ interface FakeAcpBuiltinSession {
 	toggleFastMode(): boolean;
 	setFastMode(enabled: boolean): boolean;
 	isFastModeEnabled(): boolean;
+	isFastModeActive(): boolean;
 	setForcedToolChoice(toolName: string): void;
 	fetchUsageReports?: () => Promise<unknown>;
 	getAsyncJobSnapshot: (opts?: { recentLimit?: number }) => { running: unknown[]; recent: unknown[] } | null;
@@ -84,6 +86,7 @@ function createRuntime() {
 	let fakeSessionManager: FakeAcpBuiltinSessionManager | undefined;
 	const session: FakeAcpBuiltinSession = {
 		fastMode: false,
+		fastModeActive: false,
 		forcedToolChoice: undefined as string | undefined,
 		isStreaming: false,
 		sessionFile: undefined,
@@ -102,6 +105,9 @@ function createRuntime() {
 		},
 		isFastModeEnabled() {
 			return this.fastMode;
+		},
+		isFastModeActive() {
+			return this.fastModeActive;
 		},
 		setForcedToolChoice(toolName: string) {
 			this.forcedToolChoice = toolName;
@@ -236,6 +242,28 @@ function createRuntime() {
 describe("ACP builtin slash commands", () => {
 	it("consumes fast status without returning prompt text", async () => {
 		const { output, runtime } = createRuntime();
+
+		const result = await executeAcpBuiltinSlashCommand("/fast status", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(output).toEqual(["Fast mode is off."]);
+	});
+
+	it("reports active automatic fast mode as on", async () => {
+		const { output, runtime, session } = createRuntime();
+		session.model = { provider: "openai", id: "gpt-5.2" };
+		session.fastModeActive = true;
+
+		const result = await executeAcpBuiltinSlashCommand("/fast status", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(output).toEqual(["Fast mode is on."]);
+	});
+
+	it("excludes an uncontrollable Fireworks-only priority tier from fast status", async () => {
+		const { output, runtime, session } = createRuntime();
+		session.model = { provider: "fireworks", id: "some-fireworks-model" };
+		session.fastModeActive = true;
 
 		const result = await executeAcpBuiltinSlashCommand("/fast status", runtime);
 
