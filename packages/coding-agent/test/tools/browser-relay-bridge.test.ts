@@ -1265,6 +1265,101 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext3.rpcs("send")[0]!.tabId).toBe(1);
 		expect(cdp.messages.find(m => m.id === cmdId)?.error).toBeUndefined();
 	});
+
+	it("does not mint auto-attach sessions when the user cancels the debugger mid-replay", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+		// Auto-attach holder: recovery mints a replacement session for it once the
+		// replay finishes. A journaled subscription gives the replay an RPC to gate on.
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: ++msgSeq, sessionId: pageSession, method: "Target.setAutoAttach" }),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId: pageSession, method: "Network.enable" }));
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		// The replay's Network.enable is now in flight (unacknowledged).
+		await waitFor(() => ext2.pending("send").length === 1, "in-flight replay command");
+		const attachedBefore = cdp.attachedSessions().length;
+
+		// The user dismisses the debugger infobar while the replay RPC is in flight:
+		// the extension reports a user-initiated detach. This bans the tab and
+		// retracts its sessions.
+		bridge.extMessage(ext2, JSON.stringify({ t: "detached", tabId: 1, reason: "canceled_by_user" }));
+		await flush();
+
+		// The replay RPC now resolves. The continuation must revalidate and NOT mint
+		// fresh auto-attach sessions for the now-detached, banned tab.
+		ack(bridge, ext2, "send");
+		await flush();
+		expect(cdp.attachedSessions().length).toBe(attachedBefore);
+	});
+
+	it("serializes replay across repeated same-socket hellos instead of racing a second", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+		for (const method of ["Network.enable", "Page.enable"]) {
+			bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId: pageSession, method }));
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+		}
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		// Replay of the first journaled subscription is now in flight on ext2.
+		await waitFor(() => ext2.pending("send").length === 1, "first replay command in flight");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable"]);
+
+		// Another tab's delayed guard detach fires a second hello on the SAME socket
+		// while this tab's replay is still in flight and reports it attached. It must
+		// not launch a competing replay: the send count stays put until the active
+		// replay is acknowledged and advances one command at a time.
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "hello",
+				userAgent: "test",
+				browserVersion: "Chrome/151.0.0.0",
+				tabs: [tab({ tabId: 1, groupId: -1 })],
+				attachedTabIds: [1],
+				recoverableTabIds: [1],
+			}),
+		);
+		await flush();
+		// No duplicate Network.enable — still exactly one send in flight.
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable"]);
+
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.rpcs("send").length === 2, "second replay command");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable", "Page.enable"]);
+		ack(bridge, ext2, "send");
+		await flush();
+		// Exactly the two journaled subscriptions replayed once each — no concurrent
+		// second task doubled them.
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable", "Page.enable"]);
+	});
 });
 
 describe("RelayBridge Runtime sessions", () => {

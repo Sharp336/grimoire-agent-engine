@@ -137,6 +137,8 @@ class TabState {
 	runtimeGeneration = 0;
 	/** Replays preserved page-session subscriptions after a guard-authorized attach. */
 	restoring: Promise<void> | null = null;
+	/** Extension socket the in-flight `restoring` replay is bound to (null when idle). */
+	restoringExt: RelaySocket | null = null;
 	/** Recovery replay must complete, including after an extension socket replacement. */
 	restorePending = false;
 	/** Effective state of subscription commands executed on the shared Chrome root. */
@@ -293,6 +295,7 @@ export class RelayBridge {
 			tab.attached = false;
 			tab.attaching = null;
 			tab.restoring = null;
+			tab.restoringExt = null;
 			this.#resetRuntime(tab);
 			// The extension dissolves omp groups on disconnect (or died along
 			// with them); grouping state is unknowable until the next hello.
@@ -377,11 +380,20 @@ export class RelayBridge {
 		for (const tab of this.#tabs.values()) {
 			tab.attached = attachedNow.has(tab.tabId);
 			tab.attaching = null;
-			tab.restoring = null;
+			// A same-socket hello (another tab's delayed guard detach triggering a
+			// refresh) can land while this tab's replay is still in flight. A real
+			// socket replacement rejects the in-flight RPCs (ExtensionReplacedError),
+			// but its `restoring.finally` clears the pointer only on a later microtask,
+			// so `tab.restoring` may still be set here. Distinguish by the socket the
+			// replay is bound to: keep an active same-socket replay (do not relaunch a
+			// second, concurrent one below); reset only when the socket actually
+			// changed, so the replacement hello restarts the interrupted replay.
+			const sameSocketReplay = tab.restoring !== null && tab.restoringExt === this.#ext;
+			if (!sameSocketReplay) tab.restoring = null;
 			const holders = this.#sessionHolders(tab.tabId);
 			const preserve = holders.filter(conn => !conn.autoAttach && conn.sessionsForTab(tab.tabId).length > 0);
 			if (tab.attached) {
-				if (tab.restorePending) {
+				if (tab.restorePending && !sameSocketReplay) {
 					// A socket replacement can interrupt replay after Chrome accepted only
 					// part of it. The replacement hello still reports the debugger attached,
 					// so resume the pending journal instead of treating the root as ready.
@@ -1181,6 +1193,16 @@ export class RelayBridge {
 				}
 				tab.restorePending = false;
 			}
+			// The user can cancel the debugger attachment while the final replay RPC
+			// is in flight: #onTabDetached then bans the tab and retracts its
+			// sessions, but this continuation's resolved RPC would otherwise mint
+			// fresh auto-attach sessions for a now-detached tab. Those sessions look
+			// usable but every forwarded command fails, and they keep the tab
+			// recorded as held. Revalidate against the live state before emitting.
+			if (tab.banned || !tab.attached || this.#ext !== ext) {
+				this.#detachIfUnheld(tab.tabId);
+				return;
+			}
 			for (const conn of autoAttachConns) {
 				if (this.#conns.has(conn.id)) this.#emitTabAttached(conn, tab);
 			}
@@ -1193,9 +1215,13 @@ export class RelayBridge {
 			this.#detachIfUnheld(tab.tabId);
 		})();
 		const task = restoring.finally(() => {
-			if (tab.restoring === task) tab.restoring = null;
+			if (tab.restoring === task) {
+				tab.restoring = null;
+				tab.restoringExt = null;
+			}
 		});
 		tab.restoring = task;
+		tab.restoringExt = ext;
 	}
 
 	/** Restore root-domain state promised by page sessions preserved across recovery. */
