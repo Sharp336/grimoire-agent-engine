@@ -1565,22 +1565,19 @@ function packageManagerUpdateSteps(manager: "bun" | "npm", release: ReleaseInfo)
 
 /**
  * Run a package-manager self-update, repairing the launcher when the manager
- * leaves this install without a working `omp`.
+ * succeeds without updating it or leaves no working launcher behind.
  *
  * A global reinstall has to replace files the running process still holds open.
  * On Windows that is unavoidable — the launcher image, the loaded native addon,
- * and the package tree being executed are all locked — and either manager can
- * end the attempt with no usable launcher: npm moves the global bin shims aside
- * before unpacking and restores them only if its own rollback succeeds, and bun
- * aborts the whole install on the first file it cannot overwrite, which leaves
- * a half-replaced package the launcher can no longer run.
+ * and the package tree being executed are all locked. Bun writes the new
+ * `.bunx` metadata before ignoring EBUSY from the launcher replacement, while
+ * npm can retire its shims before an install fails.
  *
- * Only a launcher that is gone from PATH, or that can no longer report a
- * version, is repaired — by taking its path over with the standalone release
- * binary. A launcher that still reports the old version means the install did
- * not land (usually a transient registry failure): the previous version keeps
- * working, so that case surfaces the error and leaves the managed install
- * alone instead of migrating a healthy install off its manager.
+ * A successful install whose PATH launcher still reports the previous version
+ * means the manager no longer controls that launcher, so it is taken over with
+ * the standalone binary. If the install itself failed, a launcher that still
+ * reports a version is preserved and the manager error is surfaced; only a
+ * missing or unusable launcher is repaired.
  */
 export async function updateViaManager(
 	release: ReleaseInfo,
@@ -1597,8 +1594,9 @@ export async function updateViaManager(
 		installError = err;
 	}
 	const result = verification ?? (await steps.verify());
-	const launcherBroken = !result.ok && (result.path === undefined || result.actual === undefined);
-	if (!launcherBroken) {
+	const launcherNeedsRepair =
+		!result.ok && (installError === undefined || result.path === undefined || result.actual === undefined);
+	if (!launcherNeedsRepair) {
 		if (installError) throw installError;
 		printVerificationResult(result, release.version);
 		return;
@@ -1608,13 +1606,13 @@ export async function updateViaManager(
 	}
 	console.log(
 		chalk.yellow(
-			`\n${steps.manager} left no working ${APP_NAME} launcher (${formatVerificationFailure(result, release.version)}); installing the standalone binary at ${launcherPath}.`,
+			`\n${steps.manager} did not install a working ${APP_NAME} ${release.version} launcher (${formatVerificationFailure(result, release.version)}); installing the standalone binary at ${launcherPath}.`,
 		),
 	);
 	try {
 		await steps.repair(launcherPath);
 	} catch (err) {
-		throw new Error(`${steps.manager} install failed and the launcher could not be repaired: ${err}`, {
+		throw new Error(`${steps.manager} update did not produce a working launcher and binary repair failed: ${err}`, {
 			cause: installError ?? err,
 		});
 	}

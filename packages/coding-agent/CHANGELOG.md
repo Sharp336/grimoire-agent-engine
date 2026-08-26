@@ -42,6 +42,7 @@
 - Expanded git TUI navigation and file-management shortcuts, including refresh, stage/unstage, directory operations, hunk and file navigation, pane movement, diff-view selection, commit-form access, and paging.
 
 ### Fixed
+- Fixed `omp update` leaving standalone Windows binaries on the old version when stale Bun launcher metadata was present.
 
 - Fixed race condition where tunnel startup was incorrectly reported as failure on quick process exit
 - Fixed Obsidian theme task instructions and usage-limit text becoming unreadable against dark backgrounds.

@@ -1513,13 +1513,13 @@ describe("update-cli manager update recovery", () => {
 		expect(calls).toEqual(["install", `repair:${launcherPath}`]);
 	});
 
-	it("leaves a working managed install on its manager when the new version did not land", async () => {
+	it("takes the launcher over when the manager succeeds but the previous version remains", async () => {
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		const { steps, calls } = scriptedSteps({ install: { ok: false, path: launcherPath, actual: "17.4.2" } });
 
 		await updateViaManager(release, launcherPath, steps);
 
-		expect(calls).toEqual(["install"]);
+		expect(calls).toEqual(["install", `repair:${launcherPath}`]);
 	});
 
 	it("surfaces the install failure without a takeover when the previous launcher still runs", async () => {
@@ -1559,7 +1559,7 @@ describe("update-cli manager update recovery", () => {
 		});
 
 		await expect(updateViaManager(release, launcherPath, steps)).rejects.toThrow(
-			"launcher could not be repaired: Error: no binary asset",
+			"update did not produce a working launcher and binary repair failed: Error: no binary asset",
 		);
 	});
 });
