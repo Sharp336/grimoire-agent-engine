@@ -734,7 +734,7 @@ if "__omp_prelude_loaded__" not in globals():
         return [text[i : i + max_chars] for i in range(0, len(text), max_chars)]
 
     def search(text, pattern, flags=0, *, limit=100, max_line_chars=1000):
-        """Return 'L<lineno>: <line>' for each line matching the regex `pattern`, stopping after `limit` matches (default 100); a trailing '... (truncated, more matches may exist)' entry marks an early stop. Matching lines longer than `max_line_chars` characters (default 1000) are truncated to that many characters with a '... (line truncated)' suffix so a single oversized line cannot blow up the result."""
+        """Return 'L<lineno>: <line>' for each line matching the regex `pattern`, stopping after `limit` matches (default 100); a trailing '... (truncated, more matches may exist)' entry marks an early stop. Matching lines longer than `max_line_chars` characters (default 1000) are not cut from the line start — that could drop the matched region entirely (e.g. a key near the end of one minified JSON line) — instead a bounded window around the first match is kept, emitted as 'L<lineno>@<offset>: <window>' with '...' markers on cut sides and a '... (line truncated)' suffix for the right cut, so a single oversized line cannot blow up the result."""
         if not isinstance(limit, int) or limit <= 0:
             raise ValueError("search limit must be a positive integer")
         if not isinstance(max_line_chars, int) or max_line_chars <= 0:
@@ -749,12 +749,43 @@ if "__omp_prelude_loaded__" not in globals():
         # numbering and the rstrip() trim are identical to the old behavior.
         # The result list is bounded too: scanning stops as soon as `limit`
         # matches are retained (trailing marker appended), and each retained
-        # match is itself capped at `max_line_chars` characters (a '... (line
-        # truncated)' suffix marks a cut line). A broad or frequent pattern on
+        # match is itself capped at `max_line_chars` characters. An oversized
+        # matching line is not cut from its start — that can drop the matched
+        # region entirely (e.g. a key near the end of one minified JSON
+        # line), defeating the discovery role — instead a bounded window
+        # around the first match is kept, annotated with the match offset as
+        # `L<n>@<offset>:`, "..." markers on any cut side, and a '... (line
+        # truncated)' suffix for the right cut. A broad or frequent pattern on
         # a huge payload — including one unbroken multi-MB line, e.g.
         # minified JSON/base64, whose whole content a match would otherwise
         # copy — cannot grow the output past the input and OOM the eval
         # worker.
+        def _entry(line):
+            if not rx.search(line):
+                return None
+            content = line.rstrip()
+            if len(content) <= max_line_chars:
+                return f"L{line_no}: {content}"
+            # Oversized line: keep a bounded window centered on the first
+            # match instead of the line prefix, so the excerpt always
+            # contains the matched region. The `L<n>@<offset>:` annotation
+            # pins the window's character offset in the line; "..." marks a
+            # cut on either side.
+            first = rx.search(line)
+            match_start = first.start() if first else 0
+            k = max_line_chars // 2
+            start = match_start - k
+            end = match_start + (max_line_chars - k)
+            if start < 0:
+                start = 0
+                end = min(len(line), max_line_chars)
+            elif end > len(line):
+                end = len(line)
+                start = max(0, len(line) - max_line_chars)
+            left = "..." if start > 0 else ""
+            right = "... (line truncated)" if end < len(line) else ""
+            return f"L{line_no}@{start}: {left}{line[start:end].rstrip()}{right}"
+
         out = []
         line_no = 0
         last = 0
@@ -762,22 +793,17 @@ if "__omp_prelude_loaded__" not in globals():
             line_no += 1
             line = text[last : m.start()]
             last = m.end()
-            if rx.search(line):
-                content = line.rstrip()
-                if len(content) > max_line_chars:
-                    content = content[:max_line_chars] + "... (line truncated)"
-                out.append(f"L{line_no}: {content}")
+            entry = _entry(line)
+            if entry is not None:
+                out.append(entry)
                 if len(out) == limit and last < len(text):
                     out.append("... (truncated, more matches may exist)")
                     return out
         if last < len(text):
             line_no += 1
-            line = text[last:]
-            if rx.search(line):
-                content = line.rstrip()
-                if len(content) > max_line_chars:
-                    content = content[:max_line_chars] + "... (line truncated)"
-                out.append(f"L{line_no}: {content}")
+            entry = _entry(text[last:])
+            if entry is not None:
+                out.append(entry)
         return out
 
     _line_break_re = re.compile(r"\r\n|[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]")

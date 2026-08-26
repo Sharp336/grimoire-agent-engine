@@ -312,12 +312,17 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		// identical to the split-based behavior. The result list is bounded
 		// too: scanning stops as soon as `limit` matches are retained (a
 		// trailing marker notes the early stop), and each retained match is
-		// itself capped at `max_line_chars` characters (a "... (line
-		// truncated)" suffix marks a cut line). A broad or frequent pattern
-		// on a huge payload — including one unbroken multi-MB line, e.g.
-		// minified JSON/base64, whose whole content a match would otherwise
-		// copy — cannot grow the output past the input and OOM the eval
-		// worker.
+		// itself capped at `max_line_chars` characters. An oversized
+		// matching line is not cut from its start — that can drop the
+		// matched region entirely (e.g. a key near the end of one minified
+		// JSON line), defeating the discovery role — instead a bounded
+		// window around the first match is kept, annotated with the match
+		// offset as `L<n>@<offset>:`, "..." markers on any cut side, and a
+		// "... (line truncated)" suffix for the right cut. A broad or
+		// frequent pattern on a huge payload — including one unbroken
+		// multi-MB line, e.g. minified JSON/base64, whose whole content a
+		// match would otherwise copy — cannot grow the output past the
+		// input and OOM the eval worker.
 		const str = String(text);
 		const out = [];
 		let lineNo = 0;
@@ -328,13 +333,33 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			// Stateful g/y patterns must restart per line or they skip
 			// matches after the first hit.
 			rx.lastIndex = 0;
-			if (rx.test(line)) {
-				let content = line.replace(/\s+$/, "");
-				if (content.length > maxLineChars) {
-					content = `${content.slice(0, maxLineChars)}... (line truncated)`;
-				}
+			if (!rx.test(line)) return;
+			const content = line.replace(/\s+$/, "");
+			if (content.length <= maxLineChars) {
 				out.push(`L${lineNo}: ${content}`);
+				return;
 			}
+			// Oversized line: keep a bounded window centered on the first
+			// match instead of the line prefix, so the excerpt always
+			// contains the matched region. The `L<n>@<offset>:` annotation
+			// pins the window's character offset in the line; "..." marks a
+			// cut on either side.
+			rx.lastIndex = 0;
+			const m = rx.exec(line);
+			const matchStart = m ? m.index : 0;
+			const k = Math.floor(maxLineChars / 2);
+			let start = matchStart - k;
+			let end = matchStart + (maxLineChars - k);
+			if (start < 0) {
+				start = 0;
+				end = Math.min(line.length, maxLineChars);
+			} else if (end > line.length) {
+				end = line.length;
+				start = Math.max(0, line.length - maxLineChars);
+			}
+			const left = start > 0 ? "..." : "";
+			const right = end < line.length ? "... (line truncated)" : "";
+			out.push(`L${lineNo}@${start}: ${left}${line.slice(start, end).replace(/\s+$/, "")}${right}`);
 		};
 		let m;
 		while ((m = lineBreak.exec(str)) !== null) {

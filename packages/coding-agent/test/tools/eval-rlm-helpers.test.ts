@@ -177,37 +177,73 @@ describe("eval JS RLM helpers", () => {
 		const long = "y".repeat(5000);
 		// Short lines pass through unchanged (default cap is 1000).
 		expect(search("short\n", "short")).toEqual(["L1: short"]);
-		// A single oversized matching line is truncated to max_line_chars
-		// plus the marker instead of being copied whole — the failure mode
-		// where one minified JSON/base64 line duplicates the payload.
-		expect(search(long, "y")).toEqual([`L1: ${"y".repeat(1000)}... (line truncated)`]);
+		// A single oversized matching line keeps a bounded window instead of
+		// being copied whole — the failure mode where one minified
+		// JSON/base64 line duplicates the payload. The match sits at offset
+		// 0, so the window is the line prefix and the offset annotation
+		// reads L1@0.
+		expect(search(long, "y")).toEqual([`L1@0: ${"y".repeat(1000)}... (line truncated)`]);
 		// The cap is configurable; every matching line is truncated, and the
 		// count cap (limit) still applies on top.
 		const two = `${long}\n${long}`;
 		expect(search(two, "y", { max_line_chars: 20 })).toEqual([
-			`L1: ${"y".repeat(20)}... (line truncated)`,
-			`L2: ${"y".repeat(20)}... (line truncated)`,
+			`L1@0: ${"y".repeat(20)}... (line truncated)`,
+			`L2@0: ${"y".repeat(20)}... (line truncated)`,
 		]);
 		expect(search(`${long}\n${long}\n${long}`, "y", { limit: 1, max_line_chars: 10 })).toEqual([
-			`L1: ${"y".repeat(10)}... (line truncated)`,
+			`L1@0: ${"y".repeat(10)}... (line truncated)`,
 			"... (truncated, more matches may exist)",
 		]);
 		// Trailing whitespace is trimmed before the cap applies; numbering
 		// stays intact across blank lines.
 		expect(search(`\n${long}  `, "y", { max_line_chars: 5 })).toEqual([
-			`L2: ${"y".repeat(5)}... (line truncated)`,
+			`L2@0: ${"y".repeat(5)}... (line truncated)`,
 		]);
 		// The new option also rides positionally after flags/limit, like
 		// limit itself did when it was added. (A payload ending exactly at
 		// the cap is not marked, so keep a remaining line to see the marker.)
 		expect(search(`${long}\n${long}`, "y", "g", 1, 8)).toEqual([
-			`L1: ${"y".repeat(8)}... (line truncated)`,
+			`L1@0: ${"y".repeat(8)}... (line truncated)`,
 			"... (truncated, more matches may exist)",
 		]);
 		// Invalid caps are rejected like invalid limits.
 		expect(() => search("a\nb", "a", { max_line_chars: 0 })).toThrow();
 		expect(() => search("a\nb", "a", { max_line_chars: -1 })).toThrow();
 		expect(() => search("a\nb", "a", { max_line_chars: 1.5 })).toThrow();
+	});
+
+	it("search keeps a bounded window around the first match in oversized lines", () => {
+		const sandbox = loadJsPrelude(async () => ({}));
+		const search = sandbox.search as SearchFn;
+		// Match near the END of an oversized single line (e.g. a key at the
+		// tail of minified JSON): a prefix cut would drop the matched region
+		// entirely, so the excerpt must be a window centered on the match,
+		// annotated with the window's character offset (L<n>@<offset>:) and
+		// "..." markers on the cut sides.
+		const head = "a".repeat(2000);
+		const tail = "b".repeat(3000);
+		const line = head + tail; // first "b" at offset 2000
+		expect(search(line, "b")).toEqual([`L1@1500: ...${"a".repeat(500)}${"b".repeat(500)}... (line truncated)`]);
+		// A match at the very END of the line: the window shifts right to
+		// the line end (no right cut, so no "... (line truncated)" suffix).
+		const end = "z".repeat(3000) + "K";
+		expect(search(end, "K")).toEqual([`L1@2001: ...${"z".repeat(999)}K`]);
+		// Multiple matches: the window is centered on the FIRST match only.
+		const multi = "z".repeat(100) + "m" + "z".repeat(1899) + "m" + "z".repeat(2000);
+		expect(search(multi, "m")).toEqual([`L1@0: ${"z".repeat(100)}m${"z".repeat(899)}... (line truncated)`]);
+		// Stateful g/y flags keep their per-line lastIndex reset on oversized
+		// lines: every matching line is reported with its own window.
+		expect(search(`${line}\n${line}`, "b", "g")).toEqual([
+			`L1@1500: ...${"a".repeat(500)}${"b".repeat(500)}... (line truncated)`,
+			`L2@1500: ...${"a".repeat(500)}${"b".repeat(500)}... (line truncated)`,
+		]);
+		// Sticky mode only matches at offset 0, so a line starting with the
+		// pattern keeps the window anchored to the prefix.
+		const sticky = "b".repeat(3000) + "a".repeat(2000);
+		expect(search(`${sticky}\n${sticky}`, "b", "y")).toEqual([
+			`L1@0: ${"b".repeat(1000)}... (line truncated)`,
+			`L2@0: ${"b".repeat(1000)}... (line truncated)`,
+		]);
 	});
 
 	it("metadata reports str shape", () => {
@@ -462,24 +498,53 @@ print(json.dumps(search("\\n" + long + "  ", "y", max_line_chars=5)))
 		const lines = r.stdout.trim().split("\n");
 		// Short lines pass through unchanged (default cap is 1000).
 		expect(JSON.parse(lines[0]!)).toEqual(["L1: short"]);
-		// A single oversized matching line is truncated to max_line_chars
-		// plus the marker instead of being copied whole.
-		expect(JSON.parse(lines[1]!)).toEqual(["L1: " + "y".repeat(1000) + "... (line truncated)"]);
+		// A single oversized matching line keeps a bounded window instead of
+		// being copied whole; the match is at offset 0, so the window is the
+		// line prefix and the offset annotation reads L1@0.
+		expect(JSON.parse(lines[1]!)).toEqual(["L1@0: " + "y".repeat(1000) + "... (line truncated)"]);
 		// The cap is configurable; every matching line is truncated, and the
 		// count cap (limit) still applies on top.
 		expect(JSON.parse(lines[2]!)).toEqual([
-			"L1: " + "y".repeat(20) + "... (line truncated)",
-			"L2: " + "y".repeat(20) + "... (line truncated)",
+			"L1@0: " + "y".repeat(20) + "... (line truncated)",
+			"L2@0: " + "y".repeat(20) + "... (line truncated)",
 		]);
 		expect(JSON.parse(lines[3]!)).toEqual([
-			"L1: " + "y".repeat(10) + "... (line truncated)",
+			"L1@0: " + "y".repeat(10) + "... (line truncated)",
 			"... (truncated, more matches may exist)",
 		]);
 		// Trailing whitespace is stripped before the cap applies; numbering
 		// stays intact across blank lines.
-		expect(JSON.parse(lines[4]!)).toEqual(["L2: " + "y".repeat(5) + "... (line truncated)"]);
+		expect(JSON.parse(lines[4]!)).toEqual(["L2@0: " + "y".repeat(5) + "... (line truncated)"]);
 	});
 
+	it("search keeps a bounded window around the first match in oversized lines", async () => {
+		const r = await run(`
+import json
+head = "a" * 2000
+tail = "b" * 3000
+line = head + tail
+print(json.dumps(search(line, "b")))
+print(json.dumps(search("z" * 3000 + "K", "K")))
+print(json.dumps(search("z" * 100 + "m" + "z" * 1899 + "m" + "z" * 2000, "m")))
+print(json.dumps(search(line + "\\n" + line, "b")))
+`);
+		expect(r.exitCode).toBe(0);
+		const lines = r.stdout.trim().split("\n");
+		// Match near the END of an oversized single line: the excerpt is a
+		// window centered on the match (offset 1500 for a match at 2000
+		// with the default 1000-char cap), not the line prefix.
+		expect(JSON.parse(lines[0]!)).toEqual(["L1@1500: ..." + "a".repeat(500) + "b".repeat(500) + "... (line truncated)"]);
+		// A match at the very END of the line: the window shifts right to
+		// the line end (no right cut, so no "... (line truncated)" suffix).
+		expect(JSON.parse(lines[1]!)).toEqual(["L1@2001: ..." + "z".repeat(999) + "K"]);
+		// Multiple matches: the window is centered on the FIRST match only.
+		expect(JSON.parse(lines[2]!)).toEqual(["L1@0: " + "z".repeat(100) + "m" + "z".repeat(899) + "... (line truncated)"]);
+		// Every matching oversized line gets its own window.
+		expect(JSON.parse(lines[3]!)).toEqual([
+			"L1@1500: ..." + "a".repeat(500) + "b".repeat(500) + "... (line truncated)",
+			"L2@1500: ..." + "a".repeat(500) + "b".repeat(500) + "... (line truncated)",
+		]);
+	});
 	it("search rejects non-positive limits and max_line_chars", async () => {
 		const bad = await run(`search("a\\nb", "a", limit=0)`);
 		expect(bad.exitCode).not.toBe(0);
