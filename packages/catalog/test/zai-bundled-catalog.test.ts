@@ -7,6 +7,9 @@ interface BundledModel {
 	baseUrl: string;
 	contextWindow: number | null;
 	maxTokens: number | null;
+	input?: readonly string[];
+	reasoning?: boolean;
+	thinking?: { efforts?: readonly string[]; defaultLevel?: string; requiresEffort?: boolean };
 }
 
 describe("zai bundled catalog", () => {
@@ -21,5 +24,24 @@ describe("zai bundled catalog", () => {
 		expect(model.contextWindow).toBe(1_000_000);
 		expect(model.maxTokens).toBe(131_072);
 		expect(Object.keys(zaiModels)).not.toContain("glm-5.2[1m]");
+	});
+
+	it("bundles glm-5.3-flash with the 1M tier, native image input, and the GLM-5.3 ladder", () => {
+		const zaiModels = modelsJson.zai as Record<string, BundledModel>;
+		const model = zaiModels["glm-5.3-flash"];
+
+		expect(model).toBeDefined();
+		expect(model.api).toBe("anthropic-messages");
+		expect(model.baseUrl).toBe("https://api.z.ai/api/anthropic");
+		expect(model.contextWindow).toBe(1_000_000);
+		expect(model.maxTokens).toBe(131_072);
+		// Natively multimodal: the id carries no `v` marker, but the Anthropic
+		// endpoint accepts image blocks.
+		expect(model.input).toEqual(["text", "image"]);
+		expect(model.reasoning).toBe(true);
+		// Thinking cannot be disabled and defaults to `max`.
+		expect(model.thinking?.efforts).toEqual(["low", "high", "max"]);
+		expect(model.thinking?.requiresEffort).toBe(true);
+		expect(model.thinking?.defaultLevel).toBe("max");
 	});
 });

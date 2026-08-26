@@ -577,6 +577,27 @@ async function generateModels() {
 		contextWindow: 1_000_000,
 		maxTokens: 131_072,
 	} as ModelSpec<"anthropic-messages">);
+	// GLM-5.3-Flash ships on the same coding-plan endpoints and is likewise
+	// absent from `/v1/models`-derived upstream metadata. It is the first
+	// natively multimodal GLM coding SKU — its id carries no `v` marker, and
+	// base64 image blocks are accepted on `https://api.z.ai/api/anthropic` —
+	// so the seed declares image input directly instead of inheriting the
+	// text-only default. Cost is the currently billed launch price from
+	// https://docs.z.ai/guides/overview/pricing (50% off list 0.15/0.50/0.03
+	// through 2026-09-09); once upstream metadata carries the SKU its row wins
+	// dedup and supplies pricing.
+	allModels.push({
+		id: "glm-5.3-flash",
+		name: "GLM-5.3-Flash",
+		api: "anthropic-messages",
+		provider: "zai",
+		baseUrl: "https://api.z.ai/api/anthropic",
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0.075, output: 0.25, cacheRead: 0.015, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 131_072,
+	} as ModelSpec<"anthropic-messages">);
 	// Seed Meta's documented Muse model so first-run selection does not depend on
 	// credentials or live discovery.
 	allModels.push(...META_MUSE_STATIC_MODELS);

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Z.AI `glm-5.3-flash` to the bundled GLM Coding Plan catalog with its 1M
+  context window, 131,072-token output budget, native image input, and the
+  GLM-5.3 `low`/`high`/`max` mandatory-thinking ladder. The `zai` provider has
+  no live model discovery, so the SKU was unreachable in `/model` and
+  `omp models` even though the coding-plan endpoints already serve it. GLM-5.3-Flash
+  is also the first `-flash` SKU that reasons and the first GLM coding model
+  that accepts images without a `v` marker in its id, so the GLM family
+  classifiers now admit `-flash` from 5.3 on.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added
