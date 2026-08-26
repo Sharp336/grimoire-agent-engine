@@ -233,6 +233,15 @@ export function zaiModelManagerOptions(config: ZaiModelManagerConfig = {}): Mode
 			// discovery must match or an authoritative refresh would resurrect the
 			// unusable ids over the filtered bundled catalog.
 			filterModel: (_entry, model) => !model.id.endsWith("[1m]"),
+			// A newly launched GLM id has no bundled reference, so the generic
+			// discovery defaults would mark it `reasoning: false` and
+			// resolveModelThinking would return undefined — hiding the mandatory
+			// GLM thinking controls. Every GLM SKU the endpoint serves is a
+			// hybrid reasoning model, so floor `reasoning` for the family; the
+			// build-time policy then derives the correct ladder (GLM-5.3+:
+			// anthropic-budget-effort low/high/max with default `max`).
+			transformModel: model =>
+				model.id.startsWith("glm-") && !model.reasoning ? { ...model, reasoning: true } : model,
 		}),
 		dynamicModelsAuthoritative: true,
 	};

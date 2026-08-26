@@ -608,6 +608,13 @@ type SimpleProviderConfig = {
 	 * the authoritative runtime list.
 	 */
 	filterModel?: (entry: OpenAICompatibleModelRecord, model: ModelSpec<Api>) => boolean;
+	/**
+	 * Optional post-map transform applied to every discovered row after the
+	 * bundled-reference merge (anthropic-messages factory). Use for
+	 * provider-specific capability floors that must survive even when no
+	 * bundled reference exists for a newly launched id.
+	 */
+	transformModel?: (model: ModelSpec<"anthropic-messages">) => ModelSpec<"anthropic-messages">;
 };
 
 function resolveSimpleProviderHeaders(
@@ -720,11 +727,12 @@ export function createSimpleAnthropicProviderOptions(
 					mapModel: (entry, defaults) => {
 						const reference = references.get(defaults.id);
 						const model = mapWithBundledReference(entry, defaults, reference);
-						return {
+						const mapped = {
 							...model,
 							name: toModelName(entry.display_name, model.name),
 							baseUrl,
 						};
+						return config?.transformModel ? config.transformModel(mapped) : mapped;
 					},
 					fetch: config?.fetch,
 				}),
