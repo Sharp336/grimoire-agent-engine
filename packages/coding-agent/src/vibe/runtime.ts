@@ -35,11 +35,8 @@ import type { ToolSession } from "../tools";
 import { formatDuration } from "../tools/render-utils";
 import { ToolError } from "../tools/tool-errors";
 import { calculateTokensPerSecond } from "../utils/token-rate";
-import {
-	buildVibeDelegatedAssignment,
-	parseDelegatedSkillDependency,
-	validateSkillDispatchResult,
-} from "./delegated-skill-boundary";
+import type { SkillDispatchResult } from "./delegated-skill-boundary";
+import { buildVibeDelegatedAssignment, coordinateDelegatedSkillDependency } from "./delegated-skill-boundary";
 /** The two worker CLI flavors the director drives. */
 export type VibeCli = "fast" | "good";
 
@@ -447,6 +444,7 @@ export class VibeSessionRegistry {
 	readonly #records = new Map<string, VibeRecord>();
 	readonly #terminationTails = new Map<string, Promise<void>>();
 	readonly #terminatedScopes = new Set<string>();
+	readonly #dependencyCache = new Map<string, Promise<SkillDispatchResult | null>>();
 	#teardownGraceMs = VIBE_TEARDOWN_GRACE_MS;
 
 	/** Override the teardown grace period for deterministic lifecycle tests. */
@@ -1602,32 +1600,20 @@ export class VibeSessionRegistry {
 		turnIndex: number,
 		result: SingleResult,
 	): Promise<string> {
-		const dependency = parseDelegatedSkillDependency(result.output.trim());
-		if (dependency) {
-			const dispatched = session.dispatchSkillDependency
-				? validateSkillDispatchResult(
-						await session.dispatchSkillDependency(dependency, this.ownerScope(session)),
-						dependency.skill,
-					)
-				: null;
-			const dependencyEvidence = dispatched
-				? JSON.stringify(dispatched)
-				: JSON.stringify({
-						type: "skill-dispatch-result/v1",
-						skill: dependency.skill,
-						status: "failed",
-						evidence: "parent_dispatch_unavailable_or_invalid",
-					});
-			if (dispatched?.status === "success") {
-				// Queue the verified evidence through the same registry-safe path used by
-				// vibe_send. #finishTurn transitions the worker to idle/parked first.
-				record.queue.unshift(dependencyEvidence);
-			}
-			await this.#finishTurn(session, manager, record, turn.jobId);
+		const coordinated = await coordinateDelegatedSkillDependency(
+			result.output,
+			request => session.dispatchSkillDependency?.(request, this.ownerScope(session)) ?? Promise.resolve(null),
+			async payload => {
+				record.queue.unshift(JSON.stringify(payload));
+			},
+			this.#dependencyCache,
+		);
+		if (coordinated.handled) {
+			await this.#finishTurn(session, manager, record, settledJobId);
 			record.lastActivity = firstLine(
-				dispatched?.status === "success"
-					? `dependency ${dependency.skill} dispatched; worker resumed`
-					: `dependency ${dependency.skill} blocked: ${dispatched?.evidence ?? "invalid dispatch evidence"}`,
+				coordinated.result?.status === "success"
+					? "dependency dispatched; worker resumed"
+					: `dependency blocked: ${coordinated.result?.evidence ?? "invalid dispatch evidence"}`,
 			);
 			return "";
 		}
