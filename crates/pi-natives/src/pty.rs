@@ -13,7 +13,7 @@ use std::{
 };
 
 use napi::{
-	JsString,
+	JsString, Status,
 	bindgen_prelude::*,
 	threadsafe_function::{ThreadsafeFunction, ThreadsafeFunctionCallMode},
 };
@@ -115,6 +115,21 @@ const CANCEL_REAP_TIMEOUT: Duration = Duration::from_millis(500);
 const CANCEL_REAP_POLL_INTERVAL: Duration = Duration::from_millis(5);
 #[cfg(not(windows))]
 const FINAL_READER_DRAIN_TIMEOUT: Duration = Duration::from_millis(50);
+/// Maximum pending `on_chunk` invocations queued on the N-API
+/// threadsafe-function before further chunks are dropped (#7328). With a max
+/// read size of 64 KiB per chunk this caps the native output backlog at
+/// ~64 MiB, mirroring `MAX_STDOUT_BACKLOG_BYTES` in the TUI backlog guard.
+const MAX_PENDING_CHUNK_EVENTS: usize = 1024;
+/// Capacity of the reader-thread to consumer channel. When full, the reader
+/// thread blocks, which propagates backpressure to the kernel PTY buffer
+/// instead of growing native memory without bound (#7328).
+const READER_CHANNEL_CAPACITY: usize = 256;
+
+/// `on_chunk` callback with a bounded N-API queue. The default
+/// `ThreadsafeFunction` queue is unbounded (`MaxQueueSize = 0`), which allows
+/// unbounded native memory growth when the JS event loop stalls (#7328).
+type ChunkCallback =
+	ThreadsafeFunction<String, Unknown<'static>, String, Status, true, false, MAX_PENDING_CHUNK_EVENTS>;
 
 struct PtySessionCore {
 	control_tx: flume::Sender<ControlMessage>,
@@ -147,7 +162,7 @@ impl PtySession {
 		env: &'env Env,
 		options: PtyStartOptions<'env>,
 		#[napi(ts_arg_type = "((error: Error | null, chunk: string) => void) | undefined | null")]
-		on_chunk: Option<ThreadsafeFunction<String>>,
+		on_chunk: Option<ChunkCallback>,
 		#[napi(ts_arg_type = "((error: Error | null, pid: number) => void) | undefined | null")]
 		on_start: Option<ThreadsafeFunction<u32>>,
 	) -> Result<PromiseRaw<'env, PtyRunResult>> {
@@ -169,7 +184,7 @@ impl PtySession {
 		env: &'env Env,
 		options: PtyArgvStartOptions<'env>,
 		#[napi(ts_arg_type = "((error: Error | null, chunk: string) => void) | undefined | null")]
-		on_chunk: Option<ThreadsafeFunction<String>>,
+		on_chunk: Option<ChunkCallback>,
 		#[napi(ts_arg_type = "((error: Error | null, pid: number) => void) | undefined | null")]
 		on_start: Option<ThreadsafeFunction<u32>>,
 	) -> Result<PromiseRaw<'env, PtyRunResult>> {
@@ -212,7 +227,7 @@ impl PtySession {
 		run_config: PtyRunConfig,
 		timeout_ms: Option<u32>,
 		signal: Option<Unknown<'env>>,
-		on_chunk: Option<ThreadsafeFunction<String>>,
+		on_chunk: Option<ChunkCallback>,
 		on_start: Option<ThreadsafeFunction<u32>>,
 	) -> Result<PromiseRaw<'env, PtyRunResult>> {
 		let ct = task::CancelToken::new(timeout_ms, signal);
@@ -275,7 +290,7 @@ fn terminate_pty_processes(
 }
 fn run_pty_sync(
 	config: PtyRunConfig,
-	on_chunk: Option<ThreadsafeFunction<String>>,
+	on_chunk: Option<ChunkCallback>,
 	on_start: Option<ThreadsafeFunction<u32>>,
 	control_rx: flume::Receiver<ControlMessage>,
 	ct: task::CancelToken,
@@ -388,7 +403,7 @@ fn run_pty_sync(
 		.try_clone_reader()
 		.map_err(|err| Error::from_reason(format!("Failed to create PTY reader: {err}")))?;
 
-	let (reader_tx, reader_rx) = flume::unbounded::<ReaderEvent>();
+	let (reader_tx, reader_rx) = flume::bounded::<ReaderEvent>(READER_CHANNEL_CAPACITY);
 	let reader_thread = std::thread::spawn(move || {
 		const REPLACEMENT: &str = "\u{FFFD}";
 		const BUF: usize = 65536;
@@ -453,6 +468,7 @@ fn run_pty_sync(
 	let process_group_id = master.process_group_leader().filter(|pgid| *pgid > 0);
 	#[cfg(not(unix))]
 	let process_group_id: Option<i32> = None;
+	let mut chunk_emitter = ChunkEmitter::new(on_chunk.as_ref());
 	let mut timed_out = false;
 	let mut cancelled = false;
 	let mut reader_done = false;
@@ -492,7 +508,7 @@ fn run_pty_sync(
 
 		for _ in 0..READER_EVENTS_PER_TICK {
 			match reader_rx.try_recv() {
-				Ok(ReaderEvent::Chunk(chunk)) => emit_chunk(&chunk, on_chunk.as_ref()),
+				Ok(ReaderEvent::Chunk(chunk)) => chunk_emitter.emit(&chunk),
 				Ok(ReaderEvent::Done) => {
 					reader_done = true;
 					break;
@@ -527,7 +543,7 @@ fn run_pty_sync(
 					.min(Duration::from_millis(16))
 			});
 			match reader_rx.recv_timeout(wait_duration) {
-				Ok(ReaderEvent::Chunk(chunk)) => emit_chunk(&chunk, on_chunk.as_ref()),
+				Ok(ReaderEvent::Chunk(chunk)) => chunk_emitter.emit(&chunk),
 				Ok(ReaderEvent::Done) => reader_done = true,
 				Err(flume::RecvTimeoutError::Timeout) => {},
 				Err(flume::RecvTimeoutError::Disconnected) => {
@@ -614,7 +630,7 @@ fn run_pty_sync(
 			let remaining = finalize_deadline.saturating_duration_since(Instant::now());
 			let wait_duration = remaining.min(Duration::from_millis(5));
 			match reader_rx.recv_timeout(wait_duration) {
-				Ok(ReaderEvent::Chunk(chunk)) => emit_chunk(&chunk, on_chunk.as_ref()),
+				Ok(ReaderEvent::Chunk(chunk)) => chunk_emitter.emit(&chunk),
 				Ok(ReaderEvent::Done) => {
 					reader_done = true;
 					break;
@@ -658,9 +674,58 @@ fn run_pty_sync(
 	Ok(PtyRunResult { exit_code, cancelled, timed_out })
 }
 
-fn emit_chunk(text: &str, callback: Option<&ThreadsafeFunction<String>>) {
-	if let Some(callback) = callback {
-		callback.call(Ok(text.to_string()), ThreadsafeFunctionCallMode::NonBlocking);
+/// Emits output chunks to the JS `on_chunk` callback with drop-on-full
+/// semantics.
+///
+/// The threadsafe-function queue is bounded (`MAX_PENDING_CHUNK_EVENTS`); when
+/// the JS event loop stalls and the queue fills up, further chunks are dropped
+/// and counted instead of accumulating in native memory without bound (#7328).
+/// Once the queue accepts events again, a loss marker is prepended so
+/// consumers know output was truncated.
+struct ChunkEmitter<'cb> {
+	callback:      Option<&'cb ChunkCallback>,
+	dropped_bytes: u64,
+}
+
+impl<'cb> ChunkEmitter<'cb> {
+	const fn new(callback: Option<&'cb ChunkCallback>) -> Self {
+		Self { callback, dropped_bytes: 0 }
+	}
+
+	fn emit(&mut self, text: &str) {
+		let Some(callback) = self.callback else {
+			return;
+		};
+		let payload = if self.dropped_bytes == 0 {
+			text.to_string()
+		} else {
+			format!("{}{}", loss_marker(self.dropped_bytes), text)
+		};
+		let payload_len = u64::try_from(payload.len()).unwrap_or(u64::MAX);
+		if callback.call(Ok(payload), ThreadsafeFunctionCallMode::NonBlocking) == Status::QueueFull {
+			self.dropped_bytes = self.dropped_bytes.saturating_add(payload_len);
+		} else {
+			self.dropped_bytes = 0;
+		}
+	}
+}
+
+/// Human-readable notice inserted into the output stream after chunks were
+/// dropped because the JS consumer stalled (#7328).
+fn loss_marker(dropped_bytes: u64) -> String {
+	format!("\n[pty output truncated: {dropped_bytes} bytes dropped while the consumer was stalled]\n")
+}
+
+#[cfg(test)]
+mod tests {
+	use super::loss_marker;
+
+	#[test]
+	fn loss_marker_reports_dropped_byte_count() {
+		let marker = loss_marker(1024);
+		assert!(marker.contains("1024 bytes dropped"));
+		assert!(marker.starts_with('\n'));
+		assert!(marker.ends_with('\n'));
 	}
 }
 
