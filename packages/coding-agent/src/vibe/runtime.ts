@@ -1432,7 +1432,7 @@ export class VibeSessionRegistry {
 			settings: session.settings,
 			mcpManager: session.mcpManager ?? MCPManager.instance(),
 			contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
-			skills: [...(session.skills ?? [])],
+			skills: [],
 			workspaceTree: session.workspaceTree,
 			promptTemplates: session.promptTemplates,
 			rules: session.rules,
@@ -1538,7 +1538,6 @@ export class VibeSessionRegistry {
 		session: ToolSession,
 		manager: AsyncJobManager,
 		record: VibeRecord,
-		settledJobId: string,
 	): Promise<void> {
 		record.lastJobId = settledJobId;
 		record.turn = undefined;
