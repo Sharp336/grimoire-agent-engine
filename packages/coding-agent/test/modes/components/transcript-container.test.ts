@@ -36,6 +36,11 @@ class Block implements Component {
 	}
 }
 
+/** A live block the container recognizes as dynamic tool-activity. */
+class ToolBlock extends Block {
+	setToolActivityVisible(): void {}
+}
+
 function literalStableRow(row: string): TranscriptStableRow {
 	return { key: row };
 }
@@ -136,20 +141,39 @@ describe("TranscriptContainer", () => {
 		expect(transcript.blockModes()).toEqual(["mutable", "appendOnly"]);
 	});
 
-	it("rejects non-prefix and retracting append-only publications", () => {
+	it("freezes a retracting publication and keeps rendering the block", () => {
 		const transcript = new TranscriptContainer();
 		const block = new AppendBlock(["one", "two"], ["one"]);
 		transcript.addChild(block);
 		expect(transcript.renderViewport(80, 2, frame)).toEqual(["one", "two"]);
 
+		// Retraction cannot be honored (rows may already sit in scrollback):
+		// the block demotes to finalize-time retirement but never fails a render.
 		block.publish(["changed"]);
-		expect(() => transcript.renderViewport(80, 2, frame)).toThrow("must extend");
+		expect(transcript.renderViewport(80, 2, frame)).toEqual(["one", "two"]);
+		expect(transcript.blockModes()).toEqual(["appendOnly"]);
+	});
 
-		block.publish([]);
-		expect(() => transcript.renderViewport(80, 2, frame)).toThrow("must extend");
+	it("freezes drifted stable bytes, keeps the emitted slice, and retires the remainder once", () => {
+		const transcript = new TranscriptContainer();
+		const block = new AppendBlock(["one", "two"], ["one"]);
+		transcript.addChild(block);
+		expect(transcript.renderViewport(80, 2, frame)).toEqual(["one", "two"]);
 
+		const emitted = transcript.peekFinalizedBatch(80, 0)!;
+		expect(emitted.rows).toEqual(["one"]);
+		transcript.acknowledgeFinalizedBatch(emitted.id);
+
+		// Published bytes drift (e.g. a mid-stream theme change): the emitted
+		// slice stays retired, the live tail keeps rendering, and no further
+		// mid-stream row is offered.
 		block.publishStable([literalStableRow("one"), literalStableRow("two")], ["one", "changed physical row"]);
-		expect(() => transcript.renderViewport(80, 2, frame)).toThrow("must render as a prefix");
+		expect(transcript.renderViewport(80, 2, frame)).toEqual(["two"]);
+		expect(transcript.peekFinalizedBatch(80, 0)).toBeUndefined();
+
+		// Finalization retires exactly the un-emitted suffix.
+		block.finalize(["one", "two"]);
+		expect(transcript.peekFinalizedBatch(80, 0)?.rows).toEqual(["two", ""]);
 	});
 
 	it("emits only the stable current head under row pressure", () => {
@@ -348,6 +372,21 @@ describe("TranscriptContainer", () => {
 		expect(rows[0]).toBe("2 more transcript blocks active");
 		expect(Bun.stripANSI(rows[1] ?? "").trim()).toBe("Implemented");
 		expect(rows[2]).toBe("task running");
+	});
+
+	it("gives surplus rows to assistant text before a growing tool card (issue 9718)", () => {
+		const transcript = new TranscriptContainer();
+		const assistant = new Block(["A1", "A2", "A3", "A4"], false);
+		const tool = new ToolBlock(["T1", "T2", "T3", "T4"], false);
+		transcript.addChild(assistant);
+		transcript.addChild(tool);
+		// Capacity 5 cannot fit both blocks in full. Surplus (3 rows) goes to the
+		// assistant block first; the tool card collapses to its one-row minimum
+		// instead of clipping already-visible assistant text.
+		const out = transcript.renderViewport(80, 5, frame);
+		expect(out).toEqual(["A1", "A2", "A3", "A4", "T4"]);
+		expect(assistant.allocations.at(-1)).toBe(4);
+		expect(tool.allocations.at(-1)).toBe(1);
 	});
 
 	it("permits removing settled blocks until they are offered or committed", () => {
