@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, setSystemTime, vi } from "
 import * as http from "node:http";
 import * as http2 from "node:http2";
 import * as h2Pool from "@oh-my-pi/pi-ai/providers/cursor/h2-pool";
-import { buildCursorUnaryHeaders } from "@oh-my-pi/pi-ai/providers/cursor/headers";
+import { buildCursorRunHeaders, buildCursorUnaryHeaders } from "@oh-my-pi/pi-ai/providers/cursor/headers";
 import type { CursorBidiAvailability } from "@oh-my-pi/pi-ai/providers/cursor/server-config";
 import {
 	__cursorServerConfigCacheSize,
@@ -10,6 +10,7 @@ import {
 	readServerConfigResponse,
 	resetCursorServerConfigCache,
 } from "@oh-my-pi/pi-ai/providers/cursor/server-config";
+import { openCursorTransport } from "@oh-my-pi/pi-ai/providers/cursor/transport";
 import {
 	type GetServerConfigResponse,
 	GetServerConfigResponseSchema,
@@ -26,7 +27,8 @@ type Scenario =
 	| { kind: "absent-directive" }
 	| { kind: "http-500" }
 	| { kind: "hang" }
-	| { kind: "oversized" };
+	| { kind: "oversized" }
+	| { kind: "route-required" };
 
 let server: http2.Http2Server | undefined;
 const sessions = new Set<http2.Http2Session>();
@@ -85,6 +87,19 @@ async function startServer(): Promise<string> {
 			stream.respond({ ":status": 200, "content-type": "application/proto" });
 			stream.write(frameConnectMessage(Buffer.alloc(1_048_577)));
 			stream.write(endFrame());
+			stream.end();
+			return;
+		}
+		if (scenario.kind === "route-required") {
+			// A gateway demanding a caller-supplied routing header: without it the
+			// probe is rejected and availability collapses to "unspecified".
+			if (headers["x-gateway-route"] !== "east") {
+				stream.respond({ ":status": 403 });
+				stream.end();
+				return;
+			}
+			stream.respond({ ":status": 200, "content-type": "application/proto" });
+			stream.write(Buffer.concat([responseFrame({ http2Config: Http2Config.FORCE_BIDI_DISABLED }), endFrame()]));
 			stream.end();
 			return;
 		}
@@ -415,5 +430,81 @@ describe("fetchCursorBidiAvailability HTTP/1 truncated response", () => {
 		if (!address || typeof address === "string") throw new Error("expected h1 fixture to bind");
 		const baseUrl = `http://127.0.0.1:${address.port}`;
 		expect(await fetchFor(baseUrl)).toBe("bidi-disabled");
+	});
+});
+
+describe("caller header forwarding to the config probe", () => {
+	const ROUTE_HEADER = { "x-gateway-route": "east" };
+	let h1Server: http.Server | undefined;
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await h2Pool.disposeCursorH2Pool();
+		if (h1Server) {
+			const closing = h1Server;
+			h1Server = undefined;
+			const closed = Promise.withResolvers<void>();
+			closing.close(error => (error ? closed.reject(error) : closed.resolve()));
+			await closed.promise;
+		}
+	});
+
+	it("forwards caller headers on the HTTP/2 probe", async () => {
+		scenario = { kind: "route-required" };
+		const baseUrl = await startServer();
+		// Without forwarding, the gateway rejects the probe (403) and the
+		// availability collapses to "unspecified".
+		expect(await fetchCursorBidiAvailability({ apiKey: "test-token", baseUrl, callerHeaders: ROUTE_HEADER })).toBe(
+			"bidi-disabled",
+		);
+	});
+
+	it("forwards the Run header set's caller fields through the HTTP/1 probe to open the bridge", async () => {
+		// Force the ALPN failure that routes the probe to plain HTTP/1.
+		vi.spyOn(h2Pool, "acquireCursorH2").mockResolvedValue({
+			ok: false,
+			unavailable: {
+				reason: "alpn",
+				cause: Object.assign(new Error("h2 is not supported"), { code: "ERR_HTTP2_ERROR" }),
+			},
+		});
+		h1Server = http.createServer((req, res) => {
+			if (req.headers["x-gateway-route"] !== "east") {
+				res.statusCode = 403;
+				res.end();
+				return;
+			}
+			const message = create(GetServerConfigResponseSchema, {
+				http2Config: Http2Config.FORCE_BIDI_DISABLED,
+			});
+			res.writeHead(200, { "content-type": "application/proto" });
+			res.end(frameConnectMessage(toBinary(GetServerConfigResponseSchema, message)));
+		});
+		const listening = Promise.withResolvers<void>();
+		h1Server.once("error", listening.reject);
+		h1Server.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const address = h1Server.address();
+		if (!address || typeof address === "string") throw new Error("expected h1 fixture to bind");
+		const baseUrl = `http://127.0.0.1:${address.port}`;
+		// The Run header set carries the gateway's routing field among the caller
+		// extras; without forwarding, the probe is rejected (403), availability
+		// becomes "unspecified", and openCursorTransport throws instead of
+		// returning the HTTP/1 bridge.
+		const attempt = await openCursorTransport({
+			baseUrl,
+			apiKey: "test-token",
+			requestPath: "/agent.v1.AgentService/Run",
+			runHeaders: buildCursorRunHeaders({
+				apiKey: "test-token",
+				requestPath: "/agent.v1.AgentService/Run",
+				callerHeaders: { "X-Gateway-Route": "east" },
+				gzipRequest: false,
+			}),
+			gzipRequest: false,
+			provider: "cursor",
+		});
+		attempt.close();
+		await expect(attempt.trailers()).resolves.toEqual({});
 	});
 });

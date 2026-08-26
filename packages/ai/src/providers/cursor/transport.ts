@@ -2,6 +2,7 @@ import type * as http2 from "node:http2";
 import * as AIError from "../../error";
 import { type ConnectFrame, ConnectFrameDecoder } from "./connect-frame";
 import * as h2Pool from "./h2-pool";
+import { sanitizeCursorCallerHeaders } from "./headers";
 import { openCursorHttp1Bridge } from "./http1-bridge";
 import * as serverConfig from "./server-config";
 
@@ -90,9 +91,16 @@ export async function openCursorTransport(args: {
 		// fetchCursorBidiAvailability probes GetServerConfig over HTTP/1 when this
 		// origin cannot negotiate h2, so ALPN failure can still discover
 		// bidi-disabled / all-disabled rather than collapsing to "unspecified".
+		// The probe must carry the caller headers embedded in the Run header set:
+		// a gateway that required one on Run rejects GetServerConfig otherwise,
+		// collapsing availability to "unspecified" and blocking the bridge even
+		// when the backend authoritatively disables bidi. Flattening plus
+		// sanitizeCursorCallerHeaders strips every fixed Run field (all reserved
+		// names), leaving exactly the caller-supplied extras.
 		const availability = await serverConfig.fetchCursorBidiAvailability({
 			apiKey: args.apiKey,
 			baseUrl: args.baseUrl,
+			callerHeaders: sanitizeCursorCallerHeaders(flattenRunCallerHeaders(headers)),
 			signal: args.signal,
 		});
 		if (availability === "bidi-disabled" || availability === "all-disabled") {
@@ -107,6 +115,21 @@ export async function openCursorTransport(args: {
 	}
 
 	throw mapH2TransportError(acquisition.unavailable.cause, args.baseUrl);
+}
+
+/**
+ * Flattens the built Run headers (`http2.OutgoingHttpHeaders` values may be
+ * arrays, numbers, or undefined) into the plain record the sanitizing header
+ * helpers accept. Pseudo-headers are dropped here; every remaining field is
+ * left for `sanitizeCursorCallerHeaders` to filter.
+ */
+function flattenRunCallerHeaders(headers: http2.OutgoingHttpHeaders): Record<string, string> {
+	const flat: Record<string, string> = {};
+	for (const [name, value] of Object.entries(headers)) {
+		if (name.startsWith(":") || value === undefined) continue;
+		flat[name] = Array.isArray(value) ? value.join(", ") : String(value);
+	}
+	return flat;
 }
 
 function wrapH2Lease(lease: h2Pool.CursorH2Lease): CursorTransportAttempt {

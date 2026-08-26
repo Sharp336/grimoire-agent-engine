@@ -25,6 +25,7 @@ type PollPlan =
 	| { kind: "gap" }
 	| { kind: "fail-after-first" }
 	| { kind: "eof-without-end" }
+	| { kind: "trailing-after-end" }
 	| { kind: "first-nonzero" }
 	| { kind: "burst" };
 
@@ -160,6 +161,19 @@ async function startServer(): Promise<string> {
 				// never does — the turn must not settle as a clean end.
 				const body = Buffer.concat([
 					encodeConnectFrame(encodePollResponse(0n, Buffer.from("only-frame").toString("base64"), true), false),
+				]);
+				res.writeHead(200, { "content-type": "application/connect+proto" });
+				res.end(body);
+				return;
+			}
+			if (plan.kind === "trailing-after-end") {
+				// The terminal envelope is followed by stray bytes that never form a
+				// complete frame; the decoder emits the end frame while retaining
+				// them, so only a completion check before settling catches it.
+				const body = Buffer.concat([
+					encodeConnectFrame(encodePollResponse(0n, Buffer.from("only-frame").toString("base64"), true), false),
+					frameConnectMessage(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG),
+					Buffer.from([0x00, 0x00, 0x01]),
 				]);
 				res.writeHead(200, { "content-type": "application/connect+proto" });
 				res.end(body);
@@ -326,6 +340,39 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 		}
 		expect(error).toBeInstanceOf(ConnectProtocolError);
 		expect(String(error)).toContain("end-of-stream");
+		await expect(bridge.trailers()).rejects.toBeInstanceOf(ConnectProtocolError);
+		expect(pollHits).toBe(1);
+		bridge.close();
+	});
+
+	it("rejects stray trailing bytes after the terminal envelope instead of a clean end", async () => {
+		// The end-of-stream envelope is followed by bytes that never complete a
+		// frame: push() emits the end frame while retaining them in its buffer,
+		// so only a decoder completion check before settling can catch the
+		// truncation. Settling success here would report a clean turn from a
+		// malformed response.
+		plan = { kind: "trailing-after-end" };
+		const baseUrl = await startServer();
+		const bridge = openCursorHttp1Bridge({
+			baseUrl,
+			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
+			gzipRequest: false,
+		});
+		bridge.write(encodeConnectFrame(Buffer.from("client-request"), false));
+
+		let sawData = false;
+		let error: unknown;
+		try {
+			for await (const frame of bridge.frames()) {
+				if (frame.kind === "data") sawData = true;
+			}
+		} catch (cause) {
+			error = cause;
+		}
+		expect(sawData).toBe(true);
+		expect(error).toBeInstanceOf(ConnectProtocolError);
+		expect(String(error)).toContain("after end-of-stream");
 		await expect(bridge.trailers()).rejects.toBeInstanceOf(ConnectProtocolError);
 		expect(pollHits).toBe(1);
 		bridge.close();

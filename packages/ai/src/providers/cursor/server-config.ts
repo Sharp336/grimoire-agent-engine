@@ -92,6 +92,14 @@ export function __cursorServerConfigCacheSize(): number {
 export async function fetchCursorBidiAvailability(args: {
 	apiKey: string;
 	baseUrl: string;
+	/**
+	 * Sanitized caller headers (see `sanitizeCursorCallerHeaders`) forwarded to
+	 * both config transports beneath the fixed unary set — a gateway may require
+	 * a caller-supplied routing or auth field on `GetServerConfig` exactly as it
+	 * does on Run. Not part of the cache key: one provider endpoint implies one
+	 * header set.
+	 */
+	callerHeaders?: Record<string, string>;
 	signal?: AbortSignal;
 }): Promise<CursorBidiAvailability> {
 	const key = `${args.apiKey}|${args.baseUrl}`;
@@ -108,7 +116,7 @@ export async function fetchCursorBidiAvailability(args: {
 	// promise.
 	const existing = inflight.get(key);
 	if (existing) return existing;
-	const promise = fetchServerConfig(args.apiKey, args.baseUrl, args.signal);
+	const promise = fetchServerConfig(args.apiKey, args.baseUrl, args.callerHeaders, args.signal);
 	inflight.set(key, promise);
 	try {
 		const value = await promise;
@@ -121,9 +129,21 @@ export async function fetchCursorBidiAvailability(args: {
 	}
 }
 
+/**
+ * Fixed unary header set with the sanitized caller headers spread beneath it —
+ * the same merge shape as `buildCursorRunHeaders`. A gateway that requires a
+ * caller-supplied routing or auth field on Run requires it here too; without
+ * the field the probe is rejected and availability collapses to
+ * `"unspecified"`, blocking the HTTP/1 bridge.
+ */
+function cursorUnaryHeaders(apiKey: string, callerHeaders: Record<string, string> | undefined): Record<string, string> {
+	return { ...(callerHeaders ?? {}), ...buildCursorUnaryHeaders({ apiKey }) };
+}
+
 async function fetchServerConfig(
 	apiKey: string,
 	baseUrl: string,
+	callerHeaders: Record<string, string> | undefined,
 	signal?: AbortSignal,
 ): Promise<CursorBidiAvailability> {
 	const timeout = signal
@@ -133,7 +153,7 @@ async function fetchServerConfig(
 		const acquisition = await acquireCursorH2({
 			baseUrl,
 			requestPath: GET_SERVER_CONFIG_PATH,
-			headers: buildCursorUnaryHeaders({ apiKey }),
+			headers: cursorUnaryHeaders(apiKey, callerHeaders),
 			provider: "cursor",
 			signal: timeout,
 		});
@@ -143,7 +163,7 @@ async function fetchServerConfig(
 			// FORCE_ALL_DISABLED remain discoverable; do not treat ALPN failure itself
 			// as a downgrade permit.
 			if (acquisition.unavailable.reason === "alpn") {
-				return await fetchServerConfigOverHttp1(apiKey, baseUrl, timeout);
+				return await fetchServerConfigOverHttp1(apiKey, baseUrl, callerHeaders, timeout);
 			}
 			return "unspecified";
 		}
@@ -157,12 +177,13 @@ async function fetchServerConfig(
 async function fetchServerConfigOverHttp1(
 	apiKey: string,
 	baseUrl: string,
+	callerHeaders: Record<string, string> | undefined,
 	signal?: AbortSignal,
 ): Promise<CursorBidiAvailability> {
 	try {
 		const response = await Bun.fetch(new URL(GET_SERVER_CONFIG_PATH, baseUrl), {
 			method: "POST",
-			headers: buildCursorUnaryHeaders({ apiKey }),
+			headers: cursorUnaryHeaders(apiKey, callerHeaders),
 			body: encodeConnectFrame(
 				toBinary(GetServerConfigRequestSchema, create(GetServerConfigRequestSchema, {})),
 				false,
