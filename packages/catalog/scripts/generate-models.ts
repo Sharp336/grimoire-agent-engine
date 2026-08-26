@@ -559,24 +559,6 @@ async function generateModels() {
 	// Mythos 5). Deduped behind upstream entries; metadata is pinned in
 	// applyAnthropicCatalogPolicy.
 	allModels.push(...ANTHROPIC_CURATED_FALLBACK_MODELS);
-	// Seed GLM-5.3 on the z.AI provider. GLM-5.3 is live on the Anthropic and
-	// coding endpoints but not yet advertised in `/v1/models` (which still tops
-	// out at glm-5.2), so endpoint discovery misses it. The zai provider is not
-	// authoritative, so the seed survives regeneration; thinking metadata
-	// (low/high/max uniform ladder, mandatory reasoning, defaultLevel=max) is
-	// derived by rebakeModelThinking from the identity classifiers.
-	allModels.push({
-		id: "glm-5.3",
-		name: "GLM-5.3",
-		api: "anthropic-messages",
-		provider: "zai",
-		baseUrl: "https://api.z.ai/api/anthropic",
-		reasoning: true,
-		input: ["text"],
-		cost: { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
-		contextWindow: 1_000_000,
-		maxTokens: 131_072,
-	} as ModelSpec<"anthropic-messages">);
 	// Seed Meta's documented Muse model so first-run selection does not depend on
 	// credentials or live discovery.
 	allModels.push(...META_MUSE_STATIC_MODELS);
@@ -686,6 +668,54 @@ async function generateModels() {
 	}
 
 	allModels = applyGlobalModelsDevFallback(allModels, modelsDevModels);
+	// Seed the curated GLM-5.3 / GLM-5.3-Flash rows on the z.AI provider so a
+	// fresh install (and a regen without a ZAI_API_KEY) still resolves the
+	// descriptor's defaultModel synchronously at boot, and so runtime
+	// discovery finds a bundled reference to merge limits, modalities, and
+	// effort tiers onto the live ids. This must run AFTER
+	// applyGlobalModelsDevFallback — stencil.so does not list zai/glm-5.3-flash,
+	// so the fallback borrows the cross-provider same-id reference (opencode-go's
+	// "GLM-5.3-Flash (2x usage)" display name) onto any zai row carrying that id —
+	// and the seeds must be PREPENDED: deduplication keeps earlier rows, so a
+	// previous-snapshot glm-5.3-flash row would otherwise survive with its
+	// fallback-borrowed name and replace the curated row (mirrors the
+	// alibaba-token-plan seed below). If live /v1/models discovery succeeds,
+	// zai is authoritative and stale seed IDs must stay out (mirrors the
+	// gmi-cloud default-model seed).
+	if (!authoritativeCatalogProviders.has("zai")) {
+		allModels.unshift(
+			{
+				id: "glm-5.3",
+				name: "GLM-5.3",
+				api: "anthropic-messages",
+				provider: "zai",
+				baseUrl: "https://api.z.ai/api/anthropic",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
+				contextWindow: 1_000_000,
+				maxTokens: 131_072,
+			} as ModelSpec<"anthropic-messages">,
+			// Flash PAYG rates from the vendor pricing page (promotion: 50% off
+			// until 2026-09-09; list $0.15 in / $0.03 cached / $0.50 out) — the
+			// zai key surfaces PAYG rates, never the coding-plan $0 subscription
+			// rates (issue #5598). Cached-input storage is limited-time free.
+			// Vendor docs: text parameters match GLM-5.3 (1M context / 128K
+			// output) and the SKU is natively multimodal.
+			{
+				id: "glm-5.3-flash",
+				name: "GLM-5.3-Flash",
+				api: "anthropic-messages",
+				provider: "zai",
+				baseUrl: "https://api.z.ai/api/anthropic",
+				reasoning: true,
+				input: ["text", "image"],
+				cost: { input: 0.075, output: 0.25, cacheRead: 0.015, cacheWrite: 0 },
+				contextWindow: 1_000_000,
+				maxTokens: 131_072,
+			} as ModelSpec<"anthropic-messages">,
+		);
+	}
 	// Seed QwenCloud's documented Token Plan models when credentialed
 	// discovery is unavailable. A successful `/models` response is authoritative
 	// for the subscribed edition and must not be widened by the fallback.

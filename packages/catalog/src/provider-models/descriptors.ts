@@ -544,6 +544,7 @@ export const CATALOG_PROVIDERS = [
 		defaultModel: "glm-5.3",
 		envVars: ["ZAI_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => zaiModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
 		catalogDiscovery: { label: "zAI" },
 	},
 	{

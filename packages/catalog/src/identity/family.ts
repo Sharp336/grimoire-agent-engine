@@ -319,14 +319,17 @@ export const isGlm52ReasoningEffortModelId = memo((modelId: string): boolean => 
  * ladder on every host, and thinking can no longer be disabled —
  * `thinking.type` must always be `enabled`. Matching the family keeps future
  * bumps (`glm-5.4`, `glm-6`, …) covered while excluding the vision (`…v`)
- * shape and the non-reasoning `-flash`/`-flashx`/`-preview` variants.
+ * shape and the non-reasoning `-flashx`/`-preview` variants. GLM-5.3-Flash is
+ * the first reasoning `-flash` SKU (vendor docs: `thinking.type` supports only
+ * `enabled`, `reasoning_effort: max` recommended), so the version gate admits
+ * it here while older flash ids stay out.
  */
 export const isGlm53ReasoningEffortModelId = memo((modelId: string): boolean => {
 	const glm = parseGlmModel(bareModelId(modelId));
 	if (!glm || glm.vision) {
 		return false;
 	}
-	if (glm.variant !== "base" && glm.variant !== "air" && glm.variant !== "turbo") {
+	if (glm.variant !== "base" && glm.variant !== "air" && glm.variant !== "turbo" && glm.variant !== "flash") {
 		return false;
 	}
 	return semverGte(glm.version, "5.3");
