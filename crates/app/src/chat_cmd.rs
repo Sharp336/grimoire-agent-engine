@@ -859,10 +859,18 @@ pub(crate) async fn run(
 	}
 	if resume.is_some() || fork.is_some() {
 		let path = sessions_dir.join(format!("{}.jsonl", session.id.as_str()));
-		let Session { id, journal, initial_items: _ } = session;
+		let Session { id, journal, initial_items } = session;
 		let revived = omp_agent::revive_existing(&path, journal, snapshot)
 			.map_err(|error| miette::miette!(error))?;
-		session = Session { id, journal: revived.journal, initial_items: revived.live_items };
+		session = Session {
+			id,
+			journal: revived.journal,
+			initial_items: if fork.is_some() {
+				initial_items
+			} else {
+				revived.live_items
+			},
+		};
 		snapshot = revived.snapshot;
 		if let Some(model) = revived.model_override
 			&& !model.fallback
