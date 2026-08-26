@@ -2032,6 +2032,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#syncStatusLineSettings(): void {
 		this.statusLine.updateSettings({
+			gitEnabled: settings.get("git.enabled"),
 			preset: settings.get("statusLine.preset"),
 			leftSegments: settings.get("statusLine.leftSegments"),
 			rightSegments: settings.get("statusLine.rightSegments"),
