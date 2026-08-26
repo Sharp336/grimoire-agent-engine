@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { buildVibeDelegatedAssignment } from "../../src/vibe/runtime.ts";
+import { buildVibeDelegatedAssignment } from "../../src/vibe/delegated-skill-boundary";
 
 const root = resolve(import.meta.dir, "../..");
 const director = readFileSync(resolve(root, "src/prompts/system/vibe-mode-active.md"), "utf8");
