@@ -199,4 +199,16 @@ describe("StatusLineComponent", () => {
 		expect(stripped).not.toContain("(sub)");
 		expect(statusLine.render(WIDE_ENOUGH_FOR_COST_SEGMENT)).toEqual([]);
 	});
+
+	it("ignores empty inline status text and preserves the subscription marker", () => {
+		const statusLine = new StatusLineComponent(
+			makeSessionWithLastMessage(null, false, {
+				usingSubscription: true,
+			}) as unknown as AgentSession,
+		);
+		statusLine.setInlineStatus("empty", "");
+
+		const stripped = statusLine.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content.replace(/\x1b\[[0-9;]*m/g, "");
+		expect(stripped).toContain("(sub)");
+	});
 });

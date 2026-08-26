@@ -54,6 +54,8 @@ export function getKiroRegionFromEndpoint(endpoint: string | undefined): string 
 export interface KiroCatalogModel {
 	modelId: string;
 	displayName?: string;
+	modelName?: string;
+	supportedInputTypes?: string[];
 	tokenLimits?: {
 		maxInputTokens?: number;
 		maxOutputTokens?: number;
@@ -231,27 +233,26 @@ export const KIRO_AUTO_MODEL = createBootstrapModel("auto", {
 	thinking: KIRO_THINKING,
 });
 
-/** Safe offline bootstrap; authenticated discovery replaces it with the profile catalog. */
+/**
+ * Safe offline bootstrap matching the Kiro CLI 2.19.2 catalog. Once
+ * authenticated, List-Available-Models is authoritative because availability
+ * is account and profile scoped; omitted models must not be reintroduced from
+ * this list. `KIRO_AUTO_MODEL` stays independent: it is a generated-bundle
+ * entry, not part of the runtime fallback.
+ */
 export const KIRO_MODELS: readonly KiroModelSpec[] = [
-	KIRO_AUTO_MODEL,
-	createBootstrapModel("claude-opus-5", { contextWindow: 1_000_000, maxTokens: 128_000, thinking: KIRO_THINKING }),
-	createBootstrapModel("claude-sonnet-5", { contextWindow: 1_000_000, maxTokens: 65_536, thinking: KIRO_THINKING }),
-	createBootstrapModel("claude-opus-4.8", { contextWindow: 1_000_000, maxTokens: 128_000, thinking: KIRO_THINKING }),
-	createBootstrapModel("claude-opus-4.7", { contextWindow: 1_000_000, maxTokens: 128_000, thinking: KIRO_THINKING }),
-	createBootstrapModel("claude-opus-4.6", { maxTokens: 32_768, thinking: KIRO_THINKING }),
-	createBootstrapModel("claude-sonnet-4.6", { maxTokens: 65_536, thinking: KIRO_THINKING }),
-	createBootstrapModel("claude-opus-4.5", { maxTokens: 65_536, thinking: KIRO_THINKING }),
-	createBootstrapModel("claude-sonnet-4.5", { maxTokens: 65_536, thinking: KIRO_THINKING }),
-	createBootstrapModel("claude-sonnet-4", { maxTokens: 65_536, thinking: KIRO_THINKING }),
-	createBootstrapModel("claude-haiku-4.5", { reasoning: false, maxTokens: 65_536 }),
-	createBootstrapModel("gpt-5.6-sol", { thinking: KIRO_THINKING }),
-	createBootstrapModel("gpt-5.6-terra", { thinking: KIRO_THINKING }),
-	createBootstrapModel("gpt-5.6-luna", { thinking: KIRO_THINKING }),
-	createBootstrapModel("deepseek-3.2", { thinking: KIRO_THINKING }),
-	createBootstrapModel("minimax-m2.5", { reasoning: false }),
-	createBootstrapModel("minimax-m2.1", { reasoning: false }),
-	createBootstrapModel("glm-5", { thinking: KIRO_THINKING }),
-	createBootstrapModel("qwen3-coder-next", { thinking: KIRO_THINKING }),
+	createBootstrapModel("gpt-5.6-sol", { contextWindow: 272_000, input: ["text", "image"], thinking: KIRO_THINKING }),
+	createBootstrapModel("gpt-5.6-terra", { contextWindow: 272_000, input: ["text", "image"], thinking: KIRO_THINKING }),
+	createBootstrapModel("gpt-5.6-luna", { contextWindow: 272_000, input: ["text", "image"], thinking: KIRO_THINKING }),
+	createBootstrapModel("deepseek-3.2", { contextWindow: 164_000, input: ["text", "image"], thinking: KIRO_THINKING }),
+	createBootstrapModel("minimax-m2.5", { reasoning: false, contextWindow: 196_000 }),
+	createBootstrapModel("minimax-m2.1", { reasoning: false, contextWindow: 196_000, input: ["text", "image"] }),
+	createBootstrapModel("glm-5", { contextWindow: 200_000, thinking: KIRO_THINKING }),
+	createBootstrapModel("qwen3-coder-next", {
+		contextWindow: 256_000,
+		input: ["text", "image"],
+		thinking: KIRO_THINKING,
+	}),
 ];
 
 function dynamicThinking(schema: Record<string, unknown> | null | undefined): ThinkingConfig | undefined {
@@ -270,13 +271,19 @@ export function mapKiroCatalogToModelSpecs(catalog: readonly KiroCatalogModel[],
 		return {
 			...(existing ?? createBootstrapModel(id)),
 			id,
-			name: model.displayName?.trim() || existing?.name || id,
+			name: model.modelName?.trim() || model.displayName?.trim() || existing?.name || id,
 			api: KIRO_API,
 			provider: "kiro",
 			baseUrl: getKiroEndpoints(region).runtime,
 			reasoning: schema !== undefined ? true : (existing?.reasoning ?? isReasoningModel(id)),
 			contextWindow: limits?.maxInputTokens ?? existing?.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
 			maxTokens: limits?.maxOutputTokens ?? existing?.maxTokens ?? DEFAULT_MAX_TOKENS,
+			input:
+				model.supportedInputTypes !== undefined
+					? model.supportedInputTypes.some(type => type.toUpperCase() === "IMAGE")
+						? ["text", "image"]
+						: ["text"]
+					: (existing?.input ?? ["text"]),
 			supportsTools: true,
 			kiroModelId: id,
 			kiroRegion: region,
@@ -309,6 +316,14 @@ export function parseKiroApiKey(value: string | undefined): {
 export function kiroCacheProviderId(apiKey: string | undefined, baseUrl?: string): string {
 	const parsed = parseKiroApiKey(apiKey);
 	const region = resolveKiroApiRegion(parsed.region ?? getKiroRegionFromEndpoint(baseUrl));
-	const profileFingerprint = parsed.profileArn ? Bun.hash(parsed.profileArn).toString(36) : "default";
-	return `kiro:${region}:${profileFingerprint}`;
+	// Catalogs are account/profile scoped. With a profile ARN the cache is
+	// namespaced per ARN; without one, per bearer token. Only irreversible
+	// Bun.hash fingerprints are stored, so the raw token never appears in the
+	// cache namespace. Anonymous setups (no token at all) keep "default".
+	const scopeFingerprint = parsed.profileArn
+		? Bun.hash(parsed.profileArn).toString(36)
+		: parsed.token
+			? Bun.hash(parsed.token).toString(36)
+			: "default";
+	return `kiro:${region}:${scopeFingerprint}`;
 }

@@ -3600,6 +3600,7 @@ export class AuthStorage {
 
 	async #collectUsageRequests(options?: {
 		baseUrlResolver?: (provider: Provider) => string | undefined;
+		providers?: ReadonlySet<Provider>;
 	}): Promise<UsageRequestDescriptor[]> {
 		const requests: UsageRequestDescriptor[] = [];
 		const providers = new Set<string>([
@@ -3610,6 +3611,7 @@ export class AuthStorage {
 
 		for (const providerId of providers) {
 			const provider = providerId as Provider;
+			if (options?.providers && !options.providers.has(provider)) continue;
 			const providerImpl = this.#resolveUsageProvider(provider);
 			if (!providerImpl) continue;
 			const baseUrl = options?.baseUrlResolver?.(provider);
@@ -4155,7 +4157,26 @@ export class AuthStorage {
 				});
 				this.#usageReportsInFlight.set(overrideKey, shared);
 			}
-			const reports = await raceUsageWithSignal(shared, options?.signal);
+			const brokerReports = await raceUsageWithSignal(shared, options?.signal);
+			let reports = brokerReports;
+			if (
+				this.#fetchUsageReportsOverride === undefined &&
+				storeOverride !== undefined &&
+				this.#runtimeUsageProviderOverrides.size > 0
+			) {
+				const runtimeProviders = new Set(this.#runtimeUsageProviderOverrides.keys());
+				const runtimeRequests = await this.#collectUsageRequests({
+					...options,
+					providers: runtimeProviders,
+				});
+				const forcedRefresh = this.#usageForceRefresh(runtimeRequests);
+				const runtimeResults = await this.#fetchUsageRequests(runtimeRequests, forcedRefresh.providers);
+				this.#clearUsageForceRefresh(forcedRefresh);
+				reports = this.#dedupeUsageReports([
+					...(brokerReports ?? []),
+					...runtimeResults.filter((report): report is UsageReport => report !== null),
+				]);
+			}
 			if (shouldReconcileStoreHookReports && reports) this.#reconcileCodexUsageBlocksFromReports(reports);
 			return reports;
 		}

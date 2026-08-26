@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Kiro model availability and runtime routing to the coding agent, including extension-provided Credits in `omp usage` and inline provider billing through optional `ExtensionUIContext.setStatusLine()` ([#8758](https://github.com/can1357/oh-my-pi/pull/8758) by [@fanbaoyu1024](https://github.com/fanbaoyu1024)).
+
 ## [18.0.6] - 2026-08-26
 
 ### Added
@@ -437,9 +441,6 @@
 
 ### Added
 
-- Added Kiro model availability and runtime routing to the coding agent ([#8758](https://github.com/can1357/oh-my-pi/pull/8758) by [@fanbaoyu1024](https://github.com/fanbaoyu1024)).
-- Added `ProviderConfig.usage` so extensions can contribute standard usage reports to both `/usage` and `omp usage`; extension providers share the existing provider registration and cleanup lifecycle, while built-in usage providers remain the fallback ([#8758](https://github.com/can1357/oh-my-pi/pull/8758) by [@fanbaoyu1024](https://github.com/fanbaoyu1024)).
-- Added optional `ExtensionUIContext.setStatusLine()` so provider extensions can render compact billing/metering text inside the main status line instead of consuming a separate hook-status row ([#8758](https://github.com/can1357/oh-my-pi/pull/8758) by [@fanbaoyu1024](https://github.com/fanbaoyu1024)).
 
 - Added `providers.cacheRetention` setting (`/settings` → Providers → Protocol) to control prompt-cache retention per request: `auto` keeps the provider default (Anthropic: 5m entries with idle keep-alive refreshes), `short` forces 5m, `long` restores 1h TTLs where supported and disables the keep-alive refresh loop, `none` disables prompt caching.
 

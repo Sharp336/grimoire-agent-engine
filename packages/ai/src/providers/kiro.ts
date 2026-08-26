@@ -13,6 +13,7 @@ import type {
 	Api,
 	AssistantMessage,
 	Context,
+	FetchImpl,
 	ImageContent,
 	Message,
 	Model,
@@ -86,7 +87,29 @@ type KiroEvent =
 	| { type: "toolUseStop"; data: { stop: boolean } }
 	| { type: "contextUsage"; data: { contextUsagePercentage: number } }
 	| { type: "usage"; data: { inputTokens?: number; outputTokens?: number } }
+	| { type: "metering"; data: KiroMetering }
 	| { type: "error"; data: { error: string; message?: string } };
+export interface KiroMetering {
+	value: number;
+	unit: string;
+	unitPlural: string;
+}
+
+const meteringByMessageTimestamp = new Map<number, KiroMetering>();
+
+export function consumeKiroMetering(timestamp: number): KiroMetering | undefined {
+	const metering = meteringByMessageTimestamp.get(timestamp);
+	meteringByMessageTimestamp.delete(timestamp);
+	return metering;
+}
+
+export function recordKiroMetering(timestamp: number, metering: KiroMetering): void {
+	if (meteringByMessageTimestamp.size >= 32) {
+		const oldest = meteringByMessageTimestamp.keys().next().value;
+		if (oldest !== undefined) meteringByMessageTimestamp.delete(oldest);
+	}
+	meteringByMessageTimestamp.set(timestamp, metering);
+}
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
 	return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
@@ -122,6 +145,16 @@ export function parseKiroEvent(payload: unknown): KiroEvent | undefined {
 	}
 	if (typeof parsed.contextUsagePercentage === "number") {
 		return { type: "contextUsage", data: { contextUsagePercentage: parsed.contextUsagePercentage } };
+	}
+	if (typeof parsed.usage === "number" && Number.isFinite(parsed.usage) && typeof parsed.unit === "string") {
+		return {
+			type: "metering",
+			data: {
+				value: parsed.usage,
+				unit: parsed.unit,
+				unitPlural: typeof parsed.unitPlural === "string" ? parsed.unitPlural : `${parsed.unit}s`,
+			},
+		};
 	}
 	const rawUsage = asRecord(parsed.usage);
 	if (rawUsage) {
@@ -411,10 +444,21 @@ function emptyUsage(): Usage {
 	};
 }
 
-function findHeader(headers: Record<string, string> | undefined, name: string): string | undefined {
-	if (!headers) return undefined;
-	const lower = name.toLowerCase();
-	return Object.entries(headers).find(([key]) => key.toLowerCase() === lower)?.[1];
+let resolvedProfileCache: { accessToken: string; region: string; profileArn: string } | undefined;
+
+async function resolveProfileForCredential(
+	auth: { accessToken: string; region: string },
+	providedProfileArn: string | undefined,
+	fetchFn: FetchImpl,
+	signal?: AbortSignal,
+): Promise<string> {
+	if (providedProfileArn) return providedProfileArn;
+	if (resolvedProfileCache?.accessToken === auth.accessToken && resolvedProfileCache.region === auth.region) {
+		return resolvedProfileCache.profileArn;
+	}
+	const profileArn = await resolveKiroProfileArn(auth, undefined, fetchFn, signal);
+	resolvedProfileCache = { ...auth, profileArn };
+	return profileArn;
 }
 
 function appendText(
@@ -529,12 +573,12 @@ export function streamKiro(
 			if (!structured.token) throw new Error("Kiro credentials not set. Run /login kiro.");
 			const kiroModel = model as KiroModel;
 			const region = resolveKiroApiRegion(
-				kiroModel.kiroRegion ?? structured.region ?? getKiroRegionFromEndpoint(model.baseUrl),
+				structured.region ?? kiroModel.kiroRegion ?? getKiroRegionFromEndpoint(model.baseUrl),
 			);
 			const fetchFn = options.fetch ?? globalThis.fetch;
-			const profileArn = await resolveKiroProfileArn(
+			const profileArn = await resolveProfileForCredential(
 				{ accessToken: structured.token, region },
-				kiroModel.kiroProfileArn ?? structured.profileArn ?? findHeader(options.headers, "x-amzn-kiro-profile-arn"),
+				structured.profileArn,
 				fetchFn,
 				options.signal,
 			);
@@ -558,6 +602,7 @@ export function streamKiro(
 					"Content-Type": "application/json",
 					Accept: "application/vnd.amazon.eventstream",
 					Authorization: `Bearer ${structured.token}`,
+					"x-amzn-kiro-profile-arn": profileArn,
 					"x-amzn-codewhisperer-optout": "true",
 					"amz-sdk-invocation-id": requestId,
 					"amz-sdk-request": "attempt=1; max=1",
@@ -570,7 +615,25 @@ export function streamKiro(
 			});
 			if (!response.ok) {
 				output.errorStatus = response.status;
-				throw new Error(`Kiro API request failed (HTTP ${response.status})`);
+				let detail = "";
+				try {
+					const body = (await response.json()) as { message?: unknown; reason?: unknown; error?: unknown };
+					const candidate = [body.message, body.reason, body.error].find(
+						(value): value is string => typeof value === "string" && value.trim().length > 0,
+					);
+					if (candidate) {
+						detail = candidate
+							.replace(/\s+/g, " ")
+							.split(structured.token)
+							.join("[redacted]")
+							.split(profileArn)
+							.join("[redacted]")
+							.slice(0, 300);
+					}
+				} catch {
+					// Some runtime errors return an empty or non-JSON body.
+				}
+				throw new Error(`Kiro API request failed (HTTP ${response.status})${detail ? `: ${detail}` : ""}`);
 			}
 			if (!response.body) throw new Error("Kiro API returned no event stream body");
 			stream.push({ type: "start", partial: output });
@@ -580,8 +643,34 @@ export function streamKiro(
 			let emittedToolCalls = 0;
 			let receivedContextUsage = false;
 			let usageEvent: { inputTokens?: number; outputTokens?: number } | undefined;
+			let meteringEvent: KiroMetering | undefined;
 			for await (const frame of decodeKiroEventStream(response.body as ReadableStream<Uint8Array>)) {
 				const payloadText = new TextDecoder().decode(frame.payload);
+				const messageType = frame.headers[":message-type"];
+				const exceptionType = frame.headers[":exception-type"];
+				if (messageType === "exception" || exceptionType) {
+					let detail = "";
+					try {
+						const parsed = JSON.parse(payloadText) as { message?: unknown; reason?: unknown; error?: unknown };
+						const candidate = [parsed.message, parsed.reason, parsed.error].find(
+							(value): value is string => typeof value === "string" && value.trim().length > 0,
+						);
+						if (candidate) {
+							detail = candidate
+								.replace(/\s+/g, " ")
+								.split(structured.token)
+								.join("[redacted]")
+								.split(profileArn)
+								.join("[redacted]")
+								.slice(0, 300);
+						}
+					} catch {
+						// Non-JSON exception payloads still surface the exception type below.
+					}
+					throw new Error(
+						`Kiro API stream exception${exceptionType ? `: ${exceptionType}` : ""}${detail ? `: ${detail}` : ""}`,
+					);
+				}
 				let eventPayload: unknown;
 				try {
 					eventPayload = JSON.parse(payloadText);
@@ -590,6 +679,12 @@ export function streamKiro(
 				}
 				const event = parseKiroEvent(eventPayload);
 				if (!event) continue;
+				if (
+					output.ttft === undefined &&
+					(event.type === "content" || event.type === "thinkingText" || event.type === "toolUse")
+				) {
+					output.ttft = Date.now() - output.timestamp;
+				}
 				switch (event.type) {
 					case "content":
 						endThinking(output, stream, thinkingState);
@@ -633,6 +728,9 @@ export function streamKiro(
 					case "usage":
 						usageEvent = event.data;
 						break;
+					case "metering":
+						meteringEvent = event.data;
+						break;
 					case "error":
 						throw new Error(
 							`Kiro API stream error: ${event.data.error}${event.data.message ? `: ${event.data.message}` : ""}`,
@@ -643,9 +741,23 @@ export function streamKiro(
 			endThinking(output, stream, thinkingState);
 			endText(output, stream, textState);
 			output.usage.input = usageEvent?.inputTokens ?? output.usage.input;
-			output.usage.output = usageEvent?.outputTokens ?? 0;
-			output.usage.totalTokens = output.usage.input + output.usage.output;
+			const estimatedOutputText = output.content
+				.map(block => {
+					if (block.type === "text") return block.text;
+					if (block.type === "thinking") return block.thinking;
+					if (block.type === "toolCall") return `${block.name}${JSON.stringify(block.arguments)}`;
+					return "";
+				})
+				.join("");
+			output.usage.output =
+				usageEvent?.outputTokens ??
+				(estimatedOutputText
+					? Math.max(1, Math.ceil(new TextEncoder().encode(estimatedOutputText).length / 4))
+					: 0);
 			if (!receivedContextUsage && output.usage.input === 0) output.usage.input = context.messages.length;
+			output.usage.totalTokens = output.usage.input + output.usage.output;
+			output.duration = Date.now() - output.timestamp;
+			if (meteringEvent) recordKiroMetering(output.timestamp, meteringEvent);
 			calculateCost(model, output.usage);
 			output.stopReason = emittedToolCalls > 0 ? "toolUse" : "stop";
 			stream.push({ type: "done", reason: output.stopReason, message: output });

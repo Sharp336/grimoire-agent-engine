@@ -3,6 +3,7 @@ import { buildKiroRequest, parseKiroEvent } from "@oh-my-pi/pi-ai/providers/kiro
 import { crc32, decodeKiroEventStream, decodeKiroEventStreamMessage } from "@oh-my-pi/pi-ai/providers/kiro-eventstream";
 import { getOAuthApiKey } from "@oh-my-pi/pi-ai/registry/oauth";
 import { loginKiro, refreshKiroToken } from "@oh-my-pi/pi-ai/registry/oauth/kiro";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context, FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { KiroModel } from "@oh-my-pi/pi-catalog/provider-models/kiro";
@@ -12,15 +13,32 @@ function jsonResponse(value: unknown, status = 200): Response {
 	return new Response(JSON.stringify(value), { status, headers: { "Content-Type": "application/json" } });
 }
 
-function eventStreamFrame(payload: string): Uint8Array {
+function eventStreamFrame(payload: string, headers: Record<string, string> = {}): Uint8Array {
 	const payloadBytes = new TextEncoder().encode(payload);
-	const totalLength = 12 + payloadBytes.length + 4;
+	const headerParts = Object.entries(headers).map(([name, value]) => {
+		const nameBytes = new TextEncoder().encode(name);
+		const valueBytes = new TextEncoder().encode(value);
+		const bytes = new Uint8Array(1 + nameBytes.length + 1 + 2 + valueBytes.length);
+		bytes[0] = nameBytes.length;
+		bytes.set(nameBytes, 1);
+		bytes[1 + nameBytes.length] = 7;
+		new DataView(bytes.buffer).setUint16(2 + nameBytes.length, valueBytes.length, false);
+		bytes.set(valueBytes, 4 + nameBytes.length);
+		return bytes;
+	});
+	const headerLength = headerParts.reduce((total, bytes) => total + bytes.length, 0);
+	const totalLength = 12 + headerLength + payloadBytes.length + 4;
 	const frame = new Uint8Array(totalLength);
 	const view = new DataView(frame.buffer);
 	view.setUint32(0, totalLength, false);
-	view.setUint32(4, 0, false);
+	view.setUint32(4, headerLength, false);
 	view.setUint32(8, crc32(frame.subarray(0, 8)), false);
-	frame.set(payloadBytes, 12);
+	let offset = 12;
+	for (const bytes of headerParts) {
+		frame.set(bytes, offset);
+		offset += bytes.length;
+	}
+	frame.set(payloadBytes, offset);
 	view.setUint32(totalLength - 4, crc32(frame.subarray(0, totalLength - 4)), false);
 	return frame;
 }
@@ -94,6 +112,29 @@ describe("Kiro OAuth", () => {
 				refreshToken: "refresh-old",
 				grantType: "refresh_token",
 			});
+		} finally {
+			fetchSpy.mockRestore();
+		}
+	});
+
+	test("preserves definitive refresh error codes", async () => {
+		const fetchSpy = vi.spyOn(globalThis, "fetch").mockResolvedValue(
+			jsonResponse(
+				{
+					error: "invalid_grant",
+					error_description: "Refresh token revoked",
+				},
+				400,
+			),
+		);
+		try {
+			await expect(
+				refreshKiroToken({
+					access: "access-old",
+					refresh: "refresh-old|client-fixture|secret-fixture|idc|us-east-1",
+					expires: 0,
+				} as never),
+			).rejects.toThrow("invalid_grant: Refresh token revoked");
 		} finally {
 			fetchSpy.mockRestore();
 		}
@@ -287,6 +328,16 @@ describe("Kiro event stream", () => {
 			type: "usage",
 			data: { inputTokens: 10, outputTokens: 4 },
 		});
+		expect(
+			parseKiroEvent({
+				usage: 0.006,
+				unit: "credit",
+				unitPlural: "credits",
+			}),
+		).toEqual({
+			type: "metering",
+			data: { value: 0.006, unit: "credit", unitPlural: "credits" },
+		});
 		expect(parseKiroEvent({ Error: "bad", reason: "fixture" })).toEqual({
 			type: "error",
 			data: { error: "bad", message: "fixture" },
@@ -337,7 +388,6 @@ describe("Kiro structured OAuth key", () => {
 
 describe("Kiro streamSimple dispatch", () => {
 	test("uses the built-in kiro-api handler with profile discovery and EventStream output", async () => {
-		const { streamSimple } = await import("@oh-my-pi/pi-ai/stream");
 		const requests: Array<{ url: string; init?: RequestInit }> = [];
 		const fetchMock: FetchImpl = async (input, init) => {
 			const url = String(input);
@@ -363,10 +413,86 @@ describe("Kiro streamSimple dispatch", () => {
 
 		expect(result.stopReason).toBe("stop");
 		expect(result.content).toEqual([{ type: "text", text: "streamSimple works" }]);
+		expect(result.usage.output).toBeGreaterThan(0);
+		expect(result.usage.totalTokens).toBe(result.usage.input + result.usage.output);
+		expect(result.duration).toBeGreaterThanOrEqual(0);
+		expect(result.ttft).toBeGreaterThanOrEqual(0);
 		expect(requests.map(request => request.url)).toEqual([
 			"https://management.eu-central-1.kiro.dev/List-Available-Profiles",
 			"https://runtime.eu-central-1.kiro.dev/generateAssistantResponse",
 		]);
-		expect(JSON.parse(String(requests[1]?.init?.body))).toMatchObject({ profileArn: "profile-fixture" });
+		expect(JSON.parse(String(requests[1]?.init?.body))).toMatchObject({
+			profileArn: "profile-fixture",
+		});
+		expect(new Headers(requests[1]?.init?.headers).get("x-amzn-kiro-profile-arn")).toBe("profile-fixture");
+	});
+
+	test("surfaces modeled AWS EventStream exceptions", async () => {
+		const result = await streamSimple(
+			KIRO_MODELS[0] as KiroModel,
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: JSON.stringify({
+					token: "access-fixture",
+					region: "us-east-1",
+					profileArn: "profile-fixture",
+				}),
+				fetch: async () =>
+					new Response(
+						eventStreamFrame(
+							JSON.stringify({
+								message: "Model is not available",
+							}),
+							{
+								":message-type": "exception",
+								":exception-type": "ValidationException",
+							},
+						),
+						{ status: 200 },
+					),
+			},
+		).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("ValidationException: Model is not available");
+	});
+
+	test("re-resolves profile scope instead of trusting stale model metadata", async () => {
+		const requests: Array<{ url: string; init?: RequestInit }> = [];
+		const model = {
+			...KIRO_MODELS[0],
+			kiroRegion: "us-east-1",
+			kiroProfileArn: "stale-profile",
+		} as KiroModel;
+		const result = await streamSimple(
+			model,
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: JSON.stringify({
+					token: "new-access",
+					region: "eu-central-1",
+				}),
+				fetch: async (input, init) => {
+					const url = String(input);
+					requests.push({ url, init });
+					if (url.endsWith("/List-Available-Profiles")) {
+						return jsonResponse({
+							profiles: [{ arn: "current-profile" }],
+						});
+					}
+					return new Response(eventStreamFrame(JSON.stringify({ content: "ok" })), { status: 200 });
+				},
+			},
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(requests.map(request => request.url)).toEqual([
+			"https://management.eu-central-1.kiro.dev/List-Available-Profiles",
+			"https://runtime.eu-central-1.kiro.dev/generateAssistantResponse",
+		]);
+		expect(JSON.parse(String(requests[1]?.init?.body))).toMatchObject({
+			profileArn: "current-profile",
+		});
+		expect(new Headers(requests[1]?.init?.headers).get("x-amzn-kiro-profile-arn")).toBe("current-profile");
 	});
 });

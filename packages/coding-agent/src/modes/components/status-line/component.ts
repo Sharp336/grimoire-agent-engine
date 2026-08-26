@@ -1752,7 +1752,8 @@ export class StatusLineComponent implements Component {
 			usageStats,
 			inlineStatuses: Array.from(this.#inlineStatuses.entries())
 				.sort(([a], [b]) => a.localeCompare(b))
-				.map(([, text]) => sanitizeStatusText(text)),
+				.map(([, text]) => sanitizeStatusText(text))
+				.filter(text => visibleWidth(text) > 0),
 			contextPercent,
 			contextTokens,
 			contextWindow,

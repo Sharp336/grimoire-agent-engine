@@ -19,8 +19,14 @@ const REGION_PROBES = [
 	"eu-west-2",
 	"eu-west-3",
 	"eu-north-1",
+	"eu-south-1",
+	"eu-south-2",
+	"eu-central-2",
 	"ap-southeast-1",
+	"ap-southeast-2",
 	"ap-northeast-1",
+	"ap-south-1",
+	"us-west-1",
 	"us-west-2",
 ] as const;
 const REQUEST_TIMEOUT_MS = 15_000;
@@ -51,6 +57,7 @@ type TokenResponse = {
 	expiresIn?: number;
 	expires_in?: number;
 	error?: string;
+	error_description?: string;
 };
 
 function withTimeout(signal: AbortSignal | undefined): AbortSignal {
@@ -262,7 +269,13 @@ export async function refreshKiroToken(credentials: OAuthCredentials): Promise<K
 		signal: withTimeout(undefined),
 	});
 	const data = await json<TokenResponse>(response);
-	if (!response.ok) throw new Error(`Kiro token refresh failed (HTTP ${response.status})`);
+	if (!response.ok) {
+		const detail = [data.error, data.error_description]
+			.filter((value): value is string => typeof value === "string" && value.length > 0)
+			.join(": ");
+		const safeDetail = detail ? detail.replace(/\s+/g, " ").split(token).join("[redacted]").slice(0, 200) : "";
+		throw new Error(`Kiro token refresh failed (HTTP ${response.status})${safeDetail ? `: ${safeDetail}` : ""}`);
+	}
 	const access = data.accessToken ?? data.access_token;
 	const refresh = data.refreshToken ?? data.refresh_token ?? token;
 	const expiresIn = Number(data.expiresIn ?? data.expires_in);
