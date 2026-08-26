@@ -1,3 +1,4 @@
+import { gunzipSync } from "node:zlib";
 import * as AIError from "../../error";
 
 /**
@@ -24,7 +25,8 @@ export const CONNECT_FLAG_RESERVED_MASK = 0b11111100;
  * peer could force a reader to buffer gigabytes via `Buffer.concat` before an
  * idle-timeout wrapper aborts. Well above any legitimate response but tight
  * enough that a corrupt length prefix fails fast instead of consuming memory
- * (same convention as devin.ts:77).
+ * (same convention as devin.ts:77). Also bounds the decompressed output of a
+ * compressed envelope, so a tiny gzip payload cannot expand unboundedly.
  */
 export const MAX_CONNECT_FRAME_PAYLOAD = 16 * 1024 * 1024;
 
@@ -108,11 +110,20 @@ export function encodeConnectFrame(payload: Uint8Array, compress: boolean): Buff
  * Stateful per-stream Connect decoder. Appends raw bytes and emits every frame
  * that completes, enforcing the terminal grammar: reserved flags and unknown
  * compression are rejected, at most one end-of-stream envelope may arrive, and
- * `finish()` requires that the end-of-stream envelope was seen.
+ * `finish()` requires that the end-of-stream envelope was seen with no trailing
+ * bytes surviving in the buffer.
+ *
+ * Buffering is amortized O(1) per push: bytes accumulate in a geometrically
+ * growing backing buffer and the consumed head is reclaimed only when a new
+ * chunk would not fit in the remaining tail, so a large frame delivered in many
+ * small chunks no longer copies the whole pending buffer on every push.
  */
 export class ConnectFrameDecoder {
 	readonly #acceptCompressed: boolean;
-	#buffer: Buffer = Buffer.alloc(0);
+	// Backing buffer; valid unconsumed bytes are `#buf.subarray(#start, #end)`.
+	#buf: Buffer = Buffer.alloc(0);
+	#start = 0;
+	#end = 0;
 	#sawEndStream = false;
 
 	constructor(options: { acceptCompressed: boolean }) {
@@ -123,14 +134,52 @@ export class ConnectFrameDecoder {
 		return this.#sawEndStream;
 	}
 
+	/** Number of unconsumed bytes currently buffered. */
+	get #pending(): number {
+		return this.#end - this.#start;
+	}
+
+	/** Ensures `chunk` can be appended without overflowing the backing buffer. */
+	#append(chunk: Buffer): void {
+		const needed = this.#pending + chunk.length;
+		if (needed > this.#buf.length) {
+			// Grow geometrically and copy only the live bytes to the front,
+			// reclaiming any consumed head. Each byte is copied O(1) amortized.
+			const cap = Math.max(needed, this.#buf.length * 2, 64);
+			const next = Buffer.alloc(cap);
+			next.set(this.#buf.subarray(this.#start, this.#end), 0);
+			this.#buf = next;
+			this.#end = this.#pending;
+			this.#start = 0;
+		} else if (this.#end + chunk.length > this.#buf.length) {
+			// Enough total capacity, but the tail is too short: compact in place.
+			// Safe because no outstanding view into `#buf` escapes this decoder —
+			// frame payloads are copied out or decompressed into fresh buffers.
+			this.#buf.copyWithin(0, this.#start, this.#end);
+			this.#end = this.#pending;
+			this.#start = 0;
+		}
+		this.#buf.set(chunk, this.#end);
+		this.#end += chunk.length;
+	}
+
 	/** Appends bytes and returns every frame that completed. Throws `ConnectProtocolError`. */
 	push(chunk: Buffer): ConnectFrame[] {
-		this.#buffer = this.#buffer.length === 0 ? chunk : Buffer.concat([this.#buffer, chunk]);
+		// Once the terminal envelope has been consumed, no further bytes are
+		// valid — a terminal envelope is exactly one header + payload, nothing
+		// more. Reject any non-empty trailing chunk from push() itself.
+		if (this.#sawEndStream && chunk.length > 0) {
+			throw new ConnectProtocolError("Cursor Connect received bytes after end-of-stream envelope", {
+				kind: "envelope",
+			});
+		}
+		if (chunk.length === 0) return [];
+		this.#append(chunk);
 
 		const frames: ConnectFrame[] = [];
-		while (this.#buffer.length >= 5) {
-			const flags = this.#buffer[0];
-			const msgLen = this.#buffer.readUInt32BE(1);
+		while (this.#pending >= 5) {
+			const flags = this.#buf[this.#start];
+			const msgLen = this.#buf.readUInt32BE(this.#start + 1);
 			// Reject a declared length above the cap before treating the frame as
 			// present — the 4-byte prefix is otherwise attacker-controlled.
 			if (msgLen > MAX_CONNECT_FRAME_PAYLOAD) {
@@ -139,10 +188,14 @@ export class ConnectFrameDecoder {
 					{ kind: "envelope" },
 				);
 			}
-			if (this.#buffer.length < 5 + msgLen) break;
+			if (this.#pending < 5 + msgLen) break;
 
-			const payload = this.#buffer.subarray(5, 5 + msgLen);
-			this.#buffer = this.#buffer.subarray(5 + msgLen);
+			const payloadStart = this.#start + 5;
+			const payloadEnd = payloadStart + msgLen;
+			const payload = this.#buf.subarray(payloadStart, payloadEnd);
+			// Consume the envelope before processing it; a processing throw is a
+			// terminal protocol error that aborts the stream regardless.
+			this.#start = payloadEnd;
 
 			// No frame may follow the end-of-stream envelope.
 			if (this.#sawEndStream) {
@@ -165,14 +218,41 @@ export class ConnectFrameDecoder {
 						{ kind: "envelope" },
 					);
 				}
+				// node:zlib gunzipSync is used instead of Bun.gunzipSync because
+				// only node:zlib exposes `maxOutputLength`, which bounds the
+				// decompressed size and stops a tiny gzip payload from expanding
+				// unboundedly. This is the documented exception to AGENTS.md's
+				// Bun-over-Node rule (Bun has no output-bound decompressor).
 				try {
-					body = Bun.gunzipSync(payload as Uint8Array<ArrayBuffer>);
+					body = gunzipSync(payload as Uint8Array<ArrayBuffer>, {
+						maxOutputLength: MAX_CONNECT_FRAME_PAYLOAD,
+					});
 				} catch (e) {
+					const code = typeof e === "object" && e !== null && "code" in e ? e.code : undefined;
+					if (code === "ERR_BUFFER_TOO_LARGE") {
+						throw new ConnectProtocolError(
+							`Cursor Connect decompressed envelope exceeds ${MAX_CONNECT_FRAME_PAYLOAD}-byte cap`,
+							{ kind: "envelope", cause: e },
+						);
+					}
 					throw new ConnectProtocolError("Cursor Connect envelope declared gzip but could not be decompressed", {
 						kind: "envelope",
 						cause: e,
 					});
 				}
+				// Defensive: maxOutputLength already enforces this, but keep an
+				// explicit post-check so the bound holds even if the option's
+				// semantics ever change.
+				if (body.length > MAX_CONNECT_FRAME_PAYLOAD) {
+					throw new ConnectProtocolError(
+						`Cursor Connect decompressed envelope exceeds ${MAX_CONNECT_FRAME_PAYLOAD}-byte cap`,
+						{ kind: "envelope" },
+					);
+				}
+			} else {
+				// Copy the payload out so later compaction of `#buf` cannot mutate
+				// a view the caller still holds.
+				body = Buffer.from(payload);
 			}
 
 			if ((flags & CONNECT_FLAG_END_STREAM) !== 0) {
@@ -185,11 +265,16 @@ export class ConnectFrameDecoder {
 		return frames;
 	}
 
-	/** Call on stream EOF. Throws `ConnectProtocolError` when no end-of-stream was seen. */
+	/** Call on stream EOF. Throws `ConnectProtocolError` when no end-of-stream was seen, or when trailing bytes survive. */
 	finish(): void {
 		if (!this.#sawEndStream) {
 			throw new ConnectProtocolError("Cursor stream ended before end-of-stream frame", {
 				kind: "incomplete-stream",
+			});
+		}
+		if (this.#pending > 0) {
+			throw new ConnectProtocolError("Cursor Connect received bytes after end-of-stream envelope", {
+				kind: "envelope",
 			});
 		}
 	}

@@ -244,3 +244,72 @@ describe("ConnectFrameDecoder grammar", () => {
 		expect(fragFrames[2].error).toBeNull();
 	});
 });
+
+describe("ConnectFrameDecoder hardening (grill loop batch 1)", () => {
+	test("bounded inflate: a compressed envelope expanding past the cap is rejected", () => {
+		// 16 MiB + 1 of repeated bytes compresses to a few KB but would decompress
+		// past MAX_CONNECT_FRAME_PAYLOAD. The decoder must reject it as a protocol
+		// error, never allocate the full expansion.
+		const oversized = new Uint8Array(MAX_CONNECT_FRAME_PAYLOAD + 1).fill(0x41);
+		const gz = Bun.gzipSync(oversized as Uint8Array<ArrayBuffer>);
+		expect(gz.length).toBeLessThan(MAX_CONNECT_FRAME_PAYLOAD);
+		const decoder = new ConnectFrameDecoder({ acceptCompressed: true });
+		expectProtocolError(() => decoder.push(rawFrame(CONNECT_FLAG_COMPRESSED, gz)), "exceeds", "envelope");
+		expect(decoder.sawEndStream).toBe(false);
+	});
+
+	test("amortized buffering: a 256 KiB frame delivered in 4 KiB chunks decodes identically to one chunk", () => {
+		const payload = new TextEncoder().encode("Z".repeat(256 * 1024));
+		const frame = encodeConnectFrame(payload, false);
+		const chunkSize = 4 * 1024;
+
+		const whole = new ConnectFrameDecoder({ acceptCompressed: true });
+		const wholeFrames = whole.push(frame);
+
+		const fragmented = new ConnectFrameDecoder({ acceptCompressed: true });
+		const fragFrames: ConnectFrame[] = [];
+		for (let i = 0; i < frame.length; i += chunkSize) {
+			fragFrames.push(...fragmented.push(frame.subarray(i, Math.min(i + chunkSize, frame.length))));
+		}
+		expect(fragFrames).toHaveLength(1);
+		expect(fragFrames[0].kind).toBe("data");
+		expect((fragFrames[0] as { payload: Uint8Array }).payload).toEqual(payload);
+		expect(wholeFrames).toHaveLength(1);
+		expect((wholeFrames[0] as { payload: Uint8Array }).payload).toEqual(
+			(fragFrames[0] as { payload: Uint8Array }).payload,
+		);
+	});
+
+	test("trailing bytes after end-stream: stray bytes then finish() throw (1 byte)", () => {
+		const decoder = new ConnectFrameDecoder({ acceptCompressed: true });
+		const endFrame = rawFrame(CONNECT_FLAG_END_STREAM, JSON.stringify({ error: null }));
+		// Deliver the end frame plus one stray byte in one chunk.
+		const frames = decoder.push(Buffer.concat([endFrame, Buffer.from([0x00])]));
+		expect(frames).toHaveLength(1);
+		expect(frames[0]).toEqual({ kind: "end", error: null });
+		expect(decoder.sawEndStream).toBe(true);
+		expectProtocolError(() => decoder.finish(), "bytes after end-of-stream", "envelope");
+	});
+
+	test("trailing bytes after end-stream: stray bytes then finish() throw (3 bytes)", () => {
+		const decoder = new ConnectFrameDecoder({ acceptCompressed: true });
+		const endFrame = rawFrame(CONNECT_FLAG_END_STREAM, JSON.stringify({ error: null }));
+		decoder.push(Buffer.concat([endFrame, Buffer.from([0x01, 0x02, 0x03])]));
+		expectProtocolError(() => decoder.finish(), "bytes after end-of-stream", "envelope");
+	});
+
+	test("trailing bytes after end-stream: a chunk pushed after the terminal frame throws from push()", () => {
+		const decoder = new ConnectFrameDecoder({ acceptCompressed: true });
+		decoder.push(rawFrame(CONNECT_FLAG_END_STREAM, JSON.stringify({ error: null })));
+		expect(decoder.sawEndStream).toBe(true);
+		// Even a single byte pushed after the terminal envelope is a protocol error.
+		expectProtocolError(() => decoder.push(Buffer.from([0x00])), "bytes after end-of-stream", "envelope");
+	});
+
+	test("trailing bytes after end-stream: a clean stream still finishes cleanly", () => {
+		const decoder = new ConnectFrameDecoder({ acceptCompressed: true });
+		decoder.push(rawFrame(CONNECT_FLAG_END_STREAM, JSON.stringify({ error: null })));
+		expect(decoder.sawEndStream).toBe(true);
+		expect(() => decoder.finish()).not.toThrow();
+	});
+});
