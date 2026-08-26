@@ -6,8 +6,10 @@ import {
 	type AskQuestionRow,
 	type AskRowRenderContext,
 	askOptionMarker,
+	askRowPrefixColumns,
 	renderAskRow,
 } from "@oh-my-pi/pi-coding-agent/modes/components/ask-row";
+import { loadThemeSync } from "@oh-my-pi/pi-coding-agent/modes/theme/loader";
 import { getMarkdownTheme, getThemeByName, setThemeInstance, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme-class";
 import { CURSOR_MARKER, visibleWidth } from "@oh-my-pi/pi-tui";
@@ -186,5 +188,42 @@ describe("askRow", () => {
 		const first = strip(lines[0]);
 		expect(first).toContain("✎ note");
 		expect(visibleWidth(first)).toBeLessThanOrEqual(30);
+	});
+
+	it("replaces tabs in the label and description before rendering", () => {
+		// A raw tab would expand to the terminal's tab stop instead of the
+		// width the layout helpers measured, shifting the row past its
+		// boundary. replaceTabs normalizes it to spaces first.
+		const q = question(undefined, "line one\tcontinued");
+		const r: AskQuestionRow = { kind: "option", key: "opt:0", label: "Tab\there", optionIndex: 0 };
+		const { lines } = renderAskRow(r, makeCtx({ question: q, focused: true, width: 40 }));
+		const joined = lines.map(strip).join("\n");
+		expect(joined).not.toContain("\t");
+		expect(joined).toContain("Tab");
+		expect(joined).toContain("continued");
+	});
+
+	it("prefix width tracks the ASCII preset's three-column marker", () => {
+		const asciiTheme = loadThemeSync("dark", { symbolPresetOverride: "ascii" });
+		setThemeInstance(asciiTheme);
+		try {
+			// multi → checkbox marker "[ ]" = 3 columns; 4 fixed cells + 3 + 1
+			// spacer = 8 prefix columns, vs the default preset's 6.
+			const q = question(true);
+			const r: AskQuestionRow = { kind: "option", key: "opt:0", label: "Z".repeat(60), optionIndex: 0 };
+			const { lines } = renderAskRow(r, makeCtx({ question: q, focused: false, width: 30 }));
+			expect(askRowPrefixColumns(true)).toBe(8);
+			const continuationLines = lines.slice(1);
+			expect(continuationLines.length).toBeGreaterThan(0);
+			for (const line of continuationLines) {
+				const stripped = strip(line);
+				// Continuation indent must match the actual first-line prefix
+				// (8), not the default constant (6) — a constant would leave
+				// continuations two columns short of the marker.
+				expect(stripped.slice(0, 8)).toBe(" ".repeat(8));
+			}
+		} finally {
+			if (darkTheme) setThemeInstance(darkTheme);
+		}
 	});
 });

@@ -19,6 +19,18 @@ import { type Theme, theme } from "../theme/theme";
  *  dialog, transcript, and legacy surfaces. */
 export const ASK_ROW_PREFIX_COLUMNS = 6;
 
+/** Width of the leading prefix column shared by every ask row, derived from
+ *  the active theme's option-marker glyph. Four fixed cells (cursor, spacer,
+ *  jump digit, spacer) precede the marker, which is followed by a single
+ *  spacer; the marker width varies by symbol preset (the ASCII preset ships
+ *  three-column `[x]`/`( )` glyphs), so the prefix must track it rather than
+ *  assume a one-column marker. {@link ASK_ROW_PREFIX_COLUMNS} is the
+ *  default-preset value (6) kept for callers that only need the common case. */
+export function askRowPrefixColumns(multi: boolean | undefined): number {
+	const marker = askOptionMarker(theme, multi, false);
+	return 4 + visibleWidth(marker) + 1;
+}
+
 /** A single renderable ask row: an option entry or the "other" custom input.
  *  Mirrors the dialog's internal row shape so the transcript and legacy paths
  *  can feed the same engine without their own copies of the contract. */
@@ -74,20 +86,23 @@ export function renderAskRow(row: AskQuestionRow, ctx: AskRowRenderContext): Ask
 
 	// Cells 1-4 of the prefix: focus cursor (plus the terminal-cursor sentinel
 	// only for the focused, declared row), a spacer, the jump digit, a spacer.
-	// Including the cursor glyph, this half of the prefix is exactly
-	// ASK_ROW_PREFIX_COLUMNS - 2 columns wide.
+	// Including the cursor glyph, this half of the prefix is exactly four
+	// columns wide.
 	const cursorCell = ctx.focused ? theme.nav.cursor : " ";
 	const cursorMarker = ctx.focused && ctx.declareCursor ? CURSOR_MARKER : "";
 	const jumpCell = ctx.jumpDigit !== undefined ? theme.fg("dim", ctx.jumpDigit) : " ";
 	const prefix = `${cursorCell}${cursorMarker} ${jumpCell} `;
 
-	// Cells 5-6 of the prefix: the option marker followed by a spacer. The
-	// marker's colour tracks `checked`, never `focused`.
+	// Cells 5+: the option marker followed by a spacer. The marker's colour
+	// tracks `checked`, never `focused`. The marker width varies by symbol
+	// preset, so the prefix column count (and thus the continuation indent and
+	// content budget) is derived from the active glyph rather than a constant.
 	const marker = theme.fg(ctx.checked ? "success" : "dim", askOptionMarker(theme, ctx.question.multi, ctx.checked));
+	const prefixColumns = askRowPrefixColumns(ctx.question.multi);
 
 	const color = ctx.focused ? "accent" : ctx.checked ? "toolOutput" : "text";
-	const label = renderInlineMarkdown(row.label, ctx.mdTheme, t => theme.fg(color, t));
-	const contentWidth = Math.max(1, ctx.width - ASK_ROW_PREFIX_COLUMNS);
+	const label = renderInlineMarkdown(replaceTabs(row.label), ctx.mdTheme, t => theme.fg(color, t));
+	const contentWidth = Math.max(1, ctx.width - prefixColumns);
 	const noteMarker = ctx.note !== undefined ? theme.fg("success", "  ✎ note") : "";
 	const noteWidth = noteMarker ? visibleWidth(noteMarker) : 0;
 	// Reserve the trailing note marker on the first label line so fit() cannot
@@ -96,7 +111,8 @@ export function renderAskRow(row: AskQuestionRow, ctx: AskRowRenderContext): Ask
 	const wrappedLabel = wrapTextWithAnsi(label, wrapBudget);
 
 	const lines = [`${prefix}${marker} ${wrappedLabel[0] ?? ""}${noteMarker}`];
-	const indent = padding(ASK_ROW_PREFIX_COLUMNS);
+	const indent = padding(prefixColumns);
+
 	for (let i = 1; i < wrappedLabel.length; i++) {
 		lines.push(`${indent}${wrappedLabel[i] ?? ""}`);
 	}
@@ -110,7 +126,9 @@ export function renderAskRow(row: AskQuestionRow, ctx: AskRowRenderContext): Ask
 		// lines, then a counted cue when more remain. Expanded: every line, no
 		// cap. A focused description is never truncated without a visible
 		// escape.
-		const description = renderInlineMarkdown(option.description.trim(), ctx.mdTheme, t => theme.fg("muted", t));
+		const description = renderInlineMarkdown(replaceTabs(option.description.trim()), ctx.mdTheme, t =>
+			theme.fg("muted", t),
+		);
 		const wrapped = wrapTextWithAnsi(description, contentWidth);
 		hiddenDescriptionLines = ctx.expanded ? 0 : Math.max(0, wrapped.length - 2);
 		for (const line of ctx.expanded ? wrapped : wrapped.slice(0, 2)) {

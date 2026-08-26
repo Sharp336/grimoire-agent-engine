@@ -1,6 +1,7 @@
 import {
 	type Component,
 	Ellipsis,
+	extractPrintableText,
 	type Focusable,
 	fuzzyFilter,
 	getKeybindings,
@@ -36,7 +37,7 @@ import {
 	matchesSelectPageUp,
 	matchesSelectUp,
 } from "../utils/keybinding-matchers";
-import { ASK_ROW_PREFIX_COLUMNS, type AskQuestionRow, renderAskRow } from "./ask-row";
+import { type AskQuestionRow, askRowPrefixColumns, renderAskRow } from "./ask-row";
 import { CountdownTimer } from "./countdown-timer";
 import { editorKey } from "./keybinding-hints";
 import { bottomBorder, divider, dividerSplit, fit, row, topBorder, topBorderSplit } from "./overlay-box";
@@ -297,8 +298,15 @@ function noteForSubmittedAnswer(question: ExtensionAskDialogQuestion, state: Que
 	return option && state.selectedOptions.has(option.label) ? state.note : undefined;
 }
 
-function previewFacetWidths(innerWidth: number): { listWidth: number; previewWidth: number; split: boolean } {
-	if (innerWidth < PREVIEW_FACET_MIN_WIDTH) {
+function questionHasPreviewContent(question: ExtensionAskDialogQuestion): boolean {
+	return question.options.some(option => option.preview?.trim());
+}
+
+function previewFacetWidths(
+	innerWidth: number,
+	hasPreviewContent: boolean,
+): { listWidth: number; previewWidth: number; split: boolean } {
+	if (!hasPreviewContent || innerWidth < PREVIEW_FACET_MIN_WIDTH) {
 		return { listWidth: innerWidth, previewWidth: 0, split: false };
 	}
 	const listWidth = Math.max(MIN_LIST_FACET_WIDTH, Math.floor(innerWidth / 2));
@@ -323,7 +331,23 @@ function truncateFooter(parts: string[], maxWidth: number): string {
 		kept.splice(kept.length - 2, 1);
 	}
 	const text = join(kept);
-	return visibleWidth(text) <= maxWidth ? text : truncateToWidth(text, Math.max(1, maxWidth), Ellipsis.Unicode);
+	if (visibleWidth(text) <= maxWidth) return text;
+	// Dropping middle hints was not enough and only the cancel hint remains.
+	// Preserve the trailing "cancel" affordance by left-truncating the
+	// keybinding prefix; a right-truncating ellipsis would clip the word
+	// itself, hiding the only signal that cancellation is available.
+	const cancelHint = kept[kept.length - 1] ?? text;
+	if (kept.length === 1 && cancelHint.endsWith("cancel")) {
+		const affordance = "cancel";
+		const affordanceWidth = visibleWidth(affordance);
+		if (maxWidth > affordanceWidth) {
+			const prefix = cancelHint.slice(0, cancelHint.length - affordance.length).trimEnd();
+			const prefixBudget = Math.max(1, maxWidth - affordanceWidth - 1);
+			return `${truncateToWidth(prefix, prefixBudget, Ellipsis.Unicode)} ${affordance}`;
+		}
+		return truncateToWidth(affordance, Math.max(1, maxWidth), Ellipsis.Unicode);
+	}
+	return truncateToWidth(text, Math.max(1, maxWidth), Ellipsis.Unicode);
 }
 
 /**
@@ -485,7 +509,18 @@ export class AskDialogComponent implements Component, Focusable {
 		if (this.#filterOpen && this.#filterInput) {
 			// Keep list navigation live while the filter input is open: arrows
 			// and paging move among filtered rows instead of becoming query text.
-			// Enter is handled by Input.onSubmit (close filter, keep query, activate).
+			// Enter is handled by Input.onSubmit (close filter, keep query,
+			// activate). Space toggles the focused multi-select row along the same
+			// activation path Space takes outside the filter, so a keyboard user
+			// can narrow a multi-select list and toggle a match without closing
+			// the filter; Space never becomes query text in multi mode.
+			// Single-select Space has no toggle, so it stays filter input.
+			const active = this.#activeQuestionState();
+			const isSpace = matchesKey(keyData, "space") || keyData === " ";
+			if (active?.question.multi && isSpace) {
+				this.#handleQuestionInput(keyData);
+				return;
+			}
 			if (
 				matchesSelectUp(keyData) ||
 				matchesSelectDown(keyData) ||
@@ -537,7 +572,11 @@ export class AskDialogComponent implements Component, Focusable {
 		const fixedRows = 1 + headerLines.length + 1 + 1 + 1 + 1;
 		const bodyRows = Math.max(MIN_BODY_ROWS, totalRows - fixedRows);
 		this.#bodyRows = bodyRows;
-		const { listWidth, split } = previewFacetWidths(innerWidth);
+		const currentQuestion = this.#isSubmitTab() ? undefined : this.#questions[this.#currentQuestionIndex()];
+		const { listWidth, split } = previewFacetWidths(
+			innerWidth,
+			currentQuestion ? questionHasPreviewContent(currentQuestion) : false,
+		);
 		const splitChrome = split && !this.#isSubmitTab();
 		// Body concatenates list|preview without the extra spaces splitRow uses,
 		// so the inner │ sits at listWidth+2. overlay-box tees at sidebarWidth+3.
@@ -582,7 +621,7 @@ export class AskDialogComponent implements Component, Focusable {
 			const titleRows = this.#expanded ? Number.POSITIVE_INFINITY : MAX_HEADER_ROWS;
 			const headerRows = tabBarRows + renderQuestionTitle(question, width, titleRows).length;
 			const rowItems = this.#questionRows(question);
-			const { listWidth } = previewFacetWidths(width);
+			const { listWidth } = previewFacetWidths(width, questionHasPreviewContent(question));
 			let body = 0;
 			for (const rowItem of rowItems) {
 				body += renderAskRow(rowItem, {
@@ -664,18 +703,26 @@ export class AskDialogComponent implements Component, Focusable {
 		const wrapped = wrapQuestionTitle(question, width);
 		this.#headerExpandable = wrapped.length > MAX_HEADER_ROWS;
 		const maxRows = this.#expanded ? maxTitleRows : MAX_HEADER_ROWS;
-		const title = renderQuestionTitle(question, width, maxRows);
 		const filterActive = this.#filterOpen || this.#filterQuery.length > 0;
 		if (filterActive) {
 			const rows = this.#visibleRows(question);
 			const total = this.#questionRows(question).length;
-			const count = theme.fg("dim", `${rows.length}/${total}`);
+			const countText = `${rows.length}/${total}`;
+			// Reserve the suffix width before the title is wrapped so the appended
+			// count cannot be truncated away when the first title line already
+			// fills the available width.
+			const suffixWidth = 2 + visibleWidth(countText);
+			const title = renderQuestionTitle(question, Math.max(1, width - suffixWidth), maxRows);
+			const count = theme.fg("dim", countText);
 			if (title.length > 0) {
 				title[0] = `${title[0] ?? ""}  ${count}`;
 			} else {
 				title.push(count);
 			}
+			lines.push(...title);
+			return lines;
 		}
+		const title = renderQuestionTitle(question, width, maxRows);
 		lines.push(...title);
 		return lines;
 	}
@@ -855,8 +902,12 @@ export class AskDialogComponent implements Component, Focusable {
 			return;
 		}
 
-		if (/^[1-9]$/.test(keyData)) {
-			const index = Number.parseInt(keyData, 10) - 1;
+		// Decode through the shared key parser so Kitty numpad digits (CSI-u
+		// sequences like `\x1b[57400u`) reach the jump handler, not just raw
+		// bytes.
+		const decodedDigit = extractPrintableText(keyData);
+		if (decodedDigit && /^[1-9]$/.test(decodedDigit)) {
+			const index = Number.parseInt(decodedDigit, 10) - 1;
 			if (index >= 0 && index < rows.length) {
 				state.cursorIndex = index;
 				state.manualScroll = false;
@@ -875,6 +926,12 @@ export class AskDialogComponent implements Component, Focusable {
 
 	#activateFocusedRow(question: ExtensionAskDialogQuestion, state: QuestionState, mode: "enter" | "space"): void {
 		const rows = this.#visibleRows(question);
+		// Clamp the cursor against the current filtered row list before
+		// activation so Enter/Space always acts on a visible row even when a
+		// query narrowed the list between the last render and this activation
+		// (#renderQuestionBody is the only other clamp, and a fast
+		// query-plus-Enter can outpace it).
+		state.cursorIndex = clamp(state.cursorIndex, 0, Math.max(0, rows.length - 1));
 		const rowItem = rows[state.cursorIndex];
 		if (!rowItem) return;
 		if (rowItem.kind === "other") {
@@ -1020,7 +1077,7 @@ export class AskDialogComponent implements Component, Focusable {
 		rows: number,
 	): RenderedList {
 		const mdTheme = getMarkdownTheme();
-		const { listWidth, previewWidth, split } = previewFacetWidths(width);
+		const { listWidth, previewWidth, split } = previewFacetWidths(width, questionHasPreviewContent(question));
 		const filterRows = this.#filterOpen ? 1 : 0;
 		const listRows = Math.max(1, rows - filterRows);
 		const declareCursor = this.focused && !this.#promptActive;
@@ -1065,8 +1122,9 @@ export class AskDialogComponent implements Component, Focusable {
 				// layouts: in split mode the facet keeps showing the head while the
 				// expanded row carries the full text.
 				if (isFocused && rowExpanded && option?.preview?.trim()) {
-					const previewWidthInner = Math.max(1, contentWidth - ASK_ROW_PREFIX_COLUMNS);
-					const indent = padding(ASK_ROW_PREFIX_COLUMNS);
+					const prefixColumns = askRowPrefixColumns(question.multi);
+					const previewWidthInner = Math.max(1, contentWidth - prefixColumns);
+					const indent = padding(prefixColumns);
 					for (const line of renderCachedPreview(this.#previewCache, option.preview, previewWidthInner)) {
 						allLines.push(`${indent}${line}`);
 					}

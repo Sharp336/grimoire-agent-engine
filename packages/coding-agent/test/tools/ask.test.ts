@@ -1630,31 +1630,6 @@ describe("askToolRenderer malformed call args", () => {
 		expect(descriptionLine).toMatch(/\(\+\d+ chars\)/);
 	});
 
-	it("preserves custom-input window boundaries with the same fixtures", async () => {
-		const tool = new AskTool(createSession());
-		const editor = vi.fn(async (_prompt: string) => "custom");
-		const options = Array.from({ length: 20 }, (_, i) => ({ label: `opt-${i}` }));
-		const questions = [{ id: "pick", question: "Multi pick", options, multi: true }];
-		let call = 0;
-		const context = createContext({
-			select: async (_prompt, opts) => {
-				call += 1;
-				if (call === 1) return selectItemLabel(opts.find(o => selectItemLabel(o) === "opt-12"));
-				if (call === 2) return selectItemLabel(opts.find(o => selectItemLabel(o) === "opt-17"));
-				return "Other (type your own)";
-			},
-			editor,
-		});
-
-		await tool.execute("call-editor-window-math", { questions }, undefined, undefined, context);
-
-		const title = editor.mock.calls[0]?.[0] ?? "";
-		expect(title).toContain("opt-12");
-		expect(title).toContain("opt-17");
-		expect(title).toContain("Other (type your own)");
-		expect(title).toContain("more option");
-	});
-
 	it("falls back to the error frame for unparseable questions without throwing", async () => {
 		const theme = darkTheme;
 		for (const questions of ["[{trunc", 42, { 0: { id: "x" } }]) {

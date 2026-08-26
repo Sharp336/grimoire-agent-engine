@@ -1626,7 +1626,6 @@ describe("AskDialogComponent", () => {
 		}
 	});
 
-
 	it("jumps focus to the nth visible row with digit keys", () => {
 		const questions: ExtensionAskDialogQuestion[] = [
 			{
@@ -1941,6 +1940,98 @@ describe("AskDialogComponent", () => {
 			);
 			const out = stripVTControlCharacters(component.render(50).join("\n"));
 			expect(out).toContain("cancel");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("Space toggles a filtered multi-select option without closing the filter", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const onSubmit = vi.fn();
+			const options = [
+				{ label: "Alpha match" },
+				{ label: "Bravo match" },
+				...Array.from({ length: 18 }, (_, index) => ({ label: `Other ${index}` })),
+			];
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick many?", options, multi: true }], {
+				onSubmit,
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+			component.focused = true;
+			component.handleInput("/");
+			for (const ch of "match") component.handleInput(ch);
+			// Space while the filter is open must toggle the focused row, not
+			// become query text. The first filtered match ("Alpha match") is
+			// focused; toggling it selects it.
+			component.handleInput(SPACE);
+			const out = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
+			expect(out).toContain("/ match");
+			expect(out).toContain("Alpha match");
+			// Submitting the dialog confirms the toggle took effect.
+			component.handleInput(ENTER);
+			expect(onSubmit).toHaveBeenCalledTimes(1);
+			expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Alpha match"]);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("kitty keypad digit jumps focus to the nth visible row", () => {
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Pick?",
+				options: [{ label: "One" }, { label: "Two" }, { label: "Three" }, { label: "Four" }, { label: "Five" }],
+			},
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+		component.focused = true;
+		// Kitty CSI-u numpad "4" → codepoint 57403.
+		component.handleInput("\x1b[57403u");
+		const lines = component.render(80);
+		const marked = lines.findIndex(line => line.includes(CURSOR_MARKER));
+		expect(marked).toBeGreaterThanOrEqual(0);
+		expect(stripVTControlCharacters(lines[marked] ?? "")).toContain("Four");
+	});
+
+	it("Enter after narrowing the filter activates the clamped focused row, not a stale index", async () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const onPrompt = vi.fn().mockReturnValue(Promise.resolve(undefined));
+			const options = [
+				{ label: "Alpha match" },
+				{ label: "Bravo match" },
+				...Array.from({ length: 18 }, (_, index) => ({ label: `Other ${index}` })),
+			];
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick many?", options, multi: true }], {
+				onSubmit: vi.fn(),
+				onCancel: vi.fn(),
+				onPrompt,
+			});
+			component.focused = true;
+			// Move cursor to index 10, well beyond the filtered array length.
+			for (let i = 0; i < 10; i++) component.handleInput(DOWN);
+			component.handleInput("/");
+			for (const ch of "match") component.handleInput(ch);
+			// Enter without an intervening render: without the clamp fix,
+			// cursorIndex (10) exceeds the filtered array length (3) and
+			// #activateFocusedRow silently returns. With the fix, the cursor
+			// is clamped to a valid row and activation proceeds — here it
+			// lands on the "Other" row and opens the custom-input prompt.
+			component.handleInput(ENTER);
+			expect(onPrompt).toHaveBeenCalledTimes(1);
+			await Promise.resolve();
+			await Promise.resolve();
 		} finally {
 			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
 			else Reflect.deleteProperty(process.stdout, "rows");
