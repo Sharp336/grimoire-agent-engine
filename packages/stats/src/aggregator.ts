@@ -35,6 +35,7 @@ import {
 	updateUserMessageLinks,
 } from "./db";
 import { getSessionEntry, listAllSessionFiles, type ParseSessionResult, parseSessionFile } from "./parser";
+import { STATS_RANGES, type TimeRange } from "./shared-types";
 import type { SyncWorkerRequest, SyncWorkerResponse } from "./sync-worker";
 // Coding-agent binary/bundle workers route through the CLI entrypoint with a
 // hidden argv mode, so the compiled binary and npm bundle only need one
@@ -328,10 +329,6 @@ async function syncAllSessionsLocked(opts?: SyncOptions): Promise<{ processed: n
 const HOUR_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * HOUR_MS;
 const FIVE_MIN_MS = 5 * 60 * 1000;
-
-/** Accepted `--range` values, shared by the dashboard, HTTP API, and CLI. */
-export const STATS_RANGES = ["1h", "24h", "7d", "30d", "90d", "all"] as const;
-export type TimeRange = (typeof STATS_RANGES)[number];
 
 interface TimeRangeConfig {
 	timeSeriesHours: number;
