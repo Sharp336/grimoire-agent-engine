@@ -10,7 +10,7 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { adjustHsv, formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
-import { settings } from "../../../config/settings";
+import { isSettingsInitialized, settings } from "../../../config/settings";
 import type { AgentSession } from "../../../session/agent-session";
 import type { OAuthAccountIdentity } from "../../../session/auth-storage";
 import { limitMatchesActiveAccount } from "../../../slash-commands/helpers/active-oauth-account";
@@ -969,7 +969,7 @@ export class StatusLineComponent implements Component {
 				if (this.#disposed || this.#defaultBranchCwd !== lookupCwd) return;
 				if (resolved) {
 					this.#defaultBranch = resolved;
-					if (this.#onBranchChange) {
+					if (isSettingsInitialized() && this.#onBranchChange) {
 						this.#onBranchChange();
 					}
 				}
@@ -1137,6 +1137,7 @@ export class StatusLineComponent implements Component {
 		(async () => {
 			// Helper: only write cache if branch/repo context hasn't changed since launch
 			const setCachedPr = (value: { number: number; url: string } | null) => {
+				if (this.#disposed || !isSettingsInitialized()) return;
 				const latestBranch = this.#getCurrentBranch(lookupCwd);
 				const latestContext = latestBranch
 					? createPrCacheContext(latestBranch, this.#cachedBranchRepoId ?? null)
@@ -1173,7 +1174,7 @@ export class StatusLineComponent implements Component {
 				setCachedPr(null);
 			} finally {
 				this.#prLookupInFlight = false;
-				if (!this.#disposed && this.#onBranchChange) {
+				if (!this.#disposed && isSettingsInitialized() && this.#onBranchChange) {
 					this.#onBranchChange();
 				}
 			}

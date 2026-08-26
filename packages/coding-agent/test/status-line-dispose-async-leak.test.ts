@@ -154,4 +154,30 @@ describe("StatusLineComponent dispose guards async callbacks", () => {
 
 		expect(onBranchChange).not.toHaveBeenCalled();
 	});
+
+	it("suppresses stale PR lookup callbacks after settings are reset", async () => {
+		vi.spyOn(git.branch, "default").mockResolvedValue("main");
+		vi.spyOn(git.github, "run").mockResolvedValue({
+			exitCode: 0,
+			stdout: JSON.stringify({ number: 9314, url: "https://github.com/can1357/oh-my-pi/pull/9314" }),
+			stderr: "",
+		});
+
+		const onBranchChange = vi.fn(() => Settings.instance.get("statusLine.preset"));
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings({
+			...gitSegmentSettings,
+			leftSegments: ["git", "pr"],
+		});
+		component.watchBranch(onBranchChange);
+
+		component.getTopBorder(80);
+		resetSettingsForTest();
+
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(onBranchChange).not.toHaveBeenCalled();
+		component.dispose();
+	});
 });
