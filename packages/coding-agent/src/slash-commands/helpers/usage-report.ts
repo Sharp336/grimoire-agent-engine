@@ -172,7 +172,12 @@ export async function buildUsageReportText(runtime: SlashCommandRuntime): Promis
 						runtime.session.sessionId,
 					)
 				: undefined;
-			const usageModelSelectors = provider.getUsageReportingModelSelectors?.(reports) ?? [];
+			// `display.showUsageModels` (default on) opts out of the per-provider model list.
+			// Skipping the registry walk here is cheaper than filtering it away in the renderer.
+			const usageModelSelectors =
+				runtime.settings.get("display.showUsageModels") === false
+					? []
+					: (provider.getUsageReportingModelSelectors?.(reports) ?? []);
 			return renderUsageReports(
 				reports,
 				Date.now(),

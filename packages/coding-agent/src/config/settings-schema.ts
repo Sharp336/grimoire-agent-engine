@@ -1297,6 +1297,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"display.showUsageModels": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Show Usage Model List",
+			description: "List the models mapped to each provider's live usage data in /usage output",
+		},
+	},
+
 	"display.cacheMissMarker": {
 		type: "boolean",
 		default: false,

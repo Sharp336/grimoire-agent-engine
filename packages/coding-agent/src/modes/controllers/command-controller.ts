@@ -549,7 +549,12 @@ export class CommandController {
 					this.ctx.session.sessionId,
 				)
 			: undefined;
-		const usageModelSelectors = this.ctx.session.getUsageReportingModelSelectors(usageReports);
+		// `display.showUsageModels` (default on) opts out of the per-provider model list.
+		// Skipping the registry walk here is cheaper than filtering it away in the renderer.
+		const usageModelSelectors =
+			this.ctx.settings.get("display.showUsageModels") === false
+				? []
+				: this.ctx.session.getUsageReportingModelSelectors(usageReports);
 		const output = renderUsageReports(
 			usageReports,
 			theme,

@@ -40,6 +40,7 @@ describe("CommandController /usage", () => {
 			presentCommandOutput: present,
 			showWarning: vi.fn(),
 			showError: vi.fn(),
+			settings: { get: () => undefined },
 		} as unknown as InteractiveModeContext;
 		const controller = new CommandController(ctx);
 		const reports: UsageReport[] = [
@@ -80,6 +81,7 @@ describe("CommandController /usage", () => {
 			presentCommandOutput: present,
 			showWarning: vi.fn(),
 			showError: vi.fn(),
+			settings: { get: () => undefined },
 		} as unknown as InteractiveModeContext;
 		const controller = new CommandController(ctx);
 		const now = Date.now();
@@ -129,6 +131,7 @@ describe("CommandController /usage", () => {
 			presentCommandOutput: present,
 			showWarning: vi.fn(),
 			showError: vi.fn(),
+			settings: { get: () => undefined },
 		} as unknown as InteractiveModeContext;
 		const controller = new CommandController(ctx);
 		const now = Date.now();
