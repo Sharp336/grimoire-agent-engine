@@ -862,6 +862,16 @@ export default function (pi) {
 				path.join(discoveredDir, "SKILL.md"),
 				"---\nname: task-discovered-skill\ndescription: Contributed by a task subagent's own extension instance.\n---\n\nbody\n",
 			);
+			// A skill that must sort *before* the inherited "shared-skill" entry
+			// (regression: PR #9379 round-6 review) — appending discovered skills
+			// after the inherited snapshot without re-sorting would leave this
+			// after "shared-skill" in `session.skills` instead of before it.
+			const earlySortingDir = path.join(tempDir, "aaa-discovered-skill");
+			await fs.mkdir(earlySortingDir, { recursive: true });
+			await fs.writeFile(
+				path.join(earlySortingDir, "SKILL.md"),
+				"---\nname: aaa-discovered-skill\ndescription: Sorts before the inherited snapshot entry alphabetically.\n---\n\nbody\n",
+			);
 			// A colliding name: the inherited snapshot must win.
 			const collidingDir = path.join(tempDir, "shared-skill");
 			await fs.mkdir(collidingDir, { recursive: true });
@@ -954,6 +964,15 @@ export default function (pi) {
 			expect(session.skills.filter(skill => skill.name === "shared-skill")).toHaveLength(1);
 			// A skill the user disabled cannot re-enter through this merge path.
 			expect(session.skills.some(skill => skill.name === "disabled-skill")).toBe(false);
+			// The merged array must be re-sorted by the same `compareSkillOrder`
+			// comparator the full-rescan path uses (extensibility/skills.ts),
+			// not left as the inherited snapshot followed by append order
+			// (regression: PR #9379 round-6 review).
+			expect(session.skills.map(skill => skill.name)).toEqual([
+				"aaa-discovered-skill",
+				"shared-skill",
+				"task-discovered-skill",
+			]);
 		} finally {
 			await session?.dispose();
 			authStorage.close();

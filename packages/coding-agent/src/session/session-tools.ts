@@ -7,6 +7,7 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
 import type { Settings, SkillsSettings } from "../config/settings";
+import { compareSkillOrder } from "../discovery/helpers";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
 import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
 import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/extensions";
@@ -1306,7 +1307,13 @@ export class SessionTools {
 			}
 		}
 		if (added.length === 0) return false;
-		this.#skills = [...this.#skills, ...added];
+		// Match `loadSkills`'s deterministic ordering (extensibility/skills.ts):
+		// an appended directory can sort before an inherited entry (e.g. `alpha`
+		// appended after inherited `zeta`), so re-sort the merged array rather
+		// than leaving the inherited snapshot's order followed by append order.
+		this.#skills = [...this.#skills, ...added].sort((a, b) =>
+			compareSkillOrder(a.name, a.filePath, b.name, b.filePath),
+		);
 		return true;
 	}
 

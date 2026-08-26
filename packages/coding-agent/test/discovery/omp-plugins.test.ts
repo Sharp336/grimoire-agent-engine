@@ -153,7 +153,6 @@ test("user settings.json#extensions also feeds sub-discovery", async () => {
 	expect(skills.map(s => s.name)).toContain("my-skill");
 });
 
-
 test("project config.yml#extensions surfaces every sub-directory (#9768)", async () => {
 	writeFile(path.join(project, ".omp", "config.yml"), `extensions:\n  - "${ext}"\n`);
 	await expectExtensionSubDirectoriesLoaded(ctx());

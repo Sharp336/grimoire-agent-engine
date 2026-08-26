@@ -446,9 +446,14 @@ export async function scanSkillsFromDir(
 			if (child.name.startsWith(".")) continue;
 			if (!child.isDirectory() && !child.isSymbolicLink()) continue;
 			const nestedSkillPath = path.join(dir, entry.name, child.name, "SKILL.md");
-			if (fs.existsSync(nestedSkillPath)) {
-				work.push(loadSkill(nestedSkillPath));
-			}
+			// Async existence check folded into `work` (not awaited inline) so
+			// scanning a namespace with many children stays fully concurrent
+			// instead of serially blocking the event loop with sync fs stats.
+			work.push(
+				Bun.file(nestedSkillPath)
+					.exists()
+					.then(exists => (exists ? loadSkill(nestedSkillPath) : undefined)),
+			);
 		}
 	}
 	await Promise.all(work);
