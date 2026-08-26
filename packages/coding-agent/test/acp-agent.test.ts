@@ -540,11 +540,14 @@ async function createHarness(
 			if (options.sessionUpdateHook) await options.sessionUpdateHook(notification);
 			updates.push(notification);
 		},
-		extNotification: async (method: string, params: Record<string, unknown>) => {
-			if (options.extNotification !== undefined) throw new Error("client transport gone");
-			// The surfaces under test push `{ agents }` (roster) or `{ agent }` (progress).
-			const wire = params as { agents?: AcpAgentSnapshot[]; agent?: AcpAgentProgress };
-			extNotifications.push({ method, params: wire });
+		extNotification: (method: string, params: Record<string, unknown>) => {
+			if (options.extNotification === "sync-throw") throw new Error("client transport gone");
+			return (async () => {
+				if (options.extNotification === "async-reject") throw new Error("client transport gone");
+				// The surfaces under test push `{ agents }` (roster) or `{ agent }` (progress).
+				const wire = params as { agents?: AcpAgentSnapshot[]; agent?: AcpAgentProgress };
+				extNotifications.push({ method, params: wire });
+			})();
 		},
 		unstable_createElicitation: options.elicitationHandler
 			? async (req: CreateElicitationRequest) => options.elicitationHandler!(req)
@@ -2163,6 +2166,9 @@ describe("ACP agent", () => {
 
 		// Requests are rejected with a method-not-found error naming the capability.
 		await expect(harness.agent.extMethod("_omp/agents/list", {})).rejects.toThrow("extensions.agents");
+		await expect(harness.agent.extMethod("_omp/agents/messages", { agentId: "Main" })).rejects.toThrow(
+			"extensions.agents",
+		);
 		const rejection = await harness.agent.extMethod("_omp/agents/list", {}).catch((error: unknown) => error);
 		expect(rejection).toBeInstanceOf(RequestError);
 

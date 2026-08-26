@@ -180,7 +180,11 @@ boundary, so continuation reads at `nextByte` never lose or duplicate data.
 ```
 
 Poll with `fromByte: nextByte` until `nextByte` stops advancing (or `reset`
-appears after a file rotation).
+appears after a file rotation). A single JSONL record larger than the
+512 KiB budget is still delivered whole — the read spans up to 8 MiB to reach
+its terminating newline. Only a record exceeding that internal ceiling returns
+an unchanged cursor with `pendingOversizedRecord: true`, replacing what would
+otherwise be a silent no-progress stall.
 
 ## Tool-call classification
 

@@ -1358,6 +1358,7 @@ export class AcpAgent implements Agent {
 				this.#requireAgentsSurface();
 				return { agents: snapshotAcpAgents() };
 			case "_omp/agents/messages": {
+				this.#requireAgentsSurface();
 				const sessionFile = resolveAcpAgentTranscript({
 					agentId: params.agentId,
 					sessionFile: params.sessionFile,

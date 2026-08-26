@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added opt-in ACP subagent activity surface `_omp/agents/list|update|progress|messages` ([#8728](https://github.com/can1357/oh-my-pi/pull/8728) by [@Alek7eeey](https://github.com/Alek7eeey)): roster, live progress, and transcripts for ACP clients, gated behind `clientCapabilities.extensions.agents`.
+- Added opt-in ACP subagent activity surface `_omp/agents/list|update|progress|messages` ([#9878](https://github.com/can1357/oh-my-pi/pull/9878), building on [#8728](https://github.com/can1357/oh-my-pi/issues/8728) by [@Alek7eeey](https://github.com/Alek7eeey)): roster, live progress, and transcripts for ACP clients, gated behind `clientCapabilities.extensions.agents`.
 
 ### Changed
 
