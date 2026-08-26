@@ -10,6 +10,7 @@ import {
 import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { encodeConnectFrame } from "../src/providers/cursor/connect-frame";
 import * as h2Pool from "../src/providers/cursor/h2-pool";
+import * as serverConfig from "../src/providers/cursor/server-config";
 import { fetchCursorBidiAvailability, resetCursorServerConfigCache } from "../src/providers/cursor/server-config";
 import { openCursorTransport } from "../src/providers/cursor/transport";
 
@@ -212,6 +213,11 @@ describe("openCursorTransport lifecycle", () => {
 			ok: false,
 			unavailable: { reason: "alpn", cause: alpnCause() },
 		});
+		// The cache is now endpoint-scoped (apiKey + baseUrl), so the priming
+		// fetch above (against h2Url) does not satisfy the transport's lookup
+		// (against h1Url). Mock the transport's internal call directly — the
+		// wire-fetch correctness is already asserted by the priming fetch.
+		vi.spyOn(serverConfig, "fetchCursorBidiAvailability").mockResolvedValue("bidi-disabled");
 
 		const attempt = await openCursorTransport({
 			baseUrl: h1Url,

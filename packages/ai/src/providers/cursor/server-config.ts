@@ -28,35 +28,78 @@ const GET_SERVER_CONFIG_PATH = "/agent.v1.AgentService/GetServerConfig";
 /** Wall-clock budget for one config fetch. Exceeding it fails open to `"unspecified"`. */
 const CURSOR_SERVER_CONFIG_TIMEOUT_MS = 5_000;
 
-/** Per-`apiKey` TTL; two calls within it make one wire request. */
+/** Per-`apiKey`+`baseUrl` TTL; two calls within it make one wire request. */
 const CURSOR_SERVER_CONFIG_TTL_MS = 30_000;
 
+/** Maximum retained cache entries (LRU bound). */
+const CURSOR_SERVER_CONFIG_CACHE_CAP = 8;
+
+/** Cumulative decoded response cap; a config RPC is a few hundred bytes. */
+const MAX_SERVER_CONFIG_RESPONSE_BYTES = 1_048_576; // 1 MiB
+
 /**
- * Per-`apiKey` result cache. An `"unspecified"` result is cached too — it is a
- * valid answer, and the transport caller hits this fetch on every ALPN
- * failure, so a healthy account must not re-query on every retry.
+ * Per-`apiKey`+`baseUrl` result cache. An `"unspecified"` result is cached
+ * too — it is a valid answer, and the transport caller hits this fetch on
+ * every ALPN failure, so a healthy account must not re-query on every retry.
+ * The policy is per-ENDPOINT (the server's FORCE_* directives are scoped to
+ * the backend, and `baseUrl` is independently configurable), so the key
+ * composes both — same apiKey against endpoint A then B within the TTL must
+ * not cross-contaminate. The map is bounded at `CURSOR_SERVER_CONFIG_CACHE_CAP`
+ * entries (LRU) so a long-lived process with rotating keys does not hold
+ * them forever; expired entries are pruned opportunistically on every write.
  */
 const cache = new Map<string, { value: CursorBidiAvailability; expiresAt: number }>();
 
-/** Test seam: clears the per-`apiKey` cache so suites start from a cold store. */
+/** Removes entries whose TTL has elapsed. Called on every cache write. */
+function pruneExpiredCache(): void {
+	const now = Date.now();
+	for (const [key, entry] of cache) {
+		if (entry.expiresAt <= now) cache.delete(key);
+	}
+}
+
+/** Evicts least-recently-used entries until the cap is respected. */
+function evictOverflowCache(): void {
+	while (cache.size > CURSOR_SERVER_CONFIG_CACHE_CAP) {
+		const oldest = cache.keys().next();
+		if (oldest.done) break;
+		cache.delete(oldest.value);
+	}
+}
+
+/** Test seam: clears the cache so suites start from a cold store. */
 export function resetCursorServerConfigCache(): void {
 	cache.clear();
 }
 
+/** Test seam: current entry count, for LRU/pruning assertions. */
+export function __cursorServerConfigCacheSize(): number {
+	return cache.size;
+}
+
 /**
  * Returns the account's bidi availability, or `"unspecified"` when it cannot
- * be determined for any reason (fail open). The result is cached per `apiKey`
- * for the process lifetime.
+ * be determined for any reason (fail open). The result is cached per
+ * `apiKey`+`baseUrl` for the TTL; the cache is LRU-bounded and pruned on
+ * every write.
  */
 export async function fetchCursorBidiAvailability(args: {
 	apiKey: string;
 	baseUrl: string;
 	signal?: AbortSignal;
 }): Promise<CursorBidiAvailability> {
-	const cached = cache.get(args.apiKey);
-	if (cached && cached.expiresAt > Date.now()) return cached.value;
+	const key = `${args.apiKey}|${args.baseUrl}`;
+	const cached = cache.get(key);
+	if (cached && cached.expiresAt > Date.now()) {
+		// LRU: move to most-recently-used end.
+		cache.delete(key);
+		cache.set(key, cached);
+		return cached.value;
+	}
 	const value = await fetchServerConfig(args.apiKey, args.baseUrl, args.signal);
-	cache.set(args.apiKey, { value, expiresAt: Date.now() + CURSOR_SERVER_CONFIG_TTL_MS });
+	pruneExpiredCache();
+	cache.set(key, { value, expiresAt: Date.now() + CURSOR_SERVER_CONFIG_TTL_MS });
+	evictOverflowCache();
 	return value;
 }
 
@@ -109,6 +152,7 @@ export async function readServerConfigResponse(lease: CursorH2Lease): Promise<Cu
 	}
 	const decoder = new ConnectFrameDecoder({ acceptCompressed: true });
 	const chunks: Uint8Array[] = [];
+	let cumulativeBytes = 0;
 	const { promise, resolve } = Promise.withResolvers<CursorBidiAvailability>();
 	let settled = false;
 	const finish = (value: CursorBidiAvailability): void => {
@@ -132,6 +176,16 @@ export async function readServerConfigResponse(lease: CursorH2Lease): Promise<Cu
 		}
 		for (const frame of frames) {
 			if (frame.kind === "data") {
+				cumulativeBytes += frame.payload.length;
+				if (cumulativeBytes > MAX_SERVER_CONFIG_RESPONSE_BYTES) {
+					// Cumulative response cap: a config RPC is a few hundred bytes;
+					// > 1 MiB of decoded data frames is a misbehaving or hostile
+					// backend. Stop consuming (destroy the stream) and fail open
+					// through the same `finish` path as every other failure mode.
+					request.destroy();
+					finish("unspecified");
+					return;
+				}
 				chunks.push(frame.payload);
 			} else if (frame.error) {
 				// End-of-stream carrying a Connect error (e.g. unimplemented):

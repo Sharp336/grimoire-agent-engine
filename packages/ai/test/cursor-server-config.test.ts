@@ -1,9 +1,10 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, setSystemTime } from "bun:test";
 import * as http2 from "node:http2";
 import { __cursorH2PoolSnapshot, acquireCursorH2, disposeCursorH2Pool } from "@oh-my-pi/pi-ai/providers/cursor/h2-pool";
 import { buildCursorUnaryHeaders } from "@oh-my-pi/pi-ai/providers/cursor/headers";
 import type { CursorBidiAvailability } from "@oh-my-pi/pi-ai/providers/cursor/server-config";
 import {
+	__cursorServerConfigCacheSize,
 	fetchCursorBidiAvailability,
 	readServerConfigResponse,
 	resetCursorServerConfigCache,
@@ -23,7 +24,8 @@ type Scenario =
 	| { kind: "all-disabled" }
 	| { kind: "absent-directive" }
 	| { kind: "http-500" }
-	| { kind: "hang" };
+	| { kind: "hang" }
+	| { kind: "oversized" };
 
 let server: http2.Http2Server | undefined;
 const sessions = new Set<http2.Http2Session>();
@@ -72,6 +74,17 @@ async function startServer(): Promise<string> {
 		}
 		if (scenario.kind === "hang") {
 			// Accept the body, never respond: the client must fail open on abort.
+			return;
+		}
+		if (scenario.kind === "oversized") {
+			// A single data frame > 1 MiB exercises the cumulative decoded-byte
+			// cap: the per-frame cap (16 MiB) does not catch it, but the
+			// cumulative cap (1 MiB) does. The client must destroy the stream
+			// and fail open.
+			stream.respond({ ":status": 200, "content-type": "application/proto" });
+			stream.write(frameConnectMessage(Buffer.alloc(1_048_577)));
+			stream.write(endFrame());
+			stream.end();
 			return;
 		}
 		stream.respond({
@@ -125,6 +138,7 @@ beforeEach(async () => {
 afterEach(async () => {
 	await disposeCursorH2Pool();
 	await stopServer();
+	setSystemTime();
 });
 
 async function fetchFor(baseUrl: string, signal?: AbortSignal): Promise<CursorBidiAvailability> {
@@ -206,6 +220,49 @@ describe("fetchCursorBidiAvailability", () => {
 		acquisition.lease.request.destroy();
 		const availability = await readServerConfigResponse(acquisition.lease);
 		expect(availability).toBe("unspecified");
+	});
+
+	it("scopes the cache by apiKey + baseUrl, not apiKey alone", async () => {
+		// Same apiKey against endpoint A (bidi-disabled) then B (all-disabled)
+		// within the TTL: B must make its own wire fetch and get B's policy,
+		// not A's cached answer.
+		scenario = { kind: "bidi-disabled" };
+		const baseUrlA = await startServer();
+		expect(await fetchFor(baseUrlA)).toBe("bidi-disabled");
+		expect(invocations).toBe(1);
+
+		await stopServer();
+		await disposeCursorH2Pool();
+		scenario = { kind: "all-disabled" };
+		const baseUrlB = await startServer();
+		expect(await fetchFor(baseUrlB)).toBe("all-disabled");
+		// B made its own wire request — it was not served from A's cache entry.
+		expect(invocations).toBe(2);
+	});
+
+	it("fails open to unspecified when the cumulative response exceeds 1 MiB", async () => {
+		scenario = { kind: "oversized" };
+		const baseUrl = await startServer();
+		expect(await fetchFor(baseUrl)).toBe("unspecified");
+		// The stream was destroyed to stop consumption; the lease must be released.
 		expect(__cursorH2PoolSnapshot().reduce((n, entry) => n + entry.outstanding, 0)).toBe(0);
+	});
+
+	it("bounds the cache at 8 entries (LRU) and prunes expired entries on write", async () => {
+		scenario = { kind: "absent-directive" };
+		const baseUrl = await startServer();
+		// Insert 9 distinct keys (same baseUrl, distinct apiKeys). The cap is 8,
+		// so the LRU evicts the oldest after the 9th insert.
+		for (let i = 0; i < 9; i++) {
+			await fetchCursorBidiAvailability({ apiKey: `key-${i}`, baseUrl });
+		}
+		expect(__cursorServerConfigCacheSize()).toBe(8);
+
+		// Advance past the TTL so every existing entry is expired, then insert
+		// one more. The write prunes all expired entries before setting the new
+		// one, leaving exactly 1 entry.
+		setSystemTime(new Date(Date.now() + 31_000));
+		await fetchCursorBidiAvailability({ apiKey: `key-fresh`, baseUrl });
+		expect(__cursorServerConfigCacheSize()).toBe(1);
 	});
 });
