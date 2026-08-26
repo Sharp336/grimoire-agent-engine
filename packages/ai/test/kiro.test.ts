@@ -495,4 +495,71 @@ describe("Kiro streamSimple dispatch", () => {
 		});
 		expect(new Headers(requests[1]?.init?.headers).get("x-amzn-kiro-profile-arn")).toBe("current-profile");
 	});
+
+	test("retries exactly once when the first request hits a transient Invalid tool use format 400", async () => {
+		const requests: Array<{ url: string; init?: RequestInit }> = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			const url = String(input);
+			requests.push({ url, init });
+			if (url.endsWith("/List-Available-Profiles")) {
+				return jsonResponse({ profiles: [{ arn: "profile-fixture" }] });
+			}
+			if (url.endsWith("/generateAssistantResponse")) {
+				const runtimeCalls = requests.filter(request => request.url.endsWith("/generateAssistantResponse")).length;
+				if (runtimeCalls === 1) {
+					return jsonResponse({ message: "Invalid tool use format." }, 400);
+				}
+				return new Response(eventStreamFrame(JSON.stringify({ content: "retried ok" })), { status: 200 });
+			}
+			throw new Error(`unexpected Kiro stream URL: ${url}`);
+		};
+		const result = await streamSimple(
+			KIRO_MODELS[0] as KiroModel,
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: JSON.stringify({ token: "access-fixture", region: "eu-central-1" }),
+				fetch: fetchMock,
+				sessionId: "conversation-fixture",
+			},
+		).result();
+
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toEqual([{ type: "text", text: "retried ok" }]);
+		const runtimeRequests = requests.filter(request => request.url.endsWith("/generateAssistantResponse"));
+		expect(runtimeRequests).toHaveLength(2);
+		expect(JSON.parse(String(runtimeRequests[0]?.init?.body))).toEqual(
+			JSON.parse(String(runtimeRequests[1]?.init?.body)),
+		);
+		expect(new Headers(runtimeRequests[0]?.init?.headers).get("amz-sdk-invocation-id")).not.toBe(
+			new Headers(runtimeRequests[1]?.init?.headers).get("amz-sdk-invocation-id"),
+		);
+	});
+
+	test("fails immediately without retrying for HTTP 400s other than Invalid tool use format", async () => {
+		let runtimeCalls = 0;
+		const result = await streamSimple(
+			KIRO_MODELS[0] as KiroModel,
+			{ messages: [{ role: "user", content: "hello", timestamp: 1 }] },
+			{
+				apiKey: JSON.stringify({ token: "access-fixture", region: "eu-central-1" }),
+				fetch: async input => {
+					const url = String(input);
+					if (url.endsWith("/List-Available-Profiles")) {
+						return jsonResponse({ profiles: [{ arn: "profile-fixture" }] });
+					}
+					if (url.endsWith("/generateAssistantResponse")) {
+						runtimeCalls++;
+						return jsonResponse({ message: "Model is not available" }, 400);
+					}
+					throw new Error(`unexpected Kiro stream URL: ${url}`);
+				},
+			},
+		).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(400);
+		expect(result.errorMessage).toContain("Kiro API request failed (HTTP 400)");
+		expect(result.errorMessage).toContain("Model is not available");
+		expect(runtimeCalls).toBe(1);
+	});
 });
