@@ -9,9 +9,15 @@ import { BiomeClient } from "./clients/biome-client";
 import { SwiftLintClient } from "./clients/swiftlint-client";
 import DEFAULTS from "./defaults.json" with { type: "json" };
 import type { ServerConfig } from "./types";
-
 export interface LspConfig {
 	servers: Record<string, ServerConfig>;
+	/**
+	 * Servers whose root markers matched at the config root but whose command
+	 * could not be resolved inside the project. Present (with a config entry)
+	 * only for `loadConfig` calls that tracked them; callers must distinguish
+	 * this "configured but not installed" case from "not a project at all".
+	 */
+	unresolved?: Record<string, ServerConfig>;
 	/** Idle timeout in milliseconds. If set, LSP clients will be shutdown after this period of inactivity. Disabled by default. */
 	idleTimeoutMs?: number;
 }
@@ -284,6 +290,8 @@ function resolveCommandFromLocalRoot(command: string, cwd: string): string | nul
 export interface ResolveCommandOptions extends Pick<WhichOptions, "cache" | "PATH"> {
 	/** Ordered project roots checked before PATH; defaults to the command cwd. */
 	localRoots?: readonly string[];
+	/** When false, never fall back to $PATH (clone-local policy). */
+	allowPath?: boolean;
 }
 
 /**
@@ -305,8 +313,60 @@ export function resolveCommand(command: string, cwd: string, options?: ResolveCo
 		if (resolved) return resolved;
 	}
 
+	if (options?.allowPath === false) return null;
 	if (!options) return $which(command);
 	return $which(command, { cache: options.cache, PATH: options.PATH });
+}
+
+/** Options controlling per-root binary resolution for {@link loadConfig}. */
+export interface LoadConfigOptions {
+	/** Ordered project roots searched (in order) for the server binary before any $PATH fallback. */
+	localRoots?: readonly string[];
+	/** When false, never fall back to $PATH for the server binary (clone-local policy). */
+	allowPath?: boolean;
+	/**
+	 * When set, a resolved binary must stay inside this directory (realpath
+	 * containment). A node_modules symlink into a sibling clone or the founder
+	 * checkout fails closed as missing-in-project instead of being adopted.
+	 */
+	containmentRoot?: string;
+	/**
+	 * Restrict config sources to the project itself (root files plus project
+	 * config dirs such as .omp/lsp.json). User config dirs, plugin/marketplace
+	 * roots, and home-root files are excluded. Clone/stray-file discovery uses
+	 * this so an outer ~/.omp/agent/lsp.json or the founder checkout can never
+	 * leak servers or binary overrides into an independent clone.
+	 */
+	projectOnly?: boolean;
+}
+
+function resolveServerCommand(
+	name: string,
+	config: ServerConfig,
+	cwd: string,
+	options?: LoadConfigOptions,
+): string | null {
+	// Without a clone policy the lookup must stay byte-identical to the legacy
+	// `resolveCommand(command, cwd)` call, including the bare `$which(command)`
+	// fallback. Only pass options when the caller actually restricts lookup
+	// (clone-local roots and/or no $PATH).
+	const resolved = resolveCommand(
+		config.command,
+		cwd,
+		options?.localRoots !== undefined || options?.allowPath !== undefined
+			? { localRoots: options?.localRoots, allowPath: options?.allowPath }
+			: undefined,
+	);
+	if (!resolved) return null;
+	if (options?.containmentRoot && !pathIsWithin(options.containmentRoot, resolved)) {
+		logger.debug("LSP server binary escapes its project containment; treating as missing", {
+			server: name,
+			command: resolved,
+			containmentRoot: options.containmentRoot,
+		});
+		return null;
+	}
+	return resolved;
 }
 
 interface ConfigSource {
@@ -359,8 +419,13 @@ function marketplaceConfigSource(root: ClaudePluginRoot): ConfigSource {
 /**
  * Configuration sources in priority order.
  * Supports both visible and hidden variants at each config location.
+ *
+ * `projectOnly` keeps the list inside the project itself: project root files
+ * and project config dirs only. User config dirs, plugin/marketplace roots,
+ * and home-root files are the outer layers that clone/stray-file discovery
+ * must never see (an independent clone is not the user's project).
  */
-function getConfigSources(cwd: string): ConfigSource[] {
+function getConfigSources(cwd: string, projectOnly: boolean): ConfigSource[] {
 	const filenames = ["lsp.json", ".lsp.json", "lsp.yaml", ".lsp.yaml", "lsp.yml", ".lsp.yml"];
 	const sources: ConfigSource[] = [];
 
@@ -375,6 +440,10 @@ function getConfigSources(cwd: string): ConfigSource[] {
 		for (const filename of filenames) {
 			sources.push(fileConfigSource(path.join(dir, filename)));
 		}
+	}
+
+	if (projectOnly) {
+		return sources;
 	}
 
 	// User config directories (~/.omp/agent/, ~/.pi/agent/, ~/.claude/)
@@ -434,10 +503,10 @@ function getConfigSources(cwd: string): ConfigSource[] {
  * }
  * ```
  */
-export function loadConfig(cwd: string): LspConfig {
+export function loadConfig(cwd: string, options?: LoadConfigOptions): LspConfig {
 	let mergedServers = coerceServerConfigs(DEFAULTS);
 
-	const configSources = getConfigSources(cwd).reverse();
+	const configSources = getConfigSources(cwd, options?.projectOnly === true).reverse();
 	let hasOverrides = false;
 
 	let idleTimeoutMs: number | undefined;
@@ -457,6 +526,7 @@ export function loadConfig(cwd: string): LspConfig {
 	if (!hasOverrides) {
 		// Auto-detect: find servers based on project markers AND available binaries
 		const detected: Record<string, ServerConfig> = {};
+		const unresolved: Record<string, ServerConfig> = {};
 		const defaultsWithRuntime = applyRuntimeDefaults(mergedServers);
 
 		for (const [name, config] of Object.entries(defaultsWithRuntime)) {
@@ -464,28 +534,42 @@ export function loadConfig(cwd: string): LspConfig {
 			if (!hasRootMarkers(cwd, config.rootMarkers)) continue;
 
 			// Check if the language server binary is available (local or $PATH)
-			const resolved = resolveCommand(config.command, cwd);
-			if (!resolved) continue;
-
-			detected[name] = { ...config, resolvedCommand: resolved };
+			const resolved = resolveServerCommand(name, config, cwd, options);
+			if (resolved) {
+				detected[name] = { ...config, resolvedCommand: resolved };
+			} else {
+				unresolved[name] = config;
+			}
 		}
 
-		return { servers: detected, idleTimeoutMs };
+		return { servers: detected, unresolved, idleTimeoutMs };
 	}
 
 	// Merge overrides with defaults and filter to available servers
 	const mergedWithRuntime = applyRuntimeDefaults(mergedServers);
 	const available: Record<string, ServerConfig> = {};
+	const unresolved: Record<string, ServerConfig> = {};
 
 	for (const [name, config] of Object.entries(mergedWithRuntime)) {
 		if (config.disabled) continue;
 		if (!hasRootMarkers(cwd, config.rootMarkers)) continue;
-		const resolved = resolveCommand(config.command, cwd);
-		if (!resolved) continue;
-		available[name] = { ...config, resolvedCommand: resolved };
+		const resolved = resolveServerCommand(name, config, cwd, options);
+		if (resolved) {
+			available[name] = { ...config, resolvedCommand: resolved };
+		} else {
+			unresolved[name] = config;
+		}
 	}
 
-	return { servers: available, idleTimeoutMs };
+	return { servers: available, unresolved, idleTimeoutMs };
+}
+
+/**
+ * Default server configs before config-file overrides and binary resolution.
+ * File-driven discovery uses these to determine candidate marker sets.
+ */
+export function getDefaultServerConfigs(): Record<string, ServerConfig> {
+	return coerceServerConfigs(DEFAULTS);
 }
 
 // =============================================================================

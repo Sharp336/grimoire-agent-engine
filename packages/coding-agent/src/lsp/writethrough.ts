@@ -10,15 +10,25 @@ import {
 	DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	type FileDiagnosticsResult,
 	FileFormatResult,
+	type FormatContentResult,
 	formatContent,
 	getDiagnosticsForFile,
 	INLINE_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	limitDiagnosticMessages,
 	type ServerVersionMap,
 } from "./diagnostics";
-import { getConfig, notifyFileSaved, splitServers, syncFileContent } from "./servers";
+import {
+	canonicalRoot,
+	getConfig,
+	notifyFileSaved,
+	type ResolvedFileServer,
+	resolveFileLspServers,
+	splitServers,
+	syncFileContent,
+} from "./servers";
 import type { ServerConfig } from "./types";
 import { summarizeDiagnosticMessages } from "./utils";
+import { resolveLspCeiling } from "./workspace";
 
 /** Options for creating the LSP writethrough callback */
 export interface WritethroughOptions {
@@ -199,95 +209,6 @@ function mergeDiagnostics(
 	};
 }
 
-async function scheduleDeferredDiagnosticsFetch(args: {
-	dst: string;
-	cwd: string;
-	servers: Array<[string, ServerConfig]>;
-	minVersions: ServerVersionMap | undefined;
-	expectedDocumentVersions: ServerVersionMap | undefined;
-	signal: AbortSignal;
-	callback: (diagnostics: FileDiagnosticsResult) => void;
-}): Promise<void> {
-	try {
-		const deferredTimeout = AbortSignal.timeout(25_000);
-		const combined = AbortSignal.any([args.signal, deferredTimeout]);
-		const diagnostics = await getDiagnosticsForFile(args.dst, args.cwd, args.servers, {
-			signal: combined,
-			minVersions: args.minVersions,
-			expectedDocumentVersions: args.expectedDocumentVersions,
-			timeoutMs: DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS,
-		});
-		if (args.signal.aborted || diagnostics === undefined) return;
-		args.callback(diagnostics);
-	} catch {
-		// Cancelled or LSP gave up; silently discard.
-	}
-}
-
-/**
- * Fetch post-write diagnostics without making the edit/write block on a slow
- * language server.
- *
- * Blocks inline only briefly ({@link INLINE_DIAGNOSTICS_WAIT_TIMEOUT_MS}) for a
- * fresh result. Freshness is enforced by the pre-edit `minVersions` baseline:
- * exact document-version matches return immediately, and unversioned/mismatched
- * publishes must settle with no newer publish before inline acceptance. If
- * nothing fresh arrives in the inline window and a deferred
- * channel is available, the in-flight fetch is handed off to deliver late via
- * `onDeferredDiagnostics`, and this returns `undefined` so the tool result
- * lands immediately. Without a deferred channel (direct/CI callers) it blocks
- * for the standard budget so the result is still returned inline.
- */
-async function fetchDiagnosticsWithDeferral(args: {
-	dst: string;
-	cwd: string;
-	servers: Array<[string, ServerConfig]>;
-	minVersions: ServerVersionMap | undefined;
-	expectedDocumentVersions: ServerVersionMap | undefined;
-	transformDiagnostics?: ResolvedWritethroughOptions["transformDiagnostics"];
-	deferred?: { onDeferredDiagnostics: (diagnostics: FileDiagnosticsResult) => void; signal: AbortSignal };
-	signal?: AbortSignal;
-}): Promise<FileDiagnosticsResult | undefined> {
-	const { dst, cwd, servers, minVersions, expectedDocumentVersions, transformDiagnostics, deferred, signal } = args;
-	const apply = (d: FileDiagnosticsResult | undefined) =>
-		d && transformDiagnostics ? transformDiagnostics(dst, d) : d;
-
-	if (!deferred) {
-		// No late-injection channel: block for the standard budget and return inline.
-		return apply(
-			await getDiagnosticsForFile(dst, cwd, servers, {
-				signal,
-				minVersions,
-				expectedDocumentVersions,
-			}),
-		);
-	}
-
-	// One background fetch with a generous inner budget; await it only briefly inline.
-	const fetchPromise = getDiagnosticsForFile(dst, cwd, servers, {
-		signal: deferred.signal,
-		minVersions,
-		expectedDocumentVersions,
-		timeoutMs: DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS,
-	});
-	const INLINE_TIMEOUT = Symbol("inline-diagnostics-timeout");
-	const raced = await Promise.race([
-		fetchPromise,
-		Bun.sleep(INLINE_DIAGNOSTICS_WAIT_TIMEOUT_MS).then(() => INLINE_TIMEOUT),
-	]);
-	if (raced !== INLINE_TIMEOUT) {
-		return apply(raced as FileDiagnosticsResult | undefined);
-	}
-	// Slow server: deliver late via the deferred channel; nothing inline. The
-	// deferred sink (edit tool) applies its own dedup, so pass the raw result.
-	void fetchPromise
-		.then(diagnostics => {
-			if (diagnostics && !deferred.signal.aborted) deferred.onDeferredDiagnostics(diagnostics);
-		})
-		.catch(() => {});
-	return undefined;
-}
-
 async function runLspWritethrough(
 	dst: string,
 	content: string,
@@ -311,11 +232,20 @@ async function runLspWritethrough(
 		contentAlreadyWritten && finalContent === content ? Promise.resolve() : writeContent(finalContent),
 	);
 	let writeNotified = false;
+	// Watched-file announcements go to every canonical workspace root the
+	// write touches (clone partitions), never the session cwd: clients are
+	// keyed by their workspace root, so a session-cwd announce would never
+	// reach the clone servers that just formatted and saved.
+	let notifyRoots: string[] = [cwd];
 	const notifyWriteCommitted = async (notifySignal: AbortSignal | undefined = signal) => {
 		if (writeNotified) return;
 		writeNotified = true;
 		try {
-			await notifyWorkspaceWatchedFiles(cwd, [{ filePath: dst, type: changeType }], notifySignal);
+			await Promise.all(
+				notifyRoots.map(root =>
+					notifyWorkspaceWatchedFiles(root, [{ filePath: dst, type: changeType }], notifySignal),
+				),
+			);
 		} catch (error) {
 			if (notifySignal?.aborted && !signal?.aborted) {
 				// The operation budget died mid-notify while the caller is still
@@ -333,21 +263,191 @@ async function runLspWritethrough(
 		return undefined;
 	}
 
-	const config = getConfig(cwd);
-	const servers = getServersForFile(config, dst);
-
-	if (servers.length === 0) {
+	// File-driven bounded resolution: a clone file's servers attach to their
+	// own canonical workspace roots (realpath), never the session cwd, and a
+	// missing clone-local binary is skipped — never a $PATH/founder fallback,
+	// never a client spawned at the session root. Session-owned files keep
+	// the original session-config selection and identity, so lazy/custom
+	// formatter/freshness behavior is unchanged — including exactly one
+	// getServersForFile call per file. Stray (non-git) files outside the
+	// session are bounded to their own directory: a valid session TS server
+	// must never attach to an unrelated /tmp scratch file.
+	const ceiling = resolveLspCeiling(dst, cwd);
+	if (ceiling.escaped) {
+		notifyRoots = [];
 		await getWritePromise();
 		await notifyWriteCommitted();
 		return undefined;
 	}
-	const { lspServers, customLinterServers } = splitServers(servers);
+	let resolvable: ResolvedFileServer[];
+	if (ceiling.kind === "session") {
+		const config = getConfig(cwd);
+		const sessionServers = getServersForFile(config, dst);
+		if (sessionServers.length === 0) {
+			await getWritePromise();
+			await notifyWriteCommitted();
+			return undefined;
+		}
+		resolvable = sessionServers.map(([name, serverConfig]) => ({
+			name,
+			config: serverConfig,
+			workspaceRoot: cwd,
+			workspaceRootReal: canonicalRoot(cwd),
+			ceiling: ceiling.path,
+			ceilingKind: ceiling.kind,
+			missingBinary: false,
+		}));
+	} else {
+		const fileResolution = resolveFileLspServers(dst, cwd);
+		resolvable = fileResolution.servers.filter(entry => !entry.missingBinary);
+		if (ceiling.kind === "git") {
+			// A clone write always announces on the clone work tree — never the
+			// unrelated session root — even when nothing is resolvable.
+			notifyRoots = [canonicalRoot(fileResolution.ceiling.path)];
+		} else {
+			// A stray file outside the session and any repo: a plain write
+			// announces nothing (no session-root announce, no attach).
+			notifyRoots = [];
+		}
+		if (fileResolution.ceiling.escaped || resolvable.length === 0) {
+			await getWritePromise();
+			await notifyWriteCommitted();
+			return undefined;
+		}
+	}
+	notifyRoots = Array.from(new Set(resolvable.map(entry => entry.workspaceRootReal)));
+
+	// Partition resolvable servers by their canonical workspace root so every
+	// client attaches to its own project. Version maps below are keyed by
+	// server name, so partitions merge cleanly.
+	const partitions = new Map<string, ResolvedFileServer[]>();
+	for (const entry of resolvable) {
+		const list = partitions.get(entry.workspaceRootReal);
+		if (list) {
+			list.push(entry);
+		} else {
+			partitions.set(entry.workspaceRootReal, [entry]);
+		}
+	}
+	const roots = Array.from(partitions.keys());
+	const rootServers = (root: string): Array<[string, ServerConfig]> =>
+		(partitions.get(root) ?? []).map(entry => [entry.name, entry.config]);
+	const rootLspServers = (root: string): Array<[string, ServerConfig]> =>
+		(partitions.get(root) ?? []).filter(entry => !entry.config.createClient).map(entry => [entry.name, entry.config]);
+	const rootCustomServers = (root: string): Array<[string, ServerConfig]> =>
+		(partitions.get(root) ?? [])
+			.filter(entry => Boolean(entry.config.createClient))
+			.map(entry => [entry.name, entry.config]);
+	const servers = resolvable.map(entry => [entry.name, entry.config] as [string, ServerConfig]);
+	const { customLinterServers } = splitServers(servers);
 	const useCustomFormatter = enableFormat && customLinterServers.length > 0;
+
+	// Run one LSP step per workspace partition, so each server's client is
+	// created at its own canonical root. Sync/notify/version capture use the
+	// non-custom subset (mirroring the original lspServers); formatting uses
+	// the branch's subset so custom formatting never cold-starts an LSP server.
+	const syncFileContentPerRoots = async (
+		dstPath: string,
+		fileContent: string,
+		opSignal: AbortSignal,
+		createMissing: boolean,
+	): Promise<void> => {
+		await Promise.all(
+			roots.map(root => syncFileContent(dstPath, fileContent, root, rootLspServers(root), opSignal, createMissing)),
+		);
+	};
+	const notifyFileSavedPerRoots = async (
+		dstPath: string,
+		opSignal: AbortSignal,
+		createMissing: boolean,
+	): Promise<void> => {
+		await Promise.all(
+			roots.map(root => notifyFileSaved(dstPath, root, rootLspServers(root), opSignal, createMissing)),
+		);
+	};
+	const formatContentPerRoots = async (
+		contentToFormat: string,
+		opSignal: AbortSignal,
+		serversForRoot: (root: string) => Array<[string, ServerConfig]>,
+	): Promise<FormatContentResult> => {
+		let hadFailure = false;
+		for (const root of roots) {
+			const formatted = await formatContent(dst, contentToFormat, root, serversForRoot(root), opSignal);
+			if (!formatted.failed && !formatted.unsupported) return formatted;
+			hadFailure ||= formatted.failed;
+		}
+		return { content: contentToFormat, failed: hadFailure, unsupported: !hadFailure };
+	};
+
+	// Fetch post-write diagnostics per workspace partition without making the
+	// edit/write block on a slow language server. Blocks inline only briefly
+	// for a fresh result; slow servers deliver late via the deferred channel
+	// as ONE merged result.
+	const fetchDiagnosticsPerRoots = async (args: {
+		minVersions: ServerVersionMap | undefined;
+		expectedDocumentVersions: ServerVersionMap | undefined;
+		transformDiagnostics?: ResolvedWritethroughOptions["transformDiagnostics"];
+		deferred?: { onDeferredDiagnostics: (diagnostics: FileDiagnosticsResult) => void; signal: AbortSignal };
+		signal?: AbortSignal;
+	}): Promise<FileDiagnosticsResult | undefined> => {
+		const { minVersions, expectedDocumentVersions, transformDiagnostics, deferred, signal } = args;
+		const apply = (d: FileDiagnosticsResult | undefined) =>
+			d && transformDiagnostics ? transformDiagnostics(dst, d) : d;
+		// A single partition returns its raw result (freshness contract: the
+		// summary stays "OK"); only multiple partitions are merged.
+		const mergeResults = (results: Array<FileDiagnosticsResult | undefined>): FileDiagnosticsResult | undefined =>
+			roots.length === 1 ? results[0] : mergeDiagnostics(results, options);
+
+		if (!deferred) {
+			// No late-injection channel: block for the standard budget and return inline.
+			const results = await Promise.all(
+				roots.map(root =>
+					getDiagnosticsForFile(dst, root, rootServers(root), {
+						signal,
+						minVersions,
+						expectedDocumentVersions,
+					}),
+				),
+			);
+			return apply(mergeResults(results));
+		}
+
+		// One background fetch per partition with a generous inner budget;
+		// await them only briefly inline.
+		const fetchPromises = roots.map(root =>
+			getDiagnosticsForFile(dst, root, rootServers(root), {
+				signal: deferred.signal,
+				minVersions,
+				expectedDocumentVersions,
+				timeoutMs: DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS,
+			}),
+		);
+		const INLINE_TIMEOUT = Symbol("inline-diagnostics-timeout");
+		const raced = await Promise.race([
+			Promise.all(fetchPromises).then(results => mergeResults(results)),
+			Bun.sleep(INLINE_DIAGNOSTICS_WAIT_TIMEOUT_MS).then(() => INLINE_TIMEOUT),
+		]);
+		if (raced !== INLINE_TIMEOUT) {
+			return apply(raced as FileDiagnosticsResult | undefined);
+		}
+		// Slow servers: deliver late via the deferred channel; nothing inline.
+		void Promise.all(fetchPromises)
+			.then(results => {
+				const merged = mergeResults(results);
+				if (merged && !deferred.signal.aborted) deferred.onDeferredDiagnostics(merged);
+			})
+			.catch(() => {});
+		return undefined;
+	};
 
 	// Capture diagnostic versions BEFORE syncing to detect stale diagnostics
 	// Bound client creation by the writethrough budget: a hung/broken server
 	// must not add its full init wait (30s default) to every edit.
-	const minVersionsPromise = enableDiagnostics ? captureDiagnosticVersions(cwd, servers, 5_000, signal) : undefined;
+	const minVersionsPromise = enableDiagnostics
+		? Promise.all(roots.map(root => captureDiagnosticVersions(root, rootServers(root), 5_000, signal))).then(
+				maps => new Map(maps.flatMap(map => Array.from(map.entries()))),
+			)
+		: undefined;
 	let minVersions = useCustomFormatter ? undefined : await minVersionsPromise;
 	let expectedDocumentVersions: ServerVersionMap | undefined;
 
@@ -355,24 +455,26 @@ async function runLspWritethrough(
 	let diagnostics: FileDiagnosticsResult | undefined;
 	let timedOut = false;
 	let synced = false;
-	let operationSignal: AbortSignal | undefined;
+	// The writethrough LSP budget is 5s, bounded by the caller's signal when
+	// one is supplied. Concrete by construction — every per-partition step
+	// below takes it as a required AbortSignal, never an optional.
+	const timeoutSignal = AbortSignal.timeout(5_000);
+	timeoutSignal.addEventListener(
+		"abort",
+		() => {
+			timedOut = true;
+		},
+		{ once: true },
+	);
+	const operationSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 	try {
-		const timeoutSignal = AbortSignal.timeout(5_000);
-		timeoutSignal.addEventListener(
-			"abort",
-			() => {
-				timedOut = true;
-			},
-			{ once: true },
-		);
-		operationSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 		await untilAborted(operationSignal, async () => {
 			if (useCustomFormatter) {
 				// Custom linters operate on on-disk input; the shared pre-write also
 				// supports implementations that inspect the file before formatting.
 				if (!contentAlreadyWritten) await writeContent(content);
 				const [formattedContent, capturedVersions] = await Promise.all([
-					formatContent(dst, content, cwd, customLinterServers, operationSignal),
+					formatContentPerRoots(content, operationSignal, rootCustomServers),
 					minVersionsPromise,
 				]);
 				finalContent = formattedContent.content;
@@ -386,14 +488,14 @@ async function runLspWritethrough(
 				}
 				if (!contentAlreadyWritten || finalContent !== content) await writeContent(finalContent);
 				await notifyWriteCommitted(operationSignal);
-				await syncFileContent(dst, finalContent, cwd, lspServers, operationSignal, enableDiagnostics);
+				await syncFileContentPerRoots(dst, finalContent, operationSignal, enableDiagnostics);
 			} else {
 				// 1. Sync original content to LSP servers
-				await syncFileContent(dst, content, cwd, lspServers, operationSignal);
+				await syncFileContentPerRoots(dst, content, operationSignal, true);
 
 				// 2. Format in-memory via LSP
 				if (enableFormat) {
-					const formatted = await formatContent(dst, content, cwd, lspServers, operationSignal);
+					const formatted = await formatContentPerRoots(content, operationSignal, rootLspServers);
 					finalContent = formatted.content;
 					if (formatted.failed) {
 						formatter = FileFormatResult.FAILED;
@@ -406,7 +508,7 @@ async function runLspWritethrough(
 
 				// 3. If formatted, sync formatted content to LSP servers
 				if (finalContent !== content) {
-					await syncFileContent(dst, finalContent, cwd, lspServers, operationSignal);
+					await syncFileContentPerRoots(dst, finalContent, operationSignal, true);
 				}
 
 				// 4. Write to disk
@@ -415,28 +517,42 @@ async function runLspWritethrough(
 			}
 
 			if (enableDiagnostics) {
-				expectedDocumentVersions = await captureOpenFileVersions(dst, cwd, lspServers, operationSignal);
+				expectedDocumentVersions = new Map(
+					(
+						await Promise.all(
+							roots.map(root => captureOpenFileVersions(dst, root, rootLspServers(root), operationSignal)),
+						)
+					).flatMap(map => Array.from(map.entries())),
+				);
 			}
 
 			// 5. Notify saved to LSP servers
-			await notifyFileSaved(dst, cwd, lspServers, operationSignal, !useCustomFormatter || enableDiagnostics);
+			await notifyFileSavedPerRoots(dst, operationSignal, !useCustomFormatter || enableDiagnostics);
 		});
 		synced = true;
 	} catch {
 		if (timedOut) {
 			formatter = undefined;
 			diagnostics = undefined;
-			// Schedule background diagnostic fetch if caller wants deferred results
+			// Schedule background diagnostic fetch if caller wants deferred results:
+			// one bounded fetch per partition; whenever every partition settles,
+			// exactly one merged result is delivered (no lost or duplicated
+			// callbacks when a partition fetch yields nothing).
 			if (deferred && !deferred.signal.aborted && enableDiagnostics) {
-				void scheduleDeferredDiagnosticsFetch({
-					dst,
-					cwd,
-					servers,
-					minVersions,
-					expectedDocumentVersions,
-					signal: deferred.signal,
-					callback: deferred.onDeferredDiagnostics,
-				});
+				void (async () => {
+					const results = await Promise.all(
+						roots.map(root =>
+							getDiagnosticsForFile(dst, root, rootServers(root), {
+								signal: AbortSignal.any([deferred.signal, AbortSignal.timeout(25_000)]),
+								minVersions,
+								expectedDocumentVersions,
+								timeoutMs: DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS,
+							}).catch(() => undefined),
+						),
+					);
+					const merged = mergeDiagnostics(results, options);
+					if (merged && !deferred.signal.aborted) deferred.onDeferredDiagnostics(merged);
+				})();
 			}
 		}
 		await getWritePromise();
@@ -447,10 +563,7 @@ async function runLspWritethrough(
 	}
 
 	if (synced && enableDiagnostics) {
-		diagnostics = await fetchDiagnosticsWithDeferral({
-			dst,
-			cwd,
-			servers,
+		diagnostics = await fetchDiagnosticsPerRoots({
 			minVersions,
 			expectedDocumentVersions,
 			transformDiagnostics: options.transformDiagnostics,
