@@ -3425,14 +3425,23 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					logger.error("Extension error", { path: err.extensionPath, error: err.error });
 				});
 				await awaitAbortable(extensionRunner.emit({ type: "session_start" }));
-				while (pendingExtensionMessages.length > 0) {
-					await awaitAbortable(Promise.all(pendingExtensionMessages.splice(0)));
-				}
+				const drainPendingExtensionMessages = async (): Promise<void> => {
+					while (pendingExtensionMessages.length > 0) {
+						await awaitAbortable(Promise.all(pendingExtensionMessages.splice(0)));
+					}
+				};
+				await drainPendingExtensionMessages();
 				// Same post-session_start snapshot as print/RPC/TUI sessions
 				// (runtime-init): extension-contributed skill directories from
 				// resources_discover must reach freshly created task subagents too,
 				// not only revived ones (which route through initializeExtensions).
 				await awaitAbortable(session.discoverStartupSkillPaths());
+				// A resources_discover handler can call sendMessage/sendUserMessage
+				// (e.g. to announce a discovered directory) from the same shared
+				// action context as any other handler; drain those too so they
+				// land before autoload/prompt, not silently in flight when the
+				// session moves on.
+				await drainPendingExtensionMessages();
 			}
 
 			unsubscribe = monitor.attach(session);

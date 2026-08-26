@@ -1257,16 +1257,22 @@ export class SessionTools {
 		}
 	}
 
-	/** Rediscovers reloadable skills and refreshes prompt metadata. Used by `/reload-plugins`. */
+	/**
+	 * Rediscovers reloadable skills and refreshes prompt metadata. Used by
+	 * `/reload-plugins`. Mirrors the startup contract: the `resources_discover`
+	 * event (reason `"reload"`) always fires when a runner exists, even for a
+	 * fixed skill snapshot, so non-skill side effects still run on reload;
+	 * only the skill rescan is skipped for those sessions.
+	 */
 	async refreshSkills(): Promise<void> {
 		resetCapabilities();
+		// Extensions may contribute skill directories (resources_discover).
+		// Re-emit on every refresh so /reload-plugins picks up changes.
+		const runner = this.#host.extensionRunner();
+		const discoveredResources = runner
+			? await runner.emitResourcesDiscover(this.#host.sessionManager.getCwd(), "reload")
+			: undefined;
 		if (this.#skillsReloadable) {
-			// Extensions may contribute skill directories (resources_discover).
-			// Re-emit on every refresh so /reload-plugins picks up changes.
-			const runner = this.#host.extensionRunner();
-			const discoveredResources = runner
-				? await runner.emitResourcesDiscover(this.#host.sessionManager.getCwd(), "reload")
-				: undefined;
 			await this.#applyDiscoveredSkills(discoveredResources?.skillPaths.map(entry => entry.path));
 		}
 		await this.refreshBaseSystemPrompt();

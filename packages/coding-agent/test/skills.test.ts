@@ -849,6 +849,85 @@ export default function (pi) {
 			await removeWithRetries(tempDir);
 		}
 	});
+
+	it("still emits resources_discover on /reload-plugins for a session with a fixed skill snapshot", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-fixed-skills-reload-"));
+		const authStorage = createInMemoryAuthStorage();
+		let session: AgentSession | undefined;
+		try {
+			const reasonsPath = path.join(tempDir, "resources-discover-reasons.log");
+			const extensionsDir = path.join(tempDir, "ext");
+			await fs.mkdir(extensionsDir, { recursive: true });
+			const extPath = path.join(extensionsDir, "fixed-skills-reload-observer.ts");
+			await fs.writeFile(
+				extPath,
+				`import * as fs from "node:fs";
+export default function (pi) {
+	pi.on("resources_discover", event => {
+		fs.appendFileSync(${JSON.stringify(reasonsPath)}, event.reason + "\\n");
+		return { skillPaths: [${JSON.stringify(tempDir)}] };
+	});
+}
+`,
+			);
+
+			const loaded = await loadExtensions([extPath], tempDir);
+			expect(loaded.errors).toEqual([]);
+
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+			const mock = createMockModel({ handler: () => ({ content: ["ok"] }) });
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [] },
+				streamFn: mock.stream,
+			});
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+			const sessionManager = SessionManager.inMemory(tempDir);
+			const extensionRunner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir,
+				sessionManager,
+				modelRegistry,
+			);
+
+			// Same fixed-snapshot contract as startup, but exercised through
+			// `/reload-plugins` (`session.refreshSkills()`): the event must
+			// still fire with reason "reload" even though the skill rescan
+			// it would otherwise trigger stays skipped.
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				extensionRunner,
+				skills: [],
+				skillsReloadable: false,
+			});
+
+			const runtimeErrors: ExtensionError[] = [];
+			await initializeExtensions(session, {
+				reportSendError: () => {},
+				reportRuntimeError: error => {
+					runtimeErrors.push(error);
+				},
+			});
+			expect(runtimeErrors).toEqual([]);
+
+			await session.refreshSkills();
+
+			const reasons = await fs.readFile(reasonsPath, "utf8");
+			expect(reasons.trim().split("\n")).toEqual(["startup", "reload"]);
+			// The skill rescan is skipped for a fixed snapshot: the returned
+			// skillPaths never reach session.skills, even after reload.
+			expect(session.skills.some(skill => skill.name === "startup-discovered-skill")).toBe(false);
+		} finally {
+			await session?.dispose();
+			authStorage.close();
+			await removeWithRetries(tempDir);
+		}
+	});
 });
 
 describe("collision handling", () => {

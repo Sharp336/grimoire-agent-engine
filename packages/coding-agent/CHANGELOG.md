@@ -76,6 +76,8 @@
 - Fixed skill discovery not finding skills nested one namespace level deep (e.g. `skills/<namespace>/<skill>/SKILL.md`).
 - Extension-contributed skill paths (`resources_discover`) are now honored at session start and `/reload-plugins`.
 - Fixed freshly created task subagents missing extension-contributed skills that print, RPC, and TUI sessions already receive at startup.
+- Fixed `/reload-plugins` skipping the `resources_discover` event entirely for sessions with a fixed skill snapshot; it now fires (matching startup) and only skips the skill rescan.
+- Fixed task subagent startup dropping extension messages sent from a `resources_discover` handler by draining them before the first prompt.
 
 ## [18.0.6] - 2026-08-26
 
