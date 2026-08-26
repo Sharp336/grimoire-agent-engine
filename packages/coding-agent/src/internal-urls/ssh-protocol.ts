@@ -21,11 +21,12 @@
  */
 import * as capability from "../capability";
 import { type SSHHost, sshCapability } from "../capability/ssh";
-import type { SSHConnectionTarget } from "../ssh/connection-manager";
+import { getCachedHostInfoSync, type SSHConnectionTarget } from "../ssh/connection-manager";
 import {
 	listRemoteDir,
 	type RemoteDirEntry,
 	type RemotePathKind,
+	type RemoteResource,
 	readRemoteFile,
 	resolveWindowsResource,
 	statRemotePath,
@@ -256,6 +257,43 @@ function formatDirListing(entries: readonly RemoteDirEntry[]): string {
 	return entries.map(entry => `${entry.name}${entry.isDirectory ? "/" : ""}`).join("\n");
 }
 
+/**
+ * Finalize fetched file bytes into a resource — shared by the merged Windows
+ * and classic POSIX read paths so the truncation and binary/non-UTF-8
+ * rejections (and their exact messages) can never drift apart.
+ */
+function finalizeFileResource(
+	bytes: Uint8Array,
+	truncated: boolean,
+	remotePath: string,
+	urlHref: string,
+): InternalResource {
+	if (truncated) {
+		throw new Error(
+			`ssh://: ${remotePath} exceeds the 1 MiB limit; ssh:// supports text files up to 1 MiB — use an sshfs mount for larger files`,
+		);
+	}
+	const content = decodeUtf8Text(bytes);
+	if (content === null) {
+		throw new Error(
+			`ssh://: ${remotePath} is a binary or non-UTF-8 file; ssh:// supports UTF-8 text only — use \`bash\` with a remote SSH command or an \`sshfs\` mount`,
+		);
+	}
+	return {
+		url: urlHref,
+		content,
+		contentType: contentTypeFor(remotePath),
+		size: bytes.length,
+	};
+}
+
+/** Reject a special file (FIFO, socket, device) — shared by both read paths. */
+function refuseNonRegularFile(remotePath: string): never {
+	throw new Error(
+		`ssh://: ${remotePath} is not a regular file (FIFO, socket, or device); ssh:// reads UTF-8 text files only — use \`bash\` with a remote SSH command for special files`,
+	);
+}
+
 export class SshProtocolHandler implements ProtocolHandler {
 	readonly scheme = "ssh";
 	readonly immutable = false;
@@ -280,23 +318,33 @@ export class SshProtocolHandler implements ProtocolHandler {
 		// so a special file must fail fast. Only a regular file is read; a
 		// directory lists. On the PowerShell channel classify+fetch is ONE merged
 		// roundtrip (`resolveWindowsResource` — each remote exec costs ~0.75s
-		// when the local client cannot multiplex, which win32 never can). Other
-		// channels fall back to the classic stat-then-fetch sequence below —
-		// note that a POSIX remote from a win32 client pays BOTH roundtrips too
-		// (ControlMaster depends on the local platform, not the remote OS).
+		// when the local client cannot multiplex, which win32 never can). The
+		// merged attempt is gated on the cached host info: a cached non-windows
+		// host skips it entirely so POSIX reads keep their exact pre-Windows
+		// process count — an ungated call resolves the transfer (and re-runs
+		// `ensureConnection`) only to return `undefined`. A cache miss still
+		// tries it: a one-time cost that also warms the host-info cache.
+		// Other channels fall back to the classic stat-then-fetch sequence
+		// below — note that a POSIX remote from a win32 client pays BOTH
+		// roundtrips too (ControlMaster depends on the local platform, not
+		// the remote OS).
 		// `missing`/transport stat failures fall through to the read so its
 		// original remote stderr (e.g. "No such file or directory") still
 		// surfaces. Protocol-validation failures rethrow — they must not
 		// degrade into another result.
 		let kind: RemotePathKind | undefined;
-		const merged = await resolveWindowsResource(target, remotePath, {
-			maxBytes: SSH_TEXT_MAX_BYTES,
-			signal: context?.signal,
-			skipListing: context?.skipDirectoryListing,
-		}).catch((error: unknown) => {
-			if (error instanceof WindowsTransferProtocolError) throw error;
-			return undefined; // transport failure — fall through to the read
-		});
+		let merged: RemoteResource | undefined;
+		const cachedInfo = getCachedHostInfoSync(target);
+		if (!cachedInfo || cachedInfo.os === "windows") {
+			merged = await resolveWindowsResource(target, remotePath, {
+				maxBytes: SSH_TEXT_MAX_BYTES,
+				signal: context?.signal,
+				skipListing: context?.skipDirectoryListing,
+			}).catch((error: unknown) => {
+				if (error instanceof WindowsTransferProtocolError) throw error;
+				return undefined; // transport failure — fall through to the read
+			});
+		}
 		if (merged) {
 			if (merged.kind === "directory") {
 				const content = merged.listingSkipped ? "" : formatDirListing(merged.entries ?? []);
@@ -310,76 +358,43 @@ export class SshProtocolHandler implements ProtocolHandler {
 				};
 			}
 			if (merged.kind === "file") {
-				if (merged.truncated) {
-					throw new Error(
-						`ssh://: ${remotePath} exceeds the 1 MiB limit; ssh:// supports text files up to 1 MiB — use an sshfs mount for larger files`,
-					);
-				}
-				const content = decodeUtf8Text(merged.bytes ?? new Uint8Array());
-				if (content === null) {
-					throw new Error(
-						`ssh://: ${remotePath} is a binary or non-UTF-8 file; ssh:// supports UTF-8 text only — use \`bash\` with a remote SSH command or an \`sshfs\` mount`,
-					);
-				}
-				return {
-					url: url.href,
-					content,
-					contentType: contentTypeFor(remotePath),
-					size: (merged.bytes ?? new Uint8Array()).length,
-				};
+				return finalizeFileResource(
+					merged.bytes ?? new Uint8Array(),
+					merged.truncated === true,
+					remotePath,
+					url.href,
+				);
 			}
 			if (merged.kind === "other") {
-				throw new Error(
-					`ssh://: ${remotePath} is not a regular file (FIFO, socket, or device); ssh:// reads UTF-8 text files only — use \`bash\` with a remote SSH command for special files`,
-				);
+				refuseNonRegularFile(remotePath);
 			}
 			// Windows "missing": the merged frame already classified it — fail
 			// locally without a second roundtrip. Message mirrors the classic
 			// POSIX path's surfaced read error for consistency.
 			throw new Error(`ssh://: ${remotePath}: No such file or directory`);
 		}
-		if (!merged && kind !== "missing") {
-			try {
-				kind = await statRemotePath(target, remotePath, { signal: context?.signal });
-			} catch (error) {
-				// Transport failure (host/connection issue) — fall through; the
-				// read gives a clearer error. Protocol-validation failures
-				// rethrow — they must not degrade into another result, matching
-				// the merged-operation catch above.
-				if (error instanceof WindowsTransferProtocolError) throw error;
-			}
+		try {
+			kind = await statRemotePath(target, remotePath, { signal: context?.signal });
+		} catch (error) {
+			// Transport failure (host/connection issue) — fall through; the
+			// read gives a clearer error. Protocol-validation failures
+			// rethrow — they must not degrade into another result, matching
+			// the merged-operation catch above.
+			if (error instanceof WindowsTransferProtocolError) throw error;
 		}
 		if (kind === "directory") {
 			return this.#resolveDirectory(target, remotePath, url, context?.signal, context?.skipDirectoryListing);
 		}
 		if (kind === "other") {
-			throw new Error(
-				`ssh://: ${remotePath} is not a regular file (FIFO, socket, or device); ssh:// reads UTF-8 text files only — use \`bash\` with a remote SSH command for special files`,
-			);
+			refuseNonRegularFile(remotePath);
 		}
 		const fileResult = await readRemoteFile(target, remotePath, {
 			maxBytes: SSH_TEXT_MAX_BYTES,
 			signal: context?.signal,
 		});
-		if (fileResult.truncated) {
-			throw new Error(
-				`ssh://: ${remotePath} exceeds the 1 MiB limit; ssh:// supports text files up to 1 MiB — use an sshfs mount for larger files`,
-			);
-		}
-		const content = decodeUtf8Text(fileResult.bytes);
-		if (content === null) {
-			throw new Error(
-				`ssh://: ${remotePath} is a binary or non-UTF-8 file; ssh:// supports UTF-8 text only — use \`bash\` with a remote SSH command or an \`sshfs\` mount`,
-			);
-		}
 		// No `sourcePath`: keeps search on the virtual-resource path so the
 		// displayed/searched resource stays `ssh://…` instead of a temp path.
-		return {
-			url: url.href,
-			content,
-			contentType: contentTypeFor(remotePath),
-			size: fileResult.bytes.length,
-		};
+		return finalizeFileResource(fileResult.bytes, fileResult.truncated, remotePath, url.href);
 	}
 
 	/** Resolve a remote directory to a one-level listing (no `sourcePath`; `isDirectory` so search refuses it; immutable). */

@@ -307,6 +307,26 @@ describe("SshProtocolHandler", () => {
 		);
 	});
 
+	it("a cached POSIX host skips the merged Windows resolver entirely", async () => {
+		// The merged attempt is gated on cached host info: a known-POSIX host
+		// must not pay an extra resolveTransfer/ensureConnection roundtrip
+		// (an extra `ssh -O check` spawn on ControlMaster-capable clients)
+		// just to learn the resolver would return undefined.
+		mockHosts();
+		vi.spyOn(connectionManager, "getCachedHostInfoSync").mockReturnValue({
+			version: 5,
+			os: "linux",
+			shell: "bash",
+			transferShell: "bash",
+			compatEnabled: false,
+		});
+		const mergedSpy = vi.spyOn(fileTransfer, "resolveWindowsResource").mockResolvedValue(undefined);
+		mockReadBytes("posix bytes\n");
+		const resource = await handler.resolve(parseInternalUrl("ssh://icaro/etc/hosts"));
+		expect(resource.content).toBe("posix bytes\n");
+		expect(mergedSpy).not.toHaveBeenCalled();
+	});
+
 	it("falls through a transport stat failure so the read surfaces its remote stderr", async () => {
 		mockHosts();
 		vi.spyOn(fileTransfer, "statRemotePath").mockRejectedValue(new Error("ssh: connect to host icaro: timed out"));

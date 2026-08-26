@@ -48,7 +48,16 @@ describe("probeHostInfo layered classification", () => {
 	});
 
 	it("classifies a cmd default-shell host with no powershell at all as unknown", async () => {
-		mockSshExec(() => PS_FAIL);
+		// Every probe fails, but connection-control commands (`ssh -O check`)
+		// must still succeed — on ControlMaster-capable clients (Linux CI)
+		// ensureConnection runs them, and a failing `-O check` would abort the
+		// probe with "Failed to start SSH master" before classification.
+		mockSshExec(cmd => {
+			if (cmd.includes("PI_HOST_PROBE=")) return PS_FAIL;
+			if (cmd.startsWith("sh -lc") || cmd.startsWith("bash -lc") || cmd.startsWith("zsh -lc")) return PS_FAIL;
+			if (cmd.startsWith("powershell -NoProfile -NonInteractive -EncodedCommand")) return PS_FAIL;
+			return { exitCode: 0, stdout: "", stderr: "" };
+		});
 		const info = await connectionManager.ensureHostInfo(HOST);
 		expect(info.os).toBe("unknown");
 		expect(info.transferShell).toBeUndefined();
@@ -90,7 +99,9 @@ describe("probeHostInfo layered classification", () => {
 				return { exitCode: 0, stdout: "PI_HOST_PROBE=msys_nt|powershell|", stderr: "" };
 			}
 			if (cmd.startsWith("powershell -NoProfile -NonInteractive -EncodedCommand")) return PS_OK;
-			return PS_FAIL;
+			if (cmd.startsWith("sh -lc") || cmd.startsWith("bash -lc") || cmd.startsWith("zsh -lc")) return PS_FAIL;
+			// Connection-control commands succeed (see the cmd-host test above).
+			return { exitCode: 0, stdout: "", stderr: "" };
 		});
 		const info = await connectionManager.ensureHostInfo(HOST);
 		expect(info.os).toBe("windows");

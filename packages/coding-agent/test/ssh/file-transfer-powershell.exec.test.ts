@@ -148,9 +148,7 @@ describe.skipIf(process.platform !== "win32")("windows transfer real execution",
 		const unused = [..."ZYXWVUTSRQPONMLKJIHGFEDBA"].find(letter => !syncFs.existsSync(`${letter}:\\`));
 		if (!unused) return; // every drive letter is mounted — nothing to exercise
 		await expect(statRemotePath(target, `${unused}:/nowhere`)).rejects.toThrow(/exited 1/);
-		await expect(resolveWindowsResource(target, `${unused}:/nowhere`, { maxBytes: 16 })).rejects.toThrow(
-			/exited 1/,
-		);
+		await expect(resolveWindowsResource(target, `${unused}:/nowhere`, { maxBytes: 16 })).rejects.toThrow(/exited 1/);
 	});
 
 	it("lists entries dirs-first with UTF-8 names and trailing-slash markers", async () => {
