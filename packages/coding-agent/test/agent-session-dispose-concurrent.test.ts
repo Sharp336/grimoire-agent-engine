@@ -157,12 +157,14 @@ describe("AgentSession concurrent disposal", () => {
 
 		const current = createSession(owned);
 		const hindsight: HindsightSessionState = Object.create(HindsightSessionState.prototype);
-		vi.spyOn(hindsight, "flushRetainQueue").mockImplementation(async () => {
+		vi.spyOn(hindsight, "drainOnClose").mockImplementation(async () => {
 			order.push("hindsight:start");
 			await hindsightGate.promise;
 			order.push("hindsight:end");
 		});
-		vi.spyOn(hindsight, "dispose").mockImplementation(() => {});
+		vi.spyOn(hindsight, "dispose").mockImplementation(() => {
+			order.push("hindsight:dispose");
+		});
 		current.setHindsightSessionState(hindsight);
 
 		const mnemopi: MnemopiSessionState = Object.create(MnemopiSessionState.prototype);
@@ -183,8 +185,8 @@ describe("AgentSession concurrent disposal", () => {
 		try {
 			await asyncStarted.promise;
 			await Promise.resolve();
-			expect(order).toContain("hindsight:start");
 			expect(order).toContain("mnemopi:start");
+			expect(order).not.toContain("hindsight:start");
 			expect(order).not.toContain("async:end");
 			expect(order).not.toContain("hindsight:end");
 			expect(order).not.toContain("mnemopi:end");
@@ -201,6 +203,7 @@ describe("AgentSession concurrent disposal", () => {
 		expect(closeAt).toBeGreaterThan(order.indexOf("async:end"));
 		expect(closeAt).toBeGreaterThan(order.indexOf("hindsight:end"));
 		expect(closeAt).toBeGreaterThan(order.indexOf("mnemopi:end"));
+		expect(order.indexOf("hindsight:dispose")).toBeGreaterThan(order.indexOf("hindsight:end"));
 	});
 
 	it("bounds post-prompt work that ignores abort", async () => {
