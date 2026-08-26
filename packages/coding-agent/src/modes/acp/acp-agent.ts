@@ -18,6 +18,7 @@ import {
 	type ElicitationPropertySchema,
 	type ForkSessionRequest,
 	type ForkSessionResponse,
+	type Implementation,
 	type InitializeRequest,
 	type InitializeResponse,
 	type ListSessionsRequest,
@@ -616,6 +617,7 @@ export class AcpAgent implements Agent {
 	#disposePromise: Promise<void> | undefined;
 	#cleanupRegistered = false;
 	#clientCapabilities: ClientCapabilities | undefined;
+	#clientInfo: Implementation | undefined | null;
 	#cancelCleanupTimeoutMs = ACP_CANCEL_CLEANUP_TIMEOUT_MS;
 	#blobs = new BlobStore(getBlobsDir());
 
@@ -632,6 +634,7 @@ export class AcpAgent implements Agent {
 	async initialize(params: InitializeRequest): Promise<InitializeResponse> {
 		this.#registerConnectionCleanup();
 		this.#clientCapabilities = params.clientCapabilities;
+		this.#clientInfo = params.clientInfo;
 		const authMethods: AuthMethod[] = [
 			{
 				id: "agent",
@@ -1766,7 +1769,25 @@ export class AcpAgent implements Agent {
 		return configOptions;
 	}
 
+	/**
+	 * Clients that only understand the flat `SessionConfigSelectOption[]` shape would see
+	 * `options[].value === undefined` for a `Grouped` group header and either drop the model
+	 * list or fail to render it. ACP has no negotiated capability flag for this (it's a
+	 * hand-maintained protocol superset here), so only opt in known-compatible clients.
+	 */
+	#clientSupportsGroupedSelectOptions(): boolean {
+		return this.#clientInfo?.name === "zed";
+	}
+
 	#buildModelSelectOptions(models: Model[]): SessionConfigSelectOption[] | SessionConfigSelectGroup[] {
+		const toOption = (model: Model): SessionConfigSelectOption => ({
+			value: this.#toModelId(model),
+			name: model.name,
+			description: `${model.provider}/${model.id}`,
+		});
+		if (!this.#clientSupportsGroupedSelectOptions()) {
+			return models.map(toOption);
+		}
 		const providers: string[] = [];
 		const byProvider = new Map<string, Model[]>();
 		for (const model of models) {
@@ -1778,11 +1799,6 @@ export class AcpAgent implements Agent {
 			}
 			group.push(model);
 		}
-		const toOption = (model: Model): SessionConfigSelectOption => ({
-			value: this.#toModelId(model),
-			name: model.name,
-			description: `${model.provider}/${model.id}`,
-		});
 		if (providers.length <= 1) {
 			return models.map(toOption);
 		}
