@@ -2,6 +2,7 @@
  * System prompt construction and project context loading
  */
 
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -9,8 +10,9 @@ import type { ToolExample, TSchema } from "@oh-my-pi/pi-ai";
 import { renderToolInventory } from "@oh-my-pi/pi-ai/dialect";
 import {
 	$env,
+	formatBytes,
 	getAgentDir,
-	getGpuCachePath,
+	getHardwareCachePath,
 	getProjectDir,
 	hasFsCode,
 	isEnoent,
@@ -180,20 +182,26 @@ function parseWindowsGpuModel(output: string): string | null {
 
 const SYSTEM_PROMPT_PREP_TIMEOUT_MS = 5000;
 /** Kept below prep timeout so timed-out probes can still write the null cache before fallback. */
-const GPU_PROBE_TIMEOUT_MS = SYSTEM_PROMPT_PREP_TIMEOUT_MS - 500;
+const HOST_PROBE_TIMEOUT_MS = SYSTEM_PROMPT_PREP_TIMEOUT_MS - 500;
 /** Drop stdout from a probe descendant that inherited the pipe after the probe exited. */
-const GPU_PROBE_STDOUT_DRAIN_MS = 250;
+const HOST_PROBE_STDOUT_DRAIN_MS = 250;
 
-async function runGpuProbe(cmd: string[]): Promise<string | null> {
+interface HostProbeOptions {
+	/** Return captured stdout even on a non-zero exit (df exits 1 when any single mount cannot be statted). */
+	lenientExit?: boolean;
+}
+
+async function runHostProbe(cmd: string[], options: HostProbeOptions = {}): Promise<string | null> {
 	try {
 		const proc = Bun.spawn({
 			cmd,
 			stdout: "pipe",
 			stderr: "ignore",
 			stdin: "ignore",
-			timeout: GPU_PROBE_TIMEOUT_MS,
+			timeout: HOST_PROBE_TIMEOUT_MS,
 			// SIGKILL so a probe ignoring SIGTERM (PATH wrapper, wedged WMI) still
-			// dies at the deadline and lets getCachedGpu reach the null-cache write.
+			// dies at the deadline and lets the cached-probe path reach its
+			// null-cache write.
 			killSignal: "SIGKILL",
 		});
 		const stdoutReader = proc.stdout.getReader();
@@ -209,33 +217,37 @@ async function runGpuProbe(cmd: string[]): Promise<string | null> {
 		})();
 		const exitCode = await proc.exited;
 		// Even on exit 0, a probe wrapper can leave a descendant holding stdout open.
-		// Bound the EOF wait so getCachedGpu cannot outlive the probe in either path;
+		// Bound the EOF wait so a cached probe cannot outlive its child in either path;
 		// keep whatever bytes the reader already captured before cancelling.
 		const drained = await Promise.race([
 			stdoutDone.then(() => "ok" as const).catch(() => "err" as const),
-			Bun.sleep(GPU_PROBE_STDOUT_DRAIN_MS).then(() => "timeout" as const),
+			Bun.sleep(HOST_PROBE_STDOUT_DRAIN_MS).then(() => "timeout" as const),
 		]);
 		if (drained !== "ok") {
 			await stdoutReader.cancel().catch(() => undefined);
 			await stdoutDone.catch(() => undefined);
 		}
-		return exitCode === 0 ? stdout : null;
+		if (exitCode !== 0 && !(options.lenientExit && stdout.trim().length > 0)) return null;
+		return stdout;
 	} catch {
 		return null;
 	}
 }
 
-async function getGpuModel(): Promise<string | null> {
+/**
+ * Pick the most interesting GPU. On Linux the caller supplies one shared
+ * `lspci` capture (the network probe consumes the same output).
+ */
+async function getGpuModel(lspciText: string | null): Promise<string | null> {
 	switch (process.platform) {
 		case "win32": {
-			const output = await runGpuProbe(["wmic", "path", "win32_VideoController", "get", "name"]);
+			const output = await runHostProbe(["wmic", "path", "win32_VideoController", "get", "name"]);
 			return output ? parseWindowsGpuModel(output) : null;
 		}
 		case "linux": {
-			const output = await runGpuProbe(["lspci"]);
-			if (!output) return null;
+			if (!lspciText) return null;
 			const gpus: Array<{ name: string; priority: number }> = [];
-			for (const line of output.split("\n")) {
+			for (const line of lspciText.split("\n")) {
 				if (!/(VGA|3D|Display)/i.test(line)) continue;
 				const parts = line.split(":");
 				const name = parts.length > 1 ? parts.slice(1).join(":").trim() : line.trim();
@@ -269,6 +281,252 @@ async function getGpuModel(): Promise<string | null> {
 	}
 }
 
+/** SMBIOS memory-device type codes (DMTF spec 7.18.2) as reported by wmic's `SMBIOSMemoryType`. */
+const SMBIOS_MEMORY_TYPE: Record<string, string> = {
+	"18": "DDR",
+	"19": "DDR2",
+	"24": "DDR3",
+	"26": "DDR4",
+	"27": "LPDDR",
+	"28": "LPDDR2",
+	"29": "LPDDR3",
+	"30": "LPDDR4",
+	"34": "DDR5",
+	"35": "LPDDR5",
+};
+
+/**
+ * A mixed-speed kit runs the whole set at a common supported rate, and only
+ * the firmware-configured per-stick speed reflects that rate — a stick's
+ * rated maximum (DMI `Speed`) can exceed it. Report the lowest configured
+ * speed, and only when every populated stick exposes one; otherwise omit the
+ * rate (and the bandwidth derived from it) rather than overstate the
+ * hardware.
+ */
+function commonSpeedMts(configuredSpeeds: number[]): number {
+	return configuredSpeeds.length > 0 && configuredSpeeds.every(speed => speed > 0) ? Math.min(...configuredSpeeds) : 0;
+}
+
+/**
+ * Parse the `E: MEMORY_DEVICE_<n>_<KEY>=<value>` properties that systemd's
+ * dmi/id udev builtin exports (readable without root, unlike `dmidecode`)
+ * into a one-line RAM summary, e.g.
+ * `96.0GB DDR5 @ 6000 MT/s (2x 48.0GB, 2 channels, ~96 GB/s peak)`.
+ *
+ * Channel count and the derived theoretical peak bandwidth
+ * (`channels x data width x transfer rate`) appear only when the locators name
+ * channels unambiguously (`CHANNEL A` / `DIMM_A1` style). The memory-controller
+ * clock ratio (UCLK 1:1 vs 1:2) is firmware state that DMI does not expose, so
+ * it is intentionally absent.
+ *
+ * Exported for tests. Returns null when no populated memory device is found.
+ */
+export function parseDmiMemory(udevText: string): string | null {
+	const devices = new Map<string, Record<string, string>>();
+	for (const line of udevText.split("\n")) {
+		const match = /^E:\s*MEMORY_DEVICE_(\d+)_([A-Z0-9_]+)=(.*)$/.exec(line.trim());
+		if (!match) continue;
+		let device = devices.get(match[1]);
+		if (!device) {
+			device = {};
+			devices.set(match[1], device);
+		}
+		device[match[2]] = match[3].trim();
+	}
+
+	const populated = [...devices.values()].filter(device => {
+		if (device.PRESENT === "0") return false;
+		const size = Number(device.SIZE);
+		return Number.isFinite(size) && size > 0;
+	});
+	if (populated.length === 0) return null;
+
+	const sizes = populated.map(device => Number(device.SIZE));
+	const totalBytes = sizes.reduce((sum, size) => sum + size, 0);
+	const type = populated.map(device => device.TYPE).find(value => value && value !== "Unknown");
+	const speedMts = commonSpeedMts(populated.map(device => Number(device.CONFIGURED_SPEED_MTS) || 0));
+	// Channel count: only trust an explicit channel token in the locators.
+	// Deduping raw bank locators would count slot-level labels ("BANK 0".."BANK 3")
+	// as one fictitious channel per DIMM and overstate the peak bandwidth.
+	const channelTokens = populated.map(device => {
+		const locators = `${device.BANK_LOCATOR ?? ""} ${device.LOCATOR ?? ""}`;
+		const named = /CHANNEL[\s_-]*([A-Z0-9]+)/i.exec(locators);
+		if (named) return named[1].toUpperCase();
+		const dimmSlot = /\bDIMM[\s_-]?([A-Z])\d*\b/i.exec(locators);
+		return dimmSlot ? dimmSlot[1].toUpperCase() : null;
+	});
+	const channels = channelTokens.every(token => token !== null) ? new Set(channelTokens).size : 0;
+	const dataWidthBits = Math.max(0, ...populated.map(device => Number(device.DATA_WIDTH) || 0)) || 64;
+
+	let summary = formatBytes(totalBytes);
+	if (type) summary += ` ${type}`;
+	if (speedMts > 0) summary += ` @ ${speedMts} MT/s`;
+	const details: string[] = [
+		sizes.every(size => size === sizes[0])
+			? `${populated.length}x ${formatBytes(sizes[0])}`
+			: `${populated.length} DIMMs`,
+	];
+	if (channels > 0) {
+		details.push(`${channels} ${channels === 1 ? "channel" : "channels"}`);
+		if (speedMts > 0) {
+			details.push(`~${Math.round((channels * dataWidthBits * speedMts) / 8000)} GB/s peak`);
+		}
+	}
+	return `${summary} (${details.join(", ")})`;
+}
+
+/** Split `wmic ... /format:list` output (blank-line separated `Key=Value` blocks) into per-record maps. */
+function parseWmicList(output: string): Array<Record<string, string>> {
+	const records: Array<Record<string, string>> = [];
+	for (const block of output.split(/\r?\n\s*\r?\n/)) {
+		const record: Record<string, string> = {};
+		for (const line of block.split("\n")) {
+			const trimmed = line.trim();
+			const separator = trimmed.indexOf("=");
+			if (separator > 0) record[trimmed.slice(0, separator)] = trimmed.slice(separator + 1);
+		}
+		if (Object.keys(record).length > 0) records.push(record);
+	}
+	return records;
+}
+
+/**
+ * Parse `wmic memorychip get ... /format:list` output (blank-line separated
+ * `Key=Value` blocks, one per DIMM) into a one-line RAM summary.
+ * Exported for tests. Returns null when no stick reports a capacity.
+ */
+export function parseWmicMemory(output: string): string | null {
+	const populated = parseWmicList(output).filter(stick => Number(stick.Capacity) > 0);
+
+	if (populated.length === 0) return null;
+
+	const sizes = populated.map(stick => Number(stick.Capacity));
+	const totalBytes = sizes.reduce((sum, size) => sum + size, 0);
+	const type = populated
+		.map(stick => SMBIOS_MEMORY_TYPE[stick.SMBIOSMemoryType ?? ""])
+		.find(value => value !== undefined);
+	const speedMts = commonSpeedMts(populated.map(stick => Number(stick.ConfiguredClockSpeed) || 0));
+
+	let summary = formatBytes(totalBytes);
+	if (type) summary += ` ${type}`;
+	if (speedMts > 0) summary += ` @ ${speedMts} MT/s`;
+	const sticksDetail = sizes.every(size => size === sizes[0])
+		? `${populated.length}x ${formatBytes(sizes[0])}`
+		: `${populated.length} DIMMs`;
+	return `${summary} (${sticksDetail})`;
+}
+
+async function getRamInfo(): Promise<string | null> {
+	switch (process.platform) {
+		case "linux": {
+			// systemd's dmi/id udev builtin re-exports the SMBIOS memory tables
+			// that only root can read from /sys/firmware/dmi, so DDR generation,
+			// transfer rate, and slot population are available unprivileged.
+			const output = await runHostProbe(["udevadm", "info", "/sys/devices/virtual/dmi/id"]);
+			const parsed = output ? parseDmiMemory(output) : null;
+			if (parsed) return parsed;
+			break;
+		}
+		case "win32": {
+			const output = await runHostProbe([
+				"wmic",
+				"memorychip",
+				"get",
+				"Capacity,ConfiguredClockSpeed,Speed,SMBIOSMemoryType",
+				"/format:list",
+			]);
+			const parsed = output ? parseWmicMemory(output) : null;
+			if (parsed) return parsed;
+			break;
+		}
+	}
+	// Capacity-only fallback (macOS, containers, hosts without DMI export).
+	// os.totalmem() reports usable RAM, slightly below the installed total.
+	const totalBytes = os.totalmem();
+	return totalBytes > 0 ? formatBytes(totalBytes) : null;
+}
+
+/**
+ * Parse POSIX `df -kP` output into a one-line per-mount disk summary, e.g.
+ * `/ 1.9TB btrfs; /boot 499.8MB vfat`.
+ *
+ * Deliberately stable: total size and filesystem type only. Free space is
+ * omitted because it changes constantly and would bust prompt KV caching.
+ * Keeps block-device-backed filesystems (plus the root mount, so container
+ * overlayfs roots survive), collapses bind/subvolume mounts sharing a device
+ * to the shortest mount point, and skips loop/ram pseudo-disks (snaps).
+ * Exported for tests. Returns null when nothing qualifies.
+ */
+export function parseDfDisks(dfText: string, fstypeByMount: Record<string, string> = {}): string | null {
+	const byDevice = new Map<string, { mount: string; totalBytes: number }>();
+	for (const line of dfText.split("\n").slice(1)) {
+		const match = /^(\S+)\s+(\d+)\s+\d+\s+\d+\s+\S+\s+(.+)$/.exec(line.trim());
+		if (!match) continue;
+		const [, device, totalKb, mount] = match;
+		if (/^\/dev\/(loop|ram)/.test(device)) continue;
+		if (!device.startsWith("/") && mount !== "/") continue;
+		const existing = byDevice.get(device);
+		if (existing && existing.mount.length <= mount.length) continue;
+		byDevice.set(device, { mount, totalBytes: Number(totalKb) * 1024 });
+	}
+	const disks = [...byDevice.values()].sort((a, b) =>
+		a.mount === "/" ? -1 : b.mount === "/" ? 1 : a.mount.localeCompare(b.mount),
+	);
+	if (disks.length === 0) return null;
+	return disks
+		.slice(0, 6)
+		.map(disk => {
+			const fstype = fstypeByMount[disk.mount];
+			return `${disk.mount} ${formatBytes(disk.totalBytes)}${fstype ? ` ${fstype}` : ""}`;
+		})
+		.join("; ");
+}
+
+/**
+ * Parse `wmic logicaldisk get ... /format:list` output into a one-line
+ * per-drive disk summary (size + filesystem, no volatile free space).
+ * Exported for tests.
+ */
+export function parseWmicDisks(output: string): string | null {
+	const drives = parseWmicList(output).filter(record => record.Caption && Number(record.Size) > 0);
+	if (drives.length === 0) return null;
+	return drives
+		.slice(0, 6)
+		.map(record => {
+			const fstype = record.FileSystem?.trim();
+			return `${record.Caption} ${formatBytes(Number(record.Size))}${fstype ? ` ${fstype}` : ""}`;
+		})
+		.join("; ");
+}
+
+/**
+ * Disk inventory for the workstation block: mount, total size, and filesystem
+ * type (a btrfs root implies CoW and transparent compression, which matters
+ * for I/O-sensitive work). The filesystem type comes from /proc/self/mounts
+ * on Linux; other platforms omit it rather than guess.
+ */
+async function getDiskInfo(): Promise<string | null> {
+	if (process.platform === "win32") {
+		const output = await runHostProbe(["wmic", "logicaldisk", "get", "Caption,FileSystem,Size", "/format:list"]);
+		return output ? parseWmicDisks(output) : null;
+	}
+	const output = await runHostProbe(["df", "-kP"], { lenientExit: true });
+	if (!output) return null;
+	const fstypeByMount: Record<string, string> = {};
+	if (process.platform === "linux") {
+		try {
+			for (const line of (await Bun.file("/proc/self/mounts").text()).split("\n")) {
+				const [, mount, fstype] = line.split(" ");
+				// Octal-escaped spaces in mount points per fstab(5).
+				if (mount && fstype) fstypeByMount[mount.replace(/\\040/g, " ")] = fstype;
+			}
+		} catch (error) {
+			logger.debug("Could not read /proc/self/mounts", { error: String(error) });
+		}
+	}
+	return parseDfDisks(output, fstypeByMount);
+}
+
 function getTerminalName(): string | undefined {
 	const termProgram = Bun.env.TERM_PROGRAM;
 	const termProgramVersion = Bun.env.TERM_PROGRAM_VERSION;
@@ -282,48 +540,400 @@ function getTerminalName(): string | undefined {
 	return term ?? undefined;
 }
 
-/**
- * On-disk cache schema version. Bumped when detection logic changes so stored
- * selections from an older parser are rejected and re-probed instead of served
- * indefinitely — e.g. the Windows virtual-adapter filtering added for #9675,
- * which would otherwise keep returning a cached virtual GPU after upgrade.
- */
-const GPU_CACHE_VERSION = 1;
-
-/** Cached GPU probe result. */
-interface GpuCache {
-	gpu: string | null;
+/** Read a small sysfs/procfs attribute; a missing attribute is normal and yields null. */
+async function readSysFile(filePath: string): Promise<string | null> {
+	try {
+		return (await Bun.file(filePath).text()).trim() || null;
+	} catch {
+		return null;
+	}
 }
 
-async function loadGpuCache(): Promise<GpuCache | null> {
+/** CPU facts gathered from /proc and /sys, kept as data so the summary is testable. */
+export interface CpuTopologyData {
+	model: string | null;
+	/** AMD gets its L3 domains labelled as CCDs. */
+	isAmd: boolean;
+	threadCount: number;
+	coreCount: number;
+	/** `thread_siblings_list` contents, one per logical CPU (e.g. "0,16" or "0-1"). */
+	siblingLists: string[];
+	/** Highest cpufreq `cpuinfo_max_freq` across CPUs, in kHz (0 = unknown). */
+	maxFreqKhz: number;
+	/** Total across distinct L2 cache domains, in KB. */
+	l2TotalKb: number;
+	/** Distinct L3 cache domains in CPU order. */
+	l3Domains: Array<{ sizeKb: number; cpuList: string }>;
+	/** Intel hybrid core lists (/sys/devices/cpu_core/cpus, cpu_atom/cpus) when exposed. */
+	pCores?: string;
+	eCores?: string;
+}
+
+/**
+ * Render gathered CPU topology into one line, e.g.
+ * `AMD Ryzen 9 7950X3D 16-Core Processor — 16c/32t, SMT siblings t,t+16,
+ * boost 5.76GHz, L2 16.0MB, L3 96.0MB+32.0MB (CCD0 0-7,16-23; CCD1 8-15,24-31)`.
+ * Every part is optional; unknown facts are omitted rather than guessed.
+ * Exported for tests.
+ */
+export function summarizeCpuTopology(data: CpuTopologyData): string | null {
+	if (!data.model) return null;
+	const parts: string[] = [];
+	if (data.coreCount > 0 && data.threadCount > 0) parts.push(`${data.coreCount}c/${data.threadCount}t`);
+	if (data.pCores && data.eCores) parts.push(`P-cores ${data.pCores}, E-cores ${data.eCores}`);
+	// SMT layout: name the sibling stride when it is uniform across all cores.
+	const strides = new Set<number>();
+	let hasSmt = false;
+	let uniform = true;
+	for (const list of new Set(data.siblingLists)) {
+		const ids = list
+			.split(/[,-]/)
+			.map(Number)
+			.filter(id => Number.isFinite(id));
+		if (ids.length === 2) {
+			hasSmt = true;
+			strides.add(ids[1] - ids[0]);
+		} else if (ids.length > 2) {
+			hasSmt = true;
+			uniform = false;
+		}
+	}
+	if (hasSmt) {
+		parts.push(uniform && strides.size === 1 ? `SMT siblings t,t+${[...strides][0]}` : "SMT");
+	}
+	if (data.maxFreqKhz > 0) parts.push(`boost ${(data.maxFreqKhz / 1e6).toFixed(2)}GHz`);
+	if (data.l2TotalKb > 0) parts.push(`L2 ${formatBytes(data.l2TotalKb * 1024)}`);
+	if (data.l3Domains.length === 1) {
+		parts.push(`L3 ${formatBytes(data.l3Domains[0].sizeKb * 1024)}`);
+	} else if (data.l3Domains.length > 1) {
+		const sizes = data.l3Domains.map(domain => formatBytes(domain.sizeKb * 1024)).join("+");
+		const label = data.isAmd ? "CCD" : "L3 domain";
+		const detail = data.l3Domains.map((domain, index) => `${label}${index} ${domain.cpuList}`).join("; ");
+		parts.push(`L3 ${sizes} (${detail})`);
+	}
+	return parts.length > 0 ? `${data.model} — ${parts.join(", ")}` : data.model;
+}
+
+/**
+ * Parse `wmic cpu get ... /format:list` output into the same one-line shape.
+ * Cache sizes are reported in KB by WMI. Exported for tests.
+ */
+export function parseWmicCpu(output: string): string | null {
+	const cpu = parseWmicList(output)[0];
+	const model = cpu?.Name?.trim();
+	if (!model) return null;
+	const parts: string[] = [];
+	const cores = Number(cpu.NumberOfCores);
+	const threads = Number(cpu.NumberOfLogicalProcessors);
+	if (cores > 0 && threads > 0) parts.push(`${cores}c/${threads}t`);
+	const maxMhz = Number(cpu.MaxClockSpeed);
+	if (maxMhz > 0) parts.push(`boost ${(maxMhz / 1000).toFixed(2)}GHz`);
+	const l2Kb = Number(cpu.L2CacheSize);
+	if (l2Kb > 0) parts.push(`L2 ${formatBytes(l2Kb * 1024)}`);
+	const l3Kb = Number(cpu.L3CacheSize);
+	if (l3Kb > 0) parts.push(`L3 ${formatBytes(l3Kb * 1024)}`);
+	return parts.length > 0 ? `${model} — ${parts.join(", ")}` : model;
+}
+
+async function getCpuInfo(): Promise<string | null> {
+	if (process.platform === "win32") {
+		const output = await runHostProbe([
+			"wmic",
+			"cpu",
+			"get",
+			"Name,MaxClockSpeed,NumberOfCores,NumberOfLogicalProcessors,L2CacheSize,L3CacheSize",
+			"/format:list",
+		]);
+		return output ? parseWmicCpu(output) : null;
+	}
+	if (process.platform !== "linux") return null;
 	try {
-		const cachePath = getGpuCachePath();
-		const content = await Bun.file(cachePath).json();
-		if (content && typeof content === "object" && content.version === GPU_CACHE_VERSION && "gpu" in content) {
-			const gpu = content.gpu;
-			return { gpu: typeof gpu === "string" ? gpu : null };
+		const cpuInfoText = await Bun.file("/proc/cpuinfo").text();
+		const cpuRoot = "/sys/devices/system/cpu";
+		const cpuDirs = (await fs.readdir(cpuRoot))
+			.filter(name => /^cpu\d+$/.test(name))
+			.sort((a, b) => Number(a.slice(3)) - Number(b.slice(3)));
+		const siblingLists: string[] = [];
+		const coreIds = new Set<string>();
+		let maxFreqKhz = 0;
+		const l2Domains = new Map<string, number>();
+		const l3Domains = new Map<string, { sizeKb: number; cpuList: string }>();
+		for (const cpu of cpuDirs) {
+			const base = `${cpuRoot}/${cpu}`;
+			const siblings = await readSysFile(`${base}/topology/thread_siblings_list`);
+			if (siblings) siblingLists.push(siblings);
+			const coreId = await readSysFile(`${base}/topology/core_id`);
+			if (coreId !== null) {
+				coreIds.add(`${await readSysFile(`${base}/topology/physical_package_id`)}:${coreId}`);
+			}
+			maxFreqKhz = Math.max(maxFreqKhz, Number(await readSysFile(`${base}/cpufreq/cpuinfo_max_freq`)) || 0);
+			let cacheIndexes: string[] = [];
+			try {
+				cacheIndexes = (await fs.readdir(`${base}/cache`)).filter(name => /^index\d+$/.test(name));
+			} catch {
+				// No cache topology exposed (VMs, some ARM parts).
+			}
+			for (const index of cacheIndexes) {
+				const level = await readSysFile(`${base}/cache/${index}/level`);
+				if (level !== "2" && level !== "3") continue;
+				const sizeText = await readSysFile(`${base}/cache/${index}/size`);
+				const sizeMatch = sizeText ? /^(\d+)([KM])?$/.exec(sizeText) : null;
+				if (!sizeMatch) continue;
+				const sizeKb = Number(sizeMatch[1]) * (sizeMatch[2] === "M" ? 1024 : 1);
+				const shared = (await readSysFile(`${base}/cache/${index}/shared_cpu_list`)) ?? cpu;
+				if (level === "2" && !l2Domains.has(shared)) l2Domains.set(shared, sizeKb);
+				if (level === "3" && !l3Domains.has(shared)) l3Domains.set(shared, { sizeKb, cpuList: shared });
+			}
+		}
+		return summarizeCpuTopology({
+			model: /^model name\s*:\s*(.+)$/m.exec(cpuInfoText)?.[1]?.trim() ?? null,
+			isAmd: /^vendor_id\s*:\s*AuthenticAMD/m.test(cpuInfoText),
+			threadCount: cpuDirs.length,
+			coreCount: coreIds.size,
+			siblingLists,
+			maxFreqKhz,
+			l2TotalKb: [...l2Domains.values()].reduce((sum, sizeKb) => sum + sizeKb, 0),
+			l3Domains: [...l3Domains.values()],
+			pCores: (await readSysFile("/sys/devices/cpu_core/cpus")) ?? undefined,
+			eCores: (await readSysFile("/sys/devices/cpu_atom/cpus")) ?? undefined,
+		});
+	} catch (error) {
+		logger.debug("Could not gather CPU topology", { error: String(error) });
+		return null;
+	}
+}
+
+/**
+ * Match `lspci` network devices to their interface names, e.g.
+ * `Realtek ... RTL8126 5GbE Controller (enp7s0); Qualcomm ... WCN785x Wi-Fi 7 (wlp8s0)`.
+ * Exported for tests.
+ */
+export function summarizeNetworkDevices(
+	lspciText: string,
+	interfaces: Array<{ name: string; pciAddr: string }>,
+): string | null {
+	const entries: string[] = [];
+	for (const line of lspciText.split("\n")) {
+		const match = /^(\S+)\s+(?:Ethernet|Network) controller:\s*(.+?)(?:\s*\(rev [^)]*\))?$/.exec(line.trim());
+		if (!match) continue;
+		const [, addr, desc] = match;
+		const iface = interfaces.find(entry => entry.pciAddr.endsWith(addr));
+		entries.push(iface ? `${desc} (${iface.name})` : desc);
+	}
+	return entries.length > 0 ? entries.slice(0, 6).join("; ") : null;
+}
+
+async function getNetworkInfo(lspciText: string | null): Promise<string | null> {
+	if (process.platform === "win32") {
+		const output = await runHostProbe([
+			"wmic",
+			"nic",
+			"where",
+			"PhysicalAdapter=true",
+			"get",
+			"Name,NetConnectionID",
+			"/format:list",
+		]);
+		if (!output) return null;
+		const nics = parseWmicList(output).filter(nic => nic.Name);
+		if (nics.length === 0) return null;
+		return nics
+			.slice(0, 6)
+			.map(nic => (nic.NetConnectionID ? `${nic.Name} (${nic.NetConnectionID})` : nic.Name))
+			.join("; ");
+	}
+	if (process.platform !== "linux" || !lspciText) return null;
+	const interfaces: Array<{ name: string; pciAddr: string }> = [];
+	try {
+		for (const name of await fs.readdir("/sys/class/net")) {
+			try {
+				// Virtual interfaces (bridges, veth, tailscale) have no backing
+				// device; realpath throws and they are skipped.
+				const devicePath = await fs.realpath(`/sys/class/net/${name}/device`);
+				if (devicePath.includes("/virtual/")) continue;
+				interfaces.push({ name, pciAddr: path.basename(devicePath) });
+			} catch {
+				// Not a physical device.
+			}
+		}
+	} catch (error) {
+		logger.debug("Could not enumerate network interfaces", { error: String(error) });
+	}
+	return summarizeNetworkDevices(lspciText, interfaces);
+}
+
+/** Firmware placeholder strings that must not surface as hardware identity. */
+const DMI_PLACEHOLDER =
+	/^(default string|to be filled.*|none|not applicable|n\/a|unknown|system (product name|version|manufacturer)|oem.*)$/i;
+
+async function getMotherboardInfo(): Promise<string | null> {
+	if (process.platform === "win32") {
+		const output = await runHostProbe(["wmic", "baseboard", "get", "Manufacturer,Product,Version", "/format:list"]);
+		const board = output ? parseWmicList(output)[0] : undefined;
+		if (!board) return null;
+		const fields = [board.Manufacturer, board.Product, board.Version].filter(
+			(value): value is string => !!value && !DMI_PLACEHOLDER.test(value.trim()),
+		);
+		return fields.length > 0 ? fields.join(" ") : null;
+	}
+	if (process.platform !== "linux") return null;
+	const fields: string[] = [];
+	for (const attr of ["board_vendor", "board_name", "board_version"]) {
+		const value = await readSysFile(`/sys/devices/virtual/dmi/id/${attr}`);
+		if (value && !DMI_PLACEHOLDER.test(value)) fields.push(value);
+	}
+	return fields.length > 0 ? fields.join(" ") : null;
+}
+
+/**
+ * PSU identity/rating. Only power supplies with a software interface (laptop
+ * adapters, UPSes, PMBus/USB-monitored units) are enumerable; a plain desktop
+ * PSU exposes nothing, so this field is usually absent.
+ */
+async function getPsuInfo(): Promise<string | null> {
+	if (process.platform !== "linux") return null;
+	try {
+		const entries: string[] = [];
+		for (const name of await fs.readdir("/sys/class/power_supply")) {
+			const base = `/sys/class/power_supply/${name}`;
+			const type = await readSysFile(`${base}/type`);
+			if (type !== "Mains" && type !== "UPS") continue;
+			const model = [await readSysFile(`${base}/manufacturer`), await readSysFile(`${base}/model_name`)]
+				.filter(Boolean)
+				.join(" ");
+			const microWatts = Number(await readSysFile(`${base}/input_power_limit`)) || 0;
+			const watts = microWatts > 0 ? ` ${Math.round(microWatts / 1e6)}W` : "";
+			entries.push(`${model || name}${watts}`.trim());
+		}
+		return entries.length > 0 ? entries.join("; ") : null;
+	} catch (error) {
+		if (!isEnoent(error)) {
+			logger.debug("Could not enumerate power supplies", { error: String(error) });
 		}
 		return null;
-	} catch {
-		return null;
 	}
 }
 
-async function saveGpuCache(info: GpuCache): Promise<void> {
+/**
+ * One consolidated probe cache (~/.omp/hardware_cache.json). Every field is
+ * independent: a present key is the last successful probe; an absent key is
+ * re-probed in the background on the next session. Failed probes are never
+ * persisted, so a missing command or bad output only costs a retry.
+ */
+interface HardwareCache {
+	cpu?: string;
+	gpu?: string;
+	ram?: string;
+	network?: string;
+	motherboard?: string;
+	psu?: string;
+	disks?: string;
+}
+const HARDWARE_FIELDS = ["cpu", "gpu", "ram", "network", "motherboard", "psu", "disks"] as const;
+type HardwareField = (typeof HARDWARE_FIELDS)[number];
+
+/** Deduplicates concurrent background refreshes per cache path (profiles have distinct caches). */
+const hardwareRefreshInFlight = new Map<string, Promise<boolean>>();
+
+/** A cache snapshot plus the completion signal of the refresh it scheduled. */
+interface HardwareLoad {
+	cache: HardwareCache;
+	/**
+	 * Settles when the background probe finishes; true when it added fields.
+	 * Already-settled `false` when nothing was missing. Held per load result —
+	 * not global state — so a caller that registers after a fast probe already
+	 * finished still observes the outcome.
+	 */
+	refreshed: Promise<boolean>;
+}
+
+/**
+ * Load cached hardware facts without ever blocking on probes: the session
+ * renders whatever fields are present, and missing fields kick off one
+ * deduplicated background refresh. Callers may await `refreshed` to learn
+ * when a prompt rebuild would pick up new fields; results persist in
+ * hardware_cache.json for later sessions either way.
+ */
+async function loadHardwareInfo(): Promise<HardwareLoad> {
+	const cachePath = getHardwareCachePath();
+	const cache: HardwareCache = {};
 	try {
-		const cachePath = getGpuCachePath();
-		await Bun.write(cachePath, JSON.stringify({ version: GPU_CACHE_VERSION, gpu: info.gpu }, null, "\t"));
-	} catch {
-		// Silently ignore cache write failures
+		const content = await Bun.file(cachePath).json();
+		if (content && typeof content === "object") {
+			for (const field of HARDWARE_FIELDS) {
+				const value = (content as Record<string, unknown>)[field];
+				if (typeof value === "string" && value.length > 0) cache[field] = value;
+			}
+		}
+	} catch (error) {
+		if (!isEnoent(error)) {
+			logger.debug("Could not read hardware cache", { path: cachePath, error: String(error) });
+		}
 	}
+	const missing = HARDWARE_FIELDS.filter(field => cache[field] === undefined);
+	if (missing.length === 0) return { cache, refreshed: Promise.resolve(false) };
+	// Capture the resolved cache path in the key and the closure: the refresh
+	// outlives this call and must not re-resolve against (or block refreshes
+	// for) a different profile activated meanwhile.
+	let refresh = hardwareRefreshInFlight.get(cachePath);
+	if (!refresh) {
+		refresh = refreshHardwareCache(cachePath, cache, missing)
+			.catch(error => {
+				logger.warn("Background hardware probe failed", { error: String(error) });
+				return false;
+			})
+			.finally(() => {
+				hardwareRefreshInFlight.delete(cachePath);
+			});
+		hardwareRefreshInFlight.set(cachePath, refresh);
+	}
+	return { cache, refreshed: refresh };
 }
 
-async function getCachedGpu(): Promise<string | undefined> {
-	const cached = await logger.time("getCachedGpu:loadGpuCache", loadGpuCache);
-	if (cached) return cached.gpu ?? undefined;
-	const gpu = await logger.time("getCachedGpu:getGpuModel", getGpuModel);
-	await logger.time("getCachedGpu:saveGpuCache", saveGpuCache, { gpu });
-	return gpu ?? undefined;
+async function refreshHardwareCache(
+	cachePath: string,
+	existing: HardwareCache,
+	missing: HardwareField[],
+): Promise<boolean> {
+	// GPU and network identity both come from lspci on Linux; probe it once.
+	const needsLspci = process.platform === "linux" && (missing.includes("gpu") || missing.includes("network"));
+	const lspciText = needsLspci ? await runHostProbe(["lspci"]) : null;
+	const probes: Record<HardwareField, () => Promise<string | null>> = {
+		cpu: getCpuInfo,
+		gpu: () => getGpuModel(lspciText),
+		ram: getRamInfo,
+		network: () => getNetworkInfo(lspciText),
+		motherboard: getMotherboardInfo,
+		psu: getPsuInfo,
+		disks: getDiskInfo,
+	};
+	const updated: HardwareCache = { ...existing };
+	let changed = false;
+	await Promise.all(
+		missing.map(async field => {
+			try {
+				const value = await probes[field]();
+				if (value) {
+					updated[field] = value;
+					changed = true;
+				} else {
+					logger.debug("Hardware probe found nothing; field omitted", { field });
+				}
+			} catch (error) {
+				logger.warn("Hardware probe failed; field omitted", { field, error: String(error) });
+			}
+		}),
+	);
+	try {
+		await Bun.write(cachePath, JSON.stringify(updated, null, "\t"));
+	} catch (error) {
+		logger.debug("Could not write hardware cache", { path: cachePath, error: String(error) });
+	}
+	// Retire the per-part caches this file replaces.
+	for (const legacy of ["gpu_cache.json", "ram_cache.json"]) {
+		void fs.unlink(path.join(path.dirname(cachePath), legacy)).catch(() => undefined);
+	}
+	return changed;
 }
 
 async function getCpuModel(): Promise<string | undefined> {
@@ -335,6 +945,35 @@ async function getCpuModel(): Promise<string | undefined> {
 	} catch (error) {
 		if (!isEnoent(error)) {
 			logger.debug("Could not read Linux CPU model", { error: String(error) });
+		}
+		return undefined;
+	}
+}
+
+/**
+ * Resolve a human distro identity from os-release(5) content: `PRETTY_NAME`
+ * (already includes the version), else `NAME` + `VERSION_ID`, else null.
+ * Exported for tests.
+ */
+export function parseOsRelease(text: string): string | null {
+	const fields: Record<string, string> = {};
+	for (const line of text.split("\n")) {
+		const match = /^([A-Z_]+)=("?)(.*)\2\s*$/.exec(line.trim());
+		if (match) fields[match[1]] = match[3];
+	}
+	if (fields.PRETTY_NAME) return fields.PRETTY_NAME;
+	if (fields.NAME) return fields.VERSION_ID ? `${fields.NAME} ${fields.VERSION_ID}` : fields.NAME;
+	return null;
+}
+
+/** Linux distro identity for the Distro field; non-Linux keeps the os.type() fallback. */
+async function getDistro(): Promise<string | undefined> {
+	if (process.platform !== "linux") return undefined;
+	try {
+		return parseOsRelease(await Bun.file("/etc/os-release").text()) ?? undefined;
+	} catch (error) {
+		if (!isEnoent(error)) {
+			logger.debug("Could not read /etc/os-release", { error: String(error) });
 		}
 		return undefined;
 	}
@@ -356,15 +995,21 @@ function getKernelIdentity(): string {
 
 function getEnvironmentInfo(
 	cpuModel: string | undefined,
-	gpu: string | undefined,
+	distro: string | undefined,
+	hardware: HardwareCache,
 ): Array<{ label: string; value: string }> {
 	const entries: Array<{ label: string; value: string | undefined }> = [
 		{ label: "OS", value: `${os.platform()} ${os.release()}` },
-		{ label: "Distro", value: os.type() },
+		{ label: "Distro", value: distro ?? os.type() },
 		{ label: "Kernel", value: getKernelIdentity() },
 		{ label: "Arch", value: os.arch() },
-		{ label: "CPU", value: cpuModel },
-		{ label: "GPU", value: gpu },
+		{ label: "CPU", value: hardware.cpu ?? cpuModel },
+		{ label: "RAM", value: hardware.ram },
+		{ label: "GPU", value: hardware.gpu },
+		{ label: "Motherboard", value: hardware.motherboard },
+		{ label: "PSU", value: hardware.psu },
+		{ label: "Network", value: hardware.network },
+		{ label: "Disks", value: hardware.disks },
 		{ label: "Terminal", value: getTerminalName() },
 	];
 	return entries.filter((e): e is { label: string; value: string } => !!e.value);
@@ -673,6 +1318,14 @@ export interface BuildSystemPromptResult {
 	 * a catalog the prompt already carries (issue #7139).
 	 */
 	xdevCatalogNames?: readonly string[];
+	/**
+	 * Settles when the background hardware probe scheduled by this build (if
+	 * any) finishes; true when it added fields, i.e. a prompt rebuild would
+	 * render a more complete workstation block. Already-settled when the
+	 * hardware cache was complete. Kept per-result so a caller registering
+	 * after the probe finished still observes the outcome.
+	 */
+	hardwareRefreshed?: Promise<boolean>;
 }
 
 /** Build the system prompt with tools, guidelines, and context */
@@ -737,7 +1390,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		} satisfies WorkspaceTree,
 		activeRepoContext: null as ActiveRepoContext | null,
 		cpuModel: undefined as string | undefined,
-		gpu: undefined as string | undefined,
+		distro: undefined as string | undefined,
+		hardware: { cache: {}, refreshed: Promise.resolve(false) } as HardwareLoad,
 	};
 
 	const { promise: deadline, resolve: fireDeadline } = Promise.withResolvers<"__timeout__">();
@@ -827,7 +1481,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			? Promise.resolve(providedActiveRepoContext)
 			: logger.time("resolveActiveRepoContext", () => resolveActiveRepoContext(resolvedCwd));
 	const cpuModelPromise = logger.time("getCpuModel", getCpuModel);
-	const gpuPromise = logger.time("getCachedGpu", getCachedGpu);
+	const hardwarePromise = logger.time("loadHardwareInfo", loadHardwareInfo);
 	// "none" (explicit off — and every subagent) omits the block and skips the file lookup.
 	const bundledPersonality = personality === "none" ? "" : PERSONALITY_SPECS[personality].trim();
 	const personalityPromise: Promise<string> =
@@ -836,6 +1490,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 			: logger
 					.time("loadPersonalityOverride", loadPersonalityOverride)
 					.then(override => override ?? bundledPersonality);
+	const distroPromise = logger.time("getDistro", getDistro);
 
 	const [
 		resolvedCustomPrompt,
@@ -846,8 +1501,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		workspaceTree,
 		activeRepoContext,
 		cpuModel,
-		gpu,
 		personalityBlock,
+		distro,
+		hardware,
 	] = await Promise.all([
 		withDeadline(
 			"customPrompt",
@@ -871,8 +1527,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		withDeadline("buildWorkspaceTree", workspaceTreePromise, prepDefaults.workspaceTree),
 		withDeadline("resolveActiveRepoContext", activeRepoContextPromise, prepDefaults.activeRepoContext),
 		withDeadline("getCpuModel", cpuModelPromise, prepDefaults.cpuModel),
-		withDeadline("getCachedGpu", gpuPromise, prepDefaults.gpu),
 		withDeadline("loadPersonalityOverride", personalityPromise, bundledPersonality),
+		withDeadline("getDistro", distroPromise, prepDefaults.distro),
+		withDeadline("loadHardwareInfo", hardwarePromise, prepDefaults.hardware),
 	]);
 	clearTimeout(deadlineTimer);
 	const agentsMdFiles = Array.from(new Set(workspaceTree.agentsMdFiles)).sort().slice(0, AGENTS_MD_LIMIT);
@@ -969,7 +1626,14 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	];
 	const injectedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
 
-	const environment = getEnvironmentInfo(cpuModel, gpu);
+	const environment = getEnvironmentInfo(cpuModel, distro, hardware.cache);
+	// Point the agent at the probe cache so it can self-heal a stale hardware
+	// line (e.g. after a GPU swap) by deleting the entry instead of trusting it.
+	const homeDir = os.homedir();
+	const rawCachePath = getHardwareCachePath();
+	const hardwareCachePath = normalizePromptPath(
+		rawCachePath.startsWith(homeDir) ? `~${rawCachePath.slice(homeDir.length)}` : rawCachePath,
+	);
 	const data = {
 		systemPromptCustomization: effectiveSystemPromptCustomization,
 		customPrompt: resolvedCustomPrompt,
@@ -981,6 +1645,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		toolListMode,
 		toolRefs,
 		environment,
+		hardwareCachePath,
 		contextFiles,
 		agentsMdSearch: { files: agentsMdFiles },
 		workspaceTree,
@@ -1032,5 +1697,5 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// default template; a resolved custom prompt uses a template that omits it.
 	const xdevCatalogNames =
 		!resolvedCustomPrompt && xdevTools.length > 0 ? xdevTools.map(mounted => mounted.name) : undefined;
-	return { systemPrompt, xdevCatalogNames };
+	return { systemPrompt, xdevCatalogNames, hardwareRefreshed: hardware.refreshed };
 }

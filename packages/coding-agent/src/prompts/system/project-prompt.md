@@ -3,6 +3,7 @@ PROJECT
 <workstation>
 {{#list environment prefix="- " join="\n"}}{{label}}: {{value}}{{/list}}
 {{#if model}}- Model: {{model}}{{/if}}
+{{#if hardwareCachePath}}Hardware fields are cached probes ({{hardwareCachePath}}); stale after a hardware change? Delete the entry to re-probe.{{/if}}
 </workstation>
 
 {{#if contextFiles.length}}

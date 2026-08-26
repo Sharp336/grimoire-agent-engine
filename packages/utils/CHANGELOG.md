@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Replaced `getGpuCachePath()` with `getHardwareCachePath()` (`~/.omp/hardware_cache.json`), the consolidated per-field hardware probe cache.
+
+### Changed
+
+- `formatBytes` now has a TB tier instead of capping at GB (e.g. `1.9TB` rather than `1907.3GB`).
+
 ## [18.0.6] - 2026-08-26
 
 ### Added

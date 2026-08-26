@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Expanded the system prompt's `<workstation>` block with best-effort hardware fields — CPU topology (cores/threads, SMT sibling stride, AMD CCD L3 domains, Intel P/E cores, boost clock, L2/L3 caches), RAM (capacity, DDR generation, MT/s, sticks, channels, theoretical peak bandwidth), Motherboard (DMI vendor/name/version), PSU (only when software-enumerable: laptop adapters, UPSes, PMBus-monitored units), Network devices (lspci model text matched to interface names), and Disks (mount, total size, filesystem type; free space deliberately omitted to keep the prompt KV-cache stable). Every probe fails safe: a missing command or unexpected output logs a warning and omits the field.
+- All hardware probes now run in the background and never delay startup: the workstation block renders whatever `~/.omp/hardware_cache.json` already holds (first session ≈6ms build), missing fields are probed asynchronously per field, only successful probes are persisted, and failures are retried on the next session. The block names the cache file and instructs the agent to delete a stale entry that contradicts observed hardware, so wrong info self-heals. Replaces the former `gpu_cache.json` (legacy per-part caches are cleaned up automatically).
+- The very first session also picks the probed hardware up without waiting: when the background probe adds fields, the session rebuilds its stable base prompt in place, so a first message sent after the probes settle (~1s) already sees the full workstation block. In-flight probe deduplication is scoped per profile cache path, so an `OMP_PROFILE` switch never inherits another profile's probe.
+
+### Changed
+
+- The workstation `Distro` field now resolves the actual Linux distribution from `/etc/os-release` (`PRETTY_NAME`, falling back to `NAME` + `VERSION_ID`), e.g. `NixOS 25.11 (Xantusia)` instead of the generic `Linux`. Non-Linux hosts keep the previous `os.type()` value.
+
 ## [18.0.6] - 2026-08-26
 
 ### Added
