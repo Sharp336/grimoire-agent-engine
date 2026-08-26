@@ -110,6 +110,7 @@ async function* iterateH2Frames(
 	decoder: ConnectFrameDecoder,
 ): AsyncGenerator<ConnectFrame> {
 	const pending: ConnectFrame[] = [];
+	let head = 0;
 	const waiters: Array<() => void> = [];
 	let done = false;
 	let failure: Error | undefined;
@@ -154,7 +155,19 @@ async function* iterateH2Frames(
 
 	try {
 		for (;;) {
-			const frame = pending.shift();
+			const frame = head < pending.length ? pending[head++] : undefined;
+			// Head-index dequeue keeps each dequeue O(1) where Array#shift()
+			// would relocate the whole tail per frame. Compact when the queue
+			// drains, and again past a small threshold so a never-draining
+			// backlog cannot pin already-delivered frames.
+			if (head === pending.length) {
+				pending.length = 0;
+				head = 0;
+			} else if (head > 64) {
+				pending.copyWithin(0, head);
+				pending.length -= head;
+				head = 0;
+			}
 			if (frame) {
 				yield frame;
 				continue;

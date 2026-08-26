@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as http from "node:http";
-import { ConnectProtocolError, encodeConnectFrame } from "../src/providers/cursor/connect-frame";
-import { openCursorHttp1Bridge } from "../src/providers/cursor/http1-bridge";
+import { type ConnectFrame, ConnectProtocolError, encodeConnectFrame } from "../src/providers/cursor/connect-frame";
+import { openCursorHttp1Bridge, pendingCursorHttp1BridgePolls } from "../src/providers/cursor/http1-bridge";
 
 const RUN_PATH = "/agent.v1.AgentService/Run";
 const CONNECT_END_STREAM_FLAG = 0b00000010;
@@ -16,7 +16,8 @@ type PollPlan =
 	| { kind: "gap" }
 	| { kind: "fail-after-first" }
 	| { kind: "eof-without-end" }
-	| { kind: "first-nonzero" };
+	| { kind: "first-nonzero" }
+	| { kind: "burst" };
 
 let plan: PollPlan = { kind: "success" };
 let appendStatus = 200;
@@ -41,6 +42,11 @@ function nextTick(): Promise<void> {
 	const { promise, resolve } = Promise.withResolvers<void>();
 	setImmediate(resolve);
 	return promise;
+}
+
+/** Let straggler poll tasks from earlier tests finish so counts are exact. */
+async function settleStragglerPollTasks(): Promise<void> {
+	for (let i = 0; i < 200 && pendingCursorHttp1BridgePolls() > 0; i++) await nextTick();
 }
 
 function frameConnectMessage(data: Uint8Array, flags = 0): Buffer {
@@ -107,6 +113,28 @@ async function startServer(): Promise<string> {
 					encodeConnectFrame(encodePollResponse(1n, Buffer.from("bye-frame").toString("base64"), true), false),
 					frameConnectMessage(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG),
 				]);
+				const respond = (): void => {
+					res.writeHead(200, { "content-type": "application/connect+proto" });
+					res.end(body);
+				};
+				if (holdPollResponse) {
+					pendingPoll = respond;
+					return;
+				}
+				respond();
+				return;
+			}
+			if (plan.kind === "burst") {
+				// 70 data frames + eof + end envelope: enough to cross the frame
+				// queue's compaction threshold (head index > 64) mid-drain.
+				const parts: Buffer[] = [];
+				for (let i = 0; i < 70; i++) {
+					const payload = Buffer.from(`f${i}`).toString("base64");
+					parts.push(encodeConnectFrame(encodePollResponse(BigInt(i), payload, false), false));
+				}
+				parts.push(encodeConnectFrame(encodePollResponse(70n, "", true), false));
+				parts.push(frameConnectMessage(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG));
+				const body = Buffer.concat(parts);
 				const respond = (): void => {
 					res.writeHead(200, { "content-type": "application/connect+proto" });
 					res.end(body);
@@ -408,5 +436,108 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 		expect(appendHits).toBe(2);
 		releaseAllHeldAppends();
 		bridge.close();
+	});
+
+	it("delivers a >64-frame burst in order across frame queue compaction", async () => {
+		// The queue dequeues by advancing a head index and compacts once the
+		// index passes 64. Park the consumer on the empty queue first, then
+		// land the whole burst at once: the drain crosses the compaction point
+		// mid-flight and the parked waiter must still receive every frame in
+		// order.
+		plan = { kind: "burst" };
+		// Earlier tests arm holdAppendResponses and afterEach never clears it;
+		// an armed hold would park the append (and the poll gate) forever.
+		holdAppendResponses = false;
+		holdPollResponse = true;
+		await settleStragglerPollTasks();
+		expect(pendingCursorHttp1BridgePolls()).toBe(0);
+		const baseUrl = await startServer();
+		const bridge = openCursorHttp1Bridge({
+			baseUrl,
+			apiKey: API_KEY,
+			requestPath: RUN_PATH,
+			gzipRequest: false,
+		});
+		bridge.write(encodeConnectFrame(Buffer.from("client-request"), false));
+		const consumed: ConnectFrame[] = [];
+		const drained = Promise.withResolvers<void>();
+		void (async () => {
+			for await (const frame of bridge.frames()) consumed.push(frame);
+			drained.resolve();
+		})();
+		for (let i = 0; i < 10; i++) await nextTick();
+		while (pollHits < 1) await nextTick();
+		releasePoll();
+		await drained.promise;
+		const payloads: string[] = [];
+		for (const frame of consumed) {
+			if (frame.kind === "data") payloads.push(Buffer.from(frame.payload).toString());
+		}
+		expect(payloads).toHaveLength(70);
+		for (let i = 0; i < payloads.length; i++) expect(payloads[i]).toBe(`f${i}`);
+		expect(consumed.at(-1)?.kind).toBe("end");
+		await expect(bridge.trailers()).resolves.toEqual({});
+		for (let i = 0; i < 20 && pendingCursorHttp1BridgePolls() > 0; i++) await nextTick();
+		expect(pendingCursorHttp1BridgePolls()).toBe(0);
+		bridge.close();
+	});
+
+	it("terminates the parked poll task when close() lands before the first write", async () => {
+		// close() settles the bridge but only write() settled the initial-append
+		// latch the poll task parks on — before the first write nothing else
+		// would ever unblock it, so the task (and everything it retained)
+		// leaked. The settle path must reject the latch so the task finishes.
+		plan = { kind: "success" };
+		await settleStragglerPollTasks();
+		expect(pendingCursorHttp1BridgePolls()).toBe(0);
+		const baseUrl = await startServer();
+		const bridge = openCursorHttp1Bridge({
+			baseUrl,
+			apiKey: API_KEY,
+			requestPath: RUN_PATH,
+			gzipRequest: false,
+		});
+		expect(pendingCursorHttp1BridgePolls()).toBe(1);
+		bridge.close();
+		await expect(bridge.trailers()).resolves.toEqual({});
+		const frames: ConnectFrame[] = [];
+		for await (const frame of bridge.frames()) frames.push(frame);
+		expect(frames).toHaveLength(0);
+		for (let i = 0; i < 20 && pendingCursorHttp1BridgePolls() > 0; i++) await nextTick();
+		expect(pendingCursorHttp1BridgePolls()).toBe(0);
+		expect(appendHits).toBe(0);
+		expect(pollHits).toBe(0);
+	});
+
+	it("terminates the parked poll task when an ambient abort fires before the first write", async () => {
+		plan = { kind: "success" };
+		await settleStragglerPollTasks();
+		expect(pendingCursorHttp1BridgePolls()).toBe(0);
+		const baseUrl = await startServer();
+		const ambient = new AbortController();
+		const bridge = openCursorHttp1Bridge({
+			baseUrl,
+			apiKey: API_KEY,
+			requestPath: RUN_PATH,
+			gzipRequest: false,
+			signal: ambient.signal,
+		});
+		expect(pendingCursorHttp1BridgePolls()).toBe(1);
+		const reason = new Error("ambient stop");
+		ambient.abort(reason);
+		await expect(bridge.trailers()).rejects.toBe(reason);
+		let surfaced: unknown;
+		try {
+			for await (const _frame of bridge.frames()) {
+				// no frames expected before the first write
+			}
+		} catch (cause) {
+			surfaced = cause;
+		}
+		expect(surfaced).toBe(reason);
+		for (let i = 0; i < 20 && pendingCursorHttp1BridgePolls() > 0; i++) await nextTick();
+		expect(pendingCursorHttp1BridgePolls()).toBe(0);
+		expect(appendHits).toBe(0);
+		expect(pollHits).toBe(0);
 	});
 });

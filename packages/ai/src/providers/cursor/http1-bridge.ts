@@ -36,6 +36,19 @@ interface PollResponse {
 const FIRST_POLL_SEQNO = 0n;
 
 /**
+ * Bridge background poll tasks opened but not yet settled in this process.
+ * Diagnostic only — production code never reads it; tests use it to prove
+ * that settling a bridge before its first write() terminates the parked poll
+ * task instead of leaking it on a never-settling latch.
+ */
+let livePollTasks = 0;
+
+/** Diagnostic accessor for {@link livePollTasks}. */
+export function pendingCursorHttp1BridgePolls(): number {
+	return livePollTasks;
+}
+
+/**
  * Opens Cursor's HTTP/1.1 append/poll bridge. Not a public provider export —
  * only {@link openCursorTransport} may choose this after an authoritative
  * server directive permits the downgrade.
@@ -78,7 +91,14 @@ export function openCursorHttp1Bridge(args: {
 		terminal = true;
 		queue.end();
 		trailerResult.resolve({});
-		if (!abort.signal.aborted) abort.abort(new Error("Cursor HTTP/1 bridge closed"));
+		const closedReason = new Error("Cursor HTTP/1 bridge closed");
+		if (!abort.signal.aborted) abort.abort(closedReason);
+		// Settling before the first write() leaves the poll task parked on the
+		// initial-append latch, which no write will ever settle. Reject it with
+		// the terminal reason so the task terminates instead of lingering on a
+		// retained promise; the rejection flows through the task's catch into
+		// settleFailure, which is a no-op now that `terminal` is set.
+		if (firstWrite) initialAppendReady.reject(closedReason);
 	};
 	const settleFailure = (cause: unknown): void => {
 		if (terminal) return;
@@ -87,6 +107,8 @@ export function openCursorHttp1Bridge(args: {
 		queue.fail(error);
 		trailerResult.reject(error);
 		if (!abort.signal.aborted) abort.abort(error);
+		// Same pre-first-write park as settleSuccess: unblock the poll task.
+		if (firstWrite) initialAppendReady.reject(error);
 	};
 
 	const onAbort = (): void => {
@@ -96,6 +118,7 @@ export function openCursorHttp1Bridge(args: {
 	signal.addEventListener("abort", onAbort, { once: true });
 	if (signal.aborted) onAbort();
 
+	livePollTasks++;
 	void (async () => {
 		// Sequence the first poll behind the initial append's settlement: the poll
 		// stream exists only to return server messages for a request body that must
@@ -104,7 +127,9 @@ export function openCursorHttp1Bridge(args: {
 		// form would let the poll outrun the first append request. The first `write`
 		// resolves/rejects the latch with its own settlement; a failed initial append
 		// settles the attempt through the shared terminal path before the poll can
-		// run — it cannot be masked.
+		// run — it cannot be masked. close() or an abort before the first write
+		// settles the latch through that same terminal path (both settle functions
+		// reject it), so the poll task terminates rather than parking forever.
 		await initialAppendReady.promise;
 		const headers = {
 			...baseHeaders,
@@ -177,7 +202,11 @@ export function openCursorHttp1Bridge(args: {
 		throw new ConnectProtocolError("Cursor HTTP/1 poll stream ended without reaching a settled terminal state", {
 			kind: "envelope",
 		});
-	})().catch(settleFailure);
+	})()
+		.catch(settleFailure)
+		.finally(() => {
+			livePollTasks--;
+		});
 
 	return {
 		write(frame: Buffer): void {
@@ -225,6 +254,7 @@ class FrameQueue implements AsyncIterable<ConnectFrame> {
 	readonly #waiters: Array<() => void> = [];
 	#error: Error | undefined;
 	#done = false;
+	#head = 0;
 
 	push(frame: ConnectFrame): void {
 		if (this.#done || this.#error) return;
@@ -246,7 +276,7 @@ class FrameQueue implements AsyncIterable<ConnectFrame> {
 
 	async *[Symbol.asyncIterator](): AsyncIterator<ConnectFrame> {
 		for (;;) {
-			const value = this.#values.shift();
+			const value = this.#dequeue();
 			if (value) {
 				yield value;
 				continue;
@@ -255,6 +285,33 @@ class FrameQueue implements AsyncIterable<ConnectFrame> {
 			if (this.#done) return;
 			await new Promise<void>(resolve => this.#waiters.push(resolve));
 		}
+	}
+
+	/**
+	 * Head-index dequeue — O(1) per frame where Array#shift() would relocate
+	 * the whole tail. The backing array is compacted when the queue drains
+	 * and, so a never-fully-drained backlog cannot pin dequeued frames, again
+	 * once the head index crosses a small threshold.
+	 */
+	#dequeue(): ConnectFrame | undefined {
+		const values = this.#values;
+		if (this.#head >= values.length) {
+			if (this.#head > 0) {
+				values.length = 0;
+				this.#head = 0;
+			}
+			return undefined;
+		}
+		const value = values[this.#head++];
+		if (this.#head === values.length) {
+			values.length = 0;
+			this.#head = 0;
+		} else if (this.#head > 64) {
+			values.copyWithin(0, this.#head);
+			values.length -= this.#head;
+			this.#head = 0;
+		}
+		return value;
 	}
 
 	#wake(): void {
