@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -6,6 +6,7 @@ import { adaptSchemaForStrict, toolWireSchema } from "@oh-my-pi/pi-ai/utils/sche
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import * as natives from "@oh-my-pi/pi-natives";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 type InvokedToolResult = {
@@ -50,6 +51,7 @@ describe("ast_edit tool schema", () => {
 		const itemProperties = asSchemaObject(items.properties);
 		expect(asSchemaObject(itemProperties.pat).type).toBe("string");
 		expect(asSchemaObject(itemProperties.out).type).toBe("string");
+		expect(asSchemaObject(properties.selector).type).toBe("string");
 		expect(properties.preview).toBeUndefined();
 	});
 
@@ -61,6 +63,220 @@ describe("ast_edit tool schema", () => {
 
 		const strict = adaptSchemaForStrict(schema, true);
 		expect(strict.strict).toBe(true);
+	});
+
+	it("rejects contextual selectors on multi-operation calls", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-selector-batch-"));
+		try {
+			const filePath = path.join(tempDir, "Example.php");
+			await Bun.write(filePath, "<?php\nclass Example { public function greet() {} }\n");
+			const tools = await createTools(createTestSession(tempDir), ["ast_edit"]);
+			const tool = tools.find(entry => entry.name === "ast_edit");
+			expect(tool).toBeDefined();
+
+			await expect(
+				tool!.execute("ast-edit-selector-batch", {
+					ops: [
+						{
+							pat: "class $_ { public function $NAME($$$ARGS) { $$$BODY } }",
+							out: "protected function $NAME($$$ARGS) { $$$BODY }",
+						},
+						{ pat: "legacy($ARG)", out: "modern($ARG)" },
+					],
+					paths: [filePath],
+					selector: "method_declaration",
+				}),
+			).rejects.toThrow("`selector` requires exactly one operation");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("guides zero-match PHP member patterns to safe contextual selection", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-php-member-"));
+		try {
+			const filePath = path.join(tempDir, "Example.php");
+			await Bun.write(
+				filePath,
+				`<?php
+class Example {
+	public function greet($name) {
+		return $name;
+	}
+	public function keep() {
+		return "keep";
+	}
+}
+`,
+			);
+
+			const queue = new ToolChoiceQueue();
+			const tools = await createTools(
+				createTestSession(tempDir, {
+					getToolChoiceQueue: () => queue,
+					buildToolChoice: () => ({ type: "tool" as const, name: "resolve" }),
+					steer: () => {},
+				}),
+				["ast_edit"],
+			);
+			const tool = tools.find(entry => entry.name === "ast_edit");
+			expect(tool).toBeDefined();
+
+			const result = await tool!.execute("ast-edit-php-member", {
+				ops: [
+					{
+						pat: "public function $NAME($$$ARGS) { $$$BODY }",
+						out: "protected function $NAME($$$ARGS) { $$$BODY }",
+					},
+				],
+				paths: [filePath],
+			});
+			const text = result.content.find(content => content.type === "text")?.text ?? "";
+			const details = result.details as { totalReplacements?: number; patternHint?: string } | undefined;
+
+			expect(details?.totalReplacements).toBe(0);
+			expect(details?.patternHint).toContain("selector");
+			expect(text).toContain("class $_ { … }");
+			expect(text).toContain("method_declaration");
+
+			const previewResult = await tool!.execute("ast-edit-php-member-context", {
+				ops: [
+					{
+						pat: "class $_ { public function $NAME($$$ARGS) { $$$BODY } }",
+						out: "protected function $NAME($$$ARGS) { $$$BODY }",
+					},
+				],
+				paths: [filePath],
+				selector: "method_declaration",
+			});
+			const previewText = previewResult.content.find(content => content.type === "text")?.text ?? "";
+			expect((previewResult.details as { totalReplacements?: number }).totalReplacements).toBe(2);
+			expect(previewText).toContain("public function greet");
+			expect(previewText).not.toContain("class Example");
+
+			const invoker = queue.peekPendingInvoker()!;
+			const applyResult = (await invoker({
+				action: "apply",
+				reason: "apply safely selected PHP member edits",
+			})) as InvokedToolResult;
+			expect(applyResult.isError).toBeUndefined();
+			const updated = await Bun.file(filePath).text();
+			expect(updated).toContain("class Example {");
+			expect(updated).toContain("protected function greet");
+			expect(updated).toContain("protected function keep");
+			expect(updated).not.toContain("public function");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("surfaces PHP member guidance when another batch rewrite matches", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-php-batch-"));
+		try {
+			const filePath = path.join(tempDir, "Example.php");
+			await Bun.write(
+				filePath,
+				`<?php
+legacy($value);
+class Example {
+	public function greet($name) {
+		return $name;
+	}
+}
+`,
+			);
+
+			const tools = await createTools(createTestSession(tempDir), ["ast_edit"]);
+			const tool = tools.find(entry => entry.name === "ast_edit");
+			expect(tool).toBeDefined();
+
+			const result = await tool!.execute("ast-edit-php-batch", {
+				ops: [
+					{
+						pat: "function $NAME($$$ARGS) { $$$BODY }",
+						out: "protected function $NAME($$$ARGS) { $$$BODY }",
+					},
+					{ pat: "legacy($ARG)", out: "modern($ARG)" },
+				],
+				paths: [filePath],
+			});
+			const text = result.content.find(content => content.type === "text")?.text ?? "";
+			const details = result.details as { totalReplacements?: number; patternHint?: string } | undefined;
+
+			expect(details?.totalReplacements).toBe(1);
+			expect(details?.patternHint).toContain("method_declaration");
+			expect(text).toContain("modern($value)");
+			expect(text).toContain("method_declaration");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("does not flag a modifierless PHP pattern that matches a top-level function", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-php-function-"));
+		try {
+			const filePath = path.join(tempDir, "functions.php");
+			await Bun.write(filePath, "<?php\nfunction greet($name) { return $name; }\n");
+			const tools = await createTools(createTestSession(tempDir), ["ast_edit"]);
+			const tool = tools.find(entry => entry.name === "ast_edit");
+			expect(tool).toBeDefined();
+
+			const result = await tool!.execute("ast-edit-php-function", {
+				ops: [
+					{
+						pat: "function greet($$$ARGS) { $$$BODY }",
+						out: "function renamed($$$ARGS) { $$$BODY }",
+					},
+				],
+				paths: [filePath],
+			});
+			const details = result.details as { totalReplacements?: number; patternHint?: string } | undefined;
+			const text = result.content.find(content => content.type === "text")?.text ?? "";
+
+			expect(details?.totalReplacements).toBe(1);
+			expect(details?.patternHint).toBeUndefined();
+			expect(text).toContain("function renamed");
+			expect(text).not.toContain("method_declaration");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("scans a matching multi-member batch only once", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-php-multi-member-"));
+		const astEditSpy = spyOn(natives, "astEdit");
+		try {
+			const filePath = path.join(tempDir, "functions.php");
+			await Bun.write(
+				filePath,
+				"<?php\nfunction first($value) { return $value; }\nfunction second($value) { return $value; }\n",
+			);
+			const tools = await createTools(createTestSession(tempDir), ["ast_edit"]);
+			const tool = tools.find(entry => entry.name === "ast_edit");
+			expect(tool).toBeDefined();
+
+			const result = await tool!.execute("ast-edit-php-multi-member", {
+				ops: [
+					{
+						pat: "function first($$$ARGS) { $$$BODY }",
+						out: "function renamedFirst($$$ARGS) { $$$BODY }",
+					},
+					{
+						pat: "function second($$$ARGS) { $$$BODY }",
+						out: "function renamedSecond($$$ARGS) { $$$BODY }",
+					},
+				],
+				paths: [filePath],
+			});
+			const details = result.details as { totalReplacements?: number; patternHint?: string } | undefined;
+
+			expect(details?.totalReplacements).toBe(2);
+			expect(details?.patternHint).toBeUndefined();
+			expect(astEditSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			astEditSpy.mockRestore();
+			await removeWithRetries(tempDir);
+		}
 	});
 
 	it("renders +/- lines with numbered hashline prefixes", async () => {

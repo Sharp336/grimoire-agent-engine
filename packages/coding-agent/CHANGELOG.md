@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- Fixed silent PHP member-pattern misses in `ast_edit` with safe class-context guidance and contextual node selection ([#6904](https://github.com/can1357/oh-my-pi/issues/6904)).
 - Fixed hub process waits being incorrectly prolonged or satisfied by a replacement process after an automatic restart.
 - Preserved an explicitly empty `tools: []` configuration for agent definitions instead of adding default work tools.
 - Corrected MCP per-tool approval configuration documentation and behavior to use registered tool names for deny policies.

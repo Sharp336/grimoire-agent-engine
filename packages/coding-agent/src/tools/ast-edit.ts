@@ -3,7 +3,7 @@ import { formatHashlineHeader } from "@oh-my-pi/hashline";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
-import { type AstReplaceChange, type AstReplaceFileChange, astEdit } from "@oh-my-pi/pi-natives";
+import * as natives from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { replaceTabs, Text } from "@oh-my-pi/pi-tui";
 import { $envpos, prompt, untilAborted } from "@oh-my-pi/pi-utils";
@@ -55,10 +55,20 @@ const astEditSchema = type({
 		.array()
 		.atLeastLength(1)
 		.describe("files, directories, globs, or internal URLs to rewrite"),
+	"selector?": type("string").describe("AST node kind to rewrite in a single-operation contextual pattern"),
 });
+
+const PHP_MEMBER_PATTERN = /^\s*(?:(?:abstract|final|public|protected|private|readonly|static)\s+)*function\b/u;
+const PHP_MEMBER_WRAPPER_HINT =
+	"Hint: If this operation targets a PHP member, retry it alone with `pat` wrapped in `class $_ { … }` and `selector` set to `method_declaration`.";
+
+function isPhpMemberPattern(pattern: string): boolean {
+	return PHP_MEMBER_PATTERN.test(pattern);
+}
 
 interface AstEditCallOptions {
 	rewrites: Record<string, string>;
+	selector?: string;
 	dryRun: boolean;
 	maxFiles: number;
 	failOnParseError: boolean;
@@ -66,8 +76,9 @@ interface AstEditCallOptions {
 }
 
 interface AstEditAggregatedResult {
-	changes: AstReplaceChange[];
-	fileChanges: AstReplaceFileChange[];
+	changes: natives.AstReplaceChange[];
+	fileChanges: natives.AstReplaceFileChange[];
+	rewriteMatches: natives.AstReplaceRuleMatch[];
 	totalReplacements: number;
 	filesTouched: number;
 	filesSearched: number;
@@ -81,16 +92,18 @@ async function runAstEditTargets(
 	commonBasePath: string,
 	options: AstEditCallOptions,
 ): Promise<AstEditAggregatedResult> {
-	const aggregatedChanges: AstReplaceChange[] = [];
+	const aggregatedChanges: natives.AstReplaceChange[] = [];
 	const fileCounts = new Map<string, number>();
+	const rewriteMatchCounts = new Map(Object.keys(options.rewrites).map(pattern => [pattern, 0]));
 	const parseErrors: string[] = [];
 	let totalReplacements = 0;
 	let filesSearched = 0;
 	let limitReached = false;
 	let applied = !options.dryRun;
 	for (const target of targets) {
-		const targetResult = await astEdit({
+		const targetResult = await natives.astEdit({
 			rewrites: options.rewrites,
+			selector: options.selector,
 			path: target.basePath,
 			glob: target.glob,
 			dryRun: options.dryRun,
@@ -103,6 +116,12 @@ async function runAstEditTargets(
 		limitReached = limitReached || targetResult.limitReached;
 		applied = applied && targetResult.applied;
 		if (targetResult.parseErrors) parseErrors.push(...targetResult.parseErrors);
+		for (const rewriteMatch of targetResult.rewriteMatches) {
+			rewriteMatchCounts.set(
+				rewriteMatch.pattern,
+				(rewriteMatchCounts.get(rewriteMatch.pattern) ?? 0) + rewriteMatch.count,
+			);
+		}
 		for (const change of targetResult.changes) {
 			const absolute = path.resolve(target.basePath, change.path);
 			const rebased = path.relative(commonBasePath, absolute).replace(/\\/g, "/");
@@ -114,13 +133,18 @@ async function runAstEditTargets(
 			fileCounts.set(rebased, (fileCounts.get(rebased) ?? 0) + fileChange.count);
 		}
 	}
-	const fileChanges: AstReplaceFileChange[] = Array.from(fileCounts, ([changePath, count]) => ({
+	const fileChanges: natives.AstReplaceFileChange[] = Array.from(fileCounts, ([changePath, count]) => ({
 		path: changePath,
+		count,
+	}));
+	const rewriteMatches: natives.AstReplaceRuleMatch[] = Array.from(rewriteMatchCounts, ([pattern, count]) => ({
+		pattern,
 		count,
 	}));
 	return {
 		changes: aggregatedChanges,
 		fileChanges,
+		rewriteMatches,
 		totalReplacements,
 		filesTouched: fileChanges.length,
 		filesSearched,
@@ -139,8 +163,9 @@ function runAstEditOnce(
 	if (targets) {
 		return runAstEditTargets(targets, resolvedSearchPath, options);
 	}
-	return astEdit({
+	return natives.astEdit({
 		rewrites: options.rewrites,
+		selector: options.selector,
 		path: resolvedSearchPath,
 		glob: globFilter,
 		dryRun: options.dryRun,
@@ -159,6 +184,8 @@ export interface AstEditToolDetails {
 	parseErrors?: string[];
 	/** Total parse error count before {@link PARSE_ERRORS_LIMIT} capping. Omitted when no errors. */
 	parseErrorsTotal?: number;
+	/** Guidance emitted when a PHP member-shaped operation needs a contextual selector. */
+	patternHint?: string;
 	scopePath?: string;
 	files?: string[];
 	fileReplacements?: Array<{ path: string; count: number }>;
@@ -195,6 +222,9 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			if (ops.length > 1) {
 				lines.push(`+${ops.length - 1} more op${ops.length === 2 ? "" : "s"}`);
 			}
+		}
+		if (params.selector) {
+			lines.push(`Selector: ${truncateForPrompt(params.selector)}`);
 		}
 		if (Array.isArray(params.paths) && params.paths.length > 0) {
 			lines.push(`Paths: ${truncateForPrompt(params.paths.join(", "))}`);
@@ -274,6 +304,10 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			if (ops.length === 0) {
 				throw new ToolError("`ops` must include at least one op entry");
 			}
+			const selector = params.selector?.trim() || undefined;
+			if (selector && ops.length !== 1) {
+				throw new ToolError("`selector` requires exactly one operation; run contextual rewrites separately");
+			}
 			const seenPatterns = new Set<string>();
 			for (const [pat] of ops) {
 				if (seenPatterns.has(pat)) {
@@ -304,6 +338,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 
 			const result = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
 				rewrites: normalizedRewrites,
+				selector,
 				dryRun: true,
 				maxFiles,
 				failOnParseError: false,
@@ -311,12 +346,18 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			});
 
 			const { errors: cappedParseErrors, total: parseErrorsTotal } = capParseErrors(result.parseErrors);
+			const rewriteMatchCounts = new Map(result.rewriteMatches.map(({ pattern, count }) => [pattern, count]));
+			const patternHint = ops.some(
+				([pattern]) => isPhpMemberPattern(pattern) && (rewriteMatchCounts.get(pattern) ?? 0) === 0,
+			)
+				? PHP_MEMBER_WRAPPER_HINT
+				: undefined;
 			const formatPath = (filePath: string): string =>
 				formatResultPath(filePath, isDirectory, resolvedSearchPath, this.session.cwd);
 
 			const { record: recordFile, list: fileList } = createFileRecorder();
 			const fileReplacementCounts = new Map<string, number>();
-			const changesByFile = new Map<string, AstReplaceChange[]>();
+			const changesByFile = new Map<string, natives.AstReplaceChange[]>();
 			for (const fileChange of result.fileChanges) {
 				const relativePath = formatPath(fileChange.path);
 				recordFile(relativePath);
@@ -338,6 +379,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				applied: result.applied,
 				limitReached: result.limitReached,
 				...(cappedParseErrors.length > 0 ? { parseErrors: cappedParseErrors, parseErrorsTotal } : {}),
+				...(patternHint ? { patternHint } : {}),
 				scopePath,
 				searchPath: resolvedSearchPath,
 				cwd: this.session.cwd,
@@ -346,10 +388,11 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			};
 
 			if (result.totalReplacements === 0) {
+				const hintMessage = patternHint ? `\n${patternHint}` : "";
 				const parseMessage = cappedParseErrors.length
 					? `\n${formatParseErrors(cappedParseErrors, parseErrorsTotal).join("\n")}`
 					: "";
-				return toolResult(baseDetails).text(`No replacements made${parseMessage}`).done();
+				return toolResult(baseDetails).text(`No replacements made${hintMessage}${parseMessage}`).done();
 			}
 
 			const useHashLines = resolveFileDisplayMode(this.session).hashLines;
@@ -430,6 +473,9 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				path: filePath,
 				count: fileReplacementCounts.get(filePath) ?? 0,
 			}));
+			if (patternHint) {
+				outputLines.push("", patternHint);
+			}
 			if (result.limitReached) {
 				outputLines.push("", "Limit reached; narrow paths.");
 			}
@@ -447,6 +493,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					apply: async (_reason: string) => {
 						const applyResult = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
 							rewrites: normalizedRewrites,
+							selector,
 							dryRun: false,
 							maxFiles,
 							failOnParseError: false,
@@ -497,6 +544,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 							...(cappedApplyParseErrors.length > 0
 								? { parseErrors: cappedApplyParseErrors, parseErrorsTotal: applyParseErrorsTotal }
 								: {}),
+							...(patternHint ? { patternHint } : {}),
 							scopePath,
 							files: appliedFileList,
 							fileReplacements: appliedFileReplacements,
@@ -636,17 +684,21 @@ export const astEditToolRenderer = {
 			if (filesSearched > 0) meta.push(`searched ${filesSearched}`);
 			const header = renderStatusLine({ icon: "warning", title: "AST Edit", description, meta }, uiTheme);
 			// The "0 replacements" count already rides on the status line; only parse
-			// errors are worth a body, so frame solely when there are some.
+			// errors and actionable hints are worth a body.
 			const bodyLines: string[] = [];
+			if (details?.patternHint) bodyLines.push(uiTheme.fg("muted", details.patternHint));
 			appendParseErrorsBulletList(bodyLines, details?.parseErrors, uiTheme, details?.parseErrorsTotal);
 			if (bodyLines.length === 0) return new Text(header, 0, 0);
-			return framedBlock(uiTheme, width => ({
-				header,
-				sections: [{ lines: bodyLines }],
-				state: "warning",
-				borderColor: "borderMuted",
-				width,
-			}));
+			return framedBlock(uiTheme, width => {
+				const innerWidth = outputBlockContentWidth(width);
+				return {
+					header,
+					sections: [{ lines: bodyLines.map(line => truncateToWidth(line, innerWidth, Ellipsis.Omit)) }],
+					state: "warning",
+					borderColor: "borderMuted",
+					width,
+				};
+			});
 		}
 
 		const summaryParts = [formatCount("replacement", totalReplacements), formatCount("file", filesTouched)];
@@ -687,12 +739,16 @@ export const astEditToolRenderer = {
 			.map(indices => indices.map(index => styledLines[index]!));
 
 		const badge = { label: "proposed", color: "warning" as const };
+		const hasPatternHint = Boolean(details?.patternHint);
 		const header = renderStatusLine(
-			{ icon: limitReached ? "warning" : "success", title: "AST Edit", description, badge, meta },
+			{ icon: limitReached || hasPatternHint ? "warning" : "success", title: "AST Edit", description, badge, meta },
 			uiTheme,
 		);
 
 		const extraLines: string[] = [];
+		if (details?.patternHint) {
+			extraLines.push(uiTheme.fg("warning", details.patternHint));
+		}
 		if (limitReached) {
 			extraLines.push(uiTheme.fg("warning", "limit reached; narrow path"));
 		}
@@ -709,7 +765,7 @@ export const astEditToolRenderer = {
 			return {
 				header,
 				sections: bodyLines.length > 0 ? [{ lines: bodyLines }] : [],
-				state: options.isPartial ? "pending" : "success",
+				state: options.isPartial ? "pending" : hasPatternHint ? "warning" : "success",
 				borderColor: "borderMuted",
 				width,
 			};
