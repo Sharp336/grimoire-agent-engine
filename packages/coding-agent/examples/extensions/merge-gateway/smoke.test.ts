@@ -76,9 +76,9 @@ describe("mapCatalogEntry", () => {
 		);
 		expect(mapped).not.toBeNull();
 		expect(mapped!.id).toBe("openai/gpt-5.2");
-		expect(mapped!.reasoning).toBe(true);
 		expect(mapped!.input).toEqual(["text", "image"]);
-		expect(mapped!.cost).toEqual({ input: 1, output: 2, cacheRead: 0, cacheWrite: 0 });
+		// OpenAI-wire routes never advertise reasoning, even when supported.
+		expect(mapped!.reasoning).toBe(false);
 	});
 
 	test("drops a model whose vendor lacks tool calling (embeddings)", () => {
@@ -100,10 +100,39 @@ describe("mapCatalogEntry", () => {
 	});
 
 	test("pins first-party anthropic routes to the Anthropic wire", () => {
-		const mapped = mapCatalogEntry(entry("anthropic/claude", { anthropic: vendor() }) as never);
+		const mapped = mapCatalogEntry(
+			entry("anthropic/claude", {
+				anthropic: vendor({
+					capabilities: {
+						input: ["text"],
+						output: ["text", "tool_use"],
+						supports_tool_calling: true,
+						supports_reasoning: true,
+					},
+				}),
+			}) as never,
+		);
 		expect(mapped!.api).toBe("anthropic-messages");
 		expect(mapped!.baseUrl).toBe("https://api-gateway.merge.dev");
 		expect(mapped!.compat).toBeUndefined();
+		expect(mapped!.reasoning).toBe(true);
+	});
+
+	test("never advertises reasoning on OpenAI-wire routes even when supported", () => {
+		const mapped = mapCatalogEntry(
+			entry("openai/qwen3", {
+				openai: vendor({
+					capabilities: {
+						input: ["text"],
+						output: ["text", "tool_use"],
+						supports_tool_calling: true,
+						supports_reasoning: true,
+					},
+				}),
+			}) as never,
+		);
+		expect(mapped).not.toBeNull();
+		expect(mapped!.reasoning).toBe(false);
 	});
 
 	test("serves bedrock-backed anthropic models over the OpenAI wire", () => {

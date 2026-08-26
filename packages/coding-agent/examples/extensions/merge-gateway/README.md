@@ -15,7 +15,7 @@ Selectors look like `merge-gateway/openai/gpt-5.2` or `merge-gateway/anthropic/c
 
 ## Why per-model wires
 
-omp builds the OpenAI wire as `<baseUrl>/chat/completions`, but the Anthropic wire as `<baseUrl>/v1/messages`. Each model therefore carries its own `api` + `baseUrl`: Claude routes are pinned to the Anthropic-compatible surface because signed thinking blocks survive multi-round tool loops there, while Gateway drops unsigned blocks on replay over the OpenAI wire. Only **first-party** Anthropic routes get this treatment — an `anthropic/…` model served through bedrock rides the OpenAI wire. `reasoning_effort` is suppressed on OpenAI-wire models because Gateway forwards it and some vendors reject it.
+omp builds the OpenAI wire as `<baseUrl>/chat/completions`, but the Anthropic wire as `<baseUrl>/v1/messages`. Each model therefore carries its own `api` + `baseUrl`: Claude routes are pinned to the Anthropic-compatible surface because signed thinking blocks survive multi-round tool loops there, while Gateway drops unsigned blocks on replay over the OpenAI wire. Only **first-party** Anthropic routes get this treatment — an `anthropic/…` model served through bedrock rides the OpenAI wire. `reasoning_effort` is suppressed on OpenAI-wire models because Gateway forwards it and some vendors reject it. For the same reason, OpenAI-wire models are always advertised as non-reasoning (`reasoning: false`), even when the vendor reports `supports_reasoning: true`.
 
 ## Usage
 

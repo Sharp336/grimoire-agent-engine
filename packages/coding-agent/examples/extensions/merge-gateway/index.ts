@@ -16,8 +16,10 @@ import { APIError, MergeGateway } from "merge-gateway-sdk";
  *
  * The Anthropic wire preserves signed thinking blocks across multi-round tool
  * loops (Gateway drops unsigned blocks on replay), so first-party Claude
- * routes are pinned to it. `reasoning_effort` is suppressed on OpenAI-wire
- * models because Gateway forwards it and some vendors reject it.
+ * routes are pinned to it. OpenAI-wire models are advertised as non-reasoning
+ * for the same reason `reasoning_effort` is suppressed there: Gateway forwards
+ * it and some vendors reject it, and omp's family-specific thinking dialects
+ * (derived from the model id) are not accepted by the endpoint either.
  *
  * Catalog discovery and key validation go through the official
  * `merge-gateway-sdk` client (auth header, request timeout, typed errors),
@@ -103,8 +105,9 @@ export function pickVendor(entry: CatalogModel): { id: string; vendor: CatalogVe
  * generation models.
  *
  * First-party `anthropic` routes are pinned to the Anthropic-compatible wire
- * (signed thinking blocks); everything else rides the OpenAI-compatible wire
- * with `supportsReasoningEffort` disabled.
+ * (signed thinking blocks) and advertise `supports_reasoning` as-is; every
+ * other route rides the OpenAI-compatible wire with `supportsReasoningEffort`
+ * disabled and is advertised as non-reasoning.
  */
 export function mapCatalogEntry(entry: CatalogModel): ProviderModelConfig | null {
 	const picked = pickVendor(entry);
@@ -112,11 +115,14 @@ export function mapCatalogEntry(entry: CatalogModel): ProviderModelConfig | null
 	const caps = picked.vendor.capabilities ?? {};
 	if (caps.supports_tool_calling !== true) return null;
 	if (!(caps.output ?? []).includes("text")) return null;
+	// Decide the wire first: only the Anthropic-compatible surface accepts
+	// omp's standard thinking params.
+	const anthropicWire = picked.id === "anthropic";
 	const input: ("text" | "image")[] = (caps.input ?? []).includes("image") ? ["text", "image"] : ["text"];
 	const model: ProviderModelConfig = {
 		id: entry.model,
 		name: entry.display_name ?? entry.model,
-		reasoning: caps.supports_reasoning === true,
+		reasoning: anthropicWire ? caps.supports_reasoning === true : false,
 		input,
 		cost: {
 			input: picked.vendor.pricing?.input_per_million ?? 0,
@@ -127,12 +133,17 @@ export function mapCatalogEntry(entry: CatalogModel): ProviderModelConfig | null
 		contextWindow: picked.vendor.context_window ?? 128_000,
 		maxTokens: picked.vendor.max_output_tokens ?? 16_384,
 	};
-	if (picked.id === "anthropic") {
+	if (anthropicWire) {
 		model.api = "anthropic-messages";
 		model.baseUrl = ANTHROPIC_BASE_URL;
 	} else {
 		model.baseUrl = OPENAI_BASE_URL;
 		model.compat = { supportsReasoningEffort: false };
+		// omp derives family-specific thinking dialects from the model id
+		// (Qwen enable_thinking / chat_template_kwargs etc.) that Gateway's
+		// OpenAI-compatible endpoint does not accept, and the only mapped
+		// control (reasoning_effort) is suppressed — so OpenAI-wire routes
+		// stay non-reasoning rather than risking 4xx.
 	}
 	return model;
 }
