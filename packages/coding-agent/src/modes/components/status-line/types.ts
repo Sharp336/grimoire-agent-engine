@@ -40,6 +40,8 @@ export interface StatusLineSettings {
 	/** Replace the model-segment icon with the thinking-level glyph and drop the
 	 *  " · <level>" suffix, so the thinking level reads as a single compact icon. */
 	compactThinkingLevel?: boolean;
+	/** Display the active provider name before the model name in the status line. */
+	showModelProvider?: boolean;
 	/** How the gap line between the left and right groups reacts to context
 	 *  usage. `embedded` moves configured context segments into the annotated
 	 *  gauge as percentage and window labels. Box composer only. */
