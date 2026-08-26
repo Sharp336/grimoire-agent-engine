@@ -223,13 +223,12 @@ export class ModelRegistry {
 	// Keyless runtime registrations (auth: "none") — persisted like
 	// #runtimeProviderApiKeys so they survive #reloadStaticModels() cycles.
 	#runtimeKeylessProviders: Set<string> = new Set();
-	// Extension-owned models (registerProvider `models` entries and
-	// fetchDynamicModels results) that declared an explicit model-level
-	// `baseUrl`. For these, a provider-level runtime transport override acts as
-	// a *default* rather than a proxy reroute — mirroring models.yml, where the
-	// provider baseUrl only fills models that have none. Models relying on the
-	// provider fallback (and bundled/hosted catalogs) keep override-wins.
-	#runtimeExplicitModelBaseUrls: Map<string, Set<string>> = new Map();
+	// Static overlays (registerProvider `models` entries) that declared an
+	// explicit model-level `baseUrl`. Dynamically discovered models are NOT
+	// indexed here: their declared urls are derived from #runtimeDiscoveredModels
+	// at application time (see #runtimeExplicitModelBaseUrls), so cache-served
+	// cycles classify exactly like the live fetch that produced the rows.
+	#runtimeOverlayExplicitBaseUrls: Map<string, Set<string>> = new Map();
 	// Credential-aware model projections registered via
 	// `registerProvider({ oauth: { modifyModels } })`. Persisted for the same
 	// reason as #runtimeModelOverlays: the overlays hold the *pre-projection*
@@ -241,8 +240,13 @@ export class ModelRegistry {
 	#runtimeProviderSourceByName: Map<string, string> = new Map();
 	// Runtime model managers registered by extensions via fetchDynamicModels.
 	// Keyed by provider name; use the same SQLite cache path as builtins.
-	#runtimeModelManagers: Map<string, { options: ModelManagerOptions<Api>; sourceId: string; requiresAuth: boolean }> =
-		new Map();
+	// `providerBaseUrl` is the registration-time config.baseUrl: discovered
+	// models whose url differs from it declared their own (see
+	// #runtimeExplicitModelBaseUrls).
+	#runtimeModelManagers: Map<
+		string,
+		{ options: ModelManagerOptions<Api>; sourceId: string; requiresAuth: boolean; providerBaseUrl: string }
+	> = new Map();
 	#ignoreLocalModelConfig: boolean;
 	#fetch: FetchImpl;
 	#settings: Settings | undefined;
@@ -1893,13 +1897,52 @@ export class ModelRegistry {
 		});
 	}
 
+	/**
+	 * Extension-owned model ids whose declared model-level `baseUrl` treats a
+	 * runtime provider transport override as a *default* rather than a proxy
+	 * reroute (mirroring models.yml, where the provider baseUrl only fills
+	 * models that have none). Every other model of the provider keeps
+	 * override-wins semantics.
+	 *
+	 * Derived from origin lists so the classification never depends on whether
+	 * the CURRENT cycle fetched live: static overlays are indexed at
+	 * registration (#runtimeOverlayExplicitBaseUrls), while dynamic discoveries
+	 * — live fetches, cache-served manager cycles, and the auth-gated cached
+	 * fallback alike — all flow through #runtimeDiscoveredModels, where a url
+	 * differing from the registration-time provider baseUrl marks a
+	 * model-declared url. A discovered url equal to the provider baseUrl is
+	 * indistinguishable from an inherited one, and behaves identically while
+	 * they agree. If an extension declares an id that collides with a bundled
+	 * model of the same provider name, the extension declaration wins
+	 * (default-treated) — acceptable ownership semantics.
+	 */
+	#runtimeExplicitModelBaseUrls(provider: string): Set<string> {
+		const explicit = new Set(this.#runtimeOverlayExplicitBaseUrls.get(provider));
+		const providerBaseUrl = this.#runtimeModelManagers.get(provider)?.providerBaseUrl;
+		if (providerBaseUrl === undefined) return explicit;
+		for (const model of this.#runtimeDiscoveredModels) {
+			if (model.provider !== provider || !model.baseUrl) continue;
+			if (model.baseUrl !== providerBaseUrl) explicit.add(model.id);
+		}
+		return explicit;
+	}
+
 	#applyRuntimeProviderOverrides(models: Model<Api>[]): Model<Api>[] {
 		if (this.#runtimeProviderOverrides.size === 0) return models;
+		let explicitByProvider: Map<string, Set<string>> | undefined;
+		const explicitFor = (provider: string): Set<string> => {
+			explicitByProvider ??= new Map();
+			let ids = explicitByProvider.get(provider);
+			if (!ids) {
+				ids = this.#runtimeExplicitModelBaseUrls(provider);
+				explicitByProvider.set(provider, ids);
+			}
+			return ids;
+		};
 		return models.map(model => {
 			const override = this.#runtimeProviderOverrides.get(model.provider);
 			if (!override) return model;
-			const preferModelBaseUrl = this.#runtimeExplicitModelBaseUrls.get(model.provider)?.has(model.id) ?? false;
-			return this.#applyProviderTransportOverrideToModel(model, override, preferModelBaseUrl);
+			return this.#applyProviderTransportOverrideToModel(model, override, explicitFor(model.provider).has(model.id));
 		});
 	}
 	#resolveLiveModelOverride(model: Model<Api>): ModelOverride | undefined {
@@ -2269,7 +2312,7 @@ export class ModelRegistry {
 		this.#runtimeProviderApiKeys.delete(providerName);
 		this.#runtimeProviderOverrides.delete(providerName);
 		this.#runtimeKeylessProviders.delete(providerName);
-		this.#runtimeExplicitModelBaseUrls.delete(providerName);
+		this.#runtimeOverlayExplicitBaseUrls.delete(providerName);
 		this.#runtimeModelOverlays = this.#runtimeModelOverlays.filter(overlay => overlay.provider !== providerName);
 		this.#runtimeModelManagers.delete(providerName);
 		this.#runtimeModelModifiers.delete(providerName);
@@ -2450,12 +2493,13 @@ export class ModelRegistry {
 			// Store as runtime overlays so they survive #reloadStaticModels()
 			this.#runtimeModelOverlays = this.#runtimeModelOverlays.filter(m => m.provider !== providerName);
 			this.#runtimeModelOverlays.push(...newOverlays);
-			// Replace the explicit-baseUrl index for this provider; models relying on
-			// the provider baseUrl keep override-wins transport semantics.
+			// Replace the explicit-baseUrl index for this provider's static
+			// overlays; models relying on the provider baseUrl keep override-wins
+			// transport semantics.
 			if (explicitBaseUrlIds.size > 0) {
-				this.#runtimeExplicitModelBaseUrls.set(providerName, explicitBaseUrlIds);
+				this.#runtimeOverlayExplicitBaseUrls.set(providerName, explicitBaseUrlIds);
 			} else {
-				this.#runtimeExplicitModelBaseUrls.delete(providerName);
+				this.#runtimeOverlayExplicitBaseUrls.delete(providerName);
 			}
 
 			// A modifier is explicitly a whole-catalog transform and may throw
@@ -2490,17 +2534,18 @@ export class ModelRegistry {
 				nextModels.push(finalizeCustomModel(overlay, { useDefaults: true }));
 			}
 			const runtimeTransportOverride = this.#runtimeProviderOverrides.get(providerName);
-			const explicitBaseUrls = this.#runtimeExplicitModelBaseUrls.get(providerName);
-			const nextModelsWithTransport = runtimeTransportOverride
-				? nextModels.map(model => {
-						if (model.provider !== providerName) return model;
-						return this.#applyProviderTransportOverrideToModel(
-							model,
-							runtimeTransportOverride,
-							explicitBaseUrls?.has(model.id) ?? false,
-						);
-					})
-				: nextModels;
+			let nextModelsWithTransport = nextModels;
+			if (runtimeTransportOverride) {
+				const explicitBaseUrls = this.#runtimeExplicitModelBaseUrls(providerName);
+				nextModelsWithTransport = nextModels.map(model => {
+					if (model.provider !== providerName) return model;
+					return this.#applyProviderTransportOverrideToModel(
+						model,
+						runtimeTransportOverride,
+						explicitBaseUrls.has(model.id),
+					);
+				});
+			}
 			this.#unprojectedModels = this.#applyProviderGuardrailOverrides(nextModelsWithTransport);
 
 			this.#models = this.#applyRuntimeModelModifiers(this.#unprojectedModels);
@@ -2533,9 +2578,7 @@ export class ModelRegistry {
 					);
 					if (modelDefs === null) return null;
 					const results: Model<Api>[] = [];
-					const explicitBaseUrlIds = new Set<string>();
 					for (const modelDef of modelDefs) {
-						if (modelDef.baseUrl) explicitBaseUrlIds.add(modelDef.id);
 						const overlay = buildCustomModelOverlay(
 							providerName,
 							modelDef.baseUrl ?? providerBaseUrl,
@@ -2550,13 +2593,6 @@ export class ModelRegistry {
 						);
 						if (overlay) results.push(finalizeCustomModel(overlay, { useDefaults: true }));
 					}
-					// Record before the caller merges these into the catalog, so the
-					// post-discovery transport override can honor per-model baseUrls.
-					if (explicitBaseUrlIds.size > 0) {
-						this.#runtimeExplicitModelBaseUrls.set(providerName, explicitBaseUrlIds);
-					} else {
-						this.#runtimeExplicitModelBaseUrls.delete(providerName);
-					}
 					return results.map(toModelSpec);
 				},
 			};
@@ -2567,6 +2603,11 @@ export class ModelRegistry {
 				// defers discovery until a key resolves; unset/"none" keeps the
 				// legacy always-discover behavior for keyless extension providers.
 				requiresAuth: config.auth === "apiKey" || config.auth === "oauth",
+				// Registration-time config.baseUrl. Discovered models carry this url
+				// when they inherited it and their own otherwise; the difference is
+				// how cache-served cycles recover which urls are model-declared
+				// (see #runtimeExplicitModelBaseUrls).
+				providerBaseUrl,
 			});
 			// Discovery is driven by refreshRuntimeProviders() after the drain — not
 			// here, so registration has no network side effect and callers can await.
@@ -2594,13 +2635,14 @@ export class ModelRegistry {
 			);
 			this.#runtimeProviderOverrides.set(providerName, nextRuntimeOverride);
 			if (this.#hasFullSnapshot) {
+				const explicitBaseUrls = this.#runtimeExplicitModelBaseUrls(providerName);
 				this.#unprojectedModels = this.#applyLlamaCppModelFixups(
 					this.#unprojectedModels.map(model => {
 						if (model.provider !== providerName) return model;
 						return this.#applyProviderTransportOverrideToModel(
 							model,
 							transportOverride,
-							this.#runtimeExplicitModelBaseUrls.get(providerName)?.has(model.id) ?? false,
+							explicitBaseUrls.has(model.id),
 						);
 					}),
 				);

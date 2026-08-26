@@ -426,6 +426,113 @@ describe("ModelRegistry runtime provider registration", () => {
 		expectBaseUrls();
 	});
 
+	test("cache-served dynamic models keep per-model baseUrls without a live fetch", async () => {
+		const providerName = "warm-cache-url-provider";
+		const cacheDbPath = path.join(tempDir, "model-cache.db");
+		const dynamicModels = async () => [
+			{ ...baseModel, id: "own-a", baseUrl: "https://own-a.example.com/v1" },
+			{ ...baseModel, id: "own-b", baseUrl: "https://own-b.example.com/v1" },
+			{ ...baseModel, id: "inherited-model" },
+		];
+
+		// Seed the SQLite discovery cache with exactly one live fetch.
+		const first = new ModelRegistry(authStorage, modelsJsonPath, { fetch: offlineFetch, cacheDbPath });
+		first.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://default.example.com/v1",
+				auth: "apiKey",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: dynamicModels,
+			},
+			"ext://runtime",
+		);
+		await first.refreshRuntimeProviders("online");
+		expect(first.find(providerName, "own-a")?.baseUrl).toBe("https://own-a.example.com/v1");
+
+		// A fresh registry over the same cache: the rows are fresh under the
+		// runtime provider TTL, so an online-if-uncached cycle serves the cached
+		// specs WITHOUT invoking the fetcher. The provider baseUrl must still act
+		// only as a default for models that declared their own url.
+		let discoveryCalls = 0;
+		const second = new ModelRegistry(authStorage, modelsJsonPath, { fetch: offlineFetch, cacheDbPath });
+		second.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://default.example.com/v1",
+				auth: "apiKey",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: async () => {
+					discoveryCalls++;
+					return dynamicModels();
+				},
+			},
+			"ext://runtime",
+		);
+		await second.refreshRuntimeProviders("online-if-uncached");
+		expect(discoveryCalls).toBe(0);
+		const expectBaseUrls = () => {
+			expect(second.find(providerName, "own-a")?.baseUrl).toBe("https://own-a.example.com/v1");
+			expect(second.find(providerName, "own-b")?.baseUrl).toBe("https://own-b.example.com/v1");
+			expect(second.find(providerName, "inherited-model")?.baseUrl).toBe("https://default.example.com/v1");
+		};
+		expectBaseUrls();
+		await second.refresh("offline");
+		expectBaseUrls();
+	});
+
+	test("auth-gated cached fallback keeps per-model baseUrls without credentials", async () => {
+		const providerName = "gated-cache-url-provider";
+		const cacheDbPath = path.join(tempDir, "model-cache.db");
+		const dynamicModels = async () => [
+			{ ...baseModel, id: "gated-own", baseUrl: "https://gated-own.example.com/v1" },
+			{ ...baseModel, id: "gated-inherited" },
+		];
+
+		const first = new ModelRegistry(authStorage, modelsJsonPath, { fetch: offlineFetch, cacheDbPath });
+		first.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://default.example.com/v1",
+				auth: "apiKey",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: dynamicModels,
+			},
+			"ext://runtime",
+		);
+		await first.refreshRuntimeProviders("online");
+
+		// The unauthenticated second instance cannot run discovery at all: the
+		// requiresAuth preflight surfaces the cached catalog via readModelCache
+		// (no fetch, no cache write). Even so, the model-declared url must not be
+		// clobbered by the provider-level runtime override. A separate
+		// AuthStorage keeps the seed credential from leaking into the cycle.
+		let discoveryCalls = 0;
+		const unauthStorage = await AuthStorage.create(":memory:");
+		const second = new ModelRegistry(unauthStorage, modelsJsonPath, { fetch: offlineFetch, cacheDbPath });
+		second.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://default.example.com/v1",
+				auth: "apiKey",
+				api: "openai-completions",
+				fetchDynamicModels: async () => {
+					discoveryCalls++;
+					return dynamicModels();
+				},
+			},
+			"ext://runtime",
+		);
+		await second.refreshRuntimeProviders("online");
+		expect(discoveryCalls).toBe(0);
+		expect(second.find(providerName, "gated-own")?.baseUrl).toBe("https://gated-own.example.com/v1");
+		expect(second.find(providerName, "gated-inherited")?.baseUrl).toBe("https://default.example.com/v1");
+		unauthStorage.close();
+	});
+
 	test("auth none registers keyless static models without credentials", () => {
 		const providerName = "keyless-static-provider";
 		registry.registerProvider(
