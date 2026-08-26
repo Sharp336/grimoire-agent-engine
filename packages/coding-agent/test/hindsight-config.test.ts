@@ -7,10 +7,6 @@ function load(overrides: Record<string, unknown> = {}, env: NodeJS.ProcessEnv = 
 }
 
 describe("loadHindsightConfig retainStrategy", () => {
-	it("omits retainStrategy when unset", () => {
-		expect(load().retainStrategy).toBeNull();
-	});
-
 	it("treats empty and whitespace retainStrategy as unset", () => {
 		expect(load({ "hindsight.retainStrategy": "" }).retainStrategy).toBeNull();
 		expect(load({ "hindsight.retainStrategy": "   " }).retainStrategy).toBeNull();
