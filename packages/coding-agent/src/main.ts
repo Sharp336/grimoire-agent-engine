@@ -11,6 +11,7 @@ import { EventLoopKeepalive, type ThinkingLevel } from "@oh-my-pi/pi-agent-core"
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import {
 	$env,
+	APP_NAME,
 	directoryExists,
 	getLogPath,
 	getProjectDir,
@@ -88,6 +89,15 @@ import {
 import type { AgentSession } from "./session/agent-session";
 import { describeAuthBrokerStartupError } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
+import {
+	autoRestartHandoffEnv,
+	buildAutoRestartCommand,
+	consumeAutoRestartHandoff,
+	defaultAutoRestartWatchPaths,
+	ExecutableUpdateMonitor,
+	handoffAutoRestart,
+	prepareAutoRestartArgs,
+} from "./session/auto-restart";
 import { describePendingToolCalls } from "./session/exit-diagnostics";
 import {
 	createForeignSessionStore,
@@ -116,6 +126,10 @@ type RunRpcMode = (
 	eventBus?: EventBus,
 	input?: ReadableStream<Uint8Array>,
 ) => Promise<never>;
+
+interface InteractiveModeOutcome {
+	autoRestartSessionFile?: string;
+}
 
 export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string): void {
 	(parsedArgs.mode === "json" ? process.stderr : process.stdout).write(text);
@@ -496,7 +510,7 @@ async function runInteractiveMode(
 	joinLink?: string,
 	startBackgroundModelDiscovery?: () => Promise<void>,
 	startupLease?: ComposerLease,
-): Promise<void> {
+): Promise<InteractiveModeOutcome> {
 	let mode: InteractiveMode;
 	try {
 		mode = new InteractiveMode(
@@ -550,6 +564,24 @@ async function runInteractiveMode(
 	} catch (error) {
 		mode.stop();
 		throw error;
+	}
+
+	let autoRestart: ExecutableUpdateMonitor | undefined;
+	if (session.sessionManager.getSessionFile()) {
+		autoRestart = new ExecutableUpdateMonitor({
+			paths: defaultAutoRestartWatchPaths({
+				argv: process.argv,
+				execPath: process.execPath,
+				env: process.env,
+			}),
+			isEnabled: () => session.settings.get("settings.autoRestartOnUpdate"),
+			onUpdate: () => {
+				mode.showStatus("OMP update detected. Restarting this session…");
+				mode.interruptIdleInputForAutoRestart();
+			},
+		});
+		await autoRestart.prime();
+		autoRestart.start();
 	}
 
 	if (setupWizard && playStartupSplash) {
@@ -622,9 +654,21 @@ async function runInteractiveMode(
 		}
 	}
 
-	while (true) {
-		const input = await mode.getUserInput();
-		await submitInteractiveInput(mode, session, input);
+	try {
+		while (true) {
+			if (autoRestart?.updatePending) {
+				const sessionFile = session.sessionManager.getSessionFile();
+				if (sessionFile) {
+					await mode.shutdownForAutoRestart();
+					return { autoRestartSessionFile: sessionFile };
+				}
+			}
+			const input = await mode.getUserInput();
+			if (autoRestart?.updatePending && input.cancelled) continue;
+			await submitInteractiveInput(mode, session, input);
+		}
+	} finally {
+		autoRestart?.stop();
 	}
 }
 
@@ -1346,6 +1390,10 @@ export async function runRootCommand(
 		await logger.time("initTheme:initial", ensureTheme);
 
 		const parsedArgs = parsed;
+		const autoRestartSessionFile = consumeAutoRestartHandoff(process.env, process.ppid);
+		if (autoRestartSessionFile) {
+			prepareAutoRestartArgs(parsedArgs, autoRestartSessionFile);
+		}
 		await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
 
 		const notifs: (InteractiveModeNotify | null)[] = [];
@@ -1825,6 +1873,9 @@ export async function runRootCommand(
 					`Trusted extension failed to load: ${extensionsResult.errors.map(item => item.error).join("; ")}`,
 				);
 			}
+			if (autoRestartSessionFile) {
+				prepareAutoRestartArgs(initialArgs, autoRestartSessionFile);
+			}
 			for (const message of formatExtensionLoadNotifications(extensionsResult.errors)) {
 				if (isInteractive) {
 					notifs.push({ kind: "warn", message });
@@ -1983,11 +2034,12 @@ export async function runRootCommand(
 						process.exit(0);
 					}
 				}
+				let autoRestartOutcome: InteractiveModeOutcome | undefined;
 				const startupLease = takeStartupComposerLease();
 				try {
 					stopStartupWatchdog();
 					logger.endTiming();
-					await runInteractiveMode(
+					autoRestartOutcome = await runInteractiveMode(
 						session,
 						VERSION,
 						startupChangelog,
@@ -2009,6 +2061,38 @@ export async function runRootCommand(
 					);
 				} finally {
 					startupLease?.dispose();
+				}
+				const handoffSessionFile = autoRestartOutcome?.autoRestartSessionFile;
+				if (handoffSessionFile) {
+					try {
+						const cmd = buildAutoRestartCommand({
+							argv: process.argv,
+							execPath: process.execPath,
+							execArgv: process.execArgv,
+							env: process.env,
+						});
+						await handoffAutoRestart(
+							() =>
+								Bun.spawn({
+									cmd,
+									cwd: process.cwd(),
+									env: {
+										...process.env,
+										...autoRestartHandoffEnv(handoffSessionFile, process.pid),
+									},
+									stdin: "inherit",
+									stdout: "inherit",
+									stderr: "inherit",
+								}),
+							exitCode => postmortem.quit(exitCode),
+						);
+					} catch (error) {
+						process.stderr.write(
+							`\nAuto-restart failed: ${error instanceof Error ? error.message : String(error)}\n` +
+								`Resume this session with ${APP_NAME} --resume ${handoffSessionFile}\n`,
+						);
+						await postmortem.quit(1);
+					}
 				}
 			} else {
 				// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
