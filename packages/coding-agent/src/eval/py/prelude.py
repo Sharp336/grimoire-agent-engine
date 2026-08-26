@@ -689,16 +689,16 @@ if "__omp_prelude_loaded__" not in globals():
         """Parallel sub-LLM completions, preserving input order."""
         return parallel([lambda p=p: llm_query(p, model=model) for p in prompts])
 
-    def rlm_query(prompt, *, model=None, agent="task"):
-        """Recursive subagent via agent(); returns its text output. `model` is accepted for signature parity (agent() has no model tier). `agent` is resolved through globals() so the `agent` parameter does not shadow the module-level agent() helper."""
+    def rlm_query(prompt, *, agent="task"):
+        """Recursive subagent via agent(); returns its text output. `agent` is resolved through globals() so the `agent` parameter does not shadow the module-level agent() helper."""
         return globals()["agent"](prompt, agent=agent)
 
-    def rlm_query_batched(prompts, *, model=None, agent="task"):
+    def rlm_query_batched(prompts, *, agent="task"):
         """Parallel recursive subagents, preserving input order."""
         return parallel([lambda p=p: rlm_query(p, agent=agent) for p in prompts])
 
     def chunk(text, *, by="lines", size=100):
-        """Split `text` into chunks of `size` lines or whitespace tokens."""
+        """Split `text` into chunks of `size` lines, or into fixed ~`size`-token windows."""
         if by not in ("lines", "tokens"):
             raise ValueError(f"chunk by must be 'lines' or 'tokens', got {by!r}")
         if not isinstance(size, int) or size <= 0:
@@ -706,8 +706,12 @@ if "__omp_prelude_loaded__" not in globals():
         if by == "lines":
             lines = text.splitlines()
             return ["\n".join(lines[i : i + size]) for i in range(0, len(lines), size)]
-        tokens = text.split()
-        return [" ".join(tokens[i : i + size]) for i in range(0, len(tokens), size)]
+        # Bounded by character count (~4 chars/token, matching metadata()'s
+        # approx_tokens heuristic) rather than whitespace-word splitting: an
+        # unbroken multi-MB line (minified JSON/base64/code) must still be
+        # split into windows llm_query() can consume, regardless of whitespace.
+        max_chars = size * 4
+        return [text[i : i + max_chars] for i in range(0, len(text), max_chars)]
 
     def search(text, pattern, flags=0):
         """Return 'L<lineno>: <line>' for each line matching the regex `pattern`."""

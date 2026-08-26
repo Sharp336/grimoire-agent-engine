@@ -28,21 +28,22 @@ completion(prompt, model?="default"|"smol"|"slow", system?=None, schema?=None) �
 parallel(thunks) → list     pipeline(items, ...stages) → list
 log(message) → None         phase(title) → None
 budget → {{#if py}}`budget.total` (ceiling or None), `budget.spent()`, `budget.remaining()`{{/if}}{{#if js}}`await budget.total()`, `await budget.spent()`, `await budget.remaining()`{{/if}}{{#if rb}}`budget.total`, `budget.spent`, `budget.remaining`{{/if}}{{#if jl}}`budget.total`, `budget.spent()`, `budget.remaining()`{{/if}}; ceiling `+Nk` advisory, `+Nk!` hard.
-llm_query(snippet, instructions?=None, *, model?="default") → str
+{{#if rlm}}llm_query(snippet, instructions?=None, *, model?="default") → str
     Sub-LLM completion; `instructions` (when given) prefixes `snippet`.{{#if js}} `await`.{{/if}}
 llm_query_batched(prompts, *, model?="default") → list[str]
     Parallel sub-LLM completions, same order as input.{{#if js}} `await`.{{/if}}
-{{#if spawns}}rlm_query(prompt, *, model?=None, agent?="task") → str
+{{#if spawns}}rlm_query(prompt, *, agent?="task") → str
     Recursive subagent (via agent()); returns its text.{{#if js}} `await`.{{/if}}
-rlm_query_batched(prompts, *, model?=None, agent?="task") → list[str]
+rlm_query_batched(prompts, *, agent?="task") → list[str]
     Parallel recursive subagents, same order.{{#if js}} `await`.{{/if}}
 {{/if}}
 chunk(text, *, by?="lines", size?=100) → list[str]
-    Split into `size` chunks by "lines" (join "\n") or "tokens" (join " "). Empty text → [].
+    Split into `size` chunks by "lines" (join "\n") or bounded ~`size`-token windows (~4 chars/token, character-bounded regardless of whitespace). Empty text → [].
 search(text, pattern, flags?=0) → list[str]
     "L<lineno>: <line>" for each regex-matching line; no match → [].
 metadata(text) → dict
     str → {chars, lines, words, approx_tokens}; list → {items, chars, approx_tokens}.
+{{/if}}
 ```
 </prelude>
 {{#if spawns}}

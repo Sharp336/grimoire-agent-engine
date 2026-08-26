@@ -53,11 +53,25 @@ describe("eval JS RLM helpers", () => {
 		expect(chunk("a\nb\nc", { size: 1 })).toEqual(["a", "b", "c"]);
 	});
 
-	it("chunk splits by whitespace tokens and joins with a space", () => {
+	it("chunk splits 'tokens' mode into character-bounded windows (~4 chars/token)", () => {
 		const sandbox = loadJsPrelude(async () => ({}));
 		const chunk = sandbox.chunk as ChunkFn;
-		expect(chunk("a b c d", { by: "tokens", size: 2 })).toEqual(["a b", "c d"]);
-		expect(chunk("  a  b\tc\n", { by: "tokens", size: 2 })).toEqual(["a b", "c"]);
+		// size=2 -> maxChars=8; each window is a hard character slice, not a
+		// word-boundary split, so it stays bounded regardless of whitespace.
+		expect(chunk("a b c d", { by: "tokens", size: 2 })).toEqual(["a b c d"]);
+		expect(chunk("a b c d e f g h", { by: "tokens", size: 2 })).toEqual(["a b c d ", "e f g h"]);
+	});
+
+	it("chunk 'tokens' mode bounds a single unbroken run with no whitespace", () => {
+		const sandbox = loadJsPrelude(async () => ({}));
+		const chunk = sandbox.chunk as ChunkFn;
+		// The exact failure mode this bounds: one giant minified/base64 line
+		// that word-splitting would leave as a single unbounded chunk.
+		const unbroken = "x".repeat(1000);
+		const chunks = chunk(unbroken, { by: "tokens", size: 10 });
+		expect(chunks.length).toBeGreaterThan(1);
+		for (const c of chunks) expect(c.length).toBeLessThanOrEqual(40);
+		expect(chunks.join("")).toBe(unbroken);
 	});
 
 	it("chunk returns [] for empty text and rejects invalid by/size", () => {
@@ -193,9 +207,22 @@ print(json.dumps(chunk("", by="tokens")))
 		const lines = r.stdout.trim().split("\n");
 		expect(JSON.parse(lines[0]!)).toEqual(["a\nb\nc"]);
 		expect(JSON.parse(lines[1]!)).toEqual(["a\nb", "c"]);
-		expect(JSON.parse(lines[2]!)).toEqual(["a b", "c d"]);
+		// "a b c d" is 7 chars; size=2 -> max_chars=8, so it fits one window.
+		expect(JSON.parse(lines[2]!)).toEqual(["a b c d"]);
 		expect(JSON.parse(lines[3]!)).toEqual([]);
 		expect(JSON.parse(lines[4]!)).toEqual([]);
+	});
+
+	it("chunk 'tokens' mode bounds a single unbroken run with no whitespace", async () => {
+		const r = await run(`
+import json
+print(json.dumps(chunk("x" * 1000, by="tokens", size=10)))
+`);
+		expect(r.exitCode).toBe(0);
+		const chunks = JSON.parse(r.stdout.trim().split("\n")[0]!) as string[];
+		expect(chunks.length).toBeGreaterThan(1);
+		for (const c of chunks) expect(c.length).toBeLessThanOrEqual(40);
+		expect(chunks.join("")).toBe("x".repeat(1000));
 	});
 
 	it("chunk rejects invalid by and non-positive size", async () => {

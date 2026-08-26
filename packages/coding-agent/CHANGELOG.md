@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added RLM (Recursive Language Model) mode: a flag-gated `/rlm` slash command (`rlm.enabled`, default off) that processes oversized input by externalizing it into the eval sandbox as a `context` variable, probing it with `metadata`/`search`/`chunk`, and delegating semantic work to the `llm_query`/`llm_query_batched` and `rlm_query`/`rlm_query_batched` eval helpers, aggregating results in code. Recursion is bounded by `task.maxRecursionDepth`.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added
@@ -16,12 +20,6 @@
 - Added Yolo-Auto to `/login` and documented the `YOLO_AUTO_API_KEY` environment variable.
 - Updated the OpenRouter `/login` flow to support browser-based sign-in and automatic API-key provisioning, while retaining support for pasted `sk-or-…` keys.
 - Added DeepInfra support for the `image_gen` and `tts` tools, including provider selection and MP3 or WAV output for text-to-speech.
-- Added side-by-side image and SVG previews to `omp git`, including local Git LFS object resolution and explicit placeholders for unavailable or unsupported binary content.
-- Added the `omp if-bench` command: a zero-tool instruction-following and working-memory benchmark that drives one cached conversation per model, adding one more glyph array action every turn while a `nya{1,N}` directive moves through the prompt, with a live turn-ladder board and a ranked scoreboard
-- Added `q` shortcut to exit the git TUI
-- Added a third state to the git TUI whitespace toggle (`b`): beyond ignoring whitespace-only line changes, it hides formatting-only changes (indentation, line splits/joins, blank lines) and import-only changes in TypeScript/JavaScript, Rust, and Go
-- Compressed single-child directory chains in the sidebar tree view
-- Added RLM (Recursive Language Model) mode: a flag-gated `/rlm` slash command (`rlm.enabled`, default off) that processes oversized input by externalizing it into the eval sandbox as a `context` variable, probing it with `metadata`/`search`/`chunk`, and delegating semantic work to the `llm_query`/`llm_query_batched` and `rlm_query`/`rlm_query_batched` eval helpers, aggregating results in code. Recursion is bounded by `task.maxRecursionDepth`.
 
 ### Changed
 

@@ -225,12 +225,12 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	};
 
 	const rlm_query = async (prompt, opts, ...rest) => {
-		const o = optionsArg("rlm_query", opts, rest, ["agent"], "{ agent, model }");
+		const o = optionsArg("rlm_query", opts, rest, ["agent"], "{ agent }");
 		return agent(prompt, { agent: o.agent ?? "task" });
 	};
 
 	const rlm_query_batched = async (prompts, opts, ...rest) => {
-		const o = optionsArg("rlm_query_batched", opts, rest, ["agent"], "{ agent, model }");
+		const o = optionsArg("rlm_query_batched", opts, rest, ["agent"], "{ agent }");
 		const agentId = o.agent ?? "task";
 		return parallel(Array.from(prompts ?? []).map(p => async () => rlm_query(p, { agent: agentId })));
 	};
@@ -244,9 +244,14 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		const size = o.size ?? 100;
 		if (!Number.isInteger(size) || size <= 0) throw new Error("chunk() size must be a positive integer");
 		if (by === "tokens") {
-			const tokens = String(text).split(/\s+/).filter(Boolean);
+			// Bounded by character count (~4 chars/token, matching metadata()'s
+			// approx_tokens heuristic) rather than whitespace-word splitting: an
+			// unbroken multi-MB line (minified JSON/base64/code) must still be
+			// split into windows llm_query() can consume, regardless of whitespace.
+			const maxChars = size * 4;
+			const s = String(text);
 			const chunks = [];
-			for (let i = 0; i < tokens.length; i += size) chunks.push(tokens.slice(i, i + size).join(" "));
+			for (let i = 0; i < s.length; i += maxChars) chunks.push(s.slice(i, i + maxChars));
 			return chunks;
 		}
 		const lines = __splitlines(text);
