@@ -24,6 +24,7 @@
 ### Added
 
 - Tint the Windows Terminal tab when the agent needs you — red while waiting on you, yellow when a turn finished while the tab was inactive (clears when you focus the tab, like the terminal's own bell indicator) (gated by `tui.titleState`)
+- Added `ssh://` read/write support for Windows hosts: layered host classification that recognizes PowerShell and cmd default shells, and byte-exact PowerShell-based transfers that mirror the POSIX write contract (in-place overwrite preserving ACLs and hardlinks, symlink replacement, directory listing, path classification).
 
 ## [18.0.5] - 2026-08-25
 
