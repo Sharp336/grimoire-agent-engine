@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Parsed absolute quota-reset moments named in GLM Coding Plan 429 error bodies (`您的限额将在 2026-08-17 11:17:40 重置`, codes 1308–1321; international Z.AI `Your limit will reset at 2026-02-06 05:34:34`) so `extractRetryHint` returns the real remaining wait (+3s grace), including monthly windows, instead of falling through to a generic hint.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added

@@ -12,6 +12,69 @@ const RETRY_DELAY_FIELD_PATTERN = /"retryDelay":\s*"([0-9.]+)(ms|s)"/i;
 const TRY_AGAIN_PATTERN = /try again in\s+~?\s*([0-9.]+)\s*(ms|sec|s|minutes?|mins?|m|hours?|hrs?|h)\b/i;
 // "Your limit will reset in 13 minutes" / "reset in 13 minutes" / "will reset in 2h"
 const WILL_RESET_IN_PATTERN = /(?:will\s+)?reset in\s+~?\s*([0-9.]+)\s*(ms|sec|s|minutes?|mins?|m|hours?|hrs?|h)\b/i;
+// Zhipu GLM Coding Plan 429s (docs.bigmodel.cn/cn/api/api-code,
+// docs.z.ai/api-reference/api-code, codes 1308–1321) state the reset as an
+// absolute wall-clock stamp, not a duration.
+const ZHIPU_RESET_AT_DATETIME = String.raw`\d{4}-\d{1,2}-\d{1,2} \d{1,2}:\d{2}(?::\d{2})?`;
+// Unattested in any body so far; honored if Zhipu starts stamping one.
+const ZHIPU_RESET_AT_ZONE = String.raw`(?:\s*(?:Z|UTC|GMT|[+-]\d{2}(?::?\d{2})?))?`;
+const ZHIPU_CN_RESET_AT_PATTERN = new RegExp(
+	String.raw`您的限额将在[^\S\n]*(${ZHIPU_RESET_AT_DATETIME}${ZHIPU_RESET_AT_ZONE})[^\S\n]*重置`,
+	"i",
+);
+// Only a body pairing a Zhipu code with its own documented message (regexes
+// below) earns the UTC+8 read.
+const ZHIPU_JSON_ERROR_ENVELOPE =
+	/\{\s*(?:"error"\s*:\s*\{\s*)?"code"\s*:\s*"(?<code>1308|1310|131[6-9]|132[01])"\s*,\s*"message"\s*:\s*"(?<message>[^"]*)"/;
+const ZHIPU_TYPE_CODE_PATTERN = /\btype=(?<code>1308|1310|131[6-9]|132[01])\b/;
+const ZHIPU_CODE_MESSAGES: Readonly<Record<string, RegExp>> = {
+	"1308": /已达到[^。]{0,16}的使用上限|usage limit reached for (?!the past)/i,
+	"1310": /每周\/每月使用上限|weekly\/monthly limit exhausted/i,
+	"1316":
+		/已达到\s*5\s*小时使用上限[，。][^。]{0,40}主账号余额不足|usage limit reached for the past 5 hours\.[^"]{0,80}insufficient balance/i,
+	"1317":
+		/已达到\s*7\s*天使用上限[，。][^。]{0,40}主账号余额不足|usage limit reached for the past 7 days\.[^"]{0,80}insufficient balance/i,
+	"1318":
+		/已达到\s*5\s*小时使用上限，且已达子账号月消费上限|usage limit reached for the past 5 hours\.[^"]{0,80}monthly spend limit/i,
+	"1319":
+		/已达到\s*7\s*天使用上限，且已达子账号月消费上限|usage limit reached for the past 7 days\.[^"]{0,80}monthly spend limit/i,
+	"1320":
+		/已达到\s*5\s*小时使用上限，且已达企业级月消费上限|usage limit reached for the past 5 hours\.[^"]{0,80}monthly spend limit/i,
+	"1321":
+		/已达到\s*7\s*天使用上限，且已达企业级月消费上限|usage limit reached for the past 7 days\.[^"]{0,80}monthly spend limit/i,
+};
+const ZHIPU_EN_RESET_AT_PATTERN = new RegExp(
+	String.raw`\b(?:will\s+reset|resets)\s+at\s+(${ZHIPU_RESET_AT_DATETIME}${ZHIPU_RESET_AT_ZONE})`,
+	"i",
+);
+const ZHIPU_RESET_AT_TOKEN =
+	/^(?<year>\d{4})-(?<month>\d{1,2})-(?<day>\d{1,2}) (?<hour>\d{1,2}):(?<minute>\d{2})(?::(?<second>\d{2}))?(?<zone>\s*(?:Z|UTC|GMT|[+-]\d{2}(?::?\d{2})?))?$/i;
+// Bare stamps are server wall clock; both platforms anchor UTC+8 (Beijing/Singapore).
+const ZHIPU_RESET_AT_ASSUMED_ZONE = "+08:00";
+const ZHIPU_RESET_AT_ZONE_SHIFT_MS = 8 * 3_600_000;
+// Grace past the stated boundary: reset jobs land seconds late and clocks skew ~1s;
+// waking early just buys another 429, and account windows run minutes+ — 3s is free.
+const RESET_AT_BUFFER_MS = 3_000;
+// Plausibility window for a past stamp in a fresh body: real staleness is
+// seconds, and 1min also absorbs client skew. A bare stamp staler than that
+// can't be a live UTC+8 boundary — the server likely stamped UTC (reread below).
+const ZHIPU_RESET_AT_STALE_MS = 60_000;
+// Horizon per code = its documented window; a stated reset further out is
+// garbage, not a wait target. 1308's `${number} ${unit}` interpolates any
+// unit → the widest window the docs name, the month (≤31d, shared with
+// 1310's weekly/monthly). Also bounds the implied sleep.
+const ZHIPU_RESET_AT_MAX_DELTA_MS: Readonly<Record<string, number>> = {
+	"1308": 31 * 24 * 60 * 60 * 1000,
+	"1310": 31 * 24 * 60 * 60 * 1000,
+	"1316": 5 * 60 * 60 * 1000,
+	"1317": 7 * 24 * 60 * 60 * 1000,
+	"1318": 5 * 60 * 60 * 1000,
+	"1319": 7 * 24 * 60 * 60 * 1000,
+	"1320": 5 * 60 * 60 * 1000,
+	"1321": 7 * 24 * 60 * 60 * 1000,
+};
+// Fallback for a code not yet mapped above; widest, since the horizon only rejects garbage.
+const ZHIPU_RESET_AT_MAX_DELTA_MS_DEFAULT = 31 * 24 * 60 * 60 * 1000;
 
 /**
  * Server-suggested retry delay extraction. Merges the patterns historically used
@@ -25,6 +88,9 @@ const WILL_RESET_IN_PATTERN = /(?:will\s+)?reset in\s+~?\s*([0-9.]+)\s*(ms|sec|s
  *  - `x-ratelimit-reset-after` (seconds)
  *
  * Body patterns:
+ *  - `您的限额将在 2026-08-17 11:17:40 重置` / `Your limit will reset at …`
+ *    (GLM Coding Plan 429, codes 1308–1321) — absolute reset moments; bare
+ *    stamps are server UTC+8, explicit zone markers honored, +3s grace
  *  - `Your quota will reset after 18h31m10s` / `10m15s` / `39s`
  *  - `Please retry in 250ms` / `Please retry in 12s`
  *  - `"retryDelay": "34.074824224s"` (JSON error detail field)
@@ -74,6 +140,10 @@ export function extractRetryHint(source: Response | Headers | null | undefined, 
 	}
 
 	if (!body) return undefined;
+	// Absolute reset moments are account windows → they outrank every relative
+	// hint below. Only the Zhipu family is registered today.
+	const zhipuResetWaitMs = extractZhipuResetWaitMs(body);
+	if (zhipuResetWaitMs !== undefined) return zhipuResetWaitMs;
 
 	const quotaMatch = QUOTA_RESET_PATTERN.exec(body);
 	if (quotaMatch) {
@@ -124,6 +194,61 @@ function unitToMs(unit: string): number | undefined {
 		default:
 			return undefined;
 	}
+}
+
+/**
+ * Zhipu stamp family: the wait implied by an absolute reset moment in the
+ * body. The reset-wording bracket keeps unrelated embedded dates out.
+ */
+
+function extractZhipuResetWaitMs(body: string): number | undefined {
+	const stamp = parseZhipuResetStamp(body);
+	if (!stamp) return undefined;
+	const maxDeltaMs = ZHIPU_RESET_AT_MAX_DELTA_MS[stamp.code] ?? ZHIPU_RESET_AT_MAX_DELTA_MS_DEFAULT;
+	const deltaMs = stamp.resetAtMs - Date.now();
+	// Future within the code's horizon → the wait.
+	if (deltaMs > 0 && deltaMs <= maxDeltaMs) return deltaMs + RESET_AT_BUFFER_MS;
+	// Bare + stale past the window → the UTC+8 assumption is likely wrong for
+	// this server; reread the same wall clock as UTC — Zhipu support's
+	// fallback advice. Zoned stamps have nothing to correct.
+	if (!stamp.explicitZone && deltaMs <= -ZHIPU_RESET_AT_STALE_MS) {
+		const utcDeltaMs = deltaMs + ZHIPU_RESET_AT_ZONE_SHIFT_MS;
+		if (utcDeltaMs > 0 && utcDeltaMs <= maxDeltaMs) return utcDeltaMs + RESET_AT_BUFFER_MS;
+	}
+	return undefined;
+}
+function parseZhipuResetStamp(body: string): { resetAtMs: number; code: string; explicitZone: boolean } | undefined {
+	// Code, wording, and stamp must come from one message — a code elsewhere
+	// in the body must not vouch for them.
+	const envelope = ZHIPU_JSON_ERROR_ENVELOPE.exec(body);
+	const code = envelope?.groups?.code ?? ZHIPU_TYPE_CODE_PATTERN.exec(body)?.groups?.code;
+	if (code === undefined) return undefined;
+	const text = envelope?.groups?.message ?? body;
+	if (!ZHIPU_CODE_MESSAGES[code]?.test(text)) return undefined;
+	for (const pattern of [ZHIPU_CN_RESET_AT_PATTERN, ZHIPU_EN_RESET_AT_PATTERN]) {
+		const token = ZHIPU_RESET_AT_TOKEN.exec(pattern.exec(text)?.[1] ?? "")?.groups;
+		if (!token) continue;
+		// Date.parse rolls an impossible day ("2026-02-30" → Mar 2); a server
+		// never states a rolled date → mismatch discards the stamp.
+		const day = Number(token.day);
+		if (new Date(Date.UTC(Number(token.year), Number(token.month) - 1, day)).getUTCDate() !== day) continue;
+		const pad2 = (value: string) => value.padStart(2, "0");
+		const iso =
+			`${token.year}-${pad2(token.month!)}-${pad2(token.day!)}` +
+			`T${token.hour!.padStart(2, "0")}:${token.minute}:${token.second ?? "00"}` +
+			zoneMarkerToIsoSuffix(token.zone);
+		const resetAtMs = Date.parse(iso);
+		if (!Number.isNaN(resetAtMs)) return { resetAtMs, code, explicitZone: token.zone !== undefined };
+	}
+	return undefined;
+}
+
+function zoneMarkerToIsoSuffix(zone: string | undefined): string {
+	if (zone === undefined) return ZHIPU_RESET_AT_ASSUMED_ZONE;
+	const marker = zone.trim().toUpperCase();
+	if (marker === "Z" || marker === "UTC" || marker === "GMT") return "Z";
+	const digits = marker.slice(1).replace(":", "");
+	return `${marker[0]!}${digits.slice(0, 2)}:${digits.slice(2) || "00"}`;
 }
 
 export interface FetchWithRetryOptions extends RequestInit {
