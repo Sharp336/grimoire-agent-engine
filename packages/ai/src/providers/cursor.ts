@@ -499,30 +499,39 @@ function streamCursorWithWireMode(
 		let abortSettled: Promise<void> | undefined;
 		let drainTimedOut = false;
 		const drainInFlightDispatches = async (): Promise<void> => {
+			if (inFlightDispatches.size === 0) return;
 			const signal = options?.signal;
+			let timeoutId: NodeJS.Timeout | undefined;
 			const timeout = new Promise<"timeout">(resolve => {
-				setTimeout(() => resolve("timeout"), CURSOR_TURN_END_DRAIN_TIMEOUT_MS);
+				timeoutId = setTimeout(() => resolve("timeout"), CURSOR_TURN_END_DRAIN_TIMEOUT_MS);
+				// A bounded drain must not become the reason a completed print-mode
+				// process stays alive.
+				timeoutId.unref();
 			});
-			while (inFlightDispatches.size > 0) {
-				if (signal?.aborted) return;
-				const settled = Promise.all([...inFlightDispatches]).then(() => "settled" as const);
-				if (!signal) {
-					const winner = await Promise.race([settled, timeout]);
+			try {
+				while (inFlightDispatches.size > 0) {
+					if (signal?.aborted) return;
+					const settled = Promise.all([...inFlightDispatches]).then(() => "settled" as const);
+					if (!signal) {
+						const winner = await Promise.race([settled, timeout]);
+						if (winner === "timeout") {
+							drainTimedOut = true;
+							return;
+						}
+						continue;
+					}
+					abortSettled ??= new Promise<void>(resolve =>
+						signal.addEventListener("abort", () => resolve(), { once: true }),
+					);
+					const winner = await Promise.race([settled, abortSettled.then(() => "abort" as const), timeout]);
 					if (winner === "timeout") {
 						drainTimedOut = true;
 						return;
 					}
-					continue;
+					if (winner === "abort") return;
 				}
-				abortSettled ??= new Promise<void>(resolve =>
-					signal.addEventListener("abort", () => resolve(), { once: true }),
-				);
-				const winner = await Promise.race([settled, abortSettled.then(() => "abort" as const), timeout]);
-				if (winner === "timeout") {
-					drainTimedOut = true;
-					return;
-				}
-				if (winner === "abort") return;
+			} finally {
+				clearTimeout(timeoutId);
 			}
 		};
 
