@@ -53,6 +53,7 @@ import {
 	veniceModelManagerOptions,
 	vercelAiGatewayModelManagerOptions,
 	vllmModelManagerOptions,
+	volcengineAgentPlanModelManagerOptions,
 	waferServerlessModelManagerOptions,
 	xaiModelManagerOptions,
 	xaiOAuthModelManagerOptions,
@@ -538,6 +539,12 @@ export const CATALOG_PROVIDERS = [
 		createModelManagerOptions: (config: ModelManagerConfig) => yoloAutoModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
 		catalogDiscovery: { label: "Yolo-Auto" },
+	},
+	{
+		id: "volcengine-agent-plan",
+		defaultModel: "ark-code-latest",
+		envVars: ["VOLCENGINE_AGENT_PLAN_API_KEY"],
+		createModelManagerOptions: () => volcengineAgentPlanModelManagerOptions(),
 	},
 	{
 		id: "zai",
