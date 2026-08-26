@@ -226,13 +226,17 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 
 	const rlm_query = async (prompt, opts, ...rest) => {
 		const o = optionsArg("rlm_query", opts, rest, ["agent"], "{ agent }");
-		return agent(prompt, { agent: o.agent ?? "task" });
+		// Omit the agent field entirely when unset (rather than defaulting to
+		// "task") so agent()'s own bridge resolves the session's spawn-policy
+		// default, matching what a bare agent(prompt) call would pick.
+		return o.agent != null ? agent(prompt, { agent: o.agent }) : agent(prompt);
 	};
 
 	const rlm_query_batched = async (prompts, opts, ...rest) => {
 		const o = optionsArg("rlm_query_batched", opts, rest, ["agent"], "{ agent }");
-		const agentId = o.agent ?? "task";
-		return parallel(Array.from(prompts ?? []).map(p => async () => rlm_query(p, { agent: agentId })));
+		return parallel(
+			Array.from(prompts ?? []).map(p => async () => rlm_query(p, o.agent != null ? { agent: o.agent } : undefined)),
+		);
 	};
 
 	const chunk = (text, opts, ...rest) => {

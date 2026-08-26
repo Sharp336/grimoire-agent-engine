@@ -149,14 +149,22 @@ describe("eval JS RLM helpers", () => {
 		for (const c of completions) expect(c.args.model).toBe("smol");
 	});
 
-	it("rlm_query delegates to agent() with the default agent", async () => {
+	it("rlm_query delegates to agent() with no agent field, resolving the session's spawn-policy default", async () => {
 		const { calls, stub } = recordingBridge();
 		const sandbox = loadJsPrelude(stub);
 		const out = await (sandbox.rlm_query as RlmQueryFn)("solve this");
 		expect(out).toBe("reply-1");
 		const agentCall = calls.filter(c => c.name === "__agent__");
 		expect(agentCall).toHaveLength(1);
-		expect(agentCall[0]!.args).toEqual({ prompt: "solve this", agent: "task", handle: false });
+		expect(agentCall[0]!.args).toEqual({ prompt: "solve this", handle: false });
+	});
+
+	it("rlm_query forwards an explicit agent override", async () => {
+		const { calls, stub } = recordingBridge();
+		const sandbox = loadJsPrelude(stub);
+		await (sandbox.rlm_query as RlmQueryFn)("solve this", { agent: "scout" });
+		const agentCall = calls.filter(c => c.name === "__agent__");
+		expect(agentCall[0]!.args).toEqual({ prompt: "solve this", agent: "scout", handle: false });
 	});
 
 	it("rlm_query_batched fans out through parallel and preserves order", async () => {

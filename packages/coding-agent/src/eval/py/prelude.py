@@ -689,11 +689,11 @@ if "__omp_prelude_loaded__" not in globals():
         """Parallel sub-LLM completions, preserving input order."""
         return parallel([lambda p=p: llm_query(p, model=model) for p in prompts])
 
-    def rlm_query(prompt, *, agent="task"):
-        """Recursive subagent via agent(); returns its text output. `agent` is resolved through globals() so the `agent` parameter does not shadow the module-level agent() helper."""
+    def rlm_query(prompt, *, agent=None):
+        """Recursive subagent via agent(); returns its text output. `agent=None` (default) resolves the session's spawn-policy default. `agent` is resolved through globals() so the `agent` parameter does not shadow the module-level agent() helper."""
         return globals()["agent"](prompt, agent=agent)
 
-    def rlm_query_batched(prompts, *, agent="task"):
+    def rlm_query_batched(prompts, *, agent=None):
         """Parallel recursive subagents, preserving input order."""
         return parallel([lambda p=p: rlm_query(p, agent=agent) for p in prompts])
 

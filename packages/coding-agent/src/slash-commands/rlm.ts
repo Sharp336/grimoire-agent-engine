@@ -1,6 +1,8 @@
 import { prompt } from "@oh-my-pi/pi-utils";
 import { resolveLocalUrlToPath } from "../internal-urls/local-protocol";
 import rlmTemplate from "../prompts/rlm.md" with { type: "text" };
+import type { ToolSession } from "../tools";
+import { resolveEvalBackends } from "../tools/eval-backends";
 import { commandConsumed } from "./helpers/parse";
 import type { ParsedSlashCommand, SlashCommandResult, SlashCommandRuntime } from "./types";
 
@@ -18,6 +20,16 @@ export async function handleRlmCommand(
 	if (!runtime.settings.get("rlm.enabled")) {
 		await runtime.output(
 			"RLM mode is disabled. Enable it via the rlm.enabled setting (e.g. omp config set rlm.enabled true).",
+		);
+		return commandConsumed();
+	}
+	// RLM's whole workflow runs inside the eval sandbox (context/metadata/chunk/
+	// llm_query). Without at least one eval backend enabled, the strategy prompt
+	// below would hand the model instructions it has no tool to execute.
+	const backends = resolveEvalBackends({ settings: runtime.settings } as ToolSession);
+	if (!backends.python && !backends.js && !backends.ruby && !backends.julia) {
+		await runtime.output(
+			"RLM mode requires an eval backend, but none is enabled in this session (eval.py/eval.js/eval.rb/eval.jl are all off or PI_PY/PI_JS/PI_RB/PI_JL disable them). Enable at least one before using /rlm.",
 		);
 		return commandConsumed();
 	}

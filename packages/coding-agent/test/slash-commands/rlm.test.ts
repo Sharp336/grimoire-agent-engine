@@ -1,15 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import type { AcpBuiltinSlashCommandResult, SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
 
 const DISABLE_MESSAGE =
 	"RLM mode is disabled. Enable it via the rlm.enabled setting (e.g. omp config set rlm.enabled true).";
 
-function acpRuntime(options?: { enabled?: boolean }) {
-	const store: Record<string, unknown> = { "rlm.enabled": options?.enabled ?? false };
+function acpRuntime(options?: { enabled?: boolean; backends?: Record<string, boolean> }) {
+	const store: Record<string, unknown> = {
+		"rlm.enabled": options?.enabled ?? false,
+		...options?.backends,
+	};
 	const settings = {
 		get: (path: string) => store[path],
 	} as unknown as SlashCommandRuntime["settings"];
@@ -78,6 +81,15 @@ describe("/rlm slash command", () => {
 		expect(match).not.toBeNull();
 		const writtenPath = path.join(h.artifactsDir, "local", match?.[1] ?? "");
 		expect(fs.readFileSync(writtenPath, "utf-8")).toBe("summarize the report");
+	});
+
+	it("rejects with an actionable message when no eval backend is enabled", async () => {
+		const h = acpRuntime({ enabled: true, backends: { "eval.py": false, "eval.js": false } });
+
+		const result = await executeAcpBuiltinSlashCommand("/rlm summarize the report", h.runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(h.output).toHaveBeenCalledWith(expect.stringContaining("requires an eval backend"));
 	});
 
 	it("still returns a prompt when invoked without arguments", async () => {
