@@ -451,8 +451,8 @@ export class CollabGuestLink {
 		this.#ctx.syncRunningSubagentBadge();
 		this.#assistantStreamSynced = false;
 		setSessionTerminalTitle(pending.state.sessionName ?? pending.header.title, pending.state.cwd);
-		this.#ctx.chatContainer.clear();
-		this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
+		this.#ctx.chatContainer.disposeChildren();
+		await this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
 		await this.#ctx.reloadTodos();
 		this.#updateStatusSegment();
 		this.#readOnly = pending.readOnly;
@@ -504,6 +504,14 @@ export class CollabGuestLink {
 				this.#ctx.sessionManager.ingestReplicatedEntry(frame.entry);
 				if (frame.entry.type === "message") {
 					this.#ctx.session.agent.replaceMessages([...this.#ctx.session.messages, frame.entry.message]);
+				} else if (frame.entry.type === "compaction" || frame.entry.type === "branch_summary") {
+					// Compaction/branch entries rewrite the host's model context: the
+					// pre-boundary transcript collapses behind a summary. Appending
+					// the entry alone leaves the replica holding the stale full
+					// history, so rebuild the message array from the ingested entries
+					// exactly as the host does after appendCompaction/branchWithSummary
+					// (session-maintenance.ts, agent-session.ts).
+					this.#ctx.session.agent.replaceMessages(this.#ctx.session.buildDisplaySessionContext().messages);
 				}
 				break;
 			}
@@ -749,7 +757,7 @@ export class CollabGuestLink {
 		this.#ctx.statusLine.resetActiveTime();
 		this.#ctx.ui.requestRender();
 		this.#ctx.updateEditorBorderColor();
-		this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
+		await this.#ctx.renderInitialMessages({ clearTerminalHistory: true });
 		await this.#ctx.reloadTodos();
 		this.#ctx.ui.requestRender(true, { clearScrollback: true });
 	}

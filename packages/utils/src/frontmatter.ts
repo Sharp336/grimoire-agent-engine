@@ -126,7 +126,15 @@ export function parseFrontmatter(
 	content: string,
 	options?: FrontmatterOptions,
 ): { frontmatter: Record<string, unknown>; body: string } {
-	const { location, source, fallback, normalize = true, level = "warn", repair = true, rawKeys = false } = options ?? {};
+	const {
+		location,
+		source,
+		fallback,
+		normalize = true,
+		level = "warn",
+		repair = true,
+		rawKeys = false,
+	} = options ?? {};
 	const finalizeKeys = (fm: Record<string, unknown>): Record<string, unknown> =>
 		rawKeys ? fm : normalizeFrontmatterKeys(fm);
 	const loc = location ?? source;

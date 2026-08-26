@@ -18,6 +18,7 @@ import {
 	TrendEmpty,
 } from "../components/models-table-shared";
 import { formatRangeTick, rangeMeta } from "../components/range-meta";
+import { formatEstimatedCost } from "../data/formatters";
 import { useResource } from "../data/useResource";
 import { buildModelPerformanceLookup } from "../data/view-models";
 import type { ModelPerformancePoint, ModelStats, ModelTimeSeriesPoint, TimeRange } from "../types";
@@ -266,7 +267,7 @@ function ModelsTable({
 				columns={[
 					{ label: "Model" },
 					{ label: "Requests", align: "right" },
-					{ label: "Cost", align: "right" },
+					{ label: "API-equivalent estimate", align: "right" },
 					{ label: "Tokens", align: "right" },
 					{ label: "Tokens/s", align: "right" },
 					{ label: "TTFT", align: "right" },
@@ -295,7 +296,7 @@ function ModelsTable({
 									{model.totalRequests.toLocaleString()}
 								</div>,
 								<div key="cost" className="text-right text-[var(--text-secondary)] font-mono text-sm">
-									${model.totalCost.toFixed(2)}
+									{formatEstimatedCost(model.totalCost, model.unpricedRequests)}
 								</div>,
 								<div key="tokens" className="text-right text-[var(--text-secondary)] font-mono text-sm">
 									{(model.totalInputTokens + model.totalOutputTokens).toLocaleString()}
@@ -322,7 +323,7 @@ function ModelsTable({
 								<div className="grid gap-4" style={{ gridTemplateColumns: "200px 1fr" }}>
 									<div className="space-y-4 text-sm">
 										<div>
-											<div className="text-[var(--text-primary)] font-medium mb-2">Quality</div>
+											<div className="text-[var(--text-primary)] font-medium mb-2">Efficiency</div>
 											<div className="space-y-1 text-[var(--text-secondary)]">
 												<div className="flex items-center justify-between">
 													<span>Error rate</span>
@@ -336,8 +337,18 @@ function ModelsTable({
 												</div>
 												<div className="flex items-center justify-between">
 													<span>Cache rate</span>
-													<span className="text-[var(--accent-cyan)]">
-														{(model.cacheRate * 100).toFixed(1)}%
+													<span className="font-mono">{(model.cacheRate * 100).toFixed(1)}%</span>
+												</div>
+												<div className="flex items-center justify-between">
+													<span>Cache savings</span>
+													<span
+														className={
+															model.cacheSavings < 0
+																? "text-[var(--accent-red)]"
+																: "text-[var(--accent-green)]"
+														}
+													>
+														{(model.cacheSavings * 100).toFixed(1)}%
 													</span>
 												</div>
 											</div>

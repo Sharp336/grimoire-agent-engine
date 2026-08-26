@@ -11,7 +11,7 @@ import {
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
 import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
-import { formatDuration, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, logger, Snowflake, sanitizeText } from "@oh-my-pi/pi-utils";
 import { shouldEnableAppendOnlyContext } from "../../config/append-only-context-mode";
 import { type BashResult, isPersistentShellCdCommand } from "../../exec/bash-executor";
 import { type LoadedCustomShare, loadCustomShare } from "../../export/custom-share";
@@ -29,7 +29,7 @@ import {
 	summarizeMentalModel,
 } from "../../hindsight";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../../memory-backend";
-import { BashExecutionComponent } from "../../modes/components/bash-execution";
+import { BashExecutionComponent, bashPtyViewport } from "../../modes/components/bash-execution";
 import { BorderedLoader } from "../../modes/components/bordered-loader";
 import { DynamicBorder } from "../../modes/components/dynamic-border";
 import { EvalExecutionComponent } from "../../modes/components/eval-execution";
@@ -1161,7 +1161,16 @@ export class CommandController {
 						this.ctx.bashComponent.appendOutput(chunk);
 					}
 				},
-				{ excludeFromContext, useUserShell: true },
+				{
+					excludeFromContext,
+					useUserShell: true,
+					// User-shell zsh/fish `!` commands run on a headless PTY; raw
+					// bytes render through the component's vterm replay (color-safe).
+					pty: {
+						...bashPtyViewport(this.ctx.ui),
+						onChunk: chunk => this.ctx.bashComponent?.appendPtyChunk(chunk),
+					},
+				},
 			);
 			if (this.ctx.bashComponent) {
 				const meta = outputMeta().truncationFromSummary(result, { direction: "tail" }).get();
@@ -1283,8 +1292,9 @@ export class CommandController {
 	}
 
 	/**
-	 * TUI handler for `/shake`. `elide` drops heavy structural content and
-	 * `images` strips image blocks. Rebuilds the chat and reports counts.
+	 * TUI handler for `/shake`. `elide` drops heavy structural content,
+	 * `images` strips image blocks, and `thinking` drops all thinking blocks.
+	 * Rebuilds the chat and reports counts.
 	 */
 	async handleShakeCommand(mode: ShakeMode): Promise<void> {
 		let result: ShakeResult;
@@ -1295,7 +1305,11 @@ export class CommandController {
 			return;
 		}
 
-		const dropped = result.toolResultsDropped + result.blocksDropped + (result.imagesDropped ?? 0);
+		const dropped =
+			result.toolResultsDropped +
+			result.blocksDropped +
+			(result.imagesDropped ?? 0) +
+			(result.thinkingBlocksDropped ?? 0);
 		if (dropped === 0) {
 			this.ctx.showStatus("Nothing to shake.");
 			return;
@@ -1412,7 +1426,8 @@ export class CommandController {
 		this.ctx.ui.requestRender();
 
 		try {
-			// Handoff generation runs as a oneshot request; the new session is shown after it completes.
+			// Handoff generation runs as a oneshot request; the document is then
+			// committed as a compaction entry on this session.
 			const result = await this.ctx.session.handoff(customInstructions);
 
 			if (!result) {
@@ -1420,25 +1435,35 @@ export class CommandController {
 				return;
 			}
 
-			// Rebuild chat from the new session (which now contains the handoff document).
+			// Rebuild chat from the session, which now shows the handoff compaction divider.
 			this.ctx.clearTransientSessionUi();
-			this.ctx.renderInitialMessages();
+			await this.ctx.renderInitialMessages();
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorBorderColor();
 			await this.ctx.reloadTodos();
 
 			this.ctx.present([
 				new Spacer(1),
-				new Text(`${theme.fg("accent", `${theme.status.success} New session started with handoff context`)}`, 1, 1),
+				new Text(
+					`${theme.fg("accent", `${theme.status.success} Context handed off and compacted in place`)}`,
+					1,
+					1,
+				),
 			]);
 			if (result.savedPath) {
 				this.ctx.showStatus(`Handoff document saved to: ${result.savedPath}`);
 			}
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			if (message === "Handoff cancelled" || (error instanceof Error && error.name === "AbortError")) {
+			// `session.handoff()` normalizes genuine cancellations to this exact message; a
+			// provider error (even one named AbortError) is re-thrown verbatim so it surfaces
+			// as a real failure instead of a false "cancelled".
+			if (message === "Handoff cancelled") {
 				this.ctx.showError("Handoff cancelled");
 			} else {
+				// Persist the real failure so it is debuggable after the transient
+				// TUI error clears (#7993).
+				logger.error("Handoff failed", { error: message });
 				this.ctx.showError(`Handoff failed: ${message}`);
 			}
 		} finally {
