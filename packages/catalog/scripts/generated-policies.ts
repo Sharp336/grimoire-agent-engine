@@ -18,6 +18,7 @@ import { isMimoModelIdOrName } from "../src/identity/family";
 import { getLongestModelLikeIdSegment } from "../src/identity/id";
 import { buildModelReferenceIndex, resolveModelReference } from "../src/identity/reference";
 import { resolveModelThinking } from "../src/model-thinking";
+import { OPENAI_GPT_56_SOL_STANDARD_COST } from "../src/openai-pricing";
 import { isOllamaCloudOutputCapped, OLLAMA_CLOUD_MAX_OUTPUT_TOKENS } from "../src/provider-models/ollama";
 import {
 	ALIBABA_TOKEN_PLAN_STATIC_MODELS,
@@ -157,6 +158,11 @@ const OPENAI_GPT_5_6_LONG_CONTEXT_COST_BY_MODEL_ID: Readonly<Record<string, Long
 	"gpt-5.6-luna": OPENAI_GPT_56_LONG_CONTEXT_COSTS.luna,
 	"gpt-5.6-sol": OPENAI_GPT_56_LONG_CONTEXT_COSTS.sol,
 	"gpt-5.6-terra": OPENAI_GPT_56_LONG_CONTEXT_COSTS.terra,
+};
+const OPENAI_GPT_5_6_SOL_STANDARD_MODEL_IDS: Record<string, true> = {
+	"daybreak-blue-latest": true,
+	"gpt-5.6": true,
+	"gpt-5.6-sol": true,
 };
 
 const OPENAI_NONE_EFFORT_MODEL_IDS: Record<string, true> = {
@@ -403,6 +409,7 @@ function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
 			model.provider === "minimax-code-cn")
 	) {
 		model.contextWindow = 1_000_000;
+		model.maxTokens = 128_000;
 	}
 
 	if (
@@ -522,6 +529,9 @@ function applyOpenAICatalogPolicy(model: ModelSpec<Api>, parsedModel: OpenAIMode
 	const isFirstPartyCodex = model.provider === "openai-codex" && model.api === "openai-codex-responses";
 	if (isFirstPartyResponses && modelOrRequestIdValue(model, OPENAI_NONE_EFFORT_MODEL_IDS)) {
 		model.compat = { ...(model.compat ?? {}), reasoningDisableMode: "none-effort" };
+	}
+	if (isFirstPartyResponses && modelOrRequestIdValue(model, OPENAI_GPT_5_6_SOL_STANDARD_MODEL_IDS)) {
+		model.cost = { ...model.cost, ...OPENAI_GPT_56_SOL_STANDARD_COST };
 	}
 	const longContextCost =
 		isFirstPartyResponses || isFirstPartyCodex

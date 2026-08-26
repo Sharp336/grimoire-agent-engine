@@ -40,6 +40,7 @@ import {
 	buildXaiOAuthStaticSeed,
 	clampFireworksKimiMaxTokens,
 	clampKimiK27CodeMaxTokens,
+	FREEPI_STATIC_MODELS,
 	fetchWellKnownModels,
 	GMI_CLOUD_STATIC_MODELS,
 	isFireworksKimiK2ModelId,
@@ -600,6 +601,11 @@ async function generateModels() {
 	// authoritative and replaces the seed.
 	if (!authoritativeCatalogProviders.has("yolo-auto")) {
 		allModels.push(...YOLO_AUTO_STATIC_MODELS);
+	}
+	// Seed FreePI's closed-alpha default so a fresh install and credential-free
+	// catalog regeneration can resolve it before authenticated discovery runs.
+	if (!authoritativeCatalogProviders.has("freepi")) {
+		allModels.push(...FREEPI_STATIC_MODELS);
 	}
 	// Seed the GMI Cloud default model so a fresh install (and a regen without a
 	// `GMI_API_KEY`) still resolves the descriptor's `defaultModel` synchronously
