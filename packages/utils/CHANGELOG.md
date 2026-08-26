@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `RequestError.sessionBusy(message, data)` to represent ACP session-busy errors (`-32003`) through the shared JSON-RPC transport.
+- Exported `getComposerCacheDir` for resolving the per-project Composer cache directory, including support for `XDG_CACHE_HOME`.
+
+### Fixed
+
+- Fixed OMP sessions unexpectedly exiting during socket cleanup or optional-worker communication on Bun.
+
+## [18.0.6] - 2026-08-26
+
+### Added
+
+- Added conventional commit generation with support for dependency, security, configuration, UX, and infrastructure commit types, plus configurable caching and large-diff analysis behavior.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added

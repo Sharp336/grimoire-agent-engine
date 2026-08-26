@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed image previews displaying as garbled characters in Paseo terminals.
+- Fixed graceful shutdown so finalized output is correctly retired before handing control back to the shell.
+- Fixed terminal resizing from duplicating committed history in native scrollback.
+- Fixed autocomplete suggestions for bare-name skills such as `/batch` when no command matches the prefix more strongly.
+
+## [18.0.6] - 2026-08-26
+
+### Added
+
+- Added `Markdown.getLastRenderStableText()` to expose the stable prefix of streamed Markdown text for append-only transcript publication.
+
 ## [18.0.5] - 2026-08-25
 
 ### Breaking Changes

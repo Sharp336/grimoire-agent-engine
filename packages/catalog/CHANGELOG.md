@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed LiteLLM model discovery so model pricing is correctly populated when pricing information is provided by a later metadata endpoint.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added
