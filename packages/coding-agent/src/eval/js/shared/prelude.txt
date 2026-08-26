@@ -273,9 +273,30 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			}
 			return chunks;
 		}
-		const lines = __splitlines(text);
+		// Incremental line scan instead of __splitlines(text) + slice/join,
+		// which materializes a full array of every line substring: for a
+		// large line-rich payload that array would coexist with the joined
+		// chunk strings and the original text, tripling memory use and
+		// risking an eval-worker OOM before any chunk is delegated. Only
+		// `size` lines are buffered at a time; the scan mirrors
+		// __splitlines' exact semantics (\r\n|\r|\n boundaries, a trailing
+		// terminator produces no empty last line).
+		const str = String(text);
 		const chunks = [];
-		for (let i = 0; i < lines.length; i += size) chunks.push(lines.slice(i, i + size).join("\n"));
+		let buf = [];
+		let last = 0;
+		const lineBreak = /\r\n|\r|\n/g;
+		let m;
+		while ((m = lineBreak.exec(str)) !== null) {
+			buf.push(str.slice(last, m.index));
+			if (buf.length === size) {
+				chunks.push(buf.join("\n"));
+				buf = [];
+			}
+			last = m.index + m[0].length;
+		}
+		if (last < str.length) buf.push(str.slice(last));
+		if (buf.length > 0) chunks.push(buf.join("\n"));
 		return chunks;
 	};
 

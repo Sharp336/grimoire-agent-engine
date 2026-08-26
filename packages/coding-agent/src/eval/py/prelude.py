@@ -703,8 +703,29 @@ if "__omp_prelude_loaded__" not in globals():
         if not isinstance(size, int) or size <= 0:
             raise ValueError("chunk size must be a positive integer")
         if by == "lines":
-            lines = text.splitlines()
-            return ["\n".join(lines[i : i + size]) for i in range(0, len(lines), size)]
+            # Scan line offsets incrementally (lazy finditer over the same
+            # line-break separators splitlines() understands) instead of
+            # text.splitlines(), which materializes a full list of every line
+            # substring: for a large line-rich payload that list would coexist
+            # with the joined chunk strings and the original text, tripling
+            # memory use and risking an eval-worker OOM before any chunk is
+            # delegated. Only `size` lines are buffered at a time.
+            if text == "":
+                return []
+            chunks = []
+            buf = []
+            last = 0
+            for m in _line_break_re.finditer(text):
+                buf.append(text[last : m.start()])
+                if len(buf) == size:
+                    chunks.append("\n".join(buf))
+                    buf = []
+                last = m.end()
+            if last < len(text):
+                buf.append(text[last:])
+            if buf:
+                chunks.append("\n".join(buf))
+            return chunks
         # Bounded by character count (~4 chars/token, matching metadata()'s
         # approx_tokens heuristic) rather than whitespace-word splitting: an
         # unbroken multi-MB line (minified JSON/base64/code) must still be

@@ -53,6 +53,20 @@ describe("eval JS RLM helpers", () => {
 		expect(chunk("a\nb\nc", { size: 1 })).toEqual(["a", "b", "c"]);
 	});
 
+	it("chunk by lines preserves __splitlines semantics on CRLF, trailing newlines, and uneven sizes", () => {
+		const sandbox = loadJsPrelude(async () => ({}));
+		const chunk = sandbox.chunk as ChunkFn;
+		// The incremental line scan must match the previous
+		// __splitlines() + slice/join behavior exactly: \r\n|\r|\n are the
+		// only boundaries, and a trailing terminator yields no empty last line.
+		expect(chunk("a\r\nb\r\nc", { size: 2 })).toEqual(["a\nb", "c"]);
+		expect(chunk("a\nb\n", { size: 1 })).toEqual(["a", "b"]); // trailing \n dropped
+		expect(chunk("a\r\nb\r\n", { size: 1 })).toEqual(["a", "b"]); // trailing CRLF dropped
+		expect(chunk("a\rb\nc", { size: 2 })).toEqual(["a\nb", "c"]); // lone \r boundary
+		expect(chunk("\n\n", { size: 1 })).toEqual(["", ""]); // internal blank lines kept
+		expect(chunk("a\n\nb", { size: 1 })).toEqual(["a", "", "b"]);
+	});
+
 	it("chunk splits 'tokens' mode into character-bounded windows (~4 chars/token)", () => {
 		const sandbox = loadJsPrelude(async () => ({}));
 		const chunk = sandbox.chunk as ChunkFn;
@@ -232,6 +246,26 @@ print(json.dumps(chunk("", by="tokens")))
 		expect(JSON.parse(lines[2]!)).toEqual(["a b c d"]);
 		expect(JSON.parse(lines[3]!)).toEqual([]);
 		expect(JSON.parse(lines[4]!)).toEqual([]);
+	});
+
+	it("chunk by lines preserves splitlines semantics on CRLF, Unicode separators, and uneven sizes", async () => {
+		const r = await run(`
+import json
+print(json.dumps(chunk("a\\r\\nb\\r\\nc", size=2)))
+print(json.dumps(chunk("a\\nb\\n", size=1)))
+print(json.dumps(chunk("\\n\\n", size=1)))
+print(json.dumps(chunk("a\\n\\nb", size=1)))
+print(json.dumps(chunk("a\\u2028b\\u2029c", size=2)))
+print(json.dumps(chunk("a\\v\\fb\\x85c", size=2)))
+`);
+		expect(r.exitCode).toBe(0);
+		const lines = r.stdout.trim().split("\n");
+		expect(JSON.parse(lines[0]!)).toEqual(["a\nb", "c"]);
+		expect(JSON.parse(lines[1]!)).toEqual(["a", "b"]);
+		expect(JSON.parse(lines[2]!)).toEqual(["", ""]);
+		expect(JSON.parse(lines[3]!)).toEqual(["a", "", "b"]);
+		expect(JSON.parse(lines[4]!)).toEqual(["a\nb", "c"]);
+		expect(JSON.parse(lines[5]!)).toEqual(["a\n", "b\nc"]); // \v and \f are adjacent boundaries -> blank line
 	});
 
 	it("chunk 'tokens' mode bounds a single unbroken run with no whitespace", async () => {
