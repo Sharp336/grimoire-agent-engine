@@ -516,6 +516,35 @@ export class AskDialogComponent implements Component, Focusable {
 			// can narrow a multi-select list and toggle a match without closing
 			// the filter; Space never becomes query text in multi mode.
 			// Single-select Space has no toggle, so it stays filter input.
+			// The filter key itself toggles the editor closed while keeping the
+			// query and the filtered focus: Enter activates the focused row and
+			// Escape discards the filter, so this is the only route to the
+			// advertised note shortcut for a narrowed match.
+			if (getKeybindings().matches(keyData, "app.ask.filter")) {
+				this.#filterQuery = this.#filterInput.getValue();
+				this.#filterOpen = false;
+				this.#filterInput = undefined;
+				this.#requestRender();
+				return;
+			}
+			// Tab keeps switching tabs while the filter is open; switching
+			// clears the filter exactly as it does outside the editor.
+			if (this.#hasSubmitTab() && this.#matchesTabSwitch(keyData)) {
+				this.#requestRender();
+				return;
+			}
+			// Expand/collapse are control keys with no query-text meaning, so
+			// they keep acting on the focused filtered row instead of moving
+			// the query caret. The note key is printable, so it stays query
+			// text while the editor is open — closing the editor with the
+			// filter key above is the route to it.
+			if (
+				getKeybindings().matches(keyData, "app.ask.expand") ||
+				getKeybindings().matches(keyData, "app.ask.collapse")
+			) {
+				this.#handleQuestionInput(keyData);
+				return;
+			}
 			const active = this.#activeQuestionState();
 			const isSpace = matchesKey(keyData, "space") || keyData === " ";
 			if (active?.question.multi && isSpace) {
@@ -850,7 +879,15 @@ export class AskDialogComponent implements Component, Focusable {
 		if (!active) return;
 		const { question, state } = active;
 		const rows = this.#visibleRows(question);
-		this.#filterAvailable = this.#questionRows(question).length > this.#bodyRows;
+		// Availability must agree with the rendered frame: wrapped labels and
+		// the focused description can overflow the body without the option
+		// count exceeding it, so keep any overflow the last render measured
+		// (#renderQuestionList recomputes it every frame) and only fall back
+		// to the count bound for keys that arrive before a first render, when
+		// #bodyRows still holds the minimum. The count bound implies the
+		// rendered one — every option is at least one line — so widening can
+		// never contradict a rendered frame.
+		this.#filterAvailable ||= this.#questionRows(question).length > this.#bodyRows;
 
 		if (getKeybindings().matches(keyData, "app.ask.filter") && this.#filterAvailable) {
 			this.#openFilter();
@@ -1066,7 +1103,6 @@ export class AskDialogComponent implements Component, Focusable {
 		const { question, state } = active;
 		const rowItems = this.#visibleRows(question);
 		state.cursorIndex = clamp(state.cursorIndex, 0, Math.max(0, rowItems.length - 1));
-		this.#filterAvailable = this.#questionRows(question).length > maxRows;
 		return this.#renderQuestionList(question, state, rowItems, width, maxRows);
 	}
 
@@ -1148,6 +1184,13 @@ export class AskDialogComponent implements Component, Focusable {
 		}
 		const { allLines, lineStartByRow, hidden } = renderedRows;
 		this.#hiddenDescriptionLines = hidden;
+		// Availability follows the rendered height, not the option count:
+		// wrapped labels and the focused description can overflow the list
+		// while the count still fits, and every overflowing list must be
+		// filterable. Set here — after the overflow-aware re-render settles
+		// the final line set — so the footer hint and the "/"-opens check
+		// read the same flag in the same frame.
+		this.#filterAvailable = allLines.length > listRows;
 		const cursorStart = lineStartByRow[state.cursorIndex] ?? 0;
 		const cursorEnd = lineStartByRow[state.cursorIndex + 1] ?? allLines.length;
 		this.#questionCanPage = cursorEnd - cursorStart > listRows;

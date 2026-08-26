@@ -1,9 +1,9 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AskDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/ask-dialog";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, setThemeInstance, type Theme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { CURSOR_MARKER, setKeybindings } from "@oh-my-pi/pi-tui";
 
 const DOWN = "\x1b[B";
@@ -17,6 +17,10 @@ const SHIFT_TAB = "\x1b[Z";
 const RIGHT = "\x1b[C";
 
 let darkTheme = await getThemeByName("dark");
+// setThemeInstance replaces process-wide theme state and disables
+// auto-detection, so capture the prior instance and restore it after the
+// file; otherwise later test files inherit this file's dark theme.
+let priorTheme: Theme | undefined;
 
 function render(component: AskDialogComponent): string {
 	return stripVTControlCharacters(component.render(80).join("\n"));
@@ -24,12 +28,14 @@ function render(component: AskDialogComponent): string {
 
 describe("AskDialogComponent", () => {
 	beforeAll(async () => {
+		priorTheme = theme;
 		darkTheme = await getThemeByName("dark");
 		if (!darkTheme) throw new Error("Failed to load dark theme");
 	});
 
 	beforeEach(() => {
-		setThemeInstance(darkTheme!);
+		if (!darkTheme) throw new Error("Failed to load dark theme");
+		setThemeInstance(darkTheme);
 		setKeybindings(KeybindingsManager.inMemory({ "tui.select.cancel": "ctrl+g" }));
 	});
 
@@ -37,6 +43,10 @@ describe("AskDialogComponent", () => {
 		setKeybindings(KeybindingsManager.inMemory());
 		vi.useRealTimers();
 		vi.restoreAllMocks();
+	});
+
+	afterAll(() => {
+		if (priorTheme) setThemeInstance(priorTheme);
 	});
 
 	it("single-question, single-select: Enter on option submits immediately", () => {
@@ -1975,6 +1985,125 @@ describe("AskDialogComponent", () => {
 			component.handleInput(ENTER);
 			expect(onSubmit).toHaveBeenCalledTimes(1);
 			expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Alpha match"]);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("expand acts on the focused filtered row and the filter key closes the editor keeping the query", async () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const onPrompt = vi.fn().mockReturnValue(Promise.resolve("kept note"));
+			const onSubmit = vi.fn();
+			const options = [
+				{
+					label: "Alpha match",
+					description: Array.from({ length: 5 }, (_, index) => `DESC-LINE-${index + 1}`).join("\n"),
+				},
+				{ label: "Bravo match" },
+				...Array.from({ length: 4 }, (_, index) => ({ label: `Filler ${index}` })),
+			];
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit,
+				onCancel: vi.fn(),
+				onPrompt,
+			});
+			component.focused = true;
+			component.handleInput("/");
+			for (const ch of "match") component.handleInput(ch);
+			// The collapsed focused description hides lines behind a counted
+			// cue; expand must act on the focused filtered row instead of
+			// moving the query caret, with the filter bar still open.
+			const collapsed = stripVTControlCharacters(component.render(80).join("\n"));
+			expect(collapsed).toContain("/ match");
+			expect(collapsed).toContain("3 more");
+			expect(collapsed).not.toContain("DESC-LINE-4");
+			component.handleInput(RIGHT);
+			const expanded = stripVTControlCharacters(component.render(80).join("\n"));
+			expect(expanded).toContain("/ match");
+			expect(expanded).toContain("DESC-LINE-4");
+			// The filter key closes the editor but keeps the query and the
+			// filtered focus, so the advertised note shortcut is reachable
+			// without activating (Enter) or discarding (Escape) the filter.
+			component.handleInput("/");
+			const closed = stripVTControlCharacters(component.render(80).join("\n"));
+			expect(closed).not.toContain("/ match");
+			expect(closed).toContain("Alpha match");
+			component.handleInput("n");
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(onPrompt).toHaveBeenCalledTimes(1);
+			expect(String(onPrompt.mock.calls[0][0])).toContain("Alpha match");
+			component.handleInput(ENTER);
+			expect(onSubmit).toHaveBeenCalledTimes(1);
+			expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Alpha match"]);
+			expect(onSubmit.mock.calls[0][0].results[0].note).toBe("kept note");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("Tab switches tabs while the filter editor is open", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const component = new AskDialogComponent(
+				[
+					{
+						id: "q1",
+						question: "First?",
+						options: Array.from({ length: 8 }, (_, index) => ({ label: `Opt ${index}` })),
+					},
+					{ id: "q2", question: "Second?", options: [{ label: "B-target" }] },
+				],
+				{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+			);
+			component.focused = true;
+			component.handleInput("/");
+			const markerLineCount = (frame: readonly string[]): number =>
+				frame.filter(line => line.includes(CURSOR_MARKER)).length;
+			expect(markerLineCount(component.render(80))).toBe(2);
+			component.handleInput(TAB);
+			const switched = component.render(80);
+			// Switching tabs cleared the filter, so only the focused row keeps
+			// its cursor marker and the second question's option is on screen.
+			expect(markerLineCount(switched)).toBe(1);
+			expect(stripVTControlCharacters(switched.join("\n"))).toContain("B-target");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("offers filtering when wrapped rows overflow the viewport despite the option count fitting", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const wrappedLabel = (prefix: string): string => `${prefix} ${"wrapped option label ".repeat(8)}`;
+			const options = [
+				{ label: wrappedLabel("Alpha xxqq") },
+				...Array.from({ length: 4 }, (_, index) => ({ label: wrappedLabel(`Beta ${index}`) })),
+			];
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit: vi.fn(),
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+			component.focused = true;
+			const out = stripVTControlCharacters(component.render(80).join("\n"));
+			// Five options plus Other fit the option-count bound, but their
+			// wrapped labels overflow the rendered body, so the filter must
+			// still be advertised and openable.
+			expect(out).toContain("filter");
+			component.handleInput("/");
+			for (const ch of "xxqq") component.handleInput(ch);
+			const filtered = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
+			expect(filtered).toContain("/ xxqq");
+			expect(filtered).toContain("Alpha xxqq");
+			expect(filtered).not.toContain("Beta 0");
 		} finally {
 			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
 			else Reflect.deleteProperty(process.stdout, "rows");

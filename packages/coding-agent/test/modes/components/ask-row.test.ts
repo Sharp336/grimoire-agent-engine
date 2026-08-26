@@ -1,4 +1,4 @@
-import { beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import {
@@ -15,6 +15,10 @@ import type { Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme-class";
 import { CURSOR_MARKER, visibleWidth } from "@oh-my-pi/pi-tui";
 
 let darkTheme: Theme | undefined;
+// setThemeInstance replaces process-wide theme state and disables
+// auto-detection, so capture the prior instance and restore it after the
+// file; otherwise later test files inherit this file's dark theme.
+let priorTheme: Theme | undefined;
 
 function strip(line: string): string {
 	return stripVTControlCharacters(line);
@@ -60,17 +64,25 @@ function styledMarker(line: string, glyph: string): string {
 
 describe("askRow", () => {
 	beforeAll(async () => {
+		priorTheme = theme;
 		darkTheme = await getThemeByName("dark");
 		if (!darkTheme) throw new Error("Failed to load dark theme");
 	});
 
 	beforeEach(() => {
-		setThemeInstance(darkTheme!);
+		if (!darkTheme) throw new Error("Failed to load dark theme");
+		setThemeInstance(darkTheme);
+	});
+
+	afterAll(() => {
+		if (priorTheme) setThemeInstance(priorTheme);
 	});
 
 	it("prefix is exactly ASK_ROW_PREFIX_COLUMNS wide for focused × multi × jumpDigit", () => {
 		const variants: Array<{ multi: boolean | undefined; focused: boolean; jumpDigit: string | undefined }> = [];
-		for (const multi of [false, true, undefined] as const) {
+		// `false` and `undefined` share the same falsy single-select branch in
+		// askOptionMarker/renderAskRow, so only one of the two is exercised.
+		for (const multi of [true, undefined] as const) {
 			for (const focused of [false, true]) {
 				for (const jumpDigit of [undefined, "4"]) {
 					variants.push({ multi, focused, jumpDigit });
