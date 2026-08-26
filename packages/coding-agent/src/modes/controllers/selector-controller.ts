@@ -54,7 +54,7 @@ import type { ForeignSessionInfo, ForeignSessionSource } from "../../session/for
 import type { SessionEntry } from "../../session/session-entries";
 import type { SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
-import { loadPinnedSessionIds } from "../../session/session-pins";
+import { loadPinnedSessionIds, setSessionPinned } from "../../session/session-pins";
 import { FileSessionStorage } from "../../session/session-storage";
 import { type LogoutAccount, toLogoutAccounts } from "../../slash-commands/helpers/logout";
 import {
@@ -1608,6 +1608,7 @@ export class SelectorController {
 					}
 				},
 				historyMatcher,
+				onSetPinned: (session, isPinned) => setSessionPinned(session.id, isPinned),
 				loadAllSessions: () => SessionManager.listAll(),
 				pinnedIds,
 			};
