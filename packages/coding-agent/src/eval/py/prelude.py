@@ -718,14 +718,35 @@ if "__omp_prelude_loaded__" not in globals():
         rx = re.compile(pattern, flags)
         return [f"L{n}: {line.rstrip()}" for n, line in enumerate(text.splitlines(), 1) if rx.search(line)]
 
+    _line_break_re = re.compile(r"\r\n|[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]")
+    _word_re = re.compile(r"\S+")
+
+    def _count_lines_and_words(text):
+        # Single-pass scans via re.finditer (lazy, discards each match
+        # immediately) instead of text.splitlines()/text.split(), which
+        # both materialize a full list of substrings for the whole
+        # payload. metadata() sizes input before any chunk is delegated,
+        # so a large document must not multiply memory here.
+        boundaries = 0
+        last_end = 0
+        for m in _line_break_re.finditer(text):
+            boundaries += 1
+            last_end = m.end()
+        lines = 0 if not text else boundaries + 1
+        if boundaries and last_end == len(text):
+            lines -= 1
+        words = sum(1 for _ in _word_re.finditer(text))
+        return lines, words
+
     def metadata(text):
         """Shape stats for a str or a list of strings."""
         if isinstance(text, str):
+            lines, words = _count_lines_and_words(text)
             return {
                 "type": "str",
                 "chars": len(text),
-                "lines": len(text.splitlines()),
-                "words": len(text.split()),
+                "lines": lines,
+                "words": words,
                 "approx_tokens": len(text) // 4,
             }
         return {

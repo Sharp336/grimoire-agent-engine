@@ -289,13 +289,47 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		return out;
 	};
 
+	const __countLinesAndWords = text => {
+		// Single-pass scan instead of splitting the whole payload into a
+		// lines array and a words array: for the large whitespace-rich
+		// inputs metadata() is meant to size cheaply before any chunk is
+		// delegated, materializing both would multiply memory use and can
+		// OOM the eval worker during the mandatory probe step.
+		let lines = text.length === 0 ? 0 : 1;
+		let words = 0;
+		let inWord = false;
+		let endsWithTerminator = false;
+		const len = text.length;
+		let i = 0;
+		while (i < len) {
+			const ch = text[i];
+			if (ch === "\r" || ch === "\n") {
+				lines++;
+				i += ch === "\r" && text[i + 1] === "\n" ? 2 : 1;
+				endsWithTerminator = i === len;
+				inWord = false;
+				continue;
+			}
+			if (/\s/.test(ch)) {
+				inWord = false;
+			} else if (!inWord) {
+				words++;
+				inWord = true;
+			}
+			i++;
+		}
+		if (endsWithTerminator) lines--;
+		return { lines, words };
+	};
+
 	const metadata = text => {
 		if (typeof text === "string") {
+			const { lines, words } = __countLinesAndWords(text);
 			return {
 				type: "str",
 				chars: text.length,
-				lines: __splitlines(text).length,
-				words: text.split(/\s+/).filter(Boolean).length,
+				lines,
+				words,
 				approx_tokens: Math.floor(text.length / 4),
 			};
 		}
