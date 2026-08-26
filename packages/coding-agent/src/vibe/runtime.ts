@@ -35,7 +35,11 @@ import type { ToolSession } from "../tools";
 import { formatDuration } from "../tools/render-utils";
 import { ToolError } from "../tools/tool-errors";
 import { calculateTokensPerSecond } from "../utils/token-rate";
-import { buildVibeDelegatedAssignment, parseDelegatedSkillDependency, validateSkillDispatchResult } from "./delegated-skill-boundary";
+import {
+	buildVibeDelegatedAssignment,
+	parseDelegatedSkillDependency,
+	validateSkillDispatchResult,
+} from "./delegated-skill-boundary";
 /** The two worker CLI flavors the director drives. */
 export type VibeCli = "fast" | "good";
 
@@ -92,6 +96,7 @@ export interface VibeParentSession {
 	asyncJobManager?: AsyncJobManager;
 	settings: ToolSession["settings"];
 	getModelString?: () => string | undefined;
+	getActiveModelString?: () => string | undefined;
 	dispatchSkillDependency?: ToolSession["dispatchSkillDependency"];
 }
 type VibeTombstoneReason = "explicit-kill" | "mode-exit" | "spawn-failed" | "unrecoverable";
@@ -1105,38 +1110,41 @@ export class VibeSessionRegistry {
 			if (job?.status === "running") runningJobs.push(job);
 		}
 
-		let waited = false;
+		let waitEndedByTimeout = false;
 		if (runningJobs.length > 0 && collectSettled().length === 0) {
-			waited = true;
 			const timeoutMs = Math.max(1, Math.trunc(args.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS));
 			const watchedJobIds = runningJobs.map(job => job.id);
 			manager.watchJobs(watchedJobIds);
-			const { promise: timeoutPromise, resolve: timeoutResolve } = Promise.withResolvers<void>();
-			const timeoutHandle = setTimeout(() => timeoutResolve(), timeoutMs);
-			const racePromises: Promise<unknown>[] = [...runningJobs.map(job => job.promise), timeoutPromise];
+			const { promise: timeoutPromise, resolve: timeoutResolve } = Promise.withResolvers<"timeout">();
+			const timeoutHandle = setTimeout(() => timeoutResolve("timeout"), timeoutMs);
+			const racePromises: Array<Promise<"settled" | "timeout" | "aborted">> = [
+				...runningJobs.map(job => job.promise.then(() => "settled" as const)),
+				timeoutPromise,
+			];
 			let abortCleanup: (() => void) | undefined;
 			if (args.signal) {
-				const { promise: abortPromise, resolve: abortResolve } = Promise.withResolvers<void>();
-				const onAbort = () => abortResolve();
-				args.signal.addEventListener("abort", onAbort, { once: true });
-				abortCleanup = () => args.signal?.removeEventListener("abort", onAbort);
+				const { promise: abortPromise, resolve: abortResolve } = Promise.withResolvers<"aborted">();
+				const onAbort = () => abortResolve("aborted");
+				if (args.signal.aborted) onAbort();
+				else {
+					args.signal.addEventListener("abort", onAbort, { once: true });
+					abortCleanup = () => args.signal?.removeEventListener("abort", onAbort);
+				}
 				racePromises.push(abortPromise);
 			}
 			try {
-				await Promise.race(racePromises);
+				const outcome = await Promise.race(racePromises);
+				waitEndedByTimeout = outcome === "timeout";
 			} finally {
 				manager.unwatchJobs(watchedJobIds);
 				clearTimeout(timeoutHandle);
 				abortCleanup?.();
 			}
 		}
-
 		const settled = collectSettled();
 		manager.acknowledgeDeliveries(settled.map(entry => entry.jobId));
-		// Current in-flight state, independent of the snapshot: a session whose
-		// watched turn settled may already be mid queued follow-up.
 		const stillRunning = watched.filter(record => record.turn !== undefined).map(record => record.id);
-		return { settled, stillRunning, timedOut: waited && settled.length === 0 };
+		return { settled, stillRunning, timedOut: waitEndedByTimeout && settled.length === 0 };
 	}
 
 	/** Detach one parent's process-local workers without tombstoning their persisted conversations. */
@@ -1389,12 +1397,12 @@ export class VibeSessionRegistry {
 			});
 	}
 
-	/** Build the ExecutorOptions for a first spawn, mirroring the `task`/eval-bridge plumbing. */
 	async #buildSpawnOptions(
 		session: ToolSession,
 		record: VibeRecord,
 		message: string,
 		signal: AbortSignal,
+		onProgress: (progress: AgentProgress) => void,
 	): Promise<ExecutorOptions> {
 		const sessionFile = session.getSessionFile();
 		const sessionArtifactsDir = sessionFile ? sessionFile.slice(0, -6) : null;
@@ -1515,7 +1523,10 @@ export class VibeSessionRegistry {
 							});
 					return await this.#settleTurn(session, manager, record, turn, ownJobId, turnIndex, result);
 				} catch (error) {
-					if (error instanceof VibeTurnError) throw error;
+					if (error instanceof VibeTurnError) {
+						await this.#finishTurn(session, manager, record, ownJobId);
+						throw error;
+					}
 					await this.#finishTurn(session, manager, record, ownJobId);
 					const reason = error instanceof Error ? error.message : String(error);
 					record.lastActivity = firstLine(`turn failed: ${reason}`);
@@ -1524,6 +1535,7 @@ export class VibeSessionRegistry {
 					);
 				}
 			},
+
 			{ id: `${record.id}-t${turnIndex}`, agentId: record.id, ownerId: record.ownerId },
 		);
 		turn.jobId = jobId;
@@ -1536,6 +1548,7 @@ export class VibeSessionRegistry {
 		session: ToolSession,
 		manager: AsyncJobManager,
 		record: VibeRecord,
+		settledJobId: string,
 	): Promise<void> {
 		record.lastJobId = settledJobId;
 		record.turn = undefined;
@@ -1592,9 +1605,31 @@ export class VibeSessionRegistry {
 		const dependency = parseDelegatedSkillDependency(result.output.trim());
 		if (dependency) {
 			const dispatched = session.dispatchSkillDependency
-				? validateSkillDispatchResult(await session.dispatchSkillDependency(dependency, this.ownerScope(session)), dependency.skill)
+				? validateSkillDispatchResult(
+						await session.dispatchSkillDependency(dependency, this.ownerScope(session)),
+						dependency.skill,
+					)
 				: null;
-			if (!dispatched) throw new VibeTurnError(`Delegated dependency ${dependency.skill} was not dispatched or lacked evidence.`);
+			const dependencyEvidence = dispatched
+				? JSON.stringify(dispatched)
+				: JSON.stringify({
+						type: "skill-dispatch-result/v1",
+						skill: dependency.skill,
+						status: "failed",
+						evidence: "parent_dispatch_unavailable_or_invalid",
+					});
+			if (dispatched?.status === "success") {
+				// Queue the verified evidence through the same registry-safe path used by
+				// vibe_send. #finishTurn transitions the worker to idle/parked first.
+				record.queue.unshift(dependencyEvidence);
+			}
+			await this.#finishTurn(session, manager, record, turn.jobId);
+			record.lastActivity = firstLine(
+				dispatched?.status === "success"
+					? `dependency ${dependency.skill} dispatched; worker resumed`
+					: `dependency ${dependency.skill} blocked: ${dispatched?.evidence ?? "invalid dispatch evidence"}`,
+			);
+			return "";
 		}
 		await this.#finishTurn(session, manager, record, settledJobId);
 		const failed = result.exitCode !== 0 || result.aborted === true;
