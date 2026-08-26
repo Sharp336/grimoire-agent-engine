@@ -851,6 +851,10 @@ export class RelayBridge {
 				return;
 			}
 			case "Target.setAutoAttach": {
+				// A replacement extension socket can open before its hello arrives.
+				// Reconcile every previously known tab before an attachment command can
+				// create a fresh debugger root and make the hello skip recovery.
+				await Promise.all([...this.#tabs.values()].map(tab => this.#awaitTabReady(tab.tabId)));
 				conn.autoAttach = true;
 				const tabs = [...this.#tabs.values()].filter(tab => this.#eligible(tab));
 				await Promise.all(tabs.map(tab => this.#ensureAttached(tab)));
@@ -873,12 +877,18 @@ export class RelayBridge {
 					this.#replyError(conn, msg, `No target with id ${String(msg.params?.targetId)}`);
 					return;
 				}
-				if (!(await this.#ensureAttached(tab))) {
-					this.#replyError(conn, msg, `Cannot attach to tab ${tab.tabId} (${tab.url})`);
+				await this.#awaitTabReady(tab.tabId);
+				const currentTab = this.#tabs.get(parsed.tabId);
+				if (!currentTab) {
+					this.#replyError(conn, msg, `No target with id ${String(msg.params?.targetId)}`);
 					return;
 				}
-				const sessionId = this.#mintSession(conn, parsed.kind, tab.tabId);
-				const info = parsed.kind === "tab" ? this.#tabInfo(tab, true) : this.#pageInfo(tab, true);
+				if (!(await this.#ensureAttached(currentTab))) {
+					this.#replyError(conn, msg, `Cannot attach to tab ${currentTab.tabId} (${currentTab.url})`);
+					return;
+				}
+				const sessionId = this.#mintSession(conn, parsed.kind, currentTab.tabId);
+				const info = parsed.kind === "tab" ? this.#tabInfo(currentTab, true) : this.#pageInfo(currentTab, true);
 				this.#emit(conn, "Target.attachedToTarget", { sessionId, targetInfo: info, waitingForDebugger: false });
 				this.#reply(conn, msg, { sessionId });
 				return;

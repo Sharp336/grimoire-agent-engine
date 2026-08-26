@@ -140,8 +140,12 @@ async function attachPage(
 			params: { targetId: `PAGE${tabId}`, flatten: true },
 		}),
 	);
-	ack(bridge, ext, "attach");
-	await flush();
+	await waitFor(
+		() => ext.pending("attach").length > 0 || cdp.sessionFor(attachId) !== undefined,
+		`attach RPC or reply for tab ${tabId}`,
+	);
+	if (ext.pending("attach").length > 0) ack(bridge, ext, "attach");
+	await waitFor(() => cdp.sessionFor(attachId) !== undefined, `attachToTarget reply for tab ${tabId}`);
 	const sessionId = cdp.sessionFor(attachId);
 	if (!sessionId) throw new Error(`attachToTarget for tab ${tabId} did not produce a session`);
 	return sessionId;
@@ -926,7 +930,10 @@ describe("RelayBridge tab grouping", () => {
 		);
 		await waitFor(() => ext2.rpcs("attach").length === 1, "auto-attach recovery RPC");
 		ack(bridge, ext2, "attach");
-		await flush();
+		await waitFor(
+			() => cdp.messages.some(message => message.id === commandId && message.error !== undefined),
+			"queued command error",
+		);
 
 		// The hello retracted oldPageSession and minted replacement auto-attach
 		// state. The queued Page.navigate must not execute against the fresh root.
@@ -935,6 +942,87 @@ describe("RelayBridge tab grouping", () => {
 			code: -32000,
 			message: `Unknown session id ${oldPageSession}`,
 		});
+	});
+
+	it("holds repeated browser auto-attach until the reconnect hello reconciles the old root", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const firstAutoAttachId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: firstAutoAttachId, method: "Target.setAutoAttach" }));
+		await waitFor(() => ext.rpcs("attach").length === 1, "initial auto-attach RPC");
+		ack(bridge, ext, "attach");
+		await waitFor(() => cdp.messages.some(message => message.id === firstAutoAttachId), "initial auto-attach reply");
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		bridge.extConnected(ext2);
+		const reconnectAutoAttachId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: reconnectAutoAttachId, method: "Target.setAutoAttach" }));
+		expect(ext2.rpcs("attach")).toHaveLength(0);
+		expect(cdp.messages.some(message => message.id === reconnectAutoAttachId)).toBeFalse();
+
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "hello",
+				userAgent: "test",
+				browserVersion: "Chrome/151.0.0.0",
+				tabs: [tab({ tabId: 1 })],
+				attachedTabIds: [],
+				recoverableTabIds: [1],
+			}),
+		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(
+			() => cdp.messages.some(message => message.id === reconnectAutoAttachId),
+			"reconnect auto-attach reply",
+		);
+		expect(ext2.rpcs("attach")).toHaveLength(1);
+	});
+
+	it("holds browser attachToTarget until the reconnect hello restores a held tab", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		bridge.extConnected(ext2);
+		const attachId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: attachId,
+				method: "Target.attachToTarget",
+				params: { targetId: "PAGE1", flatten: true },
+			}),
+		);
+		expect(ext2.rpcs("attach")).toHaveLength(0);
+		expect(cdp.messages.some(message => message.id === attachId)).toBeFalse();
+
+		bridge.extMessage(
+			ext2,
+			JSON.stringify({
+				t: "hello",
+				userAgent: "test",
+				browserVersion: "Chrome/151.0.0.0",
+				tabs: [tab({ tabId: 1 })],
+				attachedTabIds: [],
+				recoverableTabIds: [1],
+			}),
+		);
+		await waitFor(() => ext2.rpcs("attach").length === 1, "held-tab recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => cdp.messages.some(message => message.id === attachId), "attachToTarget reply");
+		expect(ext2.rpcs("attach")).toHaveLength(1);
+		expect(cdp.sessionFor(attachId)).toBeDefined();
 	});
 
 	it("re-arms the hello gate when a replacement socket connects before the old close is delivered", async () => {
@@ -1311,8 +1399,9 @@ describe("RelayBridge attachment release", () => {
 			connId,
 			JSON.stringify({ id: reattachId, method: "Target.attachToTarget", params: { targetId: "PAGE1" } }),
 		);
+		await waitFor(() => ext.pending("attach").length === 1, "clean reattach RPC");
 		ack(bridge, ext, "attach");
-		await flush();
+		await waitFor(() => cdp.sessionFor(reattachId) !== undefined, "clean reattach reply");
 		expect(cdp.sessionFor(reattachId)).toBeDefined();
 		expect(cdp.messages.some(message => message.method === "Target.targetDestroyed")).toBe(false);
 	});
@@ -1466,7 +1555,7 @@ describe("RelayBridge attachment release", () => {
 			connId,
 			JSON.stringify({ id: ++msgSeq, method: "Target.attachToTarget", params: { targetId: "PAGE1" } }),
 		);
-		expect(ext.pending("attach")).toHaveLength(1);
+		await waitFor(() => ext.pending("attach").length === 1, "interrupted attach RPC");
 
 		const replacement = new FakeExtSocket();
 		connect(bridge, replacement, [tab({ tabId: 1 })]);
