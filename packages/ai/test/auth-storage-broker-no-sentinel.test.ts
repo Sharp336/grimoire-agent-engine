@@ -33,6 +33,7 @@ describe("AuthStorage broker sentinel refresh", () => {
 					accountId: "broker-account",
 					email: "broker@example.com",
 					projectId: "broker-project",
+					enterpriseUrl: undefined,
 				};
 			},
 		});
@@ -49,7 +50,7 @@ describe("AuthStorage broker sentinel refresh", () => {
 		}
 	});
 
-	test("getOAuthAccess refreshes expired broker credentials through the store hook only", async () => {
+	test("refreshes expired broker credentials without erasing undefined metadata", async () => {
 		if (!authStorage || !store) throw new Error("test setup failed");
 
 		await authStorage.set("anthropic", [
@@ -59,23 +60,30 @@ describe("AuthStorage broker sentinel refresh", () => {
 				refresh: REMOTE_REFRESH_SENTINEL,
 				expires: Date.now() - 60_000,
 				accountId: "broker-account-old",
+				enterpriseUrl: "https://broker.example.test",
 			},
 		]);
 
 		const providerRefresh = vi.spyOn(oauthUtils, "refreshOAuthToken").mockImplementation(async () => {
 			throw new Error("provider-direct refresh must not be called");
 		});
-
-		const access = await authStorage.getOAuthAccess("anthropic", "broker-session");
-
-		expect(access).toEqual({
-			accessToken: "broker-access-rotated",
-			credentialId: expect.any(Number),
-			accountId: "broker-account",
-			email: "broker@example.com",
-			projectId: "broker-project",
-			enterpriseUrl: undefined,
+		const getOAuthApiKey = vi.spyOn(oauthUtils, "getOAuthApiKey").mockResolvedValue({
+			newCredentials: {
+				access: "broker-access-rotated",
+				refresh: REMOTE_REFRESH_SENTINEL,
+				expires: Date.now() + 60 * 60_000,
+				accountId: "broker-account",
+				email: "broker@example.com",
+				projectId: "broker-project",
+				enterpriseUrl: undefined,
+			},
+			apiKey: "broker-api-key",
 		});
+
+		const apiKey = await authStorage.getApiKey("anthropic", "broker-session");
+
+		expect(apiKey).toBe("broker-api-key");
+		expect(getOAuthApiKey).toHaveBeenCalledTimes(1);
 		expect(brokerRefreshCalls).toBe(1);
 		expect(providerRefresh).not.toHaveBeenCalled();
 		const persisted = store.listAuthCredentials("anthropic");
@@ -84,6 +92,7 @@ describe("AuthStorage broker sentinel refresh", () => {
 		if (persisted[0]?.credential.type === "oauth") {
 			expect(persisted[0].credential.access).toBe("broker-access-rotated");
 			expect(persisted[0].credential.refresh).toBe(REMOTE_REFRESH_SENTINEL);
+			expect(persisted[0].credential.enterpriseUrl).toBe("https://broker.example.test");
 		}
 	});
 

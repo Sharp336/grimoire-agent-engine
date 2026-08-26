@@ -17,10 +17,11 @@ import {
 	type UsageReport,
 	type UsageUnit,
 } from "@oh-my-pi/pi-ai";
-import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatDuration, formatNumber, getProjectDir, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
-import { discoverAuthStorage } from "../sdk";
+import { Settings } from "../config/settings";
+import { discoverAuthStorage, loadCliExtensionProviders } from "../sdk";
 
 const BAR_WIDTH = 28;
 
@@ -33,6 +34,13 @@ export interface UsageCommandArgs {
 	history?: boolean;
 	/** History window in days (with `history`). */
 	days?: number;
+}
+
+export interface RunUsageCommandOptions {
+	agentDir?: string;
+	cwd?: string;
+	additionalExtensionPaths?: string[];
+	disableExtensionDiscovery?: boolean;
 }
 
 /** Identity slice of a stored credential, for "every account" coverage. */
@@ -210,6 +218,7 @@ function formatUnitValue(value: number, unit: UsageUnit): string {
 
 const UNIT_SUFFIX: Record<UsageUnit, string> = {
 	tokens: " tokens",
+	credits: " credits",
 	requests: " requests",
 	minutes: " min",
 	bytes: " bytes",
@@ -935,8 +944,8 @@ function redactReportForJson(
 	return { ...report, metadata, limits };
 }
 
-export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
-	const authStorage = await discoverAuthStorage();
+export async function runUsageCommand(cmd: UsageCommandArgs, options: RunUsageCommandOptions = {}): Promise<void> {
+	const authStorage = await discoverAuthStorage(options.agentDir);
 	try {
 		if (cmd.action === "invalidate") {
 			const provider = cmd.provider?.toLowerCase();
@@ -980,6 +989,12 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			return;
 		}
 		const modelRegistry = new ModelRegistry(authStorage);
+		const cwd = options.cwd ?? getProjectDir();
+		const settings = await Settings.init({ cwd });
+		await loadCliExtensionProviders(modelRegistry, settings, cwd, {
+			additionalExtensionPaths: options.additionalExtensionPaths,
+			disableExtensionDiscovery: options.disableExtensionDiscovery,
+		});
 		const reports =
 			(await authStorage.fetchUsageReports({
 				baseUrlResolver: provider => modelRegistry.getProviderBaseUrl(provider),

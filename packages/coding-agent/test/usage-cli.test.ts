@@ -1,12 +1,16 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
-import type { UsageReport } from "@oh-my-pi/pi-ai";
+import { AuthStorage, type UsageReport } from "@oh-my-pi/pi-ai";
 import {
 	buildRedactionMap,
 	collectUnreportedAccounts,
 	computeProviderWindowStats,
 	formatUsageBreakdown,
 	formatUsageHistory,
+	runUsageCommand,
 	type UsageAccountIdentity,
 } from "@oh-my-pi/pi-coding-agent/cli/usage-cli";
 
@@ -610,5 +614,68 @@ describe("formatUsageHistory", () => {
 		const text = stripVTControlCharacters(formatUsageHistory(entries, SINCE, NOW, redaction));
 		expect(text).not.toContain("dummy.primary@example.test");
 		expect(text).toContain("du*");
+	});
+});
+
+describe.serial("runUsageCommand extension integration", () => {
+	it("loads an extension UsageProvider before fetching stored-account usage", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-usage-extension-"));
+		const agentDir = path.join(root, "agent");
+		const extensionPath = path.join(root, "usage-extension.mjs");
+		await fs.mkdir(agentDir, { recursive: true });
+		await fs.writeFile(
+			extensionPath,
+			[
+				"export default function register(pi) {",
+				'  pi.registerProvider("fixture-usage", {',
+				"    usage: {",
+				'      id: "fixture-usage",',
+				'      supports: params => params.credential.type === "api_key",',
+				"      async fetchUsage() {",
+				"        return {",
+				'          provider: "fixture-usage",',
+				"          fetchedAt: Date.now(),",
+				"          limits: [{",
+				'            id: "credits",',
+				'            label: "Credits",',
+				'            scope: { provider: "fixture-usage" },',
+				'            amount: { used: 2, limit: 10, remaining: 8, usedFraction: 0.2, unit: "credits" },',
+				"          }],",
+				"        };",
+				"      },",
+				"    },",
+				"  });",
+				"}",
+			].join("\n"),
+		);
+
+		const seed = await AuthStorage.create(path.join(agentDir, "agent.db"));
+		await seed.set("fixture-usage", { type: "api_key", key: "fixture-key" });
+		seed.close();
+
+		const originalWrite = process.stdout.write.bind(process.stdout);
+		let output = "";
+		process.stdout.write = ((chunk: string | Uint8Array): boolean => {
+			output += typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk);
+			return true;
+		}) as typeof process.stdout.write;
+		try {
+			await runUsageCommand(
+				{ provider: "fixture-usage" },
+				{
+					agentDir,
+					cwd: root,
+					additionalExtensionPaths: [extensionPath],
+					disableExtensionDiscovery: true,
+				},
+			);
+		} finally {
+			process.stdout.write = originalWrite;
+			await fs.rm(root, { recursive: true, force: true });
+		}
+
+		const text = stripVTControlCharacters(output);
+		expect(text).toContain("Fixture Usage");
+		expect(text).toContain("2 / 10 credits");
 	});
 });

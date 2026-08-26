@@ -27,6 +27,7 @@ import {
 	googleAntigravityModelManagerOptions,
 	googleGeminiCliModelManagerOptions,
 	isCredentialScopedModelCacheProvider,
+	kiroModelManagerOptions,
 	openaiCodexModelManagerOptions,
 	PROVIDER_DESCRIPTORS,
 	resolveModelCacheProviderId,
@@ -1612,6 +1613,17 @@ export class ModelRegistry {
 						oauthToken,
 						projectId: extractGoogleOAuthProjectId(raw) ?? this.#resolveGeminiCliDiscoveryProjectId(oauthToken),
 						endpoint: this.#descriptorBaseUrl("google-gemini-cli"),
+						fetch: this.#fetch,
+					}),
+			},
+			{
+				providerId: "kiro",
+				authoritative: true,
+				resolveKey: value => value,
+				createOptions: apiKey =>
+					kiroModelManagerOptions({
+						apiKey,
+						baseUrl: this.#descriptorBaseUrl("kiro"),
 						fetch: this.#fetch,
 					}),
 			},

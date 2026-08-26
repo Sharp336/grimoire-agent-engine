@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added first-party Kiro support with AWS IAM Identity Center device-code login, token refresh, native streaming, and a `credits` usage unit for account quota reporting ([#8758](https://github.com/can1357/oh-my-pi/pull/8758) by [@fanbaoyu1024](https://github.com/fanbaoyu1024)).
+
 ## [18.0.6] - 2026-08-26
 
 ### Added

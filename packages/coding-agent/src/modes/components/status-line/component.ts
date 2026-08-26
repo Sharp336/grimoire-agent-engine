@@ -382,6 +382,7 @@ export class StatusLineComponent implements Component {
 	#speculationBlinkTimer: NodeJS.Timeout | undefined;
 	#speculationBlinkOn = true;
 	#hookStatuses: Map<string, string> = new Map();
+	#inlineStatuses: Map<string, string> = new Map();
 	#subagentCount: number = 0;
 	/**
 	 * Active-processing accounting for the `time_spent` segment, keyed per
@@ -695,6 +696,14 @@ export class StatusLineComponent implements Component {
 			this.#hookStatuses.delete(key);
 		} else {
 			this.#hookStatuses.set(key, text);
+		}
+	}
+
+	setInlineStatus(key: string, text: string | undefined): void {
+		if (text === undefined) {
+			this.#inlineStatuses.delete(key);
+		} else {
+			this.#inlineStatuses.set(key, text);
 		}
 	}
 
@@ -1741,6 +1750,10 @@ export class StatusLineComponent implements Component {
 			vibeMode: this.#vibeModeStatus,
 			collab: this.#collabStatus,
 			usageStats,
+			inlineStatuses: Array.from(this.#inlineStatuses.entries())
+				.sort(([a], [b]) => a.localeCompare(b))
+				.map(([, text]) => sanitizeStatusText(text))
+				.filter(text => visibleWidth(text) > 0),
 			contextPercent,
 			contextTokens,
 			contextWindow,

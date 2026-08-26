@@ -263,5 +263,24 @@ describe("auth-broker public wire schemas", () => {
 			...response,
 			reports: [{ ...USAGE_REPORT, limits: [{ ...USAGE_REPORT.limits[0], status: "critical" }] }],
 		});
+		accept(wireSchemas.usageResponseSchema, {
+			...response,
+			reports: [
+				{
+					...USAGE_REPORT,
+					limits: [
+						{
+							...USAGE_REPORT.limits[0],
+							amount: {
+								used: 2,
+								limit: 10,
+								remaining: 8,
+								unit: "credits",
+							},
+						},
+					],
+				},
+			],
+		});
 	});
 });

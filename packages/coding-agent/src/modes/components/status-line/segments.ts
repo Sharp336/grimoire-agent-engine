@@ -457,15 +457,16 @@ const costSegment: StatusLineSegment = {
 		const state = ctx.session.state;
 		const usingSubscription = state.model ? (ctx.session.modelRegistry?.isUsingOAuth(state.model) ?? false) : false;
 		const advisorUsingSubscription = ctx.session.isAdvisorUsingSubscription?.() ?? false;
+		const inlineStatuses = ctx.inlineStatuses ?? [];
 
-		if (!cost && !advisorCost && !usingSubscription && !normalizedPremiumRequests) {
+		if (!cost && !advisorCost && !usingSubscription && !normalizedPremiumRequests && inlineStatuses.length === 0) {
 			return { content: "", visible: false };
 		}
 
-		const billingParts: string[] = [];
+		const billingParts: string[] = [...inlineStatuses];
 		if (cost) {
 			billingParts.push(formatSpend(cost, usingSubscription, theme));
-		} else if (usingSubscription) {
+		} else if (usingSubscription && inlineStatuses.length === 0) {
 			billingParts.push(
 				theme.getSymbolPreset() === "nerd" && theme.icon.subscription ? theme.icon.subscription : "(sub)",
 			);

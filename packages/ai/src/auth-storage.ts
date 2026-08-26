@@ -114,6 +114,22 @@ export type OAuthCredential = {
 	type: "oauth";
 } & OAuthCredentials;
 
+function mergeOAuthCredential(current: OAuthCredential, refreshed: OAuthCredentials): OAuthCredential {
+	return {
+		...current,
+		...refreshed,
+		type: "oauth",
+		accountId: refreshed.accountId ?? current.accountId,
+		email: refreshed.email ?? current.email,
+		projectId: refreshed.projectId ?? current.projectId,
+		enterpriseUrl: refreshed.enterpriseUrl ?? current.enterpriseUrl,
+		apiEndpoint: refreshed.apiEndpoint ?? current.apiEndpoint,
+		orgId: refreshed.orgId ?? current.orgId,
+		orgName: refreshed.orgName ?? current.orgName,
+		authorizedAt: refreshed.authorizedAt ?? current.authorizedAt,
+	};
+}
+
 export type AuthCredential = ApiKeyCredential | OAuthCredential;
 
 export type AuthCredentialEntry = AuthCredential | AuthCredential[];
@@ -3584,6 +3600,7 @@ export class AuthStorage {
 
 	async #collectUsageRequests(options?: {
 		baseUrlResolver?: (provider: Provider) => string | undefined;
+		providers?: ReadonlySet<Provider>;
 	}): Promise<UsageRequestDescriptor[]> {
 		const requests: UsageRequestDescriptor[] = [];
 		const providers = new Set<string>([
@@ -3594,6 +3611,7 @@ export class AuthStorage {
 
 		for (const providerId of providers) {
 			const provider = providerId as Provider;
+			if (options?.providers && !options.providers.has(provider)) continue;
 			const providerImpl = this.#resolveUsageProvider(provider);
 			if (!providerImpl) continue;
 			const baseUrl = options?.baseUrlResolver?.(provider);
@@ -4139,7 +4157,26 @@ export class AuthStorage {
 				});
 				this.#usageReportsInFlight.set(overrideKey, shared);
 			}
-			const reports = await raceUsageWithSignal(shared, options?.signal);
+			const brokerReports = await raceUsageWithSignal(shared, options?.signal);
+			let reports = brokerReports;
+			if (
+				this.#fetchUsageReportsOverride === undefined &&
+				storeOverride !== undefined &&
+				this.#runtimeUsageProviderOverrides.size > 0
+			) {
+				const runtimeProviders = new Set(this.#runtimeUsageProviderOverrides.keys());
+				const runtimeRequests = await this.#collectUsageRequests({
+					...options,
+					providers: runtimeProviders,
+				});
+				const forcedRefresh = this.#usageForceRefresh(runtimeRequests);
+				const runtimeResults = await this.#fetchUsageRequests(runtimeRequests, forcedRefresh.providers);
+				this.#clearUsageForceRefresh(forcedRefresh);
+				reports = this.#dedupeUsageReports([
+					...(brokerReports ?? []),
+					...runtimeResults.filter((report): report is UsageReport => report !== null),
+				]);
+			}
 			if (shouldReconcileStoreHookReports && reports) this.#reconcileCodexUsageBlocksFromReports(reports);
 			return reports;
 		}
@@ -4940,11 +4977,7 @@ export class AuthStorage {
 						credentialId,
 						options?.signal,
 					);
-					const updated: OAuthCredential = {
-						...candidate.selection.credential,
-						...refreshedCredentials,
-						type: "oauth",
-					};
+					const updated = mergeOAuthCredential(candidate.selection.credential, refreshedCredentials);
 					candidate.selection.credential = updated;
 					if (credentialId !== undefined) {
 						const idx = this.#replaceCredentialById(provider, credentialId, updated);
@@ -5436,20 +5469,7 @@ export class AuthStorage {
 				result = await getOAuthApiKey(provider as OAuthProvider, oauthCreds);
 			}
 			if (!result) return undefined;
-			const updated: OAuthCredential = {
-				type: "oauth",
-				access: result.newCredentials.access,
-				refresh: result.newCredentials.refresh,
-				expires: result.newCredentials.expires,
-				accountId: result.newCredentials.accountId ?? selection.credential.accountId,
-				email: result.newCredentials.email ?? selection.credential.email,
-				projectId: result.newCredentials.projectId ?? selection.credential.projectId,
-				enterpriseUrl: result.newCredentials.enterpriseUrl ?? selection.credential.enterpriseUrl,
-				apiEndpoint: result.newCredentials.apiEndpoint ?? selection.credential.apiEndpoint,
-				orgId: result.newCredentials.orgId ?? selection.credential.orgId,
-				orgName: result.newCredentials.orgName ?? selection.credential.orgName,
-				authorizedAt: result.newCredentials.authorizedAt ?? selection.credential.authorizedAt,
-			};
+			const updated = mergeOAuthCredential(selection.credential, result.newCredentials);
 			if (credentialId !== undefined) {
 				const idx = this.#replaceCredentialById(provider, credentialId, updated);
 				if (idx !== -1) selection.index = idx;
@@ -5557,6 +5577,17 @@ export class AuthStorage {
 						token: oauthSelection.credential.access,
 						enterpriseUrl: oauthSelection.credential.enterpriseUrl,
 						apiEndpoint: oauthSelection.credential.apiEndpoint,
+					});
+				}
+				if (provider === "kiro") {
+					const credential = oauthSelection.credential as OAuthCredentials & {
+						region?: string;
+						profileArn?: string;
+					};
+					return JSON.stringify({
+						token: credential.access,
+						region: credential.region,
+						profileArn: credential.profileArn,
 					});
 				}
 				return oauthSelection.credential.access;
@@ -6689,20 +6720,7 @@ export class AuthStorage {
 				}
 				throw error;
 			}
-			const updated: OAuthCredential = {
-				type: "oauth",
-				access: refreshed.access,
-				refresh: refreshed.refresh,
-				expires: refreshed.expires,
-				accountId: refreshed.accountId ?? attempted.accountId,
-				email: refreshed.email ?? attempted.email,
-				projectId: refreshed.projectId ?? attempted.projectId,
-				enterpriseUrl: refreshed.enterpriseUrl ?? attempted.enterpriseUrl,
-				apiEndpoint: refreshed.apiEndpoint ?? attempted.apiEndpoint,
-				orgId: refreshed.orgId ?? attempted.orgId,
-				orgName: refreshed.orgName ?? attempted.orgName,
-				authorizedAt: refreshed.authorizedAt ?? attempted.authorizedAt,
-			};
+			const updated = mergeOAuthCredential(attempted, refreshed);
 			// Persist by id: the array may have been reordered/shrunk while the
 			// refresh was in flight, so the pre-await positional index is unsafe. A
 			// -1 means the row was disabled/removed mid-refresh — surface that as a

@@ -30,6 +30,7 @@ import {
 	isCatalogDescriptor,
 } from "../src/provider-models/descriptor-types";
 import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
+import { KIRO_AUTO_MODEL } from "../src/provider-models/kiro";
 import {
 	AIAND_STATIC_MODELS,
 	ALIBABA_TOKEN_PLAN_STATIC_MODELS,
@@ -551,6 +552,10 @@ async function generateModels() {
 	// persisted `modelRoles.default = "xai-oauth/<id>"` is honored before the
 	// async refresh fires (interactive boot does not await refresh).
 	allModels.push(...buildXaiOAuthStaticSeed());
+	// Kiro uses a credential-scoped special model manager, so its descriptor is
+	// intentionally excluded above. Bundle only the stable `auto` route; runtime
+	// discovery replaces it with the authenticated profile catalog.
+	allModels.push(KIRO_AUTO_MODEL);
 	// Daybreak is separately provisioned and absent from stencil.so. Keep its
 	// documented aliases and current Cyber snapshot in every generated bundle.
 	allModels.push(...OPENAI_DAYBREAK_CURATED_FALLBACK_MODELS);

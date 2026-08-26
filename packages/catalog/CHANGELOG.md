@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Kiro profile and model discovery with an automatically resolved catalog entry ([#8758](https://github.com/can1357/oh-my-pi/pull/8758) by [@fanbaoyu1024](https://github.com/fanbaoyu1024)).
+
 ## [18.0.5] - 2026-08-25
 
 ### Added

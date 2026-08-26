@@ -103,6 +103,8 @@ export interface SegmentContext {
 		cost: number;
 		tokensPerSecond: number | null;
 	};
+	/** Compact extension-provided text rendered beside built-in billing. */
+	inlineStatuses?: readonly string[];
 	/** Context usage percent, or null when unknown (e.g. right after compaction). */
 	contextPercent: number | null;
 	contextTokens: number;

@@ -1684,6 +1684,19 @@ function resolveAggregateStatus(limits: UsageLimit[]): AggregateDisplayStatus {
 }
 
 function formatAggregateAmount(limits: UsageLimit[]): string {
+	const creditAmounts = limits
+		.map(limit => limit.amount)
+		.filter(
+			amount =>
+				amount.unit === "credits" && amount.used !== undefined && amount.limit !== undefined && amount.limit > 0,
+		);
+	if (creditAmounts.length === limits.length && creditAmounts.length > 0) {
+		const used = creditAmounts.reduce((total, amount) => total + (amount.used ?? 0), 0);
+		const limit = creditAmounts.reduce((total, amount) => total + (amount.limit ?? 0), 0);
+		const remainingPct = Math.max(0, 100 - (used / limit) * 100);
+		return `${formatNumber(used, 2)} / ${formatNumber(limit, 2)} credits · ${formatNumber(remainingPct)}% free`;
+	}
+
 	const fractions = limits
 		.map(limit => resolveUsedFraction(limit))
 		.filter((value): value is number => value !== undefined);
