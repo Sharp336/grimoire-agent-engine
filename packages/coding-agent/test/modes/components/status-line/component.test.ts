@@ -185,4 +185,18 @@ describe("StatusLineComponent", () => {
 			setThemeInstance(baseTheme);
 		}
 	});
+
+	it("renders extension billing inline instead of as a hook-status row", () => {
+		const statusLine = new StatusLineComponent(
+			makeSessionWithLastMessage(null, false, {
+				usingSubscription: true,
+			}) as unknown as AgentSession,
+		);
+		statusLine.setInlineStatus("kiro-credits", "0.006 credits");
+
+		const stripped = statusLine.getTopBorder(WIDE_ENOUGH_FOR_COST_SEGMENT).content.replace(/\x1b\[[0-9;]*m/g, "");
+		expect(stripped).toContain("0.006 credits");
+		expect(stripped).not.toContain("(sub)");
+		expect(statusLine.render(WIDE_ENOUGH_FOR_COST_SEGMENT)).toEqual([]);
+	});
 });

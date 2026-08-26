@@ -568,6 +568,8 @@ Current no-op methods in this controller:
 
 `setEditorComponent` is wired to the live editor (`ctx.setEditorComponent(factory)`). `setWidget` renders real widget components above or below the editor via `setHookWidget(...)` (`placement: "aboveEditor" | "belowEditor"`; string-array content capped at 10 lines).
 
+`setStatusLine(key, text)` renders compact extension-owned billing/metering text inside the main top-border status line, beside the built-in cost segment. Unlike `setStatus`, it does not allocate a separate hook-status row. Pass `undefined` to clear the keyed value.
+
 ### RPC mode (`rpc-mode.ts`)
 
 `ctx.ui` is backed by RPC `extension_ui_request` events:
@@ -581,6 +583,7 @@ Unsupported/no-op in RPC implementation:
 - `custom`
 - `setFooter`, `setHeader`, `setEditorComponent`, `addAutocompleteProvider`
 - `setWorkingMessage`
+- `setStatusLine`
 - theme switching/loading (`setTheme` returns failure)
 - tool expansion controls are inert
 

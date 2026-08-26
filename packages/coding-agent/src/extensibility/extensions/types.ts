@@ -284,6 +284,12 @@ export interface ExtensionUIContext {
 	/** Set status text in the footer/status bar. Pass undefined to clear. */
 	setStatus(key: string, text: string | undefined): void;
 
+	/**
+	 * Set compact extension text inside the main status line. Use for provider
+	 * billing/metering that belongs beside the built-in cost segment.
+	 */
+	setStatusLine?(key: string, text: string | undefined): void;
+
 	/** Set the working/loading message shown during streaming. Call with no argument to restore default. */
 	setWorkingMessage(message?: string): void;
 
