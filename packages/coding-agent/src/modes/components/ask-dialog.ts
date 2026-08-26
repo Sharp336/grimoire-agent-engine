@@ -316,9 +316,10 @@ function previewFacetWidths(
 
 function countedMoreCue(hidden: number): string {
 	const glyph = theme.nav.expand || "▾";
+	const noun = hidden === 1 ? "line" : "lines";
 	// Name the key that reveals the rest: the facet cannot scroll, so a bare
 	// count would advertise unread lines with no way to reach them.
-	return theme.fg("dim", `${glyph} ${hidden} more lines · ${askActionKey("app.ask.expand")} expand`);
+	return theme.fg("dim", `${glyph} ${hidden} more ${noun} · ${askActionKey("app.ask.expand")} expand`);
 }
 
 function truncateFooter(parts: string[], maxWidth: number): string {

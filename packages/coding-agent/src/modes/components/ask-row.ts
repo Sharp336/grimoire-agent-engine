@@ -136,7 +136,8 @@ export function renderAskRow(row: AskQuestionRow, ctx: AskRowRenderContext): Ask
 		}
 		if (!ctx.expanded && hiddenDescriptionLines > 0) {
 			const glyph = theme.nav.expand || "▾";
-			lines.push(`${indent}${theme.fg("dim", `${glyph} ${hiddenDescriptionLines} more lines`)}`);
+			const noun = hiddenDescriptionLines === 1 ? "line" : "lines";
+			lines.push(`${indent}${theme.fg("dim", `${glyph} ${hiddenDescriptionLines} more ${noun}`)}`);
 		}
 	}
 
