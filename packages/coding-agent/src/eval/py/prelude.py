@@ -125,12 +125,11 @@ if "__omp_prelude_loaded__" not in globals():
             return _read_tool_text(tool_path)
         p = _resolve_omp_path(path)
         data = p.read_text(encoding="utf-8")
-        lines = data.splitlines(keepends=True)
         if offset > 1 or limit is not None:
+            lines = data.splitlines(keepends=True)
             start = max(0, offset - 1)
             end = start + limit if limit else len(lines)
-            lines = lines[start:end]
-            data = "".join(lines)
+            data = "".join(lines[start:end])
         preview = data[:500]
         _emit_status("read", path=str(p), chars=len(data), preview=preview)
         return data

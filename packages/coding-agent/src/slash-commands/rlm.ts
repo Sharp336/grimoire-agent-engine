@@ -1,4 +1,5 @@
 import { prompt } from "@oh-my-pi/pi-utils";
+import { randomUUID } from "node:crypto";
 import { resolveLocalUrlToPath } from "../internal-urls/local-protocol";
 import rlmTemplate from "../prompts/rlm.md" with { type: "text" };
 import type { ToolSession } from "../tools";
@@ -57,7 +58,7 @@ export async function handleRlmCommand(
 		getArtifactsDir: () => runtime.sessionManager.getArtifactsDir(),
 		getSessionId: () => runtime.sessionManager.getSessionId(),
 	};
-	const inputUrl = `local://rlm-input-${Date.now()}.txt`;
+	const inputUrl = `local://rlm-input-${randomUUID()}.txt`;
 	const inputPath = resolveLocalUrlToPath(inputUrl, localProtocolOptions);
 	await Bun.write(inputPath, args);
 	return {

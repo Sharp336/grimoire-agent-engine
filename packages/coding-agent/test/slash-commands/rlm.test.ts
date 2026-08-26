@@ -84,6 +84,29 @@ describe("/rlm slash command", () => {
 		expect(fs.readFileSync(writtenPath, "utf-8")).toBe("summarize the report");
 	});
 
+	it("writes each /rlm payload to a distinct path so a second call never clobbers the first", async () => {
+		const h = acpRuntime({ enabled: true });
+		tempDirs.push(h.artifactsDir);
+
+		const first = await executeAcpBuiltinSlashCommand("/rlm summarize the report", h.runtime);
+		const second = await executeAcpBuiltinSlashCommand("/rlm summarize the report", h.runtime);
+
+		const firstUrl = promptOf(first).match(/local:\/\/(rlm-input-[\w.-]+\.txt)/)?.[1];
+		const secondUrl = promptOf(second).match(/local:\/\/(rlm-input-[\w.-]+\.txt)/)?.[1];
+		expect(firstUrl).toBeDefined();
+		expect(secondUrl).toBeDefined();
+		// Two invocations in the same millisecond used to derive the same
+		// Date.now() path, so the second write silently overwrote the first
+		// payload and the first rendered prompt analyzed the second request.
+		expect(firstUrl).not.toBe(secondUrl);
+		expect(fs.readFileSync(path.join(h.artifactsDir, "local", firstUrl ?? ""), "utf-8")).toBe(
+			"summarize the report",
+		);
+		expect(fs.readFileSync(path.join(h.artifactsDir, "local", secondUrl ?? ""), "utf-8")).toBe(
+			"summarize the report",
+		);
+	});
+
 	it("rejects with an actionable message when no eval backend is enabled", async () => {
 		const h = acpRuntime({ enabled: true, backends: { "eval.py": false, "eval.js": false } });
 
