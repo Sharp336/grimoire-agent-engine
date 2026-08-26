@@ -71,6 +71,14 @@
 - Accelerated SHA-2 and SHA-3 checksum builtins on supported ARM64 hardware.
 - Fixed joined collaboration guests becoming inconsistent with the host after host-side compaction.
 - Fixed `hub list` and child peer rosters counting parked agents from stale root sessions; the persisted roster now scopes to the current root, retries transient filesystem faults, and renders live rows through the production subagent prompt template with a truthful omitted count.
+### Added
+
+- Added an ask dialog preview side panel, expandable option descriptions (`→`/`←`), number-key jumps to options, and `/` filtering for long option lists.
+- Added mouse support to the ask dialog: wheel scrolling in either pane, click to focus an option, and click again to select it.
+
+### Changed
+
+- Unified ask option markers across the dialog, transcript, and legacy prompts, with a visible count whenever option text is clipped.
 
 ## [18.0.6] - 2026-08-26
 
