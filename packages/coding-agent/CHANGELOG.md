@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Fixed failed Termux clipboard copies falling through to a synchronous native helper that could freeze the TUI.
 
 ## [18.0.6] - 2026-08-26
 
