@@ -10,6 +10,8 @@
 - Fixed that same recovery path tearing down a bare `Target.attachToTarget` holder's page session while re-attaching, which made the holder's next command fail `Unknown session id` and — with no session left to sweep — left the debugger attachment orphaned past client disconnect: the relay bridge now preserves those tabId-routed page sessions across the Chrome root swap, so recovered tabs stay drivable and are still detached (infobar cleared) when the last holder disconnects ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
 - Fixed browser-relay recovery minting fresh auto-attach sessions for a tab the user detached (dismissed the debugger infobar) while the final subscription-replay RPC was in flight: the replay continuation now revalidates that the tab is still attached, unbanned, and on the same extension socket before emitting replacement sessions, so downstream clients no longer receive sessions whose every command fails ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
 - Fixed a second, concurrent subscription replay being launched when another tab's delayed guard detach triggered a same-socket hello while a replay was still in flight, which could double-issue journaled subscriptions and let a stale task retract sessions after commands resumed: same-socket hellos now preserve the active replay instead of discarding its task pointer ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+## [18.0.7] - 2026-08-26
+
 ### Added
 
 - Added `omp usage clients` to report per-client token usage recorded by the auth broker, including the machine and application responsible for usage by provider. Supports `--days` and `--json` output.
@@ -76,6 +78,7 @@
 - Kept completed assistant replies visible when viewport pressure prevents older active content from being retired.
 - Accelerated SHA-2 and SHA-3 checksum builtins on supported ARM64 hardware.
 - Fixed joined collaboration guests becoming inconsistent with the host after host-side compaction.
+- Fixed `hub list` and child peer rosters counting parked agents from stale root sessions; the persisted roster now scopes to the current root, retries transient filesystem faults, and renders live rows through the production subagent prompt template with a truthful omitted count.
 
 ## [18.0.6] - 2026-08-26
 
@@ -96,7 +99,6 @@
 - Commit-message generation errors in the git TUI now remain visible in the status bar instead of disappearing and returning to an idle state.
 - Fixed `omp update` leaving standalone Windows binaries on the old version when stale Bun launcher metadata was present, and preserved launchers installed by a newer concurrent update during binary repair ([#9806](https://github.com/can1357/oh-my-pi/issues/9806)).
 - Quitting `omp git` during commit-message generation now exits cleanly without leaving the process running.
-- Fixed `hub list` and child peer rosters counting parked agents from stale root sessions; the persisted roster now scopes to the current root, retries transient filesystem faults, and renders live rows through the production subagent prompt template with a truthful omitted count.
 
 ## [18.0.5] - 2026-08-25
 

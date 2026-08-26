@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.0.7] - 2026-08-26
+
 ### Added
 
 - Added application-level usage attribution for billing and usage reporting, with per-application aggregation and automatic client identification. Applications can set their label with `OMP_APP_NAME` (default: `omp`); update the broker before clients to support the new usage reports.

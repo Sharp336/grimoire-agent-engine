@@ -8,6 +8,8 @@
 - Fixed a fast-reconnect race where the extension's cleanup detach of a late-resolving attach was reported as a user cancellation: it is now marked guard-internal so the surviving relay reconciles the tab from the next `hello` instead of banning it ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
 - Fixed the extension never reclaiming a debugger attachment that survived an MV3 service-worker restart while the relay stayed unreachable: startup/install/keepalive now reconcile surviving attachments and arm an orphan sweep independent of a successful relay connection ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
 - Fixed a fast-reconnect race where a guard detach resolving during reconnect fired a second `hello` alongside the new socket's own: both could launch competing recovery attaches, and the loser's "already attached" failure retracted the tab the winner just recovered. Hello refreshes are now coalesced per live socket so only one recovery attach is launched ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+## [18.0.7] - 2026-08-26
+
 ### Changed
 
 - Clarified the scope of the two browser relay opt-in paths: per-call `app.relay: true` enables relay access for an individual call, while the `browser.relay` setting enables it by default across projects in a profile.
