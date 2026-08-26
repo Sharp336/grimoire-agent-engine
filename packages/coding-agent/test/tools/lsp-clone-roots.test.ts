@@ -676,6 +676,43 @@ describe("writethrough clone-local roots", () => {
 		}
 	});
 
+	it("writes through an escaped directory symlink without attaching or notifying a session server", async () => {
+		const session = TempDir.createSync("@omp-wt-session-");
+		const siblingBase = TempDir.createSync("@omp-wt-sibling-");
+		const aliasBase = TempDir.createSync("@omp-wt-alias-");
+		try {
+			fs.writeFileSync(path.join(session.path(), "package.json"), JSON.stringify({ name: "session" }));
+			fs.writeFileSync(path.join(session.path(), "tsconfig.json"), "{}");
+			const sessionBin = path.join(session.path(), "node_modules", ".bin");
+			fs.mkdirSync(sessionBin, { recursive: true });
+			const sessionServer = path.join(sessionBin, "typescript-language-server");
+			fs.writeFileSync(sessionServer, "#!/bin/sh\nexit 0\n");
+			fs.chmodSync(sessionServer, 0o755);
+
+			const sibling = makeClone(siblingBase, { binAtRoot: true });
+			const alias = path.join(aliasBase.path(), "sibling-link");
+			fs.symlinkSync(sibling.root, alias, "dir");
+			const aliasFile = path.join(alias, "api", "src", "main.ts");
+			const getOrCreate = vi.spyOn(lspClient, "getOrCreateClient");
+			const notify = vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
+
+			const writethrough = createLspWritethrough(session.path(), {
+				enableFormat: true,
+				enableDiagnostics: true,
+			});
+			const result = await writethrough(aliasFile, "export const escaped = true;\n");
+
+			expect(result).toBeUndefined();
+			expect(await Bun.file(sibling.file).text()).toBe("export const escaped = true;\n");
+			expect(getOrCreate).not.toHaveBeenCalled();
+			expect(notify).not.toHaveBeenCalled();
+		} finally {
+			session.removeSync();
+			siblingBase.removeSync();
+			aliasBase.removeSync();
+		}
+	});
+
 	it("writes each sibling clone through its own workspace root", async () => {
 		const session = TempDir.createSync("@omp-wt-session-");
 		const cloneBaseA = TempDir.createSync("@omp-wt-clone-a-");

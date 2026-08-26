@@ -271,6 +271,12 @@ async function runLspWritethrough(
 	// identity, so lazy/custom formatter/freshness behavior is unchanged —
 	// including exactly one getServersForFile call per file.
 	const ceiling = resolveLspCeiling(dst, cwd);
+	if (ceiling.escaped) {
+		notifyRoots = [];
+		await getWritePromise();
+		await notifyWriteCommitted();
+		return undefined;
+	}
 	let resolvable: ResolvedFileServer[];
 	if (ceiling.kind !== "git") {
 		const config = getConfig(cwd);
