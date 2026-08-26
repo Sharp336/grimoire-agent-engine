@@ -238,14 +238,18 @@ export class ModelRegistry {
 	#lastModelModifierWarnings: Map<string, string> = new Map();
 	#runtimeProvidersBySource: Map<string, Set<string>> = new Map();
 	#runtimeProviderSourceByName: Map<string, string> = new Map();
-	// Runtime model managers registered by extensions via fetchDynamicModels.
-	// Keyed by provider name; use the same SQLite cache path as builtins.
-	// `providerBaseUrl` is the registration-time config.baseUrl: discovered
-	// models whose url differs from it declared their own (see
-	// #runtimeExplicitModelBaseUrls).
+	// #runtimeExplicitModelBaseUrls). `cacheProviderId` scopes the discovery
+	// cache by the provider baseUrl so a changed default invalidates inherited
+	// rows instead of letting a stale cached url masquerade as model-declared.
 	#runtimeModelManagers: Map<
 		string,
-		{ options: ModelManagerOptions<Api>; sourceId: string; requiresAuth: boolean; providerBaseUrl: string }
+		{
+			options: ModelManagerOptions<Api>;
+			sourceId: string;
+			requiresAuth: boolean;
+			providerBaseUrl: string;
+			cacheProviderId: string;
+		}
 	> = new Map();
 	#ignoreLocalModelConfig: boolean;
 	#fetch: FetchImpl;
@@ -1714,7 +1718,7 @@ export class ModelRegistry {
 		}
 		const cachedResults: BuiltInDiscoveryResult[] = [];
 		// Append runtime model managers registered by extensions via fetchDynamicModels.
-		for (const { options: managerOpts, requiresAuth } of this.#runtimeModelManagers.values()) {
+		for (const { options: managerOpts, requiresAuth, cacheProviderId } of this.#runtimeModelManagers.values()) {
 			if (
 				configuredDiscoveryProviders.has(managerOpts.providerId) ||
 				(providerFilter && !providerFilter.has(managerOpts.providerId))
@@ -1756,7 +1760,7 @@ export class ModelRegistry {
 					// must not pin a fresh empty catalog row over the first
 					// authenticated refresh's retry window.
 					const cached = readModelCache<Api>(
-						managerOpts.providerId,
+						cacheProviderId,
 						RUNTIME_PROVIDER_CACHE_TTL_MS,
 						Date.now,
 						this.#cacheDbPath,
@@ -2569,8 +2573,17 @@ export class ModelRegistry {
 			const providerApiKey = config.apiKey;
 			const providerAuthHeader = config.authHeader;
 			const providerCompat = config.compat;
+			// Scope the discovery cache by the provider baseUrl: discovered models
+			// inherit the provider default, so when that default changes between
+			// registrations the cached rows (carrying the old url) must not be
+			// replayed as if their url were model-declared (see
+			// #runtimeExplicitModelBaseUrls). A changed default changes the cache
+			// key, forcing a refetch that re-derives inherited urls from the new
+			// default.
+			const cacheProviderId = `${providerName}\u0000${providerBaseUrl}`;
 			const managerOptions: ModelManagerOptions<Api> = {
 				providerId: providerName as Parameters<typeof createModelManager>[0]["providerId"],
+				cacheProviderId,
 				staticModels: [],
 				cacheDbPath: this.#cacheDbPath,
 				cacheTtlMs: RUNTIME_PROVIDER_CACHE_TTL_MS,
@@ -2627,8 +2640,11 @@ export class ModelRegistry {
 				// Registration-time config.baseUrl. Discovered models carry this url
 				// when they inherited it and their own otherwise; the difference is
 				// how cache-served cycles recover which urls are model-declared
-				// (see #runtimeExplicitModelBaseUrls).
+				// (see #runtimeExplicitModelBaseUrls). cacheProviderId scopes the
+				// discovery cache so a changed baseUrl re-fetches instead of
+				// replaying stale inherited urls.
 				providerBaseUrl,
+				cacheProviderId,
 			});
 			// Discovery is driven by refreshRuntimeProviders() after the drain — not
 			// here, so registration has no network side effect and callers can await.

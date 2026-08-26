@@ -485,6 +485,61 @@ describe("ModelRegistry runtime provider registration", () => {
 		expectBaseUrls();
 	});
 
+	test("changing the provider baseUrl re-derives inherited urls instead of replaying the stale default", async () => {
+		const providerName = "baseurl-migration-provider";
+		const cacheDbPath = path.join(tempDir, "model-cache.db");
+		const dynamicModels = async () => [
+			{ ...baseModel, id: "inherited-model" },
+			{ ...baseModel, id: "own-model", baseUrl: "https://own.example.com/v1" },
+		];
+
+		// Seed the discovery cache under the OLD provider default.
+		const seed = new ModelRegistry(authStorage, modelsJsonPath, { fetch: offlineFetch, cacheDbPath });
+		seed.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://old-default.example.com/v1",
+				auth: "apiKey",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: dynamicModels,
+			},
+			"ext://runtime",
+		);
+		await seed.refreshRuntimeProviders("online");
+		expect(seed.find(providerName, "inherited-model")?.baseUrl).toBe(
+			"https://old-default.example.com/v1",
+		);
+
+		// The provider moves its default while the old cache is still fresh. The
+		// discovery cache is scoped by provider baseUrl, so an online-if-uncached
+		// cycle must MISS the old rows and re-fetch, re-deriving the inherited
+		// url from the new default instead of treating the stale url as
+		// model-declared. A genuinely model-declared url stays put.
+		let discoveryCalls = 0;
+		const migrated = new ModelRegistry(authStorage, modelsJsonPath, { fetch: offlineFetch, cacheDbPath });
+		migrated.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://new-default.example.com/v1",
+				auth: "apiKey",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: async () => {
+					discoveryCalls++;
+					return dynamicModels();
+				},
+			},
+			"ext://runtime",
+		);
+		await migrated.refreshRuntimeProviders("online-if-uncached");
+		expect(discoveryCalls).toBe(1);
+		expect(migrated.find(providerName, "inherited-model")?.baseUrl).toBe(
+			"https://new-default.example.com/v1",
+		);
+		expect(migrated.find(providerName, "own-model")?.baseUrl).toBe("https://own.example.com/v1");
+	});
+
 	test("auth-gated cached fallback keeps per-model baseUrls without credentials", async () => {
 		const providerName = "gated-cache-url-provider";
 		const cacheDbPath = path.join(tempDir, "model-cache.db");
