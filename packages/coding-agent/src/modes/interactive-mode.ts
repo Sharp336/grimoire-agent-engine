@@ -893,6 +893,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.mcpManager?.setAuthHandler((serverName, challenge) =>
 			new MCPCommandController(this).handleMCPAuthChallenge(serverName, challenge),
 		);
+		this.mcpManager?.setUrlElicitationHandler((serverName, request) =>
+			new MCPCommandController(this).handleMCPUrlElicitation(serverName, request),
+		);
 		this.#eventBus = eventBus;
 		if (eventBus) {
 			this.#eventBusUnsubscribers.push(

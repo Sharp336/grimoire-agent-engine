@@ -36,6 +36,18 @@ export interface JsonRpcError {
 	message: string;
 	data?: unknown;
 }
+/** A structured JSON-RPC error returned by an MCP request. */
+export class MCPRequestError extends Error {
+	readonly code: number;
+	readonly data?: unknown;
+
+	constructor(error: JsonRpcError) {
+		super(`MCP error ${error.code}: ${error.message}`);
+		this.name = "MCPRequestError";
+		this.code = error.code;
+		this.data = error.data;
+	}
+}
 
 export type JsonRpcMessage = JsonRpcRequest | JsonRpcNotification | JsonRpcResponse;
 
@@ -186,6 +198,8 @@ export interface MCPImplementation {
 export interface MCPClientCapabilities {
 	roots?: { listChanged?: boolean };
 	sampling?: Record<string, never>;
+	/** URL-mode elicitation support. */
+	elicitation?: { url?: Record<string, never>; form?: Record<string, never> };
 	experimental?: Record<string, unknown>;
 }
 
@@ -286,6 +300,28 @@ export interface MCPAuthChallenge {
 	/** Values from `_meta["mcp/www_authenticate"]`. */
 	readonly wwwAuthenticate: readonly string[];
 }
+/** A URL-mode MCP elicitation request. */
+export interface MCPUrlElicitation {
+	readonly mode: "url";
+	readonly elicitationId: string;
+	readonly url: string;
+	readonly message: string;
+}
+
+export type MCPUrlElicitationAction = "accept" | "decline" | "cancel";
+
+export interface MCPUrlElicitationResponse {
+	readonly action: MCPUrlElicitationAction;
+}
+
+/** UI callback for a server-owned URL interaction. */
+export type MCPUrlElicitationHandler = (
+	serverName: string,
+	request: MCPUrlElicitation,
+) => Promise<MCPUrlElicitationResponse>;
+
+/** Transport-level URL elicitation handler without a server-name closure. */
+export type MCPUrlElicitationRequestHandler = (request: MCPUrlElicitation) => Promise<MCPUrlElicitationResponse>;
 
 /** tools/call response */
 export interface MCPToolCallResult {
@@ -331,6 +367,8 @@ export interface MCPTransport {
 	onNotification?: (method: string, params: unknown) => void;
 	/** Handler for server-to-client requests (e.g. roots/list). Returns result or throws a JsonRpcError. */
 	onRequest?: (method: string, params: unknown) => Promise<unknown>;
+	/** Handler for user-approved URL-mode elicitation requests. */
+	urlElicitationHandler?: MCPUrlElicitationRequestHandler;
 }
 
 /** Transport factory function */
@@ -352,6 +390,10 @@ export interface MCPServerConnection {
 	serverInfo: MCPImplementation;
 	/** Server capabilities */
 	capabilities: MCPServerCapabilities;
+	/** Handler for user-approved URL-mode elicitation requests. */
+	urlElicitationHandler?: MCPUrlElicitationHandler;
+	/** Wait for the server to report completion of a URL elicitation. */
+	waitForUrlElicitationCompletion?: (elicitationId: string, signal?: AbortSignal) => Promise<void>;
 	/** Cached tools (populated on demand) */
 	tools?: MCPToolDefinition[];
 	/** Source metadata (for display) */
@@ -502,10 +544,16 @@ export const MCPNotificationMethods = {
 	RESOURCES_LIST_CHANGED: "notifications/resources/list_changed",
 	RESOURCES_UPDATED: "notifications/resources/updated",
 	PROMPTS_LIST_CHANGED: "notifications/prompts/list_changed",
+	ELICITATION_COMPLETE: "notifications/elicitation/complete",
 } as const;
 
-/** Extract a JsonRpcError from a thrown value. Preserves `.code` and `.message` from Error instances or plain objects. */
+/** Extract a JSON-RPC error safe to send back to an MCP server. */
 export function toJsonRpcError(error: unknown): JsonRpcError {
+	if (error instanceof MCPRequestError) {
+		return error.data === undefined
+			? { code: error.code, message: error.message }
+			: { code: error.code, message: error.message, data: error.data };
+	}
 	if (error instanceof Error) {
 		const code = "code" in error && typeof error.code === "number" ? error.code : -32603;
 		return { code, message: error.message };
