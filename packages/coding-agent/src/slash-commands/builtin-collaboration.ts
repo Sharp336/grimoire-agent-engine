@@ -2,6 +2,7 @@ import { Spacer } from "@oh-my-pi/pi-tui";
 import { APP_NAME } from "@oh-my-pi/pi-utils";
 import { CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
+import { resolveRelayUrl, startCollabHost } from "../collab/start";
 import type { SettingPath, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
 import { parseExportArgs } from "../export/html/args";
@@ -327,17 +328,19 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				);
 				return;
 			}
-			// Scheme-less relay args default to wss (ws:// must be spelled out for localhost).
-			const relayUrl = relayInput.includes("://") ? relayInput : `wss://${relayInput}`;
+			const relayUrl = resolveRelayUrl(relayInput);
 			const webUrl = ctx.settings.get("collab.webUrl") || "";
-			const host = new CollabHost(ctx);
+			let host: CollabHost;
 			try {
-				await host.start(relayUrl, webUrl);
+				host = await startCollabHost(ctx, {
+					relayUrl,
+					webUrl,
+					writeLinkPath: ctx.settings.get("collab.writeLinkPath") || "",
+				});
 			} catch (err) {
 				ctx.showError(`Failed to start collab session: ${errorMessage(err)}`);
 				return;
 			}
-			ctx.collabHost = host;
 			showCollabLink(ctx, host, "Collab session started!", view);
 		},
 	},
