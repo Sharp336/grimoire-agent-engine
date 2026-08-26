@@ -172,12 +172,12 @@ describe("StatusLineComponent dispose guards async callbacks", () => {
 		component.watchBranch(onBranchChange);
 
 		component.getTopBorder(80);
+		component.dispose();
 		resetSettingsForTest();
 
 		await Promise.resolve();
 		await Promise.resolve();
 
 		expect(onBranchChange).not.toHaveBeenCalled();
-		component.dispose();
 	});
 });
