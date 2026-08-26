@@ -109,6 +109,21 @@ const PROVIDER_META: Record<SearchProviderId, ProviderMeta> = {
 		label: SEARCH_PROVIDER_LABELS.searxng,
 		load: async () => new (await import("./providers/searxng")).SearXNGProvider(),
 	},
+	wigolo: {
+		id: "wigolo",
+		label: SEARCH_PROVIDER_LABELS.wigolo,
+		load: async () => new (await import("./providers/wigolo")).WigoloProvider(),
+	},
+	zhihu: {
+		id: "zhihu",
+		label: SEARCH_PROVIDER_LABELS.zhihu,
+		load: async () => new (await import("./providers/zhihu")).ZhihuProvider(),
+	},
+	"zhihu-global": {
+		id: "zhihu-global",
+		label: SEARCH_PROVIDER_LABELS["zhihu-global"],
+		load: async () => new (await import("./providers/zhihu")).ZhihuGlobalProvider(),
+	},
 	duckduckgo: {
 		id: "duckduckgo",
 		label: SEARCH_PROVIDER_LABELS.duckduckgo,

@@ -57,6 +57,9 @@ export const SEARCH_PROVIDER_OPTIONS = [
 	{ value: "parallel", label: "Parallel", description: "Requires PARALLEL_API_KEY" },
 	{ value: "synthetic", label: "Synthetic", description: "Requires SYNTHETIC_API_KEY" },
 	{ value: "searxng", label: "SearXNG", description: "Requires SEARXNG_ENDPOINT or searxng.endpoint" },
+	{ value: "wigolo", label: "Wigolo", description: "Self-hosted Wigolo search aggregator (requires WIGOLO_BASE_URL or wigolo.baseUrl)" },
+	{ value: "zhihu", label: "Zhihu", description: "Zhihu Open Platform site search (requires ZHIHU_ACCESS_SECRET)" },
+	{ value: "zhihu-global", label: "Zhihu Global", description: "Zhihu Open Platform global web search (requires ZHIHU_ACCESS_SECRET)" },
 	{
 		value: "startpage",
 		label: "Startpage",

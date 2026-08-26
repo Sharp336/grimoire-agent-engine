@@ -5885,6 +5885,24 @@ export const SETTINGS_SCHEMA = {
 		default: undefined,
 	},
 
+	// Wigolo
+	"wigolo.baseUrl": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Wigolo Base URL",
+			description: "Base URL of a local Wigolo search aggregator instance (e.g. http://127.0.0.1:3333)",
+		},
+	},
+
+	"wigolo.authToken": {
+		type: "string",
+		default: undefined,
+		credential: true,
+	},
+
 	"commit.mapReduceEnabled": { type: "boolean", default: true },
 
 	"commit.mapReduceMinFiles": { type: "number", default: 4 },
