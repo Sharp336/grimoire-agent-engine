@@ -1,0 +1,591 @@
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as http2 from "node:http2";
+import * as net from "node:net";
+import type { CursorH2AcquireOptions, CursorH2Acquisition } from "../src/providers/cursor/h2-pool";
+import {
+	__cursorH2PoolSnapshot,
+	__setCursorH2EstablishBodyGate,
+	__setCursorH2FreshSessionHook,
+	acquireCursorH2,
+	disposeCursorH2Pool,
+} from "../src/providers/cursor/h2-pool";
+import { __resetProxyCache } from "../src/utils/proxy";
+
+/**
+ * Pool fixtures run against a real loopback `http2.createServer()` so session
+ * reuse, GOAWAY drain, reservation-before-connect, and connect classification
+ * exercise the actual http2 stack rather than a mock (pattern:
+ * cursor-terminal-error.test.ts).
+ */
+
+const RUN_PATH = "/agent.v1.AgentService/Run";
+
+let server: http2.Http2Server | undefined;
+const sessions = new Set<http2.Http2Session>();
+let totalSessions = 0;
+let streamCount = 0;
+let serveStream: ((stream: http2.ServerHttp2Stream) => void) | undefined;
+
+async function startServer(): Promise<string> {
+	server = http2.createServer();
+	server.on("session", session => {
+		totalSessions++;
+		sessions.add(session);
+		session.on("close", () => sessions.delete(session));
+	});
+	server.on("stream", (stream: http2.ServerHttp2Stream) => {
+		streamCount++;
+		stream.on("data", () => {});
+		serveStream?.(stream);
+	});
+	const listening = Promise.withResolvers<void>();
+	server.once("error", listening.reject);
+	server.listen(0, "127.0.0.1", listening.resolve);
+	await listening.promise;
+	const address = server.address();
+	if (!address || typeof address === "string") {
+		throw new Error("expected fixture http2 server to bind a tcp port");
+	}
+	return `http://127.0.0.1:${address.port}`;
+}
+
+function respondOk(stream: http2.ServerHttp2Stream): void {
+	stream.respond({ ":status": 200 });
+	stream.write(Buffer.from("ok"));
+	stream.end();
+}
+
+async function stopServer(): Promise<void> {
+	for (const session of sessions) {
+		session.destroy();
+	}
+	sessions.clear();
+	if (!server) return;
+	const closing = server;
+	server = undefined;
+	const closed = Promise.withResolvers<void>();
+	closing.close(error => (error ? closed.reject(error) : closed.resolve()));
+	await closed.promise;
+}
+
+function poolOutstanding(): number {
+	return __cursorH2PoolSnapshot().reduce((n, entry) => n + entry.outstanding, 0);
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!predicate()) {
+		if (Date.now() > deadline) throw new Error("waitFor timed out");
+		await Bun.sleep(5);
+	}
+}
+
+/** Returns a loopback port that is currently free (connect will be refused). */
+async function freeClosedPort(): Promise<number> {
+	const srv = net.createServer();
+	await new Promise<void>(resolve => srv.listen(0, "127.0.0.1", () => resolve()));
+	const address = srv.address();
+	const port = typeof address === "object" && address !== null ? address.port : 0;
+	await new Promise<void>(resolve => srv.close(() => resolve()));
+	return port;
+}
+
+function runArgs(baseUrl: string): CursorH2AcquireOptions {
+	return { baseUrl, requestPath: RUN_PATH, headers: {}, provider: "cursor" };
+}
+
+beforeEach(async () => {
+	totalSessions = 0;
+	streamCount = 0;
+	serveStream = undefined;
+	await disposeCursorH2Pool();
+});
+
+afterEach(async () => {
+	await stopServer();
+	await disposeCursorH2Pool();
+});
+
+describe("cursor HTTP/2 session pool", () => {
+	it("reuses one pooled session for two sequential acquisitions on the same baseUrl", async () => {
+		const baseUrl = await startServer();
+		serveStream = respondOk;
+
+		const first = await acquireCursorH2(runArgs(baseUrl));
+		expect(first.ok).toBe(true);
+		if (!first.ok) return;
+
+		const second = await acquireCursorH2(runArgs(baseUrl));
+		expect(second.ok).toBe(true);
+		if (!second.ok) return;
+
+		// Distinct request streams on the SAME underlying session.
+		expect(second.lease.request).not.toBe(first.lease.request);
+		await waitFor(() => streamCount >= 2);
+		expect(totalSessions).toBe(1);
+
+		first.lease.release();
+		second.lease.release();
+		expect(poolOutstanding()).toBe(0);
+	});
+
+	it("shares one in-flight connect across concurrent acquisitions on a fresh baseUrl", async () => {
+		const baseUrl = await startServer();
+		serveStream = respondOk;
+
+		// Both acquisitions race the same empty pool; the reservation
+		// (reserve-before-connect) makes the second await the first's in-flight
+		// connect instead of opening a duplicate session.
+		const [a, b] = await Promise.all([acquireCursorH2(runArgs(baseUrl)), acquireCursorH2(runArgs(baseUrl))]);
+		expect(a.ok).toBe(true);
+		expect(b.ok).toBe(true);
+		if (!a.ok || !b.ok) return;
+
+		expect(a.lease.request).not.toBe(b.lease.request);
+		await waitFor(() => streamCount >= 2);
+		expect(totalSessions).toBe(1);
+
+		a.lease.release();
+		b.lease.release();
+		expect(poolOutstanding()).toBe(0);
+	});
+
+	it("drains an in-flight lease on GOAWAY and opens a fresh session on the next acquire", async () => {
+		const baseUrl = await startServer();
+		let goawaySent = false;
+		const requestEnded = Promise.withResolvers<void>();
+		serveStream = stream => {
+			respondOk(stream);
+			const session = stream.session;
+			if (!goawaySent && session) {
+				goawaySent = true;
+				session.goaway();
+			}
+		};
+
+		const first = await acquireCursorH2(runArgs(baseUrl));
+		expect(first.ok).toBe(true);
+		if (!first.ok) return;
+		// A real transport consumes the response to start the stream flowing;
+		// without a data/response consumer Node's http2 client never emits `end`.
+		first.lease.request.on("data", () => {});
+		first.lease.request.once("end", () => requestEnded.resolve());
+
+		// The in-flight lease completes even though the session received GOAWAY
+		// mid-stream.
+		await requestEnded.promise;
+		// GOAWAY must mark the pooled entry draining before the release path.
+		await waitFor(() => __cursorH2PoolSnapshot().some(entry => entry.draining));
+		first.lease.release();
+		expect(poolOutstanding()).toBe(0);
+
+		// A draining session is never reused: the next acquire opens a fresh one.
+		const second = await acquireCursorH2(runArgs(baseUrl));
+		expect(second.ok).toBe(true);
+		if (!second.ok) return;
+		await waitFor(() => streamCount >= 2);
+		await waitFor(() => totalSessions === 2);
+		second.lease.release();
+		expect(poolOutstanding()).toBe(0);
+	});
+
+	it("leaks no lease when the signal aborts between request creation and listener install", async () => {
+		const baseUrl = await startServer();
+		serveStream = respondOk;
+
+		// Establish a pooled session first so request creation is synchronous.
+		const warm = await acquireCursorH2(runArgs(baseUrl));
+		expect(warm.ok).toBe(true);
+		if (!warm.ok) return;
+		warm.lease.release();
+		expect(poolOutstanding()).toBe(0);
+
+		// A pre-aborted signal is observed right after request creation: the
+		// lease must be released immediately and the count return to zero.
+		const controller = new AbortController();
+		controller.abort();
+		const result = await acquireCursorH2({ ...runArgs(baseUrl), signal: controller.signal });
+		expect(result.ok).toBe(true);
+		if (result.ok) {
+			expect(result.lease.request.destroyed).toBe(true);
+		}
+		expect(poolOutstanding()).toBe(0);
+	});
+
+	it("classifies an unreachable proxy tunnel as connect-tunnel unavailability, not a throw", async () => {
+		const provider = "cursor-h2-proxy-test";
+		const envKey = `PI_PROXY_${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
+		const saved = {
+			[envKey]: Bun.env[envKey],
+			NO_PROXY: Bun.env.NO_PROXY,
+			no_proxy: Bun.env.no_proxy,
+		};
+		try {
+			Bun.env[envKey] = "http://127.0.0.1:1";
+			Bun.env.NO_PROXY = "";
+			Bun.env.no_proxy = "";
+			__resetProxyCache();
+
+			const result = await acquireCursorH2({
+				baseUrl: "https://cursor.example.invalid",
+				requestPath: RUN_PATH,
+				headers: {},
+				provider,
+			});
+			expect(result.ok).toBe(false);
+			if (result.ok) return;
+			expect(result.unavailable.reason).toBe("connect-tunnel");
+		} finally {
+			if (saved[envKey] === undefined) delete Bun.env[envKey];
+			else Bun.env[envKey] = saved[envKey];
+			if (saved.NO_PROXY === undefined) delete Bun.env.NO_PROXY;
+			else Bun.env.NO_PROXY = saved.NO_PROXY;
+			if (saved.no_proxy === undefined) delete Bun.env.no_proxy;
+			else Bun.env.no_proxy = saved.no_proxy;
+			__resetProxyCache();
+		}
+	});
+
+	it("rejects a non-ALPN connect error instead of classifying it as unavailable", async () => {
+		const port = await freeClosedPort();
+		const promise = acquireCursorH2({
+			baseUrl: `http://127.0.0.1:${port}`,
+			requestPath: RUN_PATH,
+			headers: {},
+			provider: "cursor",
+		});
+		await expect(promise).rejects.toBeTruthy();
+		expect(poolOutstanding()).toBe(0);
+	});
+	it("restores the lease count when session.request() throws synchronously", async () => {
+		const baseUrl = await startServer();
+		serveStream = respondOk;
+
+		const warm = await acquireCursorH2(runArgs(baseUrl));
+		expect(warm.ok).toBe(true);
+		if (!warm.ok) return;
+		const session = warm.lease.request.session as http2.ClientHttp2Session | undefined;
+		warm.lease.release();
+		expect(poolOutstanding()).toBe(0);
+		if (!session) return;
+
+		// Force a synchronous stream-creation failure on the pooled session: the
+		// reserved lease slot must be restored before the error propagates so a
+		// later acquire is not counted twice and the session stays reusable.
+		// Test-only monkeypatch: `request` is a prototype method; shadow it on the
+		// instance to force a synchronous stream-creation error.
+		const requestHost = session as { request: typeof session.request };
+		const originalRequest = requestHost.request.bind(session);
+		requestHost.request = () => {
+			throw new Error("forced synchronous request failure");
+		};
+		try {
+			await expect(acquireCursorH2(runArgs(baseUrl))).rejects.toThrow("forced synchronous request failure");
+		} finally {
+			requestHost.request = originalRequest;
+		}
+		expect(poolOutstanding()).toBe(0);
+		// The pooled session survives the aborted stream creation.
+		const again = await acquireCursorH2(runArgs(baseUrl));
+		expect(again.ok).toBe(true);
+		if (again.ok) {
+			await waitFor(() => streamCount >= 2);
+			again.lease.release();
+		}
+		expect(poolOutstanding()).toBe(0);
+	});
+
+	it("does not deadlock when the fresh session is drained before its first lease", async () => {
+		const baseUrl = await startServer();
+		serveStream = respondOk;
+		let hookCalls = 0;
+
+		// Simulate a GOAWAY landing between connect and the first lease — a
+		// window a real fixture cannot hit (Node delivers goaway only after the
+		// establishing continuation's microtask has already leased), but exactly
+		// the drained-before-first-lease condition that previously made the retry
+		// re-acquire under its own unsettled reservation and hang forever.
+		__setCursorH2FreshSessionHook((_key, entry) => {
+			hookCalls++;
+			if (!entry) return;
+			entry.draining = true;
+			entry.session.destroy();
+		});
+		try {
+			// A bounded watchdog so a deadlock regression fails fast instead of
+			// hanging the whole suite. Deterministic clock control cannot model
+			// "never settles", which is what a deadlock is.
+			const result = (await Promise.race([
+				acquireCursorH2(runArgs(baseUrl)),
+				new Promise<never>((_, reject) =>
+					setTimeout(
+						() => reject(new Error("deadlock: acquire hung after fresh-session drain before first lease")),
+						3000,
+					),
+				),
+			])) as CursorH2Acquisition;
+
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			// The retry built a fresh session to replace the drained one.
+			await waitFor(() => totalSessions >= 2);
+			result.lease.release();
+			expect(poolOutstanding()).toBe(0);
+		} finally {
+			__setCursorH2FreshSessionHook(undefined);
+		}
+		expect(hookCalls).toBe(1);
+	});
+
+	it("dispose cancels a stalled in-flight connect instead of awaiting it forever", async () => {
+		// A TCP sink that accepts but never performs the h2 handshake keeps the
+		// client's establish in-flight forever. Disposal must terminate that
+		// establishment via its cancellation handle — not by this test destroying
+		// the socket — and settle within a bounded window.
+		let stalledSocket: net.Socket | undefined;
+		const sink = net.createServer(sock => {
+			stalledSocket = sock;
+			// Flow the socket so the peer's teardown (FIN / close) is processed
+			// and `destroyed` flips true — on a paused socket Node never advances
+			// the stream state and the assertion below would be a false negative.
+			sock.resume();
+		});
+		await new Promise<void>(resolve => sink.listen(0, "127.0.0.1", () => resolve()));
+		const address = sink.address();
+		const port = typeof address === "object" && address !== null ? address.port : 0;
+		const baseUrl = `http://127.0.0.1:${port}`;
+
+		try {
+			// Wait for the real event that proves the establish is in-flight: the
+			// client's TCP connection reached the sink.
+			const acquirer = acquireCursorH2(runArgs(baseUrl)).catch(e => e);
+			await waitFor(() => stalledSocket !== undefined, 2000);
+			// The socket is still open — disposal, not this test, must tear it down.
+			expect(stalledSocket?.destroyed).toBe(false);
+
+			// Disposal must cancel the stalled establishment and resolve within a
+			// bounded window; it must NOT hang until the socket is destroyed from
+			// outside.
+			const disposed = await Promise.race([
+				disposeCursorH2Pool().then(() => true),
+				new Promise<false>(timedOut => setTimeout(() => timedOut(false), 3000)),
+			]);
+			expect(disposed).toBe(true);
+
+			// Disposal's cancellation destroyed the stalled socket as part of
+			// terminating the establishment.
+			await waitFor(() => stalledSocket?.destroyed === true, 2000);
+			expect(__cursorH2PoolSnapshot()).toHaveLength(0);
+
+			// `acquirer` settles exactly when the establishment does; nothing live
+			// may have been resurrected into the pool in that settlement.
+			await acquirer;
+			expect(__cursorH2PoolSnapshot()).toHaveLength(0);
+		} finally {
+			sink.close();
+		}
+	});
+
+	it("dispose tears down a still-resolving proxy tunnel instead of leaving it live", async () => {
+		// A CONNECT proxy that accepts TCP but never replies to the CONNECT
+		// request keeps the establishment's tunnel stage pending indefinitely it
+		// would only settle on its own 30s timeout. `session` is not yet assigned
+		// during the tunnel, so disposal must abort the tunnel via the
+		// establishment controller — tearing the pre-disposal socket down now —
+		// rather than returning with it still live until that timeout.
+		const provider = "cursor-h2-proxy-dispose-test";
+		const envKey = `PI_PROXY_${provider.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`;
+
+		let proxySocket: net.Socket | undefined;
+		const proxy = net.createServer(sock => {
+			proxySocket = sock;
+			// Flow the socket so the peer's teardown (FIN / close) is processed
+			// and `destroyed` flips true — on a paused socket Node never advances
+			// the stream state and the assertion below would be a false negative.
+			sock.resume();
+		});
+		await new Promise<void>(resolve => proxy.listen(0, "127.0.0.1", () => resolve()));
+		const address = proxy.address();
+		const port = typeof address === "object" && address !== null ? address.port : 0;
+
+		const saved = {
+			[envKey]: Bun.env[envKey],
+			NO_PROXY: Bun.env.NO_PROXY,
+			no_proxy: Bun.env.no_proxy,
+		};
+		try {
+			Bun.env[envKey] = `http://127.0.0.1:${port}`;
+			Bun.env.NO_PROXY = "";
+			Bun.env.no_proxy = "";
+			__resetProxyCache();
+
+			// The establishment hangs in the tunnel stage (waiting for a CONNECT
+			// reply the silent proxy never sends).
+			const acquirer = acquireCursorH2({
+				baseUrl: "https://cursor.example.invalid",
+				requestPath: RUN_PATH,
+				headers: {},
+				provider,
+			}).catch(e => e);
+			await waitFor(() => proxySocket !== undefined, 2000);
+			// The pre-disposal tunnel is live: the peer accepted the CONNECT.
+			expect(proxySocket?.destroyed).toBe(false);
+
+			// Disposal must abort the tunnel and resolve within a bounded watchdog
+			// — NOT return while the pre-disposal tunnel keeps running into its own
+			// 30s timeout.
+			const disposed = await Promise.race([
+				disposeCursorH2Pool().then(() => true),
+				new Promise<false>(timedOut => setTimeout(() => timedOut(false), 3000)),
+			]);
+			expect(disposed).toBe(true);
+
+			// Disposal's cancellation tore the still-resolving tunnel's socket down.
+			await waitFor(() => proxySocket?.destroyed === true, 2000);
+			expect(__cursorH2PoolSnapshot()).toHaveLength(0);
+
+			await acquirer;
+			expect(__cursorH2PoolSnapshot()).toHaveLength(0);
+		} finally {
+			if (saved[envKey] === undefined) delete Bun.env[envKey];
+			else Bun.env[envKey] = saved[envKey];
+			if (saved.NO_PROXY === undefined) delete Bun.env.NO_PROXY;
+			else Bun.env.NO_PROXY = saved.NO_PROXY;
+			if (saved.no_proxy === undefined) delete Bun.env.no_proxy;
+			else Bun.env.no_proxy = saved.no_proxy;
+			__resetProxyCache();
+			proxy.close();
+		}
+	});
+
+	it("dispose does not resolve until the establishment body's done-teardown has fully run", async () => {
+		// Frames the exact audit race: `cancel` rejects the outward acquisition
+		// promise immediately, but the establishment body may still be in flight
+		// and go on to CREATE an http2 session after cancellation, observe `done`,
+		// and destroy it. The gate holds the body suspended immediately before it
+		// creates its session — the window where `cancel` has no session to
+		// destroy — so we can assert disposal has not completed while the body is
+		// still running. Without the establishment-completion await, disposal
+		// resolves the moment cancel rejects and this assertion fails (the body
+		// tears its transiently-created session down a moment later).
+		const baseUrl = await startServer();
+
+		let releaseBody: (() => void) | undefined;
+		const bodyAtGate = Promise.withResolvers<void>();
+		__setCursorH2EstablishBodyGate(() => {
+			bodyAtGate.resolve();
+			return new Promise<void>(release => {
+				releaseBody = release;
+			});
+		});
+
+		try {
+			const acquirer = acquireCursorH2(runArgs(baseUrl)).catch(e => e);
+			// The body reached the gate: it is suspended before creating its
+			// session, so nothing is pooled or connected yet.
+			await bodyAtGate.promise;
+			expect(__cursorH2PoolSnapshot()).toHaveLength(0);
+
+			// Disposal starts while the body is still held. It MUST NOT resolve
+			// until the body has created its session, observed `done`, destroyed
+			// it, and fully exited.
+			let disposed = false;
+			const disposing = disposeCursorH2Pool().then(() => {
+				disposed = true;
+			});
+			await Bun.sleep(50);
+			expect(disposed).toBe(false);
+
+			// Release the body: it creates a session, hits `done`, destroys it,
+			// and exits — and only after that teardown may disposal resolve.
+			releaseBody?.();
+			await disposing;
+			expect(disposed).toBe(true);
+
+			// The pre-disposal establishment left nothing live behind: the
+			// session it transiently created (if it reached the fixture) was torn
+			// down as part of the body's done-teardown before disposal returned.
+			await waitFor(() => sessions.size === 0);
+
+			await acquirer;
+			expect(__cursorH2PoolSnapshot()).toHaveLength(0);
+		} finally {
+			__setCursorH2EstablishBodyGate(undefined);
+		}
+	});
+
+	it("rejects a fresh establishment whose first lease throws synchronously, clears the reservation, and leaves the key reusable", async () => {
+		// The failure class: the establishing body's very first `issueLease` (a
+		// fresh establishment — nothing pooled yet) throws synchronously. That is
+		// a top-level body throw the live-arm `settled.resolve()` cannot carry:
+		// pre-fix the rejection arm swallowed it wholesale, so the outward
+		// acquisition stayed pending forever AND the `connecting` reservation
+		// (cleared only when the outward promise settles) remained installed,
+		// hanging every subsequent acquisition for the key.
+		const baseUrl = await startServer();
+		serveStream = respondOk;
+		let injected = false;
+		let pooledSession: http2.ClientHttp2Session | undefined;
+		let restoreRequest: (() => void) | undefined;
+
+		// The fresh-session hook runs synchronously right before the body issues
+		// its first lease. Monkeypatch the just-connected session's `request` to
+		// throw on first call, forcing the synchronous stream-creation failure on
+		// the FIRST-lease path (the pooled-session equivalent is covered by the
+		// "restores the lease count" case above; this is the fresh-establishment
+		// arm that previously never rejected).
+		__setCursorH2FreshSessionHook((_key, entry) => {
+			if (injected || !entry) return;
+			injected = true;
+			pooledSession = entry.session;
+			const session = entry.session as { request: typeof entry.session.request };
+			const originalRequest = session.request.bind(entry.session);
+			session.request = () => {
+				throw new Error("forced synchronous first-lease failure");
+			};
+			restoreRequest = () => {
+				session.request = originalRequest;
+			};
+		});
+
+		try {
+			const first = acquireCursorH2(runArgs(baseUrl));
+			// The acquisition must reject promptly; a bounded watchdog guards the
+			// regression where the error was swallowed and the promise never
+			// settled (no hang in the suite).
+			const verdict = await Promise.race([
+				first.then(
+					() => "resolved",
+					() => "rejected",
+				),
+				new Promise<string>(resolve => setTimeout(() => resolve("hung"), 3000)),
+			]);
+			expect(verdict).toBe("rejected");
+			await expect(first).rejects.toThrow("forced synchronous first-lease failure");
+			expect(injected).toBe(true);
+			// The failed first lease restored its slot; nothing is leaked.
+			expect(poolOutstanding()).toBe(0);
+
+			// Evict the broken pooled session so the second acquire must go
+			// through the connecting reservation and a FRESH establishment — which
+			// requires the pre-fix leaked reservation to have been cleared. A
+			// stale never-settling reservation would hang this acquire.
+			pooledSession?.destroy();
+			await waitFor(() => __cursorH2PoolSnapshot().length === 0, 2000);
+
+			// The failure is never cached and the key is not poisoned: a second
+			// acquisition for the same key settles and succeeds via a fresh
+			// establishment.
+			const second = await acquireCursorH2(runArgs(baseUrl));
+			expect(second.ok).toBe(true);
+			if (second.ok) {
+				await waitFor(() => streamCount >= 1);
+				second.lease.release();
+			}
+			expect(poolOutstanding()).toBe(0);
+		} finally {
+			__setCursorH2FreshSessionHook(undefined);
+			restoreRequest?.();
+		}
+	});
+});
