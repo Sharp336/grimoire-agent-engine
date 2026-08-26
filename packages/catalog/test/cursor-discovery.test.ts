@@ -8,6 +8,7 @@ import * as path from "node:path";
 // copy resolves to the primary checkout, not this worktree.
 import {
 	__cursorDiscoveryHttp2Snapshot,
+	__setCursorDiscoveryHttp2EstablishBodyGate,
 	disposeCursorDiscoveryHttp2Pool,
 	fetchCursorUsableModels,
 } from "../src/discovery/cursor";
@@ -75,10 +76,12 @@ afterAll(() => {
 
 beforeEach(() => {
 	disposeCursorDiscoveryHttp2Pool();
+	__setCursorDiscoveryHttp2EstablishBodyGate(undefined);
 });
 
 afterEach(() => {
 	disposeCursorDiscoveryHttp2Pool();
+	__setCursorDiscoveryHttp2EstablishBodyGate(undefined);
 });
 
 async function discover(): Promise<Map<string, ModelSpec<"cursor-agent">>> {
@@ -455,6 +458,29 @@ describe("fetchCursorUsableModels", () => {
 		const models = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
 
 		expect(models).toEqual([expect.objectContaining({ id: "composer-3" })]);
+		expect(__cursorDiscoveryHttp2Snapshot()).toEqual([
+			expect.objectContaining({ outstanding: 0, draining: false, referenced: false }),
+		]);
+	});
+
+	it("unrefs a session published after the waiter aborted mid-handshake", async () => {
+		const response = create(GetUsableModelsResponseSchema, {
+			models: [create(ModelDetailsSchema, { modelId: "composer-3" })],
+		});
+		const url = await startCursorDiscoveryServer(toBinary(GetUsableModelsResponseSchema, response));
+		const { promise: released, resolve: releaseGate } = Promise.withResolvers<void>();
+		const { promise: gated, resolve: sawGate } = Promise.withResolvers<void>();
+		__setCursorDiscoveryHttp2EstablishBodyGate(async () => {
+			sawGate();
+			await released;
+		});
+
+		const pending = fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 20 });
+		await gated;
+		expect(__cursorDiscoveryHttp2Snapshot()).toEqual([]);
+		expect(await pending).toBeNull();
+		releaseGate();
+		await Bun.sleep(20);
 		expect(__cursorDiscoveryHttp2Snapshot()).toEqual([
 			expect.objectContaining({ outstanding: 0, draining: false, referenced: false }),
 		]);

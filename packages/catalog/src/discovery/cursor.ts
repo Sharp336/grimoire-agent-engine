@@ -175,6 +175,9 @@ const cursorH2Connecting = new Map<string, Promise<CursorH2PoolEntry | null>>();
  * its session when the generation no longer matches.
  */
 let cursorH2Generation = 0;
+/** One-shot test gate awaited immediately before `http2.connect`. */
+let cursorH2EstablishBodyGate: ((key: string) => Promise<void>) | undefined;
+
 
 function destroyCursorH2Session(session: http2.ClientHttp2Session): void {
 	try {
@@ -255,45 +258,54 @@ function issueCursorH2Lease(
 function establishCursorH2Session(key: string, origin: string): Promise<CursorH2PoolEntry | null> {
 	const generation = cursorH2Generation;
 	const { promise, resolve } = Promise.withResolvers<CursorH2PoolEntry | null>();
-	let settled = false;
-	const settle = (value: CursorH2PoolEntry | null): void => {
-		if (settled) return;
-		settled = true;
-		resolve(value);
-	};
-	let session: http2.ClientHttp2Session;
-	try {
-		session = http2.connect(origin);
-	} catch {
-		return Promise.resolve(null);
-	}
-	// A just-connected session stays referenced (node's default) through the
-	// handshake so the connect can complete; the first lease's final release
-	// unrefs it once idle.
-	const entry: CursorH2PoolEntry = { session, outstanding: 0, draining: false, referenced: true };
-	session.on("goaway", () => drainCursorH2Entry(key, entry));
-	session.on("error", () => {
-		if (settled) {
-			drainCursorH2Entry(key, entry);
+	const run = async (): Promise<void> => {
+		if (cursorH2EstablishBodyGate) {
+			const gate = cursorH2EstablishBodyGate;
+			cursorH2EstablishBodyGate = undefined;
+			await gate(key);
+		}
+		if (cursorH2Generation !== generation) {
+			resolve(null);
 			return;
 		}
-		// Failed before publish: nothing is pooled, so just report the failure.
-		destroyCursorH2Session(session);
-		settle(null);
-	});
-	const publish = (): void => {
-		if (cursorH2Generation !== generation) {
-			// Pool disposed mid-connect: never publish a stale session.
+		let session: http2.ClientHttp2Session;
+		try {
+			session = http2.connect(origin);
+		} catch {
+			resolve(null);
+			return;
+		}
+		let settled = false;
+		const settle = (value: CursorH2PoolEntry | null): void => {
+			if (settled) return;
+			settled = true;
+			resolve(value);
+		};
+		const entry: CursorH2PoolEntry = { session, outstanding: 0, draining: false, referenced: false };
+		session.on("goaway", () => drainCursorH2Entry(key, entry));
+		session.on("error", () => {
+			if (settled) {
+				drainCursorH2Entry(key, entry);
+				return;
+			}
 			destroyCursorH2Session(session);
 			settle(null);
-			return;
-		}
-		cursorH2Pool.set(key, entry);
-		settle(entry);
+		});
+		const publish = (): void => {
+			if (cursorH2Generation !== generation) {
+				destroyCursorH2Session(session);
+				settle(null);
+				return;
+			}
+			session.unref();
+			entry.referenced = false;
+			cursorH2Pool.set(key, entry);
+			settle(entry);
+		};
+		session.once("connect", publish);
+		if (!session.connecting && !session.destroyed) publish();
 	};
-	session.once("connect", publish);
-	// Connect can complete before the listener is attached on a reused socket.
-	if (!session.connecting && !session.destroyed) publish();
+	void run();
 	return promise;
 }
 
@@ -368,6 +380,16 @@ export function __cursorDiscoveryHttp2Snapshot(): Array<{
 		draining: entry.draining,
 		referenced: entry.referenced,
 	}));
+}
+
+/**
+ * Test seam: one-shot gate awaited immediately before `http2.connect` so a
+ * test can abort the caller while handshake is still pending.
+ */
+export function __setCursorDiscoveryHttp2EstablishBodyGate(
+	fn: ((key: string) => Promise<void>) | undefined,
+): void {
+	cursorH2EstablishBodyGate = fn;
 }
 
 /** HTTP/2 transport required by Cursor API (HTTP/1.1 is rejected with 464). */
