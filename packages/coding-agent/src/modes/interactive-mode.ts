@@ -91,6 +91,8 @@ import {
 	type McpConnectionFailure,
 	type McpConnectionStatusEvent,
 } from "../mcp/startup-events";
+import type { PanelRunOptions, PanelRunResult } from "../panel/runtime";
+import type { PanelSettings, PanelTaskMode } from "../panel/types";
 import { humanizePlanTitle, type PlanApprovalDetails, resolvePlanTitle } from "../plan-mode/approved-plan";
 import { resolvePlanModelTransition } from "../plan-mode/model-transition";
 import guidedGoalInterviewPrompt from "../prompts/goals/guided-goal-interview.md" with { type: "text" };
@@ -5433,6 +5435,24 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showModelSelector(options?: { temporaryOnly?: boolean }): void {
 		this.#selectorController.showModelSelector(options);
+	}
+
+	showPanelRolePicker(settings: PanelSettings): Promise<string | undefined> {
+		return this.#selectorController.showPanelRolePicker(settings);
+	}
+
+	runPanelWithConfirmation(
+		options: Omit<PanelRunOptions, "onProgress" | "session" | "signal">,
+	): Promise<PanelRunResult | undefined> {
+		return this.#selectorController.runPanelWithConfirmation(options);
+	}
+
+	showPanelLineupBuilder(taskMode: PanelTaskMode, request: string): Promise<PanelRunResult | undefined> {
+		return this.#selectorController.showPanelLineupBuilder(taskMode, request);
+	}
+
+	showPanelPersonaEditor(): void {
+		this.#selectorController.showPanelPersonaEditor();
 	}
 
 	showPluginSelector(mode?: "install" | "uninstall"): void {

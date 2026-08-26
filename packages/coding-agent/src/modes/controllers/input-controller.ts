@@ -355,6 +355,12 @@ export class InputController {
 				return;
 			}
 
+			if (!this.ctx.focusedAgentId && this.ctx.session.isPanelRunning) {
+				void this.ctx.session.abortPanel();
+				this.ctx.showStatus("Cancelling panel…");
+				return;
+			}
+
 			if (!this.ctx.focusedAgentId) {
 				const viewSession = this.ctx.viewSession;
 				let aborted = false;
@@ -1116,6 +1122,12 @@ export class InputController {
 		// else. See issue #2600.
 		if (this.ctx.isShuttingDown) {
 			process.exit(130); // 128 + SIGINT
+		}
+
+		if (this.ctx.session.isPanelRunning) {
+			void this.ctx.session.abortPanel();
+			this.ctx.showStatus("Cancelling panel…");
+			return;
 		}
 
 		const now = Date.now();
