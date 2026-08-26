@@ -252,13 +252,25 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			// metadata()'s approx_tokens heuristic) rather than whitespace-word
 			// splitting: an unbroken multi-MB line (minified JSON/base64/code)
 			// must still be split into windows llm_query() can consume,
-			// regardless of whitespace. Array.from() iterates by code point
-			// (not String#slice's UTF-16 code units), so a boundary never
-			// splits a surrogate pair.
+			// regardless of whitespace. Iterates by UTF-16 offset (not by
+			// materializing a full code-point array via Array.from, which
+			// would multiply memory use on huge inputs) and steps two units
+			// at a time on surrogate pairs so a boundary never splits one.
 			const maxChars = size * 4;
-			const codePoints = Array.from(String(text));
+			const str = String(text);
 			const chunks = [];
-			for (let i = 0; i < codePoints.length; i += maxChars) chunks.push(codePoints.slice(i, i + maxChars).join(""));
+			let start = 0;
+			while (start < str.length) {
+				let count = 0;
+				let i = start;
+				while (i < str.length && count < maxChars) {
+					const code = str.codePointAt(i);
+					i += code > 0xffff ? 2 : 1;
+					count++;
+				}
+				chunks.push(str.slice(start, i));
+				start = i;
+			}
 			return chunks;
 		}
 		const lines = __splitlines(text);
