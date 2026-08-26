@@ -1483,7 +1483,7 @@ describe("AskTool option markers", () => {
 describe("AskTool legacy path marker and truncation parity", () => {
 	it("multi-select custom-input window renders unchecked glyph for unchecked option alongside checked sibling", async () => {
 		const tool = new AskTool(createSession());
-		const editor = vi.fn(async () => "custom");
+		const editor = vi.fn(async (_prompt: string) => "custom");
 		const options = [{ label: "alpha" }, { label: "beta" }, { label: "gamma" }];
 		const questions = [{ id: "pick", question: "Pick many", options, multi: true }];
 		let call = 0;
@@ -1519,7 +1519,7 @@ describe("AskTool legacy path marker and truncation parity", () => {
 		Object.defineProperty(process.stdout, "columns", { value: 40, configurable: true });
 		try {
 			const tool = new AskTool(createSession());
-			const editor = vi.fn(async () => "custom");
+			const editor = vi.fn(async (_prompt: string) => "custom");
 			// 20 CJK chars = 40 visible columns. The description line is 4 + 40 = 44
 			// columns, well over the 32-column budget. Each CJK char is 1 grapheme
 			// but 2 columns, so the character count must be roughly half the column
@@ -1610,7 +1610,7 @@ describe("askToolRenderer malformed call args", () => {
 
 	it("shows a counted truncation cue on a windowed option description", async () => {
 		const tool = new AskTool(createSession());
-		const editor = vi.fn(async () => "custom");
+		const editor = vi.fn(async (_prompt: string) => "custom");
 		const longDescription = "x".repeat(400);
 		const options = [{ label: "Alpha", description: longDescription }];
 		const questions = [{ id: "pick", question: "Pick one", options }];
@@ -1631,7 +1631,7 @@ describe("askToolRenderer malformed call args", () => {
 
 	it("preserves custom-input window boundaries with the same fixtures", async () => {
 		const tool = new AskTool(createSession());
-		const editor = vi.fn(async () => "custom");
+		const editor = vi.fn(async (_prompt: string) => "custom");
 		const options = Array.from({ length: 20 }, (_, i) => ({ label: `opt-${i}` }));
 		const questions = [{ id: "pick", question: "Multi pick", options, multi: true }];
 		let call = 0;
