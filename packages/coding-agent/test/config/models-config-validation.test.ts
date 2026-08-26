@@ -33,3 +33,17 @@ describe("validateProviderConfiguration (models-config auth)", () => {
 		).not.toThrow();
 	});
 });
+
+describe("validateProviderConfiguration (runtime-register auth)", () => {
+	test("auth: none allows runtime-registered models without apiKey/oauth", () => {
+		expect(() =>
+			validateProviderConfiguration("local-runtime", { baseUrl, auth: "none", models }, "runtime-register"),
+		).not.toThrow();
+	});
+
+	test("missing credentials still throws for runtime-registered models", () => {
+		expect(() => validateProviderConfiguration("gated-runtime", { baseUrl, models }, "runtime-register")).toThrow(
+			'Provider gated-runtime: "apiKey" or "oauth" is required when defining models.',
+		);
+	});
+});

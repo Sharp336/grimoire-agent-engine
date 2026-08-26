@@ -363,6 +363,143 @@ describe("ModelRegistry runtime provider registration", () => {
 		await registry.refreshProvider(providerName, "online");
 		expect(registry.find(providerName, "transient-model")).toBeDefined();
 	});
+	test("runtime baseUrl default does not clobber per-model baseUrl from fetchDynamicModels", async () => {
+		const providerName = "per-model-url-provider";
+		registry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://default.example.com/v1",
+				auth: "apiKey",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: async () => [
+					{ ...baseModel, id: "openai-wire", baseUrl: "https://openai-wire.example.com/v1" },
+					{
+						...baseModel,
+						id: "anthropic-wire",
+						api: "anthropic-messages",
+						baseUrl: "https://anthropic-wire.example.com/v1",
+					},
+					{ ...baseModel, id: "fallback-model" },
+				],
+			},
+			"ext://runtime",
+		);
+
+		await registry.refreshRuntimeProviders("online");
+		expect(registry.find(providerName, "openai-wire")?.baseUrl).toBe("https://openai-wire.example.com/v1");
+		expect(registry.find(providerName, "anthropic-wire")?.baseUrl).toBe("https://anthropic-wire.example.com/v1");
+		expect(registry.find(providerName, "fallback-model")?.baseUrl).toBe("https://default.example.com/v1");
+
+		// A full recomposition (compose site) must preserve the same contract.
+		await registry.refresh("offline");
+		expect(registry.find(providerName, "openai-wire")?.baseUrl).toBe("https://openai-wire.example.com/v1");
+		expect(registry.find(providerName, "anthropic-wire")?.baseUrl).toBe("https://anthropic-wire.example.com/v1");
+		expect(registry.find(providerName, "fallback-model")?.baseUrl).toBe("https://default.example.com/v1");
+	});
+
+	test("provider baseUrl stays a default for static models that declare their own", async () => {
+		const providerName = "static-per-model-url-provider";
+		registry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://default.example.com/v1",
+				auth: "apiKey",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				models: [
+					{ ...baseModel, id: "own-url-model", baseUrl: "https://own.example.com/v1" },
+					{ ...baseModel, id: "inheriting-model" },
+				],
+			},
+			"ext://runtime",
+		);
+
+		const expectBaseUrls = () => {
+			expect(registry.find(providerName, "own-url-model")?.baseUrl).toBe("https://own.example.com/v1");
+			expect(registry.find(providerName, "inheriting-model")?.baseUrl).toBe("https://default.example.com/v1");
+		};
+		expectBaseUrls();
+		await registry.refresh("offline");
+		expectBaseUrls();
+		await registry.refreshProvider(providerName, "offline");
+		expectBaseUrls();
+	});
+
+	test("auth none registers keyless static models without credentials", () => {
+		const providerName = "keyless-static-provider";
+		registry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://keyless.example.com/v1",
+				auth: "none",
+				api: "openai-completions",
+				models: [baseModel],
+			},
+			"ext://runtime",
+		);
+
+		const model = registry.find(providerName, baseModel.id);
+		expect(model).toBeDefined();
+		expect(registry.getAvailable().some(candidate => candidate.provider === providerName)).toBe(true);
+		expect(registry.hasConfiguredAuth(model!)).toBe(true);
+	});
+
+	test("auth none discovers dynamic models without credentials", async () => {
+		const providerName = "keyless-dynamic-provider";
+		registry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://keyless.example.com/v1",
+				auth: "none",
+				api: "openai-completions",
+				fetchDynamicModels: async () => [{ ...baseModel, id: "keyless-dynamic-model" }],
+			},
+			"ext://runtime",
+		);
+
+		await registry.refreshRuntimeProviders("online");
+		const model = registry.find(providerName, "keyless-dynamic-model");
+		expect(model).toBeDefined();
+		expect(registry.getAvailable().some(candidate => candidate.provider === providerName)).toBe(true);
+		expect(registry.hasConfiguredAuth(model!)).toBe(true);
+	});
+
+	test("keyless lifecycle: unregister removes availability and credential auth flips out of keyless", () => {
+		const providerName = "keyless-lifecycle-provider";
+		const keylessConfig: ProviderConfigInput = {
+			baseUrl: "https://keyless.example.com/v1",
+			auth: "none",
+			api: "openai-completions",
+			models: [baseModel],
+		};
+		const isAvailable = () => registry.getAvailable().some(candidate => candidate.provider === providerName);
+
+		registry.registerProvider(providerName, keylessConfig, "ext://runtime");
+		const model = registry.find(providerName, baseModel.id)!;
+		expect(model).toBeDefined();
+		expect(isAvailable()).toBe(true);
+		expect(registry.hasConfiguredAuth(model)).toBe(true);
+
+		registry.unregisterProvider(providerName);
+		expect(registry.find(providerName, baseModel.id)).toBeUndefined();
+		expect(isAvailable()).toBe(false);
+
+		registry.registerProvider(providerName, keylessConfig, "ext://runtime");
+		expect(isAvailable()).toBe(true);
+
+		// A credential auth mode flips the provider out of the keyless set even
+		// while no credential resolves: the model survives but gates on auth.
+		registry.registerProvider(
+			providerName,
+			{ auth: "apiKey", baseUrl: "https://keyless.example.com/v1" },
+			"ext://runtime",
+		);
+		const flipped = registry.find(providerName, baseModel.id)!;
+		expect(flipped).toBeDefined();
+		expect(registry.hasConfiguredAuth(flipped)).toBe(false);
+		expect(isAvailable()).toBe(false);
+	});
 
 	test("expired oauth credential defers gated discovery without throwing", async () => {
 		const providerName = "expired-oauth-runtime-provider";

@@ -67,7 +67,10 @@ export function validateProviderConfiguration(
 		}
 		const requiresAuth =
 			mode === "runtime-register"
-				? !config.apiKey && !config.oauthConfigured
+				? !config.apiKey &&
+					!config.oauthConfigured &&
+					(config.auth ?? "apiKey") !== "none" &&
+					(config.auth ?? "apiKey") !== "oauth"
 				: !config.apiKey && (config.auth ?? "apiKey") !== "none" && (config.auth ?? "apiKey") !== "oauth";
 		if (requiresAuth) {
 			throw new Error(
