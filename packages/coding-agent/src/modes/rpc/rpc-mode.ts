@@ -956,6 +956,10 @@ export async function runRpcMode(
 	const rpcUiContext = new RpcExtensionUIContext(pendingExtensionRequests, output);
 	setToolUIContext?.(rpcUiContext, true);
 
+	// Output all agent events as JSON
+	session.subscribe(event => {
+		output(event);
+	});
 	// Set up extensions with RPC-based UI context
 	await initializeExtensions(session, {
 		mode: "rpc",
@@ -972,11 +976,6 @@ export async function runRpcMode(
 			extensionUserMessageTracker.trackAgentMessageTask(task);
 		},
 		uiContext: rpcUiContext,
-	});
-
-	// Output all agent events as JSON
-	session.subscribe(event => {
-		output(event);
 	});
 
 	const getAvailableCommands = async () => buildAvailableSlashCommands(session);
