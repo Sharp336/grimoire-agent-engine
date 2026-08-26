@@ -73,7 +73,14 @@ import { SessionManager } from "../../session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "../../stt/models";
-import { type AgentProgress, refreshAgentDiscovery } from "../../task";
+import {
+	type AgentProgress,
+	refreshAgentDiscovery,
+	type SubagentLifecyclePayload,
+	type SubagentProgressPayload,
+	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
+	TASK_SUBAGENT_PROGRESS_CHANNEL,
+} from "../../task";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../../thinking";
 import { OTHER_OPTION } from "../../tools/ask";
 import { normalizeLocalScheme } from "../../tools/path-utils";
@@ -84,6 +91,7 @@ import {
 	TTS_LOCAL_MODELS,
 	TTS_LOCAL_VOICE_OPTIONS,
 } from "../../tts/models";
+import type { EventBus } from "../../utils/event-bus";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { createAcpClientBridge } from "./acp-client-bridge";
 import {
@@ -205,11 +213,14 @@ function snapshotAcpAgents(): AcpAgentSnapshot[] {
 /** Cap for the verbose task/assignment texts on the progress wire. */
 const ACP_AGENT_PROGRESS_TASK_CAP = 400;
 
+/** Per-request byte ceiling for `_omp/agents/messages` transcript windows. */
+export const ACP_AGENTS_MESSAGES_MAX_BYTES = 512 * 1024;
+
 /**
  * Wire shape of one subagent's live progress for the `_omp/agents/progress`
- * notification. Mirrors the task executor's `AgentProgress` snapshot, which
- * the session stream already carries on `tool_execution_update` events
- * (`partialResult.details.progress`), so no extra plumbing is needed.
+ * notification. Mirrors the task executor's `AgentProgress` snapshots and
+ * lifecycle transitions delivered over the session's task event channels,
+ * so background spawns stream live work and reach an explicit terminal state.
  */
 export interface AcpAgentProgress {
 	id: string;
@@ -263,13 +274,31 @@ function toAcpAgentProgress(progress: AgentProgress): AcpAgentProgress {
 	};
 }
 
-/** Pull the task tool's `AgentProgress` snapshots out of a tool result/update payload. */
-function extractSubagentProgress(partialResult: unknown): AgentProgress[] | undefined {
-	if (!partialResult || typeof partialResult !== "object" || Array.isArray(partialResult)) return undefined;
-	const details = (partialResult as { details?: unknown }).details;
-	if (!details || typeof details !== "object" || Array.isArray(details)) return undefined;
-	const progress = (details as { progress?: unknown }).progress;
-	return Array.isArray(progress) ? (progress as AgentProgress[]) : undefined;
+/**
+ * Fold a subagent lifecycle transition into the last mirrored progress frame.
+ * Terminal transitions keep clients failure-blind even when the final progress
+ * frame raced ahead of the lifecycle event or was never emitted.
+ */
+function applyLifecycleToProgress(
+	existing: AcpAgentProgress | undefined,
+	payload: SubagentLifecyclePayload,
+): AcpAgentProgress {
+	const status = payload.status === "started" ? "running" : payload.status;
+	if (!existing) {
+		return {
+			id: payload.id,
+			index: payload.index,
+			agent: payload.agent,
+			status,
+			recentOutput: [],
+			toolCount: 0,
+			requests: 0,
+			tokens: 0,
+			cost: 0,
+			durationMs: 0,
+		};
+	}
+	return { ...existing, index: payload.index, agent: payload.agent, status };
 }
 
 /**
@@ -281,11 +310,12 @@ function resolveAcpAgentTranscript(params: { agentId?: unknown; sessionFile?: un
 	if (typeof params.sessionFile === "string") {
 		const registered = AgentRegistry.global()
 			.list()
-			.some(ref => ref.sessionFile === params.sessionFile);
+			.some(ref => ref.kind !== "advisor" && ref.sessionFile === params.sessionFile);
 		if (registered) return params.sessionFile;
 	}
 	if (typeof params.agentId === "string") {
-		return AgentRegistry.global().get(params.agentId)?.sessionFile ?? undefined;
+		const ref = AgentRegistry.global().get(params.agentId);
+		return ref !== undefined && ref.kind !== "advisor" ? (ref.sessionFile ?? undefined) : undefined;
 	}
 	return undefined;
 }
@@ -364,6 +394,8 @@ type ManagedSessionRecord = {
 	// Installed inside `#scheduleBootstrapUpdates` (post-race-guard); released
 	// in `#disposeSessionRecord`. Lives independent of any prompt turn.
 	lifetimeUnsubscribe: (() => void) | undefined;
+	// `_omp/agents/progress` channel subscriptions; released in `#disposeSessionRecord`.
+	progressUnsubscribers: Array<() => void>;
 	closedError: PromptLifecycleError | undefined;
 	promptEventHandlers: Set<Promise<void>>;
 	extensionUserMessageTasks: Set<Promise<void>>;
@@ -405,6 +437,7 @@ type MCPSourceMap = {
 type AcpSessionHandle = {
 	session: AgentSession;
 	setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
+	eventBus?: EventBus;
 };
 
 type CreateAcpSession = (
@@ -415,8 +448,9 @@ type CreateAcpSession = (
 function normalizeCreatedAcpSession(created: AgentSession | AcpSessionHandle): {
 	session: AgentSession;
 	setToolUIContext: AcpSessionHandle["setToolUIContext"] | undefined;
+	eventBus?: EventBus;
 } {
-	return "session" in created ? created : { session: created, setToolUIContext: undefined };
+	return "session" in created ? created : { session: created, setToolUIContext: undefined, eventBus: undefined };
 }
 
 type AcpSpeechOption = {
@@ -819,9 +853,10 @@ export class AcpAgent implements Agent {
 		this.#clientCapabilities = params.clientCapabilities;
 		// Live-track subagent activity: mirror the registry into `_omp/agents/update`
 		// notifications once the client has processed `initialize` (in-order JSON-RPC
-		// guarantees the initial push lands after the response). The subscription is
-		// released in `dispose()`.
-		if (!this.#registryUnsubscribe) {
+		// guarantees the initial push lands after the response). Opt-in only: a
+		// client that does not declare `extensions.agents` receives no unsolicited
+		// traffic. The subscription is released in `dispose()`.
+		if (!this.#registryUnsubscribe && this.#clientCapabilities?.extensions?.agents === true) {
 			this.#registryUnsubscribe = AgentRegistry.global().onChange(() => this.#scheduleAgentsBroadcast());
 			this.#scheduleAgentsBroadcast();
 		}
@@ -1320,6 +1355,7 @@ export class AcpAgent implements Agent {
 			case SPEECH_MODELS_LIST_METHOD:
 				return buildAcpSpeechModelsCatalog();
 			case "_omp/agents/list":
+				this.#requireAgentsSurface();
 				return { agents: snapshotAcpAgents() };
 			case "_omp/agents/messages": {
 				const sessionFile = resolveAcpAgentTranscript({
@@ -1333,7 +1369,9 @@ export class AcpAgent implements Agent {
 					typeof params.fromByte === "number" && Number.isFinite(params.fromByte)
 						? Math.max(0, Math.trunc(params.fromByte))
 						: 0;
-				const result = await readRpcSubagentTranscript(sessionFile, fromByte);
+				const result = await readRpcSubagentTranscript(sessionFile, fromByte, {
+					maxBytes: ACP_AGENTS_MESSAGES_MAX_BYTES,
+				});
 				return {
 					sessionFile: result.sessionFile,
 					fromByte: result.fromByte,
@@ -1420,6 +1458,14 @@ export class AcpAgent implements Agent {
 
 	async extNotification(_method: string, _params: { [key: string]: unknown }): Promise<void> {}
 
+	/** Rejects `_omp/agents/*` requests from connections that never declared the capability. */
+	#requireAgentsSurface(): void {
+		if (this.#clientCapabilities?.extensions?.agents !== true) {
+			throw RequestError.methodNotFound(
+				"_omp/agents surface not enabled: declare clientCapabilities.extensions.agents",
+			);
+		}
+	}
 	/**
 	 * Debounced push of the agent roster as an `_omp/agents/update` notification.
 	 * Mirrors the collab host's broadcast: any registry change (spawn, status,
@@ -1462,6 +1508,35 @@ export class AcpAgent implements Agent {
 		delivery?.catch(error => logger.warn("Failed to push ACP agents/progress notification", { error }));
 	}
 
+	/**
+	 * Subscribe a record's task-event channels so executor-side subagent work
+	 * streams to the client as `_omp/agents/progress`. Driven by channels —
+	 * not `tool_execution_update` payloads — because background spawns settle
+	 * their task tool call before any subagent frame arrives, and terminal
+	 * completed/failed states must survive that suppression.
+	 */
+	#subscribeRecordToTaskChannels(record: ManagedSessionRecord, eventBus: EventBus): void {
+		const lastByAgentId = new Map<string, AcpAgentProgress>();
+		record.progressUnsubscribers.push(
+			eventBus.on(TASK_SUBAGENT_PROGRESS_CHANNEL, data => {
+				const payload = data as SubagentProgressPayload;
+				const agent = toAcpAgentProgress(payload.progress);
+				lastByAgentId.set(agent.id, agent);
+				if (lastByAgentId.size > 256) {
+					const oldest = lastByAgentId.keys().next().value;
+					if (oldest !== undefined) lastByAgentId.delete(oldest);
+				}
+				this.#pushAgentsProgressNotification(agent);
+			}),
+			eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, data => {
+				const payload = data as SubagentLifecyclePayload;
+				const merged = applyLifecycleToProgress(lastByAgentId.get(payload.id), payload);
+				lastByAgentId.set(merged.id, merged);
+				if (payload.status !== "started") this.#pushAgentsProgressNotification(merged);
+			}),
+		);
+	}
+
 	get signal(): AbortSignal {
 		return this.#connection.signal;
 	}
@@ -1485,7 +1560,7 @@ export class AcpAgent implements Agent {
 	}
 
 	async #createNewSessionRecord(cwd: string, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
-		const { session, setToolUIContext } = normalizeCreatedAcpSession(
+		const { session, setToolUIContext, eventBus } = normalizeCreatedAcpSession(
 			await this.#createSession(path.resolve(cwd), {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
 			}),
@@ -1496,7 +1571,7 @@ export class AcpAgent implements Agent {
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext);
+		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext, eventBus);
 	}
 
 	async #loadManagedSession(sessionId: string, cwd: string, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
@@ -1531,7 +1606,7 @@ export class AcpAgent implements Agent {
 
 	async #forkManagedSession(params: ForkSessionRequest): Promise<ManagedSessionRecord> {
 		const sourcePath = await this.#resolveForkSourceSessionPath(params.sessionId);
-		const { session, setToolUIContext } = normalizeCreatedAcpSession(
+		const { session, setToolUIContext, eventBus } = normalizeCreatedAcpSession(
 			await this.#createSession(path.resolve(params.cwd), {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
 			}),
@@ -1549,7 +1624,7 @@ export class AcpAgent implements Agent {
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		return await this.#registerPreparedSession(session, params.mcpServers ?? [], setToolUIContext);
+		return await this.#registerPreparedSession(session, params.mcpServers ?? [], setToolUIContext, eventBus);
 	}
 
 	async #openStoredSession(
@@ -1558,7 +1633,7 @@ export class AcpAgent implements Agent {
 		mcpServers: McpServer[],
 		sessionId: string,
 	): Promise<ManagedSessionRecord> {
-		const { session, setToolUIContext } = normalizeCreatedAcpSession(
+		const { session, setToolUIContext, eventBus } = normalizeCreatedAcpSession(
 			await this.#createSession(path.resolve(cwd), {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
 			}),
@@ -1572,18 +1647,24 @@ export class AcpAgent implements Agent {
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext);
+		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext, eventBus);
 	}
 
 	async #registerPreparedSession(
 		session: AgentSession,
 		mcpServers: McpServer[],
 		setToolUIContext: ((uiContext: ExtensionUIContext, hasUI: boolean) => void) | undefined,
+		eventBus?: EventBus,
 	): Promise<ManagedSessionRecord> {
 		const record = this.#createManagedSessionRecord(session, setToolUIContext);
 		session.setClientBridge(createAcpClientBridge(this.#connection, session.sessionId, this.#clientCapabilities));
-		// `record.lifetimeUnsubscribe` is installed in `#scheduleBootstrapUpdates`
-		// so it shares the bootstrap race guard — see that comment for why.
+		if (eventBus !== undefined && this.#clientCapabilities?.extensions?.agents === true) {
+			this.#subscribeRecordToTaskChannels(record, eventBus);
+		}
+		// `_omp/agents/*` is opt-in (`extensions.agents`); when declared, channel
+		// subscriptions stream executor-side subagent work without touching prompt
+		// routing. `record.lifetimeUnsubscribe` itself installs later in
+		// `#scheduleBootstrapUpdates`, sharing the bootstrap race guard.
 		try {
 			await this.#configureExtensions(record);
 			await this.#configureMcpServers(record, mcpServers);
@@ -1615,6 +1696,7 @@ export class AcpAgent implements Agent {
 			promptEventHandlers: new Set(),
 			extensionUserMessageTasks: new Set(),
 			lifetimeUnsubscribe: undefined,
+			progressUnsubscribers: [],
 		};
 	}
 
@@ -1727,17 +1809,6 @@ export class AcpAgent implements Agent {
 		}
 		if (event.type === "tool_execution_end") {
 			record.toolArgsById.delete(event.toolCallId);
-		}
-		if (event.type === "tool_execution_update") {
-			// Live subagent work: the task tool's progress snapshots ride the
-			// update payload; mirror them as `_omp/agents/progress` so clients
-			// can render subagent work in real time without polling.
-			const progress = extractSubagentProgress(event.partialResult);
-			if (progress) {
-				for (const entry of progress) {
-					this.#pushAgentsProgressNotification(toAcpAgentProgress(entry));
-				}
-			}
 		}
 		this.#clearLiveAssistantMessageAfterEvent(record, event);
 
@@ -3026,6 +3097,7 @@ export class AcpAgent implements Agent {
 
 	async #disposeSessionRecord(record: ManagedSessionRecord, reason?: postmortem.Reason): Promise<void> {
 		record.lifetimeUnsubscribe?.();
+		for (const unsubscribe of record.progressUnsubscribers.splice(0)) unsubscribe();
 		if (record.mcpManager) {
 			try {
 				await record.mcpManager.disconnectAll();

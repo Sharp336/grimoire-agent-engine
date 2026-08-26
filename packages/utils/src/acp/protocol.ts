@@ -152,6 +152,8 @@ export interface ClientCapabilities {
 	terminal?: boolean;
 	auth?: { terminal?: boolean };
 	elicitation?: { form?: Record<string, unknown>; url?: Record<string, unknown> };
+	/** Optional `_omp/*` extension surfaces the client opts into during `initialize`. */
+	extensions?: { agents?: boolean };
 	_meta?: Record<string, unknown>;
 }
 /** Implementation identity sent during initialization. */

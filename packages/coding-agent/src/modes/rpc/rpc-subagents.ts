@@ -65,7 +65,20 @@ function addPruned(set: Set<string>, value: string, maxSize: number): void {
 	}
 }
 
-export async function readRpcSubagentTranscript(sessionFile: string, fromByte = 0): Promise<RpcSubagentMessagesResult> {
+export interface RpcSubagentTranscriptReadOptions {
+	/**
+	 * Upper bound on transcript bytes consumed per call, starting at `fromByte`.
+	 * When set, the window is clamped to complete lines and full UTF-8 code
+	 * points, so continuation reads at `nextByte` never lose data.
+	 */
+	maxBytes?: number;
+}
+
+export async function readRpcSubagentTranscript(
+	sessionFile: string,
+	fromByte = 0,
+	options?: RpcSubagentTranscriptReadOptions,
+): Promise<RpcSubagentMessagesResult> {
 	let startByte = Number.isFinite(fromByte) ? Math.max(0, Math.trunc(fromByte)) : 0;
 	const file = Bun.file(sessionFile);
 	let size: number;
@@ -87,12 +100,30 @@ export async function readRpcSubagentTranscript(sessionFile: string, fromByte = 
 		startByte = 0;
 		reset = true;
 	}
-
-	const text = startByte >= size ? "" : await file.slice(startByte).text();
-	const lastNewline = text.lastIndexOf("\n");
-	const completeText = lastNewline >= 0 ? text.slice(0, lastNewline + 1) : "";
-	const entries = completeText.length > 0 ? parseSessionEntries(completeText) : [];
-	const nextByte = startByte + Buffer.byteLength(completeText, "utf8");
+	const maxBytes =
+		options?.maxBytes !== undefined && Number.isFinite(options.maxBytes)
+			? Math.max(0, Math.trunc(options.maxBytes))
+			: undefined;
+	const endByte = maxBytes !== undefined ? Math.min(size, startByte + maxBytes) : size;
+	const bytes =
+		startByte < endByte ? new Uint8Array(await file.slice(startByte, endByte).arrayBuffer()) : new Uint8Array(0);
+	let end = bytes.length;
+	if (end > 0 && bytes[end - 1]! >= 0x80) {
+		// Clamp a capped window to whole code points: walk back over continuation
+		// bytes; if their lead byte cannot be fully contained, drop the cluster.
+		let i = end - 1;
+		const floor = Math.max(0, end - 4);
+		while (i > floor && bytes[i]! >= 0x80 && bytes[i]! < 0xc0) i--;
+		const lead = bytes[i]!;
+		const width = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+		const containsLead = lead >= 0xc0 && lead < 0xf5;
+		if (containsLead && end - i < width) end = i;
+	}
+	const newlineIdx = bytes.lastIndexOf(0x0a, end - 1);
+	const consumed = newlineIdx >= 0 ? newlineIdx + 1 : 0;
+	const text = consumed > 0 ? new TextDecoder().decode(bytes.subarray(0, consumed)) : "";
+	const entries = text.length > 0 ? parseSessionEntries(text) : [];
+	const nextByte = startByte + consumed;
 
 	return {
 		sessionFile,

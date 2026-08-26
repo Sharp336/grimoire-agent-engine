@@ -359,6 +359,74 @@ describe("readRpcSubagentTranscript", () => {
 			messages: [],
 		});
 	});
+
+	test("caps reads by bytes without splitting lines or code points", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-rpc-subagent-transcript-capped-"));
+		tempPaths.push(dir);
+		const sessionFile = path.join(dir, "session.jsonl");
+		const headerLine = `${JSON.stringify({ type: "session", id: "s1", timestamp: "2026-06-09T00:00:00.000Z", cwd: dir })}\n`;
+		// Multi-byte content means a naive byte cut can split a code point; every
+		// line stays well under the cap so each window always contains a newline.
+		const lines = [headerLine];
+		for (let i = 0; i < 12; i++) {
+			lines.push(
+				`${JSON.stringify({
+					type: "message",
+					id: `m${i}`,
+					parentId: "s1",
+					timestamp: "2026-06-09T00:00:00.000Z",
+					message: { role: "user", content: [{ type: "text", text: `🌍📖 ${(i + 1).toString().repeat(40)}` }] },
+				})}\n`,
+			);
+		}
+		await Bun.write(sessionFile, lines.join(""));
+
+		const full = await readRpcSubagentTranscript(sessionFile);
+		let fromByte = 0;
+		const seen = [];
+		for (let window = 0; window < 200; window++) {
+			const read = await readRpcSubagentTranscript(sessionFile, fromByte, { maxBytes: 512 });
+			if (read.nextByte === fromByte) break;
+			expect(read.messages.length).toBeGreaterThan(0);
+			seen.push(...read.messages);
+			fromByte = read.nextByte;
+			expect(fromByte).toBeLessThanOrEqual(full.nextByte);
+		}
+
+		expect(seen).toEqual(full.messages);
+		expect(fromByte).toBe(full.nextByte);
+	});
+
+	test("covers continuation past nextByte after the transcript grows", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-rpc-subagent-transcript-append-"));
+		tempPaths.push(dir);
+		const sessionFile = path.join(dir, "session.jsonl");
+		const headerLine = `${JSON.stringify({ type: "session", id: "s1", timestamp: "2026-06-09T00:00:00.000Z", cwd: dir })}\n`;
+		const firstLine = `${JSON.stringify({
+			type: "message",
+			id: "m1",
+			parentId: null,
+			timestamp: "2026-06-09T00:00:00.000Z",
+			message: { role: "user", content: [{ type: "text", text: "first" }] },
+		})}\n`;
+		await Bun.write(sessionFile, `${headerLine}${firstLine}`);
+
+		const first = await readRpcSubagentTranscript(sessionFile);
+		expect(first.nextByte).toBe(Buffer.byteLength(`${headerLine}${firstLine}`, "utf8"));
+
+		const secondLine = `${JSON.stringify({
+			type: "message",
+			id: "m2",
+			parentId: "m1",
+			timestamp: "2026-06-09T00:00:01.000Z",
+			message: { role: "assistant", content: [{ type: "text", text: "🌍 final" }] },
+		})}\n`;
+		fs.appendFileSync(sessionFile, secondLine);
+
+		const resumed = await readRpcSubagentTranscript(sessionFile, first.nextByte);
+		expect(resumed.messages).toHaveLength(1);
+		expect(resumed.nextByte).toBe(first.nextByte + Buffer.byteLength(secondLine, "utf8"));
+	});
 });
 
 describe("RpcClient subagent frames", () => {

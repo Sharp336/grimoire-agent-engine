@@ -10,9 +10,10 @@ Primary implementation:
 - `packages/coding-agent/src/modes/acp/acp-agent.ts` (`AcpAgentSnapshot`,
   `snapshotAcpAgents`, `AcpAgent.#scheduleAgentsBroadcast`)
 
-The extension surface is opt-in by convention: clients that do not implement
-`extMethod`/`extNotification` simply never see these frames; unknown
-notifications are dropped by the JSON-RPC transport.
+The extension surface is opt-in: clients declare
+`clientCapabilities.extensions.agents` during `initialize`. Connections that do
+not declare it receive no `_omp/agents*` frames at all, and `_omp/agents/*`
+requests are rejected with a method-not-found error naming the capability.
 
 ## Request: `_omp/agents/list`
 
@@ -100,8 +101,11 @@ the `initialize` response).
 
 ## Notification: `_omp/agents/progress`
 
-Pushed in real time while a subagent works (the task executor coalesces at
-~150 ms). Carries one subagent's live work snapshot:
+Pushed whenever the task executor reports subagent work over the session's task
+event channels — including background spawns whose `task` tool call settles
+before any subagent frame arrives, plus terminal lifecycle transitions folded
+into the last known snapshot so failures are explicit. Carries one subagent's
+live work snapshot:
 
 ```json
 {
@@ -151,8 +155,10 @@ Mirrors the RPC `get_subagent_messages` surface.
 
 Either `agentId` (registry id from a roster snapshot) or `sessionFile` may be
 given; `fromByte` resumes a previous read (byte offset, line-aligned). Only
-files claimed by a registered agent are readable — arbitrary paths are
-rejected. Response `result`:
+files claimed by a registered main or sub agent are readable — arbitrary paths
+and advisor transcripts are rejected. A single request consumes at most
+512 KiB beyond `fromByte`, cut at a complete line on a whole code point
+boundary, so continuation reads at `nextByte` never lose or duplicate data.
 
 ```json
 {
@@ -194,6 +200,10 @@ task tool beyond the spec `kind` (which maps it to `other`).
   `in_progress` that reopens a finished tool call.
 - `activity` refreshes on status/metadata boundaries, not per tool call, so it
   is a coarse "what is it doing" gist, matching the Agent Hub roster.
+- Subagent progress frames cover top-level spawns of a session today; nested
+  spawns (a subagent spawning further agents) stream only their own channel
+  traffic, and deeper descendants surface through the registry-driven
+  `_omp/agents/update` roster once they register.
 - The surface is transport-agnostic: `omp acp` over stdio and the embedded
   ACP-channel transport (`mcpServers` type `acp`) both dispatch through the same
   `extMethod`/`extNotification` hooks.
