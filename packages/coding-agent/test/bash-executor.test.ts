@@ -900,25 +900,28 @@ exit 64
 		if (process.platform === "win32") return;
 
 		const sessionKey = "parallel-overlap";
+		const started = path.join(tempDir, "parallel-overlap.started");
+		const release = path.join(tempDir, "parallel-overlap.release");
 		const order: string[] = [];
-		const slow = executeBash('sleep 0.15 && echo "A-done"', { cwd: tempDir, timeout: 5000, sessionKey }).then(
-			result => {
-				order.push("slow");
-				return result;
-			},
-		);
-		const fast = executeBash('echo "B-done"', { cwd: tempDir, timeout: 5000, sessionKey }).then(result => {
-			order.push("fast");
+		const slow = executeBash(
+			`touch ${shellQuote(started)}; while [ ! -f ${shellQuote(release)} ]; do sleep 0.02; done; echo "A-done"`,
+			{ cwd: tempDir, timeout: 5000, sessionKey },
+		).then(result => {
+			order.push("slow");
 			return result;
 		});
+		await pollUntil(() => fs.existsSync(started), Date.now() + 4000);
+		expect(fs.existsSync(started)).toBe(true);
 
-		const [slowResult, fastResult] = await Promise.all([slow, fast]);
+		const fastResult = await executeBash('echo "B-done"', { cwd: tempDir, timeout: 5000, sessionKey });
+		order.push("fast");
+		fs.writeFileSync(release, "");
+		const slowResult = await slow;
+
 		expect(slowResult.exitCode).toBe(0);
 		expect(slowResult.output).toContain("A-done");
 		expect(fastResult.exitCode).toBe(0);
 		expect(fastResult.output).toContain("B-done");
-		// If the second call had queued behind the persistent session it could
-		// not finish before the 150ms sleep of the first.
 		expect(order).toEqual(["fast", "slow"]);
 	});
 
