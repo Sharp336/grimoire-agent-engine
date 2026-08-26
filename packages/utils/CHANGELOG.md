@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+## [18.0.5] - 2026-08-25
+
+### Added
+
+- Added `stableStringifyJson` for deterministic serialization of nested JSON-shaped data.
+
+### Fixed
+
+- Fixed managed Chrome-for-Testing installation failures when extracting the trusted browser download.
+
+## [18.0.4] - 2026-08-24
+
+### Added
+
+- Exported `getAvatarCacheDir` to resolve the avatar cache directory path.
+
+## [18.0.1] - 2026-08-23
+
+### Fixed
+
+- Fixed the Mermaid ASCII renderer throwing on left-to-right diagrams containing a `subgraph`, which made the fenced block fall back to raw source in the terminal. `offsetDrawingForSubgraphs` shifts every drawing coordinate to make room for subgraph borders that extend past the origin, but the canvas had already been sized from the pre-shift grid extents, so edges routed to the outermost column wrote past the allocation and `drawLine` threw on the missing column. The canvas and role canvas now grow by the same shift. ([#9340](https://github.com/can1357/oh-my-pi/issues/9340))
+- Fixed child shell environments inheriting Bun-autoloaded `.env.<mode>.local` values from the launch directory. ([#9290](https://github.com/can1357/oh-my-pi/issues/9290))
+
+## [17.4.2] - 2026-08-21
+
+### Fixed
+
+- Made malformed advanced-serialization frames from a worker subprocess non-fatal: Bun surfaces an undecodable IPC frame as a process-level `uncaughtException` in the parent (oven-sh/bun#37287), which the postmortem handler treated as fatal and tore down every active session and subagent. The handler now recognizes the decode failure and, keeping the session alive, faults the active advanced-IPC worker subsystems so their clients reject in-flight requests and recycle the subprocess instead of awaiting forever — mirroring the existing ipc-send EPIPE containment. ([#9158](https://github.com/can1357/oh-my-pi/issues/9158))
+
 ## [17.4.1] - 2026-08-21
 
 ### Added
