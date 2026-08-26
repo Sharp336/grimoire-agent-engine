@@ -85,6 +85,9 @@ requires a registered skill, return exactly one JSON dependency object with:
 Do not call this host-native unavailable and do not claim the dependent gate is complete.
 The parent active session will invoke /skill:<canonical-name> <exact args> and validate the
 matching skill-dispatch-result/v1 before dependent completion.`;
+export function buildVibeDelegatedAssignment(message: string): string {
+	return `${VIBE_DELEGATED_WORKER_BOUNDARY}\n\nAssignment:\n${message}`;
+}
 
 const VIBE_LIFECYCLE_CUSTOM_TYPE = "vibe-session-lifecycle";
 const VIBE_LIFECYCLE_VERSION = 1;
@@ -1410,6 +1413,7 @@ export class VibeSessionRegistry {
 		record: VibeRecord,
 		message: string,
 		signal: AbortSignal,
+	): Promise<ExecutorOptions> {
 		const sessionFile = session.getSessionFile();
 		const sessionArtifactsDir = sessionFile ? sessionFile.slice(0, -6) : null;
 		const artifactsDir = sessionArtifactsDir ?? path.join(os.tmpdir(), `omp-vibe-${Snowflake.next()}`);
@@ -1422,8 +1426,8 @@ export class VibeSessionRegistry {
 		return {
 			cwd: session.cwd,
 			agent: record.agent,
-			task: `${VIBE_DELEGATED_WORKER_BOUNDARY}\n\nAssignment:\n${message}`,
-			assignment: `${VIBE_DELEGATED_WORKER_BOUNDARY}\n\nAssignment:\n${message}`,
+			task: buildVibeDelegatedAssignment(message),
+			assignment: buildVibeDelegatedAssignment(message),
 			description: `vibe ${record.cli} session`,
 			index: 0,
 			id: record.id,
