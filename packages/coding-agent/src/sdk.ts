@@ -1880,23 +1880,27 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			asyncJobManager: scopedAsyncJobManager,
 		};
 		toolSession.dispatchSkillDependency = async (request, ownerScope) => {
-			if (!session.skillsSettings?.enableSkillCommands) {
-				return { type: "skill-dispatch-result/v1", skill: String((request as { skill?: string }).skill ?? ""), status: "failed", evidence: "skill_commands_disabled" };
-			}
-			const { skill, args } = request as { skill?: string; args?: string };
+			const input = request as { skill?: unknown; args?: unknown };
+			const skill = typeof input.skill === "string" ? input.skill : "";
+			const args = typeof input.args === "string" ? input.args : "";
+			if (!session.skillsSettings?.enableSkillCommands) return { type: "skill-dispatch-result/v1", skill, status: "failed", evidence: "skill_commands_disabled" };
 			const definition = session.skills.find(candidate => candidate.name === skill);
-			if (!definition || typeof args !== "string") {
-				return { type: "skill-dispatch-result/v1", skill: String(skill ?? ""), status: "failed", evidence: "unregistered_skill" };
-			}
-			const built = await buildSkillPromptMessage(definition, args, "user");
-			const started = await session.sendCustomMessage({
-				customType: SKILL_PROMPT_MESSAGE_TYPE,
-				content: built.message,
-				display: true,
-				details: { ...built.details, correlationId: `${ownerScope.parentSessionId}:${skill}:${args}` },
-				attribution: "user",
-			}, { triggerTurn: true, deliverAs: "nextTurn" });
-			return { type: "skill-dispatch-result/v1", skill, status: started ? "partial" : "failed", evidence: started ? "parent_turn_started" : "parent_turn_not_started" };
+			if (!definition || args.length > 2048) return { type: "skill-dispatch-result/v1", skill, status: "failed", evidence: "unregistered_or_invalid_skill" };
+			const correlationId = `${ownerScope.parentSessionId}:${skill}:${args}`;
+			if (session.isStreaming) return { type: "skill-dispatch-result/v1", skill, status: "failed", evidence: "parent_busy" };
+			const completion = Promise.withResolvers<{ status: "success" | "failed"; evidence: string }>();
+			const unsubscribe = session.subscribe(event => {
+				if (event.type === "agent_end") completion.resolve({ status: "success", evidence: `parent_agent_end:${correlationId}` });
+				if (event.type === "notice" && event.level === "error") completion.resolve({ status: "failed", evidence: event.message });
+			});
+			const timer = setTimeout(() => completion.resolve({ status: "failed", evidence: "parent_dispatch_timeout" }), 120_000);
+			try {
+				const built = await buildSkillPromptMessage(definition, args, "user");
+				const started = await session.sendCustomMessage({ customType: SKILL_PROMPT_MESSAGE_TYPE, content: built.message, display: true, details: { ...built.details, correlationId }, attribution: "user" }, { triggerTurn: true, deliverAs: "nextTurn" });
+				if (!started) completion.resolve({ status: "failed", evidence: "parent_turn_not_started" });
+				const outcome = await completion.promise;
+				return { type: "skill-dispatch-result/v1", skill, status: outcome.status, evidence: outcome.evidence };
+			} finally { clearTimeout(timer); unsubscribe(); }
 		};
 
 		// Wire process-wide internal URL singletons owned by their real classes.
