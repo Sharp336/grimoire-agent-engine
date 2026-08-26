@@ -72,6 +72,11 @@ function poolOutstanding(): number {
 	return __cursorH2PoolSnapshot().reduce((n, entry) => n + entry.outstanding, 0);
 }
 
+function poolIdleUnreferenced(): boolean {
+	const snapshot = __cursorH2PoolSnapshot();
+	return snapshot.length > 0 && snapshot.every(entry => entry.outstanding === 0 && !entry.referenced);
+}
+
 async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
 	while (!predicate()) {
@@ -127,6 +132,31 @@ describe("cursor HTTP/2 session pool", () => {
 		first.lease.release();
 		second.lease.release();
 		expect(poolOutstanding()).toBe(0);
+	});
+
+	it("refs the idle session for a lease, unrefs at zero, and re-refs on the next acquire", async () => {
+		const baseUrl = await startServer();
+		serveStream = respondOk;
+
+		const first = await acquireCursorH2(runArgs(baseUrl));
+		expect(first.ok).toBe(true);
+		if (!first.ok) return;
+		expect(__cursorH2PoolSnapshot()).toEqual(
+			expect.arrayContaining([expect.objectContaining({ outstanding: 1, draining: false, referenced: true })]),
+		);
+
+		first.lease.release();
+		expect(poolIdleUnreferenced()).toBe(true);
+
+		const second = await acquireCursorH2(runArgs(baseUrl));
+		expect(second.ok).toBe(true);
+		if (!second.ok) return;
+		expect(totalSessions).toBe(1);
+		expect(__cursorH2PoolSnapshot()).toEqual(
+			expect.arrayContaining([expect.objectContaining({ outstanding: 1, draining: false, referenced: true })]),
+		);
+		second.lease.release();
+		expect(poolIdleUnreferenced()).toBe(true);
 	});
 
 	it("shares one in-flight connect across concurrent acquisitions on a fresh baseUrl", async () => {
@@ -285,6 +315,7 @@ describe("cursor HTTP/2 session pool", () => {
 			requestHost.request = originalRequest;
 		}
 		expect(poolOutstanding()).toBe(0);
+		expect(poolIdleUnreferenced()).toBe(true);
 		// The pooled session survives the aborted stream creation.
 		const again = await acquireCursorH2(runArgs(baseUrl));
 		expect(again.ok).toBe(true);
@@ -565,6 +596,7 @@ describe("cursor HTTP/2 session pool", () => {
 			expect(injected).toBe(true);
 			// The failed first lease restored its slot; nothing is leaked.
 			expect(poolOutstanding()).toBe(0);
+			expect(poolIdleUnreferenced()).toBe(true);
 
 			// Evict the broken pooled session so the second acquire must go
 			// through the connecting reservation and a FRESH establishment — which

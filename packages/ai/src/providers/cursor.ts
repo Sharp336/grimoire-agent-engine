@@ -639,7 +639,7 @@ function streamCursorWithWireMode(
 				baseUrl,
 				apiKey,
 				requestPath,
-				callerHeaders: options?.headers,
+				runHeaders: requestHeaders,
 				gzipRequest: true,
 				signal: options?.signal,
 				provider: model.provider,

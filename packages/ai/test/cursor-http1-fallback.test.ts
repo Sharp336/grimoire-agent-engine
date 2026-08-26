@@ -1,11 +1,20 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as http from "node:http";
 import { type ConnectFrame, ConnectProtocolError, encodeConnectFrame } from "../src/providers/cursor/connect-frame";
+import { buildCursorRunHeaders } from "../src/providers/cursor/headers";
 import { openCursorHttp1Bridge, pendingCursorHttp1BridgePolls } from "../src/providers/cursor/http1-bridge";
 
 const RUN_PATH = "/agent.v1.AgentService/Run";
 const CONNECT_END_STREAM_FLAG = 0b00000010;
 const API_KEY = "http1-fallback-key";
+
+function testRunHeaders() {
+	return buildCursorRunHeaders({
+		apiKey: API_KEY,
+		requestPath: RUN_PATH,
+		gzipRequest: false,
+	});
+}
 
 let server: http.Server | undefined;
 let appendHits = 0;
@@ -219,8 +228,8 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 		const baseUrl = await startServer();
 		const bridge = openCursorHttp1Bridge({
 			baseUrl,
-			apiKey: API_KEY,
 			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
 			gzipRequest: false,
 		});
 		bridge.write(encodeConnectFrame(Buffer.from("client-request"), false));
@@ -240,8 +249,8 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 		const baseUrl = await startServer();
 		const bridge = openCursorHttp1Bridge({
 			baseUrl,
-			apiKey: API_KEY,
 			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
 			gzipRequest: false,
 		});
 		bridge.write(encodeConnectFrame(Buffer.from("client-request"), false));
@@ -267,8 +276,8 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 		const baseUrl = await startServer();
 		const bridge = openCursorHttp1Bridge({
 			baseUrl,
-			apiKey: API_KEY,
 			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
 			gzipRequest: false,
 		});
 		bridge.write(encodeConnectFrame(Buffer.from("client-request"), false));
@@ -289,8 +298,8 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 		const baseUrl = await startServer();
 		const bridge = openCursorHttp1Bridge({
 			baseUrl,
-			apiKey: API_KEY,
 			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
 			gzipRequest: false,
 		});
 		bridge.write(encodeConnectFrame(Buffer.from("client-request"), false));
@@ -319,8 +328,8 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 		const baseUrl = await startServer();
 		const bridge = openCursorHttp1Bridge({
 			baseUrl,
-			apiKey: API_KEY,
 			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
 			gzipRequest: false,
 		});
 		bridge.write(encodeConnectFrame(Buffer.from("client-request"), false));
@@ -344,8 +353,8 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 		const baseUrl = await startServer();
 		const bridge = openCursorHttp1Bridge({
 			baseUrl,
-			apiKey: API_KEY,
 			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
 			gzipRequest: false,
 		});
 		bridge.write(encodeConnectFrame(Buffer.from("client-request"), false));
@@ -374,8 +383,8 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 		const baseUrl = await startServer();
 		const bridge = openCursorHttp1Bridge({
 			baseUrl,
-			apiKey: API_KEY,
 			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
 			gzipRequest: false,
 		});
 		bridge.write(encodeConnectFrame(Buffer.from("client-request"), false));
@@ -408,8 +417,8 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 		const baseUrl = await startServer();
 		const bridge = openCursorHttp1Bridge({
 			baseUrl,
-			apiKey: API_KEY,
 			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
 			gzipRequest: false,
 		});
 		bridge.write(encodeConnectFrame(Buffer.from("frameA"), false));
@@ -454,8 +463,8 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 		const baseUrl = await startServer();
 		const bridge = openCursorHttp1Bridge({
 			baseUrl,
-			apiKey: API_KEY,
 			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
 			gzipRequest: false,
 		});
 		bridge.write(encodeConnectFrame(Buffer.from("client-request"), false));
@@ -493,8 +502,8 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 		const baseUrl = await startServer();
 		const bridge = openCursorHttp1Bridge({
 			baseUrl,
-			apiKey: API_KEY,
 			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
 			gzipRequest: false,
 		});
 		expect(pendingCursorHttp1BridgePolls()).toBe(1);
@@ -517,8 +526,8 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 		const ambient = new AbortController();
 		const bridge = openCursorHttp1Bridge({
 			baseUrl,
-			apiKey: API_KEY,
 			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
 			gzipRequest: false,
 			signal: ambient.signal,
 		});

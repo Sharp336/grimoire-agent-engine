@@ -10,6 +10,7 @@ import {
 import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { encodeConnectFrame } from "../src/providers/cursor/connect-frame";
 import * as h2Pool from "../src/providers/cursor/h2-pool";
+import { buildCursorRunHeaders } from "../src/providers/cursor/headers";
 import * as serverConfig from "../src/providers/cursor/server-config";
 import { fetchCursorBidiAvailability, resetCursorServerConfigCache } from "../src/providers/cursor/server-config";
 import { openCursorTransport } from "../src/providers/cursor/transport";
@@ -18,6 +19,14 @@ const RUN_PATH = "/agent.v1.AgentService/Run";
 const GET_SERVER_CONFIG_PATH = "/agent.v1.AgentService/GetServerConfig";
 const CONNECT_END_STREAM_FLAG = 0b00000010;
 const API_KEY = "transport-lifecycle-key";
+
+function testRunHeaders() {
+	return buildCursorRunHeaders({
+		apiKey: API_KEY,
+		requestPath: RUN_PATH,
+		gzipRequest: false,
+	});
+}
 
 let h2Server: http2.Http2Server | undefined;
 const h2Sessions = new Set<http2.Http2Session>();
@@ -178,6 +187,7 @@ describe("openCursorTransport lifecycle", () => {
 				baseUrl: h1Url,
 				apiKey: API_KEY,
 				requestPath: RUN_PATH,
+				runHeaders: testRunHeaders(),
 				gzipRequest: false,
 				provider: "cursor",
 			}),
@@ -223,6 +233,7 @@ describe("openCursorTransport lifecycle", () => {
 			baseUrl: h1Url,
 			apiKey: API_KEY,
 			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
 			gzipRequest: false,
 			provider: "cursor",
 		});
@@ -257,6 +268,7 @@ describe("openCursorTransport lifecycle", () => {
 				baseUrl: h1Url,
 				apiKey: API_KEY,
 				requestPath: RUN_PATH,
+				runHeaders: testRunHeaders(),
 				gzipRequest: false,
 				provider: "cursor",
 			}),
@@ -294,6 +306,7 @@ describe("openCursorTransport lifecycle", () => {
 				baseUrl: h2Url,
 				apiKey: API_KEY,
 				requestPath: RUN_PATH,
+				runHeaders: testRunHeaders(),
 				gzipRequest: false,
 				provider: "cursor",
 			});

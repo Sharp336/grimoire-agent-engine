@@ -2,7 +2,6 @@ import type * as http2 from "node:http2";
 import * as AIError from "../../error";
 import { type ConnectFrame, ConnectFrameDecoder } from "./connect-frame";
 import * as h2Pool from "./h2-pool";
-import { buildCursorRunHeaders } from "./headers";
 import { openCursorHttp1Bridge } from "./http1-bridge";
 import * as serverConfig from "./server-config";
 
@@ -72,17 +71,12 @@ export async function openCursorTransport(args: {
 	baseUrl: string;
 	apiKey: string;
 	requestPath: string;
-	callerHeaders?: Record<string, string>;
+	runHeaders: http2.OutgoingHttpHeaders;
 	gzipRequest: boolean;
 	signal?: AbortSignal;
 	provider: string;
 }): Promise<CursorTransportAttempt> {
-	const headers = buildCursorRunHeaders({
-		apiKey: args.apiKey,
-		requestPath: args.requestPath,
-		callerHeaders: args.callerHeaders,
-		gzipRequest: args.gzipRequest,
-	});
+	const headers = args.runHeaders;
 	const acquisition = await h2Pool.acquireCursorH2({
 		baseUrl: args.baseUrl,
 		requestPath: args.requestPath,
@@ -101,9 +95,8 @@ export async function openCursorTransport(args: {
 		if (availability === "bidi-disabled" || availability === "all-disabled") {
 			return openCursorHttp1Bridge({
 				baseUrl: args.baseUrl,
-				apiKey: args.apiKey,
 				requestPath: args.requestPath,
-				callerHeaders: args.callerHeaders,
+				runHeaders: headers,
 				gzipRequest: args.gzipRequest,
 				signal: args.signal,
 			});

@@ -4,10 +4,9 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import { connectProxiedSocket, getProxyForUrl } from "../../utils/proxy";
 
 /**
- * Pooled Cursor HTTP/2 transport owner. Replaces the two ad-hoc, unpooled
- * `http2.connect` call sites (the Run RPC and catalog discovery) with one
- * place that owns session lifetime: reservation-before-connect, GOAWAY drain,
- * a typed pre-dispatch ALPN outcome, and proxy tunneling.
+ * Pooled Cursor AI HTTP/2 transport owner. One place owns session lifetime:
+ * reservation-before-connect, GOAWAY drain, a typed pre-dispatch ALPN outcome,
+ * and proxy tunneling.
  *
  * A session is keyed by `baseUrl|proxyUrl` and reused for as many concurrent
  * streams as arrive. When the peer sends GOAWAY (or the session errors after
@@ -15,8 +14,10 @@ import { connectProxiedSocket, getProxyForUrl } from "../../utils/proxy";
  * in-flight leases finish, and the session is destroyed once the last lease
  * releases.
  *
- * This module deliberately registers no process-level hooks at import time;
- * shutdown and tests call {@link disposeCursorH2Pool} explicitly.
+ * Reusable sessions are intentionally unreferenced while idle so the pool does
+ * not keep short-lived consumers alive. This module registers no process-level
+ * hooks; {@link disposeCursorH2Pool} remains available for deterministic
+ * teardown and tests.
  */
 
 /** Client wall-clock budget for establishing a proxy CONNECT tunnel + TLS. */
@@ -52,6 +53,14 @@ interface PoolEntry {
 	session: http2.ClientHttp2Session;
 	outstanding: number;
 	draining: boolean;
+	/**
+	 * Mirrors the live `ref()`/`unref()` state we drive on the session: true
+	 * while at least one lease is outstanding, false once the session goes idle
+	 * or is destroyed. Node/Bun expose `ref`/`unref` but no readable ref-state
+	 * getter, so this tracked boolean IS the observable ref state — set only at
+	 * the same points we call the underlying ref/unref, never independently.
+	 */
+	referenced: boolean;
 }
 
 /** Base-url → live (non-draining) session with its outstanding lease count. */
@@ -123,6 +132,17 @@ function destroyEntry(key: string, entry: PoolEntry): void {
 	}
 }
 
+function releaseEntryLease(key: string, entry: PoolEntry): void {
+	entry.outstanding--;
+	if (entry.outstanding !== 0) return;
+	if (entry.draining) {
+		destroyEntry(key, entry);
+		return;
+	}
+	entry.session.unref();
+	entry.referenced = false;
+}
+
 /** Waits for a session's `close` (destroy already initiated). */
 function closeSession(session: http2.ClientHttp2Session): Promise<void> {
 	if (session.closed) return Promise.resolve();
@@ -142,16 +162,18 @@ function closeSession(session: http2.ClientHttp2Session): Promise<void> {
  * which an abort leaves the stream leased but unreleasable.
  */
 function issueLease(options: CursorH2AcquireOptions, key: string, entry: PoolEntry): CursorH2Lease {
+	if (entry.outstanding === 0) {
+		entry.session.ref();
+		entry.referenced = true;
+	}
 	entry.outstanding++;
 	let request: http2.ClientHttp2Stream;
 	try {
 		request = entry.session.request({ ...options.headers, ":method": "POST", ":path": options.requestPath });
 	} catch (error) {
 		// A synchronous stream-creation failure must not escape with the lease
-		// slot still reserved. Restore the count and, if this was the last
-		// lease on a draining session, finish the drain before rethrowing.
-		entry.outstanding--;
-		if (entry.draining && entry.outstanding === 0) destroyEntry(key, entry);
+		// slot or its zero-to-one session reference still held.
+		releaseEntryLease(key, entry);
 		throw error;
 	}
 
@@ -163,10 +185,7 @@ function issueLease(options: CursorH2AcquireOptions, key: string, entry: PoolEnt
 		if (released) return;
 		released = true;
 		options.signal?.removeEventListener("abort", onAbort);
-		entry.outstanding--;
-		if (entry.draining && entry.outstanding === 0) {
-			destroyEntry(key, entry);
-		}
+		releaseEntryLease(key, entry);
 		try {
 			request.destroy();
 		} catch {
@@ -340,8 +359,11 @@ function establishSession(options: CursorH2AcquireOptions, key: string): CursorE
 				return;
 			}
 			// Register in the pool before resolving so a waiter never observes a
-			// missing entry for a session that is already live.
-			pool.set(key, { session: connect, outstanding: 0, draining: false });
+			// missing entry for a session that is already live. Unref immediately:
+			// Node/Bun leave a just-connected session referenced, and a first-lease
+			// issuance failure must not pin a zero-outstanding idle entry.
+			connect.unref();
+			pool.set(key, { session: connect, outstanding: 0, draining: false, referenced: false });
 			handshake.resolve({ kind: "ok", session: connect });
 		};
 		const onGoaway = (): void => {
@@ -492,9 +514,8 @@ export async function acquireCursorH2(options: CursorH2AcquireOptions): Promise<
 }
 
 /**
- * Destroys every pooled session and clears the pool. Used by shutdown and
- * tests. No process-level hooks are installed at import time; callers own when
- * this runs.
+ * Destroys every pooled session and clears the pool for deterministic teardown.
+ * No process-level hooks are installed at import time; callers opt into this.
  */
 export async function disposeCursorH2Pool(): Promise<void> {
 	// Bump the generation BEFORE touching any state: a connect that began under
@@ -546,14 +567,20 @@ export async function disposeCursorH2Pool(): Promise<void> {
 }
 
 /**
- * Test seam: per-key pool introspection (outstanding count and drain state).
- * Kept minimal — tests assert the leak invariant and GOAWAY drain through it.
+ * Test seam: per-key pool introspection. Reference state is the tracked
+ * mirror of our `ref()`/`unref()` calls; no mutable transport object escapes.
  */
-export function __cursorH2PoolSnapshot(): Array<{ key: string; outstanding: number; draining: boolean }> {
+export function __cursorH2PoolSnapshot(): Array<{
+	key: string;
+	outstanding: number;
+	draining: boolean;
+	referenced: boolean;
+}> {
 	return [...pool.entries()].map(([key, entry]) => ({
 		key,
 		outstanding: entry.outstanding,
 		draining: entry.draining,
+		referenced: entry.referenced,
 	}));
 }
 /**

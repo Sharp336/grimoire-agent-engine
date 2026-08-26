@@ -9,7 +9,6 @@ import {
 	ConnectProtocolError,
 	encodeConnectFrame,
 } from "./connect-frame";
-import { buildCursorRunHeaders } from "./headers";
 
 export interface CursorHttp1BridgeAttempt {
 	write(frame: Buffer): void;
@@ -55,9 +54,8 @@ export function pendingCursorHttp1BridgePolls(): number {
  */
 export function openCursorHttp1Bridge(args: {
 	baseUrl: string;
-	apiKey: string;
 	requestPath: string;
-	callerHeaders?: Record<string, string>;
+	runHeaders: http2.OutgoingHttpHeaders;
 	gzipRequest: boolean;
 	signal?: AbortSignal;
 }): CursorHttp1BridgeAttempt {
@@ -74,14 +72,8 @@ export function openCursorHttp1Bridge(args: {
 	let firstWrite = true;
 	const initialAppendReady = Promise.withResolvers<void>();
 
-	const runHeaders = buildCursorRunHeaders({
-		apiKey: args.apiKey,
-		requestPath: args.requestPath,
-		callerHeaders: args.callerHeaders,
-		gzipRequest: args.gzipRequest,
-	});
 	const baseHeaders: Record<string, string> = {};
-	for (const [name, value] of Object.entries(runHeaders)) {
+	for (const [name, value] of Object.entries(args.runHeaders)) {
 		if (name.startsWith(":") || value === undefined) continue;
 		baseHeaders[name] = Array.isArray(value) ? value.join(", ") : String(value);
 	}

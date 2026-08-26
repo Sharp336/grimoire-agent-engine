@@ -187,4 +187,68 @@ describe("cursor conversation store — rotation", () => {
 		// An unrelated base is unaffected by rotations on "base".
 		expect(resolveCursorConversationId("other")).toBe("other");
 	});
+
+	it("65 unpinned bases with rotation state evict the oldest mapping and count", () => {
+		const rotatedByBase = new Map<string, string>();
+		for (let i = 0; i < CURSOR_RETAINED_CONVERSATION_LIMIT; i++) {
+			const id = `rot-r-${i}`;
+			pinCursorConversation(id);
+			let rotated = requireRotation(rotateCursorConversation(id));
+			if (i === 0) {
+				markCursorRotationSucceeded(rotated);
+				rotated = requireRotation(rotateCursorConversation(id));
+				markCursorRotationSucceeded(rotated);
+				rotated = requireRotation(rotateCursorConversation(id));
+				markCursorRotationSucceeded(rotated);
+				expect(rotateCursorConversation(id)).toBeUndefined();
+			}
+			rotatedByBase.set(id, rotated);
+			unpinCursorConversation(id);
+		}
+		const oldest = "rot-r-0";
+		const oldestCapped = rotatedByBase.get(oldest)!;
+		expect(resolveCursorConversationId(oldest)).toBe(oldestCapped);
+		expect(rotateCursorConversation(oldest)).toBeUndefined();
+
+		pinCursorConversation("rot-r-65");
+		const overflowRotated = requireRotation(rotateCursorConversation("rot-r-65"));
+		unpinCursorConversation("rot-r-65");
+
+		expect(resolveCursorConversationId(oldest)).toBe(oldest);
+		expect(isCursorRotationFresh(oldestCapped)).toBe(false);
+		expect(isCursorRotationMarked(oldestCapped)).toBe(false);
+		expect(isCursorRotationFresh(oldest)).toBe(false);
+		expect(isCursorRotationMarked(oldest)).toBe(false);
+		const reissued = requireRotation(rotateCursorConversation(oldest));
+		expect(reissued).not.toBe(oldestCapped);
+		expect(isCursorRotationFresh(reissued)).toBe(true);
+
+		const survivor = "rot-r-1";
+		const survivorRotated = rotatedByBase.get(survivor);
+		if (survivorRotated === undefined) throw new Error("expected survivor rotation");
+		expect(resolveCursorConversationId(survivor)).toBe(survivorRotated);
+		expect(isCursorRotationFresh(survivorRotated)).toBe(true);
+		expect(resolveCursorConversationId("rot-r-65")).toBe(overflowRotated);
+	});
+
+	it("a pinned base's rotation state survives retained churn", () => {
+		pinCursorConversation("pinned-rot");
+		const pinnedRotated = requireRotation(rotateCursorConversation("pinned-rot"));
+		markCursorRotationSucceeded(pinnedRotated);
+
+		for (let i = 0; i <= CURSOR_RETAINED_CONVERSATION_LIMIT; i++) {
+			const id = `churn-${i}`;
+			pinCursorConversation(id);
+			rotateCursorConversation(id);
+			unpinCursorConversation(id);
+		}
+
+		expect(resolveCursorConversationId("pinned-rot")).toBe(pinnedRotated);
+		expect(isCursorRotationMarked(pinnedRotated)).toBe(true);
+		expect(isCursorRotationFresh(pinnedRotated)).toBe(false);
+		const next = requireRotation(rotateCursorConversation("pinned-rot"));
+		expect(next).not.toBe(pinnedRotated);
+		expect(isCursorRotationFresh(next)).toBe(true);
+		unpinCursorConversation("pinned-rot");
+	});
 });

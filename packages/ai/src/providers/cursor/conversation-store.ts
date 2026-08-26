@@ -68,6 +68,25 @@ export function pinCursorConversation(id: string): CursorConversationEntry {
 }
 
 /**
+ * Purges rotation bookkeeping owned by a base id evicted from the retained
+ * LRU: its base→rotated mapping and rotation count, its current rotated id
+ * from the success/fresh sets, and the base id itself from those sets. Only
+ * called for a base genuinely evicted from `retainedLru` — pinned/active
+ * bases are never in that set, so their rotation state is never dropped.
+ */
+function evictCursorRotationState(baseId: string): void {
+	const rotated = rotatedConversationIds.get(baseId);
+	if (rotated !== undefined) {
+		successfulRotatedConversationIds.delete(rotated);
+		freshRotatedConversationIds.delete(rotated);
+	}
+	rotatedConversationIds.delete(baseId);
+	rotationCounts.delete(baseId);
+	successfulRotatedConversationIds.delete(baseId);
+	freshRotatedConversationIds.delete(baseId);
+}
+
+/**
  * Releases one pin. On the final unpin the entry moves to the retained LRU,
  * which evicts oldest-first beyond `CURSOR_RETAINED_CONVERSATION_LIMIT`.
  * Unknown ids are a no-op (reset-first discipline: this is an exit-path gate
@@ -94,6 +113,7 @@ export function unpinCursorConversation(id: string): void {
 		if (oldest === undefined) break;
 		retainedLru.delete(oldest);
 		entries.delete(oldest);
+		evictCursorRotationState(oldest);
 	}
 }
 
