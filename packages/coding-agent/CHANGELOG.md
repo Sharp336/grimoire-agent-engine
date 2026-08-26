@@ -8,6 +8,26 @@
 - Fixed a recoverable tab that fails to re-attach after an outage (for example, DevTools claimed it) leaving a discovering Puppeteer client holding an undrivable recreated target: the relay bridge now retracts the re-announced target when the guard-authorized reattach fails, matching the `Target.setAutoAttach` path ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
 - Fixed browser-relay recovery skipping the debugger re-attach for a still-claimed tab whose session holder attached through `Target.attachToTarget` without enabling `Target.setAutoAttach`: the reconnect path now forces the attachment for recoverable tabs regardless of auto-attach clients, so the tab is not left announced-but-detached with the holder's next command failing ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
 - Fixed that same recovery path tearing down a bare `Target.attachToTarget` holder's page session while re-attaching, which made the holder's next command fail `Unknown session id` and — with no session left to sweep — left the debugger attachment orphaned past client disconnect: the relay bridge now preserves those tabId-routed page sessions across the Chrome root swap, so recovered tabs stay drivable and are still detached (infobar cleared) when the last holder disconnects ([#8930](https://github.com/can1357/oh-my-pi/issues/8930)).
+## [18.0.6] - 2026-08-26
+
+### Added
+
+- Added fast, cached conventional commit message generation to the git TUI and `omp commit --legacy`, including automatic handling of whitespace-only changes, clearer commit scopes, and improved grammar and tense in generated summaries.
+- The git TUI sidebar now supports collapsing and expanding the Unstaged and Staged sections, with keyboard shortcuts to stage or unstage an entire section.
+- Long streaming thinking and reasoning output now continues into terminal scrollback during a turn instead of remaining clipped to the viewport.
+
+### Changed
+
+- `omp commit --legacy` now uses the same conventional commit message generation as the git TUI.
+- The git TUI sidebar now groups new files separately from tracked changes in the Unstaged section, while Staged and commit file lists use a unified status-based view.
+- Improved resilience when streaming output changes during rendering, preventing incomplete blocks from causing further display updates to fail.
+
+### Fixed
+
+- Commit-message generation errors in the git TUI now remain visible in the status bar instead of disappearing and returning to an idle state.
+- Fixed `omp update` leaving standalone Windows binaries on the old version when stale Bun launcher metadata was present, and preserved launchers installed by a newer concurrent update during binary repair ([#9806](https://github.com/can1357/oh-my-pi/issues/9806)).
+- Quitting `omp git` during commit-message generation now exits cleanly without leaving the process running.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added
