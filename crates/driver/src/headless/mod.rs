@@ -157,15 +157,14 @@ pub struct HeadlessSessionOptions {
 
 /// Single owner of every authority needed by a non-interactive agent loop.
 ///
-/// Field order is deliberate: the Agent and its cloned Environment client are
-/// dropped before the project Environment authority.
+/// The project Environment must outlive every authority that borrows it, so
+/// those owners are grouped in one `EnvironmentBound` field declared before
+/// `_environment`; Rust drops fields in declaration order, which keeps the
+/// Environment — still declared last — the final drop.
 pub struct HeadlessSession {
-	session:             SessionHandle,
-	advisor_parent:      Arc<chat::ChatParentHost<InProcTurnClient>>,
 	advise_queue:        omp_agent::advisor::AdvisorAdviceQueue,
 	state:               AgentState,
 	control:             omp_agent::ControlSender,
-	env:                 omp_env::EnvClient,
 	regimes:             Arc<RegimeHandle>,
 	tree:                Arc<AgentTree>,
 	events:              Option<EventSubscription>,
@@ -179,8 +178,20 @@ pub struct HeadlessSession {
 	session_id:          Str,
 	initial_items:       Vec<Item>,
 	_inference_registry: InferenceRegistry,
-	_edit_repair_task:   Option<tokio::task::JoinHandle<()>>,
+	environment_bound:   EnvironmentBound,
 	_environment:        omp_envd::ProjectEnvironment,
+}
+
+/// Every authority that borrows the project Environment.
+///
+/// Held in one field so the Environment cannot be dropped first: this struct
+/// is declared before `_environment`, and Rust drops fields in declaration
+/// order.
+struct EnvironmentBound {
+	session:           SessionHandle,
+	advisor_parent:    Arc<chat::ChatParentHost<InProcTurnClient>>,
+	env:               omp_env::EnvClient,
+	_edit_repair_task: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl HeadlessSession {
@@ -430,12 +441,9 @@ impl HeadlessSession {
 		environment
 			.bind_approval_authority(Some(Arc::clone(&approval_book)), Some(approval_route.clone()));
 		Ok(Self {
-			session: session_handle,
-			advisor_parent,
 			advise_queue,
 			state,
 			control,
-			env,
 			regimes: modes,
 			tree,
 			events: Some(events),
@@ -449,7 +457,12 @@ impl HeadlessSession {
 			session_id: session.id,
 			initial_items: session.initial_items,
 			_inference_registry: inference_registry,
-			_edit_repair_task: edit_repair_task,
+			environment_bound: EnvironmentBound {
+				session: session_handle,
+				advisor_parent,
+				env,
+				_edit_repair_task: edit_repair_task,
+			},
 			_environment: environment,
 		})
 	}
@@ -460,7 +473,7 @@ impl HeadlessSession {
 		items: impl IntoIterator<Item = Item>,
 		turn_id: TurnId,
 	) -> Result<AgentRunSummary, omp_sdk::SessionHandleError> {
-		self.session.submit(items, turn_id).await
+		self.environment_bound.session.submit(items, turn_id).await
 	}
 
 	/// Rewinds and resubmits the latest durable user turn.
@@ -468,7 +481,11 @@ impl HeadlessSession {
 		&self,
 		turn_id: TurnId,
 	) -> Result<Option<(Vec<Item>, Str, AgentRunSummary)>, omp_sdk::SessionHandleError> {
-		self.session.retry_last_turn(turn_id).await
+		self
+			.environment_bound
+			.session
+			.retry_last_turn(turn_id)
+			.await
 	}
 
 	/// Executes and durably commits one manual compaction.
@@ -476,7 +493,7 @@ impl HeadlessSession {
 		&self,
 		request: omp_agent::ManualCompactionRequest,
 	) -> Result<omp_agent::ManualCompactionOutcome, omp_sdk::SessionHandleError> {
-		self.session.compact_manual(request).await
+		self.environment_bound.session.compact_manual(request).await
 	}
 
 	/// Returns the durable session identifier.
@@ -487,7 +504,7 @@ impl HeadlessSession {
 	/// Returns the session-local parent authority used by persistent advisor
 	/// children.
 	pub fn advisor_parent(&self) -> Arc<chat::ChatParentHost<InProcTurnClient>> {
-		Arc::clone(&self.advisor_parent)
+		Arc::clone(&self.environment_bound.advisor_parent)
 	}
 
 	/// Clone-shared session queue backing the environment's `advise@1` device.
@@ -513,7 +530,7 @@ impl HeadlessSession {
 
 	/// Returns the Environment client owned alongside the agent.
 	pub const fn env(&self) -> &omp_env::EnvClient {
-		&self.env
+		&self.environment_bound.env
 	}
 
 	/// Binds or clears the session-scoped ACP terminal execution capability.
@@ -608,7 +625,7 @@ impl HeadlessSession {
 
 	/// Interrupts the active caller submission without waiting for settlement.
 	pub fn interrupt(&self) {
-		self.session.interrupt();
+		self.environment_bound.session.interrupt();
 	}
 
 	/// Returns a cheap interrupt-only capable clone of the durable handle.
@@ -616,7 +633,7 @@ impl HeadlessSession {
 	/// Protocol hosts use this before borrowing the session mutably for a
 	/// submission so cancellation never contends on their session mutex.
 	pub fn interrupt_handle(&self) -> SessionHandle {
-		self.session.clone()
+		self.environment_bound.session.clone()
 	}
 
 	/// Records a user-visible session title through the sole journal owner.
@@ -643,6 +660,7 @@ impl HeadlessSession {
 		let (spec, regime) =
 			omp_agent::core_regime(spec_id).expect("headless command names a built-in regime");
 		let (receipt, entries) = self
+			.environment_bound
 			.session
 			.start_regime(spec, regime, omp_agent::StartOptions { now_ms: now_ms(), queue })
 			.await?;
@@ -652,7 +670,11 @@ impl HeadlessSession {
 
 	/// Stops an active regime on the actor-owned regime set.
 	pub async fn stop_regime(&self, activation: Str) -> Result<bool, omp_sdk::SessionHandleError> {
-		let (removed, entries) = self.session.stop_regime(activation, now_ms()).await?;
+		let (removed, entries) = self
+			.environment_bound
+			.session
+			.stop_regime(activation, now_ms())
+			.await?;
 		self.regimes.sync_records(&entries);
 		Ok(removed)
 	}
@@ -699,7 +721,7 @@ impl HeadlessSession {
 
 	/// Disposes the live session without running mode-specific finalizers.
 	pub(crate) async fn dispose(&mut self) {
-		let _ = self.session.dispose().await;
+		let _ = self.environment_bound.session.dispose().await;
 	}
 
 	/// Runs ordered bounded finalization. Dropping this session afterward
@@ -711,14 +733,14 @@ impl HeadlessSession {
 		let report = mem::take(&mut self.finalizer)
 			.finalize(stdout, budget)
 			.await;
-		let _ = self.session.dispose().await;
+		let _ = self.environment_bound.session.dispose().await;
 		report
 	}
 
 	/// Publishes an additional event through the session's generation-stamped
 	/// event bus. Intended for typed mode transitions owned by protocol hosts.
 	pub fn publish(&self, event: AgentEvent) {
-		self.session.publish(event);
+		self.environment_bound.session.publish(event);
 	}
 }
 
@@ -731,4 +753,42 @@ fn now_ms() -> u64 {
 		.as_millis()
 		.try_into()
 		.unwrap_or(u64::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[tokio::test]
+	async fn dropped_session_without_finalize_leaves_environment_reopenable() {
+		let scratch = tempfile::tempdir().expect("scratch directory");
+		let data_dir = scratch.path().join("data");
+		let root = scratch.path().join("project");
+		std::fs::create_dir_all(&root).expect("project root");
+		let options = HeadlessSessionOptions {
+			project:               root,
+			additional_roots:      Box::new([]),
+			model:                 Str::from("apple-intelligence/apple-intelligence"),
+			initial_regime:        None,
+			initial_prompt_slot:   None,
+			plan_handoff:          None,
+			resume:                None,
+			fork:                  None,
+			py_eval:               false,
+			approval_mode:         None,
+			pty_denied:            false,
+			credential_provider:   None,
+			api_key:               None,
+			prompt_cache_affinity: None,
+			session_generation:    1,
+		};
+		let first = HeadlessSession::open(data_dir.clone(), options.clone())
+			.await
+			.expect("first session opens");
+		drop(first);
+		let second = HeadlessSession::open(data_dir, options)
+			.await
+			.expect("second session opens on the same project root");
+		drop(second);
+	}
 }
