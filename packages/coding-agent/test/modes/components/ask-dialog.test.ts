@@ -4,7 +4,7 @@ import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings
 import type { ExtensionAskDialogQuestion } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { AskDialogComponent } from "@oh-my-pi/pi-coding-agent/modes/components/ask-dialog";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { setKeybindings } from "@oh-my-pi/pi-tui";
+import { CURSOR_MARKER, setKeybindings } from "@oh-my-pi/pi-tui";
 
 const DOWN = "\x1b[B";
 const UP = "\x1b[A";
@@ -15,6 +15,7 @@ const CANCEL = "\x07";
 const SPACE = " ";
 const TAB = "\t";
 const SHIFT_TAB = "\x1b[Z";
+const RIGHT = "\x1b[C";
 
 let darkTheme = await getThemeByName("dark");
 
@@ -242,10 +243,10 @@ describe("AskDialogComponent", () => {
 		);
 
 		component.handleInput(SPACE);
-		expect(render(component)).toContain("❯ ☑ Generic MLE loop (Recommended)");
+		expect(render(component)).toContain("❯ 1 ☑ Generic MLE loop (Recommended)");
 
 		component.handleInput(SPACE);
-		expect(render(component)).toContain("❯ ☐ Generic MLE loop (Recommended)");
+		expect(render(component)).toContain("❯ 1 ☐ Generic MLE loop (Recommended)");
 
 		component.handleInput(SPACE);
 		component.handleInput(ENTER);
@@ -484,7 +485,7 @@ describe("AskDialogComponent", () => {
 		expect(onPrompt.mock.calls[1][1]).toBeUndefined();
 
 		// Move back up to Option A and re-open its note.
-		component.handleInput("\x1b[A"); // UP
+		component.handleInput(UP); // UP
 		onPrompt.mockReturnValueOnce(Promise.resolve("Updated note"));
 		component.handleInput("n");
 		await Promise.resolve();
@@ -1093,7 +1094,7 @@ describe("AskDialogComponent", () => {
 		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual([]);
 	});
 
-	it("renders every option's preview inline, not only the highlighted one", () => {
+	it("renders the focused option preview in the side panel", () => {
 		const questions: ExtensionAskDialogQuestion[] = [
 			{
 				id: "q1",
@@ -1110,10 +1111,14 @@ describe("AskDialogComponent", () => {
 			onCancel: vi.fn(),
 			onPrompt: vi.fn(),
 		});
-		// Cursor defaults to option 0; both previews must be visible without navigating.
+		// Cursor defaults to option 0; only the focused preview appears in the facet.
 		const out = stripVTControlCharacters(component.render(80).join("\n"));
 		expect(out).toContain("PREVIEW-ALPHA");
-		expect(out).toContain("PREVIEW-BRAVO");
+		expect(out).not.toContain("PREVIEW-BRAVO");
+		component.handleInput(DOWN);
+		const next = stripVTControlCharacters(component.render(80).join("\n"));
+		expect(next).toContain("PREVIEW-BRAVO");
+		expect(next).not.toContain("PREVIEW-ALPHA");
 	});
 
 	it("refreshes cached preview styling after theme invalidation", async () => {
@@ -1130,7 +1135,7 @@ describe("AskDialogComponent", () => {
 		if (!lightTheme) throw new Error("Failed to load light theme");
 		const cachedComponent = createComponent();
 		const before = previewLine(cachedComponent);
-		expect(stripVTControlCharacters(before)).toContain("│ CACHE-PREVIEW");
+		expect(stripVTControlCharacters(before)).toContain("CACHE-PREVIEW");
 		try {
 			setThemeInstance(lightTheme);
 			const stale = previewLine(cachedComponent);
@@ -1187,8 +1192,9 @@ describe("AskDialogComponent", () => {
 			);
 			const out = render(component);
 
-			expect(out).toContain("PgUp/PgDn");
-			expect(out).toContain("Tab/←/→");
+			// Tall previews live in the side facet, so the list no longer pages them;
+			// the footer must still keep tab and cancel affordances.
+			expect(out).toContain("Tab/S-Tab");
 			expect(out).not.toContain(" tabs");
 			expect(out).toContain("Ctrl+G cancel");
 			setKeybindings(
@@ -1199,7 +1205,6 @@ describe("AskDialogComponent", () => {
 				}),
 			);
 			const remapped = render(component);
-			expect(remapped).toContain("Ctrl+U/Ctrl+D");
 			expect(remapped).toContain("Ctrl+G cancel");
 		} finally {
 			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
@@ -1207,7 +1212,7 @@ describe("AskDialogComponent", () => {
 		}
 	});
 
-	it("pages through an inline preview taller than the question viewport", () => {
+	it("scrolls the side preview facet without changing selection", () => {
 		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
 		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 24 });
 		try {
@@ -1230,42 +1235,42 @@ describe("AskDialogComponent", () => {
 				onPrompt: vi.fn(),
 			});
 
+			component.handleInput(DOWN);
 			let out = render(component);
 			expect(out).toContain("PREVIEW-FIRST");
 			expect(out).not.toContain("PREVIEW-MIDDLE");
 			expect(out).not.toContain("PREVIEW-LAST");
-			expect(out).not.toContain("PgUp/PgDn");
-			expect(out).toContain("↓ scroll");
-			component.handleInput(DOWN);
-			for (let page = 0; page < 4; page++) component.handleInput(PAGE_DOWN);
+			expect(out).toContain("❯ 2 ○ Alpha");
+
+			// Wheel over the preview facet (right of the divider) scrolls preview only.
+			const frame = component.render(80);
+			const previewRow = frame.findIndex(line => line.includes("PREVIEW-FIRST"));
+			expect(previewRow).toBeGreaterThanOrEqual(0);
+			const previewCol = stripVTControlCharacters(frame[previewRow] ?? "").lastIndexOf("PREVIEW-FIRST") + 2;
+			for (let i = 0; i < 38; i++) {
+				component.handleInput(`\x1b[<65;${previewCol};${previewRow + 1}M`);
+			}
 			out = render(component);
-			expect(out).toContain("PgUp/PgDn");
+			expect(out).toContain("❯ 2 ○ Alpha");
 			expect(out).toContain("PREVIEW-MIDDLE");
-			component.handleInput(DOWN);
-			out = render(component);
-			expect(out).toContain("Other (type your own)");
-			expect(out).not.toContain("PREVIEW-MIDDLE");
-			expect(out).not.toContain("PgUp/PgDn");
-			component.handleInput(UP);
-			out = render(component);
-			expect(out).toContain("PREVIEW-FIRST");
-			expect(out).toContain("PgUp/PgDn");
-			for (let page = 0; page < 10; page++) {
-				component.handleInput(PAGE_DOWN);
-				out = render(component);
+			expect(out).not.toContain("PREVIEW-FIRST");
+
+			for (let i = 0; i < 80; i++) {
+				component.handleInput(`\x1b[<65;${previewCol};${previewRow + 1}M`);
 			}
+			out = render(component);
+			expect(out).toContain("❯ 2 ○ Alpha");
 			expect(out).toContain("PREVIEW-LAST");
-			expect(out).not.toContain("Other (type your own)");
-			component.handleInput(DOWN);
-			out = render(component);
-			expect(out).toContain("Other (type your own)");
-			component.handleInput(UP);
-			out = render(component);
-			for (let page = 0; page < 10; page++) {
-				component.handleInput(PAGE_UP);
-				out = render(component);
+
+			for (let i = 0; i < 80; i++) {
+				component.handleInput(`\x1b[<64;${previewCol};${previewRow + 1}M`);
 			}
+			out = render(component);
 			expect(out).toContain("PREVIEW-FIRST");
+			// PAGE_UP is list paging; selection must remain on Alpha.
+			component.handleInput(PAGE_UP);
+			out = render(component);
+			expect(out).toContain("❯ 2 ○ Alpha");
 		} finally {
 			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
 			else Reflect.deleteProperty(process.stdout, "rows");
@@ -1441,9 +1446,20 @@ describe("AskDialogComponent", () => {
 		});
 
 		const output = render(component);
-		// The unique label tail must be present — no ellipsis truncation.
+		// The unique label tail must be present on the list side — no ellipsis truncation there.
 		expect(output).toContain(tail);
-		expect(output).not.toContain("…");
+		const listLines = output.split("\n").filter(line => {
+			const dividerAt = line.indexOf("│", 1);
+			const listPart = dividerAt > 0 ? line.slice(0, dividerAt) : line;
+			return listPart.includes("deliberately") || listPart.includes(tail) || listPart.includes("option label");
+		});
+		expect(
+			listLines.some(line => {
+				const dividerAt = line.indexOf("│", 1);
+				const listPart = dividerAt > 0 ? line.slice(0, dividerAt) : line;
+				return listPart.includes("…");
+			}),
+		).toBe(false);
 		// The first line carries the cursor glyph; continuation lines are
 		// indented under the marker so the cursor stays visually anchored.
 		const lines = output.split("\n");
@@ -1453,9 +1469,9 @@ describe("AskDialogComponent", () => {
 		expect(continuation).toMatch(/│ {3}/);
 	});
 
-	it("does not wrap an option label that fits the dialog content width", () => {
+	it("does not wrap an option label that fits the list facet width", () => {
 		const component = new AskDialogComponent(
-			[{ id: "q1", question: "Pick one?", options: [{ label: "x".repeat(70) }] }],
+			[{ id: "q1", question: "Pick one?", options: [{ label: "x".repeat(20) }] }],
 			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
 		);
 
@@ -1495,8 +1511,8 @@ describe("AskDialogComponent", () => {
 		expect(onCancel).not.toHaveBeenCalled();
 
 		// The dialog should still be usable: select Option A and submit.
-		component.handleInput("\x1b[A"); // UP to Option B
-		component.handleInput("\x1b[A"); // UP to Option A
+		component.handleInput(UP); // UP to Option B
+		component.handleInput(UP); // UP to Option A
 		component.handleInput(ENTER);
 
 		expect(onSubmit).toHaveBeenCalledTimes(1);
@@ -1596,5 +1612,289 @@ describe("AskDialogComponent", () => {
 		const result = onSubmit.mock.calls[0][0].results[0];
 		expect(result.question).toBe("");
 		expect(result.selectedOptions).toEqual(["Option A"]);
+	});
+
+	it("keeps markers and a non-empty footer at a 40-column width", () => {
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Pick?",
+				options: [{ label: "Alpha choice" }, { label: "Bravo choice" }, { label: "Charlie choice" }],
+			},
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+		const lines = stripVTControlCharacters(component.render(40).join("\n")).split("\n");
+		for (const label of ["Alpha", "Bravo", "Charlie"]) {
+			expect(lines.some(line => line.includes(label))).toBe(true);
+		}
+		expect(lines.some(line => line.includes("○"))).toBe(true);
+		const footer = [...lines].reverse().find(line => line.includes("cancel") || line.includes("Enter")) ?? "";
+		expect(footer.trim().length).toBeGreaterThan(0);
+		expect(footer).toMatch(/Enter select|cancel/);
+	});
+
+	it("renders preview inside the expanded row when the side facet collapses", () => {
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Pick?",
+				options: [{ label: "Alpha", preview: "NARROW-PREVIEW-TEXT" }, { label: "Bravo" }],
+			},
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+		const narrow = stripVTControlCharacters(component.render(50).join("\n"));
+		expect(narrow).not.toContain("NARROW-PREVIEW-TEXT");
+		const body = narrow.split("\n").filter(line => line.includes("Alpha") || line.includes("Bravo"));
+		expect(body.some(line => line.split("│").length > 3)).toBe(false);
+		component.handleInput(RIGHT);
+		const expanded = stripVTControlCharacters(component.render(50).join("\n"));
+		expect(expanded).toContain("NARROW-PREVIEW-TEXT");
+	});
+
+	it("jumps focus to the nth visible row with digit keys", () => {
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Pick?",
+				options: [{ label: "One" }, { label: "Two" }, { label: "Three" }, { label: "Four" }, { label: "Five" }],
+			},
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+		component.focused = true;
+		component.handleInput("4");
+		const lines = component.render(80);
+		const marked = lines.findIndex(line => line.includes(CURSOR_MARKER));
+		expect(marked).toBeGreaterThanOrEqual(0);
+		expect(stripVTControlCharacters(lines[marked] ?? "")).toContain("Four");
+	});
+
+	it("filters options, renumbers jump digits, and cancels only after clearing the filter", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const onCancel = vi.fn();
+			const options = Array.from({ length: 20 }, (_, index) => ({
+				label: `Option ${String(index + 1).padStart(2, "0")}`,
+			}));
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick many?", options }], {
+				onSubmit: vi.fn(),
+				onCancel,
+				onPrompt: vi.fn(),
+			});
+			component.focused = true;
+			component.handleInput("/");
+			component.handleInput("1");
+			let out = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
+			expect(out).toContain("/ 1");
+			expect(out).toMatch(/\d+\/21/);
+			expect(out).toContain("❯ 1 ○");
+			component.handleInput(CANCEL);
+			out = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
+			expect(out).not.toContain("/ 1");
+			expect(onCancel).not.toHaveBeenCalled();
+			component.handleInput(CANCEL);
+			expect(onCancel).toHaveBeenCalledTimes(1);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+	it("declares both cursors while filtering, the filter bar's marker last (bottom-most wins)", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const options = Array.from({ length: 8 }, (_, index) => ({
+				label: `Option ${String(index + 1).padStart(2, "0")}`,
+			}));
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit: vi.fn(),
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+			component.focused = true;
+			component.handleInput("/");
+			const frame = component.render(80);
+			const markerLines: number[] = [];
+			frame.forEach((line, index) => {
+				if (line.includes(CURSOR_MARKER)) markerLines.push(index);
+			});
+			expect(markerLines).toHaveLength(2);
+			// Focused row marker first; the bottom filter bar's marker follows it,
+			// so the TUI's bottom-most marker belongs to the filter while open.
+			expect(stripVTControlCharacters(frame[markerLines[0] ?? -1] ?? "")).toContain("❯");
+			expect(stripVTControlCharacters(frame[markerLines[1] ?? -1] ?? "")).toContain("/");
+			expect(markerLines[1] ?? -1).toBeGreaterThan(markerLines[0] ?? -1);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+	it("keeps the divider and preview facet continuous across the bottom filter bar when split", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			// At least 5 options so the filter is available and actually opens.
+			const options = [
+				{ label: "Alpha", preview: "FILTER-ROW-PREVIEW" },
+				{ label: "Bravo" },
+				{ label: "Charlie" },
+				{ label: "Delta" },
+				{ label: "Echo" },
+			];
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit: vi.fn(),
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+			// Dialog not focused: the focused row emits no cursor marker, so the
+			// filter input's marker uniquely locates the bottom bar.
+			component.handleInput("/");
+			const frame = component.render(80); // width 80 -> split facet active
+			const stripped = frame.map(line => stripVTControlCharacters(line));
+			// The APC cursor marker survives stripVTControlCharacters, so drop it
+			// before measuring columns (it inflates character indexes, not cells).
+			const clean = (line: string): string => stripVTControlCharacters(line).replaceAll(CURSOR_MARKER, "");
+			const facetDivider = (line: string): number => clean(line).indexOf("│", 1);
+			const barIdx = frame.findIndex(line => line.includes(CURSOR_MARKER));
+			expect(barIdx).toBeGreaterThanOrEqual(0);
+			const previewRowIdx = stripped.findIndex(line => line.includes("FILTER-ROW-PREVIEW"));
+			expect(previewRowIdx).toBeGreaterThanOrEqual(0);
+			expect(barIdx).toBeGreaterThan(previewRowIdx); // bar sits below the list/preview rows
+			// The bar spans only the list width, so the facet divider survives at
+			// the same column as a regular split row (finding 2: a full-width bar
+			// would push the divider and preview facet off this line).
+			const barDivider = facetDivider(stripped[barIdx] ?? "");
+			const rowDivider = facetDivider(stripped[previewRowIdx] ?? "");
+			expect(barDivider).toBeGreaterThan(0);
+			expect(barDivider).toBe(rowDivider);
+			// The bar composes the filter cell + divider + preview-facet cell.
+			const barList = (stripped[barIdx] ?? "").slice(0, barDivider);
+			expect(barList).toContain("/");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("leaves only the focused-row cursor once Escape closes the filter", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const options = Array.from({ length: 6 }, (_, index) => ({
+				label: `Option ${String(index + 1).padStart(2, "0")}`,
+			}));
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit: vi.fn(),
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+			component.focused = true;
+			component.handleInput("/");
+			expect(component.render(80).filter(line => line.includes(CURSOR_MARKER))).toHaveLength(2);
+			component.handleInput(CANCEL);
+			const markers = component.render(80).filter(line => line.includes(CURSOR_MARKER));
+			expect(markers).toHaveLength(1);
+			// The surviving marker belongs to the focused option row after the filter input has closed.
+			expect(stripVTControlCharacters(markers[0] ?? "")).toContain("❯");
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("activates the focused row on a second click and keeps a single cursor marker", () => {
+		const onSubmit = vi.fn();
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Pick?",
+				options: [{ label: "Alpha", preview: "CURSOR-PREVIEW" }, { label: "Bravo" }],
+			},
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit,
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+		component.focused = true;
+		const frame = component.render(80);
+		const markerLines = frame.filter(line => line.includes(CURSOR_MARKER));
+		expect(markerLines).toHaveLength(1);
+		expect(stripVTControlCharacters(markerLines[0] ?? "")).toContain("Alpha");
+		const previewOnly = frame.filter(
+			line => stripVTControlCharacters(line).includes("CURSOR-PREVIEW") && line.includes(CURSOR_MARKER),
+		);
+		expect(previewOnly).toHaveLength(0);
+
+		const alphaRow = frame.findIndex(
+			line => stripVTControlCharacters(line).includes("❯") && stripVTControlCharacters(line).includes("Alpha"),
+		);
+		expect(alphaRow).toBeGreaterThanOrEqual(0);
+		component.handleInput(`\x1b[<0;4;${alphaRow + 1}M`);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Alpha"]);
+	});
+
+	it("clamps submit-tab scrolling to the rendered line count", () => {
+		const questions: ExtensionAskDialogQuestion[] = [
+			{ id: "q1", question: "Q1?", options: [{ label: "A" }], multi: true },
+			{ id: "q2", question: "Q2?", options: [{ label: "B" }] },
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+		component.handleInput(TAB);
+		component.handleInput(TAB);
+		expect(render(component)).toContain("Review answers");
+		for (let i = 0; i < 50; i++) component.handleInput(DOWN);
+		const out = render(component);
+		expect(out).toContain("Review answers");
+		expect(out).toContain("Submit");
+	});
+
+	it("timeout auto-select ignores an active filter and keeps the recommended option", () => {
+		vi.useFakeTimers();
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const onSubmit = vi.fn();
+			const onTimeout = vi.fn();
+			const options = [
+				{ label: "Recommended" },
+				...Array.from({ length: 20 }, (_, index) => ({ label: `Zzz ${index}` })),
+			];
+			const component = new AskDialogComponent(
+				[{ id: "q1", question: "Pick?", options, recommended: 0 }],
+				{ onSubmit, onCancel: vi.fn(), onPrompt: vi.fn() },
+				{ timeout: 1000, onTimeout },
+			);
+			component.handleInput("/");
+			for (const ch of "Zzz") component.handleInput(ch);
+			const filtered = stripVTControlCharacters(component.render(80).join("\n"));
+			expect(filtered).toMatch(/\d+\/22/);
+			expect(filtered).not.toContain("❯ 1 ○ Recommended");
+			vi.advanceTimersByTime(1000);
+			expect(onTimeout).toHaveBeenCalledTimes(1);
+			expect(onSubmit).toHaveBeenCalledTimes(1);
+			expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Recommended"]);
+			expect(onSubmit.mock.calls[0][0].results[0].timedOut).toBe(true);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
 	});
 });
