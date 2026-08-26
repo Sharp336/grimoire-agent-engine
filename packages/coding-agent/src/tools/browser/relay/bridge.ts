@@ -57,6 +57,15 @@ interface SessionRef {
 	runtimeEnabling: Promise<void> | null;
 	/** Monotonic ownership token for enable rollback and replay. */
 	runtimeEpoch: number;
+	/** Root-domain subscriptions that must survive a guard-authorized root swap. */
+	readonly subscriptions: Map<string, RootSubscription>;
+}
+
+interface RootSubscription {
+	method: string;
+	params?: Record<string, unknown>;
+	/** Preserves the original cross-session command order during recovery replay. */
+	sequence: number;
 }
 
 interface TargetInfo {
@@ -128,6 +137,8 @@ class TabState {
 	rootRuntimeEnabling: Promise<void> | null = null;
 	/** Invalidates an in-flight Runtime enable when the debugger detaches. */
 	runtimeGeneration = 0;
+	/** Replays preserved page-session subscriptions after a guard-authorized attach. */
+	restoring: Promise<void> | null = null;
 
 	constructor(
 		readonly tabId: number,
@@ -183,6 +194,7 @@ export class RelayBridge {
 	#conns = new Map<number, CdpConnection>();
 	#connSeq = 0;
 	#sessionSeq = 0;
+	#subscriptionSeq = 0;
 	#rpcSeq = 0;
 	#ext: RelaySocket | null = null;
 	#extInfo: { userAgent: string; browserVersion: string } | null = null;
@@ -278,6 +290,7 @@ export class RelayBridge {
 		for (const tab of this.#tabs.values()) {
 			tab.attached = false;
 			tab.attaching = null;
+			tab.restoring = null;
 			this.#resetRuntime(tab);
 			// The extension dissolves omp groups on disconnect (or died along
 			// with them); grouping state is unknowable until the next hello.
@@ -495,7 +508,7 @@ export class RelayBridge {
 			return;
 		}
 		if (msg.method !== "Runtime.enable") {
-			await this.#forwardToTab(conn, msg, ref.tabId, undefined);
+			await this.#forwardToTab(conn, msg, ref.tabId, undefined, ref);
 			return;
 		}
 		// A preserved page session can repeat `Runtime.enable` in the reconnect
@@ -504,9 +517,10 @@ export class RelayBridge {
 		// so the fast path below would ack without re-cycling; recovery then resets
 		// the fresh root (Runtime disabled) and drops this ref back to `default`,
 		// leaving the client silently un-enabled with no execution-context events.
-		// Gate on the hello first so recovery bookkeeping runs and the state read
-		// below is current.
-		if (this.#ext && !this.#extInfo) await this.#awaitHello();
+		// Gate on the complete recovery (hello, attach, and subscription replay) so
+		// the state read below is current and an enabled fast-path cannot outrun the
+		// fresh root's Runtime.enable.
+		await this.#awaitTabReady(ref.tabId);
 		// A pipelined duplicate must await the in-flight enable, never ack early:
 		// the root cycle may still fail, and success must trail the context replay.
 		if (ref.runtimeEnabling) {
@@ -606,6 +620,7 @@ export class RelayBridge {
 		msg: CdpCommand,
 		tabId: number,
 		realSessionId: string | undefined,
+		pageRef?: SessionRef,
 	): Promise<void> {
 		// Guard rail: a page session must never take the whole browser down.
 		if (msg.method === "Browser.close") {
@@ -641,10 +656,55 @@ export class RelayBridge {
 				method: msg.method,
 				params: msg.params,
 			});
+			if (pageRef) this.#recordSubscription(pageRef, msg);
 			this.#reply(conn, msg, (result as Record<string, unknown> | undefined) ?? {});
 		} catch (err) {
 			this.#replyError(conn, msg, err instanceof Error ? err.message : String(err));
 		}
+	}
+
+	/** Remember successful root-session subscriptions for guard recovery replay. */
+	#recordSubscription(ref: SessionRef, msg: CdpCommand): void {
+		const separator = msg.method.indexOf(".");
+		const domain = separator > 0 ? msg.method.slice(0, separator) : "";
+		const command = separator > 0 ? msg.method.slice(separator + 1) : "";
+		if (domain && domain !== "Runtime" && (command === "enable" || command === "disable")) {
+			const key = `${domain}.enable`;
+			if (command === "disable") {
+				ref.subscriptions.delete(key);
+			} else {
+				ref.subscriptions.set(key, {
+					method: msg.method,
+					params: msg.params,
+					sequence: ++this.#subscriptionSeq,
+				});
+			}
+			return;
+		}
+
+		let enabled: boolean | undefined;
+		switch (msg.method) {
+			case "Target.setAutoAttach":
+				enabled = msg.params?.autoAttach === true;
+				break;
+			case "Target.setDiscoverTargets":
+				enabled = msg.params?.discover === true;
+				break;
+			case "Page.setLifecycleEventsEnabled":
+				enabled = msg.params?.enabled === true;
+				break;
+			default:
+				return;
+		}
+		if (!enabled) {
+			ref.subscriptions.delete(msg.method);
+			return;
+		}
+		ref.subscriptions.set(msg.method, {
+			method: msg.method,
+			params: msg.params,
+			sequence: ++this.#subscriptionSeq,
+		});
 	}
 
 	/**
@@ -1007,7 +1067,7 @@ export class RelayBridge {
 		// reconciliation, so a `false` here is a retryable transport swap — not a
 		// terminal attach failure — and must not retract preserved sessions.
 		const ext = this.#ext;
-		void this.#ensureAttached(tab).then(ok => {
+		const restoring = this.#ensureAttached(tab).then(async ok => {
 			if (!ok) {
 				if (this.#ext !== ext) {
 					// The extension socket was replaced (or closed) mid-attach: the
@@ -1026,6 +1086,24 @@ export class RelayBridge {
 				this.#retractTab(tab);
 				return;
 			}
+			if (keepPageSessions.length > 0) {
+				try {
+					await this.#restorePreservedSubscriptions(tab, keepPageSessions);
+				} catch (err) {
+					if (this.#ext !== ext || err instanceof ExtensionReplacedError) return;
+					this.#log("subscription recovery failed", {
+						tabId: tab.tabId,
+						error: err instanceof Error ? err.message : String(err),
+					});
+					// The preserved session can no longer uphold its pre-detach CDP
+					// contract. Surface a real session teardown instead of leaving the
+					// client silently subscribed to domains that are disabled on Chrome's
+					// fresh root.
+					this.#retractTab(tab);
+					this.#detachIfUnheld(tab.tabId);
+					return;
+				}
+			}
 			for (const conn of autoAttachConns) {
 				if (this.#conns.has(conn.id)) this.#emitTabAttached(conn, tab);
 			}
@@ -1037,6 +1115,36 @@ export class RelayBridge {
 			// attachment and its infobar.
 			this.#detachIfUnheld(tab.tabId);
 		});
+		const task = restoring.finally(() => {
+			if (tab.restoring === task) tab.restoring = null;
+		});
+		tab.restoring = task;
+	}
+
+	/** Restore root-domain state promised by page sessions preserved across recovery. */
+	async #restorePreservedSubscriptions(tab: TabState, conns: CdpConnection[]): Promise<void> {
+		const refs: SessionRef[] = [];
+		for (const conn of conns) {
+			for (const pageSession of conn.sessionsForTab(tab.tabId, "page")) {
+				const ref = conn.sessions.get(pageSession);
+				if (ref) refs.push(ref);
+			}
+		}
+		if (refs.some(ref => ref.runtimeState === "enabled")) {
+			await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.disable" });
+			await this.#rpc({ op: "send", tabId: tab.tabId, method: "Runtime.enable" });
+			tab.rootRuntimeEnabled = true;
+		}
+		const subscriptions = refs.flatMap(ref => [...ref.subscriptions.values()]);
+		subscriptions.sort((a, b) => a.sequence - b.sequence);
+		for (const subscription of subscriptions) {
+			await this.#rpc({
+				op: "send",
+				tabId: tab.tabId,
+				method: subscription.method,
+				params: subscription.params,
+			});
+		}
 	}
 
 	// ---- tab grouping -----------------------------------------------------------
@@ -1126,7 +1234,8 @@ export class RelayBridge {
 	 * session survives a Chrome root swap and must not be destroyed on recovery.
 	 */
 	#retractTab(tab: TabState, keepPageSessions: CdpConnection[] = []): void {
-		for (const realSession of tab.realSessions) this.#realSessionTabs.delete(realSession);
+		const staleRealSessions = [...tab.realSessions];
+		for (const realSession of staleRealSessions) this.#realSessionTabs.delete(realSession);
 		tab.realSessions.clear();
 		for (const conn of this.#conns.values()) {
 			const preservePages = keepPageSessions.includes(conn);
@@ -1143,23 +1252,21 @@ export class RelayBridge {
 				}
 			} else {
 				// The page session survives, but the Chrome root it was riding was
-				// swapped by the guard detach, so its Runtime domain is no longer
-				// enabled. Clear each preserved session's stale context bookkeeping and
-				// abandon any in-flight enable; the reused root context ids would
-				// otherwise be suppressed as already announced and the recovered client
-				// goes silent. A session that had `Runtime.enable`d must also drop back
-				// to `default` so its next `Runtime.enable` re-cycles the fresh root
-				// instead of early-returning on the stale `enabled` flag. A session that
-				// explicitly sent `Runtime.disable` keeps that per-session opt-out:
-				// resetting it to `default` would re-subject it to the legacy root
-				// fan-out even though its client never re-enabled the domain.
+				// swapped by the guard detach. Explicitly invalidate real child sessions
+				// from that old root, then clear Runtime context bookkeeping and abandon
+				// any in-flight enable. Keep the session's enabled/disabled intent: the
+				// recovery continuation replays enabled domains on the fresh root before
+				// forwarding another command, while an explicit Runtime.disable remains
+				// a per-session opt-out.
 				for (const pageSession of conn.sessionsForTab(tab.tabId, "page")) {
 					const ref = conn.sessions.get(pageSession);
 					if (!ref) continue;
+					for (const realSession of staleRealSessions) {
+						this.#emit(conn, "Target.detachedFromTarget", { sessionId: realSession }, pageSession);
+					}
 					ref.runtimeContexts.clear();
 					ref.runtimeEnabling = null;
 					ref.runtimeEpoch++;
-					if (ref.runtimeState === "enabled") ref.runtimeState = "default";
 				}
 			}
 			for (const tabSession of tabSessions) {
@@ -1185,6 +1292,7 @@ export class RelayBridge {
 			runtimeContexts: new Set(),
 			runtimeEnabling: null,
 			runtimeEpoch: 0,
+			subscriptions: new Map(),
 		});
 		return sessionId;
 	}
@@ -1353,6 +1461,10 @@ export class RelayBridge {
 			const tab = this.#tabs.get(tabId);
 			if (tab?.attaching) {
 				await tab.attaching;
+				continue;
+			}
+			if (tab?.restoring) {
+				await tab.restoring;
 				continue;
 			}
 			return;

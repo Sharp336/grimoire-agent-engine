@@ -78,7 +78,9 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 	setTimer: (fn, ms) => setTimeout(fn, ms),
 	clearTimer: handle => clearTimeout(handle),
 	detachAll: tabIds => {
-		void rememberRecoverable(tabIds);
+		// trackAttachments persisted every id before handing it to the guard, so
+		// onSuspend can start these detaches without depending on a last-moment
+		// storage write that MV3 may terminate with the worker.
 		for (const tabId of tabIds) {
 			guardDetachments.add(tabId);
 			void chrome.debugger.detach({ tabId }).catch(async () => {
@@ -91,12 +93,19 @@ const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
 				// otherwise the onDetach listener already forgot it.
 				const targets = await chrome.debugger.getTargets().catch(() => []);
 				if (targets.some(target => target.tabId === tabId && target.attached)) {
-					attachmentGuard.track(tabId);
+					void trackAttachments([tabId]);
 				}
 			});
 		}
 	},
 });
+
+/** Persist recovery authorization before a tab becomes eligible for a sweep. */
+async function trackAttachments(tabIds: number[]): Promise<void> {
+	if (tabIds.length === 0) return;
+	await rememberRecoverable(tabIds);
+	for (const tabId of tabIds) attachmentGuard.track(tabId);
+}
 
 interface RelaySettings {
 	port: number;
@@ -291,12 +300,14 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 	for (const target of targets) {
 		if (target.attached && target.tabId !== undefined) {
 			attachedTabIds.push(target.tabId);
-			// Re-seed ownership after an MV3 worker restart. Without this, the
-			// next relay outage has nothing to sweep even though Chrome retained
-			// this extension's debugger attachment.
-			attachmentGuard.track(target.tabId);
 		}
 	}
+	// Re-seed ownership after an MV3 worker restart. Persist the recovery marker
+	// before exposing the attachment to onSuspend's immediate sweep; otherwise
+	// Chrome can complete detach while the worker is reaped before the queued
+	// storage write, and the replacement worker misclassifies recovery as a user
+	// cancellation.
+	await trackAttachments(attachedTabIds);
 	const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
 	return {
 		t: "hello",
@@ -333,13 +344,12 @@ async function attachTab(tabId: number, socket: WebSocket): Promise<void> {
 				// debugger infobar orphaned indefinitely.
 				const targets = await chrome.debugger.getTargets().catch(() => []);
 				if (targets.some(target => target.tabId === tabId && target.attached)) {
-					attachmentGuard.track(tabId);
+					void trackAttachments([tabId]);
 				}
 			});
 			return;
 		}
-		attachmentGuard.track(tabId);
-		await forgetRecoverable(tabId);
+		await trackAttachments([tabId]);
 	} finally {
 		pendingAttaches.delete(pending);
 	}
@@ -434,16 +444,19 @@ function scheduleReconnect(): void {
  */
 async function reconcileOrphans(): Promise<void> {
 	const targets = await chrome.debugger.getTargets().catch(() => []);
-	let seeded = false;
+	const attachedTabIds: number[] = [];
 	for (const target of targets) {
 		if (target.attached && target.tabId !== undefined) {
-			attachmentGuard.track(target.tabId);
-			seeded = true;
+			attachedTabIds.push(target.tabId);
 		}
 	}
+	await trackAttachments(attachedTabIds);
 	// A live/pending socket owns reconciliation via hello; only arm a
 	// standalone sweep when nothing is connecting to reclaim these tabs.
-	if (seeded && !(ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))) {
+	if (
+		attachedTabIds.length > 0 &&
+		!(ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))
+	) {
 		attachmentGuard.onDisconnected();
 	}
 }

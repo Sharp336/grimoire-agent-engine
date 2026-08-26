@@ -101,19 +101,25 @@ var attachmentGuard = new AttachmentGuard({
   setTimer: (fn, ms) => setTimeout(fn, ms),
   clearTimer: (handle) => clearTimeout(handle),
   detachAll: (tabIds) => {
-    rememberRecoverable(tabIds);
     for (const tabId of tabIds) {
       guardDetachments.add(tabId);
       chrome.debugger.detach({ tabId }).catch(async () => {
         guardDetachments.delete(tabId);
         const targets = await chrome.debugger.getTargets().catch(() => []);
         if (targets.some((target) => target.tabId === tabId && target.attached)) {
-          attachmentGuard.track(tabId);
+          trackAttachments([tabId]);
         }
       });
     }
   }
 });
+async function trackAttachments(tabIds) {
+  if (tabIds.length === 0)
+    return;
+  await rememberRecoverable(tabIds);
+  for (const tabId of tabIds)
+    attachmentGuard.track(tabId);
+}
 async function loadSettings() {
   const stored = await chrome.storage.local.get({ port: DEFAULT_PORT, token: "" });
   const port = Number(stored.port);
@@ -250,9 +256,9 @@ async function buildHello() {
   for (const target of targets) {
     if (target.attached && target.tabId !== undefined) {
       attachedTabIds.push(target.tabId);
-      attachmentGuard.track(target.tabId);
     }
   }
+  await trackAttachments(attachedTabIds);
   const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
   return {
     t: "hello",
@@ -274,13 +280,12 @@ async function attachTab(tabId, socket) {
         guardDetachments.delete(tabId);
         const targets = await chrome.debugger.getTargets().catch(() => []);
         if (targets.some((target) => target.tabId === tabId && target.attached)) {
-          attachmentGuard.track(tabId);
+          trackAttachments([tabId]);
         }
       });
       return;
     }
-    attachmentGuard.track(tabId);
-    await forgetRecoverable(tabId);
+    await trackAttachments([tabId]);
   } finally {
     pendingAttaches.delete(pending);
   }
@@ -357,14 +362,14 @@ function scheduleReconnect() {
 }
 async function reconcileOrphans() {
   const targets = await chrome.debugger.getTargets().catch(() => []);
-  let seeded = false;
+  const attachedTabIds = [];
   for (const target of targets) {
     if (target.attached && target.tabId !== undefined) {
-      attachmentGuard.track(target.tabId);
-      seeded = true;
+      attachedTabIds.push(target.tabId);
     }
   }
-  if (seeded && !(ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))) {
+  await trackAttachments(attachedTabIds);
+  if (attachedTabIds.length > 0 && !(ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))) {
     attachmentGuard.onDisconnected();
   }
 }

@@ -104,7 +104,7 @@ function nack(bridge: RelayBridge, socket: FakeExtSocket, op: RelayRpcRequest["o
 
 /** Flush the rpc .then() microtask chains (no timers involved). */
 async function flush(): Promise<void> {
-	for (let i = 0; i < 5; i++) await Promise.resolve();
+	for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
 let msgSeq = 100;
@@ -601,6 +601,87 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send")).toHaveLength(1);
 		expect(ext2.rpcs("send")[0]!.tabId).toBe(1);
 		expect(cdp.messages.find(m => m.id === cmdId)?.error).toBeUndefined();
+	});
+
+	it("replays preserved domain subscriptions and invalidates child sessions before forwarding", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		const sendRootCommand = async (method: string, params?: Record<string, unknown>): Promise<void> => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId: pageSession, method, params }));
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+			expect(cdp.messages.filter(message => message.id === id && "result" in message)).toHaveLength(1);
+		};
+		await sendRootCommand("Network.enable", { maxTotalBufferSize: 4096 });
+		await sendRootCommand("Fetch.enable", { patterns: [{ urlPattern: "*" }] });
+		await sendRootCommand("Fetch.disable");
+		await sendRootCommand("Target.setAutoAttach", {
+			autoAttach: true,
+			waitForDebuggerOnStart: false,
+			flatten: true,
+		});
+
+		bridge.extMessage(
+			ext,
+			JSON.stringify({
+				t: "cdpEvent",
+				tabId: 1,
+				method: "Target.attachedToTarget",
+				params: { sessionId: "child-before-recovery", targetInfo: { targetId: "worker-1", type: "worker" } },
+			}),
+		);
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await flush();
+		expect(
+			cdp.messages.some(
+				message =>
+					message.sessionId === pageSession &&
+					message.method === "Target.detachedFromTarget" &&
+					typeof message.params === "object" &&
+					message.params !== null &&
+					"sessionId" in message.params &&
+					message.params.sessionId === "child-before-recovery",
+			),
+		).toBe(true);
+
+		ack(bridge, ext2, "attach");
+		await flush();
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable"]);
+		expect(ext2.rpcs("send")[0]!.params).toEqual({ maxTotalBufferSize: 4096 });
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: commandId, sessionId: pageSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		// Fetch.enable was followed by a successful Fetch.disable, so only the
+		// still-active Network and Target subscriptions replay. The new command is
+		// held until both acknowledgements arrive.
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable"]);
+		ack(bridge, ext2, "send");
+		await flush();
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable", "Target.setAutoAttach"]);
+		ack(bridge, ext2, "send");
+		await flush();
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Network.enable",
+			"Target.setAutoAttach",
+			"Network.getCookies",
+		]);
+		ack(bridge, ext2, "send", { cookies: [] });
+		await flush();
+		expect(cdp.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
 	it("holds a preserved session's command until the reconnect hello arrives", async () => {
@@ -1503,7 +1584,7 @@ describe("RelayBridge attachment release", () => {
 
 		// Recovery: the socket drops and a replacement reconnects. The tab is
 		// recoverable, so the page session is preserved across the fresh Chrome
-		// root — but that new root's Runtime domain is NOT enabled.
+		// root and its prior Runtime subscription must be restored automatically.
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
@@ -1511,33 +1592,30 @@ describe("RelayBridge attachment release", () => {
 		expect(ext2.rpcs("attach")).toHaveLength(1);
 		ack(bridge, ext2, "attach");
 		await flush();
-
-		// The recovered client re-enables Runtime. Because the preserved session's
-		// stale `enabled` state and context bookkeeping were rolled back on retract,
-		// this must actually re-cycle the fresh root (disable/enable) rather than
-		// ack early on the stale flag.
-		const reEnableId = ++msgSeq;
-		bridge.cdpMessage(connId, JSON.stringify({ id: reEnableId, sessionId: pageSession, method: "Runtime.enable" }));
-		await flush();
 		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Runtime.disable"]);
 		ack(bridge, ext2, "send"); // Runtime.disable leg
 		await flush();
 		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Runtime.disable", "Runtime.enable"]);
-		ack(bridge, ext2, "send"); // Runtime.enable leg
-		await flush();
-		expect(cdp.messages.filter(m => m.id === reEnableId && "result" in m)).toHaveLength(1);
 
-		// A reused context id after recovery must reach the client again: the old
-		// per-session `runtimeContexts` was cleared, so it is no longer suppressed
-		// as already announced.
+		// Runtime.enable on the fresh root re-announces contexts without requiring
+		// the preserved client to repeat its original subscription command.
 		bridge.extMessage(
 			ext2,
 			JSON.stringify({ t: "cdpEvent", tabId: 1, method: "Runtime.executionContextCreated", params: context }),
 		);
+		ack(bridge, ext2, "send"); // Runtime.enable leg
 		await flush();
 		expect(
 			cdp.messages.filter(m => m.sessionId === pageSession && m.method === "Runtime.executionContextCreated"),
 		).toHaveLength(2);
+
+		// A repeated enable now observes the restored state and acknowledges without
+		// driving a redundant third root command.
+		const reEnableId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: reEnableId, sessionId: pageSession, method: "Runtime.enable" }));
+		await flush();
+		expect(ext2.rpcs("send")).toHaveLength(2);
+		expect(cdp.messages.filter(m => m.id === reEnableId && "result" in m)).toHaveLength(1);
 	});
 
 	it("keeps a preserved session's Runtime.disable opt-out across recovery", async () => {
