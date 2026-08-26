@@ -2361,7 +2361,16 @@ export class TUI extends Container {
 			// committed rows and blanks, never an unfinished frame.
 			const pushed = Math.max(0, startTop + preparedHistory.length + rows - height);
 			if (pushed > this.#providerViewportTop && this.#providerWindow.length > 0) {
-				buffer += `\x1b[${this.#providerViewportTop + 1};1H\x1b[J`;
+				const eraseTop = this.#providerViewportTop;
+				if (eraseTop > 0) {
+					// Below existing history: ED0 here never spans the whole screen.
+					buffer += `\x1b[${eraseTop + 1};1H\x1b[J`;
+				} else {
+					// Full-screen erase makes tmux preserve the live rows (#9780);
+					// EL2 the first row + ED0 the rest clears the same cells, no full clear.
+					buffer += "\x1b[1;1H\x1b[2K";
+					if (height > 1) buffer += "\x1b[2;1H\x1b[J";
+				}
 			}
 			buffer += `\x1b[${startTop + 1};1H`;
 			let screenRow = startTop;
