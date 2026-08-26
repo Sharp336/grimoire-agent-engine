@@ -937,8 +937,10 @@ export class ModelRegistry {
 
 	#configuredDiscoveryHeaderFallback(providerId: string): Record<string, string> | undefined {
 		const override = this.#providerOverrides.get(providerId);
-		if (override?.authHeader !== true || !override.apiKey) return undefined;
-		const headers = mergeAuthHeaderSources([override.headers], override.authHeader, override.apiKey);
+		if (override?.authHeader !== true) return undefined;
+		const headers = mergeAuthHeaderSources([override.headers], override.authHeader, override.apiKey, () =>
+			this.authStorage.getRuntimeApiKey(providerId),
+		);
 		return headers?.Authorization ? headers : undefined;
 	}
 
@@ -1777,7 +1779,12 @@ export class ModelRegistry {
 		};
 	}
 	#applyProviderTransportOverride<
-		T extends { baseUrl?: string; headers?: Record<string, string>; remoteCompaction?: RemoteCompactionConfig<Api> },
+		T extends {
+			provider: string;
+			baseUrl?: string;
+			headers?: Record<string, string>;
+			remoteCompaction?: RemoteCompactionConfig<Api>;
+		},
 	>(
 		entry: T,
 		override: Pick<
@@ -1789,6 +1796,7 @@ export class ModelRegistry {
 			override.headers ? [entry.headers, override.headers] : [entry.headers],
 			override.authHeader,
 			override.apiKey,
+			() => this.authStorage.getRuntimeApiKey(entry.provider),
 		);
 		return {
 			...entry,
@@ -1864,8 +1872,26 @@ export class ModelRegistry {
 			if (!providerOverrides) return model;
 			const override = resolveModelOverrideWithAliases(providerOverrides, model, hasLiveModel);
 			if (!override) return model;
-			return applyModelOverride(model, override);
+			return this.#restoreRuntimeAuthPrecedence(model.provider, override, applyModelOverride(model, override));
 		});
+	}
+
+	/** `applyModelOverride` merges per-model `headers` with a plain spread, which
+	 *  snapshots the base model's live header proxy and lets a configured
+	 *  `modelOverrides.<id>.headers.Authorization` outrank the process-local
+	 *  runtime key installed by `--provider-api-keys`. When the provider uses
+	 *  authHeader semantics and the override supplied an Authorization variant,
+	 *  rebuild the merged headers as a live source so every read re-checks the
+	 *  runtime key first and falls back to the configured value without one. */
+	#restoreRuntimeAuthPrecedence(provider: string, override: ModelOverride, patched: Model<Api>): Model<Api> {
+		if (!override.headers || !patched.headers) return patched;
+		if (this.#providerOverrides.get(provider)?.authHeader !== true) return patched;
+		if (!Object.keys(override.headers).some(header => header.toLowerCase() === "authorization")) return patched;
+		const headers = createLiveConfigHeaders([{ ...patched.headers }], {
+			authHeader: true,
+			apiKeyOverride: () => this.authStorage.getRuntimeApiKey(provider),
+		});
+		return buildModel({ ...toModelSpec(patched), headers });
 	}
 	#applyHardcodedModelPolicies(models: Model<Api>[]): Model<Api>[] {
 		const extendedContext = isExtendedContextEnabledFromSettings(this.#settings);
@@ -1925,6 +1951,7 @@ export class ModelRegistry {
 					(providerConfig.auth as ProviderAuthMode | undefined) ?? undefined,
 					providerConfig.remoteCompaction,
 					modelDef as CustomModelDefinitionLike,
+					() => this.authStorage.getRuntimeApiKey(providerName),
 				);
 				if (!model) continue;
 				models.push(model);
@@ -2107,6 +2134,8 @@ export class ModelRegistry {
 		sessionId?: string,
 		options?: { signal?: AbortSignal },
 	): Promise<string | undefined> {
+		const runtimeKey = this.authStorage.getRuntimeApiKey(model.provider);
+		if (runtimeKey) return runtimeKey;
 		const commandKey = this.#resolveCommandBackedApiKey(model.provider);
 		if (commandKey.configured) return commandKey.value;
 		if (this.#keylessProviders.has(model.provider) && !this.authStorage.hasAuth(model.provider)) {
@@ -2145,6 +2174,8 @@ export class ModelRegistry {
 		sessionId?: string,
 		options?: { baseUrl?: string; modelId?: string; forceRefresh?: boolean; signal?: AbortSignal },
 	): Promise<string | undefined> {
+		const runtimeKey = this.authStorage.getRuntimeApiKey(provider);
+		if (runtimeKey) return runtimeKey;
 		const commandKey = this.#resolveCommandBackedApiKey(
 			provider,
 			options?.forceRefresh ? { forceCommandRefresh: true } : undefined,
@@ -2183,6 +2214,8 @@ export class ModelRegistry {
 	}
 
 	async #peekApiKeyForProvider(provider: string): Promise<string | undefined> {
+		const runtimeKey = this.authStorage.getRuntimeApiKey(provider);
+		if (runtimeKey) return runtimeKey;
 		const commandKey = this.#resolveCommandBackedApiKey(provider);
 		if (commandKey.configured) return commandKey.value;
 		if (this.#keylessProviders.has(provider) && !this.authStorage.hasAuth(provider)) {
@@ -2357,6 +2390,7 @@ export class ModelRegistry {
 					undefined,
 					config.remoteCompaction,
 					modelDef as CustomModelDefinitionLike,
+					() => this.authStorage.getRuntimeApiKey(providerName),
 				);
 				if (!overlay) {
 					throw new Error(`Provider ${providerName}, model ${modelDef.id}: no "api" specified.`);
@@ -2445,6 +2479,7 @@ export class ModelRegistry {
 							undefined,
 							config.remoteCompaction,
 							modelDef as CustomModelDefinitionLike,
+							() => this.authStorage.getRuntimeApiKey(providerName),
 						);
 						if (overlay) results.push(finalizeCustomModel(overlay, { useDefaults: true }));
 					}
