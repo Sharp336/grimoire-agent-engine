@@ -1119,16 +1119,25 @@ function resolveOmpPath(): string | undefined {
 }
 
 /**
+ * Parse the version a launcher reports from `omp --version` output
+ * (`omp/X.Y.Z`, or a prerelease such as `omp/X.Y.Z-canary.1`).
+ *
+ * The prerelease suffix is preserved so a correctly installed canary build
+ * verifies as up to date instead of appearing to report a stale `X.Y.Z` and
+ * being mistaken for an unreplaced launcher.
+ */
+export function parseReportedVersion(output: string): string | undefined {
+	return output.match(/\/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/)?.[1];
+}
+
+/**
  * Run a specific binary and check if it reports the expected version.
  */
 async function verifyBinaryAtPath(binaryPath: string, expectedVersion: string): Promise<InstalledVersionVerification> {
 	try {
 		const result = await $`${binaryPath} --version`.quiet().nothrow();
 		if (result.exitCode !== 0) return { ok: false, path: binaryPath };
-		const output = result.text().trim();
-		// Output format: "omp/X.Y.Z"
-		const match = output.match(/\/(\d+\.\d+\.\d+)/);
-		const actual = match?.[1];
+		const actual = parseReportedVersion(result.text().trim());
 		return { ok: actual === expectedVersion, actual, path: binaryPath };
 	} catch {
 		return { ok: false, path: binaryPath };
