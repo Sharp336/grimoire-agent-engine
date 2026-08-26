@@ -138,6 +138,26 @@ describe("Z.AI built-in provider", () => {
 		expect(flash?.thinking?.defaultLevel).toBe(Effort.Max);
 	});
 
+	test("drops unusable context-tier ids from the authoritative discovered catalog", async () => {
+		// `/v1/models` advertises `[1m]` context-tier variants (a Claude
+		// Code-side convention) that the inference endpoint rejects; the
+		// generator strips them from the bundle, so an authoritative refresh
+		// must not resurrect them over the filtered bundled catalog.
+		const fetchMock: FetchImpl = async () =>
+			anthropicModelsResponse([
+				{ id: "glm-5.2", object: "model", display_name: "GLM-5.2" },
+				{ id: "glm-5.2[1m]", object: "model", display_name: "GLM-5.2 (1M)" },
+				{ id: "glm-5.3-flash", object: "model", display_name: "GLM-5.3-Flash" },
+			]);
+		const manager = createModelManager(zaiModelManagerOptions({ apiKey: "zai-test-key", fetch: fetchMock }));
+		const { models } = await manager.refresh("online");
+
+		const ids = models.map(model => model.id);
+		expect(ids).toContain("glm-5.2");
+		expect(ids).toContain("glm-5.3-flash");
+		expect(ids.filter(id => id.endsWith("[1m]"))).toEqual([]);
+	});
+
 	test("resolves null on discovery failure so the bundled catalog survives", async () => {
 		const fetchMock: FetchImpl = async (): Promise<Response> => {
 			throw new Error("network unreachable");

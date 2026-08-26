@@ -602,6 +602,12 @@ type SimpleProviderConfig = {
 	baseUrl?: string;
 	fetch?: FetchImpl;
 	headers?: SimpleProviderDiscoveryHeaders;
+	/**
+	 * Optional post-normalization discovery filter; return false to drop the
+	 * model. Runs before the discovered catalog is cached, so it also gates
+	 * the authoritative runtime list.
+	 */
+	filterModel?: (entry: OpenAICompatibleModelRecord, model: ModelSpec<Api>) => boolean;
 };
 
 function resolveSimpleProviderHeaders(
@@ -670,6 +676,7 @@ export function createSimpleOpenAICompletionsOptions(
 		config,
 		headers: config?.headers,
 		requireApiKey: true,
+		filterModel: config?.filterModel,
 		mapModel: mapWithBundledReference,
 	});
 }
@@ -688,6 +695,8 @@ export function createSimpleOpenAICompletionsOptions(
  *   `mapWithBundledReference`, so limits, modalities, pricing, and thinking
  *   metadata missing from the discovery payload fall back to the bundled
  *   reference for the same id; the endpoint's `display_name` wins for `name`.
+ * - **Discovery filter**: `config.filterModel` (optional) drops unusable ids
+ *   (e.g. Z.AI's context-tier `[1m]` variants) before the catalog is cached.
  */
 export function createSimpleAnthropicProviderOptions(
 	providerId: Parameters<typeof getBundledModels>[0],
@@ -707,6 +716,7 @@ export function createSimpleAnthropicProviderOptions(
 					provider: providerId,
 					baseUrl: discoveryBaseUrl,
 					headers: buildAnthropicDiscoveryHeaders(apiKey),
+					filterModel: config?.filterModel,
 					mapModel: (entry, defaults) => {
 						const reference = references.get(defaults.id);
 						const model = mapWithBundledReference(entry, defaults, reference);

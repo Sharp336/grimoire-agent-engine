@@ -224,7 +224,16 @@ export interface ZaiModelManagerConfig {
  */
 export function zaiModelManagerOptions(config: ZaiModelManagerConfig = {}): ModelManagerOptions<"anthropic-messages"> {
 	return {
-		...createSimpleAnthropicProviderOptions("zai", "https://api.z.ai/api/anthropic", config),
+		...createSimpleAnthropicProviderOptions("zai", "https://api.z.ai/api/anthropic", {
+			...config,
+			// `/v1/models` advertises context-tier ids (`glm-5.2[1m]`) that the
+			// inference endpoint rejects with `Unknown Model` — the `[1m]` suffix
+			// is a Claude Code-side convention, not a real model code. The
+			// generator strips them from the bundle (dropUnusableZaiContextTierIds);
+			// discovery must match or an authoritative refresh would resurrect the
+			// unusable ids over the filtered bundled catalog.
+			filterModel: (_entry, model) => !model.id.endsWith("[1m]"),
+		}),
 		dynamicModelsAuthoritative: true,
 	};
 }
