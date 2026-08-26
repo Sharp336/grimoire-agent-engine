@@ -5,6 +5,7 @@
 ### Added
 
 - Added a DeepInfra `/login` flow that validates the pasted API key against the DeepInfra chat completions endpoint.
+
 ## [18.0.6] - 2026-08-26
 
 ### Added
