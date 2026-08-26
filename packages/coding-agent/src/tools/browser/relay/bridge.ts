@@ -1199,7 +1199,7 @@ export class RelayBridge {
 			// fresh auto-attach sessions for a now-detached tab. Those sessions look
 			// usable but every forwarded command fails, and they keep the tab
 			// recorded as held. Revalidate against the live state before emitting.
-			if (tab.banned || !tab.attached || this.#ext !== ext) {
+			if (this.#tabs.get(tab.tabId) !== tab || tab.banned || !tab.attached || this.#ext !== ext) {
 				this.#detachIfUnheld(tab.tabId);
 				return;
 			}

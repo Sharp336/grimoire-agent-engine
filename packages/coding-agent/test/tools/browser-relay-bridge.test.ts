@@ -1309,6 +1309,44 @@ describe("RelayBridge tab grouping", () => {
 		expect(cdp.attachedSessions().length).toBe(attachedBefore);
 	});
 
+	it("does not mint auto-attach sessions when the tab closes mid-replay", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+		// Auto-attach holder: recovery would normally emit a replacement session
+		// after replay. Keep a subscription in the journal so we can close the tab
+		// while the final replay command is unresolved.
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({ id: ++msgSeq, sessionId: pageSession, method: "Target.setAutoAttach" }),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+		bridge.cdpMessage(connId, JSON.stringify({ id: ++msgSeq, sessionId: pageSession, method: "Network.enable" }));
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.pending("send").length === 1, "in-flight replay command");
+		const attachedBefore = cdp.attachedSessions().length;
+
+		bridge.extMessage(ext2, JSON.stringify({ t: "tabRemoved", tabId: 1 }));
+		await flush();
+
+		ack(bridge, ext2, "send");
+		await flush();
+		expect(cdp.attachedSessions().length).toBe(attachedBefore);
+	});
+
 	it("serializes replay across repeated same-socket hellos instead of racing a second", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
