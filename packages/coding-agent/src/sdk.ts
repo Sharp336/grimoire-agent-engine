@@ -112,6 +112,7 @@ import {
 	wrapRegisteredTools,
 } from "./extensibility/extensions";
 import {
+	buildSkillPromptMessage,
 	loadSkills as loadSkillsInternal,
 	type Skill,
 	type SkillWarning,
@@ -157,6 +158,7 @@ import {
 	type CustomMessage,
 	convertToLlm,
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
+	SKILL_PROMPT_MESSAGE_TYPE,
 	replaceLlmImagesWithText,
 	USER_INTERRUPT_LABEL,
 	wrapSteeringForModel,
@@ -1876,6 +1878,25 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// this undefined so tools and session job snapshots refuse async work
 			// instead of silently routing into the owning session (issue #1923).
 			asyncJobManager: scopedAsyncJobManager,
+		};
+		toolSession.dispatchSkillDependency = async (request, ownerScope) => {
+			if (!session.skillsSettings?.enableSkillCommands) {
+				return { type: "skill-dispatch-result/v1", skill: String((request as { skill?: string }).skill ?? ""), status: "failed", evidence: "skill_commands_disabled" };
+			}
+			const { skill, args } = request as { skill?: string; args?: string };
+			const definition = session.skills.find(candidate => candidate.name === skill);
+			if (!definition || typeof args !== "string") {
+				return { type: "skill-dispatch-result/v1", skill: String(skill ?? ""), status: "failed", evidence: "unregistered_skill" };
+			}
+			const built = await buildSkillPromptMessage(definition, args, "user");
+			const started = await session.sendCustomMessage({
+				customType: SKILL_PROMPT_MESSAGE_TYPE,
+				content: built.message,
+				display: true,
+				details: { ...built.details, correlationId: `${ownerScope.parentSessionId}:${skill}:${args}` },
+				attribution: "user",
+			}, { triggerTurn: true, deliverAs: "nextTurn" });
+			return { type: "skill-dispatch-result/v1", skill, status: started ? "partial" : "failed", evidence: started ? "parent_turn_started" : "parent_turn_not_started" };
 		};
 
 		// Wire process-wide internal URL singletons owned by their real classes.
