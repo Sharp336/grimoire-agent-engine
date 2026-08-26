@@ -1,12 +1,127 @@
+// ../coding-agent/src/tools/browser/relay/attachment-guard.ts
+class AttachmentGuard {
+  options;
+  #attached = new Set;
+  #disconnected = false;
+  #pending = null;
+  constructor(options) {
+    this.options = options;
+  }
+  track(tabId) {
+    this.#attached.add(tabId);
+    this.#scheduleSweep();
+  }
+  untrack(tabId) {
+    this.#attached.delete(tabId);
+    if (this.#attached.size === 0)
+      this.#cancel();
+  }
+  attachedTabIds() {
+    return [...this.#attached];
+  }
+  onConnected() {
+    this.#disconnected = false;
+    this.#cancel();
+  }
+  onDisconnected() {
+    this.#disconnected = true;
+    this.#scheduleSweep();
+  }
+  onSuspend() {
+    this.#cancel();
+    this.#sweep();
+  }
+  #cancel() {
+    if (this.#pending === null)
+      return;
+    this.options.clearTimer(this.#pending);
+    this.#pending = null;
+  }
+  #scheduleSweep() {
+    if (!this.#disconnected || this.#pending !== null || this.#attached.size === 0)
+      return;
+    this.#pending = this.options.setTimer(() => {
+      this.#pending = null;
+      this.#sweep();
+    }, this.options.graceMs);
+  }
+  #sweep() {
+    if (this.#attached.size === 0)
+      return;
+    const tabIds = [...this.#attached];
+    this.#attached.clear();
+    this.options.detachAll(tabIds);
+  }
+}
+
 // extension/background.ts
 var DEFAULT_PORT = 9224;
 var PING_INTERVAL_MS = 20000;
 var RECONNECT_MIN_MS = 1000;
 var RECONNECT_MAX_MS = 1e4;
+var ORPHAN_GRACE_MS = 30000;
 var ws = null;
 var reconnectDelay = RECONNECT_MIN_MS;
 var pingTimer = null;
+var pendingAttaches = new Set;
+var pendingAttachTabs = new Set;
+var canceledPendingAttachTabs = new Set;
+var guardDetachments = new Set;
 var relayInitiatedDetachTabs = new Set;
+var RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
+var recoverableTabIds = new Set;
+var recoverableReady = chrome.storage.session.get({ [RECOVERABLE_TAB_IDS_KEY]: [] }).then((stored) => {
+  const ids = stored[RECOVERABLE_TAB_IDS_KEY];
+  if (!Array.isArray(ids))
+    return;
+  for (const id of ids) {
+    if (typeof id === "number")
+      recoverableTabIds.add(id);
+  }
+}).catch(() => {});
+var recoverableUpdates = recoverableReady;
+function updateRecoverable(update) {
+  recoverableUpdates = recoverableUpdates.then(async () => {
+    update();
+    await chrome.storage.session.set({ [RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds] }).catch(() => {});
+  });
+  return recoverableUpdates;
+}
+function rememberRecoverable(tabIds) {
+  return updateRecoverable(() => {
+    for (const tabId of tabIds)
+      recoverableTabIds.add(tabId);
+  });
+}
+function forgetRecoverable(tabId) {
+  return updateRecoverable(() => {
+    recoverableTabIds.delete(tabId);
+  });
+}
+var attachmentGuard = new AttachmentGuard({
+  graceMs: ORPHAN_GRACE_MS,
+  setTimer: (fn, ms) => setTimeout(fn, ms),
+  clearTimer: (handle) => clearTimeout(handle),
+  detachAll: (tabIds) => {
+    for (const tabId of tabIds) {
+      guardDetachments.add(tabId);
+      chrome.debugger.detach({ tabId }).catch(async () => {
+        guardDetachments.delete(tabId);
+        const targets = await chrome.debugger.getTargets().catch(() => []);
+        if (targets.some((target) => target.tabId === tabId && target.attached)) {
+          trackAttachments([tabId]);
+        }
+      });
+    }
+  }
+});
+async function trackAttachments(tabIds) {
+  if (tabIds.length === 0)
+    return;
+  await rememberRecoverable(tabIds);
+  for (const tabId of tabIds)
+    attachmentGuard.track(tabId);
+}
 async function loadSettings() {
   const stored = await chrome.storage.local.get({ port: DEFAULT_PORT, token: "" });
   const port = Number(stored.port);
@@ -96,7 +211,42 @@ async function setBadge(connected) {
     await chrome.action.setBadgeBackgroundColor({ color: connected ? "#1a7f37" : "#8b8b8b" });
   } catch {}
 }
+var helloRefresh = null;
+function refreshHello() {
+  const socket = ws;
+  if (!socket || socket.readyState !== WebSocket.OPEN)
+    return;
+  if (helloRefresh?.socket === socket) {
+    helloRefresh.dirty = true;
+    return;
+  }
+  const startRefresh = () => {
+    const entry = {
+      socket,
+      dirty: false,
+      done: Promise.resolve()
+    };
+    entry.done = buildHello().then((hello) => {
+      if (entry.dirty)
+        return;
+      if (ws === socket && socket.readyState === WebSocket.OPEN)
+        socket.send(JSON.stringify(hello));
+    }).finally(() => {
+      if (helloRefresh !== entry)
+        return;
+      if (entry.dirty && ws === socket && socket.readyState === WebSocket.OPEN) {
+        startRefresh();
+      } else {
+        helloRefresh = null;
+      }
+    });
+    helloRefresh = entry;
+  };
+  startRefresh();
+}
 async function buildHello() {
+  await Promise.allSettled([...pendingAttaches]);
+  await recoverableUpdates;
   const [tabs, targets] = await Promise.all([chrome.tabs.query({}), chrome.debugger.getTargets()]);
   const snapshots = [];
   for (const tab of tabs) {
@@ -106,27 +256,64 @@ async function buildHello() {
   }
   const attachedTabIds = [];
   for (const target of targets) {
-    if (target.attached && target.tabId !== undefined)
+    if (target.attached && target.tabId !== undefined) {
       attachedTabIds.push(target.tabId);
+    }
   }
+  await trackAttachments(attachedTabIds);
   const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
   return {
     t: "hello",
     userAgent: navigator.userAgent,
     browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
     tabs: snapshots,
-    attachedTabIds
+    attachedTabIds,
+    recoverableTabIds: [...recoverableTabIds]
   };
 }
-async function runRpc(msg) {
+async function attachTab(tabId, socket) {
+  pendingAttachTabs.add(tabId);
+  const pending = attachTabOperation(tabId, socket);
+  pendingAttaches.add(pending);
+  try {
+    await pending;
+  } finally {
+    pendingAttaches.delete(pending);
+    pendingAttachTabs.delete(tabId);
+    canceledPendingAttachTabs.delete(tabId);
+  }
+}
+async function attachTabOperation(tabId, socket) {
+  await chrome.debugger.attach({ tabId }, "1.3");
+  if (ws !== socket) {
+    guardDetachments.add(tabId);
+    await chrome.debugger.detach({ tabId }).catch(async () => {
+      guardDetachments.delete(tabId);
+      const targets = await chrome.debugger.getTargets().catch(() => []);
+      if (targets.some((target) => target.tabId === tabId && target.attached)) {
+        trackAttachments([tabId]);
+      }
+    });
+    return;
+  }
+  await trackAttachments([tabId]);
+  if (canceledPendingAttachTabs.delete(tabId)) {
+    attachmentGuard.untrack(tabId);
+    await forgetRecoverable(tabId);
+    throw new Error("debugger attachment detached before attach completed");
+  }
+}
+async function runRpc(msg, socket) {
   switch (msg.op) {
     case "attach":
-      await chrome.debugger.attach({ tabId: msg.tabId }, "1.3");
+      await attachTab(msg.tabId, socket);
       return {};
     case "detach":
       relayInitiatedDetachTabs.add(msg.tabId);
       try {
         await chrome.debugger.detach({ tabId: msg.tabId });
+        attachmentGuard.untrack(msg.tabId);
+        await forgetRecoverable(msg.tabId);
         return {};
       } catch (error) {
         relayInitiatedDetachTabs.delete(msg.tabId);
@@ -157,7 +344,7 @@ async function runRpc(msg) {
       return {};
   }
 }
-function handleRelayMessage(raw) {
+function handleRelayMessage(socket, raw) {
   let msg;
   try {
     msg = JSON.parse(raw);
@@ -166,14 +353,38 @@ function handleRelayMessage(raw) {
   }
   if (msg.t === "pong")
     return;
-  runRpc(msg).then((result) => post({ t: "rpcResult", id: msg.id, ok: true, result })).catch((err) => {
-    post({ t: "rpcResult", id: msg.id, ok: false, error: err instanceof Error ? err.message : String(err) });
+  runRpc(msg, socket).then((result) => {
+    if (ws === socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({ t: "rpcResult", id: msg.id, ok: true, result }));
+    }
+  }).catch((err) => {
+    if (ws === socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({
+        t: "rpcResult",
+        id: msg.id,
+        ok: false,
+        error: err instanceof Error ? err.message : String(err)
+      }));
+    }
   });
 }
 function scheduleReconnect() {
   const delay = reconnectDelay;
   reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
   setTimeout(() => void connect(), delay);
+}
+async function reconcileOrphans() {
+  const targets = await chrome.debugger.getTargets().catch(() => []);
+  const attachedTabIds = [];
+  for (const target of targets) {
+    if (target.attached && target.tabId !== undefined) {
+      attachedTabIds.push(target.tabId);
+    }
+  }
+  await trackAttachments(attachedTabIds);
+  if (attachedTabIds.length > 0 && !(ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))) {
+    attachmentGuard.onDisconnected();
+  }
 }
 async function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))
@@ -184,14 +395,15 @@ async function connect() {
   ws = socket;
   socket.onopen = () => {
     reconnectDelay = RECONNECT_MIN_MS;
+    attachmentGuard.onConnected();
     setBadge(true);
-    buildHello().then((hello) => post(hello));
+    refreshHello();
     clearInterval(pingTimer ?? undefined);
     pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);
   };
   socket.onmessage = (event) => {
     if (typeof event.data === "string")
-      handleRelayMessage(event.data);
+      handleRelayMessage(socket, event.data);
   };
   socket.onclose = () => {
     if (ws !== socket)
@@ -203,6 +415,7 @@ async function connect() {
     }
     setBadge(false);
     restoreGroups();
+    attachmentGuard.onDisconnected();
     scheduleReconnect();
   };
   socket.onerror = () => {
@@ -217,8 +430,18 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 chrome.debugger.onDetach.addListener((source, reason) => {
   if (source.tabId === undefined)
     return;
+  attachmentGuard.untrack(source.tabId);
+  const guardMarked = guardDetachments.delete(source.tabId);
+  if (guardMarked && reason !== "canceled_by_user") {
+    refreshHello();
+    return;
+  }
   const relayInitiated = relayInitiatedDetachTabs.delete(source.tabId);
+  if (!relayInitiated && pendingAttachTabs.has(source.tabId))
+    canceledPendingAttachTabs.add(source.tabId);
+  forgetRecoverable(source.tabId);
   post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
+  refreshHello();
 });
 chrome.tabs.onCreated.addListener((tab) => {
   const snap = snapshot(tab);
@@ -231,6 +454,7 @@ chrome.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => {
     post({ t: "tabUpdated", tab: snap });
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
+  forgetRecoverable(tabId);
   post({ t: "tabRemoved", tabId });
 });
 chrome.alarms.create("omp-relay-keepalive", { periodInMinutes: 0.5 });
@@ -245,6 +469,14 @@ chrome.storage.onChanged.addListener((_changes, areaName) => {
   connect();
 });
 chrome.action.onClicked.addListener(() => void chrome.runtime.openOptionsPage());
-chrome.runtime.onInstalled.addListener(() => void connect());
-chrome.runtime.onStartup.addListener(() => void connect());
+chrome.runtime.onInstalled.addListener(() => {
+  reconcileOrphans();
+  connect();
+});
+chrome.runtime.onStartup.addListener(() => {
+  reconcileOrphans();
+  connect();
+});
+chrome.runtime.onSuspend.addListener(() => attachmentGuard.onSuspend());
+reconcileOrphans();
 connect();

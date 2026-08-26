@@ -9,17 +9,105 @@
  * worker alive while connected (Chrome 116+); a chrome.alarms tick revives it
  * and re-dials after Chrome reaps it while disconnected.
  */
+import { AttachmentGuard } from "../../coding-agent/src/tools/browser/relay/attachment-guard";
 import type { ExtToRelayMessage, RelayToExtMessage, TabSnapshot } from "../../coding-agent/src/tools/browser/relay/protocol";
 
 const DEFAULT_PORT = 9224;
 const PING_INTERVAL_MS = 20_000;
 const RECONNECT_MIN_MS = 1_000;
 const RECONNECT_MAX_MS = 10_000;
+/**
+ * How long the relay may stay disconnected before we reclaim our debugger
+ * attachments. Covers a couple of reconnect backoff cycles so a brief relay
+ * restart doesn't strip a live session, but a dead relay no longer orphans the
+ * "started debugging this browser" infobar forever (#8930).
+ */
+const ORPHAN_GRACE_MS = 30_000;
 
 let ws: WebSocket | null = null;
 let reconnectDelay = RECONNECT_MIN_MS;
 let pingTimer: NodeJS.Timeout | null = null;
+const pendingAttaches = new Set<Promise<void>>();
+const pendingAttachTabs = new Set<number>();
+const canceledPendingAttachTabs = new Set<number>();
+const guardDetachments = new Set<number>();
+// Tabs the relay explicitly asked us to detach. onDetach reports these as
+// relay-initiated so the bridge doesn't misclassify them as user cancellations.
 const relayInitiatedDetachTabs = new Set<number>();
+
+const RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
+const recoverableTabIds = new Set<number>();
+const recoverableReady = chrome.storage.session
+	.get({ [RECOVERABLE_TAB_IDS_KEY]: [] })
+	.then(stored => {
+		const ids = stored[RECOVERABLE_TAB_IDS_KEY];
+		if (!Array.isArray(ids)) return;
+		for (const id of ids) {
+			if (typeof id === "number") recoverableTabIds.add(id);
+		}
+	})
+	.catch(() => {});
+let recoverableUpdates: Promise<void> = recoverableReady;
+
+function updateRecoverable(update: () => void): Promise<void> {
+	recoverableUpdates = recoverableUpdates.then(async () => {
+		update();
+		await chrome.storage.session.set({ [RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds] }).catch(() => {});
+	});
+	return recoverableUpdates;
+}
+
+function rememberRecoverable(tabIds: number[]): Promise<void> {
+	return updateRecoverable(() => {
+		for (const tabId of tabIds) recoverableTabIds.add(tabId);
+	});
+}
+
+function forgetRecoverable(tabId: number): Promise<void> {
+	return updateRecoverable(() => {
+		recoverableTabIds.delete(tabId);
+	});
+}
+
+/**
+ * The extension owns its `chrome.debugger` attachments: it outlives the relay,
+ * so it must detach tabs the relay can no longer speak for. The relay reconciles
+ * live attachments from the next `hello` and re-attaches any tab that still has
+ * session holders, so an early detach is safe.
+ */
+const attachmentGuard = new AttachmentGuard<NodeJS.Timeout>({
+	graceMs: ORPHAN_GRACE_MS,
+	setTimer: (fn, ms) => setTimeout(fn, ms),
+	clearTimer: handle => clearTimeout(handle),
+	detachAll: tabIds => {
+		// trackAttachments persisted every id before handing it to the guard, so
+		// onSuspend can start these detaches without depending on a last-moment
+		// storage write that MV3 may terminate with the worker.
+		for (const tabId of tabIds) {
+			guardDetachments.add(tabId);
+			void chrome.debugger.detach({ tabId }).catch(async () => {
+				guardDetachments.delete(tabId);
+				// The detach rejected. If Chrome still reports the tab attached, the
+				// #sweep() that fired this already dropped it from the guard's tracked
+				// set, so no later reconnect failure would retry it and the debugger
+				// attachment (and its infobar) would stay orphaned. Re-track only when
+				// the attachment truly survived so a subsequent sweep reclaims it;
+				// otherwise the onDetach listener already forgot it.
+				const targets = await chrome.debugger.getTargets().catch(() => []);
+				if (targets.some(target => target.tabId === tabId && target.attached)) {
+					void trackAttachments([tabId]);
+				}
+			});
+		}
+	},
+});
+
+/** Persist recovery authorization before a tab becomes eligible for a sweep. */
+async function trackAttachments(tabIds: number[]): Promise<void> {
+	if (tabIds.length === 0) return;
+	await rememberRecoverable(tabIds);
+	for (const tabId of tabIds) attachmentGuard.track(tabId);
+}
 
 interface RelaySettings {
 	port: number;
@@ -131,7 +219,79 @@ async function setBadge(connected: boolean): Promise<void> {
 	}
 }
 
+let helloRefresh: { socket: WebSocket; done: Promise<void>; dirty: boolean } | null = null;
+
+/**
+ * Send a fresh hello for the live socket, coalescing concurrent callers.
+ *
+ * A guard detach can resolve during a fast reconnect while the new socket's
+ * `onopen` is already awaiting `buildHello()`. Firing a second hello from the
+ * detach handler lets both reach `RelayBridge.#onHello()` before the recovery
+ * attach settles; each hello clears `tab.attaching` and launches a separate
+ * `chrome.debugger.attach()`, so one loses the race as "already attached" and
+ * its failure retracts the target the other just recovered. `buildHello()`
+ * already waits for pending attaches to settle, so a single coalesced refresh
+ * captures the final attachment state. Coalescing is scoped to the live socket:
+ * a refresh already queued for a socket that has since been replaced never
+ * suppresses the replacement's own hello.
+ *
+ * A concurrent caller cannot simply be dropped, though: the in-flight refresh
+ * may have already snapshotted `getTargets()` before the newer detach/attach
+ * landed, so its hello would report the just-detached tab as still attached and
+ * `RelayBridge.#onHello()` would preserve the stale session instead of
+ * recovering it. Rather than dropping the request, mark the active refresh
+ * dirty and rebuild once it settles, so the follow-up hello reflects the final
+ * attachment state.
+ */
+function refreshHello(): void {
+	const socket = ws;
+	if (!socket || socket.readyState !== WebSocket.OPEN) return;
+	if (helloRefresh?.socket === socket) {
+		// A refresh is already running for this socket; its snapshot may predate
+		// this change. Rebuild after it settles instead of discarding the refresh.
+		helloRefresh.dirty = true;
+		return;
+	}
+	const startRefresh = (): void => {
+		const entry: { socket: WebSocket; done: Promise<void>; dirty: boolean } = {
+			socket,
+			dirty: false,
+			done: Promise.resolve(),
+		};
+		entry.done = buildHello()
+			.then(hello => {
+				// Suppress a hello whose snapshot was invalidated before it could be
+				// sent. A guard detach that marks this refresh `dirty` in flight means
+				// `getTargets()` may predate the detach, so this hello can report a
+				// just-detached tab as still attached; `RelayBridge.#onHello()` would
+				// then preserve the stale session and start recovery, while the rebuilt
+				// follow-up hello clears `tab.attaching` and launches a competing
+				// attach. Skip the stale send and let the dirty rebuild below emit the
+				// single authoritative hello.
+				if (entry.dirty) return;
+				if (ws === socket && socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(hello));
+			})
+			.finally(() => {
+				if (helloRefresh !== entry) return;
+				if (entry.dirty && ws === socket && socket.readyState === WebSocket.OPEN) {
+					// A refresh arrived while this one was in flight; its snapshot may be
+					// stale, so rebuild to capture the change it observed.
+					startRefresh();
+				} else {
+					helloRefresh = null;
+				}
+			});
+		helloRefresh = entry;
+	};
+	startRefresh();
+}
+
 async function buildHello(): Promise<ExtToRelayMessage> {
+	// An attach requested by the previous socket can finish during a fast
+	// reconnect. Wait for it before taking the hello snapshot so the replacement
+	// relay learns the real attachment state instead of stranding the tab.
+	await Promise.allSettled([...pendingAttaches]);
+	await recoverableUpdates;
 	const [tabs, targets] = await Promise.all([chrome.tabs.query({}), chrome.debugger.getTargets()]);
 	const snapshots: TabSnapshot[] = [];
 	for (const tab of tabs) {
@@ -140,8 +300,16 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 	}
 	const attachedTabIds: number[] = [];
 	for (const target of targets) {
-		if (target.attached && target.tabId !== undefined) attachedTabIds.push(target.tabId);
+		if (target.attached && target.tabId !== undefined) {
+			attachedTabIds.push(target.tabId);
+		}
 	}
+	// Re-seed ownership after an MV3 worker restart. Persist the recovery marker
+	// before exposing the attachment to onSuspend's immediate sweep; otherwise
+	// Chrome can complete detach while the worker is reaped before the queued
+	// storage write, and the replacement worker misclassifies recovery as a user
+	// cancellation.
+	await trackAttachments(attachedTabIds);
 	const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
 	return {
 		t: "hello",
@@ -149,18 +317,72 @@ async function buildHello(): Promise<ExtToRelayMessage> {
 		browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
 		tabs: snapshots,
 		attachedTabIds,
+		recoverableTabIds: [...recoverableTabIds],
 	};
 }
 
-async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>): Promise<unknown> {
+async function attachTab(tabId: number, socket: WebSocket): Promise<void> {
+	pendingAttachTabs.add(tabId);
+	const pending = attachTabOperation(tabId, socket);
+	pendingAttaches.add(pending);
+	try {
+		await pending;
+	} finally {
+		pendingAttaches.delete(pending);
+		pendingAttachTabs.delete(tabId);
+		canceledPendingAttachTabs.delete(tabId);
+	}
+}
+
+async function attachTabOperation(tabId: number, socket: WebSocket): Promise<void> {
+	await chrome.debugger.attach({ tabId }, "1.3");
+	// The relay that requested this attachment disappeared while Chrome was
+	// still resolving attach(). Its pending RPC was rejected by RelayBridge,
+	// so no downstream session can own the resulting debugger attachment.
+	// Mark the cleanup detach as guard-internal: a replacement socket may
+	// already be live, and an unmarked onDetach would post a user-style
+	// `detached` that bans the tab and drops its recovery bit instead of
+	// letting the surviving relay reconcile it from the next hello.
+	if (ws !== socket) {
+		guardDetachments.add(tabId);
+		await chrome.debugger.detach({ tabId }).catch(async () => {
+			guardDetachments.delete(tabId);
+			// The cleanup detach rejected. If Chrome still reports the tab
+			// attached, nothing else tracks it: the requesting socket is gone, so
+			// no downstream session and no guard entry hold it, and if the relay
+			// stays unavailable no later hello reseeds the guard. Mirror the guard
+			// sweep's failure path and re-track only when the attachment truly
+			// survived, so a subsequent sweep reclaims it instead of leaving the
+			// debugger infobar orphaned indefinitely.
+			const targets = await chrome.debugger.getTargets().catch(() => []);
+			if (targets.some(target => target.tabId === tabId && target.attached)) {
+				void trackAttachments([tabId]);
+			}
+		});
+		return;
+	}
+	await trackAttachments([tabId]);
+	if (canceledPendingAttachTabs.delete(tabId)) {
+		// onDetach ran while the recovery marker was being persisted. Undo the
+		// delayed track and fail the RPC: returning success would make the bridge
+		// mint a session for a Chrome root the user already canceled.
+		attachmentGuard.untrack(tabId);
+		await forgetRecoverable(tabId);
+		throw new Error("debugger attachment detached before attach completed");
+	}
+}
+
+async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>, socket: WebSocket): Promise<unknown> {
 	switch (msg.op) {
 		case "attach":
-			await chrome.debugger.attach({ tabId: msg.tabId }, "1.3");
+			await attachTab(msg.tabId, socket);
 			return {};
 		case "detach":
 			relayInitiatedDetachTabs.add(msg.tabId);
 			try {
 				await chrome.debugger.detach({ tabId: msg.tabId });
+				attachmentGuard.untrack(msg.tabId);
+				await forgetRecoverable(msg.tabId);
 				return {};
 			} catch (error) {
 				relayInitiatedDetachTabs.delete(msg.tabId);
@@ -195,7 +417,7 @@ async function runRpc(msg: Extract<RelayToExtMessage, { t: "rpc" }>): Promise<un
 	}
 }
 
-function handleRelayMessage(raw: string): void {
+function handleRelayMessage(socket: WebSocket, raw: string): void {
 	let msg: RelayToExtMessage;
 	try {
 		msg = JSON.parse(raw) as RelayToExtMessage;
@@ -203,10 +425,23 @@ function handleRelayMessage(raw: string): void {
 		return;
 	}
 	if (msg.t === "pong") return;
-	void runRpc(msg)
-		.then(result => post({ t: "rpcResult", id: msg.id, ok: true, result }))
+	void runRpc(msg, socket)
+		.then(result => {
+			if (ws === socket && socket.readyState === WebSocket.OPEN) {
+				socket.send(JSON.stringify({ t: "rpcResult", id: msg.id, ok: true, result } satisfies ExtToRelayMessage));
+			}
+		})
 		.catch((err: unknown) => {
-			post({ t: "rpcResult", id: msg.id, ok: false, error: err instanceof Error ? err.message : String(err) });
+			if (ws === socket && socket.readyState === WebSocket.OPEN) {
+				socket.send(
+					JSON.stringify({
+						t: "rpcResult",
+						id: msg.id,
+						ok: false,
+						error: err instanceof Error ? err.message : String(err),
+					} satisfies ExtToRelayMessage),
+				);
+			}
 		});
 }
 
@@ -214,6 +449,33 @@ function scheduleReconnect(): void {
 	const delay = reconnectDelay;
 	reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
 	setTimeout(() => void connect(), delay);
+}
+
+/**
+ * Seed the guard from attachments that survived a service-worker restart and,
+ * when the relay is still unreachable, arm an orphan sweep independent of a
+ * successful connection. Without this, a worker recreated during a relay outage
+ * only re-seeds the guard inside `buildHello()` (which runs after `onopen`), so
+ * a failed reconnect calls `onDisconnected()` on an empty guard and never
+ * reclaims the surviving `chrome.debugger` infobar.
+ */
+async function reconcileOrphans(): Promise<void> {
+	const targets = await chrome.debugger.getTargets().catch(() => []);
+	const attachedTabIds: number[] = [];
+	for (const target of targets) {
+		if (target.attached && target.tabId !== undefined) {
+			attachedTabIds.push(target.tabId);
+		}
+	}
+	await trackAttachments(attachedTabIds);
+	// A live/pending socket owns reconciliation via hello; only arm a
+	// standalone sweep when nothing is connecting to reclaim these tabs.
+	if (
+		attachedTabIds.length > 0 &&
+		!(ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))
+	) {
+		attachmentGuard.onDisconnected();
+	}
 }
 
 async function connect(): Promise<void> {
@@ -224,13 +486,14 @@ async function connect(): Promise<void> {
 	ws = socket;
 	socket.onopen = () => {
 		reconnectDelay = RECONNECT_MIN_MS;
+		attachmentGuard.onConnected();
 		void setBadge(true);
-		void buildHello().then(hello => post(hello));
+		refreshHello();
 		clearInterval(pingTimer ?? undefined);
 		pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);
 	};
 	socket.onmessage = event => {
-		if (typeof event.data === "string") handleRelayMessage(event.data);
+		if (typeof event.data === "string") handleRelayMessage(socket, event.data);
 	};
 	socket.onclose = () => {
 		if (ws !== socket) return;
@@ -241,6 +504,7 @@ async function connect(): Promise<void> {
 		}
 		void setBadge(false);
 		void restoreGroups();
+		attachmentGuard.onDisconnected();
 		scheduleReconnect();
 	};
 	socket.onerror = () => {
@@ -257,8 +521,37 @@ chrome.debugger.onEvent.addListener((source, method, params) => {
 
 chrome.debugger.onDetach.addListener((source, reason) => {
 	if (source.tabId === undefined) return;
+	// The attachment is gone (user clicked Cancel, tab navigated to a
+	// non-attachable target, or Chrome tore it down); stop tracking it so a
+	// later orphan sweep never tries to detach a tab we no longer own.
+	attachmentGuard.untrack(source.tabId);
+	// A user cancellation can race the orphan sweep: the guard calls
+	// chrome.debugger.detach() and adds the tab to guardDetachments, but Chrome
+	// then delivers the user's own Cancel as this onDetach. Trust Chrome's reason
+	// over the in-memory marker — "canceled_by_user" is the user revoking the
+	// attachment, so clear any stale guard/recovery bit and report it as a real
+	// user detach (which bans the tab) instead of silently reattaching it.
+	const guardMarked = guardDetachments.delete(source.tabId);
+	if (guardMarked && reason !== "canceled_by_user") {
+		// A reconnect can win the race with the asynchronous guard detach. Do not
+		// report it as a user detach (which bans the tab); refresh hello so the
+		// relay can restore only this guard-authorized attachment. Coalesce with
+		// the reconnect's own hello so a single recovery attach is launched.
+		refreshHello();
+		return;
+	}
+	// A relay-requested detach is attributed explicitly so the bridge can
+	// reconcile the stale snapshot instead of treating it as a user cancel.
 	const relayInitiated = relayInitiatedDetachTabs.delete(source.tabId);
+	if (!relayInitiated && pendingAttachTabs.has(source.tabId)) canceledPendingAttachTabs.add(source.tabId);
+	void forgetRecoverable(source.tabId);
 	post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
+	// A detach can land after buildHello() snapshots getTargets() while that
+	// refresh is still persisting its recovery markers. Invalidate the stale
+	// snapshot so the follow-up hello reports the real detached state. This
+	// includes relay-initiated detaches whose old RPC result may be suppressed
+	// after a socket replacement.
+	refreshHello();
 });
 
 chrome.tabs.onCreated.addListener(tab => {
@@ -272,6 +565,7 @@ chrome.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => {
 });
 
 chrome.tabs.onRemoved.addListener(tabId => {
+	void forgetRecoverable(tabId);
 	post({ t: "tabRemoved", tabId });
 });
 
@@ -290,7 +584,17 @@ chrome.storage.onChanged.addListener((_changes, areaName) => {
 });
 
 chrome.action.onClicked.addListener(() => void chrome.runtime.openOptionsPage());
-chrome.runtime.onInstalled.addListener(() => void connect());
-chrome.runtime.onStartup.addListener(() => void connect());
+chrome.runtime.onInstalled.addListener(() => {
+	void reconcileOrphans();
+	void connect();
+});
+chrome.runtime.onStartup.addListener(() => {
+	void reconcileOrphans();
+	void connect();
+});
+// Clean teardown: detach any tab we still own before the worker is suspended,
+// so the debugger infobar never survives the extension going idle.
+chrome.runtime.onSuspend.addListener(() => attachmentGuard.onSuspend());
 
+void reconcileOrphans();
 void connect();
