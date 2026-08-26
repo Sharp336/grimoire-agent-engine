@@ -637,17 +637,22 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			// something useful to say about a rename if it understands one of the
 			// affected file extensions. Resolution is per file so clone-local
 			// paths attach their own workspace server (never the session cwd).
-			const relevantNames = new Set<string>();
-			const relevantConfigs = new Map<string, ServerConfig>();
-			const relevantRoots = new Map<string, string>();
+			// Entries are keyed by canonical workspace root + server name: two
+			// clones can both provide "typescript-language-server", and a
+			// name-keyed map would collapse the second root onto the first,
+			// sending both clones' rename traffic to one client and dropping
+			// the other clone's edits entirely.
+			const relevantServers = new Map<string, { name: string; config: ServerConfig; root: string }>();
 			const collectRelevant = (filePath: string) => {
 				const fileResolution = resolveFileLspServers(filePath, this.session.cwd);
 				if (fileResolution.ceiling.escaped) return;
 				for (const entry of fileResolution.servers) {
 					if (entry.missingBinary || entry.config.createClient) continue;
-					relevantNames.add(entry.name);
-					relevantConfigs.set(entry.name, entry.config);
-					relevantRoots.set(entry.name, entry.workspaceRootReal);
+					relevantServers.set(`${entry.workspaceRootReal}\u0000${entry.name}`, {
+						name: entry.name,
+						config: entry.config,
+						root: entry.workspaceRootReal,
+					});
 				}
 			};
 			collectRelevant(source);
@@ -656,9 +661,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				collectRelevant(uriToFile(pair.oldUri));
 				collectRelevant(uriToFile(pair.newUri));
 			}
-			const servers = Array.from(relevantConfigs.entries());
+			const servers = Array.from(relevantServers.values());
 			const respondingServers = new Set<string>();
-			const perServerEdits: Array<{ serverName: string; edit: WorkspaceEdit }> = [];
+			const perServerEdits: Array<{ identity: string; serverName: string; edit: WorkspaceEdit }> = [];
 			const serverNotes: string[] = [];
 			// Servers that support workspace/willRenameFiles (i.e. did not reply
 			// method-not-found) but failed the request. Their semantic edits are
@@ -667,17 +672,18 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			// (issue #8380).
 			const hardFailures: string[] = [];
 
-			for (const [serverName, serverConfig] of servers) {
+			const sourceLabel = formatPathRelativeToCwd(source, this.session.cwd);
+			const destLabel = formatPathRelativeToCwd(dest, this.session.cwd);
+			const fileCountLabel = sourceStat.isDirectory()
+				? `${pairs.length} file${pairs.length !== 1 ? "s" : ""} under ${sourceLabel}`
+				: sourceLabel;
+
+			for (const server of servers) {
 				throwIfAborted(signal);
 				let client: LspClient;
 				try {
-					client = await getOrCreateClient(
-						serverConfig,
-						relevantRoots.get(serverName) ?? this.session.cwd,
-						undefined,
-						signal,
-					);
-					if (isProjectAwareLspServer(serverConfig)) {
+					client = await getOrCreateClient(server.config, server.root, undefined, signal);
+					if (isProjectAwareLspServer(server.config)) {
 						await waitForProjectLoaded(client, signal);
 					}
 				} catch (err) {
@@ -687,7 +693,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					// Could not reach the server at all; note it but don't block —
 					// this is not a willRenameFiles failure.
 					const msg = err instanceof Error ? err.message : String(err);
-					serverNotes.push(`  ${serverName}: ${msg}`);
+					serverNotes.push(`  ${server.name}: ${msg}`);
 					continue;
 				}
 				try {
@@ -697,9 +703,13 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						lspParams,
 						signal,
 					)) as WorkspaceEdit | null;
-					respondingServers.add(serverName);
+					respondingServers.add(server.name);
 					if (result && (result.changes || result.documentChanges)) {
-						perServerEdits.push({ serverName, edit: result });
+						perServerEdits.push({
+							identity: `${server.root}\u0000${server.name}`,
+							serverName: server.name,
+							edit: result,
+						});
 					}
 				} catch (err) {
 					if (err instanceof ToolAbortError || signal?.aborted) {
@@ -710,17 +720,11 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					// server that supports willRenameFiles.
 					if (!isMethodNotFoundError(err)) {
 						const msg = err instanceof Error ? err.message : String(err);
-						serverNotes.push(`  ${serverName}: ${msg}`);
-						hardFailures.push(serverName);
+						serverNotes.push(`  ${server.name}: ${msg}`);
+						hardFailures.push(server.name);
 					}
 				}
 			}
-
-			const sourceLabel = formatPathRelativeToCwd(source, this.session.cwd);
-			const destLabel = formatPathRelativeToCwd(dest, this.session.cwd);
-			const fileCountLabel = sourceStat.isDirectory()
-				? `${pairs.length} file${pairs.length !== 1 ? "s" : ""} under ${sourceLabel}`
-				: sourceLabel;
 
 			const shouldApply = apply !== false;
 			if (!shouldApply) {
@@ -775,28 +779,26 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 			const summary: string[] = [];
 
-			// Coalesce per-URI edits across servers before applying. Each server
-			// computed positions against the pre-edit file content, so applying
-			// server A then re-reading for server B yields stale positions and
-			// produces malformed imports. Group all text edits by URI, prefer the
-			// project-primary (project-aware) server on overlap, and apply once
-			// per URI from a single snapshot.
-			const serverConfigByName = new Map(servers);
+			const serverConfigByIdentity = new Map<string, ServerConfig>(
+				servers.map((server): [string, ServerConfig] => [`${server.root}\u0000${server.name}`, server.config]),
+			);
 			interface AcceptedBucket {
+				primaryIdentity: string;
 				primaryServer: string;
 				edits: TextEdit[];
 				discarded: number;
 				conflictServers: Set<string>;
 			}
 			const acceptedByUri = new Map<string, AcceptedBucket>();
-			for (const { serverName, edit } of perServerEdits) {
-				const cfg = serverConfigByName.get(serverName);
+			for (const { identity, serverName, edit } of perServerEdits) {
+				const cfg = serverConfigByIdentity.get(identity);
 				const incomingPrimary = cfg ? isProjectAwareLspServer(cfg) : false;
 				const flat = flattenWorkspaceTextEdits(edit);
 				for (const [uri, edits] of flat) {
 					const existing = acceptedByUri.get(uri);
 					if (!existing) {
 						acceptedByUri.set(uri, {
+							primaryIdentity: identity,
 							primaryServer: serverName,
 							edits: [...edits],
 							discarded: 0,
@@ -804,7 +806,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						});
 						continue;
 					}
-					const existingCfg = serverConfigByName.get(existing.primaryServer);
+					const existingCfg = serverConfigByIdentity.get(existing.primaryIdentity);
 					const existingIsPrimary = existingCfg ? isProjectAwareLspServer(existingCfg) : false;
 					if (incomingPrimary && !existingIsPrimary) {
 						// Promote incoming to primary; keep existing edits that don't overlap.
@@ -816,6 +818,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						}
 						if (discardedOld > 0) existing.conflictServers.add(existing.primaryServer);
 						existing.discarded += discardedOld;
+						existing.primaryIdentity = identity;
 						existing.primaryServer = serverName;
 						existing.edits = [...edits, ...keptOld];
 					} else {
@@ -866,14 +869,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			await applyEditsThenRename(referenceEdits, source, dest);
 			summary.push(`  Renamed ${sourceLabel} → ${destLabel}`);
 
-			for (const [serverName, serverConfig] of servers) {
+			for (const server of servers) {
 				try {
-					const client = await getOrCreateClient(
-						serverConfig,
-						relevantRoots.get(serverName) ?? this.session.cwd,
-						undefined,
-						signal,
-					);
+					const client = await getOrCreateClient(server.config, server.root, undefined, signal);
 					for (const { oldUri } of pairs) {
 						if (client.openFiles.has(oldUri)) {
 							await sendNotification(client, "textDocument/didClose", { textDocument: { uri: oldUri } }, signal);
@@ -886,7 +884,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						throw err;
 					}
 					const msg = err instanceof Error ? err.message : String(err);
-					serverNotes.push(`  ${serverName}: ${msg}`);
+					serverNotes.push(`  ${server.name}: ${msg}`);
 				}
 			}
 

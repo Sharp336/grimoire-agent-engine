@@ -263,13 +263,15 @@ async function runLspWritethrough(
 		return undefined;
 	}
 
-	// File-driven clone-local resolution: a clone file's servers attach to
-	// their own canonical workspace roots (realpath), never the session cwd,
-	// and a missing clone-local binary is skipped — never a $PATH/founder
-	// fallback, never a client spawned at the session root. Session-owned and
-	// stray (non-git) files keep the original session-config selection and
-	// identity, so lazy/custom formatter/freshness behavior is unchanged —
-	// including exactly one getServersForFile call per file.
+	// File-driven bounded resolution: a clone file's servers attach to their
+	// own canonical workspace roots (realpath), never the session cwd, and a
+	// missing clone-local binary is skipped — never a $PATH/founder fallback,
+	// never a client spawned at the session root. Session-owned files keep
+	// the original session-config selection and identity, so lazy/custom
+	// formatter/freshness behavior is unchanged — including exactly one
+	// getServersForFile call per file. Stray (non-git) files outside the
+	// session are bounded to their own directory: a valid session TS server
+	// must never attach to an unrelated /tmp scratch file.
 	const ceiling = resolveLspCeiling(dst, cwd);
 	if (ceiling.escaped) {
 		notifyRoots = [];
@@ -278,7 +280,7 @@ async function runLspWritethrough(
 		return undefined;
 	}
 	let resolvable: ResolvedFileServer[];
-	if (ceiling.kind !== "git") {
+	if (ceiling.kind === "session") {
 		const config = getConfig(cwd);
 		const sessionServers = getServersForFile(config, dst);
 		if (sessionServers.length === 0) {
@@ -298,9 +300,15 @@ async function runLspWritethrough(
 	} else {
 		const fileResolution = resolveFileLspServers(dst, cwd);
 		resolvable = fileResolution.servers.filter(entry => !entry.missingBinary);
-		// A clone write always announces on the clone work tree — never the
-		// unrelated session root — even when nothing is resolvable.
-		notifyRoots = [canonicalRoot(fileResolution.ceiling.path)];
+		if (ceiling.kind === "git") {
+			// A clone write always announces on the clone work tree — never the
+			// unrelated session root — even when nothing is resolvable.
+			notifyRoots = [canonicalRoot(fileResolution.ceiling.path)];
+		} else {
+			// A stray file outside the session and any repo: a plain write
+			// announces nothing (no session-root announce, no attach).
+			notifyRoots = [];
+		}
 		if (fileResolution.ceiling.escaped || resolvable.length === 0) {
 			await getWritePromise();
 			await notifyWriteCommitted();

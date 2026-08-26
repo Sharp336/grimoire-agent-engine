@@ -696,52 +696,51 @@ describe("LSP diagnostics freshness", () => {
 			...TEST_SERVER,
 			rootMarkers: ["package.json", "tsconfig.json", "jsconfig.json"],
 		};
-		const orphanDir = TempDir.createSync("@omp-lsp-orphan-");
-		try {
-			const filePath = path.join(orphanDir.path(), "scratch.ts");
-			const uri = fileToUri(filePath);
-			const client = createClient(tempDir.path(), server);
-			client.openFiles.set(uri, { version: 1, languageId: "typescript" });
+		// The orphan file is a session temp file: inside the session root but
+		// outside any TS project (no root markers anywhere). The session server
+		// still attaches and reports — project diagnostics suppressed, syntax
+		// errors retained. External non-git strays plain-write without attaching.
+		const filePath = path.join(tempDir.path(), "scratch.ts");
+		const uri = fileToUri(filePath);
+		const client = createClient(tempDir.path(), server);
+		client.openFiles.set(uri, { version: 1, languageId: "typescript" });
 
-			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
-				servers: { "typescript-language-server": server },
-				idleTimeoutMs: undefined,
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({
+			servers: { "typescript-language-server": server },
+			idleTimeoutMs: undefined,
+		});
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["typescript-language-server", server]]);
+		vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+		vi.spyOn(lspClient, "syncContent").mockImplementation(async (mockClient, syncedFilePath) => {
+			const syncedUri = fileToUri(syncedFilePath);
+			mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript" });
+		});
+		vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
+			const moduleDiagnostic = createDiagnostic(
+				"Cannot find module 'bun:sqlite' or its corresponding type declarations.",
+			);
+			moduleDiagnostic.code = 2307;
+			const bunDiagnostic = createDiagnostic(
+				"Cannot find name 'Bun'. Do you need to install type definitions for Bun?",
+			);
+			bunDiagnostic.code = 2867;
+			const syntaxDiagnostic = createDiagnostic("';' expected.");
+			syntaxDiagnostic.code = 1005;
+			mockClient.diagnostics.set(uri, {
+				version: 1,
+				diagnostics: [moduleDiagnostic, bunDiagnostic, syntaxDiagnostic],
 			});
-			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["typescript-language-server", server]]);
-			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
-			vi.spyOn(lspClient, "syncContent").mockImplementation(async (mockClient, syncedFilePath) => {
-				const syncedUri = fileToUri(syncedFilePath);
-				mockClient.openFiles.set(syncedUri, { version: 1, languageId: "typescript" });
-			});
-			vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
-				const moduleDiagnostic = createDiagnostic(
-					"Cannot find module 'bun:sqlite' or its corresponding type declarations.",
-				);
-				moduleDiagnostic.code = 2307;
-				const bunDiagnostic = createDiagnostic(
-					"Cannot find name 'Bun'. Do you need to install type definitions for Bun?",
-				);
-				bunDiagnostic.code = 2867;
-				const syntaxDiagnostic = createDiagnostic("';' expected.");
-				syntaxDiagnostic.code = 1005;
-				mockClient.diagnostics.set(uri, {
-					version: 1,
-					diagnostics: [moduleDiagnostic, bunDiagnostic, syntaxDiagnostic],
-				});
-				mockClient.diagnosticsVersion += 1;
-			});
+			mockClient.diagnosticsVersion += 1;
+		});
 
-			const writethrough = createLspWritethrough(tempDir.path(), { enableFormat: false, enableDiagnostics: true });
-			const result = await writethrough(filePath, 'import { Database } from "bun:sqlite";\nawait Bun.sleep(1)\n');
+		const writethrough = createLspWritethrough(tempDir.path(), { enableFormat: false, enableDiagnostics: true });
+		const result = await writethrough(filePath, 'import { Database } from "bun:sqlite";\nawait Bun.sleep(1)\n');
 
-			expect(result).toBeDefined();
-			expect(result?.errored).toBe(true);
-			expect(result?.messages.some(message => message.includes("bun:sqlite"))).toBe(false);
-			expect(result?.messages.some(message => message.includes("Cannot find name 'Bun'"))).toBe(false);
-			expect(result?.messages.some(message => message.includes("';' expected."))).toBe(true);
-			expect(await Bun.file(filePath).text()).toBe('import { Database } from "bun:sqlite";\nawait Bun.sleep(1)\n');
-		} finally {
-			orphanDir.removeSync();
-		}
+		expect(result).toBeDefined();
+		expect(result?.errored).toBe(true);
+		expect(result?.messages.some(message => message.includes("bun:sqlite"))).toBe(false);
+		expect(result?.messages.some(message => message.includes("Cannot find name 'Bun'"))).toBe(false);
+		expect(result?.messages.some(message => message.includes("';' expected."))).toBe(true);
+		expect(await Bun.file(filePath).text()).toBe('import { Database } from "bun:sqlite";\nawait Bun.sleep(1)\n');
 	});
 });

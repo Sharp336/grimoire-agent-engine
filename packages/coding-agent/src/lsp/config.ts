@@ -330,6 +330,14 @@ export interface LoadConfigOptions {
 	 * checkout fails closed as missing-in-project instead of being adopted.
 	 */
 	containmentRoot?: string;
+	/**
+	 * Restrict config sources to the project itself (root files plus project
+	 * config dirs such as .omp/lsp.json). User config dirs, plugin/marketplace
+	 * roots, and home-root files are excluded. Clone/stray-file discovery uses
+	 * this so an outer ~/.omp/agent/lsp.json or the founder checkout can never
+	 * leak servers or binary overrides into an independent clone.
+	 */
+	projectOnly?: boolean;
 }
 
 function resolveServerCommand(
@@ -411,8 +419,13 @@ function marketplaceConfigSource(root: ClaudePluginRoot): ConfigSource {
 /**
  * Configuration sources in priority order.
  * Supports both visible and hidden variants at each config location.
+ *
+ * `projectOnly` keeps the list inside the project itself: project root files
+ * and project config dirs only. User config dirs, plugin/marketplace roots,
+ * and home-root files are the outer layers that clone/stray-file discovery
+ * must never see (an independent clone is not the user's project).
  */
-function getConfigSources(cwd: string): ConfigSource[] {
+function getConfigSources(cwd: string, projectOnly: boolean): ConfigSource[] {
 	const filenames = ["lsp.json", ".lsp.json", "lsp.yaml", ".lsp.yaml", "lsp.yml", ".lsp.yml"];
 	const sources: ConfigSource[] = [];
 
@@ -427,6 +440,10 @@ function getConfigSources(cwd: string): ConfigSource[] {
 		for (const filename of filenames) {
 			sources.push(fileConfigSource(path.join(dir, filename)));
 		}
+	}
+
+	if (projectOnly) {
+		return sources;
 	}
 
 	// User config directories (~/.omp/agent/, ~/.pi/agent/, ~/.claude/)
@@ -489,7 +506,7 @@ function getConfigSources(cwd: string): ConfigSource[] {
 export function loadConfig(cwd: string, options?: LoadConfigOptions): LspConfig {
 	let mergedServers = coerceServerConfigs(DEFAULTS);
 
-	const configSources = getConfigSources(cwd).reverse();
+	const configSources = getConfigSources(cwd, options?.projectOnly === true).reverse();
 	let hasOverrides = false;
 
 	let idleTimeoutMs: number | undefined;

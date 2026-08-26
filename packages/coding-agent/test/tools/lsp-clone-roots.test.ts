@@ -452,6 +452,107 @@ describe("clone-local LSP roots", () => {
 			outsideBase.removeSync();
 		}
 	});
+	it("routes rename_file traffic to each clone's own same-named server", async () => {
+		const session = TempDir.createSync("@omp-lsp-rename-session-");
+		const cloneBaseA = TempDir.createSync("@omp-lsp-rename-clone-a-");
+		const cloneBaseB = TempDir.createSync("@omp-lsp-rename-clone-b-");
+		try {
+			const cloneA = makeClone(cloneBaseA, { binAtRoot: true });
+			const cloneB = makeClone(cloneBaseB, { binAtRoot: true });
+			// A cross-clone rename: the source lives in clone A and the
+			// destination in clone B, so both clones' typescript-language-server
+			// instances are relevant. Each server rewrites its own reference
+			// file's import.
+			const sourceFile = path.join(cloneA.api, "src", "old.ts");
+			fs.writeFileSync(sourceFile, "export const value = 1;\n");
+			const destFile = path.join(cloneB.api, "src", "new.ts");
+			const refA = path.join(cloneA.api, "src", "consumer.ts");
+			fs.writeFileSync(refA, "import { value } from './old';\n");
+			const refB = path.join(cloneB.api, "src", "consumer.ts");
+			fs.writeFileSync(refB, "import { value } from './old';\n");
+
+			const rootA = fs.realpathSync(cloneA.api);
+			const rootB = fs.realpathSync(cloneB.api);
+			const tsA = resolveFileLspServers(sourceFile, session.path()).servers.find(
+				s => s.name === "typescript-language-server",
+			)!;
+			const tsB = resolveFileLspServers(cloneB.file, session.path()).servers.find(
+				s => s.name === "typescript-language-server",
+			)!;
+			const clientA = stubClient(rootA, tsA.config, fileToUri(sourceFile));
+			const clientB = stubClient(rootB, tsB.config, fileToUri(cloneB.file));
+			const getOrCreate = vi.spyOn(lspClient, "getOrCreateClient").mockImplementation(async (_config, root) => {
+				if (root === rootA) return clientA;
+				if (root === rootB) return clientB;
+				throw new Error(`unexpected client root ${root}`);
+			});
+			const willRenameClients: LspClient[] = [];
+			vi.spyOn(lspClient, "sendRequest").mockImplementation(async (client, method) => {
+				if (method !== "workspace/willRenameFiles") return null;
+				willRenameClients.push(client);
+				if (client === clientA) {
+					return {
+						changes: {
+							[fileToUri(refA)]: [
+								{
+									range: { start: { line: 0, character: 23 }, end: { line: 0, character: 28 } },
+									newText: "./new",
+								},
+							],
+						},
+					};
+				}
+				if (client === clientB) {
+					return {
+						changes: {
+							[fileToUri(refB)]: [
+								{
+									range: { start: { line: 0, character: 23 }, end: { line: 0, character: 28 } },
+									newText: "./renamed",
+								},
+							],
+						},
+					};
+				}
+				return null;
+			});
+			const didRenameClients: LspClient[] = [];
+			vi.spyOn(lspClient, "sendNotification").mockImplementation(async (client, method) => {
+				if (method === "workspace/didRenameFiles") didRenameClients.push(client);
+			});
+
+			const tool = new LspTool(makeLspSession(session.path()));
+			const result = await tool.execute("cross-root-rename", {
+				action: "rename_file",
+				file: sourceFile,
+				new_name: destFile,
+				timeout: 5,
+			});
+
+			// Both clones' same-named servers were asked and notified — the
+			// name-keyed collapse would have sent everything to clone B only.
+			expect(willRenameClients).toContain(clientA);
+			expect(willRenameClients).toContain(clientB);
+			expect(didRenameClients).toContain(clientA);
+			expect(didRenameClients).toContain(clientB);
+			// Client creation was routed to BOTH canonical roots — never the
+			// session cwd and never collapsed onto one clone.
+			const usedRoots = new Set(getOrCreate.mock.calls.map(call => call[1]));
+			expect(usedRoots).toEqual(new Set([rootA, rootB]));
+			// Each clone's server edit landed in its own clone's file.
+			expect(await Bun.file(refA).text()).toBe("import { value } from './new';\n");
+			expect(await Bun.file(refB).text()).toBe("import { value } from './renamed';\n");
+			// The file itself moved A → B; B's untouched file stays.
+			expect(fs.existsSync(sourceFile)).toBe(false);
+			expect(fs.existsSync(destFile)).toBe(true);
+			expect(fs.existsSync(cloneB.file)).toBe(true);
+			expect(textResult(result)).toContain("Renamed");
+		} finally {
+			session.removeSync();
+			cloneBaseA.removeSync();
+			cloneBaseB.removeSync();
+		}
+	});
 
 	it("never adopts a sibling clone through a symlinked directory prefix", async () => {
 		await initTheme();
@@ -580,6 +681,156 @@ describe("clone-local LSP roots", () => {
 			session.removeSync();
 			cloneBaseA.removeSync();
 			cloneBaseB.removeSync();
+		}
+	});
+
+	it("discovers a clone-local custom server from .omp/lsp.json and resolves its binary inside the clone", async () => {
+		await initTheme();
+		const session = TempDir.createSync("@omp-lsp-clone-session-");
+		const cloneBase = TempDir.createSync("@omp-lsp-clone-repo-");
+		try {
+			const clone = makeClone(cloneBase, { binAtRoot: true });
+			// Clone-local project config (project-only source): a custom server
+			// with its own command, fileTypes, and marker set.
+			const ompDir = path.join(clone.root, ".omp");
+			fs.mkdirSync(ompDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(ompDir, "lsp.json"),
+				JSON.stringify({
+					servers: {
+						"xyz-lsp": {
+							command: "xyz-lsp",
+							args: ["--stdio"],
+							fileTypes: [".xyz"],
+							rootMarkers: ["package.json", "tsconfig.json"],
+						},
+					},
+				}),
+			);
+			const xyzBin = path.join(clone.root, "node_modules", ".bin", "xyz-lsp");
+			fs.writeFileSync(xyzBin, "#!/bin/sh\nexit 0\n");
+			fs.chmodSync(xyzBin, 0o755);
+			const xyzFile = path.join(clone.api, "src", "main.xyz");
+			fs.writeFileSync(xyzFile, "hello xyz\n");
+
+			const resolution = resolveFileLspServers(xyzFile, session.path());
+			const xyz = resolution.servers.find(s => s.name === "xyz-lsp");
+			expect(xyz).toBeDefined();
+			expect(xyz!.missingBinary).toBe(false);
+			expect(xyz!.workspaceRoot).toBe(clone.api);
+			expect(xyz!.workspaceRootReal).toBe(fs.realpathSync(clone.api));
+			expect(xyz!.config.resolvedCommand).toBe(xyzBin);
+
+			// The diagnostics client for the custom server attaches to the
+			// custom server's own workspace root, never the session cwd.
+			const uri = fileToUri(xyzFile);
+			const client = stubClient(fs.realpathSync(clone.api), xyz!.config, uri);
+			const getOrCreate = vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+			vi.spyOn(Bun, "sleep").mockImplementation(async () => {
+				client.diagnosticsVersion += 1;
+				client.diagnostics.set(uri, {
+					diagnostics: [],
+					version: client.openFiles.get(uri)?.version ?? 2,
+				});
+			});
+			const tool = new LspTool(makeLspSession(session.path()));
+			const result = await tool.execute("custom-diag", { action: "diagnostics", file: xyzFile, timeout: 5 });
+			expect(textResult(result)).toBe("OK");
+			for (const call of getOrCreate.mock.calls) {
+				expect(call[1]).toBe(fs.realpathSync(clone.api));
+				expect(call[1]).not.toBe(session.path());
+			}
+		} finally {
+			session.removeSync();
+			cloneBase.removeSync();
+		}
+	});
+
+	it("reports a structured miss for a clone-local custom server without a clone binary", async () => {
+		await initTheme();
+		const session = TempDir.createSync("@omp-lsp-clone-session-");
+		const cloneBase = TempDir.createSync("@omp-lsp-clone-repo-");
+		try {
+			const clone = makeClone(cloneBase); // no binaries anywhere
+			const ompDir = path.join(clone.root, ".omp");
+			fs.mkdirSync(ompDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(ompDir, "lsp.json"),
+				JSON.stringify({
+					servers: {
+						"xyz-lsp": {
+							command: "xyz-lsp",
+							args: ["--stdio"],
+							fileTypes: [".xyz"],
+							rootMarkers: ["package.json", "tsconfig.json"],
+						},
+					},
+				}),
+			);
+			const xyzFile = path.join(clone.api, "src", "main.xyz");
+			fs.writeFileSync(xyzFile, "hello xyz\n");
+			// A founder/PATH binary for the custom command must never be adopted.
+			const whichSpy = vi
+				.spyOn(piUtils, "$which")
+				.mockImplementation(command => (command === "xyz-lsp" ? "/founder/bin/xyz-lsp" : null));
+			const getOrCreate = vi.spyOn(lspClient, "getOrCreateClient");
+
+			const resolution = resolveFileLspServers(xyzFile, session.path());
+			const xyz = resolution.servers.find(s => s.name === "xyz-lsp");
+			expect(xyz).toBeDefined();
+			expect(xyz!.missingBinary).toBe(true);
+
+			const tool = new LspTool(makeLspSession(session.path()));
+			const result = await tool.execute("custom-missing", { action: "diagnostics", file: xyzFile, timeout: 5 });
+			const output = textResult(result);
+			expect(output).toContain("not installed in clone");
+			expect(output).toContain("xyz-lsp");
+			expect(output).toContain("Not using PATH or founder");
+			expect(result.details?.success).toBe(false);
+			expect(getOrCreate).not.toHaveBeenCalled();
+			expect(whichSpy).not.toHaveBeenCalledWith("xyz-lsp");
+		} finally {
+			session.removeSync();
+			cloneBase.removeSync();
+		}
+	});
+
+	it("never leaks user or home config servers into clone discovery", async () => {
+		await initTheme();
+		const session = TempDir.createSync("@omp-lsp-clone-session-");
+		const cloneBase = TempDir.createSync("@omp-lsp-clone-repo-");
+		try {
+			const clone = makeClone(cloneBase, { binAtRoot: true });
+			// Outer configs: a home-root lsp.json and a ~/.omp/agent/lsp.json
+			// define servers that must never reach an independent clone.
+			fs.writeFileSync(
+				path.join(lspHomeOverride!, "lsp.json"),
+				JSON.stringify({
+					servers: {
+						"home-lsp": { command: "home-lsp", fileTypes: [".ts"], rootMarkers: ["package.json"] },
+					},
+				}),
+			);
+			const userAgentDir = path.join(lspHomeOverride!, ".omp", "agent");
+			fs.mkdirSync(userAgentDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(userAgentDir, "lsp.json"),
+				JSON.stringify({
+					servers: {
+						"user-lsp": { command: "user-lsp", fileTypes: [".ts"], rootMarkers: ["package.json"] },
+					},
+				}),
+			);
+
+			const resolution = resolveFileLspServers(clone.file, session.path());
+			const names = resolution.servers.map(s => s.name);
+			expect(names).not.toContain("home-lsp");
+			expect(names).not.toContain("user-lsp");
+			// The clone's own server still resolves normally.
+			expect(resolution.servers.some(s => s.name === "typescript-language-server" && !s.missingBinary)).toBe(true);
+		} finally {
+			session.removeSync();
+			cloneBase.removeSync();
 		}
 	});
 });
@@ -756,6 +1007,44 @@ describe("writethrough clone-local roots", () => {
 			session.removeSync();
 			cloneBaseA.removeSync();
 			cloneBaseB.removeSync();
+		}
+	});
+	it("writes a stray non-git file as a plain write without attaching or notifying the session TS server", async () => {
+		const session = TempDir.createSync("@omp-wt-session-");
+		const strayBase = TempDir.createSync("@omp-wt-stray-");
+		try {
+			// The session is a valid TS project with a resolvable server.
+			fs.writeFileSync(path.join(session.path(), "package.json"), JSON.stringify({ name: "session" }));
+			fs.writeFileSync(path.join(session.path(), "tsconfig.json"), "{}");
+			const sessionBin = path.join(session.path(), "node_modules", ".bin");
+			fs.mkdirSync(sessionBin, { recursive: true });
+			const sessionServer = path.join(sessionBin, "typescript-language-server");
+			fs.writeFileSync(sessionServer, "#!/bin/sh\nexit 0\n");
+			fs.chmodSync(sessionServer, 0o755);
+
+			// The stray file lives outside the session and outside any repo:
+			// its own directory is the discovery ceiling and has no markers.
+			const strayFile = path.join(strayBase.path(), "scratch.ts");
+			fs.writeFileSync(strayFile, "export const scratch = 1;\n");
+
+			const getOrCreate = vi.spyOn(lspClient, "getOrCreateClient");
+			const notify = vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
+
+			const writethrough = createLspWritethrough(session.path(), {
+				enableFormat: true,
+				enableDiagnostics: true,
+			});
+			const result = await writethrough(strayFile, "export const scratch = 2;\n");
+
+			expect(result).toBeUndefined();
+			expect(await Bun.file(strayFile).text()).toBe("export const scratch = 2;\n");
+			// The session's valid TS server must not attach to the stray file
+			// and no watched-file announce may reach the session root.
+			expect(getOrCreate).not.toHaveBeenCalled();
+			expect(notify).not.toHaveBeenCalled();
+		} finally {
+			session.removeSync();
+			strayBase.removeSync();
 		}
 	});
 });

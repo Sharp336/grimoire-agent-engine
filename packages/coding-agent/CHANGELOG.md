@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed LSP handling of files outside the session: clone files now discover custom servers from clone-local `.omp`/`lsp.json` project configs (binaries resolved only inside the clone, never from user/founder config or $PATH), stray non-git files are written as plain writes without attaching the session's language servers, and `rename_file` routes each same-named server to its own canonical workspace root instead of collapsing sibling clones onto one client ([#9779](https://github.com/can1357/oh-my-pi/issues/9779)).
+
 ## [18.0.5] - 2026-08-25
 
 ### Added
