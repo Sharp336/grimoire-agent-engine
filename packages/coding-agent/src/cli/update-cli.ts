@@ -1599,11 +1599,12 @@ function packageManagerUpdateSteps(
  * `.bunx` metadata before ignoring EBUSY from the launcher replacement, while
  * npm can retire its shims before an install fails.
  *
- * A successful install whose PATH launcher still reports the previous version
+ * A successful install whose PATH launcher still reports an older version
  * means the manager no longer controls that launcher, so it is taken over with
- * the standalone binary. If the install itself failed, a launcher that still
- * reports a version is preserved and the manager error is surfaced; only a
- * missing or unusable launcher is repaired.
+ * the standalone binary. A newer launcher may have been installed by a
+ * concurrent update and is left untouched. If the install itself failed, a
+ * launcher that still reports a version is preserved and the manager error is
+ * surfaced; only a missing or unusable launcher is repaired.
  */
 export async function updateViaManager(
 	release: ReleaseInfo,
@@ -1620,8 +1621,10 @@ export async function updateViaManager(
 		installError = err;
 	}
 	const result = verification ?? (await steps.verify());
-	const launcherNeedsRepair =
-		!result.ok && (installError === undefined || result.path === undefined || result.actual === undefined);
+	const launcherIsBroken = result.path === undefined || result.actual === undefined;
+	const launcherIsOlder =
+		installError === undefined && result.actual !== undefined && compareVersions(result.actual, release.version) < 0;
+	const launcherNeedsRepair = !result.ok && (launcherIsBroken || launcherIsOlder);
 	if (!launcherNeedsRepair) {
 		if (installError) throw installError;
 		printVerificationResult(result, release.version);

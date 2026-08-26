@@ -1576,6 +1576,15 @@ describe("update-cli manager update recovery", () => {
 		expect(calls).toEqual(["install", `repair:${launcherPath}`]);
 	});
 
+	it("leaves a concurrently installed newer launcher untouched", async () => {
+		vi.spyOn(console, "log").mockImplementation(() => {});
+		const { steps, calls } = scriptedSteps({ install: { ok: false, path: launcherPath, actual: "18.0.2" } });
+
+		await updateViaManager(release, launcherPath, steps);
+
+		expect(calls).toEqual(["install"]);
+	});
+
 	it("surfaces the install failure without a takeover when the previous launcher still runs", async () => {
 		vi.spyOn(console, "log").mockImplementation(() => {});
 		const { steps, calls } = scriptedSteps({
