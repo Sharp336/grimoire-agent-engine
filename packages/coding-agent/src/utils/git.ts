@@ -147,6 +147,38 @@ export interface CloneOptions {
 	readonly timeoutMs?: number;
 }
 
+export interface TreeCaptureOptions {
+	/**
+	 * Worktree-root-relative paths omitted from the snapshot (oversize guard).
+	 * Sent as literal exclude pathspecs, so glob metacharacters in a filename
+	 * are matched as themselves.
+	 */
+	readonly excludePaths?: readonly string[];
+	readonly signal?: AbortSignal;
+}
+
+export interface CommitTreeOptions {
+	readonly author?: CommitAuthor;
+	readonly message: string;
+	readonly parents?: readonly string[];
+	readonly signal?: AbortSignal;
+}
+
+/** `git diff-tree --name-status` status letter, restricted to what two trees can produce. */
+export type TreeDiffStatus = "A" | "D" | "M" | "T";
+
+export interface TreeDiffEntry {
+	readonly path: string;
+	readonly status: TreeDiffStatus;
+}
+
+export interface TreeBlobEntry {
+	readonly oid: string;
+	readonly path: string;
+	/** Blob size in bytes as recorded in the object database. */
+	readonly size: number;
+}
+
 interface GitHeadBase extends GitRepository {
 	headContent: string;
 }
@@ -269,6 +301,21 @@ export const GIT_SPAWN_SYNC_TIMEOUT_MS = 5_000;
  * always-on status line cheap while surfacing a branch switch within a second.
  */
 export const HEAD_WATCH_INTERVAL_MS = 1000;
+
+/**
+ * Pathspec batch size for {@link restorePathsFromTree}. Keeps a rollback of a
+ * multi-thousand-file change set inside every platform's argument-list limit
+ * without paying a subprocess per file.
+ */
+const SNAPSHOT_PATHSPEC_BATCH = 256;
+
+/**
+ * Output cap for {@link ls.treeBlobs}. `ls-tree -r -l` emits ~60 bytes plus the
+ * path per file, so the default 8 MiB cap would silently truncate — and thus
+ * undercount snapshot bytes — around 100k files. 64 MiB covers trees an order of
+ * magnitude larger.
+ */
+const SNAPSHOT_LS_TREE_OUTPUT_LIMIT_BYTES = 64 * 1024 * 1024;
 
 const GIT_COMMAND_TIMEOUT_EXIT_CODE = 124;
 // Exit code returned when the `git` binary cannot be launched at all (spawn
@@ -1380,6 +1427,27 @@ function parseStatusPorcelain(text: string): GitStatusSummary {
 	return { staged, unstaged, untracked };
 }
 
+const TREE_DIFF_STATUSES: readonly TreeDiffStatus[] = ["A", "D", "M", "T"];
+
+/**
+ * Parse NUL-delimited `diff-tree --name-status -z` output. The stream alternates
+ * status field / path field; unknown status letters (copy/rename records, which
+ * `--no-renames` suppresses) are dropped rather than guessed at.
+ */
+function parseTreeNameStatus(text: string): TreeDiffEntry[] {
+	const fields = text.split("\0");
+	const entries: TreeDiffEntry[] = [];
+	for (let index = 0; index + 1 < fields.length; index += 2) {
+		const status = fields[index];
+		const entryPath = fields[index + 1];
+		if (!status || !entryPath) continue;
+		const letter = status[0] as TreeDiffStatus;
+		if (!TREE_DIFF_STATUSES.includes(letter)) continue;
+		entries.push({ path: entryPath, status: letter });
+	}
+	return entries;
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // API: diff
 // ════════════════════════════════════════════════════════════════════════════
@@ -1444,6 +1512,25 @@ export const diff = Object.assign(
 				return (await git(cwd, args, { readOnly: true, signal: options.signal })).stdout;
 			}
 			return runText(cwd, args, { readOnly: true, signal: options.signal });
+		},
+		/**
+		 * Per-path change set between two tree-ish objects
+		 * (`git diff-tree --name-status`). Rename detection is off, so a rename
+		 * reads as delete + add: rollback needs the literal per-path set, not a
+		 * similarity-based summary. NUL-delimited, so paths with newlines or
+		 * quotes survive intact.
+		 */
+		async treeStatus(
+			cwd: string,
+			base: string,
+			target: string,
+			options: { signal?: AbortSignal } = {},
+		): Promise<TreeDiffEntry[]> {
+			const raw = await runText(cwd, ["diff-tree", "-r", "-z", "--no-renames", "--name-status", base, target], {
+				readOnly: true,
+				signal: options.signal,
+			});
+			return parseTreeNameStatus(raw);
 		},
 		/** Parse raw diff text into per-file diffs. */
 		parseFiles(text: string): FileDiff[] {
@@ -1531,6 +1618,23 @@ export const stage = {
 		const args = files.length === 0 ? ["reset"] : ["reset", "--", ...files];
 		await runEffect(cwd, args, { signal });
 	},
+
+	/**
+	 * Drop index entries for `files` without touching the working tree
+	 * (`git rm --cached`). Paths absent from the index are ignored, so a caller
+	 * removing a mixed tracked/untracked set needs no pre-classification.
+	 * Pathspecs are literal and batched.
+	 */
+	async removeCached(cwd: string, files: readonly string[], signal?: AbortSignal): Promise<void> {
+		for (let index = 0; index < files.length; index += SNAPSHOT_PATHSPEC_BATCH) {
+			const batch = files.slice(index, index + SNAPSHOT_PATHSPEC_BATCH);
+			await runEffect(
+				cwd,
+				["--literal-pathspecs", "rm", "--cached", "--quiet", "--ignore-unmatch", "--", ...batch],
+				{ signal },
+			);
+		}
+	},
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -1595,6 +1699,82 @@ export async function readTree(
 /** Write the current index as a tree and return its object id. */
 export async function writeTree(cwd: string, options: Pick<CommandOptions, "env" | "signal"> = {}): Promise<string> {
 	return (await runText(cwd, ["write-tree"], options)).trim();
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// API: snapshot plumbing (workspace checkpoints)
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Snapshot the full working tree of `worktreeRoot` into a tree object without
+ * touching the repository's real index, HEAD, or working tree.
+ *
+ * The staging happens in a throwaway index (`GIT_INDEX_FILE`), so a concurrent
+ * `git add`/commit by the user cannot collide with the capture and the capture
+ * cannot clobber the user's staged state. `.gitignore` is honored (`git add -A`
+ * never picks ignored paths up), so ignored build output is never snapshotted.
+ *
+ * `worktreeRoot` MUST be the worktree root: the positive pathspec is `.`, which
+ * is what makes exclude pathspecs usable alongside it.
+ */
+export async function captureWorktreeTree(worktreeRoot: string, options: TreeCaptureOptions = {}): Promise<string> {
+	const indexFile = path.join(os.tmpdir(), `omp-git-snapshot-index-${Snowflake.next()}`);
+	const env = { GIT_INDEX_FILE: indexFile };
+	const args = ["add", "--all", "--", "."];
+	for (const excluded of options.excludePaths ?? []) args.push(`:(exclude,literal)${excluded}`);
+	try {
+		await runEffect(worktreeRoot, args, { env, signal: options.signal });
+		return await writeTree(worktreeRoot, { env, signal: options.signal });
+	} finally {
+		// The temp index and its lock are ours alone; leaking the pair would waste
+		// disk for every capture over the process lifetime.
+		await fs.promises.rm(indexFile, { force: true }).catch(() => {});
+		await fs.promises.rm(`${indexFile}.lock`, { force: true }).catch(() => {});
+	}
+}
+
+/**
+ * Wrap a tree in a commit object (`git commit-tree`) without moving HEAD or any
+ * branch. Author/committer identity is passed explicitly so the call succeeds in
+ * repositories where the user has no configured `user.name`/`user.email`.
+ */
+export async function commitTree(cwd: string, treeSha: string, options: CommitTreeOptions): Promise<string> {
+	const args = ["commit-tree", treeSha];
+	for (const parent of options.parents ?? []) args.push("-p", parent);
+	const identityEnv = options.author
+		? {
+				GIT_AUTHOR_NAME: options.author.name,
+				GIT_AUTHOR_EMAIL: options.author.email,
+				GIT_COMMITTER_NAME: options.author.name,
+				GIT_COMMITTER_EMAIL: options.author.email,
+				...(options.author.date
+					? { GIT_AUTHOR_DATE: options.author.date, GIT_COMMITTER_DATE: options.author.date }
+					: {}),
+			}
+		: {};
+	const result = await runText(cwd, args, { env: identityEnv, signal: options.signal, stdin: options.message });
+	return result.trim();
+}
+
+/**
+ * Restore `files` from a tree-ish into both the working tree and the index.
+ * Pathspecs are sent literally (a file named `*.txt` is one path, not a glob)
+ * and batched so a large change set cannot overflow the argument list.
+ */
+export async function restorePathsFromTree(
+	cwd: string,
+	treeish: string,
+	files: readonly string[],
+	options: { signal?: AbortSignal } = {},
+): Promise<void> {
+	for (let index = 0; index < files.length; index += SNAPSHOT_PATHSPEC_BATCH) {
+		const batch = files.slice(index, index + SNAPSHOT_PATHSPEC_BATCH);
+		await runEffect(
+			cwd,
+			["--literal-pathspecs", "restore", `--source=${treeish}`, "--staged", "--worktree", "--", ...batch],
+			{ signal: options.signal },
+		);
+	}
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -2071,6 +2251,40 @@ export const ref = {
 			),
 		);
 	},
+
+	/**
+	 * Point `refName` at `sha` (`git update-ref`). Creates the ref when absent.
+	 * Mutates repository state: hold {@link withRepoLock} around the call.
+	 */
+	async update(cwd: string, refName: string, sha: string, signal?: AbortSignal): Promise<void> {
+		await runEffect(cwd, ["update-ref", refName, sha], { signal });
+	},
+
+	/**
+	 * Delete `refName` (`git update-ref -d`). Missing refs are not an error, so
+	 * cleanup paths stay idempotent. Mutates repository state: hold
+	 * {@link withRepoLock} around the call.
+	 */
+	async delete(cwd: string, refName: string, signal?: AbortSignal): Promise<void> {
+		const result = await git(cwd, ["update-ref", "-d", refName], { signal });
+		if (result.exitCode === 0) return;
+		if (await ref.exists(cwd, refName, signal)) throw new GitCommandError(["update-ref", "-d", refName], result);
+	},
+
+	/** Refs under `prefix` with the object each points at (`git for-each-ref`). */
+	async list(cwd: string, prefix: string, signal?: AbortSignal): Promise<{ refName: string; sha: string }[]> {
+		const raw = await runText(cwd, ["for-each-ref", "--format=%(refname)%00%(objectname)", prefix], {
+			readOnly: true,
+			signal,
+		});
+		const refs: { refName: string; sha: string }[] = [];
+		for (const line of raw.split("\n")) {
+			if (!line) continue;
+			const [refName, sha] = line.split("\0");
+			if (refName && sha) refs.push({ refName, sha });
+		}
+		return refs;
+	},
 };
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -2431,6 +2645,33 @@ export const ls = {
 		if (files.length > 0) args.push("--", ...files);
 		const raw = await runText(cwd, args, { readOnly: true, signal });
 		return raw.split("\0").filter(entry => entry.length > 0);
+	},
+
+	/**
+	 * Every blob in a tree with its recorded object size (`ls-tree -r -l`). One
+	 * subprocess answers "how many bytes does this snapshot represent", which is
+	 * what checkpoint disk accounting needs; `cat-file --batch-check` would cost
+	 * a round trip per path for the same numbers.
+	 */
+	async treeBlobs(cwd: string, treeish: string, signal?: AbortSignal): Promise<TreeBlobEntry[]> {
+		const raw = await runText(cwd, ["ls-tree", "-r", "-l", "-z", treeish], {
+			maxOutputBytes: SNAPSHOT_LS_TREE_OUTPUT_LIMIT_BYTES,
+			readOnly: true,
+			signal,
+		});
+		const entries: TreeBlobEntry[] = [];
+		for (const record of raw.split("\0")) {
+			if (!record) continue;
+			// "<mode> <type> <oid> <size>\t<path>"; size is "-" for non-blobs.
+			const tabIndex = record.indexOf("\t");
+			if (tabIndex < 0) continue;
+			const fields = record.slice(0, tabIndex).split(/\s+/);
+			const [, type, oid, rawSize] = fields;
+			if (type !== "blob" || !oid) continue;
+			const size = Number.parseInt(rawSize ?? "", 10);
+			entries.push({ oid, path: record.slice(tabIndex + 1), size: Number.isFinite(size) ? size : 0 });
+		}
+		return entries;
 	},
 
 	/** List submodule paths (recursive). */
