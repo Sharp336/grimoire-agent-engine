@@ -7,11 +7,12 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelString } from "../config/model-resolver";
 import type { Settings, SkillsSettings } from "../config/settings";
+import { compareSkillOrder } from "../discovery/helpers";
 import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
 import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
 import type { ExtensionRunner, SourceInfo, ToolInfo } from "../extensibility/extensions";
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
-import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
+import { loadSkills, loadSkillsFromDir, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
 import { type LocalProtocolOptions, XD_URL_PREFIX } from "../internal-urls";
 import { deduplicateMCPToolsByName } from "../mcp/tool-bridge";
 import { resolveMemoryBackend } from "../memory-backend/resolve";
@@ -22,7 +23,7 @@ import { usesCodexTaskPrompt } from "../task/prompt-policy";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
 import { computerExposureMode } from "../tools/computer/exposure";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
-import { isFilesystemSourcePath } from "../tools/path-utils";
+import { expandTilde, isFilesystemSourcePath } from "../tools/path-utils";
 import { supportsExternalThinking } from "../tools/think";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
 import { isMountableUnderXdev, listXdevTools, type XdevState, xdevDocsFor, xdevEntries } from "../tools/xdev";
@@ -102,6 +103,13 @@ interface SessionToolsOptions {
 	skillWarnings?: SkillWarning[];
 	skillsSettings?: SkillsSettings;
 	skillsReloadable?: boolean;
+	/**
+	 * Fixed `skills` came from a parent forwarding its own discovery to a
+	 * subagent (perf only): `discoverStartupSkillPaths` still merges the
+	 * subagent's own `resources_discover` directories into the inherited
+	 * snapshot instead of dropping them.
+	 */
+	mergeDiscoveredSkillPaths?: boolean;
 }
 
 export interface MountedMCPToolRouteSource {
@@ -264,6 +272,7 @@ export class SessionTools {
 	#skillWarnings: SkillWarning[];
 	#skillsSettings: SkillsSettings | undefined;
 	#skillsReloadable: boolean;
+	#mergeDiscoveredSkillPaths: boolean;
 	#acpPermissionDecisions = new Map<string, "allow_always" | "reject_always">();
 
 	constructor(host: SessionToolsHost, options: SessionToolsOptions) {
@@ -306,6 +315,7 @@ export class SessionTools {
 		this.#skillWarnings = options.skillWarnings ?? [];
 		this.#skillsSettings = options.skillsSettings;
 		this.#skillsReloadable = options.skillsReloadable ?? true;
+		this.#mergeDiscoveredSkillPaths = options.mergeDiscoveredSkillPaths === true;
 		this.#promptModelKey = this.#currentPromptModelKey();
 	}
 
@@ -1238,24 +1248,131 @@ export class SessionTools {
 		};
 	}
 
-	/** Rediscovers reloadable skills and refreshes prompt metadata. */
+	/** Reruns skill discovery with the given extension-contributed directories and refreshes prompt metadata. */
+	async #applyDiscoveredSkills(extensionDirectories: string[] | undefined): Promise<void> {
+		const skillsSettings = this.#host.settings.getGroup("skills");
+		const discovered = await loadSkills({
+			...skillsSettings,
+			cwd: this.#host.sessionManager.getCwd(),
+			disabledExtensions: this.#host.settings.get("disabledExtensions") ?? [],
+			extensionRoots: this.#host.effectiveExtensionRoots(),
+			extensionDirectories,
+		});
+		this.#skills = discovered.skills;
+		this.#skillWarnings = discovered.warnings;
+		this.#skillsSettings = skillsSettings;
+
+		if (this.#host.agentKind() === "main") {
+			setActiveSkills(this.#skills);
+		}
+	}
+
+	/**
+	 * Scans extension-contributed directories and appends non-colliding
+	 * skills to an already-fixed snapshot (a subagent's inherited baseline)
+	 * instead of discarding it for a full rescan. A name already present in
+	 * the snapshot wins — it was already curated by the parent. Honors the
+	 * same disablement gates as the full-rescan path
+	 * ({@link SessionTools.#applyDiscoveredSkills} → `loadSkills`): the
+	 * master `skills.enabled` flag and `disabledExtensions` entries of the
+	 * form `skill:<name>`, so a skill the user disabled cannot re-enter
+	 * through this merge. Returns whether any skill was actually added.
+	 */
+	async #mergeDiscoveredSkillDirectories(extensionDirectories: string[]): Promise<boolean> {
+		const skillsSettings = this.#skillsSettings ?? this.#host.settings.getGroup("skills");
+		if (skillsSettings.enabled === false) return false;
+		const ignoredSkills = skillsSettings.ignoredSkills ?? [];
+		const includeSkills = skillsSettings.includeSkills ?? [];
+		const disabledSkillNames = new Set(
+			(this.#host.settings.get("disabledExtensions") ?? [])
+				.filter(id => id.startsWith("skill:"))
+				.map(id => id.slice(6)),
+		);
+		const matchesIncludePatterns = (name: string): boolean =>
+			includeSkills.length === 0 || includeSkills.some(pattern => new Bun.Glob(pattern).match(name));
+		const matchesIgnorePatterns = (name: string): boolean =>
+			ignoredSkills.some(pattern => new Bun.Glob(pattern).match(name));
+
+		const existingNames = new Set(this.#skills.map(skill => skill.name));
+		const added: Skill[] = [];
+		for (const dir of extensionDirectories) {
+			const { skills } = await loadSkillsFromDir({ dir: expandTilde(dir), source: "extension:user" });
+			for (const skill of skills) {
+				if (existingNames.has(skill.name)) continue;
+				if (disabledSkillNames.has(skill.name)) continue;
+				if (matchesIgnorePatterns(skill.name)) continue;
+				if (!matchesIncludePatterns(skill.name)) continue;
+				existingNames.add(skill.name);
+				added.push(skill);
+			}
+		}
+		if (added.length === 0) return false;
+		// Match `loadSkills`'s deterministic ordering (extensibility/skills.ts):
+		// an appended directory can sort before an inherited entry (e.g. `alpha`
+		// appended after inherited `zeta`), so re-sort the merged array rather
+		// than leaving the inherited snapshot's order followed by append order.
+		this.#skills = [...this.#skills, ...added].sort((a, b) =>
+			compareSkillOrder(a.name, a.filePath, b.name, b.filePath),
+		);
+		return true;
+	}
+
+	/**
+	 * Rediscovers reloadable skills and refreshes prompt metadata. Used by
+	 * `/reload-plugins`. Mirrors the startup contract: the `resources_discover`
+	 * event (reason `"reload"`) always fires when a runner exists, even for a
+	 * fixed skill snapshot, so non-skill side effects still run on reload;
+	 * only the skill rescan is skipped for those sessions.
+	 */
 	async refreshSkills(): Promise<void> {
 		resetCapabilities();
+		// Extensions may contribute skill directories (resources_discover).
+		// Re-emit on every refresh so /reload-plugins picks up changes.
+		const runner = this.#host.extensionRunner();
+		const discoveredResources = runner
+			? await runner.emitResourcesDiscover(this.#host.sessionManager.getCwd(), "reload")
+			: undefined;
 		if (this.#skillsReloadable) {
-			const skillsSettings = this.#host.settings.getGroup("skills");
-			const discovered = await loadSkills({
-				...skillsSettings,
-				cwd: this.#host.sessionManager.getCwd(),
-				disabledExtensions: this.#host.settings.get("disabledExtensions") ?? [],
-				extensionRoots: this.#host.effectiveExtensionRoots(),
-			});
-			this.#skills = discovered.skills;
-			this.#skillWarnings = discovered.warnings;
-			this.#skillsSettings = skillsSettings;
+			await this.#applyDiscoveredSkills(discoveredResources?.skillPaths.map(entry => entry.path));
+		}
+		await this.refreshBaseSystemPrompt();
+		this.#host.notifyCommandMetadataChanged();
+	}
 
-			if (this.#host.agentKind() === "main") {
-				setActiveSkills(this.#skills);
-			}
+	/**
+	 * One-time post-`session_start` `resources_discover` emission (reason
+	 * `"startup"`), called by every mode's extension-lifecycle init
+	 * (`initializeExtensions`, ACP, interactive, task/eval/vibe subagents)
+	 * right after `session_start` fires — matching the event's public
+	 * contract (fires after `session_start`, when runtime actions and the
+	 * error listener are wired). The event always fires when a runner
+	 * exists, so non-skill side effects always run. What happens to
+	 * discovered `skillPaths` then depends on why the snapshot is fixed:
+	 * - Reloadable (no fixed snapshot): full rescan via
+	 *   {@link SessionTools.#applyDiscoveredSkills}.
+	 * - Fixed because a subagent inherited its parent's snapshot for perf
+	 *   (`mergeDiscoveredSkillPaths`): merge the newly discovered
+	 *   directories into the inherited snapshot — the subagent's own
+	 *   extensions (possibly seeing a different `cwd`, e.g. a worktree)
+	 *   must still be able to contribute skills.
+	 * - Fixed because an SDK caller explicitly supplied `options.skills` to
+	 *   opt out of discovery: stays untouched, matching that caller's
+	 *   request.
+	 * Otherwise this stays a cheap no-op (no capability reset, no rescan, no
+	 * prompt rebuild) unless a handler actually contributed a directory.
+	 */
+	async discoverStartupSkillPaths(): Promise<void> {
+		const runner = this.#host.extensionRunner();
+		if (!runner) return;
+		const discoveredResources = await runner.emitResourcesDiscover(this.#host.sessionManager.getCwd(), "startup");
+		if (discoveredResources.skillPaths.length === 0) return;
+		const extensionDirectories = discoveredResources.skillPaths.map(entry => entry.path);
+		if (this.#skillsReloadable) {
+			resetCapabilities();
+			await this.#applyDiscoveredSkills(extensionDirectories);
+		} else {
+			if (!this.#mergeDiscoveredSkillPaths) return;
+			if (!(await this.#mergeDiscoveredSkillDirectories(extensionDirectories))) return;
 		}
 		await this.refreshBaseSystemPrompt();
 		this.#host.notifyCommandMetadataChanged();

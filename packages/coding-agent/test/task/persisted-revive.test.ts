@@ -59,6 +59,7 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 		},
 		subscribeRunState: () => () => {},
 		getLastAssistantMessage: () => undefined,
+		discoverStartupSkillPaths: async () => {},
 		extensionRunner,
 	} as unknown as AgentSession;
 	return { session, observer: () => observer };

@@ -228,6 +228,81 @@ test("user YAML config suppresses its legacy settings.json migration source", as
 	expect(skills.map(skill => skill.name)).not.toContain("legacy-skill");
 });
 
+test("omp manifest skills directories replace the conventional skills directory", async () => {
+	writeFile(
+		path.join(ext, "package.json"),
+		JSON.stringify({
+			name: path.basename(ext),
+			omp: { extensions: ["./src/main.ts"], skills: ["./.opencode/skills"] },
+		}),
+	);
+	writeFile(
+		path.join(ext, ".opencode", "skills", "manifest-skill", "SKILL.md"),
+		"---\nname: manifest-skill\ndescription: Hello from manifest skill\n---\nbody\n",
+	);
+	writeFile(path.join(project, ".omp", "settings.json"), JSON.stringify({ extensions: [ext] }));
+
+	const skills = await loadFromPlugin<{ name: string }>(skillCapability.id, ctx());
+	expect(skills.map(skill => skill.name)).toContain("manifest-skill");
+	expect(skills.map(skill => skill.name)).not.toContain("my-skill");
+});
+
+test("omp manifest skills entry pointing directly at a skill directory is loaded", async () => {
+	writeFile(
+		path.join(ext, "package.json"),
+		JSON.stringify({
+			name: path.basename(ext),
+			omp: { extensions: ["./src/main.ts"], skills: ["./skills/direct-skill"] },
+		}),
+	);
+	writeFile(
+		path.join(ext, "skills", "direct-skill", "SKILL.md"),
+		"---\nname: direct-skill\ndescription: Hello from a directly-declared skill dir\n---\nbody\n",
+	);
+	writeFile(path.join(project, ".omp", "settings.json"), JSON.stringify({ extensions: [ext] }));
+
+	const skills = await loadFromPlugin<{ name: string }>(skillCapability.id, ctx());
+	expect(skills.map(skill => skill.name)).toContain("direct-skill");
+});
+
+test("manifest skills directories outside the plugin root are rejected", async () => {
+	const outsideSkills = path.join(tempDir, "outside-skills");
+	writeFile(
+		path.join(ext, "package.json"),
+		JSON.stringify({
+			name: path.basename(ext),
+			omp: { extensions: ["./src/main.ts"], skills: ["../outside-skills"] },
+		}),
+	);
+	writeFile(
+		path.join(outsideSkills, "escaped-skill", "SKILL.md"),
+		"---\nname: escaped-skill\ndescription: Outside plugin root\n---\nbody\n",
+	);
+	writeFile(path.join(project, ".omp", "settings.json"), JSON.stringify({ extensions: [ext] }));
+
+	const skills = await loadFromPlugin<{ name: string }>(skillCapability.id, ctx());
+	expect(skills.map(skill => skill.name)).not.toContain("escaped-skill");
+});
+
+test("legacy pi manifest skills directories replace the conventional skills directory", async () => {
+	writeFile(
+		path.join(ext, "package.json"),
+		JSON.stringify({
+			name: path.basename(ext),
+			pi: { extensions: ["./src/main.ts"], skills: ["./.opencode/skills"] },
+		}),
+	);
+	writeFile(
+		path.join(ext, ".opencode", "skills", "legacy-skill", "SKILL.md"),
+		"---\nname: legacy-skill\ndescription: Hello from legacy manifest skill\n---\nbody\n",
+	);
+	writeFile(path.join(project, ".omp", "settings.json"), JSON.stringify({ extensions: [ext] }));
+
+	const skills = await loadFromPlugin<{ name: string }>(skillCapability.id, ctx());
+	expect(skills.map(skill => skill.name)).toContain("legacy-skill");
+	expect(skills.map(skill => skill.name)).not.toContain("my-skill");
+});
+
 test("`--extension` CLI injection is wired through the same provider", async () => {
 	// Empty settings on disk; rely purely on CLI injection.
 	injectOmpExtensionCliRoots([ext], home, project);
