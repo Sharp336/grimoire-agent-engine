@@ -1385,6 +1385,7 @@ export class AgentSession {
 			skillWarnings: config.skillWarnings,
 			skillsSettings: config.skillsSettings,
 			skillsReloadable: config.skillsReloadable,
+			mergeDiscoveredSkillPaths: config.mergeDiscoveredSkillPaths,
 		});
 		this.#disconnectOwnedMcpManager = config.disconnectOwnedMcpManager;
 		const ttsrHost: TtsrCoordinatorHost = {

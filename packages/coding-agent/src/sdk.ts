@@ -498,6 +498,16 @@ export interface CreateAgentSessionOptions {
 
 	/** Skills. Default: discovered from multiple locations */
 	skills?: Skill[];
+	/**
+	 * Forwarded by a parent session when spawning a subagent so the child
+	 * skips full skill discovery (perf only — not an opt-out request). When
+	 * `skills` is set for this reason, `discoverStartupSkillPaths()` still
+	 * merges directories a subagent's own `resources_discover` handlers
+	 * contribute at its own startup into the inherited snapshot (existing
+	 * names win) instead of leaving them permanently unreachable. Leave unset
+	 * for a caller-supplied fixed snapshot that must stay untouched.
+	 */
+	mergeDiscoveredSkillPaths?: boolean;
 	/** Rules. Default: discovered from multiple locations */
 	rules?: Rule[];
 	/** Context files (AGENTS.md content). Default: discovered walking up from cwd */
@@ -3645,6 +3655,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			skills,
 			skillWarnings,
 			skillsReloadable: options.skills === undefined,
+			mergeDiscoveredSkillPaths: options.mergeDiscoveredSkillPaths === true,
 			skillsSettings: settings.getGroup("skills"),
 			modelRegistry,
 			toolRegistry,

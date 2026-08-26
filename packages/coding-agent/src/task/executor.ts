@@ -3178,6 +3178,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				requireYieldTool: true,
 				contextFiles: options.contextFiles,
 				skills: options.skills,
+				// Forwarded for perf (skip the subagent re-running full discovery),
+				// not to freeze the set: discoverStartupSkillPaths still merges
+				// directories the subagent's own resources_discover handlers
+				// contribute at its own startup (see session-tools.ts).
+				mergeDiscoveredSkillPaths: true,
 				promptTemplates: options.promptTemplates,
 				workspaceTree: options.workspaceTree,
 				rules: options.rules,

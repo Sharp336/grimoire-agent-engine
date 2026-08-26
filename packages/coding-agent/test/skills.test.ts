@@ -850,6 +850,102 @@ export default function (pi) {
 		}
 	});
 
+	it("merges resources_discover skillPaths into a subagent's inherited fixed skill snapshot (mergeDiscoveredSkillPaths)", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-merge-skills-"));
+		const authStorage = createInMemoryAuthStorage();
+		let session: AgentSession | undefined;
+		try {
+			// A skill the subagent's own resources_discover handler contributes.
+			const discoveredDir = path.join(tempDir, "task-discovered-skill");
+			await fs.mkdir(discoveredDir, { recursive: true });
+			await fs.writeFile(
+				path.join(discoveredDir, "SKILL.md"),
+				"---\nname: task-discovered-skill\ndescription: Contributed by a task subagent's own extension instance.\n---\n\nbody\n",
+			);
+			// A colliding name: the inherited snapshot must win.
+			const collidingDir = path.join(tempDir, "shared-skill");
+			await fs.mkdir(collidingDir, { recursive: true });
+			await fs.writeFile(
+				path.join(collidingDir, "SKILL.md"),
+				"---\nname: shared-skill\ndescription: Discovered version — must lose to the inherited one.\n---\n\nbody\n",
+			);
+
+			const extensionsDir = path.join(tempDir, "ext");
+			await fs.mkdir(extensionsDir, { recursive: true });
+			const extPath = path.join(extensionsDir, "task-merge-observer.ts");
+			await fs.writeFile(
+				extPath,
+				`export default function (pi) {
+	pi.on("resources_discover", () => ({ skillPaths: [${JSON.stringify(tempDir)}] }));
+}
+`,
+			);
+
+			const loaded = await loadExtensions([extPath], tempDir);
+			expect(loaded.errors).toEqual([]);
+
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+			const mock = createMockModel({ handler: () => ({ content: ["ok"] }) });
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [] },
+				streamFn: mock.stream,
+			});
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+			const sessionManager = SessionManager.inMemory(tempDir);
+			const extensionRunner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir,
+				sessionManager,
+				modelRegistry,
+			);
+
+			// Simulates `buildSubagentSessionOptions` in task/executor.ts: the
+			// parent forwards its own already-discovered `skills` (perf only)
+			// and sets `mergeDiscoveredSkillPaths`, unlike a direct SDK caller
+			// who supplies `options.skills` to freeze the set outright.
+			const inheritedSkill: Skill = {
+				name: "shared-skill",
+				description: "Inherited from the parent session — must win on collision.",
+				filePath: path.join(tempDir, "inherited", "SKILL.md"),
+				baseDir: path.join(tempDir, "inherited"),
+				source: "custom:user",
+			};
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				extensionRunner,
+				skills: [inheritedSkill],
+				skillsReloadable: false,
+				mergeDiscoveredSkillPaths: true,
+			});
+
+			const runtimeErrors: ExtensionError[] = [];
+			await initializeExtensions(session, {
+				reportSendError: () => {},
+				reportRuntimeError: error => {
+					runtimeErrors.push(error);
+				},
+			});
+
+			expect(runtimeErrors).toEqual([]);
+			// The newly discovered skill is added onto the inherited snapshot...
+			expect(session.skills.some(skill => skill.name === "task-discovered-skill")).toBe(true);
+			// ...but a name collision keeps the inherited snapshot's version.
+			const shared = session.skills.find(skill => skill.name === "shared-skill");
+			expect(shared?.description).toBe("Inherited from the parent session — must win on collision.");
+			expect(session.skills.filter(skill => skill.name === "shared-skill")).toHaveLength(1);
+		} finally {
+			await session?.dispose();
+			authStorage.close();
+			await removeWithRetries(tempDir);
+		}
+	});
+
 	it("still emits resources_discover on /reload-plugins for a session with a fixed skill snapshot", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-fixed-skills-reload-"));
 		const authStorage = createInMemoryAuthStorage();

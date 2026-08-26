@@ -78,6 +78,7 @@
 - Fixed freshly created task subagents missing extension-contributed skills that print, RPC, and TUI sessions already receive at startup.
 - Fixed `/reload-plugins` skipping the `resources_discover` event entirely for sessions with a fixed skill snapshot; it now fires (matching startup) and only skips the skill rescan.
 - Fixed task subagent startup dropping extension messages sent from a `resources_discover` handler by draining them before the first prompt.
+- Fixed task/eval/vibe subagents silently dropping skills their own `resources_discover` handlers discovered at startup; those directories now merge into the inherited snapshot instead of being scanned and thrown away.
 
 ## [18.0.6] - 2026-08-26
 
