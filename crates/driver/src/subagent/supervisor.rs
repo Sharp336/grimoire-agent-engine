@@ -13,7 +13,7 @@ use flume::Receiver;
 use omp_agent::{
 	AbortHandle, Agent, AgentError, AgentEvent, AgentNode, AgentRunSummary, AgentStatus, AgentTree,
 	AgentTreeLimits, Interrupt, InterruptClass, InterruptSource, JobBoard, MailboxSender,
-	SubagentActivity, SubagentActivityKind, SubagentDisposition, SubagentLifecycle,
+	SpawnPermit, SubagentActivity, SubagentActivityKind, SubagentDisposition, SubagentLifecycle,
 	SubagentProgressSnapshot, SubagentRunState, SubagentStateError, SubagentTerminalKind,
 	SubagentTerminalStatus, TurnClient, TurnId,
 };
@@ -761,15 +761,7 @@ async fn run_child<C: TurnClient + Clone + Send + 'static>(
 	turn_id: TurnId,
 	settings: &TaskSettings,
 ) -> Result<AgentRunSummary, SupervisorError> {
-	let first_turn = state.lifecycle() == SubagentLifecycle::Created;
-	let reopening = state.lifecycle() == SubagentLifecycle::Parked;
-	match state.lifecycle() {
-		SubagentLifecycle::Created => state.transition(SubagentLifecycle::Starting)?,
-		SubagentLifecycle::Settled | SubagentLifecycle::Parked => {
-			state.begin_generation()?;
-		},
-		lifecycle => return Err(SupervisorError::NotIdleState { id: node.id.clone(), lifecycle }),
-	}
+	let (permit, first_turn, reopening) = admit_run(tree, state, &node.id).await?;
 	if runtime.is_none() {
 		let factory =
 			reviver.ok_or_else(|| SupervisorError::RevivalUnavailable { id: node.id.clone() })?;
@@ -808,7 +800,6 @@ async fn run_child<C: TurnClient + Clone + Send + 'static>(
 	if first_turn || reopening {
 		record_lifecycle(runtime, state, &node.id, "turn-started", None)?;
 	}
-	let permit = tree.admit(1).await?;
 	state.transition(SubagentLifecycle::Running)?;
 	state.record_activity(SubagentActivity {
 		kind: Some(if first_turn {
@@ -891,6 +882,31 @@ async fn run_child<C: TurnClient + Clone + Send + 'static>(
 			Err(error)
 		},
 	}
+}
+
+async fn admit_run(
+	tree: &AgentTree,
+	state: &SubagentRunState,
+	id: &Str,
+) -> Result<(SpawnPermit, bool, bool), SupervisorError> {
+	let lifecycle = state.lifecycle();
+	let (first_turn, reopening) = match lifecycle {
+		SubagentLifecycle::Created => (true, false),
+		SubagentLifecycle::Settled => (false, false),
+		SubagentLifecycle::Parked => (false, true),
+		lifecycle => {
+			return Err(SupervisorError::NotIdleState { id: id.clone(), lifecycle });
+		},
+	};
+	let permit = tree.admit(1).await?;
+	match lifecycle {
+		SubagentLifecycle::Created => state.transition(SubagentLifecycle::Starting)?,
+		SubagentLifecycle::Settled | SubagentLifecycle::Parked => {
+			state.begin_generation()?;
+		},
+		_ => unreachable!("active subagent lifecycle was rejected before admission"),
+	}
+	Ok((permit, first_turn, reopening))
 }
 
 fn record_lifecycle<C: TurnClient + Clone>(
@@ -1373,5 +1389,25 @@ mod tests {
 			budget_killed.terminal().map(|terminal| terminal.kind),
 			Some(SubagentTerminalKind::Failed)
 		);
+	}
+
+	#[tokio::test]
+	async fn admission_refusal_does_not_start_or_reopen_a_generation() {
+		let tree = AgentTree::new(2, 1, 0);
+		let _active = tree.admit(1).await.unwrap();
+		let id = sf!("queued-child");
+		let state = SubagentRunState::new(id.clone());
+
+		let result = admit_run(&tree, &state, &id).await;
+		assert!(matches!(result, Err(SupervisorError::Admission(_))));
+		assert_eq!(state.lifecycle(), SubagentLifecycle::Created);
+
+		state.transition(SubagentLifecycle::Settled).unwrap();
+		state.transition(SubagentLifecycle::Parked).unwrap();
+		let generation = state.generation();
+		let result = admit_run(&tree, &state, &id).await;
+		assert!(matches!(result, Err(SupervisorError::Admission(_))));
+		assert_eq!(state.lifecycle(), SubagentLifecycle::Parked);
+		assert_eq!(state.generation(), generation);
 	}
 }
