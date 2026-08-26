@@ -206,6 +206,48 @@ describe("/rlm slash command", () => {
 		expect(prompt).toContain(`(${expectedPayload.length} chars)`);
 	});
 
+	it("externalizes an oversized input end-to-end: full payload on disk, prompt carries only the local:// handle", async () => {
+		const h = acpRuntime({ enabled: true });
+		tempDirs.push(h.artifactsDir);
+
+		// ~324k chars — well past a typical model context window (≈64k
+		// tokens), exactly the over-window case /rlm exists for. The marker
+		// sits mid-payload (after a 150k-char run of "a") so every "not
+		// inlined" assertion below is discriminative: if the rendered prompt
+		// ever embedded the payload text — whole or prefix-only — the marker,
+		// the letter run, or the prompt size would give it away.
+		const marker = "OVERSIZED-INPUT-MARKER-7f3a9c";
+		const fillerLine = "oversized-input-line-abcdefghijklmnopqrstuvwxyz0123456789\n";
+		const oversizedPayload = `${"a".repeat(150_000)}${marker}${fillerLine.repeat(3_000)}`;
+		expect(oversizedPayload.length).toBeGreaterThan(200_000);
+
+		const result = await executeAcpBuiltinSlashCommand(`/rlm ${oversizedPayload}`, h.runtime);
+
+		expect(result).not.toEqual({ consumed: true });
+		const prompt = promptOf(result);
+
+		// (c) Heart of the externalization: the prompt sent to the model
+		// carries only the local:// handle — never the giant payload text.
+		expect(prompt).toContain("local://rlm-input-");
+		expect(prompt).toContain("Inline payload externalized");
+		expect(prompt).not.toContain(marker);
+		expect(prompt).not.toContain("abcdefghijklmnopqrstuvwxyz0123456789");
+		expect(prompt).not.toContain("a".repeat(1_000));
+		expect(prompt.length).toBeLessThan(oversizedPayload.length);
+
+		// (a)+(b) The artifact exists and holds the payload byte-for-byte,
+		// size included — nothing truncated or trimmed on the way to disk.
+		const match = prompt.match(/local:\/\/(rlm-input-[\w.-]+\.txt)/);
+		expect(match).not.toBeNull();
+		const writtenPath = path.join(h.artifactsDir, "local", match?.[1] ?? "");
+		const written = fs.readFileSync(writtenPath, "utf-8");
+		expect(written).toBe(oversizedPayload);
+		expect(fs.statSync(writtenPath).size).toBe(Buffer.byteLength(oversizedPayload, "utf-8"));
+
+		// (d) The rendered charCount describes the real payload size.
+		expect(prompt).toContain(`(${oversizedPayload.length} chars)`);
+	});
+
 	it("falls back to the no-request marker when the input contains only whitespace", async () => {
 		const h = acpRuntime({ enabled: true });
 		tempDirs.push(h.artifactsDir);
