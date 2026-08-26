@@ -42,6 +42,7 @@ import {
 	clampKimiK27CodeMaxTokens,
 	fetchWellKnownModels,
 	GMI_CLOUD_STATIC_MODELS,
+	getEuropeanGatewayStaticFallbackModels,
 	isFireworksKimiK2ModelId,
 	isKimiK27CodeModelId,
 	kimiCodeMaxTokens,
@@ -621,6 +622,11 @@ async function generateModels() {
 	if (!authoritativeCatalogProviders.has("gitlab-duo-agent")) {
 		allModels.push(buildGitLabDuoWorkflowFallbackModel());
 	}
+	// Seed European gateway defaults so provider entries remain available when
+	// catalog regeneration lacks live credentials or provider discovery is down.
+	// If a gateway returned an authoritative catalog, keep that live list exact
+	// and do not reintroduce seed IDs the endpoint omitted.
+	allModels.push(...getEuropeanGatewayStaticFallbackModels(authoritativeCatalogProviders));
 	// Seed Fireworks "Fast" serving-path variants (`<id>-fast`). Fast routers are
 	// not enumerated by the serverless control-plane list, so discovery never
 	// surfaces them; the seed projects each base entry into a fast variant.

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added catalog and discovery entries for AKI.IO, Cortecs, EUrouter, Melious, Nebius Token Factory, Opper, OVHcloud AI Endpoints, and Scaleway Generative APIs. ([#3319](https://github.com/can1357/oh-my-pi/issues/3319))
+
 ## [18.0.7] - 2026-08-26
 
 ### Fixed

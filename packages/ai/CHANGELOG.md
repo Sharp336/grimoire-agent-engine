@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/login` support for AKI.IO, Cortecs, EUrouter, Melious, Nebius Token Factory, Opper, OVHcloud AI Endpoints, and Scaleway Generative APIs. ([#3319](https://github.com/can1357/oh-my-pi/issues/3319))
+
+### Fixed
+
+- Fixed hosted gateway API key validation to use each provider's authenticated OpenAI-compatible endpoint. ([#3319](https://github.com/can1357/oh-my-pi/issues/3319))
+
 ## [18.0.7] - 2026-08-26
 
 ### Added
