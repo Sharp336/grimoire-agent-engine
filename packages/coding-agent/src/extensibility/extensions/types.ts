@@ -80,6 +80,7 @@ import type {
 import type { ApprovalMode } from "../../tools/approval";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import type { EventBus } from "../../utils/event-bus";
+import type { ExtensionSearchProvider } from "../../web/search/provider";
 import type {
 	AgentEndEvent,
 	AgentStartEvent,
@@ -122,6 +123,7 @@ import type { SlashCommandInfo } from "../slash-commands";
 export type { OverlayHandle, OverlayOptions } from "@oh-my-pi/pi-tui";
 export type { AppKeybinding, KeybindingsManager } from "../../config/keybindings";
 export type { ExecOptions, ExecResult } from "../../exec/exec";
+export type { ExtensionSearchProvider } from "../../web/search/provider";
 export type { AgentToolResult, AgentToolUpdateCallback };
 
 // ============================================================================
@@ -1526,6 +1528,19 @@ export interface ExtensionAPI {
 	 */
 	unregisterProvider(name: string): void;
 
+	/**
+	 * Register a session-scoped provider for the built-in `web_search` tool.
+	 *
+	 * Extension provider IDs appear in the settings selector while at least one
+	 * live session has the extension loaded. Built-in provider IDs cannot be
+	 * replaced. The provider receives the same parsed query, credential store,
+	 * cancellation signal, and timeout contract as built-in adapters.
+	 */
+	registerSearchProvider(provider: ExtensionSearchProvider): void;
+
+	/** Remove a web-search provider registered by this extension. */
+	unregisterSearchProvider(id: string): void;
+
 	/** Shared event bus for extension communication. */
 	events: EventBus;
 }
@@ -1677,10 +1692,16 @@ export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
 	/** Provider registrations queued during extension loading, processed during session initialization */
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }>;
+	/** Web-search provider registrations queued during extension loading. */
+	pendingSearchProviderRegistrations: Array<{ provider: ExtensionSearchProvider; sourceId: string }>;
 	/** Queue a provider registration until initialization, then apply it immediately. */
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void;
 	/** Remove a queued or initialized provider registration. */
 	unregisterProvider(name: string, sourceId: string): void;
+	/** Queue or apply a session-scoped web-search provider registration. */
+	registerSearchProvider(provider: ExtensionSearchProvider, sourceId: string): void;
+	/** Remove a queued or initialized web-search provider registration. */
+	unregisterSearchProvider(id: string, sourceId: string): void;
 }
 
 /** Action implementations for ExtensionAPI methods. */

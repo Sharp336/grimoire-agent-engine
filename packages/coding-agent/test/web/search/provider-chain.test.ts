@@ -4,10 +4,11 @@ import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/
 import {
 	resolveProviderCandidates,
 	resolveProviderChain,
+	SearchProviderRegistry,
 	setExcludedSearchProviders,
 	setSearchProviderOrder,
 } from "@oh-my-pi/pi-coding-agent/web/search/provider";
-import { SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
+import { SEARCH_PROVIDER_CHOICES, SEARCH_PROVIDER_ORDER } from "@oh-my-pi/pi-coding-agent/web/search/types";
 
 const authStorage = {
 	hasAuth(provider: string): boolean {
@@ -41,6 +42,19 @@ afterEach(() => {
 	setSearchProviderOrder([]);
 	restoreEnv();
 });
+
+function registerFixtureProvider(registry: SearchProviderRegistry, sourceId = "fixture-extension"): void {
+	registry.register(
+		{
+			id: "fixture-search",
+			label: "Fixture Search",
+			description: "Fixture extension search provider",
+			isAvailable: () => true,
+			search: () => Promise.resolve({ provider: "fixture-search", sources: [] }),
+		},
+		sourceId,
+	);
+}
 
 describe("resolveProviderCandidates", () => {
 	it("orders the forced provider before configured and built-in fallbacks", () => {
@@ -82,6 +96,70 @@ describe("resolveProviderCandidates", () => {
 		const candidates = resolveProviderCandidates();
 		expect(candidates.slice(0, 2).map(candidate => candidate.id)).toEqual(["exa", "gemini"]);
 		expect(candidates).toHaveLength(SEARCH_PROVIDER_ORDER.length);
+	});
+});
+
+describe("SearchProviderRegistry", () => {
+	it("activates a configured extension ID after its extension registers", () => {
+		setSearchProviderOrder(["fixture-search"]);
+		expect(resolveProviderCandidates().map(candidate => candidate.id)).not.toContain("fixture-search");
+
+		const registry = new SearchProviderRegistry();
+		try {
+			registerFixtureProvider(registry);
+			expect(resolveProviderCandidates(undefined, registry)[0]).toEqual({
+				id: "fixture-search",
+				explicit: true,
+			});
+		} finally {
+			registry.dispose();
+		}
+	});
+
+	it("keeps a live settings choice until every session registry releases it", () => {
+		const first = new SearchProviderRegistry();
+		const second = new SearchProviderRegistry();
+		try {
+			registerFixtureProvider(first);
+			registerFixtureProvider(second);
+			expect(SEARCH_PROVIDER_CHOICES.filter(option => option.value === "fixture-search")).toHaveLength(1);
+			first.dispose();
+			expect(SEARCH_PROVIDER_CHOICES.some(option => option.value === "fixture-search")).toBe(true);
+			second.dispose();
+			expect(SEARCH_PROVIDER_CHOICES.some(option => option.value === "fixture-search")).toBe(false);
+		} finally {
+			first.dispose();
+			second.dispose();
+		}
+	});
+
+	it("routes the available chain through an extension provider", async () => {
+		const registry = new SearchProviderRegistry();
+		try {
+			registerFixtureProvider(registry);
+			setSearchProviderOrder(["fixture-search"]);
+			setExcludedSearchProviders(SEARCH_PROVIDER_ORDER);
+			const providers = await resolveProviderChain(authStorage, undefined, registry);
+			expect(providers.map(provider => provider.id)).toEqual(["fixture-search"]);
+		} finally {
+			registry.dispose();
+		}
+	});
+
+	it("rejects attempts to replace a built-in provider", () => {
+		const registry = new SearchProviderRegistry();
+		expect(() =>
+			registry.register(
+				{
+					id: "brave",
+					label: "Replacement",
+					description: "Must not replace built-ins",
+					isAvailable: () => true,
+					search: () => Promise.resolve({ provider: "brave", sources: [] }),
+				},
+				"fixture-extension",
+			),
+		).toThrow('Cannot replace built-in web search provider "brave"');
 	});
 });
 

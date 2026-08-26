@@ -37,6 +37,7 @@ import { canSpawnAtDepth, type StructuredSubagentSchemaMode } from "../task/type
 import type { EventBus } from "../utils/event-bus";
 import { type InspectImageMode, isInspectImageToolActive } from "../utils/inspect-image-mode";
 import { WebSearchTool } from "../web/search";
+import type { SearchProviderRegistry } from "../web/search/provider";
 import type { WorkspaceTree } from "../workspace-tree";
 import { AskTool } from "./ask";
 import { AstEditTool } from "./ast-edit";
@@ -324,6 +325,8 @@ export interface ToolSession {
 	authStorage?: import("../session/auth-storage").AuthStorage;
 	/** Model registry for passing to subagents (avoids re-discovery) */
 	modelRegistry?: import("../config/model-registry").ModelRegistry;
+	/** Session-local web-search providers registered by extensions. */
+	searchProviderRegistry?: SearchProviderRegistry;
 	/** Agent output manager for unique agent:// IDs across task invocations */
 	agentOutputManager?: AgentOutputManager;
 	/**

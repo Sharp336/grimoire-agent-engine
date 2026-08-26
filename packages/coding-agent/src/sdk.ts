@@ -217,6 +217,7 @@ import {
 	ReadTool,
 	releaseComputerSessionsForOwner,
 	resolveMountedXdevExecutable,
+	SearchProviderRegistry,
 	supportsExternalThinking,
 	type Tool,
 	type ToolSession,
@@ -1721,6 +1722,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		agentRegistry.unregister(resolvedAgentId, ref);
 	};
 	const evalKernelOwnerId = `agent-session:${Snowflake.next()}`;
+	const searchProviderRegistry = new SearchProviderRegistry();
 
 	try {
 		const getActiveModelString = (): string | undefined => {
@@ -1734,6 +1736,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// mutation (any tool) bumped it in the meantime.
 		const fileMutationVersions = new Map<string, number>();
 		const disposeCallbacks = new Set<() => void>();
+		disposeCallbacks.add(() => searchProviderRegistry.dispose());
 		const activeToolNames = new Set<string>();
 		const toolRegistry = new Map<string, Tool & Pick<ToolDefinition, "defaultInactive">>();
 		const setActiveToolNames = (names: Iterable<string>): void => {
@@ -1868,6 +1871,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			settings,
 			authStorage,
 			modelRegistry,
+			searchProviderRegistry,
 			getTelemetry: () => agent?.telemetry,
 			// Subagents inherit the singleton (the parent's manager) so their bash/task
 			// completions still flow into the spawning conversation's yieldQueue.
@@ -2038,7 +2042,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 			// Add web search tools
 			if (options.toolNames?.includes("web_search")) {
-				customTools.push(...getSearchTools());
+				customTools.push(...getSearchTools(searchProviderRegistry));
 			}
 
 			// Discover custom tools from `.omp/tools/`, `.claude/tools/`, plugins, etc.
@@ -2171,6 +2175,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 			extensionsResult.runtime.pendingProviderRegistrations = [];
 		}
+		for (const { provider, sourceId } of extensionsResult.runtime.pendingSearchProviderRegistrations) {
+			searchProviderRegistry.register(provider, sourceId);
+		}
+		extensionsResult.runtime.pendingSearchProviderRegistrations = [];
 		// Hydrate cached runtime (extension) provider catalogs before model
 		// resolution. Dynamic-only providers have no synchronous registration side
 		// effect, so a cold --model/provider resume must see the same fresh SQLite
@@ -2725,6 +2733,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			settings,
 			localProtocolOptions,
 			() => (hasSession ? session.getAsyncJobSnapshot() : null),
+			searchProviderRegistry,
 		);
 
 		credentialDisabledTarget = extensionRunner;
@@ -4190,6 +4199,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			eventBus,
 		};
 	} catch (error) {
+		searchProviderRegistry.dispose();
 		// Release the subscription if the throw happened after install but before the
 		// dispose-wrap took ownership. Idempotent with dispose() — Set.delete is a no-op
 		// for already-removed listeners.

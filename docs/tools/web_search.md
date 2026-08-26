@@ -7,6 +7,7 @@
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/web-search.md`
 - Key collaborators:
   - `packages/coding-agent/src/web/search/provider.ts` — lazy provider registry; availability chain.
+  - `packages/coding-agent/src/extensibility/extensions/types.ts` — extension-facing `registerSearchProvider()` contract.
   - `packages/coding-agent/src/web/search/types.ts` — unified `SearchResponse` / `SearchProviderError` types.
   - `packages/coding-agent/src/web/search/render.ts` — TUI renderer details type.
   - `packages/coding-agent/src/web/search/providers/base.ts` — provider interface and shared params contract.
@@ -46,7 +47,7 @@
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `query` | `string` | Yes | Raw query. The orchestrator parses Google-style directives (`site:`/`-site:`, `after:`/`before:`, `inurl:`, `intitle:`, `filetype:`, quoted phrases, exclusions, and `OR`) so providers can map them to native filters or supported syntax; the original string remains available to adapters. |
-| `recency` | `"day" \| "week" \| "month" \| "year"` | No | Relative time filter. Implemented by Brave, Perplexity, Tavily, SearXNG, Kagi, TinyFish, Firecrawl, DuckDuckGo, Startpage, Google, and Mojeek; other adapters ignore it. |
+| `recency` | `"day" \| "week" \| "month" \| "year"` | No | Relative time filter. Implemented by Brave, Perplexity, Tavily, SearXNG, Kagi, TinyFish, Firecrawl, DuckDuckGo, Startpage, Google, and Mojeek; other built-in and extension adapters decide whether to support it. |
 | `limit` | `number` | No | Max results to return. Usually becomes the provider request's result-count parameter when `num_search_results` is absent. TinyFish uses it for paginated fetches before slicing. xAI uses the collapsed value only as a local cap on parsed sources/citations, defaulting to `10` and max `30`. |
 | `max_tokens` | `number` | No | Passed through as provider token caps (`maxOutputTokens`, `max_tokens`, or xAI `max_output_tokens`) only by Anthropic, Gemini, xAI, and Perplexity API-key mode. Ignored by the other providers. |
 | `temperature` | `number` | No | Passed through only by Anthropic models that support sampling parameters, Gemini, xAI, and Perplexity API-key mode. Ignored or omitted by the other provider/model paths. |
@@ -106,9 +107,10 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 ## Modes / Variants
 - **Provider selection**
   - **Forced provider**: internal callers may pass `provider`; a non-`auto` value is the only attempted provider and uses `isExplicitlyAvailable()`, while `auto` (or omitting it) walks the configured chain. This field is not in the model-facing schema.
-  - **Configured order**: `setSearchProviderOrder()` prioritizes valid, first-occurrence provider IDs in `providers.webSearchOrder`; omitted providers follow in built-in relative order. Listed providers are explicit selections and resolve through `isExplicitlyAvailable()`, so Perplexity, Exa, and Firecrawl can use their unauthenticated/keyless paths.
+  - **Configured order**: `setSearchProviderOrder()` preserves valid first-occurrence provider IDs from `providers.webSearchOrder`, including IDs whose extension has not loaded yet. Registered matches lead the chain and use `isExplicitlyAvailable()`; omitted built-ins retain their relative order and omitted extension providers follow them.
   - **Excluded providers**: `setExcludedSearchProviders()` removes providers from the automatic/configured chain and Public Web fan-out. Wired from `providers.webSearchExclude` through `packages/coding-agent/src/config/provider-globals.ts`.
-  - **Default auto chain order** (23 providers): `perplexity`, `gemini`, `anthropic`, `codex`, `xai`, `zai`, `exa`, `tinyfish`, `jina`, `kagi`, `tavily`, `firecrawl`, `brave`, `kimi`, `parallel`, `synthetic`, `searxng`, `startpage`, `duckduckgo`, `ecosia`, `google`, `mojeek`, `public` (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/types.ts`). `public` is explicit-only: its `isAvailable()` returns `false`, so the auto chain never fans out implicitly.
+  - **Extension providers**: `pi.registerSearchProvider()` installs a provider into the current session's `SearchProviderRegistry`. Its ID appears in the live settings choices, can be prioritized/excluded like a built-in, and is accepted by `omp search --provider <id>`. Registrations are released when the final session using that extension closes. Extensions cannot replace built-in provider IDs.
+  - **Default built-in auto chain order** (23 providers): `perplexity`, `gemini`, `anthropic`, `codex`, `xai`, `zai`, `exa`, `tinyfish`, `jina`, `kagi`, `tavily`, `firecrawl`, `brave`, `kimi`, `parallel`, `synthetic`, `searxng`, `startpage`, `duckduckgo`, `ecosia`, `google`, `mojeek`, `public` (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/types.ts`). Unlisted extension providers append after this order. `public` is explicit-only: its `isAvailable()` returns `false`, so the auto chain never fans out implicitly.
 - **Provider timeout**: `providers.webSearchTimeoutSeconds` supplies the hard ceiling for each provider's search transport before the automatic chain advances. It defaults to `60`; invalid non-positive values fall back to that default and values above `300` are capped, while provider-specific upstream or aggregate limits may still be shorter.
 - **Provider adapters**
   - **Perplexity** — `packages/coding-agent/src/web/search/providers/perplexity.ts`
@@ -238,13 +240,14 @@ Each provider search transport receives a hard timeout from `providers.webSearch
   - This fallback can start a Chromium process and create its browser-profile lifecycle. On first browser use it can also download Chromium into the omp Puppeteer cache unless a system Chromium or `PUPPETEER_EXECUTABLE_PATH` is available. The search adapter itself uses no native binding.
 - Session state (transcript, memory, jobs, checkpoints, registries)
   - Uses a module-global provider-instance cache in `packages/coding-agent/src/web/search/provider.ts`.
+  - Uses one session-local `SearchProviderRegistry` for extension providers; live settings-choice metadata is reference-counted across concurrent sessions.
   - Uses a module-global preferred-provider setting in the same file.
   - `packages/coding-agent/src/tools/index.ts` gates tool availability behind `session.settings.get("web_search.enabled")`.
 - Background work / cancellation
   - Many provider adapters accept `AbortSignal`; `WebSearchTool.execute()` passes the tool call signal into `executeSearch()`, which forwards it as `params.signal` to providers and rethrows cancellation during fallback.
 
 ## Limits & Caps
-- Provider auto-order length: 23 providers (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/types.ts`).
+- Built-in provider auto-order length: 23 providers (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/types.ts`); extension providers are additional.
 - `formatForLLM()` truncates source snippets and citation text to 240 chars (`packages/coding-agent/src/web/search/index.ts`).
 - `formatForLLM()` emits at most 3 search queries, each truncated to 120 chars (`packages/coding-agent/src/web/search/index.ts`).
 - Brave result count: default `10`, max `20` (`DEFAULT_NUM_RESULTS`, `MAX_NUM_RESULTS` in `packages/coding-agent/src/web/search/providers/brave.ts`).
@@ -280,7 +283,7 @@ Each provider search transport receives a hard timeout from `providers.webSearch
 - The model-facing schema does not expose `provider`, but internal callers can force one through `SearchQueryParams`.
 - `executeSearch()` walks `resolveProviderCandidates()` lazily; `resolveProviderChain()` remains a compatibility helper that loads every candidate. Provider instances are cached, and asking for labels via `getSearchProviderLabel()` does not trigger imports.
 - Most providers treat `limit` and `num_search_results` as the same number because adapters pass `params.numSearchResults ?? params.limit`. Perplexity preserves both concepts. TinyFish uses the collapsed value as a local cap, serializes `num_results` per page, and paginates when more results are needed. xAI uses it only to cap parsed sources/citations (`10` default, `30` max).
-- `recency` has native or engine-query mappings in Brave, Perplexity, Tavily, SearXNG, Kagi, TinyFish, Firecrawl, DuckDuckGo, Startpage, Google, and Mojeek. xAI retains absolute date directives as natural-language query hints because its current Responses tool has no date parameters; Ecosia ignores recency. Public Web passes the request through to its engines.
-- `packages/coding-agent/src/config/settings-schema.ts` uses the shared `SEARCH_PROVIDER_PREFERENCES` / `SEARCH_PROVIDER_OPTIONS` metadata, so the settings selector and setup wizard expose `auto` plus every provider in the auto chain.
+- `recency` has native or engine-query mappings in Brave, Perplexity, Tavily, SearXNG, Kagi, TinyFish, Firecrawl, DuckDuckGo, Startpage, Google, and Mojeek. Extension providers receive the same field and choose their own native mapping. xAI retains absolute date directives as natural-language query hints because its current Responses tool has no date parameters; Ecosia ignores recency. Public Web passes the request through to its engines.
+- `packages/coding-agent/src/config/settings-schema.ts` holds live `SEARCH_PROVIDER_OPTIONS` / `SEARCH_PROVIDER_CHOICES` arrays. A registered extension provider is appended once across concurrent sessions and removed after its final registry releases it.
 - The credential-free scrapers close the auto chain: Startpage and DuckDuckGo precede the browser-backed Ecosia, Google, and Mojeek paths; `public` is listed last and never auto-selected.
 - `/login exa` stores the pasted key in AuthStorage; Exa resolves stored or environment credentials before the unauthenticated `https://mcp.exa.ai/mcp` fallback.

@@ -9,21 +9,139 @@
 // listings can share it without importing provider implementations.
 
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
-import type { SearchProvider } from "./providers/base";
-import { SEARCH_PROVIDER_LABELS, SEARCH_PROVIDER_ORDER, SearchProviderError, type SearchProviderId } from "./types";
+import { type SearchParams, SearchProvider } from "./providers/base";
+import {
+	type BuiltInSearchProviderId,
+	isBuiltInSearchProviderId,
+	isSearchProviderId,
+	retainSearchProviderOption,
+	SEARCH_PROVIDER_LABELS,
+	SEARCH_PROVIDER_ORDER,
+	SearchProviderError,
+	type SearchProviderId,
+	type SearchResponse,
+} from "./types";
 
 export type { SearchParams } from "./providers/base";
 export { SearchProvider } from "./providers/base";
 export { SEARCH_PROVIDER_ORDER } from "./types";
 
+/** Structural provider contract accepted from runtime extensions. */
+export interface ExtensionSearchProvider {
+	readonly id: SearchProviderId;
+	readonly label: string;
+	readonly description: string;
+	isAvailable(authStorage: AuthStorage): Promise<boolean> | boolean;
+	isExplicitlyAvailable?(authStorage: AuthStorage): Promise<boolean> | boolean;
+	search(params: SearchParams): Promise<SearchResponse>;
+}
+
+class ExtensionSearchProviderAdapter extends SearchProvider {
+	readonly id: SearchProviderId;
+	readonly label: string;
+	#definition: ExtensionSearchProvider;
+
+	constructor(definition: ExtensionSearchProvider, label: string) {
+		super();
+		this.id = definition.id;
+		this.label = label;
+		this.#definition = definition;
+	}
+
+	isAvailable(authStorage: AuthStorage): Promise<boolean> | boolean {
+		return this.#definition.isAvailable(authStorage);
+	}
+
+	override isExplicitlyAvailable(authStorage: AuthStorage): Promise<boolean> | boolean {
+		return this.#definition.isExplicitlyAvailable?.(authStorage) ?? this.#definition.isAvailable(authStorage);
+	}
+
+	search(params: SearchParams): Promise<SearchResponse> {
+		return this.#definition.search(params);
+	}
+}
+
+interface RegisteredExtensionSearchProvider {
+	provider: SearchProvider;
+	sourceId: string;
+	label: string;
+	description: string;
+	releaseOption: () => void;
+}
+
+/** Session-local overlay containing providers contributed by loaded extensions. */
+export class SearchProviderRegistry {
+	#providers = new Map<SearchProviderId, RegisteredExtensionSearchProvider>();
+
+	register(definition: ExtensionSearchProvider, sourceId: string): void {
+		if (!isSearchProviderId(definition.id)) {
+			throw new TypeError(`Invalid web search provider id: ${definition.id}`);
+		}
+		if (isBuiltInSearchProviderId(definition.id)) {
+			throw new Error(`Cannot replace built-in web search provider "${definition.id}"`);
+		}
+		const label = definition.label.trim();
+		const description = definition.description.trim();
+		if (label.length === 0) {
+			throw new TypeError(`Web search provider "${definition.id}" must have a label`);
+		}
+		if (description.length === 0) {
+			throw new TypeError(`Web search provider "${definition.id}" must have a description`);
+		}
+
+		const existing = this.#providers.get(definition.id);
+		if (existing) {
+			if (existing.sourceId !== sourceId) {
+				throw new Error(
+					`Web search provider "${definition.id}" is already registered by extension "${existing.sourceId}"`,
+				);
+			}
+			if (existing.label !== label || existing.description !== description) {
+				throw new Error(`Unregister web search provider "${definition.id}" before changing its metadata`);
+			}
+			existing.provider = new ExtensionSearchProviderAdapter(definition, label);
+			return;
+		}
+
+		const releaseOption = retainSearchProviderOption({ value: definition.id, label, description });
+		this.#providers.set(definition.id, {
+			provider: new ExtensionSearchProviderAdapter(definition, label),
+			sourceId,
+			label,
+			description,
+			releaseOption,
+		});
+	}
+
+	unregister(id: SearchProviderId, sourceId: string): void {
+		const existing = this.#providers.get(id);
+		if (!existing || existing.sourceId !== sourceId) return;
+		this.#providers.delete(id);
+		existing.releaseOption();
+	}
+
+	get(id: SearchProviderId): SearchProvider | undefined {
+		return this.#providers.get(id)?.provider;
+	}
+
+	ids(): SearchProviderId[] {
+		return [...this.#providers.keys()];
+	}
+
+	dispose(): void {
+		for (const registration of this.#providers.values()) registration.releaseOption();
+		this.#providers.clear();
+	}
+}
+
 interface ProviderMeta {
-	id: SearchProviderId;
+	id: BuiltInSearchProviderId;
 	label: string;
 	load: () => Promise<SearchProvider>;
 }
 
 /** Lazy factories. Each `load()` dynamic-imports its provider module on first call. */
-const PROVIDER_META: Record<SearchProviderId, ProviderMeta> = {
+const PROVIDER_META: Record<BuiltInSearchProviderId, ProviderMeta> = {
 	perplexity: {
 		id: "perplexity",
 		label: SEARCH_PROVIDER_LABELS.perplexity,
@@ -141,11 +259,13 @@ const PROVIDER_META: Record<SearchProviderId, ProviderMeta> = {
 	},
 };
 
-const instanceCache = new Map<SearchProviderId, SearchProvider>();
+const instanceCache = new Map<BuiltInSearchProviderId, SearchProvider>();
 
-/** Cheap, sync metadata accessor — never triggers a provider load. */
-export function getSearchProviderLabel(id: SearchProviderId): string {
-	return PROVIDER_META[id]?.label ?? id;
+/** Cheap, sync metadata accessor — never triggers a built-in provider load. */
+export function getSearchProviderLabel(id: SearchProviderId, registry?: SearchProviderRegistry): string {
+	const extensionProvider = registry?.get(id);
+	if (extensionProvider) return extensionProvider.label;
+	return isBuiltInSearchProviderId(id) ? PROVIDER_META[id].label : id;
 }
 
 /** Format one provider failure for the user-facing fallback summary. */
@@ -158,7 +278,8 @@ export function formatSearchProviderFailure(error: unknown, provider: Pick<Searc
 			if (error.provider === "zai") {
 				return error.message;
 			}
-			return `${getSearchProviderLabel(error.provider)} authorization failed (${error.status}). Check API key or base URL.`;
+			const label = error.provider === provider.id ? provider.label : getSearchProviderLabel(error.provider);
+			return `${label} authorization failed (${error.status}). Check API key or base URL.`;
 		}
 		return error.message;
 	}
@@ -174,40 +295,38 @@ export function formatSearchProviderFailures(
 }
 
 /**
- * Resolve and cache a provider instance. First call for a given id loads the
- * underlying module; subsequent calls return the cached singleton.
+ * Resolve an extension provider from the session overlay, or lazily load and
+ * cache a built-in provider.
  */
-export async function getSearchProvider(id: SearchProviderId): Promise<SearchProvider> {
-	const cached = instanceCache.get(id);
-	if (cached) return cached;
-	const meta = PROVIDER_META[id];
-	if (!meta) {
+export async function getSearchProvider(
+	id: SearchProviderId,
+	registry?: SearchProviderRegistry,
+): Promise<SearchProvider> {
+	const extensionProvider = registry?.get(id);
+	if (extensionProvider) return extensionProvider;
+	if (!isBuiltInSearchProviderId(id)) {
 		throw new Error(`Unknown search provider: ${id}`);
 	}
-	const provider = await meta.load();
+	const cached = instanceCache.get(id);
+	if (cached) return cached;
+	const provider = await PROVIDER_META[id].load();
 	instanceCache.set(id, provider);
 	return provider;
 }
 
-/** Provider fallback order set via settings (default: built-in order). */
-let orderedProvIds: readonly SearchProviderId[] = SEARCH_PROVIDER_ORDER;
-/** Providers the user explicitly listed in `providers.webSearchOrder`. */
+/** Providers explicitly prioritized through settings. */
+let orderedProvIds: readonly SearchProviderId[] = [];
 let explicitProvIds = new Set<SearchProviderId>();
 
 /**
- * Prioritize configured providers while retaining every unlisted provider in
- * its built-in relative order. Invalid IDs are ignored defensively. Listed
- * providers are treated as explicit selections: they resolve through
- * `isExplicitlyAvailable`, so e.g. a hand-listed Perplexity may fall back to
- * anonymous search exactly like the retired single-preference setting did.
+ * Preserve configured extension IDs even when settings load before their
+ * extensions. Candidate resolution admits them once the session registry has
+ * the matching provider.
  */
 export function setSearchProviderOrder(providers: readonly SearchProviderId[]): void {
-	const prioritized = new Set(providers.filter(id => SEARCH_PROVIDER_ORDER.includes(id)));
+	const prioritized = new Set(providers.filter(isSearchProviderId));
 	explicitProvIds = prioritized;
-	orderedProvIds =
-		prioritized.size === 0
-			? SEARCH_PROVIDER_ORDER
-			: [...prioritized, ...SEARCH_PROVIDER_ORDER.filter(id => !prioritized.has(id))];
+	orderedProvIds = [...prioritized];
 }
 
 /** Providers excluded from web search resolution via settings. */
@@ -229,22 +348,26 @@ export interface SearchProviderCandidate {
 }
 
 /**
- * Return provider candidates in fallback order without loading their modules.
- * `forcedProvider` (a per-request `provider` argument) is terminal-first and
- * bypasses exclusion; configured-order entries carry `explicit: true`.
+ * Return provider candidates without loading built-in modules. Configured
+ * providers lead, followed by unlisted built-ins and then unlisted extensions.
  */
-export function resolveProviderCandidates(forcedProvider?: SearchProviderId): SearchProviderCandidate[] {
+export function resolveProviderCandidates(
+	forcedProvider?: SearchProviderId,
+	registry?: SearchProviderRegistry,
+): SearchProviderCandidate[] {
 	const candidates: SearchProviderCandidate[] = [];
+	const seen = new Set<SearchProviderId>();
+	const isKnown = (id: SearchProviderId): boolean => isBuiltInSearchProviderId(id) || registry?.get(id) !== undefined;
+	const append = (id: SearchProviderId, explicit: boolean): void => {
+		if (seen.has(id) || isSearchProviderExcluded(id) || !isKnown(id)) return;
+		seen.add(id);
+		candidates.push({ id, explicit });
+	};
 
-	if (forcedProvider !== undefined && !isSearchProviderExcluded(forcedProvider)) {
-		candidates.push({ id: forcedProvider, explicit: true });
-	}
-
-	for (const id of orderedProvIds) {
-		if (id === forcedProvider || isSearchProviderExcluded(id)) continue;
-		candidates.push({ id, explicit: explicitProvIds.has(id) });
-	}
-
+	if (forcedProvider !== undefined) append(forcedProvider, true);
+	for (const id of orderedProvIds) append(id, explicitProvIds.has(id));
+	for (const id of SEARCH_PROVIDER_ORDER) append(id, explicitProvIds.has(id));
+	for (const id of registry?.ids() ?? []) append(id, explicitProvIds.has(id));
 	return candidates;
 }
 
@@ -257,11 +380,12 @@ export function resolveProviderCandidates(forcedProvider?: SearchProviderId): Se
 export async function resolveProviderChain(
 	authStorage: AuthStorage,
 	forcedProvider?: SearchProviderId,
+	registry?: SearchProviderRegistry,
 ): Promise<SearchProvider[]> {
 	const providers: SearchProvider[] = [];
 
-	for (const candidate of resolveProviderCandidates(forcedProvider)) {
-		const provider = await getSearchProvider(candidate.id);
+	for (const candidate of resolveProviderCandidates(forcedProvider, registry)) {
+		const provider = await getSearchProvider(candidate.id, registry);
 		const available = candidate.explicit
 			? await provider.isExplicitlyAvailable(authStorage)
 			: await provider.isAvailable(authStorage);
