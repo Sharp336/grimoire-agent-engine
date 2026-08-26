@@ -67,9 +67,9 @@ class PullRequestInfo:
     state: str
     author: str = ""
     head_repo: str = ""
+    head_sha: str = ""
     title: str = ""
     body: str = ""
-    head_sha: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -226,21 +226,24 @@ class GitHubClient:
         token: str,
         *,
         transport: httpx.BaseTransport | None = None,
+        base_url: str = GITHUB_API,
+        auth_prefix: str = "Bearer",
         platform: str = "github",
     ) -> None:
         self._token = token
+        self._base_url = base_url
+        self._platform = platform
         self._headers = {
-            "Authorization": f"Bearer {token}",
+            "Authorization": f"{auth_prefix} {token}",
             "Accept": ACCEPT,
             "X-GitHub-Api-Version": API_VERSION,
             "User-Agent": "robomp/0.1",
         }
         self._transport = transport
-        self._platform = platform
 
     def _client(self) -> httpx.Client:
         return httpx.Client(
-            base_url=GITHUB_API,
+            base_url=self._base_url,
             headers=self._headers,
             transport=self._transport,
             timeout=httpx.Timeout(30.0, connect=10.0),
@@ -249,7 +252,7 @@ class GitHubClient:
 
     def _async_client(self) -> httpx.AsyncClient:
         return httpx.AsyncClient(
-            base_url=GITHUB_API,
+            base_url=self._base_url,
             headers=self._headers,
             transport=self._transport,  # type: ignore[arg-type]
             timeout=httpx.Timeout(30.0, connect=10.0),
@@ -479,7 +482,7 @@ class GitHubClient:
         data = await self.request(
             "GET",
             f"/repos/{repo}/issues/{number}/timeline",
-            params={"per_page": 100},
+            params={"per_page": 100} if self._platform != "forgejo" else {"limit": 100},
         )
         linked: set[int] = set()
         states: dict[int, str] = {}
@@ -489,7 +492,7 @@ class GitHubClient:
             ev = event.get("event")
             source = event.get("source") or {}
             src_issue = source.get("issue") if isinstance(source, Mapping) else None
-            if not isinstance(src_issue, Mapping) or "pull_request" not in src_issue:
+            if not isinstance(src_issue, Mapping) or src_issue.get("pull_request") is None:
                 continue
             pr_number = src_issue.get("number")
             if not isinstance(pr_number, int):
@@ -508,15 +511,20 @@ class GitHubClient:
     async def list_pr_files(self, repo: str, pr_number: int) -> list[PullRequestFileInfo]:
         files: list[PullRequestFileInfo] = []
         page = 1
+        # Forgejo clamps limit to MaxResponseItems (default 50), so use
+        # the effective per-page size for the termination check.
+        per_page = 100 if self._platform != "forgejo" else 50
         while True:
             data = await self.request(
                 "GET",
                 f"/repos/{repo}/pulls/{pr_number}/files",
-                params={"per_page": 100, "page": page},
+                params={"per_page": per_page, "page": page}
+                if self._platform != "forgejo"
+                else {"limit": per_page, "page": page},
             )
             batch = [_pr_file_from_payload(item) for item in (data or [])]
             files.extend(batch)
-            if len(batch) < 100:
+            if len(batch) < per_page:
                 return files
             page += 1
 
@@ -536,14 +544,14 @@ class GitHubClient:
         if state not in ("open", "closed", "all"):
             raise ValueError(f"invalid state: {state!r}")
         per_page = max(1, min(int(limit), 100))
-        data = await self.request(
-            "GET",
-            f"/repos/{repo}/issues",
-            params={"state": state, "per_page": per_page, "sort": "updated", "direction": "desc"},
-        )
+        if self._platform == "forgejo":
+            params = {"state": state, "limit": per_page, "sort": "updated", "direction": "desc"}
+        else:
+            params = {"state": state, "per_page": per_page, "sort": "updated", "direction": "desc"}
+        data = await self.request("GET", f"/repos/{repo}/issues", params=params)
         out: list[IssueSummary] = []
         for item in data or []:
-            if "pull_request" in item:
+            if item.get("pull_request") is not None:
                 continue  # GitHub's /issues endpoint also returns PRs; skip them.
             out.append(_summary_from_item(repo, item))
         return out
@@ -557,11 +565,30 @@ class GitHubClient:
         serves triage lookups (duplicates, prior fixes), not pagination.
         """
         per_page = max(1, min(int(limit), 30))
-        data = await self.request(
-            "GET",
-            "/search/issues",
-            params={"q": f"repo:{repo} {query}".strip(), "per_page": per_page},
-        )
+        if self._platform == "forgejo":
+            # Forgejo/Gitea ListIssues is repo-scoped and PR-inclusive, so prefer
+            # /repos/{owner}/{repo}/issues over the global /repos/issues/search.
+            # Map GitHub `is:pr`-style intent to Gitea's `type` param (pulls/
+            # issues); omit it so plain queries return both. `limit` replaces
+            # GitHub's `per_page`.
+            type_param = None
+            low = query.lower()
+            if "is:pr" in low or "is:pull" in low or "type:pr" in low:
+                type_param = "pulls"
+            elif "is:issue" in low or "type:issue" in low:
+                type_param = "issues"
+            params: dict[str, Any] = {
+                "q": query,
+                "state": "all",
+                "limit": per_page,
+            }
+            if type_param:
+                params["type"] = type_param
+            data = await self.request("GET", f"/repos/{repo}/issues", params=params)
+            items = data if isinstance(data, list) else []
+            return [_summary_from_item(repo, item) for item in items]
+        params = {"q": f"repo:{repo} {query}".strip(), "per_page": per_page}
+        data = await self.request("GET", "/search/issues", params=params)
         items = (data or {}).get("items") or []
         return [_summary_from_item(repo, item) for item in items]
 
@@ -578,20 +605,28 @@ class GitHubClient:
         `since` is GitHub's ISO `updated_at` lower bound; omit for a full
         backfill. Callers page from 1 until a short page comes back.
         """
+        page_size = max(1, min(int(per_page), 100))
         params: dict[str, Any] = {
             "state": "all",
-            "per_page": max(1, min(int(per_page), 100)),
             "page": max(1, int(page)),
             "sort": "updated",
             "direction": "asc",
         }
+        if self._platform == "forgejo":
+            params["limit"] = page_size
+        else:
+            params["per_page"] = page_size
         if since:
             params["since"] = since
         data = await self.request("GET", f"/repos/{repo}/issues", params=params)
         return [index_entry_from_issue_object(repo, item) for item in (data or [])]
 
     async def list_comments(self, repo: str, number: int) -> list[CommentInfo]:
-        data = await self.request("GET", f"/repos/{repo}/issues/{number}/comments", params={"per_page": 100})
+        data = await self.request(
+            "GET",
+            f"/repos/{repo}/issues/{number}/comments",
+            params={"per_page": 100} if self._platform != "forgejo" else {"limit": 100},
+        )
         return [_comment_from_payload(item) for item in (data or [])]
 
     async def list_review_comments(self, repo: str, pr_number: int) -> list[ReviewCommentInfo]:
@@ -599,7 +634,7 @@ class GitHubClient:
         data = await self.request(
             "GET",
             f"/repos/{repo}/pulls/{pr_number}/comments",
-            params={"per_page": 100},
+            params={"per_page": 100} if self._platform != "forgejo" else {"limit": 100},
         )
         out: list[ReviewCommentInfo] = []
         for item in data or []:
@@ -626,7 +661,7 @@ class GitHubClient:
         data = await self.request(
             "GET",
             f"/repos/{repo}/pulls/{pr_number}/reviews",
-            params={"per_page": 100},
+            params={"per_page": 100} if self._platform != "forgejo" else {"limit": 100},
         )
         out: list[PullRequestReviewInfo] = []
         for item in data or []:
@@ -727,7 +762,7 @@ class GitHubClient:
     def _review_comments_payload(self, comments: list[Mapping[str, Any]]) -> list[dict[str, Any]]:
         """Adapt canonical host-tool comment shape to the wire schema for this platform.
 
-        GitHub keeps line/side/start_line/start_side; Forgejo only reads
+        GitHub keeps line/side/start_line/start_side; Forgejo/Gitea only reads
         path/body/new_position (+old_position), so github-only keys are dropped
         and `line` is mapped to `new_position` for RIGHT-side comments or
         `old_position` for LEFT-side (removed-line) comments.
@@ -769,6 +804,27 @@ class GitHubClient:
             json={"assignees": assignees},
         )
 
+    async def get_review_comment(self, repo: str, comment_id: int) -> ReviewCommentInfo:
+        """Fetch a single inline review comment by id.
+
+        Workaround for Forgejo #7935: `pull_request_review_comment` webhook
+        payloads on Forgejo carry empty `body` — the API returns the actual text.
+        """
+        data = await self.request("GET", f"/repos/{repo}/pulls/comments/{comment_id}")
+        user = data.get("user") or {}
+        line = data.get("line")
+        if not isinstance(line, int):
+            orig = data.get("original_line")
+            line = orig if isinstance(orig, int) else None
+        return ReviewCommentInfo(
+            id=int(data.get("id") or comment_id),
+            author=str(user.get("login") or ""),
+            body=str(data.get("body") or ""),
+            path=str(data.get("path") or ""),
+            line=line,
+            created_at=str(data.get("created_at") or ""),
+        )
+
     async def list_comment_reactions(self, repo: str, comment_id: int) -> tuple[ReactionInfo, ...]:
         """Reactions on an issue comment, filtered server-side to 👎 (`content=-1`).
 
@@ -779,7 +835,9 @@ class GitHubClient:
         data = await self.request(
             "GET",
             f"/repos/{repo}/issues/comments/{comment_id}/reactions",
-            params={"content": "-1", "per_page": 100},
+            params={"content": "-1", "per_page": 100}
+            if self._platform != "forgejo"
+            else {"content": "-1", "limit": 100},
         )
         return tuple(_reaction_from_payload(item) for item in (data or []))
 
@@ -862,7 +920,7 @@ def _issue_from_payload(repo: str, data: Mapping[str, Any]) -> IssueInfo:
         state=str(data.get("state") or "open"),
         author=str(user.get("login") or ""),
         labels=labels,
-        is_pull_request="pull_request" in data,
+        is_pull_request=data.get("pull_request") is not None,
     )
 
 
@@ -894,7 +952,7 @@ def _summary_from_item(repo: str, item: Mapping[str, Any]) -> IssueSummary:
         created_at=str(item.get("created_at") or ""),
         html_url=str(item.get("html_url") or ""),
         state_reason=str(item.get("state_reason") or ""),
-        is_pull_request="pull_request" in item,
+        is_pull_request=item.get("pull_request") is not None,
     )
 
 
@@ -976,9 +1034,9 @@ def _pr_from_payload(repo: str, data: Mapping[str, Any]) -> PullRequestInfo:
         state=str(data.get("state") or "open"),
         author=str(user.get("login") or "") if isinstance(user, Mapping) else "",
         head_repo=str(head_repo.get("full_name") or "") if isinstance(head_repo, Mapping) else "",
+        head_sha=str(head.get("sha") or "") if isinstance(head, Mapping) else "",
         title=str(data.get("title") or ""),
         body=str(data.get("body") or ""),
-        head_sha=str(head.get("sha") or "") if isinstance(head, Mapping) else "",
     )
 
 
