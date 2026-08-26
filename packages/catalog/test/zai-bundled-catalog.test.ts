@@ -11,6 +11,7 @@ interface BundledModel {
 	contextWindow: number | null;
 	maxTokens: number | null;
 	thinking: { mode: string; efforts: string[]; defaultLevel?: string; requiresEffort?: boolean };
+	cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
 }
 
 describe("zai bundled catalog", () => {
@@ -45,5 +46,6 @@ describe("zai bundled catalog", () => {
 			defaultLevel: "max",
 			requiresEffort: true,
 		});
+		expect(model.cost).toEqual({ input: 0.075, output: 0.25, cacheRead: 0.015, cacheWrite: 0 });
 	});
 });

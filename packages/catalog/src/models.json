@@ -294601,9 +294601,9 @@
 				"image"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
+				"input": 0.075,
+				"output": 0.25,
+				"cacheRead": 0.015,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1000000,

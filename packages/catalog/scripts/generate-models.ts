@@ -696,10 +696,12 @@ async function generateModels() {
 				contextWindow: 1_000_000,
 				maxTokens: 131_072,
 			} as ModelSpec<"anthropic-messages">,
-			// Flash pricing is unpublished (coding-plan usage is quota-based); the
-			// $0 surface matches the earlier glm-4.5-flash seed until stencil.so
-			// carries live rates. Vendor docs: text parameters match GLM-5.3 (1M
-			// context / 128K output) and the SKU is natively multimodal.
+			// Flash PAYG rates from the vendor pricing page (promotion: 50% off
+			// until 2026-09-09; list $0.15 in / $0.03 cached / $0.50 out) — the
+			// zai key surfaces PAYG rates, never the coding-plan $0 subscription
+			// rates (issue #5598). Cached-input storage is limited-time free.
+			// Vendor docs: text parameters match GLM-5.3 (1M context / 128K
+			// output) and the SKU is natively multimodal.
 			{
 				id: "glm-5.3-flash",
 				name: "GLM-5.3-Flash",
@@ -708,7 +710,7 @@ async function generateModels() {
 				baseUrl: "https://api.z.ai/api/anthropic",
 				reasoning: true,
 				input: ["text", "image"],
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				cost: { input: 0.075, output: 0.25, cacheRead: 0.015, cacheWrite: 0 },
 				contextWindow: 1_000_000,
 				maxTokens: 131_072,
 			} as ModelSpec<"anthropic-messages">,

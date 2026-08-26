@@ -115,7 +115,7 @@ describe("Z.AI built-in provider", () => {
 			defaultLevel: Effort.Max,
 			requiresEffort: true,
 		});
-		expect(flash?.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		expect(flash?.cost).toEqual({ input: 0.075, output: 0.25, cacheRead: 0.015, cacheWrite: 0 });
 	});
 
 	test("builds discovered glm-5.3-flash with the full Model contract", async () => {
