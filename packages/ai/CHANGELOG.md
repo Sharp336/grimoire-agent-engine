@@ -113,6 +113,7 @@
 - Fixed tool-argument repair applying lossy transformations (such as stringifying objects or stripping unrecognized keys) when validating union schemas (`anyOf`/`oneOf`), preventing corrupted tool call and subagent payloads
 - Fixed 400 errors when communicating with local OpenAI-compatible inference servers that reject `chat_template_kwargs.reasoning_effort` by improving reasoning effort parameter fallback and compatibility handling
 - Fixed DeepSeek-family models on hosts like Fireworks losing reasoning whenever tools were offered: a redundant `tool_choice: "auto"` is now omitted so the provider keeps thinking enabled; forced and `"none"` selectors still take priority ([#1207](https://github.com/can1357/oh-my-pi/issues/1207))
+- Fixed a TDZ crash (`Cannot access 'claudeCodeVersion' before initialization`) when `providers/anthropic` was the first module loaded: `providers/anthropic` → `stream` → `registry` → `registry/oauth/anthropic` circled back into the still-initializing provider module. The Claude Code fingerprint constants now live in the leaf module `providers/claude-code-fingerprint` (star re-exported from `providers/anthropic`, so import paths are unchanged).
 
 ## [17.3.8] - 2026-08-19
 
@@ -512,7 +513,6 @@
 - Fixed QwenCloud Token Plan quota reporting to call the current console usage RPC and document how to capture its optional Cookie during login.
 - Fixed Cursor exec-channel MCP calls such as `web_search` omitting `toolCall` blocks when no interaction block arrives, which rendered their tool cards below the final assistant answer or dropped them on transcript replay. ([#6501](https://github.com/can1357/oh-my-pi/issues/6501))
 - Fixed Claude scoped weekly limits (e.g. `Claude 7 Day (Fable)`) with `is_active: false` being dropped by the `/usage` parser, rendering as `not reported` in `omp usage` despite carrying real utilization. Live payloads mark only the currently binding limit active — an account pinned at a 100% Fable cap reports its 77% shared weekly row as inactive too — so `is_active` signals severity ranking, not bucket existence, and is now ignored. Exhaustion gating is unchanged: tier rows still hard-block only at confirmed 100% with a future reset.
-- Fixed a TDZ crash (`Cannot access 'claudeCodeVersion' before initialization`) when `providers/anthropic` was the first module loaded: `providers/anthropic` → `stream` → `registry` → `registry/oauth/anthropic` circled back into the still-initializing provider module. The Claude Code fingerprint constants now live in the leaf module `providers/claude-code-fingerprint` (star re-exported from `providers/anthropic`, so import paths are unchanged).
 
 ### Fixed
 
