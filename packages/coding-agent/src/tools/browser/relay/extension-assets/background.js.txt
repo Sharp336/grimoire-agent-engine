@@ -441,8 +441,7 @@ chrome.debugger.onDetach.addListener((source, reason) => {
     canceledPendingAttachTabs.add(source.tabId);
   forgetRecoverable(source.tabId);
   post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
-  if (!relayInitiated)
-    refreshHello();
+  refreshHello();
 });
 chrome.tabs.onCreated.addListener((tab) => {
   const snap = snapshot(tab);

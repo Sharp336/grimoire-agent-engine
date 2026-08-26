@@ -546,10 +546,12 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 	if (!relayInitiated && pendingAttachTabs.has(source.tabId)) canceledPendingAttachTabs.add(source.tabId);
 	void forgetRecoverable(source.tabId);
 	post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
-	// A user/Chrome detach can land after buildHello() snapshots getTargets()
-	// while that refresh is still persisting its recovery markers. Invalidate
-	// the stale snapshot so the follow-up hello reports the real detached state.
-	if (!relayInitiated) refreshHello();
+	// A detach can land after buildHello() snapshots getTargets() while that
+	// refresh is still persisting its recovery markers. Invalidate the stale
+	// snapshot so the follow-up hello reports the real detached state. This
+	// includes relay-initiated detaches whose old RPC result may be suppressed
+	// after a socket replacement.
+	refreshHello();
 });
 
 chrome.tabs.onCreated.addListener(tab => {
