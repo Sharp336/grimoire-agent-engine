@@ -228,8 +228,11 @@ export class SelectorController {
 							showHookStatus: settings.get("statusLine.showHookStatus"),
 							sessionAccent: settings.get("statusLine.sessionAccent"),
 							transparent: settings.get("statusLine.transparent"),
+							segmentOptions: settings.get("statusLine.segmentOptions"),
 							compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
-							showModelProvider: settings.get("statusLine.showModelProvider"),
+							showModelProvider: settings.isConfigured("statusLine.showModelProvider")
+								? settings.get("statusLine.showModelProvider")
+								: undefined,
 							contextLine: settings.get("statusLine.contextLine"),
 							...previewSettings,
 						});
@@ -260,8 +263,11 @@ export class SelectorController {
 							showHookStatus: settings.get("statusLine.showHookStatus"),
 							sessionAccent: settings.get("statusLine.sessionAccent"),
 							transparent: settings.get("statusLine.transparent"),
+							segmentOptions: settings.get("statusLine.segmentOptions"),
 							compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
-							showModelProvider: settings.get("statusLine.showModelProvider"),
+							showModelProvider: settings.isConfigured("statusLine.showModelProvider")
+								? settings.get("statusLine.showModelProvider")
+								: undefined,
 							contextLine: settings.get("statusLine.contextLine"),
 						});
 						this.ctx.ui.requestRender();
@@ -717,7 +723,9 @@ export class SelectorController {
 					transparent: settings.get("statusLine.transparent"),
 					segmentOptions: settings.get("statusLine.segmentOptions"),
 					compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
-					showModelProvider: settings.get("statusLine.showModelProvider"),
+					showModelProvider: settings.isConfigured("statusLine.showModelProvider")
+						? settings.get("statusLine.showModelProvider")
+						: undefined,
 					contextLine: settings.get("statusLine.contextLine"),
 				};
 				this.ctx.statusLine.updateSettings(statusLineSettings);

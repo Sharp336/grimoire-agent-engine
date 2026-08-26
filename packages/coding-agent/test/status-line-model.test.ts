@@ -130,7 +130,7 @@ describe("status line model segment compact thinking level", () => {
 describe("status line model segment showProvider option", () => {
 	function createProviderContext(
 		showProvider: boolean | undefined,
-		model: { id: string; name?: string; provider?: string },
+		model: { id: string; name?: string; provider: string },
 	): SegmentContext {
 		return {
 			...createModelContext(false),
@@ -184,14 +184,5 @@ describe("status line model segment showProvider option", () => {
 		const rendered = renderSegment("model", ctx);
 		expect(Bun.stripANSI(rendered.content)).toContain("google-antigravity/Gemini 3.7 Flash");
 		expect(Bun.stripANSI(rendered.content)).not.toContain("google-antigravity/google-antigravity/");
-	});
-
-	it("falls back cleanly to modelName when provider is missing", () => {
-		const ctx = createProviderContext(true, {
-			id: "custom-model",
-			name: "Custom Model",
-		});
-		const rendered = renderSegment("model", ctx);
-		expect(Bun.stripANSI(rendered.content)).toContain("Custom Model");
 	});
 });

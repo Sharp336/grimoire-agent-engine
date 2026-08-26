@@ -483,7 +483,9 @@ export class StatusLineComponent implements Component {
 			sessionAccent: settings.get("statusLine.sessionAccent"),
 			transparent: settings.get("statusLine.transparent"),
 			compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
-			showModelProvider: settings.get("statusLine.showModelProvider"),
+			showModelProvider: settings.isConfigured("statusLine.showModelProvider")
+				? settings.get("statusLine.showModelProvider")
+				: undefined,
 			contextLine: settings.get("statusLine.contextLine"),
 		};
 	}
@@ -1785,11 +1787,11 @@ export class StatusLineComponent implements Component {
 			};
 		}
 
-		if (this.#settings.showModelProvider) {
+		if (this.#settings.showModelProvider !== undefined) {
 			const currentModel = (mergedSegmentOptions.model ?? {}) as Record<string, unknown>;
 			mergedSegmentOptions.model = {
 				...currentModel,
-				showProvider: true,
+				showProvider: this.#settings.showModelProvider,
 			};
 		}
 
