@@ -294,15 +294,22 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		return chunks;
 	};
 
-	const search = (text, pattern, flags) => {
-		const rx = new RegExp(pattern, typeof flags === "string" ? flags : "");
+	const search = (text, pattern, opts, ...rest) => {
+		const o = optionsArg("search", opts, rest, ["flags", "limit"], "{ flags, limit }");
+		const limit = o.limit ?? 100;
+		if (!Number.isInteger(limit) || limit <= 0) throw new Error("search() limit must be a positive integer");
+		const rx = new RegExp(pattern, typeof o.flags === "string" ? o.flags : "");
 		// Incremental line scan (the same /\r\n|\r|\n/g exec loop chunk()
 		// uses) instead of materializing a full array of every line via
 		// split(): search() only ever emits matching lines, so for a large
 		// line-rich payload the array would double memory use before the
 		// first hit is returned. One line is in flight at a time; numbering,
 		// the \r\n|\r|\n boundary set, and the trailing-whitespace trim are
-		// identical to the split-based behavior.
+		// identical to the split-based behavior. The result list is bounded
+		// too: scanning stops as soon as `limit` matches are retained (a
+		// trailing marker notes the early stop), so a broad or frequent
+		// pattern on a huge payload cannot grow the output past the input
+		// and OOM the eval worker.
 		const str = String(text);
 		const out = [];
 		let lineNo = 0;
@@ -319,6 +326,10 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		while ((m = lineBreak.exec(str)) !== null) {
 			matchLine(str.slice(last, m.index));
 			last = m.index + m[0].length;
+			if (out.length === limit && last < str.length) {
+				out.push("... (truncated, more matches may exist)");
+				return out;
+			}
 		}
 		if (last < str.length) matchLine(str.slice(last));
 		return out;

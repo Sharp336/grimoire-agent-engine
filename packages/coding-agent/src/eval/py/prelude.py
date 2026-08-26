@@ -733,8 +733,10 @@ if "__omp_prelude_loaded__" not in globals():
         max_chars = size * 4
         return [text[i : i + max_chars] for i in range(0, len(text), max_chars)]
 
-    def search(text, pattern, flags=0):
-        """Return 'L<lineno>: <line>' for each line matching the regex `pattern`."""
+    def search(text, pattern, flags=0, *, limit=100):
+        """Return 'L<lineno>: <line>' for each line matching the regex `pattern`, stopping after `limit` matches (default 100); a trailing '... (truncated, more matches may exist)' entry marks an early stop."""
+        if not isinstance(limit, int) or limit <= 0:
+            raise ValueError("search limit must be a positive integer")
         rx = re.compile(pattern, flags)
         # Incremental line scan via lazy finditer over _line_break_re (the
         # same Unicode line-break set splitlines() understands) instead of
@@ -743,6 +745,10 @@ if "__omp_prelude_loaded__" not in globals():
         # line-rich payload the list would double memory use before the first
         # hit is returned. Only one line is in flight at a time; 1-indexed
         # numbering and the rstrip() trim are identical to the old behavior.
+        # The result list is bounded too: scanning stops as soon as `limit`
+        # matches are retained (trailing marker appended), so a broad or
+        # frequent pattern on a huge payload cannot grow the output past the
+        # input and OOM the eval worker.
         out = []
         line_no = 0
         last = 0
@@ -752,6 +758,9 @@ if "__omp_prelude_loaded__" not in globals():
             last = m.end()
             if rx.search(line):
                 out.append(f"L{line_no}: {line.rstrip()}")
+                if len(out) == limit and last < len(text):
+                    out.append("... (truncated, more matches may exist)")
+                    return out
         if last < len(text):
             line_no += 1
             line = text[last:]

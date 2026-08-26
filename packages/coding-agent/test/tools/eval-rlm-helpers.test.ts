@@ -26,7 +26,12 @@ function loadJsPrelude(callTool: (name: string, args: unknown) => Promise<unknow
 }
 
 type ChunkFn = (text: string, opts?: Record<string, unknown>) => string[];
-type SearchFn = (text: string, pattern: string, flags?: string) => string[];
+type SearchFn = (
+	text: string,
+	pattern: string,
+	flags?: string | Record<string, unknown>,
+	...rest: unknown[]
+) => string[];
 type MetadataFn = (text: unknown) => Record<string, unknown>;
 type LlmQueryFn = (snippet: string, opts?: Record<string, unknown>) => Promise<unknown>;
 type RlmQueryFn = (prompt: string, opts?: Record<string, unknown>) => Promise<unknown>;
@@ -138,6 +143,32 @@ describe("eval JS RLM helpers", () => {
 		// first match position and misses the match on the next line entirely.
 		expect(search("aaa\na", "a", "g")).toEqual(["L1: aaa", "L2: a"]);
 		expect(search("aaa\na", "a", "y")).toEqual(["L1: aaa", "L2: a"]);
+	});
+
+	it("search caps results at limit and stops scanning once the cap is hit", () => {
+		const sandbox = loadJsPrelude(async () => ({}));
+		const search = sandbox.search as SearchFn;
+		// Below the cap the result is identical to the unbounded behavior.
+		expect(search("a\nb\nc\nd\ne", "a|c", { limit: 5 })).toEqual(["L1: a", "L3: c"]);
+		// Over the cap: first `limit` matches plus a truncation marker; the
+		// scan stops the moment the cap is hit, so the result list cannot
+		// grow past limit+1 entries no matter how many lines match.
+		expect(search("a\nb\nc\nd\ne", "a|c|e", { limit: 2 })).toEqual([
+			"L1: a",
+			"L3: c",
+			"... (truncated, more matches may exist)",
+		]);
+		// A scan that ends exactly at the cap (no lines left unexamined) is
+		// not truncated, so no marker is appended.
+		expect(search("a\nb\n", "a|b", { limit: 2 })).toEqual(["L1: a", "L2: b"]);
+		expect(search("a\nb", "a|b", { limit: 2 })).toEqual(["L1: a", "L2: b"]);
+		// Positional flags still work; limit can ride along positionally too.
+		expect(search("Foo\nfoo", "foo", "i", 1)).toEqual(["L1: Foo", "... (truncated, more matches may exist)"]);
+		// Invalid limits are rejected like chunk()'s size.
+		expect(() => search("a\nb", "a", { limit: 0 })).toThrow();
+		expect(() => search("a\nb", "a", { limit: -1 })).toThrow();
+		expect(() => search("a\nb", "a", { limit: 1.5 })).toThrow();
+		expect(() => search("a\nb", "a", { limit: "5" })).toThrow();
 	});
 
 	it("metadata reports str shape", () => {
@@ -351,6 +382,37 @@ print(json.dumps(search("  pad  \\n\\t", "pad")))
 		expect(JSON.parse(lines[5]!)).toEqual(["L2: b"]); // \u2028/\u2029 separators
 		expect(JSON.parse(lines[6]!)).toEqual(["L3: b"]); // \v and \f are adjacent -> blank line, b on L3
 		expect(JSON.parse(lines[7]!)).toEqual(["L1:   pad"]); // trailing whitespace stripped, leading kept
+	});
+
+	it("search caps results at limit and stops scanning once the cap is hit", async () => {
+		const r = await run(`
+import json
+print(json.dumps(search("a\\nb\\nc\\nd\\ne", "a|c", limit=5)))
+print(json.dumps(search("a\\nb\\nc\\nd\\ne", "a|c|e", limit=2)))
+print(json.dumps(search("a\\nb\\n", "a|b", limit=2)))
+print(json.dumps(search("a\\nb", "a|b", limit=2)))
+print(json.dumps(search("Foo\\nfoo", "foo", re.IGNORECASE, limit=1)))
+`);
+		expect(r.exitCode).toBe(0);
+		const lines = r.stdout.trim().split("\n");
+		// Below the cap the result is identical to the unbounded behavior.
+		expect(JSON.parse(lines[0]!)).toEqual(["L1: a", "L3: c"]);
+		// Over the cap: first `limit` matches plus a truncation marker; the
+		// scan stops the moment the cap is hit, so the result list cannot
+		// grow past limit+1 entries no matter how many lines match.
+		expect(JSON.parse(lines[1]!)).toEqual(["L1: a", "L3: c", "... (truncated, more matches may exist)"]);
+		// A scan that ends exactly at the cap (no lines left unexamined) is
+		// not truncated, so no marker is appended.
+		expect(JSON.parse(lines[2]!)).toEqual(["L1: a", "L2: b"]);
+		expect(JSON.parse(lines[3]!)).toEqual(["L1: a", "L2: b"]);
+		// flags stays positional; limit is a keyword-only kwarg.
+		expect(JSON.parse(lines[4]!)).toEqual(["L1: Foo", "... (truncated, more matches may exist)"]);
+	});
+
+	it("search rejects non-positive limits", async () => {
+		const bad = await run(`search("a\\nb", "a", limit=0)`);
+		expect(bad.exitCode).not.toBe(0);
+		expect(bad.stderr).toContain("ValueError");
 	});
 
 	it("metadata reports str and list shapes", async () => {

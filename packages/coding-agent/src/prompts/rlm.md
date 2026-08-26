@@ -6,7 +6,7 @@ Process oversized or decomposable input recursively instead of reading it all in
    - For a file or URL, read its content in the sandbox (`read(path)`, `write(path, content)`, or `tool.read`) and set `context = <that content>`. In JS, `read` is async — use `context = await read(path)`; omitting `await` binds a Promise, not the text.
    - For inline text, set `context = <the text>` directly. Do NOT echo the full text back into your reply.
 
-2. **Probe before delegating.** Use `metadata(context)` to size it, `search(context, pattern)` to locate regions of interest, and `chunk(context, …)` to split it into manageable pieces of `by="lines"` or `by="tokens"`, `size=100`. Never scan the whole input linearly.
+2. **Probe before delegating.** Use `metadata(context)` to size it, `search(context, pattern)` to locate regions of interest, and `chunk(context, …)` to split it into manageable pieces of `by="lines"` or `by="tokens"`, `size=100`. Never scan the whole input linearly. `search()` returns at most 100 matches by default — if the result ends with `"... (truncated, more matches may exist)"`, pass a larger `limit` (JS: `{ limit }`; Python: `limit=`) or narrow the pattern.
    - Python: `chunk(context, by="lines", size=100)` or `chunk(context, by="tokens", size=100)`
    - JS: `chunk(context, { by: "lines", size: 100 })` or `chunk(context, { by: "tokens", size: 100 })`
 
