@@ -53,7 +53,10 @@ describe("Z.AI built-in provider", () => {
 		// must not stay selectable.
 		const fetch: FetchImpl = async () =>
 			anthropicModelsResponse([{ id: "glm-5.3", object: "model", display_name: "GLM-5.3" }]);
-		const manager = createModelManager(zaiModelManagerOptions({ apiKey: "zai-test-key", fetch }));
+		const manager = createModelManager({
+			...zaiModelManagerOptions({ apiKey: "zai-test-key", fetch }),
+			cacheDbPath: ":memory:",
+		});
 		const { models } = await manager.refresh("online");
 
 		expect(models.map(model => model.id)).toEqual(["glm-5.3"]);
@@ -125,7 +128,10 @@ describe("Z.AI built-in provider", () => {
 		// build time once `reasoning` is floored.
 		const fetchMock: FetchImpl = async () =>
 			anthropicModelsResponse([{ id: "glm-5.4", object: "model", display_name: "GLM-5.4" }]);
-		const manager = createModelManager(zaiModelManagerOptions({ apiKey: "zai-test-key", fetch: fetchMock }));
+		const manager = createModelManager({
+			...zaiModelManagerOptions({ apiKey: "zai-test-key", fetch: fetchMock }),
+			cacheDbPath: ":memory:",
+		});
 		const { models } = await manager.refresh("online");
 
 		const glm54 = models.find(model => model.id === "glm-5.4");
@@ -141,7 +147,10 @@ describe("Z.AI built-in provider", () => {
 		// reference survives createModelManager's authoritative replace path.
 		const fetchMock: FetchImpl = async () =>
 			anthropicModelsResponse([{ id: "glm-5.3-flash", object: "model", display_name: "GLM-5.3-Flash" }]);
-		const manager = createModelManager(zaiModelManagerOptions({ apiKey: "zai-test-key", fetch: fetchMock }));
+		const manager = createModelManager({
+			...zaiModelManagerOptions({ apiKey: "zai-test-key", fetch: fetchMock }),
+			cacheDbPath: ":memory:",
+		});
 		const { models } = await manager.refresh("online");
 
 		const flash = models.find(model => model.id === "glm-5.3-flash");
@@ -167,7 +176,10 @@ describe("Z.AI built-in provider", () => {
 				{ id: "glm-5.2[1m]", object: "model", display_name: "GLM-5.2 (1M)" },
 				{ id: "glm-5.3-flash", object: "model", display_name: "GLM-5.3-Flash" },
 			]);
-		const manager = createModelManager(zaiModelManagerOptions({ apiKey: "zai-test-key", fetch: fetchMock }));
+		const manager = createModelManager({
+			...zaiModelManagerOptions({ apiKey: "zai-test-key", fetch: fetchMock }),
+			cacheDbPath: ":memory:",
+		});
 		const { models } = await manager.refresh("online");
 
 		const ids = models.map(model => model.id);
