@@ -67,6 +67,17 @@ function exitProcess(code: number): never {
 let cleanupPromise: Promise<void> | undefined;
 let stdioDisconnectRegistrations = 0;
 
+/** User-facing command printed before fatal cleanup so interrupted work can be resumed. */
+export interface FatalRecoveryHint {
+	/** Stable label identifying the recoverable session or process. */
+	label: string;
+	/** Complete shell command the user can execute to resume the interrupted work. */
+	command: string;
+}
+
+type FatalRecoveryHintProvider = () => FatalRecoveryHint | undefined;
+const fatalRecoveryHintProviders = new Set<FatalRecoveryHintProvider>();
+
 /**
  * Internal: runs all registered cleanup callbacks for the given reason.
  * Ensures each callback is invoked at most once. Handles errors and prevents reentrancy.
@@ -136,6 +147,66 @@ export function isIpcSendEpipe(err: Error): boolean {
 }
 
 /**
+ * Detect Bun's advanced-serialization (structured-clone) IPC decode failure.
+ *
+ * When a worker subprocess spawned with `serialization: "advanced"` sends a
+ * malformed or truncated frame, Bun raises the decode failure as a
+ * process-level `uncaughtException` in the *parent* rather than routing it to
+ * the channel's `ipc()` callback (oven-sh/bun#37287). The error is a bare
+ * `TypeError: Unable to deserialize data.` whose only own property is `message`
+ * — it carries no `code`, no `syscall`, and no `stack`. Matching all four traits
+ * keeps unrelated application `TypeError`s (which always carry a populated
+ * multi-frame stack) on the fatal path, so a genuine bug is never silently
+ * swallowed.
+ *
+ * Every advanced-serialization channel in this process is an optional worker
+ * subsystem (TTS, STT, tiny-title, mnemopi embeddings, JS eval), so one
+ * worker's bad frame must fault only that worker — via its own `onExit`/error
+ * path — never tear down the whole session. Callers log-and-continue instead of
+ * taking the fatal path. Mirrors {@link classifyBrokenPipe} for the send side
+ * (#2997, #9158).
+ */
+export function isWorkerIpcDeserializeError(err: unknown): boolean {
+	return (
+		err instanceof TypeError &&
+		err.message === "Unable to deserialize data." &&
+		!err.stack &&
+		!("code" in err) &&
+		!("syscall" in err)
+	);
+}
+
+/** Recycle callbacks for the active advanced-serialization worker IPC channels. */
+const workerIpcFaultHandlers = new Set<(err: Error) => void>();
+
+/**
+ * Register a fault/recycle callback for an active advanced-serialization worker
+ * IPC channel.
+ *
+ * Bun surfaces a malformed frame as a process-global `uncaughtException`
+ * ({@link isWorkerIpcDeserializeError}) with no way to attribute it to a
+ * specific channel, so when one fires every registered handler is invoked to
+ * conservatively fault its worker — reject in-flight requests and recycle the
+ * subprocess — instead of leaving pending work to await forever. Returns an
+ * unregister function; callers MUST unregister when the worker exits.
+ */
+export function registerWorkerIpcFaultHandler(handler: (err: Error) => void): () => void {
+	workerIpcFaultHandlers.add(handler);
+	return () => workerIpcFaultHandlers.delete(handler);
+}
+
+/** Invoke every registered worker IPC fault handler, isolating handler throws. */
+function faultWorkerIpcChannels(err: Error): void {
+	for (const handler of workerIpcFaultHandlers) {
+		try {
+			handler(err);
+		} catch (handlerErr) {
+			logger.warn("Worker IPC fault handler threw", { err: handlerErr });
+		}
+	}
+}
+
+/**
  * Treat unhandled stdout EPIPE rejections as a graceful peer disconnect.
  *
  * Stdio protocol servers call this for their process lifetime so a closed
@@ -196,6 +267,38 @@ export function interceptUnhandledRejections(interceptor: (reason: unknown) => b
 	return () => rejectionInterceptors.delete(interceptor);
 }
 
+/**
+ * Register a synchronous recovery command to print when the process exits
+ * through an uncaught exception or unhandled rejection.
+ */
+export function registerFatalRecoveryHint(provider: FatalRecoveryHintProvider): () => void {
+	fatalRecoveryHintProviders.add(provider);
+	return () => fatalRecoveryHintProviders.delete(provider);
+}
+
+function escapeFatalHintText(value: string): string {
+	return value.replace(/[\u0000-\u001f\u007f-\u009f]/gu, char => {
+		const code = char.codePointAt(0) ?? 0;
+		return `\\u${code.toString(16).padStart(4, "0")}`;
+	});
+}
+
+function formatFatalRecoveryHints(): string {
+	const lines: string[] = [];
+	const seenCommands = new Set<string>();
+	for (const provider of fatalRecoveryHintProviders) {
+		try {
+			const hint = provider();
+			if (!hint?.command || seenCommands.has(hint.command)) continue;
+			seenCommands.add(hint.command);
+			lines.push(`  ${escapeFatalHintText(hint.label)}: ${escapeFatalHintText(hint.command)}`);
+		} catch (err) {
+			logger.warn("Fatal recovery hint provider failed", { err });
+		}
+	}
+	return lines.length > 0 ? `\n[Recovery]\n${lines.join("\n")}\n` : "";
+}
+
 function formatFatalError(label: string, err: Error): string {
 	const name = err.name || "Error";
 	const message = err.message || "(no message)";
@@ -212,7 +315,7 @@ async function exitAfterFatal(label: string, logMessage: string, err: Error, rea
 		// A revoked terminal can make stream writes raise another fatal error. Use
 		// the descriptor directly so failure stays synchronous and contained.
 		try {
-			fs.writeSync(2, formatFatalError(label, err));
+			fs.writeSync(2, `${formatFatalError(label, err)}${formatFatalRecoveryHints()}`);
 		} catch {}
 		logger.error(logMessage, { err });
 		await runCleanup(reason);
@@ -238,6 +341,20 @@ if (isMainThread) {
 		.on("uncaughtException", async err => {
 			if (isExpectedCleanupError(err)) {
 				logger.warn("Ignoring expected cleanup exception", { err });
+				return;
+			}
+			// A malformed advanced-serialization frame from a worker subprocess
+			// surfaces here as a process-level uncaughtException (oven-sh/bun#37287)
+			// rather than in the channel's ipc() callback, and Bun gives no way to
+			// tell which channel produced it. Contain it to the worker layer: keep
+			// the session alive and conservatively fault every active advanced-IPC
+			// worker so its owning client rejects in-flight requests and recycles
+			// the subprocess — a worker that sent a bad frame but stays alive would
+			// otherwise never fire onExit and leave callers awaiting forever.
+			// Mirrors the ipc-send EPIPE containment below (#9158, #2997).
+			if (isWorkerIpcDeserializeError(err)) {
+				logger.warn("Malformed worker IPC frame; faulting active worker subsystems", { err });
+				faultWorkerIpcChannels(err);
 				return;
 			}
 			await exitAfterFatal("Uncaught Exception", "Uncaught exception", err, Reason.UNCAUGHT_EXCEPTION);

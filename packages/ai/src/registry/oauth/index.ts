@@ -51,6 +51,13 @@ export function registerOAuthProvider(provider: OAuthProviderInterface): void {
 }
 
 /**
+ * Remove a custom OAuth provider by ID.
+ */
+export function unregisterOAuthProvider(id: string): void {
+	customOAuthProviders.delete(id);
+}
+
+/**
  * Get a custom OAuth provider by ID.
  */
 export function getOAuthProvider(id: OAuthProviderId): OAuthProviderInterface | undefined {
@@ -76,8 +83,7 @@ export function unregisterOAuthProviders(sourceId: string): void {
 }
 
 /**
- * Refresh token for any OAuth provider.
- * Saves the new credentials and returns the new access token.
+ * Refresh a built-in OAuth grant, cancelling provider work when refresh ownership ends.
  */
 export async function refreshOAuthToken(
 	provider: OAuthProvider,
@@ -109,7 +115,7 @@ export async function refreshOAuthToken(
 	}
 	// Providers without a real refresher (static bearer tokens / API keys that
 	// don't expire) return the credentials unchanged.
-	return def.refreshToken ? def.refreshToken(credentials) : credentials;
+	return def.refreshToken ? def.refreshToken(credentials, signal) : credentials;
 }
 function getPerplexityJwtExpiryMs(token: string): number | undefined {
 	const parts = token.split(".");

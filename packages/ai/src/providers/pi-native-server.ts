@@ -73,11 +73,15 @@ const ALLOWED_OPTION_KEYS: ReadonlySet<keyof SimpleStreamOptions> = new Set([
 	"thinkingBudgets",
 	"toolChoice",
 	"serviceTier",
+	"guardrailIdentifier",
+	"guardrailVersion",
+	"guardrailTrace",
 	"kimiApiFormat",
 	"syntheticApiFormat",
 	"preferWebsockets",
 	"openrouterVariant",
 	"loopGuard",
+	"acceptEmptyResponse",
 ] as const satisfies readonly (keyof SimpleStreamOptions)[]);
 
 // ---------------------------------------------------------------------------

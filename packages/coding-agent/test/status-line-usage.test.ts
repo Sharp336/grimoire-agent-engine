@@ -18,11 +18,15 @@ afterAll(() => {
 
 function makeComponent(
 	reports: unknown,
-	options: { provider?: string; activeIdentity?: { accountId?: string; email?: string; projectId?: string } } = {},
+	options: {
+		provider?: string;
+		modelId?: string;
+		activeIdentity?: { accountId?: string; email?: string; projectId?: string };
+	} = {},
 ): StatusLineComponent {
 	const component = new StatusLineComponent({
-		state: { messages: [], model: { contextWindow: 1000, provider: options.provider } },
-		model: { contextWindow: 1000, provider: options.provider },
+		state: { messages: [], model: { id: options.modelId, contextWindow: 1000, provider: options.provider } },
+		model: { id: options.modelId, contextWindow: 1000, provider: options.provider },
 		sessionManager: {
 			getUsageStatistics: () => ({
 				input: 0,
@@ -110,7 +114,49 @@ describe("usage status-line segment", () => {
 		expect(content).toContain("8%");
 	});
 
-	it("prefers untiered windows and labels the displayed tiered window", async () => {
+	it("selects one coherent scope for the active model", async () => {
+		const reports = [
+			{
+				provider: "openai-codex",
+				limits: [
+					{
+						scope: { windowId: "5h", tier: "spark", modelId: "GPT-5.3-Codex-Spark" },
+						amount: { usedFraction: 0 },
+					},
+					{ scope: { windowId: "7d" }, amount: { usedFraction: 0.08 } },
+					{
+						scope: { windowId: "7d", tier: "spark", modelId: "GPT-5.3-Codex-Spark" },
+						amount: { usedFraction: 0 },
+					},
+				],
+			},
+		];
+		const component = makeComponent(reports, { provider: "openai-codex", modelId: "gpt-5.6-sol" });
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const content = stripVTControlCharacters(component.getTopBorder(200).content);
+
+		expect(content).not.toContain("spark");
+		expect(content).not.toContain("5h");
+		expect(content).toContain("7d");
+		expect(content).toContain("8%");
+
+		const sparkComponent = makeComponent(reports, {
+			provider: "openai-codex",
+			modelId: "gpt-5.3-codex-spark",
+		});
+		sparkComponent.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const sparkContent = stripVTControlCharacters(sparkComponent.getTopBorder(200).content);
+
+		expect(sparkContent).toContain("spark");
+		expect(sparkContent).toContain("5h");
+		expect(sparkContent).toContain("7d");
+		expect(sparkContent).not.toContain("8%");
+	});
+
+	it("keeps windows within the preferred untiered scope", async () => {
 		const component = makeComponent([
 			{
 				limits: [
@@ -125,12 +171,12 @@ describe("usage status-line segment", () => {
 		await flushUsageRefresh();
 		const content = stripVTControlCharacters(component.getTopBorder(200).content);
 
-		expect(content).toContain("prolite");
+		expect(content).not.toContain("prolite");
 		expect(content).not.toContain("stale");
 		expect(content).toContain("5h");
 		expect(content).toContain("24%");
-		expect(content).toContain("7d");
-		expect(content).toContain("8%");
+		expect(content).not.toContain("7d");
+		expect(content).not.toContain("8%");
 	});
 
 	it("scopes fetched usage reports to the active provider and account", async () => {
@@ -238,6 +284,77 @@ describe("usage status-line segment", () => {
 		expect(refreshed).toContain("24%");
 	});
 
+	it("invalidates cached usage when the active model changes within a provider", async () => {
+		const model = { id: "gpt-5.6-sol", contextWindow: 1000, provider: "openai-codex" };
+		const reports = [
+			{
+				provider: "openai-codex",
+				metadata: { accountId: "active-account" },
+				limits: [
+					{ scope: { windowId: "7d" }, amount: { usedFraction: 0.08 } },
+					{
+						scope: { windowId: "5h", tier: "spark", modelId: "GPT-5.3-Codex-Spark" },
+						amount: { usedFraction: 0.42 },
+					},
+					{
+						scope: { windowId: "7d", tier: "spark", modelId: "GPT-5.3-Codex-Spark" },
+						amount: { usedFraction: 0.11 },
+					},
+				],
+			},
+		];
+		const session = {
+			state: { messages: [], model },
+			model,
+			sessionManager: {
+				getUsageStatistics: () => ({
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					orchestrationInput: 0,
+					orchestrationOutput: 0,
+					orchestrationCacheRead: 0,
+					premiumRequests: 0,
+					cost: 0,
+				}),
+			},
+			fetchUsageReports: async () => reports,
+			modelRegistry: {
+				authStorage: {
+					getOAuthAccountIdentity: (requestedProvider: string) =>
+						requestedProvider === "openai-codex" ? { accountId: "active-account" } : undefined,
+				},
+			},
+			getAsyncJobSnapshot: () => ({ running: [] }),
+			getContextUsage: () => undefined,
+		} as unknown as ConstructorParameters<typeof StatusLineComponent>[0];
+		const component = new StatusLineComponent(session);
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: [],
+			rightSegments: ["usage"],
+			sessionAccent: false,
+		});
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const solContent = stripVTControlCharacters(component.getTopBorder(200).content);
+		expect(solContent).not.toContain("spark");
+		expect(solContent).not.toContain("5h");
+		expect(solContent).toContain("8%");
+
+		model.id = "gpt-5.3-codex-spark";
+		const immediate = stripVTControlCharacters(component.getTopBorder(200).content);
+		expect(immediate).not.toContain("8%");
+		await flushUsageRefresh();
+		const sparkContent = stripVTControlCharacters(component.getTopBorder(200).content);
+		expect(sparkContent).toContain("spark");
+		expect(sparkContent).toContain("5h");
+		expect(sparkContent).toContain("42%");
+	});
+
 	it("keeps active-provider rate-limit header reports with account metadata", async () => {
 		const component = makeComponent(
 			[
@@ -327,6 +444,141 @@ describe("usage status-line segment", () => {
 		expect(content).not.toContain("7d");
 	});
 
+	it("renders monthly Cursor usage when five-hour and seven-day windows are absent", () => {
+		const result = renderSegment("usage", {
+			usage: { monthly: { percent: 1.88, resetHours: 743 } },
+		} as unknown as SegmentContext);
+		const content = stripVTControlCharacters(result.content);
+
+		expect(result.visible).toBe(true);
+		expect(content).toContain("mo");
+		// Match Cursor web dashboard flooring (1.88 → 1%), not Math.round → 2%.
+		expect(content).toContain("1%");
+		expect(content).not.toContain("2%");
+		expect(content).toContain("30d 23h");
+		expect(content).not.toContain("5h");
+		expect(content).not.toContain("7d");
+	});
+
+	it("keeps monthly Cursor personal usage from the active provider", async () => {
+		const component = makeComponent(
+			[
+				{
+					provider: "cursor",
+					limits: [
+						{
+							id: "cursor:usd:individual-plan",
+							scope: { windowId: "monthly" },
+							window: { id: "monthly", resetsAt: Date.now() + 743 * 3_600_000 },
+							amount: { usedFraction: 0.132 },
+						},
+					],
+				},
+			],
+			{ provider: "cursor" },
+		);
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const content = stripVTControlCharacters(component.getTopBorder(200).content);
+
+		expect(content).toContain("mo");
+		expect(content).toContain("13%");
+	});
+
+	it("prefers Cursor personal dashboard rails over legacy monthly request limits", async () => {
+		const component = makeComponent(
+			[
+				{
+					provider: "cursor",
+					limits: [
+						{
+							id: "cursor:requests:gpt-4",
+							scope: { windowId: "monthly" },
+							amount: { usedFraction: 0.9 },
+						},
+						{
+							id: "cursor:usd:individual-auto",
+							scope: { windowId: "monthly" },
+							amount: { usedFraction: 0.0185 },
+						},
+					],
+				},
+			],
+			{ provider: "cursor" },
+		);
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const content = stripVTControlCharacters(component.getTopBorder(200).content);
+
+		expect(content).toContain("mo");
+		expect(content).toContain("1%");
+		expect(content).not.toContain("90%");
+	});
+
+	it("renders all three OpenCode Go windows including monthly", async () => {
+		const now = Date.now();
+		const component = makeComponent(
+			[
+				{
+					provider: "opencode-go",
+					limits: [
+						{
+							id: "rolling-5h",
+							scope: { windowId: "5h" },
+							window: { id: "5h", durationMs: 5 * 3_600_000, resetsAt: now + 90 * 60_000 },
+							amount: { used: 12, usedFraction: 0.12, unit: "percent" },
+						},
+						{
+							id: "weekly",
+							scope: { windowId: "7d" },
+							window: { id: "7d", durationMs: 7 * 86_400_000, resetsAt: now + 100 * 3_600_000 },
+							amount: { used: 8, usedFraction: 0.08, unit: "percent" },
+						},
+						{
+							id: "monthly",
+							scope: { windowId: "monthly" },
+							window: { id: "monthly", resetsAt: now + 160 * 3_600_000 },
+							amount: { used: 42, usedFraction: 0.42, unit: "percent" },
+						},
+					],
+				},
+			],
+			{ provider: "opencode-go" },
+		);
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const content = stripVTControlCharacters(component.getTopBorder(200).content);
+
+		expect(content).toContain("5h");
+		expect(content).toContain("12%");
+		expect(content).toContain("7d");
+		expect(content).toContain("8%");
+		expect(content).toContain("mo");
+		expect(content).toContain("42%");
+	});
+
+	it("does not render monthly usage for providers outside the single-bucket gate", async () => {
+		const component = makeComponent(
+			[
+				{
+					provider: "github-copilot",
+					limits: [{ id: "copilot:premium", scope: { windowId: "monthly" }, amount: { usedFraction: 0.42 } }],
+				},
+			],
+			{ provider: "github-copilot" },
+		);
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const content = stripVTControlCharacters(component.getTopBorder(200).content);
+
+		expect(content).not.toContain("mo");
+		expect(content).not.toContain("42%");
+	});
+
 	it("uses a distinct error color at the eighty-percent threshold", () => {
 		const high = renderSegment("usage", { usage: { fiveHour: { percent: 80 } } } as unknown as SegmentContext);
 		const low = renderSegment("usage", { usage: { fiveHour: { percent: 24 } } } as unknown as SegmentContext);
@@ -337,5 +589,81 @@ describe("usage status-line segment", () => {
 		expect(low.visible).toBe(true);
 		expect(stripVTControlCharacters(highWithoutValue)).toBe(stripVTControlCharacters(lowWithoutValue));
 		expect(highWithoutValue).not.toBe(lowWithoutValue);
+	});
+
+	it("maps non-canonical window ids onto subscription windows by reported span", async () => {
+		// Kimi-shaped rows: the burst window reports duration/timeUnit instead
+		// of a canonical id, and rows written before canonicalization keep the
+		// old id. The reported span still identifies the window.
+		const now = Date.now();
+		const component = makeComponent([
+			{
+				limits: [
+					{
+						scope: { windowId: "300time_unit_minute" },
+						window: { durationMs: 5 * 3_600_000, resetsAt: now + 30 * 60_000 },
+						amount: { usedFraction: 0.24 },
+					},
+					{
+						scope: { windowId: "weekly" },
+						window: { durationMs: 7 * 86_400_000, resetsAt: now + 141 * 3_600_000 },
+						amount: { usedFraction: 0.08 },
+					},
+				],
+			},
+		]);
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const content = stripVTControlCharacters(component.getTopBorder(200).content);
+
+		expect(content).toContain("5h");
+		expect(content).toContain("24%");
+		expect(content).toContain("7d");
+		expect(content).toContain("8%");
+	});
+
+	it("ignores non-canonical windows without a reported span", async () => {
+		const component = makeComponent([
+			{
+				limits: [
+					{ scope: { windowId: "default" }, window: {}, amount: { usedFraction: 0.24 } },
+					{
+						scope: { windowId: "monthly" },
+						window: { durationMs: 30 * 86_400_000 },
+						amount: { usedFraction: 0.5 },
+					},
+				],
+			},
+		]);
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const content = stripVTControlCharacters(component.getTopBorder(200).content);
+
+		expect(content).not.toContain("24%");
+		expect(content).not.toContain("50%");
+	});
+
+	it("prefers canonical window ids over a conflicting reported span", async () => {
+		const component = makeComponent([
+			{
+				limits: [
+					{
+						scope: { windowId: "5h" },
+						window: { durationMs: 7 * 86_400_000 },
+						amount: { usedFraction: 0.24 },
+					},
+				],
+			},
+		]);
+
+		component.refreshUsageInBackground();
+		await flushUsageRefresh();
+		const content = stripVTControlCharacters(component.getTopBorder(200).content);
+
+		expect(content).toContain("5h");
+		expect(content).toContain("24%");
+		expect(content).not.toContain("7d");
 	});
 });

@@ -5,6 +5,8 @@ const DELIVERY_RETRY_MAX_MS = 30_000;
 const DELIVERY_RETRY_JITTER_MS = 200;
 const DEFAULT_RETENTION_MS = 5 * 60 * 1000;
 const DEFAULT_MAX_RUNNING_JOBS = 15;
+/** Abort reason used only when the owning session shuts down the entire manager. */
+export const ASYNC_JOB_MANAGER_SHUTDOWN_REASON = Symbol("AsyncJobManager shutdown");
 
 /**
  * Adaptive ("smart") `hub` poll-wait ladder (ms). A tight poll loop climbs
@@ -27,9 +29,12 @@ interface PollEscalationState {
 	lastPollEndAt: number;
 }
 
+/** Kind of work a managed job runs; drives job-row badges and delivery labels. */
+export type AsyncJobType = "bash" | "task" | "eval";
+
 export interface AsyncJob {
 	id: string;
-	type: "bash" | "task";
+	type: AsyncJobType;
 	status: "running" | "completed" | "failed" | "cancelled";
 	startTime: number;
 	label: string;
@@ -143,6 +148,7 @@ export class AsyncJobManager {
 	readonly #inFlightDeliveries: AsyncJobDelivery[] = [];
 	readonly #suppressedDeliveries = new Set<string>();
 	readonly #watchedJobs = new Set<string>();
+	readonly #consumedJobResults = new Set<string>();
 	readonly #evictionTimers = new Map<string, NodeJS.Timeout>();
 	readonly #pollEscalation = new Map<string | undefined, PollEscalationState>();
 	readonly #deliverySinks = new Map<string, AsyncJobDeliverySink>();
@@ -150,6 +156,7 @@ export class AsyncJobManager {
 	readonly #maxRunningJobs: number;
 	readonly #retentionMs: number;
 	#deliveryLoop: Promise<void> | undefined;
+	#deliveryQueueChanged = Promise.withResolvers<void>();
 	#disposed = false;
 
 	#filterJobs(jobs: Iterable<AsyncJob>, filter?: AsyncJobFilter): AsyncJob[] {
@@ -180,7 +187,7 @@ export class AsyncJobManager {
 	}
 
 	register(
-		type: "bash" | "task",
+		type: AsyncJobType,
 		label: string,
 		run: (ctx: {
 			jobId: string;
@@ -208,6 +215,7 @@ export class AsyncJobManager {
 
 		const id = this.#resolveJobId(options?.id);
 		this.#suppressedDeliveries.delete(id);
+		this.#consumedJobResults.delete(id);
 		const abortController = new AbortController();
 		const startTime = Date.now();
 
@@ -333,6 +341,7 @@ export class AsyncJobManager {
 		for (const jobId of uniqueJobIds) {
 			this.#watchedJobs.add(jobId);
 		}
+		this.#notifyDeliveryQueueChanged();
 		return uniqueJobIds.length;
 	}
 
@@ -387,7 +396,29 @@ export class AsyncJobManager {
 			this.#deliveries.length,
 			...this.#deliveries.filter(delivery => !this.isDeliverySuppressed(delivery.jobId)),
 		);
+		this.#notifyDeliveryQueueChanged();
 		return before - this.#deliveries.length;
+	}
+
+	/**
+	 * Mark settled job results as recovered by a foreground snapshot.
+	 *
+	 * Suppresses queued delivery and marks retained bodies as consumed so later
+	 * snapshots report execution state without replaying the same result.
+	 */
+	consumeJobResults(jobIds: string[]): number {
+		const uniqueJobIds = Array.from(new Set(jobIds.map(id => id.trim()).filter(id => id.length > 0)));
+		this.acknowledgeDeliveries(uniqueJobIds);
+		let consumed = 0;
+		for (const jobId of uniqueJobIds) {
+			if (this.#consumeJobResult(jobId)) consumed += 1;
+		}
+		return consumed;
+	}
+
+	/** True once a result was auto-delivered or recovered by a foreground snapshot. */
+	isJobResultConsumed(jobId: string): boolean {
+		return this.#consumedJobResults.has(jobId);
 	}
 
 	/**
@@ -414,11 +445,20 @@ export class AsyncJobManager {
 	 * Cancel running jobs. With `filter.ownerId` set, cancels only jobs the
 	 * matching agent registered; with no filter, cancels every running job
 	 * (used by `dispose()` to nuke the manager's state).
+	 *
+	 * `reason` is forwarded to each job's `AbortController.abort`, so a session
+	 * teardown can tag its owned jobs with {@link ASYNC_JOB_MANAGER_SHUTDOWN_REASON}
+	 * before `dispose()` runs — the task executor reads it to park (not
+	 * tombstone) a subagent interrupted purely by process shutdown.
 	 */
-	cancelAll(filter?: AsyncJobFilter): void {
+	cancelAll(filter?: AsyncJobFilter, reason?: unknown): void {
+		this.#cancelJobs(filter, reason);
+	}
+
+	#cancelJobs(filter?: AsyncJobFilter, reason?: unknown): void {
 		for (const job of this.getRunningJobs(filter)) {
 			job.status = "cancelled";
-			job.abortController.abort();
+			job.abortController.abort(reason);
 			this.#scheduleEviction(job.id);
 		}
 	}
@@ -584,7 +624,7 @@ export class AsyncJobManager {
 	async dispose(options?: { timeoutMs?: number }): Promise<boolean> {
 		this.#disposed = true;
 		this.#clearEvictionTimers();
-		this.cancelAll();
+		this.#cancelJobs(undefined, ASYNC_JOB_MANAGER_SHUTDOWN_REASON);
 		const timeoutMs = Math.max(options?.timeoutMs ?? 3_000, 0);
 		const deadline = Date.now() + timeoutMs;
 		const jobsSettled = await this.#waitForAllUntil(deadline);
@@ -592,12 +632,22 @@ export class AsyncJobManager {
 		this.#clearEvictionTimers();
 		this.#jobs.clear();
 		this.#deliveries.length = 0;
+		this.#notifyDeliveryQueueChanged();
 		this.#inFlightDeliveries.length = 0;
 		this.#suppressedDeliveries.clear();
 		this.#watchedJobs.clear();
+		this.#consumedJobResults.clear();
 		this.#pollEscalation.clear();
 		this.#deliverySinks.clear();
 		return jobsSettled && drained;
+	}
+
+	#consumeJobResult(jobId: string): boolean {
+		const job = this.#jobs.get(jobId);
+		if (!job || job.status === "running" || this.#consumedJobResults.has(jobId)) return false;
+		if (job.resultText === undefined && job.errorText === undefined) return false;
+		this.#consumedJobResults.add(jobId);
+		return true;
 	}
 
 	#resolveJobId(preferredId?: string): string {
@@ -630,6 +680,7 @@ export class AsyncJobManager {
 		this.#evictionTimers.delete(jobId);
 		this.#suppressedDeliveries.delete(jobId);
 		this.#watchedJobs.delete(jobId);
+		this.#consumedJobResults.delete(jobId);
 		return this.#jobs.delete(jobId);
 	}
 
@@ -693,13 +744,14 @@ export class AsyncJobManager {
 			const now = Date.now();
 			if (selected.nextAttemptAt > now) {
 				if (selected.nextAttemptAt > deadline) return false;
-				await Bun.sleep(selected.nextAttemptAt - now);
+				await this.#waitForDeliveryQueueChange(selected.nextAttemptAt - now);
 				continue;
 			}
 
 			const index = this.#deliveries.indexOf(selected);
 			if (index === -1) continue;
 			this.#deliveries.splice(index, 1);
+			this.#notifyDeliveryQueueChanged();
 			if (this.isDeliverySuppressed(selected.jobId)) continue;
 
 			return this.#waitForDeliveryPromise(this.#deliverDelivery(selected), deadline);
@@ -715,7 +767,7 @@ export class AsyncJobManager {
 		if (this.isDeliverySuppressed(jobId)) {
 			return;
 		}
-		this.#deliveries.push({
+		this.#queueDelivery({
 			jobId,
 			text,
 			attempt: 0,
@@ -751,7 +803,8 @@ export class AsyncJobManager {
 			}
 			const waitMs = delivery.nextAttemptAt - Date.now();
 			if (waitMs > 0) {
-				await Bun.sleep(waitMs);
+				await this.#waitForDeliveryQueueChange(waitMs);
+				continue;
 			}
 			if (this.#deliveries[0] !== delivery) {
 				continue;
@@ -762,7 +815,7 @@ export class AsyncJobManager {
 			}
 
 			this.#deliveries.shift();
-			await this.#deliverDelivery(delivery);
+			void this.#deliverDelivery(delivery);
 		}
 	}
 
@@ -797,12 +850,13 @@ export class AsyncJobManager {
 			this.#inFlightDeliveries.push(delivery);
 			try {
 				await sink(delivery.jobId, delivery.text, this.#jobs.get(delivery.jobId));
+				this.#consumeJobResult(delivery.jobId);
 			} catch (error) {
 				delivery.attempt += 1;
 				delivery.lastError = error instanceof Error ? error.message : String(error);
 				delivery.nextAttemptAt = Date.now() + this.#getRetryDelay(delivery.attempt);
-				if (!this.isDeliverySuppressed(delivery.jobId)) {
-					this.#deliveries.push(delivery);
+				if (!this.isDeliverySuppressed(delivery.jobId) && this.#jobs.has(delivery.jobId)) {
+					this.#queueDelivery(delivery);
 				}
 				logger.warn("Async job completion delivery failed", {
 					jobId: delivery.jobId,
@@ -818,6 +872,29 @@ export class AsyncJobManager {
 		})();
 		delivery.promise = promise;
 		return promise;
+	}
+
+	#queueDelivery(delivery: AsyncJobDelivery): void {
+		const index = this.#deliveries.findIndex(candidate => candidate.nextAttemptAt > delivery.nextAttemptAt);
+		if (index === -1) this.#deliveries.push(delivery);
+		else this.#deliveries.splice(index, 0, delivery);
+		this.#notifyDeliveryQueueChanged();
+	}
+
+	async #waitForDeliveryQueueChange(delayMs: number): Promise<void> {
+		const timerElapsed = Promise.withResolvers<void>();
+		const timer = setTimeout(timerElapsed.resolve, delayMs);
+		timer.unref();
+		try {
+			await Promise.race([timerElapsed.promise, this.#deliveryQueueChanged.promise]);
+		} finally {
+			clearTimeout(timer);
+		}
+	}
+
+	#notifyDeliveryQueueChanged(): void {
+		this.#deliveryQueueChanged.resolve();
+		this.#deliveryQueueChanged = Promise.withResolvers<void>();
 	}
 
 	async #waitForDeliveryPromise(promise: Promise<void> | undefined, deadline: number): Promise<boolean> {

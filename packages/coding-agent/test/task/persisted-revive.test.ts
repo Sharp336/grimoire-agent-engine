@@ -46,7 +46,7 @@ interface RevivedSessionHandle {
 	observer: () => IrcWakeObserver | undefined;
 }
 
-function createRevivedSession(activeToolNames: string[][]): RevivedSessionHandle {
+function createRevivedSession(activeToolNames: string[][], extensionRunner?: unknown): RevivedSessionHandle {
 	let observer: IrcWakeObserver | undefined;
 	const session = {
 		getMountedXdevToolNames: () => [],
@@ -57,12 +57,19 @@ function createRevivedSession(activeToolNames: string[][]): RevivedSessionHandle
 		setIrcWakeTurnObserver: (next: IrcWakeObserver | undefined) => {
 			observer = next;
 		},
+		subscribeRunState: () => () => {},
 		getLastAssistantMessage: () => undefined,
+		extensionRunner,
 	} as unknown as AgentSession;
 	return { session, observer: () => observer };
 }
 
-async function createPersistedSession(cwd: string, restrictToolNames?: boolean): Promise<string> {
+async function createPersistedSession(
+	cwd: string,
+	restrictToolNames?: boolean,
+	modelRole?: string,
+	advisor?: string,
+): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
 	if (!sessionFile) throw new Error("Expected a persisted session file");
@@ -71,6 +78,9 @@ async function createPersistedSession(cwd: string, restrictToolNames?: boolean):
 		task: "persisted task",
 		tools: ["read", "yield"],
 		restrictToolNames,
+		modelRole,
+		resolvedModel: modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
+		advisor,
 	});
 	manager.appendMessage({
 		role: "assistant",
@@ -120,6 +130,28 @@ afterEach(async () => {
 });
 
 describe("persisted subagent revival", () => {
+	it("initializes the extension runtime on cold revival so tool_call handlers are not fail-closed blocked", async () => {
+		const cwd = makeTempDir("@pi-revive-ext-init-");
+		const sessionFile = await createPersistedSession(cwd);
+		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		const initialize = vi.fn();
+		const onError = vi.fn();
+		const emit = vi.fn(async () => undefined);
+		const extensionRunner = { initialize, onError, emit };
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(
+			async () => ({ session: createRevivedSession([], extensionRunner).session }) as CreateAgentSessionResult,
+		);
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(initialize).toHaveBeenCalledTimes(1);
+		expect(onError).toHaveBeenCalledTimes(1);
+		expect(emit).toHaveBeenCalledWith({ type: "session_start" });
+	});
+
 	it("cold-revives a restricted contract without loading hostile same-name capabilities", async () => {
 		const cwd = makeTempDir("@pi-restricted-revive-");
 		const sessionFile = await createPersistedSession(cwd, true);
@@ -177,6 +209,68 @@ describe("persisted subagent revival", () => {
 		expect(capturedOptions?.enableLsp).toBe(true);
 		expect(capturedOptions?.mcpManager).toBe(hostileMcp);
 		expect(capturedOptions?.customTools?.map(tool => tool.name)).toEqual(["mcp__server_read"]);
+	});
+	it("restores the persisted per-agent advisor opt-in on cold revival", async () => {
+		const cwd = makeTempDir("@pi-advisor-revive-");
+		const advisedFile = await createPersistedSession(cwd, undefined, undefined, "moonshot/k3");
+		const roleAdvisedFile = await createPersistedSession(cwd, undefined, undefined, "on");
+		const unadvisedFile = await createPersistedSession(cwd);
+		const captured: Settings[] = [];
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (options?.settings) captured.push(options.settings);
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const factory = createFactory(cwd);
+		for (const sessionFile of [advisedFile, roleAdvisedFile, unadvisedFile]) {
+			const ref = createRef(sessionFile);
+			const reviver = await factory(ref);
+			if (!reviver) throw new Error("Expected a persisted reviver");
+			await reviver(ref);
+		}
+
+		const [advised, roleAdvised, unadvised] = captured;
+		expect(advised.get("advisor.enabled")).toBe(true);
+		expect(advised.getModelRole("advisor")).toBe("moonshot/k3");
+		expect(roleAdvised.get("advisor.enabled")).toBe(true);
+		expect(roleAdvised.getModelRole("advisor")).toBeUndefined();
+		expect(unadvised.get("advisor.enabled")).toBe(false);
+	});
+
+	it("restores the persisted custom model role before reopening the session", async () => {
+		const cwd = makeTempDir("@pi-custom-role-revive-");
+		const sessionFile = await createPersistedSession(cwd, false, "review-fast");
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.modelPattern).toEqual(["@review-fast", "anthropic/claude-sonnet-4-5"]);
+		expect(capturedOptions?.modelPatternAuthFallback).toBe("anthropic/claude-sonnet-4-5");
+	});
+
+	it("pins the persisted concrete model when the default role is revived", async () => {
+		const cwd = makeTempDir("@pi-default-role-revive-");
+		const sessionFile = await createPersistedSession(cwd, false, "default");
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.modelPattern).toBe("anthropic/claude-sonnet-4-5");
+		expect(capturedOptions?.modelPatternAuthFallback).toBe("anthropic/claude-sonnet-4-5");
 	});
 
 	it("installs an IRC wake monitor that emits cold-revive lifecycle frames on the shared bus", async () => {
@@ -236,6 +330,58 @@ describe("persisted subagent revival", () => {
 		expect(last.payload.id).toBe(ref.id);
 		expect(last.payload.status).not.toBe("started");
 		rpcRegistry.dispose();
+		AgentLifecycleManager.resetGlobalForTests();
+		AgentRegistry.resetGlobalForTests();
+	});
+
+	it("preserves the completed output artifact when a revived subagent answers a hub message without yielding", async () => {
+		AgentRegistry.resetGlobalForTests();
+		AgentLifecycleManager.resetGlobalForTests();
+		const cwd = makeTempDir("@pi-revive-artifact-");
+		const sessionFile = await createPersistedSession(cwd);
+		MCPManager.setInstance({ getTools: () => [] } as unknown as MCPManager);
+		let handle: RevivedSessionHandle | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			handle = createRevivedSession([]);
+			return { session: handle.session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		AgentRegistry.global().register({
+			id: ref.id,
+			displayName: ref.displayName,
+			kind: "sub",
+			session: null,
+			sessionFile,
+			status: "parked",
+		});
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		// The completed first run already wrote its report to <artifactsDir>/<id>.md
+		// (artifactsDir = parent sessionFile sans ".jsonl"; see createFactory).
+		const artifactPath = path.join(cwd, "parent", `${ref.id}.md`);
+		const completedReport = "# Completed report\n\nfull multi-paragraph body\n\nZZEND";
+		await Bun.write(artifactPath, completedReport);
+
+		const observer = handle?.observer();
+		expect(observer).toBeDefined();
+		const record: CustomMessage = {
+			role: "custom",
+			customType: "irc:incoming",
+			content: "thanks",
+			display: true,
+			details: { id: "irc-1", from: "Main", message: "thanks" },
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+		// A wake turn answering a hub message never calls yield; finalization must
+		// not clobber the authoritative completion artifact with a warning body.
+		const finish = observer?.([record]);
+		await finish?.();
+
+		expect(await Bun.file(artifactPath).text()).toBe(completedReport);
 		AgentLifecycleManager.resetGlobalForTests();
 		AgentRegistry.resetGlobalForTests();
 	});

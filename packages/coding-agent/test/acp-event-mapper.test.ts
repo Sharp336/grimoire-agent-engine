@@ -2,8 +2,8 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import path from "node:path";
-import type { AgentSideConnection, SessionNotification } from "@agentclientprotocol/sdk";
 import { type } from "@oh-my-pi/omptype";
+import type { AgentSideConnection, SessionNotification } from "@oh-my-pi/pi-utils/acp";
 
 const arkSessionNotification = type({
 	sessionId: "string",
@@ -648,6 +648,43 @@ describe("ACP event mapper", () => {
 			type: "content",
 			content: { type: "text", text: '{"content":[],"details":{"terminalId":"term-1"}}' },
 		});
+	});
+
+	it("does not serialize a hub wait progress envelope into content text", () => {
+		const partialResult = {
+			content: [{ type: "text", text: "" }],
+			details: {
+				op: "wait",
+				jobs: [
+					{ id: "bash_1", state: "running" },
+					{ id: "bash_2", state: "running" },
+				],
+			},
+		};
+		const updates = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "tool_execution_update",
+				toolCallId: "tc-hub-wait",
+				toolName: "hub",
+				args: { op: "wait", i: "waiting for jobs" },
+				partialResult,
+			} as AgentSessionEvent,
+			"session-1",
+		);
+
+		expect(updates).toHaveLength(1);
+		expectAcpNotifications(updates);
+		const update = updates[0]!.update as {
+			sessionUpdate: string;
+			content?: unknown;
+			rawOutput?: unknown;
+		};
+		expect(update.sessionUpdate).toBe("tool_call_update");
+		// The job details already ride the frame as structured rawOutput.
+		expect(update.rawOutput).toEqual(partialResult);
+		// An empty-text envelope must not be dumped as a JSON blob display row.
+		expect(update.content).toBeUndefined();
+		expect(JSON.stringify(update.content ?? [])).not.toContain('"op":"wait"');
 	});
 
 	it("keeps terminal content alongside readable text", () => {

@@ -8,6 +8,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
 import { createTools, type Tool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { requiresApproval, resolveApproval } from "@oh-my-pi/pi-coding-agent/tools/approval";
 import { githubToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/gh-renderer";
 import { ToolError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import { WriteTool, writeToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/write";
@@ -87,7 +88,7 @@ describe("read and write route xd:// device URLs", () => {
 			const approval = write!.approval;
 			expect(typeof approval).toBe("function");
 			if (typeof approval === "function") {
-				expect(approval({ path: "xd://ast_edit", content })).toBe("write");
+				expect(approval({ path: "xd://ast_edit", content })).toEqual({ tier: "write", policyKey: "ast_edit" });
 			}
 
 			// Execute dispatches through the xdev registry to the mounted ast_edit,
@@ -129,6 +130,51 @@ describe("read and write route xd:// device URLs", () => {
 		const result = await write.execute("write-xdev-read", { path: "xd://peek", content: JSON.stringify({ q: "x" }) });
 		expect(result.isError).toBeUndefined();
 		expect(result.details?.xdev).toMatchObject({ tool: "peek", mode: "execute", tier: "read" });
+	});
+
+	it("resolves device dispatches against the device's user policy, falling back to write's", async () => {
+		// Like the pi-knowledge plugin in #7923: the mounted device declares no
+		// approval, so it defaults to exec tier — but a device-scoped user policy
+		// must still gate, and without one the dispatch must honor `write`'s policy.
+		const device: AgentTool = {
+			name: "knowledge_search",
+			label: "Knowledge Search",
+			description: "Read-only device without a tier declaration",
+			parameters: type({ q: "string" }),
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+		const xdev = createTestXdevState([device]);
+		const write = new WriteTool(xdevSession(process.cwd(), { xdev }));
+		const args = { path: "xd://knowledge_search", content: JSON.stringify({ q: "x" }) };
+
+		const approval = write.approval;
+		expect(typeof approval).toBe("function");
+		if (typeof approval !== "function") throw new Error("expected a function approval");
+		// The gate reports the mounted tool's (default exec) tier and keys user
+		// policy on the device name.
+		expect(approval(args)).toEqual({ tier: "exec", policyKey: "knowledge_search" });
+
+		// No device policy → falls back to the write tool's own policy.
+		expect(resolveApproval(write, args, "always-ask", { write: "prompt" }).policy).toBe("prompt");
+		expect(resolveApproval(write, args, "always-ask", { write: "allow" }).policy).toBe("allow");
+
+		// Device-scoped allow lets the dispatch through even while the blanket
+		// write policy stays prompt — the exact scenario from #7923.
+		const allowed = resolveApproval(write, args, "always-ask", { write: "prompt", knowledge_search: "allow" });
+		expect(allowed).toMatchObject({ policy: "allow", source: "user", policyKey: "knowledge_search" });
+
+		// Device-scoped deny blocks the dispatch and names the device in the refusal.
+		expect(() => requiresApproval(write, args, "always-ask", { knowledge_search: "deny" })).toThrow(
+			'remove "tools.approval.knowledge_search: deny"',
+		);
+
+		// Device-scoped prompt forces a prompt for this device.
+		expect(resolveApproval(write, args, "always-ask", { knowledge_search: "prompt" }).policy).toBe("prompt");
+
+		// An unrelated device's policy does not leak into this dispatch.
+		expect(resolveApproval(write, args, "always-ask", { other_device: "deny" }).policy).toBe("prompt");
 	});
 
 	it("records the effective tier reported after an execution decorator rewrites device args", async () => {
@@ -223,12 +269,18 @@ describe("read and write route xd:// device URLs", () => {
 				ops: [{ pat: "a", out: "b" }],
 				paths: ["artifact://abc"],
 			});
-			expect(tier("xd://ast_edit", astFsPath)).toBe("write");
-			expect(tier("xd://ast_edit", astInternalPath)).toBe("read");
+			expect(tier("xd://ast_edit", astFsPath)).toEqual({ tier: "write", policyKey: "ast_edit" });
+			expect(tier("xd://ast_edit", astInternalPath)).toEqual({ tier: "read", policyKey: "ast_edit" });
 
 			// debug: inspection action → read; a real launch → exec (control).
-			expect(tier("xd://debug", JSON.stringify({ action: "sessions" }))).toBe("read");
-			expect(tier("xd://debug", JSON.stringify({ action: "launch", program: "./app" }))).toBe("exec");
+			expect(tier("xd://debug", JSON.stringify({ action: "sessions" }))).toEqual({
+				tier: "read",
+				policyKey: "debug",
+			});
+			expect(tier("xd://debug", JSON.stringify({ action: "launch", program: "./app" }))).toEqual({
+				tier: "exec",
+				policyKey: "debug",
+			});
 
 			// Fail closed: malformed JSON, non-object or schema-invalid payloads,
 			// missing content, and unknown devices all stay exec so the gate never
@@ -244,7 +296,7 @@ describe("read and write route xd:// device URLs", () => {
 		}
 	});
 
-	it("renderCall withholds a partial xd:// URL, then delegates once settled", async () => {
+	it("renderCall withholds a partial xd:// URL, then queues until execution starts", async () => {
 		await themeModule.initTheme();
 		const uiTheme = (await themeModule.getThemeByName("dark")) ?? (await themeModule.getThemeByName("light"));
 		if (!uiTheme) throw new Error("expected an initialized theme");
@@ -259,10 +311,56 @@ describe("read and write route xd:// device URLs", () => {
 		// never sees a half-typed "xd://ast_" frame.
 		expect(writeToolRenderer.renderCall({ path: "xd://ast_e" }, options, uiTheme)).toBeUndefined();
 
-		// Path settled + content streaming: delegate to the mounted tool's renderer
+		// Path settled + content streaming, but the write has not executed yet:
+		// show a queued card instead of the inner tool's in-flight renderer.
+		const queued = writeToolRenderer.renderCall({ path: "xd://ast_edit", content }, options, uiTheme);
+		expect(queued).toBeDefined();
+		const queuedText = Bun.stripANSI(queued!.render(80).join("\n"));
+		expect(queuedText).toContain("queued");
+		expect(queuedText).toContain("ast_edit");
+
+		// Args can be final at message_end while an earlier exclusive write still
+		// runs — keep the queued card until this call's tool_execution_start.
+		const argsCompleteOnly = writeToolRenderer.renderCall(
+			{ path: "xd://ast_edit", content },
+			{ ...options, argsComplete: true },
+			uiTheme,
+		);
+		expect(Bun.stripANSI(argsCompleteOnly!.render(80).join("\n"))).toContain("queued");
+
+		// Same payload after tool_execution_start: delegate to the inner renderer
 		// instead of throwing ReferenceError inside a generic Write frame.
-		const rendered = writeToolRenderer.renderCall({ path: "xd://ast_edit", content }, options, uiTheme);
-		expect(rendered).toBeDefined();
+		const executing = writeToolRenderer.renderCall(
+			{ path: "xd://ast_edit", content },
+			{ ...options, argsComplete: true, executionStarted: true },
+			uiTheme,
+		);
+		expect(executing).toBeDefined();
+		const executingText = Bun.stripANSI(executing!.render(80).join("\n"));
+		expect(executingText).not.toContain("queued");
+	});
+
+	it("renders streamed MCP device writes as queued until execution starts", async () => {
+		await themeModule.initTheme();
+		const uiTheme = (await themeModule.getThemeByName("dark")) ?? (await themeModule.getThemeByName("light"));
+		if (!uiTheme) throw new Error("expected an initialized theme");
+		const content = JSON.stringify({
+			action: "grep_all",
+			pattern: "Broken",
+			scope: "game.StarterPlayer",
+			studio: "AED Content Development",
+			maxResults: 20,
+		});
+		const queued = writeToolRenderer.renderCall(
+			{ path: "xd://mcp__ecoport_search", content },
+			{ expanded: false, isPartial: true },
+			uiTheme,
+		);
+		expect(queued).toBeDefined();
+		const queuedText = Bun.stripANSI(queued!.render(120).join("\n"));
+		expect(queuedText).toContain("queued");
+		expect(queuedText).toContain("ecoport/search");
+		expect(queuedText).toContain("Broken");
 	});
 
 	it("renders device execution errors as the mounted tool instead of write", async () => {
