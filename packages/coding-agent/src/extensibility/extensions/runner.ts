@@ -64,6 +64,8 @@ import type {
 	SessionCompactingResult,
 	SessionStopEvent,
 	SessionStopEventResult,
+	StatusLineSegmentContext,
+	StatusLineSegmentResult,
 	ToolCallEvent,
 	ToolCallEventResult,
 	ToolRegistrationListener,
@@ -405,6 +407,7 @@ const noOpUIContext: ExtensionUIContext = {
 	notify: () => {},
 	onTerminalInput: () => () => {},
 	setStatus: () => {},
+	refreshStatusLine: () => {},
 	setWorkingMessage: () => {},
 	setWidget: () => {},
 	setFooter: () => {},
@@ -430,7 +433,49 @@ const noOpUIContext: ExtensionUIContext = {
 interface ToolRegistrationScope {
 	pending: Set<Promise<void>>;
 	signal?: AbortSignal;
+
 	closed: boolean;
+}
+
+function isStatusLineSegmentResult(value: unknown): value is StatusLineSegmentResult {
+	try {
+		if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+		const result = value as { content?: unknown; visible?: unknown };
+		return typeof result.content === "string" && typeof result.visible === "boolean";
+	} catch {
+		return false;
+	}
+}
+
+function invisibleStatusLineSegment(): StatusLineSegmentResult {
+	return { content: "", visible: false };
+}
+
+/** Matches only CSI SGR sequences (`\x1b[<params>m`), the styling extensions are documented to emit. */
+const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
+
+/**
+ * Neutralizes newlines, tabs, and other C0/C1 control characters in
+ * extension-supplied segment content, without touching CSI SGR styling
+ * escapes. Built-in segments already funnel their text through
+ * `sanitizeStatusText`, which strips ANSI entirely; extension content must
+ * keep its ANSI styling, so control characters are mapped to spaces in place
+ * instead of relying on that stricter sanitizer. This protects the
+ * single-line status bar layout (`component.ts`) from a segment whose
+ * content contains a literal newline or tab.
+ */
+function sanitizeExtensionSegmentContent(content: string): string {
+	if (!content) return content;
+	let sanitized = "";
+	let lastIndex = 0;
+	for (const match of content.matchAll(ANSI_SGR_RE)) {
+		const index = match.index ?? 0;
+		sanitized += content.slice(lastIndex, index).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
+		sanitized += match[0];
+		lastIndex = index + match[0].length;
+	}
+	sanitized += content.slice(lastIndex).replace(/[\u0000-\u001f\u007f-\u009f]/g, " ");
+	return sanitized;
 }
 
 export class ExtensionRunner {
@@ -1091,6 +1136,86 @@ export class ExtensionRunner {
 			}
 		}
 		return undefined;
+	}
+
+	/**
+	 * Render a status-line segment through every extension wrapper registered for
+	 * `id`, around the supplied built-in or invisible base renderer.
+	 *
+	 * Extensions are composed in load order so the newest extension is the
+	 * outermost wrapper. Each wrapper receives a memoized `next()` callback;
+	 * malformed or throwing wrappers are skipped in favor of the result beneath
+	 * them.
+	 */
+	renderStatusLineSegment(
+		id: string,
+		ctx: StatusLineSegmentContext,
+		segmentTheme: Theme,
+		renderBase: () => StatusLineSegmentResult,
+	): StatusLineSegmentResult {
+		const safeBase = (): StatusLineSegmentResult => {
+			try {
+				const result = renderBase();
+				if (isStatusLineSegmentResult(result)) return result;
+				logger.warn("Extension status-line segment base renderer returned an invalid result", { id });
+			} catch (error) {
+				logger.warn("Extension status-line segment base renderer threw", {
+					id,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+			return invisibleStatusLineSegment();
+		};
+
+		let render: () => StatusLineSegmentResult = safeBase;
+		for (const extension of this.extensions) {
+			const renderer = extension.statusLineSegments.get(id);
+			if (!renderer) continue;
+
+			const nextRenderer = render;
+			render = (): StatusLineSegmentResult => {
+				let nextCalled = false;
+				let nextResult: StatusLineSegmentResult | undefined;
+				const next = (): StatusLineSegmentResult => {
+					if (!nextCalled) {
+						nextCalled = true;
+						nextResult = nextRenderer();
+					}
+					return nextResult ?? invisibleStatusLineSegment();
+				};
+
+				try {
+					const result = renderer(ctx, next, segmentTheme);
+					if (isStatusLineSegmentResult(result)) return result;
+					logger.warn("Extension status-line segment renderer returned an invalid result", {
+						id,
+						extensionPath: extension.path,
+					});
+				} catch (error) {
+					logger.warn("Extension status-line segment renderer threw; falling through", {
+						id,
+						extensionPath: extension.path,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				}
+				return next();
+			};
+		}
+
+		try {
+			const result = render();
+			return { ...result, content: sanitizeExtensionSegmentContent(result.content) };
+		} catch (error) {
+			logger.warn("Extension status-line segment rendering failed", {
+				id,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return invisibleStatusLineSegment();
+		}
+	}
+
+	hasStatusLineSegment(id: string): boolean {
+		return this.extensions.some(extension => extension.statusLineSegments.has(id));
 	}
 
 	getAssistantThinkingRenderers(): AssistantThinkingRenderer[] {

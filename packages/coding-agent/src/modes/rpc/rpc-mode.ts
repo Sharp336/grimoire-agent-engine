@@ -842,6 +842,10 @@ export async function runRpcMode(
 			} as RpcExtensionUIRequest);
 		}
 
+		refreshStatusLine(): void {
+			// Status-line segments are interactive-TUI only.
+		}
+
 		setWorkingMessage(_message?: string): void {
 			// Not supported in RPC mode
 		}
