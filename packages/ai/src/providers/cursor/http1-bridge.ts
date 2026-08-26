@@ -275,7 +275,9 @@ class FrameQueue implements AsyncIterable<ConnectFrame> {
 			}
 			if (this.#error) throw this.#error;
 			if (this.#done) return;
-			await new Promise<void>(resolve => this.#waiters.push(resolve));
+			const waiter = Promise.withResolvers<void>();
+			this.#waiters.push(waiter.resolve);
+			await waiter.promise;
 		}
 	}
 

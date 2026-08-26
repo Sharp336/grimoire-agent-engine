@@ -87,6 +87,9 @@ export async function openCursorTransport(args: {
 	if (acquisition.ok) return wrapH2Lease(acquisition.lease);
 
 	if (acquisition.unavailable.reason === "alpn") {
+		// fetchCursorBidiAvailability probes GetServerConfig over HTTP/1 when this
+		// origin cannot negotiate h2, so ALPN failure can still discover
+		// bidi-disabled / all-disabled rather than collapsing to "unspecified".
 		const availability = await serverConfig.fetchCursorBidiAvailability({
 			apiKey: args.apiKey,
 			baseUrl: args.baseUrl,
@@ -234,7 +237,9 @@ async function* iterateH2Frames(
 			}
 			if (failure) throw failure;
 			if (done) return;
-			await new Promise<void>(resolve => waiters.push(resolve));
+			const waiter = Promise.withResolvers<void>();
+			waiters.push(waiter.resolve);
+			await waiter.promise;
 		}
 	} finally {
 		request.off("data", onData);

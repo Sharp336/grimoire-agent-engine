@@ -119,10 +119,59 @@ async function fetchServerConfig(
 			provider: "cursor",
 			signal: timeout,
 		});
-		if (!acquisition.ok) return "unspecified";
+		if (!acquisition.ok) {
+			// The same origin that failed Run ALPN will fail this unary over h2 too.
+			// Probe GetServerConfig with a unary HTTP/1 fetch so FORCE_BIDI_DISABLED /
+			// FORCE_ALL_DISABLED remain discoverable; do not treat ALPN failure itself
+			// as a downgrade permit.
+			if (acquisition.unavailable.reason === "alpn") {
+				return await fetchServerConfigOverHttp1(apiKey, baseUrl, timeout);
+			}
+			return "unspecified";
+		}
 		return await readServerConfigResponse(acquisition.lease);
 	} catch {
 		// Acquisition rejection, timeout, or abort: fail open.
+		return "unspecified";
+	}
+}
+
+async function fetchServerConfigOverHttp1(
+	apiKey: string,
+	baseUrl: string,
+	signal?: AbortSignal,
+): Promise<CursorBidiAvailability> {
+	try {
+		const response = await Bun.fetch(new URL(GET_SERVER_CONFIG_PATH, baseUrl), {
+			method: "POST",
+			headers: buildCursorUnaryHeaders({ apiKey }),
+			body: encodeConnectFrame(
+				toBinary(GetServerConfigRequestSchema, create(GetServerConfigRequestSchema, {})),
+				false,
+			),
+			signal,
+		});
+		if (!response.ok) return "unspecified";
+		const bytes = new Uint8Array(await response.arrayBuffer());
+		if (bytes.byteLength === 0 || bytes.byteLength > MAX_SERVER_CONFIG_RESPONSE_BYTES) {
+			return "unspecified";
+		}
+		const decoder = new ConnectFrameDecoder({ acceptCompressed: true });
+		const chunks: Uint8Array[] = [];
+		for (const frame of decoder.push(Buffer.from(bytes))) {
+			if (frame.kind === "data") {
+				chunks.push(frame.payload);
+			} else if (frame.error) {
+				return "unspecified";
+			}
+		}
+		try {
+			decoder.finish();
+		} catch {
+			// Unary HTTP/1 may omit the Connect end-of-stream envelope.
+		}
+		return decodeServerConfig(chunks);
+	} catch {
 		return "unspecified";
 	}
 }

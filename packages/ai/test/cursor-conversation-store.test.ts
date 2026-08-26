@@ -251,4 +251,21 @@ describe("cursor conversation store — rotation", () => {
 		expect(isCursorRotationFresh(next)).toBe(true);
 		unpinCursorConversation("pinned-rot");
 	});
+
+	it("keeps a retained base mapping while its rotated id is pinned across retained overflow", () => {
+		pinCursorConversation("poisoned-base");
+		const rotated = requireRotation(rotateCursorConversation("poisoned-base"));
+		unpinCursorConversation("poisoned-base");
+		pinCursorConversation(rotated);
+
+		for (let i = 0; i < CURSOR_RETAINED_CONVERSATION_LIMIT + 1; i++) {
+			const id = `unpin-overflow-${i}`;
+			pinCursorConversation(id);
+			unpinCursorConversation(id);
+		}
+
+		expect(resolveCursorConversationId("poisoned-base")).toBe(rotated);
+		expect(isCursorRotationFresh(rotated)).toBe(true);
+		unpinCursorConversation(rotated);
+	});
 });

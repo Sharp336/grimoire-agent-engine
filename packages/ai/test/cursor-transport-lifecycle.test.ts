@@ -1,7 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { EventEmitter } from "node:events";
+import * as fs from "node:fs/promises";
 import * as http from "node:http";
 import * as http2 from "node:http2";
+import * as os from "node:os";
+import * as path from "node:path";
 import { ProviderResponseError } from "@oh-my-pi/pi-ai/error";
 import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
 import type { Context, Model, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
@@ -184,7 +187,7 @@ afterEach(async () => {
 });
 
 describe("openCursorTransport lifecycle", () => {
-	it("throws on ALPN failure when GetServerConfig is unspecified and opens zero HTTP/1.1 requests", async () => {
+	it("throws on ALPN failure when GetServerConfig is unspecified and never opens the HTTP/1.1 Run bridge", async () => {
 		const h1Url = await startH1Fixture();
 		vi.spyOn(h2Pool, "acquireCursorH2").mockResolvedValue({
 			ok: false,
@@ -202,7 +205,57 @@ describe("openCursorTransport lifecycle", () => {
 			}),
 		).rejects.toBeInstanceOf(ProviderResponseError);
 
-		expect(h1Hits).toBe(0);
+		expect(h1Paths).toContain(GET_SERVER_CONFIG_PATH);
+		expect(h1Paths.some(path => path.includes("Run"))).toBe(false);
+	});
+
+	it("opens the HTTP/1.1 bridge when ALPN fails and GetServerConfig is discovered over HTTP/1", async () => {
+		const payload = Buffer.from("server-frame", "utf8");
+		const h1Url = await startH1Fixture((req, res) => {
+			if (req.url === GET_SERVER_CONFIG_PATH) {
+				const message = create(GetServerConfigResponseSchema, {
+					http2Config: Http2Config.FORCE_BIDI_DISABLED,
+				});
+				res.writeHead(200, { "content-type": "application/proto" });
+				res.end(Buffer.concat([frameConnectMessage(toBinary(GetServerConfigResponseSchema, message)), endFrame()]));
+				return;
+			}
+			if (req.url?.endsWith("RunPoll")) {
+				const body = Buffer.concat([
+					encodeConnectFrame(encodePollResponse(0n, payload.toString("base64"), false), false),
+					encodeConnectFrame(encodePollResponse(1n, "", true), false),
+					frameConnectMessage(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG),
+				]);
+				res.writeHead(200, { "content-type": "application/connect+proto" });
+				res.end(body);
+				return;
+			}
+			res.statusCode = 200;
+			res.end();
+		});
+
+		vi.spyOn(h2Pool, "acquireCursorH2").mockResolvedValue({
+			ok: false,
+			unavailable: { reason: "alpn", cause: alpnCause() },
+		});
+
+		const attempt = await openCursorTransport({
+			baseUrl: h1Url,
+			apiKey: API_KEY,
+			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
+			gzipRequest: false,
+			provider: "cursor",
+		});
+
+		attempt.write(encodeConnectFrame(Buffer.from("client-request", "utf8"), false));
+
+		const frames: Array<{ kind: string }> = [];
+		for await (const frame of attempt.frames()) frames.push(frame);
+		expect(frames.some(frame => frame.kind === "data")).toBe(true);
+		expect(h1Paths).toContain(GET_SERVER_CONFIG_PATH);
+		expect(h1Paths.some(path => path.includes("RunPoll"))).toBe(true);
+		attempt.close();
 	});
 
 	it("opens the HTTP/1.1 bridge when ALPN fails and GetServerConfig is bidi-disabled", async () => {
@@ -571,4 +624,111 @@ describe("cursor heartbeat and outbound write lifecycle", () => {
 			await closed.promise;
 		}
 	}, 15_000);
+
+	it("writes Connect data-frame payloads into the PI_REQ_DEBUG response log", async () => {
+		const previousDebugFlag = Bun.env.PI_REQ_DEBUG;
+		const previousCwd = process.cwd();
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-req-debug-body-"));
+		const sessions = new Set<http2.Http2Session>();
+		const server = http2.createServer();
+		server.on("session", session => {
+			sessions.add(session);
+			session.on("close", () => sessions.delete(session));
+		});
+		const payload = turnEndedPayload();
+		server.on("stream", (stream: http2.ServerHttp2Stream, headers: http2.IncomingHttpHeaders) => {
+			stream.on("data", () => {});
+			stream.on("error", () => {});
+			if (headers[":path"] !== RUN_PATH) {
+				stream.respond({ ":status": 404 });
+				stream.end();
+				return;
+			}
+			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+			stream.write(frameConnectMessage(payload));
+			stream.end();
+		});
+		const listening = Promise.withResolvers<void>();
+		server.once("error", listening.reject);
+		server.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const address = server.address();
+		if (!address || typeof address === "string") throw new Error("expected h2 run fixture to bind a tcp port");
+		const baseUrl = `http://127.0.0.1:${address.port}`;
+
+		try {
+			process.chdir(tempDir);
+			Bun.env.PI_REQ_DEBUG = "1";
+			const stream = streamCursor(makeModel(baseUrl), streamContext, { apiKey: API_KEY });
+			for await (const _event of stream) {
+				/* drain */
+			}
+			const entries = await fs.readdir(tempDir);
+			const resLogs = entries.filter(name => /^rr-session-\d+\.res\.log$/.test(name));
+			expect(resLogs.length).toBeGreaterThan(0);
+			const bytes = await fs.readFile(path.join(tempDir, resLogs[0]!));
+			const separator = Buffer.from("\r\n\r\n");
+			const separatorIndex = bytes.indexOf(separator);
+			expect(separatorIndex).toBeGreaterThanOrEqual(0);
+			const body = bytes.subarray(separatorIndex + separator.length);
+			expect(body.length).toBeGreaterThan(0);
+			expect(body.includes(payload)).toBe(true);
+		} finally {
+			process.chdir(previousCwd);
+			if (previousDebugFlag === undefined) delete Bun.env.PI_REQ_DEBUG;
+			else Bun.env.PI_REQ_DEBUG = previousDebugFlag;
+			await fs.rm(tempDir, { recursive: true, force: true });
+			for (const session of sessions) session.destroy();
+			const closed = Promise.withResolvers<void>();
+			server.close(error => (error ? closed.reject(error) : closed.resolve()));
+			await closed.promise;
+		}
+	});
+
+	it("does not emit an unhandled rejection when HTTP/2 trailers reject", async () => {
+		const rejections: unknown[] = [];
+		const onUnhandled = (reason: unknown): void => {
+			rejections.push(reason);
+		};
+		process.on("unhandledRejection", onUnhandled);
+		try {
+			const request = new EventEmitter() as EventEmitter & {
+				write: (frame: Buffer) => boolean;
+				destroy: () => void;
+			};
+			let failed = false;
+			request.write = () => {
+				if (!failed) {
+					failed = true;
+					queueMicrotask(() => {
+						request.emit("response", { ":status": "200" });
+						request.emit("error", new Error("mid-stream network error"));
+					});
+				}
+				return true;
+			};
+			request.destroy = () => {
+				request.emit("close");
+			};
+			vi.spyOn(h2Pool, "acquireCursorH2").mockResolvedValue({
+				ok: true,
+				lease: {
+					request: request as unknown as http2.ClientHttp2Stream,
+					release() {
+						request.destroy();
+					},
+				},
+			});
+			const h1Url = await startH1Fixture();
+			const stream = streamCursor(makeModel(h1Url), streamContext, { apiKey: API_KEY });
+			for await (const _event of stream) {
+				/* drain */
+			}
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(rejections).toHaveLength(0);
+		} finally {
+			process.off("unhandledRejection", onUnhandled);
+		}
+	});
 });

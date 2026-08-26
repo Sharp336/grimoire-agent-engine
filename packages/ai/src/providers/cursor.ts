@@ -502,28 +502,29 @@ function streamCursorWithWireMode(
 			if (inFlightDispatches.size === 0) return;
 			const signal = options?.signal;
 			let timeoutId: NodeJS.Timeout | undefined;
-			const timeout = new Promise<"timeout">(resolve => {
-				timeoutId = setTimeout(() => resolve("timeout"), CURSOR_TURN_END_DRAIN_TIMEOUT_MS);
-				// A bounded drain must not become the reason a completed print-mode
-				// process stays alive.
-				timeoutId.unref();
-			});
+			const timeout = Promise.withResolvers<"timeout">();
+			timeoutId = setTimeout(() => timeout.resolve("timeout"), CURSOR_TURN_END_DRAIN_TIMEOUT_MS);
+			// A bounded drain must not become the reason a completed print-mode
+			// process stays alive.
+			timeoutId.unref();
 			try {
 				while (inFlightDispatches.size > 0) {
 					if (signal?.aborted) return;
 					const settled = Promise.all([...inFlightDispatches]).then(() => "settled" as const);
 					if (!signal) {
-						const winner = await Promise.race([settled, timeout]);
+						const winner = await Promise.race([settled, timeout.promise]);
 						if (winner === "timeout") {
 							drainTimedOut = true;
 							return;
 						}
 						continue;
 					}
-					abortSettled ??= new Promise<void>(resolve =>
-						signal.addEventListener("abort", () => resolve(), { once: true }),
-					);
-					const winner = await Promise.race([settled, abortSettled.then(() => "abort" as const), timeout]);
+					abortSettled ??= (() => {
+						const abortWait = Promise.withResolvers<void>();
+						signal.addEventListener("abort", () => abortWait.resolve(), { once: true });
+						return abortWait.promise;
+					})();
+					const winner = await Promise.race([settled, abortSettled.then(() => "abort" as const), timeout.promise]);
 					if (winner === "timeout") {
 						drainTimedOut = true;
 						return;
@@ -716,7 +717,7 @@ function streamCursorWithWireMode(
 				try {
 					attempt.write(frame);
 				} catch (error) {
-					closeOutboundWrites();
+					closeAttempt();
 					void closeDebugLog().finally(() => settleH2(error));
 					return;
 				}
@@ -742,27 +743,34 @@ function streamCursorWithWireMode(
 				await log?.close();
 			};
 
-			void attempt.responseHeaders?.().then(headers => {
-				debugResponseLogPromise = debugSession?.openResponseLog(
-					`HTTP/2 ${headers[":status"] ?? ""}`.trim(),
-					headers,
-				);
-			});
+			if (attempt.responseHeaders) {
+				debugResponseLogPromise = attempt
+					.responseHeaders()
+					.then(headers => debugSession?.openResponseLog(`HTTP/2 ${headers[":status"] ?? ""}`.trim(), headers));
+			}
+			// HTTP/1 bridge has no responseHeaders: poll/append are separate HTTP
+			// responses, not one Connect stream we can dump as a single body.
 
-			void attempt.trailers().then(trailers => {
-				const status = trailers["grpc-status"];
-				const msg = trailers["grpc-message"];
-				if (status && status !== "0" && !endStreamError) {
-					endStreamError = new AIError.ProviderResponseError(
-						`gRPC error ${status}: ${decodeURIComponent(String(msg || ""))}`,
-						{ kind: "envelope" },
-					);
-				}
-			});
+			void attempt
+				.trailers()
+				.then(trailers => {
+					const status = trailers["grpc-status"];
+					const msg = trailers["grpc-message"];
+					if (status && status !== "0" && !endStreamError) {
+						endStreamError = new AIError.ProviderResponseError(
+							`gRPC error ${status}: ${decodeURIComponent(String(msg || ""))}`,
+							{ kind: "envelope" },
+						);
+					}
+				})
+				.catch(() => {});
 
 			void (async () => {
 				try {
 					for await (const frame of transport.frames()) {
+						if (frame.kind === "data") {
+							void debugResponseLogPromise?.then(log => log?.write(frame.payload));
+						}
 						if (frame.kind === "end") {
 							// Logical outbound close + heartbeat disarm. Do not
 							// destroy the transport here: h2 trailers still need
