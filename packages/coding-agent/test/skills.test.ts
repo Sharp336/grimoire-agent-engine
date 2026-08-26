@@ -769,6 +769,86 @@ export default function (pi) {
 			await removeWithRetries(tempDir);
 		}
 	});
+
+	it("still emits resources_discover at startup for a session with a fixed skill snapshot (options.skills)", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-fixed-skills-"));
+		const authStorage = createInMemoryAuthStorage();
+		let session: AgentSession | undefined;
+		try {
+			const markerPath = path.join(tempDir, "resources-discover.marker");
+			const extensionsDir = path.join(tempDir, "ext");
+			await fs.mkdir(extensionsDir, { recursive: true });
+			const extPath = path.join(extensionsDir, "fixed-skills-observer.ts");
+			await fs.writeFile(
+				extPath,
+				`import * as fs from "node:fs";
+export default function (pi) {
+	pi.on("resources_discover", () => {
+		fs.writeFileSync(${JSON.stringify(markerPath)}, "discovered");
+		return { skillPaths: [${JSON.stringify(tempDir)}] };
+	});
+}
+`,
+			);
+
+			const loaded = await loadExtensions([extPath], tempDir);
+			expect(loaded.errors).toEqual([]);
+
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+			const mock = createMockModel({ handler: () => ({ content: ["ok"] }) });
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [] },
+				streamFn: mock.stream,
+			});
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+			const sessionManager = SessionManager.inMemory(tempDir);
+			const extensionRunner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir,
+				sessionManager,
+				modelRegistry,
+			);
+
+			// A fixed skill snapshot (the SDK caller supplied `options.skills`,
+			// which maps to `skillsReloadable: false`) must not suppress the
+			// `resources_discover` event itself — only the skill rescan it
+			// would otherwise trigger.
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				extensionRunner,
+				skills: [],
+				skillsReloadable: false,
+			});
+
+			const runtimeErrors: ExtensionError[] = [];
+			await initializeExtensions(session, {
+				reportSendError: () => {},
+				reportRuntimeError: error => {
+					runtimeErrors.push(error);
+				},
+			});
+
+			expect(runtimeErrors).toEqual([]);
+			const markerFired = await fs.access(markerPath).then(
+				() => true,
+				() => false,
+			);
+			expect(markerFired).toBe(true);
+			// The skill rescan is skipped for a fixed snapshot: the returned
+			// skillPaths never reach session.skills.
+			expect(session.skills.some(skill => skill.name === "startup-discovered-skill")).toBe(false);
+		} finally {
+			await session?.dispose();
+			authStorage.close();
+			await removeWithRetries(tempDir);
+		}
+	});
 });
 
 describe("collision handling", () => {

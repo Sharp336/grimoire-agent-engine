@@ -1279,15 +1279,18 @@ export class SessionTools {
 	 * (`initializeExtensions`, ACP, interactive) right after `session_start`
 	 * fires — matching the event's public contract (fires after
 	 * `session_start`, when runtime actions and the error listener are wired).
-	 * Every session reaches this call, so it stays a cheap no-op (no capability
-	 * reset, no skill rescan, no prompt rebuild) unless a handler actually
-	 * contributed a directory.
+	 * The event always fires when a runner exists, so handlers observing
+	 * startup or performing non-skill side effects still run for sessions
+	 * with a fixed skill snapshot (`options.skills` supplied); only the skill
+	 * rescan is skipped for those sessions. Otherwise this stays a cheap
+	 * no-op (no capability reset, no skill rescan, no prompt rebuild) unless
+	 * a handler actually contributed a directory.
 	 */
 	async discoverStartupSkillPaths(): Promise<void> {
-		if (!this.#skillsReloadable) return;
 		const runner = this.#host.extensionRunner();
 		if (!runner) return;
 		const discoveredResources = await runner.emitResourcesDiscover(this.#host.sessionManager.getCwd(), "startup");
+		if (!this.#skillsReloadable) return;
 		if (discoveredResources.skillPaths.length === 0) return;
 		resetCapabilities();
 		await this.#applyDiscoveredSkills(discoveredResources.skillPaths.map(entry => entry.path));

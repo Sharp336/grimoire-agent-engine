@@ -674,6 +674,11 @@ export type * from "./extensibility/extensions";
 export type { Skill } from "./extensibility/skills";
 export type { FileSlashCommand } from "./extensibility/slash-commands";
 export type { MCPManager, MCPServerConfig, MCPServerConnection, MCPToolsLoadResult } from "./mcp";
+// Direct SDK sessions (bypassing every built-in mode) must call this once,
+// after `createAgentSession()` and before the first `session.prompt()`, to
+// get `session_start`/`resources_discover` extension lifecycle events —
+// see docs/sdk.md#extensions.
+export { type InitializeExtensionsOptions, initializeExtensions } from "./modes/runtime-init";
 // Agent registry: pass a private instance per `createAgentSession` when
 // embedding several concurrent top-level sessions in one process (the default
 // global registry admits only one "Main" per process generation).
