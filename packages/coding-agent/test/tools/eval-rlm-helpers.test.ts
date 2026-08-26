@@ -120,6 +120,26 @@ describe("eval JS RLM helpers", () => {
 		expect(search("Foo\nfoo", "foo", "i")).toEqual(["L1: Foo", "L2: foo"]); // flags honored
 	});
 
+	it("search scans lines incrementally with split semantics on CRLF, blank lines, and trailing newlines", () => {
+		const sandbox = loadJsPrelude(async () => ({}));
+		const search = sandbox.search as SearchFn;
+		expect(search("", "x")).toEqual([]); // empty payload
+		expect(search("no newline", "newline")).toEqual(["L1: no newline"]);
+		expect(search("a\r\nb\rc\nd\n", "b")).toEqual(["L2: b"]); // CRLF, lone \r, trailing \n
+		expect(search("foo\n\nfoo", "foo")).toEqual(["L1: foo", "L3: foo"]); // blank line keeps numbering
+		expect(search("same same\nsame", "same")).toEqual(["L1: same same", "L2: same"]); // one entry per matching line
+		expect(search("  pad  \n\t", "pad")).toEqual(["L1:   pad"]); // trailing whitespace trimmed, leading kept
+	});
+
+	it("search resets lastIndex per line for stateful g/y flags", () => {
+		const sandbox = loadJsPrelude(async () => ({}));
+		const search = sandbox.search as SearchFn;
+		// Without a per-line reset, the stateful pattern resumes after the
+		// first match position and misses the match on the next line entirely.
+		expect(search("aaa\na", "a", "g")).toEqual(["L1: aaa", "L2: a"]);
+		expect(search("aaa\na", "a", "y")).toEqual(["L1: aaa", "L2: a"]);
+	});
+
 	it("metadata reports str shape", () => {
 		const sandbox = loadJsPrelude(async () => ({}));
 		const metadata = sandbox.metadata as MetadataFn;
@@ -132,15 +152,20 @@ describe("eval JS RLM helpers", () => {
 		});
 	});
 
-	it("metadata reports list shape", () => {
+	it("metadata sizes iterable and array-like list inputs in one pass", () => {
 		const sandbox = loadJsPrelude(async () => ({}));
 		const metadata = sandbox.metadata as MetadataFn;
-		expect(metadata(["ab", "cde"])).toEqual({
-			type: "list",
-			items: 2,
-			chars: 5,
-			approx_tokens: 1, // 5 // 4
-		});
+		function* gen() {
+			yield "ab";
+			yield "cde";
+		}
+		// No Array.from: generators are consumed once (items counted as they
+		// stream) and array-likes are indexed by numeric length — both must
+		// report the same shape as a plain array.
+		expect(metadata(["ab", "cde"])).toEqual({ type: "list", items: 2, chars: 5, approx_tokens: 1 });
+		expect(metadata(gen())).toEqual({ type: "list", items: 2, chars: 5, approx_tokens: 1 });
+		expect(metadata({ length: 2, 0: "ab", 1: "cde" })).toEqual({ type: "list", items: 2, chars: 5, approx_tokens: 1 });
+		expect(metadata([])).toEqual({ type: "list", items: 0, chars: 0, approx_tokens: 0 });
 	});
 
 	it("llm_query delegates to completion, prefixing instructions when given", async () => {
@@ -302,6 +327,30 @@ print(json.dumps(search("Foo\\nfoo", "foo", re.IGNORECASE)))
 		expect(JSON.parse(lines[0]!)).toEqual(["L1: foo bar", "L3: foo baz"]);
 		expect(JSON.parse(lines[1]!)).toEqual([]);
 		expect(JSON.parse(lines[2]!)).toEqual(["L1: Foo", "L2: foo"]);
+	});
+
+	it("search scans lines lazily with splitlines semantics on CRLF, Unicode separators, and blank lines", async () => {
+		const r = await run(`
+import json
+print(json.dumps(search("", "x")))
+print(json.dumps(search("no newline", "newline")))
+print(json.dumps(search("a\\r\\nb\\rc\\nd\\n", "b")))
+print(json.dumps(search("foo\\n\\nfoo", "foo")))
+print(json.dumps(search("same same\\nsame", "same")))
+print(json.dumps(search("a\\u2028b\\u2029c", "b")))
+print(json.dumps(search("a\\v\\fb\\x85c", "b")))
+print(json.dumps(search("  pad  \\n\\t", "pad")))
+`);
+		expect(r.exitCode).toBe(0);
+		const lines = r.stdout.trim().split("\n");
+		expect(JSON.parse(lines[0]!)).toEqual([]); // empty payload
+		expect(JSON.parse(lines[1]!)).toEqual(["L1: no newline"]);
+		expect(JSON.parse(lines[2]!)).toEqual(["L2: b"]); // CRLF, lone \r, trailing \n
+		expect(JSON.parse(lines[3]!)).toEqual(["L1: foo", "L3: foo"]); // blank line keeps numbering
+		expect(JSON.parse(lines[4]!)).toEqual(["L1: same same", "L2: same"]); // one entry per matching line
+		expect(JSON.parse(lines[5]!)).toEqual(["L2: b"]); // \u2028/\u2029 separators
+		expect(JSON.parse(lines[6]!)).toEqual(["L3: b"]); // \v and \f are adjacent -> blank line, b on L3
+		expect(JSON.parse(lines[7]!)).toEqual(["L1:   pad"]); // trailing whitespace stripped, leading kept
 	});
 
 	it("metadata reports str and list shapes", async () => {

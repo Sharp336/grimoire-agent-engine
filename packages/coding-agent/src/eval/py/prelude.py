@@ -736,7 +736,28 @@ if "__omp_prelude_loaded__" not in globals():
     def search(text, pattern, flags=0):
         """Return 'L<lineno>: <line>' for each line matching the regex `pattern`."""
         rx = re.compile(pattern, flags)
-        return [f"L{n}: {line.rstrip()}" for n, line in enumerate(text.splitlines(), 1) if rx.search(line)]
+        # Incremental line scan via lazy finditer over _line_break_re (the
+        # same Unicode line-break set splitlines() understands) instead of
+        # text.splitlines(), which materializes a full list of every line
+        # substring: search() only ever emits matching lines, so for a large
+        # line-rich payload the list would double memory use before the first
+        # hit is returned. Only one line is in flight at a time; 1-indexed
+        # numbering and the rstrip() trim are identical to the old behavior.
+        out = []
+        line_no = 0
+        last = 0
+        for m in _line_break_re.finditer(text):
+            line_no += 1
+            line = text[last : m.start()]
+            last = m.end()
+            if rx.search(line):
+                out.append(f"L{line_no}: {line.rstrip()}")
+        if last < len(text):
+            line_no += 1
+            line = text[last:]
+            if rx.search(line):
+                out.append(f"L{line_no}: {line.rstrip()}")
+        return out
 
     _line_break_re = re.compile(r"\r\n|[\n\r\v\f\x1c\x1d\x1e\x85\u2028\u2029]")
     _word_re = re.compile(r"\S+")

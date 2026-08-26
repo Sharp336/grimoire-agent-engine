@@ -206,12 +206,6 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		hard: async () => Boolean((await __budgetSnap()).hard),
 	};
 
-	const __splitlines = text => {
-		const lines = String(text).split(/\r\n|\r|\n/);
-		if (lines.length > 0 && lines.at(-1) === "") lines.pop();
-		return lines;
-	};
-
 	const llm_query = async (snippet, opts, ...rest) => {
 		const o = optionsArg("llm_query", opts, rest, ["instructions", "model"], "{ instructions, model }");
 		const prompt = o.instructions != null ? `${o.instructions}\n\n${snippet}` : snippet;
@@ -279,7 +273,7 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		// chunk strings and the original text, tripling memory use and
 		// risking an eval-worker OOM before any chunk is delegated. Only
 		// `size` lines are buffered at a time; the scan mirrors
-		// __splitlines' exact semantics (\r\n|\r|\n boundaries, a trailing
+		// the old split-based semantics (\r\n|\r|\n boundaries, a trailing
 		// terminator produces no empty last line).
 		const str = String(text);
 		const chunks = [];
@@ -302,11 +296,31 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 
 	const search = (text, pattern, flags) => {
 		const rx = new RegExp(pattern, typeof flags === "string" ? flags : "");
+		// Incremental line scan (the same /\r\n|\r|\n/g exec loop chunk()
+		// uses) instead of materializing a full array of every line via
+		// split(): search() only ever emits matching lines, so for a large
+		// line-rich payload the array would double memory use before the
+		// first hit is returned. One line is in flight at a time; numbering,
+		// the \r\n|\r|\n boundary set, and the trailing-whitespace trim are
+		// identical to the split-based behavior.
+		const str = String(text);
 		const out = [];
-		for (const [index, line] of __splitlines(text).entries()) {
+		let lineNo = 0;
+		let last = 0;
+		const lineBreak = /\r\n|\r|\n/g;
+		const matchLine = line => {
+			lineNo++;
+			// Stateful g/y patterns must restart per line or they skip
+			// matches after the first hit.
 			rx.lastIndex = 0;
-			if (rx.test(line)) out.push(`L${index + 1}: ${line.replace(/\s+$/, "")}`);
+			if (rx.test(line)) out.push(`L${lineNo}: ${line.replace(/\s+$/, "")}`);
+		};
+		let m;
+		while ((m = lineBreak.exec(str)) !== null) {
+			matchLine(str.slice(last, m.index));
+			last = m.index + m[0].length;
 		}
+		if (last < str.length) matchLine(str.slice(last));
 		return out;
 	};
 
@@ -354,10 +368,25 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 				approx_tokens: Math.floor(text.length / 4),
 			};
 		}
-		const items = Array.from(text ?? []);
+		const items = text ?? [];
+		// Single pass without Array.from: copying the whole list into a fresh
+		// array would double the container memory for huge payloads just to
+		// count items and sum char lengths. Iterables are consumed once;
+		// array-likes fall back to numeric-length indexing with the same
+		// coercion Array.from would apply.
+		let count = 0;
 		let chars = 0;
-		for (const s of items) chars += String(s).length;
-		return { type: "list", items: items.length, chars, approx_tokens: Math.floor(chars / 4) };
+		if (typeof items[Symbol.iterator] === "function") {
+			for (const s of items) {
+				chars += String(s).length;
+				count++;
+			}
+		} else {
+			const len = Number(items.length);
+			count = Number.isFinite(len) ? Math.max(0, Math.trunc(len)) : 0;
+			for (let i = 0; i < count; i++) chars += String(items[i]).length;
+		}
+		return { type: "list", items: count, chars, approx_tokens: Math.floor(chars / 4) };
 	};
 
 	const display = value => {
