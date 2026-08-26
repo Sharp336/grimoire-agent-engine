@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Pressing Enter while the autocomplete popup shows file-path suggestions for a slash command argument (e.g. `/add-dir ../p`) now submits the command instead of accepting the first file suggestion; Tab remains the way to accept a completion.
+
+
 ## [18.0.6] - 2026-08-26
 
 ### Added

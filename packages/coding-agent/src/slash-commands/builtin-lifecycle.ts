@@ -11,6 +11,7 @@ import { resolveResumableSession } from "../session/session-listing";
 import { toggleSessionPin } from "../session/session-pins";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { resolveToCwd } from "../tools/path-utils";
+import { parseCommandArgs } from "../utils/command-args";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
 import type {
@@ -593,61 +594,98 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 	{
 		name: "add-dir",
 		icon: "folderPlus",
-		description: "Add a workspace directory to this session (multi-root)",
+		description: "Add a workspace directory to this session (multi-root, space-separated paths)",
 		acpDescription: "Add a workspace directory to this session",
-		inlineHint: "<path>",
+		inlineHint: "<path> [<path> ...]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			if (runtime.session.isStreaming) return usage("Cannot add a directory while streaming.", runtime);
-			if (!command.args) return usage(formatWorkspaceDirectories(runtime, "Usage: /add-dir <path>"), runtime);
-			const resolved = resolveToCwd(command.args, runtime.cwd);
-			try {
-				const stat = await fs.stat(resolved);
-				if (!stat.isDirectory()) return usage(`Not a directory: ${resolved}`, runtime);
-			} catch {
-				return usage(`Directory does not exist: ${resolved}`, runtime);
+			if (!command.args)
+				return usage(formatWorkspaceDirectories(runtime, "Usage: /add-dir <path> [<path> ...]"), runtime);
+			const rawPaths = parseCommandArgs(command.args);
+			const resolvedPaths: string[] = [];
+			for (const raw of rawPaths) {
+				const resolved = resolveToCwd(raw, runtime.cwd);
+				try {
+					const stat = await fs.stat(resolved);
+					if (!stat.isDirectory()) return usage(`Not a directory: ${resolved}`, runtime);
+				} catch {
+					return usage(`Directory does not exist: ${resolved}`, runtime);
+				}
+				resolvedPaths.push(resolved);
 			}
-			let added: string | null;
-			try {
-				added = await runtime.sessionManager.addWorkspaceDirectory(resolved);
-			} catch (err) {
-				return usage(errorMessage(err), runtime);
-			}
-			if (added === null) {
-				await runtime.output(`Already in the workspace: ${resolved}`);
-				return commandConsumed();
+			const added: string[] = [];
+			const skipped: string[] = [];
+			for (const resolved of resolvedPaths) {
+				try {
+					const result = await runtime.sessionManager.addWorkspaceDirectory(resolved);
+					if (result !== null) added.push(result);
+					else skipped.push(resolved);
+				} catch (err) {
+					return usage(errorMessage(err), runtime);
+				}
 			}
 			await runtime.session.refreshBaseSystemPrompt();
-			await runtime.output(formatWorkspaceDirectories(runtime, `Added ${added}.`));
+			const parts: string[] = [];
+			if (added.length > 0)
+				parts.push(
+					added.length === 1 ? `Added ${added[0]}.` : `Added ${added.length} directories: ${added.join(", ")}.`,
+				);
+			if (skipped.length > 0)
+				parts.push(
+					skipped.length === 1
+						? `Already in the workspace: ${skipped[0]}`
+						: `Already in the workspace: ${skipped.join(", ")}`,
+				);
+			await runtime.output(formatWorkspaceDirectories(runtime, parts.join("\n")));
 			return commandConsumed();
 		},
 	},
 	{
 		name: "remove-dir",
 		icon: "folderMinus",
-		description: "Remove a workspace directory from this session",
+		description: "Remove a workspace directory from this session (space-separated paths)",
 		acpDescription: "Remove a workspace directory from this session",
-		inlineHint: "<path>",
+		inlineHint: "<path> [<path> ...]",
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			if (runtime.session.isStreaming) return usage("Cannot remove a directory while streaming.", runtime);
-			if (!command.args) return usage("Usage: /remove-dir <path>", runtime);
-			const resolved = resolveToCwd(command.args, runtime.cwd);
-			if (resolved === path.resolve(runtime.cwd)) {
-				return usage("Cannot remove the working directory; use /move to change it.", runtime);
+			if (!command.args) return usage("Usage: /remove-dir <path> [<path> ...]", runtime);
+			const rawPaths = parseCommandArgs(command.args);
+			const resolvedPaths: string[] = [];
+			for (const raw of rawPaths) {
+				const resolved = resolveToCwd(raw, runtime.cwd);
+				if (resolved === path.resolve(runtime.cwd)) {
+					return usage("Cannot remove the working directory; use /move to change it.", runtime);
+				}
+				resolvedPaths.push(resolved);
 			}
-			let removed: string | null;
-			try {
-				removed = await runtime.sessionManager.removeWorkspaceDirectory(resolved);
-			} catch (err) {
-				return usage(errorMessage(err), runtime);
-			}
-			if (removed === null) {
-				await runtime.output(`Not a workspace directory: ${resolved}`);
-				return commandConsumed();
+			const removed: string[] = [];
+			const skipped: string[] = [];
+			for (const resolved of resolvedPaths) {
+				try {
+					const result = await runtime.sessionManager.removeWorkspaceDirectory(resolved);
+					if (result !== null) removed.push(result);
+					else skipped.push(resolved);
+				} catch (err) {
+					return usage(errorMessage(err), runtime);
+				}
 			}
 			await runtime.session.refreshBaseSystemPrompt();
-			await runtime.output(formatWorkspaceDirectories(runtime, `Removed ${removed}.`));
+			const parts: string[] = [];
+			if (removed.length > 0)
+				parts.push(
+					removed.length === 1
+						? `Removed ${removed[0]}.`
+						: `Removed ${removed.length} directories: ${removed.join(", ")}.`,
+				);
+			if (skipped.length > 0)
+				parts.push(
+					skipped.length === 1
+						? `Not a workspace directory: ${skipped[0]}`
+						: `Not workspace directories: ${skipped.join(", ")}`,
+				);
+			await runtime.output(formatWorkspaceDirectories(runtime, parts.join("\n")));
 			return commandConsumed();
 		},
 	},

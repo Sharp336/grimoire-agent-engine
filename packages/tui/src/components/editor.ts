@@ -1484,7 +1484,13 @@ export class Editor implements Component, Focusable {
 					// Don't return - fall through to submission logic
 				}
 				// Otherwise, apply the completion without submitting the surrounding draft.
-				else if (kb.matchesCanonical(canonical, "tui.input.submit") || data === "\n") {
+				// When the popup is a file-path completion whose prefix is just the argument
+				// tail of a submitted slash command (e.g. `/add-dir ../p`), Enter should
+				// submit the command rather than accept the file selection — Tab handles that.
+				else if (this.#isInSubmittedSlashCommandContext() && this.#cursorIsInSlashCommandArgument()) {
+					this.#cancelAutocomplete();
+					// Fall through to normal submission logic below.
+				} else if (kb.matchesCanonical(canonical, "tui.input.submit") || data === "\n") {
 					const selected = this.#autocompleteList.getSelectedItem();
 					// Check for stale autocomplete state due to buffer edits since last refresh.
 					const currentLine = this.#state.lines[this.#state.cursorLine] ?? "";
@@ -3250,6 +3256,14 @@ export class Editor implements Component, Focusable {
 		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
 		const beforeCursor = currentLine.slice(0, this.#state.cursorCol);
 		return this.#hasOnlyWhitespaceBeforeCursorLine() && beforeCursor.trimStart().startsWith("/");
+	}
+
+	/** Whether the cursor sits past the first whitespace inside a submitted slash
+	 *  command (i.e. in the argument region, not the command-name token). */
+	#cursorIsInSlashCommandArgument(): boolean {
+		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
+		const beforeCursor = currentLine.slice(0, this.#state.cursorCol).trimStart();
+		return beforeCursor.startsWith("/") && beforeCursor.includes(" ");
 	}
 
 	#isInMidPromptSkillSlashContext(): boolean {

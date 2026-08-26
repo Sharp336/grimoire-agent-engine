@@ -78,7 +78,7 @@ function materializeTuiBuiltinSlashCommand(
 				? buildMcpArgumentCompletions(cmd.subcommands, runtime)
 				: buildArgumentCompletions(cmd.subcommands);
 		materialized.getInlineHint = buildSubcommandInlineHint(cmd.subcommands);
-	} else if (cmd.name === "move") {
+	} else if (cmd.name === "move" || cmd.name === "add-dir" || cmd.name === "remove-dir") {
 		materialized.getArgumentCompletions = buildDirectoryArgumentCompletions();
 		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
 	} else if (cmd.inlineHint) {
