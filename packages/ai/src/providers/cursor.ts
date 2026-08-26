@@ -543,13 +543,20 @@ function streamCursorWithWireMode(
 				heartbeatTimer = null;
 			}
 		};
+		let outboundClosed = false;
+		const closeOutboundWrites = (): void => {
+			if (outboundClosed) return;
+			outboundClosed = true;
+			disarmHeartbeat();
+		};
 		const closeAttempt = (): void => {
 			if (attemptClosed) return;
 			attemptClosed = true;
-			disarmHeartbeat();
+			closeOutboundWrites();
 			attempt?.close();
 		};
 		const settleH2 = (error?: unknown): void => {
+			disarmHeartbeat();
 			if (h2Settled) return;
 			h2Settled = true;
 			if (protocolSealed) {
@@ -689,13 +696,19 @@ function streamCursorWithWireMode(
 			};
 
 			const writeOutbound = (frame: Buffer): void => {
-				if (attemptClosed || !attempt) return;
-				attempt.write(frame);
+				if (outboundClosed || attemptClosed || !attempt) return;
+				try {
+					attempt.write(frame);
+				} catch (error) {
+					closeOutboundWrites();
+					void closeDebugLog().finally(() => settleH2(error));
+					return;
+				}
 				disarmHeartbeat();
 				heartbeatTimer = setTimeout(sendHeartbeat, 5000);
 			};
 			const sendHeartbeat = (): void => {
-				if (attemptClosed || !attempt) return;
+				if (outboundClosed || attemptClosed || !attempt) return;
 				const heartbeatMessage = create(AgentClientMessageSchema, {
 					message: { case: "clientHeartbeat", value: create(ClientHeartbeatSchema, {}) },
 				});
@@ -735,9 +748,12 @@ function streamCursorWithWireMode(
 				try {
 					for await (const frame of transport.frames()) {
 						if (frame.kind === "end") {
+							// Logical outbound close + heartbeat disarm. Do not
+							// destroy the transport here: h2 trailers still need
+							// to arrive. Physical teardown stays in finally.
+							closeOutboundWrites();
 							if (frame.error) {
 								endStreamError = frame.error;
-								closeAttempt();
 							}
 							continue;
 						}

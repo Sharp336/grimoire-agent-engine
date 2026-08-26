@@ -81,6 +81,14 @@ interface ConnectHandle {
 	 * `cancel` settles immediately), so no teardown outlives disposal.
 	 */
 	settled: Promise<void>;
+	/**
+	 * Live acquisitions awaiting this establishment. Each waiter is bound to its
+	 * own `options.signal`; this count is the single cancellation owner — only
+	 * the LAST live waiter leaving before {@link finished} destroys the connect.
+	 */
+	waiters: number;
+	/** True once {@link promise} has settled, so a late abort never cancels. */
+	finished: boolean;
 }
 /**
  * Base-url → in-flight connect shared by concurrent acquisitions. This is the
@@ -213,13 +221,15 @@ interface CursorEstablishment {
 function establishSession(options: CursorH2AcquireOptions, key: string): CursorEstablishment {
 	const proxyUrl = getProxyForUrl(options.provider, new URL(options.baseUrl));
 
-	// Establishment-local abort controller. The tunnel stage composes it with the
-	// caller signal so `cancel` can tear down a still-resolving
-	// `connectProxiedSocket` immediately — while the tunnel is pending `session`
-	// is not yet assigned, so the session-destroy in `cancel` alone would leave
-	// the pre-disposal tunnel live until its own timeout.
+	// Establishment-local abort controller. Caller signals never abort the
+	// shared tunnel: a waiter leaving while others still await must not cancel
+	// the connect. `cancel` (disposal, or the last live waiter's abort) is the
+	// sole owner of this controller. While the tunnel is pending `session` is
+	// not yet assigned, so aborting the controller is what tears
+	// `connectProxiedSocket` down immediately instead of leaving it until its
+	// own timeout.
 	const controller = new AbortController();
-	const tunnelSignal = options.signal ? AbortSignal.any([options.signal, controller.signal]) : controller.signal;
+	const tunnelSignal = controller.signal;
 
 	// The externally visible establishment result, settled exactly once by
 	// `finish` (success / unavailable) or `fail` / `cancel` (rejection).
@@ -262,6 +272,11 @@ function establishSession(options: CursorH2AcquireOptions, key: string): CursorE
 		controller.abort();
 		try {
 			session?.destroy();
+		} catch {
+			/* already closed */
+		}
+		try {
+			session?.socket?.destroy();
 		} catch {
 			/* already closed */
 		}
@@ -325,6 +340,21 @@ function establishSession(options: CursorH2AcquireOptions, key: string): CursorE
 		}
 		const connect = http2.connect(options.baseUrl, createConnection ? { createConnection } : undefined);
 		session = connect;
+		// Bind cancel to the raw TCP/TLS socket as well as the http2 session.
+		// During Bun TLS/preface, `session.destroy()` may not emit error/connect
+		// and may not close the accepted peer socket.
+		const rawSocket = connect.socket;
+		if (rawSocket) {
+			const destroyRaw = (): void => {
+				try {
+					rawSocket.destroy();
+				} catch {
+					/* already closed */
+				}
+			};
+			if (controller.signal.aborted) destroyRaw();
+			else controller.signal.addEventListener("abort", destroyRaw, { once: true });
+		}
 		if (done) {
 			// Cancelled while the body was suspended before `session` existed (a
 			// tunnel still resolving, or the test gate above). `cancel` saw no
@@ -405,16 +435,40 @@ function establishSession(options: CursorH2AcquireOptions, key: string): CursorE
 		connect.on("goaway", onGoaway);
 		connect.on("close", onClose);
 
+		// `session.destroy()` during TLS/h2 preface does not always surface
+		// `error`/`connect` on Bun, so a cancelled handshake would hang the
+		// establishment body (and disposal). Bind the handshake to the same
+		// establishment controller that `cancel` already aborts.
+		const onCancelHandshake = (): void => {
+			if (handshakeDone) return;
+			handshakeDone = true;
+			try {
+				connect.destroy();
+			} catch {
+				/* already closed */
+			}
+			try {
+				connect.socket?.destroy();
+			} catch {
+				/* already closed */
+			}
+			handshake.reject(new Error("HTTP/2 connect cancelled"));
+		};
+		if (controller.signal.aborted) onCancelHandshake();
+		else controller.signal.addEventListener("abort", onCancelHandshake, { once: true });
+
 		let result!: HandshakeResult;
 		try {
 			result = await handshake.promise;
 		} catch (error) {
+			controller.signal.removeEventListener("abort", onCancelHandshake);
 			// The connect failed or was cancelled mid-flight; onError has already
 			// destroyed the socket. If cancellation already settled the
 			// establishment, `fail` is a no-op.
 			fail(error);
 			return;
 		}
+		controller.signal.removeEventListener("abort", onCancelHandshake);
 
 		if (result.kind === "unavailable") {
 			finish({ ok: false, unavailable: result.unavailable });
@@ -474,10 +528,69 @@ function establishSession(options: CursorH2AcquireOptions, key: string): CursorE
 }
 
 /**
- * Acquires a request stream on a pooled HTTP/2 session for `baseUrl`, creating
- * and reserving the session on first use. Concurrent acquisitions for the same
- * key share one in-flight connect and one pooled session.
+ * Preserves a caller's abort reason when it is an Error; otherwise a concrete
+ * abort Error. An abort is never authority to downgrade to the typed
+ * ALPN/tunnel-unavailable outcome, so a bounded acquisition rejects with this.
  */
+function acquisitionAbortError(signal: AbortSignal | undefined): Error {
+	const reason = signal?.reason;
+	return reason instanceof Error ? reason : new Error("HTTP/2 acquisition aborted");
+}
+
+/**
+ * Binds one acquisition to a shared establishment under its own `options.signal`.
+ * {@link ConnectHandle.waiters} is the single cancellation owner: an aborted
+ * waiter rejects promptly and leaves, but only the LAST live waiter's abort —
+ * before the establishment settles — destructively cancels the connect (abort
+ * proxy tunnel, destroy any direct session/socket) and clears its reservation.
+ * A settled establishment reaches every still-live waiter unchanged, and the
+ * abort listener is always removed on settle.
+ */
+function joinEstablishment(handle: ConnectHandle, options: CursorH2AcquireOptions): Promise<CursorH2Acquisition> {
+	const signal = options.signal;
+	const { promise, resolve, reject } = Promise.withResolvers<CursorH2Acquisition>();
+	handle.waiters++;
+	let settled = false;
+	const onAbort = (): void => {
+		if (settled) return;
+		settled = true;
+		signal?.removeEventListener("abort", onAbort);
+		reject(acquisitionAbortError(signal));
+		handle.waiters--;
+		// The last live waiter leaving before the establishment settles destroys
+		// the connect and clears its reservation; an earlier waiter leaving keeps
+		// the shared connect alive for the others.
+		if (handle.waiters <= 0 && !handle.finished) handle.cancel();
+	};
+	void handle.promise.then(
+		acquisition => {
+			if (settled) {
+				// This waiter already left (aborted). The establishment still
+				// issued a lease under the first waiter's options; release it so
+				// an aborted owner cannot leak a stream while joiners re-acquire.
+				if (acquisition.ok) acquisition.lease.release();
+				return;
+			}
+			settled = true;
+			signal?.removeEventListener("abort", onAbort);
+			handle.waiters--;
+			resolve(acquisition);
+		},
+		(error: unknown) => {
+			if (settled) return;
+			settled = true;
+			signal?.removeEventListener("abort", onAbort);
+			handle.waiters--;
+			reject(error);
+		},
+	);
+	if (signal) {
+		signal.addEventListener("abort", onAbort, { once: true });
+		if (signal.aborted) onAbort();
+	}
+	return promise;
+}
+
 export async function acquireCursorH2(options: CursorH2AcquireOptions): Promise<CursorH2Acquisition> {
 	const key = poolKey(options.baseUrl, getProxyForUrl(options.provider, new URL(options.baseUrl)));
 
@@ -486,31 +599,57 @@ export async function acquireCursorH2(options: CursorH2AcquireOptions): Promise<
 		return { ok: true, lease: issueLease(options, key, entry) };
 	}
 
+	// Past the pooled fast path, every wait — the reservation owner's own
+	// handshake and every shared-connect joiner — is bounded by the caller's
+	// signal. An already-aborted signal rejects here without opening or joining a
+	// connect at all.
+	if (options.signal?.aborted) throw acquisitionAbortError(options.signal);
+
 	// Reserve before connect: while a new session is being created the key is
 	// marked connecting so a concurrent acquisition awaits the same connect
 	// instead of racing to a duplicate or a session about to be released.
 	const inFlight = connecting.get(key);
 	if (inFlight) {
-		const first = await inFlight.promise;
-		// The reservation-owning acquisition consumed the connect. An
-		// unavailable outcome (ALPN / tunnel) propagates as-is — never retry a
-		// doomed connect. A success means the session is pooled: issue our own
-		// lease on it.
-		if (!first.ok) return first;
+		// Joiner: wait bounded by our own signal. An unavailable outcome (ALPN /
+		// tunnel) propagates as-is — never retry a doomed connect. A success means
+		// the session is pooled: issue our own lease on it.
+		const shared = await joinEstablishment(inFlight, options);
+		if (!shared.ok) return shared;
 		return acquireCursorH2(options);
 	}
 
-	// Establish and reserve the slot. The reservation is cleared only when the
-	// establishing promise settles AND we still own the slot; a drained-before-
-	// lease establishment clears its own reservation and re-reserves with a
-	// fresh promise inside `establishSession`, so an unconditional delete here
-	// would erase a live reservation another acquirer depends on.
+	// Owner: establish, reserve the slot, then await bounded by our own signal.
+	// The reservation is cleared only when the establishing promise settles AND
+	// we still own the slot; a drained-before-lease establishment clears its own
+	// reservation and re-reserves with a fresh promise inside `establishSession`,
+	// so an unconditional delete here would erase a live reservation another
+	// acquirer depends on.
 	const establishment = establishSession(options, key);
-	const connect = establishment.promise.finally(() => {
-		if (connecting.get(key)?.promise === connect) connecting.delete(key);
-	});
-	connecting.set(key, { promise: connect, cancel: establishment.cancel, settled: establishment.settled });
-	return connect;
+	const handle: ConnectHandle = {
+		promise: establishment.promise,
+		cancel: establishment.cancel,
+		settled: establishment.settled,
+		waiters: 0,
+		finished: false,
+	};
+	// Mark the establishment finished and drop its reservation once it settles.
+	// The rejection arm is handled here so a connect cancelled by its last
+	// aborting waiter — with no acquirer left to await it — never surfaces an
+	// unhandled rejection.
+	void handle.promise
+		.then(
+			() => {
+				handle.finished = true;
+			},
+			() => {
+				handle.finished = true;
+			},
+		)
+		.finally(() => {
+			if (connecting.get(key) === handle) connecting.delete(key);
+		});
+	connecting.set(key, handle);
+	return joinEstablishment(handle, options);
 }
 
 /**
@@ -582,6 +721,13 @@ export function __cursorH2PoolSnapshot(): Array<{
 		draining: entry.draining,
 		referenced: entry.referenced,
 	}));
+}
+/**
+ * Test seam: in-flight establishment introspection — the reserved keys and the
+ * live waiter count each shares. Exposes no socket or session.
+ */
+export function __cursorH2ConnectingSnapshot(): Array<{ key: string; waiters: number }> {
+	return [...connecting.entries()].map(([key, handle]) => ({ key, waiters: handle.waiters }));
 }
 /**
  * Test seam: install (or clear) the one-shot fresh-session hook. When set, the

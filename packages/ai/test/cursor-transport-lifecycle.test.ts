@@ -1,11 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { EventEmitter } from "node:events";
 import * as http from "node:http";
 import * as http2 from "node:http2";
 import { ProviderResponseError } from "@oh-my-pi/pi-ai/error";
+import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
+import type { Context, Model } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
+	AgentServerMessageSchema,
+	ExecServerMessageSchema,
 	type GetServerConfigResponse,
 	GetServerConfigResponseSchema,
 	Http2Config,
+	InteractionUpdateSchema,
+	ReadArgsSchema,
+	TurnEndedUpdateSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { encodeConnectFrame } from "../src/providers/cursor/connect-frame";
@@ -324,6 +333,156 @@ describe("openCursorTransport lifecycle", () => {
 			const closed = Promise.withResolvers<void>();
 			closing.close(error => (error ? closed.reject(error) : closed.resolve()));
 			await closed.promise;
+		}
+	});
+});
+
+function turnEndedPayload(): Uint8Array {
+	return toBinary(
+		AgentServerMessageSchema,
+		create(AgentServerMessageSchema, {
+			message: {
+				case: "interactionUpdate",
+				value: create(InteractionUpdateSchema, {
+					message: {
+						case: "turnEnded",
+						value: create(TurnEndedUpdateSchema, {}),
+					},
+				}),
+			},
+		}),
+	);
+}
+
+function execReadPayload(): Uint8Array {
+	return toBinary(
+		AgentServerMessageSchema,
+		create(AgentServerMessageSchema, {
+			message: {
+				case: "execServerMessage",
+				value: create(ExecServerMessageSchema, {
+					id: 1,
+					execId: "exec-hang",
+					message: {
+						case: "readArgs",
+						value: create(ReadArgsSchema, { path: "/tmp/hang", toolCallId: "call-hang" }),
+					},
+				}),
+			},
+		}),
+	);
+}
+
+function makeModel(baseUrl: string): Model<"cursor-agent"> {
+	return buildModel({
+		id: "cursor-transport-lifecycle",
+		name: "Cursor transport lifecycle",
+		api: "cursor-agent",
+		provider: "cursor",
+		baseUrl,
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1,
+		maxTokens: 1,
+	});
+}
+
+const streamContext: Context = {
+	messages: [{ role: "user", content: "lifecycle", timestamp: 1 }],
+};
+
+function alpnUnavailable(): { ok: false; unavailable: { reason: "alpn"; cause: Error } } {
+	return { ok: false, unavailable: { reason: "alpn", cause: alpnCause() } };
+}
+
+describe("cursor heartbeat and outbound write lifecycle", () => {
+	it("holds an h1 end-stream drain across the heartbeat boundary without an uncaught write", async () => {
+		const uncaught: unknown[] = [];
+		const onUncaught = (error: unknown): void => {
+			uncaught.push(error);
+		};
+		process.on("uncaughtException", onUncaught);
+		try {
+			const execB64 = Buffer.from(execReadPayload()).toString("base64");
+			const turnB64 = Buffer.from(turnEndedPayload()).toString("base64");
+			const h1Url = await startH1Fixture((req, res) => {
+				if (req.url?.includes("RunPoll")) {
+					const body = Buffer.concat([
+						encodeConnectFrame(encodePollResponse(0n, execB64, false), false),
+						encodeConnectFrame(encodePollResponse(1n, turnB64, false), false),
+						encodeConnectFrame(encodePollResponse(2n, "", true), false),
+						endFrame(),
+					]);
+					res.writeHead(200, { "content-type": "application/connect+proto" });
+					res.end(body);
+					return;
+				}
+				res.statusCode = 200;
+				res.end();
+			});
+			vi.spyOn(h2Pool, "acquireCursorH2").mockResolvedValue(alpnUnavailable());
+			vi.spyOn(serverConfig, "fetchCursorBidiAvailability").mockResolvedValue("bidi-disabled");
+
+			const started = Date.now();
+			const stream = streamCursor(makeModel(h1Url), streamContext, {
+				apiKey: API_KEY,
+				execHandlers: {
+					read: () => new Promise(() => {}),
+				},
+			});
+			const eventTypes: string[] = [];
+			for await (const event of stream) eventTypes.push(event.type);
+			const elapsed = Date.now() - started;
+			const result = await stream.result();
+			expect(elapsed).toBeLessThan(7000);
+			expect(elapsed).toBeGreaterThanOrEqual(4500);
+			expect(eventTypes).toContain("done");
+			expect(eventTypes).not.toContain("error");
+			expect(result.stopReason).toBe("stop");
+			expect(uncaught).toHaveLength(0);
+		} finally {
+			process.off("uncaughtException", onUncaught);
+		}
+	}, 15_000);
+
+	it("surfaces a synchronous transport write failure through stream error output", async () => {
+		const uncaught: unknown[] = [];
+		const onUncaught = (error: unknown): void => {
+			uncaught.push(error);
+		};
+		process.on("uncaughtException", onUncaught);
+		try {
+			const request = new EventEmitter() as EventEmitter & {
+				write: (frame: Buffer) => boolean;
+				destroy: () => void;
+			};
+			request.write = () => {
+				throw new Error("forced synchronous write failure");
+			};
+			request.destroy = () => {
+				request.emit("close");
+			};
+			vi.spyOn(h2Pool, "acquireCursorH2").mockResolvedValue({
+				ok: true,
+				lease: {
+					request: request as unknown as http2.ClientHttp2Stream,
+					release() {
+						request.destroy();
+					},
+				},
+			});
+			const h1Url = await startH1Fixture();
+			const stream = streamCursor(makeModel(h1Url), streamContext, { apiKey: API_KEY });
+			const eventTypes: string[] = [];
+			for await (const event of stream) eventTypes.push(event.type);
+			const result = await stream.result();
+			expect(eventTypes.at(-1)).toBe("error");
+			expect(result.stopReason).toBe("error");
+			expect(result.errorMessage).toContain("forced synchronous write failure");
+			expect(uncaught).toHaveLength(0);
+		} finally {
+			process.off("uncaughtException", onUncaught);
 		}
 	});
 });

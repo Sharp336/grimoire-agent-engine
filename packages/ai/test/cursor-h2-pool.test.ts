@@ -3,6 +3,7 @@ import * as http2 from "node:http2";
 import * as net from "node:net";
 import type { CursorH2AcquireOptions, CursorH2Acquisition } from "../src/providers/cursor/h2-pool";
 import {
+	__cursorH2ConnectingSnapshot,
 	__cursorH2PoolSnapshot,
 	__setCursorH2EstablishBodyGate,
 	__setCursorH2FreshSessionHook,
@@ -618,6 +619,99 @@ describe("cursor HTTP/2 session pool", () => {
 		} finally {
 			__setCursorH2FreshSessionHook(undefined);
 			restoreRequest?.();
+		}
+	});
+
+	it("rejects a stalled h2 handshake when the acquisition signal aborts", async () => {
+		let stalledSocket: net.Socket | undefined;
+		const sink = net.createServer(sock => {
+			stalledSocket = sock;
+			sock.resume();
+		});
+		await new Promise<void>(resolve => sink.listen(0, "127.0.0.1", () => resolve()));
+		const address = sink.address();
+		const port = typeof address === "object" && address !== null ? address.port : 0;
+		const baseUrl = `https://127.0.0.1:${port}`;
+		const reason = new Error("stalled-handshake-aborted");
+
+		try {
+			const controller = new AbortController();
+			const acquirer = acquireCursorH2({ ...runArgs(baseUrl), signal: controller.signal });
+			await waitFor(() => stalledSocket !== undefined, 2000);
+			await waitFor(() => __cursorH2ConnectingSnapshot().some(entry => entry.waiters >= 1), 2000);
+			controller.abort(reason);
+			const verdict = await Promise.race([
+				acquirer.then(
+					() => "resolved" as const,
+					(error: unknown) => error,
+				),
+				new Promise<"hung">(resolve => setTimeout(() => resolve("hung"), 3000)),
+			]);
+			expect(verdict).toBe(reason);
+			await waitFor(() => __cursorH2ConnectingSnapshot().length === 0, 2000);
+			const disposed = await Promise.race([
+				disposeCursorH2Pool().then(() => true),
+				new Promise<false>(timedOut => setTimeout(() => timedOut(false), 3000)),
+			]);
+			expect(disposed).toBe(true);
+		} finally {
+			sink.close();
+		}
+	});
+
+	it("does not cancel a shared stalled connect until the last waiter aborts", async () => {
+		let stalledSocket: net.Socket | undefined;
+		const sink = net.createServer(sock => {
+			stalledSocket = sock;
+			sock.resume();
+		});
+		await new Promise<void>(resolve => sink.listen(0, "127.0.0.1", () => resolve()));
+		const address = sink.address();
+		const port = typeof address === "object" && address !== null ? address.port : 0;
+		const baseUrl = `https://127.0.0.1:${port}`;
+
+		try {
+			const firstController = new AbortController();
+			const secondController = new AbortController();
+			let firstSettled = false;
+			let secondSettled = false;
+			const first = acquireCursorH2({ ...runArgs(baseUrl), signal: firstController.signal }).then(
+				() => {
+					firstSettled = true;
+					return "resolved" as const;
+				},
+				(error: unknown) => {
+					firstSettled = true;
+					return error;
+				},
+			);
+			await waitFor(() => stalledSocket !== undefined, 2000);
+			await waitFor(() => __cursorH2ConnectingSnapshot().some(entry => entry.waiters >= 1), 2000);
+			const second = acquireCursorH2({ ...runArgs(baseUrl), signal: secondController.signal }).then(
+				() => {
+					secondSettled = true;
+					return "resolved" as const;
+				},
+				(error: unknown) => {
+					secondSettled = true;
+					return error;
+				},
+			);
+			await waitFor(() => __cursorH2ConnectingSnapshot().some(entry => entry.waiters === 2), 2000);
+
+			firstController.abort(new Error("first-waiter-aborted"));
+			expect(await first).toEqual(expect.objectContaining({ message: "first-waiter-aborted" }));
+			expect(firstSettled).toBe(true);
+			expect(secondSettled).toBe(false);
+			expect(stalledSocket?.destroyed).toBe(false);
+			expect(__cursorH2ConnectingSnapshot().some(entry => entry.waiters === 1)).toBe(true);
+
+			secondController.abort(new Error("last-waiter-aborted"));
+			expect(await second).toEqual(expect.objectContaining({ message: "last-waiter-aborted" }));
+			expect(secondSettled).toBe(true);
+			await waitFor(() => __cursorH2ConnectingSnapshot().length === 0, 2000);
+		} finally {
+			sink.close();
 		}
 	});
 });
