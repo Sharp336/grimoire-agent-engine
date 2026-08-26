@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { claudeCodeSdkVersion, claudeCodeVersion } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
+import { claudeCodeVersion } from "@oh-my-pi/pi-ai/providers/claude-code-fingerprint";
 import { AnthropicOAuthFlow, refreshAnthropicToken } from "@oh-my-pi/pi-ai/registry/oauth/anthropic";
 import {
 	buildAnthropicAuthConfig,
@@ -125,7 +125,7 @@ describe("anthropic oauth alignment", () => {
 			expect(init?.method).toBe("POST");
 			const headers = init?.headers as Record<string, string> | undefined;
 			expect(headers?.["anthropic-beta"]).toBe("oauth-2025-04-20");
-			expect(headers?.["User-Agent"]).toBe(`anthropic-sdk-typescript/${claudeCodeSdkVersion} userOAuthProvider`);
+			expect(headers?.["User-Agent"]).toBe("anthropic-sdk-typescript/0.112.1 userOAuthProvider");
 			return new Response(
 				JSON.stringify({
 					access_token: "new-access-token",

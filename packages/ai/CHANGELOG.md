@@ -13,7 +13,7 @@
 - Fixed auth-broker background activity keeping processes alive unnecessarily, so unused broker-backed auth storage now parks automatically and no longer prevents CLI exit.
 ### Fixed
 
-- Fixed Anthropic Claude subscription OAuth requests being rejected by the upstream service.
+- Fixed Anthropic Claude subscription OAuth requests being rejected by the upstream service ([#9801](https://github.com/can1357/oh-my-pi/pull/9801) by [@fanbaoyu1024](https://github.com/fanbaoyu1024)).
 
 ## [18.0.5] - 2026-08-25
 
