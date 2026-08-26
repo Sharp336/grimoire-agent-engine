@@ -115,6 +115,7 @@ type RunRpcMode = (
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
 	eventBus?: EventBus,
 	input?: ReadableStream<Uint8Array>,
+	sink?: import("./modes/rpc/rpc-http").RpcOutputSink,
 ) => Promise<never>;
 
 export function writeStartupNotice(parsedArgs: Pick<Args, "mode">, text: string): void {
@@ -1375,8 +1376,13 @@ export async function runRootCommand(
 			process.exit(1);
 		}
 		const mode = parsedArgs.mode || "text";
-		// RPC owns stdin. Claim its singleton stream before plugin/extension discovery can load an in-process consumer.
-		const rpcInput = mode === "rpc" || mode === "rpc-ui" ? claimRpcInput() : undefined;
+		if (parsedArgs.http && mode !== "rpc" && mode !== "rpc-ui") {
+			process.stderr.write(`${chalk.red("Error: --http is only valid with --mode rpc or --mode rpc-ui")}\n`);
+			process.exit(1);
+		}
+		// RPC owns stdin unless --http is serving the protocol. Claim the singleton
+		// stream before plugin/extension discovery can load an in-process consumer.
+		const rpcInput = (mode === "rpc" || mode === "rpc-ui") && !parsedArgs.http ? claimRpcInput() : undefined;
 
 		// Kick off plugin-root preload in parallel with the remaining startup work.
 		// Awaited later (before extension/skill discovery in createAgentSession needs it).
@@ -1961,7 +1967,36 @@ export async function runRootCommand(
 				// Branch-only protocol runner: keep RPC host code out of normal interactive startup.
 				const runRpcMode: RunRpcMode = (await import("./modes/rpc/rpc-mode")).runRpcMode;
 				stopStartupWatchdog();
-				await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined, eventBus, rpcInput);
+				if (parsedArgs.http) {
+					const { startRpcHttpServer } = await import("./modes/rpc/rpc-http");
+					let http: ReturnType<typeof startRpcHttpServer>;
+					try {
+						http = startRpcHttpServer({
+							bind: parsedArgs.http,
+							token: parsedArgs.httpToken ?? process.env.OMP_RPC_HTTP_TOKEN,
+							noAuth: parsedArgs.httpNoAuth === true,
+						});
+					} catch (error) {
+						const message = error instanceof Error ? error.message : String(error);
+						process.stderr.write(`${chalk.red(`Error: ${message}`)}\n`);
+						process.exit(1);
+					}
+					process.stderr.write(`RPC HTTP listening on ${http.url}/rpc\n`);
+					if (http.token) {
+						process.stderr.write(`RPC HTTP bearer token: ${http.token}\n`);
+					} else {
+						process.stderr.write("RPC HTTP auth: disabled (--http-no-auth)\n");
+					}
+					await runRpcMode(
+						session,
+						mode === "rpc-ui" ? setToolUIContext : undefined,
+						eventBus,
+						http.input,
+						http.sink,
+					);
+				} else {
+					await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined, eventBus, rpcInput);
+				}
 			} else if (isInteractive) {
 				const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
 				const startupChangelog = await startupChangelogPromise;

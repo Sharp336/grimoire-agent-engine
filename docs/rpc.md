@@ -19,6 +19,22 @@ Primary implementation:
 omp --mode rpc [regular CLI options]
 ```
 
+Optional HTTP transport (same frames, not a new protocol):
+
+```bash
+omp --mode rpc --http                  # 127.0.0.1:8765, generated bearer token on stderr
+omp --mode rpc --http 9000 --http-no-auth
+omp --mode rpc --http 0.0.0.0:8765 --http-token "$TOKEN"
+```
+
+- `GET /healthz` — unauthenticated liveness.
+- `GET /rpc` — outbound frames as `application/x-ndjson` (or SSE when `Accept: text/event-stream`).
+- `POST /rpc` — one JSON object or JSONL body of inbound frames. Responses arrive on the GET/WebSocket stream, not the POST body (`202`).
+- `WebSocket /rpc` — each message is one JSON frame, duplex.
+- One streaming subscriber at a time. Disconnect closes inbound input the same way stdin EOF does for stdio RPC.
+- Bearer `Authorization` is required unless `--http-no-auth` (loopback only). Non-loopback binds reject `--http-no-auth`. Token comes from `--http-token`, `OMP_RPC_HTTP_TOKEN`, or a generated value printed to stderr.
+- Stdio RPC remains the default. `--http` is invalid outside `--mode rpc` / `--mode rpc-ui`.
+
 Behavior notes:
 
 - `@file` CLI arguments are rejected in RPC mode.

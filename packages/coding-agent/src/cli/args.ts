@@ -56,6 +56,12 @@ export interface Args {
 	help?: boolean;
 	version?: boolean;
 	mode?: Mode;
+	/** Opt-in RPC HTTP bind (`--http` / `--http=host:port`). */
+	http?: string;
+	/** Bearer token for `--http` (overrides OMP_RPC_HTTP_TOKEN). */
+	httpToken?: string;
+	/** Disable bearer auth for loopback `--http` binds. */
+	httpNoAuth?: boolean;
 	noSession?: boolean;
 	sessionDir?: string;
 	providerSessionId?: string;
@@ -244,6 +250,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.fromClaude = true;
 		} else if (arg === "--from-codex") {
 			result.fromCodex = true;
+		} else if (arg === "--http-no-auth") {
+			result.httpNoAuth = true;
 		} else if (arg === "--no-session") {
 			result.noSession = true;
 		} else if (arg === "--no-tools") {

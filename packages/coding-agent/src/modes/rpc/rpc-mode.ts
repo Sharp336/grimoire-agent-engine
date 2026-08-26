@@ -37,6 +37,7 @@ import { initializeExtensions } from "../runtime-init";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
+import type { RpcOutputSink } from "./rpc-http";
 import { claimRpcInput, readRpcInputFrames } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
@@ -694,13 +695,15 @@ export function requestRpcDialog<T>(
 }
 /**
  * Run in RPC mode.
- * Listens for JSON commands on stdin, outputs events and responses on stdout.
+ * Listens for JSON commands on stdin or an injected HTTP input stream,
+ * and writes events and responses to stdout or an injected HTTP sink.
  */
 export async function runRpcMode(
 	session: AgentSession,
 	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
 	eventBus?: EventBus,
 	input: ReadableStream<Uint8Array> = claimRpcInput(),
+	sink?: RpcOutputSink,
 ): Promise<never> {
 	// Signal to RPC clients that the server is ready to accept commands
 	// Suppress terminal notifications: they write \x07 (BEL) or OSC sequences directly to
@@ -718,7 +721,11 @@ export async function runRpcMode(
 		stdoutQueue = stdoutQueue
 			.then(async () => {
 				for (const line of frames) {
-					if (!process.stdout.write(line)) await once(process.stdout, "drain");
+					if (sink) {
+						if (!sink.write(line)) await sink.drain();
+					} else if (!process.stdout.write(line)) {
+						await once(process.stdout, "drain");
+					}
 				}
 			})
 			// stdout gone (host exited) — nothing left to deliver; keep the queue alive.

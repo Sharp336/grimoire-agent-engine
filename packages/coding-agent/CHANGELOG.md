@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in HTTP transport for `--mode rpc` / `--mode rpc-ui` via `--http` ([#9846](https://github.com/can1357/oh-my-pi/issues/9846)). Same JSON frames as stdio; `GET`/`POST` `/rpc` plus WebSocket `/rpc`, loopback by default, bearer token required unless `--http-no-auth` on loopback.
+
 ## [18.0.6] - 2026-08-26
 
 ### Added

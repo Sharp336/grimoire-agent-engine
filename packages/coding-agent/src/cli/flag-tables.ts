@@ -233,6 +233,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 			});
 		}
 	},
+	"--http-token": (result, value) => {
+		result.httpToken = value;
+	},
 };
 
 /**
@@ -246,6 +249,11 @@ export const OPTIONAL_FLAGS: Record<string, OptionalFlagConfig> = {
 	"--resume": { set: setResume, rejectEmpty: true },
 	"-r": { set: setResume, rejectEmpty: true },
 	"--session": { set: setResume, rejectEmpty: true },
+	"--http": {
+		set: (result, value) => {
+			result.http = value !== undefined ? value : "127.0.0.1:8765";
+		},
+	},
 };
 
 /**
@@ -315,6 +323,7 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--no-title",
 	"--auto-approve",
 	"--yolo",
+	"--http-no-auth",
 ]);
 
 /**

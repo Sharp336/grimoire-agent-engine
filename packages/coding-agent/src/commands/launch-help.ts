@@ -43,6 +43,16 @@ export const launchHelp = {
 			description: "Output mode: text (default), json, rpc, or rpc-ui",
 			options: ["text", "json", "rpc", "acp", "rpc-ui"],
 		}),
+		http: Flags.string({
+			description:
+				"Expose RPC mode over HTTP (loopback:8765 if omitted). GET/POST /rpc plus WebSocket /rpc; same JSON frames as stdio",
+		}),
+		"http-token": Flags.string({
+			description: "Bearer token for --http (or OMP_RPC_HTTP_TOKEN). Generated and printed to stderr if omitted",
+		}),
+		"http-no-auth": Flags.boolean({
+			description: "Disable bearer auth for --http (loopback binds only)",
+		}),
 		config: Flags.string({
 			description: "Load an extra config.yml-style overlay for this run (repeatable)",
 			multiple: true,
@@ -116,5 +126,6 @@ export const launchHelp = {
 		`# Use different model (fuzzy matching)\n  ${APP_NAME} --model opus "Help me refactor this code"`,
 		`# Limit model cycling to specific models\n  ${APP_NAME} --models claude-sonnet,claude-haiku,gpt-4o`,
 		`# Export a session file to HTML\n  ${APP_NAME} --export ~/.omp/agent/sessions/--path--/session.jsonl`,
+		`# RPC over HTTP (loopback)\n  ${APP_NAME} --mode rpc --http --http-no-auth --no-session`,
 	],
 } satisfies CommandMetadata;
