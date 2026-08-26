@@ -1,4 +1,4 @@
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, ASIDE_MESSAGE_COMMIT } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import type { RestoredQueuedMessage } from "./agent-session-types";
 import { type CustomMessage, readQueueChipText } from "./messages";
@@ -62,8 +62,18 @@ export function isUserQueuedMessage(message: AgentMessage): boolean {
 	return message.role === "custom" && message.attribution === "user" && message.display !== false;
 }
 
-/** Hidden magic-keyword notices queued alongside a user prompt. */
+/**
+ * Hidden magic-keyword notices queued alongside a user prompt.
+ *
+ * Every `customType` pushed by `#createMagicKeywordNotices` MUST appear here.
+ * A notice that is missing is invisible to both `isHiddenUserCompanion` and
+ * `isUserQueuedMessage` (which requires `display !== false`), so dequeue and
+ * clear walk straight past it: the user's prompt leaves the queue and the
+ * hidden notice stays behind, uncounted, to be delivered ahead of some later
+ * unrelated turn.
+ */
 export const MAGIC_KEYWORD_NOTICE_TYPES: Record<string, true> = {
+	"ultracode-notice": true,
 	"ultrathink-notice": true,
 	"orchestrate-notice": true,
 	"workflow-notice": true,
@@ -91,6 +101,20 @@ export function queueChipText(message: AgentMessage): string {
 	const text = queuedTextContent(message) ?? "";
 	if (text) return text;
 	return queuedImageContent(message) ? "[Image]" : "";
+}
+
+/**
+ * Attach a side effect that runs exactly once, when the queued message is
+ * committed into the live context (the agent loop's delivery point, before the
+ * provider call that first includes the message).
+ *
+ * This is for state that must flip at TURN START rather than at enqueue: the
+ * ultracode arm/disarm rides the queued user message so a steer/follow-up
+ * queued during streaming cannot flip the effort pin under the in-flight turn,
+ * and a message that is dequeued or handed back to the editor never fires it.
+ */
+export function attachQueuedMessageDeliveryEffect(message: AgentMessage, effect: () => void): void {
+	Object.defineProperty(message, ASIDE_MESSAGE_COMMIT, { configurable: true, value: effect });
 }
 
 /** Converts a queued user message to editor-restorable content. */
