@@ -10,6 +10,7 @@ import {
 	DEFERRED_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	type FileDiagnosticsResult,
 	FileFormatResult,
+	type FormatContentResult,
 	formatContent,
 	getDiagnosticsForFile,
 	INLINE_DIAGNOSTICS_WAIT_TIMEOUT_MS,
@@ -146,6 +147,8 @@ function mergeDiagnostics(
 	let hasResults = false;
 	let hasFormatter = false;
 	let formatted = false;
+	let hasFailed = false;
+	let hasUnsupported = false;
 
 	for (const result of results) {
 		if (!result) continue;
@@ -165,6 +168,10 @@ function mergeDiagnostics(
 			hasFormatter = true;
 			if (result.formatter === FileFormatResult.FORMATTED) {
 				formatted = true;
+			} else if (result.formatter === FileFormatResult.FAILED) {
+				hasFailed = true;
+			} else if (result.formatter === FileFormatResult.UNSUPPORTED) {
+				hasUnsupported = true;
 			}
 		}
 	}
@@ -182,7 +189,16 @@ function mergeDiagnostics(
 		errored = summaryInfo.errored;
 		limitedMessages = limitDiagnosticMessages(messages);
 	}
-	const formatter = hasFormatter ? (formatted ? FileFormatResult.FORMATTED : FileFormatResult.UNCHANGED) : undefined;
+	// Priority: FAILED > FORMATTED > UNCHANGED > UNSUPPORTED
+	const formatter = hasFormatter
+		? hasFailed
+			? FileFormatResult.FAILED
+			: formatted
+				? FileFormatResult.FORMATTED
+				: hasUnsupported && !formatted
+					? FileFormatResult.UNSUPPORTED
+					: FileFormatResult.UNCHANGED
+		: undefined;
 
 	return {
 		server: servers.size > 0 ? Array.from(servers).join(", ") : undefined,
@@ -339,13 +355,14 @@ async function runLspWritethrough(
 		contentToFormat: string,
 		opSignal: AbortSignal,
 		serversForRoot: (root: string) => Array<[string, ServerConfig]>,
-	): Promise<string> => {
-		const result = contentToFormat;
+	): Promise<FormatContentResult> => {
+		let hadFailure = false;
 		for (const root of roots) {
-			const formatted = await formatContent(dst, result, root, serversForRoot(root), opSignal);
-			if (formatted !== result) return formatted; // first formatter wins, mirroring single-cwd behavior
+			const formatted = await formatContent(dst, contentToFormat, root, serversForRoot(root), opSignal);
+			if (!formatted.failed && !formatted.unsupported) return formatted;
+			hadFailure ||= formatted.failed;
 		}
-		return result;
+		return { content: contentToFormat, failed: hadFailure, unsupported: !hadFailure };
 	};
 
 	// Fetch post-write diagnostics per workspace partition without making the
@@ -446,9 +463,15 @@ async function runLspWritethrough(
 					formatContentPerRoots(content, operationSignal, rootCustomServers),
 					minVersionsPromise,
 				]);
-				finalContent = formattedContent;
+				finalContent = formattedContent.content;
 				minVersions = capturedVersions;
-				formatter = finalContent !== content ? FileFormatResult.FORMATTED : FileFormatResult.UNCHANGED;
+				if (formattedContent.failed) {
+					formatter = FileFormatResult.FAILED;
+				} else if (formattedContent.unsupported) {
+					formatter = FileFormatResult.UNSUPPORTED;
+				} else {
+					formatter = finalContent !== content ? FileFormatResult.FORMATTED : FileFormatResult.UNCHANGED;
+				}
 				if (!contentAlreadyWritten || finalContent !== content) await writeContent(finalContent);
 				await notifyWriteCommitted(operationSignal);
 				await syncFileContentPerRoots(dst, finalContent, operationSignal, enableDiagnostics);
@@ -458,8 +481,15 @@ async function runLspWritethrough(
 
 				// 2. Format in-memory via LSP
 				if (enableFormat) {
-					finalContent = await formatContentPerRoots(content, operationSignal, rootLspServers);
-					formatter = finalContent !== content ? FileFormatResult.FORMATTED : FileFormatResult.UNCHANGED;
+					const formatted = await formatContentPerRoots(content, operationSignal, rootLspServers);
+					finalContent = formatted.content;
+					if (formatted.failed) {
+						formatter = FileFormatResult.FAILED;
+					} else if (formatted.unsupported) {
+						formatter = FileFormatResult.UNSUPPORTED;
+					} else {
+						formatter = finalContent !== content ? FileFormatResult.FORMATTED : FileFormatResult.UNCHANGED;
+					}
 				}
 
 				// 3. If formatted, sync formatted content to LSP servers

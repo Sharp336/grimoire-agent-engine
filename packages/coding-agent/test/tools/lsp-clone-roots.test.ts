@@ -526,7 +526,7 @@ describe("clone-local LSP roots", () => {
 		}
 	});
 
-	it("reload * clears every config cache and shuts down all clients; single-file reload keeps other clones", async () => {
+	it("reload * clears every config cache and atomically stops clone clients; single-file reload keeps other clones", async () => {
 		await initTheme();
 		const session = TempDir.createSync("@omp-lsp-clone-session-");
 		const cloneBaseA = TempDir.createSync("@omp-lsp-clone-a-");
@@ -545,7 +545,7 @@ describe("clone-local LSP roots", () => {
 			const getOrCreate = vi
 				.spyOn(lspClient, "getOrCreateClient")
 				.mockResolvedValue(stubClient(tsA.workspaceRootReal, tsA.config, fileToUri(cloneA.file)));
-			const shutdownAll = vi.spyOn(lspClient, "shutdownAll").mockResolvedValue();
+			const shutdownStale = vi.spyOn(lspClient, "shutdownStaleClients").mockResolvedValue([]);
 			const sendNotification = vi.spyOn(lspClient, "sendNotification").mockResolvedValue();
 
 			// reload <file> must invalidate the file's ceiling BEFORE resolution
@@ -560,13 +560,14 @@ describe("clone-local LSP roots", () => {
 			const fileReload = await tool.execute("reload-a", { action: "reload", file: cloneA.file });
 			expect(textResult(fileReload)).toContain("Reloaded");
 			expect(invalidateSpy).toHaveBeenCalledWith(expect.objectContaining({ path: cloneA.root, kind: "git" }));
-			expect(shutdownAll).not.toHaveBeenCalled();
+			expect(shutdownStale).not.toHaveBeenCalled();
 			expect([...fileConfigCache.keys()].some(key => key.includes(cloneB.root))).toBe(true);
 			expect(sendNotification).toHaveBeenCalled();
 
-			// reload * drops everything and tears down every client.
+			// reload * drops every file config and tears down each cached clone
+			// root through identity-aware stale-client shutdown.
 			await tool.execute("reload-star", { action: "reload", file: "*" });
-			expect(shutdownAll).toHaveBeenCalled();
+			expect(shutdownStale).toHaveBeenCalled();
 			expect(fileConfigCache.size).toBe(0);
 			// reload * then re-reads the session config into the cache
 			// immediately (the refresh contract), so the entry is present

@@ -7,12 +7,13 @@ import type {
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
-import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { isEnoent, isFsError, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { type Theme, theme } from "../modes/theme/theme";
 import lspDescription from "../prompts/tools/lsp.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { truncateForPrompt } from "../tools/approval";
 import { formatPathRelativeToCwd, resolveToCwd } from "../tools/path-utils";
+import { replaceTabs, shortenPath } from "../tools/render-utils";
 import { ToolAbortError, ToolError, throwIfAborted } from "../tools/tool-errors";
 import { clampTimeout } from "../tools/tool-timeouts";
 import {
@@ -26,7 +27,7 @@ import {
 	refreshFile,
 	sendNotification,
 	sendRequest,
-	shutdownAll,
+	shutdownStaleClients,
 	waitForProjectLoaded,
 } from "./client";
 import { getLinterClient } from "./clients";
@@ -54,8 +55,10 @@ import {
 } from "./edits";
 import { detectLspmux } from "./lspmux";
 import {
+	canonicalRoot,
 	clearFileConfigCache,
 	configCache,
+	fileConfigCache,
 	getConfig,
 	getLspServers,
 	invalidateFileConfigs,
@@ -160,6 +163,21 @@ async function enumerateRenamePairs(
 		});
 	}
 	return { pairs, directory: true, exceeded: false };
+}
+
+function formatRenameStatPath(filePath: string, cwd: string): string {
+	const relative = formatPathRelativeToCwd(filePath, cwd);
+	// formatPathRelativeToCwd normalizes Windows separators. Shorten the
+	// original native path first when it stayed absolute so home matching uses
+	// the same separator form as os.homedir().
+	return replaceTabs(path.isAbsolute(relative) ? shortenPath(filePath) : relative);
+}
+
+/** Filesystem error detail safe for model/TUI output: never echo raw paths. */
+function formatRenameStatError(error: unknown): string {
+	if (!isFsError(error)) return "unknown filesystem error";
+	const syscall = error.syscall ? ` during ${replaceTabs(error.syscall)}` : "";
+	return `${replaceTabs(error.code)}${syscall}`;
 }
 
 /**
@@ -330,26 +348,26 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					);
 					continue;
 				}
-							const servers = fileResolution.servers;
-			if (servers.length === 0) {
-				totalUnresolvedTargets++;
-				if (!detailed && targets.length === 1 && fileResolution.ceiling.kind === "session") {
-					// Session-owned single files keep the legacy plain message.
-					return {
-						content: [{ type: "text", text: "No language server found" }],
-						details: { action, serverName: "", success: false, request: params },
-					};
+				const servers = fileResolution.servers;
+				if (servers.length === 0) {
+					totalUnresolvedTargets++;
+					if (!detailed && targets.length === 1 && fileResolution.ceiling.kind === "session") {
+						// Session-owned single files keep the legacy plain message.
+						return {
+							content: [{ type: "text", text: "No language server found" }],
+							details: { action, serverName: "", success: false, request: params },
+						};
+					}
+					// Markers absent inside the ceiling: the server is simply not
+					// configured for this file. Kept distinct from the
+					// markers-present-but-binary-missing case below.
+					const hint =
+						fileResolution.ceiling.kind === "session"
+							? ""
+							: ` (no project markers inside ${fileResolution.ceiling.path})`;
+					results.push(`${theme.status.error} ${target}: No language server found${hint}`);
+					continue;
 				}
-				// Markers absent inside the ceiling: the server is simply not
-				// configured for this file. Kept distinct from the
-				// markers-present-but-binary-missing case below.
-				const hint =
-					fileResolution.ceiling.kind === "session"
-						? ""
-						: ` (no project markers inside ${fileResolution.ceiling.path})`;
-				results.push(`${theme.status.error} ${target}: No language server found${hint}`);
-				continue;
-			}
 
 				const uri = fileToUri(resolved);
 				const relPath = formatPathRelativeToCwd(resolved, this.session.cwd);
@@ -545,35 +563,50 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			let sourceStat: fs.Stats;
 			try {
 				sourceStat = await fs.promises.stat(source);
-			} catch {
+			} catch (err) {
+				// Only ENOENT means "missing". Reporting EACCES/ELOOP/EIO as a
+				// missing path sends the caller hunting the wrong problem — and
+				// silently invites them to recreate a file that is already there.
+				const relSource = formatRenameStatPath(source, this.session.cwd);
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Error: source path does not exist: ${formatPathRelativeToCwd(source, this.session.cwd)}`,
+							text: isEnoent(err)
+								? `Error: source path does not exist: ${relSource}`
+								: `Error: cannot read source path ${relSource}: ${formatRenameStatError(err)}`,
 						},
 					],
 					details: { action, success: false, request: params },
 				};
 			}
 
-			let destExists = false;
 			try {
-				await fs.promises.stat(dest);
-				destExists = true;
-			} catch {
-				// expected: destination must not exist
-			}
-			if (destExists) {
+				await fs.promises.lstat(dest);
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Error: destination already exists: ${formatPathRelativeToCwd(dest, this.session.cwd)}`,
+							text: `Error: destination already exists: ${formatRenameStatPath(dest, this.session.cwd)}`,
 						},
 					],
 					details: { action, success: false, request: params },
 				};
+			} catch (err) {
+				// ENOENT is the success case: the destination is free. Any other
+				// failure means we never established that, so renaming onto it
+				// could clobber a file we simply could not see.
+				if (!isEnoent(err)) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Error: cannot read destination path ${formatRenameStatPath(dest, this.session.cwd)}: ${formatRenameStatError(err)}`,
+							},
+						],
+						details: { action, success: false, request: params },
+					};
+				}
 			}
 
 			const enumerated = await enumerateRenamePairs(source, dest);
@@ -1157,18 +1190,31 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 		}
 
 		if (action === "reload" && (isWorkspace || !resolvedFile)) {
-			// `reload *` is the user's explicit request to re-read config from
-			// disk. Drop EVERY config cache entry (session + file-scoped) and
-			// shut down every live client this process started — a session
-			// launched in ~/projects may hold clone-local servers, and only a
-			// full teardown lets the next LSP call cold-start against fresh
-			// config everywhere (#3546). Single-file reload keeps other clones
-			// untouched.
-			configCache.clear();
+			// Refresh the session config and every clone-local config without
+			// racing a concurrent client creation. Each workspace goes through
+			// identity-aware stale teardown; clone workspaces have no retained
+			// configs after a global reload, while the session keeps only its
+			// freshly read configs.
+			const cloneRoots = new Set<string>();
+			for (const key of fileConfigCache.keys()) {
+				const separator = key.indexOf("\u0000");
+				cloneRoots.add(canonicalRoot(separator >= 0 ? key.slice(0, separator) : key));
+			}
+			configCache.delete(this.session.cwd);
 			clearFileConfigCache();
-			await shutdownAll();
 			const refreshedConfig = getConfig(this.session.cwd);
 			const servers = getLspServers(refreshedConfig);
+			const stopped = await shutdownStaleClients(
+				this.session.cwd,
+				servers.map(([, serverConfig]) => serverConfig),
+				signal,
+			);
+			const sessionRoot = canonicalRoot(this.session.cwd);
+			for (const cloneRoot of cloneRoots) {
+				if (cloneRoot === sessionRoot) continue;
+				stopped.push(...(await shutdownStaleClients(cloneRoot, [], signal)));
+			}
+			const stoppedNames = [...new Set(stopped)];
 			if (servers.length === 0) {
 				// The session config legitimately has no servers (e.g. a
 				// conductor session in ~/projects); the refresh itself still
@@ -1186,6 +1232,11 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				};
 			}
 			const outputs: string[] = [];
+			if (stoppedNames.length > 0) {
+				outputs.push(
+					`Stopped ${stoppedNames.length} server(s) with superseded configuration: ${stoppedNames.join(", ")}`,
+				);
+			}
 			for (const [workspaceServerName, workspaceServerConfig] of servers) {
 				throwIfAborted(signal);
 				clearInitializationFailure(workspaceServerConfig, this.session.cwd);
