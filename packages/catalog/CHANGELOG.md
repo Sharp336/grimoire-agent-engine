@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added DeepInfra as a built-in provider (`deepinfra`, `DEEPINFRA_API_KEY`) with dynamic model discovery from DeepInfra's public tagged catalog: chat models, context windows, per-1M-token pricing (including cache reads), vision input, and reasoning-effort support all come from the API at discovery time (output-token caps fall back to bundled/stencil.so references — the catalog’s `max_tokens` restates the context ceiling, and a bundled cap is clamped to the window DeepInfra actually serves). DeepInfra’s discovered modality list is authoritative through the refresh merge, so a model that loses its `vision`/`vlm` tags stops advertising image input instead of retaining it from the bundled reference.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added
