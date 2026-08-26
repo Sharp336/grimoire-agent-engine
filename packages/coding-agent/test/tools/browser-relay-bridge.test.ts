@@ -819,6 +819,70 @@ describe("RelayBridge tab grouping", () => {
 		expect(first.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
+	it("drops root subscriptions owned by auto-attach sessions retracted during recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const manual = new FakeCdpSocket();
+		const manualConn = bridge.cdpConnected(manual);
+		const manualSession = await attachPage(bridge, ext, manual, manualConn, 1);
+		const auto = new FakeCdpSocket();
+		const autoConn = bridge.cdpConnected(auto);
+		const autoAttachId = ++msgSeq;
+		bridge.cdpMessage(autoConn, JSON.stringify({ id: autoAttachId, method: "Target.setAutoAttach" }));
+		await waitFor(() => auto.messages.some(message => message.id === autoAttachId), "browser auto-attach reply");
+		const autoTabSession = auto.attachedSessions().find(sessionId => sessionId.startsWith("ST"));
+		if (!autoTabSession) throw new Error("setAutoAttach did not mint a tab session");
+		bridge.cdpMessage(
+			autoConn,
+			JSON.stringify({ id: ++msgSeq, sessionId: autoTabSession, method: "Target.setAutoAttach" }),
+		);
+		await flush();
+		const autoSession = auto.attachedSessions().find(sessionId => sessionId.startsWith("SP"));
+		if (!autoSession) throw new Error("setAutoAttach did not mint a page session");
+
+		bridge.cdpMessage(
+			manualConn,
+			JSON.stringify({ id: ++msgSeq, sessionId: manualSession, method: "Network.enable" }),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+		bridge.cdpMessage(
+			autoConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: autoSession,
+				method: "Fetch.enable",
+				params: { patterns: [{ urlPattern: "*" }] },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "manual subscription replay");
+
+		// Recovery keeps the manual page session and retracts auto-attach sessions,
+		// so only state owned by the preserved session may replay on the fresh root.
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable"]);
+		ack(bridge, ext2, "send");
+		await flush();
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable"]);
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			manualConn,
+			JSON.stringify({ id: commandId, sessionId: manualSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable", "Network.getCookies"]);
+	});
+
 	it("replays persistent user-agent overrides for a preserved session across recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();

@@ -62,6 +62,8 @@ interface SessionRef {
 interface RootSubscription {
 	method: string;
 	params?: Record<string, unknown>;
+	/** Minted page pseudo-session that last made this root state effective. */
+	ownerSessionId: string;
 	/** Preserves the original cross-session command order during recovery replay. */
 	sequence: number;
 }
@@ -467,7 +469,10 @@ export class RelayBridge {
 		if (!conn) return;
 		this.#conns.delete(connId);
 		const touched = new Set<number>();
-		for (const ref of conn.sessions.values()) touched.add(ref.tabId);
+		for (const [sessionId, ref] of conn.sessions) {
+			touched.add(ref.tabId);
+			if (ref.kind === "page") this.#forgetSessionSubscriptions(ref.tabId, [sessionId]);
+		}
 		conn.sessions.clear();
 		// Tabs this client claimed leave the omp group unless another claimant
 		// remains — session holders don't count: the long-lived registry
@@ -701,7 +706,7 @@ export class RelayBridge {
 				this.#replyError(conn, msg, `Unknown session id ${String(msg.sessionId)}`);
 				return;
 			}
-			if (pageRef) this.#recordSubscription(tabId, msg);
+			if (pageRef && msg.sessionId) this.#recordSubscription(tabId, msg, msg.sessionId);
 			this.#reply(conn, msg, (result as Record<string, unknown> | undefined) ?? {});
 		} catch (err) {
 			this.#replyError(conn, msg, err instanceof Error ? err.message : String(err));
@@ -721,7 +726,7 @@ export class RelayBridge {
 	}
 
 	/** Remember successful commands that changed the shared Chrome root state. */
-	#recordSubscription(tabId: number, msg: CdpCommand): void {
+	#recordSubscription(tabId: number, msg: CdpCommand, ownerSessionId: string): void {
 		const tab = this.#tabs.get(tabId);
 		if (!tab) return;
 		const separator = msg.method.indexOf(".");
@@ -735,6 +740,7 @@ export class RelayBridge {
 				tab.subscriptions.set(key, {
 					method: msg.method,
 					params: msg.params,
+					ownerSessionId,
 					sequence: ++this.#subscriptionSeq,
 				});
 			}
@@ -762,6 +768,7 @@ export class RelayBridge {
 				tab.subscriptions.set(msg.method, {
 					method: msg.method,
 					params: msg.params,
+					ownerSessionId,
 					sequence: ++this.#subscriptionSeq,
 				});
 				return;
@@ -775,8 +782,19 @@ export class RelayBridge {
 		tab.subscriptions.set(msg.method, {
 			method: msg.method,
 			params: msg.params,
+			ownerSessionId,
 			sequence: ++this.#subscriptionSeq,
 		});
+	}
+
+	#forgetSessionSubscriptions(tabId: number, sessionIds: Iterable<string>): void {
+		const tab = this.#tabs.get(tabId);
+		if (!tab) return;
+		for (const sessionId of sessionIds) {
+			for (const [key, subscription] of tab.subscriptions) {
+				if (subscription.ownerSessionId === sessionId) tab.subscriptions.delete(key);
+			}
+		}
 	}
 
 	/**
@@ -1373,7 +1391,9 @@ export class RelayBridge {
 			const preservePages = keepPageSessions.includes(conn);
 			const tabSessions = conn.sessionsForTab(tab.tabId, "tab");
 			if (!preservePages) {
-				for (const pageSession of conn.sessionsForTab(tab.tabId, "page")) {
+				const pageSessions = conn.sessionsForTab(tab.tabId, "page");
+				this.#forgetSessionSubscriptions(tab.tabId, pageSessions);
+				for (const pageSession of pageSessions) {
 					conn.sessions.delete(pageSession);
 					this.#emit(
 						conn,
@@ -1444,6 +1464,7 @@ export class RelayBridge {
 		const ref = conn.sessions.get(sessionId);
 		if (!ref) return;
 		conn.sessions.delete(sessionId);
+		if (ref.kind === "page") this.#forgetSessionSubscriptions(ref.tabId, [sessionId]);
 		const targetId = ref.kind === "tab" ? tabTargetId(ref.tabId) : pageTargetId(ref.tabId);
 		this.#emit(conn, "Target.detachedFromTarget", { sessionId, targetId }, parentSessionId);
 		// An explicit release of the last session must drop the attachment too,
