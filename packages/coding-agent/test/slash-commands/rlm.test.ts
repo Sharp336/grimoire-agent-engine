@@ -89,7 +89,19 @@ describe("/rlm slash command", () => {
 		const result = await executeAcpBuiltinSlashCommand("/rlm summarize the report", h.runtime);
 
 		expect(result).toEqual({ consumed: true });
-		expect(h.output).toHaveBeenCalledWith(expect.stringContaining("requires an eval backend"));
+		expect(h.output).toHaveBeenCalledWith(expect.stringContaining("requires the Python or JavaScript eval backend"));
+	});
+
+	it("rejects when only Ruby/Julia are enabled (RLM helpers are py/js-only)", async () => {
+		const h = acpRuntime({
+			enabled: true,
+			backends: { "eval.py": false, "eval.js": false, "eval.rb": true, "eval.jl": true },
+		});
+
+		const result = await executeAcpBuiltinSlashCommand("/rlm summarize the report", h.runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(h.output).toHaveBeenCalledWith(expect.stringContaining("requires the Python or JavaScript eval backend"));
 	});
 
 	it("still returns a prompt when invoked without arguments", async () => {

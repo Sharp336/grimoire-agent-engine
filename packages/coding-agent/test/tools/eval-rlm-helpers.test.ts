@@ -74,6 +74,19 @@ describe("eval JS RLM helpers", () => {
 		expect(chunks.join("")).toBe(unbroken);
 	});
 
+	it("chunk 'tokens' mode never splits a surrogate pair", () => {
+		const sandbox = loadJsPrelude(async () => ({}));
+		const chunk = sandbox.chunk as ChunkFn;
+		// U+1F600 (😀) is a non-BMP code point encoded as a UTF-16 surrogate
+		// pair. Pad so a naive maxChars=8 (size=2) UTF-16-unit slice would land
+		// mid-pair; code-point-aware splitting must keep every emoji intact.
+		const text = `ab${"\u{1F600}".repeat(6)}cd`;
+		const chunks = chunk(text, { by: "tokens", size: 2 });
+		expect(chunks.join("")).toBe(text);
+		for (const c of chunks)
+			expect(c).not.toMatch(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u);
+	});
+
 	it("chunk returns [] for empty text and rejects invalid by/size", () => {
 		const sandbox = loadJsPrelude(async () => ({}));
 		const chunk = sandbox.chunk as ChunkFn;

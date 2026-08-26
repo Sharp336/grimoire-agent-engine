@@ -248,14 +248,17 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		const size = o.size ?? 100;
 		if (!Number.isInteger(size) || size <= 0) throw new Error("chunk() size must be a positive integer");
 		if (by === "tokens") {
-			// Bounded by character count (~4 chars/token, matching metadata()'s
-			// approx_tokens heuristic) rather than whitespace-word splitting: an
-			// unbroken multi-MB line (minified JSON/base64/code) must still be
-			// split into windows llm_query() can consume, regardless of whitespace.
+			// Bounded by code-point count (~4 code points/token, matching
+			// metadata()'s approx_tokens heuristic) rather than whitespace-word
+			// splitting: an unbroken multi-MB line (minified JSON/base64/code)
+			// must still be split into windows llm_query() can consume,
+			// regardless of whitespace. Array.from() iterates by code point
+			// (not String#slice's UTF-16 code units), so a boundary never
+			// splits a surrogate pair.
 			const maxChars = size * 4;
-			const s = String(text);
+			const codePoints = Array.from(String(text));
 			const chunks = [];
-			for (let i = 0; i < s.length; i += maxChars) chunks.push(s.slice(i, i + maxChars));
+			for (let i = 0; i < codePoints.length; i += maxChars) chunks.push(codePoints.slice(i, i + maxChars).join(""));
 			return chunks;
 		}
 		const lines = __splitlines(text);

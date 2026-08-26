@@ -24,12 +24,13 @@ export async function handleRlmCommand(
 		return commandConsumed();
 	}
 	// RLM's whole workflow runs inside the eval sandbox (context/metadata/chunk/
-	// llm_query). Without at least one eval backend enabled, the strategy prompt
-	// below would hand the model instructions it has no tool to execute.
+	// llm_query), and only the Python and JS preludes implement those helpers
+	// (rb/jl do not). Without py or js enabled, the strategy prompt below would
+	// hand the model instructions it has no tool to execute.
 	const backends = resolveEvalBackends({ settings: runtime.settings } as ToolSession);
-	if (!backends.python && !backends.js && !backends.ruby && !backends.julia) {
+	if (!backends.python && !backends.js) {
 		await runtime.output(
-			"RLM mode requires an eval backend, but none is enabled in this session (eval.py/eval.js/eval.rb/eval.jl are all off or PI_PY/PI_JS/PI_RB/PI_JL disable them). Enable at least one before using /rlm.",
+			"RLM mode requires the Python or JavaScript eval backend (the RLM helpers are not implemented for Ruby/Julia), but neither is enabled in this session (eval.py/eval.js are off or PI_PY/PI_JS disable them). Enable one before using /rlm.",
 		);
 		return commandConsumed();
 	}
@@ -40,7 +41,9 @@ export async function handleRlmCommand(
 	// Externalize the inline payload into a session-local file instead of
 	// interpolating it into the prompt: the whole point of RLM is to keep
 	// oversized input out of the model's context, so the prompt must carry
-	// only a reference the model loads from inside the eval sandbox.
+	// only a reference the model loads from inside the eval sandbox. The
+	// load-instruction prose itself lives in rlm.md (never build prompts in
+	// code), rendered with the externalized-payload variables below.
 	const localProtocolOptions = {
 		getArtifactsDir: () => runtime.sessionManager.getArtifactsDir(),
 		getSessionId: () => runtime.sessionManager.getSessionId(),
@@ -48,6 +51,7 @@ export async function handleRlmCommand(
 	const inputUrl = `local://rlm-input-${Date.now()}.txt`;
 	const inputPath = resolveLocalUrlToPath(inputUrl, localProtocolOptions);
 	await Bun.write(inputPath, args);
-	const request = `The user's inline request text (${args.length} chars) has been externalized to \`${inputUrl}\`. Load it in the eval sandbox (e.g. \`context = read("${inputUrl}")\`) before probing/chunking it — do not ask the operator to repaste it.`;
-	return { prompt: prompt.render(rlmTemplate, { request }).trim() };
+	return {
+		prompt: prompt.render(rlmTemplate, { externalized: true, inputUrl, charCount: args.length }).trim(),
+	};
 }
