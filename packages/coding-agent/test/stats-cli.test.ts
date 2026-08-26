@@ -23,6 +23,23 @@ describe("stats dashboard host arguments", () => {
 			host: "::",
 			json: false,
 			summary: false,
+			range: "24h",
+		});
+	});
+
+	it("forwards the --range flag to the dashboard runner", async () => {
+		vi.spyOn(theme, "initTheme").mockResolvedValue();
+		const runStatsCommand = vi.spyOn(statsCli, "runStatsCommand").mockResolvedValue();
+		const command = new Stats(["--range", "30d"], TEST_CONFIG);
+
+		await command.run();
+
+		expect(runStatsCommand).toHaveBeenCalledWith({
+			port: 3847,
+			host: "127.0.0.1",
+			json: false,
+			summary: false,
+			range: "30d",
 		});
 	});
 

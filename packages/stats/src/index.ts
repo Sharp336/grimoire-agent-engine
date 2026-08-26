@@ -10,10 +10,13 @@ export {
 	getDashboardStats,
 	getToolDashboardStats,
 	getTotalMessageCount,
+	normalizeTimeRange,
+	STATS_RANGES,
 	type SyncOptions,
 	type SyncProgress,
 	smokeTestSyncWorker,
 	syncAllSessions,
+	type TimeRange,
 } from "./aggregator";
 export { closeDb } from "./db";
 export { getGainDashboardStats } from "./gain-aggregator";
