@@ -1,5 +1,5 @@
 import { prompt } from "@oh-my-pi/pi-utils";
-import { LocalProtocolHandler, resolveLocalUrlToPath } from "../internal-urls/local-protocol";
+import { resolveLocalUrlToPath } from "../internal-urls/local-protocol";
 import rlmTemplate from "../prompts/rlm.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { resolveEvalBackends } from "../tools/eval-backends";
@@ -45,14 +45,15 @@ export async function handleRlmCommand(
 	// load-instruction prose itself lives in rlm.md (never build prompts in
 	// code), rendered with the externalized-payload variables below.
 	//
-	// Resolve through the same canonical mapping the eval backends use
-	// (LocalProtocolHandler.resolveOptions()) rather than hand-rolling one
-	// from sessionManager: an SDK host that supplies a custom
-	// localProtocolOptions override on createAgentSession registers it as a
-	// process-wide override that eval's local:// resolution honors — writing
-	// through a different mapping would point the rendered `read("local://…")`
-	// instruction at a root the eval sandbox never reads from.
-	const localProtocolOptions = LocalProtocolHandler.resolveOptions() ?? {
+	// Pin the write to *this* session's own mapping rather than consulting
+	// LocalProtocolHandler's process-wide override/"first main session"
+	// fallback: those are last-resort branches for callers with no session
+	// reference (e.g. TUI hyperlink resolution). /rlm always has one, and
+	// per LocalProtocolHandler.resolveOptions()'s own documented priority
+	// an explicit session mapping always wins over that global state anyway
+	// — so building it directly is equivalent and avoids pinning the write
+	// to the wrong session in a multi-session host.
+	const localProtocolOptions = {
 		getArtifactsDir: () => runtime.sessionManager.getArtifactsDir(),
 		getSessionId: () => runtime.sessionManager.getSessionId(),
 	};

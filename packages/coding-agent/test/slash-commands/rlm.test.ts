@@ -105,7 +105,7 @@ describe("/rlm slash command", () => {
 		expect(h.output).toHaveBeenCalledWith(expect.stringContaining("requires the Python or JavaScript eval backend"));
 	});
 
-	it("writes through a process-wide localProtocolOptions override (SDK host with a custom local root)", async () => {
+	it("pins the write to this session's own root, ignoring a process-wide localProtocolOptions override", async () => {
 		const h = acpRuntime({ enabled: true });
 		tempDirs.push(h.artifactsDir);
 		const overrideDir = fs.mkdtempSync(path.join(os.tmpdir(), "rlm-override-"));
@@ -119,10 +119,14 @@ describe("/rlm slash command", () => {
 			const prompt = promptOf(result);
 			const match = prompt.match(/local:\/\/(rlm-input-[\w.-]+\.txt)/);
 			expect(match).not.toBeNull();
-			// Written under the override's artifacts dir, not the session's own —
-			// this is what eval's local:// resolution will read from too.
+			// /rlm has a session reference (runtime.sessionManager), so per
+			// LocalProtocolHandler's own documented priority that must win over
+			// the process-wide override — otherwise a multi-session host could
+			// pin the write to an unrelated session's root.
+			const sessionPath = path.join(h.artifactsDir, "local", match?.[1] ?? "");
+			expect(fs.readFileSync(sessionPath, "utf-8")).toBe("summarize the report");
 			const overriddenPath = path.join(overrideDir, "local", match?.[1] ?? "");
-			expect(fs.readFileSync(overriddenPath, "utf-8")).toBe("summarize the report");
+			expect(fs.existsSync(overriddenPath)).toBe(false);
 		} finally {
 			LocalProtocolHandler.resetOverrideForTests();
 		}
