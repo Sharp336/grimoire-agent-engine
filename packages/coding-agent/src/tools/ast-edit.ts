@@ -55,15 +55,15 @@ const astEditSchema = type({
 		.array()
 		.atLeastLength(1)
 		.describe("files, directories, globs, or internal URLs to rewrite"),
-	"selector?": type("string").describe("AST node kind to rewrite inside a contextual pattern"),
+	"selector?": type("string").describe("AST node kind to rewrite in a single-operation contextual pattern"),
 });
 
-const PHP_MEMBER_PATTERN = /^\s*(?:(?:abstract|final|public|protected|private|readonly|static)\s+)+function\b/u;
+const PHP_MEMBER_PATTERN = /^\s*(?:(?:abstract|final|public|protected|private|readonly|static)\s+)*function\b/u;
 const PHP_MEMBER_WRAPPER_HINT =
-	"Hint: For PHP members, wrap `pat` in `class $_ { … }` and set `selector` to `method_declaration` so only the member is replaced.";
+	"Hint: If this operation targets a PHP member, retry it alone with `pat` wrapped in `class $_ { … }` and `selector` set to `method_declaration`.";
 
-function phpMemberWrapperHint(ops: readonly (readonly [string, string])[]): string | undefined {
-	return ops.some(([pattern]) => PHP_MEMBER_PATTERN.test(pattern)) ? PHP_MEMBER_WRAPPER_HINT : undefined;
+function isPhpMemberPattern(pattern: string): boolean {
+	return PHP_MEMBER_PATTERN.test(pattern);
 }
 
 interface AstEditCallOptions {
@@ -291,6 +291,10 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			if (ops.length === 0) {
 				throw new ToolError("`ops` must include at least one op entry");
 			}
+			const selector = params.selector?.trim() || undefined;
+			if (selector && ops.length !== 1) {
+				throw new ToolError("`selector` requires exactly one operation; run contextual rewrites separately");
+			}
 			const seenPatterns = new Set<string>();
 			for (const [pat] of ops) {
 				if (seenPatterns.has(pat)) {
@@ -321,7 +325,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 
 			const result = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
 				rewrites: normalizedRewrites,
-				selector: params.selector,
+				selector,
 				dryRun: true,
 				maxFiles,
 				failOnParseError: false,
@@ -329,7 +333,27 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			});
 
 			const { errors: cappedParseErrors, total: parseErrorsTotal } = capParseErrors(result.parseErrors);
-			const patternHint = phpMemberWrapperHint(ops);
+			const phpMemberOps = ops.filter(([pattern]) => isPhpMemberPattern(pattern));
+			let patternHint: string | undefined;
+			if (phpMemberOps.length > 0) {
+				if (result.totalReplacements === 0) {
+					patternHint = PHP_MEMBER_WRAPPER_HINT;
+				} else if (ops.length > 1) {
+					for (const [pattern, replacement] of phpMemberOps) {
+						const probe = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
+							rewrites: { [pattern]: replacement },
+							dryRun: true,
+							maxFiles,
+							failOnParseError: false,
+							signal,
+						});
+						if (probe.totalReplacements === 0) {
+							patternHint = PHP_MEMBER_WRAPPER_HINT;
+							break;
+						}
+					}
+				}
+			}
 			const formatPath = (filePath: string): string =>
 				formatResultPath(filePath, isDirectory, resolvedSearchPath, this.session.cwd);
 
@@ -471,7 +495,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					apply: async (_reason: string) => {
 						const applyResult = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
 							rewrites: normalizedRewrites,
-							selector: params.selector,
+							selector,
 							dryRun: false,
 							maxFiles,
 							failOnParseError: false,

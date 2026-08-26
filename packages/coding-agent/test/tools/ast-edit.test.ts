@@ -64,6 +64,33 @@ describe("ast_edit tool schema", () => {
 		expect(strict.strict).toBe(true);
 	});
 
+	it("rejects contextual selectors on multi-operation calls", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-selector-batch-"));
+		try {
+			const filePath = path.join(tempDir, "Example.php");
+			await Bun.write(filePath, "<?php\nclass Example { public function greet() {} }\n");
+			const tools = await createTools(createTestSession(tempDir), ["ast_edit"]);
+			const tool = tools.find(entry => entry.name === "ast_edit");
+			expect(tool).toBeDefined();
+
+			await expect(
+				tool!.execute("ast-edit-selector-batch", {
+					ops: [
+						{
+							pat: "class $_ { public function $NAME($$$ARGS) { $$$BODY } }",
+							out: "protected function $NAME($$$ARGS) { $$$BODY }",
+						},
+						{ pat: "legacy($ARG)", out: "modern($ARG)" },
+					],
+					paths: [filePath],
+					selector: "method_declaration",
+				}),
+			).rejects.toThrow("`selector` requires exactly one operation");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
 	it("guides zero-match PHP member patterns to safe contextual selection", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-php-member-"));
 		try {
@@ -165,7 +192,7 @@ class Example {
 			const result = await tool!.execute("ast-edit-php-batch", {
 				ops: [
 					{
-						pat: "public function $NAME($$$ARGS) { $$$BODY }",
+						pat: "function $NAME($$$ARGS) { $$$BODY }",
 						out: "protected function $NAME($$$ARGS) { $$$BODY }",
 					},
 					{ pat: "legacy($ARG)", out: "modern($ARG)" },
@@ -179,6 +206,36 @@ class Example {
 			expect(details?.patternHint).toContain("method_declaration");
 			expect(text).toContain("modern($value)");
 			expect(text).toContain("method_declaration");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("does not flag a modifierless PHP pattern that matches a top-level function", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-php-function-"));
+		try {
+			const filePath = path.join(tempDir, "functions.php");
+			await Bun.write(filePath, "<?php\nfunction greet($name) { return $name; }\n");
+			const tools = await createTools(createTestSession(tempDir), ["ast_edit"]);
+			const tool = tools.find(entry => entry.name === "ast_edit");
+			expect(tool).toBeDefined();
+
+			const result = await tool!.execute("ast-edit-php-function", {
+				ops: [
+					{
+						pat: "function greet($$$ARGS) { $$$BODY }",
+						out: "function renamed($$$ARGS) { $$$BODY }",
+					},
+				],
+				paths: [filePath],
+			});
+			const details = result.details as { totalReplacements?: number; patternHint?: string } | undefined;
+			const text = result.content.find(content => content.type === "text")?.text ?? "";
+
+			expect(details?.totalReplacements).toBe(1);
+			expect(details?.patternHint).toBeUndefined();
+			expect(text).toContain("function renamed");
+			expect(text).not.toContain("method_declaration");
 		} finally {
 			await removeWithRetries(tempDir);
 		}
