@@ -241,6 +241,7 @@ import {
 	piReadPathHasRange,
 	piTimeout,
 } from "./cursor/exec-modern";
+import { CURSOR_COMPOSER_PROMPT, isCursorComposerModel } from "./cursor/composer-prompt";
 import { handleInteractionQuery } from "./cursor/interaction-query";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
@@ -703,7 +704,7 @@ function streamCursorWithWireMode(
 			serializedFallbackWireModelId = builtRequest.fallbackWireModelId;
 			conversationStateCache.set(conversationId, conversationState);
 			const requestContextTools = buildMcpToolDefinitions(context.tools);
-			const requestContextRules = buildCursorRequestContextRules(context.systemPrompt);
+			const requestContextRules = buildCursorRequestContextRules(context.systemPrompt, model.id);
 
 			const baseUrl = model.baseUrl || CURSOR_API_URL;
 			const requestPath = "/agent.v1.AgentService/Run";
@@ -4572,8 +4573,29 @@ function readCursorBlob(blobStore: Map<string, Uint8Array>, blobId: Uint8Array):
  * OMP system-prompt entry to a global CursorRule so always-apply rules survive
  * that reconstruction.
  */
-export function buildCursorRequestContextRules(systemPrompt: readonly string[] | undefined): CursorRule[] {
-	return normalizeSystemPrompts(systemPrompt).map((content, index) =>
+export function buildCursorRequestContextRules(
+	systemPrompt: readonly string[] | undefined,
+	modelId?: string,
+): CursorRule[] {
+	// Composer models are Cursor-harness-trained and otherwise reach for the
+	// native tool vocabulary of that harness (StrReplace-style editors) which
+	// this client never executes. The operating prefix leads the reconstructed
+	// prompt so the trained habits are overwritten before the host rules run.
+	const composerPrefix =
+		modelId !== undefined && isCursorComposerModel(modelId)
+			? create(CursorRuleSchema, {
+					fullPath: "/omp/system-prompt/composer.mdc",
+					content: CURSOR_COMPOSER_PROMPT,
+					source: CursorRuleSource.USER,
+					type: create(CursorRuleTypeSchema, {
+						type: {
+							case: "global",
+							value: create(CursorRuleTypeGlobalSchema, {}),
+						},
+					}),
+				})
+			: undefined;
+	const hostRules = normalizeSystemPrompts(systemPrompt).map((content, index) =>
 		create(CursorRuleSchema, {
 			fullPath: `/omp/system-prompt/${index}.mdc`,
 			content,
@@ -4586,6 +4608,7 @@ export function buildCursorRequestContextRules(systemPrompt: readonly string[] |
 			}),
 		}),
 	);
+	return composerPrefix ? [composerPrefix, ...hostRules] : hostRules;
 }
 
 /**
@@ -4836,12 +4859,24 @@ function findLastUserMessageIndex(messages: Message[]): number {
  * When no system prompts are provided, returns a single default greeting so we never emit
  * an empty `rootPromptMessagesJson` head.
  */
-export function buildCursorSystemPromptJsons(systemPrompt: readonly string[] | undefined): string[] {
+export function buildCursorSystemPromptJsons(
+	systemPrompt: readonly string[] | undefined,
+	modelId?: string,
+): string[] {
 	const systemPrompts = normalizeSystemPrompts(systemPrompt);
+	// Composer models get their operating prefix as its own leading blob
+	// rather than concatenated into the host prompt, so Cursor's per-blob
+	// prompt cache keeps the prefix stable while the host prompt changes
+	// underneath it.
+	const prefixJson =
+		modelId !== undefined && isCursorComposerModel(modelId)
+			? [JSON.stringify({ role: "system", content: CURSOR_COMPOSER_PROMPT })]
+			: [];
 	if (systemPrompts.length === 0) {
+		if (prefixJson.length > 0) return prefixJson;
 		return [JSON.stringify({ role: "system", content: "You are a helpful assistant." })];
 	}
-	return systemPrompts.map(content => JSON.stringify({ role: "system", content }));
+	return [...prefixJson, ...systemPrompts.map(content => JSON.stringify({ role: "system", content }))];
 }
 
 function buildRootPromptMessagesJson(
@@ -5237,7 +5272,7 @@ async function buildGrpcRequestForWireMode(
 ): Promise<CursorTransportRequest> {
 	const blobStore = state.blobStore;
 
-	const systemPromptIds = buildCursorSystemPromptJsons(context.systemPrompt).map(json =>
+	const systemPromptIds = buildCursorSystemPromptJsons(context.systemPrompt, model.id).map(json =>
 		storeCursorBlob(blobStore, new TextEncoder().encode(json)),
 	);
 

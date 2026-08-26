@@ -14,6 +14,7 @@ import {
 import { streamCursor as lazyStreamCursor, setCursorProviderModule } from "@oh-my-pi/pi-ai/providers/register-builtins";
 import type { AssistantMessage, Context, CursorExecHandlers, Model, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
+import { CURSOR_COMPOSER_PROMPT, isCursorComposerModel } from "@oh-my-pi/pi-ai/providers/cursor/composer-prompt";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { McpResult, ReadResult } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
@@ -468,6 +469,43 @@ describe("Cursor system prompt encoding", () => {
 		expect(rules[1]?.content).toContain(canary);
 		expect(rules[0]?.source).toBe(CursorRuleSource.USER);
 		expect(rules[1]?.type?.type.case).toBe("global");
+	});
+
+	it("detects Composer family ids and excludes Cursor-resold Kimi and grok ids", () => {
+		expect(isCursorComposerModel("composer-2.5")).toBe(true);
+		expect(isCursorComposerModel("cursor/composer-2.6-thinking-max")).toBe(true);
+		expect(isCursorComposerModel("composer-2.6-lite-medium-fast")).toBe(true);
+		expect(isCursorComposerModel("kimi-k2.7-code")).toBe(false);
+		expect(isCursorComposerModel("cursor-grok-4.6")).toBe(false);
+		expect(isCursorComposerModel("claude-sonnet-5")).toBe(false);
+	});
+
+	it("prepends the Composer operating prefix as its own leading blob for Composer models", () => {
+		const jsons = buildCursorSystemPromptJsons(["Primary instructions."], "cursor/composer-2.6");
+		expect(jsons).toHaveLength(2);
+		expect(JSON.parse(jsons[0])).toEqual({ role: "system", content: CURSOR_COMPOSER_PROMPT });
+		expect(JSON.parse(jsons[1])).toEqual({ role: "system", content: "Primary instructions." });
+	});
+
+	it("leaves non-Composer and unspecified model prompts unchanged", () => {
+		expect(buildCursorSystemPromptJsons(["Primary instructions."], "cursor/claude-sonnet-5")).toHaveLength(1);
+		expect(buildCursorSystemPromptJsons(["Primary instructions."], "kimi-k3")).toHaveLength(1);
+	});
+
+	it("leads the reconstructed rule prompt with the Composer prefix for Composer models", () => {
+		const rules = buildCursorRequestContextRules(["prefix"], "composer-2.5");
+		expect(rules).toHaveLength(2);
+		expect(rules[0]?.fullPath).toBe("/omp/system-prompt/composer.mdc");
+		expect(rules[0]?.content).toBe(CURSOR_COMPOSER_PROMPT);
+		expect(rules[0]?.source).toBe(CursorRuleSource.USER);
+		expect(rules[1]?.fullPath).toBe("/omp/system-prompt/0.mdc");
+		expect(rules[1]?.content).toBe("prefix");
+	});
+
+	it("leaves rules unchanged for non-Composer models", () => {
+		const rules = buildCursorRequestContextRules(["prefix"], "cursor-grok-4.6");
+		expect(rules).toHaveLength(1);
+		expect(rules[0]?.fullPath).toBe("/omp/system-prompt/0.mdc");
 	});
 });
 
