@@ -491,6 +491,13 @@ describe("setup wizard web search tab", () => {
 		expect(SEARCH_PROVIDER_OPTIONS.slice(1).map(option => option.value)).toEqual([...SEARCH_PROVIDER_ORDER]);
 	});
 
+	it("advertises Parallel's explicit keyless MCP fallback in the shared provider picker", () => {
+		const parallelOption = SEARCH_PROVIDER_OPTIONS.find(option => option.value === "parallel");
+
+		expect(parallelOption?.description).toContain("PARALLEL_API_KEY");
+		expect(parallelOption?.description).toContain("explicit keyless fallback via MCP");
+	});
+
 	it("persists the highlighted provider as the head of the web search order", async () => {
 		const settings = Settings.isolated();
 		const host = {
