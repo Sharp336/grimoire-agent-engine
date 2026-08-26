@@ -951,6 +951,7 @@ function mapEuropeanGatewayModel(
 	reference: ModelSpec<"openai-completions"> | undefined,
 ): ModelSpec<"openai-completions"> {
 	const model = mapWithBundledReference(entry, defaults, reference);
+	const knownReference = resolveEuropeanGatewayKnownReference(model);
 	const pricing = isRecord(entry.pricing) ? entry.pricing : undefined;
 	const topProvider = isRecord(entry.top_provider) ? entry.top_provider : undefined;
 	const supportsTools = getEuropeanGatewayToolCapability(entry);
@@ -970,11 +971,14 @@ function mapEuropeanGatewayModel(
 		},
 		contextWindow: toPositiveNumber(
 			entry.context_length,
-			toPositiveNumber(entry.context_size, toPositiveNumber(topProvider?.context_length, model.contextWindow)),
+			toPositiveNumber(
+				entry.context_size,
+				toPositiveNumber(topProvider?.context_length, model.contextWindow ?? knownReference?.contextWindow ?? null),
+			),
 		),
 		maxTokens: toPositiveNumber(
 			entry.max_completion_tokens,
-			toPositiveNumber(topProvider?.max_completion_tokens, model.maxTokens),
+			toPositiveNumber(topProvider?.max_completion_tokens, model.maxTokens ?? knownReference?.maxTokens ?? null),
 		),
 		...(supportsTools !== undefined ? { supportsTools } : {}),
 	};
@@ -1006,7 +1010,7 @@ function createEuropeanGatewayModelManagerOptions(
 	const references = new Map(staticModels.map(model => [model.id, model]));
 	return {
 		providerId,
-		cacheProviderId: resolveModelCacheProviderId(providerId, { baseUrl }),
+		cacheProviderId: resolveModelCacheProviderId(providerId, { apiKey, baseUrl }),
 		staticModels,
 		dynamicModelsAuthoritative: true,
 		...(canFetchDynamicModels && {
