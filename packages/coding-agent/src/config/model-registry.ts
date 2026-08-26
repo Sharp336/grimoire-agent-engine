@@ -1703,12 +1703,31 @@ export class ModelRegistry {
 				continue;
 			}
 			if (requiresAuth && strategy !== "offline") {
-				const apiKey = await this.#peekApiKeyForProvider(managerOpts.providerId);
+				let apiKey = await this.#peekApiKeyForProvider(managerOpts.providerId);
 				if (!isAuthenticated(apiKey)) {
-					// Never authenticated: surface cached models without running discovery,
-					// mirroring configured-discovery handling — no network, no cache write.
-					// A pre-auth cycle must not pin a fresh empty catalog row over the
-					// first authenticated refresh's retry window.
+					// peekApiKey returns undefined once a stored OAuth credential
+					// expires, so mirror #resolveBuiltInDiscoveryApiKey: when OAuth
+					// credentials exist for the provider, run the refreshing resolver
+					// before declaring it unauthenticated — otherwise oauth-backed
+					// catalogs would never refresh again.
+					const oauthCredentials = getOAuthCredentialsForProvider(this.authStorage, managerOpts.providerId);
+					if (oauthCredentials.length > 0) {
+						try {
+							apiKey = await this.getApiKeyForProvider(managerOpts.providerId);
+						} catch (error) {
+							logger.debug("OAuth refresh failed during model discovery preflight", {
+								provider: managerOpts.providerId,
+								error: error instanceof Error ? error.message : String(error),
+							});
+						}
+					}
+				}
+				if (!isAuthenticated(apiKey)) {
+					// Never authenticated (or the OAuth refresh also failed): surface
+					// cached models without running discovery, mirroring configured-
+					// discovery handling — no network, no cache write. A pre-auth cycle
+					// must not pin a fresh empty catalog row over the first
+					// authenticated refresh's retry window.
 					const cached = readModelCache<Api>(
 						managerOpts.providerId,
 						RUNTIME_PROVIDER_CACHE_TTL_MS,
@@ -2456,10 +2475,13 @@ export class ModelRegistry {
 				fetchDynamicModels: async () => {
 					const apiKey = await this.#peekApiKeyForProvider(providerName);
 					const resolvedKey = isAuthenticated(apiKey) ? apiKey : undefined;
-					const modelDefs =
-						(await withRuntimeDynamicModelsTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
-							fetcher(resolvedKey),
-						)) ?? [];
+					// Propagate a contract-compliant null: the model manager treats it
+					// as failed discovery and preserves cached models as stale, while
+					// an empty array would prune them for the whole cache cycle.
+					const modelDefs = await withRuntimeDynamicModelsTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
+						fetcher(resolvedKey),
+					);
+					if (modelDefs === null) return null;
 					const results: Model<Api>[] = [];
 					for (const modelDef of modelDefs) {
 						const overlay = buildCustomModelOverlay(

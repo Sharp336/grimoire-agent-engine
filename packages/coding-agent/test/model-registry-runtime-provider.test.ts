@@ -330,6 +330,72 @@ describe("ModelRegistry runtime provider registration", () => {
 		expect(registry.find(providerName, "gated-model")).toBeDefined();
 	});
 
+	test("null from fetchDynamicModels preserves previously discovered cached models", async () => {
+		const providerName = "null-fetch-provider";
+
+		registry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				auth: "apiKey",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: async () => [{ ...baseModel, id: "transient-model" }],
+			},
+			"ext://runtime",
+		);
+		await registry.refreshRuntimeProviders("online");
+		expect(registry.find(providerName, "transient-model")).toBeDefined();
+
+		// Re-register with a fetcher reporting failed discovery (contract null):
+		// the cached catalog must survive the cycle instead of being pruned.
+		registry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				auth: "apiKey",
+				apiKey: "RUNTIME_KEY",
+				api: "openai-completions",
+				fetchDynamicModels: async () => null,
+			},
+			"ext://runtime",
+		);
+		await registry.refreshProvider(providerName, "online");
+		expect(registry.find(providerName, "transient-model")).toBeDefined();
+	});
+
+	test("expired oauth credential defers gated discovery without throwing", async () => {
+		const providerName = "expired-oauth-runtime-provider";
+		let discoveryCalls = 0;
+
+		await authStorage.set(providerName, {
+			type: "oauth",
+			access: "expired-access",
+			refresh: "refresh-token",
+			expires: Date.now() - 60_000,
+		});
+
+		registry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				auth: "oauth",
+				api: "openai-completions",
+				fetchDynamicModels: async () => {
+					discoveryCalls++;
+					return [{ ...baseModel, id: "oauth-model" }];
+				},
+			},
+			"ext://oauth",
+		);
+
+		// No refresher is registered for this provider: the OAuth fallback must
+		// fail gracefully and keep discovery gated rather than throw or fetch.
+		await registry.refreshRuntimeProviders("online");
+		expect(discoveryCalls).toBe(0);
+		expect(registry.find(providerName, "oauth-model")).toBeUndefined();
+	});
+
 	test("configured discovery suppresses extension fetchDynamicModels for the same provider", async () => {
 		const providerName = "runtime-configured-provider";
 		fs.writeFileSync(
