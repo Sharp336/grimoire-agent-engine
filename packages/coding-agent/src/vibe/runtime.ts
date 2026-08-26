@@ -1607,6 +1607,7 @@ export class VibeSessionRegistry {
 				record.queue.unshift(JSON.stringify(payload));
 			},
 			this.#dependencyCache,
+			`${this.ownerScope(session).ownerId}:${this.ownerScope(session).parentSessionId}:${record.id}`,
 		);
 		if (coordinated.handled) {
 			await this.#finishTurn(session, manager, record, settledJobId);

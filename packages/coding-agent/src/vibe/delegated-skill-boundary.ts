@@ -90,8 +90,7 @@ export function validateSkillDispatchResult(
 	if (
 		!value ||
 		typeof value !== "object" ||
-		Array.isArray(value) ||
-		!hasExactKeys(value, correlationId ? [...RESULT_KEYS, "correlationId"] : RESULT_KEYS)
+		(!hasExactKeys(value, RESULT_KEYS) && !hasExactKeys(value, [...RESULT_KEYS, "correlationId"]))
 	)
 		return null;
 	const result = value as Record<string, unknown>;
@@ -113,19 +112,16 @@ export async function coordinateDelegatedSkillDependency(
 	dispatch: (dependency: DelegatedSkillDependency) => Promise<unknown>,
 	resume: (payload: SkillDispatchResult) => Promise<void>,
 	cache: Map<string, Promise<SkillDispatchResult | null>>,
+	fingerprintPrefix = "",
+	expectedCorrelation?: string,
 ): Promise<{ handled: boolean; result: SkillDispatchResult | null }> {
 	const dependency = parseDelegatedSkillDependency(output.trim());
 	if (!dependency) return { handled: false, result: null };
-	const key = JSON.stringify([
-		dependency.skill,
-		dependency.args,
-		dependency.dependent_gate,
-		dependency.dependent_artifact,
-	]);
+	const key = `${fingerprintPrefix}:${JSON.stringify([dependency.skill, dependency.args, dependency.dependent_gate, dependency.dependent_artifact])}`;
 	let pending = cache.get(key);
 	if (!pending) {
 		pending = (async () => {
-			const result = validateSkillDispatchResult(await dispatch(dependency), dependency.skill);
+			const result = validateSkillDispatchResult(await dispatch(dependency), dependency.skill, expectedCorrelation);
 			if (result?.status === "success") await resume(result);
 			return result;
 		})();
