@@ -46,6 +46,7 @@ type ConfigurableEditorAction = Extract<
 	| "app.clipboard.pasteImage"
 	| "app.clipboard.pasteTextRaw"
 	| "app.clipboard.copyPrompt"
+	| "app.vibe.toggle"
 >;
 
 const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
@@ -68,6 +69,7 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.clipboard.pasteImage": ["ctrl+v"],
 	"app.clipboard.pasteTextRaw": ["ctrl+shift+v", "alt+shift+v"],
 	"app.clipboard.copyPrompt": ["alt+shift+c"],
+	"app.vibe.toggle": [],
 };
 
 function buildMatchKeys(keys: readonly KeyId[]): Set<string> {
@@ -707,6 +709,8 @@ export class CustomEditor extends Editor {
 	onPasteImagePath?: (path: string) => void | Promise<void>;
 	/** Called when the configured raw text-paste shortcut is pressed. */
 	onPasteTextRaw?: () => void;
+	/** Called when the configured Vibe mode shortcut is pressed. */
+	onToggleVibe?: () => void;
 	/** Called when the configured dequeue shortcut is pressed. */
 	onDequeue?: () => void;
 	/** Called when the configured retry shortcut is pressed. */
@@ -994,6 +998,13 @@ export class CustomEditor extends Editor {
 			canonical !== undefined &&
 			(this.#actionMatchKeyUnion.has(canonical) || this.#customMatchKeys.has(canonical))
 		) {
+			// Vibe ships unbound, so any match is an explicit user choice and wins
+			// over an untouched default action that happens to use the same chord.
+			if (this.#matchesAction(canonical, "app.vibe.toggle") && this.onToggleVibe) {
+				this.onToggleVibe();
+				return;
+			}
+
 			// Intercept configured image paste (async - fires and handles result)
 			if (this.#matchesAction(canonical, "app.clipboard.pasteImage") && this.onPasteImage) {
 				void this.onPasteImage();
