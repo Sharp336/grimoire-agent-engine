@@ -175,6 +175,80 @@ export function formatTokenCount(value: number): string {
 	return value.toLocaleString();
 }
 
+const RELOAD_CONFIG_KEY_PREVIEW = 8;
+
+/**
+ * Re-read the global config layer into a live session and describe what actually
+ * happened.
+ *
+ * The report deliberately separates "changed" from "took effect": a key can be
+ * reloaded and still need a restart, or reach some consumers and not others, and
+ * the model rebind can legitimately decline. Reporting a flat "reloaded" would
+ * leave the operator believing an edit landed when it did not.
+ */
+async function reloadConfigIntoSession(session: AgentSession): Promise<string> {
+	const { report, rebind } = await session.reloadConfigAndReapplyRole();
+	if (report === undefined) {
+		return "Config reload is unavailable for this session.";
+	}
+	if (report.status === "failed") {
+		return `Config reload failed, previous settings kept: ${report.error ?? "unknown error"}`;
+	}
+	if (report.status === "unchanged") {
+		return "Config already matches this session; nothing to apply.";
+	}
+
+	const lines: string[] = [];
+	const preview = report.changed.slice(0, RELOAD_CONFIG_KEY_PREVIEW).join(", ");
+	const overflow = report.changed.length - RELOAD_CONFIG_KEY_PREVIEW;
+	lines.push(
+		`Config reloaded: ${report.changed.length} setting${report.changed.length === 1 ? "" : "s"} changed (${preview}${overflow > 0 ? `, +${overflow} more` : ""}).`,
+	);
+
+	// `rebind` is undefined when the roles did not move; the session gates that
+	// internally so an unrelated setting edit cannot retarget an active fallback.
+	if (rebind !== undefined) {
+		switch (rebind) {
+			case "switched": {
+				// Read the model AFTER the switch: capturing it earlier reported the model the
+				// session just moved off.
+				const model = session.model;
+				lines.push(`Model switched to ${model ? `${model.provider}/${model.id}` : "the new default role"}.`);
+				break;
+			}
+			case "thinking-applied":
+				lines.push(`Thinking level updated to ${session.configuredThinkingLevel() ?? "the model default"}.`);
+				break;
+			case "deferred-turn":
+				lines.push("Model change will apply at the end of the current turn.");
+				break;
+			case "deferred-plan-mode":
+				lines.push("Model change will apply when you leave plan mode.");
+				break;
+			case "fallback-retargeted":
+				lines.push("Model change will apply when the active fallback is released.");
+				break;
+			case "declined":
+				lines.push("Model roles changed but this session kept its model, which was chosen explicitly.");
+				break;
+			case "unchanged":
+				break;
+		}
+	}
+
+	for (const entry of report.partiallyApplied) {
+		// Neutral prefix: some of these took effect for part of the system, others need a
+		// different action entirely (`/reload-plugins`), and the reason says which.
+		lines.push(`Caveat: ${entry.key} — ${entry.reason}.`);
+	}
+	if (report.restartRequired.length > 0) {
+		// "Known" because the classification is traced per key rather than exhaustive:
+		// an empty list is not a promise that everything else took effect.
+		lines.push(`Known to need a restart: ${report.restartRequired.join(", ")}.`);
+	}
+	return lines.join("\n");
+}
+
 export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "security",
@@ -196,6 +270,19 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			{ name: "disposition", description: "Set a finding disposition with rationale" },
 		],
 		handle: handleSecurityCommand,
+	},
+	{
+		name: "reload-config",
+		description: "Re-read ~/.omp/agent/config.yml into this session",
+		acpDescription: "Reload global config",
+		handle: async (_command, runtime) => {
+			await runtime.output(await reloadConfigIntoSession(runtime.session));
+			return commandConsumed();
+		},
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.showStatus(await reloadConfigIntoSession(runtime.ctx.session));
+			runtime.ctx.editor.setText("");
+		},
 	},
 	{
 		name: "settings",
