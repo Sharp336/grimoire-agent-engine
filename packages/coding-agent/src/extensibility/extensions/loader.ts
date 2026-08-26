@@ -42,6 +42,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 	ExtensionFactory,
+	ExtensionModelAliasResult,
 	ExtensionRuntime as IExtensionRuntime,
 	LoadExtensionsResult,
 	MessageRenderer,
@@ -117,6 +118,9 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	}
 
 	setModel(): Promise<boolean> {
+		throw new ExtensionRuntimeNotInitializedError();
+	}
+	setModelAlias(): Promise<ExtensionModelAliasResult> {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
 
@@ -295,6 +299,9 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 
 	setModel(model: Model): Promise<boolean> {
 		return this.runtime.setModel(model);
+	}
+	setModelAlias(name: string): Promise<ExtensionModelAliasResult> {
+		return this.runtime.setModelAlias!(name);
 	}
 
 	getThinkingLevel(): ThinkingLevel | undefined {

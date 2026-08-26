@@ -5,6 +5,7 @@
 ## [18.0.6] - 2026-08-26
 
 ### Added
+- Added the extension model-alias API: `ctx.models.listAliases()` exposes effective role resolution, and `pi.setModelAlias()` applies a session-only alias with model/thinking-level metadata.
 
 - Added fast, cached conventional commit message generation to the git TUI and `omp commit --legacy`, including automatic handling of whitespace-only changes, clearer commit scopes, and improved grammar and tense in generated summaries.
 - The git TUI sidebar now supports collapsing and expanding the Unstaged and Staged sections, with keyboard shortcuts to stage or unstage an entire section.
