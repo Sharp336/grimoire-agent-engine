@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added built-in FreePI model discovery through its OpenAI-compatible API.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added

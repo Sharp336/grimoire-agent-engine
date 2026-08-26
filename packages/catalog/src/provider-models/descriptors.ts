@@ -23,6 +23,7 @@ import {
 	deepseekModelManagerOptions,
 	firepassModelManagerOptions,
 	fireworksModelManagerOptions,
+	freepiModelManagerOptions,
 	githubCopilotModelManagerOptions,
 	gmiCloudModelManagerOptions,
 	groqModelManagerOptions,
@@ -187,6 +188,14 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["FIREWORKS_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => fireworksModelManagerOptions(config),
 		catalogDiscovery: { label: "Fireworks" },
+	},
+	{
+		id: "freepi",
+		defaultModel: "deepseek/deepseek-v4-flash",
+		envVars: ["FREEPI_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => freepiModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "FreePI" },
 	},
 	{
 		id: "github-copilot",

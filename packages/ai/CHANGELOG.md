@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/login` API-key authentication and validation for FreePI, including its closed-alpha data-retention warning.
+
 ## [18.0.6] - 2026-08-26
 
 ### Added
