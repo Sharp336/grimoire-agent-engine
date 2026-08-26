@@ -178,7 +178,6 @@ let cursorH2Generation = 0;
 /** One-shot test gate awaited immediately before `http2.connect`. */
 let cursorH2EstablishBodyGate: ((key: string) => Promise<void>) | undefined;
 
-
 function destroyCursorH2Session(session: http2.ClientHttp2Session): void {
 	try {
 		session.destroy();
@@ -386,9 +385,7 @@ export function __cursorDiscoveryHttp2Snapshot(): Array<{
  * Test seam: one-shot gate awaited immediately before `http2.connect` so a
  * test can abort the caller while handshake is still pending.
  */
-export function __setCursorDiscoveryHttp2EstablishBodyGate(
-	fn: ((key: string) => Promise<void>) | undefined,
-): void {
+export function __setCursorDiscoveryHttp2EstablishBodyGate(fn: ((key: string) => Promise<void>) | undefined): void {
 	cursorH2EstablishBodyGate = fn;
 }
 
