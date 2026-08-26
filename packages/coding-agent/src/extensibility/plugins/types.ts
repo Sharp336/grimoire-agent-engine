@@ -31,19 +31,18 @@ export interface PluginManifest {
 	version: string;
 	/** Human-readable description */
 	description?: string;
-
 	/** Entry point for base tools (relative path from package root) */
 	tools?: string;
 	/** Entry point for base hooks (relative path from package root) */
 	hooks?: string;
 	/** Extension entry points (relative paths from package root) */
 	extensions?: string[];
+	/** Declares that extension entrypoints use native ESM semantics. */
+	compatibility?: "legacy" | "modern-esm";
 	/** Command files (relative paths from package root) */
 	commands?: string[];
-
-	/** Feature definitions for selective installation */
+	/** Feature definitions for selective plugin installation */
 	features?: Record<string, PluginFeature>;
-
 	/** Settings schema for plugin configuration */
 	settings?: Record<string, PluginSettingSchema>;
 }
