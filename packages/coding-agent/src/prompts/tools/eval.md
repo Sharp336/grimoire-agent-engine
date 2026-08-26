@@ -39,8 +39,8 @@ rlm_query_batched(prompts, *, agent?=None) → list[str]
 {{/if}}
 chunk(text, *, by?="lines", size?=100) → list[str]
     Split into `size` chunks by "lines" (join "\n") or bounded ~`size`-token windows (~4 chars/token, character-bounded regardless of whitespace). Empty text → [].
-search(text, pattern, flags?=0, limit?=100) → list[str]
-    "L<lineno>: <line>" for each regex-matching line, capped at `limit` matches (default 100; `{ limit }` in JS, `limit=` in Python). Appends "... (truncated, more matches may exist)" when the scan stops early. No match → [].
+search(text, pattern, flags?=0, limit?=100, max_line_chars?=1000) → list[str]
+    "L<lineno>: <line>" for each regex-matching line, capped at `limit` matches (default 100; `{ limit }` in JS, `limit=` in Python). Matching lines longer than `max_line_chars` chars (default 1000; `{ max_line_chars }` in JS, `max_line_chars=` in Python) are truncated with a "... (line truncated)" suffix. Appends "... (truncated, more matches may exist)" when the scan stops early. No match → [].
 metadata(text) → dict
     str → {chars, lines, words, approx_tokens}; list → {items, chars, approx_tokens}.
 {{/ifAny}}{{/if}}

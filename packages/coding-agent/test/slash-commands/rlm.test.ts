@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
 import type { AcpBuiltinSlashCommandResult, SlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
+import { pythonBackend } from "@oh-my-pi/pi-coding-agent/eval";
 
 const DISABLE_MESSAGE =
 	"RLM mode is disabled. Enable it via the rlm.enabled setting (e.g. omp config set rlm.enabled true).";
@@ -24,7 +25,7 @@ function acpRuntime(options?: { enabled?: boolean; backends?: Record<string, boo
 		getArtifactsDir: () => artifactsDir,
 		getSessionId: () => "test-session",
 	} as unknown as SlashCommandRuntime["sessionManager"];
-	const runtime = { settings, output, sessionManager } as unknown as SlashCommandRuntime;
+	const runtime = { settings, output, sessionManager, cwd: artifactsDir } as unknown as SlashCommandRuntime;
 	return { get, output, runtime, artifactsDir };
 }
 
@@ -174,6 +175,41 @@ describe("/rlm slash command", () => {
 		expect(prompt).not.toContain("Inline payload externalized");
 		const localDir = path.join(h.artifactsDir, "local");
 		expect(fs.existsSync(localDir) ? fs.readdirSync(localDir) : []).toHaveLength(0);
+		expect(h.output).not.toHaveBeenCalled();
+	});
+
+	it("rejects when Python is the only enabled backend but no interpreter is available", async () => {
+		const h = acpRuntime({ enabled: true, backends: { "eval.js": false } });
+		// The real probe spawns `python -c ...` (bounded by
+		// DEFAULT_PROBE_TIMEOUT_MS); in tests the kernel availability checker
+		// short-circuits to "available", so stub the backend's own
+		// isAvailable() — the exact gate resolveBackend() rejects every eval
+		// cell with when no interpreter exists.
+		vi.spyOn(pythonBackend, "isAvailable").mockResolvedValue(false);
+
+		const result = await executeAcpBuiltinSlashCommand("/rlm summarize the report", h.runtime);
+
+		// The command must fail up front with the prerequisite error rather
+		// than externalizing the payload and handing the model a workflow
+		// whose eval cells would all be rejected later.
+		expect(result).toEqual({ consumed: true });
+		expect(result).not.toHaveProperty("prompt");
+		expect(h.output).toHaveBeenCalledWith(expect.stringContaining("no working Python interpreter"));
+		expect(pythonBackend.isAvailable).toHaveBeenCalledTimes(1);
+		const localDir = path.join(h.artifactsDir, "local");
+		expect(fs.existsSync(localDir) ? fs.readdirSync(localDir) : []).toHaveLength(0);
+	});
+
+	it("accepts /rlm when Python is the sole backend and its interpreter is available", async () => {
+		const h = acpRuntime({ enabled: true, backends: { "eval.js": false } });
+		tempDirs.push(h.artifactsDir);
+		vi.spyOn(pythonBackend, "isAvailable").mockResolvedValue(true);
+
+		const result = await executeAcpBuiltinSlashCommand("/rlm summarize the report", h.runtime);
+
+		expect(result).not.toEqual({ consumed: true });
+		expect(promptOf(result)).toContain("local://rlm-input-");
+		expect(pythonBackend.isAvailable).toHaveBeenCalledTimes(1);
 		expect(h.output).not.toHaveBeenCalled();
 	});
 });

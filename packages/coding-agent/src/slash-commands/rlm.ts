@@ -1,5 +1,7 @@
 import { prompt } from "@oh-my-pi/pi-utils";
 import { randomUUID } from "node:crypto";
+import { pythonBackend } from "../eval";
+import { DEFAULT_PROBE_TIMEOUT_MS } from "../eval/probe";
 import { resolveLocalUrlToPath } from "../internal-urls/local-protocol";
 import rlmTemplate from "../prompts/rlm.md" with { type: "text" };
 import type { ToolSession } from "../tools";
@@ -24,16 +26,29 @@ export async function handleRlmCommand(
 		);
 		return commandConsumed();
 	}
-	// RLM's whole workflow runs inside the eval sandbox (context/metadata/chunk/
-	// llm_query), and only the Python and JS preludes implement those helpers
-	// (rb/jl do not). Without py or js enabled, the strategy prompt below would
-	// hand the model instructions it has no tool to execute.
-	const backends = resolveEvalBackends({ settings: runtime.settings } as ToolSession);
+	const session = { settings: runtime.settings, cwd: runtime.cwd } as ToolSession;
+	const backends = resolveEvalBackends(session);
 	if (!backends.python && !backends.js) {
 		await runtime.output(
 			"RLM mode requires the Python or JavaScript eval backend (the RLM helpers are not implemented for Ruby/Julia), but neither is enabled in this session (eval.py/eval.js are off or PI_PY/PI_JS disable them). Enable one before using /rlm.",
 		);
 		return commandConsumed();
+	}
+	// Python is the only candidate backend: probe that an interpreter actually
+	// exists before accepting the command. Every real eval cell is gated on
+	// pythonBackend.isAvailable() (resolveBackend), so accepting /rlm here and
+	// letting the probe fail later would externalize the payload and hand the
+	// model a workflow it cannot execute. Surface the same prerequisite error
+	// up front instead. JS needs no probe (jsBackend.isAvailable() is trivially
+	// true), and when both are enabled the model can fall back to JS cells.
+	if (backends.python && !backends.js) {
+		const available = await pythonBackend.isAvailable(session, { timeoutMs: DEFAULT_PROBE_TIMEOUT_MS });
+		if (!available) {
+			await runtime.output(
+				"RLM mode requires a working eval backend: Python is the only one enabled in this session, but no working Python interpreter is available (every RLM eval cell would be rejected). Install the python kernel or enable the JavaScript eval backend before using /rlm.",
+			);
+			return commandConsumed();
+		}
 	}
 	const args = command.args.trim();
 	if (!args) {

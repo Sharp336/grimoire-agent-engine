@@ -295,9 +295,13 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	};
 
 	const search = (text, pattern, opts, ...rest) => {
-		const o = optionsArg("search", opts, rest, ["flags", "limit"], "{ flags, limit }");
+		const o = optionsArg("search", opts, rest, ["flags", "limit", "max_line_chars"], "{ flags, limit, max_line_chars }");
 		const limit = o.limit ?? 100;
 		if (!Number.isInteger(limit) || limit <= 0) throw new Error("search() limit must be a positive integer");
+		const maxLineChars = o.max_line_chars ?? 1000;
+		if (!Number.isInteger(maxLineChars) || maxLineChars <= 0) {
+			throw new Error("search() max_line_chars must be a positive integer");
+		}
 		const rx = new RegExp(pattern, typeof o.flags === "string" ? o.flags : "");
 		// Incremental line scan (the same /\r\n|\r|\n/g exec loop chunk()
 		// uses) instead of materializing a full array of every line via
@@ -307,9 +311,13 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		// the \r\n|\r|\n boundary set, and the trailing-whitespace trim are
 		// identical to the split-based behavior. The result list is bounded
 		// too: scanning stops as soon as `limit` matches are retained (a
-		// trailing marker notes the early stop), so a broad or frequent
-		// pattern on a huge payload cannot grow the output past the input
-		// and OOM the eval worker.
+		// trailing marker notes the early stop), and each retained match is
+		// itself capped at `max_line_chars` characters (a "... (line
+		// truncated)" suffix marks a cut line). A broad or frequent pattern
+		// on a huge payload — including one unbroken multi-MB line, e.g.
+		// minified JSON/base64, whose whole content a match would otherwise
+		// copy — cannot grow the output past the input and OOM the eval
+		// worker.
 		const str = String(text);
 		const out = [];
 		let lineNo = 0;
@@ -320,7 +328,13 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			// Stateful g/y patterns must restart per line or they skip
 			// matches after the first hit.
 			rx.lastIndex = 0;
-			if (rx.test(line)) out.push(`L${lineNo}: ${line.replace(/\s+$/, "")}`);
+			if (rx.test(line)) {
+				let content = line.replace(/\s+$/, "");
+				if (content.length > maxLineChars) {
+					content = `${content.slice(0, maxLineChars)}... (line truncated)`;
+				}
+				out.push(`L${lineNo}: ${content}`);
+			}
 		};
 		let m;
 		while ((m = lineBreak.exec(str)) !== null) {
@@ -334,7 +348,6 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		if (last < str.length) matchLine(str.slice(last));
 		return out;
 	};
-
 	const __countLinesAndWords = text => {
 		// Single-pass scan instead of splitting the whole payload into a
 		// lines array and a words array: for the large whitespace-rich

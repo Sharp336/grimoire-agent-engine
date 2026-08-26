@@ -171,6 +171,45 @@ describe("eval JS RLM helpers", () => {
 		expect(() => search("a\nb", "a", { limit: "5" })).toThrow();
 	});
 
+	it("search truncates oversized matching lines to max_line_chars and leaves short lines intact", () => {
+		const sandbox = loadJsPrelude(async () => ({}));
+		const search = sandbox.search as SearchFn;
+		const long = "y".repeat(5000);
+		// Short lines pass through unchanged (default cap is 1000).
+		expect(search("short\n", "short")).toEqual(["L1: short"]);
+		// A single oversized matching line is truncated to max_line_chars
+		// plus the marker instead of being copied whole — the failure mode
+		// where one minified JSON/base64 line duplicates the payload.
+		expect(search(long, "y")).toEqual([`L1: ${"y".repeat(1000)}... (line truncated)`]);
+		// The cap is configurable; every matching line is truncated, and the
+		// count cap (limit) still applies on top.
+		const two = `${long}\n${long}`;
+		expect(search(two, "y", { max_line_chars: 20 })).toEqual([
+			`L1: ${"y".repeat(20)}... (line truncated)`,
+			`L2: ${"y".repeat(20)}... (line truncated)`,
+		]);
+		expect(search(`${long}\n${long}\n${long}`, "y", { limit: 1, max_line_chars: 10 })).toEqual([
+			`L1: ${"y".repeat(10)}... (line truncated)`,
+			"... (truncated, more matches may exist)",
+		]);
+		// Trailing whitespace is trimmed before the cap applies; numbering
+		// stays intact across blank lines.
+		expect(search(`\n${long}  `, "y", { max_line_chars: 5 })).toEqual([
+			`L2: ${"y".repeat(5)}... (line truncated)`,
+		]);
+		// The new option also rides positionally after flags/limit, like
+		// limit itself did when it was added. (A payload ending exactly at
+		// the cap is not marked, so keep a remaining line to see the marker.)
+		expect(search(`${long}\n${long}`, "y", "g", 1, 8)).toEqual([
+			`L1: ${"y".repeat(8)}... (line truncated)`,
+			"... (truncated, more matches may exist)",
+		]);
+		// Invalid caps are rejected like invalid limits.
+		expect(() => search("a\nb", "a", { max_line_chars: 0 })).toThrow();
+		expect(() => search("a\nb", "a", { max_line_chars: -1 })).toThrow();
+		expect(() => search("a\nb", "a", { max_line_chars: 1.5 })).toThrow();
+	});
+
 	it("metadata reports str shape", () => {
 		const sandbox = loadJsPrelude(async () => ({}));
 		const metadata = sandbox.metadata as MetadataFn;
@@ -409,10 +448,46 @@ print(json.dumps(search("Foo\\nfoo", "foo", re.IGNORECASE, limit=1)))
 		expect(JSON.parse(lines[4]!)).toEqual(["L1: Foo", "... (truncated, more matches may exist)"]);
 	});
 
-	it("search rejects non-positive limits", async () => {
+	it("search truncates oversized matching lines to max_line_chars and leaves short lines intact", async () => {
+		const r = await run(`
+import json
+long = "y" * 5000
+print(json.dumps(search("short\\n", "short")))
+print(json.dumps(search(long, "y")))
+print(json.dumps(search(long + "\\n" + long, "y", max_line_chars=20)))
+print(json.dumps(search(long + "\\n" + long + "\\n" + long, "y", limit=1, max_line_chars=10)))
+print(json.dumps(search("\\n" + long + "  ", "y", max_line_chars=5)))
+`);
+		expect(r.exitCode).toBe(0);
+		const lines = r.stdout.trim().split("\n");
+		// Short lines pass through unchanged (default cap is 1000).
+		expect(JSON.parse(lines[0]!)).toEqual(["L1: short"]);
+		// A single oversized matching line is truncated to max_line_chars
+		// plus the marker instead of being copied whole.
+		expect(JSON.parse(lines[1]!)).toEqual(["L1: " + "y".repeat(1000) + "... (line truncated)"]);
+		// The cap is configurable; every matching line is truncated, and the
+		// count cap (limit) still applies on top.
+		expect(JSON.parse(lines[2]!)).toEqual([
+			"L1: " + "y".repeat(20) + "... (line truncated)",
+			"L2: " + "y".repeat(20) + "... (line truncated)",
+		]);
+		expect(JSON.parse(lines[3]!)).toEqual([
+			"L1: " + "y".repeat(10) + "... (line truncated)",
+			"... (truncated, more matches may exist)",
+		]);
+		// Trailing whitespace is stripped before the cap applies; numbering
+		// stays intact across blank lines.
+		expect(JSON.parse(lines[4]!)).toEqual(["L2: " + "y".repeat(5) + "... (line truncated)"]);
+	});
+
+	it("search rejects non-positive limits and max_line_chars", async () => {
 		const bad = await run(`search("a\\nb", "a", limit=0)`);
 		expect(bad.exitCode).not.toBe(0);
 		expect(bad.stderr).toContain("ValueError");
+
+		const badCap = await run(`search("a\\nb", "a", max_line_chars=0)`);
+		expect(badCap.exitCode).not.toBe(0);
+		expect(badCap.stderr).toContain("ValueError");
 	});
 
 	it("metadata reports str and list shapes", async () => {
