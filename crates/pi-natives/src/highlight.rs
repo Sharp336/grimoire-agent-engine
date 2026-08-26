@@ -689,9 +689,9 @@ mod tests {
 		assert!(supports_language_impl("ts"));
 		assert!(supports_language_impl("tsx"));
 
-		let code = "function icons(): Record<\"close\" | \"hunk\", string> {\n\treturn {};\n}\nfunction \
-		            chip(label: string): string {\n\tconst text = ` ${label} `;\n\treturn text;\n}\nconst zzz \
-		            = 1;\n";
+		let code = "function icons(): Record<\"close\" | \"hunk\", string> {\n\treturn \
+		            {};\n}\nfunction chip(label: string): string {\n\tconst text = ` ${label} \
+		            `;\n\treturn text;\n}\nconst zzz = 1;\n";
 		let out = highlight_code_impl(code, Some("ts"), &test_colors());
 		let last = out.lines().last().unwrap();
 		assert!(last.contains("<k>const"), "trailing code lost keyword highlighting: {last}");
