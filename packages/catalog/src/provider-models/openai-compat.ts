@@ -674,6 +674,21 @@ export function createSimpleOpenAICompletionsOptions(
 	});
 }
 
+/**
+ * Builds {@link ModelManagerOptions} for an Anthropic-messages provider whose
+ * live catalog is discovered from the endpoint's OpenAI-shaped `/v1/models`.
+ *
+ * - **API-key gating**: `fetchDynamicModels` is attached only when
+ *   `config.apiKey` is set; keyless callers keep the bundled/static catalog.
+ * - **Discovery URL normalization**: the configured base URL is normalized
+ *   against `defaultBaseUrlFallback` (`normalizeAnthropicBaseUrl`) and remapped
+ *   via `toAnthropicDiscoveryBaseUrl` to the host serving `/v1/models`, while
+ *   discovered rows keep the chat `baseUrl` for actual requests.
+ * - **Bundled-reference merge**: every discovered row is mapped through
+ *   `mapWithBundledReference`, so limits, modalities, pricing, and thinking
+ *   metadata missing from the discovery payload fall back to the bundled
+ *   reference for the same id; the endpoint's `display_name` wins for `name`.
+ */
 export function createSimpleAnthropicProviderOptions(
 	providerId: Parameters<typeof getBundledModels>[0],
 	defaultBaseUrlFallback: string,

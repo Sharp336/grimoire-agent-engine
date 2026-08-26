@@ -294589,6 +294589,55 @@
 			},
 			"supportsComputerUseConfig": false
 		},
+		"glm-5.3-flash": {
+			"id": "glm-5.3-flash",
+			"name": "GLM-5.3-Flash",
+			"api": "anthropic-messages",
+			"provider": "zai",
+			"baseUrl": "https://api.z.ai/api/anthropic",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 131072,
+			"thinking": {
+				"mode": "anthropic-budget-effort",
+				"efforts": [
+					"low",
+					"high",
+					"max"
+				],
+				"defaultLevel": "max",
+				"requiresEffort": true
+			},
+			"requiresGlyphTokenization": false,
+			"tokenizer": "glm5",
+			"supportsComputerUse": false,
+			"compat": {
+				"officialEndpoint": false,
+				"signingEndpoint": false,
+				"disableStrictTools": false,
+				"disableAdaptiveThinking": false,
+				"allowAnthropicHeaderOverrides": false,
+				"supportsEagerToolInputStreaming": false,
+				"supportsLongCacheRetention": false,
+				"supportsMidConversationSystem": false,
+				"supportsForcedToolChoice": true,
+				"supportsSamplingParams": true,
+				"requiresToolResultId": true,
+				"requiresThinkingEnabled": false,
+				"replayUnsignedThinking": true,
+				"escapeBuiltinToolNames": false
+			}
+		},
 		"glm-5v-turbo": {
 			"id": "glm-5v-turbo",
 			"name": "GLM-5V-Turbo",
