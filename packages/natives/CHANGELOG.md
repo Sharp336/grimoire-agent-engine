@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added per-rewrite match counts to native `astEdit` results.
+
 ## [18.0.6] - 2026-08-26
 
 ### Fixed

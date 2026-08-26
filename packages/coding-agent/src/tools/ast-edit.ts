@@ -3,7 +3,7 @@ import { formatHashlineHeader } from "@oh-my-pi/hashline";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
-import { type AstReplaceChange, type AstReplaceFileChange, astEdit } from "@oh-my-pi/pi-natives";
+import * as natives from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { replaceTabs, Text } from "@oh-my-pi/pi-tui";
 import { $envpos, prompt, untilAborted } from "@oh-my-pi/pi-utils";
@@ -76,8 +76,9 @@ interface AstEditCallOptions {
 }
 
 interface AstEditAggregatedResult {
-	changes: AstReplaceChange[];
-	fileChanges: AstReplaceFileChange[];
+	changes: natives.AstReplaceChange[];
+	fileChanges: natives.AstReplaceFileChange[];
+	rewriteMatches: natives.AstReplaceRuleMatch[];
 	totalReplacements: number;
 	filesTouched: number;
 	filesSearched: number;
@@ -91,15 +92,16 @@ async function runAstEditTargets(
 	commonBasePath: string,
 	options: AstEditCallOptions,
 ): Promise<AstEditAggregatedResult> {
-	const aggregatedChanges: AstReplaceChange[] = [];
+	const aggregatedChanges: natives.AstReplaceChange[] = [];
 	const fileCounts = new Map<string, number>();
+	const rewriteMatchCounts = new Map(Object.keys(options.rewrites).map(pattern => [pattern, 0]));
 	const parseErrors: string[] = [];
 	let totalReplacements = 0;
 	let filesSearched = 0;
 	let limitReached = false;
 	let applied = !options.dryRun;
 	for (const target of targets) {
-		const targetResult = await astEdit({
+		const targetResult = await natives.astEdit({
 			rewrites: options.rewrites,
 			selector: options.selector,
 			path: target.basePath,
@@ -114,6 +116,12 @@ async function runAstEditTargets(
 		limitReached = limitReached || targetResult.limitReached;
 		applied = applied && targetResult.applied;
 		if (targetResult.parseErrors) parseErrors.push(...targetResult.parseErrors);
+		for (const rewriteMatch of targetResult.rewriteMatches) {
+			rewriteMatchCounts.set(
+				rewriteMatch.pattern,
+				(rewriteMatchCounts.get(rewriteMatch.pattern) ?? 0) + rewriteMatch.count,
+			);
+		}
 		for (const change of targetResult.changes) {
 			const absolute = path.resolve(target.basePath, change.path);
 			const rebased = path.relative(commonBasePath, absolute).replace(/\\/g, "/");
@@ -125,13 +133,18 @@ async function runAstEditTargets(
 			fileCounts.set(rebased, (fileCounts.get(rebased) ?? 0) + fileChange.count);
 		}
 	}
-	const fileChanges: AstReplaceFileChange[] = Array.from(fileCounts, ([changePath, count]) => ({
+	const fileChanges: natives.AstReplaceFileChange[] = Array.from(fileCounts, ([changePath, count]) => ({
 		path: changePath,
+		count,
+	}));
+	const rewriteMatches: natives.AstReplaceRuleMatch[] = Array.from(rewriteMatchCounts, ([pattern, count]) => ({
+		pattern,
 		count,
 	}));
 	return {
 		changes: aggregatedChanges,
 		fileChanges,
+		rewriteMatches,
 		totalReplacements,
 		filesTouched: fileChanges.length,
 		filesSearched,
@@ -150,7 +163,7 @@ function runAstEditOnce(
 	if (targets) {
 		return runAstEditTargets(targets, resolvedSearchPath, options);
 	}
-	return astEdit({
+	return natives.astEdit({
 		rewrites: options.rewrites,
 		selector: options.selector,
 		path: resolvedSearchPath,
@@ -333,33 +346,18 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			});
 
 			const { errors: cappedParseErrors, total: parseErrorsTotal } = capParseErrors(result.parseErrors);
-			const phpMemberOps = ops.filter(([pattern]) => isPhpMemberPattern(pattern));
-			let patternHint: string | undefined;
-			if (phpMemberOps.length > 0) {
-				if (result.totalReplacements === 0) {
-					patternHint = PHP_MEMBER_WRAPPER_HINT;
-				} else if (ops.length > 1) {
-					for (const [pattern, replacement] of phpMemberOps) {
-						const probe = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
-							rewrites: { [pattern]: replacement },
-							dryRun: true,
-							maxFiles,
-							failOnParseError: false,
-							signal,
-						});
-						if (probe.totalReplacements === 0) {
-							patternHint = PHP_MEMBER_WRAPPER_HINT;
-							break;
-						}
-					}
-				}
-			}
+			const rewriteMatchCounts = new Map(result.rewriteMatches.map(({ pattern, count }) => [pattern, count]));
+			const patternHint = ops.some(
+				([pattern]) => isPhpMemberPattern(pattern) && (rewriteMatchCounts.get(pattern) ?? 0) === 0,
+			)
+				? PHP_MEMBER_WRAPPER_HINT
+				: undefined;
 			const formatPath = (filePath: string): string =>
 				formatResultPath(filePath, isDirectory, resolvedSearchPath, this.session.cwd);
 
 			const { record: recordFile, list: fileList } = createFileRecorder();
 			const fileReplacementCounts = new Map<string, number>();
-			const changesByFile = new Map<string, AstReplaceChange[]>();
+			const changesByFile = new Map<string, natives.AstReplaceChange[]>();
 			for (const fileChange of result.fileChanges) {
 				const relativePath = formatPath(fileChange.path);
 				recordFile(relativePath);

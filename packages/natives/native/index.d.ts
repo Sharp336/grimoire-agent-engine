@@ -603,6 +603,11 @@ export interface AstReplaceResult {
   changes: Array<AstReplaceChange>
   /** Replacement counts grouped by file. */
   fileChanges: Array<AstReplaceFileChange>
+  /**
+   * Match counts grouped by rewrite pattern, including patterns with no
+   * matches.
+   */
+  rewriteMatches: Array<AstReplaceRuleMatch>
   /** Total replacements applied or previewed. */
   totalReplacements: number
   /** Files that had at least one replacement. */
@@ -615,6 +620,14 @@ export interface AstReplaceResult {
   limitReached: boolean
   /** Parse or pattern errors when not failing the whole operation. */
   parseErrors?: Array<string>
+}
+
+/** Per-pattern match count from an `astEdit` run. */
+export interface AstReplaceRuleMatch {
+  /** Rewrite pattern that was scanned. */
+  pattern: string
+  /** Matches observed before duplicate edits were suppressed. */
+  count: number
 }
 
 export interface AxNode {

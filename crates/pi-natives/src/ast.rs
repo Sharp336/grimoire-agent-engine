@@ -353,6 +353,15 @@ pub struct AstReplaceFileChange {
 	pub count: u32,
 }
 
+/// Per-pattern match count from an `astEdit` run.
+#[napi(object)]
+pub struct AstReplaceRuleMatch {
+	/// Rewrite pattern that was scanned.
+	pub pattern: String,
+	/// Matches observed before duplicate edits were suppressed.
+	pub count:   u32,
+}
+
 /// Summary of an ast-grep rewrite pass, including whether disk writes occurred.
 #[napi(object)]
 pub struct AstReplaceResult {
@@ -360,6 +369,9 @@ pub struct AstReplaceResult {
 	pub changes:            Vec<AstReplaceChange>,
 	/// Replacement counts grouped by file.
 	pub file_changes:       Vec<AstReplaceFileChange>,
+	/// Match counts grouped by rewrite pattern, including patterns with no
+	/// matches.
+	pub rewrite_matches:    Vec<AstReplaceRuleMatch>,
 	/// Total replacements applied or previewed.
 	pub total_replacements: u32,
 	/// Files that had at least one replacement.
@@ -956,6 +968,10 @@ fn ast_edit_blocking(
 	fail_on_parse_error: Option<bool>,
 ) -> Result<AstReplaceResult> {
 	let rewrite_rules = normalize_rewrite_map(rewrites)?;
+	let mut rewrite_match_counts = rewrite_rules
+		.iter()
+		.map(|(pattern, _)| (pattern.clone(), 0u32))
+		.collect::<BTreeMap<_, _>>();
 	let strictness = resolve_strictness(strictness);
 	let dry_run = dry_run.unwrap_or(true);
 	let max_replacements = max_replacements.unwrap_or(u32::MAX).max(1);
@@ -1026,6 +1042,10 @@ fn ast_edit_blocking(
 	if compiled_rules.is_empty() {
 		return Ok(AstReplaceResult {
 			file_changes: vec![],
+			rewrite_matches: rewrite_match_counts
+				.into_iter()
+				.map(|(pattern, count)| AstReplaceRuleMatch { pattern, count })
+				.collect(),
 			total_replacements: 0,
 			files_touched: 0,
 			files_searched,
@@ -1059,7 +1079,7 @@ fn ast_edit_blocking(
 		};
 		let lang_key = language.canonical_name();
 
-		let mut runnable_rules: Vec<(&str, &Pattern)> = Vec::new();
+		let mut runnable_rules: Vec<(&CompiledRewriteRule, &Pattern)> = Vec::new();
 		for rule in &compiled_rules {
 			ct.heartbeat()?;
 			if let Some(error) = rule.compile_errors_by_lang.get(lang_key) {
@@ -1067,7 +1087,7 @@ fn ast_edit_blocking(
 				continue;
 			}
 			if let Some(compiled) = rule.compiled_by_lang.get(lang_key) {
-				runnable_rules.push((rule.rewrite.as_str(), compiled));
+				runnable_rules.push((rule, compiled));
 			}
 		}
 		if runnable_rules.is_empty() {
@@ -1098,10 +1118,14 @@ fn ast_edit_blocking(
 
 		let mut file_changes = Vec::new();
 		let mut reached_max_replacements = false;
-		'patterns: for &(rewrite, compiled) in &runnable_rules {
+		'patterns: for &(rule, compiled) in &runnable_rules {
 			for matched in ast.root().find_all(compiled.clone()) {
 				ct.heartbeat()?;
-				let edit = matched.replace_by(rewrite);
+				let count = rewrite_match_counts
+					.get_mut(&rule.pattern)
+					.expect("compiled rewrite rule must retain its match counter");
+				*count = count.saturating_add(1);
+				let edit = matched.replace_by(rule.rewrite.as_str());
 				// Multiple rules matching the same node with the same output are one
 				// deterministic edit; list and count it once instead of staging a
 				// duplicate that trips the apply-time overlap check.
@@ -1196,6 +1220,10 @@ fn ast_edit_blocking(
 
 	Ok(AstReplaceResult {
 		file_changes,
+		rewrite_matches: rewrite_match_counts
+			.into_iter()
+			.map(|(pattern, count)| AstReplaceRuleMatch { pattern, count })
+			.collect(),
 		total_replacements: to_u32(changes.len()),
 		files_touched,
 		files_searched,

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -6,6 +6,7 @@ import { adaptSchemaForStrict, toolWireSchema } from "@oh-my-pi/pi-ai/utils/sche
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import * as natives from "@oh-my-pi/pi-natives";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 type InvokedToolResult = {
@@ -237,6 +238,43 @@ class Example {
 			expect(text).toContain("function renamed");
 			expect(text).not.toContain("method_declaration");
 		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
+	it("scans a matching multi-member batch only once", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-php-multi-member-"));
+		const astEditSpy = spyOn(natives, "astEdit");
+		try {
+			const filePath = path.join(tempDir, "functions.php");
+			await Bun.write(
+				filePath,
+				"<?php\nfunction first($value) { return $value; }\nfunction second($value) { return $value; }\n",
+			);
+			const tools = await createTools(createTestSession(tempDir), ["ast_edit"]);
+			const tool = tools.find(entry => entry.name === "ast_edit");
+			expect(tool).toBeDefined();
+
+			const result = await tool!.execute("ast-edit-php-multi-member", {
+				ops: [
+					{
+						pat: "function first($$$ARGS) { $$$BODY }",
+						out: "function renamedFirst($$$ARGS) { $$$BODY }",
+					},
+					{
+						pat: "function second($$$ARGS) { $$$BODY }",
+						out: "function renamedSecond($$$ARGS) { $$$BODY }",
+					},
+				],
+				paths: [filePath],
+			});
+			const details = result.details as { totalReplacements?: number; patternHint?: string } | undefined;
+
+			expect(details?.totalReplacements).toBe(2);
+			expect(details?.patternHint).toBeUndefined();
+			expect(astEditSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			astEditSpy.mockRestore();
 			await removeWithRetries(tempDir);
 		}
 	});
