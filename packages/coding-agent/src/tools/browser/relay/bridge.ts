@@ -1597,14 +1597,21 @@ export class RelayBridge {
 		if (this.#sessionHolders(tabId).length > 0) return;
 		const tab = this.#tabs.get(tabId);
 		if (!tab?.attached) return;
-		tab.attached = false;
-		tab.restorePending = false;
-		tab.subscriptions.clear();
-		this.#resetRuntime(tab);
+		if (tab.detaching) return;
 		tab.reattachedAfterDetach = false;
 		const done = this.#rpc({ op: "detach", tabId })
-			.then(() => {})
-			.catch(() => {})
+			.then(() => {
+				tab.attached = false;
+				tab.restorePending = false;
+				tab.subscriptions.clear();
+				this.#resetRuntime(tab);
+			})
+			.catch(err => {
+				this.#log("detach failed", {
+					tabId,
+					error: err instanceof Error ? err.message : String(err),
+				});
+			})
 			.finally(() => {
 				if (tab.detaching === done) tab.detaching = null;
 			});
