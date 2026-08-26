@@ -1,4 +1,4 @@
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as http2 from "node:http2";
 import type * as net from "node:net";
@@ -6,7 +6,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 // Import from source, not the package specifier: the workspace `node_modules`
 // copy resolves to the primary checkout, not this worktree.
-import { fetchCursorUsableModels } from "../src/discovery/cursor";
+import {
+	__cursorDiscoveryHttp2Snapshot,
+	__cursorH2ConnectingSize,
+	__setCursorDiscoveryHttp2EstablishBodyGate,
+	disposeCursorDiscoveryHttp2Pool,
+	fetchCursorUsableModels,
+} from "../src/discovery/cursor";
 import { GetUsableModelsResponseSchema, ModelDetailsSchema } from "../src/discovery/cursor-proto";
 import { create, toBinary } from "../src/discovery/protobuf";
 import { resolveProviderModels } from "../src/model-manager";
@@ -67,6 +73,16 @@ beforeAll(async () => {
 
 afterAll(() => {
 	server?.close();
+});
+
+beforeEach(() => {
+	disposeCursorDiscoveryHttp2Pool();
+	__setCursorDiscoveryHttp2EstablishBodyGate(undefined);
+});
+
+afterEach(() => {
+	disposeCursorDiscoveryHttp2Pool();
+	__setCursorDiscoveryHttp2EstablishBodyGate(undefined);
 });
 
 async function discover(): Promise<Map<string, ModelSpec<"cursor-agent">>> {
@@ -153,12 +169,13 @@ function requireTcpAddress(address: string | net.AddressInfo | null): net.Addres
 	return address;
 }
 
-function startCursorDiscoveryServer(body: Uint8Array): Promise<string> {
+function startCursorDiscoveryServer(body: Uint8Array, seenHeaders?: http2.IncomingHttpHeaders[]): Promise<string> {
 	const { promise, resolve, reject } = Promise.withResolvers<string>();
 	const srv = http2.createServer();
 	servers.add(srv);
 	srv.once("error", reject);
-	srv.on("stream", (stream: http2.ServerHttp2Stream) => {
+	srv.on("stream", (stream: http2.ServerHttp2Stream, headers: http2.IncomingHttpHeaders) => {
+		seenHeaders?.push(headers);
 		stream.respond({ ":status": 200, "content-type": "application/proto" });
 		stream.end(Buffer.from(body));
 	});
@@ -378,5 +395,125 @@ describe("fetchCursorUsableModels", () => {
 				contextWindow: 1_000_000,
 			}),
 		]);
+	});
+
+	it("pins the shared client version on the wire and forwards explicit overrides", async () => {
+		const seen: http2.IncomingHttpHeaders[] = [];
+		const response = create(GetUsableModelsResponseSchema, {
+			models: [create(ModelDetailsSchema, { modelId: "claude-opus-4-8-high-fast" })],
+		});
+		const url = await startCursorDiscoveryServer(toBinary(GetUsableModelsResponseSchema, response), seen);
+
+		const defaulted = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
+		const overridden = await fetchCursorUsableModels({
+			apiKey: "test-token",
+			baseUrl: url,
+			clientVersion: "cli-0000.00.00-override",
+			timeoutMs: 1_000,
+		});
+
+		expect(defaulted).toEqual([expect.objectContaining({ id: "claude-opus-4-8-high-fast" })]);
+		expect(overridden).toEqual(defaulted);
+		expect(seen.map(headers => headers["x-cursor-client-version"])).toEqual([
+			"cli-2026.08.11-e8db854",
+			"cli-0000.00.00-override",
+		]);
+	});
+
+	it("reuses one HTTP/2 session for sequential GetUsableModels calls", async () => {
+		const response = create(GetUsableModelsResponseSchema, {
+			models: [create(ModelDetailsSchema, { modelId: "composer-3" })],
+		});
+		const body = toBinary(GetUsableModelsResponseSchema, response);
+		const { promise, resolve, reject } = Promise.withResolvers<string>();
+		const srv = http2.createServer();
+		servers.add(srv);
+		let sessions = 0;
+		srv.once("error", reject);
+		srv.on("session", () => {
+			sessions++;
+		});
+		srv.on("stream", (stream: http2.ServerHttp2Stream) => {
+			stream.respond({ ":status": 200, "content-type": "application/proto" });
+			stream.end(Buffer.from(body));
+		});
+		srv.listen(0, "127.0.0.1", () => {
+			resolve(`http://127.0.0.1:${requireTcpAddress(srv.address()).port}`);
+		});
+		const url = await promise;
+
+		const first = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
+		const second = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
+
+		expect(first).toEqual([expect.objectContaining({ id: "composer-3" })]);
+		expect(second).toEqual(first);
+		expect(sessions).toBe(1);
+	});
+
+	it("unrefs the pooled session once outstanding leases drop to zero", async () => {
+		const response = create(GetUsableModelsResponseSchema, {
+			models: [create(ModelDetailsSchema, { modelId: "composer-3" })],
+		});
+		const url = await startCursorDiscoveryServer(toBinary(GetUsableModelsResponseSchema, response));
+
+		const models = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
+
+		expect(models).toEqual([expect.objectContaining({ id: "composer-3" })]);
+		expect(__cursorDiscoveryHttp2Snapshot()).toEqual([
+			expect.objectContaining({ outstanding: 0, draining: false, referenced: false }),
+		]);
+	});
+
+	it("cancels a connect whose last waiter aborted mid-handshake instead of publishing it", async () => {
+		const response = create(GetUsableModelsResponseSchema, {
+			models: [create(ModelDetailsSchema, { modelId: "composer-3" })],
+		});
+		const url = await startCursorDiscoveryServer(toBinary(GetUsableModelsResponseSchema, response));
+		const { promise: released, resolve: releaseGate } = Promise.withResolvers<void>();
+		const { promise: gated, resolve: sawGate } = Promise.withResolvers<void>();
+		__setCursorDiscoveryHttp2EstablishBodyGate(async () => {
+			sawGate();
+			await released;
+		});
+
+		const pending = fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 20 });
+		await gated;
+		expect(__cursorDiscoveryHttp2Snapshot()).toEqual([]);
+		expect(await pending).toBeNull();
+		// The last live waiter left before the handshake completed, so the
+		// connect is cancelled and must never publish a session into the pool —
+		// nor leave a destroyed one reserved for the next discovery.
+		expect(__cursorH2ConnectingSize()).toBe(0);
+		expect(__cursorDiscoveryHttp2Snapshot()).toEqual([]);
+		releaseGate();
+		// The suspended establish body's post-gate continuation is pure
+		// microtasks (the settled guard returns before any connect), so drain
+		// them rather than sleeping.
+		for (let i = 0; i < 10; i++) await Promise.resolve();
+		expect(__cursorH2ConnectingSize()).toBe(0);
+		expect(__cursorDiscoveryHttp2Snapshot()).toEqual([]);
+		// A later discovery retries a fresh connect instead of joining the
+		// cancelled reservation.
+		const models = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
+		expect(models).toEqual([expect.objectContaining({ id: "composer-3" })]);
+	});
+
+	it("maps request failures to null", async () => {
+		const { promise, resolve, reject } = Promise.withResolvers<string>();
+		const srv = http2.createServer();
+		servers.add(srv);
+		srv.once("error", reject);
+		srv.on("stream", (stream: http2.ServerHttp2Stream) => {
+			stream.respond({ ":status": 500 });
+			stream.end();
+		});
+		srv.listen(0, "127.0.0.1", () => {
+			resolve(`http://127.0.0.1:${requireTcpAddress(srv.address()).port}`);
+		});
+		const url = await promise;
+
+		const models = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
+
+		expect(models).toBeNull();
 	});
 });
