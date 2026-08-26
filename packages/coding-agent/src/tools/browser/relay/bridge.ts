@@ -379,7 +379,7 @@ export class RelayBridge {
 			tab.attaching = null;
 			tab.restoring = null;
 			const holders = this.#sessionHolders(tab.tabId);
-			const preserve = holders.filter(conn => !conn.autoAttach && conn.sessionsForTab(tab.tabId, "page").length > 0);
+			const preserve = holders.filter(conn => !conn.autoAttach && conn.sessionsForTab(tab.tabId).length > 0);
 			if (tab.attached) {
 				if (tab.restorePending) {
 					// A socket replacement can interrupt replay after Chrome accepted only
@@ -1363,9 +1363,21 @@ export class RelayBridge {
 					ref.runtimeEpoch++;
 				}
 			}
-			for (const tabSession of tabSessions) {
-				conn.sessions.delete(tabSession);
-				this.#emit(conn, "Target.detachedFromTarget", { sessionId: tabSession, targetId: tabTargetId(tab.tabId) });
+			// A bare Target.attachToTarget holder can own a TAB<n> pseudo-session
+			// instead of (or as well as) a PAGE<n> one. Like the page session, it is
+			// routed by tabId rather than the swapped Chrome root, so Chrome mints no
+			// replacement for it — dropping it strands the holder on "Unknown session
+			// id" and, once its last session is gone, prevents cdpClosed from ever
+			// detaching the debugger. Preserve it through the retract for a preserved
+			// connection; only tear down tab sessions on connections being reset.
+			if (!preservePages) {
+				for (const tabSession of tabSessions) {
+					conn.sessions.delete(tabSession);
+					this.#emit(conn, "Target.detachedFromTarget", {
+						sessionId: tabSession,
+						targetId: tabTargetId(tab.tabId),
+					});
+				}
 			}
 			if (conn.discover && tab.announced && !preservePages) {
 				this.#emit(conn, "Target.targetDestroyed", { targetId: pageTargetId(tab.tabId) });

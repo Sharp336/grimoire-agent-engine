@@ -151,6 +151,34 @@ async function attachPage(
 	return sessionId;
 }
 
+/** Attach to a tab's TAB target and return the minted tab pseudo-session id. */
+async function attachTab(
+	bridge: RelayBridge,
+	ext: FakeExtSocket,
+	cdp: FakeCdpSocket,
+	connId: number,
+	tabId: number,
+): Promise<string> {
+	const attachId = ++msgSeq;
+	bridge.cdpMessage(
+		connId,
+		JSON.stringify({
+			id: attachId,
+			method: "Target.attachToTarget",
+			params: { targetId: `TAB${tabId}`, flatten: true },
+		}),
+	);
+	await waitFor(
+		() => ext.pending("attach").length > 0 || cdp.sessionFor(attachId) !== undefined,
+		`attach RPC or reply for TAB ${tabId}`,
+	);
+	if (ext.pending("attach").length > 0) ack(bridge, ext, "attach");
+	await waitFor(() => cdp.sessionFor(attachId) !== undefined, `attachToTarget reply for TAB ${tabId}`);
+	const sessionId = cdp.sessionFor(attachId);
+	if (!sessionId) throw new Error(`attachToTarget for TAB ${tabId} did not produce a session`);
+	return sessionId;
+}
+
 /**
  * Emulate the omp tab worker adopting a tab: attach to its page target, then
  * claim it as this connection's drive target.
@@ -514,6 +542,50 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send")[0]!.tabId).toBe(1);
 
 		// Closing the sole holder now detaches the debugger — the session was never
+		// orphaned, so the attachment is reclaimable and the infobar clears.
+		bridge.cdpClosed(connId);
+		await flush();
+		expect(ext2.rpcs("detach")).toHaveLength(1);
+		expect(ext2.rpcs("detach")[0]!.tabId).toBe(1);
+	});
+
+	it("keeps a bare TAB-target holder's tab pseudo-session usable across recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		// Bare holder that attached to the TAB<n> target rather than PAGE<n>, and
+		// never called setAutoAttach — so it owns only a tab pseudo-session routed
+		// by tabId. Chrome mints no replacement for it on recovery.
+		const tabSession = await attachTab(bridge, ext, cdp, connId, 1);
+
+		bridge.extClosed(ext);
+
+		// Reconnect: the tab is recoverable (guard detach), so the bridge re-attaches.
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await flush();
+		expect(ext2.rpcs("attach")).toHaveLength(1);
+		ack(bridge, ext2, "attach");
+		await flush();
+
+		// The tab pseudo-session survived the root swap: a supported command on it
+		// (setAutoAttach mints a page child) routes instead of "Unknown session id".
+		const cmdId = ++msgSeq;
+		bridge.cdpMessage(connId, JSON.stringify({ id: cmdId, sessionId: tabSession, method: "Target.setAutoAttach" }));
+		await flush();
+		const reply = cdp.messages.find(m => m.id === cmdId);
+		expect(reply?.error).toBeUndefined();
+		// setAutoAttach on a live tab session mints and announces a page child.
+		const pageChild = cdp.messages.find(
+			m =>
+				m.method === "Target.attachedToTarget" &&
+				(m.params as { targetInfo?: { type?: string } })?.targetInfo?.type === "page",
+		);
+		expect(pageChild).toBeDefined();
+
+		// Closing the sole holder detaches the debugger — the session was never
 		// orphaned, so the attachment is reclaimable and the infobar clears.
 		bridge.cdpClosed(connId);
 		await flush();
