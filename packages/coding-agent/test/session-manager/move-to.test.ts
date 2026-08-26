@@ -110,21 +110,27 @@ describe("SessionManager.moveTo", () => {
 		expect(hasAssistantEntry(entries)).toBe(true);
 	});
 
-	it("makes the moved session visible to resume from the target cwd", async () => {
+	it("persists the captured header and workspace roots after a rollback relocation", async () => {
 		const session = SessionManager.create(cwdA);
 		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
 		session.appendMessage(makeAssistantMessage());
+		await session.addWorkspaceDirectory(cwdB);
 		await session.flush();
-		const oldFile = session.getSessionFile()!;
+		const originalFile = session.getSessionFile()!;
+		const snapshot = session.captureState();
 
+		// Move to a target that is also an additional workspace root: moveTo
+		// filters it from #additionalDirectories in the rewritten header.
 		await session.moveTo(cwdB);
+		await session.rollbackMove(snapshot);
 
-		const movedFile = session.getSessionFile()!;
-		const sourceSessions = await SessionManager.list(cwdA);
-		const targetSessions = await SessionManager.list(cwdB);
-
-		expect(sourceSessions.some(item => item.path === oldFile)).toBe(false);
-		expect(targetSessions.some(item => item.path === movedFile)).toBe(true);
+		// Reopen the restored source file: disk must carry the captured header,
+		// including the workspace root the forward move filtered out.
+		const entries = await loadEntriesFromFile(originalFile);
+		const header = getHeader(entries);
+		expect(header?.cwd).toBe(path.resolve(cwdA));
+		expect(header?.additionalDirectories ?? []).toContain(path.resolve(cwdB));
+		expect(session.getCwd()).toBe(path.resolve(cwdA));
 	});
 
 	it("succeeds on fresh session without ENOENT, then deferred persistence works", async () => {
@@ -484,5 +490,27 @@ describe("SessionManager.moveTo", () => {
 					entry.message.content === "during move crash window",
 			),
 		).toBe(true);
+	});
+
+	it("keeps the manager pointed at the moved file when the inverse relocation fails", async () => {
+		const session = SessionManager.create(cwdA);
+		session.appendMessage({ role: "user", content: "hello", timestamp: 1 });
+		session.appendMessage(makeAssistantMessage());
+		await session.flush();
+		const snapshot = session.captureState();
+		await session.moveTo(cwdB);
+		const movedFile = session.getSessionFile()!;
+
+		// Make the inverse rename fail on the rollback call.
+		const moveTo = spyOn(session, "moveTo").mockRejectedValueOnce(new Error("rename denied"));
+		try {
+			await expect(session.rollbackMove(snapshot)).rejects.toThrow("the session file remains at");
+		} finally {
+			moveTo.mockRestore();
+		}
+
+		// The manager must keep pointing at the actual on-disk file so later
+		// appends continue there instead of splitting the transcript.
+		expect(session.getSessionFile()).toBe(movedFile);
 	});
 });

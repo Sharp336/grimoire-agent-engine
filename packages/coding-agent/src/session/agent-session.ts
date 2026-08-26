@@ -95,6 +95,7 @@ import {
 	postmortem,
 	prompt,
 	Snowflake,
+	setProjectDir,
 	stringProperty,
 	withTimeout,
 } from "@oh-my-pi/pi-utils";
@@ -469,6 +470,7 @@ function cloneMessageEndNotification(message: AgentMessage): AgentMessage {
 }
 
 const INTERRUPTED_THINKING_MIN_CHARS = 60;
+const SESSION_CWD_CHANGE_REJECTED = Symbol("sessionCwdChangeRejected");
 
 export class AgentSession {
 	readonly agent: Agent;
@@ -8098,14 +8100,16 @@ export class AgentSession {
 		if (!sessionFile) return;
 		await this.switchSession(sessionFile);
 	}
-
 	/**
 	 * Switch to a different session file.
 	 * Aborts current operation, loads messages, restores model/thinking.
 	 * Listeners are preserved and will continue receiving events.
-	 * @returns true if switch completed, false if cancelled by hook
+	 * @returns true if switch completed, false if cancelled by hook or cwd change
 	 */
-	async switchSession(sessionPath: string): Promise<boolean> {
+	async switchSession(
+		sessionPath: string,
+		options?: { onCwdChange?: (newCwd: string, previousCwd: string) => Promise<boolean> },
+	): Promise<boolean> {
 		const previousSessionFile = this.sessionManager.getSessionFile();
 		const switchingToDifferentSession = previousSessionFile
 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
@@ -8180,6 +8184,7 @@ export class AgentSession {
 		this.#usagePreflightReadyForNextModelCall = false;
 		this.#usagePreflightReadyModel = undefined;
 
+		let cwdChangeTarget: string | undefined;
 		try {
 			if (switchingToDifferentSession) {
 				// Stop and settle in-flight advisors while the old-session feeds can
@@ -8188,6 +8193,25 @@ export class AgentSession {
 			}
 			await this.sessionManager.setSessionFile(sessionPath);
 			this.#bash.markSessionTransition(bashTransition);
+			if (options?.onCwdChange) {
+				const newCwd = this.sessionManager.getCwd();
+				const recordedCwd = this.sessionManager.getRecordedCwd() ?? previousSessionState.cwd;
+				if (path.resolve(newCwd) !== path.resolve(previousSessionState.cwd)) {
+					cwdChangeTarget = newCwd;
+					if (!(await options.onCwdChange(newCwd, previousSessionState.cwd))) {
+						throw SESSION_CWD_CHANGE_REJECTED;
+					}
+				} else if (path.resolve(recordedCwd) !== path.resolve(previousSessionState.cwd)) {
+					// setSessionFile retained previous cwd because recorded cwd failed
+					// directoryIsEnterable (TCC-denied). Previous check saw no change
+					// and returned success, leaving tools on wrong transcript.
+					cwdChangeTarget = recordedCwd;
+					if (!(await options.onCwdChange(recordedCwd, previousSessionState.cwd))) {
+						throw SESSION_CWD_CHANGE_REJECTED;
+					}
+					throw SESSION_CWD_CHANGE_REJECTED;
+				}
+			}
 			if (switchingToDifferentSession) {
 				this.#freshProviderSessionId = undefined;
 				this.#clearInheritedProviderPromptCacheKey();
@@ -8390,7 +8414,34 @@ export class AgentSession {
 					error: String(reconcileError),
 				});
 			}
+			if (cwdChangeTarget && error !== SESSION_CWD_CHANGE_REJECTED && options?.onCwdChange) {
+				let rollbackFailure: string | undefined;
+				try {
+					if (!(await options.onCwdChange(previousSessionState.cwd, cwdChangeTarget))) {
+						rollbackFailure = "cwd rollback was rejected";
+					}
+				} catch (rollbackError) {
+					rollbackFailure = `cwd rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`;
+				}
+				if (rollbackFailure) {
+					// Attempt to realign process cwd for diagnostics, but do not clear rollbackFailure — full workspace restore via onCwdChange already failed.
+					try {
+						process.chdir(previousSessionState.cwd);
+						try {
+							setProjectDir(previousSessionState.cwd);
+						} catch {}
+					} catch {}
+					this.#bash.finishSessionTransition(bashTransition, false);
+					logger.warn("Failed to restore cwd after session switch", { cwd: previousSessionState.cwd });
+					// The session is restored to the source, but the process cwd
+					// may still sit at the target. Surface both halves instead of
+					// failing open with only the original error.
+					const original = error instanceof Error ? error.message : String(error);
+					throw new Error(`${original} (${rollbackFailure}; the process may remain in ${cwdChangeTarget})`);
+				}
+			}
 			this.#bash.finishSessionTransition(bashTransition, false);
+			if (error === SESSION_CWD_CHANGE_REJECTED) return false;
 			throw error;
 		}
 	}

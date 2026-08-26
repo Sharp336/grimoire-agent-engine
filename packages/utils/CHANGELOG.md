@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Keep project-directory state unchanged when changing directories fails.
+
 ## [18.0.7] - 2026-08-26
 
 ### Added

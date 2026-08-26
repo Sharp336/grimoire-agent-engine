@@ -13,7 +13,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/acp-builtins";
-import { removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
+import { getProjectDir, removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
 
 interface FakeAcpBuiltinSession {
 	fastMode: boolean;
@@ -72,6 +72,9 @@ interface FakeAcpBuiltinSessionManager {
 	appendCustomEntry(customType: string, data?: unknown): string;
 	flush(): Promise<void>;
 	moveTo(newCwd: string): Promise<void>;
+	captureState(): { cwd: string; sessionDir: string };
+	restoreState(snapshot: { cwd: string }): void;
+	rollbackMove(snapshot: { cwd: string; sessionDir: string }): Promise<void>;
 	setSessionFile(sessionFile: string): Promise<void>;
 	dropSession(sessionPath: string): Promise<void>;
 	getCwd(): string;
@@ -191,6 +194,17 @@ function createRuntime() {
 		async moveTo(newCwd: string) {
 			this._cwd = newCwd;
 			this._movedTo = newCwd;
+		},
+		captureState() {
+			return { cwd: this._cwd, sessionDir: "/tmp/fake-sessions", movedTo: this._movedTo };
+		},
+		restoreState(snapshot: { cwd: string }) {
+			this._cwd = snapshot.cwd;
+			this._movedTo = snapshot.cwd;
+		},
+		async rollbackMove(snapshot: { cwd: string; sessionDir: string }) {
+			await this.moveTo(snapshot.cwd);
+			this.restoreState(snapshot);
 		},
 		async setSessionFile(sessionFile: string) {
 			this._sessionFile = path.resolve(sessionFile);
@@ -1254,6 +1268,9 @@ describe("/move preflight flush", () => {
 			expect(flushed).toBe(true);
 			expect(fakeSessionManager!._movedTo).toBe(targetDir);
 			expect(output[0]).toContain("Moved to");
+			// The success path must chdir the process and project-dir cache to the
+			// target; otherwise bash tools and discovery run in the wrong project.
+			expect(getProjectDir()).toBe(path.resolve(targetDir));
 		} finally {
 			setProjectDir(originalProjectDir);
 			await fs.rm(targetDir, { recursive: true, force: true });

@@ -2,7 +2,10 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { CompactionCancelledError } from "@oh-my-pi/pi-agent-core/compaction";
 import { logger, setProjectDir } from "@oh-my-pi/pi-utils";
+import { reset as resetCapabilities } from "../capability";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
+import { clearClaudePluginRootsCache } from "../discovery/helpers";
+import { loadSlashCommands } from "../extensibility/slash-commands";
 import { memoryStatsUnavailableMessage, resolveMemoryBackend } from "../memory-backend";
 import type { FreshSessionResult, HandoffResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
@@ -10,6 +13,7 @@ import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveResumableSession } from "../session/session-listing";
 import { toggleSessionPin } from "../session/session-pins";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
+import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { resolveToCwd } from "../tools/path-utils";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
@@ -568,17 +572,128 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 			} catch (err) {
 				return usage(`Failed to save pending settings: ${errorMessage(err)}`, runtime);
 			}
+			const previousState = runtime.sessionManager.captureState();
 			try {
 				await runtime.session.moveSession(resolvedPath);
 			} catch (err) {
 				return usage(`Move failed: ${errorMessage(err)}`, runtime);
 			}
-			setProjectDir(resolvedPath);
-			await runtime.settings.reloadForCwd(resolvedPath);
-			applyProviderGlobalsFromSettings(runtime.settings);
-			// Reload plugin/capability caches so the next prompt sees commands and
-			// capabilities scoped to the new cwd.
-			await runtime.reloadPlugins();
+			try {
+				setProjectDir(resolvedPath);
+			} catch (err) {
+				try {
+					await runtime.sessionManager.rollbackMove(previousState);
+				} catch (rollbackError) {
+					const actual = runtime.sessionManager.getCwd();
+					let realigned = false;
+					try {
+						setProjectDir(actual);
+						await runtime.settings.reloadForCwd(actual);
+						applyProviderGlobalsFromSettings(runtime.settings);
+						clearClaudePluginRootsCache();
+						const src = discoverTitleSystemPromptFile(actual);
+						const p = await resolvePromptInput(src, "title system prompt");
+						runtime.session.setTitleSystemPrompt(p);
+						resetCapabilities();
+						await runtime.session.refreshSkills(); // refreshSkillState
+						const cmds = await loadSlashCommands({
+							cwd: actual,
+							extensionRoots: runtime.session.effectiveExtensionRoots,
+						});
+						runtime.session.setSlashCommands(cmds);
+						await runtime.refreshCommands?.(); // refreshSlashCommandState
+						await runtime.reloadPlugins();
+						realigned = true;
+					} catch {}
+					if (!realigned) {
+						return usage(
+							`Move failed and rollback failed: ${errorMessage(rollbackError)} (failed to re-align workspace to ${actual}; process remains at source while session is at ${actual})`,
+							runtime,
+						);
+					}
+					return usage(
+						`Move failed and rollback failed: ${errorMessage(rollbackError)} (workspace remains at ${actual})`,
+						runtime,
+					);
+				}
+				return usage(`Move failed: ${errorMessage(err)}`, runtime);
+			}
+			try {
+				await runtime.settings.reloadForCwd(resolvedPath);
+				applyProviderGlobalsFromSettings(runtime.settings);
+				clearClaudePluginRootsCache();
+				const titleSource = discoverTitleSystemPromptFile(resolvedPath);
+				const titlePrompt = await resolvePromptInput(titleSource, "title system prompt");
+				runtime.session.setTitleSystemPrompt(titlePrompt);
+				resetCapabilities();
+				// refreshSkillState — headless equivalent via session.refreshSkills
+				await runtime.session.refreshSkills();
+				// refreshSlashCommandState — headless equivalent via loadSlashCommands + refreshCommands
+				const fileCommands = await loadSlashCommands({
+					cwd: resolvedPath,
+					extensionRoots: runtime.session.effectiveExtensionRoots,
+				});
+				runtime.session.setSlashCommands(fileCommands);
+				await runtime.refreshCommands?.();
+				// Reload plugin/capability caches so the next prompt sees commands and
+				// capabilities scoped to the new cwd (also covers agent discovery / MCP).
+				await runtime.reloadPlugins();
+			} catch (err) {
+				try {
+					// Undo the whole transition: the process cwd and Settings scope
+					// return to the source project alongside the session relocation.
+					setProjectDir(runtime.cwd);
+					await runtime.settings.reloadForCwd(runtime.cwd);
+					applyProviderGlobalsFromSettings(runtime.settings);
+					clearClaudePluginRootsCache();
+					const src = discoverTitleSystemPromptFile(runtime.cwd);
+					const p = await resolvePromptInput(src, "title system prompt");
+					runtime.session.setTitleSystemPrompt(p);
+					resetCapabilities();
+					await runtime.session.refreshSkills(); // refreshSkillState
+					const cmds = await loadSlashCommands({
+						cwd: runtime.cwd,
+						extensionRoots: runtime.session.effectiveExtensionRoots,
+					});
+					runtime.session.setSlashCommands(cmds);
+					await runtime.refreshCommands?.(); // refreshSlashCommandState
+					await runtime.reloadPlugins();
+					await runtime.sessionManager.rollbackMove(previousState);
+				} catch (rollbackError) {
+					const actual = runtime.sessionManager.getCwd();
+					let realigned = false;
+					try {
+						setProjectDir(actual);
+						await runtime.settings.reloadForCwd(actual);
+						applyProviderGlobalsFromSettings(runtime.settings);
+						clearClaudePluginRootsCache();
+						const src2 = discoverTitleSystemPromptFile(actual);
+						const p2 = await resolvePromptInput(src2, "title system prompt");
+						runtime.session.setTitleSystemPrompt(p2);
+						resetCapabilities();
+						await runtime.session.refreshSkills(); // refreshSkillState
+						const cmds2 = await loadSlashCommands({
+							cwd: actual,
+							extensionRoots: runtime.session.effectiveExtensionRoots,
+						});
+						runtime.session.setSlashCommands(cmds2);
+						await runtime.refreshCommands?.(); // refreshSlashCommandState
+						await runtime.reloadPlugins();
+						realigned = true;
+					} catch {}
+					if (!realigned) {
+						return usage(
+							`Move failed and rollback failed: ${errorMessage(rollbackError)} (failed to re-align workspace to ${actual}; process remains at source while session is at ${actual})`,
+							runtime,
+						);
+					}
+					return usage(
+						`Move failed and rollback failed: ${errorMessage(rollbackError)} (workspace remains at ${actual})`,
+						runtime,
+					);
+				}
+				return usage(`Move failed: ${errorMessage(err)}`, runtime);
+			}
 			await runtime.notifyConfigChanged?.();
 			await runtime.notifyTitleChanged?.();
 			await runtime.output(`Moved to ${runtime.sessionManager.getCwd()}.`);

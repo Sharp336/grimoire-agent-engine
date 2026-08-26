@@ -3,7 +3,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
+import { getSafeProjectCwd, logger } from "@oh-my-pi/pi-utils";
 import { type BlobDestinationId, type BlobDestinationMetadata, BUILTIN_BLOB_DESTINATIONS } from "./destinations";
 import type { BlobPublication, BlobUploader, BlobUploadRequest } from "./publication";
 import { type DestinationRuntimeConfig, DestinationUnavailableError, optionString } from "./uploader-runtime";
@@ -93,7 +93,7 @@ export function createCommandUploader(template: string): BlobUploader {
 				const argv = argvTemplate.map(arg =>
 					arg.replaceAll("{file}", file).replaceAll("{mime}", mimeType).replaceAll("{ext}", extension),
 				);
-				const proc = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+				const proc = Bun.spawn(argv, { stdin: "ignore", stdout: "pipe", stderr: "pipe", cwd: getSafeProjectCwd() });
 				const timeout = setTimeout(() => proc.kill(), UPLOAD_TIMEOUT_MS);
 				const [stdout, stderr, exitCode] = await Promise.all([
 					new Response(proc.stdout as ReadableStream<Uint8Array>).text(),

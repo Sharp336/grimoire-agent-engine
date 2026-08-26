@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Handle denied working-directory changes without crashing resume, move, or startup flows.
+- Fixed `hub list` and child peer rosters counting parked agents from stale root sessions; the persisted roster now scopes to the current root, retries transient filesystem faults, and renders live rows through the production subagent prompt template with a truthful omitted count.
+
 ## [18.0.7] - 2026-08-26
 
 ### Added
@@ -70,8 +75,6 @@
 - Kept completed assistant replies visible when viewport pressure prevents older active content from being retired.
 - Accelerated SHA-2 and SHA-3 checksum builtins on supported ARM64 hardware.
 - Fixed joined collaboration guests becoming inconsistent with the host after host-side compaction.
-- Fixed `hub list` and child peer rosters counting parked agents from stale root sessions; the persisted roster now scopes to the current root, retries transient filesystem faults, and renders live rows through the production subagent prompt template with a truthful omitted count.
-
 ## [18.0.6] - 2026-08-26
 
 ### Added

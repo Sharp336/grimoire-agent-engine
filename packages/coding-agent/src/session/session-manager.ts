@@ -9,7 +9,7 @@ import type {
 	Usage,
 } from "@oh-my-pi/pi-ai";
 import {
-	directoryExists,
+	directoryIsEnterable,
 	getBlobsDir,
 	getProjectDir,
 	getSessionsDir,
@@ -361,6 +361,7 @@ class SessionEntryIndex {
 export type ReadonlySessionManager = Pick<
 	SessionManager,
 	| "getCwd"
+	| "getRecordedCwd"
 	| "getSessionDir"
 	| "getSessionId"
 	| "getSessionFile"
@@ -461,6 +462,7 @@ export class SessionManager {
 	#cwd: string;
 	/** Additional workspace directories beyond cwd (multi-root). Normalized absolute, deduped, excludes cwd. */
 	#additionalDirectories: string[] = [];
+	#fallbackRuntimeOnly = false;
 	#sessionDir: string;
 	readonly #persist: boolean;
 	readonly #storage: SessionStorage;
@@ -1294,9 +1296,11 @@ export class SessionManager {
 			onDisk: this.#fileIsCurrent,
 			needsRewrite: this.#rewriteRequired,
 			draftOnlySessionCleanupArmed: this.#draftOnlySessionCleanupArmed,
-			// Snapshot header + entries by reference: switch/reload replaces the
-			// active header/array wholesale, so rollback needs no deep clone.
-			header: this.#header,
+			// Entries are snapshotted by reference (switch/reload replaces the
+			// array wholesale). The header is cloned: moveTo mutates it in place
+			// (cwd, additionalDirectories), so a by-reference capture would let
+			// a rollback observe the move it is undoing.
+			header: structuredClone(this.#header),
 			entries: [...this.#entries],
 		};
 	}
@@ -1336,6 +1340,7 @@ export class SessionManager {
 		this.#applyEntries(snapshot.header, [...snapshot.entries]);
 		this.#additionalDirectories = snapshot.header.additionalDirectories ?? [];
 		this.#sessionName = snapshot.sessionName;
+
 		this.#titleSource = snapshot.titleSource;
 		this.#titleUpdatedAt = snapshot.titleUpdatedAt;
 		this.#hasTitleSlot = snapshot.hasTitleSlot;
@@ -1346,6 +1351,37 @@ export class SessionManager {
 		if (this.#sessionFile) this.#rememberBreadcrumb(this.#cwd, this.#sessionFile);
 	}
 
+	/**
+	 * Undo a {@link moveTo} using a {@link captureState} snapshot: rename the
+	 * session and artifacts back into the captured bucket, then restore the
+	 * captured metadata (cwd, header, additionalDirectories). The captured
+	 * header is persisted after relocation so a fresh open of the source
+	 * session sees the pre-move metadata, including workspace roots the move
+	 * filtered out. Rollbacks must not re-enter forward-move hooks, so this
+	 * bypasses AgentSession entirely. If the rename-back itself fails, the
+	 * manager stays pointed at the actual moved file (restoring the snapshot
+	 * would split the transcript across a recreated source and the stranded
+	 * target) and the error names where the session file actually lives.
+	 */
+	async rollbackMove(snapshot: SessionManagerStateSnapshot): Promise<void> {
+		try {
+			await this.moveTo(snapshot.cwd, snapshot.sessionDir);
+		} catch (error) {
+			const movedFile = this.getSessionFile();
+			throw new Error(
+				`could not relocate the session back to ${snapshot.sessionDir} (${error instanceof Error ? error.message : String(error)}); the session file remains at ${movedFile}`,
+			);
+		}
+		this.restoreState(snapshot);
+		// The inverse moveTo already rewrote the source file with the
+		// target-filtered header. Persist the captured one so disk and memory
+		// agree after a fresh open.
+		if (this.#persist && this.#sessionFile) {
+			this.#forceFileCreation = true;
+			this.#rewriteRequired = true;
+			await this.#rewriteAtomically();
+		}
+	}
 	/** Switch to a different session file (resume / branch). */
 	async setSessionFile(sessionFile: string): Promise<void> {
 		await this.#setSessionFile(sessionFile);
@@ -1377,14 +1413,16 @@ export class SessionManager {
 		// loadEntriesFromFile guarantees entries[0] is a valid session header.
 		const header = fileEntries[0] as SessionHeader;
 
-		// Adopt the loaded session's working directory. Sessions live in a dir
-		// keyed by their cwd, so resuming a session from another project must
-		// re-point cwd/sessionDir at that project — unless that project directory
-		// no longer exists on disk, in which case adopting it (and the process
-		// chdir interactive mode then performs) would fail with ENOENT. Keep the
-		// current cwd so the resumed session stays where the user already is.
+		// Adopt the loaded session's working directory only when it is verifiably
+		// accessible. Sessions live in a dir keyed by their cwd, so resuming a
+		// session from another project must re-point cwd/sessionDir at that
+		// project — but a deleted OR permission-blocked directory (macOS TCC
+		// denial) must not be adopted: callers without a cwd-change callback
+		// (extension UI, RPC) would otherwise track a directory the process
+		// cannot enter. Keep the current cwd so the session stays where the
+		// user already is.
 		const headerCwd = header.cwd ? path.resolve(header.cwd) : undefined;
-		if (headerCwd && headerCwd !== path.resolve(this.#cwd) && (await directoryExists(headerCwd))) {
+		if (headerCwd && headerCwd !== path.resolve(this.#cwd) && (await directoryIsEnterable(headerCwd))) {
 			this.#cwd = headerCwd;
 			this.#sessionDir = path.dirname(resolvedSessionFile);
 			this.#rememberBreadcrumb(this.#cwd, resolvedSessionFile);
@@ -1844,6 +1882,24 @@ export class SessionManager {
 		return this.#cwd;
 	}
 
+	/** Recorded cwd from the session header (original project), may differ from runtime {@link getCwd} when fallback retained launch cwd. */
+	getRecordedCwd(): string | undefined {
+		return this.#header?.cwd;
+	}
+
+	setCwdWithoutRelocation(newCwd: string): void {
+		const resolvedCwd = path.resolve(newCwd);
+		if (resolvedCwd === path.resolve(this.#cwd)) {
+			this.#fallbackRuntimeOnly = true;
+			return;
+		}
+		this.#cwd = resolvedCwd;
+		this.#fallbackRuntimeOnly = true;
+		if (this.#sessionFile) {
+			this.#rememberBreadcrumb(resolvedCwd, this.#sessionFile);
+		}
+	}
+
 	/** Additional workspace directories beyond cwd (multi-root), absolute and normalized. */
 	getAdditionalDirectories(): string[] {
 		return [...this.#additionalDirectories];
@@ -1902,6 +1958,11 @@ export class SessionManager {
 	async setAdditionalDirectories(directories: string[]): Promise<void> {
 		const workspace = normalizeSessionWorkspace({ cwd: this.#cwd, directories });
 		const next = additionalWorkspaceDirectories(workspace);
+		if (this.#fallbackRuntimeOnly) {
+			this.#additionalDirectories = next;
+			this.#fallbackRuntimeOnly = false;
+			return;
+		}
 		if (
 			next.length === this.#additionalDirectories.length &&
 			next.every((d, i) => d === this.#additionalDirectories[i])
@@ -2727,13 +2788,14 @@ export class SessionManager {
 	): Promise<SessionManager> {
 		const loaded = await loadSessionFile(filePath, storage);
 		const header = loaded.entries.find(entry => entry.type === "session") as SessionHeader | undefined;
-		// Resume into the session's recorded cwd only when that directory still
-		// exists. A deleted project dir would make the constructor's #cwd — and the
-		// `setProjectDir` chdir interactive mode runs next — point at (and fail on)
-		// a missing path, so fall back to the launch cwd and anchor /new and /branch
-		// there too, keeping the resumed session where the user already is.
+		// Resume into the session's recorded cwd only when it is verifiably
+		// accessible. A deleted or permission-blocked (macOS TCC denial) project
+		// dir would make the constructor's #cwd — and the `setProjectDir` chdir
+		// interactive mode runs next — fail, so fall back to the launch cwd and
+		// anchor /new and /branch there too, keeping the resumed session where
+		// the user already is.
 		const recordedCwd = header?.cwd;
-		const recordedCwdUsable = !!recordedCwd && (await directoryExists(recordedCwd));
+		const recordedCwdUsable = !!recordedCwd && (await directoryIsEnterable(recordedCwd));
 		const cwd = recordedCwdUsable ? recordedCwd : (options?.initialCwd ?? getProjectDir());
 		const dir =
 			sessionDir ??
