@@ -216,7 +216,7 @@ describe("Cursor pooled transport e2e", () => {
 		expect(observedClientVersion).toBe("cli-2026.08.11-e8db854");
 	});
 
-	it("finalizes a hung exec handler within ~5s with a synthesized tool result", async () => {
+	it("ends the turn within ~5s without synthesizing a result for a still-hung handler", async () => {
 		scenario = { kind: "bounded-drain" };
 		const baseUrl = await startServer();
 		const started = Date.now();
@@ -239,6 +239,9 @@ describe("Cursor pooled transport e2e", () => {
 		expect(elapsed).toBeGreaterThanOrEqual(4500);
 		expect(eventTypes).toContain("done");
 		expect(result.content.some(block => block.type === "toolCall")).toBe(true);
-		expect(paired.length).toBeGreaterThan(0);
+		// A handler still running when the drain times out must not receive a
+		// synthetic "Tool not available"; the real result is allowed to win if
+		// it ever arrives, and a hung handler here never does.
+		expect(paired.length).toBe(0);
 	}, 15_000);
 });

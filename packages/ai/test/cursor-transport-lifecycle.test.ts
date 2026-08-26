@@ -539,7 +539,7 @@ describe("cursor heartbeat and outbound write lifecycle", () => {
 		}
 	});
 
-	it("pairs a drain-timeout error only for an exec still pending at turn end", async () => {
+	it("lets a late handler result win over the drain-timeout synthesis", async () => {
 		const sessions = new Set<http2.Http2Session>();
 		const server = http2.createServer();
 		server.on("session", session => {
@@ -558,7 +558,8 @@ describe("cursor heartbeat and outbound write lifecycle", () => {
 			stream.write(
 				Buffer.concat([
 					frameConnectMessage(execReadPayload("call-done", "/tmp/done")),
-					frameConnectMessage(execReadPayload("call-hang", "/tmp/hang")),
+					frameConnectMessage(execReadPayload("call-slow", "/tmp/slow")),
+					frameConnectMessage(execReadPayload("call-never", "/tmp/hang")),
 					frameConnectMessage(turnEndedPayload()),
 				]),
 			);
@@ -571,15 +572,16 @@ describe("cursor heartbeat and outbound write lifecycle", () => {
 		const address = server.address();
 		if (!address || typeof address === "string") throw new Error("expected h2 run fixture to bind a tcp port");
 		const baseUrl = `http://127.0.0.1:${address.port}`;
-		vi.spyOn(serverConfig, "fetchCursorBidiAvailability").mockResolvedValue("unspecified");
 
+		const releaseSlow = Promise.withResolvers<ToolResultMessage>();
+		const slowPaired = Promise.withResolvers<void>();
+		const paired: ToolResultMessage[] = [];
 		try {
-			const paired: ToolResultMessage[] = [];
 			const stream = streamCursor(makeModel(baseUrl), streamContext, {
 				apiKey: API_KEY,
 				execHandlers: {
 					read(args) {
-						if (args.path === "/tmp/done" || args.toolCallId === "call-done") {
+						if (args.toolCallId === "call-done") {
 							return Promise.resolve({
 								role: "toolResult" as const,
 								toolCallId: "call-done",
@@ -589,34 +591,59 @@ describe("cursor heartbeat and outbound write lifecycle", () => {
 								timestamp: 1,
 							});
 						}
+						if (args.toolCallId === "call-slow") {
+							return releaseSlow.promise;
+						}
 						return new Promise(() => {});
 					},
 				},
 				onToolResult: result => {
 					paired.push(result);
+					if (result.toolCallId === "call-slow") slowPaired.resolve();
 					return result;
 				},
 			});
 			const eventTypes: string[] = [];
-			for await (const event of stream) eventTypes.push(event.type);
+			for await (const event of stream) {
+				eventTypes.push(event.type);
+				if (event.type === "done") {
+					// The 5-second drain has timed out and the stream ended. The
+					// slow handler is still live; releasing it now proves a late
+					// real result beats any synthetic "Tool not available".
+					releaseSlow.resolve({
+						role: "toolResult" as const,
+						toolCallId: "call-slow",
+						toolName: "read",
+						content: [{ type: "text" as const, text: "slow-body" }],
+						isError: false,
+						timestamp: 1,
+					});
+				}
+			}
 			const result = await stream.result();
+			// The done event has already released the slow handler; wait for its
+			// real result to pair before we assert the absence of "Tool not
+			// available".
+			await slowPaired.promise;
 			expect(eventTypes).toContain("done");
 			expect(eventTypes).not.toContain("error");
 			expect(result.stopReason).toBe("stop");
 
 			const doneResults = paired.filter(entry => entry.toolCallId === "call-done");
-			const hangResults = paired.filter(entry => entry.toolCallId === "call-hang");
+			const slowResults = paired.filter(entry => entry.toolCallId === "call-slow");
+			const hangResults = paired.filter(entry => entry.toolCallId === "call-never");
 			expect(doneResults).toHaveLength(1);
 			expect(doneResults[0]?.content).toEqual([{ type: "text", text: "done-body" }]);
 			expect(doneResults[0]?.isError).toBe(false);
-			expect(hangResults).toHaveLength(1);
-			expect(hangResults[0]?.content).toEqual([{ type: "text", text: "Tool not available" }]);
-			expect(hangResults[0]?.isError).toBe(true);
+			expect(slowResults).toHaveLength(1);
+			expect(slowResults[0]?.content).toEqual([{ type: "text", text: "slow-body" }]);
+			expect(slowResults[0]?.isError).toBe(false);
+			expect(hangResults).toHaveLength(0);
 			expect(
 				paired.filter(entry =>
 					entry.content.some(part => part.type === "text" && part.text === "Tool not available"),
 				),
-			).toHaveLength(1);
+			).toHaveLength(0);
 		} finally {
 			for (const session of sessions) session.destroy();
 			const closed = Promise.withResolvers<void>();
@@ -682,6 +709,55 @@ describe("cursor heartbeat and outbound write lifecycle", () => {
 			const closed = Promise.withResolvers<void>();
 			server.close(error => (error ? closed.reject(error) : closed.resolve()));
 			await closed.promise;
+		}
+	});
+
+	it("writes poll-stream payloads into the HTTP/1 bridge PI_REQ_DEBUG response log", async () => {
+		const previousDebugFlag = Bun.env.PI_REQ_DEBUG;
+		const previousCwd = process.cwd();
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "cursor-req-debug-h1-body-"));
+		const turnBytes = turnEndedPayload();
+		const turnB64 = Buffer.from(turnBytes).toString("base64");
+
+		const h1Url = await startH1Fixture((req, res) => {
+			if (req.url?.includes("RunPoll")) {
+				const body = Buffer.concat([
+					encodeConnectFrame(encodePollResponse(0n, turnB64, false), false),
+					encodeConnectFrame(encodePollResponse(1n, "", true), false),
+					frameConnectMessage(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG),
+				]);
+				res.writeHead(200, { "content-type": "application/connect+proto" });
+				res.end(body);
+				return;
+			}
+			res.statusCode = 200;
+			res.end();
+		});
+		vi.spyOn(h2Pool, "acquireCursorH2").mockResolvedValue(alpnUnavailable());
+		vi.spyOn(serverConfig, "fetchCursorBidiAvailability").mockResolvedValue("bidi-disabled");
+
+		try {
+			process.chdir(tempDir);
+			Bun.env.PI_REQ_DEBUG = "1";
+			const stream = streamCursor(makeModel(h1Url), streamContext, { apiKey: API_KEY });
+			for await (const _event of stream) {
+				/* drain */
+			}
+			const entries = await fs.readdir(tempDir);
+			const resLogs = entries.filter(name => /^rr-session-\d+\.res\.log$/.test(name));
+			if (resLogs.length === 0) throw new Error("expected at least one response log");
+			const bytes = await fs.readFile(path.join(tempDir, resLogs[0]));
+			const separator = Buffer.from("\r\n\r\n");
+			const separatorIndex = bytes.indexOf(separator);
+			expect(separatorIndex).toBeGreaterThanOrEqual(0);
+			const body = bytes.subarray(separatorIndex + separator.length);
+			expect(body.length).toBeGreaterThan(0);
+			expect(body.includes(turnBytes)).toBe(true);
+		} finally {
+			process.chdir(previousCwd);
+			if (previousDebugFlag === undefined) delete Bun.env.PI_REQ_DEBUG;
+			else Bun.env.PI_REQ_DEBUG = previousDebugFlag;
+			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
 

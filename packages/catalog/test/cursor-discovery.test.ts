@@ -8,6 +8,7 @@ import * as path from "node:path";
 // copy resolves to the primary checkout, not this worktree.
 import {
 	__cursorDiscoveryHttp2Snapshot,
+	__cursorH2ConnectingSize,
 	__setCursorDiscoveryHttp2EstablishBodyGate,
 	disposeCursorDiscoveryHttp2Pool,
 	fetchCursorUsableModels,
@@ -463,7 +464,7 @@ describe("fetchCursorUsableModels", () => {
 		]);
 	});
 
-	it("unrefs a session published after the waiter aborted mid-handshake", async () => {
+	it("cancels a connect whose last waiter aborted mid-handshake instead of publishing it", async () => {
 		const response = create(GetUsableModelsResponseSchema, {
 			models: [create(ModelDetailsSchema, { modelId: "composer-3" })],
 		});
@@ -479,11 +480,22 @@ describe("fetchCursorUsableModels", () => {
 		await gated;
 		expect(__cursorDiscoveryHttp2Snapshot()).toEqual([]);
 		expect(await pending).toBeNull();
+		// The last live waiter left before the handshake completed, so the
+		// connect is cancelled and must never publish a session into the pool —
+		// nor leave a destroyed one reserved for the next discovery.
+		expect(__cursorH2ConnectingSize()).toBe(0);
+		expect(__cursorDiscoveryHttp2Snapshot()).toEqual([]);
 		releaseGate();
-		await Bun.sleep(20);
-		expect(__cursorDiscoveryHttp2Snapshot()).toEqual([
-			expect.objectContaining({ outstanding: 0, draining: false, referenced: false }),
-		]);
+		// The suspended establish body's post-gate continuation is pure
+		// microtasks (the settled guard returns before any connect), so drain
+		// them rather than sleeping.
+		for (let i = 0; i < 10; i++) await Promise.resolve();
+		expect(__cursorH2ConnectingSize()).toBe(0);
+		expect(__cursorDiscoveryHttp2Snapshot()).toEqual([]);
+		// A later discovery retries a fresh connect instead of joining the
+		// cancelled reservation.
+		const models = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: url, timeoutMs: 1_000 });
+		expect(models).toEqual([expect.objectContaining({ id: "composer-3" })]);
 	});
 
 	it("maps request failures to null", async () => {

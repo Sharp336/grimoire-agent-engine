@@ -167,8 +167,27 @@ interface CursorH2PoolEntry {
 
 /** Normalized origin → live (non-draining) session with its lease count. */
 const cursorH2Pool = new Map<string, CursorH2PoolEntry>();
+/**
+ * An in-flight connect alongside the handle that can terminate it. `cancel()`
+ * is destructive: it destroys the underlying session and socket and settles
+ * the connect with `null`, so a peer that accepts TCP/TLS but never finishes
+ * the h2 handshake cannot pin the process open or strand its reservation.
+ */
+interface CursorH2ConnectHandle {
+	promise: Promise<CursorH2PoolEntry | null>;
+	cancel(): void;
+	/**
+	 * Live acquisitions awaiting this connect. Each waiter is bound to its own
+	 * timeout signal; this count is the single cancellation owner — only the
+	 * LAST live waiter leaving before {@link promise} settles cancels the
+	 * connect, so an earlier waiter leaving keeps it alive for the others.
+	 */
+	waiters: number;
+	/** True once {@link promise} settled, so a late waiter exit never cancels. */
+	finished: boolean;
+}
 /** Normalized origin → in-flight connect shared by concurrent acquisitions. */
-const cursorH2Connecting = new Map<string, Promise<CursorH2PoolEntry | null>>();
+const cursorH2Connecting = new Map<string, CursorH2ConnectHandle>();
 /**
  * Disposal epoch. A connect that began under one generation must not publish a
  * session after a later disposal cleared the pool; the connect handler discards
@@ -254,58 +273,110 @@ function issueCursorH2Lease(
 	return { request, release };
 }
 
-function establishCursorH2Session(key: string, origin: string): Promise<CursorH2PoolEntry | null> {
+function establishCursorH2Session(key: string, origin: string): CursorH2ConnectHandle {
 	const generation = cursorH2Generation;
 	const { promise, resolve } = Promise.withResolvers<CursorH2PoolEntry | null>();
+	let settled = false;
+	let session: http2.ClientHttp2Session | undefined;
+	let rawSocket: { destroy(): void } | undefined;
+	const settle = (value: CursorH2PoolEntry | null): void => {
+		if (settled) return;
+		settled = true;
+		resolve(value);
+	};
+	// The raw socket is captured the moment `http2.connect` returns; Bun's
+	// `session.socket` getter can throw once the session has begun handshaking,
+	// so teardown uses the captured reference to destroy the socket
+	// independently.
+	const destroyConnect = (): void => {
+		// `session.destroy()` and `rawSocket.destroy()` are intentionally
+		// separate: destroying the session does not always close the accepted
+		// peer socket on Bun, and the captured socket is destroyed directly.
+		try {
+			session?.destroy();
+		} catch {
+			/* already closed */
+		}
+		try {
+			rawSocket?.destroy();
+		} catch {
+			/* already closed */
+		}
+	};
+	/**
+	 * Destructive cancellation, owned by the last live waiter or disposal.
+	 * Race-safe: publish+settle is atomic within one synchronous tick, so an
+	 * unsettled connect has never published its session into the pool, and a
+	 * session created after cancellation is destroyed by the body's own
+	 * `settled` guard below.
+	 */
+	const cancel = (): void => {
+		if (settled) return;
+		destroyConnect();
+		settle(null);
+	};
 	const run = async (): Promise<void> => {
 		if (cursorH2EstablishBodyGate) {
 			const gate = cursorH2EstablishBodyGate;
 			cursorH2EstablishBodyGate = undefined;
 			await gate(key);
 		}
-		if (cursorH2Generation !== generation) {
-			resolve(null);
+		if (cursorH2Generation !== generation || settled) {
+			settle(null);
 			return;
 		}
-		let session: http2.ClientHttp2Session;
+		let connected: http2.ClientHttp2Session;
 		try {
-			session = http2.connect(origin);
+			connected = http2.connect(origin);
 		} catch {
-			resolve(null);
+			settle(null);
 			return;
 		}
-		let settled = false;
-		const settle = (value: CursorH2PoolEntry | null): void => {
-			if (settled) return;
-			settled = true;
-			resolve(value);
-		};
-		const entry: CursorH2PoolEntry = { session, outstanding: 0, draining: false, referenced: false };
-		session.on("goaway", () => drainCursorH2Entry(key, entry));
-		session.on("error", () => {
+		// Capture the underlying socket immediately; Bun may throw on
+		// `session.socket` once the session has begun the h2 handshake.
+		try {
+			rawSocket = connected.socket as { destroy(): void } | undefined;
+		} catch {
+			/* socket not yet exposed */
+		}
+		session = connected;
+		if (settled) {
+			// Cancelled while the body was suspended before the session existed
+			// (the test gate): cancel had no session to destroy, so this branch
+			// is the sole owner of the teardown.
+			destroyConnect();
+			return;
+		}
+		const entry: CursorH2PoolEntry = { session: connected, outstanding: 0, draining: false, referenced: false };
+		connected.on("goaway", () => drainCursorH2Entry(key, entry));
+		connected.on("error", () => {
 			if (settled) {
 				drainCursorH2Entry(key, entry);
 				return;
 			}
-			destroyCursorH2Session(session);
+			destroyConnect();
 			settle(null);
 		});
 		const publish = (): void => {
+			if (settled) {
+				destroyConnect();
+				return;
+			}
 			if (cursorH2Generation !== generation) {
-				destroyCursorH2Session(session);
+				destroyConnect();
 				settle(null);
 				return;
 			}
-			session.unref();
+			connected.unref();
 			entry.referenced = false;
 			cursorH2Pool.set(key, entry);
 			settle(entry);
 		};
-		session.once("connect", publish);
-		if (!session.connecting && !session.destroyed) publish();
+		connected.once("connect", publish);
+		if (!connected.connecting && !connected.destroyed) publish();
 	};
 	void run();
-	return promise;
+	return { promise, cancel, waiters: 0, finished: false };
 }
 
 async function acquireCursorH2(
@@ -324,22 +395,41 @@ async function acquireCursorH2(
 	if (existing && !existing.draining && !existing.session.destroyed) {
 		return issueCursorH2Lease(key, existing, headers, signal);
 	}
-	let inFlight = cursorH2Connecting.get(key);
-	if (!inFlight) {
-		const connect = establishCursorH2Session(key, key).finally(() => {
-			if (cursorH2Connecting.get(key) === connect) cursorH2Connecting.delete(key);
+	let reserved = cursorH2Connecting.get(key);
+	if (!reserved) {
+		const created = establishCursorH2Session(key, key);
+		cursorH2Connecting.set(key, created);
+		// Mark finished and drop the reservation once the connect settles, so a
+		// later acquisition always reserves afresh rather than joining a handle
+		// whose promise already settled.
+		void created.promise.finally(() => {
+			created.finished = true;
+			if (cursorH2Connecting.get(key) === created) cursorH2Connecting.delete(key);
 		});
-		inFlight = connect;
-		cursorH2Connecting.set(key, connect);
+		reserved = created;
 	}
-	// Bound the wait by the caller's timeout without cancelling a shared
-	// in-flight connect another acquisition still depends on.
+	const handle = reserved;
+	handle.waiters++;
+	// Bound the wait by the caller's timeout. The LAST live waiter leaving
+	// before the connect settles cancels it: an endpoint that accepted TCP/TLS
+	// but never finishes the h2 handshake is destroyed and its reservation
+	// cleared, so a later discovery retries a fresh connect instead of forever
+	// joining a permanently stalled one. An earlier waiter leaving keeps the
+	// shared connect alive for the others.
 	const { promise: wait, resolve: finishWait } = Promise.withResolvers<CursorH2PoolEntry | null>();
 	const onAbort = (): void => finishWait(null);
 	signal.addEventListener("abort", onAbort, { once: true });
-	void inFlight.then(finishWait, () => finishWait(null));
+	void handle.promise.then(
+		entry => finishWait(entry),
+		() => finishWait(null),
+	);
 	const entry = await wait;
 	signal.removeEventListener("abort", onAbort);
+	handle.waiters--;
+	if (handle.waiters <= 0 && !handle.finished) {
+		handle.cancel();
+		if (cursorH2Connecting.get(key) === handle) cursorH2Connecting.delete(key);
+	}
 	if (!entry) return null;
 	const live = cursorH2Pool.get(key);
 	if (!live || live.draining || live.session.destroyed) return null;
@@ -354,7 +444,13 @@ async function acquireCursorH2(
  */
 export function disposeCursorDiscoveryHttp2Pool(): void {
 	cursorH2Generation++;
+	// Cancel every in-flight connect BEFORE clearing the map: a peer that
+	// accepts TCP but never finishes the h2 handshake leaves the connect
+	// pending forever, so its session/socket must be destroyed here or a
+	// short-lived consumer stays pinned open.
+	const inFlight = [...cursorH2Connecting.values()];
 	cursorH2Connecting.clear();
+	for (const handle of inFlight) handle.cancel();
 	for (const entry of cursorH2Pool.values()) {
 		entry.draining = true;
 		destroyCursorH2Session(entry.session);
@@ -441,6 +537,11 @@ async function readUnaryResponse(
 	if (body.length > 0) request.end(Buffer.from(body));
 	else request.end();
 	return promise;
+}
+
+/** Test seam: in-flight connect reservation count. */
+export function __cursorH2ConnectingSize(): number {
+	return cursorH2Connecting.size;
 }
 
 function normalizeCustomModelIds(customModelIds: readonly string[] | undefined): string[] {

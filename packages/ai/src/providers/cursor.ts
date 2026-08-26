@@ -478,13 +478,34 @@ function streamCursorWithWireMode(
 		// transport fails, and the error path finalizes the synthesized call just
 		// like the success path does.
 		const inFlightDispatches = new Set<Promise<void>>();
-		// Exec toolCall.id values whose dispatch is still in `inFlightDispatches`.
+		// Exec toolCall.id values owned by each dispatch in `inFlightDispatches`.
 		// Populated at the same moment the dispatch promise enters that set (after
 		// handleServerMessage's synchronous prefix has synthesized the block) and
-		// cleared in the same `finally` that removes the promise. Drain-timeout
-		// pairing uses this set — never `kCursorExecResolved`, which is stamped
-		// when the block is opened, before the handler completes.
-		const pendingExecToolCallIds = new Set<string>();
+		// cleared in the same `finally` that removes the promise. The drain-timeout
+		// pairing below defers through this map — never `kCursorExecResolved`,
+		// which is stamped when the block is opened, before the handler completes.
+		const dispatchExecToolCallIds = new Map<Promise<void>, string[]>();
+		// toolCall.id values that already received a `toolResult` through the
+		// sink. The deferred drain-timeout pairing consults this so a handler
+		// that settles after the drain keeps its real result — never a second,
+		// synthetic failure layered over it.
+		const pairedToolCallIds = new Set<string>();
+		// The stream's onToolResult transformer, wrapped to record which call ids
+		// have been paired. Every pair path in this stream flows through the sink
+		// argument threaded into `handleServerMessage` (or its
+		// `state.onToolResult` fallback), so wrapping here covers them all; the
+		// transformer's return value is passed through untouched.
+		//
+		// The sink is defined even when the caller supplies no transformer:
+		// `resolveExecHandler` pairs through `applyToolResultHandler` either way,
+		// so leaving it undefined would keep pairing while recording nothing, and
+		// the deferred drain-timeout pairing below would then read every id as
+		// unpaired and layer a synthetic failure over results that did land.
+		const upstreamOnToolResult = options?.onToolResult;
+		const resultSink: CursorToolResultHandler = result => {
+			pairedToolCallIds.add(result.toolCallId);
+			return upstreamOnToolResult ? upstreamOnToolResult(result) : result;
+		};
 		// A dispatch can spawn another (a handler that decodes a nested frame), so
 		// re-check rather than awaiting one snapshot. Each dispatch already
 		// swallows its own rejection, so this only waits.
@@ -533,6 +554,44 @@ function streamCursorWithWireMode(
 				}
 			} finally {
 				clearTimeout(timeoutId);
+			}
+		};
+		// Deferred synthetic pairing, shared by the success and terminal-error
+		// paths so both apply one completion policy. A still-pending id means its
+		// handler is still executing and cannot be cancelled: pairing "Tool not
+		// available" now would persist a synthetic failure whose real result then
+		// lands late — dropped once the agent detached, or observed as a second
+		// result for the same call id. Each pair therefore waits for its own
+		// dispatch to settle; a settling handler has already paired its result
+		// through every `resolveExecHandler` exit, so this fires only for a
+		// dispatch that exits without delivering one. A handler that never
+		// settles gets no synthetic result at all: the real result must win.
+		const deferSyntheticExecPairs = (pairState: BlockState, output: AssistantMessage): void => {
+			for (const dispatch of [...inFlightDispatches]) {
+				const ownedIds = dispatchExecToolCallIds.get(dispatch);
+				if (!ownedIds || ownedIds.length === 0) continue;
+				void dispatch.finally(() => {
+					for (const toolCallId of ownedIds) {
+						if (pairedToolCallIds.has(toolCallId)) continue;
+						const toolCall = output.content.find(
+							(block): block is ToolCallState =>
+								block.type === "toolCall" &&
+								(block as ToolCallState).id === toolCallId &&
+								(block as ToolCallState)[kStreamingBlockKind] === "cursor-exec",
+						);
+						if (!toolCall) continue;
+						void pairSynthesizedExecResult(
+							pairState,
+							resultSink,
+							toolCallId,
+							toolCall.name,
+							"Tool not available",
+							true,
+						).catch(error => {
+							log("error", "pairSynthesizedExecResult", { error: String(error) });
+						});
+					}
+				});
 			}
 		};
 
@@ -704,7 +763,7 @@ function streamCursorWithWireMode(
 					if (!firstTokenTime) firstTokenTime = performance.now();
 				},
 				onTodoSnapshot: options?.execHandlers?.todoSync?.bind(options.execHandlers),
-				onToolResult: options?.onToolResult,
+				onToolResult: resultSink,
 			};
 			openBlockState = state;
 
@@ -747,9 +806,14 @@ function streamCursorWithWireMode(
 				debugResponseLogPromise = attempt
 					.responseHeaders()
 					.then(headers => debugSession?.openResponseLog(`HTTP/2 ${headers[":status"] ?? ""}`.trim(), headers));
+			} else {
+				// The HTTP/1 bridge surfaces no single response-headers moment —
+				// poll and append are separate HTTP responses — but the decoded
+				// poll frames below are still the response body a PI_REQ_DEBUG
+				// session needs. Open a minimal response log up front so those
+				// payloads are captured instead of leaving the dump body-empty.
+				debugResponseLogPromise = Promise.resolve(debugSession?.openResponseLog("HTTP/1.1 bridge"));
 			}
-			// HTTP/1 bridge has no responseHeaders: poll/append are separate HTTP
-			// responses, not one Connect stream we can dump as a single body.
 
 			void attempt
 				.trailers()
@@ -805,7 +869,7 @@ function streamCursorWithWireMode(
 								blobStore,
 								frameSink,
 								options?.execHandlers,
-								options?.onToolResult,
+								resultSink,
 								usageState!,
 								requestContextTools,
 								requestContextRules,
@@ -820,12 +884,12 @@ function streamCursorWithWireMode(
 								if (toolCall[kStreamingBlockKind] !== "cursor-exec") continue;
 								if (execIdsBefore.has(toolCall.id)) continue;
 								ownedExecIds.push(toolCall.id);
-								pendingExecToolCallIds.add(toolCall.id);
 							}
 							inFlightDispatches.add(dispatch);
+							dispatchExecToolCallIds.set(dispatch, ownedExecIds);
 							void dispatch.finally(() => {
 								inFlightDispatches.delete(dispatch);
-								for (const id of ownedExecIds) pendingExecToolCallIds.delete(id);
+								dispatchExecToolCallIds.delete(dispatch);
 							});
 
 							if (isTurnEnded) {
@@ -874,22 +938,7 @@ function streamCursorWithWireMode(
 			// unpaired and stripped from every rebuilt transcript. Each dispatch
 			// already swallows its own rejection, so this only waits.
 			await drainInFlightDispatches();
-			if (drainTimedOut) {
-				for (const block of output.content) {
-					if (block.type !== "toolCall") continue;
-					const toolCall = block as ToolCallState;
-					if (toolCall[kStreamingBlockKind] !== "cursor-exec") continue;
-					if (!pendingExecToolCallIds.has(toolCall.id)) continue;
-					await pairSynthesizedExecResult(
-						state,
-						options?.onToolResult,
-						toolCall.id,
-						toolCall.name,
-						"Tool not available",
-						true,
-					);
-				}
-			}
+			if (drainTimedOut) deferSyntheticExecPairs(state, output);
 
 			endCurrentTextBlock(output, stream, state);
 			endCurrentThinkingBlock(output, stream, state);
@@ -946,6 +995,10 @@ function streamCursorWithWireMode(
 			// (handlers have no cancellation contract and must not delay the
 			// terminal error the user asked for).
 			await drainInFlightDispatches();
+			// Same completion policy as the success path: a dispatch that outlived
+			// the drain and then exits without pairing still owes a result, and a
+			// terminal error must not leave that call stripped from the transcript.
+			if (drainTimedOut && openBlockState) deferSyntheticExecPairs(openBlockState, output);
 			// A stream that dies mid-turn leaves blocks open, and this is the path
 			// it takes: `settleH2` rejects when the transport closes without
 			// `turnEnded`, so the success-path flush above never runs. Closing
