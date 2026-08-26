@@ -16,6 +16,7 @@ import * as fs from "node:fs";
 import { performance } from "node:perf_hooks";
 import { $flag, getDebugLogPath, logger } from "@oh-my-pi/pi-utils";
 import { DEFAULT_MAX_INLINE_IMAGES, ImageBudget } from "./components/image";
+import { parseFocusEvent } from "./focus";
 import { isKeyRelease, matchesKey } from "./keys";
 import { LoopWatchdog } from "./loop-watchdog";
 import { setAltScreenActive, type Terminal } from "./terminal";
@@ -701,6 +702,7 @@ export class TUI extends Container {
 	#focusedComponent: Component | null = null;
 	#inputListeners = new Set<InputListener>();
 	#startListeners = new Set<StartListener>();
+	#focusSubscribers = new Set<(focused: boolean) => void>();
 
 	/** Global callback for debug key (Shift+Ctrl+D). Called before input is forwarded to focused component. */
 	onDebug?: () => void;
@@ -1404,6 +1406,17 @@ export class TUI extends Container {
 		this.#inputListeners.delete(listener);
 	}
 
+	/**
+	 * Subscribe to terminal focus changes (CSI ?1004 focus reports: `ESC[I` on
+	 * focus-in, `ESC[O` on focus-out). Returns an unsubscribe function.
+	 */
+	onTerminalFocus(callback: (focused: boolean) => void): () => void {
+		this.#focusSubscribers.add(callback);
+		return () => {
+			this.#focusSubscribers.delete(callback);
+		};
+	}
+
 	#querySixelSupport(): void {
 		// A statically known protocol (Kitty/iTerm2 terminals) or an explicit
 		// PI_FORCE_IMAGE_PROTOCOL choice — including its `off` kill switch — wins
@@ -1785,6 +1798,20 @@ export class TUI extends Container {
 	}
 
 	#handleInput(data: string): void {
+		// CSI ?1004 focus reports (ESC[I / ESC[O) are decoded before every
+		// listener and key handler sees the chunk: consecutive reports all
+		// dispatch in order, and only the first non-focus remainder flows on
+		// as ordinary input (so a coalesced focus report + paste packet
+		// reaches the paste controller intact).
+		while (true) {
+			const focus = parseFocusEvent(data);
+			if (!focus) break;
+			this.#focusSubscribers.forEach(callback => {
+				callback(focus.focused);
+			});
+			if (focus.rest.length === 0) return;
+			data = focus.rest;
+		}
 		// Consume CPR replies (CSI row;col R) while an anchor probe is unanswered;
 		// they are terminal reports, never keystrokes, and must not reach the
 		// focused component.

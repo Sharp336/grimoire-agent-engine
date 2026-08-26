@@ -484,7 +484,7 @@ export function setExtensionTerminalTitle(title: string): void {
 	emitTerminalTitle();
 }
 
-export type TerminalTitleState = "idle" | "working" | "attention";
+export type TerminalTitleState = "idle" | "working" | "attention" | "notify";
 
 /** Windows uses a static working separator instead of scheduling title animation. */
 const WINDOWS_TITLE_WORKING_SEPARATOR = ":";
@@ -494,6 +494,27 @@ const TITLE_SPINNER_INTERVAL_MS = 80;
 const TITLE_IDLE_SEPARATOR = ">";
 /** Agent blocked on the user (ask / approval prompt). */
 const TITLE_ATTENTION_SEPARATOR = "!";
+/** A finished turn whose result the user hasn't read: the title carries the
+ *  static `:>` separator (working's `:` + your-turn's `>`). */
+const TITLE_NOTIFY_SEPARATOR = ":>";
+/** Windows Terminal tab tint per needing-user state (DECAC palette indices —
+ *  they follow the user's terminal scheme): red while the agent is blocked on
+ *  the user, yellow when a finished turn's result is unread. Working/idle
+ *  never paint: they restore the default tab color. */
+const TAB_COLOR_STATE_INDEX: Record<Extract<TerminalTitleState, "attention" | "notify">, number> = {
+	attention: 1,
+	notify: 3,
+};
+/** DECAC foreground index. Windows Terminal ignores it and auto-picks a
+ *  contrasting tab-text color. */
+const TAB_COLOR_FG_INDEX = 15;
+/** Restore the default tab color via the VT default fg/bg sentinels (263/264,
+ *  outside the 256-color table). Empirically, only this exact sequence resets
+ *  the tab — omitted-param forms and DECSTR do not. */
+const TAB_COLOR_RESET_SEQUENCE = "\x1b[2;263;264,|";
+/** CSI ?1004 focus state: true while the terminal tab is active. Launching
+ *  implies presence; a later focus-out report flips it. */
+let terminalFocus = true;
 
 const terminalTitleRuntime: {
 	label: string | undefined;
@@ -501,6 +522,11 @@ const terminalTitleRuntime: {
 	frame: number;
 	enabled: boolean;
 	timer: NodeJS.Timeout | undefined;
+	/** DECAC palette index of the tint currently applied to the WT tab, or
+	 *  `undefined` when the tab shows its default color. Gates both lazy paint
+	 *  (idle-only sessions never paint) and dedup (skip repainting the same
+	 *  tint; reset only when a tint is actually applied). */
+	tabColorIndex: number | undefined;
 	/** A title an extension set via `setTitle()`. While set, it owns the terminal
 	 *  title verbatim: the run-state separator never rewrites it. Cleared when the
 	 *  app next establishes an authoritative session title (rename, new session,
@@ -513,6 +539,7 @@ const terminalTitleRuntime: {
 	enabled: true,
 	timer: undefined,
 	extensionOverride: undefined,
+	tabColorIndex: undefined,
 };
 
 /**
@@ -521,6 +548,7 @@ const terminalTitleRuntime: {
  *   - `idle` (user's turn):  `π > label`;
  *   - `working`:             `π ⠋ label` (`π : label` on Windows);
  *   - `attention`:           `π ! label`;
+ *   - `notify`:              `π :> label` (static on all platforms);
  *   - disabled:              `π: label`.
  * Without a label the separator trails the brand (`π >`) so the state stays visible.
  */
@@ -532,6 +560,10 @@ export function buildTerminalTitleWithState(
 	platform: NodeJS.Platform = process.platform,
 ): string {
 	if (!enabled) return label ? `${DEFAULT_TERMINAL_TITLE}: ${label}` : DEFAULT_TERMINAL_TITLE;
+	if (state === "notify") {
+		const base = `${DEFAULT_TERMINAL_TITLE} ${TITLE_NOTIFY_SEPARATOR}`;
+		return label ? `${base} ${label}` : base;
+	}
 	const separator =
 		state === "working"
 			? platform === "win32"
@@ -557,6 +589,57 @@ function emitTerminalTitle(): void {
 		);
 	setTerminalTitle(next);
 }
+/**
+ * Build the DECAC sequence for a run state: the tint (`CSI 2;15;<bg-index>,|`)
+ * for attention/notify, or the reset restoring the default tab color (`CSI
+ * 2;263;264,|`) for working/idle. Pure so the wire bytes are testable; Windows
+ * Terminal is the only known implementor of the frame color item, so callers
+ * must gate on it.
+ */
+export function buildTabColorSequence(state: TerminalTitleState): string {
+	if (state === "attention" || state === "notify") {
+		return `\x1b[2;${TAB_COLOR_FG_INDEX};${TAB_COLOR_STATE_INDEX[state]},|`;
+	}
+	return TAB_COLOR_RESET_SEQUENCE;
+}
+
+/** Tint the Windows Terminal tab for `state`. No-op anywhere else, in headless
+ *  mode, while the `tui.titleState` signal is off, and — lazily — until the
+ *  agent first needs the user, so a quiet session never clobbers a tab color
+ *  the user set by hand. Repaints only when the applied tint changes. The
+ *  notify tint is bell-semantics: painted only while the tab is inactive. */
+function paintTabColorState(state: TerminalTitleState): void {
+	if (!terminalTitleRuntime.enabled) return;
+	if (isTerminalHeadless()) return;
+	if (process.platform !== "win32" || process.env.WT_SESSION === undefined) return;
+	if (state === "attention" || state === "notify") {
+		if (state === "notify" && terminalFocus) {
+			// A focused agent_end is already visible to the user: no bell tint,
+			// but clear any tint a prior state left applied so red never
+			// lingers until a later transition.
+			if (terminalTitleRuntime.tabColorIndex === undefined) return;
+			terminalTitleRuntime.tabColorIndex = undefined;
+			writeTitleSequence(buildTabColorSequence("idle"));
+			return;
+		}
+		const index = TAB_COLOR_STATE_INDEX[state];
+		if (terminalTitleRuntime.tabColorIndex === index) return;
+		terminalTitleRuntime.tabColorIndex = index;
+	} else if (terminalTitleRuntime.tabColorIndex === undefined) {
+		return;
+	} else {
+		terminalTitleRuntime.tabColorIndex = undefined;
+	}
+	writeTitleSequence(buildTabColorSequence(state));
+}
+
+/** Clear any tab tint this process applied: repaint the default tab color and
+ *  return to the lazy (never-painted) state. No-op unless we actually painted. */
+function resetTabColorToIdle(): void {
+	if (terminalTitleRuntime.tabColorIndex === undefined) return;
+	terminalTitleRuntime.tabColorIndex = undefined;
+	writeTitleSequence(buildTabColorSequence("idle"));
+}
 
 function stopTerminalTitleSpinner(): void {
 	clearInterval(terminalTitleRuntime.timer);
@@ -576,19 +659,39 @@ function startTerminalTitleSpinner(): void {
 /**
  * Reflect the agent run state in the terminal title's separator: `working`
  * animates outside Windows and stays `:` on Windows, `idle` shows `>` (your
- * turn), and `attention` shows `!` (agent blocked on you). Gated off by
- * `tui.titleState`.
+ * turn), `attention` shows `!` (agent blocked on you), and `notify` shows `:>`
+ * (a finished turn's result is unread). Gated off by `tui.titleState`.
  */
 export function setTerminalTitleState(state: TerminalTitleState): void {
 	terminalTitleRuntime.state = state;
+	paintTabColorState(state);
 	if (state === "working" && terminalTitleRuntime.enabled) startTerminalTitleSpinner();
 	else stopTerminalTitleSpinner();
 	emitTerminalTitle();
 }
 
+/**
+ * Track terminal focus (CSI ?1004 reports wired through the TUI). Defaults to
+ * focused — launching implies presence; a later departure emits focus-out.
+ * Focus-in while a finished-turn yellow tint is showing clears it (bell
+ * semantics); the title state is untouched.
+ */
+export function setTerminalFocus(focused: boolean): void {
+	terminalFocus = focused;
+	if (
+		focused &&
+		terminalTitleRuntime.state === "notify" &&
+		terminalTitleRuntime.tabColorIndex === TAB_COLOR_STATE_INDEX.notify
+	) {
+		terminalTitleRuntime.tabColorIndex = undefined;
+		writeTitleSequence(buildTabColorSequence("idle"));
+	}
+}
+
 /** Enable/disable the run-state separator (driven by the `tui.titleState` setting). */
 export function setTerminalTitleStateEnabled(enabled: boolean): void {
 	terminalTitleRuntime.enabled = enabled;
+	if (!enabled) resetTabColorToIdle();
 	if (enabled && terminalTitleRuntime.state === "working") startTerminalTitleSpinner();
 	else stopTerminalTitleSpinner();
 	emitTerminalTitle();
@@ -597,6 +700,7 @@ export function setTerminalTitleStateEnabled(enabled: boolean): void {
 /** Release terminal-title runtime resources. */
 export function disposeTerminalTitleState(): void {
 	stopTerminalTitleSpinner();
+	resetTabColorToIdle();
 	disposeWindowsConsoleTitleApi();
 	lastTerminalTitle = undefined;
 }

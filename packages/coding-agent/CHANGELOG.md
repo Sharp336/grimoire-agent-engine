@@ -21,6 +21,9 @@
 - Commit-message generation errors in the git TUI now remain visible in the status bar instead of disappearing and returning to an idle state.
 - Fixed `omp update` leaving standalone Windows binaries on the old version when stale Bun launcher metadata was present, and preserved launchers installed by a newer concurrent update during binary repair ([#9806](https://github.com/can1357/oh-my-pi/issues/9806)).
 - Quitting `omp git` during commit-message generation now exits cleanly without leaving the process running.
+### Added
+
+- Tint the Windows Terminal tab when the agent needs you — red while waiting on you, yellow when a turn finished while the tab was inactive (clears when you focus the tab, like the terminal's own bell indicator) (gated by `tui.titleState`)
 
 ## [18.0.5] - 2026-08-25
 

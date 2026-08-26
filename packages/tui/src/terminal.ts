@@ -10,6 +10,7 @@ import {
 	restoreTerminalStderr,
 	suppressTerminalStderr,
 } from "@oh-my-pi/pi-utils";
+import { FOCUS_TRACKING_OFF, FOCUS_TRACKING_ON } from "./focus";
 import { setKittyProtocolActive } from "./keys";
 import { StdinBuffer } from "./stdin-buffer";
 import {
@@ -368,6 +369,7 @@ export function emergencyTerminalRestore(): void {
 					"\x1b[?7h" + // Restore autowrap
 					"\x1b[?1l\x1b>" + // Restore normal cursor-key + keypad mode (rmkx, #6374)
 					"\x1b[?2004l" + // Disable bracketed paste
+					FOCUS_TRACKING_OFF + // Disable focus reporting (CSI ?1004)
 					"\x1b[?2031l" + // Disable Mode 2031 appearance notifications
 					"\x1b[?2048l" + // Disable in-band resize notifications
 					"\x1b[?5522l" + // Disable enhanced paste notifications
@@ -856,6 +858,10 @@ export class ProcessTerminal implements Terminal {
 
 		// Enable bracketed paste mode - terminal will wrap pastes in \x1b[200~ ... \x1b[201~
 		this.#safeWrite("\x1b[?2004h");
+
+		// Enable focus reporting (CSI ?1004) - WT emits ESC[I/ESC[O on tab
+		// activation so consumers can clear needing-user tints on focus-in.
+		this.#safeWrite(FOCUS_TRACKING_ON);
 
 		// Force normal cursor-key (DECCKM) and numeric-keypad mode (terminfo
 		// `rmkx` = "\x1b[?1l\x1b>"). omp decodes both CSI ("\x1b[A") and SS3
@@ -1654,6 +1660,8 @@ export class ProcessTerminal implements Terminal {
 
 		// Disable bracketed paste mode
 		this.#safeWrite("\x1b[?2004l");
+		// Disable focus reporting (CSI ?1004)
+		this.#safeWrite(FOCUS_TRACKING_OFF);
 		this.#safeWrite("\x1b[?5522l");
 
 		// Disable mouse tracking (enabled only by fullscreen overlays; safe
