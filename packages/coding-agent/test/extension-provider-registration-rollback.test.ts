@@ -48,6 +48,64 @@ describe("extension provider registration rollback", () => {
 		expect(runtime.pendingProviderRegistrations).toEqual([]);
 	});
 
+	test("removes web-search provider registrations when extension initialization fails", async () => {
+		const runtime = new ExtensionRuntime();
+		const events = new EventBus();
+
+		await expect(
+			loadExtensionFromFactory(
+				pi => {
+					pi.registerSearchProvider({
+						id: "broken-search",
+						label: "Broken Search",
+						description: "Must be rolled back",
+						isAvailable: () => true,
+						search: () => Promise.resolve({ provider: "broken-search", sources: [] }),
+					});
+					throw new Error("intentional search initialization failure");
+				},
+				process.cwd(),
+				events,
+				runtime,
+				"broken-search-extension",
+			),
+		).rejects.toThrow("intentional search initialization failure");
+
+		expect(runtime.pendingSearchProviderRegistrations).toEqual([]);
+	});
+
+	test("replaces a queued web-search provider after unregistering it", async () => {
+		const runtime = new ExtensionRuntime();
+		const events = new EventBus();
+
+		await loadExtensionFromFactory(
+			pi => {
+				pi.registerSearchProvider({
+					id: "replaceable-search",
+					label: "Original Search",
+					description: "Original",
+					isAvailable: () => true,
+					search: () => Promise.resolve({ provider: "replaceable-search", sources: [] }),
+				});
+				pi.unregisterSearchProvider("replaceable-search");
+				pi.registerSearchProvider({
+					id: "replaceable-search",
+					label: "Replacement Search",
+					description: "Replacement",
+					isAvailable: () => true,
+					search: () => Promise.resolve({ provider: "replaceable-search", sources: [] }),
+				});
+			},
+			process.cwd(),
+			events,
+			runtime,
+			"replaceable-search-extension",
+		);
+
+		expect(runtime.pendingSearchProviderRegistrations).toHaveLength(1);
+		expect(runtime.pendingSearchProviderRegistrations[0]?.provider.label).toBe("Replacement Search");
+	});
+
 	test("replaces a queued provider after unregistering it", async () => {
 		const runtime = new ExtensionRuntime();
 		const events = new EventBus();

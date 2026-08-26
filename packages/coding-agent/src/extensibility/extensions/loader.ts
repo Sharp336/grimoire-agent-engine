@@ -42,6 +42,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 	ExtensionFactory,
+	ExtensionSearchProvider,
 	ExtensionRuntime as IExtensionRuntime,
 	LoadExtensionsResult,
 	MessageRenderer,
@@ -75,6 +76,7 @@ export class ExtensionRuntimeNotInitializedError extends Error {
 export class ExtensionRuntime implements IExtensionRuntime {
 	flagValues = new Map<string, boolean | string>();
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }> = [];
+	pendingSearchProviderRegistrations: Array<{ provider: ExtensionSearchProvider; sourceId: string }> = [];
 
 	registerProvider(name: string, config: ProviderConfig, sourceId: string): void {
 		this.pendingProviderRegistrations.push({ name, config, sourceId });
@@ -83,6 +85,27 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	unregisterProvider(name: string): void {
 		const remaining = this.pendingProviderRegistrations.filter(registration => registration.name !== name);
 		this.pendingProviderRegistrations.splice(0, this.pendingProviderRegistrations.length, ...remaining);
+	}
+
+	registerSearchProvider(provider: ExtensionSearchProvider, sourceId: string): void {
+		const existing = this.pendingSearchProviderRegistrations.find(
+			registration => registration.provider.id === provider.id,
+		);
+		if (existing && existing.sourceId !== sourceId) {
+			throw new Error(
+				`Web search provider "${provider.id}" is already registered by extension "${existing.sourceId}"`,
+			);
+		}
+		this.pendingSearchProviderRegistrations = this.pendingSearchProviderRegistrations.filter(
+			registration => registration.provider.id !== provider.id,
+		);
+		this.pendingSearchProviderRegistrations.push({ provider, sourceId });
+	}
+
+	unregisterSearchProvider(id: string, sourceId: string): void {
+		this.pendingSearchProviderRegistrations = this.pendingSearchProviderRegistrations.filter(
+			registration => registration.provider.id !== id || registration.sourceId !== sourceId,
+		);
 	}
 
 	sendMessage(): void {
@@ -162,6 +185,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		config: ProviderConfig;
 		sourceId: string;
 	}> = [];
+	readonly pendingSearchProviderRegistrations: Array<{ provider: ExtensionSearchProvider; sourceId: string }> = [];
 
 	constructor(
 		public readonly pi: typeof PiCodingAgent,
@@ -332,6 +356,14 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	unregisterProvider(name: string): void {
 		this.runtime.unregisterProvider(name, this.extension.path);
 	}
+
+	registerSearchProvider(provider: ExtensionSearchProvider): void {
+		this.runtime.registerSearchProvider(provider, this.extension.path);
+	}
+
+	unregisterSearchProvider(id: string): void {
+		this.runtime.unregisterSearchProvider(id, this.extension.path);
+	}
 }
 
 /**
@@ -366,6 +398,7 @@ async function runExtensionFactory(
 	runtime: IExtensionRuntime,
 ): Promise<void> {
 	const providerRegistrationCheckpoint = [...runtime.pendingProviderRegistrations];
+	const searchProviderRegistrationCheckpoint = [...runtime.pendingSearchProviderRegistrations];
 
 	try {
 		await factory(api);
@@ -374,6 +407,11 @@ async function runExtensionFactory(
 			0,
 			runtime.pendingProviderRegistrations.length,
 			...providerRegistrationCheckpoint,
+		);
+		runtime.pendingSearchProviderRegistrations.splice(
+			0,
+			runtime.pendingSearchProviderRegistrations.length,
+			...searchProviderRegistrationCheckpoint,
 		);
 		throw error;
 	}

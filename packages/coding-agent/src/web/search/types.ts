@@ -4,7 +4,7 @@
  * Unified types for web search responses across supported providers.
  */
 
-export const SEARCH_PROVIDER_OPTIONS = [
+const BUILTIN_SEARCH_PROVIDER_OPTIONS = [
 	{
 		value: "auto",
 		label: "Auto",
@@ -95,34 +95,116 @@ export const DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS = 60;
 /** Maximum configurable hard timeout for each web-search provider transport. */
 export const MAX_WEB_SEARCH_TIMEOUT_SECONDS = 300;
 
-/** Supported web search providers (every option except `auto`). */
-export type SearchProviderId = Exclude<(typeof SEARCH_PROVIDER_OPTIONS)[number]["value"], "auto">;
+export interface SearchProviderOption {
+	value: string;
+	label: string;
+	description: string;
+}
+
+/** Built-in provider IDs have compile-time coverage in the lazy provider registry. */
+export type BuiltInSearchProviderId = Exclude<(typeof BUILTIN_SEARCH_PROVIDER_OPTIONS)[number]["value"], "auto">;
+
+/** Provider IDs may also be contributed at runtime by extensions. */
+export type SearchProviderId = string;
+
+/** Settings/setup choices. Extension registrations append to this live array. */
+export const SEARCH_PROVIDER_OPTIONS: SearchProviderOption[] = BUILTIN_SEARCH_PROVIDER_OPTIONS.map(option => ({
+	...option,
+}));
 
 /**
- * Auto-resolution priority order. Derived from {@link SEARCH_PROVIDER_OPTIONS}
- * (minus `auto`) so the settings/setup dropdown and `resolveProviderChain()`
- * share one source of truth and never drift apart.
+ * Auto-resolution priority for built-ins. Extension providers append after
+ * these unless the user names them in `providers.webSearchOrder`.
  */
-export const SEARCH_PROVIDER_ORDER: readonly SearchProviderId[] = SEARCH_PROVIDER_OPTIONS.flatMap(option =>
-	option.value === "auto" ? [] : [option.value],
+export const SEARCH_PROVIDER_ORDER: readonly BuiltInSearchProviderId[] = BUILTIN_SEARCH_PROVIDER_OPTIONS.flatMap(
+	option => (option.value === "auto" ? [] : [option.value]),
 );
 
-/** Concrete provider choices (no `auto` sentinel) — for list-valued settings like order/exclude. */
-export const SEARCH_PROVIDER_CHOICES = SEARCH_PROVIDER_OPTIONS.filter(option => option.value !== "auto");
+/** Concrete provider choices (no `auto` sentinel) — kept live for the settings UI. */
+export const SEARCH_PROVIDER_CHOICES: SearchProviderOption[] = SEARCH_PROVIDER_OPTIONS.filter(
+	option => option.value !== "auto",
+);
 
-export const SEARCH_PROVIDER_PREFERENCES = ["auto", ...SEARCH_PROVIDER_ORDER] as const;
+export const SEARCH_PROVIDER_PREFERENCES: string[] = ["auto", ...SEARCH_PROVIDER_ORDER];
 
-/** Display labels, derived from {@link SEARCH_PROVIDER_OPTIONS}. */
+/** Display labels for built-in providers. */
 export const SEARCH_PROVIDER_LABELS = Object.fromEntries(
-	SEARCH_PROVIDER_OPTIONS.flatMap(option => (option.value === "auto" ? [] : [[option.value, option.label] as const])),
-) as Record<SearchProviderId, string>;
+	BUILTIN_SEARCH_PROVIDER_OPTIONS.flatMap(option =>
+		option.value === "auto" ? [] : [[option.value, option.label] as const],
+	),
+) as Record<BuiltInSearchProviderId, string>;
 
+const BUILTIN_SEARCH_PROVIDER_IDS = Object.fromEntries(SEARCH_PROVIDER_ORDER.map(id => [id, true] as const)) as Record<
+	BuiltInSearchProviderId,
+	true
+>;
+const SEARCH_PROVIDER_ID_PATTERN = /^[a-z0-9](?:[a-z0-9._-]{0,62}[a-z0-9])?$/;
+
+export function isBuiltInSearchProviderId(value: string): value is BuiltInSearchProviderId {
+	return Object.hasOwn(BUILTIN_SEARCH_PROVIDER_IDS, value);
+}
+
+/** Validate a built-in or extension provider ID. */
 export function isSearchProviderId(value: string): value is SearchProviderId {
-	return SEARCH_PROVIDER_ORDER.includes(value as SearchProviderId);
+	return value !== "auto" && value !== "none" && SEARCH_PROVIDER_ID_PATTERN.test(value);
 }
 
 export function isSearchProviderPreference(value: string): value is SearchProviderId | "auto" {
-	return SEARCH_PROVIDER_PREFERENCES.includes(value as SearchProviderId | "auto");
+	return value === "auto" || isSearchProviderId(value);
+}
+
+interface ExtensionSearchProviderOptionRef {
+	option: SearchProviderOption;
+	count: number;
+}
+
+const extensionSearchProviderOptions = new Map<string, ExtensionSearchProviderOptionRef>();
+
+/**
+ * Add one extension provider to live settings/setup choices. Registries retain
+ * independently; the choice disappears only after the final session releases it.
+ */
+export function retainSearchProviderOption(option: SearchProviderOption): () => void {
+	if (!isSearchProviderId(option.value)) {
+		throw new TypeError(`Invalid web search provider id: ${option.value}`);
+	}
+	if (isBuiltInSearchProviderId(option.value)) {
+		throw new Error(`Cannot replace built-in web search provider "${option.value}"`);
+	}
+	if (option.label.trim().length === 0) {
+		throw new TypeError(`Web search provider "${option.value}" must have a label`);
+	}
+
+	const existing = extensionSearchProviderOptions.get(option.value);
+	if (existing) {
+		if (existing.option.label !== option.label || existing.option.description !== option.description) {
+			throw new Error(`Conflicting metadata for web search provider "${option.value}"`);
+		}
+		existing.count++;
+	} else {
+		const retained = { ...option };
+		extensionSearchProviderOptions.set(option.value, { option: retained, count: 1 });
+		SEARCH_PROVIDER_OPTIONS.push(retained);
+		SEARCH_PROVIDER_CHOICES.push(retained);
+		SEARCH_PROVIDER_PREFERENCES.push(retained.value);
+	}
+
+	let released = false;
+	return () => {
+		if (released) return;
+		released = true;
+		const current = extensionSearchProviderOptions.get(option.value);
+		if (!current) return;
+		current.count--;
+		if (current.count > 0) return;
+		extensionSearchProviderOptions.delete(option.value);
+		const optionIndex = SEARCH_PROVIDER_OPTIONS.findIndex(candidate => candidate.value === option.value);
+		if (optionIndex >= 0) SEARCH_PROVIDER_OPTIONS.splice(optionIndex, 1);
+		const choiceIndex = SEARCH_PROVIDER_CHOICES.findIndex(candidate => candidate.value === option.value);
+		if (choiceIndex >= 0) SEARCH_PROVIDER_CHOICES.splice(choiceIndex, 1);
+		const preferenceIndex = SEARCH_PROVIDER_PREFERENCES.indexOf(option.value);
+		if (preferenceIndex >= 0) SEARCH_PROVIDER_PREFERENCES.splice(preferenceIndex, 1);
+	};
 }
 
 /** Source returned by search (all providers) */

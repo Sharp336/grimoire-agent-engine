@@ -1,8 +1,8 @@
 /**
  * Unified Web Search Tool
  *
- * Single tool supporting Anthropic, Perplexity, Exa, Brave, Jina, Kimi, Gemini, Codex, Tavily, Kagi, Z.AI, SearXNG, and Synthetic
- * providers with provider-specific parameters exposed conditionally.
+ * Single tool supporting a configurable, provider-backed search chain with
+ * provider-specific parameters exposed conditionally.
  */
 
 import { type } from "@oh-my-pi/omptype";
@@ -27,6 +27,7 @@ import {
 	resolveProviderCandidates,
 	type SearchProvider,
 	type SearchProviderCandidate,
+	type SearchProviderRegistry,
 } from "./provider";
 import { applyQueryConstraints, parseSearchQuery } from "./query";
 import { renderSearchCall, renderSearchResult, type SearchRenderDetails } from "./render";
@@ -132,6 +133,7 @@ interface ExecuteSearchOptions {
 	modelRegistry?: ModelRegistry;
 	sessionId?: string;
 	signal?: AbortSignal;
+	providerRegistry?: SearchProviderRegistry;
 }
 
 /** Execute web search */
@@ -140,7 +142,7 @@ async function executeSearch(
 	params: SearchQueryParams,
 	options: ExecuteSearchOptions,
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchRenderDetails }> {
-	const { authStorage, modelRegistry, sessionId, signal } = options;
+	const { authStorage, modelRegistry, providerRegistry, sessionId, signal } = options;
 	const explicitProvider = params.provider;
 	let candidates: SearchProviderCandidate[];
 	if (explicitProvider && explicitProvider !== "auto") {
@@ -148,7 +150,7 @@ async function executeSearch(
 	} else {
 		// `--provider auto` and the default both walk the configured chain;
 		// exclusions still apply.
-		candidates = resolveProviderCandidates();
+		candidates = resolveProviderCandidates(undefined, providerRegistry);
 	}
 
 	const parsedQuery = parseSearchQuery(params.query);
@@ -185,10 +187,10 @@ async function executeSearch(
 	let lastProvider: Pick<SearchProvider, "id" | "label"> | undefined;
 	for (const candidate of candidates) {
 		let provider: SearchProvider | undefined;
-		const providerMeta = { id: candidate.id, label: getSearchProviderLabel(candidate.id) };
+		const providerMeta = { id: candidate.id, label: getSearchProviderLabel(candidate.id, providerRegistry) };
 		lastProvider = providerMeta;
 		try {
-			provider = await getSearchProvider(candidate.id);
+			provider = await getSearchProvider(candidate.id, providerRegistry);
 			const available = candidate.explicit
 				? await provider.isExplicitlyAvailable(authStorage)
 				: await provider.isAvailable(authStorage);
@@ -290,7 +292,13 @@ async function executeSearch(
  */
 export async function runSearchQuery(
 	params: SearchQueryParams,
-	options: { authStorage?: AuthStorage; modelRegistry?: ModelRegistry; sessionId?: string; signal?: AbortSignal } = {},
+	options: {
+		authStorage?: AuthStorage;
+		modelRegistry?: ModelRegistry;
+		providerRegistry?: SearchProviderRegistry;
+		sessionId?: string;
+		signal?: AbortSignal;
+	} = {},
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: SearchRenderDetails }> {
 	const createdAuthStorage = options.authStorage || options.modelRegistry ? undefined : await discoverAuthStorage();
 	const authStorage = options.authStorage ?? options.modelRegistry?.authStorage ?? createdAuthStorage;
@@ -302,6 +310,7 @@ export async function runSearchQuery(
 		return await executeSearch("cli-web-search", params, {
 			authStorage,
 			modelRegistry,
+			providerRegistry: options.providerRegistry,
 			sessionId: options.sessionId,
 			signal: options.signal,
 		});
@@ -344,50 +353,61 @@ export class WebSearchTool implements AgentTool<typeof webSearchSchema, SearchRe
 		return executeSearch(_toolCallId, params, {
 			authStorage,
 			modelRegistry: this.#session.modelRegistry,
+			providerRegistry: this.#session.searchProviderRegistry,
 			sessionId,
 			signal,
 		});
 	}
 }
 
-/** Web search tool as CustomTool (for TUI rendering support) */
-export const webSearchCustomTool: CustomTool<typeof webSearchSchema, SearchRenderDetails> = {
-	name: "web_search",
-	label: "Web Search",
-	description: prompt.render(webSearchDescription),
-	parameters: webSearchSchema,
-
-	approval: "read",
-	async execute(
-		toolCallId: string,
-		params: SearchToolParams,
-		_onUpdate,
-		ctx: CustomToolContext,
-		signal?: AbortSignal,
-	) {
-		const authStorage = ctx.modelRegistry?.authStorage ?? (await discoverAuthStorage());
-		const sessionId = ctx.sessionManager.getSessionId();
-		return executeSearch(toolCallId, params, {
-			authStorage,
-			modelRegistry: ctx.modelRegistry,
-			sessionId,
-			signal,
-		});
-	},
-
-	renderCall(args: SearchToolParams, options: RenderResultOptions, theme: Theme) {
-		return renderSearchCall(args, options, theme);
-	},
-
-	renderResult(result, options: RenderResultOptions, theme: Theme, args) {
-		return renderSearchResult(result, options, theme, args);
-	},
-};
-
-export function getSearchTools(): CustomTool<any, any>[] {
-	return [webSearchCustomTool];
+/** Build web_search as a CustomTool for SDK callers, with an optional extension-provider overlay. */
+function createWebSearchCustomTool(
+	providerRegistry?: SearchProviderRegistry,
+): CustomTool<typeof webSearchSchema, SearchRenderDetails> {
+	return {
+		name: "web_search",
+		label: "Web Search",
+		description: prompt.render(webSearchDescription),
+		parameters: webSearchSchema,
+		approval: "read",
+		async execute(
+			toolCallId: string,
+			params: SearchToolParams,
+			_onUpdate,
+			ctx: CustomToolContext,
+			signal?: AbortSignal,
+		) {
+			const authStorage = ctx.modelRegistry?.authStorage ?? (await discoverAuthStorage());
+			const sessionId = ctx.sessionManager.getSessionId();
+			return executeSearch(toolCallId, params, {
+				authStorage,
+				modelRegistry: ctx.modelRegistry,
+				providerRegistry,
+				sessionId,
+				signal,
+			});
+		},
+		renderCall(args: SearchToolParams, options: RenderResultOptions, theme: Theme) {
+			return renderSearchCall(args, options, theme);
+		},
+		renderResult(result, options: RenderResultOptions, theme: Theme, args) {
+			return renderSearchResult(result, options, theme, args);
+		},
+	};
 }
 
-export { getSearchProvider, setExcludedSearchProviders, setSearchProviderOrder } from "./provider";
-export type { SearchProviderId as SearchProvider, SearchResponse } from "./types";
-export { isSearchProviderId, isSearchProviderPreference } from "./types";
+export const webSearchCustomTool = createWebSearchCustomTool();
+
+export function getSearchTools(providerRegistry?: SearchProviderRegistry): CustomTool<any, any>[] {
+	return [createWebSearchCustomTool(providerRegistry)];
+}
+
+export type { ExtensionSearchProvider, SearchParams } from "./provider";
+export {
+	getSearchProvider,
+	SearchProviderRegistry,
+	setExcludedSearchProviders,
+	setSearchProviderOrder,
+} from "./provider";
+export type { SearchProviderId as SearchProvider, SearchResponse, SearchSource } from "./types";
+export { isSearchProviderId, isSearchProviderPreference, SearchProviderError } from "./types";

@@ -5,9 +5,6 @@
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { searchHelp as commandHelp } from "../cli/command-help";
 import { runSearchCommand, type SearchCommandArgs } from "../cli/web-search-cli";
-import { SEARCH_PROVIDER_ORDER } from "../web/search/provider";
-
-const PROVIDERS: Array<string> = ["auto", ...SEARCH_PROVIDER_ORDER];
 
 const RECENCY: NonNullable<SearchCommandArgs["recency"]>[] = ["day", "week", "month", "year"];
 
@@ -20,7 +17,7 @@ export default class Search extends Command {
 	};
 
 	static flags = {
-		provider: Flags.string({ description: "Search provider", options: PROVIDERS }),
+		provider: Flags.string({ description: "Search provider (built-in or extension ID)" }),
 		recency: Flags.string({ description: "Recency filter", options: RECENCY }),
 		limit: Flags.integer({ char: "l", description: "Max results to return" }),
 		compact: Flags.boolean({ description: "Render condensed output" }),

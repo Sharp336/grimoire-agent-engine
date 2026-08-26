@@ -20,6 +20,7 @@ import { type Theme, theme } from "../../modes/theme/theme";
 import type { AsyncJobSnapshot } from "../../session/agent-session";
 import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
+import { SearchProviderRegistry } from "../../web/search/provider";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
 import { ManagedTimers } from "./managed-timers";
 import { createExtensionModelQuery } from "./model-api";
@@ -607,6 +608,7 @@ export class ExtensionRunner {
 		private readonly settings?: Settings,
 		private readonly localProtocolOptions?: LocalProtocolOptions,
 		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
+		private readonly searchProviderRegistry: SearchProviderRegistry = new SearchProviderRegistry(),
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
@@ -674,6 +676,12 @@ export class ExtensionRunner {
 		};
 		this.runtime.unregisterProvider = name => {
 			this.modelRegistry.unregisterProvider(name);
+		};
+		this.runtime.registerSearchProvider = (provider, sourceId) => {
+			this.searchProviderRegistry.register(provider, sourceId);
+		};
+		this.runtime.unregisterSearchProvider = (id, sourceId) => {
+			this.searchProviderRegistry.unregister(id, sourceId);
 		};
 
 		// Context actions (required)

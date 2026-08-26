@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `pi.registerSearchProvider()` / `pi.unregisterSearchProvider()` so extensions can add session-scoped providers to the built-in `web_search` tool, including live settings choices, configured order/exclusion support, and `omp search --provider <extension-id>`.
+
 ## [18.0.7] - 2026-08-26
 
 ### Added

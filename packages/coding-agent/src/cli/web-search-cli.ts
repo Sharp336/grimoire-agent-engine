@@ -9,10 +9,12 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import { Settings } from "../config/settings";
 import { initTheme, theme } from "../modes/theme/theme";
+import { loadSessionExtensions } from "../sdk";
+import { EventBus } from "../utils/event-bus";
 import { runSearchQuery, type SearchQueryParams } from "../web/search/index";
-import { SEARCH_PROVIDER_ORDER } from "../web/search/provider";
+import { SEARCH_PROVIDER_ORDER, SearchProviderRegistry } from "../web/search/provider";
 import { renderSearchResult } from "../web/search/render";
-import type { SearchProviderId } from "../web/search/types";
+import { isSearchProviderId, type SearchProviderId } from "../web/search/types";
 
 export interface SearchCommandArgs {
 	query: string;
@@ -22,7 +24,7 @@ export interface SearchCommandArgs {
 	expanded: boolean;
 }
 
-const PROVIDERS: Array<SearchProviderId | "auto"> = ["auto", ...SEARCH_PROVIDER_ORDER];
+const BUILTIN_PROVIDERS: Array<SearchProviderId | "auto"> = ["auto", ...SEARCH_PROVIDER_ORDER];
 
 const RECENCY_OPTIONS: SearchCommandArgs["recency"][] = ["day", "week", "month", "year"];
 
@@ -70,9 +72,11 @@ export async function runSearchCommand(cmd: SearchCommandArgs): Promise<void> {
 		process.exit(1);
 	}
 
-	if (cmd.provider && !PROVIDERS.includes(cmd.provider)) {
-		process.stderr.write(`${chalk.red(`Error: Unknown provider "${cmd.provider}"`)}\n`);
-		process.stderr.write(`${chalk.dim(`Valid providers: ${PROVIDERS.join(", ")}`)}\n`);
+	if (cmd.provider && cmd.provider !== "auto" && !isSearchProviderId(cmd.provider)) {
+		process.stderr.write(`${chalk.red(`Error: Invalid provider ID "${cmd.provider}"`)}\n`);
+		process.stderr.write(
+			`${chalk.dim("Use lowercase letters, digits, '.', '_', or '-' (maximum 64 characters).")}\n`,
+		);
 		process.exit(1);
 	}
 
@@ -87,29 +91,34 @@ export async function runSearchCommand(cmd: SearchCommandArgs): Promise<void> {
 		process.exit(1);
 	}
 
-	const settings = await Settings.init({ cwd: getProjectDir() });
+	const cwd = getProjectDir();
+	const settings = await Settings.init({ cwd });
 	applyProviderGlobalsFromSettings(settings);
+	const providerRegistry = new SearchProviderRegistry();
+	try {
+		const extensionsResult = await loadSessionExtensions({}, cwd, settings, new EventBus());
+		for (const { provider, sourceId } of extensionsResult.runtime.pendingSearchProviderRegistrations) {
+			providerRegistry.register(provider, sourceId);
+		}
+		extensionsResult.runtime.pendingSearchProviderRegistrations = [];
 
-	await initTheme();
-
-	const params: SearchQueryParams = {
-		query: cmd.query,
-		provider: cmd.provider,
-		recency: cmd.recency,
-		limit: cmd.limit,
-	};
-
-	const result = await runSearchQuery(params);
-	const component = renderSearchResult(result, { expanded: cmd.expanded, isPartial: false }, theme, {
-		query: cmd.query,
-		maxAnswerLines: cmd.expanded ? undefined : 6,
-	});
-
-	const width = Math.max(60, process.stdout.columns ?? 100);
-	process.stdout.write(`${component.render(width).join("\n")}\n`);
-
-	if (result.details?.error) {
-		process.exitCode = 1;
+		await initTheme();
+		const params: SearchQueryParams = {
+			query: cmd.query,
+			provider: cmd.provider,
+			recency: cmd.recency,
+			limit: cmd.limit,
+		};
+		const result = await runSearchQuery(params, { providerRegistry });
+		const component = renderSearchResult(result, { expanded: cmd.expanded, isPartial: false }, theme, {
+			query: cmd.query,
+			maxAnswerLines: cmd.expanded ? undefined : 6,
+		});
+		const width = Math.max(60, process.stdout.columns ?? 100);
+		process.stdout.write(`${component.render(width).join("\n")}\n`);
+		if (result.details?.error) process.exitCode = 1;
+	} finally {
+		providerRegistry.dispose();
 	}
 }
 
@@ -124,7 +133,7 @@ ${chalk.bold("Arguments:")}
   query      Search query text
 
 ${chalk.bold("Options:")}
-  --provider <name>   Provider: ${PROVIDERS.join(", ")}
+  --provider <name>   Built-ins: ${BUILTIN_PROVIDERS.join(", ")}; extension IDs are also accepted
   --recency <value>   Recency filter (when supported): ${RECENCY_OPTIONS.join(", ")}
   -l, --limit <n>     Max results to return
   --compact           Render condensed output

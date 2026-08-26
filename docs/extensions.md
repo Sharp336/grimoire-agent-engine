@@ -123,7 +123,8 @@ Core methods:
 - `getSessionName`, `setSessionName`
 - `setModel`, `getThinkingLevel`, `setThinkingLevel`
 - `getServiceTiers`, `setServiceTier`
-- `registerProvider`
+- `registerProvider`, `unregisterProvider`
+- `registerSearchProvider`, `unregisterSearchProvider`
 - `registerFileWriteFallback`, `registerFileDeleteFallback`
 - `events` (shared event bus)
 
@@ -170,6 +171,48 @@ An extension usage provider overrides a built-in provider with the same name for
 long as that extension registration is active. `pi.unregisterProvider(name)` (and
 extension source cleanup) removes only that runtime override, restoring the built-in
 or configured usage resolver.
+
+### Web-search provider registration
+
+`pi.registerSearchProvider(provider)` adds a session-scoped source to the built-in
+`web_search` tool instead of registering a second model-callable tool. The provider
+receives the same `SearchParams` contract as built-in adapters: parsed Google-style
+query constraints, `AuthStorage`, `AbortSignal`, per-provider timeout, result limits,
+and the session/model context. Return the unified `SearchResponse` shape.
+
+```ts
+pi.registerSearchProvider({
+  id: "docs-search",
+  label: "Docs Search",
+  description: "Searches the internal documentation index",
+  isAvailable(authStorage) {
+    return authStorage.hasResolvableAuth("docs-search");
+  },
+  async search(params) {
+    const response = await (params.fetch ?? fetch)("https://search.example.com", {
+      method: "POST",
+      body: JSON.stringify({ query: params.query, limit: params.numSearchResults ?? params.limit }),
+      signal: params.signal,
+    });
+    const payload = (await response.json()) as {
+      results: Array<{ title: string; url: string; snippet?: string }>;
+    };
+    return {
+      provider: "docs-search",
+      sources: payload.results,
+    };
+  },
+});
+```
+
+IDs use lowercase letters, digits, `.`, `_`, and `-` (maximum 64 characters).
+An extension cannot replace a built-in search provider ID. Registered IDs appear in
+the live settings choices and work in `providers.webSearchOrder` /
+`providers.webSearchExclude`; configured extension IDs are preserved when settings
+load before the extension. Unlisted extension providers follow the built-in chain.
+`pi.unregisterSearchProvider(id)` removes only the calling extension's registration.
+Session teardown releases any remaining registrations and removes the dynamic choice
+after the final concurrent session closes.
 
 In interactive mode, `input` handlers run before the built-in first-message auto-title check. Extensions that call `await pi.setSessionName(...)` from `input` can set the persisted session name and prevent the default auto-generated title from running for that session.
 
