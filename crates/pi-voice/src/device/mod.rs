@@ -87,6 +87,23 @@ impl PlaybackDevice {
 	}
 }
 
+/// Periods of audio a backend may hold queued OS-side for a playback stream
+/// opened with this config, before a fill callback observing no new data
+/// can be trusted as genuine drain rather than an in-flight refill. Fixed
+/// at three for backends with a hardware/API-enforced queue depth
+/// (`CoreAudio` `AudioQueue` buffer count, WASAPI padding cap); `PulseAudio`
+/// scales this with the widened remote/`PULSE_LATENCY_MSEC` backlog before
+/// the stream even opens (see `linux::playback_drain_periods`).
+#[cfg(target_os = "linux")]
+pub fn playback_drain_periods(config: DeviceConfig) -> u32 {
+	imp::playback_drain_periods(config)
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn playback_drain_periods(_config: DeviceConfig) -> u32 {
+	3
+}
+
 /// Running default-microphone capture stream driven by a sink callback.
 pub struct CaptureDevice {
 	inner: imp::CaptureDevice,
