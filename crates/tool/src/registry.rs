@@ -3,7 +3,7 @@
 use std::{
 	collections::{BTreeMap, BTreeSet},
 	future::Future,
-	iter,
+	iter::{self, FusedIterator},
 	mem::size_of,
 	pin::Pin,
 	slice,
@@ -1034,6 +1034,9 @@ pub enum RegistryError {
 	/// Tool name is not registered.
 	#[error("unknown tool: {0}")]
 	UnknownTool(Str),
+	/// Roster unlisting named a tool with no live claim.
+	#[error("cannot unlist unknown tool from roster: {0}")]
+	UnlistUnknown(Str),
 	/// Two distinct claimants declared the same precedence for one name.
 	#[error("tool precedence tie for {name}: {first} and {second}")]
 	PrecedenceTie {
@@ -1379,6 +1382,7 @@ struct RegistryEntry {
 pub struct Registry {
 	versions:         BTreeMap<Str, BTreeMap<Rev, RegistryEntry>>,
 	live:             BTreeMap<Str, Claim>,
+	unlisted:         BTreeSet<Str>,
 	protected_core:   BTreeSet<Str>,
 	unmounted:        RwLock<BTreeMap<Str, Option<Str>>>,
 	arg_specs:        ArgSpecRegistry,
@@ -1407,9 +1411,32 @@ impl Registry {
 			.extend(names.into_iter().map(Into::into));
 	}
 
+	/// Reserves every currently-live claim name as a protected core claim.
+	pub fn protect_live_claims(&mut self) {
+		self.protected_core.extend(self.live.keys().cloned());
+	}
+
+	/// Omits one live claim from the user-facing roster while leaving its
+	/// model-facing presentation intact.
+	///
+	/// Returns [`RegistryError::UnlistUnknown`] if `name` has no live claim.
+	pub fn unlist_from_roster(&mut self, name: &str) -> Result<(), RegistryError> {
+		if !self.live.contains_key(name) {
+			return Err(RegistryError::UnlistUnknown(Str::new(name)));
+		}
+		self.unlisted.insert(Str::new(name));
+		Ok(())
+	}
+
 	/// Iterates the policy-resolved tool roster in stable name order.
-	pub fn roster(&self) -> impl Iterator<Item = (&Str, Presentation)> + '_ {
+	pub fn roster(
+		&self,
+	) -> impl Iterator<Item = (&Str, Presentation)> + Clone + DoubleEndedIterator + FusedIterator + '_
+	{
 		self.live.iter().filter_map(|(name, claim)| {
+			if self.unlisted.contains(name) {
+				return None;
+			}
 			self
 				.versions
 				.get(name)?
