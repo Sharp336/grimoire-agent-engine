@@ -121,7 +121,9 @@ const hubSchema = type({
 	"grep?": type("string > 0").describe("logs: regex filter"),
 	"follow?": type("boolean").describe("logs: wait for output newer than cursor"),
 	"cursor?": type("number >= 0").describe("logs: output cursor returned by an earlier call"),
-	"for?": type("'ready' | 'exit'").describe("wait with name: lifecycle condition; default exit"),
+	"for?": type("'ready' | 'exit'").describe(
+		"wait with name: lifecycle condition; omitted = auto: already-ready returns immediately, a ready-less one-shot waits for exit, otherwise waits for readiness or exit",
+	),
 	"pattern?": type("string > 0").describe("wait with name: output regex; takes precedence over for"),
 	"text?": type("string > 0").describe("send with name: stdin text"),
 	"enter?": type("boolean").describe("send with name: append Enter after text; default true"),

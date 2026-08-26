@@ -1,6 +1,9 @@
 # Changelog
 
-## [Unreleased]
+
+### Fixed
+
+- Fixed `hub wait` schema text falsely advertising a default exit wait: the model-facing description of an omitted `for` now states the auto condition (an already-ready daemon returns immediately; a ready-less one-shot waits for exit), with a test pinning the exact text.
 
 ## [18.0.5] - 2026-08-25
 

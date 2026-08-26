@@ -2,13 +2,16 @@
  * Hub-level process wait binding: `executeLaunch` must send the daemon id and
  * owner to the broker, must NOT default an omitted `for` to `exit`, and must
  * turn classified broker refusals into immediate isError results instead of
- * letting a rejection surface as a framework error.
+ * letting a rejection surface as a framework error. The model-facing schema
+ * text must describe the same auto condition — never a false default exit.
  */
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import type { DaemonBrokerClient } from "../../../src/launch/client";
 import * as daemonClient from "../../../src/launch/client";
 import { type DaemonOperation, type DaemonRpcResult, encodeDaemonWaitReject } from "../../../src/launch/protocol";
 import type { ToolSession } from "../../../src/tools";
+import { HubTool } from "../../../src/tools/hub";
 import { executeLaunch } from "../../../src/tools/hub/launch";
 
 const OWNER = "session-owner";
@@ -160,5 +163,20 @@ describe("hub process wait binding", () => {
 			expect(text).toBe(refusal.message);
 			expect(result.details?.op).toBe("wait");
 		}
+	});
+
+	it("pins the model-facing `for` schema text to auto semantics, never a false default exit", () => {
+		const wire = toolWireSchema(new HubTool(makeSession())) as {
+			properties?: { for?: { description?: string } };
+		};
+		// This description is the exact text the model sees in the tool schema:
+		// an omitted `for` is auto (already-ready returns immediately, a
+		// ready-less one-shot waits for exit), never a default exit wait.
+		expect(wire.properties?.for?.description).toBe(
+			"wait with name: lifecycle condition; omitted = auto: already-ready returns immediately, a ready-less one-shot waits for exit, otherwise waits for readiness or exit",
+		);
+		// The explicit values survive alongside the auto description.
+		expect(JSON.stringify(wire.properties?.for)).toContain('"exit"');
+		expect(JSON.stringify(wire.properties?.for)).toContain('"ready"');
 	});
 });
