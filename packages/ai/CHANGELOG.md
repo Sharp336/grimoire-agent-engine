@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.0.6] - 2026-08-26
+
 ### Added
 
 - Added the `backgroundIdleMs` option to customize how long background auth-broker activity remains active before automatically parking.

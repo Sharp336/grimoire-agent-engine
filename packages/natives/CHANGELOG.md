@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.0.6] - 2026-08-26
+
 ### Fixed
 
 - Improved TypeScript and TSX syntax highlighting, including correct handling of type annotations and template literals.

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.0.6] - 2026-08-26
+
 ### Added
 
 - Added fast, cached conventional commit message generation to the git TUI and `omp commit --legacy`, including automatic handling of whitespace-only changes, clearer commit scopes, and improved grammar and tense in generated summaries.

@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.0.6] - 2026-08-26
+
 ### Added
 
 - Added `Markdown.getLastRenderStableText()` to expose the stable prefix of streamed Markdown text for append-only transcript publication.
