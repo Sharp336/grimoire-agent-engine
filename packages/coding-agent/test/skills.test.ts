@@ -869,6 +869,16 @@ export default function (pi) {
 				path.join(collidingDir, "SKILL.md"),
 				"---\nname: shared-skill\ndescription: Discovered version — must lose to the inherited one.\n---\n\nbody\n",
 			);
+			// A skill explicitly disabled by the user (`disabledExtensions:
+			// ["skill:disabled-skill"]` below): the merge must honor that gate
+			// the same way the full-rescan `loadSkills` path does, not just
+			// ignoredSkills/includeSkills.
+			const disabledDir = path.join(tempDir, "disabled-skill");
+			await fs.mkdir(disabledDir, { recursive: true });
+			await fs.writeFile(
+				path.join(disabledDir, "SKILL.md"),
+				"---\nname: disabled-skill\ndescription: Disabled by the user — must never enter the child snapshot.\n---\n\nbody\n",
+			);
 
 			const extensionsDir = path.join(tempDir, "ext");
 			await fs.mkdir(extensionsDir, { recursive: true });
@@ -916,7 +926,10 @@ export default function (pi) {
 			session = new AgentSession({
 				agent,
 				sessionManager,
-				settings: Settings.isolated({ "compaction.enabled": false }),
+				settings: Settings.isolated({
+					"compaction.enabled": false,
+					disabledExtensions: ["skill:disabled-skill"],
+				}),
 				modelRegistry,
 				extensionRunner,
 				skills: [inheritedSkill],
@@ -939,6 +952,8 @@ export default function (pi) {
 			const shared = session.skills.find(skill => skill.name === "shared-skill");
 			expect(shared?.description).toBe("Inherited from the parent session — must win on collision.");
 			expect(session.skills.filter(skill => skill.name === "shared-skill")).toHaveLength(1);
+			// A skill the user disabled cannot re-enter through this merge path.
+			expect(session.skills.some(skill => skill.name === "disabled-skill")).toBe(false);
 		} finally {
 			await session?.dispose();
 			authStorage.close();

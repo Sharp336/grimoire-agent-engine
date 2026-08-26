@@ -1270,13 +1270,23 @@ export class SessionTools {
 	 * Scans extension-contributed directories and appends non-colliding
 	 * skills to an already-fixed snapshot (a subagent's inherited baseline)
 	 * instead of discarding it for a full rescan. A name already present in
-	 * the snapshot wins — it was already curated by the parent. Returns
-	 * whether any skill was actually added.
+	 * the snapshot wins — it was already curated by the parent. Honors the
+	 * same disablement gates as the full-rescan path
+	 * ({@link SessionTools.#applyDiscoveredSkills} → `loadSkills`): the
+	 * master `skills.enabled` flag and `disabledExtensions` entries of the
+	 * form `skill:<name>`, so a skill the user disabled cannot re-enter
+	 * through this merge. Returns whether any skill was actually added.
 	 */
 	async #mergeDiscoveredSkillDirectories(extensionDirectories: string[]): Promise<boolean> {
 		const skillsSettings = this.#skillsSettings ?? this.#host.settings.getGroup("skills");
+		if (skillsSettings.enabled === false) return false;
 		const ignoredSkills = skillsSettings.ignoredSkills ?? [];
 		const includeSkills = skillsSettings.includeSkills ?? [];
+		const disabledSkillNames = new Set(
+			(this.#host.settings.get("disabledExtensions") ?? [])
+				.filter(id => id.startsWith("skill:"))
+				.map(id => id.slice(6)),
+		);
 		const matchesIncludePatterns = (name: string): boolean =>
 			includeSkills.length === 0 || includeSkills.some(pattern => new Bun.Glob(pattern).match(name));
 		const matchesIgnorePatterns = (name: string): boolean =>
@@ -1288,6 +1298,7 @@ export class SessionTools {
 			const { skills } = await loadSkillsFromDir({ dir: expandTilde(dir), source: "extension:user" });
 			for (const skill of skills) {
 				if (existingNames.has(skill.name)) continue;
+				if (disabledSkillNames.has(skill.name)) continue;
 				if (matchesIgnorePatterns(skill.name)) continue;
 				if (!matchesIncludePatterns(skill.name)) continue;
 				existingNames.add(skill.name);
