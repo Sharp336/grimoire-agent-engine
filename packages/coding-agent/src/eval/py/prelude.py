@@ -679,3 +679,54 @@ if "__omp_prelude_loaded__" not in globals():
                 return "<budget unavailable>"
 
     budget = _Budget()
+
+    def llm_query(snippet, instructions=None, *, model="default"):
+        """Sub-LLM completion. `instructions` prefixes `snippet` when given."""
+        prompt = f"{instructions}\n\n{snippet}" if instructions is not None else snippet
+        return completion(prompt, model=model)
+
+    def llm_query_batched(prompts, *, model="default"):
+        """Parallel sub-LLM completions, preserving input order."""
+        return parallel([lambda p=p: llm_query(p, model=model) for p in prompts])
+
+    def rlm_query(prompt, *, model=None, agent="task"):
+        """Recursive subagent via agent(); returns its text output. `model` is accepted for signature parity (agent() has no model tier). `agent` is resolved through globals() so the `agent` parameter does not shadow the module-level agent() helper."""
+        return globals()["agent"](prompt, agent=agent)
+
+    def rlm_query_batched(prompts, *, model=None, agent="task"):
+        """Parallel recursive subagents, preserving input order."""
+        return parallel([lambda p=p: rlm_query(p, agent=agent) for p in prompts])
+
+    def chunk(text, *, by="lines", size=100):
+        """Split `text` into chunks of `size` lines or whitespace tokens."""
+        if by not in ("lines", "tokens"):
+            raise ValueError(f"chunk by must be 'lines' or 'tokens', got {by!r}")
+        if not isinstance(size, int) or size <= 0:
+            raise ValueError("chunk size must be a positive integer")
+        if by == "lines":
+            lines = text.splitlines()
+            return ["\n".join(lines[i : i + size]) for i in range(0, len(lines), size)]
+        tokens = text.split()
+        return [" ".join(tokens[i : i + size]) for i in range(0, len(tokens), size)]
+
+    def search(text, pattern, flags=0):
+        """Return 'L<lineno>: <line>' for each line matching the regex `pattern`."""
+        rx = re.compile(pattern, flags)
+        return [f"L{n}: {line.rstrip()}" for n, line in enumerate(text.splitlines(), 1) if rx.search(line)]
+
+    def metadata(text):
+        """Shape stats for a str or a list of strings."""
+        if isinstance(text, str):
+            return {
+                "type": "str",
+                "chars": len(text),
+                "lines": len(text.splitlines()),
+                "words": len(text.split()),
+                "approx_tokens": len(text) // 4,
+            }
+        return {
+            "type": "list",
+            "items": len(text),
+            "chars": sum(len(s) for s in text),
+            "approx_tokens": sum(len(s) for s in text) // 4,
+        }

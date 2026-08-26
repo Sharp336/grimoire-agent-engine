@@ -206,6 +206,80 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		hard: async () => Boolean((await __budgetSnap()).hard),
 	};
 
+	const __splitlines = text => {
+		const lines = String(text).split(/\r\n|\r|\n/);
+		if (lines.length > 0 && lines.at(-1) === "") lines.pop();
+		return lines;
+	};
+
+	const llm_query = async (snippet, opts, ...rest) => {
+		const o = optionsArg("llm_query", opts, rest, ["instructions", "model"], "{ instructions, model }");
+		const prompt = o.instructions != null ? `${o.instructions}\n\n${snippet}` : snippet;
+		return completion(prompt, { model: o.model ?? "default" });
+	};
+
+	const llm_query_batched = async (prompts, opts, ...rest) => {
+		const o = optionsArg("llm_query_batched", opts, rest, ["model"], "{ model }");
+		const model = o.model ?? "default";
+		return parallel(Array.from(prompts ?? []).map(p => async () => llm_query(p, { model })));
+	};
+
+	const rlm_query = async (prompt, opts, ...rest) => {
+		const o = optionsArg("rlm_query", opts, rest, ["agent"], "{ agent, model }");
+		return agent(prompt, { agent: o.agent ?? "task" });
+	};
+
+	const rlm_query_batched = async (prompts, opts, ...rest) => {
+		const o = optionsArg("rlm_query_batched", opts, rest, ["agent"], "{ agent, model }");
+		const agentId = o.agent ?? "task";
+		return parallel(Array.from(prompts ?? []).map(p => async () => rlm_query(p, { agent: agentId })));
+	};
+
+	const chunk = (text, opts, ...rest) => {
+		const o = optionsArg("chunk", opts, rest, ["by", "size"], "{ by, size }");
+		const by = o.by ?? "lines";
+		if (by !== "lines" && by !== "tokens") {
+			throw new Error(`chunk() by must be "lines" or "tokens", got ${JSON.stringify(by)}`);
+		}
+		const size = o.size ?? 100;
+		if (!Number.isInteger(size) || size <= 0) throw new Error("chunk() size must be a positive integer");
+		if (by === "tokens") {
+			const tokens = String(text).split(/\s+/).filter(Boolean);
+			const chunks = [];
+			for (let i = 0; i < tokens.length; i += size) chunks.push(tokens.slice(i, i + size).join(" "));
+			return chunks;
+		}
+		const lines = __splitlines(text);
+		const chunks = [];
+		for (let i = 0; i < lines.length; i += size) chunks.push(lines.slice(i, i + size).join("\n"));
+		return chunks;
+	};
+
+	const search = (text, pattern, flags) => {
+		const rx = new RegExp(pattern, typeof flags === "string" ? flags : "");
+		const out = [];
+		for (const [index, line] of __splitlines(text).entries()) {
+			if (rx.test(line)) out.push(`L${index + 1}: ${line.replace(/\s+$/, "")}`);
+		}
+		return out;
+	};
+
+	const metadata = text => {
+		if (typeof text === "string") {
+			return {
+				type: "str",
+				chars: text.length,
+				lines: __splitlines(text).length,
+				words: text.split(/\s+/).filter(Boolean).length,
+				approx_tokens: Math.floor(text.length / 4),
+			};
+		}
+		const items = Array.from(text ?? []);
+		let chars = 0;
+		for (const s of items) chars += String(s).length;
+		return { type: "list", items: items.length, chars, approx_tokens: Math.floor(chars / 4) };
+	};
+
 	const display = value => {
 		globalThis.__omp_display__(value);
 	};
@@ -287,6 +361,13 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 	globalThis.log = log;
 	globalThis.phase = phase;
 	globalThis.budget = budget;
+	globalThis.llm_query = llm_query;
+	globalThis.llm_query_batched = llm_query_batched;
+	globalThis.rlm_query = rlm_query;
+	globalThis.rlm_query_batched = rlm_query_batched;
+	globalThis.chunk = chunk;
+	globalThis.search = search;
+	globalThis.metadata = metadata;
 	globalThis.__pool = __pool;
 	globalThis.read = read;
 	globalThis.write = write;
