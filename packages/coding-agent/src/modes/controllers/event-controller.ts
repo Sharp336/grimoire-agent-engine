@@ -1774,7 +1774,9 @@ export class EventController {
 			this.ctx.flushPendingCommandOutput();
 			return;
 		}
-		setTerminalTitleState("idle");
+		// A finished turn whose result the user hasn't read yet: yellow tab until
+		// the next agent_start repaints to working.
+		setTerminalTitleState("notify");
 
 		await this.#finishAgentEnd(event);
 	}

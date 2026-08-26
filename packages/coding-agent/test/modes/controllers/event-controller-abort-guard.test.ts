@@ -423,13 +423,13 @@ describe("EventController — terminal title across a non-terminal agent_end", (
 		expect(flushPendingModelSwitch).toHaveBeenCalledTimes(1);
 	});
 
-	it("transitions to idle and tears down on the terminal agent_end", async () => {
+	it("transitions to notify and tears down on the terminal agent_end", async () => {
 		const stateSpy = vi.spyOn(titleGenerator, "setTerminalTitleState").mockImplementation(() => {});
 		const ctx = makeTurnEndContext();
 		const markActivityEnd = vi.spyOn(ctx.statusLine, "markActivityEnd");
 		const controller = new EventController(ctx);
 		await controller.handleEvent(makeAgentEndEvent([makeAssistantMessage("stop")]));
-		expect(stateSpy).toHaveBeenCalledWith("idle");
+		expect(stateSpy).toHaveBeenCalledWith("notify");
 		expect(markActivityEnd).toHaveBeenCalledTimes(1);
 	});
 });

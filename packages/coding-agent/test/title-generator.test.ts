@@ -3,12 +3,15 @@ import type { Api, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import {
+	buildTabColorSequence,
 	disposeTerminalTitleState,
 	generateSessionTitle,
 	setExtensionTerminalTitle,
 	setSessionTerminalTitle,
+	setTerminalFocus,
 	setTerminalTitle,
 	setTerminalTitleState,
+	setTerminalTitleStateEnabled,
 } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { logger, setTerminalHeadless } from "@oh-my-pi/pi-utils";
 import { mockWindowsConsoleTitle, type WindowsConsoleTitleMock } from "./terminal-title-test-utils";
@@ -605,6 +608,7 @@ describe("terminal title runtime", () => {
 	let prevHeadless = false;
 	let ttyDescriptor: PropertyDescriptor | undefined;
 	let windowsTitleMock: WindowsConsoleTitleMock | undefined;
+	let prevWtSession: string | undefined;
 
 	// Titles emitted (newest last) since the last reset of `writes`; used across
 	// every assertion, so the OSC extraction lives here rather than at each site.
@@ -621,6 +625,10 @@ describe("terminal title runtime", () => {
 		prevHeadless = setTerminalHeadless(false);
 		ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
 		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+		// Tab-color gating must not fire inside these tests even when the host
+		// really is Windows Terminal (WT_SESSION set): they assert exact writes.
+		prevWtSession = process.env.WT_SESSION;
+		delete process.env.WT_SESSION;
 
 		windowsTitleMock = mockWindowsConsoleTitle();
 		writes = [];
@@ -646,6 +654,8 @@ describe("terminal title runtime", () => {
 		windowsTitleMock = undefined;
 		stdoutSpy?.mockRestore();
 		stdoutSpy = undefined;
+		if (prevWtSession === undefined) delete process.env.WT_SESSION;
+		else process.env.WT_SESSION = prevWtSession;
 		if (ttyDescriptor) Object.defineProperty(process.stdout, "isTTY", ttyDescriptor);
 		else Reflect.deleteProperty(process.stdout, "isTTY");
 		setTerminalHeadless(prevHeadless);
@@ -767,5 +777,296 @@ describe("terminal title runtime", () => {
 		} finally {
 			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
 		}
+	});
+});
+// Windows Terminal tints the active tab via DECAC (`CSI 2;15;<idx>,|`; item 2
+// is the window/tab frame, fg 15 is ignored by WT which picks contrasting tab
+// text). These tests pin the observable contract at the stdout sink: which
+// exact bytes reach the terminal, under which host conditions, and when the
+// runtime must stay silent (other terminals, disabled signal, idle-only
+// sessions, headless).
+describe("terminal tab color (Windows Terminal)", () => {
+	let writes: string[] = [];
+	let stdoutSpy: { mockRestore(): void } | undefined;
+	let prevHeadless = false;
+	let ttyDescriptor: PropertyDescriptor | undefined;
+	let prevWtSession: string | undefined;
+	let windowsTitleMock: WindowsConsoleTitleMock | undefined;
+
+	const DECAC_RE = /\x1b\[2;\d+;\d+,\|/;
+
+	function decacPayloads(): string[] {
+		return writes.filter(payload => DECAC_RE.test(payload));
+	}
+
+	function emittedTitles(): string[] {
+		return writes.map(payload => OSC_TITLE_RE.exec(payload)?.[1]).filter((t): t is string => t !== undefined);
+	}
+
+	/** Run `fn` with the two gate conditions forced on: platform win32 and
+	 * WT_SESSION present. Restores both on exit (mirror of the WSL test). */
+	function withWindowsTerminal(fn: () => void): void {
+		const originalPlatform = process.platform;
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		process.env.WT_SESSION = "test-session";
+		try {
+			fn();
+		} finally {
+			if (prevWtSession === undefined) delete process.env.WT_SESSION;
+			else process.env.WT_SESSION = prevWtSession;
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+		}
+	}
+
+	beforeEach(() => {
+		prevHeadless = setTerminalHeadless(false);
+		ttyDescriptor = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+		windowsTitleMock = mockWindowsConsoleTitle();
+		prevWtSession = process.env.WT_SESSION;
+		delete process.env.WT_SESSION;
+
+		writes = [];
+		stdoutSpy = spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => {
+			writes.push(typeof chunk === "string" ? chunk : new TextDecoder().decode(chunk as Uint8Array));
+			return true;
+		});
+
+		setSessionTerminalTitle(undefined);
+		setTerminalTitleState("idle");
+		setTerminalTitleStateEnabled(true);
+		setTerminalFocus(true);
+		writes.length = 0;
+	});
+
+	afterEach(() => {
+		disposeTerminalTitleState();
+		setTerminalFocus(true);
+		windowsTitleMock?.restore();
+		windowsTitleMock = undefined;
+		stdoutSpy?.mockRestore();
+		stdoutSpy = undefined;
+		if (prevWtSession === undefined) delete process.env.WT_SESSION;
+		else process.env.WT_SESSION = prevWtSession;
+		if (ttyDescriptor) Object.defineProperty(process.stdout, "isTTY", ttyDescriptor);
+		else Reflect.deleteProperty(process.stdout, "isTTY");
+		setTerminalHeadless(prevHeadless);
+	});
+
+	it("maps run state to DECAC wire bytes (attention=1 red, notify=3 yellow, working/idle reset to default)", () => {
+		// CONTRACT: WT parses the exact sequences CSI 2;15;<bg-index>,| and
+		// CSI 2;263;264,| — these bytes ARE the feature. Only attention/notify
+		// paint; working/idle restore the default tab color, and from a clean
+		// (never-painted) state they write nothing at all.
+		withWindowsTerminal(() => {
+			setTerminalFocus(false);
+			setTerminalTitleState("working"); // clean → nothing
+			setTerminalTitleState("attention");
+			setTerminalTitleState("notify");
+			setTerminalTitleState("working");
+			setTerminalTitleState("idle"); // already default → nothing
+			setTerminalTitleState("attention");
+			setTerminalTitleState("idle");
+		});
+		expect(decacPayloads()).toEqual([
+			"\x1b[2;15;1,|",
+			"\x1b[2;15;3,|",
+			"\x1b[2;263;264,|",
+			"\x1b[2;15;1,|",
+			"\x1b[2;263;264,|",
+		]);
+	});
+
+	it("emits the same wire bytes from the pure builder", () => {
+		// CONTRACT: buildTabColorSequence is the single source of the sequence;
+		// pin it independently of the runtime so refactors can't drift bytes.
+		expect(buildTabColorSequence("attention")).toBe("\x1b[2;15;1,|");
+		expect(buildTabColorSequence("notify")).toBe("\x1b[2;15;3,|");
+		expect(buildTabColorSequence("working")).toBe("\x1b[2;263;264,|");
+		expect(buildTabColorSequence("idle")).toBe("\x1b[2;263;264,|");
+	});
+
+	it("emits the notify title and yellow tint when a turn finishes", () => {
+		// CONTRACT: a finished-but-unread turn is a "needs the user" state: the
+		// title carries the static `:>` separator and the tab turns yellow, so
+		// an answered question never reads as plain idle.
+		setSessionTerminalTitle("label");
+		withWindowsTerminal(() => {
+			setTerminalFocus(false);
+			writes.length = 0;
+			setTerminalTitleState("notify");
+		});
+		expect(emittedTitles()).toEqual(["π :> label"]);
+		expect(decacPayloads()).toEqual(["\x1b[2;15;3,|"]);
+	});
+
+	it("repaints through a full turn cycle (yellow → reset → red → yellow)", () => {
+		// CONTRACT: the tab follows the run state across an entire turn: notify
+		// (yellow) → working (reset to default) → attention (red) → notify (yellow).
+		withWindowsTerminal(() => {
+			setTerminalFocus(false);
+			setTerminalTitleState("notify");
+			setTerminalTitleState("working");
+			setTerminalTitleState("attention");
+			setTerminalTitleState("notify");
+		});
+		expect(decacPayloads()).toEqual(["\x1b[2;15;3,|", "\x1b[2;263;264,|", "\x1b[2;15;1,|", "\x1b[2;15;3,|"]);
+	});
+
+	it("paints yellow when a turn finishes while the tab is inactive", () => {
+		// CONTRACT: the bell tint applies only while the tab is unfocused —
+		// agent_end on an inactive tab turns it yellow.
+		withWindowsTerminal(() => {
+			setTerminalFocus(false);
+			setTerminalTitleState("notify");
+		});
+		expect(decacPayloads()).toEqual(["\x1b[2;15;3,|"]);
+	});
+
+	it("does not paint yellow when a turn finishes while the tab is focused", () => {
+		// CONTRACT: with the tab focused (the default at launch), agent_end is
+		// visible to the user already — no bell tint needed.
+		withWindowsTerminal(() => {
+			setTerminalTitleState("notify");
+		});
+		expect(decacPayloads()).toEqual([]);
+	});
+
+	it("clears the yellow tint on focus-in without touching the title", () => {
+		// CONTRACT: activating the tab behaves like WT's native bell indicator —
+		// the yellow tint clears, the `π :> label` title stays.
+		withWindowsTerminal(() => {
+			setTerminalFocus(false);
+			setSessionTerminalTitle("label");
+			writes.length = 0;
+			setTerminalTitleState("notify");
+			setTerminalFocus(true);
+		});
+		expect(decacPayloads()).toEqual(["\x1b[2;15;3,|", "\x1b[2;263;264,|"]);
+		expect(emittedTitles()).toEqual(["π :> label"]);
+	});
+
+	it("does not re-paint yellow on focus-out after the tint cleared", () => {
+		// CONTRACT: focus-out alone never repaints — the yellow returns only on
+		// the next notify transition.
+		withWindowsTerminal(() => {
+			setTerminalFocus(false);
+			setTerminalTitleState("notify");
+			setTerminalFocus(true);
+			writes.length = 0;
+			setTerminalFocus(false);
+		});
+		expect(decacPayloads()).toEqual([]);
+	});
+
+	it("clears a lingering red tint when notify lands while focused", () => {
+		// CONTRACT: a focused agent_end must not leave an earlier attention tint
+		// on the tab — the red clears to the default, not lingers until the
+		// next transition.
+		withWindowsTerminal(() => {
+			setTerminalFocus(false);
+			setTerminalTitleState("attention");
+			setTerminalFocus(true);
+			setTerminalTitleState("notify");
+		});
+		expect(decacPayloads()).toEqual(["\x1b[2;15;1,|", "\x1b[2;263;264,|"]);
+	});
+
+	it("paints yellow directly on notify after red when the tab is inactive", () => {
+		// CONTRACT: unfocused notify replaces the previous tint with yellow in
+		// one paint (no intermediate reset).
+		withWindowsTerminal(() => {
+			setTerminalFocus(false);
+			setTerminalTitleState("attention");
+			setTerminalTitleState("notify");
+		});
+		expect(decacPayloads()).toEqual(["\x1b[2;15;1,|", "\x1b[2;15;3,|"]);
+	});
+
+	it("never writes DECAC outside Windows Terminal (no WT_SESSION)", () => {
+		// CONTRACT: terminals without the window-frame DECAC item must not
+		// receive the sequence (conhost, VS Code, mintty would drop/garble it).
+		const originalPlatform = process.platform;
+		Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+		try {
+			setTerminalTitleState("working");
+			setTerminalTitleState("attention");
+			setTerminalTitleState("notify");
+			setTerminalTitleState("idle");
+		} finally {
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+		}
+		expect(decacPayloads()).toEqual([]);
+	});
+
+	it("never writes DECAC off Windows (WT_SESSION set but platform linux)", () => {
+		// CONTRACT: the gate is the conjunction — WT_SESSION alone (e.g. a WT-
+		// hosted WSL/ssh pane) must not tint anything.
+		const originalPlatform = process.platform;
+		Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+		process.env.WT_SESSION = "test-session";
+		try {
+			setTerminalTitleState("attention");
+		} finally {
+			if (prevWtSession === undefined) delete process.env.WT_SESSION;
+			else process.env.WT_SESSION = prevWtSession;
+			Object.defineProperty(process, "platform", { value: originalPlatform, configurable: true });
+		}
+		expect(decacPayloads()).toEqual([]);
+	});
+
+	it("does not tint an idle-only session (lazy paint)", () => {
+		// CONTRACT: a session that never leaves idle must not touch the tab
+		// color — preserves colors the user set by hand or via --tabColor.
+		withWindowsTerminal(() => {
+			setTerminalTitleState("idle");
+		});
+		expect(decacPayloads()).toEqual([]);
+	});
+
+	it("does not tint while the titleState signal is disabled", () => {
+		// CONTRACT: tui.titleState=false kills the color signal with the
+		// separator signal — one switch, both effects.
+		withWindowsTerminal(() => {
+			setTerminalTitleStateEnabled(false);
+			setTerminalTitleState("working");
+			setTerminalTitleState("attention");
+		});
+		expect(decacPayloads()).toEqual([]);
+	});
+
+	it("resets to the default tab color when the signal is switched off mid-session", () => {
+		// CONTRACT: disabling after painting must clear the tint, not freeze
+		// it in the last state forever.
+		withWindowsTerminal(() => {
+			setTerminalTitleState("attention");
+			setTerminalTitleStateEnabled(false);
+		});
+		expect(decacPayloads()).toEqual(["\x1b[2;15;1,|", "\x1b[2;263;264,|"]);
+	});
+
+	it("resets to the default tab color on dispose iff this process painted", () => {
+		// CONTRACT: exit cleanup returns the tab to its default color exactly
+		// once and only when we changed it; a second dispose is a no-op.
+		withWindowsTerminal(() => {
+			setTerminalTitleState("attention");
+		});
+		writes.length = 0;
+		disposeTerminalTitleState();
+		expect(decacPayloads()).toEqual(["\x1b[2;263;264,|"]);
+
+		writes.length = 0;
+		disposeTerminalTitleState();
+		expect(decacPayloads()).toEqual([]);
+	});
+
+	it("does not tint in headless mode", () => {
+		// CONTRACT: RPC/SDK headless runs must not write terminal control
+		// sequences — mirrors the setTerminalTitle headless guard.
+		setTerminalHeadless(true);
+		withWindowsTerminal(() => {
+			setTerminalTitleState("attention");
+		});
+		expect(decacPayloads()).toEqual([]);
 	});
 });

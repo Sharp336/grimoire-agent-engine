@@ -7,6 +7,9 @@
 ### Added
 
 - Added `Markdown.getLastRenderStableText()` to expose the stable prefix of streamed Markdown text for append-only transcript publication.
+### Added
+
+- Terminal focus tracking (CSI ?1004) with `onTerminalFocus` subscriptions on the TUI
 
 ## [18.0.5] - 2026-08-25
 

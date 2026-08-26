@@ -149,6 +149,7 @@ import {
 	popTerminalTitle,
 	pushTerminalTitle,
 	setSessionTerminalTitle,
+	setTerminalFocus,
 	setTerminalTitleStateEnabled,
 } from "../utils/title-generator";
 import {
@@ -1243,6 +1244,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		pushTerminalTitle();
 		setTerminalTitleStateEnabled(this.settings.get("tui.titleState"));
 		setSessionTerminalTitle(this.sessionManager.getSessionName(), this.sessionManager.getCwd());
+		// CSI ?1004 focus reports drive the bell-semantics tab tint: yellow only
+		// while the tab is inactive, cleared when the user focuses the tab.
+		this.#eventBusUnsubscribers.push(this.ui.onTerminalFocus(setTerminalFocus));
 		this.updateEditorBorderColor();
 		// Single side-effect point for title changes: every setSessionName caller
 		// (first-input titling, /rename, extension renames, plan seeding, replan

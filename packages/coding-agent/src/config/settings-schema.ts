@@ -1220,7 +1220,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Display",
 			label: "Terminal Title Run State",
 			description:
-				"Show the agent run state in the terminal title's separator — an animated spinner while working (a static ':' on Windows), '>' when it's your turn, '!' when the agent is waiting on you",
+				"Show the agent run state in the terminal title's separator — an animated spinner while working (a static ':' on Windows), '>' when it's your turn, '!' when the agent is waiting on you — and tint the Windows Terminal tab when the agent needs you — red while it waits on your approval or answer, yellow when a turn finished while the tab was inactive (clears when you focus the tab, like the terminal's own bell indicator)",
 		},
 	},
 
