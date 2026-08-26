@@ -34,16 +34,17 @@ Merged from the former `irc`, `job`, and `launch` tools; each op family keeps it
 | `timeoutMs` | `number` | No | Peer `send` with `await`, and message/job `wait`: milliseconds; `0` waits indefinitely. Defaults to `irc.timeoutMs` for a reply/pure-message wait and to the poll window when jobs are watched. |
 | `peek` | `boolean` | No | `inbox`: leave messages in the process-global bus mailbox. Note that messages already buffered on the live recipient session are still drained into this result by the current implementation. |
 | `name` | `string` | process ops | Stable project-scoped launch name (1-48 chars). On `send`/`wait` it routes the op to the process broker. |
+| `id` | `string` | `wait` (name) | Daemon id returned by `start`/`restart`/`describe` — binds the wait to one launch generation; REQUIRED (an unbound wait is refused). |
 | `application`, `args`, `env`, `cwd`, `pty`, `ready`, `restart`, `persist`, `detached` | — | `start` | Launch spec, unchanged from the former `launch` tool. |
 | `lines`, `head`, `grep`, `follow`, `cursor` | — | `logs` | Log window controls, unchanged. |
-| `for`, `pattern` | — | `wait` (name) | Process lifecycle condition / output regex. |
+| `for`, `pattern` | — | `wait` (name) | Process lifecycle condition (`"ready"` / `"exit"`; omitted = auto: already-ready returns immediately, otherwise wait for readiness or exit) / output regex. |
 | `text`, `enter`, `keys`, `signal` | — | `send` (name) | Process stdin / terminal keys / signal. |
 | `timeout` | `number` | No | `logs`/`stop`/`wait`-with-`name`: seconds; default 30 (stop: 5). |
 
 ## Op families and dispatch
 - **Messaging** — `send` (with `to`), `inbox`, `list`, and `wait` with `from`. Fire-and-forget sends return delivery receipts (`injected`/`woken`/`revived`/`failed`); direct sends can revive parked agents, while broadcasts target visible live peers without reviving every parked agent. `await: true` waits for one reply after delivery. A busy recipient with async execution disabled may auto-reply rather than strand an awaiting sender.
-- **Jobs** — `wait` (bare or with `ids`), `cancel`, `jobs`. Owner-scoped visibility, watch/unwatch delivery suppression, `acknowledgeDeliveries` on returned completions, 500 ms `onUpdate` snapshots while waiting, and the `async.pollWaitDuration` fixed/smart wait window. `jobs` is the former job-list snapshot plus the roster of running subagents with no running job entry.
-- **Processes** — `start`, `ps`, `logs`, `stop`, `restart`, `describe`, plus `send`/`wait` when they carry `name`. Exact behavior of the former `launch` tool; `ps` is the broker's `list`. See the launch sections below.
+- **Jobs** — `wait` (bare or with `ids`), `cancel`, `jobs`. Owner-scoped visibility, watch/unwatch delivery suppression, `acknowledgeDeliveries` on returned completions, 500 ms `onUpdate` snapshots while waiting, and the `async.pollWaitDuration` fixed/smart wait window. `jobs` is the former job-list snapshot plus the roster of running subagents with no running job entry. Task agents (subagents) cannot enter a bare `wait` — it is refused immediately; they must name explicit `ids` (or wait for results to self-deliver).
+- **Processes** — `start`, `ps`, `logs`, `stop`, `restart`, `describe`, plus `send`/`wait` when they carry `name`. Exact behavior of the former `launch` tool; `ps` is the broker's `list`. `wait` additionally requires the daemon `id` (generation binding, see below). See the launch sections below.
 
 `send` with both `to` and `name` is rejected as ambiguous. `wait` routes by target: `name` → process wait; otherwise the unified coordination wait.
 
@@ -60,6 +61,7 @@ Outcomes:
 - No job legs: pure message wait with peer liveness (bounded by `irc.timeoutMs`); with no running peers either, it returns `No running background jobs to wait for.` immediately (plus the jobless running-agent roster when one exists).
 - Explicit `ids` that match nothing visible → `No matching jobs found for IDs: ...` with per-id agent hints (`history://<id>`), never a hang.
 - A message already buffered on the session satisfies the wait before anything is watched.
+- Task agents (subagents, `taskDepth > 0`) cannot enter a bare `wait` — it is refused immediately with their running jobs listed. They must name explicit `ids`; results self-deliver, so a bare wait is never needed.
 
 Smart-ladder bookkeeping (`recordPollWaitEnd`) runs only when the smart window was actually used (no explicit `timeoutMs`).
 
@@ -94,6 +96,17 @@ Defaults: `cwd` = session directory, `args: []`, `env: {}`, `pty: true`, `restar
 
 Names are stable and unique within one project directory. A live name must be stopped or restarted; starting a completed name creates a new launch and rotates its prior output log.
 
+## Waiting on a process (generation binding)
+Every `start`/`restart` returns the daemon `id` in its result text (`id=<uuid>`), and every launch is a new generation: `restart` (manual or via a restart policy) rotates the id. `wait` with a `name` REQUIRES that `id` — the wait binds to exactly one generation:
+
+- `id` missing → immediate refusal (`wait on <name> requires id`), never a default long exit wait.
+- `id` unknown for the name (stale after a restart/relaunch) → immediate refusal with the current id so the caller can re-bind.
+- Daemon owned by another session → immediate wrong-owner refusal. Names stay shared for `ps`/`logs`/`describe`/`stop`/`restart`; only the owning session may `wait`.
+- Daemon already `exited`/`failed` → immediate settled snapshot, never a block.
+- `for` omitted (auto): an already-ready daemon returns its ready snapshot immediately; a running one-shot (no ready spec) or a still-starting daemon waits for readiness or exit. `for: "ready"` waits for readiness; `for: "exit"` waits for exit even when the daemon is already ready.
+- A bound wait that times out stays a normal result carrying the daemon snapshot (including the current id), so a retry can re-bind or stop instead of starting an unbound wait.
+- Steering an in-flight wait aborts the wait only — the daemon and its process are untouched.
+
 ## Logs, input, signals (processes)
 ```json
 {"op":"logs","name":"web","grep":"error|warn","lines":50}
@@ -111,11 +124,12 @@ Unchanged from the former `launch` tool: the first process op starts a detached 
 - `irc.timeoutMs` default `120_000`; `0` disables; negative/non-finite fall back to the default.
 - Poll window: `async.pollWaitDuration` — `5s`/`10s`/`30s`/`1m`/`5m`/`smart` (default); smart ladder `[5s..5m]` climbing per back-to-back wait, resetting after 60 s without waiting.
 - Job retention 5 min; manager max-running fallback 15; `async.maxJobs` clamped 1..100.
-- Launch names 1-48 chars; `ready.port` 1..65535; `logs`/`wait`/`stop` timeouts capped at one hour.
+- Launch names 1-48 chars; `ready.port` 1..65535; `logs`/`wait`/`stop` timeouts capped at one hour. The daemon `id` rotates on every launch (start/restart/restart-policy) — it is the wait generation handle.
 
 ## Errors
 - Most validation/availability failures are text results with `isError: true`: messaging unavailable, missing `to`/`message`, self-send (`Cannot send a message to yourself.`), `await` with `to:"all"`, `to`+`name` on one send, missing `ids` on `cancel`, and launch disabled. The async-disabled `jobs`/`cancel` response is an exception: it returns `Async execution is disabled; no background jobs are available.` with an empty job list and no `isError` flag.
 - Launch validation (missing `name`/`application`, bad `ready.port`, unsupported key) throws `ToolError`, exactly as before.
+- Process `wait` binding refusals (missing/stale `id`, unknown daemon, wrong owner) are immediate `isError` results with a classified message; a task agent's bare job `wait` is likewise refused immediately. Explicit `wait ids=[...]` that match nothing visible return `No matching jobs found for IDs: ...` immediately, never a hang.
 - A `wait` timeout is a normal result (`waited: null` or an all-running snapshot flagged `useless`), never an error.
 - Per-recipient delivery failures surface as `failed` receipts; `send` is `isError` only when nothing was delivered.
 

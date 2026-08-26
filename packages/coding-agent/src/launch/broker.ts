@@ -23,6 +23,7 @@ import {
 	type DaemonSnapshot,
 	type DaemonSpec,
 	type DaemonWireRequest,
+	encodeDaemonWaitReject,
 	parseDaemonSnapshot,
 	parseDaemonSpec,
 	parseDaemonWireMessage,
@@ -687,6 +688,10 @@ class DaemonBroker {
 
 	async #launch(record: ManagedDaemon): Promise<void> {
 		record.generation++;
+		// Each launch is a new generation: rotate the daemon id so waits bound to
+		// a previous start/restart are refused as stale instead of silently
+		// attaching to the new process (generation binding for `wait`).
+		record.snapshot.id = crypto.randomUUID();
 		const generation = record.generation;
 		record.stopRequested = false;
 		record.snapshot.state = record.spec.ready ? "starting" : "running";
@@ -1056,7 +1061,50 @@ class DaemonBroker {
 	}
 
 	async #wait(operation: Extract<DaemonOperation, { op: "wait" }>): Promise<DaemonRpcResult> {
-		const record = this.#record(operation.name);
+		const record = this.#records.get(operation.name);
+		if (!record) {
+			const names = [...this.#records.keys()];
+			throw new Error(
+				encodeDaemonWaitReject({
+					code: "missing-daemon",
+					message: `Unknown daemon ${operation.name}${names.length ? `. Available: ${names.join(", ")}` : ""}`,
+				}),
+			);
+		}
+		if (operation.id === undefined) {
+			throw new Error(
+				encodeDaemonWaitReject({
+					code: "missing-id",
+					message:
+						`wait on ${operation.name} requires id — the daemon id returned by \`start\` (generation binding). ` +
+						"An unbound wait cannot be enforced and is refused instead of defaulting to a long exit wait.",
+				}),
+			);
+		}
+		if (operation.id !== record.snapshot.id) {
+			throw new Error(
+				encodeDaemonWaitReject({
+					code: "stale-id",
+					message:
+						`Daemon ${operation.name} generation mismatch: id ${operation.id} is stale ` +
+						`(restart/relaunch rotates it); current id is ${record.snapshot.id}. Re-bind with the current id.`,
+				}),
+			);
+		}
+		if (
+			operation.owner !== undefined &&
+			record.snapshot.owner !== undefined &&
+			operation.owner !== record.snapshot.owner
+		) {
+			throw new Error(
+				encodeDaemonWaitReject({
+					code: "wrong-owner",
+					message:
+						`Daemon ${operation.name} is owned by session ${record.snapshot.owner}; ` +
+						"only the owning session may wait on it. Inspect it with ps/logs/describe instead.",
+				}),
+			);
+		}
 		await this.#refreshDetached(record);
 		let matched: string | undefined;
 		let pattern: RegExp | undefined;
@@ -1073,6 +1121,13 @@ class DaemonBroker {
 			record.snapshot.readyAt !== undefined ||
 			record.snapshot.state === "ready" ||
 			(record.snapshot.state === "running" && !record.spec.ready);
+		const auto = operation.for === undefined;
+		const hasReadySpec = record.spec.ready !== undefined;
+		// Auto (for omitted): only a daemon with a ready spec that already
+		// observed readiness is "already ready" — a ready-less running daemon is
+		// a one-shot that still needs its exit, never an instant ready.
+		const autoReady = (): boolean =>
+			hasReadySpec && (record.snapshot.readyAt !== undefined || record.snapshot.state === "ready");
 		const condition = (): boolean => {
 			if (pattern) {
 				const match = pattern.exec(record.readinessBuffer);
@@ -1081,9 +1136,19 @@ class DaemonBroker {
 				return true;
 			}
 			if (operation.for === "exit") return terminalState(record.snapshot.state);
-			// Wake on observed readiness or any terminal state so the wait never
-			// blocks for the full timeout; success is judged by readyObserved below.
-			return readyObserved() || terminalState(record.snapshot.state);
+			if (operation.for === "ready") {
+				// Wake on observed readiness or any terminal state so the wait never
+				// blocks for the full timeout; success is judged by readyObserved below.
+				return readyObserved() || terminalState(record.snapshot.state);
+			}
+			if (auto) {
+				// Auto (for omitted): settle on exit, or on observed readiness for a
+				// ready-spec daemon (a one-shot that became ready is done). An
+				// already-ready daemon returns immediately instead of defaulting to
+				// a long exit wait.
+				return terminalState(record.snapshot.state) || autoReady();
+			}
+			return terminalState(record.snapshot.state);
 		};
 		const woke = condition() || (await this.#waitUntil(record, condition, operation.timeoutMs));
 		// A for:"ready" wait that woke on a terminal exit without ever observing

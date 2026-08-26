@@ -10,6 +10,7 @@ Background jobs auto-deliver when they finish. You NEVER need to poll; if `jobs`
 - **Format**: plain prose ONLY. No JSON status objects. Share paths via `local://`/`artifact://` URLs, not pasted blobs.
 - **`wait`**: use ONLY when completely blocked with no other work. Returns on the FIRST of: an incoming message, a watched job finishing, the wait window elapsing, or a steering interrupt — NOT when all jobs finish; re-issue to keep waiting.
   - Bare `wait` watches every running job AND incoming messages. NEVER pass an array of every running ID; `ids` narrows to specific jobs, `from` to one peer (or use `await: true` on send).
+  - Task agents (subagents): bare `wait` (no `ids`, no `from`) is REFUSED immediately — results self-deliver, so name explicit `ids` only when you must block on a specific job.
 - **`inbox`**: drain queued messages without blocking.
 - **`cancel`**: kill background jobs by `ids` when they have hung, stalled, or are no longer needed. Returns immediately.
 - **`jobs`**: status snapshot of every job without waiting. A settled row consumes auto-delivery. Also names running subagents with no job entry — coordinate with those via `send`.
@@ -27,8 +28,11 @@ Project-scoped long-running processes shared by every omp instance in the same d
   - Names are unique per project directory. A completed name MAY be started again; a live name MUST be stopped or restarted.
   - `restart` policy defaults `no`; `on-failure` and `always` use bounded backoff.
   - `persist: true` opts out of last-omp teardown; `detached: true` survives broker shutdown and all omp exits (implies persist, disables PTY input). Omit both unless their survival guarantees are required.
+  - The result includes the daemon `id` — the generation handle `wait` must bind to.
 - **`ps`**, **`logs`**, **`wait`** (with `name`), **`send`** (with `name`), **`stop`**, **`restart`**, and **`describe`** address the stable `name`.
 - **`logs`** defaults to the last 100 lines. `head: true` reads the beginning. `grep` is a regex. `follow: true` waits for output after `cursor`; reuse the returned cursor on the next call.
-- **`wait`** with `name` blocks until readiness/exit/`pattern` or `timeout` (seconds).
+- **`wait`** with `name` REQUIRES `id` — the daemon id returned by `start`/`restart`/`describe` (generation binding). Missing or stale `id` (a restart rotated it), a wrong owner, or an unknown daemon are refused immediately — never a long default wait.
+  - `for` omitted (auto): an already-ready daemon returns its ready snapshot immediately; a running one-shot waits for exit. `for: "ready"` waits for readiness; `for: "exit"` waits for exit even when already ready.
+  - A restart rotates the daemon id — re-read it from `start`/`restart`/`describe`/`ps` before re-waiting.
 - **`send`** with `name`: `text` writes stdin (`enter` defaults true); `keys` supports ENTER, TAB, ESCAPE, CTRL_C, CTRL_D, UP, DOWN, LEFT, RIGHT; `signal` supports SIGINT, SIGTERM, SIGHUP, SIGQUIT, SIGKILL. PTY input is serialized; writes share one input stream.
 - **`stop`** performs graceful process-tree termination before hard-kill; NEVER kill an unverified PID through bash. **`restart`** reuses the retained launch spec.

@@ -36,12 +36,14 @@ export async function describeQuietly(
 export async function waitReady(
 	client: DaemonBrokerClient,
 	name: string,
+	id: string,
 	label: string,
 	signal?: AbortSignal,
 	timeoutMs: number = DEFAULT_READY_TIMEOUT_MS,
 ): Promise<DaemonSnapshot | undefined> {
 	try {
-		const result = await client.request({ op: "wait", name, for: "ready", timeoutMs }, signal);
+		// The id is the daemon generation binding: waits without it are refused.
+		const result = await client.request({ op: "wait", name, id, for: "ready", timeoutMs }, signal);
 		if (result.op !== "wait" || result.timedOut) return undefined;
 		return result.daemon;
 	} catch (error) {

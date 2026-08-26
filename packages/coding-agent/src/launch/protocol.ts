@@ -70,6 +70,42 @@ export interface DaemonSnapshot {
 /** Signals accepted by daemon input operations. */
 export type DaemonSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT" | "SIGKILL";
 
+/** Classified `wait` refusals: the wait cannot be enforced, so it returns instead of blocking. */
+export type DaemonWaitRejectCode = "missing-daemon" | "missing-id" | "stale-id" | "wrong-owner";
+
+export interface DaemonWaitReject {
+	code: DaemonWaitRejectCode;
+	message: string;
+}
+
+const DAEMON_WAIT_REJECT_PREFIX = "wait-binding:";
+
+/** Encode a classified wait refusal into the broker's error string. */
+export function encodeDaemonWaitReject(reject: DaemonWaitReject): string {
+	return `${DAEMON_WAIT_REJECT_PREFIX}${JSON.stringify(reject)}`;
+}
+
+/** Decode a classified wait refusal from a broker error string; undefined for unrelated errors. */
+export function decodeDaemonWaitReject(error: string): DaemonWaitReject | undefined {
+	if (!error.startsWith(DAEMON_WAIT_REJECT_PREFIX)) return undefined;
+	try {
+		const value: unknown = JSON.parse(error.slice(DAEMON_WAIT_REJECT_PREFIX.length));
+		if (
+			typeof value === "object" &&
+			value !== null &&
+			"code" in value &&
+			"message" in value &&
+			typeof value.code === "string" &&
+			typeof value.message === "string"
+		) {
+			return { code: value.code as DaemonWaitRejectCode, message: value.message };
+		}
+	} catch {
+		// Malformed payloads decode to nothing; the raw error still surfaces.
+	}
+	return undefined;
+}
+
 /** Typed broker operation sent over the authenticated socket. */
 export type DaemonOperation =
 	| { op: "ping" }
@@ -87,7 +123,18 @@ export type DaemonOperation =
 			renderTerminalRows?: boolean;
 			timeoutMs: number;
 	  }
-	| { op: "wait"; name: string; for: "ready" | "exit"; pattern?: string; timeoutMs: number }
+	| {
+			op: "wait";
+			name: string;
+			/** Daemon id returned by `start` — binds the wait to one launch generation; REQUIRED. */
+			id?: string;
+			/** Caller session id; waits on a daemon owned by another session are refused. */
+			owner?: string;
+			/** Omitted = auto: already-ready returns immediately, otherwise wait for readiness or exit. */
+			for?: "ready" | "exit";
+			pattern?: string;
+			timeoutMs: number;
+	  }
 	| { op: "send"; name: string; data?: string; signal?: DaemonSignal }
 	| { op: "stop"; name: string; timeoutMs: number }
 	| { op: "restart"; name: string }
@@ -368,11 +415,15 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 				timeoutMs: numberValue(source.timeoutMs, "operation.timeoutMs"),
 			};
 		case "wait": {
-			const target = stringValue(source.for, "operation.for");
-			if (target !== "ready" && target !== "exit") throw new Error("operation.for must be ready or exit");
+			const target = source.for === undefined ? undefined : stringValue(source.for, "operation.for");
+			if (target !== undefined && target !== "ready" && target !== "exit") {
+				throw new Error("operation.for must be ready or exit");
+			}
 			return {
 				op,
 				name: stringValue(source.name, "operation.name"),
+				id: optionalString(source.id, "operation.id"),
+				owner: optionalString(source.owner, "operation.owner"),
 				for: target,
 				pattern: optionalString(source.pattern, "operation.pattern"),
 				timeoutMs: numberValue(source.timeoutMs, "operation.timeoutMs"),

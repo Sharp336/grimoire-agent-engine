@@ -317,6 +317,39 @@ export function nothingToWaitForResult(session: ToolSession): AgentToolResult<Co
 	};
 }
 
+/**
+ * Task agents (subagents) may not enter an unbound `wait`: a bare wait cannot
+ * bind a job generation and would park the worker in a smart-ladder poll that
+ * looks like a phantom validation wait. Refuse immediately with the caller's
+ * running jobs listed; job results self-deliver, and explicit `ids` still
+ * block on exactly those jobs.
+ */
+export function taskAgentBareWaitResult(
+	session: ToolSession,
+	manager: AsyncJobManager | undefined,
+	ownerId: string | undefined,
+): AgentToolResult<CoordinationDetails> {
+	const jobs = manager ? manager.getRunningJobs(ownerId ? { ownerId } : undefined) : [];
+	const jobResults = snapshotJobs(session, jobs);
+	const lines: string[] = [
+		"Bare `wait` is refused for task agents: an unbound wait cannot be enforced and would hang the worker.",
+		"Job results self-deliver when they finish; to block on a specific job, pass its `id` from `jobs`/`wait`.",
+	];
+	if (jobResults.length > 0) {
+		lines.push("", `## Still Running (${jobResults.length})\n`);
+		for (const job of jobResults) {
+			lines.push(`- \`${job.id}\` [${job.type}] — ${job.label}`);
+		}
+		lines.push("");
+		lines.push("Wait on one of these ids explicitly, or use `jobs` to snapshot without blocking.");
+	}
+	return {
+		content: [{ type: "text", text: lines.join("\n") }],
+		details: { op: "wait", jobs: jobResults },
+		isError: true,
+	};
+}
+
 /** `cancel`: kill the named jobs; returns immediately with outcomes + snapshots. */
 export async function executeCancel(
 	session: ToolSession,

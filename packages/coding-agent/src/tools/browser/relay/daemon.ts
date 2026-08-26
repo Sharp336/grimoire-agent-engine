@@ -72,7 +72,9 @@ export async function ensureRelayDaemon(opts: { cdpUrl: string; signal?: AbortSi
 		if (await probeRelayServer(opts.cdpUrl)) return true;
 		const existing = await describeQuietly(client, RELAY_DAEMON_NAME, "Browser relay", opts.signal);
 		if (existing && existing.state !== "exited" && existing.state !== "failed") {
-			if (existing.readyAt === undefined) await waitReady(client, RELAY_DAEMON_NAME, "Browser relay", opts.signal);
+			if (existing.readyAt === undefined) {
+				await waitReady(client, RELAY_DAEMON_NAME, existing.id, "Browser relay", opts.signal);
+			}
 			if (await probeRelayServer(opts.cdpUrl)) return true;
 			// Live record but nothing listening: replace the wedged daemon.
 			await stopQuietly(client, RELAY_DAEMON_NAME, "Browser relay", opts.signal);

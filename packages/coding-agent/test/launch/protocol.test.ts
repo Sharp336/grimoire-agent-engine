@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import {
 	type DaemonOperation,
+	decodeDaemonWaitReject,
+	encodeDaemonWaitReject,
 	parseDaemonRpcResult,
 	parseDaemonSnapshot,
 	parseDaemonWireRequest,
@@ -117,5 +119,42 @@ describe("regex-derived protocol fields", () => {
 			matched: "",
 			timedOut: false,
 		});
+	});
+});
+
+describe("wait generation binding protocol", () => {
+	it("preserves id, owner, and an omitted for on wait operations", () => {
+		const request = parseDaemonWireRequest({
+			id: "request-1",
+			token: "token-1",
+			operation: { op: "wait", name: "web", id: "daemon-1", owner: "session-owner", timeoutMs: 1_000 },
+		});
+		expect(request.operation).toEqual({
+			op: "wait",
+			name: "web",
+			id: "daemon-1",
+			owner: "session-owner",
+			for: undefined,
+			pattern: undefined,
+			timeoutMs: 1_000,
+		});
+	});
+
+	it("rejects an unknown for value", () => {
+		expect(() =>
+			parseDaemonWireRequest({
+				id: "request-1",
+				token: "token-1",
+				operation: { op: "wait", name: "web", id: "daemon-1", for: "never", timeoutMs: 1_000 },
+			}),
+		).toThrow("operation.for must be ready or exit");
+	});
+
+	it("round-trips classified wait rejections and ignores unrelated errors", () => {
+		for (const code of ["missing-daemon", "missing-id", "stale-id", "wrong-owner"] as const) {
+			const encoded = encodeDaemonWaitReject({ code, message: `${code} happened` });
+			expect(decodeDaemonWaitReject(encoded)).toEqual({ code, message: `${code} happened` });
+		}
+		expect(decodeDaemonWaitReject("Unknown daemon web")).toBeUndefined();
 	});
 });

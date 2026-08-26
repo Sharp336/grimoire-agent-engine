@@ -11,7 +11,14 @@ import { Text } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { type DaemonBrokerClient, DaemonBrokerRejectedError, daemonClientForProject } from "../../launch/client";
-import type { DaemonOperation, DaemonRpcResult, DaemonSnapshot, DaemonSpec, DaemonState } from "../../launch/protocol";
+import {
+	type DaemonOperation,
+	type DaemonRpcResult,
+	type DaemonSnapshot,
+	type DaemonSpec,
+	type DaemonState,
+	decodeDaemonWaitReject,
+} from "../../launch/protocol";
 import { renderTerminalOutputIsolated } from "../../launch/terminal-output-worker-client";
 import type { Theme, ThemeColor } from "../../modes/theme/theme";
 import { framedBlock, outputBlockContentWidth, renderStatusLine } from "../../tui";
@@ -114,6 +121,8 @@ function registerCompletionSink(
 export interface LaunchParams {
 	op: "start" | "list" | "logs" | "wait" | "send" | "stop" | "restart" | "describe";
 	name?: string;
+	/** wait: daemon id returned by `start` — binds the wait to one launch generation (required). */
+	id?: string;
 	application?: string;
 	args?: string[];
 	env?: Record<string, string>;
@@ -243,7 +252,12 @@ function operationFor(params: LaunchParams, session: ToolSession): DaemonOperati
 			return {
 				op: "wait",
 				name: requiredName(params),
-				for: params.for ?? "exit",
+				id: params.id,
+				// The broker requires the daemon id (generation binding) and decides
+				// the default condition: already-ready returns immediately, a running
+				// one-shot waits for exit, explicit `for` wins.
+				owner: session.getSessionId?.() ?? undefined,
+				for: params.for,
 				pattern: params.pattern,
 				timeoutMs: timeoutMs(params.timeout, 30),
 			};
@@ -266,7 +280,9 @@ function operationFor(params: LaunchParams, session: ToolSession): DaemonOperati
 function daemonLabel(daemon: DaemonSnapshot): string {
 	const pid = daemon.pid === undefined ? "" : ` pid=${daemon.pid}`;
 	const exit = daemon.exitCode === undefined ? "" : ` exit=${daemon.exitCode}`;
-	return `${daemon.name}: ${daemon.state}${pid}${exit} uptime=${formatDuration(
+	// The id is the generation handle `wait` binds to — always surface it so a
+	// retry can re-bind after a restart rotated it.
+	return `${daemon.name}: ${daemon.state} id=${daemon.id}${pid}${exit} uptime=${formatDuration(
 		(daemon.exitedAt ?? Date.now()) - daemon.startedAt,
 	)} restarts=${daemon.restartCount}${daemon.detached ? " detached" : daemon.persist ? " persistent" : ""}`;
 }
@@ -440,6 +456,18 @@ export async function executeLaunch(
 		} else {
 			completionLease?.retain();
 		}
+		if (error instanceof DaemonBrokerRejectedError) {
+			const reject = decodeDaemonWaitReject(error.message);
+			if (reject) {
+				// Binding refusal (missing/stale id, wrong owner, unknown daemon):
+				// an immediate classified result — never a long unbound exit wait.
+				return {
+					content: [{ type: "text", text: reject.message }],
+					details: { op: "wait" },
+					isError: true,
+				};
+			}
+		}
 		throw error;
 	}
 }
@@ -494,7 +522,10 @@ function callMeta(args: LaunchRenderArgs): string[] {
 			if (args.grep) meta.push(`grep /${args.grep}/`);
 			break;
 		case "wait":
-			meta.push(args.pattern ? `for /${args.pattern}/` : `for ${args.for ?? "exit"}`);
+			// Omitted `for` is auto: already-ready returns immediately, otherwise
+			// the wait settles on readiness or exit.
+			meta.push(args.pattern ? `for /${args.pattern}/` : `for ${args.for ?? "auto"}`);
+			if (args.id) meta.push(args.id);
 			break;
 		case "send":
 			if (args.signal) meta.push(args.signal);
