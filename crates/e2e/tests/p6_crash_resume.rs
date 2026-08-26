@@ -136,6 +136,8 @@ struct GatewayState {
 	accepted: Vec<bool>,
 }
 
+/// Exists because scripting cannot express a client that rejects before opening
+/// while counting open attempts.
 #[derive(Clone)]
 struct NeverTurnClient {
 	opens: Arc<AtomicUsize>,
@@ -155,6 +157,8 @@ impl TurnClient for NeverTurnClient {
 	}
 }
 
+/// Exists because scripting cannot express provider responses persisted to and
+/// recovered from disk.
 #[derive(Clone)]
 struct DiskTurnClient {
 	path: PathBuf,
