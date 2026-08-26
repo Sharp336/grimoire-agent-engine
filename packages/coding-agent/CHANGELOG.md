@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `ultracode` magic keyword: pins the turn and every spawned subagent to maximum reasoning effort and makes scripted multi-agent workflows the default for that turn, with a matching "Approve and execute with ultracode" plan-review option ([#2159](https://github.com/can1357/oh-my-pi/issues/2159)).
+
 ## [18.0.6] - 2026-08-26
 
 ### Added

@@ -2196,7 +2196,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "interaction",
 			group: "Magic Keywords",
 			label: "Magic Keywords",
-			description: "Enable hidden notices for standalone ultrathink, orchestrate, and workflowz keywords",
+			description: "Enable hidden notices for standalone ultrathink, orchestrate, workflowz, and ultracode keywords",
 		},
 	},
 
@@ -2231,6 +2231,28 @@ export const SETTINGS_SCHEMA = {
 			label: "Workflow Keyword",
 			description: "Let standalone workflowz append its hidden eval workflow notice",
 		},
+	},
+
+	"magicKeywords.ultracode": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			group: "Magic Keywords",
+			label: "Ultracode Keyword",
+			description:
+				"Let standalone ultracode run that turn at xhigh effort with multi-subagent workflow orchestration",
+		},
+	},
+
+	// Turn state, not a preference, and deliberately absent from the settings UI:
+	// the ultracode keyword writes it through the runtime override layer
+	// (Settings.override), which never reaches disk, and the next user turn
+	// without the keyword writes it back to false. It exists so the task executor
+	// can see that this turn's spawns run at the ultracode floor.
+	ultracode: {
+		type: "boolean",
+		default: false,
 	},
 
 	// Notifications

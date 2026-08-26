@@ -71,6 +71,11 @@ export class ModelControls {
 	readonly #thinkingLevelCeiling: Effort | undefined;
 	#autoThinking = false;
 	#autoResolvedLevel: Effort | undefined;
+	/**
+	 * Level to hand back once the ultracode turn ends, captured before the pin.
+	 * `undefined` means no ultracode turn is in flight, which is the common case.
+	 */
+	#levelBeforeUltracode: ConfiguredThinkingLevel | undefined;
 	#serviceTierByFamily: ServiceTierByFamily;
 
 	constructor(
@@ -501,8 +506,18 @@ export class ModelControls {
 	 * auto writes its provisional level plus `configured: "auto"` immediately,
 	 * giving external readers an authoritative selection receipt before the next
 	 * user turn. Later classifications persist only changed concrete resolutions.
+	 *
+	 * `configuredReceipt` overrides the `configured` value written to the session
+	 * record for a concrete level. {@link beginUltracodeTurn} passes the
+	 * borrowed-FROM level so the turn-scoped pin never becomes the session's own
+	 * configured level on disk: a process killed mid-ultracode-turn must resume
+	 * at the pre-ultracode level, not stranded at xhigh with no handback state.
 	 */
-	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
+	setThinkingLevel(
+		level: ConfiguredThinkingLevel | undefined,
+		persist: boolean = false,
+		configuredReceipt?: ConfiguredThinkingLevel,
+	): void {
 		if (level === AUTO_THINKING) {
 			const provisional = clampThinkingLevelToCeiling(
 				this.#model,
@@ -546,7 +561,7 @@ export class ModelControls {
 
 		if (isChanging) {
 			this.#host.clearInheritedProviderPromptCacheKey();
-			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel);
+			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, configuredReceipt ?? effectiveLevel);
 			if (persist && effectiveLevel !== undefined && effectiveLevel !== ThinkingLevel.Off) {
 				this.#host.settings.set("defaultThinkingLevel", effectiveLevel);
 			}
@@ -565,6 +580,14 @@ export class ModelControls {
 
 	/**
 	 * Cycle to next thinking level: off → auto → minimal..max → off.
+	 *
+	 * This is the user's own effort control, so it also takes precedence over an
+	 * ultracode turn in flight. {@link beginUltracodeTurn} borrows the level and
+	 * {@link endUltracodeTurn} hands it back on the next keyword-free turn, which
+	 * would silently discard a level the user picked in between. Reaching for this
+	 * control is an unambiguous "I want a different effort", so it drops the
+	 * pending restore and keeps the choice.
+	 *
 	 * @returns New selector, or undefined if model doesn't support thinking
 	 */
 	cycleThinkingLevel(): ConfiguredThinkingLevel | undefined {
@@ -582,8 +605,66 @@ export class ModelControls {
 		const nextLevel = levels[nextIndex];
 		if (!nextLevel) return undefined;
 
+		// Reaching for the effort control mid-ultracode-turn is an explicit choice:
+		// keep it, and drop the restore that would otherwise overwrite it when the
+		// turn ends.
+		this.forgetUltracodeRestore();
+		if (this.#host.settings.get("ultracode")) this.#host.settings.override("ultracode", false);
 		this.setThinkingLevel(nextLevel);
 		return nextLevel;
+	}
+
+	/**
+	 * Raise this TURN to the ultracode effort ({@link Effort.XHigh}), remembering
+	 * the level to hand back in {@link endUltracodeTurn}.
+	 *
+	 * Stronger than "ultrathink", which only biases the auto-thinking classifier
+	 * and therefore does nothing at all when auto-thinking is off. Ultracode sets
+	 * a concrete level, so it lands either way, and handing `setThinkingLevel` a
+	 * concrete effort clears `#autoThinking` on purpose: a classifier that still
+	 * runs is a classifier that can still lower the effort mid-turn.
+	 *
+	 * Turn-scoped, not session-scoped: the keyword steers the message that
+	 * carries it and nothing after it. `setThinkingLevel` is called without
+	 * `persist`, so `defaultThinkingLevel` is never rewritten, and the hard
+	 * `#thinkingLevelCeiling` still wins because that setter re-clamps to it.
+	 */
+	beginUltracodeTurn(): void {
+		const model = this.#model;
+		if (!model?.reasoning) return;
+		// Reasoning models with no controllable effort surface (devin-agent Cascade
+		// routes effort via sibling model ids) have nothing to pin.
+		if (getSupportedEfforts(model).length === 0) return;
+		// XHigh is the target, not an assumption: clamp it onto the ladder this model
+		// actually exposes, so one topping out at `high` pins to high.
+		const effort = clampAutoThinkingEffort(model, Effort.XHigh);
+		if (effort === undefined) return;
+		// Capture what to restore ONCE. Repeating the keyword on consecutive turns
+		// must not overwrite the saved level with xhigh and strand the session there.
+		if (this.#levelBeforeUltracode === undefined) {
+			this.#levelBeforeUltracode = this.configuredThinkingLevel() ?? ThinkingLevel.Off;
+		}
+		// The borrowed-from level is also the session record's `configured` receipt:
+		// the handback state lives in process memory only, so persisting the pin as
+		// the configured level would strand a killed-and-resumed session at xhigh.
+		this.setThinkingLevel(effort, false, this.#levelBeforeUltracode);
+	}
+
+	/**
+	 * Hand back the level {@link beginUltracodeTurn} borrowed, restoring `auto`
+	 * when that is what was running before. A no-op when the keyword never fired,
+	 * so ordinary turns cost nothing.
+	 */
+	endUltracodeTurn(): void {
+		const previous = this.#levelBeforeUltracode;
+		if (previous === undefined) return;
+		this.#levelBeforeUltracode = undefined;
+		this.setThinkingLevel(previous);
+	}
+
+	/** Forget the pending restore, leaving the current level alone. */
+	forgetUltracodeRestore(): void {
+		this.#levelBeforeUltracode = undefined;
 	}
 
 	/** Timeout (ms) for per-turn auto-thinking classification before falling back. */
@@ -604,7 +685,13 @@ export class ModelControls {
 		if (getSupportedEfforts(model).length === 0) return;
 
 		let resolved: Effort | undefined;
-		if (this.#host.magicKeywordEnabled("ultrathink") && containsUltrathink(promptText)) {
+		if (this.#host.settings.get("ultracode")) {
+			// This turn carries the ultracode keyword and beginUltracodeTurn already
+			// set the concrete level. If anything re-enabled auto since then, resolve
+			// straight back to that level instead of letting the difficulty classifier
+			// walk the effort down mid-turn.
+			resolved = clampAutoThinkingEffort(model, Effort.XHigh);
+		} else if (this.#host.magicKeywordEnabled("ultrathink") && containsUltrathink(promptText)) {
 			// The user explicitly asked for maximum thinking; bypass the classifier
 			// (and the `providers.autoThinkingMaxEffort` ceiling) and jump straight
 			// to the highest supported level for this model.
