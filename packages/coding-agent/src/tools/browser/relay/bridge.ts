@@ -59,10 +59,9 @@ interface SessionRef {
 	runtimeEpoch: number;
 }
 
-interface RootSubscription {
+interface SessionRootSubscription {
 	method: string;
 	params?: Record<string, unknown>;
-	/** Minted page pseudo-session that last made this root state effective. */
 	ownerSessionId: string;
 	/** Preserves the original cross-session command order during recovery replay. */
 	sequence: number;
@@ -145,8 +144,8 @@ class TabState {
 	restoringExt: RelaySocket | null = null;
 	/** Recovery replay must complete, including after an extension socket replacement. */
 	restorePending = false;
-	/** Effective state of subscription commands executed on the shared Chrome root. */
-	readonly subscriptions = new Map<string, RootSubscription>();
+	/** Effective root-domain state by subscription key and owning page pseudo-session. */
+	readonly subscriptions = new Map<string, Map<string, SessionRootSubscription>>();
 
 	constructor(
 		readonly tabId: number,
@@ -405,7 +404,7 @@ export class RelayBridge {
 					// A socket replacement can interrupt replay after Chrome accepted only
 					// part of it. The replacement hello still reports the debugger attached,
 					// so resume the pending journal instead of treating the root as ready.
-					if (preserve.length === 0) tab.subscriptions.clear();
+					this.#pruneSubscriptions(tab, preserve);
 					this.#startTabRecovery(tab, false, preserve);
 				}
 				continue;
@@ -737,7 +736,7 @@ export class RelayBridge {
 			if (command === "disable") {
 				tab.subscriptions.delete(key);
 			} else {
-				tab.subscriptions.set(key, {
+				this.#rememberSessionSubscription(tab, key, ownerSessionId, {
 					method: msg.method,
 					params: msg.params,
 					ownerSessionId,
@@ -765,7 +764,7 @@ export class RelayBridge {
 				// fresh root after a guard-authorized swap no longer carries it. Record
 				// latest-wins so recovery replays the current override rather than
 				// letting the fingerprint change mid-session.
-				tab.subscriptions.set(msg.method, {
+				this.#rememberSessionSubscription(tab, msg.method, ownerSessionId, {
 					method: msg.method,
 					params: msg.params,
 					ownerSessionId,
@@ -776,10 +775,10 @@ export class RelayBridge {
 				return;
 		}
 		if (!enabled) {
-			tab.subscriptions.delete(msg.method);
+			this.#forgetSessionSubscription(tab, msg.method, ownerSessionId);
 			return;
 		}
-		tab.subscriptions.set(msg.method, {
+		this.#rememberSessionSubscription(tab, msg.method, ownerSessionId, {
 			method: msg.method,
 			params: msg.params,
 			ownerSessionId,
@@ -787,13 +786,112 @@ export class RelayBridge {
 		});
 	}
 
+	#rememberSessionSubscription(
+		tab: TabState,
+		key: string,
+		ownerSessionId: string,
+		subscription: SessionRootSubscription,
+	): void {
+		let owners = tab.subscriptions.get(key);
+		if (!owners) {
+			owners = new Map();
+			tab.subscriptions.set(key, owners);
+		}
+		owners.set(ownerSessionId, subscription);
+	}
+
+	#forgetSessionSubscription(tab: TabState, key: string, ownerSessionId: string): void {
+		const owners = tab.subscriptions.get(key);
+		if (!owners) return;
+		owners.delete(ownerSessionId);
+		if (owners.size === 0) tab.subscriptions.delete(key);
+	}
+
 	#forgetSessionSubscriptions(tabId: number, sessionIds: Iterable<string>): void {
 		const tab = this.#tabs.get(tabId);
 		if (!tab) return;
 		for (const sessionId of sessionIds) {
-			for (const [key, subscription] of tab.subscriptions) {
-				if (subscription.ownerSessionId === sessionId) tab.subscriptions.delete(key);
+			for (const [key, owners] of tab.subscriptions) {
+				owners.delete(sessionId);
+				if (owners.size === 0) tab.subscriptions.delete(key);
 			}
+		}
+	}
+
+	#pruneSubscriptions(tab: TabState, keepPageSessions: CdpConnection[]): void {
+		const liveSessions = new Set<string>();
+		for (const conn of keepPageSessions) {
+			for (const pageSession of conn.sessionsForTab(tab.tabId, "page")) liveSessions.add(pageSession);
+		}
+		if (liveSessions.size === 0) {
+			tab.subscriptions.clear();
+			return;
+		}
+		for (const [key, owners] of tab.subscriptions) {
+			for (const ownerSessionId of owners.keys()) {
+				if (!liveSessions.has(ownerSessionId)) owners.delete(ownerSessionId);
+			}
+			if (owners.size === 0) tab.subscriptions.delete(key);
+		}
+	}
+
+	#sessionOwnsTab(conn: CdpConnection, tabId: number, sessionId: string): boolean {
+		const ref = conn.sessions.get(sessionId);
+		return ref?.kind === "page" && ref.tabId === tabId;
+	}
+
+	#latestSubscriptionForKey(tab: TabState, key: string): SessionRootSubscription | undefined {
+		const owners = tab.subscriptions.get(key);
+		if (!owners) return undefined;
+		let latest: SessionRootSubscription | undefined;
+		for (const subscription of owners.values()) {
+			if (!latest || subscription.sequence > latest.sequence) latest = subscription;
+		}
+		return latest;
+	}
+
+	#isCurrentPreservedSubscription(
+		tab: TabState,
+		key: string,
+		subscription: SessionRootSubscription,
+		conns: CdpConnection[],
+	): boolean {
+		if (this.#latestSubscriptionForKey(tab, key) !== subscription) return false;
+		return conns.some(conn => this.#sessionOwnsTab(conn, tab.tabId, subscription.ownerSessionId));
+	}
+
+	#nextPreservedSubscription(
+		tab: TabState,
+		conns: CdpConnection[],
+		replayed: Map<string, number>,
+	): { key: string; subscription: SessionRootSubscription } | undefined {
+		const subscriptions: Array<{ key: string; subscription: SessionRootSubscription }> = [];
+		for (const key of tab.subscriptions.keys()) {
+			const subscription = this.#latestSubscriptionForKey(tab, key);
+			if (!subscription) continue;
+			if (replayed.get(key) === subscription.sequence) continue;
+			if (!conns.some(conn => this.#sessionOwnsTab(conn, tab.tabId, subscription.ownerSessionId))) continue;
+			subscriptions.push({ key, subscription });
+		}
+		subscriptions.sort((a, b) => a.subscription.sequence - b.subscription.sequence);
+		return subscriptions[0];
+	}
+
+	#subscriptionDisableCommand(
+		subscription: SessionRootSubscription,
+	): { method: string; params?: Record<string, unknown> } | null {
+		if (subscription.method.endsWith(".enable")) {
+			return { method: `${subscription.method.slice(0, -".enable".length)}.disable` };
+		}
+		switch (subscription.method) {
+			case "Target.setAutoAttach":
+				return { method: subscription.method, params: { autoAttach: false } };
+			case "Target.setDiscoverTargets":
+				return { method: subscription.method, params: { discover: false } };
+			case "Page.setLifecycleEventsEnabled":
+				return { method: subscription.method, params: { enabled: false } };
+			default:
+				return null;
 		}
 	}
 
@@ -1274,15 +1372,31 @@ export class RelayBridge {
 			tab.rootRuntimeEnabled = true;
 		}
 		tab.restoreRootRuntime = false;
-		const subscriptions = [...tab.subscriptions.values()];
-		subscriptions.sort((a, b) => a.sequence - b.sequence);
-		for (const subscription of subscriptions) {
+		const replayed = new Map<string, number>();
+		while (true) {
+			const next = this.#nextPreservedSubscription(tab, conns, replayed);
+			if (!next) break;
+			const { key, subscription } = next;
 			this.#assertExtensionCurrent(expectedExt);
 			await this.#rpc({
 				op: "send",
 				tabId: tab.tabId,
 				method: subscription.method,
 				params: subscription.params,
+			});
+			this.#assertExtensionCurrent(expectedExt);
+			if (this.#isCurrentPreservedSubscription(tab, key, subscription, conns)) {
+				replayed.set(key, subscription.sequence);
+				continue;
+			}
+			const disable = this.#subscriptionDisableCommand(subscription);
+			if (!disable) continue;
+			this.#assertExtensionCurrent(expectedExt);
+			await this.#rpc({
+				op: "send",
+				tabId: tab.tabId,
+				method: disable.method,
+				params: disable.params,
 			});
 			this.#assertExtensionCurrent(expectedExt);
 		}
@@ -1379,11 +1493,9 @@ export class RelayBridge {
 	 * session survives a Chrome root swap and must not be destroyed on recovery.
 	 */
 	#retractTab(tab: TabState, keepPageSessions: CdpConnection[] = []): void {
-		if (keepPageSessions.length === 0) {
-			tab.subscriptions.clear();
-			tab.restorePending = false;
-			tab.restoreRootRuntime = false;
-		}
+		this.#pruneSubscriptions(tab, keepPageSessions);
+		if (keepPageSessions.length === 0) tab.restorePending = false;
+		if (keepPageSessions.length === 0) tab.restoreRootRuntime = false;
 		const staleRealSessions = [...tab.realSessions];
 		for (const realSession of staleRealSessions) this.#realSessionTabs.delete(realSession);
 		tab.realSessions.clear();

@@ -819,7 +819,7 @@ describe("RelayBridge tab grouping", () => {
 		expect(first.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
 	});
 
-	it("drops root subscriptions owned by auto-attach sessions retracted during recovery", async () => {
+	it("drops root subscriptions owned by retracted auto-attach sessions during recovery", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 })]);
@@ -843,7 +843,12 @@ describe("RelayBridge tab grouping", () => {
 
 		bridge.cdpMessage(
 			manualConn,
-			JSON.stringify({ id: ++msgSeq, sessionId: manualSession, method: "Network.enable" }),
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: manualSession,
+				method: "Fetch.enable",
+				params: { patterns: [{ urlPattern: "https://manual.example/*" }] },
+			}),
 		);
 		await flush();
 		ack(bridge, ext, "send");
@@ -854,7 +859,7 @@ describe("RelayBridge tab grouping", () => {
 				id: ++msgSeq,
 				sessionId: autoSession,
 				method: "Fetch.enable",
-				params: { patterns: [{ urlPattern: "*" }] },
+				params: { patterns: [{ urlPattern: "https://auto.example/*" }] },
 			}),
 		);
 		await flush();
@@ -870,17 +875,70 @@ describe("RelayBridge tab grouping", () => {
 
 		// Recovery keeps the manual page session and retracts auto-attach sessions,
 		// so only state owned by the preserved session may replay on the fresh root.
-		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable"]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable"]);
+		expect(ext2.rpcs("send")[0]!.params).toEqual({ patterns: [{ urlPattern: "https://manual.example/*" }] });
 		ack(bridge, ext2, "send");
 		await flush();
-		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable"]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable"]);
 		const commandId = ++msgSeq;
 		bridge.cdpMessage(
 			manualConn,
 			JSON.stringify({ id: commandId, sessionId: manualSession, method: "Network.getCookies" }),
 		);
 		await flush();
-		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.enable", "Network.getCookies"]);
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable", "Network.getCookies"]);
+	});
+
+	it("clears a replayed root subscription when its preserved owner disconnects during recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const owner = new FakeCdpSocket();
+		const ownerConn = bridge.cdpConnected(owner);
+		const ownerSession = await attachPage(bridge, ext, owner, ownerConn, 1);
+		const holder = new FakeCdpSocket();
+		const holderConn = bridge.cdpConnected(holder);
+		const holderSession = await attachPage(bridge, ext, holder, holderConn, 1);
+
+		bridge.cdpMessage(
+			ownerConn,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: ownerSession,
+				method: "Fetch.enable",
+				params: { patterns: [{ urlPattern: "https://owner.example/*" }] },
+			}),
+		);
+		await flush();
+		ack(bridge, ext, "send");
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.rpcs("send").length === 1, "owner subscription replay");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable"]);
+
+		// The owner disconnects after its subscription has been sent to the fresh
+		// Chrome root but before replay observes completion. Another holder keeps
+		// the tab attached, so recovery must clear the orphaned Fetch state instead
+		// of leaving request interception enabled with no owning client.
+		bridge.cdpClosed(ownerConn);
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.rpcs("send").length === 2, "orphaned subscription cleanup");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable", "Fetch.disable"]);
+		ack(bridge, ext2, "send");
+		await flush();
+
+		const commandId = ++msgSeq;
+		bridge.cdpMessage(
+			holderConn,
+			JSON.stringify({ id: commandId, sessionId: holderSession, method: "Network.getCookies" }),
+		);
+		await flush();
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Fetch.enable", "Fetch.disable", "Network.getCookies"]);
 	});
 
 	it("replays persistent user-agent overrides for a preserved session across recovery", async () => {
