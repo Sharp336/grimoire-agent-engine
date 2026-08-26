@@ -57,6 +57,14 @@ const astEditSchema = type({
 		.describe("files, directories, globs, or internal URLs to rewrite"),
 });
 
+const PHP_MEMBER_PATTERN = /^\s*(?:(?:abstract|final|public|protected|private|readonly|static)\s+)+function\b/u;
+const PHP_MEMBER_WRAPPER_HINT =
+	"Hint: PHP member patterns cannot match at top level. Wrap the pattern in `class $_ { … }`.";
+
+function phpMemberWrapperHint(ops: readonly (readonly [string, string])[]): string | undefined {
+	return ops.some(([pattern]) => PHP_MEMBER_PATTERN.test(pattern)) ? PHP_MEMBER_WRAPPER_HINT : undefined;
+}
+
 interface AstEditCallOptions {
 	rewrites: Record<string, string>;
 	dryRun: boolean;
@@ -159,6 +167,8 @@ export interface AstEditToolDetails {
 	parseErrors?: string[];
 	/** Total parse error count before {@link PARSE_ERRORS_LIMIT} capping. Omitted when no errors. */
 	parseErrorsTotal?: number;
+	/** Guidance emitted when a PHP member-shaped pattern cannot match at the parser's top level. */
+	zeroMatchHint?: string;
 	scopePath?: string;
 	files?: string[];
 	fileReplacements?: Array<{ path: string; count: number }>;
@@ -311,6 +321,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			});
 
 			const { errors: cappedParseErrors, total: parseErrorsTotal } = capParseErrors(result.parseErrors);
+			const zeroMatchHint = result.totalReplacements === 0 ? phpMemberWrapperHint(ops) : undefined;
 			const formatPath = (filePath: string): string =>
 				formatResultPath(filePath, isDirectory, resolvedSearchPath, this.session.cwd);
 
@@ -338,6 +349,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				applied: result.applied,
 				limitReached: result.limitReached,
 				...(cappedParseErrors.length > 0 ? { parseErrors: cappedParseErrors, parseErrorsTotal } : {}),
+				...(zeroMatchHint ? { zeroMatchHint } : {}),
 				scopePath,
 				searchPath: resolvedSearchPath,
 				cwd: this.session.cwd,
@@ -346,10 +358,11 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			};
 
 			if (result.totalReplacements === 0) {
+				const hintMessage = zeroMatchHint ? `\n${zeroMatchHint}` : "";
 				const parseMessage = cappedParseErrors.length
 					? `\n${formatParseErrors(cappedParseErrors, parseErrorsTotal).join("\n")}`
 					: "";
-				return toolResult(baseDetails).text(`No replacements made${parseMessage}`).done();
+				return toolResult(baseDetails).text(`No replacements made${hintMessage}${parseMessage}`).done();
 			}
 
 			const useHashLines = resolveFileDisplayMode(this.session).hashLines;
@@ -636,17 +649,21 @@ export const astEditToolRenderer = {
 			if (filesSearched > 0) meta.push(`searched ${filesSearched}`);
 			const header = renderStatusLine({ icon: "warning", title: "AST Edit", description, meta }, uiTheme);
 			// The "0 replacements" count already rides on the status line; only parse
-			// errors are worth a body, so frame solely when there are some.
+			// errors and actionable hints are worth a body.
 			const bodyLines: string[] = [];
+			if (details?.zeroMatchHint) bodyLines.push(uiTheme.fg("muted", details.zeroMatchHint));
 			appendParseErrorsBulletList(bodyLines, details?.parseErrors, uiTheme, details?.parseErrorsTotal);
 			if (bodyLines.length === 0) return new Text(header, 0, 0);
-			return framedBlock(uiTheme, width => ({
-				header,
-				sections: [{ lines: bodyLines }],
-				state: "warning",
-				borderColor: "borderMuted",
-				width,
-			}));
+			return framedBlock(uiTheme, width => {
+				const innerWidth = outputBlockContentWidth(width);
+				return {
+					header,
+					sections: [{ lines: bodyLines.map(line => truncateToWidth(line, innerWidth, Ellipsis.Omit)) }],
+					state: "warning",
+					borderColor: "borderMuted",
+					width,
+				};
+			});
 		}
 
 		const summaryParts = [formatCount("replacement", totalReplacements), formatCount("file", filesTouched)];

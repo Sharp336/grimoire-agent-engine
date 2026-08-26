@@ -63,6 +63,46 @@ describe("ast_edit tool schema", () => {
 		expect(strict.strict).toBe(true);
 	});
 
+	it("hints that zero-match PHP member patterns need a class wrapper", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-php-member-"));
+		try {
+			const filePath = path.join(tempDir, "Example.php");
+			await Bun.write(
+				filePath,
+				`<?php
+class Example {
+	public function greet(string $name): string {
+		return $name;
+	}
+}
+`,
+			);
+
+			const tools = await createTools(createTestSession(tempDir), ["ast_edit"]);
+			const tool = tools.find(entry => entry.name === "ast_edit");
+			expect(tool).toBeDefined();
+
+			const result = await tool!.execute("ast-edit-php-member", {
+				ops: [
+					{
+						pat: "public function $NAME($$$ARGS) { $$$BODY }",
+						out: "protected function $NAME($$$ARGS) { $$$BODY }",
+					},
+				],
+				paths: [filePath],
+			});
+			const text = result.content.find(content => content.type === "text")?.text ?? "";
+			const details = result.details as { totalReplacements?: number; zeroMatchHint?: string } | undefined;
+
+			expect(details?.totalReplacements).toBe(0);
+			expect(details?.zeroMatchHint).toContain("PHP member patterns cannot match at top level");
+			expect(text).toContain("PHP member patterns cannot match at top level");
+			expect(text).toContain("class $_ { … }");
+		} finally {
+			await removeWithRetries(tempDir);
+		}
+	});
+
 	it("renders +/- lines with numbered hashline prefixes", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-edit-render-"));
 		try {
