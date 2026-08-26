@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added AnySearch as the first concrete web-search provider after Auto, with API-key login and safe explicit anonymous auto-registration ([#9726](https://github.com/can1357/oh-my-pi/pull/9726) by [@anysearch-ai](https://github.com/anysearch-ai)).
+
 ## [18.0.5] - 2026-08-25
 
 ### Added
