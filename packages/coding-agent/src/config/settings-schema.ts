@@ -1533,6 +1533,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"context.loadClaudeMd": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "General",
+			label: "Discover CLAUDE.md",
+			description:
+				"Also discover standalone CLAUDE.md files during the ancestor-directory walk, alongside AGENTS.md. Off by default: enabling it adds project context for every repository that keeps a CLAUDE.md for another tool. When both files sit in the same directory, both load (AGENTS.md first).",
+		},
+	},
+
 	personality: {
 		type: "enum",
 		values: ["default", "friendly", "pragmatic", "none"] as const,

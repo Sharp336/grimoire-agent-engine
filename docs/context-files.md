@@ -65,7 +65,7 @@ Put broad, durable project background in `AGENTS.md`. Reserve `RULES.md` for sho
 | `opencode`  | `.config/opencode/AGENTS.md`                | User           | User file `~/.config/opencode/AGENTS.md` only.                                                                                                                                                                                                                                                                                                               |
 | `github`    | `.github/copilot-instructions.md`           | User + project | Project file `<cwd>/.github/copilot-instructions.md` only (no ancestor walk-up), plus a user-global `~/.copilot/copilot-instructions.md` (relocate with `COPILOT_HOME`). `AGENTS.md` candidates from `COPILOT_CUSTOM_INSTRUCTIONS_DIRS` are also considered at user scope, where normal one-user-file deduplication applies.                                 |
 | `agents`    | `.agent/AGENTS.md`, `.agents/AGENTS.md`     | User + project | User files from `~/.agent/` and `~/.agents/`; project files discovered while walking up from the current directory to the repository root.                                                                                                                                                                                                                   |
-| `agents-md` | `AGENTS.md`                                 | Project        | Standalone (non-config-directory) `AGENTS.md` files, discovered by walking up from the current directory to the repository root and, when that repository is nested under the user's home directory, through enclosing workspace directories up to but not including the home directory. With no repository root, discovery uses the home directory as the boundary for sessions under home and includes that boundary file. Files whose parent directory name starts with `.` are ignored — those belong to a config-directory provider instead.                                                                   |
+| `agents-md` | `AGENTS.md`, `CLAUDE.md`                    | Project        | Standalone (non-config-directory) `AGENTS.md` files, discovered by walking up from the current directory to the repository root and, when that repository is nested under the user's home directory, through enclosing workspace directories up to but not including the home directory. With no repository root, discovery uses the home directory as the boundary for sessions under home and includes that boundary file. Files whose parent directory name starts with `.` are ignored — those belong to a config-directory provider instead. Standalone `CLAUDE.md` is discovered by the same walk only when [`context.loadClaudeMd`](#claudemd-in-the-ancestor-walk) is enabled.                                                                   |
 | `github`    | `.github/instructions/**/*.instructions.md` | Project rules  | GitHub Copilot / VS Code instruction files become rules. `applyTo: '*'`, `applyTo: '**'`, or `applyTo: '**/*'` is injected as always-apply content; other `applyTo` globs are listed in the rulebook with a generated description when needed and are readable as `rule://<name>`. Missing `applyTo` also produces a rulebook entry and a discovery warning. |
 
 Providers marked "(no ancestor walk-up)" only look in the current working directory's config directory. If you need ancestor walk-up behavior, prefer the native `.omp/AGENTS.md` format or a standalone `AGENTS.md` (the `agents-md` provider), or launch `omp` from the directory that holds the config directory.
@@ -91,8 +91,24 @@ Discovered files are then deduplicated by scope:
 - **At the same depth, the higher-priority provider shadows the rest.**
 - **Across depths, multiple files survive.** In a monorepo, an ancestor `AGENTS.md` and a package-level one are different depths and both load.
 - **Byte-identical files are collapsed after ordering.** Among project copies, the one closest to the cwd survives. The single surviving user-scope file sorts after project files, so it survives instead when its content is identical to project content.
+- **A standalone `CLAUDE.md` occupies its own slot.** When `context.loadClaudeMd` is enabled, a `CLAUDE.md` found by the `agents-md` walk does not compete with the `AGENTS.md` at the same depth — both survive. This exemption is limited to that one provider and filename; a config-directory `.claude/CLAUDE.md` still competes for the shared per-depth slot as before.
 
-Final injection order is **farther project ancestors first**, then project files closer to the cwd, then the surviving user-scope file. Later files sit nearer the end of the generated context and are more prominent.
+Final injection order is **farther project ancestors first**, then project files closer to the cwd, then the surviving user-scope file. Later files sit nearer the end of the generated context and are more prominent. Where a standalone `AGENTS.md` and `CLAUDE.md` share a depth, `AGENTS.md` is injected first.
+
+### CLAUDE.md in the ancestor walk
+
+`CLAUDE.md` is the conventional project context file for Claude Code and several other tools, but a repository-root `CLAUDE.md` is not discovered by default: the `claude` provider only reads `<cwd>/.claude/CLAUDE.md` (no walk-up), and the `agents-md` walk only looks for `AGENTS.md`. A project whose context lives in a root `CLAUDE.md` therefore starts with no project context at all.
+
+Set `context.loadClaudeMd` to opt that filename into the same ancestor walk:
+
+```yaml
+context:
+  loadClaudeMd: true
+```
+
+It is off by default because enabling it changes the prompt for every project that already keeps a `CLAUDE.md` for another tool. Once enabled, `CLAUDE.md` follows the identical rules as `AGENTS.md` — same walk, same hidden-directory skip, same repo-root/home stop condition — and both files load when they share a directory.
+
+If you would rather not enable a setting, the alternatives are unchanged: rename the file to `AGENTS.md`, add an `AGENTS.md` containing `@CLAUDE.md` (at-imports are expanded on load), or run `omp` from the directory holding `.claude/`.
 
 ### Worked shadowing example
 
@@ -249,6 +265,7 @@ Browse the ids interactively with `/extensions`, which lists every discovered co
 - Native project context is read only from the nearest non-empty `.omp/` directory. That directory must contain a non-empty `AGENTS.md`; if it does not, discovery does not continue to a farther native directory.
 - A standalone `AGENTS.md` is handled by `agents-md`, not `native`.
 - `.claude/CLAUDE.md`, `.gemini/GEMINI.md`, and `.github/copilot-instructions.md` are read only from the current working directory's config directory — not from every ancestor.
+- A repository-root `CLAUDE.md` (outside `.claude/`) is only discovered when `context.loadClaudeMd` is enabled — see [CLAUDE.md in the ancestor walk](#claudemd-in-the-ancestor-walk).
 - `~/.codex/AGENTS.md` and `~/.config/opencode/AGENTS.md` are user-level only and have no project equivalent.
 - Empty files contribute nothing for the native and standalone providers.
 - A disabled discovery provider contributes nothing — check `disabledProviders` across your global, project, and `--config` layers.
