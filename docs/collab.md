@@ -107,8 +107,16 @@ Set `collab.webUrl` when the browser UI is hosted separately from the websocket 
 | `collab.relayUrl`     | `wss://my.omp.sh`     | Relay used by `/collab` when no relay is passed inline                                                         |
 | `collab.webUrl`       | empty                 | Browser UI URL for `/collab` links; empty derives from relay; explicit `http://` is allowed only for localhost |
 | `collab.displayName`  | OS username           | Name shown to other participants                                                                               |
+| `collab.autoStart`    | `false`               | Start hosting once when an interactive session begins                                                          |
+| `collab.writeLinkPath` | empty                | Overwrite this `~`-relative or absolute file with the full write-capable host link after each successful start |
 | `share.serverUrl`     | `https://my.omp.sh/s` | Share viewer/upload base used by `/share` (links are `<base>/<id>#<key>`)                                      |
 | `share.redactSecrets` | `true`                | Run the secret obfuscator over `/share` snapshots before upload                                                |
+
+Auto-start is interactive-TUI-only and is opt-in. It skips guests and sessions
+already hosting, starts at most once per TUI lifetime, and refuses the implicit
+public relay until `collab.relayUrl` is explicitly configured. Auto-start keeps
+the credential out of terminal output; use `/collab` or `/collab status` to
+display the link and QR code.
 
 ## Self-hosting the relay
 
