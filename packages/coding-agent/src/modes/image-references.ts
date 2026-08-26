@@ -3,70 +3,27 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { type BlobPutResult, blobExtensionForImageMimeType } from "../session/blob-store";
 import { fileHyperlink } from "../tui/hyperlink";
 
-/** Matches `[Image #N]`/`[Image #N, WxH]` and `[Paste #N, +X lines]`/`[Paste #N, Y chars]` tokens.
- *  Group 1 is the kind (`Image`/`Paste`), group 2 the 1-based index. The optional metadata
- *  tail (`, …`) is captured loosely (no `]`/newline) so future label tweaks keep matching. */
-export const PLACEHOLDER_REGEX = /\[(Image|Paste) #([1-9]\d*)(?:,[^\]\n]*)?\]/g;
+/** Probed pixel dimensions riding on the draft image object itself; `null` records a failed
+ *  probe so the chips band never re-decodes a corrupt header every frame. */
+const kImageDims = Symbol("omp.imageDimensions");
 
-/** Matches a single `[Image #N]` / `[Image #N, WxH]` marker and its optional
- *  immediately following `attachment://N` URI (legacy drafts only — new pastes
- *  insert the bare marker). Groups 1 and 3 are the 1-based
- *  marker and attachment indices; group 2 is the optional metadata tail
- *  (leading comma, no `]` or newline). Paste markers are excluded on purpose:
- *  their numbering is owned by the editor's paste store, not by the
- *  pending-image buffer. */
-const IMAGE_MARKER_REGEX = /\[Image #([1-9]\d*)((?:,[^\]\n]*)?)\](?: attachment:\/\/(\1))?/g;
+interface ImageContentWithDims extends ImageContent {
+	[kImageDims]?: { width: number; height: number } | null;
+}
 
-/** Renumber every `[Image #N]` marker — and, in legacy drafts, its immediately
- *  following `attachment://N` URI — in `text` by `offset` (added to each existing index),
- *  preserving the optional `, WxH` tail. Paste markers and unrelated attachment
- *  URIs are left untouched. Used when restoring queued image-messages back into
- *  a draft that already holds pending images so the merged text's positional
- *  references still line up with `pendingImages`. */
-export function shiftImageMarkers(text: string, offset: number): string {
-	if (offset === 0) return text;
-	return text.replace(IMAGE_MARKER_REGEX, (_match, idx: string, tail: string, attachmentIdx: string | undefined) => {
-		const marker = `[Image #${Number(idx) + offset}${tail}]`;
-		return attachmentIdx === undefined ? marker : `${marker} attachment://${Number(attachmentIdx) + offset}`;
-	});
+/** Cached probe result for a draft image: dimensions, `null` (probe failed), or `undefined`
+ *  (never probed). */
+export function cachedImageDimensions(image: ImageContent): { width: number; height: number } | null | undefined {
+	return (image as ImageContentWithDims)[kImageDims];
+}
+
+/** Record a probe result for a draft image (see {@link cachedImageDimensions}). */
+export function setCachedImageDimensions(image: ImageContent, dims: { width: number; height: number } | null): void {
+	(image as ImageContentWithDims)[kImageDims] = dims;
 }
 
 type ImageBlobWriter = (data: Buffer, options?: { extension?: string }) => Promise<BlobPutResult>;
 type ImageBlobWriterSync = (data: Buffer, options?: { extension?: string }) => BlobPutResult;
-
-export type PlaceholderKind = "image" | "paste";
-
-export interface PlaceholderRenderers {
-	renderText: (text: string) => string;
-	renderReference: (label: string, kind: PlaceholderKind, index: number) => string;
-}
-
-export function renderPlaceholders(text: string, renderers: PlaceholderRenderers): string {
-	PLACEHOLDER_REGEX.lastIndex = 0;
-	let result = "";
-	let last = 0;
-	let matched = false;
-
-	for (;;) {
-		const match = PLACEHOLDER_REGEX.exec(text);
-		if (match === null) break;
-		matched = true;
-		if (match.index > last) {
-			result += renderers.renderText(text.slice(last, match.index));
-		}
-		const kind: PlaceholderKind = match[1] === "Paste" ? "paste" : "image";
-		result += renderers.renderReference(match[0], kind, Number(match[2]));
-		last = match.index + match[0].length;
-	}
-
-	if (!matched) {
-		return renderers.renderText(text);
-	}
-	if (last < text.length) {
-		result += renderers.renderText(text.slice(last));
-	}
-	return result;
-}
 
 export function imageReferenceHyperlink(
 	label: string,

@@ -29,25 +29,25 @@ function makeTool(name: string): AgentTool {
 interface HarnessOptions {
 	extraRegistryTools?: readonly AgentTool[];
 	builtInToolNames?: Iterable<string>;
+	/** Registry tools active from the first turn, alongside the built-in `read`. */
+	initialActiveTools?: readonly AgentTool[];
 	rebuildGate?: { fail: boolean; calls?: number };
 	xdev?: XdevState;
 	/** Provider/id of the initial model; defaults to `anthropic/claude-sonnet-4-5`. */
 	initialModel?: { provider: string; id: string };
 }
 
-describe("InteractiveMode startup settings", () => {
+describe("InteractiveMode plan.defaultOnStartup", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
 	let mode: InteractiveMode | undefined;
 	let session: AgentSession | undefined;
-	let savedHerdrEnv: string | undefined;
 
 	beforeAll(() => {
 		initTheme();
 	});
 
 	beforeEach(async () => {
-		savedHerdrEnv = Bun.env.HERDR_ENV;
 		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-default-plan-");
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
@@ -57,8 +57,6 @@ describe("InteractiveMode startup settings", () => {
 	});
 
 	afterEach(async () => {
-		if (savedHerdrEnv === undefined) delete Bun.env.HERDR_ENV;
-		else Bun.env.HERDR_ENV = savedHerdrEnv;
 		vi.restoreAllMocks();
 		mode?.stop();
 		await session?.dispose();
@@ -107,7 +105,7 @@ describe("InteractiveMode startup settings", () => {
 				initialState: {
 					model: initialModel,
 					systemPrompt: ["Test"],
-					tools: [readTool],
+					tools: [readTool, ...(options.initialActiveTools ?? [])],
 					messages: [],
 					thinkingLevel: Effort.Medium,
 				},
@@ -143,30 +141,6 @@ describe("InteractiveMode startup settings", () => {
 			sessionSettings,
 		);
 	}
-
-	describe("tui.scrollbackRebuild", () => {
-		it("stays off outside HerdR when no value is configured", () => {
-			delete Bun.env.HERDR_ENV;
-			const created = createHarness(Settings.instance);
-
-			expect(created.ui.getScrollbackRebuild()).toBe(false);
-		});
-
-		it("starts on in HerdR when no value is configured", () => {
-			Bun.env.HERDR_ENV = "1";
-			const created = createHarness(Settings.instance);
-
-			expect(created.ui.getScrollbackRebuild()).toBe(true);
-		});
-
-		it("respects an explicit off value in HerdR", () => {
-			Bun.env.HERDR_ENV = "1";
-			Settings.instance.set("tui.scrollbackRebuild", false);
-			const created = createHarness(Settings.instance);
-
-			expect(created.ui.getScrollbackRebuild()).toBe(false);
-		});
-	});
 
 	it("enters plan mode at startup when the setting is enabled", async () => {
 		const created = createHarness(Settings.isolated({ "plan.defaultOnStartup": true, "compaction.enabled": false }));
@@ -240,6 +214,7 @@ describe("InteractiveMode startup settings", () => {
 			{
 				extraRegistryTools: [makeTool("write"), evalTool],
 				builtInToolNames: ["read", "write"],
+				initialActiveTools: [evalTool],
 				initialModel: { provider: "openai-codex", id: "gpt-5.6-sol" },
 			},
 		);
@@ -248,6 +223,9 @@ describe("InteractiveMode startup settings", () => {
 
 		expect(created.planModeEnabled).toBe(true);
 		expect(session?.getActiveToolNames()).toContain("write");
+		// The eval tool advertises the bridge from this set, so a direct `write`
+		// must never appear as `tool.write()`.
+		expect(session?.getCodeModeDirectToolNames()).toContain("write");
 		expect(session?.getActiveToolNames()).toContain("eval");
 	});
 
