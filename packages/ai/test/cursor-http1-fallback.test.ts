@@ -218,6 +218,15 @@ async function stopServer(): Promise<void> {
 }
 
 afterEach(async () => {
+	// Release any held responses and reset fixture gates so a failed test
+	// cannot leak held connections into the next, which would hang
+	// server.close() forever.
+	releaseAllHeldAppends();
+	releasePoll();
+	holdAppendResponses = false;
+	holdPollResponse = false;
+	plan = { kind: "success" };
+	await settleStragglerPollTasks();
 	await stopServer();
 	appendStatus = 200;
 });

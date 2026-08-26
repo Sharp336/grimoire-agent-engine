@@ -1,6 +1,7 @@
-import { afterEach, beforeEach, describe, expect, it, setSystemTime } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
+import * as http from "node:http";
 import * as http2 from "node:http2";
-import { __cursorH2PoolSnapshot, acquireCursorH2, disposeCursorH2Pool } from "@oh-my-pi/pi-ai/providers/cursor/h2-pool";
+import * as h2Pool from "@oh-my-pi/pi-ai/providers/cursor/h2-pool";
 import { buildCursorUnaryHeaders } from "@oh-my-pi/pi-ai/providers/cursor/headers";
 import type { CursorBidiAvailability } from "@oh-my-pi/pi-ai/providers/cursor/server-config";
 import {
@@ -131,12 +132,12 @@ async function stopServer(): Promise<void> {
 beforeEach(async () => {
 	scenario = { kind: "absent-directive" };
 	invocations = 0;
-	await disposeCursorH2Pool();
+	await h2Pool.disposeCursorH2Pool();
 	resetCursorServerConfigCache();
 });
 
 afterEach(async () => {
-	await disposeCursorH2Pool();
+	await h2Pool.disposeCursorH2Pool();
 	await stopServer();
 	setSystemTime();
 });
@@ -202,7 +203,7 @@ describe("fetchCursorBidiAvailability", () => {
 
 	it("releases the lease when the acquired stream is closed before handlers install", async () => {
 		const baseUrl = await startServer();
-		const acquisition = await acquireCursorH2({
+		const acquisition = await h2Pool.acquireCursorH2({
 			baseUrl,
 			requestPath: GET_SERVER_CONFIG_PATH,
 			headers: buildCursorUnaryHeaders({ apiKey: "test-token" }),
@@ -232,7 +233,7 @@ describe("fetchCursorBidiAvailability", () => {
 		expect(invocations).toBe(1);
 
 		await stopServer();
-		await disposeCursorH2Pool();
+		await h2Pool.disposeCursorH2Pool();
 		scenario = { kind: "all-disabled" };
 		const baseUrlB = await startServer();
 		expect(await fetchFor(baseUrlB)).toBe("all-disabled");
@@ -245,7 +246,7 @@ describe("fetchCursorBidiAvailability", () => {
 		const baseUrl = await startServer();
 		expect(await fetchFor(baseUrl)).toBe("unspecified");
 		// The stream was destroyed to stop consumption; the lease must be released.
-		expect(__cursorH2PoolSnapshot().reduce((n, entry) => n + entry.outstanding, 0)).toBe(0);
+		expect(h2Pool.__cursorH2PoolSnapshot().reduce((n, entry) => n + entry.outstanding, 0)).toBe(0);
 	});
 
 	it("bounds the cache at 8 entries (LRU) and prunes expired entries on write", async () => {
@@ -264,5 +265,155 @@ describe("fetchCursorBidiAvailability", () => {
 		setSystemTime(new Date(Date.now() + 31_000));
 		await fetchCursorBidiAvailability({ apiKey: `key-fresh`, baseUrl });
 		expect(__cursorServerConfigCacheSize()).toBe(1);
+	});
+});
+
+describe("acquireCursorH2 aborted acquisition", () => {
+	beforeEach(async () => {
+		await h2Pool.disposeCursorH2Pool();
+	});
+
+	afterEach(async () => {
+		await h2Pool.disposeCursorH2Pool();
+		await stopServer();
+	});
+
+	it("rejects an already-aborted acquisition before the pooled fast path", async () => {
+		scenario = { kind: "bidi-disabled" };
+		const baseUrl = await startServer();
+		// Establish a session and return it to the pool so the next acquisition
+		// hits the pooled fast path.
+		const first = await h2Pool.acquireCursorH2({
+			baseUrl,
+			requestPath: GET_SERVER_CONFIG_PATH,
+			headers: buildCursorUnaryHeaders({ apiKey: "test-token" }),
+			provider: "cursor",
+			signal: AbortSignal.timeout(5000),
+		});
+		expect(first.ok).toBe(true);
+		if (!first.ok) return;
+		first.lease.release();
+		// The pool now has a warm, non-draining entry. An already-aborted signal
+		// must reject before issueLease runs, so no pooled lease is handed out.
+		const controller = new AbortController();
+		controller.abort();
+		await expect(
+			h2Pool.acquireCursorH2({
+				baseUrl,
+				requestPath: GET_SERVER_CONFIG_PATH,
+				headers: buildCursorUnaryHeaders({ apiKey: "test-token" }),
+				provider: "cursor",
+				signal: controller.signal,
+			}),
+		).rejects.toBeInstanceOf(Error);
+		// The pool entry must not have a lease outstanding.
+		expect(h2Pool.__cursorH2PoolSnapshot().reduce((n, entry) => n + entry.outstanding, 0)).toBe(0);
+	});
+});
+
+describe("fetchCursorBidiAvailability concurrent miss coalescing", () => {
+	beforeEach(async () => {
+		scenario = { kind: "absent-directive" };
+		invocations = 0;
+		await h2Pool.disposeCursorH2Pool();
+		resetCursorServerConfigCache();
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await h2Pool.disposeCursorH2Pool();
+		await stopServer();
+		setSystemTime();
+	});
+
+	it("coalesces concurrent misses onto one fetch and one published value", async () => {
+		scenario = { kind: "bidi-disabled" };
+		const baseUrl = await startServer();
+		const [a, b] = await Promise.all([fetchFor(baseUrl), fetchFor(baseUrl)]);
+		expect(a).toBe("bidi-disabled");
+		expect(b).toBe("bidi-disabled");
+		// Without coalescing, each caller would start its own wire request.
+		expect(invocations).toBe(1);
+	});
+});
+
+describe("fetchCursorBidiAvailability HTTP/1 truncated response", () => {
+	let h1Server: http.Server | undefined;
+
+	beforeEach(async () => {
+		await h2Pool.disposeCursorH2Pool();
+		resetCursorServerConfigCache();
+	});
+
+	afterEach(async () => {
+		vi.restoreAllMocks();
+		await h2Pool.disposeCursorH2Pool();
+		if (h1Server) {
+			const closing = h1Server;
+			h1Server = undefined;
+			const closed = Promise.withResolvers<void>();
+			closing.close(error => (error ? closed.reject(error) : closed.resolve()));
+			await closed.promise;
+		}
+	});
+
+	it("rejects a valid envelope followed by trailing bytes as unspecified", async () => {
+		// Force the H1 fallback path by mocking the h2 acquisition to fail ALPN.
+		vi.spyOn(h2Pool, "acquireCursorH2").mockResolvedValue({
+			ok: false,
+			unavailable: {
+				reason: "alpn",
+				cause: Object.assign(new Error("h2 is not supported"), { code: "ERR_HTTP2_ERROR" }),
+			},
+		});
+		h1Server = http.createServer((_req, res) => {
+			const message = create(GetServerConfigResponseSchema, {
+				http2Config: Http2Config.FORCE_BIDI_DISABLED,
+			});
+			const dataFrame = frameConnectMessage(toBinary(GetServerConfigResponseSchema, message));
+			// Three trailing bytes that look like the start of a frame header
+			// but never form a complete envelope — a truncated response.
+			const truncated = Buffer.from([0x00, 0x00, 0x01]);
+			res.writeHead(200, { "content-type": "application/proto" });
+			res.end(Buffer.concat([dataFrame, truncated]));
+		});
+		const listening = Promise.withResolvers<void>();
+		h1Server.once("error", listening.reject);
+		h1Server.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const address = h1Server.address();
+		if (!address || typeof address === "string") throw new Error("expected h1 fixture to bind");
+		const baseUrl = `http://127.0.0.1:${address.port}`;
+		// A valid bidi-disabled envelope followed by truncated bytes must not
+		// be treated as authoritative permission to downgrade.
+		expect(await fetchFor(baseUrl)).toBe("unspecified");
+	});
+
+	it("accepts a valid envelope without end-of-stream as bidi-disabled", async () => {
+		vi.spyOn(h2Pool, "acquireCursorH2").mockResolvedValue({
+			ok: false,
+			unavailable: {
+				reason: "alpn",
+				cause: Object.assign(new Error("h2 is not supported"), { code: "ERR_HTTP2_ERROR" }),
+			},
+		});
+		h1Server = http.createServer((_req, res) => {
+			const message = create(GetServerConfigResponseSchema, {
+				http2Config: Http2Config.FORCE_BIDI_DISABLED,
+			});
+			// A single data frame with no end-of-stream envelope: a legitimate
+			// unary HTTP/1 omission that must still be decoded as authoritative.
+			const dataFrame = frameConnectMessage(toBinary(GetServerConfigResponseSchema, message));
+			res.writeHead(200, { "content-type": "application/proto" });
+			res.end(dataFrame);
+		});
+		const listening = Promise.withResolvers<void>();
+		h1Server.once("error", listening.reject);
+		h1Server.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const address = h1Server.address();
+		if (!address || typeof address === "string") throw new Error("expected h1 fixture to bind");
+		const baseUrl = `http://127.0.0.1:${address.port}`;
+		expect(await fetchFor(baseUrl)).toBe("bidi-disabled");
 	});
 });

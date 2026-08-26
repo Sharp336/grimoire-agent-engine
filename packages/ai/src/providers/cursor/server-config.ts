@@ -49,6 +49,13 @@ const MAX_SERVER_CONFIG_RESPONSE_BYTES = 1_048_576; // 1 MiB
  * them forever; expired entries are pruned opportunistically on every write.
  */
 const cache = new Map<string, { value: CursorBidiAvailability; expiresAt: number }>();
+/**
+ * Per-key in-flight fetch promise. Concurrent callers that miss the cache
+ * coalesce onto the same fetch so only one wire request is made and every
+ * caller receives the same published value. A rejected entry is cleared so
+ * later callers retry instead of awaiting a dead promise.
+ */
+const inflight = new Map<string, Promise<CursorBidiAvailability>>();
 
 /** Removes entries whose TTL has elapsed. Called on every cache write. */
 function pruneExpiredCache(): void {
@@ -66,10 +73,9 @@ function evictOverflowCache(): void {
 		cache.delete(oldest.value);
 	}
 }
-
-/** Test seam: clears the cache so suites start from a cold store. */
 export function resetCursorServerConfigCache(): void {
 	cache.clear();
+	inflight.clear();
 }
 
 /** Test seam: current entry count, for LRU/pruning assertions. */
@@ -96,11 +102,23 @@ export async function fetchCursorBidiAvailability(args: {
 		cache.set(key, cached);
 		return cached.value;
 	}
-	const value = await fetchServerConfig(args.apiKey, args.baseUrl, args.signal);
-	pruneExpiredCache();
-	cache.set(key, { value, expiresAt: Date.now() + CURSOR_SERVER_CONFIG_TTL_MS });
-	evictOverflowCache();
-	return value;
+	// Coalesce concurrent misses onto one fetch so N callers make one wire
+	// request and all receive the same published value. A rejected in-flight
+	// entry is cleared so later callers retry instead of awaiting a dead
+	// promise.
+	const existing = inflight.get(key);
+	if (existing) return existing;
+	const promise = fetchServerConfig(args.apiKey, args.baseUrl, args.signal);
+	inflight.set(key, promise);
+	try {
+		const value = await promise;
+		pruneExpiredCache();
+		cache.set(key, { value, expiresAt: Date.now() + CURSOR_SERVER_CONFIG_TTL_MS });
+		evictOverflowCache();
+		return value;
+	} finally {
+		if (inflight.get(key) === promise) inflight.delete(key);
+	}
 }
 
 async function fetchServerConfig(
@@ -152,10 +170,25 @@ async function fetchServerConfigOverHttp1(
 			signal,
 		});
 		if (!response.ok) return "unspecified";
-		const bytes = new Uint8Array(await response.arrayBuffer());
-		if (bytes.byteLength === 0 || bytes.byteLength > MAX_SERVER_CONFIG_RESPONSE_BYTES) {
-			return "unspecified";
+		// Read the body incrementally and cancel once the cumulative cap is
+		// exceeded, matching the H2 path's streaming behavior instead of
+		// buffering the entire body before checking the limit.
+		const reader = response.body?.getReader();
+		if (!reader) return "unspecified";
+		const bodyChunks: Uint8Array[] = [];
+		let cumulativeBytes = 0;
+		for (;;) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			cumulativeBytes += value.byteLength;
+			if (cumulativeBytes > MAX_SERVER_CONFIG_RESPONSE_BYTES) {
+				await reader.cancel();
+				return "unspecified";
+			}
+			bodyChunks.push(value);
 		}
+		const bytes = concatBytes(bodyChunks);
+		if (bytes.byteLength === 0) return "unspecified";
 		const decoder = new ConnectFrameDecoder({ acceptCompressed: true });
 		const chunks: Uint8Array[] = [];
 		for (const frame of decoder.push(Buffer.from(bytes))) {
@@ -165,10 +198,26 @@ async function fetchServerConfigOverHttp1(
 				return "unspecified";
 			}
 		}
-		try {
-			decoder.finish();
-		} catch {
-			// Unary HTTP/1 may omit the Connect end-of-stream envelope.
+		if (decoder.sawEndStream) {
+			// End-of-stream was seen; finish() checks for trailing bytes after it.
+			try {
+				decoder.finish();
+			} catch {
+				return "unspecified";
+			}
+		} else {
+			// Unary HTTP/1 may omit the end-of-stream envelope. But a truncated
+			// trailing frame (bytes that don't form a complete envelope) must not
+			// be treated as authoritative. Walk the raw wire format to detect
+			// any unconsumed trailing bytes.
+			let offset = 0;
+			const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+			while (offset + 5 <= bytes.byteLength) {
+				const msgLen = view.getUint32(offset + 1);
+				if (offset + 5 + msgLen > bytes.byteLength) break;
+				offset += 5 + msgLen;
+			}
+			if (offset < bytes.byteLength) return "unspecified";
 		}
 		return decodeServerConfig(chunks);
 	} catch {

@@ -61,10 +61,18 @@ interface PoolEntry {
 	 * the same points we call the underlying ref/unref, never independently.
 	 */
 	referenced: boolean;
+	/**
+	 * Wall-clock timestamp stamped when the entry last dropped to zero
+	 * outstanding leases (or at creation), used by opportunistic idle
+	 * eviction. Undefined while at least one lease is outstanding.
+	 */
+	idleSince: number | undefined;
 }
 
 /** Base-url → live (non-draining) session with its outstanding lease count. */
 const pool = new Map<string, PoolEntry>();
+/** Idle eviction window: a pooled session unused for this long is evicted. */
+const IDLE_EVICT_MS = 60_000;
 /**
  * An in-flight establishment alongside the handle that can terminate it.
  * `cancel()` is destructive: it destroys the underlying session/socket so an
@@ -149,6 +157,29 @@ function releaseEntryLease(key: string, entry: PoolEntry): void {
 	}
 	entry.session.unref();
 	entry.referenced = false;
+	entry.idleSince = Date.now();
+}
+
+/**
+ * Opportunistic idle eviction: destroys pooled entries that have had zero
+ * outstanding leases for longer than {@link IDLE_EVICT_MS}. Called on each
+ * acquisition so a process that rotates endpoints does not accumulate
+ * retained sockets indefinitely. Never evicts an entry with live leases or
+ * one that is draining; a waiter joins a `connecting` entry, not a pooled
+ * one, so no waiter is about to join an evicted entry.
+ */
+function evictIdleEntries(): void {
+	const now = Date.now();
+	for (const [key, entry] of pool) {
+		if (
+			entry.outstanding === 0 &&
+			!entry.draining &&
+			entry.idleSince !== undefined &&
+			now - entry.idleSince >= IDLE_EVICT_MS
+		) {
+			destroyEntry(key, entry);
+		}
+	}
 }
 
 /** Waits for a session's `close` (destroy already initiated). */
@@ -173,6 +204,7 @@ function issueLease(options: CursorH2AcquireOptions, key: string, entry: PoolEnt
 	if (entry.outstanding === 0) {
 		entry.session.ref();
 		entry.referenced = true;
+		entry.idleSince = undefined;
 	}
 	entry.outstanding++;
 	let request: http2.ClientHttp2Stream;
@@ -318,7 +350,7 @@ function establishSession(options: CursorH2AcquireOptions, key: string): CursorE
 				finish({
 					ok: false,
 					unavailable: {
-						reason: "connect-tunnel",
+						reason: "alpn",
 						cause: new Error(`TLS negotiated ${socket.alpnProtocol ?? "<none>"}, expected h2`),
 					},
 				});
@@ -393,7 +425,7 @@ function establishSession(options: CursorH2AcquireOptions, key: string): CursorE
 			// Node/Bun leave a just-connected session referenced, and a first-lease
 			// issuance failure must not pin a zero-outstanding idle entry.
 			connect.unref();
-			pool.set(key, { session: connect, outstanding: 0, draining: false, referenced: false });
+			pool.set(key, { session: connect, outstanding: 0, draining: false, referenced: false, idleSince: Date.now() });
 			handshake.resolve({ kind: "ok", session: connect });
 		};
 		const onGoaway = (): void => {
@@ -604,6 +636,14 @@ function joinEstablishment(
 
 export async function acquireCursorH2(options: CursorH2AcquireOptions): Promise<CursorH2Acquisition> {
 	const key = poolKey(options.baseUrl, getProxyForUrl(options.provider, new URL(options.baseUrl)));
+	// An already-aborted signal rejects before any pooled or connecting path,
+	// so an abort never receives a pooled lease or joins a shared connect.
+	if (options.signal?.aborted) throw acquisitionAbortError(options.signal);
+
+	// Opportunistic idle eviction: drop entries idle beyond the window before
+	// consulting the pool, so a process that rotates endpoints does not
+	// accumulate retained sockets indefinitely.
+	evictIdleEntries();
 
 	const entry = pool.get(key);
 	if (entry && !entry.draining) {
@@ -612,9 +652,8 @@ export async function acquireCursorH2(options: CursorH2AcquireOptions): Promise<
 
 	// Past the pooled fast path, every wait — the reservation owner's own
 	// handshake and every shared-connect joiner — is bounded by the caller's
-	// signal. An already-aborted signal rejects here without opening or joining a
-	// connect at all.
-	if (options.signal?.aborted) throw acquisitionAbortError(options.signal);
+	// signal. A signal that aborts mid-wait is handled by joinEstablishment's
+	// listener.
 
 	// Reserve before connect: while a new session is being created the key is
 	// marked connecting so a concurrent acquisition awaits the same connect

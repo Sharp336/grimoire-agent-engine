@@ -220,26 +220,25 @@ describe("cursor HTTP/2 session pool", () => {
 		expect(poolOutstanding()).toBe(0);
 	});
 
-	it("leaks no lease when the signal aborts between request creation and listener install", async () => {
+	it("rejects a pre-aborted acquisition instead of leasing, and leaks nothing", async () => {
 		const baseUrl = await startServer();
 		serveStream = respondOk;
 
-		// Establish a pooled session first so request creation is synchronous.
+		// Establish a pooled session first, so the aborted acquisition below would
+		// otherwise take the synchronous pooled fast path.
 		const warm = await acquireCursorH2(runArgs(baseUrl));
 		expect(warm.ok).toBe(true);
 		if (!warm.ok) return;
 		warm.lease.release();
 		expect(poolOutstanding()).toBe(0);
 
-		// A pre-aborted signal is observed right after request creation: the
-		// lease must be released immediately and the count return to zero.
+		// An abort that arrives mid-wait already rejects (joinEstablishment's
+		// listener), so a pre-aborted signal rejects too rather than handing back
+		// a lease whose request is already destroyed. The invariant either way is
+		// that no lease survives the abort.
 		const controller = new AbortController();
 		controller.abort();
-		const result = await acquireCursorH2({ ...runArgs(baseUrl), signal: controller.signal });
-		expect(result.ok).toBe(true);
-		if (result.ok) {
-			expect(result.lease.request.destroyed).toBe(true);
-		}
+		await expect(acquireCursorH2({ ...runArgs(baseUrl), signal: controller.signal })).rejects.toThrow();
 		expect(poolOutstanding()).toBe(0);
 	});
 
