@@ -931,15 +931,28 @@ async function isLinkedWorktreeAsync(repository: GitRepository): Promise<boolean
 	);
 }
 
+/**
+ * Resolve the primary checkout root for a linked worktree whose common dir
+ * is itself relocated via `core.worktree` — a submodule's internal git dir
+ * (`<super>/.git/modules/<name>`) or any `--separate-git-dir` checkout. Such
+ * a common dir has no ordinary parent-directory relationship to its work
+ * tree, so the `.git`-basename and bare-worktree heuristics below would
+ * otherwise return the common dir itself, splitting the submodule's primary
+ * checkout from its own linked worktrees onto different primary roots.
+ */
 function primaryRootFromRepositorySync(repository: GitRepository): string {
 	if (path.basename(repository.commonDir) === ".git") return path.dirname(repository.commonDir);
-	if (isLinkedWorktree(repository)) return repository.commonDir;
+	if (isLinkedWorktree(repository)) {
+		return resolveConfiguredWorktreeSync(repository.commonDir) ?? repository.commonDir;
+	}
 	return repository.repoRoot;
 }
 
 async function primaryRootFromRepository(repository: GitRepository): Promise<string> {
 	if (path.basename(repository.commonDir) === ".git") return path.dirname(repository.commonDir);
-	if (await isLinkedWorktreeAsync(repository)) return repository.commonDir;
+	if (await isLinkedWorktreeAsync(repository)) {
+		return (await resolveConfiguredWorktree(repository.commonDir)) ?? repository.commonDir;
+	}
 	return repository.repoRoot;
 }
 
@@ -1078,6 +1091,50 @@ function parseGitConfigHasReftable(content: string): boolean {
 		}
 	}
 	return false;
+}
+
+/**
+ * Parse a git-dir's `config` file for an explicit `core.worktree` override —
+ * the mechanism `git submodule` and `git init --separate-git-dir` both use to
+ * point a git dir at a work tree that isn't its own parent directory. Returns
+ * the raw (possibly relative) value, or `null` when unset.
+ */
+function parseGitConfigWorktree(content: string): string | null {
+	let inCore = false;
+	for (const line of content.split("\n")) {
+		const trimmed = stripGitConfigComments(line);
+		if (trimmed.startsWith("[") && trimmed.endsWith("]")) {
+			const section = trimmed.slice(1, -1).trim().toLowerCase();
+			inCore = section === "core";
+			continue;
+		}
+		if (!inCore) continue;
+		const eqIndex = trimmed.indexOf("=");
+		if (eqIndex === -1) continue;
+		const key = trimmed.slice(0, eqIndex).trim().toLowerCase();
+		if (key !== "worktree") continue;
+		let value = trimmed.slice(eqIndex + 1).trim();
+		if (value.startsWith('"') && value.endsWith('"')) value = value.slice(1, -1).trim();
+		return value || null;
+	}
+	return null;
+}
+
+/**
+ * Resolve a git-dir's `core.worktree` override to an absolute path, or
+ * `null` when the git dir has none (the ordinary case for ordinary
+ * checkouts and linked worktrees of them).
+ */
+function resolveConfiguredWorktreeSync(gitDir: string): string | null {
+	const content = readOptionalTextSync(path.join(gitDir, "config"));
+	const worktree = content ? parseGitConfigWorktree(content) : null;
+	return worktree ? path.resolve(gitDir, worktree) : null;
+}
+
+async function resolveConfiguredWorktree(gitDir: string): Promise<string | null> {
+	const content = await readOptionalText(path.join(gitDir, "config"));
+	const worktree = content ? parseGitConfigWorktree(content) : null;
+	return worktree ? path.resolve(gitDir, worktree) : null;
 }
 
 function isReftableRepoSync(repository: GitRepository): boolean {

@@ -266,6 +266,17 @@ async function resolveRepoDir(root: string): Promise<string> {
 	return repoPath;
 }
 
+/** Sync sibling of {@link resolveRepoDir}, for callers needing a synchronous primary-root lookup (e.g. bank/tag derivation). */
+function resolveRepoDirSync(root: string): string {
+	const jjDir = path.join(root, ".jj");
+	const repoPath = path.join(jjDir, "repo");
+	if (fs.statSync(repoPath).isFile()) {
+		const target = fs.readFileSync(repoPath, "utf8").trim();
+		return path.resolve(jjDir, target);
+	}
+	return repoPath;
+}
+
 async function repositoryFromRoot(root: string): Promise<JjRepository> {
 	return {
 		repoRoot: root,
@@ -356,6 +367,20 @@ export const repo = {
 	 */
 	rootSync(cwd: string): string | null {
 		return findWorkspaceRootSync(cwd) ?? null;
+	},
+
+	/**
+	 * Resolve the primary workspace root synchronously — the directory whose
+	 * `.jj/repo` is the actual repo store, following the file indirection used
+	 * by non-default workspaces created with `jj workspace add`. A colocated
+	 * workspace already gets a real Git worktree (`jj workspace add --colocate`
+	 * shells out to `git worktree add`), so `git.repo.primaryRootSync` resolves
+	 * those; this covers the non-colocated case, where no `.git` exists at all.
+	 * Returns `null` when `cwd` is outside a Jujutsu workspace.
+	 */
+	primaryRootSync(cwd: string): string | null {
+		const root = findWorkspaceRootSync(cwd);
+		return root ? path.dirname(path.dirname(resolveRepoDirSync(root))) : null;
 	},
 
 	/** Resolve the current Jujutsu workspace root, or `null` when `cwd` is not in a JJ repository. */
