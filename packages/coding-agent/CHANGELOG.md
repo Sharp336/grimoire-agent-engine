@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Added
+- Added the extension model-alias API: `ctx.models.listAliases()` exposes effective role resolution, and `pi.setModelAlias()` applies a session-only alias with model/thinking-level metadata.
 
 - Added an explicit append-only transcript declaration and width-independent stable-row API for components that can guarantee an immutable history prefix across later updates.
 - Added `:img` read selector to rasterize local SVG/SVGZ files for vision input.
