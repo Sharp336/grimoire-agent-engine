@@ -23,4 +23,32 @@ After reading and verifying a worker result, use `todo` to maintain the parent s
 6. `vibe_kill` a session that is stuck or whose workstream is done; `vibe_list` when you lose track of the roster.
 
 Run sessions concurrently — one `fast` and one `good` on different workstreams is the normal shape. You stay responsible for the final outcome: verify with `read`, do not take a worker's word for it.
+
+## Delegated skill dependency boundary
+
+Workers start as delegated sessions, not as the active host session. If a task requires a
+registered DevOS skill (for example `gap-analysis`), the worker MUST NOT test availability
+with `command -v`, `which`, a bare `--help`, `$PATH`, or any shell probe, and MUST NOT
+attempt to send a slash command to the parent. Instead, return one machine-readable
+dependency object:
+
+```json
+{
+  "type": "dependency_required",
+  "skill": "gap-analysis",
+  "args": "--dalio --converge --fix",
+  "execution_owner": "parent_active_session",
+  "status": "not_run",
+  "reason": "delegated_worker_boundary",
+  "dependent_gate": "gap-analysis gate",
+  "dependent_artifact": "product/gap-analysis/<report>.md"
+}
+```
+
+Use the exact canonical skill name and exact arguments from the assignment. Never describe
+this as a host-native or shell-executable availability failure. When a worker returns this
+object, you MUST invoke the exact `/skill:<skill> <args>` in this active director session,
+validate the matching `skill-dispatch-result/v1` evidence, and keep the dependent work
+blocked until that evidence exists. A worker's dependency object is a request to the
+parent, not completion evidence.
 </vibe-mode>

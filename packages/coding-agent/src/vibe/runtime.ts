@@ -71,6 +71,20 @@ const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 const RESPONSE_PREVIEW_MAX = 6000;
 /** Grace period for Vibe cancellation/release cleanup before teardown detaches (ms). */
 const VIBE_TEARDOWN_GRACE_MS = 5_000;
+/**
+ * Workers are deliberately isolated from the director's active skill surface. Keep this
+ * boundary in the launch path (rather than relying on AGENTS.md, which is filtered for
+ * delegated workers) so every first turn receives the same dependency contract.
+ */
+const VIBE_DELEGATED_WORKER_BOUNDARY = `Delegated worker boundary (machine-enforced):
+You are not the active host session. DevOS capabilities are registry-routed skills, not
+shell executables. Never use command -v, which, bare --help, PATH, or another shell probe
+to test a skill, and never send a slash command to the parent session. If the assignment
+requires a registered skill, return exactly one JSON dependency object with:
+{"type":"dependency_required","skill":"<canonical-name>","args":"<exact args>","execution_owner":"parent_active_session","status":"not_run","reason":"delegated_worker_boundary","dependent_gate":"<gate>","dependent_artifact":"<artifact>"}
+Do not call this host-native unavailable and do not claim the dependent gate is complete.
+The parent active session will invoke /skill:<canonical-name> <exact args> and validate the
+matching skill-dispatch-result/v1 before dependent completion.`;
 
 const VIBE_LIFECYCLE_CUSTOM_TYPE = "vibe-session-lifecycle";
 const VIBE_LIFECYCLE_VERSION = 1;
@@ -1396,8 +1410,6 @@ export class VibeSessionRegistry {
 		record: VibeRecord,
 		message: string,
 		signal: AbortSignal,
-		onProgress: (progress: AgentProgress) => void,
-	): Promise<ExecutorOptions> {
 		const sessionFile = session.getSessionFile();
 		const sessionArtifactsDir = sessionFile ? sessionFile.slice(0, -6) : null;
 		const artifactsDir = sessionArtifactsDir ?? path.join(os.tmpdir(), `omp-vibe-${Snowflake.next()}`);
@@ -1410,8 +1422,8 @@ export class VibeSessionRegistry {
 		return {
 			cwd: session.cwd,
 			agent: record.agent,
-			task: message,
-			assignment: message,
+			task: `${VIBE_DELEGATED_WORKER_BOUNDARY}\n\nAssignment:\n${message}`,
+			assignment: `${VIBE_DELEGATED_WORKER_BOUNDARY}\n\nAssignment:\n${message}`,
 			description: `vibe ${record.cli} session`,
 			index: 0,
 			id: record.id,
