@@ -126,3 +126,63 @@ describe("status line model segment compact thinking level", () => {
 		expect(Bun.stripANSI(rendered.content)).not.toContain(theme.sep.dot);
 	});
 });
+
+describe("status line model segment showProvider option", () => {
+	function createProviderContext(
+		showProvider: boolean | undefined,
+		model: { id: string; name?: string; provider: string },
+	): SegmentContext {
+		return {
+			...createModelContext(false),
+			options: showProvider !== undefined ? { model: { showProvider } } : {},
+			session: {
+				state: { model },
+				isFastModeActive: () => false,
+				isAutoThinking: false,
+				autoResolvedThinkingLevel: () => undefined,
+				isAdvisorActive: () => false,
+				getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+			} as unknown as SegmentContext["session"],
+		};
+	}
+
+	it("omits the provider prefix when showProvider is false or unspecified", () => {
+		const ctxDefault = createProviderContext(undefined, {
+			id: "gemini-3.7-flash",
+			name: "Gemini 3.7 Flash",
+			provider: "google-antigravity",
+		});
+		const renderedDefault = renderSegment("model", ctxDefault);
+		expect(Bun.stripANSI(renderedDefault.content)).toContain("Gemini 3.7 Flash");
+		expect(Bun.stripANSI(renderedDefault.content)).not.toContain("google-antigravity/");
+
+		const ctxFalse = createProviderContext(false, {
+			id: "gemini-3.7-flash",
+			name: "Gemini 3.7 Flash",
+			provider: "google-antigravity",
+		});
+		const renderedFalse = renderSegment("model", ctxFalse);
+		expect(Bun.stripANSI(renderedFalse.content)).not.toContain("google-antigravity/");
+	});
+
+	it("prepends the provider prefix when showProvider is true", () => {
+		const ctx = createProviderContext(true, {
+			id: "gemini-3.7-flash",
+			name: "Gemini 3.7 Flash",
+			provider: "google-antigravity",
+		});
+		const rendered = renderSegment("model", ctx);
+		expect(Bun.stripANSI(rendered.content)).toContain("google-antigravity/Gemini 3.7 Flash");
+	});
+
+	it("does not duplicate provider prefix if modelName already starts with provider prefix", () => {
+		const ctx = createProviderContext(true, {
+			id: "gemini-3.7-flash",
+			name: "google-antigravity/Gemini 3.7 Flash",
+			provider: "google-antigravity",
+		});
+		const rendered = renderSegment("model", ctx);
+		expect(Bun.stripANSI(rendered.content)).toContain("google-antigravity/Gemini 3.7 Flash");
+		expect(Bun.stripANSI(rendered.content)).not.toContain("google-antigravity/google-antigravity/");
+	});
+});

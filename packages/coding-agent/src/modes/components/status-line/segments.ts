@@ -121,6 +121,11 @@ const modelSegment: StatusLineSegment = {
 		if (modelName.startsWith("Claude ")) {
 			modelName = modelName.slice(7);
 		}
+		if (opts.showProvider && state.model?.provider) {
+			if (!modelName.startsWith(`${state.model.provider}/`)) {
+				modelName = `${state.model.provider}/${modelName}`;
+			}
+		}
 
 		// Resolve the current thinking-level display ("◉ xhigh", "⟳ auto", …)
 		// when the model supports thinking and the segment isn't hiding it.

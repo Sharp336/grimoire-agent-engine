@@ -2036,6 +2036,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			transparent: settings.get("statusLine.transparent"),
 			segmentOptions: settings.get("statusLine.segmentOptions"),
 			compactThinkingLevel: settings.get("statusLine.compactThinkingLevel"),
+			showModelProvider: settings.isConfigured("statusLine.showModelProvider")
+				? settings.get("statusLine.showModelProvider")
+				: undefined,
 			contextLine: settings.get("statusLine.contextLine"),
 		});
 	}

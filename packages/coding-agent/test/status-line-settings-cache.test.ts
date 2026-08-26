@@ -269,6 +269,34 @@ describe("StatusLineComponent effective settings cache", () => {
 	});
 });
 
+describe("StatusLineComponent showModelProvider precedence", () => {
+	it("preserves nested segmentOptions.model.showProvider when showModelProvider is unset", () => {
+		const component = makeComponent({
+			segmentOptions: { model: { showProvider: true } },
+		});
+		const effective = component.getEffectiveSettingsForTest();
+		expect(effective.segmentOptions.model?.showProvider).toBe(true);
+	});
+
+	it("allows explicit showModelProvider: false to override nested segmentOptions.model.showProvider: true", () => {
+		const component = makeComponent({
+			showModelProvider: false,
+			segmentOptions: { model: { showProvider: true } },
+		});
+		const effective = component.getEffectiveSettingsForTest();
+		expect(effective.segmentOptions.model?.showProvider).toBe(false);
+	});
+
+	it("allows explicit showModelProvider: true to override nested segmentOptions.model.showProvider: false", () => {
+		const component = makeComponent({
+			showModelProvider: true,
+			segmentOptions: { model: { showProvider: false } },
+		});
+		const effective = component.getEffectiveSettingsForTest();
+		expect(effective.segmentOptions.model?.showProvider).toBe(true);
+	});
+});
+
 describe("StatusLineComponent hook statuses", () => {
 	it("renders every keyed status on a deterministic line", () => {
 		const component = makeComponent({ showHookStatus: true });
