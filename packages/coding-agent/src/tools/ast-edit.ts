@@ -55,11 +55,12 @@ const astEditSchema = type({
 		.array()
 		.atLeastLength(1)
 		.describe("files, directories, globs, or internal URLs to rewrite"),
+	"selector?": type("string").describe("AST node kind to rewrite inside a contextual pattern"),
 });
 
 const PHP_MEMBER_PATTERN = /^\s*(?:(?:abstract|final|public|protected|private|readonly|static)\s+)+function\b/u;
 const PHP_MEMBER_WRAPPER_HINT =
-	"Hint: PHP member patterns cannot match at top level. Wrap the pattern in `class $_ { … }`.";
+	"Hint: For PHP members, wrap `pat` in `class $_ { … }` and set `selector` to `method_declaration` so only the member is replaced.";
 
 function phpMemberWrapperHint(ops: readonly (readonly [string, string])[]): string | undefined {
 	return ops.some(([pattern]) => PHP_MEMBER_PATTERN.test(pattern)) ? PHP_MEMBER_WRAPPER_HINT : undefined;
@@ -67,6 +68,7 @@ function phpMemberWrapperHint(ops: readonly (readonly [string, string])[]): stri
 
 interface AstEditCallOptions {
 	rewrites: Record<string, string>;
+	selector?: string;
 	dryRun: boolean;
 	maxFiles: number;
 	failOnParseError: boolean;
@@ -99,6 +101,7 @@ async function runAstEditTargets(
 	for (const target of targets) {
 		const targetResult = await astEdit({
 			rewrites: options.rewrites,
+			selector: options.selector,
 			path: target.basePath,
 			glob: target.glob,
 			dryRun: options.dryRun,
@@ -149,6 +152,7 @@ function runAstEditOnce(
 	}
 	return astEdit({
 		rewrites: options.rewrites,
+		selector: options.selector,
 		path: resolvedSearchPath,
 		glob: globFilter,
 		dryRun: options.dryRun,
@@ -205,6 +209,9 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			if (ops.length > 1) {
 				lines.push(`+${ops.length - 1} more op${ops.length === 2 ? "" : "s"}`);
 			}
+		}
+		if (params.selector) {
+			lines.push(`Selector: ${truncateForPrompt(params.selector)}`);
 		}
 		if (Array.isArray(params.paths) && params.paths.length > 0) {
 			lines.push(`Paths: ${truncateForPrompt(params.paths.join(", "))}`);
@@ -314,6 +321,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 
 			const result = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
 				rewrites: normalizedRewrites,
+				selector: params.selector,
 				dryRun: true,
 				maxFiles,
 				failOnParseError: false,
@@ -460,6 +468,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					apply: async (_reason: string) => {
 						const applyResult = await runAstEditOnce(multiTargets, resolvedSearchPath, globFilter, {
 							rewrites: normalizedRewrites,
+							selector: params.selector,
 							dryRun: false,
 							maxFiles,
 							failOnParseError: false,
