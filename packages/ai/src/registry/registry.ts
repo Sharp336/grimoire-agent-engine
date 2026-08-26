@@ -31,6 +31,7 @@ import { huggingfaceProvider } from "./huggingface";
 import { kagiProvider } from "./kagi";
 import { kiloProvider } from "./kilo";
 import { kimiCodeProvider } from "./kimi-code";
+import { kymaProvider } from "./kyma";
 import { litellmProvider } from "./litellm";
 import { llamaCppProvider } from "./llama-cpp";
 import { lmStudioProvider } from "./lm-studio";
@@ -92,6 +93,7 @@ const ALL = [
 	zaiProvider,
 	zaiCodingPlanProvider,
 	kimiCodeProvider,
+	kymaProvider,
 	openrouterProvider,
 	githubCopilotProvider,
 	cursorProvider,
