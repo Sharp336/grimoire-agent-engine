@@ -157,7 +157,7 @@ async function ensureBlobDaemon(projectDir: string, config: BlobBrokerWorkerConf
 		const existing = await describeQuietly(client, BLOB_BROKER_DAEMON_NAME, "blob broker");
 		if (existing && existing.state !== "exited" && existing.state !== "failed") {
 			if (existing.readyAt === undefined) {
-				await waitReady(client, BLOB_BROKER_DAEMON_NAME, "blob broker", undefined, READY_TIMEOUT_MS);
+				await waitReady(client, BLOB_BROKER_DAEMON_NAME, existing.id, "blob broker", undefined, READY_TIMEOUT_MS);
 			}
 			const adopted = await probeDaemon(socket);
 			if (adopted?.configKey === wantKey) return adopted;

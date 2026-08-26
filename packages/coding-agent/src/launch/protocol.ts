@@ -17,6 +17,17 @@ export const DAEMON_RUNTIME_DIR_ENV = "OMP_DAEMON_RUNTIME_DIR";
 /** Optional environment key overriding last-client shutdown grace. */
 export const DAEMON_IDLE_GRACE_ENV = "OMP_DAEMON_IDLE_GRACE_MS";
 
+/** Current broker protocol version, announced in every `ping` result. */
+export const DAEMON_PROTOCOL_VERSION = 2;
+
+/**
+ * First protocol version whose brokers support wait generation binding: the
+ * `wait` `id`/`owner` fields and the omitted-`for` auto condition. Brokers at
+ * or above this version answer `ping` with `protocolVersion`; older brokers
+ * omit it (they ignore `id` and require an explicit `for`).
+ */
+export const DAEMON_WAIT_BINDING_PROTOCOL_VERSION = 2;
+
 /** Stable lifecycle states exposed by the launch tool. */
 export type DaemonState = "starting" | "running" | "ready" | "restarting" | "stopping" | "exited" | "failed";
 
@@ -70,6 +81,42 @@ export interface DaemonSnapshot {
 /** Signals accepted by daemon input operations. */
 export type DaemonSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT" | "SIGKILL";
 
+/** Classified `wait` refusals: the wait cannot be enforced, so it returns instead of blocking. */
+export type DaemonWaitRejectCode = "missing-daemon" | "missing-id" | "stale-id" | "wrong-owner" | "upgrade-required";
+
+export interface DaemonWaitReject {
+	code: DaemonWaitRejectCode;
+	message: string;
+}
+
+const DAEMON_WAIT_REJECT_PREFIX = "wait-binding:";
+
+/** Encode a classified wait refusal into the broker's error string. */
+export function encodeDaemonWaitReject(reject: DaemonWaitReject): string {
+	return `${DAEMON_WAIT_REJECT_PREFIX}${JSON.stringify(reject)}`;
+}
+
+/** Decode a classified wait refusal from a broker error string; undefined for unrelated errors. */
+export function decodeDaemonWaitReject(error: string): DaemonWaitReject | undefined {
+	if (!error.startsWith(DAEMON_WAIT_REJECT_PREFIX)) return undefined;
+	try {
+		const value: unknown = JSON.parse(error.slice(DAEMON_WAIT_REJECT_PREFIX.length));
+		if (
+			typeof value === "object" &&
+			value !== null &&
+			"code" in value &&
+			"message" in value &&
+			typeof value.code === "string" &&
+			typeof value.message === "string"
+		) {
+			return { code: value.code as DaemonWaitRejectCode, message: value.message };
+		}
+	} catch {
+		// Malformed payloads decode to nothing; the raw error still surfaces.
+	}
+	return undefined;
+}
+
 /** Typed broker operation sent over the authenticated socket. */
 export type DaemonOperation =
 	| { op: "ping" }
@@ -87,7 +134,18 @@ export type DaemonOperation =
 			renderTerminalRows?: boolean;
 			timeoutMs: number;
 	  }
-	| { op: "wait"; name: string; for: "ready" | "exit"; pattern?: string; timeoutMs: number }
+	| {
+			op: "wait";
+			name: string;
+			/** Daemon id returned by `start` — binds the wait to one launch generation; REQUIRED. */
+			id?: string;
+			/** Caller session id; waits on a daemon owned by another session are refused. */
+			owner?: string;
+			/** Omitted = auto: already-ready returns immediately, otherwise wait for readiness or exit. */
+			for?: "ready" | "exit";
+			pattern?: string;
+			timeoutMs: number;
+	  }
 	| { op: "send"; name: string; data?: string; signal?: DaemonSignal }
 	| { op: "stop"; name: string; timeoutMs: number }
 	| { op: "restart"; name: string }
@@ -96,7 +154,7 @@ export type DaemonOperation =
 
 /** Typed broker result decoded before it reaches tool code. */
 export type DaemonRpcResult =
-	| { op: "ping"; projectDir: string }
+	| { op: "ping"; projectDir: string; protocolVersion?: number }
 	| { op: "start"; daemon: DaemonSnapshot; readyTimedOut: boolean }
 	| { op: "list"; daemons: DaemonSnapshot[] }
 	| {
@@ -122,6 +180,8 @@ export type DaemonRpcResult =
 export interface DaemonWireRequest {
 	id: string;
 	token: string;
+	/** Client protocol version (`DAEMON_PROTOCOL_VERSION`); ignored by pre-handshake brokers. */
+	protocolVersion?: number;
 	owners?: string[];
 	detachedOwners?: string[];
 	completionEvents?: boolean;
@@ -290,6 +350,10 @@ export function parseDaemonWireRequest(value: unknown): DaemonWireRequest {
 	return {
 		id: stringValue(source.id, "request.id"),
 		token: stringValue(source.token, "request.token"),
+		protocolVersion:
+			source.protocolVersion === undefined
+				? undefined
+				: numberValue(source.protocolVersion, "request.protocolVersion"),
 		owners: source.owners === undefined ? undefined : stringArray(source.owners, "request.owners"),
 		detachedOwners:
 			source.detachedOwners === undefined ? undefined : stringArray(source.detachedOwners, "request.detachedOwners"),
@@ -368,11 +432,15 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 				timeoutMs: numberValue(source.timeoutMs, "operation.timeoutMs"),
 			};
 		case "wait": {
-			const target = stringValue(source.for, "operation.for");
-			if (target !== "ready" && target !== "exit") throw new Error("operation.for must be ready or exit");
+			const target = source.for === undefined ? undefined : stringValue(source.for, "operation.for");
+			if (target !== undefined && target !== "ready" && target !== "exit") {
+				throw new Error("operation.for must be ready or exit");
+			}
 			return {
 				op,
 				name: stringValue(source.name, "operation.name"),
+				id: optionalString(source.id, "operation.id"),
+				owner: optionalString(source.owner, "operation.owner"),
 				for: target,
 				pattern: optionalString(source.pattern, "operation.pattern"),
 				timeoutMs: numberValue(source.timeoutMs, "operation.timeoutMs"),
@@ -404,7 +472,14 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 	const source = record(value, `${operation.op} result`);
 	switch (operation.op) {
 		case "ping":
-			return { op: "ping", projectDir: stringValue(source.projectDir, "result.projectDir") };
+			return {
+				op: "ping",
+				projectDir: stringValue(source.projectDir, "result.projectDir"),
+				protocolVersion:
+					source.protocolVersion === undefined
+						? undefined
+						: numberValue(source.protocolVersion, "result.protocolVersion"),
+			};
 		case "start":
 			return {
 				op: "start",

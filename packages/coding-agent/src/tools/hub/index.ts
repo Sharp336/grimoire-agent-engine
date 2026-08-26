@@ -43,6 +43,7 @@ import {
 	nothingToWaitForResult,
 	resolvePollWindow,
 	snapshotJobs,
+	taskAgentBareWaitResult,
 	visibleJobs,
 } from "./jobs";
 import {
@@ -86,7 +87,9 @@ const hubSchema = type({
 	"replyTo?": type("string").describe("send: message id being answered"),
 	"await?": type("boolean").describe('send: wait for the recipient\'s reply (invalid with to:"all")'),
 	"from?": type("string").describe("wait: only accept a message from this agent id"),
-	"ids?": type("string[]").describe("wait: job ids to watch (omit = all running jobs); cancel: job ids to kill"),
+	"ids?": type("string[]").describe(
+		"wait: job ids to watch (omit = all running jobs; task agents must name ids — bare waits are refused); cancel: job ids to kill",
+	),
 	"timeoutMs?": type("number").describe("wait (messages/jobs): timeout in milliseconds (0 waits indefinitely)"),
 	"peek?": type("boolean").describe("inbox: list messages without consuming them"),
 	"status?": type("'running' | 'idle' | 'parked'").describe("list: filter by status; omit for running+idle"),
@@ -94,6 +97,9 @@ const hubSchema = type({
 		`list: max peer rows; default ${DEFAULT_HUB_LIST_LIMIT}, max ${MAX_HUB_LIST_LIMIT}`,
 	),
 	"name?": type("string <= 48").describe("process ops: stable project-scoped launch name"),
+	"id?": type("string > 0").describe(
+		"wait with name: daemon id returned by `start` — binds the wait to one launch generation (required)",
+	),
 	"application?": type("string > 0").describe("start: executable or application path"),
 	"args?": type("string[]").describe("start: argv passed directly to the application"),
 	"env?": type({ "[string]": "string" }).describe("start: extra environment variables"),
@@ -115,7 +121,9 @@ const hubSchema = type({
 	"grep?": type("string > 0").describe("logs: regex filter"),
 	"follow?": type("boolean").describe("logs: wait for output newer than cursor"),
 	"cursor?": type("number >= 0").describe("logs: output cursor returned by an earlier call"),
-	"for?": type("'ready' | 'exit'").describe("wait with name: lifecycle condition; default exit"),
+	"for?": type("'ready' | 'exit'").describe(
+		"wait with name: lifecycle condition; omitted = auto: already-ready returns immediately, a ready-less one-shot waits for exit, otherwise waits for readiness or exit",
+	),
 	"pattern?": type("string > 0").describe("wait with name: output regex; takes precedence over for"),
 	"text?": type("string > 0").describe("send with name: stdin text"),
 	"enter?": type("boolean").describe("send with name: append Enter after text; default true"),
@@ -241,8 +249,8 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			call: { op: "send", name: "debugger", keys: ["CTRL_C"] },
 		},
 		{
-			caption: "Block until a process is ready",
-			call: { op: "wait", name: "web", for: "ready", timeout: 30 },
+			caption: "Block until a process is ready (id is the daemon id returned by start)",
+			call: { op: "wait", name: "web", id: "<daemon id from start>", for: "ready", timeout: 30 },
 		},
 	];
 
@@ -377,6 +385,15 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		// - explicit `ids` → exactly those (owner-scoped; missing ids corrected);
 		// - omitted → every running job the caller owns.
 		const ids = params.ids;
+
+		// Task agents must not enter an unbound wait: a bare wait cannot bind a
+		// job generation and would park the worker in a smart-ladder poll.
+		// Refuse immediately; explicit ids and `from`-targeted message waits
+		// are still allowed.
+		if ((this.session.taskDepth ?? 0) > 0 && !ids?.length && !from) {
+			return taskAgentBareWaitResult(this.session, manager, ownerId);
+		}
+
 		const jobsToWatch = manager
 			? ids?.length
 				? visibleJobs(manager, ids, ownerId)

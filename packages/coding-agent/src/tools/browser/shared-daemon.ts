@@ -86,7 +86,9 @@ export async function ensureSharedBrowser(opts: {
 		const existing = await describeQuietly(client, name, "Shared browser", opts.signal);
 		if (existing && existing.state !== "exited" && existing.state !== "failed") {
 			const settled =
-				existing.readyAt !== undefined ? existing : await waitReady(client, name, "Shared browser", opts.signal);
+				existing.readyAt !== undefined
+					? existing
+					: await waitReady(client, name, existing.id, "Shared browser", opts.signal);
 			const wsEndpoint = wsEndpointOf(settled);
 			if (wsEndpoint && (await probeEndpoint(wsEndpoint))) {
 				return { wsEndpoint, daemonName: name, projectDir: client.projectDir };

@@ -88,6 +88,7 @@ process.stdin.on("data", () => process.stdout.write("AFTER-SNAPSHOT\\n"));
 			const observed = await client.request({
 				op: "wait",
 				name: "cursor",
+				id: started.daemon.id,
 				for: "exit",
 				pattern: "AFTER-SNAPSHOT",
 				timeoutMs: 1_000,

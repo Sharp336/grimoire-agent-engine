@@ -10,11 +10,14 @@ import {
 	DAEMON_BROKER_WORKER_ARG,
 	DAEMON_IDLE_GRACE_ENV,
 	DAEMON_PROJECT_DIR_ENV,
+	DAEMON_PROTOCOL_VERSION,
 	DAEMON_RUNTIME_DIR_ENV,
+	DAEMON_WAIT_BINDING_PROTOCOL_VERSION,
 	type DaemonCompletionNotification,
 	type DaemonOperation,
 	type DaemonRpcResult,
 	type DaemonWireMessage,
+	encodeDaemonWaitReject,
 	parseDaemonRpcResult,
 	parseDaemonWireMessage,
 } from "./protocol";
@@ -151,6 +154,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	#buffer = "";
 	#closed = false;
 	#completionReconnectTimer: NodeJS.Timeout | undefined;
+	#brokerProtocolVersion: number | undefined;
 
 	constructor(projectDir: string, runtimeDir: string, token: string, options: DaemonBrokerClientOptions) {
 		this.projectDir = projectDir;
@@ -166,6 +170,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		await this.#connect();
 		const socket = this.#socket;
 		if (!socket || socket.destroyed) throw new Error("Daemon broker socket is unavailable");
+		this.#assertBrokerCompatible(operation);
 
 		const completionUnsubscribes = [...this.#completionUnsubscribes];
 		const completionReplays = [...this.#completionReplays];
@@ -199,6 +204,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				completionUnsubscribes,
 				completionReplays,
 				completionSubscriptionId: this.#completionSubscriptionId,
+				protocolVersion: DAEMON_PROTOCOL_VERSION,
 				operation,
 			})}\n`,
 		);
@@ -210,6 +216,45 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			if (this.#completionSinks.has(owner)) this.#completionReplays.delete(owner);
 		}
 		return result;
+	}
+
+	/**
+	 * Refuse operations whose semantics the connected broker cannot enforce.
+	 * Pre-binding brokers (their `ping` omits `protocolVersion`) ignore the
+	 * wait `id`/`owner` fields and reject an omitted `for` outright: a new CLI
+	 * must never silently downgrade a generation-bound or auto wait against
+	 * them. The refusal is classified and non-destructive — the stale
+	 * foreign/persistent broker is left running, and legacy-shaped waits
+	 * (explicit `for`, no `id`) still pass through unchanged.
+	 */
+	#assertBrokerCompatible(operation: DaemonOperation): void {
+		if (operation.op !== "wait") return;
+		const version = this.#brokerProtocolVersion;
+		if (version !== undefined && version >= DAEMON_WAIT_BINDING_PROTOCOL_VERSION) return;
+		if (operation.id !== undefined) {
+			throw new DaemonBrokerRejectedError(
+				encodeDaemonWaitReject({
+					code: "upgrade-required",
+					message:
+						`Daemon ${operation.name} wait binds generation id ${operation.id}, which the running broker ` +
+						`does not support (it predates protocol v${DAEMON_WAIT_BINDING_PROTOCOL_VERSION} and would silently ` +
+						"ignore the id). The stale broker is not restarted automatically; stop it (or the daemons " +
+						"keeping it alive) and retry, or wait with an explicit `for` and no `id` to keep the legacy contract.",
+				}),
+			);
+		}
+		if (operation.for === undefined) {
+			throw new DaemonBrokerRejectedError(
+				encodeDaemonWaitReject({
+					code: "upgrade-required",
+					message:
+						`Daemon ${operation.name} wait omits \`for\` (auto condition), which the running broker does not ` +
+						`support (it predates protocol v${DAEMON_WAIT_BINDING_PROTOCOL_VERSION} and requires an explicit ` +
+						"`for`). The stale broker is not restarted automatically; stop it (or the daemons keeping it " +
+						"alive) and retry, or pass an explicit `for` to keep the legacy contract.",
+				}),
+			);
+		}
 	}
 
 	close(): void {
@@ -284,7 +329,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 
 	async #connectOnce(): Promise<void> {
 		try {
-			this.#bindSocket(await openSocket(this.#endpoint, 250));
+			await this.#connectAndHandshake(await openSocket(this.#endpoint, 250));
 			return;
 		} catch {
 			// No live broker. Multiple clients may race to spawn; the broker's PID
@@ -295,7 +340,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		let lastError: Error | undefined;
 		while (Date.now() < deadline) {
 			try {
-				this.#bindSocket(await openSocket(this.#endpoint, 250));
+				await this.#connectAndHandshake(await openSocket(this.#endpoint, 250));
 				return;
 			} catch (error) {
 				lastError = error instanceof Error ? error : new Error(String(error));
@@ -303,6 +348,54 @@ class SocketDaemonClient implements DaemonBrokerClient {
 			}
 		}
 		throw new Error(`Failed to start daemon broker: ${lastError?.message ?? "socket unavailable"}`);
+	}
+
+	async #connectAndHandshake(socket: net.Socket): Promise<void> {
+		this.#bindSocket(socket);
+		this.#brokerProtocolVersion = await this.#hello();
+	}
+
+	/**
+	 * One authenticated ping round-trip on the freshly bound socket. The broker
+	 * answers with its protocol version (absent on pre-binding brokers), so
+	 * `request` can refuse new wait semantics instead of letting the legacy
+	 * broker silently ignore `id` or reject an omitted `for` unclassified.
+	 */
+	#hello(): Promise<number | undefined> {
+		const socket = this.#socket;
+		if (!socket || socket.destroyed) throw new Error("Daemon broker socket is unavailable");
+		const id = crypto.randomUUID();
+		const { promise, resolve, reject } = Promise.withResolvers<number | undefined>();
+		const timer = setTimeout(() => {
+			if (!this.#pending.delete(id)) return;
+			reject(new Error("Daemon broker handshake timed out"));
+		}, CONNECT_TIMEOUT_MS);
+		this.#pending.set(id, {
+			operation: { op: "ping" },
+			resolve: result => {
+				clearTimeout(timer);
+				resolve(result.op === "ping" ? result.protocolVersion : undefined);
+			},
+			reject: error => {
+				clearTimeout(timer);
+				reject(error);
+			},
+			timer,
+		});
+		socket.write(
+			`${JSON.stringify({
+				id,
+				token: this.#token,
+				owners: [...this.#completionSinks.keys()],
+				detachedOwners: [...this.#preservedCompletionOwners],
+				completionEvents: true,
+				completionUnsubscribes: [...this.#completionUnsubscribes],
+				completionSubscriptionId: this.#completionSubscriptionId,
+				protocolVersion: DAEMON_PROTOCOL_VERSION,
+				operation: { op: "ping" },
+			})}\n`,
+		);
+		return promise;
 	}
 
 	#spawnBroker(): void {
@@ -434,6 +527,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 				completionAcks: [completionId],
 				completionUnsubscribes: [...this.#completionUnsubscribes],
 				completionSubscriptionId: this.#completionSubscriptionId,
+				protocolVersion: DAEMON_PROTOCOL_VERSION,
 				operation: { op: "ping" },
 			})}\n`,
 		);

@@ -237,7 +237,7 @@ async function ensureLspMuxDaemon(projectDir: string, signal?: AbortSignal): Pro
 		const existing = await describeQuietly(client, LSP_MUX_DAEMON_NAME, "LSP mux", signal);
 		if (existing && existing.state !== "exited" && existing.state !== "failed") {
 			if (existing.readyAt === undefined) {
-				await waitReady(client, LSP_MUX_DAEMON_NAME, "LSP mux", signal, READY_TIMEOUT_MS);
+				await waitReady(client, LSP_MUX_DAEMON_NAME, existing.id, "LSP mux", signal, READY_TIMEOUT_MS);
 			}
 			if (await probeMux(endpoint)) return endpoint;
 			// Live record but nothing listening: replace the wedged daemon.
