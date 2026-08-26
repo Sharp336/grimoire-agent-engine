@@ -14,6 +14,7 @@ import {
 import { getOAuthProviders, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { ModelRegistry, type ProviderConfigInput } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { logger, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -45,6 +46,7 @@ describe("ModelRegistry runtime provider registration", () => {
 		for (const sourceId of sourceIds) {
 			unregisterOAuthProviders(sourceId);
 		}
+		resetSettingsForTest();
 		authStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
 			removeSyncWithRetries(tempDir);
@@ -1569,5 +1571,82 @@ describe("ModelRegistry runtime provider registration", () => {
 		} finally {
 			warn.mockRestore();
 		}
+	});
+
+	test("disabled extension provider is excluded from runtime discovery fetches", async () => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, overrides: { disabledProviders: ["disabled-runtime-provider"] } });
+
+		let discoveryCalls = 0;
+		const disabledRegistry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: offlineFetch });
+		disabledRegistry.registerProvider(
+			"disabled-runtime-provider",
+			{
+				baseUrl: "https://disabled.example.com/v1",
+				auth: "none",
+				api: "openai-completions",
+				fetchDynamicModels: async () => {
+					discoveryCalls++;
+					return [{ ...baseModel, id: "disabled-model" }];
+				},
+			},
+			"ext://runtime",
+		);
+
+		await disabledRegistry.refreshRuntimeProviders("online");
+		// A disabled extension provider must not be fetched by the background
+		// refresh: getAvailable()/getDiscoverableProviders() already shadow it out,
+		// so the requiresAuth gate must skip it too (mirrors #discoverableProviders
+		// filtering in #refreshRuntimeDiscoveries).
+		expect(discoveryCalls).toBe(0);
+		expect(disabledRegistry.find("disabled-runtime-provider", "disabled-model")).toBeUndefined();
+		expect(disabledRegistry.getAvailable().some(model => model.provider === "disabled-runtime-provider")).toBe(false);
+	});
+
+	test("runtime provider restorableHeaderFallback preserves headers across cache round-trip", async () => {
+		const providerName = "header-restore-provider";
+		const dynamicModels = async () => [{ ...baseModel, id: "header-model" }];
+		const cacheDbPath = path.join(tempDir, "model-cache.db");
+
+		// Seed the SQLite discovery cache with one live fetch. The provider declares
+		// a constant header that must survive a cache write (cache rows never persist
+		// headers) and be reattached on the cache-served read via restorableHeaderFallback.
+		const first = new ModelRegistry(authStorage, modelsJsonPath, { fetch: offlineFetch, cacheDbPath });
+		first.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://default.example.com/v1",
+				auth: "none",
+				api: "openai-completions",
+				headers: { "X-Custom-Auth": "secret-token" },
+				fetchDynamicModels: dynamicModels,
+			},
+			"ext://runtime",
+		);
+		await first.refreshRuntimeProviders("online");
+		expect(first.find(providerName, "header-model")?.headers?.["X-Custom-Auth"]).toBe("secret-token");
+
+		// A fresh registry over the same cache: without the restorable fallback the
+		// header-bearing model would be flagged unrestorable and dropped on the
+		// offline-style read. With it, the constant header is reattached by value.
+		let discoveryCalls = 0;
+		const second = new ModelRegistry(authStorage, modelsJsonPath, { fetch: offlineFetch, cacheDbPath });
+		second.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://default.example.com/v1",
+				auth: "none",
+				api: "openai-completions",
+				headers: { "X-Custom-Auth": "secret-token" },
+				fetchDynamicModels: async () => {
+					discoveryCalls++;
+					return dynamicModels();
+				},
+			},
+			"ext://runtime",
+		);
+		await second.refreshRuntimeProviders("online-if-uncached");
+		expect(discoveryCalls).toBe(0);
+		expect(second.find(providerName, "header-model")?.headers?.["X-Custom-Auth"]).toBe("secret-token");
 	});
 });

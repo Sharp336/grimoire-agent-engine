@@ -1721,6 +1721,14 @@ export class ModelRegistry {
 			) {
 				continue;
 			}
+			// Disabled extension providers must not be fetched by runtime discovery,
+			// mirroring the #discoverableProviders filter applied to configured
+			// discovery in #refreshRuntimeDiscoveries. getAvailable()/isAvailable()
+			// already shadow them out, so skipping them here keeps the requiresAuth
+			// background-refresh gate from fetching a provider the user disabled.
+			if (disabledProviders.has(managerOpts.providerId)) {
+				continue;
+			}
 			if (requiresAuth && strategy !== "offline") {
 				let apiKey = await this.#peekApiKeyForProvider(managerOpts.providerId);
 				if (!isAuthenticated(apiKey)) {
@@ -2567,6 +2575,19 @@ export class ModelRegistry {
 				cacheDbPath: this.#cacheDbPath,
 				cacheTtlMs: RUNTIME_PROVIDER_CACHE_TTL_MS,
 				dynamicModelsAuthoritative: true,
+				// Provider-declared headers are stripped from cache rows and must be
+				// reattached on offline reads. Configured discovery re-derives its
+				// fallback from models.yml overrides (#configuredDiscoveryHeaderFallback);
+				// a runtime provider has no static config, so capture the header
+				// sources from the registerProvider call that created it. Merging the
+				// provider headers with any authHeader/apiKey-derived Authorization
+				// mirrors that construction, and an empty result yields `undefined`
+				// so cache writes stay unchanged when there is nothing to restore.
+				restorableHeaderFallback: mergeAuthHeaderSources(
+					providerHeaders ? [providerHeaders] : [],
+					providerAuthHeader,
+					providerApiKey,
+				),
 				fetchDynamicModels: async () => {
 					const apiKey = await this.#peekApiKeyForProvider(providerName);
 					const resolvedKey = isAuthenticated(apiKey) ? apiKey : undefined;
