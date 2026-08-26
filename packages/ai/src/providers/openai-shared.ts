@@ -3548,6 +3548,7 @@ type ReasoningOptions = {
 	reasoning?: string;
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
 	disableReasoning?: boolean;
+	forceReasoningOff?: boolean;
 	toolChoice?: unknown;
 };
 
@@ -3634,7 +3635,7 @@ export function applyResponsesReasoningParams<P extends ResponseCreateParamsStre
 	includeEncryptedReasoning?: boolean,
 	omitReasoningEffort?: boolean,
 ): void {
-	return applyResponsesCompatPolicy(
+	applyResponsesCompatPolicy(
 		params,
 		resolveOpenAICompatPolicy(model, {
 			endpoint: "responses",
@@ -3644,8 +3645,15 @@ export function applyResponsesReasoningParams<P extends ResponseCreateParamsStre
 			includeEncryptedReasoning,
 			omitReasoningEffort,
 		}),
-		{ reasoningSummary: options?.reasoningSummary, mapEffort },
+		{
+			reasoningSummary: options?.reasoningSummary,
+			mapEffort,
+			forceReasoningOff: options?.forceReasoningOff,
+		},
 	);
+	if (model.reasoningMode && !options?.forceReasoningOff) {
+		params.reasoning = { ...params.reasoning, mode: model.reasoningMode };
+	}
 }
 
 /** Populate `output.usage` from a Responses-API `response.usage` payload. Does not invoke `calculateCost`. */
