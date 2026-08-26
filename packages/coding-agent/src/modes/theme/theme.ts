@@ -45,7 +45,7 @@ function shouldUseMacOSAppearanceFallback(): boolean {
 	return process.platform === "darwin" && !!Bun.env.ZELLIJ;
 }
 
-function detectTerminalBackground(): "dark" | "light" {
+export function detectTerminalAppearance(): "dark" | "light" {
 	// Tier 1: terminal-reported appearance from OSC 11 luminance.
 	if (!shouldUseMacOSAppearanceFallback() && terminalReportedAppearance) {
 		return terminalReportedAppearance;
@@ -71,7 +71,7 @@ function detectTerminalBackground(): "dark" | "light" {
 }
 
 function getDefaultTheme(): string {
-	const bg = detectTerminalBackground();
+	const bg = detectTerminalAppearance();
 	return bg === "light" ? autoLightTheme : autoDarkTheme;
 }
 

@@ -66,6 +66,9 @@ export interface RawSettings {
 	[key: string]: unknown;
 }
 
+/** Persistent configuration layer edited by the settings UI. */
+export type SettingsScope = "global" | "project";
+
 type YamlLoadResult =
 	| { kind: "missing" }
 	| { kind: "loaded"; settings: RawSettings }
@@ -80,7 +83,10 @@ type MainYamlReadResult = {
 type ProjectSettingsReadResult = {
 	settings: RawSettings;
 	fileSettings: RawSettings;
+	withoutNative: RawSettings;
+	configExists: boolean;
 	shellPathSource: string | undefined;
+	withoutNativeShellPathSource: string | undefined;
 };
 
 type ConfigOverlayReadResult = {
@@ -186,6 +192,31 @@ export function dropSettingsGroupShadows(data: RawSettings, sourcePath: string, 
 	return result;
 }
 
+/**
+ * Delete a nested value and prune empty parent objects.
+ */
+function deleteByPath(obj: RawSettings, segments: readonly string[]): boolean {
+	const parents: Array<{ parent: RawSettings; segment: string }> = [];
+	let current = obj;
+	for (let i = 0; i < segments.length - 1; i++) {
+		const segment = segments[i];
+		const child = current[segment];
+		if (!isRecord(child)) return false;
+		parents.push({ parent: current, segment });
+		current = child;
+	}
+	const leaf = segments[segments.length - 1];
+	if (!Object.hasOwn(current, leaf)) return false;
+	delete current[leaf];
+	for (let i = parents.length - 1; i >= 0; i--) {
+		const { parent, segment } = parents[i];
+		const child = parent[segment];
+		if (!isRecord(child) || Object.keys(child).length > 0) break;
+		delete parent[segment];
+	}
+	return true;
+}
+
 export function normalizeProviderMaxInFlightRequests(value: unknown): Record<string, number> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
 	const normalized: Record<string, number> = {};
@@ -201,6 +232,7 @@ export function validateProviderMaxInFlightRequests(value: unknown): Record<stri
 	const invalidProviders: string[] = [];
 	const normalized: Record<string, number> = {};
 	for (const [provider, rawLimit] of Object.entries(value)) {
+		if (rawLimit === null) continue;
 		if (typeof rawLimit !== "number" || !Number.isFinite(rawLimit) || rawLimit <= 0) {
 			invalidProviders.push(provider);
 			continue;
@@ -393,12 +425,18 @@ export class Settings {
 	#project: RawSettings = {};
 	/** Last successfully loaded native .omp/config.yml contents. */
 	#projectFileSettings: RawSettings = {};
+	/** Project settings excluding the native .omp/config.yml layer. */
+	#projectWithoutNative: RawSettings = {};
+	/** Whether the current project already has a native .omp/config.yml. */
+	#projectConfigExists = false;
 	/** Logical config paths whose malformed targets were moved aside. */
 	#quarantinedYamlTargets = new Map<string, string>();
 	/** Extra config.yml-style overlays passed by CLI */
 	#configOverlay: RawSettings = {};
 	/** Project settings file that most recently supplied shellPath. */
 	#projectShellPathSource: string | undefined;
+	/** Non-native project file that most recently supplied shellPath, if any. */
+	#projectWithoutNativeShellPathSource: string | undefined;
 	/** Explicit config overlay that most recently supplied shellPath. */
 	#overlayShellPathSource: string | undefined;
 	/** Runtime overrides (not persisted) */
@@ -411,6 +449,8 @@ export class Settings {
 
 	/** Paths modified during this session (for partial save) */
 	#modified = new Set<string>();
+	/** Native project setting paths modified during this session. */
+	#modifiedProject = new Set<string>();
 	/** Individual project model roles modified during this session */
 	#modifiedProjectModelRoles = new Set<string>();
 	/** Individual global model roles modified during this session (for partial save) */
@@ -553,6 +593,46 @@ export class Settings {
 	}
 
 	/**
+	 * Resolve a setting from only the global layer plus schema defaults,
+	 * ignoring the project/overlay/runtime layers. The settings UI uses this to
+	 * show and edit the global fallback while in global scope, so a project
+	 * override never masks the value being written.
+	 */
+	getGlobalValue<P extends SettingPath>(path: P): SettingValue<P> {
+		const value = getByPath(this.#global, SETTING_PATH_SEGMENTS[path]);
+		const resolved =
+			value !== undefined ? (resolvePathScopedStringArray(path, value, this.#cwd) ?? value) : getDefault(path);
+		return resolved as SettingValue<P>;
+	}
+
+	/**
+	 * Resolve a setting from global plus non-native project sources, ignoring
+	 * the native `.omp/config.yml` layer. Used to compute a project-scope
+	 * record delta so unchanged inherited keys are not copied into the native
+	 * file, while existing native overrides are preserved.
+	 */
+	getProjectInheritedValue<P extends SettingPath>(path: P): SettingValue<P> {
+		const merged = this.#deepMerge(this.#deepMerge({}, this.#global), this.#projectWithoutNative);
+		const value = getByPath(merged, SETTING_PATH_SEGMENTS[path]);
+		const resolved =
+			value !== undefined ? (resolvePathScopedStringArray(path, value, this.#cwd) ?? value) : getDefault(path);
+		return resolved as SettingValue<P>;
+	}
+
+	/**
+	 * Resolve a setting from global plus project sources, excluding `--config`
+	 * overlays and runtime overrides. Project-scope `/settings` rows use this
+	 * so an overlay cannot pin the displayed value while edits write below it.
+	 */
+	getProjectScopedValue<P extends SettingPath>(path: P): SettingValue<P> {
+		const merged = this.#deepMerge(this.#deepMerge({}, this.#global), this.#projectSettingsForMerge());
+		const value = getByPath(merged, SETTING_PATH_SEGMENTS[path]);
+		const resolved =
+			value !== undefined ? (resolvePathScopedStringArray(path, value, this.#cwd) ?? value) : getDefault(path);
+		return resolved as SettingValue<P>;
+	}
+
+	/**
 	 * Whether `path` has an explicitly configured value (global config, project
 	 * config, or runtime override) rather than falling back to the schema default.
 	 */
@@ -561,21 +641,64 @@ export class Settings {
 	}
 
 	/**
-	 * Set a setting value (sync).
-	 * Updates global settings and queues a background save.
-	 * Triggers hooks for settings that have side effects.
+	 * Set a setting value in a persistent layer.
+	 * Updates the global layer by default and triggers effective-value hooks.
 	 */
-	set<P extends SettingPath>(path: P, value: SettingValue<P>): void {
+	set<P extends SettingPath>(path: P, value: SettingValue<P>, scope: SettingsScope = "global"): void {
 		const prev = this.get(path);
 		const segments = path.split(".");
-		setByPath(this.#global, segments, value);
 		this.#persistedMutationGeneration++;
-		this.#modified.add(path);
+		if (scope === "project") {
+			setByPath(this.#projectFileSettings, segments, value);
+			this.#rebuildProjectLayer();
+			this.#projectConfigExists = true;
+			if (path === "shellPath") {
+				this.#projectShellPathSource = `${this.#cwd}/.omp/config.yml`;
+			}
+			this.#modifiedProject.add(path);
+			this.#queueProjectSave();
+		} else {
+			setByPath(this.#global, segments, value);
+			this.#modified.add(path);
+			this.#queueSave();
+		}
+		this.#applySettingChange(path, prev);
+	}
+
+	/**
+	 * Remove a native project override so lower-precedence settings become effective.
+	 */
+	clearProject<P extends SettingPath>(path: P): boolean {
+		const segments = SETTING_PATH_SEGMENTS[path];
+		const migratedNative = this.#migrateRawSettings(structuredClone(this.#projectFileSettings), false);
+		if (
+			getByPath(this.#projectFileSettings, segments) === undefined &&
+			getByPath(migratedNative, segments) === undefined
+		) {
+			return false;
+		}
+
+		const prev = this.get(path);
+		this.#persistedMutationGeneration++;
+		deleteByPath(this.#projectFileSettings, segments);
+		if (path === "steeringMode") {
+			delete this.#projectFileSettings.queueMode;
+		}
+		this.#rebuildProjectLayer();
+		if (path === "shellPath") {
+			this.#projectShellPathSource = Object.hasOwn(this.#project, "shellPath")
+				? this.#projectWithoutNativeShellPathSource
+				: undefined;
+		}
+		this.#modifiedProject.add(path);
+		this.#queueProjectSave();
+		this.#applySettingChange(path, prev);
+		return true;
+	}
+
+	#applySettingChange<P extends SettingPath>(path: P, prev: SettingValue<P>): void {
 		this.#rebuildMerged();
 		const next = this.get(path);
-		this.#queueSave();
-
-		// Trigger hook if exists
 		const hook = SETTING_HOOKS[path];
 		if (hook) {
 			hook(next, prev);
@@ -680,7 +803,7 @@ export class Settings {
 		if (this.#modified.size > 0 || this.#modifiedGlobalModelRoles.size > 0) {
 			await this.#saveNow();
 		}
-		if (this.#modifiedProjectModelRoles.size > 0) {
+		if (this.#modifiedProject.size > 0 || this.#modifiedProjectModelRoles.size > 0) {
 			await this.#saveProjectNow();
 		}
 	}
@@ -694,8 +817,16 @@ export class Settings {
 		cloned.#storage = this.#storage;
 		cloned.#configPath = this.#configPath;
 		cloned.#global = structuredClone(this.#global);
-		cloned.#project = this.#persist ? await cloned.#loadProjectSettings() : structuredClone(this.#project);
-		if (!this.#persist) cloned.#projectShellPathSource = this.#projectShellPathSource;
+		if (this.#persist) {
+			cloned.#project = await cloned.#loadProjectSettings();
+		} else {
+			cloned.#project = structuredClone(this.#project);
+			cloned.#projectWithoutNative = structuredClone(this.#projectWithoutNative);
+			cloned.#projectFileSettings = structuredClone(this.#projectFileSettings);
+			cloned.#projectConfigExists = this.#projectConfigExists;
+			cloned.#projectShellPathSource = this.#projectShellPathSource;
+			cloned.#projectWithoutNativeShellPathSource = this.#projectWithoutNativeShellPathSource;
+		}
 		cloned.#configFiles = [...this.#configFiles];
 		cloned.#configOverlay = structuredClone(this.#configOverlay);
 		cloned.#overlayShellPathSource = this.#overlayShellPathSource;
@@ -756,7 +887,10 @@ export class Settings {
 			this.#global = globalResult.value.settings ?? {};
 			this.#project = projectResult.value.settings;
 			this.#projectFileSettings = projectResult.value.fileSettings;
+			this.#projectWithoutNative = projectResult.value.withoutNative;
+			this.#projectConfigExists = projectResult.value.configExists;
 			this.#projectShellPathSource = projectResult.value.shellPathSource;
+			this.#projectWithoutNativeShellPathSource = projectResult.value.withoutNativeShellPathSource;
 			this.#configOverlay = overlayResult.value.settings;
 			this.#overlayShellPathSource = overlayResult.value.shellPathSource;
 			this.#rebuildMerged();
@@ -827,6 +961,11 @@ export class Settings {
 
 	getAgentDir(): string {
 		return this.#agentDir;
+	}
+
+	/** Whether the current project has a native .omp/config.yml. */
+	hasProjectConfig(): boolean {
+		return this.#projectConfigExists;
 	}
 
 	getPlansDirectory(): string {
@@ -914,6 +1053,11 @@ export class Settings {
 	 */
 	getBashInterceptorRules(): BashInterceptorRule[] {
 		return this.get("bashInterceptor.patterns");
+	}
+
+	#rawModelRolesFromLayer(layer: RawSettings): Record<string, unknown> {
+		const value = getByPath(layer, ["modelRoles"]);
+		return isRecord(value) ? { ...value } : {};
 	}
 
 	#modelRolesFromLayer(layer: RawSettings): Record<string, string> {
@@ -1027,12 +1171,13 @@ export class Settings {
 
 	#setProjectModelRoleValue(role: ModelRole | string, modelId: string | null): void {
 		const prev = this.get("modelRoles");
-		const projectRoles = getByPath(this.#project, ["modelRoles"]);
-		const current: Record<string, unknown> = isRecord(projectRoles) ? { ...projectRoles } : {};
+		const fileRoles = getByPath(this.#projectFileSettings, ["modelRoles"]);
+		const current: Record<string, unknown> = isRecord(fileRoles) ? { ...fileRoles } : {};
 		current[role] = modelId;
-		setByPath(this.#project, ["modelRoles"], current);
+		setByPath(this.#projectFileSettings, ["modelRoles"], current);
 		this.#modifiedProjectModelRoles.add(role);
 		this.#persistedMutationGeneration++;
+		this.#rebuildProjectLayer();
 		this.#rebuildMerged();
 		this.#fireEffectiveSettingChanged("modelRoles", this.get("modelRoles"), prev);
 		this.#queueProjectSave();
@@ -1405,40 +1550,58 @@ export class Settings {
 
 	async #readProjectSettings(quarantineInvalid: boolean): Promise<ProjectSettingsReadResult> {
 		let shellPathSource: string | undefined;
+		let withoutNativeShellPathSource: string | undefined;
+		const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
 		let merged: RawSettings = {};
+		let withoutNative: RawSettings = {};
 		try {
 			const result = await loadCapability(settingsCapability.id, { cwd: this.#cwd });
 			for (const item of result.items as SettingsCapabilityItem[]) {
-				if (item.level === "project") {
-					merged = this.#deepMerge(merged, dropSettingsGroupShadows(item.data as RawSettings, item.path));
-					if (Object.hasOwn(item.data, "shellPath")) shellPathSource = item.path;
+				if (item.level !== "project") continue;
+				const data = dropSettingsGroupShadows(item.data as RawSettings, item.path);
+				merged = this.#deepMerge(merged, data);
+				if (path.normalize(item.path) !== path.normalize(projectConfigPath)) {
+					withoutNative = this.#deepMerge(withoutNative, data);
+					if (Object.hasOwn(data, "shellPath")) withoutNativeShellPathSource = item.path;
 				}
+				if (Object.hasOwn(data, "shellPath")) shellPathSource = item.path;
 			}
 		} catch {
 			shellPathSource = undefined;
+			withoutNativeShellPathSource = undefined;
 			// Capability discovery is best-effort; the native project config below
 			// remains authoritative for its model-role layer and must not be hidden.
 		}
-		const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
-		const nativeProject = quarantineInvalid
-			? await this.#loadYaml(projectConfigPath)
-			: (this.#unwrapYamlLoadResult(projectConfigPath, await this.#loadYamlIfPresent(projectConfigPath, false)) ??
-				{});
-		const nativeModelRoles = getByPath(nativeProject, ["modelRoles"]);
-		if (nativeModelRoles !== undefined) {
-			merged = this.#deepMerge(merged, { modelRoles: nativeModelRoles });
+		const loadedNativeProject = quarantineInvalid
+			? await this.#loadYamlIfPresentForStartup(projectConfigPath)
+			: this.#unwrapYamlLoadResult(projectConfigPath, await this.#loadYamlIfPresent(projectConfigPath, false));
+		const nativeProject = loadedNativeProject ?? {};
+		// Native `.omp/config.yml` is the /settings project-scope write target.
+		// Overlay it last so a same-key `.claude/settings.json` (or other project
+		// source) cannot hide a native edit across reload.
+		if (loadedNativeProject !== null) {
+			merged = this.#deepMerge(merged, nativeProject);
+			if (Object.hasOwn(nativeProject, "shellPath")) {
+				shellPathSource = projectConfigPath;
+			}
 		}
 		return {
 			settings: this.#migrateRawSettings(merged, quarantineInvalid),
 			fileSettings: structuredClone(nativeProject),
+			withoutNative: this.#migrateRawSettings(withoutNative, quarantineInvalid),
+			configExists: loadedNativeProject !== null,
 			shellPathSource,
+			withoutNativeShellPathSource,
 		};
 	}
 
 	async #loadProjectSettings(): Promise<RawSettings> {
 		const result = await this.#readProjectSettings(true);
 		this.#projectFileSettings = result.fileSettings;
+		this.#projectWithoutNative = result.withoutNative;
+		this.#projectConfigExists = result.configExists;
 		this.#projectShellPathSource = result.shellPathSource;
+		this.#projectWithoutNativeShellPathSource = result.withoutNativeShellPathSource;
 		return result.settings;
 	}
 
@@ -1526,6 +1689,12 @@ export class Settings {
 	}
 
 	/** Apply schema migrations to raw settings */
+	#dropLegacyNativeKeys(target: RawSettings, path: string): void {
+		if (path === "steeringMode") {
+			delete target.queueMode;
+		}
+	}
+
 	#migrateRawSettings(raw: RawSettings, captureLegacyChangelogVersion = true): RawSettings {
 		// queueMode -> steeringMode
 		if ("queueMode" in raw && !("steeringMode" in raw)) {
@@ -2387,10 +2556,19 @@ export class Settings {
 	}
 
 	async #saveProjectNow(): Promise<void> {
-		if (this.#savesCancelled || !this.#persist || this.#modifiedProjectModelRoles.size === 0) return;
+		if (
+			this.#savesCancelled ||
+			!this.#persist ||
+			(this.#modifiedProject.size === 0 && this.#modifiedProjectModelRoles.size === 0)
+		)
+			return;
 
 		const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
+		const modifiedPaths = [...this.#modifiedProject];
 		const modifiedModelRoles = [...this.#modifiedProjectModelRoles];
+		const projectFileAtStart = structuredClone(this.#projectFileSettings);
+		const projectRolesAtStart = this.#rawModelRolesFromLayer(this.#projectFileSettings);
+		this.#modifiedProject.clear();
 		this.#modifiedProjectModelRoles.clear();
 
 		try {
@@ -2399,20 +2577,57 @@ export class Settings {
 				const loaded = await this.#loadYamlIfPresentForWriteLocked(projectConfigPath, writePath);
 				const projectSettings =
 					loaded ??
-					(this.#quarantinedYamlTargets.has(projectConfigPath) ? structuredClone(this.#projectFileSettings) : {});
+					(this.#quarantinedYamlTargets.has(projectConfigPath) ? structuredClone(projectFileAtStart) : {});
 
-				const projectRoles = getByPath(this.#project, ["modelRoles"]);
+				for (const modifiedPath of modifiedPaths) {
+					const segments = modifiedPath.split(".");
+					const value = getByPath(projectFileAtStart, segments);
+					if (value === undefined) {
+						deleteByPath(projectSettings, segments);
+					} else {
+						setByPath(projectSettings, segments, value);
+					}
+					this.#dropLegacyNativeKeys(projectSettings, modifiedPath);
+				}
 				for (const role of modifiedModelRoles) {
-					const value = isRecord(projectRoles) ? projectRoles[role] : undefined;
-					setByPath(projectSettings, ["modelRoles", role], value);
+					if (Object.hasOwn(projectRolesAtStart, role)) {
+						setByPath(projectSettings, ["modelRoles", role], projectRolesAtStart[role]);
+					} else {
+						deleteByPath(projectSettings, ["modelRoles", role]);
+					}
 				}
 
 				await this.#writeYamlAtomically(writePath, projectSettings);
-				this.#projectFileSettings = structuredClone(projectSettings);
+				this.#projectConfigExists = true;
 				this.#quarantinedYamlTargets.delete(projectConfigPath);
+
+				// Retain changes queued while the write lock was pending in the
+				// in-memory source for the follow-up save.
+				for (const pendingPath of this.#modifiedProject) {
+					const segments = pendingPath.split(".");
+					const value = getByPath(this.#projectFileSettings, segments);
+					if (value === undefined) {
+						deleteByPath(projectSettings, segments);
+					} else {
+						setByPath(projectSettings, segments, value);
+					}
+					this.#dropLegacyNativeKeys(projectSettings, pendingPath);
+				}
+				const latestProjectRoles = this.#rawModelRolesFromLayer(this.#projectFileSettings);
+				for (const role of this.#modifiedProjectModelRoles) {
+					if (Object.hasOwn(latestProjectRoles, role)) {
+						setByPath(projectSettings, ["modelRoles", role], latestProjectRoles[role]);
+					} else {
+						deleteByPath(projectSettings, ["modelRoles", role]);
+					}
+				}
+				this.#projectFileSettings = structuredClone(projectSettings);
 			});
 			invalidateCapabilityFsCache(projectConfigPath);
 		} catch (error) {
+			for (const modifiedPath of modifiedPaths) {
+				this.#modifiedProject.add(modifiedPath);
+			}
 			for (const role of modifiedModelRoles) {
 				this.#modifiedProjectModelRoles.add(role);
 			}
@@ -2438,6 +2653,11 @@ export class Settings {
 			delete filteredRoles[role];
 		}
 		return filteredRoles ? { ...this.#project, modelRoles: filteredRoles } : this.#project;
+	}
+
+	#rebuildProjectLayer(): void {
+		const native = this.#migrateRawSettings(structuredClone(this.#projectFileSettings), false);
+		this.#project = this.#deepMerge(structuredClone(this.#projectWithoutNative), native);
 	}
 
 	#rebuildMerged(): void {

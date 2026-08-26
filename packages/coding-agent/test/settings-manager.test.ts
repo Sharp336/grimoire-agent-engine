@@ -8,6 +8,7 @@ import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock
 import { __providerInFlightForTesting, streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Context } from "@oh-my-pi/pi-ai/types";
 import {
+	normalizeProviderMaxInFlightRequests,
 	onAppendOnlyModeChanged,
 	onCodeModeChanged,
 	onModelRolesChanged,
@@ -146,6 +147,243 @@ describe("Settings", () => {
 			const content = await Bun.file(getConfigPath()).text();
 			expect(content).not.toMatch(/: +$/m);
 			expect(YAML.parse(content)).toEqual({ custom, theme: { dark: "titanium" } });
+		});
+	});
+
+	describe("project setting scope", () => {
+		it("persists scoped edits to the native project config without modifying the global layer", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ theme: { dark: "dark-one" }, ask: { enabled: true }, custom: { keep: true } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.hasProjectConfig()).toBe(true);
+			settings.set("theme.dark", "titanium", "project");
+			settings.set("ask.enabled", false, "project");
+			expect(settings.get("theme.dark")).toBe("titanium");
+			expect(settings.get("ask.enabled")).toBe(false);
+			await settings.flush();
+
+			expect(await readSettings()).toEqual({});
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				theme: { dark: "titanium" },
+				ask: { enabled: false },
+				custom: { keep: true },
+			});
+		});
+		it("resolves the global layer independently of a shadowing project override", async () => {
+			await writeSettings({ ask: { enabled: false } });
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ ask: { enabled: true } }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			// Effective view is the project override; the global getter ignores it.
+			expect(settings.get("ask.enabled")).toBe(true);
+			expect(settings.getGlobalValue("ask.enabled")).toBe(false);
+
+			settings.set("ask.enabled", true, "global");
+			expect(settings.getGlobalValue("ask.enabled")).toBe(true);
+			expect(settings.get("ask.enabled")).toBe(true);
+			await settings.flush();
+
+			expect(await readSettings()).toEqual({ ask: { enabled: true } });
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({ ask: { enabled: true } });
+		});
+
+		it("removes a project override and immediately restores the global fallback", async () => {
+			await writeSettings({ ask: { enabled: false } });
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ theme: { dark: "dark-one" }, ask: { enabled: true } }, null, 2),
+			);
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("ask.enabled")).toBe(true);
+			expect(settings.clearProject("ask.enabled")).toBe(true);
+			expect(settings.get("ask.enabled")).toBe(false);
+			expect(settings.clearProject("ask.enabled")).toBe(false);
+			await settings.flush();
+
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				theme: { dark: "dark-one" },
+			});
+			expect(await readSettings()).toEqual({ ask: { enabled: false } });
+		});
+
+		it("keeps native .omp/config.yml winning over another project source after reload", async () => {
+			await fs.promises.mkdir(path.join(projectDir, ".claude"), { recursive: true });
+			await Bun.write(
+				path.join(projectDir, ".claude", "settings.json"),
+				`${JSON.stringify({ ask: { enabled: true } }, null, 2)}\n`,
+			);
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ ask: { enabled: false } }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("ask.enabled")).toBe(false);
+
+			settings.set("ask.enabled", false, "project");
+			await settings.flush();
+			const reloaded = await Settings.init({ cwd: projectDir, agentDir });
+			expect(reloaded.get("ask.enabled")).toBe(false);
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({ ask: { enabled: false } });
+		});
+
+		it("attributes an invalid native shellPath to .omp/config.yml when another project source also sets it", async () => {
+			await fs.promises.mkdir(path.join(projectDir, ".claude"), { recursive: true });
+			const missingShell = tempDir.join("missing-native-bash");
+			await Bun.write(
+				path.join(projectDir, ".claude", "settings.json"),
+				`${JSON.stringify({ shellPath: tempDir.join("missing-claude-bash") }, null, 2)}
+`,
+			);
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ shellPath: missingShell }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(() => settings.getShellConfig()).toThrow(`Please update shellPath in ${projectConfigPath}`);
+		});
+
+		it("attributes a live project-scope shellPath edit to .omp/config.yml", async () => {
+			await fs.promises.mkdir(path.join(projectDir, ".claude"), { recursive: true });
+			await Bun.write(
+				path.join(projectDir, ".claude", "settings.json"),
+				`${JSON.stringify({ shellPath: tempDir.join("missing-claude-bash") }, null, 2)}\n`,
+			);
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({}, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			const nativeShell = tempDir.join("missing-native-bash");
+
+			settings.set("shellPath", nativeShell, "project");
+			expect(() => settings.getShellConfig()).toThrow(`Please update shellPath in ${projectConfigPath}`);
+
+			settings.clearProject("shellPath");
+			expect(() => settings.getShellConfig()).toThrow(
+				`Please update shellPath in ${path.join(projectDir, ".claude", "settings.json")}`,
+			);
+		});
+
+		it("lets a project null tombstone mask a globally capped provider", async () => {
+			await writeSettings({ providers: { maxInFlightRequests: { anthropic: 3, openai: 5 } } });
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({}, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			settings.set("providers.maxInFlightRequests", { openai: 5, anthropic: null } as never, "project");
+			expect(settings.get("providers.maxInFlightRequests") as Record<string, number | null>).toEqual({
+				openai: 5,
+				anthropic: null,
+			});
+			expect(settings.getGlobalValue("providers.maxInFlightRequests")).toEqual({
+				anthropic: 3,
+				openai: 5,
+			});
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				providers: { maxInFlightRequests: { openai: 5, anthropic: null } },
+			});
+		});
+
+		it("lets a project null tombstone mask a non-native project provider cap", async () => {
+			await fs.promises.mkdir(path.join(projectDir, ".claude"), { recursive: true });
+			await Bun.write(
+				path.join(projectDir, ".claude", "settings.json"),
+				`${JSON.stringify({ providers: { maxInFlightRequests: { anthropic: 3 } } }, null, 2)}\n`,
+			);
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({}, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("providers.maxInFlightRequests")).toEqual({ anthropic: 3 });
+
+			settings.set("providers.maxInFlightRequests", { anthropic: null } as never, "project");
+			expect(normalizeProviderMaxInFlightRequests(settings.get("providers.maxInFlightRequests"))).toEqual({});
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				providers: { maxInFlightRequests: { anthropic: null } },
+			});
+		});
+
+		it("keeps a non-native provider cap live after a sibling native override", async () => {
+			await fs.promises.mkdir(path.join(projectDir, ".claude"), { recursive: true });
+			await Bun.write(
+				path.join(projectDir, ".claude", "settings.json"),
+				`${JSON.stringify({ providers: { maxInFlightRequests: { anthropic: 3 } } }, null, 2)}\n`,
+			);
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({}, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			settings.set("providers.maxInFlightRequests", { openai: 9 }, "project");
+			expect(settings.get("providers.maxInFlightRequests")).toEqual({ anthropic: 3, openai: 9 });
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				providers: { maxInFlightRequests: { openai: 9 } },
+			});
+		});
+
+		it("keeps a pending project model role across an unrelated native set", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ custom: { keep: true } }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			settings.setProjectModelRole("smol", "new/smol");
+			settings.set("ask.enabled", false, "project");
+			expect(settings.get("modelRoles")).toEqual(expect.objectContaining({ smol: "new/smol" }));
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				custom: { keep: true },
+				ask: { enabled: false },
+				modelRoles: { smol: "new/smol" },
+			});
+		});
+
+		it("keeps migrated native settings after an unrelated project edit", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ queueMode: "one-at-a-time" }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("steeringMode")).toBe("one-at-a-time");
+			settings.set("ask.enabled", true, "project");
+			expect(settings.get("steeringMode")).toBe("one-at-a-time");
+		});
+
+		it("resolves project-scope values without config overlays", async () => {
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ ask: { enabled: false } }, null, 2));
+			const overlayPath = tempDir.join("overlay.yml");
+			await Bun.write(overlayPath, YAML.stringify({ ask: { enabled: true } }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir, configFiles: [overlayPath] });
+			expect(settings.get("ask.enabled")).toBe(true);
+			expect(settings.getProjectScopedValue("ask.enabled")).toBe(false);
+		});
+
+		it("persists a native null when clearing a non-native project model role", async () => {
+			await fs.promises.mkdir(path.join(projectDir, ".claude"), { recursive: true });
+			await Bun.write(
+				path.join(projectDir, ".claude", "settings.json"),
+				`${JSON.stringify({ modelRoles: { smol: "claude/smol" } }, null, 2)}\n`,
+			);
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({}, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.getProjectModelRole("smol")).toBe("claude/smol");
+			settings.clearProjectModelRole("smol");
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({
+				modelRoles: { smol: null },
+			});
+		});
+
+		it("clears a migrated native queueMode via the steeringMode path", async () => {
+			await writeSettings({ steeringMode: "all" });
+			const projectConfigPath = path.join(projectDir, ".omp", "config.yml");
+			await Bun.write(projectConfigPath, YAML.stringify({ queueMode: "one-at-a-time" }, null, 2));
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+			expect(settings.get("steeringMode")).toBe("one-at-a-time");
+			expect(settings.clearProject("steeringMode")).toBe(true);
+			expect(settings.get("steeringMode")).toBe("all");
+			await settings.flush();
+			expect(YAML.parse(await Bun.file(projectConfigPath).text())).toEqual({});
 		});
 	});
 
