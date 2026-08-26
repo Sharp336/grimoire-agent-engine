@@ -1396,6 +1396,15 @@ export function createCacheKeepalivePolicy(
 			if (!usage) return 0;
 			return usage.cacheRead + usage.cacheWrite;
 		},
+		uncachedInputTokens: () => {
+			// Everything the provider billed as ordinary prompt input on the observed request.
+			// Across every provider in this repo `usage.input` already EXCLUDES the cache
+			// buckets — Anthropic reports `input_tokens` beside `cache_read_input_tokens`,
+			// Bedrock beside `cacheReadInputTokens`, and the OpenAI and Google mappers
+			// subtract the cached count — so this is exactly the suffix a touch re-sends at
+			// full price rather than a double count of the prefix.
+			return getSession()?.getLastAssistantMessage()?.usage?.input ?? 0;
+		},
 		/**
 		 * The learned TTL for the current route, or `undefined` when none is known yet —
 		 * the provider layer then schedules from its nominal lifetime, exactly as it does

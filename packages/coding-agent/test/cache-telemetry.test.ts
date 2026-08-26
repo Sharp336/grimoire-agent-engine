@@ -1,10 +1,18 @@
-import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { cacheFingerprint, MIN_CACHE_FOOTPRINT, orderedHash, resolveTtl, structuralHash } from "@oh-my-pi/pi-ai/cache";
+import {
+	cacheFingerprint,
+	MIN_CACHE_FOOTPRINT,
+	normalizeEndpoint,
+	orderedHash,
+	resolveTtl,
+	routeProfileKey,
+	structuralHash,
+} from "@oh-my-pi/pi-ai/cache";
 import type { CacheKeepaliveRecord } from "@oh-my-pi/pi-ai/cache/keepalive";
 import { createMockModel, type MockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -23,7 +31,7 @@ import {
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { sessionMessagePersistenceKey } from "@oh-my-pi/pi-coding-agent/session/turn-persistence";
-import { getSessionsDir } from "@oh-my-pi/pi-utils";
+import { $env, getSessionsDir } from "@oh-my-pi/pi-utils";
 
 /**
  * The journal path is injected rather than stubbed through `getStatsDbPath`: the store
@@ -38,17 +46,39 @@ async function tmpJournal(): Promise<string> {
 
 const BASE_AT = 1_760_000_000_000;
 
-function model(): Model {
+function model(baseUrl = "https://api.anthropic.com/v1"): Model {
 	return buildModel({
 		id: "claude-test",
 		name: "claude-test",
 		api: "anthropic-messages",
 		provider: "anthropic",
-		baseUrl: "https://api.anthropic.com/v1",
+		baseUrl,
 		reasoning: false,
 		input: ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 200_000,
+		maxTokens: 8_192,
+	});
+}
+
+/**
+ * A non-Anthropic route, used to prove the effective-endpoint resolution stays scoped.
+ * `moonshot` specifically because its transport DOES honour an env base-url override
+ * (`MOONSHOT_BASE_URL`, `providers/openai-shared.ts`) that this layer deliberately does
+ * not resolve — so if someone later widens the Anthropic fix generically, this model is
+ * the one whose key would move.
+ */
+function moonshotModel(): Model {
+	return buildModel({
+		id: "kimi-test",
+		name: "kimi-test",
+		api: "openai-completions",
+		provider: "moonshot",
+		baseUrl: "https://api.moonshot.ai/v1",
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
 		maxTokens: 8_192,
 	});
 }
@@ -69,7 +99,47 @@ function observation(overrides: Partial<CacheObservation> = {}): CacheObservatio
 	};
 }
 
+/**
+ * Install per-test isolation for the env vars `resolveAnthropicBaseUrl` consults, and
+ * return the setter tests use to pose as a gateway. Returned rather than exported as
+ * bare state so each `describe` gets its own save table and hooks.
+ *
+ * Values are CLEARED on entry, not merely recorded: `resolveCacheTelemetryRoute` now
+ * resolves the effective endpoint from these, so a developer or CI runner with a real
+ * gateway exported would otherwise decide the expected route keys and the suite would
+ * go green or red by accident of the shell it ran in. They are restored afterwards
+ * because `$env` is `Bun.env` — one mutable table shared by every later test file in
+ * the same bun process.
+ */
+function useHermeticEndpointEnv(): (name: string, value: string | undefined) => void {
+	const endpointEnv = ["ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_FOUNDRY", "FOUNDRY_BASE_URL"] as const;
+	const saved = new Map<string, string | undefined>();
+	const setEnv = (name: string, value: string | undefined): void => {
+		if (!saved.has(name)) saved.set(name, $env[name]);
+		if (value === undefined) delete $env[name];
+		else $env[name] = value;
+	};
+
+	beforeEach(() => {
+		for (const name of endpointEnv) setEnv(name, undefined);
+	});
+
+	afterEach(() => {
+		for (const [name, value] of saved) {
+			if (value === undefined) delete $env[name];
+			else $env[name] = value;
+		}
+		saved.clear();
+	});
+
+	return setEnv;
+}
+
 describe("cache telemetry store", () => {
+	// The route assertions below name the official endpoint, which is only the effective
+	// one when no gateway is exported. Without this the suite passes or fails by accident
+	// of the runner's shell.
+	useHermeticEndpointEnv();
 	it("round-trips an observation's numbers and outcome through the journal", async () => {
 		// Failure mode: a recorded observation that cannot be read back is telemetry
 		// that exists only in the writer's imagination.
@@ -265,6 +335,125 @@ describe("cache telemetry store", () => {
 		expect(rows.length).toBeGreaterThan(100);
 		expect(rows[rows.length - 1]?.fingerprint).toBe("fp-newest");
 		expect(rows.some(row => row.fingerprint === "fp-0")).toBe(false);
+	});
+});
+
+/**
+ * The route key persists TTL evidence, so it has to name the endpoint the request will
+ * actually reach. For Anthropic that is not always `model.baseUrl`: `FOUNDRY_BASE_URL`
+ * and `ANTHROPIC_BASE_URL` redirect a model whose configured `baseUrl` is unset or the
+ * bundled official URL (`providers/anthropic.ts` `resolveAnthropicBaseUrl`).
+ */
+describe("cache telemetry route effective endpoint", () => {
+	const setEnv = useHermeticEndpointEnv();
+	/** The key the pre-`effectiveEndpoint` code produced: keyed on `model.baseUrl` alone. */
+	function baseUrlKey(target: Model): string {
+		return routeProfileKey({
+			provider: target.provider,
+			api: target.api,
+			modelId: target.id,
+			endpoint: normalizeEndpoint(target.baseUrl),
+			route: "",
+			retention: "short",
+		});
+	}
+
+	it("keys an ANTHROPIC_BASE_URL gateway apart from the official API", () => {
+		// Failure mode: both endpoints share one route key, so the gateway's observed
+		// retention becomes the official API's learned TTL (and vice versa after an
+		// endpoint switch). The keepalive then schedules touches on a lifetime no
+		// physical entry has — too late for the shorter side, so the entry it means to
+		// keep warm is already evicted and every touch pays a full cache write.
+		const official = resolveCacheTelemetryRoute(model(), "auto");
+		expect(official?.endpoint).toBe("https://api.anthropic.com/v1");
+
+		setEnv("ANTHROPIC_BASE_URL", "https://gw.corp.example.com/anthropic");
+		const gateway = resolveCacheTelemetryRoute(model(), "auto");
+		expect(gateway?.endpoint).toBe("https://gw.corp.example.com/anthropic");
+		expect(gateway?.routeKey).not.toBe(official?.routeKey);
+	});
+
+	it("keys a Foundry redirect apart from both the official API and a plain gateway", () => {
+		// Failure mode: Foundry wins over ANTHROPIC_BASE_URL in the transport, so keying
+		// on the lower-precedence value would merge two live gateways' TTL evidence.
+		const official = resolveCacheTelemetryRoute(model(), "auto");
+
+		setEnv("ANTHROPIC_BASE_URL", "https://gw.corp.example.com/anthropic");
+		const gateway = resolveCacheTelemetryRoute(model(), "auto");
+
+		setEnv("CLAUDE_CODE_USE_FOUNDRY", "1");
+		setEnv("FOUNDRY_BASE_URL", "https://foundry.corp.example.com");
+		const foundry = resolveCacheTelemetryRoute(model(), "auto");
+
+		expect(foundry?.endpoint).toBe("https://foundry.corp.example.com");
+		expect(foundry?.routeKey).not.toBe(official?.routeKey);
+		expect(foundry?.routeKey).not.toBe(gateway?.routeKey);
+	});
+
+	it("leaves an explicitly configured non-official baseUrl winning over the env gateway", () => {
+		// Failure mode: treating the env var as unconditionally authoritative would file a
+		// models.yml proxy's observations under an unrelated gateway. `model.baseUrl` is
+		// the more specific configuration and the transport prefers it.
+		const proxy = model("https://proxy.internal.example.com/anthropic");
+		const before = resolveCacheTelemetryRoute(proxy, "auto");
+
+		setEnv("ANTHROPIC_BASE_URL", "https://gw.corp.example.com/anthropic");
+		const after = resolveCacheTelemetryRoute(proxy, "auto");
+
+		expect(after?.endpoint).toBe("https://proxy.internal.example.com/anthropic");
+		expect(after?.routeKey).toBe(before?.routeKey);
+	});
+
+	it("does not re-key a route the transport never redirects", () => {
+		// Failure mode: silently orphaning persisted evidence. The profile behind the old
+		// key still exists, but nothing reads it again, so a route with weeks of learned
+		// retention drops back below the sample gate and stops being kept warm at all.
+		// Both spellings matter: the bundled provider URL carries `/v1`, and the resolver
+		// canonicalizes `/v1` away — echoing its output back unconditionally would move
+		// the key of every such route without any endpoint actually changing.
+		for (const target of [model(), model("https://api.anthropic.com"), moonshotModel()]) {
+			const route = resolveCacheTelemetryRoute(target, "auto");
+			expect(route?.endpoint).toBe(normalizeEndpoint(target.baseUrl));
+			expect(route?.routeKey).toBe(baseUrlKey(target));
+		}
+	});
+
+	it("keeps non-Anthropic providers on their configured baseUrl", () => {
+		// Failure mode: an over-broad fix that resolves the Anthropic endpoint for every
+		// api. Moonshot's own env override lives behind per-call client options this layer
+		// never sees, so its key must not move when Anthropic env is present.
+		const moonshot = moonshotModel();
+		const before = resolveCacheTelemetryRoute(moonshot, "auto");
+
+		setEnv("ANTHROPIC_BASE_URL", "https://gw.corp.example.com/anthropic");
+		setEnv("CLAUDE_CODE_USE_FOUNDRY", "1");
+		setEnv("FOUNDRY_BASE_URL", "https://foundry.corp.example.com");
+		const after = resolveCacheTelemetryRoute(moonshot, "auto");
+
+		expect(after?.endpoint).toBe("https://api.moonshot.ai/v1");
+		expect(after?.routeKey).toBe(before?.routeKey);
+	});
+
+	it("collapses equivalent spellings of one resolved endpoint into one key", () => {
+		// Failure mode: a trailing slash or host casing shards one gateway's evidence
+		// across several keys, each staying under the sample gate forever, so a real
+		// learned TTL never materializes.
+		const keys = new Set<string>();
+		for (const spelling of [
+			"https://gw.corp.example.com/anthropic",
+			"https://gw.corp.example.com/anthropic/",
+			"https://GW.Corp.Example.COM/anthropic",
+		]) {
+			setEnv("ANTHROPIC_BASE_URL", spelling);
+			const route = resolveCacheTelemetryRoute(model(), "auto");
+			expect(route?.endpoint).toBe("https://gw.corp.example.com/anthropic");
+			keys.add(route!.routeKey);
+		}
+		expect(keys.size).toBe(1);
+
+		// A different gateway path is a different cache scope and must stay distinct.
+		setEnv("ANTHROPIC_BASE_URL", "https://gw.corp.example.com/other");
+		expect(keys.has(resolveCacheTelemetryRoute(model(), "auto")!.routeKey)).toBe(false);
 	});
 });
 

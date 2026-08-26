@@ -32,7 +32,7 @@ import {
 	CACHE_KEEPALIVE_STATE_KEY,
 	type CacheKeepalivePolicy,
 	type CacheKeepaliveShape,
-	classifyCacheOutcome,
+	classifyTouchOutcome,
 	DEFAULT_CACHE_KEEPALIVE_MAX_TOUCHES,
 	evaluateWarm,
 	LEGACY_CACHE_KEEPALIVE_MAX_TOUCHES,
@@ -45,7 +45,7 @@ import * as AIError from "./error";
 import { ProviderHttpError } from "./error";
 import { isConcurrencyCapExclusion, isUsageLimitOutcome } from "./error/rate-limit";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
-import type { AnthropicOptions } from "./providers/anthropic";
+import { type AnthropicOptions, resolveAnthropicBaseUrl } from "./providers/anthropic";
 import type { MessageCreateParamsStreaming } from "./providers/anthropic-wire";
 import { coworkFetch } from "./providers/cowork-fetch";
 import type { CursorOptions } from "./providers/cursor";
@@ -100,7 +100,6 @@ import type {
 } from "./types";
 import { resolveCacheRetention } from "./utils";
 import { AssistantMessageEventStream } from "./utils/event-stream";
-import { isFoundryEnabled } from "./utils/foundry";
 import { applyGlyphCodec } from "./utils/glyph-codec";
 import { wrapLeakedThinkingStream } from "./utils/leaked-thinking-stream";
 import { wrapFetchForProxy } from "./utils/proxy";
@@ -137,18 +136,11 @@ function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
  */
 function isLeakedThinkingHealExempt(model: Model<Api>): boolean {
 	switch (model.provider) {
-		case "anthropic": {
-			// Mirror resolveAnthropicBaseUrl's effective endpoint: Foundry redirects
-			// an empty baseUrl to FOUNDRY_BASE_URL; otherwise an explicit non-official
-			// model.baseUrl wins, then the ANTHROPIC_BASE_URL gateway fallback, then
-			// the official default. Exempt only when the effective endpoint is official.
-			if (isFoundryEnabled()) {
-				const foundry = $env.FOUNDRY_BASE_URL?.trim();
-				if (foundry) return isOfficialAnthropicApiUrl(foundry);
-			}
-			if (model.baseUrl && !isOfficialAnthropicApiUrl(model.baseUrl)) return false;
-			return isOfficialAnthropicApiUrl($env.ANTHROPIC_BASE_URL?.trim() || model.baseUrl);
-		}
+		case "anthropic":
+			// One resolver owns this precedence. This branch used to hand-mirror it and had
+			// already drifted: it skipped the URL normalization, so a trailing-slash spelling
+			// of the official host could read as non-official.
+			return isOfficialAnthropicApiUrl(resolveAnthropicBaseUrl(model as Model<"anthropic-messages">));
 		case "openai":
 			return isOfficialOpenAIApiUrl(model.baseUrl);
 		case "openai-codex":
@@ -1410,12 +1402,16 @@ class CacheKeepaliveState implements ProviderSessionState {
 		if (!policy || !cost) return undefined;
 		try {
 			const prefixTokens = policy.prefixTokens();
+			const uncachedInputTokens = policy.uncachedInputTokens?.() ?? 0;
 			return evaluateWarm({
 				prefixTokens,
-				// Resolve the context-length tier against the actual prefix: on a
-				// long-context model, pricing a 400k-token prefix at the short-context rate
-				// understates both the avoided loss and the touch cost.
-				rates: warmRatesForPrefix(cost, prefixTokens),
+				uncachedInputTokens,
+				// Resolve the context-length tier against the whole prompt the replay sends,
+				// prefix plus uncached suffix: on a long-context model, pricing a 400k-token
+				// request at the short-context rate understates both the avoided loss and the
+				// touch cost, and the tier is decided by total prompt size rather than by how
+				// much of it happened to be cached.
+				rates: warmRatesForPrefix(cost, prefixTokens + uncachedInputTokens),
 				// Read fresh: background work finishing is what should end the chain.
 				resumeProbability: policy.resumeProbability(),
 				cumulativeWarmCostUsd: this.#cumulativeCostUsd,
@@ -1433,13 +1429,11 @@ class CacheKeepaliveState implements ProviderSessionState {
 			policy.onDecision({
 				fingerprint: this.#fingerprint(),
 				decision,
+				// Stricter than `classifyCacheOutcome`: a touch that wrote cache rebuilt the
+				// entry rather than reusing it, so it must never be filed as a hit — that is
+				// what would teach the route a retention it does not have.
 				outcome: result
-					? classifyCacheOutcome({
-							ok: true,
-							cacheRead: result.cacheRead,
-							cacheWrite: result.cacheWrite,
-							inputTokens: 0,
-						})
+					? classifyTouchOutcome({ ok: true, cacheRead: result.cacheRead, cacheWrite: result.cacheWrite })
 					: undefined,
 				idleSeconds: Math.max(0, (Date.now() - this.#lastTouchAtMs) / 1000),
 				cacheRead: result?.cacheRead ?? 0,
@@ -1724,81 +1718,103 @@ function createCacheKeepalivePlan<TApi extends Api>(
 			let costUsd = 0;
 			let touchedAtMs: number | undefined;
 			let canceledAfterGenerationStarted = false;
-			const response = streamSimpleRequest(model, context, {
-				...options,
-				acceptEmptyResponse: true,
-				anthropicCacheRefreshRequest: spec.zeroOutput,
-				cacheRetention: "short",
-				maxTokens: spec.maxTokens,
-				onPayload: () => spec.boundedPayload,
-				onResponse: () => {
-					touchedAtMs = Date.now();
-				},
-				onSseEvent: undefined,
-				// A touch is not a turn: never let it inherit the keepalive flags and
-				// recurse into arming another chain.
-				anthropicCacheRefresh: false,
-				cacheKeepalivePolicy: undefined,
-				// Nor may it join the OpenAI Responses server-side conversation. A touch
-				// replays the priming request's own history, so the delta against the live
-				// chain baseline is empty — which sends
-				// `buildOpenAIResponsesChainedParams` down its reset branch and wipes
-				// `lastResponseId`/`lastParams` (`providers/openai-responses.ts:325-328`).
-				// The touch then succeeds and installs ITS response id as the chain head
-				// (`:863`), so the next real turn would chain from a discarded 1-token reply
-				// — server-side conversation and all. A keepalive must be invisible to
-				// everything except the cache clock, so it opts out of chaining entirely.
-				statefulResponses: false,
-				signal: controller.signal,
-			});
-
-			for await (const event of response) {
-				if ("partial" in event) {
-					cacheRead = event.partial.usage.cacheRead;
-					cacheWrite = event.partial.usage.cacheWrite;
-					// Bill from partial usage too, not just from `done`. A thinking-active touch
-					// aborts at the first generation event and never reaches `done`, but its
-					// cache read is fully billed by then (Anthropic prices `message_start`
-					// usage). Reading the cost only from `done` left `costUsd` at 0 on exactly
-					// that path, so cumulative spend never accrued, `evaluateWarm` could never
-					// reach `economic-stop`, and the advertised termination bound silently
-					// degraded to the `maxTouches` safety net. `done` still overwrites this
-					// below whenever the touch gets there, so it stays authoritative.
-					costUsd = event.partial.usage.cost.total;
-				}
-				if (event.type === "error") return undefined;
-				if (event.type === "done") {
-					cacheRead = event.message.usage.cacheRead;
-					cacheWrite = event.message.usage.cacheWrite;
-					costUsd = event.message.usage.cost.total;
-					break;
-				}
-				if (spec.mayAbortAtGeneration && isAnthropicGenerationEvent(event)) {
-					canceledAfterGenerationStarted = true;
-					controller.abort();
-					break;
-				}
-			}
-
-			if (canceledAfterGenerationStarted) {
-				try {
-					await response.result();
-				} catch (error) {
-					if (!controller.signal.aborted) throw error;
-				}
-			}
-			// The verified-touch rule: a read with no write proves the entry was present
-			// and reused. Anything else — including HTTP 200 with no telemetry at all —
-			// ends the chain rather than pretending the cache is still warm.
+			// A touch shares no mutable provider state with the session it protects. The
+			// generalized reason: every entry in that map is per-conversation bookkeeping, and
+			// a replay is not a turn in the conversation — it must leave no trace beyond the
+			// cache clock it resets.
 			//
-			// Report the counters even when unverified. `miss-rebuilt` means the entry was
-			// gone and this touch just paid full write price to recreate it; that is the
-			// single most expensive thing the keepalive can do, so it must reach telemetry
-			// rather than vanish as "no result". Only a request that never produced a
-			// response at all resolves to `undefined`.
-			if (touchedAtMs === undefined) return undefined;
-			const verified = cacheRead > 0 && cacheWrite === 0;
-			return { touchedAtMs, cacheRead, cacheWrite, costUsd, verified };
+			// Concretely, Antigravity keeps `stepIndex`/`lastExecutionId` here
+			// (`providers/google-gemini-cli.ts:1263-1283`). Merely BUILDING a request
+			// increments `stepIndex`, and a success writes `lastExecutionId` (`:1115`). Since
+			// the touch replaces the body wholesale, the envelope it built is thrown away —
+			// so the mutation buys nothing and costs correctness twice: the next real turn
+			// reports a step index with a gap, and names an invisible one-token reply as its
+			// prior execution.
+			//
+			// Entries are closed afterwards because a `ProviderSessionState` may hold timers.
+			const touchSessionState = new Map<string, ProviderSessionState>();
+			try {
+				const response = streamSimpleRequest(model, context, {
+					...options,
+					providerSessionState: touchSessionState,
+					acceptEmptyResponse: true,
+					anthropicCacheRefreshRequest: spec.zeroOutput,
+					cacheRetention: "short",
+					maxTokens: spec.maxTokens,
+					onPayload: () => spec.boundedPayload,
+					onResponse: () => {
+						touchedAtMs = Date.now();
+					},
+					onSseEvent: undefined,
+					// A touch is not a turn: never let it inherit the keepalive flags and
+					// recurse into arming another chain.
+					anthropicCacheRefresh: false,
+					cacheKeepalivePolicy: undefined,
+					// Nor may it join the OpenAI Responses server-side conversation. A touch
+					// replays the priming request's own history, so the delta against the live
+					// chain baseline is empty — which sends
+					// `buildOpenAIResponsesChainedParams` down its reset branch and wipes
+					// `lastResponseId`/`lastParams` (`providers/openai-responses.ts:325-328`).
+					// The touch then succeeds and installs ITS response id as the chain head
+					// (`:863`), so the next real turn would chain from a discarded 1-token reply
+					// — server-side conversation and all. A keepalive must be invisible to
+					// everything except the cache clock, so it opts out of chaining entirely.
+					statefulResponses: false,
+					signal: controller.signal,
+				});
+
+				for await (const event of response) {
+					if ("partial" in event) {
+						cacheRead = event.partial.usage.cacheRead;
+						cacheWrite = event.partial.usage.cacheWrite;
+						// Bill from partial usage too, not just from `done`. A thinking-active touch
+						// aborts at the first generation event and never reaches `done`, but its
+						// cache read is fully billed by then (Anthropic prices `message_start`
+						// usage). Reading the cost only from `done` left `costUsd` at 0 on exactly
+						// that path, so cumulative spend never accrued, `evaluateWarm` could never
+						// reach `economic-stop`, and the advertised termination bound silently
+						// degraded to the `maxTouches` safety net. `done` still overwrites this
+						// below whenever the touch gets there, so it stays authoritative.
+						costUsd = event.partial.usage.cost.total;
+					}
+					if (event.type === "error") return undefined;
+					if (event.type === "done") {
+						cacheRead = event.message.usage.cacheRead;
+						cacheWrite = event.message.usage.cacheWrite;
+						costUsd = event.message.usage.cost.total;
+						break;
+					}
+					if (spec.mayAbortAtGeneration && isAnthropicGenerationEvent(event)) {
+						canceledAfterGenerationStarted = true;
+						controller.abort();
+						break;
+					}
+				}
+
+				if (canceledAfterGenerationStarted) {
+					try {
+						await response.result();
+					} catch (error) {
+						if (!controller.signal.aborted) throw error;
+					}
+				}
+				// The verified-touch rule: a read with no write proves the entry was present
+				// and reused. Anything else — including HTTP 200 with no telemetry at all —
+				// ends the chain rather than pretending the cache is still warm.
+				//
+				// Report the counters even when unverified. `miss-rebuilt` means the entry was
+				// gone and this touch just paid full write price to recreate it; that is the
+				// single most expensive thing the keepalive can do, so it must reach telemetry
+				// rather than vanish as "no result". Only a request that never produced a
+				// response at all resolves to `undefined`.
+				if (touchedAtMs === undefined) return undefined;
+				const verified = cacheRead > 0 && cacheWrite === 0;
+				return { touchedAtMs, cacheRead, cacheWrite, costUsd, verified };
+			} finally {
+				// The throwaway map may hold a `ProviderSessionState` with live timers.
+				for (const state of touchSessionState.values()) state.close();
+				touchSessionState.clear();
+			}
 		},
 	};
 }

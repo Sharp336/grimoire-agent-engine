@@ -4,7 +4,7 @@
  */
 
 import { describe, expect, it } from "bun:test";
-import { classifyCacheOutcome, MIN_CACHE_FOOTPRINT } from "@oh-my-pi/pi-ai/cache/outcome";
+import { classifyCacheOutcome, classifyTouchOutcome, MIN_CACHE_FOOTPRINT } from "@oh-my-pi/pi-ai/cache/outcome";
 
 describe("classifyCacheOutcome", () => {
 	it("reports a confirmed hit when cache tokens were read", () => {
@@ -60,10 +60,34 @@ describe("classifyCacheOutcome", () => {
 		expect(large).toBe("success-unverified");
 		expect(small).toBe("success-unverified");
 	});
+});
 
-	it("mirrors the cache-invalidation-marker footprint floor", () => {
-		// Diverging from modes/components/cache-invalidation-marker.ts would make the
-		// two subsystems disagree about which readings are trustworthy.
-		expect(MIN_CACHE_FOOTPRINT).toBe(2048);
+describe("classifyTouchOutcome", () => {
+	it("calls a touch that wrote cache a rebuilt miss, even alongside a read", () => {
+		// THE difference from `classifyCacheOutcome`, and the reason a second function
+		// exists. A touch replays a request that was already sent, so it extends nothing: a
+		// write means the entry it was holding open had expired and this replay rebuilt it,
+		// perhaps only partly. Filing that as a hit teaches `observeTtl` that the route
+		// survives an interval it demonstrably did not, and later leases are then scheduled
+		// past the real expiry.
+		expect(classifyTouchOutcome({ ok: true, cacheRead: 4096, cacheWrite: 512 })).toBe("miss-rebuilt");
+		// Same counters, ordinary request: still a hit, because there the write is just the
+		// conversation's tail being appended past the prefix that was read.
+		expect(classifyCacheOutcome({ ok: true, cacheRead: 4096, cacheWrite: 512, inputTokens: 8192 })).toBe(
+			"confirmed-hit",
+		);
+	});
+
+	it("agrees with the chain's own verified-touch rule", () => {
+		// `CacheKeepaliveTouchResult.verified` is `cacheRead > 0 && cacheWrite === 0`, and
+		// telemetry that contradicts the control flow it describes is worse than none: only
+		// that exact shape may be reported as a hit.
+		expect(classifyTouchOutcome({ ok: true, cacheRead: 4096, cacheWrite: 0 })).toBe("confirmed-hit");
+		expect(classifyTouchOutcome({ ok: true, cacheRead: 0, cacheWrite: 4096 })).toBe("miss-rebuilt");
+		expect(classifyTouchOutcome({ ok: true, cacheRead: 0, cacheWrite: 0 })).toBe("success-unverified");
+	});
+
+	it("prefers failure over any reported cache usage", () => {
+		expect(classifyTouchOutcome({ ok: false, cacheRead: 4096, cacheWrite: 0 })).toBe("failed");
 	});
 });

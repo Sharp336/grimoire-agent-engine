@@ -1190,7 +1190,17 @@ function foundryTlsOptionsCacheKey(): string {
 	]);
 }
 
-function resolveAnthropicBaseUrl(model: Model<"anthropic-messages">, apiKey?: string): string | undefined {
+/**
+ * The endpoint an Anthropic-family request will actually reach, resolving the full
+ * precedence: Copilot's own resolver, the Foundry redirect, an explicitly configured
+ * non-official `baseUrl`, the `ANTHROPIC_BASE_URL` gateway, then the official default.
+ *
+ * Exported because two other subsystems need the SAME answer and any hand-mirrored
+ * copy drifts: `stream.ts` gates the leaked-thinking heal on whether the effective
+ * endpoint is official, and the coding-agent keys prompt-cache telemetry on it — a
+ * gateway and the official API must never merge their learned retention.
+ */
+export function resolveAnthropicBaseUrl(model: Model<"anthropic-messages">, apiKey?: string): string | undefined {
 	if (model.provider === "github-copilot") {
 		return normalizeAnthropicBaseUrl(resolveGitHubCopilotBaseUrl(model.baseUrl, apiKey) ?? model.baseUrl);
 	}

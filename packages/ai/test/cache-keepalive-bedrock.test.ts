@@ -366,6 +366,32 @@ describe("Bedrock prompt-cache keepalive", () => {
 		expect(instance.bodies).toHaveLength(2);
 	});
 
+	it("files a touch that read AND wrote as a rebuilt miss, not a hit", async () => {
+		// Failure mode: the chain already stops on this shape (`verified` requires
+		// `cacheWrite === 0`), but the telemetry row went through the ordinary request
+		// classifier, which prefers a read over a simultaneous write and called it
+		// `confirmed-hit`. `observeTtl` then raises the route's TTL lower bound from a touch
+		// that actually rebuilt the entry — an earlier breakpoint surviving while the
+		// trailing one named by the fingerprint had expired — so later leases get scheduled
+		// past the real expiry. Telemetry must agree with the rule the chain enforces.
+		const instance = harness(callIndex =>
+			callIndex === 0
+				? converseFrames(PREFIX_TOKENS, 0)
+				: converseFrames(Math.floor(PREFIX_TOKENS / 2), Math.floor(PREFIX_TOKENS / 2)),
+		);
+		await drive(instance);
+		await instance.awaitDecisions(1);
+
+		expect(instance.decisions).toHaveLength(1);
+		expect(instance.decisions[0]?.outcome).toBe("miss-rebuilt");
+		// Both counters reached the row, so the classification is the only thing under test.
+		expect(instance.decisions[0]?.cacheRead).toBeGreaterThan(0);
+		expect(instance.decisions[0]?.cacheWrite).toBeGreaterThan(0);
+		// And the chain still stopped, which it already did — this is the non-vacuity check
+		// that the fix changed the label without loosening the control flow.
+		expect(instance.bodies).toHaveLength(2);
+	});
+
 	it("reports a skip instead of touching when nothing will resume the session", async () => {
 		const instance = harness(() => converseFrames(PREFIX_TOKENS, 0));
 		// resumeProbability 0 is the "turn is genuinely over" signal. The previous blind

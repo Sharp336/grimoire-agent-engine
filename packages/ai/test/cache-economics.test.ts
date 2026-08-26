@@ -13,6 +13,9 @@ const OPUS_RATES: WarmRates = { input: 5, output: 25, cacheRead: 0.5, cacheWrite
 
 const reference: WarmInputs = {
 	prefixTokens: 120_000,
+	// The whole prompt is the cached prefix, so a touch re-sends nothing at input price.
+	// The pricing assertions below are stated against that shape.
+	uncachedInputTokens: 0,
 	rates: OPUS_RATES,
 	resumeProbability: 0.95,
 	cumulativeWarmCostUsd: 0,
@@ -207,4 +210,44 @@ describe("evaluateWarm", () => {
 		expect(tightBudget.action).toBe("economic-stop");
 		expect(tightBudget.shouldWarm).toBe(false);
 	});
+	it("bills the prompt outside the cached prefix at full input price", () => {
+		// Failure mode: the touch was priced as cacheRead(prefix) + output only. Automatic
+		// prefix caching routinely leaves a large uncached suffix, which the replay re-sends
+		// at FULL input rate — so the real invoice can exceed the rebuild the gate thinks it
+		// is avoiding, and the overrun is discovered only after the money is spent.
+		const suffixed = evaluateWarm({ ...reference, uncachedInputTokens: 50_000 });
+
+		// 120k @ $0.50/M cache read + 50k @ $5/M input + 1 @ $25/M output.
+		const expected = (120_000 * 0.5) / 1e6 + (50_000 * 5) / 1e6 + (1 * 25) / 1e6;
+		expect(suffixed.nextWarmCostUsd).toBeCloseTo(expected, 10);
+		// Four times what the prefix-only price would have been: the omission was not a
+		// rounding detail.
+		expect(suffixed.nextWarmCostUsd).toBeGreaterThan(reference_nextWarmCost() * 4);
+
+		// The avoided loss is untouched — a cold resume pays for the same suffix, so it
+		// cancels and only the touch price moves.
+		expect(suffixed.avoidableLossUsd).toBeCloseTo(evaluateWarm(reference).avoidableLossUsd, 10);
+	});
+
+	it("refuses a touch whose uncached suffix costs more than the rebuild it protects", () => {
+		// The worked case from the review: a modest cached prefix behind a large uncached
+		// suffix. Pricing only the cache read let this through as `warm`.
+		const lopsided = evaluateWarm({ ...reference, prefixTokens: 20_000, uncachedInputTokens: 400_000 });
+		expect(lopsided.nextWarmCostUsd).toBeGreaterThan(lopsided.avoidableLossUsd);
+		expect(lopsided.action).toBe("skip-not-economic");
+		expect(lopsided.shouldWarm).toBe(false);
+	});
+
+	it("refuses a non-finite uncached count instead of computing NaN costs", () => {
+		// Same contract the other usage inputs have: every field of the record must be a
+		// real number, so a bad input is rejected before any arithmetic.
+		const broken = evaluateWarm({ ...reference, uncachedInputTokens: Number.NaN });
+		expect(broken.action).toBe("skip-unknown-pricing");
+		expect(broken.nextWarmCostUsd).toBe(0);
+	});
 });
+
+/** Touch price for {@link reference}, where the whole prompt is cached. */
+function reference_nextWarmCost(): number {
+	return evaluateWarm(reference).nextWarmCostUsd;
+}

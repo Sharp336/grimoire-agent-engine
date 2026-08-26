@@ -41,6 +41,19 @@ export interface WarmRates {
 export interface WarmInputs {
 	/** Size of the cached prefix that would have to be rebuilt on a cold resume. */
 	prefixTokens: number;
+	/**
+	 * Prompt tokens the replayed request carries OUTSIDE the cached prefix, billed at the
+	 * full input rate on every touch.
+	 *
+	 * Nonzero whenever caching covers a prefix boundary rather than the whole prompt,
+	 * which is the normal case for automatic prefix caching. It does NOT affect the
+	 * avoided loss — a cold resume and a cached one both pay for this suffix, so it
+	 * cancels — but it is a real part of what a touch costs. Omitting it underpriced
+	 * every touch on such a route: a 50k cached prefix behind a 50k uncached suffix can
+	 * cost more per touch than rebuilding the prefix it protects, and the gate would
+	 * still approve it.
+	 */
+	uncachedInputTokens: number;
 	rates: WarmRates;
 	/** P(the session resumes and would have used this cache). */
 	resumeProbability: number;
@@ -93,7 +106,8 @@ export interface WarmDecision {
  * comparison, matching the documented gate order exactly.
  */
 export function evaluateWarm(inputs: WarmInputs): WarmDecision {
-	const { prefixTokens, rates, resumeProbability, cumulativeWarmCostUsd, warmOutputTokens } = inputs;
+	const { prefixTokens, uncachedInputTokens, rates, resumeProbability, cumulativeWarmCostUsd, warmOutputTokens } =
+		inputs;
 	const budgetRatio = inputs.budgetRatio ?? DEFAULT_WARM_BUDGET_RATIO;
 	const safetyMarginUsd = inputs.safetyMarginUsd ?? DEFAULT_WARM_SAFETY_MARGIN_USD;
 	const minimumNetSavingsUsd = inputs.minimumNetSavingsUsd ?? DEFAULT_MINIMUM_NET_SAVINGS_USD;
@@ -124,6 +138,7 @@ export function evaluateWarm(inputs: WarmInputs): WarmDecision {
 	if (
 		!(
 			Number.isFinite(prefixTokens) &&
+			Number.isFinite(uncachedInputTokens) &&
 			Number.isFinite(resumeProbability) &&
 			Number.isFinite(cumulativeWarmCostUsd) &&
 			Number.isFinite(warmOutputTokens) &&
@@ -152,10 +167,12 @@ export function evaluateWarm(inputs: WarmInputs): WarmDecision {
 	const expectedValueUsd = resumeProbability * avoidableLossUsd;
 	const maxWarmBudgetUsd = expectedValueUsd * budgetRatio;
 	const remainingBudgetUsd = maxWarmBudgetUsd - cumulativeWarmCostUsd;
-	// A keepalive touch re-reads the whole prefix from cache and is billed for the
-	// token(s) it emits.
+	// A keepalive touch re-reads the whole cached prefix, pays full input price for
+	// whatever prompt sits outside it, and is billed for the token(s) it emits.
 	const nextWarmCostUsd =
-		(prefixTokens * rates.cacheRead) / RATE_UNIT_TOKENS + (warmOutputTokens * rates.output) / RATE_UNIT_TOKENS;
+		(prefixTokens * rates.cacheRead) / RATE_UNIT_TOKENS +
+		(uncachedInputTokens * rates.input) / RATE_UNIT_TOKENS +
+		(warmOutputTokens * rates.output) / RATE_UNIT_TOKENS;
 
 	decision.coldResumeCostUsd = coldResumeCostUsd;
 	decision.cachedResumeCostUsd = cachedResumeCostUsd;

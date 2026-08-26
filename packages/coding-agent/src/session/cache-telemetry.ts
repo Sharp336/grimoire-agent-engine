@@ -30,6 +30,7 @@ import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { CacheOutcome, CacheRetention, TtlProfile } from "@oh-my-pi/pi-ai/cache";
 import { emptyTtlProfile, normalizeEndpoint, observeTtl, routeProfileKey } from "@oh-my-pi/pi-ai/cache";
+import { normalizeAnthropicBaseUrl, resolveAnthropicBaseUrl } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { resolveCacheRetention } from "@oh-my-pi/pi-ai/utils";
 import { getStatsDbPath, isEnoent, isRecord, logger, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 
@@ -365,6 +366,41 @@ export interface CacheTelemetryRoute {
 }
 
 /**
+ * The endpoint the transport will actually dispatch to, which is not always
+ * `model.baseUrl`. {@link resolveAnthropicBaseUrl} prefers `FOUNDRY_BASE_URL` (under
+ * `CLAUDE_CODE_USE_FOUNDRY`) and then `ANTHROPIC_BASE_URL` over a `model.baseUrl` that
+ * is unset or the bundled official URL, so keying on `model.baseUrl` would file
+ * gateway observations under `api.anthropic.com` and let a gateway's learned retention
+ * schedule touches for the official API — and vice versa across an endpoint switch.
+ * The resolver is called, never mirrored: the one hand-copy that existed (`stream.ts`)
+ * had already dropped a branch and read a trailing-slash official URL as third-party.
+ *
+ * Scoped to `anthropic` + `anthropic-messages`, the pair the resolver answers purely
+ * from model and env (the same guard `anthropicFastModeDisabled` uses). Every other
+ * provider keeps `normalizeEndpoint(model.baseUrl)` byte for byte, including
+ * `github-copilot`, whose endpoint the resolver derives from the api key: telemetry
+ * holds no credential, so an un-keyed call could only answer less precisely than the
+ * transport, and guessing is worse than the status quo.
+ *
+ * A resolved value that merely re-spells the configured one must NOT change the key.
+ * `normalizeAnthropicBaseUrl` canonicalizes away a trailing `/v1`, so echoing it back
+ * unconditionally would re-key every `.../v1`-spelled route and orphan its persisted
+ * TTL evidence — a silent regression, since the profile behind the old key still
+ * exists but nothing reads it again. Comparing through the resolver's own normalizer
+ * keeps the redirect detection while leaving non-redirected routes untouched.
+ */
+function effectiveEndpoint(model: Model): string {
+	if (model.provider !== "anthropic" || model.api !== "anthropic-messages") {
+		return normalizeEndpoint(model.baseUrl);
+	}
+	const resolved = resolveAnthropicBaseUrl(model as Model<"anthropic-messages">);
+	if (resolved === undefined || resolved === normalizeAnthropicBaseUrl(model.baseUrl)) {
+		return normalizeEndpoint(model.baseUrl);
+	}
+	return normalizeEndpoint(resolved);
+}
+
+/**
  * Resolve the route a request will cache under, or `undefined` for
  * `retention: "none"` — no entry is created then, so there is nothing to learn from
  * and nothing to keep warm.
@@ -379,7 +415,7 @@ export function resolveCacheTelemetryRoute(
 ): CacheTelemetryRoute | undefined {
 	const retention = resolveCacheRetention(retentionSetting === "auto" ? undefined : retentionSetting);
 	if (retention === "none") return undefined;
-	const endpoint = normalizeEndpoint(model.baseUrl);
+	const endpoint = effectiveEndpoint(model);
 	return {
 		endpoint,
 		retention,

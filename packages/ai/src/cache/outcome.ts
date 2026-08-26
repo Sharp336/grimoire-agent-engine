@@ -48,3 +48,29 @@ export function classifyCacheOutcome(input: {
 	if (input.cacheWrite > 0) return "miss-rebuilt";
 	return "success-unverified";
 }
+
+/**
+ * Classify one keepalive TOUCH, which is stricter than {@link classifyCacheOutcome} in
+ * exactly one place: any cache write makes it `miss-rebuilt`, even alongside a read.
+ *
+ * For an ordinary request a simultaneous write is unremarkable — the conversation grew, so
+ * the tail of the prefix is being extended past the entry that was just read, and the read
+ * still proves reuse. A touch replays a request that was ALREADY sent, so it extends
+ * nothing. A write there means the entry it was supposed to be holding open had expired
+ * and this replay rebuilt it, possibly only in part (an earlier breakpoint surviving while
+ * the trailing one named by the fingerprint had gone).
+ *
+ * Calling that a hit is not merely imprecise, it corrupts the learned TTL: `observeTtl`
+ * raises a route's lower bound from a `confirmed-hit` at idle age A, so a rebuilt touch
+ * would teach the route that its cache survives an interval it demonstrably did not, and
+ * later leases would be scheduled after the real expiry. It also disagrees with the rule
+ * the chain itself applies — {@link CacheKeepaliveTouchResult.verified} requires
+ * `cacheRead > 0 && cacheWrite === 0` — and telemetry that contradicts the control flow it
+ * describes is worse than none.
+ */
+export function classifyTouchOutcome(input: { ok: boolean; cacheRead: number; cacheWrite: number }): CacheOutcome {
+	if (!input.ok) return "failed";
+	if (input.cacheWrite > 0) return "miss-rebuilt";
+	if (input.cacheRead > 0) return "confirmed-hit";
+	return "success-unverified";
+}

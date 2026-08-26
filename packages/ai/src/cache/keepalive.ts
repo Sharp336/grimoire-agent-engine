@@ -112,6 +112,17 @@ export interface CacheKeepalivePolicy {
 	resumeProbability(): number;
 	/** Size of the cached prefix, used to price the decision. */
 	prefixTokens(): number;
+	/**
+	 * Prompt tokens the observed request carried OUTSIDE the cached prefix.
+	 *
+	 * Omitted means zero, which is only right when caching covers the whole prompt. A
+	 * route where it does not — automatic prefix caching, or an explicit breakpoint part
+	 * way through — bills the replay for this suffix at full input price on every touch,
+	 * and it also decides which context-length rate tier the request lands in. Left
+	 * optional so an existing caller keeps compiling, but supplying it is what makes the
+	 * gate's answer match the invoice.
+	 */
+	uncachedInputTokens?(): number;
 	/** Called for every touch and every skip. Must never throw; a throw is swallowed. */
 	onDecision?(record: CacheKeepaliveRecord): void;
 	/** Safety cap on touches per armed chain. Defaults to {@link DEFAULT_CACHE_KEEPALIVE_MAX_TOUCHES}. */
