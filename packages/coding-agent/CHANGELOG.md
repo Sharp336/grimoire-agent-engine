@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in ACP subagent activity surface `_omp/agents/list|update|progress|messages` ([#9878](https://github.com/can1357/oh-my-pi/pull/9878), building on [#8728](https://github.com/can1357/oh-my-pi/issues/8728) by [@Alek7eeey](https://github.com/Alek7eeey)): roster, live progress, and transcripts for ACP clients, gated behind `clientCapabilities.extensions.agents`.
+
+### Changed
+
+- ACP `_omp/agents/progress` is now driven by the task executor's subagent channels instead of task tool-call updates, so background spawns stream live work and reach explicit terminal states.
+- `_omp/agents/messages` reads are capped per request and advisor transcripts are no longer readable.
+
 ## [18.0.7] - 2026-08-26
 
 ### Added
