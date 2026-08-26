@@ -1,6 +1,12 @@
-import { describe, expect, test, mock } from "bun:test";
-import { fetchModels, login, mapCatalogEntry, pickVendor, validateKey } from "./index.ts";
+import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { fetchModels, login, mapCatalogEntry, pickVendor, validateKey } from "./index";
 
+// Every test that stubs the network does so via spyOn, and this hook restores
+// the original fetch afterwards — a leaked mock would poison later tests in
+// the same Bun worker.
+afterEach(() => {
+	mock.restore();
+});
 /** Build a vendor entry like Gateway's GET /models schema. */
 function vendor(overrides: Record<string, unknown> = {}) {
 	return {
@@ -25,6 +31,15 @@ function entry(model: string, vendors: Record<string, unknown>, displayName?: st
 /** A fetch that returns one page of the given data (envelope). */
 function singlePage(data: unknown[], hasMore = false, cursor: string | null = null) {
 	return JSON.stringify({ object: "list", data, has_more: hasMore, next_cursor: cursor });
+}
+
+/**
+ * Stub globalThis.fetch for one test; restored by the afterEach above. The
+ * cast trims Bun's preconnect extension — the Gateway client only ever calls
+ * fetch(url, init).
+ */
+function stubFetch(impl: (input: string | URL | Request, init?: RequestInit) => Promise<Response>) {
+	return spyOn(globalThis, "fetch").mockImplementation(impl as unknown as typeof fetch);
 }
 
 describe("pickVendor", () => {
@@ -101,16 +116,16 @@ describe("mapCatalogEntry", () => {
 });
 
 describe("fetchModels", () => {
-	test("returns an empty list when unauthenticated", async () => {
-		globalThis.fetch = mock(async () => {
+	test("returns no discovery when unauthenticated", async () => {
+		stubFetch(async () => {
 			throw new Error("should not fetch without a key");
-		}) as never;
-		expect(await fetchModels(undefined)).toEqual([]);
+		});
+		expect(await fetchModels(undefined)).toBeNull();
 	});
 
 	test("pages through the catalog and maps wire overrides", async () => {
 		const calls: string[] = [];
-		globalThis.fetch = mock(async (input: any) => {
+		const fetchMock = stubFetch(async input => {
 			const url = String(input);
 			calls.push(url);
 			if (url.includes("cursor=next")) {
@@ -132,9 +147,10 @@ describe("fetchModels", () => {
 				),
 				{ status: 200 },
 			);
-		}) as never;
+		});
 
 		const result = await fetchModels("mg_key");
+		if (!result) throw new Error("expected discovery to return models");
 		expect(calls[0]).toContain("limit=500");
 		expect(calls[1]).toContain("cursor=next");
 		expect(result.map(m => m.id)).toEqual(["openai/gpt-5.2", "anthropic/claude", "google/gemini"]);
@@ -143,14 +159,12 @@ describe("fetchModels", () => {
 		expect(claude.api).toBe("anthropic-messages");
 		expect(claude.baseUrl).toBe("https://api-gateway.merge.dev");
 		// Bearer header sent
-		const init = (globalThis.fetch as any).mock.calls[0][1];
-		expect(new Headers(init.headers).get("Authorization")).toBe("Bearer mg_key");
+		const init = fetchMock.mock.calls[0][1];
+		expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer mg_key");
 	});
 
 	test("surfaces SDK-typed rate limit errors", async () => {
-		globalThis.fetch = mock(
-			async () => new Response(JSON.stringify({ error: { message: "quota exceeded" } }), { status: 429 }),
-		) as never;
+		stubFetch(async () => new Response(JSON.stringify({ error: { message: "quota exceeded" } }), { status: 429 }));
 		await expect(fetchModels("mg_key")).rejects.toThrow(
 			/Merge Gateway model discovery failed: RateLimitError: quota exceeded/,
 		);
@@ -158,12 +172,12 @@ describe("fetchModels", () => {
 
 	test("reports uncapped pagination through the warn sink", async () => {
 		let page = 0;
-		globalThis.fetch = mock(async () => {
+		stubFetch(async () => {
 			page++;
 			return new Response(singlePage([entry(`openai/m${page}`, { openai: vendor() })], true, `c${page}`), {
 				status: 200,
 			});
-		}) as never;
+		});
 
 		const warnings: string[] = [];
 		const result = await fetchModels("mg_key", m => warnings.push(m));
@@ -174,26 +188,27 @@ describe("fetchModels", () => {
 
 describe("validateKey / login", () => {
 	test("rejects 401 with the gateway-specific message", async () => {
-		globalThis.fetch = mock(async () => new Response("Unauthorized", { status: 401 })) as never;
+		stubFetch(async () => new Response("Unauthorized", { status: 401 }));
 		await expect(validateKey("  mg_bad  ")).rejects.toThrow("Invalid Merge Gateway API key");
 	});
 
 	test("maps budget exhaustion to a distinct message", async () => {
-		globalThis.fetch = mock(async () => new Response("{}", { status: 402 })) as never;
+		stubFetch(async () => new Response("{}", { status: 402 }));
 		await expect(validateKey("mg_key")).rejects.toThrow(/budget exhausted \(HTTP 402\)/);
 	});
 
 	test("honors the injected fetch seam and trims the pasted key", async () => {
 		const seen: string[] = [];
-		const seam = (async (input: any, init?: any) => {
+		const seam = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 			seen.push(String(input));
-			expect(new Headers(init.headers).get("Authorization")).toBe("Bearer mg_good");
+			expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer mg_good");
 			return new Response(singlePage([]), { status: 200 });
-		}) as never;
+		};
 		const key = await login({
+			onAuth: () => {},
 			onPrompt: async () => "  mg_good  ",
 			fetch: seam,
-		} as never);
+		});
 		expect(key).toBe("mg_good");
 		expect(seen[0]).toContain("/models?limit=1");
 	});
@@ -201,24 +216,22 @@ describe("validateKey / login", () => {
 	test("aborts an in-flight probe when the login flow is cancelled", async () => {
 		const controller = new AbortController();
 		controller.abort();
-		globalThis.fetch = mock(async () => new Response("", { status: 599 })) as never;
+		stubFetch(async () => new Response("", { status: 599 }));
 		// Node/bun abort semantics: fetch rejects once the signal is already aborted.
-		await expect(login({ onPrompt: async () => "mg_key", signal: controller.signal } as never)).rejects.toThrow();
+		await expect(
+			login({ onAuth: () => {}, onPrompt: async () => "mg_key", signal: controller.signal }),
+		).rejects.toThrow();
 	});
 
-	test(
-		"times out a stalled probe with a clear message",
-		async () => {
-			globalThis.fetch = mock(
-				async (_input: unknown, init?: RequestInit): Promise<Response> =>
-					new Promise<Response>((_resolve, reject) => {
-						init?.signal?.addEventListener("abort", () => reject(new Error("The operation was aborted")));
-					}),
-			) as unknown as typeof fetch;
-			await expect(validateKey("mg_key")).rejects.toThrow(/timed out after 15s/);
-		},
-		20_000,
-	);
+	test("times out a stalled probe with a clear message", async () => {
+		stubFetch(
+			async (_input, init): Promise<Response> =>
+				new Promise<Response>((_resolve, reject) => {
+					init?.signal?.addEventListener("abort", () => reject(new Error("The operation was aborted")));
+				}),
+		);
+		await expect(validateKey("mg_key")).rejects.toThrow(/timed out after 15s/);
+	}, 20_000);
 
 	test("rejects an empty paste before any network call", async () => {
 		await expect(login({ onPrompt: async () => "   " } as never)).rejects.toThrow("No API key provided");

@@ -29,7 +29,7 @@ omp builds the OpenAI wire as `<baseUrl>/chat/completions`, but the Anthropic wi
 
 	or run without it and paste the key via `/login` → **Merge Gateway** (validated against the API before saving; cancelling aborts an in-flight probe).
 
-3. `/model` → filter `merge`. Without a key the provider shows no models; with one, the live catalog populates with display names, context windows, and per-million pricing.
+3. `/model` → filter `merge`. Discovery only runs once a key is available (env var or `/login`); before that the provider shows no models. With a key, the live catalog populates with display names, context windows, and per-million pricing.
 
 ## Tests
 
@@ -42,5 +42,6 @@ Covers vendor selection (owner preference, third-party fallback), wire pinning, 
 
 ## Notes
 
-- Catalog results are cached by omp for 24 h.
+- Catalog results are cached by omp for 24 h; discovery does not run until a credential exists, so nothing unauthenticated is ever cached.
 - The env var is read when the extension loads; `/login` covers the unset case.
+- `auth: "apiKey"` keeps the Anthropic-wire models on the normal API-key request shape instead of omp's custom-model Claude-OAuth default.

@@ -1,5 +1,5 @@
-import { APIError, MergeGateway } from "merge-gateway-sdk";
 import type { ExtensionAPI, OAuthLoginCallbacks, ProviderModelConfig } from "@oh-my-pi/pi-coding-agent";
+import { APIError, MergeGateway } from "merge-gateway-sdk";
 
 /**
  * omp-merge-gateway-provider
@@ -167,16 +167,17 @@ async function fetchRawCatalog(apiKey: string, warn: WarnSink): Promise<CatalogM
 }
 
 /**
- * Discover the live model catalog from Gateway. Without a key returns an
- * empty list — the picker simply shows nothing until the user authenticates.
+ * Discover the live model catalog from Gateway. Without a key returns null —
+ * "nothing discovered", which omp treats like a failed discovery: no empty
+ * catalog is cached, so the picker recovers as soon as a credential exists.
  * With a key, pages through the catalog and maps every tool-callable text
  * model. `warn` receives non-fatal notices; omp wires it to its logger.
  */
 export async function fetchModels(
 	apiKey: string | undefined,
 	warn: WarnSink = () => {},
-): Promise<ProviderModelConfig[]> {
-	if (!apiKey) return [];
+): Promise<ProviderModelConfig[] | null> {
+	if (!apiKey) return null;
 	try {
 		const entries = await fetchRawCatalog(apiKey, warn);
 		return entries.map(mapCatalogEntry).filter(m => m !== null);
@@ -189,7 +190,7 @@ export interface ValidateOptions {
 	/** Aborts the probe — wired to the /login flow's cancel signal. */
 	signal?: AbortSignal;
 	/** Request seam override — the /login flow supplies its own. */
-	fetch?: typeof fetch;
+	fetch?: (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 }
 
 /**
@@ -251,6 +252,10 @@ export async function login(callbacks: OAuthLoginCallbacks): Promise<string> {
  * "MERGE_GATEWAY_API_KEY". When unset, users authenticate once via /login
  * (static key; no refresh).
  *
+ * `auth: "apiKey"` keeps Anthropic-wire models on the normal API-key request
+ * shape. Without it omp defaults custom anthropic-messages models to the
+ * Claude-OAuth shape (isOAuth), which Gateway tolerates but is not built for.
+ *
  * No provider-level baseUrl: omp's provider transport override wins over
  * per-model baseUrl (`override.baseUrl ?? entry.baseUrl`), so a provider
  * default would clobber the Anthropic-wire routes. Every model therefore
@@ -262,6 +267,7 @@ export default function (pi: ExtensionAPI): void {
 	pi.registerProvider(PROVIDER, {
 		...(apiKeyConfig ? { apiKey: apiKeyConfig } : {}),
 		api: "openai-completions",
+		auth: "apiKey",
 		oauth: { name: "Merge Gateway", login },
 		fetchDynamicModels: (apiKey: string | undefined) => fetchModels(apiKey, m => pi.logger.warn(m)),
 	});
