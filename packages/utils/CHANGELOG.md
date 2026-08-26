@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `math-delimiters`, the LaTeX span/block delimiter grammar (`mathStartIndex`, `mathOpenerAt`, `mathSpanAt`, `mathBlockAt`) shared by every Markdown renderer: pandoc's anti-currency rules for `$…$`, own-line display blocks, and delimiters matched by backslash parity, so an escaped `\$x$` stays literal and a TeX row break cannot end a span early.
+
 ## [18.0.6] - 2026-08-26
 
 ### Added

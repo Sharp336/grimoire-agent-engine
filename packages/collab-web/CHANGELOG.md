@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Transcript Markdown now renders LaTeX: `$…$` and `\(…\)` inline, `$$…$$` and `\[…\]` in display mode, plus own-line `$$`/`\[` blocks. Currency ("$5 and $10"), escaped dollars, and code spans stay literal, and half-streamed delimiters stay visible until the equation closes.
+
 ## [17.3.8] - 2026-08-19
 
 ### Fixed
