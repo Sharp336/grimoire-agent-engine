@@ -41,12 +41,18 @@ import {
 	shouldUseProviderNativeCompaction,
 	upsertFileOperations,
 } from "@oh-my-pi/pi-agent-core/compaction";
+import type { SessionMessageEntry } from "@oh-my-pi/pi-agent-core/compaction/entries";
 import {
 	DEFAULT_PRUNE_CONFIG,
 	pruneSupersededToolResults,
 	pruneToolOutputs,
 	readToolSupersedeKey,
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
+import {
+	applySupercompactRegions,
+	collectSupercompactRegions,
+	type SupercompactRegion,
+} from "@oh-my-pi/pi-agent-core/compaction/supercompact";
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
 import type { AssistantMessage, CodexCompactionContext, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
@@ -90,6 +96,7 @@ import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
+import type { SupercompactOutcome } from "./supercompact-types";
 
 export type CompactionCheckResult = Readonly<{
 	deferredHandoff: boolean;
@@ -695,6 +702,169 @@ export class SessionMaintenance {
 		}
 		try {
 			return await this.#host.sessionManager.saveArtifact(parts.join("\n"), "shake");
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
+	 * Supercompact the branch ("supercompact").
+	 *
+	 * Drops every tool result, caps every tool-call argument, and removes every
+	 * reasoning block across the whole branch, keeping the conversation itself
+	 * verbatim from the first turn. There is no threshold, no recency window, no
+	 * compaction boundary, and no summarization model: the input is the entire
+	 * history and the output is deterministic.
+	 *
+	 * Same rewrite contract as {@link dropImages}: mutate in place, persist via
+	 * `rewriteEntries`, replay the rebuilt context through the agent, and tear
+	 * down provider sessions that cache message identity.
+	 *
+	 * No-op (zero counts) when the branch holds nothing but conversation.
+	 */
+	async supercompactContext(opts: { signal?: AbortSignal } = {}): Promise<SupercompactOutcome> {
+		const keepRecentTurns = Math.max(0, this.#host.settings.getGroup("compaction").supercompactKeepRecentTurns);
+		const tokensBefore = this.#measureLiveContextTokens();
+		const branchEntries = this.#host.sessionManager.getBranch();
+		const regions = collectSupercompactRegions(branchEntries, this.#tokenizer, keepRecentTurns);
+		const unchanged: SupercompactOutcome = {
+			toolResultsRemoved: 0,
+			toolCallsTrimmed: 0,
+			thinkingBlocksDropped: 0,
+			tokensBefore,
+			tokensAfter: tokensBefore,
+		};
+		if (regions.length === 0) return unchanged;
+
+		// Recovery is a precondition, not a courtesy: without a readable archive
+		// this operation is a permanent delete. The gate is the artifact directory,
+		// not the session file, because a subagent can adopt its parent's artifact
+		// manager and read back through `artifact://` while having no session file
+		// of its own. Sessions with neither keep only an unreadable in-memory copy.
+		if (this.#host.sessionManager.getArtifactsDir() === null) {
+			throw new Error(
+				"Supercompact needs somewhere to save a recovery artifact before it removes anything, and this session has none.",
+			);
+		}
+		const artifactId = await this.#saveSupercompactArtifact(regions);
+		if (artifactId === undefined) {
+			throw new Error(
+				"Could not save the recovery artifact, so nothing was changed. Supercompact needs a persisted session to write it to.",
+			);
+		}
+		// Last cancellation point. Everything below mutates and persists, so a
+		// later abort would report a cancel that did not happen.
+		if (opts.signal?.aborted === true) return unchanged;
+		const items = regions.map((region, index) => ({
+			region,
+			// Only tool-result regions consume a replacement string. Argument and
+			// reasoning regions are rewritten structurally: a fabricated key inside
+			// schema-governed arguments can fail strict validation and teaches the
+			// model to emit it, so the recovery id stays in the operator summary.
+			replacement:
+				region.kind === "toolResult"
+					? `[removed ~${region.tokens} tokens · recover: artifact://${artifactId} (region ${index + 1})]`
+					: "",
+		}));
+
+		// Tokens removed from a prompt the provider already billed have to come off
+		// the displayed budget or it stays pinned to pre-pass counts. Measured
+		// rather than estimated: regions are mutated in place, so counting the same
+		// entries before and after is exact. A per-region estimate cannot be,
+		// because trimmed arguments and retained images both survive in context.
+		const latestCompaction = getLatestCompactionEntry(branchEntries);
+		const hasRemoteReplacementHistory = getOpenAiRemoteCompactionPayload(latestCompaction) !== undefined;
+		const compactionIndex = latestCompaction ? branchEntries.lastIndexOf(latestCompaction) : -1;
+		let anchorIndex = -1;
+		for (let index = branchEntries.length - 1; index > compactionIndex; index--) {
+			const entry = branchEntries[index];
+			if (entry.type !== "message" || !isTranscriptUsageAnchor(entry.message)) continue;
+			anchorIndex = index;
+			break;
+		}
+		// Start where the prompt actually starts. Entries before the newest reset
+		// boundary, or before a compaction's kept range, are not in the billed
+		// prompt at all, so removing them corrects nothing and counting them would
+		// subtract tokens the provider never charged for.
+		let contextStart = 0;
+		for (let index = branchEntries.length - 1; index >= 0; index--) {
+			if (branchEntries[index].type !== "reset_boundary") continue;
+			contextStart = index + 1;
+			break;
+		}
+		if (latestCompaction) {
+			const keptFrom = branchEntries.findIndex(entry => entry.id === latestCompaction.firstKeptEntryId);
+			if (keptFrom >= 0) contextStart = Math.max(contextStart, keptFrom);
+		}
+		const anchoredEntries: SessionMessageEntry[] = [];
+		for (let index = contextStart; index < anchorIndex; index++) {
+			const entry = branchEntries[index];
+			if (entry.type !== "message") continue;
+			// Remote replacement history already omits everything up to the
+			// compaction, so removing it costs the provider prompt nothing.
+			if (hasRemoteReplacementHistory && index <= compactionIndex) continue;
+			anchoredEntries.push(entry);
+		}
+		let anchoredBefore = 0;
+		for (const entry of anchoredEntries) anchoredBefore += this.#tokenizer.countMessage(entry.message);
+
+		const tally = applySupercompactRegions(items);
+
+		let anchoredAfter = 0;
+		for (const entry of anchoredEntries) anchoredAfter += this.#tokenizer.countMessage(entry.message);
+		this.#host.recordAnchoredHistoryRewrite(Math.max(0, anchoredBefore - anchoredAfter));
+
+		await this.#host.sessionManager.rewriteEntries();
+		const sessionContext = this.#host.buildDisplaySessionContext();
+		this.#host.agent.replaceMessages(sessionContext.messages);
+		this.#host.resetAdvisorRuntimes("supercompact");
+		this.#host.syncTodoPhasesFromBranch();
+		this.#host.closeCodexProviderSessionsForHistoryRewrite();
+
+		return {
+			toolResultsRemoved: tally.toolResults,
+			toolCallsTrimmed: tally.toolCalls,
+			thinkingBlocksDropped: tally.thinkingBlocks,
+			tokensBefore,
+			tokensAfter: this.#measureLiveContextTokens(sessionContext.messages),
+			artifactId,
+		};
+	}
+
+	/**
+	 * Local token count of the messages the agent is holding.
+	 *
+	 * `getContextUsage()` reports what the provider last billed, so it is stale
+	 * on both sides of a history rewrite: the pre-supercompact figure belongs to the
+	 * turn before the rewrite, and afterwards there is no fresh response to read
+	 * at all. Counting the built context with the local tokenizer gives a number
+	 * that is available immediately and comparable across the mutation.
+	 */
+	#measureLiveContextTokens(messages?: readonly AgentMessage[]): number {
+		const source = messages ?? this.#host.buildDisplaySessionContext().messages;
+		let total = 0;
+		for (const message of source) total += this.#tokenizer.countMessage(message);
+		return total;
+	}
+
+	/**
+	 * Concatenate every removed original into one session artifact so the agent
+	 * can read them back via `artifact://<id>`. Returns `undefined` when the
+	 * session is not persisted or the write fails.
+	 */
+	async #saveSupercompactArtifact(regions: SupercompactRegion[]): Promise<string | undefined> {
+		const parts: string[] = [];
+		for (let index = 0; index < regions.length; index++) {
+			const region = regions[index];
+			parts.push(
+				`### region ${index + 1} (${region.kind}: ${region.label}, ~${region.tokens} tok)`,
+				"",
+				region.originalText,
+				"",
+			);
+		}
+		try {
+			return await this.#host.sessionManager.saveArtifact(parts.join("\n"), "supercompact");
 		} catch {
 			return undefined;
 		}
@@ -2874,18 +3044,20 @@ export class SessionMaintenance {
 		// in the background. Claiming consumes the slot either way: an in-flight
 		// run is aborted (this real pass supersedes it) and an armed result is
 		// returned only when still valid for the current branch/model/settings.
-		// Snapcompact is local and instant, so an armed LLM summary (possible
-		// only when settings/model changed since arming) never overrides it.
+		// Snapcompact and supercompact are local and instant, so an armed LLM
+		// summary (possible only when settings/model changed since arming) never
+		// overrides them.
 		const claimedSpec = this.#claimArmedSpeculation();
-		const armedSpec = method === "snapcompact" ? undefined : claimedSpec;
+		const armedSpec = method === "snapcompact" || method === "supercompact" ? undefined : claimedSpec;
 
 		const effectiveSettings = resolveMethodSettings(compactionSettings, method);
 		const fallbackFromShake = options.fallbackFromShake === true;
-		// Shake runs inline (cheap, no remote LLM). If it cannot recover enough
-		// context, resume from the next configured method instead of hardcoding a
-		// context-full summary.
-		if (method === "shake" && !armedSpec) {
-			const outcome = await this.#runAutoShake(
+		// Shake and supercompact both run inline (cheap, no remote LLM). If either
+		// cannot recover enough context, resume from the next configured method
+		// instead of hardcoding a context-full summary.
+		if ((method === "shake" || method === "supercompact") && !armedSpec) {
+			const outcome = await this.#runInlineReduction(
+				method,
 				reason,
 				willRetry,
 				generation,
@@ -2899,7 +3071,12 @@ export class SessionMaintenance {
 			return await this.runAutoCompaction(reason, willRetry, deferred, allowDefer, {
 				...options,
 				methodIndex: methodIndex + 1,
-				fallbackFromShake: true,
+				// Only shake leaves the large fenced/XML blocks already elided, so
+				// only shake may tell a later dead-end rescue to skip that work.
+				// Sticky: once shake has elided the large blocks a later dead-end
+				// rescue must not repeat that work, even if another method ran in
+				// between.
+				fallbackFromShake: fallbackFromShake || method === "shake",
 			});
 		}
 		// "overflow" and "incomplete" force inline execution because they are recovery
@@ -3840,7 +4017,8 @@ export class SessionMaintenance {
 	 * Returns `"fallback"` when the caller should advance to the next configured
 	 * method; returns a check result when shake handled the maintenance itself.
 	 */
-	async #runAutoShake(
+	async #runInlineReduction(
+		kind: "shake" | "supercompact",
 		reason: "overflow" | "threshold" | "idle" | "incomplete",
 		willRetry: boolean,
 		generation: number,
@@ -3850,14 +4028,15 @@ export class SessionMaintenance {
 		suppressContinuation = false,
 		detachPostCommit = false,
 	): Promise<CompactionCheckResult | "fallback"> {
-		const action = "shake";
+		const action = kind;
+		const label = kind === "shake" ? "Auto-shake" : "Auto-supercompact";
 		this.#autoCompactionAbortController?.abort();
 		const controller = new AbortController();
 		this.#autoCompactionAbortController = controller;
 		const signal = controller.signal;
 		try {
 			await this.#emitLifecycleEvent({ type: "auto_compaction_start", reason, action }, false);
-			const result = await this.#host.shake("elide", { config: DEFAULT_SHAKE_CONFIG, signal });
+			const result = await this.#runReducer(kind, signal);
 			if (signal.aborted) {
 				await this.#emitLifecycleEvent(
 					{
@@ -3871,7 +4050,7 @@ export class SessionMaintenance {
 				);
 				return COMPACTION_CHECK_NONE;
 			}
-			const reclaimed = result.toolResultsDropped + result.blocksDropped > 0;
+			const reclaimed = result.dropped > 0;
 			// Detect the dead-loop reported in issues #2119/#2275: the threshold check
 			// fires, shake runs, but residual context is still above the configured
 			// threshold. The next agent_end would re-trigger shake, which has nothing
@@ -3909,8 +4088,8 @@ export class SessionMaintenance {
 			const shouldFallBack = reason !== "idle" && ((reason === "overflow" && !reclaimed) || stillOverThreshold);
 			if (shouldFallBack) {
 				const errorMessage = reclaimed
-					? `Auto-shake reclaimed ~${result.tokensFreed} tokens but context is still above the threshold; trying the next preferred compaction method.`
-					: "Auto-shake found nothing eligible to drop; trying the next preferred compaction method.";
+					? `${label} reclaimed ~${result.tokensFreed} tokens but context is still above the threshold; trying the next preferred compaction method.`
+					: `${label} found nothing eligible to drop; trying the next preferred compaction method.`;
 				await this.#emitLifecycleEvent(
 					{
 						type: "auto_compaction_end",
@@ -3939,9 +4118,9 @@ export class SessionMaintenance {
 
 			let continuationScheduled = false;
 			if (willRetry) {
-				// The shake rebuild replays every entry, so a trailing error/length
-				// assistant from the failed turn re-enters agent state — drop it before
-				// retrying, same as the context-full tail.
+				// The rebuild replays every entry, so a trailing error/length assistant
+				// from the failed turn re-enters agent state — drop it before retrying,
+				// same as the context-full tail.
 				const messages = this.#host.agent.state.messages;
 				const lastMsg = messages[messages.length - 1];
 				if (lastMsg?.role === "assistant") {
@@ -3986,7 +4165,7 @@ export class SessionMaintenance {
 				);
 				return COMPACTION_CHECK_NONE;
 			}
-			const message = error instanceof Error ? error.message : "shake failed";
+			const message = error instanceof Error ? error.message : `${kind} failed`;
 			await this.#emitLifecycleEvent(
 				{
 					type: "auto_compaction_end",
@@ -3999,13 +4178,41 @@ export class SessionMaintenance {
 				},
 				detachPostCommit,
 			);
-			// Overflow still needs recovery even if shake threw.
-			return reason === "overflow" ? "fallback" : COMPACTION_CHECK_NONE;
+			// Shake keeps its original semantics: only overflow advances, because
+			// only overflow has to be resolved before the next request. Supercompact
+			// throws on a missing or unwritable recovery artifact, which will not fix
+			// itself, so re-selecting it every turn would stall maintenance; it
+			// advances for every reason but idle, whose timer rechecks usage anyway.
+			if (kind === "shake") return reason === "overflow" ? "fallback" : COMPACTION_CHECK_NONE;
+			return reason === "idle" ? COMPACTION_CHECK_NONE : "fallback";
 		} finally {
 			if (this.#autoCompactionAbortController === controller) {
 				this.#autoCompactionAbortController = undefined;
 			}
 		}
+	}
+
+	/**
+	 * Run one inline (no-LLM) reducer and normalize its counts.
+	 *
+	 * `shake` frees the live window by size; `supercompact` removes across the whole
+	 * branch by content kind. Both rewrite history in place with no provider
+	 * call, so they share the lifecycle, dead-loop guard, and continuation
+	 * scheduling in {@link #runInlineReduction}.
+	 */
+	async #runReducer(
+		kind: "shake" | "supercompact",
+		signal: AbortSignal,
+	): Promise<{ dropped: number; tokensFreed: number }> {
+		if (kind === "shake") {
+			const result = await this.#host.shake("elide", { config: DEFAULT_SHAKE_CONFIG, signal });
+			return { dropped: result.toolResultsDropped + result.blocksDropped, tokensFreed: result.tokensFreed };
+		}
+		const result = await this.supercompactContext({ signal });
+		return {
+			dropped: result.toolResultsRemoved + result.toolCallsTrimmed + result.thinkingBlocksDropped,
+			tokensFreed: Math.max(0, result.tokensBefore - result.tokensAfter),
+		};
 	}
 
 	/**

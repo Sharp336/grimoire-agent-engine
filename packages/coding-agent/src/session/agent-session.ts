@@ -349,6 +349,7 @@ import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-sta
 import { SessionTools, type SessionToolsHost } from "./session-tools";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "./skill-title-input";
+import type { SupercompactResult } from "./supercompact-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
@@ -4908,6 +4909,36 @@ export class AgentSession {
 	/** Reduce stored context with the selected shake strategy. */
 	shake(mode: ShakeMode, opts: { config?: ShakeConfig; signal?: AbortSignal } = {}): Promise<ShakeResult> {
 		return this.#maintenance.shake(mode, opts);
+	}
+
+	/**
+	 * Reduce the session to its conversation.
+	 *
+	 * Forks first, so the source transcript keeps every byte and the reduced
+	 * history becomes the active session. A requested fork that does not happen
+	 * aborts the whole operation rather than quietly falling back to rewriting
+	 * the session in place: `fork()` also returns false when an extension
+	 * cancelled `session_before_switch`, and answering "do not switch sessions"
+	 * by destroying the current one is the opposite of what was asked.
+	 *
+	 * `inPlace` rewrites the current session deliberately, which is the only way
+	 * to reduce a session that cannot fork.
+	 *
+	 * Rejected while streaming: it rewrites the history the live turn is
+	 * reading from.
+	 */
+	async supercompact(opts: { inPlace?: boolean } = {}): Promise<SupercompactResult> {
+		if (this.isStreaming) {
+			throw new Error("Wait for the current response to finish or abort it before supercompacting.");
+		}
+		const forked = opts.inPlace === true ? false : await this.fork();
+		if (opts.inPlace !== true && !forked) {
+			throw new Error(
+				"Could not fork this session, so nothing was changed. Use `/supercompact here` to reduce this session without forking.",
+			);
+		}
+		const outcome = await this.#maintenance.supercompactContext();
+		return { ...outcome, forked, sessionFile: this.sessionFile };
 	}
 
 	/** Compact the active session history. */

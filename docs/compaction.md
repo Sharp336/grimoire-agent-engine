@@ -139,6 +139,16 @@ Including `shake` in `compaction.methodOrder` performs an inline, local reductio
 
 Threshold, incomplete-output, and overflow recovery advance to the next configured method when shake cannot reclaim enough context to get below the recovery band; this prevents repeated no-op shake loops. Idle shake does not use that fallback because the idle timer rechecks usage before running again. Manual `/shake` is a separate, more aggressive command that can target all eligible history.
 
+### Supercompact method
+
+Including `supercompact` in `compaction.methodOrder` runs the same inline, no-LLM machinery as shake through `SessionMaintenance.#runInlineReduction`, so it inherits the dead-loop guard, the provider-anchored recovery band, and the continuation scheduling. It is not in the default order.
+
+Where shake cuts by size inside a protected recent window, supercompact cuts by content kind across the whole branch: every tool result, every oversized tool-call argument value, and every reasoning block, leaving user and assistant messages verbatim. Removed originals are written to one session artifact first, and the pass refuses to run when that write fails, so the operation is never a bare delete. `compaction.supercompactKeepRecentTurns` exempts the last N rounds.
+
+Two content kinds are deliberately exempt. `skill` results are live instructions rather than tool output. Computer-use calls and results replay from `providerMetadata` (`actions` and `screenshot`) rather than from message content, so rewriting their content would shrink nothing the provider reads while breaking the pairing. Image blocks inside a tool result are also kept; `/shake images` and `dropImages` own that job.
+
+Automatic supercompact emits the normal auto-compaction events with `action: "supercompact"`. Unlike the manual `/supercompact`, the automatic path never forks, because a compaction method must not change session identity mid-turn. See [session-operations-export-share-fork-resume.md](./session-operations-export-share-fork-resume.md) for the manual command.
+
 ### Snapcompact method
 
 Including `snapcompact` in `compaction.methodOrder` replaces the LLM summarization call with a local, deterministic archival pass (`compact` from `@oh-my-pi/snapcompact`):
@@ -418,7 +428,7 @@ Post-navigation event exposing new/old leaf and optional summary entry.
 From `settings-schema.ts`:
 
 - `compaction.enabled` = `true`
-- `compaction.methodOrder` = `["remote", "snapcompact", "handoff", "shake", "soft"]`. `remote` uses provider-native OpenAI-compatible server compaction when available; unavailable or failed methods advance to the next preference.
+- `compaction.methodOrder` = `["remote", "snapcompact", "handoff", "shake", "soft"]`. `supercompact` is also selectable but not included by default. `remote` uses provider-native OpenAI-compatible server compaction when available; unavailable or failed methods advance to the next preference.
 - `compaction.asyncEnabled` = `true`. Async (speculative) compaction: when context enters the pre-threshold band `[threshold − lead, threshold)` (lead = `clamp(threshold × 0.125, 8192, 32000)`), maintenance starts a background summarization for the first configured LLM-backed method (`remote`, `handoff`, or `soft`) off a branch snapshot, isolated from the live turn by a side session id. The armed result is committed instantly when the threshold is actually crossed, hiding summarization latency; post-snapshot turns are appended after the summary unchanged. Armed results are discarded when the branch prefix changes (new compaction, reset boundary, `/tree` navigation), when a provider-native replay payload is no longer readable by the active model, or when context grows past `keepRecentTokens` since compute (a fresh speculation replaces it). Speculation is skipped while an extension registers `session_before_compact`. The status line pulses the auto-compact icon while a speculation runs and holds it in accent when a result is armed.
 - `compaction.reserveTokens` is unset by default. The compaction layer normally applies a `16384`-token floor and at least 15% of the context window; on small windows where that default would be impractical, budget checks use the 15% proportional reserve. An explicit configured reserve is honored.
 - `compaction.keepRecentTokens` = `20000`
@@ -435,6 +445,7 @@ From `settings-schema.ts`:
 - `compaction.idleTimeoutSeconds` = `300`
 - `compaction.supersedeReads` = `true`
 - `compaction.dropUseless` = `true`
+- `compaction.supercompactKeepRecentTurns` = `0`
 - `snapcompact.systemPrompt` = `"none"` (`"agents-md"` and `"all"` opt into transient system-prompt imaging)
 - `snapcompact.toolResults` = `false` (transient imaging of large historical tool results)
 - `snapcompact.shape` = `"auto"`

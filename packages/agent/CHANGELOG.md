@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `collectSupercompactRegions` and `applySupercompactRegions` in `compaction/supercompact`, which locate and remove tool results, oversized tool-call arguments, and reasoning blocks across a whole branch while leaving user and assistant messages verbatim. Image blocks inside a tool result are kept. `skill` results are exempt because they are live instructions rather than tool output, and computer-use calls and results are exempt because they replay from provider metadata rather than from message content.
+
 ## [18.0.5] - 2026-08-25
 
 ### Fixed

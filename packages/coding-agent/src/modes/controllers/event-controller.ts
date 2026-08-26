@@ -1876,9 +1876,11 @@ export class EventController {
 					? "Auto-handoff"
 					: event.action === "shake"
 						? "Auto-shake"
-						: event.action === "snapcompact"
-							? "Auto-snapcompact"
-							: "Auto context-full maintenance";
+						: event.action === "supercompact"
+							? "Auto-supercompact"
+							: event.action === "snapcompact"
+								? "Auto-snapcompact"
+								: "Auto context-full maintenance";
 		this.ctx.autoCompactionLoader = new Loader(
 			this.ctx.ui,
 			spinner => theme.fg("accent", spinner),
@@ -1901,25 +1903,29 @@ export class EventController {
 		}
 		const isHandoffAction = event.action === "handoff";
 		const isRemoteAction = event.action === "remote";
-		const isShakeAction = event.action === "shake";
+		// Shake and supercompact are the inline reducers: no CompactionResult, so
+		// they report and rebuild on their own rather than falling through to the
+		// summary-based branches below.
+		const isInlineReducer = event.action === "shake" || event.action === "supercompact";
 		const isSnapcompactAction = event.action === "snapcompact";
+		const inlineLabel = event.action === "supercompact" ? "Auto-supercompact" : "Auto-shake";
 		if (event.aborted) {
 			this.ctx.showStatus(
 				isHandoffAction
 					? "Auto-handoff cancelled"
 					: isRemoteAction
 						? "Auto server compaction cancelled"
-						: isShakeAction
-							? "Auto-shake cancelled"
+						: isInlineReducer
+							? `${inlineLabel} cancelled`
 							: isSnapcompactAction
 								? "Auto-snapcompact cancelled"
 								: "Auto context-full maintenance cancelled",
 			);
-		} else if (isShakeAction) {
-			// Shake produces no CompactionResult; rebuild on success, suppress benign skips.
-			// The fallback path (`errorMessage` set, `skipped` false) means shake reclaimed
-			// some tokens before deciding the threshold still wasn't cleared — rebuild so
-			// the chat reflects the dropped regions even though a context-full pass follows.
+		} else if (isInlineReducer) {
+			// The fallback path (`errorMessage` set, `skipped` false) means the pass
+			// reclaimed some tokens before deciding the threshold still wasn't
+			// cleared — rebuild so the chat reflects the dropped regions even though
+			// a context-full pass follows.
 			if (event.errorMessage) {
 				if (!event.skipped) {
 					this.ctx.rebuildChatFromMessages();
@@ -1932,7 +1938,7 @@ export class EventController {
 				this.ctx.rebuildChatFromMessages();
 				this.ctx.statusLine.invalidate();
 				this.ctx.ui.requestRender();
-				this.ctx.showStatus("Auto-shake completed");
+				this.ctx.showStatus(`${inlineLabel} completed`);
 			}
 		} else if (event.result) {
 			this.ctx.lastAssistantUsage = undefined;
