@@ -2681,6 +2681,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"compaction.supercompactKeepRecentTurns": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Supercompact Keeps Recent Turns",
+			description:
+				"Leave the last N rounds of conversation completely untouched when supercompacting (0 removes all of them)",
+		},
+	},
+
 	// Experimental: snapcompact inline imaging (transient, per-request; never persisted)
 	"snapcompact.systemPrompt": {
 		type: "enum",
@@ -6100,6 +6112,7 @@ export interface CompactionSettings {
 	idleTimeoutSeconds: number;
 	supersedeReads: boolean;
 	dropUseless: boolean;
+	supercompactKeepRecentTurns: number;
 }
 
 export interface RecapSettings {

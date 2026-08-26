@@ -34,6 +34,12 @@ export const COMPACTION_METHOD_CHOICES = [
 		label: "Shake",
 		description: "Drop recoverable heavy content in place without an LLM call",
 	},
+	{
+		value: "supercompact",
+		label: "Supercompact",
+		description:
+			"Remove tool results, call arguments, and reasoning across all history; keep the conversation verbatim",
+	},
 ] as const;
 
 /** One selectable automatic context-maintenance method. */
@@ -54,6 +60,7 @@ const COMPACTION_METHODS: Record<CompactionMethod, true> = {
 	handoff: true,
 	soft: true,
 	shake: true,
+	supercompact: true,
 };
 
 /** Whether an unknown configuration value names a supported compaction method. */
@@ -75,12 +82,16 @@ export function resolveCompactionMethodOrder(value: unknown): CompactionMethod[]
 	return methods;
 }
 
-const STRATEGY_BY_COMPACTION_METHOD: Record<CompactionMethod, "context-full" | "handoff" | "shake" | "snapcompact"> = {
+const STRATEGY_BY_COMPACTION_METHOD: Record<
+	CompactionMethod,
+	"context-full" | "handoff" | "shake" | "snapcompact" | "supercompact"
+> = {
 	remote: "context-full",
 	snapcompact: "snapcompact",
 	handoff: "handoff",
 	soft: "context-full",
 	shake: "shake",
+	supercompact: "supercompact",
 };
 
 /**

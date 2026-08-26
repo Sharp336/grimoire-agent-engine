@@ -5396,6 +5396,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleShakeCommand(mode);
 	}
 
+	handleSupercompactCommand(inPlace: boolean): Promise<void> {
+		return this.#commandController.handleSupercompactCommand(inPlace);
+	}
+
 	executeCompaction(
 		customInstructionsOrOptions?: string | CompactOptions,
 		isAuto?: boolean,

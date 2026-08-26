@@ -45,6 +45,7 @@ import type { AuthStorage, OAuthAccountIdentity } from "../../session/auth-stora
 import type { CompactMode } from "../../session/compact-modes";
 import type { NewSessionOptions } from "../../session/session-entries";
 import { formatShakeSummary, type ShakeMode, type ShakeResult } from "../../session/shake-types";
+import { formatSupercompactSummary, type SupercompactResult } from "../../session/supercompact-types";
 import { formatActiveAccountLabel, limitMatchesActiveAccount } from "../../slash-commands/helpers/active-oauth-account";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
@@ -1318,6 +1319,32 @@ export class CommandController {
 		this.ctx.statusLine.invalidate();
 		this.ctx.ui.requestRender();
 		this.ctx.showStatus(formatShakeSummary(result));
+	}
+
+	/**
+	 * TUI handler for `/supercompact`. Forks (unless `inPlace`) and removes every
+	 * tool result, tool-call argument, and thinking block out of the whole
+	 * branch, keeping the conversation verbatim. Rebuilds the chat and reports
+	 * the token delta.
+	 */
+	async handleSupercompactCommand(inPlace: boolean): Promise<void> {
+		let result: SupercompactResult;
+		try {
+			result = await this.ctx.session.supercompact({ inPlace });
+		} catch (error) {
+			this.ctx.showError(`Supercompact failed: ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
+
+		const removed = result.toolResultsRemoved + result.toolCallsTrimmed + result.thinkingBlocksDropped;
+		if (removed === 0) {
+			this.ctx.showStatus("Nothing left to remove. the conversation is already all that remains.");
+			return;
+		}
+		this.ctx.rebuildChatFromMessages();
+		this.ctx.statusLine.invalidate();
+		this.ctx.ui.requestRender();
+		this.ctx.showStatus(formatSupercompactSummary(result));
 	}
 
 	async executeCompaction(

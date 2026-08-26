@@ -10,6 +10,7 @@ import { USER_INTERRUPT_LABEL } from "../session/messages";
 import { resolveResumableSession } from "../session/session-listing";
 import { toggleSessionPin } from "../session/session-pins";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
+import { formatSupercompactSummary, type SupercompactResult } from "../session/supercompact-types";
 import { resolveToCwd } from "../tools/path-utils";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSshAcp } from "./helpers/ssh";
@@ -220,6 +221,38 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 				return;
 			}
 			await runtime.ctx.handleShakeCommand(mode);
+		},
+	},
+	{
+		name: "supercompact",
+		icon: "vibrate",
+		description: "Keep the conversation, remove every tool result, call argument, and thinking block",
+		acpDescription: "Fork the session and reduce it to the conversation alone",
+		subcommands: [{ name: "here", description: "Reduce the current session instead of a fork" }],
+		acpInputHint: "[here]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const verb = command.args.trim().toLowerCase();
+			if (verb !== "" && verb !== "here") {
+				return usage(`Unknown /supercompact mode "${verb}". Use "here" or no argument.`, runtime);
+			}
+			let result: SupercompactResult;
+			try {
+				result = await runtime.session.supercompact({ inPlace: verb === "here" });
+			} catch (err) {
+				return usage(errorMessage(err), runtime);
+			}
+			await runtime.output(formatSupercompactSummary(result));
+			return commandConsumed();
+		},
+		handleTui: async (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			const verb = command.args.trim().toLowerCase();
+			if (verb !== "" && verb !== "here") {
+				runtime.ctx.showWarning(`Unknown /supercompact mode "${verb}". Use "here" or no argument.`);
+				return;
+			}
+			await runtime.ctx.handleSupercompactCommand(verb === "here");
 		},
 	},
 	{
