@@ -246,6 +246,67 @@ describe("eval JS RLM helpers", () => {
 		]);
 	});
 
+	it("search windows never split a surrogate pair at a truncation boundary", () => {
+		const sandbox = loadJsPrelude(async () => ({}));
+		const search = sandbox.search as SearchFn;
+		// The exact Codex repro: repeated emoji (each a UTF-16 surrogate
+		// pair) followed by K, with a max_line_chars window that would end
+		// mid-pair. The offset annotation moves to the adjusted code-point
+		// boundary and the excerpt keeps whole emoji (before the fix the
+		// slice started on a lone low surrogate and ended on a lone high).
+		const emoji = "\u{1F600}".repeat(2000) + "K";
+		expect(search(emoji, "K", { max_line_chars: 4 })).toEqual(["L1@3996: ...\u{1F600}\u{1F600}K"]);
+
+		// Sweep window sizes and emoji placements: every emitted window must
+		// hold no lone surrogate half, stay contiguous with its annotated
+		// (adjusted) offset, and still cover the first match.
+		const loneHalf = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u;
+		const cases: Array<[string, string]> = [
+			// emoji at the start, middle, and end of an oversized line
+			["\u{1F600}" + "x".repeat(3000), "x"],
+			["x".repeat(1500) + "\u{1F600}" + "x".repeat(1500), "x"],
+			["x".repeat(3000) + "\u{1F600}", "\u{1F600}"],
+			// match inside astral text
+			["\u{1F600}".repeat(1000) + "needle" + "\u{1F600}".repeat(1000), "needle"],
+			// match directly before / after an emoji (window edges land on
+			// the pair's halves)
+			["x".repeat(2000) + "m" + "\u{1F600}" + "x".repeat(2000), "m"],
+			["x".repeat(2000) + "\u{1F600}" + "m" + "x".repeat(2000), "m"],
+		];
+		for (const [line, pattern] of cases) {
+			for (const maxLineChars of [1, 2, 3, 4, 5, 7, 8]) {
+				const entries = search(line, pattern, { max_line_chars: maxLineChars });
+				const firstMatch = line.indexOf(pattern);
+				expect(entries).toHaveLength(1);
+				const ann = /^L\d+@(\d+): /.exec(entries[0]!);
+				expect(ann).not.toBeNull();
+				const offset = Number(ann![1]);
+				let windowText = entries[0]!.slice(ann![0].length);
+				if (offset > 0 && windowText.startsWith("...")) windowText = windowText.slice(3);
+				if (windowText.endsWith("... (line truncated)")) {
+					windowText = windowText.slice(0, -"... (line truncated)".length);
+				}
+				expect(windowText).not.toMatch(loneHalf);
+				expect(line.slice(offset).startsWith(windowText)).toBe(true);
+				expect(offset).toBeLessThanOrEqual(firstMatch);
+				expect(firstMatch).toBeLessThan(offset + windowText.length);
+			}
+		}
+		// Stateful g/y flags still reset per line and keep every window
+		// surrogate-safe.
+		const two = `${emoji}\n${emoji}`;
+		expect(search(two, "K", { flags: "g", max_line_chars: 4 })).toEqual([
+			"L1@3996: ...\u{1F600}\u{1F600}K",
+			"L2@3996: ...\u{1F600}\u{1F600}K",
+		]);
+		// Sticky mode only matches at offset 0; the window anchored to the
+		// line start keeps the leading emoji pair intact.
+		expect(search(two, "\u{1F600}", { flags: "y", max_line_chars: 4 })).toEqual([
+			"L1@0: \u{1F600}\u{1F600}... (line truncated)",
+			"L2@0: \u{1F600}\u{1F600}... (line truncated)",
+		]);
+	});
+
 	it("metadata reports str shape", () => {
 		const sandbox = loadJsPrelude(async () => ({}));
 		const metadata = sandbox.metadata as MetadataFn;
@@ -571,6 +632,61 @@ print(json.dumps(search(line + "\\n" + line, "b")))
 			"L1@1500: ..." + "a".repeat(500) + "b".repeat(500) + "... (line truncated)",
 			"L2@1500: ..." + "a".repeat(500) + "b".repeat(500) + "... (line truncated)",
 		]);
+	});
+	it("search windows never split a surrogate pair at a truncation boundary", async () => {
+		const r = await run(`
+import json
+
+def has_lone_half(s):
+    for i, ch in enumerate(s):
+        cp = ord(ch)
+        if 0xDC00 <= cp <= 0xDFFF and (i == 0 or not 0xD800 <= ord(s[i - 1]) <= 0xDBFF):
+            return True
+        if 0xD800 <= cp <= 0xDBFF and (i == len(s) - 1 or not 0xDC00 <= ord(s[i + 1]) <= 0xDFFF):
+            return True
+    return False
+
+# The exact Codex repro: repeated emoji as JSON-style surrogate escapes
+# (decoding leaves them as surrogate code points) followed by K, with a
+# max_line_chars window that would land mid-pair.
+emoji = "\\ud83d\\ude00" * 2000 + "K"
+print(json.dumps(search(emoji, "K", max_line_chars=4)))
+
+# Sweep window sizes and emoji placements; every window must hold no
+# lone surrogate half, stay contiguous with its annotated (adjusted)
+# offset, and still cover the first match.
+cases = [
+    ("\\ud83d\\ude00" + "x" * 3000, "x"),
+    ("x" * 1500 + "\\ud83d\\ude00" + "x" * 1500, "x"),
+    ("x" * 3000 + "\\ud83d\\ude00", "\\ud83d\\ude00"),
+    ("\\ud83d\\ude00" * 1000 + "needle" + "\\ud83d\\ude00" * 1000, "needle"),
+    ("x" * 2000 + "m" + "\\ud83d\\ude00" + "x" * 2000, "m"),
+    ("x" * 2000 + "\\ud83d\\ude00" + "m" + "x" * 2000, "m"),
+]
+for line, pattern in cases:
+    for cap in (1, 2, 3, 4, 5, 7, 8):
+        entries = search(line, pattern, max_line_chars=cap)
+        assert len(entries) == 1, (pattern, cap)
+        ann = re.match(r"^L\\d+@(\\d+): ", entries[0])
+        assert ann, entries[0]
+        off = int(ann.group(1))
+        win = entries[0][ann.end() :]
+        if off > 0 and win.startswith("..."):
+            win = win[3:]
+        if win.endswith("... (line truncated)"):
+            win = win[: -len("... (line truncated)")]
+        assert not has_lone_half(win), (pattern, cap, entries[0])
+        assert line[off:].startswith(win), (pattern, cap, entries[0])
+        first = line.index(pattern)
+        assert off <= first < off + len(win), (pattern, cap, entries[0])
+print("ok")
+`);
+		expect(r.exitCode).toBe(0);
+		const lines = r.stdout.trim().split("\n");
+		// Same exact output as the JS backend (UTF-16 equality: the JSON
+		// surrogate escapes decode to the same code units as \\u{1F600}).
+		expect(JSON.parse(lines[0]!)).toEqual(["L1@3996: ...\u{1F600}\u{1F600}K"]);
+		expect(lines[1]).toBe("ok");
 	});
 	it("search rejects non-positive limits and max_line_chars", async () => {
 		const bad = await run(`search("a\\nb", "a", limit=0)`);

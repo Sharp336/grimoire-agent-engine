@@ -747,7 +747,7 @@ if "__omp_prelude_loaded__" not in globals():
         return [text[i : i + max_chars] for i in range(0, len(text), max_chars)]
 
     def search(text, pattern, flags=0, *, limit=100, max_line_chars=1000):
-        """Return 'L<lineno>: <line>' for each line matching the regex `pattern`, stopping after `limit` matches (default 100); a trailing '... (truncated, more matches may exist)' entry marks an early stop. Matching lines longer than `max_line_chars` characters (default 1000) are not cut from the line start — that could drop the matched region entirely (e.g. a key near the end of one minified JSON line) — instead a bounded window around the first match is kept, emitted as 'L<lineno>@<offset>: <window>' with '...' markers on cut sides and a '... (line truncated)' suffix for the right cut, so a single oversized line cannot blow up the result."""
+        """Return 'L<lineno>: <line>' for each line matching the regex `pattern`, stopping after `limit` matches (default 100); a trailing '... (truncated, more matches may exist)' entry marks an early stop. Matching lines longer than `max_line_chars` characters (default 1000) are not cut from the line start — that could drop the matched region entirely (e.g. a key near the end of one minified JSON line) — instead a bounded window around the first match is kept, emitted as 'L<lineno>@<offset>: <window>' with '...' markers on cut sides and a '... (line truncated)' suffix for the right cut, so a single oversized line cannot blow up the result. Window edges are shifted onto code-point boundaries so a cut never bisects a surrogate pair into a lone half."""
         if not isinstance(limit, int) or limit <= 0:
             raise ValueError("search limit must be a positive integer")
         if not isinstance(max_line_chars, int) or max_line_chars <= 0:
@@ -795,6 +795,26 @@ if "__omp_prelude_loaded__" not in globals():
             elif end > len(line):
                 end = len(line)
                 start = max(0, len(line) - max_line_chars)
+            # Never slice through a surrogate pair: a window edge landing
+            # between the two halves would emit a lone half that a JSON
+            # round-trip turns into a U+FFFD replacement char, corrupting
+            # the excerpt. Back `start` off a low surrogate (its high half
+            # re-enters the window) and push `end` past a low surrogate
+            # whose high half is inside the window, so both edges sit on
+            # code-point boundaries (the same discipline chunk(by="tokens")
+            # applies; Python strings are code-point sequences, so this only
+            # matters when the payload itself carries surrogate code points,
+            # e.g. a JSON-decoded \ud83d\ude00 escape). Lone surrogates in
+            # the input itself are left alone — the cut never creates them.
+            while start > 0 and start < len(line) and 0xDC00 <= ord(line[start]) <= 0xDFFF:
+                start -= 1
+            if (
+                end > 0
+                and end < len(line)
+                and 0xDC00 <= ord(line[end]) <= 0xDFFF
+                and 0xD800 <= ord(line[end - 1]) <= 0xDBFF
+            ):
+                end += 1
             left = "..." if start > 0 else ""
             right = "... (line truncated)" if end < len(line) else ""
             return f"L{line_no}@{start}: {left}{line[start:end].rstrip()}{right}"

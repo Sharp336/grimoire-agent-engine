@@ -333,6 +333,8 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		// multi-MB line, e.g. minified JSON/base64, whose whole content a
 		// match would otherwise copy — cannot grow the output past the
 		// input and OOM the eval worker.
+		// Window edges are shifted onto code-point boundaries so a cut never
+		// bisects a surrogate pair into a lone half.
 		const str = String(text);
 		const out = [];
 		let lineNo = 0;
@@ -366,6 +368,33 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 			} else if (end > line.length) {
 				end = line.length;
 				start = Math.max(0, line.length - maxLineChars);
+			}
+			// Never slice through a surrogate pair: a window edge landing
+			// between the two halves would emit a lone half the model reads
+			// as a U+FFFD replacement char, corrupting the excerpt. Back
+			// `start` off a low surrogate (its high half re-enters the
+			// window) and push `end` past a low surrogate whose high half is
+			// inside the window, so both edges sit on code-point boundaries
+			// (the same codePointAt/step-2 discipline chunk(by="tokens")
+			// applies). Lone surrogates in the input itself are left alone —
+			// the cut never creates them.
+			while (
+				start > 0 &&
+				start < line.length &&
+				line.charCodeAt(start) >= 0xdc00 &&
+				line.charCodeAt(start) <= 0xdfff
+			) {
+				start--;
+			}
+			if (
+				end > 0 &&
+				end < line.length &&
+				line.charCodeAt(end) >= 0xdc00 &&
+				line.charCodeAt(end) <= 0xdfff &&
+				line.charCodeAt(end - 1) >= 0xd800 &&
+				line.charCodeAt(end - 1) <= 0xdbff
+			) {
+				end++;
 			}
 			const left = start > 0 ? "..." : "";
 			const right = end < line.length ? "... (line truncated)" : "";
