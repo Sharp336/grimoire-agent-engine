@@ -113,6 +113,10 @@
           "type": "boolean",
           "description": "Whether OMP should try to connect this server."
         },
+        "lazy": {
+          "type": "boolean",
+          "description": "Connect on first use instead of at startup. Startup serves the tool definitions cached from the last successful connect; the first tool invocation (or /mcp reconnect) establishes the connection."
+        },
         "timeout": {
           "type": "number",
           "minimum": 0,
@@ -138,7 +142,6 @@
         },
         {
           "type": "object",
-          "additionalProperties": false,
           "required": ["command"],
           "properties": {
             "type": {
@@ -171,7 +174,8 @@
             "required": ["url"]
           }
         }
-      ]
+      ],
+      "unevaluatedProperties": false
     },
     "httpServer": {
       "allOf": [
@@ -180,7 +184,6 @@
         },
         {
           "type": "object",
-          "additionalProperties": false,
           "required": ["type", "url"],
           "properties": {
             "type": {
@@ -202,7 +205,8 @@
             "required": ["command"]
           }
         }
-      ]
+      ],
+      "unevaluatedProperties": false
     },
     "sseServer": {
       "allOf": [
@@ -211,7 +215,6 @@
         },
         {
           "type": "object",
-          "additionalProperties": false,
           "required": ["type", "url"],
           "properties": {
             "type": {
@@ -233,7 +236,8 @@
             "required": ["command"]
           }
         }
-      ]
+      ],
+      "unevaluatedProperties": false
     },
     "serverConfig": {
       "oneOf": [

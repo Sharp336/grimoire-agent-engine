@@ -26,10 +26,44 @@ function toHex(buffer: ArrayBuffer): string {
 	return output;
 }
 
-async function hashConfig(config: MCPServerConfig): Promise<string> {
-	const stable = stableStringifyJson(config);
+/**
+ * Fields excluded from cache-identity hashing because they are connection
+ * *policy* (when to connect, whether to connect at all), not part of the
+ * server's identity — flipping either on an already-cached server must
+ * still hit the cache, or an eager-to-lazy transition orphans the cache and
+ * starts the server tool-less.
+ */
+const CURRENT_IDENTITY_EXCLUDED_KEYS: readonly (keyof MCPServerConfig)[] = ["lazy", "enabled"];
+
+/**
+ * Identity-exclusion sets used by every prior cache-identity hashing scheme,
+ * recent first: excluding only `lazy` (before `enabled` was added to the
+ * exclusion set), then excluding neither (the shape that shipped before this
+ * cache computed a policy-stripped identity at all). Checked on a miss so a
+ * cache written under an older release still hits. This is required, not an
+ * optimization: an eager server that misses just reconnects in the
+ * background and repopulates its cache, but a *lazy* server with no cache
+ * registers no tools at all and stays dormant until a manual
+ * `/mcp reconnect` (see `connectServers` in `manager.ts`) — every algorithm
+ * change here would otherwise strand every already-lazy server on upgrade.
+ */
+const LEGACY_IDENTITY_EXCLUDED_KEYS: ReadonlyArray<readonly (keyof MCPServerConfig)[]> = [["lazy"], []];
+
+function stripKeys(config: MCPServerConfig, keys: readonly (keyof MCPServerConfig)[]): Record<string, unknown> {
+	const identity: Record<string, unknown> = { ...config };
+	for (const key of keys) delete identity[key];
+	return identity;
+}
+
+async function hashIdentity(identity: Record<string, unknown>): Promise<string> {
+	const stable = stableStringifyJson(identity);
 	const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(stable));
 	return toHex(digest);
+}
+
+/** Hashes of `config` under every retired identity-exclusion set, for cache-miss migration. */
+async function hashLegacyConfigs(config: MCPServerConfig): Promise<string[]> {
+	return Promise.all(LEGACY_IDENTITY_EXCLUDED_KEYS.map(keys => hashIdentity(stripKeys(config, keys))));
 }
 
 function cacheKey(serverName: string): string {
@@ -59,13 +93,22 @@ export class MCPToolCache {
 
 		let currentHash: string;
 		try {
-			currentHash = await hashConfig(config);
+			currentHash = await hashIdentity(stripKeys(config, CURRENT_IDENTITY_EXCLUDED_KEYS));
 		} catch (error) {
 			logger.warn("MCP tool cache hash failed", { serverName, error: String(error) });
 			return null;
 		}
 
-		if (parsed.configHash !== currentHash) return null;
+		if (parsed.configHash !== currentHash) {
+			let legacyHashes: string[];
+			try {
+				legacyHashes = await hashLegacyConfigs(config);
+			} catch (error) {
+				logger.warn("MCP tool cache legacy hash failed", { serverName, error: String(error) });
+				return null;
+			}
+			if (!legacyHashes.includes(parsed.configHash)) return null;
+		}
 
 		return parsed.tools as MCPToolDefinition[];
 	}
@@ -73,7 +116,7 @@ export class MCPToolCache {
 	async set(serverName: string, config: MCPServerConfig, tools: MCPToolDefinition[]): Promise<void> {
 		let configHash: string;
 		try {
-			configHash = await hashConfig(config);
+			configHash = await hashIdentity(stripKeys(config, CURRENT_IDENTITY_EXCLUDED_KEYS));
 		} catch (error) {
 			logger.warn("MCP tool cache hash failed", { serverName, error: String(error) });
 			return;
