@@ -408,18 +408,6 @@ export interface EditorTheme {
 	hintStyle?: (text: string) => string;
 }
 
-export interface EditorTopBorder {
-	/** The status content (already styled). May contain at most one `\n`: line 1 is the
-	 * primary bar (exactly as today), line 2 holds overflow/substrate segments. The
-	 * second row renders with vertical sides so the frame reads as one box. */
-	content: string;
-	/** Visible width of the content. For multi-line content this is the MAX visibleWidth
-	 * across lines; the component re-derives per-row widths when it splits on `\n`. */
-	width: number;
-	/** Optional logical revision that changes independently of available width. */
-	revision?: number;
-}
-
 interface HistoryEntry {
 	prompt: string;
 }

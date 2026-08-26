@@ -2090,7 +2090,9 @@ export class StatusLineComponent implements Component {
 					// The shrink kept only the title on a narrow bar; when it is popped
 					// to the overflow line there is no width budget, so emit the full
 					// unshrunk title there instead of the chopped copy.
-					overflowRight.push(shrunkName !== undefined && popped === shrunkName && fullName !== undefined ? fullName : popped);
+					overflowRight.push(
+						shrunkName !== undefined && popped === shrunkName && fullName !== undefined ? fullName : popped,
+					);
 				}
 				rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);
 			}
@@ -2179,11 +2181,13 @@ export class StatusLineComponent implements Component {
 		const leftGroup = renderGroup(left, "left");
 		const rightGroup = renderGroup(right, "right");
 
-		// Line 1 is the primary bar, kept-set exactly as before the two-line work.
+		// Line 1 keeps upstream's placement semantics verbatim (empty guard,
+		// space-fallback when a side is absent on plain layouts), with only the
+		// box-layout gap composed through the context gauge.
 		let line1: string;
 		if (!leftGroup && !rightGroup) {
 			line1 = "";
-		} else if (topFillWidth === 0 || left.length === 0 || right.length === 0) {
+		} else if (topFillWidth === 0 || (plain && (left.length === 0 || right.length === 0))) {
 			line1 = leftGroup + (leftGroup && rightGroup ? " " : "") + rightGroup;
 		} else {
 			const gapWidth = Math.max(1, topFillWidth - leftWidth - rightWidth);
@@ -2191,7 +2195,13 @@ export class StatusLineComponent implements Component {
 				// Standalone composers: no gauge line between the groups, just air.
 				line1 = leftGroup + padding(gapWidth) + rightGroup;
 			} else {
-				line1 = leftGroup + this.#buildContextGaugeFill(gapWidth, ctx, effectiveSettings, embedContext) + rightGroup;
+				// Box layout: with one group absent (an unnamed session hides
+				// `session_name`, emptying the default preset's right group) the
+				// gauge runs to the border edge instead of disappearing, so
+				// embedded context labels don't fall back to a context chip until
+				// the session is titled.
+				line1 =
+					leftGroup + this.#buildContextGaugeFill(gapWidth, ctx, effectiveSettings, embedContext) + rightGroup;
 			}
 		}
 
