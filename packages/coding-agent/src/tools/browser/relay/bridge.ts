@@ -693,6 +693,19 @@ export class RelayBridge {
 			case "Page.setLifecycleEventsEnabled":
 				enabled = msg.params?.enabled === true;
 				break;
+			case "Network.setUserAgentOverride":
+			case "Emulation.setUserAgentOverride":
+				// Persistent state setters with no disable counterpart: the browser
+				// tool applies the stealth UA to preserved page sessions, and Chrome's
+				// fresh root after a guard-authorized swap no longer carries it. Record
+				// latest-wins so recovery replays the current override rather than
+				// letting the fingerprint change mid-session.
+				ref.subscriptions.set(msg.method, {
+					method: msg.method,
+					params: msg.params,
+					sequence: ++this.#subscriptionSeq,
+				});
+				return;
 			default:
 				return;
 		}

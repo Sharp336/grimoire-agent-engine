@@ -107,6 +107,20 @@ async function flush(): Promise<void> {
 	for (let i = 0; i < 10; i++) await Promise.resolve();
 }
 
+/**
+ * Drain microtasks until `predicate` holds. The recovery chain (attach →
+ * subscription replay → root Runtime cycle) resolves purely on the microtask
+ * queue, but its depth varies with the scheduler, so a fixed {@link flush}
+ * count is racy. Poll the observable condition instead of guessing a tick count.
+ */
+async function waitFor(predicate: () => boolean, label = "condition"): Promise<void> {
+	for (let i = 0; i < 1000; i++) {
+		if (predicate()) return;
+		await Promise.resolve();
+	}
+	throw new Error(`waitFor timed out waiting for ${label}`);
+}
+
 let msgSeq = 100;
 
 /** Attach to a tab's page target and return the minted page session id. */
@@ -682,6 +696,58 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext2, "send", { cookies: [] });
 		await flush();
 		expect(cdp.messages.filter(message => message.id === commandId && "result" in message)).toHaveLength(1);
+	});
+
+	it("replays persistent user-agent overrides for a preserved session across recovery", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		const sendRootCommand = async (method: string, params?: Record<string, unknown>): Promise<void> => {
+			const id = ++msgSeq;
+			bridge.cdpMessage(connId, JSON.stringify({ id, sessionId: pageSession, method, params }));
+			await flush();
+			ack(bridge, ext, "send");
+			await flush();
+			expect(cdp.messages.filter(message => message.id === id && "result" in message)).toHaveLength(1);
+		};
+
+		// The browser tool applies the stealth UA through both CDP setters (see
+		// launch.ts sendUserAgentOverride). A later re-issue must win.
+		const staleUa = { userAgent: "stale-agent", platform: "Linux" };
+		const stealthUa = { userAgent: "Mozilla/5.0 stealth", platform: "Win32" };
+		await sendRootCommand("Network.setUserAgentOverride", staleUa);
+		await sendRootCommand("Emulation.setUserAgentOverride", staleUa);
+		await sendRootCommand("Network.setUserAgentOverride", stealthUa);
+		await sendRootCommand("Emulation.setUserAgentOverride", stealthUa);
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
+		ack(bridge, ext2, "attach");
+
+		// Recovery replays each UA setter serially, in original order, with the
+		// latest override params — so the fresh Chrome root keeps the stealth
+		// fingerprint instead of reverting after the guard-authorized swap.
+		await waitFor(() => ext2.rpcs("send").length === 1, "first UA override replayed");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Network.setUserAgentOverride"]);
+		expect(ext2.rpcs("send")[0]!.params).toEqual(stealthUa);
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.rpcs("send").length === 2, "second UA override replayed");
+		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual([
+			"Network.setUserAgentOverride",
+			"Emulation.setUserAgentOverride",
+		]);
+		expect(ext2.rpcs("send")[1]!.params).toEqual(stealthUa);
+		ack(bridge, ext2, "send");
+		await flush();
+		// Exactly the two UA setters replay — no duplicate from the superseded
+		// stale override, and no disable/enable churn for a stateless setter.
+		expect(ext2.rpcs("send")).toHaveLength(2);
 	});
 
 	it("holds a preserved session's command until the reconnect hello arrives", async () => {
@@ -1532,19 +1598,22 @@ describe("RelayBridge attachment release", () => {
 				recoverableTabIds: [1],
 			}),
 		);
-		await flush();
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		expect(ext2.rpcs("attach")).toHaveLength(1);
 		expect(ext2.rpcs("send")).toHaveLength(0);
 
 		// Attach acknowledges: only now does the root Runtime cycle proceed.
 		ack(bridge, ext2, "attach");
-		await flush();
+		await waitFor(() => ext2.rpcs("send").length === 1, "Runtime.disable leg");
 		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Runtime.disable"]);
 		ack(bridge, ext2, "send"); // Runtime.disable leg
-		await flush();
+		await waitFor(() => ext2.rpcs("send").length === 2, "Runtime.enable leg");
 		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Runtime.disable", "Runtime.enable"]);
 		ack(bridge, ext2, "send"); // Runtime.enable leg
-		await flush();
+		await waitFor(
+			() => cdp.messages.some(message => message.id === enableId && "result" in message),
+			"Runtime.enable ack to client",
+		);
 		expect(cdp.messages.filter(message => message.id === enableId && "result" in message)).toHaveLength(1);
 	});
 
@@ -1588,13 +1657,13 @@ describe("RelayBridge attachment release", () => {
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
 		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
-		await flush();
+		await waitFor(() => ext2.rpcs("attach").length === 1, "recovery reattach RPC");
 		expect(ext2.rpcs("attach")).toHaveLength(1);
 		ack(bridge, ext2, "attach");
-		await flush();
+		await waitFor(() => ext2.rpcs("send").length === 1, "Runtime.disable leg");
 		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Runtime.disable"]);
 		ack(bridge, ext2, "send"); // Runtime.disable leg
-		await flush();
+		await waitFor(() => ext2.rpcs("send").length === 2, "Runtime.enable leg");
 		expect(ext2.rpcs("send").map(rpc => rpc.method)).toEqual(["Runtime.disable", "Runtime.enable"]);
 
 		// Runtime.enable on the fresh root re-announces contexts without requiring
