@@ -155,13 +155,25 @@ describe("/rlm slash command", () => {
 		}
 	});
 
-	it("still returns a prompt when invoked without arguments", async () => {
+	it("renders an explicit no-request marker and skips externalization when invoked without arguments", async () => {
 		const h = acpRuntime({ enabled: true });
+		tempDirs.push(h.artifactsDir);
 
 		const result = await executeAcpBuiltinSlashCommand("/rlm", h.runtime);
 
+		// The no-argument branch must still hand the model an actionable
+		// prompt: the rendered request slot carries the explicit
+		// "(no request text provided)" marker instead of an empty/garbled
+		// field the model could not act on.
 		const prompt = promptOf(result);
-		expect(prompt).toContain("RLM mode");
+		expect(prompt).toContain("User request: (no request text provided)");
+		// And it must not take the inline-payload path: no local:// reference
+		// is rendered and no payload file is written for a request with no
+		// text (the with-args branch writes one).
+		expect(prompt).not.toContain("local://rlm-input-");
+		expect(prompt).not.toContain("Inline payload externalized");
+		const localDir = path.join(h.artifactsDir, "local");
+		expect(fs.existsSync(localDir) ? fs.readdirSync(localDir) : []).toHaveLength(0);
 		expect(h.output).not.toHaveBeenCalled();
 	});
 });
