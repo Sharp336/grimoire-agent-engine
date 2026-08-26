@@ -480,7 +480,7 @@ export class WelcomeComponent implements Component {
 	}
 }
 
-export const PI_LOGO = ["▀██████████▀", " ╘██    ██  ", "  ██    ██  ", "  ██    ██  ", " ▄██▄  ▄██▄ "];
+export const PI_LOGO = ["████████████", "  ██   ██   ", "  ██   ██   ", "  ██   ██   ", "       ██   "];
 
 /** Multi-stop palette for the diagonal gradient. */
 const GRADIENT_STOPS: ReadonlyArray<readonly [number, number, number]> = [
@@ -548,7 +548,7 @@ export function gradientEscape(t: number, shine?: ShineConfig): string {
 }
 
 /**
- * Apply a multi-stop diagonal gradient (bottom-left → top-right) plus an
+ * Apply a multi-stop diagonal gradient (top-left → bottom-right) plus an
  * optional sliding shine band across multi-line art. `phase` (0..1) shifts the
  * gradient along the diagonal, wrapping at 1. When `shine` is provided, a soft
  * white highlight is composited on top, centered at `shine.pos`.
@@ -568,8 +568,8 @@ export function gradientLogo(lines: readonly string[], phase = 0, shine?: ShineC
 				result += char;
 				continue;
 			}
-			// Diagonal: bottom-left (x=0, y=rows-1) → top-right (x=cols-1, y=0)
-			const base = (x + (rows - 1 - y)) / span;
+			// Diagonal: top-left (x=0, y=0) → bottom-right (x=cols-1, y=rows-1)
+			const base = (x + y) / span;
 			const t = (((base + phase) % 1) + 1) % 1;
 			result += gradientEscape(t, shine) + char + reset;
 		}
