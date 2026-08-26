@@ -1039,6 +1039,93 @@ export default function (pi) {
 			await removeWithRetries(tempDir);
 		}
 	});
+
+	it("drains a resources_discover-triggered sendUserMessage before returning (regression: PR #9379 round-5 review)", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-session-discover-drain-"));
+		const authStorage = createInMemoryAuthStorage();
+		let session: AgentSession | undefined;
+		try {
+			// A `resources_discover` handler that announces itself via
+			// `pi.sendUserMessage()` — the same shared action context every other
+			// handler uses (mirrors an extension posting a note about a directory
+			// it just discovered). The handler itself returns synchronously, but
+			// `sendUserMessage` starts an async turn the action never exposes a
+			// promise for.
+			const extensionsDir = path.join(tempDir, "ext");
+			await fs.mkdir(extensionsDir, { recursive: true });
+			const extPath = path.join(extensionsDir, "discover-announce.ts");
+			await fs.writeFile(
+				extPath,
+				`export default function (pi) {
+	pi.on("resources_discover", () => {
+		pi.sendUserMessage("announcing a discovered directory");
+		return undefined;
+	});
+}
+`,
+			);
+
+			const loaded = await loadExtensions([extPath], tempDir);
+			expect(loaded.errors).toEqual([]);
+
+			const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+			if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+			// `delayMs` makes the extension-triggered turn's completion
+			// observably later than the handler's own synchronous return, so a
+			// caller that fails to drain pending sends would see this resolve
+			// with the turn still in flight.
+			const mock = createMockModel({ handler: () => ({ content: ["ack"], delayMs: 20 }) });
+			const agent = new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["Test"], tools: [] },
+				streamFn: mock.stream,
+			});
+			const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+			const sessionManager = SessionManager.inMemory(tempDir);
+			const extensionRunner = new ExtensionRunner(
+				loaded.extensions,
+				loaded.runtime,
+				tempDir,
+				sessionManager,
+				modelRegistry,
+			);
+
+			session = new AgentSession({
+				agent,
+				sessionManager,
+				settings: Settings.isolated({ "compaction.enabled": false }),
+				modelRegistry,
+				extensionRunner,
+			});
+
+			const runtimeErrors: ExtensionError[] = [];
+			await initializeExtensions(session, {
+				reportSendError: () => {},
+				reportRuntimeError: error => {
+					runtimeErrors.push(error);
+				},
+			});
+
+			expect(runtimeErrors).toEqual([]);
+			// The extension-triggered turn must be fully settled by the time
+			// `initializeExtensions` resolves — not merely started — or a caller
+			// like print mode's immediate `session.prompt()` can observe the
+			// session as still streaming and throw `AgentBusyError`.
+			expect(session.isStreaming).toBe(false);
+			expect(
+				session.messages.some(
+					m => m.role === "assistant" && m.content.some(c => c.type === "text" && c.text === "ack"),
+				),
+			).toBe(true);
+			// Prove it wasn't a lucky race: a caller can prompt immediately
+			// afterward without hitting AgentBusyError.
+			await expect(session.prompt("next")).resolves.toBe(true);
+		} finally {
+			await session?.dispose();
+			authStorage.close();
+			await removeWithRetries(tempDir);
+		}
+	});
 });
 
 describe("collision handling", () => {
