@@ -39,6 +39,10 @@ import type {
 	UsageProvider,
 } from "@oh-my-pi/pi-ai";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
+
+// Re-exported: extension authors need these to implement provider login flows.
+export type { OAuthCredentials, OAuthLoginCallbacks };
+
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
@@ -53,6 +57,7 @@ import type {
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { KeybindingsManager } from "../../config/keybindings";
 import type { ModelRegistry } from "../../config/model-registry";
+import type { ProviderAuthMode } from "../../config/models-config-schema";
 import type { EditToolDetails } from "../../edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
@@ -1570,8 +1575,20 @@ export interface ProviderConfig {
 	 * Runs through the same SQLite model-cache as built-in providers (keyed by
 	 * provider name, default 24 h TTL). Receives the resolved API key (undefined
 	 * when unauthenticated). Mutually exclusive with `models`.
+	 * Return null when there is nothing to discover — e.g. no credentials yet —
+	 * instead of an empty list: null is treated like a failed discovery and
+	 * never prunes cached models.
 	 */
-	fetchDynamicModels?: (apiKey: string | undefined) => Promise<readonly ProviderModelConfig[]>;
+	fetchDynamicModels?: (apiKey: string | undefined) => Promise<readonly ProviderModelConfig[] | null>;
+	/**
+	 * Auth mode, mirroring models.yml `auth`. "apiKey" opts anthropic-messages
+	 * models out of the custom-model OAuth default (normal API-key request
+	 * shaping). For `fetchDynamicModels` providers, declaring "apiKey" or
+	 * "oauth" additionally defers discovery until a credential resolves — no
+	 * network calls and no cache writes while unauthenticated. Unset or "none"
+	 * keeps the legacy always-discover behavior for keyless providers.
+	 */
+	auth?: ProviderAuthMode;
 }
 
 /** Configuration for a model within a provider. */
@@ -1582,6 +1599,8 @@ export interface ProviderModelConfig {
 	name: string;
 	/** API type override for this model. */
 	api?: Api;
+	/** Base URL override for this model (defaults to the provider baseUrl). */
+	baseUrl?: string;
 	/** Whether the model supports extended thinking at all. */
 	reasoning: boolean;
 	/** Optional canonical thinking capability metadata for per-model effort support. */

@@ -302,6 +302,34 @@ describe("ModelRegistry runtime provider registration", () => {
 		});
 	});
 
+	test("auth-declared runtime providers defer fetchDynamicModels until a credential resolves", async () => {
+		const providerName = "gated-runtime-provider";
+		let discoveryCalls = 0;
+
+		registry.registerProvider(
+			providerName,
+			{
+				baseUrl: "https://runtime.example.com/v1",
+				auth: "apiKey",
+				api: "openai-completions",
+				fetchDynamicModels: async () => {
+					discoveryCalls++;
+					return [{ ...baseModel, id: "gated-model" }];
+				},
+			},
+			"ext://runtime",
+		);
+
+		await registry.refreshRuntimeProviders("online");
+		expect(discoveryCalls).toBe(0);
+		expect(registry.find(providerName, "gated-model")).toBeUndefined();
+		// A resolved credential (login/env/config key) unlocks discovery.
+		registry.authStorage.setRuntimeApiKey(providerName, "RUNTIME_KEY");
+		await registry.refreshProvider(providerName, "online");
+		expect(discoveryCalls).toBe(1);
+		expect(registry.find(providerName, "gated-model")).toBeDefined();
+	});
+
 	test("configured discovery suppresses extension fetchDynamicModels for the same provider", async () => {
 		const providerName = "runtime-configured-provider";
 		fs.writeFileSync(

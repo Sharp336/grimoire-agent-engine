@@ -117,6 +117,9 @@ import { type Settings, settings } from "./settings";
 // requests; the pi-ai provider resolves it just-in-time per request.
 setCodexAttestationProvider(generateCodexAttestation);
 
+/** SQLite cache TTL for extension-registered dynamic providers (`fetchDynamicModels`). */
+const RUNTIME_PROVIDER_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+
 /**
  * Bedrock guardrail fields to spread onto a model spec, dropping keys that a
  * provider override left unset so an override never clobbers an existing value
@@ -228,7 +231,8 @@ export class ModelRegistry {
 	#runtimeProviderSourceByName: Map<string, string> = new Map();
 	// Runtime model managers registered by extensions via fetchDynamicModels.
 	// Keyed by provider name; use the same SQLite cache path as builtins.
-	#runtimeModelManagers: Map<string, { options: ModelManagerOptions<Api>; sourceId: string }> = new Map();
+	#runtimeModelManagers: Map<string, { options: ModelManagerOptions<Api>; sourceId: string; requiresAuth: boolean }> =
+		new Map();
 	#ignoreLocalModelConfig: boolean;
 	#fetch: FetchImpl;
 	#settings: Settings | undefined;
@@ -1500,17 +1504,18 @@ export class ModelRegistry {
 	): Promise<BuiltInDiscoveryResult> {
 		// Skip providers already handled by configured discovery (e.g. user-configured ollama with discovery.type)
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(p => p.provider));
-		const managerOptions = await this.#collectBuiltInModelManagerOptions(
+		const { managers: managerOptions, cachedResults } = await this.#collectBuiltInModelManagerOptions(
 			strategy,
 			providerFilter,
 			configuredDiscoveryProviders,
 		);
-		if (managerOptions.length === 0) {
+		if (managerOptions.length === 0 && cachedResults.length === 0) {
 			return { models: [], authoritativeProviders: new Set() };
 		}
-		const discoveries = await Promise.all(
-			managerOptions.map(options => this.#discoverWithModelManager(options, strategy)),
-		);
+		const discoveries = [
+			...cachedResults,
+			...(await Promise.all(managerOptions.map(options => this.#discoverWithModelManager(options, strategy)))),
+		];
 		const authoritativeProviders = new Set<string>();
 		const models: Model<Api>[] = [];
 		for (const discovery of discoveries) {
@@ -1585,7 +1590,7 @@ export class ModelRegistry {
 		strategy: ModelRefreshStrategy,
 		providerFilter: ReadonlySet<string> | undefined,
 		configuredDiscoveryProviders: ReadonlySet<string>,
-	): Promise<ModelManagerOptions<Api>[]> {
+	): Promise<{ managers: ModelManagerOptions<Api>[]; cachedResults: BuiltInDiscoveryResult[] }> {
 		const specialProviderDescriptors: Array<{
 			providerId: string;
 			authoritative: boolean;
@@ -1688,16 +1693,38 @@ export class ModelRegistry {
 			}
 			options.push(descriptor.createOptions(key, specialKeys[i]));
 		}
+		const cachedResults: BuiltInDiscoveryResult[] = [];
 		// Append runtime model managers registered by extensions via fetchDynamicModels.
-		for (const { options: managerOpts } of this.#runtimeModelManagers.values()) {
+		for (const { options: managerOpts, requiresAuth } of this.#runtimeModelManagers.values()) {
 			if (
-				!configuredDiscoveryProviders.has(managerOpts.providerId) &&
-				(!providerFilter || providerFilter.has(managerOpts.providerId))
+				configuredDiscoveryProviders.has(managerOpts.providerId) ||
+				(providerFilter && !providerFilter.has(managerOpts.providerId))
 			) {
-				options.push(managerOpts);
+				continue;
 			}
+			if (requiresAuth && strategy !== "offline") {
+				const apiKey = await this.#peekApiKeyForProvider(managerOpts.providerId);
+				if (!isAuthenticated(apiKey)) {
+					// Never authenticated: surface cached models without running discovery,
+					// mirroring configured-discovery handling — no network, no cache write.
+					// A pre-auth cycle must not pin a fresh empty catalog row over the
+					// first authenticated refresh's retry window.
+					const cached = readModelCache<Api>(
+						managerOpts.providerId,
+						RUNTIME_PROVIDER_CACHE_TTL_MS,
+						Date.now,
+						this.#cacheDbPath,
+					);
+					cachedResults.push({
+						models: (cached?.models ?? []).map(model => buildModel(model)),
+						authoritativeProviders: new Set(),
+					});
+					continue;
+				}
+			}
+			options.push(managerOpts);
 		}
-		return options;
+		return { managers: options, cachedResults };
 	}
 
 	async #discoverWithModelManager(
@@ -2354,7 +2381,7 @@ export class ModelRegistry {
 					config.apiKey,
 					config.authHeader,
 					config.compat,
-					undefined,
+					config.auth,
 					config.remoteCompaction,
 					modelDef as CustomModelDefinitionLike,
 				);
@@ -2424,14 +2451,15 @@ export class ModelRegistry {
 				providerId: providerName as Parameters<typeof createModelManager>[0]["providerId"],
 				staticModels: [],
 				cacheDbPath: this.#cacheDbPath,
-				cacheTtlMs: 24 * 60 * 60 * 1000,
+				cacheTtlMs: RUNTIME_PROVIDER_CACHE_TTL_MS,
 				dynamicModelsAuthoritative: true,
 				fetchDynamicModels: async () => {
 					const apiKey = await this.#peekApiKeyForProvider(providerName);
 					const resolvedKey = isAuthenticated(apiKey) ? apiKey : undefined;
-					const modelDefs = await withRuntimeDynamicModelsTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
-						fetcher(resolvedKey),
-					);
+					const modelDefs =
+						(await withRuntimeDynamicModelsTimeout(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, () =>
+							fetcher(resolvedKey),
+						)) ?? [];
 					const results: Model<Api>[] = [];
 					for (const modelDef of modelDefs) {
 						const overlay = buildCustomModelOverlay(
@@ -2442,7 +2470,7 @@ export class ModelRegistry {
 							providerApiKey,
 							providerAuthHeader,
 							providerCompat,
-							undefined,
+							config.auth,
 							config.remoteCompaction,
 							modelDef as CustomModelDefinitionLike,
 						);
@@ -2451,7 +2479,14 @@ export class ModelRegistry {
 					return results.map(toModelSpec);
 				},
 			};
-			this.#runtimeModelManagers.set(providerName, { options: managerOptions, sourceId: sourceId ?? "" });
+			this.#runtimeModelManagers.set(providerName, {
+				options: managerOptions,
+				sourceId: sourceId ?? "",
+				// Opt-in gating: declaring a credential auth mode ("apiKey"/"oauth")
+				// defers discovery until a key resolves; unset/"none" keeps the
+				// legacy always-discover behavior for keyless extension providers.
+				requiresAuth: config.auth === "apiKey" || config.auth === "oauth",
+			});
 			// Discovery is driven by refreshRuntimeProviders() after the drain — not
 			// here, so registration has no network side effect and callers can await.
 		}
@@ -2546,6 +2581,15 @@ export interface ProviderConfigInput {
 	headers?: Record<string, string>;
 	compat?: ModelSpec<Api>["compat"];
 	remoteCompaction?: RemoteCompactionConfig<Api>;
+	/**
+	 * Auth mode, mirroring models.yml `auth`. "apiKey" opts anthropic-messages
+	 * models out of the custom-model OAuth default (normal API-key request
+	 * shaping). For `fetchDynamicModels` providers, declaring "apiKey" or
+	 * "oauth" additionally defers discovery until a credential resolves — no
+	 * network calls and no cache writes while unauthenticated. Unset or "none"
+	 * keeps the legacy always-discover behavior for keyless providers.
+	 */
+	auth?: ProviderAuthMode;
 	authHeader?: boolean;
 	/** Streaming transport override — see {@link Model.transport}. */
 	transport?: Model<Api>["transport"];
@@ -2563,10 +2607,13 @@ export interface ProviderConfigInput {
 	 * When present, the result is run through the same SQLite model-cache as
 	 * built-in providers (keyed by provider name, default 24 h TTL).
 	 * The factory receives the resolved API key (undefined when unauthenticated).
+	 * Return null when there is nothing to discover — e.g. no credentials yet —
+	 * instead of an empty list: null is treated like a failed discovery, while a
+	 * successful empty list prunes cached models for the cycle.
 	 */
 	fetchDynamicModels?: (
 		apiKey: string | undefined,
-	) => Promise<readonly NonNullable<ProviderConfigInput["models"]>[number][]>;
+	) => Promise<readonly NonNullable<ProviderConfigInput["models"]>[number][] | null>;
 	models?: Array<{
 		id: string;
 		name: string;
