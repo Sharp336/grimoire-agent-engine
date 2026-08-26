@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `omp bench` and `omp if-bench` failing to resolve credential-scoped dynamic models already listed by `omp models`.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added
