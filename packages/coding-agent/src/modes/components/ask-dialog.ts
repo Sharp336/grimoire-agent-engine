@@ -42,7 +42,7 @@ import {
 import { ASK_ROW_PREFIX_COLUMNS, type AskQuestionRow, renderAskRow } from "./ask-row";
 import { CountdownTimer } from "./countdown-timer";
 import { editorKey } from "./keybinding-hints";
-import { bottomBorder, divider, fit, row, topBorder } from "./overlay-box";
+import { bottomBorder, divider, dividerSplit, fit, row, topBorder, topBorderSplit } from "./overlay-box";
 
 const OTHER_OPTION = "Other (type your own)";
 const SUBMIT_OPTION = "Submit";
@@ -324,9 +324,11 @@ function countedMoreCue(hidden: number): string {
 function truncateFooter(parts: string[], maxWidth: number): string {
 	if (parts.length === 0) return "";
 	const join = (items: string[]): string => items.join(" · ");
-	let kept = parts.slice();
+	const kept = parts.slice();
+	// Pin the last part (cancel). Overflow drops lower-priority middle hints
+	// first so cancellation stays advertised whenever it is available.
 	while (kept.length > 1 && visibleWidth(join(kept)) > maxWidth) {
-		kept = kept.slice(0, -1);
+		kept.splice(kept.length - 2, 1);
 	}
 	const text = join(kept);
 	return visibleWidth(text) <= maxWidth ? text : truncateToWidth(text, Math.max(1, maxWidth), Ellipsis.Unicode);
@@ -408,7 +410,6 @@ export class AskDialogComponent implements Component, Focusable, MouseRoutable {
 	#filterRowCount = 0;
 	#rowHits: RowHitZone[] = [];
 	#lastPreviewLineCount = 0;
-	#lastListLineCount = 0;
 
 	constructor(
 		questions: ExtensionAskDialogQuestion[],
@@ -506,9 +507,23 @@ export class AskDialogComponent implements Component, Focusable, MouseRoutable {
 			return;
 		}
 		if (this.#filterOpen && this.#filterInput) {
+			// Keep list navigation live while the filter input is open: arrows
+			// and paging move among filtered rows instead of becoming query text.
+			// Enter is handled by Input.onSubmit (close filter, keep query, activate).
+			if (
+				matchesSelectUp(keyData) ||
+				matchesSelectDown(keyData) ||
+				matchesSelectPageUp(keyData) ||
+				matchesSelectPageDown(keyData)
+			) {
+				this.#handleQuestionInput(keyData);
+				return;
+			}
 			this.#filterInput.handleInput(keyData);
-			this.#filterQuery = this.#filterInput.getValue();
-			this.#requestRender();
+			if (this.#filterInput) {
+				this.#filterQuery = this.#filterInput.getValue();
+				this.#requestRender();
+			}
 			return;
 		}
 		if (this.#hasSubmitTab() && this.#matchesTabSwitch(keyData)) {
@@ -556,12 +571,9 @@ export class AskDialogComponent implements Component, Focusable, MouseRoutable {
 			if (listLine >= 0 && listLine < listRowCount) {
 				const active = this.#activeQuestionState();
 				if (!active) return;
-				active.state.scrollOffset = clamp(
-					active.state.scrollOffset + event.wheel,
-					0,
-					Math.max(0, this.#lastListLineCount - Math.max(1, this.#bodyRowCount - this.#filterRowCount)),
-				);
-				active.state.manualScroll = true;
+				const rows = this.#visibleRows(active.question);
+				active.state.cursorIndex = clamp(active.state.cursorIndex + event.wheel, 0, Math.max(0, rows.length - 1));
+				active.state.manualScroll = false;
 				this.#requestRender();
 			}
 			return;
@@ -622,18 +634,25 @@ export class AskDialogComponent implements Component, Focusable, MouseRoutable {
 		const fixedRows = 1 + headerLines.length + 1 + 1 + 1 + 1;
 		const bodyRows = Math.max(MIN_BODY_ROWS, totalRows - fixedRows);
 		this.#bodyRows = bodyRows;
-		const out: string[] = [topBorder(width, this.#titleText())];
+		const { listWidth, split } = previewFacetWidths(innerWidth);
+		const splitChrome = split && !this.#isSubmitTab();
+		// Body concatenates list|preview without the extra spaces splitRow uses,
+		// so the inner │ sits at listWidth+2. overlay-box tees at sidebarWidth+3.
+		const splitSidebar = Math.max(0, listWidth - 1);
+		const out: string[] = [
+			splitChrome ? topBorderSplit(width, this.#titleText(), splitSidebar) : topBorder(width, this.#titleText()),
+		];
 		this.#tabRowStart = this.#hasSubmitTab() ? out.length : -1;
 		this.#tabRowCount = this.#hasSubmitTab() ? 1 : 0;
 		out.push(...headerLines.map(line => row(line, width)));
-		out.push(divider(width));
+		out.push(splitChrome ? dividerSplit(width, splitSidebar) : divider(width));
 		this.#bodyRowStart = out.length;
 		this.#bodyRowCount = bodyRows;
 		const bodyLines = this.#isSubmitTab()
 			? this.#renderSubmitBody(innerWidth, bodyRows)
 			: this.#renderQuestionBody(innerWidth, bodyRows);
 		out.push(...bodyLines.lines.map(line => row(line, width)));
-		out.push(divider(width));
+		out.push(splitChrome ? dividerSplit(width, splitSidebar) : divider(width));
 		out.push(row(theme.fg("dim", this.#footerHintText(bodyLines.indicator)), width));
 		out.push(bottomBorder(width));
 		return out;
@@ -866,6 +885,17 @@ export class AskDialogComponent implements Component, Focusable, MouseRoutable {
 		this.#filterInput.prompt = "/ ";
 		this.#filterInput.setValue(this.#filterQuery);
 		this.#filterInput.focused = true;
+		this.#filterInput.onSubmit = () => {
+			this.#filterQuery = this.#filterInput?.getValue() ?? this.#filterQuery;
+			this.#filterOpen = false;
+			this.#filterInput = undefined;
+			const active = this.#activeQuestionState();
+			if (!active) {
+				this.#requestRender();
+				return;
+			}
+			this.#activateFocusedRow(active.question, active.state, "enter");
+		};
 	}
 
 	#handleQuestionInput(keyData: string): void {
@@ -1159,7 +1189,6 @@ export class AskDialogComponent implements Component, Focusable, MouseRoutable {
 		}
 		const { allLines, lineStartByRow, hidden } = renderedRows;
 		this.#hiddenDescriptionLines = hidden;
-		this.#lastListLineCount = allLines.length;
 		const cursorStart = lineStartByRow[state.cursorIndex] ?? 0;
 		const cursorEnd = lineStartByRow[state.cursorIndex + 1] ?? allLines.length;
 		this.#questionCanPage = cursorEnd - cursorStart > listRows;
@@ -1247,7 +1276,7 @@ export class AskDialogComponent implements Component, Focusable, MouseRoutable {
 			return Array.from({ length: rows }, () => "");
 		}
 		const option = focusedRow?.kind === "option" ? question.options[focusedRow.optionIndex ?? -1] : undefined;
-		const title = truncateToWidth(focusedRow?.label ?? "", previewWidth, Ellipsis.Unicode);
+		const title = truncateToWidth(replaceTabs(focusedRow?.label ?? ""), previewWidth, Ellipsis.Unicode);
 		const titleLine = theme.bold(theme.fg("accent", title));
 		const bodyBudget = Math.max(0, rows - 1);
 		const previewText = option?.preview?.trim() ? option.preview : "";

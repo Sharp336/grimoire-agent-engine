@@ -217,20 +217,20 @@ function customInputContentWidth(): number {
 	return Math.max(MIN_CUSTOM_INPUT_CONTENT_WIDTH, cols - CUSTOM_INPUT_CHROME_COLUMNS);
 }
 
-/** Clamp a line to `width` and return both the visible text and how many
- *  characters (grapheme clusters) were removed. The count is the number of
- *  user-perceived characters beyond the truncation boundary, not visible
- *  terminal columns — so a CJK or emoji tail reports its true character
+/** Clamp a line to `width` surfacing the hidden count in a `(+N chars)` cue.
+ *  The count is the number of user-perceived characters beyond the truncation
+ *  boundary, not visible terminal columns — so a CJK or emoji tail reports its true character
  *  count rather than an inflated column count. */
-function clampLineToWidth(line: string, width: number): { text: string; clippedChars: number } {
+function clampLineToWidth(line: string, width: number): string {
 	const fullWidth = visibleWidth(line);
-	if (fullWidth <= width) return { text: line, clippedChars: 0 };
+	if (fullWidth <= width) return line;
 	const ellipsis = "…";
 	const ellipsisWidth = visibleWidth(ellipsis);
 
 	function cue(hidden: number): string {
-		// Match the file's existing ellipsis-style truncation cues.
-		return `${ellipsis} (+${hidden} chars)`;
+		// `truncated` already carries the ellipsis from truncateToWidth; the
+		// cue adds only the count so the line reads `<retained>… (+N chars)`.
+		return `(+${hidden} chars)`;
 	}
 
 	/** Count grapheme clusters in `text` using the shared Intl.Segmenter. */
@@ -262,14 +262,11 @@ function clampLineToWidth(line: string, width: number): { text: string; clippedC
 		// then count graphemes in the remaining tail.
 		const retained = truncated.endsWith(ellipsis) ? truncated.slice(0, -ellipsis.length) : truncated;
 		const hiddenChars = graphemeCount(line.slice(retained.length));
-		return { text: `${truncated} ${cue(hiddenChars)}`, clippedChars: hiddenChars };
+		return `${truncated} ${cue(hiddenChars)}`;
 	}
 
 	// Not enough room for the cue; fall back to a plain ellipsis.
-	const plain = truncateToWidth(line, width, Ellipsis.Unicode);
-	const plainRetained = plain.endsWith(ellipsis) ? plain.slice(0, -ellipsis.length) : plain;
-	const plainHiddenChars = graphemeCount(line.slice(plainRetained.length));
-	return { text: plain, clippedChars: plainHiddenChars };
+	return truncateToWidth(line, width, Ellipsis.Unicode);
 }
 
 function flattenDescription(text: string): string {
@@ -367,7 +364,7 @@ function buildCustomInputRows(
 	const checked = new Set(context.checkedIndices ?? []);
 	const window = pickCustomInputOptionWindow(options.length, selectedIndex, checked);
 	const rows: CustomInputRow[] = [];
-	rows.push({ text: clampLineToWidth(question, contentWidth).text, priority: -1 });
+	rows.push({ text: clampLineToWidth(question, contentWidth), priority: -1 });
 	rows.push({ text: "", priority: -1 });
 
 	const emitGap = (gap: CustomInputOptionGap) => {
@@ -376,7 +373,7 @@ function buildCustomInputRows(
 			text: clampLineToWidth(
 				`    … ${gap.total} more option${gap.total === 1 ? "" : "s"}${checkedSuffix} …`,
 				contentWidth,
-			).text,
+			),
 			priority: 2,
 		});
 	};
@@ -392,17 +389,17 @@ function buildCustomInputRows(
 		const multi = context.selectionMarker === "checkbox";
 		const marker =
 			isMarkable || (isSelected && context.selectionMarker !== "checkbox")
-				? askOptionMarker(multi, multi ? checkedThis : isSelected)
+				? askOptionMarker(theme, multi, multi ? checkedThis : isSelected)
 				: isSelected
 					? `${theme.nav.cursor} `
 					: "  ";
-		rows.push({ text: clampLineToWidth(`${marker} ${label}`, contentWidth).text, priority: -1 });
+		rows.push({ text: clampLineToWidth(`${marker} ${label}`, contentWidth), priority: -1 });
 		const description = getSelectOptionDescription(option);
 		if (description) {
 			const flat = flattenDescription(description);
 			if (flat) {
 				rows.push({
-					text: clampLineToWidth(`${CUSTOM_INPUT_DESCRIPTION_INDENT}${flat}`, contentWidth).text,
+					text: clampLineToWidth(`${CUSTOM_INPUT_DESCRIPTION_INDENT}${flat}`, contentWidth),
 					// Selected (Other) carries no description; favor checked rows
 					// when budget pressure forces description rows to be dropped.
 					priority: isSelected ? 2 : checked.has(index) ? 1 : 0,
@@ -1279,7 +1276,7 @@ function renderQuestionOptionLines(
 	const out: string[] = [];
 	for (const opt of options) {
 		const optLabel = renderInlineMarkdown(opt.label, mdTheme, t => uiTheme.fg("muted", t));
-		out.push(` ${uiTheme.fg("dim", askOptionMarker(multi, false))} ${optLabel}`);
+		out.push(` ${uiTheme.fg("dim", askOptionMarker(uiTheme, multi, false))} ${optLabel}`);
 		if (opt.description?.trim()) {
 			const description = renderInlineMarkdown(opt.description.trim(), mdTheme, t => uiTheme.fg("dim", t));
 			out.push(`   ${uiTheme.fg("dim", "↳")} ${description}`);
@@ -1316,7 +1313,7 @@ function renderAnswerOptionLines(
 	const out: string[] = [];
 	for (const label of list) {
 		const isSelected = selected.has(label);
-		const marker = askOptionMarker(multi, isSelected);
+		const marker = askOptionMarker(uiTheme, multi, isSelected);
 		const markerStyled = isSelected ? uiTheme.fg("success", marker) : uiTheme.fg("dim", marker);
 		const labelStyled = renderInlineMarkdown(label, mdTheme, t =>
 			isSelected ? uiTheme.fg("toolOutput", t) : uiTheme.fg("muted", t),

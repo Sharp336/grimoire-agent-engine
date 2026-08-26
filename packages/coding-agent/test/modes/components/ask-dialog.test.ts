@@ -1030,7 +1030,8 @@ describe("AskDialogComponent", () => {
 			const initial = renderAt(60);
 			expect(initial).toContain("Option 01");
 			expect(initial).not.toContain("Option 30");
-			expect(initial).toContain("↓ scroll");
+			// Overflow drops the scroll hint before cancel (F9); the list still pages.
+			expect(initial).toContain("cancel");
 
 			for (let i = 0; i < 28; i++) component.handleInput(DOWN);
 			const scrolled = renderAt(60);
@@ -1634,7 +1635,7 @@ describe("AskDialogComponent", () => {
 		expect(lines.some(line => line.includes("○"))).toBe(true);
 		const footer = [...lines].reverse().find(line => line.includes("cancel") || line.includes("Enter")) ?? "";
 		expect(footer.trim().length).toBeGreaterThan(0);
-		expect(footer).toMatch(/Enter select|cancel/);
+		expect(footer).toContain("cancel");
 	});
 
 	it("renders preview inside the expanded row when the side facet collapses", () => {
@@ -1892,6 +1893,118 @@ describe("AskDialogComponent", () => {
 			expect(onSubmit).toHaveBeenCalledTimes(1);
 			expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Recommended"]);
 			expect(onSubmit.mock.calls[0][0].results[0].timedOut).toBe(true);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("Enter after filtering submits the focused filtered option", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const onSubmit = vi.fn();
+			const options = [
+				{ label: "Alpha" },
+				{ label: "Bravo" },
+				{ label: "UniqueZebra" },
+				...Array.from({ length: 17 }, (_, index) => ({ label: `Filler ${index}` })),
+			];
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit,
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+			component.focused = true;
+			component.handleInput("/");
+			for (const ch of "UniqueZebra") component.handleInput(ch);
+			const filtered = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
+			expect(filtered).toContain("/ UniqueZebra");
+			expect(filtered).toContain("UniqueZebra");
+			component.handleInput(ENTER);
+			expect(onSubmit).toHaveBeenCalledTimes(1);
+			expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["UniqueZebra"]);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("up/down while filtering move list focus without typing into the query", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const onSubmit = vi.fn();
+			const options = [
+				{ label: "Alpha match" },
+				{ label: "Bravo match" },
+				...Array.from({ length: 18 }, (_, index) => ({ label: `Other ${index}` })),
+			];
+			const component = new AskDialogComponent([{ id: "q1", question: "Pick?", options }], {
+				onSubmit,
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			});
+			component.focused = true;
+			component.handleInput("/");
+			for (const ch of "match") component.handleInput(ch);
+			component.handleInput(DOWN);
+			const out = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
+			expect(out).toContain("/ match");
+			expect(out).toContain("❯ 2");
+			expect(out).toContain("Bravo match");
+			component.handleInput(ENTER);
+			expect(onSubmit).toHaveBeenCalledTimes(1);
+			expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Bravo match"]);
+		} finally {
+			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
+			else Reflect.deleteProperty(process.stdout, "rows");
+		}
+	});
+
+	it("list wheel moves the focused cursor among one-line options", () => {
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Pick?",
+				options: [{ label: "Option A" }, { label: "Option B" }, { label: "Option C" }],
+			},
+		];
+		const component = new AskDialogComponent(questions, {
+			onSubmit: vi.fn(),
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+		const frame = component.render(80);
+		const optionRow = frame.findIndex(line => stripVTControlCharacters(line).includes("Option A"));
+		expect(optionRow).toBeGreaterThan(-1);
+		component.routeMouse(
+			{ button: 64, col: 4, row: optionRow, release: false, wheel: 1, motion: false, leftClick: false },
+			optionRow,
+			4,
+		);
+		const after = stripVTControlCharacters(component.render(80).join("\n")).replaceAll(CURSOR_MARKER, "");
+		expect(after).toContain("❯ 2");
+		expect(after).toContain("Option B");
+	});
+
+	it("pins the cancel hint when the footer overflows at a narrow width", () => {
+		const originalRows = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, value: 16 });
+		try {
+			const options = Array.from({ length: 20 }, (_, index) => ({
+				label: `Option ${String(index + 1).padStart(2, "0")}`,
+				preview: "PREVIEW",
+			}));
+			const component = new AskDialogComponent(
+				[
+					{ id: "q1", question: "Pick many?", options, multi: true },
+					{ id: "q2", question: "Next?", options: [{ label: "X" }] },
+				],
+				{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+			);
+			const out = stripVTControlCharacters(component.render(50).join("\n"));
+			expect(out).toContain("cancel");
 		} finally {
 			if (originalRows) Object.defineProperty(process.stdout, "rows", originalRows);
 			else Reflect.deleteProperty(process.stdout, "rows");

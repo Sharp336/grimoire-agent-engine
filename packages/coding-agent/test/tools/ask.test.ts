@@ -1542,10 +1542,11 @@ describe("AskTool legacy path marker and truncation parity", () => {
 			expect(match).not.toBeNull();
 			const reportedCount = Number(match?.[1] ?? 0);
 			// The description has 26 grapheme clusters; at 32-col content width
-			// with the 4-col indent, 6 are retained and 20 are hidden. The cue
-			// must report 20 — the CHARACTER count, not the 40-column count a
-			// column-based measure would produce for 20 CJK chars × 2 cols.
-			expect(reportedCount).toBe(20);
+			// with the 4-col indent the counted cue (now `(+N chars)` without a
+			// leading ellipsis) leaves room for 7 retained graphemes, so 19 are
+			// hidden. The cue must report the CHARACTER count, not the 40-column
+			// count a column-based measure would produce for 20 CJK chars × 2 cols.
+			expect(reportedCount).toBe(19);
 			// A column-based count would report 40 (20 chars × 2 columns each).
 			// Assert we got the character count, not the column count.
 			expect(reportedCount).toBeLessThan(40);

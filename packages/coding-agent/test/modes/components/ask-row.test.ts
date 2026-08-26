@@ -89,7 +89,7 @@ describe("askRow", () => {
 
 	it("marker colour follows checked only and is unchanged by toggling focused", () => {
 		const q = question(true);
-		const glyph = askOptionMarker(true, true);
+		const glyph = askOptionMarker(theme, true, true);
 
 		const unfocused = renderAskRow(row(), makeCtx({ question: q, focused: false, checked: true })).lines[0];
 		const focused = renderAskRow(row(), makeCtx({ question: q, focused: true, checked: true })).lines[0];
@@ -178,5 +178,13 @@ describe("askRow", () => {
 		const joined = focusedDeclared.join("");
 		expect(joined.split(CURSOR_MARKER).length - 1).toBe(1);
 		expect(focusedDeclared[0].indexOf(CURSOR_MARKER)).toBeGreaterThan(0);
+	});
+
+	it("keeps the trailing note marker when the label fills the row width", () => {
+		const r: AskQuestionRow = { kind: "option", key: "opt:0", label: "X".repeat(80), optionIndex: 0 };
+		const { lines } = renderAskRow(r, makeCtx({ note: "saved", width: 30 }));
+		const first = strip(lines[0]);
+		expect(first).toContain("✎ note");
+		expect(visibleWidth(first)).toBeLessThanOrEqual(30);
 	});
 });

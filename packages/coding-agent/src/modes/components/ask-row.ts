@@ -6,10 +6,11 @@ import {
 	renderInlineMarkdown,
 	replaceTabs,
 	truncateToWidth,
+	visibleWidth,
 	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import type { ExtensionAskDialogQuestion } from "../../extensibility/extensions";
-import { theme } from "../theme/theme";
+import { type Theme, theme } from "../theme/theme";
 
 /** Width of the leading prefix column shared by every ask row (the focus
  *  cursor cell, the jump-digit cell, and the option-marker cell). Wrapped
@@ -57,10 +58,11 @@ export interface AskRowLines {
 
 /** Shared option marker glyph: a checkbox for multi questions, a radio control
  *  otherwise. Colour is applied by the caller via {@link theme.fg} and follows
- *  `checked` only — focus never changes the marker's hue. */
-export function askOptionMarker(multi: boolean | undefined, checked: boolean): string {
-	if (multi) return checked ? theme.checkbox.checked : theme.checkbox.unchecked;
-	return checked ? theme.radio.selected : theme.radio.unselected;
+ *  `checked` only — focus never changes the marker's hue. Glyphs come from
+ *  `uiTheme` so transcript renders match the theme instance they were handed. */
+export function askOptionMarker(uiTheme: Theme, multi: boolean | undefined, checked: boolean): string {
+	if (multi) return checked ? uiTheme.checkbox.checked : uiTheme.checkbox.unchecked;
+	return checked ? uiTheme.radio.selected : uiTheme.radio.unselected;
 }
 
 /** Render one ask row. Pure: given the same row and context it returns the same
@@ -81,13 +83,17 @@ export function renderAskRow(row: AskQuestionRow, ctx: AskRowRenderContext): Ask
 
 	// Cells 5-6 of the prefix: the option marker followed by a spacer. The
 	// marker's colour tracks `checked`, never `focused`.
-	const marker = theme.fg(ctx.checked ? "success" : "dim", askOptionMarker(ctx.question.multi, ctx.checked));
+	const marker = theme.fg(ctx.checked ? "success" : "dim", askOptionMarker(theme, ctx.question.multi, ctx.checked));
 
 	const color = ctx.focused ? "accent" : ctx.checked ? "toolOutput" : "text";
 	const label = renderInlineMarkdown(row.label, ctx.mdTheme, t => theme.fg(color, t));
 	const contentWidth = Math.max(1, ctx.width - ASK_ROW_PREFIX_COLUMNS);
-	const wrappedLabel = wrapTextWithAnsi(label, contentWidth);
 	const noteMarker = ctx.note !== undefined ? theme.fg("success", "  ✎ note") : "";
+	const noteWidth = noteMarker ? visibleWidth(noteMarker) : 0;
+	// Reserve the trailing note marker on the first label line so fit() cannot
+	// clip it when the label fills contentWidth.
+	const wrapBudget = Math.max(1, contentWidth - noteWidth);
+	const wrappedLabel = wrapTextWithAnsi(label, wrapBudget);
 
 	const lines = [`${prefix}${marker} ${wrappedLabel[0] ?? ""}${noteMarker}`];
 	const indent = padding(ASK_ROW_PREFIX_COLUMNS);
