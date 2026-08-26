@@ -574,6 +574,8 @@ export interface CreateAgentSessionOptions {
 
 	/** Whether UI is available (enables interactive tools like ask). Default: false */
 	hasUI?: boolean;
+	/** Wait for deferred discovery before returning to headless callers. */
+	awaitDeferredModel?: boolean;
 	/**
 	 * A human can answer synchronous prompts even without a terminal UI (e.g. an
 	 * ACP client rendering elicitation forms). Enables `ask` without enabling
@@ -1475,6 +1477,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		}),
 	);
 	let model = options.model;
+	let deferredModelResolution: Promise<{ model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined> | undefined;
 	let modelFallbackMessage: string | undefined;
 	let initialRetryFallback: InitialRetryFallbackState | undefined;
 	// Identify session model strings to restore in fallback order. We do an
@@ -2561,39 +2564,27 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 			if (!model) {
 				const fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
-				let pick = pickDefaultAvailableModel(fallbackCandidates.filter(hasModelAuth));
-
-				// Cold-cache discovery race (issues #6114, #6162): a discovery
-				// provider (models.yml `openai-models-list`, LM Studio/Ollama/
-				// llama.cpp, or an openai-compat proxy) ships no static models, so
-				// the static+cached catalog resolved nothing above. Background
-				// discovery in main.ts fires only AFTER createAgentSession returns,
-				// so on a cache-cold boot the configured default stays unresolved
-				// and `pick` silently degrades to an unrelated authed provider's
-				// default (#6162) or "No models available" (#6114) — even though
-				// `omp models` (which awaits discovery) lists the model. Await one
-				// cache-aware discovery pass and retry when a default role is
-				// configured (must win over `pick`) or nothing resolved at all.
-				// The common path — role already resolved, or a `pick` with no
-				// configured default — never pays for it.
+				const pick = pickDefaultAvailableModel(fallbackCandidates.filter(hasModelAuth));
 				const defaultRoleConfigured = Boolean(settings.getModelRole("default"));
-				if (
+				const canDiscoverDefault =
 					!hasExplicitModel &&
 					(defaultRoleConfigured || !pick) &&
-					modelRegistry.getDiscoverableProviders().length > 0
-				) {
-					await logger.time("resolveModelDiscoveryFallback", () => modelRegistry.refresh("online-if-uncached"));
-					if (!(await tryResolveDefaultRole()) && !model) {
-						const refreshedCandidates = await resolveAllowedModels(
-							modelRegistry,
-							settings,
-							modelMatchPreferences,
-						);
-						pick = pickDefaultAvailableModel(refreshedCandidates.filter(hasModelAuth));
-					}
-				}
-
-				if (!model && pick) {
+					modelRegistry.getDiscoverableProviders().length > 0;
+				if (canDiscoverDefault) {
+					deferredModelResolution = modelRegistry
+						.refresh("online-if-uncached")
+						.then(async () => {
+							if (model || hasExplicitModel) return undefined;
+							const resolved = await tryResolveDefaultRole();
+							return resolved ? { model: model!, thinkingLevel } : pick ? { model: pick } : undefined;
+						})
+						.catch(error => {
+							logger.warn("background model discovery failed", {
+								error: error instanceof Error ? error.message : String(error),
+							});
+							return pick ? { model: pick } : undefined;
+						});
+				} else if (pick) {
 					model = pick;
 				}
 			}
@@ -2607,6 +2598,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					patterns && patterns.length > 0
 						? `No model available matching enabledModels (${patterns.join(", ")}) with usable credentials. Configure auth for an allowed provider or adjust enabledModels.`
 						: "No models available. Use /login or set an API key environment variable. Then use /model to select a model.";
+			}
+		}
+		if (deferredModelResolution && options.awaitDeferredModel) {
+			const deferredModel = await deferredModelResolution;
+			if (deferredModel) {
+				model = deferredModel.model;
+				thinkingLevel = deferredModel.thinkingLevel ?? thinkingLevel;
+				modelFallbackMessage = undefined;
 			}
 		}
 
@@ -4094,13 +4093,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// `auto` matching the model's `code_mode_only` flag): the Agent above was
 		// handed the unrestricted `initialTools`, so without this the first and all
 		// subsequent turns would expose the full direct tool surface and omit
-		// `tool_namespaces_info` until an unrelated model/setting/tool-selection
-		// change reconciled.
 		try {
 			await session.initializeCodeMode();
 		} catch (error) {
 			logger.warn("Code Mode initialization at session startup failed", { error: String(error) });
 		}
+
+		void deferredModelResolution?.then(discovered => {
+			if (!discovered || session.model) return;
+			void session.setModelTemporary(discovered.model, discovered.thinkingLevel).catch(error => {
+				logger.warn("background model discovery model activation failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
+		});
+
 
 		return {
 			session,

@@ -1662,3 +1662,91 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		expect(cliOptions.model?.id).toBe(scopedTarget.id);
 	});
 });
+
+describe("nonblocking default model discovery", () => {
+	test("does not await remote discovery before creating a session", async () => {
+		const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "omp-nonblocking-discovery-"));
+		const authStorage = createInMemoryAuthStorage();
+		const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
+		const settings = Settings.isolated();
+		settings.setModelRole("default", "missing-provider/missing-model");
+		const startedAt = performance.now();
+		const refreshPending = Promise.withResolvers<void>();
+		const refresh = vi.spyOn(modelRegistry, "refresh").mockImplementation(() => refreshPending.promise);
+		try {
+			const { session } = await createAgentSession({
+				cwd,
+				agentDir: cwd,
+				authStorage,
+				modelRegistry,
+				settings,
+				sessionManager: SessionManager.inMemory(),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+				rules: [],
+				preloadedCustomToolPaths: [],
+				toolNames: ["read"],
+			});
+			try {
+				expect(performance.now() - startedAt).toBeLessThan(2_000);
+				expect(session.model).toBeUndefined();
+				expect(refresh).toHaveBeenCalled();
+			} finally {
+				await session.dispose();
+			}
+		} finally {
+			refresh.mockRestore();
+			refreshPending.resolve();
+			authStorage.close();
+			fs.rmSync(cwd, { recursive: true, force: true });
+		}
+	});
+});
+
+test("does not accept an unrelated fallback before discovery resolves the configured default", async () => {
+	const fallback = getBundledModel("anthropic", "claude-sonnet-4-5");
+	if (!fallback) return;
+	const authStorage = createInMemoryAuthStorage();
+	authStorage.setRuntimeApiKey(fallback.provider, "test-key");
+	const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "omp-default-discovery-race-"));
+	const settings = Settings.isolated();
+	settings.setModelRole("default", "runtime-provider/discovery-model");
+	const modelRegistry = new ModelRegistry(authStorage, path.join(cwd, "models.yml"));
+	const release = Promise.withResolvers<void>();
+	const refresh = vi.spyOn(modelRegistry, "refresh").mockImplementation(async () => release.promise);
+	try {
+		const { session } = await createAgentSession({
+			cwd,
+			agentDir: cwd,
+			authStorage,
+			modelRegistry,
+			settings,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+		});
+		expect(refresh).toHaveBeenCalled();
+		expect(session.model?.provider).not.toBe(fallback.provider);
+		await session.dispose();
+	} finally {
+		release.resolve();
+		refresh.mockRestore();
+		authStorage.close();
+		fs.rmSync(cwd, { recursive: true, force: true });
+	}
+});
