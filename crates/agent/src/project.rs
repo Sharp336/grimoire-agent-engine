@@ -8,7 +8,7 @@ use omp_proto::{
 	thread::v1::{self as thread_pb, blob, item, part},
 };
 use omp_scribe::{Props, Template};
-use omp_storage::transcript::{AmendPatch, Entry, Kind, LiveSet, Log, truncate_persisted_text};
+use omp_storage::transcript::{AmendPatch, Entry, Kind, LiveLog, truncate_persisted_text};
 use omp_tool::{
 	Abort, CallOutcome, CapsBase, Part as ToolPart, ProjectedCall, PromptCaps, RecordedCallOwned,
 	Registry as ToolRegistry, Rev, TOOL_REV_PROP, ToolIdentity,
@@ -169,11 +169,12 @@ fn is_silent_abort_item(item: &thread_pb::Item) -> bool {
 /// Rewinds are already resolved in `live`. Sequence amendments update only the
 /// working copy; original item events remain untouched.
 pub fn project_journal(
-	log: &Log,
-	live: &LiveSet,
+	view: &LiveLog,
 	tool_registry: &ToolRegistry,
 	caps: &CapsBase,
 ) -> Result<thread_pb::Thread, ProjectionError> {
+	let log = view.log();
+	let live = view.live();
 	let mut items = Vec::new();
 	let mut positions = SparseMap::new();
 	let mut amended = SparseSet::new();
@@ -650,7 +651,7 @@ mod tests {
 		thread::v1::{self as thread_pb, blob, item},
 	};
 	use omp_storage::transcript::{
-		AmendPatch, Event, Header, ItemRecord, Kind, LiveSet, SessionId, Writer, load,
+		AmendPatch, Event, Header, ItemRecord, Kind, SessionId, Writer, load, load_live,
 	};
 	use omp_tool::{CapsBase, ModelClass, TOOL_REV_PROP};
 
@@ -726,9 +727,8 @@ mod tests {
 			panic!("durable entry is an assistant item");
 		};
 		assert_eq!(record.item, item);
-		let mut live = LiveSet::new();
-		log.live_into(&mut live);
-		let projected = project_journal(&log, &live, &omp_tool::Registry::new(), &CapsBase {
+		let view = load_live(&path).expect("load live transcript");
+		let projected = project_journal(&view, &omp_tool::Registry::new(), &CapsBase {
 			maximum_parts:      1,
 			maximum_text_bytes: 1,
 			media:              false,
@@ -781,10 +781,8 @@ mod tests {
 			.expect("append user item");
 		drop(writer);
 
-		let log = load(&path).expect("load transcript");
-		let mut live = LiveSet::new();
-		log.live_into(&mut live);
-		let projected = project_journal(&log, &live, &omp_tool::Registry::new(), &CapsBase {
+		let view = load_live(&path).expect("load transcript");
+		let projected = project_journal(&view, &omp_tool::Registry::new(), &CapsBase {
 			maximum_parts:      1,
 			maximum_text_bytes: 1024,
 			media:              false,
@@ -840,10 +838,8 @@ mod tests {
 			.expect("append content drop");
 		drop(writer);
 
-		let log = load(&path).expect("load transcript");
-		let mut live = LiveSet::new();
-		log.live_into(&mut live);
-		let projected = project_journal(&log, &live, &omp_tool::Registry::new(), &CapsBase {
+		let view = load_live(&path).expect("load transcript");
+		let projected = project_journal(&view, &omp_tool::Registry::new(), &CapsBase {
 			maximum_parts:      8,
 			maximum_text_bytes: 4_096,
 			media:              true,
