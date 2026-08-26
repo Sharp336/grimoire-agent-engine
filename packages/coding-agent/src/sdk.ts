@@ -1880,70 +1880,36 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// instead of silently routing into the owning session (issue #1923).
 			asyncJobManager: scopedAsyncJobManager,
 		};
+		const dispatchSkillDependency = createSkillDependencyDispatcher({
+			enabled: () => Boolean(session.skillsSettings?.enableSkillCommands),
+			knownSkill: skill => session.skills.some(candidate => candidate.name === skill),
+			buildMessage: async (skill, args) => {
+				const definition = session.skills.find(candidate => candidate.name === skill);
+				if (!definition) return "";
+				const built = await buildSkillPromptMessage(definition, args, "user");
+				return {
+					customType: SKILL_PROMPT_MESSAGE_TYPE,
+					content: built.message,
+					display: true,
+					details: built.details,
+					attribution: "user",
+				};
+			},
+			send: (message, correlationId) =>
+				session.sendCustomMessage(
+					{ ...(message as Record<string, unknown>), details: { ...((message as { details?: object }).details ?? {}), correlationId } } as never,
+					{ triggerTurn: true, deliverAs: "nextTurn" },
+				),
+			subscribe: listener => session.subscribe(listener),
+		});
 		toolSession.dispatchSkillDependency = async (request, ownerScope) => {
-			const input = request as {
-				skill?: unknown;
-				args?: unknown;
-				dependent_gate?: unknown;
-				dependent_artifact?: unknown;
-			};
+			const input = request as { skill?: unknown; args?: unknown; dependent_gate?: unknown; dependent_artifact?: unknown };
 			const skill = typeof input.skill === "string" ? input.skill : "";
 			const args = typeof input.args === "string" ? input.args : "";
-			const gate = typeof input.dependent_gate === "string" ? input.dependent_gate : "";
-			const artifact = typeof input.dependent_artifact === "string" ? input.dependent_artifact : "";
-			const key = JSON.stringify([ownerScope.ownerId, ownerScope.parentSessionId, skill, args, gate, artifact]);
+			const key = JSON.stringify([ownerScope.ownerId, ownerScope.parentSessionId, skill, args, input.dependent_gate, input.dependent_artifact]);
 			const prior = skillDependencyDispatches.get(key);
 			if (prior) return prior;
-			const dispatch = (async (): Promise<unknown> => {
-				if (!session.skillsSettings?.enableSkillCommands)
-					return {
-						type: "skill-dispatch-result/v1",
-						skill,
-						status: "failed",
-						evidence: "skill_commands_disabled",
-					};
-				const definition = session.skills.find(candidate => candidate.name === skill);
-				if (!definition || args.length > 2048)
-					return {
-						type: "skill-dispatch-result/v1",
-						skill,
-						status: "failed",
-						evidence: "unregistered_or_invalid_skill",
-					};
-				const correlationId = `${ownerScope.parentSessionId}:${skill}:${args}`;
-				if (session.isStreaming)
-					return { type: "skill-dispatch-result/v1", skill, status: "failed", evidence: "parent_busy" };
-				const completion = Promise.withResolvers<{ status: "success" | "failed"; evidence: string }>();
-				const unsubscribe = session.subscribe(event => {
-					if (event.type === "agent_end")
-						completion.resolve({ status: "success", evidence: `parent_agent_end:${correlationId}` });
-					if (event.type === "notice" && event.level === "error")
-						completion.resolve({ status: "failed", evidence: event.message });
-				});
-				const timer = setTimeout(
-					() => completion.resolve({ status: "failed", evidence: "parent_dispatch_timeout" }),
-					120_000,
-				);
-				try {
-					const built = await buildSkillPromptMessage(definition, args, "user");
-					const started = await session.sendCustomMessage(
-						{
-							customType: SKILL_PROMPT_MESSAGE_TYPE,
-							content: built.message,
-							display: true,
-							details: { ...built.details, correlationId },
-							attribution: "user",
-						},
-						{ triggerTurn: true, deliverAs: "nextTurn" },
-					);
-					if (!started) completion.resolve({ status: "failed", evidence: "parent_turn_not_started" });
-					const outcome = await completion.promise;
-					return { type: "skill-dispatch-result/v1", skill, status: outcome.status, evidence: outcome.evidence };
-				} finally {
-					clearTimeout(timer);
-					unsubscribe();
-				}
-			})();
+			const dispatch = dispatchSkillDependency(request as never, ownerScope.parentSessionId);
 			skillDependencyDispatches.set(key, dispatch);
 			return dispatch;
 		};
