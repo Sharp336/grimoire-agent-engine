@@ -294,6 +294,33 @@ describe("eval JS RLM helpers", () => {
 		});
 	});
 
+	it("llm_query renders the llm_query.md template exactly like the old inline construction", async () => {
+		const { calls, stub } = recordingBridge();
+		const sandbox = loadJsPrelude(stub);
+		// Empty instructions still prefix the two newlines, exactly as the
+		// previous `${instructions}\n\n${snippet}` construction did.
+		await (sandbox.llm_query as LlmQueryFn)("code", { instructions: "" });
+		expect(calls.filter(c => c.name === "__completion__")[0]!.args).toEqual({
+			prompt: "\n\ncode",
+			model: "default",
+		});
+		// Payloads that themselves contain the placeholder tokens are never
+		// re-scanned: the single-pass render replaces only the template's own
+		// {{instructions}}/{{snippet}} placeholders, so both values survive
+		// byte-for-byte (and $ patterns are not special).
+		calls.length = 0;
+		await (sandbox.llm_query as LlmQueryFn)("see {{instructions}} $& here", {
+			instructions: "a {{snippet}} b",
+		});
+		expect(calls.filter(c => c.name === "__completion__")[0]!.args.prompt).toBe(
+			"a {{snippet}} b\n\nsee {{instructions}} $& here",
+		);
+		// Multi-line values keep their newlines verbatim.
+		calls.length = 0;
+		await (sandbox.llm_query as LlmQueryFn)("l1\nl2", { instructions: "i1\ni2" });
+		expect(calls.filter(c => c.name === "__completion__")[0]!.args.prompt).toBe("i1\ni2\n\nl1\nl2");
+	});
+
 	it("llm_query_batched fans out through parallel and preserves order", async () => {
 		const { calls, stub } = recordingBridge();
 		const sandbox = loadJsPrelude(stub);
@@ -555,26 +582,53 @@ print(json.dumps(search(line + "\\n" + line, "b")))
 		expect(badCap.stderr).toContain("ValueError");
 	});
 
-	it("metadata reports str and list shapes", async () => {
+	it("llm_query delegates to completion, prefixing instructions when given", async () => {
+		// The prelude's completion() hits the host bridge, so stub it after
+		// the prelude (same namespace) to capture the delegated prompts.
 		const r = await run(`
 import json
-print(json.dumps(metadata("hi there\\nworld")))
-print(json.dumps(metadata(["ab", "cde"])))
+def completion(prompt, *, model="default", system=None, schema=None):
+    print(json.dumps({"prompt": prompt, "model": model}))
+    return "reply"
+llm_query("the code", "explain this")
+llm_query("just code")
+llm_query_batched(["a", "b"], model="smol")
 `);
 		expect(r.exitCode).toBe(0);
 		const lines = r.stdout.trim().split("\n");
-		expect(JSON.parse(lines[0]!)).toEqual({
-			type: "str",
-			chars: 14,
-			lines: 2,
-			words: 3,
-			approx_tokens: 3,
+		expect(JSON.parse(lines[0]!)).toEqual({ prompt: "explain this\n\nthe code", model: "default" });
+		expect(JSON.parse(lines[1]!)).toEqual({ prompt: "just code", model: "default" });
+		// Batched prompts are bare snippets (no instructions path).
+		expect(JSON.parse(lines[2]!)).toEqual({ prompt: "a", model: "smol" });
+		expect(JSON.parse(lines[3]!)).toEqual({ prompt: "b", model: "smol" });
+	});
+
+	it("llm_query renders the llm_query.md template exactly like the old inline construction", async () => {
+		const r = await run(`
+import json
+def completion(prompt, *, model="default", system=None, schema=None):
+    print(json.dumps({"prompt": prompt, "model": model}))
+    return "reply"
+llm_query("code", "")
+llm_query("", "explain")
+llm_query("see {{instructions}} $& here", "a {{snippet}} b")
+llm_query("l1\\nl2", "i1\\ni2")
+`);
+		expect(r.exitCode).toBe(0);
+		const lines = r.stdout.trim().split("\n");
+		// Empty instructions still prefix the two newlines, exactly as the
+		// previous f"{instructions}\\n\\n{snippet}" construction did.
+		expect(JSON.parse(lines[0]!)).toEqual({ prompt: "\n\ncode", model: "default" });
+		expect(JSON.parse(lines[1]!)).toEqual({ prompt: "explain\n\n", model: "default" });
+		// Payloads that themselves contain the placeholder tokens are never
+		// re-scanned: the single-pass render replaces only the template's own
+		// {{instructions}}/{{snippet}} placeholders, so both values survive
+		// byte-for-byte.
+		expect(JSON.parse(lines[2]!)).toEqual({
+			prompt: "a {{snippet}} b\n\nsee {{instructions}} $& here",
+			model: "default",
 		});
-		expect(JSON.parse(lines[1]!)).toEqual({
-			type: "list",
-			items: 2,
-			chars: 5,
-			approx_tokens: 1,
-		});
+		// Multi-line values keep their newlines verbatim.
+		expect(JSON.parse(lines[3]!)).toEqual({ prompt: "i1\ni2\n\nl1\nl2", model: "default" });
 	});
 });

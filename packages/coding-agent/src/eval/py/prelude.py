@@ -679,9 +679,22 @@ if "__omp_prelude_loaded__" not in globals():
 
     budget = _Budget()
 
+    # llm_query's delegated-prompt shape lives in the static llm_query.md
+    # template (injected at the top of this source as
+    # __omp_llm_query_template__ by eval/py/prelude.ts); this single pass over
+    # the placeholders is the whole interpolation, so a payload that itself
+    # contains {{instructions}}/{{snippet}} is never re-scanned.
+    _LLM_QUERY_TEMPLATE_RE = re.compile(r"\{\{(instructions|snippet)\}\}")
+
     def llm_query(snippet, instructions=None, *, model="default"):
         """Sub-LLM completion. `instructions` prefixes `snippet` when given."""
-        prompt = f"{instructions}\n\n{snippet}" if instructions is not None else snippet
+        if instructions is not None:
+            prompt = _LLM_QUERY_TEMPLATE_RE.sub(
+                lambda m: instructions if m.group(1) == "instructions" else snippet,
+                __omp_llm_query_template__,
+            )
+        else:
+            prompt = snippet
         return completion(prompt, model=model)
 
     def llm_query_batched(prompts, *, model="default"):

@@ -206,9 +206,19 @@ if (!globalThis.__omp_js_prelude_loaded__) {
 		hard: async () => Boolean((await __budgetSnap()).hard),
 	};
 
+	// llm_query's delegated-prompt shape lives in the static llm_query.md
+	// template (embedded at the top of this source as
+	// __omp_llm_query_template__); this single pass over the placeholders is
+	// the whole interpolation, so a payload that itself contains
+	// {{instructions}}/{{snippet}} is never re-scanned.
+	const __renderLlmmQueryPrompt = (instructions, snippet) =>
+		__omp_llm_query_template__.replace(/\{\{(instructions|snippet)\}\}/g, (match, name) =>
+			name === "instructions" ? instructions : snippet,
+		);
+
 	const llm_query = async (snippet, opts, ...rest) => {
 		const o = optionsArg("llm_query", opts, rest, ["instructions", "model"], "{ instructions, model }");
-		const prompt = o.instructions != null ? `${o.instructions}\n\n${snippet}` : snippet;
+		const prompt = o.instructions != null ? __renderLlmmQueryPrompt(o.instructions, snippet) : snippet;
 		return completion(prompt, { model: o.model ?? "default" });
 	};
 
