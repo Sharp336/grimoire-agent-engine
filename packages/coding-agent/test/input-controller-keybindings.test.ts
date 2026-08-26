@@ -69,6 +69,7 @@ async function createContext() {
 		"app.model.select": ["alt+m"],
 		"app.retry": ["alt+r"],
 		"app.clipboard.pasteImage": ["ctrl+v"],
+		"app.vibe.toggle": ["alt+shift+v"],
 		"app.tools.toggleVisibility": ["ctrl+shift+o"],
 		"app.tools.expand": ["ctrl+o"],
 	};
@@ -217,6 +218,7 @@ async function createContext() {
 		chatContainer: { children: [], setToolActivityVisible: vi.fn() },
 		handleHotkeysCommand: vi.fn(),
 		handlePlanModeCommand: vi.fn(),
+		handleVibeModeCommand: vi.fn(),
 		handleClearCommand: vi.fn(),
 		showTreeSelector: vi.fn(),
 		showUserMessageSelector: vi.fn(),
@@ -276,6 +278,16 @@ async function createContext() {
 }
 
 describe("InputController keybinding setup", () => {
+	it("routes a configured vibe mode binding to the existing toggle", async () => {
+		const { InputController, ctx, customHandlers } = await createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		customHandlers.get("alt+shift+v")?.();
+
+		expect(ctx.handleVibeModeCommand).toHaveBeenCalledTimes(1);
+	});
+
 	it("registers model selector and display reset actions separately", async () => {
 		const { InputController, ctx, editor, spies } = await createContext();
 		const controller = new InputController(ctx);
