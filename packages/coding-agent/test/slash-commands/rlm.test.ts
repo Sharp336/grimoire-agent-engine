@@ -178,6 +178,49 @@ describe("/rlm slash command", () => {
 		expect(h.output).not.toHaveBeenCalled();
 	});
 
+	it("preserves leading/trailing whitespace byte-for-byte in the externalized payload", async () => {
+		const h = acpRuntime({ enabled: true });
+		tempDirs.push(h.artifactsDir);
+
+		// Indented code block ending with a blank line: the shared slash
+		// parser trims command.args, so externalizing the normalized string
+		// would strip the leading indentation run and the final newlines
+		// before Bun.write. The payload must instead be the exact remainder
+		// of the raw command text after "/rlm" and its single separator char
+		// — every remaining byte, whitespace included.
+		const input = "/rlm    def foo():\n            return 42\n\n";
+		const expectedPayload = input.slice("/rlm".length + 1);
+		// Guard that this input actually exercises the corruption: the
+		// trimmed arg string (what the old code externalized) differs.
+		expect(expectedPayload.trim()).not.toBe(expectedPayload);
+		expect(expectedPayload).toBe("   def foo():\n            return 42\n\n");
+
+		const result = await executeAcpBuiltinSlashCommand(input, h.runtime);
+
+		const prompt = promptOf(result);
+		const match = prompt.match(/local:\/\/(rlm-input-[\w.-]+\.txt)/);
+		expect(match).not.toBeNull();
+		const writtenPath = path.join(h.artifactsDir, "local", match?.[1] ?? "");
+		expect(fs.readFileSync(writtenPath, "utf-8")).toBe(expectedPayload);
+		// charCount must describe the lossless payload, not the trimmed one.
+		expect(prompt).toContain(`(${expectedPayload.length} chars)`);
+	});
+
+	it("falls back to the no-request marker when the input contains only whitespace", async () => {
+		const h = acpRuntime({ enabled: true });
+		tempDirs.push(h.artifactsDir);
+
+		const result = await executeAcpBuiltinSlashCommand("/rlm   \n\t ", h.runtime);
+
+		const prompt = promptOf(result);
+		expect(prompt).toContain("User request: (no request text provided)");
+		expect(prompt).not.toContain("local://rlm-input-");
+		expect(prompt).not.toContain("Inline payload externalized");
+		const localDir = path.join(h.artifactsDir, "local");
+		expect(fs.existsSync(localDir) ? fs.readdirSync(localDir) : []).toHaveLength(0);
+		expect(h.output).not.toHaveBeenCalled();
+	});
+
 	it("rejects when Python is the only enabled backend but no interpreter is available", async () => {
 		const h = acpRuntime({ enabled: true, backends: { "eval.js": false } });
 		// The real probe spawns `python -c ...` (bounded by

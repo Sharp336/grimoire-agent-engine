@@ -50,8 +50,17 @@ export async function handleRlmCommand(
 			return commandConsumed();
 		}
 	}
-	const args = command.args.trim();
-	if (!args) {
+	// Derive the request from the raw command text instead of `command.args`:
+	// the shared slash parser (parseSlashCommand) already trims args, so
+	// externalizing the normalized string would silently strip meaningful
+	// leading/trailing whitespace from the payload (indented code,
+	// whitespace-sensitive templates, documents whose final newlines matter).
+	// Slicing past the leading "/", the command name, and the single separator
+	// character reproduces the parser's own arg extraction without the trim,
+	// so the payload RLM analyzes is byte-for-byte what the user typed as the
+	// argument.
+	const request = command.text.slice(command.name.length + 2);
+	if (!request.trim()) {
 		return { prompt: prompt.render(rlmTemplate, { request: "(no request text provided)" }).trim() };
 	}
 	// Externalize the inline payload into a session-local file instead of
@@ -75,8 +84,8 @@ export async function handleRlmCommand(
 	};
 	const inputUrl = `local://rlm-input-${randomUUID()}.txt`;
 	const inputPath = resolveLocalUrlToPath(inputUrl, localProtocolOptions);
-	await Bun.write(inputPath, args);
+	await Bun.write(inputPath, request);
 	return {
-		prompt: prompt.render(rlmTemplate, { externalized: true, inputUrl, charCount: args.length }).trim(),
+		prompt: prompt.render(rlmTemplate, { externalized: true, inputUrl, charCount: request.length }).trim(),
 	};
 }
