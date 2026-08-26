@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `statusLine.showModelProvider` setting and `statusLine.segmentOptions.model.showProvider` to display the active provider name before the model name in the status line.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added
