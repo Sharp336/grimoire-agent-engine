@@ -2097,7 +2097,7 @@ export class StatusLineComponent implements Component {
 				? `ctx:${formatCompactContextPercent(percentOverflow ? pct : clampedPct)}`
 				: formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
 			const candidateWindow = embedCompactContext ? "" : formatNumber(ctx.contextWindow);
-			const labelPadding = embedCompactContext ? 2 : candidateWindow.length + 4;
+			const labelPadding = embedCompactContext ? 1 : candidateWindow.length + 4;
 			if (gapWidth >= candidatePercent.length + labelPadding) {
 				percentLabel = candidatePercent;
 				if (embedCompactContext) {
@@ -2138,7 +2138,7 @@ export class StatusLineComponent implements Component {
 		}
 
 		if (percentLabel && percentStart < 0) {
-			const maxStart = scaleWidth - percentLabel.length - 1;
+			const maxStart = embedCompactContext ? scaleWidth - percentLabel.length : scaleWidth - percentLabel.length - 1;
 			const preferredStart = Math.min(maxStart, Math.max(1, usedCount));
 			const overlapsBoundary = (start: number): boolean => {
 				const end = start + percentLabel.length;

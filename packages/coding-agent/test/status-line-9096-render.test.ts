@@ -138,6 +138,58 @@ test("breakdown keeps orchestration usage out of in/out labels", () => {
 	expect(rendered).toContain("orch:12K");
 });
 
+test("keeps compact embedded context visible in a seven-cell gauge gap", () => {
+	const component = new StatusLineComponent({
+		state: { messages: [], model: { name: "M", contextWindow: 100000 } },
+		messages: [],
+		model: { name: "M", contextWindow: 100000 },
+		systemPrompt: [],
+		agent: { state: { tools: [] } },
+		skills: [],
+		isStreaming: false,
+		isAutoThinking: false,
+		autoResolvedThinkingLevel: () => undefined,
+		isFastModeActive: () => false,
+		isAdvisorActive: () => false,
+		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
+		getAsyncJobSnapshot: () => ({ running: [] }),
+		settings: { get: () => false },
+		modelRegistry: { isUsingOAuth: () => false },
+		sessionManager: {
+			getSessionName: () => "status demo",
+			getUsageStatistics: () => ({
+				input: 25000,
+				output: 5,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 25005,
+				orchestrationInput: 0,
+				orchestrationOutput: 0,
+				orchestrationCacheRead: 0,
+				premiumRequests: 0,
+				cost: 0,
+			}),
+		},
+		getContextUsage: () => ({ tokens: 8000, contextWindow: 100000, percent: 8 }),
+	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0]);
+
+	component.updateSettings({
+		preset: "custom",
+		leftSegments: ["model"],
+		rightSegments: ["token_total", "context_pct"],
+		separator: "pipe",
+		sessionAccent: false,
+		contextLine: "embedded",
+		segmentOptions: {
+			context_pct: { compact: true },
+		},
+	});
+
+	const rendered = stripVTControlCharacters(component.getTopBorder(20).content);
+	expect(rendered).toContain("ctx:8%");
+	expect(rendered).toContain("25K");
+});
+
 test("keeps the embedded context percentage visible when every slot collides with a boundary marker", () => {
 	// Narrow gauge (small window makes the "50K" label wide relative to the gap)
 	// where the only legal label positions overlap the speculation/threshold
