@@ -10,6 +10,7 @@ import { BeamMemory, initBeam } from "./beam/index";
 import { reconcileEmbeddingModel } from "./beam/store";
 import type { RecallEnhancedOptions, RecallOptions, RecallResult, SleepResult } from "./beam/types";
 import { EpisodicGraph } from "./episodic-graph";
+import { type OrchestratedRecallResult, orchestrateRecall } from "./orchestrator";
 import {
 	isPiAiModel,
 	type MnemopiEmbeddingRuntimeOptions,
@@ -320,6 +321,9 @@ function toRecallOptions(options: RecallFacadeOptions): BeamRecallFacadeOptions 
 		ftsWeight: options.ftsWeight ?? options.fts_weight ?? undefined,
 		importanceWeight: options.importanceWeight ?? options.importance_weight ?? undefined,
 		contentPreviewChars: options.contentPreviewChars,
+		lengthNormalization: options.lengthNormalization,
+		scoreFloor: options.scoreFloor,
+		poolFloor: options.poolFloor,
 	};
 	// Preserve the three-state semantics (`undefined` = auto-derive, `null` = explicitly
 	// FTS-only, `number[]` = caller-supplied) so callers can opt out of `recall()`'s
@@ -460,14 +464,19 @@ export class Mnemopi {
 		query: string,
 		topK = 5,
 		options: RecallFacadeOptions & RecallEnhancedOptions = {},
-	): Promise<RecallResult[]> {
-		return this.#withRuntimeOptions(() =>
-			this.beam.recallEnhanced(query, topK, {
-				...toRecallOptions(options),
-				useCache: options.useCache,
-				includeFacts: options.includeFacts,
-			}),
-		);
+	): Promise<OrchestratedRecallResult[]> {
+		// `orchestrateRecall` is the single funnel for both the polyphonic and linear
+		// recall paths (see core/orchestrator.ts). `enhanced: true` makes it delegate to
+		// `beam.recallEnhanced` whenever polyphonic recall is disabled (the default), so
+		// this is byte-identical to the previous direct `this.beam.recallEnhanced(...)`
+		// call unless `MNEMOPI_POLYPHONIC_RECALL=1` (or the equivalent config flag) is set.
+		const recallOptions = {
+			...toRecallOptions(options),
+			useCache: options.useCache,
+			includeFacts: options.includeFacts,
+			enhanced: true,
+		};
+		return this.#withRuntimeOptions(() => orchestrateRecall(this.beam, query, topK, recallOptions));
 	}
 
 	getContext(limit = 10): unknown[] {
@@ -591,7 +600,7 @@ export function recallEnhanced(
 	query: string,
 	topK = 5,
 	options: ModuleRecallEnhancedOptions = {},
-): Promise<RecallResult[]> {
+): Promise<OrchestratedRecallResult[]> {
 	return defaultFor(options.bank).recallEnhanced(query, topK, options);
 }
 
