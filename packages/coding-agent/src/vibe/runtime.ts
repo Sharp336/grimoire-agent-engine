@@ -35,8 +35,7 @@ import type { ToolSession } from "../tools";
 import { formatDuration } from "../tools/render-utils";
 import { ToolError } from "../tools/tool-errors";
 import { calculateTokensPerSecond } from "../utils/token-rate";
-
-import { buildVibeDelegatedAssignment } from "./delegated-skill-boundary";
+import { buildVibeDelegatedAssignment, parseDelegatedSkillDependency, validateSkillDispatchResult } from "./delegated-skill-boundary";
 /** The two worker CLI flavors the director drives. */
 export type VibeCli = "fast" | "good";
 
@@ -1590,6 +1589,13 @@ export class VibeSessionRegistry {
 		turnIndex: number,
 		result: SingleResult,
 	): Promise<string> {
+		const dependency = parseDelegatedSkillDependency(result.output.trim());
+		if (dependency) {
+			const dispatched = session.dispatchSkillDependency
+				? validateSkillDispatchResult(await session.dispatchSkillDependency(dependency, this.ownerScope(session)), dependency.skill)
+				: null;
+			if (!dispatched) throw new VibeTurnError(`Delegated dependency ${dependency.skill} was not dispatched or lacked evidence.`);
+		}
 		await this.#finishTurn(session, manager, record, settledJobId);
 		const failed = result.exitCode !== 0 || result.aborted === true;
 		const status = result.aborted ? "aborted" : failed ? "failed" : "completed";
