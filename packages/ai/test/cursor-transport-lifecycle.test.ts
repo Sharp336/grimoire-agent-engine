@@ -4,7 +4,7 @@ import * as http from "node:http";
 import * as http2 from "node:http2";
 import { ProviderResponseError } from "@oh-my-pi/pi-ai/error";
 import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
-import type { Context, Model } from "@oh-my-pi/pi-ai/types";
+import type { Context, Model, ToolResultMessage } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	AgentServerMessageSchema,
@@ -354,7 +354,7 @@ function turnEndedPayload(): Uint8Array {
 	);
 }
 
-function execReadPayload(): Uint8Array {
+function execReadPayload(toolCallId = "call-hang", path = "/tmp/hang"): Uint8Array {
 	return toBinary(
 		AgentServerMessageSchema,
 		create(AgentServerMessageSchema, {
@@ -365,7 +365,7 @@ function execReadPayload(): Uint8Array {
 					execId: "exec-hang",
 					message: {
 						case: "readArgs",
-						value: create(ReadArgsSchema, { path: "/tmp/hang", toolCallId: "call-hang" }),
+						value: create(ReadArgsSchema, { path, toolCallId }),
 					},
 				}),
 			},
@@ -485,4 +485,90 @@ describe("cursor heartbeat and outbound write lifecycle", () => {
 			process.off("uncaughtException", onUncaught);
 		}
 	});
+
+	it("pairs a drain-timeout error only for an exec still pending at turn end", async () => {
+		const sessions = new Set<http2.Http2Session>();
+		const server = http2.createServer();
+		server.on("session", session => {
+			sessions.add(session);
+			session.on("close", () => sessions.delete(session));
+		});
+		server.on("stream", (stream: http2.ServerHttp2Stream, headers: http2.IncomingHttpHeaders) => {
+			stream.on("data", () => {});
+			stream.on("error", () => {});
+			if (headers[":path"] !== RUN_PATH) {
+				stream.respond({ ":status": 404 });
+				stream.end();
+				return;
+			}
+			stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+			stream.write(
+				Buffer.concat([
+					frameConnectMessage(execReadPayload("call-done", "/tmp/done")),
+					frameConnectMessage(execReadPayload("call-hang", "/tmp/hang")),
+					frameConnectMessage(turnEndedPayload()),
+				]),
+			);
+			stream.end();
+		});
+		const listening = Promise.withResolvers<void>();
+		server.once("error", listening.reject);
+		server.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const address = server.address();
+		if (!address || typeof address === "string") throw new Error("expected h2 run fixture to bind a tcp port");
+		const baseUrl = `http://127.0.0.1:${address.port}`;
+		vi.spyOn(serverConfig, "fetchCursorBidiAvailability").mockResolvedValue("unspecified");
+
+		try {
+			const paired: ToolResultMessage[] = [];
+			const stream = streamCursor(makeModel(baseUrl), streamContext, {
+				apiKey: API_KEY,
+				execHandlers: {
+					read(args) {
+						if (args.path === "/tmp/done" || args.toolCallId === "call-done") {
+							return Promise.resolve({
+								role: "toolResult" as const,
+								toolCallId: "call-done",
+								toolName: "read",
+								content: [{ type: "text" as const, text: "done-body" }],
+								isError: false,
+								timestamp: 1,
+							});
+						}
+						return new Promise(() => {});
+					},
+				},
+				onToolResult: result => {
+					paired.push(result);
+					return result;
+				},
+			});
+			const eventTypes: string[] = [];
+			for await (const event of stream) eventTypes.push(event.type);
+			const result = await stream.result();
+			expect(eventTypes).toContain("done");
+			expect(eventTypes).not.toContain("error");
+			expect(result.stopReason).toBe("stop");
+
+			const doneResults = paired.filter(entry => entry.toolCallId === "call-done");
+			const hangResults = paired.filter(entry => entry.toolCallId === "call-hang");
+			expect(doneResults).toHaveLength(1);
+			expect(doneResults[0]?.content).toEqual([{ type: "text", text: "done-body" }]);
+			expect(doneResults[0]?.isError).toBe(false);
+			expect(hangResults).toHaveLength(1);
+			expect(hangResults[0]?.content).toEqual([{ type: "text", text: "Tool not available" }]);
+			expect(hangResults[0]?.isError).toBe(true);
+			expect(
+				paired.filter(entry =>
+					entry.content.some(part => part.type === "text" && part.text === "Tool not available"),
+				),
+			).toHaveLength(1);
+		} finally {
+			for (const session of sessions) session.destroy();
+			const closed = Promise.withResolvers<void>();
+			server.close(error => (error ? closed.reject(error) : closed.resolve()));
+			await closed.promise;
+		}
+	}, 15_000);
 });

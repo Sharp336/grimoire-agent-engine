@@ -478,6 +478,13 @@ function streamCursorWithWireMode(
 		// transport fails, and the error path finalizes the synthesized call just
 		// like the success path does.
 		const inFlightDispatches = new Set<Promise<void>>();
+		// Exec toolCall.id values whose dispatch is still in `inFlightDispatches`.
+		// Populated at the same moment the dispatch promise enters that set (after
+		// handleServerMessage's synchronous prefix has synthesized the block) and
+		// cleared in the same `finally` that removes the promise. Drain-timeout
+		// pairing uses this set — never `kCursorExecResolved`, which is stamped
+		// when the block is opened, before the handler completes.
+		const pendingExecToolCallIds = new Set<string>();
 		// A dispatch can spawn another (a handler that decodes a nested frame), so
 		// re-check rather than awaiting one snapshot. Each dispatch already
 		// swallows its own rejection, so this only waits.
@@ -767,6 +774,12 @@ function streamCursorWithWireMode(
 							// discovered-id retry.
 							if (interactionCase !== "heartbeat") sawProgressOrSideEffect = true;
 							const isTurnEnded = interactionCase === "turnEnded";
+							const execIdsBefore = new Set<string>();
+							for (const block of output.content) {
+								if (block.type !== "toolCall") continue;
+								const toolCall = block as ToolCallState;
+								if (toolCall[kStreamingBlockKind] === "cursor-exec") execIdsBefore.add(toolCall.id);
+							}
 							const dispatch = handleServerMessage(
 								serverMessage,
 								output,
@@ -783,8 +796,20 @@ function streamCursorWithWireMode(
 							).catch(error => {
 								log("error", "handleServerMessage", { error: String(error) });
 							});
+							const ownedExecIds: string[] = [];
+							for (const block of output.content) {
+								if (block.type !== "toolCall") continue;
+								const toolCall = block as ToolCallState;
+								if (toolCall[kStreamingBlockKind] !== "cursor-exec") continue;
+								if (execIdsBefore.has(toolCall.id)) continue;
+								ownedExecIds.push(toolCall.id);
+								pendingExecToolCallIds.add(toolCall.id);
+							}
 							inFlightDispatches.add(dispatch);
-							void dispatch.finally(() => inFlightDispatches.delete(dispatch));
+							void dispatch.finally(() => {
+								inFlightDispatches.delete(dispatch);
+								for (const id of ownedExecIds) pendingExecToolCallIds.delete(id);
+							});
 
 							if (isTurnEnded) {
 								sawTurnEnded = true;
@@ -837,6 +862,7 @@ function streamCursorWithWireMode(
 					if (block.type !== "toolCall") continue;
 					const toolCall = block as ToolCallState;
 					if (toolCall[kStreamingBlockKind] !== "cursor-exec") continue;
+					if (!pendingExecToolCallIds.has(toolCall.id)) continue;
 					await pairSynthesizedExecResult(
 						state,
 						options?.onToolResult,

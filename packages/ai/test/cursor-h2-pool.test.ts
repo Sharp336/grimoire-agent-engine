@@ -714,4 +714,43 @@ describe("cursor HTTP/2 session pool", () => {
 			sink.close();
 		}
 	});
+
+	it("keeps the owner's establishment lease writable after a joiner aborts during shared connect", async () => {
+		const baseUrl = await startServer();
+		serveStream = respondOk;
+		const bodyAtGate = Promise.withResolvers<void>();
+		let releaseBody: (() => void) | undefined;
+		__setCursorH2EstablishBodyGate(() => {
+			bodyAtGate.resolve();
+			return new Promise<void>(release => {
+				releaseBody = release;
+			});
+		});
+		try {
+			const owner = acquireCursorH2(runArgs(baseUrl));
+			await bodyAtGate.promise;
+			await waitFor(() => __cursorH2ConnectingSnapshot().some(entry => entry.waiters >= 1), 2000);
+			const joinerController = new AbortController();
+			const joiner = acquireCursorH2({ ...runArgs(baseUrl), signal: joinerController.signal });
+			await waitFor(() => __cursorH2ConnectingSnapshot().some(entry => entry.waiters === 2), 2000);
+
+			joinerController.abort(new Error("joiner-aborted-during-establish"));
+			await expect(joiner).rejects.toMatchObject({ message: "joiner-aborted-during-establish" });
+			expect(__cursorH2ConnectingSnapshot().some(entry => entry.waiters === 1)).toBe(true);
+
+			releaseBody?.();
+			const result = await owner;
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			expect(result.lease.request.destroyed).toBe(false);
+			expect(result.lease.request.writable).toBe(true);
+			const wrote = result.lease.request.write(Buffer.from("owner-lease-still-live"));
+			expect(wrote).toBe(true);
+			await waitFor(() => streamCount >= 1);
+			result.lease.release();
+			expect(poolOutstanding()).toBe(0);
+		} finally {
+			__setCursorH2EstablishBodyGate(undefined);
+		}
+	});
 });

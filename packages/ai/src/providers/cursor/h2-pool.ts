@@ -545,8 +545,17 @@ function acquisitionAbortError(signal: AbortSignal | undefined): Error {
  * proxy tunnel, destroy any direct session/socket) and clears its reservation.
  * A settled establishment reaches every still-live waiter unchanged, and the
  * abort listener is always removed on settle.
+ *
+ * `isOwner` marks the reservation owner — the single waiter whose `options` the
+ * establishment issued its one lease under. Only that owner, if it aborted, may
+ * release that lease after the establishment settles; an aborted joiner holds no
+ * lease from this establishment and must never release the owner's.
  */
-function joinEstablishment(handle: ConnectHandle, options: CursorH2AcquireOptions): Promise<CursorH2Acquisition> {
+function joinEstablishment(
+	handle: ConnectHandle,
+	options: CursorH2AcquireOptions,
+	isOwner: boolean,
+): Promise<CursorH2Acquisition> {
 	const signal = options.signal;
 	const { promise, resolve, reject } = Promise.withResolvers<CursorH2Acquisition>();
 	handle.waiters++;
@@ -565,10 +574,12 @@ function joinEstablishment(handle: ConnectHandle, options: CursorH2AcquireOption
 	void handle.promise.then(
 		acquisition => {
 			if (settled) {
-				// This waiter already left (aborted). The establishment still
-				// issued a lease under the first waiter's options; release it so
-				// an aborted owner cannot leak a stream while joiners re-acquire.
-				if (acquisition.ok) acquisition.lease.release();
+				// This waiter already left (aborted). The establishment issued
+				// exactly one lease, bound to the OWNER's options. Only the
+				// aborted owner may release it; a joiner releasing here would
+				// destroy the still-live owner's lease. Joiners hold no lease of
+				// their own from this establishment — they re-acquire on success.
+				if (isOwner && acquisition.ok) acquisition.lease.release();
 				return;
 			}
 			settled = true;
@@ -613,7 +624,7 @@ export async function acquireCursorH2(options: CursorH2AcquireOptions): Promise<
 		// Joiner: wait bounded by our own signal. An unavailable outcome (ALPN /
 		// tunnel) propagates as-is — never retry a doomed connect. A success means
 		// the session is pooled: issue our own lease on it.
-		const shared = await joinEstablishment(inFlight, options);
+		const shared = await joinEstablishment(inFlight, options, false);
 		if (!shared.ok) return shared;
 		return acquireCursorH2(options);
 	}
@@ -649,7 +660,7 @@ export async function acquireCursorH2(options: CursorH2AcquireOptions): Promise<
 			if (connecting.get(key) === handle) connecting.delete(key);
 		});
 	connecting.set(key, handle);
-	return joinEstablishment(handle, options);
+	return joinEstablishment(handle, options, true);
 }
 
 /**
