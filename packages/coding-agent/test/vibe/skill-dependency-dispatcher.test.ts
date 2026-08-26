@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createSkillDependencyDispatcher } from "../../src/vibe/skill-dependency-dispatcher";
+
 const request = {
 	type: "dependency_required",
 	skill: "demo",
