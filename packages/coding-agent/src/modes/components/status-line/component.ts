@@ -474,6 +474,7 @@ export class StatusLineComponent implements Component {
 
 	constructor(private session: AgentSession) {
 		this.#settings = {
+			gitEnabled: settings.get("git.enabled"),
 			preset: settings.get("statusLine.preset"),
 			leftSegments: settings.get("statusLine.leftSegments"),
 			rightSegments: settings.get("statusLine.rightSegments"),
@@ -488,7 +489,7 @@ export class StatusLineComponent implements Component {
 	}
 
 	#gitEnabled(): boolean {
-		return settings.get("git.enabled");
+		return this.#settings.gitEnabled ?? true;
 	}
 	#hasGitBackedSegment(): boolean {
 		const effectiveSettings = this.#resolveSettings();
@@ -546,7 +547,7 @@ export class StatusLineComponent implements Component {
 	}
 
 	updateSettings(settings: StatusLineSettings): void {
-		this.#settings = settings;
+		this.#settings = { gitEnabled: this.#settings.gitEnabled, ...settings };
 		this.#effectiveSettings = undefined;
 		if (this.#onBranchChange) this.#setupGitWatcher();
 	}

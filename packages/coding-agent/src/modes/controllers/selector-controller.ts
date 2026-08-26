@@ -221,6 +221,7 @@ export class SelectorController {
 					onStatusLinePreview: previewSettings => {
 						// Update status line with preview settings
 						this.ctx.statusLine.updateSettings({
+							gitEnabled: settings.get("git.enabled"),
 							preset: settings.get("statusLine.preset"),
 							leftSegments: settings.get("statusLine.leftSegments"),
 							rightSegments: settings.get("statusLine.rightSegments"),
@@ -253,6 +254,7 @@ export class SelectorController {
 						done();
 						// Restore status line to saved settings
 						this.ctx.statusLine.updateSettings({
+							gitEnabled: settings.get("git.enabled"),
 							preset: settings.get("statusLine.preset"),
 							leftSegments: settings.get("statusLine.leftSegments"),
 							rightSegments: settings.get("statusLine.rightSegments"),
@@ -707,6 +709,7 @@ export class SelectorController {
 			case "statusLineTimeFormat":
 			case "statusLineTimeShowSeconds": {
 				const statusLineSettings = {
+					gitEnabled: settings.get("git.enabled"),
 					preset: settings.get("statusLine.preset"),
 					leftSegments: settings.get("statusLine.leftSegments"),
 					rightSegments: settings.get("statusLine.rightSegments"),

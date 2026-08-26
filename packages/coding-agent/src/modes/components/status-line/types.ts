@@ -29,6 +29,7 @@ export interface StatusLineSegmentOptions {
 }
 
 export interface StatusLineSettings {
+	gitEnabled?: boolean;
 	preset?: StatusLinePreset;
 	leftSegments?: StatusLineSegmentId[];
 	rightSegments?: StatusLineSegmentId[];
