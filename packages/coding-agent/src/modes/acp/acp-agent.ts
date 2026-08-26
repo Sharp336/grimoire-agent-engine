@@ -33,6 +33,8 @@ import {
 	type ResumeSessionRequest,
 	type ResumeSessionResponse,
 	type SessionConfigOption,
+	type SessionConfigSelectGroup,
+	type SessionConfigSelectOption,
 	type SessionInfo,
 	type SessionModeState,
 	type SessionNotification,
@@ -1747,11 +1749,7 @@ export class AcpAgent implements Agent {
 				category: "model",
 				type: "select",
 				currentValue: currentModel ? this.#toModelId(currentModel) : this.#toModelId(models[0]),
-				options: models.map(model => ({
-					value: this.#toModelId(model),
-					name: model.name,
-					description: `${model.provider}/${model.id}`,
-				})),
+				options: this.#buildModelSelectOptions(models),
 			});
 		}
 
@@ -1768,6 +1766,32 @@ export class AcpAgent implements Agent {
 		return configOptions;
 	}
 
+	#buildModelSelectOptions(models: Model[]): SessionConfigSelectOption[] | SessionConfigSelectGroup[] {
+		const providers: string[] = [];
+		const byProvider = new Map<string, Model[]>();
+		for (const model of models) {
+			let group = byProvider.get(model.provider);
+			if (!group) {
+				group = [];
+				byProvider.set(model.provider, group);
+				providers.push(model.provider);
+			}
+			group.push(model);
+		}
+		const toOption = (model: Model): SessionConfigSelectOption => ({
+			value: this.#toModelId(model),
+			name: model.name,
+			description: `${model.provider}/${model.id}`,
+		});
+		if (providers.length <= 1) {
+			return models.map(toOption);
+		}
+		return providers.map(provider => ({
+			group: provider,
+			name: provider,
+			options: (byProvider.get(provider) ?? []).map(toOption),
+		}));
+	}
 	#buildThinkingOptions(session: AgentSession): Array<{ value: string; name: string; description?: string }> {
 		return [
 			{ value: THINKING_OFF, name: "Off" },
