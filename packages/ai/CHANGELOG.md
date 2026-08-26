@@ -15,6 +15,19 @@
 - Fixed multimodal tool results in OpenAI Responses requests so inline, remote, and OpenAI file-backed images are preserved correctly.
 - Fixed resumed and forked Cursor sessions failing when their history came from a Responses-based provider such as Codex ([#9754](https://github.com/can1357/oh-my-pi/issues/9754)).
 - Fixed Cursor `composer-2.5` selections using the Fast variant instead of the Standard tier ([#9012](https://github.com/can1357/oh-my-pi/issues/9012)).
+### Added
+
+- Added a pooled HTTP/2 transport for Cursor that negotiates gzip in both directions, fixing oversized and long-running turns over ALPN-preserving networks.
+- Added an HTTP/1.1 fallback for Cursor on proxies that strip HTTP/2, engaged only when the Cursor server config itself disables bidirectional streaming.
+
+### Changed
+
+- Bumped the Cursor client version to `cli-2026.08.11-e8db854`.
+
+### Fixed
+
+- Fixed Cursor Connect streams mis-parsing compressed or end-of-stream frames, which previously surfaced as protobuf errors mid-stream.
+- Fixed long-lived Cursor sessions retaining conversation state without bound; cached conversations are now capped and rotation depth is limited.
 
 ## [18.0.6] - 2026-08-26
 

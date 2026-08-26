@@ -7,6 +7,9 @@
 ### Fixed
 
 - Fixed LiteLLM model discovery so model pricing is correctly populated when pricing information is provided by a later metadata endpoint.
+### Changed
+
+- Routed Cursor model discovery through the shared pooled HTTP/2 transport.
 
 ## [18.0.5] - 2026-08-25
 
