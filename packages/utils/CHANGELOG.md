@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `SessionConfigSelectGroup` type and widened `SessionConfigOption`'s select variant to accept grouped options, matching the ACP schema's `Grouped` select shape.
+
 ## [18.0.6] - 2026-08-26
 
 ### Added

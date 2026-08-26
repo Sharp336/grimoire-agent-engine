@@ -225,9 +225,15 @@ export interface SessionConfigSelectOption extends Meta {
 	name: string;
 	description?: string | null;
 }
+/** A group of options under a header, for grouped select configuration values. */
+export interface SessionConfigSelectGroup extends Meta {
+	group: string;
+	name: string;
+	options: SessionConfigSelectOption[];
+}
 /** Session configuration option. */
 export type SessionConfigOption = (
-	| { type: "select"; currentValue: string; options: SessionConfigSelectOption[] }
+	| { type: "select"; currentValue: string; options: SessionConfigSelectOption[] | SessionConfigSelectGroup[] }
 	| { type: "boolean"; currentValue: boolean }
 ) & { id: string; name: string; description?: string | null; category?: string | null } & Meta;
 /** Shared fields for creating or restoring a session. */

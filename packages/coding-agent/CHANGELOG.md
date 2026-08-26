@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the ACP model picker (Zed) showing every configured provider's models as one flat, unlabeled list — models are now grouped under provider headers when the client supports it, so same-named models from different providers (e.g. multiple "free" tiers) are distinguishable.
+
 ## [18.0.6] - 2026-08-26
 
 ### Added
