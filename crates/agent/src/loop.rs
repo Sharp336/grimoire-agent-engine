@@ -1203,12 +1203,8 @@ impl<C: TurnClient + Clone> Agent<C> {
 		self.last_toolset_hash = None;
 		*self.checkpoint_state.lock() = recover_checkpoint_state(&self.journal)?;
 		let journal = self.journal.load()?;
-		let projected = project_journal(
-			&journal,
-			journal.as_ref(),
-			self.state.snapshot().registry.as_ref(),
-			&self.caps,
-		)?;
+		let projected =
+			project_journal(&journal, self.state.snapshot().registry.as_ref(), &self.caps)?;
 		Ok(projected.items)
 	}
 
@@ -2496,7 +2492,7 @@ impl<C: TurnClient + Clone> Agent<C> {
 		let lifted_reseed = if changed_toolset {
 			self.transition(AgentPhase::Projecting);
 			let journal = self.journal.load()?;
-			Some(project_journal(&journal, journal.as_ref(), snapshot.registry.as_ref(), &self.caps)?)
+			Some(project_journal(&journal, snapshot.registry.as_ref(), &self.caps)?)
 		} else {
 			None
 		};
@@ -2513,8 +2509,7 @@ impl<C: TurnClient + Clone> Agent<C> {
 				input.clone()
 			} else if full {
 				let journal = self.journal.load()?;
-				let projected =
-					project_journal(&journal, journal.as_ref(), snapshot.registry.as_ref(), &self.caps)?;
+				let projected = project_journal(&journal, snapshot.registry.as_ref(), &self.caps)?;
 				let context_handlers = self.hook_bus.union_mask()
 					& hook_event_mask(v1::HookEventId::HookEventThreadProjection)
 					!= 0;
@@ -5034,9 +5029,9 @@ mod tests {
 		assert_eq!(summary.committed_turns, 0);
 		assert!(agent.journal().pending_turn().is_none());
 		let log = agent.journal().load().expect("load aborted journal");
-		assert!((0..u64::try_from(log.len()).expect("log length fits")).any(|index| {
+		assert!((0..u64::try_from(log.log().len()).expect("log length fits")).any(|index| {
 			matches!(
-				log.get(index),
+				log.log().get(index),
 				Some(Entry::Ok(event))
 					if matches!(&event.kind, Kind::TurnAbort(abort) if !abort.recoverable)
 			)
@@ -5446,8 +5441,8 @@ mod tests {
 		let log = agent.journal.load().expect("load rewind journal");
 		let mut settled = None;
 		let mut rewinds = Vec::new();
-		for index in 0..u64::try_from(log.len()).expect("journal length") {
-			let Some(Entry::Ok(event)) = log.get(index) else {
+		for index in 0..u64::try_from(log.log().len()).expect("journal length") {
+			let Some(Entry::Ok(event)) = log.log().get(index) else {
 				continue;
 			};
 			match &event.kind {
@@ -5634,9 +5629,8 @@ mod tests {
 		let display = agent.journal().items_at(&live).expect("display projection");
 		assert_eq!(display.len(), 2, "user input plus durable terminal error");
 		let log = agent.journal().load().expect("journal log");
-		let provider =
-			project_journal(&log, log.as_ref(), state.snapshot().registry.as_ref(), &test_caps())
-				.expect("provider projection");
+		let provider = project_journal(&log, state.snapshot().registry.as_ref(), &test_caps())
+			.expect("provider projection");
 		assert_eq!(provider.items.len(), 1, "terminal error-only frame stays display-only");
 		fs::remove_file(path).expect("remove journal");
 	}
