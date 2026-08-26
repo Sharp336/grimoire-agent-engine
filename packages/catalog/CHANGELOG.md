@@ -6,6 +6,10 @@
 
 - Added built-in FreePI model discovery through its OpenAI-compatible API.
 
+### Fixed
+
+- Fixed catalog regeneration from changing GPT-5.6 Sol standard pricing or MiniMax-M3 output limits when live metadata drifts.
+
 ## [18.0.5] - 2026-08-25
 
 ### Added
