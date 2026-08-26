@@ -253,12 +253,11 @@ describe("validateKey / login", () => {
 	});
 
 	test("times out a stalled probe with a clear message", async () => {
-		stubFetch(
-			async (_input, init): Promise<Response> =>
-				new Promise<Response>((_resolve, reject) => {
-					init?.signal?.addEventListener("abort", () => reject(new Error("The operation was aborted")));
-				}),
-		);
+		stubFetch(async (_input, init): Promise<Response> => {
+			const { promise, reject } = Promise.withResolvers<Response>();
+			init?.signal?.addEventListener("abort", () => reject(new Error("The operation was aborted")));
+			return promise;
+		});
 		await expect(validateKey("mg_key")).rejects.toThrow(/timed out after 15s/);
 	}, 20_000);
 
