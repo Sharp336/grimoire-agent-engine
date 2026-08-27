@@ -265,6 +265,11 @@ describe("EngineRuntime", () => {
 		prompt.resolve(true);
 		await runtime.drain();
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
+		expect(
+			(await runtime.store.pendingEvents())
+				.filter(event => event.kind === "cancelled")
+				.map(event => event.causationCommandId),
+		).toEqual(["command-a", "cancel-a"]);
 		await runtime.dispose();
 	}, 60000);
 });

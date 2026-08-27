@@ -409,12 +409,11 @@ export class EngineRuntime {
 			binding.attemptState = "cancelled";
 			await this.store.putBinding(this.#snapshot(binding));
 			await this.store.putAttempt(binding, "cancelled", request.reason);
-			await this.#emit(
-				binding,
-				"cancelled",
-				request.reason ? { reason: request.reason } : undefined,
-				request.commandId,
-			);
+			const payload = request.reason ? { reason: request.reason } : undefined;
+			await this.#emit(binding, "cancelled", payload);
+			if (request.commandId !== binding.commandId) {
+				await this.#emit(binding, "cancelled", payload, request.commandId);
+			}
 		});
 	}
 
