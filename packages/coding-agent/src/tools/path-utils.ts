@@ -5,7 +5,7 @@ import * as url from "node:url";
 import { glob } from "@oh-my-pi/pi-natives";
 import { hasFsCode, isEnoent, isEnotdir, stripWindowsExtendedLengthPathPrefix } from "@oh-my-pi/pi-utils";
 import type { Skill } from "../extensibility/skills";
-import { InternalUrlRouter, type LocalProtocolOptions } from "../internal-urls";
+import { InternalUrlRouter, type LocalProtocolOptions, type ResolveContext } from "../internal-urls";
 import { ToolAbortError, ToolError } from "./tool-errors";
 
 const UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
@@ -1438,6 +1438,8 @@ export interface ToolScopeOptions {
 	skills?: readonly Skill[];
 	/** Calling session's session file — lets history:///agent:// resolve against the caller's root. */
 	sessionFile?: string;
+	/** Full caller context for Engine-scoped registry/MCP/rule routing. */
+	resolveContext?: ResolveContext;
 	/** Materialize readable external URLs to local text files before scope derivation. */
 	resolveExternalUrl?: (rawPath: string) => Promise<ResolvedExternalSearchUrl | undefined>;
 }
@@ -1522,6 +1524,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 			throw new ToolError(`Glob patterns are not supported for internal URLs: ${rawPath}`);
 		}
 		const resource = await internalRouter.resolve(rawPath, {
+			...opts.resolveContext,
 			cwd,
 			settings: opts.settings,
 			signal: opts.signal,

@@ -18,6 +18,7 @@ import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
+import type { IrcBus } from "../irc/bus";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import { LspTool } from "../lsp";
 import type { MCPManager } from "../mcp";
@@ -157,6 +158,8 @@ export interface DeferredDiagnosticsEntry {
 
 /** Session context for tool factories */
 export interface ToolSession {
+	/** Rootless multi-session Engine path: disables ambient process-global routing fallbacks. */
+	engineMode?: boolean;
 	/** Current working directory */
 	cwd: string;
 	/** Additional workspace directories beyond cwd (multi-root), forwarded to subagents. */
@@ -266,6 +269,8 @@ export interface ToolSession {
 	getMnemopiSessionState?: () => MnemopiSessionState | undefined;
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "Main", "AuthLoader"). */
 	getAgentId?: () => string | null;
+	/** Durable Attempt identity captured by asynchronous Engine work. */
+	getAttemptId?: () => string | undefined;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */
 	getToolByName?: (name: string) => AgentTool | undefined;
 	/** Look up an enabled tool through the eval bridge's normal permission pipeline. */
@@ -302,6 +307,8 @@ export interface ToolSession {
 	agentRegistry?: AgentRegistry;
 	/** Idle→parked→revive lifecycle owner; lets the hub kill a non-job-backed agent registration. Default: AgentLifecycleManager.global(). */
 	agentLifecycle?: () => AgentLifecycleManager;
+	/** IRC bus scoped to the owning runtime. Default: IrcBus.global(). */
+	ircBus?: IrcBus;
 	/** Get artifacts directory for artifact:// URLs */
 	getArtifactsDir?: () => string | null;
 	/** Get the ArtifactManager backing this session (shared across parent + subagents). */
@@ -333,9 +340,7 @@ export interface ToolSession {
 	 * - Subagent (`parentTaskPrefix` set): the parent's manager, so background
 	 *   bash/task work and `onJobComplete` deliveries flow into the conversation
 	 *   that spawned it.
-	 * - Secondary in-process top-level session that found a singleton already
-	 *   installed (issue #1923): `undefined`. Tools refuse async work rather
-	 *   than silently route completions into the owning session's `yieldQueue`.
+	 * - Engine session: the manager injected by its owning runtime.
 	 *
 	 * Tools MUST use this instead of `AsyncJobManager.instance()` so a secondary
 	 * session never borrows the owning session's manager by accident.

@@ -51,6 +51,12 @@ describe("McpProtocolHandler", () => {
 		await expect(router.resolve("mcp://test://resource")).rejects.toThrow("No MCP manager");
 	});
 
+	it("Engine resolution ignores the process-global MCP manager", async () => {
+		MCPManager.setInstance(createMockManager({ servers: ["global"] }));
+		const router = InternalUrlRouter.instance();
+		await expect(router.resolve("mcp://test://resource", { engineMode: true })).rejects.toThrow("No MCP manager");
+	});
+
 	it("requires resource URI in mcp URL", async () => {
 		const manager = createMockManager({ servers: ["server-a"] });
 		MCPManager.setInstance(manager);

@@ -40,6 +40,7 @@ import { canUseInteractiveBashPty } from "./bash-pty-selection";
 import { expandInternalUrls, type InternalUrlExpansionOptions } from "./bash-skill-urls";
 import { resolveEvalBackends } from "./eval-backends";
 import { invalidateGithubCacheForBashCommand } from "./gh-cache-invalidation";
+import { internalUrlContext } from "./internal-url-context";
 import {
 	formatStyledTruncationWarning,
 	type OutputMeta,
@@ -874,6 +875,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			},
 			{
 				ownerId: this.session.getAgentId?.() ?? undefined,
+				attemptId: this.session.getAttemptId?.(),
 				onProgress: async text => {
 					latestText = text;
 					if (!forwardUpdates) return;
@@ -953,6 +955,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				getArtifactsDir: this.session.getArtifactsDir,
 				getSessionId: this.session.getSessionId,
 			},
+			resolveContext: internalUrlContext(this.session, signal),
 		};
 		command = await expandInternalUrls(command, { ...internalUrlOptions, ensureLocalParentDirs: true });
 		const resolvedEnv = env

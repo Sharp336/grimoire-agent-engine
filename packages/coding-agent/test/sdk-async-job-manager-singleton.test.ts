@@ -6,7 +6,14 @@ import { type } from "@oh-my-pi/omptype";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createAgentSession, type ExtensionFactory } from "@oh-my-pi/pi-coding-agent/sdk";
+import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
+import {
+	type CreateAgentSessionOptions,
+	createAgentSession,
+	type ExtensionFactory,
+} from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AsyncJobSnapshot } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -40,7 +47,11 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 		AsyncJobManager.resetForTests();
 	});
 
-	async function spawnTopLevelSession(extraSettings?: Record<string, unknown>, extensions: ExtensionFactory[] = []) {
+	async function spawnTopLevelSession(
+		extraSettings?: Record<string, unknown>,
+		extensions: ExtensionFactory[] = [],
+		sessionOptions: Partial<CreateAgentSessionOptions> = {},
+	) {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-async-singleton-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);
 		const cwd = path.join(tempDir, `project-${Snowflake.next()}`);
@@ -59,9 +70,55 @@ describe("AsyncJobManager singleton across concurrent top-level sessions", () =>
 			enableMCP: false,
 			enableLsp: false,
 			modelRegistry: sharedModelRegistry,
+			...sessionOptions,
 		});
 		return session;
 	}
+
+	it("keeps injected Engine services alive while disposing independent roots", async () => {
+		const registry = new AgentRegistry();
+		const lifecycle = new AgentLifecycleManager(registry);
+		const manager = new AsyncJobManager({ requireAttemptId: true });
+		const ircBus = new IrcBus(registry, lifecycle);
+		const engineOptions = {
+			engineMode: true,
+			agentRegistry: registry,
+			agentLifecycle: lifecycle,
+			asyncJobManager: manager,
+			ircBus,
+		};
+		const first = await spawnTopLevelSession(undefined, [], {
+			...engineOptions,
+			agentId: "Engine-A",
+			attemptId: "attempt-a",
+		});
+		const second = await spawnTopLevelSession(undefined, [], {
+			...engineOptions,
+			agentId: "Engine-B",
+			attemptId: "attempt-b",
+		});
+		const release = Promise.withResolvers<string>();
+		const jobId = manager.register("bash", "engine job", async () => release.promise, {
+			ownerId: "Engine-A",
+			attemptId: "attempt-a",
+		});
+
+		try {
+			expect(first.asyncJobManager).toBe(manager);
+			expect(second.asyncJobManager).toBe(manager);
+			expect(first.getToolByName("vibe_spawn")).toBeUndefined();
+			expect(AsyncJobManager.instance()).toBeUndefined();
+			await second.dispose();
+			expect(manager.getJob(jobId)?.status).toBe("running");
+			expect(registry.get("Engine-A")?.session).toBe(first);
+		} finally {
+			release.resolve("done");
+			await manager.waitForAll();
+			await first.dispose();
+			await lifecycle.dispose();
+			await manager.dispose({ timeoutMs: 1_000 });
+		}
+	}, 60000);
 
 	it("keeps the primary session's manager installed after a secondary session disposes", async () => {
 		const primary = await spawnTopLevelSession();

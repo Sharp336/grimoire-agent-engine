@@ -489,6 +489,79 @@ describe("AsyncJobManager", () => {
 		expect(manager.getJob(parentJobId)?.status).toBe("cancelled");
 	});
 
+	test("requires and fences Engine jobs by ownerId plus attemptId", async () => {
+		const manager = new AsyncJobManager({ requireAttemptId: true, onJobComplete: async () => {} });
+		expect(() => manager.register("bash", "missing attempt", async () => "done", { ownerId: "Engine-A" })).toThrow(
+			/requires attemptId/,
+		);
+
+		const deliveriesA: string[] = [];
+		const deliveriesB: string[] = [];
+		manager.registerDeliverySink(
+			"Engine-A",
+			jobId => {
+				deliveriesA.push(jobId);
+			},
+			"attempt-a",
+		);
+		manager.registerDeliverySink(
+			"Engine-A",
+			jobId => {
+				deliveriesB.push(jobId);
+			},
+			"attempt-b",
+		);
+
+		manager.register("task", "first attempt", async () => "a", {
+			id: "job-a",
+			ownerId: "Engine-A",
+			attemptId: "attempt-a",
+		});
+		manager.register("task", "second attempt", async () => "b", {
+			id: "job-b",
+			ownerId: "Engine-A",
+			attemptId: "attempt-b",
+		});
+		await manager.waitForAll();
+		await manager.drainDeliveries({ timeoutMs: 500 });
+
+		expect(manager.getAllJobs({ ownerId: "Engine-A", attemptId: "attempt-a" }).map(job => job.id)).toEqual(["job-a"]);
+		expect(deliveriesA).toEqual(["job-a"]);
+		expect(deliveriesB).toEqual(["job-b"]);
+	});
+
+	test("cancels and reaps only the selected Attempt for one owner", async () => {
+		const manager = new AsyncJobManager({ requireAttemptId: true });
+		const hold = (signal: AbortSignal) =>
+			new Promise<void>(resolve => signal.addEventListener("abort", () => resolve(), { once: true }));
+		const jobA = manager.register(
+			"bash",
+			"attempt a",
+			async ({ signal }) => {
+				await hold(signal);
+				return "stopped a";
+			},
+			{ ownerId: "Engine-A", attemptId: "attempt-a" },
+		);
+		const jobB = manager.register(
+			"bash",
+			"attempt b",
+			async ({ signal }) => {
+				await hold(signal);
+				return "stopped b";
+			},
+			{ ownerId: "Engine-A", attemptId: "attempt-b" },
+		);
+
+		const reap = await manager.cancelAndReapOwnerJobs("Engine-A", Date.now() + 1_000, "attempt-a");
+		expect(reap.settled).toBe(true);
+		expect(manager.getJob(jobA)?.status).toBe("cancelled");
+		expect(manager.getJob(jobB)?.status).toBe("running");
+
+		manager.cancelAll({ ownerId: "Engine-A", attemptId: "attempt-b" });
+		await manager.waitForAll();
+	});
+
 	test("routes owned deliveries to the owner's registered sink only", async () => {
 		const mainDeliveries: string[] = [];
 		const defaultDeliveries: string[] = [];

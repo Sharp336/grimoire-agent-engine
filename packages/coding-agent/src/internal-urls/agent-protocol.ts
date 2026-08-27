@@ -18,10 +18,9 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { AgentRegistry } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { applyQuery, pathToQuery } from "./json-query";
-import { artifactsDirsFromRegistry } from "./registry-helpers";
+import { agentRegistryFromContext, artifactsDirsFromRegistry } from "./registry-helpers";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
 
 /**
@@ -49,7 +48,7 @@ export class AgentProtocolHandler implements ProtocolHandler {
 			throw new Error("agent:// URL cannot combine path extraction with ?q=");
 		}
 
-		const registry = AgentRegistry.global();
+		const registry = agentRegistryFromContext(context);
 		const rootSessionFile = context?.sessionFile
 			? await ensurePersistedRoster(registry, context.sessionFile)
 			: undefined;
@@ -62,7 +61,9 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		// the first-hit id map for a shared id. No caller session file: keep the
 		// pre-existing global scan untouched.
 		const dirs = artifactsDirsFromRegistry(
-			rootSessionFile ? { preferredDir: rootSessionFile.slice(0, -6) } : undefined,
+			rootSessionFile
+				? { preferredDir: rootSessionFile.slice(0, -6), agentRegistry: registry }
+				: { agentRegistry: registry },
 		);
 		if (dirs.length === 0) {
 			throw new Error("No session - agent outputs unavailable");
@@ -177,9 +178,9 @@ export class AgentProtocolHandler implements ProtocolHandler {
 		return { anyDirExists, availableIds: new Set(byId.keys()) };
 	}
 
-	async complete(): Promise<UrlCompletion[]> {
+	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {
 		const ids = new Set<string>();
-		for (const dir of artifactsDirsFromRegistry()) {
+		for (const dir of artifactsDirsFromRegistry({ agentRegistry: agentRegistryFromContext(context) })) {
 			let files: string[];
 			try {
 				files = await fs.readdir(dir);

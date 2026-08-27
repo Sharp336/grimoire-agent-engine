@@ -159,6 +159,7 @@ export async function executeList(
 	senderId: string,
 	params: HubListParams = {},
 	sessionFileHint?: string | null,
+	bus: IrcBus = IrcBus.global(),
 ): Promise<AgentToolResult<CoordinationDetails>> {
 	const rootSessionFile = await ensurePersistedRoster(
 		registry,
@@ -182,7 +183,6 @@ export async function executeList(
 		truncated,
 	};
 
-	const bus = IrcBus.global();
 	const peers = shownRefs.map(ref => ({
 		id: ref.id,
 		displayName: ref.displayName,
@@ -226,11 +226,18 @@ export interface HubSendParams {
 }
 
 export async function executeSend(
-	deps: { registry: AgentRegistry; senderId: string; settings: Settings; sessionFileHint?: string | null },
+	deps: {
+		registry: AgentRegistry;
+		senderId: string;
+		settings: Settings;
+		ircBus?: IrcBus;
+		sessionFileHint?: string | null;
+	},
 	params: HubSendParams,
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<CoordinationDetails>> {
 	const { registry, senderId, settings, sessionFileHint } = deps;
+	const bus = deps.ircBus ?? IrcBus.global();
 	const to = params.to?.trim();
 	const message = params.message?.trim();
 	if (!to) {
@@ -262,7 +269,6 @@ export async function executeSend(
 		await ensurePersistedRoster(registry, sessionFileHint);
 	}
 
-	const bus = IrcBus.global();
 	let waited: IrcMessage | null | undefined;
 	const timeoutMs = params.await ? resolveMessageTimeoutMs(settings, params.timeoutMs) : undefined;
 	const awaitAbort = params.await ? new AbortController() : undefined;
@@ -386,15 +392,16 @@ export async function executeSend(
 
 /** Pure message wait: no jobs in play, block on the bus with peer liveness. */
 export async function executeMessageWait(
-	deps: { registry: AgentRegistry; senderId: string; settings: Settings },
+	deps: { registry: AgentRegistry; senderId: string; settings: Settings; ircBus?: IrcBus },
 	params: { from?: string; timeoutMs?: number },
 	signal?: AbortSignal,
 ): Promise<AgentToolResult<CoordinationDetails>> {
 	const { registry, senderId, settings } = deps;
+	const ircBus = deps.ircBus ?? IrcBus.global();
 	const from = params.from?.trim() || undefined;
 	const timeoutMs = resolveMessageTimeoutMs(settings, params.timeoutMs);
 	try {
-		const waited = await IrcBus.global().wait(senderId, { from }, timeoutMs, signal, {
+		const waited = await ircBus.wait(senderId, { from }, timeoutMs, signal, {
 			liveness: { registry, senderId },
 		});
 		if (!waited) {
@@ -419,8 +426,9 @@ export function executeInbox(
 	registry: AgentRegistry,
 	senderId: string,
 	peek?: boolean,
+	bus: IrcBus = IrcBus.global(),
 ): AgentToolResult<CoordinationDetails> {
-	const busMessages = IrcBus.global().inbox(senderId, { peek });
+	const busMessages = bus.inbox(senderId, { peek });
 	const session = registry.get(senderId)?.session;
 	const pendingMessages =
 		typeof session?.drainPendingIrcInboxMessages === "function" ? session.drainPendingIrcInboxMessages(senderId) : [];

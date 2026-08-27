@@ -5,7 +5,10 @@
  * providing access to agent outputs and server resources without exposing filesystem paths.
  */
 
+import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
+import type { MCPManager } from "../mcp";
+import type { AgentRegistry } from "../registry/agent-registry";
 import type { LocalProtocolOptions } from "./local-protocol";
 
 /**
@@ -115,6 +118,14 @@ export interface ResolveContext {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Calling session's loaded skills. Prefer this over process-global skill state. */
 	skills?: readonly Skill[];
+	/** Calling runtime's agent registry. Engine callers must provide it. */
+	agentRegistry?: AgentRegistry;
+	/** Calling session's MCP manager. Engine callers must provide it when MCP is enabled. */
+	mcpManager?: MCPManager;
+	/** Calling session's active rules. Engine callers must provide them. */
+	rules?: readonly Rule[];
+	/** Fail closed instead of consulting process-global fallbacks. */
+	engineMode?: boolean;
 	/** Session-bound `xd://` documentation resolver. */
 	xd?: {
 		read(name: string | null): Promise<string>;

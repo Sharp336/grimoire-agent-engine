@@ -470,9 +470,8 @@ export class LocalProtocolHandler implements ProtocolHandler {
 		if (fromContext) return fromContext;
 		const override = LocalProtocolHandler.#override;
 		if (override) return override;
-		const main = AgentRegistry.global()
-			.list()
-			.find(ref => ref.kind === "main");
+		if (context?.engineMode) return undefined;
+		const main = (context?.agentRegistry ?? AgentRegistry.global()).list().find(ref => ref.kind === "main");
 		const sessionManager = main?.session?.sessionManager;
 		if (!sessionManager) return undefined;
 		return {

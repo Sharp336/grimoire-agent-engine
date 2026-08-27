@@ -45,6 +45,7 @@ import type { ToolSession } from ".";
 import { materializeReadUrlToFile, parseReadUrlTarget } from "./fetch";
 import { createFileRecorder, formatResultPath } from "./file-recorder";
 import { classifyGroupedLines, formatGroupedFiles, groupLineIndicesByBlank } from "./grouped-file-output";
+import { internalUrlContext } from "./internal-url-context";
 import { formatMatchLine } from "./match-line-format";
 import type { OutputMeta } from "./output-meta";
 import {
@@ -775,6 +776,7 @@ async function resolveInternalSearchInputs(opts: {
 	localProtocolOptions?: LocalProtocolOptions;
 	skills?: ResolveContext["skills"];
 	sessionFile?: string;
+	resolveContext?: ResolveContext;
 }): Promise<InternalSearchInputResolution> {
 	const internalRouter = InternalUrlRouter.instance();
 	const paths = opts.resolvedPaths.slice();
@@ -784,6 +786,7 @@ async function resolveInternalSearchInputs(opts: {
 	const immutableSourcePaths = new Set<string>();
 	let virtualScopePath: string | undefined;
 	const context: ResolveContext = {
+		...opts.resolveContext,
 		cwd: opts.cwd,
 		settings: opts.settings,
 		signal: opts.signal,
@@ -1000,6 +1003,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 					localProtocolOptions: this.session.localProtocolOptions,
 					skills: this.session.skills,
 					sessionFile: this.session.getSessionFile() ?? undefined,
+					resolveContext: internalUrlContext(this.session, signal),
 				});
 				const searchablePaths = internalResolution.paths;
 				const { virtualResources, virtualPathSet, virtualInputIndexes } = internalResolution;
@@ -1043,6 +1047,7 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 						localProtocolOptions: this.session.localProtocolOptions,
 						skills: this.session.skills,
 						sessionFile: this.session.getSessionFile() ?? undefined,
+						resolveContext: internalUrlContext(this.session, signal),
 						resolveExternalUrl: materializeExternalUrlForSearch,
 						trackImmutableSources: true,
 						surfaceExactFilePaths: true,

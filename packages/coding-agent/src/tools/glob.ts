@@ -16,6 +16,7 @@ import { type TruncationResult, truncateHead } from "../session/streaming-output
 import { isScoutSpawnable } from "../task/spawn-policy";
 import { Ellipsis, fileHyperlink, renderFileList, renderStatusLine, renderTreeList, truncateToWidth } from "../tui";
 import type { ToolSession } from ".";
+import { internalUrlContext } from "./internal-url-context";
 import { applyListLimit } from "./list-limit";
 import { formatFullOutputReference, type OutputMeta } from "./output-meta";
 import {
@@ -221,12 +222,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					}
 					const memoryGlob = splitMemoryGlobPattern(rawPattern);
 					const resource = await internalRouter.resolve(memoryGlob.baseUrl, {
-						cwd: this.session.cwd,
-						settings: this.session.settings,
-						signal,
-						sessionFile: this.session.getSessionFile() ?? undefined,
-						localProtocolOptions: this.session.localProtocolOptions,
-						skills: this.session.skills,
+						...internalUrlContext(this.session, signal),
 						pathOnly: true,
 					});
 					if (!resource.sourcePath) {
@@ -238,12 +234,7 @@ export class GlobTool implements AgentTool<typeof findSchema, GlobToolDetails> {
 					continue;
 				}
 				const resource = await internalRouter.resolve(rawPattern, {
-					cwd: this.session.cwd,
-					settings: this.session.settings,
-					signal,
-					sessionFile: this.session.getSessionFile() ?? undefined,
-					localProtocolOptions: this.session.localProtocolOptions,
-					skills: this.session.skills,
+					...internalUrlContext(this.session, signal),
 					pathOnly: true,
 				});
 				if (!resource.sourcePath) {

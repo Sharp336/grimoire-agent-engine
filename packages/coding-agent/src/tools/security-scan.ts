@@ -134,6 +134,7 @@ export class SecurityScanTool implements AgentTool<typeof securityScanSchema, Se
 				activeModel: this.session.getActiveModel?.(),
 				sessionId: this.session.getSessionId?.() ?? undefined,
 				agentId: this.session.getAgentId?.() ?? undefined,
+				attemptId: this.session.getAttemptId?.(),
 				asyncJobManager: this.session.asyncJobManager,
 			});
 		};

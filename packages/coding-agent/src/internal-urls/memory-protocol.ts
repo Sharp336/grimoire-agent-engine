@@ -7,6 +7,7 @@ import { AgentRegistry } from "../registry/agent-registry";
 import { isMarkdownPath } from "../utils/lang-from-path";
 import { buildDirectoryResource } from "./filesystem-resource";
 import { parseInternalUrl } from "./parse";
+import { agentRegistryFromContext } from "./registry-helpers";
 import { validateRelativePath } from "./skill-protocol";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
 
@@ -18,10 +19,10 @@ const MEMORY_NAMESPACE = "root";
  * Each session has its own cwd (possibly a worktree), so subagents and main
  * may see different roots.
  */
-export function memoryRootsFromRegistry(): string[] {
+export function memoryRootsFromRegistry(agentRegistry: AgentRegistry = AgentRegistry.global()): string[] {
 	const agentDir = getAgentDir();
 	const roots: string[] = [];
-	for (const ref of AgentRegistry.global().list()) {
+	for (const ref of agentRegistry.list()) {
 		const sm = ref.session?.sessionManager;
 		if (!sm) continue;
 		const root = getMemoryRoot(agentDir, sm.getCwd());
@@ -32,7 +33,7 @@ export function memoryRootsFromRegistry(): string[] {
 
 function memoryRootsForContext(context?: ResolveContext): string[] {
 	if (context?.cwd) return [getMemoryRoot(getAgentDir(), context.cwd)];
-	return memoryRootsFromRegistry();
+	return memoryRootsFromRegistry(agentRegistryFromContext(context));
 }
 
 function ensureWithinRoot(targetPath: string, rootPath: string): void {
@@ -206,10 +207,12 @@ async function tryResolveInRoot(url: InternalUrl, memoryRoot: string): Promise<I
  * canonical (non-aliased) state per bank set so `memory://<id>` resolves in
  * one pass regardless of how many subagents are alive.
  */
-function mnemopiSessionStatesFromRegistry(): MnemopiSessionState[] {
+function mnemopiSessionStatesFromRegistry(
+	agentRegistry: AgentRegistry = AgentRegistry.global(),
+): MnemopiSessionState[] {
 	const seen = new Set<unknown>();
 	const states: MnemopiSessionState[] = [];
-	for (const ref of AgentRegistry.global().list()) {
+	for (const ref of agentRegistry.list()) {
 		const session = ref.session;
 		if (!session) continue;
 		const state = getMnemopiSessionState(session);
@@ -290,6 +293,7 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 	readonly immutable = true;
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
+		const agentRegistry = agentRegistryFromContext(context);
 		const backend = memoryBackendFromContext(context);
 		if (backend === "off") {
 			throw new Error("Unknown protocol: memory://");
@@ -305,13 +309,10 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 		// `memory_edit update` and lets agents inspect the full content of a
 		// clipped recall preview before overwriting it (issue #4443).
 		if (namespace !== MEMORY_NAMESPACE) {
-			const mnemopiStates = mnemopiSessionStatesFromRegistry();
+			const mnemopiStates = mnemopiSessionStatesFromRegistry(agentRegistry);
 			const hindsightActive =
 				backend === "hindsight" ||
-				(mnemopiStates.length === 0 &&
-					AgentRegistry.global()
-						.list()
-						.some(ref => ref.session?.getHindsightSessionState?.()));
+				(mnemopiStates.length === 0 && agentRegistry.list().some(ref => ref.session?.getHindsightSessionState?.()));
 			if (hindsightActive) {
 				// Hindsight keeps memories server-side and exposes no
 				// `memory://<id>` addressing, yet the shared `recall` tool
@@ -369,7 +370,7 @@ export class MemoryProtocolHandler implements ProtocolHandler {
 		if (memoryRootsForContext(context).length > 0) {
 			completions.push({ value: MEMORY_NAMESPACE, description: "Project memory summary" });
 		}
-		if (mnemopiSessionStatesFromRegistry().length > 0) {
+		if (mnemopiSessionStatesFromRegistry(agentRegistryFromContext(context)).length > 0) {
 			completions.push({
 				value: "<memory-id>",
 				description: "Full mnemopi memory by id (from recall)",

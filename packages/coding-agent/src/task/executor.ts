@@ -35,6 +35,7 @@ import type { PreparedExtension } from "../extensibility/extensions/types";
 import { buildSkillPromptMessage, type Skill } from "../extensibility/skills";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
+import type { IrcBus } from "../irc/bus";
 import type { MCPManager } from "../mcp/manager";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import { initializeExtensions } from "../modes/runtime-init";
@@ -499,6 +500,12 @@ export interface ExecutorOptions {
 	 */
 	preloadedCustomToolPaths?: ToolPathWithSource[];
 	mcpManager?: MCPManager;
+	agentRegistry?: AgentRegistry;
+	agentLifecycle?: AgentLifecycleManager;
+	asyncJobManager?: AsyncJobManager;
+	ircBus?: IrcBus;
+	attemptId?: string;
+	engineMode?: boolean;
 	authStorage?: AuthStorage;
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
@@ -990,6 +997,7 @@ interface RunMonitorArgs {
 	softRequestBudgetNotice: boolean;
 	/** Wall-clock cap in ms; 0 disables the timer. */
 	maxRuntimeMs: number;
+	agentRegistry?: AgentRegistry;
 }
 
 /**
@@ -1315,7 +1323,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		onProgress?.({ ...progress });
 		const activityGist =
 			progress.lastIntent ?? (progress.currentTool ? `running ${progress.currentTool}` : undefined);
-		if (activityGist) AgentRegistry.global().setActivity(id, activityGist);
+		if (activityGist) (args.agentRegistry ?? AgentRegistry.global()).setActivity(id, activityGist);
 		if (args.eventBus) {
 			args.eventBus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
 				index,
@@ -2375,6 +2383,7 @@ export interface IrcWakeTurnMonitorOptions {
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	outputSchemaSource?: StructuredSubagentSchemaSource;
 	artifactsDir?: string;
+	agentRegistry?: AgentRegistry;
 }
 
 /**
@@ -2402,7 +2411,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 				.filter(Boolean)
 				.join("\n\n") || "IRC follow-up";
 		const turnStartTime = Date.now();
-		const sessionFile = AgentRegistry.global().get(id)?.sessionFile ?? options.sessionFile ?? undefined;
+		const sessionFile = (options.agentRegistry ?? AgentRegistry.global()).get(id)?.sessionFile ?? options.sessionFile;
 		const turnMonitor = createSubagentRunMonitor({
 			index,
 			id,
@@ -2418,6 +2427,7 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 			softRequestBudget: 0,
 			softRequestBudgetNotice: false,
 			maxRuntimeMs,
+			agentRegistry: options.agentRegistry,
 		});
 
 		if (options.eventBus) {
@@ -2509,8 +2519,11 @@ export async function finalizeSubagentLifecycle(args: {
 	reviveSession: AgentReviver | null;
 	cleanupDeadlineAt?: number;
 	onCleanupDeferred?: (completion: Promise<void>) => void;
+	agentRegistry?: AgentRegistry;
+	agentLifecycle?: AgentLifecycleManager;
 }): Promise<void> {
-	const registry = AgentRegistry.global();
+	const registry = args.agentRegistry ?? AgentRegistry.global();
+	const lifecycle = args.agentLifecycle ?? AgentLifecycleManager.global();
 	const ref = registry.get(args.id);
 	const ownsRef = Boolean(ref && ref.session === args.session);
 	const cleanupDeadlineAt = args.cleanupDeadlineAt ?? Date.now() + 5000;
@@ -2550,7 +2563,7 @@ export async function finalizeSubagentLifecycle(args: {
 		if (ref && ownsRef) {
 			if (args.abortKind === "shutdown") {
 				try {
-					await AgentLifecycleManager.global().release(args.id, ref);
+					await lifecycle.release(args.id, ref);
 				} catch (error) {
 					logger.warn("runSubagent: failed to release session during manager shutdown", {
 						id: args.id,
@@ -2564,7 +2577,7 @@ export async function finalizeSubagentLifecycle(args: {
 				// decision is durable and a restart cannot rediscover the transcript
 				// as a revivable parked agent.
 				try {
-					await AgentLifecycleManager.global().release(args.id, ref, { tombstone: true });
+					await lifecycle.release(args.id, ref, { tombstone: true });
 				} catch (error) {
 					logger.warn("runSubagent: failed to persist kill tombstone", { id: args.id, error: String(error) });
 					registry.setStatus(args.id, "aborted", ref);
@@ -2603,7 +2616,7 @@ export async function finalizeSubagentLifecycle(args: {
 		await disposeSession();
 		return;
 	}
-	AgentLifecycleManager.global().adopt(
+	lifecycle.adopt(
 		args.id,
 		{
 			idleTtlMs: args.agentIdleTtlMs,
@@ -2753,6 +2766,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		signal,
 		onProgress,
 	} = options;
+	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
 	const cleanupGraceMs = options.cleanupGraceMs ?? TASK_ABORT_CLEANUP_GRACE_MS;
 	const startTime = Date.now();
 	// Set by the session's onFirstChatDispatch hook the first time the agent
@@ -2892,6 +2906,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		softRequestBudget,
 		softRequestBudgetNotice,
 		maxRuntimeMs,
+		agentRegistry,
 	});
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;
@@ -2912,6 +2927,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			outputSchemaMode: options.outputSchemaMode,
 			outputSchemaSource: options.outputSchemaSource,
 			artifactsDir: options.artifactsDir,
+			agentRegistry,
 		});
 	};
 
@@ -3186,9 +3202,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				preloadedPreparedExtensions: restrictToolNames ? [] : options.preloadedPreparedExtensions,
 				preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
 				systemPrompt: defaultPrompt => {
-					const ircRoster = ircEnabled
-						? collectIrcPeerRoster(AgentRegistry.global(), id, ircRootSessionFile)
-						: undefined;
+					const ircRoster = ircEnabled ? collectIrcPeerRoster(agentRegistry, id, ircRootSessionFile) : undefined;
 					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
 						agent: agent.systemPrompt,
 						context: options.context?.trim() ?? "",
@@ -3218,6 +3232,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				agentId: id,
 				agentDisplayName: agent.name,
 				expectedAgentRef,
+				agentRegistry,
+				agentLifecycle: options.agentLifecycle,
+				asyncJobManager: options.asyncJobManager,
+				ircBus: options.ircBus,
+				attemptId: options.attemptId,
+				engineMode: options.engineMode,
 				enableLsp: lspEnabled,
 				enableIrc: options.enableIrc,
 				skipPythonPreflight,
@@ -3239,11 +3259,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			sessionOpenedAt = performance.now();
 			if (ircEnabled) {
 				ircRootSessionFile = await ensurePersistedRoster(
-					AgentRegistry.global(),
+					agentRegistry,
 					sessionManager.getSessionFile() ??
 						sessionFile ??
-						AgentRegistry.global().get(id)?.sessionFile ??
-						AgentRegistry.global().get(MAIN_AGENT_ID)?.sessionFile,
+						agentRegistry.get(id)?.sessionFile ??
+						agentRegistry.get(MAIN_AGENT_ID)?.sessionFile,
 				);
 			}
 
@@ -3263,7 +3283,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			monitor.setActiveSession(session);
 			// Run-state notifications precede deferrable wire-level `agent_end`,
 			// so adopted keep-alive lifecycle cannot get stuck during prompt unwind.
-			AgentRegistry.global().syncSessionStatus(id, session);
+			agentRegistry.syncSessionStatus(id, session);
 			if (sessionFile !== null && worktree === undefined) {
 				// Lifecycle reviver: park closed the JSONL writer, so reopening takes
 				// the single-writer lock cleanly and restores the full message history
@@ -3278,11 +3298,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					}
 					if (ircEnabled) {
 						ircRootSessionFile = await ensurePersistedRoster(
-							AgentRegistry.global(),
+							agentRegistry,
 							reopened.getSessionFile() ??
 								sessionFile ??
-								AgentRegistry.global().get(id)?.sessionFile ??
-								AgentRegistry.global().get(MAIN_AGENT_ID)?.sessionFile,
+								agentRegistry.get(id)?.sessionFile ??
+								agentRegistry.get(MAIN_AGENT_ID)?.sessionFile,
 						);
 					}
 					const { session: revived } = await createAgentSession(
@@ -3298,7 +3318,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						reportRuntimeError: err =>
 							logger.error("Extension error", { path: err.extensionPath, error: err.error }),
 					});
-					AgentRegistry.global().syncSessionStatus(id, revived);
+					agentRegistry.syncSessionStatus(id, revived);
 					installIrcWakeTurnMonitor(revived);
 					return revived;
 				};
@@ -3515,9 +3535,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				}
 				unsubscribe = null;
 			}
-			const jobManager = AsyncJobManager.instance();
+			const jobManager = options.asyncJobManager ?? AsyncJobManager.instance();
 			if (jobManager) {
-				const reap = await jobManager.cancelAndReapOwnerJobs(id, cleanupDeadlineAt);
+				const reap = await jobManager.cancelAndReapOwnerJobs(id, cleanupDeadlineAt, options.attemptId);
 				if (!reap.settled) {
 					deferCleanup(reap.completion);
 					logger.warn("Subagent async job cleanup exceeded its deadline", {
@@ -3542,6 +3562,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					agentIdleTtlMs,
 					reviveSession,
 					cleanupDeadlineAt,
+					agentRegistry,
+					agentLifecycle: options.agentLifecycle,
 					onCleanupDeferred: completion => {
 						deferredSessionShutdown = completion;
 						deferCleanup(completion);
@@ -3551,12 +3573,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (jobManager) {
 				if (deferredSessionShutdown) {
 					const finalReap = Promise.allSettled([deferredSessionShutdown]).then(async () => {
-						const reap = await jobManager.cancelAndReapOwnerJobs(id, Date.now());
+						const reap = await jobManager.cancelAndReapOwnerJobs(id, Date.now(), options.attemptId);
 						await reap.completion;
 					});
 					lateCleanups.push(finalReap);
 				} else {
-					const reap = await jobManager.cancelAndReapOwnerJobs(id, cleanupDeadlineAt);
+					const reap = await jobManager.cancelAndReapOwnerJobs(id, cleanupDeadlineAt, options.attemptId);
 					if (!reap.settled) {
 						deferCleanup(reap.completion);
 						logger.warn("Subagent async job cleanup exceeded its deadline after session shutdown", {
@@ -3636,6 +3658,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		sessionFile: subtaskSessionFile,
 		startTime,
 	});
-	AgentRegistry.global().setHistory(id, { outputPath: result.outputPath });
+	agentRegistry.setHistory(id, { outputPath: result.outputPath });
 	return result;
 }

@@ -247,7 +247,8 @@ function parseUrl(url: InternalUrl, scheme: Scheme): Parsed {
  */
 function resolveCwd(context: ResolveContext | undefined): string {
 	if (context?.cwd) return context.cwd;
-	for (const ref of AgentRegistry.global().list()) {
+	if (context?.engineMode) throw new Error("Engine internal URL resolution requires a cwd");
+	for (const ref of (context?.agentRegistry ?? AgentRegistry.global()).list()) {
 		const cwd = ref.session?.sessionManager?.getCwd();
 		if (cwd) return cwd;
 	}

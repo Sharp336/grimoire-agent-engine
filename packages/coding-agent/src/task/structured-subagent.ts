@@ -431,7 +431,17 @@ function buildExecutorOptions(
 		authStorage: session.authStorage,
 		modelRegistry: session.modelRegistry,
 		settings: session.settings,
-		mcpManager: enableMCP ? (session.mcpManager ?? MCPManager.instance()) : undefined,
+		agentRegistry: session.agentRegistry,
+		agentLifecycle: session.agentLifecycle?.(),
+		asyncJobManager: session.asyncJobManager,
+		ircBus: session.ircBus,
+		attemptId: session.getAttemptId?.(),
+		engineMode: session.engineMode,
+		mcpManager: enableMCP
+			? session.engineMode
+				? session.mcpManager
+				: (session.mcpManager ?? MCPManager.instance())
+			: undefined,
 		enableMCP,
 		contextFiles: session.contextFiles?.filter(file => path.basename(file.path).toLowerCase() !== "agents.md"),
 		skills,

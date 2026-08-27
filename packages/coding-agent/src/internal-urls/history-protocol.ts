@@ -17,11 +17,10 @@
  * - history://<agentId> - Concise markdown transcript of that agent
  */
 import type { AgentRef } from "../registry/agent-registry";
-import { AgentRegistry } from "../registry/agent-registry";
 import { ensurePersistedRoster } from "../registry/persisted-agents";
 import { formatSessionHistoryMarkdown } from "../session/session-history-format";
 import { loadSessionMessagesReadOnly } from "../session/session-loader";
-import { sessionFilesFromDisk } from "./registry-helpers";
+import { agentRegistryFromContext, sessionFilesFromDisk } from "./registry-helpers";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
 
 /** Humanize a last-activity timestamp as `Ns/Nm/Nh/Nd ago`. */
@@ -58,7 +57,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 
 	async resolve(url: InternalUrl, context?: ResolveContext): Promise<InternalResource> {
 		const agentId = url.rawHost || url.hostname;
-		const registry = AgentRegistry.global();
+		const registry = agentRegistryFromContext(context);
 		// A caller resolving a possibly-parked id refreshes its own root's
 		// persisted roster first: a same-named parked ref restored by another
 		// root's scan must not be served (or listed as known) in its place.
@@ -192,10 +191,11 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		return `${lines.join("\n")}\n`;
 	}
 
-	async complete(): Promise<UrlCompletion[]> {
+	async complete(_query?: string, context?: ResolveContext): Promise<UrlCompletion[]> {
 		const completions: UrlCompletion[] = [];
 		const seen = new Set<string>();
-		for (const ref of AgentRegistry.global().list()) {
+		const registry = agentRegistryFromContext(context);
+		for (const ref of registry.list()) {
 			if (ref.kind === "advisor") continue;
 			seen.add(ref.id);
 			completions.push({
@@ -203,7 +203,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 				description: `${ref.status} · ${ref.kind}${ref.parentId ? ` · parent ${ref.parentId}` : ""}`,
 			});
 		}
-		const disk = await sessionFilesFromDisk();
+		const disk = await sessionFilesFromDisk(undefined, registry);
 		for (const id of disk.keys()) {
 			if (seen.has(id)) continue;
 			seen.add(id);

@@ -8,6 +8,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { AgentRegistry } from "../registry/agent-registry";
+import type { ResolveContext } from "./types";
 
 const extraArtifactsDirs = new Set<string>();
 
@@ -41,14 +42,23 @@ export function resetRegisteredArtifactDirsForTests(): void {
  * registered at all). Absent a preferred dir, the pre-existing process-global
  * ordering is preserved unchanged.
  */
-export function artifactsDirsFromRegistry(options?: { preferredDir?: string }): string[] {
+export function agentRegistryFromContext(context?: ResolveContext): AgentRegistry {
+	if (context?.agentRegistry) return context.agentRegistry;
+	if (context?.engineMode) throw new Error("Engine internal URL resolution requires an AgentRegistry");
+	return AgentRegistry.global();
+}
+
+export function artifactsDirsFromRegistry(options?: {
+	preferredDir?: string;
+	agentRegistry?: AgentRegistry;
+}): string[] {
 	const dirs: string[] = [];
 	const addDir = (dir: string | null | undefined) => {
 		if (!dir) return;
 		if (!dirs.includes(dir)) dirs.push(dir);
 	};
 	if (options?.preferredDir) addDir(options.preferredDir);
-	for (const ref of AgentRegistry.global().list()) {
+	for (const ref of (options?.agentRegistry ?? AgentRegistry.global()).list()) {
 		addDir(ref.session?.sessionManager?.getArtifactsDir());
 		if (ref.sessionFile) addDir(ref.sessionFile.slice(0, -6));
 	}
@@ -71,7 +81,10 @@ export function artifactsDirsFromRegistry(options?: { preferredDir?: string }): 
  * multiple dirs, the first hit wins (registry dirs are scanned first; a
  * `preferredDir` from the caller root is scanned before them).
  */
-export async function sessionFilesFromDisk(preferredDir?: string): Promise<Map<string, string>> {
+export async function sessionFilesFromDisk(
+	preferredDir?: string,
+	agentRegistry: AgentRegistry = AgentRegistry.global(),
+): Promise<Map<string, string>> {
 	const found = new Map<string, string>();
 	const seenDirs = new Set<string>();
 	const scan = async (dir: string, depth: number): Promise<void> => {
@@ -97,7 +110,8 @@ export async function sessionFilesFromDisk(preferredDir?: string): Promise<Map<s
 			if (!found.has(id)) found.set(id, path.join(dir, name));
 		}
 	};
-	const dirs = preferredDir ? [preferredDir, ...artifactsDirsFromRegistry()] : artifactsDirsFromRegistry();
+	const registryDirs = artifactsDirsFromRegistry({ agentRegistry });
+	const dirs = preferredDir ? [preferredDir, ...registryDirs] : registryDirs;
 	for (const dir of dirs) await scan(dir, 0);
 	return found;
 }
@@ -112,16 +126,19 @@ export async function sessionFilesFromDisk(preferredDir?: string): Promise<Map<s
  * and probing never throws: a stale path or unreadable artifacts subtree
  * reads as unavailable instead of disturbing the caller's delivery path.
  */
-export async function hasResolvableTranscript(agentId: string): Promise<boolean> {
+export async function hasResolvableTranscript(
+	agentId: string,
+	agentRegistry: AgentRegistry = AgentRegistry.global(),
+): Promise<boolean> {
 	try {
-		const registry = AgentRegistry.global();
+		const registry = agentRegistry;
 		const lower = agentId.toLowerCase();
 		let ref = registry.get(agentId);
 		if (ref?.kind === "advisor") ref = undefined;
 		ref ??= registry.list().find(candidate => candidate.kind !== "advisor" && candidate.id.toLowerCase() === lower);
 		if (ref?.session) return true;
 		if (ref?.sessionFile && (await isReadableFile(ref.sessionFile))) return true;
-		const files = await sessionFilesFromDisk();
+		const files = await sessionFilesFromDisk(undefined, registry);
 		for (const id of files.keys()) {
 			if (id.toLowerCase() === lower) return true;
 		}

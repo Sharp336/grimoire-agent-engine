@@ -1081,8 +1081,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			options;
 		const buildFollowUpHint = async (aborted: boolean): Promise<string> => {
 			if (aborted) {
-				const ref = AgentRegistry.global().get(agentId);
-				const transcript = (await hasResolvableTranscript(agentId))
+				const ref = (this.session.agentRegistry ?? AgentRegistry.global()).get(agentId);
+				const transcript = (await hasResolvableTranscript(
+					agentId,
+					this.session.agentRegistry ?? AgentRegistry.global(),
+				))
 					? `transcript at history://${agentId}`
 					: "transcript unavailable";
 				if (ref?.status === "idle" || ref?.status === "parked") {
@@ -1219,7 +1222,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const statusText = `Background task ${agentId} failed.`;
 					await reportProgress(statusText, buildDetails() as unknown as Record<string, unknown>);
 					const message = error instanceof Error ? error.message : String(error);
-					const hint = AgentRegistry.global().get(agentId) ? await buildFollowUpHint(false) : "";
+					const hint = (this.session.agentRegistry ?? AgentRegistry.global()).get(agentId)
+						? await buildFollowUpHint(false)
+						: "";
 					throw new TaskJobError(`${message}${hint}`);
 				} finally {
 					releasePermit();
@@ -1230,6 +1235,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				agentId,
 				queued: true,
 				ownerId: this.session.getAgentId?.() ?? undefined,
+				attemptId: this.session.getAttemptId?.(),
 				onProgress: text => {
 					onUpdate?.({ content: [{ type: "text", text }], details: buildDetails() });
 				},
@@ -1506,7 +1512,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		}
 		// A stopped-but-adopted agent (soft-budget stop) stays messageable; tell
 		// the parent so it can resume via irc instead of redoing the work.
-		const refStatus = AgentRegistry.global().get(result.id)?.status;
+		const refStatus = (this.session.agentRegistry ?? AgentRegistry.global()).get(result.id)?.status;
 		const resumable = result.aborted && (refStatus === "idle" || refStatus === "parked");
 		const summary = prompt.render(taskSummaryTemplate, {
 			agentName: result.agent,

@@ -79,6 +79,7 @@ export interface SecurityCoordinatorHost {
 	activeModel?: Model;
 	sessionId?: string;
 	agentId?: string;
+	attemptId?: string;
 	asyncJobManager?: AsyncJobManager;
 }
 
@@ -489,7 +490,7 @@ export class SecurityCoordinator {
 					await run(signal, text => reportProgress(text, { operationId, scanId, phase: record.snapshot.phase }));
 					return terminalText(record.snapshot);
 				},
-				{ id: operationId, ownerId: this.#host.agentId },
+				{ id: operationId, ownerId: this.#host.agentId, attemptId: this.#host.attemptId },
 			);
 			record.snapshot.jobId = jobId;
 			record.promise = manager.getJob(jobId)?.promise ?? Promise.resolve();
@@ -526,7 +527,10 @@ export class SecurityCoordinator {
 		if (!record) return false;
 		if (["completed", "partial", "cancelled", "failed"].includes(record.snapshot.phase)) return false;
 		if (record.snapshot.jobId && this.#host.asyncJobManager) {
-			return this.#host.asyncJobManager.cancel(record.snapshot.jobId, { ownerId: this.#host.agentId });
+			return this.#host.asyncJobManager.cancel(record.snapshot.jobId, {
+				ownerId: this.#host.agentId,
+				attemptId: this.#host.attemptId,
+			});
 		}
 		record.abortController?.abort(new Error("Security scan cancelled"));
 		return true;

@@ -68,6 +68,7 @@ import {
 	scanFileForConflicts,
 } from "./conflict-detect";
 import { executeReadUrl, fetchReadUrl, parseReadUrlTarget } from "./fetch";
+import { internalUrlContext } from "./internal-url-context";
 import { type OutputMeta, resolveOutputMaxColumns } from "./output-meta";
 import {
 	expandPath,
@@ -1169,13 +1170,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				throw new ToolError(imageSelectorMessage);
 			}
 			if (scheme === "local") {
-				const localFile = await resolveLocalUrlToFile(urlMeta, {
-					cwd: this.session.cwd,
-					settings: this.session.settings,
-					signal,
-					localProtocolOptions: this.session.localProtocolOptions,
-					skills: this.session.skills,
-				});
+				const localFile = await resolveLocalUrlToFile(urlMeta, internalUrlContext(this.session, signal));
 				if (localFile) {
 					readPath = localFile.path;
 					// Preserve a local:// selector separately so a sibling literal file
@@ -1984,13 +1979,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		parsedSel: ParsedSelector,
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<ReadToolDetails>> {
-		const artifact = await resolveArtifactFile(url, {
-			cwd: this.session.cwd,
-			settings: this.session.settings,
-			signal,
-			localProtocolOptions: this.session.localProtocolOptions,
-			skills: this.session.skills,
-		});
+		const artifact = await resolveArtifactFile(url, internalUrlContext(this.session, signal));
 		const artifactUrl = `artifact://${artifact.id}`;
 		const details: ReadToolDetails = {
 			resolvedPath: artifact.path,
@@ -2214,12 +2203,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		// Resolve the internal URL
 		const resource = await internalRouter.resolve(url, {
-			cwd: this.session.cwd,
-			settings: this.session.settings,
-			signal,
-			sessionFile: this.session.getSessionFile() ?? undefined,
-			localProtocolOptions: this.session.localProtocolOptions,
-			skills: this.session.skills,
+			...internalUrlContext(this.session, signal),
 			xd: {
 				read: async name => {
 					if (name === REPORT_ISSUE_DEVICE_NAME) return reportIssueDeviceUsage();
@@ -2275,12 +2259,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	async #tryReadLocalImage(url: InternalUrl, signal?: AbortSignal): Promise<AgentToolResult<ReadToolDetails> | null> {
 		let file: { path: string; size: number } | null;
 		try {
-			file = await resolveLocalUrlToFile(url, {
-				cwd: this.session.cwd,
-				settings: this.session.settings,
-				signal,
-				localProtocolOptions: this.session.localProtocolOptions,
-			});
+			file = await resolveLocalUrlToFile(url, internalUrlContext(this.session, signal));
 		} catch {
 			// Not found / containment escape / no session — let the text path
 			// surface the router's canonical error.

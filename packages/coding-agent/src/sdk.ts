@@ -120,6 +120,7 @@ import {
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionState } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
+import { IrcBus } from "./irc/bus";
 import { setSharedLspEnabled } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
 import {
@@ -555,6 +556,16 @@ export interface CreateAgentSessionOptions {
 	agentDisplayName?: string;
 	/** Optional shared agent registry for IRC routing. Default: AgentRegistry.global(). */
 	agentRegistry?: AgentRegistry;
+	/** Shared lifecycle owner for an embedded multi-session runtime. The caller owns disposal. */
+	agentLifecycle?: AgentLifecycleManager;
+	/** Shared IRC bus for an embedded multi-session runtime. The caller owns disposal. */
+	ircBus?: IrcBus;
+	/** Shared async job manager for an embedded multi-session runtime. The caller owns disposal. */
+	asyncJobManager?: AsyncJobManager;
+	/** Durable Attempt identity for Engine-managed work. Native sessions leave this unset. */
+	attemptId?: string;
+	/** Rootless multi-session Engine path. Native CLI/TUI leaves this unset. */
+	engineMode?: boolean;
 	/**
 	 * Registry generation authorized for this creation. `null` requires the id
 	 * to be absent; an AgentRef allows a parked revival to reuse only that ref.
@@ -1267,6 +1278,17 @@ export function createAutoLearnCaptureRunner(
  * ```
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
+	if (options.engineMode) {
+		const missing = [
+			!options.agentId && "agentId",
+			!options.attemptId && "attemptId",
+			!options.agentRegistry && "agentRegistry",
+			!options.agentLifecycle && "agentLifecycle",
+			!options.asyncJobManager && "asyncJobManager",
+			!options.ircBus && "ircBus",
+		].filter((name): name is string => Boolean(name));
+		if (missing.length > 0) throw new Error(`Engine mode requires explicit ${missing.join(", ")}`);
+	}
 	const extensionRoots = options.extensionRoots?.();
 	const explicit = extensionRoots?.explicit ?? options.additionalExtensionPaths ?? [];
 	const mode = extensionRoots?.mode ?? (options.disableExtensionDiscovery ? "explicit-only" : "merge");
@@ -1690,14 +1712,21 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// Delivery is owner-routed: every AgentSession registers its own sink
 	// (see session/async-job-delivery.ts), so the manager takes no default
 	// onJobComplete here.
-	const asyncJobManager =
-		!options.parentTaskPrefix && !AsyncJobManager.instance()
+	const ownedAsyncJobManager =
+		!options.asyncJobManager && !options.parentTaskPrefix && !AsyncJobManager.instance()
 			? new AsyncJobManager({ maxRunningJobs: asyncMaxJobs })
 			: undefined;
 
-	const scopedAsyncJobManager = asyncJobManager ?? (options.parentTaskPrefix ? AsyncJobManager.instance() : undefined);
+	const scopedAsyncJobManager =
+		options.asyncJobManager ??
+		ownedAsyncJobManager ??
+		(options.parentTaskPrefix ? AsyncJobManager.instance() : undefined);
 
 	const agentRegistry = options.agentRegistry ?? AgentRegistry.global();
+	const ownedAgentLifecycle =
+		!options.agentLifecycle && !options.agentRegistry ? AgentLifecycleManager.global() : undefined;
+	const agentLifecycle = options.agentLifecycle ?? ownedAgentLifecycle;
+	const ircBus = options.ircBus ?? IrcBus.global();
 	const resolvedAgentId = options.agentId ?? options.parentTaskPrefix ?? MAIN_AGENT_ID;
 	const resolvedAgentDisplayName =
 		options.agentDisplayName ?? ((options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? "sub" : "main");
@@ -1717,7 +1746,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const ref = registeredAgentRef;
 		if (!ref || agentRegistry.get(resolvedAgentId) !== ref) return;
 		if (ref.status === "parked" || (ref.status === "aborted" && !ref.session)) return;
-		if (AgentLifecycleManager.global().isParking(resolvedAgentId, ref)) return;
+		if (agentLifecycle?.manages(agentRegistry) && agentLifecycle.isParking(resolvedAgentId, ref)) return;
 		agentRegistry.unregister(resolvedAgentId, ref);
 	};
 	const evalKernelOwnerId = `agent-session:${Snowflake.next()}`;
@@ -1743,6 +1772,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		};
 		const toolSession: ToolSession = {
+			engineMode: options.engineMode,
 			get cwd() {
 				return sessionManager.getCwd();
 			},
@@ -1792,16 +1822,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
 			getAgentId: () => resolvedAgentId,
+			getAttemptId: () => session?.getAttemptId() ?? options.attemptId,
 			getToolByName: name => session?.getToolByName(name),
 			getToolForEvalBridge: name => session?.getToolForEvalBridge(name),
 			getEvalBridgeToolNames: () => session?.getEvalBridgeToolNames() ?? [],
 			getCodeModeDirectToolNames: () => session?.getCodeModeDirectToolNames(),
 			agentRegistry,
-			// The global lifecycle releases through AgentRegistry.global(); wiring it
-			// onto a caller-supplied registry would report a cancel while releasing an
-			// unrelated global ref. With no lifecycle, hub cancel falls back to
-			// dispose + unregister on the session's own registry.
-			agentLifecycle: options.agentRegistry ? undefined : () => AgentLifecycleManager.global(),
+			agentLifecycle: agentLifecycle ? () => agentLifecycle : undefined,
+			ircBus,
 			getSessionSpawns: () => options.spawns ?? "*",
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
@@ -1869,36 +1897,30 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			authStorage,
 			modelRegistry,
 			getTelemetry: () => agent?.telemetry,
-			// Subagents inherit the singleton (the parent's manager) so their bash/task
-			// completions still flow into the spawning conversation's yieldQueue.
-			// Secondary in-process top-level sessions (no parentTaskPrefix, no
-			// constructed manager because the singleton was already installed) leave
-			// this undefined so tools and session job snapshots refuse async work
-			// instead of silently routing into the owning session (issue #1923).
+			// Native subagents inherit the process singleton. Engine roots and descendants
+			// receive one runtime-owned manager explicitly and fence delivery by Attempt.
+			// Secondary native top-level sessions leave this undefined so async work cannot
+			// leak into the primary session's manager (issue #1923).
 			asyncJobManager: scopedAsyncJobManager,
 		};
 
-		// Wire process-wide internal URL singletons owned by their real classes.
-		// Top-level sessions install the active snapshots; subagents inherit them.
-		// Artifact and agent-output URLs resolve via `AgentRegistry.global()` —
-		// the protocol handlers walk each ref's `sessionManager.getArtifactsDir()`,
-		// which collapses to the parent's dir for subagents (they adopt the
-		// parent's ArtifactManager) so one lookup hits everything.
+		// Native top-level sessions keep the legacy process-wide URL snapshots.
+		// Engine sessions resolve every URL from their explicit ToolSession context.
 		const getArtifactsDir = () => sessionManager.getArtifactsDir();
-		if (!options.parentTaskPrefix) {
+		if (!options.parentTaskPrefix && !options.engineMode) {
 			setActiveSkills(skills);
 			// Include TTSR rules so `rule://<name>` can resolve them too. They are
 			// registered with the manager and bucketed out before rulebook/always,
 			// so without this a TTSR-only rule (e.g. a triggered builtin) is not
 			// addressable and `rule://` reports "Available: none".
 			setActiveRules([...rulebookRules, ...alwaysApplyRules, ...ttsrManager.getRules()]);
-			if (asyncJobManager) AsyncJobManager.setInstance(asyncJobManager);
+			if (ownedAsyncJobManager) AsyncJobManager.setInstance(ownedAsyncJobManager);
 		}
 		const localProtocolOptions = options.localProtocolOptions ?? {
 			getArtifactsDir,
 			getSessionId: () => sessionManager.getSessionId?.() ?? null,
 		};
-		if (options.localProtocolOptions && !options.parentTaskPrefix) {
+		if (options.localProtocolOptions && !options.parentTaskPrefix && !options.engineMode) {
 			LocalProtocolHandler.setOverride(options.localProtocolOptions);
 		}
 		toolSession.getArtifactsDir = getArtifactsDir;
@@ -1971,7 +1993,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								await deferredMCPManager.disconnectAll();
 								return;
 							}
-							applyMCPEnvironment(mcpResult);
+							if (!options.engineMode) applyMCPEnvironment(mcpResult);
 							logMCPLoadErrors(mcpResult.errors);
 							// Connected MCP tools are enabled and mounted under xd:// devices.
 							await liveSession.refreshMCPTools(mcpResult.tools);
@@ -1995,7 +2017,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (settings.get("mcp.notifications")) {
 					mcpManager.setNotificationsEnabled(true);
 				}
-				applyMCPEnvironment(mcpResult);
+				if (!options.engineMode) applyMCPEnvironment(mcpResult);
 
 				// Log MCP errors
 				for (const { path, error } of mcpResult.errors) {
@@ -2013,7 +2035,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// receive the parent's manager via `options.mcpManager`, and reassigning
 		// the singleton to the same value is a no-op — keep the gate explicit
 		// to mirror the AsyncJobManager ownership rule.
-		if (mcpManager && !options.parentTaskPrefix) MCPManager.setInstance(mcpManager);
+		if (mcpManager && !options.parentTaskPrefix && !options.engineMode) MCPManager.setInstance(mcpManager);
 
 		const builtInToolNames = [...toolRegistry.keys()];
 		let customToolPaths: ToolPathWithSource[] = [];
@@ -3234,8 +3256,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// The reclaim is gated by the lifecycle owner and only touches the
 			// registry it manages; the corpse's transcript stays at history://.
 			const stale = agentRegistry.get(resolvedAgentId);
-			const lifecycle = AgentLifecycleManager.global();
-			if (stale && lifecycle.manages(agentRegistry) && (await lifecycle.reclaimDeadCorpse(resolvedAgentId, stale))) {
+			if (
+				stale &&
+				agentLifecycle?.manages(agentRegistry) &&
+				(await agentLifecycle.reclaimDeadCorpse(resolvedAgentId, stale))
+			) {
 				registeredAgentRef = agentRegistry.registerIfAvailable(registrationInput, null);
 			}
 		}
@@ -3622,7 +3647,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// AgentSession uses this to decide whether it may dispose the global
 			// AsyncJobManager on teardown; subagents inherit the parent's and
 			// **MUST NOT** tear it down.
-			ownedAsyncJobManager: asyncJobManager,
+			ownedAsyncJobManager,
 			asyncJobManager: scopedAsyncJobManager,
 			scopedModels: options.scopedModels,
 			promptTemplates,
@@ -3653,7 +3678,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				? undefined
 				: async () => (await BUILTIN_TOOLS.inspect_image(toolSession)) ?? null,
 			createVibeTools:
-				(options.taskDepth ?? 0) === 0 && !options.parentTaskPrefix
+				!options.engineMode && (options.taskDepth ?? 0) === 0 && !options.parentTaskPrefix
 					? () => createVibeTools(toolSession)
 					: undefined,
 			builtInToolNames: builtInRegistryToolNames,
@@ -3699,6 +3724,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			obfuscator,
 			agentId: resolvedAgentId,
 			agentKind,
+			attemptId: options.attemptId,
 			providerSessionId: options.providerSessionId,
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,
@@ -3878,18 +3904,20 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						// adopted subagent sessions, revivers. Tear it down while shared
 						// resources (kernels, MCP, LSP) are still live. Subagent disposal
 						// must NOT touch the global lifecycle.
-						const vibeRegistry = VibeSessionRegistry.global();
-						const vibeParentSession = {
-							getAgentId: () => resolvedAgentId,
-							getSessionId: () => sessionManager.getSessionId(),
-							getSessionFile: () => sessionManager.getSessionFile() ?? null,
-							sessionManager,
-							asyncJobManager: scopedAsyncJobManager,
-							settings,
-							getActiveModelString,
-						};
-						await vibeRegistry.suspendScope(vibeRegistry.ownerScope(vibeParentSession), scopedAsyncJobManager);
-						await AgentLifecycleManager.global().dispose();
+						if (!options.engineMode) {
+							const vibeRegistry = VibeSessionRegistry.global();
+							const vibeParentSession = {
+								getAgentId: () => resolvedAgentId,
+								getSessionId: () => sessionManager.getSessionId(),
+								getSessionFile: () => sessionManager.getSessionFile() ?? null,
+								sessionManager,
+								asyncJobManager: scopedAsyncJobManager,
+								settings,
+								getActiveModelString,
+							};
+							await vibeRegistry.suspendScope(vibeRegistry.ownerScope(vibeParentSession), scopedAsyncJobManager);
+						}
+						if (ownedAgentLifecycle) await ownedAgentLifecycle.dispose();
 					}
 					await originalDispose();
 				} finally {
@@ -4200,11 +4228,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (hasRegistered) unregisterUnlessParked();
 			} else {
 				if (hasRegistered) unregisterUnlessParked();
-				if (asyncJobManager) {
-					if (AsyncJobManager.instance() === asyncJobManager) {
+				if (ownedAsyncJobManager) {
+					if (AsyncJobManager.instance() === ownedAsyncJobManager) {
 						AsyncJobManager.setInstance(undefined);
 					}
-					await asyncJobManager.dispose({ timeoutMs: 3_000 });
+					await ownedAsyncJobManager.dispose({ timeoutMs: 3_000 });
 				}
 				await releaseComputerSessionsForOwner(evalKernelOwnerId);
 				await disposeKernelSessionsByOwner(evalKernelOwnerId);

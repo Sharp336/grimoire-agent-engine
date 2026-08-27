@@ -99,7 +99,7 @@ import {
 	withTimeout,
 } from "@oh-my-pi/pi-utils";
 import { type AdvisorConfig, type AdvisorRuntimeStatus, loadAdvisorTranscriptCosts } from "../advisor";
-import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
+import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, type AsyncJobFilter, AsyncJobManager } from "../async";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
@@ -601,6 +601,7 @@ export class AgentSession {
 		| undefined;
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
+	#attemptId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
 	#scoutAllowedBySpawnPolicy = true;
 	#providerSessionId: string | undefined;
@@ -1430,6 +1431,7 @@ export class AgentSession {
 		this.#streamingEditGuard = new StreamingEditGuard(streamGuardsHost);
 		this.#loopGuards = new LoopGuards(streamGuardsHost);
 		this.#agentId = config.agentId;
+		this.#attemptId = config.attemptId;
 		this.#agentKind = config.agentKind ?? "main";
 		this.#scoutAllowedBySpawnPolicy = config.scoutAllowedBySpawnPolicy ?? true;
 		this.#providerSessionId = config.providerSessionId;
@@ -1442,9 +1444,7 @@ export class AgentSession {
 		// session and for subagents inheriting the process manager alike.
 		if (this.#asyncJobManager && this.#agentId) {
 			const manager = this.#asyncJobManager;
-			this.#unregisterAsyncDeliverySink = manager.registerDeliverySink(this.#agentId, (jobId, text, job) =>
-				this.#deliverAsyncJobResult(manager, jobId, text, job),
-			);
+			this.#registerAsyncDeliverySink();
 			this.yieldQueue.register<AsyncResultEntry>("async-result", {
 				isStale: entry => entry.epoch !== this.#asyncDeliveryEpoch || manager.isDeliverySuppressed(entry.jobId),
 				build: buildAsyncResultBatchMessage,
@@ -1704,6 +1704,40 @@ export class AgentSession {
 		return this.#agentId;
 	}
 
+	getAttemptId(): string | undefined {
+		return this.#attemptId;
+	}
+
+	/** Switch the durable Attempt fence while this session is idle. */
+	setAttemptId(attemptId: string | undefined): void {
+		const normalized = attemptId?.trim() || undefined;
+		if (normalized === this.#attemptId) return;
+		if (this.isStreaming || this.#hasPendingAsyncWake()) {
+			throw new Error("Cannot switch attemptId while the session has active work");
+		}
+		this.#unregisterAsyncDeliverySink?.();
+		this.#unregisterAsyncDeliverySink = undefined;
+		this.#asyncDeliveryEpoch += 1;
+		this.yieldQueue.clear("async-result");
+		this.#attemptId = normalized;
+		this.#registerAsyncDeliverySink();
+	}
+
+	#asyncJobFilter(): AsyncJobFilter | undefined {
+		if (!this.#agentId && !this.#attemptId) return undefined;
+		return { ownerId: this.#agentId, attemptId: this.#attemptId };
+	}
+
+	#registerAsyncDeliverySink(): void {
+		const manager = this.#asyncJobManager;
+		if (!manager || !this.#agentId) return;
+		this.#unregisterAsyncDeliverySink = manager.registerDeliverySink(
+			this.#agentId,
+			(jobId, text, job) => this.#deliverAsyncJobResult(manager, jobId, text, job),
+			this.#attemptId,
+		);
+	}
+
 	/** Dequeue the next HARD forced tool choice for the upcoming LLM call, dropping
 	 *  (and rejecting) one whose named tool is no longer active. */
 	#nextHardToolChoice(): ToolChoice | undefined {
@@ -1871,7 +1905,7 @@ export class AgentSession {
 	getAsyncJobSnapshot(options?: { recentLimit?: number }): AsyncJobSnapshot | null {
 		const manager = this.#asyncJobManager;
 		if (!manager) return null;
-		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
+		const ownerFilter = this.#asyncJobFilter();
 		const running = manager.getRunningJobs(ownerFilter).map(job => ({
 			id: job.id,
 			type: job.type,
@@ -1909,8 +1943,9 @@ export class AgentSession {
 	#cancelOwnAsyncJobs(reason?: unknown): void {
 		if (!this.#agentId) return;
 		const manager = this.#asyncJobManager;
-		manager?.cancelAll({ ownerId: this.#agentId }, reason);
-		manager?.evictCompletedJobs({ ownerId: this.#agentId });
+		const filter = this.#asyncJobFilter();
+		manager?.cancelAll(filter, reason);
+		manager?.evictCompletedJobs(filter);
 		// Invalidate this owner's in-flight/drained deliveries against the new
 		// generation, then drop any async-result follow-up already queued, so a
 		// prior session's background result cannot inject into the next transcript.
@@ -1932,7 +1967,7 @@ export class AgentSession {
 	#hasPendingAsyncWake(): boolean {
 		const manager = this.#asyncJobManager;
 		if (!manager) return false;
-		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
+		const ownerFilter = this.#asyncJobFilter();
 		return (
 			manager.getRunningJobs(ownerFilter).some(job => !manager.isDeliverySuppressed(job.id)) ||
 			manager.hasPendingDeliveries(ownerFilter) ||
@@ -1967,8 +2002,11 @@ export class AgentSession {
 	async settleAsyncWork(): Promise<void> {
 		const manager = this.#asyncJobManager;
 		if (!manager || !this.#agentId) return;
-		await manager.waitForOwnerJobs(this.#agentId, { excludeSuppressed: true });
-		await manager.drainDeliveries({ filter: { ownerId: this.#agentId } });
+		await manager.waitForOwnerJobs(this.#agentId, {
+			excludeSuppressed: true,
+			attemptId: this.#attemptId,
+		});
+		await manager.drainDeliveries({ filter: this.#asyncJobFilter() });
 		await this.waitForIdle();
 	}
 
@@ -4639,7 +4677,7 @@ export class AgentSession {
 	async drainAsyncJobDeliveriesForAcp(options?: { timeoutMs?: number }): Promise<boolean> {
 		const manager = this.#asyncJobManager;
 		if (!manager) return false;
-		const ownerFilter = this.#agentId ? { ownerId: this.#agentId } : undefined;
+		const ownerFilter = this.#asyncJobFilter();
 		const before = manager.getDeliveryState(ownerFilter);
 		if (before.queued === 0 && !before.delivering) return false;
 		const previousAllowAcpAgentInitiatedTurns = this.#allowAcpAgentInitiatedTurns;

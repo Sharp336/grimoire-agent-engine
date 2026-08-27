@@ -132,6 +132,7 @@ interface MessagingDeps {
 	registry: AgentRegistry;
 	senderId: string;
 	settings: ToolSession["settings"];
+	ircBus: IrcBus;
 	/** Caller session file: direct sends refresh this root's persisted roster before resolving the target. */
 	sessionFileHint?: string | null;
 }
@@ -261,6 +262,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			registry,
 			senderId,
 			settings: this.session.settings,
+			ircBus: this.session.ircBus ?? IrcBus.global(),
 			sessionFileHint: this.session.getSessionFile?.() ?? null,
 		};
 	}
@@ -284,6 +286,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 						limit: params.limit,
 					},
 					this.session.getSessionFile(),
+					messaging.ircBus,
 				);
 			}
 			case "send": {
@@ -302,7 +305,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			case "inbox": {
 				const messaging = this.#messaging();
 				if (!messaging) return hubErrorResult("Peer messaging is unavailable in this session.", { op: "inbox" });
-				return executeInbox(messaging.registry, messaging.senderId, params.peek);
+				return executeInbox(messaging.registry, messaging.senderId, params.peek, messaging.ircBus);
 			}
 			case "wait":
 				if (params.name?.trim()) return this.#launch(params, "wait", signal);
@@ -407,7 +410,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			// there, so without this take the liveness gate would answer "nothing
 			// to wait for" while `hub inbox` hands back the very message being
 			// waited on. Single atomic take: the rest of the backlog stays queued.
-			const queued = IrcBus.global().take(messaging.senderId, from);
+			const queued = messaging.ircBus.take(messaging.senderId, from);
 			if (queued) return messageResult(messaging.senderId, queued);
 			if (!from) {
 				// A bare wait can only be satisfied by a running peer eventually
@@ -438,16 +441,13 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		let removeBusAbortListener: (() => void) | undefined;
 		const busLeg =
 			messaging && busAbort
-				? IrcBus.global()
-						.wait(messaging.senderId, { from }, 0, busAbort.signal)
-						.then(
-							message => ({ message, error: null as Error | null }),
-							error => ({
-								message: null,
-								error:
-									error === busCancelled ? null : error instanceof Error ? error : new Error(String(error)),
-							}),
-						)
+				? messaging.ircBus.wait(messaging.senderId, { from }, 0, busAbort.signal).then(
+						message => ({ message, error: null as Error | null }),
+						error => ({
+							message: null,
+							error: error === busCancelled ? null : error instanceof Error ? error : new Error(String(error)),
+						}),
+					)
 				: undefined;
 		if (busLeg) racePromises.push(busLeg);
 		if (busAbort && signal) {

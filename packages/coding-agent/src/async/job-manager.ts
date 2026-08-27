@@ -51,6 +51,8 @@ export interface AsyncJob {
 	 * supply an id (e.g. legacy tests, SDK consumers without an agent context).
 	 */
 	ownerId?: string;
+	/** Immutable durable Attempt identity captured when the job is registered. */
+	attemptId?: string;
 	/**
 	 * Registry id of the subagent this job runs (task/tan/vibe jobs). Lets
 	 * job-view code link a job row to its AgentRegistry ref even when the job
@@ -80,6 +82,8 @@ export interface AsyncJobManagerOptions {
 	onJobComplete?: AsyncJobDeliverySink;
 	maxRunningJobs?: number;
 	retentionMs?: number;
+	/** Reject registrations without an Attempt identity. EngineRuntime enables this; native sessions leave it off. */
+	requireAttemptId?: boolean;
 }
 
 interface AsyncJobDelivery {
@@ -89,6 +93,7 @@ interface AsyncJobDelivery {
 	nextAttemptAt: number;
 	lastError?: string;
 	ownerId?: string;
+	attemptId?: string;
 	promise?: Promise<void>;
 }
 
@@ -109,6 +114,8 @@ export interface AsyncJobRegisterOptions {
 	id?: string;
 	/** Registry id of the agent that owns this job; used to scope cancelAll. */
 	ownerId?: string;
+	/** Durable Attempt identity captured before asynchronous dispatch. */
+	attemptId?: string;
 	/** Registry id of the subagent this job runs; see {@link AsyncJob.agentId}. */
 	agentId?: string;
 	onProgress?: (text: string, details?: Record<string, unknown>) => void | Promise<void>;
@@ -123,6 +130,7 @@ export interface AsyncJobRegisterOptions {
  */
 export interface AsyncJobFilter {
 	ownerId?: string;
+	attemptId?: string;
 }
 
 export class AsyncJobManager {
@@ -155,24 +163,33 @@ export class AsyncJobManager {
 	readonly #onJobComplete: AsyncJobManagerOptions["onJobComplete"];
 	readonly #maxRunningJobs: number;
 	readonly #retentionMs: number;
+	readonly #requireAttemptId: boolean;
 	#deliveryLoop: Promise<void> | undefined;
 	#deliveryQueueChanged = Promise.withResolvers<void>();
 	#disposed = false;
 
 	#filterJobs(jobs: Iterable<AsyncJob>, filter?: AsyncJobFilter): AsyncJob[] {
 		const ownerId = filter?.ownerId;
-		if (!ownerId) return Array.from(jobs);
+		const attemptId = filter?.attemptId;
+		if (ownerId === undefined && attemptId === undefined) return Array.from(jobs);
 		const out: AsyncJob[] = [];
 		for (const job of jobs) {
-			if (job.ownerId === ownerId) out.push(job);
+			if (ownerId !== undefined && job.ownerId !== ownerId) continue;
+			if (attemptId !== undefined && job.attemptId !== attemptId) continue;
+			out.push(job);
 		}
 		return out;
+	}
+
+	#deliverySinkKey(ownerId: string, attemptId?: string): string {
+		return JSON.stringify([ownerId, attemptId ?? null]);
 	}
 
 	constructor(options: AsyncJobManagerOptions) {
 		this.#onJobComplete = options.onJobComplete;
 		this.#maxRunningJobs = Math.max(1, Math.floor(options.maxRunningJobs ?? DEFAULT_MAX_RUNNING_JOBS));
 		this.#retentionMs = Math.max(0, Math.floor(options.retentionMs ?? DEFAULT_RETENTION_MS));
+		this.#requireAttemptId = options.requireAttemptId === true;
 	}
 
 	/** True when the running-job count has reached the configured cap. */
@@ -201,6 +218,9 @@ export class AsyncJobManager {
 		if (this.#disposed) {
 			throw new Error("Async job manager is disposed");
 		}
+		if (this.#requireAttemptId && !options?.attemptId?.trim()) {
+			throw new Error("Async job registration requires attemptId in Engine mode");
+		}
 		// Queued jobs hold no execution slot yet — only count jobs that are
 		// actually running so a large parked batch cannot starve registration.
 		let activeCount = 0;
@@ -228,6 +248,7 @@ export class AsyncJobManager {
 			abortController,
 			promise: Promise.resolve(),
 			ownerId: options?.ownerId,
+			attemptId: options?.attemptId,
 			agentId: options?.agentId,
 			queued: options?.queued === true,
 		};
@@ -289,7 +310,8 @@ export class AsyncJobManager {
 	cancel(id: string, filter?: AsyncJobFilter): boolean {
 		const job = this.#jobs.get(id);
 		if (!job) return false;
-		if (filter?.ownerId && job.ownerId !== filter.ownerId) return false;
+		if (filter?.ownerId !== undefined && job.ownerId !== filter.ownerId) return false;
+		if (filter?.attemptId !== undefined && job.attemptId !== filter.attemptId) return false;
 		if (job.status !== "running") return false;
 		job.status = "cancelled";
 		job.abortController.abort();
@@ -497,10 +519,11 @@ export class AsyncJobManager {
 	 * mapping only while it still points at `sink`, so a revived session's fresh
 	 * registration survives its parked predecessor's late cleanup.
 	 */
-	registerDeliverySink(ownerId: string, sink: AsyncJobDeliverySink): () => void {
-		this.#deliverySinks.set(ownerId, sink);
+	registerDeliverySink(ownerId: string, sink: AsyncJobDeliverySink, attemptId?: string): () => void {
+		const key = this.#deliverySinkKey(ownerId, attemptId);
+		this.#deliverySinks.set(key, sink);
 		return () => {
-			if (this.#deliverySinks.get(ownerId) === sink) this.#deliverySinks.delete(ownerId);
+			if (this.#deliverySinks.get(key) === sink) this.#deliverySinks.delete(key);
 		};
 	}
 
@@ -517,13 +540,13 @@ export class AsyncJobManager {
 	 */
 	async waitForOwnerJobs(
 		ownerId: string,
-		options?: { timeoutMs?: number; excludeSuppressed?: boolean },
+		options?: { timeoutMs?: number; excludeSuppressed?: boolean; attemptId?: string },
 	): Promise<boolean> {
 		const deadline =
 			options?.timeoutMs === undefined ? Number.POSITIVE_INFINITY : Date.now() + Math.max(0, options.timeoutMs);
 		const awaited = new Set<string>();
 		for (;;) {
-			const pending = this.#filterJobs(this.#jobs.values(), { ownerId }).filter(
+			const pending = this.#filterJobs(this.#jobs.values(), { ownerId, attemptId: options?.attemptId }).filter(
 				job => !awaited.has(job.id) && (options?.excludeSuppressed !== true || !this.isDeliverySuppressed(job.id)),
 			);
 			if (pending.length === 0) return true;
@@ -542,17 +565,18 @@ export class AsyncJobManager {
 	 * the deadline expires, so callers can move that cleanup out of the
 	 * user-visible Task wait without losing ownership of the live work.
 	 */
-	async cancelAndReapOwnerJobs(ownerId: string, deadlineAt: number): Promise<AsyncJobReapResult> {
-		this.cancelAll({ ownerId });
+	async cancelAndReapOwnerJobs(ownerId: string, deadlineAt: number, attemptId?: string): Promise<AsyncJobReapResult> {
+		const filter = { ownerId, attemptId };
+		this.cancelAll(filter);
 		const timeoutMs = Math.max(0, deadlineAt - Date.now());
-		const settled = await this.waitForOwnerJobs(ownerId, { timeoutMs });
+		const settled = await this.waitForOwnerJobs(ownerId, { timeoutMs, attemptId });
 		if (settled) {
 			return { settled: true, pendingJobIds: [], completion: Promise.resolve() };
 		}
-		const pendingJobIds = this.getAllJobs({ ownerId })
+		const pendingJobIds = this.getAllJobs(filter)
 			.filter(job => job.status === "running" || job.status === "cancelled")
 			.map(job => job.id);
-		const completion = this.waitForOwnerJobs(ownerId).then(() => {});
+		const completion = this.waitForOwnerJobs(ownerId, { attemptId }).then(() => {});
 		return { settled: false, pendingJobIds, completion };
 	}
 
@@ -710,17 +734,29 @@ export class AsyncJobManager {
 
 	#filterDeliveries(filter?: AsyncJobFilter): AsyncJobDelivery[] {
 		const ownerId = filter?.ownerId;
-		if (!ownerId) return this.#deliveries.filter(delivery => !this.isDeliverySuppressed(delivery.jobId));
+		const attemptId = filter?.attemptId;
+		if (ownerId === undefined && attemptId === undefined) {
+			return this.#deliveries.filter(delivery => !this.isDeliverySuppressed(delivery.jobId));
+		}
 		return this.#deliveries.filter(
-			delivery => delivery.ownerId === ownerId && !this.isDeliverySuppressed(delivery.jobId),
+			delivery =>
+				(ownerId === undefined || delivery.ownerId === ownerId) &&
+				(attemptId === undefined || delivery.attemptId === attemptId) &&
+				!this.isDeliverySuppressed(delivery.jobId),
 		);
 	}
 
 	#filterInFlightDeliveries(filter?: AsyncJobFilter): AsyncJobDelivery[] {
 		const ownerId = filter?.ownerId;
-		if (!ownerId) return this.#inFlightDeliveries.filter(delivery => !this.isDeliverySuppressed(delivery.jobId));
+		const attemptId = filter?.attemptId;
+		if (ownerId === undefined && attemptId === undefined) {
+			return this.#inFlightDeliveries.filter(delivery => !this.isDeliverySuppressed(delivery.jobId));
+		}
 		return this.#inFlightDeliveries.filter(
-			delivery => delivery.ownerId === ownerId && !this.isDeliverySuppressed(delivery.jobId),
+			delivery =>
+				(ownerId === undefined || delivery.ownerId === ownerId) &&
+				(attemptId === undefined || delivery.attemptId === attemptId) &&
+				!this.isDeliverySuppressed(delivery.jobId),
 		);
 	}
 
@@ -728,7 +764,8 @@ export class AsyncJobManager {
 		while (true) {
 			let selected: AsyncJobDelivery | undefined;
 			for (const delivery of this.#deliveries) {
-				if (delivery.ownerId !== filter.ownerId) continue;
+				if (filter.ownerId !== undefined && delivery.ownerId !== filter.ownerId) continue;
+				if (filter.attemptId !== undefined && delivery.attemptId !== filter.attemptId) continue;
 				if (this.isDeliverySuppressed(delivery.jobId)) continue;
 				if (!selected || delivery.nextAttemptAt < selected.nextAttemptAt) {
 					selected = delivery;
@@ -773,6 +810,7 @@ export class AsyncJobManager {
 			attempt: 0,
 			nextAttemptAt: Date.now(),
 			ownerId: this.#jobs.get(jobId)?.ownerId,
+			attemptId: this.#jobs.get(jobId)?.attemptId,
 		});
 		this.#ensureDeliveryLoop();
 	}
@@ -827,13 +865,13 @@ export class AsyncJobManager {
 	 * attempt so a sink registered between retries (e.g. a revived session)
 	 * picks up the retry.
 	 */
-	#resolveDeliverySink(ownerId: string | undefined): AsyncJobDeliverySink | undefined {
-		if (ownerId !== undefined) return this.#deliverySinks.get(ownerId);
+	#resolveDeliverySink(ownerId: string | undefined, attemptId: string | undefined): AsyncJobDeliverySink | undefined {
+		if (ownerId !== undefined) return this.#deliverySinks.get(this.#deliverySinkKey(ownerId, attemptId));
 		return this.#onJobComplete;
 	}
 
 	#deliverDelivery(delivery: AsyncJobDelivery): Promise<void> {
-		const sink = this.#resolveDeliverySink(delivery.ownerId);
+		const sink = this.#resolveDeliverySink(delivery.ownerId, delivery.attemptId);
 		if (!sink) {
 			// Dead-letter: owned delivery with no live sink (session disposed or
 			// parked), or unowned delivery with no default sink. Drop it — the
@@ -842,6 +880,7 @@ export class AsyncJobManager {
 			logger.warn("Async job delivery dead-lettered: no delivery sink", {
 				jobId: delivery.jobId,
 				ownerId: delivery.ownerId,
+				attemptId: delivery.attemptId,
 			});
 			delivery.promise = Promise.resolve();
 			return delivery.promise;
