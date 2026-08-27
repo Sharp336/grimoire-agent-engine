@@ -235,7 +235,9 @@ export class HostedEngineBridge {
 				const command = claim.work.command;
 				if (!command) throw new Error("Agent Engine command claim has no command envelope");
 				const envelope = { ...command, engineGeneration: this.#options.engineGeneration } as EngineCommandEnvelope;
-				await js.publish(commandSubject(envelope), encode(envelope), { msgID: envelope.commandId });
+				await js.publish(commandSubject(envelope), encode(envelope), {
+					msgID: `${envelope.commandId}:${envelope.engineGeneration}`,
+				});
 			} catch (error) {
 				this.#report(error);
 				await Bun.sleep(1_000);

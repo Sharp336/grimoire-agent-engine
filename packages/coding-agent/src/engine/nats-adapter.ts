@@ -321,6 +321,10 @@ export class NatsEngineAdapter {
 		try {
 			command = this.#parseCommand(message);
 			await this.#options.authorizeCommand(command);
+			if (command.engineGeneration < this.runtime.engineGeneration) {
+				message.ack();
+				return;
+			}
 			await this.#dispatchCommand(command);
 			message.ack();
 		} catch (error) {

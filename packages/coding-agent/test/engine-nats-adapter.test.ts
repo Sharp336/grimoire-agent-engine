@@ -123,12 +123,29 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			);
 			expect(dispatchCount).toBe(2);
 
-			const staleA = {
+			const deliveredAfterDuplicate = (await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer))
+				.delivered.consumer_seq;
+			const oldGenerationA = {
+				...startCommand(runtime.engineGeneration - 1, "agent-a", "old-generation", cwd),
+				commandId: "command-a-old-generation",
+			};
+			await js.publish(adapter.commandSubject("agent-a", "start"), JSON.stringify(oldGenerationA), {
+				msgID: oldGenerationA.commandId,
+			});
+			await waitFor(async () => {
+				const info = await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer);
+				return info.delivered.consumer_seq > deliveredAfterDuplicate && info.num_ack_pending === 0;
+			});
+			await adapter.flushEvents();
+			expect(eventsA.some(event => event.causationCommandId === oldGenerationA.commandId)).toBeFalse();
+			expect(dispatchCount).toBe(2);
+
+			const futureGenerationA = {
 				...startCommand(runtime.engineGeneration + 1, "agent-a", "stale", cwd),
 				commandId: "command-a-stale",
 			};
-			await js.publish(adapter.commandSubject("agent-a", "start"), JSON.stringify(staleA), {
-				msgID: staleA.commandId,
+			await js.publish(adapter.commandSubject("agent-a", "start"), JSON.stringify(futureGenerationA), {
+				msgID: futureGenerationA.commandId,
 			});
 			await waitFor(() => eventsA.some(event => event.type === "command.rejected"));
 			expect(dispatchCount).toBe(2);

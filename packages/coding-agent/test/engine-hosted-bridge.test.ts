@@ -79,6 +79,23 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 				"attempt.completed",
 			]);
 			expect(rpc.terminalStatus).toBe("completed");
+
+			await bridge.dispose();
+			const retryRpc = new FakeRpc(startCommand(cwd, profile));
+			const retryBridge = await HostedEngineBridge.connect({
+				rpc: retryRpc,
+				deviceId: "device-hosted",
+				engineId: "engine-hosted",
+				engineGeneration: runtime.engineGeneration + 1,
+				servers: broker.url,
+				pollIntervalMs: 10,
+				heartbeatIntervalMs: 100,
+			});
+			try {
+				await waitFor(() => retryRpc.events.some(event => event.type === "command.rejected"));
+			} finally {
+				await retryBridge.dispose();
+			}
 		} finally {
 			await bridge.dispose();
 			await adapter.dispose();
