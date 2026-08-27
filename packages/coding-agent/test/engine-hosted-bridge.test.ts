@@ -11,6 +11,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/engine/hosted-bridge";
 import { type EngineCommandEnvelope, NatsEngineAdapter } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
+import { runEngineService } from "@oh-my-pi/pi-coding-agent/engine/service";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -87,6 +88,160 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			await broker.process.exited;
 		}
 	}, 60_000);
+
+	it("recovers the exact hosted lease for an event after bridge state is lost", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-host-recovery-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		const cwd = path.join(tempDir, "workspace");
+		fs.mkdirSync(cwd);
+		const runtime = await EngineRuntime.create({
+			databasePath: path.join(tempDir, "engine.sqlite"),
+			dispatchPrompt: async () => true,
+			sessionDefaults: {
+				cwd,
+				agentDir: path.join(tempDir, "agent"),
+				settings: Settings.isolated({}),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				modelRegistry,
+			},
+		});
+		const profile = { spawns: "", profileDigest: "leaf-profile-v1", enableMCP: false, enableLsp: false };
+		const adapter = await NatsEngineAdapter.connect({
+			runtime,
+			deviceId: "device-hosted",
+			engineId: "engine-hosted",
+			servers: broker.url,
+			authorizeCommand: () => {},
+			authorizeMessage: () => {},
+			resolveLaunchProfile: command => command.payload.launchProfile as typeof profile,
+		});
+		const command = startCommand(cwd, profile);
+		await runtime.start(
+			{
+				commandId: command.commandId,
+				agentInstanceId: command.agentInstanceId,
+				executionId: command.executionId ?? "",
+				attemptId: command.attemptId ?? "",
+				authorityGeneration: command.authorityGeneration,
+				cwd,
+				input: "RECOVER",
+			},
+			profile,
+		);
+		await runtime.drain();
+		const rpc = new FakeRpc(command, { exactRecoveryOnly: true });
+		const bridge = await HostedEngineBridge.connect({
+			rpc,
+			deviceId: "device-hosted",
+			engineId: "engine-hosted",
+			engineGeneration: runtime.engineGeneration,
+			servers: broker.url,
+			pollIntervalMs: 10,
+			heartbeatIntervalMs: 100,
+		});
+		try {
+			await waitFor(() => rpc.terminalStatus === "completed");
+			expect(rpc.exactRecoveryClaims).toBe(1);
+		} finally {
+			await bridge.dispose();
+			await adapter.dispose();
+			await runtime.dispose();
+			authStorage.close();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 60_000);
+
+	it("keeps a live claim after one transient heartbeat failure", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-host-heartbeat-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		const cwd = path.join(tempDir, "workspace");
+		fs.mkdirSync(cwd);
+		const prompt = Promise.withResolvers<boolean>();
+		const runtime = await EngineRuntime.create({
+			databasePath: path.join(tempDir, "engine.sqlite"),
+			dispatchPrompt: () => prompt.promise,
+			sessionDefaults: {
+				cwd,
+				agentDir: path.join(tempDir, "agent"),
+				settings: Settings.isolated({}),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				modelRegistry,
+			},
+		});
+		const profile = { spawns: "", profileDigest: "leaf-profile-v1", enableMCP: false, enableLsp: false };
+		const adapter = await NatsEngineAdapter.connect({
+			runtime,
+			deviceId: "device-hosted",
+			engineId: "engine-hosted",
+			servers: broker.url,
+			authorizeCommand: () => {},
+			authorizeMessage: () => {},
+			resolveLaunchProfile: command => command.payload.launchProfile as typeof profile,
+		});
+		const rpc = new FakeRpc(startCommand(cwd, profile), { heartbeatFailures: 1 });
+		const bridge = await HostedEngineBridge.connect({
+			rpc,
+			deviceId: "device-hosted",
+			engineId: "engine-hosted",
+			engineGeneration: runtime.engineGeneration,
+			servers: broker.url,
+			pollIntervalMs: 10,
+			heartbeatIntervalMs: 25,
+		});
+		try {
+			await waitFor(() => rpc.heartbeatCalls >= 1);
+			prompt.resolve(true);
+			await waitFor(() => rpc.terminalStatus === "completed");
+			expect(rpc.exactRecoveryClaims).toBe(0);
+		} finally {
+			await bridge.dispose();
+			await adapter.dispose();
+			await runtime.dispose();
+			authStorage.close();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 60_000);
+
+	it("allows only one service owner for a runtime directory", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-service-lock-${Snowflake.next()}-`));
+		const stop = Promise.withResolvers<void>();
+		const config = {
+			deviceId: "device-lock",
+			engineId: "engine-lock",
+			runtimeDir: tempDir,
+			databasePath: path.join(tempDir, "engine.sqlite"),
+			natsServerPath: natsServer,
+		};
+		const first = runEngineService(config, stop.promise);
+		await waitFor(async () => {
+			try {
+				return JSON.parse(await Bun.file(path.join(tempDir ?? "", "status.json")).text()).status === "running";
+			} catch {
+				return false;
+			}
+		});
+		await expect(runEngineService(config, Promise.resolve())).rejects.toThrow("already running");
+		stop.resolve();
+		await first;
+	}, 60_000);
 });
 
 describe("HostedGrimoireRpc", () => {
@@ -120,25 +275,40 @@ describe("HostedGrimoireRpc", () => {
 class FakeRpc implements GrimoireRpc {
 	readonly events: Array<Record<string, unknown>> = [];
 	terminalStatus: string | undefined;
+	heartbeatCalls = 0;
+	exactRecoveryClaims = 0;
 	#claimed = false;
+	#leaseToken = "lease-hosted";
+	#heartbeatFailures: number;
 
-	constructor(readonly command: Omit<EngineCommandEnvelope, "engineGeneration">) {}
+	constructor(
+		readonly command: Omit<EngineCommandEnvelope, "engineGeneration">,
+		readonly options: { exactRecoveryOnly?: boolean; heartbeatFailures?: number } = {},
+	) {
+		this.#heartbeatFailures = options.heartbeatFailures ?? 0;
+	}
 
 	async call(_tool: string, arguments_: Record<string, unknown>): Promise<Record<string, unknown>> {
 		switch (arguments_.action) {
 			case "claim":
-				if (this.#claimed) return { status: "no_job" };
+				if (this.#claimed || (this.options.exactRecoveryOnly && arguments_.job_id !== this.command.commandId)) {
+					return { status: "no_job" };
+				}
 				this.#claimed = true;
+				if (arguments_.job_id === this.command.commandId) this.exactRecoveryClaims++;
 				return {
 					status: "claimed",
 					job_id: this.command.commandId,
 					operation_type: "agent_engine_command",
-					lease_token: "lease-hosted",
+					lease_token: this.#leaseToken,
 					work: { kind: "command", command: this.command },
 				};
 			case "heartbeat":
+				this.heartbeatCalls++;
+				if (this.#heartbeatFailures-- > 0) throw new Error("temporary heartbeat failure");
 				return { status: "renewed" };
 			case "event": {
+				if (arguments_.lease_token !== this.#leaseToken) throw new Error("active lease is required");
 				const event = arguments_.event as Record<string, unknown>;
 				this.events.push(event);
 				const terminal = event.type === "attempt.completed";

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -26,15 +27,17 @@ export interface EngineServiceConfig {
 export async function runEngineService(config: EngineServiceConfig, stop?: Promise<void>): Promise<void> {
 	validateConfig(config);
 	await fs.mkdir(config.runtimeDir, { recursive: true });
+	const serviceLock = await acquireServiceLock(config.runtimeDir);
 	const engineKey = nkeys.createUser();
 	const bridgeKey = nkeys.createUser();
 	const engineSeed = engineKey.getSeed();
 	const bridgeSeed = bridgeKey.getSeed();
-	const broker = await startBroker(config, engineKey.getPublicKey(), bridgeKey.getPublicKey());
+	let broker: Awaited<ReturnType<typeof startBroker>> | undefined;
 	let runtime: EngineRuntime | undefined;
 	let adapter: NatsEngineAdapter | undefined;
 	let bridge: HostedEngineBridge | undefined;
 	try {
+		broker = await startBroker(config, engineKey.getPublicKey(), bridgeKey.getPublicKey());
 		runtime = await EngineRuntime.create({ databasePath: config.databasePath });
 		adapter = await NatsEngineAdapter.connect({
 			runtime,
@@ -77,14 +80,82 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 		await bridge?.dispose().catch(reportServiceError);
 		await adapter?.dispose().catch(reportServiceError);
 		await runtime?.dispose().catch(reportServiceError);
-		broker.process.kill();
-		await broker.process.exited.catch(() => {});
+		broker?.process.kill();
+		await broker?.process.exited.catch(() => {});
 		engineSeed.fill(0);
 		bridgeSeed.fill(0);
 		engineKey.clear();
 		bridgeKey.clear();
 		await writeStatus(config, { status: "stopped", pid: process.pid }).catch(() => {});
+		await serviceLock.release().catch(reportServiceError);
 	}
+}
+
+async function acquireServiceLock(runtimeDir: string): Promise<{ release(): Promise<void> }> {
+	const lockDir = path.join(runtimeDir, "service.lock");
+	const ownerPath = path.join(lockDir, "owner.json");
+	const nonce = randomUUID();
+	for (;;) {
+		const candidate = `${lockDir}.${process.pid}.${nonce}.tmp`;
+		await fs.mkdir(candidate);
+		await fs.writeFile(path.join(candidate, "owner.json"), JSON.stringify({ pid: process.pid, nonce }), "utf8");
+		try {
+			await fs.rename(candidate, lockDir);
+			return {
+				async release() {
+					const owner = await readLockOwner(ownerPath);
+					if (owner?.pid === process.pid && owner.nonce === nonce) {
+						await fs.rm(lockDir, { recursive: true, force: true });
+					}
+				},
+			};
+		} catch (error) {
+			await fs.rm(candidate, { recursive: true, force: true });
+			if (!isAlreadyExists(error)) throw error;
+			const owner = await readLockOwner(ownerPath);
+			if (owner && pidAlive(owner.pid)) {
+				throw new Error(`Agent Engine service is already running with pid ${owner.pid}`);
+			}
+			const stale = `${lockDir}.stale.${process.pid}.${randomUUID()}`;
+			try {
+				await fs.rename(lockDir, stale);
+			} catch (renameError) {
+				if (
+					isAlreadyExists(renameError) ||
+					(renameError instanceof Error && "code" in renameError && renameError.code === "ENOENT")
+				) {
+					continue;
+				}
+				throw renameError;
+			}
+			await fs.rm(stale, { recursive: true, force: true });
+		}
+	}
+}
+
+async function readLockOwner(ownerPath: string): Promise<{ pid: number; nonce: string } | undefined> {
+	try {
+		const value = JSON.parse(await fs.readFile(ownerPath, "utf8")) as Record<string, unknown>;
+		return typeof value.nonce === "string" && Number.isSafeInteger(value.pid)
+			? { pid: Number(value.pid), nonce: value.nonce }
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+function pidAlive(pid: number): boolean {
+	if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+function isAlreadyExists(error: unknown): boolean {
+	return error instanceof Error && "code" in error && ["EEXIST", "ENOTEMPTY", "EPERM"].includes(String(error.code));
 }
 
 function validateConfig(config: EngineServiceConfig): void {

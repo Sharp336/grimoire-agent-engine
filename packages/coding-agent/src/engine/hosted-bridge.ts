@@ -27,6 +27,7 @@ interface BridgeClaim {
 		command?: Omit<EngineCommandEnvelope, "engineGeneration">;
 		message?: AgentMessageEnvelope;
 	};
+	heartbeatFailures: number;
 }
 
 export interface GrimoireRpc {
@@ -130,6 +131,7 @@ export class HostedEngineBridge {
 	readonly #connection: NatsConnection;
 	readonly #active = new Map<string, BridgeClaim>();
 	readonly #loops = new Set<Promise<void>>();
+	readonly #stop = Promise.withResolvers<void>();
 	#events: ConsumerMessages | undefined;
 	#stopping = false;
 
@@ -158,6 +160,7 @@ export class HostedEngineBridge {
 	async dispose(): Promise<void> {
 		if (this.#stopping) return;
 		this.#stopping = true;
+		this.#stop.resolve();
 		await this.#events?.close();
 		await Promise.all(this.#loops);
 		await this.#connection.drain();
@@ -245,13 +248,32 @@ export class HostedEngineBridge {
 			if (this.#stopping) break;
 			try {
 				const event = parseEvent(message.data);
-				const claim = this.#active.get(event.causationCommandId);
+				let claim = this.#active.get(event.causationCommandId);
+				if (!claim) {
+					const recovered = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
+						action: "claim",
+						device_id: this.#options.deviceId,
+						engine_id: this.#options.engineId,
+						worker_id: `engine-${this.#options.engineGeneration}`,
+						job_id: event.causationCommandId,
+						lease_ttl_seconds: 90,
+					});
+					if (recovered.status !== "claimed") {
+						message.nak(5_000);
+						continue;
+					}
+					claim = parseClaim(recovered);
+					if (claim.jobId !== event.causationCommandId || claim.operationType !== "agent_engine_command") {
+						throw new Error("Recovered Agent Engine claim does not match its event");
+					}
+					this.#active.set(claim.jobId, claim);
+				}
 				const result = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
 					action: "event",
 					device_id: this.#options.deviceId,
 					engine_id: this.#options.engineId,
 					job_id: event.causationCommandId,
-					...(claim ? { lease_token: claim.leaseToken } : {}),
+					lease_token: claim.leaseToken,
 					event,
 				});
 				if (["completed", "cancelled", "failed", "already_terminal"].includes(String(result.status))) {
@@ -260,14 +282,14 @@ export class HostedEngineBridge {
 				message.ack();
 			} catch (error) {
 				this.#report(error);
-				message.nak(1_000);
+				message.nak(5_000);
 			}
 		}
 	}
 
 	async #heartbeatLoop(): Promise<void> {
 		while (!this.#stopping) {
-			await Bun.sleep(this.#options.heartbeatIntervalMs ?? 30_000);
+			await Promise.race([Bun.sleep(this.#options.heartbeatIntervalMs ?? 30_000), this.#stop.promise]);
 			if (this.#stopping) break;
 			for (const claim of [...this.#active.values()]) {
 				try {
@@ -279,8 +301,10 @@ export class HostedEngineBridge {
 						lease_token: claim.leaseToken,
 						lease_ttl_seconds: 90,
 					});
+					claim.heartbeatFailures = 0;
 				} catch (error) {
-					this.#active.delete(claim.jobId);
+					claim.heartbeatFailures++;
+					if (claim.heartbeatFailures >= 3) this.#active.delete(claim.jobId);
 					this.#report(error);
 				}
 			}
@@ -315,6 +339,7 @@ function parseClaim(value: Record<string, unknown>): BridgeClaim {
 		leaseToken: value.lease_token,
 		operationType: value.operation_type,
 		work: value.work as BridgeClaim["work"],
+		heartbeatFailures: 0,
 	};
 }
 
