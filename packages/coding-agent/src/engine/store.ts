@@ -21,12 +21,13 @@ interface BindingRow {
 	binding_generation: number;
 }
 
-interface AttemptRow {
+export interface EngineAttemptRow {
 	agent_instance_id: string;
 	execution_id: string;
 	attempt_id: string;
 	engine_generation: number;
 	binding_generation: number;
+	state: EngineAttemptState;
 }
 
 interface SeqRow {
@@ -174,14 +175,20 @@ export class EngineStore {
 		);
 	}
 
-	async putAttempt(binding: EngineBindingSnapshot, state: EngineAttemptState, cause?: string): Promise<void> {
-		await this.#client.unsafe(
+	async putAttempt(binding: EngineBindingSnapshot, state: EngineAttemptState, cause?: string): Promise<boolean> {
+		const rows = (await this.#client.unsafe(
 			`INSERT INTO engine_attempts(
 			 attempt_id, agent_instance_id, execution_id, binding_id, engine_generation,
 			 binding_generation, state, cause, updated_at
 			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(attempt_id) DO UPDATE SET state=excluded.state, cause=excluded.cause,
-			 updated_at=excluded.updated_at`,
+			 updated_at=excluded.updated_at
+			 WHERE engine_attempts.agent_instance_id=excluded.agent_instance_id
+			   AND engine_attempts.execution_id=excluded.execution_id
+			   AND engine_attempts.binding_id=excluded.binding_id
+			   AND engine_attempts.engine_generation=excluded.engine_generation
+			   AND engine_attempts.binding_generation=excluded.binding_generation
+			 RETURNING attempt_id`,
 			[
 				binding.attemptId,
 				binding.agentInstanceId,
@@ -193,16 +200,26 @@ export class EngineStore {
 				cause ?? null,
 				Date.now(),
 			],
-		);
+		)) as Array<{ attempt_id: string }>;
+		return rows.length === 1;
 	}
 
-	async reconcileInterrupted(engineGeneration: number): Promise<AttemptRow[]> {
+	async getAttempt(attemptId: string): Promise<EngineAttemptRow | undefined> {
+		const rows = (await this.#client.unsafe(
+			`SELECT agent_instance_id, execution_id, attempt_id, engine_generation, binding_generation, state
+			 FROM engine_attempts WHERE attempt_id = ?`,
+			[attemptId],
+		)) as EngineAttemptRow[];
+		return rows[0];
+	}
+
+	async reconcileInterrupted(engineGeneration: number): Promise<EngineAttemptRow[]> {
 		const active = (await this.#client.unsafe(
-			`SELECT agent_instance_id, execution_id, attempt_id, engine_generation, binding_generation
+			`SELECT agent_instance_id, execution_id, attempt_id, engine_generation, binding_generation, state
 			 FROM engine_attempts
 			 WHERE engine_generation < ? AND state IN ('accepted', 'running')`,
 			[engineGeneration],
-		)) as AttemptRow[];
+		)) as EngineAttemptRow[];
 		const now = Date.now();
 		await this.#client.unsafe(
 			`UPDATE engine_attempts SET state='interrupted', cause='engine_lost', updated_at=?

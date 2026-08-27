@@ -5,7 +5,7 @@ import * as path from "node:path";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { EngineLaunchProfile } from "@oh-my-pi/pi-coding-agent/engine/contracts";
-import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
+import { EngineRuntime, type EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -30,14 +30,14 @@ describe("EngineRuntime", () => {
 		for (const dir of tempDirs.splice(0)) removeSyncWithRetries(dir);
 	});
 
-	async function createRuntime() {
+	async function createRuntime(dispatchPrompt: EngineRuntimeOptions["dispatchPrompt"] = async () => true) {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-runtime-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);
 		const cwd = path.join(tempDir, "workspace");
 		fs.mkdirSync(cwd);
-		const runtime = await EngineRuntime.create({
+		const options: EngineRuntimeOptions = {
 			databasePath: path.join(tempDir, "engine.sqlite"),
-			dispatchPrompt: async () => true,
+			dispatchPrompt,
 			sessionDefaults: {
 				cwd,
 				agentDir: path.join(tempDir, "agent"),
@@ -51,8 +51,9 @@ describe("EngineRuntime", () => {
 				enableLsp: false,
 				modelRegistry,
 			},
-		});
-		return { runtime, cwd };
+		};
+		const runtime = await EngineRuntime.create(options);
+		return { runtime, cwd, options };
 	}
 
 	const profile: EngineLaunchProfile = {
@@ -118,6 +119,54 @@ describe("EngineRuntime", () => {
 			code: "stale_target",
 		});
 		await runtime.drain();
+		await runtime.dispose();
+	}, 60000);
+
+	it("keeps a completed Attempt terminal when cancel arrives late", async () => {
+		const { runtime, cwd } = await createRuntime();
+		const started = await runtime.start(
+			{ agentInstanceId: "agent-a", executionId: "execution-a", attemptId: "attempt-a", cwd, input: "A" },
+			profile,
+		);
+		await runtime.drain();
+		await expect(runtime.cancel(started)).rejects.toMatchObject({ code: "too_late" });
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
+		await runtime.dispose();
+	}, 60000);
+
+	it("does not redispatch a durable Attempt after Engine restart", async () => {
+		let dispatchCount = 0;
+		const { runtime, cwd, options } = await createRuntime(async () => {
+			dispatchCount++;
+			return true;
+		});
+		const request = {
+			agentInstanceId: "agent-a",
+			executionId: "execution-a",
+			attemptId: "attempt-a",
+			cwd,
+			input: "A",
+		};
+		await runtime.start(request, profile);
+		await runtime.drain();
+		await runtime.dispose();
+
+		const restarted = await EngineRuntime.create(options);
+		await expect(restarted.start(request, profile)).rejects.toMatchObject({ code: "too_late" });
+		expect(dispatchCount).toBe(1);
+		await restarted.dispose();
+	}, 60000);
+
+	it("rejects steering after an Attempt becomes idle", async () => {
+		const { runtime, cwd } = await createRuntime();
+		const started = await runtime.start(
+			{ agentInstanceId: "agent-a", executionId: "execution-a", attemptId: "attempt-a", cwd, input: "A" },
+			profile,
+		);
+		await runtime.drain();
+		await expect(runtime.steer({ ...started, commandId: "steer-1", message: "too late" })).rejects.toMatchObject({
+			code: "too_late",
+		});
 		await runtime.dispose();
 	}, 60000);
 });

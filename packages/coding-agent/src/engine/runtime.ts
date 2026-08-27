@@ -7,6 +7,7 @@ import { type CreateAgentSessionOptions, createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import { SessionManager } from "../session/session-manager";
 import {
+	type EngineAttemptState,
 	type EngineBindingSnapshot,
 	type EngineCancelRequest,
 	type EngineEvent,
@@ -25,7 +26,10 @@ import { EngineStore } from "./store";
 type EngineEventListener = (event: EngineEvent) => void | Promise<void>;
 
 interface LiveBinding extends EngineBindingSnapshot {
+	attemptState: EngineAttemptState;
 	session: AgentSession;
+	steerCommandIds: string[];
+	steerCommandSet: Set<string>;
 	unsubscribe: () => void;
 }
 
@@ -102,20 +106,33 @@ export class EngineRuntime {
 	}
 
 	steer(request: EngineSteerRequest): Promise<void> {
-		if (!request.message.trim()) {
-			throw new EngineTargetError("invalid_request", "message must be a non-empty string");
+		if (!request.commandId.trim() || !request.message.trim()) {
+			throw new EngineTargetError("invalid_request", "commandId and message must be non-empty strings");
 		}
 		return this.#inLane(request.agentInstanceId, async () => {
 			const binding = this.#requireTarget(request);
-			await binding.session.prompt(request.message, { streamingBehavior: "steer" });
+			if (binding.steerCommandSet.has(request.commandId)) return;
+			if (binding.state !== "running" || !binding.session.isStreaming) {
+				throw new EngineTargetError("too_late", `Attempt ${request.attemptId} is not streaming`);
+			}
+			await binding.session.steer(request.message);
+			binding.steerCommandIds.push(request.commandId);
+			binding.steerCommandSet.add(request.commandId);
+			const evicted = binding.steerCommandIds.length > 256 ? binding.steerCommandIds.shift() : undefined;
+			if (evicted) binding.steerCommandSet.delete(evicted);
 		});
 	}
 
 	cancel(request: EngineCancelRequest): Promise<void> {
 		return this.#inLane(request.agentInstanceId, async () => {
 			const binding = this.#requireTarget(request);
+			if (binding.attemptState === "cancelled") return;
+			if (binding.state !== "running") {
+				throw new EngineTargetError("too_late", `Attempt ${request.attemptId} is already ${binding.attemptState}`);
+			}
 			this.asyncJobManager.cancelAll({ ownerId: binding.engineAgentId, attemptId: binding.attemptId });
 			binding.state = "idle";
+			binding.attemptState = "cancelled";
 			await binding.session.abort({ reason: request.reason ?? "Engine attempt cancelled" });
 			if (binding.attemptId !== request.attemptId) return;
 			await this.store.putBinding(this.#snapshot(binding));
@@ -174,6 +191,23 @@ export class EngineRuntime {
 					`Attempt ${request.attemptId} is already bound to Execution ${binding.executionId}`,
 				);
 			}
+		}
+
+		const priorAttempt = await this.store.getAttempt(request.attemptId);
+		if (priorAttempt) {
+			if (
+				priorAttempt.agent_instance_id !== request.agentInstanceId ||
+				priorAttempt.execution_id !== request.executionId
+			) {
+				throw new EngineTargetError("invalid_request", `Attempt ${request.attemptId} is already bound`);
+			}
+			throw new EngineTargetError(
+				"too_late",
+				`Attempt ${request.attemptId} already exists in state ${priorAttempt.state}`,
+			);
+		}
+
+		if (binding) {
 			if (binding.state === "running" || binding.session.isStreaming) {
 				throw new EngineTargetError("agent_busy", `AgentInstance ${request.agentInstanceId} is busy`);
 			}
@@ -183,17 +217,22 @@ export class EngineRuntime {
 			} else {
 				binding.executionId = request.executionId;
 				binding.attemptId = request.attemptId;
+				binding.attemptState = "accepted";
 				binding.state = "idle";
+				binding.steerCommandIds = [];
+				binding.steerCommandSet.clear();
 				binding.session.setAttemptId(request.attemptId);
 			}
 		}
-
 		if (!binding) binding = await this.#openBinding(request, profile);
 		try {
 			await this.store.putBinding(this.#snapshot(binding));
-			await this.store.putAttempt(binding, "accepted");
+			if (!(await this.store.putAttempt(binding, "accepted"))) {
+				throw new EngineTargetError("invalid_request", `Attempt ${request.attemptId} was claimed concurrently`);
+			}
 			await this.#emit(binding, "accepted");
 			binding.state = "running";
+			binding.attemptState = "running";
 			await this.store.putBinding(this.#snapshot(binding));
 			await this.store.putAttempt(binding, "running");
 			await this.#emit(binding, "running");
@@ -248,10 +287,13 @@ export class EngineRuntime {
 			engineAgentId: id,
 			sessionFile: created.session.sessionFile,
 			profileDigest: profile.profileDigest,
+			attemptState: "accepted",
 			state: "idle",
 			engineGeneration: this.engineGeneration,
 			bindingGeneration,
 			session: created.session,
+			steerCommandIds: [],
+			steerCommandSet: new Set(),
 			unsubscribe: () => {},
 		};
 		binding.unsubscribe = created.session.subscribe(event => {
@@ -271,6 +313,7 @@ export class EngineRuntime {
 				if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
 				if (binding.attemptId !== attemptId || binding.state !== "running") return;
 				binding.state = "idle";
+				binding.attemptState = "completed";
 				await this.store.putBinding(this.#snapshot(binding));
 				await this.store.putAttempt(binding, "completed");
 				await this.#emit(binding, "completed");
@@ -281,6 +324,7 @@ export class EngineRuntime {
 				if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
 				if (binding.attemptId !== attemptId || binding.state !== "running") return;
 				binding.state = "idle";
+				binding.attemptState = "failed";
 				await this.store.putBinding(this.#snapshot(binding));
 				await this.store.putAttempt(binding, "failed", message);
 				await this.#emit(binding, "failed", { error: message });
@@ -300,9 +344,11 @@ export class EngineRuntime {
 		this.agentRegistry.unregister(binding.engineAgentId, binding.session);
 		await this.store.putBinding(this.#snapshot(binding));
 		if (cause === "engine_lost" && wasRunning) {
+			binding.attemptState = "interrupted";
 			await this.store.putAttempt(binding, "interrupted", cause);
 			await this.#emit(binding, "interrupted", { cause });
 		} else if (cause === "requested" && wasRunning) {
+			binding.attemptState = "cancelled";
 			await this.store.putAttempt(binding, "cancelled", "binding_released");
 			await this.#emit(binding, "cancelled", { cause: "binding_released" });
 		}

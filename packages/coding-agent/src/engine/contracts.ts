@@ -29,6 +29,7 @@ export interface EngineTarget {
 }
 
 export interface EngineSteerRequest extends EngineTarget {
+	commandId: string;
 	message: string;
 }
 
@@ -63,7 +64,7 @@ export interface EngineEvent {
 	attemptId: string;
 	engineGeneration: number;
 	bindingGeneration: number;
-	kind: "accepted" | "running" | "completed" | "cancelled" | "failed" | "interrupted";
+	kind: "accepted" | "running" | "completed" | "cancelled" | "failed" | "interrupted" | "reconciled";
 	payload?: Record<string, unknown>;
 	createdAt: number;
 }
