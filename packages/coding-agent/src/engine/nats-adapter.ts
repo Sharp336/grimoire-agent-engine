@@ -310,12 +310,14 @@ export class NatsEngineAdapter {
 	async #consumeCommands(messages: ConsumerMessages): Promise<void> {
 		for await (const message of messages) {
 			if (this.#stopping) break;
-			await this.#handleCommand(message);
+			this.#trackLoop(this.#handleCommand(message));
 		}
 	}
 
 	async #handleCommand(message: JsMsg): Promise<void> {
 		let command: EngineCommandEnvelope | undefined;
+		message.working();
+		const heartbeat = setInterval(() => message.working(), 10_000);
 		try {
 			command = this.#parseCommand(message);
 			await this.#options.authorizeCommand(command);
@@ -356,6 +358,8 @@ export class NatsEngineAdapter {
 			}
 			message.nak(1_000);
 			this.#report(error);
+		} finally {
+			clearInterval(heartbeat);
 		}
 	}
 
@@ -377,6 +381,7 @@ export class NatsEngineAdapter {
 				if (profile.profileDigest !== profileDigest) {
 					throw new EngineTargetError("invalid_request", "launch profile digest mismatch");
 				}
+				await this.provisionMailbox(command.agentInstanceId);
 				await this.runtime.start(
 					{
 						commandId: command.commandId,
@@ -659,6 +664,8 @@ function eventType(kind: EngineEvent["kind"]): string {
 			return "attempt.started";
 		case "reconciled":
 			return "reconcile.snapshot";
+		case "steered":
+			return "command.steered";
 		default:
 			return `attempt.${kind}`;
 	}

@@ -101,7 +101,16 @@ export interface EngineEvent {
 	bindingId: string;
 	bindingGeneration: number;
 	authorityGeneration: number;
-	kind: "accepted" | "rejected" | "running" | "completed" | "cancelled" | "failed" | "interrupted" | "reconciled";
+	kind:
+		| "accepted"
+		| "rejected"
+		| "running"
+		| "completed"
+		| "cancelled"
+		| "failed"
+		| "interrupted"
+		| "reconciled"
+		| "steered";
 	payload?: Record<string, unknown>;
 	createdAt: number;
 }

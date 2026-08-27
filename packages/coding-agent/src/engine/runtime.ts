@@ -124,6 +124,7 @@ export class EngineRuntime {
 			binding.steerCommandSet.add(request.commandId);
 			const evicted = binding.steerCommandIds.length > 256 ? binding.steerCommandIds.shift() : undefined;
 			if (evicted) binding.steerCommandSet.delete(evicted);
+			await this.#emit(binding, "steered", undefined, request.commandId);
 		});
 	}
 
