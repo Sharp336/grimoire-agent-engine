@@ -48,6 +48,8 @@
   },
   "dependencies": {
     "@babel/parser": "catalog:",
+    "@nats-io/jetstream": "catalog:",
+    "@nats-io/transport-node": "catalog:",
     "@oh-my-pi/hashline": "catalog:",
     "@oh-my-pi/omp-stats": "catalog:",
     "@oh-my-pi/omptype": "catalog:",

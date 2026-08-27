@@ -13,6 +13,9 @@ import {
 	type EngineEvent,
 	type EngineLaunchProfile,
 	type EnginePeerMessage,
+	type EngineReconcileRequest,
+	type EngineReconcileResult,
+	type EngineRejectedCommand,
 	type EngineStartRequest,
 	type EngineStartResult,
 	type EngineSteerRequest,
@@ -110,7 +113,8 @@ export class EngineRuntime {
 			throw new EngineTargetError("invalid_request", "commandId and message must be non-empty strings");
 		}
 		return this.#inLane(request.agentInstanceId, async () => {
-			const binding = this.#requireTarget(request);
+			const binding = await this.#requireCancelableTarget(request);
+			if (!binding) return;
 			if (binding.steerCommandSet.has(request.commandId)) return;
 			if (binding.state !== "running" || !binding.session.isStreaming) {
 				throw new EngineTargetError("too_late", `Attempt ${request.attemptId} is not streaming`);
@@ -124,20 +128,66 @@ export class EngineRuntime {
 	}
 
 	cancel(request: EngineCancelRequest): Promise<void> {
+		if (!request.commandId.trim()) {
+			throw new EngineTargetError("invalid_request", "commandId must be a non-empty string");
+		}
 		return this.#inLane(request.agentInstanceId, async () => {
 			const binding = this.#requireTarget(request);
-			if (binding.attemptState === "cancelled") return;
-			if (binding.state !== "running") {
+			if (binding.attemptState === "cancelled" || binding.attemptState === "cancel_requested") return;
+			if (binding.attemptState !== "running") {
 				throw new EngineTargetError("too_late", `Attempt ${request.attemptId} is already ${binding.attemptState}`);
 			}
 			this.asyncJobManager.cancelAll({ ownerId: binding.engineAgentId, attemptId: binding.attemptId });
-			binding.state = "idle";
-			binding.attemptState = "cancelled";
-			await binding.session.abort({ reason: request.reason ?? "Engine attempt cancelled" });
-			if (binding.attemptId !== request.attemptId) return;
-			await this.store.putBinding(this.#snapshot(binding));
-			await this.store.putAttempt(binding, "cancelled", request.reason);
-			await this.#emit(binding, "cancelled", request.reason ? { reason: request.reason } : undefined);
+			const abort = binding.session.abort({ reason: request.reason ?? "Engine attempt cancelled" });
+			binding.attemptState = "cancel_requested";
+			await this.store.putAttempt(binding, "cancel_requested", request.reason);
+			this.#trackRun(this.#finishCancel(binding, request, abort));
+		});
+	}
+
+	reconcile(request: EngineReconcileRequest): Promise<EngineReconcileResult> {
+		if (!request.commandId.trim() || !request.agentInstanceId.trim()) {
+			throw new EngineTargetError("invalid_request", "commandId and agentInstanceId must be non-empty strings");
+		}
+		if (!Number.isSafeInteger(request.authorityGeneration) || request.authorityGeneration < 0) {
+			throw new EngineTargetError("invalid_request", "authorityGeneration must be a non-negative safe integer");
+		}
+		return this.#inLane(request.agentInstanceId, async () => {
+			this.#throwIfDisposed();
+			const binding = this.#bindings.get(request.agentInstanceId);
+			const snapshot = binding ? this.#snapshot(binding) : await this.store.getBinding(request.agentInstanceId);
+			if (!snapshot) return {};
+			if (snapshot.authorityGeneration !== request.authorityGeneration) {
+				throw new EngineTargetError("stale_target", `Stale authority for ${request.agentInstanceId}`);
+			}
+			const attempt = await this.store.getAttempt(snapshot.attemptId);
+			await this.#emit(
+				snapshot,
+				"reconciled",
+				{ binding: snapshot, attemptState: attempt?.state },
+				request.commandId,
+			);
+			return { binding: snapshot, attemptState: attempt?.state };
+		});
+	}
+
+	recordCommandRejection(command: EngineRejectedCommand): Promise<void> {
+		return this.#inLane(command.agentInstanceId, async () => {
+			this.#throwIfDisposed();
+			await this.#emit(
+				{
+					commandId: command.commandId,
+					agentInstanceId: command.agentInstanceId,
+					executionId: command.executionId,
+					attemptId: command.attemptId,
+					engineGeneration: this.engineGeneration,
+					bindingId: "",
+					bindingGeneration: command.bindingGeneration ?? 0,
+					authorityGeneration: command.authorityGeneration,
+				},
+				"rejected",
+				{ code: command.code, message: command.message },
+			);
 		});
 	}
 
@@ -184,6 +234,9 @@ export class EngineRuntime {
 		if (binding) {
 			if (binding.attemptId === request.attemptId) {
 				if (binding.executionId === request.executionId) {
+					if (binding.authorityGeneration !== request.authorityGeneration) {
+						throw new EngineTargetError("stale_target", `Stale authority for ${request.agentInstanceId}`);
+					}
 					return { ...this.#snapshot(binding), duplicate: true };
 				}
 				throw new EngineTargetError(
@@ -201,6 +254,14 @@ export class EngineRuntime {
 			) {
 				throw new EngineTargetError("invalid_request", `Attempt ${request.attemptId} is already bound`);
 			}
+			const durableBinding = await this.store.getBinding(request.agentInstanceId);
+			if (
+				durableBinding?.attemptId === request.attemptId &&
+				durableBinding.executionId === request.executionId &&
+				durableBinding.authorityGeneration === request.authorityGeneration
+			) {
+				return { ...durableBinding, duplicate: true };
+			}
 			throw new EngineTargetError(
 				"too_late",
 				`Attempt ${request.attemptId} already exists in state ${priorAttempt.state}`,
@@ -211,12 +272,17 @@ export class EngineRuntime {
 			if (binding.state === "running" || binding.session.isStreaming) {
 				throw new EngineTargetError("agent_busy", `AgentInstance ${request.agentInstanceId} is busy`);
 			}
-			if (binding.profileDigest !== profile.profileDigest) {
+			if (
+				binding.profileDigest !== profile.profileDigest ||
+				binding.authorityGeneration !== request.authorityGeneration
+			) {
 				await this.#terminateBinding(binding, "requested");
 				binding = undefined;
 			} else {
 				binding.executionId = request.executionId;
 				binding.attemptId = request.attemptId;
+				binding.commandId = request.commandId;
+				binding.authorityGeneration = request.authorityGeneration;
 				binding.attemptState = "accepted";
 				binding.state = "idle";
 				binding.steerCommandIds = [];
@@ -240,12 +306,7 @@ export class EngineRuntime {
 			await this.#discardBinding(binding);
 			throw error;
 		}
-		const run = this.#runPrompt(binding, request.input);
-		this.#runs.add(run);
-		void run.then(
-			() => this.#runs.delete(run),
-			() => this.#runs.delete(run),
-		);
+		this.#trackRun(this.#runPrompt(binding, request.input));
 		return { ...this.#snapshot(binding), duplicate: false };
 	}
 
@@ -281,6 +342,7 @@ export class EngineRuntime {
 		});
 		const binding: LiveBinding = {
 			bindingId: `${route}:${bindingGeneration}`,
+			commandId: request.commandId,
 			agentInstanceId: request.agentInstanceId,
 			executionId: request.executionId,
 			attemptId: request.attemptId,
@@ -291,6 +353,7 @@ export class EngineRuntime {
 			state: "idle",
 			engineGeneration: this.engineGeneration,
 			bindingGeneration,
+			authorityGeneration: request.authorityGeneration,
 			session: created.session,
 			steerCommandIds: [],
 			steerCommandSet: new Set(),
@@ -311,7 +374,7 @@ export class EngineRuntime {
 			await this.#dispatchPrompt(binding.session, input);
 			await this.#inLane(binding.agentInstanceId, async () => {
 				if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
-				if (binding.attemptId !== attemptId || binding.state !== "running") return;
+				if (binding.attemptId !== attemptId || binding.attemptState !== "running") return;
 				binding.state = "idle";
 				binding.attemptState = "completed";
 				await this.store.putBinding(this.#snapshot(binding));
@@ -322,7 +385,7 @@ export class EngineRuntime {
 			const message = error instanceof Error ? error.message : String(error);
 			await this.#inLane(binding.agentInstanceId, async () => {
 				if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
-				if (binding.attemptId !== attemptId || binding.state !== "running") return;
+				if (binding.attemptId !== attemptId || binding.attemptState !== "running") return;
 				binding.state = "idle";
 				binding.attemptState = "failed";
 				await this.store.putBinding(this.#snapshot(binding));
@@ -330,6 +393,28 @@ export class EngineRuntime {
 				await this.#emit(binding, "failed", { error: message });
 			});
 		}
+	}
+
+	async #finishCancel(binding: LiveBinding, request: EngineCancelRequest, abort: Promise<void>): Promise<void> {
+		await abort.catch(() => {});
+		await this.asyncJobManager.waitForOwnerJobs(binding.engineAgentId, { attemptId: request.attemptId });
+		await this.asyncJobManager.drainDeliveries({
+			filter: { ownerId: binding.engineAgentId, attemptId: request.attemptId },
+		});
+		await this.#inLane(binding.agentInstanceId, async () => {
+			if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
+			if (binding.attemptId !== request.attemptId || binding.attemptState !== "cancel_requested") return;
+			binding.state = "idle";
+			binding.attemptState = "cancelled";
+			await this.store.putBinding(this.#snapshot(binding));
+			await this.store.putAttempt(binding, "cancelled", request.reason);
+			await this.#emit(
+				binding,
+				"cancelled",
+				request.reason ? { reason: request.reason } : undefined,
+				request.commandId,
+			);
+		});
 	}
 
 	async #terminateBinding(binding: LiveBinding, cause: "requested" | "engine_lost"): Promise<void> {
@@ -370,9 +455,11 @@ export class EngineRuntime {
 		const binding = this.#bindings.get(target.agentInstanceId);
 		if (!binding) throw new EngineTargetError("agent_not_found", `Unknown AgentInstance ${target.agentInstanceId}`);
 		if (
+			binding.bindingId !== target.bindingId ||
 			binding.engineGeneration !== target.engineGeneration ||
 			binding.bindingGeneration !== target.bindingGeneration ||
-			binding.executionId !== target.executionId
+			binding.executionId !== target.executionId ||
+			binding.authorityGeneration !== target.authorityGeneration
 		) {
 			throw new EngineTargetError("stale_target", `Stale runtime target for ${target.agentInstanceId}`);
 		}
@@ -382,16 +469,40 @@ export class EngineRuntime {
 		return binding;
 	}
 
+	async #requireCancelableTarget(target: EngineTarget): Promise<LiveBinding | undefined> {
+		const binding = this.#bindings.get(target.agentInstanceId);
+		if (binding) return this.#requireTarget(target);
+		this.#throwIfDisposed();
+		const attempt = await this.store.getAttempt(target.attemptId);
+		if (!attempt || attempt.agent_instance_id !== target.agentInstanceId) {
+			throw new EngineTargetError("agent_not_found", `Unknown AgentInstance ${target.agentInstanceId}`);
+		}
+		if (
+			attempt.binding_id !== target.bindingId ||
+			attempt.execution_id !== target.executionId ||
+			Number(attempt.engine_generation) !== target.engineGeneration ||
+			Number(attempt.binding_generation) !== target.bindingGeneration ||
+			Number(attempt.authority_generation) !== target.authorityGeneration
+		) {
+			throw new EngineTargetError("stale_target", `Stale runtime target for ${target.agentInstanceId}`);
+		}
+		if (attempt.state === "cancelled" || attempt.state === "cancel_requested") return undefined;
+		throw new EngineTargetError("too_late", `Attempt ${target.attemptId} is already ${attempt.state}`);
+	}
+
 	async #reconcileLostAttempts(): Promise<void> {
 		const interrupted = await this.store.reconcileInterrupted(this.engineGeneration);
 		for (const attempt of interrupted) {
 			await this.#emit(
 				{
+					commandId: attempt.command_id,
 					agentInstanceId: attempt.agent_instance_id,
 					executionId: attempt.execution_id,
 					attemptId: attempt.attempt_id,
 					engineGeneration: this.engineGeneration,
+					bindingId: attempt.binding_id,
 					bindingGeneration: Number(attempt.binding_generation),
+					authorityGeneration: Number(attempt.authority_generation),
 				},
 				"interrupted",
 				{ cause: "engine_lost", lostEngineGeneration: Number(attempt.engine_generation) },
@@ -401,13 +512,27 @@ export class EngineRuntime {
 
 	async #emit(
 		target: Pick<
-			EngineTarget,
-			"agentInstanceId" | "executionId" | "attemptId" | "engineGeneration" | "bindingGeneration"
+			EngineBindingSnapshot,
+			| "commandId"
+			| "agentInstanceId"
+			| "executionId"
+			| "attemptId"
+			| "engineGeneration"
+			| "bindingId"
+			| "bindingGeneration"
+			| "authorityGeneration"
 		>,
 		kind: EngineEvent["kind"],
 		payload?: Record<string, unknown>,
+		causationCommandId = target.commandId,
 	): Promise<void> {
-		const event = await this.store.appendEvent({ ...target, kind, payload });
+		const { commandId: _, ...eventTarget } = target;
+		const event = await this.store.appendEvent({
+			...eventTarget,
+			causationCommandId,
+			kind,
+			payload,
+		});
 		for (const listener of this.#listeners) {
 			void Promise.resolve(listener(event)).catch(() => {});
 		}
@@ -416,6 +541,7 @@ export class EngineRuntime {
 	#snapshot(binding: LiveBinding): EngineBindingSnapshot {
 		return {
 			bindingId: binding.bindingId,
+			commandId: binding.commandId,
 			agentInstanceId: binding.agentInstanceId,
 			executionId: binding.executionId,
 			attemptId: binding.attemptId,
@@ -425,6 +551,7 @@ export class EngineRuntime {
 			state: binding.state,
 			engineGeneration: binding.engineGeneration,
 			bindingGeneration: binding.bindingGeneration,
+			authorityGeneration: binding.authorityGeneration,
 		};
 	}
 
@@ -440,6 +567,14 @@ export class EngineRuntime {
 			if (this.#lanes.get(agentInstanceId) === tail) this.#lanes.delete(agentInstanceId);
 		});
 		return current;
+	}
+
+	#trackRun(run: Promise<void>): void {
+		this.#runs.add(run);
+		void run.then(
+			() => this.#runs.delete(run),
+			() => this.#runs.delete(run),
+		);
 	}
 
 	#throwIfDisposed(): void {

@@ -1,4 +1,11 @@
-export type EngineAttemptState = "accepted" | "running" | "completed" | "cancelled" | "failed" | "interrupted";
+export type EngineAttemptState =
+	| "accepted"
+	| "running"
+	| "cancel_requested"
+	| "completed"
+	| "cancelled"
+	| "failed"
+	| "interrupted";
 export type EngineBindingState = "idle" | "running" | "released";
 
 export interface EngineLaunchProfile {
@@ -13,17 +20,21 @@ export interface EngineLaunchProfile {
 }
 
 export interface EngineStartRequest {
+	commandId: string;
 	agentInstanceId: string;
 	executionId: string;
 	attemptId: string;
+	authorityGeneration: number;
 	cwd: string;
 	input: string;
 }
 
 export interface EngineTarget {
+	bindingId: string;
 	agentInstanceId: string;
 	executionId: string;
 	attemptId: string;
+	authorityGeneration: number;
 	engineGeneration: number;
 	bindingGeneration: number;
 }
@@ -34,7 +45,14 @@ export interface EngineSteerRequest extends EngineTarget {
 }
 
 export interface EngineCancelRequest extends EngineTarget {
+	commandId: string;
 	reason?: string;
+}
+
+export interface EngineReconcileRequest {
+	commandId: string;
+	agentInstanceId: string;
+	authorityGeneration: number;
 }
 
 export interface EnginePeerMessage {
@@ -45,7 +63,7 @@ export interface EnginePeerMessage {
 }
 
 export interface EngineBindingSnapshot extends EngineTarget {
-	bindingId: string;
+	commandId: string;
 	engineAgentId: string;
 	sessionFile?: string;
 	profileDigest: string;
@@ -56,15 +74,34 @@ export interface EngineStartResult extends EngineBindingSnapshot {
 	duplicate: boolean;
 }
 
+export interface EngineReconcileResult {
+	binding?: EngineBindingSnapshot;
+	attemptState?: EngineAttemptState;
+}
+
+export interface EngineRejectedCommand {
+	commandId: string;
+	agentInstanceId: string;
+	executionId: string;
+	attemptId: string;
+	authorityGeneration: number;
+	bindingGeneration?: number;
+	code: EngineTargetError["code"];
+	message: string;
+}
+
 export interface EngineEvent {
 	eventId: number;
 	seq: number;
+	causationCommandId: string;
 	agentInstanceId: string;
 	executionId: string;
 	attemptId: string;
 	engineGeneration: number;
+	bindingId: string;
 	bindingGeneration: number;
-	kind: "accepted" | "running" | "completed" | "cancelled" | "failed" | "interrupted" | "reconciled";
+	authorityGeneration: number;
+	kind: "accepted" | "rejected" | "running" | "completed" | "cancelled" | "failed" | "interrupted" | "reconciled";
 	payload?: Record<string, unknown>;
 	createdAt: number;
 }
@@ -80,9 +117,19 @@ export class EngineTargetError extends Error {
 }
 
 export function validateStartRequest(request: EngineStartRequest): void {
-	for (const [name, value] of Object.entries(request)) {
-		if (typeof value !== "string" || !value.trim()) {
+	for (const [name, value] of Object.entries({
+		commandId: request.commandId,
+		agentInstanceId: request.agentInstanceId,
+		executionId: request.executionId,
+		attemptId: request.attemptId,
+		cwd: request.cwd,
+		input: request.input,
+	})) {
+		if (!value.trim()) {
 			throw new EngineTargetError("invalid_request", `${name} must be a non-empty string`);
 		}
+	}
+	if (!Number.isSafeInteger(request.authorityGeneration) || request.authorityGeneration < 0) {
+		throw new EngineTargetError("invalid_request", "authorityGeneration must be a non-negative safe integer");
 	}
 }

@@ -21,6 +21,7 @@ describe("EngineStore", () => {
 		const generation = await first.nextEngineGeneration();
 		const binding = {
 			bindingId: "binding-1",
+			commandId: "command-1",
 			agentInstanceId: "agent-1",
 			executionId: "execution-1",
 			attemptId: "attempt-1",
@@ -29,6 +30,7 @@ describe("EngineStore", () => {
 			state: "running" as const,
 			engineGeneration: generation,
 			bindingGeneration: 1,
+			authorityGeneration: 1,
 		};
 		await first.putBinding(binding);
 		await first.putAttempt(binding, "running");

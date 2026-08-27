@@ -66,11 +66,27 @@ describe("EngineRuntime", () => {
 	it("runs two independent roots on one shared runtime and disposes only the targeted root", async () => {
 		const { runtime, cwd } = await createRuntime();
 		const first = await runtime.start(
-			{ agentInstanceId: "agent-a", executionId: "execution-a", attemptId: "attempt-a", cwd, input: "A" },
+			{
+				commandId: "command-a",
+				agentInstanceId: "agent-a",
+				executionId: "execution-a",
+				attemptId: "attempt-a",
+				authorityGeneration: 1,
+				cwd,
+				input: "A",
+			},
 			profile,
 		);
 		const second = await runtime.start(
-			{ agentInstanceId: "agent-b", executionId: "execution-b", attemptId: "attempt-b", cwd, input: "B" },
+			{
+				commandId: "command-b",
+				agentInstanceId: "agent-b",
+				executionId: "execution-b",
+				attemptId: "attempt-b",
+				authorityGeneration: 1,
+				cwd,
+				input: "B",
+			},
 			profile,
 		);
 		await runtime.drain();
@@ -96,20 +112,44 @@ describe("EngineRuntime", () => {
 	it("reuses an idle root for a new Attempt and rejects stale generation fences", async () => {
 		const { runtime, cwd } = await createRuntime();
 		const first = await runtime.start(
-			{ agentInstanceId: "agent-a", executionId: "execution-a", attemptId: "attempt-a", cwd, input: "A" },
+			{
+				commandId: "command-a",
+				agentInstanceId: "agent-a",
+				executionId: "execution-a",
+				attemptId: "attempt-a",
+				authorityGeneration: 1,
+				cwd,
+				input: "A",
+			},
 			profile,
 		);
 		await runtime.drain();
 		const firstSession = runtime.agentRegistry.get(first.engineAgentId)?.session;
 		const second = await runtime.start(
-			{ agentInstanceId: "agent-a", executionId: "execution-b", attemptId: "attempt-b", cwd, input: "B" },
+			{
+				commandId: "command-b",
+				agentInstanceId: "agent-a",
+				executionId: "execution-b",
+				attemptId: "attempt-b",
+				authorityGeneration: 1,
+				cwd,
+				input: "B",
+			},
 			profile,
 		);
 		expect(second.bindingGeneration).toBe(first.bindingGeneration);
 		expect(runtime.agentRegistry.get(second.engineAgentId)?.session).toBe(firstSession);
 		await expect(
 			runtime.start(
-				{ agentInstanceId: "agent-a", executionId: "execution-c", attemptId: "attempt-b", cwd, input: "C" },
+				{
+					commandId: "command-c",
+					agentInstanceId: "agent-a",
+					executionId: "execution-c",
+					attemptId: "attempt-b",
+					authorityGeneration: 1,
+					cwd,
+					input: "C",
+				},
 				profile,
 			),
 		).rejects.toMatchObject({ code: "invalid_request" });
@@ -125,7 +165,15 @@ describe("EngineRuntime", () => {
 	it("keeps a completed Attempt terminal when cancel arrives late", async () => {
 		const { runtime, cwd } = await createRuntime();
 		const started = await runtime.start(
-			{ agentInstanceId: "agent-a", executionId: "execution-a", attemptId: "attempt-a", cwd, input: "A" },
+			{
+				commandId: "command-a",
+				agentInstanceId: "agent-a",
+				executionId: "execution-a",
+				attemptId: "attempt-a",
+				authorityGeneration: 1,
+				cwd,
+				input: "A",
+			},
 			profile,
 		);
 		await runtime.drain();
@@ -141,9 +189,11 @@ describe("EngineRuntime", () => {
 			return true;
 		});
 		const request = {
+			commandId: "command-a",
 			agentInstanceId: "agent-a",
 			executionId: "execution-a",
 			attemptId: "attempt-a",
+			authorityGeneration: 1,
 			cwd,
 			input: "A",
 		};
@@ -152,7 +202,9 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 
 		const restarted = await EngineRuntime.create(options);
-		await expect(restarted.start(request, profile)).rejects.toMatchObject({ code: "too_late" });
+		const duplicate = await restarted.start(request, profile);
+		expect(duplicate.duplicate).toBeTrue();
+		expect(duplicate.state).toBe("released");
 		expect(dispatchCount).toBe(1);
 		await restarted.dispose();
 	}, 60000);
@@ -160,13 +212,59 @@ describe("EngineRuntime", () => {
 	it("rejects steering after an Attempt becomes idle", async () => {
 		const { runtime, cwd } = await createRuntime();
 		const started = await runtime.start(
-			{ agentInstanceId: "agent-a", executionId: "execution-a", attemptId: "attempt-a", cwd, input: "A" },
+			{
+				commandId: "command-a",
+				agentInstanceId: "agent-a",
+				executionId: "execution-a",
+				attemptId: "attempt-a",
+				authorityGeneration: 1,
+				cwd,
+				input: "A",
+			},
 			profile,
 		);
 		await runtime.drain();
 		await expect(runtime.steer({ ...started, commandId: "steer-1", message: "too late" })).rejects.toMatchObject({
 			code: "too_late",
 		});
+		await runtime.dispose();
+	}, 60000);
+
+	it("admits cancel before owner jobs quiesce and publishes terminal cancellation after", async () => {
+		const prompt = Promise.withResolvers<boolean>();
+		const job = Promise.withResolvers<string>();
+		let jobSettled = false;
+		const { runtime, cwd } = await createRuntime(() => prompt.promise);
+		const started = await runtime.start(
+			{
+				commandId: "command-a",
+				agentInstanceId: "agent-a",
+				executionId: "execution-a",
+				attemptId: "attempt-a",
+				authorityGeneration: 1,
+				cwd,
+				input: "A",
+			},
+			profile,
+		);
+		runtime.asyncJobManager.register(
+			"bash",
+			"slow cancellation",
+			async () => {
+				const result = await job.promise;
+				jobSettled = true;
+				return result;
+			},
+			{ ownerId: started.engineAgentId, attemptId: started.attemptId },
+		);
+
+		await runtime.cancel({ ...started, commandId: "cancel-a" });
+		expect(jobSettled).toBeFalse();
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancel_requested");
+		job.resolve("stopped");
+		prompt.resolve(true);
+		await runtime.drain();
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
 		await runtime.dispose();
 	}, 60000);
 });
