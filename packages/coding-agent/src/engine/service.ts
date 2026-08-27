@@ -215,11 +215,11 @@ async function startBroker(config: EngineServiceConfig, engineNkey: string, brid
 	}
 }
 
-function natsConfig(storeDir: string, engineNkey: string, bridgeNkey: string): string {
+export function natsConfig(storeDir: string, engineNkey: string, bridgeNkey: string): string {
 	const eventSubjects = ["grimoire.engine.v1.d.*.e.*.a.*.evt.*"];
 	const commandSubjects = ["grimoire.engine.v1.d.*.e.*.a.*.cmd.*"];
 	const messageSubjects = ["grimoire.agent.v1.d.*.to.*.from.*.msg"];
-	const apiSubjects = ["$JS.API.>", "_INBOX.>"];
+	const apiSubjects = ["$JS.API.>", "$JS.ACK.>", "_INBOX.>"];
 	return [
 		"listen: 127.0.0.1:-1",
 		"jetstream {",

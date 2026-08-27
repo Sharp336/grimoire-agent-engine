@@ -261,7 +261,15 @@ export class HostedEngineBridge {
 						lease_ttl_seconds: 90,
 					});
 					if (recovered.status !== "claimed") {
-						message.nak(5_000);
+						const terminal = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
+							action: "event",
+							device_id: this.#options.deviceId,
+							engine_id: this.#options.engineId,
+							job_id: event.causationCommandId,
+							event,
+						});
+						if (terminal.status === "already_terminal") message.ack();
+						else message.nak(5_000);
 						continue;
 					}
 					claim = parseClaim(recovered);

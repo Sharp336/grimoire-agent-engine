@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { jetstream, jetstreamManager } from "@nats-io/jetstream";
+import { connect, nkeyAuthenticator, nkeys } from "@nats-io/transport-node";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
@@ -9,9 +11,14 @@ import {
 	HostedEngineBridge,
 	HostedGrimoireRpc,
 } from "@oh-my-pi/pi-coding-agent/engine/hosted-bridge";
-import { type EngineCommandEnvelope, NatsEngineAdapter } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
+import {
+	ENGINE_COMMAND_STREAM,
+	ENGINE_EVENT_STREAM,
+	type EngineCommandEnvelope,
+	NatsEngineAdapter,
+} from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
-import { runEngineService } from "@oh-my-pi/pi-coding-agent/engine/service";
+import { natsConfig, runEngineService } from "@oh-my-pi/pi-coding-agent/engine/service";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -28,7 +35,10 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 
 	it("claims a hosted command and settles the same durable job from Engine events", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-host-${Snowflake.next()}-`));
-		const broker = await startNatsServer(tempDir);
+		const broker = await startNatsServer(tempDir, true);
+		const engineSeed = broker.engineSeed;
+		const bridgeSeed = broker.bridgeSeed;
+		if (!engineSeed || !bridgeSeed) throw new Error("authenticated NATS credentials were not created");
 		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 		const cwd = path.join(tempDir, "workspace");
@@ -56,6 +66,7 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			deviceId: "device-hosted",
 			engineId: "engine-hosted",
 			servers: broker.url,
+			connectionOptions: { authenticator: nkeyAuthenticator(engineSeed) },
 			authorizeCommand: () => {},
 			authorizeMessage: () => {},
 			resolveLaunchProfile: command => command.payload.launchProfile as typeof profile,
@@ -67,11 +78,28 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			engineId: "engine-hosted",
 			engineGeneration: runtime.engineGeneration,
 			servers: broker.url,
+			connectionOptions: { authenticator: nkeyAuthenticator(bridgeSeed) },
 			pollIntervalMs: 10,
 			heartbeatIntervalMs: 100,
 		});
+		const managerConnection = await connect({
+			servers: broker.url,
+			authenticator: nkeyAuthenticator(bridgeSeed),
+		});
+		const enginePublisherConnection = await connect({
+			servers: broker.url,
+			authenticator: nkeyAuthenticator(engineSeed),
+		});
 		try {
 			await waitFor(() => rpc.events.some(event => event.type === "attempt.completed"));
+			const manager = await jetstreamManager(managerConnection);
+			await waitFor(async () => {
+				const [commands, events] = await Promise.all([
+					manager.consumers.info(ENGINE_COMMAND_STREAM, `engine_${adapter.engineRoute}`),
+					manager.consumers.info(ENGINE_EVENT_STREAM, `host_${adapter.deviceRoute}_${adapter.engineRoute}`),
+				]);
+				return commands.num_ack_pending === 0 && events.num_ack_pending === 0;
+			});
 			expect((await runtime.store.getAttempt("attempt-hosted"))?.state).toBe("completed");
 			expect(rpc.events.map(event => event.type)).toEqual([
 				"command.accepted",
@@ -79,6 +107,19 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 				"attempt.completed",
 			]);
 			expect(rpc.terminalStatus).toBe("completed");
+			const terminalEvent = rpc.events.find(event => event.type === "attempt.completed");
+			if (!terminalEvent) throw new Error("terminal Engine event was not recorded");
+			await jetstream(enginePublisherConnection).publish(
+				adapter.eventSubject("agent-hosted", "completed"),
+				JSON.stringify({ ...terminalEvent, eventId: "event-terminal-redelivery" }),
+				{ msgID: "event-terminal-redelivery" },
+			);
+			await waitFor(() => rpc.terminalReplayCalls === 1);
+			await waitFor(
+				async () =>
+					(await manager.consumers.info(ENGINE_EVENT_STREAM, `host_${adapter.deviceRoute}_${adapter.engineRoute}`))
+						.num_ack_pending === 0,
+			);
 
 			await bridge.dispose();
 			const retryRpc = new FakeRpc(startCommand(cwd, profile));
@@ -88,6 +129,7 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 				engineId: "engine-hosted",
 				engineGeneration: runtime.engineGeneration + 1,
 				servers: broker.url,
+				connectionOptions: { authenticator: nkeyAuthenticator(bridgeSeed) },
 				pollIntervalMs: 10,
 				heartbeatIntervalMs: 100,
 			});
@@ -97,12 +139,16 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 				await retryBridge.dispose();
 			}
 		} finally {
+			await enginePublisherConnection.drain();
+			await managerConnection.drain();
 			await bridge.dispose();
 			await adapter.dispose();
 			await runtime.dispose();
 			authStorage.close();
 			broker.process.kill();
 			await broker.process.exited;
+			engineSeed.fill(0);
+			bridgeSeed.fill(0);
 		}
 	}, 60_000);
 
@@ -292,6 +338,7 @@ describe("HostedGrimoireRpc", () => {
 class FakeRpc implements GrimoireRpc {
 	readonly events: Array<Record<string, unknown>> = [];
 	terminalStatus: string | undefined;
+	terminalReplayCalls = 0;
 	heartbeatCalls = 0;
 	exactRecoveryClaims = 0;
 	#claimed = false;
@@ -325,8 +372,14 @@ class FakeRpc implements GrimoireRpc {
 				if (this.#heartbeatFailures-- > 0) throw new Error("temporary heartbeat failure");
 				return { status: "renewed" };
 			case "event": {
-				if (arguments_.lease_token !== this.#leaseToken) throw new Error("active lease is required");
 				const event = arguments_.event as Record<string, unknown>;
+				if (arguments_.lease_token !== this.#leaseToken) {
+					if (!arguments_.lease_token && this.terminalStatus === "completed") {
+						this.terminalReplayCalls++;
+						return { status: "already_terminal" };
+					}
+					throw new Error("active lease is required");
+				}
 				this.events.push(event);
 				const terminal = event.type === "attempt.completed";
 				if (terminal) this.terminalStatus = "completed";
@@ -359,14 +412,25 @@ function startCommand(cwd: string, profile: Record<string, unknown>): Omit<Engin
 	};
 }
 
-async function startNatsServer(root: string) {
+async function startNatsServer(root: string, authenticated = false) {
 	const portsDir = path.join(root, "ports");
 	const dataDir = path.join(root, "jetstream");
 	fs.mkdirSync(portsDir);
-	const process = Bun.spawn(
-		[natsServer, "-js", "-a", "127.0.0.1", "-p", "-1", "--ports_file_dir", portsDir, "-sd", dataDir],
-		{ stdout: "pipe", stderr: "pipe", windowsHide: true },
-	);
+	let engineSeed: Uint8Array | undefined;
+	let bridgeSeed: Uint8Array | undefined;
+	let args = [natsServer, "-js", "-a", "127.0.0.1", "-p", "-1", "--ports_file_dir", portsDir, "-sd", dataDir];
+	if (authenticated) {
+		const engineKey = nkeys.createUser();
+		const bridgeKey = nkeys.createUser();
+		engineSeed = engineKey.getSeed().slice();
+		bridgeSeed = bridgeKey.getSeed().slice();
+		const configPath = path.join(root, "nats.conf");
+		fs.writeFileSync(configPath, natsConfig(dataDir, engineKey.getPublicKey(), bridgeKey.getPublicKey()));
+		engineKey.clear();
+		bridgeKey.clear();
+		args = [natsServer, "-c", configPath, "--ports_file_dir", portsDir];
+	}
+	const process = Bun.spawn(args, { stdout: "pipe", stderr: "pipe", windowsHide: true });
 	try {
 		let manifest: { nats?: string[] } | undefined;
 		await waitFor(async () => {
@@ -375,10 +439,12 @@ async function startNatsServer(root: string) {
 			manifest = (await Bun.file(path.join(portsDir, files[0])).json()) as { nats?: string[] };
 			return Boolean(manifest.nats?.[0]);
 		});
-		return { process, url: manifest?.nats?.[0] ?? "" };
+		return { process, url: manifest?.nats?.[0] ?? "", engineSeed, bridgeSeed };
 	} catch (error) {
 		process.kill();
 		await process.exited;
+		engineSeed?.fill(0);
+		bridgeSeed?.fill(0);
 		throw error;
 	}
 }

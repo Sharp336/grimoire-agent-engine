@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed authenticated Agent Engine messages, commands, and hosted events being redelivered after successful handling, including stale terminal events after a bridge restart.
+
 ## [18.0.7] - 2026-08-26
 
 ### Added
