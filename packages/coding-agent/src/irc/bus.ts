@@ -66,6 +66,7 @@ export class IrcBus {
 	readonly #lifecycle: () => AgentLifecycleManager;
 	readonly #mailboxes = new Map<string, IrcMessage[]>();
 	readonly #waiters = new Map<string, IrcWaiter[]>();
+	#disposed = false;
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
 		this.#registry = registry;
@@ -102,6 +103,7 @@ export class IrcBus {
 		msg: Omit<IrcMessage, "id" | "ts">,
 		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
 	): Promise<IrcDeliveryReceipt> {
+		if (this.#disposed) return { to: msg.to, outcome: "failed", error: "IRC bus is disposed" };
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
 		const ref = this.#registry.get(message.to);
 		if (!ref) {
@@ -207,6 +209,7 @@ export class IrcBus {
 		signal?: AbortSignal,
 		options?: { drainPending?: boolean; liveness?: { registry: AgentRegistry; senderId: string } },
 	): Promise<IrcMessage | null> {
+		if (this.#disposed) throw new Error("IRC bus is disposed");
 		if (signal?.aborted) {
 			throw signal.reason instanceof Error ? signal.reason : new Error("IRC wait aborted");
 		}
@@ -250,7 +253,7 @@ export class IrcBus {
 		const waiter: IrcWaiter = {
 			from: filter.from,
 			resolve: msg => settle({ kind: "message", msg }),
-			cancel: () => cleanup(),
+			cancel: () => settle({ kind: "abort", error: new Error("IRC bus is disposed") }),
 		};
 
 		if (signal) {
@@ -314,6 +317,17 @@ export class IrcBus {
 
 	unreadCount(agentId: string): number {
 		return this.#mailboxes.get(agentId)?.length ?? 0;
+	}
+
+	/** Release runtime-owned mailboxes and unblock pending waits. */
+	dispose(): void {
+		if (this.#disposed) return;
+		this.#disposed = true;
+		for (const waiters of [...this.#waiters.values()]) {
+			for (const waiter of [...waiters]) waiter.cancel();
+		}
+		this.#waiters.clear();
+		this.#mailboxes.clear();
 	}
 
 	#enqueue(message: IrcMessage): void {
