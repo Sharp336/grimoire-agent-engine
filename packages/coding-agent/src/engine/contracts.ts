@@ -7,6 +7,7 @@ export type EngineAttemptState =
 	| "failed"
 	| "interrupted";
 export type EngineBindingState = "idle" | "running" | "released";
+export type EngineToolPolicy = "unrestricted" | "tracked" | "permit";
 
 export interface EngineLaunchProfile {
 	/** Empty disables nested agents; "*" enables the native OMP spawn surface. */
@@ -22,6 +23,8 @@ export interface EngineLaunchProfile {
 	providerPromptCacheKey?: string;
 	toolNames?: string[];
 	restrictToolNames?: boolean;
+	/** Optional per-tool boundary policy. Missing tools remain unrestricted. */
+	toolPolicies?: Record<string, EngineToolPolicy>;
 	enableMCP?: boolean;
 	enableLsp?: boolean;
 	/** Existing OMP yield schema used by bounded consultant sessions. */
@@ -59,6 +62,13 @@ export interface EngineSteerRequest extends EngineTarget {
 
 export interface EngineCancelRequest extends EngineTarget {
 	commandId: string;
+	reason?: string;
+}
+
+export interface EngineToolApprovalDecision extends EngineTarget {
+	commandId: string;
+	approvalId: string;
+	decision: "approve" | "deny";
 	reason?: string;
 }
 
@@ -131,7 +141,11 @@ export interface EngineEvent {
 		| "failed"
 		| "interrupted"
 		| "reconciled"
-		| "steered";
+		| "steered"
+		| "tool_approval_requested"
+		| "tool_approval_resolved"
+		| "tool_started"
+		| "tool_settled";
 	payload?: Record<string, unknown>;
 	createdAt: number;
 }

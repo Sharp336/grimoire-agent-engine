@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { EngineLaunchProfile } from "@oh-my-pi/pi-coding-agent/engine/contracts";
+import type { EngineEvent, EngineLaunchProfile } from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import { EngineRuntime, type EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -66,6 +66,131 @@ describe("EngineRuntime", () => {
 		enableMCP: false,
 		enableLsp: false,
 	};
+
+	it("waits for an explicit permit decision before executing a tool", async () => {
+		let executed = false;
+		const { runtime, cwd } = await createRuntime(async session => {
+			const read = session.getToolByName("read");
+			if (!read) throw new Error("read tool is unavailable");
+			await read.execute("read-permit", { path: "permit.txt" });
+			executed = true;
+			return true;
+		});
+		fs.writeFileSync(path.join(cwd, "permit.txt"), "approved");
+		const approvalRequested = nextEngineEvent(runtime, "tool_approval_requested");
+		const started = await runtime.start(
+			{
+				commandId: "command-permit",
+				agentInstanceId: "agent-permit",
+				executionId: "execution-permit",
+				attemptId: "attempt-permit",
+				authorityGeneration: 1,
+				cwd,
+				input: "read",
+			},
+			{ ...profile, toolPolicies: { read: "permit" } },
+		);
+		const approval = await approvalRequested;
+		expect(executed).toBeFalse();
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("running");
+
+		await runtime.resolveToolApproval({
+			...started,
+			commandId: "command-approve",
+			approvalId: String(approval.payload?.approvalId),
+			decision: "approve",
+		});
+		await runtime.drain();
+		expect(executed).toBeTrue();
+		const events = await runtime.store.pendingEvents();
+		expect(events.filter(event => event.kind.startsWith("tool_")).map(event => event.kind)).toEqual([
+			"tool_approval_requested",
+			"tool_approval_resolved",
+			"tool_started",
+			"tool_settled",
+		]);
+		expect(events.find(event => event.kind === "tool_approval_resolved")?.causationCommandId).toBe("command-approve");
+		await runtime.dispose();
+	}, 60_000);
+
+	it("cancels an Attempt that is waiting for a tool permit", async () => {
+		let executed = false;
+		const { runtime, cwd } = await createRuntime(async session => {
+			const read = session.getToolByName("read");
+			if (!read) throw new Error("read tool is unavailable");
+			await read.execute("read-cancelled-permit", { path: "permit.txt" });
+			executed = true;
+			return true;
+		});
+		fs.writeFileSync(path.join(cwd, "permit.txt"), "not read");
+		const approvalRequested = nextEngineEvent(runtime, "tool_approval_requested");
+		const started = await runtime.start(
+			{
+				commandId: "command-cancelled-permit",
+				agentInstanceId: "agent-cancelled-permit",
+				executionId: "execution-cancelled-permit",
+				attemptId: "attempt-cancelled-permit",
+				authorityGeneration: 1,
+				cwd,
+				input: "read",
+			},
+			{ ...profile, toolPolicies: { read: "permit" } },
+		);
+		await approvalRequested;
+		await runtime.cancel({ ...started, commandId: "command-cancel-permit" });
+		await runtime.drain();
+		expect(executed).toBeFalse();
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
+		const events = await runtime.store.pendingEvents();
+		expect(events.find(event => event.kind === "tool_approval_resolved")?.payload?.decision).toBe("cancelled");
+		expect(events.find(event => event.kind === "tool_approval_resolved")?.causationCommandId).toBe(
+			"command-cancel-permit",
+		);
+		await runtime.dispose();
+	}, 60_000);
+
+	it("settles a tracked async effect only after its owner job finishes", async () => {
+		const release = Promise.withResolvers<string>();
+		let runtime!: EngineRuntime;
+		let cwd = "";
+		({ runtime, cwd } = await createRuntime(async session => {
+			const jobId = runtime.asyncJobManager.register("bash", "tracked", () => release.promise, {
+				ownerId: session.getAgentId(),
+				attemptId: session.getAttemptId(),
+				sourceToolCallId: "read-tracked",
+			});
+			runtime.asyncJobManager.watchJobs([jobId]);
+			const read = session.getToolByName("read");
+			if (!read) throw new Error("read tool is unavailable");
+			await read.execute("read-tracked", { path: "tracked.txt" });
+			return true;
+		}));
+		fs.writeFileSync(path.join(cwd, "tracked.txt"), "tracked");
+		const toolStarted = nextEngineEvent(runtime, "tool_started");
+		const started = await runtime.start(
+			{
+				commandId: "command-tracked",
+				agentInstanceId: "agent-tracked",
+				executionId: "execution-tracked",
+				attemptId: "attempt-tracked",
+				authorityGeneration: 1,
+				cwd,
+				input: "read",
+			},
+			{ ...profile, toolPolicies: { read: "tracked" } },
+		);
+		await toolStarted;
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("running");
+		expect((await runtime.store.pendingEvents()).find(event => event.kind === "tool_settled")).toBeUndefined();
+		release.resolve("done");
+		await runtime.drain();
+		const events = await runtime.store.pendingEvents();
+		expect(events.find(event => event.kind === "tool_settled")?.payload).toMatchObject({ status: "completed" });
+		expect(events.findIndex(event => event.kind === "tool_settled")).toBeLessThan(
+			events.findIndex(event => event.kind === "completed"),
+		);
+		await runtime.dispose();
+	}, 60_000);
 
 	it("routes Engine task calls through explicit AgentProfile child launch", async () => {
 		let taskResult = "";
@@ -216,6 +341,40 @@ describe("EngineRuntime", () => {
 		await runtime.drain();
 		await runtime.dispose();
 	}, 60000);
+
+	it("rebuilds an idle root when only its per-run tool policy changes", async () => {
+		const { runtime, cwd } = await createRuntime();
+		const first = await runtime.start(
+			{
+				commandId: "command-policy-a",
+				agentInstanceId: "agent-policy",
+				executionId: "execution-policy-a",
+				attemptId: "attempt-policy-a",
+				authorityGeneration: 1,
+				cwd,
+				input: "A",
+			},
+			profile,
+		);
+		await runtime.drain();
+		const firstSession = runtime.agentRegistry.get(first.engineAgentId)?.session;
+		const second = await runtime.start(
+			{
+				commandId: "command-policy-b",
+				agentInstanceId: "agent-policy",
+				executionId: "execution-policy-b",
+				attemptId: "attempt-policy-b",
+				authorityGeneration: 1,
+				cwd,
+				input: "B",
+			},
+			{ ...profile, toolPolicies: { read: "tracked" } },
+		);
+		expect(second.bindingGeneration).toBeGreaterThan(first.bindingGeneration);
+		expect(runtime.agentRegistry.get(second.engineAgentId)?.session).not.toBe(firstSession);
+		await runtime.drain();
+		await runtime.dispose();
+	}, 60_000);
 
 	it("keeps a completed Attempt terminal when cancel arrives late", async () => {
 		const { runtime, cwd } = await createRuntime();
@@ -457,3 +616,13 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60000);
 });
+
+function nextEngineEvent(runtime: EngineRuntime, kind: EngineEvent["kind"]): Promise<EngineEvent> {
+	const result = Promise.withResolvers<EngineEvent>();
+	const unsubscribe = runtime.subscribe(event => {
+		if (event.kind !== kind) return;
+		unsubscribe();
+		result.resolve(event);
+	});
+	return result.promise;
+}

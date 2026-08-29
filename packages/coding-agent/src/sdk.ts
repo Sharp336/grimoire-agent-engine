@@ -109,6 +109,7 @@ import {
 	type PreparedExtension,
 	type RegisteredTool,
 	type ToolDefinition,
+	type ToolExecutionHook,
 	wrapRegisteredTools,
 } from "./extensibility/extensions";
 import {
@@ -569,6 +570,8 @@ export interface CreateAgentSessionOptions {
 	attemptId?: string;
 	/** Rootless multi-session Engine path. Native CLI/TUI leaves this unset. */
 	engineMode?: boolean;
+	/** Optional host-owned tracking/approval boundary around native tool execution. */
+	toolExecutionHook?: ToolExecutionHook;
 	/** Engine-only conscious child profile dispatcher. */
 	engineChildLauncher?: EngineChildLauncher;
 	/**
@@ -2759,6 +2762,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			settings,
 			localProtocolOptions,
 			() => (hasSession ? session.getAsyncJobSnapshot() : null),
+			options.toolExecutionHook,
 		);
 
 		credentialDisabledTarget = extensionRunner;

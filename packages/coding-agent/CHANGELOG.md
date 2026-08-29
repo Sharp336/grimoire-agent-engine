@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added optional per-tool `tracked` and `permit` policies for Agent Engine sessions, with durable lifecycle events and broker-resolved approval requests that keep asynchronous tool jobs non-blocking.
+
 ### Fixed
 
 - Fixed authenticated Agent Engine messages, commands, and hosted events being redelivered after successful handling, including stale terminal events after a bridge restart.

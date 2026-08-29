@@ -1,5 +1,13 @@
+import * as crypto from "node:crypto";
 import * as path from "node:path";
+import { logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../async/job-manager";
+import type {
+	ToolExecutionHook,
+	ToolExecutionHookCall,
+	ToolExecutionHookOutcome,
+	ToolExecutionHookToken,
+} from "../extensibility/extensions";
 import { IrcBus, type IrcDeliveryReceipt } from "../irc/bus";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
@@ -23,6 +31,8 @@ import {
 	type EngineSteerRequest,
 	type EngineTarget,
 	EngineTargetError,
+	type EngineToolApprovalDecision,
+	type EngineToolPolicy,
 	validateStartRequest,
 } from "./contracts";
 import { engineAgentId, engineRouteToken } from "./route";
@@ -61,6 +71,29 @@ interface LiveBinding extends EngineBindingSnapshot {
 	requireYieldTool: boolean;
 }
 
+interface ToolInvocationRecord {
+	invocationId: string;
+	policy: Exclude<EngineToolPolicy, "unrestricted">;
+	toolCallId: string;
+	toolName: string;
+	inputHash: string;
+	inputPreview: string;
+	target: EngineBindingSnapshot;
+	writeTail: Promise<void>;
+	done: Promise<void>;
+	resolveDone: () => void;
+	settled: boolean;
+}
+
+interface PendingToolApproval {
+	record: ToolInvocationRecord;
+	resolve: (decision: {
+		decision: "approve" | "deny" | "cancelled";
+		reason?: string;
+		causationCommandId?: string;
+	}) => void;
+}
+
 export interface EngineRuntimeOptions {
 	databasePath: string;
 	sessionDefaults?: Omit<
@@ -74,6 +107,7 @@ export interface EngineRuntimeOptions {
 		| "ircBus"
 		| "sessionManager"
 		| "spawns"
+		| "toolExecutionHook"
 	>;
 	/** Test/integration seam; production uses AgentSession.prompt directly. */
 	dispatchPrompt?: (session: AgentSession, input: string) => Promise<boolean>;
@@ -110,6 +144,8 @@ export class EngineRuntime {
 	readonly #lanes = new Map<string, Promise<void>>();
 	readonly #runs = new Set<Promise<void>>();
 	readonly #listeners = new Set<EngineEventListener>();
+	readonly #toolInvocations = new Map<string, ToolInvocationRecord>();
+	readonly #pendingToolApprovals = new Map<string, PendingToolApproval>();
 	readonly #sessionRoot: string;
 	#disposed = false;
 
@@ -213,11 +249,41 @@ export class EngineRuntime {
 			if (binding.attemptState !== "running") {
 				throw new EngineTargetError("too_late", `Attempt ${request.attemptId} is already ${binding.attemptState}`);
 			}
+			this.#cancelToolApprovals(binding, request.reason ?? "Engine attempt cancelled", request.commandId);
 			this.asyncJobManager.cancelAll({ ownerId: binding.engineAgentId, attemptId: binding.attemptId });
 			const abort = binding.session.abort({ reason: request.reason ?? "Engine attempt cancelled" });
 			binding.attemptState = "cancel_requested";
 			await this.store.putAttempt(binding, "cancel_requested", request.reason);
 			this.#trackRun(this.#finishCancel(binding, request, abort));
+		});
+	}
+
+	resolveToolApproval(request: EngineToolApprovalDecision): Promise<void> {
+		if (!request.commandId.trim() || !request.approvalId.trim()) {
+			throw new EngineTargetError("invalid_request", "commandId and approvalId must be non-empty strings");
+		}
+		if (request.decision !== "approve" && request.decision !== "deny") {
+			throw new EngineTargetError("invalid_request", "decision must be approve or deny");
+		}
+		return this.#inLane(request.agentInstanceId, async () => {
+			const binding = this.#requireTarget(request);
+			const pending = this.#pendingToolApprovals.get(request.approvalId);
+			if (!pending || pending.record.target.bindingId !== binding.bindingId) {
+				throw new EngineTargetError("too_late", `Tool approval ${request.approvalId} is no longer pending`);
+			}
+			await this.#queueToolEvent(
+				pending.record,
+				"tool_approval_resolved",
+				{
+					approvalId: request.approvalId,
+					decision: request.decision,
+					...(request.reason ? { reason: request.reason.slice(0, 2_048) } : {}),
+				},
+				request.commandId,
+			);
+			if (this.#pendingToolApprovals.get(request.approvalId) !== pending) return;
+			this.#pendingToolApprovals.delete(request.approvalId);
+			pending.resolve({ decision: request.decision, reason: request.reason });
 		});
 	}
 
@@ -360,7 +426,7 @@ export class EngineRuntime {
 				throw new EngineTargetError("agent_busy", `AgentInstance ${request.agentInstanceId} is busy`);
 			}
 			if (
-				binding.profileDigest !== profile.profileDigest ||
+				binding.profileDigest !== sessionProfileDigest(profile) ||
 				binding.authorityGeneration !== request.authorityGeneration
 			) {
 				await this.#terminateBinding(binding, "requested");
@@ -410,6 +476,16 @@ export class EngineRuntime {
 			: SessionManager.create(request.cwd, sessionDir, this.store.sessionStorage);
 		const id = engineAgentId(request.agentInstanceId);
 		let created: Awaited<ReturnType<typeof createAgentSession>>;
+		let liveBinding: LiveBinding | undefined;
+		const toolExecutionHook: ToolExecutionHook | undefined = hasToolExecutionPolicies(profile)
+			? {
+					before: (call, signal) => {
+						if (!liveBinding) throw new Error("Engine tool boundary is not bound to its AgentSession");
+						return this.#beforeToolExecution(liveBinding, profile, call, signal);
+					},
+					after: (call, token, outcome) => this.#afterToolExecution(token, call, outcome),
+				}
+			: undefined;
 		try {
 			const engineChildLauncher =
 				this.#launchChild && request.agentInstanceRef && profile.spawns === "*" && (profile.maxSpawnDepth ?? 0) > 0
@@ -447,6 +523,7 @@ export class EngineRuntime {
 				outputSchema: profile.outputSchema,
 				requireYieldTool: profile.requireYieldTool,
 				...resolved?.options,
+				toolExecutionHook,
 				engineChildLauncher,
 				agentId: id,
 				agentDisplayName: request.agentInstanceId,
@@ -471,7 +548,7 @@ export class EngineRuntime {
 			attemptId: request.attemptId,
 			engineAgentId: id,
 			sessionFile: created.session.sessionFile,
-			profileDigest: profile.profileDigest,
+			profileDigest: sessionProfileDigest(profile),
 			attemptState: "accepted",
 			state: "idle",
 			engineGeneration: this.engineGeneration,
@@ -484,6 +561,7 @@ export class EngineRuntime {
 			disposeProfile: resolved?.dispose ?? (() => {}),
 			requireYieldTool: profile.requireYieldTool === true,
 		};
+		liveBinding = binding;
 		binding.unsubscribe = created.session.subscribe(event => {
 			if (event.type === "agent_end" && event.isTerminal !== false && binding.state === "running") {
 				this.agentRegistry.setStatus(binding.engineAgentId, "idle", binding.session);
@@ -491,6 +569,190 @@ export class EngineRuntime {
 		});
 		this.#bindings.set(request.agentInstanceId, binding);
 		return binding;
+	}
+
+	async #beforeToolExecution(
+		binding: LiveBinding,
+		profile: EngineLaunchProfile,
+		call: ToolExecutionHookCall,
+		signal?: AbortSignal,
+	): Promise<ToolExecutionHookToken | undefined> {
+		const policy = profile.toolPolicies?.[call.toolName] ?? "unrestricted";
+		if (policy === "unrestricted") return undefined;
+		const input = stableStringifyJson(call.input);
+		const inputHash = sha256(input);
+		const invocationId = `tool_${sha256(`${binding.bindingId}\0${binding.attemptId}\0${call.toolCallId}\0${inputHash}`).slice(0, 32)}`;
+		if (this.#toolInvocations.has(invocationId)) {
+			throw new Error(`Tool invocation ${invocationId} is already active`);
+		}
+		const done = Promise.withResolvers<void>();
+		const record: ToolInvocationRecord = {
+			invocationId,
+			policy,
+			toolCallId: call.toolCallId,
+			toolName: call.toolName,
+			inputHash,
+			inputPreview: input.length > 8_192 ? `${input.slice(0, 8_192)}…` : input,
+			target: this.#snapshot(binding),
+			writeTail: Promise.resolve(),
+			done: done.promise,
+			resolveDone: done.resolve,
+			settled: false,
+		};
+		this.#toolInvocations.set(invocationId, record);
+		if (policy === "permit") return await this.#requestToolApproval(record, signal);
+		void this.#queueToolEvent(record, "tool_started", this.#toolEventPayload(record));
+		return { invocationId };
+	}
+
+	async #requestToolApproval(record: ToolInvocationRecord, signal?: AbortSignal): Promise<ToolExecutionHookToken> {
+		signal?.throwIfAborted();
+		const completion = Promise.withResolvers<{
+			decision: "approve" | "deny" | "cancelled";
+			reason?: string;
+			causationCommandId?: string;
+		}>();
+		const pending: PendingToolApproval = { record, resolve: completion.resolve };
+		this.#pendingToolApprovals.set(record.invocationId, pending);
+		try {
+			await this.#queueToolEvent(record, "tool_approval_requested", {
+				...this.#toolEventPayload(record),
+				approvalId: record.invocationId,
+			});
+		} catch (error) {
+			this.#pendingToolApprovals.delete(record.invocationId);
+			this.#toolInvocations.delete(record.invocationId);
+			record.resolveDone();
+			throw error;
+		}
+		const abort = () => {
+			if (this.#pendingToolApprovals.get(record.invocationId) !== pending) return;
+			this.#pendingToolApprovals.delete(record.invocationId);
+			completion.resolve({ decision: "cancelled", reason: "Attempt cancelled while awaiting approval" });
+		};
+		signal?.addEventListener("abort", abort, { once: true });
+		const decision = await completion.promise.finally(() => signal?.removeEventListener("abort", abort));
+		if (decision.decision === "approve") {
+			void this.#queueToolEvent(record, "tool_started", this.#toolEventPayload(record));
+			return { invocationId: record.invocationId };
+		}
+		if (decision.decision === "cancelled") {
+			await this.#queueToolEvent(
+				record,
+				"tool_approval_resolved",
+				{
+					approvalId: record.invocationId,
+					decision: "cancelled",
+					reason: decision.reason,
+				},
+				decision.causationCommandId,
+			);
+		}
+		this.#completeToolInvocation(record, decision.decision, decision.reason);
+		throw new Error(
+			decision.decision === "deny"
+				? `Tool call denied by approval: ${record.toolName}`
+				: `Tool approval cancelled: ${record.toolName}`,
+		);
+	}
+
+	#afterToolExecution(
+		token: ToolExecutionHookToken,
+		call: ToolExecutionHookCall,
+		outcome: ToolExecutionHookOutcome,
+	): void {
+		const record = this.#toolInvocations.get(token.invocationId);
+		if (!record || record.toolCallId !== call.toolCallId || record.toolName !== call.toolName) return;
+		const jobs = this.asyncJobManager
+			.getAllJobs({ ownerId: record.target.engineAgentId, attemptId: record.target.attemptId })
+			.filter(job => job.sourceToolCallId === record.toolCallId);
+		if (jobs.length === 0) {
+			this.#completeToolInvocation(record, outcome.isError ? "failed" : "completed", outcome.error);
+			return;
+		}
+		void Promise.all(jobs.map(job => job.promise)).then(() => {
+			const failed = jobs.find(job => job.status === "failed");
+			const cancelled = jobs.find(job => job.status === "cancelled");
+			const status = outcome.isError || failed ? "failed" : cancelled ? "cancelled" : "completed";
+			this.#completeToolInvocation(
+				record,
+				status,
+				outcome.error ?? failed?.errorText,
+				jobs.map(job => job.id),
+			);
+		});
+	}
+
+	#completeToolInvocation(
+		record: ToolInvocationRecord,
+		status: "completed" | "failed" | "cancelled" | "deny",
+		error?: string,
+		jobIds?: string[],
+	): void {
+		if (record.settled) return;
+		record.settled = true;
+		void this.#queueToolEvent(record, "tool_settled", {
+			invocationId: record.invocationId,
+			toolCallId: record.toolCallId,
+			toolName: record.toolName,
+			status: status === "deny" ? "denied" : status,
+			...(error ? { error: error.slice(0, 2_048) } : {}),
+			...(jobIds?.length ? { jobIds } : {}),
+		}).finally(() => {
+			this.#toolInvocations.delete(record.invocationId);
+			record.resolveDone();
+		});
+	}
+
+	#queueToolEvent(
+		record: ToolInvocationRecord,
+		kind: EngineEvent["kind"],
+		payload: Record<string, unknown>,
+		causationCommandId = record.target.commandId,
+	): Promise<void> {
+		const write = record.writeTail.then(() => this.#emit(record.target, kind, payload, causationCommandId));
+		record.writeTail = write.catch(error => {
+			logger.warn("Engine tool event write failed", {
+				invocationId: record.invocationId,
+				kind,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
+		return write;
+	}
+
+	#toolEventPayload(record: ToolInvocationRecord): Record<string, unknown> {
+		return {
+			invocationId: record.invocationId,
+			toolCallId: record.toolCallId,
+			toolName: record.toolName,
+			policy: record.policy,
+			inputHash: record.inputHash,
+			inputPreview: record.inputPreview,
+		};
+	}
+
+	async #waitForToolInvocations(binding: LiveBinding, attemptId: string): Promise<void> {
+		for (;;) {
+			const pending = [...this.#toolInvocations.values()].filter(
+				record => record.target.bindingId === binding.bindingId && record.target.attemptId === attemptId,
+			);
+			if (pending.length === 0) return;
+			await Promise.all(pending.map(record => record.done));
+		}
+	}
+
+	#cancelToolApprovals(binding: LiveBinding, reason: string, causationCommandId?: string): void {
+		for (const [approvalId, pending] of this.#pendingToolApprovals) {
+			if (
+				pending.record.target.bindingId !== binding.bindingId ||
+				pending.record.target.attemptId !== binding.attemptId
+			) {
+				continue;
+			}
+			this.#pendingToolApprovals.delete(approvalId);
+			pending.resolve({ decision: "cancelled", reason, causationCommandId });
+		}
 	}
 
 	/** Cancel an Engine child when its parent task call is aborted. */
@@ -545,6 +807,7 @@ export class EngineRuntime {
 			await binding.session.waitForIdle();
 			await this.asyncJobManager.waitForOwnerJobs(binding.engineAgentId, { attemptId });
 			await this.asyncJobManager.drainDeliveries({ filter });
+			await this.#waitForToolInvocations(binding, attemptId);
 			await binding.session.waitForIdle();
 			if (
 				this.asyncJobManager.getRunningJobs(filter).length === 0 &&
@@ -572,6 +835,7 @@ export class EngineRuntime {
 		await this.asyncJobManager.drainDeliveries({
 			filter: { ownerId: binding.engineAgentId, attemptId: request.attemptId },
 		});
+		await this.#waitForToolInvocations(binding, request.attemptId);
 		await this.#inLane(binding.agentInstanceId, async () => {
 			if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
 			if (binding.attemptId !== request.attemptId || binding.attemptState !== "cancel_requested") return;
@@ -593,6 +857,7 @@ export class EngineRuntime {
 		this.#bindings.delete(binding.agentInstanceId);
 		binding.state = "released";
 		binding.unsubscribe();
+		this.#cancelToolApprovals(binding, cause === "engine_lost" ? "Engine stopped" : "Engine binding released");
 		this.asyncJobManager.cancelAll({ ownerId: binding.engineAgentId, attemptId: binding.attemptId });
 		await binding.session.abort({ reason: cause === "engine_lost" ? "Engine stopped" : "Engine binding released" });
 		await binding.session.dispose();
@@ -615,6 +880,7 @@ export class EngineRuntime {
 		this.#bindings.delete(binding.agentInstanceId);
 		binding.state = "released";
 		binding.unsubscribe();
+		this.#cancelToolApprovals(binding, "Engine admission failed");
 		this.asyncJobManager.cancelAll({ ownerId: binding.engineAgentId, attemptId: binding.attemptId });
 		await binding.session.abort({ reason: "Engine admission failed" });
 		await binding.session.dispose();
@@ -752,4 +1018,16 @@ export class EngineRuntime {
 	#throwIfDisposed(): void {
 		if (this.#disposed) throw new Error("EngineRuntime is disposed");
 	}
+}
+
+function hasToolExecutionPolicies(profile: EngineLaunchProfile): boolean {
+	return Object.values(profile.toolPolicies ?? {}).some(policy => policy !== "unrestricted");
+}
+
+function sha256(value: string): string {
+	return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function sessionProfileDigest(profile: EngineLaunchProfile): string {
+	return `sha256:${sha256(stableStringifyJson(profile))}`;
 }

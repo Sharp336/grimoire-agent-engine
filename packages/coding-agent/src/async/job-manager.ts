@@ -53,6 +53,8 @@ export interface AsyncJob {
 	ownerId?: string;
 	/** Immutable durable Attempt identity captured when the job is registered. */
 	attemptId?: string;
+	/** Model-facing tool call that registered this job, for deferred effect settlement. */
+	sourceToolCallId?: string;
 	/**
 	 * Registry id of the subagent this job runs (task/tan/vibe jobs). Lets
 	 * job-view code link a job row to its AgentRegistry ref even when the job
@@ -116,6 +118,8 @@ export interface AsyncJobRegisterOptions {
 	ownerId?: string;
 	/** Durable Attempt identity captured before asynchronous dispatch. */
 	attemptId?: string;
+	/** Model-facing tool call that registered this job. */
+	sourceToolCallId?: string;
 	/** Registry id of the subagent this job runs; see {@link AsyncJob.agentId}. */
 	agentId?: string;
 	onProgress?: (text: string, details?: Record<string, unknown>) => void | Promise<void>;
@@ -249,6 +253,7 @@ export class AsyncJobManager {
 			promise: Promise.resolve(),
 			ownerId: options?.ownerId,
 			attemptId: options?.attemptId,
+			sourceToolCallId: options?.sourceToolCallId,
 			agentId: options?.agentId,
 			queued: options?.queued === true,
 		};

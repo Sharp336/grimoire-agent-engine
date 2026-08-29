@@ -83,6 +83,34 @@ interface BeforeAgentStartCombinedResult {
 
 export type ExtensionErrorListener = (error: ExtensionError) => void;
 
+export interface ToolExecutionHookCall {
+	toolCallId: string;
+	toolName: string;
+	input: unknown;
+}
+
+export interface ToolExecutionHookToken {
+	invocationId: string;
+}
+
+export interface ToolExecutionHookOutcome {
+	isError: boolean;
+	error?: string;
+}
+
+/** Optional host-owned boundary around native tool execution. */
+export interface ToolExecutionHook {
+	before(
+		call: ToolExecutionHookCall,
+		signal?: AbortSignal,
+	): ToolExecutionHookToken | undefined | Promise<ToolExecutionHookToken | undefined>;
+	after(
+		call: ToolExecutionHookCall,
+		token: ToolExecutionHookToken,
+		outcome: ToolExecutionHookOutcome,
+	): void | Promise<void>;
+}
+
 export const EXTENSION_HANDLER_TIMEOUT_MS = 30_000;
 let extensionHandlerTimeoutMs = EXTENSION_HANDLER_TIMEOUT_MS;
 
@@ -607,6 +635,7 @@ export class ExtensionRunner {
 		private readonly settings?: Settings,
 		private readonly localProtocolOptions?: LocalProtocolOptions,
 		getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
+		readonly toolExecutionHook?: ToolExecutionHook,
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;

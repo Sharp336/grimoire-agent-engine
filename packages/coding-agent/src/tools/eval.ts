@@ -448,7 +448,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	}
 
 	async execute(
-		_toolCallId: string,
+		toolCallId: string,
 		params: typeof evalSchema.infer,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback,
@@ -577,7 +577,11 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 					throw error;
 				}
 			},
-			{ ownerId: session.getAgentId?.() ?? undefined },
+			{
+				ownerId: session.getAgentId?.() ?? undefined,
+				attemptId: session.getAttemptId?.(),
+				sourceToolCallId: toolCallId,
+			},
 		);
 
 		if (startBackgrounded) {

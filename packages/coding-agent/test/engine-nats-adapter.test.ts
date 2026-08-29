@@ -36,11 +36,19 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 		const cwd = path.join(tempDir, "workspace");
 		fs.mkdirSync(cwd);
+		fs.writeFileSync(path.join(cwd, "permit.txt"), "approved through broker");
 		let dispatchCount = 0;
+		let permitExecuted = false;
 		const runtime = await EngineRuntime.create({
 			databasePath: path.join(tempDir, "engine.sqlite"),
-			dispatchPrompt: async () => {
+			dispatchPrompt: async session => {
 				dispatchCount++;
+				if (session.getAgentId() === engineAgentId("agent-permit")) {
+					const read = session.getToolByName("read");
+					if (!read) throw new Error("read tool is unavailable");
+					await read.execute("read-permit", { path: "permit.txt" });
+					permitExecuted = true;
+				}
 				return true;
 			},
 			sessionDefaults: {
@@ -66,7 +74,8 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			servers: broker.url,
 			authorizeCommand: () => {},
 			authorizeMessage: () => {},
-			resolveLaunchProfile: () => profile,
+			resolveLaunchProfile: command =>
+				command.agentInstanceId === "agent-permit" ? { ...profile, toolPolicies: { read: "permit" } } : profile,
 			onError: error => errors.push(error),
 		});
 		const client = await connect({ servers: broker.url });
@@ -76,6 +85,7 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			const decoder = new TextDecoder();
 			const eventsA: Array<Record<string, unknown>> = [];
 			const eventsB: Array<Record<string, unknown>> = [];
+			const permitEvents: Array<Record<string, unknown>> = [];
 			const subA = client.subscribe(adapter.eventSubject("agent-a", "*"), {
 				callback: (_error, message) => {
 					eventsA.push(JSON.parse(decoder.decode(message.data)));
@@ -84,6 +94,11 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			const subB = client.subscribe(adapter.eventSubject("agent-b", "*"), {
 				callback: (_error, message) => {
 					eventsB.push(JSON.parse(decoder.decode(message.data)));
+				},
+			});
+			const permitSub = client.subscribe(adapter.eventSubject("agent-permit", "*"), {
+				callback: (_error, message) => {
+					permitEvents.push(JSON.parse(decoder.decode(message.data)));
 				},
 			});
 
@@ -109,6 +124,52 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			expect(eventsA.map(event => event.type)).toEqual(["command.accepted", "attempt.started", "attempt.completed"]);
 			expect(eventsB.map(event => event.type)).toEqual(["command.accepted", "attempt.started", "attempt.completed"]);
 			expect(dispatchCount).toBe(2);
+
+			const permitStart = startCommand(runtime.engineGeneration, "agent-permit", "permit", cwd);
+			await js.publish(adapter.commandSubject("agent-permit", "start"), JSON.stringify(permitStart), {
+				msgID: permitStart.commandId,
+			});
+			await waitFor(() => permitEvents.some(event => event.type === "tool.approval_requested"));
+			expect(permitExecuted).toBeFalse();
+			const approval = permitEvents.find(event => event.type === "tool.approval_requested")!;
+			const resolveApproval: EngineCommandEnvelope = {
+				schema: "grimoire.engine.command.v1",
+				commandId: "command-resolve-permit",
+				op: "resolve_tool_approval",
+				deviceId: "device-1",
+				engineId: "engine-1",
+				engineGeneration: Number(approval.engineGeneration),
+				agentInstanceId: "agent-permit",
+				runtimeBindingId: String(approval.runtimeBindingId),
+				bindingGeneration: Number(approval.bindingGeneration),
+				executionId: String(approval.executionId),
+				attemptId: String(approval.attemptId),
+				authorityGeneration: Number(approval.authorityGeneration),
+				issuedAt: Date.now(),
+				payload: {
+					approvalId: String((approval.payload as Record<string, unknown>).approvalId),
+					decision: "approve",
+				},
+			};
+			await js.publish(
+				adapter.commandSubject("agent-permit", "resolve_tool_approval"),
+				JSON.stringify(resolveApproval),
+				{ msgID: resolveApproval.commandId },
+			);
+			await waitFor(async () => (await runtime.store.getAttempt("attempt-permit"))?.state === "completed");
+			await adapter.flushEvents();
+			await waitFor(() => permitEvents.some(event => event.type === "attempt.completed"));
+			expect(permitExecuted).toBeTrue();
+			expect(permitEvents.map(event => event.type)).toEqual([
+				"command.accepted",
+				"attempt.started",
+				"tool.approval_requested",
+				"tool.approval_resolved",
+				"tool.started",
+				"tool.settled",
+				"attempt.completed",
+			]);
+			permitSub.unsubscribe();
 
 			const inbound = runtime.ircBus.wait(engineAgentId("agent-b"), { from: engineAgentId("agent-a") }, 5_000);
 			const receipt = await runtime.ircBus.send({
@@ -151,7 +212,7 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 					(await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer)).delivered.consumer_seq >
 					deliveredBefore,
 			);
-			expect(dispatchCount).toBe(2);
+			expect(dispatchCount).toBe(3);
 
 			const deliveredAfterDuplicate = (await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer))
 				.delivered.consumer_seq;
@@ -168,7 +229,7 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			});
 			await adapter.flushEvents();
 			expect(eventsA.some(event => event.causationCommandId === oldGenerationA.commandId)).toBeFalse();
-			expect(dispatchCount).toBe(2);
+			expect(dispatchCount).toBe(3);
 
 			const futureGenerationA = {
 				...startCommand(runtime.engineGeneration + 1, "agent-a", "stale", cwd),
@@ -178,7 +239,7 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 				msgID: futureGenerationA.commandId,
 			});
 			await waitFor(() => eventsA.some(event => event.type === "command.rejected"));
-			expect(dispatchCount).toBe(2);
+			expect(dispatchCount).toBe(3);
 			subA.unsubscribe();
 			subB.unsubscribe();
 

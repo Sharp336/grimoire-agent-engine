@@ -309,6 +309,18 @@ function resolveLaunchProfile(command: EngineCommandEnvelope): EngineLaunchProfi
 	if (profile.requireYieldTool !== undefined && typeof profile.requireYieldTool !== "boolean") {
 		throw new Error("requireYieldTool must be a boolean");
 	}
+	if (profile.toolPolicies !== undefined) {
+		if (!profile.toolPolicies || typeof profile.toolPolicies !== "object" || Array.isArray(profile.toolPolicies)) {
+			throw new Error("toolPolicies must be an object");
+		}
+		for (const [toolName, policy] of Object.entries(profile.toolPolicies)) {
+			if (!toolName.trim() || toolName.length > 128)
+				throw new Error("toolPolicies keys must contain 1..128 characters");
+			if (policy !== "unrestricted" && policy !== "tracked" && policy !== "permit") {
+				throw new Error(`toolPolicies.${toolName} must be unrestricted, tracked or permit`);
+			}
+		}
+	}
 	if (profile.outputSchema !== undefined) {
 		if (!profile.outputSchema || typeof profile.outputSchema !== "object" || Array.isArray(profile.outputSchema)) {
 			throw new Error("outputSchema must be an object");

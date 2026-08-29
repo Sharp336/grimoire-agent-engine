@@ -27,7 +27,7 @@ export const ENGINE_EVENT_STREAM = "GRIMOIRE_ENGINE_EVENTS";
 export const AGENT_MESSAGE_STREAM = "GRIMOIRE_AGENT_MESSAGES";
 export const ENGINE_MAX_ENVELOPE_BYTES = 256 * 1024;
 
-export type EngineCommandOp = "start" | "steer" | "cancel" | "reconcile";
+export type EngineCommandOp = "start" | "steer" | "cancel" | "reconcile" | "resolve_tool_approval";
 
 export interface EngineCommandEnvelope {
 	schema: "grimoire.engine.command.v1";
@@ -473,6 +473,20 @@ export class NatsEngineAdapter {
 					reason: optionalRecordString(command.payload, "reason"),
 				});
 				return;
+			case "resolve_tool_approval": {
+				const decision = requiredRecordString(command.payload, "decision");
+				if (decision !== "approve" && decision !== "deny") {
+					throw new PoisonMessageError("decision must be approve or deny");
+				}
+				await this.runtime.resolveToolApproval({
+					...boundTarget(command),
+					commandId: command.commandId,
+					approvalId: requiredRecordString(command.payload, "approvalId"),
+					decision,
+					reason: optionalRecordString(command.payload, "reason"),
+				});
+				return;
+			}
 			case "reconcile":
 				await this.runtime.reconcile({
 					commandId: command.commandId,
@@ -704,7 +718,13 @@ function requiredSafeInteger(record: Record<string, unknown>, key: string): numb
 }
 
 function isCommandOp(value: unknown): value is EngineCommandOp {
-	return value === "start" || value === "steer" || value === "cancel" || value === "reconcile";
+	return (
+		value === "start" ||
+		value === "steer" ||
+		value === "cancel" ||
+		value === "reconcile" ||
+		value === "resolve_tool_approval"
+	);
 }
 
 function boundTarget(command: EngineCommandEnvelope) {
@@ -731,6 +751,14 @@ function eventType(kind: EngineEvent["kind"]): string {
 			return "reconcile.snapshot";
 		case "steered":
 			return "command.steered";
+		case "tool_approval_requested":
+			return "tool.approval_requested";
+		case "tool_approval_resolved":
+			return "tool.approval_resolved";
+		case "tool_started":
+			return "tool.started";
+		case "tool_settled":
+			return "tool.settled";
 		default:
 			return `attempt.${kind}`;
 	}

@@ -1319,6 +1319,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				queued: true,
 				ownerId: this.session.getAgentId?.() ?? undefined,
 				attemptId: this.session.getAttemptId?.(),
+				sourceToolCallId: toolCallId,
 				onProgress: text => {
 					onUpdate?.({ content: [{ type: "text", text }], details: buildDetails() });
 				},

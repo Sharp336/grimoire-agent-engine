@@ -9,7 +9,7 @@ import type {
 	ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
-import { sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
+import { logger, sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../config/settings";
 import type { Theme } from "../../modes/theme/theme";
 import {
@@ -345,6 +345,10 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			}
 		}
 
+		const executionHook = this.runner.toolExecutionHook;
+		const hookCall = { toolCallId, toolName: this.tool.name, input: effectiveParams };
+		const hookToken = await executionHook?.before(hookCall, signal);
+
 		// Execute the actual tool
 		let result: AgentToolResult<TDetails, TParameters>;
 		let executionError: Error | undefined;
@@ -365,6 +369,22 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				content: [{ type: "text", text: executionError.message }],
 				details: undefined as TDetails,
 			};
+		}
+		if (executionHook && hookToken) {
+			void Promise.resolve()
+				.then(() =>
+					executionHook.after(hookCall, hookToken, {
+						isError: executionError !== undefined || result.isError === true,
+						...(executionError ? { error: executionError.message } : {}),
+					}),
+				)
+				.catch(error => {
+					logger.warn("Tool execution hook settlement failed", {
+						toolName: this.tool.name,
+						toolCallId,
+						error: error instanceof Error ? error.message : String(error),
+					});
+				});
 		}
 
 		// Emit tool_result event - extensions can modify the result and error status
