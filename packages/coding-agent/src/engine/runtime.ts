@@ -10,6 +10,7 @@ import {
 	type EngineAttemptState,
 	type EngineBindingSnapshot,
 	type EngineCancelRequest,
+	type EngineCompletionPayload,
 	type EngineEvent,
 	type EngineLaunchProfile,
 	type EnginePeerMessage,
@@ -28,12 +29,15 @@ import { EngineStore } from "./store";
 
 type EngineEventListener = (event: EngineEvent) => void | Promise<void>;
 
+const MAX_ASSISTANT_FINAL_CHARS = 48_000;
+
 interface LiveBinding extends EngineBindingSnapshot {
 	attemptState: EngineAttemptState;
 	session: AgentSession;
 	steerCommandIds: string[];
 	steerCommandSet: Set<string>;
 	unsubscribe: () => void;
+	disposeProfile: () => void;
 }
 
 export interface EngineRuntimeOptions {
@@ -52,6 +56,10 @@ export interface EngineRuntimeOptions {
 	>;
 	/** Test/integration seam; production uses AgentSession.prompt directly. */
 	dispatchPrompt?: (session: AgentSession, input: string) => Promise<boolean>;
+	resolveSessionProfile?: (profile: EngineLaunchProfile) => Promise<{
+		options: Partial<CreateAgentSessionOptions>;
+		dispose(): void;
+	}>;
 }
 
 export class EngineRuntime {
@@ -63,6 +71,7 @@ export class EngineRuntime {
 	readonly store: EngineStore;
 	readonly #sessionDefaults: EngineRuntimeOptions["sessionDefaults"];
 	readonly #dispatchPrompt: (session: AgentSession, input: string) => Promise<boolean>;
+	readonly #resolveSessionProfile: EngineRuntimeOptions["resolveSessionProfile"];
 	readonly #bindings = new Map<string, LiveBinding>();
 	readonly #lanes = new Map<string, Promise<void>>();
 	readonly #runs = new Set<Promise<void>>();
@@ -75,6 +84,7 @@ export class EngineRuntime {
 		this.engineGeneration = engineGeneration;
 		this.#sessionDefaults = options.sessionDefaults;
 		this.#dispatchPrompt = options.dispatchPrompt ?? ((session, input) => session.prompt(input));
+		this.#resolveSessionProfile = options.resolveSessionProfile;
 		this.#sessionRoot = path.join(path.dirname(path.resolve(options.databasePath)), "engine-sessions");
 	}
 
@@ -98,6 +108,36 @@ export class EngineRuntime {
 
 	listBindings(): EngineBindingSnapshot[] {
 		return [...this.#bindings.values()].map(binding => this.#snapshot(binding));
+	}
+
+	resolveBrokerAgent(
+		engineAgentId: string,
+	): Pick<LiveBinding, "agentInstanceId" | "executionId" | "attemptId" | "authorityGeneration"> | undefined {
+		let current = engineAgentId;
+		const seen = new Set<string>();
+		let binding: LiveBinding | undefined;
+		while (!seen.has(current)) {
+			seen.add(current);
+			binding = [...this.#bindings.values()].find(candidate => candidate.engineAgentId === current);
+			if (binding) break;
+			const parent = this.agentRegistry.get(current)?.parentId;
+			if (!parent) return undefined;
+			current = parent;
+		}
+		return binding
+			? {
+					agentInstanceId: engineAgentId === binding.engineAgentId ? binding.agentInstanceId : engineAgentId,
+					executionId: binding.executionId,
+					attemptId: binding.attemptId,
+					authorityGeneration: binding.authorityGeneration,
+				}
+			: undefined;
+	}
+
+	resolveEngineAgentId(agentInstanceId: string): string | undefined {
+		const binding = this.#bindings.get(agentInstanceId);
+		if (binding) return binding.engineAgentId;
+		return this.agentRegistry.get(agentInstanceId)?.id;
 	}
 
 	start(request: EngineStartRequest, profile: EngineLaunchProfile): Promise<EngineStartResult> {
@@ -204,10 +244,18 @@ export class EngineRuntime {
 		if (!message.messageId.trim() || !message.body.trim()) {
 			throw new EngineTargetError("invalid_request", "messageId and body must be non-empty strings");
 		}
-		return await this.ircBus.send({
-			from: engineAgentId(message.fromAgentInstanceId),
-			to: engineAgentId(message.toAgentInstanceId),
+		const recipient = this.resolveEngineAgentId(message.toAgentInstanceId);
+		const sender = this.resolveEngineAgentId(message.fromAgentInstanceId);
+		if (!recipient || !sender) {
+			return { to: message.toAgentInstanceId, outcome: "failed", error: "Unknown Engine peer" };
+		}
+		return await this.ircBus.deliver({
+			id: message.messageId,
+			from: sender,
+			to: recipient,
 			body: message.body,
+			ts: message.sentAt ?? Date.now(),
+			replyTo: message.replyToMessageId,
 		});
 	}
 
@@ -312,6 +360,7 @@ export class EngineRuntime {
 	}
 
 	async #openBinding(request: EngineStartRequest, profile: EngineLaunchProfile): Promise<LiveBinding> {
+		const resolved = await this.#resolveSessionProfile?.(profile);
 		const prior = await this.store.getBinding(request.agentInstanceId);
 		const bindingGeneration = (prior?.bindingGeneration ?? 0) + 1;
 		const route = engineRouteToken(request.agentInstanceId);
@@ -322,25 +371,32 @@ export class EngineRuntime {
 				})
 			: SessionManager.create(request.cwd, sessionDir, this.store.sessionStorage);
 		const id = engineAgentId(request.agentInstanceId);
-		const created = await createAgentSession({
-			...this.#sessionDefaults,
-			cwd: request.cwd,
-			sessionManager,
-			spawns: profile.spawns,
-			toolNames: profile.toolNames,
-			restrictToolNames: profile.restrictToolNames,
-			enableMCP: profile.enableMCP,
-			enableLsp: profile.enableLsp,
-			agentId: id,
-			agentDisplayName: request.agentInstanceId,
-			agentRegistry: this.agentRegistry,
-			agentLifecycle: this.agentLifecycle,
-			asyncJobManager: this.asyncJobManager,
-			ircBus: this.ircBus,
-			attemptId: request.attemptId,
-			engineMode: true,
-			expectedAgentRef: null,
-		});
+		let created: Awaited<ReturnType<typeof createAgentSession>>;
+		try {
+			created = await createAgentSession({
+				...this.#sessionDefaults,
+				cwd: request.cwd,
+				sessionManager,
+				spawns: profile.spawns,
+				toolNames: profile.toolNames,
+				restrictToolNames: profile.restrictToolNames,
+				enableMCP: profile.enableMCP,
+				enableLsp: profile.enableLsp,
+				...resolved?.options,
+				agentId: id,
+				agentDisplayName: request.agentInstanceId,
+				agentRegistry: this.agentRegistry,
+				agentLifecycle: this.agentLifecycle,
+				asyncJobManager: this.asyncJobManager,
+				ircBus: this.ircBus,
+				attemptId: request.attemptId,
+				engineMode: true,
+				expectedAgentRef: null,
+			});
+		} catch (error) {
+			resolved?.dispose();
+			throw error;
+		}
 		const binding: LiveBinding = {
 			bindingId: `${route}:${bindingGeneration}`,
 			commandId: request.commandId,
@@ -359,6 +415,7 @@ export class EngineRuntime {
 			steerCommandIds: [],
 			steerCommandSet: new Set(),
 			unsubscribe: () => {},
+			disposeProfile: resolved?.dispose ?? (() => {}),
 		};
 		binding.unsubscribe = created.session.subscribe(event => {
 			if (event.type === "agent_end" && event.isTerminal !== false && binding.state === "running") {
@@ -373,6 +430,7 @@ export class EngineRuntime {
 		const attemptId = binding.attemptId;
 		try {
 			await this.#dispatchPrompt(binding.session, input);
+			await this.#waitForAttemptQuiescence(binding, attemptId);
 			await this.#inLane(binding.agentInstanceId, async () => {
 				if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
 				if (binding.attemptId !== attemptId || binding.attemptState !== "running") return;
@@ -380,7 +438,7 @@ export class EngineRuntime {
 				binding.attemptState = "completed";
 				await this.store.putBinding(this.#snapshot(binding));
 				await this.store.putAttempt(binding, "completed");
-				await this.#emit(binding, "completed");
+				await this.#emit(binding, "completed", this.#completionPayload(binding));
 			});
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
@@ -394,6 +452,32 @@ export class EngineRuntime {
 				await this.#emit(binding, "failed", { error: message });
 			});
 		}
+	}
+
+	async #waitForAttemptQuiescence(binding: LiveBinding, attemptId: string): Promise<void> {
+		const filter = { ownerId: binding.engineAgentId, attemptId };
+		for (;;) {
+			await binding.session.waitForIdle();
+			await this.asyncJobManager.waitForOwnerJobs(binding.engineAgentId, { attemptId });
+			await this.asyncJobManager.drainDeliveries({ filter });
+			await binding.session.waitForIdle();
+			if (
+				this.asyncJobManager.getRunningJobs(filter).length === 0 &&
+				!this.asyncJobManager.hasPendingDeliveries(filter)
+			) {
+				return;
+			}
+		}
+	}
+
+	#completionPayload(binding: LiveBinding): EngineCompletionPayload {
+		const final = binding.session.getLastAssistantText() ?? "";
+		const outputTruncated = final.length > MAX_ASSISTANT_FINAL_CHARS;
+		return {
+			assistantFinal: outputTruncated ? `${final.slice(0, MAX_ASSISTANT_FINAL_CHARS)}\n[…truncated]` : final,
+			...(binding.sessionFile ? { transcriptRef: `history://${binding.engineAgentId}` } : {}),
+			...(outputTruncated ? { outputTruncated: true } : {}),
+		};
 	}
 
 	async #finishCancel(binding: LiveBinding, request: EngineCancelRequest, abort: Promise<void>): Promise<void> {
@@ -426,6 +510,7 @@ export class EngineRuntime {
 		this.asyncJobManager.cancelAll({ ownerId: binding.engineAgentId, attemptId: binding.attemptId });
 		await binding.session.abort({ reason: cause === "engine_lost" ? "Engine stopped" : "Engine binding released" });
 		await binding.session.dispose();
+		binding.disposeProfile();
 		this.agentRegistry.unregister(binding.engineAgentId, binding.session);
 		await this.store.putBinding(this.#snapshot(binding));
 		if (cause === "engine_lost" && wasRunning) {
@@ -447,6 +532,7 @@ export class EngineRuntime {
 		this.asyncJobManager.cancelAll({ ownerId: binding.engineAgentId, attemptId: binding.attemptId });
 		await binding.session.abort({ reason: "Engine admission failed" });
 		await binding.session.dispose();
+		binding.disposeProfile();
 		this.agentRegistry.unregister(binding.engineAgentId, binding.session);
 	}
 

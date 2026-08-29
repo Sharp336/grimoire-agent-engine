@@ -272,4 +272,39 @@ describe("EngineRuntime", () => {
 		).toEqual(["command-a", "cancel-a"]);
 		await runtime.dispose();
 	}, 60000);
+
+	it("waits for attempt jobs before publishing the bounded final result", async () => {
+		const job = Promise.withResolvers<string>();
+		const { runtime, cwd } = await createRuntime(async session => {
+			Object.defineProperty(session, "getLastAssistantText", { value: () => "final answer" });
+			const jobId = runtime.asyncJobManager.register("task", "child", () => job.promise, {
+				ownerId: session.getAgentId(),
+				attemptId: session.getAttemptId(),
+			});
+			runtime.asyncJobManager.watchJobs([jobId]);
+			return true;
+		});
+		const started = await runtime.start(
+			{
+				commandId: "command-final",
+				agentInstanceId: "agent-final",
+				executionId: "execution-final",
+				attemptId: "attempt-final",
+				authorityGeneration: 1,
+				cwd,
+				input: "finish",
+			},
+			profile,
+		);
+		await Bun.sleep(10);
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("running");
+		job.resolve("done");
+		await runtime.drain();
+		const completed = (await runtime.store.pendingEvents()).find(event => event.kind === "completed");
+		expect(completed?.payload).toEqual({
+			assistantFinal: "final answer",
+			transcriptRef: `history://${started.engineAgentId}`,
+		});
+		await runtime.dispose();
+	}, 60000);
 });

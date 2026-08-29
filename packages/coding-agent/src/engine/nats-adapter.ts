@@ -16,6 +16,7 @@ import {
 	type StreamConfig,
 } from "@nats-io/jetstream";
 import { connect, type NatsConnection, type NodeConnectionOptions, nanos } from "@nats-io/transport-node";
+import type { IrcDeliveryReceipt, IrcMessage } from "../irc/bus";
 import type { EngineEvent, EngineLaunchProfile } from "./contracts";
 import { EngineTargetError } from "./contracts";
 import { engineRouteToken } from "./route";
@@ -113,6 +114,8 @@ export class NatsEngineAdapter {
 	readonly #mailboxes = new Map<string, Promise<void>>();
 	#commandMessages: ConsumerMessages | undefined;
 	#unsubscribeRuntime: () => void = () => {};
+	#unsubscribeRegistry: () => void = () => {};
+	#unsubscribeOutbound: () => void = () => {};
 	#outboxFlush: Promise<void> | undefined;
 	#stopping = false;
 
@@ -195,6 +198,8 @@ export class NatsEngineAdapter {
 		if (this.#stopping) return;
 		this.#stopping = true;
 		this.#unsubscribeRuntime();
+		this.#unsubscribeRegistry();
+		this.#unsubscribeOutbound();
 		await Promise.all([...this.#consumers].map(consumer => consumer.close()));
 		await Promise.all(this.#loops);
 		await this.flushEvents().catch(error => this.#report(error));
@@ -217,7 +222,51 @@ export class NatsEngineAdapter {
 		this.#unsubscribeRuntime = this.runtime.subscribe(() => {
 			void this.flushEvents().catch(error => this.#report(error));
 		});
+		this.#unsubscribeRegistry = this.runtime.agentRegistry.onChange(event => {
+			if (event.type !== "registered" || event.ref.kind === "advisor") return;
+			const broker = this.runtime.resolveBrokerAgent(event.ref.id);
+			if (broker) void this.provisionMailbox(broker.agentInstanceId).catch(error => this.#report(error));
+		});
+		this.#unsubscribeOutbound = this.runtime.ircBus.setOutboundTransport((message, opts) =>
+			this.#publishPeerMessage(message, opts),
+		);
 		await this.flushEvents();
+	}
+
+	async #publishPeerMessage(
+		message: IrcMessage,
+		_opts?: { expectsReply?: boolean; suppressRelay?: boolean },
+	): Promise<IrcDeliveryReceipt> {
+		const from = this.runtime.resolveBrokerAgent(message.from);
+		const to = this.runtime.resolveBrokerAgent(message.to);
+		if (!from || !to) {
+			return {
+				to: message.to,
+				outcome: "failed",
+				error: "Engine peer has no broker-visible AgentInstance binding",
+			};
+		}
+		const envelope: AgentMessageEnvelope = {
+			schema: "grimoire.agent.message.v1",
+			messageId: message.id,
+			fromAgentInstanceId: from.agentInstanceId,
+			toAgentInstanceId: to.agentInstanceId,
+			authorityGeneration: from.authorityGeneration,
+			sentAt: message.ts,
+			kind: "text",
+			payload: { body: message.body },
+			executionId: from.executionId,
+			attemptId: from.attemptId,
+			replyToMessageId: message.replyTo,
+		};
+		await this.#options.authorizeMessage(envelope);
+		await this.provisionMailbox(to.agentInstanceId);
+		await this.#jetstream.publish(
+			this.messageSubject(from.agentInstanceId, to.agentInstanceId),
+			encodeEnvelope(envelope),
+			{ msgID: envelope.messageId },
+		);
+		return { to: message.to, outcome: "queued" };
 	}
 
 	async #ensureStreams(): Promise<void> {
@@ -459,6 +508,8 @@ export class NatsEngineAdapter {
 					fromAgentInstanceId: envelope.fromAgentInstanceId,
 					toAgentInstanceId: envelope.toAgentInstanceId,
 					body: requiredRecordString(envelope.payload, "body"),
+					sentAt: envelope.sentAt,
+					replyToMessageId: envelope.replyToMessageId,
 				});
 				if (receipt.outcome === "failed") message.nak(1_000);
 				else message.ack();

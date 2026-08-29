@@ -13,6 +13,9 @@ export interface EngineLaunchProfile {
 	spawns: string;
 	profileDigest: string;
 	launchProfileRef?: string;
+	selectedRouteRef?: string;
+	/** Descendants allowed below this session. Artel default: one leaf child. */
+	maxSpawnDepth?: number;
 	toolNames?: string[];
 	restrictToolNames?: boolean;
 	enableMCP?: boolean;
@@ -60,6 +63,8 @@ export interface EnginePeerMessage {
 	fromAgentInstanceId: string;
 	toAgentInstanceId: string;
 	body: string;
+	sentAt?: number;
+	replyToMessageId?: string;
 }
 
 export interface EngineBindingSnapshot extends EngineTarget {
@@ -77,6 +82,12 @@ export interface EngineStartResult extends EngineBindingSnapshot {
 export interface EngineReconcileResult {
 	binding?: EngineBindingSnapshot;
 	attemptState?: EngineAttemptState;
+}
+
+export interface EngineCompletionPayload extends Record<string, unknown> {
+	assistantFinal: string;
+	transcriptRef?: string;
+	outputTruncated?: boolean;
 }
 
 export interface EngineRejectedCommand {

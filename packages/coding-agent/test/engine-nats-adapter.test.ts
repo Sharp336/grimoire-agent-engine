@@ -13,6 +13,7 @@ import {
 	type EngineCommandEnvelope,
 	NatsEngineAdapter,
 } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
+import { engineAgentId } from "@oh-my-pi/pi-coding-agent/engine/route";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -108,6 +109,35 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			expect(eventsA.map(event => event.type)).toEqual(["command.accepted", "attempt.started", "attempt.completed"]);
 			expect(eventsB.map(event => event.type)).toEqual(["command.accepted", "attempt.started", "attempt.completed"]);
 			expect(dispatchCount).toBe(2);
+
+			const inbound = runtime.ircBus.wait(engineAgentId("agent-b"), { from: engineAgentId("agent-a") }, 5_000);
+			const receipt = await runtime.ircBus.send({
+				from: engineAgentId("agent-a"),
+				to: engineAgentId("agent-b"),
+				body: "broker round trip",
+			});
+			expect(receipt.outcome).toBe("queued");
+			expect((await inbound)?.body).toBe("broker round trip");
+
+			const rootB = runtime.agentRegistry.get(engineAgentId("agent-b"));
+			if (!rootB?.session) throw new Error("root B session is unavailable");
+			runtime.agentRegistry.register({
+				id: "native-child-b1",
+				displayName: "child B1",
+				kind: "sub",
+				parentId: engineAgentId("agent-b"),
+				session: rootB.session,
+				status: "idle",
+			});
+			const childInbound = runtime.ircBus.wait("native-child-b1", { from: engineAgentId("agent-a") }, 5_000);
+			const childReceipt = await runtime.ircBus.send({
+				from: engineAgentId("agent-a"),
+				to: "native-child-b1",
+				body: "durable child mailbox",
+			});
+			expect(childReceipt.outcome).toBe("queued");
+			expect((await childInbound)?.body).toBe("durable child mailbox");
+			runtime.agentRegistry.unregister("native-child-b1", rootB.session);
 
 			const commandConsumer = `engine_${adapter.engineRoute}`;
 			const deliveredBefore = (await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer)).delivered

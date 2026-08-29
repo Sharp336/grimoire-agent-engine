@@ -373,6 +373,8 @@ export interface CreateAgentSessionOptions {
 	agentDir?: string;
 	/** Spawns to allow. Default: "*" */
 	spawns?: string;
+	/** Maximum descendant depth below this session. Undefined keeps the ordinary OMP setting. */
+	maxSpawnDepth?: number;
 
 	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
 	authStorage?: AuthStorage;
@@ -1306,6 +1308,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	const settings = await (options.settings ??
 		options.settingsManager ??
 		logger.time("settings", Settings.init, { cwd, agentDir }));
+	if (options.maxSpawnDepth !== undefined) {
+		if (!Number.isSafeInteger(options.maxSpawnDepth) || options.maxSpawnDepth < 0) {
+			throw new Error("maxSpawnDepth must be a non-negative safe integer");
+		}
+		settings.override("task.maxRecursionDepth", (options.taskDepth ?? 0) + options.maxSpawnDepth);
+	}
 	logger.time("initializeWithSettings", initializeWithSettings, settings);
 	// Snapshot this session's effective configured lane onto its invocation scope
 	// so startup sub-discovery sees the same complete policy that post-startup

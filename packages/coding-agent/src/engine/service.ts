@@ -6,6 +6,7 @@ import { nkeyAuthenticator, nkeys } from "@nats-io/transport-node";
 import type { EngineLaunchProfile } from "./contracts";
 import { HostedEngineBridge, HostedGrimoireRpc } from "./hosted-bridge";
 import { type EngineCommandEnvelope, NatsEngineAdapter } from "./nats-adapter";
+import { EngineProfileResolver } from "./profile-resolver";
 import { EngineRuntime } from "./runtime";
 
 export interface EngineServiceConfig {
@@ -14,6 +15,7 @@ export interface EngineServiceConfig {
 	runtimeDir: string;
 	databasePath: string;
 	natsServerPath: string;
+	artifactCacheRoot?: string;
 	hosted?: {
 		serverUrl: string;
 		token: string;
@@ -38,7 +40,13 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 	let bridge: HostedEngineBridge | undefined;
 	try {
 		broker = await startBroker(config, engineKey.getPublicKey(), bridgeKey.getPublicKey());
-		runtime = await EngineRuntime.create({ databasePath: config.databasePath });
+		const profileResolver = config.artifactCacheRoot
+			? new EngineProfileResolver(config.artifactCacheRoot, path.join(config.runtimeDir, "credentials"))
+			: undefined;
+		runtime = await EngineRuntime.create({
+			databasePath: config.databasePath,
+			resolveSessionProfile: profileResolver ? profile => profileResolver.resolve(profile) : undefined,
+		});
 		adapter = await NatsEngineAdapter.connect({
 			runtime,
 			deviceId: config.deviceId,
@@ -260,6 +268,18 @@ function resolveLaunchProfile(command: EngineCommandEnvelope): EngineLaunchProfi
 	if (profile.spawns !== "" && profile.spawns !== "*") throw new Error("launchProfile.spawns must be empty or *");
 	if (typeof profile.profileDigest !== "string" || profile.profileDigest !== command.payload.profileDigest) {
 		throw new Error("launchProfile digest does not match the command");
+	}
+	if (
+		profile.launchProfileRef !== undefined &&
+		!/^gctx:[23456789abcdefghjkmnpqrstuvwxyz]{16}$/.test(profile.launchProfileRef)
+	) {
+		throw new Error("launchProfileRef must be a gctx Artifact ref");
+	}
+	if (
+		profile.maxSpawnDepth !== undefined &&
+		(!Number.isSafeInteger(profile.maxSpawnDepth) || profile.maxSpawnDepth < 0)
+	) {
+		throw new Error("maxSpawnDepth must be a non-negative safe integer");
 	}
 	return profile;
 }

@@ -21,6 +21,7 @@ export default class Engine extends Command {
 		"runtime-dir": Flags.string({ description: "Engine runtime directory" }),
 		database: Flags.string({ description: "Engine SQLite path" }),
 		"nats-server": Flags.string({ description: "Absolute nats-server executable path" }),
+		"artifact-cache": Flags.string({ description: "ClientHost Artifact cache directory" }),
 		"server-url": Flags.string({ description: "Hosted Grimoire base URL" }),
 		"token-env": Flags.string({ description: "Environment variable containing the hosted bearer token" }),
 		"client-id": Flags.string({ description: "Hosted Grimoire client id" }),
@@ -65,6 +66,11 @@ export default class Engine extends Command {
 						process.env.GRIMOIRE_NATS_SERVER ??
 						path.join(process.env.LOCALAPPDATA ?? "", "Grimoire", "bin", "nats-server.exe"),
 				),
+				artifactCacheRoot: flags["artifact-cache"]
+					? path.resolve(flags["artifact-cache"])
+					: process.env.GRIMOIRE_CLIENT_ARTIFACT_CACHE_ROOT
+						? path.resolve(process.env.GRIMOIRE_CLIENT_ARTIFACT_CACHE_ROOT)
+						: undefined,
 				hosted:
 					flags["no-hosted"] || !serverUrl || !token
 						? undefined

@@ -34,9 +34,14 @@ export interface IrcMessage {
 
 export interface IrcDeliveryReceipt {
 	to: string;
-	outcome: "injected" | "woken" | "revived" | "failed";
+	outcome: "queued" | "injected" | "woken" | "revived" | "failed";
 	error?: string;
 }
+
+export type IrcOutboundTransport = (
+	message: IrcMessage,
+	opts?: { expectsReply?: boolean; suppressRelay?: boolean },
+) => Promise<IrcDeliveryReceipt>;
 
 interface IrcWaiter {
 	from?: string;
@@ -66,6 +71,7 @@ export class IrcBus {
 	readonly #lifecycle: () => AgentLifecycleManager;
 	readonly #mailboxes = new Map<string, IrcMessage[]>();
 	readonly #waiters = new Map<string, IrcWaiter[]>();
+	#outboundTransport: IrcOutboundTransport | undefined;
 	#disposed = false;
 
 	constructor(registry: AgentRegistry = AgentRegistry.global(), lifecycle?: AgentLifecycleManager) {
@@ -73,6 +79,14 @@ export class IrcBus {
 		// Lazy: the lifecycle global self-constructs against the global registry,
 		// so only touch it when a parked recipient actually needs reviving.
 		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.global();
+	}
+
+	/** Route Engine-mode sends through the durable broker; native OMP leaves this unset. */
+	setOutboundTransport(transport: IrcOutboundTransport): () => void {
+		this.#outboundTransport = transport;
+		return () => {
+			if (this.#outboundTransport === transport) this.#outboundTransport = undefined;
+		};
 	}
 
 	/**
@@ -105,6 +119,16 @@ export class IrcBus {
 	): Promise<IrcDeliveryReceipt> {
 		if (this.#disposed) return { to: msg.to, outcome: "failed", error: "IRC bus is disposed" };
 		const message: IrcMessage = { ...msg, id: Snowflake.next(), ts: Date.now() };
+		if (this.#outboundTransport) return await this.#outboundTransport(message, opts);
+		return await this.deliver(message, opts);
+	}
+
+	/** Deliver one already-transported message locally without re-publishing it. */
+	async deliver(
+		message: IrcMessage,
+		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
+	): Promise<IrcDeliveryReceipt> {
+		if (this.#disposed) return { to: message.to, outcome: "failed", error: "IRC bus is disposed" };
 		const ref = this.#registry.get(message.to);
 		if (!ref) {
 			return {
