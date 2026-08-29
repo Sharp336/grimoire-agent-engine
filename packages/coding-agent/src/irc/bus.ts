@@ -126,7 +126,7 @@ export class IrcBus {
 	/** Deliver one already-transported message locally without re-publishing it. */
 	async deliver(
 		message: IrcMessage,
-		opts?: { expectsReply?: boolean; suppressRelay?: boolean },
+		opts?: { expectsReply?: boolean; suppressRelay?: boolean; bufferOnFailure?: boolean },
 	): Promise<IrcDeliveryReceipt> {
 		if (this.#disposed) return { to: message.to, outcome: "failed", error: "IRC bus is disposed" };
 		const ref = this.#registry.get(message.to);
@@ -208,9 +208,9 @@ export class IrcBus {
 		} catch (error) {
 			// Live hand-off failed (e.g. recipient disposed mid-shutdown): buffer
 			// the message so a later `wait`/`inbox` from the recipient can still
-			// pick it up. The receipt stays "failed" — the recipient has not
-			// seen it.
-			this.#enqueue(message);
+			// pick it up. Broker-consumed messages disable this local copy: their
+			// JetStream ACK/NAK remains the sole durable mailbox authority.
+			if (opts?.bufferOnFailure !== false) this.#enqueue(message);
 			return {
 				to: message.to,
 				outcome: "failed",

@@ -26,11 +26,13 @@ export interface IrcBridgeHost {
 /** Owns incoming IRC queues, injection, and side-channel auto-replies. */
 export class IrcBridge {
 	readonly #host: IrcBridgeHost;
+	readonly #bus: IrcBus;
 	#interrupts: CustomMessage[] = [];
 	#asides: CustomMessage[] = [];
 
-	constructor(host: IrcBridgeHost) {
+	constructor(host: IrcBridgeHost, bus: IrcBus = IrcBus.global()) {
 		this.#host = host;
+		this.#bus = bus;
 	}
 
 	/** Whether an incoming peer message can interrupt a wait. */
@@ -197,7 +199,7 @@ export class IrcBridge {
 			};
 			void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 			this.#asides.push(record);
-			const receipt = await IrcBus.global().send({ from: msg.to, to: msg.from, body, replyTo: msg.id });
+			const receipt = await this.#bus.send({ from: msg.to, to: msg.from, body, replyTo: msg.id });
 			if (receipt.outcome === "failed") {
 				logger.warn("IRC auto-reply delivery failed", { to: msg.from, error: receipt.error });
 			}

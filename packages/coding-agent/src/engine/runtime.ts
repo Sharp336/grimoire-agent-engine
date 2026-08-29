@@ -249,14 +249,17 @@ export class EngineRuntime {
 		if (!recipient || !sender) {
 			return { to: message.toAgentInstanceId, outcome: "failed", error: "Unknown Engine peer" };
 		}
-		return await this.ircBus.deliver({
-			id: message.messageId,
-			from: sender,
-			to: recipient,
-			body: message.body,
-			ts: message.sentAt ?? Date.now(),
-			replyTo: message.replyToMessageId,
-		});
+		return await this.ircBus.deliver(
+			{
+				id: message.messageId,
+				from: sender,
+				to: recipient,
+				body: message.body,
+				ts: message.sentAt ?? Date.now(),
+				replyTo: message.replyToMessageId,
+			},
+			{ bufferOnFailure: false },
+		);
 	}
 
 	async drain(): Promise<void> {

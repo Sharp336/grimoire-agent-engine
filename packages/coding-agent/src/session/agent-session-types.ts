@@ -33,6 +33,7 @@ import type { ExtensionRunner } from "../extensibility/extensions";
 import type { ContextUsage } from "../extensibility/extensions/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import type { FileSlashCommand } from "../extensibility/slash-commands";
+import type { IrcBus } from "../irc/bus";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
@@ -122,6 +123,8 @@ export interface InitialRetryFallbackState {
 /** Dependencies and initial state used to construct an AgentSession. */
 export interface AgentSessionConfig {
 	agent: Agent;
+	/** Session messaging bus; Engine sessions inject their broker-backed bus. */
+	ircBus?: IrcBus;
 	/** Shared with the provider stream wrapper: current Codex Code Mode tool exposure snapshot for turn metadata. */
 	codeModeState?: { namespacesInfo?: unknown };
 	sessionManager: SessionManager;

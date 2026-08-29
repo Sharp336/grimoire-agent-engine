@@ -75,10 +75,10 @@ function makeToolSession(registry: AgentRegistry, agentId: string): ToolSession 
 	};
 }
 
-function createRealSession(overrides: Partial<Record<SettingPath, unknown>> = {}): {
-	session: AgentSession;
-	sessionManager: SessionManager;
-} {
+function createRealSession(
+	overrides: Partial<Record<SettingPath, unknown>> = {},
+	ircBus?: IrcBus,
+): { session: AgentSession; sessionManager: SessionManager } {
 	const sessionManager = SessionManager.inMemory("/tmp");
 	const session = new AgentSession({
 		agent: new Agent({
@@ -91,6 +91,7 @@ function createRealSession(overrides: Partial<Record<SettingPath, unknown>> = {}
 		sessionManager,
 		settings: Settings.isolated({ "compaction.enabled": false, ...overrides }),
 		modelRegistry: {} as never,
+		ircBus,
 	});
 	return { session, sessionManager };
 }
@@ -467,6 +468,20 @@ describe("IRC", () => {
 			expect(drained.map(msg => msg.body)).toEqual(["one", "two"]);
 			expect(bus.unreadCount("0-Main")).toBe(0);
 			expect(bus.inbox("0-Main")).toEqual([]);
+		});
+
+		it("does not duplicate an already-transported failure into the local mailbox", async () => {
+			const main = makeFakeSession();
+			registry.register({ id: "0-Main", displayName: "main", kind: "main", session: main.session });
+			main.setError(new Error("temporarily unavailable"));
+
+			const receipt = await bus.deliver(
+				{ id: "broker-1", from: "0-Sub", to: "0-Main", body: "retry at broker", ts: Date.now() },
+				{ bufferOnFailure: false },
+			);
+
+			expect(receipt.outcome).toBe("failed");
+			expect(bus.unreadCount("0-Main")).toBe(0);
 		});
 
 		it("wait does not leak the waiter after timeout or abort", async () => {
@@ -1044,7 +1059,8 @@ describe("IRC", () => {
 		});
 
 		it("auto-replies via an ephemeral side turn when the sender awaits and async execution is disabled", async () => {
-			const { session } = createRealSession({ "async.enabled": false });
+			const sessionBus = new IrcBus(registry, AgentLifecycleManager.global());
+			const { session } = createRealSession({ "async.enabled": false }, sessionBus);
 			sessions.push(session);
 			registry.register({ id: "Main", displayName: "main", kind: "main", session });
 			const sub = makeFakeSession();
@@ -1063,8 +1079,8 @@ describe("IRC", () => {
 
 			// The sender parks a waiter (the `await: true` path), then sends with
 			// the expectsReply hint — exactly what the irc tool does.
-			const waiting = bus.wait("0-Sub", { from: "Main" }, 1000);
-			const receipt = await bus.send(
+			const waiting = sessionBus.wait("0-Sub", { from: "Main" }, 1000);
+			const receipt = await sessionBus.send(
 				{ from: "0-Sub", to: "Main", body: "which PR did you mean?" },
 				{ expectsReply: true },
 			);
