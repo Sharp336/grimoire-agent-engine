@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { nkeyAuthenticator, nkeys } from "@nats-io/transport-node";
-import type { EngineLaunchProfile } from "./contracts";
+import { type EngineLaunchProfile, EngineTargetError } from "./contracts";
 import { HostedEngineBridge, HostedGrimoireRpc, launchHostedEngineChild } from "./hosted-bridge";
 import { type EngineCommandEnvelope, NatsEngineAdapter } from "./nats-adapter";
 import { EngineProfileResolver } from "./profile-resolver";
@@ -70,7 +70,7 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 				}
 			},
 			authorizeMessage: () => {},
-			resolveLaunchProfile: resolveLaunchProfile,
+			resolveLaunchProfile: command => resolveLaunchProfile(command, Boolean(profileResolver)),
 			onError: reportServiceError,
 		});
 		if (config.hosted && rpc) {
@@ -271,7 +271,7 @@ function userConfig(nkey: string, publish: string[], subscribe: string[]): strin
 	].join("\n");
 }
 
-function resolveLaunchProfile(command: EngineCommandEnvelope): EngineLaunchProfile {
+function resolveLaunchProfile(command: EngineCommandEnvelope, requireArtifactRef = false): EngineLaunchProfile {
 	const value = command.payload.launchProfile;
 	if (!value || typeof value !== "object" || Array.isArray(value))
 		throw new Error("start command has no launchProfile");
@@ -285,6 +285,12 @@ function resolveLaunchProfile(command: EngineCommandEnvelope): EngineLaunchProfi
 		!/^gctx:[23456789abcdefghjkmnpqrstuvwxyz]{16}$/.test(profile.launchProfileRef)
 	) {
 		throw new Error("launchProfileRef must be a gctx Artifact ref");
+	}
+	if (requireArtifactRef && !profile.launchProfileRef) {
+		throw new EngineTargetError(
+			"invalid_request",
+			"launchProfileRef is required for artifact-backed Engine profiles",
+		);
 	}
 	if (
 		profile.maxSpawnDepth !== undefined &&
