@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import * as path from "node:path";
 import { AsyncJobManager } from "../async/job-manager";
 import { IrcBus, type IrcDeliveryReceipt } from "../irc/bus";
@@ -498,7 +497,8 @@ export class EngineRuntime {
 	async cancelAgentInstance(agentInstanceId: string, reason: string): Promise<void> {
 		const binding = this.#bindings.get(agentInstanceId);
 		if (binding?.attemptState !== "running") return;
-		await this.cancel({ ...this.#snapshot(binding), commandId: `parent-${randomUUID()}`, reason });
+		// The start command owns the Attempt terminal event, including parent-driven cancellation.
+		await this.cancel({ ...this.#snapshot(binding), commandId: binding.commandId, reason });
 	}
 
 	async #runPrompt(binding: LiveBinding, input: string): Promise<void> {

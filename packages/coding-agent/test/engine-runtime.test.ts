@@ -237,6 +237,32 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60000);
 
+	it("attributes parent-driven cancellation to the start command that owns the Attempt", async () => {
+		const prompt = Promise.withResolvers<boolean>();
+		const { runtime, cwd } = await createRuntime(() => prompt.promise);
+		const events: Array<{ kind: string; causationCommandId: string }> = [];
+		runtime.subscribe(event => {
+			events.push(event);
+		});
+		await runtime.start(
+			{
+				commandId: "command-parent-owned",
+				agentInstanceId: "agent-parent-owned",
+				executionId: "execution-parent-owned",
+				attemptId: "attempt-parent-owned",
+				authorityGeneration: 1,
+				cwd,
+				input: "wait",
+			},
+			profile,
+		);
+		await runtime.cancelAgentInstance("agent-parent-owned", "parent aborted");
+		prompt.resolve(true);
+		await runtime.drain();
+		expect(events.find(event => event.kind === "cancelled")?.causationCommandId).toBe("command-parent-owned");
+		await runtime.dispose();
+	}, 60000);
+
 	it("does not redispatch a durable Attempt after Engine restart", async () => {
 		let dispatchCount = 0;
 		const { runtime, cwd, options } = await createRuntime(async () => {
