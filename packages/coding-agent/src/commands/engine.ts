@@ -50,6 +50,9 @@ export default class Engine extends Command {
 		const tokenEnv = flags["token-env"] ?? "GRIMOIRE_ACCESS_TOKEN";
 		const serverUrl = flags["server-url"] ?? process.env.GRIMOIRE_SERVER_URL;
 		const token = process.env[tokenEnv] ?? process.env.GRIMOIRE_TOKEN ?? process.env.GRIMOIRE_OIDC_BEARER_TOKEN;
+		const defaultArtifactCacheRoot = process.env.LOCALAPPDATA
+			? path.join(process.env.LOCALAPPDATA, "Grimoire", "offline-cache", "default", "artifacts")
+			: undefined;
 		if (!flags["no-hosted"] && (!serverUrl || !token)) {
 			throw new Error(`Hosted mode requires --server-url and a bearer token in ${tokenEnv}`);
 		}
@@ -70,7 +73,7 @@ export default class Engine extends Command {
 					? path.resolve(flags["artifact-cache"])
 					: process.env.GRIMOIRE_CLIENT_ARTIFACT_CACHE_ROOT
 						? path.resolve(process.env.GRIMOIRE_CLIENT_ARTIFACT_CACHE_ROOT)
-						: undefined,
+						: defaultArtifactCacheRoot,
 				hosted:
 					flags["no-hosted"] || !serverUrl || !token
 						? undefined
