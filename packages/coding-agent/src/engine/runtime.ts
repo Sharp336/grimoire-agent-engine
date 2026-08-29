@@ -377,6 +377,10 @@ export class EngineRuntime {
 				...this.#sessionDefaults,
 				cwd: request.cwd,
 				sessionManager,
+				systemPrompt: profile.systemPrompt
+					? defaultPrompt => [...defaultPrompt, profile.systemPrompt as string]
+					: undefined,
+				providerPromptCacheKey: profile.providerPromptCacheKey,
 				spawns: profile.spawns,
 				toolNames: profile.toolNames,
 				restrictToolNames: profile.restrictToolNames,

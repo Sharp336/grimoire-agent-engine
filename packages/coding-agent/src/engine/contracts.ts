@@ -16,6 +16,10 @@ export interface EngineLaunchProfile {
 	selectedRouteRef?: string;
 	/** Descendants allowed below this session. Artel default: one leaf child. */
 	maxSpawnDepth?: number;
+	/** Per-launch stable instructions; AgentProfile itself intentionally has no permanent prompt. */
+	systemPrompt?: string;
+	/** Stable provider cache identity compiled by ClientHost for consultant launches. */
+	providerPromptCacheKey?: string;
 	toolNames?: string[];
 	restrictToolNames?: boolean;
 	enableMCP?: boolean;

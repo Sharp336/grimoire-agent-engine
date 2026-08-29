@@ -281,6 +281,20 @@ function resolveLaunchProfile(command: EngineCommandEnvelope): EngineLaunchProfi
 	) {
 		throw new Error("maxSpawnDepth must be a non-negative safe integer");
 	}
+	if (
+		profile.systemPrompt !== undefined &&
+		(typeof profile.systemPrompt !== "string" || profile.systemPrompt.length > 262_144)
+	) {
+		throw new Error("systemPrompt must be a string no larger than 262144 characters");
+	}
+	if (
+		profile.providerPromptCacheKey !== undefined &&
+		(typeof profile.providerPromptCacheKey !== "string" ||
+			!profile.providerPromptCacheKey.trim() ||
+			profile.providerPromptCacheKey.length > 512)
+	) {
+		throw new Error("providerPromptCacheKey must contain 1..512 characters");
+	}
 	return profile;
 }
 

@@ -100,7 +100,7 @@ export class EngineProfileResolver {
 		let lastError: unknown;
 		for (const routeRef of candidates) {
 			try {
-				return await this.#resolveRoute(profile, routeRef, launch.maxSpawnDepth);
+				return await this.#resolveRoute(profile, routeRef, launch);
 			} catch (error) {
 				lastError = error;
 			}
@@ -141,7 +141,7 @@ export class EngineProfileResolver {
 	async #resolveRoute(
 		profile: AgentProfile,
 		routeRef: string,
-		maxSpawnDepth: number | undefined,
+		launch: EngineLaunchProfile,
 	): Promise<ResolvedEngineSessionProfile> {
 		const route = parseJson<AvailableModelRoute>(
 			(await this.#read(routeRef, "grimoire.available_model_route.v1")).content,
@@ -202,18 +202,29 @@ export class EngineProfileResolver {
 				});
 			});
 			const model = buildModel(toModelSpec(route, account)) as Model;
-			const restricted = profile.tools?.mode === "allowlist";
+			const profileRestricted = profile.tools?.mode === "allowlist";
+			const launchRestricted = launch.restrictToolNames === true;
+			const profileNames = uniqueStrings(profile.tools?.names ?? []);
+			const launchNames = uniqueStrings(launch.toolNames ?? []);
+			const toolNames =
+				profileRestricted && launchRestricted
+					? profileNames.filter(name => launchNames.includes(name))
+					: profileRestricted
+						? profileNames
+						: launchRestricted
+							? launchNames
+							: undefined;
 			return {
 				options: {
 					authStorage,
 					modelRegistry,
 					model,
 					thinkingLevel: profile.generationDefaults?.thinkingLevel,
-					toolNames: restricted ? uniqueStrings(profile.tools?.names ?? []) : undefined,
-					restrictToolNames: restricted,
+					toolNames,
+					restrictToolNames: profileRestricted || launchRestricted,
 					enableMCP: true,
 					enableLsp: true,
-					maxSpawnDepth: maxSpawnDepth ?? 1,
+					maxSpawnDepth: launch.maxSpawnDepth ?? 1,
 				},
 				dispose: () => {
 					unsubscribeWriteback();
