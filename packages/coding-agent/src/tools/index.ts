@@ -156,10 +156,38 @@ export interface DeferredDiagnosticsEntry {
 	isStale(): boolean;
 }
 
+/** Engine-only delegation target compiled from the principal's cached AgentProfile artifacts. */
+export interface EngineChildProfile {
+	profileRef: string;
+	displayName: string;
+	description?: string;
+}
+
+export interface EngineChildLaunchResult {
+	agentInstanceId: string;
+	agentInstanceRef?: string;
+	status: "completed" | "failed" | "cancelled";
+	assistantFinal?: string;
+	transcriptRef?: string;
+	error?: string;
+}
+
+export interface EngineChildLauncher {
+	profiles: readonly EngineChildProfile[];
+	launch(request: {
+		profileRef: string;
+		workStepId: string;
+		toolCallId: string;
+		signal?: AbortSignal;
+	}): Promise<EngineChildLaunchResult>;
+}
+
 /** Session context for tool factories */
 export interface ToolSession {
 	/** Rootless multi-session Engine path: disables ambient process-global routing fallbacks. */
 	engineMode?: boolean;
+	/** Engine-mode child dispatch through Grimoire AgentInstance/Attempt identities. */
+	engineChildLauncher?: EngineChildLauncher;
 	/** Current working directory */
 	cwd: string;
 	/** Additional workspace directories beyond cwd (multi-root), forwarded to subagents. */

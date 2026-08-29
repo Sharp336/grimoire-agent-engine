@@ -207,6 +207,7 @@ import {
 	defaultLoadModeForToolName,
 	discoverStartupLspServers,
 	EditTool,
+	type EngineChildLauncher,
 	EvalTool,
 	GlobTool,
 	GrepTool,
@@ -568,6 +569,8 @@ export interface CreateAgentSessionOptions {
 	attemptId?: string;
 	/** Rootless multi-session Engine path. Native CLI/TUI leaves this unset. */
 	engineMode?: boolean;
+	/** Engine-only conscious child profile dispatcher. */
+	engineChildLauncher?: EngineChildLauncher;
 	/**
 	 * Registry generation authorized for this creation. `null` requires the id
 	 * to be absent; an AgentRef allows a parked revival to reuse only that ref.
@@ -1780,6 +1783,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		};
 		const toolSession: ToolSession = {
+			engineChildLauncher: options.engineChildLauncher,
 			engineMode: options.engineMode,
 			get cwd() {
 				return sessionManager.getCwd();

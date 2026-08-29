@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { nkeyAuthenticator, nkeys } from "@nats-io/transport-node";
 import type { EngineLaunchProfile } from "./contracts";
-import { HostedEngineBridge, HostedGrimoireRpc } from "./hosted-bridge";
+import { HostedEngineBridge, HostedGrimoireRpc, launchHostedEngineChild } from "./hosted-bridge";
 import { type EngineCommandEnvelope, NatsEngineAdapter } from "./nats-adapter";
 import { EngineProfileResolver } from "./profile-resolver";
 import { EngineRuntime } from "./runtime";
@@ -40,12 +40,23 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 	let bridge: HostedEngineBridge | undefined;
 	try {
 		broker = await startBroker(config, engineKey.getPublicKey(), bridgeKey.getPublicKey());
+		const rpc = config.hosted ? new HostedGrimoireRpc(config.hosted) : undefined;
 		const profileResolver = config.artifactCacheRoot
 			? new EngineProfileResolver(config.artifactCacheRoot, path.join(config.runtimeDir, "credentials"))
 			: undefined;
 		runtime = await EngineRuntime.create({
 			databasePath: config.databasePath,
 			resolveSessionProfile: profileResolver ? profile => profileResolver.resolve(profile) : undefined,
+			launchChild: rpc
+				? request =>
+						launchHostedEngineChild(rpc, {
+							...request,
+							deviceId: config.deviceId,
+							engineId: config.engineId,
+							cancelLocal: agentInstanceId =>
+								runtime?.cancelAgentInstance(agentInstanceId, "Parent task aborted") ?? Promise.resolve(),
+						})
+				: undefined,
 		});
 		adapter = await NatsEngineAdapter.connect({
 			runtime,
@@ -62,9 +73,9 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 			resolveLaunchProfile: resolveLaunchProfile,
 			onError: reportServiceError,
 		});
-		if (config.hosted) {
+		if (config.hosted && rpc) {
 			bridge = await HostedEngineBridge.connect({
-				rpc: new HostedGrimoireRpc(config.hosted),
+				rpc,
 				deviceId: config.deviceId,
 				engineId: config.engineId,
 				engineGeneration: runtime.engineGeneration,

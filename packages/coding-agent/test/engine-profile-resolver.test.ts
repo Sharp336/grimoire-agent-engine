@@ -79,6 +79,7 @@ describe("EngineProfileResolver", () => {
 		});
 		try {
 			expect(resolved.options.model?.id).toBe("trusted-model");
+			expect(resolved.childProfiles).toEqual([{ profileRef: refs.profile, displayName: "Trusted fallback" }]);
 			expect(resolved.options.model?.baseUrl).toBe("https://trusted.invalid");
 			expect(resolved.options.restrictToolNames).toBe(false);
 			expect(resolved.options.enableMCP).toBe(true);

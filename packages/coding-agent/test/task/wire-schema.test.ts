@@ -166,3 +166,52 @@ describe("task approval details surface the dispatch", () => {
 		expect(() => tool.formatApprovalDetails({ tasks: [undefined, { agent: "reviewer" }] })).not.toThrow();
 	});
 });
+
+describe("Engine task profile dispatch", () => {
+	it("requires an explicit cached AgentProfile and launches the bound WorkStep", async () => {
+		const calls: unknown[] = [];
+		const tool = await TaskTool.create({
+			cwd: "/tmp",
+			hasUI: false,
+			settings: Settings.isolated({ "task.isolation.mode": "none" }),
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			engineChildLauncher: {
+				profiles: [{ profileRef: "gctx:2222222222222222", displayName: "Opus worker" }],
+				async launch(request: {
+					profileRef: string;
+					workStepId: string;
+					toolCallId: string;
+					signal?: AbortSignal;
+				}) {
+					calls.push(request);
+					return {
+						agentInstanceId: "child-1",
+						status: "completed" as const,
+						assistantFinal: "done",
+					};
+				},
+			},
+		} as unknown as ToolSession);
+
+		expect(tool.description).toContain("gctx:2222222222222222");
+		const rejected = await tool.execute("call-0", {
+			profileRef: "gctx:3333333333333333",
+			workStepId: "implement",
+		});
+		expect(rejected.content[0]).toMatchObject({ type: "text" });
+		expect(calls).toHaveLength(0);
+
+		const result = await tool.execute("call-1", {
+			profileRef: "gctx:2222222222222222",
+			workStepId: "implement",
+		});
+		expect(calls).toHaveLength(1);
+		expect(calls[0]).toMatchObject({
+			profileRef: "gctx:2222222222222222",
+			workStepId: "implement",
+			toolCallId: "call-1",
+		});
+		expect(result.details?.results[0]).toMatchObject({ id: "child-1", output: "done", exitCode: 0 });
+	});
+});

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import * as path from "node:path";
 import { AsyncJobManager } from "../async/job-manager";
 import { IrcBus, type IrcDeliveryReceipt } from "../irc/bus";
@@ -6,6 +7,7 @@ import { AgentRegistry } from "../registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import { SessionManager } from "../session/session-manager";
+import type { EngineChildLaunchResult, EngineChildProfile } from "../tools";
 import {
 	type EngineAttemptState,
 	type EngineBindingSnapshot,
@@ -58,8 +60,20 @@ export interface EngineRuntimeOptions {
 	dispatchPrompt?: (session: AgentSession, input: string) => Promise<boolean>;
 	resolveSessionProfile?: (profile: EngineLaunchProfile) => Promise<{
 		options: Partial<CreateAgentSessionOptions>;
+		childProfiles?: EngineChildProfile[];
 		dispose(): void;
 	}>;
+	launchChild?: (request: {
+		parentAgentInstanceId: string;
+		parentAgentInstanceRef: string;
+		parentAttemptId: string;
+		profileRef: string;
+		workStepId: string;
+		toolCallId: string;
+		cwd: string;
+		maxSpawnDepth: number;
+		signal?: AbortSignal;
+	}) => Promise<EngineChildLaunchResult>;
 }
 
 export class EngineRuntime {
@@ -72,6 +86,7 @@ export class EngineRuntime {
 	readonly #sessionDefaults: EngineRuntimeOptions["sessionDefaults"];
 	readonly #dispatchPrompt: (session: AgentSession, input: string) => Promise<boolean>;
 	readonly #resolveSessionProfile: EngineRuntimeOptions["resolveSessionProfile"];
+	readonly #launchChild: EngineRuntimeOptions["launchChild"];
 	readonly #bindings = new Map<string, LiveBinding>();
 	readonly #lanes = new Map<string, Promise<void>>();
 	readonly #runs = new Set<Promise<void>>();
@@ -85,6 +100,7 @@ export class EngineRuntime {
 		this.#sessionDefaults = options.sessionDefaults;
 		this.#dispatchPrompt = options.dispatchPrompt ?? ((session, input) => session.prompt(input));
 		this.#resolveSessionProfile = options.resolveSessionProfile;
+		this.#launchChild = options.launchChild;
 		this.#sessionRoot = path.join(path.dirname(path.resolve(options.databasePath)), "engine-sessions");
 	}
 
@@ -376,6 +392,26 @@ export class EngineRuntime {
 		const id = engineAgentId(request.agentInstanceId);
 		let created: Awaited<ReturnType<typeof createAgentSession>>;
 		try {
+			const engineChildLauncher =
+				this.#launchChild && request.agentInstanceRef && profile.spawns === "*" && (profile.maxSpawnDepth ?? 0) > 0
+					? {
+							profiles: resolved?.childProfiles ?? [],
+							launch: (child: {
+								profileRef: string;
+								workStepId: string;
+								toolCallId: string;
+								signal?: AbortSignal;
+							}) =>
+								this.#launchChild!({
+									...child,
+									parentAgentInstanceId: request.agentInstanceId,
+									parentAgentInstanceRef: request.agentInstanceRef!,
+									parentAttemptId: request.attemptId,
+									cwd: request.cwd,
+									maxSpawnDepth: Math.max(0, (profile.maxSpawnDepth ?? 0) - 1),
+								}),
+						}
+					: undefined;
 			created = await createAgentSession({
 				...this.#sessionDefaults,
 				cwd: request.cwd,
@@ -390,6 +426,7 @@ export class EngineRuntime {
 				enableMCP: profile.enableMCP,
 				enableLsp: profile.enableLsp,
 				...resolved?.options,
+				engineChildLauncher,
 				agentId: id,
 				agentDisplayName: request.agentInstanceId,
 				agentRegistry: this.agentRegistry,
@@ -397,6 +434,7 @@ export class EngineRuntime {
 				asyncJobManager: this.asyncJobManager,
 				ircBus: this.ircBus,
 				attemptId: request.attemptId,
+				parentAgentId: request.parentAgentInstanceId ? engineAgentId(request.parentAgentInstanceId) : undefined,
 				engineMode: true,
 				expectedAgentRef: null,
 			});
@@ -431,6 +469,13 @@ export class EngineRuntime {
 		});
 		this.#bindings.set(request.agentInstanceId, binding);
 		return binding;
+	}
+
+	/** Cancel an Engine child when its parent task call is aborted. */
+	async cancelAgentInstance(agentInstanceId: string, reason: string): Promise<void> {
+		const binding = this.#bindings.get(agentInstanceId);
+		if (binding?.attemptState !== "running") return;
+		await this.cancel({ ...this.#snapshot(binding), commandId: `parent-${randomUUID()}`, reason });
 	}
 
 	async #runPrompt(binding: LiveBinding, input: string): Promise<void> {

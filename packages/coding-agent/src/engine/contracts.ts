@@ -29,6 +29,9 @@ export interface EngineLaunchProfile {
 export interface EngineStartRequest {
 	commandId: string;
 	agentInstanceId: string;
+	/** Canonical hosted identity used for child AgentInstance creation. */
+	agentInstanceRef?: string;
+	parentAgentInstanceId?: string;
 	executionId: string;
 	attemptId: string;
 	authorityGeneration: number;
@@ -151,6 +154,14 @@ export function validateStartRequest(request: EngineStartRequest): void {
 	})) {
 		if (!value.trim()) {
 			throw new EngineTargetError("invalid_request", `${name} must be a non-empty string`);
+		}
+	}
+	for (const [name, value] of Object.entries({
+		agentInstanceRef: request.agentInstanceRef,
+		parentAgentInstanceId: request.parentAgentInstanceId,
+	})) {
+		if (value !== undefined && !value.trim()) {
+			throw new EngineTargetError("invalid_request", `${name} must be a non-empty string when supplied`);
 		}
 	}
 	if (!Number.isSafeInteger(request.authorityGeneration) || request.authorityGeneration < 0) {

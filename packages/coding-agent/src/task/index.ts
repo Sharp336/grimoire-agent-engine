@@ -34,6 +34,8 @@ import {
 	type AgentDefinition,
 	type AgentProgress,
 	canSpawnAtDepth,
+	type EngineTaskParams,
+	engineTaskSchema,
 	getTaskSchema,
 	type SingleResult,
 	type TaskItem,
@@ -509,6 +511,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	readonly formatApprovalDetails = (args: unknown): string[] => {
 		const params = args as Partial<TaskParams>;
 		const lines: string[] = [];
+		if (this.session.engineChildLauncher) {
+			const engine = args as EngineTaskParams;
+			if (typeof engine.profileRef === "string") lines.push(`Profile: ${truncateForPrompt(engine.profileRef)}`);
+			if (typeof engine.workStepId === "string") lines.push(`WorkStep: ${truncateForPrompt(engine.workStepId)}`);
+			return lines;
+		}
 		if (typeof params.agent === "string") {
 			lines.push(`Agent: ${truncateForPrompt(params.agent)}`);
 		}
@@ -587,6 +595,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	#spawnSemaphore: Semaphore | undefined;
 
 	get parameters(): TaskToolSchemaInstance {
+		if (this.session.engineChildLauncher) return engineTaskSchema;
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationEnabled = !planMode && this.session.settings.get("task.isolation.mode") !== "none";
 		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
@@ -599,11 +608,31 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	}
 
 	renderCall(args: unknown, options: Parameters<typeof renderTaskCall>[1], theme: Theme) {
+		if (this.session.engineChildLauncher) {
+			const params = args as EngineTaskParams;
+			return renderTaskCall(
+				{ agent: params.profileRef, task: `Grimoire WorkStep ${params.workStepId ?? ""}` },
+				options,
+				theme,
+			);
+		}
 		return renderTaskCall(repairTaskParams(args as TaskParams), options, theme);
 	}
 
 	/** Dynamic description that reflects current task settings. */
 	get description(): string {
+		if (this.session.engineChildLauncher) {
+			const profiles = this.session.engineChildLauncher.profiles;
+			const catalog = profiles.length
+				? profiles
+						.map(
+							profile =>
+								`- ${profile.profileRef}: ${profile.displayName}${profile.description ? ` — ${profile.description}` : ""}`,
+						)
+						.join("\n")
+				: "- No cached active profiles are available.";
+			return `Launch a child AgentSession for an existing Grimoire WorkStep. Select one profileRef explicitly; the parent profile is never inherited.\n\nAvailable AgentProfiles:\n${catalog}`;
+		}
 		const disabledAgents = this.session.settings.get("task.disabledAgents") as string[];
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;
 		const isolationMode = this.session.settings.get("task.isolation.mode");
@@ -675,6 +704,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * Create a TaskTool instance with async agent discovery.
 	 */
 	static async create(session: ToolSession): Promise<TaskTool> {
+		if (session.engineChildLauncher) return new TaskTool(session, []);
 		const { agents } = await discoverAgentsForCreate(session.cwd, session.effectiveExtensionRoots?.());
 		return new TaskTool(session, agents);
 	}
@@ -685,6 +715,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
 	): Promise<AgentToolResult<TaskToolDetails>> {
+		if (this.session.engineChildLauncher) {
+			return this.#executeEngineChild(toolCallId, rawParams as EngineTaskParams, signal, onUpdate);
+		}
 		const params = repairTaskParams(rawParams as TaskParams);
 		// Schema defaults fill `agent` for model calls, but internal callers
 		// and stale transcripts can bypass arktype. `spawnParamsFor` resolves each
@@ -1058,6 +1091,56 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			content: [{ type: "text", text: text.length > 0 ? text : "No results." }],
 			details: buildAsyncDetails(),
 		});
+	}
+
+	async #executeEngineChild(
+		toolCallId: string,
+		params: EngineTaskParams,
+		signal?: AbortSignal,
+		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
+	): Promise<AgentToolResult<TaskToolDetails>> {
+		const launcher = this.session.engineChildLauncher!;
+		const profileRef = params.profileRef?.trim();
+		const workStepId = params.workStepId?.trim();
+		if (!profileRef || !workStepId) return createTaskModeError("profileRef and workStepId are required");
+		const profile = launcher.profiles.find(candidate => candidate.profileRef === profileRef);
+		if (!profile) return createTaskModeError(`AgentProfile ${profileRef} is not in the active cached catalog`);
+		const startedAt = Date.now();
+		onUpdate?.({
+			content: [{ type: "text", text: `Launching ${profile.displayName} for WorkStep ${workStepId}...` }],
+			details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },
+		});
+		try {
+			const child = await launcher.launch({ profileRef, workStepId, toolCallId, signal });
+			const durationMs = Date.now() - startedAt;
+			const output = child.assistantFinal ?? child.error ?? "";
+			const failed = child.status !== "completed";
+			const result: SingleResult = {
+				index: 0,
+				id: child.agentInstanceId,
+				agent: profile.displayName,
+				agentSource: "user",
+				task: workStepId,
+				assignment: workStepId,
+				exitCode: failed ? 1 : 0,
+				output,
+				stderr: child.error ?? "",
+				truncated: false,
+				durationMs,
+				tokens: 0,
+				requests: 0,
+				...(failed ? { error: child.error ?? child.status, aborted: child.status === "cancelled" } : {}),
+			};
+			return {
+				content: [
+					{ type: "text", text: failed ? `Child ${child.agentInstanceId} ${child.status}: ${output}` : output },
+				],
+				details: { projectAgentsDir: null, results: [result], totalDurationMs: durationMs },
+				...(failed ? { isError: true } : {}),
+			};
+		} catch (error) {
+			return createTaskModeError(`Task execution failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
 	}
 
 	/**

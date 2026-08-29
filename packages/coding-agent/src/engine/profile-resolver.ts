@@ -7,6 +7,7 @@ import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
 import type { CreateAgentSessionOptions } from "../sdk";
 import { AuthStorage } from "../session/auth-storage";
+import type { EngineChildProfile } from "../tools";
 import type { EngineLaunchProfile } from "./contracts";
 
 const GCTX = /^gctx:[23456789abcdefghjkmnpqrstuvwxyz]{16}$/;
@@ -22,6 +23,8 @@ interface CachedArtifact {
 
 interface AgentProfile {
 	schema: "grimoire.agent_profile.v1";
+	displayName?: string;
+	description?: string;
 	status?: "active" | "disabled";
 	models: string[];
 	allowSameModelProviderFallback?: boolean;
@@ -74,6 +77,7 @@ export interface ResolvedEngineSessionProfile {
 		| "enableLsp"
 		| "maxSpawnDepth"
 	>;
+	childProfiles: EngineChildProfile[];
 	dispose(): void;
 }
 
@@ -99,10 +103,11 @@ export class EngineProfileResolver {
 			throw new Error("AgentProfile must contain at least one route");
 		}
 		const candidates = await this.#routeCandidates(profile, launch.selectedRouteRef);
+		const childProfiles = await this.#allCachedProfiles();
 		let lastError: unknown;
 		for (const routeRef of candidates) {
 			try {
-				return await this.#resolveRoute(profile, routeRef, launch);
+				return await this.#resolveRoute(profile, routeRef, launch, childProfiles);
 			} catch (error) {
 				lastError = error;
 			}
@@ -144,6 +149,7 @@ export class EngineProfileResolver {
 		profile: AgentProfile,
 		routeRef: string,
 		launch: EngineLaunchProfile,
+		childProfiles: EngineChildProfile[],
 	): Promise<ResolvedEngineSessionProfile> {
 		const route = parseJson<AvailableModelRoute>(
 			(await this.#read(routeRef, "grimoire.available_model_route.v1")).content,
@@ -237,6 +243,7 @@ export class EngineProfileResolver {
 					enableLsp: true,
 					maxSpawnDepth: launch.maxSpawnDepth ?? 1,
 				},
+				childProfiles,
 				dispose: () => {
 					unsubscribeWriteback();
 					authStorage.close();
@@ -246,6 +253,27 @@ export class EngineProfileResolver {
 			authStorage.close();
 			throw error;
 		}
+	}
+
+	async #allCachedProfiles(): Promise<EngineChildProfile[]> {
+		const entries = await fs.readdir(this.artifactCacheRoot, { withFileTypes: true }).catch(() => []);
+		const profiles: EngineChildProfile[] = [];
+		for (const entry of entries) {
+			if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
+			const value = await readJson(path.join(this.artifactCacheRoot, entry.name));
+			if (value?.kind !== "grimoire.agent_profile.v1" || typeof value.content !== "string") continue;
+			try {
+				const profile = parseJson<AgentProfile>(value.content, "AgentProfile");
+				if (profile.schema !== "grimoire.agent_profile.v1" || profile.status === "disabled") continue;
+				const profileRef = requiredRef(String(value.artifact_ref), "artifact_ref");
+				profiles.push({
+					profileRef,
+					displayName: profile.displayName?.trim() || profileRef,
+					...(profile.description?.trim() ? { description: profile.description.trim() } : {}),
+				});
+			} catch {}
+		}
+		return profiles.sort((a, b) => a.displayName.localeCompare(b.displayName));
 	}
 
 	async #allCachedRoutes(): Promise<Array<{ ref: string; route: AvailableModelRoute }>> {

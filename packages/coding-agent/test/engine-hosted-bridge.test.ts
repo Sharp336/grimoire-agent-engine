@@ -10,6 +10,7 @@ import {
 	type GrimoireRpc,
 	HostedEngineBridge,
 	HostedGrimoireRpc,
+	launchHostedEngineChild,
 } from "@oh-my-pi/pi-coding-agent/engine/hosted-bridge";
 import {
 	ENGINE_COMMAND_STREAM,
@@ -332,6 +333,52 @@ describe("HostedGrimoireRpc", () => {
 		} finally {
 			server.stop(true);
 		}
+	});
+});
+
+describe("hosted child launch", () => {
+	it("returns the public Engine completion payload for the created child", async () => {
+		const calls: string[] = [];
+		const rpc: GrimoireRpc = {
+			async call(tool) {
+				calls.push(tool);
+				if (tool === "grimoire_agent_engine_child_launch") {
+					return {
+						agent_instance: {
+							agent_instance_id: "child-1",
+							agent_instance_ref: "grimoire://tasks/p/t/agents/child-1",
+						},
+						job: { job_id: "job-1" },
+					};
+				}
+				if (tool === "grimoire_job_get") {
+					return {
+						job: {
+							status: "succeeded",
+							result: {
+								engine_event: {
+									payload: { assistantFinal: "done", transcriptRef: "history://child-1" },
+								},
+							},
+						},
+					};
+				}
+				throw new Error(`unexpected ${tool}`);
+			},
+		};
+		const result = await launchHostedEngineChild(rpc, {
+			deviceId: "device",
+			engineId: "engine",
+			parentAgentInstanceRef: "grimoire://tasks/p/t/agents/parent",
+			parentAttemptId: "attempt-parent",
+			profileRef: "gctx:2222222222222222",
+			workStepId: "implement",
+			cwd: "/tmp",
+			maxSpawnDepth: 0,
+			cancelLocal: async () => {},
+		});
+		expect(result).toMatchObject({ agentInstanceId: "child-1", status: "completed", assistantFinal: "done" });
+		expect(calls).toEqual(["grimoire_agent_engine_child_launch", "grimoire_job_get"]);
 	});
 });
 

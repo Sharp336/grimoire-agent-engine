@@ -30,7 +30,10 @@ describe("EngineRuntime", () => {
 		for (const dir of tempDirs.splice(0)) removeSyncWithRetries(dir);
 	});
 
-	async function createRuntime(dispatchPrompt: EngineRuntimeOptions["dispatchPrompt"] = async () => true) {
+	async function createRuntime(
+		dispatchPrompt: EngineRuntimeOptions["dispatchPrompt"] = async () => true,
+		overrides: Partial<EngineRuntimeOptions> = {},
+	) {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-runtime-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);
 		const cwd = path.join(tempDir, "workspace");
@@ -51,6 +54,7 @@ describe("EngineRuntime", () => {
 				enableLsp: false,
 				modelRegistry,
 			},
+			...overrides,
 		};
 		const runtime = await EngineRuntime.create(options);
 		return { runtime, cwd, options };
@@ -62,6 +66,57 @@ describe("EngineRuntime", () => {
 		enableMCP: false,
 		enableLsp: false,
 	};
+
+	it("routes Engine task calls through explicit AgentProfile child launch", async () => {
+		let taskResult = "";
+		const launches: unknown[] = [];
+		const { runtime, cwd } = await createRuntime(
+			async session => {
+				const task = session.getToolByName("task");
+				if (!task) throw new Error("Engine root did not expose task");
+				const result = await task.execute("tool-child", {
+					profileRef: "gctx:2222222222222222",
+					workStepId: "child-step",
+				});
+				taskResult = result.content.find(part => part.type === "text")?.text ?? "";
+				return true;
+			},
+			{
+				resolveSessionProfile: async () => ({
+					options: {},
+					childProfiles: [{ profileRef: "gctx:2222222222222222", displayName: "Worker" }],
+					dispose() {},
+				}),
+				launchChild: async request => {
+					launches.push(request);
+					return { agentInstanceId: "child-agent", status: "completed", assistantFinal: "child done" };
+				},
+			},
+		);
+		await runtime.start(
+			{
+				commandId: "command-parent",
+				agentInstanceId: "parent-agent",
+				agentInstanceRef: "grimoire://tasks/p/t/agents/parent-agent",
+				executionId: "execution-parent",
+				attemptId: "attempt-parent",
+				authorityGeneration: 1,
+				cwd,
+				input: "delegate",
+			},
+			{ ...profile, spawns: "*", maxSpawnDepth: 1 },
+		);
+		await runtime.drain();
+		expect(taskResult).toBe("child done");
+		expect(launches[0]).toMatchObject({
+			parentAgentInstanceId: "parent-agent",
+			parentAttemptId: "attempt-parent",
+			profileRef: "gctx:2222222222222222",
+			workStepId: "child-step",
+			maxSpawnDepth: 0,
+		});
+		await runtime.dispose();
+	}, 60_000);
 
 	it("runs two independent roots on one shared runtime and disposes only the targeted root", async () => {
 		const { runtime, cwd } = await createRuntime();

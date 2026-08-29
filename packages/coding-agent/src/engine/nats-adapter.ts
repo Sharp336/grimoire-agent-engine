@@ -37,6 +37,8 @@ export interface EngineCommandEnvelope {
 	engineId: string;
 	engineGeneration: number;
 	agentInstanceId: string;
+	agentInstanceRef?: string;
+	parentAgentInstanceId?: string;
 	runtimeBindingId?: string;
 	bindingGeneration?: number;
 	executionId?: string;
@@ -439,6 +441,14 @@ export class NatsEngineAdapter {
 					{
 						commandId: command.commandId,
 						agentInstanceId: command.agentInstanceId,
+						agentInstanceRef: optionalRecordString(
+							command as unknown as Record<string, unknown>,
+							"agentInstanceRef",
+						),
+						parentAgentInstanceId: optionalRecordString(
+							command as unknown as Record<string, unknown>,
+							"parentAgentInstanceId",
+						),
 						executionId,
 						attemptId,
 						authorityGeneration: command.authorityGeneration,

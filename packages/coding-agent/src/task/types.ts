@@ -156,6 +156,18 @@ export const taskSchema = type({
 	"isolated?": "boolean",
 	"+": "delete",
 });
+
+/** Engine-mode task calls select a Grimoire WorkStep and AgentProfile, never an ambient OMP role. */
+export const engineTaskSchema = type({
+	profileRef: "string",
+	workStepId: "string",
+	"+": "delete",
+});
+
+export interface EngineTaskParams {
+	profileRef?: string;
+	workStepId?: string;
+}
 const taskSchemaNoIsolation = type({
 	"name?": "string",
 	agent: "string = 'task'",
@@ -179,7 +191,7 @@ const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaNoIsolation, taskSchemaBatch, ta
 type DynamicTaskSchema = (typeof ALL_TASK_SCHEMAS)[number];
 export type TaskSchema = typeof taskSchema;
 /** Active task tool parameter schema for the current isolation / batch flags */
-export type TaskToolSchemaInstance = DynamicTaskSchema | BaseType;
+export type TaskToolSchemaInstance = DynamicTaskSchema | typeof engineTaskSchema | BaseType;
 
 const TASK_AGENT_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
 const taskSchemaCache = new Map<string, BaseType>();

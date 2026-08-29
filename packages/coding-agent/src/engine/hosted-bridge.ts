@@ -9,6 +9,7 @@ import {
 	ReplayPolicy,
 } from "@nats-io/jetstream";
 import { connect, type NatsConnection, type NodeConnectionOptions } from "@nats-io/transport-node";
+import type { EngineChildLaunchResult } from "../tools";
 import {
 	type AgentMessageEnvelope,
 	ENGINE_EVENT_STREAM,
@@ -111,6 +112,65 @@ export class HostedGrimoireRpc implements GrimoireRpc {
 		) as Record<string, unknown> | undefined;
 		if (typeof text?.text !== "string") throw new Error("Grimoire Host bridge result has no JSON content");
 		return JSON.parse(text.text) as Record<string, unknown>;
+	}
+}
+
+export async function launchHostedEngineChild(
+	rpc: GrimoireRpc,
+	request: {
+		deviceId: string;
+		engineId: string;
+		parentAgentInstanceRef: string;
+		parentAttemptId: string;
+		profileRef: string;
+		workStepId: string;
+		cwd: string;
+		maxSpawnDepth: number;
+		signal?: AbortSignal;
+		cancelLocal(agentInstanceId: string): Promise<void>;
+	},
+): Promise<EngineChildLaunchResult> {
+	request.signal?.throwIfAborted();
+	const launched = await rpc.call("grimoire_agent_engine_child_launch", {
+		device_id: request.deviceId,
+		engine_id: request.engineId,
+		parent_agent_instance_ref: request.parentAgentInstanceRef,
+		parent_attempt_id: request.parentAttemptId,
+		profile_ref: request.profileRef,
+		work_step_id: request.workStepId,
+		cwd: request.cwd,
+		max_spawn_depth: request.maxSpawnDepth,
+	});
+	const agent = launched.agent_instance as Record<string, unknown> | undefined;
+	const job = launched.job as Record<string, unknown> | undefined;
+	const agentInstanceId = String(agent?.agent_instance_id ?? "");
+	const agentInstanceRef = String(agent?.agent_instance_ref ?? agent?.grimoire_uri ?? "");
+	const jobId = String(job?.job_id ?? "");
+	if (!agentInstanceId || !agentInstanceRef || !jobId)
+		throw new Error("Grimoire child launch returned no durable identity");
+	while (true) {
+		if (request.signal?.aborted) {
+			await request.cancelLocal(agentInstanceId).catch(() => {});
+			await rpc.call("grimoire_job_cancel", { job_id: jobId, reason: "parent task aborted" }).catch(() => {});
+			return { agentInstanceId, agentInstanceRef, status: "cancelled", error: "Parent task aborted" };
+		}
+		const current = await rpc.call("grimoire_job_get", { job_id: jobId });
+		const currentJob = current.job as Record<string, unknown> | undefined;
+		const status = String(currentJob?.status ?? "");
+		if (["succeeded", "failed", "cancelled", "dead_letter"].includes(status)) {
+			const result = currentJob?.result as Record<string, unknown> | undefined;
+			const event = result?.engine_event as Record<string, unknown> | undefined;
+			const payload = event?.payload as Record<string, unknown> | undefined;
+			return {
+				agentInstanceId,
+				agentInstanceRef,
+				status: status === "succeeded" ? "completed" : status === "cancelled" ? "cancelled" : "failed",
+				assistantFinal: typeof payload?.assistantFinal === "string" ? payload.assistantFinal : undefined,
+				transcriptRef: typeof payload?.transcriptRef === "string" ? payload.transcriptRef : undefined,
+				...(status === "succeeded" ? {} : { error: String(currentJob?.error ?? event?.type ?? status) }),
+			};
+		}
+		await Bun.sleep(250);
 	}
 }
 
