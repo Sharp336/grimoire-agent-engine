@@ -33,7 +33,7 @@ type EngineEventListener = (event: EngineEvent) => void | Promise<void>;
 
 const MAX_ASSISTANT_FINAL_CHARS = 48_000;
 
-function terminalYieldData(messages: readonly { role: string; content?: unknown }[]): unknown {
+function terminalYield(messages: readonly { role: string; content?: unknown }[]): { found: boolean; data?: unknown } {
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i];
 		if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
@@ -43,13 +43,13 @@ function terminalYieldData(messages: readonly { role: string; content?: unknown 
 			const call = block as { type?: string; name?: string; arguments?: unknown };
 			if (call.type !== "toolCall" || call.name !== "yield") continue;
 			const args = call.arguments;
-			if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
+			if (!args || typeof args !== "object" || Array.isArray(args)) return { found: false };
 			const result = (args as Record<string, unknown>).result;
-			if (!result || typeof result !== "object" || Array.isArray(result)) return undefined;
-			return (result as Record<string, unknown>).data;
+			if (!result || typeof result !== "object" || Array.isArray(result)) return { found: false };
+			return { found: "data" in result, data: (result as Record<string, unknown>).data };
 		}
 	}
-	return undefined;
+	return { found: false };
 }
 
 interface LiveBinding extends EngineBindingSnapshot {
@@ -59,6 +59,7 @@ interface LiveBinding extends EngineBindingSnapshot {
 	steerCommandSet: Set<string>;
 	unsubscribe: () => void;
 	disposeProfile: () => void;
+	requireYieldTool: boolean;
 }
 
 export interface EngineRuntimeOptions {
@@ -482,6 +483,7 @@ export class EngineRuntime {
 			steerCommandSet: new Set(),
 			unsubscribe: () => {},
 			disposeProfile: resolved?.dispose ?? (() => {}),
+			requireYieldTool: profile.requireYieldTool === true,
 		};
 		binding.unsubscribe = created.session.subscribe(event => {
 			if (event.type === "agent_end" && event.isTerminal !== false && binding.state === "running") {
@@ -503,6 +505,13 @@ export class EngineRuntime {
 		const attemptId = binding.attemptId;
 		try {
 			await this.#dispatchPrompt(binding.session, input);
+			for (let reminder = 0; reminder < 2 && binding.requireYieldTool; reminder++) {
+				if (terminalYield(binding.session.messages).found || binding.attemptState !== "running") break;
+				await this.#dispatchPrompt(
+					binding.session,
+					"Your previous response was not submitted. Call the yield tool now with the complete output object in result.data. Do not answer with text.",
+				);
+			}
 			await this.#waitForAttemptQuiescence(binding, attemptId);
 			await this.#inLane(binding.agentInstanceId, async () => {
 				if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
@@ -544,8 +553,8 @@ export class EngineRuntime {
 	}
 
 	#completionPayload(binding: LiveBinding): EngineCompletionPayload {
-		const yielded = terminalYieldData(binding.session.messages);
-		const final = yielded === undefined ? (binding.session.getLastAssistantText() ?? "") : JSON.stringify(yielded);
+		const yielded = terminalYield(binding.session.messages);
+		const final = yielded.found ? JSON.stringify(yielded.data) : (binding.session.getLastAssistantText() ?? "");
 		const outputTruncated = final.length > MAX_ASSISTANT_FINAL_CHARS;
 		return {
 			assistantFinal: outputTruncated ? `${final.slice(0, MAX_ASSISTANT_FINAL_CHARS)}\n[…truncated]` : final,

@@ -364,7 +364,11 @@ describe("EngineRuntime", () => {
 	}, 60000);
 
 	it("publishes schema-validated yield data as the Engine final result", async () => {
-		const { runtime, cwd } = await createRuntime(async session => {
+		const prompts: string[] = [];
+		const { runtime, cwd } = await createRuntime(async (session, input) => {
+			prompts.push(input);
+			expect(session.getToolByName("yield")).toBeDefined();
+			if (prompts.length === 1) return true;
 			Object.defineProperty(session, "messages", {
 				value: [
 					{
@@ -396,6 +400,8 @@ describe("EngineRuntime", () => {
 		await runtime.drain();
 		const completed = (await runtime.store.pendingEvents()).find(event => event.kind === "completed");
 		expect(completed?.payload?.assistantFinal).toBe('{"schema":"example.v1","ok":true}');
+		expect(prompts).toHaveLength(2);
+		expect(prompts[1]).toContain("Call the yield tool now");
 		await runtime.dispose();
 	}, 60000);
 });
