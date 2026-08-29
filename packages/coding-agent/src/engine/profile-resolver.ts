@@ -1,7 +1,9 @@
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Api, AuthCredential, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
 import type { CreateAgentSessionOptions } from "../sdk";
 import { AuthStorage } from "../session/auth-storage";
@@ -180,27 +182,36 @@ export class EngineProfileResolver {
 		try {
 			const source = await readJson(sourcePath);
 			if (source?.contentHash !== cachedAccount.content_hash) {
-				authStorage.upsertCredential(account.providerId, account.credential);
+				await authStorage.set(account.providerId, account.credential);
 				await atomicWriteJson(sourcePath, { contentHash: cachedAccount.content_hash });
 			} else await authStorage.reload();
 			const modelRegistry = new ModelRegistry(authStorage, path.join(accountDir, "models.yml"), {
 				ignoreLocalModelConfig: true,
 				cacheDbPath: path.join(accountDir, "models.sqlite"),
 			});
-			const unsubscribeWriteback = authStorage.onGenerationChanged(() => {
+			const baseCredentialHash = credentialHash(account.credential);
+			const writebackPath = path.join(writebackRoot, `${accountRef.slice(5)}.json`);
+			const writeback = async () => {
 				const credentials = authStorage.listStoredCredentials(account.providerId);
 				if (credentials.length !== 1) return;
 				const credential = credentials[0]?.credential;
 				if (!credential) return;
-				void atomicWriteJson(path.join(writebackRoot, `${accountRef.slice(5)}.json`), {
+				if (credentialHash(credential) === baseCredentialHash) {
+					await fs.rm(writebackPath, { force: true });
+					return;
+				}
+				await atomicWriteJson(writebackPath, {
 					schema: "grimoire.engine_credential_writeback.v1",
 					artifactRef: accountRef,
 					baseRevision: cachedAccount.revision,
 					baseContentHash: cachedAccount.content_hash,
+					baseCredentialHash,
 					credential,
 					updatedAt: new Date().toISOString(),
 				});
-			});
+			};
+			const unsubscribeWriteback = authStorage.onGenerationChanged(() => void writeback().catch(() => {}));
+			await writeback();
 			const model = buildModel(toModelSpec(route, account)) as Model;
 			const profileRestricted = profile.tools?.mode === "allowlist";
 			const launchRestricted = launch.restrictToolNames === true;
@@ -337,7 +348,11 @@ async function readJson(file: string): Promise<Record<string, unknown> | undefin
 }
 
 async function atomicWriteJson(file: string, value: unknown): Promise<void> {
-	const temp = `${file}.${process.pid}.tmp`;
+	const temp = `${file}.${process.pid}.${randomUUID()}.tmp`;
 	await fs.writeFile(temp, JSON.stringify(value), "utf8");
 	await fs.rename(temp, file);
+}
+
+function credentialHash(credential: AuthCredential): string {
+	return `sha256:${createHash("sha256").update(stableStringifyJson(credential), "utf8").digest("hex")}`;
 }
