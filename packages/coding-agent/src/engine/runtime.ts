@@ -513,6 +513,9 @@ export class EngineRuntime {
 				);
 			}
 			await this.#waitForAttemptQuiescence(binding, attemptId);
+			if (binding.requireYieldTool && !terminalYield(binding.session.messages).found) {
+				throw new Error("required_yield_not_submitted");
+			}
 			await this.#inLane(binding.agentInstanceId, async () => {
 				if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
 				if (binding.attemptId !== attemptId || binding.attemptState !== "running") return;

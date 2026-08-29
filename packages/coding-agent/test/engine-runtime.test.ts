@@ -404,4 +404,30 @@ describe("EngineRuntime", () => {
 		expect(prompts[1]).toContain("Call the yield tool now");
 		await runtime.dispose();
 	}, 60000);
+
+	it("fails a required-yield attempt after two prose-only reminders", async () => {
+		const prompts: string[] = [];
+		const { runtime, cwd } = await createRuntime(async (_session, input) => {
+			prompts.push(input);
+			return true;
+		});
+		await runtime.start(
+			{
+				commandId: "command-missing-yield",
+				agentInstanceId: "agent-missing-yield",
+				executionId: "execution-missing-yield",
+				attemptId: "attempt-missing-yield",
+				authorityGeneration: 1,
+				cwd,
+				input: "finish",
+			},
+			{ ...profile, requireYieldTool: true, outputSchema: { type: "object" } },
+		);
+		await runtime.drain();
+		const events = await runtime.store.pendingEvents();
+		expect(events.find(event => event.kind === "completed")).toBeUndefined();
+		expect(events.find(event => event.kind === "failed")?.payload).toEqual({ error: "required_yield_not_submitted" });
+		expect(prompts).toHaveLength(3);
+		await runtime.dispose();
+	}, 60000);
 });
