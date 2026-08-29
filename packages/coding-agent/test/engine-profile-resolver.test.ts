@@ -19,10 +19,11 @@ describe("EngineProfileResolver", () => {
 		await fs.mkdir(cache);
 		await artifact(cache, refs.profile, "grimoire.agent_profile.v1", {
 			schema: "grimoire.agent_profile.v1",
-			routes: [refs.untrustedRoute, refs.trustedRoute],
-			trustedProviderRequired: true,
-			toolPolicy: { mode: "unrestricted" },
-			mcpPolicy: { mode: "unrestricted" },
+			status: "active",
+			displayName: "Trusted fallback",
+			models: [refs.untrustedRoute, refs.trustedRoute],
+			requireTrustedProvider: true,
+			tools: { mode: "unrestricted" },
 		});
 		for (const [ref, accountRef] of [
 			[refs.untrustedRoute, refs.untrustedAccount],
@@ -30,30 +31,40 @@ describe("EngineProfileResolver", () => {
 		] as const) {
 			await artifact(cache, ref, "grimoire.available_model_route.v1", {
 				schema: "grimoire.available_model_route.v1",
+				status: "active",
+				displayName: "Test",
 				providerAccountRef: accountRef,
 				model: {
-					id: ref === refs.trustedRoute ? "trusted-model" : "untrusted-model",
+					modelIdentityId: ref === refs.trustedRoute ? "trusted-model-v1" : "untrusted-model-v1",
+					providerSurfaceId: ref.slice(5),
+					modelId: ref === refs.trustedRoute ? "trusted-model" : "untrusted-model",
 					name: "Test",
-					api: "anthropic-messages",
-					provider: "anthropic",
-					baseUrl: `https://${ref === refs.trustedRoute ? "trusted" : "untrusted"}.invalid`,
-					reasoning: true,
-					input: ["text"],
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 					contextWindow: 100_000,
-					maxTokens: 4_096,
+					maxOutputTokens: 4_096,
+					inputModalities: ["text"],
+					supportsReasoning: true,
 				},
 			});
 		}
 		await artifact(cache, refs.untrustedAccount, "grimoire.provider_account.v1", {
 			schema: "grimoire.provider_account.v1",
+			status: "active",
 			providerId: "anthropic",
+			providerKind: "anthropic",
+			api: "anthropic-messages",
+			baseUrl: "https://untrusted.invalid",
+			accountBindingId: "untrusted",
 			trusted: false,
 			credential: { type: "api_key", key: "untrusted-key" },
 		});
 		await artifact(cache, refs.trustedAccount, "grimoire.provider_account.v1", {
 			schema: "grimoire.provider_account.v1",
+			status: "active",
 			providerId: "anthropic",
+			providerKind: "anthropic",
+			api: "anthropic-messages",
+			baseUrl: "https://trusted.invalid",
+			accountBindingId: "trusted",
 			trusted: true,
 			credential: { type: "api_key", key: "trusted-key" },
 		});

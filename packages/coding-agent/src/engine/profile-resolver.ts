@@ -20,23 +20,41 @@ interface CachedArtifact {
 
 interface AgentProfile {
 	schema: "grimoire.agent_profile.v1";
-	routes: string[];
-	trySameModelOtherProvider?: boolean;
-	trustedProviderRequired?: boolean;
-	toolPolicy?: { mode?: "unrestricted" | "allowlist"; toolNames?: string[] };
-	mcpPolicy?: { mode?: "unrestricted" | "disabled" };
-	generation?: { thinkingLevel?: CreateAgentSessionOptions["thinkingLevel"] };
+	status?: "active" | "disabled";
+	models: string[];
+	allowSameModelProviderFallback?: boolean;
+	requireTrustedProvider?: boolean;
+	autoSelectionEnabled?: boolean;
+	tools?: { mode?: "unrestricted" | "allowlist"; names?: string[] };
+	generationDefaults?: { thinkingLevel?: CreateAgentSessionOptions["thinkingLevel"] };
 }
 
 interface AvailableModelRoute {
 	schema: "grimoire.available_model_route.v1";
+	status?: "active" | "disabled";
+	displayName?: string;
 	providerAccountRef: string;
-	model: ModelSpec<Api>;
+	model: {
+		modelIdentityId: string;
+		providerSurfaceId: string;
+		modelId: string;
+		requestModelId?: string;
+		name?: string;
+		contextWindow?: number;
+		maxOutputTokens?: number;
+		inputModalities?: string[];
+		supportsTools?: boolean;
+		supportsReasoning?: boolean;
+	};
 }
 
 interface ProviderAccount {
 	schema: "grimoire.provider_account.v1";
+	status?: "active" | "disabled";
 	providerId: string;
+	api: Api;
+	baseUrl: string;
+	headers?: Record<string, string>;
 	trusted: boolean;
 	credential: AuthCredential;
 }
@@ -70,7 +88,12 @@ export class EngineProfileResolver {
 			throw new Error("AgentProfile digest does not match the cached Artifact");
 		}
 		const profile = parseJson<AgentProfile>(cachedProfile.content, "AgentProfile");
-		if (profile.schema !== "grimoire.agent_profile.v1" || !Array.isArray(profile.routes) || !profile.routes.length) {
+		if (
+			profile.schema !== "grimoire.agent_profile.v1" ||
+			profile.status === "disabled" ||
+			!Array.isArray(profile.models) ||
+			!profile.models.length
+		) {
 			throw new Error("AgentProfile must contain at least one route");
 		}
 		const candidates = await this.#routeCandidates(profile, launch.selectedRouteRef);
@@ -86,14 +109,14 @@ export class EngineProfileResolver {
 	}
 
 	async #routeCandidates(profile: AgentProfile, selected?: string): Promise<string[]> {
-		const configured = profile.routes.map((ref, index) => requiredRef(ref, `routes[${index}]`));
+		const configured = profile.models.map((ref, index) => requiredRef(ref, `models[${index}]`));
 		if (selected) {
 			const selectedRef = requiredRef(selected, "selectedRouteRef");
 			if (!configured.includes(selectedRef)) throw new Error("selectedRouteRef is outside AgentProfile");
 			configured.splice(configured.indexOf(selectedRef), 1);
 			configured.unshift(selectedRef);
 		}
-		if (!profile.trySameModelOtherProvider) return configured;
+		if (!profile.allowSameModelProviderFallback) return configured;
 		const allRoutes = await this.#allCachedRoutes();
 		const expanded: string[] = [];
 		for (const ref of configured) {
@@ -103,7 +126,13 @@ export class EngineProfileResolver {
 				"AvailableModelRoute",
 			);
 			for (const candidate of allRoutes) {
-				if (candidate.ref !== ref && candidate.route.model.id === route.model.id) expanded.push(candidate.ref);
+				if (
+					candidate.ref !== ref &&
+					candidate.route.status !== "disabled" &&
+					candidate.route.model.modelIdentityId === route.model.modelIdentityId
+				) {
+					expanded.push(candidate.ref);
+				}
 			}
 		}
 		return [...new Set(expanded)];
@@ -118,7 +147,12 @@ export class EngineProfileResolver {
 			(await this.#read(routeRef, "grimoire.available_model_route.v1")).content,
 			"AvailableModelRoute",
 		);
-		if (route.schema !== "grimoire.available_model_route.v1" || !route.model?.id || !route.model.provider) {
+		if (
+			route.schema !== "grimoire.available_model_route.v1" ||
+			route.status === "disabled" ||
+			!route.model?.modelId ||
+			!route.model.modelIdentityId
+		) {
 			throw new Error("AvailableModelRoute has no valid model");
 		}
 		const accountRef = requiredRef(route.providerAccountRef, "providerAccountRef");
@@ -126,13 +160,15 @@ export class EngineProfileResolver {
 		const account = parseJson<ProviderAccount>(cachedAccount.content, "ProviderAccount");
 		if (
 			account.schema !== "grimoire.provider_account.v1" ||
+			account.status === "disabled" ||
 			!account.providerId ||
-			account.providerId !== route.model.provider ||
+			!account.api ||
+			!account.baseUrl ||
 			!validCredential(account.credential)
 		) {
 			throw new Error("ProviderAccount does not match AvailableModelRoute");
 		}
-		if (profile.trustedProviderRequired && account.trusted !== true) {
+		if (profile.requireTrustedProvider && account.trusted !== true) {
 			throw new Error("AgentProfile requires a trusted provider");
 		}
 		const accountDir = path.join(this.credentialRoot, accountRef.slice(5));
@@ -165,17 +201,17 @@ export class EngineProfileResolver {
 					updatedAt: new Date().toISOString(),
 				});
 			});
-			const model = buildModel(route.model) as Model;
-			const restricted = profile.toolPolicy?.mode === "allowlist";
+			const model = buildModel(toModelSpec(route, account)) as Model;
+			const restricted = profile.tools?.mode === "allowlist";
 			return {
 				options: {
 					authStorage,
 					modelRegistry,
 					model,
-					thinkingLevel: profile.generation?.thinkingLevel,
-					toolNames: restricted ? uniqueStrings(profile.toolPolicy?.toolNames ?? []) : undefined,
+					thinkingLevel: profile.generationDefaults?.thinkingLevel,
+					toolNames: restricted ? uniqueStrings(profile.tools?.names ?? []) : undefined,
 					restrictToolNames: restricted,
-					enableMCP: profile.mcpPolicy?.mode !== "disabled",
+					enableMCP: true,
 					enableLsp: true,
 					maxSpawnDepth: maxSpawnDepth ?? 1,
 				},
@@ -218,6 +254,35 @@ export class EngineProfileResolver {
 		}
 		return value as unknown as CachedArtifact;
 	}
+}
+
+function toModelSpec(route: AvailableModelRoute, account: ProviderAccount): ModelSpec<Api> {
+	const contextWindow = route.model.contextWindow;
+	const maxTokens = route.model.maxOutputTokens;
+	if (!Number.isSafeInteger(contextWindow) || Number(contextWindow) <= 0) {
+		throw new Error("AvailableModelRoute requires model.contextWindow for execution");
+	}
+	if (!Number.isSafeInteger(maxTokens) || Number(maxTokens) <= 0) {
+		throw new Error("AvailableModelRoute requires model.maxOutputTokens for execution");
+	}
+	const input = uniqueStrings(route.model.inputModalities ?? ["text"]).filter(
+		(value): value is "text" | "image" => value === "text" || value === "image",
+	);
+	return {
+		id: route.model.modelId,
+		requestModelId: route.model.requestModelId,
+		name: route.model.name || route.displayName || route.model.modelId,
+		api: account.api,
+		provider: account.providerId,
+		baseUrl: account.baseUrl,
+		headers: account.headers,
+		reasoning: route.model.supportsReasoning === true,
+		supportsTools: route.model.supportsTools,
+		input: input.length ? input : ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: Number(contextWindow),
+		maxTokens: Number(maxTokens),
+	};
 }
 
 function requiredRef(value: unknown, field: string): string {
