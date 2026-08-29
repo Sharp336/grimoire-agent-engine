@@ -33,6 +33,25 @@ type EngineEventListener = (event: EngineEvent) => void | Promise<void>;
 
 const MAX_ASSISTANT_FINAL_CHARS = 48_000;
 
+function terminalYieldData(messages: readonly { role: string; content?: unknown }[]): unknown {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
+		for (let j = message.content.length - 1; j >= 0; j--) {
+			const block = message.content[j];
+			if (!block || typeof block !== "object") continue;
+			const call = block as { type?: string; name?: string; arguments?: unknown };
+			if (call.type !== "toolCall" || call.name !== "yield") continue;
+			const args = call.arguments;
+			if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
+			const result = (args as Record<string, unknown>).result;
+			if (!result || typeof result !== "object" || Array.isArray(result)) return undefined;
+			return (result as Record<string, unknown>).data;
+		}
+	}
+	return undefined;
+}
+
 interface LiveBinding extends EngineBindingSnapshot {
 	attemptState: EngineAttemptState;
 	session: AgentSession;
@@ -425,6 +444,8 @@ export class EngineRuntime {
 				restrictToolNames: profile.restrictToolNames,
 				enableMCP: profile.enableMCP,
 				enableLsp: profile.enableLsp,
+				outputSchema: profile.outputSchema,
+				requireYieldTool: profile.requireYieldTool,
 				...resolved?.options,
 				engineChildLauncher,
 				agentId: id,
@@ -523,7 +544,8 @@ export class EngineRuntime {
 	}
 
 	#completionPayload(binding: LiveBinding): EngineCompletionPayload {
-		const final = binding.session.getLastAssistantText() ?? "";
+		const yielded = terminalYieldData(binding.session.messages);
+		const final = yielded === undefined ? (binding.session.getLastAssistantText() ?? "") : JSON.stringify(yielded);
 		const outputTruncated = final.length > MAX_ASSISTANT_FINAL_CHARS;
 		return {
 			assistantFinal: outputTruncated ? `${final.slice(0, MAX_ASSISTANT_FINAL_CHARS)}\n[…truncated]` : final,

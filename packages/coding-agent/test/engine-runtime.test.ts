@@ -362,4 +362,40 @@ describe("EngineRuntime", () => {
 		});
 		await runtime.dispose();
 	}, 60000);
+
+	it("publishes schema-validated yield data as the Engine final result", async () => {
+		const { runtime, cwd } = await createRuntime(async session => {
+			Object.defineProperty(session, "messages", {
+				value: [
+					{
+						role: "assistant",
+						content: [
+							{
+								type: "toolCall",
+								name: "yield",
+								arguments: { result: { data: { schema: "example.v1", ok: true } } },
+							},
+						],
+					},
+				],
+			});
+			return true;
+		});
+		await runtime.start(
+			{
+				commandId: "command-yield",
+				agentInstanceId: "agent-yield",
+				executionId: "execution-yield",
+				attemptId: "attempt-yield",
+				authorityGeneration: 1,
+				cwd,
+				input: "finish",
+			},
+			{ ...profile, requireYieldTool: true, outputSchema: { type: "object" } },
+		);
+		await runtime.drain();
+		const completed = (await runtime.store.pendingEvents()).find(event => event.kind === "completed");
+		expect(completed?.payload?.assistantFinal).toBe('{"schema":"example.v1","ok":true}');
+		await runtime.dispose();
+	}, 60000);
 });

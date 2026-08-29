@@ -24,6 +24,9 @@ export interface EngineLaunchProfile {
 	restrictToolNames?: boolean;
 	enableMCP?: boolean;
 	enableLsp?: boolean;
+	/** Existing OMP yield schema used by bounded consultant sessions. */
+	outputSchema?: unknown;
+	requireYieldTool?: boolean;
 }
 
 export interface EngineStartRequest {

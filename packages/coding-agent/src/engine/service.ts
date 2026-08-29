@@ -306,6 +306,18 @@ function resolveLaunchProfile(command: EngineCommandEnvelope): EngineLaunchProfi
 	) {
 		throw new Error("providerPromptCacheKey must contain 1..512 characters");
 	}
+	if (profile.requireYieldTool !== undefined && typeof profile.requireYieldTool !== "boolean") {
+		throw new Error("requireYieldTool must be a boolean");
+	}
+	if (profile.outputSchema !== undefined) {
+		if (!profile.outputSchema || typeof profile.outputSchema !== "object" || Array.isArray(profile.outputSchema)) {
+			throw new Error("outputSchema must be an object");
+		}
+		if (!profile.requireYieldTool) throw new Error("outputSchema requires requireYieldTool");
+		if (JSON.stringify(profile.outputSchema).length > 262_144) {
+			throw new Error("outputSchema must be no larger than 262144 characters");
+		}
+	}
 	return profile;
 }
 
