@@ -105,6 +105,21 @@ describe("EngineProfileResolver", () => {
 		} finally {
 			resolved.dispose();
 		}
+
+		const reopened = await resolver.resolve({
+			spawns: "*",
+			profileDigest: hash(refs.profile),
+			launchProfileRef: refs.profile,
+			maxSpawnDepth: 1,
+		});
+		try {
+			expect(reopened.options.authStorage?.get("anthropic")).toEqual({
+				type: "api_key",
+				key: "rotated-key",
+			});
+		} finally {
+			reopened.dispose();
+		}
 	});
 });
 

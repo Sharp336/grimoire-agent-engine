@@ -182,7 +182,7 @@ export class EngineProfileResolver {
 			if (source?.contentHash !== cachedAccount.content_hash) {
 				authStorage.upsertCredential(account.providerId, account.credential);
 				await atomicWriteJson(sourcePath, { contentHash: cachedAccount.content_hash });
-			}
+			} else await authStorage.reload();
 			const modelRegistry = new ModelRegistry(authStorage, path.join(accountDir, "models.yml"), {
 				ignoreLocalModelConfig: true,
 				cacheDbPath: path.join(accountDir, "models.sqlite"),
