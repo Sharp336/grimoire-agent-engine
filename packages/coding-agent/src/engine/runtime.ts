@@ -655,12 +655,14 @@ export class EngineRuntime {
 		binding.unsubscribe = created.session.subscribe(event => {
 			if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_end") {
 				const reasoning = event.assistantMessageEvent.content.trim();
-				if (reasoning) this.#queueTraceEvent(binding, "trace_reasoning", { reasoning: reasoning.slice(0, MAX_TRACE_CHARS) });
+				if (reasoning)
+					this.#queueTraceEvent(binding, "trace_reasoning", { reasoning: reasoning.slice(0, MAX_TRACE_CHARS) });
 			}
 			if (event.type === "tool_execution_start") {
 				binding.activeToolCallIds.add(event.toolCallId);
 				const intent = event.intent?.trim();
-				if (intent) this.#queueTraceEvent(binding, "trace_reasoning", { reasoning: intent.slice(0, MAX_TRACE_CHARS) });
+				if (intent)
+					this.#queueTraceEvent(binding, "trace_reasoning", { reasoning: intent.slice(0, MAX_TRACE_CHARS) });
 				let traceName = event.toolName;
 				let traceArgs: unknown = event.args;
 				if (
@@ -985,7 +987,11 @@ export class EngineRuntime {
 		}
 	}
 
-	#queueTraceEvent(binding: LiveBinding, kind: "trace_reasoning" | "trace_tool", payload: Record<string, unknown>): void {
+	#queueTraceEvent(
+		binding: LiveBinding,
+		kind: "trace_reasoning" | "trace_tool",
+		payload: Record<string, unknown>,
+	): void {
 		const write = binding.traceWriteTail.then(() => this.#emit(binding, kind, payload));
 		binding.traceWriteTail = write.catch(error => {
 			logger.warn("Engine trace event write failed", {
