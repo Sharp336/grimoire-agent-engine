@@ -266,13 +266,13 @@ export class EngineStore {
 			`SELECT agent_instance_id, execution_id, attempt_id, command_id, binding_id, engine_generation, binding_generation,
 			 authority_generation, state
 			 FROM engine_attempts
-			 WHERE engine_generation < ? AND state IN ('accepted', 'running')`,
+			 WHERE engine_generation < ? AND state IN ('accepted', 'running', 'pause_requested', 'paused', 'cancel_requested')`,
 			[engineGeneration],
 		)) as EngineAttemptRow[];
 		const now = Date.now();
 		await this.#client.unsafe(
 			`UPDATE engine_attempts SET state='interrupted', cause='engine_lost', updated_at=?
-			 WHERE engine_generation < ? AND state IN ('accepted', 'running')`,
+			 WHERE engine_generation < ? AND state IN ('accepted', 'running', 'pause_requested', 'paused', 'cancel_requested')`,
 			[now, engineGeneration],
 		);
 		await this.#client.unsafe(

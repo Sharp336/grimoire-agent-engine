@@ -1,6 +1,8 @@
 export type EngineAttemptState =
 	| "accepted"
 	| "running"
+	| "pause_requested"
+	| "paused"
 	| "cancel_requested"
 	| "completed"
 	| "cancelled"
@@ -63,6 +65,15 @@ export interface EngineSteerRequest extends EngineTarget {
 export interface EngineCancelRequest extends EngineTarget {
 	commandId: string;
 	reason?: string;
+}
+
+export type EngineControlInitiator =
+	| { kind: "human" }
+	| { kind: "agent"; agentInstanceId: string; agentInstanceRef: string };
+
+export interface EngineControlRequest extends EngineTarget {
+	commandId: string;
+	initiator: EngineControlInitiator;
 }
 
 export interface EngineToolApprovalDecision extends EngineTarget {
@@ -136,6 +147,9 @@ export interface EngineEvent {
 		| "accepted"
 		| "rejected"
 		| "running"
+		| "pause_requested"
+		| "paused"
+		| "resumed"
 		| "completed"
 		| "cancelled"
 		| "failed"
@@ -145,7 +159,9 @@ export interface EngineEvent {
 		| "tool_approval_requested"
 		| "tool_approval_resolved"
 		| "tool_started"
-		| "tool_settled";
+		| "tool_settled"
+		| "trace_reasoning"
+		| "trace_tool";
 	payload?: Record<string, unknown>;
 	createdAt: number;
 }

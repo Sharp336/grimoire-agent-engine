@@ -25,6 +25,8 @@ export type AgentPauseListener = (paused: boolean) => void;
 export class AgentPauseGate {
 	/** Pending while paused; resolved and cleared on resume. */
 	#gate: PromiseWithResolvers<void> | undefined;
+	#parkedGate: PromiseWithResolvers<void> | undefined;
+	#parked = false;
 	#pausedAt = 0;
 	#listeners = new Set<AgentPauseListener>();
 
@@ -38,10 +40,16 @@ export class AgentPauseGate {
 		return this.#gate ? this.#pausedAt : undefined;
 	}
 
+	get parked(): boolean {
+		return this.#parked;
+	}
+
 	/** Engage the gate. Returns false (and does nothing) when already paused. */
 	pause(): boolean {
 		if (this.#gate) return false;
 		this.#gate = Promise.withResolvers<void>();
+		this.#parkedGate = Promise.withResolvers<void>();
+		this.#parked = false;
 		this.#pausedAt = Date.now();
 		this.#notify(true);
 		return true;
@@ -55,7 +63,10 @@ export class AgentPauseGate {
 		const gate = this.#gate;
 		if (!gate) return undefined;
 		this.#gate = undefined;
+		this.#parked = false;
 		gate.resolve();
+		this.#parkedGate?.resolve();
+		this.#parkedGate = undefined;
 		this.#notify(false);
 		return Date.now() - this.#pausedAt;
 	}
@@ -76,6 +87,10 @@ export class AgentPauseGate {
 		// waiter is between awaits must re-park instead of slipping through.
 		while (this.#gate) {
 			if (signal?.aborted) return;
+			if (!this.#parked) {
+				this.#parked = true;
+				this.#parkedGate?.resolve();
+			}
 			const gate = this.#gate.promise;
 			if (!signal) {
 				await gate;
@@ -89,6 +104,21 @@ export class AgentPauseGate {
 			} finally {
 				signal.removeEventListener("abort", onAbort);
 			}
+		}
+	}
+
+	async waitUntilParked(signal?: AbortSignal): Promise<void> {
+		if (!this.#gate || this.#parked || signal?.aborted) return;
+		const parked = this.#parkedGate?.promise;
+		if (!parked) return;
+		if (!signal) return await parked;
+		const aborted = Promise.withResolvers<void>();
+		const onAbort = () => aborted.resolve();
+		signal.addEventListener("abort", onAbort, { once: true });
+		try {
+			await Promise.race([parked, aborted.promise]);
+		} finally {
+			signal.removeEventListener("abort", onAbort);
 		}
 	}
 

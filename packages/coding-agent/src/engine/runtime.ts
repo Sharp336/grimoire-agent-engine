@@ -1,5 +1,6 @@
 import * as crypto from "node:crypto";
 import * as path from "node:path";
+import { AgentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../async/job-manager";
 import type {
@@ -20,6 +21,8 @@ import {
 	type EngineBindingSnapshot,
 	type EngineCancelRequest,
 	type EngineCompletionPayload,
+	type EngineControlInitiator,
+	type EngineControlRequest,
 	type EngineEvent,
 	type EngineLaunchProfile,
 	type EnginePeerMessage,
@@ -41,6 +44,7 @@ import { EngineStore } from "./store";
 type EngineEventListener = (event: EngineEvent) => void | Promise<void>;
 
 const MAX_ASSISTANT_FINAL_CHARS = 48_000;
+const MAX_TRACE_CHARS = 48_000;
 
 function terminalYield(messages: readonly { role: string; content?: unknown }[]): { found: boolean; data?: unknown } {
 	for (let i = messages.length - 1; i >= 0; i--) {
@@ -69,6 +73,14 @@ interface LiveBinding extends EngineBindingSnapshot {
 	unsubscribe: () => void;
 	disposeProfile: () => void;
 	requireYieldTool: boolean;
+	pauseGate: AgentPauseGate;
+	activeToolCallIds: Set<string>;
+	pauseProgress: PromiseWithResolvers<void>;
+	pauseCommandIds: Set<string>;
+	pauseRequests: Map<string, EngineControlInitiator>;
+	resumeCommandIds: Set<string>;
+	traceWriteTail: Promise<void>;
+	traceTools: Map<string, { name: string; summary: string; startedAt: number }>;
 }
 
 interface ToolInvocationRecord {
@@ -239,6 +251,61 @@ export class EngineRuntime {
 		});
 	}
 
+	pause(request: EngineControlRequest): Promise<void> {
+		validateControlRequest(request);
+		return this.#inLane(request.agentInstanceId, async () => {
+			const binding = this.#requireTarget(request);
+			if (binding.pauseCommandIds.has(request.commandId)) return;
+			if (binding.attemptState === "paused") {
+				binding.pauseCommandIds.add(request.commandId);
+				await this.#emit(binding, "paused", controlPayload(request.initiator, "paused", true), request.commandId);
+				return;
+			}
+			if (binding.attemptState === "pause_requested") {
+				binding.pauseCommandIds.add(request.commandId);
+				binding.pauseRequests.set(request.commandId, request.initiator);
+				await this.#emit(
+					binding,
+					"pause_requested",
+					controlPayload(request.initiator, "pause_requested", true),
+					request.commandId,
+				);
+				return;
+			}
+			if (binding.attemptState !== "running") {
+				throw new EngineTargetError("too_late", `Attempt ${request.attemptId} is already ${binding.attemptState}`);
+			}
+			binding.pauseCommandIds.add(request.commandId);
+			binding.pauseRequests.set(request.commandId, request.initiator);
+			binding.pauseGate.pause();
+			binding.attemptState = "pause_requested";
+			await this.store.putAttempt(binding, "pause_requested");
+			await this.#emit(
+				binding,
+				"pause_requested",
+				controlPayload(request.initiator, "pause_requested"),
+				request.commandId,
+			);
+			this.#trackRun(this.#finishPause(binding, request.attemptId));
+		});
+	}
+
+	resume(request: EngineControlRequest): Promise<void> {
+		validateControlRequest(request);
+		return this.#inLane(request.agentInstanceId, async () => {
+			const binding = this.#requireTarget(request);
+			if (binding.resumeCommandIds.has(request.commandId)) return;
+			if (binding.attemptState !== "paused") {
+				throw new EngineTargetError("too_late", `Attempt ${request.attemptId} is already ${binding.attemptState}`);
+			}
+			binding.resumeCommandIds.add(request.commandId);
+			binding.attemptState = "running";
+			await this.store.putAttempt(binding, "running");
+			await this.#emit(binding, "resumed", controlPayload(request.initiator, "running"), request.commandId);
+			binding.pauseGate.resume();
+		});
+	}
+
 	cancel(request: EngineCancelRequest): Promise<void> {
 		if (!request.commandId.trim()) {
 			throw new EngineTargetError("invalid_request", "commandId must be a non-empty string");
@@ -246,7 +313,11 @@ export class EngineRuntime {
 		return this.#inLane(request.agentInstanceId, async () => {
 			const binding = this.#requireTarget(request);
 			if (binding.attemptState === "cancelled" || binding.attemptState === "cancel_requested") return;
-			if (binding.attemptState !== "running") {
+			if (
+				binding.attemptState !== "running" &&
+				binding.attemptState !== "pause_requested" &&
+				binding.attemptState !== "paused"
+			) {
 				throw new EngineTargetError("too_late", `Attempt ${request.attemptId} is already ${binding.attemptState}`);
 			}
 			this.#cancelToolApprovals(binding, request.reason ?? "Engine attempt cancelled", request.commandId);
@@ -254,6 +325,8 @@ export class EngineRuntime {
 			const abort = binding.session.abort({ reason: request.reason ?? "Engine attempt cancelled" });
 			binding.attemptState = "cancel_requested";
 			await this.store.putAttempt(binding, "cancel_requested", request.reason);
+			binding.pauseGate.resume();
+			this.#notifyPauseProgress(binding);
 			this.#trackRun(this.#finishCancel(binding, request, abort));
 		});
 	}
@@ -432,6 +505,7 @@ export class EngineRuntime {
 				await this.#terminateBinding(binding, "requested");
 				binding = undefined;
 			} else {
+				binding.pauseGate.resume();
 				binding.executionId = request.executionId;
 				binding.attemptId = request.attemptId;
 				binding.commandId = request.commandId;
@@ -440,6 +514,12 @@ export class EngineRuntime {
 				binding.state = "idle";
 				binding.steerCommandIds = [];
 				binding.steerCommandSet.clear();
+				binding.activeToolCallIds.clear();
+				binding.traceTools.clear();
+				binding.traceWriteTail = Promise.resolve();
+				binding.pauseCommandIds.clear();
+				binding.pauseRequests.clear();
+				binding.resumeCommandIds.clear();
 				binding.session.setAttemptId(request.attemptId);
 			}
 		}
@@ -475,6 +555,7 @@ export class EngineRuntime {
 				})
 			: SessionManager.create(request.cwd, sessionDir, this.store.sessionStorage);
 		const id = engineAgentId(request.agentInstanceId);
+		const pauseGate = new AgentPauseGate();
 		let created: Awaited<ReturnType<typeof createAgentSession>>;
 		let liveBinding: LiveBinding | undefined;
 		const toolExecutionHook: ToolExecutionHook | undefined = hasToolExecutionPolicies(profile)
@@ -532,6 +613,7 @@ export class EngineRuntime {
 				asyncJobManager: this.asyncJobManager,
 				ircBus: this.ircBus,
 				attemptId: request.attemptId,
+				pauseGate,
 				parentAgentId: request.parentAgentInstanceId ? engineAgentId(request.parentAgentInstanceId) : undefined,
 				engineMode: true,
 				expectedAgentRef: null,
@@ -560,9 +642,59 @@ export class EngineRuntime {
 			unsubscribe: () => {},
 			disposeProfile: resolved?.dispose ?? (() => {}),
 			requireYieldTool: profile.requireYieldTool === true,
+			pauseGate,
+			activeToolCallIds: new Set(),
+			pauseProgress: Promise.withResolvers<void>(),
+			pauseCommandIds: new Set(),
+			pauseRequests: new Map(),
+			resumeCommandIds: new Set(),
+			traceWriteTail: Promise.resolve(),
+			traceTools: new Map(),
 		};
 		liveBinding = binding;
 		binding.unsubscribe = created.session.subscribe(event => {
+			if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_end") {
+				const reasoning = event.assistantMessageEvent.content.trim();
+				if (reasoning) this.#queueTraceEvent(binding, "trace_reasoning", { reasoning: reasoning.slice(0, MAX_TRACE_CHARS) });
+			}
+			if (event.type === "tool_execution_start") {
+				binding.activeToolCallIds.add(event.toolCallId);
+				const intent = event.intent?.trim();
+				if (intent) this.#queueTraceEvent(binding, "trace_reasoning", { reasoning: intent.slice(0, MAX_TRACE_CHARS) });
+				let traceName = event.toolName;
+				let traceArgs: unknown = event.args;
+				if (
+					traceName === "write" &&
+					typeof traceArgs === "object" &&
+					traceArgs !== null &&
+					"path" in traceArgs &&
+					typeof traceArgs.path === "string" &&
+					traceArgs.path.startsWith("xd://mcp__")
+				) {
+					traceName = traceArgs.path.slice("xd://".length);
+					traceArgs = "content" in traceArgs ? traceArgs.content : {};
+				}
+				const summary = typeof traceArgs === "string" ? traceArgs : stableStringifyJson(traceArgs);
+				binding.traceTools.set(event.toolCallId, {
+					name: traceName,
+					summary: summary.length > 2_048 ? `${summary.slice(0, 2_048)}…` : summary,
+					startedAt: Date.now(),
+				});
+			}
+			if (event.type === "tool_execution_end") {
+				binding.activeToolCallIds.delete(event.toolCallId);
+				const started = binding.traceTools.get(event.toolCallId);
+				binding.traceTools.delete(event.toolCallId);
+				this.#queueTraceEvent(binding, "trace_tool", {
+					tool: {
+						name: started?.name ?? event.toolName,
+						...(started?.summary ? { summary: started.summary } : {}),
+						outcome: event.isError ? "failed" : "ok",
+						...(started ? { took: Math.max(0, Math.round((Date.now() - started.startedAt) / 100) / 10) } : {}),
+					},
+				});
+				this.#notifyPauseProgress(binding);
+			}
 			if (event.type === "agent_end" && event.isTerminal !== false && binding.state === "running") {
 				this.agentRegistry.setStatus(binding.engineAgentId, "idle", binding.session);
 			}
@@ -758,19 +890,58 @@ export class EngineRuntime {
 	/** Cancel an Engine child when its parent task call is aborted. */
 	async cancelAgentInstance(agentInstanceId: string, reason: string): Promise<void> {
 		const binding = this.#bindings.get(agentInstanceId);
-		if (binding?.attemptState !== "running") return;
+		if (
+			binding?.attemptState !== "running" &&
+			binding?.attemptState !== "pause_requested" &&
+			binding?.attemptState !== "paused"
+		) {
+			return;
+		}
 		// The start command owns the Attempt terminal event, including parent-driven cancellation.
 		await this.cancel({ ...this.#snapshot(binding), commandId: binding.commandId, reason });
+	}
+
+	async #finishPause(binding: LiveBinding, attemptId: string): Promise<void> {
+		await binding.pauseGate.waitUntilParked();
+		while (binding.activeToolCallIds.size > 0 && binding.attemptState === "pause_requested") {
+			const progress = binding.pauseProgress.promise;
+			if (binding.activeToolCallIds.size > 0) await progress;
+		}
+		await binding.session.sessionManager.flush();
+		await this.#inLane(binding.agentInstanceId, async () => {
+			if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
+			if (binding.attemptId !== attemptId || binding.attemptState !== "pause_requested") return;
+			binding.attemptState = "paused";
+			await this.store.putAttempt(binding, "paused");
+			for (const [commandId, initiator] of binding.pauseRequests) {
+				await this.#emit(binding, "paused", controlPayload(initiator, "paused"), commandId);
+			}
+			binding.pauseRequests.clear();
+		});
+	}
+
+	#notifyPauseProgress(binding: LiveBinding): void {
+		binding.pauseProgress.resolve();
+		binding.pauseProgress = Promise.withResolvers<void>();
+	}
+
+	async #dispatchModel(binding: LiveBinding, input: string): Promise<boolean> {
+		try {
+			return await this.#dispatchPrompt(binding.session, input);
+		} finally {
+			await binding.pauseGate.waitUntilResumed();
+		}
 	}
 
 	async #runPrompt(binding: LiveBinding, input: string): Promise<void> {
 		const attemptId = binding.attemptId;
 		try {
-			await this.#dispatchPrompt(binding.session, input);
+			await this.#dispatchModel(binding, input);
 			for (let reminder = 0; reminder < 2 && binding.requireYieldTool; reminder++) {
+				await binding.pauseGate.waitUntilResumed();
 				if (terminalYield(binding.session.messages).found || binding.attemptState !== "running") break;
-				await this.#dispatchPrompt(
-					binding.session,
+				await this.#dispatchModel(
+					binding,
 					"Your previous response was not submitted. Call the yield tool now with the complete output object in result.data. Do not answer with text.",
 				);
 			}
@@ -778,36 +949,61 @@ export class EngineRuntime {
 			if (binding.requireYieldTool && !terminalYield(binding.session.messages).found) {
 				throw new Error("required_yield_not_submitted");
 			}
-			await this.#inLane(binding.agentInstanceId, async () => {
-				if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
-				if (binding.attemptId !== attemptId || binding.attemptState !== "running") return;
-				binding.state = "idle";
-				binding.attemptState = "completed";
-				await this.store.putBinding(this.#snapshot(binding));
-				await this.store.putAttempt(binding, "completed");
-				await this.#emit(binding, "completed", this.#completionPayload(binding));
-			});
+			await this.#settleAttempt(binding, attemptId, "completed");
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			await this.#inLane(binding.agentInstanceId, async () => {
-				if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
-				if (binding.attemptId !== attemptId || binding.attemptState !== "running") return;
-				binding.state = "idle";
-				binding.attemptState = "failed";
-				await this.store.putBinding(this.#snapshot(binding));
-				await this.store.putAttempt(binding, "failed", message);
-				await this.#emit(binding, "failed", { error: message });
-			});
+			await this.#settleAttempt(binding, attemptId, "failed", message);
 		}
+	}
+
+	async #settleAttempt(
+		binding: LiveBinding,
+		attemptId: string,
+		state: "completed" | "failed",
+		cause?: string,
+	): Promise<void> {
+		await binding.traceWriteTail;
+		for (;;) {
+			await binding.pauseGate.waitUntilResumed();
+			const retry = await this.#inLane(binding.agentInstanceId, async () => {
+				if (this.#bindings.get(binding.agentInstanceId) !== binding || binding.attemptId !== attemptId)
+					return false;
+				if (binding.attemptState === "pause_requested" || binding.attemptState === "paused") return true;
+				if (binding.attemptState !== "running") return false;
+				binding.state = "idle";
+				binding.attemptState = state;
+				await this.store.putBinding(this.#snapshot(binding));
+				await this.store.putAttempt(binding, state, cause);
+				await this.#emit(
+					binding,
+					state,
+					state === "completed" ? this.#completionPayload(binding) : { error: cause ?? "Unknown Engine failure" },
+				);
+				return false;
+			});
+			if (!retry) return;
+		}
+	}
+
+	#queueTraceEvent(binding: LiveBinding, kind: "trace_reasoning" | "trace_tool", payload: Record<string, unknown>): void {
+		const write = binding.traceWriteTail.then(() => this.#emit(binding, kind, payload));
+		binding.traceWriteTail = write.catch(error => {
+			logger.warn("Engine trace event write failed", {
+				kind,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
 	}
 
 	async #waitForAttemptQuiescence(binding: LiveBinding, attemptId: string): Promise<void> {
 		const filter = { ownerId: binding.engineAgentId, attemptId };
 		for (;;) {
+			await binding.pauseGate.waitUntilResumed();
 			await binding.session.waitForIdle();
 			await this.asyncJobManager.waitForOwnerJobs(binding.engineAgentId, { attemptId });
 			await this.asyncJobManager.drainDeliveries({ filter });
 			await this.#waitForToolInvocations(binding, attemptId);
+			await binding.pauseGate.waitUntilResumed();
 			await binding.session.waitForIdle();
 			if (
 				this.asyncJobManager.getRunningJobs(filter).length === 0 &&
@@ -859,7 +1055,12 @@ export class EngineRuntime {
 		binding.unsubscribe();
 		this.#cancelToolApprovals(binding, cause === "engine_lost" ? "Engine stopped" : "Engine binding released");
 		this.asyncJobManager.cancelAll({ ownerId: binding.engineAgentId, attemptId: binding.attemptId });
-		await binding.session.abort({ reason: cause === "engine_lost" ? "Engine stopped" : "Engine binding released" });
+		const abort = binding.session.abort({
+			reason: cause === "engine_lost" ? "Engine stopped" : "Engine binding released",
+		});
+		binding.pauseGate.resume();
+		this.#notifyPauseProgress(binding);
+		await abort;
 		await binding.session.dispose();
 		binding.disposeProfile();
 		this.agentRegistry.unregister(binding.engineAgentId, binding.session);
@@ -882,7 +1083,10 @@ export class EngineRuntime {
 		binding.unsubscribe();
 		this.#cancelToolApprovals(binding, "Engine admission failed");
 		this.asyncJobManager.cancelAll({ ownerId: binding.engineAgentId, attemptId: binding.attemptId });
-		await binding.session.abort({ reason: "Engine admission failed" });
+		const abort = binding.session.abort({ reason: "Engine admission failed" });
+		binding.pauseGate.resume();
+		this.#notifyPauseProgress(binding);
+		await abort;
 		await binding.session.dispose();
 		binding.disposeProfile();
 		this.agentRegistry.unregister(binding.engineAgentId, binding.session);
@@ -1022,6 +1226,37 @@ export class EngineRuntime {
 
 function hasToolExecutionPolicies(profile: EngineLaunchProfile): boolean {
 	return Object.values(profile.toolPolicies ?? {}).some(policy => policy !== "unrestricted");
+}
+
+function validateControlRequest(request: EngineControlRequest): void {
+	if (!request.commandId.trim()) {
+		throw new EngineTargetError("invalid_request", "commandId must be a non-empty string");
+	}
+	if (request.initiator.kind === "human") return;
+	if (request.initiator.kind !== "agent") {
+		throw new EngineTargetError("invalid_request", "initiator kind must be human or agent");
+	}
+	if (!request.initiator.agentInstanceId.trim() || !request.initiator.agentInstanceRef.trim()) {
+		throw new EngineTargetError("invalid_request", "agent initiator identity must be non-empty");
+	}
+}
+
+function controlPayload(
+	initiator: EngineControlInitiator,
+	state: EngineAttemptState,
+	duplicate = false,
+): Record<string, unknown> {
+	return {
+		initiator,
+		attemptState: state,
+		controlReadiness: {
+			pause: state === "running",
+			resume: state === "paused",
+			steer: state === "running" || state === "pause_requested" || state === "paused",
+			cancel: state === "running" || state === "pause_requested" || state === "paused",
+		},
+		...(duplicate ? { duplicate: true } : {}),
+	};
 }
 
 function sha256(value: string): string {

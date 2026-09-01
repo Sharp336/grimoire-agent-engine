@@ -601,6 +601,14 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 	);
 }
 
+async function waitWhilePaused(config: AgentLoopConfig, signal?: AbortSignal): Promise<void> {
+	while (!signal?.aborted) {
+		const gate = config.pauseGate?.paused ? config.pauseGate : agentPauseGate.paused ? agentPauseGate : undefined;
+		if (!gate) return;
+		await gate.waitUntilResumed(signal);
+	}
+}
+
 /**
  * Build the `agent_end` event payload. When telemetry is enabled, snapshots
  * the run collector so consumers receive {@link AgentRunSummary} +
@@ -1041,6 +1049,7 @@ async function runLoopBody(
 		// Skip when the run is already externally aborted — dequeuing would strand
 		// the messages in a run that is about to die.
 		try {
+			await waitWhilePaused(config, signal);
 			pendingMessages = signal?.aborted ? [] : (await config.getSteeringMessages?.(signal)) || [];
 		} catch (error) {
 			stream.push({ type: "turn_start" });
@@ -1076,10 +1085,10 @@ async function runLoopBody(
 				// Yield at the top of each iteration to prevent busy-wait when
 				// the agent loop is executing tool calls back-to-back.
 				await yieldIfDue();
-				// Park at the turn boundary while the process-wide pause gate is
-				// engaged (host /pause). An external abort releases the park so a
+				// Park at the turn boundary while an active pause gate is engaged.
+				// An external abort releases the park so a
 				// cancelled run still unwinds while everything else stays frozen.
-				if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(signal);
+				await waitWhilePaused(config, signal);
 
 				// Build the provider-bound context before opening the turn. Queue
 				// messages are added now but their events remain deferred until
@@ -1179,6 +1188,8 @@ async function runLoopBody(
 					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
 					return;
 				}
+
+				await waitWhilePaused(config, signal);
 
 				if (!turnOpen) {
 					stream.push({ type: "turn_start" });
@@ -2453,10 +2464,10 @@ async function executeToolCalls(
 			record.skipped = true;
 			return;
 		}
-		// Park before starting this tool while the process-wide pause gate is
+		// Park before starting this tool while an active pause gate is
 		// engaged. Tools already executing are unaffected (pausing never aborts);
 		// a batch interrupted mid-pause unwinds via the signal checks below.
-		if (agentPauseGate.paused) await agentPauseGate.waitUntilResumed(record.signal);
+		await waitWhilePaused(config, record.signal);
 
 		const { toolCall, tool } = record;
 		// Validation (and the beforeToolCall hook) ran in the prepare phase; a

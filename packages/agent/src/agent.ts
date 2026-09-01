@@ -36,6 +36,7 @@ import {
 	resolveOwnedDialectFromEnv,
 } from "./agent-loop";
 import type { AppendOnlyContextManager } from "./append-only-context";
+import type { AgentPauseGate } from "./pause";
 import { isProviderRefusalMessage } from "./replay-policy";
 import { Tokenizer, tokenizerEncodingForModel } from "./tokenizer";
 import type {
@@ -97,6 +98,7 @@ export class AgentBusyError extends Error {
 }
 export interface AgentOptions {
 	initialState?: Partial<AgentState>;
+	pauseGate?: AgentPauseGate;
 
 	/**
 	 * Converts AgentMessage[] to LLM-compatible Message[] before each LLM call.
@@ -427,6 +429,7 @@ export class Agent {
 	#asideMessageProvider?: () => AsideMessage[] | Promise<AsideMessage[]>;
 	#telemetry?: AgentLoopConfig["telemetry"];
 	#appendOnlyContext?: AppendOnlyContextManager;
+	#pauseGate?: AgentPauseGate;
 	#beforeQueuedMessageDequeueHooks = new Set<(signal?: AbortSignal) => Promise<void> | void>();
 	#beforeModelCallHooks = new Set<(signal?: AbortSignal) => Promise<void> | void>();
 
@@ -509,6 +512,7 @@ export class Agent {
 		this.transformAssistantMessage = opts.transformAssistantMessage;
 		this.#telemetry = opts.telemetry;
 		this.#appendOnlyContext = opts.appendOnlyContext;
+		this.#pauseGate = opts.pauseGate;
 		this.#transformProviderContext = opts.transformProviderContext;
 	}
 
@@ -1457,6 +1461,7 @@ export class Agent {
 			dialect: this.#dialect,
 			abortOnFabricatedToolResult: this.#abortOnFabricatedToolResult,
 			appendOnlyContext: this.#appendOnlyContext,
+			pauseGate: this.#pauseGate,
 			beforeToolCall: this.beforeToolCall ? (ctx, signal) => this.beforeToolCall?.(ctx, signal) : undefined,
 			afterToolCall: this.afterToolCall ? (ctx, signal) => this.afterToolCall?.(ctx, signal) : undefined,
 			transformAssistantMessage: this.transformAssistantMessage

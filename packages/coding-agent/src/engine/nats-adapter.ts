@@ -17,7 +17,7 @@ import {
 } from "@nats-io/jetstream";
 import { connect, type NatsConnection, type NodeConnectionOptions, nanos } from "@nats-io/transport-node";
 import type { IrcDeliveryReceipt, IrcMessage } from "../irc/bus";
-import type { EngineEvent, EngineLaunchProfile } from "./contracts";
+import type { EngineControlInitiator, EngineEvent, EngineLaunchProfile } from "./contracts";
 import { EngineTargetError } from "./contracts";
 import { engineRouteToken } from "./route";
 import type { EngineRuntime } from "./runtime";
@@ -27,7 +27,7 @@ export const ENGINE_EVENT_STREAM = "GRIMOIRE_ENGINE_EVENTS";
 export const AGENT_MESSAGE_STREAM = "GRIMOIRE_AGENT_MESSAGES";
 export const ENGINE_MAX_ENVELOPE_BYTES = 256 * 1024;
 
-export type EngineCommandOp = "start" | "steer" | "cancel" | "reconcile" | "resolve_tool_approval";
+export type EngineCommandOp = "start" | "steer" | "pause" | "resume" | "cancel" | "reconcile" | "resolve_tool_approval";
 
 export interface EngineCommandEnvelope {
 	schema: "grimoire.engine.command.v1";
@@ -466,6 +466,20 @@ export class NatsEngineAdapter {
 					message: requiredRecordString(command.payload, "text"),
 				});
 				return;
+			case "pause":
+				await this.runtime.pause({
+					...boundTarget(command),
+					commandId: command.commandId,
+					initiator: controlInitiator(command.payload),
+				});
+				return;
+			case "resume":
+				await this.runtime.resume({
+					...boundTarget(command),
+					commandId: command.commandId,
+					initiator: controlInitiator(command.payload),
+				});
+				return;
 			case "cancel":
 				await this.runtime.cancel({
 					...boundTarget(command),
@@ -721,10 +735,26 @@ function isCommandOp(value: unknown): value is EngineCommandOp {
 	return (
 		value === "start" ||
 		value === "steer" ||
+		value === "pause" ||
+		value === "resume" ||
 		value === "cancel" ||
 		value === "reconcile" ||
 		value === "resolve_tool_approval"
 	);
+}
+
+function controlInitiator(payload: Record<string, unknown>): EngineControlInitiator {
+	const initiator = requiredRecord(payload, "initiator");
+	const kind = requiredRecordString(initiator, "kind");
+	if (kind === "human") return { kind };
+	if (kind === "agent") {
+		return {
+			kind,
+			agentInstanceId: requiredRecordString(initiator, "agentInstanceId"),
+			agentInstanceRef: requiredRecordString(initiator, "agentInstanceRef"),
+		};
+	}
+	throw new PoisonMessageError("initiator kind must be human or agent");
 }
 
 function boundTarget(command: EngineCommandEnvelope) {
@@ -759,6 +789,10 @@ function eventType(kind: EngineEvent["kind"]): string {
 			return "tool.started";
 		case "tool_settled":
 			return "tool.settled";
+		case "trace_reasoning":
+			return "trace.reasoning";
+		case "trace_tool":
+			return "trace.tool";
 		default:
 			return `attempt.${kind}`;
 	}

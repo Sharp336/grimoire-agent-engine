@@ -4,7 +4,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { EngineEvent, EngineLaunchProfile } from "@oh-my-pi/pi-coding-agent/engine/contracts";
+import type {
+	EngineControlInitiator,
+	EngineEvent,
+	EngineLaunchProfile,
+} from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import { EngineRuntime, type EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -419,6 +423,137 @@ describe("EngineRuntime", () => {
 		prompt.resolve(true);
 		await runtime.drain();
 		expect(events.find(event => event.kind === "cancelled")?.causationCommandId).toBe("command-parent-owned");
+		await runtime.dispose();
+	}, 60000);
+
+	it("pauses and resumes the same child Attempt without waking its parent", async () => {
+		const prompts = new Map<string, PromiseWithResolvers<boolean>>();
+		const { runtime, cwd } = await createRuntime(session => {
+			const prompt = Promise.withResolvers<boolean>();
+			const agentId = session.getAgentId();
+			if (!agentId) throw new Error("Engine test session has no agent id");
+			prompts.set(agentId, prompt);
+			return prompt.promise;
+		});
+		const parent = await runtime.start(
+			{
+				commandId: "command-parent",
+				agentInstanceId: "parent-agent",
+				agentInstanceRef: "grimoire://tasks/p/t/agents/parent-agent",
+				executionId: "execution-parent",
+				attemptId: "attempt-parent",
+				authorityGeneration: 1,
+				cwd,
+				input: "wait for children",
+			},
+			profile,
+		);
+		const parentSession = runtime.agentRegistry.get(parent.engineAgentId)?.session;
+		if (!parentSession) throw new Error("parent session is unavailable");
+		let parentSessionEvents = 0;
+		parentSession.subscribe(() => parentSessionEvents++);
+
+		const sources: EngineControlInitiator[] = [
+			{ kind: "human" },
+			{
+				kind: "agent",
+				agentInstanceId: "controller-agent",
+				agentInstanceRef: "grimoire://tasks/p/t/agents/controller-agent",
+			},
+		];
+		for (const [index, initiator] of sources.entries()) {
+			const child = await runtime.start(
+				{
+					commandId: `command-child-${index}`,
+					agentInstanceId: `child-agent-${index}`,
+					agentInstanceRef: `grimoire://tasks/p/t/agents/child-agent-${index}`,
+					parentAgentInstanceId: "parent-agent",
+					executionId: `execution-child-${index}`,
+					attemptId: `attempt-child-${index}`,
+					authorityGeneration: 1,
+					cwd,
+					input: "work",
+				},
+				profile,
+			);
+			const parentEventsBefore = (await runtime.store.pendingEvents()).filter(
+				event => event.agentInstanceId === "parent-agent",
+			);
+			const parentSnapshot = {
+				mailbox: runtime.ircBus.inbox(parent.engineAgentId, { peek: true }),
+				unread: runtime.ircBus.unreadCount(parent.engineAgentId),
+				sessionEvents: parentSessionEvents,
+				messages: parentSession.messages.length,
+				eventSeq: parentEventsBefore.map(event => event.seq),
+			};
+			const paused = nextEngineEvent(runtime, "paused");
+			await runtime.pause({ ...child, commandId: `pause-child-${index}`, initiator });
+			prompts.get(child.engineAgentId)?.resolve(true);
+			const pausedEvent = await paused;
+
+			expect((await runtime.store.getAttempt(child.attemptId))?.state).toBe("paused");
+			expect(runtime.getBinding(child.agentInstanceId)).toMatchObject({
+				bindingId: child.bindingId,
+				attemptId: child.attemptId,
+			});
+			expect(pausedEvent.payload).toMatchObject({
+				initiator,
+				attemptState: "paused",
+				controlReadiness: { pause: false, resume: true, steer: true, cancel: true },
+			});
+			expect({
+				mailbox: runtime.ircBus.inbox(parent.engineAgentId, { peek: true }),
+				unread: runtime.ircBus.unreadCount(parent.engineAgentId),
+				sessionEvents: parentSessionEvents,
+				messages: parentSession.messages.length,
+				eventSeq: (await runtime.store.pendingEvents())
+					.filter(event => event.agentInstanceId === "parent-agent")
+					.map(event => event.seq),
+			}).toEqual(parentSnapshot);
+
+			const completed = nextEngineEvent(runtime, "completed");
+			await runtime.resume({ ...child, commandId: `resume-child-${index}`, initiator });
+			const completedEvent = await completed;
+			expect(completedEvent.attemptId).toBe(child.attemptId);
+			expect((await runtime.store.getAttempt(child.attemptId))?.state).toBe("completed");
+			const resumedEvent = (await runtime.store.pendingEvents()).find(
+				event => event.kind === "resumed" && event.attemptId === child.attemptId,
+			);
+			expect(resumedEvent?.payload).toMatchObject({ initiator, attemptState: "running" });
+		}
+
+		prompts.get(parent.engineAgentId)?.resolve(true);
+		await runtime.drain();
+		await runtime.dispose();
+	}, 60000);
+
+	it("keeps cancel terminal and distinct from resume for a paused Attempt", async () => {
+		const prompt = Promise.withResolvers<boolean>();
+		const { runtime, cwd } = await createRuntime(() => prompt.promise);
+		const started = await runtime.start(
+			{
+				commandId: "command-paused-cancel",
+				agentInstanceId: "agent-paused-cancel",
+				executionId: "execution-paused-cancel",
+				attemptId: "attempt-paused-cancel",
+				authorityGeneration: 1,
+				cwd,
+				input: "wait",
+			},
+			profile,
+		);
+		const paused = nextEngineEvent(runtime, "paused");
+		await runtime.pause({ ...started, commandId: "pause-before-cancel", initiator: { kind: "human" } });
+		prompt.resolve(true);
+		await paused;
+		await runtime.cancel({ ...started, commandId: "cancel-not-resume" });
+		await runtime.drain();
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
+		const events = await runtime.store.pendingEvents();
+		expect(events.some(event => event.kind === "resumed")).toBeFalse();
+		expect(
+			events.find(event => event.kind === "cancelled" && event.causationCommandId === "cancel-not-resume"),
+		).toBeDefined();
 		await runtime.dispose();
 	}, 60000);
 

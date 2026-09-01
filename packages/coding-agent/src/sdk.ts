@@ -4,6 +4,7 @@ import {
 	type AgentEvent,
 	type AgentMessage,
 	type AgentOptions,
+	type AgentPauseGate,
 	type AgentTelemetryConfig,
 	type AgentTool,
 	AppendOnlyContextManager,
@@ -377,6 +378,7 @@ export interface CreateAgentSessionOptions {
 	spawns?: string;
 	/** Maximum descendant depth below this session. Undefined keeps the ordinary OMP setting. */
 	maxSpawnDepth?: number;
+	pauseGate?: AgentPauseGate;
 
 	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
 	authStorage?: AuthStorage;
@@ -3473,6 +3475,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				disableReasoning: shouldDisableReasoning(effectiveThinkingLevel),
 				tools: initialTools,
 			},
+			pauseGate: options.pauseGate,
 			cwd,
 			// Live cwd: `/move` updates SessionManager (and process cwd) without
 			// reconstructing the Agent, so a static cwd would strand GitLab Duo Agent

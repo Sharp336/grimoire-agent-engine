@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { agentLoop, agentPauseGate } from "@oh-my-pi/pi-agent-core";
+import { AgentPauseGate, agentLoop, agentPauseGate } from "@oh-my-pi/pi-agent-core";
 import type { AgentContext, AgentLoopConfig, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core/types";
 import type { Message } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
@@ -57,6 +57,35 @@ describe("agentPauseGate", () => {
 		} finally {
 			agentPauseGate.waitUntilResumed = originalWait;
 		}
+	});
+
+	it("can pause one agent loop without pausing a sibling", async () => {
+		const localGate = new AgentPauseGate();
+		const pausedMock = createMockModel({ responses: [{ content: ["paused done"] }] });
+		const siblingMock = createMockModel({ responses: [{ content: ["sibling done"] }] });
+		const context = (): AgentContext => ({ systemPrompt: ["Test"], messages: [], tools: [] });
+		localGate.pause();
+		const pausedResult = agentLoop(
+			[createUserMessage("pause me")],
+			context(),
+			{ model: pausedMock.model, convertToLlm: identityConverter, pauseGate: localGate },
+			undefined,
+			pausedMock.stream,
+		).result();
+		await localGate.waitUntilParked();
+		await agentLoop(
+			[createUserMessage("keep going")],
+			context(),
+			{ model: siblingMock.model, convertToLlm: identityConverter },
+			undefined,
+			siblingMock.stream,
+		).result();
+		expect(pausedMock.calls).toHaveLength(0);
+		expect(siblingMock.calls).toHaveLength(1);
+
+		localGate.resume();
+		await pausedResult;
+		expect(pausedMock.calls).toHaveLength(1);
 	});
 
 	it("holds tool execution at the tool boundary when paused mid-turn", async () => {
