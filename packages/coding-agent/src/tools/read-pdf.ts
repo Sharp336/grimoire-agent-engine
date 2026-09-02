@@ -106,6 +106,7 @@ export async function renderPdfPageScreenshot(
 		browserLease = true;
 		await untilAborted(renderSignal, () =>
 			acquireTab(tabName, acquiredBrowser, {
+				cwd: session.cwd,
 				url: url.href,
 				waitUntil: "load",
 				timeoutMs: PDF_RENDER_TIMEOUT_MS,

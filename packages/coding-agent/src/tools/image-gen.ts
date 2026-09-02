@@ -749,7 +749,13 @@ function imageProviderOrder(activeModel: Model | undefined, requested?: ImagePro
 	// Per-request provider wins, then the configured priority list, then the
 	// active session's provider, then the built-in auto order.
 	if (requested !== undefined && requested !== "auto") add(requested);
-	for (const provider of configuredImageProviderOrder) add(provider);
+	let scopedProviderOrder = configuredImageProviderOrder;
+	try {
+		scopedProviderOrder = settings.get("providers.imageOrder").filter(isImageProviderId);
+	} catch {
+		// Keep the native-process compatibility policy when Settings is not initialized.
+	}
+	for (const provider of scopedProviderOrder) add(provider);
 	add(activeImageProvider(activeModel));
 	for (const provider of AUTO_IMAGE_PROVIDER_ORDER) add(provider);
 	return providers;

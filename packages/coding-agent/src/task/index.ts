@@ -630,7 +630,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 								`- ${profile.profileRef}: ${profile.displayName}${profile.description ? ` — ${profile.description}` : ""}`,
 						)
 						.join("\n")
-				: "- No cached active profiles are available.";
+				: "- No child AgentProfiles are allowed by the pinned profile.";
 			return `Launch a child AgentSession for an existing Grimoire WorkStep. Select one profileRef explicitly; the parent profile is never inherited.\n\nAvailable AgentProfiles:\n${catalog}`;
 		}
 		const disabledAgents = this.session.settings.get("task.disabledAgents") as string[];
@@ -705,6 +705,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 */
 	static async create(session: ToolSession): Promise<TaskTool> {
 		if (session.engineChildLauncher) return new TaskTool(session, []);
+		if (session.engineMode) return new TaskTool(session, []);
 		const { agents } = await discoverAgentsForCreate(session.cwd, session.effectiveExtensionRoots?.());
 		return new TaskTool(session, agents);
 	}
@@ -718,6 +719,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		if (this.session.engineChildLauncher) {
 			return this.#executeEngineChild(toolCallId, rawParams as EngineTaskParams, signal, onUpdate);
 		}
+		if (this.session.engineMode) throw new Error("Engine task requires an explicit child launcher");
 		const params = repairTaskParams(rawParams as TaskParams);
 		// Schema defaults fill `agent` for model calls, but internal callers
 		// and stale transcripts can bypass arktype. `spawnParamsFor` resolves each
@@ -1104,7 +1106,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const workStepId = params.workStepId?.trim();
 		if (!profileRef || !workStepId) return createTaskModeError("profileRef and workStepId are required");
 		const profile = launcher.profiles.find(candidate => candidate.profileRef === profileRef);
-		if (!profile) return createTaskModeError(`AgentProfile ${profileRef} is not in the active cached catalog`);
+		if (!profile) return createTaskModeError(`AgentProfile ${profileRef} is not in the pinned child catalog`);
 		const startedAt = Date.now();
 		onUpdate?.({
 			content: [{ type: "text", text: `Launching ${profile.displayName} for WorkStep ${workStepId}...` }],

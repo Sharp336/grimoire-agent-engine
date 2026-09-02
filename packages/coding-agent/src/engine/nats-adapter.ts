@@ -16,10 +16,11 @@ import {
 	type StreamConfig,
 } from "@nats-io/jetstream";
 import { connect, type NatsConnection, type NodeConnectionOptions, nanos } from "@nats-io/transport-node";
+import type { ExtensionAskDialogResult } from "../extensibility/extensions/types";
 import type { IrcDeliveryReceipt, IrcMessage } from "../irc/bus";
 import type { EngineControlInitiator, EngineEvent, EngineLaunchProfile } from "./contracts";
 import { EngineTargetError } from "./contracts";
-import { engineRouteToken } from "./route";
+import { engineAgentInstanceId, engineRouteToken } from "./route";
 import type { EngineRuntime } from "./runtime";
 
 export const ENGINE_COMMAND_STREAM = "GRIMOIRE_ENGINE_COMMANDS";
@@ -27,7 +28,15 @@ export const ENGINE_EVENT_STREAM = "GRIMOIRE_ENGINE_EVENTS";
 export const AGENT_MESSAGE_STREAM = "GRIMOIRE_AGENT_MESSAGES";
 export const ENGINE_MAX_ENVELOPE_BYTES = 256 * 1024;
 
-export type EngineCommandOp = "start" | "steer" | "pause" | "resume" | "cancel" | "reconcile" | "resolve_tool_approval";
+export type EngineCommandOp =
+	| "start"
+	| "steer"
+	| "pause"
+	| "resume"
+	| "cancel"
+	| "reconcile"
+	| "resolve_tool_approval"
+	| "resolve_input";
 
 export interface EngineCommandEnvelope {
 	schema: "grimoire.engine.command.v1";
@@ -429,6 +438,13 @@ export class NatsEngineAdapter {
 			case "start": {
 				const executionId = requiredEnvelopeString(command.executionId, "executionId");
 				const attemptId = requiredEnvelopeString(command.attemptId, "attemptId");
+				const agentInstanceRef = optionalRecordString(
+					command as unknown as Record<string, unknown>,
+					"agentInstanceRef",
+				);
+				if (agentInstanceRef && command.agentInstanceId !== engineAgentInstanceId(agentInstanceRef)) {
+					throw new EngineTargetError("invalid_request", "agentInstanceId does not match agentInstanceRef");
+				}
 				const input = requiredRecordString(command.payload, "input");
 				const cwd = requiredRecordString(command.payload, "cwd");
 				const profileDigest = requiredRecordString(command.payload, "profileDigest");
@@ -441,10 +457,7 @@ export class NatsEngineAdapter {
 					{
 						commandId: command.commandId,
 						agentInstanceId: command.agentInstanceId,
-						agentInstanceRef: optionalRecordString(
-							command as unknown as Record<string, unknown>,
-							"agentInstanceRef",
-						),
+						agentInstanceRef,
 						parentAgentInstanceId: optionalRecordString(
 							command as unknown as Record<string, unknown>,
 							"parentAgentInstanceId",
@@ -501,6 +514,14 @@ export class NatsEngineAdapter {
 				});
 				return;
 			}
+			case "resolve_input":
+				await this.runtime.resolveInput({
+					...boundTarget(command),
+					commandId: command.commandId,
+					inputId: requiredRecordString(command.payload, "inputId"),
+					result: askDialogResult(command.payload),
+				});
+				return;
 			case "reconcile":
 				await this.runtime.reconcile({
 					commandId: command.commandId,
@@ -739,8 +760,18 @@ function isCommandOp(value: unknown): value is EngineCommandOp {
 		value === "resume" ||
 		value === "cancel" ||
 		value === "reconcile" ||
-		value === "resolve_tool_approval"
+		value === "resolve_tool_approval" ||
+		value === "resolve_input"
 	);
+}
+
+function askDialogResult(payload: Record<string, unknown>): ExtensionAskDialogResult {
+	const result = requiredRecord(payload, "result");
+	if (result.kind === "chat") return { kind: "chat" };
+	if (result.kind !== "submit" || !Array.isArray(result.results)) {
+		throw new PoisonMessageError("result must be a chat or submit Ask result");
+	}
+	return result as unknown as ExtensionAskDialogResult;
 }
 
 function controlInitiator(payload: Record<string, unknown>): EngineControlInitiator {
@@ -785,6 +816,10 @@ function eventType(kind: EngineEvent["kind"]): string {
 			return "tool.approval_requested";
 		case "tool_approval_resolved":
 			return "tool.approval_resolved";
+		case "input_requested":
+			return "input.requested";
+		case "input_resolved":
+			return "input.resolved";
 		case "tool_started":
 			return "tool.started";
 		case "tool_settled":

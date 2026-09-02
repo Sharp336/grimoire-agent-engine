@@ -46,7 +46,7 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 			: undefined;
 		runtime = await EngineRuntime.create({
 			databasePath: config.databasePath,
-			resolveSessionProfile: profileResolver ? profile => profileResolver.resolve(profile) : undefined,
+			resolveSessionProfile: profileResolver ? (profile, cwd) => profileResolver.resolve(profile, cwd) : undefined,
 			launchChild: rpc
 				? request =>
 						launchHostedEngineChild(rpc, {
@@ -294,9 +294,33 @@ function resolveLaunchProfile(command: EngineCommandEnvelope, requireArtifactRef
 	}
 	if (
 		profile.maxSpawnDepth !== undefined &&
-		(!Number.isSafeInteger(profile.maxSpawnDepth) || profile.maxSpawnDepth < 0)
+		(!Number.isSafeInteger(profile.maxSpawnDepth) || profile.maxSpawnDepth < 0 || profile.maxSpawnDepth > 31)
 	) {
-		throw new Error("maxSpawnDepth must be a non-negative safe integer");
+		throw new Error("maxSpawnDepth must be an integer between 0 and 31");
+	}
+	if (
+		profile.maxChildren !== undefined &&
+		(!Number.isSafeInteger(profile.maxChildren) || profile.maxChildren < 0 || profile.maxChildren > 256)
+	) {
+		throw new Error("maxChildren must be an integer between 0 and 256");
+	}
+	const childProfileRefs = profile.childProfileRefs ?? [];
+	if (
+		!Array.isArray(childProfileRefs) ||
+		childProfileRefs.some(
+			ref => typeof ref !== "string" || !/^gctx:[23456789abcdefghjkmnpqrstuvwxyz]{16}$/.test(ref),
+		) ||
+		new Set(childProfileRefs).size !== childProfileRefs.length
+	) {
+		throw new Error("childProfileRefs must be a unique array of gctx Artifact refs");
+	}
+	const maxSpawnDepth = profile.maxSpawnDepth ?? 0;
+	const maxChildren = profile.maxChildren ?? 0;
+	if (
+		(profile.spawns === "*") !== (maxSpawnDepth > 0 && maxChildren > 0 && childProfileRefs.length > 0) ||
+		(profile.spawns === "" && (maxSpawnDepth !== 0 || maxChildren !== 0 || childProfileRefs.length !== 0))
+	) {
+		throw new Error("spawn rights require depth, maxChildren and an explicit childProfileRefs catalog");
 	}
 	if (
 		profile.systemPrompt !== undefined &&
@@ -314,6 +338,19 @@ function resolveLaunchProfile(command: EngineCommandEnvelope, requireArtifactRef
 	}
 	if (profile.requireYieldTool !== undefined && typeof profile.requireYieldTool !== "boolean") {
 		throw new Error("requireYieldTool must be a boolean");
+	}
+	if (profile.lspShared !== undefined && typeof profile.lspShared !== "boolean") {
+		throw new Error("lspShared must be a boolean");
+	}
+	if (profile.disabledCapabilityProviders !== undefined) {
+		if (
+			!Array.isArray(profile.disabledCapabilityProviders) ||
+			profile.disabledCapabilityProviders.some(
+				provider => typeof provider !== "string" || !provider.trim() || provider.length > 128,
+			)
+		) {
+			throw new Error("disabledCapabilityProviders must contain non-empty provider ids");
+		}
 	}
 	if (profile.toolPolicies !== undefined) {
 		if (!profile.toolPolicies || typeof profile.toolPolicies !== "object" || Array.isArray(profile.toolPolicies)) {

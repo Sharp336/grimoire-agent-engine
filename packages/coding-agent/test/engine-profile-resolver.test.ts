@@ -7,6 +7,7 @@ import { EngineProfileResolver } from "../src/engine/profile-resolver";
 
 const refs = {
 	profile: "gctx:2222222222222222",
+	childProfile: "gctx:aaaaaaaaaaaaaaaa",
 	untrustedRoute: "gctx:3333333333333333",
 	trustedRoute: "gctx:4444444444444444",
 	untrustedAccount: "gctx:5555555555555555",
@@ -25,6 +26,18 @@ describe("EngineProfileResolver", () => {
 			models: [refs.untrustedRoute, refs.trustedRoute],
 			requireTrustedProvider: true,
 			tools: { mode: "unrestricted" },
+			childProfiles: [refs.childProfile],
+			maxSpawnDepth: 1,
+			maxChildren: 6,
+		});
+		await artifact(cache, refs.childProfile, "grimoire.agent_profile.v1", {
+			schema: "grimoire.agent_profile.v1",
+			status: "active",
+			displayName: "Pinned child",
+			models: [refs.trustedRoute],
+			childProfiles: [],
+			maxSpawnDepth: 0,
+			maxChildren: 0,
 		});
 		for (const [ref, accountRef] of [
 			[refs.untrustedRoute, refs.untrustedAccount],
@@ -71,15 +84,20 @@ describe("EngineProfileResolver", () => {
 		});
 
 		const resolver = new EngineProfileResolver(cache, path.join(root, "credentials"));
-		const resolved = await resolver.resolve({
-			spawns: "*",
-			profileDigest: hash(refs.profile),
-			launchProfileRef: refs.profile,
-			maxSpawnDepth: 1,
-		});
+		const resolved = await resolver.resolve(
+			{
+				spawns: "*",
+				profileDigest: hash(refs.profile),
+				launchProfileRef: refs.profile,
+				maxSpawnDepth: 1,
+				maxChildren: 6,
+				childProfileRefs: [refs.childProfile],
+			},
+			root,
+		);
 		try {
 			expect(resolved.options.model?.id).toBe("trusted-model");
-			expect(resolved.childProfiles).toEqual([{ profileRef: refs.profile, displayName: "Trusted fallback" }]);
+			expect(resolved.childProfiles).toEqual([{ profileRef: refs.childProfile, displayName: "Pinned child" }]);
 			expect(resolved.options.model?.baseUrl).toBe("https://trusted.invalid");
 			expect(resolved.options.restrictToolNames).toBe(false);
 			expect(resolved.options.enableMCP).toBe(true);
@@ -108,13 +126,31 @@ describe("EngineProfileResolver", () => {
 		} finally {
 			resolved.dispose();
 		}
+		await expect(
+			resolver.resolve(
+				{
+					spawns: "*",
+					profileDigest: hash(refs.profile),
+					launchProfileRef: refs.profile,
+					maxSpawnDepth: 1,
+					maxChildren: 6,
+					childProfileRefs: [refs.profile],
+				},
+				root,
+			),
+		).rejects.toThrow("does not match the pinned AgentProfile");
 
-		const reopened = await resolver.resolve({
-			spawns: "*",
-			profileDigest: hash(refs.profile),
-			launchProfileRef: refs.profile,
-			maxSpawnDepth: 1,
-		});
+		const reopened = await resolver.resolve(
+			{
+				spawns: "*",
+				profileDigest: hash(refs.profile),
+				launchProfileRef: refs.profile,
+				maxSpawnDepth: 1,
+				maxChildren: 6,
+				childProfileRefs: [refs.childProfile],
+			},
+			root,
+		);
 		try {
 			expect(reopened.options.authStorage?.get("anthropic")).toEqual({
 				type: "api_key",
@@ -187,8 +223,8 @@ describe("EngineProfileResolver", () => {
 		});
 
 		const resolver = new EngineProfileResolver(cache, path.join(root, "credentials"));
-		const launch = { spawns: "*" as const, profileDigest: hash(profileRef), launchProfileRef: profileRef };
-		const [first, second] = await Promise.all([resolver.resolve(launch), resolver.resolve(launch)]);
+		const launch = { spawns: "" as const, profileDigest: hash(profileRef), launchProfileRef: profileRef };
+		const [first, second] = await Promise.all([resolver.resolve(launch, root), resolver.resolve(launch, root)]);
 		try {
 			expect(
 				await Promise.all([

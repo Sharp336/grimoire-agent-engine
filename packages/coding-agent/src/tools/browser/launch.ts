@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { $which, getPuppeteerDir, logger, removeWithRetries } from "@oh-my-pi/pi-utils";
 import type * as BrowsersNs from "@oh-my-pi/pi-utils/browsers";
-import type { Browser, CDPSession, Page, default as Puppeteer, Target } from "puppeteer-core";
+import puppeteer, { type Browser, type CDPSession, type Page, type Target } from "puppeteer-core";
 import stealthTamperingScript from "../puppeteer/00_stealth_tampering.txt" with { type: "text" };
 import stealthActivityScript from "../puppeteer/01_stealth_activity.txt" with { type: "text" };
 import stealthHairlineScript from "../puppeteer/02_stealth_hairline.txt" with { type: "text" };
@@ -75,41 +75,12 @@ const USER_AGENT_TARGET_TIMEOUT_MS = 5_000;
 const USER_AGENT_TARGET_TYPES = new Set(["page", "webview", "background_page"]);
 const PUPPETEER_SOURCE_URL_SUFFIX = "//# sourceURL=__puppeteer_evaluation_script__";
 
-/**
- * Lazy-import puppeteer from a safe CWD so cosmiconfig doesn't choke
- * on malformed package.json files in the user's project tree.
- *
- * Dynamic import is required because puppeteer-core probes the cwd at module
- * load time; we must `process.chdir` to a safe scratch dir before loading and
- * restore cwd afterwards. A static import would run at module-init time before
- * cwd is safe.
- */
-let puppeteerModule: typeof Puppeteer | undefined;
-export async function loadPuppeteer(): Promise<typeof Puppeteer> {
-	if (puppeteerModule) return puppeteerModule;
-	const prev = process.cwd();
-	const safeDir = getPuppeteerDir();
-	await Bun.write(path.join(safeDir, "package.json"), "{}");
-	try {
-		process.chdir(safeDir);
-		puppeteerModule = (await import("puppeteer-core")).default;
-		return puppeteerModule;
-	} finally {
-		process.chdir(prev);
-	}
+export async function loadPuppeteer(): Promise<typeof puppeteer> {
+	return puppeteer;
 }
 
-let puppeteerModuleWorker: typeof Puppeteer | undefined;
-export async function loadPuppeteerInWorker(safeDir: string): Promise<typeof Puppeteer> {
-	if (puppeteerModuleWorker) return puppeteerModuleWorker;
-	const orig = process.cwd;
-	Object.defineProperty(process, "cwd", { value: () => safeDir, configurable: true });
-	try {
-		puppeteerModuleWorker = (await import("puppeteer-core")).default;
-		return puppeteerModuleWorker;
-	} finally {
-		Object.defineProperty(process, "cwd", { value: orig, configurable: true });
-	}
+export async function loadPuppeteerInWorker(_safeDir: string): Promise<typeof puppeteer> {
+	return puppeteer;
 }
 
 let browsersModule: typeof BrowsersNs | undefined;

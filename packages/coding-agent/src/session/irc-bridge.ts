@@ -5,7 +5,6 @@ import { IrcBus, type IrcMessage } from "../irc/bus";
 import parentIrcSteerTemplate from "../prompts/steering/parent-irc.md" with { type: "text" };
 import ircAutoReplyTemplate from "../prompts/system/irc-autoreply.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
-import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "./agent-session-events";
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
@@ -133,7 +132,7 @@ export class IrcBridge {
 		};
 		void this.#host.emitSessionEvent({ type: "irc_message", message: record });
 		if (streaming) {
-			const recipientParentId = AgentRegistry.global().get(msg.to)?.parentId;
+			const recipientParentId = this.#bus.parentId(msg.to);
 			if (recipientParentId === msg.from) {
 				this.#host.agent.steer({
 					role: "user",

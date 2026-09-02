@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as path from "node:path";
 import { isEnoent, logger, postmortem, ptree, stableStringifyJson, untilAborted } from "@oh-my-pi/pi-utils";
 import { MessageFramer } from "../jsonrpc/message-framing";
@@ -24,6 +25,7 @@ import { detectLanguageId, EquivalentUriMap, fileToUri, uriToFile } from "./util
 // =============================================================================
 
 const clients = new Map<string, LspClient>();
+const clientOwners = new Map<string, Set<string>>();
 interface PendingClient {
 	promise: Promise<LspClient>;
 	cwd: string;
@@ -50,6 +52,18 @@ const IDLE_CHECK_INTERVAL_MS = 60 * 1000;
 // tests that drive getOrCreateClient directly never touch the daemon broker;
 // the SDK turns it on from the `lsp.shared` setting at session creation.
 let sharedLspEnabled = false;
+
+export interface LspSessionScope {
+	shared: boolean;
+	ownerId?: string;
+	realm?: string;
+}
+
+const lspSessionScope = new AsyncLocalStorage<LspSessionScope>();
+
+export function withLspSessionScope<T>(scope: LspSessionScope, callback: () => T): T {
+	return lspSessionScope.run({ ...scope }, callback);
+}
 
 /** Enable or disable attaching to broker-shared language servers. */
 export function setSharedLspEnabled(enabled: boolean): void {
@@ -841,6 +855,18 @@ const EXIT_TIMEOUT_MS = 1_000;
  * differently still share, while the same name resolving to different binaries
  * does not. JSON-encoded so no value can forge the separator.
  */
+function currentLspOwnership(): string {
+	const scope = lspSessionScope.getStore();
+	const shared = scope?.shared ?? sharedLspEnabled;
+	return shared
+		? scope?.realm
+			? `shared:${scope.realm}`
+			: "shared"
+		: scope?.ownerId
+			? `private:${scope.ownerId}`
+			: "private";
+}
+
 function clientKey(config: ServerConfig, cwd: string): string {
 	const spawnCommand = config.resolvedCommand ?? config.command;
 	const identity = stableStringifyJson([
@@ -848,8 +874,53 @@ function clientKey(config: ServerConfig, cwd: string): string {
 		config.initOptions ?? null,
 		config.settings ?? null,
 		config.languageId ?? null,
+		currentLspOwnership(),
 	]);
 	return `${spawnCommand}:${cwd}:${identity}`;
+}
+
+function reloadBarrierKey(cwd: string): string {
+	return `${path.resolve(cwd)}\0${currentLspOwnership()}`;
+}
+
+function retainClientOwner(key: string, ownerId: string | undefined): void {
+	if (!ownerId) return;
+	let owners = clientOwners.get(key);
+	if (!owners) {
+		owners = new Set();
+		clientOwners.set(key, owners);
+	}
+	owners.add(ownerId);
+}
+
+export async function releaseLspOwner(ownerId: string): Promise<void> {
+	const releases: Promise<unknown>[] = [];
+	for (const [key, owners] of [...clientOwners]) {
+		if (!owners.delete(ownerId) || owners.size > 0) continue;
+		clientOwners.delete(key);
+		const client = clients.get(key);
+		if (client) {
+			releases.push(shutdownClientInstance(client));
+			continue;
+		}
+		const pending = clientLocks.get(key)?.promise;
+		if (pending) {
+			releases.push(
+				pending.then(client => {
+					if (!clientOwners.has(key)) return shutdownClientInstance(client);
+				}),
+			);
+		}
+	}
+	await Promise.allSettled(releases);
+}
+
+export function getLspResourceCounts(): { clients: number; pending: number; owners: number } {
+	return {
+		clients: clients.size,
+		pending: clientLocks.size,
+		owners: [...clientOwners.values()].reduce((count, owners) => count + owners.size, 0),
+	};
 }
 
 /**
@@ -867,8 +938,10 @@ export function shutdownStaleClients(
 	signal?: AbortSignal,
 ): Promise<string[]> {
 	const fresh = new Set(configs.map(config => clientKey(config, cwd)));
+	const scopedOwnerId = lspSessionScope.getStore()?.ownerId;
 	const resolvedCwd = path.resolve(cwd);
-	const previousBarrier = clientReloadBarriers.get(resolvedCwd);
+	const barrierKey = reloadBarrierKey(cwd);
+	const previousBarrier = clientReloadBarriers.get(barrierKey);
 	const cleanup = (async (): Promise<string[]> => {
 		if (previousBarrier) {
 			try {
@@ -883,12 +956,37 @@ export function shutdownStaleClients(
 		// Tombstone stale identities before awaiting initialization. Existing
 		// callers keep sharing their in-flight promise; later callers cannot spawn
 		// another stale process while reload is blocked on teardown.
-		const stalePending = Array.from(clientLocks.entries()).filter(
-			([key, pending]) => path.resolve(pending.cwd) === resolvedCwd && !fresh.has(key),
+		const stalePendingCandidates = Array.from(clientLocks.entries()).filter(
+			([key, pending]) =>
+				path.resolve(pending.cwd) === resolvedCwd &&
+				!fresh.has(key) &&
+				(!scopedOwnerId || clientOwners.get(key)?.has(scopedOwnerId) === true),
 		);
-		for (const [key] of stalePending) invalidatedClientKeys.add(key);
+		const staleClientCandidates = Array.from(clients.values()).filter(
+			client =>
+				path.resolve(client.cwd) === resolvedCwd &&
+				!fresh.has(client.name) &&
+				(!scopedOwnerId || clientOwners.get(client.name)?.has(scopedOwnerId) === true),
+		);
+		const staleKeys = new Set([
+			...stalePendingCandidates.map(([key]) => key),
+			...staleClientCandidates.map(c => c.name),
+		]);
+		for (const key of [...staleKeys]) {
+			if (scopedOwnerId) {
+				const owners = clientOwners.get(key);
+				owners?.delete(scopedOwnerId);
+				if (owners && owners.size > 0) {
+					staleKeys.delete(key);
+					continue;
+				}
+				clientOwners.delete(key);
+			}
+			invalidatedClientKeys.add(key);
+		}
+		const stalePending = stalePendingCandidates.filter(([key]) => staleKeys.has(key));
 		for (const client of clients.values()) {
-			if (path.resolve(client.cwd) === resolvedCwd && !fresh.has(client.name)) {
+			if (staleKeys.has(client.name)) {
 				invalidatedClientKeys.add(client.name);
 			}
 		}
@@ -902,9 +1000,7 @@ export function shutdownStaleClients(
 			}),
 		);
 
-		const stale = Array.from(clients.values()).filter(
-			client => path.resolve(client.cwd) === resolvedCwd && !fresh.has(client.name),
-		);
+		const stale = Array.from(clients.values()).filter(client => staleKeys.has(client.name));
 		const results = await Promise.all(stale.map(client => shutdownClientInstance(client)));
 		const failed = stale.filter((_client, index) => results[index] !== true);
 		if (failed.length > 0) {
@@ -915,10 +1011,10 @@ export function shutdownStaleClients(
 		}
 		return stale.map(client => client.config.command);
 	})();
-	clientReloadBarriers.set(resolvedCwd, cleanup);
+	clientReloadBarriers.set(barrierKey, cleanup);
 	void cleanup.then(
 		() => {
-			if (clientReloadBarriers.get(resolvedCwd) === cleanup) clientReloadBarriers.delete(resolvedCwd);
+			if (clientReloadBarriers.get(barrierKey) === cleanup) clientReloadBarriers.delete(barrierKey);
 		},
 		() => {},
 	);
@@ -946,10 +1042,13 @@ export async function getOrCreateClient(
 	initTimeoutMs?: number,
 	signal?: AbortSignal,
 ): Promise<LspClient> {
+	const scope = lspSessionScope.getStore();
+	const shared = scope?.shared ?? sharedLspEnabled;
 	const key = clientKey(config, cwd);
 	// Check if client already exists
 	const existingClient = clients.get(key);
 	if (existingClient && !invalidatedClientKeys.has(key)) {
+		retainClientOwner(key, scope?.ownerId);
 		existingClient.lastActivity = Date.now();
 		return existingClient;
 	}
@@ -957,6 +1056,7 @@ export async function getOrCreateClient(
 	// Check if another coroutine is already creating this client
 	const existingLock = clientLocks.get(key);
 	if (existingLock) {
+		retainClientOwner(key, scope?.ownerId);
 		return existingLock.promise;
 	}
 	if (invalidatedClientKeys.has(key)) {
@@ -964,7 +1064,7 @@ export async function getOrCreateClient(
 	}
 
 	// Do not start a fresh identity until superseded processes are confirmed stopped.
-	const reloadBarrier = clientReloadBarriers.get(path.resolve(cwd));
+	const reloadBarrier = clientReloadBarriers.get(reloadBarrierKey(cwd));
 	if (reloadBarrier) {
 		try {
 			await untilAborted(signal, reloadBarrier);
@@ -974,11 +1074,15 @@ export async function getOrCreateClient(
 		}
 		const clientAfterReload = clients.get(key);
 		if (clientAfterReload && !invalidatedClientKeys.has(key)) {
+			retainClientOwner(key, scope?.ownerId);
 			clientAfterReload.lastActivity = Date.now();
 			return clientAfterReload;
 		}
 		const lockAfterReload = clientLocks.get(key);
-		if (lockAfterReload) return lockAfterReload.promise;
+		if (lockAfterReload) {
+			retainClientOwner(key, scope?.ownerId);
+			return lockAfterReload.promise;
+		}
 		if (invalidatedClientKeys.has(key)) {
 			throw new Error(`LSP configuration was superseded during reload: ${config.command}`);
 		}
@@ -995,6 +1099,7 @@ export async function getOrCreateClient(
 	}
 
 	// Create new client with lock
+	retainClientOwner(key, scope?.ownerId);
 	const lockToken = Symbol();
 	const clientPromise = (async () => {
 		const baseCommand = config.resolvedCommand ?? config.command;
@@ -1009,7 +1114,7 @@ export async function getOrCreateClient(
 		// already multiplexing this command. Any shared-path failure falls back
 		// to a private spawn so LSP never regresses on broker trouble.
 		let proc: LspTransport | null = null;
-		if (sharedLspEnabled && command === baseCommand) {
+		if (shared && command === baseCommand) {
 			proc = await connectSharedLspTransport({ command, args, cwd, env, signal });
 		}
 		proc ??= ptree.spawn([command, ...args], {
@@ -1054,6 +1159,7 @@ export async function getOrCreateClient(
 		// Register crash recovery - remove client on process exit
 		proc.exited.then(() => {
 			if (clients.get(key) === client) clients.delete(key);
+			clientOwners.delete(key);
 			if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
 			client.resolveProjectLoaded();
 
@@ -1127,6 +1233,7 @@ export async function getOrCreateClient(
 			// Clean up on initialization failure
 			client.status = "error";
 			if (clients.get(key) === client) clients.delete(key);
+			clientOwners.delete(key);
 			proc.kill();
 			const message = err instanceof Error ? err.message : String(err);
 			// Negative-cache deterministic failures. Timeouts under a
@@ -1153,16 +1260,20 @@ export async function getActiveOrPendingClient(
 	signal?: AbortSignal,
 ): Promise<LspClient | undefined> {
 	throwIfAborted(signal);
-	const client = clients.get(clientKey(config, cwd));
+	const key = clientKey(config, cwd);
+	const client = clients.get(key);
 	if (client) {
+		retainClientOwner(key, lspSessionScope.getStore()?.ownerId);
 		client.lastActivity = Date.now();
 		return client;
 	}
 
-	const pending = clientLocks.get(clientKey(config, cwd));
+	const pending = clientLocks.get(key);
 	if (!pending) return undefined;
+	retainClientOwner(key, lspSessionScope.getStore()?.ownerId);
 	try {
-		return await untilAborted(signal, pending.promise);
+		const resolved = await untilAborted(signal, pending.promise);
+		return resolved;
 	} catch {
 		throwIfAborted(signal);
 		return undefined;
@@ -1506,12 +1617,16 @@ export async function shutdownClientInstance(client: LspClient): Promise<boolean
 	);
 	if (shutdownCompleted) {
 		await sendNotification(client, "exit", undefined).catch(() => {});
-		if (await waitForExit(client, EXIT_TIMEOUT_MS)) return true;
+		if (await waitForExit(client, EXIT_TIMEOUT_MS)) {
+			clientOwners.delete(client.name);
+			return true;
+		}
 	}
 
 	client.proc.kill();
 	const exited = await waitForExit(client, EXIT_TIMEOUT_MS);
 	if (!exited && !clients.has(client.name)) clients.set(client.name, client);
+	if (exited) clientOwners.delete(client.name);
 	return exited;
 }
 
@@ -1677,6 +1792,7 @@ export async function shutdownAll(): Promise<void> {
 	// shutdown. Failed init promises already cleaned up after themselves.
 	const pendingClients = Array.from(clientLocks.values(), pending => pending.promise);
 	clientLocks.clear();
+	clientOwners.clear();
 	const seen = new Set<LspClient>(clientsToShutdown);
 	await Promise.allSettled([
 		...clientsToShutdown.map(client => shutdownClientInstance(client)),

@@ -54,7 +54,11 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			sessionDefaults: {
 				cwd,
 				agentDir: path.join(tempDir, "agent"),
-				settings: Settings.isolated({ "bash.autoBackground.enabled": true }),
+				settings: await Settings.loadReadOnly({
+					cwd,
+					agentDir: path.join(tempDir, "agent"),
+					overrides: { "bash.autoBackground.enabled": true },
+				}),
 				disableExtensionDiscovery: true,
 				skills: [],
 				contextFiles: [],
@@ -229,6 +233,21 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			});
 			await adapter.flushEvents();
 			expect(eventsA.some(event => event.causationCommandId === oldGenerationA.commandId)).toBeFalse();
+			expect(dispatchCount).toBe(3);
+
+			const mismatchedIdentityA = {
+				...startCommand(runtime.engineGeneration, "agent-a", "mismatched-identity", cwd),
+				commandId: "command-a-mismatched-identity",
+				agentInstanceRef: "grimoire://tasks/other/task/agents/agent-a",
+			};
+			await js.publish(adapter.commandSubject("agent-a", "start"), JSON.stringify(mismatchedIdentityA), {
+				msgID: mismatchedIdentityA.commandId,
+			});
+			await waitFor(() =>
+				eventsA.some(
+					event => event.type === "command.rejected" && event.causationCommandId === mismatchedIdentityA.commandId,
+				),
+			);
 			expect(dispatchCount).toBe(3);
 
 			const futureGenerationA = {

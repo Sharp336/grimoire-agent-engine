@@ -17,7 +17,7 @@ import {
 	type EngineCommandEnvelope,
 	type EngineEventEnvelope,
 } from "./nats-adapter";
-import { engineRouteToken } from "./route";
+import { engineAgentInstanceId, engineRouteToken } from "./route";
 
 interface BridgeClaim {
 	jobId: string;
@@ -143,8 +143,8 @@ export async function launchHostedEngineChild(
 	});
 	const agent = launched.agent_instance as Record<string, unknown> | undefined;
 	const job = launched.job as Record<string, unknown> | undefined;
-	const agentInstanceId = String(agent?.agent_instance_id ?? "");
 	const agentInstanceRef = String(agent?.agent_instance_ref ?? agent?.grimoire_uri ?? "");
+	const agentInstanceId = agentInstanceRef ? engineAgentInstanceId(agentInstanceRef) : "";
 	const jobId = String(job?.job_id ?? "");
 	if (!agentInstanceId || !agentInstanceRef || !jobId)
 		throw new Error("Grimoire child launch returned no durable identity");

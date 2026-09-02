@@ -1,8 +1,11 @@
+import type { ExtensionAskDialogResult } from "../extensibility/extensions/types";
+
 export type EngineAttemptState =
 	| "accepted"
 	| "running"
 	| "pause_requested"
 	| "paused"
+	| "waiting_input"
 	| "cancel_requested"
 	| "completed"
 	| "cancelled"
@@ -19,6 +22,10 @@ export interface EngineLaunchProfile {
 	selectedRouteRef?: string;
 	/** Descendants allowed below this session. Artel default: one leaf child. */
 	maxSpawnDepth?: number;
+	/** Total child AgentInstances this Attempt may launch. */
+	maxChildren?: number;
+	/** Exact child AgentProfiles allowed by the pinned parent AgentProfile. */
+	childProfileRefs?: string[];
 	/** Per-launch stable instructions; AgentProfile itself intentionally has no permanent prompt. */
 	systemPrompt?: string;
 	/** Stable provider cache identity compiled by ClientHost for consultant launches. */
@@ -29,6 +36,10 @@ export interface EngineLaunchProfile {
 	toolPolicies?: Record<string, EngineToolPolicy>;
 	enableMCP?: boolean;
 	enableLsp?: boolean;
+	/** Per-session LSP transport policy; false keeps a private client. */
+	lspShared?: boolean;
+	/** Capability providers excluded by the compiled launch policy. */
+	disabledCapabilityProviders?: string[];
 	/** Existing OMP yield schema used by bounded consultant sessions. */
 	outputSchema?: unknown;
 	requireYieldTool?: boolean;
@@ -81,6 +92,12 @@ export interface EngineToolApprovalDecision extends EngineTarget {
 	approvalId: string;
 	decision: "approve" | "deny";
 	reason?: string;
+}
+
+export interface EngineResolveInputRequest extends EngineTarget {
+	commandId: string;
+	inputId: string;
+	result: ExtensionAskDialogResult;
 }
 
 export interface EngineReconcileRequest {
@@ -158,6 +175,8 @@ export interface EngineEvent {
 		| "steered"
 		| "tool_approval_requested"
 		| "tool_approval_resolved"
+		| "input_requested"
+		| "input_resolved"
 		| "tool_started"
 		| "tool_settled"
 		| "trace_reasoning"

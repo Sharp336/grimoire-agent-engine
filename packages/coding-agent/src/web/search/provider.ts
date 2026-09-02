@@ -9,6 +9,7 @@
 // listings can share it without importing provider implementations.
 
 import type { AuthStorage } from "@oh-my-pi/pi-ai";
+import { settings } from "../../config/settings";
 import type { SearchProvider } from "./providers/base";
 import { SEARCH_PROVIDER_LABELS, SEARCH_PROVIDER_ORDER, SearchProviderError, type SearchProviderId } from "./types";
 
@@ -218,9 +219,30 @@ export function setExcludedSearchProviders(providers: readonly SearchProviderId[
 	excludedProvIds = new Set(providers);
 }
 
+function effectiveProviderPolicy(): {
+	order: readonly SearchProviderId[];
+	explicit: ReadonlySet<SearchProviderId>;
+	excluded: ReadonlySet<SearchProviderId>;
+} {
+	try {
+		const configured = settings.get("providers.webSearchOrder");
+		const prioritized = new Set(configured.filter(id => SEARCH_PROVIDER_ORDER.includes(id)));
+		return {
+			order:
+				prioritized.size === 0
+					? SEARCH_PROVIDER_ORDER
+					: [...prioritized, ...SEARCH_PROVIDER_ORDER.filter(id => !prioritized.has(id))],
+			explicit: prioritized,
+			excluded: new Set(settings.get("providers.webSearchExclude")),
+		};
+	} catch {
+		return { order: orderedProvIds, explicit: explicitProvIds, excluded: excludedProvIds };
+	}
+}
+
 /** `true` when settings exclude `id` from web search (auto chain and the Public Web fan-out). */
 export function isSearchProviderExcluded(id: SearchProviderId): boolean {
-	return excludedProvIds.has(id);
+	return effectiveProviderPolicy().excluded.has(id);
 }
 
 export interface SearchProviderCandidate {
@@ -235,14 +257,15 @@ export interface SearchProviderCandidate {
  */
 export function resolveProviderCandidates(forcedProvider?: SearchProviderId): SearchProviderCandidate[] {
 	const candidates: SearchProviderCandidate[] = [];
+	const policy = effectiveProviderPolicy();
 
-	if (forcedProvider !== undefined && !isSearchProviderExcluded(forcedProvider)) {
+	if (forcedProvider !== undefined && !policy.excluded.has(forcedProvider)) {
 		candidates.push({ id: forcedProvider, explicit: true });
 	}
 
-	for (const id of orderedProvIds) {
-		if (id === forcedProvider || isSearchProviderExcluded(id)) continue;
-		candidates.push({ id, explicit: explicitProvIds.has(id) });
+	for (const id of policy.order) {
+		if (id === forcedProvider || policy.excluded.has(id)) continue;
+		candidates.push({ id, explicit: policy.explicit.has(id) });
 	}
 
 	return candidates;

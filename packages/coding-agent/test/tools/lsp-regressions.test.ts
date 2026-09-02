@@ -424,6 +424,55 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("isolates private Engine owners and releases their LSP resources exactly", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-session-scope-");
+		try {
+			const handshake = (message: RpcMessage, srv: FakeLspServer) => {
+				if (message.method === "initialize") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			};
+			const config: ServerConfig = {
+				command: "fake-lsp",
+				fileTypes: ["ts"],
+				rootMarkers: [],
+			};
+
+			const firstServer = installFakeLsp(handshake);
+			const first = await lspClient.withLspSessionScope({ shared: false, ownerId: "engine-session-a" }, () =>
+				lspClient.getOrCreateClient(config, tempDir.path(), 1_000),
+			);
+			const secondServer = installFakeLsp(handshake);
+			const second = await lspClient.withLspSessionScope({ shared: false, ownerId: "engine-session-b" }, () =>
+				lspClient.getOrCreateClient(config, tempDir.path(), 1_000),
+			);
+
+			expect(second).not.toBe(first);
+			expect(firstServer.spawnCount).toBe(1);
+			expect(secondServer.spawnCount).toBe(1);
+			expect(
+				await lspClient.withLspSessionScope({ shared: true, ownerId: "engine-session-shared" }, () =>
+					lspClient.getActiveOrPendingClient(config, tempDir.path()),
+				),
+			).toBeUndefined();
+			expect(lspClient.getLspResourceCounts()).toEqual({ clients: 2, pending: 0, owners: 2 });
+
+			await lspClient.withLspSessionScope({ shared: false, ownerId: "engine-session-a" }, () =>
+				lspClient.shutdownStaleClients(tempDir.path(), []),
+			);
+			expect(lspClient.getLspResourceCounts()).toEqual({ clients: 1, pending: 0, owners: 1 });
+			await lspClient.releaseLspOwner("engine-session-b");
+			expect(lspClient.getLspResourceCounts()).toEqual({ clients: 0, pending: 0, owners: 0 });
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it("uses a custom server languageId for disk and in-memory document opens", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-language-id-");
 		const filePath = path.join(tempDir.path(), "foo.gd");

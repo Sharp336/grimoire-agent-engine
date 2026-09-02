@@ -81,6 +81,10 @@ export class IrcBus {
 		this.#lifecycle = () => lifecycle ?? AgentLifecycleManager.global();
 	}
 
+	parentId(agentId: string): string | undefined {
+		return this.#registry.get(agentId)?.parentId;
+	}
+
 	/** Route Engine-mode sends through the durable broker; native OMP leaves this unset. */
 	setOutboundTransport(transport: IrcOutboundTransport): () => void {
 		this.#outboundTransport = transport;

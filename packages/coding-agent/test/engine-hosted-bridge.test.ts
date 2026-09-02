@@ -50,7 +50,7 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			sessionDefaults: {
 				cwd,
 				agentDir: path.join(tempDir, "agent"),
-				settings: Settings.isolated({}),
+				settings: await Settings.loadReadOnly({ cwd, agentDir: path.join(tempDir, "agent") }),
 				disableExtensionDiscovery: true,
 				skills: [],
 				contextFiles: [],
@@ -166,7 +166,7 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			sessionDefaults: {
 				cwd,
 				agentDir: path.join(tempDir, "agent"),
-				settings: Settings.isolated({}),
+				settings: await Settings.loadReadOnly({ cwd, agentDir: path.join(tempDir, "agent") }),
 				disableExtensionDiscovery: true,
 				skills: [],
 				contextFiles: [],
@@ -238,7 +238,7 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			sessionDefaults: {
 				cwd,
 				agentDir: path.join(tempDir, "agent"),
-				settings: Settings.isolated({}),
+				settings: await Settings.loadReadOnly({ cwd, agentDir: path.join(tempDir, "agent") }),
 				disableExtensionDiscovery: true,
 				skills: [],
 				contextFiles: [],
@@ -377,8 +377,52 @@ describe("hosted child launch", () => {
 			maxSpawnDepth: 0,
 			cancelLocal: async () => {},
 		});
-		expect(result).toMatchObject({ agentInstanceId: "child-1", status: "completed", assistantFinal: "done" });
+		expect(result).toMatchObject({
+			agentInstanceId: "agent_5362f5f8e4885e2abf275ed90a5bc4f8",
+			status: "completed",
+			assistantFinal: "done",
+		});
 		expect(calls).toEqual(["grimoire_agent_engine_child_launch", "grimoire_job_get"]);
+	});
+
+	it("cancels an aborted child by its Engine-scoped identity", async () => {
+		const controller = new AbortController();
+		const cancelled: string[] = [];
+		const rpc: GrimoireRpc = {
+			async call(tool) {
+				if (tool === "grimoire_agent_engine_child_launch") {
+					controller.abort();
+					return {
+						agent_instance: {
+							agent_instance_id: "child-cancel",
+							agent_instance_ref: "grimoire://tasks/p/t/agents/child-cancel",
+						},
+						job: { job_id: "job-cancel" },
+					};
+				}
+				if (tool === "grimoire_job_cancel") return { status: "cancelled" };
+				throw new Error(`unexpected ${tool}`);
+			},
+		};
+		const result = await launchHostedEngineChild(rpc, {
+			deviceId: "device",
+			engineId: "engine",
+			parentAgentInstanceRef: "grimoire://tasks/p/t/agents/parent",
+			parentAttemptId: "attempt-parent",
+			profileRef: "gctx:2222222222222222",
+			workStepId: "implement",
+			cwd: "/tmp",
+			maxSpawnDepth: 0,
+			signal: controller.signal,
+			cancelLocal: async agentInstanceId => {
+				cancelled.push(agentInstanceId);
+			},
+		});
+		expect(cancelled).toEqual(["agent_2f68651184ebfcaea74ecc934ce85868"]);
+		expect(result).toMatchObject({
+			agentInstanceId: "agent_2f68651184ebfcaea74ecc934ce85868",
+			status: "cancelled",
+		});
 	});
 });
 

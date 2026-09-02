@@ -94,6 +94,8 @@ export interface CmuxTabSession extends TabSessionBase<CmuxBrowserHandle> {
 export type TabSession = WorkerTabSession | CmuxTabSession;
 
 export interface AcquireTabOptions {
+	/** Workspace used by snapshot helpers when an existing tab is reused. */
+	cwd?: string;
 	url?: string;
 	waitUntil?: "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 	viewport?: { width: number; height: number; deviceScaleFactor?: number };
@@ -277,6 +279,7 @@ async function acquireTabImpl(
 					);
 				}
 				if (reuseSteps.length) {
+					if (!opts.cwd) throw new ToolError("Reusing a browser tab requires an explicit workspace cwd");
 					await runInTabWithSnapshot(
 						name,
 						{
@@ -284,7 +287,7 @@ async function acquireTabImpl(
 							timeoutMs: opts.timeoutMs,
 							signal: opts.signal,
 						},
-						{ cwd: process.cwd() },
+						{ cwd: opts.cwd },
 					);
 				}
 				return { tab: tabs.get(name)!, created: false };

@@ -1058,6 +1058,42 @@ describe("IRC", () => {
 			expect(parentSteer.content).toContain("change approach");
 		});
 
+		it("resolves an Engine parent through the injected bus instead of the ambient registry", async () => {
+			const engineRegistry = new AgentRegistry();
+			const engineBus = new IrcBus(engineRegistry);
+			const { session } = createRealSession({}, engineBus);
+			sessions.push(session);
+			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
+			engineRegistry.register({
+				id: "engine-child",
+				displayName: "task",
+				kind: "sub",
+				parentId: "engine-root",
+				session,
+			});
+			registry.register({
+				id: "engine-child",
+				displayName: "poison",
+				kind: "sub",
+				parentId: "ambient-root",
+				session,
+			});
+
+			const outcome = await session.deliverIrcMessage({
+				id: "msg-engine-parent",
+				from: "engine-root",
+				to: "engine-child",
+				body: "use the sealed route",
+				ts: Date.now(),
+			});
+
+			expect(outcome).toBe("injected");
+			expect(promptSpy).not.toHaveBeenCalled();
+			expect(session.agent.hasIrcInterrupts?.()).toBe(false);
+			expect(session.agent.peekSteeringQueue()).toHaveLength(1);
+		});
+
 		it("auto-replies via an ephemeral side turn when the sender awaits and async execution is disabled", async () => {
 			const sessionBus = new IrcBus(registry, AgentLifecycleManager.global());
 			const { session } = createRealSession({ "async.enabled": false }, sessionBus);

@@ -5,6 +5,7 @@ import type { Api, AuthCredential, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
+import { Settings } from "../config/settings";
 import type { CreateAgentSessionOptions } from "../sdk";
 import { AuthStorage } from "../session/auth-storage";
 import type { EngineChildProfile } from "../tools";
@@ -32,6 +33,9 @@ interface AgentProfile {
 	autoSelectionEnabled?: boolean;
 	tools?: { mode?: "unrestricted" | "allowlist"; names?: string[] };
 	generationDefaults?: { thinkingLevel?: CreateAgentSessionOptions["thinkingLevel"] };
+	childProfiles?: string[];
+	maxSpawnDepth?: number;
+	maxChildren?: number;
 }
 
 interface AvailableModelRoute {
@@ -76,6 +80,7 @@ export interface ResolvedEngineSessionProfile {
 		| "enableMCP"
 		| "enableLsp"
 		| "maxSpawnDepth"
+		| "settings"
 	>;
 	childProfiles: EngineChildProfile[];
 	dispose(): void;
@@ -87,7 +92,8 @@ export class EngineProfileResolver {
 		readonly credentialRoot: string,
 	) {}
 
-	async resolve(launch: EngineLaunchProfile): Promise<ResolvedEngineSessionProfile> {
+	async resolve(launch: EngineLaunchProfile, cwd: string): Promise<ResolvedEngineSessionProfile> {
+		const disabledProviders = launch.disabledCapabilityProviders ?? [];
 		const profileRef = requiredRef(launch.launchProfileRef, "launchProfileRef");
 		const cachedProfile = await this.#read(profileRef, "grimoire.agent_profile.v1");
 		if (cachedProfile.content_hash !== launch.profileDigest) {
@@ -102,12 +108,28 @@ export class EngineProfileResolver {
 		) {
 			throw new Error("AgentProfile must contain at least one route");
 		}
+		const spawnPolicy = resolveSpawnPolicy(profile, launch);
+		const settings = await Settings.loadReadOnly({
+			cwd,
+			overrides: {
+				disabledProviders,
+				"lsp.shared": launch.lspShared ?? false,
+				"task.maxRecursionDepth": spawnPolicy.maxSpawnDepth,
+			},
+		});
 		const candidates = await this.#routeCandidates(profile, launch.selectedRouteRef);
-		const childProfiles = await this.#allCachedProfiles();
+		const childProfiles = await this.#childProfiles(spawnPolicy.childProfileRefs);
 		let lastError: unknown;
 		for (const routeRef of candidates) {
 			try {
-				return await this.#resolveRoute(profile, routeRef, launch, childProfiles);
+				return await this.#resolveRoute(
+					profile,
+					routeRef,
+					launch,
+					childProfiles,
+					settings,
+					spawnPolicy.maxSpawnDepth,
+				);
 			} catch (error) {
 				lastError = error;
 			}
@@ -150,6 +172,8 @@ export class EngineProfileResolver {
 		routeRef: string,
 		launch: EngineLaunchProfile,
 		childProfiles: EngineChildProfile[],
+		settings: Settings,
+		maxSpawnDepth: number,
 	): Promise<ResolvedEngineSessionProfile> {
 		const route = parseJson<AvailableModelRoute>(
 			(await this.#read(routeRef, "grimoire.available_model_route.v1")).content,
@@ -233,15 +257,16 @@ export class EngineProfileResolver {
 							: undefined;
 			return {
 				options: {
+					settings,
 					authStorage,
 					modelRegistry,
 					model,
 					thinkingLevel: profile.generationDefaults?.thinkingLevel,
 					toolNames,
 					restrictToolNames: profileRestricted || launchRestricted,
-					enableMCP: true,
-					enableLsp: true,
-					maxSpawnDepth: launch.maxSpawnDepth ?? 1,
+					enableMCP: launch.enableMCP ?? true,
+					enableLsp: launch.enableLsp ?? true,
+					maxSpawnDepth,
 				},
 				childProfiles,
 				dispose: () => {
@@ -255,25 +280,29 @@ export class EngineProfileResolver {
 		}
 	}
 
-	async #allCachedProfiles(): Promise<EngineChildProfile[]> {
-		const entries = await fs.readdir(this.artifactCacheRoot, { withFileTypes: true }).catch(() => []);
+	async #childProfiles(refs: string[]): Promise<EngineChildProfile[]> {
 		const profiles: EngineChildProfile[] = [];
-		for (const entry of entries) {
-			if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-			const value = await readJson(path.join(this.artifactCacheRoot, entry.name));
-			if (value?.kind !== "grimoire.agent_profile.v1" || typeof value.content !== "string") continue;
-			try {
-				const profile = parseJson<AgentProfile>(value.content, "AgentProfile");
-				if (profile.schema !== "grimoire.agent_profile.v1" || profile.status === "disabled") continue;
-				const profileRef = requiredRef(String(value.artifact_ref), "artifact_ref");
-				profiles.push({
-					profileRef,
-					displayName: profile.displayName?.trim() || profileRef,
-					...(profile.description?.trim() ? { description: profile.description.trim() } : {}),
-				});
-			} catch {}
+		for (const [index, profileRef] of refs.entries()) {
+			const cached = await this.#read(
+				requiredRef(profileRef, `childProfiles[${index}]`),
+				"grimoire.agent_profile.v1",
+			);
+			const profile = parseJson<AgentProfile>(cached.content, "AgentProfile");
+			if (
+				profile.schema !== "grimoire.agent_profile.v1" ||
+				profile.status === "disabled" ||
+				!Array.isArray(profile.models) ||
+				!profile.models.length
+			) {
+				throw new Error(`Child AgentProfile is unavailable: ${profileRef}`);
+			}
+			profiles.push({
+				profileRef,
+				displayName: profile.displayName?.trim() || profileRef,
+				...(profile.description?.trim() ? { description: profile.description.trim() } : {}),
+			});
 		}
-		return profiles.sort((a, b) => a.displayName.localeCompare(b.displayName));
+		return profiles;
 	}
 
 	async #allCachedRoutes(): Promise<Array<{ ref: string; route: AvailableModelRoute }>> {
@@ -338,6 +367,55 @@ function toModelSpec(route: AvailableModelRoute, account: ProviderAccount): Mode
 function requiredRef(value: unknown, field: string): string {
 	if (typeof value !== "string" || !GCTX.test(value)) throw new Error(`${field} must be a gctx Artifact ref`);
 	return value;
+}
+
+function resolveSpawnPolicy(
+	profile: AgentProfile,
+	launch: EngineLaunchProfile,
+): { maxSpawnDepth: number; maxChildren: number; childProfileRefs: string[] } {
+	if (!Array.isArray(profile.childProfiles ?? [])) throw new Error("AgentProfile childProfiles must be an array");
+	const profileRefs = (profile.childProfiles ?? []).map((ref, index) => requiredRef(ref, `childProfiles[${index}]`));
+	if (new Set(profileRefs).size !== profileRefs.length) throw new Error("AgentProfile childProfiles must be unique");
+	const profileDepth = profile.maxSpawnDepth ?? 0;
+	const profileLimit = profile.maxChildren ?? 0;
+	if (!Number.isSafeInteger(profileDepth) || profileDepth < 0 || profileDepth > 31) {
+		throw new Error("AgentProfile maxSpawnDepth must be between 0 and 31");
+	}
+	if (!Number.isSafeInteger(profileLimit) || profileLimit < 0 || profileLimit > 256) {
+		throw new Error("AgentProfile maxChildren must be between 0 and 256");
+	}
+	if (profileDepth > 0 && (!profileRefs.length || profileLimit === 0)) {
+		throw new Error("AgentProfile spawn depth requires childProfiles and maxChildren");
+	}
+	if (profileDepth === 0 && (profileRefs.length > 0 || profileLimit !== 0)) {
+		throw new Error("AgentProfile childProfiles and maxChildren require spawn depth");
+	}
+
+	const launchDepth = launch.maxSpawnDepth ?? 0;
+	const launchLimit = launch.maxChildren ?? 0;
+	const launchRefs = launch.childProfileRefs ?? [];
+	if (
+		!Number.isSafeInteger(launchDepth) ||
+		launchDepth < 0 ||
+		launchDepth > profileDepth ||
+		!Number.isSafeInteger(launchLimit) ||
+		launchLimit < 0 ||
+		!Array.isArray(launchRefs)
+	) {
+		throw new Error("Launch spawn policy exceeds the pinned AgentProfile");
+	}
+	const expectedRefs = launchDepth > 0 ? profileRefs : [];
+	const expectedLimit = launchDepth > 0 ? profileLimit : 0;
+	const expectedSpawns = launchDepth > 0 ? "*" : "";
+	if (
+		launch.spawns !== expectedSpawns ||
+		launchLimit !== expectedLimit ||
+		launchRefs.length !== expectedRefs.length ||
+		launchRefs.some((ref, index) => ref !== expectedRefs[index])
+	) {
+		throw new Error("Launch spawn policy does not match the pinned AgentProfile");
+	}
+	return { maxSpawnDepth: launchDepth, maxChildren: launchLimit, childProfileRefs: expectedRefs };
 }
 
 function parseJson<T>(content: string, label: string): T {

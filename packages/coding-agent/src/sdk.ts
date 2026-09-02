@@ -51,7 +51,7 @@ import {
 import { AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { createAutoresearchExtension } from "./autoresearch";
-import { loadCapability } from "./capability";
+import { loadCapability, withCapabilityProviderPolicy } from "./capability";
 import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
 import { bucketRules } from "./capability/rule-buckets";
 import type { EffectiveExtensionRoots } from "./capability/types";
@@ -74,7 +74,7 @@ import {
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
 import { buildServiceTierByFamily } from "./config/service-tier";
-import { Settings, type SkillsSettings } from "./config/settings";
+import { Settings, type SkillsSettings, withSettingsScope } from "./config/settings";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
 import "./discovery";
@@ -123,7 +123,7 @@ import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal }
 import type { HindsightSessionState } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
 import { IrcBus } from "./irc/bus";
-import { setSharedLspEnabled } from "./lsp/client";
+import { releaseLspOwner, setSharedLspEnabled, withLspSessionScope } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
 import {
 	deduplicateMCPToolsByName,
@@ -1290,6 +1290,8 @@ export function createAutoLearnCaptureRunner(
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
 	if (options.engineMode) {
 		const missing = [
+			!options.cwd && "cwd",
+			!options.settings && "settings",
 			!options.agentId && "agentId",
 			!options.attemptId && "attemptId",
 			!options.agentRegistry && "agentRegistry",
@@ -1298,11 +1300,50 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			!options.ircBus && "ircBus",
 		].filter((name): name is string => Boolean(name));
 		if (missing.length > 0) throw new Error(`Engine mode requires explicit ${missing.join(", ")}`);
+		if (!options.settings!.isReadOnly()) throw new Error("Engine mode requires a read-only Settings snapshot");
+		if (path.relative(path.resolve(options.cwd!), path.resolve(options.settings!.getCwd())) !== "") {
+			throw new Error("Engine settings cwd does not match session cwd");
+		}
+		if (options.disableExtensionDiscovery !== true) {
+			throw new Error("Engine mode disables ambient extension discovery");
+		}
+		if (
+			options.extensionRoots ||
+			options.extensions?.length ||
+			options.additionalExtensionPaths?.length ||
+			options.preloadedExtensions ||
+			options.preloadedExtensionPaths?.length ||
+			options.preloadedPreparedExtensions?.length
+		) {
+			throw new Error("Engine mode does not allow in-process extension roots");
+		}
+		if (options.customTools?.length || options.preloadedCustomToolPaths?.length) {
+			throw new Error("Engine mode does not allow in-process custom tools");
+		}
 	}
 	const extensionRoots = options.extensionRoots?.();
 	const explicit = extensionRoots?.explicit ?? options.additionalExtensionPaths ?? [];
 	const mode = extensionRoots?.mode ?? (options.disableExtensionDiscovery ? "explicit-only" : "merge");
-	return await withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options));
+	const create = () => withOmpExtensionRootScope(explicit, mode, () => createAgentSessionScoped(options));
+	if (!options.engineMode) return await create();
+	const settings = options.settings!;
+	return await withSettingsScope(settings, () =>
+		withCapabilityProviderPolicy(
+			{
+				disabledProviders: settings.get("disabledProviders"),
+				disabledExtensions: settings.get("disabledExtensions"),
+			},
+			() =>
+				withLspSessionScope(
+					{
+						shared: (options.enableLsp ?? true) && settings.get("lsp.shared"),
+						ownerId: options.agentId,
+						realm: "engine",
+					},
+					create,
+				),
+		),
+	);
 }
 
 async function createAgentSessionScoped(options: CreateAgentSessionOptions): Promise<CreateAgentSessionResult> {
@@ -1320,9 +1361,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (!Number.isSafeInteger(options.maxSpawnDepth) || options.maxSpawnDepth < 0) {
 			throw new Error("maxSpawnDepth must be a non-negative safe integer");
 		}
-		settings.override("task.maxRecursionDepth", (options.taskDepth ?? 0) + options.maxSpawnDepth);
+		if (!options.engineMode) {
+			settings.override("task.maxRecursionDepth", (options.taskDepth ?? 0) + options.maxSpawnDepth);
+		}
 	}
-	logger.time("initializeWithSettings", initializeWithSettings, settings);
+	if (!options.engineMode) logger.time("initializeWithSettings", initializeWithSettings, settings);
 	// Snapshot this session's effective configured lane onto its invocation scope
 	// so startup sub-discovery sees the same complete policy that post-startup
 	// reloads and recursively spawned children consume.
@@ -1431,7 +1474,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	discoveredSkillsPromise?.catch(() => {});
 
 	// Initialize provider preferences from settings
-	applyProviderGlobalsFromSettings(settings);
+	if (!options.engineMode) applyProviderGlobalsFromSettings(settings);
 
 	const sessionManager =
 		options.sessionManager ??
@@ -3941,6 +3984,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					}
 					await originalDispose();
 				} finally {
+					if (options.engineMode) await releaseLspOwner(resolvedAgentId);
 					unregisterUnlessParked();
 					unsubscribeCredentialDisabled?.();
 					unsubscribeMcpNotifications?.();
@@ -3994,7 +4038,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Broker-shared language servers: one server per project, multiplexed
 		// across omp instances by the LSP mux daemon. Session-level because the
 		// flag lives in module state consulted on every client cold-start.
-		setSharedLspEnabled(enableLsp && settings.get("lsp.shared"));
+		if (!options.engineMode) setSharedLspEnabled(enableLsp && settings.get("lsp.shared"));
 
 		// Start LSP warmup in the background so startup does not block on language server initialization.
 		// With `lsp.lazy` (the default) the warmup is skipped: recognized servers are still discovered and

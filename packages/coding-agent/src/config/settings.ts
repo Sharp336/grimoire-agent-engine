@@ -11,6 +11,7 @@
  *   const isolated = Settings.isolated({ "compaction.enabled": false });
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -431,6 +432,8 @@ function resolvePathScopedStringArray(settingPath: SettingPath, value: unknown, 
 // Settings Class
 // ═══════════════════════════════════════════════════════════════════════════
 
+const settingsScope = new AsyncLocalStorage<Settings>();
+
 export class Settings {
 	#configPath: string | null;
 	#cwd: string;
@@ -493,6 +496,8 @@ export class Settings {
 
 	/** Whether to persist changes */
 	#persist: boolean;
+	/** Immutable snapshot loaded without storage, migrations, writes, or process hooks. */
+	#readOnly: boolean;
 
 	private constructor(options: SettingsOptions = {}) {
 		this.#cwd = path.normalize(options.cwd ?? getProjectDir());
@@ -502,6 +507,7 @@ export class Settings {
 		if (options.configFiles) configFiles.push(...options.configFiles);
 		this.#configFiles = configFiles.map(file => path.resolve(this.#cwd, expandTilde(file)));
 		this.#persist = !options.inMemory && options.readOnly !== true;
+		this.#readOnly = options.readOnly === true;
 		liveSettingsInstances.add(new WeakRef(this));
 
 		if (options.overrides) {
@@ -580,6 +586,8 @@ export class Settings {
 	 * Throws if not initialized.
 	 */
 	static get instance(): Settings {
+		const scoped = settingsScope.getStore();
+		if (scoped) return scoped;
 		if (!globalInstance) {
 			throw new Error("Settings not initialized. Call Settings.init() first.");
 		}
@@ -602,8 +610,9 @@ export class Settings {
 		const value = getByPath(this.#merged, SETTING_PATH_SEGMENTS[path]);
 		const resolved =
 			value !== undefined ? (resolvePathScopedStringArray(path, value, this.#cwd) ?? value) : getDefault(path);
-		this.#resolvedCache.set(path, resolved);
-		return resolved as SettingValue<P>;
+		const snapshotValue = this.#readOnly ? freezeSettingsSnapshotValue(structuredClone(resolved)) : resolved;
+		this.#resolvedCache.set(path, snapshotValue);
+		return snapshotValue as SettingValue<P>;
 	}
 
 	/**
@@ -620,6 +629,7 @@ export class Settings {
 	 * Triggers hooks for settings that have side effects.
 	 */
 	set<P extends SettingPath>(path: P, value: SettingValue<P>): void {
+		this.#assertMutable();
 		const prev = this.get(path);
 		const segments = path.split(".");
 		this.#captureGlobalMutation(path, this.#modifiedPathMutations, getByPath(this.#global, segments));
@@ -642,6 +652,7 @@ export class Settings {
 	 * Apply runtime overrides (not persisted).
 	 */
 	override<P extends SettingPath>(path: P, value: SettingValue<P>): void {
+		this.#assertMutable();
 		if (path === "modelRoles") {
 			this.#savedRuntimeModelRoleOverrides.clear();
 		}
@@ -656,6 +667,7 @@ export class Settings {
 	 * Clear a runtime override.
 	 */
 	clearOverride(path: SettingPath): void {
+		this.#assertMutable();
 		if (path === "modelRoles") {
 			this.#savedRuntimeModelRoleOverrides.clear();
 		}
@@ -741,6 +753,7 @@ export class Settings {
 	}
 
 	async cloneForCwd(cwd: string): Promise<Settings> {
+		this.#assertMutable();
 		const cloned = new Settings({
 			cwd,
 			agentDir: this.#agentDir,
@@ -769,6 +782,7 @@ export class Settings {
 	 * same reload.
 	 */
 	async reloadFromDisk(): Promise<void> {
+		this.#assertMutable();
 		if (!this.#persist) return;
 		if (this.#reloadFromDiskPromise) return this.#reloadFromDiskPromise;
 
@@ -852,6 +866,7 @@ export class Settings {
 	 * already the current scope.
 	 */
 	async reloadForCwd(cwd: string): Promise<void> {
+		this.#assertMutable();
 		const normalized = path.normalize(cwd);
 		if (normalized === this.#cwd) return;
 		await this.flush();
@@ -874,6 +889,10 @@ export class Settings {
 
 	getStorage(): AgentStorage | null {
 		return this.#storage;
+	}
+
+	isReadOnly(): boolean {
+		return this.#readOnly;
 	}
 
 	getCwd(): string {
@@ -1124,6 +1143,7 @@ export class Settings {
 	 * stale skip in place.
 	 */
 	setModelRole(role: ModelRole | string, modelId: string | undefined): void {
+		this.#assertMutable();
 		const prev = this.get("modelRoles");
 		const current = this.#modelRolesFromLayer(this.#global);
 		this.#captureGlobalMutation(role, this.#modifiedGlobalModelRoleMutations, current[role]);
@@ -1165,6 +1185,7 @@ export class Settings {
 	 * Set a model role in the current project's settings layer.
 	 */
 	setProjectModelRole(role: ModelRole | string, modelId: string): void {
+		this.#assertMutable();
 		this.#setProjectModelRoleValue(role, modelId);
 		this.#captureRuntimeModelRoleOverride(role);
 		this.#updateRuntimeModelRoleOverride(role, modelId);
@@ -1173,6 +1194,7 @@ export class Settings {
 	 * Clear a model role from the current project's settings layer.
 	 */
 	clearProjectModelRole(role: ModelRole | string): void {
+		this.#assertMutable();
 		this.#setProjectModelRoleValue(role, null);
 		this.#captureRuntimeModelRoleOverride(role);
 		this.#updateRuntimeModelRoleOverride(role, undefined);
@@ -1252,6 +1274,7 @@ export class Settings {
 	 * Override model roles (helper for modelRoles record).
 	 */
 	overrideModelRoles(roles: ReadOnlyDict<string>): void {
+		this.#assertMutable();
 		const next = this.#modelRolesFromLayer(this.#overrides);
 		for (const [role, modelId] of Object.entries(roles)) {
 			if (modelId) {
@@ -1266,6 +1289,7 @@ export class Settings {
 	 * Set disabled providers (for compatibility with discovery system).
 	 */
 	setDisabledProviders(ids: string[]): void {
+		this.#assertMutable();
 		this.set("disabledProviders", ids);
 	}
 
@@ -2664,6 +2688,10 @@ export class Settings {
 		}
 	}
 
+	#assertMutable(): void {
+		if (this.#readOnly) throw new Error("Settings snapshot is read-only");
+	}
+
 	#deepMerge(base: RawSettings, overrides: RawSettings): RawSettings {
 		const result = { ...base };
 		for (const key of Object.keys(overrides)) {
@@ -2687,6 +2715,12 @@ export class Settings {
 		}
 		return result;
 	}
+}
+
+function freezeSettingsSnapshotValue<T>(value: T): T {
+	if (value === null || typeof value !== "object" || Object.isFrozen(value)) return value;
+	for (const nested of Object.values(value)) freezeSettingsSnapshotValue(nested);
+	return Object.freeze(value);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -2877,7 +2911,11 @@ function clearBoundSettingsMethods(): void {
 }
 
 export function isSettingsInitialized(): boolean {
-	return globalInstance !== null;
+	return settingsScope.getStore() !== undefined || globalInstance !== null;
+}
+
+export function withSettingsScope<T>(activeSettings: Settings, callback: () => T): T {
+	return settingsScope.run(activeSettings, callback);
 }
 
 /**
@@ -2906,8 +2944,13 @@ export function resetSettingsForTest(): void {
  */
 export const settings = new Proxy({} as Settings, {
 	get(_target, prop) {
-		if (!globalInstance) {
+		const activeSettings = settingsScope.getStore() ?? globalInstance;
+		if (!activeSettings) {
 			throw new Error("Settings not initialized. Call Settings.init() first.");
+		}
+		if (activeSettings !== globalInstance) {
+			const scopedValue = (activeSettings as unknown as Record<PropertyKey, unknown>)[prop];
+			return typeof scopedValue === "function" ? scopedValue.bind(activeSettings) : scopedValue;
 		}
 		if (boundSettingsInstance !== globalInstance) {
 			clearBoundSettingsMethods();

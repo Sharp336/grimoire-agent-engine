@@ -601,12 +601,15 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 	);
 }
 
-async function waitWhilePaused(config: AgentLoopConfig, signal?: AbortSignal): Promise<void> {
+async function waitWhilePaused(config: AgentLoopConfig, signal?: AbortSignal): Promise<boolean> {
+	let waited = false;
 	while (!signal?.aborted) {
 		const gate = config.pauseGate?.paused ? config.pauseGate : agentPauseGate.paused ? agentPauseGate : undefined;
-		if (!gate) return;
+		if (!gate) return waited;
+		waited = true;
 		await gate.waitUntilResumed(signal);
 	}
+	return waited;
 }
 
 /**
@@ -1088,7 +1091,10 @@ async function runLoopBody(
 				// Park at the turn boundary while an active pause gate is engaged.
 				// An external abort releases the park so a
 				// cancelled run still unwinds while everything else stays frozen.
-				await waitWhilePaused(config, signal);
+				const resumedAtTurnBoundary = await waitWhilePaused(config, signal);
+				if (resumedAtTurnBoundary && !signal?.aborted) {
+					pendingMessages.push(...((await config.getSteeringMessages?.(signal)) || []));
+				}
 
 				// Build the provider-bound context before opening the turn. Queue
 				// messages are added now but their events remain deferred until
@@ -1138,8 +1144,21 @@ async function runLoopBody(
 						directiveResolvedForTurn = true;
 					}
 
-					preparedProviderCall = await prepareProviderCall(currentContext, config, signal);
-					gateResult = (await config.beforeModelCall?.(preparedProviderCall.context, signal)) || undefined;
+					for (;;) {
+						preparedProviderCall = await prepareProviderCall(currentContext, config, signal);
+						gateResult = (await config.beforeModelCall?.(preparedProviderCall.context, signal)) || undefined;
+						if (config.beforeModelCall && signal?.aborted) gateResult = { stop: true };
+						if (gateResult?.stop || !(await waitWhilePaused(config, signal)) || signal?.aborted) break;
+
+						const resumedSteering = (await config.getSteeringMessages?.(signal)) || [];
+						if (resumedSteering.length === 0) break;
+						for (const message of resumedSteering) {
+							currentContext.messages.push(message);
+							newMessages.push(message);
+							turnMessages.push(message);
+							(message as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
+						}
+					}
 				} catch (error) {
 					if (!turnOpen) {
 						stream.push({ type: "turn_start" });
@@ -1147,9 +1166,6 @@ async function runLoopBody(
 						turnOpen = true;
 					}
 					throw error;
-				}
-				if (config.beforeModelCall && signal?.aborted) {
-					gateResult = { stop: true };
 				}
 				if (gateResult?.stop) {
 					if (gateResult.reason) {
@@ -1188,8 +1204,6 @@ async function runLoopBody(
 					endAgentStream(stream, newMessages, telemetry, stepCounter.count);
 					return;
 				}
-
-				await waitWhilePaused(config, signal);
 
 				if (!turnOpen) {
 					stream.push({ type: "turn_start" });

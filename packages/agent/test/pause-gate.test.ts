@@ -88,6 +88,41 @@ describe("agentPauseGate", () => {
 		expect(pausedMock.calls).toHaveLength(1);
 	});
 
+	it("delivers steering queued during a pre-model pause in the first call after resume", async () => {
+		const localGate = new AgentPauseGate();
+		const mock = createMockModel({ responses: [{ content: ["corrected"] }] });
+		const queued: AgentMessage[] = [];
+		const pauseRequested = Promise.withResolvers<void>();
+		let beforeModelCalls = 0;
+		const context: AgentContext = { systemPrompt: ["Test"], messages: [], tools: [] };
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			pauseGate: localGate,
+			beforeModelCall: () => {
+				if (beforeModelCalls++ === 0) {
+					localGate.pause();
+					pauseRequested.resolve();
+				}
+			},
+			getSteeringMessages: async () => queued.splice(0),
+		};
+
+		const result = agentLoop([createUserMessage("start")], context, config, undefined, mock.stream).result();
+		await pauseRequested.promise;
+		await localGate.waitUntilParked();
+		queued.push(createUserMessage("use the correction"));
+		localGate.resume();
+		await result;
+
+		expect(mock.calls).toHaveLength(1);
+		expect(
+			mock.calls[0]?.context.messages.some(
+				message => message.role === "user" && message.content === "use the correction",
+			),
+		).toBeTrue();
+	});
+
 	it("holds tool execution at the tool boundary when paused mid-turn", async () => {
 		const executed: string[] = [];
 		// Signal exactly when the loop parks on the gate. A test-local manual

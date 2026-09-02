@@ -6,6 +6,7 @@
  * - Registering providers (where to find it)
  * - Loading items for a capability across all providers
  */
+import { AsyncLocalStorage } from "node:async_hooks";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getProjectDir, logger } from "@oh-my-pi/pi-utils";
@@ -41,6 +42,23 @@ const disabledProviders = new Set<string>();
 
 /** Settings manager for persistence (if set) */
 let settings: Settings | null = null;
+
+export interface CapabilityProviderPolicy {
+	disabledProviders: readonly string[];
+	disabledExtensions: readonly string[];
+}
+
+const providerPolicyScope = new AsyncLocalStorage<CapabilityProviderPolicy>();
+
+export function withCapabilityProviderPolicy<T>(policy: CapabilityProviderPolicy, callback: () => T): T {
+	return providerPolicyScope.run(
+		{
+			disabledProviders: [...policy.disabledProviders],
+			disabledExtensions: [...policy.disabledExtensions],
+		},
+		callback,
+	);
+}
 
 // =============================================================================
 // Registration API
@@ -108,9 +126,12 @@ async function loadImpl<T>(
 	const suppressedItems = new Set<T & { _source: SourceMeta; _shadowed?: boolean }>();
 	const allWarnings: string[] = [];
 	const contributingProviders: string[] = [];
+	const scopedPolicy = providerPolicyScope.getStore();
 	const disabledExtensionIds = options.includeDisabled
 		? new Set<string>()
-		: new Set<string>(options.disabledExtensions ?? settings?.get("disabledExtensions") ?? []);
+		: new Set<string>(
+				options.disabledExtensions ?? scopedPolicy?.disabledExtensions ?? settings?.get("disabledExtensions") ?? [],
+			);
 
 	const results = await Promise.all(
 		providers.map(async provider => {
@@ -236,7 +257,9 @@ async function loadImpl<T>(
  * Filter providers based on options and disabled state.
  */
 function filterProviders<T>(capability: Capability<T>, options: LoadOptions<T>): Provider<T>[] {
-	let providers = (capability.providers as Provider<T>[]).filter(p => !disabledProviders.has(p.id));
+	const scopedDisabled = providerPolicyScope.getStore()?.disabledProviders;
+	const disabled = scopedDisabled ? new Set(scopedDisabled) : disabledProviders;
+	let providers = (capability.providers as Provider<T>[]).filter(p => !disabled.has(p.id));
 
 	if (options.providers) {
 		const allowed = new Set(options.providers);

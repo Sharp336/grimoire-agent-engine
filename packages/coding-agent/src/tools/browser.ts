@@ -312,6 +312,7 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 			try {
 				result = await untilAborted(openSignal, () =>
 					acquireTab(name, browser, {
+						cwd: this.session.cwd,
 						url: params.url,
 						waitUntil: params.wait_until,
 						viewport: params.viewport

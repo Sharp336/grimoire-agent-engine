@@ -722,6 +722,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			);
 		}
 		if (name === "task") {
+			if (session.engineMode && !session.engineChildLauncher) return false;
 			return canSpawnAtDepth(session.settings.get("task.maxRecursionDepth") ?? 2, session.taskDepth ?? 0);
 		}
 		return true;

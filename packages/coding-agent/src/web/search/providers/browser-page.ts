@@ -1,6 +1,7 @@
 import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { Page } from "puppeteer-core";
+import { settings } from "../../../config/settings";
 import { applyStealthPatches, applyViewport } from "../../../tools/browser/launch";
 import { acquireBrowser, holdBrowser, releaseBrowser } from "../../../tools/browser/registry";
 import { buildBrowserNavigationHeaders } from "./browser-headers";
@@ -66,7 +67,7 @@ async function browseHtmlPage(
 		acquireBrowser(
 			{ kind: "headless", headless: true },
 			{
-				cwd: process.cwd(),
+				cwd: settings.getCwd(),
 				signal,
 			},
 		),
