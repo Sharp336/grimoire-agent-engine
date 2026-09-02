@@ -1435,6 +1435,37 @@ describe("EngineRuntime", () => {
 		expect(prompts).toHaveLength(3);
 		await runtime.dispose();
 	}, 60000);
+
+	it("fails an attempt when the model turn ends with a provider error", async () => {
+		const { runtime, cwd } = await createRuntime(async session => {
+			Object.defineProperty(session, "getLastAssistantMessage", {
+				value: () => ({
+					role: "assistant",
+					content: [],
+					stopReason: "error",
+					errorMessage: "provider rejected request",
+				}),
+			});
+			return true;
+		});
+		await runtime.start(
+			{
+				commandId: "command-provider-error",
+				agentInstanceId: "agent-provider-error",
+				executionId: "execution-provider-error",
+				attemptId: "attempt-provider-error",
+				authorityGeneration: 1,
+				cwd,
+				input: "fail",
+			},
+			profile,
+		);
+		await runtime.drain();
+		const events = await runtime.store.pendingEvents();
+		expect(events.find(event => event.kind === "completed")).toBeUndefined();
+		expect(events.find(event => event.kind === "failed")?.payload).toEqual({ error: "provider rejected request" });
+		await runtime.dispose();
+	}, 60000);
 });
 
 function nextEngineEvent(runtime: EngineRuntime, kind: EngineEvent["kind"]): Promise<EngineEvent> {

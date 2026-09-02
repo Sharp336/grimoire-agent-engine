@@ -1175,8 +1175,14 @@ export class EngineRuntime {
 	}
 
 	async #dispatchModel(binding: LiveBinding, input: string): Promise<boolean> {
+		const previous = binding.session.getLastAssistantMessage();
 		try {
-			return await this.#withSessionScope(binding, () => this.#dispatchPrompt(binding.session, input));
+			const dispatched = await this.#withSessionScope(binding, () => this.#dispatchPrompt(binding.session, input));
+			const current = binding.session.getLastAssistantMessage();
+			if (current !== previous && current?.stopReason === "error") {
+				throw new Error(current.errorMessage?.trim() || "Model request failed");
+			}
+			return dispatched;
 		} finally {
 			await binding.pauseGate.waitUntilResumed();
 		}
