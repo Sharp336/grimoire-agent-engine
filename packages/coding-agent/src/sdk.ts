@@ -561,6 +561,8 @@ export interface CreateAgentSessionOptions {
 	agentId?: string;
 	/** Display name for the agent in IRC. Default: "main" or "sub". */
 	agentDisplayName?: string;
+	/** Presentation-only hint for future delegation; never an IRC/routing key. */
+	agentDelegationHint?: string;
 	/** Optional shared agent registry for IRC routing. Default: AgentRegistry.global(). */
 	agentRegistry?: AgentRegistry;
 	/** Shared lifecycle owner for an embedded multi-session runtime. The caller owns disposal. */
@@ -3302,6 +3304,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const registrationInput = {
 			id: resolvedAgentId,
 			displayName: resolvedAgentDisplayName,
+			delegationHint: options.agentDelegationHint,
 			kind: agentKind,
 			parentId: options.parentAgentId,
 			session: null,

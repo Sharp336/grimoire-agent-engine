@@ -107,6 +107,11 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			});
 
 			const commandA = startCommand(runtime.engineGeneration, "agent-a", "a", cwd);
+			commandA.payload = {
+				...commandA.payload,
+				displayName: "Runtime Gardener",
+				delegationHint: "Engine broker integration",
+			};
 			const commandB = startCommand(runtime.engineGeneration, "agent-b", "b", cwd);
 			await Promise.all([
 				js.publish(adapter.commandSubject("agent-a", "start"), JSON.stringify(commandA), {
@@ -140,6 +145,11 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 				"attempt.completed",
 			]);
 			expect(dispatchCount).toBe(2);
+			expect(runtime.agentRegistry.get(engineAgentId("agent-a"))).toMatchObject({
+				id: engineAgentId("agent-a"),
+				displayName: "Runtime Gardener",
+				delegationHint: "Engine broker integration",
+			});
 
 			const permitStart = startCommand(runtime.engineGeneration, "agent-permit", "permit", cwd);
 			await js.publish(adapter.commandSubject("agent-permit", "start"), JSON.stringify(permitStart), {

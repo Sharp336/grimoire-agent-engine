@@ -11,6 +11,8 @@ import type {
 	EngineEvent,
 	EngineLaunchProfile,
 } from "@oh-my-pi/pi-coding-agent/engine/contracts";
+import { validateStartRequest } from "@oh-my-pi/pi-coding-agent/engine/contracts";
+import { engineAgentId } from "@oh-my-pi/pi-coding-agent/engine/route";
 import { EngineRuntime, type EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { getLspResourceCounts } from "@oh-my-pi/pi-coding-agent/lsp/client";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -1036,6 +1038,57 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
+	it("uses canonical presentation fields without changing the Engine agent route", async () => {
+		const { runtime, cwd } = await createRuntime();
+		const started = await runtime.start(
+			{
+				commandId: "command-named",
+				agentInstanceId: "agent-machine-identity",
+				agentInstanceRef: "grimoire://tasks/p/t/agents/agent-machine-identity",
+				displayName: "Schema Sentinel",
+				delegationHint: "PostgreSQL migration review",
+				executionId: "execution-named",
+				attemptId: "attempt-named",
+				authorityGeneration: 1,
+				cwd,
+				input: "verify naming",
+			},
+			profile,
+		);
+		await runtime.drain();
+		const ref = runtime.agentRegistry.get(started.engineAgentId);
+		expect(started.engineAgentId).toBe(engineAgentId("agent-machine-identity"));
+		expect(ref).toMatchObject({
+			id: started.engineAgentId,
+			displayName: "Schema Sentinel",
+			delegationHint: "PostgreSQL migration review",
+		});
+		await runtime.dispose();
+	}, 60_000);
+
+	it("bounds canonical presentation fields at Engine admission", () => {
+		const request = {
+			commandId: "command-validation",
+			agentInstanceId: "agent-validation",
+			executionId: "execution-validation",
+			attemptId: "attempt-validation",
+			authorityGeneration: 1,
+			cwd: process.cwd(),
+			input: "verify",
+		};
+		expect(() => validateStartRequest({ ...request, displayName: "" })).toThrow("displayName");
+		expect(() => validateStartRequest({ ...request, displayName: "x".repeat(65) })).toThrow("displayName");
+		expect(() => validateStartRequest({ ...request, delegationHint: "line one\nline two" })).toThrow(
+			"delegationHint",
+		);
+		expect(() =>
+			validateStartRequest({
+				...request,
+				displayName: "Schema Sentinel",
+				delegationHint: "UI/UX review",
+			}),
+		).not.toThrow();
+	});
 	it("runs two independent roots on one shared runtime and disposes only the targeted root", async () => {
 		const { runtime, cwd } = await createRuntime();
 		const first = await runtime.start(
