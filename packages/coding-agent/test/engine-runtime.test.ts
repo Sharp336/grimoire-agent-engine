@@ -790,6 +790,55 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
+	it("keeps a background effect open while paused and settles only after resume", async () => {
+		const release = Promise.withResolvers<string>();
+		let runtime!: EngineRuntime;
+		let cwd = "";
+		({ runtime, cwd } = await createRuntime(async session => {
+			const jobId = runtime.asyncJobManager.register("bash", "paused background", () => release.promise, {
+				ownerId: session.getAgentId(),
+				attemptId: session.getAttemptId(),
+				sourceToolCallId: "read-paused-background",
+			});
+			runtime.asyncJobManager.watchJobs([jobId]);
+			const read = session.getToolByName("read");
+			if (!read) throw new Error("read tool is unavailable");
+			await read.execute("read-paused-background", { path: "paused.txt" });
+			return true;
+		}));
+		fs.writeFileSync(path.join(cwd, "paused.txt"), "paused");
+		const toolStarted = nextEngineEvent(runtime, "tool_started");
+		const started = await runtime.start(
+			{
+				commandId: "command-paused-background",
+				agentInstanceId: "agent-paused-background",
+				executionId: "execution-paused-background",
+				attemptId: "attempt-paused-background",
+				authorityGeneration: 1,
+				cwd,
+				input: "read",
+			},
+			{ ...profile, toolPolicies: { read: "tracked" } },
+		);
+		const effectId = String((await toolStarted).payload?.invocationId);
+		const paused = nextEngineEvent(runtime, "paused");
+		await runtime.pause({ ...started, commandId: "pause-background", initiator: { kind: "human" } });
+		await paused;
+		expect(await runtime.store.getEffect(effectId)).toMatchObject({ state: "started" });
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("paused");
+		expect((await runtime.store.pendingEvents()).some(event => event.kind === "completed")).toBeFalse();
+
+		const toolSettled = nextEngineEvent(runtime, "tool_settled");
+		release.resolve("done");
+		await toolSettled;
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("paused");
+		const completed = nextEngineEvent(runtime, "completed");
+		await runtime.resume({ ...started, commandId: "resume-background", initiator: { kind: "human" } });
+		await completed;
+		expect(await runtime.store.getEffect(effectId)).toMatchObject({ state: "settled", outcome: "completed" });
+		await runtime.dispose();
+	}, 60_000);
+
 	it("records unrestricted tools without exposing their raw input", async () => {
 		const { runtime, cwd } = await createRuntime(async session => {
 			const read = session.getToolByName("read");
