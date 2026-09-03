@@ -34,7 +34,7 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 		tempDir = undefined;
 	});
 
-	it("claims a hosted command and settles the same durable job from Engine events", async () => {
+	it("retries a stranded hosted claim and settles the same durable job from Engine events", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-host-${Snowflake.next()}-`));
 		const broker = await startNatsServer(tempDir, true);
 		const engineSeed = broker.engineSeed;
@@ -63,7 +63,7 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 		});
 		const profile = { spawns: "", profileDigest: "leaf-profile-v1", enableMCP: false, enableLsp: false };
 		const adapterErrors: Error[] = [];
-		const adapter = await NatsEngineAdapter.connect({
+		let adapter = await NatsEngineAdapter.connect({
 			runtime,
 			deviceId: "device-hosted",
 			engineId: "engine-hosted",
@@ -74,7 +74,15 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			resolveLaunchProfile: command => command.payload.launchProfile as typeof profile,
 			onError: error => adapterErrors.push(error),
 		});
+		await adapter.dispose();
+		const managerConnection = await connect({
+			servers: broker.url,
+			authenticator: nkeyAuthenticator(bridgeSeed),
+		});
+		const manager = await jetstreamManager(managerConnection);
+		await manager.streams.delete(ENGINE_COMMAND_STREAM);
 		const rpc = new FakeRpc(startCommand(cwd, profile));
+		const bridgeErrors: Error[] = [];
 		const bridge = await HostedEngineBridge.connect({
 			rpc,
 			deviceId: "device-hosted",
@@ -84,10 +92,19 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			connectionOptions: { authenticator: nkeyAuthenticator(bridgeSeed) },
 			pollIntervalMs: 10,
 			heartbeatIntervalMs: 100,
+			onError: error => bridgeErrors.push(error),
 		});
-		const managerConnection = await connect({
+		await waitFor(() => bridgeErrors.length > 0);
+		adapter = await NatsEngineAdapter.connect({
+			runtime,
+			deviceId: "device-hosted",
+			engineId: "engine-hosted",
 			servers: broker.url,
-			authenticator: nkeyAuthenticator(bridgeSeed),
+			connectionOptions: { authenticator: nkeyAuthenticator(engineSeed) },
+			authorizeCommand: () => {},
+			authorizeMessage: () => {},
+			resolveLaunchProfile: command => command.payload.launchProfile as typeof profile,
+			onError: error => adapterErrors.push(error),
 		});
 		const enginePublisherConnection = await connect({
 			servers: broker.url,
@@ -96,7 +113,6 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 		try {
 			await waitFor(() => rpc.events.some(event => event.type === "attempt.completed") || adapterErrors.length > 0);
 			expect(adapterErrors).toEqual([]);
-			const manager = await jetstreamManager(managerConnection);
 			await waitFor(async () => {
 				const [commands, events] = await Promise.all([
 					manager.consumers.info(ENGINE_COMMAND_STREAM, `engine_${adapter.engineRoute}`),
