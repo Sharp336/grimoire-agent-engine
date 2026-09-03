@@ -33,6 +33,24 @@ function modelEffectPayload(effectId: string, modelCallId: string): Record<strin
 	return { effectId, modelCallId };
 }
 
+function eventFromRow(row: EventRow): EngineEvent {
+	return {
+		eventId: Number(row.event_id),
+		seq: Number(row.seq),
+		causationCommandId: row.causation_command_id,
+		agentInstanceId: row.agent_instance_id,
+		executionId: row.execution_id,
+		attemptId: row.attempt_id,
+		bindingId: row.binding_id,
+		engineGeneration: Number(row.engine_generation),
+		bindingGeneration: Number(row.binding_generation),
+		authorityGeneration: Number(row.authority_generation),
+		kind: row.kind,
+		payload: row.payload ? (JSON.parse(row.payload) as Record<string, unknown>) : undefined,
+		createdAt: Number(row.created_at),
+	};
+}
+
 interface BindingRow {
 	binding_id: string;
 	command_id: string;
@@ -368,6 +386,20 @@ const EFFECT_KIND_COLUMN = [
 	["engine_effects", "effect_kind", "TEXT NOT NULL DEFAULT 'tool' CHECK(effect_kind IN ('tool', 'model'))"],
 ] as const;
 
+const EVENT_DELIVERY_SCHEMA = [
+	`CREATE TABLE engine_event_deliveries (
+		event_id INTEGER NOT NULL REFERENCES engine_event_outbox(event_id),
+		sink_id TEXT NOT NULL,
+		state TEXT NOT NULL CHECK(state IN ('pending', 'delivered')),
+		attempts INTEGER NOT NULL DEFAULT 0,
+		last_error TEXT,
+		delivered_at INTEGER,
+		updated_at INTEGER NOT NULL,
+		PRIMARY KEY(event_id, sink_id)
+	)`,
+	`CREATE INDEX engine_event_deliveries_pending_idx ON engine_event_deliveries(sink_id, state, event_id)`,
+] as const;
+
 const SCHEMA_MIGRATIONS = [
 	{ version: 1, statements: SCHEMA, requiredColumns: [] },
 	{ version: 2, statements: [], requiredColumns: REQUIRED_COLUMNS },
@@ -375,6 +407,7 @@ const SCHEMA_MIGRATIONS = [
 	{ version: 4, statements: [], requiredColumns: TRANSCRIPT_CHECKPOINT_COLUMNS },
 	{ version: 5, statements: EFFECT_APPROVAL_SCHEMA, requiredColumns: [] },
 	{ version: 6, statements: [], requiredColumns: EFFECT_KIND_COLUMN },
+	{ version: 7, statements: EVENT_DELIVERY_SCHEMA, requiredColumns: [] },
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;
@@ -1059,21 +1092,49 @@ export class EngineStore {
 			 FROM engine_event_outbox WHERE published_at IS NULL ORDER BY event_id LIMIT ?`,
 			[Math.max(1, Math.min(1000, Math.floor(limit)))],
 		)) as EventRow[];
-		return rows.map(row => ({
-			eventId: Number(row.event_id),
-			seq: Number(row.seq),
-			causationCommandId: row.causation_command_id,
-			agentInstanceId: row.agent_instance_id,
-			executionId: row.execution_id,
-			attemptId: row.attempt_id,
-			bindingId: row.binding_id,
-			engineGeneration: Number(row.engine_generation),
-			bindingGeneration: Number(row.binding_generation),
-			authorityGeneration: Number(row.authority_generation),
-			kind: row.kind,
-			payload: row.payload ? (JSON.parse(row.payload) as Record<string, unknown>) : undefined,
-			createdAt: Number(row.created_at),
-		}));
+		return rows.map(eventFromRow);
+	}
+
+	async pendingEventsForSink(sinkId: string, limit = 100): Promise<EngineEvent[]> {
+		if (!sinkId.trim()) throw new Error("Event sink ID must be non-empty");
+		const rows = (await this.#client.unsafe(
+			`SELECT e.event_id, e.seq, e.causation_command_id, e.agent_instance_id, e.execution_id, e.attempt_id,
+			 e.binding_id, e.engine_generation, e.binding_generation, e.authority_generation, e.kind, e.payload, e.created_at
+			 FROM engine_event_outbox e
+			 LEFT JOIN engine_event_deliveries d ON d.event_id=e.event_id AND d.sink_id=?
+			 WHERE d.event_id IS NULL OR d.state='pending'
+			 ORDER BY e.event_id LIMIT ?`,
+			[sinkId, Math.max(1, Math.min(1000, Math.floor(limit)))],
+		)) as EventRow[];
+		return rows.map(eventFromRow);
+	}
+
+	async markEventDeliveryFailed(eventId: number, sinkId: string, error: string): Promise<void> {
+		if (!sinkId.trim()) throw new Error("Event sink ID must be non-empty");
+		await this.#transaction(sql =>
+			sql.unsafe(
+				`INSERT INTO engine_event_deliveries(event_id, sink_id, state, attempts, last_error, updated_at)
+			 VALUES (?, ?, 'pending', 1, ?, ?)
+			 ON CONFLICT(event_id, sink_id) DO UPDATE SET attempts=attempts+1,
+			 last_error=excluded.last_error, updated_at=excluded.updated_at
+			 WHERE engine_event_deliveries.state='pending'`,
+				[eventId, sinkId, error.slice(0, 2_048), Date.now()],
+			),
+		);
+	}
+
+	async markEventDelivered(eventId: number, sinkId: string): Promise<void> {
+		if (!sinkId.trim()) throw new Error("Event sink ID must be non-empty");
+		const now = Date.now();
+		await this.#transaction(sql =>
+			sql.unsafe(
+				`INSERT INTO engine_event_deliveries(event_id, sink_id, state, attempts, delivered_at, updated_at)
+			 VALUES (?, ?, 'delivered', 1, ?, ?)
+			 ON CONFLICT(event_id, sink_id) DO UPDATE SET state='delivered', attempts=attempts+1,
+			 last_error=NULL, delivered_at=excluded.delivered_at, updated_at=excluded.updated_at`,
+				[eventId, sinkId, now, now],
+			),
+		);
 	}
 
 	async markEventPublished(eventId: number): Promise<void> {

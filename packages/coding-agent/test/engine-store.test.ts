@@ -269,6 +269,39 @@ describe("EngineStore", () => {
 		await store.close();
 	});
 
+	it("tracks delivery independently for each event sink", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-delivery-${Snowflake.next()}-`));
+		const store = await EngineStore.open(path.join(tempDir, "engine.sqlite"));
+		const event = await store.appendEvent({
+			causationCommandId: "command-delivery",
+			agentInstanceId: "agent-delivery",
+			executionId: "execution-delivery",
+			attemptId: "attempt-delivery",
+			bindingId: "binding-delivery",
+			engineGeneration: 1,
+			bindingGeneration: 1,
+			authorityGeneration: 1,
+			kind: "accepted",
+		});
+		expect((await store.pendingEventsForSink("nats:a")).map(candidate => candidate.eventId)).toEqual([event.eventId]);
+		expect((await store.pendingEventsForSink("query:a")).map(candidate => candidate.eventId)).toEqual([
+			event.eventId,
+		]);
+		await store.markEventDelivered(event.eventId, "nats:a");
+		expect(await store.pendingEventsForSink("nats:a")).toEqual([]);
+		expect((await store.pendingEventsForSink("query:a")).map(candidate => candidate.eventId)).toEqual([
+			event.eventId,
+		]);
+		await store.markEventDeliveryFailed(event.eventId, "query:a", "temporary failure");
+		expect((await store.pendingEventsForSink("query:a")).map(candidate => candidate.eventId)).toEqual([
+			event.eventId,
+		]);
+		await store.markEventDelivered(event.eventId, "query:a");
+		expect(await store.pendingEventsForSink("query:a")).toEqual([]);
+		expect((await store.pendingEvents()).map(candidate => candidate.eventId)).toEqual([event.eventId]);
+		await store.close();
+	});
+
 	it("commits tool effect and approval state with their events atomically", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-effect-${Snowflake.next()}-`));
 		const databasePath = path.join(tempDir, "engine.sqlite");

@@ -686,19 +686,29 @@ export class NatsEngineAdapter {
 	}
 
 	async #flushEvents(): Promise<void> {
+		const sinkId = `nats:${this.deviceRoute}:${this.engineRoute}`;
 		for (;;) {
 			if (!(await this.runtime.store.isCurrentEngineGeneration(this.runtime.engineGeneration))) {
 				throw new StaleEngineLeaseError("Engine generation lease is no longer current");
 			}
-			const events = await this.runtime.store.pendingEvents(100);
+			const events = await this.runtime.store.pendingEventsForSink(sinkId, 100);
 			if (events.length === 0) return;
 			for (const event of events) {
 				const envelope = this.#eventEnvelope(event);
 				const payload = encodeEnvelope(envelope);
-				await this.#jetstream.publish(this.eventSubject(event.agentInstanceId, event.kind), payload, {
-					msgID: String(event.eventId),
-				});
-				await this.runtime.store.markEventPublished(event.eventId);
+				try {
+					await this.#jetstream.publish(this.eventSubject(event.agentInstanceId, event.kind), payload, {
+						msgID: String(event.eventId),
+					});
+				} catch (error) {
+					await this.runtime.store.markEventDeliveryFailed(
+						event.eventId,
+						sinkId,
+						error instanceof Error ? error.message : String(error),
+					);
+					throw error;
+				}
+				await this.runtime.store.markEventDelivered(event.eventId, sinkId);
 			}
 		}
 	}
