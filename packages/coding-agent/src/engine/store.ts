@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { SQL } from "bun";
+import type { SessionDurabilityCheckpoint } from "../session/session-manager";
 import { SqlSessionStorage } from "../session/sql-session-storage";
 import type { EngineAttemptState, EngineBindingSnapshot, EngineEvent } from "./contracts";
 
@@ -33,6 +34,11 @@ export interface EngineAttemptRow {
 	binding_generation: number;
 	authority_generation: number;
 	state: EngineAttemptState;
+	transcript_session_id: string | null;
+	transcript_path: string | null;
+	transcript_leaf_entry_id: string | null;
+	transcript_byte_boundary: number | null;
+	transcript_revision: number;
 }
 
 interface SeqRow {
@@ -82,6 +88,10 @@ export interface EngineTransitionEvent {
 	kind: EngineEvent["kind"];
 	payload?: Record<string, unknown>;
 	causationCommandId?: string;
+}
+
+export interface EngineTranscriptCheckpoint extends SessionDurabilityCheckpoint {
+	revision: number;
 }
 
 export type EngineCommandAdmission =
@@ -214,10 +224,19 @@ const COMMAND_INBOX_SCHEMA = [
 	`CREATE INDEX engine_commands_state_idx ON engine_commands(state, processor_generation, updated_at)`,
 ] as const;
 
+const TRANSCRIPT_CHECKPOINT_COLUMNS = [
+	["engine_attempts", "transcript_session_id", "TEXT"],
+	["engine_attempts", "transcript_path", "TEXT"],
+	["engine_attempts", "transcript_leaf_entry_id", "TEXT"],
+	["engine_attempts", "transcript_byte_boundary", "INTEGER"],
+	["engine_attempts", "transcript_revision", "INTEGER NOT NULL DEFAULT 0"],
+] as const;
+
 const SCHEMA_MIGRATIONS = [
 	{ version: 1, statements: SCHEMA, requiredColumns: [] },
 	{ version: 2, statements: [], requiredColumns: REQUIRED_COLUMNS },
 	{ version: 3, statements: COMMAND_INBOX_SCHEMA, requiredColumns: [] },
+	{ version: 4, statements: [], requiredColumns: TRANSCRIPT_CHECKPOINT_COLUMNS },
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;
@@ -446,25 +465,37 @@ export class EngineStore {
 			settleCommandId?: string;
 			expectedStates?: readonly EngineAttemptState[];
 			requireNew?: boolean;
+			transcriptCheckpoint?: SessionDurabilityCheckpoint;
 		} = {},
 	): Promise<EngineEvent[]> {
 		return await this.#transaction(async sql => {
-			const rows = (await sql.unsafe("SELECT state FROM engine_attempts WHERE attempt_id=?", [
+			const rows = (await sql.unsafe("SELECT state, transcript_revision FROM engine_attempts WHERE attempt_id=?", [
 				binding.attemptId,
-			])) as Array<{ state: EngineAttemptState }>;
-			const current = rows[0]?.state;
+			])) as Array<{ state: EngineAttemptState; transcript_revision: number }>;
+			const currentRow = rows[0];
+			const current = currentRow?.state;
 			if (
 				(options.requireNew && current !== undefined) ||
 				(options.expectedStates && (current === undefined || !options.expectedStates.includes(current)))
 			) {
 				throw new EngineAttemptConflictError(binding.attemptId);
 			}
+			const transcriptCheckpoint = options.transcriptCheckpoint
+				? { ...options.transcriptCheckpoint, revision: Number(currentRow?.transcript_revision ?? 0) + 1 }
+				: undefined;
 			await this.#putBinding(sql, binding);
-			if (!(await this.#putAttempt(sql, binding, state, options.cause))) {
+			if (!(await this.#putAttempt(sql, binding, state, options.cause, transcriptCheckpoint))) {
 				throw new EngineAttemptConflictError(binding.attemptId);
 			}
 			const committed: EngineEvent[] = [];
-			for (const event of events) committed.push(await this.#appendTransitionEvent(sql, binding, event));
+			for (const event of events) {
+				committed.push(
+					await this.#appendTransitionEvent(sql, binding, {
+						...event,
+						...(transcriptCheckpoint ? { payload: { ...event.payload, transcriptCheckpoint } } : {}),
+					}),
+				);
+			}
 			if (options.settleCommandId) {
 				await this.#settleAdmittedCommand(sql, options.settleCommandId, { outcome: "applied" });
 			}
@@ -498,7 +529,8 @@ export class EngineStore {
 	async getAttempt(attemptId: string): Promise<EngineAttemptRow | undefined> {
 		const rows = (await this.#client.unsafe(
 			`SELECT agent_instance_id, execution_id, attempt_id, command_id, binding_id, engine_generation, binding_generation,
-			 authority_generation, state
+			 authority_generation, state, transcript_session_id, transcript_path, transcript_leaf_entry_id,
+			 transcript_byte_boundary, transcript_revision
 			 FROM engine_attempts WHERE attempt_id = ?`,
 			[attemptId],
 		)) as EngineAttemptRow[];
@@ -509,7 +541,8 @@ export class EngineStore {
 		return await this.#transaction(async sql => {
 			const active = (await sql.unsafe(
 				`SELECT agent_instance_id, execution_id, attempt_id, command_id, binding_id, engine_generation, binding_generation,
-				 authority_generation, state
+				 authority_generation, state, transcript_session_id, transcript_path, transcript_leaf_entry_id,
+				 transcript_byte_boundary, transcript_revision
 				 FROM engine_attempts
 				 WHERE engine_generation < ? AND state IN ('accepted', 'running', 'pause_requested', 'paused', 'waiting_input', 'cancel_requested')`,
 				[engineGeneration],
@@ -527,6 +560,20 @@ export class EngineStore {
 			);
 			const events: EngineEvent[] = [];
 			for (const attempt of active) {
+				const transcriptCheckpoint =
+					Number(attempt.transcript_revision) > 0 &&
+					attempt.transcript_session_id &&
+					attempt.transcript_path &&
+					attempt.transcript_leaf_entry_id &&
+					attempt.transcript_byte_boundary !== null
+						? {
+								sessionId: attempt.transcript_session_id,
+								sessionPath: attempt.transcript_path,
+								leafEntryId: attempt.transcript_leaf_entry_id,
+								byteBoundary: Number(attempt.transcript_byte_boundary),
+								revision: Number(attempt.transcript_revision),
+							}
+						: undefined;
 				events.push(
 					await this.#appendTransitionEvent(
 						sql,
@@ -542,7 +589,11 @@ export class EngineStore {
 						},
 						{
 							kind: "interrupted",
-							payload: { cause: "engine_lost", lostEngineGeneration: Number(attempt.engine_generation) },
+							payload: {
+								cause: "engine_lost",
+								lostEngineGeneration: Number(attempt.engine_generation),
+								...(transcriptCheckpoint ? { transcriptCheckpoint } : {}),
+							},
 						},
 					),
 				);
@@ -633,14 +684,22 @@ export class EngineStore {
 		binding: EngineBindingSnapshot,
 		state: EngineAttemptState,
 		cause?: string,
+		checkpoint?: EngineTranscriptCheckpoint,
 	): Promise<boolean> {
 		const rows = (await sql.unsafe(
 			`INSERT INTO engine_attempts(
 			 attempt_id, command_id, agent_instance_id, execution_id, binding_id, engine_generation,
-			 binding_generation, authority_generation, state, cause, updated_at
-			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 binding_generation, authority_generation, state, cause, updated_at,
+			 transcript_session_id, transcript_path, transcript_leaf_entry_id, transcript_byte_boundary, transcript_revision
+			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(attempt_id) DO UPDATE SET state=excluded.state, cause=excluded.cause,
-			 updated_at=excluded.updated_at
+			 updated_at=excluded.updated_at,
+			 transcript_session_id=COALESCE(excluded.transcript_session_id, engine_attempts.transcript_session_id),
+			 transcript_path=COALESCE(excluded.transcript_path, engine_attempts.transcript_path),
+			 transcript_leaf_entry_id=COALESCE(excluded.transcript_leaf_entry_id, engine_attempts.transcript_leaf_entry_id),
+			 transcript_byte_boundary=COALESCE(excluded.transcript_byte_boundary, engine_attempts.transcript_byte_boundary),
+			 transcript_revision=CASE WHEN excluded.transcript_revision > 0
+				THEN excluded.transcript_revision ELSE engine_attempts.transcript_revision END
 			 WHERE engine_attempts.agent_instance_id=excluded.agent_instance_id
 			   AND engine_attempts.execution_id=excluded.execution_id
 			   AND engine_attempts.binding_id=excluded.binding_id
@@ -660,6 +719,11 @@ export class EngineStore {
 				state,
 				cause ?? null,
 				Date.now(),
+				checkpoint?.sessionId ?? null,
+				checkpoint?.sessionPath ?? null,
+				checkpoint?.leafEntryId ?? null,
+				checkpoint?.byteBoundary ?? null,
+				checkpoint?.revision ?? 0,
 			],
 		)) as Array<{ attempt_id: string }>;
 		return rows.length === 1;

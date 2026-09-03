@@ -14,6 +14,7 @@ import type {
 import { EngineRuntime, type EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { getLspResourceCounts } from "@oh-my-pi/pi-coding-agent/lsp/client";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { resolveProviderCandidates } from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -1135,7 +1136,8 @@ describe("EngineRuntime", () => {
 			prompts.get(child.engineAgentId)?.resolve(true);
 			const pausedEvent = await paused;
 
-			expect((await runtime.store.getAttempt(child.attemptId))?.state).toBe("paused");
+			const pausedAttempt = await runtime.store.getAttempt(child.attemptId);
+			expect(pausedAttempt).toMatchObject({ state: "paused", transcript_revision: 1 });
 			expect(runtime.getBinding(child.agentInstanceId)).toMatchObject({
 				bindingId: child.bindingId,
 				attemptId: child.attemptId,
@@ -1144,6 +1146,7 @@ describe("EngineRuntime", () => {
 				initiator,
 				attemptState: "paused",
 				controlReadiness: { pause: false, resume: true, steer: true, cancel: true },
+				transcriptCheckpoint: { revision: 1 },
 			});
 			expect({
 				mailbox: runtime.ircBus.inbox(parent.engineAgentId, { peek: true }),
@@ -1159,7 +1162,12 @@ describe("EngineRuntime", () => {
 			await runtime.resume({ ...child, commandId: `resume-child-${index}`, initiator });
 			const completedEvent = await completed;
 			expect(completedEvent.attemptId).toBe(child.attemptId);
-			expect((await runtime.store.getAttempt(child.attemptId))?.state).toBe("completed");
+			expect(completedEvent.payload).toMatchObject({ transcriptCheckpoint: { revision: 2 } });
+			const completedAttempt = await runtime.store.getAttempt(child.attemptId);
+			expect(completedAttempt).toMatchObject({ state: "completed", transcript_revision: 2 });
+			expect(Number(completedAttempt?.transcript_byte_boundary)).toBeGreaterThanOrEqual(
+				Number(pausedAttempt?.transcript_byte_boundary),
+			);
 			const resumedEvent = (await runtime.store.pendingEvents()).find(
 				event => event.kind === "resumed" && event.attemptId === child.attemptId,
 			);
@@ -1365,9 +1373,24 @@ describe("EngineRuntime", () => {
 		job.resolve("done");
 		await runtime.drain();
 		const completed = (await runtime.store.pendingEvents()).find(event => event.kind === "completed");
-		expect(completed?.payload).toEqual({
+		expect(completed?.payload).toMatchObject({
 			assistantFinal: "final answer",
 			transcriptRef: `history://${started.engineAgentId}`,
+			transcriptCheckpoint: {
+				sessionId: expect.any(String),
+				sessionPath: expect.any(String),
+				leafEntryId: expect.any(String),
+				byteBoundary: expect.any(Number),
+				revision: 1,
+			},
+		});
+		expect(await runtime.store.getAttempt(started.attemptId)).toMatchObject({
+			state: "completed",
+			transcript_session_id: expect.any(String),
+			transcript_path: expect.any(String),
+			transcript_leaf_entry_id: expect.any(String),
+			transcript_byte_boundary: expect.any(Number),
+			transcript_revision: 1,
 		});
 		await runtime.dispose();
 	}, 60000);
@@ -1435,7 +1458,10 @@ describe("EngineRuntime", () => {
 		await runtime.drain();
 		const events = await runtime.store.pendingEvents();
 		expect(events.find(event => event.kind === "completed")).toBeUndefined();
-		expect(events.find(event => event.kind === "failed")?.payload).toEqual({ error: "required_yield_not_submitted" });
+		expect(events.find(event => event.kind === "failed")?.payload).toMatchObject({
+			error: "required_yield_not_submitted",
+			transcriptCheckpoint: { revision: 1 },
+		});
 		expect(prompts).toHaveLength(3);
 		await runtime.dispose();
 	}, 60000);
@@ -1467,7 +1493,45 @@ describe("EngineRuntime", () => {
 		await runtime.drain();
 		const events = await runtime.store.pendingEvents();
 		expect(events.find(event => event.kind === "completed")).toBeUndefined();
-		expect(events.find(event => event.kind === "failed")?.payload).toEqual({ error: "provider rejected request" });
+		expect(events.find(event => event.kind === "failed")?.payload).toMatchObject({
+			error: "provider rejected request",
+			transcriptCheckpoint: { revision: 1 },
+		});
+		await runtime.dispose();
+	}, 60000);
+
+	it("keeps an Attempt nonterminal when transcript durability cannot be proven", async () => {
+		const { runtime, cwd } = await createRuntime();
+		const failedTwice = Promise.withResolvers<void>();
+		let flushCalls = 0;
+		const flush = spyOn(SessionManager.prototype, "flushAndCheckpoint").mockImplementation(async () => {
+			flushCalls++;
+			if (flushCalls === 2) failedTwice.resolve();
+			throw new Error("injected transcript flush failure");
+		});
+		const started = await runtime.start(
+			{
+				commandId: "command-flush-failure",
+				agentInstanceId: "agent-flush-failure",
+				executionId: "execution-flush-failure",
+				attemptId: "attempt-flush-failure",
+				authorityGeneration: 1,
+				cwd,
+				input: "finish",
+			},
+			profile,
+		);
+		await failedTwice.promise;
+		await Bun.sleep(1);
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("running");
+		expect(
+			(await runtime.store.pendingEvents()).some(event => event.kind === "completed" || event.kind === "failed"),
+		).toBeFalse();
+
+		flush.mockRestore();
+		await runtime.cancel({ ...started, commandId: "cancel-after-flush-failure" });
+		await runtime.drain();
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
 		await runtime.dispose();
 	}, 60000);
 });

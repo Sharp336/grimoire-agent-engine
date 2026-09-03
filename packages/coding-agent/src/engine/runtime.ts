@@ -21,7 +21,7 @@ import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
-import { SessionManager } from "../session/session-manager";
+import { type SessionDurabilityCheckpoint, SessionManager } from "../session/session-manager";
 import type { EngineChildLaunchResult, EngineChildProfile } from "../tools";
 import {
 	type EngineAttemptState,
@@ -1214,7 +1214,7 @@ export class EngineRuntime {
 			const progress = binding.pauseProgress.promise;
 			if (binding.activeToolCallIds.size > 0) await progress;
 		}
-		await binding.session.sessionManager.flush();
+		const transcriptCheckpoint = await binding.session.sessionManager.flushAndCheckpoint();
 		await this.#inLane(binding.agentInstanceId, async () => {
 			if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
 			if (binding.attemptId !== attemptId || binding.attemptState !== "pause_requested") return;
@@ -1223,7 +1223,10 @@ export class EngineRuntime {
 				payload: controlPayload(initiator, "paused"),
 				causationCommandId: commandId,
 			}));
-			await this.#commitAttemptTransition(binding, "paused", events, { expectedStates: ["pause_requested"] });
+			await this.#commitAttemptTransition(binding, "paused", events, {
+				expectedStates: ["pause_requested"],
+				transcriptCheckpoint,
+			});
 			binding.attemptState = "paused";
 			binding.pauseRequests.clear();
 		});
@@ -1302,6 +1305,7 @@ export class EngineRuntime {
 					return false;
 				if (binding.attemptState === "pause_requested" || binding.attemptState === "paused") return true;
 				if (binding.attemptState !== "running") return false;
+				const transcriptCheckpoint = await binding.session.sessionManager.flushAndCheckpoint();
 				binding.state = "idle";
 				binding.attemptState = state;
 				try {
@@ -1317,7 +1321,7 @@ export class EngineRuntime {
 										: { error: cause ?? "Unknown Engine failure" },
 							},
 						],
-						{ cause, expectedStates: ["running"] },
+						{ cause, expectedStates: ["running"], transcriptCheckpoint },
 					);
 				} catch (error) {
 					binding.state = "running";
@@ -1381,6 +1385,7 @@ export class EngineRuntime {
 			filter: { ownerId: binding.engineAgentId, attemptId: request.attemptId },
 		});
 		await this.#waitForToolInvocations(binding, request.attemptId);
+		const transcriptCheckpoint = await binding.session.sessionManager.flushAndCheckpoint();
 		await this.#inLane(binding.agentInstanceId, async () => {
 			if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
 			if (binding.attemptId !== request.attemptId || binding.attemptState !== "cancel_requested") return;
@@ -1395,6 +1400,7 @@ export class EngineRuntime {
 				await this.#commitAttemptTransition(binding, "cancelled", events, {
 					cause: request.reason,
 					expectedStates: ["cancel_requested"],
+					transcriptCheckpoint,
 				});
 			} catch (error) {
 				binding.state = "running";
@@ -1412,28 +1418,43 @@ export class EngineRuntime {
 		binding.state = "released";
 		const reason = cause === "engine_lost" ? "Engine stopped" : "Engine binding released";
 		const errors: unknown[] = [];
+		let transcriptCheckpoint: SessionDurabilityCheckpoint | undefined;
 		await collectFailure(errors, () =>
-			this.#disposeBindingResources(binding, reason, cause === "engine_lost" ? "interrupted" : "cancelled"),
+			this.#disposeBindingResources(
+				binding,
+				reason,
+				cause === "engine_lost" ? "interrupted" : "cancelled",
+				wasRunning
+					? async () => {
+							transcriptCheckpoint = await binding.session.sessionManager.flushAndCheckpoint();
+						}
+					: undefined,
+			),
 		);
-		if (cause === "engine_lost" && wasRunning) {
+		if (cause === "engine_lost" && wasRunning && transcriptCheckpoint) {
 			binding.attemptState = "interrupted";
 			await collectFailure(errors, () =>
 				this.#commitAttemptTransition(binding, "interrupted", [{ kind: "interrupted", payload: { cause } }], {
 					cause,
 					expectedStates: [previousAttemptState],
+					transcriptCheckpoint,
 				}),
 			);
-		} else if (cause === "requested" && wasRunning) {
+		} else if (cause === "requested" && wasRunning && transcriptCheckpoint) {
 			binding.attemptState = "cancelled";
 			await collectFailure(errors, () =>
 				this.#commitAttemptTransition(
 					binding,
 					"cancelled",
 					[{ kind: "cancelled", payload: { cause: "binding_released" } }],
-					{ cause: "binding_released", expectedStates: [previousAttemptState] },
+					{
+						cause: "binding_released",
+						expectedStates: [previousAttemptState],
+						transcriptCheckpoint,
+					},
 				),
 			);
-		} else {
+		} else if (!wasRunning) {
 			await collectFailure(errors, () => this.store.putBinding(this.#snapshot(binding)));
 		}
 		throwCollectedFailures(errors, `Engine binding ${binding.agentInstanceId} cleanup failed`);
@@ -1450,6 +1471,7 @@ export class EngineRuntime {
 		binding: LiveBinding,
 		reason: string,
 		attemptState: EngineAttemptState,
+		beforeSessionDispose?: () => Promise<void>,
 	): Promise<void> {
 		const errors: unknown[] = [];
 		await collectFailure(errors, binding.unsubscribe);
@@ -1465,6 +1487,7 @@ export class EngineRuntime {
 		await collectFailure(errors, () => binding.pauseGate.resume());
 		await collectFailure(errors, () => this.#notifyPauseProgress(binding));
 		if (abort) await collectFailure(errors, () => abort!);
+		if (beforeSessionDispose) await collectFailure(errors, beforeSessionDispose);
 		await collectFailure(errors, () => binding.session.dispose());
 		await collectFailure(errors, binding.disposeProfile);
 		await collectFailure(errors, () => this.agentRegistry.unregister(binding.engineAgentId, binding.session));
@@ -1577,6 +1600,7 @@ export class EngineRuntime {
 			settleCommandId?: string;
 			expectedStates?: readonly EngineAttemptState[];
 			requireNew?: boolean;
+			transcriptCheckpoint?: SessionDurabilityCheckpoint;
 		} = {},
 	): Promise<void> {
 		const committed = await this.store.commitAttemptTransition(this.#snapshot(binding), state, events, options);

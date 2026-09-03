@@ -399,6 +399,13 @@ interface SessionManagerStateSnapshot {
 	entries: SessionEntry[];
 }
 
+export interface SessionDurabilityCheckpoint {
+	sessionId: string;
+	sessionPath: string;
+	leafEntryId: string;
+	byteBoundary: number;
+}
+
 interface DiskQueueOptions {
 	ignorePriorError?: boolean;
 	ignoreEpoch?: boolean;
@@ -1727,6 +1734,23 @@ export class SessionManager {
 		// flush() see the write durably visible to readers.
 		await this.#storage.drain();
 		if (this.#diskFailure) throw this.#diskFailure;
+	}
+
+	/** Materialize and drain the exact transcript prefix referenced by an Engine state transition. */
+	async flushAndCheckpoint(): Promise<SessionDurabilityCheckpoint> {
+		await this.ensureOnDisk();
+		await this.flush();
+		const sessionPath = this.#sessionFile;
+		const leafEntryId = this.#index.leafId();
+		if (!this.#persist || !sessionPath || !leafEntryId || !this.#storage.existsSync(sessionPath)) {
+			throw new Error("Session transcript cannot be checkpointed before it is durably materialized");
+		}
+		return {
+			sessionId: this.#sessionId,
+			sessionPath,
+			leafEntryId,
+			byteBoundary: this.#storage.statSync(sessionPath).size,
+		};
 	}
 
 	/**

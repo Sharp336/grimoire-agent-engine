@@ -261,6 +261,12 @@ describe("EngineStore", () => {
 		await expect(
 			store.commitAttemptTransition(binding, "running", [{ kind: "accepted" }, { kind: "running" }], {
 				settleCommandId: command.commandId,
+				transcriptCheckpoint: {
+					sessionId: "session-transition",
+					sessionPath: "sessions/transition.jsonl",
+					leafEntryId: "leaf-transition",
+					byteBoundary: 123,
+				},
 			}),
 		).rejects.toThrow("injected transition failure");
 		expect(await store.getBinding(command.agentInstanceId)).toBeUndefined();
@@ -281,13 +287,32 @@ describe("EngineStore", () => {
 		]);
 		expect((await store.getBinding(command.agentInstanceId))?.state).toBe("running");
 		expect((await store.getAttempt("attempt-transition"))?.state).toBe("running");
+		const checkpoint = {
+			sessionId: "session-transition",
+			sessionPath: "sessions/transition.jsonl",
+			leafEntryId: "leaf-transition",
+			byteBoundary: 456,
+		};
+		const [paused] = await store.commitAttemptTransition(binding, "paused", [{ kind: "paused" }], {
+			expectedStates: ["running"],
+			transcriptCheckpoint: checkpoint,
+		});
+		expect(paused?.payload).toEqual({ transcriptCheckpoint: { ...checkpoint, revision: 1 } });
+		expect(await store.getAttempt("attempt-transition")).toMatchObject({
+			state: "paused",
+			transcript_session_id: checkpoint.sessionId,
+			transcript_path: checkpoint.sessionPath,
+			transcript_leaf_entry_id: checkpoint.leafEntryId,
+			transcript_byte_boundary: checkpoint.byteBoundary,
+			transcript_revision: 1,
+		});
 		await expect(
-			store.commitAttemptTransition(binding, "paused", [{ kind: "paused" }], {
+			store.commitAttemptTransition(binding, "completed", [{ kind: "completed" }], {
 				expectedStates: ["completed"],
 			}),
 		).rejects.toBeInstanceOf(EngineAttemptConflictError);
-		expect((await store.getAttempt("attempt-transition"))?.state).toBe("running");
-		expect((await store.pendingEvents()).map(event => event.kind)).toEqual(["accepted", "running"]);
+		expect((await store.getAttempt("attempt-transition"))?.state).toBe("paused");
+		expect((await store.pendingEvents()).map(event => event.kind)).toEqual(["accepted", "running", "paused"]);
 		expect(await store.admitCommand(command, 1)).toEqual({
 			status: "replay",
 			receipt: { outcome: "applied" },
