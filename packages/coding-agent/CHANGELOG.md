@@ -5,6 +5,7 @@
 ### Added
 
 - Added optional per-tool `tracked` and `permit` policies for Agent Engine sessions, with durable lifecycle events and broker-resolved approval requests that keep asynchronous tool jobs non-blocking.
+- Added exact local OMP account bindings for Grimoire AgentProfiles, so Artel can use an existing Codex subscription without copying OAuth credentials.
 
 ### Fixed
 

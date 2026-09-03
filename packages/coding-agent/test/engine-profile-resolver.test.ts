@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { EngineProfileResolver } from "../src/engine/profile-resolver";
+import { AuthStorage } from "../src/session/auth-storage";
 
 const refs = {
 	profile: "gctx:2222222222222222",
@@ -248,6 +249,78 @@ describe("EngineProfileResolver", () => {
 			first.dispose();
 			second.dispose();
 			unregisterOAuthProviders(sourceId);
+		}
+	});
+
+	it("runs a local OMP binding on the exact selected OAuth account", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-engine-local-account-"));
+		const cache = path.join(root, "artifacts");
+		const localDb = path.join(root, "agent.db");
+		const profileRef = "gctx:eeeeeeeeeeeeeeee";
+		const routeRef = "gctx:ffffffffffffffff";
+		const accountRef = "gctx:gggggggggggggggg";
+		await fs.mkdir(cache);
+		const source = await AuthStorage.create(localDb);
+		await source.set("openai-codex", [
+			{
+				type: "oauth",
+				access: "wrong-account-token",
+				refresh: "wrong-account-refresh",
+				expires: Date.now() + 3_600_000,
+				accountId: "account-a",
+			},
+			{
+				type: "oauth",
+				access: "selected-account-token",
+				refresh: "selected-account-refresh",
+				expires: Date.now() + 3_600_000,
+				accountId: "account-b",
+			},
+		]);
+		source.close();
+		await artifact(cache, profileRef, "grimoire.agent_profile.v1", {
+			schema: "grimoire.agent_profile.v1",
+			status: "active",
+			models: [routeRef],
+			childProfiles: [],
+			maxSpawnDepth: 0,
+			maxChildren: 0,
+		});
+		await artifact(cache, routeRef, "grimoire.available_model_route.v1", {
+			schema: "grimoire.available_model_route.v1",
+			status: "active",
+			providerAccountRef: accountRef,
+			model: {
+				modelIdentityId: "openai:gpt-5.6-sol",
+				providerSurfaceId: "openai-codex:account-b",
+				modelId: "gpt-5.6-sol",
+				contextWindow: 1_000_000,
+				maxOutputTokens: 128_000,
+				supportsReasoning: true,
+			},
+		});
+		await artifact(cache, accountRef, "grimoire.provider_account.v1", {
+			schema: "grimoire.provider_account.v1",
+			status: "active",
+			providerId: "openai-codex",
+			api: "openai-codex-responses",
+			baseUrl: "https://chatgpt.com/backend-api",
+			trusted: true,
+			credentialBinding: { source: "local_omp", accountId: "account-b" },
+		});
+
+		const resolver = new EngineProfileResolver(cache, path.join(root, "credentials"), localDb);
+		const resolved = await resolver.resolve(
+			{ spawns: "", profileDigest: hash(profileRef), launchProfileRef: profileRef },
+			root,
+		);
+		try {
+			expect(await resolved.options.authStorage?.getApiKey("openai-codex", "attempt-1")).toBe(
+				"selected-account-token",
+			);
+			expect(resolved.options.authStorage?.listStoredCredentials("openai-codex")).toHaveLength(1);
+		} finally {
+			resolved.dispose();
 		}
 	});
 });

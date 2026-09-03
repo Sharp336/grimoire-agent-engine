@@ -1,13 +1,14 @@
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { Api, AuthCredential, Model, ModelSpec } from "@oh-my-pi/pi-ai";
+import type { Api, AuthCredential, AuthCredentialStore, Model, ModelSpec } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath } from "@oh-my-pi/pi-utils/dirs";
 import { ModelRegistry } from "../config/model-registry";
 import { Settings } from "../config/settings";
 import type { CreateAgentSessionOptions } from "../sdk";
-import { AuthStorage } from "../session/auth-storage";
+import { AuthStorage, SqliteAuthCredentialStore } from "../session/auth-storage";
 import type { EngineChildProfile } from "../tools";
 import type { EngineLaunchProfile } from "./contracts";
 
@@ -65,7 +66,8 @@ interface ProviderAccount {
 	baseUrl: string;
 	headers?: Record<string, string>;
 	trusted: boolean;
-	credential: AuthCredential;
+	credential?: AuthCredential;
+	credentialBinding?: { source: "local_omp"; accountId: string };
 }
 
 export interface ResolvedEngineSessionProfile {
@@ -90,6 +92,7 @@ export class EngineProfileResolver {
 	constructor(
 		readonly artifactCacheRoot: string,
 		readonly credentialRoot: string,
+		readonly localCredentialDbPath: string = getAgentDbPath(),
 	) {}
 
 	async resolve(launch: EngineLaunchProfile, cwd: string): Promise<ResolvedEngineSessionProfile> {
@@ -190,13 +193,17 @@ export class EngineProfileResolver {
 		const accountRef = requiredRef(route.providerAccountRef, "providerAccountRef");
 		const cachedAccount = await this.#read(accountRef, "grimoire.provider_account.v1");
 		const account = parseJson<ProviderAccount>(cachedAccount.content, "ProviderAccount");
+		const embeddedCredential = validCredential(account.credential) ? account.credential : undefined;
+		const localBinding = validLocalCredentialBinding(account.credentialBinding)
+			? account.credentialBinding
+			: undefined;
 		if (
 			account.schema !== "grimoire.provider_account.v1" ||
 			account.status === "disabled" ||
 			!account.providerId ||
 			!account.api ||
 			!account.baseUrl ||
-			!validCredential(account.credential)
+			(!embeddedCredential && !localBinding)
 		) {
 			throw new Error("ProviderAccount does not match AvailableModelRoute");
 		}
@@ -204,44 +211,63 @@ export class EngineProfileResolver {
 			throw new Error("AgentProfile requires a trusted provider");
 		}
 		const accountDir = path.join(this.credentialRoot, accountRef.slice(5));
-		const writebackRoot = path.resolve(this.artifactCacheRoot, "..", "credential-writeback");
 		await fs.mkdir(accountDir, { recursive: true });
-		await fs.mkdir(writebackRoot, { recursive: true });
-		const sourcePath = path.join(accountDir, "source.json");
-		const authStorage = await AuthStorage.create(path.join(accountDir, "credentials.sqlite"));
+		let authStorage: AuthStorage;
+		if (localBinding) {
+			const store = await SqliteAuthCredentialStore.open(this.localCredentialDbPath);
+			const credential = store
+				.listAuthCredentials(account.providerId)
+				.find(item => item.credential.type === "oauth" && item.credential.accountId === localBinding.accountId);
+			if (!credential) {
+				store.close();
+				throw new Error("The local OMP account bound to ProviderAccount is unavailable");
+			}
+			authStorage = new AuthStorage(exactCredentialStore(store, account.providerId, credential.id), {
+				sourceLabel: "local OMP account",
+			});
+			await authStorage.reload();
+		} else {
+			authStorage = await AuthStorage.create(path.join(accountDir, "credentials.sqlite"));
+		}
 		try {
-			const source = await readJson(sourcePath);
-			if (source?.contentHash !== cachedAccount.content_hash) {
-				await authStorage.set(account.providerId, account.credential);
-				await atomicWriteJson(sourcePath, { contentHash: cachedAccount.content_hash });
-			} else await authStorage.reload();
+			let unsubscribeWriteback = () => {};
+			if (embeddedCredential) {
+				const sourcePath = path.join(accountDir, "source.json");
+				const source = await readJson(sourcePath);
+				if (source?.contentHash !== cachedAccount.content_hash) {
+					await authStorage.set(account.providerId, embeddedCredential);
+					await atomicWriteJson(sourcePath, { contentHash: cachedAccount.content_hash });
+				} else await authStorage.reload();
+				const writebackRoot = path.resolve(this.artifactCacheRoot, "..", "credential-writeback");
+				await fs.mkdir(writebackRoot, { recursive: true });
+				const baseCredentialHash = credentialHash(embeddedCredential);
+				const writebackPath = path.join(writebackRoot, `${accountRef.slice(5)}.json`);
+				const writeback = async () => {
+					const credentials = authStorage.listStoredCredentials(account.providerId);
+					if (credentials.length !== 1) return;
+					const credential = credentials[0]?.credential;
+					if (!credential) return;
+					if (credentialHash(credential) === baseCredentialHash) {
+						await fs.rm(writebackPath, { force: true });
+						return;
+					}
+					await atomicWriteJson(writebackPath, {
+						schema: "grimoire.engine_credential_writeback.v1",
+						artifactRef: accountRef,
+						baseRevision: cachedAccount.revision,
+						baseContentHash: cachedAccount.content_hash,
+						baseCredentialHash,
+						credential,
+						updatedAt: new Date().toISOString(),
+					});
+				};
+				unsubscribeWriteback = authStorage.onGenerationChanged(() => void writeback().catch(() => {}));
+				await writeback();
+			}
 			const modelRegistry = new ModelRegistry(authStorage, path.join(accountDir, "models.yml"), {
 				ignoreLocalModelConfig: true,
 				cacheDbPath: path.join(accountDir, "models.sqlite"),
 			});
-			const baseCredentialHash = credentialHash(account.credential);
-			const writebackPath = path.join(writebackRoot, `${accountRef.slice(5)}.json`);
-			const writeback = async () => {
-				const credentials = authStorage.listStoredCredentials(account.providerId);
-				if (credentials.length !== 1) return;
-				const credential = credentials[0]?.credential;
-				if (!credential) return;
-				if (credentialHash(credential) === baseCredentialHash) {
-					await fs.rm(writebackPath, { force: true });
-					return;
-				}
-				await atomicWriteJson(writebackPath, {
-					schema: "grimoire.engine_credential_writeback.v1",
-					artifactRef: accountRef,
-					baseRevision: cachedAccount.revision,
-					baseContentHash: cachedAccount.content_hash,
-					baseCredentialHash,
-					credential,
-					updatedAt: new Date().toISOString(),
-				});
-			};
-			const unsubscribeWriteback = authStorage.onGenerationChanged(() => void writeback().catch(() => {}));
-			await writeback();
 			const model = buildModel(toModelSpec(route, account)) as Model;
 			const profileRestricted = profile.tools?.mode === "allowlist";
 			const launchRestricted = launch.restrictToolNames === true;
@@ -438,6 +464,32 @@ function validCredential(value: unknown): value is AuthCredential {
 			typeof credential.refresh === "string" &&
 			Number.isSafeInteger(credential.expires))
 	);
+}
+
+function validLocalCredentialBinding(value: unknown): value is { source: "local_omp"; accountId: string } {
+	return (
+		value !== null &&
+		typeof value === "object" &&
+		!Array.isArray(value) &&
+		(value as Record<string, unknown>).source === "local_omp" &&
+		typeof (value as Record<string, unknown>).accountId === "string" &&
+		((value as Record<string, unknown>).accountId as string).trim().length > 0
+	);
+}
+
+function exactCredentialStore(store: AuthCredentialStore, provider: string, credentialId: number): AuthCredentialStore {
+	return new Proxy(store, {
+		get(target, property) {
+			if (property === "listAuthCredentials") {
+				return (requestedProvider?: string) => {
+					if (requestedProvider !== undefined && requestedProvider !== provider) return [];
+					return target.listAuthCredentials(provider).filter(item => item.id === credentialId);
+				};
+			}
+			const value = Reflect.get(target, property, target) as unknown;
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
 }
 
 function uniqueStrings(values: unknown[]): string[] {
