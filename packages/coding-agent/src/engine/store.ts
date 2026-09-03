@@ -3,7 +3,16 @@ import * as path from "node:path";
 import { SQL } from "bun";
 import type { SessionDurabilityCheckpoint } from "../session/session-manager";
 import { SqlSessionStorage } from "../session/sql-session-storage";
-import type { EngineAttemptState, EngineBindingSnapshot, EngineEvent, EngineToolPolicy } from "./contracts";
+import type {
+	EngineAttemptState,
+	EngineBindingSnapshot,
+	EngineEvent,
+	EngineInboxItem,
+	EngineInboxMutation,
+	EngineInboxSource,
+	EngineInboxTarget,
+	EngineToolPolicy,
+} from "./contracts";
 
 interface MetadataRow {
 	value: string;
@@ -107,6 +116,64 @@ interface EventRow {
 	kind: EngineEvent["kind"];
 	payload: string | null;
 	created_at: number;
+}
+
+interface InboxItemRow {
+	queue_id: string;
+	session_id: string;
+	agent_instance_id: string;
+	execution_id: string;
+	attempt_id: string;
+	binding_id: string;
+	engine_generation: number;
+	binding_generation: number;
+	authority_generation: number;
+	source_event_id: string;
+	source_type: EngineInboxItem["sourceType"];
+	sender: string | null;
+	source_body: string;
+	delivery_payload: string;
+	annotation: string | null;
+	deliver_at: number | null;
+	wake_intent: number;
+	wake_delivered_at: number | null;
+	position: number;
+	disposition: EngineInboxItem["disposition"];
+	revision: number;
+	created_at: number;
+	updated_at: number;
+}
+
+function inboxItemFromRow(row: InboxItemRow): EngineInboxItem {
+	return {
+		queueId: row.queue_id,
+		sessionId: row.session_id,
+		agentInstanceId: row.agent_instance_id,
+		attemptId: row.attempt_id,
+		sourceEventId: row.source_event_id,
+		sourceType: row.source_type,
+		...(row.sender ? { sender: row.sender } : {}),
+		sourceBody: row.source_body,
+		deliveryPayload: row.delivery_payload,
+		...(row.annotation !== null ? { annotation: row.annotation } : {}),
+		...(row.deliver_at !== null ? { deliverAt: Number(row.deliver_at) } : {}),
+		wakeIntent: Boolean(row.wake_intent),
+		...(row.wake_delivered_at !== null ? { wakeDeliveredAt: Number(row.wake_delivered_at) } : {}),
+		position: Number(row.position),
+		disposition: row.disposition,
+		revision: Number(row.revision),
+		createdAt: Number(row.created_at),
+		updatedAt: Number(row.updated_at),
+	};
+}
+
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+	return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sameStringSet(left: readonly string[], right: readonly string[]): boolean {
+	const values = new Set(left);
+	return values.size === right.length && right.every(value => values.has(value));
 }
 
 type EngineEventTarget = Pick<
@@ -232,6 +299,13 @@ export class EngineEffectConflictError extends Error {
 	constructor(effectId: string) {
 		super(`Tool effect ${effectId} is not in the expected durable state`);
 		this.name = "EngineEffectConflictError";
+	}
+}
+
+export class EngineInboxConflictError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "EngineInboxConflictError";
 	}
 }
 
@@ -406,6 +480,40 @@ const EVENT_DELIVERY_SCHEMA = [
 	`CREATE INDEX engine_event_deliveries_pending_idx ON engine_event_deliveries(sink_id, state, event_id)`,
 ] as const;
 
+const AGENT_INBOX_SCHEMA = [
+	`CREATE TABLE engine_inbox_sources (
+		source_event_id TEXT PRIMARY KEY,
+		source_type TEXT NOT NULL CHECK(source_type IN ('user', 'agent', 'runtime')),
+		sender TEXT,
+		body TEXT NOT NULL,
+		created_at INTEGER NOT NULL
+	)`,
+	`CREATE TABLE engine_inbox_items (
+		queue_id TEXT PRIMARY KEY,
+		session_id TEXT NOT NULL,
+		agent_instance_id TEXT NOT NULL,
+		execution_id TEXT NOT NULL,
+		attempt_id TEXT NOT NULL,
+		binding_id TEXT NOT NULL,
+		engine_generation INTEGER NOT NULL,
+		binding_generation INTEGER NOT NULL,
+		authority_generation INTEGER NOT NULL,
+		source_event_id TEXT NOT NULL UNIQUE REFERENCES engine_inbox_sources(source_event_id),
+		delivery_payload TEXT NOT NULL,
+		annotation TEXT,
+		deliver_at INTEGER,
+		wake_intent INTEGER NOT NULL CHECK(wake_intent IN (0, 1)),
+		wake_delivered_at INTEGER,
+		position INTEGER NOT NULL,
+		disposition TEXT NOT NULL CHECK(disposition IN ('pending', 'acknowledged', 'dropped')),
+		revision INTEGER NOT NULL,
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL
+	)`,
+	`CREATE INDEX engine_inbox_session_idx
+	 ON engine_inbox_items(session_id, disposition, deliver_at, position, queue_id)`,
+] as const;
+
 const SCHEMA_MIGRATIONS = [
 	{ version: 1, statements: SCHEMA, requiredColumns: [] },
 	{ version: 2, statements: [], requiredColumns: REQUIRED_COLUMNS },
@@ -414,6 +522,7 @@ const SCHEMA_MIGRATIONS = [
 	{ version: 5, statements: EFFECT_APPROVAL_SCHEMA, requiredColumns: [] },
 	{ version: 6, statements: [], requiredColumns: EFFECT_KIND_COLUMN },
 	{ version: 7, statements: EVENT_DELIVERY_SCHEMA, requiredColumns: [] },
+	{ version: 8, statements: AGENT_INBOX_SCHEMA, requiredColumns: [] },
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;
@@ -538,6 +647,227 @@ export class EngineStore {
 		return value;
 	}
 
+	async enqueueInboxItem(
+		target: EngineInboxTarget,
+		source: EngineInboxSource,
+	): Promise<{ item: EngineInboxItem; created: boolean }> {
+		if (!source.sourceEventId.trim() || !source.body.trim()) {
+			throw new EngineInboxConflictError("Inbox sourceEventId and body must be non-empty");
+		}
+		if (!Number.isSafeInteger(source.createdAt) || source.createdAt < 0) {
+			throw new EngineInboxConflictError("Inbox createdAt must be a non-negative safe integer");
+		}
+		return await this.#transaction(async sql => {
+			const sourceRows = (await sql.unsafe(
+				`SELECT source_type, sender, body, created_at FROM engine_inbox_sources WHERE source_event_id=?`,
+				[source.sourceEventId],
+			)) as Array<{ source_type: string; sender: string | null; body: string; created_at: number }>;
+			const existingSource = sourceRows[0];
+			if (
+				existingSource &&
+				(existingSource.source_type !== source.sourceType ||
+					existingSource.sender !== (source.sender ?? null) ||
+					existingSource.body !== source.body ||
+					Number(existingSource.created_at) !== source.createdAt)
+			) {
+				throw new EngineInboxConflictError(`Inbox source ${source.sourceEventId} has different immutable content`);
+			}
+			if (!existingSource) {
+				await sql.unsafe(
+					`INSERT INTO engine_inbox_sources(source_event_id, source_type, sender, body, created_at)
+					 VALUES (?, ?, ?, ?, ?)`,
+					[source.sourceEventId, source.sourceType, source.sender ?? null, source.body, source.createdAt],
+				);
+			}
+			const existing = await this.#inboxItem(sql, target.sessionId, source.sourceEventId);
+			if (existing) {
+				this.#assertInboxTarget(existing, target);
+				return { item: inboxItemFromRow(existing), created: false };
+			}
+			const positions = (await sql.unsafe(
+				`SELECT COALESCE(MAX(position), 0) AS position FROM engine_inbox_items
+				 WHERE session_id=? AND disposition='pending'`,
+				[target.sessionId],
+			)) as Array<{ position: number }>;
+			const now = Date.now();
+			await sql.unsafe(
+				`INSERT INTO engine_inbox_items(
+				 queue_id, session_id, agent_instance_id, execution_id, attempt_id, binding_id,
+				 engine_generation, binding_generation, authority_generation, source_event_id,
+				 delivery_payload, deliver_at, wake_intent, position, disposition, revision, created_at, updated_at
+				 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 1, ?, ?)`,
+				[
+					source.sourceEventId,
+					target.sessionId,
+					target.agentInstanceId,
+					target.executionId,
+					target.attemptId,
+					target.bindingId,
+					target.engineGeneration,
+					target.bindingGeneration,
+					target.authorityGeneration,
+					source.sourceEventId,
+					source.body,
+					source.deliverAt ?? null,
+					source.wakeIntent ? 1 : 0,
+					Number(positions[0]?.position ?? 0) + 1024,
+					now,
+					now,
+				],
+			);
+			await this.#appendInboxEvent(sql, target, source.sourceEventId, "queued", 1);
+			const created = await this.#inboxItem(sql, target.sessionId, source.sourceEventId);
+			if (!created) throw new Error("Engine inbox insert was not readable");
+			return { item: inboxItemFromRow(created), created: true };
+		});
+	}
+
+	async listInboxItems(sessionId: string, includeTerminal = false): Promise<EngineInboxItem[]> {
+		if (!sessionId.trim()) throw new EngineInboxConflictError("Inbox sessionId must be non-empty");
+		const rows = (await this.#client.unsafe(
+			`${this.#inboxSelect()} WHERE i.session_id=?${includeTerminal ? "" : " AND i.disposition='pending'"}
+			 ORDER BY i.position, i.queue_id`,
+			[sessionId],
+		)) as InboxItemRow[];
+		return rows.map(inboxItemFromRow);
+	}
+
+	async getInboxItem(sessionId: string, queueId: string): Promise<EngineInboxItem | undefined> {
+		const row = await this.#inboxItem(this.#client, sessionId, queueId);
+		return row ? inboxItemFromRow(row) : undefined;
+	}
+
+	async mutateInboxItem(target: EngineInboxTarget, mutation: EngineInboxMutation): Promise<EngineInboxItem> {
+		if (!mutation.mutationId.trim() || !mutation.queueId.trim()) {
+			throw new EngineInboxConflictError("Inbox mutationId and queueId must be non-empty");
+		}
+		return await this.#transaction(async sql => {
+			const row = await this.#inboxItem(sql, target.sessionId, mutation.queueId);
+			if (!row) throw new EngineInboxConflictError(`Inbox item ${mutation.queueId} does not exist`);
+			this.#assertInboxTarget(row, target);
+			const item = inboxItemFromRow(row);
+			const desired = this.#applyInboxMutation(item, mutation);
+			if (desired === item) return item;
+			if (item.disposition !== "pending") {
+				throw new EngineInboxConflictError(`Inbox item ${mutation.queueId} is already ${item.disposition}`);
+			}
+			if (mutation.expectedRevision !== item.revision) {
+				throw new EngineInboxConflictError(
+					`Inbox item ${mutation.queueId} revision ${item.revision} does not match ${mutation.expectedRevision}`,
+				);
+			}
+			const revision = item.revision + 1;
+			const now = Date.now();
+			await sql.unsafe(
+				`UPDATE engine_inbox_items SET delivery_payload=?, annotation=?, deliver_at=?, wake_intent=?, disposition=?, revision=?, updated_at=?
+				 WHERE queue_id=?`,
+				[
+					desired.deliveryPayload,
+					desired.annotation ?? null,
+					desired.deliverAt ?? null,
+					desired.wakeIntent ? 1 : 0,
+					desired.disposition,
+					revision,
+					now,
+					mutation.queueId,
+				],
+			);
+			await this.#appendInboxEvent(sql, target, mutation.mutationId, mutation.op, revision, mutation.queueId);
+			return { ...desired, revision, updatedAt: now };
+		});
+	}
+
+	async reorderInboxItems(
+		target: EngineInboxTarget,
+		mutationId: string,
+		expectedOrder: readonly string[],
+		desiredOrder: readonly string[],
+	): Promise<EngineInboxItem[]> {
+		if (!mutationId.trim() || new Set(desiredOrder).size !== desiredOrder.length) {
+			throw new EngineInboxConflictError("Inbox reorder identity and queue IDs must be unique");
+		}
+		return await this.#transaction(async sql => {
+			const rows = (await sql.unsafe(
+				`${this.#inboxSelect()} WHERE i.session_id=? AND i.disposition='pending' ORDER BY i.position, i.queue_id`,
+				[target.sessionId],
+			)) as InboxItemRow[];
+			for (const row of rows) this.#assertInboxTarget(row, target);
+			const current = rows.map(row => row.queue_id);
+			if (sameStrings(current, desiredOrder)) return rows.map(inboxItemFromRow);
+			if (!sameStrings(current, expectedOrder) || !sameStringSet(current, desiredOrder)) {
+				throw new EngineInboxConflictError(
+					"Inbox order changed or desiredOrder does not contain every pending item",
+				);
+			}
+			const byId = new Map(rows.map(row => [row.queue_id, row]));
+			const now = Date.now();
+			for (const [index, queueId] of desiredOrder.entries()) {
+				const row = byId.get(queueId);
+				if (!row) throw new EngineInboxConflictError(`Inbox item ${queueId} does not exist`);
+				await sql.unsafe(
+					`UPDATE engine_inbox_items SET position=?, revision=revision+1, updated_at=? WHERE queue_id=?`,
+					[(index + 1) * 1024, now, queueId],
+				);
+			}
+			await this.#appendInboxEvent(sql, target, mutationId, "reorder", 1);
+			const reordered = (await sql.unsafe(
+				`${this.#inboxSelect()} WHERE i.session_id=? AND i.disposition='pending' ORDER BY i.position, i.queue_id`,
+				[target.sessionId],
+			)) as InboxItemRow[];
+			return reordered.map(inboxItemFromRow);
+		});
+	}
+
+	async nextInboxWakeAt(engineGeneration: number): Promise<number | undefined> {
+		const rows = (await this.#client.unsafe(
+			`SELECT MIN(deliver_at) AS deliver_at FROM engine_inbox_items
+			 WHERE engine_generation=? AND disposition='pending' AND wake_intent=1
+			 AND wake_delivered_at IS NULL AND deliver_at IS NOT NULL`,
+			[engineGeneration],
+		)) as Array<{ deliver_at: number | null }>;
+		return rows[0]?.deliver_at === null || rows[0]?.deliver_at === undefined ? undefined : Number(rows[0].deliver_at);
+	}
+
+	async claimDueInboxWakes(engineGeneration: number, now = Date.now()): Promise<EngineEvent[]> {
+		return await this.#transaction(async sql => {
+			const rows = (await sql.unsafe(
+				`${this.#inboxSelect()} WHERE i.engine_generation=? AND i.disposition='pending'
+				 AND i.wake_intent=1 AND i.wake_delivered_at IS NULL AND i.deliver_at<=?
+				 ORDER BY i.deliver_at, i.position, i.queue_id LIMIT 100`,
+				[engineGeneration, now],
+			)) as InboxItemRow[];
+			const events: EngineEvent[] = [];
+			for (const row of rows) {
+				const revision = Number(row.revision) + 1;
+				await sql.unsafe(
+					`UPDATE engine_inbox_items SET wake_delivered_at=?, revision=?, updated_at=?
+					 WHERE queue_id=? AND wake_delivered_at IS NULL`,
+					[now, revision, now, row.queue_id],
+				);
+				events.push(
+					await this.#appendInboxEvent(
+						sql,
+						{
+							sessionId: row.session_id,
+							agentInstanceId: row.agent_instance_id,
+							executionId: row.execution_id,
+							attemptId: row.attempt_id,
+							bindingId: row.binding_id,
+							engineGeneration: Number(row.engine_generation),
+							bindingGeneration: Number(row.binding_generation),
+							authorityGeneration: Number(row.authority_generation),
+						},
+						`inbox-wake:${row.queue_id}:${revision}`,
+						"wake_due",
+						revision,
+						row.queue_id,
+					),
+				);
+			}
+			return events;
+		});
+	}
+
 	async admitCommand(command: EngineCommandIdentity, processorGeneration: number): Promise<EngineCommandAdmission> {
 		return await this.#transaction(async sql => {
 			const rows = (await sql.unsafe(
@@ -653,6 +983,7 @@ export class EngineStore {
 			expectedStates?: readonly EngineAttemptState[];
 			requireNew?: boolean;
 			transcriptCheckpoint?: SessionDurabilityCheckpoint;
+			inboxSessionId?: string;
 		} = {},
 	): Promise<EngineEvent[]> {
 		return await this.#transaction(async sql => {
@@ -681,6 +1012,24 @@ export class EngineStore {
 			await this.#putBinding(sql, binding);
 			if (!(await this.#putAttempt(sql, binding, state, options.cause, transcriptCheckpoint))) {
 				throw new EngineAttemptConflictError(binding.attemptId);
+			}
+			if (options.inboxSessionId) {
+				await sql.unsafe(
+					`UPDATE engine_inbox_items SET execution_id=?, attempt_id=?, binding_id=?, engine_generation=?,
+					 binding_generation=?, authority_generation=?, updated_at=?
+					 WHERE session_id=? AND agent_instance_id=? AND disposition='pending'`,
+					[
+						binding.executionId,
+						binding.attemptId,
+						binding.bindingId,
+						binding.engineGeneration,
+						binding.bindingGeneration,
+						binding.authorityGeneration,
+						Date.now(),
+						options.inboxSessionId,
+						binding.agentInstanceId,
+					],
+				);
 			}
 			const committed: EngineEvent[] = [];
 			for (const event of events) {
@@ -1208,6 +1557,100 @@ export class EngineStore {
 	async close(): Promise<void> {
 		await this.drain();
 		await this.#client.end();
+	}
+
+	#inboxSelect(): string {
+		return `SELECT i.queue_id, i.session_id, i.agent_instance_id, i.execution_id, i.attempt_id,
+		 i.binding_id, i.engine_generation, i.binding_generation, i.authority_generation,
+		 i.source_event_id, s.source_type, s.sender, s.body AS source_body,
+		 i.delivery_payload, i.annotation, i.deliver_at, i.wake_intent, i.wake_delivered_at, i.position,
+		 i.disposition, i.revision, i.created_at, i.updated_at
+		 FROM engine_inbox_items i JOIN engine_inbox_sources s ON s.source_event_id=i.source_event_id`;
+	}
+
+	async #inboxItem(sql: SqlClient, sessionId: string, queueId: string): Promise<InboxItemRow | undefined> {
+		const rows = (await sql.unsafe(`${this.#inboxSelect()} WHERE i.session_id=? AND i.queue_id=?`, [
+			sessionId,
+			queueId,
+		])) as InboxItemRow[];
+		return rows[0];
+	}
+
+	#assertInboxTarget(row: InboxItemRow, target: EngineInboxTarget): void {
+		if (
+			row.session_id !== target.sessionId ||
+			row.agent_instance_id !== target.agentInstanceId ||
+			row.execution_id !== target.executionId ||
+			row.attempt_id !== target.attemptId ||
+			row.binding_id !== target.bindingId ||
+			Number(row.engine_generation) !== target.engineGeneration ||
+			Number(row.binding_generation) !== target.bindingGeneration ||
+			Number(row.authority_generation) !== target.authorityGeneration
+		) {
+			throw new EngineInboxConflictError(`Inbox item ${row.queue_id} belongs to another fenced session`);
+		}
+	}
+
+	#applyInboxMutation(item: EngineInboxItem, mutation: EngineInboxMutation): EngineInboxItem {
+		switch (mutation.op) {
+			case "edit": {
+				if (typeof mutation.value !== "string" || !mutation.value.trim()) {
+					throw new EngineInboxConflictError("Inbox delivery payload must be a non-empty string");
+				}
+				return mutation.value === item.deliveryPayload ? item : { ...item, deliveryPayload: mutation.value };
+			}
+			case "annotate": {
+				if (mutation.value !== null && typeof mutation.value !== "string") {
+					throw new EngineInboxConflictError("Inbox annotation must be a string or null");
+				}
+				const annotation = mutation.value?.trim() || undefined;
+				return annotation === item.annotation ? item : { ...item, annotation };
+			}
+			case "defer": {
+				if (
+					mutation.value !== null &&
+					(typeof mutation.value !== "number" || !Number.isSafeInteger(mutation.value) || mutation.value < 0)
+				) {
+					throw new EngineInboxConflictError("Inbox deliverAt must be a non-negative safe integer or null");
+				}
+				const deliverAt = mutation.value ?? undefined;
+				return deliverAt === item.deliverAt && item.wakeIntent ? item : { ...item, deliverAt, wakeIntent: true };
+			}
+			case "acknowledge":
+				if (item.disposition === "acknowledged") return item;
+				if (item.disposition !== "pending") {
+					throw new EngineInboxConflictError(`Inbox item ${item.queueId} is already ${item.disposition}`);
+				}
+				return { ...item, disposition: "acknowledged" };
+			case "drop":
+				if (item.disposition === "dropped") return item;
+				if (item.disposition !== "pending") {
+					throw new EngineInboxConflictError(`Inbox item ${item.queueId} is already ${item.disposition}`);
+				}
+				return { ...item, disposition: "dropped" };
+		}
+	}
+
+	#appendInboxEvent(
+		sql: SqlClient,
+		target: EngineInboxTarget,
+		causationCommandId: string,
+		action: string,
+		revision: number,
+		queueId = causationCommandId,
+	): Promise<EngineEvent> {
+		return this.#appendEvent(sql, {
+			agentInstanceId: target.agentInstanceId,
+			executionId: target.executionId,
+			attemptId: target.attemptId,
+			bindingId: target.bindingId,
+			engineGeneration: target.engineGeneration,
+			bindingGeneration: target.bindingGeneration,
+			authorityGeneration: target.authorityGeneration,
+			causationCommandId,
+			kind: "inbox_changed",
+			payload: { action, queueId, revision },
+		});
 	}
 
 	async #insertToolEffect(

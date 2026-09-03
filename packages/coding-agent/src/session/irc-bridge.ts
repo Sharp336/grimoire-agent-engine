@@ -28,6 +28,7 @@ export class IrcBridge {
 	readonly #bus: IrcBus;
 	#interrupts: CustomMessage[] = [];
 	#asides: CustomMessage[] = [];
+	#inboxNotice: CustomMessage | undefined;
 
 	constructor(host: IrcBridgeHost, bus: IrcBus = IrcBus.global()) {
 		this.#host = host;
@@ -49,7 +50,41 @@ export class IrcBridge {
 		const records = [...this.#interrupts, ...this.#asides];
 		this.#interrupts = [];
 		this.#asides = [];
+		this.#inboxNotice = undefined;
 		return records;
+	}
+
+	/** Queues one coalesced, body-free Engine inbox notice at a safe model/tool boundary. */
+	notifyInboxChanged(count: number): void {
+		const content = `Inbox changed: ${count} pending item${count === 1 ? "" : "s"}. Use hub inbox to inspect it; no message was steered into this turn.`;
+		if (this.#inboxNotice) {
+			this.#inboxNotice.content = content;
+			this.#inboxNotice.details = { count };
+			this.#inboxNotice.timestamp = Date.now();
+			return;
+		}
+		const record: CustomMessage = {
+			role: "custom",
+			customType: "engine:inbox_changed",
+			content,
+			display: false,
+			details: { count },
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+		if (!this.#host.isStreaming()) {
+			this.#host.agent.appendMessage(record);
+			this.#host.sessionManager.appendCustomMessageEntry(
+				record.customType,
+				record.content,
+				record.display,
+				record.details,
+				record.attribution ?? "agent",
+			);
+			return;
+		}
+		this.#inboxNotice = record;
+		this.#interrupts.push(record);
 	}
 
 	/** Queues records whose idle wake must wait for a session transition to finish. */

@@ -23,7 +23,7 @@ import { AgentRegistry } from "../registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import { type SessionDurabilityCheckpoint, SessionManager } from "../session/session-manager";
-import type { EngineChildLaunchResult, EngineChildProfile } from "../tools";
+import type { EngineChildLaunchResult, EngineChildProfile, EngineInboxToolRequest } from "../tools";
 import {
 	type EngineAttemptState,
 	type EngineBindingSnapshot,
@@ -32,6 +32,9 @@ import {
 	type EngineControlInitiator,
 	type EngineControlRequest,
 	type EngineEvent,
+	type EngineInboxItem,
+	type EngineInboxMutation,
+	type EngineInboxTarget,
 	type EngineLaunchProfile,
 	type EnginePeerMessage,
 	type EngineReconcileRequest,
@@ -201,6 +204,8 @@ export class EngineRuntime {
 	readonly #toolInvocations = new Map<string, ToolInvocationRecord>();
 	readonly #pendingToolApprovals = new Map<string, PendingToolApproval>();
 	readonly #sessionRoot: string;
+	#inboxWakeSignal = Promise.withResolvers<void>();
+	#inboxWakeRun?: Promise<void>;
 	#disposed = false;
 
 	private constructor(store: EngineStore, engineGeneration: number, options: EngineRuntimeOptions) {
@@ -219,6 +224,7 @@ export class EngineRuntime {
 		const engineGeneration = await store.nextEngineGeneration();
 		const runtime = new EngineRuntime(store, engineGeneration, options);
 		await runtime.#reconcileLostAttempts();
+		runtime.#inboxWakeRun = runtime.#runInboxWakeLoop();
 		return runtime;
 	}
 
@@ -556,38 +562,78 @@ export class EngineRuntime {
 	}
 
 	async deliverPeerMessage(message: EnginePeerMessage): Promise<IrcDeliveryReceipt> {
-		this.#throwIfDisposed();
-		if (!message.messageId.trim() || !message.body.trim()) {
-			throw new EngineTargetError("invalid_request", "messageId and body must be non-empty strings");
-		}
-		const recipient = this.resolveEngineAgentId(message.toAgentInstanceId);
-		const sender = this.resolveEngineAgentId(message.fromAgentInstanceId);
-		if (!recipient || !sender) {
-			return { to: message.toAgentInstanceId, outcome: "failed", error: "Unknown Engine peer" };
-		}
-		const owner = this.resolveBrokerAgent(recipient);
-		const binding = owner
-			? [...this.#bindings.values()].find(
-					candidate =>
-						candidate.executionId === owner.executionId &&
-						candidate.attemptId === owner.attemptId &&
-						candidate.authorityGeneration === owner.authorityGeneration,
-				)
-			: undefined;
-		if (!binding) return { to: message.toAgentInstanceId, outcome: "failed", error: "Unknown Engine peer" };
-		return await this.#withSessionScope(binding, () =>
-			this.ircBus.deliver(
-				{
-					id: message.messageId,
-					from: sender,
-					to: recipient,
-					body: message.body,
-					ts: message.sentAt ?? Date.now(),
-					replyTo: message.replyToMessageId,
-				},
-				{ bufferOnFailure: false },
-			),
-		);
+		return await this.#inLane(message.toAgentInstanceId, async () => {
+			this.#throwIfDisposed();
+			if (!message.messageId.trim() || !message.body.trim()) {
+				throw new EngineTargetError("invalid_request", "messageId and body must be non-empty strings");
+			}
+			if (message.body.length > MAX_INPUT_FIELD_CHARS) {
+				throw new EngineTargetError("invalid_request", `message body exceeds ${MAX_INPUT_FIELD_CHARS} characters`);
+			}
+			const recipient = this.resolveEngineAgentId(message.toAgentInstanceId);
+			const sender = this.resolveEngineAgentId(message.fromAgentInstanceId);
+			if (!recipient || !sender) {
+				return { to: message.toAgentInstanceId, outcome: "failed", error: "Unknown Engine peer" };
+			}
+			const owner = this.resolveBrokerAgent(recipient);
+			const binding = owner
+				? [...this.#bindings.values()].find(
+						candidate =>
+							candidate.executionId === owner.executionId &&
+							candidate.attemptId === owner.attemptId &&
+							candidate.authorityGeneration === owner.authorityGeneration,
+					)
+				: undefined;
+			if (!binding) return { to: message.toAgentInstanceId, outcome: "failed", error: "Unknown Engine peer" };
+			const queued = await this.store.enqueueInboxItem(this.#inboxTarget(binding), {
+				sourceEventId: message.messageId,
+				sourceType: "agent",
+				sender: message.fromAgentInstanceId,
+				body: message.body,
+				createdAt: message.sentAt ?? Date.now(),
+			});
+			if (queued.created) {
+				const count = (await this.store.listInboxItems(binding.session.sessionId)).length;
+				await this.#withSessionScope(binding, () => binding.session.notifyEngineInboxChanged(count));
+				this.#signalInboxWake();
+			}
+			return { to: message.toAgentInstanceId, outcome: "queued" };
+		});
+	}
+
+	listInbox(target: EngineTarget, includeTerminal = false): Promise<EngineInboxItem[]> {
+		return this.#inLane(target.agentInstanceId, async () => {
+			const binding = this.#requireTarget(target);
+			return await this.store.listInboxItems(binding.session.sessionId, includeTerminal);
+		});
+	}
+
+	readInbox(target: EngineTarget, queueId: string): Promise<EngineInboxItem | undefined> {
+		return this.#inLane(target.agentInstanceId, async () => {
+			const binding = this.#requireTarget(target);
+			return await this.store.getInboxItem(binding.session.sessionId, queueId);
+		});
+	}
+
+	mutateInbox(target: EngineTarget, mutation: EngineInboxMutation): Promise<EngineInboxItem> {
+		return this.#inLane(target.agentInstanceId, async () => {
+			const binding = this.#requireTarget(target);
+			const item = await this.store.mutateInboxItem(this.#inboxTarget(binding), mutation);
+			if (mutation.op === "defer") this.#signalInboxWake();
+			return item;
+		});
+	}
+
+	reorderInbox(
+		target: EngineTarget,
+		mutationId: string,
+		expectedOrder: readonly string[],
+		desiredOrder: readonly string[],
+	): Promise<EngineInboxItem[]> {
+		return this.#inLane(target.agentInstanceId, async () => {
+			const binding = this.#requireTarget(target);
+			return await this.store.reorderInboxItems(this.#inboxTarget(binding), mutationId, expectedOrder, desiredOrder);
+		});
 	}
 
 	async drain(): Promise<void> {
@@ -599,6 +645,7 @@ export class EngineRuntime {
 	async dispose(options: { closeStore?: boolean } = {}): Promise<void> {
 		if (this.#disposed) return;
 		this.#disposed = true;
+		this.#signalInboxWake();
 		const errors: unknown[] = [];
 		for (const result of await Promise.allSettled(this.#lanes.values())) {
 			if (result.status === "rejected") errors.push(result.reason);
@@ -609,6 +656,8 @@ export class EngineRuntime {
 		for (const result of await Promise.allSettled(this.#runs)) {
 			if (result.status === "rejected") errors.push(result.reason);
 		}
+		const inboxWakeRun = this.#inboxWakeRun;
+		if (inboxWakeRun) await collectFailure(errors, () => inboxWakeRun);
 		await collectFailure(errors, () => this.agentLifecycle.dispose());
 		await collectFailure(errors, () => this.asyncJobManager.dispose({ timeoutMs: 3_000 }));
 		await collectFailure(errors, () => this.ircBus.dispose());
@@ -692,6 +741,7 @@ export class EngineRuntime {
 			await this.#commitAttemptTransition(binding, "running", [{ kind: "accepted" }, { kind: "running" }], {
 				settleCommandId: request.commandId,
 				requireNew: true,
+				inboxSessionId: binding.session.sessionId,
 			});
 		} catch (error) {
 			try {
@@ -705,7 +755,73 @@ export class EngineRuntime {
 			throw error;
 		}
 		this.#trackRun(this.#runPrompt(binding, request.input));
+		this.#signalInboxWake();
 		return { ...this.#snapshot(binding), duplicate: false };
+	}
+
+	#inboxTarget(binding: LiveBinding): EngineInboxTarget {
+		return { ...this.#snapshot(binding), sessionId: binding.session.sessionId };
+	}
+
+	async #invokeEngineInbox(binding: LiveBinding, request: EngineInboxToolRequest): Promise<EngineInboxItem[]> {
+		switch (request.action) {
+			case "list":
+				return await this.store.listInboxItems(binding.session.sessionId, request.includeTerminal);
+			case "read": {
+				const item = await this.store.getInboxItem(binding.session.sessionId, request.queueId);
+				return item ? [item] : [];
+			}
+			case "reorder":
+				return await this.store.reorderInboxItems(
+					this.#inboxTarget(binding),
+					request.mutationId,
+					request.expectedOrder,
+					request.desiredOrder,
+				);
+			default: {
+				const item = await this.store.mutateInboxItem(this.#inboxTarget(binding), {
+					mutationId: request.mutationId,
+					queueId: request.queueId,
+					expectedRevision: request.expectedRevision,
+					op: request.action,
+					value: request.value,
+				});
+				if (request.action === "defer") this.#signalInboxWake();
+				return [item];
+			}
+		}
+	}
+
+	async #runInboxWakeLoop(): Promise<void> {
+		while (!this.#disposed) {
+			const signal = this.#inboxWakeSignal.promise;
+			try {
+				const dueAt = await this.store.nextInboxWakeAt(this.engineGeneration);
+				if (dueAt === undefined) {
+					await signal;
+					continue;
+				}
+				await Promise.race([Bun.sleep(Math.max(0, dueAt - Date.now())), signal]);
+				if (this.#disposed) break;
+				const events = await this.store.claimDueInboxWakes(this.engineGeneration);
+				this.#notifyEvents(events);
+				for (const event of events) {
+					const binding = this.#bindings.get(event.agentInstanceId);
+					if (!binding || binding.attemptId !== event.attemptId) continue;
+					const count = (await this.store.listInboxItems(binding.session.sessionId)).length;
+					await this.#withSessionScope(binding, () => binding.session.notifyEngineInboxChanged(count));
+				}
+			} catch (error) {
+				if (!this.#disposed) logger.warn("Engine inbox wake loop failed", { error: String(error) });
+				await Bun.sleep(1_000);
+			}
+		}
+	}
+
+	#signalInboxWake(): void {
+		const current = this.#inboxWakeSignal;
+		this.#inboxWakeSignal = Promise.withResolvers<void>();
+		current.resolve();
 	}
 
 	async #openBinding(
@@ -808,6 +924,12 @@ export class EngineRuntime {
 				interactivePrompts: true,
 				toolExecutionHook,
 				engineChildLauncher,
+				engineInbox: {
+					invoke: request => {
+						if (!liveBinding) throw new Error("Engine inbox is not bound to its AgentSession");
+						return this.#invokeEngineInbox(liveBinding, request);
+					},
+				},
 				agentId: id,
 				agentDisplayName: request.agentInstanceId,
 				agentRegistry: this.agentRegistry,
@@ -1655,6 +1777,7 @@ export class EngineRuntime {
 			expectedStates?: readonly EngineAttemptState[];
 			requireNew?: boolean;
 			transcriptCheckpoint?: SessionDurabilityCheckpoint;
+			inboxSessionId?: string;
 		} = {},
 	): Promise<void> {
 		const committed = await this.store.commitAttemptTransition(this.#snapshot(binding), state, events, options);

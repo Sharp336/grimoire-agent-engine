@@ -117,6 +117,52 @@ export interface EnginePeerMessage {
 	replyToMessageId?: string;
 }
 
+export type EngineInboxSourceType = "user" | "agent" | "runtime";
+export type EngineInboxDisposition = "pending" | "acknowledged" | "dropped";
+
+export interface EngineInboxTarget extends EngineTarget {
+	sessionId: string;
+}
+
+export interface EngineInboxSource {
+	sourceEventId: string;
+	sourceType: EngineInboxSourceType;
+	sender?: string;
+	body: string;
+	createdAt: number;
+	deliverAt?: number;
+	wakeIntent?: boolean;
+}
+
+export interface EngineInboxItem {
+	queueId: string;
+	sessionId: string;
+	agentInstanceId: string;
+	attemptId: string;
+	sourceEventId: string;
+	sourceType: EngineInboxSourceType;
+	sender?: string;
+	sourceBody: string;
+	deliveryPayload: string;
+	annotation?: string;
+	deliverAt?: number;
+	wakeIntent: boolean;
+	wakeDeliveredAt?: number;
+	position: number;
+	disposition: EngineInboxDisposition;
+	revision: number;
+	createdAt: number;
+	updatedAt: number;
+}
+
+export interface EngineInboxMutation {
+	mutationId: string;
+	queueId: string;
+	expectedRevision: number;
+	op: "edit" | "annotate" | "defer" | "acknowledge" | "drop";
+	value?: string | number | null;
+}
+
 export interface EngineBindingSnapshot extends EngineTarget {
 	commandId: string;
 	engineAgentId: string;
@@ -183,6 +229,7 @@ export interface EngineEvent {
 		| "tool_settled"
 		| "model_started"
 		| "model_settled"
+		| "inbox_changed"
 		| "trace_reasoning"
 		| "trace_tool";
 	payload?: Record<string, unknown>;

@@ -1179,6 +1179,83 @@ describe("EngineRuntime", () => {
 		await restarted.dispose();
 	}, 60_000);
 
+	it("rebinds a deferred inbox item after restart and emits its wake once", async () => {
+		const { runtime, cwd, options } = await createRuntime();
+		await runtime.start(
+			{
+				commandId: "command-inbox-sender",
+				agentInstanceId: "agent-inbox-sender",
+				executionId: "execution-inbox-sender",
+				attemptId: "attempt-inbox-sender",
+				authorityGeneration: 1,
+				cwd,
+				input: "sender",
+			},
+			profile,
+		);
+		const recipient = await runtime.start(
+			{
+				commandId: "command-inbox-recipient-a",
+				agentInstanceId: "agent-inbox-recipient",
+				executionId: "execution-inbox-recipient-a",
+				attemptId: "attempt-inbox-recipient-a",
+				authorityGeneration: 1,
+				cwd,
+				input: "recipient",
+			},
+			profile,
+		);
+		await runtime.drain();
+		expect(
+			await runtime.deliverPeerMessage({
+				messageId: "message-deferred-restart",
+				fromAgentInstanceId: "agent-inbox-sender",
+				toAgentInstanceId: "agent-inbox-recipient",
+				body: "wake later",
+			}),
+		).toMatchObject({ outcome: "queued" });
+		const [queued] = await runtime.listInbox(recipient);
+		if (!queued) throw new Error("deferred inbox item was not queued");
+		await runtime.mutateInbox(recipient, {
+			mutationId: "defer-before-restart",
+			queueId: queued.queueId,
+			expectedRevision: queued.revision,
+			op: "defer",
+			value: Date.now() + 1_000,
+		});
+		await runtime.dispose();
+
+		const restarted = await EngineRuntime.create(options);
+		const wakes: string[] = [];
+		restarted.subscribe(event => {
+			if (event.kind === "inbox_changed" && event.payload?.action === "wake_due")
+				wakes.push(event.eventId.toString());
+		});
+		const resumed = await restarted.start(
+			{
+				commandId: "command-inbox-recipient-b",
+				agentInstanceId: "agent-inbox-recipient",
+				executionId: "execution-inbox-recipient-b",
+				attemptId: "attempt-inbox-recipient-b",
+				authorityGeneration: 1,
+				cwd,
+				input: "resume recipient",
+			},
+			profile,
+		);
+		for (let remaining = 50; wakes.length === 0 && remaining > 0; remaining--) await Bun.sleep(50);
+		await Bun.sleep(150);
+		expect(wakes).toHaveLength(1);
+		expect(resumed.sessionFile).toBe(recipient.sessionFile);
+		expect((await restarted.listInbox(resumed))[0]).toMatchObject({
+			queueId: "message-deferred-restart",
+			attemptId: "attempt-inbox-recipient-b",
+			wakeIntent: true,
+			revision: 3,
+		});
+		await restarted.dispose();
+	}, 60_000);
+
 	it("reopens a transcript only across an exact continuation identity", async () => {
 		let dependencyDigest = "dependency-a";
 		const { runtime, cwd } = await createRuntime(async () => true, {

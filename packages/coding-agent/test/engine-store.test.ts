@@ -8,6 +8,7 @@ import {
 	EngineCommandConflictError,
 	type EngineCommandIdentity,
 	EngineEffectConflictError,
+	EngineInboxConflictError,
 	EngineStore,
 } from "@oh-my-pi/pi-coding-agent/engine/store";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -240,6 +241,137 @@ describe("EngineStore", () => {
 			),
 		).rejects.toBeInstanceOf(EngineCommandConflictError);
 		await restarted.close();
+	});
+
+	it("keeps immutable inbox facts and fenced mutable order across restart", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-inbox-${Snowflake.next()}-`));
+		const databasePath = path.join(tempDir, "engine.sqlite");
+		const store = await EngineStore.open(databasePath);
+		const target = {
+			sessionId: "session-inbox",
+			bindingId: "binding-inbox",
+			agentInstanceId: "agent-inbox",
+			executionId: "execution-inbox",
+			attemptId: "attempt-inbox",
+			authorityGeneration: 4,
+			engineGeneration: 7,
+			bindingGeneration: 2,
+		};
+		const firstSource = {
+			sourceEventId: "message-1",
+			sourceType: "agent" as const,
+			sender: "agent-sender",
+			body: "original immutable body",
+			createdAt: 100,
+		};
+		const first = await store.enqueueInboxItem(target, firstSource);
+		expect(first).toMatchObject({ created: true, item: { queueId: "message-1", revision: 1 } });
+		expect(await store.enqueueInboxItem(target, firstSource)).toMatchObject({ created: false });
+		await expect(store.enqueueInboxItem(target, { ...firstSource, body: "changed source" })).rejects.toBeInstanceOf(
+			EngineInboxConflictError,
+		);
+
+		const edited = await store.mutateInboxItem(target, {
+			mutationId: "edit-1",
+			queueId: "message-1",
+			expectedRevision: 1,
+			op: "edit",
+			value: "edited delivery only",
+		});
+		expect(edited).toMatchObject({
+			sourceBody: "original immutable body",
+			deliveryPayload: "edited delivery only",
+			revision: 2,
+		});
+		expect(
+			await store.mutateInboxItem(target, {
+				mutationId: "edit-retry",
+				queueId: "message-1",
+				expectedRevision: 1,
+				op: "edit",
+				value: "edited delivery only",
+			}),
+		).toMatchObject({ revision: 2 });
+		const annotated = await store.mutateInboxItem(target, {
+			mutationId: "annotate-1",
+			queueId: "message-1",
+			expectedRevision: 2,
+			op: "annotate",
+			value: "review after tests",
+		});
+		const deferred = await store.mutateInboxItem(target, {
+			mutationId: "defer-1",
+			queueId: "message-1",
+			expectedRevision: annotated.revision,
+			op: "defer",
+			value: 500,
+		});
+		expect(deferred).toMatchObject({ annotation: "review after tests", deliverAt: 500, revision: 4 });
+
+		await store.enqueueInboxItem(target, {
+			sourceEventId: "message-2",
+			sourceType: "user",
+			body: "second body",
+			createdAt: 200,
+		});
+		const reordered = await store.reorderInboxItems(
+			target,
+			"reorder-1",
+			["message-1", "message-2"],
+			["message-2", "message-1"],
+		);
+		expect(reordered.map(item => item.queueId)).toEqual(["message-2", "message-1"]);
+		expect(
+			(
+				await store.reorderInboxItems(
+					target,
+					"reorder-retry",
+					["message-1", "message-2"],
+					["message-2", "message-1"],
+				)
+			).map(item => item.queueId),
+		).toEqual(["message-2", "message-1"]);
+		await expect(
+			store.mutateInboxItem(
+				{ ...target, authorityGeneration: 5 },
+				{
+					mutationId: "stale-authority",
+					queueId: "message-1",
+					expectedRevision: reordered[1]!.revision,
+					op: "drop",
+				},
+			),
+		).rejects.toBeInstanceOf(EngineInboxConflictError);
+
+		await store.mutateInboxItem(target, {
+			mutationId: "ack-2",
+			queueId: "message-2",
+			expectedRevision: reordered[0]!.revision,
+			op: "acknowledge",
+		});
+		await store.mutateInboxItem(target, {
+			mutationId: "drop-1",
+			queueId: "message-1",
+			expectedRevision: reordered[1]!.revision,
+			op: "drop",
+		});
+		expect(await store.listInboxItems(target.sessionId)).toEqual([]);
+		expect(await store.listInboxItems("sibling-session", true)).toEqual([]);
+		expect((await store.listInboxItems(target.sessionId, true)).map(item => item.sourceBody)).toEqual([
+			"second body",
+			"original immutable body",
+		]);
+		await store.close();
+
+		const reopened = await EngineStore.open(databasePath);
+		expect((await reopened.listInboxItems(target.sessionId, true)).map(item => item.disposition)).toEqual([
+			"acknowledged",
+			"dropped",
+		]);
+		expect(
+			(await reopened.eventsAfter(target.attemptId)).filter(event => event.kind === "inbox_changed"),
+		).toHaveLength(8);
+		await reopened.close();
 	});
 
 	it("rolls back event sequence allocation when event insertion fails", async () => {

@@ -189,17 +189,61 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			]);
 			permitSub.unsubscribe();
 
-			const inbound = runtime.ircBus.wait(engineAgentId("agent-b"), { from: engineAgentId("agent-a") }, 5_000);
 			const receipt = await runtime.ircBus.send({
 				from: engineAgentId("agent-a"),
 				to: engineAgentId("agent-b"),
 				body: "broker round trip",
 			});
 			expect(receipt.outcome).toBe("queued");
-			expect((await inbound)?.body).toBe("broker round trip");
-
 			const rootB = runtime.agentRegistry.get(engineAgentId("agent-b"));
 			if (!rootB?.session) throw new Error("root B session is unavailable");
+			const bindingB = await runtime.store.getBinding("agent-b");
+			if (!bindingB) throw new Error("root B binding is unavailable");
+			await waitFor(async () => (await runtime.listInbox(bindingB)).length === 1);
+			expect(await runtime.listInbox(bindingB)).toMatchObject([
+				{ sourceType: "agent", sender: "agent-a", deliveryPayload: "broker round trip", disposition: "pending" },
+			]);
+			expect(JSON.stringify(rootB.session.messages)).not.toContain("broker round trip");
+			expect(JSON.stringify(rootB.session.messages)).toContain("engine:inbox_changed");
+			const hub = rootB.session.getToolByName("hub");
+			if (!hub) throw new Error("root B hub tool is unavailable");
+			const hubList = await hub.execute("hub-inbox-list", { op: "inbox" });
+			expect(hubList.content[0]?.type === "text" ? hubList.content[0].text : "").toContain("broker round trip");
+			await hub.execute("hub-inbox-edit", {
+				op: "inbox",
+				inboxAction: "edit",
+				queueId: (await runtime.listInbox(bindingB))[0]!.queueId,
+				expectedRevision: 1,
+				deliveryPayload: "edited through native hub",
+			});
+			expect((await runtime.listInbox(bindingB))[0]).toMatchObject({
+				sourceBody: "broker round trip",
+				deliveryPayload: "edited through native hub",
+				revision: 2,
+			});
+			await hub.execute("hub-inbox-defer", {
+				op: "inbox",
+				inboxAction: "defer",
+				queueId: (await runtime.listInbox(bindingB))[0]!.queueId,
+				expectedRevision: 2,
+				deliverAt: Date.now() + 50,
+			});
+			await waitFor(() =>
+				eventsB.some(
+					event =>
+						event.type === "attempt.inbox_changed" &&
+						(event.payload as Record<string, unknown>).action === "wake_due",
+				),
+			);
+			await Bun.sleep(150);
+			expect(
+				eventsB.filter(
+					event =>
+						event.type === "attempt.inbox_changed" &&
+						(event.payload as Record<string, unknown>).action === "wake_due",
+				),
+			).toHaveLength(1);
+			expect((await runtime.listInbox(bindingB))[0]).toMatchObject({ wakeIntent: true, revision: 4 });
 			runtime.agentRegistry.register({
 				id: "native-child-b1",
 				displayName: "child B1",
@@ -208,14 +252,17 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 				session: rootB.session,
 				status: "idle",
 			});
-			const childInbound = runtime.ircBus.wait("native-child-b1", { from: engineAgentId("agent-a") }, 5_000);
 			const childReceipt = await runtime.ircBus.send({
 				from: engineAgentId("agent-a"),
 				to: "native-child-b1",
 				body: "durable child mailbox",
 			});
 			expect(childReceipt.outcome).toBe("queued");
-			expect((await childInbound)?.body).toBe("durable child mailbox");
+			await waitFor(async () => (await runtime.listInbox(bindingB)).length === 2);
+			expect((await runtime.listInbox(bindingB)).map(item => item.deliveryPayload)).toEqual([
+				"edited through native hub",
+				"durable child mailbox",
+			]);
 			runtime.agentRegistry.unregister("native-child-b1", rootB.session);
 
 			const commandConsumer = `engine_${adapter.engineRoute}`;
