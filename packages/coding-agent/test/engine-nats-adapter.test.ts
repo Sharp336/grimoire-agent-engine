@@ -218,6 +218,38 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			);
 			expect(dispatchCount).toBe(3);
 
+			const deliveredBeforeReplay = (await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer)).delivered
+				.consumer_seq;
+			await js.publish(
+				adapter.commandSubject("agent-a", "start"),
+				JSON.stringify({ ...commandA, issuedAt: Date.now() }),
+				{
+					msgID: "transport-command-a-replay",
+				},
+			);
+			await waitFor(
+				async () =>
+					(await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer)).delivered.consumer_seq >
+					deliveredBeforeReplay,
+			);
+			expect(dispatchCount).toBe(3);
+
+			const deliveredBeforeConflict = (await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer))
+				.delivered.consumer_seq;
+			await js.publish(
+				adapter.commandSubject("agent-a", "start"),
+				JSON.stringify({ ...commandA, issuedAt: Date.now(), payload: { ...commandA.payload, input: "CHANGED" } }),
+				{ msgID: "transport-command-a-conflict" },
+			);
+			await waitFor(async () => {
+				const info = await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer);
+				return info.delivered.consumer_seq > deliveredBeforeConflict && info.num_ack_pending === 0;
+			});
+			const conflict = errors.findIndex(error => error.message.includes("different canonical content"));
+			expect(conflict).toBeGreaterThanOrEqual(0);
+			errors.splice(conflict, 1);
+			expect(dispatchCount).toBe(3);
+
 			const deliveredAfterDuplicate = (await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer))
 				.delivered.consumer_seq;
 			const oldGenerationA = {

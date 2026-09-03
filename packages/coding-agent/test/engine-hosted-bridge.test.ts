@@ -62,6 +62,7 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			},
 		});
 		const profile = { spawns: "", profileDigest: "leaf-profile-v1", enableMCP: false, enableLsp: false };
+		const adapterErrors: Error[] = [];
 		const adapter = await NatsEngineAdapter.connect({
 			runtime,
 			deviceId: "device-hosted",
@@ -71,6 +72,7 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			authorizeCommand: () => {},
 			authorizeMessage: () => {},
 			resolveLaunchProfile: command => command.payload.launchProfile as typeof profile,
+			onError: error => adapterErrors.push(error),
 		});
 		const rpc = new FakeRpc(startCommand(cwd, profile));
 		const bridge = await HostedEngineBridge.connect({
@@ -92,7 +94,8 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			authenticator: nkeyAuthenticator(engineSeed),
 		});
 		try {
-			await waitFor(() => rpc.events.some(event => event.type === "attempt.completed"));
+			await waitFor(() => rpc.events.some(event => event.type === "attempt.completed") || adapterErrors.length > 0);
+			expect(adapterErrors).toEqual([]);
 			const manager = await jetstreamManager(managerConnection);
 			await waitFor(async () => {
 				const [commands, events] = await Promise.all([

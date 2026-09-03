@@ -16,12 +16,15 @@ import {
 	type StreamConfig,
 } from "@nats-io/jetstream";
 import { connect, type NatsConnection, type NodeConnectionOptions, nanos } from "@nats-io/transport-node";
+import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import type { ExtensionAskDialogResult } from "../extensibility/extensions/types";
 import type { IrcDeliveryReceipt, IrcMessage } from "../irc/bus";
 import type { EngineControlInitiator, EngineEvent, EngineLaunchProfile } from "./contracts";
 import { EngineTargetError } from "./contracts";
 import { engineAgentInstanceId, engineRouteToken } from "./route";
 import type { EngineRuntime } from "./runtime";
+import type { EngineCommandIdentity } from "./store";
+import { EngineCommandConflictError } from "./store";
 
 export const ENGINE_COMMAND_STREAM = "GRIMOIRE_ENGINE_COMMANDS";
 export const ENGINE_EVENT_STREAM = "GRIMOIRE_ENGINE_EVENTS";
@@ -376,6 +379,8 @@ export class NatsEngineAdapter {
 
 	async #handleCommand(message: JsMsg): Promise<void> {
 		let command: EngineCommandEnvelope | undefined;
+		let identity: EngineCommandIdentity | undefined;
+		let claimed = false;
 		message.working();
 		const heartbeat = setInterval(() => message.working(), 10_000);
 		try {
@@ -385,7 +390,19 @@ export class NatsEngineAdapter {
 				message.ack();
 				return;
 			}
+			identity = commandIdentity(command);
+			const admission = await this.runtime.store.admitCommand(identity, this.runtime.engineGeneration);
+			if (admission.status === "replay") {
+				message.ack();
+				return;
+			}
+			if (admission.status === "in_progress") {
+				message.nak(250);
+				return;
+			}
+			claimed = true;
 			await this.#dispatchCommand(command);
+			await this.runtime.store.settleCommand(command.commandId, identity.canonicalHash, { outcome: "applied" });
 			message.ack();
 		} catch (error) {
 			if (error instanceof StaleEngineLeaseError) {
@@ -398,8 +415,32 @@ export class NatsEngineAdapter {
 				message.term(error.message.slice(0, 128));
 				return;
 			}
+			if (error instanceof EngineCommandConflictError) {
+				if (command?.executionId && command.attemptId) {
+					await this.runtime
+						.recordCommandRejection({
+							commandId: command.commandId,
+							agentInstanceId: command.agentInstanceId,
+							executionId: command.executionId,
+							attemptId: command.attemptId,
+							authorityGeneration: command.authorityGeneration,
+							bindingGeneration: command.bindingGeneration,
+							code: "invalid_request",
+							message: error.message,
+						})
+						.catch(reportError => this.#report(reportError));
+				}
+				message.term("command_id_conflict");
+				this.#report(error);
+				return;
+			}
 			if (error instanceof EngineTargetError) {
 				if (error.code === "agent_busy") {
+					if (claimed && identity) {
+						await this.runtime.store
+							.releaseCommand(identity.commandId, identity.canonicalHash, this.runtime.engineGeneration)
+							.catch(reportError => this.#report(reportError));
+					}
 					message.nak(1_000);
 					return;
 				}
@@ -417,8 +458,21 @@ export class NatsEngineAdapter {
 						})
 						.catch(reportError => this.#report(reportError));
 				}
+				if (claimed && identity) {
+					await this.runtime.store
+						.settleCommand(identity.commandId, identity.canonicalHash, {
+							outcome: "rejected",
+							detail: { code: error.code, message: error.message.slice(0, 2_048) },
+						})
+						.catch(reportError => this.#report(reportError));
+				}
 				message.ack();
 				return;
+			}
+			if (claimed && identity) {
+				await this.runtime.store
+					.releaseCommand(identity.commandId, identity.canonicalHash, this.runtime.engineGeneration)
+					.catch(reportError => this.#report(reportError));
 			}
 			message.nak(1_000);
 			this.#report(error);
@@ -686,6 +740,46 @@ function parseCommandSubject(subject: string): [string, string, string, EngineCo
 		throw new PoisonMessageError("invalid command subject");
 	}
 	return [tokens[4], tokens[6], tokens[8], tokens[10]];
+}
+
+function commandIdentity(command: EngineCommandEnvelope): EngineCommandIdentity {
+	const payloadHash = sha256(stableStringifyJson(command.payload));
+	const canonical = {
+		op: command.op,
+		deviceId: command.deviceId,
+		engineId: command.engineId,
+		engineGeneration: command.engineGeneration,
+		agentInstanceId: command.agentInstanceId,
+		agentInstanceRef: command.agentInstanceRef,
+		parentAgentInstanceId: command.parentAgentInstanceId,
+		bindingId: command.runtimeBindingId,
+		bindingGeneration: command.bindingGeneration,
+		executionId: command.executionId,
+		attemptId: command.attemptId,
+		authorityGeneration: command.authorityGeneration,
+		payloadHash,
+	};
+	return {
+		commandId: command.commandId,
+		operation: command.op,
+		deviceId: command.deviceId,
+		engineId: command.engineId,
+		engineGeneration: command.engineGeneration,
+		agentInstanceId: command.agentInstanceId,
+		agentInstanceRef: command.agentInstanceRef,
+		parentAgentInstanceId: command.parentAgentInstanceId,
+		bindingId: command.runtimeBindingId,
+		bindingGeneration: command.bindingGeneration,
+		executionId: command.executionId,
+		attemptId: command.attemptId,
+		authorityGeneration: command.authorityGeneration,
+		payloadHash,
+		canonicalHash: sha256(stableStringifyJson(canonical)),
+	};
+}
+
+function sha256(value: string): string {
+	return `sha256:${new Bun.CryptoHasher("sha256").update(value).digest("hex")}`;
 }
 
 function parseMessageSubject(subject: string): [string, string, string] {

@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Made Agent Engine command admission and receipts durable across broker redelivery and restart, with conflicting command-ID reuse rejected before runtime effects and atomic per-agent event sequencing.
 - Prevented separate Agent Engine runtime directories from opening the same SQLite database, and made Engine schema upgrades versioned, checksummed, and fail closed for newer databases.
 - Fixed authenticated Agent Engine messages, commands, and hosted events being redelivered after successful handling, including stale terminal events after a bridge restart.
 

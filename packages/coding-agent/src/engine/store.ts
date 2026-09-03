@@ -55,6 +55,48 @@ interface EventRow {
 	created_at: number;
 }
 
+export interface EngineCommandIdentity {
+	commandId: string;
+	operation: string;
+	deviceId: string;
+	engineId: string;
+	engineGeneration: number;
+	agentInstanceId: string;
+	agentInstanceRef?: string;
+	parentAgentInstanceId?: string;
+	bindingId?: string;
+	bindingGeneration?: number;
+	executionId?: string;
+	attemptId?: string;
+	authorityGeneration: number;
+	payloadHash: string;
+	canonicalHash: string;
+}
+
+export interface EngineCommandReceipt {
+	outcome: "applied" | "rejected";
+	detail?: Record<string, unknown>;
+}
+
+export type EngineCommandAdmission =
+	| { status: "claimed" }
+	| { status: "in_progress" }
+	| { status: "replay"; receipt: EngineCommandReceipt };
+
+interface CommandRow {
+	canonical_hash: string;
+	state: "received" | "settled";
+	processor_generation: number | null;
+	receipt: string | null;
+}
+
+export class EngineCommandConflictError extends Error {
+	constructor(commandId: string) {
+		super(`Command ${commandId} was already admitted with different canonical content`);
+		this.name = "EngineCommandConflictError";
+	}
+}
+
 const SCHEMA = [
 	`CREATE TABLE IF NOT EXISTS engine_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS omp_session_files (
@@ -131,9 +173,38 @@ const REQUIRED_COLUMNS = [
 	["omp_session_files", "title_updated_at", "TEXT"],
 ] as const;
 
+const COMMAND_INBOX_SCHEMA = [
+	`CREATE TABLE engine_commands (
+		command_id TEXT PRIMARY KEY,
+		operation TEXT NOT NULL,
+		device_id TEXT NOT NULL,
+		engine_id TEXT NOT NULL,
+		engine_generation INTEGER NOT NULL,
+		agent_instance_id TEXT NOT NULL,
+		agent_instance_ref TEXT,
+		parent_agent_instance_id TEXT,
+		binding_id TEXT,
+		binding_generation INTEGER,
+		execution_id TEXT,
+		attempt_id TEXT,
+		authority_generation INTEGER NOT NULL,
+		payload_hash TEXT NOT NULL,
+		canonical_hash TEXT NOT NULL,
+		state TEXT NOT NULL CHECK(state IN ('received', 'settled')),
+		processor_generation INTEGER,
+		outcome TEXT CHECK(outcome IN ('applied', 'rejected')),
+		receipt TEXT,
+		received_at INTEGER NOT NULL,
+		settled_at INTEGER,
+		updated_at INTEGER NOT NULL
+	)`,
+	`CREATE INDEX engine_commands_state_idx ON engine_commands(state, processor_generation, updated_at)`,
+] as const;
+
 const SCHEMA_MIGRATIONS = [
 	{ version: 1, statements: SCHEMA, requiredColumns: [] },
 	{ version: 2, statements: [], requiredColumns: REQUIRED_COLUMNS },
+	{ version: 3, statements: COMMAND_INBOX_SCHEMA, requiredColumns: [] },
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;
@@ -203,6 +274,7 @@ async function applySchemaMigrations(client: SqlClient): Promise<void> {
 export class EngineStore {
 	readonly #client: SqlClient;
 	readonly sessionStorage: SqlSessionStorage;
+	#transactionTail: Promise<void> = Promise.resolve();
 
 	private constructor(client: SqlClient, sessionStorage: SqlSessionStorage) {
 		this.#client = client;
@@ -245,6 +317,98 @@ export class EngineStore {
 			`SELECT value FROM engine_metadata WHERE key='engine_generation'`,
 		)) as MetadataRow[];
 		return Number(rows[0]?.value) === engineGeneration;
+	}
+
+	async admitCommand(command: EngineCommandIdentity, processorGeneration: number): Promise<EngineCommandAdmission> {
+		return await this.#transaction(async sql => {
+			const rows = (await sql.unsafe(
+				`SELECT canonical_hash, state, processor_generation, receipt
+				 FROM engine_commands WHERE command_id = ?`,
+				[command.commandId],
+			)) as CommandRow[];
+			const existing = rows[0];
+			if (existing) {
+				if (existing.canonical_hash !== command.canonicalHash) {
+					throw new EngineCommandConflictError(command.commandId);
+				}
+				if (existing.state === "settled") {
+					if (!existing.receipt) throw new Error(`Settled command ${command.commandId} has no receipt`);
+					return { status: "replay", receipt: JSON.parse(existing.receipt) as EngineCommandReceipt };
+				}
+				if (Number(existing.processor_generation) === processorGeneration) return { status: "in_progress" };
+				await sql.unsafe(
+					`UPDATE engine_commands SET processor_generation=?, updated_at=?
+					 WHERE command_id=? AND state='received'`,
+					[processorGeneration, Date.now(), command.commandId],
+				);
+				return { status: "claimed" };
+			}
+
+			const now = Date.now();
+			await sql.unsafe(
+				`INSERT INTO engine_commands(
+				 command_id, operation, device_id, engine_id, engine_generation, agent_instance_id,
+				 agent_instance_ref, parent_agent_instance_id, binding_id, binding_generation,
+				 execution_id, attempt_id, authority_generation, payload_hash, canonical_hash,
+				 state, processor_generation, received_at, updated_at
+				 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?)`,
+				[
+					command.commandId,
+					command.operation,
+					command.deviceId,
+					command.engineId,
+					command.engineGeneration,
+					command.agentInstanceId,
+					command.agentInstanceRef ?? null,
+					command.parentAgentInstanceId ?? null,
+					command.bindingId ?? null,
+					command.bindingGeneration ?? null,
+					command.executionId ?? null,
+					command.attemptId ?? null,
+					command.authorityGeneration,
+					command.payloadHash,
+					command.canonicalHash,
+					processorGeneration,
+					now,
+					now,
+				],
+			);
+			return { status: "claimed" };
+		});
+	}
+
+	async releaseCommand(commandId: string, canonicalHash: string, processorGeneration: number): Promise<void> {
+		await this.#transaction(async sql => {
+			await sql.unsafe(
+				`UPDATE engine_commands SET processor_generation=NULL, updated_at=?
+				 WHERE command_id=? AND canonical_hash=? AND state='received' AND processor_generation=?`,
+				[Date.now(), commandId, canonicalHash, processorGeneration],
+			);
+		});
+	}
+
+	async settleCommand(commandId: string, canonicalHash: string, receipt: EngineCommandReceipt): Promise<void> {
+		const serialized = JSON.stringify(receipt);
+		await this.#transaction(async sql => {
+			const rows = (await sql.unsafe(
+				"SELECT canonical_hash, state, processor_generation, receipt FROM engine_commands WHERE command_id = ?",
+				[commandId],
+			)) as CommandRow[];
+			const existing = rows[0];
+			if (!existing) throw new Error(`Command ${commandId} was not admitted`);
+			if (existing.canonical_hash !== canonicalHash) throw new EngineCommandConflictError(commandId);
+			if (existing.state === "settled") {
+				if (existing.receipt !== serialized) throw new Error(`Command ${commandId} already has another receipt`);
+				return;
+			}
+			const now = Date.now();
+			await sql.unsafe(
+				`UPDATE engine_commands
+				 SET state='settled', processor_generation=NULL, outcome=?, receipt=?, settled_at=?, updated_at=?
+				 WHERE command_id=? AND state='received'`,
+				[receipt.outcome, serialized, now, now, commandId],
+			);
+		});
 	}
 
 	async getBinding(agentInstanceId: string): Promise<EngineBindingSnapshot | undefined> {
@@ -369,34 +533,36 @@ export class EngineStore {
 	}
 
 	async appendEvent(event: Omit<EngineEvent, "eventId" | "seq" | "createdAt">): Promise<EngineEvent> {
-		const seqRows = (await this.#client.unsafe(
-			`INSERT INTO engine_agent_seq(agent_instance_id, seq) VALUES (?, 1)
-			 ON CONFLICT(agent_instance_id) DO UPDATE SET seq=seq+1 RETURNING seq`,
-			[event.agentInstanceId],
-		)) as SeqRow[];
-		const seq = Number(seqRows[0]?.seq ?? 1);
-		const createdAt = Date.now();
-		const rows = (await this.#client.unsafe(
-			`INSERT INTO engine_event_outbox(
-			 seq, causation_command_id, agent_instance_id, execution_id, attempt_id, binding_id, engine_generation,
-			 binding_generation, authority_generation, kind, payload, created_at
-			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING event_id`,
-			[
-				seq,
-				event.causationCommandId,
-				event.agentInstanceId,
-				event.executionId,
-				event.attemptId,
-				event.bindingId,
-				event.engineGeneration,
-				event.bindingGeneration,
-				event.authorityGeneration,
-				event.kind,
-				event.payload ? JSON.stringify(event.payload) : null,
-				createdAt,
-			],
-		)) as Array<{ event_id: number }>;
-		return { ...event, eventId: Number(rows[0]?.event_id), seq, createdAt };
+		return await this.#transaction(async sql => {
+			const seqRows = (await sql.unsafe(
+				`INSERT INTO engine_agent_seq(agent_instance_id, seq) VALUES (?, 1)
+				 ON CONFLICT(agent_instance_id) DO UPDATE SET seq=seq+1 RETURNING seq`,
+				[event.agentInstanceId],
+			)) as SeqRow[];
+			const seq = Number(seqRows[0]?.seq ?? 1);
+			const createdAt = Date.now();
+			const rows = (await sql.unsafe(
+				`INSERT INTO engine_event_outbox(
+				 seq, causation_command_id, agent_instance_id, execution_id, attempt_id, binding_id, engine_generation,
+				 binding_generation, authority_generation, kind, payload, created_at
+				 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING event_id`,
+				[
+					seq,
+					event.causationCommandId,
+					event.agentInstanceId,
+					event.executionId,
+					event.attemptId,
+					event.bindingId,
+					event.engineGeneration,
+					event.bindingGeneration,
+					event.authorityGeneration,
+					event.kind,
+					event.payload ? JSON.stringify(event.payload) : null,
+					createdAt,
+				],
+			)) as Array<{ event_id: number }>;
+			return { ...event, eventId: Number(rows[0]?.event_id), seq, createdAt };
+		});
 	}
 
 	async pendingEvents(limit = 100): Promise<EngineEvent[]> {
@@ -431,11 +597,21 @@ export class EngineStore {
 	}
 
 	async drain(): Promise<void> {
+		await this.#transactionTail;
 		await this.sessionStorage.drain();
 	}
 
 	async close(): Promise<void> {
 		await this.drain();
 		await this.#client.end();
+	}
+
+	#transaction<T>(work: (sql: SqlClient) => Promise<T>): Promise<T> {
+		const run = this.#transactionTail.then(() => this.#client.begin("IMMEDIATE", work));
+		this.#transactionTail = run.then(
+			() => {},
+			() => {},
+		);
+		return run;
 	}
 }

@@ -3,7 +3,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
-import { EngineStore } from "@oh-my-pi/pi-coding-agent/engine/store";
+import {
+	EngineCommandConflictError,
+	type EngineCommandIdentity,
+	EngineStore,
+} from "@oh-my-pi/pi-coding-agent/engine/store";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
 
@@ -133,5 +137,88 @@ describe("EngineStore", () => {
 		)) as Array<{ name: string }>;
 		await inspect.end();
 		expect(rows).toEqual([]);
+	});
+
+	it("persists command receipts and rejects command ID reuse with different content", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-command-${Snowflake.next()}-`));
+		const databasePath = path.join(tempDir, "engine.sqlite");
+		const command: EngineCommandIdentity = {
+			commandId: "command-1",
+			operation: "steer",
+			deviceId: "device-1",
+			engineId: "engine-1",
+			engineGeneration: 1,
+			agentInstanceId: "agent-1",
+			bindingId: "binding-1",
+			bindingGeneration: 1,
+			executionId: "execution-1",
+			attemptId: "attempt-1",
+			authorityGeneration: 1,
+			payloadHash: "sha256:payload-1",
+			canonicalHash: "sha256:canonical-1",
+		};
+		const store = await EngineStore.open(databasePath);
+		expect(await store.admitCommand(command, 1)).toEqual({ status: "claimed" });
+		expect(await store.admitCommand(command, 1)).toEqual({ status: "in_progress" });
+		await store.releaseCommand(command.commandId, command.canonicalHash, 1);
+		expect(await store.admitCommand(command, 1)).toEqual({ status: "claimed" });
+		await store.settleCommand(command.commandId, command.canonicalHash, {
+			outcome: "applied",
+			detail: { eventId: "17" },
+		});
+		await store.close();
+
+		const reopened = await EngineStore.open(databasePath);
+		expect(await reopened.admitCommand(command, 2)).toEqual({
+			status: "replay",
+			receipt: { outcome: "applied", detail: { eventId: "17" } },
+		});
+		const pending = { ...command, commandId: "command-pending", canonicalHash: "sha256:pending" };
+		expect(await reopened.admitCommand(pending, 1)).toEqual({ status: "claimed" });
+		await reopened.close();
+
+		const restarted = await EngineStore.open(databasePath);
+		expect(await restarted.admitCommand(pending, 2)).toEqual({ status: "claimed" });
+		await expect(
+			restarted.admitCommand(
+				{ ...command, payloadHash: "sha256:payload-2", canonicalHash: "sha256:canonical-2" },
+				2,
+			),
+		).rejects.toBeInstanceOf(EngineCommandConflictError);
+		await restarted.close();
+	});
+
+	it("rolls back event sequence allocation when event insertion fails", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-event-${Snowflake.next()}-`));
+		const databasePath = path.join(tempDir, "engine.sqlite");
+		const store = await EngineStore.open(databasePath);
+		const inspect = new SQL(`sqlite:${databasePath.replaceAll("\\", "/")}`);
+		await inspect.unsafe(`CREATE TRIGGER reject_failed_event
+			BEFORE INSERT ON engine_event_outbox WHEN NEW.kind='failed'
+			BEGIN SELECT RAISE(ABORT, 'injected event failure'); END`);
+		const event = {
+			causationCommandId: "command-1",
+			agentInstanceId: "agent-1",
+			executionId: "execution-1",
+			attemptId: "attempt-1",
+			bindingId: "binding-1",
+			engineGeneration: 1,
+			bindingGeneration: 1,
+			authorityGeneration: 1,
+		};
+		await expect(store.appendEvent({ ...event, kind: "failed" })).rejects.toThrow("injected event failure");
+		await inspect.unsafe("DROP TRIGGER reject_failed_event");
+		const first = await store.appendEvent({ ...event, kind: "accepted" });
+		expect(first.seq).toBe(1);
+		const concurrent = await Promise.all(
+			Array.from({ length: 16 }, (_, index) =>
+				store.appendEvent({ ...event, causationCommandId: `command-${index + 2}`, kind: "steered" }),
+			),
+		);
+		expect(concurrent.map(candidate => candidate.seq).sort((left, right) => left - right)).toEqual(
+			Array.from({ length: 16 }, (_, index) => index + 2),
+		);
+		await inspect.end();
+		await store.close();
 	});
 });
