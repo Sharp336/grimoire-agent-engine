@@ -412,22 +412,42 @@ export class NatsEngineAdapter {
 				return;
 			}
 			if (error instanceof PoisonMessageError) {
+				if (claimed && identity) {
+					try {
+						await this.runtime.store.settleCommand(identity.commandId, identity.canonicalHash, {
+							outcome: "rejected",
+							detail: { code: "invalid_request", message: error.message.slice(0, 2_048) },
+						});
+					} catch (settleError) {
+						await this.runtime.store.releaseCommand(
+							identity.commandId,
+							identity.canonicalHash,
+							this.runtime.engineGeneration,
+						);
+						message.nak(1_000);
+						this.#report(settleError);
+						return;
+					}
+				}
 				message.term(error.message.slice(0, 128));
 				return;
 			}
 			if (error instanceof EngineCommandConflictError) {
 				if (command?.executionId && command.attemptId) {
 					await this.runtime
-						.recordCommandRejection({
-							commandId: command.commandId,
-							agentInstanceId: command.agentInstanceId,
-							executionId: command.executionId,
-							attemptId: command.attemptId,
-							authorityGeneration: command.authorityGeneration,
-							bindingGeneration: command.bindingGeneration,
-							code: "invalid_request",
-							message: error.message,
-						})
+						.recordCommandRejection(
+							{
+								commandId: command.commandId,
+								agentInstanceId: command.agentInstanceId,
+								executionId: command.executionId,
+								attemptId: command.attemptId,
+								authorityGeneration: command.authorityGeneration,
+								bindingGeneration: command.bindingGeneration,
+								code: "invalid_request",
+								message: error.message,
+							},
+							false,
+						)
 						.catch(reportError => this.#report(reportError));
 				}
 				message.term("command_id_conflict");
@@ -444,9 +464,9 @@ export class NatsEngineAdapter {
 					message.nak(1_000);
 					return;
 				}
-				if (command?.executionId && command.attemptId) {
-					await this.runtime
-						.recordCommandRejection({
+				try {
+					if (command?.executionId && command.attemptId) {
+						await this.runtime.recordCommandRejection({
 							commandId: command.commandId,
 							agentInstanceId: command.agentInstanceId,
 							executionId: command.executionId,
@@ -455,16 +475,22 @@ export class NatsEngineAdapter {
 							bindingGeneration: command.bindingGeneration,
 							code: error.code,
 							message: error.message,
-						})
-						.catch(reportError => this.#report(reportError));
-				}
-				if (claimed && identity) {
-					await this.runtime.store
-						.settleCommand(identity.commandId, identity.canonicalHash, {
+						});
+					} else if (claimed && identity) {
+						await this.runtime.store.settleCommand(identity.commandId, identity.canonicalHash, {
 							outcome: "rejected",
 							detail: { code: error.code, message: error.message.slice(0, 2_048) },
-						})
-						.catch(reportError => this.#report(reportError));
+						});
+					}
+				} catch (persistError) {
+					if (claimed && identity) {
+						await this.runtime.store
+							.releaseCommand(identity.commandId, identity.canonicalHash, this.runtime.engineGeneration)
+							.catch(reportError => this.#report(reportError));
+					}
+					message.nak(1_000);
+					this.#report(persistError);
+					return;
 				}
 				message.ack();
 				return;

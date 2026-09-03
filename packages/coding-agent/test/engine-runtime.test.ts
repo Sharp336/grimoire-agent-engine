@@ -484,17 +484,21 @@ describe("EngineRuntime", () => {
 				},
 			],
 		};
-		const appendEvent = runtime.store.appendEvent.bind(runtime.store);
-		const appendEventSpy = spyOn(runtime.store, "appendEvent").mockImplementation(async event => {
-			if (event.kind === "input_resolved") throw new Error("injected input_resolved failure");
-			return await appendEvent(event);
-		});
+		const commitAttemptTransition = runtime.store.commitAttemptTransition.bind(runtime.store);
+		const transitionSpy = spyOn(runtime.store, "commitAttemptTransition").mockImplementation(
+			async (binding, state, events, options) => {
+				if (events.some(event => event.kind === "input_resolved")) {
+					throw new Error("injected input_resolved failure");
+				}
+				return await commitAttemptTransition(binding, state, events, options);
+			},
+		);
 		try {
 			await expect(
 				runtime.resolveInput({ ...started, commandId: "command-failed-input-event", inputId, result }),
 			).rejects.toThrow("injected input_resolved failure");
 		} finally {
-			appendEventSpy.mockRestore();
+			transitionSpy.mockRestore();
 		}
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("waiting_input");
 		const resolved = nextEngineEvent(runtime, "input_resolved");

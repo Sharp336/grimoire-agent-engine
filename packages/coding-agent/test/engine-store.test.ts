@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import {
+	EngineAttemptConflictError,
 	EngineCommandConflictError,
 	type EngineCommandIdentity,
 	EngineStore,
@@ -218,6 +219,79 @@ describe("EngineStore", () => {
 		expect(concurrent.map(candidate => candidate.seq).sort((left, right) => left - right)).toEqual(
 			Array.from({ length: 16 }, (_, index) => index + 2),
 		);
+		await inspect.end();
+		await store.close();
+	});
+
+	it("commits Binding, Attempt, command receipt and events as one transition", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-transition-${Snowflake.next()}-`));
+		const databasePath = path.join(tempDir, "engine.sqlite");
+		const store = await EngineStore.open(databasePath);
+		const command: EngineCommandIdentity = {
+			commandId: "command-transition",
+			operation: "start",
+			deviceId: "device-1",
+			engineId: "engine-1",
+			engineGeneration: 1,
+			agentInstanceId: "agent-transition",
+			executionId: "execution-transition",
+			attemptId: "attempt-transition",
+			authorityGeneration: 1,
+			payloadHash: "sha256:payload-transition",
+			canonicalHash: "sha256:canonical-transition",
+		};
+		const binding = {
+			bindingId: "binding-transition",
+			commandId: command.commandId,
+			agentInstanceId: command.agentInstanceId,
+			executionId: "execution-transition",
+			attemptId: "attempt-transition",
+			engineAgentId: "Engine-transition",
+			profileDigest: "profile-transition",
+			state: "running" as const,
+			engineGeneration: 1,
+			bindingGeneration: 1,
+			authorityGeneration: 1,
+		};
+		expect(await store.admitCommand(command, 1)).toEqual({ status: "claimed" });
+		const inspect = new SQL(`sqlite:${databasePath.replaceAll("\\", "/")}`);
+		await inspect.unsafe(`CREATE TRIGGER reject_running_transition
+			BEFORE INSERT ON engine_event_outbox WHEN NEW.kind='running'
+			BEGIN SELECT RAISE(ABORT, 'injected transition failure'); END`);
+		await expect(
+			store.commitAttemptTransition(binding, "running", [{ kind: "accepted" }, { kind: "running" }], {
+				settleCommandId: command.commandId,
+			}),
+		).rejects.toThrow("injected transition failure");
+		expect(await store.getBinding(command.agentInstanceId)).toBeUndefined();
+		expect(await store.getAttempt("attempt-transition")).toBeUndefined();
+		expect(await store.pendingEvents()).toEqual([]);
+		expect(await store.admitCommand(command, 1)).toEqual({ status: "in_progress" });
+
+		await inspect.unsafe("DROP TRIGGER reject_running_transition");
+		const events = await store.commitAttemptTransition(
+			binding,
+			"running",
+			[{ kind: "accepted" }, { kind: "running" }],
+			{ settleCommandId: command.commandId },
+		);
+		expect(events.map(event => [event.kind, event.seq])).toEqual([
+			["accepted", 1],
+			["running", 2],
+		]);
+		expect((await store.getBinding(command.agentInstanceId))?.state).toBe("running");
+		expect((await store.getAttempt("attempt-transition"))?.state).toBe("running");
+		await expect(
+			store.commitAttemptTransition(binding, "paused", [{ kind: "paused" }], {
+				expectedStates: ["completed"],
+			}),
+		).rejects.toBeInstanceOf(EngineAttemptConflictError);
+		expect((await store.getAttempt("attempt-transition"))?.state).toBe("running");
+		expect((await store.pendingEvents()).map(event => event.kind)).toEqual(["accepted", "running"]);
+		expect(await store.admitCommand(command, 1)).toEqual({
+			status: "replay",
+			receipt: { outcome: "applied" },
+		});
 		await inspect.end();
 		await store.close();
 	});

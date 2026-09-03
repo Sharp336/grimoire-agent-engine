@@ -47,7 +47,7 @@ import {
 	validateStartRequest,
 } from "./contracts";
 import { engineAgentId, engineRouteToken } from "./route";
-import { EngineStore } from "./store";
+import { EngineAttemptConflictError, EngineStore, type EngineTransitionEvent } from "./store";
 
 type EngineEventListener = (event: EngineEvent) => void | Promise<void>;
 
@@ -288,7 +288,7 @@ export class EngineRuntime {
 			binding.steerCommandSet.add(request.commandId);
 			const evicted = binding.steerCommandIds.length > 256 ? binding.steerCommandIds.shift() : undefined;
 			if (evicted) binding.steerCommandSet.delete(evicted);
-			await this.#emit(binding, "steered", undefined, request.commandId);
+			await this.#commitEvent(binding, "steered", undefined, request.commandId, request.commandId);
 		});
 	}
 
@@ -298,35 +298,53 @@ export class EngineRuntime {
 			const binding = this.#requireTarget(request);
 			if (binding.pauseCommandIds.has(request.commandId)) return;
 			if (binding.attemptState === "paused") {
+				await this.#commitEvent(
+					binding,
+					"paused",
+					controlPayload(request.initiator, "paused", true),
+					request.commandId,
+					request.commandId,
+				);
 				binding.pauseCommandIds.add(request.commandId);
-				await this.#emit(binding, "paused", controlPayload(request.initiator, "paused", true), request.commandId);
 				return;
 			}
 			if (binding.attemptState === "pause_requested") {
-				binding.pauseCommandIds.add(request.commandId);
-				binding.pauseRequests.set(request.commandId, request.initiator);
-				await this.#emit(
+				await this.#commitEvent(
 					binding,
 					"pause_requested",
 					controlPayload(request.initiator, "pause_requested", true),
 					request.commandId,
+					request.commandId,
 				);
+				binding.pauseCommandIds.add(request.commandId);
+				binding.pauseRequests.set(request.commandId, request.initiator);
 				return;
 			}
 			if (binding.attemptState !== "running") {
 				throw new EngineTargetError("too_late", `Attempt ${request.attemptId} is already ${binding.attemptState}`);
 			}
-			binding.pauseCommandIds.add(request.commandId);
-			binding.pauseRequests.set(request.commandId, request.initiator);
 			binding.pauseGate.pause();
 			binding.attemptState = "pause_requested";
-			await this.store.putAttempt(binding, "pause_requested");
-			await this.#emit(
-				binding,
-				"pause_requested",
-				controlPayload(request.initiator, "pause_requested"),
-				request.commandId,
-			);
+			try {
+				await this.#commitAttemptTransition(
+					binding,
+					"pause_requested",
+					[
+						{
+							kind: "pause_requested",
+							payload: controlPayload(request.initiator, "pause_requested"),
+							causationCommandId: request.commandId,
+						},
+					],
+					{ settleCommandId: request.commandId, expectedStates: ["running"] },
+				);
+			} catch (error) {
+				binding.attemptState = "running";
+				binding.pauseGate.resume();
+				throw error;
+			}
+			binding.pauseCommandIds.add(request.commandId);
+			binding.pauseRequests.set(request.commandId, request.initiator);
 			this.#trackRun(this.#finishPause(binding, request.attemptId));
 		});
 	}
@@ -339,10 +357,25 @@ export class EngineRuntime {
 			if (binding.attemptState !== "paused") {
 				throw new EngineTargetError("too_late", `Attempt ${request.attemptId} is already ${binding.attemptState}`);
 			}
-			binding.resumeCommandIds.add(request.commandId);
 			binding.attemptState = "running";
-			await this.store.putAttempt(binding, "running");
-			await this.#emit(binding, "resumed", controlPayload(request.initiator, "running"), request.commandId);
+			try {
+				await this.#commitAttemptTransition(
+					binding,
+					"running",
+					[
+						{
+							kind: "resumed",
+							payload: controlPayload(request.initiator, "running"),
+							causationCommandId: request.commandId,
+						},
+					],
+					{ settleCommandId: request.commandId, expectedStates: ["paused"] },
+				);
+			} catch (error) {
+				binding.attemptState = "paused";
+				throw error;
+			}
+			binding.resumeCommandIds.add(request.commandId);
 			binding.pauseGate.resume();
 		});
 	}
@@ -363,10 +396,20 @@ export class EngineRuntime {
 				throw new EngineTargetError("too_late", `Attempt ${request.attemptId} is already ${binding.attemptState}`);
 			}
 			const reason = request.reason ?? "Engine attempt cancelled";
+			const previousState = binding.attemptState;
+			binding.attemptState = "cancel_requested";
+			try {
+				await this.#commitAttemptTransition(binding, "cancel_requested", [], {
+					cause: request.reason,
+					settleCommandId: request.commandId,
+					expectedStates: [previousState],
+				});
+			} catch (error) {
+				binding.attemptState = previousState;
+				throw error;
+			}
 			this.#cancelToolApprovals(binding, reason, request.commandId);
 			this.asyncJobManager.cancelAll({ ownerId: binding.engineAgentId, attemptId: binding.attemptId });
-			binding.attemptState = "cancel_requested";
-			await this.store.putAttempt(binding, "cancel_requested", request.reason);
 			await this.#cancelPendingInput(binding, reason, request.commandId);
 			const abort = binding.session.abort({ reason });
 			binding.pauseGate.resume();
@@ -397,6 +440,7 @@ export class EngineRuntime {
 					...(request.reason ? { reason: request.reason.slice(0, 2_048) } : {}),
 				},
 				request.commandId,
+				request.commandId,
 			);
 			if (this.#pendingToolApprovals.get(request.approvalId) !== pending) return;
 			this.#pendingToolApprovals.delete(request.approvalId);
@@ -417,26 +461,25 @@ export class EngineRuntime {
 			const result = validateInputResult(request.result, pending.questions);
 			binding.attemptState = "running";
 			try {
-				await this.store.putAttempt(binding, "running");
-				await this.#emit(
+				await this.#commitAttemptTransition(
 					binding,
-					"input_resolved",
-					{
-						inputId: request.inputId,
-						result,
-						attemptState: "running",
-						controlReadiness: controlReadiness("running"),
-					},
-					request.commandId,
+					"running",
+					[
+						{
+							kind: "input_resolved",
+							payload: {
+								inputId: request.inputId,
+								result,
+								attemptState: "running",
+								controlReadiness: controlReadiness("running"),
+							},
+							causationCommandId: request.commandId,
+						},
+					],
+					{ settleCommandId: request.commandId, expectedStates: ["waiting_input"] },
 				);
 			} catch (error) {
 				binding.attemptState = "waiting_input";
-				await this.store.putAttempt(binding, "waiting_input").catch(rollbackError => {
-					logger.warn("Engine input resolution rollback failed", {
-						inputId: pending.inputId,
-						error: rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
-					});
-				});
 				throw error;
 			}
 			if (binding.pendingInput !== pending) return;
@@ -461,20 +504,21 @@ export class EngineRuntime {
 				throw new EngineTargetError("stale_target", `Stale authority for ${request.agentInstanceId}`);
 			}
 			const attempt = await this.store.getAttempt(snapshot.attemptId);
-			await this.#emit(
+			await this.#commitEvent(
 				snapshot,
 				"reconciled",
 				{ binding: snapshot, attemptState: attempt?.state },
+				request.commandId,
 				request.commandId,
 			);
 			return { binding: snapshot, attemptState: attempt?.state };
 		});
 	}
 
-	recordCommandRejection(command: EngineRejectedCommand): Promise<void> {
+	recordCommandRejection(command: EngineRejectedCommand, settleCommand = true): Promise<void> {
 		return this.#inLane(command.agentInstanceId, async () => {
 			this.#throwIfDisposed();
-			await this.#emit(
+			await this.#commitEvent(
 				{
 					commandId: command.commandId,
 					agentInstanceId: command.agentInstanceId,
@@ -487,6 +531,9 @@ export class EngineRuntime {
 				},
 				"rejected",
 				{ code: command.code, message: command.message },
+				command.commandId,
+				settleCommand ? command.commandId : undefined,
+				"rejected",
 			);
 		});
 	}
@@ -630,21 +677,20 @@ export class EngineRuntime {
 		}
 		if (!binding) binding = await this.#openBinding(request, profile);
 		try {
-			await this.store.putBinding(this.#snapshot(binding));
-			if (!(await this.store.putAttempt(binding, "accepted"))) {
-				throw new EngineTargetError("invalid_request", `Attempt ${request.attemptId} was claimed concurrently`);
-			}
-			await this.#emit(binding, "accepted");
 			binding.state = "running";
 			binding.attemptState = "running";
-			await this.store.putBinding(this.#snapshot(binding));
-			await this.store.putAttempt(binding, "running");
-			await this.#emit(binding, "running");
+			await this.#commitAttemptTransition(binding, "running", [{ kind: "accepted" }, { kind: "running" }], {
+				settleCommandId: request.commandId,
+				requireNew: true,
+			});
 		} catch (error) {
 			try {
 				await this.#discardBinding(binding);
 			} catch (cleanupError) {
 				throw new AggregateError([error, cleanupError], "Engine admission and cleanup failed");
+			}
+			if (error instanceof EngineAttemptConflictError) {
+				throw new EngineTargetError("invalid_request", `Attempt ${request.attemptId} was claimed concurrently`);
 			}
 			throw error;
 		}
@@ -892,18 +938,26 @@ export class EngineRuntime {
 			binding.pendingInput = pending;
 			binding.attemptState = "waiting_input";
 			try {
-				await this.store.putAttempt(binding, "waiting_input");
-				await this.#emit(binding, "input_requested", {
-					inputId: pending.inputId,
-					inputKind: "ask",
-					questions,
-					attemptState: "waiting_input",
-					controlReadiness: controlReadiness("waiting_input"),
-				});
+				await this.#commitAttemptTransition(
+					binding,
+					"waiting_input",
+					[
+						{
+							kind: "input_requested",
+							payload: {
+								inputId: pending.inputId,
+								inputKind: "ask",
+								questions,
+								attemptState: "waiting_input",
+								controlReadiness: controlReadiness("waiting_input"),
+							},
+						},
+					],
+					{ expectedStates: ["running"] },
+				);
 			} catch (error) {
 				binding.pendingInput = undefined;
 				binding.attemptState = "running";
-				await this.store.putAttempt(binding, "running");
 				throw error;
 			}
 		});
@@ -928,11 +982,9 @@ export class EngineRuntime {
 		if (!pending) return;
 		binding.pendingInput = undefined;
 		try {
-			if (persistState) await this.store.putAttempt(binding, attemptState);
-			await this.#emit(
-				binding,
-				"input_resolved",
-				{
+			const event = {
+				kind: "input_resolved" as const,
+				payload: {
 					inputId: pending.inputId,
 					status: "cancelled",
 					reason: reason.slice(0, 2_048),
@@ -940,7 +992,10 @@ export class EngineRuntime {
 					controlReadiness: controlReadiness(attemptState),
 				},
 				causationCommandId,
-			);
+			};
+			if (persistState) {
+				await this.#commitAttemptTransition(binding, attemptState, [event], { expectedStates: ["waiting_input"] });
+			} else await this.#commitEvent(binding, event.kind, event.payload, causationCommandId);
 		} catch (error) {
 			logger.warn("Engine input cancellation event write failed", {
 				inputId: pending.inputId,
@@ -1089,8 +1144,11 @@ export class EngineRuntime {
 		kind: EngineEvent["kind"],
 		payload: Record<string, unknown>,
 		causationCommandId = record.target.commandId,
+		settleCommandId?: string,
 	): Promise<void> {
-		const write = record.writeTail.then(() => this.#emit(record.target, kind, payload, causationCommandId));
+		const write = record.writeTail.then(() =>
+			this.#commitEvent(record.target, kind, payload, causationCommandId, settleCommandId),
+		);
 		record.writeTail = write.catch(error => {
 			logger.warn("Engine tool event write failed", {
 				invocationId: record.invocationId,
@@ -1160,11 +1218,13 @@ export class EngineRuntime {
 		await this.#inLane(binding.agentInstanceId, async () => {
 			if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
 			if (binding.attemptId !== attemptId || binding.attemptState !== "pause_requested") return;
+			const events = [...binding.pauseRequests].map(([commandId, initiator]) => ({
+				kind: "paused" as const,
+				payload: controlPayload(initiator, "paused"),
+				causationCommandId: commandId,
+			}));
+			await this.#commitAttemptTransition(binding, "paused", events, { expectedStates: ["pause_requested"] });
 			binding.attemptState = "paused";
-			await this.store.putAttempt(binding, "paused");
-			for (const [commandId, initiator] of binding.pauseRequests) {
-				await this.#emit(binding, "paused", controlPayload(initiator, "paused"), commandId);
-			}
 			binding.pauseRequests.clear();
 		});
 	}
@@ -1244,13 +1304,26 @@ export class EngineRuntime {
 				if (binding.attemptState !== "running") return false;
 				binding.state = "idle";
 				binding.attemptState = state;
-				await this.store.putBinding(this.#snapshot(binding));
-				await this.store.putAttempt(binding, state, cause);
-				await this.#emit(
-					binding,
-					state,
-					state === "completed" ? this.#completionPayload(binding) : { error: cause ?? "Unknown Engine failure" },
-				);
+				try {
+					await this.#commitAttemptTransition(
+						binding,
+						state,
+						[
+							{
+								kind: state,
+								payload:
+									state === "completed"
+										? this.#completionPayload(binding)
+										: { error: cause ?? "Unknown Engine failure" },
+							},
+						],
+						{ cause, expectedStates: ["running"] },
+					);
+				} catch (error) {
+					binding.state = "running";
+					binding.attemptState = "running";
+					throw error;
+				}
 				return false;
 			});
 			if (!retry) return;
@@ -1313,12 +1386,20 @@ export class EngineRuntime {
 			if (binding.attemptId !== request.attemptId || binding.attemptState !== "cancel_requested") return;
 			binding.state = "idle";
 			binding.attemptState = "cancelled";
-			await this.store.putBinding(this.#snapshot(binding));
-			await this.store.putAttempt(binding, "cancelled", request.reason);
 			const payload = request.reason ? { reason: request.reason } : undefined;
-			await this.#emit(binding, "cancelled", payload);
+			const events: EngineTransitionEvent[] = [{ kind: "cancelled", payload }];
 			if (request.commandId !== binding.commandId) {
-				await this.#emit(binding, "cancelled", payload, request.commandId);
+				events.push({ kind: "cancelled", payload, causationCommandId: request.commandId });
+			}
+			try {
+				await this.#commitAttemptTransition(binding, "cancelled", events, {
+					cause: request.reason,
+					expectedStates: ["cancel_requested"],
+				});
+			} catch (error) {
+				binding.state = "running";
+				binding.attemptState = "cancel_requested";
+				throw error;
 			}
 		});
 	}
@@ -1326,6 +1407,7 @@ export class EngineRuntime {
 	async #terminateBinding(binding: LiveBinding, cause: "requested" | "engine_lost"): Promise<void> {
 		if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
 		const wasRunning = binding.state === "running";
+		const previousAttemptState = binding.attemptState;
 		this.#bindings.delete(binding.agentInstanceId);
 		binding.state = "released";
 		const reason = cause === "engine_lost" ? "Engine stopped" : "Engine binding released";
@@ -1333,15 +1415,26 @@ export class EngineRuntime {
 		await collectFailure(errors, () =>
 			this.#disposeBindingResources(binding, reason, cause === "engine_lost" ? "interrupted" : "cancelled"),
 		);
-		await collectFailure(errors, () => this.store.putBinding(this.#snapshot(binding)));
 		if (cause === "engine_lost" && wasRunning) {
 			binding.attemptState = "interrupted";
-			await collectFailure(errors, () => this.store.putAttempt(binding, "interrupted", cause));
-			await collectFailure(errors, () => this.#emit(binding, "interrupted", { cause }));
+			await collectFailure(errors, () =>
+				this.#commitAttemptTransition(binding, "interrupted", [{ kind: "interrupted", payload: { cause } }], {
+					cause,
+					expectedStates: [previousAttemptState],
+				}),
+			);
 		} else if (cause === "requested" && wasRunning) {
 			binding.attemptState = "cancelled";
-			await collectFailure(errors, () => this.store.putAttempt(binding, "cancelled", "binding_released"));
-			await collectFailure(errors, () => this.#emit(binding, "cancelled", { cause: "binding_released" }));
+			await collectFailure(errors, () =>
+				this.#commitAttemptTransition(
+					binding,
+					"cancelled",
+					[{ kind: "cancelled", payload: { cause: "binding_released" } }],
+					{ cause: "binding_released", expectedStates: [previousAttemptState] },
+				),
+			);
+		} else {
+			await collectFailure(errors, () => this.store.putBinding(this.#snapshot(binding)));
 		}
 		throwCollectedFailures(errors, `Engine binding ${binding.agentInstanceId} cleanup failed`);
 	}
@@ -1419,23 +1512,7 @@ export class EngineRuntime {
 	}
 
 	async #reconcileLostAttempts(): Promise<void> {
-		const interrupted = await this.store.reconcileInterrupted(this.engineGeneration);
-		for (const attempt of interrupted) {
-			await this.#emit(
-				{
-					commandId: attempt.command_id,
-					agentInstanceId: attempt.agent_instance_id,
-					executionId: attempt.execution_id,
-					attemptId: attempt.attempt_id,
-					engineGeneration: this.engineGeneration,
-					bindingId: attempt.binding_id,
-					bindingGeneration: Number(attempt.binding_generation),
-					authorityGeneration: Number(attempt.authority_generation),
-				},
-				"interrupted",
-				{ cause: "engine_lost", lostEngineGeneration: Number(attempt.engine_generation) },
-			);
-		}
+		this.#notifyEvents(await this.store.interruptGeneration(this.engineGeneration));
 	}
 
 	async #emit(
@@ -1461,8 +1538,56 @@ export class EngineRuntime {
 			kind,
 			payload,
 		});
-		for (const listener of this.#listeners) {
-			void Promise.resolve(listener(event)).catch(() => {});
+		this.#notifyEvents([event]);
+	}
+
+	async #commitEvent(
+		target: Pick<
+			EngineBindingSnapshot,
+			| "commandId"
+			| "agentInstanceId"
+			| "executionId"
+			| "attemptId"
+			| "engineGeneration"
+			| "bindingId"
+			| "bindingGeneration"
+			| "authorityGeneration"
+		>,
+		kind: EngineEvent["kind"],
+		payload?: Record<string, unknown>,
+		causationCommandId = target.commandId,
+		settleCommandId?: string,
+		settleOutcome: "applied" | "rejected" = "applied",
+	): Promise<void> {
+		const event = await this.store.commitEvent(
+			target,
+			{ kind, payload, causationCommandId },
+			settleCommandId,
+			settleOutcome,
+		);
+		this.#notifyEvents([event]);
+	}
+
+	async #commitAttemptTransition(
+		binding: LiveBinding,
+		state: EngineAttemptState,
+		events: readonly EngineTransitionEvent[],
+		options: {
+			cause?: string;
+			settleCommandId?: string;
+			expectedStates?: readonly EngineAttemptState[];
+			requireNew?: boolean;
+		} = {},
+	): Promise<void> {
+		const committed = await this.store.commitAttemptTransition(this.#snapshot(binding), state, events, options);
+		this.#notifyEvents(committed);
+	}
+
+	#notifyEvents(events: readonly EngineEvent[]): void {
+		for (const event of events) {
+			for (const listener of this.#listeners) {
+				void Promise.resolve(listener(event)).catch(() => {});
+			}
 		}
 	}
 

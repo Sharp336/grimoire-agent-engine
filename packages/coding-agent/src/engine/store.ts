@@ -78,6 +78,12 @@ export interface EngineCommandReceipt {
 	detail?: Record<string, unknown>;
 }
 
+export interface EngineTransitionEvent {
+	kind: EngineEvent["kind"];
+	payload?: Record<string, unknown>;
+	causationCommandId?: string;
+}
+
 export type EngineCommandAdmission =
 	| { status: "claimed" }
 	| { status: "in_progress" }
@@ -94,6 +100,13 @@ export class EngineCommandConflictError extends Error {
 	constructor(commandId: string) {
 		super(`Command ${commandId} was already admitted with different canonical content`);
 		this.name = "EngineCommandConflictError";
+	}
+}
+
+export class EngineAttemptConflictError extends Error {
+	constructor(attemptId: string) {
+		super(`Attempt ${attemptId} is already bound to another runtime identity`);
+		this.name = "EngineAttemptConflictError";
 	}
 }
 
@@ -388,27 +401,7 @@ export class EngineStore {
 	}
 
 	async settleCommand(commandId: string, canonicalHash: string, receipt: EngineCommandReceipt): Promise<void> {
-		const serialized = JSON.stringify(receipt);
-		await this.#transaction(async sql => {
-			const rows = (await sql.unsafe(
-				"SELECT canonical_hash, state, processor_generation, receipt FROM engine_commands WHERE command_id = ?",
-				[commandId],
-			)) as CommandRow[];
-			const existing = rows[0];
-			if (!existing) throw new Error(`Command ${commandId} was not admitted`);
-			if (existing.canonical_hash !== canonicalHash) throw new EngineCommandConflictError(commandId);
-			if (existing.state === "settled") {
-				if (existing.receipt !== serialized) throw new Error(`Command ${commandId} already has another receipt`);
-				return;
-			}
-			const now = Date.now();
-			await sql.unsafe(
-				`UPDATE engine_commands
-				 SET state='settled', processor_generation=NULL, outcome=?, receipt=?, settled_at=?, updated_at=?
-				 WHERE command_id=? AND state='received'`,
-				[receipt.outcome, serialized, now, now, commandId],
-			);
-		});
+		await this.#transaction(sql => this.#settleAdmittedCommand(sql, commandId, receipt, canonicalHash, true));
 	}
 
 	async getBinding(agentInstanceId: string): Promise<EngineBindingSnapshot | undefined> {
@@ -437,67 +430,69 @@ export class EngineStore {
 	}
 
 	async putBinding(binding: EngineBindingSnapshot): Promise<void> {
-		await this.#client.unsafe(
-			`INSERT INTO engine_runtime_bindings(
-			 binding_id, command_id, agent_instance_id, execution_id, attempt_id, engine_agent_id, session_file,
-			 profile_digest, state, engine_generation, binding_generation, authority_generation, updated_at
-			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			 ON CONFLICT(agent_instance_id) DO UPDATE SET
-			 binding_id=excluded.binding_id, command_id=excluded.command_id,
-			 execution_id=excluded.execution_id, attempt_id=excluded.attempt_id,
-			 engine_agent_id=excluded.engine_agent_id, session_file=excluded.session_file,
-			 profile_digest=excluded.profile_digest, state=excluded.state,
-			 engine_generation=excluded.engine_generation, binding_generation=excluded.binding_generation,
-			 authority_generation=excluded.authority_generation,
-			 updated_at=excluded.updated_at`,
-			[
-				binding.bindingId,
-				binding.commandId,
-				binding.agentInstanceId,
-				binding.executionId,
-				binding.attemptId,
-				binding.engineAgentId,
-				binding.sessionFile ?? null,
-				binding.profileDigest,
-				binding.state,
-				binding.engineGeneration,
-				binding.bindingGeneration,
-				binding.authorityGeneration,
-				Date.now(),
-			],
-		);
+		await this.#putBinding(this.#client, binding);
 	}
 
 	async putAttempt(binding: EngineBindingSnapshot, state: EngineAttemptState, cause?: string): Promise<boolean> {
-		const rows = (await this.#client.unsafe(
-			`INSERT INTO engine_attempts(
-			 attempt_id, command_id, agent_instance_id, execution_id, binding_id, engine_generation,
-			 binding_generation, authority_generation, state, cause, updated_at
-			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			 ON CONFLICT(attempt_id) DO UPDATE SET state=excluded.state, cause=excluded.cause,
-			 updated_at=excluded.updated_at
-			 WHERE engine_attempts.agent_instance_id=excluded.agent_instance_id
-			   AND engine_attempts.execution_id=excluded.execution_id
-			   AND engine_attempts.binding_id=excluded.binding_id
-			   AND engine_attempts.engine_generation=excluded.engine_generation
-			   AND engine_attempts.binding_generation=excluded.binding_generation
-			   AND engine_attempts.authority_generation=excluded.authority_generation
-			 RETURNING attempt_id`,
-			[
+		return await this.#putAttempt(this.#client, binding, state, cause);
+	}
+
+	async commitAttemptTransition(
+		binding: EngineBindingSnapshot,
+		state: EngineAttemptState,
+		events: readonly EngineTransitionEvent[],
+		options: {
+			cause?: string;
+			settleCommandId?: string;
+			expectedStates?: readonly EngineAttemptState[];
+			requireNew?: boolean;
+		} = {},
+	): Promise<EngineEvent[]> {
+		return await this.#transaction(async sql => {
+			const rows = (await sql.unsafe("SELECT state FROM engine_attempts WHERE attempt_id=?", [
 				binding.attemptId,
-				binding.commandId,
-				binding.agentInstanceId,
-				binding.executionId,
-				binding.bindingId,
-				binding.engineGeneration,
-				binding.bindingGeneration,
-				binding.authorityGeneration,
-				state,
-				cause ?? null,
-				Date.now(),
-			],
-		)) as Array<{ attempt_id: string }>;
-		return rows.length === 1;
+			])) as Array<{ state: EngineAttemptState }>;
+			const current = rows[0]?.state;
+			if (
+				(options.requireNew && current !== undefined) ||
+				(options.expectedStates && (current === undefined || !options.expectedStates.includes(current)))
+			) {
+				throw new EngineAttemptConflictError(binding.attemptId);
+			}
+			await this.#putBinding(sql, binding);
+			if (!(await this.#putAttempt(sql, binding, state, options.cause))) {
+				throw new EngineAttemptConflictError(binding.attemptId);
+			}
+			const committed: EngineEvent[] = [];
+			for (const event of events) committed.push(await this.#appendTransitionEvent(sql, binding, event));
+			if (options.settleCommandId) {
+				await this.#settleAdmittedCommand(sql, options.settleCommandId, { outcome: "applied" });
+			}
+			return committed;
+		});
+	}
+
+	async commitEvent(
+		target: Pick<
+			EngineBindingSnapshot,
+			| "commandId"
+			| "agentInstanceId"
+			| "executionId"
+			| "attemptId"
+			| "engineGeneration"
+			| "bindingId"
+			| "bindingGeneration"
+			| "authorityGeneration"
+		>,
+		event: EngineTransitionEvent,
+		settleCommandId?: string,
+		settleOutcome: EngineCommandReceipt["outcome"] = "applied",
+	): Promise<EngineEvent> {
+		return await this.#transaction(async sql => {
+			const committed = await this.#appendTransitionEvent(sql, target, event);
+			if (settleCommandId) await this.#settleAdmittedCommand(sql, settleCommandId, { outcome: settleOutcome });
+			return committed;
+		});
 	}
 
 	async getAttempt(attemptId: string): Promise<EngineAttemptRow | undefined> {
@@ -510,59 +505,54 @@ export class EngineStore {
 		return rows[0];
 	}
 
-	async reconcileInterrupted(engineGeneration: number): Promise<EngineAttemptRow[]> {
-		const active = (await this.#client.unsafe(
-			`SELECT agent_instance_id, execution_id, attempt_id, command_id, binding_id, engine_generation, binding_generation,
-			 authority_generation, state
-			 FROM engine_attempts
-			 WHERE engine_generation < ? AND state IN ('accepted', 'running', 'pause_requested', 'paused', 'waiting_input', 'cancel_requested')`,
-			[engineGeneration],
-		)) as EngineAttemptRow[];
-		const now = Date.now();
-		await this.#client.unsafe(
-			`UPDATE engine_attempts SET state='interrupted', cause='engine_lost', updated_at=?
-			 WHERE engine_generation < ? AND state IN ('accepted', 'running', 'pause_requested', 'paused', 'waiting_input', 'cancel_requested')`,
-			[now, engineGeneration],
-		);
-		await this.#client.unsafe(
-			`UPDATE engine_runtime_bindings SET state='released', updated_at=?
-			 WHERE engine_generation < ? AND state <> 'released'`,
-			[now, engineGeneration],
-		);
-		return active;
+	async interruptGeneration(engineGeneration: number): Promise<EngineEvent[]> {
+		return await this.#transaction(async sql => {
+			const active = (await sql.unsafe(
+				`SELECT agent_instance_id, execution_id, attempt_id, command_id, binding_id, engine_generation, binding_generation,
+				 authority_generation, state
+				 FROM engine_attempts
+				 WHERE engine_generation < ? AND state IN ('accepted', 'running', 'pause_requested', 'paused', 'waiting_input', 'cancel_requested')`,
+				[engineGeneration],
+			)) as EngineAttemptRow[];
+			const now = Date.now();
+			await sql.unsafe(
+				`UPDATE engine_attempts SET state='interrupted', cause='engine_lost', updated_at=?
+				 WHERE engine_generation < ? AND state IN ('accepted', 'running', 'pause_requested', 'paused', 'waiting_input', 'cancel_requested')`,
+				[now, engineGeneration],
+			);
+			await sql.unsafe(
+				`UPDATE engine_runtime_bindings SET state='released', updated_at=?
+				 WHERE engine_generation < ? AND state <> 'released'`,
+				[now, engineGeneration],
+			);
+			const events: EngineEvent[] = [];
+			for (const attempt of active) {
+				events.push(
+					await this.#appendTransitionEvent(
+						sql,
+						{
+							commandId: attempt.command_id,
+							agentInstanceId: attempt.agent_instance_id,
+							executionId: attempt.execution_id,
+							attemptId: attempt.attempt_id,
+							engineGeneration,
+							bindingId: attempt.binding_id,
+							bindingGeneration: Number(attempt.binding_generation),
+							authorityGeneration: Number(attempt.authority_generation),
+						},
+						{
+							kind: "interrupted",
+							payload: { cause: "engine_lost", lostEngineGeneration: Number(attempt.engine_generation) },
+						},
+					),
+				);
+			}
+			return events;
+		});
 	}
 
 	async appendEvent(event: Omit<EngineEvent, "eventId" | "seq" | "createdAt">): Promise<EngineEvent> {
-		return await this.#transaction(async sql => {
-			const seqRows = (await sql.unsafe(
-				`INSERT INTO engine_agent_seq(agent_instance_id, seq) VALUES (?, 1)
-				 ON CONFLICT(agent_instance_id) DO UPDATE SET seq=seq+1 RETURNING seq`,
-				[event.agentInstanceId],
-			)) as SeqRow[];
-			const seq = Number(seqRows[0]?.seq ?? 1);
-			const createdAt = Date.now();
-			const rows = (await sql.unsafe(
-				`INSERT INTO engine_event_outbox(
-				 seq, causation_command_id, agent_instance_id, execution_id, attempt_id, binding_id, engine_generation,
-				 binding_generation, authority_generation, kind, payload, created_at
-				 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING event_id`,
-				[
-					seq,
-					event.causationCommandId,
-					event.agentInstanceId,
-					event.executionId,
-					event.attemptId,
-					event.bindingId,
-					event.engineGeneration,
-					event.bindingGeneration,
-					event.authorityGeneration,
-					event.kind,
-					event.payload ? JSON.stringify(event.payload) : null,
-					createdAt,
-				],
-			)) as Array<{ event_id: number }>;
-			return { ...event, eventId: Number(rows[0]?.event_id), seq, createdAt };
-		});
+		return await this.#transaction(sql => this.#appendEvent(sql, event));
 	}
 
 	async pendingEvents(limit = 100): Promise<EngineEvent[]> {
@@ -604,6 +594,163 @@ export class EngineStore {
 	async close(): Promise<void> {
 		await this.drain();
 		await this.#client.end();
+	}
+
+	async #putBinding(sql: SqlClient, binding: EngineBindingSnapshot): Promise<void> {
+		await sql.unsafe(
+			`INSERT INTO engine_runtime_bindings(
+			 binding_id, command_id, agent_instance_id, execution_id, attempt_id, engine_agent_id, session_file,
+			 profile_digest, state, engine_generation, binding_generation, authority_generation, updated_at
+			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(agent_instance_id) DO UPDATE SET
+			 binding_id=excluded.binding_id, command_id=excluded.command_id,
+			 execution_id=excluded.execution_id, attempt_id=excluded.attempt_id,
+			 engine_agent_id=excluded.engine_agent_id, session_file=excluded.session_file,
+			 profile_digest=excluded.profile_digest, state=excluded.state,
+			 engine_generation=excluded.engine_generation, binding_generation=excluded.binding_generation,
+			 authority_generation=excluded.authority_generation,
+			 updated_at=excluded.updated_at`,
+			[
+				binding.bindingId,
+				binding.commandId,
+				binding.agentInstanceId,
+				binding.executionId,
+				binding.attemptId,
+				binding.engineAgentId,
+				binding.sessionFile ?? null,
+				binding.profileDigest,
+				binding.state,
+				binding.engineGeneration,
+				binding.bindingGeneration,
+				binding.authorityGeneration,
+				Date.now(),
+			],
+		);
+	}
+
+	async #putAttempt(
+		sql: SqlClient,
+		binding: EngineBindingSnapshot,
+		state: EngineAttemptState,
+		cause?: string,
+	): Promise<boolean> {
+		const rows = (await sql.unsafe(
+			`INSERT INTO engine_attempts(
+			 attempt_id, command_id, agent_instance_id, execution_id, binding_id, engine_generation,
+			 binding_generation, authority_generation, state, cause, updated_at
+			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 ON CONFLICT(attempt_id) DO UPDATE SET state=excluded.state, cause=excluded.cause,
+			 updated_at=excluded.updated_at
+			 WHERE engine_attempts.agent_instance_id=excluded.agent_instance_id
+			   AND engine_attempts.execution_id=excluded.execution_id
+			   AND engine_attempts.binding_id=excluded.binding_id
+			   AND engine_attempts.engine_generation=excluded.engine_generation
+			   AND engine_attempts.binding_generation=excluded.binding_generation
+			   AND engine_attempts.authority_generation=excluded.authority_generation
+			 RETURNING attempt_id`,
+			[
+				binding.attemptId,
+				binding.commandId,
+				binding.agentInstanceId,
+				binding.executionId,
+				binding.bindingId,
+				binding.engineGeneration,
+				binding.bindingGeneration,
+				binding.authorityGeneration,
+				state,
+				cause ?? null,
+				Date.now(),
+			],
+		)) as Array<{ attempt_id: string }>;
+		return rows.length === 1;
+	}
+
+	#appendTransitionEvent(
+		sql: SqlClient,
+		target: Pick<
+			EngineBindingSnapshot,
+			| "commandId"
+			| "agentInstanceId"
+			| "executionId"
+			| "attemptId"
+			| "engineGeneration"
+			| "bindingId"
+			| "bindingGeneration"
+			| "authorityGeneration"
+		>,
+		event: EngineTransitionEvent,
+	): Promise<EngineEvent> {
+		const { commandId: _, ...eventTarget } = target;
+		return this.#appendEvent(sql, {
+			...eventTarget,
+			causationCommandId: event.causationCommandId ?? target.commandId,
+			kind: event.kind,
+			payload: event.payload,
+		});
+	}
+
+	async #appendEvent(sql: SqlClient, event: Omit<EngineEvent, "eventId" | "seq" | "createdAt">): Promise<EngineEvent> {
+		const seqRows = (await sql.unsafe(
+			`INSERT INTO engine_agent_seq(agent_instance_id, seq) VALUES (?, 1)
+			 ON CONFLICT(agent_instance_id) DO UPDATE SET seq=seq+1 RETURNING seq`,
+			[event.agentInstanceId],
+		)) as SeqRow[];
+		const seq = Number(seqRows[0]?.seq ?? 1);
+		const createdAt = Date.now();
+		const rows = (await sql.unsafe(
+			`INSERT INTO engine_event_outbox(
+			 seq, causation_command_id, agent_instance_id, execution_id, attempt_id, binding_id, engine_generation,
+			 binding_generation, authority_generation, kind, payload, created_at
+			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING event_id`,
+			[
+				seq,
+				event.causationCommandId,
+				event.agentInstanceId,
+				event.executionId,
+				event.attemptId,
+				event.bindingId,
+				event.engineGeneration,
+				event.bindingGeneration,
+				event.authorityGeneration,
+				event.kind,
+				event.payload ? JSON.stringify(event.payload) : null,
+				createdAt,
+			],
+		)) as Array<{ event_id: number }>;
+		return { ...event, eventId: Number(rows[0]?.event_id), seq, createdAt };
+	}
+
+	async #settleAdmittedCommand(
+		sql: SqlClient,
+		commandId: string,
+		receipt: EngineCommandReceipt,
+		expectedCanonicalHash?: string,
+		required = false,
+	): Promise<void> {
+		const rows = (await sql.unsafe(
+			"SELECT canonical_hash, state, processor_generation, receipt FROM engine_commands WHERE command_id = ?",
+			[commandId],
+		)) as CommandRow[];
+		const existing = rows[0];
+		if (!existing) {
+			if (required) throw new Error(`Command ${commandId} was not admitted`);
+			return;
+		}
+		if (expectedCanonicalHash && existing.canonical_hash !== expectedCanonicalHash) {
+			throw new EngineCommandConflictError(commandId);
+		}
+		const serialized = JSON.stringify(receipt);
+		if (existing.state === "settled") {
+			if (existing.receipt !== serialized) throw new Error(`Command ${commandId} already has another receipt`);
+			return;
+		}
+		const now = Date.now();
+		await sql.unsafe(
+			`UPDATE engine_commands
+			 SET state='settled', processor_generation=NULL, outcome=?, receipt=?, settled_at=?, updated_at=?
+			 WHERE command_id=? AND state='received'`,
+			[receipt.outcome, serialized, now, now, commandId],
+		);
 	}
 
 	#transaction<T>(work: (sql: SqlClient) => Promise<T>): Promise<T> {
