@@ -59,7 +59,6 @@ import {
 type EngineEventListener = (event: EngineEvent) => void | Promise<void>;
 
 const MAX_ASSISTANT_FINAL_CHARS = 48_000;
-const MAX_TRACE_CHARS = 48_000;
 const MAX_INPUT_FIELD_CHARS = 48_000;
 const MAX_INPUT_RESULT_CHARS = 128_000;
 
@@ -109,7 +108,7 @@ interface LiveBinding extends EngineBindingSnapshot {
 	pauseRequests: Map<string, EngineControlInitiator>;
 	resumeCommandIds: Set<string>;
 	traceWriteTail: Promise<void>;
-	traceTools: Map<string, { name: string; summary: string; startedAt: number }>;
+	traceTools: Map<string, { name: string; startedAt: number }>;
 	childLaunchCount: number;
 	modelCallSequence: number;
 	activeModelCalls: Set<Promise<void>>;
@@ -864,32 +863,23 @@ export class EngineRuntime {
 			);
 			binding.unsubscribe = created.session.subscribe(event => {
 				if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_end") {
-					const reasoning = event.assistantMessageEvent.content.trim();
-					if (reasoning)
-						this.#queueTraceEvent(binding, "trace_reasoning", { reasoning: reasoning.slice(0, MAX_TRACE_CHARS) });
+					this.#queueTraceEvent(binding, "trace_reasoning", { state: "completed" });
 				}
 				if (event.type === "tool_execution_start") {
 					binding.activeToolCallIds.add(event.toolCallId);
-					const intent = event.intent?.trim();
-					if (intent)
-						this.#queueTraceEvent(binding, "trace_reasoning", { reasoning: intent.slice(0, MAX_TRACE_CHARS) });
 					let traceName = event.toolName;
-					let traceArgs: unknown = event.args;
 					if (
 						traceName === "write" &&
-						typeof traceArgs === "object" &&
-						traceArgs !== null &&
-						"path" in traceArgs &&
-						typeof traceArgs.path === "string" &&
-						traceArgs.path.startsWith("xd://mcp__")
+						typeof event.args === "object" &&
+						event.args !== null &&
+						"path" in event.args &&
+						typeof event.args.path === "string" &&
+						event.args.path.startsWith("xd://mcp__")
 					) {
-						traceName = traceArgs.path.slice("xd://".length);
-						traceArgs = "content" in traceArgs ? traceArgs.content : {};
+						traceName = event.args.path.slice("xd://".length);
 					}
-					const summary = typeof traceArgs === "string" ? traceArgs : stableStringifyJson(traceArgs);
 					binding.traceTools.set(event.toolCallId, {
 						name: traceName,
-						summary: summary.length > 2_048 ? `${summary.slice(0, 2_048)}…` : summary,
 						startedAt: Date.now(),
 					});
 				}
@@ -900,7 +890,6 @@ export class EngineRuntime {
 					this.#queueTraceEvent(binding, "trace_tool", {
 						tool: {
 							name: started?.name ?? event.toolName,
-							...(started?.summary ? { summary: started.summary } : {}),
 							outcome: event.isError ? "failed" : "ok",
 							...(started ? { took: Math.max(0, Math.round((Date.now() - started.startedAt) / 100) / 10) } : {}),
 						},

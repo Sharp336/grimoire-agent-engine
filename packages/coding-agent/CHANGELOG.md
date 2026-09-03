@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Removed raw reasoning and arbitrary tool inputs from public Agent Engine trace events while preserving bounded activity and outcome metadata.
 - Prevented Agent Engine transcript continuation when profile dependencies, authority, project, workspace, settings/context closure, or explicit continuation policy changed.
 - Kept Agent Engine event delivery alive until graceful shutdown durably interrupts and checkpoints active, paused, and approval-waiting Attempts.
 - Prevented Agent Engine pause and terminal states from becoming visible before their exact OMP transcript prefix is durably checkpointed.

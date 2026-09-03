@@ -850,6 +850,48 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
+	it("keeps reasoning and tool input out of public trace events", async () => {
+		const mock = createMockModel({
+			reasoning: true,
+			responses: [
+				{
+					content: [
+						{ type: "thinking", thinking: "private reasoning sentinel" },
+						{ type: "toolCall", id: "read-private", name: "read", arguments: { path: "private-input.txt" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const { runtime, cwd } = await createRuntime(
+			(session, input) => session.prompt(input),
+			{},
+			{ model: mock.model },
+		);
+		fs.writeFileSync(path.join(cwd, "private-input.txt"), "private tool output sentinel");
+		await runtime.start(
+			{
+				commandId: "command-public-trace",
+				agentInstanceId: "agent-public-trace",
+				executionId: "execution-public-trace",
+				attemptId: "attempt-public-trace",
+				authorityGeneration: 1,
+				cwd,
+				input: "inspect the file",
+			},
+			{ ...profile, toolNames: ["read"], restrictToolNames: true },
+		);
+		await runtime.drain();
+		const events = await runtime.store.pendingEvents();
+		const trace = events.filter(event => event.kind.startsWith("trace_"));
+		expect(trace.some(event => event.kind === "trace_reasoning")).toBe(true);
+		expect(trace.some(event => event.kind === "trace_tool")).toBe(true);
+		expect(JSON.stringify(events)).not.toMatch(
+			/private reasoning sentinel|private-input\.txt|private tool output sentinel/,
+		);
+		await runtime.dispose();
+	}, 60_000);
+
 	it("launches six pinned children in parallel and rejects the seventh", async () => {
 		let taskResults: string[] = [];
 		const launches: Array<{ toolCallId: string; maxSpawnDepth: number }> = [];
