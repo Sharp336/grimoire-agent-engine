@@ -4,6 +4,7 @@ import {
 	DeliverPolicy,
 	JetStreamApiCodes,
 	JetStreamApiError,
+	type JetStreamClient,
 	jetstream,
 	jetstreamManager,
 	ReplayPolicy,
@@ -29,6 +30,7 @@ interface BridgeClaim {
 		message?: AgentMessageEnvelope;
 	};
 	heartbeatFailures: number;
+	published: boolean;
 }
 
 export interface GrimoireRpc {
@@ -192,7 +194,9 @@ export class HostedEngineBridge {
 	readonly #active = new Map<string, BridgeClaim>();
 	readonly #loops = new Set<Promise<void>>();
 	readonly #stop = Promise.withResolvers<void>();
+	#claimLoop: Promise<void> = Promise.resolve();
 	#events: ConsumerMessages | undefined;
+	#accepting = true;
 	#stopping = false;
 
 	private constructor(options: HostedEngineBridgeOptions, connection: NatsConnection) {
@@ -219,11 +223,26 @@ export class HostedEngineBridge {
 
 	async dispose(): Promise<void> {
 		if (this.#stopping) return;
+		await this.stopAdmission();
 		this.#stopping = true;
 		this.#stop.resolve();
 		await this.#events?.close();
 		await Promise.all(this.#loops);
 		await this.#connection.drain();
+	}
+
+	async stopAdmission(): Promise<void> {
+		this.#accepting = false;
+		await this.#claimLoop;
+	}
+
+	async drain(timeoutMs = 3_000): Promise<void> {
+		const deadline = Date.now() + timeoutMs;
+		while (this.#active.size > 0) {
+			if (Date.now() >= deadline)
+				throw new Error(`Hosted Engine bridge still has ${this.#active.size} active claim(s)`);
+			await Bun.sleep(25);
+		}
 	}
 
 	async #start(): Promise<void> {
@@ -250,14 +269,25 @@ export class HostedEngineBridge {
 		}
 		const consumer = await jetstream(this.#connection).consumers.get(ENGINE_EVENT_STREAM, durable);
 		this.#events = await consumer.consume({ max_messages: 128 });
-		this.#track(this.#claimLoop());
+		this.#claimLoop = this.#claimCommands();
+		this.#track(this.#claimLoop);
 		this.#track(this.#eventLoop(this.#events));
 		this.#track(this.#heartbeatLoop());
 	}
 
-	async #claimLoop(): Promise<void> {
+	async #claimCommands(): Promise<void> {
 		const js = jetstream(this.#connection);
-		while (!this.#stopping) {
+		while (this.#accepting && !this.#stopping) {
+			const pending = [...this.#active.values()].find(claim => !claim.published);
+			if (pending) {
+				try {
+					await this.#publishClaim(js, pending);
+				} catch (error) {
+					this.#report(error);
+					await Bun.sleep(1_000);
+				}
+				continue;
+			}
 			if (this.#active.size >= 128) {
 				await Bun.sleep(this.#options.pollIntervalMs ?? 250);
 				continue;
@@ -276,33 +306,38 @@ export class HostedEngineBridge {
 				}
 				const claim = parseClaim(result);
 				this.#active.set(claim.jobId, claim);
-				if (claim.operationType === "agent_engine_message") {
-					const message = claim.work.message;
-					if (!message) throw new Error("Agent Engine message claim has no message envelope");
-					await js.publish(messageSubject(this.#options.deviceId, message), encode(message), {
-						msgID: message.messageId,
-					});
-					await this.#options.rpc.call("grimoire_agent_engine_bridge", {
-						action: "published",
-						device_id: this.#options.deviceId,
-						engine_id: this.#options.engineId,
-						job_id: claim.jobId,
-						lease_token: claim.leaseToken,
-					});
-					this.#active.delete(claim.jobId);
-					continue;
-				}
-				const command = claim.work.command;
-				if (!command) throw new Error("Agent Engine command claim has no command envelope");
-				const envelope = { ...command, engineGeneration: this.#options.engineGeneration } as EngineCommandEnvelope;
-				await js.publish(commandSubject(envelope), encode(envelope), {
-					msgID: `${envelope.commandId}:${envelope.engineGeneration}`,
-				});
+				await this.#publishClaim(js, claim);
 			} catch (error) {
 				this.#report(error);
 				await Bun.sleep(1_000);
 			}
 		}
+	}
+
+	async #publishClaim(js: JetStreamClient, claim: BridgeClaim): Promise<void> {
+		if (claim.operationType === "agent_engine_message") {
+			const message = claim.work.message;
+			if (!message) throw new Error("Agent Engine message claim has no message envelope");
+			await js.publish(messageSubject(this.#options.deviceId, message), encode(message), {
+				msgID: message.messageId,
+			});
+			await this.#options.rpc.call("grimoire_agent_engine_bridge", {
+				action: "published",
+				device_id: this.#options.deviceId,
+				engine_id: this.#options.engineId,
+				job_id: claim.jobId,
+				lease_token: claim.leaseToken,
+			});
+			this.#active.delete(claim.jobId);
+			return;
+		}
+		const command = claim.work.command;
+		if (!command) throw new Error("Agent Engine command claim has no command envelope");
+		const envelope = { ...command, engineGeneration: this.#options.engineGeneration } as EngineCommandEnvelope;
+		await js.publish(commandSubject(envelope), encode(envelope), {
+			msgID: `${envelope.commandId}:${envelope.engineGeneration}`,
+		});
+		claim.published = true;
 	}
 
 	async #eventLoop(messages: ConsumerMessages): Promise<void> {
@@ -336,6 +371,7 @@ export class HostedEngineBridge {
 					if (claim.jobId !== event.causationCommandId || claim.operationType !== "agent_engine_command") {
 						throw new Error("Recovered Agent Engine claim does not match its event");
 					}
+					claim.published = true;
 					this.#active.set(claim.jobId, claim);
 				}
 				const result = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
@@ -410,6 +446,7 @@ function parseClaim(value: Record<string, unknown>): BridgeClaim {
 		operationType: value.operation_type,
 		work: value.work as BridgeClaim["work"],
 		heartbeatFailures: 0,
+		published: false,
 	};
 }
 

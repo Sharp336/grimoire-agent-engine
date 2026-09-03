@@ -8,6 +8,7 @@ import type { EffectiveExtensionRoots } from "../capability/types";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
 import { EditTool } from "../edit";
+import type { EngineInboxItem } from "../engine/contracts";
 import { checkJuliaKernelAvailability } from "../eval/jl/kernel";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import { checkRubyKernelAvailability } from "../eval/rb/kernel";
@@ -182,12 +183,30 @@ export interface EngineChildLauncher {
 	}): Promise<EngineChildLaunchResult>;
 }
 
+export type EngineInboxToolRequest =
+	| { action: "list"; includeTerminal?: boolean }
+	| { action: "read"; queueId: string }
+	| {
+			action: "edit" | "annotate" | "defer" | "acknowledge" | "drop";
+			mutationId: string;
+			queueId: string;
+			expectedRevision: number;
+			value?: string | number | null;
+	  }
+	| { action: "reorder"; mutationId: string; expectedOrder: string[]; desiredOrder: string[] };
+
+export interface EngineInboxController {
+	invoke(request: EngineInboxToolRequest): Promise<EngineInboxItem[]>;
+}
+
 /** Session context for tool factories */
 export interface ToolSession {
 	/** Rootless multi-session Engine path: disables ambient process-global routing fallbacks. */
 	engineMode?: boolean;
 	/** Engine-mode child dispatch through Grimoire AgentInstance/Attempt identities. */
 	engineChildLauncher?: EngineChildLauncher;
+	/** Engine-owned durable inbox exposed through the native hub tool. */
+	engineInbox?: EngineInboxController;
 	/** Current working directory */
 	cwd: string;
 	/** Additional workspace directories beyond cwd (multi-root), forwarded to subagents. */

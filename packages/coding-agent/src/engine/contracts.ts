@@ -18,6 +18,8 @@ export interface EngineLaunchProfile {
 	/** Empty disables nested agents; "*" enables the native OMP spawn surface. */
 	spawns: string;
 	profileDigest: string;
+	/** Exact reopens prior conversation state; fresh always starts a new transcript. */
+	continuationPolicy?: "exact" | "fresh";
 	launchProfileRef?: string;
 	selectedRouteRef?: string;
 	/** Descendants allowed below this session. Artel default: one leaf child. */
@@ -115,6 +117,52 @@ export interface EnginePeerMessage {
 	replyToMessageId?: string;
 }
 
+export type EngineInboxSourceType = "user" | "agent" | "runtime";
+export type EngineInboxDisposition = "pending" | "acknowledged" | "dropped";
+
+export interface EngineInboxTarget extends EngineTarget {
+	sessionId: string;
+}
+
+export interface EngineInboxSource {
+	sourceEventId: string;
+	sourceType: EngineInboxSourceType;
+	sender?: string;
+	body: string;
+	createdAt: number;
+	deliverAt?: number;
+	wakeIntent?: boolean;
+}
+
+export interface EngineInboxItem {
+	queueId: string;
+	sessionId: string;
+	agentInstanceId: string;
+	attemptId: string;
+	sourceEventId: string;
+	sourceType: EngineInboxSourceType;
+	sender?: string;
+	sourceBody: string;
+	deliveryPayload: string;
+	annotation?: string;
+	deliverAt?: number;
+	wakeIntent: boolean;
+	wakeDeliveredAt?: number;
+	position: number;
+	disposition: EngineInboxDisposition;
+	revision: number;
+	createdAt: number;
+	updatedAt: number;
+}
+
+export interface EngineInboxMutation {
+	mutationId: string;
+	queueId: string;
+	expectedRevision: number;
+	op: "edit" | "annotate" | "defer" | "acknowledge" | "drop";
+	value?: string | number | null;
+}
+
 export interface EngineBindingSnapshot extends EngineTarget {
 	commandId: string;
 	engineAgentId: string;
@@ -179,6 +227,9 @@ export interface EngineEvent {
 		| "input_resolved"
 		| "tool_started"
 		| "tool_settled"
+		| "model_started"
+		| "model_settled"
+		| "inbox_changed"
 		| "trace_reasoning"
 		| "trace_tool";
 	payload?: Record<string, unknown>;

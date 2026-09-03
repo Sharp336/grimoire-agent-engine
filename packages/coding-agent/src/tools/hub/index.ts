@@ -26,6 +26,7 @@ import type {
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { prompt } from "@oh-my-pi/pi-utils";
+import type { EngineInboxItem } from "../../engine/contracts";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { IrcBus } from "../../irc/bus";
 import type { Theme } from "../../modes/theme/theme";
@@ -89,6 +90,17 @@ const hubSchema = type({
 	"ids?": type("string[]").describe("wait: job ids to watch (omit = all running jobs); cancel: job ids to kill"),
 	"timeoutMs?": type("number").describe("wait (messages/jobs): timeout in milliseconds (0 waits indefinitely)"),
 	"peek?": type("boolean").describe("inbox: list messages without consuming them"),
+	"inboxAction?": type(
+		"'list' | 'read' | 'edit' | 'reorder' | 'annotate' | 'defer' | 'acknowledge' | 'drop'",
+	).describe("Engine inbox: durable projection operation; defaults to list"),
+	"queueId?": type("string > 0").describe("Engine inbox: queue item id"),
+	"expectedRevision?": type("number >= 1").describe("Engine inbox: optimistic item revision"),
+	"deliveryPayload?": type("string > 0").describe("Engine inbox edit: future delivery text"),
+	"annotation?": type("string").describe("Engine inbox annotate: note for the queued item"),
+	"deliverAt?": type("number >= 0").describe("Engine inbox defer: Unix epoch milliseconds"),
+	"expectedOrder?": type("string[]").describe("Engine inbox reorder: current queue ids in order"),
+	"desiredOrder?": type("string[]").describe("Engine inbox reorder: desired queue ids in order"),
+	"includeTerminal?": type("boolean").describe("Engine inbox list: include acknowledged and dropped items"),
 	"status?": type("'running' | 'idle' | 'parked'").describe("list: filter by status; omit for running+idle"),
 	"limit?": type("number > 0").describe(
 		`list: max peer rows; default ${DEFAULT_HUB_LIST_LIMIT}, max ${MAX_HUB_LIST_LIMIT}`,
@@ -268,7 +280,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 	}
 
 	async execute(
-		_toolCallId: string,
+		toolCallId: string,
 		params: HubParams,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<HubDetails>,
@@ -303,6 +315,7 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 				return executeSend(messaging, params, signal);
 			}
 			case "inbox": {
+				if (this.session.engineInbox) return await this.#executeEngineInbox(toolCallId, params);
 				const messaging = this.#messaging();
 				if (!messaging) return hubErrorResult("Peer messaging is unavailable in this session.", { op: "inbox" });
 				return executeInbox(messaging.registry, messaging.senderId, params.peek, messaging.ircBus);
@@ -333,6 +346,75 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 			default:
 				return hubErrorResult("Unknown hub op.", { op: params.op });
 		}
+	}
+
+	async #executeEngineInbox(toolCallId: string, params: HubParams): Promise<AgentToolResult<HubDetails>> {
+		const controller = this.session.engineInbox;
+		if (!controller) return hubErrorResult("Engine inbox is unavailable in this session.", { op: "inbox" });
+		const action = params.inboxAction ?? "list";
+		let items: EngineInboxItem[];
+		switch (action) {
+			case "list":
+				items = await controller.invoke({ action, includeTerminal: params.includeTerminal });
+				break;
+			case "read":
+				if (!params.queueId) return hubErrorResult("`queueId` is required for inbox read.", { op: "inbox" });
+				items = await controller.invoke({ action, queueId: params.queueId });
+				break;
+			case "reorder":
+				if (!params.expectedOrder || !params.desiredOrder) {
+					return hubErrorResult("`expectedOrder` and `desiredOrder` are required for inbox reorder.", {
+						op: "inbox",
+					});
+				}
+				items = await controller.invoke({
+					action,
+					mutationId: toolCallId,
+					expectedOrder: params.expectedOrder,
+					desiredOrder: params.desiredOrder,
+				});
+				break;
+			default: {
+				if (!params.queueId || params.expectedRevision === undefined) {
+					return hubErrorResult("`queueId` and `expectedRevision` are required for inbox mutation.", {
+						op: "inbox",
+					});
+				}
+				const value =
+					action === "edit"
+						? params.deliveryPayload
+						: action === "annotate"
+							? (params.annotation ?? "")
+							: action === "defer"
+								? params.deliverAt
+								: undefined;
+				if ((action === "edit" || action === "defer") && value === undefined) {
+					return hubErrorResult(`Inbox ${action} requires its value field.`, { op: "inbox" });
+				}
+				items = await controller.invoke({
+					action,
+					mutationId: toolCallId,
+					queueId: params.queueId,
+					expectedRevision: params.expectedRevision,
+					value,
+				});
+			}
+		}
+		const senderId = this.session.getAgentId?.() ?? "agent";
+		return {
+			content: [{ type: "text", text: items.length ? JSON.stringify(items) : "Inbox is empty." }],
+			details: {
+				op: "inbox",
+				queue: items,
+				inbox: items.map(item => ({
+					id: item.queueId,
+					from: item.sender ?? item.sourceType,
+					to: senderId,
+					body: item.deliveryPayload,
+					ts: item.createdAt,
+				})),
+			},
+		};
 	}
 
 	/** Job visibility scope: everything the calling agent owns (tests/SDK without an agent id see all). */

@@ -6,7 +6,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils/dirs";
 import { ModelRegistry } from "../config/model-registry";
-import { Settings } from "../config/settings";
+import { SETTINGS_SCHEMA, type SettingPath, Settings } from "../config/settings";
 import type { CreateAgentSessionOptions } from "../sdk";
 import { AuthStorage, SqliteAuthCredentialStore } from "../session/auth-storage";
 import type { EngineChildProfile } from "../tools";
@@ -94,6 +94,58 @@ export class EngineProfileResolver {
 		readonly credentialRoot: string,
 		readonly localCredentialDbPath: string = getAgentDbPath(),
 	) {}
+
+	async continuationDigest(launch: EngineLaunchProfile, cwd: string): Promise<string> {
+		const profileRef = requiredRef(launch.launchProfileRef, "launchProfileRef");
+		const cachedProfile = await this.#read(profileRef, "grimoire.agent_profile.v1");
+		if (cachedProfile.content_hash !== launch.profileDigest) {
+			throw new Error("AgentProfile digest does not match the cached Artifact");
+		}
+		const profile = parseJson<AgentProfile>(cachedProfile.content, "AgentProfile");
+		if (profile.schema !== "grimoire.agent_profile.v1" || profile.status === "disabled" || !profile.models?.length) {
+			throw new Error("AgentProfile must contain at least one route");
+		}
+		const spawnPolicy = resolveSpawnPolicy(profile, launch);
+		const settings = await Settings.loadReadOnly({
+			cwd,
+			overrides: {
+				disabledProviders: launch.disabledCapabilityProviders ?? [],
+				"lsp.shared": launch.lspShared ?? false,
+				"task.maxRecursionDepth": spawnPolicy.maxSpawnDepth,
+			},
+		});
+		const routes: Record<string, unknown>[] = [];
+		for (const routeRef of await this.#routeCandidates(profile, launch.selectedRouteRef)) {
+			try {
+				const cachedRoute = await this.#read(routeRef, "grimoire.available_model_route.v1");
+				const route = parseJson<AvailableModelRoute>(cachedRoute.content, "AvailableModelRoute");
+				const accountRef = requiredRef(route.providerAccountRef, "providerAccountRef");
+				const cachedAccount = await this.#read(accountRef, "grimoire.provider_account.v1");
+				routes.push({
+					ref: routeRef,
+					contentHash: cachedRoute.content_hash,
+					accountRef,
+					accountContentHash: cachedAccount.content_hash,
+				});
+			} catch {
+				routes.push({ ref: routeRef, unavailable: true });
+			}
+		}
+		const childProfiles = [];
+		for (const ref of spawnPolicy.childProfileRefs) {
+			const cached = await this.#read(ref, "grimoire.agent_profile.v1");
+			childProfiles.push({ ref, contentHash: cached.content_hash });
+		}
+		return digestJson({
+			profileRef,
+			profileContentHash: cachedProfile.content_hash,
+			routes,
+			childProfiles,
+			settings: Object.fromEntries(
+				(Object.keys(SETTINGS_SCHEMA) as SettingPath[]).map(key => [key, settings.get(key)]),
+			),
+		});
+	}
 
 	async resolve(launch: EngineLaunchProfile, cwd: string): Promise<ResolvedEngineSessionProfile> {
 		const disabledProviders = launch.disabledCapabilityProviders ?? [];
@@ -512,5 +564,9 @@ async function atomicWriteJson(file: string, value: unknown): Promise<void> {
 }
 
 function credentialHash(credential: AuthCredential): string {
-	return `sha256:${createHash("sha256").update(stableStringifyJson(credential), "utf8").digest("hex")}`;
+	return digestJson(credential);
+}
+
+function digestJson(value: unknown): string {
+	return `sha256:${createHash("sha256").update(stableStringifyJson(value), "utf8").digest("hex")}`;
 }

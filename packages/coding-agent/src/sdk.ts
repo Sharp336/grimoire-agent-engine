@@ -210,6 +210,7 @@ import {
 	discoverStartupLspServers,
 	EditTool,
 	type EngineChildLauncher,
+	type EngineInboxController,
 	EvalTool,
 	GlobTool,
 	GrepTool,
@@ -576,6 +577,8 @@ export interface CreateAgentSessionOptions {
 	toolExecutionHook?: ToolExecutionHook;
 	/** Engine-only conscious child profile dispatcher. */
 	engineChildLauncher?: EngineChildLauncher;
+	/** Engine-owned durable inbox exposed through the native hub tool. */
+	engineInbox?: EngineInboxController;
 	/**
 	 * Registry generation authorized for this creation. `null` requires the id
 	 * to be absent; an AgentRef allows a parked revival to reuse only that ref.
@@ -1832,6 +1835,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		};
 		const toolSession: ToolSession = {
 			engineChildLauncher: options.engineChildLauncher,
+			engineInbox: options.engineInbox,
 			engineMode: options.engineMode,
 			get cwd() {
 				return sessionManager.getCwd();

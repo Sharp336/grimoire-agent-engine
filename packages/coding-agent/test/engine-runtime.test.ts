@@ -14,6 +14,7 @@ import type {
 import { EngineRuntime, type EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { getLspResourceCounts } from "@oh-my-pi/pi-coding-agent/lsp/client";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { resolveProviderCandidates } from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -74,6 +75,9 @@ describe("EngineRuntime", () => {
 			},
 			...overrides,
 		};
+		if (options.resolveSessionProfile && !options.resolveSessionContinuation) {
+			options.resolveSessionContinuation = async launch => `test:${launch.profileDigest}`;
+		}
 		const runtime = await EngineRuntime.create(options);
 		return { runtime, cwd, options };
 	}
@@ -484,17 +488,21 @@ describe("EngineRuntime", () => {
 				},
 			],
 		};
-		const appendEvent = runtime.store.appendEvent.bind(runtime.store);
-		const appendEventSpy = spyOn(runtime.store, "appendEvent").mockImplementation(async event => {
-			if (event.kind === "input_resolved") throw new Error("injected input_resolved failure");
-			return await appendEvent(event);
-		});
+		const commitAttemptTransition = runtime.store.commitAttemptTransition.bind(runtime.store);
+		const transitionSpy = spyOn(runtime.store, "commitAttemptTransition").mockImplementation(
+			async (binding, state, events, options) => {
+				if (events.some(event => event.kind === "input_resolved")) {
+					throw new Error("injected input_resolved failure");
+				}
+				return await commitAttemptTransition(binding, state, events, options);
+			},
+		);
 		try {
 			await expect(
 				runtime.resolveInput({ ...started, commandId: "command-failed-input-event", inputId, result }),
 			).rejects.toThrow("injected input_resolved failure");
 		} finally {
-			appendEventSpy.mockRestore();
+			transitionSpy.mockRestore();
 		}
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("waiting_input");
 		const resolved = nextEngineEvent(runtime, "input_resolved");
@@ -632,13 +640,16 @@ describe("EngineRuntime", () => {
 			{ ...profile, toolPolicies: { read: "permit" } },
 		);
 		const approval = await approvalRequested;
+		const approvalId = String(approval.payload?.approvalId);
 		expect(executed).toBeFalse();
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("running");
+		expect(await runtime.store.getEffect(approvalId)).toMatchObject({ state: "planned", policy: "permit" });
+		expect(await runtime.store.getApproval(approvalId)).toMatchObject({ state: "pending", decision: null });
 
 		await runtime.resolveToolApproval({
 			...started,
 			commandId: "command-approve",
-			approvalId: String(approval.payload?.approvalId),
+			approvalId,
 			decision: "approve",
 		});
 		await runtime.drain();
@@ -651,6 +662,8 @@ describe("EngineRuntime", () => {
 			"tool_settled",
 		]);
 		expect(events.find(event => event.kind === "tool_approval_resolved")?.causationCommandId).toBe("command-approve");
+		expect(await runtime.store.getEffect(approvalId)).toMatchObject({ state: "settled", outcome: "completed" });
+		expect(await runtime.store.getApproval(approvalId)).toMatchObject({ state: "resolved", decision: "approve" });
 		await runtime.dispose();
 	}, 60_000);
 
@@ -677,7 +690,8 @@ describe("EngineRuntime", () => {
 			},
 			{ ...profile, toolPolicies: { read: "permit" } },
 		);
-		await approvalRequested;
+		const approval = await approvalRequested;
+		const approvalId = String(approval.payload?.approvalId);
 		await runtime.cancel({ ...started, commandId: "command-cancel-permit" });
 		await runtime.drain();
 		expect(executed).toBeFalse();
@@ -687,6 +701,46 @@ describe("EngineRuntime", () => {
 		expect(events.find(event => event.kind === "tool_approval_resolved")?.causationCommandId).toBe(
 			"command-cancel-permit",
 		);
+		expect(await runtime.store.getEffect(approvalId)).toMatchObject({ state: "settled", outcome: "cancelled" });
+		expect(await runtime.store.getApproval(approvalId)).toMatchObject({ state: "resolved", decision: "cancelled" });
+		await runtime.dispose();
+	}, 60_000);
+
+	it("durably denies a permitted tool without executing it", async () => {
+		let executed = false;
+		const { runtime, cwd } = await createRuntime(async session => {
+			const read = session.getToolByName("read");
+			if (!read) throw new Error("read tool is unavailable");
+			await read.execute("read-denied-permit", { path: "permit.txt" });
+			executed = true;
+			return true;
+		});
+		fs.writeFileSync(path.join(cwd, "permit.txt"), "not read");
+		const requested = nextEngineEvent(runtime, "tool_approval_requested");
+		const started = await runtime.start(
+			{
+				commandId: "command-denied-permit",
+				agentInstanceId: "agent-denied-permit",
+				executionId: "execution-denied-permit",
+				attemptId: "attempt-denied-permit",
+				authorityGeneration: 1,
+				cwd,
+				input: "read",
+			},
+			{ ...profile, toolPolicies: { read: "permit" } },
+		);
+		const approvalId = String((await requested).payload?.approvalId);
+		await runtime.resolveToolApproval({
+			...started,
+			commandId: "command-deny",
+			approvalId,
+			decision: "deny",
+			reason: "not now",
+		});
+		await runtime.drain();
+		expect(executed).toBeFalse();
+		expect(await runtime.store.getEffect(approvalId)).toMatchObject({ state: "settled", outcome: "denied" });
+		expect(await runtime.store.getApproval(approvalId)).toMatchObject({ state: "resolved", decision: "deny" });
 		await runtime.dispose();
 	}, 60_000);
 
@@ -720,8 +774,10 @@ describe("EngineRuntime", () => {
 			},
 			{ ...profile, toolPolicies: { read: "tracked" } },
 		);
-		await toolStarted;
+		const startedEvent = await toolStarted;
+		const effectId = String(startedEvent.payload?.invocationId);
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("running");
+		expect(await runtime.store.getEffect(effectId)).toMatchObject({ state: "started", policy: "tracked" });
 		expect((await runtime.store.pendingEvents()).find(event => event.kind === "tool_settled")).toBeUndefined();
 		release.resolve("done");
 		await runtime.drain();
@@ -729,6 +785,158 @@ describe("EngineRuntime", () => {
 		expect(events.find(event => event.kind === "tool_settled")?.payload).toMatchObject({ status: "completed" });
 		expect(events.findIndex(event => event.kind === "tool_settled")).toBeLessThan(
 			events.findIndex(event => event.kind === "completed"),
+		);
+		expect(await runtime.store.getEffect(effectId)).toMatchObject({ state: "settled", outcome: "completed" });
+		await runtime.dispose();
+	}, 60_000);
+
+	it("keeps a background effect open while paused and settles only after resume", async () => {
+		const release = Promise.withResolvers<string>();
+		let runtime!: EngineRuntime;
+		let cwd = "";
+		({ runtime, cwd } = await createRuntime(async session => {
+			const jobId = runtime.asyncJobManager.register("bash", "paused background", () => release.promise, {
+				ownerId: session.getAgentId(),
+				attemptId: session.getAttemptId(),
+				sourceToolCallId: "read-paused-background",
+			});
+			runtime.asyncJobManager.watchJobs([jobId]);
+			const read = session.getToolByName("read");
+			if (!read) throw new Error("read tool is unavailable");
+			await read.execute("read-paused-background", { path: "paused.txt" });
+			return true;
+		}));
+		fs.writeFileSync(path.join(cwd, "paused.txt"), "paused");
+		const toolStarted = nextEngineEvent(runtime, "tool_started");
+		const started = await runtime.start(
+			{
+				commandId: "command-paused-background",
+				agentInstanceId: "agent-paused-background",
+				executionId: "execution-paused-background",
+				attemptId: "attempt-paused-background",
+				authorityGeneration: 1,
+				cwd,
+				input: "read",
+			},
+			{ ...profile, toolPolicies: { read: "tracked" } },
+		);
+		const effectId = String((await toolStarted).payload?.invocationId);
+		const paused = nextEngineEvent(runtime, "paused");
+		await runtime.pause({ ...started, commandId: "pause-background", initiator: { kind: "human" } });
+		await paused;
+		expect(await runtime.store.getEffect(effectId)).toMatchObject({ state: "started" });
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("paused");
+		expect((await runtime.store.pendingEvents()).some(event => event.kind === "completed")).toBeFalse();
+
+		const toolSettled = nextEngineEvent(runtime, "tool_settled");
+		release.resolve("done");
+		await toolSettled;
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("paused");
+		const completed = nextEngineEvent(runtime, "completed");
+		await runtime.resume({ ...started, commandId: "resume-background", initiator: { kind: "human" } });
+		await completed;
+		expect(await runtime.store.getEffect(effectId)).toMatchObject({ state: "settled", outcome: "completed" });
+		await runtime.dispose();
+	}, 60_000);
+
+	it("records unrestricted tools without exposing their raw input", async () => {
+		const { runtime, cwd } = await createRuntime(async session => {
+			const read = session.getToolByName("read");
+			if (!read) throw new Error("read tool is unavailable");
+			await read.execute("read-unrestricted", { path: "secret-name.txt" });
+			return true;
+		});
+		fs.writeFileSync(path.join(cwd, "secret-name.txt"), "secret-value");
+		await runtime.start(
+			{
+				commandId: "command-unrestricted",
+				agentInstanceId: "agent-unrestricted",
+				executionId: "execution-unrestricted",
+				attemptId: "attempt-unrestricted",
+				authorityGeneration: 1,
+				cwd,
+				input: "read",
+			},
+			profile,
+		);
+		await runtime.drain();
+		const events = (await runtime.store.pendingEvents()).filter(event => event.kind.startsWith("tool_"));
+		expect(events.map(event => event.kind)).toEqual(["tool_started", "tool_settled"]);
+		expect(JSON.stringify(events)).not.toContain("secret-name.txt");
+		const effectId = String(events[0]?.payload?.invocationId);
+		expect(await runtime.store.getEffect(effectId)).toMatchObject({
+			state: "settled",
+			outcome: "completed",
+			policy: "unrestricted",
+		});
+		await runtime.dispose();
+	}, 60_000);
+
+	it("records model dispatch certainty without exposing the prompt", async () => {
+		const { runtime, cwd } = await createRuntime();
+		await runtime.start(
+			{
+				commandId: "command-model-effect",
+				agentInstanceId: "agent-model-effect",
+				executionId: "execution-model-effect",
+				attemptId: "attempt-model-effect",
+				authorityGeneration: 1,
+				cwd,
+				input: "private prompt sentinel",
+			},
+			profile,
+		);
+		await runtime.drain();
+		const events = (await runtime.store.pendingEvents()).filter(event => event.kind.startsWith("model_"));
+		expect(events.map(event => event.kind)).toEqual(["model_started", "model_settled"]);
+		expect(JSON.stringify(events)).not.toContain("private prompt sentinel");
+		const effectId = String(events[0]?.payload?.effectId);
+		expect(await runtime.store.getEffect(effectId)).toMatchObject({
+			effect_kind: "model",
+			state: "settled",
+			outcome: "completed",
+		});
+		await runtime.dispose();
+	}, 60_000);
+
+	it("keeps reasoning and tool input out of public trace events", async () => {
+		const mock = createMockModel({
+			reasoning: true,
+			responses: [
+				{
+					content: [
+						{ type: "thinking", thinking: "private reasoning sentinel" },
+						{ type: "toolCall", id: "read-private", name: "read", arguments: { path: "private-input.txt" } },
+					],
+				},
+				{ content: ["done"] },
+			],
+		});
+		const { runtime, cwd } = await createRuntime(
+			(session, input) => session.prompt(input),
+			{},
+			{ model: mock.model },
+		);
+		fs.writeFileSync(path.join(cwd, "private-input.txt"), "private tool output sentinel");
+		await runtime.start(
+			{
+				commandId: "command-public-trace",
+				agentInstanceId: "agent-public-trace",
+				executionId: "execution-public-trace",
+				attemptId: "attempt-public-trace",
+				authorityGeneration: 1,
+				cwd,
+				input: "inspect the file",
+			},
+			{ ...profile, toolNames: ["read"], restrictToolNames: true },
+		);
+		await runtime.drain();
+		const events = await runtime.store.pendingEvents();
+		const trace = events.filter(event => event.kind.startsWith("trace_"));
+		expect(trace.some(event => event.kind === "trace_reasoning")).toBe(true);
+		expect(trace.some(event => event.kind === "trace_tool")).toBe(true);
+		expect(JSON.stringify(events)).not.toMatch(
+			/private reasoning sentinel|private-input\.txt|private tool output sentinel/,
 		);
 		await runtime.dispose();
 	}, 60_000);
@@ -1020,6 +1228,154 @@ describe("EngineRuntime", () => {
 		await restarted.dispose();
 	}, 60_000);
 
+	it("rebinds a deferred inbox item after restart and emits its wake once", async () => {
+		const { runtime, cwd, options } = await createRuntime();
+		await runtime.start(
+			{
+				commandId: "command-inbox-sender",
+				agentInstanceId: "agent-inbox-sender",
+				executionId: "execution-inbox-sender",
+				attemptId: "attempt-inbox-sender",
+				authorityGeneration: 1,
+				cwd,
+				input: "sender",
+			},
+			profile,
+		);
+		const recipient = await runtime.start(
+			{
+				commandId: "command-inbox-recipient-a",
+				agentInstanceId: "agent-inbox-recipient",
+				executionId: "execution-inbox-recipient-a",
+				attemptId: "attempt-inbox-recipient-a",
+				authorityGeneration: 1,
+				cwd,
+				input: "recipient",
+			},
+			profile,
+		);
+		await runtime.drain();
+		expect(
+			await runtime.deliverPeerMessage({
+				messageId: "message-deferred-restart",
+				fromAgentInstanceId: "agent-inbox-sender",
+				toAgentInstanceId: "agent-inbox-recipient",
+				body: "wake later",
+			}),
+		).toMatchObject({ outcome: "queued" });
+		const [queued] = await runtime.listInbox(recipient);
+		if (!queued) throw new Error("deferred inbox item was not queued");
+		await runtime.mutateInbox(recipient, {
+			mutationId: "defer-before-restart",
+			queueId: queued.queueId,
+			expectedRevision: queued.revision,
+			op: "defer",
+			value: Date.now() + 1_000,
+		});
+		await runtime.dispose();
+
+		const restarted = await EngineRuntime.create(options);
+		const wakes: string[] = [];
+		restarted.subscribe(event => {
+			if (event.kind === "inbox_changed" && event.payload?.action === "wake_due")
+				wakes.push(event.eventId.toString());
+		});
+		const resumed = await restarted.start(
+			{
+				commandId: "command-inbox-recipient-b",
+				agentInstanceId: "agent-inbox-recipient",
+				executionId: "execution-inbox-recipient-b",
+				attemptId: "attempt-inbox-recipient-b",
+				authorityGeneration: 1,
+				cwd,
+				input: "resume recipient",
+			},
+			profile,
+		);
+		for (let remaining = 50; wakes.length === 0 && remaining > 0; remaining--) await Bun.sleep(50);
+		await Bun.sleep(150);
+		expect(wakes).toHaveLength(1);
+		expect(resumed.sessionFile).toBe(recipient.sessionFile);
+		expect((await restarted.listInbox(resumed))[0]).toMatchObject({
+			queueId: "message-deferred-restart",
+			attemptId: "attempt-inbox-recipient-b",
+			wakeIntent: true,
+			revision: 3,
+		});
+		await restarted.dispose();
+	}, 60_000);
+
+	it("reopens a transcript only across an exact continuation identity", async () => {
+		let dependencyDigest = "dependency-a";
+		const { runtime, cwd } = await createRuntime(async () => true, {
+			resolveSessionContinuation: async () => dependencyDigest,
+			resolveSessionProfile: async (_profile, sessionCwd) => ({
+				options: { settings: await Settings.loadReadOnly({ cwd: sessionCwd }) },
+				dispose() {},
+			}),
+		});
+		const request = {
+			agentInstanceId: "agent-exact-continuation",
+			agentInstanceRef: "grimoire://tasks/project-a/task-a/agents/agent-exact-continuation",
+			authorityGeneration: 1,
+			cwd,
+		};
+		const start = (suffix: string, overrides: Partial<typeof request> = {}, launch = profile) =>
+			runtime.start(
+				{
+					...request,
+					...overrides,
+					commandId: `command-exact-${suffix}`,
+					executionId: `execution-exact-${suffix}`,
+					attemptId: `attempt-exact-${suffix}`,
+					input: suffix,
+				},
+				launch,
+			);
+
+		const first = await start("first");
+		await runtime.drain();
+		const same = await start("same");
+		await runtime.drain();
+		expect(same.sessionFile).toBe(first.sessionFile);
+
+		dependencyDigest = "dependency-b";
+		const dependencyChanged = await start("dependency");
+		await runtime.drain();
+		expect(dependencyChanged.sessionFile).not.toBe(same.sessionFile);
+
+		const projectChanged = await start("project", {
+			agentInstanceRef: "grimoire://tasks/project-b/task-b/agents/agent-exact-continuation",
+		});
+		await runtime.drain();
+		expect(projectChanged.sessionFile).not.toBe(dependencyChanged.sessionFile);
+
+		const authorityChanged = await start("authority", { authorityGeneration: 2 });
+		await runtime.drain();
+		expect(authorityChanged.sessionFile).not.toBe(projectChanged.sessionFile);
+
+		const otherCwd = path.join(path.dirname(cwd), "workspace-b");
+		fs.mkdirSync(otherCwd);
+		const cwdChanged = await start("cwd", { authorityGeneration: 2, cwd: otherCwd });
+		await runtime.drain();
+		expect(cwdChanged.sessionFile).not.toBe(authorityChanged.sessionFile);
+
+		const fresh = await start(
+			"fresh-a",
+			{ authorityGeneration: 2, cwd: otherCwd },
+			{ ...profile, continuationPolicy: "fresh" },
+		);
+		await runtime.drain();
+		const freshAgain = await start(
+			"fresh-b",
+			{ authorityGeneration: 2, cwd: otherCwd },
+			{ ...profile, continuationPolicy: "fresh" },
+		);
+		await runtime.drain();
+		expect(freshAgain.sessionFile).not.toBe(fresh.sessionFile);
+		await runtime.dispose();
+	}, 60_000);
+
 	it("keeps a completed Attempt terminal when cancel arrives late", async () => {
 		const { runtime, cwd } = await createRuntime();
 		const started = await runtime.start(
@@ -1131,7 +1487,8 @@ describe("EngineRuntime", () => {
 			prompts.get(child.engineAgentId)?.resolve(true);
 			const pausedEvent = await paused;
 
-			expect((await runtime.store.getAttempt(child.attemptId))?.state).toBe("paused");
+			const pausedAttempt = await runtime.store.getAttempt(child.attemptId);
+			expect(pausedAttempt).toMatchObject({ state: "paused", transcript_revision: 1 });
 			expect(runtime.getBinding(child.agentInstanceId)).toMatchObject({
 				bindingId: child.bindingId,
 				attemptId: child.attemptId,
@@ -1140,6 +1497,7 @@ describe("EngineRuntime", () => {
 				initiator,
 				attemptState: "paused",
 				controlReadiness: { pause: false, resume: true, steer: true, cancel: true },
+				transcriptCheckpoint: { revision: 1 },
 			});
 			expect({
 				mailbox: runtime.ircBus.inbox(parent.engineAgentId, { peek: true }),
@@ -1155,7 +1513,12 @@ describe("EngineRuntime", () => {
 			await runtime.resume({ ...child, commandId: `resume-child-${index}`, initiator });
 			const completedEvent = await completed;
 			expect(completedEvent.attemptId).toBe(child.attemptId);
-			expect((await runtime.store.getAttempt(child.attemptId))?.state).toBe("completed");
+			expect(completedEvent.payload).toMatchObject({ transcriptCheckpoint: { revision: 2 } });
+			const completedAttempt = await runtime.store.getAttempt(child.attemptId);
+			expect(completedAttempt).toMatchObject({ state: "completed", transcript_revision: 2 });
+			expect(Number(completedAttempt?.transcript_byte_boundary)).toBeGreaterThanOrEqual(
+				Number(pausedAttempt?.transcript_byte_boundary),
+			);
 			const resumedEvent = (await runtime.store.pendingEvents()).find(
 				event => event.kind === "resumed" && event.attemptId === child.attemptId,
 			);
@@ -1269,6 +1632,100 @@ describe("EngineRuntime", () => {
 		await restarted.dispose();
 	}, 60000);
 
+	it("interrupts active, paused and approval-waiting Attempts before closing the store", async () => {
+		const pausedDispatch = Promise.withResolvers<boolean>();
+		const activeDispatch = Promise.withResolvers<boolean>();
+		const { runtime, cwd } = await createRuntime(async (session, input) => {
+			switch (input) {
+				case "wait": {
+					const abort = session.abort.bind(session);
+					session.abort = async options => {
+						activeDispatch.resolve(false);
+						return await abort(options);
+					};
+					return await activeDispatch.promise;
+				}
+				case "pause":
+					return await pausedDispatch.promise;
+				case "read": {
+					const read = session.getToolByName("read");
+					if (!read) throw new Error("read tool is unavailable");
+					await read.execute("read-shutdown-permit", { path: "shutdown.txt" });
+					return true;
+				}
+				default:
+					throw new Error("unexpected shutdown test agent");
+			}
+		}, {});
+		fs.writeFileSync(path.join(cwd, "shutdown.txt"), "must not be read");
+		try {
+			const modelStarted = nextEngineEvent(runtime, "model_started");
+			await runtime.start(
+				{
+					commandId: "command-shutdown-active",
+					agentInstanceId: "agent-shutdown-active",
+					executionId: "execution-shutdown-active",
+					attemptId: "attempt-shutdown-active",
+					authorityGeneration: 1,
+					cwd,
+					input: "wait",
+				},
+				profile,
+			);
+			await modelStarted;
+
+			const paused = await runtime.start(
+				{
+					commandId: "command-shutdown-paused",
+					agentInstanceId: "agent-shutdown-paused",
+					executionId: "execution-shutdown-paused",
+					attemptId: "attempt-shutdown-paused",
+					authorityGeneration: 1,
+					cwd,
+					input: "pause",
+				},
+				profile,
+			);
+			const pauseFinished = nextEngineEvent(runtime, "paused");
+			await runtime.pause({ ...paused, commandId: "pause-for-shutdown", initiator: { kind: "human" } });
+			pausedDispatch.resolve(true);
+			await pauseFinished;
+
+			const approvalRequested = nextEngineEvent(runtime, "tool_approval_requested");
+			await runtime.start(
+				{
+					commandId: "command-shutdown-approval",
+					agentInstanceId: "agent-shutdown-approval",
+					executionId: "execution-shutdown-approval",
+					attemptId: "attempt-shutdown-approval",
+					authorityGeneration: 1,
+					cwd,
+					input: "read",
+				},
+				{ ...profile, toolPolicies: { read: "permit" } },
+			);
+			const approvalId = String((await approvalRequested).payload?.approvalId);
+
+			await runtime.dispose({ closeStore: false });
+			for (const attemptId of ["attempt-shutdown-active", "attempt-shutdown-paused", "attempt-shutdown-approval"]) {
+				expect(await runtime.store.getAttempt(attemptId)).toMatchObject({ state: "interrupted" });
+			}
+			const events = await runtime.store.pendingEvents();
+			expect(
+				events
+					.filter(event => event.kind === "interrupted")
+					.map(event => event.attemptId)
+					.sort(),
+			).toEqual(["attempt-shutdown-active", "attempt-shutdown-approval", "attempt-shutdown-paused"]);
+			expect(await runtime.store.getApproval(approvalId)).toMatchObject({
+				state: "resolved",
+				decision: "cancelled",
+			});
+		} finally {
+			await runtime.store.close();
+		}
+	}, 60_000);
+
 	it("rejects steering after an Attempt becomes idle", async () => {
 		const { runtime, cwd } = await createRuntime();
 		const started = await runtime.start(
@@ -1361,9 +1818,24 @@ describe("EngineRuntime", () => {
 		job.resolve("done");
 		await runtime.drain();
 		const completed = (await runtime.store.pendingEvents()).find(event => event.kind === "completed");
-		expect(completed?.payload).toEqual({
+		expect(completed?.payload).toMatchObject({
 			assistantFinal: "final answer",
 			transcriptRef: `history://${started.engineAgentId}`,
+			transcriptCheckpoint: {
+				sessionId: expect.any(String),
+				sessionPath: expect.any(String),
+				leafEntryId: expect.any(String),
+				byteBoundary: expect.any(Number),
+				revision: 1,
+			},
+		});
+		expect(await runtime.store.getAttempt(started.attemptId)).toMatchObject({
+			state: "completed",
+			transcript_session_id: expect.any(String),
+			transcript_path: expect.any(String),
+			transcript_leaf_entry_id: expect.any(String),
+			transcript_byte_boundary: expect.any(Number),
+			transcript_revision: 1,
 		});
 		await runtime.dispose();
 	}, 60000);
@@ -1431,7 +1903,10 @@ describe("EngineRuntime", () => {
 		await runtime.drain();
 		const events = await runtime.store.pendingEvents();
 		expect(events.find(event => event.kind === "completed")).toBeUndefined();
-		expect(events.find(event => event.kind === "failed")?.payload).toEqual({ error: "required_yield_not_submitted" });
+		expect(events.find(event => event.kind === "failed")?.payload).toMatchObject({
+			error: "required_yield_not_submitted",
+			transcriptCheckpoint: { revision: 1 },
+		});
 		expect(prompts).toHaveLength(3);
 		await runtime.dispose();
 	}, 60000);
@@ -1463,7 +1938,51 @@ describe("EngineRuntime", () => {
 		await runtime.drain();
 		const events = await runtime.store.pendingEvents();
 		expect(events.find(event => event.kind === "completed")).toBeUndefined();
-		expect(events.find(event => event.kind === "failed")?.payload).toEqual({ error: "provider rejected request" });
+		expect(events.find(event => event.kind === "failed")?.payload).toMatchObject({
+			error: "provider rejected request",
+			transcriptCheckpoint: { revision: 1 },
+		});
+		const modelEffectId = String(events.find(event => event.kind === "model_started")?.payload?.effectId);
+		expect(await runtime.store.getEffect(modelEffectId)).toMatchObject({
+			effect_kind: "model",
+			state: "settled",
+			outcome: "failed",
+		});
+		await runtime.dispose();
+	}, 60000);
+
+	it("keeps an Attempt nonterminal when transcript durability cannot be proven", async () => {
+		const { runtime, cwd } = await createRuntime();
+		const failedTwice = Promise.withResolvers<void>();
+		let flushCalls = 0;
+		const flush = spyOn(SessionManager.prototype, "flushAndCheckpoint").mockImplementation(async () => {
+			flushCalls++;
+			if (flushCalls === 2) failedTwice.resolve();
+			throw new Error("injected transcript flush failure");
+		});
+		const started = await runtime.start(
+			{
+				commandId: "command-flush-failure",
+				agentInstanceId: "agent-flush-failure",
+				executionId: "execution-flush-failure",
+				attemptId: "attempt-flush-failure",
+				authorityGeneration: 1,
+				cwd,
+				input: "finish",
+			},
+			profile,
+		);
+		await failedTwice.promise;
+		await Bun.sleep(1);
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("running");
+		expect(
+			(await runtime.store.pendingEvents()).some(event => event.kind === "completed" || event.kind === "failed"),
+		).toBeFalse();
+
+		flush.mockRestore();
+		await runtime.cancel({ ...started, commandId: "cancel-after-flush-failure" });
+		await runtime.drain();
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
 		await runtime.dispose();
 	}, 60000);
 });

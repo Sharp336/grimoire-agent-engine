@@ -160,6 +160,21 @@ describe("EngineProfileResolver", () => {
 		} finally {
 			reopened.dispose();
 		}
+
+		const launch = {
+			spawns: "*",
+			profileDigest: hash(refs.profile),
+			launchProfileRef: refs.profile,
+			maxSpawnDepth: 1,
+			maxChildren: 6,
+			childProfileRefs: [refs.childProfile],
+		};
+		const beforeDependencyChange = await resolver.continuationDigest(launch, root);
+		const accountPath = path.join(cache, `${refs.trustedAccount.slice(5)}.json`);
+		const cachedAccount = JSON.parse(await fs.readFile(accountPath, "utf8"));
+		cachedAccount.content_hash = `sha256:${"f".repeat(64)}`;
+		await fs.writeFile(accountPath, JSON.stringify(cachedAccount));
+		expect(await resolver.continuationDigest(launch, root)).not.toBe(beforeDependencyChange);
 	});
 
 	it("shares one OAuth refresh lease and repairs writeback from the credential store", async () => {

@@ -4,11 +4,22 @@
 
 ### Added
 
+- Added authenticated Engine session context, usage, compaction, release, and durable inbox controls for non-TUI clients.
+- Added independent durable Agent Engine event delivery state per sink while retaining SQLite events as the authoritative history.
+- Added durable Agent Engine model-dispatch effects without persisting prompt bodies, including conservative unknown recovery after Engine loss.
+- Added durable Agent Engine tool-effect and approval records for every tool policy, including conservative unknown-effect recovery after Engine loss.
 - Added optional per-tool `tracked` and `permit` policies for Agent Engine sessions, with durable lifecycle events and broker-resolved approval requests that keep asynchronous tool jobs non-blocking.
 - Added exact local OMP account bindings for Grimoire AgentProfiles, so Artel can use an existing Codex subscription without copying OAuth credentials.
 
 ### Fixed
 
+- Removed raw reasoning and arbitrary tool inputs from public Agent Engine trace events while preserving bounded activity and outcome metadata.
+- Prevented Agent Engine transcript continuation when profile dependencies, authority, project, workspace, settings/context closure, or explicit continuation policy changed.
+- Kept Agent Engine event delivery alive until graceful shutdown durably interrupts and checkpoints active, paused, and approval-waiting Attempts.
+- Prevented Agent Engine pause and terminal states from becoming visible before their exact OMP transcript prefix is durably checkpointed.
+- Committed Agent Engine Binding, Attempt, command-receipt, sequence, and event transitions atomically, including pause/resume/cancel settlement and generation-loss interruption.
+- Made Agent Engine command admission and receipts durable across broker redelivery and restart, with conflicting command-ID reuse rejected before runtime effects and atomic per-agent event sequencing.
+- Prevented separate Agent Engine runtime directories from opening the same SQLite database, and made Engine schema upgrades versioned, checksummed, and fail closed for newer databases.
 - Fixed authenticated Agent Engine messages, commands, and hosted events being redelivered after successful handling, including stale terminal events after a bridge restart.
 
 ## [18.0.7] - 2026-08-26

@@ -34,7 +34,7 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 		tempDir = undefined;
 	});
 
-	it("claims a hosted command and settles the same durable job from Engine events", async () => {
+	it("retries a stranded hosted claim and settles the same durable job from Engine events", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-host-${Snowflake.next()}-`));
 		const broker = await startNatsServer(tempDir, true);
 		const engineSeed = broker.engineSeed;
@@ -62,7 +62,8 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			},
 		});
 		const profile = { spawns: "", profileDigest: "leaf-profile-v1", enableMCP: false, enableLsp: false };
-		const adapter = await NatsEngineAdapter.connect({
+		const adapterErrors: Error[] = [];
+		let adapter = await NatsEngineAdapter.connect({
 			runtime,
 			deviceId: "device-hosted",
 			engineId: "engine-hosted",
@@ -71,8 +72,17 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			authorizeCommand: () => {},
 			authorizeMessage: () => {},
 			resolveLaunchProfile: command => command.payload.launchProfile as typeof profile,
+			onError: error => adapterErrors.push(error),
 		});
+		await adapter.dispose();
+		const managerConnection = await connect({
+			servers: broker.url,
+			authenticator: nkeyAuthenticator(bridgeSeed),
+		});
+		const manager = await jetstreamManager(managerConnection);
+		await manager.streams.delete(ENGINE_COMMAND_STREAM);
 		const rpc = new FakeRpc(startCommand(cwd, profile));
+		const bridgeErrors: Error[] = [];
 		const bridge = await HostedEngineBridge.connect({
 			rpc,
 			deviceId: "device-hosted",
@@ -82,18 +92,27 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			connectionOptions: { authenticator: nkeyAuthenticator(bridgeSeed) },
 			pollIntervalMs: 10,
 			heartbeatIntervalMs: 100,
+			onError: error => bridgeErrors.push(error),
 		});
-		const managerConnection = await connect({
+		await waitFor(() => bridgeErrors.length > 0);
+		adapter = await NatsEngineAdapter.connect({
+			runtime,
+			deviceId: "device-hosted",
+			engineId: "engine-hosted",
 			servers: broker.url,
-			authenticator: nkeyAuthenticator(bridgeSeed),
+			connectionOptions: { authenticator: nkeyAuthenticator(engineSeed) },
+			authorizeCommand: () => {},
+			authorizeMessage: () => {},
+			resolveLaunchProfile: command => command.payload.launchProfile as typeof profile,
+			onError: error => adapterErrors.push(error),
 		});
 		const enginePublisherConnection = await connect({
 			servers: broker.url,
 			authenticator: nkeyAuthenticator(engineSeed),
 		});
 		try {
-			await waitFor(() => rpc.events.some(event => event.type === "attempt.completed"));
-			const manager = await jetstreamManager(managerConnection);
+			await waitFor(() => rpc.events.some(event => event.type === "attempt.completed") || adapterErrors.length > 0);
+			expect(adapterErrors).toEqual([]);
 			await waitFor(async () => {
 				const [commands, events] = await Promise.all([
 					manager.consumers.info(ENGINE_COMMAND_STREAM, `engine_${adapter.engineRoute}`),
@@ -105,6 +124,8 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			expect(rpc.events.map(event => event.type)).toEqual([
 				"command.accepted",
 				"attempt.started",
+				"model.started",
+				"model.settled",
 				"attempt.completed",
 			]);
 			expect(rpc.terminalStatus).toBe("completed");
@@ -284,25 +305,112 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 		}
 	}, 60_000);
 
-	it("allows only one service owner for a runtime directory", async () => {
+	it("delivers a graceful interruption before disconnecting the event path", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-host-shutdown-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		const cwd = path.join(tempDir, "workspace");
+		fs.mkdirSync(cwd);
+		const dispatch = Promise.withResolvers<boolean>();
+		const runtime = await EngineRuntime.create({
+			databasePath: path.join(tempDir, "engine.sqlite"),
+			dispatchPrompt: async session => {
+				const abort = session.abort.bind(session);
+				session.abort = async options => {
+					dispatch.resolve(false);
+					return await abort(options);
+				};
+				return await dispatch.promise;
+			},
+			sessionDefaults: {
+				cwd,
+				agentDir: path.join(tempDir, "agent"),
+				settings: await Settings.loadReadOnly({ cwd, agentDir: path.join(tempDir, "agent") }),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				modelRegistry,
+			},
+		});
+		const profile = { spawns: "", profileDigest: "leaf-profile-v1", enableMCP: false, enableLsp: false };
+		const adapter = await NatsEngineAdapter.connect({
+			runtime,
+			deviceId: "device-hosted",
+			engineId: "engine-hosted",
+			servers: broker.url,
+			authorizeCommand: () => {},
+			authorizeMessage: () => {},
+			resolveLaunchProfile: command => command.payload.launchProfile as typeof profile,
+		});
+		const rpc = new FakeRpc(startCommand(cwd, profile));
+		const bridge = await HostedEngineBridge.connect({
+			rpc,
+			deviceId: "device-hosted",
+			engineId: "engine-hosted",
+			engineGeneration: runtime.engineGeneration,
+			servers: broker.url,
+			pollIntervalMs: 10,
+			heartbeatIntervalMs: 100,
+		});
+		try {
+			await waitFor(() => rpc.events.some(event => event.type === "attempt.started"));
+			await bridge.stopAdmission();
+			await adapter.stopAdmission();
+			await runtime.dispose({ closeStore: false });
+			await adapter.dispose();
+			await bridge.drain();
+			expect(rpc.terminalStatus).toBe("interrupted");
+			expect(rpc.events.filter(event => event.type === "attempt.interrupted")).toHaveLength(1);
+			expect(await runtime.store.pendingEventsForSink(`nats:${adapter.deviceRoute}:${adapter.engineRoute}`)).toEqual(
+				[],
+			);
+		} finally {
+			await bridge.dispose();
+			await adapter.dispose();
+			await runtime.dispose({ closeStore: false });
+			await runtime.store.close();
+			authStorage.close();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 60_000);
+
+	it("allows only one service owner for a database across runtime directories", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-service-lock-${Snowflake.next()}-`));
 		const stop = Promise.withResolvers<void>();
+		const firstRuntimeDir = path.join(tempDir, "runtime-a");
+		const secondRuntimeDir = path.join(tempDir, "runtime-b");
 		const config = {
 			deviceId: "device-lock",
 			engineId: "engine-lock",
-			runtimeDir: tempDir,
-			databasePath: path.join(tempDir, "engine.sqlite"),
+			runtimeDir: firstRuntimeDir,
+			databasePath: path.join(tempDir, "data", "engine.sqlite"),
 			natsServerPath: natsServer,
 		};
 		const first = runEngineService(config, stop.promise);
 		await waitFor(async () => {
 			try {
-				return JSON.parse(await Bun.file(path.join(tempDir ?? "", "status.json")).text()).status === "running";
+				return JSON.parse(await Bun.file(path.join(firstRuntimeDir, "status.json")).text()).status === "running";
 			} catch {
 				return false;
 			}
 		});
-		await expect(runEngineService(config, Promise.resolve())).rejects.toThrow("already running");
+		await expect(
+			runEngineService(
+				{
+					...config,
+					runtimeDir: secondRuntimeDir,
+					databasePath: path.join(tempDir, "data", "..", "data", "engine.sqlite"),
+				},
+				Promise.resolve(),
+			),
+		).rejects.toThrow("database is already owned");
+		expect(await Bun.file(path.join(secondRuntimeDir, "nats.conf")).exists()).toBe(false);
 		stop.resolve();
 		await first;
 	}, 60_000);
@@ -472,9 +580,9 @@ class FakeRpc implements GrimoireRpc {
 					throw new Error("active lease is required");
 				}
 				this.events.push(event);
-				const terminal = event.type === "attempt.completed";
-				if (terminal) this.terminalStatus = "completed";
-				return { status: terminal ? "completed" : "recorded" };
+				const terminal = event.type === "attempt.completed" || event.type === "attempt.interrupted";
+				if (terminal) this.terminalStatus = event.type === "attempt.completed" ? "completed" : "interrupted";
+				return { status: terminal ? (event.type === "attempt.completed" ? "completed" : "cancelled") : "recorded" };
 			}
 			default:
 				throw new Error(`Unexpected bridge action ${String(arguments_.action)}`);

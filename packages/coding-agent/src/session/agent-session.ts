@@ -7955,6 +7955,11 @@ export class AgentSession {
 		return this.#irc.deliver(msg, opts);
 	}
 
+	/** Announces durable Engine inbox changes without steering message text into the active turn. */
+	notifyEngineInboxChanged(count: number): void {
+		this.#irc.notifyInboxChanged(count);
+	}
+
 	/** Installs task-executor monitoring around autonomous IRC wake turns. */
 	setIrcWakeTurnObserver(
 		observer: ((records: CustomMessage[]) => ((error?: unknown) => void | Promise<void>) | undefined) | undefined,

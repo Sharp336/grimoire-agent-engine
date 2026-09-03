@@ -6,6 +6,7 @@
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { AsyncJobType } from "../../async";
+import type { EngineInboxItem } from "../../engine/contracts";
 import type { IrcDeliveryReceipt, IrcMessage } from "../../irc/bus";
 import type { LaunchParams, LaunchToolDetails } from "./launch";
 
@@ -107,6 +108,7 @@ export interface CoordinationDetails {
 	/** Message consumed by `wait` / `send await:true`; null when the wait timed out. */
 	waited?: IrcMessage | null;
 	inbox?: IrcMessage[];
+	queue?: EngineInboxItem[];
 	peers?: HubPeerInfo[];
 	/** Present on `op:"list"`: addressable running/idle/parked plus page size. */
 	counts?: HubRosterCounts;

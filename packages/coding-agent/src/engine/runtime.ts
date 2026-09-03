@@ -1,10 +1,11 @@
 import * as crypto from "node:crypto";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AgentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../async/job-manager";
 import { withCapabilityProviderPolicy } from "../capability";
-import { withSettingsScope } from "../config/settings";
+import { SETTINGS_SCHEMA, type SettingPath, withSettingsScope } from "../config/settings";
 
 import {
 	type ExtensionAskDialogQuestion,
@@ -21,8 +22,8 @@ import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
-import { SessionManager } from "../session/session-manager";
-import type { EngineChildLaunchResult, EngineChildProfile } from "../tools";
+import { type SessionDurabilityCheckpoint, SessionManager } from "../session/session-manager";
+import type { EngineChildLaunchResult, EngineChildProfile, EngineInboxToolRequest } from "../tools";
 import {
 	type EngineAttemptState,
 	type EngineBindingSnapshot,
@@ -31,6 +32,10 @@ import {
 	type EngineControlInitiator,
 	type EngineControlRequest,
 	type EngineEvent,
+	type EngineInboxItem,
+	type EngineInboxMutation,
+	type EngineInboxSource,
+	type EngineInboxTarget,
 	type EngineLaunchProfile,
 	type EnginePeerMessage,
 	type EngineReconcileRequest,
@@ -47,12 +52,17 @@ import {
 	validateStartRequest,
 } from "./contracts";
 import { engineAgentId, engineRouteToken } from "./route";
-import { EngineStore } from "./store";
+import {
+	EngineAttemptConflictError,
+	type EngineModelEffectInput,
+	EngineStore,
+	type EngineToolEffectInput,
+	type EngineTransitionEvent,
+} from "./store";
 
 type EngineEventListener = (event: EngineEvent) => void | Promise<void>;
 
 const MAX_ASSISTANT_FINAL_CHARS = 48_000;
-const MAX_TRACE_CHARS = 48_000;
 const MAX_INPUT_FIELD_CHARS = 48_000;
 const MAX_INPUT_RESULT_CHARS = 128_000;
 
@@ -102,20 +112,20 @@ interface LiveBinding extends EngineBindingSnapshot {
 	pauseRequests: Map<string, EngineControlInitiator>;
 	resumeCommandIds: Set<string>;
 	traceWriteTail: Promise<void>;
-	traceTools: Map<string, { name: string; summary: string; startedAt: number }>;
+	traceTools: Map<string, { name: string; startedAt: number }>;
 	childLaunchCount: number;
+	modelCallSequence: number;
+	activeModelCalls: Set<Promise<void>>;
 	pendingInput?: PendingInput;
 }
 
 interface ToolInvocationRecord {
 	invocationId: string;
-	policy: Exclude<EngineToolPolicy, "unrestricted">;
+	policy: EngineToolPolicy;
 	toolCallId: string;
 	toolName: string;
 	inputHash: string;
-	inputPreview: string;
 	target: EngineBindingSnapshot;
-	writeTail: Promise<void>;
 	done: Promise<void>;
 	resolveDone: () => void;
 	settled: boolean;
@@ -161,6 +171,8 @@ export interface EngineRuntimeOptions {
 		childProfiles?: EngineChildProfile[];
 		dispose(): void;
 	}>;
+	/** Exact non-secret digest of every external dependency resolved for this launch. */
+	resolveSessionContinuation?: (profile: EngineLaunchProfile, cwd: string) => Promise<string>;
 	launchChild?: (request: {
 		parentAgentInstanceId: string;
 		parentAgentInstanceRef: string;
@@ -184,6 +196,7 @@ export class EngineRuntime {
 	readonly #sessionDefaults: EngineRuntimeOptions["sessionDefaults"];
 	readonly #dispatchPrompt: (session: AgentSession, input: string) => Promise<boolean>;
 	readonly #resolveSessionProfile: EngineRuntimeOptions["resolveSessionProfile"];
+	readonly #resolveSessionContinuation: EngineRuntimeOptions["resolveSessionContinuation"];
 	readonly #launchChild: EngineRuntimeOptions["launchChild"];
 	readonly #bindings = new Map<string, LiveBinding>();
 	readonly #lanes = new Map<string, Promise<void>>();
@@ -192,6 +205,8 @@ export class EngineRuntime {
 	readonly #toolInvocations = new Map<string, ToolInvocationRecord>();
 	readonly #pendingToolApprovals = new Map<string, PendingToolApproval>();
 	readonly #sessionRoot: string;
+	#inboxWakeSignal = Promise.withResolvers<void>();
+	#inboxWakeRun?: Promise<void>;
 	#disposed = false;
 
 	private constructor(store: EngineStore, engineGeneration: number, options: EngineRuntimeOptions) {
@@ -200,6 +215,7 @@ export class EngineRuntime {
 		this.#sessionDefaults = options.sessionDefaults;
 		this.#dispatchPrompt = options.dispatchPrompt ?? ((session, input) => session.prompt(input));
 		this.#resolveSessionProfile = options.resolveSessionProfile;
+		this.#resolveSessionContinuation = options.resolveSessionContinuation;
 		this.#launchChild = options.launchChild;
 		this.#sessionRoot = path.join(path.dirname(path.resolve(options.databasePath)), "engine-sessions");
 	}
@@ -209,6 +225,7 @@ export class EngineRuntime {
 		const engineGeneration = await store.nextEngineGeneration();
 		const runtime = new EngineRuntime(store, engineGeneration, options);
 		await runtime.#reconcileLostAttempts();
+		runtime.#inboxWakeRun = runtime.#runInboxWakeLoop();
 		return runtime;
 	}
 
@@ -288,7 +305,7 @@ export class EngineRuntime {
 			binding.steerCommandSet.add(request.commandId);
 			const evicted = binding.steerCommandIds.length > 256 ? binding.steerCommandIds.shift() : undefined;
 			if (evicted) binding.steerCommandSet.delete(evicted);
-			await this.#emit(binding, "steered", undefined, request.commandId);
+			await this.#commitEvent(binding, "steered", undefined, request.commandId, request.commandId);
 		});
 	}
 
@@ -298,35 +315,53 @@ export class EngineRuntime {
 			const binding = this.#requireTarget(request);
 			if (binding.pauseCommandIds.has(request.commandId)) return;
 			if (binding.attemptState === "paused") {
+				await this.#commitEvent(
+					binding,
+					"paused",
+					controlPayload(request.initiator, "paused", true),
+					request.commandId,
+					request.commandId,
+				);
 				binding.pauseCommandIds.add(request.commandId);
-				await this.#emit(binding, "paused", controlPayload(request.initiator, "paused", true), request.commandId);
 				return;
 			}
 			if (binding.attemptState === "pause_requested") {
-				binding.pauseCommandIds.add(request.commandId);
-				binding.pauseRequests.set(request.commandId, request.initiator);
-				await this.#emit(
+				await this.#commitEvent(
 					binding,
 					"pause_requested",
 					controlPayload(request.initiator, "pause_requested", true),
 					request.commandId,
+					request.commandId,
 				);
+				binding.pauseCommandIds.add(request.commandId);
+				binding.pauseRequests.set(request.commandId, request.initiator);
 				return;
 			}
 			if (binding.attemptState !== "running") {
 				throw new EngineTargetError("too_late", `Attempt ${request.attemptId} is already ${binding.attemptState}`);
 			}
-			binding.pauseCommandIds.add(request.commandId);
-			binding.pauseRequests.set(request.commandId, request.initiator);
 			binding.pauseGate.pause();
 			binding.attemptState = "pause_requested";
-			await this.store.putAttempt(binding, "pause_requested");
-			await this.#emit(
-				binding,
-				"pause_requested",
-				controlPayload(request.initiator, "pause_requested"),
-				request.commandId,
-			);
+			try {
+				await this.#commitAttemptTransition(
+					binding,
+					"pause_requested",
+					[
+						{
+							kind: "pause_requested",
+							payload: controlPayload(request.initiator, "pause_requested"),
+							causationCommandId: request.commandId,
+						},
+					],
+					{ settleCommandId: request.commandId, expectedStates: ["running"] },
+				);
+			} catch (error) {
+				binding.attemptState = "running";
+				binding.pauseGate.resume();
+				throw error;
+			}
+			binding.pauseCommandIds.add(request.commandId);
+			binding.pauseRequests.set(request.commandId, request.initiator);
 			this.#trackRun(this.#finishPause(binding, request.attemptId));
 		});
 	}
@@ -339,10 +374,25 @@ export class EngineRuntime {
 			if (binding.attemptState !== "paused") {
 				throw new EngineTargetError("too_late", `Attempt ${request.attemptId} is already ${binding.attemptState}`);
 			}
-			binding.resumeCommandIds.add(request.commandId);
 			binding.attemptState = "running";
-			await this.store.putAttempt(binding, "running");
-			await this.#emit(binding, "resumed", controlPayload(request.initiator, "running"), request.commandId);
+			try {
+				await this.#commitAttemptTransition(
+					binding,
+					"running",
+					[
+						{
+							kind: "resumed",
+							payload: controlPayload(request.initiator, "running"),
+							causationCommandId: request.commandId,
+						},
+					],
+					{ settleCommandId: request.commandId, expectedStates: ["paused"] },
+				);
+			} catch (error) {
+				binding.attemptState = "paused";
+				throw error;
+			}
+			binding.resumeCommandIds.add(request.commandId);
 			binding.pauseGate.resume();
 		});
 	}
@@ -363,10 +413,20 @@ export class EngineRuntime {
 				throw new EngineTargetError("too_late", `Attempt ${request.attemptId} is already ${binding.attemptState}`);
 			}
 			const reason = request.reason ?? "Engine attempt cancelled";
-			this.#cancelToolApprovals(binding, reason, request.commandId);
-			this.asyncJobManager.cancelAll({ ownerId: binding.engineAgentId, attemptId: binding.attemptId });
+			const previousState = binding.attemptState;
 			binding.attemptState = "cancel_requested";
-			await this.store.putAttempt(binding, "cancel_requested", request.reason);
+			try {
+				await this.#commitAttemptTransition(binding, "cancel_requested", [], {
+					cause: request.reason,
+					settleCommandId: request.commandId,
+					expectedStates: [previousState],
+				});
+			} catch (error) {
+				binding.attemptState = previousState;
+				throw error;
+			}
+			await this.#cancelToolApprovals(binding, reason, request.commandId);
+			this.asyncJobManager.cancelAll({ ownerId: binding.engineAgentId, attemptId: binding.attemptId });
 			await this.#cancelPendingInput(binding, reason, request.commandId);
 			const abort = binding.session.abort({ reason });
 			binding.pauseGate.resume();
@@ -388,16 +448,17 @@ export class EngineRuntime {
 			if (!pending || pending.record.target.bindingId !== binding.bindingId) {
 				throw new EngineTargetError("too_late", `Tool approval ${request.approvalId} is no longer pending`);
 			}
-			await this.#queueToolEvent(
-				pending.record,
-				"tool_approval_resolved",
+			const events = await this.store.resolveToolApproval(
+				pending.record.target,
+				request.approvalId,
+				request.decision,
 				{
-					approvalId: request.approvalId,
-					decision: request.decision,
 					...(request.reason ? { reason: request.reason.slice(0, 2_048) } : {}),
+					causationCommandId: request.commandId,
+					settleCommandId: request.commandId,
 				},
-				request.commandId,
 			);
+			this.#notifyEvents(events);
 			if (this.#pendingToolApprovals.get(request.approvalId) !== pending) return;
 			this.#pendingToolApprovals.delete(request.approvalId);
 			pending.resolve({ decision: request.decision, reason: request.reason });
@@ -417,26 +478,25 @@ export class EngineRuntime {
 			const result = validateInputResult(request.result, pending.questions);
 			binding.attemptState = "running";
 			try {
-				await this.store.putAttempt(binding, "running");
-				await this.#emit(
+				await this.#commitAttemptTransition(
 					binding,
-					"input_resolved",
-					{
-						inputId: request.inputId,
-						result,
-						attemptState: "running",
-						controlReadiness: controlReadiness("running"),
-					},
-					request.commandId,
+					"running",
+					[
+						{
+							kind: "input_resolved",
+							payload: {
+								inputId: request.inputId,
+								result,
+								attemptState: "running",
+								controlReadiness: controlReadiness("running"),
+							},
+							causationCommandId: request.commandId,
+						},
+					],
+					{ settleCommandId: request.commandId, expectedStates: ["waiting_input"] },
 				);
 			} catch (error) {
 				binding.attemptState = "waiting_input";
-				await this.store.putAttempt(binding, "waiting_input").catch(rollbackError => {
-					logger.warn("Engine input resolution rollback failed", {
-						inputId: pending.inputId,
-						error: rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
-					});
-				});
 				throw error;
 			}
 			if (binding.pendingInput !== pending) return;
@@ -461,20 +521,21 @@ export class EngineRuntime {
 				throw new EngineTargetError("stale_target", `Stale authority for ${request.agentInstanceId}`);
 			}
 			const attempt = await this.store.getAttempt(snapshot.attemptId);
-			await this.#emit(
+			await this.#commitEvent(
 				snapshot,
 				"reconciled",
 				{ binding: snapshot, attemptState: attempt?.state },
+				request.commandId,
 				request.commandId,
 			);
 			return { binding: snapshot, attemptState: attempt?.state };
 		});
 	}
 
-	recordCommandRejection(command: EngineRejectedCommand): Promise<void> {
+	recordCommandRejection(command: EngineRejectedCommand, settleCommand = true): Promise<void> {
 		return this.#inLane(command.agentInstanceId, async () => {
 			this.#throwIfDisposed();
-			await this.#emit(
+			await this.#commitEvent(
 				{
 					commandId: command.commandId,
 					agentInstanceId: command.agentInstanceId,
@@ -487,6 +548,9 @@ export class EngineRuntime {
 				},
 				"rejected",
 				{ code: command.code, message: command.message },
+				command.commandId,
+				settleCommand ? command.commandId : undefined,
+				"rejected",
 			);
 		});
 	}
@@ -499,38 +563,164 @@ export class EngineRuntime {
 	}
 
 	async deliverPeerMessage(message: EnginePeerMessage): Promise<IrcDeliveryReceipt> {
-		this.#throwIfDisposed();
-		if (!message.messageId.trim() || !message.body.trim()) {
-			throw new EngineTargetError("invalid_request", "messageId and body must be non-empty strings");
-		}
-		const recipient = this.resolveEngineAgentId(message.toAgentInstanceId);
-		const sender = this.resolveEngineAgentId(message.fromAgentInstanceId);
-		if (!recipient || !sender) {
-			return { to: message.toAgentInstanceId, outcome: "failed", error: "Unknown Engine peer" };
-		}
-		const owner = this.resolveBrokerAgent(recipient);
-		const binding = owner
-			? [...this.#bindings.values()].find(
-					candidate =>
-						candidate.executionId === owner.executionId &&
-						candidate.attemptId === owner.attemptId &&
-						candidate.authorityGeneration === owner.authorityGeneration,
-				)
-			: undefined;
-		if (!binding) return { to: message.toAgentInstanceId, outcome: "failed", error: "Unknown Engine peer" };
-		return await this.#withSessionScope(binding, () =>
-			this.ircBus.deliver(
-				{
-					id: message.messageId,
-					from: sender,
-					to: recipient,
-					body: message.body,
-					ts: message.sentAt ?? Date.now(),
-					replyTo: message.replyToMessageId,
-				},
-				{ bufferOnFailure: false },
-			),
-		);
+		return await this.#inLane(message.toAgentInstanceId, async () => {
+			this.#throwIfDisposed();
+			if (!message.messageId.trim() || !message.body.trim()) {
+				throw new EngineTargetError("invalid_request", "messageId and body must be non-empty strings");
+			}
+			if (message.body.length > MAX_INPUT_FIELD_CHARS) {
+				throw new EngineTargetError("invalid_request", `message body exceeds ${MAX_INPUT_FIELD_CHARS} characters`);
+			}
+			const recipient = this.resolveEngineAgentId(message.toAgentInstanceId);
+			const sender = this.resolveEngineAgentId(message.fromAgentInstanceId);
+			if (!recipient || !sender) {
+				return { to: message.toAgentInstanceId, outcome: "failed", error: "Unknown Engine peer" };
+			}
+			const owner = this.resolveBrokerAgent(recipient);
+			const binding = owner
+				? [...this.#bindings.values()].find(
+						candidate =>
+							candidate.executionId === owner.executionId &&
+							candidate.attemptId === owner.attemptId &&
+							candidate.authorityGeneration === owner.authorityGeneration,
+					)
+				: undefined;
+			if (!binding) return { to: message.toAgentInstanceId, outcome: "failed", error: "Unknown Engine peer" };
+			const queued = await this.store.enqueueInboxItem(this.#inboxTarget(binding), {
+				sourceEventId: message.messageId,
+				sourceType: "agent",
+				sender: message.fromAgentInstanceId,
+				body: message.body,
+				createdAt: message.sentAt ?? Date.now(),
+			});
+			if (queued.created) {
+				const count = (await this.store.listInboxItems(binding.session.sessionId)).length;
+				await this.#withSessionScope(binding, () => binding.session.notifyEngineInboxChanged(count));
+				this.#signalInboxWake();
+			}
+			return { to: message.toAgentInstanceId, outcome: "queued" };
+		});
+	}
+
+	listInbox(target: EngineTarget, includeTerminal = false): Promise<EngineInboxItem[]> {
+		return this.#inLane(target.agentInstanceId, async () => {
+			const binding = this.#requireTarget(target);
+			return await this.store.listInboxItems(binding.session.sessionId, includeTerminal);
+		});
+	}
+
+	enqueueInbox(target: EngineTarget, source: EngineInboxSource): Promise<{ item: EngineInboxItem; created: boolean }> {
+		return this.#inLane(target.agentInstanceId, async () => {
+			const binding = this.#requireTarget(target);
+			const queued = await this.store.enqueueInboxItem(this.#inboxTarget(binding), source);
+			if (queued.created) {
+				const count = (await this.store.listInboxItems(binding.session.sessionId)).length;
+				await this.#withSessionScope(binding, () => binding.session.notifyEngineInboxChanged(count));
+				this.#signalInboxWake();
+			}
+			return queued;
+		});
+	}
+
+	readInbox(target: EngineTarget, queueId: string): Promise<EngineInboxItem | undefined> {
+		return this.#inLane(target.agentInstanceId, async () => {
+			const binding = this.#requireTarget(target);
+			return await this.store.getInboxItem(binding.session.sessionId, queueId);
+		});
+	}
+
+	sessionContext(target: EngineTarget): Promise<Record<string, unknown>> {
+		return this.#inLane(target.agentInstanceId, async () => {
+			const binding = this.#requireTarget(target);
+			const model = binding.session.model;
+			return {
+				schema: "grimoire.engine.session_context.v1",
+				attemptId: binding.attemptId,
+				sessionId: binding.session.sessionId,
+				model: model ? { provider: model.provider, id: model.id, contextWindow: model.contextWindow } : null,
+				context: binding.session.getContextBreakdown() ?? null,
+				contextUsageRevision: binding.session.contextUsageRevision,
+			};
+		});
+	}
+
+	sessionUsage(target: EngineTarget): Promise<Record<string, unknown>> {
+		return this.#inLane(target.agentInstanceId, async () => {
+			const binding = this.#requireTarget(target);
+			const model = binding.session.model;
+			const local = binding.session.getSessionStats();
+			try {
+				const reports = await binding.session.fetchUsageReports();
+				return {
+					schema: "grimoire.engine.session_usage.v1",
+					attemptId: binding.attemptId,
+					sessionId: binding.session.sessionId,
+					model: model ? { provider: model.provider, id: model.id } : null,
+					local,
+					provider: reports
+						? {
+								status: "available",
+								fetchedAt: Math.max(0, ...reports.map(report => report.fetchedAt)),
+								reports: reports.map(report => ({
+									provider: report.provider,
+									fetchedAt: report.fetchedAt,
+									limits: report.limits,
+									...(report.resetCredits ? { resetCredits: report.resetCredits } : {}),
+									...(report.notes ? { notes: report.notes } : {}),
+								})),
+							}
+						: { status: "unavailable", reason: "provider_usage_not_supported" },
+				};
+			} catch {
+				return {
+					schema: "grimoire.engine.session_usage.v1",
+					attemptId: binding.attemptId,
+					sessionId: binding.session.sessionId,
+					model: model ? { provider: model.provider, id: model.id } : null,
+					local,
+					provider: { status: "unavailable", reason: "provider_usage_fetch_failed" },
+				};
+			}
+		});
+	}
+
+	compact(target: EngineTarget): Promise<Record<string, unknown>> {
+		return this.#inLane(target.agentInstanceId, async () => {
+			const binding = this.#requireTarget(target);
+			const before = binding.session.getContextBreakdown();
+			const result = await this.#withSessionScope(binding, () => binding.session.compact());
+			const after = binding.session.getContextBreakdown();
+			return {
+				schema: "grimoire.engine.session_compaction.v1",
+				attemptId: binding.attemptId,
+				sessionId: binding.session.sessionId,
+				tokensBefore: result.tokensBefore,
+				tokensAfter: after?.usedTokens ?? null,
+				contextBefore: before ?? null,
+				contextAfter: after ?? null,
+			};
+		});
+	}
+
+	mutateInbox(target: EngineTarget, mutation: EngineInboxMutation): Promise<EngineInboxItem> {
+		return this.#inLane(target.agentInstanceId, async () => {
+			const binding = this.#requireTarget(target);
+			const item = await this.store.mutateInboxItem(this.#inboxTarget(binding), mutation);
+			if (mutation.op === "defer") this.#signalInboxWake();
+			return item;
+		});
+	}
+
+	reorderInbox(
+		target: EngineTarget,
+		mutationId: string,
+		expectedOrder: readonly string[],
+		desiredOrder: readonly string[],
+	): Promise<EngineInboxItem[]> {
+		return this.#inLane(target.agentInstanceId, async () => {
+			const binding = this.#requireTarget(target);
+			return await this.store.reorderInboxItems(this.#inboxTarget(binding), mutationId, expectedOrder, desiredOrder);
+		});
 	}
 
 	async drain(): Promise<void> {
@@ -539,9 +729,10 @@ export class EngineRuntime {
 		await this.store.drain();
 	}
 
-	async dispose(): Promise<void> {
+	async dispose(options: { closeStore?: boolean } = {}): Promise<void> {
 		if (this.#disposed) return;
 		this.#disposed = true;
+		this.#signalInboxWake();
 		const errors: unknown[] = [];
 		for (const result of await Promise.allSettled(this.#lanes.values())) {
 			if (result.status === "rejected") errors.push(result.reason);
@@ -552,10 +743,12 @@ export class EngineRuntime {
 		for (const result of await Promise.allSettled(this.#runs)) {
 			if (result.status === "rejected") errors.push(result.reason);
 		}
+		const inboxWakeRun = this.#inboxWakeRun;
+		if (inboxWakeRun) await collectFailure(errors, () => inboxWakeRun);
 		await collectFailure(errors, () => this.agentLifecycle.dispose());
 		await collectFailure(errors, () => this.asyncJobManager.dispose({ timeoutMs: 3_000 }));
 		await collectFailure(errors, () => this.ircBus.dispose());
-		await collectFailure(errors, () => this.store.close());
+		if (options.closeStore !== false) await collectFailure(errors, () => this.store.close());
 		throwCollectedFailures(errors, "Engine disposal failed");
 	}
 
@@ -598,15 +791,13 @@ export class EngineRuntime {
 				`Attempt ${request.attemptId} already exists in state ${priorAttempt.state}`,
 			);
 		}
+		const continuationDigest = await this.#continuationDigest(request, profile);
 
 		if (binding) {
 			if (binding.state === "running" || binding.session.isStreaming) {
 				throw new EngineTargetError("agent_busy", `AgentInstance ${request.agentInstanceId} is busy`);
 			}
-			if (
-				binding.profileDigest !== sessionProfileDigest(profile) ||
-				binding.authorityGeneration !== request.authorityGeneration
-			) {
+			if (profile.continuationPolicy === "fresh" || binding.profileDigest !== continuationDigest) {
 				await this.#terminateBinding(binding, "requested");
 				binding = undefined;
 			} else {
@@ -622,48 +813,120 @@ export class EngineRuntime {
 				binding.activeToolCallIds.clear();
 				binding.traceTools.clear();
 				binding.traceWriteTail = Promise.resolve();
+				binding.modelCallSequence = 0;
+				binding.activeModelCalls.clear();
 				binding.pauseCommandIds.clear();
 				binding.pauseRequests.clear();
 				binding.resumeCommandIds.clear();
 				binding.session.setAttemptId(request.attemptId);
 			}
 		}
-		if (!binding) binding = await this.#openBinding(request, profile);
+		if (!binding) binding = await this.#openBinding(request, profile, continuationDigest);
 		try {
-			await this.store.putBinding(this.#snapshot(binding));
-			if (!(await this.store.putAttempt(binding, "accepted"))) {
-				throw new EngineTargetError("invalid_request", `Attempt ${request.attemptId} was claimed concurrently`);
-			}
-			await this.#emit(binding, "accepted");
 			binding.state = "running";
 			binding.attemptState = "running";
-			await this.store.putBinding(this.#snapshot(binding));
-			await this.store.putAttempt(binding, "running");
-			await this.#emit(binding, "running");
+			await this.#commitAttemptTransition(binding, "running", [{ kind: "accepted" }, { kind: "running" }], {
+				settleCommandId: request.commandId,
+				requireNew: true,
+				inboxSessionId: binding.session.sessionId,
+			});
 		} catch (error) {
 			try {
 				await this.#discardBinding(binding);
 			} catch (cleanupError) {
 				throw new AggregateError([error, cleanupError], "Engine admission and cleanup failed");
 			}
+			if (error instanceof EngineAttemptConflictError) {
+				throw new EngineTargetError("invalid_request", `Attempt ${request.attemptId} was claimed concurrently`);
+			}
 			throw error;
 		}
 		this.#trackRun(this.#runPrompt(binding, request.input));
+		this.#signalInboxWake();
 		return { ...this.#snapshot(binding), duplicate: false };
 	}
 
-	async #openBinding(request: EngineStartRequest, profile: EngineLaunchProfile): Promise<LiveBinding> {
+	#inboxTarget(binding: LiveBinding): EngineInboxTarget {
+		return { ...this.#snapshot(binding), sessionId: binding.session.sessionId };
+	}
+
+	async #invokeEngineInbox(binding: LiveBinding, request: EngineInboxToolRequest): Promise<EngineInboxItem[]> {
+		switch (request.action) {
+			case "list":
+				return await this.store.listInboxItems(binding.session.sessionId, request.includeTerminal);
+			case "read": {
+				const item = await this.store.getInboxItem(binding.session.sessionId, request.queueId);
+				return item ? [item] : [];
+			}
+			case "reorder":
+				return await this.store.reorderInboxItems(
+					this.#inboxTarget(binding),
+					request.mutationId,
+					request.expectedOrder,
+					request.desiredOrder,
+				);
+			default: {
+				const item = await this.store.mutateInboxItem(this.#inboxTarget(binding), {
+					mutationId: request.mutationId,
+					queueId: request.queueId,
+					expectedRevision: request.expectedRevision,
+					op: request.action,
+					value: request.value,
+				});
+				if (request.action === "defer") this.#signalInboxWake();
+				return [item];
+			}
+		}
+	}
+
+	async #runInboxWakeLoop(): Promise<void> {
+		while (!this.#disposed) {
+			const signal = this.#inboxWakeSignal.promise;
+			try {
+				const dueAt = await this.store.nextInboxWakeAt(this.engineGeneration);
+				if (dueAt === undefined) {
+					await signal;
+					continue;
+				}
+				await Promise.race([Bun.sleep(Math.max(0, dueAt - Date.now())), signal]);
+				if (this.#disposed) break;
+				const events = await this.store.claimDueInboxWakes(this.engineGeneration);
+				this.#notifyEvents(events);
+				for (const event of events) {
+					const binding = this.#bindings.get(event.agentInstanceId);
+					if (!binding || binding.attemptId !== event.attemptId) continue;
+					const count = (await this.store.listInboxItems(binding.session.sessionId)).length;
+					await this.#withSessionScope(binding, () => binding.session.notifyEngineInboxChanged(count));
+				}
+			} catch (error) {
+				if (!this.#disposed) logger.warn("Engine inbox wake loop failed", { error: String(error) });
+				await Bun.sleep(1_000);
+			}
+		}
+	}
+
+	#signalInboxWake(): void {
+		const current = this.#inboxWakeSignal;
+		this.#inboxWakeSignal = Promise.withResolvers<void>();
+		current.resolve();
+	}
+
+	async #openBinding(
+		request: EngineStartRequest,
+		profile: EngineLaunchProfile,
+		continuationDigest: string,
+	): Promise<LiveBinding> {
 		const resolved = await this.#resolveSessionProfile?.(profile, request.cwd);
 		let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
 		let unsubscribeCreated: (() => void) | undefined;
 		try {
 			const prior = await this.store.getBinding(request.agentInstanceId);
-			const profileDigest = sessionProfileDigest(profile);
+			const profileDigest = continuationDigest;
 			const bindingGeneration = (prior?.bindingGeneration ?? 0) + 1;
 			const route = engineRouteToken(request.agentInstanceId);
 			const sessionDir = path.join(this.#sessionRoot, route);
 			const sessionManager =
-				prior?.sessionFile && prior.profileDigest === profileDigest
+				prior?.sessionFile && prior.profileDigest === profileDigest && profile.continuationPolicy !== "fresh"
 					? await SessionManager.open(prior.sessionFile, sessionDir, this.store.sessionStorage, {
 							initialCwd: request.cwd,
 						})
@@ -671,15 +934,13 @@ export class EngineRuntime {
 			const id = engineAgentId(request.agentInstanceId);
 			const pauseGate = new AgentPauseGate();
 			let liveBinding: LiveBinding | undefined;
-			const toolExecutionHook: ToolExecutionHook | undefined = hasToolExecutionPolicies(profile)
-				? {
-						before: (call, signal) => {
-							if (!liveBinding) throw new Error("Engine tool boundary is not bound to its AgentSession");
-							return this.#beforeToolExecution(liveBinding, profile, call, signal);
-						},
-						after: (call, token, outcome) => this.#afterToolExecution(token, call, outcome),
-					}
-				: undefined;
+			const toolExecutionHook: ToolExecutionHook = {
+				before: (call, signal) => {
+					if (!liveBinding) throw new Error("Engine tool boundary is not bound to its AgentSession");
+					return this.#beforeToolExecution(liveBinding, profile, call, signal);
+				},
+				after: (call, token, outcome) => this.#afterToolExecution(token, call, outcome),
+			};
 			const childProfiles = resolved?.childProfiles ?? [];
 			const childProfileRefs = profile.childProfileRefs ?? [];
 			const maxChildren = profile.maxChildren ?? 0;
@@ -750,6 +1011,12 @@ export class EngineRuntime {
 				interactivePrompts: true,
 				toolExecutionHook,
 				engineChildLauncher,
+				engineInbox: {
+					invoke: request => {
+						if (!liveBinding) throw new Error("Engine inbox is not bound to its AgentSession");
+						return this.#invokeEngineInbox(liveBinding, request);
+					},
+				},
 				agentId: id,
 				agentDisplayName: request.agentInstanceId,
 				agentRegistry: this.agentRegistry,
@@ -792,6 +1059,8 @@ export class EngineRuntime {
 				traceWriteTail: Promise.resolve(),
 				traceTools: new Map(),
 				childLaunchCount: 0,
+				modelCallSequence: 0,
+				activeModelCalls: new Set(),
 			};
 			liveBinding = binding;
 			created.setToolUIContext(
@@ -803,32 +1072,23 @@ export class EngineRuntime {
 			);
 			binding.unsubscribe = created.session.subscribe(event => {
 				if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_end") {
-					const reasoning = event.assistantMessageEvent.content.trim();
-					if (reasoning)
-						this.#queueTraceEvent(binding, "trace_reasoning", { reasoning: reasoning.slice(0, MAX_TRACE_CHARS) });
+					this.#queueTraceEvent(binding, "trace_reasoning", { state: "completed" });
 				}
 				if (event.type === "tool_execution_start") {
 					binding.activeToolCallIds.add(event.toolCallId);
-					const intent = event.intent?.trim();
-					if (intent)
-						this.#queueTraceEvent(binding, "trace_reasoning", { reasoning: intent.slice(0, MAX_TRACE_CHARS) });
 					let traceName = event.toolName;
-					let traceArgs: unknown = event.args;
 					if (
 						traceName === "write" &&
-						typeof traceArgs === "object" &&
-						traceArgs !== null &&
-						"path" in traceArgs &&
-						typeof traceArgs.path === "string" &&
-						traceArgs.path.startsWith("xd://mcp__")
+						typeof event.args === "object" &&
+						event.args !== null &&
+						"path" in event.args &&
+						typeof event.args.path === "string" &&
+						event.args.path.startsWith("xd://mcp__")
 					) {
-						traceName = traceArgs.path.slice("xd://".length);
-						traceArgs = "content" in traceArgs ? traceArgs.content : {};
+						traceName = event.args.path.slice("xd://".length);
 					}
-					const summary = typeof traceArgs === "string" ? traceArgs : stableStringifyJson(traceArgs);
 					binding.traceTools.set(event.toolCallId, {
 						name: traceName,
-						summary: summary.length > 2_048 ? `${summary.slice(0, 2_048)}…` : summary,
 						startedAt: Date.now(),
 					});
 				}
@@ -839,7 +1099,6 @@ export class EngineRuntime {
 					this.#queueTraceEvent(binding, "trace_tool", {
 						tool: {
 							name: started?.name ?? event.toolName,
-							...(started?.summary ? { summary: started.summary } : {}),
 							outcome: event.isError ? "failed" : "ok",
 							...(started ? { took: Math.max(0, Math.round((Date.now() - started.startedAt) / 100) / 10) } : {}),
 						},
@@ -868,6 +1127,31 @@ export class EngineRuntime {
 		}
 	}
 
+	async #continuationDigest(request: EngineStartRequest, profile: EngineLaunchProfile): Promise<string> {
+		if (
+			profile.continuationPolicy !== undefined &&
+			profile.continuationPolicy !== "exact" &&
+			profile.continuationPolicy !== "fresh"
+		) {
+			throw new EngineTargetError("invalid_request", "continuationPolicy must be exact or fresh");
+		}
+		if (this.#resolveSessionProfile && !this.#resolveSessionContinuation) {
+			throw new Error("Engine session profile resolution requires an exact continuation dependency digest");
+		}
+		const canonicalCwd = await fs.realpath(request.cwd).catch(() => path.resolve(request.cwd));
+		return sessionProfileDigest({
+			agentInstanceId: request.agentInstanceId,
+			agentInstanceRef: request.agentInstanceRef,
+			parentAgentInstanceId: request.parentAgentInstanceId,
+			authorityGeneration: request.authorityGeneration,
+			canonicalCwd: process.platform === "win32" ? canonicalCwd.toLowerCase() : canonicalCwd,
+			continuationPolicy: profile.continuationPolicy ?? "exact",
+			profile,
+			dependencyDigest: await this.#resolveSessionContinuation?.(profile, request.cwd),
+			sessionDefaults: sessionClosure(this.#sessionDefaults),
+		});
+	}
+
 	async #requestInput(
 		binding: LiveBinding,
 		questions: ExtensionAskDialogQuestion[],
@@ -892,18 +1176,26 @@ export class EngineRuntime {
 			binding.pendingInput = pending;
 			binding.attemptState = "waiting_input";
 			try {
-				await this.store.putAttempt(binding, "waiting_input");
-				await this.#emit(binding, "input_requested", {
-					inputId: pending.inputId,
-					inputKind: "ask",
-					questions,
-					attemptState: "waiting_input",
-					controlReadiness: controlReadiness("waiting_input"),
-				});
+				await this.#commitAttemptTransition(
+					binding,
+					"waiting_input",
+					[
+						{
+							kind: "input_requested",
+							payload: {
+								inputId: pending.inputId,
+								inputKind: "ask",
+								questions,
+								attemptState: "waiting_input",
+								controlReadiness: controlReadiness("waiting_input"),
+							},
+						},
+					],
+					{ expectedStates: ["running"] },
+				);
 			} catch (error) {
 				binding.pendingInput = undefined;
 				binding.attemptState = "running";
-				await this.store.putAttempt(binding, "running");
 				throw error;
 			}
 		});
@@ -928,11 +1220,9 @@ export class EngineRuntime {
 		if (!pending) return;
 		binding.pendingInput = undefined;
 		try {
-			if (persistState) await this.store.putAttempt(binding, attemptState);
-			await this.#emit(
-				binding,
-				"input_resolved",
-				{
+			const event = {
+				kind: "input_resolved" as const,
+				payload: {
 					inputId: pending.inputId,
 					status: "cancelled",
 					reason: reason.slice(0, 2_048),
@@ -940,7 +1230,10 @@ export class EngineRuntime {
 					controlReadiness: controlReadiness(attemptState),
 				},
 				causationCommandId,
-			);
+			};
+			if (persistState) {
+				await this.#commitAttemptTransition(binding, attemptState, [event], { expectedStates: ["waiting_input"] });
+			} else await this.#commitEvent(binding, event.kind, event.payload, causationCommandId);
 		} catch (error) {
 			logger.warn("Engine input cancellation event write failed", {
 				inputId: pending.inputId,
@@ -958,7 +1251,6 @@ export class EngineRuntime {
 		signal?: AbortSignal,
 	): Promise<ToolExecutionHookToken | undefined> {
 		const policy = profile.toolPolicies?.[call.toolName] ?? "unrestricted";
-		if (policy === "unrestricted") return undefined;
 		const input = stableStringifyJson(call.input);
 		const inputHash = sha256(input);
 		const invocationId = `tool_${sha256(`${binding.bindingId}\0${binding.attemptId}\0${call.toolCallId}\0${inputHash}`).slice(0, 32)}`;
@@ -972,17 +1264,22 @@ export class EngineRuntime {
 			toolCallId: call.toolCallId,
 			toolName: call.toolName,
 			inputHash,
-			inputPreview: input.length > 8_192 ? `${input.slice(0, 8_192)}…` : input,
 			target: this.#snapshot(binding),
-			writeTail: Promise.resolve(),
 			done: done.promise,
 			resolveDone: done.resolve,
 			settled: false,
 		};
 		this.#toolInvocations.set(invocationId, record);
 		if (policy === "permit") return await this.#requestToolApproval(record, signal);
-		void this.#queueToolEvent(record, "tool_started", this.#toolEventPayload(record));
-		return { invocationId };
+		try {
+			const event = await this.store.startToolEffect(record.target, this.#toolEffect(record));
+			this.#notifyEvents([event]);
+			return { invocationId };
+		} catch (error) {
+			this.#toolInvocations.delete(invocationId);
+			record.resolveDone();
+			throw error;
+		}
 	}
 
 	async #requestToolApproval(record: ToolInvocationRecord, signal?: AbortSignal): Promise<ToolExecutionHookToken> {
@@ -995,10 +1292,8 @@ export class EngineRuntime {
 		const pending: PendingToolApproval = { record, resolve: completion.resolve };
 		this.#pendingToolApprovals.set(record.invocationId, pending);
 		try {
-			await this.#queueToolEvent(record, "tool_approval_requested", {
-				...this.#toolEventPayload(record),
-				approvalId: record.invocationId,
-			});
+			const event = await this.store.requestToolApproval(record.target, this.#toolEffect(record));
+			this.#notifyEvents([event]);
 		} catch (error) {
 			this.#pendingToolApprovals.delete(record.invocationId);
 			this.#toolInvocations.delete(record.invocationId);
@@ -1007,28 +1302,20 @@ export class EngineRuntime {
 		}
 		const abort = () => {
 			if (this.#pendingToolApprovals.get(record.invocationId) !== pending) return;
-			this.#pendingToolApprovals.delete(record.invocationId);
-			completion.resolve({ decision: "cancelled", reason: "Attempt cancelled while awaiting approval" });
+			void this.#cancelPendingToolApproval(pending, "Attempt cancelled while awaiting approval").catch(error => {
+				logger.warn("Engine tool approval cancellation failed", {
+					approvalId: record.invocationId,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
 		};
 		signal?.addEventListener("abort", abort, { once: true });
 		const decision = await completion.promise.finally(() => signal?.removeEventListener("abort", abort));
 		if (decision.decision === "approve") {
-			void this.#queueToolEvent(record, "tool_started", this.#toolEventPayload(record));
 			return { invocationId: record.invocationId };
 		}
-		if (decision.decision === "cancelled") {
-			await this.#queueToolEvent(
-				record,
-				"tool_approval_resolved",
-				{
-					approvalId: record.invocationId,
-					decision: "cancelled",
-					reason: decision.reason,
-				},
-				decision.causationCommandId,
-			);
-		}
-		this.#completeToolInvocation(record, decision.decision, decision.reason);
+		this.#toolInvocations.delete(record.invocationId);
+		record.resolveDone();
 		throw new Error(
 			decision.decision === "deny"
 				? `Tool call denied by approval: ${record.toolName}`
@@ -1065,50 +1352,38 @@ export class EngineRuntime {
 
 	#completeToolInvocation(
 		record: ToolInvocationRecord,
-		status: "completed" | "failed" | "cancelled" | "deny",
+		status: "completed" | "failed" | "cancelled",
 		error?: string,
 		jobIds?: string[],
 	): void {
 		if (record.settled) return;
 		record.settled = true;
-		void this.#queueToolEvent(record, "tool_settled", {
-			invocationId: record.invocationId,
-			toolCallId: record.toolCallId,
-			toolName: record.toolName,
-			status: status === "deny" ? "denied" : status,
-			...(error ? { error: error.slice(0, 2_048) } : {}),
-			...(jobIds?.length ? { jobIds } : {}),
-		}).finally(() => {
-			this.#toolInvocations.delete(record.invocationId);
-			record.resolveDone();
-		});
-	}
-
-	#queueToolEvent(
-		record: ToolInvocationRecord,
-		kind: EngineEvent["kind"],
-		payload: Record<string, unknown>,
-		causationCommandId = record.target.commandId,
-	): Promise<void> {
-		const write = record.writeTail.then(() => this.#emit(record.target, kind, payload, causationCommandId));
-		record.writeTail = write.catch(error => {
-			logger.warn("Engine tool event write failed", {
-				invocationId: record.invocationId,
-				kind,
-				error: error instanceof Error ? error.message : String(error),
+		void this.store
+			.settleToolEffect(record.target, record.invocationId, status, {
+				...(error ? { error: error.slice(0, 2_048) } : {}),
+				...(jobIds?.length ? { jobIds } : {}),
+			})
+			.then(event => {
+				this.#notifyEvents([event]);
+				this.#toolInvocations.delete(record.invocationId);
+				record.resolveDone();
+			})
+			.catch(error => {
+				record.settled = false;
+				logger.warn("Engine tool effect settlement failed", {
+					invocationId: record.invocationId,
+					error: error instanceof Error ? error.message : String(error),
+				});
 			});
-		});
-		return write;
 	}
 
-	#toolEventPayload(record: ToolInvocationRecord): Record<string, unknown> {
+	#toolEffect(record: ToolInvocationRecord): EngineToolEffectInput {
 		return {
-			invocationId: record.invocationId,
+			effectId: record.invocationId,
 			toolCallId: record.toolCallId,
 			toolName: record.toolName,
 			policy: record.policy,
 			inputHash: record.inputHash,
-			inputPreview: record.inputPreview,
 		};
 	}
 
@@ -1122,17 +1397,33 @@ export class EngineRuntime {
 		}
 	}
 
-	#cancelToolApprovals(binding: LiveBinding, reason: string, causationCommandId?: string): void {
-		for (const [approvalId, pending] of this.#pendingToolApprovals) {
+	async #cancelToolApprovals(binding: LiveBinding, reason: string, causationCommandId?: string): Promise<void> {
+		for (const pending of this.#pendingToolApprovals.values()) {
 			if (
 				pending.record.target.bindingId !== binding.bindingId ||
 				pending.record.target.attemptId !== binding.attemptId
 			) {
 				continue;
 			}
-			this.#pendingToolApprovals.delete(approvalId);
-			pending.resolve({ decision: "cancelled", reason, causationCommandId });
+			await this.#cancelPendingToolApproval(pending, reason, causationCommandId);
 		}
+	}
+
+	async #cancelPendingToolApproval(
+		pending: PendingToolApproval,
+		reason: string,
+		causationCommandId?: string,
+	): Promise<void> {
+		const approvalId = pending.record.invocationId;
+		if (this.#pendingToolApprovals.get(approvalId) !== pending) return;
+		const events = await this.store.resolveToolApproval(pending.record.target, approvalId, "cancelled", {
+			reason: reason.slice(0, 2_048),
+			causationCommandId,
+		});
+		this.#notifyEvents(events);
+		if (this.#pendingToolApprovals.get(approvalId) !== pending) return;
+		this.#pendingToolApprovals.delete(approvalId);
+		pending.resolve({ decision: "cancelled", reason, causationCommandId });
 	}
 
 	/** Cancel an Engine child when its parent task call is aborted. */
@@ -1156,15 +1447,20 @@ export class EngineRuntime {
 			const progress = binding.pauseProgress.promise;
 			if (binding.activeToolCallIds.size > 0) await progress;
 		}
-		await binding.session.sessionManager.flush();
+		const transcriptCheckpoint = await binding.session.sessionManager.flushAndCheckpoint();
 		await this.#inLane(binding.agentInstanceId, async () => {
 			if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
 			if (binding.attemptId !== attemptId || binding.attemptState !== "pause_requested") return;
+			const events = [...binding.pauseRequests].map(([commandId, initiator]) => ({
+				kind: "paused" as const,
+				payload: controlPayload(initiator, "paused"),
+				causationCommandId: commandId,
+			}));
+			await this.#commitAttemptTransition(binding, "paused", events, {
+				expectedStates: ["pause_requested"],
+				transcriptCheckpoint,
+			});
 			binding.attemptState = "paused";
-			await this.store.putAttempt(binding, "paused");
-			for (const [commandId, initiator] of binding.pauseRequests) {
-				await this.#emit(binding, "paused", controlPayload(initiator, "paused"), commandId);
-			}
 			binding.pauseRequests.clear();
 		});
 	}
@@ -1175,15 +1471,43 @@ export class EngineRuntime {
 	}
 
 	async #dispatchModel(binding: LiveBinding, input: string): Promise<boolean> {
-		const previous = binding.session.getLastAssistantMessage();
+		const completed = Promise.withResolvers<void>();
+		binding.activeModelCalls.add(completed.promise);
+		const modelCallId = `model-${++binding.modelCallSequence}`;
+		const inputHash = sha256(input);
+		const effect: EngineModelEffectInput = {
+			effectId: `model_${sha256(`${binding.bindingId}\0${binding.attemptId}\0${modelCallId}`).slice(0, 32)}`,
+			modelCallId,
+			inputHash,
+		};
 		try {
-			const dispatched = await this.#withSessionScope(binding, () => this.#dispatchPrompt(binding.session, input));
-			const current = binding.session.getLastAssistantMessage();
-			if (current !== previous && current?.stopReason === "error") {
-				throw new Error(current.errorMessage?.trim() || "Model request failed");
+			const started = await this.store.startModelEffect(this.#snapshot(binding), effect);
+			this.#notifyEvents([started]);
+			const previous = binding.session.getLastAssistantMessage();
+			let dispatched: boolean;
+			try {
+				dispatched = await this.#withSessionScope(binding, () => this.#dispatchPrompt(binding.session, input));
+				const current = binding.session.getLastAssistantMessage();
+				if (current !== previous && current?.stopReason === "error") {
+					throw new Error(current.errorMessage?.trim() || "Model request failed");
+				}
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				const settled = await this.store.settleModelEffect(
+					this.#snapshot(binding),
+					effect,
+					"failed",
+					message.slice(0, 2_048),
+				);
+				this.#notifyEvents([settled]);
+				throw error;
 			}
+			const settled = await this.store.settleModelEffect(this.#snapshot(binding), effect, "completed");
+			this.#notifyEvents([settled]);
 			return dispatched;
 		} finally {
+			completed.resolve();
+			binding.activeModelCalls.delete(completed.promise);
 			await binding.pauseGate.waitUntilResumed();
 		}
 	}
@@ -1242,15 +1566,29 @@ export class EngineRuntime {
 					return false;
 				if (binding.attemptState === "pause_requested" || binding.attemptState === "paused") return true;
 				if (binding.attemptState !== "running") return false;
+				const transcriptCheckpoint = await binding.session.sessionManager.flushAndCheckpoint();
 				binding.state = "idle";
 				binding.attemptState = state;
-				await this.store.putBinding(this.#snapshot(binding));
-				await this.store.putAttempt(binding, state, cause);
-				await this.#emit(
-					binding,
-					state,
-					state === "completed" ? this.#completionPayload(binding) : { error: cause ?? "Unknown Engine failure" },
-				);
+				try {
+					await this.#commitAttemptTransition(
+						binding,
+						state,
+						[
+							{
+								kind: state,
+								payload:
+									state === "completed"
+										? this.#completionPayload(binding)
+										: { error: cause ?? "Unknown Engine failure" },
+							},
+						],
+						{ cause, expectedStates: ["running"], transcriptCheckpoint },
+					);
+				} catch (error) {
+					binding.state = "running";
+					binding.attemptState = "running";
+					throw error;
+				}
 				return false;
 			});
 			if (!retry) return;
@@ -1308,17 +1646,27 @@ export class EngineRuntime {
 			filter: { ownerId: binding.engineAgentId, attemptId: request.attemptId },
 		});
 		await this.#waitForToolInvocations(binding, request.attemptId);
+		const transcriptCheckpoint = await binding.session.sessionManager.flushAndCheckpoint();
 		await this.#inLane(binding.agentInstanceId, async () => {
 			if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
 			if (binding.attemptId !== request.attemptId || binding.attemptState !== "cancel_requested") return;
 			binding.state = "idle";
 			binding.attemptState = "cancelled";
-			await this.store.putBinding(this.#snapshot(binding));
-			await this.store.putAttempt(binding, "cancelled", request.reason);
 			const payload = request.reason ? { reason: request.reason } : undefined;
-			await this.#emit(binding, "cancelled", payload);
+			const events: EngineTransitionEvent[] = [{ kind: "cancelled", payload }];
 			if (request.commandId !== binding.commandId) {
-				await this.#emit(binding, "cancelled", payload, request.commandId);
+				events.push({ kind: "cancelled", payload, causationCommandId: request.commandId });
+			}
+			try {
+				await this.#commitAttemptTransition(binding, "cancelled", events, {
+					cause: request.reason,
+					expectedStates: ["cancel_requested"],
+					transcriptCheckpoint,
+				});
+			} catch (error) {
+				binding.state = "running";
+				binding.attemptState = "cancel_requested";
+				throw error;
 			}
 		});
 	}
@@ -1326,22 +1674,51 @@ export class EngineRuntime {
 	async #terminateBinding(binding: LiveBinding, cause: "requested" | "engine_lost"): Promise<void> {
 		if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
 		const wasRunning = binding.state === "running";
+		const previousAttemptState = binding.attemptState;
 		this.#bindings.delete(binding.agentInstanceId);
 		binding.state = "released";
 		const reason = cause === "engine_lost" ? "Engine stopped" : "Engine binding released";
 		const errors: unknown[] = [];
+		let transcriptCheckpoint: SessionDurabilityCheckpoint | undefined;
 		await collectFailure(errors, () =>
-			this.#disposeBindingResources(binding, reason, cause === "engine_lost" ? "interrupted" : "cancelled"),
+			this.#disposeBindingResources(
+				binding,
+				reason,
+				cause === "engine_lost" ? "interrupted" : "cancelled",
+				wasRunning
+					? async () => {
+							await Promise.all(binding.activeModelCalls);
+							await this.#waitForToolInvocations(binding, binding.attemptId);
+							transcriptCheckpoint = await binding.session.sessionManager.flushAndCheckpoint();
+						}
+					: undefined,
+			),
 		);
-		await collectFailure(errors, () => this.store.putBinding(this.#snapshot(binding)));
-		if (cause === "engine_lost" && wasRunning) {
+		if (cause === "engine_lost" && wasRunning && transcriptCheckpoint) {
 			binding.attemptState = "interrupted";
-			await collectFailure(errors, () => this.store.putAttempt(binding, "interrupted", cause));
-			await collectFailure(errors, () => this.#emit(binding, "interrupted", { cause }));
-		} else if (cause === "requested" && wasRunning) {
+			await collectFailure(errors, () =>
+				this.#commitAttemptTransition(binding, "interrupted", [{ kind: "interrupted", payload: { cause } }], {
+					cause,
+					expectedStates: [previousAttemptState],
+					transcriptCheckpoint,
+				}),
+			);
+		} else if (cause === "requested" && wasRunning && transcriptCheckpoint) {
 			binding.attemptState = "cancelled";
-			await collectFailure(errors, () => this.store.putAttempt(binding, "cancelled", "binding_released"));
-			await collectFailure(errors, () => this.#emit(binding, "cancelled", { cause: "binding_released" }));
+			await collectFailure(errors, () =>
+				this.#commitAttemptTransition(
+					binding,
+					"cancelled",
+					[{ kind: "cancelled", payload: { cause: "binding_released" } }],
+					{
+						cause: "binding_released",
+						expectedStates: [previousAttemptState],
+						transcriptCheckpoint,
+					},
+				),
+			);
+		} else if (!wasRunning) {
+			await collectFailure(errors, () => this.store.putBinding(this.#snapshot(binding)));
 		}
 		throwCollectedFailures(errors, `Engine binding ${binding.agentInstanceId} cleanup failed`);
 	}
@@ -1357,6 +1734,7 @@ export class EngineRuntime {
 		binding: LiveBinding,
 		reason: string,
 		attemptState: EngineAttemptState,
+		beforeSessionDispose?: () => Promise<void>,
 	): Promise<void> {
 		const errors: unknown[] = [];
 		await collectFailure(errors, binding.unsubscribe);
@@ -1372,6 +1750,7 @@ export class EngineRuntime {
 		await collectFailure(errors, () => binding.pauseGate.resume());
 		await collectFailure(errors, () => this.#notifyPauseProgress(binding));
 		if (abort) await collectFailure(errors, () => abort!);
+		if (beforeSessionDispose) await collectFailure(errors, beforeSessionDispose);
 		await collectFailure(errors, () => binding.session.dispose());
 		await collectFailure(errors, binding.disposeProfile);
 		await collectFailure(errors, () => this.agentRegistry.unregister(binding.engineAgentId, binding.session));
@@ -1419,23 +1798,7 @@ export class EngineRuntime {
 	}
 
 	async #reconcileLostAttempts(): Promise<void> {
-		const interrupted = await this.store.reconcileInterrupted(this.engineGeneration);
-		for (const attempt of interrupted) {
-			await this.#emit(
-				{
-					commandId: attempt.command_id,
-					agentInstanceId: attempt.agent_instance_id,
-					executionId: attempt.execution_id,
-					attemptId: attempt.attempt_id,
-					engineGeneration: this.engineGeneration,
-					bindingId: attempt.binding_id,
-					bindingGeneration: Number(attempt.binding_generation),
-					authorityGeneration: Number(attempt.authority_generation),
-				},
-				"interrupted",
-				{ cause: "engine_lost", lostEngineGeneration: Number(attempt.engine_generation) },
-			);
-		}
+		this.#notifyEvents(await this.store.interruptGeneration(this.engineGeneration));
 	}
 
 	async #emit(
@@ -1461,8 +1824,58 @@ export class EngineRuntime {
 			kind,
 			payload,
 		});
-		for (const listener of this.#listeners) {
-			void Promise.resolve(listener(event)).catch(() => {});
+		this.#notifyEvents([event]);
+	}
+
+	async #commitEvent(
+		target: Pick<
+			EngineBindingSnapshot,
+			| "commandId"
+			| "agentInstanceId"
+			| "executionId"
+			| "attemptId"
+			| "engineGeneration"
+			| "bindingId"
+			| "bindingGeneration"
+			| "authorityGeneration"
+		>,
+		kind: EngineEvent["kind"],
+		payload?: Record<string, unknown>,
+		causationCommandId = target.commandId,
+		settleCommandId?: string,
+		settleOutcome: "applied" | "rejected" = "applied",
+	): Promise<void> {
+		const event = await this.store.commitEvent(
+			target,
+			{ kind, payload, causationCommandId },
+			settleCommandId,
+			settleOutcome,
+		);
+		this.#notifyEvents([event]);
+	}
+
+	async #commitAttemptTransition(
+		binding: LiveBinding,
+		state: EngineAttemptState,
+		events: readonly EngineTransitionEvent[],
+		options: {
+			cause?: string;
+			settleCommandId?: string;
+			expectedStates?: readonly EngineAttemptState[];
+			requireNew?: boolean;
+			transcriptCheckpoint?: SessionDurabilityCheckpoint;
+			inboxSessionId?: string;
+		} = {},
+	): Promise<void> {
+		const committed = await this.store.commitAttemptTransition(this.#snapshot(binding), state, events, options);
+		this.#notifyEvents(committed);
+	}
+
+	#notifyEvents(events: readonly EngineEvent[]): void {
+		for (const event of events) {
+			for (const listener of this.#listeners) {
+				void Promise.resolve(listener(event)).catch(() => {});
+			}
 		}
 	}
 
@@ -1508,10 +1921,6 @@ export class EngineRuntime {
 	#throwIfDisposed(): void {
 		if (this.#disposed) throw new Error("EngineRuntime is disposed");
 	}
-}
-
-function hasToolExecutionPolicies(profile: EngineLaunchProfile): boolean {
-	return Object.values(profile.toolPolicies ?? {}).some(policy => policy !== "unrestricted");
 }
 
 function validateControlRequest(request: EngineControlRequest): void {
@@ -1675,6 +2084,36 @@ function sha256(value: string): string {
 	return crypto.createHash("sha256").update(value).digest("hex");
 }
 
-function sessionProfileDigest(profile: EngineLaunchProfile): string {
-	return `sha256:${sha256(stableStringifyJson(profile))}`;
+function sessionProfileDigest(continuation: Record<string, unknown>): string {
+	return `sha256:${sha256(stableStringifyJson(continuation))}`;
+}
+
+function sessionClosure(options: EngineRuntimeOptions["sessionDefaults"]): Record<string, unknown> {
+	const settings = options?.settings;
+	return {
+		additionalDirectories: options?.additionalDirectories,
+		model: options?.model
+			? {
+					api: options.model.api,
+					baseUrl: options.model.baseUrl,
+					id: options.model.id,
+					provider: options.model.provider,
+				}
+			: undefined,
+		thinkingLevel: options?.thinkingLevel,
+		toolNames: options?.toolNames,
+		restrictToolNames: options?.restrictToolNames,
+		enableMCP: options?.enableMCP,
+		enableLsp: options?.enableLsp,
+		maxSpawnDepth: options?.maxSpawnDepth,
+		skills: options?.skills,
+		rules: options?.rules,
+		contextFiles: options?.contextFiles,
+		promptTemplates: options?.promptTemplates,
+		slashCommands: options?.slashCommands,
+		settings: settings
+			? Object.fromEntries((Object.keys(SETTINGS_SCHEMA) as SettingPath[]).map(key => [key, settings.get(key)]))
+			: undefined,
+		extensions: "explicit-disabled",
+	};
 }
