@@ -381,14 +381,16 @@ async function snapshotFromAttempt(
 
 async function listEvents(runtime: EngineRuntime, attemptId: string, cursor: string | undefined, limit: number) {
 	const epoch = await runtime.store.getStoreEpoch();
-	const after = decodeCursor(cursor, "events", epoch);
+	const after = decodeCursor(cursor, "events", epoch, attemptId);
 	const bounds = await runtime.store.eventBounds(attemptId);
 	const gap =
-		after.resyncRequired || after.position > bounds.last || (bounds.first > 0 && after.position < bounds.first - 1);
+		after.resyncRequired ||
+		(cursor !== undefined &&
+			(after.position > bounds.last || (bounds.first > 0 && after.position < bounds.first - 1)));
 	if (gap) {
 		return {
 			events: [],
-			nextCursor: encodeCursor("events", epoch, Math.max(0, bounds.first - 1)),
+			nextCursor: encodeCursor("events", epoch, Math.max(0, bounds.first - 1), attemptId),
 			hasMore: bounds.last >= bounds.first && bounds.first > 0,
 			retentionStart: bounds.first,
 			resyncRequired: true,
@@ -400,7 +402,7 @@ async function listEvents(runtime: EngineRuntime, attemptId: string, cursor: str
 	const position = rows[events.length - 1]?.eventId ?? after.position;
 	return {
 		events,
-		nextCursor: encodeCursor("events", epoch, position),
+		nextCursor: encodeCursor("events", epoch, position, attemptId),
 		hasMore: rows.length > events.length,
 		retentionStart: bounds.first,
 		resyncRequired: false,
@@ -497,14 +499,17 @@ function fitResponsePage<T>(items: T[]): T[] {
 	return page;
 }
 
-function encodeCursor(kind: "snapshots" | "events", epoch: string, position: number): string {
-	return Buffer.from(JSON.stringify({ kind, epoch, position }), "utf8").toString("base64url");
+function encodeCursor(kind: "snapshots" | "events", epoch: string, position: number, scope?: string): string {
+	return Buffer.from(JSON.stringify({ kind, epoch, position, ...(scope ? { scope } : {}) }), "utf8").toString(
+		"base64url",
+	);
 }
 
 function decodeCursor(
 	cursor: string | undefined,
 	kind: "snapshots" | "events",
 	epoch: string,
+	scope?: string,
 ): { position: number; resyncRequired: boolean } {
 	if (!cursor) return { position: 0, resyncRequired: false };
 	try {
@@ -512,6 +517,7 @@ function decodeCursor(
 		if (
 			value.kind !== kind ||
 			value.epoch !== epoch ||
+			(scope !== undefined && value.scope !== scope) ||
 			!Number.isSafeInteger(value.position) ||
 			Number(value.position) < 0
 		) {

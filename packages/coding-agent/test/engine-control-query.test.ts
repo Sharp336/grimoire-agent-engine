@@ -52,6 +52,24 @@ describe("Engine Control + Query", () => {
 			kind: "completed",
 			payload: { assistantFinal: full, transcriptRef: "history://Engine-a" },
 		});
+		const secondBinding = {
+			...binding,
+			bindingId: "binding-b",
+			commandId: "start-b",
+			agentInstanceId: "agent-b",
+			executionId: "execution-b",
+			attemptId: "attempt-b",
+			engineAgentId: "Engine-b",
+			profileDigest: "profile-b",
+		};
+		await runtime.store.putBinding(secondBinding);
+		await runtime.store.putAttempt(secondBinding, "completed");
+		await runtime.store.appendEvent({
+			...secondBinding,
+			causationCommandId: "complete-b",
+			kind: "completed",
+			payload: { assistantFinal: "second" },
+		});
 
 		const options = {
 			runtime,
@@ -105,6 +123,14 @@ describe("Engine Control + Query", () => {
 		})) as { events: Array<{ kind: string }>; hasMore: boolean };
 		expect(second.events.map(event => event.kind)).toEqual(["completed"]);
 		expect(second.hasMore).toBeFalse();
+		expect(await client.request("events.list", { attemptId: "attempt-b" })).toMatchObject({
+			events: [{ attemptId: "attempt-b", kind: "completed" }],
+			resyncRequired: false,
+		});
+		expect(await client.request("events.list", { attemptId: "attempt-b", cursor: first.nextCursor })).toMatchObject({
+			resyncRequired: true,
+			snapshot: { attemptId: "attempt-b" },
+		});
 
 		const forgedCursor = Buffer.from(
 			JSON.stringify({ kind: "events", epoch: capabilities.storeEpoch, position: 99_999 }),
