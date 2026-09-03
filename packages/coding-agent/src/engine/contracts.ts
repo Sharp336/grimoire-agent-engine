@@ -18,6 +18,8 @@ export interface EngineLaunchProfile {
 	/** Empty disables nested agents; "*" enables the native OMP spawn surface. */
 	spawns: string;
 	profileDigest: string;
+	/** Exact reopens prior conversation state; fresh always starts a new transcript. */
+	continuationPolicy?: "exact" | "fresh";
 	launchProfileRef?: string;
 	selectedRouteRef?: string;
 	/** Descendants allowed below this session. Artel default: one leaf child. */

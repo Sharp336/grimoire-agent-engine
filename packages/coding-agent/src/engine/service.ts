@@ -48,6 +48,9 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 		runtime = await EngineRuntime.create({
 			databasePath,
 			resolveSessionProfile: profileResolver ? (profile, cwd) => profileResolver.resolve(profile, cwd) : undefined,
+			resolveSessionContinuation: profileResolver
+				? (profile, cwd) => profileResolver.continuationDigest(profile, cwd)
+				: undefined,
 			launchChild: rpc
 				? request =>
 						launchHostedEngineChild(rpc, {

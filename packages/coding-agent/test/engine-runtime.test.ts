@@ -75,6 +75,9 @@ describe("EngineRuntime", () => {
 			},
 			...overrides,
 		};
+		if (options.resolveSessionProfile && !options.resolveSessionContinuation) {
+			options.resolveSessionContinuation = async launch => `test:${launch.profileDigest}`;
+		}
 		const runtime = await EngineRuntime.create(options);
 		return { runtime, cwd, options };
 	}
@@ -1132,6 +1135,77 @@ describe("EngineRuntime", () => {
 		expect(changed.sessionFile).not.toBe(second.sessionFile);
 		expect(JSON.stringify(mock.calls[2]?.context.messages)).not.toContain("Remember 41");
 		await restarted.dispose();
+	}, 60_000);
+
+	it("reopens a transcript only across an exact continuation identity", async () => {
+		let dependencyDigest = "dependency-a";
+		const { runtime, cwd } = await createRuntime(async () => true, {
+			resolveSessionContinuation: async () => dependencyDigest,
+			resolveSessionProfile: async (_profile, sessionCwd) => ({
+				options: { settings: await Settings.loadReadOnly({ cwd: sessionCwd }) },
+				dispose() {},
+			}),
+		});
+		const request = {
+			agentInstanceId: "agent-exact-continuation",
+			agentInstanceRef: "grimoire://tasks/project-a/task-a/agents/agent-exact-continuation",
+			authorityGeneration: 1,
+			cwd,
+		};
+		const start = (suffix: string, overrides: Partial<typeof request> = {}, launch = profile) =>
+			runtime.start(
+				{
+					...request,
+					...overrides,
+					commandId: `command-exact-${suffix}`,
+					executionId: `execution-exact-${suffix}`,
+					attemptId: `attempt-exact-${suffix}`,
+					input: suffix,
+				},
+				launch,
+			);
+
+		const first = await start("first");
+		await runtime.drain();
+		const same = await start("same");
+		await runtime.drain();
+		expect(same.sessionFile).toBe(first.sessionFile);
+
+		dependencyDigest = "dependency-b";
+		const dependencyChanged = await start("dependency");
+		await runtime.drain();
+		expect(dependencyChanged.sessionFile).not.toBe(same.sessionFile);
+
+		const projectChanged = await start("project", {
+			agentInstanceRef: "grimoire://tasks/project-b/task-b/agents/agent-exact-continuation",
+		});
+		await runtime.drain();
+		expect(projectChanged.sessionFile).not.toBe(dependencyChanged.sessionFile);
+
+		const authorityChanged = await start("authority", { authorityGeneration: 2 });
+		await runtime.drain();
+		expect(authorityChanged.sessionFile).not.toBe(projectChanged.sessionFile);
+
+		const otherCwd = path.join(path.dirname(cwd), "workspace-b");
+		fs.mkdirSync(otherCwd);
+		const cwdChanged = await start("cwd", { authorityGeneration: 2, cwd: otherCwd });
+		await runtime.drain();
+		expect(cwdChanged.sessionFile).not.toBe(authorityChanged.sessionFile);
+
+		const fresh = await start(
+			"fresh-a",
+			{ authorityGeneration: 2, cwd: otherCwd },
+			{ ...profile, continuationPolicy: "fresh" },
+		);
+		await runtime.drain();
+		const freshAgain = await start(
+			"fresh-b",
+			{ authorityGeneration: 2, cwd: otherCwd },
+			{ ...profile, continuationPolicy: "fresh" },
+		);
+		await runtime.drain();
+		expect(freshAgain.sessionFile).not.toBe(fresh.sessionFile);
+		await runtime.dispose();
 	}, 60_000);
 
 	it("keeps a completed Attempt terminal when cancel arrives late", async () => {

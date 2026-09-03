@@ -1,10 +1,11 @@
 import * as crypto from "node:crypto";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AgentPauseGate } from "@oh-my-pi/pi-agent-core";
 import { logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../async/job-manager";
 import { withCapabilityProviderPolicy } from "../capability";
-import { withSettingsScope } from "../config/settings";
+import { SETTINGS_SCHEMA, type SettingPath, withSettingsScope } from "../config/settings";
 
 import {
 	type ExtensionAskDialogQuestion,
@@ -167,6 +168,8 @@ export interface EngineRuntimeOptions {
 		childProfiles?: EngineChildProfile[];
 		dispose(): void;
 	}>;
+	/** Exact non-secret digest of every external dependency resolved for this launch. */
+	resolveSessionContinuation?: (profile: EngineLaunchProfile, cwd: string) => Promise<string>;
 	launchChild?: (request: {
 		parentAgentInstanceId: string;
 		parentAgentInstanceRef: string;
@@ -190,6 +193,7 @@ export class EngineRuntime {
 	readonly #sessionDefaults: EngineRuntimeOptions["sessionDefaults"];
 	readonly #dispatchPrompt: (session: AgentSession, input: string) => Promise<boolean>;
 	readonly #resolveSessionProfile: EngineRuntimeOptions["resolveSessionProfile"];
+	readonly #resolveSessionContinuation: EngineRuntimeOptions["resolveSessionContinuation"];
 	readonly #launchChild: EngineRuntimeOptions["launchChild"];
 	readonly #bindings = new Map<string, LiveBinding>();
 	readonly #lanes = new Map<string, Promise<void>>();
@@ -206,6 +210,7 @@ export class EngineRuntime {
 		this.#sessionDefaults = options.sessionDefaults;
 		this.#dispatchPrompt = options.dispatchPrompt ?? ((session, input) => session.prompt(input));
 		this.#resolveSessionProfile = options.resolveSessionProfile;
+		this.#resolveSessionContinuation = options.resolveSessionContinuation;
 		this.#launchChild = options.launchChild;
 		this.#sessionRoot = path.join(path.dirname(path.resolve(options.databasePath)), "engine-sessions");
 	}
@@ -651,15 +656,13 @@ export class EngineRuntime {
 				`Attempt ${request.attemptId} already exists in state ${priorAttempt.state}`,
 			);
 		}
+		const continuationDigest = await this.#continuationDigest(request, profile);
 
 		if (binding) {
 			if (binding.state === "running" || binding.session.isStreaming) {
 				throw new EngineTargetError("agent_busy", `AgentInstance ${request.agentInstanceId} is busy`);
 			}
-			if (
-				binding.profileDigest !== sessionProfileDigest(profile) ||
-				binding.authorityGeneration !== request.authorityGeneration
-			) {
+			if (profile.continuationPolicy === "fresh" || binding.profileDigest !== continuationDigest) {
 				await this.#terminateBinding(binding, "requested");
 				binding = undefined;
 			} else {
@@ -683,7 +686,7 @@ export class EngineRuntime {
 				binding.session.setAttemptId(request.attemptId);
 			}
 		}
-		if (!binding) binding = await this.#openBinding(request, profile);
+		if (!binding) binding = await this.#openBinding(request, profile, continuationDigest);
 		try {
 			binding.state = "running";
 			binding.attemptState = "running";
@@ -706,18 +709,22 @@ export class EngineRuntime {
 		return { ...this.#snapshot(binding), duplicate: false };
 	}
 
-	async #openBinding(request: EngineStartRequest, profile: EngineLaunchProfile): Promise<LiveBinding> {
+	async #openBinding(
+		request: EngineStartRequest,
+		profile: EngineLaunchProfile,
+		continuationDigest: string,
+	): Promise<LiveBinding> {
 		const resolved = await this.#resolveSessionProfile?.(profile, request.cwd);
 		let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
 		let unsubscribeCreated: (() => void) | undefined;
 		try {
 			const prior = await this.store.getBinding(request.agentInstanceId);
-			const profileDigest = sessionProfileDigest(profile);
+			const profileDigest = continuationDigest;
 			const bindingGeneration = (prior?.bindingGeneration ?? 0) + 1;
 			const route = engineRouteToken(request.agentInstanceId);
 			const sessionDir = path.join(this.#sessionRoot, route);
 			const sessionManager =
-				prior?.sessionFile && prior.profileDigest === profileDigest
+				prior?.sessionFile && prior.profileDigest === profileDigest && profile.continuationPolicy !== "fresh"
 					? await SessionManager.open(prior.sessionFile, sessionDir, this.store.sessionStorage, {
 							initialCwd: request.cwd,
 						})
@@ -920,6 +927,31 @@ export class EngineRuntime {
 			}
 			throw error;
 		}
+	}
+
+	async #continuationDigest(request: EngineStartRequest, profile: EngineLaunchProfile): Promise<string> {
+		if (
+			profile.continuationPolicy !== undefined &&
+			profile.continuationPolicy !== "exact" &&
+			profile.continuationPolicy !== "fresh"
+		) {
+			throw new EngineTargetError("invalid_request", "continuationPolicy must be exact or fresh");
+		}
+		if (this.#resolveSessionProfile && !this.#resolveSessionContinuation) {
+			throw new Error("Engine session profile resolution requires an exact continuation dependency digest");
+		}
+		const canonicalCwd = await fs.realpath(request.cwd).catch(() => path.resolve(request.cwd));
+		return sessionProfileDigest({
+			agentInstanceId: request.agentInstanceId,
+			agentInstanceRef: request.agentInstanceRef,
+			parentAgentInstanceId: request.parentAgentInstanceId,
+			authorityGeneration: request.authorityGeneration,
+			canonicalCwd: process.platform === "win32" ? canonicalCwd.toLowerCase() : canonicalCwd,
+			continuationPolicy: profile.continuationPolicy ?? "exact",
+			profile,
+			dependencyDigest: await this.#resolveSessionContinuation?.(profile, request.cwd),
+			sessionDefaults: sessionClosure(this.#sessionDefaults),
+		});
 	}
 
 	async #requestInput(
@@ -1853,6 +1885,36 @@ function sha256(value: string): string {
 	return crypto.createHash("sha256").update(value).digest("hex");
 }
 
-function sessionProfileDigest(profile: EngineLaunchProfile): string {
-	return `sha256:${sha256(stableStringifyJson(profile))}`;
+function sessionProfileDigest(continuation: Record<string, unknown>): string {
+	return `sha256:${sha256(stableStringifyJson(continuation))}`;
+}
+
+function sessionClosure(options: EngineRuntimeOptions["sessionDefaults"]): Record<string, unknown> {
+	const settings = options?.settings;
+	return {
+		additionalDirectories: options?.additionalDirectories,
+		model: options?.model
+			? {
+					api: options.model.api,
+					baseUrl: options.model.baseUrl,
+					id: options.model.id,
+					provider: options.model.provider,
+				}
+			: undefined,
+		thinkingLevel: options?.thinkingLevel,
+		toolNames: options?.toolNames,
+		restrictToolNames: options?.restrictToolNames,
+		enableMCP: options?.enableMCP,
+		enableLsp: options?.enableLsp,
+		maxSpawnDepth: options?.maxSpawnDepth,
+		skills: options?.skills,
+		rules: options?.rules,
+		contextFiles: options?.contextFiles,
+		promptTemplates: options?.promptTemplates,
+		slashCommands: options?.slashCommands,
+		settings: settings
+			? Object.fromEntries((Object.keys(SETTINGS_SCHEMA) as SettingPath[]).map(key => [key, settings.get(key)]))
+			: undefined,
+		extensions: "explicit-disabled",
+	};
 }
