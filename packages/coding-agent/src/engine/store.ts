@@ -1,4 +1,4 @@
-import * as fs from "node:fs";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { SQL } from "bun";
 import { SqlSessionStorage } from "../session/sql-session-storage";
@@ -57,6 +57,14 @@ interface EventRow {
 
 const SCHEMA = [
 	`CREATE TABLE IF NOT EXISTS engine_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
+	`CREATE TABLE IF NOT EXISTS omp_session_files (
+		path TEXT PRIMARY KEY,
+		content TEXT NOT NULL,
+		mtime_ms INTEGER NOT NULL,
+		title TEXT,
+		title_source TEXT,
+		title_updated_at TEXT
+	)`,
 	`CREATE TABLE IF NOT EXISTS engine_runtime_bindings (
 		binding_id TEXT PRIMARY KEY,
 		command_id TEXT NOT NULL,
@@ -118,32 +126,109 @@ const REQUIRED_COLUMNS = [
 	["engine_event_outbox", "causation_command_id", "TEXT NOT NULL DEFAULT ''"],
 	["engine_event_outbox", "binding_id", "TEXT NOT NULL DEFAULT ''"],
 	["engine_event_outbox", "authority_generation", "INTEGER NOT NULL DEFAULT 0"],
+	["omp_session_files", "title", "TEXT"],
+	["omp_session_files", "title_source", "TEXT"],
+	["omp_session_files", "title_updated_at", "TEXT"],
 ] as const;
 
+const SCHEMA_MIGRATIONS = [
+	{ version: 1, statements: SCHEMA, requiredColumns: [] },
+	{ version: 2, statements: [], requiredColumns: REQUIRED_COLUMNS },
+] as const;
+
+const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;
+
+type SqlClient = InstanceType<typeof SQL>;
+
+interface MigrationRow {
+	version: number;
+	checksum: string;
+}
+
+function migrationChecksum(migration: (typeof SCHEMA_MIGRATIONS)[number]): string {
+	return new Bun.CryptoHasher("sha256")
+		.update(JSON.stringify({ statements: migration.statements, requiredColumns: migration.requiredColumns }))
+		.digest("hex");
+}
+
+async function applySchemaMigrations(client: SqlClient): Promise<void> {
+	await client.unsafe("BEGIN IMMEDIATE");
+	try {
+		await client.unsafe(
+			`CREATE TABLE IF NOT EXISTS engine_schema_migrations (
+				version INTEGER PRIMARY KEY,
+				checksum TEXT NOT NULL,
+				applied_at INTEGER NOT NULL
+			)`,
+		);
+		const applied = (await client.unsafe(
+			"SELECT version, checksum FROM engine_schema_migrations ORDER BY version",
+		)) as MigrationRow[];
+		if (applied.some(row => Number(row.version) > CURRENT_SCHEMA_VERSION)) {
+			throw new Error(`Engine database schema is newer than this binary (max ${CURRENT_SCHEMA_VERSION})`);
+		}
+		for (const [index, row] of applied.entries()) {
+			const migration = SCHEMA_MIGRATIONS[index];
+			if (!migration || Number(row.version) !== migration.version) {
+				throw new Error("Engine database migration history is not a contiguous supported prefix");
+			}
+			if (row.checksum !== migrationChecksum(migration)) {
+				throw new Error(`Engine database migration ${migration.version} checksum does not match this binary`);
+			}
+		}
+		for (const migration of SCHEMA_MIGRATIONS.slice(applied.length)) {
+			for (const statement of migration.statements) await client.unsafe(statement);
+			for (const [table, column, definition] of migration.requiredColumns) {
+				const columns = (await client.unsafe(`PRAGMA table_info(${table})`)) as Array<{ name: string }>;
+				if (!columns.some(candidate => candidate.name === column)) {
+					await client.unsafe(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+				}
+			}
+			await client.unsafe("INSERT INTO engine_schema_migrations(version, checksum, applied_at) VALUES (?, ?, ?)", [
+				migration.version,
+				migrationChecksum(migration),
+				Date.now(),
+			]);
+		}
+		await client.unsafe("INSERT OR IGNORE INTO engine_metadata(key, value) VALUES ('database_id', ?)", [
+			crypto.randomUUID(),
+		]);
+		await client.unsafe("COMMIT");
+	} catch (error) {
+		await client.unsafe("ROLLBACK").catch(() => {});
+		throw error;
+	}
+}
+
 export class EngineStore {
-	readonly #client: InstanceType<typeof SQL>;
+	readonly #client: SqlClient;
 	readonly sessionStorage: SqlSessionStorage;
 
-	private constructor(client: InstanceType<typeof SQL>, sessionStorage: SqlSessionStorage) {
+	private constructor(client: SqlClient, sessionStorage: SqlSessionStorage) {
 		this.#client = client;
 		this.sessionStorage = sessionStorage;
 	}
 
 	static async open(databasePath: string): Promise<EngineStore> {
 		const resolved = path.resolve(databasePath);
-		fs.mkdirSync(path.dirname(resolved), { recursive: true });
+		await fs.mkdir(path.dirname(resolved), { recursive: true });
 		const client = new SQL(`sqlite:${resolved.replaceAll("\\", "/")}`);
-		await client.unsafe("PRAGMA journal_mode=WAL");
-		await client.unsafe("PRAGMA busy_timeout=5000");
-		for (const statement of SCHEMA) await client.unsafe(statement);
-		for (const [table, column, definition] of REQUIRED_COLUMNS) {
-			const columns = (await client.unsafe(`PRAGMA table_info(${table})`)) as Array<{ name: string }>;
-			if (!columns.some(candidate => candidate.name === column)) {
-				await client.unsafe(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
-			}
+		try {
+			await client.unsafe("PRAGMA journal_mode=WAL");
+			await client.unsafe("PRAGMA foreign_keys=ON");
+			await client.unsafe("PRAGMA synchronous=FULL");
+			await client.unsafe("PRAGMA busy_timeout=5000");
+			await applySchemaMigrations(client);
+			const sessionStorage = await SqlSessionStorage.create({
+				client,
+				table: "omp_session_files",
+				createTable: false,
+			});
+			return new EngineStore(client, sessionStorage);
+		} catch (error) {
+			await client.end().catch(() => {});
+			throw error;
 		}
-		const sessionStorage = await SqlSessionStorage.create({ client, table: "omp_session_files" });
-		return new EngineStore(client, sessionStorage);
 	}
 
 	async nextEngineGeneration(): Promise<number> {

@@ -284,25 +284,37 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 		}
 	}, 60_000);
 
-	it("allows only one service owner for a runtime directory", async () => {
+	it("allows only one service owner for a database across runtime directories", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-service-lock-${Snowflake.next()}-`));
 		const stop = Promise.withResolvers<void>();
+		const firstRuntimeDir = path.join(tempDir, "runtime-a");
+		const secondRuntimeDir = path.join(tempDir, "runtime-b");
 		const config = {
 			deviceId: "device-lock",
 			engineId: "engine-lock",
-			runtimeDir: tempDir,
-			databasePath: path.join(tempDir, "engine.sqlite"),
+			runtimeDir: firstRuntimeDir,
+			databasePath: path.join(tempDir, "data", "engine.sqlite"),
 			natsServerPath: natsServer,
 		};
 		const first = runEngineService(config, stop.promise);
 		await waitFor(async () => {
 			try {
-				return JSON.parse(await Bun.file(path.join(tempDir ?? "", "status.json")).text()).status === "running";
+				return JSON.parse(await Bun.file(path.join(firstRuntimeDir, "status.json")).text()).status === "running";
 			} catch {
 				return false;
 			}
 		});
-		await expect(runEngineService(config, Promise.resolve())).rejects.toThrow("already running");
+		await expect(
+			runEngineService(
+				{
+					...config,
+					runtimeDir: secondRuntimeDir,
+					databasePath: path.join(tempDir, "data", "..", "data", "engine.sqlite"),
+				},
+				Promise.resolve(),
+			),
+		).rejects.toThrow("database is already owned");
+		expect(await Bun.file(path.join(secondRuntimeDir, "nats.conf")).exists()).toBe(false);
 		stop.resolve();
 		await first;
 	}, 60_000);

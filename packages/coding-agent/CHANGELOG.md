@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Prevented separate Agent Engine runtime directories from opening the same SQLite database, and made Engine schema upgrades versioned, checksummed, and fail closed for newer databases.
 - Fixed authenticated Agent Engine messages, commands, and hosted events being redelivered after successful handling, including stale terminal events after a bridge restart.
 
 ## [18.0.7] - 2026-08-26

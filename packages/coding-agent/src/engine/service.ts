@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { nkeyAuthenticator, nkeys } from "@nats-io/transport-node";
+import { isEnoent } from "@oh-my-pi/pi-utils";
 import { type EngineLaunchProfile, EngineTargetError } from "./contracts";
 import { HostedEngineBridge, HostedGrimoireRpc, launchHostedEngineChild } from "./hosted-bridge";
 import { type EngineCommandEnvelope, NatsEngineAdapter } from "./nats-adapter";
@@ -29,7 +30,8 @@ export interface EngineServiceConfig {
 export async function runEngineService(config: EngineServiceConfig, stop?: Promise<void>): Promise<void> {
 	validateConfig(config);
 	await fs.mkdir(config.runtimeDir, { recursive: true });
-	const serviceLock = await acquireServiceLock(config.runtimeDir);
+	const databasePath = await canonicalDatabasePath(config.databasePath);
+	const serviceLock = await acquireServiceLock(databasePath);
 	const engineKey = nkeys.createUser();
 	const bridgeKey = nkeys.createUser();
 	const engineSeed = engineKey.getSeed();
@@ -45,7 +47,7 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 			? new EngineProfileResolver(config.artifactCacheRoot, path.join(config.runtimeDir, "credentials"))
 			: undefined;
 		runtime = await EngineRuntime.create({
-			databasePath: config.databasePath,
+			databasePath,
 			resolveSessionProfile: profileResolver ? (profile, cwd) => profileResolver.resolve(profile, cwd) : undefined,
 			launchChild: rpc
 				? request =>
@@ -110,14 +112,29 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 	}
 }
 
-async function acquireServiceLock(runtimeDir: string): Promise<{ release(): Promise<void> }> {
-	const lockDir = path.join(runtimeDir, "service.lock");
+async function canonicalDatabasePath(databasePath: string): Promise<string> {
+	const resolved = path.resolve(databasePath);
+	await fs.mkdir(path.dirname(resolved), { recursive: true });
+	try {
+		return await fs.realpath(resolved);
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+		return path.join(await fs.realpath(path.dirname(resolved)), path.basename(resolved));
+	}
+}
+
+async function acquireServiceLock(databasePath: string): Promise<{ release(): Promise<void> }> {
+	const lockDir = `${databasePath}.engine.lock`;
 	const ownerPath = path.join(lockDir, "owner.json");
 	const nonce = randomUUID();
 	for (;;) {
 		const candidate = `${lockDir}.${process.pid}.${nonce}.tmp`;
 		await fs.mkdir(candidate);
-		await fs.writeFile(path.join(candidate, "owner.json"), JSON.stringify({ pid: process.pid, nonce }), "utf8");
+		await fs.writeFile(
+			path.join(candidate, "owner.json"),
+			JSON.stringify({ pid: process.pid, nonce, databasePath }),
+			"utf8",
+		);
 		try {
 			await fs.rename(candidate, lockDir);
 			return {
@@ -133,7 +150,7 @@ async function acquireServiceLock(runtimeDir: string): Promise<{ release(): Prom
 			if (!isAlreadyExists(error)) throw error;
 			const owner = await readLockOwner(ownerPath);
 			if (owner && pidAlive(owner.pid)) {
-				throw new Error(`Agent Engine service is already running with pid ${owner.pid}`);
+				throw new Error(`Agent Engine database is already owned by pid ${owner.pid}`);
 			}
 			const stale = `${lockDir}.stale.${process.pid}.${randomUUID()}`;
 			try {
