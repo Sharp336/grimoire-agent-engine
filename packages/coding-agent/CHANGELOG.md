@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added durable Agent Engine tool-effect and approval records for every tool policy, including conservative unknown-effect recovery after Engine loss.
 - Added optional per-tool `tracked` and `permit` policies for Agent Engine sessions, with durable lifecycle events and broker-resolved approval requests that keep asynchronous tool jobs non-blocking.
 
 ### Fixed

@@ -637,13 +637,16 @@ describe("EngineRuntime", () => {
 			{ ...profile, toolPolicies: { read: "permit" } },
 		);
 		const approval = await approvalRequested;
+		const approvalId = String(approval.payload?.approvalId);
 		expect(executed).toBeFalse();
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("running");
+		expect(await runtime.store.getEffect(approvalId)).toMatchObject({ state: "planned", policy: "permit" });
+		expect(await runtime.store.getApproval(approvalId)).toMatchObject({ state: "pending", decision: null });
 
 		await runtime.resolveToolApproval({
 			...started,
 			commandId: "command-approve",
-			approvalId: String(approval.payload?.approvalId),
+			approvalId,
 			decision: "approve",
 		});
 		await runtime.drain();
@@ -656,6 +659,8 @@ describe("EngineRuntime", () => {
 			"tool_settled",
 		]);
 		expect(events.find(event => event.kind === "tool_approval_resolved")?.causationCommandId).toBe("command-approve");
+		expect(await runtime.store.getEffect(approvalId)).toMatchObject({ state: "settled", outcome: "completed" });
+		expect(await runtime.store.getApproval(approvalId)).toMatchObject({ state: "resolved", decision: "approve" });
 		await runtime.dispose();
 	}, 60_000);
 
@@ -682,7 +687,8 @@ describe("EngineRuntime", () => {
 			},
 			{ ...profile, toolPolicies: { read: "permit" } },
 		);
-		await approvalRequested;
+		const approval = await approvalRequested;
+		const approvalId = String(approval.payload?.approvalId);
 		await runtime.cancel({ ...started, commandId: "command-cancel-permit" });
 		await runtime.drain();
 		expect(executed).toBeFalse();
@@ -692,6 +698,46 @@ describe("EngineRuntime", () => {
 		expect(events.find(event => event.kind === "tool_approval_resolved")?.causationCommandId).toBe(
 			"command-cancel-permit",
 		);
+		expect(await runtime.store.getEffect(approvalId)).toMatchObject({ state: "settled", outcome: "cancelled" });
+		expect(await runtime.store.getApproval(approvalId)).toMatchObject({ state: "resolved", decision: "cancelled" });
+		await runtime.dispose();
+	}, 60_000);
+
+	it("durably denies a permitted tool without executing it", async () => {
+		let executed = false;
+		const { runtime, cwd } = await createRuntime(async session => {
+			const read = session.getToolByName("read");
+			if (!read) throw new Error("read tool is unavailable");
+			await read.execute("read-denied-permit", { path: "permit.txt" });
+			executed = true;
+			return true;
+		});
+		fs.writeFileSync(path.join(cwd, "permit.txt"), "not read");
+		const requested = nextEngineEvent(runtime, "tool_approval_requested");
+		const started = await runtime.start(
+			{
+				commandId: "command-denied-permit",
+				agentInstanceId: "agent-denied-permit",
+				executionId: "execution-denied-permit",
+				attemptId: "attempt-denied-permit",
+				authorityGeneration: 1,
+				cwd,
+				input: "read",
+			},
+			{ ...profile, toolPolicies: { read: "permit" } },
+		);
+		const approvalId = String((await requested).payload?.approvalId);
+		await runtime.resolveToolApproval({
+			...started,
+			commandId: "command-deny",
+			approvalId,
+			decision: "deny",
+			reason: "not now",
+		});
+		await runtime.drain();
+		expect(executed).toBeFalse();
+		expect(await runtime.store.getEffect(approvalId)).toMatchObject({ state: "settled", outcome: "denied" });
+		expect(await runtime.store.getApproval(approvalId)).toMatchObject({ state: "resolved", decision: "deny" });
 		await runtime.dispose();
 	}, 60_000);
 
@@ -725,8 +771,10 @@ describe("EngineRuntime", () => {
 			},
 			{ ...profile, toolPolicies: { read: "tracked" } },
 		);
-		await toolStarted;
+		const startedEvent = await toolStarted;
+		const effectId = String(startedEvent.payload?.invocationId);
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("running");
+		expect(await runtime.store.getEffect(effectId)).toMatchObject({ state: "started", policy: "tracked" });
 		expect((await runtime.store.pendingEvents()).find(event => event.kind === "tool_settled")).toBeUndefined();
 		release.resolve("done");
 		await runtime.drain();
@@ -735,6 +783,40 @@ describe("EngineRuntime", () => {
 		expect(events.findIndex(event => event.kind === "tool_settled")).toBeLessThan(
 			events.findIndex(event => event.kind === "completed"),
 		);
+		expect(await runtime.store.getEffect(effectId)).toMatchObject({ state: "settled", outcome: "completed" });
+		await runtime.dispose();
+	}, 60_000);
+
+	it("records unrestricted tools without exposing their raw input", async () => {
+		const { runtime, cwd } = await createRuntime(async session => {
+			const read = session.getToolByName("read");
+			if (!read) throw new Error("read tool is unavailable");
+			await read.execute("read-unrestricted", { path: "secret-name.txt" });
+			return true;
+		});
+		fs.writeFileSync(path.join(cwd, "secret-name.txt"), "secret-value");
+		await runtime.start(
+			{
+				commandId: "command-unrestricted",
+				agentInstanceId: "agent-unrestricted",
+				executionId: "execution-unrestricted",
+				attemptId: "attempt-unrestricted",
+				authorityGeneration: 1,
+				cwd,
+				input: "read",
+			},
+			profile,
+		);
+		await runtime.drain();
+		const events = (await runtime.store.pendingEvents()).filter(event => event.kind.startsWith("tool_"));
+		expect(events.map(event => event.kind)).toEqual(["tool_started", "tool_settled"]);
+		expect(JSON.stringify(events)).not.toContain("secret-name.txt");
+		const effectId = String(events[0]?.payload?.invocationId);
+		expect(await runtime.store.getEffect(effectId)).toMatchObject({
+			state: "settled",
+			outcome: "completed",
+			policy: "unrestricted",
+		});
 		await runtime.dispose();
 	}, 60_000);
 

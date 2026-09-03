@@ -3,10 +3,30 @@ import * as path from "node:path";
 import { SQL } from "bun";
 import type { SessionDurabilityCheckpoint } from "../session/session-manager";
 import { SqlSessionStorage } from "../session/sql-session-storage";
-import type { EngineAttemptState, EngineBindingSnapshot, EngineEvent } from "./contracts";
+import type { EngineAttemptState, EngineBindingSnapshot, EngineEvent, EngineToolPolicy } from "./contracts";
 
 interface MetadataRow {
 	value: string;
+}
+
+function toolEffectPayload(effect: EngineToolEffectInput): Record<string, unknown> {
+	return {
+		invocationId: effect.effectId,
+		toolCallId: effect.toolCallId,
+		toolName: effect.toolName,
+		policy: effect.policy,
+		inputHash: effect.inputHash,
+	};
+}
+
+function effectInputFromRow(row: EngineEffectRow): EngineToolEffectInput {
+	return {
+		effectId: row.effect_id,
+		toolCallId: row.tool_call_id,
+		toolName: row.tool_name,
+		policy: row.policy,
+		inputHash: row.input_hash,
+	};
 }
 
 interface BindingRow {
@@ -61,6 +81,18 @@ interface EventRow {
 	created_at: number;
 }
 
+type EngineEventTarget = Pick<
+	EngineBindingSnapshot,
+	| "commandId"
+	| "agentInstanceId"
+	| "executionId"
+	| "attemptId"
+	| "engineGeneration"
+	| "bindingId"
+	| "bindingGeneration"
+	| "authorityGeneration"
+>;
+
 export interface EngineCommandIdentity {
 	commandId: string;
 	operation: string;
@@ -94,6 +126,47 @@ export interface EngineTranscriptCheckpoint extends SessionDurabilityCheckpoint 
 	revision: number;
 }
 
+export interface EngineToolEffectInput {
+	effectId: string;
+	toolCallId: string;
+	toolName: string;
+	policy: EngineToolPolicy;
+	inputHash: string;
+}
+
+export interface EngineEffectRow {
+	effect_id: string;
+	agent_instance_id: string;
+	execution_id: string;
+	attempt_id: string;
+	binding_id: string;
+	engine_generation: number;
+	binding_generation: number;
+	authority_generation: number;
+	tool_call_id: string;
+	tool_name: string;
+	policy: EngineToolPolicy;
+	input_hash: string;
+	state: "planned" | "started" | "settled" | "unknown";
+	outcome: "completed" | "failed" | "cancelled" | "denied" | "unknown" | null;
+}
+
+interface EngineEffectRecordRow extends EngineEffectRow {
+	command_id: string;
+}
+
+interface EngineRecoveryEffectRow extends EngineEffectRecordRow {
+	approval_id: string | null;
+	approval_state: "pending" | "resolved" | null;
+}
+
+export interface EngineApprovalRow {
+	approval_id: string;
+	effect_id: string;
+	state: "pending" | "resolved";
+	decision: "approve" | "deny" | "cancelled" | null;
+}
+
 export type EngineCommandAdmission =
 	| { status: "claimed" }
 	| { status: "in_progress" }
@@ -117,6 +190,13 @@ export class EngineAttemptConflictError extends Error {
 	constructor(attemptId: string) {
 		super(`Attempt ${attemptId} is already bound to another runtime identity`);
 		this.name = "EngineAttemptConflictError";
+	}
+}
+
+export class EngineEffectConflictError extends Error {
+	constructor(effectId: string) {
+		super(`Tool effect ${effectId} is not in the expected durable state`);
+		this.name = "EngineEffectConflictError";
 	}
 }
 
@@ -232,14 +312,57 @@ const TRANSCRIPT_CHECKPOINT_COLUMNS = [
 	["engine_attempts", "transcript_revision", "INTEGER NOT NULL DEFAULT 0"],
 ] as const;
 
+const EFFECT_APPROVAL_SCHEMA = [
+	`CREATE TABLE engine_effects (
+		effect_id TEXT PRIMARY KEY,
+		command_id TEXT NOT NULL,
+		agent_instance_id TEXT NOT NULL,
+		execution_id TEXT NOT NULL,
+		attempt_id TEXT NOT NULL,
+		binding_id TEXT NOT NULL,
+		engine_generation INTEGER NOT NULL,
+		binding_generation INTEGER NOT NULL,
+		authority_generation INTEGER NOT NULL,
+		tool_call_id TEXT NOT NULL,
+		tool_name TEXT NOT NULL,
+		policy TEXT NOT NULL CHECK(policy IN ('unrestricted', 'tracked', 'permit')),
+		input_hash TEXT NOT NULL,
+		state TEXT NOT NULL CHECK(state IN ('planned', 'started', 'settled', 'unknown')),
+		outcome TEXT CHECK(outcome IN ('completed', 'failed', 'cancelled', 'denied', 'unknown')),
+		error TEXT,
+		job_ids TEXT,
+		created_at INTEGER NOT NULL,
+		started_at INTEGER,
+		settled_at INTEGER,
+		updated_at INTEGER NOT NULL,
+		UNIQUE(attempt_id, tool_call_id)
+	)`,
+	`CREATE INDEX engine_effects_recovery_idx ON engine_effects(engine_generation, state)`,
+	`CREATE TABLE engine_approvals (
+		approval_id TEXT PRIMARY KEY,
+		effect_id TEXT NOT NULL UNIQUE REFERENCES engine_effects(effect_id),
+		request_command_id TEXT NOT NULL,
+		resolved_command_id TEXT,
+		state TEXT NOT NULL CHECK(state IN ('pending', 'resolved')),
+		decision TEXT CHECK(decision IN ('approve', 'deny', 'cancelled')),
+		reason TEXT,
+		requested_at INTEGER NOT NULL,
+		resolved_at INTEGER,
+		updated_at INTEGER NOT NULL
+	)`,
+	`CREATE INDEX engine_approvals_state_idx ON engine_approvals(state, updated_at)`,
+] as const;
+
 const SCHEMA_MIGRATIONS = [
 	{ version: 1, statements: SCHEMA, requiredColumns: [] },
 	{ version: 2, statements: [], requiredColumns: REQUIRED_COLUMNS },
 	{ version: 3, statements: COMMAND_INBOX_SCHEMA, requiredColumns: [] },
 	{ version: 4, statements: [], requiredColumns: TRANSCRIPT_CHECKPOINT_COLUMNS },
+	{ version: 5, statements: EFFECT_APPROVAL_SCHEMA, requiredColumns: [] },
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;
+const TERMINAL_ATTEMPT_STATES = new Set<EngineAttemptState>(["completed", "cancelled", "failed", "interrupted"]);
 
 type SqlClient = InstanceType<typeof SQL>;
 
@@ -480,6 +603,14 @@ export class EngineStore {
 			) {
 				throw new EngineAttemptConflictError(binding.attemptId);
 			}
+			if (TERMINAL_ATTEMPT_STATES.has(state)) {
+				const openEffects = await sql.unsafe(
+					`SELECT effect_id FROM engine_effects
+					 WHERE attempt_id=? AND binding_id=? AND state IN ('planned', 'started') LIMIT 1`,
+					[binding.attemptId, binding.bindingId],
+				);
+				if (openEffects.length > 0) throw new EngineEffectConflictError(String(openEffects[0]?.effect_id));
+			}
 			const transcriptCheckpoint = options.transcriptCheckpoint
 				? { ...options.transcriptCheckpoint, revision: Number(currentRow?.transcript_revision ?? 0) + 1 }
 				: undefined;
@@ -526,6 +657,175 @@ export class EngineStore {
 		});
 	}
 
+	async startToolEffect(target: EngineEventTarget, effect: EngineToolEffectInput): Promise<EngineEvent> {
+		return await this.#transaction(async sql => {
+			await this.#insertToolEffect(sql, target, effect, "started");
+			return await this.#appendTransitionEvent(sql, target, {
+				kind: "tool_started",
+				payload: toolEffectPayload(effect),
+			});
+		});
+	}
+
+	async requestToolApproval(target: EngineEventTarget, effect: EngineToolEffectInput): Promise<EngineEvent> {
+		return await this.#transaction(async sql => {
+			await this.#insertToolEffect(sql, target, effect, "planned");
+			const now = Date.now();
+			await sql.unsafe(
+				`INSERT INTO engine_approvals(
+				 approval_id, effect_id, request_command_id, state, requested_at, updated_at
+				 ) VALUES (?, ?, ?, 'pending', ?, ?)`,
+				[effect.effectId, effect.effectId, target.commandId, now, now],
+			);
+			return await this.#appendTransitionEvent(sql, target, {
+				kind: "tool_approval_requested",
+				payload: { ...toolEffectPayload(effect), approvalId: effect.effectId },
+			});
+		});
+	}
+
+	async resolveToolApproval(
+		target: EngineEventTarget,
+		approvalId: string,
+		decision: "approve" | "deny" | "cancelled",
+		options: { reason?: string; causationCommandId?: string; settleCommandId?: string } = {},
+	): Promise<EngineEvent[]> {
+		return await this.#transaction(async sql => {
+			const rows = (await sql.unsafe(
+				`SELECT e.effect_id, e.command_id, e.agent_instance_id, e.execution_id, e.attempt_id, e.binding_id,
+				 e.engine_generation, e.binding_generation, e.authority_generation, e.tool_call_id, e.tool_name,
+				 e.policy, e.input_hash, e.state, e.outcome, a.state AS approval_state, a.decision
+				 FROM engine_approvals a JOIN engine_effects e ON e.effect_id=a.effect_id
+				 WHERE a.approval_id=? AND e.agent_instance_id=? AND e.execution_id=? AND e.attempt_id=?
+				 AND e.binding_id=? AND e.engine_generation=? AND e.binding_generation=? AND e.authority_generation=?`,
+				[
+					approvalId,
+					target.agentInstanceId,
+					target.executionId,
+					target.attemptId,
+					target.bindingId,
+					target.engineGeneration,
+					target.bindingGeneration,
+					target.authorityGeneration,
+				],
+			)) as Array<EngineEffectRecordRow & { approval_state: "pending" | "resolved"; decision: string | null }>;
+			const row = rows[0];
+			if (row?.approval_state !== "pending" || row.state !== "planned") {
+				throw new EngineEffectConflictError(approvalId);
+			}
+			const now = Date.now();
+			await sql.unsafe(
+				`UPDATE engine_approvals SET state='resolved', decision=?, reason=?, resolved_command_id=?,
+				 resolved_at=?, updated_at=? WHERE approval_id=? AND state='pending'`,
+				[decision, options.reason ?? null, options.causationCommandId ?? null, now, now, approvalId],
+			);
+			if (decision === "approve") {
+				await sql.unsafe(
+					`UPDATE engine_effects SET state='started', started_at=?, updated_at=?
+					 WHERE effect_id=? AND state='planned'`,
+					[now, now, row.effect_id],
+				);
+			} else {
+				await sql.unsafe(
+					`UPDATE engine_effects SET state='settled', outcome=?, error=?, settled_at=?, updated_at=?
+					 WHERE effect_id=? AND state='planned'`,
+					[decision === "deny" ? "denied" : "cancelled", options.reason ?? null, now, now, row.effect_id],
+				);
+			}
+			const effect = effectInputFromRow(row);
+			const causationCommandId = options.causationCommandId ?? target.commandId;
+			const events = [
+				await this.#appendTransitionEvent(sql, target, {
+					kind: "tool_approval_resolved",
+					causationCommandId,
+					payload: {
+						approvalId,
+						decision,
+						...(options.reason ? { reason: options.reason } : {}),
+					},
+				}),
+				await this.#appendTransitionEvent(sql, target, {
+					kind: decision === "approve" ? "tool_started" : "tool_settled",
+					causationCommandId,
+					payload:
+						decision === "approve"
+							? toolEffectPayload(effect)
+							: {
+									...toolEffectPayload(effect),
+									status: decision === "deny" ? "denied" : "cancelled",
+									...(options.reason ? { error: options.reason } : {}),
+								},
+				}),
+			];
+			if (options.settleCommandId) {
+				await this.#settleAdmittedCommand(sql, options.settleCommandId, { outcome: "applied" });
+			}
+			return events;
+		});
+	}
+
+	async settleToolEffect(
+		target: EngineEventTarget,
+		effectId: string,
+		outcome: "completed" | "failed" | "cancelled",
+		options: { error?: string; jobIds?: string[] } = {},
+	): Promise<EngineEvent> {
+		return await this.#transaction(async sql => {
+			const rows = (await sql.unsafe(
+				`UPDATE engine_effects SET state='settled', outcome=?, error=?, job_ids=?, settled_at=?, updated_at=?
+				 WHERE effect_id=? AND agent_instance_id=? AND execution_id=? AND attempt_id=? AND binding_id=?
+				 AND engine_generation=? AND binding_generation=? AND authority_generation=? AND state='started'
+				 RETURNING effect_id, command_id, agent_instance_id, execution_id, attempt_id, binding_id,
+				 engine_generation, binding_generation, authority_generation, tool_call_id, tool_name,
+				 policy, input_hash, state, outcome`,
+				[
+					outcome,
+					options.error ?? null,
+					options.jobIds?.length ? JSON.stringify(options.jobIds) : null,
+					Date.now(),
+					Date.now(),
+					effectId,
+					target.agentInstanceId,
+					target.executionId,
+					target.attemptId,
+					target.bindingId,
+					target.engineGeneration,
+					target.bindingGeneration,
+					target.authorityGeneration,
+				],
+			)) as EngineEffectRecordRow[];
+			const row = rows[0];
+			if (!row) throw new EngineEffectConflictError(effectId);
+			return await this.#appendTransitionEvent(sql, target, {
+				kind: "tool_settled",
+				payload: {
+					...toolEffectPayload(effectInputFromRow(row)),
+					status: outcome,
+					...(options.error ? { error: options.error } : {}),
+					...(options.jobIds?.length ? { jobIds: options.jobIds } : {}),
+				},
+			});
+		});
+	}
+
+	async getEffect(effectId: string): Promise<EngineEffectRow | undefined> {
+		const rows = (await this.#client.unsafe(
+			`SELECT effect_id, agent_instance_id, execution_id, attempt_id, binding_id, engine_generation,
+			 binding_generation, authority_generation, tool_call_id, tool_name, policy, input_hash, state, outcome
+			 FROM engine_effects WHERE effect_id=?`,
+			[effectId],
+		)) as EngineEffectRow[];
+		return rows[0];
+	}
+
+	async getApproval(approvalId: string): Promise<EngineApprovalRow | undefined> {
+		const rows = (await this.#client.unsafe(
+			"SELECT approval_id, effect_id, state, decision FROM engine_approvals WHERE approval_id=?",
+			[approvalId],
+		)) as EngineApprovalRow[];
+		return rows[0];
+	}
+
 	async getAttempt(attemptId: string): Promise<EngineAttemptRow | undefined> {
 		const rows = (await this.#client.unsafe(
 			`SELECT agent_instance_id, execution_id, attempt_id, command_id, binding_id, engine_generation, binding_generation,
@@ -547,7 +847,33 @@ export class EngineStore {
 				 WHERE engine_generation < ? AND state IN ('accepted', 'running', 'pause_requested', 'paused', 'waiting_input', 'cancel_requested')`,
 				[engineGeneration],
 			)) as EngineAttemptRow[];
+			const abandonedEffects = (await sql.unsafe(
+				`SELECT e.effect_id, e.command_id, e.agent_instance_id, e.execution_id, e.attempt_id, e.binding_id,
+				 e.engine_generation, e.binding_generation, e.authority_generation, e.tool_call_id, e.tool_name,
+				 e.policy, e.input_hash, e.state, e.outcome, a.approval_id, a.state AS approval_state
+				 FROM engine_effects e LEFT JOIN engine_approvals a ON a.effect_id=e.effect_id
+				 WHERE e.engine_generation < ? AND e.state IN ('planned', 'started')
+				 ORDER BY e.created_at, e.effect_id`,
+				[engineGeneration],
+			)) as EngineRecoveryEffectRow[];
 			const now = Date.now();
+			await sql.unsafe(
+				`UPDATE engine_effects SET state='unknown', outcome='unknown', error='engine_lost', settled_at=?, updated_at=?
+				 WHERE engine_generation < ? AND state='started'`,
+				[now, now, engineGeneration],
+			);
+			await sql.unsafe(
+				`UPDATE engine_effects SET state='settled', outcome='cancelled', error='engine_lost', settled_at=?, updated_at=?
+				 WHERE engine_generation < ? AND state='planned'`,
+				[now, now, engineGeneration],
+			);
+			await sql.unsafe(
+				`UPDATE engine_approvals SET state='resolved', decision='cancelled', reason='engine_lost',
+				 resolved_at=?, updated_at=? WHERE state='pending' AND effect_id IN (
+				 SELECT effect_id FROM engine_effects WHERE engine_generation < ?
+				 )`,
+				[now, now, engineGeneration],
+			);
 			await sql.unsafe(
 				`UPDATE engine_attempts SET state='interrupted', cause='engine_lost', updated_at=?
 				 WHERE engine_generation < ? AND state IN ('accepted', 'running', 'pause_requested', 'paused', 'waiting_input', 'cancel_requested')`,
@@ -559,6 +885,36 @@ export class EngineStore {
 				[now, engineGeneration],
 			);
 			const events: EngineEvent[] = [];
+			for (const effect of abandonedEffects) {
+				const target = {
+					commandId: effect.command_id,
+					agentInstanceId: effect.agent_instance_id,
+					executionId: effect.execution_id,
+					attemptId: effect.attempt_id,
+					engineGeneration,
+					bindingId: effect.binding_id,
+					bindingGeneration: Number(effect.binding_generation),
+					authorityGeneration: Number(effect.authority_generation),
+				};
+				if (effect.state === "planned" && effect.approval_id && effect.approval_state === "pending") {
+					events.push(
+						await this.#appendTransitionEvent(sql, target, {
+							kind: "tool_approval_resolved",
+							payload: { approvalId: effect.approval_id, decision: "cancelled", reason: "engine_lost" },
+						}),
+					);
+				}
+				events.push(
+					await this.#appendTransitionEvent(sql, target, {
+						kind: "tool_settled",
+						payload: {
+							...toolEffectPayload(effectInputFromRow(effect)),
+							status: effect.state === "started" ? "unknown" : "cancelled",
+							error: "engine_lost",
+						},
+					}),
+				);
+			}
 			for (const attempt of active) {
 				const transcriptCheckpoint =
 					Number(attempt.transcript_revision) > 0 &&
@@ -645,6 +1001,41 @@ export class EngineStore {
 	async close(): Promise<void> {
 		await this.drain();
 		await this.#client.end();
+	}
+
+	async #insertToolEffect(
+		sql: SqlClient,
+		target: EngineEventTarget,
+		effect: EngineToolEffectInput,
+		state: "planned" | "started",
+	): Promise<void> {
+		const now = Date.now();
+		await sql.unsafe(
+			`INSERT INTO engine_effects(
+			 effect_id, command_id, agent_instance_id, execution_id, attempt_id, binding_id,
+			 engine_generation, binding_generation, authority_generation, tool_call_id, tool_name,
+			 policy, input_hash, state, created_at, started_at, updated_at
+			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			[
+				effect.effectId,
+				target.commandId,
+				target.agentInstanceId,
+				target.executionId,
+				target.attemptId,
+				target.bindingId,
+				target.engineGeneration,
+				target.bindingGeneration,
+				target.authorityGeneration,
+				effect.toolCallId,
+				effect.toolName,
+				effect.policy,
+				effect.inputHash,
+				state,
+				now,
+				state === "started" ? now : null,
+				now,
+			],
+		);
 	}
 
 	async #putBinding(sql: SqlClient, binding: EngineBindingSnapshot): Promise<void> {

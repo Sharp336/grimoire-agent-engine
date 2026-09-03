@@ -7,6 +7,7 @@ import {
 	EngineAttemptConflictError,
 	EngineCommandConflictError,
 	type EngineCommandIdentity,
+	EngineEffectConflictError,
 	EngineStore,
 } from "@oh-my-pi/pi-coding-agent/engine/store";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -40,15 +41,48 @@ describe("EngineStore", () => {
 		};
 		await first.putBinding(binding);
 		await first.putAttempt(binding, "running");
+		await first.startToolEffect(binding, {
+			effectId: "effect-a-started",
+			toolCallId: "tool-a-started",
+			toolName: "write",
+			policy: "unrestricted",
+			inputHash: "sha256:started",
+		});
+		await first.requestToolApproval(binding, {
+			effectId: "effect-b-pending",
+			toolCallId: "tool-b-pending",
+			toolName: "bash",
+			policy: "permit",
+			inputHash: "sha256:pending",
+		});
 		await first.close();
 
 		const runtime = await EngineRuntime.create({ databasePath });
 		expect(runtime.engineGeneration).toBe(generation + 1);
 		expect((await runtime.store.getBinding("agent-1"))?.state).toBe("released");
 		const events = await runtime.store.pendingEvents();
-		expect(events.map(event => event.kind)).toEqual(["interrupted"]);
-		expect(events[0]?.engineGeneration).toBe(runtime.engineGeneration);
-		expect(events[0]?.payload).toEqual({ cause: "engine_lost", lostEngineGeneration: generation });
+		expect(events.map(event => event.kind)).toEqual([
+			"tool_started",
+			"tool_approval_requested",
+			"tool_settled",
+			"tool_approval_resolved",
+			"tool_settled",
+			"interrupted",
+		]);
+		expect(events.at(-1)?.engineGeneration).toBe(runtime.engineGeneration);
+		expect(events.at(-1)?.payload).toEqual({ cause: "engine_lost", lostEngineGeneration: generation });
+		expect(await runtime.store.getEffect("effect-a-started")).toMatchObject({
+			state: "unknown",
+			outcome: "unknown",
+		});
+		expect(await runtime.store.getEffect("effect-b-pending")).toMatchObject({
+			state: "settled",
+			outcome: "cancelled",
+		});
+		expect(await runtime.store.getApproval("effect-b-pending")).toMatchObject({
+			state: "resolved",
+			decision: "cancelled",
+		});
 		await runtime.dispose();
 	});
 
@@ -219,6 +253,77 @@ describe("EngineStore", () => {
 		expect(concurrent.map(candidate => candidate.seq).sort((left, right) => left - right)).toEqual(
 			Array.from({ length: 16 }, (_, index) => index + 2),
 		);
+		await inspect.end();
+		await store.close();
+	});
+
+	it("commits tool effect and approval state with their events atomically", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-effect-${Snowflake.next()}-`));
+		const databasePath = path.join(tempDir, "engine.sqlite");
+		const store = await EngineStore.open(databasePath);
+		const target = {
+			bindingId: "binding-effect",
+			commandId: "command-effect",
+			agentInstanceId: "agent-effect",
+			executionId: "execution-effect",
+			attemptId: "attempt-effect",
+			engineAgentId: "Engine-effect",
+			profileDigest: "profile-effect",
+			state: "running" as const,
+			engineGeneration: 1,
+			bindingGeneration: 1,
+			authorityGeneration: 1,
+		};
+		const effect = {
+			effectId: "effect-atomic",
+			toolCallId: "tool-atomic",
+			toolName: "write",
+			policy: "unrestricted" as const,
+			inputHash: "sha256:atomic",
+		};
+		await store.putAttempt(target, "running");
+		const inspect = new SQL(`sqlite:${databasePath.replaceAll("\\", "/")}`);
+		await inspect.unsafe(`CREATE TRIGGER reject_tool_started
+			BEFORE INSERT ON engine_event_outbox WHEN NEW.kind='tool_started'
+			BEGIN SELECT RAISE(ABORT, 'injected tool start failure'); END`);
+		await expect(store.startToolEffect(target, effect)).rejects.toThrow("injected tool start failure");
+		expect(await store.getEffect(effect.effectId)).toBeUndefined();
+		expect(await store.pendingEvents()).toEqual([]);
+
+		await inspect.unsafe("DROP TRIGGER reject_tool_started");
+		await store.startToolEffect(target, effect);
+		await inspect.unsafe(`CREATE TRIGGER reject_tool_settled
+			BEFORE INSERT ON engine_event_outbox WHEN NEW.kind='tool_settled'
+			BEGIN SELECT RAISE(ABORT, 'injected tool settlement failure'); END`);
+		await expect(store.settleToolEffect(target, effect.effectId, "completed")).rejects.toThrow(
+			"injected tool settlement failure",
+		);
+		expect(await store.getEffect(effect.effectId)).toMatchObject({ state: "started", outcome: null });
+		expect((await store.pendingEvents()).map(event => event.kind)).toEqual(["tool_started"]);
+
+		await inspect.unsafe("DROP TRIGGER reject_tool_settled");
+		await store.settleToolEffect(target, effect.effectId, "completed");
+		expect(await store.getEffect(effect.effectId)).toMatchObject({ state: "settled", outcome: "completed" });
+		expect((await store.pendingEvents()).map(event => event.kind)).toEqual(["tool_started", "tool_settled"]);
+
+		const permitted = { ...effect, effectId: "effect-permit", toolCallId: "tool-permit", policy: "permit" as const };
+		await store.requestToolApproval(target, permitted);
+		await inspect.unsafe(`CREATE TRIGGER reject_approved_tool_start
+			BEFORE INSERT ON engine_event_outbox WHEN NEW.kind='tool_started'
+			BEGIN SELECT RAISE(ABORT, 'injected approval failure'); END`);
+		await expect(store.resolveToolApproval(target, permitted.effectId, "approve")).rejects.toThrow(
+			"injected approval failure",
+		);
+		expect(await store.getEffect(permitted.effectId)).toMatchObject({ state: "planned", outcome: null });
+		expect(await store.getApproval(permitted.effectId)).toMatchObject({ state: "pending", decision: null });
+		await inspect.unsafe("DROP TRIGGER reject_approved_tool_start");
+		await store.resolveToolApproval(target, permitted.effectId, "approve");
+		expect(await store.getEffect(permitted.effectId)).toMatchObject({ state: "started", outcome: null });
+		expect(await store.getApproval(permitted.effectId)).toMatchObject({ state: "resolved", decision: "approve" });
+		await expect(
+			store.commitAttemptTransition(target, "completed", [{ kind: "completed" }], { expectedStates: ["running"] }),
+		).rejects.toBeInstanceOf(EngineEffectConflictError);
+		expect((await store.getAttempt(target.attemptId))?.state).toBe("running");
 		await inspect.end();
 		await store.close();
 	});

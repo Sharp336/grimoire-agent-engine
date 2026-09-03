@@ -47,7 +47,12 @@ import {
 	validateStartRequest,
 } from "./contracts";
 import { engineAgentId, engineRouteToken } from "./route";
-import { EngineAttemptConflictError, EngineStore, type EngineTransitionEvent } from "./store";
+import {
+	EngineAttemptConflictError,
+	EngineStore,
+	type EngineToolEffectInput,
+	type EngineTransitionEvent,
+} from "./store";
 
 type EngineEventListener = (event: EngineEvent) => void | Promise<void>;
 
@@ -109,13 +114,11 @@ interface LiveBinding extends EngineBindingSnapshot {
 
 interface ToolInvocationRecord {
 	invocationId: string;
-	policy: Exclude<EngineToolPolicy, "unrestricted">;
+	policy: EngineToolPolicy;
 	toolCallId: string;
 	toolName: string;
 	inputHash: string;
-	inputPreview: string;
 	target: EngineBindingSnapshot;
-	writeTail: Promise<void>;
 	done: Promise<void>;
 	resolveDone: () => void;
 	settled: boolean;
@@ -408,7 +411,7 @@ export class EngineRuntime {
 				binding.attemptState = previousState;
 				throw error;
 			}
-			this.#cancelToolApprovals(binding, reason, request.commandId);
+			await this.#cancelToolApprovals(binding, reason, request.commandId);
 			this.asyncJobManager.cancelAll({ ownerId: binding.engineAgentId, attemptId: binding.attemptId });
 			await this.#cancelPendingInput(binding, reason, request.commandId);
 			const abort = binding.session.abort({ reason });
@@ -431,17 +434,17 @@ export class EngineRuntime {
 			if (!pending || pending.record.target.bindingId !== binding.bindingId) {
 				throw new EngineTargetError("too_late", `Tool approval ${request.approvalId} is no longer pending`);
 			}
-			await this.#queueToolEvent(
-				pending.record,
-				"tool_approval_resolved",
+			const events = await this.store.resolveToolApproval(
+				pending.record.target,
+				request.approvalId,
+				request.decision,
 				{
-					approvalId: request.approvalId,
-					decision: request.decision,
 					...(request.reason ? { reason: request.reason.slice(0, 2_048) } : {}),
+					causationCommandId: request.commandId,
+					settleCommandId: request.commandId,
 				},
-				request.commandId,
-				request.commandId,
 			);
+			this.#notifyEvents(events);
 			if (this.#pendingToolApprovals.get(request.approvalId) !== pending) return;
 			this.#pendingToolApprovals.delete(request.approvalId);
 			pending.resolve({ decision: request.decision, reason: request.reason });
@@ -717,15 +720,13 @@ export class EngineRuntime {
 			const id = engineAgentId(request.agentInstanceId);
 			const pauseGate = new AgentPauseGate();
 			let liveBinding: LiveBinding | undefined;
-			const toolExecutionHook: ToolExecutionHook | undefined = hasToolExecutionPolicies(profile)
-				? {
-						before: (call, signal) => {
-							if (!liveBinding) throw new Error("Engine tool boundary is not bound to its AgentSession");
-							return this.#beforeToolExecution(liveBinding, profile, call, signal);
-						},
-						after: (call, token, outcome) => this.#afterToolExecution(token, call, outcome),
-					}
-				: undefined;
+			const toolExecutionHook: ToolExecutionHook = {
+				before: (call, signal) => {
+					if (!liveBinding) throw new Error("Engine tool boundary is not bound to its AgentSession");
+					return this.#beforeToolExecution(liveBinding, profile, call, signal);
+				},
+				after: (call, token, outcome) => this.#afterToolExecution(token, call, outcome),
+			};
 			const childProfiles = resolved?.childProfiles ?? [];
 			const childProfileRefs = profile.childProfileRefs ?? [];
 			const maxChildren = profile.maxChildren ?? 0;
@@ -1013,7 +1014,6 @@ export class EngineRuntime {
 		signal?: AbortSignal,
 	): Promise<ToolExecutionHookToken | undefined> {
 		const policy = profile.toolPolicies?.[call.toolName] ?? "unrestricted";
-		if (policy === "unrestricted") return undefined;
 		const input = stableStringifyJson(call.input);
 		const inputHash = sha256(input);
 		const invocationId = `tool_${sha256(`${binding.bindingId}\0${binding.attemptId}\0${call.toolCallId}\0${inputHash}`).slice(0, 32)}`;
@@ -1027,17 +1027,22 @@ export class EngineRuntime {
 			toolCallId: call.toolCallId,
 			toolName: call.toolName,
 			inputHash,
-			inputPreview: input.length > 8_192 ? `${input.slice(0, 8_192)}…` : input,
 			target: this.#snapshot(binding),
-			writeTail: Promise.resolve(),
 			done: done.promise,
 			resolveDone: done.resolve,
 			settled: false,
 		};
 		this.#toolInvocations.set(invocationId, record);
 		if (policy === "permit") return await this.#requestToolApproval(record, signal);
-		void this.#queueToolEvent(record, "tool_started", this.#toolEventPayload(record));
-		return { invocationId };
+		try {
+			const event = await this.store.startToolEffect(record.target, this.#toolEffect(record));
+			this.#notifyEvents([event]);
+			return { invocationId };
+		} catch (error) {
+			this.#toolInvocations.delete(invocationId);
+			record.resolveDone();
+			throw error;
+		}
 	}
 
 	async #requestToolApproval(record: ToolInvocationRecord, signal?: AbortSignal): Promise<ToolExecutionHookToken> {
@@ -1050,10 +1055,8 @@ export class EngineRuntime {
 		const pending: PendingToolApproval = { record, resolve: completion.resolve };
 		this.#pendingToolApprovals.set(record.invocationId, pending);
 		try {
-			await this.#queueToolEvent(record, "tool_approval_requested", {
-				...this.#toolEventPayload(record),
-				approvalId: record.invocationId,
-			});
+			const event = await this.store.requestToolApproval(record.target, this.#toolEffect(record));
+			this.#notifyEvents([event]);
 		} catch (error) {
 			this.#pendingToolApprovals.delete(record.invocationId);
 			this.#toolInvocations.delete(record.invocationId);
@@ -1062,28 +1065,20 @@ export class EngineRuntime {
 		}
 		const abort = () => {
 			if (this.#pendingToolApprovals.get(record.invocationId) !== pending) return;
-			this.#pendingToolApprovals.delete(record.invocationId);
-			completion.resolve({ decision: "cancelled", reason: "Attempt cancelled while awaiting approval" });
+			void this.#cancelPendingToolApproval(pending, "Attempt cancelled while awaiting approval").catch(error => {
+				logger.warn("Engine tool approval cancellation failed", {
+					approvalId: record.invocationId,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
 		};
 		signal?.addEventListener("abort", abort, { once: true });
 		const decision = await completion.promise.finally(() => signal?.removeEventListener("abort", abort));
 		if (decision.decision === "approve") {
-			void this.#queueToolEvent(record, "tool_started", this.#toolEventPayload(record));
 			return { invocationId: record.invocationId };
 		}
-		if (decision.decision === "cancelled") {
-			await this.#queueToolEvent(
-				record,
-				"tool_approval_resolved",
-				{
-					approvalId: record.invocationId,
-					decision: "cancelled",
-					reason: decision.reason,
-				},
-				decision.causationCommandId,
-			);
-		}
-		this.#completeToolInvocation(record, decision.decision, decision.reason);
+		this.#toolInvocations.delete(record.invocationId);
+		record.resolveDone();
 		throw new Error(
 			decision.decision === "deny"
 				? `Tool call denied by approval: ${record.toolName}`
@@ -1120,53 +1115,38 @@ export class EngineRuntime {
 
 	#completeToolInvocation(
 		record: ToolInvocationRecord,
-		status: "completed" | "failed" | "cancelled" | "deny",
+		status: "completed" | "failed" | "cancelled",
 		error?: string,
 		jobIds?: string[],
 	): void {
 		if (record.settled) return;
 		record.settled = true;
-		void this.#queueToolEvent(record, "tool_settled", {
-			invocationId: record.invocationId,
-			toolCallId: record.toolCallId,
-			toolName: record.toolName,
-			status: status === "deny" ? "denied" : status,
-			...(error ? { error: error.slice(0, 2_048) } : {}),
-			...(jobIds?.length ? { jobIds } : {}),
-		}).finally(() => {
-			this.#toolInvocations.delete(record.invocationId);
-			record.resolveDone();
-		});
-	}
-
-	#queueToolEvent(
-		record: ToolInvocationRecord,
-		kind: EngineEvent["kind"],
-		payload: Record<string, unknown>,
-		causationCommandId = record.target.commandId,
-		settleCommandId?: string,
-	): Promise<void> {
-		const write = record.writeTail.then(() =>
-			this.#commitEvent(record.target, kind, payload, causationCommandId, settleCommandId),
-		);
-		record.writeTail = write.catch(error => {
-			logger.warn("Engine tool event write failed", {
-				invocationId: record.invocationId,
-				kind,
-				error: error instanceof Error ? error.message : String(error),
+		void this.store
+			.settleToolEffect(record.target, record.invocationId, status, {
+				...(error ? { error: error.slice(0, 2_048) } : {}),
+				...(jobIds?.length ? { jobIds } : {}),
+			})
+			.then(event => {
+				this.#notifyEvents([event]);
+				this.#toolInvocations.delete(record.invocationId);
+				record.resolveDone();
+			})
+			.catch(error => {
+				record.settled = false;
+				logger.warn("Engine tool effect settlement failed", {
+					invocationId: record.invocationId,
+					error: error instanceof Error ? error.message : String(error),
+				});
 			});
-		});
-		return write;
 	}
 
-	#toolEventPayload(record: ToolInvocationRecord): Record<string, unknown> {
+	#toolEffect(record: ToolInvocationRecord): EngineToolEffectInput {
 		return {
-			invocationId: record.invocationId,
+			effectId: record.invocationId,
 			toolCallId: record.toolCallId,
 			toolName: record.toolName,
 			policy: record.policy,
 			inputHash: record.inputHash,
-			inputPreview: record.inputPreview,
 		};
 	}
 
@@ -1180,17 +1160,33 @@ export class EngineRuntime {
 		}
 	}
 
-	#cancelToolApprovals(binding: LiveBinding, reason: string, causationCommandId?: string): void {
-		for (const [approvalId, pending] of this.#pendingToolApprovals) {
+	async #cancelToolApprovals(binding: LiveBinding, reason: string, causationCommandId?: string): Promise<void> {
+		for (const pending of this.#pendingToolApprovals.values()) {
 			if (
 				pending.record.target.bindingId !== binding.bindingId ||
 				pending.record.target.attemptId !== binding.attemptId
 			) {
 				continue;
 			}
-			this.#pendingToolApprovals.delete(approvalId);
-			pending.resolve({ decision: "cancelled", reason, causationCommandId });
+			await this.#cancelPendingToolApproval(pending, reason, causationCommandId);
 		}
+	}
+
+	async #cancelPendingToolApproval(
+		pending: PendingToolApproval,
+		reason: string,
+		causationCommandId?: string,
+	): Promise<void> {
+		const approvalId = pending.record.invocationId;
+		if (this.#pendingToolApprovals.get(approvalId) !== pending) return;
+		const events = await this.store.resolveToolApproval(pending.record.target, approvalId, "cancelled", {
+			reason: reason.slice(0, 2_048),
+			causationCommandId,
+		});
+		this.#notifyEvents(events);
+		if (this.#pendingToolApprovals.get(approvalId) !== pending) return;
+		this.#pendingToolApprovals.delete(approvalId);
+		pending.resolve({ decision: "cancelled", reason, causationCommandId });
 	}
 
 	/** Cancel an Engine child when its parent task call is aborted. */
@@ -1426,6 +1422,7 @@ export class EngineRuntime {
 				cause === "engine_lost" ? "interrupted" : "cancelled",
 				wasRunning
 					? async () => {
+							await this.#waitForToolInvocations(binding, binding.attemptId);
 							transcriptCheckpoint = await binding.session.sessionManager.flushAndCheckpoint();
 						}
 					: undefined,
@@ -1657,10 +1654,6 @@ export class EngineRuntime {
 	#throwIfDisposed(): void {
 		if (this.#disposed) throw new Error("EngineRuntime is disposed");
 	}
-}
-
-function hasToolExecutionPolicies(profile: EngineLaunchProfile): boolean {
-	return Object.values(profile.toolPolicies ?? {}).some(policy => policy !== "unrestricted");
 }
 
 function validateControlRequest(request: EngineControlRequest): void {
