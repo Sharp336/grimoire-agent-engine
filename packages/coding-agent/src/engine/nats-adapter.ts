@@ -132,6 +132,7 @@ export class NatsEngineAdapter {
 	#unsubscribeOutbound: () => void = () => {};
 	#outboxFlush: Promise<void> | undefined;
 	#stopping = false;
+	#disposed = false;
 
 	private constructor(
 		options: NatsEngineAdapterOptions,
@@ -209,15 +210,21 @@ export class NatsEngineAdapter {
 	}
 
 	async dispose(): Promise<void> {
+		if (this.#disposed) return;
+		this.#disposed = true;
+		await this.stopAdmission();
+		this.#unsubscribeRuntime();
+		await this.flushEvents().catch(error => this.#report(error));
+		await this.#connection.drain();
+	}
+
+	async stopAdmission(): Promise<void> {
 		if (this.#stopping) return;
 		this.#stopping = true;
-		this.#unsubscribeRuntime();
 		this.#unsubscribeRegistry();
 		this.#unsubscribeOutbound();
 		await Promise.all([...this.#consumers].map(consumer => consumer.close()));
 		await Promise.all(this.#loops);
-		await this.flushEvents().catch(error => this.#report(error));
-		await this.#connection.drain();
 	}
 
 	async #start(): Promise<void> {

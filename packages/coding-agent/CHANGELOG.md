@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Kept Agent Engine event delivery alive until graceful shutdown durably interrupts and checkpoints active, paused, and approval-waiting Attempts.
 - Prevented Agent Engine pause and terminal states from becoming visible before their exact OMP transcript prefix is durably checkpointed.
 - Committed Agent Engine Binding, Attempt, command-receipt, sequence, and event transitions atomically, including pause/resume/cancel settlement and generation-loss interruption.
 - Made Agent Engine command admission and receipts durable across broker redelivery and restart, with conflicting command-ID reuse rejected before runtime effects and atomic per-agent event sequencing.

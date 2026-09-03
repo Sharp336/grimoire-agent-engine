@@ -592,7 +592,7 @@ export class EngineRuntime {
 		await this.store.drain();
 	}
 
-	async dispose(): Promise<void> {
+	async dispose(options: { closeStore?: boolean } = {}): Promise<void> {
 		if (this.#disposed) return;
 		this.#disposed = true;
 		const errors: unknown[] = [];
@@ -608,7 +608,7 @@ export class EngineRuntime {
 		await collectFailure(errors, () => this.agentLifecycle.dispose());
 		await collectFailure(errors, () => this.asyncJobManager.dispose({ timeoutMs: 3_000 }));
 		await collectFailure(errors, () => this.ircBus.dispose());
-		await collectFailure(errors, () => this.store.close());
+		if (options.closeStore !== false) await collectFailure(errors, () => this.store.close());
 		throwCollectedFailures(errors, "Engine disposal failed");
 	}
 

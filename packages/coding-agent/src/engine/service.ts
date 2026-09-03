@@ -41,7 +41,6 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 	let adapter: NatsEngineAdapter | undefined;
 	let bridge: HostedEngineBridge | undefined;
 	try {
-		broker = await startBroker(config, engineKey.getPublicKey(), bridgeKey.getPublicKey());
 		const rpc = config.hosted ? new HostedGrimoireRpc(config.hosted) : undefined;
 		const profileResolver = config.artifactCacheRoot
 			? new EngineProfileResolver(config.artifactCacheRoot, path.join(config.runtimeDir, "credentials"))
@@ -60,6 +59,7 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 						})
 				: undefined,
 		});
+		broker = await startBroker(config, engineKey.getPublicKey(), bridgeKey.getPublicKey());
 		adapter = await NatsEngineAdapter.connect({
 			runtime,
 			deviceId: config.deviceId,
@@ -98,9 +98,13 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 		});
 		await Promise.race([stop ? Promise.race([stop, processStopSignal()]) : processStopSignal(), brokerExit]);
 	} finally {
-		await bridge?.dispose().catch(reportServiceError);
+		await bridge?.stopAdmission().catch(reportServiceError);
+		await adapter?.stopAdmission().catch(reportServiceError);
+		await runtime?.dispose({ closeStore: false }).catch(reportServiceError);
 		await adapter?.dispose().catch(reportServiceError);
-		await runtime?.dispose().catch(reportServiceError);
+		await bridge?.drain().catch(reportServiceError);
+		await bridge?.dispose().catch(reportServiceError);
+		await runtime?.store.close().catch(reportServiceError);
 		broker?.process.kill();
 		await broker?.process.exited.catch(() => {});
 		engineSeed.fill(0);

@@ -192,7 +192,9 @@ export class HostedEngineBridge {
 	readonly #active = new Map<string, BridgeClaim>();
 	readonly #loops = new Set<Promise<void>>();
 	readonly #stop = Promise.withResolvers<void>();
+	#claimLoop: Promise<void> = Promise.resolve();
 	#events: ConsumerMessages | undefined;
+	#accepting = true;
 	#stopping = false;
 
 	private constructor(options: HostedEngineBridgeOptions, connection: NatsConnection) {
@@ -219,11 +221,26 @@ export class HostedEngineBridge {
 
 	async dispose(): Promise<void> {
 		if (this.#stopping) return;
+		await this.stopAdmission();
 		this.#stopping = true;
 		this.#stop.resolve();
 		await this.#events?.close();
 		await Promise.all(this.#loops);
 		await this.#connection.drain();
+	}
+
+	async stopAdmission(): Promise<void> {
+		this.#accepting = false;
+		await this.#claimLoop;
+	}
+
+	async drain(timeoutMs = 3_000): Promise<void> {
+		const deadline = Date.now() + timeoutMs;
+		while (this.#active.size > 0) {
+			if (Date.now() >= deadline)
+				throw new Error(`Hosted Engine bridge still has ${this.#active.size} active claim(s)`);
+			await Bun.sleep(25);
+		}
 	}
 
 	async #start(): Promise<void> {
@@ -250,14 +267,15 @@ export class HostedEngineBridge {
 		}
 		const consumer = await jetstream(this.#connection).consumers.get(ENGINE_EVENT_STREAM, durable);
 		this.#events = await consumer.consume({ max_messages: 128 });
-		this.#track(this.#claimLoop());
+		this.#claimLoop = this.#claimCommands();
+		this.#track(this.#claimLoop);
 		this.#track(this.#eventLoop(this.#events));
 		this.#track(this.#heartbeatLoop());
 	}
 
-	async #claimLoop(): Promise<void> {
+	async #claimCommands(): Promise<void> {
 		const js = jetstream(this.#connection);
-		while (!this.#stopping) {
+		while (this.#accepting && !this.#stopping) {
 			if (this.#active.size >= 128) {
 				await Bun.sleep(this.#options.pollIntervalMs ?? 250);
 				continue;

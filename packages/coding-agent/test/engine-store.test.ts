@@ -96,6 +96,13 @@ describe("EngineStore", () => {
 			outcome: "unknown",
 		});
 		await runtime.dispose();
+
+		const restarted = await EngineRuntime.create({ databasePath });
+		expect(restarted.engineGeneration).toBe(generation + 2);
+		expect((await restarted.store.pendingEvents()).map(event => event.eventId)).toEqual(
+			events.map(event => event.eventId),
+		);
+		await restarted.dispose();
 	});
 
 	it("upgrades a legacy Engine database once and rejects changed migration history", async () => {

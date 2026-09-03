@@ -1390,6 +1390,100 @@ describe("EngineRuntime", () => {
 		await restarted.dispose();
 	}, 60000);
 
+	it("interrupts active, paused and approval-waiting Attempts before closing the store", async () => {
+		const pausedDispatch = Promise.withResolvers<boolean>();
+		const activeDispatch = Promise.withResolvers<boolean>();
+		const { runtime, cwd } = await createRuntime(async (session, input) => {
+			switch (input) {
+				case "wait": {
+					const abort = session.abort.bind(session);
+					session.abort = async options => {
+						activeDispatch.resolve(false);
+						return await abort(options);
+					};
+					return await activeDispatch.promise;
+				}
+				case "pause":
+					return await pausedDispatch.promise;
+				case "read": {
+					const read = session.getToolByName("read");
+					if (!read) throw new Error("read tool is unavailable");
+					await read.execute("read-shutdown-permit", { path: "shutdown.txt" });
+					return true;
+				}
+				default:
+					throw new Error("unexpected shutdown test agent");
+			}
+		}, {});
+		fs.writeFileSync(path.join(cwd, "shutdown.txt"), "must not be read");
+		try {
+			const modelStarted = nextEngineEvent(runtime, "model_started");
+			await runtime.start(
+				{
+					commandId: "command-shutdown-active",
+					agentInstanceId: "agent-shutdown-active",
+					executionId: "execution-shutdown-active",
+					attemptId: "attempt-shutdown-active",
+					authorityGeneration: 1,
+					cwd,
+					input: "wait",
+				},
+				profile,
+			);
+			await modelStarted;
+
+			const paused = await runtime.start(
+				{
+					commandId: "command-shutdown-paused",
+					agentInstanceId: "agent-shutdown-paused",
+					executionId: "execution-shutdown-paused",
+					attemptId: "attempt-shutdown-paused",
+					authorityGeneration: 1,
+					cwd,
+					input: "pause",
+				},
+				profile,
+			);
+			const pauseFinished = nextEngineEvent(runtime, "paused");
+			await runtime.pause({ ...paused, commandId: "pause-for-shutdown", initiator: { kind: "human" } });
+			pausedDispatch.resolve(true);
+			await pauseFinished;
+
+			const approvalRequested = nextEngineEvent(runtime, "tool_approval_requested");
+			await runtime.start(
+				{
+					commandId: "command-shutdown-approval",
+					agentInstanceId: "agent-shutdown-approval",
+					executionId: "execution-shutdown-approval",
+					attemptId: "attempt-shutdown-approval",
+					authorityGeneration: 1,
+					cwd,
+					input: "read",
+				},
+				{ ...profile, toolPolicies: { read: "permit" } },
+			);
+			const approvalId = String((await approvalRequested).payload?.approvalId);
+
+			await runtime.dispose({ closeStore: false });
+			for (const attemptId of ["attempt-shutdown-active", "attempt-shutdown-paused", "attempt-shutdown-approval"]) {
+				expect(await runtime.store.getAttempt(attemptId)).toMatchObject({ state: "interrupted" });
+			}
+			const events = await runtime.store.pendingEvents();
+			expect(
+				events
+					.filter(event => event.kind === "interrupted")
+					.map(event => event.attemptId)
+					.sort(),
+			).toEqual(["attempt-shutdown-active", "attempt-shutdown-approval", "attempt-shutdown-paused"]);
+			expect(await runtime.store.getApproval(approvalId)).toMatchObject({
+				state: "resolved",
+				decision: "cancelled",
+			});
+		} finally {
+			await runtime.store.close();
+		}
+	}, 60_000);
+
 	it("rejects steering after an Attempt becomes idle", async () => {
 		const { runtime, cwd } = await createRuntime();
 		const started = await runtime.start(
