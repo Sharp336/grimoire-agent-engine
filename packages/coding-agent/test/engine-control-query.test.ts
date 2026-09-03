@@ -64,6 +64,16 @@ describe("Engine Control + Query", () => {
 		const client = new EngineControlQueryClient(tempDir);
 		const capabilities = (await client.request("capabilities")) as Record<string, unknown>;
 		expect(capabilities).toMatchObject({ contractVersion: "1.0", rawDiagnostics: false });
+		expect(capabilities).toMatchObject({
+			commands: expect.arrayContaining(["compact", "release"]),
+			queries: expect.arrayContaining([
+				"session.context",
+				"session.usage",
+				"inbox.list",
+				"inbox.enqueue",
+				"inbox.mutate",
+			]),
+		});
 		expect(
 			await rawRequest(
 				server.endpoint,
@@ -109,6 +119,101 @@ describe("Engine Control + Query", () => {
 			outputTruncated: true,
 		});
 
+		const target = {
+			bindingId: binding.bindingId,
+			agentInstanceId: binding.agentInstanceId,
+			executionId: binding.executionId,
+			attemptId: binding.attemptId,
+			authorityGeneration: binding.authorityGeneration,
+			engineGeneration: binding.engineGeneration,
+			bindingGeneration: binding.bindingGeneration,
+		};
+		runtime.sessionContext = async received => ({
+			schema: "grimoire.engine.session_context.v1",
+			attemptId: received.attemptId,
+			context: { usedTokens: 42 },
+		});
+		runtime.sessionUsage = async received => ({
+			schema: "grimoire.engine.session_usage.v1",
+			attemptId: received.attemptId,
+			provider: { status: "unavailable", reason: "provider_usage_not_supported" },
+		});
+		runtime.listInbox = async received => [
+			{
+				queueId: "queue-a",
+				sessionId: "session-a",
+				agentInstanceId: received.agentInstanceId,
+				attemptId: received.attemptId,
+				sourceEventId: "source-a",
+				sourceType: "user",
+				sourceBody: "original",
+				deliveryPayload: "edited",
+				wakeIntent: false,
+				position: 1024,
+				disposition: "pending",
+				revision: 2,
+				createdAt: 1,
+				updatedAt: 2,
+			},
+		];
+		runtime.mutateInbox = async (received, mutation) => ({
+			...(await runtime.listInbox(received))[0]!,
+			deliveryPayload: String(mutation.value),
+			revision: mutation.expectedRevision + 1,
+		});
+		runtime.enqueueInbox = async (received, source) => ({
+			item: {
+				...(await runtime.listInbox(received))[0]!,
+				queueId: "queue-user",
+				sourceEventId: source.sourceEventId,
+				sourceType: source.sourceType,
+				sourceBody: source.body,
+				deliveryPayload: source.body,
+			},
+			created: true,
+		});
+		expect(await client.request("session.context", target)).toMatchObject({
+			attemptId: "attempt-a",
+			context: { usedTokens: 42 },
+		});
+		expect(await client.request("session.usage", target)).toMatchObject({
+			provider: { status: "unavailable", reason: "provider_usage_not_supported" },
+		});
+		expect(await client.request("inbox.list", target)).toMatchObject({
+			items: [{ queueId: "queue-a", sourceType: "user", deliveryPayload: "edited" }],
+		});
+		expect(
+			await client.request("inbox.enqueue", {
+				...target,
+				sourceEventId: "user-message-a",
+				sourceType: "user",
+				body: "queued while running",
+				createdAt: 10,
+			}),
+		).toMatchObject({
+			created: true,
+			item: { queueId: "queue-user", sourceType: "user", deliveryPayload: "queued while running" },
+		});
+		expect(
+			await client.request("inbox.mutate", {
+				...target,
+				mutationId: "mutation-a",
+				queueId: "queue-a",
+				expectedRevision: 2,
+				op: "edit",
+				value: "new delivery",
+			}),
+		).toMatchObject({ queueId: "queue-a", deliveryPayload: "new delivery", revision: 3 });
+		await expect(
+			client.request("inbox.mutate", {
+				...target,
+				mutationId: "mutation-invalid",
+				queueId: "queue-a",
+				expectedRevision: 2,
+				op: "erase",
+			}),
+		).rejects.toMatchObject({ code: "invalid_request" });
+
 		const command: EngineCommandEnvelope = {
 			schema: "grimoire.engine.command.v1",
 			commandId: "reconcile-a",
@@ -122,6 +227,29 @@ describe("Engine Control + Query", () => {
 			payload: {},
 		};
 		expect(await client.request("command", { command })).toEqual({ outcome: "applied" });
+		runtime.compact = async received => ({
+			schema: "grimoire.engine.session_compaction.v1",
+			attemptId: received.attemptId,
+			tokensBefore: 42,
+			tokensAfter: 12,
+		});
+		const compactCommand: EngineCommandEnvelope = {
+			...command,
+			commandId: "compact-a",
+			op: "compact",
+			deviceId: "device-a",
+			engineId: "engine-a",
+			runtimeBindingId: target.bindingId,
+			bindingGeneration: target.bindingGeneration,
+			executionId: target.executionId,
+			attemptId: target.attemptId,
+			issuedAt: Date.now(),
+			payload: {},
+		};
+		expect(await client.request("command", { command: compactCommand })).toMatchObject({
+			outcome: "applied",
+			detail: { attemptId: "attempt-a", tokensBefore: 42, tokensAfter: 12 },
+		});
 		const cli = Bun.spawn(
 			[
 				process.execPath,
@@ -135,6 +263,23 @@ describe("Engine Control + Query", () => {
 		);
 		expect(await cli.exited).toBe(0);
 		expect(JSON.parse(await new Response(cli.stdout).text())).toMatchObject({ contractVersion: "1.0" });
+		const requestCli = Bun.spawn(
+			[
+				process.execPath,
+				path.resolve(import.meta.dir, "../src/cli.ts"),
+				"engine",
+				"request",
+				"--runtime-dir",
+				tempDir,
+				"--method",
+				"session.context",
+				"--params",
+				JSON.stringify(target),
+			],
+			{ stdout: "pipe", stderr: "pipe" },
+		);
+		expect(await requestCli.exited).toBe(0);
+		expect(JSON.parse(await new Response(requestCli.stdout).text())).toMatchObject({ attemptId: "attempt-a" });
 		await server.close();
 		server = await startEngineControlQueryServer(options);
 		expect(await client.request("command", { command })).toEqual({ outcome: "applied" });

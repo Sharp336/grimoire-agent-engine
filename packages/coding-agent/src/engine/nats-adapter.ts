@@ -37,6 +37,8 @@ export type EngineCommandOp =
 	| "pause"
 	| "resume"
 	| "cancel"
+	| "compact"
+	| "release"
 	| "reconcile"
 	| "resolve_tool_approval"
 	| "resolve_input";
@@ -677,7 +679,7 @@ export async function dispatchEngineCommand(options: {
 	command: EngineCommandEnvelope;
 	resolveLaunchProfile: (command: EngineCommandEnvelope) => EngineLaunchProfile | Promise<EngineLaunchProfile>;
 	provisionMailbox?: (agentInstanceId: string) => void | Promise<void>;
-}): Promise<void> {
+}): Promise<unknown> {
 	const { runtime, command } = options;
 	if (command.engineGeneration !== runtime.engineGeneration) {
 		throw new EngineTargetError("stale_target", `Engine generation ${command.engineGeneration} is stale`);
@@ -747,6 +749,11 @@ export async function dispatchEngineCommand(options: {
 				commandId: command.commandId,
 				reason: optionalRecordString(command.payload, "reason"),
 			});
+			return;
+		case "compact":
+			return await runtime.compact(boundTarget(command));
+		case "release":
+			await runtime.release(boundTarget(command));
 			return;
 		case "resolve_tool_approval": {
 			const decision = requiredRecordString(command.payload, "decision");
@@ -915,6 +922,8 @@ function isCommandOp(value: unknown): value is EngineCommandOp {
 		value === "pause" ||
 		value === "resume" ||
 		value === "cancel" ||
+		value === "compact" ||
+		value === "release" ||
 		value === "reconcile" ||
 		value === "resolve_tool_approval" ||
 		value === "resolve_input"

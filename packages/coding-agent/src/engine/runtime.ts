@@ -34,6 +34,7 @@ import {
 	type EngineEvent,
 	type EngineInboxItem,
 	type EngineInboxMutation,
+	type EngineInboxSource,
 	type EngineInboxTarget,
 	type EngineLaunchProfile,
 	type EnginePeerMessage,
@@ -608,10 +609,96 @@ export class EngineRuntime {
 		});
 	}
 
+	enqueueInbox(target: EngineTarget, source: EngineInboxSource): Promise<{ item: EngineInboxItem; created: boolean }> {
+		return this.#inLane(target.agentInstanceId, async () => {
+			const binding = this.#requireTarget(target);
+			const queued = await this.store.enqueueInboxItem(this.#inboxTarget(binding), source);
+			if (queued.created) {
+				const count = (await this.store.listInboxItems(binding.session.sessionId)).length;
+				await this.#withSessionScope(binding, () => binding.session.notifyEngineInboxChanged(count));
+				this.#signalInboxWake();
+			}
+			return queued;
+		});
+	}
+
 	readInbox(target: EngineTarget, queueId: string): Promise<EngineInboxItem | undefined> {
 		return this.#inLane(target.agentInstanceId, async () => {
 			const binding = this.#requireTarget(target);
 			return await this.store.getInboxItem(binding.session.sessionId, queueId);
+		});
+	}
+
+	sessionContext(target: EngineTarget): Promise<Record<string, unknown>> {
+		return this.#inLane(target.agentInstanceId, async () => {
+			const binding = this.#requireTarget(target);
+			const model = binding.session.model;
+			return {
+				schema: "grimoire.engine.session_context.v1",
+				attemptId: binding.attemptId,
+				sessionId: binding.session.sessionId,
+				model: model ? { provider: model.provider, id: model.id, contextWindow: model.contextWindow } : null,
+				context: binding.session.getContextBreakdown() ?? null,
+				contextUsageRevision: binding.session.contextUsageRevision,
+			};
+		});
+	}
+
+	sessionUsage(target: EngineTarget): Promise<Record<string, unknown>> {
+		return this.#inLane(target.agentInstanceId, async () => {
+			const binding = this.#requireTarget(target);
+			const model = binding.session.model;
+			const local = binding.session.getSessionStats();
+			try {
+				const reports = await binding.session.fetchUsageReports();
+				return {
+					schema: "grimoire.engine.session_usage.v1",
+					attemptId: binding.attemptId,
+					sessionId: binding.session.sessionId,
+					model: model ? { provider: model.provider, id: model.id } : null,
+					local,
+					provider: reports
+						? {
+								status: "available",
+								fetchedAt: Math.max(0, ...reports.map(report => report.fetchedAt)),
+								reports: reports.map(report => ({
+									provider: report.provider,
+									fetchedAt: report.fetchedAt,
+									limits: report.limits,
+									...(report.resetCredits ? { resetCredits: report.resetCredits } : {}),
+									...(report.notes ? { notes: report.notes } : {}),
+								})),
+							}
+						: { status: "unavailable", reason: "provider_usage_not_supported" },
+				};
+			} catch {
+				return {
+					schema: "grimoire.engine.session_usage.v1",
+					attemptId: binding.attemptId,
+					sessionId: binding.session.sessionId,
+					model: model ? { provider: model.provider, id: model.id } : null,
+					local,
+					provider: { status: "unavailable", reason: "provider_usage_fetch_failed" },
+				};
+			}
+		});
+	}
+
+	compact(target: EngineTarget): Promise<Record<string, unknown>> {
+		return this.#inLane(target.agentInstanceId, async () => {
+			const binding = this.#requireTarget(target);
+			const before = binding.session.getContextBreakdown();
+			const result = await this.#withSessionScope(binding, () => binding.session.compact());
+			const after = binding.session.getContextBreakdown();
+			return {
+				schema: "grimoire.engine.session_compaction.v1",
+				attemptId: binding.attemptId,
+				sessionId: binding.session.sessionId,
+				tokensBefore: result.tokensBefore,
+				tokensAfter: after?.usedTokens ?? null,
+				contextBefore: before ?? null,
+				contextAfter: after ?? null,
+			};
 		});
 	}
 

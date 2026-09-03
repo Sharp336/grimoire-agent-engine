@@ -5,7 +5,11 @@ import * as path from "node:path";
 import { Args, Command, Flags, renderCommandHelp } from "@oh-my-pi/pi-utils/cli";
 import { getAgentDir } from "@oh-my-pi/pi-utils/dirs";
 import { engineHelp as commandHelp } from "../cli/command-help";
-import { EngineControlQueryClient, type EnginePublicSnapshot } from "../engine/control-query";
+import {
+	EngineControlQueryClient,
+	type EngineControlQueryMethod,
+	type EnginePublicSnapshot,
+} from "../engine/control-query";
 import type { EngineCommandEnvelope, EngineCommandOp } from "../engine/nats-adapter";
 import { runEngineService } from "../engine/service";
 
@@ -34,6 +38,7 @@ export default class Engine extends Command {
 				"approve",
 				"deny",
 				"reconcile",
+				"request",
 			],
 		}),
 	};
@@ -55,6 +60,8 @@ export default class Engine extends Command {
 		"command-id": Flags.string({ description: "Caller-stable idempotency key" }),
 		cursor: Flags.string({ description: "Opaque query cursor" }),
 		limit: Flags.integer({ description: "Query page size", min: 1, max: 1000 }),
+		method: Flags.string({ description: "Exact Control + Query method for engine request" }),
+		params: Flags.string({ description: "JSON object params for engine request" }),
 	};
 
 	async run(): Promise<void> {
@@ -79,6 +86,7 @@ export default class Engine extends Command {
 				"approve",
 				"deny",
 				"reconcile",
+				"request",
 			].includes(args.action)
 		) {
 			await runControlQueryAction(runtimeDir, args.action, flags);
@@ -149,10 +157,20 @@ interface EngineControlFlags {
 	"command-id"?: string;
 	cursor?: string;
 	limit?: number;
+	method?: string;
+	params?: string;
 }
 
 async function runControlQueryAction(runtimeDir: string, action: string, flags: EngineControlFlags): Promise<void> {
 	const client = new EngineControlQueryClient(runtimeDir);
+	if (action === "request") {
+		const method = requiredFlag(flags.method, "--method") as EngineControlQueryMethod;
+		const params = flags.params ? JSON.parse(flags.params) : undefined;
+		if (params !== undefined && (!params || typeof params !== "object" || Array.isArray(params))) {
+			throw new Error("--params must be a JSON object");
+		}
+		return printJson(await client.request(method, params as Record<string, unknown> | undefined));
+	}
 	if (action === "capabilities") return printJson(await client.request("capabilities"));
 	if (action === "doctor") {
 		return printJson({ status: await readStatus(runtimeDir), capabilities: await client.request("capabilities") });

@@ -2,7 +2,14 @@ import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypt
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as path from "node:path";
-import { type EngineAttemptState, type EngineEvent, EngineTargetError } from "./contracts";
+import {
+	type EngineAttemptState,
+	type EngineEvent,
+	type EngineInboxMutation,
+	type EngineInboxSource,
+	type EngineTarget,
+	EngineTargetError,
+} from "./contracts";
 import { dispatchEngineCommand, type EngineCommandEnvelope, engineCommandIdentity } from "./nats-adapter";
 import type { EngineRuntime } from "./runtime";
 import { EngineCommandConflictError, type EngineCommandReceipt } from "./store";
@@ -17,6 +24,13 @@ export type EngineControlQueryMethod =
 	| "snapshots.get"
 	| "events.list"
 	| "result.get"
+	| "session.context"
+	| "session.usage"
+	| "inbox.list"
+	| "inbox.enqueue"
+	| "inbox.read"
+	| "inbox.mutate"
+	| "inbox.reorder"
 	| "command";
 
 export interface EngineControlQueryRequest {
@@ -205,6 +219,29 @@ async function dispatchRequest(request: EngineControlQueryRequest, options: Serv
 			);
 		case "result.get":
 			return await getResult(options.runtime, requiredString(params, "attemptId"));
+		case "session.context":
+			return await options.runtime.sessionContext(requiredTarget(params));
+		case "session.usage":
+			return await options.runtime.sessionUsage(requiredTarget(params));
+		case "inbox.list":
+			return {
+				items: await options.runtime.listInbox(requiredTarget(params), optionalBoolean(params.includeTerminal)),
+			};
+		case "inbox.enqueue":
+			return await options.runtime.enqueueInbox(requiredTarget(params), requiredInboxSource(params));
+		case "inbox.read":
+			return await options.runtime.readInbox(requiredTarget(params), requiredString(params, "queueId"));
+		case "inbox.mutate":
+			return await options.runtime.mutateInbox(requiredTarget(params), requiredInboxMutation(params));
+		case "inbox.reorder":
+			return {
+				items: await options.runtime.reorderInbox(
+					requiredTarget(params),
+					requiredString(params, "mutationId"),
+					requiredStringArray(params, "expectedOrder"),
+					requiredStringArray(params, "desiredOrder"),
+				),
+			};
 		case "command":
 			return await runCommand(options, validateCommand(params.command));
 	}
@@ -234,13 +271,18 @@ async function runCommand(options: ServerOptions, command: EngineCommandEnvelope
 	}
 	if (admission.status === "in_progress") throw new EngineTargetError("agent_busy", "Command is still in progress");
 	try {
-		await dispatchEngineCommand({
+		const detail = await dispatchEngineCommand({
 			runtime: options.runtime,
 			command,
 			resolveLaunchProfile: options.resolveLaunchProfile,
 			provisionMailbox: options.provisionMailbox,
 		});
-		const receipt = { outcome: "applied" } as const;
+		const receipt: EngineCommandReceipt = {
+			outcome: "applied",
+			...(detail && typeof detail === "object" && !Array.isArray(detail)
+				? { detail: detail as Record<string, unknown> }
+				: {}),
+		};
 		await options.runtime.store.settleCommand(command.commandId, identity.canonicalHash, receipt);
 		return receipt;
 	} catch (error) {
@@ -261,8 +303,31 @@ async function capabilities(options: ServerOptions): Promise<Record<string, unkn
 		engineGeneration: options.runtime.engineGeneration,
 		deviceId: options.deviceId,
 		engineId: options.engineId,
-		commands: ["start", "steer", "pause", "resume", "cancel", "reconcile", "resolve_tool_approval", "resolve_input"],
-		queries: ["snapshots.list", "snapshots.get", "events.list", "result.get"],
+		commands: [
+			"start",
+			"steer",
+			"pause",
+			"resume",
+			"cancel",
+			"compact",
+			"release",
+			"reconcile",
+			"resolve_tool_approval",
+			"resolve_input",
+		],
+		queries: [
+			"snapshots.list",
+			"snapshots.get",
+			"events.list",
+			"result.get",
+			"session.context",
+			"session.usage",
+			"inbox.list",
+			"inbox.enqueue",
+			"inbox.read",
+			"inbox.mutate",
+			"inbox.reorder",
+		],
 		limits: { frameBytes: ENGINE_CONTROL_QUERY_MAX_FRAME_BYTES, resultChars: ENGINE_CONTROL_QUERY_MAX_RESULT_CHARS },
 		cursor: { opaque: true, order: "oldest_first", gapIsExplicit: true },
 		rawDiagnostics: false,
@@ -464,7 +529,23 @@ function validateRequest(value: unknown): EngineControlQueryRequest {
 	if (request.schema !== "grimoire.engine.control_query.request.v1") throw new Error("Unsupported request schema");
 	if (request.version !== ENGINE_CONTROL_QUERY_VERSION) throw new Error("Unsupported Control + Query version");
 	const method = requiredString(request, "method");
-	if (!["capabilities", "snapshots.list", "snapshots.get", "events.list", "result.get", "command"].includes(method)) {
+	if (
+		![
+			"capabilities",
+			"snapshots.list",
+			"snapshots.get",
+			"events.list",
+			"result.get",
+			"session.context",
+			"session.usage",
+			"inbox.list",
+			"inbox.enqueue",
+			"inbox.read",
+			"inbox.mutate",
+			"inbox.reorder",
+			"command",
+		].includes(method)
+	) {
 		throw new Error(`Unsupported method ${method}`);
 	}
 	const params = request.params;
@@ -487,9 +568,18 @@ function validateCommand(value: unknown): EngineCommandEnvelope {
 	if (command.schema !== "grimoire.engine.command.v1") throw new Error("Unsupported command schema");
 	const op = requiredString(command, "op");
 	if (
-		!["start", "steer", "pause", "resume", "cancel", "reconcile", "resolve_tool_approval", "resolve_input"].includes(
-			op,
-		)
+		![
+			"start",
+			"steer",
+			"pause",
+			"resume",
+			"cancel",
+			"compact",
+			"release",
+			"reconcile",
+			"resolve_tool_approval",
+			"resolve_input",
+		].includes(op)
 	) {
 		throw new Error(`Unsupported command op ${op}`);
 	}
@@ -505,6 +595,68 @@ function requiredString(record: Record<string, unknown>, key: string): string {
 	const value = record[key];
 	if (typeof value !== "string" || !value.trim()) throw new Error(`${key} must be a non-empty string`);
 	return value;
+}
+
+function requiredTarget(record: Record<string, unknown>): EngineTarget {
+	return {
+		bindingId: requiredString(record, "bindingId"),
+		agentInstanceId: requiredString(record, "agentInstanceId"),
+		executionId: requiredString(record, "executionId"),
+		attemptId: requiredString(record, "attemptId"),
+		authorityGeneration: requiredInteger(record, "authorityGeneration"),
+		engineGeneration: requiredInteger(record, "engineGeneration"),
+		bindingGeneration: requiredInteger(record, "bindingGeneration"),
+	};
+}
+
+function requiredInboxMutation(record: Record<string, unknown>): EngineInboxMutation {
+	const op = requiredString(record, "op");
+	if (!["edit", "annotate", "defer", "acknowledge", "drop"].includes(op)) {
+		throw new Error(`Unsupported inbox mutation ${op}`);
+	}
+	const value = record.value;
+	if (value !== undefined && value !== null && typeof value !== "string" && typeof value !== "number") {
+		throw new Error("value must be a string, number or null");
+	}
+	return {
+		mutationId: requiredString(record, "mutationId"),
+		queueId: requiredString(record, "queueId"),
+		expectedRevision: requiredInteger(record, "expectedRevision"),
+		op: op as EngineInboxMutation["op"],
+		...(value === undefined ? {} : { value }),
+	};
+}
+
+function requiredInboxSource(record: Record<string, unknown>): EngineInboxSource {
+	const sourceType = requiredString(record, "sourceType");
+	if (sourceType !== "user" && sourceType !== "agent" && sourceType !== "runtime") {
+		throw new Error("sourceType must be user, agent or runtime");
+	}
+	const deliverAt = record.deliverAt;
+	if (deliverAt !== undefined && (!Number.isSafeInteger(deliverAt) || Number(deliverAt) < 0)) {
+		throw new Error("deliverAt must be a non-negative safe integer");
+	}
+	return {
+		sourceEventId: requiredString(record, "sourceEventId"),
+		sourceType,
+		...(typeof record.sender === "string" && record.sender.trim() ? { sender: record.sender } : {}),
+		body: requiredString(record, "body"),
+		createdAt: requiredInteger(record, "createdAt"),
+		...(deliverAt === undefined ? {} : { deliverAt: Number(deliverAt) }),
+		wakeIntent: record.wakeIntent === true,
+	};
+}
+
+function requiredStringArray(record: Record<string, unknown>, key: string): string[] {
+	const value = record[key];
+	if (!Array.isArray(value) || value.some(item => typeof item !== "string" || !item.trim())) {
+		throw new Error(`${key} must be an array of non-empty strings`);
+	}
+	return value;
+}
+
+function optionalBoolean(value: unknown): boolean {
+	return value === true;
 }
 
 function optionalString(value: unknown): string | undefined {
