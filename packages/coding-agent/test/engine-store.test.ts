@@ -477,4 +477,61 @@ describe("EngineStore", () => {
 		await inspect.end();
 		await store.close();
 	});
+
+	it("rejects a corrupt database instead of recreating authority", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-corrupt-${Snowflake.next()}-`));
+		const databasePath = path.join(tempDir, "engine.sqlite");
+		fs.writeFileSync(databasePath, "not a sqlite database");
+		await expect(EngineStore.open(databasePath)).rejects.toThrow();
+		expect(fs.readFileSync(databasePath, "utf8")).toBe("not a sqlite database");
+	});
+
+	it("keeps a large transcript and 10k authoritative events within the bounded SQLite profile", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-scale-${Snowflake.next()}-`));
+		const databasePath = path.join(tempDir, "engine.sqlite");
+		const store = await EngineStore.open(databasePath);
+		const startedAt = performance.now();
+		const transcript = "x".repeat(8 * 1024 * 1024);
+		await store.sessionStorage.writeText("sessions/large.jsonl", transcript);
+		await store.sessionStorage.drain();
+		const [head, tail] = await store.sessionStorage.readTextSlices("sessions/large.jsonl", 4_096, 4_096);
+		expect([head.length, tail.length]).toEqual([4_096, 4_096]);
+
+		let firstEventId = 0;
+		for (let index = 0; index < 10_000; index++) {
+			const event = await store.appendEvent({
+				causationCommandId: `command-scale-${index}`,
+				agentInstanceId: `agent-scale-${index % 2}`,
+				executionId: "execution-scale",
+				attemptId: "attempt-scale",
+				bindingId: "binding-scale",
+				engineGeneration: 1,
+				bindingGeneration: 1,
+				authorityGeneration: 1,
+				kind: "reconciled",
+			});
+			if (index === 0) firstEventId = event.eventId;
+		}
+		await store.markEventPublished(firstEventId);
+		expect(performance.now() - startedAt).toBeLessThan(60_000);
+		const walPath = `${databasePath}-wal`;
+		const liveBytes = fs.statSync(databasePath).size + (fs.existsSync(walPath) ? fs.statSync(walPath).size : 0);
+		expect(liveBytes).toBeLessThan(64 * 1024 * 1024);
+		await store.close();
+
+		const inspect = new SQL(`sqlite:${databasePath.replaceAll("\\", "/")}`);
+		const integrity = (await inspect.unsafe("PRAGMA integrity_check")) as Array<{ integrity_check: string }>;
+		const events = (await inspect.unsafe("SELECT COUNT(*) AS count FROM engine_event_outbox")) as Array<{
+			count: number;
+		}>;
+		const sessions = (await inspect.unsafe(
+			"SELECT length(cast(content AS blob)) AS bytes FROM omp_session_files WHERE path='sessions/large.jsonl'",
+		)) as Array<{ bytes: number }>;
+		const journal = (await inspect.unsafe("PRAGMA journal_mode")) as Array<{ journal_mode: string }>;
+		await inspect.end();
+		expect(integrity[0]?.integrity_check).toBe("ok");
+		expect(Number(events[0]?.count)).toBe(10_000);
+		expect(Number(sessions[0]?.bytes)).toBe(transcript.length);
+		expect(journal[0]?.journal_mode).toBe("wal");
+	}, 90_000);
 });
