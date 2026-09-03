@@ -11,6 +11,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/engine/control-query";
 import type { EngineCommandEnvelope } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
+import { archiveChildHistory, coreMcpUrl, engineServiceStatus } from "@oh-my-pi/pi-coding-agent/engine/service";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("Engine Control + Query", () => {
@@ -86,6 +87,7 @@ describe("Engine Control + Query", () => {
 			commands: expect.arrayContaining(["compact", "release"]),
 			queries: expect.arrayContaining([
 				"session.context",
+				"session.history",
 				"session.usage",
 				"inbox.list",
 				"inbox.enqueue",
@@ -164,6 +166,28 @@ describe("Engine Control + Query", () => {
 			attemptId: received.attemptId,
 			provider: { status: "unavailable", reason: "provider_usage_not_supported" },
 		});
+		runtime.sessionHistory = async agentInstanceId => ({
+			sessionId: `session-${agentInstanceId}`,
+			leafEntryId: "entry-assistant",
+			entries: [
+				{
+					entryId: "entry-user",
+					parentEntryId: null,
+					role: "user",
+					text: "question",
+					createdAt: "2026-09-03T10:00:00Z",
+					textTruncated: false,
+				},
+				{
+					entryId: "entry-assistant",
+					parentEntryId: "entry-user",
+					role: "assistant",
+					text: "answer",
+					createdAt: "2026-09-03T10:01:00Z",
+					textTruncated: false,
+				},
+			],
+		});
 		runtime.listInbox = async received => [
 			{
 				queueId: "queue-a",
@@ -205,6 +229,28 @@ describe("Engine Control + Query", () => {
 		expect(await client.request("session.usage", target)).toMatchObject({
 			provider: { status: "unavailable", reason: "provider_usage_not_supported" },
 		});
+		const newestHistory = (await client.request("session.history", {
+			agentInstanceId: "agent-a",
+			limit: 1,
+		})) as { entries: Array<{ entryId: string }>; previousCursor: string; hasMore: boolean };
+		expect(newestHistory).toMatchObject({
+			entries: [{ entryId: "entry-assistant" }],
+			hasMore: true,
+			resyncRequired: false,
+		});
+		expect(
+			await client.request("session.history", {
+				agentInstanceId: "agent-a",
+				cursor: newestHistory.previousCursor,
+				limit: 1,
+			}),
+		).toMatchObject({ entries: [{ entryId: "entry-user" }], hasMore: false, resyncRequired: false });
+		expect(
+			await client.request("session.history", {
+				agentInstanceId: "agent-b",
+				cursor: newestHistory.previousCursor,
+			}),
+		).toMatchObject({ entries: [], resyncRequired: true });
 		expect(await client.request("inbox.list", target)).toMatchObject({
 			items: [{ queueId: "queue-a", sourceType: "user", deliveryPayload: "edited" }],
 		});
@@ -317,6 +363,62 @@ describe("Engine Control + Query", () => {
 
 		await server.close();
 		await runtime.dispose();
+	});
+
+	it("publishes retention config and streams a temporary compressed archive through the core endpoint", async () => {
+		for (const input of [
+			"https://grimoire.example",
+			"https://grimoire.example/mcp",
+			"https://grimoire.example/mcp/client_agents",
+			"https://grimoire.example/mcp/core",
+		]) {
+			expect(new URL(coreMcpUrl(input)).pathname).toBe("/mcp/core");
+		}
+		expect(
+			engineServiceStatus(
+				{
+					deviceId: "device-a",
+					engineId: "engine-a",
+					runtimeDir: "C:\\runtime",
+					databasePath: "C:\\runtime\\engine.sqlite",
+					natsServerPath: "C:\\runtime\\nats-server.exe",
+					childHistoryTtlMinutes: 90,
+					childHistoryRetention: "grimoire",
+				},
+				{ status: "running" },
+			),
+		).toMatchObject({ childHistoryTtlMinutes: 90, childHistoryRetention: "grimoire" });
+
+		const content = '{"type":"session","id":"session-a"}\n';
+		let imported: Record<string, unknown> | undefined;
+		let sourcePath: string | undefined;
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-history-archive-${Snowflake.next()}-`));
+		const rpc = {
+			call: async (method: string, params: Record<string, unknown>) => {
+				expect(method).toBe("grimoire_artifact_import");
+				imported = params;
+				sourcePath = String(params.source_path);
+				const bytes = fs.readFileSync(sourcePath);
+				expect(Buffer.from(Bun.gunzipSync(bytes)).toString("utf8")).toBe(content);
+				return {
+					artifact: {
+						artifact_ref: "gctx:archive",
+						content_hash: `sha256:${new Bun.CryptoHasher("sha256").update(bytes).digest("hex")}`,
+						size_bytes: bytes.byteLength,
+					},
+				};
+			},
+		};
+		await archiveChildHistory(rpc as never, tempDir, {
+			agentInstanceId: "child-a",
+			agentInstanceRef: "grimoire://tasks/grimoire/task-a/agents/child-a",
+			attemptId: "attempt-a",
+			terminalAt: Date.now(),
+			content,
+		});
+		expect(imported?.content_base64).toBeUndefined();
+		expect(sourcePath).toBeDefined();
+		expect(fs.existsSync(sourcePath!)).toBeFalse();
 	});
 });
 

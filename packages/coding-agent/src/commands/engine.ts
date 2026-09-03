@@ -49,6 +49,15 @@ export default class Engine extends Command {
 		database: Flags.string({ description: "Engine SQLite path" }),
 		"nats-server": Flags.string({ description: "Absolute nats-server executable path" }),
 		"artifact-cache": Flags.string({ description: "ClientHost Artifact cache directory" }),
+		"child-history-ttl-minutes": Flags.integer({
+			description: "Delete terminal child OMP history after this many minutes",
+			min: 1,
+			max: 525_600,
+		}),
+		"child-history-retention": Flags.string({
+			description: "Child OMP history at TTL: off deletes locally; grimoire archives then deletes",
+			options: ["off", "grimoire"],
+		}),
 		"server-url": Flags.string({ description: "Hosted Grimoire base URL" }),
 		"token-env": Flags.string({ description: "Environment variable containing the hosted bearer token" }),
 		"client-id": Flags.string({ description: "Hosted Grimoire client id" }),
@@ -131,6 +140,8 @@ export default class Engine extends Command {
 					: process.env.GRIMOIRE_CLIENT_ARTIFACT_CACHE_ROOT
 						? path.resolve(process.env.GRIMOIRE_CLIENT_ARTIFACT_CACHE_ROOT)
 						: defaultArtifactCacheRoot,
+				childHistoryTtlMinutes: flags["child-history-ttl-minutes"] ?? 60,
+				childHistoryRetention: (flags["child-history-retention"] ?? "off") as "off" | "grimoire",
 				hosted:
 					flags["no-hosted"] || !serverUrl || !token
 						? undefined

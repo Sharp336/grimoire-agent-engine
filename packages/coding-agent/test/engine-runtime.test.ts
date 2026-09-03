@@ -1985,6 +1985,102 @@ describe("EngineRuntime", () => {
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
 		await runtime.dispose();
 	}, 60000);
+
+	it("expires terminal child OMP history and retains it when Grimoire archival fails", async () => {
+		const starts = new Map<string, number>();
+		const startAgent = async (runtime: EngineRuntime, cwd: string, id: string, input: string, child = true) => {
+			const sequence = (starts.get(id) ?? 0) + 1;
+			starts.set(id, sequence);
+			const request = {
+				commandId: `command-${id}-${sequence}`,
+				agentInstanceId: id,
+				agentInstanceRef: `grimoire://tasks/grimoire/history-test/agents/${id}`,
+				...(child ? { parentAgentInstanceId: "parent-agent" } : {}),
+				executionId: `execution-${id}-${sequence}`,
+				attemptId: `attempt-${id}-${sequence}`,
+				authorityGeneration: 1,
+				cwd,
+				input,
+			};
+			await runtime.store.admitCommand(
+				{
+					...request,
+					operation: "start",
+					deviceId: "device-history",
+					engineId: "engine-history",
+					engineGeneration: runtime.engineGeneration,
+					payloadHash: `sha256:payload-${id}`,
+					canonicalHash: `sha256:canonical-${id}`,
+				},
+				runtime.engineGeneration,
+			);
+			await runtime.start(request, profile);
+			await runtime.drain();
+		};
+
+		const recordPrompt: NonNullable<EngineRuntimeOptions["dispatchPrompt"]> = async (session, input) => {
+			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
+			return true;
+		};
+		const local = await createRuntime(recordPrompt);
+		await startAgent(local.runtime, local.cwd, "child-off", "delete locally");
+		await startAgent(local.runtime, local.cwd, "child-off", "ordinary continuation", false);
+		expect(await local.runtime.sessionHistory("child-off")).toMatchObject({
+			entries: [{ role: "user", text: "ordinary continuation" }],
+		});
+		await local.runtime.dispose();
+		const restarted = await EngineRuntime.create(local.options);
+		expect(await restarted.sessionHistory("child-off")).toMatchObject({
+			entries: [{ role: "user", text: "ordinary continuation" }],
+		});
+		expect(await restarted.sweepExpiredChildHistory(Date.now() + 61 * 60_000)).toEqual({
+			expired: 1,
+			archived: 0,
+			deleted: 1,
+			retained: 0,
+		});
+		await expect(restarted.sessionHistory("child-off")).rejects.toMatchObject({ code: "agent_not_found" });
+		expect((await restarted.store.getBinding("child-off"))?.sessionFile).toBeUndefined();
+		await restarted.dispose();
+
+		let archivedContent = "";
+		const grimoire = await createRuntime(recordPrompt, {
+			childHistoryRetention: "grimoire",
+			archiveChildHistory: async request => {
+				if (request.agentInstanceId === "child-archive-fail") throw new Error("archive unavailable");
+				archivedContent = request.content;
+			},
+		});
+		await startAgent(grimoire.runtime, grimoire.cwd, "child-archive-ok", "archive then delete");
+		await startAgent(grimoire.runtime, grimoire.cwd, "child-archive-fail", "retain for retry");
+		expect(await grimoire.runtime.sweepExpiredChildHistory(Date.now() + 61 * 60_000)).toEqual({
+			expired: 2,
+			archived: 1,
+			deleted: 1,
+			retained: 1,
+		});
+		expect(archivedContent).toContain("archive then delete");
+		await expect(grimoire.runtime.sessionHistory("child-archive-ok")).rejects.toMatchObject({
+			code: "agent_not_found",
+		});
+		expect(await grimoire.runtime.sessionHistory("child-archive-fail")).toMatchObject({
+			entries: [{ role: "user", text: "retain for retry" }],
+		});
+		await grimoire.runtime.dispose();
+
+		const projection = await createRuntime(async session => {
+			session.sessionManager.appendMessage({ role: "user", content: "first", timestamp: Date.now() });
+			session.sessionManager.appendMessage({ role: "user", content: "", timestamp: Date.now() });
+			session.sessionManager.appendMessage({ role: "user", content: "last", timestamp: Date.now() });
+			return true;
+		});
+		await startAgent(projection.runtime, projection.cwd, "child-projection", "ignored");
+		const history = await projection.runtime.sessionHistory("child-projection");
+		expect(history.entries.map(entry => entry.text)).toEqual(["first", "last"]);
+		expect(history.entries[1]?.parentEntryId).toBe(history.entries[0]?.entryId);
+		expect(history.leafEntryId).toBe(history.entries[1]?.entryId);
+		await projection.runtime.dispose();
+	}, 60000);
 });
 
 function nextEngineEvent(runtime: EngineRuntime, kind: EngineEvent["kind"]): Promise<EngineEvent> {

@@ -2,7 +2,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AgentPauseGate } from "@oh-my-pi/pi-agent-core";
-import { logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../async/job-manager";
 import { withCapabilityProviderPolicy } from "../capability";
 import { SETTINGS_SCHEMA, type SettingPath, withSettingsScope } from "../config/settings";
@@ -22,7 +22,10 @@ import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
+import type { SessionEntry } from "../session/session-entries";
+import { loadSessionFile } from "../session/session-loader";
 import { type SessionDurabilityCheckpoint, SessionManager } from "../session/session-manager";
+import { migrateToCurrentVersion } from "../session/session-migrations";
 import type { EngineChildLaunchResult, EngineChildProfile, EngineInboxToolRequest } from "../tools";
 import {
 	type EngineAttemptState,
@@ -65,6 +68,7 @@ type EngineEventListener = (event: EngineEvent) => void | Promise<void>;
 const MAX_ASSISTANT_FINAL_CHARS = 48_000;
 const MAX_INPUT_FIELD_CHARS = 48_000;
 const MAX_INPUT_RESULT_CHARS = 128_000;
+const MAX_HISTORY_MESSAGE_CHARS = 48_000;
 
 async function collectFailure(errors: unknown[], action: () => unknown | Promise<unknown>): Promise<void> {
 	try {
@@ -148,6 +152,15 @@ interface PendingInput {
 
 export interface EngineRuntimeOptions {
 	databasePath: string;
+	childHistoryTtlMinutes?: number;
+	childHistoryRetention?: "off" | "grimoire";
+	archiveChildHistory?: (request: {
+		agentInstanceId: string;
+		agentInstanceRef: string;
+		attemptId: string;
+		terminalAt: number;
+		content: string;
+	}) => Promise<void>;
 	sessionDefaults?: Omit<
 		CreateAgentSessionOptions,
 		| "agentId"
@@ -198,6 +211,9 @@ export class EngineRuntime {
 	readonly #resolveSessionProfile: EngineRuntimeOptions["resolveSessionProfile"];
 	readonly #resolveSessionContinuation: EngineRuntimeOptions["resolveSessionContinuation"];
 	readonly #launchChild: EngineRuntimeOptions["launchChild"];
+	readonly #childHistoryTtlMinutes: number;
+	readonly #childHistoryRetention: "off" | "grimoire";
+	readonly #archiveChildHistory: EngineRuntimeOptions["archiveChildHistory"];
 	readonly #bindings = new Map<string, LiveBinding>();
 	readonly #lanes = new Map<string, Promise<void>>();
 	readonly #runs = new Set<Promise<void>>();
@@ -217,6 +233,12 @@ export class EngineRuntime {
 		this.#resolveSessionProfile = options.resolveSessionProfile;
 		this.#resolveSessionContinuation = options.resolveSessionContinuation;
 		this.#launchChild = options.launchChild;
+		this.#childHistoryTtlMinutes = options.childHistoryTtlMinutes ?? 60;
+		if (!Number.isSafeInteger(this.#childHistoryTtlMinutes) || this.#childHistoryTtlMinutes < 1) {
+			throw new Error("childHistoryTtlMinutes must be a positive integer");
+		}
+		this.#childHistoryRetention = options.childHistoryRetention ?? "off";
+		this.#archiveChildHistory = options.archiveChildHistory;
 		this.#sessionRoot = path.join(path.dirname(path.resolve(options.databasePath)), "engine-sessions");
 	}
 
@@ -682,6 +704,140 @@ export class EngineRuntime {
 				};
 			}
 		});
+	}
+
+	async sessionHistory(agentInstanceId: string): Promise<{
+		sessionId: string;
+		leafEntryId: string | null;
+		entries: Array<{
+			entryId: string;
+			parentEntryId: string | null;
+			role: "user" | "assistant";
+			text: string;
+			createdAt: string;
+			textTruncated: boolean;
+		}>;
+	}> {
+		return await this.#inLane(agentInstanceId, async () => {
+			this.#throwIfDisposed();
+			const live = this.#bindings.get(agentInstanceId);
+			let sessionId: string;
+			let branch: SessionEntry[];
+			if (live) {
+				sessionId = live.session.sessionId;
+				branch = live.session.sessionManager.getBranch();
+			} else {
+				const binding = await this.store.getBinding(agentInstanceId);
+				if (!binding?.sessionFile) {
+					throw new EngineTargetError("agent_not_found", `No retained OMP session for ${agentInstanceId}`);
+				}
+				const loaded = await loadSessionFile(binding.sessionFile, this.store.sessionStorage);
+				if (loaded.entries.length === 0 || loaded.entries[0]?.type !== "session") {
+					throw new EngineTargetError("agent_not_found", `No retained OMP session for ${agentInstanceId}`);
+				}
+				migrateToCurrentVersion(loaded.entries);
+				sessionId = loaded.entries[0].id;
+				branch = activeSessionBranch(
+					loaded.entries.filter((entry): entry is SessionEntry => entry.type !== "session"),
+				);
+			}
+			const entries = branch.flatMap(entry => {
+				if (entry.type !== "message" || (entry.message.role !== "user" && entry.message.role !== "assistant")) {
+					return [];
+				}
+				const fullText = historyMessageText(entry.message.content);
+				if (!fullText) return [];
+				return [
+					{
+						entryId: entry.id,
+						parentEntryId: null as string | null,
+						role: entry.message.role,
+						text: fullText.slice(0, MAX_HISTORY_MESSAGE_CHARS),
+						createdAt: entry.timestamp,
+						textTruncated: fullText.length > MAX_HISTORY_MESSAGE_CHARS,
+					},
+				];
+			});
+			const projected = entries.map((entry, index) => ({
+				...entry,
+				parentEntryId: entries[index - 1]?.entryId ?? null,
+			}));
+			return {
+				sessionId,
+				leafEntryId: projected.at(-1)?.entryId ?? null,
+				entries: projected,
+			};
+		});
+	}
+
+	async sweepExpiredChildHistory(now = Date.now()): Promise<{
+		expired: number;
+		archived: number;
+		deleted: number;
+		retained: number;
+	}> {
+		this.#throwIfDisposed();
+		const cutoff = now - this.#childHistoryTtlMinutes * 60_000;
+		const candidates = await this.store.listExpiredChildHistory(cutoff);
+		let archived = 0;
+		let deleted = 0;
+		let retained = 0;
+		for (const candidate of candidates) {
+			await this.#inLane(candidate.agentInstanceId, async () => {
+				let localDeleted = false;
+				const binding = await this.store.getBinding(candidate.agentInstanceId);
+				const attempt = await this.store.getAttempt(candidate.attemptId);
+				if (
+					binding?.attemptId !== candidate.attemptId ||
+					binding.sessionFile !== candidate.sessionFile ||
+					!attempt ||
+					attempt.updated_at > cutoff ||
+					!["completed", "cancelled", "failed", "interrupted"].includes(attempt.state)
+				)
+					return;
+				try {
+					let content: string;
+					try {
+						content = await this.store.sessionStorage.readText(candidate.sessionFile);
+					} catch (error) {
+						if (!isEnoent(error)) throw error;
+						await this.store.clearBindingSession(
+							candidate.agentInstanceId,
+							candidate.attemptId,
+							candidate.sessionFile,
+						);
+						return;
+					}
+					if (this.#childHistoryRetention === "grimoire") {
+						if (!this.#archiveChildHistory) throw new Error("Grimoire child-history archive is unavailable");
+						await this.#archiveChildHistory({ ...candidate, content });
+						archived++;
+					}
+					const live = this.#bindings.get(candidate.agentInstanceId);
+					if (live) await this.#terminateBinding(live, "requested");
+					await this.store.sessionStorage.deleteSessionWithArtifacts(candidate.sessionFile);
+					localDeleted = true;
+					deleted++;
+					await this.store.clearBindingSession(
+						candidate.agentInstanceId,
+						candidate.attemptId,
+						candidate.sessionFile,
+					);
+				} catch (error) {
+					if (!localDeleted) retained++;
+					logger.warn(
+						localDeleted
+							? "Expired child OMP history metadata cleanup will retry"
+							: "Expired child OMP history retained for retry",
+						{
+							agentInstanceId: candidate.agentInstanceId,
+							error: error instanceof Error ? error.message : String(error),
+						},
+					);
+				}
+			});
+		}
+		return { expired: candidates.length, archived, deleted, retained };
 	}
 
 	compact(target: EngineTarget): Promise<Record<string, unknown>> {
@@ -1921,6 +2077,33 @@ export class EngineRuntime {
 	#throwIfDisposed(): void {
 		if (this.#disposed) throw new Error("EngineRuntime is disposed");
 	}
+}
+
+function activeSessionBranch(entries: SessionEntry[]): SessionEntry[] {
+	const byId = new Map(entries.map(entry => [entry.id, entry]));
+	const branch: SessionEntry[] = [];
+	const seen = new Set<string>();
+	let entry = entries.at(-1);
+	while (entry && !seen.has(entry.id)) {
+		seen.add(entry.id);
+		branch.push(entry);
+		entry = entry.parentId ? byId.get(entry.parentId) : undefined;
+	}
+	return branch.reverse();
+}
+
+function historyMessageText(content: unknown): string {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return "";
+	return content
+		.flatMap(block => {
+			if (!block || typeof block !== "object") return [];
+			const value = block as { type?: unknown; text?: unknown };
+			if (value.type === "text" && typeof value.text === "string") return [value.text];
+			if (value.type === "image") return ["[Image]"];
+			return [];
+		})
+		.join("\n");
 }
 
 function validateControlRequest(request: EngineControlRequest): void {

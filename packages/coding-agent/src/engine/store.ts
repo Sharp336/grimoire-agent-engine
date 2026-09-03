@@ -98,6 +98,14 @@ export interface EngineAttemptRecord extends EngineAttemptRow {
 	updated_at: number;
 }
 
+export interface ExpiredChildHistory {
+	agentInstanceId: string;
+	agentInstanceRef: string;
+	attemptId: string;
+	sessionFile: string;
+	terminalAt: number;
+}
+
 interface SeqRow {
 	seq: number;
 }
@@ -963,6 +971,45 @@ export class EngineStore {
 			bindingGeneration: Number(row.binding_generation),
 			authorityGeneration: Number(row.authority_generation),
 		};
+	}
+
+	async listExpiredChildHistory(cutoff: number, limit = 100): Promise<ExpiredChildHistory[]> {
+		const rows = (await this.#client.unsafe(
+			`SELECT b.agent_instance_id, c.agent_instance_ref, b.attempt_id, b.session_file, a.updated_at
+			 FROM engine_runtime_bindings b
+			 JOIN engine_attempts a ON a.attempt_id=b.attempt_id
+			 JOIN engine_commands c ON c.command_id=(
+				SELECT child.command_id FROM engine_commands child
+				WHERE child.agent_instance_id=b.agent_instance_id AND child.operation='start'
+				AND child.parent_agent_instance_id IS NOT NULL AND child.agent_instance_ref IS NOT NULL
+				ORDER BY child.received_at, child.command_id LIMIT 1
+			 )
+			 WHERE b.session_file IS NOT NULL
+			 AND a.state IN ('completed', 'cancelled', 'failed', 'interrupted') AND a.updated_at<=?
+			 ORDER BY a.updated_at, b.agent_instance_id LIMIT ?`,
+			[Math.max(0, Math.floor(cutoff)), Math.max(1, Math.min(1000, Math.floor(limit)))],
+		)) as Array<{
+			agent_instance_id: string;
+			agent_instance_ref: string;
+			attempt_id: string;
+			session_file: string;
+			updated_at: number;
+		}>;
+		return rows.map(row => ({
+			agentInstanceId: row.agent_instance_id,
+			agentInstanceRef: row.agent_instance_ref,
+			attemptId: row.attempt_id,
+			sessionFile: row.session_file,
+			terminalAt: Number(row.updated_at),
+		}));
+	}
+
+	async clearBindingSession(agentInstanceId: string, attemptId: string, sessionFile: string): Promise<void> {
+		await this.#client.unsafe(
+			`UPDATE engine_runtime_bindings SET session_file=NULL, updated_at=?
+			 WHERE agent_instance_id=? AND attempt_id=? AND session_file=?`,
+			[Date.now(), agentInstanceId, attemptId, sessionFile],
+		);
 	}
 
 	async putBinding(binding: EngineBindingSnapshot): Promise<void> {

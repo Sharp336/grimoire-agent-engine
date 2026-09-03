@@ -18,6 +18,8 @@ export interface EngineServiceConfig {
 	databasePath: string;
 	natsServerPath: string;
 	artifactCacheRoot?: string;
+	childHistoryTtlMinutes?: number;
+	childHistoryRetention?: "off" | "grimoire";
 	hosted?: {
 		serverUrl: string;
 		token: string;
@@ -42,13 +44,24 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 	let adapter: NatsEngineAdapter | undefined;
 	let bridge: HostedEngineBridge | undefined;
 	let controlQuery: EngineControlQueryServer | undefined;
+	let retentionTimer: ReturnType<typeof setInterval> | undefined;
+	let retentionSweep: Promise<void> | undefined;
 	try {
 		const rpc = config.hosted ? new HostedGrimoireRpc(config.hosted) : undefined;
+		const artifactRpc =
+			config.hosted && (config.childHistoryRetention ?? "off") === "grimoire"
+				? new HostedGrimoireRpc({ ...config.hosted, serverUrl: coreMcpUrl(config.hosted.serverUrl) })
+				: undefined;
 		const profileResolver = config.artifactCacheRoot
 			? new EngineProfileResolver(config.artifactCacheRoot, path.join(config.runtimeDir, "credentials"))
 			: undefined;
 		runtime = await EngineRuntime.create({
 			databasePath,
+			childHistoryTtlMinutes: config.childHistoryTtlMinutes,
+			childHistoryRetention: config.childHistoryRetention,
+			archiveChildHistory: artifactRpc
+				? request => archiveChildHistory(artifactRpc, config.runtimeDir, request)
+				: undefined,
 			resolveSessionProfile: profileResolver ? (profile, cwd) => profileResolver.resolve(profile, cwd) : undefined,
 			resolveSessionContinuation: profileResolver
 				? (profile, cwd) => profileResolver.continuationDigest(profile, cwd)
@@ -64,6 +77,17 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 						})
 				: undefined,
 		});
+		await runtime.sweepExpiredChildHistory().catch(reportServiceError);
+		retentionTimer = setInterval(() => {
+			if (retentionSweep || !runtime) return;
+			retentionSweep = runtime
+				.sweepExpiredChildHistory()
+				.then(() => undefined)
+				.catch(reportServiceError)
+				.finally(() => {
+					retentionSweep = undefined;
+				});
+		}, 60_000);
 		broker = await startBroker(config, engineKey.getPublicKey(), bridgeKey.getPublicKey());
 		adapter = await NatsEngineAdapter.connect({
 			runtime,
@@ -112,9 +136,11 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 		});
 		await Promise.race([stop ? Promise.race([stop, processStopSignal()]) : processStopSignal(), brokerExit]);
 	} finally {
+		if (retentionTimer) clearInterval(retentionTimer);
 		await controlQuery?.close().catch(reportServiceError);
 		await bridge?.stopAdmission().catch(reportServiceError);
 		await adapter?.stopAdmission().catch(reportServiceError);
+		await retentionSweep;
 		await runtime?.dispose({ closeStore: false }).catch(reportServiceError);
 		await adapter?.dispose().catch(reportServiceError);
 		await bridge?.drain().catch(reportServiceError);
@@ -232,6 +258,89 @@ function validateConfig(config: EngineServiceConfig): void {
 	}
 	if (path.resolve(config.runtimeDir) === path.parse(path.resolve(config.runtimeDir)).root) {
 		throw new Error("runtimeDir cannot be a filesystem root");
+	}
+	const ttl = config.childHistoryTtlMinutes ?? 60;
+	if (!Number.isSafeInteger(ttl) || ttl < 1 || ttl > 525_600) {
+		throw new Error("childHistoryTtlMinutes must be an integer between 1 and 525600");
+	}
+	const retention = config.childHistoryRetention ?? "off";
+	if (retention !== "off" && retention !== "grimoire") {
+		throw new Error("childHistoryRetention must be off or grimoire");
+	}
+	if (retention === "grimoire" && !config.hosted) {
+		throw new Error("childHistoryRetention=grimoire requires the hosted ClientHost bridge");
+	}
+}
+
+export function coreMcpUrl(serverUrl: string): string {
+	const url = new URL(serverUrl);
+	const pathname = url.pathname.replace(/\/+$/, "");
+	if (/\/mcp\/(?:client_agents|core)$/i.test(pathname)) {
+		url.pathname = pathname.replace(/\/(?:client_agents|core)$/i, "/core");
+	} else if (/\/mcp$/i.test(pathname)) {
+		url.pathname = `${pathname}/core`;
+	} else {
+		url.pathname = `${pathname}/mcp/core`;
+	}
+	return url.toString();
+}
+
+export async function archiveChildHistory(
+	rpc: HostedGrimoireRpc,
+	runtimeDir: string,
+	request: {
+		agentInstanceId: string;
+		agentInstanceRef: string;
+		attemptId: string;
+		terminalAt: number;
+		content: string;
+	},
+): Promise<void> {
+	const match = /^grimoire:\/\/tasks\/([^/]+)\/([^/]+)\/agents\/([^/]+)$/.exec(request.agentInstanceRef);
+	if (!match) throw new Error("Child AgentInstanceRef cannot be scoped to a Grimoire Task");
+	const [, projectId, taskId] = match;
+	const rawHash = new Bun.CryptoHasher("sha256").update(request.content).digest("hex");
+	const compressed = Bun.gzipSync(new TextEncoder().encode(request.content));
+	const contentHash = `sha256:${new Bun.CryptoHasher("sha256").update(compressed).digest("hex")}`;
+	const archiveKey = new Bun.CryptoHasher("sha256")
+		.update(`${request.agentInstanceRef}\0${request.attemptId}\0${rawHash}`)
+		.digest("hex");
+	const tempDir = path.join(runtimeDir, "child-history-archive");
+	const sourcePath = path.join(tempDir, `${rawHash}.jsonl.gz`);
+	await fs.mkdir(tempDir, { recursive: true });
+	await fs.writeFile(sourcePath, compressed);
+	try {
+		const result = await rpc.call("grimoire_artifact_import", {
+			project_id: projectId,
+			task_id: taskId,
+			source_path: sourcePath,
+			role: "agent_transcript",
+			kind: "grimoire.agent_session_history.v1",
+			media_type: "application/gzip",
+			summary: `Expired child OMP transcript for ${request.agentInstanceId}`,
+			visibility: "private",
+			idempotency_key: `child-history-${archiveKey}`,
+			technical_metadata: {
+				schema: "grimoire.agent_session_history.v1",
+				agent_instance_ref: request.agentInstanceRef,
+				attempt_id: request.attemptId,
+				terminal_at: new Date(request.terminalAt).toISOString(),
+				encoding: "gzip",
+				source_media_type: "application/x-ndjson",
+				source_content_hash: `sha256:${rawHash}`,
+			},
+		});
+		const artifact = result.artifact as Record<string, unknown> | undefined;
+		if (
+			!artifact ||
+			typeof artifact.artifact_ref !== "string" ||
+			artifact.content_hash !== contentHash ||
+			Number(artifact.size_bytes) !== compressed.byteLength
+		) {
+			throw new Error("Grimoire child-history upload was not hash-verified");
+		}
+	} finally {
+		await fs.rm(sourcePath, { force: true });
 	}
 }
 
@@ -415,23 +524,24 @@ function resolveLaunchProfile(command: EngineCommandEnvelope, requireArtifactRef
 async function writeStatus(config: EngineServiceConfig, value: Record<string, unknown>): Promise<void> {
 	const statusPath = path.join(config.runtimeDir, "status.json");
 	const tempPath = `${statusPath}.${process.pid}.tmp`;
-	await fs.writeFile(
-		tempPath,
-		JSON.stringify(
-			{
-				schema: "grimoire.agent_engine.service_status.v1",
-				deviceId: config.deviceId,
-				engineId: config.engineId,
-				hostname: os.hostname(),
-				updatedAt: new Date().toISOString(),
-				...value,
-			},
-			null,
-			2,
-		),
-		"utf8",
-	);
+	await fs.writeFile(tempPath, JSON.stringify(engineServiceStatus(config, value), null, 2), "utf8");
 	await fs.rename(tempPath, statusPath);
+}
+
+export function engineServiceStatus(
+	config: EngineServiceConfig,
+	value: Record<string, unknown>,
+): Record<string, unknown> {
+	return {
+		schema: "grimoire.agent_engine.service_status.v1",
+		deviceId: config.deviceId,
+		engineId: config.engineId,
+		hostname: os.hostname(),
+		updatedAt: new Date().toISOString(),
+		...value,
+		childHistoryTtlMinutes: config.childHistoryTtlMinutes ?? 60,
+		childHistoryRetention: config.childHistoryRetention ?? "off",
+	};
 }
 
 function processStopSignal(): Promise<void> {

@@ -25,6 +25,7 @@ export type EngineControlQueryMethod =
 	| "events.list"
 	| "result.get"
 	| "session.context"
+	| "session.history"
 	| "session.usage"
 	| "inbox.list"
 	| "inbox.enqueue"
@@ -221,6 +222,13 @@ async function dispatchRequest(request: EngineControlQueryRequest, options: Serv
 			return await getResult(options.runtime, requiredString(params, "attemptId"));
 		case "session.context":
 			return await options.runtime.sessionContext(requiredTarget(params));
+		case "session.history":
+			return await listSessionHistory(
+				options.runtime,
+				requiredString(params, "agentInstanceId"),
+				optionalString(params.cursor),
+				optionalLimit(params.limit),
+			);
 		case "session.usage":
 			return await options.runtime.sessionUsage(requiredTarget(params));
 		case "inbox.list":
@@ -321,6 +329,7 @@ async function capabilities(options: ServerOptions): Promise<Record<string, unkn
 			"events.list",
 			"result.get",
 			"session.context",
+			"session.history",
 			"session.usage",
 			"inbox.list",
 			"inbox.enqueue",
@@ -330,6 +339,7 @@ async function capabilities(options: ServerOptions): Promise<Record<string, unkn
 		],
 		limits: { frameBytes: ENGINE_CONTROL_QUERY_MAX_FRAME_BYTES, resultChars: ENGINE_CONTROL_QUERY_MAX_RESULT_CHARS },
 		cursor: { opaque: true, order: "oldest_first", gapIsExplicit: true },
+		historyCursor: { opaque: true, order: "page_chronological", direction: "older", gapIsExplicit: true },
 		rawDiagnostics: false,
 	};
 }
@@ -432,6 +442,48 @@ async function getResult(runtime: EngineRuntime, attemptId: string): Promise<Rec
 	};
 }
 
+async function listSessionHistory(
+	runtime: EngineRuntime,
+	agentInstanceId: string,
+	cursor: string | undefined,
+	limit: number,
+) {
+	const epoch = await runtime.store.getStoreEpoch();
+	const history = await runtime.sessionHistory(agentInstanceId);
+	const decoded = decodeCursor(cursor, "history", epoch, agentInstanceId);
+	const end = cursor ? decoded.position : history.entries.length;
+	const anchorMatches =
+		!cursor || (end === 0 ? decoded.anchor === undefined : history.entries[end - 1]?.entryId === decoded.anchor);
+	if (decoded.resyncRequired || end > history.entries.length || !anchorMatches) {
+		return {
+			schema: "grimoire.engine.session_history.v1",
+			agentInstanceId,
+			sessionId: history.sessionId,
+			leafEntryId: history.leafEntryId,
+			entries: [],
+			previousCursor: null,
+			hasMore: history.entries.length > 0,
+			resyncRequired: true,
+		};
+	}
+	const start = Math.max(0, end - limit);
+	const entries = fitResponsePage(history.entries.slice(start, end).reverse()).reverse();
+	const pageStart = end - entries.length;
+	return {
+		schema: "grimoire.engine.session_history.v1",
+		agentInstanceId,
+		sessionId: history.sessionId,
+		leafEntryId: history.leafEntryId,
+		entries,
+		previousCursor:
+			pageStart > 0
+				? encodeCursor("history", epoch, pageStart, agentInstanceId, history.entries[pageStart - 1]?.entryId)
+				: null,
+		hasMore: pageStart > 0,
+		resyncRequired: false,
+	};
+}
+
 function publicEvent(event: EngineEvent): EngineEvent {
 	const payload = event.payload;
 	if (!payload) return event;
@@ -499,18 +551,25 @@ function fitResponsePage<T>(items: T[]): T[] {
 	return page;
 }
 
-function encodeCursor(kind: "snapshots" | "events", epoch: string, position: number, scope?: string): string {
-	return Buffer.from(JSON.stringify({ kind, epoch, position, ...(scope ? { scope } : {}) }), "utf8").toString(
-		"base64url",
-	);
+function encodeCursor(
+	kind: "snapshots" | "events" | "history",
+	epoch: string,
+	position: number,
+	scope?: string,
+	anchor?: string,
+): string {
+	return Buffer.from(
+		JSON.stringify({ kind, epoch, position, ...(scope ? { scope } : {}), ...(anchor ? { anchor } : {}) }),
+		"utf8",
+	).toString("base64url");
 }
 
 function decodeCursor(
 	cursor: string | undefined,
-	kind: "snapshots" | "events",
+	kind: "snapshots" | "events" | "history",
 	epoch: string,
 	scope?: string,
-): { position: number; resyncRequired: boolean } {
+): { position: number; anchor?: string; resyncRequired: boolean } {
 	if (!cursor) return { position: 0, resyncRequired: false };
 	try {
 		const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8")) as Record<string, unknown>;
@@ -523,7 +582,14 @@ function decodeCursor(
 		) {
 			return { position: 0, resyncRequired: true };
 		}
-		return { position: Number(value.position), resyncRequired: false };
+		if (value.anchor !== undefined && (typeof value.anchor !== "string" || !value.anchor)) {
+			return { position: 0, resyncRequired: true };
+		}
+		return {
+			position: Number(value.position),
+			...(typeof value.anchor === "string" ? { anchor: value.anchor } : {}),
+			resyncRequired: false,
+		};
 	} catch {
 		return { position: 0, resyncRequired: true };
 	}
@@ -543,6 +609,7 @@ function validateRequest(value: unknown): EngineControlQueryRequest {
 			"events.list",
 			"result.get",
 			"session.context",
+			"session.history",
 			"session.usage",
 			"inbox.list",
 			"inbox.enqueue",

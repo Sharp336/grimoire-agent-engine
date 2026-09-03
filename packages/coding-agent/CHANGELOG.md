@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added restart-safe Agent Engine conversation history plus configurable terminal-child transcript retention.
 - Added authenticated Engine session context, usage, compaction, release, and durable inbox controls for non-TUI clients.
 - Added independent durable Agent Engine event delivery state per sink while retaining SQLite events as the authoritative history.
 - Added durable Agent Engine model-dispatch effects without persisting prompt bodies, including conservative unknown recovery after Engine loss.
