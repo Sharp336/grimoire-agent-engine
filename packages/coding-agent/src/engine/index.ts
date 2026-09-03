@@ -1,4 +1,5 @@
 export * from "./contracts";
+export * from "./control-query";
 export * from "./hosted-bridge";
 export * from "./nats-adapter";
 export * from "./route";

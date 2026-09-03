@@ -518,104 +518,12 @@ export class NatsEngineAdapter {
 		if (!(await this.runtime.store.isCurrentEngineGeneration(this.runtime.engineGeneration))) {
 			throw new StaleEngineLeaseError("Engine generation lease is no longer current");
 		}
-		if (command.engineGeneration !== this.runtime.engineGeneration) {
-			throw new EngineTargetError("stale_target", `Engine generation ${command.engineGeneration} is stale`);
-		}
-		switch (command.op) {
-			case "start": {
-				const executionId = requiredEnvelopeString(command.executionId, "executionId");
-				const attemptId = requiredEnvelopeString(command.attemptId, "attemptId");
-				const agentInstanceRef = optionalRecordString(
-					command as unknown as Record<string, unknown>,
-					"agentInstanceRef",
-				);
-				if (agentInstanceRef && command.agentInstanceId !== engineAgentInstanceId(agentInstanceRef)) {
-					throw new EngineTargetError("invalid_request", "agentInstanceId does not match agentInstanceRef");
-				}
-				const input = requiredRecordString(command.payload, "input");
-				const cwd = requiredRecordString(command.payload, "cwd");
-				const profileDigest = requiredRecordString(command.payload, "profileDigest");
-				const profile = await this.#options.resolveLaunchProfile(command);
-				if (profile.profileDigest !== profileDigest) {
-					throw new EngineTargetError("invalid_request", "launch profile digest mismatch");
-				}
-				await this.provisionMailbox(command.agentInstanceId);
-				await this.runtime.start(
-					{
-						commandId: command.commandId,
-						agentInstanceId: command.agentInstanceId,
-						agentInstanceRef,
-						parentAgentInstanceId: optionalRecordString(
-							command as unknown as Record<string, unknown>,
-							"parentAgentInstanceId",
-						),
-						executionId,
-						attemptId,
-						authorityGeneration: command.authorityGeneration,
-						cwd,
-						input,
-					},
-					profile,
-				);
-				return;
-			}
-			case "steer":
-				await this.runtime.steer({
-					...boundTarget(command),
-					commandId: command.commandId,
-					message: requiredRecordString(command.payload, "text"),
-				});
-				return;
-			case "pause":
-				await this.runtime.pause({
-					...boundTarget(command),
-					commandId: command.commandId,
-					initiator: controlInitiator(command.payload),
-				});
-				return;
-			case "resume":
-				await this.runtime.resume({
-					...boundTarget(command),
-					commandId: command.commandId,
-					initiator: controlInitiator(command.payload),
-				});
-				return;
-			case "cancel":
-				await this.runtime.cancel({
-					...boundTarget(command),
-					commandId: command.commandId,
-					reason: optionalRecordString(command.payload, "reason"),
-				});
-				return;
-			case "resolve_tool_approval": {
-				const decision = requiredRecordString(command.payload, "decision");
-				if (decision !== "approve" && decision !== "deny") {
-					throw new PoisonMessageError("decision must be approve or deny");
-				}
-				await this.runtime.resolveToolApproval({
-					...boundTarget(command),
-					commandId: command.commandId,
-					approvalId: requiredRecordString(command.payload, "approvalId"),
-					decision,
-					reason: optionalRecordString(command.payload, "reason"),
-				});
-				return;
-			}
-			case "resolve_input":
-				await this.runtime.resolveInput({
-					...boundTarget(command),
-					commandId: command.commandId,
-					inputId: requiredRecordString(command.payload, "inputId"),
-					result: askDialogResult(command.payload),
-				});
-				return;
-			case "reconcile":
-				await this.runtime.reconcile({
-					commandId: command.commandId,
-					agentInstanceId: command.agentInstanceId,
-					authorityGeneration: command.authorityGeneration,
-				});
-		}
+		await dispatchEngineCommand({
+			runtime: this.runtime,
+			command,
+			resolveLaunchProfile: this.#options.resolveLaunchProfile,
+			provisionMailbox: agentInstanceId => this.provisionMailbox(agentInstanceId),
+		});
 	}
 
 	#parseCommand(message: JsMsg): EngineCommandEnvelope {
@@ -762,6 +670,117 @@ export class NatsEngineAdapter {
 	#report(error: unknown): void {
 		this.#options.onError?.(error instanceof Error ? error : new Error(String(error)));
 	}
+}
+
+export async function dispatchEngineCommand(options: {
+	runtime: EngineRuntime;
+	command: EngineCommandEnvelope;
+	resolveLaunchProfile: (command: EngineCommandEnvelope) => EngineLaunchProfile | Promise<EngineLaunchProfile>;
+	provisionMailbox?: (agentInstanceId: string) => void | Promise<void>;
+}): Promise<void> {
+	const { runtime, command } = options;
+	if (command.engineGeneration !== runtime.engineGeneration) {
+		throw new EngineTargetError("stale_target", `Engine generation ${command.engineGeneration} is stale`);
+	}
+	switch (command.op) {
+		case "start": {
+			const executionId = requiredEnvelopeString(command.executionId, "executionId");
+			const attemptId = requiredEnvelopeString(command.attemptId, "attemptId");
+			const agentInstanceRef = optionalRecordString(
+				command as unknown as Record<string, unknown>,
+				"agentInstanceRef",
+			);
+			if (agentInstanceRef && command.agentInstanceId !== engineAgentInstanceId(agentInstanceRef)) {
+				throw new EngineTargetError("invalid_request", "agentInstanceId does not match agentInstanceRef");
+			}
+			const input = requiredRecordString(command.payload, "input");
+			const cwd = requiredRecordString(command.payload, "cwd");
+			const profileDigest = requiredRecordString(command.payload, "profileDigest");
+			const profile = await options.resolveLaunchProfile(command);
+			if (profile.profileDigest !== profileDigest) {
+				throw new EngineTargetError("invalid_request", "launch profile digest mismatch");
+			}
+			await options.provisionMailbox?.(command.agentInstanceId);
+			await runtime.start(
+				{
+					commandId: command.commandId,
+					agentInstanceId: command.agentInstanceId,
+					agentInstanceRef,
+					parentAgentInstanceId: optionalRecordString(
+						command as unknown as Record<string, unknown>,
+						"parentAgentInstanceId",
+					),
+					executionId,
+					attemptId,
+					authorityGeneration: command.authorityGeneration,
+					cwd,
+					input,
+				},
+				profile,
+			);
+			return;
+		}
+		case "steer":
+			await runtime.steer({
+				...boundTarget(command),
+				commandId: command.commandId,
+				message: requiredRecordString(command.payload, "text"),
+			});
+			return;
+		case "pause":
+			await runtime.pause({
+				...boundTarget(command),
+				commandId: command.commandId,
+				initiator: controlInitiator(command.payload),
+			});
+			return;
+		case "resume":
+			await runtime.resume({
+				...boundTarget(command),
+				commandId: command.commandId,
+				initiator: controlInitiator(command.payload),
+			});
+			return;
+		case "cancel":
+			await runtime.cancel({
+				...boundTarget(command),
+				commandId: command.commandId,
+				reason: optionalRecordString(command.payload, "reason"),
+			});
+			return;
+		case "resolve_tool_approval": {
+			const decision = requiredRecordString(command.payload, "decision");
+			if (decision !== "approve" && decision !== "deny") {
+				throw new PoisonMessageError("decision must be approve or deny");
+			}
+			await runtime.resolveToolApproval({
+				...boundTarget(command),
+				commandId: command.commandId,
+				approvalId: requiredRecordString(command.payload, "approvalId"),
+				decision,
+				reason: optionalRecordString(command.payload, "reason"),
+			});
+			return;
+		}
+		case "resolve_input":
+			await runtime.resolveInput({
+				...boundTarget(command),
+				commandId: command.commandId,
+				inputId: requiredRecordString(command.payload, "inputId"),
+				result: askDialogResult(command.payload),
+			});
+			return;
+		case "reconcile":
+			await runtime.reconcile({
+				commandId: command.commandId,
+				agentInstanceId: command.agentInstanceId,
+				authorityGeneration: command.authorityGeneration,
+			});
+	}
+}
+
+export function engineCommandIdentity(command: EngineCommandEnvelope): EngineCommandIdentity {
+	return commandIdentity(command);
 }
 
 function parseCommandSubject(subject: string): [string, string, string, EngineCommandOp] {

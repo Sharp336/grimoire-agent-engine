@@ -83,6 +83,12 @@ export interface EngineAttemptRow {
 	transcript_revision: number;
 }
 
+export interface EngineAttemptRecord extends EngineAttemptRow {
+	row_id: number;
+	cause: string | null;
+	updated_at: number;
+}
+
 interface SeqRow {
 	seq: number;
 }
@@ -523,6 +529,15 @@ export class EngineStore {
 		return Number(rows[0]?.value) === engineGeneration;
 	}
 
+	async getStoreEpoch(): Promise<string> {
+		const rows = (await this.#client.unsafe(
+			`SELECT value FROM engine_metadata WHERE key='database_id'`,
+		)) as MetadataRow[];
+		const value = rows[0]?.value;
+		if (!value) throw new Error("Engine database has no stable identity");
+		return value;
+	}
+
 	async admitCommand(command: EngineCommandIdentity, processorGeneration: number): Promise<EngineCommandAdmission> {
 		return await this.#transaction(async sql => {
 			const rows = (await sql.unsafe(
@@ -947,15 +962,56 @@ export class EngineStore {
 		return rows[0];
 	}
 
-	async getAttempt(attemptId: string): Promise<EngineAttemptRow | undefined> {
+	async getAttempt(attemptId: string): Promise<EngineAttemptRecord | undefined> {
 		const rows = (await this.#client.unsafe(
-			`SELECT agent_instance_id, execution_id, attempt_id, command_id, binding_id, engine_generation, binding_generation,
-			 authority_generation, state, transcript_session_id, transcript_path, transcript_leaf_entry_id,
+			`SELECT rowid AS row_id, agent_instance_id, execution_id, attempt_id, command_id, binding_id,
+			 engine_generation, binding_generation, authority_generation, state, cause, updated_at,
+			 transcript_session_id, transcript_path, transcript_leaf_entry_id,
 			 transcript_byte_boundary, transcript_revision
 			 FROM engine_attempts WHERE attempt_id = ?`,
 			[attemptId],
-		)) as EngineAttemptRow[];
+		)) as EngineAttemptRecord[];
 		return rows[0];
+	}
+
+	async listAttempts(afterRowId = 0, limit = 100): Promise<EngineAttemptRecord[]> {
+		const rows = (await this.#client.unsafe(
+			`SELECT rowid AS row_id, agent_instance_id, execution_id, attempt_id, command_id, binding_id,
+			 engine_generation, binding_generation, authority_generation, state, cause, updated_at,
+			 transcript_session_id, transcript_path, transcript_leaf_entry_id, transcript_byte_boundary,
+			 transcript_revision FROM engine_attempts WHERE rowid > ? ORDER BY rowid LIMIT ?`,
+			[Math.max(0, Math.floor(afterRowId)), Math.max(1, Math.min(1000, Math.floor(limit)))],
+		)) as EngineAttemptRecord[];
+		return rows;
+	}
+
+	async eventsAfter(attemptId: string, afterEventId = 0, limit = 100): Promise<EngineEvent[]> {
+		const rows = (await this.#client.unsafe(
+			`SELECT event_id, seq, causation_command_id, agent_instance_id, execution_id, attempt_id, binding_id,
+			 engine_generation, binding_generation, authority_generation, kind, payload, created_at
+			 FROM engine_event_outbox WHERE attempt_id=? AND event_id>? ORDER BY event_id LIMIT ?`,
+			[attemptId, Math.max(0, Math.floor(afterEventId)), Math.max(1, Math.min(1000, Math.floor(limit)))],
+		)) as EventRow[];
+		return rows.map(eventFromRow);
+	}
+
+	async eventBounds(attemptId: string): Promise<{ first: number; last: number }> {
+		const rows = (await this.#client.unsafe(
+			"SELECT MIN(event_id) AS first, MAX(event_id) AS last FROM engine_event_outbox WHERE attempt_id=?",
+			[attemptId],
+		)) as Array<{ first: number | null; last: number | null }>;
+		return { first: Number(rows[0]?.first ?? 0), last: Number(rows[0]?.last ?? 0) };
+	}
+
+	async terminalEvent(attemptId: string): Promise<EngineEvent | undefined> {
+		const rows = (await this.#client.unsafe(
+			`SELECT event_id, seq, causation_command_id, agent_instance_id, execution_id, attempt_id, binding_id,
+			 engine_generation, binding_generation, authority_generation, kind, payload, created_at
+			 FROM engine_event_outbox WHERE attempt_id=?
+			 AND kind IN ('completed', 'cancelled', 'failed', 'interrupted') ORDER BY event_id DESC LIMIT 1`,
+			[attemptId],
+		)) as EventRow[];
+		return rows[0] ? eventFromRow(rows[0]) : undefined;
 	}
 
 	async interruptGeneration(engineGeneration: number): Promise<EngineEvent[]> {

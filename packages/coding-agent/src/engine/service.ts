@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { nkeyAuthenticator, nkeys } from "@nats-io/transport-node";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { type EngineLaunchProfile, EngineTargetError } from "./contracts";
+import { type EngineControlQueryServer, startEngineControlQueryServer } from "./control-query";
 import { HostedEngineBridge, HostedGrimoireRpc, launchHostedEngineChild } from "./hosted-bridge";
 import { type EngineCommandEnvelope, NatsEngineAdapter } from "./nats-adapter";
 import { EngineProfileResolver } from "./profile-resolver";
@@ -40,6 +41,7 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 	let runtime: EngineRuntime | undefined;
 	let adapter: NatsEngineAdapter | undefined;
 	let bridge: HostedEngineBridge | undefined;
+	let controlQuery: EngineControlQueryServer | undefined;
 	try {
 		const rpc = config.hosted ? new HostedGrimoireRpc(config.hosted) : undefined;
 		const profileResolver = config.artifactCacheRoot
@@ -78,6 +80,14 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 			resolveLaunchProfile: command => resolveLaunchProfile(command, Boolean(profileResolver)),
 			onError: reportServiceError,
 		});
+		controlQuery = await startEngineControlQueryServer({
+			runtime,
+			runtimeDir: config.runtimeDir,
+			deviceId: config.deviceId,
+			engineId: config.engineId,
+			resolveLaunchProfile: command => resolveLaunchProfile(command, Boolean(profileResolver)),
+			provisionMailbox: agentInstanceId => adapter?.provisionMailbox(agentInstanceId),
+		});
 		if (config.hosted && rpc) {
 			bridge = await HostedEngineBridge.connect({
 				rpc,
@@ -94,6 +104,7 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 			pid: process.pid,
 			engineGeneration: runtime.engineGeneration,
 			brokerUrl: broker.url,
+			controlQueryEndpoint: controlQuery.endpoint,
 			hosted: Boolean(config.hosted),
 		});
 		const brokerExit = broker.process.exited.then(code => {
@@ -101,6 +112,7 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 		});
 		await Promise.race([stop ? Promise.race([stop, processStopSignal()]) : processStopSignal(), brokerExit]);
 	} finally {
+		await controlQuery?.close().catch(reportServiceError);
 		await bridge?.stopAdmission().catch(reportServiceError);
 		await adapter?.stopAdmission().catch(reportServiceError);
 		await runtime?.dispose({ closeStore: false }).catch(reportServiceError);
