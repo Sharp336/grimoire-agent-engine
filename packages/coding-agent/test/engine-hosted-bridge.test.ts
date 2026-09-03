@@ -108,6 +108,8 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			expect(rpc.events.map(event => event.type)).toEqual([
 				"command.accepted",
 				"attempt.started",
+				"model.started",
+				"model.settled",
 				"attempt.completed",
 			]);
 			expect(rpc.terminalStatus).toBe("completed");

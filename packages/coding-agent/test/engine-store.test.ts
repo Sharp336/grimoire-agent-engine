@@ -55,6 +55,11 @@ describe("EngineStore", () => {
 			policy: "permit",
 			inputHash: "sha256:pending",
 		});
+		await first.startModelEffect(binding, {
+			effectId: "effect-c-model",
+			modelCallId: "model-1",
+			inputHash: "sha256:model",
+		});
 		await first.close();
 
 		const runtime = await EngineRuntime.create({ databasePath });
@@ -64,9 +69,11 @@ describe("EngineStore", () => {
 		expect(events.map(event => event.kind)).toEqual([
 			"tool_started",
 			"tool_approval_requested",
+			"model_started",
 			"tool_settled",
 			"tool_approval_resolved",
 			"tool_settled",
+			"model_settled",
 			"interrupted",
 		]);
 		expect(events.at(-1)?.engineGeneration).toBe(runtime.engineGeneration);
@@ -82,6 +89,11 @@ describe("EngineStore", () => {
 		expect(await runtime.store.getApproval("effect-b-pending")).toMatchObject({
 			state: "resolved",
 			decision: "cancelled",
+		});
+		expect(await runtime.store.getEffect("effect-c-model")).toMatchObject({
+			effect_kind: "model",
+			state: "unknown",
+			outcome: "unknown",
 		});
 		await runtime.dispose();
 	});

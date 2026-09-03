@@ -49,6 +49,7 @@ import {
 import { engineAgentId, engineRouteToken } from "./route";
 import {
 	EngineAttemptConflictError,
+	type EngineModelEffectInput,
 	EngineStore,
 	type EngineToolEffectInput,
 	type EngineTransitionEvent,
@@ -109,6 +110,8 @@ interface LiveBinding extends EngineBindingSnapshot {
 	traceWriteTail: Promise<void>;
 	traceTools: Map<string, { name: string; summary: string; startedAt: number }>;
 	childLaunchCount: number;
+	modelCallSequence: number;
+	activeModelCalls: Set<Promise<void>>;
 	pendingInput?: PendingInput;
 }
 
@@ -672,6 +675,8 @@ export class EngineRuntime {
 				binding.activeToolCallIds.clear();
 				binding.traceTools.clear();
 				binding.traceWriteTail = Promise.resolve();
+				binding.modelCallSequence = 0;
+				binding.activeModelCalls.clear();
 				binding.pauseCommandIds.clear();
 				binding.pauseRequests.clear();
 				binding.resumeCommandIds.clear();
@@ -839,6 +844,8 @@ export class EngineRuntime {
 				traceWriteTail: Promise.resolve(),
 				traceTools: new Map(),
 				childLaunchCount: 0,
+				modelCallSequence: 0,
+				activeModelCalls: new Set(),
 			};
 			liveBinding = binding;
 			created.setToolUIContext(
@@ -1234,15 +1241,43 @@ export class EngineRuntime {
 	}
 
 	async #dispatchModel(binding: LiveBinding, input: string): Promise<boolean> {
-		const previous = binding.session.getLastAssistantMessage();
+		const completed = Promise.withResolvers<void>();
+		binding.activeModelCalls.add(completed.promise);
+		const modelCallId = `model-${++binding.modelCallSequence}`;
+		const inputHash = sha256(input);
+		const effect: EngineModelEffectInput = {
+			effectId: `model_${sha256(`${binding.bindingId}\0${binding.attemptId}\0${modelCallId}`).slice(0, 32)}`,
+			modelCallId,
+			inputHash,
+		};
 		try {
-			const dispatched = await this.#withSessionScope(binding, () => this.#dispatchPrompt(binding.session, input));
-			const current = binding.session.getLastAssistantMessage();
-			if (current !== previous && current?.stopReason === "error") {
-				throw new Error(current.errorMessage?.trim() || "Model request failed");
+			const started = await this.store.startModelEffect(this.#snapshot(binding), effect);
+			this.#notifyEvents([started]);
+			const previous = binding.session.getLastAssistantMessage();
+			let dispatched: boolean;
+			try {
+				dispatched = await this.#withSessionScope(binding, () => this.#dispatchPrompt(binding.session, input));
+				const current = binding.session.getLastAssistantMessage();
+				if (current !== previous && current?.stopReason === "error") {
+					throw new Error(current.errorMessage?.trim() || "Model request failed");
+				}
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				const settled = await this.store.settleModelEffect(
+					this.#snapshot(binding),
+					effect,
+					"failed",
+					message.slice(0, 2_048),
+				);
+				this.#notifyEvents([settled]);
+				throw error;
 			}
+			const settled = await this.store.settleModelEffect(this.#snapshot(binding), effect, "completed");
+			this.#notifyEvents([settled]);
 			return dispatched;
 		} finally {
+			completed.resolve();
+			binding.activeModelCalls.delete(completed.promise);
 			await binding.pauseGate.waitUntilResumed();
 		}
 	}
@@ -1422,6 +1457,7 @@ export class EngineRuntime {
 				cause === "engine_lost" ? "interrupted" : "cancelled",
 				wasRunning
 					? async () => {
+							await Promise.all(binding.activeModelCalls);
 							await this.#waitForToolInvocations(binding, binding.attemptId);
 							transcriptCheckpoint = await binding.session.sessionManager.flushAndCheckpoint();
 						}

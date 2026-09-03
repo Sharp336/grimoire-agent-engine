@@ -820,6 +820,33 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
+	it("records model dispatch certainty without exposing the prompt", async () => {
+		const { runtime, cwd } = await createRuntime();
+		await runtime.start(
+			{
+				commandId: "command-model-effect",
+				agentInstanceId: "agent-model-effect",
+				executionId: "execution-model-effect",
+				attemptId: "attempt-model-effect",
+				authorityGeneration: 1,
+				cwd,
+				input: "private prompt sentinel",
+			},
+			profile,
+		);
+		await runtime.drain();
+		const events = (await runtime.store.pendingEvents()).filter(event => event.kind.startsWith("model_"));
+		expect(events.map(event => event.kind)).toEqual(["model_started", "model_settled"]);
+		expect(JSON.stringify(events)).not.toContain("private prompt sentinel");
+		const effectId = String(events[0]?.payload?.effectId);
+		expect(await runtime.store.getEffect(effectId)).toMatchObject({
+			effect_kind: "model",
+			state: "settled",
+			outcome: "completed",
+		});
+		await runtime.dispose();
+	}, 60_000);
+
 	it("launches six pinned children in parallel and rejects the seventh", async () => {
 		let taskResults: string[] = [];
 		const launches: Array<{ toolCallId: string; maxSpawnDepth: number }> = [];
@@ -1578,6 +1605,12 @@ describe("EngineRuntime", () => {
 		expect(events.find(event => event.kind === "failed")?.payload).toMatchObject({
 			error: "provider rejected request",
 			transcriptCheckpoint: { revision: 1 },
+		});
+		const modelEffectId = String(events.find(event => event.kind === "model_started")?.payload?.effectId);
+		expect(await runtime.store.getEffect(modelEffectId)).toMatchObject({
+			effect_kind: "model",
+			state: "settled",
+			outcome: "failed",
 		});
 		await runtime.dispose();
 	}, 60000);

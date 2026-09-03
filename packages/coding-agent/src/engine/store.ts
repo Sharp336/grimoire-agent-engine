@@ -29,6 +29,10 @@ function effectInputFromRow(row: EngineEffectRow): EngineToolEffectInput {
 	};
 }
 
+function modelEffectPayload(effectId: string, modelCallId: string): Record<string, unknown> {
+	return { effectId, modelCallId };
+}
+
 interface BindingRow {
 	binding_id: string;
 	command_id: string;
@@ -134,6 +138,12 @@ export interface EngineToolEffectInput {
 	inputHash: string;
 }
 
+export interface EngineModelEffectInput {
+	effectId: string;
+	modelCallId: string;
+	inputHash: string;
+}
+
 export interface EngineEffectRow {
 	effect_id: string;
 	agent_instance_id: string;
@@ -147,6 +157,7 @@ export interface EngineEffectRow {
 	tool_name: string;
 	policy: EngineToolPolicy;
 	input_hash: string;
+	effect_kind: "tool" | "model";
 	state: "planned" | "started" | "settled" | "unknown";
 	outcome: "completed" | "failed" | "cancelled" | "denied" | "unknown" | null;
 }
@@ -353,12 +364,17 @@ const EFFECT_APPROVAL_SCHEMA = [
 	`CREATE INDEX engine_approvals_state_idx ON engine_approvals(state, updated_at)`,
 ] as const;
 
+const EFFECT_KIND_COLUMN = [
+	["engine_effects", "effect_kind", "TEXT NOT NULL DEFAULT 'tool' CHECK(effect_kind IN ('tool', 'model'))"],
+] as const;
+
 const SCHEMA_MIGRATIONS = [
 	{ version: 1, statements: SCHEMA, requiredColumns: [] },
 	{ version: 2, statements: [], requiredColumns: REQUIRED_COLUMNS },
 	{ version: 3, statements: COMMAND_INBOX_SCHEMA, requiredColumns: [] },
 	{ version: 4, statements: [], requiredColumns: TRANSCRIPT_CHECKPOINT_COLUMNS },
 	{ version: 5, statements: EFFECT_APPROVAL_SCHEMA, requiredColumns: [] },
+	{ version: 6, statements: [], requiredColumns: EFFECT_KIND_COLUMN },
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;
@@ -667,6 +683,39 @@ export class EngineStore {
 		});
 	}
 
+	async startModelEffect(target: EngineEventTarget, effect: EngineModelEffectInput): Promise<EngineEvent> {
+		return await this.#transaction(async sql => {
+			const now = Date.now();
+			await sql.unsafe(
+				`INSERT INTO engine_effects(
+				 effect_id, command_id, agent_instance_id, execution_id, attempt_id, binding_id,
+				 engine_generation, binding_generation, authority_generation, tool_call_id, tool_name,
+				 policy, input_hash, effect_kind, state, created_at, started_at, updated_at
+				 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'model_dispatch', 'unrestricted', ?, 'model', 'started', ?, ?, ?)`,
+				[
+					effect.effectId,
+					target.commandId,
+					target.agentInstanceId,
+					target.executionId,
+					target.attemptId,
+					target.bindingId,
+					target.engineGeneration,
+					target.bindingGeneration,
+					target.authorityGeneration,
+					effect.modelCallId,
+					effect.inputHash,
+					now,
+					now,
+					now,
+				],
+			);
+			return await this.#appendTransitionEvent(sql, target, {
+				kind: "model_started",
+				payload: modelEffectPayload(effect.effectId, effect.modelCallId),
+			});
+		});
+	}
+
 	async requestToolApproval(target: EngineEventTarget, effect: EngineToolEffectInput): Promise<EngineEvent> {
 		return await this.#transaction(async sql => {
 			await this.#insertToolEffect(sql, target, effect, "planned");
@@ -694,7 +743,7 @@ export class EngineStore {
 			const rows = (await sql.unsafe(
 				`SELECT e.effect_id, e.command_id, e.agent_instance_id, e.execution_id, e.attempt_id, e.binding_id,
 				 e.engine_generation, e.binding_generation, e.authority_generation, e.tool_call_id, e.tool_name,
-				 e.policy, e.input_hash, e.state, e.outcome, a.state AS approval_state, a.decision
+				 e.policy, e.input_hash, e.effect_kind, e.state, e.outcome, a.state AS approval_state, a.decision
 				 FROM engine_approvals a JOIN engine_effects e ON e.effect_id=a.effect_id
 				 WHERE a.approval_id=? AND e.agent_instance_id=? AND e.execution_id=? AND e.attempt_id=?
 				 AND e.binding_id=? AND e.engine_generation=? AND e.binding_generation=? AND e.authority_generation=?`,
@@ -777,7 +826,7 @@ export class EngineStore {
 				 AND engine_generation=? AND binding_generation=? AND authority_generation=? AND state='started'
 				 RETURNING effect_id, command_id, agent_instance_id, execution_id, attempt_id, binding_id,
 				 engine_generation, binding_generation, authority_generation, tool_call_id, tool_name,
-				 policy, input_hash, state, outcome`,
+				 policy, input_hash, effect_kind, state, outcome`,
 				[
 					outcome,
 					options.error ?? null,
@@ -808,10 +857,49 @@ export class EngineStore {
 		});
 	}
 
+	async settleModelEffect(
+		target: EngineEventTarget,
+		effect: EngineModelEffectInput,
+		outcome: "completed" | "failed",
+		error?: string,
+	): Promise<EngineEvent> {
+		return await this.#transaction(async sql => {
+			const rows = await sql.unsafe(
+				`UPDATE engine_effects SET state='settled', outcome=?, error=?, settled_at=?, updated_at=?
+				 WHERE effect_id=? AND agent_instance_id=? AND execution_id=? AND attempt_id=? AND binding_id=?
+				 AND engine_generation=? AND binding_generation=? AND authority_generation=?
+				 AND effect_kind='model' AND state='started' RETURNING effect_id`,
+				[
+					outcome,
+					error ?? null,
+					Date.now(),
+					Date.now(),
+					effect.effectId,
+					target.agentInstanceId,
+					target.executionId,
+					target.attemptId,
+					target.bindingId,
+					target.engineGeneration,
+					target.bindingGeneration,
+					target.authorityGeneration,
+				],
+			);
+			if (rows.length === 0) throw new EngineEffectConflictError(effect.effectId);
+			return await this.#appendTransitionEvent(sql, target, {
+				kind: "model_settled",
+				payload: {
+					...modelEffectPayload(effect.effectId, effect.modelCallId),
+					status: outcome,
+					...(error ? { error } : {}),
+				},
+			});
+		});
+	}
+
 	async getEffect(effectId: string): Promise<EngineEffectRow | undefined> {
 		const rows = (await this.#client.unsafe(
 			`SELECT effect_id, agent_instance_id, execution_id, attempt_id, binding_id, engine_generation,
-			 binding_generation, authority_generation, tool_call_id, tool_name, policy, input_hash, state, outcome
+			 binding_generation, authority_generation, tool_call_id, tool_name, policy, input_hash, effect_kind, state, outcome
 			 FROM engine_effects WHERE effect_id=?`,
 			[effectId],
 		)) as EngineEffectRow[];
@@ -850,7 +938,7 @@ export class EngineStore {
 			const abandonedEffects = (await sql.unsafe(
 				`SELECT e.effect_id, e.command_id, e.agent_instance_id, e.execution_id, e.attempt_id, e.binding_id,
 				 e.engine_generation, e.binding_generation, e.authority_generation, e.tool_call_id, e.tool_name,
-				 e.policy, e.input_hash, e.state, e.outcome, a.approval_id, a.state AS approval_state
+				 e.policy, e.input_hash, e.effect_kind, e.state, e.outcome, a.approval_id, a.state AS approval_state
 				 FROM engine_effects e LEFT JOIN engine_approvals a ON a.effect_id=e.effect_id
 				 WHERE e.engine_generation < ? AND e.state IN ('planned', 'started')
 				 ORDER BY e.created_at, e.effect_id`,
@@ -906,9 +994,11 @@ export class EngineStore {
 				}
 				events.push(
 					await this.#appendTransitionEvent(sql, target, {
-						kind: "tool_settled",
+						kind: effect.effect_kind === "model" ? "model_settled" : "tool_settled",
 						payload: {
-							...toolEffectPayload(effectInputFromRow(effect)),
+							...(effect.effect_kind === "model"
+								? modelEffectPayload(effect.effect_id, effect.tool_call_id)
+								: toolEffectPayload(effectInputFromRow(effect))),
 							status: effect.state === "started" ? "unknown" : "cancelled",
 							error: "engine_lost",
 						},

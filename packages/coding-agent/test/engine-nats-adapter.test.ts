@@ -122,11 +122,23 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 				),
 			);
 			await adapter.flushEvents();
-			await waitFor(() => eventsA.length >= 3 && eventsB.length >= 3);
+			await waitFor(() => eventsA.length >= 5 && eventsB.length >= 5);
 			expect(eventsA.every(event => event.agentInstanceId === "agent-a")).toBeTrue();
 			expect(eventsB.every(event => event.agentInstanceId === "agent-b")).toBeTrue();
-			expect(eventsA.map(event => event.type)).toEqual(["command.accepted", "attempt.started", "attempt.completed"]);
-			expect(eventsB.map(event => event.type)).toEqual(["command.accepted", "attempt.started", "attempt.completed"]);
+			expect(eventsA.map(event => event.type)).toEqual([
+				"command.accepted",
+				"attempt.started",
+				"model.started",
+				"model.settled",
+				"attempt.completed",
+			]);
+			expect(eventsB.map(event => event.type)).toEqual([
+				"command.accepted",
+				"attempt.started",
+				"model.started",
+				"model.settled",
+				"attempt.completed",
+			]);
 			expect(dispatchCount).toBe(2);
 
 			const permitStart = startCommand(runtime.engineGeneration, "agent-permit", "permit", cwd);
@@ -167,10 +179,12 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			expect(permitEvents.map(event => event.type)).toEqual([
 				"command.accepted",
 				"attempt.started",
+				"model.started",
 				"tool.approval_requested",
 				"tool.approval_resolved",
 				"tool.started",
 				"tool.settled",
+				"model.settled",
 				"attempt.completed",
 			]);
 			permitSub.unsubscribe();

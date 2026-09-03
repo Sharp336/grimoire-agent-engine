@@ -944,6 +944,10 @@ function eventType(kind: EngineEvent["kind"]): string {
 			return "tool.started";
 		case "tool_settled":
 			return "tool.settled";
+		case "model_started":
+			return "model.started";
+		case "model_settled":
+			return "model.settled";
 		case "trace_reasoning":
 			return "trace.reasoning";
 		case "trace_tool":

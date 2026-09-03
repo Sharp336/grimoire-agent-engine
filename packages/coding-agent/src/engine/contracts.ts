@@ -179,6 +179,8 @@ export interface EngineEvent {
 		| "input_resolved"
 		| "tool_started"
 		| "tool_settled"
+		| "model_started"
+		| "model_settled"
 		| "trace_reasoning"
 		| "trace_tool";
 	payload?: Record<string, unknown>;
