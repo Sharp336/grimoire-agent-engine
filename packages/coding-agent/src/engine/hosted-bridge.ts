@@ -169,6 +169,7 @@ export async function launchHostedEngineChild(
 				status: status === "succeeded" ? "completed" : status === "cancelled" ? "cancelled" : "failed",
 				assistantFinal: typeof payload?.assistantFinal === "string" ? payload.assistantFinal : undefined,
 				transcriptRef: typeof payload?.transcriptRef === "string" ? payload.transcriptRef : undefined,
+				...(payload?.outputTruncated === true ? { outputTruncated: true } : {}),
 				...(status === "succeeded" ? {} : { error: String(currentJob?.error ?? event?.type ?? status) }),
 			};
 		}

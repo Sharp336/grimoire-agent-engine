@@ -12,6 +12,7 @@ import type {
 	EngineLaunchProfile,
 } from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import { EngineRuntime, type EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { getLspResourceCounts } from "@oh-my-pi/pi-coding-agent/lsp/client";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -943,7 +944,7 @@ describe("EngineRuntime", () => {
 
 	it("launches six pinned children in parallel and rejects the seventh", async () => {
 		let taskResults: string[] = [];
-		const launches: Array<{ toolCallId: string; maxSpawnDepth: number }> = [];
+		const launches: Array<{ toolCallId: string; workStepId: string; maxSpawnDepth: number }> = [];
 		const { runtime, cwd } = await createRuntime(
 			async session => {
 				const task = session.getToolByName("task");
@@ -999,7 +1000,13 @@ describe("EngineRuntime", () => {
 		expect(taskResults.slice(0, 6)).toEqual(Array.from({ length: 6 }, (_, index) => `done tool-child-${index}`));
 		expect(taskResults[6]).toContain("maxChildren ceiling (6) reached");
 		expect(launches[0]).toMatchObject({
+			toolCallId: "tool-child-0",
+			workStepId: "child-step-0",
 			maxSpawnDepth: 0,
+		});
+		expect(launches[1]).toMatchObject({
+			toolCallId: "tool-child-1",
+			workStepId: "child-step-1",
 		});
 		await runtime.dispose();
 	}, 60_000);
@@ -1792,8 +1799,12 @@ describe("EngineRuntime", () => {
 
 	it("waits for attempt jobs before publishing the bounded final result", async () => {
 		const job = Promise.withResolvers<string>();
+		const fullFinal = `${"x".repeat(48_001)}FULL-TRANSCRIPT-TAIL`;
 		const { runtime, cwd } = await createRuntime(async session => {
-			Object.defineProperty(session, "getLastAssistantText", { value: () => "final answer" });
+			Object.defineProperty(session, "getLastAssistantText", { value: () => fullFinal });
+			Object.defineProperty(session, "messages", {
+				value: [{ role: "assistant", content: [{ type: "text", text: fullFinal }] }],
+			});
 			const jobId = runtime.asyncJobManager.register("task", "child", () => job.promise, {
 				ownerId: session.getAgentId(),
 				attemptId: session.getAttemptId(),
@@ -1819,8 +1830,9 @@ describe("EngineRuntime", () => {
 		await runtime.drain();
 		const completed = (await runtime.store.pendingEvents()).find(event => event.kind === "completed");
 		expect(completed?.payload).toMatchObject({
-			assistantFinal: "final answer",
+			assistantFinal: `${fullFinal.slice(0, 48_000)}\n[…truncated]`,
 			transcriptRef: `history://${started.engineAgentId}`,
+			outputTruncated: true,
 			transcriptCheckpoint: {
 				sessionId: expect.any(String),
 				sessionPath: expect.any(String),
@@ -1829,7 +1841,8 @@ describe("EngineRuntime", () => {
 				revision: 1,
 			},
 		});
-		expect(await runtime.store.getAttempt(started.attemptId)).toMatchObject({
+		const completedAttempt = await runtime.store.getAttempt(started.attemptId);
+		expect(completedAttempt).toMatchObject({
 			state: "completed",
 			transcript_session_id: expect.any(String),
 			transcript_path: expect.any(String),
@@ -1837,37 +1850,108 @@ describe("EngineRuntime", () => {
 			transcript_byte_boundary: expect.any(Number),
 			transcript_revision: 1,
 		});
+		const history = await InternalUrlRouter.instance().resolve(String(completed?.payload?.transcriptRef), {
+			agentRegistry: runtime.agentRegistry,
+			engineMode: true,
+		});
+		expect(history.content).toContain("FULL-TRANSCRIPT-TAIL");
 		await runtime.dispose();
 	}, 60000);
 
-	it("publishes schema-validated yield data as the Engine final result", async () => {
+	it("uses only a successful terminal yield from the current Attempt", async () => {
 		const prompts: string[] = [];
-		const { runtime, cwd } = await createRuntime(async (session, input) => {
-			prompts.push(input);
-			expect(session.getToolByName("yield")).toBeDefined();
-			if (prompts.length === 1) return true;
-			Object.defineProperty(session, "messages", {
-				value: [
+		const mock = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							id: "yield-attempt-a",
+							name: "yield",
+							arguments: { result: { data: { assignment: "A", ok: true } } },
+						},
+					],
+				},
+				{ content: ["Attempt B prose"] },
+				{ content: ["Attempt B reminder one"] },
+				{ content: ["Attempt B reminder two"] },
+			],
+		});
+		const { runtime, cwd } = await createRuntime(
+			(session, input) => {
+				prompts.push(input);
+				expect(session.getToolByName("yield")).toBeDefined();
+				return session.prompt(input);
+			},
+			{},
+			{ model: mock.model },
+		);
+		const first = await runtime.start(
+			{
+				commandId: "command-yield-a",
+				agentInstanceId: "agent-yield",
+				executionId: "execution-yield-a",
+				attemptId: "attempt-yield-a",
+				authorityGeneration: 1,
+				cwd,
+				input: "finish A",
+			},
+			{ ...profile, requireYieldTool: true, outputSchema: { type: "object" } },
+		);
+		await runtime.drain();
+		const firstEvents = await runtime.store.pendingEvents();
+		expect(
+			firstEvents.find(event => event.kind === "completed" && event.attemptId === first.attemptId)?.payload,
+		).toMatchObject({ assistantFinal: '{"assignment":"A","ok":true}' });
+
+		const second = await runtime.start(
+			{
+				commandId: "command-yield-b",
+				agentInstanceId: "agent-yield",
+				executionId: "execution-yield-b",
+				attemptId: "attempt-yield-b",
+				authorityGeneration: 1,
+				cwd,
+				input: "finish B",
+			},
+			{ ...profile, requireYieldTool: true, outputSchema: { type: "object" } },
+		);
+		await runtime.drain();
+		const secondEvents = (await runtime.store.pendingEvents()).filter(event => event.attemptId === second.attemptId);
+		expect(secondEvents.find(event => event.kind === "completed")).toBeUndefined();
+		expect(secondEvents.find(event => event.kind === "failed")?.payload).toMatchObject({
+			error: "required_yield_not_submitted",
+		});
+		expect(prompts).toHaveLength(4);
+		expect(prompts[2]).toContain("Call the yield tool now");
+		expect(prompts[3]).toContain("Call the yield tool now");
+		await runtime.dispose();
+	}, 60000);
+
+	it("does not accept aborted yield results as terminal success", async () => {
+		const mock = createMockModel({
+			responses: Array.from({ length: 3 }, (_, index) => ({
+				content: [
 					{
-						role: "assistant",
-						content: [
-							{
-								type: "toolCall",
-								name: "yield",
-								arguments: { result: { data: { schema: "example.v1", ok: true } } },
-							},
-						],
+						type: "toolCall" as const,
+						id: `yield-aborted-${index}`,
+						name: "yield",
+						arguments: { result: { error: `cannot finish ${index}` } },
 					},
 				],
-			});
-			return true;
+			})),
 		});
-		await runtime.start(
+		const { runtime, cwd } = await createRuntime(
+			(session, input) => session.prompt(input),
+			{},
+			{ model: mock.model },
+		);
+		const started = await runtime.start(
 			{
-				commandId: "command-yield",
-				agentInstanceId: "agent-yield",
-				executionId: "execution-yield",
-				attemptId: "attempt-yield",
+				commandId: "command-aborted-yield",
+				agentInstanceId: "agent-aborted-yield",
+				executionId: "execution-aborted-yield",
+				attemptId: "attempt-aborted-yield",
 				authorityGeneration: 1,
 				cwd,
 				input: "finish",
@@ -1875,10 +1959,11 @@ describe("EngineRuntime", () => {
 			{ ...profile, requireYieldTool: true, outputSchema: { type: "object" } },
 		);
 		await runtime.drain();
-		const completed = (await runtime.store.pendingEvents()).find(event => event.kind === "completed");
-		expect(completed?.payload?.assistantFinal).toBe('{"schema":"example.v1","ok":true}');
-		expect(prompts).toHaveLength(2);
-		expect(prompts[1]).toContain("Call the yield tool now");
+		const events = (await runtime.store.pendingEvents()).filter(event => event.attemptId === started.attemptId);
+		expect(events.find(event => event.kind === "completed")).toBeUndefined();
+		expect(events.find(event => event.kind === "failed")?.payload).toMatchObject({
+			error: "required_yield_not_submitted",
+		});
 		await runtime.dispose();
 	}, 60000);
 

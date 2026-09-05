@@ -465,7 +465,11 @@ describe("hosted child launch", () => {
 							status: "succeeded",
 							result: {
 								engine_event: {
-									payload: { assistantFinal: "done", transcriptRef: "history://child-1" },
+									payload: {
+										assistantFinal: "done",
+										transcriptRef: "history://Engine-child-transport",
+										outputTruncated: true,
+									},
 								},
 							},
 						},
@@ -489,6 +493,8 @@ describe("hosted child launch", () => {
 			agentInstanceId: "agent_5362f5f8e4885e2abf275ed90a5bc4f8",
 			status: "completed",
 			assistantFinal: "done",
+			transcriptRef: "history://Engine-child-transport",
+			outputTruncated: true,
 		});
 		expect(calls).toEqual(["grimoire_agent_engine_child_launch", "grimoire_job_get"]);
 	});

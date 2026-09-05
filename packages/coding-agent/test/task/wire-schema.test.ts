@@ -188,7 +188,9 @@ describe("Engine task profile dispatch", () => {
 					return {
 						agentInstanceId: "child-1",
 						status: "completed" as const,
-						assistantFinal: "done",
+						assistantFinal: `${"x".repeat(48_000)}\n[…truncated]`,
+						transcriptRef: "history://Engine-child-transport",
+						outputTruncated: true,
 					};
 				},
 			},
@@ -212,6 +214,14 @@ describe("Engine task profile dispatch", () => {
 			workStepId: "implement",
 			toolCallId: "call-1",
 		});
-		expect(result.details?.results[0]).toMatchObject({ id: "child-1", output: "done", exitCode: 0 });
+		expect(result.details?.results[0]).toMatchObject({
+			id: "child-1",
+			exitCode: 0,
+			truncated: true,
+		});
+		expect(result.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("Full transcript: history://Engine-child-transport"),
+		});
 	});
 });

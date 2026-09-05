@@ -14,6 +14,8 @@
 
 ### Fixed
 
+- Scoped Agent Engine terminal yields to successful tool results from the current Attempt.
+- Preserved truncated Agent Engine child-result metadata and exposed the full transcript link to the parent agent.
 - Removed raw reasoning and arbitrary tool inputs from public Agent Engine trace events while preserving bounded activity and outcome metadata.
 - Prevented Agent Engine transcript continuation when profile dependencies, authority, project, workspace, settings/context closure, or explicit continuation policy changed.
 - Kept Agent Engine event delivery alive until graceful shutdown durably interrupts and checkpoints active, paused, and approval-waiting Attempts.

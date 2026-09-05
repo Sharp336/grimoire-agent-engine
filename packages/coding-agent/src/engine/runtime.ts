@@ -82,20 +82,46 @@ function throwCollectedFailures(errors: unknown[], message: string): void {
 	if (errors.length > 0) throw new AggregateError(errors, message);
 }
 
-function terminalYield(messages: readonly { role: string; content?: unknown }[]): { found: boolean; data?: unknown } {
-	for (let i = messages.length - 1; i >= 0; i--) {
+function terminalYield(
+	messages: readonly {
+		role: string;
+		content?: unknown;
+		toolCallId?: unknown;
+		toolName?: unknown;
+		details?: unknown;
+		isError?: unknown;
+	}[],
+	startIndex: number,
+): { found: boolean; data?: unknown } {
+	const successfulResults = new Map<string, { data: unknown; messageIndex: number }>();
+	for (let i = Math.max(0, startIndex); i < messages.length; i++) {
+		const message = messages[i];
+		if (
+			message?.role !== "toolResult" ||
+			message.toolName !== "yield" ||
+			typeof message.toolCallId !== "string" ||
+			message.isError === true ||
+			!message.details ||
+			typeof message.details !== "object" ||
+			Array.isArray(message.details)
+		) {
+			continue;
+		}
+		const details = message.details as Record<string, unknown>;
+		if (details.status !== "success" || (Array.isArray(details.type) && details.type.length > 0)) continue;
+		if (!Object.hasOwn(details, "data")) continue;
+		successfulResults.set(message.toolCallId, { data: details.data, messageIndex: i });
+	}
+	for (let i = messages.length - 1; i >= Math.max(0, startIndex); i--) {
 		const message = messages[i];
 		if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
 		for (let j = message.content.length - 1; j >= 0; j--) {
 			const block = message.content[j];
 			if (!block || typeof block !== "object") continue;
-			const call = block as { type?: string; name?: string; arguments?: unknown };
-			if (call.type !== "toolCall" || call.name !== "yield") continue;
-			const args = call.arguments;
-			if (!args || typeof args !== "object" || Array.isArray(args)) return { found: false };
-			const result = (args as Record<string, unknown>).result;
-			if (!result || typeof result !== "object" || Array.isArray(result)) return { found: false };
-			return { found: "data" in result, data: (result as Record<string, unknown>).data };
+			const call = block as { type?: string; id?: unknown; name?: string };
+			if (call.type !== "toolCall" || call.name !== "yield" || typeof call.id !== "string") continue;
+			const result = successfulResults.get(call.id);
+			if (result && result.messageIndex > i) return { found: true, data: result.data };
 		}
 	}
 	return { found: false };
@@ -1677,30 +1703,36 @@ export class EngineRuntime {
 
 	async #runPrompt(binding: LiveBinding, input: string): Promise<void> {
 		const attemptId = binding.attemptId;
+		const attemptMessageStart = binding.session.messages.length;
 		try {
 			await this.#dispatchModel(binding, input);
 			for (let reminder = 0; reminder < 2 && binding.requireYieldTool; reminder++) {
 				await binding.pauseGate.waitUntilResumed();
-				if (terminalYield(binding.session.messages).found || binding.attemptState !== "running") break;
+				if (
+					terminalYield(binding.session.messages, attemptMessageStart).found ||
+					binding.attemptState !== "running"
+				)
+					break;
 				await this.#dispatchModel(
 					binding,
 					"Your previous response was not submitted. Call the yield tool now with the complete output object in result.data. Do not answer with text.",
 				);
 			}
 			await this.#waitForAttemptQuiescence(binding, attemptId);
-			if (binding.requireYieldTool && !terminalYield(binding.session.messages).found) {
+			if (binding.requireYieldTool && !terminalYield(binding.session.messages, attemptMessageStart).found) {
 				throw new Error("required_yield_not_submitted");
 			}
-			await this.#settleAttempt(binding, attemptId, "completed");
+			await this.#settleAttempt(binding, attemptId, attemptMessageStart, "completed");
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			await this.#settleAttempt(binding, attemptId, "failed", message);
+			await this.#settleAttempt(binding, attemptId, attemptMessageStart, "failed", message);
 		}
 	}
 
 	async #settleAttempt(
 		binding: LiveBinding,
 		attemptId: string,
+		attemptMessageStart: number,
 		state: "completed" | "failed",
 		cause?: string,
 	): Promise<void> {
@@ -1724,7 +1756,7 @@ export class EngineRuntime {
 								kind: state,
 								payload:
 									state === "completed"
-										? this.#completionPayload(binding)
+										? this.#completionPayload(binding, attemptMessageStart)
 										: { error: cause ?? "Unknown Engine failure" },
 							},
 						],
@@ -1774,8 +1806,8 @@ export class EngineRuntime {
 		}
 	}
 
-	#completionPayload(binding: LiveBinding): EngineCompletionPayload {
-		const yielded = terminalYield(binding.session.messages);
+	#completionPayload(binding: LiveBinding, attemptMessageStart: number): EngineCompletionPayload {
+		const yielded = terminalYield(binding.session.messages, attemptMessageStart);
 		const final = yielded.found ? JSON.stringify(yielded.data) : (binding.session.getLastAssistantText() ?? "");
 		const outputTruncated = final.length > MAX_ASSISTANT_FINAL_CHARS;
 		return {
