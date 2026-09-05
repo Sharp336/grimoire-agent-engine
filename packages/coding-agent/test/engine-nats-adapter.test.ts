@@ -460,9 +460,14 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			authorizeMessage: () => {},
 			resolveLaunchProfile: command => {
 				if (command.agentInstanceId === "agent-failed") {
+					const databaseError = new Error(
+						"Failed to open auth database at 'C:/Users/private/.omp/agent/agent.db': database is locked",
+					);
+					databaseError.name = "ConfigurationError";
 					throw new Error("No usable AvailableModelRoute in AgentProfile", {
 						cause: new Error(
 							'ProviderAccount credential token=do-not-expose Authorization: Bearer bearer-secret "access_token":"json-secret" sk-proj-0123456789abcdef is unavailable',
+							{ cause: databaseError },
 						),
 					});
 				}
@@ -531,7 +536,7 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 					detail: {
 						code: "launch_failed",
 						message:
-							'Agent session initialization failed: No usable AvailableModelRoute in AgentProfile: ProviderAccount credential token="[redacted]" Authorization: Bearer [redacted] "access_token":"[redacted]" [redacted credential] is unavailable',
+							'Agent session initialization failed: No usable AvailableModelRoute in AgentProfile: ProviderAccount credential token="[redacted]" Authorization: Bearer [redacted] "access_token":"[redacted]" [redacted credential] is unavailable: Failed to open auth database at \'[local auth database]\': database is locked',
 					},
 				},
 			});

@@ -839,7 +839,7 @@ function launchFailureMessage(error: unknown): string {
 }
 
 const SAFE_LAUNCH_FAILURE =
-	/^(?:AgentProfile|AvailableModelRoute|ProviderAccount|Provider quota|No usable AvailableModelRoute|The local OMP account|Engine mode|Engine session profile|selectedRouteRef|SQLite|SQLITE_|database (?:is|could not|cannot)|ENOENT|EACCES|EPERM)/i;
+	/^(?:AgentProfile|AvailableModelRoute|ProviderAccount|Provider quota|No usable AvailableModelRoute|The local OMP account|Failed to open auth database|Persistent credential block store|OAuth credential no longer exists|Engine mode|Engine session profile|selectedRouteRef|SQLite|SQLITE_|database (?:is|could not|cannot)|Cannot read private member|Receiver must be an instance|[^\s]+ is not a function|ENOENT|EACCES|EPERM)/i;
 
 function safeLaunchFailureDetail(error: Error): string {
 	const sanitized = sanitizeLaunchFailureDetail(error.message);
@@ -850,6 +850,7 @@ function safeLaunchFailureDetail(error: Error): string {
 
 function sanitizeLaunchFailureDetail(message: string): string {
 	return message
+		.replace(/[A-Za-z]:[\\/][^'"\r\n]*[\\/]agent\.db/gi, "[local auth database]")
 		.replace(/\b(Authorization\s*:\s*Bearer|Bearer)\s+[^\s,;]+/gi, "$1 [redacted]")
 		.replace(
 			/("?(?:access[_-]?token|refresh[_-]?token|api[_-]?key|token|secret|password|credential)"?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}]*)/gi,
