@@ -1485,7 +1485,9 @@ describe("EngineRuntime", () => {
 		const wakes: string[] = [];
 		expect((await restarted.listInbox(recipient))[0]).toMatchObject({ queueId: queued.queueId, revision: 2 });
 		expect(await restarted.readInbox(recipient, queued.queueId)).toMatchObject({ deliveryPayload: "wake later" });
-		await expect(restarted.listInbox({ ...recipient, authorityGeneration: 2 })).rejects.toThrow("target has changed");
+		await expect(restarted.listInbox({ ...recipient, authorityGeneration: 2 })).rejects.toMatchObject({
+			code: "stale_target",
+		});
 		await restarted.mutateInbox(recipient, {
 			mutationId: "edit-after-restart",
 			queueId: queued.queueId,
@@ -1534,7 +1536,11 @@ describe("EngineRuntime", () => {
 		await Bun.sleep(150);
 		expect(wakes).toHaveLength(1);
 		expect(resumed.sessionFile).toBe(recipient.sessionFile);
-		await expect(restarted.listInbox(recipient)).rejects.toThrow();
+		expect((await restarted.listInbox(recipient))[0]).toMatchObject({
+			queueId: "message-deferred-restart",
+			attemptId: "attempt-inbox-recipient-b",
+			revision: 5,
+		});
 		expect((await restarted.listInbox(resumed))[0]).toMatchObject({
 			queueId: "message-deferred-restart",
 			attemptId: "attempt-inbox-recipient-b",
@@ -1782,6 +1788,143 @@ describe("EngineRuntime", () => {
 			),
 		).rejects.toMatchObject({ code: "stale_target" });
 		await runtime.dispose();
+	}, 60_000);
+
+	it("allows only read-only inbox access through an exact historical target for the same session", async () => {
+		const { runtime, cwd, options } = await createRuntime();
+		const prior = await runtime.start(
+			{
+				commandId: "command-historical-inbox-a",
+				agentInstanceId: "agent-historical-inbox",
+				executionId: "execution-historical-inbox-a",
+				attemptId: "attempt-historical-inbox-a",
+				authorityGeneration: 1,
+				cwd,
+				input: "first",
+			},
+			profile,
+		);
+		await runtime.drain();
+		const queued = await runtime.enqueueInbox(prior, {
+			sourceEventId: "historical-inbox-source",
+			sourceType: "user",
+			body: "queued for the next Attempt",
+			createdAt: Date.now(),
+			wakeIntent: true,
+		});
+		let wake: EngineEvent | undefined;
+		for (let remaining = 50; !wake && remaining > 0; remaining--) {
+			wake = (await runtime.store.pendingEvents()).find(
+				event =>
+					event.kind === "inbox_changed" &&
+					event.payload?.action === "wake_due" &&
+					event.payload?.queueId === queued.item.queueId,
+			);
+			if (!wake) await Bun.sleep(25);
+		}
+		if (!wake) throw new Error("Historical inbox wake was not claimed");
+		const current = await runtime.start(
+			{
+				commandId: "command-historical-inbox-b",
+				agentInstanceId: prior.agentInstanceId,
+				executionId: "execution-historical-inbox-b",
+				attemptId: "attempt-historical-inbox-b",
+				authorityGeneration: 1,
+				cwd,
+				queueId: queued.item.queueId,
+				expectedRevision: Number(wake.payload?.revision),
+				mutationId: `wake:${queued.item.queueId}:${wake.payload?.revision}`,
+				expectedIntentRevision: prior.intentRevision!,
+			},
+			profile,
+		);
+		await runtime.drain();
+
+		expect(await runtime.listInbox(prior, true)).toContainEqual(
+			expect.objectContaining({
+				queueId: queued.item.queueId,
+				sourceEventId: "historical-inbox-source",
+				disposition: "acknowledged",
+				revision: 3,
+			}),
+		);
+		expect(await runtime.readInbox(prior, queued.item.queueId)).toMatchObject({
+			sourceEventId: "historical-inbox-source",
+			disposition: "acknowledged",
+			revision: 3,
+		});
+
+		await expect(
+			runtime.enqueueInbox(prior, {
+				sourceEventId: "historical-write-rejected",
+				sourceType: "user",
+				body: "must not enqueue",
+				createdAt: Date.now(),
+			}),
+		).rejects.toMatchObject({ code: "stale_target" });
+		await expect(
+			runtime.mutateInbox(prior, {
+				mutationId: "historical-mutation-rejected",
+				queueId: queued.item.queueId,
+				expectedRevision: 3,
+				op: "drop",
+			}),
+		).rejects.toMatchObject({ code: "stale_target" });
+		await expect(runtime.reorderInbox(prior, "historical-reorder-rejected", [], [])).rejects.toMatchObject({
+			code: "stale_target",
+		});
+
+		const tamperedTargets = [
+			{ target: { ...prior, agentInstanceId: "agent-historical-inbox-other" }, code: "agent_not_found" },
+			{ target: { ...prior, executionId: "execution-historical-inbox-other" }, code: "stale_target" },
+			{ target: { ...prior, attemptId: current.attemptId }, code: "stale_target" },
+			{ target: { ...prior, bindingId: "binding-historical-inbox-other" }, code: "stale_target" },
+			{ target: { ...prior, engineGeneration: prior.engineGeneration + 1 }, code: "stale_target" },
+			{ target: { ...prior, bindingGeneration: prior.bindingGeneration + 1 }, code: "stale_target" },
+			{ target: { ...prior, authorityGeneration: prior.authorityGeneration + 1 }, code: "stale_target" },
+		];
+		for (const { target, code } of tamperedTargets) {
+			await expect(runtime.listInbox(target, true)).rejects.toMatchObject({ code });
+		}
+
+		await runtime.dispose();
+		const restarted = await EngineRuntime.create(options);
+		expect(await restarted.listInbox(prior, true)).toContainEqual(
+			expect.objectContaining({
+				queueId: queued.item.queueId,
+				sourceEventId: "historical-inbox-source",
+				disposition: "acknowledged",
+			}),
+		);
+		expect(await restarted.readInbox(prior, queued.item.queueId)).toMatchObject({
+			sourceEventId: "historical-inbox-source",
+			disposition: "acknowledged",
+		});
+		await expect(
+			restarted.mutateInbox(prior, {
+				mutationId: "historical-retained-mutation-rejected",
+				queueId: queued.item.queueId,
+				expectedRevision: 3,
+				op: "drop",
+			}),
+		).rejects.toMatchObject({ code: "stale_target" });
+
+		const fresh = await restarted.start(
+			{
+				commandId: "command-historical-inbox-fresh",
+				agentInstanceId: prior.agentInstanceId,
+				executionId: "execution-historical-inbox-fresh",
+				attemptId: "attempt-historical-inbox-fresh",
+				authorityGeneration: 1,
+				cwd,
+				input: "fresh session",
+			},
+			{ ...profile, continuationPolicy: "fresh" },
+		);
+		await restarted.drain();
+		expect(fresh.sessionFile).not.toBe(current.sessionFile);
+		await expect(restarted.listInbox(prior, true)).rejects.toMatchObject({ code: "stale_target" });
+		await restarted.dispose();
 	}, 60_000);
 
 	it("reopens a transcript only across an exact continuation identity", async () => {

@@ -60,6 +60,7 @@ import {
 import { engineAgentId, engineRouteToken } from "./route";
 import {
 	EngineAttemptConflictError,
+	type EngineAttemptRecord,
 	EngineInboxConflictError,
 	type EngineModelEffectInput,
 	EngineStore,
@@ -76,6 +77,7 @@ const MAX_HISTORY_MESSAGE_CHARS = 48_000;
 const ASSISTANT_SNAPSHOT_GROWTH_CHARS = 192;
 const MAX_ASSISTANT_STREAMING_SNAPSHOTS = 256;
 const ENGINE_TURN_RETRY_DELAYS_MS = [3_000, 15_000, 30_000] as const;
+const TERMINAL_ATTEMPT_STATES = new Set<EngineAttemptState>(["completed", "cancelled", "failed", "interrupted"]);
 
 async function collectFailure(errors: unknown[], action: () => unknown | Promise<unknown>): Promise<void> {
 	try {
@@ -937,7 +939,7 @@ export class EngineRuntime {
 
 	listInbox(target: EngineTarget, includeTerminal = false): Promise<EngineInboxItem[]> {
 		return this.#inLane(target.agentInstanceId, async () => {
-			const retained = await this.#requireSessionTarget(target);
+			const retained = await this.#requireSessionReadTarget(target);
 			return await this.store.listInboxItems(retained.sessionId, includeTerminal);
 		});
 	}
@@ -955,7 +957,7 @@ export class EngineRuntime {
 
 	readInbox(target: EngineTarget, queueId: string): Promise<EngineInboxItem | undefined> {
 		return this.#inLane(target.agentInstanceId, async () => {
-			const retained = await this.#requireSessionTarget(target);
+			const retained = await this.#requireSessionReadTarget(target);
 			return await this.store.getInboxItem(retained.sessionId, queueId);
 		});
 	}
@@ -2564,6 +2566,65 @@ export class EngineRuntime {
 		}
 		if (!sessionId) throw new EngineTargetError("agent_not_found", "No retained session for this AgentInstance");
 		return { ...binding, sessionId };
+	}
+
+	async #requireSessionReadTarget(target: EngineTarget): Promise<EngineInboxTarget> {
+		try {
+			return await this.#requireSessionTarget(target);
+		} catch (error) {
+			if (!(error instanceof EngineTargetError) || (error.code !== "stale_target" && error.code !== "too_late")) {
+				throw error;
+			}
+		}
+
+		this.#throwIfDisposed();
+		const attempt = await this.store.getAttempt(target.attemptId);
+		if (!attempt || attempt.agent_instance_id !== target.agentInstanceId) {
+			throw new EngineTargetError("agent_not_found", `Unknown Attempt ${target.attemptId}`);
+		}
+		if (!this.#attemptMatchesTarget(attempt, target)) {
+			throw new EngineTargetError("stale_target", `Stale historical target for ${target.agentInstanceId}`);
+		}
+		if (!TERMINAL_ATTEMPT_STATES.has(attempt.state)) {
+			throw new EngineTargetError("too_late", `Attempt ${target.attemptId} is not terminal`);
+		}
+		const sessionId = attempt.transcript_session_id;
+		if (!sessionId)
+			throw new EngineTargetError("agent_not_found", `Attempt ${target.attemptId} has no durable session`);
+
+		const live = this.#bindings.get(target.agentInstanceId);
+		const binding = live ? this.#snapshot(live) : await this.store.getBinding(target.agentInstanceId);
+		if (!binding) throw new EngineTargetError("agent_not_found", `Unknown AgentInstance ${target.agentInstanceId}`);
+		if (binding.authorityGeneration !== target.authorityGeneration) {
+			throw new EngineTargetError("stale_target", `Stale authority for ${target.agentInstanceId}`);
+		}
+		let currentSessionId = live?.session.sessionId;
+		if (!currentSessionId) {
+			currentSessionId = (await this.store.getAttempt(binding.attemptId))?.transcript_session_id ?? undefined;
+			if (!currentSessionId && binding.sessionFile) {
+				const loaded = await loadSessionFile(binding.sessionFile, this.store.sessionStorage);
+				if (loaded.entries[0]?.type === "session") currentSessionId = loaded.entries[0].id;
+			}
+		}
+		if (currentSessionId !== sessionId) {
+			throw new EngineTargetError(
+				"stale_target",
+				`Historical Attempt ${target.attemptId} belongs to another session`,
+			);
+		}
+		return { ...target, sessionId };
+	}
+
+	#attemptMatchesTarget(attempt: EngineAttemptRecord, target: EngineTarget): boolean {
+		return (
+			attempt.agent_instance_id === target.agentInstanceId &&
+			attempt.execution_id === target.executionId &&
+			attempt.attempt_id === target.attemptId &&
+			attempt.binding_id === target.bindingId &&
+			Number(attempt.engine_generation) === target.engineGeneration &&
+			Number(attempt.binding_generation) === target.bindingGeneration &&
+			Number(attempt.authority_generation) === target.authorityGeneration
+		);
 	}
 
 	async #requireCancelableTarget(target: EngineTarget): Promise<LiveBinding | undefined> {
