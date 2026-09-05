@@ -1828,9 +1828,16 @@ export class EngineRuntime {
 				return undefined;
 			}
 		}
-		const loaded = await loadSessionFile(prior.sessionFile, this.store.sessionStorage).catch(() => undefined);
+		let loaded: Awaited<ReturnType<typeof loadSessionFile>>;
+		try {
+			loaded = await loadSessionFile(prior.sessionFile, this.store.sessionStorage);
+		} catch (error) {
+			throw new Error("Retained AgentSession conversation could not be loaded", { cause: error });
+		}
 		const header = loaded?.entries[0];
-		if (header?.type !== "session" || typeof header.cwd !== "string") return undefined;
+		if (header?.type !== "session" || typeof header.cwd !== "string") {
+			throw new Error("Retained AgentSession conversation is missing or invalid");
+		}
 		if ((await canonicalWorkspacePath(header.cwd)) !== (await canonicalWorkspacePath(request.cwd))) return undefined;
 		return header.id;
 	}

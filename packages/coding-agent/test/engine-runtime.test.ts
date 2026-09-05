@@ -1517,6 +1517,71 @@ describe("EngineRuntime", () => {
 		await restarted.dispose();
 	}, 60_000);
 
+	it("fails a profile change when its retained conversation cannot be read or validated", async () => {
+		const { runtime, cwd } = await createRuntime(async (session, input) => {
+			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
+			return true;
+		});
+		const first = await runtime.start(
+			{
+				commandId: "command-retained-read-a",
+				agentInstanceId: "agent-retained-read",
+				agentInstanceRef: "grimoire://tasks/project-a/task-a/agents/agent-retained-read",
+				executionId: "execution-retained-read-a",
+				attemptId: "attempt-retained-read-a",
+				authorityGeneration: 1,
+				cwd,
+				input: "Keep this context",
+			},
+			profile,
+		);
+		await runtime.drain();
+		const storage = runtime.store.sessionStorage;
+		const readText = storage.readText.bind(storage);
+		const failedRead = spyOn(storage, "readText").mockImplementation(async file => {
+			if (file === first.sessionFile) throw new Error("injected retained storage failure");
+			return await readText(file);
+		});
+		await expect(
+			runtime.start(
+				{
+					commandId: "command-retained-read-b",
+					agentInstanceId: first.agentInstanceId,
+					agentInstanceRef: "grimoire://tasks/project-a/task-a/agents/agent-retained-read",
+					executionId: "execution-retained-read-b",
+					attemptId: "attempt-retained-read-b",
+					authorityGeneration: 1,
+					cwd,
+					input: "Must not silently reset",
+				},
+				{ ...profile, systemPrompt: "changed profile" },
+			),
+		).rejects.toThrow("Retained AgentSession conversation could not be loaded");
+		failedRead.mockRestore();
+
+		const invalidRead = spyOn(storage, "readText").mockImplementation(async file => {
+			if (file === first.sessionFile) return '{"type":"not-a-session"}\n';
+			return await readText(file);
+		});
+		await expect(
+			runtime.start(
+				{
+					commandId: "command-retained-read-c",
+					agentInstanceId: first.agentInstanceId,
+					agentInstanceRef: "grimoire://tasks/project-a/task-a/agents/agent-retained-read",
+					executionId: "execution-retained-read-c",
+					attemptId: "attempt-retained-read-c",
+					authorityGeneration: 1,
+					cwd,
+					input: "Must reject invalid history",
+				},
+				{ ...profile, systemPrompt: "changed profile" },
+			),
+		).rejects.toThrow("Retained AgentSession conversation is missing or invalid");
+		invalidRead.mockRestore();
+		await runtime.dispose();
+	}, 60_000);
+
 	it("rebinds a deferred inbox item after restart and emits its wake once", async () => {
 		const { runtime, cwd, options } = await createRuntime();
 		await runtime.start(
@@ -2109,15 +2174,24 @@ describe("EngineRuntime", () => {
 			disposition: "pending",
 		});
 
+		const parentChanged = await start("parent", { parentAgentInstanceId: "parent-agent-b" }, secondProfile);
+		await runtime.drain();
+		expect(parentChanged.sessionFile).not.toBe(dependencyChanged.sessionFile);
+		expect(priorUserMessages.get("parent")).toEqual([]);
+
 		const projectRef = "grimoire://tasks/project-b/task-b/agents/agent-exact-continuation";
-		const projectChanged = await start("project", { agentInstanceRef: projectRef }, secondProfile);
+		const projectChanged = await start(
+			"project",
+			{ agentInstanceRef: projectRef, parentAgentInstanceId: "parent-agent-b" },
+			secondProfile,
+		);
 		await runtime.drain();
 		expect(projectChanged.sessionFile).not.toBe(dependencyChanged.sessionFile);
 		expect(priorUserMessages.get("project")).toEqual([]);
 
 		const authorityChanged = await start(
 			"authority",
-			{ agentInstanceRef: projectRef, authorityGeneration: 2 },
+			{ agentInstanceRef: projectRef, parentAgentInstanceId: "parent-agent-b", authorityGeneration: 2 },
 			secondProfile,
 		);
 		await runtime.drain();
@@ -2128,7 +2202,12 @@ describe("EngineRuntime", () => {
 		fs.mkdirSync(otherCwd);
 		const cwdChanged = await start(
 			"cwd",
-			{ agentInstanceRef: projectRef, authorityGeneration: 2, cwd: otherCwd },
+			{
+				agentInstanceRef: projectRef,
+				parentAgentInstanceId: "parent-agent-b",
+				authorityGeneration: 2,
+				cwd: otherCwd,
+			},
 			secondProfile,
 		);
 		await runtime.drain();
@@ -2137,13 +2216,23 @@ describe("EngineRuntime", () => {
 
 		const fresh = await start(
 			"fresh-a",
-			{ agentInstanceRef: projectRef, authorityGeneration: 2, cwd: otherCwd },
+			{
+				agentInstanceRef: projectRef,
+				parentAgentInstanceId: "parent-agent-b",
+				authorityGeneration: 2,
+				cwd: otherCwd,
+			},
 			{ ...secondProfile, continuationPolicy: "fresh" },
 		);
 		await runtime.drain();
 		const freshAgain = await start(
 			"fresh-b",
-			{ agentInstanceRef: projectRef, authorityGeneration: 2, cwd: otherCwd },
+			{
+				agentInstanceRef: projectRef,
+				parentAgentInstanceId: "parent-agent-b",
+				authorityGeneration: 2,
+				cwd: otherCwd,
+			},
 			{ ...secondProfile, continuationPolicy: "fresh" },
 		);
 		await runtime.drain();
