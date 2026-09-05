@@ -856,15 +856,15 @@ export class EngineRuntime {
 
 	listInbox(target: EngineTarget, includeTerminal = false): Promise<EngineInboxItem[]> {
 		return this.#inLane(target.agentInstanceId, async () => {
-			const binding = this.#requireTarget(target);
-			return await this.store.listInboxItems(binding.session.sessionId, includeTerminal);
+			const retained = await this.#requireSessionTarget(target);
+			return await this.store.listInboxItems(retained.sessionId, includeTerminal);
 		});
 	}
 
 	enqueueInbox(target: EngineTarget, source: EngineInboxSource): Promise<{ item: EngineInboxItem; created: boolean }> {
 		return this.#inLane(target.agentInstanceId, async () => {
-			const binding = this.#requireTarget(target);
-			const queued = await this.store.enqueueInboxItem(this.#inboxTarget(binding), source);
+			const retained = await this.#requireSessionTarget(target);
+			const queued = await this.store.enqueueInboxItem(retained, source);
 			if (queued.created) {
 				this.#signalInboxWake();
 			}
@@ -874,13 +874,24 @@ export class EngineRuntime {
 
 	readInbox(target: EngineTarget, queueId: string): Promise<EngineInboxItem | undefined> {
 		return this.#inLane(target.agentInstanceId, async () => {
-			const binding = this.#requireTarget(target);
-			return await this.store.getInboxItem(binding.session.sessionId, queueId);
+			const retained = await this.#requireSessionTarget(target);
+			return await this.store.getInboxItem(retained.sessionId, queueId);
 		});
 	}
 
 	sessionContext(target: EngineTarget): Promise<Record<string, unknown>> {
 		return this.#inLane(target.agentInstanceId, async () => {
+			if (!this.#bindings.has(target.agentInstanceId)) {
+				const retained = await this.#requireSessionTarget(target);
+				return {
+					schema: "grimoire.engine.session_context.v1",
+					status: "not_ready",
+					attemptId: retained.attemptId,
+					sessionId: retained.sessionId,
+					context: null,
+					reason: "session_not_active",
+				};
+			}
 			const binding = this.#requireTarget(target);
 			const model = binding.session.model;
 			return {
@@ -896,6 +907,17 @@ export class EngineRuntime {
 
 	sessionUsage(target: EngineTarget): Promise<Record<string, unknown>> {
 		return this.#inLane(target.agentInstanceId, async () => {
+			if (!this.#bindings.has(target.agentInstanceId)) {
+				const retained = await this.#requireSessionTarget(target);
+				return {
+					schema: "grimoire.engine.session_usage.v1",
+					status: "not_ready",
+					attemptId: retained.attemptId,
+					sessionId: retained.sessionId,
+					local: null,
+					provider: { status: "unavailable", reason: "session_not_active" },
+				};
+			}
 			const binding = this.#requireTarget(target);
 			const model = binding.session.model;
 			const local = binding.session.getSessionStats();
@@ -1088,8 +1110,8 @@ export class EngineRuntime {
 
 	mutateInbox(target: EngineTarget, mutation: EngineInboxMutation): Promise<EngineInboxItem> {
 		return this.#inLane(target.agentInstanceId, async () => {
-			const binding = this.#requireTarget(target);
-			const item = await this.store.mutateInboxItem(this.#inboxTarget(binding), mutation);
+			const retained = await this.#requireSessionTarget(target);
+			const item = await this.store.mutateInboxItem(retained, mutation);
 			if (mutation.op === "defer") this.#signalInboxWake();
 			return item;
 		});
@@ -1102,8 +1124,8 @@ export class EngineRuntime {
 		desiredOrder: readonly string[],
 	): Promise<EngineInboxItem[]> {
 		return this.#inLane(target.agentInstanceId, async () => {
-			const binding = this.#requireTarget(target);
-			return await this.store.reorderInboxItems(this.#inboxTarget(binding), mutationId, expectedOrder, desiredOrder);
+			const retained = await this.#requireSessionTarget(target);
+			return await this.store.reorderInboxItems(retained, mutationId, expectedOrder, desiredOrder);
 		});
 	}
 
@@ -2232,6 +2254,31 @@ export class EngineRuntime {
 			throw new EngineTargetError("too_late", `Attempt ${target.attemptId} is no longer active`);
 		}
 		return binding;
+	}
+
+	async #requireSessionTarget(target: EngineTarget): Promise<EngineInboxTarget> {
+		if (this.#bindings.has(target.agentInstanceId)) return this.#inboxTarget(this.#requireTarget(target));
+		this.#throwIfDisposed();
+		const binding = await this.store.getBinding(target.agentInstanceId);
+		if (!binding?.sessionFile)
+			throw new EngineTargetError("agent_not_found", "No retained session for this AgentInstance");
+		if (
+			binding.bindingId !== target.bindingId ||
+			binding.engineGeneration !== target.engineGeneration ||
+			binding.bindingGeneration !== target.bindingGeneration ||
+			binding.executionId !== target.executionId ||
+			binding.attemptId !== target.attemptId ||
+			binding.authorityGeneration !== target.authorityGeneration
+		) {
+			throw new EngineTargetError("stale_target", "The retained session target has changed");
+		}
+		let sessionId = (await this.store.getAttempt(target.attemptId))?.transcript_session_id;
+		if (!sessionId) {
+			const loaded = await loadSessionFile(binding.sessionFile, this.store.sessionStorage);
+			if (loaded.entries[0]?.type === "session") sessionId = loaded.entries[0].id;
+		}
+		if (!sessionId) throw new EngineTargetError("agent_not_found", "No retained session for this AgentInstance");
+		return { ...binding, sessionId };
 	}
 
 	async #requireCancelableTarget(target: EngineTarget): Promise<LiveBinding | undefined> {

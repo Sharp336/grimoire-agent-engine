@@ -1313,6 +1313,23 @@ describe("EngineRuntime", () => {
 
 		const restarted = await EngineRuntime.create(options);
 		const wakes: string[] = [];
+		expect((await restarted.listInbox(recipient))[0]).toMatchObject({ queueId: queued.queueId, revision: 2 });
+		expect(await restarted.readInbox(recipient, queued.queueId)).toMatchObject({ deliveryPayload: "wake later" });
+		await expect(restarted.listInbox({ ...recipient, authorityGeneration: 2 })).rejects.toThrow("target has changed");
+		await restarted.mutateInbox(recipient, {
+			mutationId: "edit-after-restart",
+			queueId: queued.queueId,
+			expectedRevision: 2,
+			op: "edit",
+			value: "edited before resuming",
+		});
+		expect(await restarted.sessionContext(recipient)).toMatchObject({ status: "not_ready", context: null });
+		expect(await restarted.sessionUsage(recipient)).toMatchObject({
+			status: "not_ready",
+			local: null,
+			provider: { status: "unavailable" },
+		});
+		expect(restarted.getBinding(recipient.agentInstanceId)).toBeUndefined();
 		restarted.subscribe(event => {
 			if (event.kind === "inbox_changed" && event.payload?.action === "wake_due")
 				wakes.push(event.eventId.toString());
@@ -1333,11 +1350,13 @@ describe("EngineRuntime", () => {
 		await Bun.sleep(150);
 		expect(wakes).toHaveLength(1);
 		expect(resumed.sessionFile).toBe(recipient.sessionFile);
+		await expect(restarted.listInbox(recipient)).rejects.toThrow();
 		expect((await restarted.listInbox(resumed))[0]).toMatchObject({
 			queueId: "message-deferred-restart",
 			attemptId: "attempt-inbox-recipient-b",
 			wakeIntent: true,
-			revision: 3,
+			revision: 4,
+			deliveryPayload: "edited before resuming",
 		});
 		await restarted.dispose();
 	}, 60_000);
