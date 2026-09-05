@@ -10,6 +10,24 @@ import {
 } from "../src/session/provider-retry-budget";
 
 describe("Engine provider retry budget", () => {
+	it("resets after every successful logical request across more than four tool turns", async () => {
+		let physicalRequests = 0;
+		const hook = createProviderRetryBudgetHook();
+		const model = { provider: "openai-codex", id: "gpt-5.5" } as Model;
+
+		for (let toolTurn = 0; toolTurn < 6; toolTurn++) {
+			const fetch = withProviderRetryBudget(4, () =>
+				hook.wrapFetch(model, async () => {
+					physicalRequests += 1;
+					return new Response(`turn-${toolTurn}`);
+				}),
+			);
+			expect(await (await fetch("https://example.invalid/provider")).text()).toBe(`turn-${toolTurn}`);
+		}
+
+		expect(physicalRequests).toBe(6);
+	});
+
 	it("admits and sends at most four physical requests across stream reopens", async () => {
 		let admissions = 0;
 		let physicalRequests = 0;
@@ -49,12 +67,11 @@ describe("Engine provider retry budget", () => {
 				return await fetch(input, init);
 			},
 		});
-		const fetch = hook.wrapFetch({ provider: "anthropic", id: "claude-test" } as Model, async () => {
-			physicalRequests += 1;
-			return new Response("busy", { status: 429, headers: { "retry-after-ms": "12000" } });
-		});
-
 		await withProviderRetryBudget(4, async () => {
+			const fetch = hook.wrapFetch({ provider: "anthropic", id: "claude-test" } as Model, async () => {
+				physicalRequests += 1;
+				return new Response("busy", { status: 429, headers: { "retry-after-ms": "12000" } });
+			});
 			const first = await fetch("https://example.invalid/provider").catch(error => error);
 			expect(first).toMatchObject({ retryable: false });
 			expect(String(first)).toContain(`${PROVIDER_RETRY_DEFERRED_CODE}: HTTP 429`);
@@ -67,16 +84,15 @@ describe("Engine provider retry budget", () => {
 
 	it("keeps account-policy responses outside transient recovery", async () => {
 		const hook = createProviderRetryBudgetHook();
-		const fetch = hook.wrapFetch(
-			{ provider: "openai-codex", id: "gpt-5.5", api: "openai-codex-responses" } as Model,
-			async () =>
-				new Response(
-					'{"error":{"message":"The \'gpt-5.5\' model is not supported when using Codex with a ChatGPT account."}}',
-					{ status: 503 },
-				),
-		);
-
 		await withProviderRetryBudget(4, async () => {
+			const fetch = hook.wrapFetch(
+				{ provider: "openai-codex", id: "gpt-5.5", api: "openai-codex-responses" } as Model,
+				async () =>
+					new Response(
+						'{"error":{"message":"The \'gpt-5.5\' model is not supported when using Codex with a ChatGPT account."}}',
+						{ status: 503 },
+					),
+			);
 			const error = await fetch("https://example.invalid/provider").catch(reason => reason);
 			expect(error).toMatchObject({ retryable: false });
 			expect(String(error)).toContain(PROVIDER_RETRY_PERMANENT_CODE);

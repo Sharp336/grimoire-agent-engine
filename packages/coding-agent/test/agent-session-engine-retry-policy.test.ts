@@ -1,7 +1,8 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { type } from "@oh-my-pi/omptype";
+import { Agent, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -151,7 +152,7 @@ describe("Engine bounded turn retry policy", () => {
 		expect(session.getLastAssistantMessage()?.errorMessage).toContain("Retry budget exhausted after 3 retries");
 	});
 
-	it("shares the four-request physical budget across scheduled continuations", async () => {
+	it("keeps scheduled recovery to four physical calls with a fresh per-request budget", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled Anthropic model");
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
@@ -176,7 +177,8 @@ describe("Engine bounded turn retry policy", () => {
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
-			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+			streamFn: (requestedModel, context, options) =>
+				withProviderRetryBudget(4, () => mock.stream(requestedModel, context, options)),
 		});
 		const session = new AgentSession({
 			agent,
@@ -191,12 +193,65 @@ describe("Engine bounded turn retry policy", () => {
 			waits.push(Number(delay));
 		});
 
-		await withProviderRetryBudget(4, () => session.prompt("physical budget"));
+		await session.prompt("physical budget");
 		await session.waitForIdle();
 
 		expect(physicalRequests).toBe(4);
 		expect(waits.filter(delay => delay >= 3_000)).toEqual([3_000, 15_000, 30_000]);
 		expect(session.getLastAssistantMessage()?.errorMessage).toContain("Retry budget exhausted after 3 retries");
+	});
+
+	it("resets the physical budget across more than four successful tool turns", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic model");
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const noopTool: AgentTool = {
+			name: "noop",
+			label: "No-op",
+			description: "Completes a test tool turn",
+			parameters: type({}),
+			execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+		};
+		const responses: MockResponse[] = Array.from({ length: 6 }, (_, index) => ({
+			content: [{ type: "toolCall" as const, id: `noop-${index}`, name: "noop", arguments: {} }],
+			stopReason: "toolUse" as const,
+		}));
+		responses.push({ content: ["done"], stopReason: "stop" });
+		const mock = createMockModel({ responses });
+		const hook = createProviderRetryBudgetHook();
+		const physicalCalls: Promise<Response>[] = [];
+		let physicalRequests = 0;
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [noopTool], messages: [] },
+			streamFn: (requestedModel, context, options) =>
+				withProviderRetryBudget(4, () => {
+					const fetch = hook.wrapFetch(requestedModel, async () => {
+						physicalRequests += 1;
+						return new Response("ok");
+					});
+					physicalCalls.push(fetch("https://example.invalid/provider"));
+					return mock.stream(requestedModel, context, options);
+				}),
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false, "retry.modelFallback": false });
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			turnRetryPolicy: ENGINE_POLICY,
+		});
+		sessions.push(session);
+
+		await session.prompt("run six tools");
+		await session.waitForIdle();
+		await Promise.all(physicalCalls);
+
+		expect(mock.calls).toHaveLength(7);
+		expect(physicalRequests).toBe(7);
+		expect(session.getLastAssistantText()).toBe("done");
 	});
 
 	it("treats Retry-After as a lower bound beyond the interactive delay ceiling", async () => {

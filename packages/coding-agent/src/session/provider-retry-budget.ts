@@ -61,7 +61,7 @@ function permanentResponseFailure(model: Model, response: Response, body: string
 	return undefined;
 }
 
-/** Share one physical-request budget across a complete Engine model-call saga. */
+/** Share one physical-request budget across one logical provider request. */
 export function withProviderRetryBudget<T>(maxAttempts: number, callback: () => T): T {
 	if (!Number.isSafeInteger(maxAttempts) || maxAttempts < 1) {
 		throw new Error("Provider retry maxAttempts must be a positive safe integer");
@@ -76,9 +76,9 @@ export function withProviderRetryBudget<T>(maxAttempts: number, callback: () => 
 export function createProviderRetryBudgetHook(inner?: ProviderRequestHook): ProviderRequestHook {
 	return {
 		wrapFetch(model: Model, fetch: Fetch): Fetch {
+			const state = providerRetryBudget.getStore();
 			let fetchedInThisStream = false;
 			const budgetedFetch: Fetch = async (input, init) => {
-				const state = providerRetryBudget.getStore();
 				if (!state) return await fetch(input, init);
 				if (init?.signal?.aborted) throw abortError();
 				if (fetchedInThisStream) {
@@ -118,7 +118,6 @@ export function createProviderRetryBudgetHook(inner?: ProviderRequestHook): Prov
 			};
 			const admittedFetch = inner?.wrapFetch(model, budgetedFetch) ?? budgetedFetch;
 			return async (input, init) => {
-				const state = providerRetryBudget.getStore();
 				if (state && fetchedInThisStream) throw deferredError("a nested provider retry was suppressed");
 				if (state && state.attempts >= state.maxAttempts) {
 					throw new EngineProviderRetryError(
