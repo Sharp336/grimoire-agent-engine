@@ -153,7 +153,6 @@ export class EngineProfileResolver {
 	}
 
 	async resolve(launch: EngineLaunchProfile, cwd: string): Promise<ResolvedEngineSessionProfile> {
-		const disabledProviders = launch.disabledCapabilityProviders ?? [];
 		const profileRef = requiredRef(launch.launchProfileRef, "launchProfileRef");
 		const cachedProfile = await this.#read(profileRef, "grimoire.agent_profile.v1");
 		if (cachedProfile.content_hash !== launch.profileDigest) {
@@ -169,27 +168,12 @@ export class EngineProfileResolver {
 			throw new Error("AgentProfile must contain at least one route");
 		}
 		const spawnPolicy = resolveSpawnPolicy(profile, launch);
-		const settings = await Settings.loadReadOnly({
-			cwd,
-			overrides: {
-				disabledProviders,
-				"lsp.shared": launch.lspShared ?? false,
-				"task.maxRecursionDepth": spawnPolicy.maxSpawnDepth,
-			},
-		});
 		const candidates = await this.#routeCandidates(profile, launch.selectedRouteRef);
 		const childProfiles = await this.#childProfiles(spawnPolicy.childProfileRefs);
 		let lastError: unknown;
 		for (const routeRef of candidates) {
 			try {
-				return await this.#resolveRoute(
-					profile,
-					routeRef,
-					launch,
-					childProfiles,
-					settings,
-					spawnPolicy.maxSpawnDepth,
-				);
+				return await this.#resolveRoute(profile, routeRef, launch, childProfiles, cwd, spawnPolicy.maxSpawnDepth);
 			} catch (error) {
 				lastError = error;
 			}
@@ -232,7 +216,7 @@ export class EngineProfileResolver {
 		routeRef: string,
 		launch: EngineLaunchProfile,
 		childProfiles: EngineChildProfile[],
-		settings: Settings,
+		cwd: string,
 		maxSpawnDepth: number,
 	): Promise<ResolvedEngineSessionProfile> {
 		const route = parseJson<AvailableModelRoute>(
@@ -283,6 +267,15 @@ export class EngineProfileResolver {
 		if (admissionIdentity && !this.providerAdmissionClient) {
 			throw new Error("Provider quota admission is unavailable");
 		}
+		const settings = await Settings.loadReadOnly({
+			cwd,
+			overrides: {
+				disabledProviders: launch.disabledCapabilityProviders ?? [],
+				"lsp.shared": launch.lspShared ?? false,
+				"task.maxRecursionDepth": maxSpawnDepth,
+				...(admissionIdentity ? { "providers.openaiWebsockets": "off" } : {}),
+			},
+		});
 		const accountDir = path.join(this.credentialRoot, accountRef.slice(5));
 		await fs.mkdir(accountDir, { recursive: true });
 		let authStorage: AuthStorage;
@@ -342,7 +335,6 @@ export class EngineProfileResolver {
 				cacheDbPath: path.join(accountDir, "models.sqlite"),
 			});
 			const model = buildModel(toModelSpec(route, account)) as Model;
-			if (admissionIdentity) settings.override("providers.openaiWebsockets", "off");
 			const profileRestricted = profile.tools?.mode === "allowlist";
 			const launchRestricted = launch.restrictToolNames === true;
 			const profileNames = uniqueStrings(profile.tools?.names ?? []);

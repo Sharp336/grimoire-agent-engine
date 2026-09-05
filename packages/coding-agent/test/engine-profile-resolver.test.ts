@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { EngineProfileResolver } from "../src/engine/profile-resolver";
+import { ProviderAdmissionClient } from "../src/engine/provider-admission";
 import { AuthStorage } from "../src/session/auth-storage";
 
 const refs = {
@@ -318,13 +319,20 @@ describe("EngineProfileResolver", () => {
 			schema: "grimoire.provider_account.v1",
 			status: "active",
 			providerId: "openai-codex",
+			providerKind: "openai_codex_subscription",
+			accountBindingId: "account-b",
 			api: "openai-codex-responses",
 			baseUrl: "https://chatgpt.com/backend-api",
 			trusted: true,
 			credentialBinding: { source: "local_omp", accountId: "account-b" },
 		});
 
-		const resolver = new EngineProfileResolver(cache, path.join(root, "credentials"), localDb);
+		const resolver = new EngineProfileResolver(
+			cache,
+			path.join(root, "credentials"),
+			localDb,
+			new ProviderAdmissionClient("http://127.0.0.1/admission", "test-token"),
+		);
 		const resolved = await resolver.resolve(
 			{ spawns: "", profileDigest: hash(profileRef), launchProfileRef: profileRef },
 			root,
@@ -334,6 +342,7 @@ describe("EngineProfileResolver", () => {
 				"selected-account-token",
 			);
 			expect(resolved.options.authStorage?.listStoredCredentials("openai-codex")).toHaveLength(1);
+			expect(resolved.options.settings?.get("providers.openaiWebsockets")).toBe("off");
 		} finally {
 			resolved.dispose();
 		}
