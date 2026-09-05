@@ -58,6 +58,8 @@ export interface EngineStartRequest {
 	authorityGeneration: number;
 	cwd: string;
 	input: string;
+	/** Required to clear a durable manual hold for an explicit user send. */
+	expectedIntentRevision?: number;
 }
 
 export interface EngineTarget {
@@ -72,12 +74,17 @@ export interface EngineTarget {
 
 export interface EngineSteerRequest extends EngineTarget {
 	commandId: string;
-	message: string;
+	message?: string;
+	queueId?: string;
+	expectedRevision?: number;
+	mutationId?: string;
+	expectedIntentRevision?: number;
 }
 
 export interface EngineCancelRequest extends EngineTarget {
 	commandId: string;
 	reason?: string;
+	expectedIntentRevision?: number;
 }
 
 export type EngineControlInitiator =
@@ -87,6 +94,7 @@ export type EngineControlInitiator =
 export interface EngineControlRequest extends EngineTarget {
 	commandId: string;
 	initiator: EngineControlInitiator;
+	expectedIntentRevision?: number;
 }
 
 export interface EngineToolApprovalDecision extends EngineTarget {
@@ -169,10 +177,21 @@ export interface EngineBindingSnapshot extends EngineTarget {
 	sessionFile?: string;
 	profileDigest: string;
 	state: EngineBindingState;
+	manualHold?: boolean;
+	intentRevision?: number;
+	intentCommandId?: string;
 }
 
 export interface EngineStartResult extends EngineBindingSnapshot {
 	duplicate: boolean;
+}
+
+export interface EngineControlResult extends Record<string, unknown> {
+	phase: "applied" | "consumed";
+	manualHold: boolean;
+	intentRevision: number;
+	queueId?: string;
+	queueRevision?: number;
 }
 
 export interface EngineReconcileResult {
@@ -269,5 +288,11 @@ export function validateStartRequest(request: EngineStartRequest): void {
 	}
 	if (!Number.isSafeInteger(request.authorityGeneration) || request.authorityGeneration < 0) {
 		throw new EngineTargetError("invalid_request", "authorityGeneration must be a non-negative safe integer");
+	}
+	if (
+		request.expectedIntentRevision !== undefined &&
+		(!Number.isSafeInteger(request.expectedIntentRevision) || request.expectedIntentRevision < 0)
+	) {
+		throw new EngineTargetError("invalid_request", "expectedIntentRevision must be a non-negative safe integer");
 	}
 }

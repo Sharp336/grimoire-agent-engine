@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- Kept Agent Engine manual pause and Stop intent durable across restart, with revision-fenced Send, Resume, and queued-item Steer as the only operations that release held inbox delivery.
 - Removed raw reasoning and arbitrary tool inputs from public Agent Engine trace events while preserving bounded activity and outcome metadata.
 - Prevented Agent Engine transcript continuation when profile dependencies, authority, project, workspace, settings/context closure, or explicit continuation policy changed.
 - Kept Agent Engine event delivery alive until graceful shutdown durably interrupts and checkpoints active, paused, and approval-waiting Attempts.

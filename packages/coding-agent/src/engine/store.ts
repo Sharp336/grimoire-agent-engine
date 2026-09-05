@@ -73,6 +73,9 @@ interface BindingRow {
 	engine_generation: number;
 	binding_generation: number;
 	authority_generation: number;
+	manual_hold: number;
+	intent_revision: number;
+	intent_command_id: string | null;
 }
 
 export interface EngineAttemptRow {
@@ -531,6 +534,15 @@ const SCHEMA_MIGRATIONS = [
 	{ version: 6, statements: [], requiredColumns: EFFECT_KIND_COLUMN },
 	{ version: 7, statements: EVENT_DELIVERY_SCHEMA, requiredColumns: [] },
 	{ version: 8, statements: AGENT_INBOX_SCHEMA, requiredColumns: [] },
+	{
+		version: 9,
+		statements: [],
+		requiredColumns: [
+			["engine_runtime_bindings", "manual_hold", "INTEGER NOT NULL DEFAULT 0 CHECK(manual_hold IN (0, 1))"],
+			["engine_runtime_bindings", "intent_revision", "INTEGER NOT NULL DEFAULT 0"],
+			["engine_runtime_bindings", "intent_command_id", "TEXT"],
+		] as const,
+	},
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;
@@ -750,38 +762,7 @@ export class EngineStore {
 			throw new EngineInboxConflictError("Inbox mutationId and queueId must be non-empty");
 		}
 		return await this.#transaction(async sql => {
-			const row = await this.#inboxItem(sql, target.sessionId, mutation.queueId);
-			if (!row) throw new EngineInboxConflictError(`Inbox item ${mutation.queueId} does not exist`);
-			this.#assertInboxTarget(row, target);
-			const item = inboxItemFromRow(row);
-			const desired = this.#applyInboxMutation(item, mutation);
-			if (desired === item) return item;
-			if (item.disposition !== "pending") {
-				throw new EngineInboxConflictError(`Inbox item ${mutation.queueId} is already ${item.disposition}`);
-			}
-			if (mutation.expectedRevision !== item.revision) {
-				throw new EngineInboxConflictError(
-					`Inbox item ${mutation.queueId} revision ${item.revision} does not match ${mutation.expectedRevision}`,
-				);
-			}
-			const revision = item.revision + 1;
-			const now = Date.now();
-			await sql.unsafe(
-				`UPDATE engine_inbox_items SET delivery_payload=?, annotation=?, deliver_at=?, wake_intent=?, disposition=?, revision=?, updated_at=?
-				 WHERE queue_id=?`,
-				[
-					desired.deliveryPayload,
-					desired.annotation ?? null,
-					desired.deliverAt ?? null,
-					desired.wakeIntent ? 1 : 0,
-					desired.disposition,
-					revision,
-					now,
-					mutation.queueId,
-				],
-			);
-			await this.#appendInboxEvent(sql, target, mutation.mutationId, mutation.op, revision, mutation.queueId);
-			return { ...desired, revision, updatedAt: now };
+			return (await this.#mutateInboxItem(sql, target, mutation)).item;
 		});
 	}
 
@@ -828,9 +809,10 @@ export class EngineStore {
 
 	async nextInboxWakeAt(engineGeneration: number): Promise<number | undefined> {
 		const rows = (await this.#client.unsafe(
-			`SELECT MIN(deliver_at) AS deliver_at FROM engine_inbox_items
-			 WHERE engine_generation=? AND disposition='pending' AND wake_intent=1
-			 AND wake_delivered_at IS NULL AND deliver_at IS NOT NULL`,
+			`SELECT MIN(i.deliver_at) AS deliver_at FROM engine_inbox_items i
+			 JOIN engine_runtime_bindings b ON b.agent_instance_id=i.agent_instance_id
+			 WHERE i.engine_generation=? AND i.disposition='pending' AND i.wake_intent=1
+			 AND i.wake_delivered_at IS NULL AND i.deliver_at IS NOT NULL AND b.manual_hold=0`,
 			[engineGeneration],
 		)) as Array<{ deliver_at: number | null }>;
 		return rows[0]?.deliver_at === null || rows[0]?.deliver_at === undefined ? undefined : Number(rows[0].deliver_at);
@@ -839,7 +821,8 @@ export class EngineStore {
 	async claimDueInboxWakes(engineGeneration: number, now = Date.now()): Promise<EngineEvent[]> {
 		return await this.#transaction(async sql => {
 			const rows = (await sql.unsafe(
-				`${this.#inboxSelect()} WHERE i.engine_generation=? AND i.disposition='pending'
+				`${this.#inboxSelect()} JOIN engine_runtime_bindings b ON b.agent_instance_id=i.agent_instance_id
+				 WHERE i.engine_generation=? AND i.disposition='pending' AND b.manual_hold=0
 				 AND i.wake_intent=1 AND i.wake_delivered_at IS NULL AND i.deliver_at<=?
 				 ORDER BY i.deliver_at, i.position, i.queue_id LIMIT 100`,
 				[engineGeneration, now],
@@ -951,7 +934,8 @@ export class EngineStore {
 	async getBinding(agentInstanceId: string): Promise<EngineBindingSnapshot | undefined> {
 		const rows = (await this.#client.unsafe(
 			`SELECT binding_id, command_id, agent_instance_id, execution_id, attempt_id, engine_agent_id, session_file,
-			 profile_digest, state, engine_generation, binding_generation, authority_generation
+			 profile_digest, state, engine_generation, binding_generation, authority_generation,
+			 manual_hold, intent_revision, intent_command_id
 			 FROM engine_runtime_bindings WHERE agent_instance_id = ?`,
 			[agentInstanceId],
 		)) as BindingRow[];
@@ -970,6 +954,9 @@ export class EngineStore {
 			engineGeneration: Number(row.engine_generation),
 			bindingGeneration: Number(row.binding_generation),
 			authorityGeneration: Number(row.authority_generation),
+			manualHold: Boolean(row.manual_hold),
+			intentRevision: Number(row.intent_revision),
+			...(row.intent_command_id ? { intentCommandId: row.intent_command_id } : {}),
 		};
 	}
 
@@ -1027,10 +1014,12 @@ export class EngineStore {
 		options: {
 			cause?: string;
 			settleCommandId?: string;
+			settleCommandReceipt?: EngineCommandReceipt;
 			expectedStates?: readonly EngineAttemptState[];
 			requireNew?: boolean;
 			transcriptCheckpoint?: SessionDurabilityCheckpoint;
 			inboxSessionId?: string;
+			inboxMutation?: EngineInboxMutation;
 		} = {},
 	): Promise<EngineEvent[]> {
 		return await this.#transaction(async sql => {
@@ -1087,8 +1076,21 @@ export class EngineStore {
 					}),
 				);
 			}
+			if (options.inboxMutation) {
+				if (!options.inboxSessionId) throw new Error("Inbox mutation requires its session identity");
+				const result = await this.#mutateInboxItem(
+					sql,
+					{ ...binding, sessionId: options.inboxSessionId },
+					options.inboxMutation,
+				);
+				if (result.event) committed.push(result.event);
+			}
 			if (options.settleCommandId) {
-				await this.#settleAdmittedCommand(sql, options.settleCommandId, { outcome: "applied" });
+				await this.#settleAdmittedCommand(
+					sql,
+					options.settleCommandId,
+					options.settleCommandReceipt ?? { outcome: "applied" },
+				);
 			}
 			return committed;
 		});
@@ -1623,6 +1625,52 @@ export class EngineStore {
 		return rows[0];
 	}
 
+	async #mutateInboxItem(
+		sql: SqlClient,
+		target: EngineInboxTarget,
+		mutation: EngineInboxMutation,
+	): Promise<{ item: EngineInboxItem; event?: EngineEvent }> {
+		const row = await this.#inboxItem(sql, target.sessionId, mutation.queueId);
+		if (!row) throw new EngineInboxConflictError(`Inbox item ${mutation.queueId} does not exist`);
+		this.#assertInboxTarget(row, target);
+		const item = inboxItemFromRow(row);
+		const desired = this.#applyInboxMutation(item, mutation);
+		if (desired === item) return { item };
+		if (item.disposition !== "pending") {
+			throw new EngineInboxConflictError(`Inbox item ${mutation.queueId} is already ${item.disposition}`);
+		}
+		if (mutation.expectedRevision !== item.revision) {
+			throw new EngineInboxConflictError(
+				`Inbox item ${mutation.queueId} revision ${item.revision} does not match ${mutation.expectedRevision}`,
+			);
+		}
+		const revision = item.revision + 1;
+		const now = Date.now();
+		await sql.unsafe(
+			`UPDATE engine_inbox_items SET delivery_payload=?, annotation=?, deliver_at=?, wake_intent=?, disposition=?, revision=?, updated_at=?
+			 WHERE queue_id=?`,
+			[
+				desired.deliveryPayload,
+				desired.annotation ?? null,
+				desired.deliverAt ?? null,
+				desired.wakeIntent ? 1 : 0,
+				desired.disposition,
+				revision,
+				now,
+				mutation.queueId,
+			],
+		);
+		const event = await this.#appendInboxEvent(
+			sql,
+			target,
+			mutation.mutationId,
+			mutation.op,
+			revision,
+			mutation.queueId,
+		);
+		return { item: { ...desired, revision, updatedAt: now }, event };
+	}
+
 	#assertInboxTarget(row: InboxItemRow, target: EngineInboxTarget): void {
 		if (
 			row.session_id !== target.sessionId ||
@@ -1739,16 +1787,19 @@ export class EngineStore {
 		await sql.unsafe(
 			`INSERT INTO engine_runtime_bindings(
 			 binding_id, command_id, agent_instance_id, execution_id, attempt_id, engine_agent_id, session_file,
-			 profile_digest, state, engine_generation, binding_generation, authority_generation, updated_at
-			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 profile_digest, state, engine_generation, binding_generation, authority_generation,
+			 manual_hold, intent_revision, intent_command_id, updated_at
+			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(agent_instance_id) DO UPDATE SET
 			 binding_id=excluded.binding_id, command_id=excluded.command_id,
 			 execution_id=excluded.execution_id, attempt_id=excluded.attempt_id,
 			 engine_agent_id=excluded.engine_agent_id, session_file=excluded.session_file,
 			 profile_digest=excluded.profile_digest, state=excluded.state,
 			 engine_generation=excluded.engine_generation, binding_generation=excluded.binding_generation,
-			 authority_generation=excluded.authority_generation,
-			 updated_at=excluded.updated_at`,
+				 authority_generation=excluded.authority_generation,
+				 manual_hold=excluded.manual_hold, intent_revision=excluded.intent_revision,
+				 intent_command_id=excluded.intent_command_id,
+				 updated_at=excluded.updated_at`,
 			[
 				binding.bindingId,
 				binding.commandId,
@@ -1762,6 +1813,9 @@ export class EngineStore {
 				binding.engineGeneration,
 				binding.bindingGeneration,
 				binding.authorityGeneration,
+				binding.manualHold ? 1 : 0,
+				binding.intentRevision ?? 0,
+				binding.intentCommandId ?? null,
 				Date.now(),
 			],
 		);

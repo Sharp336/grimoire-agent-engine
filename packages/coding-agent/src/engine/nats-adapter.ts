@@ -410,8 +410,13 @@ export class NatsEngineAdapter {
 				return;
 			}
 			claimed = true;
-			await this.#dispatchCommand(command);
-			await this.runtime.store.settleCommand(command.commandId, identity.canonicalHash, { outcome: "applied" });
+			const detail = await this.#dispatchCommand(command);
+			await this.runtime.store.settleCommand(command.commandId, identity.canonicalHash, {
+				outcome: "applied",
+				...(detail && typeof detail === "object" && !Array.isArray(detail)
+					? { detail: detail as Record<string, unknown> }
+					: {}),
+			});
 			message.ack();
 		} catch (error) {
 			if (error instanceof StaleEngineLeaseError) {
@@ -516,11 +521,11 @@ export class NatsEngineAdapter {
 		}
 	}
 
-	async #dispatchCommand(command: EngineCommandEnvelope): Promise<void> {
+	async #dispatchCommand(command: EngineCommandEnvelope): Promise<unknown> {
 		if (!(await this.runtime.store.isCurrentEngineGeneration(this.runtime.engineGeneration))) {
 			throw new StaleEngineLeaseError("Engine generation lease is no longer current");
 		}
-		await dispatchEngineCommand({
+		return await dispatchEngineCommand({
 			runtime: this.runtime,
 			command,
 			resolveLaunchProfile: this.#options.resolveLaunchProfile,
@@ -703,7 +708,7 @@ export async function dispatchEngineCommand(options: {
 				throw new EngineTargetError("invalid_request", "launch profile digest mismatch");
 			}
 			await options.provisionMailbox?.(command.agentInstanceId);
-			await runtime.start(
+			const started = await runtime.start(
 				{
 					commandId: command.commandId,
 					agentInstanceId: command.agentInstanceId,
@@ -717,39 +722,50 @@ export async function dispatchEngineCommand(options: {
 					authorityGeneration: command.authorityGeneration,
 					cwd,
 					input,
+					expectedIntentRevision: optionalRecordInteger(command.payload, "expectedIntentRevision"),
 				},
 				profile,
 			);
-			return;
+			return {
+				phase: "applied",
+				manualHold: started.manualHold ?? false,
+				intentRevision: started.intentRevision ?? 0,
+			};
 		}
 		case "steer":
-			await runtime.steer({
+			return await runtime.steer({
 				...boundTarget(command),
 				commandId: command.commandId,
-				message: requiredRecordString(command.payload, "text"),
+				...(typeof command.payload.queueId === "string"
+					? {
+							queueId: requiredRecordString(command.payload, "queueId"),
+							expectedRevision: requiredRecordInteger(command.payload, "expectedRevision"),
+							mutationId: requiredRecordString(command.payload, "mutationId"),
+						}
+					: { message: requiredRecordString(command.payload, "text") }),
+				expectedIntentRevision: optionalRecordInteger(command.payload, "expectedIntentRevision"),
 			});
-			return;
 		case "pause":
-			await runtime.pause({
+			return await runtime.pause({
 				...boundTarget(command),
 				commandId: command.commandId,
 				initiator: controlInitiator(command.payload),
+				expectedIntentRevision: optionalRecordInteger(command.payload, "expectedIntentRevision"),
 			});
-			return;
 		case "resume":
-			await runtime.resume({
+			return await runtime.resume({
 				...boundTarget(command),
 				commandId: command.commandId,
 				initiator: controlInitiator(command.payload),
+				expectedIntentRevision: optionalRecordInteger(command.payload, "expectedIntentRevision"),
 			});
-			return;
 		case "cancel":
-			await runtime.cancel({
+			return await runtime.cancel({
 				...boundTarget(command),
 				commandId: command.commandId,
 				reason: optionalRecordString(command.payload, "reason"),
+				expectedIntentRevision: optionalRecordInteger(command.payload, "expectedIntentRevision"),
 			});
-			return;
 		case "compact":
 			return await runtime.compact(boundTarget(command));
 		case "release":
@@ -905,6 +921,16 @@ function optionalRecordString(record: Record<string, unknown>, key: string): str
 	const value = record[key];
 	if (value === undefined || value === null) return undefined;
 	return requiredEnvelopeString(value, key);
+}
+
+function requiredRecordInteger(record: Record<string, unknown>, key: string): number {
+	return requiredSafeInteger(record, key);
+}
+
+function optionalRecordInteger(record: Record<string, unknown>, key: string): number | undefined {
+	const value = record[key];
+	if (value === undefined || value === null) return undefined;
+	return requiredSafeInteger(record, key);
 }
 
 function requiredSafeInteger(record: Record<string, unknown>, key: string): number {

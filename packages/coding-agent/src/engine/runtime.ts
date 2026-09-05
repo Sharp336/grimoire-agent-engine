@@ -34,6 +34,7 @@ import {
 	type EngineCompletionPayload,
 	type EngineControlInitiator,
 	type EngineControlRequest,
+	type EngineControlResult,
 	type EngineEvent,
 	type EngineInboxItem,
 	type EngineInboxMutation,
@@ -57,6 +58,7 @@ import {
 import { engineAgentId, engineRouteToken } from "./route";
 import {
 	EngineAttemptConflictError,
+	EngineInboxConflictError,
 	type EngineModelEffectInput,
 	EngineStore,
 	type EngineToolEffectInput,
@@ -102,6 +104,8 @@ function terminalYield(messages: readonly { role: string; content?: unknown }[])
 }
 
 interface LiveBinding extends EngineBindingSnapshot {
+	manualHold: boolean;
+	intentRevision: number;
 	attemptState: EngineAttemptState;
 	session: AgentSession;
 	steerCommandIds: string[];
@@ -303,14 +307,42 @@ export class EngineRuntime {
 		return this.#inLane(request.agentInstanceId, () => this.#startInLane(request, profile));
 	}
 
-	steer(request: EngineSteerRequest): Promise<void> {
-		if (!request.commandId.trim() || !request.message.trim()) {
-			throw new EngineTargetError("invalid_request", "commandId and message must be non-empty strings");
+	steer(request: EngineSteerRequest): Promise<EngineControlResult> {
+		const queued = request.queueId !== undefined;
+		if (
+			!request.commandId.trim() ||
+			(queued
+				? !request.queueId?.trim() ||
+					!request.mutationId?.trim() ||
+					!Number.isSafeInteger(request.expectedRevision) ||
+					request.expectedRevision! < 0 ||
+					!Number.isSafeInteger(request.expectedIntentRevision) ||
+					request.expectedIntentRevision! < 0 ||
+					request.message !== undefined
+				: !request.message?.trim() || request.mutationId !== undefined || request.expectedRevision !== undefined)
+		) {
+			throw new EngineTargetError("invalid_request", "steer requires text or a complete queued-item identity");
 		}
 		return this.#inLane(request.agentInstanceId, async () => {
 			const binding = await this.#requireCancelableTarget(request);
-			if (!binding) return;
-			if (binding.steerCommandSet.has(request.commandId)) return;
+			if (!binding) {
+				const durable = await this.store.getBinding(request.agentInstanceId);
+				if (queued) {
+					if (durable && request.expectedIntentRevision !== durable.intentRevision) {
+						throw new EngineTargetError(
+							"stale_target",
+							`Intent revision ${durable.intentRevision} does not match ${request.expectedIntentRevision}`,
+						);
+					}
+					throw new EngineTargetError("too_late", `Attempt ${request.attemptId} is no longer active`);
+				}
+				return {
+					phase: "applied",
+					manualHold: durable?.manualHold ?? true,
+					intentRevision: durable?.intentRevision ?? 0,
+				};
+			}
+			if (binding.steerCommandSet.has(request.commandId)) return this.#controlResult(binding);
 			const steerableState =
 				binding.attemptState === "running" ||
 				binding.attemptState === "pause_requested" ||
@@ -322,48 +354,139 @@ export class EngineRuntime {
 			) {
 				throw new EngineTargetError("too_late", `Attempt ${request.attemptId} is not streaming`);
 			}
-			await binding.session.steer(request.message);
+			const item = queued ? await this.store.getInboxItem(binding.session.sessionId, request.queueId!) : undefined;
+			if (queued && (item?.disposition !== "pending" || item.revision !== request.expectedRevision)) {
+				throw new EngineTargetError(
+					"stale_target",
+					`Inbox item ${request.queueId} is no longer pending at that revision`,
+				);
+			}
+			const previousIntent = this.#setManualHold(binding, request.commandId, request.expectedIntentRevision, false);
+			const previousState = binding.attemptState;
+			const result = this.#controlResult(
+				binding,
+				item ? "consumed" : "applied",
+				item ? { ...item, revision: item.revision + 1 } : undefined,
+			);
+			try {
+				await binding.session.steer(item?.deliveryPayload ?? request.message!);
+				binding.attemptState = "running";
+				await this.#commitAttemptTransition(
+					binding,
+					"running",
+					[
+						...(previousState === "paused"
+							? [
+									{
+										kind: "resumed" as const,
+										payload: controlPayload({ kind: "human" }, "running", false, binding),
+										causationCommandId: request.commandId,
+									},
+								]
+							: []),
+						{ kind: "steered", causationCommandId: request.commandId },
+					],
+					{
+						expectedStates: [previousState],
+						settleCommandId: request.commandId,
+						settleCommandReceipt: { outcome: "applied", detail: result },
+						...(item
+							? {
+									inboxSessionId: binding.session.sessionId,
+									inboxMutation: {
+										mutationId: request.mutationId!,
+										queueId: item.queueId,
+										expectedRevision: request.expectedRevision!,
+										op: "acknowledge" as const,
+									},
+								}
+							: {}),
+					},
+				);
+			} catch (error) {
+				binding.attemptState = previousState;
+				this.#restoreIntent(binding, previousIntent);
+				if (queued && error instanceof EngineInboxConflictError) {
+					throw new EngineTargetError("stale_target", error.message);
+				}
+				throw error;
+			}
 			binding.steerCommandIds.push(request.commandId);
 			binding.steerCommandSet.add(request.commandId);
 			const evicted = binding.steerCommandIds.length > 256 ? binding.steerCommandIds.shift() : undefined;
 			if (evicted) binding.steerCommandSet.delete(evicted);
-			await this.#commitEvent(binding, "steered", undefined, request.commandId, request.commandId);
+			if (previousState === "paused") binding.pauseGate.resume();
+			this.#signalInboxWake();
+			return result;
 		});
 	}
 
-	pause(request: EngineControlRequest): Promise<void> {
+	pause(request: EngineControlRequest): Promise<EngineControlResult> {
 		validateControlRequest(request);
 		return this.#inLane(request.agentInstanceId, async () => {
 			const binding = this.#requireTarget(request);
-			if (binding.pauseCommandIds.has(request.commandId)) return;
+			if (binding.pauseCommandIds.has(request.commandId)) return this.#controlResult(binding);
+			const previousIntent = this.#setManualHold(binding, request.commandId, request.expectedIntentRevision, true);
 			if (binding.attemptState === "paused") {
-				await this.#commitEvent(
-					binding,
-					"paused",
-					controlPayload(request.initiator, "paused", true),
-					request.commandId,
-					request.commandId,
-				);
+				const result = this.#controlResult(binding);
+				try {
+					await this.#commitAttemptTransition(
+						binding,
+						"paused",
+						[
+							{
+								kind: "paused",
+								payload: controlPayload(request.initiator, "paused", true, binding),
+								causationCommandId: request.commandId,
+							},
+						],
+						{
+							expectedStates: ["paused"],
+							settleCommandId: request.commandId,
+							settleCommandReceipt: { outcome: "applied", detail: result },
+						},
+					);
+				} catch (error) {
+					this.#restoreIntent(binding, previousIntent);
+					throw error;
+				}
 				binding.pauseCommandIds.add(request.commandId);
-				return;
+				return result;
 			}
 			if (binding.attemptState === "pause_requested") {
-				await this.#commitEvent(
-					binding,
-					"pause_requested",
-					controlPayload(request.initiator, "pause_requested", true),
-					request.commandId,
-					request.commandId,
-				);
+				const result = this.#controlResult(binding);
+				try {
+					await this.#commitAttemptTransition(
+						binding,
+						"pause_requested",
+						[
+							{
+								kind: "pause_requested",
+								payload: controlPayload(request.initiator, "pause_requested", true, binding),
+								causationCommandId: request.commandId,
+							},
+						],
+						{
+							expectedStates: ["pause_requested"],
+							settleCommandId: request.commandId,
+							settleCommandReceipt: { outcome: "applied", detail: result },
+						},
+					);
+				} catch (error) {
+					this.#restoreIntent(binding, previousIntent);
+					throw error;
+				}
 				binding.pauseCommandIds.add(request.commandId);
 				binding.pauseRequests.set(request.commandId, request.initiator);
-				return;
+				return result;
 			}
 			if (binding.attemptState !== "running") {
+				this.#restoreIntent(binding, previousIntent);
 				throw new EngineTargetError("too_late", `Attempt ${request.attemptId} is already ${binding.attemptState}`);
 			}
 			binding.pauseGate.pause();
 			binding.attemptState = "pause_requested";
+			const result = this.#controlResult(binding);
 			try {
 				await this.#commitAttemptTransition(
 					binding,
@@ -371,32 +494,41 @@ export class EngineRuntime {
 					[
 						{
 							kind: "pause_requested",
-							payload: controlPayload(request.initiator, "pause_requested"),
+							payload: controlPayload(request.initiator, "pause_requested", false, binding),
 							causationCommandId: request.commandId,
 						},
 					],
-					{ settleCommandId: request.commandId, expectedStates: ["running"] },
+					{
+						settleCommandId: request.commandId,
+						settleCommandReceipt: { outcome: "applied", detail: result },
+						expectedStates: ["running"],
+					},
 				);
 			} catch (error) {
 				binding.attemptState = "running";
 				binding.pauseGate.resume();
+				this.#restoreIntent(binding, previousIntent);
 				throw error;
 			}
 			binding.pauseCommandIds.add(request.commandId);
 			binding.pauseRequests.set(request.commandId, request.initiator);
 			this.#trackRun(this.#finishPause(binding, request.attemptId));
+			return result;
 		});
 	}
 
-	resume(request: EngineControlRequest): Promise<void> {
+	resume(request: EngineControlRequest): Promise<EngineControlResult> {
 		validateControlRequest(request);
 		return this.#inLane(request.agentInstanceId, async () => {
 			const binding = this.#requireTarget(request);
-			if (binding.resumeCommandIds.has(request.commandId)) return;
+			if (binding.resumeCommandIds.has(request.commandId)) return this.#controlResult(binding);
+			this.#assertIntentRevision(binding, request.expectedIntentRevision);
 			if (binding.attemptState !== "paused") {
 				throw new EngineTargetError("too_late", `Attempt ${request.attemptId} is already ${binding.attemptState}`);
 			}
+			const previousIntent = this.#setManualHold(binding, request.commandId, request.expectedIntentRevision, false);
 			binding.attemptState = "running";
+			const result = this.#controlResult(binding);
 			try {
 				await this.#commitAttemptTransition(
 					binding,
@@ -404,28 +536,37 @@ export class EngineRuntime {
 					[
 						{
 							kind: "resumed",
-							payload: controlPayload(request.initiator, "running"),
+							payload: controlPayload(request.initiator, "running", false, binding),
 							causationCommandId: request.commandId,
 						},
 					],
-					{ settleCommandId: request.commandId, expectedStates: ["paused"] },
+					{
+						settleCommandId: request.commandId,
+						settleCommandReceipt: { outcome: "applied", detail: result },
+						expectedStates: ["paused"],
+					},
 				);
 			} catch (error) {
 				binding.attemptState = "paused";
+				this.#restoreIntent(binding, previousIntent);
 				throw error;
 			}
 			binding.resumeCommandIds.add(request.commandId);
 			binding.pauseGate.resume();
+			this.#signalInboxWake();
+			return result;
 		});
 	}
 
-	cancel(request: EngineCancelRequest): Promise<void> {
+	cancel(request: EngineCancelRequest): Promise<EngineControlResult> {
 		if (!request.commandId.trim()) {
 			throw new EngineTargetError("invalid_request", "commandId must be a non-empty string");
 		}
 		return this.#inLane(request.agentInstanceId, async () => {
 			const binding = this.#requireTarget(request);
-			if (binding.attemptState === "cancelled" || binding.attemptState === "cancel_requested") return;
+			if (binding.attemptState === "cancelled" || binding.attemptState === "cancel_requested") {
+				return this.#controlResult(binding);
+			}
 			if (
 				binding.attemptState !== "running" &&
 				binding.attemptState !== "pause_requested" &&
@@ -436,15 +577,19 @@ export class EngineRuntime {
 			}
 			const reason = request.reason ?? "Engine attempt cancelled";
 			const previousState = binding.attemptState;
+			const previousIntent = this.#setManualHold(binding, request.commandId, request.expectedIntentRevision, true);
 			binding.attemptState = "cancel_requested";
+			const result = this.#controlResult(binding);
 			try {
 				await this.#commitAttemptTransition(binding, "cancel_requested", [], {
 					cause: request.reason,
 					settleCommandId: request.commandId,
+					settleCommandReceipt: { outcome: "applied", detail: result },
 					expectedStates: [previousState],
 				});
 			} catch (error) {
 				binding.attemptState = previousState;
+				this.#restoreIntent(binding, previousIntent);
 				throw error;
 			}
 			await this.#cancelToolApprovals(binding, reason, request.commandId);
@@ -454,6 +599,7 @@ export class EngineRuntime {
 			binding.pauseGate.resume();
 			this.#notifyPauseProgress(binding);
 			this.#trackRun(this.#finishCancel(binding, request, abort));
+			return result;
 		});
 	}
 
@@ -944,6 +1090,7 @@ export class EngineRuntime {
 			);
 		}
 		const continuationDigest = await this.#continuationDigest(request, profile);
+		if (binding) this.#assertManualHoldClear(binding, request.expectedIntentRevision);
 
 		if (binding) {
 			if (binding.state === "running" || binding.session.isStreaming) {
@@ -974,15 +1121,20 @@ export class EngineRuntime {
 			}
 		}
 		if (!binding) binding = await this.#openBinding(request, profile, continuationDigest);
+		let previousIntent = this.#intentState(binding);
 		try {
+			previousIntent = this.#setManualHold(binding, request.commandId, request.expectedIntentRevision, false, true);
 			binding.state = "running";
 			binding.attemptState = "running";
+			const result = this.#controlResult(binding);
 			await this.#commitAttemptTransition(binding, "running", [{ kind: "accepted" }, { kind: "running" }], {
 				settleCommandId: request.commandId,
+				settleCommandReceipt: { outcome: "applied", detail: result },
 				requireNew: true,
 				inboxSessionId: binding.session.sessionId,
 			});
 		} catch (error) {
+			this.#restoreIntent(binding, previousIntent);
 			try {
 				await this.#discardBinding(binding);
 			} catch (cleanupError) {
@@ -1190,6 +1342,9 @@ export class EngineRuntime {
 				engineGeneration: this.engineGeneration,
 				bindingGeneration,
 				authorityGeneration: request.authorityGeneration,
+				manualHold: prior?.manualHold ?? false,
+				intentRevision: prior?.intentRevision ?? 0,
+				...(prior?.intentCommandId ? { intentCommandId: prior.intentCommandId } : {}),
 				session: created.session,
 				steerCommandIds: [],
 				steerCommandSet: new Set(),
@@ -1599,7 +1754,7 @@ export class EngineRuntime {
 			if (binding.attemptId !== attemptId || binding.attemptState !== "pause_requested") return;
 			const events = [...binding.pauseRequests].map(([commandId, initiator]) => ({
 				kind: "paused" as const,
-				payload: controlPayload(initiator, "paused"),
+				payload: controlPayload(initiator, "paused", false, binding),
 				causationCommandId: commandId,
 			}));
 			await this.#commitAttemptTransition(binding, "paused", events, {
@@ -2007,10 +2162,12 @@ export class EngineRuntime {
 		options: {
 			cause?: string;
 			settleCommandId?: string;
+			settleCommandReceipt?: { outcome: "applied" | "rejected"; detail?: Record<string, unknown> };
 			expectedStates?: readonly EngineAttemptState[];
 			requireNew?: boolean;
 			transcriptCheckpoint?: SessionDurabilityCheckpoint;
 			inboxSessionId?: string;
+			inboxMutation?: EngineInboxMutation;
 		} = {},
 	): Promise<void> {
 		const committed = await this.store.commitAttemptTransition(this.#snapshot(binding), state, events, options);
@@ -2039,6 +2196,95 @@ export class EngineRuntime {
 			engineGeneration: binding.engineGeneration,
 			bindingGeneration: binding.bindingGeneration,
 			authorityGeneration: binding.authorityGeneration,
+			manualHold: binding.manualHold,
+			intentRevision: binding.intentRevision,
+			...(binding.intentCommandId ? { intentCommandId: binding.intentCommandId } : {}),
+		};
+	}
+
+	#setManualHold(
+		binding: LiveBinding,
+		commandId: string,
+		expectedRevision: number | undefined,
+		manualHold: boolean,
+		requireExpectedToClear = false,
+	): Pick<LiveBinding, "manualHold" | "intentRevision" | "intentCommandId"> {
+		const previous = this.#intentState(binding);
+		if (binding.intentCommandId === commandId) return previous;
+		if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0)) {
+			throw new EngineTargetError("invalid_request", "expectedIntentRevision must be a non-negative safe integer");
+		}
+		if (!manualHold && expectedRevision !== undefined && expectedRevision !== binding.intentRevision) {
+			throw new EngineTargetError(
+				"stale_target",
+				`Intent revision ${binding.intentRevision} does not match ${expectedRevision}`,
+			);
+		}
+		if (requireExpectedToClear && expectedRevision === undefined) {
+			if (binding.manualHold) {
+				throw new EngineTargetError(
+					"stale_target",
+					`Manual hold requires expectedIntentRevision ${binding.intentRevision}`,
+				);
+			}
+			return previous;
+		}
+		binding.manualHold = manualHold;
+		binding.intentRevision++;
+		binding.intentCommandId = commandId;
+		return previous;
+	}
+
+	#assertManualHoldClear(binding: LiveBinding, expectedRevision: number | undefined): void {
+		this.#assertIntentRevision(binding, expectedRevision);
+		if (binding.manualHold && expectedRevision === undefined) {
+			throw new EngineTargetError(
+				"stale_target",
+				`Manual hold requires expectedIntentRevision ${binding.intentRevision}`,
+			);
+		}
+	}
+
+	#assertIntentRevision(binding: LiveBinding, expectedRevision: number | undefined): void {
+		if (expectedRevision !== undefined && (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0)) {
+			throw new EngineTargetError("invalid_request", "expectedIntentRevision must be a non-negative safe integer");
+		}
+		if (expectedRevision !== undefined && expectedRevision !== binding.intentRevision) {
+			throw new EngineTargetError(
+				"stale_target",
+				`Intent revision ${binding.intentRevision} does not match ${expectedRevision}`,
+			);
+		}
+	}
+
+	#intentState(binding: LiveBinding): Pick<LiveBinding, "manualHold" | "intentRevision" | "intentCommandId"> {
+		return {
+			manualHold: binding.manualHold,
+			intentRevision: binding.intentRevision,
+			...(binding.intentCommandId ? { intentCommandId: binding.intentCommandId } : {}),
+		};
+	}
+
+	#restoreIntent(
+		binding: LiveBinding,
+		previous: Pick<LiveBinding, "manualHold" | "intentRevision" | "intentCommandId">,
+	): void {
+		binding.manualHold = previous.manualHold;
+		binding.intentRevision = previous.intentRevision;
+		if (previous.intentCommandId) binding.intentCommandId = previous.intentCommandId;
+		else delete binding.intentCommandId;
+	}
+
+	#controlResult(
+		binding: LiveBinding,
+		phase: EngineControlResult["phase"] = "applied",
+		item?: EngineInboxItem,
+	): EngineControlResult {
+		return {
+			phase,
+			manualHold: binding.manualHold,
+			intentRevision: binding.intentRevision,
+			...(item ? { queueId: item.queueId, queueRevision: item.revision } : {}),
 		};
 	}
 
@@ -2113,11 +2359,13 @@ function controlPayload(
 	initiator: EngineControlInitiator,
 	state: EngineAttemptState,
 	duplicate = false,
+	binding?: Pick<EngineBindingSnapshot, "manualHold" | "intentRevision">,
 ): Record<string, unknown> {
 	return {
 		initiator,
 		attemptState: state,
 		controlReadiness: controlReadiness(state),
+		...(binding ? { manualHold: binding.manualHold, intentRevision: binding.intentRevision } : {}),
 		...(duplicate ? { duplicate: true } : {}),
 	};
 }
