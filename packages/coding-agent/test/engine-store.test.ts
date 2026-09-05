@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -190,6 +191,41 @@ describe("EngineStore", () => {
 		await tamper.unsafe("UPDATE engine_schema_migrations SET checksum='changed' WHERE version=1");
 		await tamper.end();
 		await expect(EngineStore.open(databasePath)).rejects.toThrow("migration 1 checksum does not match");
+	});
+
+	it("upgrades the exact schema v10 migration prefix without rewriting its checksums", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-store-v10-${Snowflake.next()}-`));
+		const databasePath = path.join(tempDir, "engine.sqlite");
+		const fixture = new Database(databasePath, { create: true });
+		fixture.exec(fs.readFileSync(path.join(import.meta.dir, "fixtures", "engine-schema-v10.sql"), "utf8"));
+		const prefix = fixture
+			.query("SELECT version, checksum FROM engine_schema_migrations ORDER BY version")
+			.all() as Array<{ version: number; checksum: string }>;
+		expect(prefix).toHaveLength(10);
+		expect(
+			fixture
+				.query("SELECT name FROM pragma_table_info('engine_runtime_bindings') WHERE name=?")
+				.get("conversation_identity_digest"),
+		).toBeNull();
+		fixture.close();
+
+		const upgraded = await EngineStore.open(databasePath);
+		await upgraded.close();
+		const inspect = new Database(databasePath, { readonly: true });
+		expect(
+			inspect
+				.query("SELECT version, checksum FROM engine_schema_migrations WHERE version<=10 ORDER BY version")
+				.all(),
+		).toEqual(prefix);
+		expect(inspect.query("SELECT version FROM engine_schema_migrations WHERE version=11").get()).toEqual({
+			version: 11,
+		});
+		expect(
+			inspect
+				.query("SELECT name FROM pragma_table_info('engine_runtime_bindings') WHERE name=?")
+				.get("conversation_identity_digest"),
+		).toEqual({ name: "conversation_identity_digest" });
+		inspect.close();
 	});
 
 	it("rejects a database created by a newer Engine schema", async () => {

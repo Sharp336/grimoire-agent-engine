@@ -359,7 +359,6 @@ const SCHEMA = [
 		engine_agent_id TEXT NOT NULL,
 		session_file TEXT,
 		profile_digest TEXT NOT NULL,
-		conversation_identity_digest TEXT,
 		state TEXT NOT NULL,
 		engine_generation INTEGER NOT NULL,
 		binding_generation INTEGER NOT NULL,
