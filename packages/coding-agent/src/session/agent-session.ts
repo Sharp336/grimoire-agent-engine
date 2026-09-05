@@ -334,7 +334,7 @@ import { type AdvisorStats, SessionAdvisors, type SessionAdvisorsHost } from "./
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
-import type { BranchSummaryEntry, NewSessionOptions } from "./session-entries";
+import type { BranchSummaryEntry, NewSessionOptions, SessionMessageIdentity } from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
 	COMPACTION_CHECK_NONE,
@@ -624,6 +624,7 @@ export class AgentSession {
 	#messageEndPersistenceTail: Promise<void> = Promise.resolve();
 	#pendingMessageEndPersistence = new Map<string, Promise<void>>();
 	#persistedMessageKeys: { anchor: string; keys: Set<string> } | undefined;
+	readonly #messageIdentities = new WeakMap<AgentMessage, SessionMessageIdentity>();
 
 	// Custom commands (TypeScript slash commands)
 	#customCommands: LoadedCustomCommand[] = [];
@@ -2428,6 +2429,17 @@ export class AgentSession {
 	 * branch to verify content when a key hit could be a rare collision.
 	 */
 	#sessionMessageAlreadyPersisted(message: AgentMessage): boolean {
+		const identity = this.#messageIdentities.get(message);
+		if (identity?.sourceCommandId || identity?.clientMessageId) {
+			return this.sessionManager
+				.getBranch()
+				.some(
+					entry =>
+						entry.type === "message" &&
+						(identity.sourceCommandId === undefined || entry.sourceCommandId === identity.sourceCommandId) &&
+						(identity.clientMessageId === undefined || entry.clientMessageId === identity.clientMessageId),
+				);
+		}
 		const key = sessionMessagePersistenceKey(message);
 		if (key === undefined) return false;
 		const keys = this.#ensurePersistedMessageKeys();
@@ -2453,7 +2465,7 @@ export class AgentSession {
 	): string {
 		const cache = this.#persistedMessageKeys;
 		const wasFresh = cache !== undefined && cache.anchor === this.#persistedMessageKeysAnchor();
-		const entryId = this.sessionManager.appendMessage(message);
+		const entryId = this.sessionManager.appendMessage(message, this.#messageIdentities.get(message));
 		if (message.role === "assistant") {
 			(message as PersistedAssistantMessage)[kPersistedSessionEntryId] = entryId;
 		}
@@ -5682,9 +5694,9 @@ export class AgentSession {
 				await this.#queueCustomMessage(notice, streamingBehavior);
 			}
 			if (streamingBehavior === "followUp") {
-				await this.#queueUserMessage(expandedText, options?.images, "followUp");
+				await this.#queueUserMessage(expandedText, options?.images, "followUp", options);
 			} else {
-				await this.#queueUserMessage(expandedText, options?.images, "steer");
+				await this.#queueUserMessage(expandedText, options?.images, "steer", options);
 			}
 			return true;
 		}
@@ -5726,6 +5738,7 @@ export class AgentSession {
 		const message = options?.synthetic
 			? { role: "developer" as const, content: userContent, attribution: promptAttribution, timestamp: Date.now() }
 			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: Date.now() };
+		if (message.role === "user") this.#rememberUserMessageIdentity(message, options);
 
 		const preludeMessages: AgentMessage[] = [];
 		if (eagerTodoPrelude) {
@@ -6238,13 +6251,17 @@ export class AgentSession {
 	/**
 	 * Queue a steering message to interrupt the agent mid-run.
 	 */
-	async steer(text: string, images?: ImageContent[]): Promise<void> {
+	async steer(
+		text: string,
+		images?: ImageContent[],
+		identity?: Pick<PromptOptions, "sourceCommandId" | "clientMessageId">,
+	): Promise<void> {
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
 
 		const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
-		await this.#queueUserMessage(expandedText, images, "steer");
+		await this.#queueUserMessage(expandedText, images, "steer", identity);
 	}
 
 	/**
@@ -6319,6 +6336,7 @@ export class AgentSession {
 		text: string,
 		images: ImageContent[] | undefined,
 		mode: "steer" | "followUp",
+		identity?: Pick<PromptOptions, "sourceCommandId" | "clientMessageId">,
 	): Promise<void> {
 		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
 		// while streaming) is a deliberate resume; re-enable advisor auto-resume that
@@ -6335,25 +6353,33 @@ export class AgentSession {
 			? await this.#buildImageDescriptionNotice(normalizedImages)
 			: undefined;
 		this.#allowQueuedMessageDrainRetry();
+		const message = {
+			role: "user" as const,
+			content,
+			...(mode === "steer" ? { steering: true as const } : {}),
+			attribution: "user" as const,
+			timestamp: Date.now(),
+		};
+		this.#rememberUserMessageIdentity(message, identity);
 		if (mode === "followUp") {
 			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
-			this.agent.followUp({
-				role: "user",
-				content,
-				attribution: "user",
-				timestamp: Date.now(),
-			});
+			this.agent.followUp(message);
 		} else {
 			if (imageDescriptionNotice) this.agent.steer(imageDescriptionNotice);
-			this.agent.steer({
-				role: "user",
-				content,
-				steering: true,
-				attribution: "user",
-				timestamp: Date.now(),
-			});
+			this.agent.steer(message);
 		}
 		this.#scheduleIdleQueueDrain();
+	}
+
+	#rememberUserMessageIdentity(
+		message: AgentMessage,
+		identity?: Pick<PromptOptions, "sourceCommandId" | "clientMessageId">,
+	): void {
+		if (message.role !== "user" || (!identity?.sourceCommandId && !identity?.clientMessageId)) return;
+		this.#messageIdentities.set(message, {
+			...(identity.sourceCommandId ? { sourceCommandId: identity.sourceCommandId } : {}),
+			...(identity.clientMessageId ? { clientMessageId: identity.clientMessageId } : {}),
+		});
 	}
 
 	#scheduleIdleQueueDrain(): void {

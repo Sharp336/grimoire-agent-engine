@@ -729,6 +729,7 @@ export async function dispatchEngineCommand(options: {
 						attemptId,
 						authorityGeneration: command.authorityGeneration,
 						cwd,
+						clientMessageId: optionalRecordString(command.payload, "clientMessageId"),
 						...(queued
 							? {
 									queueId: requiredRecordString(command.payload, "queueId"),
@@ -762,6 +763,7 @@ export async function dispatchEngineCommand(options: {
 							mutationId: requiredRecordString(command.payload, "mutationId"),
 						}
 					: { message: requiredRecordString(command.payload, "text") }),
+				clientMessageId: optionalRecordString(command.payload, "clientMessageId"),
 				expectedIntentRevision: optionalRecordInteger(command.payload, "expectedIntentRevision"),
 			});
 		case "pause":

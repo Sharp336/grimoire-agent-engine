@@ -66,7 +66,13 @@ export interface SessionEntryBase {
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
 	message: AgentMessage;
+	/** Engine command that introduced this exact user message. */
+	sourceCommandId?: string;
+	/** Opaque client identity used to reconcile an optimistic user message. */
+	clientMessageId?: string;
 }
+
+export type SessionMessageIdentity = Pick<SessionMessageEntry, "sourceCommandId" | "clientMessageId">;
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
 	type: "thinking_level_change";

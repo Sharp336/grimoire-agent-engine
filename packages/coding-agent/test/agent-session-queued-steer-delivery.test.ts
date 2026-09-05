@@ -23,6 +23,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { USER_INTERRUPT_LABEL } from "@oh-my-pi/pi-coding-agent/session/messages";
+import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -145,6 +146,41 @@ describe("AgentSession queued steer delivery", () => {
 		expect(await entryAppended).toBe("guest steer at yield");
 		expect(mock.calls.length).toBe(2);
 		expect(session.agent.hasQueuedMessages()).toBe(false);
+	});
+
+	it("persists exact client identities for rapid identical user messages", async () => {
+		const { session, sessionManager } = await createSession([
+			{ content: ["host answer"] },
+			{ content: ["ack repeats"] },
+		]);
+		let injected = false;
+		session.agent.setOnBeforeYield(async () => {
+			if (injected) return;
+			injected = true;
+			await session.steer("same text", undefined, {
+				sourceCommandId: "steer-command-one",
+				clientMessageId: "optimistic-one",
+			});
+			await session.steer("same text", undefined, {
+				sourceCommandId: "steer-command-two",
+				clientMessageId: "optimistic-two",
+			});
+		});
+
+		await session.prompt("same text", {
+			sourceCommandId: "launch-command",
+			clientMessageId: "optimistic-launch",
+		});
+
+		const userEntries = sessionManager
+			.getBranch()
+			.filter((entry): entry is SessionMessageEntry => entry.type === "message" && entry.message.role === "user");
+		expect(userEntries).toHaveLength(3);
+		expect(userEntries.map(entry => [entry.sourceCommandId, entry.clientMessageId])).toEqual([
+			["launch-command", "optimistic-launch"],
+			["steer-command-one", "optimistic-one"],
+			["steer-command-two", "optimistic-two"],
+		]);
 	});
 
 	it("drains a steer stranded in the agent queue when the session settles", async () => {
