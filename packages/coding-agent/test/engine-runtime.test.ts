@@ -1707,6 +1707,22 @@ describe("EngineRuntime", () => {
 			queueRevision: 4,
 			manualHold: false,
 		});
+		expect(
+			(await runtime.store.pendingEvents()).find(
+				event =>
+					event.kind === "inbox_changed" &&
+					event.payload?.action === "acknowledge" &&
+					event.payload?.queueId === queued.item.queueId,
+			),
+		).toMatchObject({
+			causationCommandId: "command-auto-queue-b",
+			payload: {
+				action: "acknowledge",
+				queueId: queued.item.queueId,
+				revision: 4,
+				sourceEventId: "ordinary-auto-queue",
+			},
+		});
 		await runtime.drain();
 		for (let remaining = 50; wakes.length < 3 && remaining > 0; remaining--) await Bun.sleep(25);
 		expect(wakes).toHaveLength(3);
@@ -2184,6 +2200,19 @@ describe("EngineRuntime", () => {
 		expect(steeredEvent).toMatchObject({
 			attemptId: started.attemptId,
 			causationCommandId: "steer-while-paused",
+		});
+		expect(
+			(await runtime.store.pendingEvents()).find(
+				event => event.kind === "inbox_changed" && event.payload?.action === "acknowledge",
+			),
+		).toMatchObject({
+			causationCommandId: "steer-while-paused",
+			payload: {
+				action: "acknowledge",
+				queueId: queuedItem.item.queueId,
+				revision: 2,
+				sourceEventId: "queued-steer-item",
+			},
 		});
 		expect((await runtime.store.getBinding(started.agentInstanceId))?.manualHold).toBeFalse();
 		expect((await completed).attemptId).toBe(started.attemptId);

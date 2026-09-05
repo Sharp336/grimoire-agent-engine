@@ -1154,6 +1154,7 @@ export class EngineStore {
 			transcriptCheckpoint?: SessionDurabilityCheckpoint;
 			inboxSessionId?: string;
 			inboxMutation?: EngineInboxMutation;
+			inboxMutationCausationCommandId?: string;
 		} = {},
 	): Promise<EngineEvent[]> {
 		return await this.#transaction(async sql => {
@@ -1216,6 +1217,7 @@ export class EngineStore {
 					sql,
 					{ ...binding, sessionId: options.inboxSessionId },
 					options.inboxMutation,
+					options.inboxMutationCausationCommandId,
 				);
 				if (result.event) committed.push(result.event);
 			}
@@ -1828,6 +1830,7 @@ export class EngineStore {
 		sql: SqlClient,
 		target: EngineInboxTarget,
 		mutation: EngineInboxMutation,
+		causationCommandId = mutation.mutationId,
 	): Promise<{ item: EngineInboxItem; event?: EngineEvent }> {
 		const row = await this.#inboxItem(sql, target.sessionId, mutation.queueId);
 		if (!row) throw new EngineInboxConflictError(`Inbox item ${mutation.queueId} does not exist`);
@@ -1863,10 +1866,11 @@ export class EngineStore {
 		const event = await this.#appendInboxEvent(
 			sql,
 			target,
-			mutation.mutationId,
+			causationCommandId,
 			mutation.op,
 			revision,
 			mutation.queueId,
+			mutation.op === "acknowledge" ? { sourceEventId: item.sourceEventId } : {},
 		);
 		return { item: { ...desired, revision, updatedAt: now }, event };
 	}

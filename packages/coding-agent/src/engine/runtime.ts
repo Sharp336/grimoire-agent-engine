@@ -470,6 +470,7 @@ export class EngineRuntime {
 										expectedRevision: request.expectedRevision!,
 										op: "acknowledge" as const,
 									},
+									inboxMutationCausationCommandId: request.commandId,
 								}
 							: {}),
 					},
@@ -1370,6 +1371,7 @@ export class EngineRuntime {
 								expectedRevision: request.expectedRevision!,
 								op: "acknowledge" as const,
 							},
+							inboxMutationCausationCommandId: request.commandId,
 						}
 					: {}),
 			});
@@ -2658,6 +2660,7 @@ export class EngineRuntime {
 			transcriptCheckpoint?: SessionDurabilityCheckpoint;
 			inboxSessionId?: string;
 			inboxMutation?: EngineInboxMutation;
+			inboxMutationCausationCommandId?: string;
 		} = {},
 	): Promise<void> {
 		const committed = await this.store.commitAttemptTransition(this.#snapshot(binding), state, events, options);
