@@ -11,6 +11,7 @@ import type { CreateAgentSessionOptions } from "../sdk";
 import { AuthStorage, SqliteAuthCredentialStore } from "../session/auth-storage";
 import type { EngineChildProfile } from "../tools";
 import type { EngineLaunchProfile } from "./contracts";
+import type { ProviderAdmissionClient } from "./provider-admission";
 
 const GCTX = /^gctx:[23456789abcdefghjkmnpqrstuvwxyz]{16}$/;
 
@@ -62,6 +63,8 @@ interface ProviderAccount {
 	schema: "grimoire.provider_account.v1";
 	status?: "active" | "disabled";
 	providerId: string;
+	providerKind?: string;
+	accountBindingId?: string;
 	api: Api;
 	baseUrl: string;
 	headers?: Record<string, string>;
@@ -76,6 +79,7 @@ export interface ResolvedEngineSessionProfile {
 		| "authStorage"
 		| "modelRegistry"
 		| "model"
+		| "providerRequestHook"
 		| "thinkingLevel"
 		| "toolNames"
 		| "restrictToolNames"
@@ -93,6 +97,7 @@ export class EngineProfileResolver {
 		readonly artifactCacheRoot: string,
 		readonly credentialRoot: string,
 		readonly localCredentialDbPath: string = getAgentDbPath(),
+		readonly providerAdmissionClient?: ProviderAdmissionClient,
 	) {}
 
 	async continuationDigest(launch: EngineLaunchProfile, cwd: string): Promise<string> {
@@ -262,6 +267,22 @@ export class EngineProfileResolver {
 		if (profile.requireTrustedProvider && account.trusted !== true) {
 			throw new Error("AgentProfile requires a trusted provider");
 		}
+		const admissionIdentity =
+			account.providerKind === "openai_codex_subscription"
+				? {
+						providerAccountRef: accountRef,
+						routeRef,
+						providerKind: "openai_codex_subscription" as const,
+						providerId: account.providerId,
+						accountBindingId: requiredText(account.accountBindingId, "ProviderAccount accountBindingId"),
+					}
+				: undefined;
+		if (admissionIdentity && (!localBinding || localBinding.accountId !== admissionIdentity.accountBindingId)) {
+			throw new Error("ProviderAccount quota identity does not match its local credential binding");
+		}
+		if (admissionIdentity && !this.providerAdmissionClient) {
+			throw new Error("Provider quota admission is unavailable");
+		}
 		const accountDir = path.join(this.credentialRoot, accountRef.slice(5));
 		await fs.mkdir(accountDir, { recursive: true });
 		let authStorage: AuthStorage;
@@ -321,6 +342,7 @@ export class EngineProfileResolver {
 				cacheDbPath: path.join(accountDir, "models.sqlite"),
 			});
 			const model = buildModel(toModelSpec(route, account)) as Model;
+			if (admissionIdentity) settings.override("providers.openaiWebsockets", "off");
 			const profileRestricted = profile.tools?.mode === "allowlist";
 			const launchRestricted = launch.restrictToolNames === true;
 			const profileNames = uniqueStrings(profile.tools?.names ?? []);
@@ -339,6 +361,10 @@ export class EngineProfileResolver {
 					authStorage,
 					modelRegistry,
 					model,
+					providerRequestHook:
+						admissionIdentity && this.providerAdmissionClient
+							? this.providerAdmissionClient.createHook(admissionIdentity, authStorage, account.baseUrl)
+							: undefined,
 					thinkingLevel: profile.generationDefaults?.thinkingLevel,
 					toolNames,
 					restrictToolNames: profileRestricted || launchRestricted,
@@ -445,6 +471,11 @@ function toModelSpec(route: AvailableModelRoute, account: ProviderAccount): Mode
 function requiredRef(value: unknown, field: string): string {
 	if (typeof value !== "string" || !GCTX.test(value)) throw new Error(`${field} must be a gctx Artifact ref`);
 	return value;
+}
+
+function requiredText(value: unknown, field: string): string {
+	if (typeof value !== "string" || !value.trim()) throw new Error(`${field} is required`);
+	return value.trim();
 }
 
 function resolveSpawnPolicy(

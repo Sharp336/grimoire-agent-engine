@@ -9,6 +9,7 @@ import { type EngineControlQueryServer, startEngineControlQueryServer } from "./
 import { HostedEngineBridge, HostedGrimoireRpc, launchHostedEngineChild } from "./hosted-bridge";
 import { type EngineCommandEnvelope, NatsEngineAdapter } from "./nats-adapter";
 import { EngineProfileResolver } from "./profile-resolver";
+import { ProviderAdmissionClient } from "./provider-admission";
 import { EngineRuntime } from "./runtime";
 
 export interface EngineServiceConfig {
@@ -52,8 +53,16 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 			config.hosted && (config.childHistoryRetention ?? "off") === "grimoire"
 				? new HostedGrimoireRpc({ ...config.hosted, serverUrl: coreMcpUrl(config.hosted.serverUrl) })
 				: undefined;
+		const providerAdmissionClient = config.hosted
+			? new ProviderAdmissionClient(providerAdmissionUrl(config.hosted.serverUrl), config.hosted.token)
+			: undefined;
 		const profileResolver = config.artifactCacheRoot
-			? new EngineProfileResolver(config.artifactCacheRoot, path.join(config.runtimeDir, "credentials"))
+			? new EngineProfileResolver(
+					config.artifactCacheRoot,
+					path.join(config.runtimeDir, "credentials"),
+					undefined,
+					providerAdmissionClient,
+				)
 			: undefined;
 		runtime = await EngineRuntime.create({
 			databasePath,
@@ -282,6 +291,15 @@ export function coreMcpUrl(serverUrl: string): string {
 	} else {
 		url.pathname = `${pathname}/mcp/core`;
 	}
+	return url.toString();
+}
+
+export function providerAdmissionUrl(serverUrl: string): string {
+	const url = new URL(serverUrl);
+	const pathname = url.pathname.replace(/\/+$/, "");
+	url.pathname = /\/mcp\/(?:client_agents|core)$/i.test(pathname)
+		? pathname.replace(/\/mcp\/(?:client_agents|core)$/i, "/provider-admission")
+		: `${pathname}/provider-admission`;
 	return url.toString();
 }
 
