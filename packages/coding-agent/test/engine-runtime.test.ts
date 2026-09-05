@@ -1361,6 +1361,61 @@ describe("EngineRuntime", () => {
 		await restarted.dispose();
 	}, 60_000);
 
+	it("emits an unheld durable queue wake from its exact released binding after restart", async () => {
+		const { runtime, cwd, options } = await createRuntime();
+		const started = await runtime.start(
+			{
+				commandId: "command-released-wake",
+				agentInstanceId: "agent-released-wake",
+				executionId: "execution-released-wake",
+				attemptId: "attempt-released-wake",
+				authorityGeneration: 1,
+				cwd,
+				input: "complete before restart",
+			},
+			profile,
+		);
+		await runtime.drain();
+		const queued = await runtime.enqueueInbox(started, {
+			sourceEventId: "ordinary-released-wake",
+			sourceType: "user",
+			body: "continue after restart",
+			createdAt: Date.now(),
+			deliverAt: Date.now() + 250,
+			wakeIntent: true,
+		});
+		const priorGeneration = runtime.engineGeneration;
+		await runtime.dispose();
+
+		const restarted = await EngineRuntime.create(options);
+		const wakes: EngineEvent[] = [];
+		restarted.subscribe(event => {
+			if (event.kind === "inbox_changed" && event.payload?.action === "wake_due") wakes.push(event);
+		});
+		for (let remaining = 80; wakes.length === 0 && remaining > 0; remaining--) await Bun.sleep(25);
+		expect(restarted.engineGeneration).toBe(priorGeneration + 1);
+		expect(await restarted.store.getBinding(started.agentInstanceId)).toMatchObject({
+			state: "released",
+			manualHold: false,
+			engineGeneration: priorGeneration,
+		});
+		expect(wakes).toHaveLength(1);
+		expect(wakes[0]).toMatchObject({
+			engineGeneration: priorGeneration,
+			bindingId: started.bindingId,
+			payload: {
+				action: "wake_due",
+				queueId: queued.item.queueId,
+				revision: 2,
+				intentRevision: started.intentRevision,
+				manualHold: false,
+			},
+		});
+		await Bun.sleep(100);
+		expect(wakes).toHaveLength(1);
+		await restarted.dispose();
+	}, 60_000);
+
 	it("starts one new Attempt from an immediate ordinary queue wake after the active Attempt settles", async () => {
 		const firstPrompt = Promise.withResolvers<boolean>();
 		const inputs: string[] = [];

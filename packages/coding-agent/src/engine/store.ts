@@ -859,8 +859,8 @@ export class EngineStore {
 			 JOIN engine_runtime_bindings b ON b.agent_instance_id=i.agent_instance_id
 			  AND b.binding_id=i.binding_id AND b.engine_generation=i.engine_generation
 			  AND b.binding_generation=i.binding_generation
-			 WHERE i.engine_generation=? AND i.disposition='pending' AND i.wake_intent=1
-			 AND i.wake_delivered_at IS NULL AND b.manual_hold=0 AND b.state='idle'
+			 WHERE i.engine_generation<=? AND i.disposition='pending' AND i.wake_intent=1
+			 AND i.wake_delivered_at IS NULL AND b.manual_hold=0 AND b.state IN ('idle', 'released')
 			 AND NOT EXISTS (
 			  SELECT 1 FROM engine_inbox_items h WHERE h.session_id=i.session_id AND h.disposition='pending'
 			  AND (h.position<i.position OR (h.position=i.position AND h.queue_id<i.queue_id))
@@ -877,7 +877,8 @@ export class EngineStore {
 				 JOIN engine_runtime_bindings b ON b.agent_instance_id=q.agent_instance_id
 				  AND b.binding_id=q.binding_id AND b.engine_generation=q.engine_generation
 				  AND b.binding_generation=q.binding_generation
-				 WHERE q.engine_generation=? AND q.disposition='pending' AND b.manual_hold=0 AND b.state='idle'
+				 WHERE q.engine_generation<=? AND q.disposition='pending' AND b.manual_hold=0
+				 AND b.state IN ('idle', 'released')
 				 AND q.wake_intent=1 AND q.wake_delivered_at IS NULL AND COALESCE(q.deliver_at, q.created_at)<=?
 				 AND NOT EXISTS (
 				  SELECT 1 FROM engine_inbox_items h WHERE h.session_id=q.session_id AND h.disposition='pending'
