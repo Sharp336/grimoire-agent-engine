@@ -34,7 +34,7 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 		tempDir = undefined;
 	});
 
-	it("retries a stranded hosted claim and settles the same durable job from Engine events", async () => {
+	it("retries stranded claims and NAK-redelivers rejected wakes with the current generation", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-host-${Snowflake.next()}-`));
 		const broker = await startNatsServer(tempDir, true);
 		const engineSeed = broker.engineSeed;
@@ -81,7 +81,7 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 		});
 		const manager = await jetstreamManager(managerConnection);
 		await manager.streams.delete(ENGINE_COMMAND_STREAM);
-		const rpc = new FakeRpc(startCommand(cwd, profile));
+		const rpc = new FakeRpc(startCommand(cwd, profile), { wakeFailures: 1 });
 		const bridgeErrors: Error[] = [];
 		const bridge = await HostedEngineBridge.connect({
 			rpc,
@@ -151,8 +151,10 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 				JSON.stringify(wakeEvent),
 				{ msgID: "event-hosted-wake" },
 			);
-			await waitFor(() => rpc.wakes.length === 1);
+			await waitFor(() => rpc.wakes.length === 1, 15_000);
 			expect(rpc.wakes[0]).toEqual(wakeEvent);
+			expect(rpc.wakeAttempts).toEqual([wakeEvent, wakeEvent]);
+			expect(rpc.wakeGenerationRequests).toEqual([runtime.engineGeneration, runtime.engineGeneration]);
 			await jetstream(enginePublisherConnection).publish(
 				adapter.eventSubject("agent-hosted", "completed"),
 				JSON.stringify({ ...terminalEvent, eventId: "event-terminal-redelivery" }),
@@ -591,7 +593,9 @@ describe("hosted child launch", () => {
 class FakeRpc implements GrimoireRpc {
 	readonly events: Array<Record<string, unknown>> = [];
 	readonly wakes: Array<Record<string, unknown>> = [];
+	readonly wakeAttempts: Array<Record<string, unknown>> = [];
 	readonly claimGenerationRequests: number[] = [];
+	readonly wakeGenerationRequests: number[] = [];
 	terminalStatus: string | undefined;
 	terminalReplayCalls = 0;
 	heartbeatCalls = 0;
@@ -599,6 +603,7 @@ class FakeRpc implements GrimoireRpc {
 	#claimed = false;
 	#leaseToken = "lease-hosted";
 	#heartbeatFailures: number;
+	#wakeFailures: number;
 	#storedEngineGeneration: number | undefined;
 
 	constructor(
@@ -607,9 +612,11 @@ class FakeRpc implements GrimoireRpc {
 			exactRecoveryOnly?: boolean;
 			heartbeatFailures?: number;
 			storedEngineGeneration?: number;
+			wakeFailures?: number;
 		} = {},
 	) {
 		this.#heartbeatFailures = options.heartbeatFailures ?? 0;
+		this.#wakeFailures = options.wakeFailures ?? 0;
 		this.#storedEngineGeneration = options.storedEngineGeneration;
 	}
 
@@ -641,6 +648,12 @@ class FakeRpc implements GrimoireRpc {
 				if (this.#heartbeatFailures-- > 0) throw new Error("temporary heartbeat failure");
 				return { status: "renewed" };
 			case "wake":
+				if (!Number.isSafeInteger(arguments_.engine_generation) || Number(arguments_.engine_generation) <= 0) {
+					throw new Error("wake engine_generation is required");
+				}
+				this.wakeGenerationRequests.push(Number(arguments_.engine_generation));
+				this.wakeAttempts.push(arguments_.event as Record<string, unknown>);
+				if (this.#wakeFailures-- > 0) throw new Error("temporary wake bridge failure");
 				this.wakes.push(arguments_.event as Record<string, unknown>);
 				return { status: this.wakes.length === 1 ? "accepted" : "duplicate", job_id: "command-hosted-wake" };
 			case "event": {

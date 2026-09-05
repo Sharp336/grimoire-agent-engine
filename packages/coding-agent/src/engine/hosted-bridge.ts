@@ -359,6 +359,7 @@ export class HostedEngineBridge {
 						action: "wake",
 						device_id: this.#options.deviceId,
 						engine_id: this.#options.engineId,
+						engine_generation: this.#options.engineGeneration,
 						event,
 					});
 					if (result.status !== "accepted" && result.status !== "duplicate") {
