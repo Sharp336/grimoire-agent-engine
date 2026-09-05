@@ -9,6 +9,10 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { TurnRetryPolicy } from "@oh-my-pi/pi-coding-agent/session/agent-session-types";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import {
+	createProviderRetryBudgetHook,
+	withProviderRetryBudget,
+} from "@oh-my-pi/pi-coding-agent/session/provider-retry-budget";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -18,6 +22,7 @@ const ENGINE_POLICY: TurnRetryPolicy = {
 	transientOnly: true,
 	exactSchedule: true,
 	allowRetryAfterBeyondMaxDelay: true,
+	deferNestedProviderRetries: true,
 };
 
 describe("Engine bounded turn retry policy", () => {
@@ -143,6 +148,54 @@ describe("Engine bounded turn retry policy", () => {
 
 		expect(requested).toEqual(models.slice(0, 4).map(model => `${model!.provider}/${model!.id}`));
 		expect(requested).not.toContain(`${fallbacks[3]!.provider}/${fallbacks[3]!.id}`);
+		expect(session.getLastAssistantMessage()?.errorMessage).toContain("Retry budget exhausted after 3 retries");
+	});
+
+	it("shares the four-request physical budget across scheduled continuations", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled Anthropic model");
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		let physicalRequests = 0;
+		const hook = createProviderRetryBudgetHook();
+		const mock = createMockModel({
+			handler: async () => {
+				const fetch = hook.wrapFetch(model, async () => {
+					physicalRequests += 1;
+					return new Response("busy", { status: 503 });
+				});
+				const error = await fetch("https://example.invalid/provider").catch(reason => reason);
+				return { throw: String(error) };
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.modelFallback": false,
+			"retry.maxDelayMs": 1,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (requestedModel, context, options) => mock.stream(requestedModel, context, options),
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			turnRetryPolicy: ENGINE_POLICY,
+		});
+		sessions.push(session);
+		const waits: number[] = [];
+		vi.spyOn(scheduler, "wait").mockImplementation(async delay => {
+			waits.push(Number(delay));
+		});
+
+		await withProviderRetryBudget(4, () => session.prompt("physical budget"));
+		await session.waitForIdle();
+
+		expect(physicalRequests).toBe(4);
+		expect(waits.filter(delay => delay >= 3_000)).toEqual([3_000, 15_000, 30_000]);
 		expect(session.getLastAssistantMessage()?.errorMessage).toContain("Retry budget exhausted after 3 retries");
 	});
 

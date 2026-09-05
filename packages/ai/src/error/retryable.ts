@@ -49,6 +49,7 @@ export interface ProviderRetryableHooks {
  */
 export function isProviderRetryableError(error: unknown, hooks: ProviderRetryableHooks = {}): boolean {
 	if (!(error instanceof Error)) return false;
+	if (Reflect.get(error, "retryable") === false) return false;
 	if (hooks.isProviderTransient?.(error)) return true;
 	if (isUsageLimit(error)) return false;
 	const httpStatus = status(error);

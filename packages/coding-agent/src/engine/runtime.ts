@@ -22,6 +22,7 @@ import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
+import { createProviderRetryBudgetHook, withProviderRetryBudget } from "../session/provider-retry-budget";
 import type { SessionEntry } from "../session/session-entries";
 import { loadSessionFile } from "../session/session-loader";
 import { type SessionDurabilityCheckpoint, SessionManager } from "../session/session-manager";
@@ -72,6 +73,7 @@ const MAX_INPUT_FIELD_CHARS = 48_000;
 const MAX_INPUT_RESULT_CHARS = 128_000;
 const MAX_HISTORY_MESSAGE_CHARS = 48_000;
 const ENGINE_TURN_RETRY_DELAYS_MS = [3_000, 15_000, 30_000] as const;
+const ENGINE_PROVIDER_MAX_ATTEMPTS = ENGINE_TURN_RETRY_DELAYS_MS.length + 1;
 
 async function collectFailure(errors: unknown[], action: () => unknown | Promise<unknown>): Promise<void> {
 	try {
@@ -1325,6 +1327,9 @@ export class EngineRuntime {
 				outputSchema: profile.outputSchema,
 				requireYieldTool: profile.requireYieldTool,
 				...resolved?.options,
+				providerRequestHook: createProviderRetryBudgetHook(
+					resolved?.options.providerRequestHook ?? this.#sessionDefaults?.providerRequestHook,
+				),
 				disableExtensionDiscovery: true,
 				extensions: [],
 				additionalExtensionPaths: [],
@@ -1356,6 +1361,7 @@ export class EngineRuntime {
 					transientOnly: true,
 					exactSchedule: true,
 					allowRetryAfterBeyondMaxDelay: true,
+					deferNestedProviderRetries: true,
 				},
 				pauseGate,
 				parentAgentId: request.parentAgentInstanceId ? engineAgentId(request.parentAgentInstanceId) : undefined,
@@ -1850,7 +1856,9 @@ export class EngineRuntime {
 			const previous = binding.session.getLastAssistantMessage();
 			let dispatched: boolean;
 			try {
-				dispatched = await this.#withSessionScope(binding, () => this.#dispatchPrompt(binding.session, input));
+				dispatched = await withProviderRetryBudget(ENGINE_PROVIDER_MAX_ATTEMPTS, () =>
+					this.#withSessionScope(binding, () => this.#dispatchPrompt(binding.session, input)),
+				);
 				const current = binding.session.getLastAssistantMessage();
 				if (current !== previous && current?.stopReason === "error") {
 					throw new Error(current.errorMessage?.trim() || "Model request failed");

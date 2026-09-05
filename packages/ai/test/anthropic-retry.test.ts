@@ -70,6 +70,11 @@ describe("isProviderRetryableError", () => {
 		expect(isProviderRetryableError(new Error("Bad request"))).toBe(false);
 	});
 
+	it("honors an explicit permanent classification before transient message heuristics", () => {
+		const error = Object.assign(new Error("503 retry deferred to Engine"), { retryable: false });
+		expect(isProviderRetryableError(error)).toBe(false);
+	});
+
 	it("does not retry persistent account usage/quota limits despite rate-limit wording", () => {
 		// Account-level 429 that says "rate limit" but is really a parked
 		// credential (long retry-after). Must surface immediately so the

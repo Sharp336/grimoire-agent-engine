@@ -166,6 +166,7 @@ import {
 	wrapSteeringForModel,
 } from "./session/messages";
 import { clampProviderContextImages } from "./session/provider-image-budget";
+import { deferNestedProviderRetry } from "./session/provider-retry-budget";
 import {
 	expandDefaultRetryFallbackChains,
 	findRetryFallbackCandidates,
@@ -3514,6 +3515,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			? (streamModel, context, streamOptions) =>
 					settingsAwareStreamFn(streamModel, context, {
 						...streamOptions,
+						...(options.turnRetryPolicy?.deferNestedProviderRetries
+							? { codexSseMaxAttempts: 1, providerRetryWait: deferNestedProviderRetry }
+							: {}),
 						fetch: providerRequestHook.wrapFetch(streamModel, streamOptions?.fetch ?? globalThis.fetch),
 					})
 			: settingsAwareStreamFn;

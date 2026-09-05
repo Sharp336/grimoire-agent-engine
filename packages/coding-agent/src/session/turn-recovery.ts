@@ -45,6 +45,7 @@ import type {
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
 import { assistantTurnProducedOutput, isEmptyAssistantStop, isEmptyErrorTurn } from "./messages";
+import { isDeferredProviderRetryMessage, isExhaustedProviderRetryMessage } from "./provider-retry-budget";
 import {
 	type ActiveRetryFallbackState,
 	calculateRetryBackoffDelayMs,
@@ -1088,6 +1089,9 @@ export class TurnRecovery {
 	 * Context overflow is NOT retryable (handled by compaction instead).
 	 */
 	isRetryableError(message: AssistantMessage): boolean {
+		const errorMessage = message.errorMessage ?? "";
+		if (isExhaustedProviderRetryMessage(errorMessage)) return false;
+		if (this.#turnRetryPolicy?.transientOnly && isDeferredProviderRetryMessage(errorMessage)) return true;
 		if (message.stopReason !== "error") return false;
 		if (this.#isUsagePreflightBlocked(message)) return false;
 		const model = this.#host.model();

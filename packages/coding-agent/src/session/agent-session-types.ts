@@ -132,6 +132,8 @@ export interface TurnRetryPolicy {
 	exactSchedule?: boolean;
 	/** Ignore the interactive retry.maxDelayMs ceiling. */
 	allowRetryAfterBeyondMaxDelay?: boolean;
+	/** Defer provider-internal retries to this recovery saga. */
+	deferNestedProviderRetries?: boolean;
 }
 
 /** Dependencies and initial state used to construct an AgentSession. */

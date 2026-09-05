@@ -219,6 +219,7 @@ export async function fetchWithRetry(
 		} catch (error) {
 			if (signal?.aborted) throw new Error("Request was aborted");
 			const wrapped = wrapNetworkError(error);
+			if (error && typeof error === "object" && Reflect.get(error, "retryable") === false) throw wrapped;
 			if (attempt + 1 >= maxAttempts) throw wrapped;
 			await waitForRetry(resolveDefaultDelay(defaultDelayMs, attempt, maxDelayMs), signal);
 			continue;

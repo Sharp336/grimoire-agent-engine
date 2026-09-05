@@ -41,6 +41,22 @@ describe("fetchWithRetry", () => {
 		expect(attempt).toBe(2);
 	});
 
+	it("does not multiply a caller-classified permanent fetch failure", async () => {
+		let attempt = 0;
+		const permanent = Object.assign(new Error("provider admission denied"), { retryable: false });
+		const request = fetchWithRetry("https://example.invalid/permanent", {
+			fetch: async () => {
+				attempt += 1;
+				throw permanent;
+			},
+			defaultDelayMs: 1,
+			maxAttempts: 5,
+		});
+
+		await expect(request).rejects.toBe(permanent);
+		expect(attempt).toBe(1);
+	});
+
 	it("lets callers stop retries for deterministic response bodies", async () => {
 		let attempt = 0;
 		const customFetch = async () => {
