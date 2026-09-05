@@ -42,6 +42,16 @@ describe("EngineStore", () => {
 		};
 		await first.putBinding(binding);
 		await first.putAttempt(binding, "running");
+		const retry = {
+			attempt: 2,
+			maxAttempts: 3,
+			route: "anthropic/claude-test",
+			delayMs: 15_000,
+			scheduledAt: Date.now() + 15_000,
+			outcome: "waiting" as const,
+			error: "503 overloaded",
+		};
+		await first.commitAttemptRetry(binding, retry, { kind: "retry_scheduled", payload: { retry } });
 		await first.startToolEffect(binding, {
 			effectId: "effect-a-started",
 			toolCallId: "tool-a-started",
@@ -68,6 +78,7 @@ describe("EngineStore", () => {
 		expect((await runtime.store.getBinding("agent-1"))?.state).toBe("released");
 		const events = await runtime.store.pendingEvents();
 		expect(events.map(event => event.kind)).toEqual([
+			"retry_scheduled",
 			"tool_started",
 			"tool_approval_requested",
 			"model_started",
@@ -79,6 +90,14 @@ describe("EngineStore", () => {
 		]);
 		expect(events.at(-1)?.engineGeneration).toBe(runtime.engineGeneration);
 		expect(events.at(-1)?.payload).toEqual({ cause: "engine_lost", lostEngineGeneration: generation });
+		expect(await runtime.store.getAttempt("attempt-1")).toMatchObject({
+			retry_attempt: 2,
+			retry_max_attempts: 3,
+			retry_route: "anthropic/claude-test",
+			retry_delay_ms: 15_000,
+			retry_outcome: "interrupted",
+			retry_error: "503 overloaded",
+		});
 		expect(await runtime.store.getEffect("effect-a-started")).toMatchObject({
 			state: "unknown",
 			outcome: "unknown",

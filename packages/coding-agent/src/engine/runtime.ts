@@ -71,6 +71,7 @@ const MAX_ASSISTANT_FINAL_CHARS = 48_000;
 const MAX_INPUT_FIELD_CHARS = 48_000;
 const MAX_INPUT_RESULT_CHARS = 128_000;
 const MAX_HISTORY_MESSAGE_CHARS = 48_000;
+const ENGINE_TURN_RETRY_DELAYS_MS = [3_000, 15_000, 30_000] as const;
 
 async function collectFailure(errors: unknown[], action: () => unknown | Promise<unknown>): Promise<void> {
 	try {
@@ -146,6 +147,7 @@ interface LiveBinding extends EngineBindingSnapshot {
 	pauseRequests: Map<string, EngineControlInitiator>;
 	resumeCommandIds: Set<string>;
 	traceWriteTail: Promise<void>;
+	retryWriteError?: unknown;
 	traceTools: Map<string, { name: string; startedAt: number }>;
 	childLaunchCount: number;
 	modelCallSequence: number;
@@ -1348,6 +1350,13 @@ export class EngineRuntime {
 				asyncJobManager: this.asyncJobManager,
 				ircBus: this.ircBus,
 				attemptId: request.attemptId,
+				turnRetryPolicy: {
+					delaysMs: ENGINE_TURN_RETRY_DELAYS_MS,
+					sharedFallbackBudget: true,
+					transientOnly: true,
+					exactSchedule: true,
+					allowRetryAfterBeyondMaxDelay: true,
+				},
 				pauseGate,
 				parentAgentId: request.parentAgentInstanceId ? engineAgentId(request.parentAgentInstanceId) : undefined,
 				engineMode: true,
@@ -1431,6 +1440,34 @@ export class EngineRuntime {
 						},
 					});
 					this.#notifyPauseProgress(binding);
+				}
+				if (event.type === "auto_retry_start") {
+					const model = binding.session.model;
+					const retry = {
+						attempt: event.attempt,
+						maxAttempts: event.maxAttempts,
+						...(model ? { route: `${model.provider}/${model.id}` } : {}),
+						delayMs: event.delayMs,
+						scheduledAt: Date.now() + event.delayMs,
+						outcome: "waiting" as const,
+						error: event.errorMessage.slice(0, 2_048),
+					};
+					this.#queueRetryEvent(binding, "retry_scheduled", retry);
+				}
+				if (event.type === "auto_retry_end") {
+					const model = binding.session.model;
+					const retry = {
+						attempt: event.attempt,
+						maxAttempts: ENGINE_TURN_RETRY_DELAYS_MS.length,
+						...(model ? { route: `${model.provider}/${model.id}` } : {}),
+						outcome: event.success
+							? ("succeeded" as const)
+							: event.finalError === "Retry cancelled"
+								? ("cancelled" as const)
+								: ("failed" as const),
+						...(event.finalError ? { error: event.finalError.slice(0, 2_048) } : {}),
+					};
+					this.#queueRetryEvent(binding, "retry_settled", retry);
 				}
 				if (event.type === "agent_end" && event.isTerminal !== false && binding.state === "running") {
 					this.agentRegistry.setStatus(binding.engineAgentId, "idle", binding.session);
@@ -1892,6 +1929,12 @@ export class EngineRuntime {
 		cause?: string,
 	): Promise<void> {
 		await binding.traceWriteTail;
+		if (binding.retryWriteError) {
+			const error = new Error("Engine retry state could not be persisted", { cause: binding.retryWriteError });
+			binding.retryWriteError = undefined;
+			if (state === "completed") throw error;
+			cause = error.message;
+		}
 		for (;;) {
 			await binding.pauseGate.waitUntilResumed();
 			const retry = await this.#inLane(binding.agentInstanceId, async () => {
@@ -1936,6 +1979,24 @@ export class EngineRuntime {
 		const write = binding.traceWriteTail.then(() => this.#emit(binding, kind, payload));
 		binding.traceWriteTail = write.catch(error => {
 			logger.warn("Engine trace event write failed", {
+				kind,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
+	}
+
+	#queueRetryEvent(
+		binding: LiveBinding,
+		kind: "retry_scheduled" | "retry_settled",
+		retry: import("./contracts").EngineRetryState,
+	): void {
+		const write = binding.traceWriteTail.then(async () => {
+			const event = await this.store.commitAttemptRetry(binding, retry, { kind, payload: { retry } });
+			if (event) this.#notifyEvents([event]);
+		});
+		binding.traceWriteTail = write.catch(error => {
+			binding.retryWriteError ??= error;
+			logger.warn("Engine retry state write failed", {
 				kind,
 				error: error instanceof Error ? error.message : String(error),
 			});

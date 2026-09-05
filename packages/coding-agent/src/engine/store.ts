@@ -11,6 +11,8 @@ import type {
 	EngineInboxMutation,
 	EngineInboxSource,
 	EngineInboxTarget,
+	EngineRetryOutcome,
+	EngineRetryState,
 	EngineToolPolicy,
 } from "./contracts";
 
@@ -93,6 +95,13 @@ export interface EngineAttemptRow {
 	transcript_leaf_entry_id: string | null;
 	transcript_byte_boundary: number | null;
 	transcript_revision: number;
+	retry_attempt: number;
+	retry_max_attempts: number;
+	retry_route: string | null;
+	retry_delay_ms: number | null;
+	retry_scheduled_at: number | null;
+	retry_outcome: EngineRetryOutcome | null;
+	retry_error: string | null;
 }
 
 export interface EngineAttemptRecord extends EngineAttemptRow {
@@ -432,6 +441,16 @@ const TRANSCRIPT_CHECKPOINT_COLUMNS = [
 	["engine_attempts", "transcript_revision", "INTEGER NOT NULL DEFAULT 0"],
 ] as const;
 
+const ATTEMPT_RETRY_COLUMNS = [
+	["engine_attempts", "retry_attempt", "INTEGER NOT NULL DEFAULT 0"],
+	["engine_attempts", "retry_max_attempts", "INTEGER NOT NULL DEFAULT 0"],
+	["engine_attempts", "retry_route", "TEXT"],
+	["engine_attempts", "retry_delay_ms", "INTEGER"],
+	["engine_attempts", "retry_scheduled_at", "INTEGER"],
+	["engine_attempts", "retry_outcome", "TEXT"],
+	["engine_attempts", "retry_error", "TEXT"],
+] as const;
+
 const EFFECT_APPROVAL_SCHEMA = [
 	`CREATE TABLE engine_effects (
 		effect_id TEXT PRIMARY KEY,
@@ -543,6 +562,7 @@ const SCHEMA_MIGRATIONS = [
 			["engine_runtime_bindings", "intent_command_id", "TEXT"],
 		] as const,
 	},
+	{ version: 10, statements: [], requiredColumns: ATTEMPT_RETRY_COLUMNS },
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;
@@ -1119,6 +1139,44 @@ export class EngineStore {
 		});
 	}
 
+	/** Atomically persist retry progress on the Attempt and append its public event. */
+	async commitAttemptRetry(
+		target: EngineBindingSnapshot,
+		retry: EngineRetryState,
+		event: EngineTransitionEvent,
+	): Promise<EngineEvent | undefined> {
+		return await this.#transaction(async sql => {
+			const rows = (await sql.unsafe(
+				`UPDATE engine_attempts SET retry_attempt=?, retry_max_attempts=?,
+				 retry_route=COALESCE(?, retry_route), retry_delay_ms=COALESCE(?, retry_delay_ms),
+				 retry_scheduled_at=COALESCE(?, retry_scheduled_at), retry_outcome=?, retry_error=?, updated_at=?
+				 WHERE attempt_id=? AND agent_instance_id=? AND execution_id=? AND binding_id=?
+				 AND engine_generation=? AND binding_generation=? AND authority_generation=?
+				 AND state IN ('running', 'pause_requested', 'paused', 'cancel_requested')
+				 RETURNING attempt_id`,
+				[
+					retry.attempt,
+					retry.maxAttempts,
+					retry.route ?? null,
+					retry.delayMs ?? null,
+					retry.scheduledAt ?? null,
+					retry.outcome ?? null,
+					retry.error ?? null,
+					Date.now(),
+					target.attemptId,
+					target.agentInstanceId,
+					target.executionId,
+					target.bindingId,
+					target.engineGeneration,
+					target.bindingGeneration,
+					target.authorityGeneration,
+				],
+			)) as Array<{ attempt_id: string }>;
+			if (rows.length === 0) return undefined;
+			return await this.#appendTransitionEvent(sql, target, event);
+		});
+	}
+
 	async startToolEffect(target: EngineEventTarget, effect: EngineToolEffectInput): Promise<EngineEvent> {
 		return await this.#transaction(async sql => {
 			await this.#insertToolEffect(sql, target, effect, "started");
@@ -1365,7 +1423,8 @@ export class EngineStore {
 			`SELECT rowid AS row_id, agent_instance_id, execution_id, attempt_id, command_id, binding_id,
 			 engine_generation, binding_generation, authority_generation, state, cause, updated_at,
 			 transcript_session_id, transcript_path, transcript_leaf_entry_id,
-			 transcript_byte_boundary, transcript_revision
+			 transcript_byte_boundary, transcript_revision, retry_attempt, retry_max_attempts,
+			 retry_route, retry_delay_ms, retry_scheduled_at, retry_outcome, retry_error
 			 FROM engine_attempts WHERE attempt_id = ?`,
 			[attemptId],
 		)) as EngineAttemptRecord[];
@@ -1377,7 +1436,9 @@ export class EngineStore {
 			`SELECT rowid AS row_id, agent_instance_id, execution_id, attempt_id, command_id, binding_id,
 			 engine_generation, binding_generation, authority_generation, state, cause, updated_at,
 			 transcript_session_id, transcript_path, transcript_leaf_entry_id, transcript_byte_boundary,
-			 transcript_revision FROM engine_attempts WHERE rowid > ? ORDER BY rowid LIMIT ?`,
+			 transcript_revision, retry_attempt, retry_max_attempts, retry_route, retry_delay_ms,
+			 retry_scheduled_at, retry_outcome, retry_error
+			 FROM engine_attempts WHERE rowid > ? ORDER BY rowid LIMIT ?`,
 			[Math.max(0, Math.floor(afterRowId)), Math.max(1, Math.min(1000, Math.floor(limit)))],
 		)) as EngineAttemptRecord[];
 		return rows;
@@ -1417,7 +1478,8 @@ export class EngineStore {
 			const active = (await sql.unsafe(
 				`SELECT agent_instance_id, execution_id, attempt_id, command_id, binding_id, engine_generation, binding_generation,
 				 authority_generation, state, transcript_session_id, transcript_path, transcript_leaf_entry_id,
-				 transcript_byte_boundary, transcript_revision
+				 transcript_byte_boundary, transcript_revision, retry_attempt, retry_max_attempts,
+				 retry_route, retry_delay_ms, retry_scheduled_at, retry_outcome, retry_error
 				 FROM engine_attempts
 				 WHERE engine_generation < ? AND state IN ('accepted', 'running', 'pause_requested', 'paused', 'waiting_input', 'cancel_requested')`,
 				[engineGeneration],
@@ -1450,7 +1512,9 @@ export class EngineStore {
 				[now, now, engineGeneration],
 			);
 			await sql.unsafe(
-				`UPDATE engine_attempts SET state='interrupted', cause='engine_lost', updated_at=?
+				`UPDATE engine_attempts SET state='interrupted', cause='engine_lost',
+				 retry_outcome=CASE WHEN retry_outcome='waiting' THEN 'interrupted' ELSE retry_outcome END,
+				 updated_at=?
 				 WHERE engine_generation < ? AND state IN ('accepted', 'running', 'pause_requested', 'paused', 'waiting_input', 'cancel_requested')`,
 				[now, engineGeneration],
 			);
@@ -1836,6 +1900,12 @@ export class EngineStore {
 			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(attempt_id) DO UPDATE SET state=excluded.state, cause=excluded.cause,
 			 updated_at=excluded.updated_at,
+			 retry_outcome=CASE
+				WHEN engine_attempts.retry_outcome='waiting' AND excluded.state='completed' THEN 'succeeded'
+				WHEN engine_attempts.retry_outcome='waiting' AND excluded.state='cancelled' THEN 'cancelled'
+				WHEN engine_attempts.retry_outcome='waiting' AND excluded.state='interrupted' THEN 'interrupted'
+				WHEN engine_attempts.retry_outcome='waiting' AND excluded.state='failed' THEN 'failed'
+				ELSE engine_attempts.retry_outcome END,
 			 transcript_session_id=COALESCE(excluded.transcript_session_id, engine_attempts.transcript_session_id),
 			 transcript_path=COALESCE(excluded.transcript_path, engine_attempts.transcript_path),
 			 transcript_leaf_entry_id=COALESCE(excluded.transcript_leaf_entry_id, engine_attempts.transcript_leaf_entry_id),

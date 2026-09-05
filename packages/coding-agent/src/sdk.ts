@@ -574,6 +574,8 @@ export interface CreateAgentSessionOptions {
 	asyncJobManager?: AsyncJobManager;
 	/** Durable Attempt identity for Engine-managed work. Native sessions leave this unset. */
 	attemptId?: string;
+	/** Caller-owned automatic turn recovery policy. */
+	turnRetryPolicy?: import("./session/agent-session-types").TurnRetryPolicy;
 	/** Rootless multi-session Engine path. Native CLI/TUI leaves this unset. */
 	engineMode?: boolean;
 	/** Optional host-owned tracking/approval boundary around native tool execution. */
@@ -3714,6 +3716,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
 			thinkingLevelCeiling: options.thinkingLevelCeiling,
 			initialRetryFallback,
+			turnRetryPolicy: options.turnRetryPolicy,
 			prewalk: options.prewalk,
 			planYolo: options.planYolo,
 			serviceTierByFamily: initialServiceTierByFamily,

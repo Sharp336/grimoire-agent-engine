@@ -120,6 +120,20 @@ export interface InitialRetryFallbackState {
 	pinned?: boolean;
 }
 
+/** Optional caller-owned policy for one bounded automatic turn-recovery saga. */
+export interface TurnRetryPolicy {
+	/** Delay before each retry. Its length is the retry budget. */
+	delaysMs: readonly number[];
+	/** Keep credential/model fallback attempts inside the same retry budget. */
+	sharedFallbackBudget?: boolean;
+	/** Retry transient/capacity failures only; auth, policy, and safety failures settle immediately. */
+	transientOnly?: boolean;
+	/** Skip provider-specific heuristic delays; Retry-After remains a lower bound. */
+	exactSchedule?: boolean;
+	/** Ignore the interactive retry.maxDelayMs ceiling. */
+	allowRetryAfterBeyondMaxDelay?: boolean;
+}
+
 /** Dependencies and initial state used to construct an AgentSession. */
 export interface AgentSessionConfig {
 	agent: Agent;
@@ -151,6 +165,8 @@ export interface AgentSessionConfig {
 	thinkingLevelCeiling?: Effort;
 	/** Retry chain ownership when startup selected one of its fallback entries. */
 	initialRetryFallback?: InitialRetryFallbackState;
+	/** Caller-owned automatic turn recovery policy. */
+	turnRetryPolicy?: TurnRetryPolicy;
 	/** Prewalk from the starting model to a fast/cheap target after implementation begins. */
 	prewalk?: Prewalk;
 	/** Force read-only plan mode at start, auto-approve, then switch to the target. */

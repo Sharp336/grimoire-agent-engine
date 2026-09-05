@@ -40,6 +40,7 @@ import {
 import type { AgentSessionEvent } from "./agent-session-events";
 import type {
 	InitialRetryFallbackState,
+	TurnRetryPolicy,
 	UsageFallbackConfirmation,
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
@@ -176,6 +177,7 @@ export interface TurnRecoveryHost {
 /** Construction-time retry state restored from model selection. */
 export interface TurnRecoveryOptions {
 	initialRetryFallback?: InitialRetryFallbackState;
+	turnRetryPolicy?: TurnRetryPolicy;
 }
 
 type PendingRetryError = {
@@ -195,6 +197,7 @@ type UsageLimitOutcome = {
 /** Owns terminal-stop recovery, automatic retries, and fallback routing. */
 export class TurnRecovery {
 	readonly #host: TurnRecoveryHost;
+	readonly #turnRetryPolicy: TurnRetryPolicy | undefined;
 	#retryAbortController: AbortController | undefined;
 	#retryAttempt = 0;
 	#retryPromise: Promise<void> | undefined;
@@ -236,6 +239,14 @@ export class TurnRecovery {
 
 	constructor(host: TurnRecoveryHost, options: TurnRecoveryOptions = {}) {
 		this.#host = host;
+		this.#turnRetryPolicy = options.turnRetryPolicy;
+		if (
+			this.#turnRetryPolicy &&
+			(this.#turnRetryPolicy.delaysMs.length === 0 ||
+				this.#turnRetryPolicy.delaysMs.some(delay => !Number.isSafeInteger(delay) || delay < 0))
+		) {
+			throw new Error("turnRetryPolicy.delaysMs must contain non-negative safe integers");
+		}
 		if (options.initialRetryFallback) {
 			this.#activeRetryFallback = {
 				...options.initialRetryFallback,
@@ -1089,6 +1100,16 @@ export class TurnRecovery {
 		if (immutableAnthropicThinkingError) return false;
 
 		const id = this.#classifyRetryMessage(message);
+		if (
+			this.#turnRetryPolicy?.transientOnly &&
+			(AIError.is(id, AIError.Flag.AuthFailed) ||
+				AIError.is(id, AIError.Flag.AccountPolicy) ||
+				AIError.is(id, AIError.Flag.ContentBlocked) ||
+				AIError.is(id, AIError.Flag.OAuthExpiry) ||
+				this.isClassifierRefusal(message))
+		) {
+			return false;
+		}
 		// Context overflow is handled by compaction, not retry.
 		const contextWindow = this.#host.model()?.contextWindow ?? 0;
 		if (AIError.isContextOverflow(message, contextWindow)) return false;
@@ -1924,6 +1945,13 @@ export class TurnRecovery {
 		},
 	): Promise<boolean> {
 		const retrySettings = this.#host.settings.getGroup("retry");
+		if (
+			this.#turnRetryPolicy?.transientOnly &&
+			(options?.fireworksFastFallback || options?.hardErrorFallback) &&
+			!this.isRetryableError(message)
+		) {
+			return false;
+		}
 		// The Fireworks Fast→base degrade is an intrinsic model-selection safety net,
 		// not a retry loop, so it runs even when the user disabled retries: it switches
 		// the model once and lets the base turn proceed.
@@ -1947,9 +1975,10 @@ export class TurnRecovery {
 		// (every rotation sets switchedCredential and skips it), so without
 		// this last resort a provider-wide usage cap never fails over to the
 		// configured chain.
+		const configuredMaxRetries = this.#turnRetryPolicy?.delaysMs.length ?? retrySettings.maxRetries;
 		const maxRetries = this.#isBoundedThinkingStreamClose(message)
-			? Math.min(retrySettings.maxRetries, 1)
-			: retrySettings.maxRetries;
+			? Math.min(configuredMaxRetries, 1)
+			: configuredMaxRetries;
 		const retryBudgetExhausted = this.#retryAttempt > maxRetries;
 
 		const errorMessage = message.errorMessage || "Unknown error";
@@ -1965,7 +1994,8 @@ export class TurnRecovery {
 		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
 		let delayMs = staleOpenAIResponsesReplayError
 			? 0
-			: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
+			: (this.#turnRetryPolicy?.delaysMs[this.#retryAttempt - 1] ??
+				calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt));
 		// Transient rate/concurrency caps stay on the same credential, but must
 		// honor their reason-specific windows. The default exponential base
 		// (≈500ms, capped at 8s) otherwise re-hits the cap and burns the retry
@@ -1976,6 +2006,7 @@ export class TurnRecovery {
 			!staleOpenAIResponsesReplayError &&
 			!AIError.is(id, AIError.Flag.UsageLimit) &&
 			parsedRetryAfterMs === undefined &&
+			this.#turnRetryPolicy?.exactSchedule !== true &&
 			(rateLimitReason === "CONCURRENT_LIMIT" || rateLimitReason === "RATE_LIMIT_EXCEEDED")
 		) {
 			const reasonBackoffMs = calculateRateLimitBackoffMs(rateLimitReason);
@@ -2030,7 +2061,11 @@ export class TurnRecovery {
 		const currentSelector = currentModel
 			? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())
 			: undefined;
-		if (accountPolicyDenial && currentModel) {
+		if (
+			accountPolicyDenial &&
+			currentModel &&
+			!(retryBudgetExhausted && this.#turnRetryPolicy?.sharedFallbackBudget)
+		) {
 			switchedCredential = await this.#host.modelRegistry.authStorage.rotateSessionCredential(
 				currentModel.provider,
 				this.#host.sessionId(),
@@ -2053,6 +2088,7 @@ export class TurnRecovery {
 				allowModelFallback &&
 				retrySettings.modelFallback &&
 				!thinkingLoop &&
+				!(retryBudgetExhausted && this.#turnRetryPolicy?.sharedFallbackBudget) &&
 				!(retryBudgetExhausted && classifierRefusal)
 			) {
 				if (!classifierRefusal) {
@@ -2077,6 +2113,10 @@ export class TurnRecovery {
 		}
 
 		if (retryBudgetExhausted) {
+			if (this.#turnRetryPolicy?.sharedFallbackBudget) {
+				switchedModel = false;
+				switchedCredential = false;
+			}
 			if (!switchedModel && !switchedCredential) {
 				const attempt = this.#retryAttempt - 1;
 				message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${errorMessage}`;
@@ -2097,7 +2137,7 @@ export class TurnRecovery {
 			// A fallback model gets a fresh retry budget. Credential rotation
 			// instead keeps the cumulative attempt count while bypassing the
 			// same-route budget: every distinct account must be tried first.
-			if (switchedModel) this.#retryAttempt = 1;
+			if (switchedModel && !this.#turnRetryPolicy?.sharedFallbackBudget) this.#retryAttempt = 1;
 		}
 		if ((classifierRefusal || accountPolicyDenial) && !switchedCredential && !switchedModel) {
 			// A prior attempt in this saga already announced `auto_retry_start`
@@ -2155,7 +2195,13 @@ export class TurnRecovery {
 		// assistant error message is preserved in agent state so the caller
 		// can act on it.
 		const maxDelayMs = retrySettings.maxDelayMs;
-		if (maxDelayMs > 0 && delayMs > maxDelayMs && !switchedCredential && !switchedModel) {
+		if (
+			!this.#turnRetryPolicy?.allowRetryAfterBeyondMaxDelay &&
+			maxDelayMs > 0 &&
+			delayMs > maxDelayMs &&
+			!switchedCredential &&
+			!switchedModel
+		) {
 			await this.persistTerminalEmptyErrorTurn(message);
 			const attempt = this.#retryAttempt;
 			this.#retryAttempt = 0;

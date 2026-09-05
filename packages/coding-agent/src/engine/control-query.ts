@@ -70,6 +70,7 @@ export interface EnginePublicSnapshot {
 	state: EngineAttemptState;
 	manualHold: boolean;
 	intentRevision: number;
+	retry?: import("./contracts").EngineRetryState;
 	profileDigest?: string;
 	transcriptRef?: string;
 	updatedAt: number;
@@ -386,6 +387,18 @@ async function snapshotFromAttempt(
 		state: attempt.state,
 		manualHold: binding?.manualHold ?? false,
 		intentRevision: binding?.intentRevision ?? 0,
+		retry:
+			attempt.retry_attempt > 0
+				? {
+						attempt: Number(attempt.retry_attempt),
+						maxAttempts: Number(attempt.retry_max_attempts),
+						...(attempt.retry_route ? { route: attempt.retry_route } : {}),
+						...(attempt.retry_delay_ms === null ? {} : { delayMs: Number(attempt.retry_delay_ms) }),
+						...(attempt.retry_scheduled_at === null ? {} : { scheduledAt: Number(attempt.retry_scheduled_at) }),
+						...(attempt.retry_outcome ? { outcome: attempt.retry_outcome } : {}),
+						...(attempt.retry_error ? { error: attempt.retry_error } : {}),
+					}
+				: undefined,
 		profileDigest: exactBinding?.profileDigest,
 		transcriptRef: attempt.transcript_session_id ? `history://${attempt.transcript_session_id}` : undefined,
 		updatedAt: Number(attempt.updated_at),

@@ -13,6 +13,17 @@ export type EngineAttemptState =
 	| "interrupted";
 export type EngineBindingState = "idle" | "running" | "released";
 export type EngineToolPolicy = "unrestricted" | "tracked" | "permit";
+export type EngineRetryOutcome = "waiting" | "succeeded" | "failed" | "cancelled" | "interrupted";
+
+export interface EngineRetryState {
+	attempt: number;
+	maxAttempts: number;
+	route?: string;
+	delayMs?: number;
+	scheduledAt?: number;
+	outcome?: EngineRetryOutcome;
+	error?: string;
+}
 
 export interface EngineLaunchProfile {
 	/** Empty disables nested agents; "*" enables the native OMP spawn surface. */
@@ -248,6 +259,8 @@ export interface EngineEvent {
 		| "tool_settled"
 		| "model_started"
 		| "model_settled"
+		| "retry_scheduled"
+		| "retry_settled"
 		| "inbox_changed"
 		| "trace_reasoning"
 		| "trace_tool";
