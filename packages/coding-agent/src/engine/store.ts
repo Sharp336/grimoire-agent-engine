@@ -1591,6 +1591,47 @@ export class EngineStore {
 		return rows.map(eventFromRow);
 	}
 
+	async isInboxNotificationAcknowledgement(event: EngineEvent): Promise<boolean> {
+		if (
+			event.kind !== "inbox_changed" ||
+			event.payload?.action !== "acknowledge" ||
+			!Number.isSafeInteger(event.eventId) ||
+			event.eventId < 1 ||
+			typeof event.payload.queueId !== "string" ||
+			!event.payload.queueId.trim() ||
+			!Number.isSafeInteger(event.payload.revision) ||
+			Number(event.payload.revision) < 1
+		)
+			return false;
+		const [stored] = await this.eventsAfter(event.attemptId, event.eventId - 1, 1);
+		if (!stored) return false;
+		for (const key of [
+			"eventId",
+			"seq",
+			"causationCommandId",
+			"agentInstanceId",
+			"executionId",
+			"attemptId",
+			"bindingId",
+			"engineGeneration",
+			"bindingGeneration",
+			"authorityGeneration",
+			"kind",
+			"createdAt",
+		] as const) {
+			if (stored[key] !== event[key]) return false;
+		}
+		for (const key of ["action", "queueId", "revision", "sourceEventId"] as const) {
+			if (stored.payload?.[key] !== event.payload?.[key]) return false;
+		}
+		// Legacy query/tool mutation IDs also occur in retained outbox events. Only actual
+		// admitted commands have hosted receipts; never infer that distinction from ID shape.
+		const commands = await this.#client.unsafe("SELECT command_id FROM engine_commands WHERE command_id=? LIMIT 1", [
+			event.causationCommandId,
+		]);
+		return commands.length === 0;
+	}
+
 	async eventBounds(attemptId: string): Promise<{ first: number; last: number }> {
 		const rows = (await this.#client.unsafe(
 			"SELECT MIN(event_id) AS first, MAX(event_id) AS last FROM engine_event_outbox WHERE attempt_id=?",

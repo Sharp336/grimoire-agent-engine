@@ -2,10 +2,11 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { jetstream, jetstreamManager } from "@nats-io/jetstream";
+import { AckPolicy, jetstream, jetstreamManager } from "@nats-io/jetstream";
 import { connect, nkeyAuthenticator, nkeys } from "@nats-io/transport-node";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { EngineEvent } from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import {
 	type GrimoireRpc,
 	HostedEngineBridge,
@@ -22,6 +23,7 @@ import {
 import { engineRouteToken } from "@oh-my-pi/pi-coding-agent/engine/route";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { natsConfig, runEngineService } from "@oh-my-pi/pi-coding-agent/engine/service";
+import { EngineStore } from "@oh-my-pi/pi-coding-agent/engine/store";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -371,6 +373,153 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			await broker.process.exited;
 		}
 	}, 30_000);
+
+	it("replays durable inbox notifications after restart without blocking command receipts or queued wakes", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `artel-bridge-inbox-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const connection = await connect({ servers: broker.url });
+		const manager = await jetstreamManager(connection);
+		const js = jetstream(connection);
+		const store = await EngineStore.open(path.join(tempDir, "engine.sqlite"));
+		const target = {
+			agentInstanceId: "agent-inbox",
+			sessionId: "session",
+			executionId: "execution",
+			attemptId: "attempt",
+			bindingId: "binding",
+			engineGeneration: 1,
+			bindingGeneration: 1,
+			authorityGeneration: 1,
+		};
+		await store.enqueueInboxItem(target, {
+			sourceEventId: "queue",
+			sourceType: "user",
+			body: "queued",
+			createdAt: 1,
+		});
+		await store.mutateInboxItem(target, {
+			mutationId: "old-query-ack",
+			queueId: "queue",
+			expectedRevision: 1,
+			op: "acknowledge",
+		});
+		const oldEvents = await store.eventsAfter(target.attemptId);
+		const oldAck = oldEvents[1]!;
+		const envelope = (event: EngineEvent): EngineEventEnvelope => ({
+			...event,
+			schema: "grimoire.engine.event.v1",
+			eventId: String(event.eventId),
+			agentSeq: event.seq,
+			deviceId: "device",
+			engineId: "engine",
+			runtimeBindingId: event.bindingId,
+			type: event.kind === "inbox_changed" ? "attempt.inbox_changed" : "attempt.completed",
+			at: event.createdAt,
+		});
+		const publish = async (event: EngineEventEnvelope) => {
+			await js.publish(
+				`grimoire.engine.v1.d.${engineRouteToken("device")}.e.${engineRouteToken("engine")}.a.${engineRouteToken(event.agentInstanceId)}.evt.changed`,
+				JSON.stringify(event),
+			);
+		};
+		const durable = `host_${engineRouteToken("device")}_${engineRouteToken("engine")}`;
+		await manager.streams.add({ name: ENGINE_EVENT_STREAM, subjects: ["grimoire.engine.v1.>"] });
+		await manager.consumers.add(ENGINE_EVENT_STREAM, {
+			durable_name: durable,
+			ack_policy: AckPolicy.Explicit,
+			max_ack_pending: 128,
+			filter_subject: `grimoire.engine.v1.d.${engineRouteToken("device")}.e.${engineRouteToken("engine")}.a.*.evt.*`,
+		});
+		for (const event of oldEvents) await publish(envelope(event));
+		const consumer = await js.consumers.get(ENGINE_EVENT_STREAM, durable);
+		const oldDelivery = await consumer.fetch({ max_messages: oldEvents.length, expires: 1_000 });
+		for await (const message of oldDelivery) message.nak(1);
+		await connection.flush();
+		expect((await manager.consumers.info(ENGINE_EVENT_STREAM, durable)).num_ack_pending).toBe(2);
+
+		const delivered: string[] = [];
+		const errors: Error[] = [];
+		const bridge = await HostedEngineBridge.connect({
+			eventStore: store,
+			deviceId: "device",
+			engineId: "engine",
+			engineGeneration: 2,
+			servers: broker.url,
+			pollIntervalMs: 10,
+			onError: error => errors.push(error),
+			rpc: {
+				async call(_tool, args) {
+					if (args.action === "claim") return { status: "no_job" };
+					const event = args.event as EngineEventEnvelope;
+					delivered.push(event.causationCommandId);
+					if (
+						event.engineGeneration === 99 ||
+						!["real-control", "start-command", "inbox-wake"].includes(event.causationCommandId)
+					)
+						return { status: "missing" };
+					return { status: args.action === "wake" ? "accepted" : "already_terminal" };
+				},
+			},
+		});
+		try {
+			await store.admitCommand(
+				{
+					...target,
+					commandId: "real-control",
+					operation: "steer",
+					deviceId: "device",
+					engineId: "engine",
+					payloadHash: "payload",
+					canonicalHash: "canonical",
+				},
+				2,
+			);
+			const commandAck = await store.appendEvent({ ...oldAck, causationCommandId: "real-control" });
+			const terminal = await store.appendEvent({
+				...oldAck,
+				causationCommandId: "start-command",
+				kind: "completed",
+				payload: {},
+			});
+			const wake = await store.appendEvent({
+				...oldAck,
+				causationCommandId: "inbox-wake",
+				payload: { action: "wake_due", queueId: "next", revision: 1 },
+			});
+			await publish(envelope(commandAck));
+			await publish(envelope(terminal));
+			await publish(envelope(wake));
+			await waitFor(() => delivered.includes("inbox-wake"), 1_000);
+			expect(delivered).toEqual(["real-control", "start-command", "inbox-wake"]);
+			await waitFor(async () => (await manager.consumers.info(ENGINE_EVENT_STREAM, durable)).num_ack_pending === 0);
+
+			// Same provenance check also handles new query acknowledgements, without a wire marker.
+			await store.enqueueInboxItem(target, {
+				sourceEventId: "next",
+				sourceType: "user",
+				body: "next",
+				createdAt: 2,
+			});
+			await store.mutateInboxItem(target, {
+				mutationId: "new-query-ack",
+				queueId: "next",
+				expectedRevision: 1,
+				op: "acknowledge",
+			});
+			for (const event of await store.eventsAfter(target.attemptId, wake.eventId)) await publish(envelope(event));
+			await publish({ ...envelope(oldAck), engineGeneration: 99 });
+			await publish({ ...envelope(terminal), agentInstanceId: "unknown-agent", causationCommandId: "unknown-job" });
+			await waitFor(() => errors.length === 2);
+			expect(delivered).toEqual(["real-control", "start-command", "inbox-wake", "old-query-ack", "unknown-job"]);
+			expect((await manager.consumers.info(ENGINE_EVENT_STREAM, durable)).num_ack_pending).toBe(2);
+		} finally {
+			await bridge.dispose();
+			await connection.drain();
+			await store.close();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 15_000);
 
 	it("recovers the exact hosted lease for an event after bridge state is lost", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-host-recovery-${Snowflake.next()}-`));

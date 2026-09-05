@@ -19,6 +19,7 @@ import {
 	type EngineEventEnvelope,
 } from "./nats-adapter";
 import { engineAgentInstanceId, engineRouteToken } from "./route";
+import type { EngineStore } from "./store";
 
 interface BridgeClaim {
 	jobId: string;
@@ -180,6 +181,7 @@ export async function launchHostedEngineChild(
 
 export interface HostedEngineBridgeOptions {
 	rpc: GrimoireRpc;
+	eventStore?: EngineStore;
 	deviceId: string;
 	engineId: string;
 	engineGeneration: number;
@@ -365,6 +367,12 @@ export class HostedEngineBridge {
 			let event: EngineEventEnvelope;
 			try {
 				event = parseEvent(message.data);
+				if (
+					event.deviceId !== this.#options.deviceId ||
+					event.engineId !== this.#options.engineId ||
+					engineRouteToken(event.agentInstanceId) !== message.subject.split(".")[8]
+				)
+					throw new Error("Engine event identity does not match its broker route");
 			} catch (error) {
 				this.#report(error);
 				message.nak(5_000);
@@ -406,6 +414,34 @@ export class HostedEngineBridge {
 	}
 
 	async #deliverEvent(event: EngineEventEnvelope): Promise<boolean> {
+		if (
+			event.type === "attempt.inbox_changed" &&
+			typeof event.payload?.action === "string" &&
+			["queued", "reorder", "edit", "annotate", "defer", "drop"].includes(event.payload.action)
+		) {
+			// Query/tool mutations are durable inbox notifications, not hosted command receipts.
+			if (
+				typeof event.payload.queueId !== "string" ||
+				!event.payload.queueId.trim() ||
+				!Number.isSafeInteger(event.payload.revision) ||
+				Number(event.payload.revision) < 1
+			)
+				throw new Error("Invalid Engine inbox notification");
+			return true;
+		}
+		if (
+			event.type === "attempt.inbox_changed" &&
+			event.payload?.action === "acknowledge" &&
+			(await this.#options.eventStore?.isInboxNotificationAcknowledgement({
+				...event,
+				eventId: Number(event.eventId),
+				seq: event.agentSeq,
+				bindingId: event.runtimeBindingId,
+				kind: "inbox_changed",
+				createdAt: event.at,
+			}))
+		)
+			return true;
 		if (event.type === "attempt.inbox_changed" && event.payload?.action === "wake_due") {
 			const result = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
 				action: "wake",

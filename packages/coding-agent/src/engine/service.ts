@@ -124,6 +124,7 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 		if (config.hosted && rpc) {
 			bridge = await HostedEngineBridge.connect({
 				rpc,
+				eventStore: runtime.store,
 				deviceId: config.deviceId,
 				engineId: config.engineId,
 				engineGeneration: runtime.engineGeneration,
