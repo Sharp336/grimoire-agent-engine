@@ -1307,7 +1307,7 @@ describe("EngineRuntime", () => {
 			queueId: queued.queueId,
 			expectedRevision: queued.revision,
 			op: "defer",
-			value: Date.now() + 1_000,
+			value: Date.now() + 60_000,
 		});
 		await runtime.dispose();
 
@@ -1346,6 +1346,20 @@ describe("EngineRuntime", () => {
 			},
 			profile,
 		);
+		const [rebound] = await restarted.listInbox(resumed);
+		if (!rebound) throw new Error("rebound inbox item was not retained");
+		expect(rebound).toMatchObject({
+			queueId: "message-deferred-restart",
+			attemptId: "attempt-inbox-recipient-b",
+			revision: 3,
+		});
+		await restarted.mutateInbox(resumed, {
+			mutationId: "defer-after-restart-rebind",
+			queueId: rebound.queueId,
+			expectedRevision: rebound.revision,
+			op: "defer",
+			value: Date.now() + 50,
+		});
 		for (let remaining = 50; wakes.length === 0 && remaining > 0; remaining--) await Bun.sleep(50);
 		await Bun.sleep(150);
 		expect(wakes).toHaveLength(1);
@@ -1355,7 +1369,7 @@ describe("EngineRuntime", () => {
 			queueId: "message-deferred-restart",
 			attemptId: "attempt-inbox-recipient-b",
 			wakeIntent: true,
-			revision: 4,
+			revision: 5,
 			deliveryPayload: "edited before resuming",
 		});
 		await restarted.dispose();
