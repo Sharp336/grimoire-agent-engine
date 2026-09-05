@@ -592,6 +592,77 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 		}
 	}, 60_000);
 
+	it("releases a queued wake after an exact terminal claim replaces a failed hosted fallback", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `artel-bridge-terminal-claim-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const connection = await connect({ servers: broker.url });
+		const manager = await jetstreamManager(connection);
+		await manager.streams.add({ name: ENGINE_EVENT_STREAM, subjects: ["grimoire.engine.v1.>"] });
+		const calls: string[] = [];
+		const errors: Error[] = [];
+		let terminalClaimAvailable = false;
+		const bridge = await HostedEngineBridge.connect({
+			rpc: {
+				async call(_tool, args) {
+					if (args.action === "claim") {
+						if (!args.job_id) return { status: "no_job" };
+						if (!terminalClaimAvailable) throw new Error("Hosted fallback cannot claim the local terminal job");
+						return { status: "already_terminal" };
+					}
+					const event = args.event as EngineEventEnvelope;
+					calls.push(`${args.action}:${event.eventId}`);
+					return { status: args.action === "wake" ? "accepted" : "already_terminal" };
+				},
+			},
+			deviceId: "device",
+			engineId: "engine",
+			engineGeneration: 1,
+			servers: broker.url,
+			pollIntervalMs: 10,
+			onError: error => errors.push(error),
+		});
+		try {
+			for (const [index, type] of ["model.settled", "attempt.completed", "attempt.inbox_changed"].entries()) {
+				const event: EngineEventEnvelope = {
+					schema: "grimoire.engine.event.v1",
+					eventId: String(index + 1),
+					agentSeq: index + 1,
+					causationCommandId: "local-terminal-job",
+					deviceId: "device",
+					engineId: "engine",
+					engineGeneration: 1,
+					agentInstanceId: "agent",
+					runtimeBindingId: "binding",
+					bindingGeneration: 1,
+					executionId: "execution",
+					attemptId: "attempt",
+					authorityGeneration: 1,
+					type,
+					at: Date.now(),
+					...(index === 2 ? { payload: { action: "wake_due", queueId: "queued-B", revision: 2 } } : {}),
+				};
+				await jetstream(connection).publish(
+					`grimoire.engine.v1.d.${engineRouteToken("device")}.e.${engineRouteToken("engine")}.a.${engineRouteToken("agent")}.evt.test`,
+					new TextEncoder().encode(JSON.stringify(event)),
+				);
+			}
+			await waitFor(() => errors.length > 0);
+			expect(calls).toEqual([]);
+			const durable = `host_${engineRouteToken("device")}_${engineRouteToken("engine")}`;
+			await waitFor(async () => (await manager.consumers.info(ENGINE_EVENT_STREAM, durable)).num_ack_pending === 3);
+			terminalClaimAvailable = true;
+			await waitFor(() => calls.includes("wake:3"));
+			expect(calls).toEqual(["event:1", "event:2", "wake:3"]);
+			await waitFor(async () => (await manager.consumers.info(ENGINE_EVENT_STREAM, durable)).num_ack_pending === 0);
+			await bridge.drain();
+		} finally {
+			await bridge.dispose();
+			await connection.drain();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 30_000);
+
 	it("keeps a live claim after one transient heartbeat failure", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-host-heartbeat-${Snowflake.next()}-`));
 		const broker = await startNatsServer(tempDir);
