@@ -176,6 +176,8 @@ export function mergeProviderRemoteCompactionConfig(
  */
 export interface ModelPatch {
 	name?: string;
+	requestModelId?: string;
+	authProvider?: string;
 	reasoning?: boolean;
 	thinking?: ThinkingConfig;
 	input?: ("text" | "image")[];
@@ -207,6 +209,8 @@ type ModelTransportPolicy = "merge" | "replace";
 export function applyModelPatch(base: Model<Api>, patch: ModelPatch, transport: ModelTransportPolicy): Model<Api> {
 	const result = { ...base };
 	if (patch.name !== undefined) result.name = patch.name;
+	if (patch.requestModelId !== undefined) result.requestModelId = patch.requestModelId;
+	if (patch.authProvider !== undefined) result.authProvider = patch.authProvider;
 	if (patch.reasoning !== undefined) result.reasoning = patch.reasoning;
 	if (patch.thinking !== undefined) result.thinking = patch.thinking;
 	if (patch.input !== undefined) result.input = patch.input;

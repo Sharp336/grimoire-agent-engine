@@ -1,11 +1,16 @@
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { Api, AuthCredential, AuthCredentialStore, Model, ModelSpec } from "@oh-my-pi/pi-ai";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import {
+	type Api,
+	type AuthCredential,
+	getOAuthProvider,
+	type OAuthProvider,
+	refreshOAuthToken,
+} from "@oh-my-pi/pi-ai";
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils/dirs";
-import { ModelRegistry } from "../config/model-registry";
+import { ModelRegistry, type ProviderConfigInput } from "../config/model-registry";
 import { SETTINGS_SCHEMA, type SettingPath, Settings } from "../config/settings";
 import type { CreateAgentSessionOptions } from "../sdk";
 import { AuthStorage, SqliteAuthCredentialStore } from "../session/auth-storage";
@@ -85,7 +90,28 @@ export interface ResolvedEngineSessionProfile {
 		| "settings"
 	>;
 	childProfiles: EngineChildProfile[];
+	routes: EngineResolvedProviderRoute[];
 	dispose(): void;
+}
+
+export interface EngineResolvedProviderRoute {
+	selector: string;
+	routeRef: string;
+	providerAccountRef: string;
+	modelIdentityId: string;
+	providerSurfaceId: string;
+}
+
+interface LoadedRoute {
+	routeRef: string;
+	route: AvailableModelRoute;
+	accountRef: string;
+	cachedAccount: CachedArtifact;
+	account: ProviderAccount;
+	credential: AuthCredential;
+	authProvider: string;
+	localCredentialId?: number;
+	localModelId?: string;
 }
 
 export class EngineProfileResolver {
@@ -164,32 +190,98 @@ export class EngineProfileResolver {
 			throw new Error("AgentProfile must contain at least one route");
 		}
 		const spawnPolicy = resolveSpawnPolicy(profile, launch);
-		const settings = await Settings.loadReadOnly({
-			cwd,
-			overrides: {
-				disabledProviders,
-				"lsp.shared": launch.lspShared ?? false,
-				"task.maxRecursionDepth": spawnPolicy.maxSpawnDepth,
-			},
-		});
 		const candidates = await this.#routeCandidates(profile, launch.selectedRouteRef);
 		const childProfiles = await this.#childProfiles(spawnPolicy.childProfileRefs);
+		let localStore: Awaited<ReturnType<typeof SqliteAuthCredentialStore.open>> | undefined;
+		const loaded: LoadedRoute[] = [];
 		let lastError: unknown;
 		for (const routeRef of candidates) {
 			try {
-				return await this.#resolveRoute(
-					profile,
-					routeRef,
-					launch,
-					childProfiles,
-					settings,
-					spawnPolicy.maxSpawnDepth,
+				const route = parseJson<AvailableModelRoute>(
+					(await this.#read(routeRef, "grimoire.available_model_route.v1")).content,
+					"AvailableModelRoute",
 				);
+				if (
+					route.schema !== "grimoire.available_model_route.v1" ||
+					route.status === "disabled" ||
+					!route.model?.modelId ||
+					!route.model.modelIdentityId
+				) {
+					throw new Error("AvailableModelRoute has no valid model");
+				}
+				const accountRef = requiredRef(route.providerAccountRef, "providerAccountRef");
+				const cachedAccount = await this.#read(accountRef, "grimoire.provider_account.v1");
+				const account = parseJson<ProviderAccount>(cachedAccount.content, "ProviderAccount");
+				const embeddedCredential = validCredential(account.credential) ? account.credential : undefined;
+				const localBinding = validLocalCredentialBinding(account.credentialBinding)
+					? account.credentialBinding
+					: undefined;
+				if (
+					account.schema !== "grimoire.provider_account.v1" ||
+					account.status === "disabled" ||
+					!account.providerId ||
+					!account.api ||
+					!account.baseUrl ||
+					(!embeddedCredential && !localBinding)
+				) {
+					throw new Error("ProviderAccount does not match AvailableModelRoute");
+				}
+				if (profile.requireTrustedProvider && account.trusted !== true) {
+					throw new Error("AgentProfile requires a trusted provider");
+				}
+				let credential = embeddedCredential;
+				let localCredentialId: number | undefined;
+				if (localBinding) {
+					localStore ??= await SqliteAuthCredentialStore.open(this.localCredentialDbPath);
+					const stored = localStore
+						.listAuthCredentials(account.providerId)
+						.find(
+							item => item.credential.type === "oauth" && item.credential.accountId === localBinding.accountId,
+						);
+					if (!stored) throw new Error("The local OMP account bound to ProviderAccount is unavailable");
+					credential = stored.credential;
+					localCredentialId = stored.id;
+				}
+				if (!credential) throw new Error("ProviderAccount credential is unavailable");
+				loaded.push({
+					routeRef,
+					route,
+					accountRef,
+					cachedAccount,
+					account,
+					credential,
+					authProvider: account.providerId,
+					...(localCredentialId === undefined ? {} : { localCredentialId }),
+				});
 			} catch (error) {
 				lastError = error;
 			}
 		}
-		throw new Error("No usable AvailableModelRoute in AgentProfile", { cause: lastError });
+		if (!loaded.length) {
+			localStore?.close();
+			throw new Error("No usable AvailableModelRoute in AgentProfile", { cause: lastError });
+		}
+		const providerCounts = Map.groupBy(loaded, route => route.account.providerId);
+		for (const route of loaded) {
+			if ((providerCounts.get(route.account.providerId)?.length ?? 0) > 1) {
+				route.authProvider = `grimoire-route-${route.routeRef.slice(5)}`;
+			}
+		}
+		try {
+			return await this.#resolveRoutes(
+				profile,
+				loaded,
+				launch,
+				childProfiles,
+				cwd,
+				disabledProviders,
+				spawnPolicy.maxSpawnDepth,
+				localStore,
+			);
+		} catch (error) {
+			localStore?.close();
+			throw error;
+		}
 	}
 
 	async #routeCandidates(profile: AgentProfile, selected?: string): Promise<string[]> {
@@ -222,105 +314,138 @@ export class EngineProfileResolver {
 		return [...new Set(expanded)];
 	}
 
-	async #resolveRoute(
+	async #resolveRoutes(
 		profile: AgentProfile,
-		routeRef: string,
+		routes: LoadedRoute[],
 		launch: EngineLaunchProfile,
 		childProfiles: EngineChildProfile[],
-		settings: Settings,
+		cwd: string,
+		disabledProviders: string[],
 		maxSpawnDepth: number,
+		localStore?: Awaited<ReturnType<typeof SqliteAuthCredentialStore.open>>,
 	): Promise<ResolvedEngineSessionProfile> {
-		const route = parseJson<AvailableModelRoute>(
-			(await this.#read(routeRef, "grimoire.available_model_route.v1")).content,
-			"AvailableModelRoute",
+		const profileDir = path.join(
+			this.credentialRoot,
+			requiredRef(launch.launchProfileRef, "launchProfileRef").slice(5),
 		);
-		if (
-			route.schema !== "grimoire.available_model_route.v1" ||
-			route.status === "disabled" ||
-			!route.model?.modelId ||
-			!route.model.modelIdentityId
-		) {
-			throw new Error("AvailableModelRoute has no valid model");
-		}
-		const accountRef = requiredRef(route.providerAccountRef, "providerAccountRef");
-		const cachedAccount = await this.#read(accountRef, "grimoire.provider_account.v1");
-		const account = parseJson<ProviderAccount>(cachedAccount.content, "ProviderAccount");
-		const embeddedCredential = validCredential(account.credential) ? account.credential : undefined;
-		const localBinding = validLocalCredentialBinding(account.credentialBinding)
-			? account.credentialBinding
-			: undefined;
-		if (
-			account.schema !== "grimoire.provider_account.v1" ||
-			account.status === "disabled" ||
-			!account.providerId ||
-			!account.api ||
-			!account.baseUrl ||
-			(!embeddedCredential && !localBinding)
-		) {
-			throw new Error("ProviderAccount does not match AvailableModelRoute");
-		}
-		if (profile.requireTrustedProvider && account.trusted !== true) {
-			throw new Error("AgentProfile requires a trusted provider");
-		}
-		const accountDir = path.join(this.credentialRoot, accountRef.slice(5));
-		await fs.mkdir(accountDir, { recursive: true });
-		let authStorage: AuthStorage;
-		if (localBinding) {
-			const store = await SqliteAuthCredentialStore.open(this.localCredentialDbPath);
-			const credential = store
-				.listAuthCredentials(account.providerId)
-				.find(item => item.credential.type === "oauth" && item.credential.accountId === localBinding.accountId);
-			if (!credential) {
-				store.close();
-				throw new Error("The local OMP account bound to ProviderAccount is unavailable");
-			}
-			authStorage = new AuthStorage(exactCredentialStore(store, account.providerId, credential.id), {
-				sourceLabel: "local OMP account",
-			});
-			await authStorage.reload();
-		} else {
-			authStorage = await AuthStorage.create(path.join(accountDir, "credentials.sqlite"));
-		}
+		await fs.mkdir(profileDir, { recursive: true });
+		const sourceProviders = new Map(routes.map(route => [route.authProvider, route.account.providerId]));
+		const authStorage = await AuthStorage.create(path.join(profileDir, "credentials.sqlite"), {
+			sourceLabel: "Grimoire AgentProfile route",
+			refreshOAuthCredential: async (provider, _credentialId, credential, signal) => {
+				const sourceProvider = sourceProviders.get(provider);
+				if (!sourceProvider) throw new Error(`Unknown AgentProfile credential route: ${provider}`);
+				const custom = getOAuthProvider(sourceProvider);
+				if (custom) {
+					if (!custom.refreshToken) throw new Error(`OAuth provider ${sourceProvider} cannot refresh credentials`);
+					return custom.refreshToken(credential, signal);
+				}
+				return refreshOAuthToken(sourceProvider as OAuthProvider, credential, signal);
+			},
+		});
 		try {
-			let unsubscribeWriteback = () => {};
-			if (embeddedCredential) {
-				const sourcePath = path.join(accountDir, "source.json");
+			await authStorage.reload();
+			for (const route of routes) {
+				const sourcePath = path.join(profileDir, `${route.routeRef.slice(5)}.source.json`);
 				const source = await readJson(sourcePath);
-				if (source?.contentHash !== cachedAccount.content_hash) {
-					await authStorage.set(account.providerId, embeddedCredential);
-					await atomicWriteJson(sourcePath, { contentHash: cachedAccount.content_hash });
-				} else await authStorage.reload();
-				const writebackRoot = path.resolve(this.artifactCacheRoot, "..", "credential-writeback");
-				await fs.mkdir(writebackRoot, { recursive: true });
-				const baseCredentialHash = credentialHash(embeddedCredential);
-				const writebackPath = path.join(writebackRoot, `${accountRef.slice(5)}.json`);
-				const writeback = async () => {
-					const credentials = authStorage.listStoredCredentials(account.providerId);
-					if (credentials.length !== 1) return;
+				const sourceIdentity =
+					route.localCredentialId === undefined
+						? route.cachedAccount.content_hash
+						: credentialHash(route.credential);
+				if (source?.sourceIdentity !== sourceIdentity) {
+					await authStorage.set(route.authProvider, route.credential);
+					await atomicWriteJson(sourcePath, { sourceIdentity });
+				}
+			}
+			const writebackRoot = path.resolve(this.artifactCacheRoot, "..", "credential-writeback");
+			await fs.mkdir(writebackRoot, { recursive: true });
+			const writeback = async () => {
+				for (const route of routes) {
+					const credentials = authStorage.listStoredCredentials(route.authProvider);
+					if (credentials.length !== 1) continue;
 					const credential = credentials[0]?.credential;
-					if (!credential) return;
+					if (!credential) continue;
+					if (route.localCredentialId !== undefined) {
+						if (credentialHash(credential) !== credentialHash(route.credential)) {
+							localStore?.updateAuthCredential(route.localCredentialId, credential);
+							route.credential = credential;
+						}
+						continue;
+					}
+					const baseCredentialHash = credentialHash(route.credential);
+					const writebackPath = path.join(writebackRoot, `${route.accountRef.slice(5)}.json`);
 					if (credentialHash(credential) === baseCredentialHash) {
 						await fs.rm(writebackPath, { force: true });
-						return;
+						continue;
 					}
 					await atomicWriteJson(writebackPath, {
 						schema: "grimoire.engine_credential_writeback.v1",
-						artifactRef: accountRef,
-						baseRevision: cachedAccount.revision,
-						baseContentHash: cachedAccount.content_hash,
+						artifactRef: route.accountRef,
+						baseRevision: route.cachedAccount.revision,
+						baseContentHash: route.cachedAccount.content_hash,
 						baseCredentialHash,
 						credential,
 						updatedAt: new Date().toISOString(),
 					});
-				};
-				unsubscribeWriteback = authStorage.onGenerationChanged(() => void writeback().catch(() => {}));
-				await writeback();
-			}
-			const modelRegistry = new ModelRegistry(authStorage, path.join(accountDir, "models.yml"), {
+				}
+			};
+			const unsubscribeWriteback = authStorage.onGenerationChanged(() => void writeback().catch(() => {}));
+			await writeback();
+
+			const modelRegistry = new ModelRegistry(authStorage, path.join(profileDir, "models.yml"), {
 				ignoreLocalModelConfig: true,
-				cacheDbPath: path.join(accountDir, "models.sqlite"),
+				cacheDbPath: path.join(profileDir, "models.sqlite"),
 			});
-			const model = buildModel(toModelSpec(route, account)) as Model;
+			const usedSelectors = new Set<string>();
+			for (const route of routes) {
+				const baseSelector = `${route.account.providerId}/${route.route.model.modelId}`;
+				route.localModelId = usedSelectors.has(baseSelector)
+					? `${route.route.model.modelId}@${route.routeRef.slice(5)}`
+					: route.route.model.modelId;
+				usedSelectors.add(`${route.account.providerId}/${route.localModelId}`);
+			}
+			const byProvider = Map.groupBy(routes, route => route.account.providerId);
+			for (const [provider, providerRoutes] of byProvider) {
+				const first = providerRoutes[0];
+				if (!first) continue;
+				modelRegistry.registerProvider(provider, {
+					api: first.account.api,
+					baseUrl: first.account.baseUrl,
+					models: providerRoutes.map(route =>
+						toModelSpec(route.route, route.account, route.localModelId!, route.authProvider),
+					),
+				});
+			}
+			const resolvedRoutes = routes.map(route => ({
+				selector: `${route.account.providerId}/${route.localModelId}`,
+				routeRef: route.routeRef,
+				providerAccountRef: route.accountRef,
+				modelIdentityId: route.route.model.modelIdentityId,
+				providerSurfaceId: route.route.model.providerSurfaceId,
+			}));
+			const [primary, ...fallbacks] = resolvedRoutes;
+			if (!primary) throw new Error("AgentProfile has no executable route");
+			const settings = await Settings.loadReadOnly({
+				cwd,
+				overrides: {
+					disabledProviders,
+					"lsp.shared": launch.lspShared ?? false,
+					"task.maxRecursionDepth": maxSpawnDepth,
+					"retry.enabled": true,
+					"retry.maxRetries": 3,
+					"retry.baseDelayMs": 3_000,
+					"retry.modelFallback": fallbacks.length > 0,
+					"retry.fallbackRevertPolicy": "never",
+					"retry.fallbackChains": fallbacks.length
+						? { [primary.selector]: fallbacks.map(route => route.selector) }
+						: {},
+				},
+			});
+			const primaryRoute = routes[0];
+			const model = primaryRoute
+				? modelRegistry.find(primaryRoute.account.providerId, primaryRoute.localModelId!)
+				: undefined;
+			if (!model) throw new Error("AgentProfile primary model is unavailable after registration");
 			const profileRestricted = profile.tools?.mode === "allowlist";
 			const launchRestricted = launch.restrictToolNames === true;
 			const profileNames = uniqueStrings(profile.tools?.names ?? []);
@@ -347,9 +472,11 @@ export class EngineProfileResolver {
 					maxSpawnDepth,
 				},
 				childProfiles,
+				routes: resolvedRoutes,
 				dispose: () => {
 					unsubscribeWriteback();
 					authStorage.close();
+					localStore?.close();
 				},
 			};
 		} catch (error) {
@@ -413,7 +540,12 @@ export class EngineProfileResolver {
 	}
 }
 
-function toModelSpec(route: AvailableModelRoute, account: ProviderAccount): ModelSpec<Api> {
+function toModelSpec(
+	route: AvailableModelRoute,
+	account: ProviderAccount,
+	localModelId = route.model.modelId,
+	authProvider?: string,
+): NonNullable<ProviderConfigInput["models"]>[number] {
 	const contextWindow = route.model.contextWindow;
 	const maxTokens = route.model.maxOutputTokens;
 	if (!Number.isSafeInteger(contextWindow) || Number(contextWindow) <= 0) {
@@ -426,11 +558,12 @@ function toModelSpec(route: AvailableModelRoute, account: ProviderAccount): Mode
 		(value): value is "text" | "image" => value === "text" || value === "image",
 	);
 	return {
-		id: route.model.modelId,
-		requestModelId: route.model.requestModelId,
+		id: localModelId,
+		requestModelId:
+			route.model.requestModelId ?? (localModelId === route.model.modelId ? undefined : route.model.modelId),
 		name: route.model.name || route.displayName || route.model.modelId,
 		api: account.api,
-		provider: account.providerId,
+		authProvider,
 		baseUrl: account.baseUrl,
 		headers: account.headers,
 		reasoning: route.model.supportsReasoning === true,
@@ -527,21 +660,6 @@ function validLocalCredentialBinding(value: unknown): value is { source: "local_
 		typeof (value as Record<string, unknown>).accountId === "string" &&
 		((value as Record<string, unknown>).accountId as string).trim().length > 0
 	);
-}
-
-function exactCredentialStore(store: AuthCredentialStore, provider: string, credentialId: number): AuthCredentialStore {
-	return new Proxy(store, {
-		get(target, property) {
-			if (property === "listAuthCredentials") {
-				return (requestedProvider?: string) => {
-					if (requestedProvider !== undefined && requestedProvider !== provider) return [];
-					return target.listAuthCredentials(provider).filter(item => item.id === credentialId);
-				};
-			}
-			const value = Reflect.get(target, property, target) as unknown;
-			return typeof value === "function" ? value.bind(target) : value;
-		},
-	});
 }
 
 function uniqueStrings(values: unknown[]): string[] {

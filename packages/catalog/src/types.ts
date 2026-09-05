@@ -917,6 +917,8 @@ export interface Model<TApi extends Api = Api> {
 	name: string;
 	api: TApi;
 	provider: Provider;
+	/** Credential namespace when one provider exposes several route-bound accounts. */
+	authProvider?: string;
 	baseUrl: string;
 	reasoning: boolean;
 	/**

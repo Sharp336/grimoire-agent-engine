@@ -2,7 +2,7 @@ import { type Api, type ApiKeyResolver, type AuthStorage, isUsageLimitOutcome, t
 import * as AIError from "@oh-my-pi/pi-ai/error";
 
 /** Model slice accepted by the model-form `resolver(model, sessionId)` overload. */
-export type ApiKeyResolverModel = Pick<Model<Api>, "provider" | "baseUrl" | "id">;
+export type ApiKeyResolverModel = Pick<Model<Api>, "provider" | "authProvider" | "baseUrl" | "id" | "requestModelId">;
 
 export interface ApiKeyResolverOptions {
 	/** Session id for credential stickiness; read at resolve time by the caller. */

@@ -233,6 +233,12 @@ export interface EngineEvent {
 		| "tool_settled"
 		| "model_started"
 		| "model_settled"
+		| "provider_attempt_started"
+		| "provider_attempt_settled"
+		| "provider_retry_scheduled"
+		| "provider_retry_finished"
+		| "provider_route_changed"
+		| "provider_route_served"
 		| "inbox_changed"
 		| "trace_reasoning"
 		| "trace_tool";

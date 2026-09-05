@@ -270,7 +270,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(recovery.isRetryableError(message)).toBe(false);
 	});
 
-	it("allows replay-safe hard fallback and excludes committed text with a configured chain", () => {
+	it("does not let a configured chain bypass replay-safety", () => {
 		const fallbackChains = {
 			[`${model.provider}/${model.id}`]: ["openai/gpt-4o-mini"],
 		};
@@ -278,8 +278,8 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		// Thinking-only output is replay-safe: nothing visible reached the user.
 		const message = makeMessage([{ type: "thinking", thinking: "safe reasoning before failing" }], model);
 		const visible = makeMessage([{ type: "text", text: "Already shown" }], model);
-		expect(recovery.isHardErrorFallbackEligible(visible)).toBe(false);
-		expect(recovery.isHardErrorFallbackEligible(message)).toBe(true);
+		expect(recovery.isRetryableError(visible)).toBe(false);
+		expect(recovery.isRetryableError(message)).toBe(true);
 	});
 
 	it("retries partial text while its buffered output remains uncommitted", () => {
@@ -291,7 +291,6 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		);
 		const message = makeMessage([{ type: "text", text: "Buffered partial answer" }], model);
 		expect(recovery.isRetryableError(message)).toBe(true);
-		expect(recovery.isHardErrorFallbackEligible(message)).toBe(true);
 	});
 
 	it("excludes a Fireworks Fast failed turn with partial visible text from Fast→base fallback", () => {
@@ -312,7 +311,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		);
 	});
 
-	it("bars usage-backed payload-shaped overflows from the hard-error fallback chain", () => {
+	it("bars usage-backed payload-shaped overflows from retry and fallback", () => {
 		const fallbackChains = { [`${model.provider}/${model.id}`]: ["openai/gpt-4o-mini"] };
 		const recovery = new TurnRecovery(createHost(model, modelRegistry, { fallbackChains }));
 		const message = {
@@ -323,10 +322,10 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		message.errorId = AIError.classifyMessage(message);
 		expect(AIError.isPayloadRejection(message)).toBe(true);
 		expect(AIError.isUsageBackedContextOverflow(message, model.contextWindow ?? 0)).toBe(true);
-		expect(recovery.isHardErrorFallbackEligible(message)).toBe(false);
+		expect(recovery.isRetryableError(message)).toBe(false);
 	});
 
-	it("keeps text-ambiguous media-budget 413s eligible for the configured chain", () => {
+	it("keeps text-ambiguous media-budget 413s terminal", () => {
 		const fallbackChains = { [`${model.provider}/${model.id}`]: ["openai/gpt-4o-mini"] };
 		const recovery = new TurnRecovery(createHost(model, modelRegistry, { fallbackChains }));
 		const message = {
@@ -335,7 +334,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		} as AssistantMessage;
 		message.errorId = AIError.classifyMessage(message);
 		expect(AIError.isContextOverflow(message, model.contextWindow ?? 0)).toBe(true);
-		expect(recovery.isHardErrorFallbackEligible(message)).toBe(true);
+		expect(recovery.isRetryableError(message)).toBe(false);
 	});
 
 	it("keeps pure token-context overflows barred from the configured chain", () => {
@@ -348,7 +347,7 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		message.errorId = AIError.classifyMessage(message);
 		expect(AIError.isContextOverflow(message, model.contextWindow ?? 0)).toBe(true);
 		expect(AIError.isPayloadRejection(message)).toBe(false);
-		expect(recovery.isHardErrorFallbackEligible(message)).toBe(false);
+		expect(recovery.isRetryableError(message)).toBe(false);
 	});
 
 	it("treats a thinking-only partial turn as still retriable", () => {
@@ -370,7 +369,6 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			model,
 		);
 		expect(recovery.isRetryableError(message)).toBe(false);
-		expect(recovery.isHardErrorFallbackEligible(message)).toBe(false);
 	});
 
 	it("keeps side-effecting output replay-unsafe while text is uncommitted", () => {
@@ -383,13 +381,34 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			model,
 		);
 		expect(recovery.isRetryableError(message)).toBe(false);
-		expect(recovery.isHardErrorFallbackEligible(message)).toBe(false);
 	});
 
 	it("keeps an empty-content error retriable (baseline)", () => {
 		const recovery = new TurnRecovery(createHost(model, modelRegistry));
 		const message = makeMessage([], model);
 		expect(recovery.isRetryableError(message)).toBe(true);
+	});
+
+	it("keeps auth, policy, invalid-request, and safety failures terminal", () => {
+		const recovery = new TurnRecovery(createHost(model, modelRegistry));
+		for (const flag of [
+			AIError.Flag.AuthFailed,
+			AIError.Flag.AccountPolicy,
+			AIError.Flag.ContentBlocked,
+			AIError.Flag.PayloadRejected,
+			AIError.Flag.Grammar,
+			AIError.Flag.OAuthExpiry,
+		]) {
+			const message = makeMessage([], model);
+			message.errorId = AIError.create(flag, AIError.Flag.Transient);
+			expect(recovery.isRetryableError(message)).toBe(false);
+		}
+		for (const status of [400, 401, 403, 404, 422]) {
+			const message = makeMessage([], model);
+			message.errorId = AIError.create(AIError.Flag.Transient);
+			message.errorStatus = status;
+			expect(recovery.isRetryableError(message)).toBe(false);
+		}
 	});
 
 	it("treats a mix of thinking and text as replay-unsafe (text wins)", () => {
@@ -450,19 +469,19 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 		expect(recovery.isRetryableError(message)).toBe(false);
 	});
 
-	it("keeps replay-safe classifier refusals retriable", () => {
+	it("keeps classifier refusals terminal even when replay-safe", () => {
 		const recovery = new TurnRecovery(createHost(model, modelRegistry));
 		const thinking = makeMessage([{ type: "thinking", thinking: "reasoning before refusal" }], model);
 		thinking.stopDetails = { type: "refusal" };
-		expect(recovery.isRetryableError(thinking)).toBe(true);
+		expect(recovery.isRetryableError(thinking)).toBe(false);
 
 		const whitespace = makeMessage([{ type: "text", text: "   \n\n  " }], model);
 		whitespace.stopDetails = { type: "refusal" };
-		expect(recovery.isRetryableError(whitespace)).toBe(true);
+		expect(recovery.isRetryableError(whitespace)).toBe(false);
 
 		const empty = makeMessage([], model);
 		empty.stopDetails = { type: "refusal" };
-		expect(recovery.isRetryableError(empty)).toBe(true);
+		expect(recovery.isRetryableError(empty)).toBe(false);
 	});
 
 	it("does not retry a classifier refusal after visible text", () => {
@@ -524,10 +543,10 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			return new TurnRecovery(createHost(model, modelRegistry, { messages: [message as AgentMessage, ...tail] }));
 		}
 
-		it("retries a refusal whose only tool call provably never executed", () => {
+		it("does not retry a safety refusal even when its tool call never executed", () => {
 			const message = makeRefusal([toolCall("call-1")]);
 			expect(message.errorId).toBe(0);
-			expect(recoveryFor(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(true);
+			expect(recoveryFor(message, [syntheticResult("call-1")]).isRetryableError(message)).toBe(false);
 		});
 
 		it("does not retry a refusal whose tool call produced a real result", () => {
@@ -561,9 +580,9 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 			expect(recovery.isRetryableError(message)).toBe(false);
 		});
 
-		it("keeps a refusal with no tool calls retriable (baseline)", () => {
+		it("does not retry a safety refusal with no tool calls", () => {
 			const message = makeRefusal([{ type: "thinking", thinking: "reasoning before refusal" }]);
-			expect(recoveryFor(message, []).isRetryableError(message)).toBe(true);
+			expect(recoveryFor(message, []).isRetryableError(message)).toBe(false);
 		});
 
 		it("retries a malformed function call whose tool call provably never executed", () => {

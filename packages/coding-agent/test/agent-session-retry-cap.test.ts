@@ -180,7 +180,7 @@ describe("AgentSession retry delay cap", () => {
 		expect(session.isRetrying).toBe(false);
 	});
 
-	it("honors the reason backoff for a transient rate-limit 429 without a provider hint", async () => {
+	it("uses the configured retry schedule for a transient 429 without a provider hint", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
 			throw new Error("Expected bundled Anthropic test model to exist");
@@ -227,8 +227,8 @@ describe("AgentSession retry delay cap", () => {
 		await session.waitForIdle();
 
 		expect(retryStartEvents).toHaveLength(1);
-		expect(retryStartEvents[0].delayMs).toBe(30_000);
-		expect(waitSpy.mock.calls.some(call => call[0] === 30_000)).toBe(true);
+		expect(retryStartEvents[0].delayMs).toBe(5);
+		expect(waitSpy.mock.calls.some(call => call[0] === 5)).toBe(true);
 		expect(lastAssistant(session).content).toContainEqual({
 			type: "text",
 			text: "recovered after rate-limit window",
@@ -600,7 +600,7 @@ describe("AgentSession retry delay cap", () => {
 		expect(last.content).toContainEqual({ type: "text", text: "recovered after sibling account" });
 	});
 
-	it("tries every Codex account before the configured model fallback on cyber-policy denials", async () => {
+	it("does not retry or fall back on cyber-policy denials", async () => {
 		const primaryModel = getBundledModel("openai-codex", "gpt-5.6-sol");
 		const fallbackModel = getBundledModel("openai", "gpt-5.5");
 		if (!primaryModel || !fallbackModel) {
@@ -672,21 +672,12 @@ describe("AgentSession retry delay cap", () => {
 		await session.prompt("Continue authorized security work");
 		await session.waitForIdle();
 
-		expect(requestedModels).toEqual([
-			`${primaryModel.provider}/${primaryModel.id}`,
-			`${primaryModel.provider}/${primaryModel.id}`,
-			`${primaryModel.provider}/${primaryModel.id}`,
-			`${primaryModel.provider}/${primaryModel.id}`,
-		]);
-		expect(requestedKeys).toHaveLength(4);
-		expect([...requestedKeys].sort()).toEqual(["codex-key-A", "codex-key-B", "codex-key-C", "codex-key-D"]);
+		expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+		expect(requestedKeys).toHaveLength(1);
 		expect(fallbackEvents).toEqual([]);
 		expect(session.model?.provider).toBe(primaryModel.provider);
 		expect(session.model?.id).toBe(primaryModel.id);
-		expect(lastAssistant(session).content).toContainEqual({
-			type: "text",
-			text: "recovered on cyber-approved account",
-		});
+		expect(lastAssistant(session).stopReason).toBe("error");
 	});
 
 	it("tries sibling Codex accounts before advisor model fallback on cyber-policy denials", async () => {
@@ -2222,7 +2213,7 @@ describe("AgentSession retry delay cap", () => {
 		});
 	});
 
-	it("defaults 502 auto-retry to ten capped backoff attempts", async () => {
+	it("defaults 502 auto-retry to the three-step headless schedule", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) {
 			throw new Error("Expected bundled Anthropic test model to exist");
@@ -2241,7 +2232,7 @@ describe("AgentSession retry delay cap", () => {
 			streamFn: (requestedModel, context, options) => {
 				attempts += 1;
 				mock.push(
-					attempts <= 10
+					attempts <= 3
 						? { throw: "502 Bad Gateway upstream_error" }
 						: { content: ["recovered after default 502 retry budget"] },
 				);
@@ -2271,14 +2262,12 @@ describe("AgentSession retry delay cap", () => {
 		await session.prompt("Trigger repeated 502s");
 		await session.waitForIdle();
 
-		expect(attempts).toBe(11);
-		expect(retryStartEvents).toHaveLength(10);
-		expect(retryStartEvents.map(event => event.maxAttempts)).toEqual(new Array(10).fill(10));
-		expect(retryStartEvents.map(event => event.delayMs)).toEqual([
-			500, 1000, 2000, 4000, 8000, 8000, 8000, 8000, 8000, 8000,
-		]);
+		expect(attempts).toBe(4);
+		expect(retryStartEvents).toHaveLength(3);
+		expect(retryStartEvents.map(event => event.maxAttempts)).toEqual([3, 3, 3]);
+		expect(retryStartEvents.map(event => event.delayMs)).toEqual([3_000, 15_000, 30_000]);
 		expect(retryEndEvents).toHaveLength(1);
-		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 10 });
+		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 3 });
 		const last = lastAssistant(session);
 		expect(last.stopReason).toBe("stop");
 		expect(last.content).toContainEqual({ type: "text", text: "recovered after default 502 retry budget" });

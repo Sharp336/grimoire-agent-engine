@@ -66,14 +66,12 @@ export interface ServingModel {
 	isFallback: boolean;
 }
 
-const RETRY_BACKOFF_MAX_DELAY_MS = 8_000;
-const RETRY_BACKOFF_JITTER_RATIO = 0.25;
+const RETRY_BACKOFF_MULTIPLIERS = [1, 5, 10] as const;
 
-/** Calculates capped exponential retry delay with downward jitter. */
+/** Calculates the deterministic headless retry schedule (3s, 15s, 30s by default). */
 export function calculateRetryBackoffDelayMs(baseDelayMs: number, attempt: number): number {
-	const cappedDelayMs = Math.min(Math.max(0, baseDelayMs) * 2 ** Math.max(0, attempt - 1), RETRY_BACKOFF_MAX_DELAY_MS);
-	const jitter = 1 - Math.random() * RETRY_BACKOFF_JITTER_RATIO;
-	return cappedDelayMs * jitter;
+	const multiplier = RETRY_BACKOFF_MULTIPLIERS[Math.min(Math.max(1, attempt), 3) - 1];
+	return Math.max(0, baseDelayMs) * multiplier;
 }
 
 /** Parses a configured retry fallback selector. */

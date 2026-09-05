@@ -267,6 +267,125 @@ describe("EngineProfileResolver", () => {
 		}
 	});
 
+	it("compiles only the ordered AgentProfile routes into one fallback chain", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-engine-profile-routes-"));
+		const cache = path.join(root, "artifacts");
+		const profileRef = "gctx:hhhhhhhhhhhhhhhh";
+		const routeRefs = ["gctx:jjjjjjjjjjjjjjjj", "gctx:kkkkkkkkkkkkkkkk", "gctx:mmmmmmmmmmmmmmmm"];
+		const accountRefs = ["gctx:nnnnnnnnnnnnnnnn", "gctx:pppppppppppppppp", "gctx:qqqqqqqqqqqqqqqq"];
+		await fs.mkdir(cache);
+		await artifact(cache, profileRef, "grimoire.agent_profile.v1", {
+			schema: "grimoire.agent_profile.v1",
+			status: "active",
+			models: routeRefs,
+		});
+		for (const [index, routeRef] of routeRefs.entries()) {
+			await artifact(cache, routeRef!, "grimoire.available_model_route.v1", {
+				schema: "grimoire.available_model_route.v1",
+				status: "active",
+				providerAccountRef: accountRefs[index],
+				model: {
+					modelIdentityId: index < 2 ? "shared-model" : "other-model",
+					providerSurfaceId: `surface-${index}`,
+					modelId: index < 2 ? "same-model" : "other-model",
+					contextWindow: 100_000,
+					maxOutputTokens: 4_096,
+				},
+			});
+			await artifact(cache, accountRefs[index]!, "grimoire.provider_account.v1", {
+				schema: "grimoire.provider_account.v1",
+				status: "active",
+				providerId: index < 2 ? "same-provider" : "other-provider",
+				api: "openai-completions",
+				baseUrl: `https://provider-${index}.invalid`,
+				trusted: true,
+				credential: { type: "api_key", key: `key-${index}` },
+			});
+		}
+
+		const resolver = new EngineProfileResolver(cache, path.join(root, "credentials"));
+		const resolved = await resolver.resolve(
+			{ spawns: "", profileDigest: hash(profileRef), launchProfileRef: profileRef },
+			root,
+		);
+		try {
+			expect(resolved.routes.map(route => route.routeRef)).toEqual(routeRefs);
+			const selectors = resolved.routes.map(route => route.selector);
+			expect(selectors).toEqual([
+				"same-provider/same-model",
+				`same-provider/same-model@${routeRefs[1]!.slice(5)}`,
+				"other-provider/other-model",
+			]);
+			expect(resolved.options.settings?.get("retry.fallbackChains")).toEqual({
+				[selectors[0]!]: selectors.slice(1),
+			});
+			expect(resolved.options.settings?.get("retry.maxRetries")).toBe(3);
+			expect(resolved.options.settings?.get("retry.baseDelayMs")).toBe(3_000);
+			for (const [index, selector] of selectors.entries()) {
+				const slash = selector.indexOf("/");
+				const model = resolved.options.modelRegistry?.find(selector.slice(0, slash), selector.slice(slash + 1));
+				expect(await resolved.options.modelRegistry?.getApiKey(model!)).toBe(`key-${index}`);
+				expect(
+					await resolved.options.modelRegistry?.resolver(model!)({ lastChance: false, error: undefined }),
+				).toBe(`key-${index}`);
+			}
+		} finally {
+			resolved.dispose();
+		}
+	});
+
+	it("expands same-model fallback only across an explicitly equal model identity", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-engine-profile-equivalent-routes-"));
+		const cache = path.join(root, "artifacts");
+		const profileRef = "gctx:rrrrrrrrrrrrrrrr";
+		const routeRefs = ["gctx:ssssssssssssssss", "gctx:tttttttttttttttt", "gctx:uuuuuuuuuuuuuuuu"];
+		const accountRefs = ["gctx:vvvvvvvvvvvvvvvv", "gctx:wwwwwwwwwwwwwwww", "gctx:xxxxxxxxxxxxxxxx"];
+		await fs.mkdir(cache);
+		await artifact(cache, profileRef, "grimoire.agent_profile.v1", {
+			schema: "grimoire.agent_profile.v1",
+			status: "active",
+			models: [routeRefs[0]],
+			allowSameModelProviderFallback: true,
+		});
+		for (const [index, routeRef] of routeRefs.entries()) {
+			await artifact(cache, routeRef!, "grimoire.available_model_route.v1", {
+				schema: "grimoire.available_model_route.v1",
+				status: "active",
+				providerAccountRef: accountRefs[index],
+				model: {
+					modelIdentityId: index < 2 ? "same-logical-model" : "different-logical-model",
+					providerSurfaceId: `surface-${index}`,
+					modelId: "wire-model",
+					contextWindow: 100_000,
+					maxOutputTokens: 4_096,
+				},
+			});
+			await artifact(cache, accountRefs[index]!, "grimoire.provider_account.v1", {
+				schema: "grimoire.provider_account.v1",
+				status: "active",
+				providerId: `provider-${index}`,
+				api: "openai-completions",
+				baseUrl: `https://provider-${index}.invalid`,
+				trusted: true,
+				credential: { type: "api_key", key: `key-${index}` },
+			});
+		}
+
+		const resolved = await new EngineProfileResolver(cache, path.join(root, "credentials")).resolve(
+			{ spawns: "", profileDigest: hash(profileRef), launchProfileRef: profileRef },
+			root,
+		);
+		try {
+			expect(resolved.routes.map(route => route.routeRef)).toEqual(routeRefs.slice(0, 2));
+			expect(resolved.routes.map(route => route.modelIdentityId)).toEqual([
+				"same-logical-model",
+				"same-logical-model",
+			]);
+		} finally {
+			resolved.dispose();
+		}
+	});
+
 	it("runs a local OMP binding on the exact selected OAuth account", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-engine-local-account-"));
 		const cache = path.join(root, "artifacts");

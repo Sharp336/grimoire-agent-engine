@@ -1328,11 +1328,13 @@ export class SessionAdvisors {
 		}
 
 		const accountPolicyDenial = AIError.is(errorId, AIError.Flag.AccountPolicy);
+		const authProvider = currentModel.authProvider ?? currentModel.provider;
+		const requestModelId = currentModel.requestModelId ?? currentModel.id;
 		if (accountPolicyDenial) {
 			const switched = await this.#host.modelRegistry.authStorage.rotateSessionCredential(
-				currentModel.provider,
+				authProvider,
 				advisor.providerSessionId,
-				{ error: message, modelId: currentModel.id, signal },
+				{ error: message, modelId: requestModelId, signal },
 			);
 			if (switched) return true;
 		}
@@ -1343,12 +1345,12 @@ export class SessionAdvisors {
 			isUsageLimitOutcome(extractHttpStatusFromError(error), message);
 		if (usageLimit) {
 			const outcome = await this.#host.modelRegistry.authStorage.markUsageLimitReached(
-				currentModel.provider,
+				authProvider,
 				advisor.providerSessionId,
 				{
 					retryAfterMs,
 					baseUrl: currentModel.baseUrl,
-					modelId: currentModel.id,
+					modelId: requestModelId,
 					signal,
 				},
 			);

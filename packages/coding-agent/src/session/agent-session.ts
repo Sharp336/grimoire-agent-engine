@@ -3146,14 +3146,6 @@ export class AgentSession {
 			let compactionResult = COMPACTION_CHECK_NONE;
 			let checkedCompaction = false;
 			if (activeGoal) {
-				// Payload rejections get a pre-compaction chain consult; checkCompaction()'s overflow path commits a remedy before returning (#9235).
-				if (AIError.isPayloadRejection(msg) && this.#recovery.isHardErrorFallbackEligible(msg)) {
-					const didRetry = await this.#recovery.handleRetryableError(msg, { hardErrorFallback: true });
-					if (didRetry) {
-						await emitAgentEndNotification({ willContinue: true });
-						return;
-					}
-				}
 				maintenanceRoute("active-goal-pre-empt-checkCompaction");
 				const compactionTask = this.#maintenance.checkCompaction(msg);
 				this.#trackPostPromptTask(compactionTask);
@@ -3226,17 +3218,6 @@ export class AgentSession {
 					msg,
 					resumeResolvedStreamStall ? { preserveFailedTurn: true } : undefined,
 				);
-				if (didRetry) {
-					await emitAgentEndNotification({ willContinue: true });
-					return;
-				}
-			} else if (this.#recovery.isHardErrorFallbackEligible(msg)) {
-				// A non-retryable hard error on a model covered by a configured
-				// fallback chain: retrying the SAME model is pointless, but a
-				// DIFFERENT model is a fresh chance — consult the chain before
-				// surfacing the failure. #handleRetryableError bails out (no
-				// backoff-retry of the failing model) when no switch happens.
-				const didRetry = await this.#recovery.handleRetryableError(msg, { hardErrorFallback: true });
 				if (didRetry) {
 					await emitAgentEndNotification({ willContinue: true });
 					return;

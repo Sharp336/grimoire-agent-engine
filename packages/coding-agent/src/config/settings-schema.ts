@@ -1767,7 +1767,7 @@ export const SETTINGS_SCHEMA = {
 
 	"retry.maxRetries": {
 		type: "number",
-		default: 10,
+		default: 3,
 		ui: {
 			tab: "model",
 			group: "Retry & Fallback",
@@ -1783,7 +1783,7 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"retry.baseDelayMs": { type: "number", default: 500 },
+	"retry.baseDelayMs": { type: "number", default: 3_000 },
 	"retry.maxDelayMs": {
 		type: "number",
 		default: 5 * 60 * 1000,

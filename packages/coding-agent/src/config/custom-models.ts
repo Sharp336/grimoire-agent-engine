@@ -78,7 +78,9 @@ export function buildCustomModelOverlay(
 	if (!api) return undefined;
 	return {
 		id: modelDef.id,
+		requestModelId: modelDef.requestModelId,
 		provider: providerName,
+		authProvider: modelDef.authProvider,
 		api,
 		baseUrl: modelDef.baseUrl ?? providerBaseUrl,
 		name: modelDef.name,
@@ -123,9 +125,11 @@ export function finalizeCustomModel(model: CustomModelOverlay, options: CustomMo
 	const supportsTools = resolvedModel.supportsTools ?? reference?.supportsTools;
 	return buildModel({
 		id: resolvedModel.id,
+		requestModelId: resolvedModel.requestModelId,
 		name: resolvedModel.name ?? (options.useDefaults ? resolvedModel.id : undefined),
 		api: resolvedModel.api,
 		provider: resolvedModel.provider,
+		authProvider: resolvedModel.authProvider,
 		baseUrl: resolvedModel.baseUrl,
 		reasoning: resolvedModel.reasoning ?? reference?.reasoning ?? (options.useDefaults ? false : undefined),
 		thinking: inheritReferenceThinking(resolvedModel.thinking, reference, resolvedModel.provider),

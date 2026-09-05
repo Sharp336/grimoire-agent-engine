@@ -449,7 +449,6 @@ export class TurnRecovery {
 		options?: {
 			allowModelFallback?: boolean;
 			fireworksFastFallback?: boolean;
-			hardErrorFallback?: boolean;
 			preserveFailedTurn?: boolean;
 		},
 	): Promise<boolean> {
@@ -466,6 +465,7 @@ export class TurnRecovery {
 		const id = this.#classifyRetryMessage(message);
 		const activeModel = this.#host.model();
 		if (!activeModel || !AIError.is(id, AIError.Flag.UsageLimit)) return false;
+		const authProvider = activeModel.authProvider ?? activeModel.provider;
 
 		let recorded = this.#usageLimitOutcomes.get(message);
 		if (!recorded) {
@@ -475,9 +475,13 @@ export class TurnRecovery {
 				calculateRateLimitBackoffMs(parseRateLimitReason(errorMessage));
 			recorded = (async (): Promise<UsageLimitOutcome> => {
 				const outcome = await this.#host.modelRegistry.authStorage.markUsageLimitReached(
-					activeModel.provider,
+					authProvider,
 					this.#host.sessionId(),
-					{ retryAfterMs, baseUrl: activeModel.baseUrl, modelId: activeModel.id },
+					{
+						retryAfterMs,
+						baseUrl: activeModel.baseUrl,
+						modelId: activeModel.requestModelId ?? activeModel.id,
+					},
 				);
 				return {
 					switchedCredential: outcome.switched,
@@ -1079,6 +1083,7 @@ export class TurnRecovery {
 	isRetryableError(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error") return false;
 		if (this.#isUsagePreflightBlocked(message)) return false;
+		if (this.isClassifierRefusal(message)) return false;
 		const model = this.#host.model();
 		const immutableAnthropicThinkingError =
 			model?.api === "anthropic-messages" &&
@@ -1089,11 +1094,25 @@ export class TurnRecovery {
 		if (immutableAnthropicThinkingError) return false;
 
 		const id = this.#classifyRetryMessage(message);
+		if (
+			AIError.is(id, AIError.Flag.AuthFailed) ||
+			AIError.is(id, AIError.Flag.AccountPolicy) ||
+			AIError.is(id, AIError.Flag.ContentBlocked) ||
+			AIError.is(id, AIError.Flag.PayloadRejected) ||
+			AIError.is(id, AIError.Flag.Grammar) ||
+			AIError.is(id, AIError.Flag.OAuthExpiry)
+		) {
+			return false;
+		}
+		const status = message.errorStatus;
+		if (status !== undefined && status >= 400 && status < 500 && status !== 408 && status !== 429) {
+			return false;
+		}
 		// Context overflow is handled by compaction, not retry.
 		const contextWindow = this.#host.model()?.contextWindow ?? 0;
 		if (AIError.isContextOverflow(message, contextWindow)) return false;
 
-		// Credential rotation and classifier fallbacks are safe only before
+		// Credential rotation and provider fallbacks are safe only before
 		// committed text, images, tool calls, or server tools. Thinking-only
 		// output remains replay-safe. A classifier refusal or malformed-function
 		// response may also be replayed when every emitted tool call is paired
@@ -1102,7 +1121,6 @@ export class TurnRecovery {
 			(this.isClassifierRefusal(message) || AIError.is(id, AIError.Flag.MalformedFunctionCall)) &&
 			this.#unexecutedToolCallsReplaySafe(message);
 		if (this.#hasReplayUnsafeOutput(message) && !replaySafeUnexecutedTools) return false;
-		if (AIError.is(id, AIError.Flag.AccountPolicy) || this.isClassifierRefusal(message)) return true;
 		return AIError.retriable(id);
 	}
 
@@ -1397,11 +1415,12 @@ export class TurnRecovery {
 		if (!this.#host.settings.get("retry.usageAwareFallback")) return false;
 		const currentModel = this.#host.model();
 		if (!currentModel) return false;
+		const authProvider = currentModel.authProvider ?? currentModel.provider;
 		const currentSelector = formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel());
 		let health: ModelUsageHealth;
 		try {
-			health = await this.#host.modelRegistry.authStorage.getModelUsageHealth(currentModel.provider, {
-				modelId: currentModel.id,
+			health = await this.#host.modelRegistry.authStorage.getModelUsageHealth(authProvider, {
+				modelId: currentModel.requestModelId ?? currentModel.id,
 				sessionId: this.#host.sessionId(),
 				baseUrl: currentModel.baseUrl,
 				reserveFraction: this.#host.settings.get("retry.usageReservePct") / 100,
@@ -1426,7 +1445,7 @@ export class TurnRecovery {
 				health.accounts.some(account => account.state === "healthy")
 			) {
 				this.#host.modelRegistry.authStorage.releaseSessionCredentialForReselection(
-					currentModel.provider,
+					authProvider,
 					this.#host.sessionId(),
 				);
 			}
@@ -1469,10 +1488,11 @@ export class TurnRecovery {
 				// (issue #8065).
 				if (!this.#host.contextFitsModel(candidateModel)) continue;
 				try {
+					const candidateAuthProvider = candidateModel.authProvider ?? candidateModel.provider;
 					const candidateHealth = await this.#host.modelRegistry.authStorage.getModelUsageHealth(
-						candidateModel.provider,
+						candidateAuthProvider,
 						{
-							modelId: candidateModel.id,
+							modelId: candidateModel.requestModelId ?? candidateModel.id,
 							sessionId: this.#host.sessionId(),
 							baseUrl: candidateModel.baseUrl,
 							reserveFraction: this.#host.settings.get("retry.usageReservePct") / 100,
@@ -1489,7 +1509,7 @@ export class TurnRecovery {
 							candidateHealth.accounts.some(account => account.state === "healthy")
 						) {
 							this.#host.modelRegistry.authStorage.releaseSessionCredentialForReselection(
-								candidateModel.provider,
+								candidateAuthProvider,
 								this.#host.sessionId(),
 							);
 						}
@@ -1728,46 +1748,6 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * True when a turn failed with a hard (non-retryable) provider error but a
-	 * configured `retry.fallbackChains` entry covers the active model: the same
-	 * model is not worth retrying, yet a DIFFERENT model is a fresh chance, so
-	 * the chain is consulted before the error becomes final. Skips failures a
-	 * model switch cannot fix or must not replay: cancellations (abort-flavored
-	 * errors are not model faults), context overflow (compaction's job),
-	 * classifier refusals (chain consult is handled on the retryable path with
-	 * `pinFallback`), and turns that already emitted replay-unsafe output.
-	 */
-	isHardErrorFallbackEligible(message: AssistantMessage): boolean {
-		if (message.stopReason !== "error") return false;
-		if (this.#isUsagePreflightBlocked(message)) return false;
-		const model = this.#host.model();
-		if (!model) return false;
-		const immutableAnthropicThinkingError =
-			model.api === "anthropic-messages" &&
-			(message.errorStatus === 400 ||
-				message.errorId === 400 ||
-				message.errorMessage?.startsWith("400 ") === true) &&
-			IMMUTABLE_ANTHROPIC_THINKING_ERROR_PATTERN.test(message.errorMessage ?? "");
-		if (immutableAnthropicThinkingError) return false;
-		const retrySettings = this.#host.settings.getGroup("retry");
-		if (!retrySettings.enabled || !retrySettings.modelFallback) return false;
-		if (this.isClassifierRefusal(message)) return false;
-		const id = this.#classifyRetryMessage(message);
-		if (AIError.is(id, AIError.Flag.Abort) || AIError.is(id, AIError.Flag.UserInterrupt)) return false;
-		// Text-ambiguous overflows waive the veto; usage-backed do not — see AIError.isTextAmbiguousContextOverflow (#9235).
-		const contextWindow = model.contextWindow ?? 0;
-		const textAmbiguousOverflow = AIError.isTextAmbiguousContextOverflow(id, message, contextWindow);
-		if (!textAmbiguousOverflow && AIError.isContextOverflow(message, contextWindow)) {
-			return false;
-		}
-		if (this.#hasReplayUnsafeOutput(message)) return false;
-		const currentSelector = formatRetryFallbackSelector(model, this.#host.thinkingLevel());
-		return this.retryFallbackChainKeys(currentSelector).some(
-			role => this.findRetryFallbackCandidates(role, currentSelector).length > 0,
-		);
-	}
-
-	/**
 	 * Switch the active model from a Fireworks Fast (`-fast`) variant to its base
 	 * (Standard) id and stick there for the rest of the session — the auto
 	 * fallback that makes Fast a safe default. Returns false when the current
@@ -1907,11 +1887,9 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * Handle retryable errors with exponential backoff, credential rotation, and
-	 * model-fallback chains. Also entered for NON-retryable errors when a switch
-	 * is the recovery (`fireworksFastFallback`, `hardErrorFallback`): then a
-	 * successful model switch retries immediately, and a failed switch surfaces
-	 * the error without a same-model backoff retry.
+	 * Handle transient provider errors with deterministic backoff, credential
+	 * rotation, and model-fallback chains. Non-retryable provider failures are
+	 * terminal and never consume another route from the shared retry budget.
 	 * @returns true if retry was initiated, false if max retries exceeded or disabled
 	 */
 	async #handleRetryableError(
@@ -1919,7 +1897,6 @@ export class TurnRecovery {
 		options?: {
 			allowModelFallback?: boolean;
 			fireworksFastFallback?: boolean;
-			hardErrorFallback?: boolean;
 			preserveFailedTurn?: boolean;
 		},
 	): Promise<boolean> {
@@ -1958,7 +1935,6 @@ export class TurnRecovery {
 			options?.preserveFailedTurn === true ||
 			((classifierRefusal || AIError.is(id, AIError.Flag.MalformedFunctionCall)) &&
 				this.#unexecutedToolCallsReplaySafe(message));
-		const rateLimitReason = parseRateLimitReason(errorMessage);
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
 		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
 		const recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
@@ -1966,21 +1942,6 @@ export class TurnRecovery {
 		let delayMs = staleOpenAIResponsesReplayError
 			? 0
 			: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
-		// Transient rate/concurrency caps stay on the same credential, but must
-		// honor their reason-specific windows. The default exponential base
-		// (≈500ms, capped at 8s) otherwise re-hits the cap and burns the retry
-		// budget before either window can clear. An explicit provider
-		// retry-after is authoritative in both directions, so the heuristic
-		// window only applies when the error carries no parsed timing.
-		if (
-			!staleOpenAIResponsesReplayError &&
-			!AIError.is(id, AIError.Flag.UsageLimit) &&
-			parsedRetryAfterMs === undefined &&
-			(rateLimitReason === "CONCURRENT_LIMIT" || rateLimitReason === "RATE_LIMIT_EXCEEDED")
-		) {
-			const reasonBackoffMs = calculateRateLimitBackoffMs(rateLimitReason);
-			if (reasonBackoffMs > delayMs) delayMs = reasonBackoffMs;
-		}
 		let switchedCredential = false;
 		let switchedModel = false;
 		// Set when a usage-limit error pinned the wait to credential
@@ -2001,7 +1962,6 @@ export class TurnRecovery {
 				))
 			) {
 				switchedCredential = true;
-				delayMs = 0;
 			} else {
 				// No sibling credential is usable right now. Wait for whichever
 				// comes first: the provider's retry-after window for the current
@@ -2030,13 +1990,12 @@ export class TurnRecovery {
 		const currentSelector = currentModel
 			? formatRetryFallbackSelector(currentModel, this.#host.thinkingLevel())
 			: undefined;
-		if (accountPolicyDenial && currentModel) {
+		if (!retryBudgetExhausted && accountPolicyDenial && currentModel) {
 			switchedCredential = await this.#host.modelRegistry.authStorage.rotateSessionCredential(
-				currentModel.provider,
+				currentModel.authProvider ?? currentModel.provider,
 				this.#host.sessionId(),
-				{ error: errorMessage, modelId: currentModel.id },
+				{ error: errorMessage, modelId: currentModel.requestModelId ?? currentModel.id },
 			);
-			if (switchedCredential) delayMs = 0;
 		}
 		// A thinking-loop abort is not a provider failure — it is the loop guard
 		// asking for a same-model resample, paired with a hidden
@@ -2046,7 +2005,7 @@ export class TurnRecovery {
 		// contents, not model health (issue #8760). Keep it on the same model; the
 		// retry budget still bounds a genuinely stuck stream.
 		const thinkingLoop = AIError.is(id, AIError.Flag.ThinkingLoop);
-		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
+		if (!retryBudgetExhausted && !staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			// A refusal chain stops at the retry budget: the exhausted-attempt
 			// last resort is for provider failures, not classifier decisions.
 			if (
@@ -2069,35 +2028,27 @@ export class TurnRecovery {
 			if (!switchedModel && allowModelFallback && options?.fireworksFastFallback) {
 				switchedModel = await this.#tryFireworksFastFallback(currentSelector);
 			}
-			if (switchedModel) {
-				delayMs = 0;
-			} else if (usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs) {
+			if (usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs) {
 				delayMs = parsedRetryAfterMs;
 			}
 		}
 
 		if (retryBudgetExhausted) {
-			if (!switchedModel && !switchedCredential) {
-				const attempt = this.#retryAttempt - 1;
-				message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${errorMessage}`;
-				await this.persistTerminalEmptyErrorTurn(message);
-				const retryErrors = await this.#markPendingRetryErrors({ status: "superseded" });
-				await this.#host.emitSessionEvent({
-					type: "auto_retry_end",
-					success: false,
-					attempt,
-					finalError: errorMessage,
-					retryErrors,
-				});
-				this.#clearPendingRetryErrors();
-				this.#retryAttempt = 0;
-				this.resolveRetry(); // Resolve so waitForRetry() completes
-				return false;
-			}
-			// A fallback model gets a fresh retry budget. Credential rotation
-			// instead keeps the cumulative attempt count while bypassing the
-			// same-route budget: every distinct account must be tried first.
-			if (switchedModel) this.#retryAttempt = 1;
+			const attempt = this.#retryAttempt - 1;
+			message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${errorMessage}`;
+			await this.persistTerminalEmptyErrorTurn(message);
+			const retryErrors = await this.#markPendingRetryErrors({ status: "superseded" });
+			await this.#host.emitSessionEvent({
+				type: "auto_retry_end",
+				success: false,
+				attempt,
+				finalError: errorMessage,
+				retryErrors,
+			});
+			this.#clearPendingRetryErrors();
+			this.#retryAttempt = 0;
+			this.resolveRetry();
+			return false;
 		}
 		if ((classifierRefusal || accountPolicyDenial) && !switchedCredential && !switchedModel) {
 			// A prior attempt in this saga already announced `auto_retry_start`
@@ -2121,16 +2072,9 @@ export class TurnRecovery {
 			this.resolveRetry();
 			return false;
 		}
-		// A fallback switch was the whole reason we entered (Fast→base degrade or
-		// a hard-error chain consult) but it could not happen (e.g. no candidate
-		// has a credential). Don't fall through to backing-off and retrying the
-		// failing model for an error the generic classifier wouldn't retry —
-		// surface it instead.
-		if (
-			(options?.fireworksFastFallback || options?.hardErrorFallback) &&
-			!switchedModel &&
-			!this.isRetryableError(message)
-		) {
+		// A Fireworks Fast fallback could not happen (for example, the base route
+		// has no credential). Do not turn that hard failure into a same-route retry.
+		if (options?.fireworksFastFallback && !switchedModel && !this.isRetryableError(message)) {
 			// Same auto_retry_end backstop as the classifier-refusal branch above.
 			if (this.#retryAttempt > 1) {
 				await this.persistTerminalEmptyErrorTurn(message);

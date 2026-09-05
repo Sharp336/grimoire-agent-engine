@@ -901,6 +901,68 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
+	it("persists bounded provider attempts and retry status without raw provider text", async () => {
+		const mock = createMockModel({
+			responses: [{ throw: "502 private upstream failure sentinel" }, { content: ["recovered"] }],
+		});
+		const selector = `${mock.model.provider}/${mock.model.id}`;
+		const route = {
+			selector,
+			routeRef: "gctx:rrrrrrrrrrrrrrrr",
+			providerAccountRef: "gctx:ssssssssssssssss",
+			modelIdentityId: "mock-model",
+			providerSurfaceId: "mock-surface",
+		};
+		const { runtime, cwd } = await createRuntime((session, input) => session.prompt(input), {
+			resolveSessionProfile: async (_launch, sessionCwd) => ({
+				options: {
+					model: mock.model,
+					modelRegistry,
+					settings: await Settings.loadReadOnly({
+						cwd: sessionCwd,
+						overrides: {
+							"retry.baseDelayMs": 0,
+							"retry.maxRetries": 1,
+							"retry.modelFallback": false,
+						},
+					}),
+				},
+				routes: [route],
+				dispose() {},
+			}),
+		});
+		await runtime.start(
+			{
+				commandId: "command-provider-retry-events",
+				agentInstanceId: "agent-provider-retry-events",
+				executionId: "execution-provider-retry-events",
+				attemptId: "attempt-provider-retry-events",
+				authorityGeneration: 1,
+				cwd,
+				input: "private prompt sentinel",
+			},
+			profile,
+		);
+		await runtime.drain();
+		const events = (await runtime.store.pendingEvents()).filter(event => event.kind.startsWith("provider_"));
+		expect(events.map(event => event.kind)).toEqual([
+			"provider_attempt_started",
+			"provider_attempt_settled",
+			"provider_retry_scheduled",
+			"provider_attempt_started",
+			"provider_attempt_settled",
+			"provider_retry_finished",
+		]);
+		expect(events[0]?.payload).toMatchObject({ providerAttempt: 1, route });
+		expect(events[1]?.payload).toMatchObject({ providerAttempt: 1, outcome: "failed" });
+		expect(events[2]?.payload).toMatchObject({ retry: 1, maxRetries: 1, delayMs: 0, route });
+		expect(events[3]?.payload).toMatchObject({ providerAttempt: 2, route });
+		expect(events[4]?.payload).toMatchObject({ providerAttempt: 2, outcome: "completed" });
+		expect(events[5]?.payload).toMatchObject({ outcome: "recovered", retries: 1, route });
+		expect(JSON.stringify(events)).not.toMatch(/private upstream failure sentinel|private prompt sentinel/);
+		await runtime.dispose();
+	}, 60_000);
+
 	it("keeps reasoning and tool input out of public trace events", async () => {
 		const mock = createMockModel({
 			reasoning: true,

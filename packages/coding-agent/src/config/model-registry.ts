@@ -2071,11 +2071,12 @@ export class ModelRegistry {
 	 * ignores that alias so SuperGrok is not auto-selected from a paid key.
 	 */
 	hasConfiguredAuth(model: Model<Api>): boolean {
-		const keyConfig = this.#customProviderApiKeys.get(model.provider);
+		const authProvider = model.authProvider ?? model.provider;
+		const keyConfig = this.#customProviderApiKeys.get(authProvider);
 		return (
 			isCommandConfigValue(keyConfig) ||
-			this.#keylessProviders.has(model.provider) ||
-			this.authStorage.hasResolvableAuth(model.provider)
+			this.#keylessProviders.has(authProvider) ||
+			this.authStorage.hasResolvableAuth(authProvider)
 		);
 	}
 
@@ -2151,14 +2152,15 @@ export class ModelRegistry {
 		sessionId?: string,
 		options?: { signal?: AbortSignal },
 	): Promise<string | undefined> {
-		const commandKey = this.#resolveCommandBackedApiKey(model.provider);
+		const authProvider = model.authProvider ?? model.provider;
+		const commandKey = this.#resolveCommandBackedApiKey(authProvider);
 		if (commandKey.configured) return commandKey.value;
-		if (this.#keylessProviders.has(model.provider) && !this.authStorage.hasAuth(model.provider)) {
+		if (this.#keylessProviders.has(authProvider) && !this.authStorage.hasAuth(authProvider)) {
 			return kNoAuth;
 		}
-		return this.authStorage.getApiKey(model.provider, sessionId, {
+		return this.authStorage.getApiKey(authProvider, sessionId, {
 			baseUrl: model.baseUrl,
-			modelId: model.id,
+			modelId: model.requestModelId ?? model.id,
 			signal: options?.signal,
 		});
 	}
@@ -2220,10 +2222,10 @@ export class ModelRegistry {
 		if (typeof target === "string") {
 			return createApiKeyResolver(this, target, options);
 		}
-		return createApiKeyResolver(this, target.provider, {
+		return createApiKeyResolver(this, target.authProvider ?? target.provider, {
 			...options,
 			baseUrl: target.baseUrl,
-			modelId: target.id,
+			modelId: target.requestModelId ?? target.id,
 		});
 	}
 
@@ -2240,7 +2242,7 @@ export class ModelRegistry {
 	 * Check if a model is using OAuth credentials (subscription).
 	 */
 	isUsingOAuth(model: Model<Api>): boolean {
-		return this.authStorage.hasOAuth(model.provider);
+		return this.authStorage.hasOAuth(model.authProvider ?? model.provider);
 	}
 
 	#clearRuntimeProviderState(providerName: string): void {
@@ -2331,7 +2333,13 @@ export class ModelRegistry {
 				headers: config.headers,
 				apiKey: config.apiKey,
 				api: config.api,
-				oauthConfigured: Boolean(config.oauth),
+				oauthConfigured:
+					Boolean(config.oauth) ||
+					(config.models?.length
+						? config.models.every(
+								model => !!model.authProvider && this.authStorage.hasResolvableAuth(model.authProvider),
+							)
+						: false),
 				models: (config.models ?? []) as ProviderValidationModel[],
 			},
 			"runtime-register",
@@ -2614,6 +2622,8 @@ export interface ProviderConfigInput {
 	) => Promise<readonly NonNullable<ProviderConfigInput["models"]>[number][]>;
 	models?: Array<{
 		id: string;
+		requestModelId?: string;
+		authProvider?: string;
 		name: string;
 		api?: Api;
 		baseUrl?: string;

@@ -2,6 +2,8 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AgentPauseGate } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { isEnoent, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../async/job-manager";
 import { withCapabilityProviderPolicy } from "../capability";
@@ -54,6 +56,7 @@ import {
 	type EngineToolPolicy,
 	validateStartRequest,
 } from "./contracts";
+import type { EngineResolvedProviderRoute } from "./profile-resolver";
 import { engineAgentId, engineRouteToken } from "./route";
 import {
 	EngineAttemptConflictError,
@@ -101,6 +104,29 @@ function terminalYield(messages: readonly { role: string; content?: unknown }[])
 	return { found: false };
 }
 
+function providerErrorClass(
+	message: Pick<AssistantMessage, "errorId" | "errorStatus" | "stopReason">,
+): string | undefined {
+	if (message.stopReason !== "error" && message.stopReason !== "aborted") return undefined;
+	const id = message.errorId ?? 0;
+	if (AIError.is(id, AIError.Flag.Abort) || AIError.is(id, AIError.Flag.UserInterrupt)) return "cancelled";
+	if (AIError.is(id, AIError.Flag.AuthFailed) || AIError.is(id, AIError.Flag.AccountPolicy)) return "auth_permission";
+	if (AIError.is(id, AIError.Flag.ContentBlocked)) return "safety";
+	if (
+		AIError.is(id, AIError.Flag.PayloadRejected) ||
+		AIError.is(id, AIError.Flag.Grammar) ||
+		(message.errorStatus !== undefined &&
+			message.errorStatus >= 400 &&
+			message.errorStatus < 500 &&
+			message.errorStatus !== 408 &&
+			message.errorStatus !== 429)
+	) {
+		return "invalid_request";
+	}
+	if (AIError.is(id, AIError.Flag.UsageLimit)) return "rate_limit";
+	return AIError.retriable(id) ? "transient" : "provider_error";
+}
+
 interface LiveBinding extends EngineBindingSnapshot {
 	attemptState: EngineAttemptState;
 	session: AgentSession;
@@ -120,7 +146,25 @@ interface LiveBinding extends EngineBindingSnapshot {
 	childLaunchCount: number;
 	modelCallSequence: number;
 	activeModelCalls: Set<Promise<void>>;
+	providerAttemptSequence: number;
+	activeProviderAttempt?: number;
+	providerRoutes: Map<string, EngineResolvedProviderRoute>;
 	pendingInput?: PendingInput;
+}
+
+function providerRoutePayload(binding: LiveBinding): Record<string, unknown> {
+	const model = binding.session.model;
+	if (!model) return {};
+	const selector = `${model.provider}/${model.id}`;
+	const route = binding.providerRoutes.get(selector);
+	return route ? { route } : { selector };
+}
+
+function routeForSelector(binding: LiveBinding, selector: string): EngineResolvedProviderRoute | undefined {
+	return (
+		binding.providerRoutes.get(selector) ??
+		[...binding.providerRoutes].find(([routeSelector]) => selector.startsWith(`${routeSelector}:`))?.[1]
+	);
 }
 
 interface ToolInvocationRecord {
@@ -182,6 +226,7 @@ export interface EngineRuntimeOptions {
 	) => Promise<{
 		options: Partial<CreateAgentSessionOptions>;
 		childProfiles?: EngineChildProfile[];
+		routes?: EngineResolvedProviderRoute[];
 		dispose(): void;
 	}>;
 	/** Exact non-secret digest of every external dependency resolved for this launch. */
@@ -967,6 +1012,8 @@ export class EngineRuntime {
 				binding.traceWriteTail = Promise.resolve();
 				binding.modelCallSequence = 0;
 				binding.activeModelCalls.clear();
+				binding.providerAttemptSequence = 0;
+				binding.activeProviderAttempt = undefined;
 				binding.pauseCommandIds.clear();
 				binding.pauseRequests.clear();
 				binding.resumeCommandIds.clear();
@@ -1208,6 +1255,8 @@ export class EngineRuntime {
 				childLaunchCount: 0,
 				modelCallSequence: 0,
 				activeModelCalls: new Set(),
+				providerAttemptSequence: 0,
+				providerRoutes: new Map((resolved?.routes ?? []).map(route => [route.selector, route])),
 			};
 			liveBinding = binding;
 			created.setToolUIContext(
@@ -1218,8 +1267,73 @@ export class EngineRuntime {
 				true,
 			);
 			binding.unsubscribe = created.session.subscribe(event => {
+				if (event.type === "message_start" && event.message.role === "assistant") {
+					const providerAttempt = ++binding.providerAttemptSequence;
+					binding.activeProviderAttempt = providerAttempt;
+					this.#queueRuntimeEvent(binding, "provider_attempt_started", {
+						providerAttempt,
+						...providerRoutePayload(binding),
+					});
+				}
+				if (event.type === "message_end" && event.message.role === "assistant") {
+					const message = event.message;
+					const errorClass = providerErrorClass(message);
+					const providerAttempt = binding.activeProviderAttempt ?? ++binding.providerAttemptSequence;
+					binding.activeProviderAttempt = undefined;
+					const interrupted =
+						(message.stopReason === "error" || message.stopReason === "aborted") && message.content.length > 0;
+					this.#queueRuntimeEvent(binding, "provider_attempt_settled", {
+						providerAttempt,
+						outcome: interrupted
+							? "interrupted"
+							: message.stopReason === "error"
+								? "failed"
+								: message.stopReason === "aborted"
+									? "cancelled"
+									: "completed",
+						...(message.errorId === undefined ? {} : { errorId: message.errorId }),
+						...(message.errorStatus === undefined ? {} : { errorStatus: message.errorStatus }),
+						...(errorClass ? { errorClass } : {}),
+						...providerRoutePayload(binding),
+					});
+				}
+				if (event.type === "auto_retry_start") {
+					this.#queueRuntimeEvent(binding, "provider_retry_scheduled", {
+						retry: event.attempt,
+						maxRetries: event.maxAttempts,
+						nextProviderAttempt: binding.providerAttemptSequence + 1,
+						delayMs: event.delayMs,
+						...(event.errorId === undefined ? {} : { errorId: event.errorId }),
+						...providerRoutePayload(binding),
+					});
+				}
+				if (event.type === "auto_retry_end") {
+					const maxRetries = binding.session.settings.getGroup("retry").maxRetries;
+					this.#queueRuntimeEvent(binding, "provider_retry_finished", {
+						outcome: event.success
+							? "recovered"
+							: event.finalError === "Retry cancelled"
+								? "cancelled"
+								: event.attempt >= maxRetries
+									? "exhausted"
+									: "failed",
+						retries: event.attempt,
+						...providerRoutePayload(binding),
+					});
+				}
+				if (event.type === "retry_fallback_applied") {
+					this.#queueRuntimeEvent(binding, "provider_route_changed", {
+						from: routeForSelector(binding, event.from) ?? { selector: event.from },
+						to: routeForSelector(binding, event.to) ?? { selector: event.to },
+					});
+				}
+				if (event.type === "retry_fallback_succeeded") {
+					this.#queueRuntimeEvent(binding, "provider_route_served", {
+						route: routeForSelector(binding, event.model) ?? { selector: event.model },
+					});
+				}
 				if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_end") {
-					this.#queueTraceEvent(binding, "trace_reasoning", { state: "completed" });
+					this.#queueRuntimeEvent(binding, "trace_reasoning", { state: "completed" });
 				}
 				if (event.type === "tool_execution_start") {
 					binding.activeToolCallIds.add(event.toolCallId);
@@ -1243,7 +1357,7 @@ export class EngineRuntime {
 					binding.activeToolCallIds.delete(event.toolCallId);
 					const started = binding.traceTools.get(event.toolCallId);
 					binding.traceTools.delete(event.toolCallId);
-					this.#queueTraceEvent(binding, "trace_tool", {
+					this.#queueRuntimeEvent(binding, "trace_tool", {
 						tool: {
 							name: started?.name ?? event.toolName,
 							outcome: event.isError ? "failed" : "ok",
@@ -1742,11 +1856,7 @@ export class EngineRuntime {
 		}
 	}
 
-	#queueTraceEvent(
-		binding: LiveBinding,
-		kind: "trace_reasoning" | "trace_tool",
-		payload: Record<string, unknown>,
-	): void {
+	#queueRuntimeEvent(binding: LiveBinding, kind: EngineEvent["kind"], payload: Record<string, unknown>): void {
 		const write = binding.traceWriteTail.then(() => this.#emit(binding, kind, payload));
 		binding.traceWriteTail = write.catch(error => {
 			logger.warn("Engine trace event write failed", {
