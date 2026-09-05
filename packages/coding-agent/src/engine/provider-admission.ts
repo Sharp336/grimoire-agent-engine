@@ -3,6 +3,7 @@ import type { ProviderRequestHook } from "../sdk";
 import type { AuthStorage } from "../session/auth-storage";
 
 type Fetch = NonNullable<SimpleStreamOptions["fetch"]>;
+const ADMISSION_TIMEOUT_MS = 10_000;
 
 export interface ProviderAdmissionIdentity {
 	providerAccountRef: string;
@@ -103,12 +104,15 @@ export class ProviderAdmissionClient {
 
 	async #post(body: Record<string, unknown>, signal: AbortSignal | undefined): Promise<ProviderAdmissionDecision> {
 		let response: Response;
+		const requestSignal = signal
+			? AbortSignal.any([signal, AbortSignal.timeout(ADMISSION_TIMEOUT_MS)])
+			: AbortSignal.timeout(ADMISSION_TIMEOUT_MS);
 		try {
 			response = await this.requestFetch(this.endpoint, {
 				method: "POST",
 				headers: { Authorization: `Bearer ${this.token}`, "Content-Type": "application/json" },
 				body: JSON.stringify(body),
-				signal,
+				signal: requestSignal,
 			});
 		} catch (error) {
 			if (signal?.aborted) throw error;
