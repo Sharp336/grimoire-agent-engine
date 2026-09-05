@@ -170,6 +170,7 @@ export interface EngineChildLaunchResult {
 	status: "completed" | "failed" | "cancelled";
 	assistantFinal?: string;
 	transcriptRef?: string;
+	outputTruncated?: boolean;
 	error?: string;
 }
 

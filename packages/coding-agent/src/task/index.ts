@@ -1116,6 +1116,13 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const child = await launcher.launch({ profileRef, workStepId, toolCallId, signal });
 			const durationMs = Date.now() - startedAt;
 			const output = child.assistantFinal ?? child.error ?? "";
+			const transcriptNotice =
+				child.outputTruncated === true
+					? child.transcriptRef
+						? `Full transcript: ${child.transcriptRef}`
+						: "Full transcript unavailable."
+					: "";
+			const parentOutput = [output, transcriptNotice].filter(Boolean).join("\n\n");
 			const failed = child.status !== "completed";
 			const result: SingleResult = {
 				index: 0,
@@ -1127,7 +1134,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				exitCode: failed ? 1 : 0,
 				output,
 				stderr: child.error ?? "",
-				truncated: false,
+				truncated: child.outputTruncated === true,
 				durationMs,
 				tokens: 0,
 				requests: 0,
@@ -1135,7 +1142,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			};
 			return {
 				content: [
-					{ type: "text", text: failed ? `Child ${child.agentInstanceId} ${child.status}: ${output}` : output },
+					{
+						type: "text",
+						text: failed ? `Child ${child.agentInstanceId} ${child.status}: ${parentOutput}` : parentOutput,
+					},
 				],
 				details: { projectAgentsDir: null, results: [result], totalDurationMs: durationMs },
 				...(failed ? { isError: true } : {}),

@@ -12,6 +12,7 @@ import type {
 	EngineLaunchProfile,
 } from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import { EngineRuntime, type EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { getLspResourceCounts } from "@oh-my-pi/pi-coding-agent/lsp/client";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -1792,8 +1793,12 @@ describe("EngineRuntime", () => {
 
 	it("waits for attempt jobs before publishing the bounded final result", async () => {
 		const job = Promise.withResolvers<string>();
+		const fullFinal = `${"x".repeat(48_001)}FULL-TRANSCRIPT-TAIL`;
 		const { runtime, cwd } = await createRuntime(async session => {
-			Object.defineProperty(session, "getLastAssistantText", { value: () => "final answer" });
+			Object.defineProperty(session, "getLastAssistantText", { value: () => fullFinal });
+			Object.defineProperty(session, "messages", {
+				value: [{ role: "assistant", content: [{ type: "text", text: fullFinal }] }],
+			});
 			const jobId = runtime.asyncJobManager.register("task", "child", () => job.promise, {
 				ownerId: session.getAgentId(),
 				attemptId: session.getAttemptId(),
@@ -1819,8 +1824,9 @@ describe("EngineRuntime", () => {
 		await runtime.drain();
 		const completed = (await runtime.store.pendingEvents()).find(event => event.kind === "completed");
 		expect(completed?.payload).toMatchObject({
-			assistantFinal: "final answer",
+			assistantFinal: `${fullFinal.slice(0, 48_000)}\n[…truncated]`,
 			transcriptRef: `history://${started.engineAgentId}`,
+			outputTruncated: true,
 			transcriptCheckpoint: {
 				sessionId: expect.any(String),
 				sessionPath: expect.any(String),
@@ -1829,7 +1835,8 @@ describe("EngineRuntime", () => {
 				revision: 1,
 			},
 		});
-		expect(await runtime.store.getAttempt(started.attemptId)).toMatchObject({
+		const completedAttempt = await runtime.store.getAttempt(started.attemptId);
+		expect(completedAttempt).toMatchObject({
 			state: "completed",
 			transcript_session_id: expect.any(String),
 			transcript_path: expect.any(String),
@@ -1837,6 +1844,11 @@ describe("EngineRuntime", () => {
 			transcript_byte_boundary: expect.any(Number),
 			transcript_revision: 1,
 		});
+		const history = await InternalUrlRouter.instance().resolve(String(completed?.payload?.transcriptRef), {
+			agentRegistry: runtime.agentRegistry,
+			engineMode: true,
+		});
+		expect(history.content).toContain("FULL-TRANSCRIPT-TAIL");
 		await runtime.dispose();
 	}, 60000);
 
