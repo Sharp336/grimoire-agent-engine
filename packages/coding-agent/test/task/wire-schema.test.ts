@@ -177,6 +177,7 @@ describe("Engine task profile dispatch", () => {
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
 			engineChildLauncher: {
+				parentAgentInstanceRef: "grimoire://tasks/project/current/agents/parent",
 				profiles: [{ profileRef: "gctx:2222222222222222", displayName: "Opus worker" }],
 				async launch(request: {
 					profileRef: string;
@@ -202,6 +203,7 @@ describe("Engine task profile dispatch", () => {
 			workStepId: "implement",
 		});
 		expect(rejected.content[0]).toMatchObject({ type: "text" });
+		expect(rejected.isError).toBeTrue();
 		expect(calls).toHaveLength(0);
 
 		const result = await tool.execute("call-1", {

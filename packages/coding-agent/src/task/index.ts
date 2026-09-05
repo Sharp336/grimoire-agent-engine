@@ -23,6 +23,7 @@ import type { Theme } from "../modes/theme/theme";
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
 import taskAsyncContractTemplate from "../prompts/tools/task-async-contract.md" with { type: "text" };
+import engineTaskDescriptionTemplate from "../prompts/tools/task-engine.md" with { type: "text" };
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
 import { TASK_EFFORTS, type TaskEffort } from "../thinking";
 import { truncateForPrompt } from "../tools/approval";
@@ -185,6 +186,7 @@ function renderDescription(options: TaskDescriptionOptions): string {
 
 function createTaskModeError(text: string): AgentToolResult<TaskToolDetails> {
 	return {
+		isError: true,
 		content: [{ type: "text", text }],
 		details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },
 	};
@@ -622,16 +624,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	/** Dynamic description that reflects current task settings. */
 	get description(): string {
 		if (this.session.engineChildLauncher) {
-			const profiles = this.session.engineChildLauncher.profiles;
-			const catalog = profiles.length
-				? profiles
-						.map(
-							profile =>
-								`- ${profile.profileRef}: ${profile.displayName}${profile.description ? ` — ${profile.description}` : ""}`,
-						)
-						.join("\n")
-				: "- No child AgentProfiles are allowed by the pinned profile.";
-			return `Launch a child AgentSession for an existing Grimoire WorkStep. Select one profileRef explicitly; the parent profile is never inherited.\n\nAvailable AgentProfiles:\n${catalog}`;
+			const launcher = this.session.engineChildLauncher;
+			return prompt.render(engineTaskDescriptionTemplate, {
+				parentAgentInstanceRef: launcher.parentAgentInstanceRef,
+				taskRef: launcher.parentAgentInstanceRef.replace(/\/agents\/[^/]+$/, ""),
+				profiles: launcher.profiles,
+			});
 		}
 		const disabledAgents = this.session.settings.get("task.disabledAgents") as string[];
 		const planMode = this.session.getPlanModeState?.()?.enabled === true;

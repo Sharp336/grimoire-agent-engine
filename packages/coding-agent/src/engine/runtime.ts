@@ -1540,6 +1540,7 @@ export class EngineRuntime {
 				childProfiles.length > 0 &&
 				childProfileRefs.length > 0
 					? {
+							parentAgentInstanceRef: request.agentInstanceRef,
 							profiles: childProfiles,
 							launch: async (child: {
 								profileRef: string;

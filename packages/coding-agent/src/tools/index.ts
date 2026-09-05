@@ -175,6 +175,7 @@ export interface EngineChildLaunchResult {
 }
 
 export interface EngineChildLauncher {
+	readonly parentAgentInstanceRef: string;
 	profiles: readonly EngineChildProfile[];
 	launch(request: {
 		profileRef: string;

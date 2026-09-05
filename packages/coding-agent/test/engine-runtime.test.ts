@@ -1292,6 +1292,87 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
+	it("binds native task discovery to each parent and exposes a failed launch as an error", async () => {
+		const parents = ["first", "second"] as const;
+		const ref = (id: string) => `grimoire://tasks/project/${id}/agents/parent-${id}`;
+		const descriptions = new Map<string, string>();
+		const results = new Map<string, boolean | undefined>();
+		const launches: string[] = [];
+		const { runtime, cwd } = await createRuntime(
+			async (session, input) => {
+				const task = session.getToolByName("task");
+				if (!task) throw new Error("Engine root did not expose task");
+				descriptions.set(input, task.description);
+				const result = await task.execute("delegate", {
+					profileRef: "gctx:2222222222222222",
+					workStepId: "child",
+				});
+				results.set(input, result.isError);
+				if (input === "first") {
+					expect(result.content).toEqual([
+						{ type: "text", text: "Task execution failed: WorkStep child is unavailable" },
+					]);
+				}
+				return true;
+			},
+			{
+				resolveSessionProfile: async () => ({
+					options: {},
+					childProfiles: [{ profileRef: "gctx:2222222222222222", displayName: "Worker" }],
+					dispose() {},
+				}),
+				launchChild: async request => {
+					launches.push(request.parentAgentInstanceRef);
+					if (request.parentAgentInstanceRef === ref("first")) throw new Error("WorkStep child is unavailable");
+					return { agentInstanceId: "child-second", status: "completed", assistantFinal: "child completed" };
+				},
+			},
+		);
+		try {
+			await Promise.all(
+				parents.map(id =>
+					runtime.start(
+						{
+							commandId: `command-${id}`,
+							agentInstanceId: `parent-${id}`,
+							agentInstanceRef: ref(id),
+							executionId: `execution-${id}`,
+							attemptId: `attempt-${id}`,
+							authorityGeneration: 1,
+							cwd,
+							input: id,
+						},
+						{
+							...profile,
+							spawns: "*",
+							maxSpawnDepth: 1,
+							maxChildren: 1,
+							childProfileRefs: ["gctx:2222222222222222"],
+						},
+					),
+				),
+			);
+			await runtime.drain();
+			for (const id of parents) {
+				expect(descriptions.get(id)).toContain(ref(id));
+				expect(descriptions.get(id)).toContain(`Current task: grimoire://tasks/project/${id}`);
+				expect(descriptions.get(id)).not.toContain(ref(id === "first" ? "second" : "first"));
+			}
+			expect(launches.sort()).toEqual(parents.map(ref));
+			expect(results.get("first")).toBeTrue();
+			expect(results.get("second")).not.toBeTrue();
+			const settled = (await runtime.store.pendingEvents()).filter(event => event.kind === "tool_settled");
+			expect(settled).toHaveLength(2);
+			for (const event of settled) {
+				expect(await runtime.store.getEffect(String(event.payload?.invocationId))).toMatchObject({
+					outcome: event.agentInstanceId === "parent-first" ? "failed" : "completed",
+				});
+			}
+		} finally {
+			await runtime.dispose();
+		}
+	}, 60_000);
+
 	it("does not expose task when the pinned profile has no child catalog", async () => {
 		let enabledTools: string[] = [];
 		const { runtime, cwd } = await createRuntime(
