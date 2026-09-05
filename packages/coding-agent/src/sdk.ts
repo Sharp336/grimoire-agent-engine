@@ -9,6 +9,7 @@ import {
 	type AgentTool,
 	AppendOnlyContextManager,
 	filterProviderReplayMessages,
+	type StreamFn,
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type {
@@ -380,6 +381,8 @@ export interface CreateAgentSessionOptions {
 	/** Maximum descendant depth below this session. Undefined keeps the ordinary OMP setting. */
 	maxSpawnDepth?: number;
 	pauseGate?: AgentPauseGate;
+	/** Wraps every physical provider HTTP request for admission and accounting. */
+	providerRequestHook?: ProviderRequestHook;
 
 	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
 	authStorage?: AuthStorage;
@@ -650,6 +653,10 @@ export interface CreateAgentSessionOptions {
 
 	/** Whether to auto-approve all tool calls (--auto-approve CLI flag). Default: false */
 	autoApprove?: boolean;
+}
+
+export interface ProviderRequestHook {
+	wrapFetch(model: Model, fetch: NonNullable<SimpleStreamOptions["fetch"]>): NonNullable<SimpleStreamOptions["fetch"]>;
 }
 
 /** Result from createAgentSession */
@@ -3500,6 +3507,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			wrapStreamFnWithProviderConcurrency(settings, createSettingsAwareStreamFn(settings)),
 			blobBroker,
 		);
+		const providerRequestHook = options.providerRequestHook;
+		const providerAwareStreamFn: StreamFn = providerRequestHook
+			? (streamModel, context, streamOptions) =>
+					settingsAwareStreamFn(streamModel, context, {
+						...streamOptions,
+						fetch: providerRequestHook.wrapFetch(streamModel, streamOptions?.fetch ?? globalThis.fetch),
+					})
+			: settingsAwareStreamFn;
 		const codeModeState: { namespacesInfo?: unknown } = {};
 		const transformToolCallArguments = (args: Record<string, unknown>): Record<string, unknown> => {
 			let result = args;
@@ -3568,7 +3583,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					settings.get("externalThinking") &&
 					agent.state.tools.some(tool => tool.name === "think") &&
 					supportsExternalThinking(streamModel);
-				return settingsAwareStreamFn(streamModel, context, {
+				return providerAwareStreamFn(streamModel, context, {
 					...streamOptions,
 					anthropicCacheRefresh: true,
 					forceReasoningOff: externalThinking || streamOptions?.forceReasoningOff,
@@ -3754,8 +3769,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			transformProviderContext,
 			onPayload,
 			onResponse,
-			sideStreamFn: settingsAwareStreamFn,
-			advisorStreamFn: settingsAwareStreamFn,
+			sideStreamFn: providerAwareStreamFn,
+			advisorStreamFn: providerAwareStreamFn,
 			preferWebsockets: preferOpenAICodexWebsockets,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
@@ -4143,7 +4158,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					kimiApiFormat,
 					preferWebsockets: preferOpenAICodexWebsockets,
 					getToolContext: toolCall => toolContextStore.getContext(toolCall),
-					streamFn: settingsAwareStreamFn,
+					streamFn: providerAwareStreamFn,
 					transformToolCallArguments,
 					resolveFallbackTool: resolveDeviceTool,
 					intentTracing: !!intentField,
