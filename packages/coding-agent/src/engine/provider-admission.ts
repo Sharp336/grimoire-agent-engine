@@ -59,13 +59,22 @@ export class ProviderAdmissionClient {
 				);
 			}
 			const signal = init?.signal ?? undefined;
+			const admissionSignal = signal
+				? AbortSignal.any([signal, AbortSignal.timeout(ADMISSION_TIMEOUT_MS)])
+				: AbortSignal.timeout(ADMISSION_TIMEOUT_MS);
 			let reports: UsageReport[] | null;
 			try {
-				await authStorage.invalidateUsageCache(identity.providerId, signal);
-				reports = await authStorage.fetchUsageReports({
-					baseUrlResolver: provider => (provider === identity.providerId ? baseUrl : undefined),
-					signal,
-				});
+				await raceWithSignal(
+					authStorage.invalidateUsageCache(identity.providerId, admissionSignal),
+					admissionSignal,
+				);
+				reports = await raceWithSignal(
+					authStorage.fetchUsageReports({
+						baseUrlResolver: provider => (provider === identity.providerId ? baseUrl : undefined),
+						signal: admissionSignal,
+					}),
+					admissionSignal,
+				);
 			} catch (error) {
 				if (signal?.aborted) throw error;
 				throw new ProviderAdmissionError(
@@ -156,4 +165,22 @@ function withoutRaw(report: UsageReport): Omit<UsageReport, "raw"> {
 
 function isDecision(value: unknown): value is ProviderAdmissionDecision {
 	return typeof value === "object" && value !== null && typeof Reflect.get(value, "allowed") === "boolean";
+}
+
+function raceWithSignal<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+	if (signal.aborted) return Promise.reject(signal.reason);
+	return new Promise<T>((resolve, reject) => {
+		const onAbort = (): void => reject(signal.reason);
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(
+			value => {
+				signal.removeEventListener("abort", onAbort);
+				resolve(value);
+			},
+			error => {
+				signal.removeEventListener("abort", onAbort);
+				reject(error);
+			},
+		);
+	});
 }
