@@ -632,6 +632,56 @@ export class EngineRuntime {
 		});
 	}
 
+	async cancelPendingStart(request: {
+		commandId: string;
+		agentInstanceId: string;
+		executionId: string;
+		attemptId: string;
+		authorityGeneration: number;
+		engineGeneration: number;
+		reason?: string;
+		expectedIntentRevision?: number;
+	}): Promise<Record<string, unknown>> {
+		if (!request.commandId.trim()) {
+			throw new EngineTargetError("invalid_request", "commandId must be a non-empty string");
+		}
+		this.#throwIfDisposed();
+		if (request.engineGeneration !== this.engineGeneration) {
+			throw new EngineTargetError("stale_target", `Engine generation ${request.engineGeneration} is stale`);
+		}
+		const cancelLiveBinding = async (): Promise<EngineControlResult | undefined> => {
+			const binding = this.#bindings.get(request.agentInstanceId);
+			if (!binding) return undefined;
+			if (
+				binding.executionId !== request.executionId ||
+				binding.attemptId !== request.attemptId ||
+				binding.authorityGeneration !== request.authorityGeneration ||
+				binding.engineGeneration !== request.engineGeneration
+			) {
+				throw new EngineTargetError("stale_target", `Stale runtime target for ${request.agentInstanceId}`);
+			}
+			return await this.cancel({
+				...this.#snapshot(binding),
+				commandId: request.commandId,
+				reason: request.reason,
+				expectedIntentRevision: request.expectedIntentRevision,
+			});
+		};
+		const liveResult = await cancelLiveBinding();
+		if (liveResult) return liveResult;
+		const cancelled = await this.store.cancelPendingStart(request, request.commandId);
+		if (cancelled.event) this.#notifyEvents([cancelled.event]);
+		if (cancelled.status === "cancelled" || cancelled.status === "already_cancelled") {
+			return { phase: "applied", preStart: true };
+		}
+		if (cancelled.status === "too_late") {
+			const racedLiveResult = await cancelLiveBinding();
+			if (racedLiveResult) return racedLiveResult;
+			throw new EngineTargetError("too_late", `Attempt ${request.attemptId} has already started or settled`);
+		}
+		throw new EngineTargetError("agent_not_found", `Unknown pending Attempt ${request.attemptId}`);
+	}
+
 	resolveToolApproval(request: EngineToolApprovalDecision): Promise<void> {
 		if (!request.commandId.trim() || !request.approvalId.trim()) {
 			throw new EngineTargetError("invalid_request", "commandId and approvalId must be non-empty strings");
@@ -747,7 +797,10 @@ export class EngineRuntime {
 				{ code: command.code, message: command.message },
 				command.commandId,
 				settleCommand ? command.commandId : undefined,
-				"rejected",
+				{
+					outcome: "rejected",
+					detail: { code: command.code, message: command.message },
+				},
 			);
 		});
 	}
@@ -2244,13 +2297,16 @@ export class EngineRuntime {
 		payload?: Record<string, unknown>,
 		causationCommandId = target.commandId,
 		settleCommandId?: string,
-		settleOutcome: "applied" | "rejected" = "applied",
+		settleReceipt:
+			| "applied"
+			| "rejected"
+			| { outcome: "applied" | "rejected"; detail?: Record<string, unknown> } = "applied",
 	): Promise<void> {
 		const event = await this.store.commitEvent(
 			target,
 			{ kind, payload, causationCommandId },
 			settleCommandId,
-			settleOutcome,
+			settleReceipt,
 		);
 		this.#notifyEvents([event]);
 	}

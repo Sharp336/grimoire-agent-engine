@@ -231,6 +231,11 @@ export interface EngineCommandReceipt {
 	detail?: Record<string, unknown>;
 }
 
+export interface EnginePendingStartCancellation {
+	status: "cancelled" | "already_cancelled" | "too_late" | "not_found";
+	event?: EngineEvent;
+}
+
 export interface EngineTransitionEvent {
 	kind: EngineEvent["kind"];
 	payload?: Record<string, unknown>;
@@ -951,6 +956,61 @@ export class EngineStore {
 		await this.#transaction(sql => this.#settleAdmittedCommand(sql, commandId, receipt, canonicalHash, true));
 	}
 
+	async cancelPendingStart(
+		target: Pick<
+			EngineCommandIdentity,
+			"agentInstanceId" | "executionId" | "attemptId" | "authorityGeneration" | "engineGeneration"
+		>,
+		cancellationCommandId: string,
+	): Promise<EnginePendingStartCancellation> {
+		return await this.#transaction(async sql => {
+			const rows = (await sql.unsafe(
+				`SELECT command_id, canonical_hash, state, processor_generation, receipt
+				 FROM engine_commands
+				 WHERE operation='start' AND agent_instance_id=? AND execution_id=? AND attempt_id=?
+				   AND authority_generation=? AND engine_generation=?
+				 ORDER BY received_at DESC LIMIT 1`,
+				[
+					target.agentInstanceId,
+					target.executionId,
+					target.attemptId,
+					target.authorityGeneration,
+					target.engineGeneration,
+				],
+			)) as Array<CommandRow & { command_id: string }>;
+			const start = rows[0];
+			if (!start) return { status: "not_found" };
+			if (start.state === "settled") {
+				const receipt = start.receipt ? (JSON.parse(start.receipt) as EngineCommandReceipt) : undefined;
+				return receipt?.outcome === "rejected" && receipt.detail?.code === "cancelled"
+					? { status: "already_cancelled" }
+					: { status: "too_late" };
+			}
+
+			const message = "Attempt cancelled before Engine session initialization";
+			await this.#settleAdmittedCommand(
+				sql,
+				start.command_id,
+				{ outcome: "rejected", detail: { code: "cancelled", message, cancellationCommandId } },
+				start.canonical_hash,
+				true,
+			);
+			const event = await this.#appendEvent(sql, {
+				causationCommandId: start.command_id,
+				agentInstanceId: target.agentInstanceId,
+				executionId: target.executionId!,
+				attemptId: target.attemptId!,
+				bindingId: "",
+				engineGeneration: target.engineGeneration,
+				bindingGeneration: 0,
+				authorityGeneration: target.authorityGeneration,
+				kind: "rejected",
+				payload: { code: "cancelled", message, cancellationCommandId },
+			});
+			return { status: "cancelled", event };
+		});
+	}
+
 	async getBinding(agentInstanceId: string): Promise<EngineBindingSnapshot | undefined> {
 		const rows = (await this.#client.unsafe(
 			`SELECT binding_id, command_id, agent_instance_id, execution_id, attempt_id, engine_agent_id, session_file,
@@ -1130,11 +1190,17 @@ export class EngineStore {
 		>,
 		event: EngineTransitionEvent,
 		settleCommandId?: string,
-		settleOutcome: EngineCommandReceipt["outcome"] = "applied",
+		settleReceipt: EngineCommandReceipt | EngineCommandReceipt["outcome"] = "applied",
 	): Promise<EngineEvent> {
 		return await this.#transaction(async sql => {
 			const committed = await this.#appendTransitionEvent(sql, target, event);
-			if (settleCommandId) await this.#settleAdmittedCommand(sql, settleCommandId, { outcome: settleOutcome });
+			if (settleCommandId) {
+				await this.#settleAdmittedCommand(
+					sql,
+					settleCommandId,
+					typeof settleReceipt === "string" ? { outcome: settleReceipt } : settleReceipt,
+				);
+			}
 			return committed;
 		});
 	}

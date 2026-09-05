@@ -270,7 +270,14 @@ export interface EngineEvent {
 
 export class EngineTargetError extends Error {
 	constructor(
-		readonly code: "agent_not_found" | "agent_busy" | "stale_target" | "too_late" | "invalid_request",
+		readonly code:
+			| "agent_not_found"
+			| "agent_busy"
+			| "stale_target"
+			| "too_late"
+			| "invalid_request"
+			| "launch_failed"
+			| "cancelled",
 		message: string,
 	) {
 		super(message);

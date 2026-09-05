@@ -11,6 +11,7 @@ import {
 	ENGINE_COMMAND_STREAM,
 	ENGINE_EVENT_STREAM,
 	type EngineCommandEnvelope,
+	engineCommandIdentity,
 	NatsEngineAdapter,
 } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
 import { engineAgentId } from "@oh-my-pi/pi-coding-agent/engine/route";
@@ -392,6 +393,224 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			await broker.process.exited;
 		}
 	}, 60000);
+
+	it("settles launch failures once and lets Stop cancel a command before an Attempt exists", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-launch-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		const cwd = path.join(tempDir, "workspace");
+		const agentDir = path.join(tempDir, "agent");
+		fs.mkdirSync(cwd);
+		const pendingProfile = Promise.withResolvers<{
+			spawns: string;
+			profileDigest: string;
+			enableMCP: false;
+			enableLsp: false;
+		}>();
+		void pendingProfile.promise.catch(() => {});
+		const livePrompt = Promise.withResolvers<boolean>();
+		let pendingResolverEntered = false;
+		const runtime = await EngineRuntime.create({
+			databasePath: path.join(tempDir, "engine.sqlite"),
+			dispatchPrompt: async session =>
+				session.getAgentId() === engineAgentId("agent-live") ? await livePrompt.promise : true,
+			sessionDefaults: {
+				cwd,
+				agentDir,
+				settings: await Settings.loadReadOnly({ cwd, agentDir }),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				modelRegistry,
+			},
+		});
+		const errors: Error[] = [];
+		const adapter = await NatsEngineAdapter.connect({
+			runtime,
+			deviceId: "device-1",
+			engineId: "engine-1",
+			servers: broker.url,
+			authorizeCommand: () => {},
+			authorizeMessage: () => {},
+			resolveLaunchProfile: command => {
+				if (command.agentInstanceId === "agent-failed") {
+					throw new Error("No usable AvailableModelRoute in AgentProfile", {
+						cause: new Error(
+							'ProviderAccount credential token=do-not-expose Authorization: Bearer bearer-secret "access_token":"json-secret" sk-proj-0123456789abcdef is unavailable',
+						),
+					});
+				}
+				if (command.agentInstanceId === "agent-unsafe-error") {
+					throw new Error("custom startup failed with raw prompt SUPER_SECRET_PROMPT");
+				}
+				if (command.agentInstanceId === "agent-live") {
+					return { spawns: "", profileDigest: "leaf-profile-v1", enableMCP: false, enableLsp: false };
+				}
+				pendingResolverEntered = true;
+				return pendingProfile.promise;
+			},
+			onError: error => errors.push(error),
+		});
+		const client = await connect({ servers: broker.url });
+		try {
+			const js = jetstream(client);
+			const decoder = new TextDecoder();
+			const events: Array<Record<string, unknown>> = [];
+			const failedSubscription = client.subscribe(adapter.eventSubject("agent-failed", "*"), {
+				callback: (_error, message) => {
+					events.push(JSON.parse(decoder.decode(message.data)));
+				},
+			});
+			const pendingSubscription = client.subscribe(adapter.eventSubject("agent-pending", "*"), {
+				callback: (_error, message) => {
+					events.push(JSON.parse(decoder.decode(message.data)));
+				},
+			});
+			const unsafeSubscription = client.subscribe(adapter.eventSubject("agent-unsafe-error", "*"), {
+				callback: (_error, message) => {
+					events.push(JSON.parse(decoder.decode(message.data)));
+				},
+			});
+			const liveSubscription = client.subscribe(adapter.eventSubject("agent-live", "*"), {
+				callback: (_error, message) => {
+					events.push(JSON.parse(decoder.decode(message.data)));
+				},
+			});
+
+			const failed = startCommand(runtime.engineGeneration, "agent-failed", "failed", cwd);
+			await js.publish(adapter.commandSubject(failed.agentInstanceId, "start"), JSON.stringify(failed), {
+				msgID: failed.commandId,
+			});
+			await waitFor(() => events.some(event => event.causationCommandId === failed.commandId));
+			const failedAdmission = await runtime.store.admitCommand(
+				engineCommandIdentity(failed),
+				runtime.engineGeneration,
+			);
+			expect(failedAdmission).toMatchObject({
+				status: "replay",
+				receipt: {
+					outcome: "rejected",
+					detail: {
+						code: "launch_failed",
+						message:
+							'Agent session initialization failed: No usable AvailableModelRoute in AgentProfile: ProviderAccount credential token="[redacted]" Authorization: Bearer [redacted] "access_token":"[redacted]" [redacted credential] is unavailable',
+					},
+				},
+			});
+			const publicFailure = JSON.stringify(failedAdmission);
+			expect(publicFailure).not.toContain("do-not-expose");
+			expect(publicFailure).not.toContain("bearer-secret");
+			expect(publicFailure).not.toContain("json-secret");
+			expect(publicFailure).not.toContain("0123456789abcdef");
+			expect(await runtime.store.getAttempt(failed.attemptId!)).toBeUndefined();
+
+			const unsafe = startCommand(runtime.engineGeneration, "agent-unsafe-error", "unsafe", cwd);
+			await js.publish(adapter.commandSubject(unsafe.agentInstanceId, "start"), JSON.stringify(unsafe), {
+				msgID: unsafe.commandId,
+			});
+			await waitFor(() => events.some(event => event.causationCommandId === unsafe.commandId));
+			const unsafeAdmission = await runtime.store.admitCommand(
+				engineCommandIdentity(unsafe),
+				runtime.engineGeneration,
+			);
+			const publicUnsafeFailure = JSON.stringify(unsafeAdmission);
+			expect(publicUnsafeFailure).toContain("Error (diagnostic ");
+			expect(publicUnsafeFailure).not.toContain("SUPER_SECRET_PROMPT");
+
+			const pending = startCommand(runtime.engineGeneration, "agent-pending", "pending", cwd);
+			await js.publish(adapter.commandSubject(pending.agentInstanceId, "start"), JSON.stringify(pending), {
+				msgID: pending.commandId,
+			});
+			await waitFor(() => pendingResolverEntered);
+			const cancel: EngineCommandEnvelope = {
+				schema: "grimoire.engine.command.v1",
+				commandId: "command-cancel-pending",
+				op: "cancel",
+				deviceId: "device-1",
+				engineId: "engine-1",
+				engineGeneration: runtime.engineGeneration,
+				agentInstanceId: pending.agentInstanceId,
+				executionId: pending.executionId,
+				attemptId: pending.attemptId,
+				authorityGeneration: pending.authorityGeneration,
+				issuedAt: Date.now(),
+				payload: { reason: "Stopped from Artel before binding" },
+			};
+			await js.publish(adapter.commandSubject(cancel.agentInstanceId, "cancel"), JSON.stringify(cancel), {
+				msgID: cancel.commandId,
+			});
+			await waitFor(() =>
+				events.some(
+					event =>
+						event.causationCommandId === pending.commandId &&
+						event.type === "command.rejected" &&
+						(event.payload as Record<string, unknown>).code === "cancelled",
+				),
+			);
+			pendingProfile.reject(new Error("late profile resolution must not revive the Attempt"));
+			await waitFor(async () => {
+				const admission = await runtime.store.admitCommand(engineCommandIdentity(cancel), runtime.engineGeneration);
+				return admission.status === "replay";
+			});
+			const pendingAdmission = await runtime.store.admitCommand(
+				engineCommandIdentity(pending),
+				runtime.engineGeneration,
+			);
+			expect(pendingAdmission).toMatchObject({
+				status: "replay",
+				receipt: { outcome: "rejected", detail: { code: "cancelled" } },
+			});
+			expect(await runtime.store.getAttempt(pending.attemptId!)).toBeUndefined();
+
+			const live = startCommand(runtime.engineGeneration, "agent-live", "live", cwd);
+			await js.publish(adapter.commandSubject(live.agentInstanceId, "start"), JSON.stringify(live), {
+				msgID: live.commandId,
+			});
+			await waitFor(async () => (await runtime.store.getAttempt(live.attemptId!))?.state === "running");
+			const racedCancel: EngineCommandEnvelope = {
+				...cancel,
+				commandId: "command-cancel-live-without-binding",
+				agentInstanceId: live.agentInstanceId,
+				executionId: live.executionId,
+				attemptId: live.attemptId,
+				issuedAt: Date.now(),
+			};
+			await js.publish(adapter.commandSubject(racedCancel.agentInstanceId, "cancel"), JSON.stringify(racedCancel), {
+				msgID: racedCancel.commandId,
+			});
+			await waitFor(async () => {
+				const state = (await runtime.store.getAttempt(live.attemptId!))?.state;
+				return state === "cancel_requested" || state === "cancelled";
+			});
+			await waitFor(async () => {
+				const admission = await runtime.store.admitCommand(
+					engineCommandIdentity(racedCancel),
+					runtime.engineGeneration,
+				);
+				return admission.status === "replay";
+			});
+			livePrompt.resolve(true);
+			await Bun.sleep(1_100);
+			expect(errors).toEqual([]);
+			failedSubscription.unsubscribe();
+			pendingSubscription.unsubscribe();
+			unsafeSubscription.unsubscribe();
+			liveSubscription.unsubscribe();
+		} finally {
+			livePrompt.resolve(true);
+			await client.drain();
+			await adapter.dispose();
+			await runtime.dispose();
+			authStorage.close();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 30000);
 });
 
 function startCommand(
