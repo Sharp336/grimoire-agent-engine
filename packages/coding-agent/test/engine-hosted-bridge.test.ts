@@ -133,6 +133,26 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			expect([...new Set(rpc.claimGenerationRequests)]).toEqual([runtime.engineGeneration]);
 			const terminalEvent = rpc.events.find(event => event.type === "attempt.completed");
 			if (!terminalEvent) throw new Error("terminal Engine event was not recorded");
+			const wakeEvent = {
+				...terminalEvent,
+				eventId: "event-hosted-wake",
+				causationCommandId: "inbox-wake:queue-hosted:2",
+				type: "attempt.inbox_changed",
+				payload: {
+					action: "wake_due",
+					queueId: "queue-hosted",
+					revision: 2,
+					intentRevision: 0,
+					manualHold: false,
+				},
+			};
+			await jetstream(enginePublisherConnection).publish(
+				adapter.eventSubject("agent-hosted", "inbox_changed"),
+				JSON.stringify(wakeEvent),
+				{ msgID: "event-hosted-wake" },
+			);
+			await waitFor(() => rpc.wakes.length === 1);
+			expect(rpc.wakes[0]).toEqual(wakeEvent);
 			await jetstream(enginePublisherConnection).publish(
 				adapter.eventSubject("agent-hosted", "completed"),
 				JSON.stringify({ ...terminalEvent, eventId: "event-terminal-redelivery" }),
@@ -570,6 +590,7 @@ describe("hosted child launch", () => {
 
 class FakeRpc implements GrimoireRpc {
 	readonly events: Array<Record<string, unknown>> = [];
+	readonly wakes: Array<Record<string, unknown>> = [];
 	readonly claimGenerationRequests: number[] = [];
 	terminalStatus: string | undefined;
 	terminalReplayCalls = 0;
@@ -619,6 +640,9 @@ class FakeRpc implements GrimoireRpc {
 				this.heartbeatCalls++;
 				if (this.#heartbeatFailures-- > 0) throw new Error("temporary heartbeat failure");
 				return { status: "renewed" };
+			case "wake":
+				this.wakes.push(arguments_.event as Record<string, unknown>);
+				return { status: this.wakes.length === 1 ? "accepted" : "duplicate", job_id: "command-hosted-wake" };
 			case "event": {
 				const event = arguments_.event as Record<string, unknown>;
 				if (arguments_.lease_token !== this.#leaseToken) {

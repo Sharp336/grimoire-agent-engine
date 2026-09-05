@@ -68,7 +68,11 @@ export interface EngineStartRequest {
 	attemptId: string;
 	authorityGeneration: number;
 	cwd: string;
-	input: string;
+	input?: string;
+	/** Durable inbox identity for an automatic queued start. Mutually exclusive with input. */
+	queueId?: string;
+	expectedRevision?: number;
+	mutationId?: string;
 	/** Required to clear a durable manual hold for an explicit user send. */
 	expectedIntentRevision?: number;
 }
@@ -195,6 +199,8 @@ export interface EngineBindingSnapshot extends EngineTarget {
 
 export interface EngineStartResult extends EngineBindingSnapshot {
 	duplicate: boolean;
+	queueId?: string;
+	queueRevision?: number;
 }
 
 export interface EngineControlResult extends Record<string, unknown> {
@@ -292,11 +298,24 @@ export function validateStartRequest(request: EngineStartRequest): void {
 		executionId: request.executionId,
 		attemptId: request.attemptId,
 		cwd: request.cwd,
-		input: request.input,
 	})) {
 		if (!value.trim()) {
 			throw new EngineTargetError("invalid_request", `${name} must be a non-empty string`);
 		}
+	}
+	const queued = request.queueId !== undefined;
+	if (
+		queued
+			? !request.queueId?.trim() ||
+				!request.mutationId?.trim() ||
+				!Number.isSafeInteger(request.expectedRevision) ||
+				request.expectedRevision! < 0 ||
+				!Number.isSafeInteger(request.expectedIntentRevision) ||
+				request.expectedIntentRevision! < 0 ||
+				request.input !== undefined
+			: !request.input?.trim() || request.mutationId !== undefined || request.expectedRevision !== undefined
+	) {
+		throw new EngineTargetError("invalid_request", "start requires text or a complete queued-item identity");
 	}
 	for (const [name, value] of Object.entries({
 		agentInstanceRef: request.agentInstanceRef,

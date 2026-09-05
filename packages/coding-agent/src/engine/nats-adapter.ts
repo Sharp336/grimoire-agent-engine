@@ -706,7 +706,8 @@ export async function dispatchEngineCommand(options: {
 			if (agentInstanceRef && command.agentInstanceId !== engineAgentInstanceId(agentInstanceRef)) {
 				throw new EngineTargetError("invalid_request", "agentInstanceId does not match agentInstanceRef");
 			}
-			const input = requiredRecordString(command.payload, "input");
+			const queued = typeof command.payload.queueId === "string";
+			const input = queued ? undefined : requiredRecordString(command.payload, "input");
 			const cwd = requiredRecordString(command.payload, "cwd");
 			const profileDigest = requiredRecordString(command.payload, "profileDigest");
 			try {
@@ -728,15 +729,22 @@ export async function dispatchEngineCommand(options: {
 						attemptId,
 						authorityGeneration: command.authorityGeneration,
 						cwd,
-						input,
+						...(queued
+							? {
+									queueId: requiredRecordString(command.payload, "queueId"),
+									expectedRevision: requiredRecordInteger(command.payload, "expectedRevision"),
+									mutationId: requiredRecordString(command.payload, "mutationId"),
+								}
+							: { input: input! }),
 						expectedIntentRevision: optionalRecordInteger(command.payload, "expectedIntentRevision"),
 					},
 					profile,
 				);
 				return {
-					phase: "applied",
+					phase: queued ? "consumed" : "applied",
 					manualHold: started.manualHold ?? false,
 					intentRevision: started.intentRevision ?? 0,
+					...(started.queueId ? { queueId: started.queueId, queueRevision: started.queueRevision } : {}),
 				};
 			} catch (error) {
 				if (error instanceof EngineTargetError) throw error;

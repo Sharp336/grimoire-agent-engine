@@ -1361,6 +1361,172 @@ describe("EngineRuntime", () => {
 		await restarted.dispose();
 	}, 60_000);
 
+	it("starts one new Attempt from an immediate ordinary queue wake after the active Attempt settles", async () => {
+		const firstPrompt = Promise.withResolvers<boolean>();
+		const inputs: string[] = [];
+		const { runtime, cwd } = await createRuntime(async (_session, input) => {
+			inputs.push(input);
+			return inputs.length === 1 ? await firstPrompt.promise : true;
+		});
+		const started = await runtime.start(
+			{
+				commandId: "command-auto-queue-a",
+				agentInstanceId: "agent-auto-queue",
+				executionId: "execution-auto-queue-a",
+				attemptId: "attempt-auto-queue-a",
+				authorityGeneration: 1,
+				cwd,
+				input: "first",
+			},
+			profile,
+		);
+		const wakes: EngineEvent[] = [];
+		runtime.subscribe(event => {
+			if (event.kind === "inbox_changed" && event.payload?.action === "wake_due") wakes.push(event);
+		});
+		const queued = await runtime.enqueueInbox(started, {
+			sourceEventId: "ordinary-auto-queue",
+			sourceType: "user",
+			body: "queued canonical body",
+			createdAt: Date.now(),
+			wakeIntent: true,
+		});
+		const queuedSecond = await runtime.enqueueInbox(started, {
+			sourceEventId: "ordinary-auto-queue-second",
+			sourceType: "user",
+			body: "second queued canonical body",
+			createdAt: Date.now(),
+			wakeIntent: true,
+		});
+		await Bun.sleep(100);
+		expect(wakes).toHaveLength(0);
+
+		firstPrompt.resolve(true);
+		await runtime.drain();
+		for (let remaining = 50; wakes.length === 0 && remaining > 0; remaining--) await Bun.sleep(25);
+		expect(wakes[0]?.payload).toEqual({
+			action: "wake_due",
+			queueId: queued.item.queueId,
+			revision: 2,
+			intentRevision: started.intentRevision,
+			manualHold: false,
+		});
+		const intervening = await runtime.start(
+			{
+				commandId: "command-auto-queue-intervening",
+				agentInstanceId: started.agentInstanceId,
+				executionId: "execution-auto-queue-intervening",
+				attemptId: "attempt-auto-queue-intervening",
+				authorityGeneration: 1,
+				cwd,
+				input: "intervening direct Send",
+			},
+			profile,
+		);
+		await expect(
+			runtime.start(
+				{
+					commandId: "command-auto-queue-old-wake",
+					agentInstanceId: started.agentInstanceId,
+					executionId: "execution-auto-queue-old-wake",
+					attemptId: "attempt-auto-queue-old-wake",
+					authorityGeneration: 1,
+					cwd,
+					queueId: queued.item.queueId,
+					expectedRevision: 2,
+					mutationId: "wake:ordinary-auto-queue:2",
+					expectedIntentRevision: started.intentRevision,
+				},
+				profile,
+			),
+		).rejects.toMatchObject({ code: "stale_target" });
+		await runtime.drain();
+		for (let remaining = 50; wakes.length < 2 && remaining > 0; remaining--) await Bun.sleep(25);
+		expect(wakes[1]?.payload).toMatchObject({
+			queueId: queued.item.queueId,
+			revision: 3,
+			intentRevision: intervening.intentRevision,
+		});
+		const next = await runtime.start(
+			{
+				commandId: "command-auto-queue-b",
+				agentInstanceId: started.agentInstanceId,
+				executionId: "execution-auto-queue-b",
+				attemptId: "attempt-auto-queue-b",
+				authorityGeneration: 1,
+				cwd,
+				queueId: queued.item.queueId,
+				expectedRevision: 3,
+				mutationId: "wake:ordinary-auto-queue:3",
+				expectedIntentRevision: intervening.intentRevision,
+			},
+			profile,
+		);
+		expect(next).toMatchObject({
+			duplicate: false,
+			queueId: queued.item.queueId,
+			queueRevision: 4,
+			manualHold: false,
+		});
+		await runtime.drain();
+		for (let remaining = 50; wakes.length < 3 && remaining > 0; remaining--) await Bun.sleep(25);
+		expect(wakes).toHaveLength(3);
+		expect(wakes[2]?.payload).toMatchObject({
+			queueId: queuedSecond.item.queueId,
+			revision: 2,
+			intentRevision: next.intentRevision,
+		});
+		const third = await runtime.start(
+			{
+				commandId: "command-auto-queue-c",
+				agentInstanceId: started.agentInstanceId,
+				executionId: "execution-auto-queue-c",
+				attemptId: "attempt-auto-queue-c",
+				authorityGeneration: 1,
+				cwd,
+				queueId: queuedSecond.item.queueId,
+				expectedRevision: 2,
+				mutationId: "wake:ordinary-auto-queue-second:2",
+				expectedIntentRevision: next.intentRevision,
+			},
+			profile,
+		);
+		expect(third.queueRevision).toBe(3);
+		await runtime.drain();
+		expect(inputs).toEqual([
+			"first",
+			"intervening direct Send",
+			"queued canonical body",
+			"second queued canonical body",
+		]);
+		expect(await runtime.store.getInboxItem(queued.item.sessionId, queued.item.queueId)).toMatchObject({
+			disposition: "acknowledged",
+			revision: 4,
+		});
+		expect(await runtime.store.getInboxItem(queuedSecond.item.sessionId, queuedSecond.item.queueId)).toMatchObject({
+			disposition: "acknowledged",
+			revision: 3,
+		});
+		await expect(
+			runtime.start(
+				{
+					commandId: "command-auto-queue-stale",
+					agentInstanceId: started.agentInstanceId,
+					executionId: "execution-auto-queue-stale",
+					attemptId: "attempt-auto-queue-stale",
+					authorityGeneration: 1,
+					cwd,
+					queueId: queued.item.queueId,
+					expectedRevision: 2,
+					mutationId: "wake:ordinary-auto-queue:2",
+					expectedIntentRevision: started.intentRevision,
+				},
+				profile,
+			),
+		).rejects.toMatchObject({ code: "stale_target" });
+		await runtime.dispose();
+	}, 60_000);
+
 	it("reopens a transcript only across an exact continuation identity", async () => {
 		let dependencyDigest = "dependency-a";
 		const { runtime, cwd } = await createRuntime(async () => true, {

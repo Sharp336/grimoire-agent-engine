@@ -333,7 +333,18 @@ export class EngineRuntime {
 		if (!profile.profileDigest.trim()) {
 			throw new EngineTargetError("invalid_request", "profileDigest must be a non-empty string");
 		}
-		return this.#inLane(request.agentInstanceId, () => this.#startInLane(request, profile));
+		return this.#inLane(request.agentInstanceId, () => this.#startInLane(request, profile)).catch(async error => {
+			if (
+				error instanceof EngineTargetError &&
+				(error.code === "agent_busy" || error.code === "stale_target") &&
+				request.queueId &&
+				request.expectedRevision !== undefined &&
+				(await this.store.rearmInboxWake(request.queueId, request.expectedRevision))
+			) {
+				this.#signalInboxWake();
+			}
+			throw error;
+		});
 	}
 
 	steer(request: EngineSteerRequest): Promise<EngineControlResult> {
@@ -1112,7 +1123,7 @@ export class EngineRuntime {
 		return this.#inLane(target.agentInstanceId, async () => {
 			const retained = await this.#requireSessionTarget(target);
 			const item = await this.store.mutateInboxItem(retained, mutation);
-			if (mutation.op === "defer") this.#signalInboxWake();
+			this.#signalInboxWake();
 			return item;
 		});
 	}
@@ -1125,7 +1136,9 @@ export class EngineRuntime {
 	): Promise<EngineInboxItem[]> {
 		return this.#inLane(target.agentInstanceId, async () => {
 			const retained = await this.#requireSessionTarget(target);
-			return await this.store.reorderInboxItems(retained, mutationId, expectedOrder, desiredOrder);
+			const items = await this.store.reorderInboxItems(retained, mutationId, expectedOrder, desiredOrder);
+			this.#signalInboxWake();
+			return items;
 		});
 	}
 
@@ -1197,6 +1210,23 @@ export class EngineRuntime {
 				`Attempt ${request.attemptId} already exists in state ${priorAttempt.state}`,
 			);
 		}
+		const queuedItem = request.queueId ? await this.store.getInboxItemByQueueId(request.queueId) : undefined;
+		if (
+			request.queueId &&
+			(queuedItem?.agentInstanceId !== request.agentInstanceId ||
+				queuedItem.disposition !== "pending" ||
+				queuedItem.revision !== request.expectedRevision ||
+				!queuedItem.wakeIntent ||
+				queuedItem.wakeDeliveredAt === undefined)
+		) {
+			throw new EngineTargetError(
+				"stale_target",
+				`Inbox item ${request.queueId} is no longer pending at that wake revision`,
+			);
+		}
+		if (binding && queuedItem && queuedItem.sessionId !== binding.session.sessionId) {
+			throw new EngineTargetError("stale_target", `Inbox item ${queuedItem.queueId} belongs to another session`);
+		}
 		const continuationDigest = await this.#continuationDigest(request, profile);
 		if (binding) this.#assertManualHoldClear(binding, request.expectedIntentRevision);
 
@@ -1229,17 +1259,35 @@ export class EngineRuntime {
 			}
 		}
 		if (!binding) binding = await this.#openBinding(request, profile, continuationDigest);
+		if (queuedItem && queuedItem.sessionId !== binding.session.sessionId) {
+			await this.#discardBinding(binding);
+			throw new EngineTargetError("stale_target", `Inbox item ${queuedItem.queueId} belongs to another session`);
+		}
 		let previousIntent = this.#intentState(binding);
 		try {
 			previousIntent = this.#setManualHold(binding, request.commandId, request.expectedIntentRevision, false, true);
 			binding.state = "running";
 			binding.attemptState = "running";
-			const result = this.#controlResult(binding);
+			const result = this.#controlResult(
+				binding,
+				queuedItem ? "consumed" : "applied",
+				queuedItem ? { ...queuedItem, revision: queuedItem.revision + 1 } : undefined,
+			);
 			await this.#commitAttemptTransition(binding, "running", [{ kind: "accepted" }, { kind: "running" }], {
 				settleCommandId: request.commandId,
 				settleCommandReceipt: { outcome: "applied", detail: result },
 				requireNew: true,
 				inboxSessionId: binding.session.sessionId,
+				...(queuedItem
+					? {
+							inboxMutation: {
+								mutationId: request.mutationId!,
+								queueId: queuedItem.queueId,
+								expectedRevision: request.expectedRevision!,
+								op: "acknowledge" as const,
+							},
+						}
+					: {}),
 			});
 		} catch (error) {
 			this.#restoreIntent(binding, previousIntent);
@@ -1251,11 +1299,18 @@ export class EngineRuntime {
 			if (error instanceof EngineAttemptConflictError) {
 				throw new EngineTargetError("invalid_request", `Attempt ${request.attemptId} was claimed concurrently`);
 			}
+			if (error instanceof EngineInboxConflictError) {
+				throw new EngineTargetError("stale_target", error.message);
+			}
 			throw error;
 		}
-		this.#trackRun(this.#runPrompt(binding, request.input));
+		this.#trackRun(this.#runPrompt(binding, queuedItem?.deliveryPayload ?? request.input!));
 		this.#signalInboxWake();
-		return { ...this.#snapshot(binding), duplicate: false };
+		return {
+			...this.#snapshot(binding),
+			duplicate: false,
+			...(queuedItem ? { queueId: queuedItem.queueId, queueRevision: queuedItem.revision + 1 } : {}),
+		};
 	}
 
 	#inboxTarget(binding: LiveBinding): EngineInboxTarget {
@@ -1285,7 +1340,7 @@ export class EngineRuntime {
 					op: request.action,
 					value: request.value,
 				});
-				if (request.action === "defer") this.#signalInboxWake();
+				this.#signalInboxWake();
 				return [item];
 			}
 		}
@@ -2053,7 +2108,10 @@ export class EngineRuntime {
 				}
 				return false;
 			});
-			if (!retry) return;
+			if (!retry) {
+				this.#signalInboxWake();
+				return;
+			}
 		}
 	}
 
@@ -2149,6 +2207,7 @@ export class EngineRuntime {
 				throw error;
 			}
 		});
+		this.#signalInboxWake();
 	}
 
 	async #terminateBinding(binding: LiveBinding, cause: "requested" | "engine_lost"): Promise<void> {

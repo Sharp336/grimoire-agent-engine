@@ -354,6 +354,19 @@ export class HostedEngineBridge {
 			if (this.#stopping) break;
 			try {
 				const event = parseEvent(message.data);
+				if (event.type === "attempt.inbox_changed" && event.payload?.action === "wake_due") {
+					const result = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
+						action: "wake",
+						device_id: this.#options.deviceId,
+						engine_id: this.#options.engineId,
+						event,
+					});
+					if (result.status !== "accepted" && result.status !== "duplicate") {
+						throw new Error(`Hosted Engine wake was not durably accepted: ${String(result.status)}`);
+					}
+					message.ack();
+					continue;
+				}
 				let claim = this.#active.get(event.causationCommandId);
 				if (!claim) {
 					const recovered = await this.#options.rpc.call("grimoire_agent_engine_bridge", {

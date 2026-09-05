@@ -783,6 +783,25 @@ export class EngineStore {
 		return row ? inboxItemFromRow(row) : undefined;
 	}
 
+	async getInboxItemByQueueId(queueId: string): Promise<EngineInboxItem | undefined> {
+		const rows = (await this.#client.unsafe(`${this.#inboxSelect()} WHERE i.queue_id=?`, [
+			queueId,
+		])) as InboxItemRow[];
+		return rows[0] ? inboxItemFromRow(rows[0]) : undefined;
+	}
+
+	async rearmInboxWake(queueId: string, expectedRevision: number): Promise<boolean> {
+		return await this.#transaction(async sql => {
+			const rows = await sql.unsafe(
+				`UPDATE engine_inbox_items SET wake_delivered_at=NULL, revision=revision+1, updated_at=?
+				 WHERE queue_id=? AND disposition='pending' AND wake_intent=1
+				 AND wake_delivered_at IS NOT NULL AND revision=? RETURNING queue_id`,
+				[Date.now(), queueId, expectedRevision],
+			);
+			return rows.length > 0;
+		});
+	}
+
 	async mutateInboxItem(target: EngineInboxTarget, mutation: EngineInboxMutation): Promise<EngineInboxItem> {
 		if (!mutation.mutationId.trim() || !mutation.queueId.trim()) {
 			throw new EngineInboxConflictError("Inbox mutationId and queueId must be non-empty");
@@ -820,7 +839,8 @@ export class EngineStore {
 				const row = byId.get(queueId);
 				if (!row) throw new EngineInboxConflictError(`Inbox item ${queueId} does not exist`);
 				await sql.unsafe(
-					`UPDATE engine_inbox_items SET position=?, revision=revision+1, updated_at=? WHERE queue_id=?`,
+					`UPDATE engine_inbox_items SET position=?, wake_delivered_at=NULL,
+					 revision=revision+1, updated_at=? WHERE queue_id=?`,
 					[(index + 1) * 1024, now, queueId],
 				);
 			}
@@ -835,10 +855,16 @@ export class EngineStore {
 
 	async nextInboxWakeAt(engineGeneration: number): Promise<number | undefined> {
 		const rows = (await this.#client.unsafe(
-			`SELECT MIN(i.deliver_at) AS deliver_at FROM engine_inbox_items i
+			`SELECT MIN(COALESCE(i.deliver_at, i.created_at)) AS deliver_at FROM engine_inbox_items i
 			 JOIN engine_runtime_bindings b ON b.agent_instance_id=i.agent_instance_id
+			  AND b.binding_id=i.binding_id AND b.engine_generation=i.engine_generation
+			  AND b.binding_generation=i.binding_generation
 			 WHERE i.engine_generation=? AND i.disposition='pending' AND i.wake_intent=1
-			 AND i.wake_delivered_at IS NULL AND i.deliver_at IS NOT NULL AND b.manual_hold=0`,
+			 AND i.wake_delivered_at IS NULL AND b.manual_hold=0 AND b.state='idle'
+			 AND NOT EXISTS (
+			  SELECT 1 FROM engine_inbox_items h WHERE h.session_id=i.session_id AND h.disposition='pending'
+			  AND (h.position<i.position OR (h.position=i.position AND h.queue_id<i.queue_id))
+			 )`,
 			[engineGeneration],
 		)) as Array<{ deliver_at: number | null }>;
 		return rows[0]?.deliver_at === null || rows[0]?.deliver_at === undefined ? undefined : Number(rows[0].deliver_at);
@@ -847,12 +873,19 @@ export class EngineStore {
 	async claimDueInboxWakes(engineGeneration: number, now = Date.now()): Promise<EngineEvent[]> {
 		return await this.#transaction(async sql => {
 			const rows = (await sql.unsafe(
-				`${this.#inboxSelect()} JOIN engine_runtime_bindings b ON b.agent_instance_id=i.agent_instance_id
-				 WHERE i.engine_generation=? AND i.disposition='pending' AND b.manual_hold=0
-				 AND i.wake_intent=1 AND i.wake_delivered_at IS NULL AND i.deliver_at<=?
-				 ORDER BY i.deliver_at, i.position, i.queue_id LIMIT 100`,
+				`SELECT q.*, b.intent_revision FROM (${this.#inboxSelect()}) q
+				 JOIN engine_runtime_bindings b ON b.agent_instance_id=q.agent_instance_id
+				  AND b.binding_id=q.binding_id AND b.engine_generation=q.engine_generation
+				  AND b.binding_generation=q.binding_generation
+				 WHERE q.engine_generation=? AND q.disposition='pending' AND b.manual_hold=0 AND b.state='idle'
+				 AND q.wake_intent=1 AND q.wake_delivered_at IS NULL AND COALESCE(q.deliver_at, q.created_at)<=?
+				 AND NOT EXISTS (
+				  SELECT 1 FROM engine_inbox_items h WHERE h.session_id=q.session_id AND h.disposition='pending'
+				  AND (h.position<q.position OR (h.position=q.position AND h.queue_id<q.queue_id))
+				 )
+				 ORDER BY COALESCE(q.deliver_at, q.created_at), q.position, q.queue_id LIMIT 100`,
 				[engineGeneration, now],
-			)) as InboxItemRow[];
+			)) as Array<InboxItemRow & { intent_revision: number }>;
 			const events: EngineEvent[] = [];
 			for (const row of rows) {
 				const revision = Number(row.revision) + 1;
@@ -878,6 +911,7 @@ export class EngineStore {
 						"wake_due",
 						revision,
 						row.queue_id,
+						{ intentRevision: Number(row.intent_revision), manualHold: false },
 					),
 				);
 			}
@@ -1151,7 +1185,7 @@ export class EngineStore {
 			if (options.inboxSessionId) {
 				await sql.unsafe(
 					`UPDATE engine_inbox_items SET execution_id=?, attempt_id=?, binding_id=?, engine_generation=?,
-					 binding_generation=?, authority_generation=?, updated_at=?
+					 binding_generation=?, authority_generation=?, wake_delivered_at=NULL, updated_at=?
 					 WHERE session_id=? AND agent_instance_id=? AND disposition='pending'`,
 					[
 						binding.executionId,
@@ -1796,7 +1830,8 @@ export class EngineStore {
 		const revision = item.revision + 1;
 		const now = Date.now();
 		await sql.unsafe(
-			`UPDATE engine_inbox_items SET delivery_payload=?, annotation=?, deliver_at=?, wake_intent=?, disposition=?, revision=?, updated_at=?
+			`UPDATE engine_inbox_items SET delivery_payload=?, annotation=?, deliver_at=?, wake_intent=?, wake_delivered_at=NULL,
+			 disposition=?, revision=?, updated_at=?
 			 WHERE queue_id=?`,
 			[
 				desired.deliveryPayload,
@@ -1882,6 +1917,7 @@ export class EngineStore {
 		action: string,
 		revision: number,
 		queueId = causationCommandId,
+		extraPayload: Record<string, unknown> = {},
 	): Promise<EngineEvent> {
 		return this.#appendEvent(sql, {
 			agentInstanceId: target.agentInstanceId,
@@ -1893,7 +1929,7 @@ export class EngineStore {
 			authorityGeneration: target.authorityGeneration,
 			causationCommandId,
 			kind: "inbox_changed",
-			payload: { action, queueId, revision },
+			payload: { action, queueId, revision, ...extraPayload },
 		});
 	}
 
