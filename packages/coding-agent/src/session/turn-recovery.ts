@@ -45,7 +45,11 @@ import type {
 	UsageFallbackConfirmer,
 } from "./agent-session-types";
 import { assistantTurnProducedOutput, isEmptyAssistantStop, isEmptyErrorTurn } from "./messages";
-import { isDeferredProviderRetryMessage, isExhaustedProviderRetryMessage } from "./provider-retry-budget";
+import {
+	isDeferredProviderRetryMessage,
+	isExhaustedProviderRetryMessage,
+	isPermanentProviderFailureMessage,
+} from "./provider-retry-budget";
 import {
 	type ActiveRetryFallbackState,
 	calculateRetryBackoffDelayMs,
@@ -1090,7 +1094,8 @@ export class TurnRecovery {
 	 */
 	isRetryableError(message: AssistantMessage): boolean {
 		const errorMessage = message.errorMessage ?? "";
-		if (isExhaustedProviderRetryMessage(errorMessage)) return false;
+		if (isExhaustedProviderRetryMessage(errorMessage) || isPermanentProviderFailureMessage(errorMessage))
+			return false;
 		if (this.#turnRetryPolicy?.transientOnly && isDeferredProviderRetryMessage(errorMessage)) return true;
 		if (message.stopReason !== "error") return false;
 		if (this.#isUsagePreflightBlocked(message)) return false;

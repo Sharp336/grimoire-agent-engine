@@ -5,6 +5,7 @@ import {
 	createProviderRetryBudgetHook,
 	PROVIDER_RETRY_DEFERRED_CODE,
 	PROVIDER_RETRY_EXHAUSTED_CODE,
+	PROVIDER_RETRY_PERMANENT_CODE,
 	withProviderRetryBudget,
 } from "../src/session/provider-retry-budget";
 
@@ -62,5 +63,23 @@ describe("Engine provider retry budget", () => {
 		});
 
 		expect({ admissions, physicalRequests }).toEqual({ admissions: 1, physicalRequests: 1 });
+	});
+
+	it("keeps account-policy responses outside transient recovery", async () => {
+		const hook = createProviderRetryBudgetHook();
+		const fetch = hook.wrapFetch(
+			{ provider: "openai-codex", id: "gpt-5.5", api: "openai-codex-responses" } as Model,
+			async () =>
+				new Response(
+					'{"error":{"message":"The \'gpt-5.5\' model is not supported when using Codex with a ChatGPT account."}}',
+					{ status: 503 },
+				),
+		);
+
+		await withProviderRetryBudget(4, async () => {
+			const error = await fetch("https://example.invalid/provider").catch(reason => reason);
+			expect(error).toMatchObject({ retryable: false });
+			expect(String(error)).toContain(PROVIDER_RETRY_PERMANENT_CODE);
+		});
 	});
 });

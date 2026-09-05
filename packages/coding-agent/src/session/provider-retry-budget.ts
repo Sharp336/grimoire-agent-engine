@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { extractRetryHint, isRetryableStatus } from "@oh-my-pi/pi-utils";
 import type { ProviderRequestHook } from "../sdk";
 
@@ -7,6 +8,7 @@ type Fetch = NonNullable<SimpleStreamOptions["fetch"]>;
 
 export const PROVIDER_RETRY_DEFERRED_CODE = "engine_provider_retry_deferred";
 export const PROVIDER_RETRY_EXHAUSTED_CODE = "engine_provider_retry_budget_exhausted";
+export const PROVIDER_RETRY_PERMANENT_CODE = "engine_provider_permanent_failure";
 
 interface ProviderRetryBudgetState {
 	attempts: number;
@@ -19,7 +21,10 @@ class EngineProviderRetryError extends Error {
 	readonly retryable = false;
 
 	constructor(
-		readonly code: typeof PROVIDER_RETRY_DEFERRED_CODE | typeof PROVIDER_RETRY_EXHAUSTED_CODE,
+		readonly code:
+			| typeof PROVIDER_RETRY_DEFERRED_CODE
+			| typeof PROVIDER_RETRY_EXHAUSTED_CODE
+			| typeof PROVIDER_RETRY_PERMANENT_CODE,
 		message: string,
 		options?: ErrorOptions,
 	) {
@@ -38,6 +43,22 @@ function retryDescription(status: number, statusText: string, retryAfterMs: numb
 
 function deferredError(reason: string, options?: ErrorOptions): EngineProviderRetryError {
 	return new EngineProviderRetryError(PROVIDER_RETRY_DEFERRED_CODE, `${reason}; retry through Engine`, options);
+}
+
+function permanentResponseFailure(model: Model, response: Response, body: string | undefined): string | undefined {
+	const id = AIError.classifyMessage({
+		api: model.api,
+		provider: model.provider,
+		model: model.id,
+		errorStatus: response.status,
+		errorMessage: `HTTP ${response.status} ${body ?? ""}`,
+	});
+	if (AIError.is(id, AIError.Flag.AuthFailed)) return "authentication failed";
+	if (AIError.is(id, AIError.Flag.AccountPolicy)) return "account policy denied the request";
+	if (AIError.is(id, AIError.Flag.ContentBlocked)) return "provider policy blocked the request";
+	if (AIError.is(id, AIError.Flag.OAuthExpiry)) return "provider authorization expired";
+	if (AIError.is(id, AIError.Flag.PayloadRejected)) return "provider rejected the request payload";
+	return undefined;
 }
 
 /** Share one physical-request budget across a complete Engine model-call saga. */
@@ -85,7 +106,14 @@ export function createProviderRetryBudgetHook(inner?: ProviderRequestHook): Prov
 					.text()
 					.catch(() => undefined);
 				const retryAfterMs = extractRetryHint(response, body);
+				const permanentFailure = permanentResponseFailure(model, response, body);
 				await response.body?.cancel().catch(() => {});
+				if (permanentFailure) {
+					throw new EngineProviderRetryError(
+						PROVIDER_RETRY_PERMANENT_CODE,
+						`${retryDescription(response.status, response.statusText, retryAfterMs)}; ${permanentFailure}`,
+					);
+				}
 				throw deferredError(retryDescription(response.status, response.statusText, retryAfterMs));
 			};
 			const admittedFetch = inner?.wrapFetch(model, budgetedFetch) ?? budgetedFetch;
@@ -118,4 +146,8 @@ export function isDeferredProviderRetryMessage(message: string): boolean {
 
 export function isExhaustedProviderRetryMessage(message: string): boolean {
 	return message.includes(PROVIDER_RETRY_EXHAUSTED_CODE);
+}
+
+export function isPermanentProviderFailureMessage(message: string): boolean {
+	return message.includes(PROVIDER_RETRY_PERMANENT_CODE);
 }
