@@ -137,6 +137,8 @@ function terminalYield(
 }
 
 interface LiveBinding extends EngineBindingSnapshot {
+	conversationIdentityDigest: string;
+	previousInboxSessionId?: string;
 	manualHold: boolean;
 	intentRevision: number;
 	attemptState: EngineAttemptState;
@@ -1312,6 +1314,7 @@ export class EngineRuntime {
 			throw new EngineTargetError("stale_target", `Inbox item ${queuedItem.queueId} belongs to another session`);
 		}
 		const continuationDigest = await this.#continuationDigest(request, profile);
+		const conversationIdentityDigest = await this.#conversationIdentityDigest(request);
 		if (binding) this.#assertManualHoldClear(binding, request.expectedIntentRevision);
 
 		if (binding) {
@@ -1345,8 +1348,12 @@ export class EngineRuntime {
 				binding.session.setAttemptId(request.attemptId);
 			}
 		}
-		if (!binding) binding = await this.#openBinding(request, profile, continuationDigest);
-		if (queuedItem && queuedItem.sessionId !== binding.session.sessionId) {
+		if (!binding) binding = await this.#openBinding(request, profile, continuationDigest, conversationIdentityDigest);
+		if (
+			queuedItem &&
+			queuedItem.sessionId !== binding.session.sessionId &&
+			queuedItem.sessionId !== binding.previousInboxSessionId
+		) {
 			await this.#discardBinding(binding);
 			throw new EngineTargetError("stale_target", `Inbox item ${queuedItem.queueId} belongs to another session`);
 		}
@@ -1473,6 +1480,7 @@ export class EngineRuntime {
 		request: EngineStartRequest,
 		profile: EngineLaunchProfile,
 		continuationDigest: string,
+		conversationIdentityDigest: string,
 	): Promise<LiveBinding> {
 		const resolved = await this.#resolveSessionProfile?.(profile, request.cwd);
 		let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
@@ -1483,12 +1491,33 @@ export class EngineRuntime {
 			const bindingGeneration = (prior?.bindingGeneration ?? 0) + 1;
 			const route = engineRouteToken(request.agentInstanceId);
 			const sessionDir = path.join(this.#sessionRoot, route);
-			const sessionManager =
-				prior?.sessionFile && prior.profileDigest === profileDigest && profile.continuationPolicy !== "fresh"
-					? await SessionManager.open(prior.sessionFile, sessionDir, this.store.sessionStorage, {
-							initialCwd: request.cwd,
-						})
-					: SessionManager.create(request.cwd, sessionDir, this.store.sessionStorage);
+			let sessionManager: SessionManager;
+			let previousInboxSessionId: string | undefined;
+			if (prior?.sessionFile && prior.profileDigest === profileDigest && profile.continuationPolicy !== "fresh") {
+				sessionManager = await SessionManager.open(prior.sessionFile, sessionDir, this.store.sessionStorage, {
+					initialCwd: request.cwd,
+				});
+			} else {
+				previousInboxSessionId = prior?.sessionFile
+					? await this.#conversationCarrySource(prior, request, profile, conversationIdentityDigest)
+					: undefined;
+				if (prior?.sessionFile && previousInboxSessionId) {
+					// A profile/dependency change needs a fresh AgentSession so none of the old
+					// model, tools, settings, or admission policy survives. Fork only the durable
+					// conversation branch, then rebuild the runtime from the newly resolved profile.
+					sessionManager = await SessionManager.forkFrom(
+						prior.sessionFile,
+						request.cwd,
+						sessionDir,
+						this.store.sessionStorage,
+					);
+					// Workspace roots are executable authority, not conversation history. The
+					// new profile/settings snapshot repopulates its own roots during session setup.
+					await sessionManager.setAdditionalDirectories([]);
+				} else {
+					sessionManager = SessionManager.create(request.cwd, sessionDir, this.store.sessionStorage);
+				}
+			}
 			const id = engineAgentId(request.agentInstanceId);
 			const pauseGate = new AgentPauseGate();
 			let liveBinding: LiveBinding | undefined;
@@ -1608,6 +1637,8 @@ export class EngineRuntime {
 				engineAgentId: id,
 				sessionFile: created.session.sessionFile,
 				profileDigest,
+				conversationIdentityDigest,
+				...(previousInboxSessionId ? { previousInboxSessionId } : {}),
 				attemptState: "accepted",
 				state: "idle",
 				engineGeneration: this.engineGeneration,
@@ -1759,17 +1790,58 @@ export class EngineRuntime {
 		if (this.#resolveSessionProfile && !this.#resolveSessionContinuation) {
 			throw new Error("Engine session profile resolution requires an exact continuation dependency digest");
 		}
-		const canonicalCwd = await fs.realpath(request.cwd).catch(() => path.resolve(request.cwd));
+		const canonicalCwd = await canonicalWorkspacePath(request.cwd);
 		return sessionProfileDigest({
 			agentInstanceId: request.agentInstanceId,
 			agentInstanceRef: request.agentInstanceRef,
 			parentAgentInstanceId: request.parentAgentInstanceId,
 			authorityGeneration: request.authorityGeneration,
-			canonicalCwd: process.platform === "win32" ? canonicalCwd.toLowerCase() : canonicalCwd,
+			canonicalCwd,
 			continuationPolicy: profile.continuationPolicy ?? "exact",
 			profile,
 			dependencyDigest: await this.#resolveSessionContinuation?.(profile, request.cwd),
 			sessionDefaults: sessionClosure(this.#sessionDefaults),
+		});
+	}
+
+	async #conversationCarrySource(
+		prior: EngineBindingSnapshot,
+		request: EngineStartRequest,
+		profile: EngineLaunchProfile,
+		conversationIdentityDigest: string,
+	): Promise<string | undefined> {
+		if (!prior.sessionFile || profile.continuationPolicy === "fresh") return undefined;
+		if (prior.authorityGeneration !== request.authorityGeneration) return undefined;
+		const storedDigest = await this.store.getBindingConversationIdentity(request.agentInstanceId);
+		if (storedDigest !== conversationIdentityDigest) {
+			if (storedDigest) return undefined;
+			// Upgrade compatibility for bindings created before the conversation digest
+			// column existed. The admitted start retains the same durable identity tuple.
+			const identity = await this.store.getStartConversationIdentity(prior.commandId);
+			if (
+				identity?.operation !== "start" ||
+				identity.agentInstanceId !== request.agentInstanceId ||
+				identity.agentInstanceRef !== request.agentInstanceRef ||
+				identity.parentAgentInstanceId !== request.parentAgentInstanceId ||
+				identity.authorityGeneration !== request.authorityGeneration
+			) {
+				return undefined;
+			}
+		}
+		const loaded = await loadSessionFile(prior.sessionFile, this.store.sessionStorage).catch(() => undefined);
+		const header = loaded?.entries[0];
+		if (header?.type !== "session" || typeof header.cwd !== "string") return undefined;
+		if ((await canonicalWorkspacePath(header.cwd)) !== (await canonicalWorkspacePath(request.cwd))) return undefined;
+		return header.id;
+	}
+
+	async #conversationIdentityDigest(request: EngineStartRequest): Promise<string> {
+		return sessionProfileDigest({
+			agentInstanceId: request.agentInstanceId,
+			agentInstanceRef: request.agentInstanceRef,
+			parentAgentInstanceId: request.parentAgentInstanceId,
+			authorityGeneration: request.authorityGeneration,
+			canonicalCwd: await canonicalWorkspacePath(request.cwd),
 		});
 	}
 
@@ -2724,7 +2796,11 @@ export class EngineRuntime {
 			inboxMutationCausationCommandId?: string;
 		} = {},
 	): Promise<void> {
-		const committed = await this.store.commitAttemptTransition(this.#snapshot(binding), state, events, options);
+		const committed = await this.store.commitAttemptTransition(this.#snapshot(binding), state, events, {
+			...options,
+			conversationIdentityDigest: binding.conversationIdentityDigest,
+			...(binding.previousInboxSessionId ? { previousInboxSessionId: binding.previousInboxSessionId } : {}),
+		});
 		this.#notifyEvents(committed);
 	}
 
@@ -3068,6 +3144,11 @@ function sha256(value: string): string {
 
 function sessionProfileDigest(continuation: Record<string, unknown>): string {
 	return `sha256:${sha256(stableStringifyJson(continuation))}`;
+}
+
+async function canonicalWorkspacePath(cwd: string): Promise<string> {
+	const canonical = await fs.realpath(cwd).catch(() => path.resolve(cwd));
+	return process.platform === "win32" ? canonical.toLowerCase() : canonical;
 }
 
 function sessionClosure(options: EngineRuntimeOptions["sessionDefaults"]): Record<string, unknown> {

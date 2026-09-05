@@ -226,6 +226,11 @@ export interface EngineCommandIdentity {
 	canonicalHash: string;
 }
 
+export type EngineStartConversationIdentity = Pick<
+	EngineCommandIdentity,
+	"operation" | "agentInstanceId" | "agentInstanceRef" | "parentAgentInstanceId" | "authorityGeneration"
+>;
+
 export interface EngineCommandReceipt {
 	outcome: "applied" | "rejected";
 	detail?: Record<string, unknown>;
@@ -354,6 +359,7 @@ const SCHEMA = [
 		engine_agent_id TEXT NOT NULL,
 		session_file TEXT,
 		profile_digest TEXT NOT NULL,
+		conversation_identity_digest TEXT,
 		state TEXT NOT NULL,
 		engine_generation INTEGER NOT NULL,
 		binding_generation INTEGER NOT NULL,
@@ -456,6 +462,8 @@ const ATTEMPT_RETRY_COLUMNS = [
 	["engine_attempts", "retry_outcome", "TEXT"],
 	["engine_attempts", "retry_error", "TEXT"],
 ] as const;
+
+const CONVERSATION_IDENTITY_COLUMNS = [["engine_runtime_bindings", "conversation_identity_digest", "TEXT"]] as const;
 
 const EFFECT_APPROVAL_SCHEMA = [
 	`CREATE TABLE engine_effects (
@@ -569,6 +577,7 @@ const SCHEMA_MIGRATIONS = [
 		] as const,
 	},
 	{ version: 10, statements: [], requiredColumns: ATTEMPT_RETRY_COLUMNS },
+	{ version: 11, statements: [], requiredColumns: CONVERSATION_IDENTITY_COLUMNS },
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;
@@ -1094,6 +1103,37 @@ export class EngineStore {
 		};
 	}
 
+	async getStartConversationIdentity(commandId: string): Promise<EngineStartConversationIdentity | undefined> {
+		const rows = (await this.#client.unsafe(
+			`SELECT operation, agent_instance_id, agent_instance_ref, parent_agent_instance_id, authority_generation
+			 FROM engine_commands WHERE command_id = ?`,
+			[commandId],
+		)) as Array<{
+			operation: string;
+			agent_instance_id: string;
+			agent_instance_ref: string | null;
+			parent_agent_instance_id: string | null;
+			authority_generation: number;
+		}>;
+		const row = rows[0];
+		if (!row) return undefined;
+		return {
+			operation: row.operation,
+			agentInstanceId: row.agent_instance_id,
+			...(row.agent_instance_ref ? { agentInstanceRef: row.agent_instance_ref } : {}),
+			...(row.parent_agent_instance_id ? { parentAgentInstanceId: row.parent_agent_instance_id } : {}),
+			authorityGeneration: Number(row.authority_generation),
+		};
+	}
+
+	async getBindingConversationIdentity(agentInstanceId: string): Promise<string | undefined> {
+		const rows = (await this.#client.unsafe(
+			"SELECT conversation_identity_digest FROM engine_runtime_bindings WHERE agent_instance_id = ?",
+			[agentInstanceId],
+		)) as Array<{ conversation_identity_digest: string | null }>;
+		return rows[0]?.conversation_identity_digest ?? undefined;
+	}
+
 	async listExpiredChildHistory(cutoff: number, limit = 100): Promise<ExpiredChildHistory[]> {
 		const rows = (await this.#client.unsafe(
 			`SELECT b.agent_instance_id, c.agent_instance_ref, b.attempt_id, b.session_file, a.updated_at
@@ -1155,6 +1195,8 @@ export class EngineStore {
 			inboxSessionId?: string;
 			inboxMutation?: EngineInboxMutation;
 			inboxMutationCausationCommandId?: string;
+			conversationIdentityDigest?: string;
+			previousInboxSessionId?: string;
 		} = {},
 	): Promise<EngineEvent[]> {
 		return await this.#transaction(async sql => {
@@ -1180,11 +1222,18 @@ export class EngineStore {
 			const transcriptCheckpoint = options.transcriptCheckpoint
 				? { ...options.transcriptCheckpoint, revision: Number(currentRow?.transcript_revision ?? 0) + 1 }
 				: undefined;
-			await this.#putBinding(sql, binding);
+			await this.#putBinding(sql, binding, options.conversationIdentityDigest);
 			if (!(await this.#putAttempt(sql, binding, state, options.cause, transcriptCheckpoint))) {
 				throw new EngineAttemptConflictError(binding.attemptId);
 			}
 			if (options.inboxSessionId) {
+				if (options.previousInboxSessionId && options.previousInboxSessionId !== options.inboxSessionId) {
+					await sql.unsafe(
+						`UPDATE engine_inbox_items SET session_id=?, updated_at=?
+						 WHERE session_id=? AND agent_instance_id=?`,
+						[options.inboxSessionId, Date.now(), options.previousInboxSessionId, binding.agentInstanceId],
+					);
+				}
 				await sql.unsafe(
 					`UPDATE engine_inbox_items SET execution_id=?, attempt_id=?, binding_id=?, engine_generation=?,
 					 binding_generation=?, authority_generation=?, wake_delivered_at=NULL, updated_at=?
@@ -2029,18 +2078,24 @@ export class EngineStore {
 		);
 	}
 
-	async #putBinding(sql: SqlClient, binding: EngineBindingSnapshot): Promise<void> {
+	async #putBinding(
+		sql: SqlClient,
+		binding: EngineBindingSnapshot,
+		conversationIdentityDigest?: string,
+	): Promise<void> {
 		await sql.unsafe(
 			`INSERT INTO engine_runtime_bindings(
 			 binding_id, command_id, agent_instance_id, execution_id, attempt_id, engine_agent_id, session_file,
-			 profile_digest, state, engine_generation, binding_generation, authority_generation,
+			 profile_digest, conversation_identity_digest, state, engine_generation, binding_generation, authority_generation,
 			 manual_hold, intent_revision, intent_command_id, updated_at
-			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			 ON CONFLICT(agent_instance_id) DO UPDATE SET
 			 binding_id=excluded.binding_id, command_id=excluded.command_id,
 			 execution_id=excluded.execution_id, attempt_id=excluded.attempt_id,
 			 engine_agent_id=excluded.engine_agent_id, session_file=excluded.session_file,
-			 profile_digest=excluded.profile_digest, state=excluded.state,
+			 profile_digest=excluded.profile_digest,
+			 conversation_identity_digest=COALESCE(excluded.conversation_identity_digest, engine_runtime_bindings.conversation_identity_digest),
+			 state=excluded.state,
 			 engine_generation=excluded.engine_generation, binding_generation=excluded.binding_generation,
 				 authority_generation=excluded.authority_generation,
 				 manual_hold=excluded.manual_hold, intent_revision=excluded.intent_revision,
@@ -2055,6 +2110,7 @@ export class EngineStore {
 				binding.engineAgentId,
 				binding.sessionFile ?? null,
 				binding.profileDigest,
+				conversationIdentityDigest ?? null,
 				binding.state,
 				binding.engineGeneration,
 				binding.bindingGeneration,

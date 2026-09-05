@@ -11,6 +11,7 @@ import type {
 	EngineControlInitiator,
 	EngineEvent,
 	EngineLaunchProfile,
+	EngineStartRequest,
 } from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import { EngineRuntime, type EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
@@ -1456,7 +1457,7 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
-	it("reopens a durable transcript only for the same AgentInstance profile", async () => {
+	it("carries a durable conversation into a fresh session when the profile changes", async () => {
 		const mock = createMockModel({
 			responses: [{ content: ["remembered 41"] }, { content: ["same profile"] }, { content: ["fresh profile"] }],
 		});
@@ -1511,7 +1512,8 @@ describe("EngineRuntime", () => {
 		);
 		await restarted.drain();
 		expect(changed.sessionFile).not.toBe(second.sessionFile);
-		expect(JSON.stringify(mock.calls[2]?.context.messages)).not.toContain("Remember 41");
+		expect(JSON.stringify(mock.calls[2]?.context.messages)).toContain("Remember 41");
+		expect(mock.calls[2]?.context.systemPrompt?.join("\n")).toContain("A different AgentInstance profile");
 		await restarted.dispose();
 	}, 60_000);
 
@@ -2009,20 +2011,41 @@ describe("EngineRuntime", () => {
 
 	it("reopens a transcript only across an exact continuation identity", async () => {
 		let dependencyDigest = "dependency-a";
-		const { runtime, cwd } = await createRuntime(async () => true, {
-			resolveSessionContinuation: async () => dependencyDigest,
-			resolveSessionProfile: async (_profile, sessionCwd) => ({
-				options: { settings: await Settings.loadReadOnly({ cwd: sessionCwd }) },
-				dispose() {},
-			}),
-		});
+		const priorUserMessages = new Map<string, string[]>();
+		const enabledTools = new Map<string, string[]>();
+		const { runtime, cwd } = await createRuntime(
+			async (session, input) => {
+				priorUserMessages.set(
+					input,
+					session.sessionManager
+						.getBranch()
+						.flatMap(entry =>
+							entry.type === "message" &&
+							entry.message.role === "user" &&
+							typeof entry.message.content === "string"
+								? [entry.message.content]
+								: [],
+						),
+				);
+				enabledTools.set(input, session.getEnabledToolNames());
+				session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
+				return true;
+			},
+			{
+				resolveSessionContinuation: async () => dependencyDigest,
+				resolveSessionProfile: async (_profile, sessionCwd) => ({
+					options: { settings: await Settings.loadReadOnly({ cwd: sessionCwd }) },
+					dispose() {},
+				}),
+			},
+		);
 		const request = {
 			agentInstanceId: "agent-exact-continuation",
 			agentInstanceRef: "grimoire://tasks/project-a/task-a/agents/agent-exact-continuation",
 			authorityGeneration: 1,
 			cwd,
 		};
-		const start = (suffix: string, overrides: Partial<typeof request> = {}, launch = profile) =>
+		const start = (suffix: string, overrides: Partial<EngineStartRequest> = {}, launch = profile) =>
 			runtime.start(
 				{
 					...request,
@@ -2035,46 +2058,97 @@ describe("EngineRuntime", () => {
 				launch,
 			);
 
-		const first = await start("first");
+		const firstProfile = { ...profile, toolNames: ["read"], restrictToolNames: true };
+		const secondProfile = {
+			...profile,
+			profileDigest: "leaf-profile-v2",
+			toolNames: ["glob"],
+			restrictToolNames: true,
+		};
+		const first = await start("first", {}, firstProfile);
 		await runtime.drain();
-		const same = await start("same");
+		const same = await start("same", {}, firstProfile);
 		await runtime.drain();
 		expect(same.sessionFile).toBe(first.sessionFile);
+		expect(priorUserMessages.get("same")).toEqual(["first"]);
+
+		const profileChanged = await start("profile", {}, secondProfile);
+		await runtime.drain();
+		expect(profileChanged.sessionFile).not.toBe(same.sessionFile);
+		expect(priorUserMessages.get("profile")).toEqual(["first", "same"]);
+		expect(enabledTools.get("profile")).toContain("glob");
+		expect(enabledTools.get("profile")).not.toContain("read");
+		const queued = await runtime.enqueueInbox(profileChanged, {
+			sourceEventId: "profile-change-pending-queue",
+			sourceType: "user",
+			body: "queued across the profile change",
+			createdAt: Date.now(),
+			wakeIntent: true,
+		});
+		const stopped = await runtime.cancel({
+			...profileChanged,
+			commandId: "command-profile-hold",
+			expectedIntentRevision: profileChanged.intentRevision,
+		});
+		expect(stopped).toMatchObject({ manualHold: true });
 
 		dependencyDigest = "dependency-b";
-		const dependencyChanged = await start("dependency");
+		const dependencyChanged = await start(
+			"dependency",
+			{ expectedIntentRevision: stopped.intentRevision },
+			secondProfile,
+		);
 		await runtime.drain();
-		expect(dependencyChanged.sessionFile).not.toBe(same.sessionFile);
-
-		const projectChanged = await start("project", {
-			agentInstanceRef: "grimoire://tasks/project-b/task-b/agents/agent-exact-continuation",
+		expect(dependencyChanged.sessionFile).not.toBe(profileChanged.sessionFile);
+		expect(priorUserMessages.get("dependency")).toEqual(["first", "same", "profile"]);
+		expect(enabledTools.get("dependency")).toContain("glob");
+		expect(enabledTools.get("dependency")).not.toContain("read");
+		expect(dependencyChanged.manualHold).toBe(false);
+		expect(await runtime.readInbox(dependencyChanged, queued.item.queueId)).toMatchObject({
+			sourceEventId: "profile-change-pending-queue",
+			disposition: "pending",
 		});
+
+		const projectRef = "grimoire://tasks/project-b/task-b/agents/agent-exact-continuation";
+		const projectChanged = await start("project", { agentInstanceRef: projectRef }, secondProfile);
 		await runtime.drain();
 		expect(projectChanged.sessionFile).not.toBe(dependencyChanged.sessionFile);
+		expect(priorUserMessages.get("project")).toEqual([]);
 
-		const authorityChanged = await start("authority", { authorityGeneration: 2 });
+		const authorityChanged = await start(
+			"authority",
+			{ agentInstanceRef: projectRef, authorityGeneration: 2 },
+			secondProfile,
+		);
 		await runtime.drain();
 		expect(authorityChanged.sessionFile).not.toBe(projectChanged.sessionFile);
+		expect(priorUserMessages.get("authority")).toEqual([]);
 
 		const otherCwd = path.join(path.dirname(cwd), "workspace-b");
 		fs.mkdirSync(otherCwd);
-		const cwdChanged = await start("cwd", { authorityGeneration: 2, cwd: otherCwd });
+		const cwdChanged = await start(
+			"cwd",
+			{ agentInstanceRef: projectRef, authorityGeneration: 2, cwd: otherCwd },
+			secondProfile,
+		);
 		await runtime.drain();
 		expect(cwdChanged.sessionFile).not.toBe(authorityChanged.sessionFile);
+		expect(priorUserMessages.get("cwd")).toEqual([]);
 
 		const fresh = await start(
 			"fresh-a",
-			{ authorityGeneration: 2, cwd: otherCwd },
-			{ ...profile, continuationPolicy: "fresh" },
+			{ agentInstanceRef: projectRef, authorityGeneration: 2, cwd: otherCwd },
+			{ ...secondProfile, continuationPolicy: "fresh" },
 		);
 		await runtime.drain();
 		const freshAgain = await start(
 			"fresh-b",
-			{ authorityGeneration: 2, cwd: otherCwd },
-			{ ...profile, continuationPolicy: "fresh" },
+			{ agentInstanceRef: projectRef, authorityGeneration: 2, cwd: otherCwd },
+			{ ...secondProfile, continuationPolicy: "fresh" },
 		);
 		await runtime.drain();
 		expect(freshAgain.sessionFile).not.toBe(fresh.sessionFile);
+		expect(priorUserMessages.get("fresh-b")).toEqual([]);
 		await runtime.dispose();
 	}, 60_000);
 
