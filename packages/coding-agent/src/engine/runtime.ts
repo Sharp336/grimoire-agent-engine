@@ -139,6 +139,7 @@ function terminalYield(
 interface LiveBinding extends EngineBindingSnapshot {
 	conversationIdentityDigest: string;
 	previousInboxSessionId?: string;
+	uncommittedForkSessionFile?: string;
 	manualHold: boolean;
 	intentRevision: number;
 	attemptState: EngineAttemptState;
@@ -1384,6 +1385,8 @@ export class EngineRuntime {
 						}
 					: {}),
 			});
+			delete binding.previousInboxSessionId;
+			delete binding.uncommittedForkSessionFile;
 		} catch (error) {
 			this.#restoreIntent(binding, previousIntent);
 			try {
@@ -1485,13 +1488,14 @@ export class EngineRuntime {
 		const resolved = await this.#resolveSessionProfile?.(profile, request.cwd);
 		let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
 		let unsubscribeCreated: (() => void) | undefined;
+		let sessionManager: SessionManager | undefined;
+		let uncommittedForkSessionFile: string | undefined;
 		try {
 			const prior = await this.store.getBinding(request.agentInstanceId);
 			const profileDigest = continuationDigest;
 			const bindingGeneration = (prior?.bindingGeneration ?? 0) + 1;
 			const route = engineRouteToken(request.agentInstanceId);
 			const sessionDir = path.join(this.#sessionRoot, route);
-			let sessionManager: SessionManager;
 			let previousInboxSessionId: string | undefined;
 			if (prior?.sessionFile && prior.profileDigest === profileDigest && profile.continuationPolicy !== "fresh") {
 				sessionManager = await SessionManager.open(prior.sessionFile, sessionDir, this.store.sessionStorage, {
@@ -1511,6 +1515,8 @@ export class EngineRuntime {
 						sessionDir,
 						this.store.sessionStorage,
 					);
+					uncommittedForkSessionFile = sessionManager.getSessionFile();
+					if (!uncommittedForkSessionFile) throw new Error("Carried AgentSession was not durably materialized");
 					// Workspace roots are executable authority, not conversation history. The
 					// new profile/settings snapshot repopulates its own roots during session setup.
 					await sessionManager.setAdditionalDirectories([]);
@@ -1640,6 +1646,7 @@ export class EngineRuntime {
 				profileDigest,
 				conversationIdentityDigest,
 				...(previousInboxSessionId ? { previousInboxSessionId } : {}),
+				...(uncommittedForkSessionFile ? { uncommittedForkSessionFile } : {}),
 				attemptState: "accepted",
 				state: "idle",
 				engineGeneration: this.engineGeneration,
@@ -1770,6 +1777,15 @@ export class EngineRuntime {
 			if (unsubscribeCreated) await collectFailure(cleanupErrors, unsubscribeCreated);
 			const createdSession = created?.session;
 			if (createdSession) await collectFailure(cleanupErrors, () => createdSession.dispose());
+			if (uncommittedForkSessionFile && sessionManager) {
+				const forkSessionManager = sessionManager;
+				const forkSessionFile = uncommittedForkSessionFile;
+				forkSessionManager.seal();
+				await collectFailure(cleanupErrors, () => forkSessionManager.close());
+				await collectFailure(cleanupErrors, () =>
+					this.store.sessionStorage.deleteSessionWithArtifacts(forkSessionFile),
+				);
+			}
 			if (resolved) await collectFailure(cleanupErrors, resolved.dispose);
 			if (cleanupErrors.length > 0) {
 				logger.warn("Engine binding startup cleanup failed", {
@@ -2574,7 +2590,17 @@ export class EngineRuntime {
 		if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
 		this.#bindings.delete(binding.agentInstanceId);
 		binding.state = "released";
-		await this.#disposeBindingResources(binding, "Engine admission failed", "cancelled");
+		const errors: unknown[] = [];
+		await collectFailure(errors, () =>
+			this.#disposeBindingResources(binding, "Engine admission failed", "cancelled"),
+		);
+		const uncommittedForkSessionFile = binding.uncommittedForkSessionFile;
+		if (uncommittedForkSessionFile) {
+			await collectFailure(errors, () =>
+				this.store.sessionStorage.deleteSessionWithArtifacts(uncommittedForkSessionFile),
+			);
+		}
+		throwCollectedFailures(errors, `Engine binding ${binding.agentInstanceId} admission cleanup failed`);
 	}
 
 	async #disposeBindingResources(

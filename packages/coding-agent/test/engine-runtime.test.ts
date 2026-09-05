@@ -2322,6 +2322,121 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
+	it("removes only an uncommitted carried transcript when a pending start is cancelled", async () => {
+		const { runtime, cwd } = await createRuntime(async (session, input) => {
+			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
+			return true;
+		});
+		const first = await runtime.start(
+			{
+				commandId: "command-carry-cancel-first",
+				agentInstanceId: "agent-carry-cancel",
+				agentInstanceRef: "grimoire://tasks/project/task/agents/agent-carry-cancel",
+				executionId: "execution-carry-cancel-first",
+				attemptId: "attempt-carry-cancel-first",
+				authorityGeneration: 1,
+				cwd,
+				input: "retained before cancelled profile change",
+			},
+			profile,
+		);
+		await runtime.drain();
+		const stopped = await runtime.cancel({
+			...first,
+			commandId: "command-carry-cancel-hold",
+			expectedIntentRevision: first.intentRevision,
+		});
+		const queued = await runtime.enqueueInbox(first, {
+			sourceEventId: "carry-cancel-pending-inbox",
+			sourceType: "user",
+			body: "remain pending on the retained session",
+			createdAt: Date.now(),
+			wakeIntent: true,
+		});
+		if (!first.sessionFile) throw new Error("Expected the retained session file");
+		const storage = runtime.store.sessionStorage;
+		const sessionDir = path.dirname(first.sessionFile);
+		const filesBefore = storage.listFilesSync(sessionDir, "*.jsonl").sort();
+		const command = {
+			commandId: "command-carry-cancel-second",
+			operation: "start" as const,
+			deviceId: "device-carry-cancel",
+			engineId: "engine-carry-cancel",
+			engineGeneration: runtime.engineGeneration,
+			agentInstanceId: first.agentInstanceId,
+			agentInstanceRef: "grimoire://tasks/project/task/agents/agent-carry-cancel",
+			executionId: "execution-carry-cancel-second",
+			attemptId: "attempt-carry-cancel-second",
+			authorityGeneration: 1,
+			payloadHash: "sha256:carry-cancel-payload",
+			canonicalHash: "sha256:carry-cancel-command",
+		};
+		expect(await runtime.store.admitCommand(command, runtime.engineGeneration)).toEqual({ status: "claimed" });
+
+		const forkStarted = Promise.withResolvers<void>();
+		const releaseFork = Promise.withResolvers<void>();
+		const writeTextAtomic = storage.writeTextAtomic.bind(storage);
+		let forkPath: string | undefined;
+		const blockedWrite = spyOn(storage, "writeTextAtomic").mockImplementation(async (file, content, options) => {
+			if (!forkPath && file !== first.sessionFile) {
+				forkPath = file;
+				forkStarted.resolve();
+				await releaseFork.promise;
+			}
+			await writeTextAtomic(file, content, options);
+		});
+		const next = {
+			commandId: command.commandId,
+			agentInstanceId: first.agentInstanceId,
+			agentInstanceRef: command.agentInstanceRef,
+			executionId: command.executionId,
+			attemptId: command.attemptId,
+			authorityGeneration: command.authorityGeneration,
+			cwd,
+			input: "must be cancelled before admission",
+			expectedIntentRevision: stopped.intentRevision,
+		};
+		try {
+			const start = runtime.start(next, { ...profile, systemPrompt: "changed profile" });
+			await forkStarted.promise;
+			const cancelled = await runtime.cancelPendingStart({
+				commandId: "command-carry-cancel-stop",
+				agentInstanceId: next.agentInstanceId,
+				executionId: next.executionId,
+				attemptId: next.attemptId,
+				authorityGeneration: next.authorityGeneration,
+				engineGeneration: runtime.engineGeneration,
+				expectedIntentRevision: stopped.intentRevision,
+			});
+			expect(cancelled).toMatchObject({ phase: "applied", preStart: true, manualHold: true });
+			releaseFork.resolve();
+			await expect(start).rejects.toThrow("already has another receipt");
+		} finally {
+			releaseFork.resolve();
+			blockedWrite.mockRestore();
+		}
+
+		expect(forkPath).toBeDefined();
+		expect(storage.existsSync(forkPath!)).toBe(false);
+		expect(storage.listFilesSync(sessionDir, "*.jsonl").sort()).toEqual(filesBefore);
+		expect(await storage.readText(first.sessionFile)).toContain("retained before cancelled profile change");
+		expect(await runtime.store.getBinding(first.agentInstanceId)).toMatchObject({
+			sessionFile: first.sessionFile,
+			state: "released",
+			manualHold: true,
+		});
+		expect(await runtime.store.getAttempt(next.attemptId)).toBeUndefined();
+		expect(await runtime.store.getInboxItem(queued.item.sessionId, queued.item.queueId)).toMatchObject({
+			sessionId: queued.item.sessionId,
+			disposition: "pending",
+		});
+		expect(await runtime.store.admitCommand(command, runtime.engineGeneration + 1)).toMatchObject({
+			status: "replay",
+			receipt: { outcome: "rejected", detail: { code: "cancelled" } },
+		});
+		await runtime.dispose();
+	}, 60_000);
+
 	it("holds a completed Attempt when a revision-fenced Stop arrives before its queued wake starts", async () => {
 		const { runtime, cwd } = await createRuntime();
 		const started = await runtime.start(
