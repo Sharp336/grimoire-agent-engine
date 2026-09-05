@@ -969,8 +969,8 @@ export class EngineStore {
 				`SELECT command_id, canonical_hash, state, processor_generation, receipt
 				 FROM engine_commands
 				 WHERE operation='start' AND agent_instance_id=? AND execution_id=? AND attempt_id=?
-				   AND authority_generation=? AND engine_generation=?
-				 ORDER BY received_at DESC LIMIT 1`,
+				   AND authority_generation=? AND engine_generation<=?
+				 ORDER BY engine_generation DESC, received_at DESC LIMIT 1`,
 				[
 					target.agentInstanceId,
 					target.executionId,

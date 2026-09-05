@@ -396,10 +396,6 @@ export class NatsEngineAdapter {
 		try {
 			command = this.#parseCommand(message);
 			await this.#options.authorizeCommand(command);
-			if (command.engineGeneration < this.runtime.engineGeneration) {
-				message.ack();
-				return;
-			}
 			identity = commandIdentity(command);
 			const admission = await this.runtime.store.admitCommand(identity, this.runtime.engineGeneration);
 			if (admission.status === "replay") {

@@ -326,7 +326,20 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 				return info.delivered.consumer_seq > deliveredAfterDuplicate && info.num_ack_pending === 0;
 			});
 			await adapter.flushEvents();
-			expect(eventsA.some(event => event.causationCommandId === oldGenerationA.commandId)).toBeFalse();
+			await waitFor(() =>
+				eventsA.some(
+					event =>
+						event.causationCommandId === oldGenerationA.commandId &&
+						event.type === "command.rejected" &&
+						(event.payload as Record<string, unknown>).code === "stale_target",
+				),
+			);
+			expect(
+				await runtime.store.admitCommand(engineCommandIdentity(oldGenerationA), runtime.engineGeneration),
+			).toMatchObject({
+				status: "replay",
+				receipt: { outcome: "rejected", detail: { code: "stale_target" } },
+			});
 			expect(dispatchCount).toBe(3);
 
 			const mismatchedIdentityA = {
@@ -666,6 +679,103 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			await adapter.dispose();
 			await runtime.dispose();
 			authStorage.close();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 30000);
+
+	it("cancels a received pre-start command across an Engine generation upgrade without launching it", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-upgrade-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const databasePath = path.join(tempDir, "engine.sqlite");
+		const cwd = path.join(tempDir, "workspace");
+		fs.mkdirSync(cwd);
+		const firstRuntime = await EngineRuntime.create({ databasePath, dispatchPrompt: async () => true });
+		const oldStart = startCommand(firstRuntime.engineGeneration, "agent-upgrade", "upgrade", cwd);
+		expect(
+			await firstRuntime.store.admitCommand(engineCommandIdentity(oldStart), firstRuntime.engineGeneration),
+		).toEqual({ status: "claimed" });
+		await firstRuntime.dispose();
+
+		const secondRuntime = await EngineRuntime.create({ databasePath, dispatchPrompt: async () => true });
+		expect(secondRuntime.engineGeneration).toBe(oldStart.engineGeneration + 1);
+		let resolverCalls = 0;
+		const errors: Error[] = [];
+		const adapter = await NatsEngineAdapter.connect({
+			runtime: secondRuntime,
+			deviceId: "device-1",
+			engineId: "engine-1",
+			servers: broker.url,
+			authorizeCommand: () => {},
+			authorizeMessage: () => {},
+			resolveLaunchProfile: () => {
+				resolverCalls++;
+				return { spawns: "", profileDigest: "leaf-profile-v1" };
+			},
+			onError: error => errors.push(error),
+		});
+		const client = await connect({ servers: broker.url });
+		try {
+			const js = jetstream(client);
+			const manager = await jetstreamManager(client);
+			const decoder = new TextDecoder();
+			const events: Array<Record<string, unknown>> = [];
+			const subscription = client.subscribe(adapter.eventSubject(oldStart.agentInstanceId, "*"), {
+				callback: (_error, message) => {
+					events.push(JSON.parse(decoder.decode(message.data)));
+				},
+			});
+			const cancel: EngineCommandEnvelope = {
+				schema: "grimoire.engine.command.v1",
+				commandId: "command-cancel-upgrade",
+				op: "cancel",
+				deviceId: "device-1",
+				engineId: "engine-1",
+				engineGeneration: secondRuntime.engineGeneration,
+				agentInstanceId: oldStart.agentInstanceId,
+				executionId: oldStart.executionId,
+				attemptId: oldStart.attemptId,
+				authorityGeneration: oldStart.authorityGeneration,
+				issuedAt: Date.now(),
+				payload: { reason: "Persisted Stop before Engine upgrade" },
+			};
+			await js.publish(adapter.commandSubject(cancel.agentInstanceId, "cancel"), JSON.stringify(cancel), {
+				msgID: cancel.commandId,
+			});
+			await waitFor(() =>
+				events.some(
+					event =>
+						event.causationCommandId === oldStart.commandId &&
+						(event.payload as Record<string, unknown>).code === "cancelled",
+				),
+			);
+			const oldReceipt = await secondRuntime.store.admitCommand(
+				engineCommandIdentity(oldStart),
+				secondRuntime.engineGeneration,
+			);
+			expect(oldReceipt).toMatchObject({
+				status: "replay",
+				receipt: { outcome: "rejected", detail: { code: "cancelled" } },
+			});
+
+			const commandConsumer = `engine_${adapter.engineRoute}`;
+			const deliveredBefore = (await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer)).delivered
+				.consumer_seq;
+			await js.publish(adapter.commandSubject(oldStart.agentInstanceId, "start"), JSON.stringify(oldStart), {
+				msgID: oldStart.commandId,
+			});
+			await waitFor(async () => {
+				const info = await manager.consumers.info(ENGINE_COMMAND_STREAM, commandConsumer);
+				return info.delivered.consumer_seq > deliveredBefore && info.num_ack_pending === 0;
+			});
+			expect(resolverCalls).toBe(0);
+			expect(await secondRuntime.store.getAttempt(oldStart.attemptId!)).toBeUndefined();
+			expect(errors).toEqual([]);
+			subscription.unsubscribe();
+		} finally {
+			await client.drain();
+			await adapter.dispose();
+			await secondRuntime.dispose();
 			broker.process.kill();
 			await broker.process.exited;
 		}
