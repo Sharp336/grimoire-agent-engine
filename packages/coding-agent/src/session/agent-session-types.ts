@@ -346,6 +346,10 @@ export interface PromptOptions {
 	attribution?: MessageAttribution;
 	/** Skip pre-send compaction checks for this prompt. */
 	skipCompactionCheck?: boolean;
+	/** Engine command that introduced the exact persisted user message. */
+	sourceCommandId?: string;
+	/** Opaque client identity used to reconcile an optimistic user message. */
+	clientMessageId?: string;
 }
 
 /** Payload for {@link AgentSession.setPromptDropped}: a user prompt cancelled

@@ -23,7 +23,7 @@ import { AgentRegistry } from "../registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import { createProviderRetryBudgetHook } from "../session/provider-retry-budget";
-import type { SessionEntry } from "../session/session-entries";
+import type { SessionEntry, SessionMessageIdentity } from "../session/session-entries";
 import { loadSessionFile } from "../session/session-loader";
 import { type SessionDurabilityCheckpoint, SessionManager } from "../session/session-manager";
 import { migrateToCurrentVersion } from "../session/session-migrations";
@@ -208,7 +208,7 @@ export interface EngineRuntimeOptions {
 		| "toolExecutionHook"
 	>;
 	/** Test/integration seam; production uses AgentSession.prompt directly. */
-	dispatchPrompt?: (session: AgentSession, input: string) => Promise<boolean>;
+	dispatchPrompt?: (session: AgentSession, input: string, identity?: SessionMessageIdentity) => Promise<boolean>;
 	resolveSessionProfile?: (
 		profile: EngineLaunchProfile,
 		cwd: string,
@@ -240,7 +240,11 @@ export class EngineRuntime {
 	readonly engineGeneration: number;
 	readonly store: EngineStore;
 	readonly #sessionDefaults: EngineRuntimeOptions["sessionDefaults"];
-	readonly #dispatchPrompt: (session: AgentSession, input: string) => Promise<boolean>;
+	readonly #dispatchPrompt: (
+		session: AgentSession,
+		input: string,
+		identity?: SessionMessageIdentity,
+	) => Promise<boolean>;
 	readonly #resolveSessionProfile: EngineRuntimeOptions["resolveSessionProfile"];
 	readonly #resolveSessionContinuation: EngineRuntimeOptions["resolveSessionContinuation"];
 	readonly #launchChild: EngineRuntimeOptions["launchChild"];
@@ -262,7 +266,7 @@ export class EngineRuntime {
 		this.store = store;
 		this.engineGeneration = engineGeneration;
 		this.#sessionDefaults = options.sessionDefaults;
-		this.#dispatchPrompt = options.dispatchPrompt ?? ((session, input) => session.prompt(input));
+		this.#dispatchPrompt = options.dispatchPrompt ?? ((session, input, identity) => session.prompt(input, identity));
 		this.#resolveSessionProfile = options.resolveSessionProfile;
 		this.#resolveSessionContinuation = options.resolveSessionContinuation;
 		this.#launchChild = options.launchChild;
@@ -351,6 +355,8 @@ export class EngineRuntime {
 		const queued = request.queueId !== undefined;
 		if (
 			!request.commandId.trim() ||
+			(request.clientMessageId !== undefined &&
+				(!request.clientMessageId.trim() || request.clientMessageId.length > 200)) ||
 			(queued
 				? !request.queueId?.trim() ||
 					!request.mutationId?.trim() ||
@@ -409,7 +415,14 @@ export class EngineRuntime {
 				item ? { ...item, revision: item.revision + 1 } : undefined,
 			);
 			try {
-				await binding.session.steer(item?.deliveryPayload ?? request.message!);
+				await binding.session.steer(item?.deliveryPayload ?? request.message!, undefined, {
+					sourceCommandId: request.commandId,
+					...(request.clientMessageId
+						? { clientMessageId: request.clientMessageId }
+						: item?.sourceType === "user"
+							? { clientMessageId: item.sourceEventId }
+							: {}),
+				});
 				binding.attemptState = "running";
 				await this.#commitAttemptTransition(
 					binding,
@@ -977,6 +990,8 @@ export class EngineRuntime {
 			text: string;
 			createdAt: string;
 			textTruncated: boolean;
+			sourceCommandId?: string;
+			clientMessageId?: string;
 		}>;
 	}> {
 		return await this.#inLane(agentInstanceId, async () => {
@@ -1016,6 +1031,12 @@ export class EngineRuntime {
 						text: fullText.slice(0, MAX_HISTORY_MESSAGE_CHARS),
 						createdAt: entry.timestamp,
 						textTruncated: fullText.length > MAX_HISTORY_MESSAGE_CHARS,
+						...(entry.message.role === "user" && entry.sourceCommandId
+							? { sourceCommandId: entry.sourceCommandId }
+							: {}),
+						...(entry.message.role === "user" && entry.clientMessageId
+							? { clientMessageId: entry.clientMessageId }
+							: {}),
 					},
 				];
 			});
@@ -1304,7 +1325,16 @@ export class EngineRuntime {
 			}
 			throw error;
 		}
-		this.#trackRun(this.#runPrompt(binding, queuedItem?.deliveryPayload ?? request.input!));
+		this.#trackRun(
+			this.#runPrompt(binding, queuedItem?.deliveryPayload ?? request.input!, {
+				sourceCommandId: request.commandId,
+				...(request.clientMessageId
+					? { clientMessageId: request.clientMessageId }
+					: queuedItem?.sourceType === "user"
+						? { clientMessageId: queuedItem.sourceEventId }
+						: {}),
+			}),
+		);
 		this.#signalInboxWake();
 		return {
 			...this.#snapshot(binding),
@@ -1975,7 +2005,7 @@ export class EngineRuntime {
 		binding.pauseProgress = Promise.withResolvers<void>();
 	}
 
-	async #dispatchModel(binding: LiveBinding, input: string): Promise<boolean> {
+	async #dispatchModel(binding: LiveBinding, input: string, identity?: SessionMessageIdentity): Promise<boolean> {
 		const completed = Promise.withResolvers<void>();
 		binding.activeModelCalls.add(completed.promise);
 		const modelCallId = `model-${++binding.modelCallSequence}`;
@@ -1991,7 +2021,9 @@ export class EngineRuntime {
 			const previous = binding.session.getLastAssistantMessage();
 			let dispatched: boolean;
 			try {
-				dispatched = await this.#withSessionScope(binding, () => this.#dispatchPrompt(binding.session, input));
+				dispatched = await this.#withSessionScope(binding, () =>
+					this.#dispatchPrompt(binding.session, input, identity),
+				);
 				const current = binding.session.getLastAssistantMessage();
 				if (current !== previous && current?.stopReason === "error") {
 					throw new Error(current.errorMessage?.trim() || "Model request failed");
@@ -2034,11 +2066,11 @@ export class EngineRuntime {
 		);
 	}
 
-	async #runPrompt(binding: LiveBinding, input: string): Promise<void> {
+	async #runPrompt(binding: LiveBinding, input: string, identity?: SessionMessageIdentity): Promise<void> {
 		const attemptId = binding.attemptId;
 		const attemptMessageStart = binding.session.messages.length;
 		try {
-			await this.#dispatchModel(binding, input);
+			await this.#dispatchModel(binding, input, identity);
 			for (let reminder = 0; reminder < 2 && binding.requireYieldTool; reminder++) {
 				await binding.pauseGate.waitUntilResumed();
 				if (

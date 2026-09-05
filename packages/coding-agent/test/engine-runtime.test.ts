@@ -1810,10 +1810,10 @@ describe("EngineRuntime", () => {
 	it("atomically consumes a queued steer while paused and resumes the same Attempt", async () => {
 		const promptStarted = Promise.withResolvers<void>();
 		const prompt = Promise.withResolvers<boolean>();
-		const queued: string[] = [];
+		const queued: Array<{ message: string; sourceCommandId?: string; clientMessageId?: string }> = [];
 		const { runtime, cwd } = await createRuntime(async session => {
-			session.steer = async message => {
-				queued.push(message);
+			session.steer = async (message, _images, identity) => {
+				queued.push({ message, ...identity });
 			};
 			promptStarted.resolve();
 			return prompt.promise;
@@ -1858,7 +1858,13 @@ describe("EngineRuntime", () => {
 			expectedIntentRevision: pauseResult.intentRevision,
 		});
 		const steeredEvent = await steered;
-		expect(queued).toEqual(["change course"]);
+		expect(queued).toEqual([
+			{
+				message: "change course",
+				sourceCommandId: "steer-while-paused",
+				clientMessageId: "queued-steer-item",
+			},
+		]);
 		expect(steerResult).toEqual({
 			phase: "consumed",
 			manualHold: false,
@@ -2534,8 +2540,8 @@ describe("EngineRuntime", () => {
 			await runtime.drain();
 		};
 
-		const recordPrompt: NonNullable<EngineRuntimeOptions["dispatchPrompt"]> = async (session, input) => {
-			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
+		const recordPrompt: NonNullable<EngineRuntimeOptions["dispatchPrompt"]> = async (session, input, identity) => {
+			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
 			return true;
 		};
 		const local = await createRuntime(recordPrompt);
@@ -2558,6 +2564,42 @@ describe("EngineRuntime", () => {
 		await expect(restarted.sessionHistory("child-off")).rejects.toMatchObject({ code: "agent_not_found" });
 		expect((await restarted.store.getBinding("child-off"))?.sessionFile).toBeUndefined();
 		await restarted.dispose();
+
+		const correlated = await createRuntime(recordPrompt);
+		const firstCorrelation = {
+			commandId: "history-command-one",
+			clientMessageId: "history-client-one",
+			agentInstanceId: "history-correlated-agent",
+			executionId: "history-execution-one",
+			attemptId: "history-attempt-one",
+			authorityGeneration: 1,
+			cwd: correlated.cwd,
+			input: "repeated text",
+		};
+		await correlated.runtime.start(firstCorrelation, profile);
+		await correlated.runtime.drain();
+		await correlated.runtime.start(
+			{
+				...firstCorrelation,
+				commandId: "history-command-two",
+				clientMessageId: "history-client-two",
+				executionId: "history-execution-two",
+				attemptId: "history-attempt-two",
+			},
+			profile,
+		);
+		await correlated.runtime.drain();
+		await correlated.runtime.dispose();
+
+		const correlatedRestart = await EngineRuntime.create(correlated.options);
+		const correlatedHistory = await correlatedRestart.sessionHistory("history-correlated-agent");
+		expect(
+			correlatedHistory.entries.map(entry => [entry.text, entry.sourceCommandId, entry.clientMessageId]),
+		).toEqual([
+			["repeated text", "history-command-one", "history-client-one"],
+			["repeated text", "history-command-two", "history-client-two"],
+		]);
+		await correlatedRestart.dispose();
 
 		let archivedContent = "";
 		const grimoire = await createRuntime(recordPrompt, {

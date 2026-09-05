@@ -51,6 +51,7 @@ import {
 	type SessionHeader,
 	type SessionInitEntry,
 	type SessionMessageEntry,
+	type SessionMessageIdentity,
 	type SessionTitleSource,
 	type SessionTreeNode,
 	type ThinkingLevelChangeEntry,
@@ -2171,8 +2172,15 @@ export class SessionManager {
 			| BashExecutionMessage
 			| PythonExecutionMessage
 			| FileMentionMessage,
+		identity?: SessionMessageIdentity,
 	): string {
-		const entry: SessionMessageEntry = { type: "message", ...this.#freshEntryFields(), message };
+		const entry: SessionMessageEntry = {
+			type: "message",
+			...this.#freshEntryFields(),
+			message,
+			...(identity?.sourceCommandId ? { sourceCommandId: identity.sourceCommandId } : {}),
+			...(identity?.clientMessageId ? { clientMessageId: identity.clientMessageId } : {}),
+		};
 		this.#recordEntry(entry);
 		return entry.id;
 	}

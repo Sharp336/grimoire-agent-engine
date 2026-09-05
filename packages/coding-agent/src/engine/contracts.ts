@@ -60,6 +60,8 @@ export interface EngineLaunchProfile {
 
 export interface EngineStartRequest {
 	commandId: string;
+	/** Opaque UI identity for the exact user message introduced by this command. */
+	clientMessageId?: string;
 	agentInstanceId: string;
 	/** Canonical hosted identity used for child AgentInstance creation. */
 	agentInstanceRef?: string;
@@ -89,6 +91,8 @@ export interface EngineTarget {
 
 export interface EngineSteerRequest extends EngineTarget {
 	commandId: string;
+	/** Opaque UI identity for the exact user message introduced by this command. */
+	clientMessageId?: string;
 	message?: string;
 	queueId?: string;
 	expectedRevision?: number;
@@ -324,6 +328,12 @@ export function validateStartRequest(request: EngineStartRequest): void {
 		if (value !== undefined && !value.trim()) {
 			throw new EngineTargetError("invalid_request", `${name} must be a non-empty string when supplied`);
 		}
+	}
+	if (
+		request.clientMessageId !== undefined &&
+		(!request.clientMessageId.trim() || request.clientMessageId.length > 200)
+	) {
+		throw new EngineTargetError("invalid_request", "clientMessageId must contain 1 to 200 characters when supplied");
 	}
 	if (!Number.isSafeInteger(request.authorityGeneration) || request.authorityGeneration < 0) {
 		throw new EngineTargetError("invalid_request", "authorityGeneration must be a non-negative safe integer");

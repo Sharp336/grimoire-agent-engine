@@ -42,8 +42,9 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 		let permitExecuted = false;
 		const runtime = await EngineRuntime.create({
 			databasePath: path.join(tempDir, "engine.sqlite"),
-			dispatchPrompt: async session => {
+			dispatchPrompt: async (session, input, identity) => {
 				dispatchCount++;
+				session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
 				if (session.getAgentId() === engineAgentId("agent-permit")) {
 					const read = session.getToolByName("read");
 					if (!read) throw new Error("read tool is unavailable");
@@ -108,6 +109,7 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			});
 
 			const commandA = startCommand(runtime.engineGeneration, "agent-a", "a", cwd);
+			commandA.payload.clientMessageId = "client-message-a";
 			const commandB = startCommand(runtime.engineGeneration, "agent-b", "b", cwd);
 			await Promise.all([
 				js.publish(adapter.commandSubject("agent-a", "start"), JSON.stringify(commandA), {
@@ -141,6 +143,16 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 				"attempt.completed",
 			]);
 			expect(dispatchCount).toBe(2);
+			expect(await runtime.sessionHistory("agent-a")).toMatchObject({
+				entries: [
+					{
+						role: "user",
+						text: "A",
+						sourceCommandId: commandA.commandId,
+						clientMessageId: "client-message-a",
+					},
+				],
+			});
 
 			const permitStart = startCommand(runtime.engineGeneration, "agent-permit", "permit", cwd);
 			await js.publish(adapter.commandSubject("agent-permit", "start"), JSON.stringify(permitStart), {
