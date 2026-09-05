@@ -214,6 +214,7 @@ export interface EngineControlResult extends Record<string, unknown> {
 	alreadyTerminal?: true;
 	queueId?: string;
 	queueRevision?: number;
+	sourceEventId?: string;
 }
 
 export interface EngineReconcileResult {

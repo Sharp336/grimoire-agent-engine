@@ -1203,14 +1203,6 @@ export class EngineStore {
 				);
 			}
 			const committed: EngineEvent[] = [];
-			for (const event of events) {
-				committed.push(
-					await this.#appendTransitionEvent(sql, binding, {
-						...event,
-						...(transcriptCheckpoint ? { payload: { ...event.payload, transcriptCheckpoint } } : {}),
-					}),
-				);
-			}
 			if (options.inboxMutation) {
 				if (!options.inboxSessionId) throw new Error("Inbox mutation requires its session identity");
 				const result = await this.#mutateInboxItem(
@@ -1220,6 +1212,14 @@ export class EngineStore {
 					options.inboxMutationCausationCommandId,
 				);
 				if (result.event) committed.push(result.event);
+			}
+			for (const event of events) {
+				committed.push(
+					await this.#appendTransitionEvent(sql, binding, {
+						...event,
+						...(transcriptCheckpoint ? { payload: { ...event.payload, transcriptCheckpoint } } : {}),
+					}),
+				);
 			}
 			if (options.settleCommandId) {
 				await this.#settleAdmittedCommand(

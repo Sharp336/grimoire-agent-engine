@@ -646,6 +646,7 @@ describe("EngineStore", () => {
 				phase: "consumed",
 				queueId: queued.item.queueId,
 				queueRevision: 2,
+				sourceEventId: "queue-transition",
 				manualHold: false,
 				intentRevision: 2,
 			},
@@ -723,9 +724,9 @@ describe("EngineStore", () => {
 			"running",
 			"paused",
 			"inbox_changed",
+			"inbox_changed",
 			"resumed",
 			"steered",
-			"inbox_changed",
 		]);
 		expect(await store.admitCommand(command, 1)).toEqual({
 			status: "replay",

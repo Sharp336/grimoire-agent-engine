@@ -2777,7 +2777,7 @@ export class EngineRuntime {
 			phase,
 			manualHold: binding.manualHold,
 			intentRevision: binding.intentRevision,
-			...(item ? { queueId: item.queueId, queueRevision: item.revision } : {}),
+			...(item ? { queueId: item.queueId, queueRevision: item.revision, sourceEventId: item.sourceEventId } : {}),
 		};
 	}
 

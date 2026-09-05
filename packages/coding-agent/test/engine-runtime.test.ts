@@ -1707,8 +1707,9 @@ describe("EngineRuntime", () => {
 			queueRevision: 4,
 			manualHold: false,
 		});
+		const nextEvents = (await runtime.store.pendingEvents()).filter(event => event.attemptId === next.attemptId);
 		expect(
-			(await runtime.store.pendingEvents()).find(
+			nextEvents.find(
 				event =>
 					event.kind === "inbox_changed" &&
 					event.payload?.action === "acknowledge" &&
@@ -1723,6 +1724,7 @@ describe("EngineRuntime", () => {
 				sourceEventId: "ordinary-auto-queue",
 			},
 		});
+		expect(nextEvents.slice(0, 3).map(event => event.kind)).toEqual(["inbox_changed", "accepted", "running"]);
 		await runtime.drain();
 		for (let remaining = 50; wakes.length < 3 && remaining > 0; remaining--) await Bun.sleep(25);
 		expect(wakes).toHaveLength(3);
@@ -1867,6 +1869,7 @@ describe("EngineRuntime", () => {
 			},
 			profile,
 		);
+		const startedIntentRevision = started.intentRevision!;
 		const queued = await runtime.enqueueInbox(started, {
 			sourceEventId: "queued-after-completion-boundary",
 			sourceType: "user",
@@ -1885,7 +1888,7 @@ describe("EngineRuntime", () => {
 		expect(wake?.payload).toMatchObject({
 			queueId: queued.item.queueId,
 			revision: 2,
-			intentRevision: started.intentRevision,
+			intentRevision: startedIntentRevision,
 		});
 		await expect(runtime.cancel({ ...started, commandId: "terminal-stop-without-revision" })).rejects.toMatchObject({
 			code: "too_late",
@@ -1894,19 +1897,19 @@ describe("EngineRuntime", () => {
 			runtime.cancel({
 				...started,
 				commandId: "terminal-stop-with-wrong-revision",
-				expectedIntentRevision: started.intentRevision + 1,
+				expectedIntentRevision: startedIntentRevision + 1,
 			}),
 		).rejects.toMatchObject({ code: "stale_target" });
 
 		const stopped = await runtime.cancel({
 			...started,
 			commandId: "stop-after-completion-before-wake-start",
-			expectedIntentRevision: started.intentRevision,
+			expectedIntentRevision: startedIntentRevision,
 		});
 		expect(stopped).toEqual({
 			phase: "applied",
 			manualHold: true,
-			intentRevision: started.intentRevision + 1,
+			intentRevision: startedIntentRevision + 1,
 			alreadyTerminal: true,
 		});
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
@@ -2193,6 +2196,7 @@ describe("EngineRuntime", () => {
 			intentRevision: 2,
 			queueId: queuedItem.item.queueId,
 			queueRevision: 2,
+			sourceEventId: "queued-steer-item",
 		});
 		expect(await runtime.listInbox(started, true)).toContainEqual(
 			expect.objectContaining({ queueId: queuedItem.item.queueId, disposition: "acknowledged", revision: 2 }),
@@ -2201,10 +2205,9 @@ describe("EngineRuntime", () => {
 			attemptId: started.attemptId,
 			causationCommandId: "steer-while-paused",
 		});
+		const pendingEvents = await runtime.store.pendingEvents();
 		expect(
-			(await runtime.store.pendingEvents()).find(
-				event => event.kind === "inbox_changed" && event.payload?.action === "acknowledge",
-			),
+			pendingEvents.find(event => event.kind === "inbox_changed" && event.payload?.action === "acknowledge"),
 		).toMatchObject({
 			causationCommandId: "steer-while-paused",
 			payload: {
@@ -2214,6 +2217,9 @@ describe("EngineRuntime", () => {
 				sourceEventId: "queued-steer-item",
 			},
 		});
+		expect(
+			pendingEvents.findIndex(event => event.kind === "inbox_changed" && event.payload?.action === "acknowledge"),
+		).toBeLessThan(pendingEvents.findIndex(event => event.kind === "steered"));
 		expect((await runtime.store.getBinding(started.agentInstanceId))?.manualHold).toBeFalse();
 		expect((await completed).attemptId).toBe(started.attemptId);
 		await runtime.dispose();
