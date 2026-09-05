@@ -204,7 +204,7 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 				{ sourceType: "agent", sender: "agent-a", deliveryPayload: "broker round trip", disposition: "pending" },
 			]);
 			expect(JSON.stringify(rootB.session.messages)).not.toContain("broker round trip");
-			expect(JSON.stringify(rootB.session.messages)).toContain("engine:inbox_changed");
+			expect(JSON.stringify(rootB.session.messages)).not.toContain("engine:inbox_changed");
 			const hub = rootB.session.getToolByName("hub");
 			if (!hub) throw new Error("root B hub tool is unavailable");
 			const hubList = await hub.execute("hub-inbox-list", { op: "inbox" });

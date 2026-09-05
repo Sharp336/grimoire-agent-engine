@@ -616,8 +616,6 @@ export class EngineRuntime {
 				createdAt: message.sentAt ?? Date.now(),
 			});
 			if (queued.created) {
-				const count = (await this.store.listInboxItems(binding.session.sessionId)).length;
-				await this.#withSessionScope(binding, () => binding.session.notifyEngineInboxChanged(count));
 				this.#signalInboxWake();
 			}
 			return { to: message.toAgentInstanceId, outcome: "queued" };
@@ -636,8 +634,6 @@ export class EngineRuntime {
 			const binding = this.#requireTarget(target);
 			const queued = await this.store.enqueueInboxItem(this.#inboxTarget(binding), source);
 			if (queued.created) {
-				const count = (await this.store.listInboxItems(binding.session.sessionId)).length;
-				await this.#withSessionScope(binding, () => binding.session.notifyEngineInboxChanged(count));
 				this.#signalInboxWake();
 			}
 			return queued;
@@ -1048,12 +1044,6 @@ export class EngineRuntime {
 				if (this.#disposed) break;
 				const events = await this.store.claimDueInboxWakes(this.engineGeneration);
 				this.#notifyEvents(events);
-				for (const event of events) {
-					const binding = this.#bindings.get(event.agentInstanceId);
-					if (!binding || binding.attemptId !== event.attemptId) continue;
-					const count = (await this.store.listInboxItems(binding.session.sessionId)).length;
-					await this.#withSessionScope(binding, () => binding.session.notifyEngineInboxChanged(count));
-				}
 			} catch (error) {
 				if (!this.#disposed) logger.warn("Engine inbox wake loop failed", { error: String(error) });
 				await Bun.sleep(1_000);
