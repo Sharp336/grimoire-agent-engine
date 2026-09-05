@@ -936,6 +936,11 @@ describe("EngineRuntime", () => {
 		const trace = events.filter(event => event.kind.startsWith("trace_"));
 		expect(trace.some(event => event.kind === "trace_reasoning")).toBe(true);
 		expect(trace.some(event => event.kind === "trace_tool")).toBe(true);
+		const tools = trace.filter(event => event.kind === "trace_tool").map(event => event.payload?.tool);
+		expect(tools).toEqual([
+			{ callId: "read-private", name: "read" },
+			expect.objectContaining({ callId: "read-private", name: "read", outcome: "ok" }),
+		]);
 		expect(JSON.stringify(events)).not.toMatch(
 			/private reasoning sentinel|private-input\.txt|private tool output sentinel/,
 		);

@@ -147,6 +147,28 @@ describe("Engine Control + Query", () => {
 			outputTruncated: true,
 		});
 
+		await runtime.store.appendEvent({
+			...binding,
+			causationCommandId: "tool-trace-a",
+			kind: "trace_tool",
+			payload: {
+				tool: {
+					callId: "call-a",
+					name: "bash",
+					outcome: "ok",
+					took: 45,
+					args: "must-not-leak",
+					output: "private-output",
+				},
+			},
+		});
+		const toolEvents = (await client.request("events.list", { attemptId: "attempt-a" })) as {
+			events: Array<{ kind: string; payload: unknown }>;
+		};
+		expect(toolEvents.events.find(event => event.kind === "trace_tool")?.payload).toEqual({
+			tool: { callId: "call-a", name: "bash", outcome: "ok", took: 45 },
+		});
+
 		const target = {
 			bindingId: binding.bindingId,
 			agentInstanceId: binding.agentInstanceId,

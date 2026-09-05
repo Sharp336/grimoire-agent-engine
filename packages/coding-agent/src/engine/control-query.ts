@@ -507,8 +507,18 @@ function publicEvent(event: EngineEvent): EngineEvent {
 	switch (event.kind) {
 		case "trace_reasoning":
 			return { ...event, payload: pick(payload, ["state"]) };
-		case "trace_tool":
-			return { ...event, payload: pick(payload, ["toolName", "status", "durationMs"]) };
+		case "trace_tool": {
+			const tool = payload.tool;
+			return {
+				...event,
+				payload: {
+					tool:
+						tool && typeof tool === "object"
+							? pick(tool as Record<string, unknown>, ["callId", "name", "outcome", "took"])
+							: {},
+				},
+			};
+		}
 		case "tool_started":
 		case "tool_settled":
 			return {

@@ -1432,6 +1432,7 @@ export class EngineRuntime {
 						name: traceName,
 						startedAt: Date.now(),
 					});
+					this.#queueTraceEvent(binding, "trace_tool", { tool: { callId: event.toolCallId, name: traceName } });
 				}
 				if (event.type === "tool_execution_end") {
 					binding.activeToolCallIds.delete(event.toolCallId);
@@ -1439,6 +1440,7 @@ export class EngineRuntime {
 					binding.traceTools.delete(event.toolCallId);
 					this.#queueTraceEvent(binding, "trace_tool", {
 						tool: {
+							callId: event.toolCallId,
 							name: started?.name ?? event.toolName,
 							outcome: event.isError ? "failed" : "ok",
 							...(started ? { took: Math.max(0, Math.round((Date.now() - started.startedAt) / 100) / 10) } : {}),
