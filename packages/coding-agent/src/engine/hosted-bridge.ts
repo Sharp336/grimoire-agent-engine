@@ -30,6 +30,7 @@ interface BridgeClaim {
 		message?: AgentMessageEnvelope;
 	};
 	heartbeatFailures: number;
+	heartbeatPending: boolean;
 	published: boolean;
 }
 
@@ -194,6 +195,9 @@ export class HostedEngineBridge {
 	readonly #connection: NatsConnection;
 	readonly #active = new Map<string, BridgeClaim>();
 	readonly #loops = new Set<Promise<void>>();
+	readonly #eventLanes = new Map<string, Promise<void>>();
+	readonly #eventWork = new Set<Promise<void>>();
+	readonly #eventRetries = new Map<string, Set<number>>();
 	readonly #stop = Promise.withResolvers<void>();
 	#claimLoop: Promise<void> = Promise.resolve();
 	#events: ConsumerMessages | undefined;
@@ -229,6 +233,8 @@ export class HostedEngineBridge {
 		this.#stop.resolve();
 		await this.#events?.close();
 		await Promise.all(this.#loops);
+		await Promise.all(this.#eventWork);
+		this.#eventRetries.clear();
 		await this.#connection.drain();
 	}
 
@@ -239,9 +245,11 @@ export class HostedEngineBridge {
 
 	async drain(timeoutMs = 3_000): Promise<void> {
 		const deadline = Date.now() + timeoutMs;
-		while (this.#active.size > 0) {
+		while (this.#active.size > 0 || this.#eventWork.size > 0 || this.#eventRetries.size > 0) {
 			if (Date.now() >= deadline)
-				throw new Error(`Hosted Engine bridge still has ${this.#active.size} active claim(s)`);
+				throw new Error(
+					`Hosted Engine bridge still has ${this.#active.size} active claim(s), ${this.#eventWork.size} event(s), ${this.#eventRetries.size} retry lane(s)`,
+				);
 			await Bun.sleep(25);
 		}
 	}
@@ -351,92 +359,136 @@ export class HostedEngineBridge {
 
 	async #eventLoop(messages: ConsumerMessages): Promise<void> {
 		for await (const message of messages) {
+			// ponytail: 128 global unacked events; per-agent consumers are needed for strict flood isolation.
+			if (this.#eventWork.size >= 128) await Promise.race(this.#eventWork);
 			if (this.#stopping) break;
+			let event: EngineEventEnvelope;
 			try {
-				const event = parseEvent(message.data);
-				if (event.type === "attempt.inbox_changed" && event.payload?.action === "wake_due") {
-					const result = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
-						action: "wake",
-						device_id: this.#options.deviceId,
-						engine_id: this.#options.engineId,
-						engine_generation: this.#options.engineGeneration,
-						event,
-					});
-					if (result.status !== "accepted" && result.status !== "duplicate") {
-						throw new Error(`Hosted Engine wake was not durably accepted: ${String(result.status)}`);
+				event = parseEvent(message.data);
+			} catch (error) {
+				this.#report(error);
+				message.nak(5_000);
+				continue;
+			}
+			const agentId = event.agentInstanceId;
+			const sequence = message.info.streamSequence;
+			message.working();
+			const heartbeat = setInterval(() => message.working(), 10_000);
+			const previous = this.#eventLanes.get(agentId) ?? Promise.resolve();
+			const work = previous
+				.then(async () => {
+					const retries = this.#eventRetries.get(agentId);
+					try {
+						// A NAK must not let later terminal/control/wake events pass the failed event.
+						if (retries && sequence > Math.min(...retries)) {
+							retries.add(sequence);
+							message.nak(5_000);
+							return;
+						}
+						if (!(await this.#deliverEvent(event))) throw new Error("Hosted Engine event was not accepted");
+						retries?.delete(sequence);
+						if (retries?.size === 0) this.#eventRetries.delete(agentId);
+						message.ack();
+					} catch (error) {
+						this.#eventRetries.set(agentId, (retries ?? new Set<number>()).add(sequence));
+						this.#report(error);
+						message.nak(5_000);
 					}
-					message.ack();
-					continue;
-				}
-				let claim = this.#active.get(event.causationCommandId);
-				if (!claim) {
-					const recovered = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
-						action: "claim",
-						device_id: this.#options.deviceId,
-						engine_id: this.#options.engineId,
-						engine_generation: this.#options.engineGeneration,
-						worker_id: `engine-${this.#options.engineGeneration}`,
-						job_id: event.causationCommandId,
-						lease_ttl_seconds: 90,
-					});
-					if (recovered.status !== "claimed") {
-						const terminal = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
-							action: "event",
-							device_id: this.#options.deviceId,
-							engine_id: this.#options.engineId,
-							job_id: event.causationCommandId,
-							event,
-						});
-						if (terminal.status === "already_terminal") message.ack();
-						else message.nak(5_000);
-						continue;
-					}
-					claim = parseClaim(recovered);
-					if (claim.jobId !== event.causationCommandId || claim.operationType !== "agent_engine_command") {
-						throw new Error("Recovered Agent Engine claim does not match its event");
-					}
-					claim.published = true;
-					this.#active.set(claim.jobId, claim);
-				}
-				const result = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
+				})
+				.finally(() => {
+					clearInterval(heartbeat);
+					this.#eventWork.delete(work);
+					if (this.#eventLanes.get(agentId) === work) this.#eventLanes.delete(agentId);
+				});
+			this.#eventLanes.set(agentId, work);
+			this.#eventWork.add(work);
+		}
+	}
+
+	async #deliverEvent(event: EngineEventEnvelope): Promise<boolean> {
+		if (event.type === "attempt.inbox_changed" && event.payload?.action === "wake_due") {
+			const result = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
+				action: "wake",
+				device_id: this.#options.deviceId,
+				engine_id: this.#options.engineId,
+				engine_generation: this.#options.engineGeneration,
+				event,
+			});
+			if (result.status !== "accepted" && result.status !== "duplicate") {
+				throw new Error(`Hosted Engine wake was not durably accepted: ${String(result.status)}`);
+			}
+			return true;
+		}
+		let claim = this.#active.get(event.causationCommandId);
+		if (!claim) {
+			const recovered = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
+				action: "claim",
+				device_id: this.#options.deviceId,
+				engine_id: this.#options.engineId,
+				engine_generation: this.#options.engineGeneration,
+				worker_id: `engine-${this.#options.engineGeneration}`,
+				job_id: event.causationCommandId,
+				lease_ttl_seconds: 90,
+			});
+			if (recovered.status !== "claimed") {
+				const terminal = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
 					action: "event",
 					device_id: this.#options.deviceId,
 					engine_id: this.#options.engineId,
 					job_id: event.causationCommandId,
-					lease_token: claim.leaseToken,
 					event,
 				});
-				if (["completed", "cancelled", "failed", "already_terminal"].includes(String(result.status))) {
-					this.#active.delete(event.causationCommandId);
-				}
-				message.ack();
-			} catch (error) {
-				this.#report(error);
-				message.nak(5_000);
+				return terminal.status === "already_terminal";
 			}
+			claim = parseClaim(recovered);
+			if (claim.jobId !== event.causationCommandId || claim.operationType !== "agent_engine_command") {
+				throw new Error("Recovered Agent Engine claim does not match its event");
+			}
+			claim.published = true;
+			this.#active.set(claim.jobId, claim);
 		}
+		const result = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
+			action: "event",
+			device_id: this.#options.deviceId,
+			engine_id: this.#options.engineId,
+			job_id: event.causationCommandId,
+			lease_token: claim.leaseToken,
+			event,
+		});
+		if (["completed", "cancelled", "failed", "already_terminal"].includes(String(result.status))) {
+			this.#active.delete(event.causationCommandId);
+		}
+		return true;
 	}
 
 	async #heartbeatLoop(): Promise<void> {
 		while (!this.#stopping) {
 			await Promise.race([Bun.sleep(this.#options.heartbeatIntervalMs ?? 30_000), this.#stop.promise]);
 			if (this.#stopping) break;
-			for (const claim of [...this.#active.values()]) {
-				try {
-					await this.#options.rpc.call("grimoire_agent_engine_bridge", {
-						action: "heartbeat",
-						device_id: this.#options.deviceId,
-						engine_id: this.#options.engineId,
-						job_id: claim.jobId,
-						lease_token: claim.leaseToken,
-						lease_ttl_seconds: 90,
-					});
-					claim.heartbeatFailures = 0;
-				} catch (error) {
-					claim.heartbeatFailures++;
-					if (claim.heartbeatFailures >= 3) this.#active.delete(claim.jobId);
-					this.#report(error);
-				}
+			for (const claim of this.#active.values()) {
+				if (claim.heartbeatPending) continue;
+				claim.heartbeatPending = true;
+				this.#track(
+					(async () => {
+						try {
+							await this.#options.rpc.call("grimoire_agent_engine_bridge", {
+								action: "heartbeat",
+								device_id: this.#options.deviceId,
+								engine_id: this.#options.engineId,
+								job_id: claim.jobId,
+								lease_token: claim.leaseToken,
+								lease_ttl_seconds: 90,
+							});
+							claim.heartbeatFailures = 0;
+						} catch (error) {
+							claim.heartbeatFailures++;
+							if (claim.heartbeatFailures >= 3) this.#active.delete(claim.jobId);
+							this.#report(error);
+						} finally {
+							claim.heartbeatPending = false;
+						}
+					})(),
+				);
 			}
 		}
 	}
@@ -470,6 +522,7 @@ function parseClaim(value: Record<string, unknown>): BridgeClaim {
 		operationType: value.operation_type,
 		work: value.work as BridgeClaim["work"],
 		heartbeatFailures: 0,
+		heartbeatPending: false,
 		published: false,
 	};
 }
@@ -482,7 +535,9 @@ function parseEvent(data: Uint8Array): EngineEventEnvelope {
 		!value.eventId ||
 		!value.causationCommandId ||
 		!value.deviceId ||
-		!value.engineId
+		!value.engineId ||
+		typeof value.agentInstanceId !== "string" ||
+		!value.agentInstanceId
 	) {
 		throw new Error("Invalid Engine event envelope");
 	}

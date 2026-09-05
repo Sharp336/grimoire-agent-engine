@@ -16,8 +16,10 @@ import {
 	ENGINE_COMMAND_STREAM,
 	ENGINE_EVENT_STREAM,
 	type EngineCommandEnvelope,
+	type EngineEventEnvelope,
 	NatsEngineAdapter,
 } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
+import { engineRouteToken } from "@oh-my-pi/pi-coding-agent/engine/route";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { natsConfig, runEngineService } from "@oh-my-pi/pi-coding-agent/engine/service";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -223,6 +225,152 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			bridgeSeed.fill(0);
 		}
 	}, 60_000);
+
+	it("delivers other agents promptly while preserving failed-agent order and draining admitted callbacks", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `artel-bridge-concurrency-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const connection = await connect({ servers: broker.url });
+		const manager = await jetstreamManager(connection);
+		await manager.streams.add({ name: ENGINE_EVENT_STREAM, subjects: ["grimoire.engine.v1.>"] });
+		const blocked = Promise.withResolvers<void>();
+		const shutdown = Promise.withResolvers<void>();
+		const heartbeat = Promise.withResolvers<void>();
+		const heartbeats: string[] = [];
+		const calls: string[] = [];
+		const accepted: string[] = [];
+		const errors: Error[] = [];
+		let failures = 1;
+		const rpc: GrimoireRpc = {
+			async call(_tool, args) {
+				if (args.action === "claim") {
+					if (!args.job_id) return { status: "no_job" };
+					return {
+						status: "claimed",
+						job_id: args.job_id,
+						lease_token: "lease",
+						operation_type: "agent_engine_command",
+						work: { kind: "command", command: { ...startCommand(tempDir!, {}), commandId: args.job_id } },
+					};
+				}
+				if (args.action === "heartbeat") {
+					heartbeats.push(String(args.job_id));
+					if (args.job_id === "command-A") await heartbeat.promise;
+					return { status: "renewed" };
+				}
+				const event = args.event as EngineEventEnvelope;
+				calls.push(event.eventId);
+				if (event.eventId === "A1" && failures-- > 0) {
+					await blocked.promise;
+					throw new Error("A callback unavailable");
+				}
+				if (event.eventId === "A4") await shutdown.promise;
+				accepted.push(event.eventId);
+				return {
+					status:
+						args.action === "wake" ? "accepted" : event.type === "attempt.completed" ? "completed" : "recorded",
+				};
+			},
+		};
+		const bridge = await HostedEngineBridge.connect({
+			rpc,
+			deviceId: "device",
+			engineId: "engine",
+			engineGeneration: 1,
+			servers: broker.url,
+			pollIntervalMs: 10,
+			heartbeatIntervalMs: 25,
+			onError: error => errors.push(error),
+		});
+		const publish = async (id: string, wake = false) => {
+			const event: EngineEventEnvelope = {
+				schema: "grimoire.engine.event.v1",
+				eventId: id,
+				agentSeq: Number(id.slice(1)),
+				causationCommandId: `command-${id[0]}`,
+				deviceId: "device",
+				engineId: "engine",
+				engineGeneration: 1,
+				agentInstanceId: id[0]!,
+				runtimeBindingId: `binding-${id[0]}`,
+				bindingGeneration: 1,
+				executionId: `execution-${id[0]}`,
+				attemptId: `attempt-${id[0]}`,
+				authorityGeneration: 1,
+				type: wake ? "attempt.inbox_changed" : id.endsWith("1") ? "attempt.started" : "attempt.completed",
+				at: Date.now(),
+				...(wake ? { payload: { action: "wake_due", queueId: id, revision: 1 } } : {}),
+			};
+			await jetstream(connection).publish(
+				`grimoire.engine.v1.d.${engineRouteToken("device")}.e.${engineRouteToken("engine")}.a.${engineRouteToken(id[0]!)}.evt.changed`,
+				JSON.stringify(event),
+			);
+		};
+		try {
+			await publish("A1");
+			await waitFor(() => calls.includes("A1"));
+			await publish("A2", true);
+			await publish("A3");
+			const beforeB = Date.now();
+			await publish("B1");
+			await waitFor(() => accepted.includes("B1"), 1_000);
+			expect(Date.now() - beforeB).toBeLessThan(1_000);
+			expect(calls.filter(id => id.startsWith("A"))).toEqual(["A1"]);
+			await waitFor(() => heartbeats.includes("command-B"), 1_000);
+			expect(heartbeats).toContain("command-A");
+			heartbeat.resolve();
+			blocked.resolve();
+			await waitFor(() => errors.length === 1);
+			await publish("B2");
+			await waitFor(() => accepted.includes("B2"), 1_000);
+			expect(calls.filter(id => id.startsWith("A"))).toEqual(["A1"]);
+			await waitFor(() => accepted.includes("A3"), 15_000);
+			expect(calls.filter(id => id.startsWith("A"))).toEqual(["A1", "A1", "A2", "A3"]);
+			expect(accepted.filter(id => id.startsWith("A"))).toEqual(["A1", "A2", "A3"]);
+			await waitFor(
+				async () =>
+					(
+						await manager.consumers.info(
+							ENGINE_EVENT_STREAM,
+							`host_${engineRouteToken("device")}_${engineRouteToken("engine")}`,
+						)
+					).num_ack_pending === 0,
+			);
+			await bridge.drain();
+
+			await publish("A4", true);
+			await publish("A5");
+			await publish("B3");
+			await waitFor(() => accepted.includes("B3"));
+			await expect(bridge.drain(25)).rejects.toThrow("event(s)");
+			await bridge.stopAdmission();
+			let disposed = false;
+			const disposal = bridge.dispose().then(() => {
+				disposed = true;
+			});
+			await Bun.sleep(25);
+			expect(disposed).toBe(false);
+			shutdown.resolve();
+			await disposal;
+			expect(accepted.filter(id => id.startsWith("A"))).toEqual(["A1", "A2", "A3", "A4", "A5"]);
+			expect(
+				(
+					await manager.consumers.info(
+						ENGINE_EVENT_STREAM,
+						`host_${engineRouteToken("device")}_${engineRouteToken("engine")}`,
+					)
+				).num_ack_pending,
+			).toBe(0);
+			expect(errors.map(error => error.message)).toEqual(["A callback unavailable"]);
+		} finally {
+			heartbeat.resolve();
+			blocked.resolve();
+			shutdown.resolve();
+			await bridge.dispose();
+			await connection.drain();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 30_000);
 
 	it("recovers the exact hosted lease for an event after bridge state is lost", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-host-recovery-${Snowflake.next()}-`));
