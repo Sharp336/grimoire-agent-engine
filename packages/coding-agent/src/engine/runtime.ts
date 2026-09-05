@@ -639,6 +639,44 @@ export class EngineRuntime {
 				return this.#controlResult(binding);
 			}
 			if (
+				request.expectedIntentRevision !== undefined &&
+				(binding.attemptState === "completed" ||
+					binding.attemptState === "failed" ||
+					binding.attemptState === "interrupted")
+			) {
+				this.#assertIntentRevision(binding, request.expectedIntentRevision);
+				const terminalState = binding.attemptState;
+				const previousIntent = this.#setManualHold(
+					binding,
+					request.commandId,
+					request.expectedIntentRevision,
+					true,
+				);
+				const result: EngineControlResult = { ...this.#controlResult(binding), alreadyTerminal: true };
+				try {
+					const event = await this.store.commitBindingEvent(
+						this.#snapshot(binding),
+						{
+							kind: "inbox_changed",
+							payload: {
+								action: "hold_applied",
+								attemptState: terminalState,
+								manualHold: true,
+								intentRevision: binding.intentRevision,
+							},
+							causationCommandId: request.commandId,
+						},
+						request.commandId,
+						{ outcome: "applied", detail: result },
+					);
+					this.#notifyEvents([event]);
+				} catch (error) {
+					this.#restoreIntent(binding, previousIntent);
+					throw error;
+				}
+				return result;
+			}
+			if (
 				binding.attemptState !== "running" &&
 				binding.attemptState !== "pause_requested" &&
 				binding.attemptState !== "paused" &&

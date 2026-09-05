@@ -1259,6 +1259,21 @@ export class EngineStore {
 		});
 	}
 
+	/** Atomically persist a binding-only intent change, its public event, and command receipt. */
+	async commitBindingEvent(
+		binding: EngineBindingSnapshot,
+		event: EngineTransitionEvent,
+		settleCommandId: string,
+		settleReceipt: EngineCommandReceipt,
+	): Promise<EngineEvent> {
+		return await this.#transaction(async sql => {
+			await this.#putBinding(sql, binding);
+			const committed = await this.#appendTransitionEvent(sql, binding, event);
+			await this.#settleAdmittedCommand(sql, settleCommandId, settleReceipt);
+			return committed;
+		});
+	}
+
 	/** Atomically persist retry progress on the Attempt and append its public event. */
 	async commitAttemptRetry(
 		target: EngineBindingSnapshot,

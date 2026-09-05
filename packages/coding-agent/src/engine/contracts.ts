@@ -211,6 +211,7 @@ export interface EngineControlResult extends Record<string, unknown> {
 	phase: "applied" | "consumed";
 	manualHold: boolean;
 	intentRevision: number;
+	alreadyTerminal?: true;
 	queueId?: string;
 	queueRevision?: number;
 }

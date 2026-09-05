@@ -1837,7 +1837,7 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
-	it("keeps a completed Attempt terminal when cancel arrives late", async () => {
+	it("holds a completed Attempt when a revision-fenced Stop arrives before its queued wake starts", async () => {
 		const { runtime, cwd } = await createRuntime();
 		const started = await runtime.start(
 			{
@@ -1851,9 +1851,131 @@ describe("EngineRuntime", () => {
 			},
 			profile,
 		);
+		const queued = await runtime.enqueueInbox(started, {
+			sourceEventId: "queued-after-completion-boundary",
+			sourceType: "user",
+			body: "must remain queued",
+			createdAt: Date.now(),
+			wakeIntent: true,
+		});
 		await runtime.drain();
-		await expect(runtime.cancel(started)).rejects.toMatchObject({ code: "too_late" });
+		let wake: EngineEvent | undefined;
+		for (let remaining = 50; !wake && remaining > 0; remaining--) {
+			wake = (await runtime.store.pendingEvents()).find(
+				event => event.kind === "inbox_changed" && event.payload?.action === "wake_due",
+			);
+			if (!wake) await Bun.sleep(25);
+		}
+		expect(wake?.payload).toMatchObject({
+			queueId: queued.item.queueId,
+			revision: 2,
+			intentRevision: started.intentRevision,
+		});
+		await expect(runtime.cancel({ ...started, commandId: "terminal-stop-without-revision" })).rejects.toMatchObject({
+			code: "too_late",
+		});
+		await expect(
+			runtime.cancel({
+				...started,
+				commandId: "terminal-stop-with-wrong-revision",
+				expectedIntentRevision: started.intentRevision + 1,
+			}),
+		).rejects.toMatchObject({ code: "stale_target" });
+
+		const stopped = await runtime.cancel({
+			...started,
+			commandId: "stop-after-completion-before-wake-start",
+			expectedIntentRevision: started.intentRevision,
+		});
+		expect(stopped).toEqual({
+			phase: "applied",
+			manualHold: true,
+			intentRevision: started.intentRevision + 1,
+			alreadyTerminal: true,
+		});
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
+		expect(await runtime.store.getBinding(started.agentInstanceId)).toMatchObject({
+			attemptId: started.attemptId,
+			manualHold: true,
+			intentRevision: stopped.intentRevision,
+		});
+		const holdEvent = (await runtime.store.pendingEvents()).find(
+			event => event.causationCommandId === "stop-after-completion-before-wake-start",
+		);
+		expect(holdEvent).toMatchObject({
+			kind: "inbox_changed",
+			payload: {
+				action: "hold_applied",
+				attemptState: "completed",
+				manualHold: true,
+				intentRevision: stopped.intentRevision,
+			},
+		});
+		await expect(
+			runtime.start(
+				{
+					commandId: "stale-wake-after-terminal-stop",
+					agentInstanceId: started.agentInstanceId,
+					executionId: "execution-stale-wake-after-stop",
+					attemptId: "attempt-stale-wake-after-stop",
+					authorityGeneration: 1,
+					cwd,
+					queueId: queued.item.queueId,
+					expectedRevision: 2,
+					mutationId: "wake:queued-after-completion-boundary:2",
+					expectedIntentRevision: started.intentRevision,
+				},
+				profile,
+			),
+		).rejects.toMatchObject({ code: "stale_target" });
+		expect(await runtime.store.getInboxItem(queued.item.sessionId, queued.item.queueId)).toMatchObject({
+			disposition: "pending",
+		});
+		expect((await runtime.store.pendingEvents()).some(event => event.kind === "cancelled")).toBeFalse();
+		await runtime.dispose();
+	}, 60000);
+
+	it("rejects a terminal Stop after a newer Send advances the AgentInstance intent", async () => {
+		const { runtime, cwd } = await createRuntime();
+		const first = await runtime.start(
+			{
+				commandId: "command-terminal-stop-old",
+				agentInstanceId: "agent-terminal-stop-newer-send",
+				executionId: "execution-terminal-stop-old",
+				attemptId: "attempt-terminal-stop-old",
+				authorityGeneration: 1,
+				cwd,
+				input: "first",
+			},
+			profile,
+		);
+		await runtime.drain();
+		const newer = await runtime.start(
+			{
+				commandId: "command-terminal-stop-newer",
+				agentInstanceId: first.agentInstanceId,
+				executionId: "execution-terminal-stop-newer",
+				attemptId: "attempt-terminal-stop-newer",
+				authorityGeneration: 1,
+				cwd,
+				input: "newer",
+				expectedIntentRevision: first.intentRevision,
+			},
+			profile,
+		);
+		await expect(
+			runtime.cancel({
+				...first,
+				commandId: "late-stop-for-old-attempt",
+				expectedIntentRevision: first.intentRevision,
+			}),
+		).rejects.toMatchObject({ code: "stale_target" });
+		expect(runtime.getBinding(first.agentInstanceId)).toMatchObject({
+			attemptId: newer.attemptId,
+			manualHold: false,
+			intentRevision: newer.intentRevision,
+		});
+		await runtime.drain();
 		await runtime.dispose();
 	}, 60000);
 
