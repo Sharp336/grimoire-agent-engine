@@ -222,6 +222,7 @@ export interface EngineReconcileResult {
 
 export interface EngineCompletionPayload extends Record<string, unknown> {
 	assistantFinal: string;
+	assistantMessageId?: string;
 	transcriptRef?: string;
 	outputTruncated?: boolean;
 }
@@ -272,6 +273,7 @@ export interface EngineEvent {
 		| "retry_scheduled"
 		| "retry_settled"
 		| "inbox_changed"
+		| "assistant_snapshot"
 		| "trace_reasoning"
 		| "trace_tool";
 	payload?: Record<string, unknown>;

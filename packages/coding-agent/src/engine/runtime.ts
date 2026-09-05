@@ -2,6 +2,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AgentPauseGate } from "@oh-my-pi/pi-agent-core";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { isEnoent, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../async/job-manager";
 import { withCapabilityProviderPolicy } from "../capability";
@@ -72,6 +73,8 @@ const MAX_ASSISTANT_FINAL_CHARS = 48_000;
 const MAX_INPUT_FIELD_CHARS = 48_000;
 const MAX_INPUT_RESULT_CHARS = 128_000;
 const MAX_HISTORY_MESSAGE_CHARS = 48_000;
+const ASSISTANT_SNAPSHOT_GROWTH_CHARS = 192;
+const MAX_ASSISTANT_STREAMING_SNAPSHOTS = 256;
 const ENGINE_TURN_RETRY_DELAYS_MS = [3_000, 15_000, 30_000] as const;
 
 async function collectFailure(errors: unknown[], action: () => unknown | Promise<unknown>): Promise<void> {
@@ -152,8 +155,23 @@ interface LiveBinding extends EngineBindingSnapshot {
 	traceTools: Map<string, { name: string; startedAt: number }>;
 	childLaunchCount: number;
 	modelCallSequence: number;
+	assistantMessageSequence: number;
+	assistantStream?: AssistantStreamState;
+	lastAssistantMessageId?: string;
 	activeModelCalls: Set<Promise<void>>;
 	pendingInput?: PendingInput;
+}
+
+interface AssistantStreamState {
+	attemptId: string;
+	sourceTimestamp: number;
+	assistantMessageId: string;
+	revision: number;
+	text: string;
+	textTruncated: boolean;
+	emittedText: string;
+	streamingSnapshots: number;
+	settled: boolean;
 }
 
 interface ToolInvocationRecord {
@@ -992,6 +1010,7 @@ export class EngineRuntime {
 			textTruncated: boolean;
 			sourceCommandId?: string;
 			clientMessageId?: string;
+			assistantMessageId?: string;
 		}>;
 	}> {
 		return await this.#inLane(agentInstanceId, async () => {
@@ -1036,6 +1055,9 @@ export class EngineRuntime {
 							: {}),
 						...(entry.message.role === "user" && entry.clientMessageId
 							? { clientMessageId: entry.clientMessageId }
+							: {}),
+						...(entry.message.role === "assistant" && entry.assistantMessageId
+							? { assistantMessageId: entry.assistantMessageId }
 							: {}),
 					},
 				];
@@ -1272,6 +1294,9 @@ export class EngineRuntime {
 				binding.traceTools.clear();
 				binding.traceWriteTail = Promise.resolve();
 				binding.modelCallSequence = 0;
+				this.#resetAssistantStream(binding);
+				binding.assistantMessageSequence = 0;
+				binding.lastAssistantMessageId = undefined;
 				binding.activeModelCalls.clear();
 				binding.pauseCommandIds.clear();
 				binding.pauseRequests.clear();
@@ -1565,6 +1590,7 @@ export class EngineRuntime {
 				traceTools: new Map(),
 				childLaunchCount: 0,
 				modelCallSequence: 0,
+				assistantMessageSequence: 0,
 				activeModelCalls: new Set(),
 			};
 			liveBinding = binding;
@@ -1576,8 +1602,26 @@ export class EngineRuntime {
 				true,
 			);
 			binding.unsubscribe = created.session.subscribe(event => {
+				if (event.type === "message_start" && event.message.role === "assistant") {
+					this.#beginAssistantStream(binding, event.message.timestamp);
+				}
+				if (
+					event.type === "message_update" &&
+					event.message.role === "assistant" &&
+					(event.assistantMessageEvent.type === "text_start" ||
+						event.assistantMessageEvent.type === "text_delta" ||
+						event.assistantMessageEvent.type === "text_end")
+				) {
+					this.#updateAssistantStream(binding, event.message.timestamp, event.message.content);
+				}
+				if (event.type === "message_end" && event.message.role === "assistant") {
+					this.#settleAssistantStream(binding, event.message);
+				}
 				if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_end") {
 					this.#queueTraceEvent(binding, "trace_reasoning", { state: "completed" });
+				}
+				if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_start") {
+					this.#queueTraceEvent(binding, "trace_reasoning", { state: "started" });
 				}
 				if (event.type === "tool_execution_start") {
 					binding.activeToolCallIds.add(event.toolCallId);
@@ -2161,6 +2205,111 @@ export class EngineRuntime {
 		});
 	}
 
+	#beginAssistantStream(binding: LiveBinding, timestamp: number): AssistantStreamState {
+		if (
+			binding.assistantStream?.attemptId === binding.attemptId &&
+			binding.assistantStream.sourceTimestamp === timestamp &&
+			!binding.assistantStream.settled
+		) {
+			return binding.assistantStream;
+		}
+		this.#resetAssistantStream(binding);
+		const assistantMessageId = `assistant_${crypto
+			.createHash("sha256")
+			.update(`${binding.attemptId}\0${timestamp}\0${++binding.assistantMessageSequence}`)
+			.digest("hex")
+			.slice(0, 32)}`;
+		const state: AssistantStreamState = {
+			attemptId: binding.attemptId,
+			sourceTimestamp: timestamp,
+			assistantMessageId,
+			revision: 0,
+			text: "",
+			textTruncated: false,
+			emittedText: "",
+			streamingSnapshots: 0,
+			settled: false,
+		};
+		binding.assistantStream = state;
+		return state;
+	}
+
+	#updateAssistantStream(binding: LiveBinding, timestamp: number, content: unknown): void {
+		const state = binding.assistantStream ?? this.#beginAssistantStream(binding, timestamp);
+		if (state.attemptId !== binding.attemptId || state.settled) return;
+		const fullText = historyMessageText(content);
+		state.text = fullText.slice(0, MAX_ASSISTANT_FINAL_CHARS);
+		state.textTruncated = fullText.length > MAX_ASSISTANT_FINAL_CHARS;
+		if (!state.text || state.text === state.emittedText) return;
+		if (
+			state.streamingSnapshots === 0 ||
+			Math.abs(state.text.length - state.emittedText.length) >= ASSISTANT_SNAPSHOT_GROWTH_CHARS
+		) {
+			this.#emitAssistantSnapshot(binding, state, "streaming");
+		}
+	}
+
+	#settleAssistantStream(binding: LiveBinding, message: AssistantMessage): void {
+		const state = binding.assistantStream ?? this.#beginAssistantStream(binding, message.timestamp);
+		if (state.attemptId !== binding.attemptId || state.settled) return;
+		const fullText = historyMessageText(message.content);
+		state.text = fullText.slice(0, MAX_ASSISTANT_FINAL_CHARS);
+		state.textTruncated = fullText.length > MAX_ASSISTANT_FINAL_CHARS;
+		state.settled = true;
+		binding.lastAssistantMessageId = state.assistantMessageId;
+		binding.session.rememberMessageIdentity(message, {
+			assistantMessageId: state.assistantMessageId,
+		});
+		if (state.text || state.streamingSnapshots > 0) {
+			this.#emitAssistantSnapshot(binding, state, "settled", assistantSnapshotStopReason(message.stopReason));
+		}
+		binding.assistantStream = undefined;
+	}
+
+	#emitAssistantSnapshot(
+		binding: LiveBinding,
+		state: AssistantStreamState,
+		status: "streaming" | "settled",
+		stopReason?: "stop" | "length" | "toolUse" | "aborted" | "error",
+	): void {
+		if (status === "streaming") {
+			if (state.streamingSnapshots >= MAX_ASSISTANT_STREAMING_SNAPSHOTS) return;
+			state.streamingSnapshots++;
+		}
+		state.emittedText = state.text;
+		const payload = {
+			assistantMessageId: state.assistantMessageId,
+			revision: ++state.revision,
+			text: state.text,
+			status,
+			...(stopReason ? { stopReason } : {}),
+			textTruncated: state.textTruncated,
+		};
+		const write = binding.traceWriteTail.then(async () => {
+			let historyEntryId: string | undefined;
+			if (status === "settled") {
+				await binding.session.settleInFlightMessagePersistence();
+				historyEntryId = binding.session.sessionManager
+					.getBranch()
+					.find(entry => entry.type === "message" && entry.assistantMessageId === state.assistantMessageId)?.id;
+			}
+			await this.#emit(binding, "assistant_snapshot", {
+				...payload,
+				...(historyEntryId ? { historyEntryId } : {}),
+			});
+		});
+		binding.traceWriteTail = write.catch(error => {
+			logger.warn("Engine assistant snapshot write failed", {
+				status,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
+	}
+
+	#resetAssistantStream(binding: LiveBinding): void {
+		binding.assistantStream = undefined;
+	}
+
 	#queueRetryEvent(
 		binding: LiveBinding,
 		kind: "retry_scheduled" | "retry_settled",
@@ -2204,6 +2353,9 @@ export class EngineRuntime {
 		const outputTruncated = final.length > MAX_ASSISTANT_FINAL_CHARS;
 		return {
 			assistantFinal: outputTruncated ? `${final.slice(0, MAX_ASSISTANT_FINAL_CHARS)}\n[…truncated]` : final,
+			...(!yielded.found && binding.lastAssistantMessageId
+				? { assistantMessageId: binding.lastAssistantMessageId }
+				: {}),
 			...(binding.sessionFile ? { transcriptRef: `history://${binding.engineAgentId}` } : {}),
 			...(outputTruncated ? { outputTruncated: true } : {}),
 		};
@@ -2216,6 +2368,7 @@ export class EngineRuntime {
 			filter: { ownerId: binding.engineAgentId, attemptId: request.attemptId },
 		});
 		await this.#waitForToolInvocations(binding, request.attemptId);
+		await binding.traceWriteTail;
 		const transcriptCheckpoint = await binding.session.sessionManager.flushAndCheckpoint();
 		await this.#inLane(binding.agentInstanceId, async () => {
 			if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
@@ -2250,6 +2403,7 @@ export class EngineRuntime {
 		binding.state = "released";
 		const reason = cause === "engine_lost" ? "Engine stopped" : "Engine binding released";
 		const errors: unknown[] = [];
+		this.#resetAssistantStream(binding);
 		let transcriptCheckpoint: SessionDurabilityCheckpoint | undefined;
 		await collectFailure(errors, () =>
 			this.#disposeBindingResources(
@@ -2638,6 +2792,13 @@ function historyMessageText(content: unknown): string {
 			return [];
 		})
 		.join("\n");
+}
+
+function assistantSnapshotStopReason(value: unknown): "stop" | "length" | "toolUse" | "aborted" | "error" | undefined {
+	if (value === "stop" || value === "length" || value === "toolUse" || value === "aborted" || value === "error") {
+		return value;
+	}
+	return undefined;
 }
 
 function validateControlRequest(request: EngineControlRequest): void {

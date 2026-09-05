@@ -2,6 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { defineCapability, loadCapability, registerProvider } from "@oh-my-pi/pi-coding-agent/capability";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -969,6 +970,175 @@ describe("EngineRuntime", () => {
 		expect(JSON.stringify(events)).not.toMatch(
 			/private reasoning sentinel|private-input\.txt|private tool output sentinel/,
 		);
+		await runtime.dispose();
+	}, 60_000);
+
+	it("streams bounded assistant snapshots with one identity before terminal settlement", async () => {
+		const releaseFinal = Promise.withResolvers<void>();
+		const finalCall = Promise.withResolvers<void>();
+		const fullFinal = `${"x".repeat(48_001)}FULL-STREAM-TAIL`;
+		const mock = createMockModel({
+			reasoning: true,
+			responses: (async function* () {
+				yield {
+					content: [
+						{ type: "thinking" as const, thinking: "private streaming reasoning sentinel" },
+						"Inspecting the file.",
+						{ type: "toolCall" as const, id: "read-stream", name: "read", arguments: { path: "private.txt" } },
+					],
+				};
+				finalCall.resolve();
+				await releaseFinal.promise;
+				yield { content: [fullFinal] };
+			})(),
+		});
+		const { runtime, cwd } = await createRuntime(
+			(session, input) => session.prompt(input),
+			{},
+			{ model: mock.model },
+		);
+		fs.writeFileSync(path.join(cwd, "private.txt"), "private tool output sentinel");
+		const firstSnapshot = nextEngineEvent(runtime, "assistant_snapshot");
+		const started = await runtime.start(
+			{
+				commandId: "command-assistant-stream",
+				agentInstanceId: "agent-assistant-stream",
+				executionId: "execution-assistant-stream",
+				attemptId: "attempt-assistant-stream",
+				authorityGeneration: 1,
+				cwd,
+				input: "inspect then answer",
+			},
+			{ ...profile, toolNames: ["read"], restrictToolNames: true },
+		);
+		await finalCall.promise;
+		expect(await firstSnapshot).toMatchObject({
+			attemptId: started.attemptId,
+			payload: {
+				assistantMessageId: expect.stringMatching(/^assistant_[0-9a-f]{32}$/),
+				revision: 1,
+				text: "Inspecting the file.",
+				status: "streaming",
+				textTruncated: false,
+			},
+		});
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("running");
+
+		releaseFinal.resolve();
+		await runtime.drain();
+		const events = (await runtime.store.pendingEvents()).filter(event => event.attemptId === started.attemptId);
+		const snapshots = events.filter(event => event.kind === "assistant_snapshot");
+		const messageIds = [...new Set(snapshots.map(event => String(event.payload?.assistantMessageId)))];
+		expect(messageIds).toHaveLength(2);
+		for (const assistantMessageId of messageIds) {
+			const revisions = snapshots
+				.filter(event => event.payload?.assistantMessageId === assistantMessageId)
+				.map(event => Number(event.payload?.revision));
+			expect(revisions).toEqual([...revisions].sort((a, b) => a - b));
+			expect(new Set(revisions).size).toBe(revisions.length);
+		}
+		const settled = snapshots.at(-1);
+		expect(settled?.payload).toMatchObject({
+			assistantMessageId: messageIds[1],
+			text: fullFinal.slice(0, 48_000),
+			status: "settled",
+			stopReason: "stop",
+			textTruncated: true,
+		});
+		expect(String(settled?.payload?.text)).toHaveLength(48_000);
+		const completed = events.find(event => event.kind === "completed");
+		expect(completed?.payload?.assistantMessageId).toBe(messageIds[1]);
+		expect(events.indexOf(settled!)).toBeLessThan(events.indexOf(completed!));
+		const history = await runtime.sessionHistory(started.agentInstanceId);
+		const assistantEntries = history.entries.filter(entry => entry.role === "assistant");
+		expect(assistantEntries.map(entry => entry.assistantMessageId)).toEqual(messageIds);
+		const historyEntryId = settled?.payload?.historyEntryId;
+		expect(typeof historyEntryId).toBe("string");
+		expect(historyEntryId).toBe(assistantEntries.at(-1)?.entryId);
+		expect(JSON.stringify(snapshots)).not.toMatch(
+			/private streaming reasoning sentinel|private\.txt|private tool output sentinel|FULL-STREAM-TAIL/,
+		);
+		await runtime.dispose();
+	}, 60_000);
+
+	it("settles a partial assistant snapshot before Stop cancels its Attempt", async () => {
+		const releasePrompt = Promise.withResolvers<void>();
+		const mock = createMockModel();
+		const partial: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "a".repeat(200) }],
+			api: mock.model.api,
+			provider: mock.model.provider,
+			model: mock.model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		let current = partial;
+		const { runtime, cwd } = await createRuntime(async session => {
+			const abort = session.abort.bind(session);
+			Object.defineProperty(session, "abort", {
+				value: async (options: { reason?: string } = {}) => {
+					current.stopReason = "aborted";
+					session.agent.emitExternalEvent({ type: "message_end", message: current });
+					releasePrompt.resolve();
+					await abort(options);
+				},
+			});
+			session.agent.emitExternalEvent({ type: "message_start", message: partial });
+			session.agent.emitExternalEvent({
+				type: "message_update",
+				message: partial,
+				assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "a".repeat(200), partial },
+			});
+			current = { ...partial, content: [{ type: "text", text: "a".repeat(400) }] };
+			session.agent.emitExternalEvent({
+				type: "message_update",
+				message: current,
+				assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "a".repeat(200), partial: current },
+			});
+			await releasePrompt.promise;
+			return true;
+		});
+		const firstSnapshot = nextEngineEvent(runtime, "assistant_snapshot");
+		const started = await runtime.start(
+			{
+				commandId: "command-assistant-stop",
+				agentInstanceId: "agent-assistant-stop",
+				executionId: "execution-assistant-stop",
+				attemptId: "attempt-assistant-stop",
+				authorityGeneration: 1,
+				cwd,
+				input: "start a long answer",
+			},
+			profile,
+		);
+		await firstSnapshot;
+		await runtime.cancel({ ...started, commandId: "command-stop-assistant", reason: "user stopped" });
+		await runtime.drain();
+		const events = (await runtime.store.pendingEvents()).filter(event => event.attemptId === started.attemptId);
+		const snapshots = events.filter(event => event.kind === "assistant_snapshot");
+		const streamingSnapshots = snapshots.filter(event => event.payload?.status === "streaming");
+		expect(streamingSnapshots).toHaveLength(2);
+		expect(new Set(streamingSnapshots.map(event => event.payload?.assistantMessageId)).size).toBe(1);
+		expect(streamingSnapshots.map(event => event.payload?.revision)).toEqual([1, 2]);
+		expect(snapshots.at(-1)?.payload).toMatchObject({
+			assistantMessageId: snapshots[0]?.payload?.assistantMessageId,
+			text: "a".repeat(400),
+			status: "settled",
+			stopReason: "aborted",
+			historyEntryId: expect.any(String),
+		});
+		const firstCancelled = events.findIndex(event => event.kind === "cancelled");
+		expect(events.indexOf(snapshots.at(-1)!)).toBeLessThan(firstCancelled);
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
 		await runtime.dispose();
 	}, 60_000);
 

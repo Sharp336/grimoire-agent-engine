@@ -8,6 +8,7 @@ import {
 } from "@oh-my-pi/pi-agent-core";
 import {
 	type Api,
+	type AssistantMessage,
 	type Context,
 	clearCustomApis,
 	type ImageContent,
@@ -30,6 +31,7 @@ import { obfuscateProviderContext, SecretObfuscator } from "@oh-my-pi/pi-coding-
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, wrapSteeringForModel } from "@oh-my-pi/pi-coding-agent/session/messages";
+import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
@@ -681,6 +683,44 @@ describe("AgentSession message pipeline", () => {
 		expect(capturedContext).toBeDefined();
 		// The secret entered only via the user prompt, which the opt-in obfuscator redacts.
 		expect(JSON.stringify(capturedContext)).not.toContain(secret);
+	});
+
+	it("persists an assistant identity through the exact deobfuscated display copy", async () => {
+		const secret = "ASSISTANT_DISPLAY_SECRET_12345";
+		const obfuscator = new SecretObfuscator([{ type: "plain", content: secret }]);
+		const placeholder = obfuscator.obfuscate(secret);
+		const sessionManager = SessionManager.inMemory();
+		const session = new AgentSession({
+			agent: createAgent(),
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: {} as never,
+			obfuscator,
+		});
+		sessions.push(session);
+		const delivered = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type !== "message_end" || event.message.role !== "assistant") return;
+			expect(JSON.stringify(event.message.content)).toContain(secret);
+			session.rememberMessageIdentity(event.message, { assistantMessageId: "assistant-exact-copy" });
+			delivered.resolve();
+		});
+
+		session.agent.emitExternalEvent({ type: "message_end", message: createAssistantMessage(placeholder) });
+		await delivered.promise;
+		await session.settleInFlightMessagePersistence();
+
+		const persisted = sessionManager
+			.getBranch()
+			.find(
+				(entry): entry is SessionMessageEntry & { message: AssistantMessage } =>
+					entry.type === "message" &&
+					entry.message.role === "assistant" &&
+					entry.assistantMessageId === "assistant-exact-copy",
+			);
+		expect(persisted?.assistantMessageId).toBe("assistant-exact-copy");
+		expect(JSON.stringify(persisted?.message.content)).toContain(placeholder);
+		expect(JSON.stringify(persisted?.message.content)).not.toContain(secret);
 	});
 
 	it("keeps obfuscated side-channel stable prefix byte-identical to the main turn", async () => {

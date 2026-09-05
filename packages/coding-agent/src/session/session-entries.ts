@@ -70,9 +70,14 @@ export interface SessionMessageEntry extends SessionEntryBase {
 	sourceCommandId?: string;
 	/** Opaque client identity used to reconcile an optimistic user message. */
 	clientMessageId?: string;
+	/** Stable Engine identity used to reconcile streamed assistant snapshots with durable history. */
+	assistantMessageId?: string;
 }
 
-export type SessionMessageIdentity = Pick<SessionMessageEntry, "sourceCommandId" | "clientMessageId">;
+export type SessionMessageIdentity = Pick<
+	SessionMessageEntry,
+	"sourceCommandId" | "clientMessageId" | "assistantMessageId"
+>;
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {
 	type: "thinking_level_change";

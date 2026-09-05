@@ -507,6 +507,19 @@ function publicEvent(event: EngineEvent): EngineEvent {
 	switch (event.kind) {
 		case "trace_reasoning":
 			return { ...event, payload: pick(payload, ["state"]) };
+		case "assistant_snapshot":
+			return {
+				...event,
+				payload: pick(payload, [
+					"assistantMessageId",
+					"revision",
+					"text",
+					"status",
+					"stopReason",
+					"textTruncated",
+					"historyEntryId",
+				]),
+			};
 		case "trace_tool": {
 			const tool = payload.tool;
 			return {
@@ -537,6 +550,9 @@ function publicEvent(event: EngineEvent): EngineEvent {
 				...event,
 				payload: {
 					assistantFinal: String(payload.assistantFinal ?? "").slice(0, ENGINE_CONTROL_QUERY_MAX_RESULT_CHARS),
+					...(typeof payload.assistantMessageId === "string"
+						? { assistantMessageId: payload.assistantMessageId }
+						: {}),
 					...(typeof payload.transcriptRef === "string" ? { transcriptRef: payload.transcriptRef } : {}),
 					...(payload.outputTruncated === true ? { outputTruncated: true } : {}),
 				},

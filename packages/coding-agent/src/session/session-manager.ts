@@ -2180,6 +2180,7 @@ export class SessionManager {
 			message,
 			...(identity?.sourceCommandId ? { sourceCommandId: identity.sourceCommandId } : {}),
 			...(identity?.clientMessageId ? { clientMessageId: identity.clientMessageId } : {}),
+			...(identity?.assistantMessageId ? { assistantMessageId: identity.assistantMessageId } : {}),
 		};
 		this.#recordEntry(entry);
 		return entry.id;

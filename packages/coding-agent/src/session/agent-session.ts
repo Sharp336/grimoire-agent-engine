@@ -625,6 +625,7 @@ export class AgentSession {
 	#pendingMessageEndPersistence = new Map<string, Promise<void>>();
 	#persistedMessageKeys: { anchor: string; keys: Set<string> } | undefined;
 	readonly #messageIdentities = new WeakMap<AgentMessage, SessionMessageIdentity>();
+	readonly #displayMessageSources = new WeakMap<AgentMessage, AgentMessage>();
 
 	// Custom commands (TypeScript slash commands)
 	#customCommands: LoadedCustomCommand[] = [];
@@ -2430,14 +2431,16 @@ export class AgentSession {
 	 */
 	#sessionMessageAlreadyPersisted(message: AgentMessage): boolean {
 		const identity = this.#messageIdentities.get(message);
-		if (identity?.sourceCommandId || identity?.clientMessageId) {
+		if (identity?.sourceCommandId || identity?.clientMessageId || identity?.assistantMessageId) {
 			return this.sessionManager
 				.getBranch()
 				.some(
 					entry =>
 						entry.type === "message" &&
 						(identity.sourceCommandId === undefined || entry.sourceCommandId === identity.sourceCommandId) &&
-						(identity.clientMessageId === undefined || entry.clientMessageId === identity.clientMessageId),
+						(identity.clientMessageId === undefined || entry.clientMessageId === identity.clientMessageId) &&
+						(identity.assistantMessageId === undefined ||
+							entry.assistantMessageId === identity.assistantMessageId),
 				);
 		}
 		const key = sessionMessagePersistenceKey(message);
@@ -2761,7 +2764,9 @@ export class AgentSession {
 			const message = event.message;
 			const deobfuscatedContent = deobfuscateAssistantContent(obfuscator, message.content);
 			if (deobfuscatedContent !== message.content) {
-				displayEvent = { ...event, message: { ...message, content: deobfuscatedContent } };
+				const displayMessage = { ...message, content: deobfuscatedContent };
+				this.#displayMessageSources.set(displayMessage, message);
+				displayEvent = { ...event, message: displayMessage };
 			}
 		}
 
@@ -3914,6 +3919,14 @@ export class AgentSession {
 				this.#eventListeners.splice(index, 1);
 			}
 		};
+	}
+
+	/** Attach a durable identity to the exact message currently crossing the persistence boundary. */
+	rememberMessageIdentity(message: AgentMessage, identity: SessionMessageIdentity): void {
+		if (!identity.sourceCommandId && !identity.clientMessageId && !identity.assistantMessageId) return;
+		this.#messageIdentities.set(message, identity);
+		const source = this.#displayMessageSources.get(message);
+		if (source) this.#messageIdentities.set(source, identity);
 	}
 
 	/**
