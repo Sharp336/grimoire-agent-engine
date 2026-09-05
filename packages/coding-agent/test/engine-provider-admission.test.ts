@@ -11,9 +11,17 @@ describe("ProviderAdmissionClient", () => {
 		let usageReads = 0;
 		let providerCalls = 0;
 		const admissionFetch = async (_input: string | URL | Request, init?: RequestInit) => {
-			const body = JSON.parse(String(init?.body)) as { phase: string; usageReport?: UsageReport };
+			const body = JSON.parse(String(init?.body)) as {
+				phase: string;
+				modelId?: string;
+				accountBindingId?: string;
+				usageReport?: UsageReport;
+			};
 			if (body.phase === "before") {
 				admissionBefore += 1;
+				expect(body.modelId).toBe("gpt-5.6-terra");
+				expect(body.accountBindingId).toBe("acct-1");
+				expect(body.usageReport?.metadata?.accountId).toBe("acct-1");
 				expect(body.usageReport?.raw).toBeUndefined();
 			} else admissionAfter += 1;
 			return Response.json({ allowed: true, status: "within_weekly_ceiling" });
@@ -63,6 +71,30 @@ describe("ProviderAdmissionClient", () => {
 		expect(error).toMatchObject({ code: "codex_weekly_ceiling_reached", retryable: false });
 		expect(providerCalls).toBe(0);
 	});
+
+	it("stops waiting for a shared usage refresh when the provider request is cancelled", async () => {
+		const cancelled = new Error("turn cancelled");
+		const controller = new AbortController();
+		const authStorage = {
+			invalidateUsageCache: async () => {},
+			fetchUsageReports: () => new Promise<UsageReport[] | null>(() => {}),
+		} as unknown as AuthStorage;
+		let providerCalls = 0;
+		const wrapped = new ProviderAdmissionClient("http://127.0.0.1/provider-admission", "token", async () =>
+			Response.json({ allowed: true }),
+		)
+			.createHook(identity(), authStorage, "https://chatgpt.com/backend-api")
+			.wrapFetch(model(), async () => {
+				providerCalls += 1;
+				return new Response("unexpected");
+			});
+		const result = wrapped("https://chatgpt.com/backend-api/codex/responses", { signal: controller.signal }).catch(
+			error => error,
+		);
+		controller.abort(cancelled);
+		expect(await result).toBe(cancelled);
+		expect(providerCalls).toBe(0);
+	});
 });
 
 function identity() {
@@ -76,7 +108,7 @@ function identity() {
 }
 
 function model(): Model {
-	return { id: "gpt-5.5", provider: "openai-codex" } as Model;
+	return { id: "gpt-5.6-terra", provider: "openai-codex" } as Model;
 }
 
 function usageReport(): UsageReport {
