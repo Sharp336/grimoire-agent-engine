@@ -68,6 +68,8 @@ export interface EnginePublicSnapshot {
 	bindingGeneration: number;
 	authorityGeneration: number;
 	state: EngineAttemptState;
+	manualHold: boolean;
+	intentRevision: number;
 	profileDigest?: string;
 	transcriptRef?: string;
 	updatedAt: number;
@@ -382,6 +384,8 @@ async function snapshotFromAttempt(
 		bindingGeneration: Number(attempt.binding_generation),
 		authorityGeneration: Number(attempt.authority_generation),
 		state: attempt.state,
+		manualHold: binding?.manualHold ?? false,
+		intentRevision: binding?.intentRevision ?? 0,
 		profileDigest: exactBinding?.profileDigest,
 		transcriptRef: attempt.transcript_session_id ? `history://${attempt.transcript_session_id}` : undefined,
 		updatedAt: Number(attempt.updated_at),

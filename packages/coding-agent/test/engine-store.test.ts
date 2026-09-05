@@ -147,14 +147,24 @@ describe("EngineStore", () => {
 			engineGeneration: 1,
 			bindingGeneration: 1,
 			authorityGeneration: 7,
+			manualHold: true,
+			intentRevision: 4,
+			intentCommandId: "pause-before-migration-reopen",
 		});
 		expect(await store.getBinding("agent-migrated")).toMatchObject({
 			commandId: "command-migrated",
 			authorityGeneration: 7,
+			manualHold: true,
+			intentRevision: 4,
+			intentCommandId: "pause-before-migration-reopen",
 		});
 		await store.close();
 		const reopened = await EngineStore.open(databasePath);
-		expect((await reopened.getBinding("agent-migrated"))?.attemptId).toBe("attempt-migrated");
+		expect(await reopened.getBinding("agent-migrated")).toMatchObject({
+			attemptId: "attempt-migrated",
+			manualHold: true,
+			intentRevision: 4,
+		});
 		await reopened.close();
 
 		const tamper = new SQL(`sqlite:${databasePath.replaceAll("\\", "/")}`);
@@ -595,13 +605,109 @@ describe("EngineStore", () => {
 			transcript_byte_boundary: checkpoint.byteBoundary,
 			transcript_revision: 1,
 		});
+		const queued = await store.enqueueInboxItem(
+			{ ...binding, sessionId: "session-transition" },
+			{
+				sourceEventId: "queue-transition",
+				sourceType: "user",
+				body: "steer now",
+				createdAt: Date.now(),
+			},
+		);
+		const steerCommand: EngineCommandIdentity = {
+			...command,
+			commandId: "command-steer-transition",
+			operation: "steer",
+			payloadHash: "sha256:payload-steer-transition",
+			canonicalHash: "sha256:canonical-steer-transition",
+		};
+		const consumedReceipt = {
+			outcome: "applied" as const,
+			detail: {
+				phase: "consumed",
+				queueId: queued.item.queueId,
+				queueRevision: 2,
+				manualHold: false,
+				intentRevision: 2,
+			},
+		};
+		expect(await store.admitCommand(steerCommand, 1)).toEqual({ status: "claimed" });
+		await inspect.unsafe(`CREATE TRIGGER reject_inbox_consumption
+			BEFORE UPDATE ON engine_inbox_items WHEN NEW.disposition='acknowledged'
+			BEGIN SELECT RAISE(ABORT, 'injected inbox consumption failure'); END`);
+		await expect(
+			store.commitAttemptTransition(
+				{
+					...binding,
+					manualHold: false,
+					intentRevision: 2,
+					intentCommandId: steerCommand.commandId,
+				},
+				"running",
+				[{ kind: "resumed" }, { kind: "steered" }],
+				{
+					expectedStates: ["paused"],
+					settleCommandId: steerCommand.commandId,
+					settleCommandReceipt: consumedReceipt,
+					inboxSessionId: "session-transition",
+					inboxMutation: {
+						mutationId: "consume-transition",
+						queueId: queued.item.queueId,
+						expectedRevision: queued.item.revision,
+						op: "acknowledge",
+					},
+				},
+			),
+		).rejects.toThrow("injected inbox consumption failure");
+		expect((await store.getAttempt(binding.attemptId))?.state).toBe("paused");
+		expect(await store.getInboxItem("session-transition", queued.item.queueId)).toMatchObject({
+			disposition: "pending",
+			revision: 1,
+		});
+		expect(await store.admitCommand(steerCommand, 1)).toEqual({ status: "in_progress" });
+		await inspect.unsafe("DROP TRIGGER reject_inbox_consumption");
+		await store.commitAttemptTransition(
+			{
+				...binding,
+				manualHold: false,
+				intentRevision: 2,
+				intentCommandId: steerCommand.commandId,
+			},
+			"running",
+			[{ kind: "resumed" }, { kind: "steered" }],
+			{
+				expectedStates: ["paused"],
+				settleCommandId: steerCommand.commandId,
+				settleCommandReceipt: consumedReceipt,
+				inboxSessionId: "session-transition",
+				inboxMutation: {
+					mutationId: "consume-transition",
+					queueId: queued.item.queueId,
+					expectedRevision: queued.item.revision,
+					op: "acknowledge",
+				},
+			},
+		);
+		expect(await store.getInboxItem("session-transition", queued.item.queueId)).toMatchObject({
+			disposition: "acknowledged",
+			revision: 2,
+		});
+		expect(await store.admitCommand(steerCommand, 1)).toEqual({ status: "replay", receipt: consumedReceipt });
 		await expect(
 			store.commitAttemptTransition(binding, "completed", [{ kind: "completed" }], {
 				expectedStates: ["completed"],
 			}),
 		).rejects.toBeInstanceOf(EngineAttemptConflictError);
-		expect((await store.getAttempt("attempt-transition"))?.state).toBe("paused");
-		expect((await store.pendingEvents()).map(event => event.kind)).toEqual(["accepted", "running", "paused"]);
+		expect((await store.getAttempt("attempt-transition"))?.state).toBe("running");
+		expect((await store.pendingEvents()).map(event => event.kind)).toEqual([
+			"accepted",
+			"running",
+			"paused",
+			"inbox_changed",
+			"resumed",
+			"steered",
+			"inbox_changed",
+		]);
 		expect(await store.admitCommand(command, 1)).toEqual({
 			status: "replay",
 			receipt: { outcome: "applied" },

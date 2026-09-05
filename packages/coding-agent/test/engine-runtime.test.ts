@@ -1537,7 +1537,7 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60000);
 
-	it("accepts a steer while paused and resumes the same Attempt", async () => {
+	it("atomically consumes a queued steer while paused and resumes the same Attempt", async () => {
 		const promptStarted = Promise.withResolvers<void>();
 		const prompt = Promise.withResolvers<boolean>();
 		const queued: string[] = [];
@@ -1561,28 +1561,54 @@ describe("EngineRuntime", () => {
 			profile,
 		);
 		await promptStarted.promise;
+		const queuedItem = await runtime.enqueueInbox(started, {
+			sourceEventId: "queued-steer-item",
+			sourceType: "user",
+			body: "change course",
+			createdAt: Date.now(),
+		});
 		const paused = nextEngineEvent(runtime, "paused");
-		await runtime.pause({ ...started, commandId: "pause-before-steer", initiator: { kind: "human" } });
+		const pauseResult = await runtime.pause({
+			...started,
+			commandId: "pause-before-steer",
+			initiator: { kind: "human" },
+			expectedIntentRevision: started.intentRevision,
+		});
 		prompt.resolve(true);
 		await paused;
 
 		const steered = nextEngineEvent(runtime, "steered");
-		await runtime.steer({ ...started, commandId: "steer-while-paused", message: "change course" });
+		const completed = nextEngineEvent(runtime, "completed");
+		const steerResult = await runtime.steer({
+			...started,
+			commandId: "steer-while-paused",
+			queueId: queuedItem.item.queueId,
+			expectedRevision: queuedItem.item.revision,
+			mutationId: "consume-queued-steer-item",
+			expectedIntentRevision: pauseResult.intentRevision,
+		});
 		const steeredEvent = await steered;
 		expect(queued).toEqual(["change course"]);
+		expect(steerResult).toEqual({
+			phase: "consumed",
+			manualHold: false,
+			intentRevision: 2,
+			queueId: queuedItem.item.queueId,
+			queueRevision: 2,
+		});
+		expect(await runtime.listInbox(started, true)).toContainEqual(
+			expect.objectContaining({ queueId: queuedItem.item.queueId, disposition: "acknowledged", revision: 2 }),
+		);
 		expect(steeredEvent).toMatchObject({
 			attemptId: started.attemptId,
 			causationCommandId: "steer-while-paused",
 		});
-		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("paused");
-
-		const completed = nextEngineEvent(runtime, "completed");
-		await runtime.resume({ ...started, commandId: "resume-after-steer", initiator: { kind: "human" } });
+		expect((await runtime.store.getBinding(started.agentInstanceId))?.manualHold).toBeFalse();
 		expect((await completed).attemptId).toBe(started.attemptId);
 		await runtime.dispose();
 	}, 60000);
 
-	it("keeps cancel terminal and distinct from resume for a paused Attempt", async () => {
+	it("lets an immediate Stop override a just-applied Resume and rejects the delayed old Resume", async () => {
 		const prompt = Promise.withResolvers<boolean>();
 		const { runtime, cwd } = await createRuntime(() => prompt.promise);
 		const started = await runtime.start(
@@ -1598,18 +1624,153 @@ describe("EngineRuntime", () => {
 			profile,
 		);
 		const paused = nextEngineEvent(runtime, "paused");
-		await runtime.pause({ ...started, commandId: "pause-before-cancel", initiator: { kind: "human" } });
+		const pauseResult = await runtime.pause({
+			...started,
+			commandId: "pause-before-cancel",
+			initiator: { kind: "human" },
+			expectedIntentRevision: started.intentRevision,
+		});
 		prompt.resolve(true);
 		await paused;
-		await runtime.cancel({ ...started, commandId: "cancel-not-resume" });
+		const resumeResult = runtime.resume({
+			...started,
+			commandId: "resume-immediately-before-stop",
+			initiator: { kind: "human" },
+			expectedIntentRevision: pauseResult.intentRevision,
+		});
+		const cancelResult = runtime.cancel({
+			...started,
+			commandId: "cancel-not-resume",
+			expectedIntentRevision: pauseResult.intentRevision,
+		});
+		expect(await resumeResult).toEqual({ phase: "applied", manualHold: false, intentRevision: 2 });
+		expect(await cancelResult).toEqual({ phase: "applied", manualHold: true, intentRevision: 3 });
 		await runtime.drain();
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
+		await expect(
+			runtime.resume({
+				...started,
+				commandId: "late-resume-after-stop",
+				initiator: { kind: "human" },
+				expectedIntentRevision: pauseResult.intentRevision,
+			}),
+		).rejects.toMatchObject({ code: "stale_target" });
 		const events = await runtime.store.pendingEvents();
-		expect(events.some(event => event.kind === "resumed")).toBeFalse();
+		expect(events.some(event => event.kind === "resumed")).toBeTrue();
 		expect(
 			events.find(event => event.kind === "cancelled" && event.causationCommandId === "cancel-not-resume"),
 		).toBeDefined();
 		await runtime.dispose();
+	}, 60000);
+
+	it("keeps a stopped AgentInstance held across restart until a revision-fenced new Send", async () => {
+		const prompt = Promise.withResolvers<boolean>();
+		const { runtime, cwd, options } = await createRuntime(() => prompt.promise);
+		const started = await runtime.start(
+			{
+				commandId: "command-held-before-restart",
+				agentInstanceId: "agent-held-before-restart",
+				executionId: "execution-held-before-restart",
+				attemptId: "attempt-held-before-restart",
+				authorityGeneration: 1,
+				cwd,
+				input: "wait",
+			},
+			profile,
+		);
+		const paused = nextEngineEvent(runtime, "paused");
+		const pauseResult = await runtime.pause({
+			...started,
+			commandId: "pause-held-before-restart",
+			initiator: { kind: "human" },
+			expectedIntentRevision: started.intentRevision,
+		});
+		prompt.resolve(true);
+		await paused;
+
+		const wakeAt = Date.now() + 250;
+		const pending = await runtime.enqueueInbox(started, {
+			sourceEventId: "held-wake-item",
+			sourceType: "user",
+			body: "deliver after explicit Send",
+			createdAt: Date.now(),
+			deliverAt: wakeAt,
+			wakeIntent: true,
+		});
+		const dropped = await runtime.enqueueInbox(started, {
+			sourceEventId: "held-drop-item",
+			sourceType: "user",
+			body: "drop without resuming",
+			createdAt: Date.now(),
+		});
+		await runtime.mutateInbox(started, {
+			mutationId: "edit-held-item",
+			queueId: pending.item.queueId,
+			expectedRevision: pending.item.revision,
+			op: "edit",
+			value: "edited while held",
+		});
+		await runtime.mutateInbox(started, {
+			mutationId: "drop-held-item",
+			queueId: dropped.item.queueId,
+			expectedRevision: dropped.item.revision,
+			op: "drop",
+		});
+		expect(runtime.getBinding(started.agentInstanceId)).toMatchObject({
+			manualHold: true,
+			intentRevision: pauseResult.intentRevision,
+		});
+
+		const cancelResult = await runtime.cancel({
+			...started,
+			commandId: "stop-held-before-restart",
+			expectedIntentRevision: pauseResult.intentRevision,
+		});
+		await runtime.drain();
+		await runtime.dispose();
+
+		const restarted = await EngineRuntime.create(options);
+		const wakes: EngineEvent[] = [];
+		restarted.subscribe(event => {
+			if (event.kind === "inbox_changed" && event.payload?.action === "wake_due") wakes.push(event);
+		});
+		await Bun.sleep(Math.max(0, wakeAt - Date.now()) + 150);
+		expect(wakes).toHaveLength(0);
+		expect(await restarted.store.getBinding(started.agentInstanceId)).toMatchObject({
+			manualHold: true,
+			intentRevision: cancelResult.intentRevision,
+		});
+
+		const nextRequest = {
+			commandId: "explicit-send-after-restart",
+			agentInstanceId: started.agentInstanceId,
+			executionId: "execution-after-restart",
+			attemptId: "attempt-after-restart",
+			authorityGeneration: 1,
+			cwd,
+			input: "continue",
+		};
+		await expect(restarted.start(nextRequest, profile)).rejects.toMatchObject({ code: "stale_target" });
+		const resumed = await restarted.start(
+			{
+				...nextRequest,
+				commandId: "explicit-send-after-restart-cas",
+				expectedIntentRevision: cancelResult.intentRevision,
+			},
+			profile,
+		);
+		for (let remaining = 50; wakes.length === 0 && remaining > 0; remaining--) await Bun.sleep(25);
+		expect(resumed).toMatchObject({ manualHold: false, intentRevision: cancelResult.intentRevision + 1 });
+		expect(wakes).toHaveLength(1);
+		expect(await restarted.store.getInboxItem(pending.item.sessionId, pending.item.queueId)).toMatchObject({
+			deliveryPayload: "edited while held",
+			disposition: "pending",
+			wakeDeliveredAt: expect.any(Number),
+		});
+		expect(await restarted.store.getInboxItem(dropped.item.sessionId, dropped.item.queueId)).toMatchObject({
+			disposition: "dropped",
+		});
+		await restarted.dispose();
 	}, 60000);
 
 	it("does not redispatch a durable Attempt after Engine restart", async () => {

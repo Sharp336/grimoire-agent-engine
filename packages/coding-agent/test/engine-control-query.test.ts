@@ -131,7 +131,7 @@ describe("Engine Control + Query", () => {
 		});
 		expect(await client.request("events.list", { attemptId: "attempt-b", cursor: first.nextCursor })).toMatchObject({
 			resyncRequired: true,
-			snapshot: { attemptId: "attempt-b" },
+			snapshot: { attemptId: "attempt-b", manualHold: false, intentRevision: 0 },
 		});
 
 		const forgedCursor = Buffer.from(
