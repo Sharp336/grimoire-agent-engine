@@ -907,7 +907,7 @@ export class EngineRuntime {
 					sessionId: binding.session.sessionId,
 					model: model ? { provider: model.provider, id: model.id } : null,
 					local,
-					provider: reports
+					provider: reports?.length
 						? {
 								status: "available",
 								fetchedAt: Math.max(0, ...reports.map(report => report.fetchedAt)),

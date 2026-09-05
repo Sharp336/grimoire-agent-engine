@@ -900,6 +900,31 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
+	it("reports unsupported provider usage when no reports exist", async () => {
+		const { runtime, cwd } = await createRuntime(async session => {
+			session.fetchUsageReports = async () => [];
+			return true;
+		});
+		const started = await runtime.start(
+			{
+				commandId: "usage-empty",
+				agentInstanceId: "usage-agent",
+				executionId: "usage-execution",
+				attemptId: "usage-attempt",
+				authorityGeneration: 1,
+				cwd,
+				input: "test usage",
+			},
+			profile,
+		);
+		await runtime.drain();
+		expect((await runtime.sessionUsage(started)).provider).toEqual({
+			status: "unavailable",
+			reason: "provider_usage_not_supported",
+		});
+		await runtime.dispose();
+	});
+
 	it("keeps reasoning and tool input out of public trace events", async () => {
 		const mock = createMockModel({
 			reasoning: true,
