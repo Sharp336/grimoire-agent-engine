@@ -764,6 +764,65 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 });
 
 describe("HostedGrimoireRpc", () => {
+	it("surfaces MCP child-launch failures before identity validation or follow-up calls", async () => {
+		const calls: string[] = [];
+		let result: Record<string, unknown>;
+		const server = Bun.serve({
+			port: 0,
+			async fetch(request) {
+				const body = (await request.json()) as { id: number; params: { name: string } };
+				calls.push(body.params.name);
+				return Response.json({ jsonrpc: "2.0", id: body.id, result });
+			},
+		});
+		try {
+			const rpc = new HostedGrimoireRpc({
+				serverUrl: `http://127.0.0.1:${server.port}/mcp/core`,
+				token: "local-test-token",
+				clientId: "test-client",
+			});
+			for (const failure of [
+				{
+					result: {
+						isError: true,
+						structuredContent: { error: "profile unavailable" },
+						content: [{ type: "text", text: "Profile hydration failed" }],
+					},
+					message: "Profile hydration failed",
+				},
+				{
+					result: { isError: true, content: [{ type: "text", text: "Permission denied" }] },
+					message: "Permission denied",
+				},
+				{
+					result: { isError: true, structuredContent: { error: { message: "Upstream unavailable" } } },
+					message: "Upstream unavailable",
+				},
+				{ result: { isError: true }, message: "unknown error" },
+			]) {
+				result = failure.result;
+				await expect(
+					launchHostedEngineChild(rpc, {
+						deviceId: "device",
+						engineId: "engine",
+						parentAgentInstanceRef: "grimoire://tasks/p/t/agents/parent",
+						parentAttemptId: "attempt-parent",
+						profileRef: "gctx:2222222222222222",
+						workStepId: "implement",
+						cwd: "/tmp",
+						maxSpawnDepth: 0,
+						cancelLocal: async () => {
+							throw new Error("No child was allocated");
+						},
+					}),
+				).rejects.toThrow(`Grimoire Host tool grimoire_agent_engine_child_launch failed: ${failure.message}`);
+			}
+			expect(calls).toEqual(Array(4).fill("grimoire_agent_engine_child_launch"));
+		} finally {
+			server.stop(true);
+		}
+	});
+
 	it("uses an exact shared-host MCP surface endpoint", async () => {
 		let requestPath = "";
 		const server = Bun.serve({

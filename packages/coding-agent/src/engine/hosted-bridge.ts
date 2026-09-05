@@ -107,13 +107,26 @@ export class HostedGrimoireRpc implements GrimoireRpc {
 		}
 		const result = json.result as Record<string, unknown> | undefined;
 		if (!result) throw new Error("Grimoire Host returned no bridge result");
-		if (result.structuredContent && typeof result.structuredContent === "object") {
-			return result.structuredContent as Record<string, unknown>;
-		}
 		const content = Array.isArray(result.content) ? result.content : [];
 		const text = content.find(
 			item => item && typeof item === "object" && (item as Record<string, unknown>).type === "text",
 		) as Record<string, unknown> | undefined;
+		const structured = result.structuredContent as Record<string, unknown> | undefined;
+		if (result.isError === true) {
+			const error = structured?.error;
+			const message =
+				typeof text?.text === "string"
+					? text.text
+					: typeof error === "string"
+						? error
+						: error && typeof error === "object"
+							? (error as Record<string, unknown>).message
+							: structured?.message;
+			throw new Error(
+				`Grimoire Host tool ${tool} failed: ${typeof message === "string" && message.trim() ? message : "unknown error"}`,
+			);
+		}
+		if (structured && typeof structured === "object") return structured;
 		if (typeof text?.text !== "string") throw new Error("Grimoire Host bridge result has no JSON content");
 		return JSON.parse(text.text) as Record<string, unknown>;
 	}
