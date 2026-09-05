@@ -841,6 +841,86 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
+	it.each(["approve", "cancel"] as const)(
+		"executes write→xd with a distinct durable device effect and honors %s",
+		async decision => {
+			let deviceResult: string | undefined;
+			const { runtime, cwd } = await createRuntime(async session => {
+				const write = session.getToolByName("write");
+				if (!write) throw new Error("write tool is unavailable");
+				const args = {
+					path: "xd://grep",
+					content: JSON.stringify({ pattern: "needle", path: "fixture.txt" }),
+				};
+				const result = await write.execute("outer-write", args);
+				if (!result.isError) {
+					deviceResult = JSON.stringify(result.content);
+					await expect(write.execute("outer-write", args)).rejects.toThrow();
+				}
+				return true;
+			});
+			try {
+				fs.writeFileSync(path.join(cwd, "fixture.txt"), "needle\n");
+				const requested = nextEngineEvent(runtime, "tool_approval_requested");
+				const started = await runtime.start(
+					{
+						commandId: "command-xd",
+						agentInstanceId: "agent-xd",
+						executionId: "execution-xd",
+						attemptId: "attempt-xd",
+						authorityGeneration: 1,
+						cwd,
+						input: "grep through xd",
+					},
+					{ ...profile, toolPolicies: { grep: "permit" } },
+				);
+				const approval = await Promise.race([
+					requested,
+					runtime.drain().then(() => {
+						throw new Error("Device finished without requesting its Engine permit");
+					}),
+				]);
+				const approvalId = String(approval.payload?.approvalId);
+				expect(deviceResult).toBeUndefined();
+				expect(await runtime.store.getEffect(approvalId)).toMatchObject({
+					tool_name: "grep",
+					policy: "permit",
+					state: "planned",
+				});
+				if (decision === "approve") {
+					await runtime.resolveToolApproval({
+						...started,
+						commandId: "approve-xd",
+						approvalId,
+						decision: "approve",
+					});
+				} else {
+					await runtime.cancel({ ...started, commandId: "cancel-xd" });
+				}
+				await runtime.drain();
+				const events = await runtime.store.pendingEvents();
+				const tools = events.filter(event => event.kind === "tool_started");
+				expect(tools.filter(event => event.payload?.toolName === "write")).toHaveLength(1);
+				expect(tools.filter(event => event.payload?.toolName === "grep")).toHaveLength(
+					decision === "approve" ? 1 : 0,
+				);
+				expect(await runtime.store.getEffect(approvalId)).toMatchObject({
+					state: "settled",
+					outcome: decision === "approve" ? "completed" : "cancelled",
+				});
+				if (decision === "approve") {
+					expect(deviceResult).toContain("needle");
+					expect(new Set(tools.map(event => event.payload?.toolCallId)).size).toBe(2);
+				} else {
+					expect(deviceResult).toBeUndefined();
+				}
+			} finally {
+				await runtime.dispose();
+			}
+		},
+		60_000,
+	);
+
 	it("records unrestricted tools without exposing their raw input", async () => {
 		const { runtime, cwd } = await createRuntime(async session => {
 			const read = session.getToolByName("read");

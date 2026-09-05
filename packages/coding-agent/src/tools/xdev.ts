@@ -454,7 +454,16 @@ export async function dispatchXdevTool(
 					},
 				}
 			: undefined;
-		const result = await executable.execute(toolCallId, validated as never, signal, innerOnUpdate, executionContext);
+		// The device is a nested invocation: the outer write already owns toolCallId.
+		// Keep this deterministic so replay cannot execute the device a second time.
+		const deviceCallId = `${toolCallId}:xd:${name}`;
+		const result = await executable.execute(
+			deviceCallId,
+			validated as never,
+			signal,
+			innerOnUpdate,
+			executionContext,
+		);
 		return { result, xdev: { ...xdev, inner: result.details } };
 	} catch (error) {
 		if (
