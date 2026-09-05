@@ -234,6 +234,7 @@ export interface EngineCommandReceipt {
 export interface EnginePendingStartCancellation {
 	status: "cancelled" | "already_cancelled" | "too_late" | "not_found";
 	event?: EngineEvent;
+	intentRevision?: number;
 }
 
 export interface EngineTransitionEvent {
@@ -982,10 +983,28 @@ export class EngineStore {
 			if (!start) return { status: "not_found" };
 			if (start.state === "settled") {
 				const receipt = start.receipt ? (JSON.parse(start.receipt) as EngineCommandReceipt) : undefined;
-				return receipt?.outcome === "rejected" && receipt.detail?.code === "cancelled"
-					? { status: "already_cancelled" }
-					: { status: "too_late" };
+				if (receipt?.outcome !== "rejected" || receipt.detail?.code !== "cancelled") {
+					return { status: "too_late" };
+				}
 			}
+
+			const intentRows = (await sql.unsafe(
+				`UPDATE engine_runtime_bindings
+				 SET manual_hold=1,
+				     intent_revision=CASE WHEN intent_command_id=? THEN intent_revision ELSE intent_revision+1 END,
+				     intent_command_id=?, updated_at=?
+				 WHERE agent_instance_id=? AND authority_generation=?
+				 RETURNING intent_revision`,
+				[
+					cancellationCommandId,
+					cancellationCommandId,
+					Date.now(),
+					target.agentInstanceId,
+					target.authorityGeneration,
+				],
+			)) as Array<{ intent_revision: number }>;
+			const intentRevision = intentRows[0] ? Number(intentRows[0].intent_revision) : undefined;
+			if (start.state === "settled") return { status: "already_cancelled", intentRevision };
 
 			const message = "Attempt cancelled before Engine session initialization";
 			await this.#settleAdmittedCommand(
@@ -1007,7 +1026,7 @@ export class EngineStore {
 				kind: "rejected",
 				payload: { code: "cancelled", message, cancellationCommandId },
 			});
-			return { status: "cancelled", event };
+			return { status: "cancelled", event, intentRevision };
 		});
 	}
 

@@ -409,8 +409,16 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			enableLsp: false;
 		}>();
 		void pendingProfile.promise.catch(() => {});
+		const reuseProfile = Promise.withResolvers<{
+			spawns: string;
+			profileDigest: string;
+			enableMCP: false;
+			enableLsp: false;
+		}>();
+		void reuseProfile.promise.catch(() => {});
 		const livePrompt = Promise.withResolvers<boolean>();
 		let pendingResolverEntered = false;
+		let reuseResolverEntered = false;
 		const runtime = await EngineRuntime.create({
 			databasePath: path.join(tempDir, "engine.sqlite"),
 			dispatchPrompt: async session =>
@@ -451,6 +459,13 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 				if (command.agentInstanceId === "agent-live") {
 					return { spawns: "", profileDigest: "leaf-profile-v1", enableMCP: false, enableLsp: false };
 				}
+				if (command.agentInstanceId === "agent-reuse") {
+					if (command.commandId === "command-reuse-first") {
+						return { spawns: "", profileDigest: "leaf-profile-v1", enableMCP: false, enableLsp: false };
+					}
+					reuseResolverEntered = true;
+					return reuseProfile.promise;
+				}
 				pendingResolverEntered = true;
 				return pendingProfile.promise;
 			},
@@ -477,6 +492,11 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 				},
 			});
 			const liveSubscription = client.subscribe(adapter.eventSubject("agent-live", "*"), {
+				callback: (_error, message) => {
+					events.push(JSON.parse(decoder.decode(message.data)));
+				},
+			});
+			const reuseSubscription = client.subscribe(adapter.eventSubject("agent-reuse", "*"), {
 				callback: (_error, message) => {
 					events.push(JSON.parse(decoder.decode(message.data)));
 				},
@@ -567,6 +587,43 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			});
 			expect(await runtime.store.getAttempt(pending.attemptId!)).toBeUndefined();
 
+			const reuseFirst = startCommand(runtime.engineGeneration, "agent-reuse", "reuse-first", cwd);
+			await js.publish(adapter.commandSubject(reuseFirst.agentInstanceId, "start"), JSON.stringify(reuseFirst), {
+				msgID: reuseFirst.commandId,
+			});
+			await waitFor(async () => (await runtime.store.getAttempt(reuseFirst.attemptId!))?.state === "completed");
+			const reusePending = startCommand(runtime.engineGeneration, "agent-reuse", "reuse-pending", cwd);
+			await js.publish(adapter.commandSubject(reusePending.agentInstanceId, "start"), JSON.stringify(reusePending), {
+				msgID: reusePending.commandId,
+			});
+			await waitFor(() => reuseResolverEntered);
+			const reuseCancel: EngineCommandEnvelope = {
+				...cancel,
+				commandId: "command-cancel-reuse-pending",
+				agentInstanceId: reusePending.agentInstanceId,
+				executionId: reusePending.executionId,
+				attemptId: reusePending.attemptId,
+				issuedAt: Date.now(),
+			};
+			await js.publish(adapter.commandSubject(reuseCancel.agentInstanceId, "cancel"), JSON.stringify(reuseCancel), {
+				msgID: reuseCancel.commandId,
+			});
+			await waitFor(() =>
+				events.some(
+					event =>
+						event.causationCommandId === reusePending.commandId &&
+						(event.payload as Record<string, unknown>).code === "cancelled",
+				),
+			);
+			expect(await runtime.store.getBinding("agent-reuse")).toMatchObject({
+				attemptId: reuseFirst.attemptId,
+				manualHold: true,
+				intentRevision: 1,
+				intentCommandId: reuseCancel.commandId,
+			});
+			reuseProfile.reject(new Error("late reused profile must not revive the Attempt"));
+			expect(await runtime.store.getAttempt(reusePending.attemptId!)).toBeUndefined();
+
 			const live = startCommand(runtime.engineGeneration, "agent-live", "live", cwd);
 			await js.publish(adapter.commandSubject(live.agentInstanceId, "start"), JSON.stringify(live), {
 				msgID: live.commandId,
@@ -601,8 +658,10 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			pendingSubscription.unsubscribe();
 			unsafeSubscription.unsubscribe();
 			liveSubscription.unsubscribe();
+			reuseSubscription.unsubscribe();
 		} finally {
 			livePrompt.resolve(true);
+			reuseProfile.reject(new Error("test cleanup"));
 			await client.drain();
 			await adapter.dispose();
 			await runtime.dispose();

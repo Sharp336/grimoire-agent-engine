@@ -657,9 +657,8 @@ export class EngineRuntime {
 				binding.attemptId !== request.attemptId ||
 				binding.authorityGeneration !== request.authorityGeneration ||
 				binding.engineGeneration !== request.engineGeneration
-			) {
-				throw new EngineTargetError("stale_target", `Stale runtime target for ${request.agentInstanceId}`);
-			}
+			)
+				return undefined;
 			return await this.cancel({
 				...this.#snapshot(binding),
 				commandId: request.commandId,
@@ -672,7 +671,12 @@ export class EngineRuntime {
 		const cancelled = await this.store.cancelPendingStart(request, request.commandId);
 		if (cancelled.event) this.#notifyEvents([cancelled.event]);
 		if (cancelled.status === "cancelled" || cancelled.status === "already_cancelled") {
-			return { phase: "applied", preStart: true };
+			return {
+				phase: "applied",
+				preStart: true,
+				manualHold: true,
+				...(cancelled.intentRevision !== undefined ? { intentRevision: cancelled.intentRevision } : {}),
+			};
 		}
 		if (cancelled.status === "too_late") {
 			const racedLiveResult = await cancelLiveBinding();
