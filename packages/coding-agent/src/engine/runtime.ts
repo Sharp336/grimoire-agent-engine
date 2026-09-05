@@ -25,7 +25,7 @@ import { type CreateAgentSessionOptions, createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
 import { createProviderRetryBudgetHook } from "../session/provider-retry-budget";
 import type { SessionEntry, SessionMessageIdentity } from "../session/session-entries";
-import { loadSessionFile } from "../session/session-loader";
+import { loadSessionFile, type SessionLoadResult } from "../session/session-loader";
 import { type SessionDurabilityCheckpoint, SessionManager } from "../session/session-manager";
 import { migrateToCurrentVersion } from "../session/session-migrations";
 import type { EngineChildLaunchResult, EngineChildProfile, EngineInboxToolRequest } from "../tools";
@@ -1829,7 +1829,7 @@ export class EngineRuntime {
 				return undefined;
 			}
 		}
-		let loaded: Awaited<ReturnType<typeof loadSessionFile>>;
+		let loaded: SessionLoadResult;
 		try {
 			loaded = await loadSessionFile(prior.sessionFile, this.store.sessionStorage);
 		} catch (error) {
