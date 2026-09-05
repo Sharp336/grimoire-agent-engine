@@ -129,6 +129,8 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 				"attempt.completed",
 			]);
 			expect(rpc.terminalStatus).toBe("completed");
+			expect(rpc.claimGenerationRequests.length).toBeGreaterThan(0);
+			expect([...new Set(rpc.claimGenerationRequests)]).toEqual([runtime.engineGeneration]);
 			const terminalEvent = rpc.events.find(event => event.type === "attempt.completed");
 			if (!terminalEvent) throw new Error("terminal Engine event was not recorded");
 			await jetstream(enginePublisherConnection).publish(
@@ -144,6 +146,32 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			);
 
 			await bridge.dispose();
+			const retainedCommand = {
+				...startCommand(cwd, profile),
+				commandId: "command-hosted-retained-generation",
+				executionId: "execution-hosted-retained-generation",
+				attemptId: "attempt-hosted-retained-generation",
+			};
+			const retainedRpc = new FakeRpc(retainedCommand, {
+				storedEngineGeneration: runtime.engineGeneration,
+			});
+			const retainedBridge = await HostedEngineBridge.connect({
+				rpc: retainedRpc,
+				deviceId: "device-hosted",
+				engineId: "engine-hosted",
+				engineGeneration: runtime.engineGeneration + 1,
+				servers: broker.url,
+				connectionOptions: { authenticator: nkeyAuthenticator(bridgeSeed) },
+				pollIntervalMs: 10,
+				heartbeatIntervalMs: 100,
+			});
+			try {
+				await waitFor(() => retainedRpc.terminalStatus === "completed");
+				expect(retainedRpc.events.every(event => event.engineGeneration === runtime.engineGeneration)).toBeTrue();
+				expect(retainedRpc.claimGenerationRequests[0]).toBe(runtime.engineGeneration + 1);
+			} finally {
+				await retainedBridge.dispose();
+			}
 			const retryRpc = new FakeRpc(startCommand(cwd, profile));
 			const retryBridge = await HostedEngineBridge.connect({
 				rpc: retryRpc,
@@ -542,6 +570,7 @@ describe("hosted child launch", () => {
 
 class FakeRpc implements GrimoireRpc {
 	readonly events: Array<Record<string, unknown>> = [];
+	readonly claimGenerationRequests: number[] = [];
 	terminalStatus: string | undefined;
 	terminalReplayCalls = 0;
 	heartbeatCalls = 0;
@@ -549,17 +578,28 @@ class FakeRpc implements GrimoireRpc {
 	#claimed = false;
 	#leaseToken = "lease-hosted";
 	#heartbeatFailures: number;
+	#storedEngineGeneration: number | undefined;
 
 	constructor(
 		readonly command: Omit<EngineCommandEnvelope, "engineGeneration">,
-		readonly options: { exactRecoveryOnly?: boolean; heartbeatFailures?: number } = {},
+		readonly options: {
+			exactRecoveryOnly?: boolean;
+			heartbeatFailures?: number;
+			storedEngineGeneration?: number;
+		} = {},
 	) {
 		this.#heartbeatFailures = options.heartbeatFailures ?? 0;
+		this.#storedEngineGeneration = options.storedEngineGeneration;
 	}
 
 	async call(_tool: string, arguments_: Record<string, unknown>): Promise<Record<string, unknown>> {
 		switch (arguments_.action) {
 			case "claim":
+				if (!Number.isSafeInteger(arguments_.engine_generation) || Number(arguments_.engine_generation) <= 0) {
+					throw new Error("claim engine_generation is required");
+				}
+				this.claimGenerationRequests.push(Number(arguments_.engine_generation));
+				this.#storedEngineGeneration ??= Number(arguments_.engine_generation);
 				if (this.#claimed || (this.options.exactRecoveryOnly && arguments_.job_id !== this.command.commandId)) {
 					return { status: "no_job" };
 				}
@@ -570,7 +610,10 @@ class FakeRpc implements GrimoireRpc {
 					job_id: this.command.commandId,
 					operation_type: "agent_engine_command",
 					lease_token: this.#leaseToken,
-					work: { kind: "command", command: this.command },
+					work: {
+						kind: "command",
+						command: { ...this.command, engineGeneration: this.#storedEngineGeneration },
+					},
 				};
 			case "heartbeat":
 				this.heartbeatCalls++;

@@ -26,7 +26,7 @@ interface BridgeClaim {
 	operationType: "agent_engine_command" | "agent_engine_message";
 	work: {
 		kind: "command" | "message";
-		command?: Omit<EngineCommandEnvelope, "engineGeneration">;
+		command?: Omit<EngineCommandEnvelope, "engineGeneration"> & { engineGeneration?: number };
 		message?: AgentMessageEnvelope;
 	};
 	heartbeatFailures: number;
@@ -298,6 +298,7 @@ export class HostedEngineBridge {
 					action: "claim",
 					device_id: this.#options.deviceId,
 					engine_id: this.#options.engineId,
+					engine_generation: this.#options.engineGeneration,
 					worker_id: `engine-${this.#options.engineGeneration}`,
 					lease_ttl_seconds: 90,
 				});
@@ -334,7 +335,14 @@ export class HostedEngineBridge {
 		}
 		const command = claim.work.command;
 		if (!command) throw new Error("Agent Engine command claim has no command envelope");
-		const envelope = { ...command, engineGeneration: this.#options.engineGeneration } as EngineCommandEnvelope;
+		if (
+			!Number.isSafeInteger(command.engineGeneration) ||
+			Number(command.engineGeneration) <= 0 ||
+			Number(command.engineGeneration) > this.#options.engineGeneration
+		) {
+			throw new Error("Agent Engine command claim has an invalid stored Engine generation");
+		}
+		const envelope = command as EngineCommandEnvelope;
 		await js.publish(commandSubject(envelope), encode(envelope), {
 			msgID: `${envelope.commandId}:${envelope.engineGeneration}`,
 		});
@@ -352,6 +360,7 @@ export class HostedEngineBridge {
 						action: "claim",
 						device_id: this.#options.deviceId,
 						engine_id: this.#options.engineId,
+						engine_generation: this.#options.engineGeneration,
 						worker_id: `engine-${this.#options.engineGeneration}`,
 						job_id: event.causationCommandId,
 						lease_ttl_seconds: 90,
