@@ -49,6 +49,9 @@ export default class Engine extends Command {
 		database: Flags.string({ description: "Engine SQLite path" }),
 		"nats-server": Flags.string({ description: "Absolute nats-server executable path" }),
 		"artifact-cache": Flags.string({ description: "ClientHost Artifact cache directory" }),
+		"local-credential-db": Flags.string({
+			description: "Exact ClientHost-local OMP credential database",
+		}),
 		"child-history-ttl-minutes": Flags.integer({
 			description: "Delete terminal child OMP history after this many minutes",
 			min: 1,
@@ -140,6 +143,9 @@ export default class Engine extends Command {
 					: process.env.GRIMOIRE_CLIENT_ARTIFACT_CACHE_ROOT
 						? path.resolve(process.env.GRIMOIRE_CLIENT_ARTIFACT_CACHE_ROOT)
 						: defaultArtifactCacheRoot,
+				localCredentialDbPath: flags["local-credential-db"]
+					? path.resolve(flags["local-credential-db"])
+					: undefined,
 				childHistoryTtlMinutes: flags["child-history-ttl-minutes"] ?? 60,
 				childHistoryRetention: (flags["child-history-retention"] ?? "local") as "local" | "off" | "grimoire",
 				hosted:
