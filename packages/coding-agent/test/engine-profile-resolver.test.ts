@@ -55,7 +55,7 @@ describe("EngineProfileResolver", () => {
 				schema: "grimoire.provider_account.v1",
 				status: "active",
 				providerId: provider,
-				api: "anthropic-messages",
+				api: index === 0 ? "openai_chat_completions" : index === 1 ? "anthropic_messages" : "anthropic-messages",
 				baseUrl: `https://${provider}.invalid`,
 				trusted: true,
 				credential: { type: "api_key", key: `${provider}-key` },
@@ -68,6 +68,7 @@ describe("EngineProfileResolver", () => {
 			root,
 		);
 		try {
+			expect(resolved.options.model?.api).toBe("openai-completions");
 			expect(resolved.options.model?.contextWindow).toBe(1_000_000);
 			expect(resolved.options.model?.maxTokens).toBe(128_000);
 			expect(resolved.sameModelRouteFallback).toEqual({
@@ -77,6 +78,7 @@ describe("EngineProfileResolver", () => {
 			expect(resolved.options.modelRegistry?.find("million", "claude-opus-5")?.baseUrl).toBe(
 				"https://million.invalid",
 			);
+			expect(resolved.options.modelRegistry?.find("million", "claude-opus-5")?.api).toBe("anthropic-messages");
 			expect(resolved.options.modelRegistry?.find("aiberm", "claude-opus-5")?.baseUrl).toBe(
 				"https://aiberm.invalid",
 			);
@@ -102,6 +104,7 @@ describe("EngineProfileResolver", () => {
 		);
 		try {
 			expect(startupFallback.options.model?.provider).toBe("million");
+			expect(startupFallback.options.model?.api).toBe("anthropic-messages");
 			expect(startupFallback.sameModelRouteFallback?.selectors).toEqual([
 				"million/claude-opus-5",
 				"aiberm/claude-opus-5",

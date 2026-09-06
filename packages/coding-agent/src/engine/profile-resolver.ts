@@ -395,7 +395,7 @@ export class EngineProfileResolver {
 						const fallbackModel = buildModel(toModelSpec(fallbackRoute, fallbackAccount)) as Model;
 						modelRegistry.registerProvider(fallbackAccount.providerId, {
 							apiKey: fallbackCredential.key,
-							api: fallbackAccount.api,
+							api: fallbackModel.api,
 							baseUrl: fallbackAccount.baseUrl,
 							headers: fallbackAccount.headers,
 							models: [toProviderModel(fallbackModel)],
@@ -560,7 +560,7 @@ function toModelSpec(route: AvailableModelRoute, account: ProviderAccount): Mode
 		id: route.model.modelId,
 		requestModelId: route.model.requestModelId,
 		name: route.model.name || route.displayName || route.model.modelId,
-		api: account.api,
+		api: nativeProviderApi(account.api),
 		provider: account.providerId,
 		baseUrl: account.baseUrl,
 		headers: account.headers,
@@ -571,6 +571,12 @@ function toModelSpec(route: AvailableModelRoute, account: ProviderAccount): Mode
 		contextWindow: Number(contextWindow),
 		maxTokens: maxOutputTokens,
 	};
+}
+
+function nativeProviderApi(api: Api): Api {
+	if (api === "openai_chat_completions") return "openai-completions";
+	if (api === "anthropic_messages") return "anthropic-messages";
+	return api;
 }
 
 function toProviderModel(
