@@ -279,6 +279,7 @@ describe("Engine Control + Query", () => {
 					textTruncated: false,
 				},
 			],
+			activityCompleteness: "legacy_messages_only" as const,
 		});
 		runtime.listInbox = async received => [
 			{
@@ -329,6 +330,7 @@ describe("Engine Control + Query", () => {
 			entries: [{ entryId: "entry-assistant" }],
 			hasMore: true,
 			resyncRequired: false,
+			activityCompleteness: "legacy_messages_only",
 		});
 		expect(
 			await client.request("session.history", {

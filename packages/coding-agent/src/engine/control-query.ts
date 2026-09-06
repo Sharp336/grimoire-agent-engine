@@ -503,6 +503,7 @@ async function listSessionHistory(
 			previousCursor: null,
 			hasMore: history.entries.length > 0,
 			resyncRequired: true,
+			activityCompleteness: "partial",
 		};
 	}
 	const start = Math.max(0, end - limit);
@@ -520,6 +521,7 @@ async function listSessionHistory(
 				: null,
 		hasMore: pageStart > 0,
 		resyncRequired: false,
+		activityCompleteness: history.activityCompleteness,
 	};
 }
 

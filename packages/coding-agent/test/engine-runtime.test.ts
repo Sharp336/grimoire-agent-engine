@@ -2139,6 +2139,23 @@ describe("EngineRuntime", () => {
 		const history = await runtime.sessionHistory(started.agentInstanceId);
 		const assistantEntries = history.entries.filter(entry => entry.role === "assistant");
 		expect(assistantEntries.map(entry => entry.assistantMessageId)).toEqual(messageIds);
+		expect(history.activityCompleteness).toBe("complete");
+		expect(assistantEntries[0]?.blocks).toEqual([
+			expect.objectContaining({
+				kind: "reasoning",
+				status: "available",
+				text: "private streaming reasoning sentinel",
+			}),
+			expect.objectContaining({
+				kind: "tool_call",
+				toolCallId: "read-stream",
+				toolName: "read",
+				argumentsText: '{"path":"private.txt"}',
+				toolStatus: "succeeded",
+				resultText: expect.stringContaining("private tool output sentinel"),
+			}),
+		]);
+		expect(assistantEntries[0]?.blocks?.[0]?.blockId).toContain(`history:${history.sessionId}:`);
 		const historyEntryId = settled?.payload?.historyEntryId;
 		expect(typeof historyEntryId).toBe("string");
 		expect(historyEntryId).toBe(assistantEntries.at(-1)?.entryId);
