@@ -11,6 +11,7 @@ import { HostedEngineBridge, HostedGrimoireRpc, launchHostedEngineChild } from "
 import { type EngineCommandEnvelope, NatsEngineAdapter } from "./nats-adapter";
 import { EngineProfileResolver } from "./profile-resolver";
 import { ProviderAdmissionClient } from "./provider-admission";
+import { ProviderExecutionClient } from "./provider-execution";
 import { EngineRuntime } from "./runtime";
 
 export interface EngineServiceConfig {
@@ -58,12 +59,16 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 		const providerAdmissionClient = config.hosted
 			? new ProviderAdmissionClient(providerAdmissionUrl(config.hosted.serverUrl), config.hosted.token)
 			: undefined;
+		const providerExecutionClient = config.hosted
+			? new ProviderExecutionClient(providerExecutionUrl(config.hosted.serverUrl), config.hosted.token)
+			: undefined;
 		const profileResolver = config.artifactCacheRoot
 			? new EngineProfileResolver(
 					config.artifactCacheRoot,
 					path.join(config.runtimeDir, "credentials"),
 					config.localCredentialDbPath,
 					providerAdmissionClient,
+					providerExecutionClient,
 				)
 			: undefined;
 		runtime = await EngineRuntime.create({
@@ -321,6 +326,15 @@ export function providerAdmissionUrl(serverUrl: string): string {
 	url.pathname = /\/mcp\/(?:client_agents|core)$/i.test(pathname)
 		? pathname.replace(/\/mcp\/(?:client_agents|core)$/i, "/provider-admission")
 		: `${pathname}/provider-admission`;
+	return url.toString();
+}
+
+export function providerExecutionUrl(serverUrl: string): string {
+	const url = new URL(serverUrl);
+	const pathname = url.pathname.replace(/\/+$/, "");
+	url.pathname = /\/mcp\/(?:client_agents|core)$/i.test(pathname)
+		? pathname.replace(/\/mcp\/(?:client_agents|core)$/i, "/provider-execution")
+		: `${pathname}/provider-execution`;
 	return url.toString();
 }
 

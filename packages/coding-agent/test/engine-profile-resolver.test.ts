@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { EngineProfileResolver } from "../src/engine/profile-resolver";
 import { ProviderAdmissionClient } from "../src/engine/provider-admission";
+import { ProviderExecutionClient } from "../src/engine/provider-execution";
 import { AuthStorage } from "../src/session/auth-storage";
 
 const refs = {
@@ -522,6 +523,134 @@ describe("EngineProfileResolver", () => {
 			reopenedSource.close();
 		}
 	});
+
+	it("resolves an opaque provider credential through the exact principal-bound transport without persistence", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-engine-provider-execution-"));
+		const cache = path.join(root, "artifacts");
+		await fs.mkdir(cache);
+		const profileRef = "gctx:bbbbbbbbbbbbbbbb";
+		const routeRef = "gctx:cccccccccccccccc";
+		const accountRef = "gctx:dddddddddddddddd";
+		const fallbackRouteRef = "gctx:eeeeeeeeeeeeeeee";
+		const fallbackAccountRef = "gctx:ffffffffffffffff";
+		await artifact(cache, profileRef, "grimoire.agent_profile.v1", {
+			schema: "grimoire.agent_profile.v1",
+			status: "active",
+			models: [routeRef, fallbackRouteRef],
+			allowSameModelProviderFallback: true,
+		});
+		await artifact(cache, routeRef, "grimoire.available_model_route.v1", {
+			schema: "grimoire.available_model_route.v1",
+			status: "active",
+			providerAccountRef: accountRef,
+			model: {
+				modelIdentityId: "gpt-5.6-terra",
+				providerSurfaceId: "cheapai",
+				modelId: "gpt-5.6-terra",
+				contextWindow: 1_050_000,
+				maxOutputTokens: 128_000,
+			},
+		});
+		await artifact(cache, accountRef, "grimoire.provider_account.v1", {
+			schema: "grimoire.provider_account.v1",
+			status: "active",
+			providerId: "cheapai",
+			api: "openai-completions",
+			baseUrl: "https://cheapai.invalid/v1",
+			accountBindingId: "account-1",
+			trusted: true,
+			credentialPlacement: { mode: "owner_local", status: "local_only" },
+			credential: { type: "api_key", key: `wincred://grimoire.provider.${"a".repeat(64)}` },
+		});
+		await artifact(cache, fallbackRouteRef, "grimoire.available_model_route.v1", {
+			schema: "grimoire.available_model_route.v1",
+			status: "active",
+			providerAccountRef: fallbackAccountRef,
+			model: {
+				modelIdentityId: "gpt-5.6-terra",
+				providerSurfaceId: "cheapai",
+				modelId: "gpt-5.6-terra",
+				contextWindow: 1_050_000,
+				maxOutputTokens: 128_000,
+			},
+		});
+		await artifact(cache, fallbackAccountRef, "grimoire.provider_account.v1", {
+			schema: "grimoire.provider_account.v1",
+			status: "active",
+			providerId: "cheapai",
+			api: "openai-completions",
+			baseUrl: "https://fallback.invalid/v1",
+			accountBindingId: "account-2",
+			trusted: true,
+			credentialPlacement: { mode: "hosted_broker", status: "ready" },
+			credential: { type: "api_key", key: `wincred://grimoire.provider.${"b".repeat(64)}` },
+		});
+		let mode: "owner_local" | "hosted_broker" = "owner_local";
+		let calls = 0;
+		const execution = new ProviderExecutionClient(
+			"http://127.0.0.1/provider-execution",
+			"local-token",
+			async (_url, init) => {
+				calls += 1;
+				const request = JSON.parse(String(init?.body));
+				if (init?.signal?.aborted) throw init.signal.reason;
+				const isFallback = request.providerAccountRef === fallbackAccountRef;
+				return Response.json({
+					...request,
+					schema: "grimoire.provider_execution.result.v1",
+					status: "ready",
+					allowed: true,
+					mode: isFallback ? "hosted_broker" : mode,
+					providerRuntimeId: `artel-${request.providerAccountRef.slice(5)}`,
+					api: "openai-completions",
+					baseUrl:
+						!isFallback && mode === "owner_local"
+							? "https://cheapai.invalid/v1"
+							: "https://core.invalid/runtime/provider-broker/v1",
+					credential:
+						!isFallback && mode === "owner_local"
+							? "owner-secret"
+							: "gri_pbr_broker-token-value-abcdefghijklmnopqrstuvwxyz",
+				});
+			},
+		);
+		const credentialDb = path.join(root, "credentials", accountRef.slice(5), "credentials.sqlite");
+		const resolver = new EngineProfileResolver(
+			cache,
+			path.join(root, "credentials"),
+			undefined,
+			undefined,
+			execution,
+		);
+		const resolved = await resolver.resolve(
+			{ spawns: "", profileDigest: hash(profileRef), launchProfileRef: profileRef },
+			root,
+		);
+		try {
+			const model = resolved.options.model!;
+			expect(model.provider).toBe(`artel-${accountRef.slice(5)}`);
+			expect(model.baseUrl).toBe("https://cheapai.invalid/v1");
+			expect(await resolved.options.modelRegistry!.getApiKey(model)).toBe("owner-secret");
+			const fallback = resolved.options.modelRegistry!.find(
+				`artel-${fallbackAccountRef.slice(5)}`,
+				"gpt-5.6-terra",
+			)!;
+			expect(fallback.baseUrl).toBe("https://core.invalid/runtime/provider-broker/v1");
+			expect(await resolved.options.modelRegistry!.getApiKey(fallback)).toStartWith("gri_pbr_");
+			expect(calls).toBe(4);
+			mode = "hosted_broker";
+			await expect(resolved.options.modelRegistry!.getApiKey(model)).rejects.toThrow("transport changed");
+		} finally {
+			resolved.dispose();
+		}
+		const reopened = await AuthStorage.create(credentialDb);
+		try {
+			await reopened.reload();
+			expect(reopened.listStoredCredentials(`artel-${accountRef.slice(5)}`)).toHaveLength(0);
+		} finally {
+			reopened.close();
+		}
+	});
 });
 
 async function artifact(cache: string, ref: string, kind: string, content: object): Promise<void> {
@@ -533,6 +662,8 @@ async function artifact(cache: string, ref: string, kind: string, content: objec
 			revision: 1,
 			content_hash: hash(ref),
 			kind,
+			binding: { principal_id: "grimoire:user:test" },
+			artifact: { owner_principal_id: "grimoire:user:test", effective_access_role: "owner" },
 			content: JSON.stringify(content),
 		}),
 	);

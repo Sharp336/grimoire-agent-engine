@@ -592,7 +592,7 @@ export type AuthStorageOptions = {
 	 * - coding-agent injects its resolveConfigValue (supports "!command" syntax via pi-natives)
 	 * - Default: checks environment variable first, then treats as literal
 	 */
-	configValueResolver?: (config: string) => Promise<string | undefined>;
+	configValueResolver?: (config: string, signal?: AbortSignal) => Promise<string | undefined>;
 	/**
 	 * Optional callback fired when AuthStorage automatically disables a
 	 * credential because something detected it as no longer usable — today
@@ -1337,7 +1337,7 @@ export class AuthStorage {
 	#usageLogger?: UsageLogger;
 	#fallbackResolver?: (provider: string) => string | undefined;
 	#store: AuthCredentialStore;
-	#configValueResolver: (config: string) => Promise<string | undefined>;
+	#configValueResolver: (config: string, signal?: AbortSignal) => Promise<string | undefined>;
 	#refreshOAuthCredentialOverride?: AuthStorageOptions["refreshOAuthCredential"];
 	#fetchUsageReportsOverride?: AuthStorageOptions["fetchUsageReports"];
 	#sourceLabel?: string;
@@ -5647,7 +5647,7 @@ export class AuthStorage {
 		);
 		if (loginApiKeySelection) {
 			this.#recordSessionCredential(provider, sessionId, "api_key", loginApiKeySelection.index);
-			return this.#configValueResolver(loginApiKeySelection.credential.key);
+			return this.#configValueResolver(loginApiKeySelection.credential.key, options?.signal);
 		}
 
 		// Past OAuth: the session sticky (if any) is stale — the request authenticates via
@@ -5665,7 +5665,7 @@ export class AuthStorage {
 		);
 		if (apiKeySelection) {
 			this.#recordSessionCredential(provider, sessionId, "api_key", apiKeySelection.index);
-			return this.#configValueResolver(apiKeySelection.credential.key);
+			return this.#configValueResolver(apiKeySelection.credential.key, options?.signal);
 		}
 
 		// Fall back to custom resolver (e.g., models.json custom providers)

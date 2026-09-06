@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import type { Api, AuthCredential, AuthCredentialStore, Model, ModelSpec } from "@oh-my-pi/pi-ai";
+import type { Api, AuthCredential, AuthCredentialStore, Model, ModelSpec, StoredAuthCredential } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils/dirs";
@@ -15,6 +15,11 @@ import type { EngineChildProfile } from "../tools";
 import type { EngineLaunchProfile } from "./contracts";
 import { resolveExecutableModelLimits } from "./model-limits";
 import type { ProviderAdmissionClient, ProviderApiKeyRouteIdentity } from "./provider-admission";
+import type {
+	ProviderExecutionClient,
+	ProviderExecutionIdentity,
+	ProviderExecutionMaterial,
+} from "./provider-execution";
 
 const GCTX = /^gctx:[23456789abcdefghjkmnpqrstuvwxyz]{16}$/;
 
@@ -25,6 +30,8 @@ interface CachedArtifact {
 	content_hash: string;
 	kind: string;
 	content: string;
+	binding: { principal_id: string; session_binding_id?: string };
+	artifact: { owner_principal_id?: string; effective_access_role?: string };
 }
 
 interface AgentProfile {
@@ -74,6 +81,7 @@ interface ProviderAccount {
 	trusted: boolean;
 	credential?: AuthCredential;
 	credentialBinding?: { source: "local_omp"; accountId: string; credentialId?: number };
+	credentialPlacement?: { mode?: "owner_local" | "hosted_broker"; status?: string };
 }
 
 export interface ResolvedEngineSessionProfile {
@@ -102,6 +110,7 @@ export class EngineProfileResolver {
 		readonly credentialRoot: string,
 		readonly localCredentialDbPath: string = getAgentDbPath(),
 		readonly providerAdmissionClient?: ProviderAdmissionClient,
+		readonly providerExecutionClient?: ProviderExecutionClient,
 	) {}
 
 	async continuationDigest(launch: EngineLaunchProfile, cwd: string): Promise<string> {
@@ -202,6 +211,8 @@ export class EngineProfileResolver {
 				}
 				return await this.#resolveRoute(
 					profile,
+					profileRef,
+					cachedProfile,
 					routeRef,
 					launch,
 					childProfiles,
@@ -229,6 +240,8 @@ export class EngineProfileResolver {
 
 	async #resolveRoute(
 		profile: AgentProfile,
+		profileRef: string,
+		cachedProfile: CachedArtifact,
 		routeRef: string,
 		launch: EngineLaunchProfile,
 		childProfiles: EngineChildProfile[],
@@ -236,10 +249,8 @@ export class EngineProfileResolver {
 		maxSpawnDepth: number,
 		fallbackRouteRefs: string[],
 	): Promise<ResolvedEngineSessionProfile> {
-		const route = parseJson<AvailableModelRoute>(
-			(await this.#read(routeRef, "grimoire.available_model_route.v1")).content,
-			"AvailableModelRoute",
-		);
+		const cachedRoute = await this.#read(routeRef, "grimoire.available_model_route.v1");
+		const route = parseJson<AvailableModelRoute>(cachedRoute.content, "AvailableModelRoute");
 		if (
 			route.schema !== "grimoire.available_model_route.v1" ||
 			route.status === "disabled" ||
@@ -252,6 +263,10 @@ export class EngineProfileResolver {
 		const cachedAccount = await this.#read(accountRef, "grimoire.provider_account.v1");
 		const account = parseJson<ProviderAccount>(cachedAccount.content, "ProviderAccount");
 		const embeddedCredential = validCredential(account.credential) ? account.credential : undefined;
+		const externalApiKey =
+			embeddedCredential?.type === "api_key" && isClientCredentialRef(embeddedCredential.key)
+				? embeddedCredential
+				: undefined;
 		const localBinding = validLocalCredentialBinding(account.credentialBinding)
 			? account.credentialBinding
 			: undefined;
@@ -268,6 +283,36 @@ export class EngineProfileResolver {
 		if (profile.requireTrustedProvider && account.trusted !== true) {
 			throw new Error("AgentProfile requires a trusted provider");
 		}
+		if (externalApiKey && !this.providerExecutionClient) {
+			throw new Error("Provider execution material is unavailable");
+		}
+		const cachedPrincipalId = cachedProfile.binding?.principal_id?.trim() || "";
+		const expectedPrincipalId = externalApiKey
+			? requiredText(cachedPrincipalId, "cached profile principal")
+			: cachedPrincipalId;
+		if (
+			externalApiKey &&
+			(cachedRoute.binding?.principal_id !== expectedPrincipalId ||
+				cachedAccount.binding?.principal_id !== expectedPrincipalId)
+		) {
+			throw new Error("Provider route cache binding does not match AgentProfile principal");
+		}
+		const executionIdentity = externalApiKey
+			? providerExecutionIdentity({
+					expectedPrincipalId,
+					profileRef,
+					profileContentHash: cachedProfile.content_hash,
+					routeRef,
+					routeContentHash: cachedRoute.content_hash,
+					providerAccountRef: accountRef,
+					providerAccountContentHash: cachedAccount.content_hash,
+					providerId: account.providerId,
+					modelId: route.model.modelId,
+				})
+			: undefined;
+		const executionMaterial = executionIdentity
+			? await this.providerExecutionClient!.resolve(executionIdentity)
+			: undefined;
 		const admissionIdentity =
 			account.providerKind === "openai_codex_subscription"
 				? {
@@ -296,6 +341,7 @@ export class EngineProfileResolver {
 		const accountDir = path.join(this.credentialRoot, accountRef.slice(5));
 		await fs.mkdir(accountDir, { recursive: true });
 		let authStorage: AuthStorage;
+		const externalCredentialIdentities = new Map<string, ProviderExecutionBinding>();
 		if (localBinding) {
 			const store = await SqliteAuthCredentialStore.open(this.localCredentialDbPath);
 			const credential = store
@@ -310,16 +356,45 @@ export class EngineProfileResolver {
 				store.close();
 				throw new Error("The local OMP account bound to ProviderAccount is unavailable");
 			}
-			authStorage = new AuthStorage(exactCredentialStore(store, account.providerId, credential.id), {
-				sourceLabel: "local OMP account",
-			});
+			authStorage = new AuthStorage(
+				externalCredentialOverlay(exactCredentialStore(store, account.providerId, credential.id)),
+				{
+					sourceLabel: "local OMP account",
+					configValueResolver: (value, signal) =>
+						resolveProviderExecutionCredential(
+							value,
+							externalCredentialIdentities,
+							this.providerExecutionClient,
+							signal,
+						),
+				},
+			);
 			await authStorage.reload();
 		} else {
-			authStorage = await AuthStorage.create(path.join(accountDir, "credentials.sqlite"));
+			const store = await SqliteAuthCredentialStore.open(path.join(accountDir, "credentials.sqlite"));
+			authStorage = new AuthStorage(externalCredentialOverlay(store), {
+				configValueResolver: (value, signal) =>
+					resolveProviderExecutionCredential(
+						value,
+						externalCredentialIdentities,
+						this.providerExecutionClient,
+						signal,
+					),
+			});
+			await authStorage.reload();
 		}
 		try {
 			let unsubscribeWriteback = () => {};
-			if (embeddedCredential) {
+			let primaryExecutionMarker: string | undefined;
+			if (executionIdentity && executionMaterial) {
+				const marker = providerExecutionMarker(executionIdentity);
+				primaryExecutionMarker = marker;
+				externalCredentialIdentities.set(marker, {
+					identity: executionIdentity,
+					transport: executionTransport(executionMaterial),
+				});
+				await authStorage.set(executionMaterial.providerRuntimeId, { type: "api_key", key: marker });
+			} else if (embeddedCredential) {
 				const sourcePath = path.join(accountDir, "source.json");
 				const source = await readJson(sourcePath);
 				if (source?.contentHash !== cachedAccount.content_hash) {
@@ -356,15 +431,25 @@ export class EngineProfileResolver {
 				ignoreLocalModelConfig: true,
 				cacheDbPath: path.join(accountDir, "models.sqlite"),
 			});
-			const model = buildModel(toModelSpec(route, account)) as Model;
+			const model = buildModel(toModelSpec(route, account, executionMaterial)) as Model;
+			if (executionMaterial) {
+				modelRegistry.registerProvider(model.provider, {
+					apiKey: primaryExecutionMarker,
+					api: model.api,
+					baseUrl: model.baseUrl,
+					headers: account.headers,
+					models: [toProviderModel(model)],
+				});
+				authStorage.removeConfigApiKey(model.provider);
+			}
 			const fallbackSelectors = [formatModelStringWithRouting(model)];
 			const fallbackApiKeyRoutes: ProviderApiKeyRouteIdentity[] = [];
-			const fallbackWritebacks: Array<() => void> = [];
 			if (profile.allowSameModelProviderFallback && (embeddedCredential || localBinding)) {
 				for (const fallbackRouteRef of fallbackRouteRefs) {
 					try {
+						const fallbackCachedRoute = await this.#read(fallbackRouteRef, "grimoire.available_model_route.v1");
 						const fallbackRoute = parseJson<AvailableModelRoute>(
-							(await this.#read(fallbackRouteRef, "grimoire.available_model_route.v1")).content,
+							fallbackCachedRoute.content,
 							"AvailableModelRoute",
 						);
 						if (
@@ -379,6 +464,8 @@ export class EngineProfileResolver {
 						const fallbackCredential = validCredential(fallbackAccount.credential)
 							? fallbackAccount.credential
 							: undefined;
+						const externalFallback =
+							fallbackCredential?.type === "api_key" && isClientCredentialRef(fallbackCredential.key);
 						if (
 							fallbackAccount.status === "disabled" ||
 							fallbackCredential?.type !== "api_key" ||
@@ -387,19 +474,67 @@ export class EngineProfileResolver {
 							!fallbackAccount.api ||
 							!fallbackAccount.baseUrl ||
 							(profile.requireTrustedProvider && fallbackAccount.trusted !== true) ||
-							fallbackAccount.providerId === account.providerId
+							(externalFallback &&
+								(!this.providerExecutionClient ||
+									!expectedPrincipalId ||
+									fallbackCachedRoute.binding?.principal_id !== expectedPrincipalId ||
+									fallbackCachedAccount.binding?.principal_id !== expectedPrincipalId))
 						) {
 							continue;
 						}
-						if (!localBinding) await authStorage.set(fallbackAccount.providerId, fallbackCredential);
-						const fallbackModel = buildModel(toModelSpec(fallbackRoute, fallbackAccount)) as Model;
-						modelRegistry.registerProvider(fallbackAccount.providerId, {
-							apiKey: fallbackCredential.key,
+						if (!externalFallback) {
+							if (!localBinding) await authStorage.set(fallbackAccount.providerId, fallbackCredential);
+							const fallbackModel = buildModel(toModelSpec(fallbackRoute, fallbackAccount)) as Model;
+							modelRegistry.registerProvider(fallbackAccount.providerId, {
+								apiKey: fallbackCredential.key,
+								api: fallbackModel.api,
+								baseUrl: fallbackAccount.baseUrl,
+								headers: fallbackAccount.headers,
+								models: [toProviderModel(fallbackModel)],
+							});
+							fallbackApiKeyRoutes.push({
+								providerAccountRef: fallbackAccountRef,
+								routeRef: fallbackRouteRef,
+								providerId: fallbackModel.provider,
+								modelId: fallbackModel.id,
+								baseUrl: fallbackModel.baseUrl,
+							});
+							const selector = formatModelStringWithRouting(fallbackModel);
+							if (!fallbackSelectors.includes(selector)) fallbackSelectors.push(selector);
+							continue;
+						}
+						const fallbackIdentity = providerExecutionIdentity({
+							expectedPrincipalId,
+							profileRef,
+							profileContentHash: cachedProfile.content_hash,
+							routeRef: fallbackRouteRef,
+							routeContentHash: fallbackCachedRoute.content_hash,
+							providerAccountRef: fallbackAccountRef,
+							providerAccountContentHash: fallbackCachedAccount.content_hash,
+							providerId: fallbackAccount.providerId,
+							modelId: fallbackRoute.model.modelId,
+						});
+						const fallbackMaterial = await this.providerExecutionClient!.resolve(fallbackIdentity);
+						const fallbackMarker = providerExecutionMarker(fallbackIdentity);
+						externalCredentialIdentities.set(fallbackMarker, {
+							identity: fallbackIdentity,
+							transport: executionTransport(fallbackMaterial),
+						});
+						await authStorage.set(fallbackMaterial.providerRuntimeId, {
+							type: "api_key",
+							key: fallbackMarker,
+						});
+						const fallbackModel = buildModel(
+							toModelSpec(fallbackRoute, fallbackAccount, fallbackMaterial),
+						) as Model;
+						modelRegistry.registerProvider(fallbackModel.provider, {
+							apiKey: fallbackMarker,
 							api: fallbackModel.api,
-							baseUrl: fallbackAccount.baseUrl,
+							baseUrl: fallbackModel.baseUrl,
 							headers: fallbackAccount.headers,
 							models: [toProviderModel(fallbackModel)],
 						});
+						authStorage.removeConfigApiKey(fallbackModel.provider);
 						fallbackApiKeyRoutes.push({
 							providerAccountRef: fallbackAccountRef,
 							routeRef: fallbackRouteRef,
@@ -409,19 +544,6 @@ export class EngineProfileResolver {
 						});
 						const selector = formatModelStringWithRouting(fallbackModel);
 						if (!fallbackSelectors.includes(selector)) fallbackSelectors.push(selector);
-						if (!localBinding)
-							fallbackWritebacks.push(
-								authStorage.onGenerationChanged(
-									() =>
-										void this.#writeCredentialBack(
-											authStorage,
-											fallbackAccount.providerId,
-											fallbackAccountRef,
-											fallbackCachedAccount,
-											fallbackCredential,
-										).catch(() => {}),
-								),
-							);
 					} catch {
 						// Unavailable routes are omitted once; the runtime chain never cycles back to them.
 					}
@@ -472,7 +594,6 @@ export class EngineProfileResolver {
 					: {}),
 				dispose: () => {
 					unsubscribeWriteback();
-					for (const unsubscribe of fallbackWritebacks) unsubscribe();
 					authStorage.close();
 				},
 			};
@@ -507,34 +628,6 @@ export class EngineProfileResolver {
 		return profiles;
 	}
 
-	async #writeCredentialBack(
-		authStorage: AuthStorage,
-		providerId: string,
-		accountRef: string,
-		cachedAccount: CachedArtifact,
-		baseCredential: AuthCredential,
-	): Promise<void> {
-		const credentials = authStorage.listStoredCredentials(providerId);
-		if (credentials.length !== 1 || !credentials[0]?.credential) return;
-		const credential = credentials[0].credential;
-		const writebackRoot = path.resolve(this.artifactCacheRoot, "..", "credential-writeback");
-		await fs.mkdir(writebackRoot, { recursive: true });
-		const writebackPath = path.join(writebackRoot, `${accountRef.slice(5)}.json`);
-		if (credentialHash(credential) === credentialHash(baseCredential)) {
-			await fs.rm(writebackPath, { force: true });
-			return;
-		}
-		await atomicWriteJson(writebackPath, {
-			schema: "grimoire.engine_credential_writeback.v1",
-			artifactRef: accountRef,
-			baseRevision: cachedAccount.revision,
-			baseContentHash: cachedAccount.content_hash,
-			baseCredentialHash: credentialHash(baseCredential),
-			credential,
-			updatedAt: new Date().toISOString(),
-		});
-	}
-
 	async #read(ref: string, kind: string): Promise<CachedArtifact> {
 		const value = await readJson(path.join(this.artifactCacheRoot, `${ref.slice(5)}.json`));
 		if (
@@ -551,7 +644,11 @@ export class EngineProfileResolver {
 	}
 }
 
-function toModelSpec(route: AvailableModelRoute, account: ProviderAccount): ModelSpec<Api> {
+function toModelSpec(
+	route: AvailableModelRoute,
+	account: ProviderAccount,
+	execution?: ProviderExecutionMaterial,
+): ModelSpec<Api> {
 	const { contextWindow, maxOutputTokens } = resolveExecutableModelLimits(route.model);
 	const input = uniqueStrings(route.model.inputModalities ?? ["text"]).filter(
 		(value): value is "text" | "image" => value === "text" || value === "image",
@@ -560,9 +657,9 @@ function toModelSpec(route: AvailableModelRoute, account: ProviderAccount): Mode
 		id: route.model.modelId,
 		requestModelId: route.model.requestModelId,
 		name: route.model.name || route.displayName || route.model.modelId,
-		api: nativeProviderApi(account.api),
-		provider: account.providerId,
-		baseUrl: account.baseUrl,
+		api: execution?.api ?? nativeProviderApi(account.api),
+		provider: execution?.providerRuntimeId ?? account.providerId,
+		baseUrl: execution?.baseUrl ?? account.baseUrl,
 		headers: account.headers,
 		reasoning: route.model.supportsReasoning === true,
 		supportsTools: route.model.supportsTools,
@@ -678,6 +775,10 @@ function validCredential(value: unknown): value is AuthCredential {
 	);
 }
 
+function isClientCredentialRef(value: string): boolean {
+	return /^(?:wincred|clientcred):\/[/][A-Za-z0-9][A-Za-z0-9._~-]{0,254}$/.test(value);
+}
+
 function validLocalCredentialBinding(
 	value: unknown,
 ): value is { source: "local_omp"; accountId: string; credentialId?: number } {
@@ -703,6 +804,147 @@ function exactCredentialStore(store: AuthCredentialStore, provider: string, cred
 					return target.listAuthCredentials(provider).filter(item => item.id === credentialId);
 				};
 			}
+			const value = Reflect.get(target, property, target) as unknown;
+			return typeof value === "function" ? value.bind(target) : value;
+		},
+	});
+}
+
+function providerExecutionIdentity(identity: ProviderExecutionIdentity): ProviderExecutionIdentity {
+	return Object.freeze({ ...identity });
+}
+
+function providerExecutionMarker(identity: ProviderExecutionIdentity): string {
+	return `clientexec://sha256:${createHash("sha256").update(stableStringifyJson(identity), "utf8").digest("hex")}`;
+}
+
+async function resolveProviderExecutionCredential(
+	value: string,
+	identities: ReadonlyMap<string, ProviderExecutionBinding>,
+	client: ProviderExecutionClient | undefined,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	const binding = identities.get(value);
+	if (!binding) return process.env[value] || value;
+	if (!client) throw new Error("Provider execution material is unavailable");
+	const material = await client.resolve(binding.identity, signal);
+	if (stableStringifyJson(executionTransport(material)) !== stableStringifyJson(binding.transport)) {
+		throw new Error("Provider execution transport changed; start a new Attempt with the refreshed profile catalog");
+	}
+	return material.credential;
+}
+
+interface ProviderExecutionBinding {
+	identity: ProviderExecutionIdentity;
+	transport: Omit<ProviderExecutionMaterial, "credential">;
+}
+
+function executionTransport(material: ProviderExecutionMaterial): Omit<ProviderExecutionMaterial, "credential"> {
+	return {
+		mode: material.mode,
+		providerRuntimeId: material.providerRuntimeId,
+		api: material.api,
+		baseUrl: material.baseUrl,
+	};
+}
+
+function externalCredentialOverlay(store: AuthCredentialStore): AuthCredentialStore {
+	const rows = new Map<string, StoredAuthCredential[]>();
+	let nextId = 1_500_000_000;
+	const isExternal = (credential: AuthCredential): boolean =>
+		credential.type === "api_key" && credential.key.startsWith("clientexec://sha256:");
+	const allRows = (provider?: string): StoredAuthCredential[] => {
+		const base = store.listAuthCredentials(provider);
+		const extra = provider ? (rows.get(provider) ?? []) : [...rows.values()].flat();
+		return [...base, ...extra];
+	};
+	return new Proxy(store, {
+		get(target, property) {
+			if (property === "listAuthCredentials") return allRows;
+			if (property === "replaceAuthCredentialsForProvider") {
+				return (provider: string, credentials: AuthCredential[]) => {
+					if (!credentials.every(isExternal))
+						return target.replaceAuthCredentialsForProvider(provider, credentials);
+					const replacement = credentials.map(credential => ({
+						id: nextId++,
+						provider,
+						credential,
+						disabledCause: null,
+					}));
+					rows.set(provider, replacement);
+					return replacement;
+				};
+			}
+			if (property === "upsertAuthCredentialForProvider") {
+				return (provider: string, credential: AuthCredential) => {
+					if (!isExternal(credential)) return target.upsertAuthCredentialForProvider(provider, credential);
+					const existing = rows.get(provider) ?? [];
+					const replacement = [
+						{
+							id: existing[0]?.id ?? nextId++,
+							provider,
+							credential,
+							disabledCause: null,
+						},
+					];
+					rows.set(provider, replacement);
+					return replacement;
+				};
+			}
+			if (property === "deleteAuthCredentialsForProvider") {
+				return (provider: string, cause: string) => {
+					if (rows.delete(provider)) return;
+					return target.deleteAuthCredentialsForProvider(provider, cause);
+				};
+			}
+			if (property === "updateAuthCredential") {
+				return (id: number, credential: AuthCredential) => {
+					for (const [provider, entries] of rows) {
+						const index = entries.findIndex(entry => entry.id === id);
+						if (index >= 0) {
+							if (!isExternal(credential)) throw new Error("External credential cannot become persistent");
+							entries[index] = { id, provider, credential, disabledCause: null };
+							return;
+						}
+					}
+					return target.updateAuthCredential(id, credential);
+				};
+			}
+			if (property === "deleteAuthCredential") {
+				return (id: number, cause: string) => {
+					for (const [provider, entries] of rows) {
+						if (entries.some(entry => entry.id === id)) {
+							rows.set(
+								provider,
+								entries.filter(entry => entry.id !== id),
+							);
+							return;
+						}
+					}
+					return target.deleteAuthCredential(id, cause);
+				};
+			}
+			if (property === "tryDisableAuthCredentialIfMatches") {
+				return (id: number, expected: string, cause: string, lease?: { owner: string; nowMs: number }) => {
+					for (const [provider, entries] of rows) {
+						const entry = entries.find(item => item.id === id);
+						if (entry) {
+							if (stableStringifyJson(entry.credential) !== expected) return false;
+							rows.set(
+								provider,
+								entries.filter(item => item.id !== id),
+							);
+							return true;
+						}
+					}
+					return target.tryDisableAuthCredentialIfMatches(id, expected, cause, lease);
+				};
+			}
+			if (property === "close")
+				return () => {
+					rows.clear();
+					target.close();
+				};
 			const value = Reflect.get(target, property, target) as unknown;
 			return typeof value === "function" ? value.bind(target) : value;
 		},
