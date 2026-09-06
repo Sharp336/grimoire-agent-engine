@@ -341,17 +341,21 @@ describe("Engine Control + Query", () => {
 			deliveryPayload: String(mutation.value),
 			revision: mutation.expectedRevision + 1,
 		});
-		runtime.enqueueInbox = async (received, source) => ({
-			item: {
-				...(await runtime.listInbox(received))[0]!,
-				queueId: "queue-user",
-				sourceEventId: source.sourceEventId,
-				sourceType: source.sourceType,
-				sourceBody: source.body,
-				deliveryPayload: source.body,
-			},
-			created: true,
-		});
+		let enqueuedCreatedAt: number | undefined;
+		runtime.enqueueInbox = async (received, source) => {
+			enqueuedCreatedAt = source.createdAt;
+			return {
+				item: {
+					...(await runtime.listInbox(received))[0]!,
+					queueId: "queue-user",
+					sourceEventId: source.sourceEventId,
+					sourceType: source.sourceType,
+					sourceBody: source.body,
+					deliveryPayload: source.body,
+				},
+				created: true,
+			};
+		};
 		expect(await client.request("session.context", target)).toMatchObject({
 			attemptId: "attempt-a",
 			context: { usedTokens: 42 },
@@ -432,12 +436,31 @@ describe("Engine Control + Query", () => {
 				sourceEventId: "user-message-a",
 				sourceType: "user",
 				body: "queued while running",
-				createdAt: 10,
 			}),
 		).toMatchObject({
 			created: true,
 			item: { queueId: "queue-user", sourceType: "user", deliveryPayload: "queued while running" },
 		});
+		expect(enqueuedCreatedAt).toBeUndefined();
+		expect(
+			await client.request("inbox.enqueue", {
+				...target,
+				sourceEventId: "user-message-with-time",
+				sourceType: "user",
+				body: "queued with an explicit source time",
+				createdAt: 10,
+			}),
+		).toMatchObject({ created: true });
+		expect(enqueuedCreatedAt).toBe(10);
+		await expect(
+			client.request("inbox.enqueue", {
+				...target,
+				sourceEventId: "user-message-invalid-time",
+				sourceType: "user",
+				body: "invalid enqueue time",
+				createdAt: -1,
+			}),
+		).rejects.toMatchObject({ code: "invalid_request" });
 		expect(
 			await client.request("inbox.mutate", {
 				...target,

@@ -194,7 +194,7 @@ export interface EngineInboxSource {
 	sourceType: EngineInboxSourceType;
 	sender?: string;
 	body: string;
-	createdAt: number;
+	createdAt?: number;
 	deliverAt?: number;
 	wakeIntent?: boolean;
 }

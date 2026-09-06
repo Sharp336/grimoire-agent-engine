@@ -331,14 +331,30 @@ describe("EngineStore", () => {
 			sourceType: "agent" as const,
 			sender: "agent-sender",
 			body: "original immutable body",
-			createdAt: 100,
 		};
-		const first = await store.enqueueInboxItem(target, firstSource);
-		expect(first).toMatchObject({ created: true, item: { queueId: "message-1", revision: 1 } });
-		expect(await store.enqueueInboxItem(target, firstSource)).toMatchObject({ created: false });
+		const concurrent = await Promise.all(
+			Array.from({ length: 8 }, () => store.enqueueInboxItem(target, firstSource)),
+		);
+		expect(concurrent.filter(result => result.created)).toHaveLength(1);
+		const first = concurrent.find(result => result.created)!;
+		expect(first).toMatchObject({ item: { queueId: "message-1", revision: 1 } });
+		expect(new Set(concurrent.map(result => result.item.createdAt))).toEqual(new Set([first.item.createdAt]));
+		expect(await store.enqueueInboxItem(target, firstSource)).toMatchObject({
+			created: false,
+			item: { createdAt: first.item.createdAt },
+		});
 		await expect(store.enqueueInboxItem(target, { ...firstSource, body: "changed source" })).rejects.toBeInstanceOf(
 			EngineInboxConflictError,
 		);
+		await expect(
+			store.enqueueInboxItem(target, { ...firstSource, createdAt: Date.now() + 60_000 }),
+		).rejects.toBeInstanceOf(EngineInboxConflictError);
+		await expect(store.enqueueInboxItem(target, { ...firstSource, createdAt: -1 })).rejects.toBeInstanceOf(
+			EngineInboxConflictError,
+		);
+		await expect(
+			store.enqueueInboxItem({ ...target, authorityGeneration: target.authorityGeneration + 1 }, firstSource),
+		).rejects.toBeInstanceOf(EngineInboxConflictError);
 
 		const edited = await store.mutateInboxItem(target, {
 			mutationId: "edit-1",
@@ -433,6 +449,10 @@ describe("EngineStore", () => {
 		await store.close();
 
 		const reopened = await EngineStore.open(databasePath);
+		expect(await reopened.enqueueInboxItem(target, firstSource)).toMatchObject({
+			created: false,
+			item: { createdAt: first.item.createdAt, disposition: "dropped" },
+		});
 		expect((await reopened.listInboxItems(target.sessionId, true)).map(item => item.disposition)).toEqual([
 			"acknowledged",
 			"dropped",

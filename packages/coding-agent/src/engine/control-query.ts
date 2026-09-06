@@ -828,6 +828,10 @@ function requiredInboxSource(record: Record<string, unknown>): EngineInboxSource
 	if (sourceType !== "user" && sourceType !== "agent" && sourceType !== "runtime") {
 		throw new Error("sourceType must be user, agent or runtime");
 	}
+	const createdAt = record.createdAt;
+	if (createdAt !== undefined && (!Number.isSafeInteger(createdAt) || Number(createdAt) < 0)) {
+		throw new Error("createdAt must be a non-negative safe integer");
+	}
 	const deliverAt = record.deliverAt;
 	if (deliverAt !== undefined && (!Number.isSafeInteger(deliverAt) || Number(deliverAt) < 0)) {
 		throw new Error("deliverAt must be a non-negative safe integer");
@@ -837,7 +841,7 @@ function requiredInboxSource(record: Record<string, unknown>): EngineInboxSource
 		sourceType,
 		...(typeof record.sender === "string" && record.sender.trim() ? { sender: record.sender } : {}),
 		body: requiredString(record, "body"),
-		createdAt: requiredInteger(record, "createdAt"),
+		...(createdAt === undefined ? {} : { createdAt: Number(createdAt) }),
 		...(deliverAt === undefined ? {} : { deliverAt: Number(deliverAt) }),
 		wakeIntent: record.wakeIntent === true,
 	};

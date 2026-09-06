@@ -716,7 +716,7 @@ export class EngineStore {
 		if (!source.sourceEventId.trim() || !source.body.trim()) {
 			throw new EngineInboxConflictError("Inbox sourceEventId and body must be non-empty");
 		}
-		if (!Number.isSafeInteger(source.createdAt) || source.createdAt < 0) {
+		if (source.createdAt !== undefined && (!Number.isSafeInteger(source.createdAt) || source.createdAt < 0)) {
 			throw new EngineInboxConflictError("Inbox createdAt must be a non-negative safe integer");
 		}
 		return await this.#transaction(async sql => {
@@ -730,15 +730,16 @@ export class EngineStore {
 				(existingSource.source_type !== source.sourceType ||
 					existingSource.sender !== (source.sender ?? null) ||
 					existingSource.body !== source.body ||
-					Number(existingSource.created_at) !== source.createdAt)
+					(source.createdAt !== undefined && Number(existingSource.created_at) !== source.createdAt))
 			) {
 				throw new EngineInboxConflictError(`Inbox source ${source.sourceEventId} has different immutable content`);
 			}
 			if (!existingSource) {
+				const createdAt = source.createdAt ?? Date.now();
 				await sql.unsafe(
 					`INSERT INTO engine_inbox_sources(source_event_id, source_type, sender, body, created_at)
 					 VALUES (?, ?, ?, ?, ?)`,
-					[source.sourceEventId, source.sourceType, source.sender ?? null, source.body, source.createdAt],
+					[source.sourceEventId, source.sourceType, source.sender ?? null, source.body, createdAt],
 				);
 			}
 			const existing = await this.#inboxItem(sql, target.sessionId, source.sourceEventId);
