@@ -144,6 +144,7 @@ describe("Engine Control + Query", () => {
 			queries: expect.arrayContaining([
 				"session.context",
 				"session.history",
+				"session.restore.stage",
 				"session.usage",
 				"inbox.list",
 				"inbox.enqueue",
@@ -289,7 +290,16 @@ describe("Engine Control + Query", () => {
 			byteLength: 4,
 			offset,
 			nextOffset: null,
-			contentBase64: Buffer.from("test").subarray(offset, offset + limit).toString("base64"),
+			contentBase64: Buffer.from("test")
+				.subarray(offset, offset + limit)
+				.toString("base64"),
+		});
+		runtime.sessionRestoreStage = async request => ({
+			restoreId: "b".repeat(64),
+			contentHash: request.contentHash,
+			totalBytes: request.totalBytes,
+			nextOffset: request.offset + Buffer.from(request.contentBase64, "base64").byteLength,
+			complete: true,
 		});
 		runtime.listInbox = async received => [
 			{
@@ -344,6 +354,17 @@ describe("Engine Control + Query", () => {
 			agentInstanceId: "agent-a",
 			contentBase64: Buffer.from("es").toString("base64"),
 		});
+		expect(
+			await client.request("session.restore.stage", {
+				agentInstanceId: "agent-restored",
+				agentInstanceRef: "grimoire://tasks/project/task/agents/agent-restored",
+				authorityGeneration: 4,
+				contentHash: `sha256:${"b".repeat(64)}`,
+				totalBytes: 4,
+				offset: 0,
+				contentBase64: Buffer.from("test").toString("base64"),
+			}),
+		).toMatchObject({ restoreId: "b".repeat(64), nextOffset: 4, complete: true });
 		const newestHistory = (await client.request("session.history", {
 			agentInstanceId: "agent-a",
 			limit: 1,

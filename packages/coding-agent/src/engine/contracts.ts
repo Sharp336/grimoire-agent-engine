@@ -78,12 +78,23 @@ export interface EngineStartRequest {
 	 * a branch starts a distinct destination AgentInstance.
 	 */
 	historyEdit?: EngineHistoryEditSource;
+	/**
+	 * Hash-pinned native checkpoint previously staged for this exact hosted
+	 * AgentInstance authority. It is forked into a fresh native session only
+	 * when this explicit Start is admitted.
+	 */
+	restoreCheckpoint?: EngineRestoreCheckpointSource;
 	/** Durable inbox identity for an automatic queued start. Mutually exclusive with input. */
 	queueId?: string;
 	expectedRevision?: number;
 	mutationId?: string;
 	/** Required to clear a durable manual hold for an explicit user send. */
 	expectedIntentRevision?: number;
+}
+
+export interface EngineRestoreCheckpointSource {
+	restoreId: string;
+	contentHash: string;
 }
 
 export interface EngineHistoryEditSource {
@@ -340,6 +351,7 @@ export function validateStartRequest(request: EngineStartRequest): void {
 	}
 	const queued = request.queueId !== undefined;
 	const historyEdit = request.historyEdit;
+	const restoreCheckpoint = request.restoreCheckpoint;
 	if (
 		queued
 			? !request.queueId?.trim() ||
@@ -349,7 +361,8 @@ export function validateStartRequest(request: EngineStartRequest): void {
 				!Number.isSafeInteger(request.expectedIntentRevision) ||
 				request.expectedIntentRevision! < 0 ||
 				request.input !== undefined ||
-				historyEdit !== undefined
+				historyEdit !== undefined ||
+				restoreCheckpoint !== undefined
 			: historyEdit
 				? request.mutationId !== undefined ||
 					request.expectedRevision !== undefined ||
@@ -357,6 +370,20 @@ export function validateStartRequest(request: EngineStartRequest): void {
 				: !request.input?.trim() || request.mutationId !== undefined || request.expectedRevision !== undefined
 	) {
 		throw new EngineTargetError("invalid_request", "start requires text or a complete queued-item identity");
+	}
+	if (restoreCheckpoint) {
+		if (historyEdit || queued) {
+			throw new EngineTargetError("invalid_request", "restoreCheckpoint requires an explicit ordinary start");
+		}
+		if (!/^[0-9a-f]{64}$/.test(restoreCheckpoint.restoreId)) {
+			throw new EngineTargetError("invalid_request", "restoreCheckpoint.restoreId must be a SHA-256 token");
+		}
+		if (!/^sha256:[0-9a-f]{64}$/.test(restoreCheckpoint.contentHash)) {
+			throw new EngineTargetError("invalid_request", "restoreCheckpoint.contentHash must be a SHA-256 digest");
+		}
+		if (!request.agentInstanceRef?.trim()) {
+			throw new EngineTargetError("invalid_request", "restoreCheckpoint requires agentInstanceRef");
+		}
 	}
 	if (historyEdit) {
 		if (historyEdit.mode !== "edit" && historyEdit.mode !== "branch") {

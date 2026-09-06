@@ -708,6 +708,8 @@ export async function dispatchEngineCommand(options: {
 			}
 			const queued = typeof command.payload.queueId === "string";
 			const historyEdit = command.payload.historyEdit === undefined ? undefined : parseHistoryEdit(command.payload);
+			const restoreCheckpoint =
+				command.payload.restoreCheckpoint === undefined ? undefined : parseRestoreCheckpoint(command.payload);
 			const input = queued
 				? undefined
 				: historyEdit
@@ -741,7 +743,11 @@ export async function dispatchEngineCommand(options: {
 									expectedRevision: requiredRecordInteger(command.payload, "expectedRevision"),
 									mutationId: requiredRecordString(command.payload, "mutationId"),
 								}
-							: { ...(input ? { input } : {}), ...(historyEdit ? { historyEdit } : {}) }),
+							: {
+									...(input ? { input } : {}),
+									...(historyEdit ? { historyEdit } : {}),
+									...(restoreCheckpoint ? { restoreCheckpoint } : {}),
+								}),
 						expectedIntentRevision: optionalRecordInteger(command.payload, "expectedIntentRevision"),
 					},
 					profile,
@@ -839,6 +845,14 @@ export async function dispatchEngineCommand(options: {
 				authorityGeneration: command.authorityGeneration,
 			});
 	}
+}
+
+function parseRestoreCheckpoint(payload: Record<string, unknown>) {
+	const restore = requiredRecord(payload, "restoreCheckpoint");
+	return {
+		restoreId: requiredRecordString(restore, "restoreId"),
+		contentHash: requiredRecordString(restore, "contentHash"),
+	};
 }
 
 function parseHistoryEdit(payload: Record<string, unknown>): EngineHistoryEditSource {

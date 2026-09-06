@@ -13,6 +13,7 @@ import type {
 	EngineLaunchProfile,
 	EngineStartRequest,
 } from "@oh-my-pi/pi-coding-agent/engine/contracts";
+import { engineAgentInstanceId } from "@oh-my-pi/pi-coding-agent/engine/route";
 import { EngineRuntime, type EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { getLspResourceCounts } from "@oh-my-pi/pi-coding-agent/lsp/client";
@@ -91,6 +92,209 @@ describe("EngineRuntime", () => {
 		enableMCP: false,
 		enableLsp: false,
 	};
+
+	it("restores a staged native checkpoint into a new identity after restart and continues only on explicit send", async () => {
+		const restoredContexts: string[] = [];
+		const sideEffects: string[] = [];
+		const restoredModel = createMockModel({ handler: () => ({ content: ["restored answer"] }) });
+		const dispatch: NonNullable<EngineRuntimeOptions["dispatchPrompt"]> = async (session, input, identity) => {
+			if (input === "source turn") {
+				session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
+				session.sessionManager.appendMessage({
+					role: "assistant",
+					content: [{ type: "toolCall", id: "settled-tool", name: "fixture", arguments: { value: 7 } }],
+					api: "engine-runtime-test",
+					provider: "mock",
+					model: "test",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: Date.now(),
+				});
+				session.sessionManager.appendMessage({
+					role: "toolResult",
+					toolCallId: "settled-tool",
+					toolName: "fixture",
+					content: [{ type: "text", text: "settled-result" }],
+					isError: false,
+					timestamp: Date.now(),
+				});
+				session.sessionManager.appendMessage({
+					role: "assistant",
+					content: [{ type: "text", text: "source complete" }],
+					api: "engine-runtime-test",
+					provider: "mock",
+					model: "test",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: Date.now(),
+				});
+				sideEffects.push("source-tool-settled");
+				return true;
+			}
+			restoredContexts.push(JSON.stringify(session.sessionManager.buildSessionContext().messages));
+			await session.prompt(input, identity);
+			return true;
+		};
+		const created = await createRuntime(dispatch, {}, { model: restoredModel.model });
+		let runtime = created.runtime;
+		const { cwd, options } = created;
+		const source = await runtime.start(
+			{
+				commandId: "command-restore-source",
+				agentInstanceId: "agent-restore-source",
+				agentInstanceRef: "grimoire://tasks/project/source/agents/agent-restore-source",
+				executionId: "execution-restore-source",
+				attemptId: "attempt-restore-source",
+				authorityGeneration: 3,
+				cwd,
+				input: "source turn",
+			},
+			profile,
+		);
+		await runtime.drain();
+		if (!source.sessionFile) throw new Error("Expected source native session");
+		const sourceArtifacts = source.sessionFile.slice(0, -".jsonl".length);
+		fs.mkdirSync(sourceArtifacts, { recursive: true });
+		fs.writeFileSync(path.join(sourceArtifacts, "attachment.bin"), Buffer.from([0, 1, 2, 255]));
+		await runtime.release(source);
+		const pages: Buffer[] = [];
+		let offset = 0;
+		let contentHash: string | undefined;
+		let byteLength = 0;
+		do {
+			const page = await runtime.sessionArchive("agent-restore-source", contentHash, offset, 17);
+			contentHash = page.contentHash;
+			byteLength = page.byteLength;
+			pages.push(Buffer.from(page.contentBase64, "base64"));
+			offset = page.nextOffset ?? page.byteLength;
+		} while (offset < byteLength);
+		const checkpoint = Buffer.concat(pages);
+		expect(checkpoint.byteLength).toBe(byteLength);
+		await runtime.dispose();
+
+		runtime = await EngineRuntime.create(options);
+		const targetRef = "grimoire://tasks/project/restored/agents/agent-restore-target";
+		const target = {
+			agentInstanceId: engineAgentInstanceId(targetRef),
+			agentInstanceRef: targetRef,
+			authorityGeneration: 9,
+		};
+		const firstChunk = checkpoint.subarray(0, Math.min(23, checkpoint.byteLength));
+		const staged = await runtime.sessionRestoreStage({
+			...target,
+			contentHash: contentHash!,
+			totalBytes: checkpoint.byteLength,
+			offset: 0,
+			contentBase64: firstChunk.toString("base64"),
+		});
+		expect(staged).toMatchObject({ nextOffset: firstChunk.byteLength, complete: false });
+		await runtime.dispose();
+
+		runtime = await EngineRuntime.create(options);
+		let nextOffset = firstChunk.byteLength;
+		while (nextOffset < checkpoint.byteLength) {
+			const chunk = checkpoint.subarray(nextOffset, Math.min(checkpoint.byteLength, nextOffset + 19));
+			const next = await runtime.sessionRestoreStage({
+				...target,
+				contentHash: contentHash!,
+				totalBytes: checkpoint.byteLength,
+				offset: nextOffset,
+				contentBase64: chunk.toString("base64"),
+			});
+			nextOffset = next.nextOffset;
+		}
+		await runtime.dispose();
+		runtime = await EngineRuntime.create({
+			...options,
+			resolveSessionContinuation: async () => "restore-profile-failure",
+			resolveSessionProfile: async () => {
+				throw new Error("deterministic restored profile failure");
+			},
+		});
+		await expect(
+			runtime.start(
+				{
+					commandId: "command-restore-profile-failure",
+					...target,
+					executionId: "execution-restore-profile-failure",
+					attemptId: "attempt-restore-profile-failure",
+					cwd,
+					input: "must remain retryable",
+					restoreCheckpoint: { restoreId: staged.restoreId, contentHash: contentHash! },
+				},
+				profile,
+			),
+		).rejects.toThrow("deterministic restored profile failure");
+		expect(restoredContexts).toHaveLength(0);
+		expect(await runtime.store.getBinding(target.agentInstanceId)).toBeUndefined();
+		await runtime.dispose();
+		runtime = await EngineRuntime.create(options);
+		await expect(
+			runtime.start(
+				{
+					commandId: "command-restore-wrong-authority",
+					...target,
+					authorityGeneration: 10,
+					executionId: "execution-restore-wrong-authority",
+					attemptId: "attempt-restore-wrong-authority",
+					cwd,
+					input: "must not dispatch",
+					restoreCheckpoint: { restoreId: staged.restoreId, contentHash: contentHash! },
+				},
+				profile,
+			),
+		).rejects.toMatchObject({ code: "stale_target" });
+		expect(restoredContexts).toHaveLength(0);
+		const restored = await runtime.start(
+			{
+				commandId: "command-restore-send",
+				...target,
+				executionId: "execution-restore-send",
+				attemptId: "attempt-restore-send",
+				cwd,
+				input: "continue after restore",
+				restoreCheckpoint: { restoreId: staged.restoreId, contentHash: contentHash! },
+			},
+			profile,
+		);
+		await runtime.drain();
+		expect(restoredContexts).toHaveLength(1);
+		expect(restoredContexts[0]).toContain("source turn");
+		expect(restoredContexts[0]).toContain("settled-tool");
+		expect(restoredContexts[0]).toContain("settled-result");
+		expect(restoredContexts[0]).toContain("source complete");
+		expect(restoredContexts[0]).not.toContain("continue after restore");
+		expect(restoredModel.calls).toHaveLength(1);
+		const modelContext = JSON.stringify(restoredModel.calls[0]!.context.messages);
+		expect(modelContext).toContain("source turn");
+		expect(modelContext).toContain("settled-tool");
+		expect(modelContext).toContain("settled-result");
+		expect(modelContext).toContain("continue after restore");
+		expect(sideEffects).toEqual(["source-tool-settled"]);
+		if (!restored.sessionFile) throw new Error("Expected restored native session");
+		expect(fs.readFileSync(path.join(restored.sessionFile.slice(0, -".jsonl".length), "attachment.bin"))).toEqual(
+			Buffer.from([0, 1, 2, 255]),
+		);
+		const restoredEvents = (await runtime.store.pendingEvents()).filter(
+			event => event.attemptId === restored.attemptId,
+		);
+		expect(restoredEvents.some(event => event.kind === "tool_started" || event.kind === "tool_settled")).toBe(false);
+		await runtime.dispose();
+	}, 60_000);
 
 	it("applies native history edit and branch starts without flattening or changing the source branch", async () => {
 		const dispatches: Array<{
@@ -379,7 +583,10 @@ describe("EngineRuntime", () => {
 		expect(nativeSession).toContain("preserve exact native history");
 		expect(nativeSession).toContain("archive answer with unicode ☃");
 		expect(checkpoint.artifacts).toEqual([
-			expect.objectContaining({ name: "0.read.log", contentBase64: Buffer.from("complete spilled attachment").toString("base64") }),
+			expect.objectContaining({
+				name: "0.read.log",
+				contentBase64: Buffer.from("complete spilled attachment").toString("base64"),
+			}),
 		]);
 		await expect(
 			restarted.sessionArchive("archive-native-agent", `sha256:${"0".repeat(64)}`, 0, 17),

@@ -29,6 +29,7 @@ export type EngineControlQueryMethod =
 	| "session.context"
 	| "session.history"
 	| "session.archive"
+	| "session.restore.stage"
 	| "session.usage"
 	| "inbox.list"
 	| "inbox.enqueue"
@@ -242,6 +243,16 @@ async function dispatchRequest(request: EngineControlQueryRequest, options: Serv
 				optionalNonNegativeInteger(params.offset),
 				optionalArchiveLimit(params.limit),
 			);
+		case "session.restore.stage":
+			return await options.runtime.sessionRestoreStage({
+				agentInstanceId: requiredString(params, "agentInstanceId"),
+				agentInstanceRef: requiredString(params, "agentInstanceRef"),
+				authorityGeneration: requiredNonNegativeInteger(params, "authorityGeneration"),
+				contentHash: requiredString(params, "contentHash"),
+				totalBytes: requiredNonNegativeInteger(params, "totalBytes"),
+				offset: requiredNonNegativeInteger(params, "offset"),
+				contentBase64: requiredString(params, "contentBase64"),
+			});
 		case "session.usage":
 			return await options.runtime.sessionUsage(requiredTarget(params));
 		case "inbox.list":
@@ -344,6 +355,7 @@ async function capabilities(options: ServerOptions): Promise<Record<string, unkn
 			"session.context",
 			"session.history",
 			"session.archive",
+			"session.restore.stage",
 			"session.usage",
 			"inbox.list",
 			"inbox.enqueue",
@@ -355,6 +367,7 @@ async function capabilities(options: ServerOptions): Promise<Record<string, unkn
 		cursor: { opaque: true, order: "oldest_first", gapIsExplicit: true },
 		historyCursor: { opaque: true, order: "page_chronological", direction: "older", gapIsExplicit: true },
 		sessionArchive: { exactNativeBytes: true, hashPinnedPages: true, maxChunkBytes: 24_000 },
+		sessionRestore: { exactNativeBytes: true, hashPinnedChunks: true, maxChunkBytes: 24_000 },
 		rawDiagnostics: false,
 	};
 }
@@ -700,6 +713,7 @@ function validateRequest(value: unknown): EngineControlQueryRequest {
 			"session.context",
 			"session.history",
 			"session.archive",
+			"session.restore.stage",
 			"session.usage",
 			"inbox.list",
 			"inbox.enqueue",
@@ -830,6 +844,12 @@ function requiredInteger(record: Record<string, unknown>, key: string): number {
 	const value = record[key];
 	if (!Number.isSafeInteger(value) || Number(value) < 0) throw new Error(`${key} must be a non-negative safe integer`);
 	return Number(value);
+}
+
+function requiredNonNegativeInteger(record: Record<string, unknown>, key: string): number {
+	const value = requiredInteger(record, key);
+	if (value < 0) throw new Error(`${key} must be a non-negative integer`);
+	return value;
 }
 
 function optionalLimit(value: unknown): number {
