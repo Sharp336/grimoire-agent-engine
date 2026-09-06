@@ -19,7 +19,7 @@ import { connect, type NatsConnection, type NodeConnectionOptions, nanos } from 
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import type { ExtensionAskDialogResult } from "../extensibility/extensions/types";
 import type { IrcDeliveryReceipt, IrcMessage } from "../irc/bus";
-import type { EngineControlInitiator, EngineEvent, EngineLaunchProfile } from "./contracts";
+import type { EngineControlInitiator, EngineEvent, EngineHistoryEditSource, EngineLaunchProfile } from "./contracts";
 import { EngineTargetError } from "./contracts";
 import { safeEngineErrorDetail } from "./public-error";
 import { engineAgentInstanceId, engineRouteToken } from "./route";
@@ -707,7 +707,12 @@ export async function dispatchEngineCommand(options: {
 				throw new EngineTargetError("invalid_request", "agentInstanceId does not match agentInstanceRef");
 			}
 			const queued = typeof command.payload.queueId === "string";
-			const input = queued ? undefined : requiredRecordString(command.payload, "input");
+			const historyEdit = command.payload.historyEdit === undefined ? undefined : parseHistoryEdit(command.payload);
+			const input = queued
+				? undefined
+				: historyEdit
+					? optionalRecordString(command.payload, "input")
+					: requiredRecordString(command.payload, "input");
 			const cwd = requiredRecordString(command.payload, "cwd");
 			const profileDigest = requiredRecordString(command.payload, "profileDigest");
 			try {
@@ -736,7 +741,7 @@ export async function dispatchEngineCommand(options: {
 									expectedRevision: requiredRecordInteger(command.payload, "expectedRevision"),
 									mutationId: requiredRecordString(command.payload, "mutationId"),
 								}
-							: { input: input! }),
+							: { ...(input ? { input } : {}), ...(historyEdit ? { historyEdit } : {}) }),
 						expectedIntentRevision: optionalRecordInteger(command.payload, "expectedIntentRevision"),
 					},
 					profile,
@@ -745,6 +750,7 @@ export async function dispatchEngineCommand(options: {
 					phase: queued ? "consumed" : "applied",
 					manualHold: started.manualHold ?? false,
 					intentRevision: started.intentRevision ?? 0,
+					...(started.historyEdit ? { historyEdit: started.historyEdit } : {}),
 					...(started.queueId ? { queueId: started.queueId, queueRevision: started.queueRevision } : {}),
 				};
 			} catch (error) {
@@ -833,6 +839,29 @@ export async function dispatchEngineCommand(options: {
 				authorityGeneration: command.authorityGeneration,
 			});
 	}
+}
+
+function parseHistoryEdit(payload: Record<string, unknown>): EngineHistoryEditSource {
+	const historyEdit = requiredRecord(payload, "historyEdit");
+	const mode = requiredRecordString(historyEdit, "mode");
+	if (mode !== "edit" && mode !== "branch") throw new PoisonMessageError("historyEdit.mode must be edit or branch");
+	const source = requiredRecord(historyEdit, "source");
+	return {
+		mode,
+		source: {
+			bindingId: requiredRecordString(source, "bindingId"),
+			agentInstanceId: requiredRecordString(source, "agentInstanceId"),
+			executionId: requiredRecordString(source, "executionId"),
+			attemptId: requiredRecordString(source, "attemptId"),
+			authorityGeneration: requiredRecordInteger(source, "authorityGeneration"),
+			engineGeneration: requiredRecordInteger(source, "engineGeneration"),
+			bindingGeneration: requiredRecordInteger(source, "bindingGeneration"),
+		},
+		sourceSessionId: requiredRecordString(historyEdit, "sourceSessionId"),
+		expectedLeafEntryId: requiredRecordString(historyEdit, "expectedLeafEntryId"),
+		entryId: requiredRecordString(historyEdit, "entryId"),
+		...(mode === "edit" ? { replacementText: requiredRecordString(historyEdit, "replacementText") } : {}),
+	};
 }
 
 function launchFailureMessage(error: unknown): string {

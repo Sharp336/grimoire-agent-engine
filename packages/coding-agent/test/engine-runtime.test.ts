@@ -92,6 +92,198 @@ describe("EngineRuntime", () => {
 		enableLsp: false,
 	};
 
+	it("applies native history edit and branch starts without flattening or changing the source branch", async () => {
+		const dispatches: Array<{
+			kind: string | undefined;
+			input: string;
+			sessionId: string;
+			messages: string;
+		}> = [];
+		const { runtime, cwd } = await createRuntime(async (session, input, _identity, kind) => {
+			dispatches.push({
+				kind,
+				input,
+				sessionId: session.sessionId,
+				messages: JSON.stringify(session.sessionManager.buildSessionContext().messages),
+			});
+			if (kind === "prompt" || kind === undefined) {
+				session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
+			}
+			session.sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: `answer:${input}` }],
+				api: "engine-runtime-test",
+				provider: "mock",
+				model: "test",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			});
+			return true;
+		});
+		const source = await runtime.start(
+			{
+				commandId: "history-source-command",
+				agentInstanceId: "history-source",
+				executionId: "history-source-execution",
+				attemptId: "history-source-attempt",
+				authorityGeneration: 1,
+				cwd,
+				input: "original user",
+			},
+			profile,
+		);
+		await runtime.drain();
+		const sourceHistory = await runtime.sessionHistory(source.agentInstanceId);
+		const sourceUser = sourceHistory.entries.find(entry => entry.role === "user");
+		const sourceAssistant = sourceHistory.entries.find(entry => entry.role === "assistant");
+		if (!sourceUser || !sourceAssistant || !sourceHistory.sessionLeafEntryId || !source.sessionFile) {
+			throw new Error("Expected complete source history");
+		}
+
+		const branched = await runtime.start(
+			{
+				commandId: "history-branch-command",
+				agentInstanceId: "history-branch",
+				executionId: "history-branch-execution",
+				attemptId: "history-branch-attempt",
+				authorityGeneration: 1,
+				cwd,
+				input: "new branch prompt",
+				historyEdit: {
+					mode: "branch",
+					source,
+					sourceSessionId: sourceHistory.sessionId,
+					expectedLeafEntryId: sourceHistory.sessionLeafEntryId,
+					entryId: sourceUser.entryId,
+				},
+			},
+			profile,
+		);
+		await runtime.drain();
+		expect(branched.sessionFile).not.toBe(source.sessionFile);
+		expect(branched.historyEdit).toMatchObject({ mode: "branch", sourceEntryId: sourceUser.entryId });
+		const branchDispatch = dispatches.find(call => call.input === "new branch prompt");
+		expect(branchDispatch?.messages).toContain("original user");
+		expect(branchDispatch?.messages).not.toContain("answer:original user");
+		const unchanged = await runtime.sessionHistory(source.agentInstanceId);
+		expect(unchanged.entries.map(entry => entry.text)).toEqual(["original user", "answer:original user"]);
+		await runtime.start(
+			{
+				commandId: "history-empty-branch-command",
+				agentInstanceId: "history-empty-branch",
+				executionId: "history-empty-branch-execution",
+				attemptId: "history-empty-branch-attempt",
+				authorityGeneration: 1,
+				cwd,
+				historyEdit: {
+					mode: "branch",
+					source,
+					sourceSessionId: sourceHistory.sessionId,
+					expectedLeafEntryId: sourceHistory.sessionLeafEntryId,
+					entryId: sourceUser.entryId,
+				},
+			},
+			profile,
+		);
+		await runtime.drain();
+		const emptyBranchDispatch = dispatches.find(call => call.kind === "continue");
+		expect(emptyBranchDispatch?.messages).toContain("original user");
+		expect(emptyBranchDispatch?.messages).not.toContain("history-resume");
+
+		const edited = await runtime.start(
+			{
+				commandId: "history-edit-command",
+				clientMessageId: "edited-client-message",
+				agentInstanceId: source.agentInstanceId,
+				executionId: "history-edit-execution",
+				attemptId: "history-edit-attempt",
+				authorityGeneration: 1,
+				cwd,
+				historyEdit: {
+					mode: "edit",
+					source,
+					sourceSessionId: sourceHistory.sessionId,
+					expectedLeafEntryId: sourceHistory.sessionLeafEntryId,
+					entryId: sourceAssistant.entryId,
+					replacementText: "edited assistant",
+				},
+			},
+			profile,
+		);
+		await runtime.drain();
+		expect(edited.sessionFile).not.toBe(source.sessionFile);
+		expect(edited.historyEdit).toMatchObject({
+			mode: "edit",
+			sourceEntryId: sourceAssistant.entryId,
+			sessionId: expect.any(String),
+			replacementEntryId: expect.any(String),
+		});
+		const editDispatch = dispatches.find(call => call.kind === "continue_after_assistant");
+		expect(editDispatch?.messages).toContain('"role":"assistant"');
+		expect(editDispatch?.messages).toContain("edited assistant");
+		expect(editDispatch?.messages).not.toContain('"role":"user","content":"edited assistant"');
+		await runtime.dispose();
+	}, 60_000);
+
+	it("rejects a history branch while the exact source Attempt is unfinished", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const { runtime, cwd } = await createRuntime(async (session, input) => {
+			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
+			entered.resolve();
+			await release.promise;
+			return true;
+		});
+		const source = await runtime.start(
+			{
+				commandId: "active-history-source-command",
+				agentInstanceId: "active-history-source",
+				executionId: "active-history-source-execution",
+				attemptId: "active-history-source-attempt",
+				authorityGeneration: 1,
+				cwd,
+				input: "active source",
+			},
+			profile,
+		);
+		await entered.promise;
+		const history = await runtime.sessionHistory(source.agentInstanceId);
+		if (!history.sessionLeafEntryId || !history.entries[0]) throw new Error("Expected active source history");
+
+		await expect(
+			runtime.start(
+				{
+					commandId: "active-history-branch-command",
+					agentInstanceId: "active-history-branch",
+					executionId: "active-history-branch-execution",
+					attemptId: "active-history-branch-attempt",
+					authorityGeneration: 1,
+					cwd,
+					historyEdit: {
+						mode: "branch",
+						source,
+						sourceSessionId: history.sessionId,
+						expectedLeafEntryId: history.sessionLeafEntryId,
+						entryId: history.entries[0].entryId,
+					},
+				},
+				profile,
+			),
+		).rejects.toMatchObject({ code: "agent_busy" });
+		expect(runtime.getBinding("active-history-branch")).toBeUndefined();
+		release.resolve();
+		await runtime.drain();
+		await runtime.dispose();
+	}, 60_000);
+
 	it("fails closed when Engine mode has no explicit Settings snapshot", async () => {
 		const { runtime, cwd } = await createRuntime(async () => true, {}, { settings: undefined });
 		await expect(

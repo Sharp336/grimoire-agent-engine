@@ -19,6 +19,7 @@ import {
 } from "../extensibility/extensions";
 import { IrcBus, type IrcDeliveryReceipt } from "../irc/bus";
 import { withLspSessionScope } from "../lsp/client";
+import historyEditContinuePrompt from "../prompts/system/history-edit-continue.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession } from "../sdk";
@@ -26,7 +27,11 @@ import type { AgentSession } from "../session/agent-session";
 import { createProviderRetryBudgetHook } from "../session/provider-retry-budget";
 import type { SessionEntry, SessionMessageIdentity } from "../session/session-entries";
 import { loadSessionFile, type SessionLoadResult } from "../session/session-loader";
-import { type SessionDurabilityCheckpoint, SessionManager } from "../session/session-manager";
+import {
+	type NativeHistoryForkResult,
+	type SessionDurabilityCheckpoint,
+	SessionManager,
+} from "../session/session-manager";
 import { migrateToCurrentVersion } from "../session/session-migrations";
 import type { EngineChildLaunchResult, EngineChildProfile, EngineInboxToolRequest } from "../tools";
 import {
@@ -213,6 +218,15 @@ interface PendingInput {
 	resolve: (result: ExtensionAskDialogResult | undefined) => void;
 }
 
+type HistoryDispatchKind = "prompt" | "continue" | "continue_after_assistant";
+
+interface PreparedHistoryStart {
+	sessionManager: SessionManager;
+	dispatchKind: HistoryDispatchKind;
+	dispatchInput: string;
+	result: NonNullable<EngineStartResult["historyEdit"]>;
+}
+
 export interface EngineRuntimeOptions {
 	databasePath: string;
 	childHistoryTtlMinutes?: number;
@@ -238,7 +252,12 @@ export interface EngineRuntimeOptions {
 		| "toolExecutionHook"
 	>;
 	/** Test/integration seam; production uses AgentSession.prompt directly. */
-	dispatchPrompt?: (session: AgentSession, input: string, identity?: SessionMessageIdentity) => Promise<boolean>;
+	dispatchPrompt?: (
+		session: AgentSession,
+		input: string,
+		identity?: SessionMessageIdentity,
+		kind?: HistoryDispatchKind,
+	) => Promise<boolean>;
 	resolveSessionProfile?: (
 		profile: EngineLaunchProfile,
 		cwd: string,
@@ -274,6 +293,7 @@ export class EngineRuntime {
 		session: AgentSession,
 		input: string,
 		identity?: SessionMessageIdentity,
+		kind?: HistoryDispatchKind,
 	) => Promise<boolean>;
 	readonly #resolveSessionProfile: EngineRuntimeOptions["resolveSessionProfile"];
 	readonly #resolveSessionContinuation: EngineRuntimeOptions["resolveSessionContinuation"];
@@ -296,7 +316,15 @@ export class EngineRuntime {
 		this.store = store;
 		this.engineGeneration = engineGeneration;
 		this.#sessionDefaults = options.sessionDefaults;
-		this.#dispatchPrompt = options.dispatchPrompt ?? ((session, input, identity) => session.prompt(input, identity));
+		this.#dispatchPrompt =
+			options.dispatchPrompt ??
+			((session, input, identity, kind = "prompt") => {
+				if (kind === "continue") return session.continueNativeHistory().then(() => true);
+				if (kind === "continue_after_assistant") {
+					return session.prompt(input, { synthetic: true, expandPromptTemplates: false, attribution: "agent" });
+				}
+				return session.prompt(input, identity);
+			});
 		this.#resolveSessionProfile = options.resolveSessionProfile;
 		this.#resolveSessionContinuation = options.resolveSessionContinuation;
 		this.#launchChild = options.launchChild;
@@ -367,7 +395,10 @@ export class EngineRuntime {
 		if (!profile.profileDigest.trim()) {
 			throw new EngineTargetError("invalid_request", "profileDigest must be a non-empty string");
 		}
-		return this.#inLane(request.agentInstanceId, () => this.#startInLane(request, profile)).catch(async error => {
+		const laneIds = request.historyEdit
+			? [request.agentInstanceId, request.historyEdit.source.agentInstanceId]
+			: [request.agentInstanceId];
+		return this.#inLanes(laneIds, () => this.#startInLane(request, profile)).catch(async error => {
 			if (
 				error instanceof EngineTargetError &&
 				(error.code === "agent_busy" || error.code === "stale_target") &&
@@ -1052,6 +1083,7 @@ export class EngineRuntime {
 	async sessionHistory(agentInstanceId: string): Promise<{
 		sessionId: string;
 		leafEntryId: string | null;
+		sessionLeafEntryId?: string | null;
 		entries: Array<{
 			entryId: string;
 			parentEntryId: string | null;
@@ -1127,6 +1159,7 @@ export class EngineRuntime {
 			return {
 				sessionId,
 				leafEntryId: projected.at(-1)?.entryId ?? null,
+				sessionLeafEntryId: branch.at(-1)?.id ?? null,
 				entries: projected,
 			};
 		});
@@ -1275,6 +1308,118 @@ export class EngineRuntime {
 		throwCollectedFailures(errors, "Engine disposal failed");
 	}
 
+	async #prepareHistoryStart(request: EngineStartRequest): Promise<PreparedHistoryStart | undefined> {
+		const edit = request.historyEdit;
+		if (!edit) return undefined;
+		const sameAgent = request.agentInstanceId === edit.source.agentInstanceId;
+		if ((edit.mode === "edit") !== sameAgent) {
+			throw new EngineTargetError(
+				"invalid_request",
+				edit.mode === "edit"
+					? "History edit must keep the source AgentInstance"
+					: "History branch must use a distinct AgentInstance",
+			);
+		}
+		if (edit.mode === "edit") {
+			if (edit.replacementText === undefined || request.input !== undefined) {
+				throw new EngineTargetError("invalid_request", "History edit requires replacementText and no input");
+			}
+		} else if (edit.replacementText !== undefined) {
+			throw new EngineTargetError("invalid_request", "History branch cannot replace the selected message");
+		}
+
+		const live = this.#bindings.get(edit.source.agentInstanceId);
+		const source = live ? this.#snapshot(live) : await this.store.getBinding(edit.source.agentInstanceId);
+		if (!source)
+			throw new EngineTargetError("agent_not_found", `Unknown AgentInstance ${edit.source.agentInstanceId}`);
+		for (const field of [
+			"bindingId",
+			"executionId",
+			"attemptId",
+			"authorityGeneration",
+			"engineGeneration",
+			"bindingGeneration",
+		] as const) {
+			if (source[field] !== edit.source[field]) {
+				throw new EngineTargetError("stale_target", `History source ${field} is stale`);
+			}
+		}
+		const sourceAttempt = await this.store.getAttempt(source.attemptId);
+		if (!sourceAttempt || !TERMINAL_ATTEMPT_STATES.has(sourceAttempt.state)) {
+			throw new EngineTargetError("agent_busy", `History source Attempt ${source.attemptId} is not terminal`);
+		}
+		if (live && (live.state === "running" || live.session.isStreaming)) {
+			throw new EngineTargetError("agent_busy", `History source ${source.agentInstanceId} is busy`);
+		}
+		if (!source.sessionFile) throw new EngineTargetError("history_expired", "History source session is unavailable");
+		if (live) await live.session.sessionManager.flushAndCheckpoint();
+
+		const loaded = await loadSessionFile(source.sessionFile, this.store.sessionStorage);
+		if (loaded.entries.length === 0 || loaded.entries[0]?.type !== "session") {
+			throw new EngineTargetError("history_expired", "History source session is unavailable");
+		}
+		migrateToCurrentVersion(loaded.entries);
+		const sourceSessionId = loaded.entries[0].id;
+		const branch = activeSessionBranch(
+			loaded.entries.filter((entry): entry is SessionEntry => entry.type !== "session"),
+		);
+		if (sourceSessionId !== edit.sourceSessionId || branch.at(-1)?.id !== edit.expectedLeafEntryId) {
+			throw new EngineTargetError("stale_target", "History source session or leaf changed");
+		}
+		const selectedEntry = branch.find(entry => entry.id === edit.entryId);
+		if (
+			selectedEntry?.type !== "message" ||
+			(selectedEntry.message.role !== "user" && selectedEntry.message.role !== "assistant")
+		) {
+			throw new EngineTargetError("stale_target", "History entry is not an active user or assistant message");
+		}
+
+		const sessionDir = path.join(this.#sessionRoot, engineRouteToken(request.agentInstanceId));
+		const forked: NativeHistoryForkResult = await SessionManager.forkNativeHistory(
+			source.sessionFile,
+			request.cwd,
+			edit.entryId,
+			sessionDir,
+			this.store.sessionStorage,
+			{
+				leafEntryId: edit.expectedLeafEntryId,
+				...(edit.mode === "edit"
+					? {
+							edit: {
+								entryId: edit.entryId,
+								text: edit.replacementText!,
+								identity: {
+									sourceCommandId: request.commandId,
+									...(request.clientMessageId ? { clientMessageId: request.clientMessageId } : {}),
+								},
+							},
+						}
+					: {}),
+			},
+		);
+
+		const branchInput = edit.mode === "branch" && request.input?.trim() ? request.input : undefined;
+		const dispatchKind: HistoryDispatchKind = branchInput
+			? "prompt"
+			: forked.selectedRole === "user"
+				? "continue"
+				: "continue_after_assistant";
+		const dispatchInput =
+			branchInput ?? (dispatchKind === "continue_after_assistant" ? historyEditContinuePrompt : "history-resume");
+		return {
+			sessionManager: forked.sessionManager,
+			dispatchKind,
+			dispatchInput,
+			result: {
+				mode: edit.mode,
+				sourceSessionId,
+				sourceEntryId: edit.entryId,
+				...(forked.replacementEntryId ? { replacementEntryId: forked.replacementEntryId } : {}),
+				sessionId: forked.sessionManager.getSessionId(),
+			},
+		};
+	}
+
 	async #startInLane(request: EngineStartRequest, profile: EngineLaunchProfile): Promise<EngineStartResult> {
 		this.#throwIfDisposed();
 		let binding = this.#bindings.get(request.agentInstanceId);
@@ -1331,16 +1476,34 @@ export class EngineRuntime {
 		if (binding && queuedItem && queuedItem.sessionId !== binding.session.sessionId) {
 			throw new EngineTargetError("stale_target", `Inbox item ${queuedItem.queueId} belongs to another session`);
 		}
+		if (binding && (binding.state === "running" || binding.session.isStreaming)) {
+			throw new EngineTargetError("agent_busy", `AgentInstance ${request.agentInstanceId} is busy`);
+		}
 		const continuationDigest = await this.#continuationDigest(request, profile);
 		const conversationIdentityDigest = await this.#conversationIdentityDigest(request);
 		if (binding) this.#assertManualHoldClear(binding, request.expectedIntentRevision);
+		const preparedHistory = await this.#prepareHistoryStart(request);
 
 		if (binding) {
 			if (binding.state === "running" || binding.session.isStreaming) {
 				throw new EngineTargetError("agent_busy", `AgentInstance ${request.agentInstanceId} is busy`);
 			}
-			if (profile.continuationPolicy === "fresh" || binding.profileDigest !== continuationDigest) {
-				await this.#terminateBinding(binding, "requested");
+			if (
+				preparedHistory ||
+				profile.continuationPolicy === "fresh" ||
+				binding.profileDigest !== continuationDigest
+			) {
+				try {
+					await this.#terminateBinding(binding, "requested");
+				} catch (error) {
+					if (!preparedHistory) throw error;
+					try {
+						await this.#discardPreparedHistory(preparedHistory);
+					} catch (cleanupError) {
+						throw new AggregateError([error, cleanupError], "History binding release and cleanup failed");
+					}
+					throw error;
+				}
 				binding = undefined;
 			} else {
 				binding.pauseGate.resume();
@@ -1366,7 +1529,14 @@ export class EngineRuntime {
 				binding.session.setAttemptId(request.attemptId);
 			}
 		}
-		if (!binding) binding = await this.#openBinding(request, profile, continuationDigest, conversationIdentityDigest);
+		if (!binding)
+			binding = await this.#openBinding(
+				request,
+				profile,
+				continuationDigest,
+				conversationIdentityDigest,
+				preparedHistory?.sessionManager,
+			);
 		if (
 			queuedItem &&
 			queuedItem.sessionId !== binding.session.sessionId &&
@@ -1380,11 +1550,14 @@ export class EngineRuntime {
 			previousIntent = this.#setManualHold(binding, request.commandId, request.expectedIntentRevision, false, true);
 			binding.state = "running";
 			binding.attemptState = "running";
-			const result = this.#controlResult(
-				binding,
-				queuedItem ? "consumed" : "applied",
-				queuedItem ? { ...queuedItem, revision: queuedItem.revision + 1 } : undefined,
-			);
+			const result = {
+				...this.#controlResult(
+					binding,
+					queuedItem ? "consumed" : "applied",
+					queuedItem ? { ...queuedItem, revision: queuedItem.revision + 1 } : undefined,
+				),
+				...(preparedHistory ? { historyEdit: preparedHistory.result } : {}),
+			};
 			await this.#commitAttemptTransition(binding, "running", [{ kind: "accepted" }, { kind: "running" }], {
 				settleCommandId: request.commandId,
 				settleCommandReceipt: { outcome: "applied", detail: result },
@@ -1420,21 +1593,38 @@ export class EngineRuntime {
 			throw error;
 		}
 		this.#trackRun(
-			this.#runPrompt(binding, queuedItem?.deliveryPayload ?? request.input!, {
-				sourceCommandId: request.commandId,
-				...(request.clientMessageId
-					? { clientMessageId: request.clientMessageId }
-					: queuedItem?.sourceType === "user"
-						? { clientMessageId: queuedItem.sourceEventId }
-						: {}),
-			}),
+			this.#runPrompt(
+				binding,
+				preparedHistory?.dispatchInput ?? queuedItem?.deliveryPayload ?? request.input!,
+				{
+					sourceCommandId: request.commandId,
+					...(request.clientMessageId
+						? { clientMessageId: request.clientMessageId }
+						: queuedItem?.sourceType === "user"
+							? { clientMessageId: queuedItem.sourceEventId }
+							: {}),
+				},
+				preparedHistory?.dispatchKind,
+			),
 		);
 		this.#signalInboxWake();
 		return {
 			...this.#snapshot(binding),
 			duplicate: false,
+			...(preparedHistory ? { historyEdit: preparedHistory.result } : {}),
 			...(queuedItem ? { queueId: queuedItem.queueId, queueRevision: queuedItem.revision + 1 } : {}),
 		};
+	}
+
+	async #discardPreparedHistory(prepared: PreparedHistoryStart): Promise<void> {
+		const sessionFile = prepared.sessionManager.getSessionFile();
+		prepared.sessionManager.seal();
+		const errors: unknown[] = [];
+		await collectFailure(errors, () => prepared.sessionManager.close());
+		if (sessionFile) {
+			await collectFailure(errors, () => this.store.sessionStorage.deleteSessionWithArtifacts(sessionFile));
+		}
+		throwCollectedFailures(errors, "Prepared history cleanup failed");
 	}
 
 	#inboxTarget(binding: LiveBinding): EngineInboxTarget {
@@ -1501,6 +1691,7 @@ export class EngineRuntime {
 		profile: EngineLaunchProfile,
 		continuationDigest: string,
 		conversationIdentityDigest: string,
+		preparedSessionManager?: SessionManager,
 	): Promise<LiveBinding> {
 		const resolved = await this.#resolveSessionProfile?.(profile, request.cwd);
 		let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
@@ -1514,7 +1705,15 @@ export class EngineRuntime {
 			const route = engineRouteToken(request.agentInstanceId);
 			const sessionDir = path.join(this.#sessionRoot, route);
 			let previousInboxSessionId: string | undefined;
-			if (prior?.sessionFile && prior.profileDigest === profileDigest && profile.continuationPolicy !== "fresh") {
+			if (preparedSessionManager) {
+				sessionManager = preparedSessionManager;
+				uncommittedForkSessionFile = preparedSessionManager.getSessionFile();
+				if (!uncommittedForkSessionFile) throw new Error("History session was not durably materialized");
+			} else if (
+				prior?.sessionFile &&
+				prior.profileDigest === profileDigest &&
+				profile.continuationPolicy !== "fresh"
+			) {
 				sessionManager = await SessionManager.open(prior.sessionFile, sessionDir, this.store.sessionStorage, {
 					initialCwd: request.cwd,
 				});
@@ -2238,7 +2437,12 @@ export class EngineRuntime {
 		binding.pauseProgress = Promise.withResolvers<void>();
 	}
 
-	async #dispatchModel(binding: LiveBinding, input: string, identity?: SessionMessageIdentity): Promise<boolean> {
+	async #dispatchModel(
+		binding: LiveBinding,
+		input: string,
+		identity?: SessionMessageIdentity,
+		kind: HistoryDispatchKind = "prompt",
+	): Promise<boolean> {
 		const completed = Promise.withResolvers<void>();
 		binding.activeModelCalls.add(completed.promise);
 		const modelCallId = `model-${++binding.modelCallSequence}`;
@@ -2255,7 +2459,7 @@ export class EngineRuntime {
 			let dispatched: boolean;
 			try {
 				dispatched = await this.#withSessionScope(binding, () =>
-					this.#dispatchPrompt(binding.session, input, identity),
+					this.#dispatchPrompt(binding.session, input, identity, kind),
 				);
 				const current = binding.session.getLastAssistantMessage();
 				if (current !== previous && current?.stopReason === "error") {
@@ -2299,11 +2503,16 @@ export class EngineRuntime {
 		);
 	}
 
-	async #runPrompt(binding: LiveBinding, input: string, identity?: SessionMessageIdentity): Promise<void> {
+	async #runPrompt(
+		binding: LiveBinding,
+		input: string,
+		identity?: SessionMessageIdentity,
+		kind: HistoryDispatchKind = "prompt",
+	): Promise<void> {
 		const attemptId = binding.attemptId;
 		const attemptMessageStart = binding.session.messages.length;
 		try {
-			await this.#dispatchModel(binding, input, identity);
+			await this.#dispatchModel(binding, input, identity, kind);
 			for (let reminder = 0; reminder < 2 && binding.requireYieldTool; reminder++) {
 				await binding.pauseGate.waitUntilResumed();
 				if (
@@ -3047,6 +3256,15 @@ export class EngineRuntime {
 			if (this.#lanes.get(agentInstanceId) === tail) this.#lanes.delete(agentInstanceId);
 		});
 		return current;
+	}
+
+	#inLanes<T>(agentInstanceIds: readonly string[], work: () => Promise<T>): Promise<T> {
+		const ids = [...new Set(agentInstanceIds)].sort();
+		const acquire = (index: number): Promise<T> => {
+			const id = ids[index];
+			return id === undefined ? work() : this.#inLane(id, () => acquire(index + 1));
+		};
+		return acquire(0);
 	}
 
 	#trackRun(run: Promise<void>): void {

@@ -71,12 +71,29 @@ export interface EngineStartRequest {
 	authorityGeneration: number;
 	cwd: string;
 	input?: string;
+	/**
+	 * Native history operation applied only when this Start is admitted. Branch
+	 * keeps the selected entry unchanged; edit replaces it while preserving its
+	 * canonical user/assistant role. The source is fenced independently because
+	 * a branch starts a distinct destination AgentInstance.
+	 */
+	historyEdit?: EngineHistoryEditSource;
 	/** Durable inbox identity for an automatic queued start. Mutually exclusive with input. */
 	queueId?: string;
 	expectedRevision?: number;
 	mutationId?: string;
 	/** Required to clear a durable manual hold for an explicit user send. */
 	expectedIntentRevision?: number;
+}
+
+export interface EngineHistoryEditSource {
+	mode: "edit" | "branch";
+	source: EngineTarget;
+	sourceSessionId: string;
+	expectedLeafEntryId: string;
+	entryId: string;
+	/** Required only for edit; branch never rewrites the selected message. */
+	replacementText?: string;
 }
 
 export interface EngineTarget {
@@ -205,6 +222,15 @@ export interface EngineStartResult extends EngineBindingSnapshot {
 	duplicate: boolean;
 	queueId?: string;
 	queueRevision?: number;
+	historyEdit?: EngineHistoryEditResult;
+}
+
+export interface EngineHistoryEditResult {
+	mode: "edit" | "branch";
+	sourceSessionId: string;
+	sourceEntryId: string;
+	replacementEntryId?: string;
+	sessionId: string;
 }
 
 export interface EngineControlResult extends Record<string, unknown> {
@@ -313,6 +339,7 @@ export function validateStartRequest(request: EngineStartRequest): void {
 		}
 	}
 	const queued = request.queueId !== undefined;
+	const historyEdit = request.historyEdit;
 	if (
 		queued
 			? !request.queueId?.trim() ||
@@ -321,10 +348,43 @@ export function validateStartRequest(request: EngineStartRequest): void {
 				request.expectedRevision! < 0 ||
 				!Number.isSafeInteger(request.expectedIntentRevision) ||
 				request.expectedIntentRevision! < 0 ||
-				request.input !== undefined
-			: !request.input?.trim() || request.mutationId !== undefined || request.expectedRevision !== undefined
+				request.input !== undefined ||
+				historyEdit !== undefined
+			: historyEdit
+				? request.mutationId !== undefined ||
+					request.expectedRevision !== undefined ||
+					(request.input !== undefined && !request.input.trim())
+				: !request.input?.trim() || request.mutationId !== undefined || request.expectedRevision !== undefined
 	) {
 		throw new EngineTargetError("invalid_request", "start requires text or a complete queued-item identity");
+	}
+	if (historyEdit) {
+		if (historyEdit.mode !== "edit" && historyEdit.mode !== "branch") {
+			throw new EngineTargetError("invalid_request", "historyEdit.mode must be edit or branch");
+		}
+		for (const [name, value] of Object.entries({
+			sourceSessionId: historyEdit.sourceSessionId,
+			expectedLeafEntryId: historyEdit.expectedLeafEntryId,
+			entryId: historyEdit.entryId,
+			"source.bindingId": historyEdit.source.bindingId,
+			"source.agentInstanceId": historyEdit.source.agentInstanceId,
+			"source.executionId": historyEdit.source.executionId,
+			"source.attemptId": historyEdit.source.attemptId,
+		})) {
+			if (!value.trim()) throw new EngineTargetError("invalid_request", `historyEdit.${name} must be non-empty`);
+		}
+		for (const [name, value] of Object.entries({
+			"source.authorityGeneration": historyEdit.source.authorityGeneration,
+			"source.engineGeneration": historyEdit.source.engineGeneration,
+			"source.bindingGeneration": historyEdit.source.bindingGeneration,
+		})) {
+			if (!Number.isSafeInteger(value) || value < 0) {
+				throw new EngineTargetError("invalid_request", `historyEdit.${name} must be a non-negative safe integer`);
+			}
+		}
+		if (historyEdit.mode === "edit" && !historyEdit.replacementText?.trim()) {
+			throw new EngineTargetError("invalid_request", "history edit requires non-empty replacementText");
+		}
 	}
 	for (const [name, value] of Object.entries({
 		agentInstanceRef: request.agentInstanceRef,
