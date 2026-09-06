@@ -120,6 +120,32 @@ describe("provider registry auth surface", () => {
 		expect(store.getApiKey("fixture-x")).toBe("fixture-key");
 	});
 
+	test("OAuth login returns the stable local row identity across token rotation", async () => {
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		const storage = new AuthStorage(store);
+		await storage.reload();
+		let generation = 1;
+		registerOAuthProvider({
+			id: "fixture-oauth",
+			name: "Fixture OAuth",
+			sourceId: FIXTURE_SOURCE,
+			login: async () => ({
+				access: `access-${generation}`,
+				refresh: `refresh-${generation++}`,
+				expires: Date.now() + 60_000,
+				accountId: "account-1",
+				email: "owner@example.test",
+			}),
+		});
+
+		const first = await storage.login("fixture-oauth", { onAuth: () => {}, onPrompt: async () => "" });
+		const rotated = await storage.login("fixture-oauth", { onAuth: () => {}, onPrompt: async () => "" });
+
+		expect(first?.credentialId).toBeInteger();
+		expect(rotated?.credentialId).toBe(first?.credentialId);
+		expect(store.listAuthCredentials("fixture-oauth")).toHaveLength(1);
+	});
+
 	test("llama.cpp login stores a local no-auth token when no key is entered", async () => {
 		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
 		const storage = new AuthStorage(store);

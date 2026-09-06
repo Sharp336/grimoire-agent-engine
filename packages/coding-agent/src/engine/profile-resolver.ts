@@ -72,7 +72,7 @@ interface ProviderAccount {
 	headers?: Record<string, string>;
 	trusted: boolean;
 	credential?: AuthCredential;
-	credentialBinding?: { source: "local_omp"; accountId: string };
+	credentialBinding?: { source: "local_omp"; accountId: string; credentialId?: number };
 }
 
 export interface ResolvedEngineSessionProfile {
@@ -299,7 +299,12 @@ export class EngineProfileResolver {
 			const store = await SqliteAuthCredentialStore.open(this.localCredentialDbPath);
 			const credential = store
 				.listAuthCredentials(account.providerId)
-				.find(item => item.credential.type === "oauth" && item.credential.accountId === localBinding.accountId);
+				.find(
+					item =>
+						item.credential.type === "oauth" &&
+						item.credential.accountId === localBinding.accountId &&
+						(localBinding.credentialId === undefined || item.id === localBinding.credentialId),
+				);
 			if (!credential) {
 				store.close();
 				throw new Error("The local OMP account bound to ProviderAccount is unavailable");
@@ -673,14 +678,19 @@ function validCredential(value: unknown): value is AuthCredential {
 	);
 }
 
-function validLocalCredentialBinding(value: unknown): value is { source: "local_omp"; accountId: string } {
+function validLocalCredentialBinding(
+	value: unknown,
+): value is { source: "local_omp"; accountId: string; credentialId?: number } {
 	return (
 		value !== null &&
 		typeof value === "object" &&
 		!Array.isArray(value) &&
 		(value as Record<string, unknown>).source === "local_omp" &&
 		typeof (value as Record<string, unknown>).accountId === "string" &&
-		((value as Record<string, unknown>).accountId as string).trim().length > 0
+		((value as Record<string, unknown>).accountId as string).trim().length > 0 &&
+		((value as Record<string, unknown>).credentialId === undefined ||
+			(Number.isSafeInteger((value as Record<string, unknown>).credentialId) &&
+				((value as Record<string, unknown>).credentialId as number) > 0))
 	);
 }
 
