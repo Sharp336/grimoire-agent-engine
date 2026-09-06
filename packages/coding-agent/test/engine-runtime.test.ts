@@ -1095,6 +1095,207 @@ describe("EngineRuntime", () => {
 		await secondRestart.dispose();
 	}, 60_000);
 
+	it("replaces an exact retained binding on explicit send and fences binding drift", async () => {
+		const observedContexts: string[] = [];
+		const settledEffects: string[] = [];
+		const model = createMockModel({ handler: () => ({ content: ["continued"] }) });
+		const dispatch: NonNullable<EngineRuntimeOptions["dispatchPrompt"]> = async (session, input, identity) => {
+			if (input === "original turn") {
+				session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
+				session.sessionManager.appendMessage({
+					role: "assistant",
+					content: [{ type: "toolCall", id: "same-restore-tool", name: "fixture", arguments: { value: 11 } }],
+					api: "engine-runtime-test",
+					provider: "mock",
+					model: "test",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "toolUse",
+					timestamp: Date.now(),
+				});
+				session.sessionManager.appendMessage({
+					role: "toolResult",
+					toolCallId: "same-restore-tool",
+					toolName: "fixture",
+					content: [{ type: "text", text: "same-restore-result" }],
+					isError: false,
+					timestamp: Date.now(),
+				});
+				session.sessionManager.appendMessage({
+					role: "assistant",
+					content: [{ type: "text", text: "original complete" }],
+					api: "engine-runtime-test",
+					provider: "mock",
+					model: "test",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: Date.now(),
+				});
+				settledEffects.push("same-restore-tool");
+				return true;
+			}
+			observedContexts.push(JSON.stringify(session.sessionManager.buildSessionContext().messages));
+			await session.prompt(input, identity);
+			return true;
+		};
+		const created = await createRuntime(dispatch, {}, { model: model.model });
+		let runtime = created.runtime;
+		const { cwd, options } = created;
+		const agentInstanceRef = "grimoire://tasks/project/same-restore/agents/retained-agent";
+		const agentInstanceId = engineAgentInstanceId(agentInstanceRef);
+		await runtime.start(
+			{
+				commandId: "command-same-restore-original",
+				agentInstanceId,
+				agentInstanceRef,
+				executionId: "execution-same-restore-original",
+				attemptId: "attempt-same-restore-original",
+				authorityGeneration: 1,
+				cwd,
+				input: "original turn",
+			},
+			profile,
+		);
+		await runtime.drain();
+
+		const archive = async (): Promise<{ bytes: Buffer; contentHash: string }> => {
+			const chunks: Buffer[] = [];
+			let offset = 0;
+			let contentHash: string | undefined;
+			let byteLength = 0;
+			do {
+				const page = await runtime.sessionArchive(agentInstanceId, contentHash, offset, 24_000);
+				contentHash = page.contentHash;
+				byteLength = page.byteLength;
+				chunks.push(Buffer.from(page.contentBase64, "base64"));
+				offset = page.nextOffset ?? page.byteLength;
+			} while (offset < byteLength);
+			return { bytes: Buffer.concat(chunks), contentHash: contentHash! };
+		};
+		const stage = async (checkpoint: { bytes: Buffer; contentHash: string }, authorityGeneration: number) => {
+			let offset = 0;
+			let result: Awaited<ReturnType<EngineRuntime["sessionRestoreStage"]>> | undefined;
+			while (offset < checkpoint.bytes.byteLength) {
+				const chunk = checkpoint.bytes.subarray(offset, Math.min(checkpoint.bytes.byteLength, offset + 24_000));
+				result = await runtime.sessionRestoreStage({
+					agentInstanceId,
+					agentInstanceRef,
+					authorityGeneration,
+					contentHash: checkpoint.contentHash,
+					totalBytes: checkpoint.bytes.byteLength,
+					offset,
+					contentBase64: chunk.toString("base64"),
+					replaceRetainedBinding: true,
+				});
+				offset = result.nextOffset;
+			}
+			if (!result?.complete) throw new Error("Expected complete retained restore stage");
+			return result;
+		};
+
+		const originalCheckpoint = await archive();
+		const staged = await stage(originalCheckpoint, 2);
+		const restored = await runtime.start(
+			{
+				commandId: "command-same-restore-send",
+				agentInstanceId,
+				agentInstanceRef,
+				executionId: "execution-same-restore-send",
+				attemptId: "attempt-same-restore-send",
+				authorityGeneration: 2,
+				cwd,
+				input: "explicit send after same restore",
+				restoreCheckpoint: { restoreId: staged.restoreId, contentHash: originalCheckpoint.contentHash },
+			},
+			profile,
+		);
+		await runtime.drain();
+		expect(restored.agentInstanceId).toBe(agentInstanceId);
+		expect(observedContexts.at(-1)).toContain("same-restore-tool");
+		expect(observedContexts.at(-1)).toContain("same-restore-result");
+		expect(settledEffects).toEqual(["same-restore-tool"]);
+		expect(
+			(await runtime.store.pendingEvents()).some(
+				event =>
+					event.attemptId === restored.attemptId &&
+					(event.kind === "tool_started" || event.kind === "tool_settled"),
+			),
+		).toBe(false);
+
+		const staleStage = await stage(originalCheckpoint, 4);
+		await runtime.start(
+			{
+				commandId: "command-same-restore-intervening",
+				agentInstanceId,
+				agentInstanceRef,
+				executionId: "execution-same-restore-intervening",
+				attemptId: "attempt-same-restore-intervening",
+				authorityGeneration: 3,
+				cwd,
+				input: "intervening turn",
+			},
+			{ ...profile, continuationPolicy: "fresh" },
+		);
+		await runtime.drain();
+		await expect(
+			runtime.start(
+				{
+					commandId: "command-same-restore-stale",
+					agentInstanceId,
+					agentInstanceRef,
+					executionId: "execution-same-restore-stale",
+					attemptId: "attempt-same-restore-stale",
+					authorityGeneration: 4,
+					cwd,
+					input: "must not run",
+					restoreCheckpoint: { restoreId: staleStage.restoreId, contentHash: originalCheckpoint.contentHash },
+				},
+				profile,
+			),
+		).rejects.toMatchObject({ code: "stale_target" });
+
+		const currentCheckpoint = await archive();
+		const retained = await runtime.store.getBinding(agentInstanceId);
+		if (!retained?.sessionFile) throw new Error("Expected retained native session");
+		await runtime.dispose();
+		if (fs.existsSync(retained.sessionFile)) fs.unlinkSync(retained.sessionFile);
+		expect(fs.existsSync(retained.sessionFile)).toBe(false);
+		runtime = await EngineRuntime.create(options);
+		const restartedStage = await stage(currentCheckpoint, 4);
+		await runtime.start(
+			{
+				commandId: "command-same-restore-missing-file",
+				agentInstanceId,
+				agentInstanceRef,
+				executionId: "execution-same-restore-missing-file",
+				attemptId: "attempt-same-restore-missing-file",
+				authorityGeneration: 4,
+				cwd,
+				input: "explicit send after missing retained file",
+				restoreCheckpoint: { restoreId: restartedStage.restoreId, contentHash: currentCheckpoint.contentHash },
+			},
+			profile,
+		);
+		await runtime.drain();
+		expect(observedContexts.at(-1)).toContain("intervening turn");
+		expect(model.calls.length).toBeGreaterThanOrEqual(3);
+		expect(settledEffects).toEqual(["same-restore-tool"]);
+		await runtime.dispose();
+	}, 60_000);
+
 	it("rejects native checkpoint artifact names that collide or escape portable filesystems", async () => {
 		const { runtime } = await createRuntime(async () => true);
 		const sessionBytes = Buffer.from(

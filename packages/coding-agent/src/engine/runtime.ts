@@ -99,6 +99,14 @@ interface NativeRestoreStageMetadata {
 	authorityGeneration: number;
 	contentHash: string;
 	totalBytes: number;
+	replaceBinding?: {
+		bindingId: string;
+		bindingGeneration: number;
+		authorityGeneration: number;
+		executionId: string;
+		attemptId: string;
+		sessionFile: string;
+	};
 }
 
 interface NativeSessionArchiveMetadata {
@@ -1429,6 +1437,7 @@ export class EngineRuntime {
 		totalBytes: number;
 		offset: number;
 		contentBase64: string;
+		replaceRetainedBinding?: boolean;
 	}): Promise<{ restoreId: string; contentHash: string; totalBytes: number; nextOffset: number; complete: boolean }> {
 		return await this.#inLane(request.agentInstanceId, async () => {
 			this.#throwIfDisposed();
@@ -1467,11 +1476,42 @@ export class EngineRuntime {
 			if (request.offset + chunk.byteLength > request.totalBytes) {
 				throw new EngineTargetError("invalid_request", "Restore chunk exceeds totalBytes");
 			}
+			const prior = await this.store.getBinding(request.agentInstanceId);
+			let replaceBinding: NativeRestoreStageMetadata["replaceBinding"];
+			if (request.replaceRetainedBinding) {
+				if (!prior?.sessionFile || (prior.state !== "idle" && prior.state !== "released")) {
+					throw new EngineTargetError("stale_target", "Restore target has no terminal retained native session");
+				}
+				const live = this.#bindings.get(request.agentInstanceId);
+				if (
+					live &&
+					(live.bindingId !== prior.bindingId ||
+						live.bindingGeneration !== prior.bindingGeneration ||
+						live.attemptId !== prior.attemptId ||
+						live.executionId !== prior.executionId ||
+						live.authorityGeneration !== prior.authorityGeneration ||
+						live.sessionFile !== prior.sessionFile ||
+						live.state !== "idle" ||
+						live.session.isStreaming)
+				) {
+					throw new EngineTargetError("agent_busy", "Restore target binding is not durably idle");
+				}
+				replaceBinding = {
+					bindingId: prior.bindingId,
+					bindingGeneration: prior.bindingGeneration,
+					authorityGeneration: prior.authorityGeneration,
+					executionId: prior.executionId,
+					attemptId: prior.attemptId,
+					sessionFile: prior.sessionFile,
+				};
+			} else if (prior?.sessionFile) {
+				throw new EngineTargetError("stale_target", "Restore target already has a native session");
+			}
 
 			const restoreId = crypto
 				.createHash("sha256")
 				.update(
-					`${request.agentInstanceId}\0${request.agentInstanceRef}\0${request.authorityGeneration}\0${request.contentHash}`,
+					`${request.agentInstanceId}\0${request.agentInstanceRef}\0${request.authorityGeneration}\0${request.contentHash}\0${stableStringifyJson(replaceBinding ?? null)}`,
 				)
 				.digest("hex");
 			const stageDir = this.#restoreStageDir(restoreId);
@@ -1483,6 +1523,7 @@ export class EngineRuntime {
 				authorityGeneration: request.authorityGeneration,
 				contentHash: request.contentHash,
 				totalBytes: request.totalBytes,
+				...(replaceBinding ? { replaceBinding } : {}),
 			};
 			await fs.mkdir(stageDir, { recursive: true });
 			const metadataPath = path.join(stageDir, "metadata.json");
@@ -1822,9 +1863,6 @@ export class EngineRuntime {
 			throw new EngineTargetError("invalid_request", "Restored start requires agentInstanceRef");
 		}
 		const prior = await this.store.getBinding(request.agentInstanceId);
-		if (prior?.sessionFile) {
-			throw new EngineTargetError("stale_target", "Restore target already has a native session");
-		}
 		const stageDir = this.#restoreStageDir(restore.restoreId);
 		let metadata: NativeRestoreStageMetadata;
 		try {
@@ -1843,6 +1881,37 @@ export class EngineRuntime {
 			metadata.contentHash !== restore.contentHash
 		) {
 			throw new EngineTargetError("stale_target", "Restore checkpoint authority is stale");
+		}
+		if (metadata.replaceBinding) {
+			const expected = metadata.replaceBinding;
+			if (
+				!prior?.sessionFile ||
+				(prior.state !== "idle" && prior.state !== "released") ||
+				prior.bindingId !== expected.bindingId ||
+				prior.bindingGeneration !== expected.bindingGeneration ||
+				prior.authorityGeneration !== expected.authorityGeneration ||
+				prior.executionId !== expected.executionId ||
+				prior.attemptId !== expected.attemptId ||
+				prior.sessionFile !== expected.sessionFile
+			) {
+				throw new EngineTargetError("stale_target", "Restore target binding changed after staging");
+			}
+			const live = this.#bindings.get(request.agentInstanceId);
+			if (
+				live &&
+				(live.bindingId !== expected.bindingId ||
+					live.bindingGeneration !== expected.bindingGeneration ||
+					live.attemptId !== expected.attemptId ||
+					live.executionId !== expected.executionId ||
+					live.authorityGeneration !== expected.authorityGeneration ||
+					live.sessionFile !== expected.sessionFile ||
+					live.state !== "idle" ||
+					live.session.isStreaming)
+			) {
+				throw new EngineTargetError("stale_target", "Restore target live binding changed after staging");
+			}
+		} else if (prior?.sessionFile) {
+			throw new EngineTargetError("stale_target", "Restore target already has a native session");
 		}
 		const bytes = await fs.readFile(path.join(stageDir, "checkpoint.bin"));
 		if (bytes.byteLength !== metadata.totalBytes) {

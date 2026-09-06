@@ -294,13 +294,17 @@ describe("Engine Control + Query", () => {
 				.subarray(offset, offset + limit)
 				.toString("base64"),
 		});
-		runtime.sessionRestoreStage = async request => ({
-			restoreId: "b".repeat(64),
-			contentHash: request.contentHash,
-			totalBytes: request.totalBytes,
-			nextOffset: request.offset + Buffer.from(request.contentBase64, "base64").byteLength,
-			complete: true,
-		});
+		let replaceRetainedBinding: boolean | undefined;
+		runtime.sessionRestoreStage = async request => {
+			replaceRetainedBinding = request.replaceRetainedBinding;
+			return {
+				restoreId: "b".repeat(64),
+				contentHash: request.contentHash,
+				totalBytes: request.totalBytes,
+				nextOffset: request.offset + Buffer.from(request.contentBase64, "base64").byteLength,
+				complete: true,
+			};
+		};
 		runtime.listInbox = async received => [
 			{
 				queueId: "queue-a",
@@ -363,8 +367,10 @@ describe("Engine Control + Query", () => {
 				totalBytes: 4,
 				offset: 0,
 				contentBase64: Buffer.from("test").toString("base64"),
+				replaceRetainedBinding: true,
 			}),
 		).toMatchObject({ restoreId: "b".repeat(64), nextOffset: 4, complete: true });
+		expect(replaceRetainedBinding).toBe(true);
 		const newestHistory = (await client.request("session.history", {
 			agentInstanceId: "agent-a",
 			limit: 1,
