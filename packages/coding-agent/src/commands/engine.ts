@@ -55,8 +55,8 @@ export default class Engine extends Command {
 			max: 525_600,
 		}),
 		"child-history-retention": Flags.string({
-			description: "Child OMP history at TTL: off deletes locally; grimoire archives then deletes",
-			options: ["off", "grimoire"],
+			description: "Child OMP history at TTL: local preserves; off deletes; grimoire archives then deletes",
+			options: ["local", "off", "grimoire"],
 		}),
 		"server-url": Flags.string({ description: "Hosted Grimoire base URL" }),
 		"token-env": Flags.string({ description: "Environment variable containing the hosted bearer token" }),
@@ -141,7 +141,7 @@ export default class Engine extends Command {
 						? path.resolve(process.env.GRIMOIRE_CLIENT_ARTIFACT_CACHE_ROOT)
 						: defaultArtifactCacheRoot,
 				childHistoryTtlMinutes: flags["child-history-ttl-minutes"] ?? 60,
-				childHistoryRetention: (flags["child-history-retention"] ?? "off") as "off" | "grimoire",
+				childHistoryRetention: (flags["child-history-retention"] ?? "local") as "local" | "off" | "grimoire",
 				hosted:
 					flags["no-hosted"] || !serverUrl || !token
 						? undefined

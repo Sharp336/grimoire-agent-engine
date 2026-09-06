@@ -474,6 +474,18 @@ describe("Engine Control + Query", () => {
 					runtimeDir: "C:\\runtime",
 					databasePath: "C:\\runtime\\engine.sqlite",
 					natsServerPath: "C:\\runtime\\nats-server.exe",
+				},
+				{ status: "running" },
+			),
+		).toMatchObject({ childHistoryTtlMinutes: 60, childHistoryRetention: "local" });
+		expect(
+			engineServiceStatus(
+				{
+					deviceId: "device-a",
+					engineId: "engine-a",
+					runtimeDir: "C:\\runtime",
+					databasePath: "C:\\runtime\\engine.sqlite",
+					natsServerPath: "C:\\runtime\\nats-server.exe",
 					childHistoryTtlMinutes: 90,
 					childHistoryRetention: "grimoire",
 				},

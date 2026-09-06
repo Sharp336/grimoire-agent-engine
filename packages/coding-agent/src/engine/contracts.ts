@@ -290,6 +290,7 @@ export class EngineTargetError extends Error {
 			| "stale_target"
 			| "too_late"
 			| "invalid_request"
+			| "history_expired"
 			| "launch_failed"
 			| "cancelled",
 		message: string,
