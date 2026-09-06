@@ -368,6 +368,10 @@ describe("EngineProfileResolver", () => {
 		const profileRef = "gctx:eeeeeeeeeeeeeeee";
 		const routeRef = "gctx:ffffffffffffffff";
 		const accountRef = "gctx:gggggggggggggggg";
+		const fallbackRouteRef = "gctx:hhhhhhhhhhhhhhhh";
+		const fallbackAccountRef = "gctx:jjjjjjjjjjjjjjjj";
+		const foreignSubscriptionRouteRef = "gctx:kkkkkkkkkkkkkkkk";
+		const foreignSubscriptionAccountRef = "gctx:mmmmmmmmmmmmmmmm";
 		await fs.mkdir(cache);
 		const source = await AuthStorage.create(localDb);
 		await source.set("openai-codex", [
@@ -390,7 +394,8 @@ describe("EngineProfileResolver", () => {
 		await artifact(cache, profileRef, "grimoire.agent_profile.v1", {
 			schema: "grimoire.agent_profile.v1",
 			status: "active",
-			models: [routeRef],
+			models: [routeRef, fallbackRouteRef, foreignSubscriptionRouteRef],
+			allowSameModelProviderFallback: true,
 			childProfiles: [],
 			maxSpawnDepth: 0,
 			maxChildren: 0,
@@ -419,6 +424,53 @@ describe("EngineProfileResolver", () => {
 			trusted: true,
 			credentialBinding: { source: "local_omp", accountId: "account-b" },
 		});
+		await artifact(cache, fallbackRouteRef, "grimoire.available_model_route.v1", {
+			schema: "grimoire.available_model_route.v1",
+			status: "active",
+			providerAccountRef: fallbackAccountRef,
+			model: {
+				modelIdentityId: "openai:gpt-5.6-sol",
+				providerSurfaceId: "cheapai-account-1",
+				modelId: "gpt-5.6-sol",
+				contextWindow: 1_000_000,
+				maxOutputTokens: 128_000,
+				supportsReasoning: true,
+			},
+		});
+		await artifact(cache, fallbackAccountRef, "grimoire.provider_account.v1", {
+			schema: "grimoire.provider_account.v1",
+			status: "active",
+			providerId: "cheapai-account-1",
+			providerKind: "api_key",
+			api: "openai-responses",
+			baseUrl: "https://cheapai.invalid/v1",
+			trusted: true,
+			credential: { type: "api_key", key: "fallback-key" },
+		});
+		await artifact(cache, foreignSubscriptionRouteRef, "grimoire.available_model_route.v1", {
+			schema: "grimoire.available_model_route.v1",
+			status: "active",
+			providerAccountRef: foreignSubscriptionAccountRef,
+			model: {
+				modelIdentityId: "openai:gpt-5.6-sol",
+				providerSurfaceId: "openai-codex:account-a",
+				modelId: "gpt-5.6-sol",
+				contextWindow: 1_000_000,
+				maxOutputTokens: 128_000,
+				supportsReasoning: true,
+			},
+		});
+		await artifact(cache, foreignSubscriptionAccountRef, "grimoire.provider_account.v1", {
+			schema: "grimoire.provider_account.v1",
+			status: "active",
+			providerId: "openai-codex",
+			providerKind: "openai_codex_subscription",
+			accountBindingId: "account-a",
+			api: "openai-codex-responses",
+			baseUrl: "https://chatgpt.com/backend-api",
+			trusted: true,
+			credentialBinding: { source: "local_omp", accountId: "account-a" },
+		});
 
 		const resolver = new EngineProfileResolver(
 			cache,
@@ -436,8 +488,30 @@ describe("EngineProfileResolver", () => {
 			);
 			expect(resolved.options.authStorage?.listStoredCredentials("openai-codex")).toHaveLength(1);
 			expect(resolved.options.settings?.get("providers.openaiWebsockets")).toBe("off");
+			expect(resolved.sameModelRouteFallback?.selectors).toEqual([
+				"openai-codex/gpt-5.6-sol",
+				"cheapai-account-1/gpt-5.6-sol",
+			]);
+			const fallbackModel = resolved.options.modelRegistry?.find("cheapai-account-1", "gpt-5.6-sol");
+			expect(fallbackModel).toBeDefined();
+			expect(await resolved.options.modelRegistry?.getApiKey(fallbackModel!)).toBe("fallback-key");
+			let fallbackCalls = 0;
+			const fallbackFetch = resolved.options.providerRequestHook?.wrapFetch(fallbackModel!, async () => {
+				fallbackCalls += 1;
+				return new Response("ok");
+			});
+			expect(await fallbackFetch?.("https://cheapai.invalid/v1/responses")).toMatchObject({ status: 200 });
+			expect(fallbackCalls).toBe(1);
 		} finally {
 			resolved.dispose();
+		}
+		const reopenedSource = await AuthStorage.create(localDb);
+		try {
+			await reopenedSource.reload();
+			expect(reopenedSource.listStoredCredentials("cheapai-account-1")).toHaveLength(0);
+			expect(reopenedSource.listStoredCredentials("openai-codex")).toHaveLength(2);
+		} finally {
+			reopenedSource.close();
 		}
 	});
 });

@@ -13,7 +13,7 @@ import type { TurnRetryPolicy } from "../session/agent-session-types";
 import { AuthStorage, SqliteAuthCredentialStore } from "../session/auth-storage";
 import type { EngineChildProfile } from "../tools";
 import type { EngineLaunchProfile } from "./contracts";
-import type { ProviderAdmissionClient } from "./provider-admission";
+import type { ProviderAdmissionClient, ProviderApiKeyRouteIdentity } from "./provider-admission";
 
 const GCTX = /^gctx:[23456789abcdefghjkmnpqrstuvwxyz]{16}$/;
 
@@ -352,8 +352,9 @@ export class EngineProfileResolver {
 			});
 			const model = buildModel(toModelSpec(route, account)) as Model;
 			const fallbackSelectors = [formatModelStringWithRouting(model)];
+			const fallbackApiKeyRoutes: ProviderApiKeyRouteIdentity[] = [];
 			const fallbackWritebacks: Array<() => void> = [];
-			if (profile.allowSameModelProviderFallback && embeddedCredential && !localBinding) {
+			if (profile.allowSameModelProviderFallback && (embeddedCredential || localBinding)) {
 				for (const fallbackRouteRef of fallbackRouteRefs) {
 					try {
 						const fallbackRoute = parseJson<AvailableModelRoute>(
@@ -375,6 +376,7 @@ export class EngineProfileResolver {
 						if (
 							fallbackAccount.status === "disabled" ||
 							fallbackCredential?.type !== "api_key" ||
+							fallbackAccount.providerKind === "openai_codex_subscription" ||
 							!fallbackAccount.providerId ||
 							!fallbackAccount.api ||
 							!fallbackAccount.baseUrl ||
@@ -383,7 +385,7 @@ export class EngineProfileResolver {
 						) {
 							continue;
 						}
-						await authStorage.set(fallbackAccount.providerId, fallbackCredential);
+						if (!localBinding) await authStorage.set(fallbackAccount.providerId, fallbackCredential);
 						const fallbackModel = buildModel(toModelSpec(fallbackRoute, fallbackAccount)) as Model;
 						modelRegistry.registerProvider(fallbackAccount.providerId, {
 							apiKey: fallbackCredential.key,
@@ -392,20 +394,28 @@ export class EngineProfileResolver {
 							headers: fallbackAccount.headers,
 							models: [toProviderModel(fallbackModel)],
 						});
+						fallbackApiKeyRoutes.push({
+							providerAccountRef: fallbackAccountRef,
+							routeRef: fallbackRouteRef,
+							providerId: fallbackModel.provider,
+							modelId: fallbackModel.id,
+							baseUrl: fallbackModel.baseUrl,
+						});
 						const selector = formatModelStringWithRouting(fallbackModel);
 						if (!fallbackSelectors.includes(selector)) fallbackSelectors.push(selector);
-						fallbackWritebacks.push(
-							authStorage.onGenerationChanged(
-								() =>
-									void this.#writeCredentialBack(
-										authStorage,
-										fallbackAccount.providerId,
-										fallbackAccountRef,
-										fallbackCachedAccount,
-										fallbackCredential,
-									).catch(() => {}),
-							),
-						);
+						if (!localBinding)
+							fallbackWritebacks.push(
+								authStorage.onGenerationChanged(
+									() =>
+										void this.#writeCredentialBack(
+											authStorage,
+											fallbackAccount.providerId,
+											fallbackAccountRef,
+											fallbackCachedAccount,
+											fallbackCredential,
+										).catch(() => {}),
+								),
+							);
 					} catch {
 						// Unavailable routes are omitted once; the runtime chain never cycles back to them.
 					}
@@ -431,7 +441,12 @@ export class EngineProfileResolver {
 					model,
 					providerRequestHook:
 						admissionIdentity && this.providerAdmissionClient
-							? this.providerAdmissionClient.createHook(admissionIdentity, authStorage, account.baseUrl)
+							? this.providerAdmissionClient.createHook(
+									admissionIdentity,
+									authStorage,
+									account.baseUrl,
+									fallbackApiKeyRoutes,
+								)
 							: undefined,
 					thinkingLevel: profile.generationDefaults?.thinkingLevel,
 					toolNames,

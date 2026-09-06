@@ -72,6 +72,48 @@ describe("ProviderAdmissionClient", () => {
 		expect(providerCalls).toBe(0);
 	});
 
+	it("bypasses subscription admission only for an exact pinned API-key fallback", async () => {
+		let admissionCalls = 0;
+		let providerCalls = 0;
+		const authStorage = {
+			invalidateUsageCache: async () => {},
+			fetchUsageReports: async () => [usageReport()],
+		} as unknown as AuthStorage;
+		const hook = new ProviderAdmissionClient("http://127.0.0.1/provider-admission", "token", async () => {
+			admissionCalls += 1;
+			return Response.json({ allowed: true });
+		}).createHook(identity(), authStorage, "https://chatgpt.com/backend-api", [
+			{
+				providerAccountRef: "gctx:4444444444444444",
+				routeRef: "gctx:5555555555555555",
+				providerId: "cheapai-account-1",
+				modelId: "gpt-5.6-terra",
+				baseUrl: "https://cheapai.invalid/v1",
+			},
+		]);
+		const fallbackModel = {
+			id: "gpt-5.6-terra",
+			provider: "cheapai-account-1",
+			baseUrl: "https://cheapai.invalid/v1",
+		} as Model;
+		const fallbackFetch = hook.wrapFetch(fallbackModel, async () => {
+			providerCalls += 1;
+			return new Response("ok");
+		});
+		await fallbackFetch("https://cheapai.invalid/v1/responses");
+		expect({ admissionCalls, providerCalls }).toEqual({ admissionCalls: 0, providerCalls: 1 });
+
+		for (const foreignSubscription of [
+			{ ...fallbackModel, provider: "other-subscription" },
+			{ ...fallbackModel, baseUrl: "https://other.invalid/v1" },
+		]) {
+			const foreignFetch = hook.wrapFetch(foreignSubscription as Model, async () => new Response("unexpected"));
+			const error = await foreignFetch("https://other.invalid/v1/responses").catch(reason => reason);
+			expect(error).toMatchObject({ code: "provider_identity_mismatch", retryable: false });
+		}
+		expect(admissionCalls).toBe(0);
+	});
+
 	it("stops waiting for a shared usage refresh when the provider request is cancelled", async () => {
 		const cancelled = new Error("turn cancelled");
 		const controller = new AbortController();
