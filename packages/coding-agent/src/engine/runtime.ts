@@ -84,6 +84,7 @@ const MAX_ASSISTANT_FINAL_CHARS = 48_000;
 const MAX_INPUT_FIELD_CHARS = 48_000;
 const MAX_INPUT_RESULT_CHARS = 128_000;
 const MAX_HISTORY_MESSAGE_CHARS = 48_000;
+const MAX_HISTORY_ACTIVITY_CHARS = 48_000;
 const ASSISTANT_SNAPSHOT_GROWTH_CHARS = 192;
 const MAX_ASSISTANT_STREAMING_SNAPSHOTS = 256;
 const ENGINE_TURN_RETRY_DELAYS_MS = [3_000, 15_000, 30_000] as const;
@@ -124,6 +125,23 @@ interface NativeSessionCheckpoint {
 	sessionJsonlBase64: string;
 	artifacts: Array<{ name: string; contentHash: string; byteLength: number; contentBase64: string }>;
 }
+
+type EngineHistoryActivityBlock = {
+	blockId: string;
+	blockIndex: number;
+	kind: "reasoning" | "tool_call";
+	status: "available" | "unavailable";
+	text?: string;
+	textTruncated?: boolean;
+	toolCallId?: string;
+	toolName?: string;
+	argumentsText?: string;
+	argumentsTruncated?: boolean;
+	toolStatus?: "unknown" | "succeeded" | "failed";
+	resultText?: string;
+	resultTruncated?: boolean;
+	error?: string;
+};
 
 function taskRefFromAgentInstanceRef(agentInstanceRef: string | undefined): string | undefined {
 	if (!agentInstanceRef?.startsWith("grimoire://tasks/")) return undefined;
@@ -1151,7 +1169,9 @@ export class EngineRuntime {
 			sourceCommandId?: string;
 			clientMessageId?: string;
 			assistantMessageId?: string;
+			blocks?: EngineHistoryActivityBlock[];
 		}>;
+		activityCompleteness: "complete" | "legacy_messages_only";
 	}> {
 		return await this.#inLane(agentInstanceId, async () => {
 			this.#throwIfDisposed();
@@ -1183,32 +1203,64 @@ export class EngineRuntime {
 					loaded.entries.filter((entry): entry is SessionEntry => entry.type !== "session"),
 				);
 			}
-			const entries = branch.flatMap(entry => {
-				if (entry.type !== "message" || (entry.message.role !== "user" && entry.message.role !== "assistant")) {
-					return [];
+			const entries: Array<{
+				entryId: string;
+				parentEntryId: string | null;
+				role: "user" | "assistant";
+				text: string;
+				createdAt: string;
+				textTruncated: boolean;
+				sourceCommandId?: string;
+				clientMessageId?: string;
+				assistantMessageId?: string;
+				blocks?: ReturnType<typeof historyActivityBlocks>;
+			}> = [];
+			const toolBlocks = new Map<string, ReturnType<typeof historyActivityBlocks>[number]>();
+			let sawActivity = false;
+			for (const entry of branch) {
+				if (entry.type !== "message") continue;
+				if (entry.message.role === "toolResult") {
+					const block = toolBlocks.get(entry.message.toolCallId);
+					if (!block) continue;
+					const fullResult = historyMessageText(entry.message.content);
+					block.toolStatus = entry.message.isError ? "failed" : "succeeded";
+					if (fullResult) {
+						block.resultText = fullResult.slice(0, MAX_HISTORY_ACTIVITY_CHARS);
+						block.resultTruncated = fullResult.length > MAX_HISTORY_ACTIVITY_CHARS;
+					}
+					if (entry.message.isError && fullResult) block.error = block.resultText;
+					continue;
 				}
+				if (entry.message.role !== "user" && entry.message.role !== "assistant") continue;
 				const fullText = historyMessageText(entry.message.content);
-				if (!fullText) return [];
-				return [
-					{
-						entryId: entry.id,
-						parentEntryId: null as string | null,
-						role: entry.message.role,
-						text: fullText.slice(0, MAX_HISTORY_MESSAGE_CHARS),
-						createdAt: entry.timestamp,
-						textTruncated: fullText.length > MAX_HISTORY_MESSAGE_CHARS,
-						...(entry.message.role === "user" && entry.sourceCommandId
-							? { sourceCommandId: entry.sourceCommandId }
-							: {}),
-						...(entry.message.role === "user" && entry.clientMessageId
-							? { clientMessageId: entry.clientMessageId }
-							: {}),
-						...(entry.message.role === "assistant" && entry.assistantMessageId
-							? { assistantMessageId: entry.assistantMessageId }
-							: {}),
-					},
-				];
-			});
+				const blocks =
+					entry.message.role === "assistant"
+						? historyActivityBlocks(sessionId, entry.id, entry.message.content)
+						: [];
+				for (const block of blocks) {
+					if (block.toolCallId) toolBlocks.set(block.toolCallId, block);
+				}
+				sawActivity ||= blocks.length > 0;
+				if (!fullText && blocks.length === 0) continue;
+				entries.push({
+					entryId: entry.id,
+					parentEntryId: null,
+					role: entry.message.role,
+					text: fullText.slice(0, MAX_HISTORY_MESSAGE_CHARS),
+					createdAt: entry.timestamp,
+					textTruncated: fullText.length > MAX_HISTORY_MESSAGE_CHARS,
+					...(blocks.length ? { blocks } : {}),
+					...(entry.message.role === "user" && entry.sourceCommandId
+						? { sourceCommandId: entry.sourceCommandId }
+						: {}),
+					...(entry.message.role === "user" && entry.clientMessageId
+						? { clientMessageId: entry.clientMessageId }
+						: {}),
+					...(entry.message.role === "assistant" && entry.assistantMessageId
+						? { assistantMessageId: entry.assistantMessageId }
+						: {}),
+				});
+			}
 			const projected = entries.map((entry, index) => ({
 				...entry,
 				parentEntryId: entries[index - 1]?.entryId ?? null,
@@ -1218,6 +1270,7 @@ export class EngineRuntime {
 				leafEntryId: projected.at(-1)?.entryId ?? null,
 				sessionLeafEntryId: branch.at(-1)?.id ?? null,
 				entries: projected,
+				activityCompleteness: sawActivity ? "complete" : "legacy_messages_only",
 			};
 		});
 	}
@@ -3927,6 +3980,56 @@ function historyMessageText(content: unknown): string {
 			return [];
 		})
 		.join("\n");
+}
+
+function historyActivityText(value: unknown): { text?: string; truncated?: boolean } {
+	let raw: string;
+	try {
+		raw = typeof value === "string" ? value : stableStringifyJson(value);
+	} catch {
+		return {};
+	}
+	if (!raw) return {};
+	return {
+		text: raw.slice(0, MAX_HISTORY_ACTIVITY_CHARS),
+		truncated: raw.length > MAX_HISTORY_ACTIVITY_CHARS,
+	};
+}
+
+function historyActivityBlocks(sessionId: string, entryId: string, content: unknown): EngineHistoryActivityBlock[] {
+	if (!Array.isArray(content)) return [];
+	return content.flatMap<EngineHistoryActivityBlock>((raw, blockIndex) => {
+		if (!raw || typeof raw !== "object") return [];
+		const block = raw as Record<string, unknown>;
+		if (block.type === "thinking" || block.type === "redactedThinking") {
+			const value = historyActivityText(
+				block.type === "thinking" && typeof block.thinking === "string" ? block.thinking : "",
+			);
+			return [
+				{
+					blockId: `history:${sessionId}:${entryId}:${blockIndex}`,
+					blockIndex,
+					kind: "reasoning" as const,
+					status: value.text ? ("available" as const) : ("unavailable" as const),
+					...(value.text ? { text: value.text, textTruncated: value.truncated === true } : {}),
+				},
+			];
+		}
+		if (block.type !== "toolCall" || typeof block.id !== "string" || !block.id.trim()) return [];
+		const args = historyActivityText(block.arguments);
+		return [
+			{
+				blockId: `history:${sessionId}:${entryId}:${blockIndex}`,
+				blockIndex,
+				kind: "tool_call" as const,
+				status: "available" as const,
+				toolCallId: block.id.slice(0, 200),
+				...(typeof block.name === "string" && block.name.trim() ? { toolName: block.name.slice(0, 200) } : {}),
+				...(args.text ? { argumentsText: args.text, argumentsTruncated: args.truncated === true } : {}),
+				toolStatus: "unknown" as const,
+			},
+		];
+	});
 }
 
 function assistantSnapshotStopReason(value: unknown): "stop" | "length" | "toolUse" | "aborted" | "error" | undefined {

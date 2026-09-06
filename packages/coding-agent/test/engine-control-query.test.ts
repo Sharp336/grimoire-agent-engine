@@ -280,6 +280,7 @@ describe("Engine Control + Query", () => {
 					textTruncated: false,
 				},
 			],
+			activityCompleteness: "legacy_messages_only" as const,
 		});
 		runtime.sessionArchive = async (agentInstanceId, expectedContentHash, offset = 0, limit = 24_000) => ({
 			schema: "grimoire.engine.session_archive.v1",
@@ -379,6 +380,7 @@ describe("Engine Control + Query", () => {
 			entries: [{ entryId: "entry-assistant" }],
 			hasMore: true,
 			resyncRequired: false,
+			activityCompleteness: "legacy_messages_only",
 		});
 		expect(
 			await client.request("session.history", {

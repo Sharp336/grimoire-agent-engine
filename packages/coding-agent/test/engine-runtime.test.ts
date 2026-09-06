@@ -2601,6 +2601,7 @@ describe("EngineRuntime", () => {
 	}, 60_000);
 
 	it("streams bounded assistant snapshots with one identity before terminal settlement", async () => {
+		let retainedSessionManager: SessionManager | undefined;
 		const releaseFinal = Promise.withResolvers<void>();
 		const finalCall = Promise.withResolvers<void>();
 		const fullFinal = `${"x".repeat(48_001)}FULL-STREAM-TAIL`;
@@ -2620,7 +2621,10 @@ describe("EngineRuntime", () => {
 			})(),
 		});
 		const { runtime, cwd } = await createRuntime(
-			(session, input) => session.prompt(input),
+			(session, input) => {
+				retainedSessionManager = session.sessionManager;
+				return session.prompt(input);
+			},
 			{},
 			{ model: mock.model },
 		);
@@ -2679,6 +2683,45 @@ describe("EngineRuntime", () => {
 		const history = await runtime.sessionHistory(started.agentInstanceId);
 		const assistantEntries = history.entries.filter(entry => entry.role === "assistant");
 		expect(assistantEntries.map(entry => entry.assistantMessageId)).toEqual(messageIds);
+		expect(history.activityCompleteness).toBe("complete");
+		expect(assistantEntries[0]?.blocks).toEqual([
+			expect.objectContaining({
+				kind: "reasoning",
+				status: "available",
+				text: "private streaming reasoning sentinel",
+			}),
+			expect.objectContaining({
+				kind: "tool_call",
+				toolCallId: "read-stream",
+				toolName: "read",
+				argumentsText: '{"path":"private.txt"}',
+				toolStatus: "succeeded",
+				resultText: expect.stringContaining("private tool output sentinel"),
+			}),
+		]);
+		expect(assistantEntries[0]?.blocks?.[0]?.blockId).toContain(`history:${history.sessionId}:`);
+		const hiddenEntry = retainedSessionManager?.appendMessage({
+			role: "assistant",
+			content: [{ type: "redactedThinking", data: "HIDDEN-PROVIDER-PAYLOAD" }],
+			api: "engine-runtime-test",
+			provider: "mock",
+			model: "test",
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		});
+		const hiddenHistory = await runtime.sessionHistory(started.agentInstanceId);
+		expect(hiddenHistory.entries.find(entry => entry.entryId === hiddenEntry)?.blocks).toEqual([
+			expect.objectContaining({ kind: "reasoning", status: "unavailable" }),
+		]);
+		expect(JSON.stringify(hiddenHistory)).not.toContain("HIDDEN-PROVIDER-PAYLOAD");
 		const historyEntryId = settled?.payload?.historyEntryId;
 		expect(typeof historyEntryId).toBe("string");
 		expect(historyEntryId).toBe(assistantEntries.at(-1)?.entryId);
