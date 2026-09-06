@@ -13,6 +13,14 @@ export interface ProviderAdmissionIdentity {
 	accountBindingId: string;
 }
 
+export interface ProviderApiKeyRouteIdentity {
+	providerAccountRef: string;
+	routeRef: string;
+	providerId: string;
+	modelId: string;
+	baseUrl: string;
+}
+
 interface ProviderAdmissionDecision {
 	allowed: boolean;
 	status?: string;
@@ -38,9 +46,14 @@ export class ProviderAdmissionClient {
 		readonly requestFetch: Fetch = globalThis.fetch,
 	) {}
 
-	createHook(identity: ProviderAdmissionIdentity, authStorage: AuthStorage, baseUrl: string): ProviderRequestHook {
+	createHook(
+		identity: ProviderAdmissionIdentity,
+		authStorage: AuthStorage,
+		baseUrl: string,
+		apiKeyRoutes: readonly ProviderApiKeyRouteIdentity[] = [],
+	): ProviderRequestHook {
 		return {
-			wrapFetch: (model, fetch) => this.#wrapFetch(identity, authStorage, baseUrl, model, fetch),
+			wrapFetch: (model, fetch) => this.#wrapFetch(identity, authStorage, baseUrl, apiKeyRoutes, model, fetch),
 		};
 	}
 
@@ -48,11 +61,13 @@ export class ProviderAdmissionClient {
 		identity: ProviderAdmissionIdentity,
 		authStorage: AuthStorage,
 		baseUrl: string,
+		apiKeyRoutes: readonly ProviderApiKeyRouteIdentity[],
 		model: Model,
 		fetch: Fetch,
 	): Fetch {
 		return async (input, init) => {
 			if (model.provider !== identity.providerId) {
+				if (apiKeyRoutes.some(route => matchesApiKeyRoute(model, route))) return fetch(input, init);
 				throw new ProviderAdmissionError(
 					"provider_identity_mismatch",
 					"The provider request does not match the admitted account",
@@ -145,6 +160,10 @@ export class ProviderAdmissionClient {
 		}
 		return value;
 	}
+}
+
+function matchesApiKeyRoute(model: Model, route: ProviderApiKeyRouteIdentity): boolean {
+	return model.provider === route.providerId && model.id === route.modelId && model.baseUrl === route.baseUrl;
 }
 
 function selectExactUsageReport(
