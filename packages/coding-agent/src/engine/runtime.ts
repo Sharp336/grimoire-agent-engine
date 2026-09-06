@@ -24,6 +24,7 @@ import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession } from "../sdk";
 import type { AgentSession } from "../session/agent-session";
+import type { TurnRetryPolicy } from "../session/agent-session-types";
 import { createProviderRetryBudgetHook } from "../session/provider-retry-budget";
 import type { SessionEntry, SessionMessageIdentity } from "../session/session-entries";
 import { loadSessionFile, type SessionLoadResult } from "../session/session-loader";
@@ -266,6 +267,7 @@ export interface EngineRuntimeOptions {
 	) => Promise<{
 		options: Partial<CreateAgentSessionOptions>;
 		childProfiles?: EngineChildProfile[];
+		sameModelRouteFallback?: NonNullable<TurnRetryPolicy["sameModelRouteFallback"]>;
 		dispose(): void;
 	}>;
 	/** Exact non-secret digest of every external dependency resolved for this launch. */
@@ -1861,6 +1863,7 @@ export class EngineRuntime {
 					exactSchedule: true,
 					allowRetryAfterBeyondMaxDelay: true,
 					deferNestedProviderRetries: true,
+					sameModelRouteFallback: resolved?.sameModelRouteFallback,
 				},
 				pauseGate,
 				parentAgentId: request.parentAgentInstanceId ? engineAgentId(request.parentAgentInstanceId) : undefined,

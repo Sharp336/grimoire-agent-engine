@@ -134,6 +134,11 @@ export interface TurnRetryPolicy {
 	allowRetryAfterBeyondMaxDelay?: boolean;
 	/** Defer provider-internal retries to this recovery saga. */
 	deferNestedProviderRetries?: boolean;
+	/** Ordered, non-cycling provider selectors for one exact logical model identity. */
+	sameModelRouteFallback?: {
+		modelIdentityId: string;
+		selectors: readonly string[];
+	};
 }
 
 /** Dependencies and initial state used to construct an AgentSession. */

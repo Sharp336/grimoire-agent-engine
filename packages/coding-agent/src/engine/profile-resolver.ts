@@ -6,8 +6,10 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils/dirs";
 import { ModelRegistry } from "../config/model-registry";
+import { formatModelStringWithRouting } from "../config/model-resolver";
 import { SETTINGS_SCHEMA, type SettingPath, Settings } from "../config/settings";
 import type { CreateAgentSessionOptions } from "../sdk";
+import type { TurnRetryPolicy } from "../session/agent-session-types";
 import { AuthStorage, SqliteAuthCredentialStore } from "../session/auth-storage";
 import type { EngineChildProfile } from "../tools";
 import type { EngineLaunchProfile } from "./contracts";
@@ -89,6 +91,7 @@ export interface ResolvedEngineSessionProfile {
 		| "settings"
 	>;
 	childProfiles: EngineChildProfile[];
+	sameModelRouteFallback?: NonNullable<TurnRetryPolicy["sameModelRouteFallback"]>;
 	dispose(): void;
 }
 
@@ -170,10 +173,41 @@ export class EngineProfileResolver {
 		const spawnPolicy = resolveSpawnPolicy(profile, launch);
 		const candidates = await this.#routeCandidates(profile, launch.selectedRouteRef);
 		const childProfiles = await this.#childProfiles(spawnPolicy.childProfileRefs);
+		let sameModelIdentityId: string | undefined;
+		if (profile.allowSameModelProviderFallback) {
+			for (const routeRef of candidates) {
+				try {
+					const route = parseJson<AvailableModelRoute>(
+						(await this.#read(routeRef, "grimoire.available_model_route.v1")).content,
+						"AvailableModelRoute",
+					);
+					if (route.status !== "disabled" && route.model?.modelIdentityId) {
+						sameModelIdentityId = route.model.modelIdentityId;
+						break;
+					}
+				} catch {}
+			}
+			if (!sameModelIdentityId) throw new Error("AgentProfile has no usable same-model identity");
+		}
 		let lastError: unknown;
-		for (const routeRef of candidates) {
+		for (const [index, routeRef] of candidates.entries()) {
 			try {
-				return await this.#resolveRoute(profile, routeRef, launch, childProfiles, cwd, spawnPolicy.maxSpawnDepth);
+				if (sameModelIdentityId) {
+					const route = parseJson<AvailableModelRoute>(
+						(await this.#read(routeRef, "grimoire.available_model_route.v1")).content,
+						"AvailableModelRoute",
+					);
+					if (route.model.modelIdentityId !== sameModelIdentityId) continue;
+				}
+				return await this.#resolveRoute(
+					profile,
+					routeRef,
+					launch,
+					childProfiles,
+					cwd,
+					spawnPolicy.maxSpawnDepth,
+					profile.allowSameModelProviderFallback ? candidates.slice(index + 1) : [],
+				);
 			} catch (error) {
 				lastError = error;
 			}
@@ -189,26 +223,7 @@ export class EngineProfileResolver {
 			configured.splice(configured.indexOf(selectedRef), 1);
 			configured.unshift(selectedRef);
 		}
-		if (!profile.allowSameModelProviderFallback) return configured;
-		const allRoutes = await this.#allCachedRoutes();
-		const expanded: string[] = [];
-		for (const ref of configured) {
-			expanded.push(ref);
-			const route = parseJson<AvailableModelRoute>(
-				(await this.#read(ref, "grimoire.available_model_route.v1")).content,
-				"AvailableModelRoute",
-			);
-			for (const candidate of allRoutes) {
-				if (
-					candidate.ref !== ref &&
-					candidate.route.status !== "disabled" &&
-					candidate.route.model.modelIdentityId === route.model.modelIdentityId
-				) {
-					expanded.push(candidate.ref);
-				}
-			}
-		}
-		return [...new Set(expanded)];
+		return configured;
 	}
 
 	async #resolveRoute(
@@ -218,6 +233,7 @@ export class EngineProfileResolver {
 		childProfiles: EngineChildProfile[],
 		cwd: string,
 		maxSpawnDepth: number,
+		fallbackRouteRefs: string[],
 	): Promise<ResolvedEngineSessionProfile> {
 		const route = parseJson<AvailableModelRoute>(
 			(await this.#read(routeRef, "grimoire.available_model_route.v1")).content,
@@ -335,6 +351,66 @@ export class EngineProfileResolver {
 				cacheDbPath: path.join(accountDir, "models.sqlite"),
 			});
 			const model = buildModel(toModelSpec(route, account)) as Model;
+			const fallbackSelectors = [formatModelStringWithRouting(model)];
+			const fallbackWritebacks: Array<() => void> = [];
+			if (profile.allowSameModelProviderFallback && embeddedCredential && !localBinding) {
+				for (const fallbackRouteRef of fallbackRouteRefs) {
+					try {
+						const fallbackRoute = parseJson<AvailableModelRoute>(
+							(await this.#read(fallbackRouteRef, "grimoire.available_model_route.v1")).content,
+							"AvailableModelRoute",
+						);
+						if (
+							fallbackRoute.status === "disabled" ||
+							fallbackRoute.model.modelIdentityId !== route.model.modelIdentityId
+						) {
+							continue;
+						}
+						const fallbackAccountRef = requiredRef(fallbackRoute.providerAccountRef, "providerAccountRef");
+						const fallbackCachedAccount = await this.#read(fallbackAccountRef, "grimoire.provider_account.v1");
+						const fallbackAccount = parseJson<ProviderAccount>(fallbackCachedAccount.content, "ProviderAccount");
+						const fallbackCredential = validCredential(fallbackAccount.credential)
+							? fallbackAccount.credential
+							: undefined;
+						if (
+							fallbackAccount.status === "disabled" ||
+							fallbackCredential?.type !== "api_key" ||
+							!fallbackAccount.providerId ||
+							!fallbackAccount.api ||
+							!fallbackAccount.baseUrl ||
+							(profile.requireTrustedProvider && fallbackAccount.trusted !== true) ||
+							fallbackAccount.providerId === account.providerId
+						) {
+							continue;
+						}
+						await authStorage.set(fallbackAccount.providerId, fallbackCredential);
+						const fallbackModel = buildModel(toModelSpec(fallbackRoute, fallbackAccount)) as Model;
+						modelRegistry.registerProvider(fallbackAccount.providerId, {
+							apiKey: fallbackCredential.key,
+							api: fallbackAccount.api,
+							baseUrl: fallbackAccount.baseUrl,
+							headers: fallbackAccount.headers,
+							models: [toProviderModel(fallbackModel)],
+						});
+						const selector = formatModelStringWithRouting(fallbackModel);
+						if (!fallbackSelectors.includes(selector)) fallbackSelectors.push(selector);
+						fallbackWritebacks.push(
+							authStorage.onGenerationChanged(
+								() =>
+									void this.#writeCredentialBack(
+										authStorage,
+										fallbackAccount.providerId,
+										fallbackAccountRef,
+										fallbackCachedAccount,
+										fallbackCredential,
+									).catch(() => {}),
+							),
+						);
+					} catch {
+						// Unavailable routes are omitted once; the runtime chain never cycles back to them.
+					}
+				}
+			}
 			const profileRestricted = profile.tools?.mode === "allowlist";
 			const launchRestricted = launch.restrictToolNames === true;
 			const profileNames = uniqueStrings(profile.tools?.names ?? []);
@@ -365,8 +441,17 @@ export class EngineProfileResolver {
 					maxSpawnDepth,
 				},
 				childProfiles,
+				...(profile.allowSameModelProviderFallback
+					? {
+							sameModelRouteFallback: {
+								modelIdentityId: route.model.modelIdentityId,
+								selectors: fallbackSelectors,
+							},
+						}
+					: {}),
 				dispose: () => {
 					unsubscribeWriteback();
+					for (const unsubscribe of fallbackWritebacks) unsubscribe();
 					authStorage.close();
 				},
 			};
@@ -401,18 +486,32 @@ export class EngineProfileResolver {
 		return profiles;
 	}
 
-	async #allCachedRoutes(): Promise<Array<{ ref: string; route: AvailableModelRoute }>> {
-		const entries = await fs.readdir(this.artifactCacheRoot, { withFileTypes: true }).catch(() => []);
-		const routes: Array<{ ref: string; route: AvailableModelRoute }> = [];
-		for (const entry of entries) {
-			if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-			const value = await readJson(path.join(this.artifactCacheRoot, entry.name));
-			if (value?.kind !== "grimoire.available_model_route.v1" || typeof value.content !== "string") continue;
-			try {
-				routes.push({ ref: String(value.artifact_ref), route: parseJson(value.content, "AvailableModelRoute") });
-			} catch {}
+	async #writeCredentialBack(
+		authStorage: AuthStorage,
+		providerId: string,
+		accountRef: string,
+		cachedAccount: CachedArtifact,
+		baseCredential: AuthCredential,
+	): Promise<void> {
+		const credentials = authStorage.listStoredCredentials(providerId);
+		if (credentials.length !== 1 || !credentials[0]?.credential) return;
+		const credential = credentials[0].credential;
+		const writebackRoot = path.resolve(this.artifactCacheRoot, "..", "credential-writeback");
+		await fs.mkdir(writebackRoot, { recursive: true });
+		const writebackPath = path.join(writebackRoot, `${accountRef.slice(5)}.json`);
+		if (credentialHash(credential) === credentialHash(baseCredential)) {
+			await fs.rm(writebackPath, { force: true });
+			return;
 		}
-		return routes;
+		await atomicWriteJson(writebackPath, {
+			schema: "grimoire.engine_credential_writeback.v1",
+			artifactRef: accountRef,
+			baseRevision: cachedAccount.revision,
+			baseContentHash: cachedAccount.content_hash,
+			baseCredentialHash: credentialHash(baseCredential),
+			credential,
+			updatedAt: new Date().toISOString(),
+		});
 	}
 
 	async #read(ref: string, kind: string): Promise<CachedArtifact> {
@@ -457,6 +556,24 @@ function toModelSpec(route: AvailableModelRoute, account: ProviderAccount): Mode
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: Number(contextWindow),
 		maxTokens: Number(maxTokens),
+	};
+}
+
+function toProviderModel(
+	model: Model,
+): NonNullable<Parameters<ModelRegistry["registerProvider"]>[1]["models"]>[number] {
+	return {
+		id: model.id,
+		name: model.name,
+		api: model.api,
+		baseUrl: model.baseUrl,
+		reasoning: model.reasoning,
+		input: model.input,
+		supportsTools: model.supportsTools,
+		cost: model.cost,
+		contextWindow: Number(model.contextWindow),
+		maxTokens: Number(model.maxTokens),
+		headers: model.headers,
 	};
 }
 

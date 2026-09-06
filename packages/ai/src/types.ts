@@ -885,7 +885,7 @@ export interface DeveloperMessage {
 }
 
 /** How an automatic retry recovered or ultimately settled a failed attempt. */
-export type AssistantRetryRecoveryKind = "credential" | "model" | "wait" | "plain";
+export type AssistantRetryRecoveryKind = "credential" | "model" | "route" | "wait" | "plain";
 
 /** Persisted presentation state for an assistant error superseded by an automatic retry saga. */
 export type AssistantRetryRecovery =
@@ -896,6 +896,8 @@ export type AssistantRetryRecovery =
 			recoveredAt: string;
 			recovery: AssistantRetryRecoveryKind;
 			note: string;
+			/** Keep a provider-valid partial/tool boundary in model context after reload. */
+			preserveInContext?: boolean;
 			supersededBy?: {
 				timestamp: number;
 				responseId?: string;
@@ -909,6 +911,8 @@ export type AssistantRetryRecovery =
 			attempt: number;
 			recovery: AssistantRetryRecoveryKind;
 			note: string;
+			/** Keep a provider-valid partial/tool boundary in model context after reload. */
+			preserveInContext?: boolean;
 	  };
 
 export interface ContextSnapshot {

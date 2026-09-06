@@ -29,6 +29,7 @@ import { formatModelStringWithRouting, resolveModelOverride } from "../config/mo
 import type { Settings } from "../config/settings";
 import type { RetryErrorUpdate } from "../extensibility/shared-events";
 import emptyStopRetryTemplate from "../prompts/system/empty-stop-retry.md" with { type: "text" };
+import manualContinueTemplate from "../prompts/system/manual-continue.md" with { type: "text" };
 import thinkingLoopRedirectTemplate from "../prompts/system/thinking-loop-redirect.md" with { type: "text" };
 import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
 import {
@@ -73,6 +74,7 @@ import { sameMessageContent, sessionMessagePersistenceKey } from "./turn-persist
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
 
 const THINKING_LOOP_REDIRECT_TYPE = "thinking-loop-redirect";
+const PROVIDER_ROUTE_CONTINUE_TYPE = "provider-route-continue";
 const UNEXPECTED_STOP_MAX_RETRIES = 3;
 const UNEXPECTED_STOP_TIMEOUT_MS = 4000;
 const EMPTY_STOP_MAX_RETRIES = 3;
@@ -191,6 +193,7 @@ type PendingRetryError = {
 	recovery: AssistantRetryRecoveryKind;
 	attempt: number;
 	note: string;
+	preserveInContext: boolean;
 };
 
 type UsageLimitOutcome = {
@@ -482,6 +485,7 @@ export class TurnRecovery {
 		const id = this.#classifyRetryMessage(message);
 		const activeModel = this.#host.model();
 		if (!activeModel || !AIError.is(id, AIError.Flag.UsageLimit)) return false;
+		if (this.#sameModelRouteCandidates().length > 0) return false;
 
 		let recorded = this.#usageLimitOutcomes.get(message);
 		if (!recorded) {
@@ -550,9 +554,11 @@ export class TurnRecovery {
 		id: number,
 		switchedCredential: boolean,
 		switchedModel: boolean,
+		switchedRoute: boolean,
 		delayMs: number,
 	): AssistantRetryRecoveryKind {
 		if (switchedCredential) return "credential";
+		if (switchedRoute) return "route";
 		if (switchedModel) return "model";
 		if (AIError.is(id, AIError.Flag.UsageLimit) && delayMs > 0) return "wait";
 		return "plain";
@@ -569,6 +575,8 @@ export class TurnRecovery {
 			parts.push("switched account");
 		} else if (recovery === "model") {
 			parts.push("switched model");
+		} else if (recovery === "route") {
+			parts.push("switched provider route");
 		} else if (recovery === "wait") {
 			parts.push("waited");
 		}
@@ -579,7 +587,13 @@ export class TurnRecovery {
 	async #recordPendingRetryError(
 		message: AssistantMessage,
 		id: number,
-		options: { switchedCredential: boolean; switchedModel: boolean; delayMs: number },
+		options: {
+			switchedCredential: boolean;
+			switchedModel: boolean;
+			switchedRoute: boolean;
+			delayMs: number;
+			preserveInContext: boolean;
+		},
 	): Promise<void> {
 		await this.persistTerminalEmptyErrorTurn(message);
 		const persistenceKey = sessionMessagePersistenceKey(message);
@@ -597,7 +611,13 @@ export class TurnRecovery {
 		if (!branchEntry) return;
 		if (this.#pendingRetryErrors.some(error => error.entryId === branchEntry.id)) return;
 		const rateLimited = AIError.is(id, AIError.Flag.UsageLimit);
-		const recovery = this.#retryRecoveryKind(id, options.switchedCredential, options.switchedModel, options.delayMs);
+		const recovery = this.#retryRecoveryKind(
+			id,
+			options.switchedCredential,
+			options.switchedModel,
+			options.switchedRoute,
+			options.delayMs,
+		);
 		const note = this.#retryRecoveryNote(recovery, rateLimited);
 		this.#pendingRetryErrors.push({
 			entryId: branchEntry.id,
@@ -605,6 +625,7 @@ export class TurnRecovery {
 			recovery,
 			attempt: this.#retryAttempt,
 			note,
+			preserveInContext: options.preserveInContext,
 		});
 	}
 
@@ -641,6 +662,7 @@ export class TurnRecovery {
 					recoveredAt: new Date().toISOString(),
 					recovery: pending.recovery,
 					note: pending.note,
+					...(pending.preserveInContext ? { preserveInContext: true } : {}),
 					supersededBy: {
 						timestamp: completion.supersedingMessage.timestamp,
 						...(completion.supersedingMessage.responseId === undefined
@@ -657,6 +679,7 @@ export class TurnRecovery {
 					attempt: pending.attempt,
 					recovery: pending.recovery,
 					note: pending.note,
+					...(pending.preserveInContext ? { preserveInContext: true } : {}),
 				};
 			}
 			entry.message.retryRecovery = retryRecovery;
@@ -1094,6 +1117,7 @@ export class TurnRecovery {
 	 */
 	isRetryableError(message: AssistantMessage): boolean {
 		const errorMessage = message.errorMessage ?? "";
+		if (this.#sameModelRouteCandidates().length > 0 && this.#isProviderRouteFailure(message)) return true;
 		if (isExhaustedProviderRetryMessage(errorMessage) || isPermanentProviderFailureMessage(errorMessage))
 			return false;
 		if (this.#turnRetryPolicy?.transientOnly && isDeferredProviderRetryMessage(errorMessage)) return true;
@@ -1134,6 +1158,80 @@ export class TurnRecovery {
 		if (this.#hasReplayUnsafeOutput(message) && !replaySafeUnexecutedTools) return false;
 		if (AIError.is(id, AIError.Flag.AccountPolicy) || this.isClassifierRefusal(message)) return true;
 		return AIError.retriable(id);
+	}
+
+	/** Whether the active profile has a later same-identity route for this provider failure. */
+	isSameModelRouteFallbackEligible(message: AssistantMessage): boolean {
+		return this.#sameModelRouteCandidates().length > 0 && this.#isProviderRouteFailure(message);
+	}
+
+	/** Whether a route hop must retain this assistant boundary for provider-valid continuation. */
+	shouldPreserveSameModelRouteTurn(message: AssistantMessage): boolean {
+		return this.isSameModelRouteFallbackEligible(message) && this.#isPartialProviderContinuation(message);
+	}
+
+	#sameModelRouteIndex(): number {
+		const policy = this.#turnRetryPolicy?.sameModelRouteFallback;
+		const model = this.#host.model();
+		if (!policy || !model) return -1;
+		return policy.selectors.findIndex(selector => {
+			const parsed = parseRetryFallbackSelector(selector, this.#host.modelRegistry);
+			return parsed?.provider === model.provider && parsed.id === model.id;
+		});
+	}
+
+	#sameModelRouteCandidates(): RetryFallbackSelector[] {
+		const policy = this.#turnRetryPolicy?.sameModelRouteFallback;
+		const index = this.#sameModelRouteIndex();
+		if (!policy || index < 0) return [];
+		return policy.selectors
+			.slice(index + 1)
+			.map(selector => parseRetryFallbackSelector(selector, this.#host.modelRegistry))
+			.filter((selector): selector is RetryFallbackSelector => selector !== undefined);
+	}
+
+	#isInterruptedProviderTransport(message: AssistantMessage): boolean {
+		if (this.#host.abortInProgress() || this.#host.isDisposed() || this.#host.streamingEditAbortTriggered()) {
+			return false;
+		}
+		const errorMessage = message.errorMessage ?? "";
+		return (
+			((message.stopReason === "aborted" || message.stopReason === "error") &&
+				(errorMessage === "Request was aborted" || errorMessage === "Request was aborted.")) ||
+			(message.stopReason === "error" &&
+				(STREAM_STALL_ERROR_RE.test(errorMessage) ||
+					HTTP2_STREAM_RESET_ERROR_RE.test(errorMessage) ||
+					PREMATURE_STREAM_CLOSE_ERROR_RE.test(errorMessage)))
+		);
+	}
+
+	#isProviderRouteFailure(message: AssistantMessage): boolean {
+		if (message.stopReason !== "error" && message.stopReason !== "aborted") return false;
+		if (this.#isInterruptedProviderTransport(message)) return true;
+		if (message.stopReason !== "error" || this.#isUsagePreflightBlocked(message)) return false;
+		if (this.isClassifierRefusal(message) || AIError.isPayloadRejection(message)) return false;
+		const id = this.#classifyRetryMessage(message);
+		if (
+			AIError.is(id, AIError.Flag.Abort) ||
+			AIError.is(id, AIError.Flag.UserInterrupt) ||
+			AIError.is(id, AIError.Flag.ContentBlocked) ||
+			AIError.is(id, AIError.Flag.MalformedFunctionCall) ||
+			AIError.is(id, AIError.Flag.ThinkingLoop)
+		) {
+			return false;
+		}
+		const contextWindow = this.#host.model()?.contextWindow ?? 0;
+		return !AIError.isContextOverflow(message, contextWindow);
+	}
+
+	#isPartialProviderContinuation(message: AssistantMessage): boolean {
+		if (!this.#isInterruptedProviderTransport(message) || !this.#host.textOutputCommitted()) return false;
+		let hasText = false;
+		for (const block of message.content) {
+			if (block.type === "text" && hasNonWhitespace(block.text)) hasText = true;
+			if (block.type === "toolCall" || block.type === "image" || block.type === "anthropicServerTool") return false;
+		}
+		return hasText;
 	}
 
 	/**
@@ -1720,6 +1818,27 @@ export class TurnRecovery {
 		return false;
 	}
 
+	async #trySameModelRouteFallback(
+		currentSelector: string,
+		failedMessage: AssistantMessage,
+		preserveFailedTurn: boolean,
+	): Promise<boolean> {
+		const ceiling = this.#host.thinkingLevelCeiling();
+		for (const selector of this.#sameModelRouteCandidates()) {
+			const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
+			const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
+			if (!candidate) continue;
+			if (ceiling !== undefined && !modelSupportsEffortCeiling(candidate, ceiling)) continue;
+			if (!this.#host.contextFitsModel(candidate, preserveFailedTurn ? undefined : failedMessage)) continue;
+			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
+			if (!apiKey) continue;
+			return this.applyRetryFallbackCandidate("same-model-route", selector, currentSelector, {
+				pinFallback: true,
+			});
+		}
+		return false;
+	}
+
 	/** The active model when it is a Fireworks Fast (`-fast`) variant, else undefined. */
 	#activeFireworksFastModel(): Model | undefined {
 		const model = this.#host.model();
@@ -1954,10 +2073,13 @@ export class TurnRecovery {
 		},
 	): Promise<boolean> {
 		const retrySettings = this.#host.settings.getGroup("retry");
+		const sameModelRouteOwned = this.#sameModelRouteIndex() >= 0;
+		const providerRouteFailure = sameModelRouteOwned && this.#isProviderRouteFailure(message);
 		if (
 			this.#turnRetryPolicy?.transientOnly &&
 			(options?.fireworksFastFallback || options?.hardErrorFallback) &&
-			!this.isRetryableError(message)
+			!this.isRetryableError(message) &&
+			!providerRouteFailure
 		) {
 			return false;
 		}
@@ -1994,6 +2116,7 @@ export class TurnRecovery {
 		const id = this.#classifyRetryMessage(message);
 		const preserveFailedTurn =
 			options?.preserveFailedTurn === true ||
+			(providerRouteFailure && this.#isPartialProviderContinuation(message)) ||
 			((classifierRefusal || AIError.is(id, AIError.Flag.MalformedFunctionCall)) &&
 				this.#unexecutedToolCallsReplaySafe(message));
 		const rateLimitReason = parseRateLimitReason(errorMessage);
@@ -2023,6 +2146,7 @@ export class TurnRecovery {
 		}
 		let switchedCredential = false;
 		let switchedModel = false;
+		let switchedRoute = false;
 		// Set when a usage-limit error pinned the wait to credential
 		// availability — suppresses the generic retry-after bump below.
 		let usageLimitWaitMs: number | undefined;
@@ -2031,7 +2155,12 @@ export class TurnRecovery {
 			this.#host.resetCurrentResponsesProviderSession("stale replay error");
 		}
 
-		if (!retryBudgetExhausted && !staleOpenAIResponsesReplayError && recordedUsageLimitOutcome) {
+		if (
+			!sameModelRouteOwned &&
+			!retryBudgetExhausted &&
+			!staleOpenAIResponsesReplayError &&
+			recordedUsageLimitOutcome
+		) {
 			if (
 				recordedUsageLimitOutcome.switchedCredential ||
 				// Convert the parsed hint to an absolute timestamp NOW, before the
@@ -2073,6 +2202,7 @@ export class TurnRecovery {
 		if (
 			accountPolicyDenial &&
 			currentModel &&
+			!sameModelRouteOwned &&
 			!(retryBudgetExhausted && this.#turnRetryPolicy?.sharedFallbackBudget)
 		) {
 			switchedCredential = await this.#host.modelRegistry.authStorage.rotateSessionCredential(
@@ -2091,9 +2221,14 @@ export class TurnRecovery {
 		// retry budget still bounds a genuinely stuck stream.
 		const thinkingLoop = AIError.is(id, AIError.Flag.ThinkingLoop);
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
+			if (providerRouteFailure && !(retryBudgetExhausted && this.#turnRetryPolicy?.sharedFallbackBudget)) {
+				switchedRoute = await this.#trySameModelRouteFallback(currentSelector, message, preserveFailedTurn);
+				switchedModel = switchedRoute;
+			}
 			// A refusal chain stops at the retry budget: the exhausted-attempt
 			// last resort is for provider failures, not classifier decisions.
 			if (
+				!sameModelRouteOwned &&
 				allowModelFallback &&
 				retrySettings.modelFallback &&
 				!thinkingLoop &&
@@ -2114,11 +2249,29 @@ export class TurnRecovery {
 			if (!switchedModel && allowModelFallback && options?.fireworksFastFallback) {
 				switchedModel = await this.#tryFireworksFastFallback(currentSelector);
 			}
-			if (switchedModel) {
+			if (switchedModel && !switchedRoute) {
 				delayMs = 0;
 			} else if (usageLimitWaitMs === undefined && parsedRetryAfterMs && parsedRetryAfterMs > delayMs) {
 				delayMs = parsedRetryAfterMs;
 			}
+		}
+
+		if (providerRouteFailure && !switchedRoute) {
+			if (this.#retryAttempt > 1) {
+				await this.persistTerminalEmptyErrorTurn(message);
+				const retryErrors = await this.#markPendingRetryErrors({ status: "superseded" });
+				await this.#host.emitSessionEvent({
+					type: "auto_retry_end",
+					success: false,
+					attempt: this.#retryAttempt - 1,
+					finalError: errorMessage,
+					retryErrors,
+				});
+			}
+			this.#clearPendingRetryErrors();
+			this.#retryAttempt = 0;
+			this.resolveRetry();
+			return false;
 		}
 
 		if (retryBudgetExhausted) {
@@ -2225,7 +2378,13 @@ export class TurnRecovery {
 			return false;
 		}
 
-		await this.#recordPendingRetryError(message, id, { switchedCredential, switchedModel, delayMs });
+		await this.#recordPendingRetryError(message, id, {
+			switchedCredential,
+			switchedModel,
+			switchedRoute,
+			delayMs,
+			preserveInContext: preserveFailedTurn,
+		});
 
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_start",
@@ -2241,6 +2400,9 @@ export class TurnRecovery {
 		// synthetic results and cannot repeat a side effect.
 		if (!preserveFailedTurn) {
 			this.removeAssistantMessageFromActiveContext(message, "auto-retry");
+		}
+		if (switchedRoute && this.#isPartialProviderContinuation(message)) {
+			this.#injectProviderRouteContinuation();
 		}
 
 		// A thinking/response loop retried into identical context loops again. Inject a
@@ -2367,6 +2529,24 @@ export class TurnRecovery {
 		this.#host.sessionManager.appendCustomMessageEntry(
 			THINKING_LOOP_REDIRECT_TYPE,
 			thinkingLoopRedirectTemplate,
+			false,
+			undefined,
+			"agent",
+		);
+	}
+
+	#injectProviderRouteContinuation(): void {
+		this.#host.agent.appendMessage({
+			role: "custom",
+			customType: PROVIDER_ROUTE_CONTINUE_TYPE,
+			content: manualContinueTemplate,
+			display: false,
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+		this.#host.sessionManager.appendCustomMessageEntry(
+			PROVIDER_ROUTE_CONTINUE_TYPE,
+			manualContinueTemplate,
 			false,
 			undefined,
 			"agent",
