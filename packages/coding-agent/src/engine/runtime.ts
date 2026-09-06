@@ -985,6 +985,14 @@ export class EngineRuntime {
 	recordCommandRejection(command: EngineRejectedCommand, settleCommand = true): Promise<void> {
 		return this.#inLane(command.agentInstanceId, async () => {
 			this.#throwIfDisposed();
+			const retainedBinding =
+				command.operation === "start" && command.code === "launch_failed"
+					? (this.#bindings.get(command.agentInstanceId) ?? (await this.store.getBinding(command.agentInstanceId)))
+					: undefined;
+			const sessionState =
+				command.operation === "start" && command.code === "launch_failed" && !retainedBinding
+					? "absent"
+					: undefined;
 			await this.#commitEvent(
 				{
 					commandId: command.commandId,
@@ -997,7 +1005,7 @@ export class EngineRuntime {
 					authorityGeneration: command.authorityGeneration,
 				},
 				"rejected",
-				{ code: command.code, message: command.message },
+				{ code: command.code, message: command.message, ...(sessionState ? { sessionState } : {}) },
 				command.commandId,
 				settleCommand ? command.commandId : undefined,
 				{

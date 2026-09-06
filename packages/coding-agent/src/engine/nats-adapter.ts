@@ -456,6 +456,7 @@ export class NatsEngineAdapter {
 								bindingGeneration: command.bindingGeneration,
 								code: "invalid_request",
 								message: error.message,
+								...(command.op === "start" ? { operation: "start" as const } : {}),
 							},
 							false,
 						)
@@ -486,6 +487,7 @@ export class NatsEngineAdapter {
 							bindingGeneration: command.bindingGeneration,
 							code: error.code,
 							message: error.message,
+							...(command.op === "start" ? { operation: "start" as const } : {}),
 						});
 					} else if (claimed && identity) {
 						await this.runtime.store.settleCommand(identity.commandId, identity.canonicalHash, {
