@@ -321,6 +321,77 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
+	it("exports exact hash-pinned native session bytes across restart", async () => {
+		const { runtime, cwd, options } = await createRuntime(async (session, input) => {
+			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
+			session.sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: "archive answer with unicode ☃" }],
+				api: "engine-runtime-test",
+				provider: "mock",
+				model: "test",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+			});
+			await session.sessionManager.saveArtifact("complete spilled attachment", "read");
+			return true;
+		});
+		await runtime.start(
+			{
+				commandId: "archive-native-command",
+				agentInstanceId: "archive-native-agent",
+				executionId: "archive-native-execution",
+				attemptId: "archive-native-attempt",
+				authorityGeneration: 1,
+				cwd,
+				input: "preserve exact native history",
+			},
+			profile,
+		);
+		await runtime.drain();
+		await expect(runtime.sessionArchive("archive-native-agent", undefined, 0, 17)).rejects.toMatchObject({
+			code: "agent_busy",
+		});
+		await runtime.dispose();
+
+		const restarted = await EngineRuntime.create(options);
+		const first = await restarted.sessionArchive("archive-native-agent", undefined, 0, 17);
+		const chunks = [Buffer.from(first.contentBase64, "base64")];
+		let offset = first.nextOffset;
+		while (offset !== null) {
+			const page = await restarted.sessionArchive("archive-native-agent", first.contentHash, offset, 17);
+			chunks.push(Buffer.from(page.contentBase64, "base64"));
+			offset = page.nextOffset;
+		}
+		const body = Buffer.concat(chunks);
+		expect(body.byteLength).toBe(first.byteLength);
+		const checkpoint = JSON.parse(body.toString("utf8"));
+		expect(checkpoint.schema).toBe("grimoire.engine.native_session_checkpoint.v1");
+		const nativeSession = Buffer.from(checkpoint.sessionJsonlBase64, "base64").toString("utf8");
+		expect(nativeSession).toContain("preserve exact native history");
+		expect(nativeSession).toContain("archive answer with unicode ☃");
+		expect(checkpoint.artifacts).toEqual([
+			expect.objectContaining({ name: "0.read.log", contentBase64: Buffer.from("complete spilled attachment").toString("base64") }),
+		]);
+		await expect(
+			restarted.sessionArchive("archive-native-agent", `sha256:${"0".repeat(64)}`, 0, 17),
+		).rejects.toMatchObject({ code: "stale_target" });
+		await restarted.dispose();
+
+		const secondRestart = await EngineRuntime.create(options);
+		const afterRestart = await secondRestart.sessionArchive("archive-native-agent", first.contentHash, 0, 24_000);
+		expect(Buffer.from(afterRestart.contentBase64, "base64")).toEqual(body);
+		await secondRestart.dispose();
+	}, 60_000);
+
 	it("fails closed when Engine mode has no explicit Settings snapshot", async () => {
 		const { runtime, cwd } = await createRuntime(async () => true, {}, { settings: undefined });
 		await expect(

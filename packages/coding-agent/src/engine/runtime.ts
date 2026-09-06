@@ -1169,6 +1169,111 @@ export class EngineRuntime {
 		});
 	}
 
+	async sessionArchive(
+		agentInstanceId: string,
+		expectedContentHash?: string,
+		offset = 0,
+		limit = 24_000,
+	): Promise<{
+		schema: "grimoire.engine.session_archive.v1";
+		agentInstanceId: string;
+		sessionId: string;
+		payloadSchema: "grimoire.engine.native_session_checkpoint.v1";
+		contentHash: string;
+		byteLength: number;
+		offset: number;
+		nextOffset: number | null;
+		contentBase64: string;
+	}> {
+		return await this.#inLane(agentInstanceId, async () => {
+			this.#throwIfDisposed();
+			const live = this.#bindings.get(agentInstanceId);
+			if (live) {
+				throw new EngineTargetError("agent_busy", `AgentInstance ${agentInstanceId} must be released before archival`);
+			}
+			const binding = await this.store.getBinding(agentInstanceId);
+			if (!binding?.sessionFile) {
+				throw new EngineTargetError("history_expired", `Native session archive is unavailable for ${agentInstanceId}`);
+			}
+			let content: string;
+			try {
+				content = await this.store.sessionStorage.readText(binding.sessionFile);
+			} catch (error) {
+				if (isEnoent(error)) {
+					throw new EngineTargetError("history_expired", `Native session archive is unavailable for ${agentInstanceId}`);
+				}
+				throw error;
+			}
+			const loaded = await loadSessionFile(binding.sessionFile, this.store.sessionStorage);
+			const header = loaded.entries[0];
+			if (header?.type !== "session") {
+				throw new EngineTargetError("history_expired", `Native session archive is invalid for ${agentInstanceId}`);
+			}
+			const artifactsDir = binding.sessionFile.endsWith(".jsonl")
+				? binding.sessionFile.slice(0, -".jsonl".length)
+				: "";
+			let artifactFiles: string[] = [];
+			if (artifactsDir) {
+				try {
+					const children = await fs.readdir(artifactsDir, { withFileTypes: true });
+					if (children.some(child => !child.isFile() || child.isSymbolicLink())) {
+						throw new EngineTargetError("history_expired", "Native session artifact directory is unsafe");
+					}
+					artifactFiles = children.map(child => path.join(artifactsDir, child.name)).sort();
+				} catch (error) {
+					if (!isEnoent(error)) throw error;
+				}
+			}
+			const artifacts: Array<{ name: string; contentHash: string; byteLength: number; contentBase64: string }> = [];
+			for (const artifactFile of artifactFiles) {
+				const name = path.basename(artifactFile);
+				if (!/^[A-Za-z0-9_.-]+$/.test(name) || path.dirname(path.resolve(artifactFile)) !== path.resolve(artifactsDir)) {
+					throw new EngineTargetError("history_expired", "Native session artifact path is invalid");
+				}
+				const artifactBytes = await fs.readFile(artifactFile);
+				artifacts.push({
+					name,
+					contentHash: `sha256:${crypto.createHash("sha256").update(artifactBytes).digest("hex")}`,
+					byteLength: artifactBytes.byteLength,
+					contentBase64: artifactBytes.toString("base64"),
+				});
+			}
+			const payloadSchema = "grimoire.engine.native_session_checkpoint.v1" as const;
+			const bytes = Buffer.from(
+				`${JSON.stringify({
+					schema: payloadSchema,
+					sessionId: header.id,
+					sessionJsonlHash: `sha256:${crypto.createHash("sha256").update(content, "utf8").digest("hex")}`,
+					sessionJsonlBase64: Buffer.from(content, "utf8").toString("base64"),
+					artifacts,
+				})}\n`,
+				"utf8",
+			);
+			const contentHash = `sha256:${crypto.createHash("sha256").update(bytes).digest("hex")}`;
+			if (expectedContentHash !== undefined && expectedContentHash !== contentHash) {
+				throw new EngineTargetError("stale_target", "Native session changed while its archive was being read");
+			}
+			if (!Number.isSafeInteger(offset) || offset < 0 || offset > bytes.byteLength) {
+				throw new EngineTargetError("invalid_request", "Native session archive offset is outside the payload");
+			}
+			if (!Number.isSafeInteger(limit) || limit < 1 || limit > 24_000) {
+				throw new EngineTargetError("invalid_request", "Native session archive limit is outside the accepted range");
+			}
+			const end = Math.min(bytes.byteLength, offset + limit);
+			return {
+				schema: "grimoire.engine.session_archive.v1",
+				agentInstanceId,
+				sessionId: header.id,
+				payloadSchema,
+				contentHash,
+				byteLength: bytes.byteLength,
+				offset,
+				nextOffset: end < bytes.byteLength ? end : null,
+				contentBase64: bytes.subarray(offset, end).toString("base64"),
+			};
+		});
+	}
+
 	async sweepExpiredChildHistory(now = Date.now()): Promise<{
 		expired: number;
 		archived: number;

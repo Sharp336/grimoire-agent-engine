@@ -280,6 +280,17 @@ describe("Engine Control + Query", () => {
 				},
 			],
 		});
+		runtime.sessionArchive = async (agentInstanceId, expectedContentHash, offset = 0, limit = 24_000) => ({
+			schema: "grimoire.engine.session_archive.v1",
+			agentInstanceId,
+			sessionId: `session-${agentInstanceId}`,
+			payloadSchema: "grimoire.engine.native_session_checkpoint.v1",
+			contentHash: expectedContentHash ?? `sha256:${"a".repeat(64)}`,
+			byteLength: 4,
+			offset,
+			nextOffset: null,
+			contentBase64: Buffer.from("test").subarray(offset, offset + limit).toString("base64"),
+		});
 		runtime.listInbox = async received => [
 			{
 				queueId: "queue-a",
@@ -320,6 +331,18 @@ describe("Engine Control + Query", () => {
 		});
 		expect(await client.request("session.usage", target)).toMatchObject({
 			provider: { status: "unavailable", reason: "provider_usage_not_supported" },
+		});
+		expect(
+			await client.request("session.archive", {
+				agentInstanceId: "agent-a",
+				expectedContentHash: `sha256:${"a".repeat(64)}`,
+				offset: 1,
+				limit: 2,
+			}),
+		).toMatchObject({
+			schema: "grimoire.engine.session_archive.v1",
+			agentInstanceId: "agent-a",
+			contentBase64: Buffer.from("es").toString("base64"),
 		});
 		const newestHistory = (await client.request("session.history", {
 			agentInstanceId: "agent-a",

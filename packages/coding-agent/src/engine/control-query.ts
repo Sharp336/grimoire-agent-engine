@@ -28,6 +28,7 @@ export type EngineControlQueryMethod =
 	| "result.get"
 	| "session.context"
 	| "session.history"
+	| "session.archive"
 	| "session.usage"
 	| "inbox.list"
 	| "inbox.enqueue"
@@ -234,6 +235,13 @@ async function dispatchRequest(request: EngineControlQueryRequest, options: Serv
 				optionalString(params.cursor),
 				optionalLimit(params.limit),
 			);
+		case "session.archive":
+			return await options.runtime.sessionArchive(
+				requiredString(params, "agentInstanceId"),
+				optionalString(params.expectedContentHash),
+				optionalNonNegativeInteger(params.offset),
+				optionalArchiveLimit(params.limit),
+			);
 		case "session.usage":
 			return await options.runtime.sessionUsage(requiredTarget(params));
 		case "inbox.list":
@@ -335,6 +343,7 @@ async function capabilities(options: ServerOptions): Promise<Record<string, unkn
 			"result.get",
 			"session.context",
 			"session.history",
+			"session.archive",
 			"session.usage",
 			"inbox.list",
 			"inbox.enqueue",
@@ -345,6 +354,7 @@ async function capabilities(options: ServerOptions): Promise<Record<string, unkn
 		limits: { frameBytes: ENGINE_CONTROL_QUERY_MAX_FRAME_BYTES, resultChars: ENGINE_CONTROL_QUERY_MAX_RESULT_CHARS },
 		cursor: { opaque: true, order: "oldest_first", gapIsExplicit: true },
 		historyCursor: { opaque: true, order: "page_chronological", direction: "older", gapIsExplicit: true },
+		sessionArchive: { exactNativeBytes: true, hashPinnedPages: true, maxChunkBytes: 24_000 },
 		rawDiagnostics: false,
 	};
 }
@@ -689,6 +699,7 @@ function validateRequest(value: unknown): EngineControlQueryRequest {
 			"result.get",
 			"session.context",
 			"session.history",
+			"session.archive",
 			"session.usage",
 			"inbox.list",
 			"inbox.enqueue",
@@ -823,6 +834,22 @@ function requiredInteger(record: Record<string, unknown>, key: string): number {
 
 function optionalLimit(value: unknown): number {
 	return Number.isSafeInteger(value) ? Math.max(1, Math.min(1000, Number(value))) : 100;
+}
+
+function optionalNonNegativeInteger(value: unknown): number {
+	if (value === undefined) return 0;
+	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+		throw new EngineTargetError("invalid_request", "offset must be a non-negative safe integer");
+	}
+	return value;
+}
+
+function optionalArchiveLimit(value: unknown): number {
+	if (value === undefined) return 24_000;
+	if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 1 || value > 24_000) {
+		throw new EngineTargetError("invalid_request", "session archive limit must be between 1 and 24000 bytes");
+	}
+	return value;
 }
 
 function sameSecret(candidate: string, expected: string): boolean {
