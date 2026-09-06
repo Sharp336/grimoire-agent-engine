@@ -1,6 +1,10 @@
 import { describe, expect, it } from "bun:test";
 import type { Model, UsageReport } from "@oh-my-pi/pi-ai";
-import { ProviderAdmissionClient, ProviderAdmissionError } from "../src/engine/provider-admission";
+import {
+	ProviderAdmissionClient,
+	ProviderAdmissionError,
+	withProviderObservationContext,
+} from "../src/engine/provider-admission";
 import type { AuthStorage } from "../src/session/auth-storage";
 
 describe("ProviderAdmissionClient", () => {
@@ -84,9 +88,15 @@ describe("ProviderAdmissionClient", () => {
 			return Response.json({ allowed: true });
 		}).createHook(identity(), authStorage, "https://chatgpt.com/backend-api", [
 			{
+				expectedPrincipalId: "grimoire:user:owner",
+				profileRef: "gctx:2222222222222222",
+				profileContentHash: "sha256:profile",
 				providerAccountRef: "gctx:4444444444444444",
+				providerAccountContentHash: "sha256:account",
 				routeRef: "gctx:5555555555555555",
+				routeContentHash: "sha256:route",
 				providerId: "cheapai-account-1",
+				runtimeProviderId: "cheapai-account-1",
 				modelId: "gpt-5.6-terra",
 				baseUrl: "https://cheapai.invalid/v1",
 			},
@@ -137,12 +147,119 @@ describe("ProviderAdmissionClient", () => {
 		expect(await result).toBe(cancelled);
 		expect(providerCalls).toBe(0);
 	});
+
+	it("records one redacted idempotent observation for a completed API-key stream", async () => {
+		const observations: Array<Record<string, unknown>> = [];
+		const admissionFetch = async (_input: string | URL | Request, init?: RequestInit) => {
+			const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			observations.push(body);
+			return observations.length === 1
+				? new Response("lost acknowledgement", { status: 503 })
+				: Response.json({ allowed: true, status: "recorded" });
+		};
+		const route = {
+			expectedPrincipalId: "grimoire:user:owner",
+			profileRef: "gctx:2222222222222222",
+			profileContentHash: "sha256:profile",
+			providerAccountRef: "gctx:4444444444444444",
+			providerAccountContentHash: "sha256:account",
+			routeRef: "gctx:5555555555555555",
+			routeContentHash: "sha256:route",
+			providerId: "cheapai",
+			runtimeProviderId: "artel-4444444444444444",
+			modelId: "gpt-5.6-terra",
+			baseUrl: "https://cheapai.invalid/v1",
+		};
+		const hook = new ProviderAdmissionClient(
+			"http://127.0.0.1/provider-admission",
+			"host-token-must-not-enter-observation",
+			admissionFetch,
+		).createHook(undefined, {} as AuthStorage, "", [route]);
+		const wrapped = hook.wrapFetch(
+			{ id: route.modelId, provider: route.runtimeProviderId, baseUrl: route.baseUrl } as Model,
+			async () => {
+				const response = new Response("completed answer");
+				Object.defineProperty(response, "url", { value: "https://cheapai.invalid/v1/chat/completions" });
+				return response;
+			},
+		);
+		const result = await withProviderObservationContext(
+			{ effectId: "model_effect_1", modelCallId: "model-1" },
+			async () => {
+				const response = await wrapped("https://cheapai.invalid/v1/chat/completions");
+				return { url: response.url, answer: await response.text() };
+			},
+		);
+		expect(result.url).toBe("https://cheapai.invalid/v1/chat/completions");
+		expect(result.answer).toBe("completed answer");
+		expect(observations).toHaveLength(2);
+		expect(observations[0]).toEqual(observations[1]);
+		expect(observations[0]).toMatchObject({
+			phase: "observe",
+			expectedPrincipalId: "grimoire:user:owner",
+			routeRef: route.routeRef,
+			providerId: "cheapai",
+			effectId: "model_effect_1",
+			modelCallId: "model-1",
+			physicalRequestOrdinal: 1,
+			outcome: "success",
+			statusCode: 200,
+		});
+		const encoded = JSON.stringify(observations);
+		expect(encoded).not.toContain("host-token-must-not-enter-observation");
+		expect(encoded).not.toContain("completed answer");
+	});
+
+	it("does not delay provider fallback while a failed-route observation is pending", async () => {
+		const observationStarted = Promise.withResolvers<void>();
+		const observationRelease = Promise.withResolvers<Response>();
+		let observation: Record<string, unknown> | undefined;
+		const route = {
+			expectedPrincipalId: "grimoire:user:owner",
+			profileRef: "gctx:2222222222222222",
+			profileContentHash: "sha256:profile",
+			providerAccountRef: "gctx:4444444444444444",
+			providerAccountContentHash: "sha256:account",
+			routeRef: "gctx:5555555555555555",
+			routeContentHash: "sha256:route",
+			providerId: "cheapai",
+			runtimeProviderId: "artel-4444444444444444",
+			modelId: "gpt-5.6-terra",
+			baseUrl: "https://cheapai.invalid/v1",
+		};
+		const hook = new ProviderAdmissionClient("http://127.0.0.1/provider-admission", "token", async (_input, init) => {
+			observation = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			observationStarted.resolve();
+			return await observationRelease.promise;
+		}).createHook(undefined, {} as AuthStorage, "", [route]);
+		const wrapped = hook.wrapFetch(
+			{ id: route.modelId, provider: route.runtimeProviderId, baseUrl: route.baseUrl } as Model,
+			async () => {
+				throw new Error("HTTP 429 upstream rate limited");
+			},
+		);
+		const startedAt = performance.now();
+		await expect(
+			withProviderObservationContext({ effectId: "model_effect_2", modelCallId: "model-2" }, async () =>
+				wrapped("https://cheapai.invalid/v1/chat/completions"),
+			),
+		).rejects.toThrow("HTTP 429");
+		expect(performance.now() - startedAt).toBeLessThan(1_000);
+		await observationStarted.promise;
+		expect(observation).toMatchObject({ outcome: "rate_limited", statusCode: 429 });
+		observationRelease.resolve(Response.json({ allowed: true, status: "recorded" }));
+	});
 });
 
 function identity() {
 	return {
+		expectedPrincipalId: "grimoire:user:owner",
+		profileRef: "gctx:1111111111111111",
+		profileContentHash: "sha256:profile",
 		providerAccountRef: "gctx:2222222222222222",
+		providerAccountContentHash: "sha256:account",
 		routeRef: "gctx:3333333333333333",
+		routeContentHash: "sha256:route",
 		providerKind: "openai_codex_subscription" as const,
 		providerId: "openai-codex",
 		accountBindingId: "acct-1",

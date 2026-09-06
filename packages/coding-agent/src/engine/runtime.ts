@@ -66,6 +66,7 @@ import {
 	validateCommandContext,
 	validateStartRequest,
 } from "./contracts";
+import { withProviderObservationContext } from "./provider-admission";
 import { safeEngineErrorDetail } from "./public-error";
 import { engineAgentId, engineAgentInstanceId, engineRouteToken } from "./route";
 import {
@@ -3159,8 +3160,8 @@ export class EngineRuntime {
 			const previous = binding.session.getLastAssistantMessage();
 			let dispatched: boolean;
 			try {
-				dispatched = await this.#withSessionScope(binding, () =>
-					this.#dispatchPrompt(binding.session, input, identity, kind),
+				dispatched = await withProviderObservationContext(effect, () =>
+					this.#withSessionScope(binding, () => this.#dispatchPrompt(binding.session, input, identity, kind)),
 				);
 				const current = binding.session.getLastAssistantMessage();
 				if (current !== previous && current?.stopReason === "error") {
