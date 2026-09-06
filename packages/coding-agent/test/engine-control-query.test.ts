@@ -273,6 +273,7 @@ describe("Engine Control + Query", () => {
 		runtime.sessionHistory = async agentInstanceId => ({
 			sessionId: `session-${agentInstanceId}`,
 			leafEntryId: "entry-assistant",
+			sessionLeafEntryId: "entry-hidden-canonical",
 			entries: [
 				{
 					entryId: "entry-user",
@@ -386,9 +387,16 @@ describe("Engine Control + Query", () => {
 		const newestHistory = (await client.request("session.history", {
 			agentInstanceId: "agent-a",
 			limit: 1,
-		})) as { entries: Array<{ entryId: string }>; previousCursor: string; hasMore: boolean };
+		})) as {
+			entries: Array<{ entryId: string }>;
+			previousCursor: string;
+			hasMore: boolean;
+			sessionLeafEntryId: string;
+		};
 		expect(newestHistory).toMatchObject({
 			entries: [{ entryId: "entry-assistant" }],
+			leafEntryId: "entry-assistant",
+			sessionLeafEntryId: "entry-hidden-canonical",
 			hasMore: true,
 			resyncRequired: false,
 			activityCompleteness: "legacy_messages_only",
@@ -399,13 +407,22 @@ describe("Engine Control + Query", () => {
 				cursor: newestHistory.previousCursor,
 				limit: 1,
 			}),
-		).toMatchObject({ entries: [{ entryId: "entry-user" }], hasMore: false, resyncRequired: false });
+		).toMatchObject({
+			entries: [{ entryId: "entry-user" }],
+			sessionLeafEntryId: "entry-hidden-canonical",
+			hasMore: false,
+			resyncRequired: false,
+		});
 		expect(
 			await client.request("session.history", {
 				agentInstanceId: "agent-b",
 				cursor: newestHistory.previousCursor,
 			}),
-		).toMatchObject({ entries: [], resyncRequired: true });
+		).toMatchObject({
+			entries: [],
+			sessionLeafEntryId: "entry-hidden-canonical",
+			resyncRequired: true,
+		});
 		expect(await client.request("inbox.list", target)).toMatchObject({
 			items: [{ queueId: "queue-a", sourceType: "user", deliveryPayload: "edited" }],
 		});

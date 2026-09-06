@@ -536,6 +536,7 @@ async function listSessionHistory(
 			agentInstanceId,
 			sessionId: history.sessionId,
 			leafEntryId: history.leafEntryId,
+			sessionLeafEntryId: history.sessionLeafEntryId,
 			entries: [],
 			previousCursor: null,
 			hasMore: history.entries.length > 0,
@@ -551,6 +552,7 @@ async function listSessionHistory(
 		agentInstanceId,
 		sessionId: history.sessionId,
 		leafEntryId: history.leafEntryId,
+		sessionLeafEntryId: history.sessionLeafEntryId,
 		entries,
 		previousCursor:
 			pageStart > 0
