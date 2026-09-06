@@ -651,6 +651,93 @@ describe("EngineProfileResolver", () => {
 			reopened.close();
 		}
 	});
+
+	it("stops primary and eager fallback material resolution when a pending launch is cancelled", async () => {
+		for (const blockedStage of ["primary", "eager-fallback"] as const) {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), `omp-engine-provider-cancel-${blockedStage}-`));
+			const cache = path.join(root, "artifacts");
+			await fs.mkdir(cache);
+			const profileRef = "gctx:abababababababab";
+			const routeRefs = ["gctx:cdcdcdcdcdcdcdcd", "gctx:efefefefefefefef", "gctx:ghghghghghghghgh"];
+			const accountRefs = ["gctx:jkjkjkjkjkjkjkjk", "gctx:mnmnmnmnmnmnmnmn", "gctx:pqpqpqpqpqpqpqpq"];
+			await artifact(cache, profileRef, "grimoire.agent_profile.v1", {
+				schema: "grimoire.agent_profile.v1",
+				status: "active",
+				models: routeRefs,
+				allowSameModelProviderFallback: true,
+			});
+			for (const [index, routeRef] of routeRefs.entries()) {
+				await artifact(cache, routeRef, "grimoire.available_model_route.v1", {
+					schema: "grimoire.available_model_route.v1",
+					status: "active",
+					providerAccountRef: accountRefs[index],
+					model: {
+						modelIdentityId: "claude-opus-5",
+						providerSurfaceId: `provider-${index}`,
+						modelId: "claude-opus-5",
+						contextWindow: 200_000,
+						maxOutputTokens: 32_000,
+					},
+				});
+				await artifact(cache, accountRefs[index]!, "grimoire.provider_account.v1", {
+					schema: "grimoire.provider_account.v1",
+					status: "active",
+					providerId: `provider-${index}`,
+					api: "anthropic-messages",
+					baseUrl: `https://provider-${index}.invalid/v1`,
+					trusted: true,
+					credentialPlacement: { mode: "owner_local", status: "local_only" },
+					credential: { type: "api_key", key: `wincred://grimoire.provider.${String(index).repeat(64)}` },
+				});
+			}
+			const blockedCall = blockedStage === "primary" ? 1 : 2;
+			const calls: string[] = [];
+			const lookupStarted = Promise.withResolvers<void>();
+			const execution = new ProviderExecutionClient(
+				"http://127.0.0.1/provider-execution",
+				"local-token",
+				async (_url, init) => {
+					const request = JSON.parse(String(init?.body));
+					calls.push(request.providerAccountRef);
+					if (calls.length === blockedCall) {
+						if (!init?.signal) throw new Error("Expected pending launch signal");
+						lookupStarted.resolve();
+						const aborted = Promise.withResolvers<void>();
+						init.signal.addEventListener("abort", () => aborted.reject(init.signal!.reason), { once: true });
+						await aborted.promise;
+					}
+					return Response.json({
+						...request,
+						schema: "grimoire.provider_execution.result.v1",
+						status: "ready",
+						allowed: true,
+						mode: "owner_local",
+						providerRuntimeId: `runtime-${request.providerAccountRef.slice(5)}`,
+						api: "anthropic-messages",
+						baseUrl: "https://provider.invalid/v1",
+						credential: "fixture-secret",
+					});
+				},
+			);
+			const resolver = new EngineProfileResolver(
+				cache,
+				path.join(root, "credentials"),
+				undefined,
+				undefined,
+				execution,
+			);
+			const controller = new AbortController();
+			const resolving = resolver.resolve(
+				{ spawns: "", profileDigest: hash(profileRef), launchProfileRef: profileRef },
+				root,
+				controller.signal,
+			);
+			await lookupStarted.promise;
+			controller.abort(new Error(`cancel ${blockedStage}`));
+			await expect(resolving).rejects.toThrow(`cancel ${blockedStage}`);
+			expect(calls).toEqual(accountRefs.slice(0, blockedCall));
+		}
+	});
 });
 
 async function artifact(cache: string, ref: string, kind: string, content: object): Promise<void> {

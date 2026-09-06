@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- Stopped pending Agent Engine starts from continuing provider credential resolution after a durable cancellation.
 - Continued Agent Engine turns across an AgentProfile's ordered same-model provider routes without replaying partial output or settled tools.
 - Scoped Agent Engine terminal yields to successful tool results from the current Attempt.
 - Preserved truncated Agent Engine child-result metadata and exposed the full transcript link to the parent agent.

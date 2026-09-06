@@ -79,7 +79,9 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 			archiveChildHistory: artifactRpc
 				? request => archiveChildHistory(artifactRpc, config.runtimeDir, request)
 				: undefined,
-			resolveSessionProfile: profileResolver ? (profile, cwd) => profileResolver.resolve(profile, cwd) : undefined,
+			resolveSessionProfile: profileResolver
+				? (profile, cwd, signal) => profileResolver.resolve(profile, cwd, signal)
+				: undefined,
 			resolveSessionContinuation: profileResolver
 				? (profile, cwd) => profileResolver.continuationDigest(profile, cwd)
 				: undefined,

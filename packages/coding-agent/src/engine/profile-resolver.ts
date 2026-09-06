@@ -165,7 +165,12 @@ export class EngineProfileResolver {
 		});
 	}
 
-	async resolve(launch: EngineLaunchProfile, cwd: string): Promise<ResolvedEngineSessionProfile> {
+	async resolve(
+		launch: EngineLaunchProfile,
+		cwd: string,
+		signal?: AbortSignal,
+	): Promise<ResolvedEngineSessionProfile> {
+		signal?.throwIfAborted();
 		const profileRef = requiredRef(launch.launchProfileRef, "launchProfileRef");
 		const cachedProfile = await this.#read(profileRef, "grimoire.agent_profile.v1");
 		if (cachedProfile.content_hash !== launch.profileDigest) {
@@ -186,6 +191,7 @@ export class EngineProfileResolver {
 		let sameModelIdentityId: string | undefined;
 		if (profile.allowSameModelProviderFallback) {
 			for (const routeRef of candidates) {
+				signal?.throwIfAborted();
 				try {
 					const route = parseJson<AvailableModelRoute>(
 						(await this.#read(routeRef, "grimoire.available_model_route.v1")).content,
@@ -195,12 +201,15 @@ export class EngineProfileResolver {
 						sameModelIdentityId = route.model.modelIdentityId;
 						break;
 					}
-				} catch {}
+				} catch {
+					if (signal?.aborted) throw signal.reason;
+				}
 			}
 			if (!sameModelIdentityId) throw new Error("AgentProfile has no usable same-model identity");
 		}
 		let lastError: unknown;
 		for (const [index, routeRef] of candidates.entries()) {
+			signal?.throwIfAborted();
 			try {
 				if (sameModelIdentityId) {
 					const route = parseJson<AvailableModelRoute>(
@@ -219,8 +228,10 @@ export class EngineProfileResolver {
 					cwd,
 					spawnPolicy.maxSpawnDepth,
 					profile.allowSameModelProviderFallback ? candidates.slice(index + 1) : [],
+					signal,
 				);
 			} catch (error) {
+				if (signal?.aborted) throw signal.reason;
 				lastError = error;
 			}
 		}
@@ -248,7 +259,9 @@ export class EngineProfileResolver {
 		cwd: string,
 		maxSpawnDepth: number,
 		fallbackRouteRefs: string[],
+		signal?: AbortSignal,
 	): Promise<ResolvedEngineSessionProfile> {
+		signal?.throwIfAborted();
 		const cachedRoute = await this.#read(routeRef, "grimoire.available_model_route.v1");
 		const route = parseJson<AvailableModelRoute>(cachedRoute.content, "AvailableModelRoute");
 		if (
@@ -311,7 +324,7 @@ export class EngineProfileResolver {
 				})
 			: undefined;
 		const executionMaterial = executionIdentity
-			? await this.providerExecutionClient!.resolve(executionIdentity)
+			? await this.providerExecutionClient!.resolve(executionIdentity, signal)
 			: undefined;
 		const admissionIdentity =
 			account.providerKind === "openai_codex_subscription"
@@ -446,6 +459,7 @@ export class EngineProfileResolver {
 			const fallbackApiKeyRoutes: ProviderApiKeyRouteIdentity[] = [];
 			if (profile.allowSameModelProviderFallback && (embeddedCredential || localBinding)) {
 				for (const fallbackRouteRef of fallbackRouteRefs) {
+					signal?.throwIfAborted();
 					try {
 						const fallbackCachedRoute = await this.#read(fallbackRouteRef, "grimoire.available_model_route.v1");
 						const fallbackRoute = parseJson<AvailableModelRoute>(
@@ -514,7 +528,7 @@ export class EngineProfileResolver {
 							providerId: fallbackAccount.providerId,
 							modelId: fallbackRoute.model.modelId,
 						});
-						const fallbackMaterial = await this.providerExecutionClient!.resolve(fallbackIdentity);
+						const fallbackMaterial = await this.providerExecutionClient!.resolve(fallbackIdentity, signal);
 						const fallbackMarker = providerExecutionMarker(fallbackIdentity);
 						externalCredentialIdentities.set(fallbackMarker, {
 							identity: fallbackIdentity,
@@ -545,6 +559,7 @@ export class EngineProfileResolver {
 						const selector = formatModelStringWithRouting(fallbackModel);
 						if (!fallbackSelectors.includes(selector)) fallbackSelectors.push(selector);
 					} catch {
+						if (signal?.aborted) throw signal.reason;
 						// Unavailable routes are omitted once; the runtime chain never cycles back to them.
 					}
 				}

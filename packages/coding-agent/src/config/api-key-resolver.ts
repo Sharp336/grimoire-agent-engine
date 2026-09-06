@@ -52,7 +52,7 @@ export function createApiKeyResolver(
 	const { sessionId, baseUrl, modelId } = options;
 	return async ({ lastChance, error, signal, previousKey }) => {
 		if (error === undefined) {
-			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId });
+			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId, signal });
 		}
 		if (lastChance) {
 			// Account constraint (401 / usage / account-rate-limit): rotate to a
@@ -74,7 +74,7 @@ export function createApiKeyResolver(
 				// auth decline can instead mean a peer refreshed the bearer.
 				if (AIError.isUsageLimit(error) || isUsageLimitOutcome(status, message)) return undefined;
 			}
-			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId });
+			return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId, signal });
 		}
 		return registry.getApiKeyForProvider(provider, sessionId, { baseUrl, modelId, forceRefresh: true, signal });
 	};

@@ -329,6 +329,7 @@ export interface EngineRuntimeOptions {
 	resolveSessionProfile?: (
 		profile: EngineLaunchProfile,
 		cwd: string,
+		signal?: AbortSignal,
 	) => Promise<{
 		options: Partial<CreateAgentSessionOptions>;
 		childProfiles?: EngineChildProfile[];
@@ -349,6 +350,11 @@ export interface EngineRuntimeOptions {
 		signal?: AbortSignal;
 	}) => Promise<EngineChildLaunchResult>;
 }
+
+type PendingStartResolution = {
+	target: Pick<EngineStartRequest, "agentInstanceId" | "executionId" | "attemptId" | "authorityGeneration">;
+	controller: AbortController;
+};
 
 export class EngineRuntime {
 	readonly agentRegistry = new AgentRegistry();
@@ -377,6 +383,7 @@ export class EngineRuntime {
 	readonly #listeners = new Set<EngineEventListener>();
 	readonly #toolInvocations = new Map<string, ToolInvocationRecord>();
 	readonly #pendingToolApprovals = new Map<string, PendingToolApproval>();
+	readonly #pendingStarts = new Set<PendingStartResolution>();
 	readonly #sessionRoot: string;
 	#inboxWakeSignal = Promise.withResolvers<void>();
 	#inboxWakeRun?: Promise<void>;
@@ -469,18 +476,30 @@ export class EngineRuntime {
 		const laneIds = request.historyEdit
 			? [request.agentInstanceId, request.historyEdit.source.agentInstanceId]
 			: [request.agentInstanceId];
-		return this.#inLanes(laneIds, () => this.#startInLane(request, profile)).catch(async error => {
-			if (
-				error instanceof EngineTargetError &&
-				(error.code === "agent_busy" || error.code === "stale_target") &&
-				request.queueId &&
-				request.expectedRevision !== undefined &&
-				(await this.store.rearmInboxWake(request.queueId, request.expectedRevision))
-			) {
-				this.#signalInboxWake();
-			}
-			throw error;
-		});
+		const pending: PendingStartResolution = {
+			target: {
+				agentInstanceId: request.agentInstanceId,
+				executionId: request.executionId,
+				attemptId: request.attemptId,
+				authorityGeneration: request.authorityGeneration,
+			},
+			controller: new AbortController(),
+		};
+		this.#pendingStarts.add(pending);
+		return this.#inLanes(laneIds, () => this.#startInLane(request, profile, pending.controller.signal))
+			.catch(async error => {
+				if (
+					error instanceof EngineTargetError &&
+					(error.code === "agent_busy" || error.code === "stale_target") &&
+					request.queueId &&
+					request.expectedRevision !== undefined &&
+					(await this.store.rearmInboxWake(request.queueId, request.expectedRevision))
+				) {
+					this.#signalInboxWake();
+				}
+				throw error;
+			})
+			.finally(() => this.#pendingStarts.delete(pending));
 	}
 
 	steer(request: EngineSteerRequest): Promise<EngineControlResult> {
@@ -870,6 +889,17 @@ export class EngineRuntime {
 		const cancelled = await this.store.cancelPendingStart(request, request.commandId);
 		if (cancelled.event) this.#notifyEvents([cancelled.event]);
 		if (cancelled.status === "cancelled" || cancelled.status === "already_cancelled") {
+			const reason = request.reason ?? "Engine pending start cancelled";
+			for (const pending of this.#pendingStarts) {
+				if (
+					pending.target.agentInstanceId === request.agentInstanceId &&
+					pending.target.executionId === request.executionId &&
+					pending.target.attemptId === request.attemptId &&
+					pending.target.authorityGeneration === request.authorityGeneration
+				) {
+					pending.controller.abort(new Error(reason));
+				}
+			}
 			return {
 				phase: "applied",
 				preStart: true,
@@ -2028,7 +2058,11 @@ export class EngineRuntime {
 		return path.join(this.#sessionRoot, ".archive", engineRouteToken(agentInstanceId));
 	}
 
-	async #startInLane(request: EngineStartRequest, profile: EngineLaunchProfile): Promise<EngineStartResult> {
+	async #startInLane(
+		request: EngineStartRequest,
+		profile: EngineLaunchProfile,
+		pendingStartSignal: AbortSignal,
+	): Promise<EngineStartResult> {
 		this.#throwIfDisposed();
 		let binding = this.#bindings.get(request.agentInstanceId);
 		if (binding) {
@@ -2146,6 +2180,7 @@ export class EngineRuntime {
 				continuationDigest,
 				conversationIdentityDigest,
 				preparedSession,
+				pendingStartSignal,
 			);
 		if (preparedHistory?.pendingInboxSourceSessionId) {
 			binding.pendingInboxSourceSessionId = preparedHistory.pendingInboxSourceSessionId;
@@ -2322,6 +2357,7 @@ export class EngineRuntime {
 		continuationDigest: string,
 		conversationIdentityDigest: string,
 		preparedSessionManager?: SessionManager,
+		pendingStartSignal?: AbortSignal,
 	): Promise<LiveBinding> {
 		let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
 		let unsubscribeCreated: (() => void) | undefined;
@@ -2332,7 +2368,9 @@ export class EngineRuntime {
 		try {
 			if (preparedSessionManager && !uncommittedForkSessionFile)
 				throw new Error("Prepared session was not durably materialized");
-			const resolved = await this.#resolveSessionProfile?.(profile, request.cwd);
+			pendingStartSignal?.throwIfAborted();
+			const resolved = await this.#resolveSessionProfile?.(profile, request.cwd, pendingStartSignal);
+			pendingStartSignal?.throwIfAborted();
 			disposeResolved = resolved?.dispose;
 			const prior = await this.store.getBinding(request.agentInstanceId);
 			const profileDigest = continuationDigest;

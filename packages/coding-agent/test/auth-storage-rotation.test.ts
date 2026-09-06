@@ -226,6 +226,53 @@ describe("AuthStorage account rotation", () => {
 		expect(rotationTargets).toEqual(["stale-access"]);
 	});
 
+	test("API key resolver cancellation stops initial and post-rotation physical lookups before a request", async () => {
+		for (const stage of ["initial", "post-rotation"] as const) {
+			const controller = new AbortController();
+			let requestCalls = 0;
+			let observedSignal: AbortSignal | undefined;
+			const lookupStarted = Promise.withResolvers<void>();
+			const registry: Parameters<typeof createApiKeyResolver>[0] = {
+				async getApiKeyForProvider(_provider, _sessionId, options) {
+					observedSignal = options?.signal;
+					lookupStarted.resolve();
+					if (!options?.signal) throw new Error("Expected request abort signal");
+					const aborted = Promise.withResolvers<void>();
+					options.signal.addEventListener("abort", () => aborted.reject(options.signal!.reason), { once: true });
+					await aborted.promise;
+					return "unreachable";
+				},
+				authStorage: {
+					async rotateSessionCredential() {
+						return true;
+					},
+				},
+			};
+			const resolver = createApiKeyResolver(registry, "abortable-provider");
+			const run =
+				stage === "initial"
+					? withAuth(
+							resolver,
+							async () => {
+								requestCalls += 1;
+								return "unexpected";
+							},
+							{ signal: controller.signal },
+						)
+					: resolver({
+							lastChance: true,
+							error: Object.assign(new Error("401 authentication_error"), { status: 401 }),
+							previousKey: "expired",
+							signal: controller.signal,
+						});
+			await lookupStarted.promise;
+			controller.abort(new Error(`cancel ${stage} lookup`));
+			await expect(run).rejects.toThrow(stage === "initial" ? "No API key" : `cancel ${stage} lookup`);
+			expect(observedSignal).toBe(controller.signal);
+			expect(requestCalls).toBe(0);
+		}
+	});
+
 	test("API key resolver stops when a usage-limit rotation has no unblocked sibling", async () => {
 		const resolvedKeys = ["quota-blocked-B", "quota-blocked-A"];
 		const registry: Parameters<typeof createApiKeyResolver>[0] = {

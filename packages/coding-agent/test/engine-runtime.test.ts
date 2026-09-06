@@ -4208,6 +4208,86 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
+	it("aborts profile resolution only after a pending Start is durably cancelled", async () => {
+		const resolutionStarted = Promise.withResolvers<AbortSignal>();
+		let promptCalls = 0;
+		const { runtime, cwd } = await createRuntime(
+			async () => {
+				promptCalls += 1;
+				return true;
+			},
+			{
+				resolveSessionProfile: async (_launch, _cwd, signal) => {
+					if (!signal) throw new Error("Expected pending Start signal");
+					resolutionStarted.resolve(signal);
+					const aborted = Promise.withResolvers<void>();
+					signal.addEventListener("abort", () => aborted.reject(signal.reason), { once: true });
+					await aborted.promise;
+					throw new Error("unreachable");
+				},
+			},
+		);
+		const command = {
+			commandId: "command-cancel-profile-resolution",
+			operation: "start" as const,
+			deviceId: "device-cancel-profile-resolution",
+			engineId: "engine-cancel-profile-resolution",
+			engineGeneration: runtime.engineGeneration,
+			agentInstanceId: "agent-cancel-profile-resolution",
+			agentInstanceRef: "grimoire://tasks/project/task/agents/agent-cancel-profile-resolution",
+			executionId: "execution-cancel-profile-resolution",
+			attemptId: "attempt-cancel-profile-resolution",
+			authorityGeneration: 1,
+			payloadHash: "sha256:cancel-profile-resolution-payload",
+			canonicalHash: "sha256:cancel-profile-resolution-command",
+		};
+		expect(await runtime.store.admitCommand(command, runtime.engineGeneration)).toEqual({ status: "claimed" });
+		const start = runtime.start(
+			{
+				commandId: command.commandId,
+				agentInstanceId: command.agentInstanceId,
+				agentInstanceRef: command.agentInstanceRef,
+				executionId: command.executionId,
+				attemptId: command.attemptId,
+				authorityGeneration: command.authorityGeneration,
+				cwd,
+				input: "must never reach the model",
+			},
+			profile,
+		);
+		const signal = await resolutionStarted.promise;
+		expect(signal.aborted).toBeFalse();
+
+		const cancelled = await runtime.cancelPendingStart({
+			commandId: "command-stop-profile-resolution",
+			agentInstanceId: command.agentInstanceId,
+			executionId: command.executionId,
+			attemptId: command.attemptId,
+			authorityGeneration: command.authorityGeneration,
+			engineGeneration: runtime.engineGeneration,
+			reason: "cancel provider material lookup",
+		});
+
+		expect(cancelled).toMatchObject({ phase: "applied", preStart: true, manualHold: true });
+		expect(signal.aborted).toBeTrue();
+		await expect(start).rejects.toThrow("cancel provider material lookup");
+		expect(promptCalls).toBe(0);
+		expect(runtime.getBinding(command.agentInstanceId)).toBeUndefined();
+		expect(await runtime.store.getAttempt(command.attemptId)).toBeUndefined();
+		expect(
+			(await runtime.store.pendingEvents()).filter(
+				event =>
+					event.attemptId === command.attemptId &&
+					(event.kind.startsWith("model_") || event.kind.startsWith("tool_")),
+			),
+		).toEqual([]);
+		expect(await runtime.store.admitCommand(command, runtime.engineGeneration + 1)).toMatchObject({
+			status: "replay",
+			receipt: { outcome: "rejected", detail: { code: "cancelled" } },
+		});
+		await runtime.dispose();
+	}, 60_000);
+
 	it("holds a completed Attempt when a revision-fenced Stop arrives before its queued wake starts", async () => {
 		const { runtime, cwd } = await createRuntime();
 		const started = await runtime.start(
