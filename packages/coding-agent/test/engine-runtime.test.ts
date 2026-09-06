@@ -1198,7 +1198,7 @@ describe("EngineRuntime", () => {
 		expect(await runtime.listInbox(source)).toEqual(pendingBeforeEdit);
 		const unchanged = await runtime.sessionHistory(source.agentInstanceId);
 		expect(unchanged.entries.map(entry => entry.text)).toEqual(["original user", "answer:original user"]);
-		const started = await runtime.start(
+		await runtime.start(
 			{
 				commandId: "history-empty-branch-command",
 				agentInstanceId: "history-empty-branch",

@@ -2200,7 +2200,8 @@ export class EngineRuntime {
 		let disposeResolved: (() => void) | undefined;
 		let mcpManager: MCPManager | undefined;
 		try {
-			if (preparedSessionManager && !uncommittedForkSessionFile) throw new Error("Prepared session was not durably materialized");
+			if (preparedSessionManager && !uncommittedForkSessionFile)
+				throw new Error("Prepared session was not durably materialized");
 			const resolved = await this.#resolveSessionProfile?.(profile, request.cwd);
 			disposeResolved = resolved?.dispose;
 			const prior = await this.store.getBinding(request.agentInstanceId);
