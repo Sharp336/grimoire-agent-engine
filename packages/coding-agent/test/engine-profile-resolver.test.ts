@@ -47,8 +47,7 @@ describe("EngineProfileResolver", () => {
 					modelIdentityId: provider === "different" ? "claude-sonnet-5" : "claude-opus-5",
 					providerSurfaceId: provider,
 					modelId: "claude-opus-5",
-					contextWindow: 200_000,
-					maxOutputTokens: 32_000,
+					...(index === 0 ? {} : { contextWindow: 200_000, maxOutputTokens: 32_000 }),
 					supportsTools: true,
 				},
 			});
@@ -69,6 +68,8 @@ describe("EngineProfileResolver", () => {
 			root,
 		);
 		try {
+			expect(resolved.options.model?.contextWindow).toBe(1_000_000);
+			expect(resolved.options.model?.maxTokens).toBe(128_000);
 			expect(resolved.sameModelRouteFallback).toEqual({
 				modelIdentityId: "claude-opus-5",
 				selectors: ["cheapai/claude-opus-5", "million/claude-opus-5", "aiberm/claude-opus-5"],

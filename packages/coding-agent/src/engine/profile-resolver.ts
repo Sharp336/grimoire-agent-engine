@@ -13,6 +13,7 @@ import type { TurnRetryPolicy } from "../session/agent-session-types";
 import { AuthStorage, SqliteAuthCredentialStore } from "../session/auth-storage";
 import type { EngineChildProfile } from "../tools";
 import type { EngineLaunchProfile } from "./contracts";
+import { resolveExecutableModelLimits } from "./model-limits";
 import type { ProviderAdmissionClient, ProviderApiKeyRouteIdentity } from "./provider-admission";
 
 const GCTX = /^gctx:[23456789abcdefghjkmnpqrstuvwxyz]{16}$/;
@@ -551,14 +552,7 @@ export class EngineProfileResolver {
 }
 
 function toModelSpec(route: AvailableModelRoute, account: ProviderAccount): ModelSpec<Api> {
-	const contextWindow = route.model.contextWindow;
-	const maxTokens = route.model.maxOutputTokens;
-	if (!Number.isSafeInteger(contextWindow) || Number(contextWindow) <= 0) {
-		throw new Error("AvailableModelRoute requires model.contextWindow for execution");
-	}
-	if (!Number.isSafeInteger(maxTokens) || Number(maxTokens) <= 0) {
-		throw new Error("AvailableModelRoute requires model.maxOutputTokens for execution");
-	}
+	const { contextWindow, maxOutputTokens } = resolveExecutableModelLimits(route.model);
 	const input = uniqueStrings(route.model.inputModalities ?? ["text"]).filter(
 		(value): value is "text" | "image" => value === "text" || value === "image",
 	);
@@ -575,7 +569,7 @@ function toModelSpec(route: AvailableModelRoute, account: ProviderAccount): Mode
 		input: input.length ? input : ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: Number(contextWindow),
-		maxTokens: Number(maxTokens),
+		maxTokens: maxOutputTokens,
 	};
 }
 

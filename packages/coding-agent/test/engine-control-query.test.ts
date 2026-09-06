@@ -142,6 +142,7 @@ describe("Engine Control + Query", () => {
 		expect(capabilities).toMatchObject({
 			commands: expect.arrayContaining(["compact", "release"]),
 			queries: expect.arrayContaining([
+				"models.reference",
 				"session.context",
 				"session.history",
 				"session.restore.stage",
@@ -150,6 +151,16 @@ describe("Engine Control + Query", () => {
 				"inbox.enqueue",
 				"inbox.mutate",
 			]),
+		});
+		expect(await client.request("models.reference", { modelIdentityId: "gpt-5.6-terra" })).toMatchObject({
+			status: "resolved",
+			modelIdentityId: "gpt-5.6-terra",
+			contextWindow: 1_050_000,
+			maxOutputTokens: 128_000,
+		});
+		expect(await client.request("models.reference", { modelIdentityId: "private-provider/custom-model" })).toEqual({
+			status: "unknown",
+			modelIdentityId: "private-provider/custom-model",
 		});
 		expect(
 			await rawRequest(

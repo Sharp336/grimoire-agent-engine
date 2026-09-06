@@ -10,6 +10,7 @@ import {
 	type EngineTarget,
 	EngineTargetError,
 } from "./contracts";
+import { resolveCanonicalModelLimits } from "./model-limits";
 import { dispatchEngineCommand, type EngineCommandEnvelope, engineCommandIdentity } from "./nats-adapter";
 import { safeEngineErrorDetail } from "./public-error";
 import { engineAgentId } from "./route";
@@ -31,6 +32,7 @@ export type EngineControlQueryMethod =
 	| "session.archive"
 	| "session.restore.stage"
 	| "session.usage"
+	| "models.reference"
 	| "inbox.list"
 	| "inbox.enqueue"
 	| "inbox.read"
@@ -256,6 +258,11 @@ async function dispatchRequest(request: EngineControlQueryRequest, options: Serv
 			});
 		case "session.usage":
 			return await options.runtime.sessionUsage(requiredTarget(params));
+		case "models.reference": {
+			const modelIdentityId = requiredString(params, "modelIdentityId");
+			const limits = resolveCanonicalModelLimits(modelIdentityId);
+			return limits ? { status: "resolved", modelIdentityId, ...limits } : { status: "unknown", modelIdentityId };
+		}
 		case "inbox.list":
 			return {
 				items: await options.runtime.listInbox(requiredTarget(params), optionalBoolean(params.includeTerminal)),
@@ -358,6 +365,7 @@ async function capabilities(options: ServerOptions): Promise<Record<string, unkn
 			"session.archive",
 			"session.restore.stage",
 			"session.usage",
+			"models.reference",
 			"inbox.list",
 			"inbox.enqueue",
 			"inbox.read",
@@ -723,6 +731,7 @@ function validateRequest(value: unknown): EngineControlQueryRequest {
 			"session.archive",
 			"session.restore.stage",
 			"session.usage",
+			"models.reference",
 			"inbox.list",
 			"inbox.enqueue",
 			"inbox.read",
