@@ -1,4 +1,5 @@
 import type { ExtensionAskDialogResult } from "../extensibility/extensions/types";
+import type { CreateAgentSessionOptions } from "../sdk";
 
 export type EngineAttemptState =
 	| "accepted"
@@ -33,6 +34,10 @@ export interface EngineLaunchProfile {
 	continuationPolicy?: "exact" | "fresh";
 	launchProfileRef?: string;
 	selectedRouteRef?: string;
+	/** Exact per-launch reasoning request resolved against the selected model. */
+	thinkingLevel?: CreateAgentSessionOptions["thinkingLevel"];
+	/** Reject models whose resolved reasoning effort falls below this floor. */
+	minimumThinkingLevel?: "high";
 	/** Descendants allowed below this session. Artel default: one leaf child. */
 	maxSpawnDepth?: number;
 	/** Total child AgentInstances this Attempt may launch. */

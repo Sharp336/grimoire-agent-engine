@@ -11,6 +11,7 @@ import { SETTINGS_SCHEMA, type SettingPath, Settings } from "../config/settings"
 import type { CreateAgentSessionOptions } from "../sdk";
 import type { TurnRetryPolicy } from "../session/agent-session-types";
 import { AuthStorage, SqliteAuthCredentialStore } from "../session/auth-storage";
+import { concreteThinkingLevel, resolveThinkingLevelForModel } from "../thinking";
 import type { EngineChildProfile } from "../tools";
 import type { EngineLaunchProfile } from "./contracts";
 import { resolveExecutableModelLimits } from "./model-limits";
@@ -157,6 +158,8 @@ export class EngineProfileResolver {
 		return digestJson({
 			profileRef,
 			profileContentHash: cachedProfile.content_hash,
+			thinkingLevel: launch.thinkingLevel,
+			minimumThinkingLevel: launch.minimumThinkingLevel,
 			routes,
 			childProfiles,
 			settings: Object.fromEntries(
@@ -187,10 +190,12 @@ export class EngineProfileResolver {
 		}
 		const spawnPolicy = resolveSpawnPolicy(profile, launch);
 		const candidates = await this.#routeCandidates(profile, launch.selectedRouteRef);
+		const configuredRouteRefs = profile.models.map((ref, index) => requiredRef(ref, `models[${index}]`));
 		const childProfiles = await this.#childProfiles(spawnPolicy.childProfileRefs);
 		let sameModelIdentityId: string | undefined;
 		if (profile.allowSameModelProviderFallback) {
-			for (const routeRef of candidates) {
+			const identityCandidates = launch.selectedRouteRef ? [launch.selectedRouteRef] : candidates;
+			for (const routeRef of identityCandidates) {
 				signal?.throwIfAborted();
 				try {
 					const route = parseJson<AvailableModelRoute>(
@@ -227,13 +232,30 @@ export class EngineProfileResolver {
 					childProfiles,
 					cwd,
 					spawnPolicy.maxSpawnDepth,
-					profile.allowSameModelProviderFallback ? candidates.slice(index + 1) : [],
+					profile.allowSameModelProviderFallback
+						? launch.selectedRouteRef
+							? configuredRouteRefs.filter(ref => ref !== routeRef)
+							: candidates.slice(index + 1)
+						: [],
 					signal,
 				);
 			} catch (error) {
 				if (signal?.aborted) throw signal.reason;
+				if (
+					launch.selectedRouteRef &&
+					error instanceof Error &&
+					error.message === "Selected model cannot satisfy minimum thinking level high"
+				) {
+					throw error;
+				}
 				lastError = error;
 			}
+		}
+		if (
+			lastError instanceof Error &&
+			lastError.message === "Selected model cannot satisfy minimum thinking level high"
+		) {
+			throw lastError;
 		}
 		throw new Error("No usable AvailableModelRoute in AgentProfile", { cause: lastError });
 	}
@@ -243,8 +265,7 @@ export class EngineProfileResolver {
 		if (selected) {
 			const selectedRef = requiredRef(selected, "selectedRouteRef");
 			if (!configured.includes(selectedRef)) throw new Error("selectedRouteRef is outside AgentProfile");
-			configured.splice(configured.indexOf(selectedRef), 1);
-			configured.unshift(selectedRef);
+			return [selectedRef];
 		}
 		return configured;
 	}
@@ -576,6 +597,14 @@ export class EngineProfileResolver {
 						: launchRestricted
 							? launchNames
 							: undefined;
+			const thinkingLevel = launch.thinkingLevel ?? profile.generationDefaults?.thinkingLevel;
+			const resolvedThinkingLevel = resolveThinkingLevelForModel(model, concreteThinkingLevel(thinkingLevel));
+			if (
+				launch.minimumThinkingLevel === "high" &&
+				!(["high", "xhigh", "max"] as const).includes(resolvedThinkingLevel as "high" | "xhigh" | "max")
+			) {
+				throw new Error("Selected model cannot satisfy minimum thinking level high");
+			}
 			return {
 				options: {
 					settings,
@@ -591,7 +620,7 @@ export class EngineProfileResolver {
 									fallbackApiKeyRoutes,
 								)
 							: undefined,
-					thinkingLevel: profile.generationDefaults?.thinkingLevel,
+					thinkingLevel: resolvedThinkingLevel,
 					toolNames,
 					restrictToolNames: profileRestricted || launchRestricted,
 					enableMCP: launch.enableMCP ?? true,

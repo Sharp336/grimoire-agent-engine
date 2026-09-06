@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { EngineProfileResolver } from "../src/engine/profile-resolver";
 import { ProviderAdmissionClient } from "../src/engine/provider-admission";
@@ -50,6 +51,7 @@ describe("EngineProfileResolver", () => {
 					modelId: "claude-opus-5",
 					...(index === 0 ? {} : { contextWindow: 200_000, maxOutputTokens: 32_000 }),
 					supportsTools: true,
+					supportsReasoning: provider !== "different",
 				},
 			});
 			await artifact(cache, accountRef, "grimoire.provider_account.v1", {
@@ -89,6 +91,34 @@ describe("EngineProfileResolver", () => {
 		} finally {
 			resolved.dispose();
 		}
+		const pinned = await resolver.resolve(
+			{
+				spawns: "",
+				profileDigest: hash(profileRef),
+				launchProfileRef: profileRef,
+				selectedRouteRef: routeRefs[2],
+			},
+			root,
+		);
+		try {
+			expect(pinned.options.model?.provider).toBe("different");
+			expect(pinned.sameModelRouteFallback?.selectors).toEqual(["different/claude-opus-5"]);
+		} finally {
+			pinned.dispose();
+		}
+		await expect(
+			resolver.resolve(
+				{
+					spawns: "",
+					profileDigest: hash(profileRef),
+					launchProfileRef: profileRef,
+					selectedRouteRef: routeRefs[2],
+					thinkingLevel: ThinkingLevel.Max,
+					minimumThinkingLevel: "high",
+				},
+				root,
+			),
+		).rejects.toThrow("minimum thinking level high");
 
 		await artifact(cache, "gctx:2222222222222222", "grimoire.provider_account.v1", {
 			schema: "grimoire.provider_account.v1",
@@ -113,6 +143,17 @@ describe("EngineProfileResolver", () => {
 		} finally {
 			startupFallback.dispose();
 		}
+		await expect(
+			resolver.resolve(
+				{
+					spawns: "",
+					profileDigest: hash(profileRef),
+					launchProfileRef: profileRef,
+					selectedRouteRef: routeRefs[0],
+				},
+				root,
+			),
+		).rejects.toThrow("No usable AvailableModelRoute");
 	});
 
 	it("resolves an exact trusted fallback without ambient model or credentials", async () => {
