@@ -20,7 +20,7 @@ import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import type { ExtensionAskDialogResult } from "../extensibility/extensions/types";
 import type { IrcDeliveryReceipt, IrcMessage } from "../irc/bus";
 import type { EngineControlInitiator, EngineEvent, EngineHistoryEditSource, EngineLaunchProfile } from "./contracts";
-import { EngineTargetError } from "./contracts";
+import { EngineTargetError, validateCommandContext } from "./contracts";
 import { safeEngineErrorDetail } from "./public-error";
 import { engineAgentInstanceId, engineRouteToken } from "./route";
 import type { EngineRuntime } from "./runtime";
@@ -692,6 +692,11 @@ export async function dispatchEngineCommand(options: {
 	provisionMailbox?: (agentInstanceId: string) => void | Promise<void>;
 }): Promise<unknown> {
 	const { runtime, command } = options;
+	const context = command.payload.context;
+	validateCommandContext(context);
+	if (context !== undefined && !["start", "steer", "resume"].includes(command.op)) {
+		throw new EngineTargetError("invalid_request", "context is supported only for start, steer and resume");
+	}
 	if (command.engineGeneration !== runtime.engineGeneration) {
 		throw new EngineTargetError("stale_target", `Engine generation ${command.engineGeneration} is stale`);
 	}
@@ -707,6 +712,9 @@ export async function dispatchEngineCommand(options: {
 				throw new EngineTargetError("invalid_request", "agentInstanceId does not match agentInstanceRef");
 			}
 			const queued = typeof command.payload.queueId === "string";
+			if (queued && command.payload.input !== undefined) {
+				throw new EngineTargetError("invalid_request", "start input and queueId are mutually exclusive");
+			}
 			const historyEdit = command.payload.historyEdit === undefined ? undefined : parseHistoryEdit(command.payload);
 			const input = queued
 				? undefined
@@ -724,6 +732,7 @@ export async function dispatchEngineCommand(options: {
 				const started = await runtime.start(
 					{
 						commandId: command.commandId,
+						context,
 						agentInstanceId: command.agentInstanceId,
 						agentInstanceRef,
 						parentAgentInstanceId: optionalRecordString(
@@ -762,6 +771,7 @@ export async function dispatchEngineCommand(options: {
 			return await runtime.steer({
 				...boundTarget(command),
 				commandId: command.commandId,
+				context,
 				...(typeof command.payload.queueId === "string"
 					? {
 							queueId: requiredRecordString(command.payload, "queueId"),
@@ -783,6 +793,7 @@ export async function dispatchEngineCommand(options: {
 			return await runtime.resume({
 				...boundTarget(command),
 				commandId: command.commandId,
+				context,
 				initiator: controlInitiator(command.payload),
 				expectedIntentRevision: optionalRecordInteger(command.payload, "expectedIntentRevision"),
 			});

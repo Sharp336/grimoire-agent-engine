@@ -19,6 +19,8 @@ import {
 } from "../extensibility/extensions";
 import { IrcBus, type IrcDeliveryReceipt } from "../irc/bus";
 import { withLspSessionScope } from "../lsp/client";
+import { MCPManager } from "../mcp/manager";
+import type { MCPHttpServerConfig } from "../mcp/types";
 import historyEditContinuePrompt from "../prompts/system/history-edit-continue.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
@@ -61,6 +63,7 @@ import {
 	EngineTargetError,
 	type EngineToolApprovalDecision,
 	type EngineToolPolicy,
+	validateCommandContext,
 	validateStartRequest,
 } from "./contracts";
 import { safeEngineErrorDetail } from "./public-error";
@@ -158,6 +161,7 @@ interface LiveBinding extends EngineBindingSnapshot {
 	intentRevision: number;
 	attemptState: EngineAttemptState;
 	session: AgentSession;
+	mcpManager?: MCPManager;
 	steerCommandIds: string[];
 	steerCommandSet: Set<string>;
 	unsubscribe: () => void;
@@ -232,6 +236,8 @@ interface PreparedHistoryStart {
 
 export interface EngineRuntimeOptions {
 	databasePath: string;
+	/** Hosted Core binding. Credentials stay in memory; undefined preserves standalone discovery. */
+	mcpServer?: MCPHttpServerConfig;
 	childHistoryTtlMinutes?: number;
 	childHistoryRetention?: "local" | "off" | "grimoire";
 	archiveChildHistory?: (request: {
@@ -293,6 +299,7 @@ export class EngineRuntime {
 	readonly engineGeneration: number;
 	readonly store: EngineStore;
 	readonly #sessionDefaults: EngineRuntimeOptions["sessionDefaults"];
+	readonly #mcpServer: EngineRuntimeOptions["mcpServer"];
 	readonly #dispatchPrompt: (
 		session: AgentSession,
 		input: string,
@@ -320,6 +327,7 @@ export class EngineRuntime {
 		this.store = store;
 		this.engineGeneration = engineGeneration;
 		this.#sessionDefaults = options.sessionDefaults;
+		this.#mcpServer = options.mcpServer;
 		this.#dispatchPrompt =
 			options.dispatchPrompt ??
 			((session, input, identity, kind = "prompt") => {
@@ -417,6 +425,7 @@ export class EngineRuntime {
 	}
 
 	steer(request: EngineSteerRequest): Promise<EngineControlResult> {
+		validateCommandContext(request.context);
 		const queued = request.queueId !== undefined;
 		if (
 			!request.commandId.trim() ||
@@ -480,6 +489,7 @@ export class EngineRuntime {
 				item ? { ...item, revision: item.revision + 1 } : undefined,
 			);
 			try {
+				await this.#sendCommandContext(binding, request.context, request.commandId);
 				await binding.session.steer(item?.deliveryPayload ?? request.message!, undefined, {
 					sourceCommandId: request.commandId,
 					...(request.clientMessageId
@@ -638,6 +648,7 @@ export class EngineRuntime {
 
 	resume(request: EngineControlRequest): Promise<EngineControlResult> {
 		validateControlRequest(request);
+		validateCommandContext(request.context);
 		return this.#inLane(request.agentInstanceId, async () => {
 			const binding = this.#requireTarget(request);
 			if (binding.resumeCommandIds.has(request.commandId)) return this.#controlResult(binding);
@@ -649,6 +660,7 @@ export class EngineRuntime {
 			binding.attemptState = "running";
 			const result = this.#controlResult(binding);
 			try {
+				await this.#sendCommandContext(binding, request.context, request.commandId);
 				await this.#commitAttemptTransition(
 					binding,
 					"running",
@@ -1622,6 +1634,7 @@ export class EngineRuntime {
 							: {}),
 				},
 				preparedHistory?.dispatchKind,
+				request.context,
 			),
 		);
 		this.#signalInboxWake();
@@ -1715,6 +1728,7 @@ export class EngineRuntime {
 		let sessionManager = preparedSessionManager;
 		let uncommittedForkSessionFile = preparedSessionManager?.getSessionFile();
 		let disposeResolved: (() => void) | undefined;
+		let mcpManager: MCPManager | undefined;
 		try {
 			const resolved = await this.#resolveSessionProfile?.(profile, request.cwd);
 			disposeResolved = resolved?.dispose;
@@ -1813,7 +1827,7 @@ export class EngineRuntime {
 						}
 					: undefined;
 			const engineHistory = await this.#retainedDirectChildHistory(request, profile, prior);
-			created = await createAgentSession({
+			const sessionOptions: CreateAgentSessionOptions = {
 				...this.#sessionDefaults,
 				cwd: request.cwd,
 				sessionManager,
@@ -1871,7 +1885,34 @@ export class EngineRuntime {
 				parentAgentId: request.parentAgentInstanceId ? engineAgentId(request.parentAgentInstanceId) : undefined,
 				engineMode: true,
 				expectedAgentRef: null,
-			});
+			};
+			if (this.#mcpServer) {
+				// A hosted session never inherits an ambient manager, including from a profile.
+				sessionOptions.mcpManager = undefined;
+				if (sessionOptions.enableMCP !== false && sessionOptions.restrictToolNames !== true) {
+					mcpManager = new MCPManager(request.cwd, null);
+					const ready = Promise.withResolvers<void>();
+					await Promise.all([
+						ready.promise,
+						mcpManager.connectServers({ grimoire_engine: this.#mcpServer }, {}, event => {
+							if (event.type === "connected") ready.resolve();
+							if (event.type === "failed") ready.reject(new Error("Hosted Core MCP binding failed"));
+						}),
+					]);
+					sessionOptions.mcpManager = mcpManager;
+				}
+			}
+			created = await createAgentSession(sessionOptions);
+			if (mcpManager) {
+				const session = created.session;
+				await session.refreshMCPTools(mcpManager.getTools());
+				mcpManager.setOnToolsChanged(async tools => {
+					if (session.isDisposed) return;
+					await session.refreshMCPTools(tools).catch(() => {
+						logger.error("Hosted Core MCP catalog refresh failed");
+					});
+				});
+			}
 
 			const binding: LiveBinding = {
 				bindingId: `${route}:${bindingGeneration}`,
@@ -1894,6 +1935,7 @@ export class EngineRuntime {
 				intentRevision: prior?.intentRevision ?? 0,
 				...(prior?.intentCommandId ? { intentCommandId: prior.intentCommandId } : {}),
 				session: created.session,
+				mcpManager,
 				steerCommandIds: [],
 				steerCommandSet: new Set(),
 				unsubscribe: () => {},
@@ -2015,6 +2057,8 @@ export class EngineRuntime {
 			if (unsubscribeCreated) await collectFailure(cleanupErrors, unsubscribeCreated);
 			const createdSession = created?.session;
 			if (createdSession) await collectFailure(cleanupErrors, () => createdSession.dispose());
+			const createdMcpManager = mcpManager;
+			if (createdMcpManager) await collectFailure(cleanupErrors, () => createdMcpManager.disconnectAll());
 			if (uncommittedForkSessionFile && sessionManager) {
 				const forkSessionManager = sessionManager;
 				const forkSessionFile = uncommittedForkSessionFile;
@@ -2523,15 +2567,30 @@ export class EngineRuntime {
 		);
 	}
 
+	async #sendCommandContext(binding: LiveBinding, context: string | undefined, commandId: string): Promise<void> {
+		if (!context) return;
+		await binding.session.sendCustomMessage(
+			{
+				customType: "engine-command-context",
+				content: context,
+				display: false,
+				details: { sourceCommandId: commandId },
+			},
+			{ triggerTurn: false },
+		);
+	}
+
 	async #runPrompt(
 		binding: LiveBinding,
 		input: string,
 		identity?: SessionMessageIdentity,
 		kind: HistoryDispatchKind = "prompt",
+		context?: string,
 	): Promise<void> {
 		const attemptId = binding.attemptId;
 		const attemptMessageStart = binding.session.messages.length;
 		try {
+			await this.#sendCommandContext(binding, context, identity?.sourceCommandId ?? binding.commandId);
 			await this.#dispatchModel(binding, input, identity, kind);
 			for (let reminder = 0; reminder < 2 && binding.requireYieldTool; reminder++) {
 				await binding.pauseGate.waitUntilResumed();
@@ -2937,6 +2996,7 @@ export class EngineRuntime {
 		if (abort) await collectFailure(errors, () => abort!);
 		if (beforeSessionDispose) await collectFailure(errors, beforeSessionDispose);
 		await collectFailure(errors, () => binding.session.dispose());
+		await collectFailure(errors, () => binding.mcpManager?.disconnectAll());
 		await collectFailure(errors, binding.disposeProfile);
 		await collectFailure(errors, () => this.agentRegistry.unregister(binding.engineAgentId, binding.session));
 		throwCollectedFailures(errors, `Engine binding ${binding.agentInstanceId} resource cleanup failed`);
