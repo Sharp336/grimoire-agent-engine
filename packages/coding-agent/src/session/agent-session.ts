@@ -3208,13 +3208,19 @@ export class AgentSession {
 			}
 
 			const resolvedInterruptedToolTurn = this.#recovery.classifyResolvedInterruptedToolTurn(msg);
-			if (this.#recovery.isRetryableReasonlessAbort(msg) || resolvedInterruptedToolTurn === "reasonless-abort") {
-				const didRetry = await this.#recovery.handleRetryableError(
-					msg,
-					resolvedInterruptedToolTurn === "reasonless-abort"
-						? { allowModelFallback: false, preserveFailedTurn: true }
-						: { allowModelFallback: false },
-				);
+			const sameModelRouteFallback = this.#recovery.isSameModelRouteFallbackEligible(msg);
+			if (
+				this.#recovery.isRetryableReasonlessAbort(msg) ||
+				resolvedInterruptedToolTurn === "reasonless-abort" ||
+				(msg.stopReason === "aborted" && sameModelRouteFallback)
+			) {
+				const preserveInterruptedTurn =
+					resolvedInterruptedToolTurn === "reasonless-abort" ||
+					this.#recovery.shouldPreserveSameModelRouteTurn(msg);
+				const didRetry = await this.#recovery.handleRetryableError(msg, {
+					allowModelFallback: sameModelRouteFallback,
+					...(preserveInterruptedTurn ? { preserveFailedTurn: true } : {}),
+				});
 				if (didRetry) {
 					await emitAgentEndNotification({ willContinue: true });
 					return;

@@ -337,7 +337,8 @@ export function buildSessionContext(
 			if (
 				!options?.transcript &&
 				entry.message.role === "assistant" &&
-				(entry.message.retryRecovery || isEmptyErrorTurn(entry.message))
+				((entry.message.retryRecovery && entry.message.retryRecovery.preserveInContext !== true) ||
+					isEmptyErrorTurn(entry.message))
 			) {
 				return;
 			}
@@ -563,6 +564,7 @@ export function buildSessionContext(
 			const message = messages[i];
 			if (message?.role !== "assistant") continue;
 			if (message.stopReason !== "aborted" && message.stopReason !== "error") continue;
+			if (message.retryRecovery?.preserveInContext === true) continue;
 			const next = messages[i + 1];
 			if (next?.role === "custom" && next.customType === INTERRUPTED_THINKING_MESSAGE_TYPE) continue;
 			// A failed turn that emitted tool calls persists paired synthetic

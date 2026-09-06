@@ -17,6 +17,99 @@ const refs = {
 };
 
 describe("EngineProfileResolver", () => {
+	it("builds an ordered runtime chain only from configured routes with the same model identity", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-engine-profile-routes-"));
+		const cache = path.join(root, "artifacts");
+		await fs.mkdir(cache);
+		const profileRef = "gctx:bbbbbbbbbbbbbbbb";
+		const routeRefs = [
+			"gctx:cccccccccccccccc",
+			"gctx:dddddddddddddddd",
+			"gctx:hhhhhhhhhhhhhhhh",
+			"gctx:jjjjjjjjjjjjjjjj",
+		];
+		const hiddenRouteRef = "gctx:kkkkkkkkkkkkkkkk";
+		const providers = ["cheapai", "million", "different", "aiberm"];
+		await artifact(cache, profileRef, "grimoire.agent_profile.v1", {
+			schema: "grimoire.agent_profile.v1",
+			status: "active",
+			models: routeRefs,
+			allowSameModelProviderFallback: true,
+		});
+		for (const [index, routeRef] of [...routeRefs, hiddenRouteRef].entries()) {
+			const provider = index === routeRefs.length ? "hidden" : providers[index];
+			const accountRef = `gctx:${String(index + 2).repeat(16)}`;
+			await artifact(cache, routeRef, "grimoire.available_model_route.v1", {
+				schema: "grimoire.available_model_route.v1",
+				status: "active",
+				providerAccountRef: accountRef,
+				model: {
+					modelIdentityId: provider === "different" ? "claude-sonnet-5" : "claude-opus-5",
+					providerSurfaceId: provider,
+					modelId: "claude-opus-5",
+					contextWindow: 200_000,
+					maxOutputTokens: 32_000,
+					supportsTools: true,
+				},
+			});
+			await artifact(cache, accountRef, "grimoire.provider_account.v1", {
+				schema: "grimoire.provider_account.v1",
+				status: "active",
+				providerId: provider,
+				api: "anthropic-messages",
+				baseUrl: `https://${provider}.invalid`,
+				trusted: true,
+				credential: { type: "api_key", key: `${provider}-key` },
+			});
+		}
+
+		const resolver = new EngineProfileResolver(cache, path.join(root, "credentials"));
+		const resolved = await resolver.resolve(
+			{ spawns: "", profileDigest: hash(profileRef), launchProfileRef: profileRef },
+			root,
+		);
+		try {
+			expect(resolved.sameModelRouteFallback).toEqual({
+				modelIdentityId: "claude-opus-5",
+				selectors: ["cheapai/claude-opus-5", "million/claude-opus-5", "aiberm/claude-opus-5"],
+			});
+			expect(resolved.options.modelRegistry?.find("million", "claude-opus-5")?.baseUrl).toBe(
+				"https://million.invalid",
+			);
+			expect(resolved.options.modelRegistry?.find("aiberm", "claude-opus-5")?.baseUrl).toBe(
+				"https://aiberm.invalid",
+			);
+			expect(resolved.options.modelRegistry?.find("different", "claude-opus-5")).toBeUndefined();
+			expect(resolved.options.modelRegistry?.find("hidden", "claude-opus-5")).toBeUndefined();
+			expect(resolved.options.authStorage?.get("million")).toEqual({ type: "api_key", key: "million-key" });
+		} finally {
+			resolved.dispose();
+		}
+
+		await artifact(cache, "gctx:2222222222222222", "grimoire.provider_account.v1", {
+			schema: "grimoire.provider_account.v1",
+			status: "disabled",
+			providerId: "cheapai",
+			api: "anthropic-messages",
+			baseUrl: "https://cheapai.invalid",
+			trusted: true,
+			credential: { type: "api_key", key: "cheapai-key" },
+		});
+		const startupFallback = await resolver.resolve(
+			{ spawns: "", profileDigest: hash(profileRef), launchProfileRef: profileRef },
+			root,
+		);
+		try {
+			expect(startupFallback.options.model?.provider).toBe("million");
+			expect(startupFallback.sameModelRouteFallback?.selectors).toEqual([
+				"million/claude-opus-5",
+				"aiberm/claude-opus-5",
+			]);
+		} finally {
+			startupFallback.dispose();
+		}
+	});
+
 	it("resolves an exact trusted fallback without ambient model or credentials", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-engine-profile-"));
 		const cache = path.join(root, "artifacts");

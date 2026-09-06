@@ -367,6 +367,7 @@ describe("AgentSession retry recovery", () => {
 		}> = [
 			{ name: "credential", recovery: "credential", note: "rate-limited; switched account; retried" },
 			{ name: "model", recovery: "model", note: "rate-limited; switched model; retried" },
+			{ name: "route", recovery: "route", note: "switched provider route; retried" },
 			{ name: "wait", recovery: "wait", note: "rate-limited; waited; retried" },
 			{ name: "plain", recovery: "plain", note: "error; retried" },
 		];
