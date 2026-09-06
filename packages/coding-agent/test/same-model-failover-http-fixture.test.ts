@@ -20,7 +20,14 @@ afterEach(() => {
 	fixture = undefined;
 });
 
-function chat(messages: unknown[], authorization = `Bearer ${DUMMY_BEARER_TOKEN}`): Promise<Response> {
+function chat(
+	messages: unknown[],
+	authorization = `Bearer ${DUMMY_BEARER_TOKEN}`,
+	requestOptions: { stream?: boolean; tools?: unknown[] } = {
+		stream: true,
+		tools: [{ type: "function", function: { name: "bash", parameters: { type: "object" } } }],
+	},
+): Promise<Response> {
 	if (!fixture) throw new Error("Fixture is not running");
 	return fetch(`${fixture.url}/v1/chat/completions`, {
 		method: "POST",
@@ -29,7 +36,7 @@ function chat(messages: unknown[], authorization = `Bearer ${DUMMY_BEARER_TOKEN}
 			"content-type": "application/json",
 			"x-sensitive-test-value": SENSITIVE_SENTINEL,
 		},
-		body: JSON.stringify({ model: MODEL, messages, sensitive: SENSITIVE_SENTINEL }),
+		body: JSON.stringify({ model: MODEL, messages, sensitive: SENSITIVE_SENTINEL, ...requestOptions }),
 	});
 }
 
@@ -43,6 +50,12 @@ describe("same-model failover HTTP fixture", () => {
 
 		const unauthorized = await chat([{ role: "user", content: SENSITIVE_SENTINEL }], "Bearer wrong-token");
 		expect(unauthorized.status).toBe(401);
+		expect(fixture.phase).toBe("tool_call_ready");
+
+		const validationProbe = await chat([{ role: "user", content: "ping" }], undefined, {
+			stream: false,
+		});
+		expect(validationProbe.status).toBe(200);
 		expect(fixture.phase).toBe("tool_call_ready");
 
 		const first = await chat([{ role: "user", content: SENSITIVE_SENTINEL }]);

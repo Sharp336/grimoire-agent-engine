@@ -70,6 +70,31 @@ function requestedModel(body: unknown): string | undefined {
 	return typeof body.model === "string" ? body.model : undefined;
 }
 
+function isArmedEngineRequest(body: unknown): boolean {
+	if (typeof body !== "object" || body === null || !("stream" in body) || body.stream !== true) return false;
+	if (!("tools" in body) || !Array.isArray(body.tools)) return false;
+	return body.tools.some(tool => {
+		if (typeof tool !== "object" || tool === null || !("function" in tool)) return false;
+		const definition = tool.function;
+		return (
+			typeof definition === "object" && definition !== null && "name" in definition && definition.name === "bash"
+		);
+	});
+}
+
+function probeResponse(model: string): Response {
+	return jsonResponse(
+		{
+			id: "chatcmpl-artel-r2-probe",
+			object: "chat.completion",
+			created: 0,
+			model,
+			choices: [{ index: 0, message: { role: "assistant", content: "ok" }, finish_reason: "stop" }],
+		},
+		200,
+	);
+}
+
 function toolCallStream(model: string): Response {
 	const base = {
 		id: "chatcmpl-artel-r2-failover",
@@ -190,6 +215,10 @@ export function startSameModelFailoverFixture(options: SameModelFailoverFixtureO
 					{ error: { message: "Configured model required", type: "invalid_request_error" } },
 					400,
 				);
+			}
+			if (!isArmedEngineRequest(body)) {
+				logRequest(200);
+				return probeResponse(model);
 			}
 
 			if (phase === "tool_call_ready") {
