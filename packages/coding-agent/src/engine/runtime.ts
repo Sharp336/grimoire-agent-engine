@@ -2370,8 +2370,8 @@ export class EngineRuntime {
 				throw new Error("Prepared session was not durably materialized");
 			pendingStartSignal?.throwIfAborted();
 			const resolved = await this.#resolveSessionProfile?.(profile, request.cwd, pendingStartSignal);
-			pendingStartSignal?.throwIfAborted();
 			disposeResolved = resolved?.dispose;
+			pendingStartSignal?.throwIfAborted();
 			const prior = await this.store.getBinding(request.agentInstanceId);
 			const profileDigest = continuationDigest;
 			const bindingGeneration = (prior?.bindingGeneration ?? 0) + 1;

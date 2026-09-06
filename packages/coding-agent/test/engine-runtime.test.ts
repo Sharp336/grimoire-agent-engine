@@ -4210,7 +4210,9 @@ describe("EngineRuntime", () => {
 
 	it("aborts profile resolution only after a pending Start is durably cancelled", async () => {
 		const resolutionStarted = Promise.withResolvers<AbortSignal>();
+		const releaseResolution = Promise.withResolvers<void>();
 		let promptCalls = 0;
+		let disposeCalls = 0;
 		const { runtime, cwd } = await createRuntime(
 			async () => {
 				promptCalls += 1;
@@ -4220,10 +4222,13 @@ describe("EngineRuntime", () => {
 				resolveSessionProfile: async (_launch, _cwd, signal) => {
 					if (!signal) throw new Error("Expected pending Start signal");
 					resolutionStarted.resolve(signal);
-					const aborted = Promise.withResolvers<void>();
-					signal.addEventListener("abort", () => aborted.reject(signal.reason), { once: true });
-					await aborted.promise;
-					throw new Error("unreachable");
+					await releaseResolution.promise;
+					return {
+						options: {},
+						dispose() {
+							disposeCalls += 1;
+						},
+					};
 				},
 			},
 		);
@@ -4270,7 +4275,9 @@ describe("EngineRuntime", () => {
 
 		expect(cancelled).toMatchObject({ phase: "applied", preStart: true, manualHold: true });
 		expect(signal.aborted).toBeTrue();
+		releaseResolution.resolve();
 		await expect(start).rejects.toThrow("cancel provider material lookup");
+		expect(disposeCalls).toBe(1);
 		expect(promptCalls).toBe(0);
 		expect(runtime.getBinding(command.agentInstanceId)).toBeUndefined();
 		expect(await runtime.store.getAttempt(command.attemptId)).toBeUndefined();
