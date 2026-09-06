@@ -4093,19 +4093,23 @@ function parseNativeSessionCheckpoint(bytes: Buffer): NativeSessionCheckpoint {
 	if (header?.id !== checkpoint.sessionId) {
 		throw new EngineTargetError("invalid_request", "Restore session header identity does not match");
 	}
-	const names = new Set<string>();
+	const portableNames = new Set<string>();
 	let artifactBytes = 0;
 	for (const artifactValue of checkpoint.artifacts) {
 		if (!artifactValue || typeof artifactValue !== "object" || Array.isArray(artifactValue)) {
 			throw new EngineTargetError("invalid_request", "Restore artifact shape is invalid");
 		}
 		const artifact = artifactValue as NativeSessionCheckpoint["artifacts"][number];
+		const portableName = typeof artifact.name === "string" ? artifact.name.toLowerCase() : "";
+		const portableStem = portableName.split(".", 1)[0] ?? "";
 		if (
 			typeof artifact.name !== "string" ||
 			!/^[A-Za-z0-9_.-]+$/.test(artifact.name) ||
 			artifact.name === "." ||
 			artifact.name === ".." ||
-			names.has(artifact.name) ||
+			artifact.name.endsWith(".") ||
+			/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])$/.test(portableStem) ||
+			portableNames.has(portableName) ||
 			typeof artifact.contentHash !== "string" ||
 			!/^sha256:[0-9a-f]{64}$/.test(artifact.contentHash) ||
 			!Number.isSafeInteger(artifact.byteLength) ||
@@ -4116,7 +4120,7 @@ function parseNativeSessionCheckpoint(bytes: Buffer): NativeSessionCheckpoint {
 		) {
 			throw new EngineTargetError("invalid_request", "Restore artifact metadata is invalid");
 		}
-		names.add(artifact.name);
+		portableNames.add(portableName);
 		const content = decodeCanonicalBase64(artifact.contentBase64, `Artifact ${artifact.name}`);
 		artifactBytes += content.byteLength;
 		if (content.byteLength !== artifact.byteLength) {
