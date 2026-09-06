@@ -803,6 +803,7 @@ describe("EngineRuntime", () => {
 	it("restores a staged native checkpoint into a new identity after restart and continues only on explicit send", async () => {
 		const restoredContexts: string[] = [];
 		const sideEffects: string[] = [];
+		const attachmentBytes = Buffer.from("0123456789abcdef".repeat(196_608));
 		const restoredModel = createMockModel({ handler: () => ({ content: ["restored answer"] }) });
 		const dispatch: NonNullable<EngineRuntimeOptions["dispatchPrompt"]> = async (session, input, identity) => {
 			if (input === "source turn") {
@@ -876,14 +877,13 @@ describe("EngineRuntime", () => {
 		if (!source.sessionFile) throw new Error("Expected source native session");
 		const sourceArtifacts = source.sessionFile.slice(0, -".jsonl".length);
 		fs.mkdirSync(sourceArtifacts, { recursive: true });
-		fs.writeFileSync(path.join(sourceArtifacts, "attachment.bin"), Buffer.from([0, 1, 2, 255]));
-		await runtime.release(source);
+		fs.writeFileSync(path.join(sourceArtifacts, "attachment.bin"), attachmentBytes);
 		const pages: Buffer[] = [];
 		let offset = 0;
 		let contentHash: string | undefined;
 		let byteLength = 0;
 		do {
-			const page = await runtime.sessionArchive("agent-restore-source", contentHash, offset, 17);
+			const page = await runtime.sessionArchive("agent-restore-source", contentHash, offset, 24_000);
 			contentHash = page.contentHash;
 			byteLength = page.byteLength;
 			pages.push(Buffer.from(page.contentBase64, "base64"));
@@ -891,6 +891,7 @@ describe("EngineRuntime", () => {
 		} while (offset < byteLength);
 		const checkpoint = Buffer.concat(pages);
 		expect(checkpoint.byteLength).toBe(byteLength);
+		expect(pages.length).toBeGreaterThan(100);
 		await runtime.dispose();
 
 		runtime = await EngineRuntime.create(options);
@@ -900,7 +901,7 @@ describe("EngineRuntime", () => {
 			agentInstanceRef: targetRef,
 			authorityGeneration: 9,
 		};
-		const firstChunk = checkpoint.subarray(0, Math.min(23, checkpoint.byteLength));
+		const firstChunk = checkpoint.subarray(0, Math.min(24_000, checkpoint.byteLength));
 		const staged = await runtime.sessionRestoreStage({
 			...target,
 			contentHash: contentHash!,
@@ -909,12 +910,32 @@ describe("EngineRuntime", () => {
 			contentBase64: firstChunk.toString("base64"),
 		});
 		expect(staged).toMatchObject({ nextOffset: firstChunk.byteLength, complete: false });
+		await expect(
+			runtime.sessionRestoreStage({
+				...target,
+				contentHash: contentHash!,
+				totalBytes: checkpoint.byteLength,
+				offset: 0,
+				contentBase64: firstChunk.toString("base64"),
+			}),
+		).resolves.toMatchObject({ nextOffset: firstChunk.byteLength, complete: false });
+		const corruptReplay = Buffer.from(firstChunk);
+		corruptReplay[corruptReplay.byteLength - 1] ^= 0xff;
+		await expect(
+			runtime.sessionRestoreStage({
+				...target,
+				contentHash: contentHash!,
+				totalBytes: checkpoint.byteLength,
+				offset: 0,
+				contentBase64: corruptReplay.toString("base64"),
+			}),
+		).rejects.toMatchObject({ code: "stale_target" });
 		await runtime.dispose();
 
 		runtime = await EngineRuntime.create(options);
 		let nextOffset = firstChunk.byteLength;
 		while (nextOffset < checkpoint.byteLength) {
-			const chunk = checkpoint.subarray(nextOffset, Math.min(checkpoint.byteLength, nextOffset + 19));
+			const chunk = checkpoint.subarray(nextOffset, Math.min(checkpoint.byteLength, nextOffset + 24_000));
 			const next = await runtime.sessionRestoreStage({
 				...target,
 				contentHash: contentHash!,
@@ -994,7 +1015,7 @@ describe("EngineRuntime", () => {
 		expect(sideEffects).toEqual(["source-tool-settled"]);
 		if (!restored.sessionFile) throw new Error("Expected restored native session");
 		expect(fs.readFileSync(path.join(restored.sessionFile.slice(0, -".jsonl".length), "attachment.bin"))).toEqual(
-			Buffer.from([0, 1, 2, 255]),
+			attachmentBytes,
 		);
 		const restoredEvents = (await runtime.store.pendingEvents()).filter(
 			event => event.attemptId === restored.attemptId,
@@ -1026,7 +1047,7 @@ describe("EngineRuntime", () => {
 			await session.sessionManager.saveArtifact("complete spilled attachment", "read");
 			return true;
 		});
-		await runtime.start(
+		const started = await runtime.start(
 			{
 				commandId: "archive-native-command",
 				agentInstanceId: "archive-native-agent",
@@ -1039,17 +1060,13 @@ describe("EngineRuntime", () => {
 			profile,
 		);
 		await runtime.drain();
-		await expect(runtime.sessionArchive("archive-native-agent", undefined, 0, 17)).rejects.toMatchObject({
-			code: "agent_busy",
-		});
-		await runtime.dispose();
-
-		const restarted = await EngineRuntime.create(options);
-		const first = await restarted.sessionArchive("archive-native-agent", undefined, 0, 17);
+		const first = await runtime.sessionArchive("archive-native-agent", undefined, 0, 17);
+		if (!started.sessionFile) throw new Error("Expected archived native session");
+		fs.appendFileSync(started.sessionFile, "\n");
 		const chunks = [Buffer.from(first.contentBase64, "base64")];
 		let offset = first.nextOffset;
 		while (offset !== null) {
-			const page = await restarted.sessionArchive("archive-native-agent", first.contentHash, offset, 17);
+			const page = await runtime.sessionArchive("archive-native-agent", first.contentHash, offset, 17);
 			chunks.push(Buffer.from(page.contentBase64, "base64"));
 			offset = page.nextOffset;
 		}
@@ -1067,9 +1084,9 @@ describe("EngineRuntime", () => {
 			}),
 		]);
 		await expect(
-			restarted.sessionArchive("archive-native-agent", `sha256:${"0".repeat(64)}`, 0, 17),
+			runtime.sessionArchive("archive-native-agent", `sha256:${"0".repeat(64)}`, 0, 17),
 		).rejects.toMatchObject({ code: "stale_target" });
-		await restarted.dispose();
+		await runtime.dispose();
 
 		const secondRestart = await EngineRuntime.create(options);
 		const afterRestart = await secondRestart.sessionArchive("archive-native-agent", first.contentHash, 0, 24_000);
@@ -1181,7 +1198,7 @@ describe("EngineRuntime", () => {
 		expect(await runtime.listInbox(source)).toEqual(pendingBeforeEdit);
 		const unchanged = await runtime.sessionHistory(source.agentInstanceId);
 		expect(unchanged.entries.map(entry => entry.text)).toEqual(["original user", "answer:original user"]);
-		await runtime.start(
+		const started = await runtime.start(
 			{
 				commandId: "history-empty-branch-command",
 				agentInstanceId: "history-empty-branch",
