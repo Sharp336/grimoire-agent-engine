@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
 import { EngineProfileResolver } from "../src/engine/profile-resolver";
 import { ProviderAdmissionClient } from "../src/engine/provider-admission";
+import { createEngineCredentialValueResolver } from "../src/engine/windows-credential";
 import { AuthStorage } from "../src/session/auth-storage";
 
 const refs = {
@@ -17,6 +18,110 @@ const refs = {
 };
 
 describe("EngineProfileResolver", () => {
+	it("resolves only exact WinCred references and preserves env-or-literal credentials", async () => {
+		const prior = process.env.ENGINE_WINCRED_TEST_KEY;
+		process.env.ENGINE_WINCRED_TEST_KEY = "env-secret";
+		const requestedTargets: string[] = [];
+		const resolve = createEngineCredentialValueResolver(target => {
+			requestedTargets.push(target);
+			return "vault-secret";
+		});
+		try {
+			expect(await resolve("wincred://valid.target-1")).toBe("vault-secret");
+			expect(await resolve("wincred://bad/target")).toBeUndefined();
+			expect(await resolve("ENGINE_WINCRED_TEST_KEY")).toBe("env-secret");
+			expect(await resolve("literal-api-key")).toBe("literal-api-key");
+			expect(requestedTargets).toEqual(["valid.target-1"]);
+		} finally {
+			if (prior === undefined) delete process.env.ENGINE_WINCRED_TEST_KEY;
+			else process.env.ENGINE_WINCRED_TEST_KEY = prior;
+		}
+	});
+
+	it("materializes owner-local WinCred refs for primary and fallback routes without persisting plaintext", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-engine-profile-wincred-"));
+		const cache = path.join(root, "artifacts");
+		await fs.mkdir(cache);
+		const profileRef = "gctx:nnnnnnnnnnnnnnnn";
+		const primaryRouteRef = "gctx:pppppppppppppppp";
+		const fallbackRouteRef = "gctx:qqqqqqqqqqqqqqqq";
+		const primaryAccountRef = "gctx:rrrrrrrrrrrrrrrr";
+		const fallbackAccountRef = "gctx:ssssssssssssssss";
+		await artifact(cache, profileRef, "grimoire.agent_profile.v1", {
+			schema: "grimoire.agent_profile.v1",
+			status: "active",
+			models: [primaryRouteRef, fallbackRouteRef],
+			allowSameModelProviderFallback: true,
+		});
+		for (const [routeRef, accountRef, provider] of [
+			[primaryRouteRef, primaryAccountRef, "cheapai"],
+			[fallbackRouteRef, fallbackAccountRef, "million"],
+		] as const) {
+			await artifact(cache, routeRef, "grimoire.available_model_route.v1", {
+				schema: "grimoire.available_model_route.v1",
+				status: "active",
+				providerAccountRef: accountRef,
+				model: {
+					modelIdentityId: "gpt-5.6-terra",
+					providerSurfaceId: provider,
+					modelId: "gpt-5.6-terra",
+					contextWindow: 1_000_000,
+					maxOutputTokens: 128_000,
+				},
+			});
+			await artifact(cache, accountRef, "grimoire.provider_account.v1", {
+				schema: "grimoire.provider_account.v1",
+				status: "active",
+				providerId: provider,
+				api: "openai-completions",
+				baseUrl: `https://${provider}.invalid/v1`,
+				trusted: true,
+				credential: { type: "api_key", key: `wincred://${provider}.credential` },
+			});
+		}
+
+		const requestedTargets: string[] = [];
+		const resolver = new EngineProfileResolver(
+			cache,
+			path.join(root, "credentials"),
+			undefined,
+			undefined,
+			target => {
+				requestedTargets.push(target);
+				return `${target}-secret`;
+			},
+		);
+		const resolved = await resolver.resolve(
+			{ spawns: "", profileDigest: hash(profileRef), launchProfileRef: profileRef },
+			root,
+		);
+		try {
+			expect(await resolved.options.authStorage?.getApiKey("cheapai", "attempt-1")).toBe(
+				"cheapai.credential-secret",
+			);
+			const fallback = resolved.options.modelRegistry?.find("million", "gpt-5.6-terra");
+			expect(fallback).toBeDefined();
+			expect(await resolved.options.modelRegistry?.getApiKey(fallback!, "attempt-1")).toBe(
+				"million.credential-secret",
+			);
+			expect(requestedTargets.sort()).toEqual(["cheapai.credential", "million.credential"]);
+			expect(resolved.options.authStorage?.get("cheapai")).toEqual({
+				type: "api_key",
+				key: "wincred://cheapai.credential",
+			});
+			expect(resolved.options.authStorage?.get("million")).toEqual({
+				type: "api_key",
+				key: "wincred://million.credential",
+			});
+			const persisted = await fs.readFile(
+				path.join(root, "credentials", primaryAccountRef.slice(5), "credentials.sqlite"),
+			);
+			expect(persisted.includes(Buffer.from("credential-secret"))).toBe(false);
+		} finally {
+			resolved.dispose();
+		}
+	});
+
 	it("builds an ordered runtime chain only from configured routes with the same model identity", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-engine-profile-routes-"));
 		const cache = path.join(root, "artifacts");

@@ -15,6 +15,7 @@ import type { EngineChildProfile } from "../tools";
 import type { EngineLaunchProfile } from "./contracts";
 import { resolveExecutableModelLimits } from "./model-limits";
 import type { ProviderAdmissionClient, ProviderApiKeyRouteIdentity } from "./provider-admission";
+import { createEngineCredentialValueResolver, type WindowsCredentialReader } from "./windows-credential";
 
 const GCTX = /^gctx:[23456789abcdefghjkmnpqrstuvwxyz]{16}$/;
 
@@ -102,6 +103,7 @@ export class EngineProfileResolver {
 		readonly credentialRoot: string,
 		readonly localCredentialDbPath: string = getAgentDbPath(),
 		readonly providerAdmissionClient?: ProviderAdmissionClient,
+		readonly readWindowsCredential?: WindowsCredentialReader,
 	) {}
 
 	async continuationDigest(launch: EngineLaunchProfile, cwd: string): Promise<string> {
@@ -295,6 +297,7 @@ export class EngineProfileResolver {
 		});
 		const accountDir = path.join(this.credentialRoot, accountRef.slice(5));
 		await fs.mkdir(accountDir, { recursive: true });
+		const credentialValueResolver = createEngineCredentialValueResolver(this.readWindowsCredential);
 		let authStorage: AuthStorage;
 		if (localBinding) {
 			const store = await SqliteAuthCredentialStore.open(this.localCredentialDbPath);
@@ -315,7 +318,9 @@ export class EngineProfileResolver {
 			});
 			await authStorage.reload();
 		} else {
-			authStorage = await AuthStorage.create(path.join(accountDir, "credentials.sqlite"));
+			authStorage = await AuthStorage.create(path.join(accountDir, "credentials.sqlite"), {
+				configValueResolver: credentialValueResolver,
+			});
 		}
 		try {
 			let unsubscribeWriteback = () => {};
@@ -392,9 +397,11 @@ export class EngineProfileResolver {
 							continue;
 						}
 						if (!localBinding) await authStorage.set(fallbackAccount.providerId, fallbackCredential);
+						const fallbackApiKey = await credentialValueResolver(fallbackCredential.key);
+						if (!fallbackApiKey) continue;
 						const fallbackModel = buildModel(toModelSpec(fallbackRoute, fallbackAccount)) as Model;
 						modelRegistry.registerProvider(fallbackAccount.providerId, {
-							apiKey: fallbackCredential.key,
+							apiKey: fallbackApiKey,
 							api: fallbackModel.api,
 							baseUrl: fallbackAccount.baseUrl,
 							headers: fallbackAccount.headers,
