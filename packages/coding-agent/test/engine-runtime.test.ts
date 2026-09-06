@@ -3471,15 +3471,45 @@ describe("EngineRuntime", () => {
 			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
 			return true;
 		};
+		const cancelledPrompt = Promise.withResolvers<boolean>();
 		const preserved = await createRuntime(async (session, input, identity) => {
 			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
 			if (input.startsWith("fail")) throw new Error("injected failed child");
+			if (input.startsWith("cancel")) return await cancelledPrompt.promise;
 			return true;
 		});
 		await startAgent(preserved.runtime, preserved.cwd, "child-local-failed", "fail but retain child history");
 		await startAgent(preserved.runtime, preserved.cwd, "child-local-completed", "complete and retain child history");
+		const cancelledRequest = {
+			commandId: "command-child-local-cancelled-1",
+			agentInstanceId: "child-local-cancelled",
+			agentInstanceRef: "grimoire://tasks/grimoire/history-test/agents/child-local-cancelled",
+			parentAgentInstanceId: "parent-agent",
+			executionId: "execution-child-local-cancelled-1",
+			attemptId: "attempt-child-local-cancelled-1",
+			authorityGeneration: 1,
+			cwd: preserved.cwd,
+			input: "cancel but retain child history",
+		};
+		await preserved.runtime.store.admitCommand(
+			{
+				...cancelledRequest,
+				operation: "start",
+				deviceId: "device-history",
+				engineId: "engine-history",
+				engineGeneration: preserved.runtime.engineGeneration,
+				payloadHash: "sha256:payload-child-local-cancelled",
+				canonicalHash: "sha256:canonical-child-local-cancelled",
+			},
+			preserved.runtime.engineGeneration,
+		);
+		const cancelledStarted = await preserved.runtime.start(cancelledRequest, profile);
+		await preserved.runtime.cancel({ ...cancelledStarted, commandId: "cancel-child-local-cancelled" });
+		cancelledPrompt.resolve(true);
+		await preserved.runtime.drain();
 		expect((await preserved.runtime.store.getAttempt("attempt-child-local-failed-1"))?.state).toBe("failed");
 		expect((await preserved.runtime.store.getAttempt("attempt-child-local-completed-1"))?.state).toBe("completed");
+		expect((await preserved.runtime.store.getAttempt("attempt-child-local-cancelled-1"))?.state).toBe("cancelled");
 		await preserved.runtime.dispose();
 		const preservedRestart = await EngineRuntime.create(preserved.options);
 		expect(await preservedRestart.sweepExpiredChildHistory(Date.now() + 61 * 60_000)).toEqual({
@@ -3493,6 +3523,9 @@ describe("EngineRuntime", () => {
 		});
 		expect(await preservedRestart.sessionHistory("child-local-completed")).toMatchObject({
 			entries: [{ role: "user", text: "complete and retain child history" }],
+		});
+		expect(await preservedRestart.sessionHistory("child-local-cancelled")).toMatchObject({
+			entries: [{ role: "user", text: "cancel but retain child history" }],
 		});
 		await preservedRestart.dispose();
 
