@@ -55,6 +55,7 @@ import {
 	EngineTargetError,
 	type EngineToolApprovalDecision,
 	type EngineToolPolicy,
+	validateCommandContext,
 	validateStartRequest,
 } from "./contracts";
 import { safeEngineErrorDetail } from "./public-error";
@@ -376,6 +377,7 @@ export class EngineRuntime {
 	}
 
 	steer(request: EngineSteerRequest): Promise<EngineControlResult> {
+		validateCommandContext(request.context);
 		const queued = request.queueId !== undefined;
 		if (
 			!request.commandId.trim() ||
@@ -439,6 +441,7 @@ export class EngineRuntime {
 				item ? { ...item, revision: item.revision + 1 } : undefined,
 			);
 			try {
+				await this.#sendCommandContext(binding, request.context, request.commandId);
 				await binding.session.steer(item?.deliveryPayload ?? request.message!, undefined, {
 					sourceCommandId: request.commandId,
 					...(request.clientMessageId
@@ -597,6 +600,7 @@ export class EngineRuntime {
 
 	resume(request: EngineControlRequest): Promise<EngineControlResult> {
 		validateControlRequest(request);
+		validateCommandContext(request.context);
 		return this.#inLane(request.agentInstanceId, async () => {
 			const binding = this.#requireTarget(request);
 			if (binding.resumeCommandIds.has(request.commandId)) return this.#controlResult(binding);
@@ -608,6 +612,7 @@ export class EngineRuntime {
 			binding.attemptState = "running";
 			const result = this.#controlResult(binding);
 			try {
+				await this.#sendCommandContext(binding, request.context, request.commandId);
 				await this.#commitAttemptTransition(
 					binding,
 					"running",
@@ -1404,14 +1409,19 @@ export class EngineRuntime {
 			throw error;
 		}
 		this.#trackRun(
-			this.#runPrompt(binding, queuedItem?.deliveryPayload ?? request.input!, {
-				sourceCommandId: request.commandId,
-				...(request.clientMessageId
-					? { clientMessageId: request.clientMessageId }
-					: queuedItem?.sourceType === "user"
-						? { clientMessageId: queuedItem.sourceEventId }
-						: {}),
-			}),
+			this.#runPrompt(
+				binding,
+				queuedItem?.deliveryPayload ?? request.input!,
+				{
+					sourceCommandId: request.commandId,
+					...(request.clientMessageId
+						? { clientMessageId: request.clientMessageId }
+						: queuedItem?.sourceType === "user"
+							? { clientMessageId: queuedItem.sourceEventId }
+							: {}),
+				},
+				request.context,
+			),
 		);
 		this.#signalInboxWake();
 		return {
@@ -2249,10 +2259,29 @@ export class EngineRuntime {
 		);
 	}
 
-	async #runPrompt(binding: LiveBinding, input: string, identity?: SessionMessageIdentity): Promise<void> {
+	async #sendCommandContext(binding: LiveBinding, context: string | undefined, commandId: string): Promise<void> {
+		if (!context) return;
+		await binding.session.sendCustomMessage(
+			{
+				customType: "engine-command-context",
+				content: context,
+				display: false,
+				details: { sourceCommandId: commandId },
+			},
+			{ triggerTurn: false },
+		);
+	}
+
+	async #runPrompt(
+		binding: LiveBinding,
+		input: string,
+		identity?: SessionMessageIdentity,
+		context?: string,
+	): Promise<void> {
 		const attemptId = binding.attemptId;
 		const attemptMessageStart = binding.session.messages.length;
 		try {
+			await this.#sendCommandContext(binding, context, identity?.sourceCommandId ?? binding.commandId);
 			await this.#dispatchModel(binding, input, identity);
 			for (let reminder = 0; reminder < 2 && binding.requireYieldTool; reminder++) {
 				await binding.pauseGate.waitUntilResumed();

@@ -13,10 +13,20 @@ import type {
 	EngineLaunchProfile,
 	EngineStartRequest,
 } from "@oh-my-pi/pi-coding-agent/engine/contracts";
+import {
+	EngineControlQueryClient,
+	startEngineControlQueryServer,
+} from "@oh-my-pi/pi-coding-agent/engine/control-query";
+import {
+	dispatchEngineCommand,
+	type EngineCommandEnvelope,
+	engineCommandIdentity,
+} from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
 import { EngineRuntime, type EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { getLspResourceCounts } from "@oh-my-pi/pi-coding-agent/lsp/client";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { loadSessionFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { resolveProviderCandidates } from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -91,6 +101,499 @@ describe("EngineRuntime", () => {
 		enableMCP: false,
 		enableLsp: false,
 	};
+
+	it("delivers refreshed command context with the unchanged inbox body after restart, once", async () => {
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const { runtime, cwd, options } = await createRuntime(
+			(session, input, identity) => session.prompt(input, identity),
+			{},
+			{ model: mock.model },
+		);
+		const started = await runtime.start(
+			{
+				commandId: "context-initial",
+				agentInstanceId: "context-agent",
+				executionId: "context-execution-1",
+				attemptId: "context-attempt-1",
+				authorityGeneration: 1,
+				cwd,
+				input: "A",
+				context: JSON.stringify({ work_tracking: { receipt: "R1" } }),
+			},
+			profile,
+		);
+		await runtime.drain();
+		const queued = await runtime.enqueueInbox(started, {
+			sourceEventId: "context-body-b",
+			sourceType: "user",
+			body: "B",
+			createdAt: Date.now(),
+			deliverAt: Date.now() + 250,
+			wakeIntent: true,
+		});
+		await runtime.dispose();
+		let resumed = await EngineRuntime.create(options);
+		try {
+			let item = await resumed.store.getInboxItemByQueueId(queued.item.queueId);
+			for (let remaining = 100; !item?.wakeDeliveredAt && remaining > 0; remaining--) {
+				await Bun.sleep(25);
+				item = await resumed.store.getInboxItemByQueueId(queued.item.queueId);
+			}
+			expect(item?.wakeDeliveredAt).toBeDefined();
+			const command: EngineCommandEnvelope = {
+				schema: "grimoire.engine.command.v1",
+				commandId: "context-wake",
+				op: "start",
+				deviceId: "context-device",
+				engineId: "context-engine",
+				engineGeneration: resumed.engineGeneration,
+				agentInstanceId: started.agentInstanceId,
+				executionId: "context-execution-2",
+				attemptId: "context-attempt-2",
+				authorityGeneration: 1,
+				issuedAt: Date.now(),
+				payload: {
+					cwd,
+					profileDigest: profile.profileDigest,
+					queueId: item!.queueId,
+					expectedRevision: item!.revision,
+					mutationId: "context-consume",
+					expectedIntentRevision: started.intentRevision,
+					context: JSON.stringify({ work_tracking: { receipt: "R2" } }),
+				},
+			};
+			const dispatch = (value: EngineCommandEnvelope) =>
+				dispatchEngineCommand({
+					runtime: resumed,
+					command: value,
+					resolveLaunchProfile: () => profile,
+				});
+			await expect(
+				dispatch({ ...command, payload: { ...command.payload, expectedRevision: item!.revision - 1 } }),
+			).rejects.toMatchObject({ code: "stale_target" });
+			expect(mock.calls).toHaveLength(1);
+			await expect(
+				dispatch({ ...command, payload: { ...command.payload, input: "replacement body" } }),
+			).rejects.toMatchObject({ code: "invalid_request" });
+			expect(await dispatch(command)).toMatchObject({ phase: "consumed" });
+			await resumed.drain();
+			expect(mock.calls).toHaveLength(2);
+			expect(JSON.stringify(mock.calls[1].context.messages)).toContain("R2");
+			expect(mock.calls[1].context.messages.filter(message => message.role === "user").at(-1)?.content).toEqual([
+				{ type: "text", text: "B" },
+			]);
+			const binding = await resumed.store.getBinding(started.agentInstanceId);
+			expect(binding?.sessionFile).toBe(started.sessionFile);
+			const history = await loadSessionFile(binding!.sessionFile!, resumed.store.sessionStorage);
+			const contexts = history.entries.filter(
+				entry => entry.type === "custom_message" && entry.customType === "engine-command-context",
+			);
+			expect(contexts).toHaveLength(2);
+			const body = history.entries.find(
+				entry => entry.type === "message" && entry.sourceCommandId === command.commandId,
+			);
+			expect(body).toMatchObject({
+				clientMessageId: "context-body-b",
+				message: { role: "user", content: [{ type: "text", text: "B" }] },
+			});
+			expect(await resumed.store.getInboxItemByQueueId(item!.queueId)).toMatchObject({
+				sourceBody: "B",
+				deliveryPayload: "B",
+				disposition: "acknowledged",
+				revision: item!.revision + 1,
+			});
+			await dispatch(command);
+			await resumed.drain();
+			await resumed.dispose();
+			resumed = await EngineRuntime.create(options);
+			await dispatch({ ...command, engineGeneration: resumed.engineGeneration });
+			await resumed.drain();
+			expect(mock.calls).toHaveLength(2);
+			const replayHistory = await loadSessionFile(binding!.sessionFile!, resumed.store.sessionStorage);
+			expect(
+				replayHistory.entries.filter(entry => entry.type === "message" || entry.type === "custom_message"),
+			).toEqual(history.entries.filter(entry => entry.type === "message" || entry.type === "custom_message"));
+		} finally {
+			await resumed.dispose();
+		}
+	}, 60_000);
+
+	it("delivers admitted command context on raw resume and queued steer without stale or replay delivery", async () => {
+		const firstEntered = Promise.withResolvers<void>();
+		const firstRelease = Promise.withResolvers<void>();
+		const secondEntered = Promise.withResolvers<void>();
+		const secondRelease = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			responses: [
+				async () => {
+					firstEntered.resolve();
+					await firstRelease.promise;
+					return { content: ["first"] };
+				},
+				async () => {
+					secondEntered.resolve();
+					await secondRelease.promise;
+					return { content: ["second"] };
+				},
+				{ content: ["steered"] },
+			],
+		});
+		const { runtime, cwd } = await createRuntime(
+			(session, input, identity) => session.prompt(input, identity),
+			{},
+			{ model: mock.model },
+		);
+		try {
+			const first = await runtime.start(
+				{
+					commandId: "resume-context-start",
+					agentInstanceId: "resume-context-agent",
+					executionId: "resume-context-execution",
+					attemptId: "resume-context-attempt",
+					authorityGeneration: 1,
+					cwd,
+					input: "work",
+				},
+				profile,
+			);
+			await firstEntered.promise;
+			let paused = nextEngineEvent(runtime, "paused");
+			const hold = await runtime.pause({
+				...first,
+				commandId: "resume-context-pause",
+				initiator: { kind: "human" },
+				expectedIntentRevision: first.intentRevision,
+			});
+			firstRelease.resolve();
+			await paused;
+			const control = (
+				target: typeof first,
+				op: "resume" | "steer",
+				commandId: string,
+				payload: Record<string, unknown>,
+			) =>
+				dispatchEngineCommand({
+					runtime,
+					resolveLaunchProfile: () => profile,
+					command: {
+						schema: "grimoire.engine.command.v1",
+						commandId,
+						op,
+						deviceId: "context-device",
+						engineId: "context-engine",
+						engineGeneration: runtime.engineGeneration,
+						agentInstanceId: target.agentInstanceId,
+						runtimeBindingId: target.bindingId,
+						bindingGeneration: target.bindingGeneration,
+						executionId: target.executionId,
+						attemptId: target.attemptId,
+						authorityGeneration: target.authorityGeneration,
+						issuedAt: Date.now(),
+						payload,
+					},
+				});
+			await expect(
+				control(first, "resume", "resume-context-stale", {
+					initiator: { kind: "human" },
+					expectedIntentRevision: first.intentRevision,
+					context: "stale-resume-context",
+				}),
+			).rejects.toMatchObject({ code: "stale_target" });
+			const resumePayload = {
+				initiator: { kind: "human" },
+				expectedIntentRevision: hold.intentRevision,
+				context: '{"work_tracking":{"receipt":"RESUME_R2"}}',
+			};
+			await control(first, "resume", "resume-context-accepted", resumePayload);
+			await control(first, "resume", "resume-context-accepted", resumePayload);
+			await runtime.drain();
+			expect(mock.calls).toHaveLength(1);
+			const second = await runtime.start(
+				{
+					commandId: "steer-context-start",
+					agentInstanceId: first.agentInstanceId,
+					executionId: "steer-context-execution",
+					attemptId: "steer-context-attempt",
+					authorityGeneration: 1,
+					cwd,
+					input: "continue",
+				},
+				profile,
+			);
+			await secondEntered.promise;
+			expect(JSON.stringify(mock.calls[1].context.messages)).toContain("RESUME_R2");
+			const queued = await runtime.enqueueInbox(second, {
+				sourceEventId: "steer-body-b",
+				sourceType: "user",
+				body: "B",
+				createdAt: Date.now(),
+			});
+			paused = nextEngineEvent(runtime, "paused");
+			const secondHold = await runtime.pause({
+				...second,
+				commandId: "steer-context-pause",
+				initiator: { kind: "human" },
+				expectedIntentRevision: second.intentRevision,
+			});
+			secondRelease.resolve();
+			await paused;
+			const steerPayload = {
+				queueId: queued.item.queueId,
+				expectedRevision: queued.item.revision,
+				mutationId: "steer-context-consume",
+				expectedIntentRevision: secondHold.intentRevision,
+				context: '{"work_tracking":{"receipt":"STEER_R3"}}',
+			};
+			await expect(
+				control(second, "steer", "steer-context-stale", {
+					...steerPayload,
+					expectedRevision: queued.item.revision + 1,
+					context: "stale-steer-context",
+				}),
+			).rejects.toMatchObject({ code: "stale_target" });
+			await control(second, "steer", "steer-context-accepted", steerPayload);
+			await control(second, "steer", "steer-context-accepted", steerPayload);
+			await runtime.drain();
+			expect(mock.calls).toHaveLength(3);
+			expect(JSON.stringify(mock.calls[2].context.messages)).toContain("STEER_R3");
+			const history = await loadSessionFile(second.sessionFile!, runtime.store.sessionStorage);
+			expect(JSON.stringify(history.entries)).not.toContain("stale-resume-context");
+			expect(JSON.stringify(history.entries)).not.toContain("stale-steer-context");
+			expect(
+				history.entries.filter(
+					entry => entry.type === "custom_message" && entry.customType === "engine-command-context",
+				),
+			).toHaveLength(2);
+			expect(
+				history.entries.find(
+					entry => entry.type === "message" && entry.sourceCommandId === "steer-context-accepted",
+				),
+			).toMatchObject({
+				clientMessageId: "steer-body-b",
+				message: { role: "user", content: [{ type: "text", text: "B" }] },
+			});
+			expect(await runtime.readInbox(second, queued.item.queueId)).toMatchObject({
+				sourceBody: "B",
+				deliveryPayload: "B",
+				disposition: "acknowledged",
+				revision: queued.item.revision + 1,
+			});
+		} finally {
+			firstRelease.resolve();
+			secondRelease.resolve();
+			await runtime.dispose();
+		}
+	}, 60_000);
+
+	it("keeps failed command context or steer delivery paused and pending, with rejected durable replay", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			responses: [
+				async () => {
+					entered.resolve();
+					await release.promise;
+					return { content: ["paused work"] };
+				},
+				{ content: ["recovered"] },
+			],
+		});
+		const { runtime, cwd, options } = await createRuntime(
+			(session, input, identity) => session.prompt(input, identity),
+			{},
+			{ model: mock.model },
+		);
+		const runtimeDir = path.dirname(options.databasePath!);
+		const server = await startEngineControlQueryServer({
+			runtime,
+			runtimeDir,
+			deviceId: "context-device",
+			engineId: "context-engine",
+			resolveLaunchProfile: () => profile,
+		});
+		const client = new EngineControlQueryClient(runtimeDir);
+		try {
+			const started = await runtime.start(
+				{
+					commandId: "context-failure-start",
+					agentInstanceId: "context-failure-agent",
+					executionId: "context-failure-execution",
+					attemptId: "context-failure-attempt",
+					authorityGeneration: 1,
+					cwd,
+					input: "A",
+				},
+				profile,
+			);
+			await entered.promise;
+			const queued = await runtime.enqueueInbox(started, {
+				sourceEventId: "context-failure-body-b",
+				sourceType: "user",
+				body: "B",
+				createdAt: Date.now(),
+			});
+			const paused = nextEngineEvent(runtime, "paused");
+			const hold = await runtime.pause({
+				...started,
+				commandId: "context-failure-pause",
+				initiator: { kind: "human" },
+				expectedIntentRevision: started.intentRevision,
+			});
+			release.resolve();
+			await paused;
+			const session = runtime.agentRegistry.get(started.engineAgentId)!.session!;
+			const command = (op: "resume" | "steer", commandId: string): EngineCommandEnvelope => ({
+				schema: "grimoire.engine.command.v1",
+				commandId,
+				op,
+				deviceId: "context-device",
+				engineId: "context-engine",
+				engineGeneration: runtime.engineGeneration,
+				agentInstanceId: started.agentInstanceId,
+				runtimeBindingId: started.bindingId,
+				bindingGeneration: started.bindingGeneration,
+				executionId: started.executionId,
+				attemptId: started.attemptId,
+				authorityGeneration: started.authorityGeneration,
+				issuedAt: Date.now(),
+				payload: {
+					context: '{"work_tracking":{"receipt":"R2"}}',
+					expectedIntentRevision: hold.intentRevision,
+					...(op === "resume"
+						? { initiator: { kind: "human" } }
+						: {
+								queueId: queued.item.queueId,
+								expectedRevision: queued.item.revision,
+								mutationId: `${commandId}-consume`,
+							}),
+				},
+			});
+			const assertRejectedReplay = async (value: EngineCommandEnvelope, message: string) => {
+				await expect(client.request("command", { command: value })).rejects.toThrow();
+				await expect(client.request("command", { command: value })).rejects.toThrow();
+				expect(
+					await runtime.store.admitCommand(engineCommandIdentity(value), runtime.engineGeneration),
+				).toMatchObject({
+					status: "replay",
+					receipt: { outcome: "rejected", detail: { message } },
+				});
+				expect(await runtime.store.getAttempt(started.attemptId)).toMatchObject({ state: "paused" });
+				expect(await runtime.store.getBinding(started.agentInstanceId)).toMatchObject({
+					manualHold: true,
+					intentRevision: hold.intentRevision,
+				});
+				expect(await runtime.readInbox(started, queued.item.queueId)).toMatchObject({
+					sourceBody: "B",
+					deliveryPayload: "B",
+					disposition: "pending",
+					revision: queued.item.revision,
+				});
+				expect(mock.calls).toHaveLength(1);
+			};
+			const contextFailure = spyOn(session, "sendCustomMessage").mockRejectedValue(
+				new Error("context delivery unavailable"),
+			);
+			try {
+				await assertRejectedReplay(command("resume", "context-failed-resume"), "context delivery unavailable");
+				await assertRejectedReplay(command("steer", "context-failed-steer"), "context delivery unavailable");
+				expect(contextFailure).toHaveBeenCalledTimes(2);
+			} finally {
+				contextFailure.mockRestore();
+			}
+			const bodyFailure = spyOn(session, "steer").mockRejectedValue(new Error("body delivery unavailable"));
+			try {
+				await assertRejectedReplay(command("steer", "context-failed-body"), "body delivery unavailable");
+				expect(bodyFailure).toHaveBeenCalledTimes(1);
+			} finally {
+				bodyFailure.mockRestore();
+			}
+			const failedHistory = await loadSessionFile(started.sessionFile!, runtime.store.sessionStorage);
+			expect(
+				failedHistory.entries.filter(
+					entry => entry.type === "custom_message" && entry.customType === "engine-command-context",
+				),
+			).toHaveLength(1);
+			expect(
+				failedHistory.entries.some(
+					entry => entry.type === "message" && entry.clientMessageId === "context-failure-body-b",
+				),
+			).toBe(false);
+			const retry = command("steer", "context-body-retry");
+			retry.payload.context = '{"work_tracking":{"status":"disabled","applicable":false}}';
+			await client.request("command", { command: retry });
+			await client.request("command", { command: retry });
+			await runtime.drain();
+			expect(mock.calls).toHaveLength(2);
+			expect(mock.calls[1].context.messages).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({ role: "developer", content: [{ type: "text", text: retry.payload.context }] }),
+				]),
+			);
+			const recoveredHistory = await loadSessionFile(started.sessionFile!, runtime.store.sessionStorage);
+			expect(
+				recoveredHistory.entries.filter(
+					entry => entry.type === "message" && entry.clientMessageId === "context-failure-body-b",
+				),
+			).toEqual([
+				expect.objectContaining({
+					sourceCommandId: retry.commandId,
+					message: expect.objectContaining({ role: "user", content: [{ type: "text", text: "B" }] }),
+				}),
+			]);
+			expect(await runtime.readInbox(started, queued.item.queueId)).toMatchObject({
+				disposition: "acknowledged",
+				revision: queued.item.revision + 1,
+			});
+		} finally {
+			release.resolve();
+			await server.close();
+			await runtime.dispose();
+		}
+	}, 60_000);
+
+	it("rejects malformed or over-budget native command context before admission and accepts the exact UTF-8 bound", async () => {
+		let dispatches = 0;
+		const { runtime, cwd } = await createRuntime(async () => {
+			dispatches++;
+			return true;
+		});
+		try {
+			const command: EngineCommandEnvelope = {
+				schema: "grimoire.engine.command.v1",
+				commandId: "context-bound",
+				op: "start",
+				deviceId: "context-device",
+				engineId: "context-engine",
+				engineGeneration: runtime.engineGeneration,
+				agentInstanceId: "context-bound-agent",
+				executionId: "context-bound-execution",
+				attemptId: "context-bound-attempt",
+				authorityGeneration: 1,
+				issuedAt: Date.now(),
+				payload: { cwd, profileDigest: profile.profileDigest, input: "B" },
+			};
+			for (const context of [null, [], {}, 42, "\u20ac".repeat(21_846)]) {
+				await expect(
+					dispatchEngineCommand({
+						runtime,
+						command: { ...command, payload: { ...command.payload, context } },
+						resolveLaunchProfile: () => profile,
+					}),
+				).rejects.toMatchObject({ code: "invalid_request" });
+			}
+			expect(dispatches).toBe(0);
+			expect(await runtime.store.getAttempt(command.attemptId!)).toBeUndefined();
+			await dispatchEngineCommand({
+				runtime,
+				command: { ...command, payload: { ...command.payload, context: "\u00e9".repeat(32_768) } },
+				resolveLaunchProfile: () => profile,
+			});
+			await runtime.drain();
+			expect(dispatches).toBe(1);
+		} finally {
+			await runtime.dispose();
+		}
+	});
 
 	it("fails closed when Engine mode has no explicit Settings snapshot", async () => {
 		const { runtime, cwd } = await createRuntime(async () => true, {}, { settings: undefined });

@@ -71,6 +71,8 @@ export interface EngineStartRequest {
 	authorityGeneration: number;
 	cwd: string;
 	input?: string;
+	/** Immutable caller context for this command, separate from the user/inbox body. */
+	context?: string;
 	/** Durable inbox identity for an automatic queued start. Mutually exclusive with input. */
 	queueId?: string;
 	expectedRevision?: number;
@@ -91,6 +93,7 @@ export interface EngineTarget {
 
 export interface EngineSteerRequest extends EngineTarget {
 	commandId: string;
+	context?: string;
 	/** Opaque UI identity for the exact user message introduced by this command. */
 	clientMessageId?: string;
 	message?: string;
@@ -112,6 +115,8 @@ export type EngineControlInitiator =
 
 export interface EngineControlRequest extends EngineTarget {
 	commandId: string;
+	/** Optional context delivered when resuming the admitted Attempt. */
+	context?: string;
 	initiator: EngineControlInitiator;
 	expectedIntentRevision?: number;
 }
@@ -300,6 +305,7 @@ export class EngineTargetError extends Error {
 }
 
 export function validateStartRequest(request: EngineStartRequest): void {
+	validateCommandContext(request.context);
 	for (const [name, value] of Object.entries({
 		commandId: request.commandId,
 		agentInstanceId: request.agentInstanceId,
@@ -347,5 +353,11 @@ export function validateStartRequest(request: EngineStartRequest): void {
 		(!Number.isSafeInteger(request.expectedIntentRevision) || request.expectedIntentRevision < 0)
 	) {
 		throw new EngineTargetError("invalid_request", "expectedIntentRevision must be a non-negative safe integer");
+	}
+}
+
+export function validateCommandContext(context: unknown): asserts context is string | undefined {
+	if (context !== undefined && (typeof context !== "string" || Buffer.byteLength(context, "utf8") > 65_536)) {
+		throw new EngineTargetError("invalid_request", "context must be a string of at most 65536 UTF-8 bytes");
 	}
 }
