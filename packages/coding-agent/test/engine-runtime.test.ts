@@ -23,8 +23,10 @@ import {
 	engineCommandIdentity,
 } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
 import { EngineRuntime, type EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
+import { hostedCoreMcpConfig } from "@oh-my-pi/pi-coding-agent/engine/service";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { getLspResourceCounts } from "@oh-my-pi/pi-coding-agent/lsp/client";
+import * as mcpConfig from "@oh-my-pi/pi-coding-agent/mcp/config";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { loadSessionFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -101,6 +103,208 @@ describe("EngineRuntime", () => {
 		enableMCP: false,
 		enableLsp: false,
 	};
+
+	it("binds hosted MCP tools to their own origin across legacy history, children and restart, without fallback", async () => {
+		const live = { owned: new Set<string>(), foreign: new Set<string>() };
+		const calls = { owned: 0, foreign: 0 };
+		let unavailable = false;
+		const failedConnectionClosed = Promise.withResolvers<void>();
+		const serve = (origin: "owned" | "foreign") =>
+			Bun.serve({
+				hostname: "127.0.0.1",
+				port: 0,
+				async fetch(request) {
+					if (
+						origin === "owned" &&
+						(new URL(request.url).pathname !== "/mcp/core" ||
+							request.headers.get("Authorization") !== "Bearer isolated-mcp-test" ||
+							request.headers.get("X-Grimoire-Client") !== "engine-route-test")
+					) {
+						return new Response(null, { status: 403 });
+					}
+					if (request.method === "DELETE") {
+						live[origin].delete(request.headers.get("Mcp-Session-Id") ?? "");
+						if (origin === "owned" && unavailable) failedConnectionClosed.resolve();
+						return new Response(null, { status: 204 });
+					}
+					if (request.method === "GET") return new Response(null, { status: 405 });
+					const message = (await request.json()) as { id?: string | number; method: string };
+					if (message.id === undefined) return new Response(null, { status: 202 });
+					if (message.method === "initialize") {
+						const id = `${origin}-${++calls[origin]}`;
+						live[origin].add(id);
+						return Response.json(
+							{
+								jsonrpc: "2.0",
+								id: message.id,
+								result: {
+									protocolVersion: "2025-11-25",
+									capabilities: { tools: {} },
+									serverInfo: { name: origin, version: "1" },
+								},
+							},
+							{ headers: { "Mcp-Session-Id": id } },
+						);
+					}
+					if (message.method === "tools/list") {
+						if (origin === "owned") {
+							if (unavailable) return new Response(null, { status: 503 });
+							// Exceed MCPManager's UI startup grace: hosted model dispatch must wait for tools.
+							await Bun.sleep(350);
+						}
+						return Response.json({
+							jsonrpc: "2.0",
+							id: message.id,
+							result: {
+								tools: [
+									{
+										name: `${origin}_probe`,
+										description: `${origin} fixture lookup`,
+										inputSchema: { type: "object", properties: {} },
+									},
+								],
+							},
+						});
+					}
+					return Response.json({
+						jsonrpc: "2.0",
+						id: message.id,
+						error: { code: -32601, message: "unsupported fixture method" },
+					});
+				},
+			});
+		const owned = serve("owned");
+		const foreign = serve("foreign");
+		const discover = spyOn(mcpConfig, "loadAllMCPConfigs").mockResolvedValue({
+			configs: { foreign: { type: "http", url: `${foreign.url}mcp` } },
+			sources: {},
+			exaApiKeys: [],
+		});
+		const mock = createMockModel({ handler: { content: ["done"] } });
+		const setup = await createRuntime(
+			(session, input, identity) => session.prompt(input, identity),
+			{
+				resolveSessionProfile: async (_launch, cwd) => ({
+					options: {
+						settings: await Settings.loadReadOnly({
+							cwd,
+							agentDir: path.join(path.dirname(cwd), "agent"),
+							overrides: { "tools.xdev": false, "bash.autoBackground.enabled": true },
+						}),
+					},
+					dispose() {},
+				}),
+			},
+			{ model: mock.model },
+		);
+		let runtime = setup.runtime;
+		const launch = { ...profile, enableMCP: true };
+		const request = (agent: string, turn: number): EngineStartRequest => ({
+			commandId: `${agent}-command-${turn}`,
+			agentInstanceId: agent,
+			executionId: `${agent}-execution-${turn}`,
+			attemptId: `${agent}-attempt-${turn}`,
+			authorityGeneration: 1,
+			cwd: setup.cwd,
+			input: `${agent} turn ${turn}`,
+		});
+		const lastMcpTools = () =>
+			mock.calls
+				.at(-1)
+				?.context.tools?.map(tool => tool.name)
+				.filter(name => name.startsWith("mcp__")) ?? [];
+		try {
+			const first = await runtime.start(request("route-root", 1), launch);
+			await runtime.drain();
+			await runtime.start(request("route-root", 2), launch);
+			await runtime.drain();
+			await runtime.start(request("route-root", 3), launch);
+			await runtime.drain();
+			expect(lastMcpTools()).toEqual(["mcp__foreign_probe"]);
+			const oldHistory = await loadSessionFile(first.sessionFile!, runtime.store.sessionStorage);
+			const oldMessages = oldHistory.entries.filter(entry => entry.type === "message");
+			expect(oldMessages).toHaveLength(6);
+			await runtime.dispose();
+			expect(live.foreign.size).toBe(0);
+			const boundOptions: EngineRuntimeOptions = {
+				...setup.options,
+				mcpServer: {
+					...hostedCoreMcpConfig({
+						serverUrl: `${owned.url}mcp/client_agents`,
+						token: "isolated-mcp-test",
+						clientId: "engine-route-test",
+					}),
+					timeout: 1000,
+				},
+			};
+			runtime = await EngineRuntime.create(boundOptions);
+			const upgraded = await runtime.start(request("route-root", 4), launch);
+			await runtime.drain();
+			expect(upgraded.sessionFile).toBe(first.sessionFile);
+			expect(lastMcpTools()).toEqual(["mcp__grimoire_engine_owned_probe"]);
+			expect(calls.foreign).toBe(1);
+			expect(live.owned.size).toBe(1);
+			const child = await runtime.start(
+				{ ...request("route-child", 1), parentAgentInstanceId: first.agentInstanceId },
+				launch,
+			);
+			await runtime.drain();
+			expect(lastMcpTools()).toEqual(["mcp__grimoire_engine_owned_probe"]);
+			expect(live.owned.size).toBe(2);
+			await runtime.release(child);
+			expect(live.owned.size).toBe(1);
+			const restrictedProfiles: [string, EngineLaunchProfile][] = [
+				["mcp-disabled", { ...launch, enableMCP: false }],
+				["mcp-restricted", { ...launch, restrictToolNames: true, toolNames: ["read"] }],
+			];
+			for (const [agent, restricted] of restrictedProfiles) {
+				await runtime.start(request(agent, 1), restricted);
+				await runtime.drain();
+				expect(lastMcpTools()).toEqual([]);
+			}
+			expect(calls.owned).toBe(2);
+			unavailable = true;
+			const modelCallsBeforeFailure = mock.calls.length;
+			await expect(runtime.start(request("mcp-unavailable", 1), launch)).rejects.toThrow(
+				"Hosted Core MCP binding failed",
+			);
+			expect(mock.calls).toHaveLength(modelCallsBeforeFailure);
+			expect(runtime.getBinding("mcp-unavailable")).toBeUndefined();
+			// MCPManager rejects promptly and closes failed catalog sessions in the background.
+			await Promise.race([failedConnectionClosed.promise, Bun.sleep(1000)]);
+			expect(live.owned.size).toBe(1);
+			expect(calls.foreign).toBe(1);
+			unavailable = false;
+			await runtime.dispose();
+			expect(live.owned.size).toBe(0);
+			runtime = await EngineRuntime.create(boundOptions);
+			const restarted = await runtime.start(request("route-root", 5), launch);
+			await runtime.drain();
+			expect(restarted.sessionFile).toBe(first.sessionFile);
+			expect(lastMcpTools()).toEqual(["mcp__grimoire_engine_owned_probe"]);
+			const retained = await loadSessionFile(restarted.sessionFile!, runtime.store.sessionStorage);
+			expect(retained.entries[0]).toEqual(oldHistory.entries[0]);
+			expect(retained.entries.filter(entry => entry.type === "message").slice(0, 6)).toEqual(oldMessages);
+			expect(retained.entries.filter(entry => entry.type === "message")).toHaveLength(10);
+			expect(JSON.stringify(retained.entries)).not.toContain("isolated-mcp-test");
+			await runtime.dispose();
+			expect(live.owned.size).toBe(0);
+			owned.stop(true);
+			runtime = await EngineRuntime.create(boundOptions);
+			const modelCallsBeforeOffline = mock.calls.length;
+			await expect(runtime.start(request("mcp-offline", 1), launch)).rejects.toThrow(
+				"Hosted Core MCP binding failed",
+			);
+			expect(runtime.getBinding("mcp-offline")).toBeUndefined();
+			expect(mock.calls).toHaveLength(modelCallsBeforeOffline);
+			expect(calls.foreign).toBe(1);
+		} finally {
+			await runtime.dispose();
+			discover.mockRestore();
+			owned.stop(true);
+			foreign.stop(true);
+		}
+	}, 60_000);
 
 	it("delivers refreshed command context with the unchanged inbox body after restart, once", async () => {
 		const mock = createMockModel({ handler: { content: ["done"] } });

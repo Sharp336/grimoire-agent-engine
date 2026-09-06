@@ -19,6 +19,8 @@ import {
 } from "../extensibility/extensions";
 import { IrcBus, type IrcDeliveryReceipt } from "../irc/bus";
 import { withLspSessionScope } from "../lsp/client";
+import { MCPManager } from "../mcp/manager";
+import type { MCPHttpServerConfig } from "../mcp/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession } from "../sdk";
@@ -146,6 +148,7 @@ interface LiveBinding extends EngineBindingSnapshot {
 	intentRevision: number;
 	attemptState: EngineAttemptState;
 	session: AgentSession;
+	mcpManager?: MCPManager;
 	steerCommandIds: string[];
 	steerCommandSet: Set<string>;
 	unsubscribe: () => void;
@@ -210,6 +213,8 @@ interface PendingInput {
 
 export interface EngineRuntimeOptions {
 	databasePath: string;
+	/** Hosted Core binding. Credentials stay in memory; undefined preserves standalone discovery. */
+	mcpServer?: MCPHttpServerConfig;
 	childHistoryTtlMinutes?: number;
 	childHistoryRetention?: "off" | "grimoire";
 	archiveChildHistory?: (request: {
@@ -265,6 +270,7 @@ export class EngineRuntime {
 	readonly engineGeneration: number;
 	readonly store: EngineStore;
 	readonly #sessionDefaults: EngineRuntimeOptions["sessionDefaults"];
+	readonly #mcpServer: EngineRuntimeOptions["mcpServer"];
 	readonly #dispatchPrompt: (
 		session: AgentSession,
 		input: string,
@@ -291,6 +297,7 @@ export class EngineRuntime {
 		this.store = store;
 		this.engineGeneration = engineGeneration;
 		this.#sessionDefaults = options.sessionDefaults;
+		this.#mcpServer = options.mcpServer;
 		this.#dispatchPrompt = options.dispatchPrompt ?? ((session, input, identity) => session.prompt(input, identity));
 		this.#resolveSessionProfile = options.resolveSessionProfile;
 		this.#resolveSessionContinuation = options.resolveSessionContinuation;
@@ -1500,6 +1507,7 @@ export class EngineRuntime {
 		let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
 		let unsubscribeCreated: (() => void) | undefined;
 		let sessionManager: SessionManager | undefined;
+		let mcpManager: MCPManager | undefined;
 		let uncommittedForkSessionFile: string | undefined;
 		try {
 			const prior = await this.store.getBinding(request.agentInstanceId);
@@ -1588,7 +1596,7 @@ export class EngineRuntime {
 							},
 						}
 					: undefined;
-			created = await createAgentSession({
+			const sessionOptions: CreateAgentSessionOptions = {
 				...this.#sessionDefaults,
 				cwd: request.cwd,
 				sessionManager,
@@ -1644,7 +1652,34 @@ export class EngineRuntime {
 				parentAgentId: request.parentAgentInstanceId ? engineAgentId(request.parentAgentInstanceId) : undefined,
 				engineMode: true,
 				expectedAgentRef: null,
-			});
+			};
+			if (this.#mcpServer) {
+				// A hosted session never inherits an ambient manager, including from a profile.
+				sessionOptions.mcpManager = undefined;
+				if (sessionOptions.enableMCP !== false && sessionOptions.restrictToolNames !== true) {
+					mcpManager = new MCPManager(request.cwd, null);
+					const ready = Promise.withResolvers<void>();
+					await Promise.all([
+						ready.promise,
+						mcpManager.connectServers({ grimoire_engine: this.#mcpServer }, {}, event => {
+							if (event.type === "connected") ready.resolve();
+							if (event.type === "failed") ready.reject(new Error("Hosted Core MCP binding failed"));
+						}),
+					]);
+					sessionOptions.mcpManager = mcpManager;
+				}
+			}
+			created = await createAgentSession(sessionOptions);
+			if (mcpManager) {
+				const session = created.session;
+				await session.refreshMCPTools(mcpManager.getTools());
+				mcpManager.setOnToolsChanged(async tools => {
+					if (session.isDisposed) return;
+					await session.refreshMCPTools(tools).catch(() => {
+						logger.error("Hosted Core MCP catalog refresh failed");
+					});
+				});
+			}
 
 			const binding: LiveBinding = {
 				bindingId: `${route}:${bindingGeneration}`,
@@ -1667,6 +1702,7 @@ export class EngineRuntime {
 				intentRevision: prior?.intentRevision ?? 0,
 				...(prior?.intentCommandId ? { intentCommandId: prior.intentCommandId } : {}),
 				session: created.session,
+				mcpManager,
 				steerCommandIds: [],
 				steerCommandSet: new Set(),
 				unsubscribe: () => {},
@@ -1788,6 +1824,8 @@ export class EngineRuntime {
 			if (unsubscribeCreated) await collectFailure(cleanupErrors, unsubscribeCreated);
 			const createdSession = created?.session;
 			if (createdSession) await collectFailure(cleanupErrors, () => createdSession.dispose());
+			const createdMcpManager = mcpManager;
+			if (createdMcpManager) await collectFailure(cleanupErrors, () => createdMcpManager.disconnectAll());
 			if (uncommittedForkSessionFile && sessionManager) {
 				const forkSessionManager = sessionManager;
 				const forkSessionFile = uncommittedForkSessionFile;
@@ -2687,6 +2725,7 @@ export class EngineRuntime {
 		if (abort) await collectFailure(errors, () => abort!);
 		if (beforeSessionDispose) await collectFailure(errors, beforeSessionDispose);
 		await collectFailure(errors, () => binding.session.dispose());
+		await collectFailure(errors, () => binding.mcpManager?.disconnectAll());
 		await collectFailure(errors, binding.disposeProfile);
 		await collectFailure(errors, () => this.agentRegistry.unregister(binding.engineAgentId, binding.session));
 		throwCollectedFailures(errors, `Engine binding ${binding.agentInstanceId} resource cleanup failed`);

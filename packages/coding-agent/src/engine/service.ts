@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { nkeyAuthenticator, nkeys } from "@nats-io/transport-node";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import type { MCPHttpServerConfig } from "../mcp/types";
 import { type EngineLaunchProfile, EngineTargetError } from "./contracts";
 import { type EngineControlQueryServer, startEngineControlQueryServer } from "./control-query";
 import { HostedEngineBridge, HostedGrimoireRpc, launchHostedEngineChild } from "./hosted-bridge";
@@ -66,6 +67,7 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 			: undefined;
 		runtime = await EngineRuntime.create({
 			databasePath,
+			mcpServer: config.hosted ? hostedCoreMcpConfig(config.hosted) : undefined,
 			childHistoryTtlMinutes: config.childHistoryTtlMinutes,
 			childHistoryRetention: config.childHistoryRetention,
 			archiveChildHistory: artifactRpc
@@ -280,6 +282,23 @@ function validateConfig(config: EngineServiceConfig): void {
 	if (retention === "grimoire" && !config.hosted) {
 		throw new Error("childHistoryRetention=grimoire requires the hosted ClientHost bridge");
 	}
+}
+
+export function hostedCoreMcpConfig(hosted: NonNullable<EngineServiceConfig["hosted"]>): MCPHttpServerConfig {
+	return {
+		type: "http",
+		url: coreMcpUrl(hosted.serverUrl),
+		headerPolicy: "origin-locked",
+		headers: {
+			Authorization: `Bearer ${hosted.token}`,
+			"X-Grimoire-Client": hosted.clientId,
+			"X-Grimoire-Client-Name": "grimoire-agent-engine",
+			"X-Grimoire-Client-Version": hosted.clientVersion ?? "0.4.0",
+			"X-Grimoire-Client-Surface": "agent_engine_bridge",
+			"X-Grimoire-Client-Protocol-Version": hosted.protocolVersion ?? "2026-08-01",
+			...(hosted.sourceSignature ? { "X-Grimoire-Client-Source-Signature": hosted.sourceSignature } : {}),
+		},
+	};
 }
 
 export function coreMcpUrl(serverUrl: string): string {
