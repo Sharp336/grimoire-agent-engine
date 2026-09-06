@@ -1,4 +1,5 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -316,6 +317,49 @@ describe("EngineRuntime", () => {
 		expect(restoredEvents.some(event => event.kind === "tool_started" || event.kind === "tool_settled")).toBe(false);
 		await runtime.dispose();
 	}, 60_000);
+
+	it("rejects native checkpoint artifact names that collide or escape portable filesystems", async () => {
+		const { runtime } = await createRuntime(async () => true);
+		const sessionBytes = Buffer.from(
+			`${JSON.stringify({
+				type: "session",
+				version: 3,
+				id: "portable-artifact-session",
+				timestamp: "2026-09-06T00:00:00Z",
+				cwd: "C:/workspace",
+			})}\n`,
+		);
+		const content = Buffer.from("artifact");
+		for (const [index, names] of [["Foo.bin", "foo.bin"], ["CON"], ["valid."]].entries()) {
+			const checkpoint = Buffer.from(
+				`${JSON.stringify({
+					schema: "grimoire.engine.native_session_checkpoint.v1",
+					sessionId: "portable-artifact-session",
+					sessionJsonlHash: `sha256:${crypto.createHash("sha256").update(sessionBytes).digest("hex")}`,
+					sessionJsonlBase64: sessionBytes.toString("base64"),
+					artifacts: names.map(name => ({
+						name,
+						contentHash: `sha256:${crypto.createHash("sha256").update(content).digest("hex")}`,
+						byteLength: content.byteLength,
+						contentBase64: content.toString("base64"),
+					})),
+				})}\n`,
+			);
+			const targetRef = `grimoire://tasks/project/portable-${index}/agents/portable-${index}`;
+			await expect(
+				runtime.sessionRestoreStage({
+					agentInstanceId: engineAgentInstanceId(targetRef),
+					agentInstanceRef: targetRef,
+					authorityGeneration: 1,
+					contentHash: `sha256:${crypto.createHash("sha256").update(checkpoint).digest("hex")}`,
+					totalBytes: checkpoint.byteLength,
+					offset: 0,
+					contentBase64: checkpoint.toString("base64"),
+				}),
+			).rejects.toMatchObject({ code: "invalid_request" });
+		}
+		await runtime.dispose();
+	});
 
 	it("applies native history edit and branch starts without flattening or changing the source branch", async () => {
 		const dispatches: Array<{
