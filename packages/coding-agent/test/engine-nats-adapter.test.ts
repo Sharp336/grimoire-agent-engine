@@ -354,6 +354,33 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			});
 			expect(dispatchCount).toBe(3);
 
+			const invalidHistoryBranch = startCommand(runtime.engineGeneration, "agent-a", "invalid-history", cwd);
+			invalidHistoryBranch.payload.historyEdit = {
+				mode: "branch",
+				source: runtime.getBinding("agent-b"),
+				sourceSessionId: "source-session",
+				expectedLeafEntryId: "source-leaf",
+				entryId: "source-entry",
+				replacementText: "must not be silently discarded",
+			};
+			await js.publish(adapter.commandSubject("agent-a", "start"), JSON.stringify(invalidHistoryBranch), {
+				msgID: invalidHistoryBranch.commandId,
+			});
+			await waitFor(() =>
+				eventsA.some(
+					event =>
+						event.type === "command.rejected" && event.causationCommandId === invalidHistoryBranch.commandId,
+				),
+			);
+			expect(
+				await runtime.store.admitCommand(engineCommandIdentity(invalidHistoryBranch), runtime.engineGeneration),
+			).toMatchObject({
+				status: "replay",
+				receipt: { outcome: "rejected", detail: { code: "invalid_request" } },
+			});
+			expect(await runtime.store.getAttempt(invalidHistoryBranch.attemptId!)).toBeUndefined();
+			expect(dispatchCount).toBe(3);
+
 			const mismatchedIdentityA = {
 				...startCommand(runtime.engineGeneration, "agent-a", "mismatched-identity", cwd),
 				commandId: "command-a-mismatched-identity",

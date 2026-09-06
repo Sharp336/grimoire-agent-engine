@@ -135,6 +135,54 @@ export async function copySessionArtifacts(sourceSessionFile: string, destinatio
 	}
 }
 
+export interface NativeHistoryForkOptions {
+	leafEntryId: string;
+	edit?: {
+		entryId: string;
+		text: string;
+		identity?: SessionMessageIdentity;
+	};
+	copyArtifacts?: boolean;
+	suppressBreadcrumb?: boolean;
+}
+
+export interface NativeHistoryForkResult {
+	sessionManager: SessionManager;
+	selectedRole: "user" | "assistant";
+	selectedEntryId: string;
+	replacementEntryId?: string;
+}
+
+function editedHistoryMessage(entry: SessionMessageEntry, text: string): SessionMessageEntry["message"] {
+	const message = structuredClone(entry.message);
+	if (message.role === "user") {
+		const images = typeof message.content === "string" ? [] : message.content.filter(block => block.type === "image");
+		message.content = [...(text.length > 0 ? [{ type: "text" as const, text }] : []), ...images];
+		return message;
+	}
+	if (message.role !== "assistant") throw new Error(`Entry ${entry.id} is not an editable user or assistant message`);
+
+	// The edited text is user-authored canonical history. Provider response ids,
+	// replay payloads, signed thinking and tool calls belong to the discarded
+	// response shape and must not be replayed as if the provider produced them.
+	message.content = [
+		...(text.length > 0 ? [{ type: "text" as const, text }] : []),
+		...message.content.filter(block => block.type === "image"),
+	];
+	message.stopReason = "stop";
+	delete message.responseId;
+	delete message.providerPayload;
+	delete message.contextSnapshot;
+	delete message.retryRecovery;
+	delete message.stopDetails;
+	delete message.errorMessage;
+	delete message.errorClassificationMessage;
+	delete message.toolCallAbortMessages;
+	delete message.errorStatus;
+	delete message.errorId;
+	return message;
+}
+
 /**
  * Resolve a breadcrumb's recorded session file to its interactive root. Subagent
  * (and other artifact) sessions live inside a parent session's artifacts dir —
@@ -2745,6 +2793,93 @@ export class SessionManager {
 			await copySessionArtifacts(sourcePath, manager.#sessionFile!);
 		}
 		return manager;
+	}
+
+	/**
+	 * Materialize one exact native history prefix into a distinct session.
+	 * Branch mode keeps the selected entry unchanged. Edit mode replaces the
+	 * selected user/assistant entry with a fresh same-role entry and drops its
+	 * complete suffix. The source manager and journal are never mutated.
+	 */
+	static async forkNativeHistory(
+		sourcePath: string,
+		cwd: string,
+		selectedEntryId: string,
+		sessionDir?: string,
+		storage: SessionStorage = new FileSessionStorage(),
+		options?: NativeHistoryForkOptions,
+	): Promise<NativeHistoryForkResult> {
+		if (!options?.leafEntryId) throw new Error("leafEntryId must be a non-empty string");
+		const dir = sessionDir ?? SessionManager.getDefaultSessionDir(cwd, undefined, storage);
+		const manager = new SessionManager(cwd, dir, true, storage);
+		manager.#suppressBreadcrumb = options.suppressBreadcrumb === true;
+
+		const sourceEntries = structuredClone(await loadEntriesFromFile(sourcePath, storage)) as FileEntry[];
+		migrateToCurrentVersion(sourceEntries);
+		await resolveBlobRefsInEntries(sourceEntries, manager.#blobs);
+		const sourceHeader = sourceEntries.find(entry => entry.type === "session") as SessionHeader | undefined;
+		const sourceHistory = sourceEntries.filter(entry => entry.type !== "session") as SessionEntry[];
+		const sourceIndex = new SessionEntryIndex();
+		sourceIndex.rebuild(sourceHistory);
+		if (sourceIndex.leafId() !== options.leafEntryId) {
+			throw new Error(`Session leaf ${sourceIndex.leafId() ?? "root"} does not match ${options.leafEntryId}`);
+		}
+		const selected = sourceIndex.get(selectedEntryId);
+		if (selected?.type !== "message" || (selected.message.role !== "user" && selected.message.role !== "assistant")) {
+			throw new Error(`Entry ${selectedEntryId} is not an editable user or assistant message`);
+		}
+		const activePath = sourceIndex.pathTo(options.leafEntryId);
+		const selectedIndex = activePath.findIndex(entry => entry.id === selectedEntryId);
+		if (selectedIndex < 0) throw new Error(`Entry ${selectedEntryId} is not on the active session branch`);
+
+		let history = activePath.slice(0, selectedIndex + 1);
+		let replacementEntryId: string | undefined;
+		if (options.edit) {
+			if (options.edit.entryId !== selectedEntryId) throw new Error("Edit entryId must match selectedEntryId");
+			const prefix = activePath.slice(0, selectedIndex);
+			const replacement: SessionMessageEntry = {
+				type: "message",
+				id: generateId(new Set(prefix.map(entry => entry.id))),
+				parentId: prefix.at(-1)?.id ?? null,
+				timestamp: nowIso(),
+				message: editedHistoryMessage(selected, options.edit.text),
+				...(options.edit.identity?.sourceCommandId
+					? { sourceCommandId: options.edit.identity.sourceCommandId }
+					: {}),
+				...(options.edit.identity?.clientMessageId
+					? { clientMessageId: options.edit.identity.clientMessageId }
+					: {}),
+			};
+			history = [...prefix, replacement];
+			replacementEntryId = replacement.id;
+		}
+
+		manager.#resetToNewSession({
+			parentSession: sourceHeader?.id,
+			providerPromptCacheKey: sourceHeader?.providerPromptCacheKey ?? sourceHeader?.id,
+		});
+		manager.#header.title = sourceHeader?.title;
+		manager.#header.titleSource = sourceHeader?.titleSource;
+		manager.#additionalDirectories = (sourceHeader?.additionalDirectories ?? []).filter(d => d !== path.resolve(cwd));
+		manager.#header.additionalDirectories =
+			manager.#additionalDirectories.length > 0 ? manager.#additionalDirectories : undefined;
+		manager.#sessionName = manager.#header.title;
+		manager.#titleSource = manager.#header.titleSource;
+		manager.#titleUpdatedAt = nowIso();
+		manager.#hasTitleSlot = true;
+		manager.#entries = history;
+		manager.#index.rebuild(history);
+		manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
+		manager.#forceFileCreation = true;
+		await manager.#rewriteAtomically();
+		if (options.copyArtifacts !== false) await copySessionArtifacts(sourcePath, manager.#sessionFile!);
+
+		return {
+			sessionManager: manager,
+			selectedRole: selected.message.role,
+			selectedEntryId,
+			...(replacementEntryId ? { replacementEntryId } : {}),
+		};
 	}
 
 	/**

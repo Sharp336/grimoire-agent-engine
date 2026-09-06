@@ -6713,6 +6713,24 @@ export class AgentSession {
 	}
 
 	/**
+	 * Resume a freshly materialized native history whose current leaf is already
+	 * a provider-valid input boundary (normally a user message). Unlike prompt(),
+	 * this does not append or fabricate another conversation message.
+	 */
+	async continueNativeHistory(): Promise<void> {
+		if (this.isStreaming) throw new AgentBusyError();
+		this.#beginInFlight();
+		try {
+			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return;
+			await this.agent.continue();
+			await this.#waitForPostPromptRecovery();
+		} finally {
+			this.#usagePreflightReadyForNextModelCall = false;
+			this.#endInFlight();
+		}
+	}
+
+	/**
 	 * Send a user message through the prompt flow.
 	 *
 	 * Omitted `deliverAs` starts a turn when idle and queues as a steer while streaming.
