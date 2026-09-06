@@ -396,8 +396,11 @@ export async function resolveBlobRefsInEntries(entries: FileEntry[], blobStore: 
  * provider-context builder which drops them. Does NOT create a writer or take
  * the session lock — safe to call against a file another session is writing.
  */
-export async function loadSessionMessagesReadOnly(filePath: string): Promise<AgentMessage[]> {
-	const entries = await loadEntriesFromFile(filePath);
+export async function loadSessionMessagesReadOnly(
+	filePath: string,
+	storage: SessionStorage = new FileSessionStorage(),
+): Promise<AgentMessage[]> {
+	const entries = await loadEntriesFromFile(filePath, storage);
 	if (entries.length === 0) return [];
 	migrateToCurrentVersion(entries);
 	await resolveBlobRefsInEntries(entries, new BlobStore(getBlobsDir()));

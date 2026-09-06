@@ -73,9 +73,10 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		// Advisor transcripts are observability-only — surfaced in the Agent Hub, never
 		// in the agent-facing roster. Hide them from the index, lookup, and completions.
 		const visible = registry.list().filter(ref => ref.kind !== "advisor");
+		const retained = context?.engineHistory?.refs ?? [];
 
 		if (!agentId) {
-			const content = await this.#renderIndex(visible);
+			const content = await this.#renderIndex(visible, retained);
 			return {
 				url: url.href,
 				content,
@@ -93,6 +94,20 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		}
 
 		if (!ref) {
+			const lower = agentId.toLowerCase();
+			const restored = retained.find(candidate => candidate.id.toLowerCase() === lower);
+			if (restored && context?.engineHistory) {
+				const messages = await loadSessionMessagesReadOnly(restored.sessionFile, context.engineHistory.storage);
+				const content = formatSessionHistoryMarkdown(messages, { title: `${restored.id} (parked)` });
+				return {
+					url: url.href,
+					content,
+					contentType: "text/markdown",
+					size: Buffer.byteLength(content, "utf-8"),
+					sourcePath: restored.sessionFile,
+					notes: ["Source: retained Engine session (read-only, parked)"],
+				};
+			}
 			// Registry miss — the agent may have been unregistered or lost on resume.
 			// Serve its transcript straight from disk if the session file persists.
 			const disk = await this.#resolveFromDisk(agentId, preferredArtifactDir);
@@ -109,7 +124,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 			messages = ref.session.messages;
 			notes.push("Source: live session");
 		} else if (ref.sessionFile) {
-			messages = await loadSessionMessagesReadOnly(ref.sessionFile);
+			messages = await loadSessionMessagesReadOnly(ref.sessionFile, context?.engineHistory?.storage);
 			notes.push(`Source: session file (read-only, ${ref.status})`);
 		} else {
 			// No live session and no retained sessionFile — try the disk scan before
@@ -162,7 +177,7 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 		};
 	}
 
-	async #renderIndex(refs: AgentRef[]): Promise<string> {
+	async #renderIndex(refs: AgentRef[], retained: readonly { id: string; parentId: string }[] = []): Promise<string> {
 		const entries: IndexEntry[] = refs.map(ref => ({
 			id: ref.id,
 			status: ref.status,
@@ -170,8 +185,13 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 			parent: ref.parentId ?? "—",
 			lastActivity: formatAgo(ref.lastActivity),
 		}));
-		// Merge on-disk transcripts for agents absent from the registry.
 		const registered = new Set(refs.map(ref => ref.id));
+		for (const ref of retained) {
+			if (registered.has(ref.id)) continue;
+			entries.push({ id: ref.id, status: "parked", kind: "sub", parent: ref.parentId, lastActivity: "—" });
+			registered.add(ref.id);
+		}
+		// Merge on-disk transcripts for agents absent from the registry.
 		const disk = await sessionFilesFromDisk();
 		for (const id of disk.keys()) {
 			if (registered.has(id)) continue;
@@ -202,6 +222,11 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 				value: ref.id,
 				description: `${ref.status} · ${ref.kind}${ref.parentId ? ` · parent ${ref.parentId}` : ""}`,
 			});
+		}
+		for (const ref of context?.engineHistory?.refs ?? []) {
+			if (seen.has(ref.id)) continue;
+			seen.add(ref.id);
+			completions.push({ value: ref.id, description: `parked · sub · parent ${ref.parentId}` });
 		}
 		const disk = await sessionFilesFromDisk(undefined, registry);
 		for (const id of disk.keys()) {

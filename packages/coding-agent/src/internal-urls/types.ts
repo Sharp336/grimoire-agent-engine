@@ -9,7 +9,20 @@ import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
 import type { MCPManager } from "../mcp";
 import type { AgentRegistry } from "../registry/agent-registry";
+import type { SessionStorage } from "../session/session-storage";
 import type { LocalProtocolOptions } from "./local-protocol";
+
+/** Engine-owned parked transcript made visible to one parent AgentSession. */
+export interface EngineHistoryRef {
+	id: string;
+	parentId: string;
+	sessionFile: string;
+}
+
+export interface EngineHistoryAccess {
+	refs: readonly EngineHistoryRef[];
+	storage: SessionStorage;
+}
 
 /**
  * Raw resource payload returned by protocol handlers. The `immutable` flag is
@@ -126,6 +139,8 @@ export interface ResolveContext {
 	rules?: readonly Rule[];
 	/** Fail closed instead of consulting process-global fallbacks. */
 	engineMode?: boolean;
+	/** Direct-child transcripts authorized for this exact Engine session. */
+	engineHistory?: EngineHistoryAccess;
 	/** Session-bound `xd://` documentation resolver. */
 	xd?: {
 		read(name: string | null): Promise<string>;

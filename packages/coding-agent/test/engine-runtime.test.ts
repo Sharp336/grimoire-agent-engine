@@ -1373,6 +1373,188 @@ describe("EngineRuntime", () => {
 		}
 	}, 60_000);
 
+	it("restores only retained direct-child history into its parent after restart", async () => {
+		const parentId = "history-parent";
+		const parentRef = "grimoire://tasks/project/history-task/agents/history-parent";
+		const visibleChildId = "history-child-visible";
+		const visibleChildRef = "grimoire://tasks/project/history-task/agents/history-child-visible";
+		const unadvertisedChildId = "history-child-unadvertised";
+		const foreignParentChildId = "history-child-foreign-parent";
+		const foreignTaskChildId = "history-child-foreign-task";
+		let runtimeRef: EngineRuntime;
+		let advertised = "";
+		const reads = new Map<string, string>();
+
+		const dispatch: NonNullable<EngineRuntimeOptions["dispatchPrompt"]> = async (session, input, identity) => {
+			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
+			if (input === "spawn truncated child") {
+				const task = session.getToolByName("task");
+				if (!task) throw new Error("Engine parent did not expose task");
+				const result = await task.execute("spawn-history-child", {
+					profileRef: "gctx:2222222222222222",
+					workStepId: "child-history",
+				});
+				advertised = result.content.find(part => part.type === "text")?.text ?? "";
+				session.sessionManager.appendMessage({
+					role: "toolResult",
+					toolCallId: "spawn-history-child",
+					toolName: "task",
+					content: [{ type: "text", text: advertised }],
+					isError: false,
+					timestamp: Date.now(),
+				});
+			}
+			if (input === "read retained children") {
+				const read = session.getToolByName("read");
+				if (!read) throw new Error("Engine parent did not expose read");
+				for (const childId of [visibleChildId, unadvertisedChildId, foreignParentChildId, foreignTaskChildId]) {
+					const childEngineId = `Engine-${new Bun.SHA256().update(childId).digest("hex").slice(0, 32)}`;
+					try {
+						const result = await read.execute(`read-${childId}`, { path: `history://${childEngineId}` });
+						reads.set(childId, result.content.find(part => part.type === "text")?.text ?? "");
+					} catch (error) {
+						reads.set(childId, error instanceof Error ? error.message : String(error));
+					}
+				}
+			}
+			return true;
+		};
+
+		const created = await createRuntime(dispatch, {
+			resolveSessionProfile: async () => ({
+				options: {},
+				childProfiles: [{ profileRef: "gctx:2222222222222222", displayName: "Worker" }],
+				dispose() {},
+			}),
+			launchChild: async request => {
+				const childRequest = {
+					commandId: "command-history-child-visible",
+					agentInstanceId: visibleChildId,
+					agentInstanceRef: visibleChildRef,
+					parentAgentInstanceId: request.parentAgentInstanceId,
+					executionId: "execution-history-child-visible",
+					attemptId: "attempt-history-child-visible",
+					authorityGeneration: 1,
+					cwd: request.cwd,
+					input: "retained child transcript marker",
+				};
+				await runtimeRef.store.admitCommand(
+					{
+						...childRequest,
+						operation: "start",
+						deviceId: "device-history-restore",
+						engineId: "engine-history-restore",
+						engineGeneration: runtimeRef.engineGeneration,
+						payloadHash: "sha256:history-child-visible",
+						canonicalHash: "sha256:history-child-visible",
+					},
+					runtimeRef.engineGeneration,
+				);
+				const child = await runtimeRef.start(childRequest, profile);
+				return {
+					agentInstanceId: visibleChildId,
+					status: "completed",
+					assistantFinal: "retained child transcript marker",
+					transcriptRef: `history://${child.engineAgentId}`,
+					outputTruncated: true,
+				};
+			},
+		});
+		runtimeRef = created.runtime;
+		const parentProfile = {
+			...profile,
+			spawns: "*",
+			maxSpawnDepth: 1,
+			maxChildren: 1,
+			childProfileRefs: ["gctx:2222222222222222"],
+			toolNames: ["task", "read"],
+			restrictToolNames: true,
+		};
+		await runtimeRef.start(
+			{
+				commandId: "command-history-parent-one",
+				agentInstanceId: parentId,
+				agentInstanceRef: parentRef,
+				executionId: "execution-history-parent-one",
+				attemptId: "attempt-history-parent-one",
+				authorityGeneration: 1,
+				cwd: created.cwd,
+				input: "spawn truncated child",
+			},
+			parentProfile,
+		);
+		await runtimeRef.drain();
+		expect(advertised).toContain(
+			`history://Engine-${new Bun.SHA256().update(visibleChildId).digest("hex").slice(0, 32)}`,
+		);
+
+		const startForeign = async (id: string, agentInstanceRef: string, parentAgentInstanceId: string) => {
+			const request = {
+				commandId: `command-${id}`,
+				agentInstanceId: id,
+				agentInstanceRef,
+				parentAgentInstanceId,
+				executionId: `execution-${id}`,
+				attemptId: `attempt-${id}`,
+				authorityGeneration: 1,
+				cwd: created.cwd,
+				input: `private marker ${id}`,
+			};
+			await runtimeRef.store.admitCommand(
+				{
+					...request,
+					operation: "start",
+					deviceId: "device-history-restore",
+					engineId: "engine-history-restore",
+					engineGeneration: runtimeRef.engineGeneration,
+					payloadHash: `sha256:payload-${id}`,
+					canonicalHash: `sha256:canonical-${id}`,
+				},
+				runtimeRef.engineGeneration,
+			);
+			await runtimeRef.start(request, profile);
+		};
+		await startForeign(
+			unadvertisedChildId,
+			"grimoire://tasks/project/history-task/agents/history-child-unadvertised",
+			parentId,
+		);
+		await startForeign(
+			foreignParentChildId,
+			"grimoire://tasks/project/history-task/agents/history-child-foreign-parent",
+			"another-parent",
+		);
+		await startForeign(
+			foreignTaskChildId,
+			"grimoire://tasks/project/another-task/agents/history-child-foreign-task",
+			parentId,
+		);
+		await runtimeRef.drain();
+		await runtimeRef.dispose();
+
+		const restarted = await EngineRuntime.create(created.options);
+		runtimeRef = restarted;
+		await restarted.start(
+			{
+				commandId: "command-history-parent-two",
+				agentInstanceId: parentId,
+				agentInstanceRef: parentRef,
+				executionId: "execution-history-parent-two",
+				attemptId: "attempt-history-parent-two",
+				authorityGeneration: 1,
+				cwd: created.cwd,
+				input: "read retained children",
+			},
+			parentProfile,
+		);
+		await restarted.drain();
+		expect(reads.get(visibleChildId)).toContain("retained child transcript marker");
+		expect(reads.get(unadvertisedChildId)).toContain(`private marker ${unadvertisedChildId}`);
+		expect(reads.get(foreignParentChildId)).toContain("Unknown agent");
+		expect(reads.get(foreignTaskChildId)).toContain("Unknown agent");
+		await restarted.dispose();
+	}, 60_000);
+
 	it("does not expose task when the pinned profile has no child catalog", async () => {
 		let enabledTools: string[] = [];
 		const { runtime, cwd } = await createRuntime(

@@ -80,6 +80,12 @@ const MAX_ASSISTANT_STREAMING_SNAPSHOTS = 256;
 const ENGINE_TURN_RETRY_DELAYS_MS = [3_000, 15_000, 30_000] as const;
 const TERMINAL_ATTEMPT_STATES = new Set<EngineAttemptState>(["completed", "cancelled", "failed", "interrupted"]);
 
+function taskRefFromAgentInstanceRef(agentInstanceRef: string | undefined): string | undefined {
+	if (!agentInstanceRef?.startsWith("grimoire://tasks/")) return undefined;
+	const agentSegment = agentInstanceRef.lastIndexOf("/agents/");
+	return agentSegment > "grimoire://tasks/".length ? agentInstanceRef.slice(0, agentSegment) : undefined;
+}
+
 async function collectFailure(errors: unknown[], action: () => unknown | Promise<unknown>): Promise<void> {
 	try {
 		await action();
@@ -1588,6 +1594,7 @@ export class EngineRuntime {
 							},
 						}
 					: undefined;
+			const engineHistory = await this.#retainedDirectChildHistory(request, profile, prior);
 			created = await createAgentSession({
 				...this.#sessionDefaults,
 				cwd: request.cwd,
@@ -1625,6 +1632,7 @@ export class EngineRuntime {
 						return this.#invokeEngineInbox(liveBinding, request);
 					},
 				},
+				engineHistory,
 				agentId: id,
 				agentDisplayName: request.agentInstanceId,
 				agentRegistry: this.agentRegistry,
@@ -1805,6 +1813,38 @@ export class EngineRuntime {
 			}
 			throw error;
 		}
+	}
+
+	async #retainedDirectChildHistory(
+		request: EngineStartRequest,
+		profile: EngineLaunchProfile,
+		prior: EngineBindingSnapshot | undefined,
+	) {
+		const parentTaskRef = taskRefFromAgentInstanceRef(request.agentInstanceRef);
+		if (
+			!prior?.sessionFile ||
+			profile.continuationPolicy === "fresh" ||
+			prior.authorityGeneration !== request.authorityGeneration ||
+			!parentTaskRef
+		) {
+			return undefined;
+		}
+		const canonicalCwd = await canonicalWorkspacePath(request.cwd);
+		const refs: Array<{ id: string; parentId: string; sessionFile: string }> = [];
+		for (const child of await this.store.listRetainedDirectChildHistory(request.agentInstanceId)) {
+			if (taskRefFromAgentInstanceRef(child.agentInstanceRef) !== parentTaskRef) continue;
+			if (child.engineAgentId !== engineAgentId(child.agentInstanceId)) continue;
+			const loaded = await loadSessionFile(child.sessionFile, this.store.sessionStorage);
+			const header = loaded.entries[0];
+			if (header?.type !== "session" || typeof header.cwd !== "string") continue;
+			if ((await canonicalWorkspacePath(header.cwd)) !== canonicalCwd) continue;
+			refs.push({
+				id: child.engineAgentId,
+				parentId: engineAgentId(request.agentInstanceId),
+				sessionFile: child.sessionFile,
+			});
+		}
+		return refs.length > 0 ? { refs, storage: this.store.sessionStorage } : undefined;
 	}
 
 	async #continuationDigest(request: EngineStartRequest, profile: EngineLaunchProfile): Promise<string> {

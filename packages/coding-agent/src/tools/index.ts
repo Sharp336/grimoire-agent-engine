@@ -18,7 +18,7 @@ import type { Skill } from "../extensibility/skills";
 import type { GoalModeState, GoalRuntime } from "../goals";
 import { GoalTool } from "../goals/tools/goal-tool";
 import type { HindsightSessionState } from "../hindsight/state";
-import type { LocalProtocolOptions } from "../internal-urls";
+import type { EngineHistoryAccess, LocalProtocolOptions } from "../internal-urls";
 import type { IrcBus } from "../irc/bus";
 import type { DaemonCompletionNotification } from "../launch/protocol";
 import { LspTool } from "../lsp";
@@ -209,6 +209,8 @@ export interface ToolSession {
 	engineChildLauncher?: EngineChildLauncher;
 	/** Engine-owned durable inbox exposed through the native hub tool. */
 	engineInbox?: EngineInboxController;
+	/** Engine-owned direct-child history authorized for this exact session. */
+	engineHistory?: EngineHistoryAccess;
 	/** Current working directory */
 	cwd: string;
 	/** Additional workspace directories beyond cwd (multi-root), forwarded to subagents. */

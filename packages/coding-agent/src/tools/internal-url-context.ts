@@ -14,5 +14,6 @@ export function internalUrlContext(session: ToolSession, signal?: AbortSignal): 
 		mcpManager: session.mcpManager,
 		rules: session.rules,
 		engineMode: session.engineMode,
+		engineHistory: session.engineHistory,
 	};
 }

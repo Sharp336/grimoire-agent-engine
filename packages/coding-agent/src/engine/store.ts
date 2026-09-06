@@ -119,6 +119,13 @@ export interface ExpiredChildHistory {
 	terminalAt: number;
 }
 
+export interface RetainedDirectChildHistory {
+	agentInstanceId: string;
+	agentInstanceRef: string;
+	engineAgentId: string;
+	sessionFile: string;
+}
+
 interface SeqRow {
 	seq: number;
 }
@@ -1162,6 +1169,31 @@ export class EngineStore {
 			attemptId: row.attempt_id,
 			sessionFile: row.session_file,
 			terminalAt: Number(row.updated_at),
+		}));
+	}
+
+	async listRetainedDirectChildHistory(parentAgentInstanceId: string): Promise<RetainedDirectChildHistory[]> {
+		const rows = (await this.#client.unsafe(
+			`SELECT b.agent_instance_id, c.agent_instance_ref, b.engine_agent_id, b.session_file
+			 FROM engine_runtime_bindings b
+			 JOIN engine_attempts a ON a.attempt_id=b.attempt_id
+			 JOIN engine_commands c ON c.command_id=b.command_id
+			 WHERE c.operation='start' AND c.parent_agent_instance_id=? AND c.agent_instance_ref IS NOT NULL
+			 AND b.state='released' AND b.session_file IS NOT NULL
+			 AND a.state IN ('completed', 'cancelled', 'failed', 'interrupted')
+			 ORDER BY a.updated_at, b.agent_instance_id`,
+			[parentAgentInstanceId],
+		)) as Array<{
+			agent_instance_id: string;
+			agent_instance_ref: string;
+			engine_agent_id: string;
+			session_file: string;
+		}>;
+		return rows.map(row => ({
+			agentInstanceId: row.agent_instance_id,
+			agentInstanceRef: row.agent_instance_ref,
+			engineAgentId: row.engine_agent_id,
+			sessionFile: row.session_file,
 		}));
 	}
 

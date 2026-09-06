@@ -122,7 +122,7 @@ import {
 } from "./extensibility/skills";
 import { type FileSlashCommand, loadSlashCommands as loadSlashCommandsInternal } from "./extensibility/slash-commands";
 import type { HindsightSessionState } from "./hindsight/state";
-import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
+import { type EngineHistoryAccess, LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
 import { IrcBus } from "./irc/bus";
 import { releaseLspOwner, setSharedLspEnabled, withLspSessionScope } from "./lsp/client";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
@@ -585,6 +585,8 @@ export interface CreateAgentSessionOptions {
 	engineChildLauncher?: EngineChildLauncher;
 	/** Engine-owned durable inbox exposed through the native hub tool. */
 	engineInbox?: EngineInboxController;
+	/** Engine-owned direct-child history authorized for this exact session. */
+	engineHistory?: EngineHistoryAccess;
 	/**
 	 * Registry generation authorized for this creation. `null` requires the id
 	 * to be absent; an AgentRef allows a parked revival to reuse only that ref.
@@ -1846,6 +1848,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const toolSession: ToolSession = {
 			engineChildLauncher: options.engineChildLauncher,
 			engineInbox: options.engineInbox,
+			engineHistory: options.engineHistory,
 			engineMode: options.engineMode,
 			get cwd() {
 				return sessionManager.getCwd();
