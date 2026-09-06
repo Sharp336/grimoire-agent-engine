@@ -1,5 +1,4 @@
 import { getBundledModelReferenceIndex } from "@oh-my-pi/pi-catalog/identity/bundled";
-import { resolveModelReference } from "@oh-my-pi/pi-catalog/identity/reference";
 
 export interface ResolvedModelLimits {
 	contextWindow: number;
@@ -12,7 +11,7 @@ export interface ResolvedModelLimits {
 export function resolveCanonicalModelLimits(modelIdentityId: string): ResolvedModelLimits | undefined {
 	const identity = modelIdentityId.trim();
 	if (!identity) return undefined;
-	const reference = resolveModelReference(identity, getBundledModelReferenceIndex());
+	const reference = getBundledModelReferenceIndex().exact.get(identity.toLowerCase());
 	const contextWindow = reference?.contextWindow;
 	const maxOutputTokens = reference?.maxTokens;
 	if (

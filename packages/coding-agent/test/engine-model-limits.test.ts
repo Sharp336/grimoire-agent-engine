@@ -23,6 +23,8 @@ describe("Engine provider model limits", () => {
 			contextWindow: 1_000_000,
 			maxOutputTokens: 128_000,
 		});
+		expect(resolveCanonicalModelLimits("vendor/gpt-5.6-terra")).toBeUndefined();
+		expect(resolveCanonicalModelLimits("gpt-5.6-terra-cloud")).toBeUndefined();
 	});
 
 	it("preserves explicit limits and rejects unknown incomplete models", () => {
