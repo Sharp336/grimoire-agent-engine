@@ -536,6 +536,15 @@ function resolveLaunchProfile(command: EngineCommandEnvelope, requireArtifactRef
 	) {
 		throw new Error("providerPromptCacheKey must contain 1..512 characters");
 	}
+	if (
+		profile.thinkingLevel !== undefined &&
+		!["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(profile.thinkingLevel)
+	) {
+		throw new Error("thinkingLevel is invalid");
+	}
+	if (profile.minimumThinkingLevel !== undefined && profile.minimumThinkingLevel !== "high") {
+		throw new Error("minimumThinkingLevel must be high");
+	}
 	if (profile.requireYieldTool !== undefined && typeof profile.requireYieldTool !== "boolean") {
 		throw new Error("requireYieldTool must be a boolean");
 	}
