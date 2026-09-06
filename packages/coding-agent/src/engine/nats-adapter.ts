@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
 	AckPolicy,
 	type ConsumerMessages,
@@ -22,6 +21,7 @@ import type { ExtensionAskDialogResult } from "../extensibility/extensions/types
 import type { IrcDeliveryReceipt, IrcMessage } from "../irc/bus";
 import type { EngineControlInitiator, EngineEvent, EngineLaunchProfile } from "./contracts";
 import { EngineTargetError } from "./contracts";
+import { safeEngineErrorDetail } from "./public-error";
 import { engineAgentInstanceId, engineRouteToken } from "./route";
 import type { EngineRuntime } from "./runtime";
 import type { EngineCommandIdentity } from "./store";
@@ -841,42 +841,11 @@ function launchFailureMessage(error: unknown): string {
 	let current: unknown = error;
 	while (current instanceof Error && !seen.has(current) && messages.length < 4) {
 		seen.add(current);
-		const sanitized = safeLaunchFailureDetail(current);
+		const sanitized = safeEngineErrorDetail(current);
 		if (sanitized && !messages.includes(sanitized)) messages.push(sanitized);
 		current = current.cause;
 	}
 	return `Agent session initialization failed${messages.length ? `: ${messages.join(": ")}` : ""}`.slice(0, 2_048);
-}
-
-const SAFE_LAUNCH_FAILURE =
-	/^(?:AgentProfile|AvailableModelRoute|ProviderAccount|Provider quota|No usable AvailableModelRoute|The local OMP account|Failed to open auth database|Persistent credential block store|OAuth credential no longer exists|Engine mode|Engine session profile|selectedRouteRef|SQLite|SQLITE_|database (?:is|could not|cannot)|Cannot read private member|Receiver must be an instance|[^\s]+ is not a function|ENOENT|EACCES|EPERM)/i;
-
-function safeLaunchFailureDetail(error: Error): string {
-	const sanitized = sanitizeLaunchFailureDetail(error.message);
-	if (SAFE_LAUNCH_FAILURE.test(sanitized)) return sanitized;
-	const fingerprint = createHash("sha256").update(`${error.name}\0${error.message}`).digest("hex").slice(0, 12);
-	return `${error.name || "Error"} (diagnostic ${fingerprint})`;
-}
-
-function sanitizeLaunchFailureDetail(message: string): string {
-	return message
-		.replace(/[A-Za-z]:[\\/][^'"\r\n]*[\\/]agent\.db/gi, "[local auth database]")
-		.replace(/\b(Authorization\s*:\s*Bearer|Bearer)\s+[^\s,;]+/gi, "$1 [redacted]")
-		.replace(
-			/("?(?:access[_-]?token|refresh[_-]?token|api[_-]?key|token|secret|password|credential)"?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;}]*)/gi,
-			'$1"[redacted]"',
-		)
-		.replace(/([?&](?:access_token|refresh_token|api[_-]?key|key|token|secret)=)[^&#\s]+/gi, "$1[redacted]")
-		.replace(/\b(?:sk|ghp|gho|ghu|ghs|glpat)-?[A-Za-z0-9_-]{12,}\b/g, "[redacted credential]")
-		.replace(/\beyJ[A-Za-z0-9_-]{12,}\.[A-Za-z0-9_-]{12,}(?:\.[A-Za-z0-9_-]{12,})?\b/g, "[redacted token]")
-		.replace(/https?:\/\/[^\s)]+/gi, raw => {
-			try {
-				return new URL(raw).origin;
-			} catch {
-				return "[redacted URL]";
-			}
-		})
-		.trim();
 }
 
 export function engineCommandIdentity(command: EngineCommandEnvelope): EngineCommandIdentity {

@@ -15,6 +15,7 @@ import type {
 	EngineRetryState,
 	EngineToolPolicy,
 } from "./contracts";
+import { engineAgentId } from "./route";
 
 interface MetadataRow {
 	value: string;
@@ -1814,7 +1815,11 @@ export class EngineStore {
 							kind: "interrupted",
 							payload: {
 								cause: "engine_lost",
+								error: "engine_lost",
 								lostEngineGeneration: Number(attempt.engine_generation),
+								...(transcriptCheckpoint
+									? { transcriptRef: `history://${engineAgentId(attempt.agent_instance_id)}` }
+									: {}),
 								...(transcriptCheckpoint ? { transcriptCheckpoint } : {}),
 							},
 						},

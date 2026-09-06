@@ -57,6 +57,7 @@ import {
 	type EngineToolPolicy,
 	validateStartRequest,
 } from "./contracts";
+import { safeEngineErrorDetail } from "./public-error";
 import { engineAgentId, engineRouteToken } from "./route";
 import {
 	EngineAttemptConflictError,
@@ -2310,7 +2311,12 @@ export class EngineRuntime {
 								payload:
 									state === "completed"
 										? this.#completionPayload(binding, attemptMessageStart)
-										: { error: cause ?? "Unknown Engine failure" },
+										: {
+												error: safeEngineErrorDetail(cause ?? "Unknown Engine failure"),
+												...(binding.sessionFile
+													? { transcriptRef: `history://${binding.engineAgentId}` }
+													: {}),
+											},
 							},
 						],
 						{ cause, expectedStates: ["running"], transcriptCheckpoint },
@@ -2513,7 +2519,11 @@ export class EngineRuntime {
 			if (binding.attemptId !== request.attemptId || binding.attemptState !== "cancel_requested") return;
 			binding.state = "idle";
 			binding.attemptState = "cancelled";
-			const payload = request.reason ? { reason: request.reason } : undefined;
+			const payload = {
+				error: "attempt_cancelled",
+				...(request.reason ? { reason: request.reason } : {}),
+				...(binding.sessionFile ? { transcriptRef: `history://${binding.engineAgentId}` } : {}),
+			};
 			const events: EngineTransitionEvent[] = [{ kind: "cancelled", payload }];
 			if (request.commandId !== binding.commandId) {
 				events.push({ kind: "cancelled", payload, causationCommandId: request.commandId });
@@ -2560,11 +2570,25 @@ export class EngineRuntime {
 		if (cause === "engine_lost" && wasRunning && transcriptCheckpoint) {
 			binding.attemptState = "interrupted";
 			await collectFailure(errors, () =>
-				this.#commitAttemptTransition(binding, "interrupted", [{ kind: "interrupted", payload: { cause } }], {
-					cause,
-					expectedStates: [previousAttemptState],
-					transcriptCheckpoint,
-				}),
+				this.#commitAttemptTransition(
+					binding,
+					"interrupted",
+					[
+						{
+							kind: "interrupted",
+							payload: {
+								cause,
+								error: "engine_lost",
+								...(binding.sessionFile ? { transcriptRef: `history://${binding.engineAgentId}` } : {}),
+							},
+						},
+					],
+					{
+						cause,
+						expectedStates: [previousAttemptState],
+						transcriptCheckpoint,
+					},
+				),
 			);
 		} else if (cause === "requested" && wasRunning && transcriptCheckpoint) {
 			binding.attemptState = "cancelled";
@@ -2572,7 +2596,16 @@ export class EngineRuntime {
 				this.#commitAttemptTransition(
 					binding,
 					"cancelled",
-					[{ kind: "cancelled", payload: { cause: "binding_released" } }],
+					[
+						{
+							kind: "cancelled",
+							payload: {
+								cause: "binding_released",
+								error: "attempt_cancelled",
+								...(binding.sessionFile ? { transcriptRef: `history://${binding.engineAgentId}` } : {}),
+							},
+						},
+					],
 					{
 						cause: "binding_released",
 						expectedStates: [previousAttemptState],

@@ -1115,11 +1115,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const durationMs = Date.now() - startedAt;
 			const output = child.assistantFinal ?? child.error ?? "";
 			const transcriptNotice =
-				child.outputTruncated === true
-					? child.transcriptRef
-						? `Full transcript: ${child.transcriptRef}`
-						: "Full transcript unavailable."
-					: "";
+				child.transcriptRef && (child.outputTruncated === true || child.status !== "completed")
+					? `Full transcript: ${child.transcriptRef}`
+					: child.outputTruncated === true
+						? "Full transcript unavailable."
+						: "";
 			const parentOutput = [output, transcriptNotice].filter(Boolean).join("\n\n");
 			const failed = child.status !== "completed";
 			const result: SingleResult = {

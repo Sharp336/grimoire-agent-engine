@@ -11,6 +11,8 @@ import {
 	EngineTargetError,
 } from "./contracts";
 import { dispatchEngineCommand, type EngineCommandEnvelope, engineCommandIdentity } from "./nats-adapter";
+import { safeEngineErrorDetail } from "./public-error";
+import { engineAgentId } from "./route";
 import type { EngineRuntime } from "./runtime";
 import { EngineCommandConflictError, type EngineCommandReceipt } from "./store";
 
@@ -400,7 +402,9 @@ async function snapshotFromAttempt(
 					}
 				: undefined,
 		profileDigest: exactBinding?.profileDigest,
-		transcriptRef: attempt.transcript_session_id ? `history://${attempt.transcript_session_id}` : undefined,
+		transcriptRef: attempt.transcript_session_id
+			? `history://${binding?.engineAgentId ?? engineAgentId(attempt.agent_instance_id)}`
+			: undefined,
 		updatedAt: Number(attempt.updated_at),
 		controlReadiness: controlReadiness(attempt.state),
 	};
@@ -439,6 +443,8 @@ async function listEvents(runtime: EngineRuntime, attemptId: string, cursor: str
 async function getResult(runtime: EngineRuntime, attemptId: string): Promise<Record<string, unknown> | undefined> {
 	const event = await runtime.store.terminalEvent(attemptId);
 	if (!event) return undefined;
+	const attempt = await runtime.store.getAttempt(attemptId);
+	const binding = await runtime.store.getBinding(event.agentInstanceId);
 	const raw = typeof event.payload?.assistantFinal === "string" ? event.payload.assistantFinal : "";
 	const outputTruncated =
 		raw.length > ENGINE_CONTROL_QUERY_MAX_RESULT_CHARS || event.payload?.outputTruncated === true;
@@ -447,16 +453,32 @@ async function getResult(runtime: EngineRuntime, attemptId: string): Promise<Rec
 	try {
 		structuredOutput = raw ? JSON.parse(raw) : undefined;
 	} catch {}
+	const error = terminalError(event, attempt?.cause);
+	const transcriptRef =
+		typeof event.payload?.transcriptRef === "string"
+			? event.payload.transcriptRef
+			: attempt?.transcript_session_id
+				? `history://${binding?.engineAgentId ?? engineAgentId(event.agentInstanceId)}`
+				: undefined;
 	return {
 		attemptId,
 		state: event.kind,
 		assistantText,
 		...(structuredOutput !== undefined ? { structuredOutput } : {}),
 		resultHash: `sha256:${createHash("sha256").update(raw).digest("hex")}`,
-		transcriptRef: typeof event.payload?.transcriptRef === "string" ? event.payload.transcriptRef : undefined,
+		...(error ? { error } : {}),
+		transcriptRef,
 		outputTruncated,
 		interruption: event.kind === "interrupted" ? { cause: "engine_lost", effectAmbiguity: true } : undefined,
 	};
+}
+
+function terminalError(event: EngineEvent, cause: string | null | undefined): string | undefined {
+	if (event.kind === "completed") return undefined;
+	if (event.kind === "cancelled") return "attempt_cancelled";
+	if (event.kind === "interrupted") return "engine_lost";
+	if (event.kind !== "failed") return undefined;
+	return safeEngineErrorDetail(event.payload?.error ?? cause ?? "Unknown Engine failure");
 }
 
 async function listSessionHistory(
@@ -542,9 +564,23 @@ function publicEvent(event: EngineEvent): EngineEvent {
 		case "model_settled":
 			return { ...event, payload: pick(payload, ["effectId", "modelCallId", "status"]) };
 		case "failed":
-			return { ...event, payload: { error: "attempt_failed" } };
+			return {
+				...event,
+				payload: {
+					error: safeEngineErrorDetail(payload.error ?? "Unknown Engine failure"),
+					...(typeof payload.transcriptRef === "string" ? { transcriptRef: payload.transcriptRef } : {}),
+				},
+			};
+		case "cancelled":
+			return {
+				...event,
+				payload: {
+					error: "attempt_cancelled",
+					...(typeof payload.transcriptRef === "string" ? { transcriptRef: payload.transcriptRef } : {}),
+				},
+			};
 		case "interrupted":
-			return { ...event, payload: pick(payload, ["cause", "lostEngineGeneration"]) };
+			return { ...event, payload: pick(payload, ["cause", "error", "lostEngineGeneration", "transcriptRef"]) };
 		case "completed":
 			return {
 				...event,

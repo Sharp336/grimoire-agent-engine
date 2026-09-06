@@ -185,7 +185,9 @@ export async function launchHostedEngineChild(
 				assistantFinal: typeof payload?.assistantFinal === "string" ? payload.assistantFinal : undefined,
 				transcriptRef: typeof payload?.transcriptRef === "string" ? payload.transcriptRef : undefined,
 				...(payload?.outputTruncated === true ? { outputTruncated: true } : {}),
-				...(status === "succeeded" ? {} : { error: String(currentJob?.error ?? event?.type ?? status) }),
+				...(status === "succeeded"
+					? {}
+					: { error: String(payload?.error ?? currentJob?.error ?? event?.type ?? status) }),
 			};
 		}
 		await Bun.sleep(250);

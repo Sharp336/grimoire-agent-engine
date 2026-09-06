@@ -3149,11 +3149,12 @@ describe("EngineRuntime", () => {
 		prompt.resolve(true);
 		await runtime.drain();
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
-		expect(
-			(await runtime.store.pendingEvents())
-				.filter(event => event.kind === "cancelled")
-				.map(event => event.causationCommandId),
-		).toEqual(["command-a", "cancel-a"]);
+		const cancelledEvents = (await runtime.store.pendingEvents()).filter(event => event.kind === "cancelled");
+		expect(cancelledEvents.map(event => event.causationCommandId)).toEqual(["command-a", "cancel-a"]);
+		expect(cancelledEvents.map(event => event.payload?.transcriptRef)).toEqual([
+			`history://${started.engineAgentId}`,
+			`history://${started.engineAgentId}`,
+		]);
 		await runtime.dispose();
 	}, 60000);
 
@@ -3363,12 +3364,12 @@ describe("EngineRuntime", () => {
 					role: "assistant",
 					content: [],
 					stopReason: "error",
-					errorMessage: "provider rejected request",
+					errorMessage: "provider rejected Authorization: Bearer sk-secretcredential1234",
 				}),
 			});
 			return true;
 		});
-		await runtime.start(
+		const started = await runtime.start(
 			{
 				commandId: "command-provider-error",
 				agentInstanceId: "agent-provider-error",
@@ -3383,10 +3384,13 @@ describe("EngineRuntime", () => {
 		await runtime.drain();
 		const events = await runtime.store.pendingEvents();
 		expect(events.find(event => event.kind === "completed")).toBeUndefined();
-		expect(events.find(event => event.kind === "failed")?.payload).toMatchObject({
-			error: "provider rejected request",
+		const failed = events.find(event => event.kind === "failed");
+		expect(failed?.payload).toMatchObject({
+			error: expect.stringContaining("diagnostic"),
+			transcriptRef: `history://${started.engineAgentId}`,
 			transcriptCheckpoint: { revision: 1 },
 		});
+		expect(JSON.stringify(failed?.payload)).not.toContain("secretcredential");
 		const modelEffectId = String(events.find(event => event.kind === "model_started")?.payload?.effectId);
 		expect(await runtime.store.getEffect(modelEffectId)).toMatchObject({
 			effect_kind: "model",

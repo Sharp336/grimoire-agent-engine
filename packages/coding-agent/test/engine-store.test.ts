@@ -90,7 +90,11 @@ describe("EngineStore", () => {
 			"interrupted",
 		]);
 		expect(events.at(-1)?.engineGeneration).toBe(runtime.engineGeneration);
-		expect(events.at(-1)?.payload).toEqual({ cause: "engine_lost", lostEngineGeneration: generation });
+		expect(events.at(-1)?.payload).toEqual({
+			cause: "engine_lost",
+			error: "engine_lost",
+			lostEngineGeneration: generation,
+		});
 		expect(await runtime.store.getAttempt("attempt-1")).toMatchObject({
 			retry_attempt: 2,
 			retry_max_attempts: 3,

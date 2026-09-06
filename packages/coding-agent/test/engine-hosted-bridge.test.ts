@@ -976,6 +976,54 @@ describe("hosted child launch", () => {
 		expect(calls).toEqual(["grimoire_agent_engine_child_launch", "grimoire_job_get"]);
 	});
 
+	it("returns a failed child's safe Engine error and stable transcript reference", async () => {
+		const rpc: GrimoireRpc = {
+			async call(tool) {
+				if (tool === "grimoire_agent_engine_child_launch") {
+					return {
+						agent_instance: {
+							agent_instance_ref: "grimoire://tasks/p/t/agents/child-failed",
+						},
+						job: { job_id: "job-failed" },
+					};
+				}
+				if (tool === "grimoire_job_get") {
+					return {
+						job: {
+							status: "failed",
+							result: {
+								engine_event: {
+									type: "attempt.failed",
+									payload: {
+										error: "Retry budget exhausted after 3 retries: Thinking loop detected",
+										transcriptRef: "history://Engine-33333333333333333333333333333333",
+									},
+								},
+							},
+						},
+					};
+				}
+				throw new Error(`unexpected ${tool}`);
+			},
+		};
+		const result = await launchHostedEngineChild(rpc, {
+			deviceId: "device",
+			engineId: "engine",
+			parentAgentInstanceRef: "grimoire://tasks/p/t/agents/parent",
+			parentAttemptId: "attempt-parent",
+			profileRef: "gctx:2222222222222222",
+			workStepId: "implement",
+			cwd: "/tmp",
+			maxSpawnDepth: 0,
+			cancelLocal: async () => {},
+		});
+		expect(result).toMatchObject({
+			status: "failed",
+			error: "Retry budget exhausted after 3 retries: Thinking loop detected",
+			transcriptRef: "history://Engine-33333333333333333333333333333333",
+		});
+	});
+
 	it("cancels an aborted child by its Engine-scoped identity", async () => {
 		const controller = new AbortController();
 		const cancelled: string[] = [];

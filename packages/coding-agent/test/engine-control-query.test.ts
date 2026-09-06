@@ -71,6 +71,62 @@ describe("Engine Control + Query", () => {
 			kind: "completed",
 			payload: { assistantFinal: "second" },
 		});
+		const failedBinding = {
+			...binding,
+			bindingId: "binding-failed",
+			commandId: "start-failed",
+			agentInstanceId: "agent-failed",
+			executionId: "execution-failed",
+			attemptId: "attempt-failed",
+			engineAgentId: "Engine-11111111111111111111111111111111",
+			profileDigest: "profile-failed",
+		};
+		await runtime.store.putBinding(failedBinding);
+		await runtime.store.putAttempt(failedBinding, "running");
+		const retryFailure =
+			"Retry budget exhausted after 3 retries: Thinking loop detected: the model repeated near-identical content";
+		await runtime.store.commitAttemptTransition(
+			failedBinding,
+			"failed",
+			[{ kind: "failed", payload: { error: retryFailure } }],
+			{
+				cause: retryFailure,
+				expectedStates: ["running"],
+				transcriptCheckpoint: {
+					sessionId: "session-failed",
+					sessionPath: path.join(tempDir, "failed.jsonl"),
+					leafEntryId: "leaf-failed",
+					byteBoundary: 64,
+				},
+			},
+		);
+		const cancelledBinding = {
+			...binding,
+			bindingId: "binding-cancelled",
+			commandId: "start-cancelled",
+			agentInstanceId: "agent-cancelled",
+			executionId: "execution-cancelled",
+			attemptId: "attempt-cancelled",
+			engineAgentId: "Engine-22222222222222222222222222222222",
+			profileDigest: "profile-cancelled",
+		};
+		await runtime.store.putBinding(cancelledBinding);
+		await runtime.store.putAttempt(cancelledBinding, "running");
+		await runtime.store.commitAttemptTransition(
+			cancelledBinding,
+			"cancelled",
+			[{ kind: "cancelled", payload: { reason: "user stop" } }],
+			{
+				cause: "user stop",
+				expectedStates: ["running"],
+				transcriptCheckpoint: {
+					sessionId: "session-cancelled",
+					sessionPath: path.join(tempDir, "cancelled.jsonl"),
+					leafEntryId: "leaf-cancelled",
+					byteBoundary: 32,
+				},
+			},
+		);
 
 		const options = {
 			runtime,
@@ -145,6 +201,20 @@ describe("Engine Control + Query", () => {
 			state: "completed",
 			assistantText: "x".repeat(ENGINE_CONTROL_QUERY_MAX_RESULT_CHARS),
 			outputTruncated: true,
+		});
+		expect(await client.request("snapshots.get", { attemptId: "attempt-failed" })).toMatchObject({
+			state: "failed",
+			transcriptRef: "history://Engine-11111111111111111111111111111111",
+		});
+		expect(await client.request("result.get", { attemptId: "attempt-failed" })).toMatchObject({
+			state: "failed",
+			error: retryFailure,
+			transcriptRef: "history://Engine-11111111111111111111111111111111",
+		});
+		expect(await client.request("result.get", { attemptId: "attempt-cancelled" })).toMatchObject({
+			state: "cancelled",
+			error: "attempt_cancelled",
+			transcriptRef: "history://Engine-22222222222222222222222222222222",
 		});
 
 		await runtime.store.appendEvent({

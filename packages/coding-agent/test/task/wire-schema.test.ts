@@ -226,4 +226,36 @@ describe("Engine task profile dispatch", () => {
 			text: expect.stringContaining("Full transcript: history://Engine-child-transport"),
 		});
 	});
+
+	it("surfaces a failed Engine child's safe error and resolvable transcript", async () => {
+		const tool = await TaskTool.create({
+			cwd: "/tmp",
+			hasUI: false,
+			settings: Settings.isolated({ "task.isolation.mode": "none" }),
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			engineChildLauncher: {
+				parentAgentInstanceRef: "grimoire://tasks/project/current/agents/parent",
+				profiles: [{ profileRef: "gctx:2222222222222222", displayName: "Opus worker" }],
+				async launch() {
+					return {
+						agentInstanceId: "child-failed",
+						status: "failed" as const,
+						error: "Retry budget exhausted after 3 retries: Thinking loop detected",
+						transcriptRef: "history://Engine-33333333333333333333333333333333",
+					};
+				},
+			},
+		} as unknown as ToolSession);
+
+		const result = await tool.execute("call-failed", {
+			profileRef: "gctx:2222222222222222",
+			workStepId: "implement",
+		});
+		expect(result.isError).toBeTrue();
+		expect(result.content[0]).toMatchObject({
+			type: "text",
+			text: expect.stringContaining("Full transcript: history://Engine-33333333333333333333333333333333"),
+		});
+	});
 });
