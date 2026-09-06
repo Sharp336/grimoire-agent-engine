@@ -419,10 +419,8 @@ export class EngineProfileResolver {
 		}
 		try {
 			let unsubscribeWriteback = () => {};
-			let primaryExecutionMarker: string | undefined;
 			if (executionIdentity && executionMaterial) {
 				const marker = providerExecutionMarker(executionIdentity);
-				primaryExecutionMarker = marker;
 				externalCredentialIdentities.set(marker, {
 					identity: executionIdentity,
 					transport: executionTransport(executionMaterial),
@@ -468,13 +466,12 @@ export class EngineProfileResolver {
 			const model = buildModel(toModelSpec(route, account, executionMaterial)) as Model;
 			if (executionMaterial) {
 				modelRegistry.registerProvider(model.provider, {
-					apiKey: primaryExecutionMarker,
+					authStorageManaged: true,
 					api: model.api,
 					baseUrl: model.baseUrl,
 					headers: account.headers,
 					models: [toProviderModel(model)],
 				});
-				authStorage.removeConfigApiKey(model.provider);
 			}
 			const fallbackSelectors = [formatModelStringWithRouting(model)];
 			const fallbackApiKeyRoutes: ProviderApiKeyRouteIdentity[] = [];
@@ -563,13 +560,12 @@ export class EngineProfileResolver {
 							toModelSpec(fallbackRoute, fallbackAccount, fallbackMaterial),
 						) as Model;
 						modelRegistry.registerProvider(fallbackModel.provider, {
-							apiKey: fallbackMarker,
+							authStorageManaged: true,
 							api: fallbackModel.api,
 							baseUrl: fallbackModel.baseUrl,
 							headers: fallbackAccount.headers,
 							models: [toProviderModel(fallbackModel)],
 						});
-						authStorage.removeConfigApiKey(fallbackModel.provider);
 						fallbackApiKeyRoutes.push({
 							providerAccountRef: fallbackAccountRef,
 							routeRef: fallbackRouteRef,

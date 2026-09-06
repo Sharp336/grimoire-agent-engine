@@ -679,6 +679,9 @@ describe("EngineProfileResolver", () => {
 			expect(fallback.baseUrl).toBe("https://core.invalid/runtime/provider-broker/v1");
 			expect(await resolved.options.modelRegistry!.getApiKey(fallback)).toStartWith("gri_pbr_");
 			expect(calls).toBe(4);
+			await resolved.options.modelRegistry!.refresh("offline");
+			expect(await resolved.options.modelRegistry!.getApiKey(model)).toBe("owner-secret");
+			expect(await resolved.options.modelRegistry!.getApiKey(fallback)).toStartWith("gri_pbr_");
 			mode = "hosted_broker";
 			await expect(resolved.options.modelRegistry!.getApiKey(model)).rejects.toThrow("transport changed");
 		} finally {
