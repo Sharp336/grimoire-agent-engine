@@ -147,6 +147,25 @@ describe("EngineRuntime", () => {
 		if (!sourceUser || !sourceAssistant || !sourceHistory.sessionLeafEntryId || !source.sessionFile) {
 			throw new Error("Expected complete source history");
 		}
+		const firstPending = await runtime.enqueueInbox(source, {
+			sourceEventId: "history-edit-pending-first",
+			sourceType: "user",
+			body: "review first",
+			createdAt: Date.now(),
+		});
+		const secondPending = await runtime.enqueueInbox(source, {
+			sourceEventId: "history-edit-pending-second",
+			sourceType: "user",
+			body: "review second",
+			createdAt: Date.now() + 1,
+		});
+		await runtime.reorderInbox(
+			source,
+			"history-edit-pending-order",
+			[firstPending.item.queueId, secondPending.item.queueId],
+			[secondPending.item.queueId, firstPending.item.queueId],
+		);
+		const pendingBeforeEdit = await runtime.listInbox(source);
 
 		const branched = await runtime.start(
 			{
@@ -173,6 +192,8 @@ describe("EngineRuntime", () => {
 		const branchDispatch = dispatches.find(call => call.input === "new branch prompt");
 		expect(branchDispatch?.messages).toContain("original user");
 		expect(branchDispatch?.messages).not.toContain("answer:original user");
+		expect(await runtime.listInbox(branched, true)).toEqual([]);
+		expect(await runtime.listInbox(source)).toEqual(pendingBeforeEdit);
 		const unchanged = await runtime.sessionHistory(source.agentInstanceId);
 		expect(unchanged.entries.map(entry => entry.text)).toEqual(["original user", "answer:original user"]);
 		await runtime.start(
@@ -230,6 +251,22 @@ describe("EngineRuntime", () => {
 		expect(editDispatch?.messages).toContain('"role":"assistant"');
 		expect(editDispatch?.messages).toContain("edited assistant");
 		expect(editDispatch?.messages).not.toContain('"role":"user","content":"edited assistant"');
+		expect(edited.manualHold).toBeTrue();
+		expect(await runtime.listInbox(edited)).toEqual(
+			pendingBeforeEdit.map(item =>
+				expect.objectContaining({
+					queueId: item.queueId,
+					sessionId: edited.historyEdit?.sessionId,
+					sourceBody: item.sourceBody,
+					deliveryPayload: item.deliveryPayload,
+					position: item.position,
+					revision: item.revision,
+					disposition: "pending",
+				}),
+			),
+		);
+		expect(await runtime.store.listInboxItems(sourceHistory.sessionId)).toEqual([]);
+		await expect(runtime.listInbox(source)).rejects.toMatchObject({ code: "stale_target" });
 		await runtime.dispose();
 	}, 60_000);
 

@@ -1229,6 +1229,7 @@ export class EngineStore {
 			inboxMutationCausationCommandId?: string;
 			conversationIdentityDigest?: string;
 			previousInboxSessionId?: string;
+			pendingInboxSourceSessionId?: string;
 		} = {},
 	): Promise<EngineEvent[]> {
 		return await this.#transaction(async sql => {
@@ -1264,6 +1265,13 @@ export class EngineStore {
 						`UPDATE engine_inbox_items SET session_id=?, updated_at=?
 						 WHERE session_id=? AND agent_instance_id=?`,
 						[options.inboxSessionId, Date.now(), options.previousInboxSessionId, binding.agentInstanceId],
+					);
+				}
+				if (options.pendingInboxSourceSessionId && options.pendingInboxSourceSessionId !== options.inboxSessionId) {
+					await sql.unsafe(
+						`UPDATE engine_inbox_items SET session_id=?, wake_delivered_at=NULL, updated_at=?
+						 WHERE session_id=? AND agent_instance_id=? AND disposition='pending'`,
+						[options.inboxSessionId, Date.now(), options.pendingInboxSourceSessionId, binding.agentInstanceId],
 					);
 				}
 				await sql.unsafe(

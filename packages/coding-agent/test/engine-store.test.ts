@@ -776,6 +776,121 @@ describe("EngineStore", () => {
 		await store.close();
 	});
 
+	it("atomically rebinds only pending inbox items for a history edit", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-history-inbox-${Snowflake.next()}-`));
+		const databasePath = path.join(tempDir, "engine.sqlite");
+		const store = await EngineStore.open(databasePath);
+		const sourceBinding = {
+			bindingId: "binding-history-source",
+			commandId: "command-history-source",
+			agentInstanceId: "agent-history-inbox",
+			executionId: "execution-history-source",
+			attemptId: "attempt-history-source",
+			engineAgentId: "Engine-history-inbox",
+			profileDigest: "profile-history-inbox",
+			state: "released" as const,
+			engineGeneration: 1,
+			bindingGeneration: 1,
+			authorityGeneration: 1,
+		};
+		await store.putBinding(sourceBinding);
+		const sourceTarget = { ...sourceBinding, sessionId: "session-history-source" };
+		const first = await store.enqueueInboxItem(sourceTarget, {
+			sourceEventId: "history-pending-first",
+			sourceType: "user",
+			body: "first pending body",
+			createdAt: 1,
+		});
+		const second = await store.enqueueInboxItem(sourceTarget, {
+			sourceEventId: "history-pending-second",
+			sourceType: "user",
+			body: "second pending body",
+			createdAt: 2,
+		});
+		const terminal = await store.enqueueInboxItem(sourceTarget, {
+			sourceEventId: "history-terminal",
+			sourceType: "user",
+			body: "terminal body",
+			createdAt: 3,
+		});
+		await store.mutateInboxItem(sourceTarget, {
+			mutationId: "history-terminal-drop",
+			queueId: terminal.item.queueId,
+			expectedRevision: terminal.item.revision,
+			op: "drop",
+		});
+		await store.reorderInboxItems(
+			sourceTarget,
+			"history-pending-reorder",
+			[first.item.queueId, second.item.queueId],
+			[second.item.queueId, first.item.queueId],
+		);
+		const expectedPending = await store.listInboxItems(sourceTarget.sessionId);
+		const editedBinding = {
+			...sourceBinding,
+			bindingId: "binding-history-edited",
+			commandId: "command-history-edit",
+			executionId: "execution-history-edited",
+			attemptId: "attempt-history-edited",
+			bindingGeneration: 2,
+			state: "running" as const,
+			manualHold: true,
+			intentRevision: 1,
+			intentCommandId: "command-history-edit",
+		};
+		const inspect = new SQL(`sqlite:${databasePath.replaceAll("\\", "/")}`);
+		await inspect.unsafe(`CREATE TRIGGER reject_history_inbox_rebind
+			BEFORE INSERT ON engine_event_outbox WHEN NEW.kind='running'
+			BEGIN SELECT RAISE(ABORT, 'injected history rebind failure'); END`);
+		await expect(
+			store.commitAttemptTransition(editedBinding, "running", [{ kind: "running" }], {
+				requireNew: true,
+				inboxSessionId: "session-history-edited",
+				pendingInboxSourceSessionId: sourceTarget.sessionId,
+			}),
+		).rejects.toThrow("injected history rebind failure");
+		expect(await store.listInboxItems(sourceTarget.sessionId)).toEqual(expectedPending);
+		expect(await store.listInboxItems("session-history-edited", true)).toEqual([]);
+		expect(await store.getAttempt(editedBinding.attemptId)).toBeUndefined();
+
+		await inspect.unsafe("DROP TRIGGER reject_history_inbox_rebind");
+		await store.commitAttemptTransition(editedBinding, "running", [{ kind: "running" }], {
+			requireNew: true,
+			inboxSessionId: "session-history-edited",
+			pendingInboxSourceSessionId: sourceTarget.sessionId,
+		});
+		const rebound = await store.listInboxItems("session-history-edited");
+		expect(rebound.map(item => [item.queueId, item.sourceBody, item.position, item.revision])).toEqual(
+			expectedPending.map(item => [item.queueId, item.sourceBody, item.position, item.revision]),
+		);
+		expect(await store.listInboxItems(sourceTarget.sessionId)).toEqual([]);
+		expect(await store.listInboxItems(sourceTarget.sessionId, true)).toContainEqual(
+			expect.objectContaining({ queueId: terminal.item.queueId, disposition: "dropped" }),
+		);
+		await expect(
+			store.commitAttemptTransition(editedBinding, "running", [{ kind: "running" }], {
+				requireNew: true,
+				inboxSessionId: "session-history-edited",
+				pendingInboxSourceSessionId: sourceTarget.sessionId,
+			}),
+		).rejects.toBeInstanceOf(EngineAttemptConflictError);
+		expect((await store.listInboxItems("session-history-edited")).map(item => item.queueId)).toEqual(
+			rebound.map(item => item.queueId),
+		);
+		await inspect.end();
+		await store.close();
+
+		const reopened = await EngineStore.open(databasePath);
+		expect(await reopened.getBinding(sourceBinding.agentInstanceId)).toMatchObject({
+			bindingId: editedBinding.bindingId,
+			manualHold: true,
+		});
+		expect((await reopened.listInboxItems("session-history-edited")).map(item => item.queueId)).toEqual(
+			rebound.map(item => item.queueId),
+		);
+		await reopened.close();
+	});
+
 	it("rejects a corrupt database instead of recreating authority", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-corrupt-${Snowflake.next()}-`));
 		const databasePath = path.join(tempDir, "engine.sqlite");

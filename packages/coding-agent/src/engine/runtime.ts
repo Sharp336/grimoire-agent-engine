@@ -151,6 +151,7 @@ function terminalYield(
 interface LiveBinding extends EngineBindingSnapshot {
 	conversationIdentityDigest: string;
 	previousInboxSessionId?: string;
+	pendingInboxSourceSessionId?: string;
 	uncommittedForkSessionFile?: string;
 	manualHold: boolean;
 	intentRevision: number;
@@ -224,6 +225,7 @@ interface PreparedHistoryStart {
 	sessionManager: SessionManager;
 	dispatchKind: HistoryDispatchKind;
 	dispatchInput: string;
+	pendingInboxSourceSessionId?: string;
 	result: NonNullable<EngineStartResult["historyEdit"]>;
 }
 
@@ -1373,6 +1375,7 @@ export class EngineRuntime {
 		) {
 			throw new EngineTargetError("stale_target", "History entry is not an active user or assistant message");
 		}
+		const hasPendingInbox = edit.mode === "edit" && (await this.store.listInboxItems(sourceSessionId)).length > 0;
 
 		const sessionDir = path.join(this.#sessionRoot, engineRouteToken(request.agentInstanceId));
 		const forked: NativeHistoryForkResult = await SessionManager.forkNativeHistory(
@@ -1410,6 +1413,7 @@ export class EngineRuntime {
 			sessionManager: forked.sessionManager,
 			dispatchKind,
 			dispatchInput,
+			...(hasPendingInbox ? { pendingInboxSourceSessionId: sourceSessionId } : {}),
 			result: {
 				mode: edit.mode,
 				sourceSessionId,
@@ -1537,6 +1541,9 @@ export class EngineRuntime {
 				conversationIdentityDigest,
 				preparedHistory?.sessionManager,
 			);
+		if (preparedHistory?.pendingInboxSourceSessionId) {
+			binding.pendingInboxSourceSessionId = preparedHistory.pendingInboxSourceSessionId;
+		}
 		if (
 			queuedItem &&
 			queuedItem.sessionId !== binding.session.sessionId &&
@@ -1547,7 +1554,14 @@ export class EngineRuntime {
 		}
 		let previousIntent = this.#intentState(binding);
 		try {
-			previousIntent = this.#setManualHold(binding, request.commandId, request.expectedIntentRevision, false, true);
+			const holdPendingInbox = preparedHistory?.pendingInboxSourceSessionId !== undefined;
+			previousIntent = this.#setManualHold(
+				binding,
+				request.commandId,
+				request.expectedIntentRevision,
+				holdPendingInbox,
+				!holdPendingInbox,
+			);
 			binding.state = "running";
 			binding.attemptState = "running";
 			const result = {
@@ -1576,6 +1590,7 @@ export class EngineRuntime {
 					: {}),
 			});
 			delete binding.previousInboxSessionId;
+			delete binding.pendingInboxSourceSessionId;
 			delete binding.uncommittedForkSessionFile;
 		} catch (error) {
 			this.#restoreIntent(binding, previousIntent);
@@ -3120,12 +3135,16 @@ export class EngineRuntime {
 			inboxSessionId?: string;
 			inboxMutation?: EngineInboxMutation;
 			inboxMutationCausationCommandId?: string;
+			pendingInboxSourceSessionId?: string;
 		} = {},
 	): Promise<void> {
 		const committed = await this.store.commitAttemptTransition(this.#snapshot(binding), state, events, {
 			...options,
 			conversationIdentityDigest: binding.conversationIdentityDigest,
 			...(binding.previousInboxSessionId ? { previousInboxSessionId: binding.previousInboxSessionId } : {}),
+			...(binding.pendingInboxSourceSessionId
+				? { pendingInboxSourceSessionId: binding.pendingInboxSourceSessionId }
+				: {}),
 		});
 		this.#notifyEvents(committed);
 	}
