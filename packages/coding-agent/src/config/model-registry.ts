@@ -2332,6 +2332,7 @@ export class ModelRegistry {
 				apiKey: config.apiKey,
 				api: config.api,
 				oauthConfigured: Boolean(config.oauth),
+				authStorageManaged: config.authStorageManaged,
 				models: (config.models ?? []) as ProviderValidationModel[],
 			},
 			"runtime-register",
@@ -2586,6 +2587,8 @@ export class ModelRegistry {
 export interface ProviderConfigInput {
 	baseUrl?: string;
 	apiKey?: string;
+	/** Authentication is already present in this registry's AuthStorage. */
+	authStorageManaged?: boolean;
 	api?: Api;
 	streamSimple?: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
 	headers?: Record<string, string>;
