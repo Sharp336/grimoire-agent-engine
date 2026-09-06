@@ -280,6 +280,7 @@ export interface EngineRejectedCommand {
 	bindingGeneration?: number;
 	code: EngineTargetError["code"];
 	message: string;
+	operation?: "start";
 }
 
 export interface EngineEvent {

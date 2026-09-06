@@ -516,6 +516,12 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 				if (command.agentInstanceId === "agent-live") {
 					return { spawns: "", profileDigest: "leaf-profile-v1", enableMCP: false, enableLsp: false };
 				}
+				if (command.agentInstanceId === "agent-retained") {
+					if (command.commandId === "command-retained-first") {
+						return { spawns: "", profileDigest: "leaf-profile-v1", enableMCP: false, enableLsp: false };
+					}
+					throw new Error("replacement profile is unavailable");
+				}
 				if (command.agentInstanceId === "agent-reuse") {
 					if (command.commandId === "command-reuse-first") {
 						return { spawns: "", profileDigest: "leaf-profile-v1", enableMCP: false, enableLsp: false };
@@ -558,6 +564,11 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 					events.push(JSON.parse(decoder.decode(message.data)));
 				},
 			});
+			const retainedSubscription = client.subscribe(adapter.eventSubject("agent-retained", "*"), {
+				callback: (_error, message) => {
+					events.push(JSON.parse(decoder.decode(message.data)));
+				},
+			});
 
 			const failed = startCommand(runtime.engineGeneration, "agent-failed", "failed", cwd);
 			await js.publish(adapter.commandSubject(failed.agentInstanceId, "start"), JSON.stringify(failed), {
@@ -585,6 +596,34 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			expect(publicFailure).not.toContain("json-secret");
 			expect(publicFailure).not.toContain("0123456789abcdef");
 			expect(await runtime.store.getAttempt(failed.attemptId!)).toBeUndefined();
+			const failedEvent = events.find(event => event.causationCommandId === failed.commandId);
+			expect(failedEvent).toMatchObject({
+				type: "command.rejected",
+				payload: { code: "launch_failed", sessionState: "absent" },
+			});
+
+			const retainedFirst = startCommand(runtime.engineGeneration, "agent-retained", "retained-first", cwd);
+			await js.publish(
+				adapter.commandSubject(retainedFirst.agentInstanceId, "start"),
+				JSON.stringify(retainedFirst),
+				{ msgID: retainedFirst.commandId },
+			);
+			await waitFor(async () => (await runtime.store.getAttempt(retainedFirst.attemptId!))?.state === "completed");
+			const retainedSessionId = (await runtime.sessionHistory(retainedFirst.agentInstanceId)).sessionId;
+			const retainedRejected = startCommand(runtime.engineGeneration, "agent-retained", "retained-rejected", cwd);
+			await js.publish(
+				adapter.commandSubject(retainedRejected.agentInstanceId, "start"),
+				JSON.stringify(retainedRejected),
+				{ msgID: retainedRejected.commandId },
+			);
+			await waitFor(() => events.some(event => event.causationCommandId === retainedRejected.commandId));
+			const retainedRejectedEvent = events.find(event => event.causationCommandId === retainedRejected.commandId);
+			expect(retainedRejectedEvent).toMatchObject({
+				type: "command.rejected",
+				payload: { code: "launch_failed" },
+			});
+			expect((retainedRejectedEvent?.payload as Record<string, unknown> | undefined)?.sessionState).toBeUndefined();
+			expect((await runtime.sessionHistory(retainedRejected.agentInstanceId)).sessionId).toBe(retainedSessionId);
 
 			const unsafe = startCommand(runtime.engineGeneration, "agent-unsafe-error", "unsafe", cwd);
 			await js.publish(adapter.commandSubject(unsafe.agentInstanceId, "start"), JSON.stringify(unsafe), {
@@ -716,6 +755,7 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			unsafeSubscription.unsubscribe();
 			liveSubscription.unsubscribe();
 			reuseSubscription.unsubscribe();
+			retainedSubscription.unsubscribe();
 		} finally {
 			livePrompt.resolve(true);
 			reuseProfile.reject(new Error("test cleanup"));
