@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import type { Model, UsageReport } from "@oh-my-pi/pi-ai";
+import { streamOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import type { Context, FetchImpl } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import {
 	ProviderAdmissionClient,
 	ProviderAdmissionError,
@@ -248,6 +251,118 @@ describe("ProviderAdmissionClient", () => {
 		await observationStarted.promise;
 		expect(observation).toMatchObject({ outcome: "rate_limited", statusCode: 429 });
 		observationRelease.resolve(Response.json({ allowed: true, status: "recorded" }));
+	});
+
+	it("records HTTP 200 terminal SSE errors as physical provider failures", async () => {
+		const observations: Array<Record<string, unknown>> = [];
+		const route = {
+			expectedPrincipalId: "grimoire:user:owner",
+			profileRef: "gctx:2222222222222222",
+			profileContentHash: "sha256:profile",
+			providerAccountRef: "gctx:4444444444444444",
+			providerAccountContentHash: "sha256:account",
+			routeRef: "gctx:5555555555555555",
+			routeContentHash: "sha256:route",
+			providerId: "cheapai",
+			runtimeProviderId: "artel-4444444444444444",
+			modelId: "gpt-5.6-terra",
+			baseUrl: "https://cheapai.invalid/v1",
+		};
+		const hook = new ProviderAdmissionClient("http://127.0.0.1/provider-admission", "token", async (_input, init) => {
+			observations.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+			return Response.json({ allowed: true, status: "recorded" });
+		}).createHook(undefined, {} as AuthStorage, "", [route]);
+		const codexModel = buildModel({
+			id: route.modelId,
+			name: "Terra",
+			api: "openai-codex-responses",
+			provider: route.runtimeProviderId,
+			baseUrl: route.baseUrl,
+			reasoning: true,
+			preferWebsockets: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 32_000,
+		});
+		const errorSse = `data: ${JSON.stringify({
+			type: "error",
+			code: "model_error",
+			message: "retryable provider failure",
+		})}\n\n`;
+		const providerFetch = hook.wrapFetch(
+			codexModel,
+			async () =>
+				new Response(errorSse, {
+					status: 200,
+					headers: { "content-type": "text/event-stream" },
+				}),
+		);
+		const context: Context = {
+			systemPrompt: ["Answer briefly."],
+			messages: [{ role: "user", content: "Hello", timestamp: Date.now() }],
+		};
+		const result = await withProviderObservationContext(
+			{ effectId: "model_effect_semantic", modelCallId: "model-semantic" },
+			async () =>
+				await streamOpenAICodexResponses(codexModel, context, {
+					apiKey: "dummy-test-key",
+					fetch: providerFetch as FetchImpl,
+				}).result(),
+		);
+		expect(result.stopReason).toBe("error");
+		expect(observations.length).toBeGreaterThan(0);
+		expect(observations.every(item => item.outcome === "provider_error" && item.statusCode === 200)).toBe(true);
+		expect(observations.map(item => item.physicalRequestOrdinal)).toEqual(
+			observations.map((_item, index) => index + 1),
+		);
+	}, 30_000);
+
+	it("does not record a cancelled successful stream as an outage", async () => {
+		const observations: Array<Record<string, unknown>> = [];
+		const controller = new AbortController();
+		const route = {
+			expectedPrincipalId: "grimoire:user:owner",
+			profileRef: "gctx:2222222222222222",
+			profileContentHash: "sha256:profile",
+			providerAccountRef: "gctx:4444444444444444",
+			providerAccountContentHash: "sha256:account",
+			routeRef: "gctx:5555555555555555",
+			routeContentHash: "sha256:route",
+			providerId: "cheapai",
+			runtimeProviderId: "artel-4444444444444444",
+			modelId: "gpt-5.6-terra",
+			baseUrl: "https://cheapai.invalid/v1",
+		};
+		const hook = new ProviderAdmissionClient("http://127.0.0.1/provider-admission", "token", async (_input, init) => {
+			observations.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+			return Response.json({ allowed: true });
+		}).createHook(undefined, {} as AuthStorage, "", [route]);
+		const wrapped = hook.wrapFetch(
+			{ id: route.modelId, provider: route.runtimeProviderId, baseUrl: route.baseUrl } as Model,
+			async () =>
+				new Response(
+					new ReadableStream<Uint8Array>({
+						start(streamController) {
+							streamController.enqueue(new TextEncoder().encode('data: {"type":"response.created"}\n\n'));
+						},
+					}),
+					{ status: 200, headers: { "content-type": "text/event-stream" } },
+				),
+		);
+		await withProviderObservationContext(
+			{ effectId: "model_effect_cancel", modelCallId: "model-cancel" },
+			async () => {
+				const response = await wrapped("https://cheapai.invalid/v1/chat/completions", {
+					signal: controller.signal,
+				});
+				const reader = response.body!.getReader();
+				await reader.read();
+				controller.abort();
+				await reader.cancel();
+			},
+		);
+		expect(observations).toEqual([]);
 	});
 });
 

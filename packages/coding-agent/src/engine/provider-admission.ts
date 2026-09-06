@@ -6,6 +6,58 @@ import type { AuthStorage } from "../session/auth-storage";
 type Fetch = NonNullable<SimpleStreamOptions["fetch"]>;
 const ADMISSION_TIMEOUT_MS = 10_000;
 const OBSERVATION_FLUSH_BUDGET_MS = 250;
+const SSE_EVENT_LIMIT = 64 * 1024;
+
+class ProviderSseOutcome {
+	#lineBuffer = "";
+	#eventName = "";
+	#data = "";
+	readonly #decoder = new TextDecoder();
+
+	push(chunk: Uint8Array, done = false): boolean {
+		this.#lineBuffer += this.#decoder.decode(chunk, { stream: !done });
+		if (this.#lineBuffer.length > SSE_EVENT_LIMIT) {
+			this.#lineBuffer = this.#lineBuffer.slice(-SSE_EVENT_LIMIT);
+		}
+		let newline = this.#lineBuffer.indexOf("\n");
+		while (newline >= 0) {
+			const line = this.#lineBuffer.slice(0, newline).replace(/\r$/, "");
+			this.#lineBuffer = this.#lineBuffer.slice(newline + 1);
+			if (this.#consumeLine(line)) return true;
+			newline = this.#lineBuffer.indexOf("\n");
+		}
+		if (done) {
+			if (this.#lineBuffer && this.#consumeLine(this.#lineBuffer.replace(/\r$/, ""))) return true;
+			this.#lineBuffer = "";
+			return this.#finishEvent();
+		}
+		return false;
+	}
+
+	#consumeLine(line: string): boolean {
+		if (!line) return this.#finishEvent();
+		if (line.startsWith("event:")) this.#eventName = line.slice(6).trim();
+		else if (line.startsWith("data:") && this.#data.length < SSE_EVENT_LIMIT) {
+			this.#data += `${this.#data ? "\n" : ""}${line.slice(5).trimStart()}`;
+		}
+		return false;
+	}
+
+	#finishEvent(): boolean {
+		const eventName = this.#eventName;
+		const data = this.#data;
+		this.#eventName = "";
+		this.#data = "";
+		if (eventName === "error") return true;
+		if (!data || data === "[DONE]" || data.length > SSE_EVENT_LIMIT) return false;
+		try {
+			const value = JSON.parse(data) as { type?: unknown; error?: unknown };
+			return value.type === "error" || value.type === "response.failed" || value.error != null;
+		} catch {
+			return false;
+		}
+	}
+}
 
 export interface ProviderAdmissionIdentity {
 	expectedPrincipalId: string;
@@ -227,25 +279,38 @@ export class ProviderAdmissionClient {
 			return response;
 		}
 		const reader = response.body.getReader();
+		const detectsSse = response.headers.get("content-type")?.toLowerCase().includes("text/event-stream") === true;
+		const semanticOutcome = detectsSse ? new ProviderSseOutcome() : undefined;
+		let settled = false;
+		const settle = (next: { outcome: ProviderObservationOutcome; statusCode?: number }): void => {
+			if (settled || signal?.aborted) return;
+			settled = true;
+			this.#queueObservation(identity, model, context, ordinal, startedAt, next);
+		};
 		const observed = new ReadableStream<Uint8Array>({
 			pull: async controller => {
 				try {
 					const next = await reader.read();
 					if (next.done) {
-						this.#queueObservation(identity, model, context, ordinal, startedAt, {
-							outcome,
-							statusCode: response.status,
-						});
+						if (semanticOutcome?.push(new Uint8Array(), true)) {
+							settle({ outcome: "provider_error", statusCode: response.status });
+						} else settle({ outcome, statusCode: response.status });
 						controller.close();
-					} else controller.enqueue(next.value);
-				} catch (error) {
-					if (!signal?.aborted) {
-						this.#queueObservation(identity, model, context, ordinal, startedAt, { outcome: "transport_error" });
+					} else {
+						if (semanticOutcome?.push(next.value)) {
+							settle({ outcome: "provider_error", statusCode: response.status });
+						}
+						controller.enqueue(next.value);
 					}
+				} catch (error) {
+					settle({ outcome: "transport_error" });
 					controller.error(error);
 				}
 			},
-			cancel: reason => reader.cancel(reason),
+			cancel: reason => {
+				if (signal?.aborted) settled = true;
+				return reader.cancel(reason);
+			},
 		});
 		const wrapped = new Response(observed, {
 			status: response.status,
