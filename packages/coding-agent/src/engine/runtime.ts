@@ -67,7 +67,7 @@ import {
 	validateStartRequest,
 } from "./contracts";
 import { safeEngineErrorDetail } from "./public-error";
-import { engineAgentId, engineRouteToken } from "./route";
+import { engineAgentId, engineAgentInstanceId, engineRouteToken } from "./route";
 import {
 	EngineAttemptConflictError,
 	type EngineAttemptRecord,
@@ -88,6 +88,26 @@ const ASSISTANT_SNAPSHOT_GROWTH_CHARS = 192;
 const MAX_ASSISTANT_STREAMING_SNAPSHOTS = 256;
 const ENGINE_TURN_RETRY_DELAYS_MS = [3_000, 15_000, 30_000] as const;
 const TERMINAL_ATTEMPT_STATES = new Set<EngineAttemptState>(["completed", "cancelled", "failed", "interrupted"]);
+const MAX_NATIVE_RESTORE_BYTES = 128 * 1024 * 1024;
+const MAX_NATIVE_RESTORE_CHUNK_BYTES = 24_000;
+
+interface NativeRestoreStageMetadata {
+	schema: "grimoire.engine.native_session_restore_stage.v1";
+	restoreId: string;
+	agentInstanceId: string;
+	agentInstanceRef: string;
+	authorityGeneration: number;
+	contentHash: string;
+	totalBytes: number;
+}
+
+interface NativeSessionCheckpoint {
+	schema: "grimoire.engine.native_session_checkpoint.v1";
+	sessionId: string;
+	sessionJsonlHash: string;
+	sessionJsonlBase64: string;
+	artifacts: Array<{ name: string; contentHash: string; byteLength: number; contentBase64: string }>;
+}
 
 function taskRefFromAgentInstanceRef(agentInstanceRef: string | undefined): string | undefined {
 	if (!agentInstanceRef?.startsWith("grimoire://tasks/")) return undefined;
@@ -232,6 +252,11 @@ interface PreparedHistoryStart {
 	dispatchInput: string;
 	pendingInboxSourceSessionId?: string;
 	result: NonNullable<EngineStartResult["historyEdit"]>;
+}
+
+interface PreparedRestoreStart {
+	sessionManager: SessionManager;
+	stageDir: string;
 }
 
 export interface EngineRuntimeOptions {
@@ -1181,6 +1206,246 @@ export class EngineRuntime {
 		});
 	}
 
+	async sessionArchive(
+		agentInstanceId: string,
+		expectedContentHash?: string,
+		offset = 0,
+		limit = 24_000,
+	): Promise<{
+		schema: "grimoire.engine.session_archive.v1";
+		agentInstanceId: string;
+		sessionId: string;
+		payloadSchema: "grimoire.engine.native_session_checkpoint.v1";
+		contentHash: string;
+		byteLength: number;
+		offset: number;
+		nextOffset: number | null;
+		contentBase64: string;
+	}> {
+		return await this.#inLane(agentInstanceId, async () => {
+			this.#throwIfDisposed();
+			const live = this.#bindings.get(agentInstanceId);
+			if (live) {
+				throw new EngineTargetError(
+					"agent_busy",
+					`AgentInstance ${agentInstanceId} must be released before archival`,
+				);
+			}
+			const binding = await this.store.getBinding(agentInstanceId);
+			if (!binding?.sessionFile) {
+				throw new EngineTargetError(
+					"history_expired",
+					`Native session archive is unavailable for ${agentInstanceId}`,
+				);
+			}
+			let content: string;
+			try {
+				content = await this.store.sessionStorage.readText(binding.sessionFile);
+			} catch (error) {
+				if (isEnoent(error)) {
+					throw new EngineTargetError(
+						"history_expired",
+						`Native session archive is unavailable for ${agentInstanceId}`,
+					);
+				}
+				throw error;
+			}
+			const loaded = await loadSessionFile(binding.sessionFile, this.store.sessionStorage);
+			const header = loaded.entries[0];
+			if (header?.type !== "session") {
+				throw new EngineTargetError("history_expired", `Native session archive is invalid for ${agentInstanceId}`);
+			}
+			const artifactsDir = binding.sessionFile.endsWith(".jsonl")
+				? binding.sessionFile.slice(0, -".jsonl".length)
+				: "";
+			let artifactFiles: string[] = [];
+			if (artifactsDir) {
+				try {
+					const children = await fs.readdir(artifactsDir, { withFileTypes: true });
+					if (children.some(child => !child.isFile() || child.isSymbolicLink())) {
+						throw new EngineTargetError("history_expired", "Native session artifact directory is unsafe");
+					}
+					artifactFiles = children.map(child => path.join(artifactsDir, child.name)).sort();
+				} catch (error) {
+					if (!isEnoent(error)) throw error;
+				}
+			}
+			const artifacts: Array<{ name: string; contentHash: string; byteLength: number; contentBase64: string }> = [];
+			for (const artifactFile of artifactFiles) {
+				const name = path.basename(artifactFile);
+				if (
+					!/^[A-Za-z0-9_.-]+$/.test(name) ||
+					path.dirname(path.resolve(artifactFile)) !== path.resolve(artifactsDir)
+				) {
+					throw new EngineTargetError("history_expired", "Native session artifact path is invalid");
+				}
+				const artifactBytes = await fs.readFile(artifactFile);
+				artifacts.push({
+					name,
+					contentHash: `sha256:${crypto.createHash("sha256").update(artifactBytes).digest("hex")}`,
+					byteLength: artifactBytes.byteLength,
+					contentBase64: artifactBytes.toString("base64"),
+				});
+			}
+			const payloadSchema = "grimoire.engine.native_session_checkpoint.v1" as const;
+			const bytes = Buffer.from(
+				`${JSON.stringify({
+					schema: payloadSchema,
+					sessionId: header.id,
+					sessionJsonlHash: `sha256:${crypto.createHash("sha256").update(content, "utf8").digest("hex")}`,
+					sessionJsonlBase64: Buffer.from(content, "utf8").toString("base64"),
+					artifacts,
+				})}\n`,
+				"utf8",
+			);
+			const contentHash = `sha256:${crypto.createHash("sha256").update(bytes).digest("hex")}`;
+			if (expectedContentHash !== undefined && expectedContentHash !== contentHash) {
+				throw new EngineTargetError("stale_target", "Native session changed while its archive was being read");
+			}
+			if (!Number.isSafeInteger(offset) || offset < 0 || offset > bytes.byteLength) {
+				throw new EngineTargetError("invalid_request", "Native session archive offset is outside the payload");
+			}
+			if (!Number.isSafeInteger(limit) || limit < 1 || limit > 24_000) {
+				throw new EngineTargetError(
+					"invalid_request",
+					"Native session archive limit is outside the accepted range",
+				);
+			}
+			const end = Math.min(bytes.byteLength, offset + limit);
+			return {
+				schema: "grimoire.engine.session_archive.v1",
+				agentInstanceId,
+				sessionId: header.id,
+				payloadSchema,
+				contentHash,
+				byteLength: bytes.byteLength,
+				offset,
+				nextOffset: end < bytes.byteLength ? end : null,
+				contentBase64: bytes.subarray(offset, end).toString("base64"),
+			};
+		});
+	}
+
+	async sessionRestoreStage(request: {
+		agentInstanceId: string;
+		agentInstanceRef: string;
+		authorityGeneration: number;
+		contentHash: string;
+		totalBytes: number;
+		offset: number;
+		contentBase64: string;
+	}): Promise<{ restoreId: string; contentHash: string; totalBytes: number; nextOffset: number; complete: boolean }> {
+		return await this.#inLane(request.agentInstanceId, async () => {
+			this.#throwIfDisposed();
+			if (!request.agentInstanceId.trim() || !request.agentInstanceRef.trim()) {
+				throw new EngineTargetError("invalid_request", "Restore target identity must be non-empty");
+			}
+			if (request.agentInstanceId !== engineAgentInstanceId(request.agentInstanceRef)) {
+				throw new EngineTargetError("invalid_request", "Restore AgentInstance id does not match its durable ref");
+			}
+			if (!Number.isSafeInteger(request.authorityGeneration) || request.authorityGeneration < 0) {
+				throw new EngineTargetError("invalid_request", "Restore authorityGeneration must be non-negative");
+			}
+			if (!/^sha256:[0-9a-f]{64}$/.test(request.contentHash)) {
+				throw new EngineTargetError("invalid_request", "Restore contentHash must be a SHA-256 digest");
+			}
+			if (
+				!Number.isSafeInteger(request.totalBytes) ||
+				request.totalBytes < 1 ||
+				request.totalBytes > MAX_NATIVE_RESTORE_BYTES
+			) {
+				throw new EngineTargetError("invalid_request", "Restore totalBytes is outside the accepted range");
+			}
+			if (!Number.isSafeInteger(request.offset) || request.offset < 0 || request.offset > request.totalBytes) {
+				throw new EngineTargetError("invalid_request", "Restore offset is outside the payload");
+			}
+			const chunk = decodeCanonicalBase64(request.contentBase64, "Restore chunk");
+			if (chunk.byteLength < 1 || chunk.byteLength > MAX_NATIVE_RESTORE_CHUNK_BYTES) {
+				throw new EngineTargetError("invalid_request", "Restore chunk is outside the accepted range");
+			}
+			if (request.offset + chunk.byteLength > request.totalBytes) {
+				throw new EngineTargetError("invalid_request", "Restore chunk exceeds totalBytes");
+			}
+
+			const restoreId = crypto
+				.createHash("sha256")
+				.update(
+					`${request.agentInstanceId}\0${request.agentInstanceRef}\0${request.authorityGeneration}\0${request.contentHash}`,
+				)
+				.digest("hex");
+			const stageDir = this.#restoreStageDir(restoreId);
+			const metadata: NativeRestoreStageMetadata = {
+				schema: "grimoire.engine.native_session_restore_stage.v1",
+				restoreId,
+				agentInstanceId: request.agentInstanceId,
+				agentInstanceRef: request.agentInstanceRef,
+				authorityGeneration: request.authorityGeneration,
+				contentHash: request.contentHash,
+				totalBytes: request.totalBytes,
+			};
+			await fs.mkdir(stageDir, { recursive: true });
+			const metadataPath = path.join(stageDir, "metadata.json");
+			try {
+				await fs.writeFile(metadataPath, `${JSON.stringify(metadata)}\n`, { encoding: "utf8", flag: "wx" });
+			} catch (error) {
+				if (!isEexist(error)) throw error;
+				const existing = JSON.parse(await fs.readFile(metadataPath, "utf8")) as NativeRestoreStageMetadata;
+				if (stableStringifyJson(existing) !== stableStringifyJson(metadata)) {
+					throw new EngineTargetError("stale_target", "Restore stage identity changed");
+				}
+			}
+			const payloadPath = path.join(stageDir, "checkpoint.bin");
+			let current = Buffer.alloc(0);
+			try {
+				current = await fs.readFile(payloadPath);
+			} catch (error) {
+				if (!isEnoent(error)) throw error;
+			}
+			if (request.offset > current.byteLength) {
+				throw new EngineTargetError("stale_target", `Restore expects offset ${current.byteLength}`);
+			}
+			if (request.offset < current.byteLength) {
+				const replayEnd = request.offset + chunk.byteLength;
+				if (replayEnd > current.byteLength || !current.subarray(request.offset, replayEnd).equals(chunk)) {
+					throw new EngineTargetError("stale_target", "Restore chunk conflicts with staged bytes");
+				}
+			} else {
+				await fs.appendFile(payloadPath, chunk);
+				current = Buffer.concat([current, chunk]);
+			}
+			if (current.byteLength > request.totalBytes) {
+				throw new EngineTargetError("stale_target", "Restore stage exceeds totalBytes");
+			}
+			const complete = current.byteLength === request.totalBytes;
+			if (complete) {
+				const hash = `sha256:${crypto.createHash("sha256").update(current).digest("hex")}`;
+				if (hash !== request.contentHash) {
+					await fs.rm(payloadPath, { force: true });
+					await fs.rm(path.join(stageDir, "ready"), { force: true });
+					throw new EngineTargetError("invalid_request", "Restore checkpoint hash does not match");
+				}
+				try {
+					parseNativeSessionCheckpoint(current);
+				} catch (error) {
+					await fs.rm(payloadPath, { force: true });
+					await fs.rm(path.join(stageDir, "ready"), { force: true });
+					throw error;
+				}
+				await fs.writeFile(path.join(stageDir, "ready"), `${request.contentHash}\n`, {
+					encoding: "utf8",
+					flag: "w",
+				});
+			}
+			return {
+				restoreId,
+				contentHash: request.contentHash,
+				totalBytes: request.totalBytes,
+				nextOffset: current.byteLength,
+				complete,
+			};
+		});
+	}
+
 	async sweepExpiredChildHistory(now = Date.now()): Promise<{
 		expired: number;
 		archived: number;
@@ -1438,6 +1703,85 @@ export class EngineRuntime {
 		};
 	}
 
+	async #prepareRestoreStart(request: EngineStartRequest): Promise<PreparedRestoreStart | undefined> {
+		const restore = request.restoreCheckpoint;
+		if (!restore) return undefined;
+		if (!request.agentInstanceRef) {
+			throw new EngineTargetError("invalid_request", "Restored start requires agentInstanceRef");
+		}
+		const prior = await this.store.getBinding(request.agentInstanceId);
+		if (prior?.sessionFile) {
+			throw new EngineTargetError("stale_target", "Restore target already has a native session");
+		}
+		const stageDir = this.#restoreStageDir(restore.restoreId);
+		let metadata: NativeRestoreStageMetadata;
+		try {
+			metadata = JSON.parse(await fs.readFile(path.join(stageDir, "metadata.json"), "utf8"));
+			const ready = (await fs.readFile(path.join(stageDir, "ready"), "utf8")).trim();
+			if (ready !== restore.contentHash) throw new Error("ready hash mismatch");
+		} catch (error) {
+			if (isEnoent(error)) throw new EngineTargetError("history_expired", "Restore checkpoint is unavailable");
+			throw new EngineTargetError("invalid_request", "Restore checkpoint is not ready");
+		}
+		if (
+			metadata.restoreId !== restore.restoreId ||
+			metadata.agentInstanceId !== request.agentInstanceId ||
+			metadata.agentInstanceRef !== request.agentInstanceRef ||
+			metadata.authorityGeneration !== request.authorityGeneration ||
+			metadata.contentHash !== restore.contentHash
+		) {
+			throw new EngineTargetError("stale_target", "Restore checkpoint authority is stale");
+		}
+		const bytes = await fs.readFile(path.join(stageDir, "checkpoint.bin"));
+		if (bytes.byteLength !== metadata.totalBytes) {
+			throw new EngineTargetError("history_expired", "Restore checkpoint is incomplete");
+		}
+		const hash = `sha256:${crypto.createHash("sha256").update(bytes).digest("hex")}`;
+		if (hash !== restore.contentHash) throw new EngineTargetError("history_expired", "Restore checkpoint changed");
+		const checkpoint = parseNativeSessionCheckpoint(bytes);
+		const materialized = path.join(stageDir, "source.jsonl");
+		const artifactsDir = materialized.slice(0, -".jsonl".length);
+		await fs.rm(artifactsDir, { recursive: true, force: true });
+		await this.store.sessionStorage.writeText(
+			materialized,
+			new TextDecoder("utf-8", { fatal: true }).decode(
+				decodeCanonicalBase64(checkpoint.sessionJsonlBase64, "Session JSONL"),
+			),
+		);
+		let sessionManager: SessionManager;
+		try {
+			if (checkpoint.artifacts.length > 0) await fs.mkdir(artifactsDir, { recursive: true });
+			for (const artifact of checkpoint.artifacts) {
+				await fs.writeFile(
+					path.join(artifactsDir, artifact.name),
+					decodeCanonicalBase64(artifact.contentBase64, "Artifact"),
+				);
+			}
+			const loaded = await loadSessionFile(materialized, this.store.sessionStorage);
+			if (loaded.entries[0]?.type !== "session" || loaded.entries[0].id !== checkpoint.sessionId) {
+				throw new EngineTargetError("history_expired", "Restore checkpoint native session is invalid");
+			}
+			const sessionDir = path.join(this.#sessionRoot, engineRouteToken(request.agentInstanceId));
+			sessionManager = await SessionManager.forkFrom(
+				materialized,
+				request.cwd,
+				sessionDir,
+				this.store.sessionStorage,
+				{ copyArtifacts: true, suppressBreadcrumb: true },
+			);
+		} finally {
+			await this.store.sessionStorage.unlink(materialized).catch(error => {
+				if (!isEnoent(error)) throw error;
+			});
+			await fs.rm(artifactsDir, { recursive: true, force: true });
+		}
+		return { sessionManager, stageDir };
+	}
+
+	#restoreStageDir(restoreId: string): string {
+		return path.join(this.#sessionRoot, ".restore", restoreId);
+	}
+
 	async #startInLane(request: EngineStartRequest, profile: EngineLaunchProfile): Promise<EngineStartResult> {
 		this.#throwIfDisposed();
 		let binding = this.#bindings.get(request.agentInstanceId);
@@ -1501,22 +1845,24 @@ export class EngineRuntime {
 		const conversationIdentityDigest = await this.#conversationIdentityDigest(request);
 		if (binding) this.#assertManualHoldClear(binding, request.expectedIntentRevision);
 		const preparedHistory = await this.#prepareHistoryStart(request);
+		const preparedRestore = await this.#prepareRestoreStart(request);
+		const preparedSession = preparedHistory?.sessionManager ?? preparedRestore?.sessionManager;
 
 		if (binding) {
 			if (binding.state === "running" || binding.session.isStreaming) {
 				throw new EngineTargetError("agent_busy", `AgentInstance ${request.agentInstanceId} is busy`);
 			}
 			if (
-				preparedHistory ||
+				preparedSession ||
 				profile.continuationPolicy === "fresh" ||
 				binding.profileDigest !== continuationDigest
 			) {
 				try {
 					await this.#terminateBinding(binding, "requested");
 				} catch (error) {
-					if (!preparedHistory) throw error;
+					if (!preparedSession) throw error;
 					try {
-						await this.#discardPreparedHistory(preparedHistory);
+						await this.#discardPreparedSession(preparedSession);
 					} catch (cleanupError) {
 						throw new AggregateError([error, cleanupError], "History binding release and cleanup failed");
 					}
@@ -1553,7 +1899,7 @@ export class EngineRuntime {
 				profile,
 				continuationDigest,
 				conversationIdentityDigest,
-				preparedHistory?.sessionManager,
+				preparedSession,
 			);
 		if (preparedHistory?.pendingInboxSourceSessionId) {
 			binding.pendingInboxSourceSessionId = preparedHistory.pendingInboxSourceSessionId;
@@ -1621,6 +1967,14 @@ export class EngineRuntime {
 			}
 			throw error;
 		}
+		if (preparedRestore) {
+			await fs.rm(preparedRestore.stageDir, { recursive: true, force: true }).catch(error => {
+				logger.warn("Committed native restore stage cleanup failed", {
+					restoreId: request.restoreCheckpoint?.restoreId,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			});
+		}
 		this.#trackRun(
 			this.#runPrompt(
 				binding,
@@ -1646,15 +2000,15 @@ export class EngineRuntime {
 		};
 	}
 
-	async #discardPreparedHistory(prepared: PreparedHistoryStart): Promise<void> {
-		const sessionFile = prepared.sessionManager.getSessionFile();
-		prepared.sessionManager.seal();
+	async #discardPreparedSession(sessionManager: SessionManager): Promise<void> {
+		const sessionFile = sessionManager.getSessionFile();
+		sessionManager.seal();
 		const errors: unknown[] = [];
-		await collectFailure(errors, () => prepared.sessionManager.close());
+		await collectFailure(errors, () => sessionManager.close());
 		if (sessionFile) {
 			await collectFailure(errors, () => this.store.sessionStorage.deleteSessionWithArtifacts(sessionFile));
 		}
-		throwCollectedFailures(errors, "Prepared history cleanup failed");
+		throwCollectedFailures(errors, "Prepared session cleanup failed");
 	}
 
 	#inboxTarget(binding: LiveBinding): EngineInboxTarget {
@@ -1730,6 +2084,7 @@ export class EngineRuntime {
 		let disposeResolved: (() => void) | undefined;
 		let mcpManager: MCPManager | undefined;
 		try {
+			if (preparedSessionManager && !uncommittedForkSessionFile) throw new Error("Prepared session was not durably materialized");
 			const resolved = await this.#resolveSessionProfile?.(profile, request.cwd);
 			disposeResolved = resolved?.dispose;
 			const prior = await this.store.getBinding(request.agentInstanceId);
@@ -1738,11 +2093,8 @@ export class EngineRuntime {
 			const route = engineRouteToken(request.agentInstanceId);
 			const sessionDir = path.join(this.#sessionRoot, route);
 			let previousInboxSessionId: string | undefined;
-			if (preparedSessionManager) {
-				sessionManager = preparedSessionManager;
-				uncommittedForkSessionFile = preparedSessionManager.getSessionFile();
-				if (!uncommittedForkSessionFile) throw new Error("History session was not durably materialized");
-			} else if (
+			if (
+				!preparedSessionManager &&
 				prior?.sessionFile &&
 				prior.profileDigest === profileDigest &&
 				profile.continuationPolicy !== "fresh"
@@ -1750,7 +2102,7 @@ export class EngineRuntime {
 				sessionManager = await SessionManager.open(prior.sessionFile, sessionDir, this.store.sessionStorage, {
 					initialCwd: request.cwd,
 				});
-			} else {
+			} else if (!preparedSessionManager) {
 				previousInboxSessionId = prior?.sessionFile
 					? await this.#conversationCarrySource(prior, request, profile, conversationIdentityDigest)
 					: undefined;
@@ -3559,6 +3911,104 @@ function optionalInputResultBoolean(
 
 function sha256(value: string): string {
 	return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function decodeCanonicalBase64(value: string, label: string): Buffer {
+	if (typeof value !== "string" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) {
+		throw new EngineTargetError("invalid_request", `${label} must be canonical base64`);
+	}
+	const bytes = Buffer.from(value, "base64");
+	if (bytes.toString("base64") !== value) {
+		throw new EngineTargetError("invalid_request", `${label} must be canonical base64`);
+	}
+	return bytes;
+}
+
+function parseNativeSessionCheckpoint(bytes: Buffer): NativeSessionCheckpoint {
+	let value: unknown;
+	try {
+		value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes));
+	} catch {
+		throw new EngineTargetError("invalid_request", "Restore checkpoint must be valid UTF-8 JSON");
+	}
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		throw new EngineTargetError("invalid_request", "Restore checkpoint must be an object");
+	}
+	const checkpoint = value as Partial<NativeSessionCheckpoint>;
+	if (
+		checkpoint.schema !== "grimoire.engine.native_session_checkpoint.v1" ||
+		typeof checkpoint.sessionId !== "string" ||
+		!checkpoint.sessionId ||
+		typeof checkpoint.sessionJsonlHash !== "string" ||
+		!/^sha256:[0-9a-f]{64}$/.test(checkpoint.sessionJsonlHash) ||
+		typeof checkpoint.sessionJsonlBase64 !== "string" ||
+		!Array.isArray(checkpoint.artifacts)
+	) {
+		throw new EngineTargetError("invalid_request", "Restore checkpoint shape is invalid");
+	}
+	const sessionBytes = decodeCanonicalBase64(checkpoint.sessionJsonlBase64, "Session JSONL");
+	if (sessionBytes.byteLength < 1 || sessionBytes.byteLength > MAX_NATIVE_RESTORE_BYTES) {
+		throw new EngineTargetError("invalid_request", "Restore session JSONL is outside the accepted range");
+	}
+	if (`sha256:${crypto.createHash("sha256").update(sessionBytes).digest("hex")}` !== checkpoint.sessionJsonlHash) {
+		throw new EngineTargetError("invalid_request", "Restore session JSONL hash does not match");
+	}
+	let jsonl: string;
+	try {
+		jsonl = new TextDecoder("utf-8", { fatal: true }).decode(sessionBytes);
+	} catch {
+		throw new EngineTargetError("invalid_request", "Restore session JSONL must be valid UTF-8");
+	}
+	const entries = jsonl
+		.split("\n")
+		.filter(Boolean)
+		.map(line => {
+			try {
+				return JSON.parse(line) as Record<string, unknown>;
+			} catch {
+				throw new EngineTargetError("invalid_request", "Restore session JSONL contains invalid JSON");
+			}
+		});
+	const header = entries.find(entry => entry.type === "session");
+	if (header?.id !== checkpoint.sessionId) {
+		throw new EngineTargetError("invalid_request", "Restore session header identity does not match");
+	}
+	const names = new Set<string>();
+	let artifactBytes = 0;
+	for (const artifactValue of checkpoint.artifacts) {
+		if (!artifactValue || typeof artifactValue !== "object" || Array.isArray(artifactValue)) {
+			throw new EngineTargetError("invalid_request", "Restore artifact shape is invalid");
+		}
+		const artifact = artifactValue as NativeSessionCheckpoint["artifacts"][number];
+		if (
+			typeof artifact.name !== "string" ||
+			!/^[A-Za-z0-9_.-]+$/.test(artifact.name) ||
+			artifact.name === "." ||
+			artifact.name === ".." ||
+			names.has(artifact.name) ||
+			typeof artifact.contentHash !== "string" ||
+			!/^sha256:[0-9a-f]{64}$/.test(artifact.contentHash) ||
+			!Number.isSafeInteger(artifact.byteLength) ||
+			artifact.byteLength < 0 ||
+			typeof artifact.contentBase64 !== "string"
+		) {
+			throw new EngineTargetError("invalid_request", "Restore artifact metadata is invalid");
+		}
+		names.add(artifact.name);
+		const content = decodeCanonicalBase64(artifact.contentBase64, `Artifact ${artifact.name}`);
+		artifactBytes += content.byteLength;
+		if (content.byteLength !== artifact.byteLength || artifactBytes > MAX_NATIVE_RESTORE_BYTES) {
+			throw new EngineTargetError("invalid_request", "Restore artifact byte length is invalid");
+		}
+		if (`sha256:${crypto.createHash("sha256").update(content).digest("hex")}` !== artifact.contentHash) {
+			throw new EngineTargetError("invalid_request", `Restore artifact ${artifact.name} hash does not match`);
+		}
+	}
+	return checkpoint as NativeSessionCheckpoint;
+}
+
+function isEexist(error: unknown): boolean {
+	return error instanceof Error && "code" in error && error.code === "EEXIST";
 }
 
 function sessionProfileDigest(continuation: Record<string, unknown>): string {
