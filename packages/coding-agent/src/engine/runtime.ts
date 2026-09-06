@@ -210,7 +210,7 @@ interface PendingInput {
 export interface EngineRuntimeOptions {
 	databasePath: string;
 	childHistoryTtlMinutes?: number;
-	childHistoryRetention?: "off" | "grimoire";
+	childHistoryRetention?: "local" | "off" | "grimoire";
 	archiveChildHistory?: (request: {
 		agentInstanceId: string;
 		agentInstanceRef: string;
@@ -273,7 +273,7 @@ export class EngineRuntime {
 	readonly #resolveSessionContinuation: EngineRuntimeOptions["resolveSessionContinuation"];
 	readonly #launchChild: EngineRuntimeOptions["launchChild"];
 	readonly #childHistoryTtlMinutes: number;
-	readonly #childHistoryRetention: "off" | "grimoire";
+	readonly #childHistoryRetention: "local" | "off" | "grimoire";
 	readonly #archiveChildHistory: EngineRuntimeOptions["archiveChildHistory"];
 	readonly #bindings = new Map<string, LiveBinding>();
 	readonly #lanes = new Map<string, Promise<void>>();
@@ -298,7 +298,7 @@ export class EngineRuntime {
 		if (!Number.isSafeInteger(this.#childHistoryTtlMinutes) || this.#childHistoryTtlMinutes < 1) {
 			throw new Error("childHistoryTtlMinutes must be a positive integer");
 		}
-		this.#childHistoryRetention = options.childHistoryRetention ?? "off";
+		this.#childHistoryRetention = options.childHistoryRetention ?? "local";
 		this.#archiveChildHistory = options.archiveChildHistory;
 		this.#sessionRoot = path.join(path.dirname(path.resolve(options.databasePath)), "engine-sessions");
 	}
@@ -1068,7 +1068,14 @@ export class EngineRuntime {
 				branch = live.session.sessionManager.getBranch();
 			} else {
 				const binding = await this.store.getBinding(agentInstanceId);
-				if (!binding?.sessionFile) {
+				if (!binding) {
+					throw new EngineTargetError("agent_not_found", `No retained OMP session for ${agentInstanceId}`);
+				}
+				if (!binding.sessionFile) {
+					const attempt = await this.store.getAttempt(binding.attemptId);
+					if (attempt?.transcript_session_id && attempt.transcript_path && attempt.transcript_revision > 0) {
+						throw new EngineTargetError("history_expired", `OMP session history expired for ${agentInstanceId}`);
+					}
 					throw new EngineTargetError("agent_not_found", `No retained OMP session for ${agentInstanceId}`);
 				}
 				const loaded = await loadSessionFile(binding.sessionFile, this.store.sessionStorage);
@@ -1126,6 +1133,9 @@ export class EngineRuntime {
 		retained: number;
 	}> {
 		this.#throwIfDisposed();
+		if (this.#childHistoryRetention === "local") {
+			return { expired: 0, archived: 0, deleted: 0, retained: 0 };
+		}
 		const cutoff = now - this.#childHistoryTtlMinutes * 60_000;
 		const candidates = await this.store.listExpiredChildHistory(cutoff);
 		let archived = 0;

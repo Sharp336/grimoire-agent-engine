@@ -20,7 +20,7 @@ export interface EngineServiceConfig {
 	natsServerPath: string;
 	artifactCacheRoot?: string;
 	childHistoryTtlMinutes?: number;
-	childHistoryRetention?: "off" | "grimoire";
+	childHistoryRetention?: "local" | "off" | "grimoire";
 	hosted?: {
 		serverUrl: string;
 		token: string;
@@ -50,7 +50,7 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 	try {
 		const rpc = config.hosted ? new HostedGrimoireRpc(config.hosted) : undefined;
 		const artifactRpc =
-			config.hosted && (config.childHistoryRetention ?? "off") === "grimoire"
+			config.hosted && (config.childHistoryRetention ?? "local") === "grimoire"
 				? new HostedGrimoireRpc({ ...config.hosted, serverUrl: coreMcpUrl(config.hosted.serverUrl) })
 				: undefined;
 		const providerAdmissionClient = config.hosted
@@ -273,9 +273,9 @@ function validateConfig(config: EngineServiceConfig): void {
 	if (!Number.isSafeInteger(ttl) || ttl < 1 || ttl > 525_600) {
 		throw new Error("childHistoryTtlMinutes must be an integer between 1 and 525600");
 	}
-	const retention = config.childHistoryRetention ?? "off";
-	if (retention !== "off" && retention !== "grimoire") {
-		throw new Error("childHistoryRetention must be off or grimoire");
+	const retention = config.childHistoryRetention ?? "local";
+	if (retention !== "local" && retention !== "off" && retention !== "grimoire") {
+		throw new Error("childHistoryRetention must be local, off or grimoire");
 	}
 	if (retention === "grimoire" && !config.hosted) {
 		throw new Error("childHistoryRetention=grimoire requires the hosted ClientHost bridge");
@@ -559,7 +559,7 @@ export function engineServiceStatus(
 		updatedAt: new Date().toISOString(),
 		...value,
 		childHistoryTtlMinutes: config.childHistoryTtlMinutes ?? 60,
-		childHistoryRetention: config.childHistoryRetention ?? "off",
+		childHistoryRetention: config.childHistoryRetention ?? "local",
 	};
 }
 
