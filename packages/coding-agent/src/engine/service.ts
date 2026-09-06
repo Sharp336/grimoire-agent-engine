@@ -20,6 +20,7 @@ export interface EngineServiceConfig {
 	databasePath: string;
 	natsServerPath: string;
 	artifactCacheRoot?: string;
+	localCredentialDbPath?: string;
 	childHistoryTtlMinutes?: number;
 	childHistoryRetention?: "local" | "off" | "grimoire";
 	hosted?: {
@@ -61,7 +62,7 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 			? new EngineProfileResolver(
 					config.artifactCacheRoot,
 					path.join(config.runtimeDir, "credentials"),
-					undefined,
+					config.localCredentialDbPath,
 					providerAdmissionClient,
 				)
 			: undefined;
