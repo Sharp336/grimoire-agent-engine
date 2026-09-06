@@ -350,8 +350,13 @@ export class EngineProfileResolver {
 		const admissionIdentity =
 			account.providerKind === "openai_codex_subscription"
 				? {
+						expectedPrincipalId: requiredText(cachedPrincipalId, "cached profile principal"),
+						profileRef,
+						profileContentHash: cachedProfile.content_hash,
 						providerAccountRef: accountRef,
+						providerAccountContentHash: cachedAccount.content_hash,
 						routeRef,
+						routeContentHash: cachedRoute.content_hash,
 						providerKind: "openai_codex_subscription" as const,
 						providerId: account.providerId,
 						accountBindingId: requiredText(account.accountBindingId, "ProviderAccount accountBindingId"),
@@ -475,6 +480,14 @@ export class EngineProfileResolver {
 			}
 			const fallbackSelectors = [formatModelStringWithRouting(model)];
 			const fallbackApiKeyRoutes: ProviderApiKeyRouteIdentity[] = [];
+			if (executionIdentity) {
+				fallbackApiKeyRoutes.push({
+					...executionIdentity,
+					runtimeProviderId: model.provider,
+					modelId: model.id,
+					baseUrl: model.baseUrl,
+				});
+			}
 			if (profile.allowSameModelProviderFallback && (embeddedCredential || localBinding)) {
 				for (const fallbackRouteRef of fallbackRouteRefs) {
 					signal?.throwIfAborted();
@@ -525,9 +538,15 @@ export class EngineProfileResolver {
 								models: [toProviderModel(fallbackModel)],
 							});
 							fallbackApiKeyRoutes.push({
+								expectedPrincipalId,
+								profileRef,
+								profileContentHash: cachedProfile.content_hash,
 								providerAccountRef: fallbackAccountRef,
+								providerAccountContentHash: fallbackCachedAccount.content_hash,
 								routeRef: fallbackRouteRef,
+								routeContentHash: fallbackCachedRoute.content_hash,
 								providerId: fallbackModel.provider,
+								runtimeProviderId: fallbackModel.provider,
 								modelId: fallbackModel.id,
 								baseUrl: fallbackModel.baseUrl,
 							});
@@ -567,9 +586,8 @@ export class EngineProfileResolver {
 							models: [toProviderModel(fallbackModel)],
 						});
 						fallbackApiKeyRoutes.push({
-							providerAccountRef: fallbackAccountRef,
-							routeRef: fallbackRouteRef,
-							providerId: fallbackModel.provider,
+							...fallbackIdentity,
+							runtimeProviderId: fallbackModel.provider,
 							modelId: fallbackModel.id,
 							baseUrl: fallbackModel.baseUrl,
 						});
@@ -608,7 +626,7 @@ export class EngineProfileResolver {
 					modelRegistry,
 					model,
 					providerRequestHook:
-						admissionIdentity && this.providerAdmissionClient
+						this.providerAdmissionClient && (admissionIdentity || fallbackApiKeyRoutes.length > 0)
 							? this.providerAdmissionClient.createHook(
 									admissionIdentity,
 									authStorage,
