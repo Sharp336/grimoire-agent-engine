@@ -252,6 +252,7 @@ async function dispatchRequest(request: EngineControlQueryRequest, options: Serv
 				totalBytes: requiredNonNegativeInteger(params, "totalBytes"),
 				offset: requiredNonNegativeInteger(params, "offset"),
 				contentBase64: requiredString(params, "contentBase64"),
+				replaceRetainedBinding: optionalBoolean(params.replaceRetainedBinding),
 			});
 		case "session.usage":
 			return await options.runtime.sessionUsage(requiredTarget(params));
@@ -367,7 +368,12 @@ async function capabilities(options: ServerOptions): Promise<Record<string, unkn
 		cursor: { opaque: true, order: "oldest_first", gapIsExplicit: true },
 		historyCursor: { opaque: true, order: "page_chronological", direction: "older", gapIsExplicit: true },
 		sessionArchive: { exactNativeBytes: true, hashPinnedPages: true, maxChunkBytes: 24_000 },
-		sessionRestore: { exactNativeBytes: true, hashPinnedChunks: true, maxChunkBytes: 24_000 },
+		sessionRestore: {
+			exactNativeBytes: true,
+			hashPinnedChunks: true,
+			replaceRetainedBindingCas: true,
+			maxChunkBytes: 24_000,
+		},
 		rawDiagnostics: false,
 	};
 }
