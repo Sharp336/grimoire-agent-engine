@@ -37,6 +37,9 @@ export default class AuthBroker extends Command {
 		provider: Flags.string({
 			description: "Override provider id for `import` (e.g. when JSON `type` is unrecognized)",
 		}),
+		"status-file": Flags.string({
+			description: "Write local OAuth login state as JSON (requires --json)",
+		}),
 		"include-disabled": Flags.boolean({
 			description: "Import credentials whose JSON has `disabled: true` (import)",
 		}),
@@ -86,6 +89,7 @@ export default class AuthBroker extends Command {
 				// `login`/`logout` reuse the legacy `provider` slot; `import` keeps `source` separate
 				// so `provider` flag (used as an override) is unambiguous.
 				provider: action === "import" ? flags.provider : (args.source ?? flags.provider),
+				statusFile: flags["status-file"],
 				source: args.source,
 				includeDisabled: flags["include-disabled"],
 				fromLocal: flags["from-local"],

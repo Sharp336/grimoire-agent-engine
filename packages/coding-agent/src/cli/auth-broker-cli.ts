@@ -42,6 +42,7 @@ import { $ } from "bun";
 import { refreshManagedMcpOAuthCredential } from "../mcp/oauth-credentials";
 import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
+import { replaceFileAtomically } from "../utils/atomic-file";
 
 export type AuthBrokerAction = "serve" | "token" | "login" | "logout" | "status" | "import" | "migrate" | "list";
 
@@ -53,6 +54,8 @@ export interface AuthBrokerCommandArgs {
 		regenerate?: boolean;
 		via?: string;
 		provider?: string;
+		/** Local-only JSON status sink used by managed, non-interactive login clients. */
+		statusFile?: string;
 		dryRun?: boolean;
 		/** `login`/`logout`: provider id. `import`: filesystem path. */
 		source?: string;
@@ -232,17 +235,69 @@ async function runLogin(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 		);
 	}
 	if (flags.via) {
+		if (flags.statusFile) throw new Error("--status-file is only supported for local login");
 		await runRemoteLogin(providerArg, flags.via, flags.dryRun ?? false);
 		return;
 	}
-	await runLocalLogin(providerArg as OAuthProvider);
+	await runLocalLogin(providerArg as OAuthProvider, flags);
 }
 
-async function runLocalLogin(provider: OAuthProvider): Promise<void> {
+type OAuthLoginStatus = {
+	schema: "omp.oauth_login_status.v1";
+	status: "pending" | "authorization_required" | "connected" | "failed";
+	loginProviderId: string;
+	credentialProviderId: string;
+	updatedAt: string;
+	authorizationUrl?: string;
+	userCode?: string;
+	expiresAt?: string;
+	account?: {
+		credentialId?: number;
+		accountId?: string;
+		email?: string;
+		orgId?: string;
+		orgName?: string;
+	};
+	errorCode?: "oauth_login_failed";
+};
+
+async function writeOAuthLoginStatus(file: string, status: OAuthLoginStatus): Promise<void> {
+	const target = path.resolve(file);
+	await fs.mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+	const temp = `${target}.${process.pid}.${crypto.randomUUID()}.tmp`;
+	await Bun.write(temp, `${JSON.stringify(status)}\n`);
+	try {
+		await fs.chmod(temp, 0o600);
+	} catch {
+		// Best-effort on Windows; the ClientHost owns the containing private directory.
+	}
+	await replaceFileAtomically(temp, target);
+}
+
+async function runLocalLogin(provider: OAuthProvider, flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	// Drive the per-provider OAuth dance in-process. Persists into the same
 	// SQLite store the broker uses.
-	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-	const ask = (msg: string) => promptLine(rl, `${msg} `);
+	const managed = Boolean(flags.statusFile);
+	if (managed && !flags.json) throw new Error("--status-file requires --json");
+	const providerInfo = getOAuthProviders().find(item => item.id === provider);
+	const credentialProviderId = providerInfo?.storeCredentialsAs ?? provider;
+	let queuedStatus = Promise.resolve();
+	const publish = (status: OAuthLoginStatus) => {
+		if (!flags.statusFile) return;
+		queuedStatus = queuedStatus.then(() => writeOAuthLoginStatus(flags.statusFile!, status));
+	};
+	const baseStatus = () => ({
+		schema: "omp.oauth_login_status.v1" as const,
+		loginProviderId: provider,
+		credentialProviderId,
+		updatedAt: new Date().toISOString(),
+	});
+	publish({ ...baseStatus(), status: "pending" });
+	const rl = managed ? undefined : readline.createInterface({ input: process.stdin, output: process.stdout });
+	const ask = (msg: string) => {
+		if (!rl) throw new Error("oauth_provider_requires_interactive_prompt");
+		return promptLine(rl, `${msg} `);
+	};
 	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
 	const storage = new AuthStorage(store);
 	await storage.reload();
@@ -256,8 +311,19 @@ async function runLocalLogin(provider: OAuthProvider): Promise<void> {
 		// `AuthStorage.login` independently refuses to synthesize the default prompt
 		// for non-paste-code providers, so this is defense-in-depth on the same gate.
 		const usesManualInput = PASTE_CODE_LOGIN_PROVIDERS.has(provider);
-		await storage.login(provider, {
+		const identity = await storage.login(provider, {
 			onAuth({ url, launchUrl, instructions }) {
+				if (managed) {
+					const userCode = /(?:enter\s+code\s*:\s*)([^\s]+)/i.exec(instructions ?? "")?.[1];
+					publish({
+						...baseStatus(),
+						status: "authorization_required",
+						authorizationUrl: url,
+						...(userCode ? { userCode } : {}),
+						expiresAt: new Date(Date.now() + 20 * 60_000).toISOString(),
+					});
+					return;
+				}
 				process.stdout.write("\nOpen this URL in your browser:\n");
 				// Full URL first so the CLI works from any machine, including SSH
 				// sessions where a `launchUrl` (loopback `/launch` on the OMP
@@ -274,23 +340,43 @@ async function runLocalLogin(provider: OAuthProvider): Promise<void> {
 				process.stdout.write("\n");
 			},
 			onProgress(message) {
-				process.stdout.write(`${message}\n`);
+				if (!managed) process.stdout.write(`${message}\n`);
 			},
 			onPrompt(p) {
+				if (!rl) throw new Error("oauth_provider_requires_interactive_prompt");
 				return ask(`${p.message}${p.placeholder ? ` (${p.placeholder})` : ""}:`);
 			},
 			...(usesManualInput
 				? {
 						onManualCodeInput() {
+							if (!rl) throw new Error("oauth_provider_requires_interactive_prompt");
 							return ask("Paste the authorization code (or full redirect URL):");
 						},
 					}
 				: undefined),
 		});
-		process.stdout.write(`\nCredentials saved to ${getAgentDbPath()}\n`);
+		if (managed) {
+			publish({
+				...baseStatus(),
+				status: "connected",
+				account: identity
+					? {
+							credentialId: (identity as typeof identity & { credentialId?: number }).credentialId,
+							accountId: identity.accountId,
+							email: identity.email,
+							orgId: identity.orgId,
+							orgName: identity.orgName,
+						}
+					: undefined,
+			});
+		} else process.stdout.write(`\nCredentials saved to ${getAgentDbPath()}\n`);
+	} catch (error) {
+		publish({ ...baseStatus(), status: "failed", errorCode: "oauth_login_failed" });
+		throw error;
 	} finally {
+		await queuedStatus;
 		store.close();
-		rl.close();
+		rl?.close();
 	}
 }
 

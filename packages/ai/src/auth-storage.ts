@@ -855,6 +855,8 @@ export interface OAuthAccess {
  */
 export interface OAuthLoginIdentity {
 	type: "oauth" | "api_key";
+	/** Stable local SQLite row id. Safe identity metadata; never a token. */
+	credentialId?: number;
 	email?: string;
 	accountId?: string;
 	orgId?: string;
@@ -2673,7 +2675,7 @@ export class AuthStorage {
 		}
 	}
 
-	async #upsertOAuthCredential(provider: string, credential: OAuthCredential): Promise<void> {
+	async #upsertOAuthCredential(provider: string, credential: OAuthCredential): Promise<StoredAuthCredential[]> {
 		const stored = this.#store.upsertAuthCredentialRemote
 			? await this.#store.upsertAuthCredentialRemote(provider, credential)
 			: this.#store.upsertAuthCredentialForProvider(provider, credential);
@@ -2682,6 +2684,7 @@ export class AuthStorage {
 			stored.map(entry => ({ id: entry.id, credential: entry.credential })),
 		);
 		this.#resetProviderAssignments(provider);
+		return stored;
 	}
 
 	/**
@@ -2982,9 +2985,18 @@ export class AuthStorage {
 		// Use #upsertOAuthCredential to upsert the new credential.
 		// Any legacy api_key rows from older versions will be cleaned up so they do not
 		// shadow the new OAuth row, while preserving other active OAuth credentials.
-		await this.#upsertOAuthCredential(def.storeCredentialsAs ?? provider, newCredential);
+		const stored = await this.#upsertOAuthCredential(def.storeCredentialsAs ?? provider, newCredential);
+		const storedIdentity = stored.find(entry => {
+			if (entry.credential.type !== "oauth") return false;
+			if (newCredential.accountId) return entry.credential.accountId === newCredential.accountId;
+			if (newCredential.email) {
+				return entry.credential.email === newCredential.email && entry.credential.orgId === newCredential.orgId;
+			}
+			return entry.credential.access === newCredential.access;
+		});
 		return {
 			type: "oauth",
+			credentialId: storedIdentity?.id,
 			email: newCredential.email,
 			accountId: newCredential.accountId,
 			orgId: newCredential.orgId,

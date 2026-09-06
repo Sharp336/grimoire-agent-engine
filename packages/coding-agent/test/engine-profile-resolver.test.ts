@@ -390,6 +390,10 @@ describe("EngineProfileResolver", () => {
 				accountId: "account-b",
 			},
 		]);
+		const selectedCredentialId = source
+			.listOAuthAccounts("openai-codex")
+			.find(account => account.accountId === "account-b")?.credentialId;
+		expect(selectedCredentialId).toBeInteger();
 		source.close();
 		await artifact(cache, profileRef, "grimoire.agent_profile.v1", {
 			schema: "grimoire.agent_profile.v1",
@@ -422,7 +426,7 @@ describe("EngineProfileResolver", () => {
 			api: "openai-codex-responses",
 			baseUrl: "https://chatgpt.com/backend-api",
 			trusted: true,
-			credentialBinding: { source: "local_omp", accountId: "account-b" },
+			credentialBinding: { source: "local_omp", accountId: "account-b", credentialId: selectedCredentialId },
 		});
 		await artifact(cache, fallbackRouteRef, "grimoire.available_model_route.v1", {
 			schema: "grimoire.available_model_route.v1",
