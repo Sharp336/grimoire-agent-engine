@@ -5016,7 +5016,7 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60000);
 
-	it("admits cancel before owner jobs quiesce and publishes terminal cancellation after", async () => {
+	it("admits repeated cancel before owner jobs quiesce and publishes one terminal cancellation after", async () => {
 		const prompt = Promise.withResolvers<boolean>();
 		const job = Promise.withResolvers<string>();
 		let jobSettled = false;
@@ -5045,6 +5045,7 @@ describe("EngineRuntime", () => {
 		);
 
 		await runtime.cancel({ ...started, commandId: "cancel-a" });
+		await runtime.cancel({ ...started, commandId: "cancel-a" });
 		expect(jobSettled).toBeFalse();
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancel_requested");
 		job.resolve("stopped");
@@ -5052,9 +5053,8 @@ describe("EngineRuntime", () => {
 		await runtime.drain();
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
 		const cancelledEvents = (await runtime.store.pendingEvents()).filter(event => event.kind === "cancelled");
-		expect(cancelledEvents.map(event => event.causationCommandId)).toEqual(["command-a", "cancel-a"]);
+		expect(cancelledEvents.map(event => event.causationCommandId)).toEqual(["cancel-a"]);
 		expect(cancelledEvents.map(event => event.payload?.transcriptRef)).toEqual([
-			`history://${started.engineAgentId}`,
 			`history://${started.engineAgentId}`,
 		]);
 		await runtime.dispose();

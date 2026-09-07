@@ -3521,10 +3521,9 @@ export class EngineRuntime {
 				...(request.reason ? { reason: request.reason } : {}),
 				...(binding.sessionFile ? { transcriptRef: `history://${binding.engineAgentId}` } : {}),
 			};
-			const events: EngineTransitionEvent[] = [{ kind: "cancelled", payload }];
-			if (request.commandId !== binding.commandId) {
-				events.push({ kind: "cancelled", payload, causationCommandId: request.commandId });
-			}
+			const events: EngineTransitionEvent[] = [
+				{ kind: "cancelled", payload, causationCommandId: request.commandId },
+			];
 			try {
 				await this.#commitAttemptTransition(binding, "cancelled", events, {
 					cause: request.reason,
