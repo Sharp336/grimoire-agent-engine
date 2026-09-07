@@ -8,6 +8,8 @@ export const MARKER_TEXT = "artel-r2-settled-tool-marker";
 export const TOOL_CALL_ID = "call_artel_r2_append_marker";
 export const RETRY_AFTER_SECONDS = 9;
 
+const MAX_RETRY_AFTER_SECONDS = 3_600;
+
 const TOOL_COMMAND = `printf '%s\\n' '${MARKER_TEXT}' >> ${MARKER_FILE}`;
 
 type FixturePhase = "tool_call_ready" | "awaiting_tool_result" | "rate_limited";
@@ -16,6 +18,7 @@ export interface SameModelFailoverFixtureEvent {
 	event: "ready" | "request";
 	phase: FixturePhase;
 	requestCount: number;
+	retryAfterSeconds: number;
 	status?: number;
 	toolCallId: string;
 	url?: string;
@@ -25,6 +28,7 @@ export interface SameModelFailoverFixtureOptions {
 	logger?: (event: SameModelFailoverFixtureEvent) => void;
 	model?: string;
 	port?: number;
+	retryAfterSeconds?: number;
 }
 
 export interface SameModelFailoverFixture {
@@ -32,6 +36,7 @@ export interface SameModelFailoverFixture {
 	get requestCount(): number;
 	model: string;
 	port: number;
+	retryAfterSeconds: number;
 	stop(): void;
 	url: string;
 }
@@ -138,7 +143,7 @@ function toolCallStream(model: string): Response {
 	});
 }
 
-function rateLimitResponse(): Response {
+function rateLimitResponse(retryAfterSeconds: number): Response {
 	return jsonResponse(
 		{
 			error: {
@@ -148,7 +153,7 @@ function rateLimitResponse(): Response {
 			},
 		},
 		429,
-		{ "retry-after": String(RETRY_AFTER_SECONDS) },
+		{ "retry-after": String(retryAfterSeconds) },
 	);
 }
 
@@ -159,14 +164,22 @@ function validateModel(model: string): string {
 	return model;
 }
 
+function validateRetryAfterSeconds(value: number): number {
+	if (!Number.isSafeInteger(value) || value < 1 || value > MAX_RETRY_AFTER_SECONDS) {
+		throw new Error(`Retry-After must be an integer from 1 to ${MAX_RETRY_AFTER_SECONDS} seconds`);
+	}
+	return value;
+}
+
 export function startSameModelFailoverFixture(options: SameModelFailoverFixtureOptions = {}): SameModelFailoverFixture {
 	const logger = options.logger ?? (event => console.log(JSON.stringify(event)));
 	const model = validateModel(options.model ?? DEFAULT_MODEL);
+	const retryAfterSeconds = validateRetryAfterSeconds(options.retryAfterSeconds ?? RETRY_AFTER_SECONDS);
 	let phase: FixturePhase = "tool_call_ready";
 	let requestCount = 0;
 
 	const logRequest = (status: number): void => {
-		logger({ event: "request", phase, requestCount, status, toolCallId: TOOL_CALL_ID });
+		logger({ event: "request", phase, requestCount, retryAfterSeconds, status, toolCallId: TOOL_CALL_ID });
 	};
 
 	const server = Bun.serve({
@@ -176,7 +189,7 @@ export function startSameModelFailoverFixture(options: SameModelFailoverFixtureO
 		async fetch(request) {
 			const url = new URL(request.url);
 			if (request.method === "GET" && url.pathname === "/healthz") {
-				return jsonResponse({ phase, requestCount, toolCallId: TOOL_CALL_ID }, 200);
+				return jsonResponse({ phase, requestCount, retryAfterSeconds, toolCallId: TOOL_CALL_ID }, 200);
 			}
 			if (!hasDummyAuthorization(request)) {
 				logRequest(401);
@@ -199,7 +212,7 @@ export function startSameModelFailoverFixture(options: SameModelFailoverFixtureO
 			requestCount += 1;
 			if (phase === "rate_limited") {
 				logRequest(429);
-				return rateLimitResponse();
+				return rateLimitResponse(retryAfterSeconds);
 			}
 
 			let body: unknown;
@@ -243,7 +256,7 @@ export function startSameModelFailoverFixture(options: SameModelFailoverFixtureO
 			}
 			phase = "rate_limited";
 			logRequest(429);
-			return rateLimitResponse();
+			return rateLimitResponse(retryAfterSeconds);
 		},
 	});
 
@@ -253,7 +266,7 @@ export function startSameModelFailoverFixture(options: SameModelFailoverFixtureO
 		throw new Error("Loopback fixture did not receive a TCP port");
 	}
 	const url = `http://${HOSTNAME}:${assignedPort}`;
-	logger({ event: "ready", phase, requestCount, toolCallId: TOOL_CALL_ID, url });
+	logger({ event: "ready", phase, requestCount, retryAfterSeconds, toolCallId: TOOL_CALL_ID, url });
 	return {
 		get phase() {
 			return phase;
@@ -263,14 +276,16 @@ export function startSameModelFailoverFixture(options: SameModelFailoverFixtureO
 		},
 		model,
 		port: assignedPort,
+		retryAfterSeconds,
 		stop: () => server.stop(true),
 		url,
 	};
 }
 
-function parseCliArgs(args: string[]): SameModelFailoverFixtureOptions {
+export function parseSameModelFailoverFixtureCliArgs(args: string[]): SameModelFailoverFixtureOptions {
 	let model: string | undefined;
 	let port: number | undefined;
+	let retryAfterSeconds: number | undefined;
 	for (let index = 0; index < args.length; index += 1) {
 		const arg = args[index];
 		if (arg === "--model") {
@@ -291,13 +306,22 @@ function parseCliArgs(args: string[]): SameModelFailoverFixtureOptions {
 			index += 1;
 			continue;
 		}
+		if (arg === "--retry-after-seconds") {
+			const value = args[index + 1];
+			if (value === undefined || !/^\d+$/.test(value)) {
+				throw new Error(`--retry-after-seconds requires an integer from 1 to ${MAX_RETRY_AFTER_SECONDS}`);
+			}
+			retryAfterSeconds = validateRetryAfterSeconds(Number(value));
+			index += 1;
+			continue;
+		}
 		throw new Error(`Unknown argument: ${arg}`);
 	}
-	return { model, port };
+	return { model, port, retryAfterSeconds };
 }
 
 if (import.meta.main) {
-	const fixture = startSameModelFailoverFixture(parseCliArgs(process.argv.slice(2)));
+	const fixture = startSameModelFailoverFixture(parseSameModelFailoverFixtureCliArgs(process.argv.slice(2)));
 	const stop = (): void => {
 		fixture.stop();
 		process.exit(0);

@@ -1,8 +1,14 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import {
+	createProviderRetryBudgetHook,
+	withProviderRetryBudget,
+} from "@oh-my-pi/pi-coding-agent/session/provider-retry-budget";
 import {
 	DUMMY_BEARER_TOKEN,
 	MARKER_FILE,
 	MARKER_TEXT,
+	parseSameModelFailoverFixtureCliArgs,
 	RETRY_AFTER_SECONDS,
 	type SameModelFailoverFixture,
 	type SameModelFailoverFixtureEvent,
@@ -97,5 +103,45 @@ describe("same-model failover HTTP fixture", () => {
 		expect(serializedEvents).not.toContain(SENSITIVE_SENTINEL);
 		expect(serializedEvents).not.toContain(DUMMY_BEARER_TOKEN);
 		expect(events.every(event => event.toolCallId === TOOL_CALL_ID)).toBeTrue();
+	});
+
+	it("normalizes a configured 45-second Retry-After through the Engine provider hook", async () => {
+		const retryAfterSeconds = 45;
+		const events: SameModelFailoverFixtureEvent[] = [];
+		const options = parseSameModelFailoverFixtureCliArgs([
+			"--model",
+			MODEL,
+			"--retry-after-seconds",
+			String(retryAfterSeconds),
+		]);
+		const startedFixture = startSameModelFailoverFixture({ ...options, logger: event => events.push(event) });
+		fixture = startedFixture;
+		expect(startedFixture.retryAfterSeconds).toBe(retryAfterSeconds);
+		expect(events[0]).toMatchObject({ event: "ready", retryAfterSeconds });
+
+		await chat([{ role: "user", content: "start" }]);
+		const afterTool = await chat([
+			{ role: "assistant", tool_calls: [{ id: TOOL_CALL_ID }] },
+			{ role: "tool", tool_call_id: TOOL_CALL_ID, content: "settled" },
+		]);
+		expect(afterTool.headers.get("retry-after")).toBe(String(retryAfterSeconds));
+
+		const model = getBundledModel("openai", "gpt-4o-mini");
+		if (!model) throw new Error("Expected bundled OpenAI model");
+		const error = await withProviderRetryBudget(1, () => {
+			const guardedFetch = createProviderRetryBudgetHook().wrapFetch(model, fetch);
+			return guardedFetch(`${startedFixture.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: {
+					authorization: `Bearer ${DUMMY_BEARER_TOKEN}`,
+					"content-type": "application/json",
+				},
+				body: JSON.stringify({ model: MODEL, messages: [], stream: true, tools: [] }),
+			}).catch(reason => reason);
+		});
+
+		expect(String(error)).toContain(`retry-after-ms=${retryAfterSeconds * 1_000}`);
+		expect(() => parseSameModelFailoverFixtureCliArgs(["--retry-after-seconds", "0"])).toThrow();
+		expect(() => parseSameModelFailoverFixtureCliArgs(["--retry-after-seconds", "3601"])).toThrow();
 	});
 });
