@@ -4834,6 +4834,12 @@ describe("EngineRuntime", () => {
 			input: "continue",
 		};
 		await expect(restarted.start(staleRequest, profile)).rejects.toMatchObject({ code: "stale_target" });
+		const retainedPending = await restarted.store.getInboxItem(pending.item.sessionId, pending.item.queueId);
+		expect(retainedPending).toMatchObject({
+			disposition: "pending",
+			revision: pending.item.revision + 2,
+		});
+		expect(retainedPending?.wakeDeliveredAt).toBeUndefined();
 		const nextRequest = {
 			commandId: "explicit-queue-send-after-restart",
 			agentInstanceId: started.agentInstanceId,
@@ -4842,7 +4848,7 @@ describe("EngineRuntime", () => {
 			authorityGeneration: 1,
 			cwd,
 			queueId: pending.item.queueId,
-			expectedRevision: pending.item.revision + 1,
+			expectedRevision: retainedPending!.revision,
 			mutationId: "consume-held-after-restart",
 			expectedIntentRevision: cancelResult.intentRevision,
 		};
@@ -4851,7 +4857,7 @@ describe("EngineRuntime", () => {
 			manualHold: false,
 			intentRevision: cancelResult.intentRevision + 1,
 			queueId: pending.item.queueId,
-			queueRevision: pending.item.revision + 2,
+			queueRevision: retainedPending!.revision + 1,
 		});
 		expect(await restarted.start(nextRequest, profile)).toMatchObject({ duplicate: true });
 		expect(wakes).toHaveLength(0);
@@ -4859,7 +4865,7 @@ describe("EngineRuntime", () => {
 		expect(consumed).toMatchObject({
 			deliveryPayload: "edited while held",
 			disposition: "acknowledged",
-			revision: pending.item.revision + 2,
+			revision: retainedPending!.revision + 1,
 		});
 		expect(consumed?.wakeDeliveredAt).toBeUndefined();
 		expect(await restarted.store.getInboxItem(dropped.item.sessionId, dropped.item.queueId)).toMatchObject({
