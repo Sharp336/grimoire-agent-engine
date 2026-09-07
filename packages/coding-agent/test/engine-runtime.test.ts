@@ -4760,6 +4760,10 @@ describe("EngineRuntime", () => {
 			body: "drop without resuming",
 			createdAt: Date.now(),
 		});
+		const mutationEvents: EngineEvent[] = [];
+		runtime.subscribe(event => {
+			if (event.kind === "inbox_changed") mutationEvents.push(event);
+		});
 		await runtime.mutateInbox(started, {
 			mutationId: "edit-held-item",
 			queueId: pending.item.queueId,
@@ -4768,11 +4772,33 @@ describe("EngineRuntime", () => {
 			value: "edited while held",
 		});
 		await runtime.mutateInbox(started, {
+			mutationId: "edit-held-item",
+			queueId: pending.item.queueId,
+			expectedRevision: pending.item.revision,
+			op: "edit",
+			value: "edited while held",
+		});
+		await runtime.reorderInbox(
+			started,
+			"reorder-held-items",
+			[pending.item.queueId, dropped.item.queueId],
+			[dropped.item.queueId, pending.item.queueId],
+		);
+		await runtime.reorderInbox(
+			started,
+			"reorder-held-items",
+			[pending.item.queueId, dropped.item.queueId],
+			[dropped.item.queueId, pending.item.queueId],
+		);
+		await runtime.mutateInbox(started, {
 			mutationId: "drop-held-item",
 			queueId: dropped.item.queueId,
-			expectedRevision: dropped.item.revision,
+			expectedRevision: dropped.item.revision + 1,
 			op: "drop",
 		});
+		await Bun.sleep(25);
+		expect(mutationEvents.map(event => event.payload?.action)).toEqual(["edit", "reorder", "drop"]);
+		expect(mutationEvents.some(event => event.payload?.action === "wake_due")).toBeFalse();
 		expect(runtime.getBinding(started.agentInstanceId)).toMatchObject({
 			manualHold: true,
 			intentRevision: pauseResult.intentRevision,

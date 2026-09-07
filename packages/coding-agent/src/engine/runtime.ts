@@ -1785,7 +1785,8 @@ export class EngineRuntime {
 	mutateInbox(target: EngineTarget, mutation: EngineInboxMutation): Promise<EngineInboxItem> {
 		return this.#inLane(target.agentInstanceId, async () => {
 			const retained = await this.#requireSessionTarget(target);
-			const item = await this.store.mutateInboxItem(retained, mutation);
+			const { item, event } = await this.store.mutateInboxItemWithEvent(retained, mutation);
+			if (event) this.#notifyEvents([event]);
 			this.#signalInboxWake();
 			return item;
 		});
@@ -1799,7 +1800,13 @@ export class EngineRuntime {
 	): Promise<EngineInboxItem[]> {
 		return this.#inLane(target.agentInstanceId, async () => {
 			const retained = await this.#requireSessionTarget(target);
-			const items = await this.store.reorderInboxItems(retained, mutationId, expectedOrder, desiredOrder);
+			const { items, event } = await this.store.reorderInboxItemsWithEvent(
+				retained,
+				mutationId,
+				expectedOrder,
+				desiredOrder,
+			);
+			if (event) this.#notifyEvents([event]);
 			this.#signalInboxWake();
 			return items;
 		});
@@ -2305,21 +2312,26 @@ export class EngineRuntime {
 				const item = await this.store.getInboxItem(binding.session.sessionId, request.queueId);
 				return item ? [item] : [];
 			}
-			case "reorder":
-				return await this.store.reorderInboxItems(
+			case "reorder": {
+				const { items, event } = await this.store.reorderInboxItemsWithEvent(
 					this.#inboxTarget(binding),
 					request.mutationId,
 					request.expectedOrder,
 					request.desiredOrder,
 				);
+				if (event) this.#notifyEvents([event]);
+				this.#signalInboxWake();
+				return items;
+			}
 			default: {
-				const item = await this.store.mutateInboxItem(this.#inboxTarget(binding), {
+				const { item, event } = await this.store.mutateInboxItemWithEvent(this.#inboxTarget(binding), {
 					mutationId: request.mutationId,
 					queueId: request.queueId,
 					expectedRevision: request.expectedRevision,
 					op: request.action,
 					value: request.value,
 				});
+				if (event) this.#notifyEvents([event]);
 				this.#signalInboxWake();
 				return [item];
 			}

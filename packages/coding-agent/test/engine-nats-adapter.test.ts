@@ -229,6 +229,28 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 				expectedRevision: 1,
 				deliveryPayload: "edited through native hub",
 			});
+			await waitFor(() =>
+				eventsB.some(
+					event =>
+						event.type === "attempt.inbox_changed" &&
+						(event.payload as Record<string, unknown>).action === "edit",
+				),
+			);
+			await hub.execute("hub-inbox-edit-replay", {
+				op: "inbox",
+				inboxAction: "edit",
+				queueId: (await runtime.listInbox(bindingB))[0]!.queueId,
+				expectedRevision: 1,
+				deliveryPayload: "edited through native hub",
+			});
+			await adapter.flushEvents();
+			expect(
+				eventsB.filter(
+					event =>
+						event.type === "attempt.inbox_changed" &&
+						(event.payload as Record<string, unknown>).action === "edit",
+				),
+			).toHaveLength(1);
 			expect((await runtime.listInbox(bindingB))[0]).toMatchObject({
 				sourceBody: "broker round trip",
 				deliveryPayload: "edited through native hub",

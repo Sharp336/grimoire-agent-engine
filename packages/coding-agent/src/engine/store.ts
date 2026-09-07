@@ -820,12 +820,17 @@ export class EngineStore {
 	}
 
 	async mutateInboxItem(target: EngineInboxTarget, mutation: EngineInboxMutation): Promise<EngineInboxItem> {
+		return (await this.mutateInboxItemWithEvent(target, mutation)).item;
+	}
+
+	async mutateInboxItemWithEvent(
+		target: EngineInboxTarget,
+		mutation: EngineInboxMutation,
+	): Promise<{ item: EngineInboxItem; event?: EngineEvent }> {
 		if (!mutation.mutationId.trim() || !mutation.queueId.trim()) {
 			throw new EngineInboxConflictError("Inbox mutationId and queueId must be non-empty");
 		}
-		return await this.#transaction(async sql => {
-			return (await this.#mutateInboxItem(sql, target, mutation)).item;
-		});
+		return await this.#transaction(sql => this.#mutateInboxItem(sql, target, mutation));
 	}
 
 	async reorderInboxItems(
@@ -834,6 +839,15 @@ export class EngineStore {
 		expectedOrder: readonly string[],
 		desiredOrder: readonly string[],
 	): Promise<EngineInboxItem[]> {
+		return (await this.reorderInboxItemsWithEvent(target, mutationId, expectedOrder, desiredOrder)).items;
+	}
+
+	async reorderInboxItemsWithEvent(
+		target: EngineInboxTarget,
+		mutationId: string,
+		expectedOrder: readonly string[],
+		desiredOrder: readonly string[],
+	): Promise<{ items: EngineInboxItem[]; event?: EngineEvent }> {
 		if (!mutationId.trim() || new Set(desiredOrder).size !== desiredOrder.length) {
 			throw new EngineInboxConflictError("Inbox reorder identity and queue IDs must be unique");
 		}
@@ -844,7 +858,7 @@ export class EngineStore {
 			)) as InboxItemRow[];
 			for (const row of rows) this.#assertInboxTarget(row, target);
 			const current = rows.map(row => row.queue_id);
-			if (sameStrings(current, desiredOrder)) return rows.map(inboxItemFromRow);
+			if (sameStrings(current, desiredOrder)) return { items: rows.map(inboxItemFromRow) };
 			if (!sameStrings(current, expectedOrder) || !sameStringSet(current, desiredOrder)) {
 				throw new EngineInboxConflictError(
 					"Inbox order changed or desiredOrder does not contain every pending item",
@@ -861,12 +875,12 @@ export class EngineStore {
 					[(index + 1) * 1024, now, queueId],
 				);
 			}
-			await this.#appendInboxEvent(sql, target, mutationId, "reorder", 1);
+			const event = await this.#appendInboxEvent(sql, target, mutationId, "reorder", 1);
 			const reordered = (await sql.unsafe(
 				`${this.#inboxSelect()} WHERE i.session_id=? AND i.disposition='pending' ORDER BY i.position, i.queue_id`,
 				[target.sessionId],
 			)) as InboxItemRow[];
-			return reordered.map(inboxItemFromRow);
+			return { items: reordered.map(inboxItemFromRow), event };
 		});
 	}
 
