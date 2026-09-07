@@ -177,12 +177,19 @@ export async function launchHostedEngineChild(
 		if (["succeeded", "failed", "cancelled", "dead_letter"].includes(status)) {
 			const result = currentJob?.result as Record<string, unknown> | undefined;
 			const event = result?.engine_event as Record<string, unknown> | undefined;
-			const payload = event?.payload as Record<string, unknown> | undefined;
+			const engineResult = result?.engine_result as Record<string, unknown> | undefined;
+			const payload = engineResult ?? (event?.payload as Record<string, unknown> | undefined);
+			// Terminal notification may precede ClientHost's full control-query result.
+			if (result?.status === "pending_engine_result" || (status === "succeeded" && !payload)) {
+				await Bun.sleep(250);
+				continue;
+			}
+			const assistantFinal = engineResult ? engineResult.assistantText : payload?.assistantFinal;
 			return {
 				agentInstanceId,
 				agentInstanceRef,
 				status: status === "succeeded" ? "completed" : status === "cancelled" ? "cancelled" : "failed",
-				assistantFinal: typeof payload?.assistantFinal === "string" ? payload.assistantFinal : undefined,
+				assistantFinal: typeof assistantFinal === "string" ? assistantFinal : undefined,
 				transcriptRef: typeof payload?.transcriptRef === "string" ? payload.transcriptRef : undefined,
 				...(payload?.outputTruncated === true ? { outputTruncated: true } : {}),
 				...(status === "succeeded"

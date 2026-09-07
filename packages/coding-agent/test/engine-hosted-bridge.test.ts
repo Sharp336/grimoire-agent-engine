@@ -922,6 +922,59 @@ describe("HostedGrimoireRpc", () => {
 });
 
 describe("hosted child launch", () => {
+	it("waits for the terminal job's full Engine result instead of returning an empty or compact event answer", async () => {
+		const answer = `${"large child result\n".repeat(4000)}CHILD-END`;
+		let polls = 0;
+		const rpc: GrimoireRpc = {
+			async call(tool, args) {
+				if (tool === "grimoire_agent_engine_child_launch") {
+					return {
+						agent_instance: { agent_instance_ref: "grimoire://tasks/p/t/agents/child-1" },
+						job: { job_id: "job-full-result" },
+					};
+				}
+				expect(tool).toBe("grimoire_job_get");
+				expect(args.job_id).toBe("job-full-result");
+				polls++;
+				return {
+					job: {
+						status: "succeeded",
+						result:
+							polls === 1
+								? { status: "pending_engine_result" }
+								: {
+										engine_result: {
+											assistantText: answer,
+											transcriptRef: "history://Engine-full-child",
+											outputTruncated: false,
+										},
+										engine_event: { payload: { assistantFinal: "compact preview", outputTruncated: true } },
+									},
+					},
+				};
+			},
+		};
+		const result = await launchHostedEngineChild(rpc, {
+			deviceId: "device",
+			engineId: "engine",
+			parentAgentInstanceRef: "grimoire://tasks/p/t/agents/parent",
+			parentAttemptId: "attempt-parent",
+			profileRef: "gctx:2222222222222222",
+			workStepId: "implement",
+			cwd: "/tmp",
+			maxSpawnDepth: 0,
+			cancelLocal: async () => {},
+		});
+		expect(polls).toBe(2);
+		expect(result).toMatchObject({
+			agentInstanceId: "agent_5362f5f8e4885e2abf275ed90a5bc4f8",
+			status: "completed",
+			assistantFinal: answer,
+			transcriptRef: "history://Engine-full-child",
+		});
+		expect(result.outputTruncated).toBeUndefined();
+	});
+
 	it("returns the public Engine completion payload for the created child", async () => {
 		const calls: string[] = [];
 		const rpc: GrimoireRpc = {
@@ -976,53 +1029,64 @@ describe("hosted child launch", () => {
 		expect(calls).toEqual(["grimoire_agent_engine_child_launch", "grimoire_job_get"]);
 	});
 
-	it("returns a failed child's safe Engine error and stable transcript reference", async () => {
-		const rpc: GrimoireRpc = {
-			async call(tool) {
-				if (tool === "grimoire_agent_engine_child_launch") {
-					return {
-						agent_instance: {
-							agent_instance_ref: "grimoire://tasks/p/t/agents/child-failed",
-						},
-						job: { job_id: "job-failed" },
-					};
-				}
-				if (tool === "grimoire_job_get") {
-					return {
-						job: {
-							status: "failed",
-							result: {
-								engine_event: {
-									type: "attempt.failed",
-									payload: {
-										error: "Retry budget exhausted after 3 retries: Thinking loop detected",
-										transcriptRef: "history://Engine-33333333333333333333333333333333",
-									},
-								},
+	it.each(["engine_result", "engine_event"])(
+		"returns a failed child's safe error and transcript from %s",
+		async envelope => {
+			const rpc: GrimoireRpc = {
+				async call(tool) {
+					if (tool === "grimoire_agent_engine_child_launch") {
+						return {
+							agent_instance: {
+								agent_instance_ref: "grimoire://tasks/p/t/agents/child-failed",
 							},
-						},
-					};
-				}
-				throw new Error(`unexpected ${tool}`);
-			},
-		};
-		const result = await launchHostedEngineChild(rpc, {
-			deviceId: "device",
-			engineId: "engine",
-			parentAgentInstanceRef: "grimoire://tasks/p/t/agents/parent",
-			parentAttemptId: "attempt-parent",
-			profileRef: "gctx:2222222222222222",
-			workStepId: "implement",
-			cwd: "/tmp",
-			maxSpawnDepth: 0,
-			cancelLocal: async () => {},
-		});
-		expect(result).toMatchObject({
-			status: "failed",
-			error: "Retry budget exhausted after 3 retries: Thinking loop detected",
-			transcriptRef: "history://Engine-33333333333333333333333333333333",
-		});
-	});
+							job: { job_id: "job-failed" },
+						};
+					}
+					if (tool === "grimoire_job_get") {
+						return {
+							job: {
+								status: "failed",
+								result:
+									envelope === "engine_result"
+										? {
+												engine_result: {
+													error: "Retry budget exhausted after 3 retries: Thinking loop detected",
+													transcriptRef: "history://Engine-33333333333333333333333333333333",
+												},
+											}
+										: {
+												engine_event: {
+													type: "attempt.failed",
+													payload: {
+														error: "Retry budget exhausted after 3 retries: Thinking loop detected",
+														transcriptRef: "history://Engine-33333333333333333333333333333333",
+													},
+												},
+											},
+							},
+						};
+					}
+					throw new Error(`unexpected ${tool}`);
+				},
+			};
+			const result = await launchHostedEngineChild(rpc, {
+				deviceId: "device",
+				engineId: "engine",
+				parentAgentInstanceRef: "grimoire://tasks/p/t/agents/parent",
+				parentAttemptId: "attempt-parent",
+				profileRef: "gctx:2222222222222222",
+				workStepId: "implement",
+				cwd: "/tmp",
+				maxSpawnDepth: 0,
+				cancelLocal: async () => {},
+			});
+			expect(result).toMatchObject({
+				status: "failed",
+				error: "Retry budget exhausted after 3 retries: Thinking loop detected",
+				transcriptRef: "history://Engine-33333333333333333333333333333333",
+			});
+		},
+	);
 
 	it("cancels an aborted child by its Engine-scoped identity", async () => {
 		const controller = new AbortController();
@@ -1030,7 +1094,6 @@ describe("hosted child launch", () => {
 		const rpc: GrimoireRpc = {
 			async call(tool) {
 				if (tool === "grimoire_agent_engine_child_launch") {
-					controller.abort();
 					return {
 						agent_instance: {
 							agent_instance_id: "child-cancel",
@@ -1038,6 +1101,10 @@ describe("hosted child launch", () => {
 						},
 						job: { job_id: "job-cancel" },
 					};
+				}
+				if (tool === "grimoire_job_get") {
+					controller.abort();
+					return { job: { status: "succeeded", result: { status: "pending_engine_result" } } };
 				}
 				if (tool === "grimoire_job_cancel") return { status: "cancelled" };
 				throw new Error(`unexpected ${tool}`);
