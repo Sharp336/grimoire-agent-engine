@@ -4824,7 +4824,7 @@ describe("EngineRuntime", () => {
 			intentRevision: cancelResult.intentRevision,
 		});
 
-		const nextRequest = {
+		const staleRequest = {
 			commandId: "explicit-send-after-restart",
 			agentInstanceId: started.agentInstanceId,
 			executionId: "execution-after-restart",
@@ -4833,23 +4833,35 @@ describe("EngineRuntime", () => {
 			cwd,
 			input: "continue",
 		};
-		await expect(restarted.start(nextRequest, profile)).rejects.toMatchObject({ code: "stale_target" });
-		const resumed = await restarted.start(
-			{
-				...nextRequest,
-				commandId: "explicit-send-after-restart-cas",
-				expectedIntentRevision: cancelResult.intentRevision,
-			},
-			profile,
-		);
-		for (let remaining = 50; wakes.length === 0 && remaining > 0; remaining--) await Bun.sleep(25);
-		expect(resumed).toMatchObject({ manualHold: false, intentRevision: cancelResult.intentRevision + 1 });
-		expect(wakes).toHaveLength(1);
-		expect(await restarted.store.getInboxItem(pending.item.sessionId, pending.item.queueId)).toMatchObject({
-			deliveryPayload: "edited while held",
-			disposition: "pending",
-			wakeDeliveredAt: expect.any(Number),
+		await expect(restarted.start(staleRequest, profile)).rejects.toMatchObject({ code: "stale_target" });
+		const nextRequest = {
+			commandId: "explicit-queue-send-after-restart",
+			agentInstanceId: started.agentInstanceId,
+			executionId: "execution-queue-after-restart",
+			attemptId: "attempt-queue-after-restart",
+			authorityGeneration: 1,
+			cwd,
+			queueId: pending.item.queueId,
+			expectedRevision: pending.item.revision + 1,
+			mutationId: "consume-held-after-restart",
+			expectedIntentRevision: cancelResult.intentRevision,
+		};
+		const resumed = await restarted.start(nextRequest, profile);
+		expect(resumed).toMatchObject({
+			manualHold: false,
+			intentRevision: cancelResult.intentRevision + 1,
+			queueId: pending.item.queueId,
+			queueRevision: pending.item.revision + 2,
 		});
+		expect(await restarted.start(nextRequest, profile)).toMatchObject({ duplicate: true });
+		expect(wakes).toHaveLength(0);
+		const consumed = await restarted.store.getInboxItem(pending.item.sessionId, pending.item.queueId);
+		expect(consumed).toMatchObject({
+			deliveryPayload: "edited while held",
+			disposition: "acknowledged",
+			revision: pending.item.revision + 2,
+		});
+		expect(consumed?.wakeDeliveredAt).toBeUndefined();
 		expect(await restarted.store.getInboxItem(dropped.item.sessionId, dropped.item.queueId)).toMatchObject({
 			disposition: "dropped",
 		});
