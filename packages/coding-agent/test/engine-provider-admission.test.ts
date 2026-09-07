@@ -1,8 +1,9 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
 import type { Model, UsageReport } from "@oh-my-pi/pi-ai";
 import { streamOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { Context, FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { logger } from "@oh-my-pi/pi-utils";
 import {
 	ProviderAdmissionClient,
 	ProviderAdmissionError,
@@ -211,6 +212,55 @@ describe("ProviderAdmissionClient", () => {
 		const encoded = JSON.stringify(observations);
 		expect(encoded).not.toContain("host-token-must-not-enter-observation");
 		expect(encoded).not.toContain("completed answer");
+	});
+
+	it("reports a bounded secret-free summary after observation rejection", async () => {
+		const warnings = spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const requests: Array<Record<string, unknown>> = [];
+			const route = {
+				expectedPrincipalId: "grimoire:user:owner",
+				profileRef: "gctx:2222222222222222",
+				profileContentHash: "sha256:profile",
+				providerAccountRef: "gctx:4444444444444444",
+				providerAccountContentHash: "sha256:account",
+				routeRef: "gctx:5555555555555555",
+				routeContentHash: "sha256:route",
+				providerId: "cheapai",
+				runtimeProviderId: "artel-4444444444444444",
+				modelId: "gpt-5.6-terra",
+				baseUrl: "https://cheapai.invalid/v1",
+			};
+			const hook = new ProviderAdmissionClient(
+				"http://127.0.0.1/provider-admission",
+				"host-token-must-not-enter-log",
+				async (_input, init) => {
+					requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+					return Response.json({ allowed: false, status: "provider_observation_identity_stale" });
+				},
+			).createHook(undefined, {} as AuthStorage, "", [route]);
+			const wrapped = hook.wrapFetch(
+				{ id: route.modelId, provider: route.runtimeProviderId, baseUrl: route.baseUrl } as Model,
+				async () => new Response("completed answer"),
+			);
+			await withProviderObservationContext(
+				{ effectId: "model_effect_rejected", modelCallId: "model-rejected" },
+				async () => await (await wrapped("https://cheapai.invalid/v1/chat/completions")).text(),
+			);
+			expect(requests).toHaveLength(2);
+			expect(requests[0]).toEqual(requests[1]);
+			expect(warnings).toHaveBeenCalledWith("Provider route observation was not recorded", {
+				observationId: "model_effect_rejected.1.5555555555555555",
+				effectId: "model_effect_rejected",
+				routeRef: route.routeRef,
+				status: "provider_observation_identity_stale",
+				attempts: 2,
+			});
+			expect(JSON.stringify(warnings.mock.calls)).not.toContain("host-token-must-not-enter-log");
+			expect(JSON.stringify(warnings.mock.calls)).not.toContain("completed answer");
+		} finally {
+			warnings.mockRestore();
+		}
 	});
 
 	it("does not delay provider fallback while a failed-route observation is pending", async () => {
