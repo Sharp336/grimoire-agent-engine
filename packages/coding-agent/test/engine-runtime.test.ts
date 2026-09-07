@@ -1053,28 +1053,35 @@ describe("EngineRuntime", () => {
 	}, 60_000);
 
 	it("exports exact hash-pinned native session bytes across restart", async () => {
-		const { runtime, cwd, options } = await createRuntime(async (session, input) => {
-			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
-			session.sessionManager.appendMessage({
-				role: "assistant",
-				content: [{ type: "text", text: "archive answer with unicode ☃" }],
-				api: "engine-runtime-test",
-				provider: "mock",
-				model: "test",
-				usage: {
-					input: 1,
-					output: 1,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 2,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-				},
-				stopReason: "stop",
-				timestamp: Date.now(),
-			});
-			await session.sessionManager.saveArtifact("complete spilled attachment", "read");
-			return true;
-		});
+		const archiveRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-engine-archive-"));
+		tempDirs.push(archiveRoot);
+		const databaseDir = path.join(archiveRoot, "long-session-root-".repeat(6));
+		fs.mkdirSync(databaseDir);
+		const { runtime, cwd, options } = await createRuntime(
+			async (session, input) => {
+				session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
+				session.sessionManager.appendMessage({
+					role: "assistant",
+					content: [{ type: "text", text: "archive answer with unicode ☃" }],
+					api: "engine-runtime-test",
+					provider: "mock",
+					model: "test",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: Date.now(),
+				});
+				await session.sessionManager.saveArtifact("complete spilled attachment", "read");
+				return true;
+			},
+			{ databasePath: path.join(databaseDir, "engine.sqlite") },
+		);
 		const started = await runtime.start(
 			{
 				commandId: "archive-native-command",

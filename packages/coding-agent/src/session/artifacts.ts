@@ -41,20 +41,27 @@ function sanitizeToolType(toolType: string): string {
  *
  * Returns the verified UTF-8 byte count.
  */
-export async function writeArtifact(path: string, content: string): Promise<number> {
+export async function writeArtifact(artifactPath: string, content: string): Promise<number> {
 	const expectedBytes = Buffer.byteLength(content);
-	const tempPath = `${path}.tmp-${crypto.randomUUID()}`;
+	const tempPath = `${artifactPath}.tmp-${crypto.randomUUID()}`;
 	try {
-		const writtenBytes = await Bun.write(tempPath, content);
-		if (writtenBytes !== expectedBytes) {
-			throw new Error(`Artifact write incomplete: wrote ${writtenBytes} of ${expectedBytes} bytes`);
+		// Bun.write rejects long Windows staging paths even when the destination is readable.
+		await fs.mkdir(path.dirname(artifactPath), { recursive: true });
+		const staging = await fs.open(tempPath, "wx");
+		try {
+			const { bytesWritten } = await staging.write(content);
+			if (bytesWritten !== expectedBytes) {
+				throw new Error(`Artifact write incomplete: wrote ${bytesWritten} of ${expectedBytes} bytes`);
+			}
+		} finally {
+			await staging.close();
 		}
 		const file = Bun.file(tempPath);
 		if (file.size !== expectedBytes) {
 			throw new Error(`Artifact size mismatch: found ${file.size} of ${expectedBytes} bytes`);
 		}
 		await file.slice(0, Math.min(expectedBytes, 1)).arrayBuffer();
-		await replaceFileAtomically(tempPath, path);
+		await replaceFileAtomically(tempPath, artifactPath);
 	} catch (error) {
 		await fs.rm(tempPath, { force: true });
 		throw error;

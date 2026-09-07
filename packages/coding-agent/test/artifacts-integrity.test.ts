@@ -14,14 +14,34 @@ describe("ArtifactManager write integrity", () => {
 		return dir;
 	}
 
+	function simulateShortWrite(bytes: number): void {
+		const open = fs.open.bind(fs);
+		vi.spyOn(fs, "open").mockImplementation(async (...args) => {
+			const file = await open(...args);
+			const write = file.write.bind(file);
+			vi.spyOn(file, "write").mockImplementation((content: string) => write(content.slice(0, bytes)));
+			return file;
+		});
+	}
+
 	afterEach(() => {
 		vi.restoreAllMocks();
 		for (const dir of dirs.splice(0)) removeSyncWithRetries(dir);
 	});
 
+	it("publishes a complete large child report through long Windows artifact paths", async () => {
+		const destination = path.join(freshDir(), "long-output-".repeat(17), "Worker.md");
+		const content = "child output with unicode \u2603\n".repeat(65_536);
+		expect(destination.length).toBeGreaterThan(260);
+
+		expect(await writeArtifact(destination, content)).toBe(Buffer.byteLength(content));
+		expect(await Bun.file(destination).text()).toBe(content);
+		expect(await fs.readdir(path.dirname(destination))).toEqual(["Worker.md"]);
+	});
+
 	it("rejects a short write instead of publishing an unreadable artifact id", async () => {
 		const manager = new ArtifactManager(freshDir());
-		vi.spyOn(Bun, "write").mockResolvedValue(1);
+		simulateShortWrite(1);
 
 		await expect(manager.save("complete report", "task")).rejects.toThrow(
 			"Artifact write incomplete: wrote 1 of 15 bytes",
@@ -32,13 +52,8 @@ describe("ArtifactManager write integrity", () => {
 		const dir = freshDir();
 		await fs.mkdir(dir, { recursive: true });
 		const destination = path.join(dir, "Worker.md");
-		// Faithfully model a short write: partial bytes land on the staging file,
-		// and Bun.write reports fewer bytes than requested.
-		const realWrite = Bun.write.bind(Bun);
-		vi.spyOn(Bun, "write").mockImplementation(async (target, content) => {
-			await realWrite(target as string, String(content).slice(0, 3));
-			return 3;
-		});
+		// Partial bytes really land on the staging file before publication is rejected.
+		simulateShortWrite(3);
 
 		await expect(writeArtifact(destination, "full report body")).rejects.toThrow("Artifact write incomplete");
 
@@ -53,11 +68,7 @@ describe("ArtifactManager write integrity", () => {
 		const destination = path.join(dir, "Worker.md");
 		await writeArtifact(destination, "original valid report");
 
-		const realWrite = Bun.write.bind(Bun);
-		vi.spyOn(Bun, "write").mockImplementation(async (target, content) => {
-			await realWrite(target as string, String(content).slice(0, 2));
-			return 2;
-		});
+		simulateShortWrite(2);
 
 		await expect(writeArtifact(destination, "replacement report")).rejects.toThrow("Artifact write incomplete");
 
