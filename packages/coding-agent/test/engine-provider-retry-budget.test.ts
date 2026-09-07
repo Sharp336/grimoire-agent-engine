@@ -1,8 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import type { Model } from "@oh-my-pi/pi-ai";
+import { type Model, streamSimple } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ProviderRequestHook } from "../src/sdk";
 import {
 	createProviderRetryBudgetHook,
+	deferNestedProviderRetry,
 	PROVIDER_RETRY_DEFERRED_CODE,
 	PROVIDER_RETRY_EXHAUSTED_CODE,
 	PROVIDER_RETRY_PERMANENT_CODE,
@@ -10,6 +12,45 @@ import {
 } from "../src/session/provider-retry-budget";
 
 describe("Engine provider retry budget", () => {
+	it("preserves the physical Retry-After through the real provider stream retry layers", async () => {
+		const model = buildModel({
+			id: "gpt-test",
+			name: "GPT test",
+			api: "openai-completions",
+			provider: "openai",
+			baseUrl: "https://example.invalid/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_384,
+		});
+		let physicalRequests = 0;
+		let nestedWaits = 0;
+		const result = await withProviderRetryBudget(4, () =>
+			streamSimple(
+				model,
+				{ messages: [{ role: "user", content: "Hello", timestamp: 1 }] },
+				{
+					apiKey: "test-key",
+					fetch: createProviderRetryBudgetHook().wrapFetch(model, async () => {
+						physicalRequests++;
+						return new Response("busy", { status: 429, headers: { "Retry-After": "45" } });
+					}),
+					providerRetryWait: async (delayMs, signal) => {
+						nestedWaits++;
+						await deferNestedProviderRetry(delayMs, signal);
+					},
+				},
+			)
+				.result()
+				.catch(error => error),
+		);
+		expect(physicalRequests).toBe(1);
+		expect(nestedWaits).toBe(1);
+		expect(String(result.errorMessage ?? result)).toContain("retry-after-ms=45000");
+	});
+
 	it("resets after every successful logical request across more than four tool turns", async () => {
 		let physicalRequests = 0;
 		const hook = createProviderRetryBudgetHook();
@@ -76,7 +117,14 @@ describe("Engine provider retry budget", () => {
 			expect(first).toMatchObject({ retryable: false });
 			expect(String(first)).toContain(`${PROVIDER_RETRY_DEFERRED_CODE}: HTTP 429`);
 			expect(String(first)).toContain("retry-after-ms=12000");
-			await expect(fetch("https://example.invalid/provider")).rejects.toThrow(PROVIDER_RETRY_DEFERRED_CODE);
+			await expect(fetch("https://example.invalid/provider")).rejects.toBe(first);
+			await expect(deferNestedProviderRetry(500)).rejects.toBe(first);
+			const controller = new AbortController();
+			controller.abort();
+			await expect(deferNestedProviderRetry(500, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
+			await expect(fetch("https://example.invalid/provider", { signal: controller.signal })).rejects.toMatchObject({
+				name: "AbortError",
+			});
 		});
 
 		expect({ admissions, physicalRequests }).toEqual({ admissions: 1, physicalRequests: 1 });

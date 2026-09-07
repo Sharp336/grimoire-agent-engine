@@ -13,6 +13,7 @@ export const PROVIDER_RETRY_PERMANENT_CODE = "engine_provider_permanent_failure"
 interface ProviderRetryBudgetState {
 	attempts: number;
 	readonly maxAttempts: number;
+	failure?: unknown;
 }
 
 const providerRetryBudget = new AsyncLocalStorage<ProviderRetryBudgetState>();
@@ -82,7 +83,7 @@ export function createProviderRetryBudgetHook(inner?: ProviderRequestHook): Prov
 				if (!state) return await fetch(input, init);
 				if (init?.signal?.aborted) throw abortError();
 				if (fetchedInThisStream) {
-					throw deferredError("a nested provider retry was suppressed");
+					throw state.failure ?? deferredError("a nested provider retry was suppressed");
 				}
 				if (state.attempts >= state.maxAttempts) {
 					throw new EngineProviderRetryError(
@@ -97,8 +98,11 @@ export function createProviderRetryBudgetHook(inner?: ProviderRequestHook): Prov
 					response = await fetch(input, init);
 				} catch (error) {
 					if (init?.signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) throw error;
-					if (error && typeof error === "object" && Reflect.get(error, "retryable") === false) throw error;
-					throw deferredError(error instanceof Error ? error.message : String(error), { cause: error });
+					state.failure =
+						error && typeof error === "object" && Reflect.get(error, "retryable") === false
+							? error
+							: deferredError(error instanceof Error ? error.message : String(error), { cause: error });
+					throw state.failure;
 				}
 				if (!isRetryableStatus(response.status)) return response;
 				const body = await response
@@ -109,16 +113,21 @@ export function createProviderRetryBudgetHook(inner?: ProviderRequestHook): Prov
 				const permanentFailure = permanentResponseFailure(model, response, body);
 				await response.body?.cancel().catch(() => {});
 				if (permanentFailure) {
-					throw new EngineProviderRetryError(
+					state.failure = new EngineProviderRetryError(
 						PROVIDER_RETRY_PERMANENT_CODE,
 						`${retryDescription(response.status, response.statusText, retryAfterMs)}; ${permanentFailure}`,
 					);
+					throw state.failure;
 				}
-				throw deferredError(retryDescription(response.status, response.statusText, retryAfterMs));
+				state.failure = deferredError(retryDescription(response.status, response.statusText, retryAfterMs));
+				throw state.failure;
 			};
 			const admittedFetch = inner?.wrapFetch(model, budgetedFetch) ?? budgetedFetch;
 			return async (input, init) => {
-				if (state && fetchedInThisStream) throw deferredError("a nested provider retry was suppressed");
+				if (init?.signal?.aborted) throw abortError();
+				if (state && fetchedInThisStream) {
+					throw state.failure ?? deferredError("a nested provider retry was suppressed");
+				}
 				if (state && state.attempts >= state.maxAttempts) {
 					throw new EngineProviderRetryError(
 						PROVIDER_RETRY_EXHAUSTED_CODE,
@@ -134,6 +143,10 @@ export function createProviderRetryBudgetHook(inner?: ProviderRequestHook): Prov
 /** Provider loops call this before replaying an already-failed stream. */
 export async function deferNestedProviderRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
 	if (signal?.aborted) throw abortError();
+	// Keep the physical response's Retry-After and failure classification when
+	// a provider loop asks to retry with its own shorter default delay.
+	const failure = providerRetryBudget.getStore()?.failure;
+	if (failure !== undefined) throw failure;
 	throw deferredError(
 		`a nested provider stream retry was suppressed; retry-after-ms=${Math.max(0, Math.ceil(delayMs))}`,
 	);
