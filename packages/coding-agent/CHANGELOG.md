@@ -15,6 +15,7 @@
 ### Fixed
 
 - Kept queued messages on hold when manual Pause reaches the Engine just after its answer finishes.
+- Restored archives expose verified native conversation history before the first send, without starting an attempt or replaying tools.
 
 - Stopped pending Agent Engine starts from continuing provider credential resolution after a durable cancellation.
 - Continued Agent Engine turns across an AgentProfile's ordered same-model provider routes without replaying partial output or settled tools.

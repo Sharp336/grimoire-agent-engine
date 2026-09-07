@@ -14,7 +14,7 @@ import { resolveCanonicalModelLimits } from "./model-limits";
 import { dispatchEngineCommand, type EngineCommandEnvelope, engineCommandIdentity } from "./nats-adapter";
 import { safeEngineErrorDetail } from "./public-error";
 import { engineAgentId } from "./route";
-import type { EngineRuntime } from "./runtime";
+import type { EngineRestoreHistoryTarget, EngineRuntime } from "./runtime";
 import { EngineCommandConflictError, type EngineCommandReceipt } from "./store";
 
 export const ENGINE_CONTROL_QUERY_VERSION = "1.0";
@@ -31,6 +31,7 @@ export type EngineControlQueryMethod =
 	| "session.history"
 	| "session.archive"
 	| "session.restore.stage"
+	| "session.restore.history"
 	| "session.usage"
 	| "models.reference"
 	| "inbox.list"
@@ -245,6 +246,21 @@ async function dispatchRequest(request: EngineControlQueryRequest, options: Serv
 				optionalNonNegativeInteger(params.offset),
 				optionalArchiveLimit(params.limit),
 			);
+		case "session.restore.history":
+			return await listSessionHistory(
+				options.runtime,
+				requiredString(params, "agentInstanceId"),
+				optionalString(params.cursor),
+				optionalLimit(params.limit),
+				{
+					agentInstanceRef: requiredString(params, "agentInstanceRef"),
+					authorityGeneration: requiredNonNegativeInteger(params, "authorityGeneration"),
+					restoreCheckpoint: {
+						restoreId: requiredString(params, "restoreId"),
+						contentHash: requiredString(params, "contentHash"),
+					},
+				},
+			);
 		case "session.restore.stage":
 			return await options.runtime.sessionRestoreStage({
 				agentInstanceId: requiredString(params, "agentInstanceId"),
@@ -364,6 +380,7 @@ async function capabilities(options: ServerOptions): Promise<Record<string, unkn
 			"session.history",
 			"session.archive",
 			"session.restore.stage",
+			"session.restore.history",
 			"session.usage",
 			"models.reference",
 			"inbox.list",
@@ -523,10 +540,12 @@ async function listSessionHistory(
 	agentInstanceId: string,
 	cursor: string | undefined,
 	limit: number,
+	restore?: EngineRestoreHistoryTarget,
 ) {
 	const epoch = await runtime.store.getStoreEpoch();
-	const history = await runtime.sessionHistory(agentInstanceId);
-	const decoded = decodeCursor(cursor, "history", epoch, agentInstanceId);
+	const history = await runtime.sessionHistory(agentInstanceId, restore);
+	const scope = restore ? JSON.stringify([agentInstanceId, restore]) : agentInstanceId;
+	const decoded = decodeCursor(cursor, "history", epoch, scope);
 	const end = cursor ? decoded.position : history.entries.length;
 	const anchorMatches =
 		!cursor || (end === 0 ? decoded.anchor === undefined : history.entries[end - 1]?.entryId === decoded.anchor);
@@ -556,7 +575,7 @@ async function listSessionHistory(
 		entries,
 		previousCursor:
 			pageStart > 0
-				? encodeCursor("history", epoch, pageStart, agentInstanceId, history.entries[pageStart - 1]?.entryId)
+				? encodeCursor("history", epoch, pageStart, scope, history.entries[pageStart - 1]?.entryId)
 				: null,
 		hasMore: pageStart > 0,
 		resyncRequired: false,
@@ -732,6 +751,7 @@ function validateRequest(value: unknown): EngineControlQueryRequest {
 			"session.history",
 			"session.archive",
 			"session.restore.stage",
+			"session.restore.history",
 			"session.usage",
 			"models.reference",
 			"inbox.list",
