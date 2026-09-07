@@ -2103,13 +2103,22 @@ export class EngineRuntime {
 			);
 		}
 		const queuedItem = request.queueId ? await this.store.getInboxItemByQueueId(request.queueId) : undefined;
+		const retainedQueueBinding =
+			queuedItem?.wakeDeliveredAt === undefined
+				? binding
+					? this.#snapshot(binding)
+					: await this.store.getBinding(request.agentInstanceId)
+				: undefined;
+		const exactHeldQueueStart =
+			retainedQueueBinding?.manualHold === true &&
+			request.expectedIntentRevision === retainedQueueBinding.intentRevision;
 		if (
 			request.queueId &&
 			(queuedItem?.agentInstanceId !== request.agentInstanceId ||
 				queuedItem.disposition !== "pending" ||
 				queuedItem.revision !== request.expectedRevision ||
 				!queuedItem.wakeIntent ||
-				queuedItem.wakeDeliveredAt === undefined)
+				(queuedItem.wakeDeliveredAt === undefined && !exactHeldQueueStart))
 		) {
 			throw new EngineTargetError(
 				"stale_target",
