@@ -484,15 +484,21 @@ describe("Engine Control + Query", () => {
 			}),
 		).toMatchObject({ created: true });
 		expect(enqueuedCreatedAt).toBe(10);
-		await expect(
-			client.request("inbox.enqueue", {
-				...target,
-				sourceEventId: "user-message-invalid-time",
-				sourceType: "user",
-				body: "invalid enqueue time",
-				createdAt: -1,
-			}),
-		).rejects.toMatchObject({ code: "invalid_request" });
+		// Settle named-pipe errors before Bun matchers can enter a nested event-loop poll.
+		expect(
+			await client
+				.request("inbox.enqueue", {
+					...target,
+					sourceEventId: "user-message-invalid-time",
+					sourceType: "user",
+					body: "invalid enqueue time",
+					createdAt: -1,
+				})
+				.then(
+					() => null,
+					(error: unknown) => error,
+				),
+		).toMatchObject({ code: "invalid_request" });
 		expect(
 			await client.request("inbox.mutate", {
 				...target,
@@ -503,15 +509,20 @@ describe("Engine Control + Query", () => {
 				value: "new delivery",
 			}),
 		).toMatchObject({ queueId: "queue-a", deliveryPayload: "new delivery", revision: 3 });
-		await expect(
-			client.request("inbox.mutate", {
-				...target,
-				mutationId: "mutation-invalid",
-				queueId: "queue-a",
-				expectedRevision: 2,
-				op: "erase",
-			}),
-		).rejects.toMatchObject({ code: "invalid_request" });
+		expect(
+			await client
+				.request("inbox.mutate", {
+					...target,
+					mutationId: "mutation-invalid",
+					queueId: "queue-a",
+					expectedRevision: 2,
+					op: "erase",
+				})
+				.then(
+					() => null,
+					(error: unknown) => error,
+				),
+		).toMatchObject({ code: "invalid_request" });
 
 		const command: EngineCommandEnvelope = {
 			schema: "grimoire.engine.command.v1",
@@ -582,9 +593,12 @@ describe("Engine Control + Query", () => {
 		await server.close();
 		server = await startEngineControlQueryServer(options);
 		expect(await client.request("command", { command })).toEqual({ outcome: "applied" });
-		await expect(
-			client.request("command", { command: { ...command, payload: { changed: true } } }),
-		).rejects.toMatchObject({
+		expect(
+			await client.request("command", { command: { ...command, payload: { changed: true } } }).then(
+				() => null,
+				(error: unknown) => error,
+			),
+		).toMatchObject({
 			code: "command_id_conflict",
 		});
 
