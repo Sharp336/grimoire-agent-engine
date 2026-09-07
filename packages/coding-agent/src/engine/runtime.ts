@@ -633,6 +633,14 @@ export class EngineRuntime {
 		validateControlRequest(request);
 		return this.#inLane(request.agentInstanceId, async () => {
 			const binding = this.#requireTarget(request);
+			if (
+				request.expectedIntentRevision !== undefined &&
+				(binding.attemptState === "completed" ||
+					binding.attemptState === "failed" ||
+					binding.attemptState === "interrupted")
+			) {
+				return await this.#holdTerminalAttempt(binding, request);
+			}
 			if (binding.pauseCommandIds.has(request.commandId)) return this.#controlResult(binding);
 			const previousIntent = this.#setManualHold(binding, request.commandId, request.expectedIntentRevision, true);
 			if (binding.attemptState === "paused") {
@@ -783,37 +791,7 @@ export class EngineRuntime {
 					binding.attemptState === "failed" ||
 					binding.attemptState === "interrupted")
 			) {
-				this.#assertIntentRevision(binding, request.expectedIntentRevision);
-				const terminalState = binding.attemptState;
-				const previousIntent = this.#setManualHold(
-					binding,
-					request.commandId,
-					request.expectedIntentRevision,
-					true,
-				);
-				const result: EngineControlResult = { ...this.#controlResult(binding), alreadyTerminal: true };
-				try {
-					const event = await this.store.commitBindingEvent(
-						this.#snapshot(binding),
-						{
-							kind: "inbox_changed",
-							payload: {
-								action: "hold_applied",
-								attemptState: terminalState,
-								manualHold: true,
-								intentRevision: binding.intentRevision,
-							},
-							causationCommandId: request.commandId,
-						},
-						request.commandId,
-						{ outcome: "applied", detail: result },
-					);
-					this.#notifyEvents([event]);
-				} catch (error) {
-					this.#restoreIntent(binding, previousIntent);
-					throw error;
-				}
-				return result;
+				return await this.#holdTerminalAttempt(binding, request);
 			}
 			if (
 				binding.attemptState !== "running" &&
@@ -3898,6 +3876,35 @@ export class EngineRuntime {
 			intentRevision: binding.intentRevision,
 			...(binding.intentCommandId ? { intentCommandId: binding.intentCommandId } : {}),
 		};
+	}
+
+	async #holdTerminalAttempt(binding: LiveBinding, request: EngineCancelRequest): Promise<EngineControlResult> {
+		this.#assertIntentRevision(binding, request.expectedIntentRevision);
+		const terminalState = binding.attemptState;
+		const previousIntent = this.#setManualHold(binding, request.commandId, request.expectedIntentRevision, true);
+		const result: EngineControlResult = { ...this.#controlResult(binding), alreadyTerminal: true };
+		try {
+			const event = await this.store.commitBindingEvent(
+				this.#snapshot(binding),
+				{
+					kind: "inbox_changed",
+					payload: {
+						action: "hold_applied",
+						attemptState: terminalState,
+						manualHold: true,
+						intentRevision: binding.intentRevision,
+					},
+					causationCommandId: request.commandId,
+				},
+				request.commandId,
+				{ outcome: "applied", detail: result },
+			);
+			this.#notifyEvents([event]);
+		} catch (error) {
+			this.#restoreIntent(binding, previousIntent);
+			throw error;
+		}
+		return result;
 	}
 
 	#setManualHold(

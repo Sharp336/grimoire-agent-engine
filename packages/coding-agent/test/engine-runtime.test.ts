@@ -4295,148 +4295,235 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
-	it("holds a completed Attempt when a revision-fenced Stop arrives before its queued wake starts", async () => {
-		const { runtime, cwd } = await createRuntime();
-		const started = await runtime.start(
-			{
-				commandId: "command-a",
-				agentInstanceId: "agent-a",
-				executionId: "execution-a",
-				attemptId: "attempt-a",
-				authorityGeneration: 1,
-				cwd,
-				input: "A",
-			},
-			profile,
-		);
-		const startedIntentRevision = started.intentRevision!;
-		const queued = await runtime.enqueueInbox(started, {
-			sourceEventId: "queued-after-completion-boundary",
-			sourceType: "user",
-			body: "must remain queued",
-			createdAt: Date.now(),
-			wakeIntent: true,
-		});
-		await runtime.drain();
-		let wake: EngineEvent | undefined;
-		for (let remaining = 50; !wake && remaining > 0; remaining--) {
-			wake = (await runtime.store.pendingEvents()).find(
-				event => event.kind === "inbox_changed" && event.payload?.action === "wake_due",
-			);
-			if (!wake) await Bun.sleep(25);
-		}
-		expect(wake?.payload).toMatchObject({
-			queueId: queued.item.queueId,
-			revision: 2,
-			intentRevision: startedIntentRevision,
-		});
-		await expect(runtime.cancel({ ...started, commandId: "terminal-stop-without-revision" })).rejects.toMatchObject({
-			code: "too_late",
-		});
-		await expect(
-			runtime.cancel({
-				...started,
-				commandId: "terminal-stop-with-wrong-revision",
-				expectedIntentRevision: startedIntentRevision + 1,
-			}),
-		).rejects.toMatchObject({ code: "stale_target" });
-
-		const stopped = await runtime.cancel({
-			...started,
-			commandId: "stop-after-completion-before-wake-start",
-			expectedIntentRevision: startedIntentRevision,
-		});
-		expect(stopped).toEqual({
-			phase: "applied",
-			manualHold: true,
-			intentRevision: startedIntentRevision + 1,
-			alreadyTerminal: true,
-		});
-		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
-		expect(await runtime.store.getBinding(started.agentInstanceId)).toMatchObject({
-			attemptId: started.attemptId,
-			manualHold: true,
-			intentRevision: stopped.intentRevision,
-		});
-		const holdEvent = (await runtime.store.pendingEvents()).find(
-			event => event.causationCommandId === "stop-after-completion-before-wake-start",
-		);
-		expect(holdEvent).toMatchObject({
-			kind: "inbox_changed",
-			payload: {
-				action: "hold_applied",
-				attemptState: "completed",
-				manualHold: true,
-				intentRevision: stopped.intentRevision,
-			},
-		});
-		await expect(
-			runtime.start(
+	for (const op of ["cancel", "pause"] as const) {
+		it(`holds a completed Attempt when a revision-fenced ${op} arrives before its queued wake starts`, async () => {
+			const { runtime, cwd, options } = await createRuntime();
+			const started = await runtime.start(
 				{
-					commandId: "stale-wake-after-terminal-stop",
-					agentInstanceId: started.agentInstanceId,
-					executionId: "execution-stale-wake-after-stop",
-					attemptId: "attempt-stale-wake-after-stop",
+					commandId: "command-a",
+					agentInstanceId: "agent-a",
+					executionId: "execution-a",
+					attemptId: "attempt-a",
 					authorityGeneration: 1,
 					cwd,
-					queueId: queued.item.queueId,
-					expectedRevision: 2,
-					mutationId: "wake:queued-after-completion-boundary:2",
-					expectedIntentRevision: started.intentRevision,
+					input: "A",
 				},
 				profile,
-			),
-		).rejects.toMatchObject({ code: "stale_target" });
-		expect(await runtime.store.getInboxItem(queued.item.sessionId, queued.item.queueId)).toMatchObject({
-			disposition: "pending",
-		});
-		expect((await runtime.store.pendingEvents()).some(event => event.kind === "cancelled")).toBeFalse();
-		await runtime.dispose();
-	}, 60000);
+			);
+			const startedIntentRevision = started.intentRevision!;
+			const queued = await runtime.enqueueInbox(started, {
+				sourceEventId: "queued-after-completion-boundary",
+				sourceType: "user",
+				body: "must remain queued",
+				createdAt: Date.now(),
+				wakeIntent: true,
+			});
+			const remaining = [];
+			for (const body of ["QB", "QC"]) {
+				remaining.push(
+					await runtime.enqueueInbox(started, {
+						sourceEventId: `queued-after-completion-${body}`,
+						sourceType: "user",
+						body,
+						createdAt: Date.now(),
+						wakeIntent: true,
+					}),
+				);
+			}
+			await runtime.drain();
+			const completedAttempt = await runtime.store.getAttempt(started.attemptId);
+			let wake: EngineEvent | undefined;
+			for (let remaining = 50; !wake && remaining > 0; remaining--) {
+				wake = (await runtime.store.pendingEvents()).find(
+					event => event.kind === "inbox_changed" && event.payload?.action === "wake_due",
+				);
+				if (!wake) await Bun.sleep(25);
+			}
+			expect(wake?.payload).toMatchObject({
+				queueId: queued.item.queueId,
+				revision: 2,
+				intentRevision: startedIntentRevision,
+			});
+			await expect(
+				runtime[op]({ ...started, initiator: { kind: "human" }, commandId: "terminal-stop-without-revision" }),
+			).rejects.toMatchObject({
+				code: "too_late",
+			});
 
-	it("rejects a terminal Stop after a newer Send advances the AgentInstance intent", async () => {
-		const { runtime, cwd } = await createRuntime();
-		const first = await runtime.start(
-			{
-				commandId: "command-terminal-stop-old",
-				agentInstanceId: "agent-terminal-stop-newer-send",
-				executionId: "execution-terminal-stop-old",
-				attemptId: "attempt-terminal-stop-old",
-				authorityGeneration: 1,
-				cwd,
-				input: "first",
-			},
-			profile,
-		);
-		await runtime.drain();
-		const newer = await runtime.start(
-			{
-				commandId: "command-terminal-stop-newer",
-				agentInstanceId: first.agentInstanceId,
-				executionId: "execution-terminal-stop-newer",
-				attemptId: "attempt-terminal-stop-newer",
-				authorityGeneration: 1,
-				cwd,
-				input: "newer",
-				expectedIntentRevision: first.intentRevision,
-			},
-			profile,
-		);
-		await expect(
-			runtime.cancel({
-				...first,
-				commandId: "late-stop-for-old-attempt",
-				expectedIntentRevision: first.intentRevision,
-			}),
-		).rejects.toMatchObject({ code: "stale_target" });
-		expect(runtime.getBinding(first.agentInstanceId)).toMatchObject({
-			attemptId: newer.attemptId,
-			manualHold: false,
-			intentRevision: newer.intentRevision,
-		});
-		await runtime.drain();
-		await runtime.dispose();
-	}, 60000);
+			const command: EngineCommandEnvelope = {
+				schema: "grimoire.engine.command.v1",
+				commandId: "stop-after-completion-before-wake-start",
+				op,
+				deviceId: "terminal-hold-device",
+				engineId: "terminal-hold-engine",
+				engineGeneration: runtime.engineGeneration,
+				agentInstanceId: started.agentInstanceId,
+				runtimeBindingId: started.bindingId,
+				bindingGeneration: started.bindingGeneration,
+				executionId: started.executionId,
+				attemptId: started.attemptId,
+				authorityGeneration: started.authorityGeneration,
+				issuedAt: Date.now(),
+				payload: { initiator: { kind: "human" }, expectedIntentRevision: startedIntentRevision },
+			};
+			expect(
+				await runtime.store.admitCommand(engineCommandIdentity(command), runtime.engineGeneration),
+			).toMatchObject({ status: "claimed" });
+			const stopped = await runtime[op]({
+				...started,
+				initiator: { kind: "human" },
+				commandId: "stop-after-completion-before-wake-start",
+				expectedIntentRevision: startedIntentRevision,
+			});
+			expect(stopped).toEqual({
+				phase: "applied",
+				manualHold: true,
+				intentRevision: startedIntentRevision + 1,
+				alreadyTerminal: true,
+			});
+			await expect(
+				runtime[op]({
+					...started,
+					initiator: { kind: "human" },
+					commandId: "terminal-stop-with-wrong-revision",
+					expectedIntentRevision: stopped.intentRevision! + 1,
+				}),
+			).rejects.toMatchObject({ code: "stale_target" });
+			expect(await runtime.store.getAttempt(started.attemptId)).toEqual(completedAttempt);
+			expect(
+				await runtime.store.admitCommand(engineCommandIdentity(command), runtime.engineGeneration),
+			).toMatchObject({
+				status: "replay",
+				receipt: { outcome: "applied", detail: stopped },
+			});
+			expect(await runtime.store.getBinding(started.agentInstanceId)).toMatchObject({
+				attemptId: started.attemptId,
+				manualHold: true,
+				intentRevision: stopped.intentRevision,
+			});
+			const holdEvent = (await runtime.store.pendingEvents()).find(
+				event => event.causationCommandId === "stop-after-completion-before-wake-start",
+			);
+			expect(holdEvent).toMatchObject({
+				kind: "inbox_changed",
+				payload: {
+					action: "hold_applied",
+					attemptState: "completed",
+					manualHold: true,
+					intentRevision: stopped.intentRevision,
+				},
+			});
+			await expect(
+				runtime.start(
+					{
+						commandId: "stale-wake-after-terminal-stop",
+						agentInstanceId: started.agentInstanceId,
+						executionId: "execution-stale-wake-after-stop",
+						attemptId: "attempt-stale-wake-after-stop",
+						authorityGeneration: 1,
+						cwd,
+						queueId: queued.item.queueId,
+						expectedRevision: 2,
+						mutationId: "wake:queued-after-completion-boundary:2",
+						expectedIntentRevision: started.intentRevision,
+					},
+					profile,
+				),
+			).rejects.toMatchObject({ code: "stale_target" });
+			expect(await runtime.store.getInboxItem(queued.item.sessionId, queued.item.queueId)).toMatchObject({
+				disposition: "pending",
+			});
+			expect(
+				(await runtime.store.pendingEvents()).some(event => event.kind === "cancelled" || event.kind === "paused"),
+			).toBeFalse();
+			await runtime.dispose();
+			const restarted = await EngineRuntime.create(options);
+			try {
+				expect(
+					await restarted.store.admitCommand(engineCommandIdentity(command), restarted.engineGeneration),
+				).toMatchObject({
+					status: "replay",
+					receipt: { outcome: "applied", detail: stopped },
+				});
+				expect(await restarted.store.getBinding(started.agentInstanceId)).toMatchObject({
+					manualHold: true,
+					intentRevision: stopped.intentRevision,
+				});
+				expect(await restarted.store.claimDueInboxWakes(restarted.engineGeneration)).toEqual([]);
+				for (const item of [queued, ...remaining]) {
+					expect(await restarted.store.getInboxItem(item.item.sessionId, item.item.queueId)).toMatchObject({
+						disposition: "pending",
+					});
+				}
+				const sent = await restarted.start(
+					{
+						commandId: "send-after-terminal-hold",
+						agentInstanceId: started.agentInstanceId,
+						executionId: "execution-after-terminal-hold",
+						attemptId: "attempt-after-terminal-hold",
+						authorityGeneration: started.authorityGeneration,
+						cwd,
+						input: "manual release",
+						expectedIntentRevision: stopped.intentRevision,
+					},
+					profile,
+				);
+				expect(sent).toMatchObject({
+					manualHold: false,
+					intentRevision: stopped.intentRevision! + 1,
+					sessionFile: started.sessionFile,
+				});
+				await restarted.drain();
+			} finally {
+				await restarted.dispose();
+			}
+		}, 60000);
+
+		it(`rejects a terminal ${op} after a newer Send advances the AgentInstance intent`, async () => {
+			const { runtime, cwd } = await createRuntime();
+			const first = await runtime.start(
+				{
+					commandId: "command-terminal-stop-old",
+					agentInstanceId: "agent-terminal-stop-newer-send",
+					executionId: "execution-terminal-stop-old",
+					attemptId: "attempt-terminal-stop-old",
+					authorityGeneration: 1,
+					cwd,
+					input: "first",
+				},
+				profile,
+			);
+			await runtime.drain();
+			const newer = await runtime.start(
+				{
+					commandId: "command-terminal-stop-newer",
+					agentInstanceId: first.agentInstanceId,
+					executionId: "execution-terminal-stop-newer",
+					attemptId: "attempt-terminal-stop-newer",
+					authorityGeneration: 1,
+					cwd,
+					input: "newer",
+					expectedIntentRevision: first.intentRevision,
+				},
+				profile,
+			);
+			await expect(
+				runtime[op]({
+					...first,
+					initiator: { kind: "human" },
+					commandId: "late-stop-for-old-attempt",
+					expectedIntentRevision: first.intentRevision,
+				}),
+			).rejects.toMatchObject({ code: "stale_target" });
+			expect(runtime.getBinding(first.agentInstanceId)).toMatchObject({
+				attemptId: newer.attemptId,
+				manualHold: false,
+				intentRevision: newer.intentRevision,
+			});
+			await runtime.drain();
+			await runtime.dispose();
+		}, 60000);
+	}
 
 	it("attributes parent-driven cancellation to the start command that owns the Attempt", async () => {
 		const prompt = Promise.withResolvers<boolean>();
