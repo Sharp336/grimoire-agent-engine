@@ -29,7 +29,7 @@ import type { AgentSession } from "../session/agent-session";
 import type { TurnRetryPolicy } from "../session/agent-session-types";
 import { createProviderRetryBudgetHook } from "../session/provider-retry-budget";
 import type { SessionEntry, SessionMessageIdentity } from "../session/session-entries";
-import { loadSessionFile, type SessionLoadResult } from "../session/session-loader";
+import { loadSessionFile, parseSessionContent, type SessionLoadResult } from "../session/session-loader";
 import {
 	type NativeHistoryForkResult,
 	type SessionDurabilityCheckpoint,
@@ -125,6 +125,12 @@ interface NativeSessionCheckpoint {
 	sessionJsonlHash: string;
 	sessionJsonlBase64: string;
 	artifacts: Array<{ name: string; contentHash: string; byteLength: number; contentBase64: string }>;
+}
+
+export interface EngineRestoreHistoryTarget {
+	agentInstanceRef: string;
+	authorityGeneration: number;
+	restoreCheckpoint: { restoreId: string; contentHash: string };
 }
 
 type EngineHistoryActivityBlock = {
@@ -1194,7 +1200,10 @@ export class EngineRuntime {
 		});
 	}
 
-	async sessionHistory(agentInstanceId: string): Promise<{
+	async sessionHistory(
+		agentInstanceId: string,
+		restore?: EngineRestoreHistoryTarget,
+	): Promise<{
 		sessionId: string;
 		leafEntryId: string | null;
 		sessionLeafEntryId?: string | null;
@@ -1217,7 +1226,19 @@ export class EngineRuntime {
 			const live = this.#bindings.get(agentInstanceId);
 			let sessionId: string;
 			let branch: SessionEntry[];
-			if (live) {
+			if (restore) {
+				const { checkpoint } = await this.#readRestoreCheckpoint({ agentInstanceId, ...restore });
+				const loaded = parseSessionContent(
+					new TextDecoder("utf-8", { fatal: true }).decode(
+						decodeCanonicalBase64(checkpoint.sessionJsonlBase64, "Session JSONL"),
+					),
+				);
+				migrateToCurrentVersion(loaded.entries);
+				sessionId = checkpoint.sessionId;
+				branch = activeSessionBranch(
+					loaded.entries.filter((entry): entry is SessionEntry => entry.type !== "session"),
+				);
+			} else if (live) {
 				sessionId = live.session.sessionId;
 				branch = live.session.sessionManager.getBranch();
 			} else {
@@ -1955,12 +1976,8 @@ export class EngineRuntime {
 		};
 	}
 
-	async #prepareRestoreStart(request: EngineStartRequest): Promise<PreparedRestoreStart | undefined> {
+	async #readRestoreCheckpoint(request: EngineRestoreHistoryTarget & { agentInstanceId: string }) {
 		const restore = request.restoreCheckpoint;
-		if (!restore) return undefined;
-		if (!request.agentInstanceRef) {
-			throw new EngineTargetError("invalid_request", "Restored start requires agentInstanceRef");
-		}
 		const prior = await this.store.getBinding(request.agentInstanceId);
 		const stageDir = this.#restoreStageDir(restore.restoreId);
 		let metadata: NativeRestoreStageMetadata;
@@ -2019,6 +2036,20 @@ export class EngineRuntime {
 		const hash = `sha256:${crypto.createHash("sha256").update(bytes).digest("hex")}`;
 		if (hash !== restore.contentHash) throw new EngineTargetError("history_expired", "Restore checkpoint changed");
 		const checkpoint = parseNativeSessionCheckpoint(bytes);
+		return { checkpoint, stageDir };
+	}
+
+	async #prepareRestoreStart(request: EngineStartRequest): Promise<PreparedRestoreStart | undefined> {
+		if (!request.restoreCheckpoint) return undefined;
+		if (!request.agentInstanceRef) {
+			throw new EngineTargetError("invalid_request", "Restored start requires agentInstanceRef");
+		}
+		const { checkpoint, stageDir } = await this.#readRestoreCheckpoint({
+			agentInstanceId: request.agentInstanceId,
+			agentInstanceRef: request.agentInstanceRef,
+			authorityGeneration: request.authorityGeneration,
+			restoreCheckpoint: request.restoreCheckpoint,
+		});
 		const materialized = path.join(stageDir, "source.jsonl");
 		const artifactsDir = materialized.slice(0, -".jsonl".length);
 		await fs.rm(artifactsDir, { recursive: true, force: true });

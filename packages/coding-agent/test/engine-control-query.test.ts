@@ -388,6 +388,38 @@ describe("Engine Control + Query", () => {
 			}),
 		).toMatchObject({ restoreId: "b".repeat(64), nextOffset: 4, complete: true });
 		expect(replaceRetainedBinding).toBe(true);
+		const restoreSelection = {
+			agentInstanceId: "agent-restored",
+			agentInstanceRef: "grimoire://tasks/project/task/agents/agent-restored",
+			authorityGeneration: 4,
+			restoreId: "b".repeat(64),
+			contentHash: `sha256:${"b".repeat(64)}`,
+			limit: 1,
+		};
+		const restoredPage = (await client.request("session.restore.history", restoreSelection)) as {
+			previousCursor: string;
+		};
+		expect(restoredPage).toMatchObject({ entries: [{ entryId: "entry-assistant" }], hasMore: true });
+		expect(
+			await client.request("session.restore.history", {
+				...restoreSelection,
+				cursor: restoredPage.previousCursor,
+			}),
+		).toMatchObject({ entries: [{ entryId: "entry-user" }], hasMore: false });
+		expect(
+			await client.request("session.restore.history", {
+				...restoreSelection,
+				authorityGeneration: 5,
+				cursor: restoredPage.previousCursor,
+			}),
+		).toMatchObject({ entries: [], resyncRequired: true });
+		expect(
+			await client.request("session.restore.history", {
+				...restoreSelection,
+				contentHash: `sha256:${"c".repeat(64)}`,
+				cursor: restoredPage.previousCursor,
+			}),
+		).toMatchObject({ entries: [], resyncRequired: true });
 		const newestHistory = (await client.request("session.history", {
 			agentInstanceId: "agent-a",
 			limit: 1,

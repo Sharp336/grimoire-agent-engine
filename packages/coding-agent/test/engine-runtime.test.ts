@@ -946,6 +946,32 @@ describe("EngineRuntime", () => {
 			});
 			nextOffset = next.nextOffset;
 		}
+		const historyRestore = {
+			agentInstanceRef: targetRef,
+			authorityGeneration: target.authorityGeneration,
+			restoreCheckpoint: { restoreId: staged.restoreId, contentHash: contentHash! },
+		};
+		const beforeSend = await runtime.sessionHistory(target.agentInstanceId, historyRestore);
+		expect(beforeSend.entries.filter(entry => entry.text).map(entry => entry.text)).toEqual([
+			"source turn",
+			"source complete",
+		]);
+		expect(beforeSend.entries.flatMap(entry => entry.blocks ?? [])).toContainEqual(
+			expect.objectContaining({
+				toolCallId: "settled-tool",
+				toolStatus: "succeeded",
+				resultText: "settled-result",
+			}),
+		);
+		expect(await runtime.store.getBinding(target.agentInstanceId)).toBeUndefined();
+		expect(restoredContexts).toHaveLength(0);
+		expect(sideEffects).toEqual(["source-tool-settled"]);
+		await expect(
+			runtime.sessionHistory(target.agentInstanceId, {
+				...historyRestore,
+				authorityGeneration: target.authorityGeneration + 1,
+			}),
+		).rejects.toMatchObject({ code: "stale_target" });
 		await runtime.dispose();
 		runtime = await EngineRuntime.create({
 			...options,
@@ -954,6 +980,7 @@ describe("EngineRuntime", () => {
 				throw new Error("deterministic restored profile failure");
 			},
 		});
+		expect(await runtime.sessionHistory(target.agentInstanceId, historyRestore)).toEqual(beforeSend);
 		await expect(
 			runtime.start(
 				{
@@ -1208,6 +1235,16 @@ describe("EngineRuntime", () => {
 
 		const originalCheckpoint = await archive();
 		const staged = await stage(originalCheckpoint, 2);
+		const retainedBeforeRead = await runtime.store.getBinding(agentInstanceId);
+		const restoredHistory = await runtime.sessionHistory(agentInstanceId, {
+			agentInstanceRef,
+			authorityGeneration: 2,
+			restoreCheckpoint: { restoreId: staged.restoreId, contentHash: originalCheckpoint.contentHash },
+		});
+		expect(restoredHistory.entries.map(entry => entry.text)).toContain("original complete");
+		expect(await runtime.store.getBinding(agentInstanceId)).toEqual(retainedBeforeRead);
+		expect(observedContexts).toHaveLength(0);
+		expect(settledEffects).toEqual(["same-restore-tool"]);
 		const restored = await runtime.start(
 			{
 				commandId: "command-same-restore-send",
@@ -1250,6 +1287,13 @@ describe("EngineRuntime", () => {
 			{ ...profile, continuationPolicy: "fresh" },
 		);
 		await runtime.drain();
+		await expect(
+			runtime.sessionHistory(agentInstanceId, {
+				agentInstanceRef,
+				authorityGeneration: 4,
+				restoreCheckpoint: { restoreId: staleStage.restoreId, contentHash: originalCheckpoint.contentHash },
+			}),
+		).rejects.toMatchObject({ code: "stale_target" });
 		await expect(
 			runtime.start(
 				{
