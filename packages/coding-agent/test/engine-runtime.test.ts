@@ -3,6 +3,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { defineCapability, loadCapability, registerProvider } from "@oh-my-pi/pi-coding-agent/capability";
@@ -2652,13 +2653,15 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
-	it.each([false, true])(
-		"records actual fallback dispatch and explicit route exhaustion (exhausted=%s)",
-		async exhausted => {
-			const primary = createMockModel({ id: "route-primary", responses: [{ throw: "401 Unauthorized" }] });
+	it.each(["answered", "auth_failed", "retry_failed"])(
+		"records actual fallback dispatch and explicit route exhaustion (%s)",
+		async outcome => {
+			const exhausted = outcome !== "answered";
+			const failure = outcome === "retry_failed" ? "503 Service unavailable" : "401 Unauthorized";
+			const primary = createMockModel({ id: "route-primary", responses: [{ throw: failure }] });
 			const fallback = createMockModel({
 				id: "route-fallback",
-				responses: [exhausted ? { throw: "401 Unauthorized" } : { content: ["fallback answered"] }],
+				handler: () => (exhausted ? { throw: failure } : { content: ["fallback answered"] }),
 			});
 			const find = spyOn(modelRegistry, "find").mockImplementation((provider, id) =>
 				[primary, fallback].find(model => model.provider === provider && model.id === id),
@@ -2681,6 +2684,7 @@ describe("EngineRuntime", () => {
 					dispose() {},
 				}),
 			});
+			const wait = spyOn(scheduler, "wait").mockResolvedValue(undefined);
 			try {
 				await runtime.start(
 					{
@@ -2696,7 +2700,7 @@ describe("EngineRuntime", () => {
 				);
 				await runtime.drain();
 				expect(primary.calls).toHaveLength(1);
-				expect(fallback.calls).toHaveLength(1);
+				expect(fallback.calls).toHaveLength(outcome === "retry_failed" ? 3 : 1);
 				const attempt = await runtime.store.getAttempt("route-fallback-attempt");
 				expect(attempt?.state).toBe(exhausted ? "failed" : "completed");
 				const state = JSON.parse(attempt!.profile_route_state!) as EngineProfileRouteState;
@@ -2718,6 +2722,7 @@ describe("EngineRuntime", () => {
 				await runtime.dispose();
 				find.mockRestore();
 				key.mockRestore();
+				wait.mockRestore();
 			}
 		},
 		60_000,

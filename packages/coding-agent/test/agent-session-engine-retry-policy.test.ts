@@ -392,7 +392,7 @@ describe("Engine bounded turn retry policy", () => {
 			expect(requested).toEqual([...routeModels(), routeModels()[2]!].map(model => `${model.provider}/${model.id}`));
 			expect(events.filter(event => event.type === "retry_fallback_applied")).toHaveLength(2);
 			expect(events.filter(event => event.type === "profile_route_exhausted")).toEqual([
-				{ type: "profile_route_exhausted", reason: "retry_budget" },
+				{ type: "profile_route_exhausted", reason: "routes_unavailable" },
 			]);
 			expect(session.getLastAssistantMessage()?.stopReason).toBe("error");
 		});

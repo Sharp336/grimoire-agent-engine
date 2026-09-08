@@ -2317,7 +2317,7 @@ export class TurnRecovery {
 				await this.#host.emitSessionEvent({
 					type: "profile_route_exhausted",
 					reason:
-						retryBudgetExhausted && (sameRouteRetryable || this.#profileRouteCandidates().length > 0)
+						retryBudgetExhausted && this.#profileRouteCandidates().length > 0
 							? "retry_budget"
 							: "routes_unavailable",
 				});
