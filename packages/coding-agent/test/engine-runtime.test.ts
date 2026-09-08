@@ -5573,48 +5573,72 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60000);
 
-	it("fails an attempt when the model turn ends with a provider error", async () => {
-		const { runtime, cwd } = await createRuntime(async session => {
-			Object.defineProperty(session, "getLastAssistantMessage", {
-				value: () => ({
-					role: "assistant",
-					content: [],
-					stopReason: "error",
-					errorMessage: "provider rejected Authorization: Bearer sk-secretcredential1234",
-				}),
+	it.each([
+		{
+			kind: "unclassified",
+			message: "provider rejected Authorization: Bearer sk-secretcredential1234",
+			publicReason: "Error",
+		},
+		{
+			kind: "rate limited",
+			message:
+				"engine_provider_retry_deferred: HTTP 429 Authorization: Bearer sk-secretcredential1234; https://private.invalid/path; retry through Engine",
+			publicReason: "Provider rate limit reached",
+		},
+		{
+			kind: "embedded untrusted code",
+			message: "raw engine_provider_retry_deferred: HTTP 429 sk-secretcredential1234",
+			publicReason: "Error",
+		},
+	])(
+		"fails an attempt safely when the model turn ends with a $kind provider error",
+		async ({ message, publicReason }) => {
+			const { runtime, cwd } = await createRuntime(async session => {
+				Object.defineProperty(session, "getLastAssistantMessage", {
+					value: () => ({
+						role: "assistant",
+						content: [],
+						stopReason: "error",
+						errorMessage: message,
+					}),
+				});
+				return true;
 			});
-			return true;
-		});
-		const started = await runtime.start(
-			{
-				commandId: "command-provider-error",
-				agentInstanceId: "agent-provider-error",
-				executionId: "execution-provider-error",
-				attemptId: "attempt-provider-error",
-				authorityGeneration: 1,
-				cwd,
-				input: "fail",
-			},
-			profile,
-		);
-		await runtime.drain();
-		const events = await runtime.store.pendingEvents();
-		expect(events.find(event => event.kind === "completed")).toBeUndefined();
-		const failed = events.find(event => event.kind === "failed");
-		expect(failed?.payload).toMatchObject({
-			error: expect.stringContaining("diagnostic"),
-			transcriptRef: `history://${started.engineAgentId}`,
-			transcriptCheckpoint: { revision: 1 },
-		});
-		expect(JSON.stringify(failed?.payload)).not.toContain("secretcredential");
-		const modelEffectId = String(events.find(event => event.kind === "model_started")?.payload?.effectId);
-		expect(await runtime.store.getEffect(modelEffectId)).toMatchObject({
-			effect_kind: "model",
-			state: "settled",
-			outcome: "failed",
-		});
-		await runtime.dispose();
-	}, 60000);
+			const started = await runtime.start(
+				{
+					commandId: "command-provider-error",
+					agentInstanceId: "agent-provider-error",
+					executionId: "execution-provider-error",
+					attemptId: "attempt-provider-error",
+					authorityGeneration: 1,
+					cwd,
+					input: "fail",
+				},
+				profile,
+			);
+			await runtime.drain();
+			const events = await runtime.store.pendingEvents();
+			const modelEffectId = String(events.find(event => event.kind === "model_started")?.payload?.effectId);
+			const modelEffect = await runtime.store.getEffect(modelEffectId);
+			await runtime.dispose();
+			expect(events.find(event => event.kind === "completed")).toBeUndefined();
+			const failed = events.find(event => event.kind === "failed");
+			expect(JSON.stringify(failed?.payload)).not.toContain("secretcredential");
+			expect(JSON.stringify(failed?.payload)).not.toContain("private.invalid");
+			expect(failed?.payload?.error).toStartWith(`${publicReason} (diagnostic `);
+			expect(failed?.payload).toMatchObject({
+				error: expect.stringContaining("diagnostic"),
+				transcriptRef: `history://${started.engineAgentId}`,
+				transcriptCheckpoint: { revision: 1 },
+			});
+			expect(modelEffect).toMatchObject({
+				effect_kind: "model",
+				state: "settled",
+				outcome: "failed",
+			});
+		},
+		60000,
+	);
 
 	it("keeps an Attempt nonterminal when transcript durability cannot be proven", async () => {
 		const { runtime, cwd } = await createRuntime();
