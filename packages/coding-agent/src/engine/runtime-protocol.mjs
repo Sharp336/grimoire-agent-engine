@@ -1,4 +1,5 @@
 import protocol from './runtime-protocol-v1.json' with { type: 'json' };
+import { sha256 } from '@noble/hashes/sha2.js';
 
 export const runtimeProtocol = protocol;
 export const runtimeLimits = protocol['x-artel'].limits;
@@ -121,6 +122,12 @@ function validProjection(name, value) {
   }
   if (name === 'queuePage' && value.items.some(item => [item.resource, item.annotationResource, item.senderResource]
     .some(resource => resource && resource.agentInstanceRef !== value.agentInstanceRef))) return false;
+  if (name === 'lifecycleActivity' && (value.beforeEntryId !== undefined && value.afterEntryId !== undefined
+    || value.id !== `engine:${value.sessionId}:${value.agentInstanceRef}:${value.attemptId}:${value.eventId}`)) return false;
+  if (name === 'historyPage' && (value.entries.length + value.activities.length > runtimeLimits.httpPageRecords
+    || value.work.changes < value.entries.length + value.activities.length
+    || new Set(value.activities.map(item => item.id)).size !== value.activities.length
+    || value.activities.some(item => item.agentInstanceRef !== value.agentInstanceRef || item.sessionId !== value.sessionId))) return false;
   if (name === 'eventBatch' || name === 'update') {
     const frame = name === 'update' ? { jsonrpc: '2.0', method: 'runtime.update', params: value } : value;
     if (encodedBytes(JSON.stringify(frame)) > runtimeLimits.deliveryBatchBytes) return false;
@@ -173,7 +180,10 @@ export function validateRuntimeChannelScope(channel, scope) {
 }
 
 async function hashRuntimeValue(value) {
-  const digest = await globalThis.crypto.subtle.digest('SHA-256', new TextEncoder().encode(canonicalRuntimeJson(value)));
+  const bytes = new TextEncoder().encode(canonicalRuntimeJson(value));
+  const digest = typeof globalThis.crypto?.subtle?.digest === 'function'
+    ? await globalThis.crypto.subtle.digest('SHA-256', bytes)
+    : sha256(bytes);
   return `sha256:${[...new Uint8Array(digest)].map(byte => byte.toString(16).padStart(2, '0')).join('')}`;
 }
 

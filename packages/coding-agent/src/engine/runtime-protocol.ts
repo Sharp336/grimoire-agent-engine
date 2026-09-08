@@ -6,7 +6,7 @@ import {
 } from "./runtime-protocol.mjs";
 import protocol from "./runtime-protocol-v1.json" with { type: "json" };
 
-export const RUNTIME_PROTOCOL_HASH = "sha256:0fab4debadbeb5913fcb9eab1511befb6ff1b7da3e485e2edd75326c6eaed4ae";
+export const RUNTIME_PROTOCOL_HASH = "sha256:a79e0c5810dbe4a2ba5061f0634c56024c561f48fff9e43e7f7027ebdc0ae6e0";
 export const runtimeLimits = protocol["x-artel"].limits;
 export const ENGINE_CONTROL_OPS = new Set(["pause", "resume", "cancel", "resolve_input", "resolve_tool_approval"]);
 

@@ -24,6 +24,13 @@ import {
 	type EngineNativeHistoryPage,
 	readNativeHistoryEntry,
 } from "./runtime-history";
+import {
+	type HistoryLifecycleContext,
+	lifecycleSummary,
+	RUNTIME_LIFECYCLE_SCHEMA,
+	readHistoryLifecycle,
+	readLifecycleCursor,
+} from "./runtime-lifecycle";
 import { RUNTIME_MESSAGE_SCHEMA } from "./runtime-messages";
 import {
 	claimLegacyOwnership,
@@ -44,6 +51,7 @@ import {
 	type RuntimeAccess,
 	type RuntimeEventBatch,
 	type RuntimeEventsRequest,
+	type RuntimeRemainingWork,
 	type RuntimeScope,
 	type RuntimeWork,
 	runtimeLimits,
@@ -708,6 +716,7 @@ const SCHEMA_MIGRATIONS = [
 	{ version: 16, statements: RUNTIME_OWNERSHIP_SCHEMA, requiredColumns: [] },
 	{ version: 17, statements: RUNTIME_QUEUE_SCHEMA, requiredColumns: [] },
 	{ version: 18, statements: ENGINE_HISTORY_LINEAGE_SCHEMA, requiredColumns: [] },
+	{ version: 19, statements: RUNTIME_LIFECYCLE_SCHEMA, requiredColumns: [] },
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;
@@ -1354,9 +1363,9 @@ export class EngineStore {
 		return await this.#transaction(async sql => {
 			const started = performance.now();
 			const bindings = (await sql.unsafe(
-				"SELECT session_file FROM engine_runtime_bindings WHERE agent_instance_id=?",
+				"SELECT session_file,attempt_id FROM engine_runtime_bindings WHERE agent_instance_id=?",
 				[agentInstanceId],
-			)) as Array<{ session_file: string | null }>;
+			)) as Array<{ session_file: string | null; attempt_id: string }>;
 			const attempts = attemptId
 				? ((await sql.unsafe(
 						"SELECT transcript_path,transcript_leaf_entry_id,state FROM engine_attempts WHERE attempt_id=? AND agent_instance_id=?",
@@ -1387,6 +1396,11 @@ export class EngineStore {
 					: (heads[0]?.entry_id ?? null);
 			let revision = anchor ?? "empty";
 			let first = anchor;
+			const watermark = (await sql.unsafe(
+				"SELECT COALESCE(MAX(event_id),0) AS cursor FROM engine_event_outbox",
+			)) as Array<{ cursor: number }>;
+			let eventWatermark = Number(watermark[0].cursor);
+			let currentAttemptId: string | null = attemptId ?? bindings[0]?.attempt_id ?? null;
 			let cursorRecords = 0;
 			if (cursor) {
 				let parsed: {
@@ -1396,6 +1410,8 @@ export class EngineStore {
 					revision: string;
 					lineage: string;
 					first: string;
+					watermark: number;
+					currentAttemptId: string | null;
 				};
 				try {
 					parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
@@ -1407,6 +1423,14 @@ export class EngineStore {
 					parsed.sessionId !== sessionId ||
 					parsed.attemptId !== (attemptId ?? null) ||
 					parsed.lineage !== headers[0].history_lineage ||
+					!Number.isSafeInteger(parsed.watermark) ||
+					parsed.watermark < 0 ||
+					parsed.watermark > eventWatermark ||
+					!(
+						parsed.currentAttemptId === null ||
+						(typeof parsed.currentAttemptId === "string" && parsed.currentAttemptId.length <= 200)
+					) ||
+					(attemptId !== undefined && parsed.currentAttemptId !== attemptId) ||
 					typeof parsed.first !== "string" ||
 					typeof parsed.revision !== "string"
 				)
@@ -1424,6 +1448,8 @@ export class EngineStore {
 				anchor = parsed.revision;
 				revision = parsed.revision;
 				first = parsed.first;
+				eventWatermark = parsed.watermark;
+				currentAttemptId = parsed.currentAttemptId;
 			}
 			const cut = anchor
 				? ((await sql.unsafe("SELECT ordinal FROM engine_history_entries WHERE session_path=? AND entry_id=?", [
@@ -1518,6 +1544,8 @@ export class EngineStore {
 								revision,
 								lineage: headers[0].history_lineage,
 								first: entry,
+								watermark: eventWatermark,
+								currentAttemptId,
 							}),
 						).toString("base64url")
 					: null;
@@ -1526,6 +1554,18 @@ export class EngineStore {
 				revision,
 				anchor,
 				entries: nativeEntries,
+				lifecycleContext: {
+					agentInstanceId,
+					sessionId,
+					sessionPath,
+					lineage: headers[0].history_lineage,
+					anchor,
+					first: selected[0]?.entry_id ?? null,
+					count: selected.length,
+					currentAttemptId,
+					targetAttemptId: attemptId ?? null,
+					watermark: eventWatermark,
+				},
 				...(activityRefs.length ? { activityRefs } : {}),
 				nextCursor: continuation(next),
 				...(selected[0]
@@ -1543,6 +1583,7 @@ export class EngineStore {
 					: {}),
 				...(entryRef ? { entryRef } : {}),
 				visitedRecords:
+					watermark.length +
 					cursorRecords +
 					cut.length +
 					rows.length +
@@ -1571,6 +1612,45 @@ export class EngineStore {
 		return await this.#transaction(sql =>
 			readNativeHistoryEntry(sql, agentInstanceId, entryId, revision, offset, limit, expectedSessionId, attemptId),
 		);
+	}
+
+	async nativeLifecyclePage(
+		agentInstanceId: string,
+		agentInstanceRef: string,
+		limit: number,
+		attemptId?: string,
+		context?: HistoryLifecycleContext,
+		cursor?: string,
+		maxBytes = runtimeLimits.httpPageBytes,
+		remaining?: RuntimeRemainingWork,
+	) {
+		return await this.#transaction(async sql => {
+			const decoded = cursor ? readLifecycleCursor(cursor) : undefined;
+			const scope = decoded?.context ?? context;
+			if (!scope || scope.agentInstanceId !== agentInstanceId || scope.targetAttemptId !== (attemptId ?? null))
+				throw new EngineTargetError("stale_target", "Lifecycle cursor changed its exact owner or Attempt");
+			const paths = attemptId
+				? await sql.unsafe(
+						"SELECT transcript_path AS path FROM engine_attempts WHERE agent_instance_id=? AND attempt_id=?",
+						[agentInstanceId, attemptId],
+					)
+				: await sql.unsafe("SELECT session_file AS path FROM engine_runtime_bindings WHERE agent_instance_id=?", [
+						agentInstanceId,
+					]);
+			if (paths[0]?.path !== scope.sessionPath)
+				throw new EngineTargetError("stale_target", "Lifecycle native session changed");
+			const result = await readHistoryLifecycle(
+				sql,
+				agentInstanceRef,
+				scope,
+				limit,
+				decoded?.before,
+				maxBytes,
+				remaining && { ...remaining, scannedRows: remaining.scannedRows - paths.length },
+			);
+			result.work.scannedRows += paths.length;
+			return { ...result, sessionId: scope.sessionId, revision: scope.anchor ?? "empty", anchor: scope.anchor };
+		});
 	}
 
 	async waitAttemptResult(
@@ -3533,8 +3613,8 @@ export class EngineStore {
 		const rows = (await sql.unsafe(
 			`INSERT INTO engine_event_outbox(
 			 seq, causation_command_id, agent_instance_id, execution_id, attempt_id, binding_id, engine_generation,
-			 binding_generation, authority_generation, kind, payload, created_at
-			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING event_id`,
+			 binding_generation, authority_generation, kind, payload, created_at,lifecycle_summary,history_assistant_id
+			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?,?) RETURNING event_id`,
 			[
 				seq,
 				event.causationCommandId,
@@ -3548,6 +3628,10 @@ export class EngineStore {
 				event.kind,
 				event.payload ? JSON.stringify(event.payload) : null,
 				createdAt,
+				lifecycleSummary(event),
+				event.kind === "assistant_snapshot" && typeof event.payload?.assistantMessageId === "string"
+					? event.payload.assistantMessageId
+					: null,
 			],
 		)) as Array<{ event_id: number }>;
 		if (await recordRuntimeProjection(sql, { ...event, eventId: Number(rows[0]?.event_id), seq, createdAt }))

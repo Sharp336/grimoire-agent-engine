@@ -6,7 +6,7 @@
   "$ref": "#/$defs/request",
   "x-artel": {
     "version": "1.0",
-    "contractRevision": 5,
+    "contractRevision": 6,
     "limits": {
       "wsMessageBytes": 262144,
       "deliveryBatchBytes": 65536,
@@ -207,7 +207,8 @@
       "observation": "No per-closed-observer backlog or background detail hydration. Canonical history/events/receipts/effects continue without interest. Observer filtering never suppresses required durable facts. Reopen uses fresh state and history access; UI never replays tool effects.",
       "nativeTarget": "Trusted existing IPC only, no browser endpoint/principal fields in browser commands. Resolve actual stored native target from exact fullAGI+optional Attempt/execution. Explicit IDs must match exactly; pending->bound sameIDs permitted, otherwise stale_target. Without IDs current canonical bound is preferred, pending is queried by exactIDs. Never infer bindingId/bindingGeneration/targetEngineGeneration from browser summary or currentEngineGeneration. registered contains no Attempt/binding. authorizedAgentInstanceRefs is an optional bounded restriction, never truncated into a device AGI cap. Optional rootAgentInstanceRef is trusted routing context, outside the frozen command/hash; Engine verifies principal, exact target and root ancestry in the same authoritative read. An unregistered explicit root launch may only enroll root==target through the existing admission path; unknown descendants require authoritative enrollment before effects. pending may expose factual source Start startExpectedIntentRevision alongside its commandId; bound exposes paired startCommandId/startExpectedIntentRevision, both or neither. Legacy missing source CAS is omitted, never inferred from current intent or base+1. Pre-start Stop validates the immutable source Start and its actually applied intent revision, with no intervening intent change; ordinary Stop CAS is unchanged.",
       "inputs": "Exact /input uses AGI+Attempt+inputId+immutable input revision. No-ID inputPage.revision is persisted per-Attempt collection mutation revision (requested/resolved/denied/cancelled/terminal clear), not token cursor. holdsPage.revision is AGI intentRevision, advanced on every effective hold mutation including ancestor/recovery/enrollment; exact old Attempt reads become stale_target after current Attempt changes. messagesPage uses per-Attempt collection revision; every contained message retains its own lineage/revision. All pages/work are bounded and read lazily. New UI submit uses indexedQuestionAnswer (question id + unique selectedOptionIndexes + optional free text/note), not echoed question/option labels. Engine resolveInput validates exact inputId/revision/intent, all question IDs, index bounds against that stored question and multi cardinality; then reconstructs the full existing native tool result from canonical input. CH forwards compact frozen bytes and never expands them into a second oversized IPC payload. Legacy echoed answers remain a separate strict compatibility variant and require the same owner validation. AGI holds reads may omit Attempt; holdsPage.attemptId is null before any Attempt. If an Attempt is supplied, it is checked exactly.",
-      "queueReads": "Queue pages are AGI-scoped, independent of Attempt, and identify the aggregate queueRevision; exact queueId uses the same page with zero or one item. Project only public queueItem fields, never sourceBody or native/session identity. Every item is <=liveChangeBytes, every page <=httpPageBytes and <=httpPageRecords. Read owner metadata/sizes before large fields; report actual work including decoded omitted data. Oversized deliveryPayload, annotation or sender is an explicit immutable-prefix preview with a pinned queue_item resource for that exact field/AGI/queueId/item revision. deliveryPayload partial requires resource; ancillary previews carry annotationResource/senderResource. If any field is partial, JSON-encoded deliveryPayload/annotation/sender previews together are <=bulkPreviewBytes. Full text remains in existing owner columns; UTF8 ranges are <=httpRangeBytes with exact revision checks and no whole-item materialization per range. Queue command receipt result.item uses the same bounded public projection. Never save a preview as the full editable text: explicit edit loads the pinned body first and cancels on changed selection/revision."
+      "queueReads": "Queue pages are AGI-scoped, independent of Attempt, and identify the aggregate queueRevision; exact queueId uses the same page with zero or one item. Project only public queueItem fields, never sourceBody or native/session identity. Every item is <=liveChangeBytes, every page <=httpPageBytes and <=httpPageRecords. Read owner metadata/sizes before large fields; report actual work including decoded omitted data. Oversized deliveryPayload, annotation or sender is an explicit immutable-prefix preview with a pinned queue_item resource for that exact field/AGI/queueId/item revision. deliveryPayload partial requires resource; ancillary previews carry annotationResource/senderResource. If any field is partial, JSON-encoded deliveryPayload/annotation/sender previews together are <=bulkPreviewBytes. Full text remains in existing owner columns; UTF8 ranges are <=httpRangeBytes with exact revision checks and no whole-item materialization per range. Queue command receipt result.item uses the same bounded public projection. Never save a preview as the full editable text: explicit edit loads the pinned body first and cancels on changed selection/revision.",
+      "historyLifecycle": "One initial history HTTP page contains bounded native entries and public lifecycle activities, sharing limit<=100 and all byte/work budgets. work.changes counts entries+activities. Activities preserve exact AGI/session/Attempt/execution/event identity; id is engine:sessionId:agentInstanceRef:attemptId:eventId. Optional beforeEntryId/afterEntryId are mutually exclusive and name a retained public user/assistant entry in this pinned native page; otherwise activity is unanchored. Only meaningful native events for Attempts reachable by sourceCommandId/assistantMessageId in this page, plus its exact current Attempt cut, are included. No jobs/full-history scan or BFF lifecycle inference. Initial page divides available records between entries and activities (limit1 may return one entry with explicit activity continuation); unused capacity may be reused. activityNextCursor is separate from older-entry nextCursor; explicit activityCursor expansion on the same /history returns entries=[] and nextCursor=null. Both opaque cursors pin authorized AGI, session, immutable lineage, native leaf/page range and event watermark/before-ID; append does not move the cut, rewrite/branch-edit invalidates old lineage with stale_target. Continuations never auto-drain. Existing canonical history/outbox metadata and indexed bounded reads are the owners; query work includes all scanned/decoded rows, not only emitted records. Lifecycle error/retry previews stay bounded; details use retained owner resources where applicable."
     },
     "nativeMethods": {
       "runtime.target": {
@@ -251,6 +252,10 @@
       "/api/runtime/queue": {
         "query": "queueReadRequest",
         "response": "queuePage"
+      },
+      "/api/runtime/history": {
+        "query": "historyReadRequest; cursor and activityCursor are mutually exclusive",
+        "response": "historyPage"
       }
     }
   },
@@ -1785,6 +1790,25 @@
         },
         "work": {
           "$ref": "#/$defs/restoreWork"
+        },
+        "activities": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/lifecycleActivity"
+          },
+          "maxItems": 100
+        },
+        "activityNextCursor": {
+          "oneOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4000
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "required": [
@@ -1795,7 +1819,9 @@
         "anchor",
         "entries",
         "nextCursor",
-        "work"
+        "work",
+        "activities",
+        "activityNextCursor"
       ],
       "additionalProperties": false
     },
@@ -4785,6 +4811,145 @@
           "additionalProperties": false
         }
       ]
+    },
+    "historyReadRequest": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "agentInstanceRef": {
+              "$ref": "#/$defs/agi"
+            },
+            "attemptId": {
+              "$ref": "#/$defs/id"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "cursor": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4000
+            }
+          },
+          "required": [
+            "agentInstanceRef"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "agentInstanceRef": {
+              "$ref": "#/$defs/agi"
+            },
+            "attemptId": {
+              "$ref": "#/$defs/id"
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100
+            },
+            "activityCursor": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4000
+            }
+          },
+          "required": [
+            "agentInstanceRef",
+            "activityCursor"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "lifecycleActivity": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1800
+        },
+        "kind": {
+          "const": "lifecycle"
+        },
+        "source": {
+          "const": "engine"
+        },
+        "sessionId": {
+          "$ref": "#/$defs/id"
+        },
+        "agentInstanceRef": {
+          "$ref": "#/$defs/agi"
+        },
+        "attemptId": {
+          "$ref": "#/$defs/id"
+        },
+        "executionId": {
+          "$ref": "#/$defs/id"
+        },
+        "eventId": {
+          "$ref": "#/$defs/id"
+        },
+        "seq": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "status": {
+          "enum": [
+            "started",
+            "paused",
+            "running",
+            "waiting",
+            "settled",
+            "failed",
+            "succeeded",
+            "cancelled"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "summary": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "causationCommandId": {
+          "$ref": "#/$defs/id"
+        },
+        "at": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "beforeEntryId": {
+          "$ref": "#/$defs/id"
+        },
+        "afterEntryId": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "source",
+        "sessionId",
+        "agentInstanceRef",
+        "attemptId",
+        "executionId",
+        "eventId",
+        "seq",
+        "status",
+        "label",
+        "at"
+      ],
+      "additionalProperties": false
     }
   }
 }

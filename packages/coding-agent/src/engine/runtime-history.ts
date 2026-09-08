@@ -1,4 +1,5 @@
 import { EngineTargetError } from "./contracts";
+import type { HistoryLifecycleContext } from "./runtime-lifecycle";
 import type { RuntimeQueryWork, RuntimeSql } from "./runtime-projection";
 import { runtimeLimits } from "./runtime-protocol";
 
@@ -126,6 +127,7 @@ export interface EngineNativeHistoryPage {
 	anchor: string | null;
 	entries: unknown[];
 	nextCursor: string | null;
+	lifecycleContext: HistoryLifecycleContext;
 	entryRef?: { entryId: string; revision: string; bytes: number; method: "runtime.history.entry" };
 	/** Exact continuation when the public projection of the first entry needs a resource. */
 	projectionFallback?: {

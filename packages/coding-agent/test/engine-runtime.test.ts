@@ -2333,7 +2333,39 @@ describe("EngineRuntime", () => {
 			const first = (await client.request("runtime.history", params)) as Record<string, unknown>;
 			validateRuntimeValue("historyPage", first);
 			expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThan(runtimeLimits.httpPageBytes);
-			expect(first).toMatchObject({ entries: [], entryRef: { entryId: "tool-result" }, work: { changes: 1 } });
+			expect(first).toMatchObject({ entries: [], entryRef: { entryId: "tool-result" }, work: { changes: 3 } });
+			expect((first.activities as Array<{ status: string }>).map(activity => activity.status)).toEqual([
+				"started",
+				"succeeded",
+			]);
+			const one = (await client.request("runtime.history", { ...params, limit: 1 })) as Record<string, unknown>;
+			expect(one).toMatchObject({
+				entries: [],
+				activities: [],
+				entryRef: { entryId: "tool-result" },
+				work: { changes: 1 },
+			});
+			expect(one.activityNextCursor).toBeString();
+			const lifecycle = (await client.request("runtime.history", {
+				...params,
+				activityCursor: one.activityNextCursor,
+				limit: 1,
+			})) as Record<string, unknown>;
+			validateRuntimeValue("historyPage", lifecycle);
+			expect(lifecycle).toMatchObject({
+				entries: [],
+				nextCursor: null,
+				activities: [{ status: "succeeded" }],
+				work: { changes: 1 },
+			});
+			expect(lifecycle.activityNextCursor).toBeString();
+			await expect(
+				client.request("runtime.history", {
+					...params,
+					cursor: one.nextCursor,
+					activityCursor: one.activityNextCursor,
+				}),
+			).rejects.toThrow();
 			const range = (await client.request("runtime.resource", {
 				principalId: "owner",
 				resource: first.entryRef,

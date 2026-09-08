@@ -339,16 +339,44 @@ async function dispatchRequest(
 		case "runtime.queue":
 			return await options.runtime.store.runtimeQueue(params as unknown as RuntimeQueueRequest);
 		case "runtime.history": {
+			const { principalId: _principal, authorizedAgentInstanceRefs: _refs, ...request } = params;
+			validateRuntimeValue("historyReadRequest", request);
 			const agent = await runtimeAgent(options.runtime, params);
 			const readStarted = performance.now();
+			const agentInstanceId = requiredString(agent, "agentInstanceId");
+			const agentInstanceRef = requiredString(params, "agentInstanceRef");
+			const limit = optionalLimit(params.limit) ?? runtimeLimits.httpPageRecords;
+			if (params.activityCursor) {
+				const page = await options.runtime.store.nativeLifecyclePage(
+					agentInstanceId,
+					agentInstanceRef,
+					limit,
+					optionalString(params.attemptId),
+					undefined,
+					String(params.activityCursor),
+				);
+				const result = {
+					version: "1.0",
+					agentInstanceRef,
+					sessionId: page.sessionId,
+					revision: page.revision,
+					anchor: page.anchor,
+					entries: [],
+					nextCursor: null,
+					activities: page.activities,
+					activityNextCursor: page.activityNextCursor,
+					work: page.work,
+				};
+				finishRuntimeHistory(result, readStarted);
+				return result;
+			}
 			const page = await options.runtime.sessionHistoryPage(
-				requiredString(agent, "agentInstanceId"),
-				requiredString(params, "agentInstanceRef"),
+				agentInstanceId,
+				agentInstanceRef,
 				optionalString(params.cursor),
-				optionalLimit(params.limit),
+				Math.ceil(limit / 2),
 				optionalString(params.attemptId),
 			);
-			const agentInstanceRef = requiredString(params, "agentInstanceRef");
 			const resource = (ref: NonNullable<typeof page.entryRef>) => ({
 				kind: "history_entry",
 				agentInstanceRef,
@@ -367,6 +395,8 @@ async function dispatchRequest(
 				anchor: page.anchor,
 				entries: page.entries,
 				nextCursor: page.nextCursor,
+				activities: [] as Record<string, unknown>[],
+				activityNextCursor: null as string | null,
 				...(page.entryRef ? { entryRef: resource(page.entryRef) } : {}),
 				work: {
 					bytes: 0,
@@ -376,20 +406,67 @@ async function dispatchRequest(
 					elapsedMs: Math.ceil(performance.now() - readStarted),
 				},
 			};
-			if (Buffer.byteLength(JSON.stringify(result)) > runtimeLimits.httpPageBytes && page.projectionFallback) {
+			if (
+				(Buffer.byteLength(JSON.stringify(result)) >
+					runtimeLimits.httpPageBytes - runtimeLimits.bulkPreviewBytes * 2 ||
+					(!result.entries.length && page.entries.length === 0 && page.readBytes > 0)) &&
+				page.projectionFallback
+			) {
 				// Canonical JSON can expand when tool arguments become public text or an error is echoed.
 				// Advance exactly one native entry; the remaining selected rows stay reachable by the cursor.
 				result.entries = [];
 				result.entryRef = resource(page.projectionFallback.entryRef);
 				result.nextCursor = page.projectionFallback.nextCursor;
 				result.work.changes = 1;
+				page.lifecycleContext.count = 1;
 			}
-			for (;;) {
-				const bytes = Buffer.byteLength(JSON.stringify(result));
-				if (bytes === result.work.bytes) break;
-				result.work.bytes = bytes;
+			let activityLimit = limit - result.work.changes;
+			// Reserve metadata discovery and one lookahead per reachable Attempt.
+			if (
+				result.work.scannedRows + page.lifecycleContext.count * 3 + activityLimit + 6 >
+				runtimeLimits.bootstrapScannedRows
+			)
+				activityLimit = 0;
+			try {
+				const lifecycle = await options.runtime.store.nativeLifecyclePage(
+					agentInstanceId,
+					agentInstanceRef,
+					activityLimit,
+					optionalString(params.attemptId),
+					page.lifecycleContext,
+					undefined,
+					runtimeLimits.httpPageBytes -
+						Buffer.byteLength(JSON.stringify(result)) -
+						runtimeLimits.bulkPreviewBytes * 2,
+					{
+						bytes: runtimeLimits.httpPageBytes,
+						changes: limit,
+						scannedRows: runtimeLimits.bootstrapScannedRows - result.work.scannedRows,
+						materializedBytes: runtimeLimits.bootstrapMaterializedBytes - result.work.materializedBytes,
+						timeMs: runtimeLimits.bootstrapTimeoutMs - result.work.elapsedMs,
+					},
+				);
+				const entries = new Set(result.entries.map(entry => entry.entryId));
+				result.activities = lifecycle.activities.map(activity => {
+					if (typeof activity.afterEntryId !== "string" || entries.has(activity.afterEntryId)) return activity;
+					const { afterEntryId: _anchor, ...unanchored } = activity;
+					return unanchored;
+				});
+				result.activityNextCursor = lifecycle.activityNextCursor;
+				result.work.changes += result.activities.length;
+				result.work.scannedRows += lifecycle.work.scannedRows;
+				result.work.materializedBytes += lifecycle.work.materializedBytes;
+			} catch (error) {
+				if (error instanceof RuntimeQueryError && error.code === "restore_budget")
+					throw new RuntimeQueryError("restore_budget", error.message, {
+						...error.work,
+						scannedRows: result.work.scannedRows + error.work.scannedRows,
+						materializedBytes: result.work.materializedBytes + error.work.materializedBytes,
+						elapsedMs: Math.ceil(performance.now() - readStarted),
+					});
+				throw error;
 			}
-			validateRuntimeValue("historyPage", result);
+			finishRuntimeHistory(result, readStarted);
 			return result;
 		}
 		case "runtime.history.entry": {
@@ -490,6 +567,22 @@ async function dispatchRequest(
 		case "command":
 			return await runCommand(options, validateCommand(params.command));
 	}
+}
+
+function finishRuntimeHistory(result: { work: RuntimeWork }, started: number): void {
+	result.work.elapsedMs = Math.ceil(performance.now() - started);
+	for (;;) {
+		const bytes = Buffer.byteLength(JSON.stringify(result));
+		if (bytes === result.work.bytes) break;
+		result.work.bytes = bytes;
+	}
+	if (
+		result.work.scannedRows > runtimeLimits.bootstrapScannedRows ||
+		result.work.materializedBytes > runtimeLimits.bootstrapMaterializedBytes ||
+		result.work.elapsedMs > runtimeLimits.bootstrapTimeoutMs
+	)
+		throw new RuntimeQueryError("restore_budget", "Owner history work budget exceeded", result.work);
+	validateRuntimeValue("historyPage", result);
 }
 
 async function runCommand(options: ServerOptions, command: EngineCommandEnvelope): Promise<EngineCommandReceipt> {

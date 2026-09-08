@@ -25,6 +25,7 @@
       "@napi-rs/cli": "3.7.2",
       "@nats-io/jetstream": "3.4.0",
       "@nats-io/transport-node": "3.4.0",
+      "@noble/hashes": "2.2.0",
       "@oh-my-pi/hashline": "18.0.7",
       "@oh-my-pi/omp-stats": "18.0.7",
       "@oh-my-pi/omptype": "18.0.7",

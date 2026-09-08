@@ -636,6 +636,138 @@ describe("runtime v1 durable boundaries", () => {
 		expect(unavailable.target).toEqual(recovered.target);
 		expect(unavailable.payloadHash).toBe(recovered.payloadHash);
 	});
+	it("pins bounded lifecycle pages to reachable native entries and their immutable event cut", async () => {
+		const store = await createStore();
+		const agent = identity("lifecycle");
+		await store.registerAgent(agent);
+		const sessionPath = "/runtime-v1-lifecycle.jsonl";
+		const old = { ...binding("lifecycle"), sessionFile: sessionPath };
+		const removed = {
+			...old,
+			attemptId: "removed-attempt",
+			executionId: "removed-execution",
+			commandId: "removed-start",
+			bindingGeneration: 2,
+		};
+		const current = {
+			...old,
+			attemptId: "current-attempt",
+			executionId: "current-execution",
+			commandId: "current-start",
+			bindingGeneration: 3,
+		};
+		for (const target of [old, removed, current])
+			await store.commitAttemptTransition(target, "running", [{ kind: "running" }]);
+		for (let i = 0; i < 110; i++)
+			await store.appendEvent({
+				...old,
+				causationCommandId: old.commandId,
+				kind: "retry_settled",
+				payload: { retry: { attempt: i, maxAttempts: 110, error: "bounded retained reason" } },
+			});
+		await store.appendEvent({
+			...removed,
+			causationCommandId: removed.commandId,
+			kind: "failed",
+			payload: { error: "edited away" },
+		});
+		const header = {
+			type: "session",
+			version: 3,
+			id: "session-lifecycle",
+			timestamp: new Date(0).toISOString(),
+			cwd: "/test",
+		};
+		const entry = (id: string, parentId: string | null, target = old) => ({
+			type: "message",
+			id,
+			parentId,
+			timestamp: new Date(0).toISOString(),
+			sourceCommandId: target.commandId,
+			message: { role: "user", content: id },
+		});
+		const retained = [
+			header,
+			entry("old-user", null),
+			entry("removed-user", "old-user", removed),
+			entry("current-user", "old-user", current),
+		];
+		await store.sessionStorage.writeText(sessionPath, retained.map(value => JSON.stringify(value)).join("\n") + "\n");
+		const history = await store.nativeHistoryPage(agent.agentInstanceId, undefined, 50);
+		expect(history.entries.map(value => (value as { id: string }).id)).toEqual(["old-user", "current-user"]);
+		const first = await store.nativeLifecyclePage(
+			agent.agentInstanceId,
+			agent.agentInstanceRef,
+			1,
+			undefined,
+			history.lifecycleContext,
+		);
+		expect(first.activities).toHaveLength(1);
+		expect(first.activityNextCursor).toBeString();
+		const oneEntry = await store.nativeHistoryPage(agent.agentInstanceId, undefined, 1);
+		const later = await store.appendEvent({
+			...current,
+			causationCommandId: current.commandId,
+			kind: "paused",
+			payload: {},
+		});
+		const writer = store.sessionStorage.openWriter(sessionPath);
+		await writer.append(JSON.stringify(entry("after-cut", "current-user", current)) + "\n");
+		await writer.close();
+		const olderEntry = await store.nativeHistoryPage(agent.agentInstanceId, oneEntry.nextCursor!, 1);
+		expect(olderEntry.lifecycleContext.watermark).toBe(oneEntry.lifecycleContext.watermark);
+		expect(olderEntry.lifecycleContext.currentAttemptId).toBe(oneEntry.lifecycleContext.currentAttemptId);
+		const activities = [...first.activities];
+		let cursor = first.activityNextCursor;
+		while (cursor) {
+			const page = await store.nativeLifecyclePage(
+				agent.agentInstanceId,
+				agent.agentInstanceRef,
+				17,
+				undefined,
+				undefined,
+				cursor,
+			);
+			expect(page.activities.length).toBeLessThanOrEqual(17);
+			expect(page.work.scannedRows).toBeLessThanOrEqual(runtimeLimits.bootstrapScannedRows);
+			expect(page.work.changes).toBe(page.activities.length);
+			activities.push(...page.activities);
+			cursor = page.activityNextCursor;
+		}
+		expect(activities).toHaveLength(112);
+		expect(new Set(activities.map(value => value.id)).size).toBe(112);
+		expect(
+			activities.every(value => value.attemptId !== removed.attemptId && value.eventId !== String(later.eventId)),
+		).toBe(true);
+		for (const value of activities) {
+			validateRuntimeValue("lifecycleActivity", value);
+			expect(["old-user", "current-user"]).toContain(String(value.afterEntryId));
+		}
+		await expect(
+			store.nativeLifecyclePage(
+				"foreign",
+				agent.agentInstanceRef,
+				10,
+				undefined,
+				undefined,
+				first.activityNextCursor!,
+			),
+		).rejects.toMatchObject({ code: "stale_target" });
+		await store.sessionStorage.writeText(
+			sessionPath,
+			[header, entry("rewritten", null, current)].map(value => JSON.stringify(value)).join("\n") + "\n",
+		);
+		await expect(
+			store.nativeLifecyclePage(
+				agent.agentInstanceId,
+				agent.agentInstanceRef,
+				10,
+				undefined,
+				undefined,
+				first.activityNextCursor!,
+			),
+		).rejects.toThrow("lineage");
+	});
 	it("bounds native history reads by the page instead of the 100,000-entry transcript", async () => {
 		const store = await createStore();
 		const agent = identity("history");
