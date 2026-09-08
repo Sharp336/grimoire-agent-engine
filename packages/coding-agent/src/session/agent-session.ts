@@ -3208,17 +3208,16 @@ export class AgentSession {
 			}
 
 			const resolvedInterruptedToolTurn = this.#recovery.classifyResolvedInterruptedToolTurn(msg);
-			const sameModelRouteFallback = this.#recovery.isSameModelRouteFallbackEligible(msg);
+			const profileRouteFallback = this.#recovery.isProfileRouteFallbackEligible(msg);
 			if (
 				this.#recovery.isRetryableReasonlessAbort(msg) ||
 				resolvedInterruptedToolTurn === "reasonless-abort" ||
-				(msg.stopReason === "aborted" && sameModelRouteFallback)
+				(msg.stopReason === "aborted" && profileRouteFallback)
 			) {
 				const preserveInterruptedTurn =
-					resolvedInterruptedToolTurn === "reasonless-abort" ||
-					this.#recovery.shouldPreserveSameModelRouteTurn(msg);
+					resolvedInterruptedToolTurn === "reasonless-abort" || this.#recovery.shouldPreserveProfileRouteTurn(msg);
 				const didRetry = await this.#recovery.handleRetryableError(msg, {
-					allowModelFallback: sameModelRouteFallback,
+					allowModelFallback: profileRouteFallback,
 					...(preserveInterruptedTurn ? { preserveFailedTurn: true } : {}),
 				});
 				if (didRetry) {

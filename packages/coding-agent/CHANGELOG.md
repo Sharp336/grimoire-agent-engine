@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added explicit ordered model/provider recovery for replay-safe failed turns without cycling back to earlier routes.
 - Added restart-safe Agent Engine conversation history plus configurable terminal-child transcript retention.
 - Added authenticated Engine session context, usage, compaction, release, and durable inbox controls for non-TUI clients.
 - Added independent durable Agent Engine event delivery state per sink while retaining SQLite events as the authoritative history.
@@ -14,6 +15,7 @@
 
 ### Fixed
 
+- Skipped unavailable fallback credentials without losing later approved routes, and respected Stop while those credentials resolve.
 - Kept owner-local Agent Engine runs on their authorized profile routes after profile edits, while still checking current connection trust and access.
 - Kept queued messages on hold when manual Pause reaches the Engine just after its answer finishes.
 - Restored archives expose verified native conversation history before the first send, without starting an attempt or replaying tools.
