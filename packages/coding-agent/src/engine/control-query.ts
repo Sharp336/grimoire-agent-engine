@@ -203,7 +203,15 @@ function serveSocket(
 ): void {
 	let buffered = Buffer.alloc(0);
 	const cancellation = new AbortController();
+	socket.on("end", () => cancellation.abort());
 	socket.on("close", () => cancellation.abort());
+	socket.on("error", error => {
+		cancellation.abort(error);
+		socket.destroy();
+		// A cancelled reader may close after the writable check but before the OS write.
+		// Keep unexpected socket failures visible; only disconnect errors belong to this request.
+		if (!isSocketDisconnect(error)) throw error;
+	});
 	socket.setTimeout(30_000, () => socket.destroy());
 	socket.on("data", chunk => {
 		buffered = Buffer.concat([buffered, Buffer.from(chunk)]);
@@ -1194,7 +1202,7 @@ function writeResponse(
 	response: EngineControlQueryResponse,
 	maxBytes = ENGINE_CONTROL_QUERY_MAX_FRAME_BYTES,
 ): void {
-	if (socket.destroyed) return;
+	if (socket.destroyed || !socket.writable || socket.writableEnded) return;
 	let serialized = JSON.stringify(response);
 	if (Buffer.byteLength(serialized, "utf8") > maxBytes) {
 		serialized = JSON.stringify(
@@ -1202,6 +1210,15 @@ function writeResponse(
 		);
 	}
 	socket.write(`${serialized}\n`);
+}
+
+function isSocketDisconnect(error: Error): boolean {
+	return (
+		"code" in error &&
+		["EPIPE", "ECONNRESET", "ECONNABORTED", "ERR_STREAM_DESTROYED", "ERR_STREAM_WRITE_AFTER_END"].includes(
+			String(error.code),
+		)
+	);
 }
 
 function requestOnce(endpoint: string, request: EngineControlQueryRequest, timeoutMs: number): Promise<unknown> {

@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
@@ -604,6 +604,72 @@ describe("Engine Control + Query", () => {
 
 		await server.close();
 		await runtime.dispose();
+	});
+
+	it("survives a native client disconnect while its durable response is ready to write", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-control-cancel-${Snowflake.next()}-`));
+		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite") });
+		const agentInstanceRef = "grimoire://tasks/grimoire/control-cancel/agents/agent";
+		await runtime.store.registerAgent({
+			agentInstanceId: "control-cancel",
+			agentInstanceRef,
+			principalId: "owner",
+			authorityGeneration: 1,
+		});
+		const server = await startEngineControlQueryServer({
+			runtime,
+			runtimeDir: tempDir,
+			deviceId: "device",
+			engineId: "engine",
+			resolveLaunchProfile: async () => ({ spawns: "", profileDigest: "profile" }),
+		});
+		const token = fs.readFileSync(path.join(tempDir, "control-query.token"), "utf8").trim();
+		const readSummary = runtime.store.runtimeSummary.bind(runtime.store);
+		const client = new EngineControlQueryClient(tempDir);
+		try {
+			for (let round = 0; round < 12; round++) {
+				const ready = Promise.withResolvers<void>();
+				const release = Promise.withResolvers<void>();
+				const query = spyOn(runtime.store, "runtimeSummary").mockImplementation(async request => {
+					const result = await readSummary(request);
+					ready.resolve();
+					await release.promise;
+					return result;
+				});
+				const socket = net.createConnection(server.endpoint);
+				const closed = new Promise<void>(resolve => socket.once("close", () => resolve()));
+				socket.on("error", () => socket.destroy());
+				socket.once("connect", () => {
+					socket.write(
+						`${JSON.stringify({
+							schema: "grimoire.engine.control_query.request.v1",
+							version: "1.0",
+							requestId: `cancel-${round}`,
+							token,
+							method: "runtime.summary",
+							params: { agentInstanceRef, principalId: "owner" },
+						})}\n`,
+					);
+				});
+				try {
+					await ready.promise;
+					// The server has not seen the peer close yet when the read resumes.
+					socket.destroy();
+					release.resolve();
+					await closed;
+				} finally {
+					release.resolve();
+					socket.destroy();
+					query.mockRestore();
+				}
+				expect(await client.request("runtime.summary", { agentInstanceRef, principalId: "owner" })).toMatchObject({
+					summary: { agentInstanceRef },
+				});
+			}
+		} finally {
+			await server.close();
+			await runtime.dispose();
+		}
 	});
 
 	it("publishes retention config and streams a temporary compressed archive through the core endpoint", async () => {
