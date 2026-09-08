@@ -148,7 +148,7 @@ export async function launchHostedEngineChild(
 		signal?: AbortSignal;
 		cancelLocal(agentInstanceId: string): Promise<void>;
 		enrollChild?(agentInstanceRef: string, attemptId?: string): Promise<void>;
-		waitLocal?(
+		waitLocal(
 			agentInstanceId: string,
 			commandId: string,
 			attemptId?: string,
@@ -157,6 +157,7 @@ export async function launchHostedEngineChild(
 	},
 ): Promise<EngineChildLaunchResult> {
 	request.signal?.throwIfAborted();
+	if (typeof request.waitLocal !== "function") throw new Error("Exact local Attempt result wait is unavailable");
 	const launched = await rpc.call("grimoire_agent_engine_child_launch", {
 		device_id: request.deviceId,
 		engine_id: request.engineId,
@@ -184,9 +185,8 @@ export async function launchHostedEngineChild(
 			: typeof launched.attempt_id === "string"
 				? launched.attempt_id
 				: undefined;
-	await request.enrollChild?.(agentInstanceRef, attemptId);
-	if (!request.waitLocal) throw new Error("Exact local Attempt result wait is unavailable");
 	try {
+		await request.enrollChild?.(agentInstanceRef, attemptId);
 		const result = await request.waitLocal(agentInstanceId, jobId, attemptId, request.signal);
 		if (result.attemptId) await request.enrollChild?.(agentInstanceRef, result.attemptId);
 		return {

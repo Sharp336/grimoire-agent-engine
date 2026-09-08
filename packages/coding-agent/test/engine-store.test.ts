@@ -245,8 +245,19 @@ describe("EngineStore", () => {
 			"INSERT INTO engine_schema_migrations(version, checksum, applied_at) VALUES (999, 'future', ?)",
 			[Date.now()],
 		);
+		await newer.unsafe("CREATE TABLE future_state(id TEXT PRIMARY KEY,payload TEXT NOT NULL)");
+		await newer.unsafe("INSERT INTO future_state VALUES ('preserve','future canonical state')");
+		await newer.unsafe("PRAGMA journal_mode=DELETE");
 		await newer.end();
+		const before = fs.readFileSync(databasePath);
 		await expect(EngineStore.open(databasePath)).rejects.toThrow("schema is newer than this binary");
+		expect(fs.readFileSync(databasePath)).toEqual(before);
+		const inspect = new Database(databasePath, { readonly: true });
+		expect(inspect.query("SELECT * FROM future_state").all()).toEqual([
+			{ id: "preserve", payload: "future canonical state" },
+		]);
+		expect(inspect.query("PRAGMA journal_mode").get()).toEqual({ journal_mode: "delete" });
+		inspect.close();
 	});
 
 	it("rolls back a migration that cannot apply cleanly", async () => {

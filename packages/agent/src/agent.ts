@@ -373,6 +373,7 @@ export class Agent {
 	#transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => Promise<AgentMessage[]>;
 	#transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 	#steeringQueue: AgentMessage[] = [];
+	readonly #steeringBatches = new WeakMap<AgentMessage, symbol>();
 	#followUpQueue: AgentMessage[] = [];
 	#steeringWaiters = new Set<() => void>();
 
@@ -996,7 +997,15 @@ export class Agent {
 	 * Delivered after current tool execution, skips remaining tools.
 	 */
 	steer(m: AgentMessage) {
-		this.#steeringQueue.push(m);
+		this.steerBatch([m]);
+	}
+
+	/** Enqueue one indivisible steering input with its context companions. */
+	steerBatch(messages: readonly AgentMessage[]): void {
+		if (!messages.length) return;
+		const batch = Symbol();
+		for (const message of messages) this.#steeringBatches.set(message, batch);
+		this.#steeringQueue.push(...messages);
 		this.#notifySteeringWaiters();
 	}
 
@@ -1055,17 +1064,25 @@ export class Agent {
 		return this.#abortController?.signal.aborted === true && this.#state.isStreaming;
 	}
 
+	#steeringHeadCount(): number {
+		if (this.#steeringMode === "all") return this.#steeringQueue.length;
+		const first = this.#steeringQueue[0];
+		if (!first) return 0;
+		const batch = this.#steeringBatches.get(first);
+		let count = 1;
+		while (
+			batch &&
+			count < this.#steeringQueue.length &&
+			this.#steeringBatches.get(this.#steeringQueue[count]) === batch
+		)
+			count++;
+		return count;
+	}
+
 	#dequeueSteeringMessages(): AgentMessage[] {
-		if (this.#steeringMode === "one-at-a-time") {
-			if (this.#steeringQueue.length > 0) {
-				const first = this.#steeringQueue[0];
-				this.#steeringQueue = this.#steeringQueue.slice(1);
-				return [first];
-			}
-			return [];
-		}
-		const steering = this.#steeringQueue.slice();
-		this.#steeringQueue = [];
+		const count = this.#steeringHeadCount();
+		const steering = this.#steeringQueue.slice(0, count);
+		this.#steeringQueue = this.#steeringQueue.slice(count);
 		return steering;
 	}
 
@@ -1490,7 +1507,7 @@ export class Agent {
 				if (this.#steeringQueue.length === 0) {
 					return { queued: false };
 				}
-				const messageCount = this.#steeringMode === "one-at-a-time" ? 1 : this.#steeringQueue.length;
+				const messageCount = this.#steeringHeadCount();
 				let hasAgentSteering = false;
 				for (let i = 0; i < messageCount; i++) {
 					const message = this.#steeringQueue[i];

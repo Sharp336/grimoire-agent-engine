@@ -6,7 +6,7 @@ import { AckPolicy, jetstream, jetstreamManager } from "@nats-io/jetstream";
 import { connect, nkeyAuthenticator, nkeys } from "@nats-io/transport-node";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { EngineEvent } from "@oh-my-pi/pi-coding-agent/engine/contracts";
+import type { EngineBindingSnapshot, EngineEvent } from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import {
 	type GrimoireRpc,
 	HostedEngineBridge,
@@ -20,7 +20,7 @@ import {
 	type EngineEventEnvelope,
 	NatsEngineAdapter,
 } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
-import { engineRouteToken } from "@oh-my-pi/pi-coding-agent/engine/route";
+import { engineAgentId, engineAgentInstanceId, engineRouteToken } from "@oh-my-pi/pi-coding-agent/engine/route";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { natsConfig, runEngineService } from "@oh-my-pi/pi-coding-agent/engine/service";
 import { EngineStore } from "@oh-my-pi/pi-coding-agent/engine/store";
@@ -921,6 +921,9 @@ describe("HostedGrimoireRpc", () => {
 						cancelLocal: async () => {
 							throw new Error("No child was allocated");
 						},
+						waitLocal: async () => {
+							throw new Error("No child was allocated");
+						},
 					}),
 				).rejects.toThrow(`Grimoire Host tool grimoire_agent_engine_child_launch failed: ${failure.message}`);
 			}
@@ -958,39 +961,65 @@ describe("HostedGrimoireRpc", () => {
 });
 
 describe("hosted child launch", () => {
-	it("waits for the terminal job's full Engine result instead of returning an empty or compact event answer", async () => {
-		const answer = `${"large child result\n".repeat(4000)}CHILD-END`;
-		let polls = 0;
+	const stores: EngineStore[] = [];
+	const directories: string[] = [];
+	afterEach(async () => {
+		for (const store of stores.splice(0)) await store.close();
+		for (const directory of directories.splice(0)) removeSyncWithRetries(directory);
+	});
+	async function childFixture(name: string) {
+		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "engine-child-wait-"));
+		directories.push(directory);
+		const store = await EngineStore.open(path.join(directory, "engine.sqlite"));
+		stores.push(store);
+		const generation = await store.nextEngineGeneration();
+		const agentInstanceRef = `grimoire://tasks/p/t/agents/${name}`;
+		const agentInstanceId = engineAgentInstanceId(agentInstanceRef);
+		await store.registerAgent({ agentInstanceId, agentInstanceRef, authorityGeneration: 1, principalId: "owner" });
+		const target: EngineBindingSnapshot = {
+			agentInstanceId,
+			bindingId: `binding-${name}`,
+			commandId: `start-${name}`,
+			executionId: `execution-${name}`,
+			attemptId: `attempt-${name}`,
+			engineAgentId: engineAgentId(agentInstanceId),
+			profileDigest: "profile",
+			state: "running",
+			engineGeneration: generation,
+			bindingGeneration: 1,
+			authorityGeneration: 1,
+		};
+		await store.admitCommand(
+			{
+				...target,
+				operation: "start",
+				agentInstanceRef,
+				principalId: "owner",
+				deviceId: "device",
+				engineId: "engine",
+				payloadHash: "payload",
+				canonicalHash: "canonical",
+			},
+			generation,
+		);
+		await store.commitAttemptTransition(target, "running", [{ kind: "running" }]);
+		const calls: string[] = [];
 		const rpc: GrimoireRpc = {
 			async call(tool, args) {
-				if (tool === "grimoire_agent_engine_child_launch") {
+				calls.push(tool);
+				if (tool === "grimoire_agent_engine_child_launch")
 					return {
-						agent_instance: { agent_instance_ref: "grimoire://tasks/p/t/agents/child-1" },
-						job: { job_id: "job-full-result" },
+						agent_instance: { agent_instance_ref: agentInstanceRef },
+						job: { job_id: target.commandId, payload: { command: { attemptId: target.attemptId } } },
 					};
+				if (tool === "grimoire_job_cancel") {
+					expect(args.job_id).toBe(target.commandId);
+					return { status: "cancelled" };
 				}
-				expect(tool).toBe("grimoire_job_get");
-				expect(args.job_id).toBe("job-full-result");
-				polls++;
-				return {
-					job: {
-						status: "succeeded",
-						result:
-							polls === 1
-								? { status: "pending_engine_result" }
-								: {
-										engine_result: {
-											assistantText: answer,
-											transcriptRef: "history://Engine-full-child",
-											outputTruncated: false,
-										},
-										engine_event: { payload: { assistantFinal: "compact preview", outputTruncated: true } },
-									},
-					},
-				};
+				throw new Error(`Unexpected Core poll ${tool}`);
 			},
 		};
-		const result = await launchHostedEngineChild(rpc, {
+		const request = {
 			deviceId: "device",
 			engineId: "engine",
 			parentAgentInstanceRef: "grimoire://tasks/p/t/agents/parent",
@@ -1000,171 +1029,102 @@ describe("hosted child launch", () => {
 			cwd: "/tmp",
 			maxSpawnDepth: 0,
 			cancelLocal: async () => {},
+			waitLocal: store.waitAttemptResult.bind(store),
+		};
+		return { store, target, calls, rpc, request, agentInstanceRef };
+	}
+	it("waits for the exact terminal Attempt full result without Core job polling", async () => {
+		const { store, target, calls, rpc, request } = await childFixture("child-1");
+		const answer = `${"large child result\n".repeat(4000)}CHILD-END`;
+		const entered = Promise.withResolvers<void>();
+		let settled = false;
+		const pending = launchHostedEngineChild(rpc, {
+			...request,
+			waitLocal: (...args) => {
+				entered.resolve();
+				return store.waitAttemptResult(...args);
+			},
+		}).then(result => {
+			settled = true;
+			return result;
 		});
-		expect(polls).toBe(2);
+		await entered.promise;
+		expect(settled).toBeFalse();
+		await store.commitAttemptTransition(
+			target,
+			"completed",
+			[{ kind: "completed", payload: { assistantFinal: "compact preview", outputTruncated: true } }],
+			{ terminalResult: { assistantFinal: answer, transcriptRef: "history://Engine-full-child" } },
+		);
+		const result = await pending;
 		expect(result).toMatchObject({
-			agentInstanceId: "agent_5362f5f8e4885e2abf275ed90a5bc4f8",
+			agentInstanceId: target.agentInstanceId,
 			status: "completed",
 			assistantFinal: answer,
 			transcriptRef: "history://Engine-full-child",
 		});
 		expect(result.outputTruncated).toBeUndefined();
+		expect(calls).toEqual(["grimoire_agent_engine_child_launch"]);
 	});
-
-	it("returns the public Engine completion payload for the created child", async () => {
-		const calls: string[] = [];
-		const rpc: GrimoireRpc = {
-			async call(tool) {
-				calls.push(tool);
-				if (tool === "grimoire_agent_engine_child_launch") {
-					return {
-						agent_instance: {
-							agent_instance_id: "child-1",
-							agent_instance_ref: "grimoire://tasks/p/t/agents/child-1",
-						},
-						job: { job_id: "job-1" },
-					};
-				}
-				if (tool === "grimoire_job_get") {
-					return {
-						job: {
-							status: "succeeded",
-							result: {
-								engine_event: {
-									payload: {
-										assistantFinal: "done",
-										transcriptRef: "history://Engine-child-transport",
-										outputTruncated: true,
-									},
-								},
-							},
-						},
-					};
-				}
-				throw new Error(`unexpected ${tool}`);
+	it("returns retained completion and enrolls the immutable child Attempt", async () => {
+		const { store, target, calls, rpc, request, agentInstanceRef } = await childFixture("child-retained");
+		await store.commitAttemptTransition(target, "completed", [
+			{
+				kind: "completed",
+				payload: {
+					assistantFinal: "done",
+					transcriptRef: "history://Engine-child-transport",
+					outputTruncated: true,
+				},
 			},
-		};
+		]);
+		const enrolled: Array<{ ref: string; attemptId?: string }> = [];
 		const result = await launchHostedEngineChild(rpc, {
-			deviceId: "device",
-			engineId: "engine",
-			parentAgentInstanceRef: "grimoire://tasks/p/t/agents/parent",
-			parentAttemptId: "attempt-parent",
-			profileRef: "gctx:2222222222222222",
-			workStepId: "implement",
-			cwd: "/tmp",
-			maxSpawnDepth: 0,
-			cancelLocal: async () => {},
+			...request,
+			enrollChild: async (ref, attemptId) => {
+				enrolled.push({ ref, attemptId });
+			},
 		});
 		expect(result).toMatchObject({
-			agentInstanceId: "agent_5362f5f8e4885e2abf275ed90a5bc4f8",
 			status: "completed",
 			assistantFinal: "done",
 			transcriptRef: "history://Engine-child-transport",
 			outputTruncated: true,
 		});
-		expect(calls).toEqual(["grimoire_agent_engine_child_launch", "grimoire_job_get"]);
+		expect(enrolled).toEqual(Array(2).fill({ ref: agentInstanceRef, attemptId: target.attemptId }));
+		expect(calls).toEqual(["grimoire_agent_engine_child_launch"]);
 	});
-
-	it.each(["engine_result", "engine_event"])(
-		"returns a failed child's safe error and transcript from %s",
-		async envelope => {
-			const rpc: GrimoireRpc = {
-				async call(tool) {
-					if (tool === "grimoire_agent_engine_child_launch") {
-						return {
-							agent_instance: {
-								agent_instance_ref: "grimoire://tasks/p/t/agents/child-failed",
-							},
-							job: { job_id: "job-failed" },
-						};
-					}
-					if (tool === "grimoire_job_get") {
-						return {
-							job: {
-								status: "failed",
-								result:
-									envelope === "engine_result"
-										? {
-												engine_result: {
-													error: "Retry budget exhausted after 3 retries: Thinking loop detected",
-													transcriptRef: "history://Engine-33333333333333333333333333333333",
-												},
-											}
-										: {
-												engine_event: {
-													type: "attempt.failed",
-													payload: {
-														error: "Retry budget exhausted after 3 retries: Thinking loop detected",
-														transcriptRef: "history://Engine-33333333333333333333333333333333",
-													},
-												},
-											},
-							},
-						};
-					}
-					throw new Error(`unexpected ${tool}`);
-				},
-			};
-			const result = await launchHostedEngineChild(rpc, {
-				deviceId: "device",
-				engineId: "engine",
-				parentAgentInstanceRef: "grimoire://tasks/p/t/agents/parent",
-				parentAttemptId: "attempt-parent",
-				profileRef: "gctx:2222222222222222",
-				workStepId: "implement",
-				cwd: "/tmp",
-				maxSpawnDepth: 0,
-				cancelLocal: async () => {},
-			});
-			expect(result).toMatchObject({
-				status: "failed",
-				error: "Retry budget exhausted after 3 retries: Thinking loop detected",
-				transcriptRef: "history://Engine-33333333333333333333333333333333",
-			});
-		},
-	);
-
-	it("cancels an aborted child by its Engine-scoped identity", async () => {
+	it.each(["failed", "interrupted"] as const)("returns an exact %s child error and transcript", async state => {
+		const { store, target, calls, rpc, request } = await childFixture(`child-${state}`);
+		await store.commitAttemptTransition(target, state, [{ kind: state }], {
+			terminalResult: { error: "Retry budget exhausted", transcriptRef: "history://Engine-failed-child" },
+		});
+		expect(await launchHostedEngineChild(rpc, request)).toMatchObject({
+			status: "failed",
+			error: "Retry budget exhausted",
+			transcriptRef: "history://Engine-failed-child",
+		});
+		expect(calls).toEqual(["grimoire_agent_engine_child_launch"]);
+	});
+	it("cancels an aborted wait by its exact Engine identity without Core job polling", async () => {
+		const { store, target, calls, rpc, request } = await childFixture("child-cancel");
 		const controller = new AbortController();
 		const cancelled: string[] = [];
-		const rpc: GrimoireRpc = {
-			async call(tool) {
-				if (tool === "grimoire_agent_engine_child_launch") {
-					return {
-						agent_instance: {
-							agent_instance_id: "child-cancel",
-							agent_instance_ref: "grimoire://tasks/p/t/agents/child-cancel",
-						},
-						job: { job_id: "job-cancel" },
-					};
-				}
-				if (tool === "grimoire_job_get") {
-					controller.abort();
-					return { job: { status: "succeeded", result: { status: "pending_engine_result" } } };
-				}
-				if (tool === "grimoire_job_cancel") return { status: "cancelled" };
-				throw new Error(`unexpected ${tool}`);
-			},
-		};
 		const result = await launchHostedEngineChild(rpc, {
-			deviceId: "device",
-			engineId: "engine",
-			parentAgentInstanceRef: "grimoire://tasks/p/t/agents/parent",
-			parentAttemptId: "attempt-parent",
-			profileRef: "gctx:2222222222222222",
-			workStepId: "implement",
-			cwd: "/tmp",
-			maxSpawnDepth: 0,
+			...request,
 			signal: controller.signal,
-			cancelLocal: async agentInstanceId => {
-				cancelled.push(agentInstanceId);
+			waitLocal: (...args) => {
+				const pending = store.waitAttemptResult(...args);
+				queueMicrotask(() => controller.abort());
+				return pending;
+			},
+			cancelLocal: async agentId => {
+				cancelled.push(agentId);
 			},
 		});
-		expect(cancelled).toEqual(["agent_2f68651184ebfcaea74ecc934ce85868"]);
-		expect(result).toMatchObject({
-			agentInstanceId: "agent_2f68651184ebfcaea74ecc934ce85868",
-			status: "cancelled",
-		});
+		expect(cancelled).toEqual([target.agentInstanceId]);
+		expect(result).toMatchObject({ agentInstanceId: target.agentInstanceId, status: "cancelled" });
+		expect(calls).toEqual(["grimoire_agent_engine_child_launch", "grimoire_job_cancel"]);
 	});
 });
 

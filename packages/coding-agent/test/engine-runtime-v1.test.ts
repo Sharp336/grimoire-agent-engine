@@ -571,4 +571,42 @@ describe("runtime v1 durable boundaries", () => {
 			store.runtimeInput({ ...request, inputId: "input", revision: events[0].eventId + 1 }),
 		).rejects.toThrow("revision");
 	});
+	it("pins a child wait to the launch command and retained Attempt across later executions", async () => {
+		const store = await createStore();
+		const first = await active(store);
+		const firstResult = { assistantFinal: "first result", transcriptRef: "history://first" };
+		await store.commitAttemptTransition(first, "completed", [{ kind: "completed" }], { terminalResult: firstResult });
+		const later = {
+			...first,
+			commandId: "later-command",
+			attemptId: "later-attempt",
+			executionId: "later-execution",
+		};
+		await store.commitAttemptTransition(later, "completed", [{ kind: "completed" }], {
+			terminalResult: { assistantFinal: "later result" },
+		});
+		expect(await store.waitAttemptResult(first.agentInstanceId, first.commandId, first.attemptId)).toEqual({
+			attemptId: first.attemptId,
+			state: "completed",
+			payload: firstResult,
+		});
+		await expect(
+			store.waitAttemptResult(first.agentInstanceId, "unrelated-command", first.attemptId),
+		).rejects.toThrow("another launch");
+		await expect(store.waitAttemptResult(first.agentInstanceId, first.commandId, later.attemptId)).rejects.toThrow(
+			"another launch",
+		);
+	});
+	it("does not lose cancellation while the initial child state read is pending", async () => {
+		const store = await createStore();
+		const controller = new AbortController();
+		const pending = store.waitAttemptResult(
+			identity("root").agentInstanceId,
+			"not-yet-admitted",
+			undefined,
+			controller.signal,
+		);
+		queueMicrotask(() => controller.abort(new Error("parent cancelled")));
+		await expect(pending).rejects.toThrow("parent cancelled");
+	});
 });

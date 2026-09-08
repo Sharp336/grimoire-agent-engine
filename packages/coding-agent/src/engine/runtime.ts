@@ -581,15 +581,26 @@ export class EngineRuntime {
 				item ? { ...item, revision: item.revision + 1 } : undefined,
 			);
 			try {
-				await this.#sendCommandContext(binding, request.context, request.commandId);
-				await binding.session.steer(item?.deliveryPayload ?? request.message!, undefined, {
-					sourceCommandId: request.commandId,
-					...(request.clientMessageId
-						? { clientMessageId: request.clientMessageId }
-						: item?.sourceType === "user"
-							? { clientMessageId: item.sourceEventId }
-							: {}),
-				});
+				await binding.session.steer(
+					item?.deliveryPayload ?? request.message!,
+					undefined,
+					{
+						sourceCommandId: request.commandId,
+						...(request.clientMessageId
+							? { clientMessageId: request.clientMessageId }
+							: item?.sourceType === "user"
+								? { clientMessageId: item.sourceEventId }
+								: {}),
+					},
+					request.context
+						? {
+								customType: "engine-command-context",
+								content: request.context,
+								display: false,
+								details: { sourceCommandId: request.commandId },
+							}
+						: undefined,
+				);
 				binding.attemptState = "running";
 				await this.#commitAttemptTransition(
 					binding,
@@ -685,6 +696,11 @@ export class EngineRuntime {
 				request.expectedIntentRevision === undefined
 			)
 				throw new EngineTargetError("too_late", "Terminal branch control requires an intent revision");
+			const startFence =
+				action === "stop" && "pendingStartCommandId" in request && request.pendingStartCommandId
+					? (request as EngineCancelRequest)
+					: undefined;
+			if (!startFence) await this.store.assertIntent(request.agentInstanceId, request.expectedIntentRevision);
 			if (
 				action === "resume" &&
 				(!root || !["paused", "pause_requested", "waiting_input"].includes(root.attemptState))
@@ -693,11 +709,6 @@ export class EngineRuntime {
 					"too_late",
 					"Only a paused Attempt can resume; interrupted execution requires Continue",
 				);
-			const startFence =
-				action === "stop" && "pendingStartCommandId" in request && request.pendingStartCommandId
-					? (request as EngineCancelRequest)
-					: undefined;
-			if (!startFence) await this.store.assertIntent(request.agentInstanceId, request.expectedIntentRevision);
 			if (action === "resume" && root && "context" in request)
 				await this.#sendCommandContext(root, request.context, request.commandId);
 			const changed = await this.store.branchIntent(
@@ -834,8 +845,8 @@ export class EngineRuntime {
 		if (request.engineGeneration !== this.engineGeneration) {
 			throw new EngineTargetError("stale_target", `Engine generation ${request.engineGeneration} is stale`);
 		}
-		const cancelLiveBinding = async (): Promise<EngineControlResult | undefined> => {
-			const binding = this.#bindings.get(request.agentInstanceId);
+		const cancelStartedAttempt = async (): Promise<EngineControlResult | undefined> => {
+			const binding = await this.store.getBinding(request.agentInstanceId);
 			if (!binding) return undefined;
 			if (
 				binding.executionId !== request.executionId ||
@@ -845,7 +856,7 @@ export class EngineRuntime {
 			)
 				return undefined;
 			return await this.cancel({
-				...this.#snapshot(binding),
+				...binding,
 				commandId: request.commandId,
 				reason: request.reason,
 				expectedIntentRevision: request.expectedIntentRevision,
@@ -854,8 +865,6 @@ export class EngineRuntime {
 				principalId: request.principalId,
 			});
 		};
-		const liveResult = await cancelLiveBinding();
-		if (liveResult) return liveResult;
 		const cancelled = await this.store.cancelPendingStart(request, request.commandId);
 		if (cancelled.event) this.#notifyEvents([cancelled.event]);
 		if (cancelled.status === "cancelled" || cancelled.status === "already_cancelled") {
@@ -878,7 +887,7 @@ export class EngineRuntime {
 			};
 		}
 		if (cancelled.status === "too_late") {
-			const racedLiveResult = await cancelLiveBinding();
+			const racedLiveResult = await cancelStartedAttempt();
 			if (racedLiveResult) return racedLiveResult;
 			throw new EngineTargetError("too_late", `Attempt ${request.attemptId} has already started or settled`);
 		}

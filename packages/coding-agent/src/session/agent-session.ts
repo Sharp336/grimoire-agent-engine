@@ -6274,13 +6274,14 @@ export class AgentSession {
 		text: string,
 		images?: ImageContent[],
 		identity?: Pick<PromptOptions, "sourceCommandId" | "clientMessageId">,
+		context?: CustomMessagePayload,
 	): Promise<void> {
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
 
 		const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
-		await this.#queueUserMessage(expandedText, images, "steer", identity);
+		await this.#queueUserMessage(expandedText, images, "steer", identity, context);
 	}
 
 	/**
@@ -6356,6 +6357,7 @@ export class AgentSession {
 		images: ImageContent[] | undefined,
 		mode: "steer" | "followUp",
 		identity?: Pick<PromptOptions, "sourceCommandId" | "clientMessageId">,
+		context?: CustomMessagePayload,
 	): Promise<void> {
 		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
 		// while streaming) is a deliberate resume; re-enable advisor auto-resume that
@@ -6371,6 +6373,13 @@ export class AgentSession {
 		const imageDescriptionNotice = normalizedImages?.length
 			? await this.#buildImageDescriptionNotice(normalizedImages)
 			: undefined;
+		const contextMessage = context
+			? await this.#normalizeAgentMessageImages({
+					...normalizeCustomMessagePayload(context),
+					role: "custom" as const,
+					timestamp: Date.now(),
+				})
+			: undefined;
 		this.#allowQueuedMessageDrainRetry();
 		const message = {
 			role: "user" as const,
@@ -6383,6 +6392,8 @@ export class AgentSession {
 		if (mode === "followUp") {
 			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
 			this.agent.followUp(message);
+		} else if (contextMessage) {
+			this.agent.steerBatch([contextMessage, ...(imageDescriptionNotice ? [imageDescriptionNotice] : []), message]);
 		} else {
 			if (imageDescriptionNotice) this.agent.steer(imageDescriptionNotice);
 			this.agent.steer(message);

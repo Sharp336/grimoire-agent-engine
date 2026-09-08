@@ -709,6 +709,18 @@ function migrationChecksum(migration: (typeof SCHEMA_MIGRATIONS)[number]): strin
 		.digest("hex");
 }
 
+function assertSchemaHistory(applied: MigrationRow[]): void {
+	if (applied.some(row => Number(row.version) > CURRENT_SCHEMA_VERSION))
+		throw new Error(`Engine database schema is newer than this binary (max ${CURRENT_SCHEMA_VERSION})`);
+	for (const [index, row] of applied.entries()) {
+		const migration = SCHEMA_MIGRATIONS[index];
+		if (!migration || Number(row.version) !== migration.version)
+			throw new Error("Engine database migration history is not a contiguous supported prefix");
+		if (row.checksum !== migrationChecksum(migration))
+			throw new Error(`Engine database migration ${migration.version} checksum does not match this binary`);
+	}
+}
+
 async function applySchemaMigrations(client: SqlClient): Promise<void> {
 	await client.unsafe("BEGIN IMMEDIATE");
 	try {
@@ -722,18 +734,7 @@ async function applySchemaMigrations(client: SqlClient): Promise<void> {
 		const applied = (await client.unsafe(
 			"SELECT version, checksum FROM engine_schema_migrations ORDER BY version",
 		)) as MigrationRow[];
-		if (applied.some(row => Number(row.version) > CURRENT_SCHEMA_VERSION)) {
-			throw new Error(`Engine database schema is newer than this binary (max ${CURRENT_SCHEMA_VERSION})`);
-		}
-		for (const [index, row] of applied.entries()) {
-			const migration = SCHEMA_MIGRATIONS[index];
-			if (!migration || Number(row.version) !== migration.version) {
-				throw new Error("Engine database migration history is not a contiguous supported prefix");
-			}
-			if (row.checksum !== migrationChecksum(migration)) {
-				throw new Error(`Engine database migration ${migration.version} checksum does not match this binary`);
-			}
-		}
+		assertSchemaHistory(applied);
 		for (const migration of SCHEMA_MIGRATIONS.slice(applied.length)) {
 			for (const statement of migration.statements) await client.unsafe(statement);
 			for (const [table, column, definition] of migration.requiredColumns) {
@@ -1517,11 +1518,13 @@ export class EngineStore {
 				const receipt = command?.receipt ? (JSON.parse(command.receipt) as EngineCommandReceipt) : undefined;
 				const attempts = pinnedAttempt
 					? ((await sql.unsafe(
-							"SELECT state,result_payload FROM engine_attempts WHERE attempt_id=? AND agent_instance_id=?",
+							"SELECT command_id,state,result_payload FROM engine_attempts WHERE attempt_id=? AND agent_instance_id=?",
 							[pinnedAttempt, agentInstanceId],
-						)) as Array<{ state: EngineAttemptState; result_payload: string | null }>)
+						)) as Array<{ command_id: string; state: EngineAttemptState; result_payload: string | null }>)
 					: [];
 				const attempt = attempts[0];
+				if (attempt && attempt.command_id !== commandId)
+					throw new EngineTargetError("stale_target", "Child Attempt belongs to another launch command");
 				if (attempt && TERMINAL_ATTEMPT_STATES.has(attempt.state)) {
 					const events = attempt.result_payload
 						? []
@@ -1548,6 +1551,7 @@ export class EngineStore {
 			const cancelled = Promise.withResolvers<void>();
 			const abort = () => cancelled.resolve();
 			signal?.addEventListener("abort", abort, { once: true });
+			if (signal?.aborted) abort();
 			try {
 				await Promise.race([changed, cancelled.promise]);
 			} finally {
@@ -1611,6 +1615,15 @@ export class EngineStore {
 		await fs.mkdir(path.dirname(resolved), { recursive: true });
 		const client = new SQL(`sqlite:${resolved.replaceAll("\\", "/")}`);
 		try {
+			const schema = await client.unsafe(
+				"SELECT 1 FROM sqlite_master WHERE type='table' AND name='engine_schema_migrations'",
+			);
+			if (schema.length) {
+				const applied = (await client.unsafe(
+					"SELECT version,checksum FROM engine_schema_migrations ORDER BY version",
+				)) as MigrationRow[];
+				assertSchemaHistory(applied);
+			}
 			await client.unsafe("PRAGMA journal_mode=WAL");
 			await client.unsafe("PRAGMA foreign_keys=ON");
 			await client.unsafe("PRAGMA synchronous=FULL");

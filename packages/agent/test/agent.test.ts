@@ -8,6 +8,44 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { createAssistantMessage } from "./helpers";
 
 describe("Agent", () => {
+	it("keeps steering context and its input atomic while preserving one-at-a-time across inputs", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			responses: [
+				async () => {
+					entered.resolve();
+					await release.promise;
+					return { content: ["initial"] };
+				},
+				{ content: ["first"] },
+				{ content: ["second"] },
+			],
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model },
+			streamFn: mock.stream,
+			steeringMode: "one-at-a-time",
+		});
+		const run = agent.prompt("start");
+		await entered.promise;
+		agent.steerBatch([
+			{ role: "user", content: "context for A", timestamp: Date.now() },
+			{ role: "user", content: "A", timestamp: Date.now() },
+		]);
+		agent.steer({ role: "user", content: "B", timestamp: Date.now() });
+		release.resolve();
+		await run;
+		expect(mock.calls).toHaveLength(3);
+		expect(JSON.stringify(mock.calls[1].context)).toContain("context for A");
+		expect(mock.calls[1].context.messages).toEqual(
+			expect.arrayContaining([expect.objectContaining({ role: "user", content: "A" })]),
+		);
+		expect(
+			mock.calls[1].context.messages.some(message => message.role === "user" && message.content === "B"),
+		).toBeFalse();
+		expect(mock.calls[2].context.messages).toContainEqual(expect.objectContaining({ role: "user", content: "B" }));
+	});
 	it("should support steering message queueing", async () => {
 		const agent = new Agent();
 
