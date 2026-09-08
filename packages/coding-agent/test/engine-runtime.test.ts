@@ -12,6 +12,7 @@ import type {
 	EngineControlInitiator,
 	EngineEvent,
 	EngineLaunchProfile,
+	EngineProfileRouteState,
 	EngineStartRequest,
 } from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import {
@@ -2649,6 +2650,175 @@ describe("EngineRuntime", () => {
 			/private reasoning sentinel|private-input\.txt|private tool output sentinel/,
 		);
 		await runtime.dispose();
+	}, 60_000);
+
+	it.each([false, true])(
+		"records actual fallback dispatch and explicit route exhaustion (exhausted=%s)",
+		async exhausted => {
+			const primary = createMockModel({ id: "route-primary", responses: [{ throw: "401 Unauthorized" }] });
+			const fallback = createMockModel({
+				id: "route-fallback",
+				responses: [exhausted ? { throw: "401 Unauthorized" } : { content: ["fallback answered"] }],
+			});
+			const find = spyOn(modelRegistry, "find").mockImplementation((provider, id) =>
+				[primary, fallback].find(model => model.provider === provider && model.id === id),
+			);
+			const key = spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
+			const mapping = {
+				profileRef: "gctx:2222222222222222",
+				primaryRouteRef: "gctx:3333333333333333",
+				routes: [primary, fallback].map((model, index) => ({
+					routeRef: index === 0 ? "gctx:3333333333333333" : "gctx:4444444444444444",
+					provider: model.provider,
+					modelId: model.id,
+				})),
+			};
+			const { runtime, cwd } = await createRuntime((session, input) => session.prompt(input), {
+				resolveSessionProfile: async () => ({
+					options: { model: primary },
+					profileRoutes: mapping,
+					orderedRouteFallback: { selectors: [primary, fallback].map(model => `${model.provider}/${model.id}`) },
+					dispose() {},
+				}),
+			});
+			try {
+				await runtime.start(
+					{
+						commandId: "route-fallback-start",
+						agentInstanceId: "route-fallback-agent",
+						executionId: "route-fallback-execution",
+						attemptId: "route-fallback-attempt",
+						authorityGeneration: 1,
+						cwd,
+						input: "test fallback",
+					},
+					profile,
+				);
+				await runtime.drain();
+				expect(primary.calls).toHaveLength(1);
+				expect(fallback.calls).toHaveLength(1);
+				const attempt = await runtime.store.getAttempt("route-fallback-attempt");
+				expect(attempt?.state).toBe(exhausted ? "failed" : "completed");
+				const state = JSON.parse(attempt!.profile_route_state!) as EngineProfileRouteState;
+				expect(state).toMatchObject({ fallback: true, phase: exhausted ? "exhausted" : "active" });
+				if (!exhausted) expect(state.routeRef).toBe(mapping.routes[1]!.routeRef);
+				const events = await runtime.store.pendingEvents();
+				const changes = events.filter(event => event.kind === "profile_route_changed");
+				expect(
+					changes.some(
+						event =>
+							(event.payload?.profileRoute as EngineProfileRouteState | undefined)?.pendingRouteRef ===
+							mapping.routes[1]!.routeRef,
+					),
+				).toBe(true);
+				expect(events.indexOf(changes.at(-1)!)).toBeLessThan(
+					events.findIndex(event => event.kind === (exhausted ? "failed" : "completed")),
+				);
+			} finally {
+				await runtime.dispose();
+				find.mockRestore();
+				key.mockRestore();
+			}
+		},
+		60_000,
+	);
+
+	it("projects observed profile slots, resets them per Attempt, and retains routing after restart", async () => {
+		const model = createMockModel({ responses: [{ content: ["route answer"] }] });
+		const release = Promise.withResolvers<void>();
+		const entered = Promise.withResolvers<void>();
+		const mapping = {
+			profileRef: "gctx:2222222222222222",
+			primaryRouteRef: "gctx:3333333333333333",
+			routes: [{ routeRef: "gctx:4444444444444444", provider: model.provider, modelId: model.id }],
+		};
+		const { runtime, cwd, options } = await createRuntime(
+			async (session, input) => {
+				if (input === "fail before provider") throw new Error("local input failure");
+				entered.resolve();
+				await release.promise;
+				return session.prompt(input);
+			},
+			{ resolveSessionProfile: async () => ({ options: { model }, profileRoutes: mapping, dispose() {} }) },
+		);
+		const runtimeDir = path.dirname(options.databasePath!);
+		const server = await startEngineControlQueryServer({
+			runtime,
+			runtimeDir,
+			deviceId: "route-device",
+			engineId: "route-engine",
+			resolveLaunchProfile: () => profile,
+		});
+		const client = new EngineControlQueryClient(runtimeDir);
+		const request = {
+			commandId: "route-start",
+			agentInstanceId: "route-agent",
+			executionId: "route-execution",
+			attemptId: "route-attempt",
+			authorityGeneration: 1,
+			cwd,
+			input: "answer",
+		};
+		const completedRoute: EngineProfileRouteState = {
+			profileRef: mapping.profileRef,
+			primaryRouteRef: mapping.primaryRouteRef,
+			routeRef: mapping.routes[0]!.routeRef,
+			fallback: true,
+			phase: "active",
+		};
+		try {
+			const loading = nextEngineEvent(runtime, "profile_route_changed");
+			await runtime.start(request, profile);
+			await entered.promise;
+			expect((await loading).payload?.profileRoute).toEqual({
+				profileRef: mapping.profileRef,
+				primaryRouteRef: mapping.primaryRouteRef,
+				pendingRouteRef: mapping.routes[0]!.routeRef,
+				fallback: true,
+				phase: "loading",
+			});
+			release.resolve();
+			await runtime.drain();
+			const first = await runtime.store.getAttempt(request.attemptId);
+			expect(first?.state).toBe("completed");
+			expect(JSON.parse(first!.profile_route_state!)).toEqual(completedRoute);
+			const response = await client.request("snapshots.get", { attemptId: request.attemptId });
+			expect(response).toMatchObject({ profileRoute: completedRoute });
+			const events = (await runtime.store.pendingEvents()).filter(event => event.attemptId === request.attemptId);
+			const changes = events.filter(event => event.kind === "profile_route_changed");
+			expect(changes.map(event => event.payload?.profileRoute)).toEqual([
+				{ ...completedRoute, routeRef: undefined, pendingRouteRef: completedRoute.routeRef, phase: "loading" },
+				completedRoute,
+			]);
+			expect(events.indexOf(changes[1]!)).toBeLessThan(events.findIndex(event => event.kind === "completed"));
+			await runtime.start(
+				{
+					...request,
+					commandId: "next-route-start",
+					executionId: "next-route-execution",
+					attemptId: "next-route-attempt",
+					input: "fail before provider",
+				},
+				profile,
+			);
+			await runtime.drain();
+			const failed = await runtime.store.getAttempt("next-route-attempt");
+			expect(failed?.state).toBe("failed");
+			expect(JSON.parse(failed!.profile_route_state!)).toMatchObject({ phase: "loading" });
+			expect(JSON.parse(failed!.profile_route_state!)).not.toHaveProperty("routeRef");
+		} finally {
+			release.resolve();
+			await server.close();
+			await runtime.dispose();
+		}
+		const reopened = await EngineRuntime.create({ databasePath: options.databasePath });
+		try {
+			expect(JSON.parse((await reopened.store.getAttempt(request.attemptId))!.profile_route_state!)).toEqual(
+				completedRoute,
+			);
+		} finally {
+			await reopened.dispose();
+		}
 	}, 60_000);
 
 	it("streams bounded assistant snapshots with one identity before terminal settlement", async () => {

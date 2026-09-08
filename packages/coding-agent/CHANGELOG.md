@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added attempt-bound profile-route events and restart-safe snapshots, separating pending selection from the observed stream and route exhaustion from a retry-budget stop.
+
 - AgentProfiles can explicitly opt into their saved cross-model fallback order; editing existing same-model profiles does not silently enable it.
 - Added explicit ordered model/provider recovery for replay-safe failed turns without cycling back to earlier routes.
 - Added restart-safe Agent Engine conversation history plus configurable terminal-child transcript retention.

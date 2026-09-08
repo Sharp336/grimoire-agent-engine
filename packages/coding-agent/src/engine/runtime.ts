@@ -52,6 +52,8 @@ import {
 	type EngineInboxTarget,
 	type EngineLaunchProfile,
 	type EnginePeerMessage,
+	type EngineProfileRouteState,
+	type EngineProfileRoutes,
 	type EngineReconcileRequest,
 	type EngineReconcileResult,
 	type EngineRejectedCommand,
@@ -239,6 +241,8 @@ interface LiveBinding extends EngineBindingSnapshot {
 	traceTools: Map<string, { name: string; startedAt: number }>;
 	childLaunchCount: number;
 	modelCallSequence: number;
+	profileRoutes?: EngineProfileRoutes;
+	profileRouteState?: EngineProfileRouteState;
 	assistantMessageSequence: number;
 	assistantStream?: AssistantStreamState;
 	lastAssistantMessageId?: string;
@@ -342,6 +346,7 @@ export interface EngineRuntimeOptions {
 		childProfiles?: EngineChildProfile[];
 		sameModelRouteFallback?: NonNullable<TurnRetryPolicy["sameModelRouteFallback"]>;
 		orderedRouteFallback?: NonNullable<TurnRetryPolicy["orderedRouteFallback"]>;
+		profileRoutes?: EngineProfileRoutes;
 		dispose(): void;
 	}>;
 	/** Exact non-secret digest of every external dependency resolved for this launch. */
@@ -2190,6 +2195,7 @@ export class EngineRuntime {
 				binding.traceTools.clear();
 				binding.traceWriteTail = Promise.resolve();
 				binding.modelCallSequence = 0;
+				binding.profileRouteState = undefined;
 				this.#resetAssistantStream(binding);
 				binding.assistantMessageSequence = 0;
 				binding.lastAssistantMessageId = undefined;
@@ -2610,6 +2616,7 @@ export class EngineRuntime {
 				steerCommandSet: new Set(),
 				unsubscribe: () => {},
 				disposeProfile: resolved?.dispose ?? (() => {}),
+				profileRoutes: resolved?.profileRoutes,
 				requireYieldTool: profile.requireYieldTool === true,
 				pauseGate,
 				activeToolCallIds: new Set(),
@@ -2634,6 +2641,7 @@ export class EngineRuntime {
 			);
 			binding.unsubscribe = created.session.subscribe(event => {
 				if (event.type === "message_start" && event.message.role === "assistant") {
+					this.#queueProfileRoute(binding, "active", event.message);
 					this.#beginAssistantStream(binding, event.message.timestamp);
 				}
 				if (
@@ -2688,6 +2696,7 @@ export class EngineRuntime {
 					this.#notifyPauseProgress(binding);
 				}
 				if (event.type === "auto_retry_start") {
+					this.#queueProfileRoute(binding, "loading");
 					const model = binding.session.model;
 					const retry = {
 						attempt: event.attempt,
@@ -2714,6 +2723,9 @@ export class EngineRuntime {
 						...(event.finalError ? { error: event.finalError.slice(0, 2_048) } : {}),
 					};
 					this.#queueRetryEvent(binding, "retry_settled", retry);
+				}
+				if (event.type === "profile_route_exhausted" && event.reason === "routes_unavailable") {
+					this.#queueProfileRoute(binding, "exhausted");
 				}
 				if (event.type === "agent_end" && event.isTerminal !== false && binding.state === "running") {
 					this.agentRegistry.setStatus(binding.engineAgentId, "idle", binding.session);
@@ -3189,6 +3201,7 @@ export class EngineRuntime {
 		try {
 			const started = await this.store.startModelEffect(this.#snapshot(binding), effect);
 			this.#notifyEvents([started]);
+			this.#queueProfileRoute(binding, "loading");
 			const previous = binding.session.getLastAssistantMessage();
 			let dispatched: boolean;
 			try {
@@ -3460,6 +3473,40 @@ export class EngineRuntime {
 
 	#resetAssistantStream(binding: LiveBinding): void {
 		binding.assistantStream = undefined;
+	}
+
+	#queueProfileRoute(binding: LiveBinding, phase: EngineProfileRouteState["phase"], message?: AssistantMessage): void {
+		const mapping = binding.profileRoutes;
+		if (!mapping) return;
+		const provider = message?.provider ?? binding.session.model?.provider;
+		const modelId = message?.model ?? binding.session.model?.id;
+		const matched = mapping.routes.find(route => route.provider === provider && route.modelId === modelId);
+		// An advisor or an unconfigured model is not a profile slot; never guess by model name.
+		if (!matched) return;
+		const previous = binding.profileRouteState;
+		const routeRef = phase === "active" ? matched.routeRef : previous?.routeRef;
+		const profileRoute: EngineProfileRouteState = {
+			profileRef: mapping.profileRef,
+			primaryRouteRef: mapping.primaryRouteRef,
+			...(routeRef ? { routeRef } : {}),
+			...(phase === "loading" ? { pendingRouteRef: matched.routeRef } : {}),
+			fallback: matched.routeRef !== mapping.primaryRouteRef,
+			phase,
+		};
+		if (JSON.stringify(previous) === JSON.stringify(profileRoute)) return;
+		binding.profileRouteState = profileRoute;
+		// Capture identity now: queued writes must not borrow a later Attempt on this binding.
+		const target = this.#snapshot(binding);
+		const write = binding.traceWriteTail.then(async () => {
+			const event = await this.store.commitAttemptProfileRoute(target, profileRoute);
+			if (event) this.#notifyEvents([event]);
+		});
+		binding.traceWriteTail = write.catch(error => {
+			binding.retryWriteError ??= error;
+			logger.warn("Engine profile route state write failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
 	}
 
 	#queueRetryEvent(

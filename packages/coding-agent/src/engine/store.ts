@@ -11,6 +11,7 @@ import type {
 	EngineInboxMutation,
 	EngineInboxSource,
 	EngineInboxTarget,
+	EngineProfileRouteState,
 	EngineRetryOutcome,
 	EngineRetryState,
 	EngineToolPolicy,
@@ -103,6 +104,7 @@ export interface EngineAttemptRow {
 	retry_scheduled_at: number | null;
 	retry_outcome: EngineRetryOutcome | null;
 	retry_error: string | null;
+	profile_route_state: string | null;
 }
 
 export interface EngineAttemptRecord extends EngineAttemptRow {
@@ -585,6 +587,7 @@ const SCHEMA_MIGRATIONS = [
 	},
 	{ version: 10, statements: [], requiredColumns: ATTEMPT_RETRY_COLUMNS },
 	{ version: 11, statements: [], requiredColumns: CONVERSATION_IDENTITY_COLUMNS },
+	{ version: 12, statements: [], requiredColumns: [["engine_attempts", "profile_route_state", "TEXT"]] as const },
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;
@@ -1418,6 +1421,38 @@ export class EngineStore {
 		});
 	}
 
+	/** Retain route truth independently of the bounded event outbox, with the full Attempt fence. */
+	async commitAttemptProfileRoute(
+		target: EngineBindingSnapshot,
+		profileRoute: EngineProfileRouteState,
+	): Promise<EngineEvent | undefined> {
+		return await this.#transaction(async sql => {
+			const rows = (await sql.unsafe(
+				`UPDATE engine_attempts SET profile_route_state=?, updated_at=?
+				 WHERE attempt_id=? AND agent_instance_id=? AND execution_id=? AND binding_id=?
+				 AND engine_generation=? AND binding_generation=? AND authority_generation=?
+				 AND state IN ('running', 'pause_requested', 'paused', 'cancel_requested')
+				 RETURNING attempt_id`,
+				[
+					JSON.stringify(profileRoute),
+					Date.now(),
+					target.attemptId,
+					target.agentInstanceId,
+					target.executionId,
+					target.bindingId,
+					target.engineGeneration,
+					target.bindingGeneration,
+					target.authorityGeneration,
+				],
+			)) as Array<{ attempt_id: string }>;
+			if (rows.length === 0) return undefined;
+			return await this.#appendTransitionEvent(sql, target, {
+				kind: "profile_route_changed",
+				payload: { profileRoute },
+			});
+		});
+	}
+
 	async startToolEffect(target: EngineEventTarget, effect: EngineToolEffectInput): Promise<EngineEvent> {
 		return await this.#transaction(async sql => {
 			await this.#insertToolEffect(sql, target, effect, "started");
@@ -1665,7 +1700,7 @@ export class EngineStore {
 			 engine_generation, binding_generation, authority_generation, state, cause, updated_at,
 			 transcript_session_id, transcript_path, transcript_leaf_entry_id,
 			 transcript_byte_boundary, transcript_revision, retry_attempt, retry_max_attempts,
-			 retry_route, retry_delay_ms, retry_scheduled_at, retry_outcome, retry_error
+			 retry_route, retry_delay_ms, retry_scheduled_at, retry_outcome, retry_error, profile_route_state
 			 FROM engine_attempts WHERE attempt_id = ?`,
 			[attemptId],
 		)) as EngineAttemptRecord[];
@@ -1678,7 +1713,7 @@ export class EngineStore {
 			 engine_generation, binding_generation, authority_generation, state, cause, updated_at,
 			 transcript_session_id, transcript_path, transcript_leaf_entry_id, transcript_byte_boundary,
 			 transcript_revision, retry_attempt, retry_max_attempts, retry_route, retry_delay_ms,
-			 retry_scheduled_at, retry_outcome, retry_error
+			 retry_scheduled_at, retry_outcome, retry_error, profile_route_state
 			 FROM engine_attempts WHERE rowid > ? ORDER BY rowid LIMIT ?`,
 			[Math.max(0, Math.floor(afterRowId)), Math.max(1, Math.min(1000, Math.floor(limit)))],
 		)) as EngineAttemptRecord[];
@@ -1761,7 +1796,7 @@ export class EngineStore {
 				`SELECT agent_instance_id, execution_id, attempt_id, command_id, binding_id, engine_generation, binding_generation,
 				 authority_generation, state, transcript_session_id, transcript_path, transcript_leaf_entry_id,
 				 transcript_byte_boundary, transcript_revision, retry_attempt, retry_max_attempts,
-				 retry_route, retry_delay_ms, retry_scheduled_at, retry_outcome, retry_error
+				 retry_route, retry_delay_ms, retry_scheduled_at, retry_outcome, retry_error, profile_route_state
 				 FROM engine_attempts
 				 WHERE engine_generation < ? AND state IN ('accepted', 'running', 'pause_requested', 'paused', 'waiting_input', 'cancel_requested')`,
 				[engineGeneration],

@@ -1117,7 +1117,8 @@ export class TurnRecovery {
 	 */
 	isRetryableError(message: AssistantMessage): boolean {
 		const errorMessage = message.errorMessage ?? "";
-		if (this.isProfileRouteFallbackEligible(message)) return true;
+		// Route-owned failures also enter recovery at the last slot to publish truthful exhaustion.
+		if (this.#profileRouteIndex() >= 0 && this.#isProfileRouteFailure(message)) return true;
 		if (isExhaustedProviderRetryMessage(errorMessage) || isPermanentProviderFailureMessage(errorMessage))
 			return false;
 		if (this.#turnRetryPolicy?.transientOnly && isDeferredProviderRetryMessage(errorMessage)) return true;
@@ -2292,6 +2293,20 @@ export class TurnRecovery {
 		}
 
 		if (providerRouteFailure && !switchedRoute) {
+			// Cancellation or a replaced prompt is not evidence of unhealthy routes.
+			if (
+				!this.#host.abortInProgress() &&
+				!this.#host.isDisposed() &&
+				this.#host.promptGeneration() === generation
+			) {
+				await this.#host.emitSessionEvent({
+					type: "profile_route_exhausted",
+					reason:
+						retryBudgetExhausted && this.#profileRouteCandidates().length > 0
+							? "retry_budget"
+							: "routes_unavailable",
+				});
+			}
 			if (this.#retryAttempt > 1) {
 				await this.persistTerminalEmptyErrorTurn(message);
 				const retryErrors = await this.#markPendingRetryErrors({ status: "superseded" });

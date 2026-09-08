@@ -96,6 +96,15 @@ describe("EngineProfileResolver", () => {
 			const resolved = await resolver.resolve(launch, root);
 			try {
 				expect(resolved.sameModelRouteFallback).toBeUndefined();
+				expect(resolved.profileRoutes).toEqual({
+					profileRef,
+					primaryRouteRef: routeRefs[0],
+					routes: routeRefs.map((routeRef, index) => ({
+						routeRef,
+						provider: `artel-route-${routeRef.slice(5)}`,
+						modelId: modelIds[index],
+					})),
+				});
 				expect(resolved.orderedRouteFallback?.selectors).toEqual(
 					routeRefs.map((ref, index) => `artel-route-${ref.slice(5)}/${modelIds[index]}`),
 				);
@@ -116,6 +125,8 @@ describe("EngineProfileResolver", () => {
 			}
 			const selected = await resolver.resolve({ ...launch, selectedRouteRef: routeRefs[1] }, root);
 			try {
+				expect(selected.profileRoutes.primaryRouteRef).toBe(routeRefs[1]);
+				expect(selected.profileRoutes.routes.map(route => route.routeRef)).toEqual(routeRefs.slice(1));
 				expect(selected.orderedRouteFallback?.selectors).toEqual(
 					routeRefs.slice(1).map((ref, index) => `artel-route-${ref.slice(5)}/${modelIds[index + 1]}`),
 				);

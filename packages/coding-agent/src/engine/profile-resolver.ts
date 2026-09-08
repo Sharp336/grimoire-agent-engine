@@ -13,7 +13,7 @@ import type { TurnRetryPolicy } from "../session/agent-session-types";
 import { AuthStorage, SqliteAuthCredentialStore } from "../session/auth-storage";
 import { concreteThinkingLevel, resolveThinkingLevelForModel } from "../thinking";
 import type { EngineChildProfile } from "../tools";
-import type { EngineLaunchProfile } from "./contracts";
+import type { EngineLaunchProfile, EngineProfileRoutes } from "./contracts";
 import { resolveExecutableModelLimits } from "./model-limits";
 import type { ProviderAdmissionClient, ProviderApiKeyRouteIdentity } from "./provider-admission";
 import type {
@@ -104,6 +104,7 @@ export interface ResolvedEngineSessionProfile {
 	childProfiles: EngineChildProfile[];
 	sameModelRouteFallback?: NonNullable<TurnRetryPolicy["sameModelRouteFallback"]>;
 	orderedRouteFallback?: NonNullable<TurnRetryPolicy["orderedRouteFallback"]>;
+	profileRoutes: EngineProfileRoutes;
 	dispose(): void;
 }
 
@@ -659,6 +660,20 @@ export class EngineProfileResolver {
 					maxSpawnDepth,
 				},
 				childProfiles,
+				profileRoutes: {
+					profileRef,
+					primaryRouteRef: launch.selectedRouteRef ?? requiredRef(profile.models[0], "primary route"),
+					routes: [
+						{ routeRef, provider: model.provider, modelId: model.id },
+						...fallbackApiKeyRoutes
+							.filter(candidate => candidate.routeRef !== routeRef)
+							.map(candidate => ({
+								routeRef: candidate.routeRef,
+								provider: candidate.runtimeProviderId,
+								modelId: candidate.modelId,
+							})),
+					],
+				},
 				...(profile.allowCrossModelFallback
 					? { orderedRouteFallback: { selectors: fallbackSelectors } }
 					: profile.allowSameModelProviderFallback

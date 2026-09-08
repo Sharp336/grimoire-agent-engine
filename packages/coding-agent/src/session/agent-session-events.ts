@@ -47,6 +47,7 @@ export type AgentSessionEvent =
 	  }
 	| { type: "retry_fallback_applied"; from: string; to: string; role: string }
 	| { type: "retry_fallback_succeeded"; model: string; role: string }
+	| { type: "profile_route_exhausted"; reason: "routes_unavailable" | "retry_budget" }
 	| { type: "model_changed" }
 	| { type: "advisor_cost_changed" }
 	| { type: "ttsr_triggered"; rules: Rule[] }

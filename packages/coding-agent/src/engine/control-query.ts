@@ -7,6 +7,7 @@ import {
 	type EngineEvent,
 	type EngineInboxMutation,
 	type EngineInboxSource,
+	type EngineProfileRouteState,
 	type EngineTarget,
 	EngineTargetError,
 } from "./contracts";
@@ -78,6 +79,7 @@ export interface EnginePublicSnapshot {
 	manualHold: boolean;
 	intentRevision: number;
 	retry?: import("./contracts").EngineRetryState;
+	profileRoute?: EngineProfileRouteState;
 	profileDigest?: string;
 	transcriptRef?: string;
 	updatedAt: number;
@@ -456,6 +458,9 @@ async function snapshotFromAttempt(
 					}
 				: undefined,
 		profileDigest: exactBinding?.profileDigest,
+		...(attempt.profile_route_state
+			? { profileRoute: JSON.parse(attempt.profile_route_state) as EngineProfileRouteState }
+			: {}),
 		transcriptRef: attempt.transcript_session_id
 			? `history://${binding?.engineAgentId ?? engineAgentId(attempt.agent_instance_id)}`
 			: undefined,

@@ -23,6 +23,72 @@ describe("EngineStore", () => {
 		tempDir = undefined;
 	});
 
+	it("persists route state with the full Attempt fence and never lends it to another Attempt", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-route-${Snowflake.next()}-`));
+		const databasePath = path.join(tempDir, "engine.sqlite");
+		const store = await EngineStore.open(databasePath);
+		const binding = {
+			bindingId: "binding-route",
+			commandId: "command-route",
+			agentInstanceId: "agent-route",
+			executionId: "execution-route",
+			attemptId: "attempt-route",
+			engineAgentId: "Engine-route",
+			profileDigest: "profile-route",
+			state: "running" as const,
+			engineGeneration: 1,
+			bindingGeneration: 2,
+			authorityGeneration: 3,
+		};
+		const state = {
+			profileRef: "gctx:2222222222222222",
+			primaryRouteRef: "gctx:3333333333333333",
+			routeRef: "gctx:4444444444444444",
+			fallback: true,
+			phase: "active" as const,
+		};
+		try {
+			await store.putBinding(binding);
+			await store.putAttempt(binding, "running");
+			for (const mismatch of [
+				{ attemptId: "wrong" },
+				{ agentInstanceId: "wrong" },
+				{ executionId: "wrong" },
+				{ bindingId: "wrong" },
+				{ engineGeneration: 9 },
+				{ bindingGeneration: 9 },
+				{ authorityGeneration: 9 },
+			]) {
+				expect(await store.commitAttemptProfileRoute({ ...binding, ...mismatch }, state)).toBeUndefined();
+			}
+			expect(await store.pendingEvents()).toEqual([]);
+			expect(await store.commitAttemptProfileRoute(binding, state)).toMatchObject({
+				kind: "profile_route_changed",
+				attemptId: binding.attemptId,
+				payload: { profileRoute: state },
+			});
+			await store.putAttempt(binding, "completed");
+			expect(await store.commitAttemptProfileRoute(binding, { ...state, phase: "exhausted" })).toBeUndefined();
+			await store.putAttempt({ ...binding, attemptId: "next-attempt", executionId: "next-execution" }, "accepted");
+			expect((await store.getAttempt("next-attempt"))?.profile_route_state).toBeNull();
+		} finally {
+			await store.close();
+		}
+		const reopened = await EngineStore.open(databasePath);
+		try {
+			expect(JSON.parse((await reopened.getAttempt(binding.attemptId))!.profile_route_state!)).toEqual(state);
+			expect(
+				(await reopened.listAttempts()).find(attempt => attempt.attempt_id === binding.attemptId)
+					?.profile_route_state,
+			).toBe(JSON.stringify(state));
+			expect((await reopened.pendingEvents()).filter(event => event.kind === "profile_route_changed")).toHaveLength(
+				1,
+			);
+		} finally {
+			await reopened.close();
+		}
+	});
+
 	it("reconciles unfinished attempts from an earlier engine generation", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-store-${Snowflake.next()}-`));
 		const databasePath = path.join(tempDir, "engine.sqlite");
@@ -224,6 +290,12 @@ describe("EngineStore", () => {
 		expect(inspect.query("SELECT version FROM engine_schema_migrations WHERE version=11").get()).toEqual({
 			version: 11,
 		});
+		expect(inspect.query("SELECT version FROM engine_schema_migrations WHERE version=12").get()).toEqual({
+			version: 12,
+		});
+		expect(
+			inspect.query("SELECT name FROM pragma_table_info('engine_attempts') WHERE name=?").get("profile_route_state"),
+		).toEqual({ name: "profile_route_state" });
 		expect(
 			inspect
 				.query("SELECT name FROM pragma_table_info('engine_runtime_bindings') WHERE name=?")

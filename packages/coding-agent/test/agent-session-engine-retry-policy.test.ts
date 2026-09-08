@@ -328,6 +328,7 @@ describe("Engine bounded turn retry policy", () => {
 			tools: AgentTool[] = [],
 			ordered = false,
 			routeOrder = [0, 1, 2],
+			maxRetries = ENGINE_POLICY.delaysMs.length,
 		) {
 			const models = routeModels();
 			const selectors = routeOrder.map(index => `${models[index]!.provider}/${models[index]!.id}`);
@@ -356,6 +357,7 @@ describe("Engine bounded turn retry policy", () => {
 				modelRegistry,
 				turnRetryPolicy: {
 					...ENGINE_POLICY,
+					delaysMs: ENGINE_POLICY.delaysMs.slice(0, maxRetries),
 					...(ordered
 						? { orderedRouteFallback: { selectors } }
 						: {
@@ -384,7 +386,37 @@ describe("Engine bounded turn retry policy", () => {
 			await session.waitForIdle();
 			expect(requested).toEqual(routeModels().map(model => `${model.provider}/${model.id}`));
 			expect(events.filter(event => event.type === "retry_fallback_applied")).toHaveLength(2);
+			expect(events.filter(event => event.type === "profile_route_exhausted")).toEqual([
+				{ type: "profile_route_exhausted", reason: "routes_unavailable" },
+			]);
 			expect(session.getLastAssistantMessage()?.stopReason).toBe("error");
+		});
+
+		it("distinguishes an untried route at the retry budget from all routes being unavailable", async () => {
+			const { session, requested, events } = createRouteSession(
+				[{ throw: "503 primary" }, { throw: "503 fallback" }],
+				[],
+				true,
+				[0, 1, 2],
+				1,
+			);
+			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			await session.prompt("bounded chain");
+			await session.waitForIdle();
+			expect(requested).toHaveLength(2);
+			expect(events.filter(event => event.type === "profile_route_exhausted")).toEqual([
+				{ type: "profile_route_exhausted", reason: "retry_budget" },
+			]);
+		});
+
+		it("reports a last-slot auth failure without dispatching another request", async () => {
+			const { session, requested, events } = createRouteSession([{ throw: "401 Unauthorized" }], [], true, [0]);
+			await session.prompt("one unavailable slot");
+			await session.waitForIdle();
+			expect(requested).toHaveLength(1);
+			expect(events.filter(event => event.type === "profile_route_exhausted")).toEqual([
+				{ type: "profile_route_exhausted", reason: "routes_unavailable" },
+			]);
 		});
 
 		it("skips a fallback whose credential was revoked instead of hiding the next authorized model", async () => {
@@ -467,6 +499,7 @@ describe("Engine bounded turn retry policy", () => {
 			await Promise.all([prompt, stop]);
 			expect(requested).toEqual([`${routeModels()[0]!.provider}/${routeModels()[0]!.id}`]);
 			expect(events.some(event => event.type === "retry_fallback_applied")).toBe(false);
+			expect(events.some(event => event.type === "profile_route_exhausted")).toBe(false);
 		});
 
 		it("moves to the next configured route before any output and never cycles", async () => {
