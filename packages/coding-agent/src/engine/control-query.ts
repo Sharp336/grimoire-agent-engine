@@ -26,6 +26,7 @@ import {
 	runtimeLimits,
 	validateRuntimeValue,
 } from "./runtime-protocol";
+import type { RuntimeQueueRequest } from "./runtime-queue";
 import type { RuntimePageRequest, RuntimeResourceRequest } from "./runtime-resources";
 import { EngineCommandConflictError, type EngineCommandReceipt } from "./store";
 
@@ -335,14 +336,8 @@ async function dispatchRequest(
 			return await options.runtime.sessionContext(await runtimeTarget(options.runtime, params));
 		case "runtime.usage":
 			return await options.runtime.sessionUsage(await runtimeTarget(options.runtime, params));
-		case "runtime.queue": {
-			const agent = await runtimeAgent(options.runtime, params);
-			return await options.runtime.store.runtimeQueue(
-				requiredString(agent, "agentInstanceId"),
-				optionalString(params.cursor),
-				optionalLimit(params.limit),
-			);
-		}
+		case "runtime.queue":
+			return await options.runtime.store.runtimeQueue(params as unknown as RuntimeQueueRequest);
 		case "runtime.history": {
 			const agent = await runtimeAgent(options.runtime, params);
 			const page = await options.runtime.sessionHistoryPage(

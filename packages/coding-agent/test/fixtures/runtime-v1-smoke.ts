@@ -101,6 +101,8 @@ try {
 		},
 	};
 	await client.request("command", { command });
+	const queue = await client.request("runtime.queue", { agentInstanceRef: agent.agentInstanceRef, ...access });
+	validateRuntimeValue("queuePage", queue);
 	const summary = (await client.request("runtime.summary", {
 		agentInstanceRef: agent.agentInstanceRef,
 		...access,

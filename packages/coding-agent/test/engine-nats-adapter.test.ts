@@ -109,6 +109,7 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			});
 
 			const commandA = startCommand(runtime.engineGeneration, "agent-a", "a", cwd);
+			commandA.agentInstanceRef = "grimoire://tasks/grimoire/nats-test/agents/agent-a";
 			commandA.payload.clientMessageId = "client-message-a";
 			const commandB = startCommand(runtime.engineGeneration, "agent-b", "b", cwd);
 			await Promise.all([
@@ -129,6 +130,7 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			expect(eventsA.every(event => event.agentInstanceId === "agent-a")).toBeTrue();
 			expect(eventsB.every(event => event.agentInstanceId === "agent-b")).toBeTrue();
 			expect(eventsA.map(event => event.type)).toEqual([
+				"attempt.agent_registered",
 				"command.accepted",
 				"attempt.started",
 				"model.started",
@@ -365,14 +367,14 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 					event =>
 						event.causationCommandId === oldGenerationA.commandId &&
 						event.type === "command.rejected" &&
-						(event.payload as Record<string, unknown>).code === "stale_target",
+						(event.payload as Record<string, unknown>).code === "interrupted",
 				),
 			);
 			expect(
 				await runtime.store.admitCommand(engineCommandIdentity(oldGenerationA), runtime.engineGeneration),
 			).toMatchObject({
 				status: "replay",
-				receipt: { outcome: "rejected", detail: { code: "stale_target" } },
+				receipt: { outcome: "rejected", detail: { code: "interrupted", requiresExplicitContinue: true } },
 			});
 			expect(dispatchCount).toBe(3);
 
@@ -425,7 +427,11 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			await js.publish(adapter.commandSubject("agent-a", "start"), JSON.stringify(futureGenerationA), {
 				msgID: futureGenerationA.commandId,
 			});
-			await waitFor(() => eventsA.some(event => event.type === "command.rejected"));
+			await waitFor(() =>
+				eventsA.some(
+					event => event.type === "command.rejected" && event.causationCommandId === futureGenerationA.commandId,
+				),
+			);
 			expect(dispatchCount).toBe(3);
 			subA.unsubscribe();
 			subB.unsubscribe();
@@ -790,7 +796,7 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 		}
 	}, 30000);
 
-	it("cancels a received pre-start command across an Engine generation upgrade without launching it", async () => {
+	it("keeps a received pre-start command interrupted across an Engine generation upgrade without launching it", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-upgrade-${Snowflake.next()}-`));
 		const broker = await startNatsServer(tempDir);
 		const databasePath = path.join(tempDir, "engine.sqlite");
@@ -805,6 +811,11 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 
 		const secondRuntime = await EngineRuntime.create({ databasePath, dispatchPrompt: async () => true });
 		expect(secondRuntime.engineGeneration).toBe(oldStart.engineGeneration + 1);
+		expect(
+			(await secondRuntime.store.pendingEventsForSink("test-recovery-audit")).filter(
+				event => event.causationCommandId === oldStart.commandId && event.kind === "rejected",
+			),
+		).toMatchObject([{ payload: { code: "interrupted", requiresExplicitContinue: true } }]);
 		let resolverCalls = 0;
 		const errors: Error[] = [];
 		const adapter = await NatsEngineAdapter.connect({
@@ -849,11 +860,7 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 				msgID: cancel.commandId,
 			});
 			await waitFor(() =>
-				events.some(
-					event =>
-						event.causationCommandId === oldStart.commandId &&
-						(event.payload as Record<string, unknown>).code === "cancelled",
-				),
+				events.some(event => event.causationCommandId === cancel.commandId && event.type === "command.rejected"),
 			);
 			const oldReceipt = await secondRuntime.store.admitCommand(
 				engineCommandIdentity(oldStart),
@@ -861,7 +868,7 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			);
 			expect(oldReceipt).toMatchObject({
 				status: "replay",
-				receipt: { outcome: "rejected", detail: { code: "cancelled" } },
+				receipt: { outcome: "rejected", detail: { code: "interrupted", requiresExplicitContinue: true } },
 			});
 
 			const commandConsumer = `engine_${adapter.engineRoute}`;
@@ -876,6 +883,11 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			});
 			expect(resolverCalls).toBe(0);
 			expect(await secondRuntime.store.getAttempt(oldStart.attemptId!)).toBeUndefined();
+			expect(
+				(await secondRuntime.store.pendingEventsForSink("test-recovery-audit")).filter(
+					event => event.causationCommandId === oldStart.commandId && event.kind === "rejected",
+				),
+			).toHaveLength(1);
 			expect(errors).toEqual([]);
 			subscription.unsubscribe();
 		} finally {

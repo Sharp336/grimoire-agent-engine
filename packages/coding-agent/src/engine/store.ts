@@ -42,6 +42,7 @@ import {
 	type RuntimeWork,
 	runtimeLimits,
 } from "./runtime-protocol";
+import { RUNTIME_QUEUE_SCHEMA, type RuntimeQueueRequest, readRuntimeQueue } from "./runtime-queue";
 import { type RuntimeSnapshot, readRuntimeEvents, readRuntimeSnapshot, readRuntimeSummary } from "./runtime-read";
 import { canonicalRuntimeReceipt, readRuntimeReceipt } from "./runtime-receipts";
 import {
@@ -699,6 +700,7 @@ const SCHEMA_MIGRATIONS = [
 	{ version: 14, statements: RUNTIME_MESSAGE_SCHEMA, requiredColumns: [] },
 	{ version: 15, statements: START_FENCE_SCHEMA, requiredColumns: [] },
 	{ version: 16, statements: RUNTIME_OWNERSHIP_SCHEMA, requiredColumns: [] },
+	{ version: 17, statements: RUNTIME_QUEUE_SCHEMA, requiredColumns: [] },
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;
@@ -1254,9 +1256,10 @@ export class EngineStore {
 		browserPayloadHash?: string,
 	): Promise<Record<string, unknown>> {
 		return await this.#transaction(async sql => {
-			const rows = (await sql.unsafe("SELECT * FROM engine_commands WHERE command_id=?", [commandId])) as Array<
-				Record<string, unknown>
-			>;
+			const rows = (await sql.unsafe(
+				"SELECT command_id,agent_instance_id,agent_instance_ref,attempt_id,execution_id,principal_id,browser_payload_hash,canonical_hash,state,operation,settled_at FROM engine_commands WHERE command_id=?",
+				[commandId],
+			)) as Array<Record<string, unknown>>;
 			const row = rows[0];
 			if (!row)
 				return {
@@ -1273,8 +1276,8 @@ export class EngineStore {
 				throw new EngineTargetError("agent_not_found", "Unknown authorized command");
 			if (browserPayloadHash && row.browser_payload_hash !== browserPayloadHash)
 				throw new EngineCommandConflictError(commandId);
-			const receipt = row.receipt ? (JSON.parse(String(row.receipt)) as EngineCommandReceipt) : undefined;
 			const canonicalRow = await readRuntimeReceipt(sql, commandId);
+			const receipt = canonicalRow?.receipt ? (JSON.parse(canonicalRow.receipt) as EngineCommandReceipt) : undefined;
 			const canonical = canonicalRow && canonicalRuntimeReceipt(canonicalRow);
 			const attempt = row.attempt_id
 				? ((await sql.unsafe("SELECT state FROM engine_attempts WHERE attempt_id=?", [row.attempt_id]))[0] as
@@ -1329,67 +1332,8 @@ export class EngineStore {
 		);
 	}
 
-	async runtimeQueue(
-		agentInstanceId: string,
-		cursor?: string,
-		limit = runtimeLimits.httpPageRecords,
-	): Promise<Record<string, unknown>> {
-		return await this.#transaction(async sql => {
-			const rows = (await sql.unsafe("SELECT queue_revision FROM engine_agent_identity WHERE agent_instance_id=?", [
-				agentInstanceId,
-			])) as Array<{ queue_revision: number }>;
-			const revision = Number(rows[0]?.queue_revision ?? 0);
-			let after = 0;
-			if (cursor) {
-				let parsed: { agentInstanceId: string; revision: number; position: number };
-				try {
-					parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
-				} catch {
-					throw new EngineTargetError("stale_target", "Invalid queue cursor");
-				}
-				if (
-					parsed.agentInstanceId !== agentInstanceId ||
-					parsed.revision !== revision ||
-					!Number.isSafeInteger(parsed.position)
-				)
-					throw new EngineTargetError("stale_target", "Queue cursor is stale");
-				after = parsed.position;
-			}
-			const pending = (await sql.unsafe(
-				`${this.#inboxSelect()} WHERE i.agent_instance_id=? AND i.disposition='pending' AND i.position>? ORDER BY i.position,i.queue_id LIMIT ?`,
-				[agentInstanceId, after, Math.min(limit, runtimeLimits.httpPageRecords) + 1],
-			)) as InboxItemRow[];
-			const items: EngineInboxItem[] = [];
-			let bytes = 1024;
-			for (const row of pending.slice(0, limit)) {
-				const item = inboxItemFromRow(row);
-				const size = Buffer.byteLength(JSON.stringify(item));
-				if (bytes + size > runtimeLimits.httpPageBytes - 2048) {
-					if (!items.length)
-						return {
-							agentInstanceId,
-							queueRevision: revision,
-							items: [],
-							nextCursor: cursor ?? null,
-							entryRef: { queueId: row.queue_id, revision: Number(row.revision), bytes: size },
-						};
-					break;
-				}
-				items.push(item);
-				bytes += size;
-			}
-			return {
-				agentInstanceId,
-				queueRevision: revision,
-				items,
-				nextCursor:
-					pending.length > items.length
-						? Buffer.from(
-								JSON.stringify({ agentInstanceId, revision, position: items.at(-1)?.position ?? after }),
-							).toString("base64url")
-						: null,
-			};
-		});
+	async runtimeQueue(request: RuntimeQueueRequest): Promise<Record<string, unknown>> {
+		return await this.#transaction(sql => readRuntimeQueue(sql, request));
 	}
 
 	async nativeHistoryPage(
@@ -3606,6 +3550,38 @@ export class EngineStore {
 			 WHERE command_id=? AND state='received'`,
 			[receipt.outcome, serialized, now, now, commandId],
 		);
+		if (
+			receipt.outcome === "rejected" &&
+			receipt.detail?.code === "interrupted" &&
+			receipt.detail.requiresExplicitContinue === true
+		) {
+			const commands = (await sql.unsafe(
+				`SELECT agent_instance_id,execution_id,attempt_id,binding_id,binding_generation,authority_generation,
+				(SELECT value FROM engine_metadata WHERE key='engine_generation') AS generation FROM engine_commands WHERE command_id=?`,
+				[commandId],
+			)) as Array<{
+				agent_instance_id: string;
+				execution_id: string | null;
+				attempt_id: string | null;
+				binding_id: string | null;
+				binding_generation: number | null;
+				authority_generation: number;
+				generation: string;
+			}>;
+			const command = commands[0];
+			await this.#appendEvent(sql, {
+				causationCommandId: commandId,
+				agentInstanceId: command.agent_instance_id,
+				executionId: command.execution_id ?? "",
+				attemptId: command.attempt_id ?? "",
+				bindingId: command.binding_id ?? "",
+				bindingGeneration: Number(command.binding_generation ?? 0),
+				authorityGeneration: Number(command.authority_generation),
+				engineGeneration: Number(command.generation),
+				kind: "rejected",
+				payload: receipt.detail,
+			});
+		}
 		await this.#commandReceiptEvent(sql, commandId);
 	}
 

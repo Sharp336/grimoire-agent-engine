@@ -30,6 +30,7 @@ import { safeEngineErrorDetail } from "./public-error";
 import { engineRouteToken } from "./route";
 import type { EngineRuntime } from "./runtime";
 import { ENGINE_CONTROL_OPS, runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
+import { publicRuntimeQueueItem } from "./runtime-queue";
 import type { EngineCommandIdentity } from "./store";
 import { EngineCommandConflictError } from "./store";
 
@@ -785,8 +786,9 @@ export async function dispatchEngineCommand(options: {
 		throw new EngineTargetError("stale_target", `Engine generation ${command.engineGeneration} is stale`);
 	}
 	switch (command.op) {
-		case "enqueue":
-			return await runtime.enqueueAgentInbox(
+		case "enqueue": {
+			const agentInstanceRef = requiredEnvelopeString(command.agentInstanceRef, "agentInstanceRef");
+			const result = await runtime.enqueueAgentInbox(
 				command.agentInstanceId,
 				{
 					sourceEventId: requiredRecordString(command.payload, "clientMessageId"),
@@ -798,14 +800,17 @@ export async function dispatchEngineCommand(options: {
 				optionalRecordInteger(command.payload, "expectedIntentRevision"),
 				command.commandId,
 			);
+			return { created: result.created, item: publicRuntimeQueueItem(agentInstanceRef, result.item) };
+		}
 		case "queue_edit":
 		case "queue_remove":
 		case "queue_annotate":
 		case "queue_defer": {
+			const agentInstanceRef = requiredEnvelopeString(command.agentInstanceRef, "agentInstanceRef");
 			const value = command.op === "queue_defer" ? (command.payload.deliverAt ?? null) : command.payload.text;
 			if ((command.op === "queue_edit" || command.op === "queue_annotate") && typeof value !== "string")
 				throw new EngineTargetError("invalid_request", "Queue text is required");
-			return await runtime.mutateAgentInbox(command.agentInstanceId, {
+			const item = await runtime.mutateAgentInbox(command.agentInstanceId, {
 				mutationId: requiredRecordString(command.payload, "mutationId"),
 				queueId: requiredRecordString(command.payload, "queueId"),
 				expectedRevision: requiredRecordInteger(command.payload, "expectedRevision"),
@@ -819,17 +824,18 @@ export async function dispatchEngineCommand(options: {
 								: "defer",
 				value: value as string | number | null | undefined,
 			});
+			return { item: publicRuntimeQueueItem(agentInstanceRef, item) };
 		}
-		case "queue_reorder":
-			return {
-				items: await runtime.reorderAgentInbox(
-					command.agentInstanceId,
-					requiredRecordString(command.payload, "mutationId"),
-					requiredStringList(command.payload, "expectedOrder"),
-					requiredStringList(command.payload, "desiredOrder"),
-					requiredRecordInteger(command.payload, "expectedQueueRevision"),
-				),
-			};
+		case "queue_reorder": {
+			const reordered = await runtime.reorderAgentInbox(
+				command.agentInstanceId,
+				requiredRecordString(command.payload, "mutationId"),
+				requiredStringList(command.payload, "expectedOrder"),
+				requiredStringList(command.payload, "desiredOrder"),
+				requiredRecordInteger(command.payload, "expectedQueueRevision"),
+			);
+			return { reordered: reordered.length };
+		}
 		case "start": {
 			const executionId = requiredEnvelopeString(command.executionId, "executionId");
 			const attemptId = requiredEnvelopeString(command.attemptId, "attemptId");

@@ -8,6 +8,7 @@ import {
 	runtimeIdentity,
 } from "./runtime-projection";
 import { type RuntimeAccess, runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
+import { runtimeQueueRange } from "./runtime-queue";
 
 export interface RuntimePageRequest extends RuntimeAccess {
 	agentInstanceRef: string;
@@ -229,6 +230,7 @@ export async function readRuntimeResource(
 	const resource = request.resource;
 	const work = queryWork();
 	if (resource.kind === "message") return await runtimeMessageRange(sql, request, work);
+	if (resource.kind === "queue_item") return await runtimeQueueRange(sql, request, work);
 	const identity = await runtimeIdentity(sql, String(resource.agentInstanceRef), request);
 	work.rows(1);
 	if (resource.kind !== "input")

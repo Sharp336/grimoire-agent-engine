@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { SQL } from "bun";
 import type { EngineBindingSnapshot, EngineInboxTarget } from "../src/engine/contracts";
 import { engineAgentId, engineAgentInstanceId } from "../src/engine/route";
 import {
@@ -11,6 +12,7 @@ import {
 	runtimeRemainingWork,
 	validateRuntimeValue,
 } from "../src/engine/runtime-protocol";
+import { publicRuntimeQueueItem } from "../src/engine/runtime-queue";
 import { type EngineCommandIdentity, EngineStore } from "../src/engine/store";
 
 describe("runtime v1 durable boundaries", () => {
@@ -416,9 +418,180 @@ describe("runtime v1 durable boundaries", () => {
 		expect(await store.getInboxItem(target.sessionId, "overflow")).toBeUndefined();
 		expect((await store.admitCommand(command("stop", "cancel"), 1)).status).toBe("claimed");
 		await expect(store.admitCommand(command("ordinary"), 1)).rejects.toThrow("budget");
-		const page = await store.runtimeQueue(agent.agentInstanceId);
+		const page = await store.runtimeQueue({ agentInstanceRef: agent.agentInstanceRef, principalId: "owner" });
 		expect((page.items as unknown[]).length).toBe(runtimeLimits.httpPageRecords);
 		expect(page.nextCursor).toBeString();
+	});
+	it("reads huge legacy queue fields through bounded previews and exact UTF-8 ranges", async () => {
+		const store = await createStore();
+		const agent = identity("queue-large");
+		await store.registerAgent(agent);
+		const target: EngineInboxTarget = { ...binding("queue-large"), sessionId: "session-queue-large" };
+		const first = await store.enqueueInboxItem(target, {
+			sourceEventId: "large-first",
+			sourceType: "user",
+			body: "small",
+		});
+		const second = await store.enqueueInboxItem(target, {
+			sourceEventId: "large-second",
+			sourceType: "agent",
+			body: "later",
+		});
+		const raw = 'я😀\u0000\\"'.repeat(1_000_000);
+		const native = new SQL(`sqlite:${path.join(directories.at(-1)!, "engine.sqlite").replaceAll("\\", "/")}`);
+		try {
+			await native.unsafe("UPDATE engine_inbox_items SET delivery_payload=?,annotation=? WHERE queue_id=?", [
+				raw,
+				raw,
+				first.item.queueId,
+			]);
+			await native.unsafe("UPDATE engine_inbox_sources SET sender=? WHERE source_event_id=?", [raw, "large-first"]);
+			const plan = await native.unsafe(
+				"EXPLAIN QUERY PLAN SELECT queue_id FROM engine_inbox_items WHERE agent_instance_id=? AND disposition='pending' AND (position,queue_id)>(?,?) ORDER BY position,queue_id LIMIT 101",
+				[agent.agentInstanceId, 0, ""],
+			);
+			expect(JSON.stringify(plan)).toContain("engine_inbox_agent_page_idx");
+		} finally {
+			await native.close();
+		}
+		const access = { principalId: "owner", agentInstanceRef: agent.agentInstanceRef };
+		const page = await store.runtimeQueue({ ...access, limit: 1 });
+		validateRuntimeValue("queuePage", page);
+		const item = (page.items as Record<string, unknown>[])[0];
+		expect(item).toMatchObject({ queueId: first.item.queueId, partial: true });
+		expect(item).not.toHaveProperty("sourceBody");
+		expect(item).not.toHaveProperty("agentInstanceId");
+		const work = page.work as { bytes: number; materializedBytes: number; scannedRows: number };
+		expect(work.bytes).toBe(Buffer.byteLength(JSON.stringify(page)));
+		expect(work.materializedBytes).toBeLessThan(16_384);
+		expect(work.scannedRows).toBeLessThanOrEqual(7);
+		expect(
+			Buffer.byteLength(
+				JSON.stringify({ deliveryPayload: item.deliveryPayload, annotation: item.annotation, sender: item.sender }),
+			),
+		).toBeLessThanOrEqual(runtimeLimits.bulkPreviewBytes);
+		const encoded = Buffer.from(raw);
+		for (const key of ["resource", "annotationResource", "senderResource"]) {
+			const resource = item[key] as Record<string, unknown>;
+			expect(resource.bytes).toBe(encoded.length);
+			const offset = 2;
+			const range = await store.runtimeResource({
+				principalId: "owner",
+				resource,
+				offset,
+				limit: runtimeLimits.httpRangeBytes,
+			});
+			validateRuntimeValue("httpRange", range);
+			const received = Buffer.from(String(range.contentBase64), "base64");
+			expect(received).toEqual(encoded.subarray(offset, offset + received.length));
+			expect(received.length).toBeGreaterThanOrEqual(runtimeLimits.httpRangeBytes - 3);
+			await expect(
+				store.runtimeResource({ principalId: "owner", resource, offset: 3, limit: 10 }),
+			).rejects.toMatchObject({ code: "invalid_request" });
+			const end = await store.runtimeResource({ principalId: "owner", resource, offset: encoded.length, limit: 1 });
+			expect(end).toMatchObject({ nextOffset: null, contentBase64: "" });
+			await expect(
+				store.runtimeResource({ principalId: "other", resource, offset: 0, limit: 1 }),
+			).rejects.toMatchObject({ code: "agent_not_found" });
+			await expect(
+				store.runtimeResource({
+					principalId: "owner",
+					resource: { ...resource, revision: 900 },
+					offset: 0,
+					limit: 1,
+				}),
+			).rejects.toMatchObject({ code: "stale_target" });
+		}
+		const next = await store.runtimeQueue({ ...access, cursor: String(page.nextCursor), limit: 1 });
+		expect(next.items).toMatchObject([{ queueId: second.item.queueId, deliveryPayload: "later", partial: false }]);
+		expect(next.nextCursor).toBeNull();
+		const exact = await store.runtimeQueue({ ...access, queueId: second.item.queueId });
+		expect(exact.items).toHaveLength(1);
+		await expect(store.runtimeQueue({ ...access, principalId: "other" })).rejects.toMatchObject({
+			code: "agent_not_found",
+		});
+		await store.mutateInboxItem(target, {
+			mutationId: "change-later",
+			queueId: second.item.queueId,
+			op: "drop",
+			expectedRevision: second.item.revision,
+		});
+		await expect(store.runtimeQueue({ ...access, cursor: String(page.nextCursor) })).rejects.toMatchObject({
+			code: "stale_target",
+		});
+	});
+	it("keeps escaped queue text and ancillary-only partial receipts inside the public change bound", async () => {
+		const store = await createStore();
+		const agent = identity("root");
+		await store.registerAgent(agent);
+		const target: EngineInboxTarget = { ...binding("root"), sessionId: "session-root" };
+		const queued = await store.enqueueInboxItem(target, {
+			sourceEventId: "escaped-queue",
+			sourceType: "user",
+			body: "short",
+		});
+		const item = publicRuntimeQueueItem(agent.agentInstanceRef, {
+			...queued.item,
+			sender: '\\"\n'.repeat(40_000),
+			annotation: "annotation".repeat(40_000),
+		});
+		expect(item).toMatchObject({ partial: false, deliveryPayload: "short" });
+		expect(item).not.toHaveProperty("resource");
+		expect(item).toHaveProperty("senderResource");
+		expect(item).toHaveProperty("annotationResource");
+		validateRuntimeValue("queueItem", item);
+		const emoji = "😀".repeat(20_000);
+		const emojiItem = publicRuntimeQueueItem(agent.agentInstanceRef, { ...queued.item, deliveryPayload: emoji });
+		expect(emojiItem.partial).toBe(true);
+		expect(emoji.startsWith(String(emojiItem.deliveryPayload))).toBe(true);
+		expect(emojiItem.deliveryPayload).not.toContain("�");
+		validateRuntimeValue("queueItem", emojiItem);
+		const snapshot = await store.runtimeSnapshot({ kind: "catalog" }, { principalId: "owner" });
+		const cmd = command("queue-receipt", "enqueue");
+		await store.admitCommand(cmd, 1);
+		await store.settleCommand(cmd.commandId, cmd.canonicalHash, { outcome: "applied", detail: { item } });
+		const receipt = await store.runtimeCommand(cmd.commandId, { principalId: "owner" });
+		expect(Buffer.byteLength(JSON.stringify(receipt))).toBeLessThan(runtimeLimits.liveChangeBytes);
+		const events = await store.runtimeEvents(
+			eventsRequest(snapshot.epoch, snapshot.watermark, {
+				kind: "agent",
+				agentInstanceRef: agent.agentInstanceRef,
+				kinds: ["state"],
+			}),
+		);
+		expect(events.changes.filter(change => change.kind === "receipt").length).toBe(2);
+		validateRuntimeValue("eventBatch", events);
+		const legacy = command("legacy-large-receipt", "queue_edit");
+		await store.admitCommand(legacy, 1);
+		await store.settleCommand(legacy.commandId, legacy.canonicalHash, {
+			outcome: "applied",
+			detail: { item: { ...queued.item, sourceBody: "private source".repeat(200_000) } },
+		});
+		const recovered = await store.runtimeCommand(legacy.commandId, { principalId: "owner" });
+		expect(recovered.result).toMatchObject({
+			item: { queueId: queued.item.queueId, deliveryPayload: "short", partial: false },
+		});
+		expect(JSON.stringify(recovered)).not.toContain("private source");
+		expect(JSON.stringify(recovered)).not.toContain("sourceBody");
+		await store.mutateInboxItem(target, {
+			mutationId: "legacy-result-later",
+			queueId: queued.item.queueId,
+			expectedRevision: queued.item.revision,
+			op: "drop",
+		});
+		const unavailable = await store.runtimeCommand(legacy.commandId, { principalId: "owner" });
+		expect(unavailable).toMatchObject({
+			stage: "applied",
+			lookup: "known",
+			result: {
+				partial: true,
+				unavailable: "legacy_queue_revision_not_retained",
+				queueId: queued.item.queueId,
+				revision: queued.item.revision,
+			},
+		});
+		expect(unavailable.target).toEqual(recovered.target);
+		expect(unavailable.payloadHash).toBe(recovered.payloadHash);
 	});
 	it("bounds native history reads by the page instead of the 100,000-entry transcript", async () => {
 		const store = await createStore();

@@ -49,6 +49,7 @@ const projectionLimits = {
   agentSummary: 'summaryBytes', detailState: 'detailStateBytes', change: 'liveChangeBytes',
   bulkPreview: 'bulkPreviewBytes', snapshot: 'httpPageBytes', historyPage: 'httpPageBytes',
   inputDetail: 'httpPageBytes', inputPage: 'httpPageBytes', holdsPage: 'httpPageBytes', messagesPage: 'httpPageBytes',
+  queuePage: 'httpPageBytes', queueItem: 'liveChangeBytes',
 };
 
 // JSON Schema covers the shape; these are the cross-field byte/identity invariants.
@@ -107,6 +108,19 @@ function validProjection(name, value) {
   }
   if (name === 'messagesPage' && value.items.some(message => message.resource
     && (message.resource.agentInstanceRef !== value.agentInstanceRef || message.resource.attemptId !== value.attemptId))) return false;
+  if (name === 'queueItem') {
+    if (value.partial !== Boolean(value.resource)) return false;
+    for (const [field, key] of [['deliveryPayload', 'resource'], ['annotation', 'annotationResource'], ['sender', 'senderResource']]) {
+      const resource = value[key];
+      if (value[field] !== undefined && !value[field].isWellFormed()) return false;
+      if (resource && (typeof value[field] !== 'string' || resource.field !== field || resource.queueId !== value.queueId
+        || resource.revision !== value.revision || encodedBytes(value[field]) >= resource.bytes)) return false;
+    }
+    if ((value.resource || value.annotationResource || value.senderResource)
+      && encodedBytes(JSON.stringify({ deliveryPayload: value.deliveryPayload, annotation: value.annotation, sender: value.sender })) > runtimeLimits.bulkPreviewBytes) return false;
+  }
+  if (name === 'queuePage' && value.items.some(item => [item.resource, item.annotationResource, item.senderResource]
+    .some(resource => resource && resource.agentInstanceRef !== value.agentInstanceRef))) return false;
   if (name === 'eventBatch' || name === 'update') {
     const frame = name === 'update' ? { jsonrpc: '2.0', method: 'runtime.update', params: value } : value;
     if (encodedBytes(JSON.stringify(frame)) > runtimeLimits.deliveryBatchBytes) return false;
@@ -123,7 +137,7 @@ function validProjection(name, value) {
     const end = value.offset + bytes;
     if (bytes > runtimeLimits.httpRangeBytes || end > value.resource.bytes
       || (value.nextOffset === null ? end !== value.resource.bytes : value.nextOffset !== end || bytes === 0)) return false;
-    if (value.resource.kind === 'message') {
+    if (value.resource.kind === 'message' || value.resource.kind === 'queue_item') {
       try { new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(atob(value.contentBase64), char => char.charCodeAt(0))); }
       catch { return false; }
     }
@@ -141,7 +155,7 @@ export function canonicalRuntimeJson(value, depth = 0) {
 }
 
 export function validateRuntimeValue(name, value) {
-  const maxBytes = ['snapshot', 'summarySnapshot', 'detailSnapshot', 'historyPage', 'inputDetail', 'inputPage', 'holdsPage', 'messagesPage'].includes(name) ? runtimeLimits.httpPageBytes : runtimeLimits.wsMessageBytes;
+  const maxBytes = ['snapshot', 'summarySnapshot', 'detailSnapshot', 'historyPage', 'inputDetail', 'inputPage', 'holdsPage', 'messagesPage', 'queuePage'].includes(name) ? runtimeLimits.httpPageBytes : runtimeLimits.wsMessageBytes;
   const canonical = canonicalRuntimeJson(value);
   if (new TextEncoder().encode(canonical).byteLength > maxBytes) throw new RuntimeProtocolError('payload_too_large', 'Runtime payload is too large. Use an HTTP attachment.');
   if (!matches({ $ref: `#/$defs/${name}` }, value)) throw new RuntimeProtocolError('invalid_params', `Invalid runtime ${name}.`);

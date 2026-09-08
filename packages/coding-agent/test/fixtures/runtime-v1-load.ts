@@ -30,7 +30,8 @@ const roots = Number(args.get("--roots") ?? 7);
 const rate = Number(args.get("--rate") ?? 20);
 const seconds = Number(args.get("--seconds") ?? 1800);
 const noisyRate = Number(args.get("--noisy-rate") ?? 0);
-const catalogAgents = Number(args.get("--catalog-agents") ?? roots * 3);
+const activeAgents = roots * 3 + (noisyRate ? 1 : 0);
+const catalogAgents = Number(args.get("--catalog-agents") ?? activeAgents);
 const historyEntries = Number(args.get("--history-entries") ?? 0);
 if (
 	![1, 2, 7, 14, 28].includes(roots) ||
@@ -39,7 +40,7 @@ if (
 	seconds <= 0 ||
 	![0, 200].includes(noisyRate) ||
 	!Number.isSafeInteger(catalogAgents) ||
-	catalogAgents < roots * 3 ||
+	catalogAgents < activeAgents ||
 	catalogAgents > 10_000 ||
 	!Number.isSafeInteger(historyEntries) ||
 	historyEntries < 0 ||
@@ -166,7 +167,7 @@ interface FixtureBinding extends EngineBindingSnapshot {
 	rootAgentInstanceRef: string;
 }
 const bindings: FixtureBinding[] = [];
-const enroll = async (name: string, parent?: FixtureBinding): Promise<FixtureBinding> => {
+const enroll = async (name: string, parent?: FixtureBinding, measured = true): Promise<FixtureBinding> => {
 	const agentInstanceRef = `grimoire://tasks/grimoire/runtime-load/agents/${name}`;
 	const binding = await runtime.start(
 		{
@@ -190,7 +191,7 @@ const enroll = async (name: string, parent?: FixtureBinding): Promise<FixtureBin
 		agentInstanceRef,
 		rootAgentInstanceRef: parent?.rootAgentInstanceRef ?? agentInstanceRef,
 	};
-	bindings.push(item);
+	if (measured) bindings.push(item);
 	return item;
 };
 for (let i = 0; i < roots; i++) {
@@ -198,7 +199,8 @@ for (let i = 0; i < roots; i++) {
 	await enroll(`child-${i}-0`, root);
 	await enroll(`child-${i}-1`, root);
 }
-for (let i = bindings.length; i < catalogAgents; i++) {
+const noisyBinding = noisyRate ? await enroll("noisy", undefined, false) : undefined;
+for (let i = activeAgents; i < catalogAgents; i++) {
 	const agentInstanceRef = `grimoire://tasks/grimoire/runtime-load/agents/catalog-${i}`;
 	await runtime.store.registerAgent({
 		agentInstanceId: engineAgentInstanceId(agentInstanceRef),
@@ -295,6 +297,16 @@ console.log(
 			attemptId: item.attemptId,
 			executionId: item.executionId,
 		})),
+		...(noisyBinding
+			? {
+					noisyAgent: {
+						agentInstanceRef: noisyBinding.agentInstanceRef,
+						rootAgentInstanceRef: noisyBinding.rootAgentInstanceRef,
+						attemptId: noisyBinding.attemptId,
+						executionId: noisyBinding.executionId,
+					},
+				}
+			: {}),
 		ratePerAgent: rate,
 		nominalEventsPerSecond: rate * bindings.length,
 		noisyRate,
@@ -315,7 +327,7 @@ try {
 		const targetNoisy = Math.floor(((performance.now() - started) * noisyRate) / 1000);
 		while (noisy < targetNoisy && !stop.signal.aborted) {
 			noisy++;
-			await produce(bindings[0]);
+			await produce(noisyBinding!);
 		}
 		await adapter?.flushEvents();
 		if (performance.now() - lastSample >= 1000) {
