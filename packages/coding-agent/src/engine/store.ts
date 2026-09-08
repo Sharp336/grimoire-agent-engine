@@ -36,6 +36,7 @@ import {
 	runtimeLimits,
 } from "./runtime-protocol";
 import { type RuntimeSnapshot, readRuntimeEvents, readRuntimeSnapshot, readRuntimeSummary } from "./runtime-read";
+import { canonicalRuntimeReceipt, readRuntimeReceipt } from "./runtime-receipts";
 import {
 	type RuntimePageRequest,
 	type RuntimeResourceRequest,
@@ -44,6 +45,15 @@ import {
 	readRuntimeMessages,
 	readRuntimeResource,
 } from "./runtime-resources";
+import {
+	cancelIntentRevision,
+	type EnginePendingStartTarget,
+	readTargetStart,
+	START_FENCE_SCHEMA,
+	startCancellation,
+	validateStartFence,
+	writeStartCancellation,
+} from "./start-fence";
 
 interface MetadataRow {
 	value: string;
@@ -680,6 +690,7 @@ const SCHEMA_MIGRATIONS = [
 	},
 	{ version: 13, statements: RUNTIME_PROJECTION_SCHEMA, requiredColumns: [] },
 	{ version: 14, statements: RUNTIME_MESSAGE_SCHEMA, requiredColumns: [] },
+	{ version: 15, statements: START_FENCE_SCHEMA, requiredColumns: [] },
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;
@@ -844,10 +855,16 @@ export class EngineStore {
 		commandId: string,
 		action: "pause" | "resume" | "stop" | "continue",
 		expectedRevision?: number,
+		startFence?: EnginePendingStartTarget,
 	): Promise<{ agentIds: string[]; events: EngineEvent[]; intentRevision: number }> {
-		return await this.#transaction(sql =>
-			this.#branchIntent(sql, agentInstanceId, commandId, action, expectedRevision),
-		);
+		return await this.#transaction(async sql => {
+			if (startFence) {
+				if (action !== "stop" || !(await readTargetStart(sql, startFence)))
+					throw new EngineTargetError("stale_target", "Cancellation requires its exact admitted Start");
+				expectedRevision = await cancelIntentRevision(sql, startFence);
+			}
+			return await this.#branchIntent(sql, agentInstanceId, commandId, action, expectedRevision);
+		});
 	}
 
 	async #branchIntent(
@@ -927,6 +944,17 @@ export class EngineStore {
 			| "authorityGeneration"
 		>,
 	): Promise<void> {
+		if (identity.agentInstanceRef) {
+			const aliases = await sql.unsafe(
+				"SELECT agent_instance_id FROM engine_agent_identity WHERE agent_instance_ref=? AND agent_instance_id<>? LIMIT 1",
+				[identity.agentInstanceRef, identity.agentInstanceId],
+			);
+			if (aliases.length)
+				throw new EngineTargetError(
+					"stale_target",
+					"Canonical AgentInstance already has a different native identity",
+				);
+		}
 		if (!identity.principalId && identity.parentAgentInstanceId) {
 			const parents = (await sql.unsafe("SELECT principal_id FROM engine_agent_identity WHERE agent_instance_id=?", [
 				identity.parentAgentInstanceId,
@@ -1142,6 +1170,8 @@ export class EngineStore {
 			if (browserPayloadHash && row.browser_payload_hash !== browserPayloadHash)
 				throw new EngineCommandConflictError(commandId);
 			const receipt = row.receipt ? (JSON.parse(String(row.receipt)) as EngineCommandReceipt) : undefined;
+			const canonicalRow = await readRuntimeReceipt(sql, commandId);
+			const canonical = canonicalRow && canonicalRuntimeReceipt(canonicalRow);
 			const attempt = row.attempt_id
 				? ((await sql.unsafe("SELECT state FROM engine_attempts WHERE attempt_id=?", [row.attempt_id]))[0] as
 						| { state: EngineAttemptState }
@@ -1170,8 +1200,29 @@ export class EngineStore {
 				dedupHorizonMs: runtimeLimits.dedupHorizonMs,
 				dedupUntil: row.settled_at ? Number(row.settled_at) + runtimeLimits.dedupHorizonMs : null,
 				retention: "indefinite",
+				...canonical,
 			};
 		});
+	}
+
+	async isNativeUnadmittedEvent(
+		event: Pick<EngineEvent, "eventId" | "agentInstanceId" | "attemptId" | "engineGeneration" | "causationCommandId">,
+	): Promise<boolean> {
+		return (
+			(
+				await this.#client.unsafe(
+					`SELECT 1 FROM engine_event_outbox e WHERE event_id=? AND agent_instance_id=? AND attempt_id=? AND engine_generation=? AND causation_command_id=?
+		AND NOT EXISTS(SELECT 1 FROM engine_commands c WHERE c.command_id=e.causation_command_id)`,
+					[
+						event.eventId,
+						event.agentInstanceId,
+						event.attemptId,
+						event.engineGeneration,
+						event.causationCommandId,
+					],
+				)
+			).length > 0
+		);
 	}
 
 	async runtimeQueue(
@@ -1949,19 +2000,30 @@ export class EngineStore {
 					command.serializedCommand ?? null,
 				],
 			);
-			if (command.browserPayloadHash)
-				await this.#identityEvent(sql, command.agentInstanceId, command.commandId, "command_receipt", {
-					commandId: command.commandId,
-					browserPayloadHash: command.browserPayloadHash,
-					target: {
-						agentInstanceRef: command.agentInstanceRef,
-						agentInstanceId: command.agentInstanceId,
-						attemptId: command.attemptId,
-						executionId: command.executionId,
-					},
-					stage: "engine_accepted",
-					lookup: "pending",
+			if (command.operation === "start") {
+				const start = await readTargetStart(sql, {
+					agentInstanceId: command.agentInstanceId,
+					executionId: command.executionId!,
+					attemptId: command.attemptId!,
+					authorityGeneration: command.authorityGeneration,
+					engineGeneration: command.engineGeneration,
+					pendingStartCommandId: command.commandId,
 				});
+				const cancelledBy = start && (await startCancellation(sql, start));
+				if (cancelledBy) {
+					const receipt: EngineCommandReceipt = {
+						outcome: "rejected",
+						detail: {
+							code: "cancelled",
+							message: "Start was cancelled before delivery",
+							cancellationCommandId: cancelledBy,
+						},
+					};
+					await this.#settleAdmittedCommand(sql, command.commandId, receipt, command.canonicalHash, true);
+					return { status: "replay", receipt };
+				}
+			}
+			if (command.browserPayloadHash) await this.#commandReceiptEvent(sql, command.commandId);
 			if (command.engineGeneration < processorGeneration) {
 				const receipt: EngineCommandReceipt = {
 					outcome: "rejected",
@@ -1993,51 +2055,32 @@ export class EngineStore {
 	}
 
 	async cancelPendingStart(
-		target: Pick<
-			EngineCommandIdentity,
-			"agentInstanceId" | "executionId" | "attemptId" | "authorityGeneration" | "engineGeneration"
-		> & { expectedIntentRevision?: number },
+		target: EnginePendingStartTarget,
 		cancellationCommandId: string,
 	): Promise<EnginePendingStartCancellation> {
 		return await this.#transaction(async sql => {
-			const rows = (await sql.unsafe(
-				`SELECT command_id, canonical_hash, state, processor_generation, receipt
-				 FROM engine_commands
-				 WHERE operation='start' AND agent_instance_id=? AND execution_id=? AND attempt_id=?
-				   AND authority_generation=? AND engine_generation<=?
-				 ORDER BY engine_generation DESC, received_at DESC LIMIT 1`,
-				[
-					target.agentInstanceId,
-					target.executionId,
-					target.attemptId,
-					target.authorityGeneration,
-					target.engineGeneration,
-				],
-			)) as Array<CommandRow & { command_id: string }>;
-			const start = rows[0];
-			if (!start) return { status: "not_found" };
-			if (start.state === "settled") {
+			const fenced = validateStartFence(target);
+			const start = await readTargetStart(sql, target);
+			if (!start && !fenced) return { status: "not_found" };
+			if (start?.state === "settled") {
 				const receipt = start.receipt ? (JSON.parse(start.receipt) as EngineCommandReceipt) : undefined;
 				if (receipt?.outcome !== "rejected" || receipt.detail?.code !== "cancelled") {
 					return { status: "too_late" };
 				}
 			}
 
-			if (start.state === "settled") {
+			if (start?.state === "settled") {
 				const rows = (await sql.unsafe(
 					"SELECT intent_revision FROM engine_agent_identity WHERE agent_instance_id=?",
 					[target.agentInstanceId],
 				)) as Array<{ intent_revision: number }>;
 				return { status: "already_cancelled", intentRevision: Number(rows[0]?.intent_revision ?? 0) };
 			}
-			const held = await this.#branchIntent(
-				sql,
-				target.agentInstanceId,
-				cancellationCommandId,
-				"stop",
-				target.expectedIntentRevision,
-			);
+			const expected = await cancelIntentRevision(sql, target);
+			await writeStartCancellation(sql, target, cancellationCommandId);
+			const held = await this.#branchIntent(sql, target.agentInstanceId, cancellationCommandId, "stop", expected);
 			const intentRevision = held.intentRevision;
+			if (!start) return { status: "cancelled", intentRevision };
 
 			const message = "Attempt cancelled before Engine session initialization";
 			await this.#settleAdmittedCommand(
@@ -2286,6 +2329,11 @@ export class EngineStore {
 					await this.#assertIntent(sql, binding.agentInstanceId, intent.expectedRevision, true);
 			}
 			await this.#putBinding(sql, binding, options.conversationIdentityDigest);
+			if (options.startIntent)
+				await sql.unsafe(
+					"UPDATE engine_commands SET start_applied_intent_revision=(SELECT intent_revision FROM engine_agent_identity WHERE agent_instance_id=?) WHERE command_id=? AND operation='start' AND state='received'",
+					[binding.agentInstanceId, binding.commandId],
+				);
 			if (!(await this.#putAttempt(sql, binding, state, options.cause, transcriptCheckpoint))) {
 				throw new EngineAttemptConflictError(binding.attemptId);
 			}
@@ -2355,6 +2403,7 @@ export class EngineStore {
 					options.settleCommandReceipt ?? { outcome: "applied" },
 				);
 			}
+			if (TERMINAL_ATTEMPT_STATES.has(state)) await this.#commandReceiptEvent(sql, binding.commandId);
 			return committed;
 		});
 	}
@@ -3441,31 +3490,27 @@ export class EngineStore {
 			 WHERE command_id=? AND state='received'`,
 			[receipt.outcome, serialized, now, now, commandId],
 		);
-		const identities = (await sql.unsafe(
-			"SELECT agent_instance_id,agent_instance_ref,attempt_id,execution_id,browser_payload_hash FROM engine_commands WHERE command_id=?",
-			[commandId],
-		)) as Array<{
-			agent_instance_id: string;
-			agent_instance_ref: string;
-			attempt_id: string;
-			execution_id: string;
-			browser_payload_hash: string | null;
-		}>;
-		const identity = identities[0];
-		if (identity?.browser_payload_hash)
-			await this.#identityEvent(sql, identity.agent_instance_id, commandId, "command_receipt", {
-				commandId,
-				browserPayloadHash: identity.browser_payload_hash,
-				target: {
-					agentInstanceRef: identity.agent_instance_ref,
-					agentInstanceId: identity.agent_instance_id,
-					attemptId: identity.attempt_id,
-					executionId: identity.execution_id,
-				},
-				stage: receipt.outcome === "rejected" ? "rejected" : "applied",
-				lookup: "known",
-				receipt,
-			});
+		await this.#commandReceiptEvent(sql, commandId);
+	}
+
+	async #commandReceiptEvent(sql: SqlClient, commandId: string): Promise<void> {
+		const row = await readRuntimeReceipt(sql, commandId);
+		const value = row && canonicalRuntimeReceipt(row);
+		if (!row || !value) return;
+		await this.#identityEvent(sql, row.agent_instance_id, commandId, "command_receipt", { value });
+		const target = value.target as { agentInstanceRef: string };
+		if (target.agentInstanceRef !== row.agent_instance_ref) {
+			const source = await sql.unsafe(
+				"SELECT agent_instance_id FROM engine_agent_identity WHERE agent_instance_ref=? AND principal_id=?",
+				[target.agentInstanceRef, row.principal_id],
+			);
+			if (!source[0])
+				throw new EngineTargetError(
+					"stale_target",
+					"Receipt source identity is not owned by the command principal",
+				);
+			await this.#identityEvent(sql, String(source[0].agent_instance_id), commandId, "command_receipt", { value });
+		}
 	}
 
 	#transaction<T>(work: (sql: SqlClient) => Promise<T>): Promise<T> {

@@ -27,7 +27,7 @@ import type {
 } from "./contracts";
 import { EngineTargetError, validateCommandContext } from "./contracts";
 import { safeEngineErrorDetail } from "./public-error";
-import { engineAgentInstanceId, engineRouteToken } from "./route";
+import { engineRouteToken } from "./route";
 import type { EngineRuntime } from "./runtime";
 import { ENGINE_CONTROL_OPS, runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
 import type { EngineCommandIdentity } from "./store";
@@ -837,9 +837,6 @@ export async function dispatchEngineCommand(options: {
 				command as unknown as Record<string, unknown>,
 				"agentInstanceRef",
 			);
-			if (agentInstanceRef && command.agentInstanceId !== engineAgentInstanceId(agentInstanceRef)) {
-				throw new EngineTargetError("invalid_request", "agentInstanceId does not match agentInstanceRef");
-			}
 			const queued = typeof command.payload.queueId === "string";
 			if (queued && command.payload.input !== undefined) {
 				throw new EngineTargetError("invalid_request", "start input and queueId are mutually exclusive");
@@ -945,6 +942,9 @@ export async function dispatchEngineCommand(options: {
 					engineGeneration: command.engineGeneration,
 					reason: optionalRecordString(command.payload, "reason"),
 					expectedIntentRevision: optionalRecordInteger(command.payload, "expectedIntentRevision"),
+					pendingStartCommandId: optionalRecordString(command.payload, "pendingStartCommandId"),
+					expectedStartIntentRevision: optionalRecordInteger(command.payload, "expectedStartIntentRevision"),
+					principalId: command.principalId,
 				});
 			}
 			return await runtime.cancel({
@@ -952,6 +952,9 @@ export async function dispatchEngineCommand(options: {
 				commandId: command.commandId,
 				reason: optionalRecordString(command.payload, "reason"),
 				expectedIntentRevision: optionalRecordInteger(command.payload, "expectedIntentRevision"),
+				pendingStartCommandId: optionalRecordString(command.payload, "pendingStartCommandId"),
+				expectedStartIntentRevision: optionalRecordInteger(command.payload, "expectedStartIntentRevision"),
+				principalId: command.principalId,
 			});
 		case "compact":
 			return await runtime.compact(
@@ -1084,6 +1087,7 @@ function parseCommandSubject(subject: string): [string, string, string, EngineCo
 }
 
 function commandIdentity(command: EngineCommandEnvelope): EngineCommandIdentity {
+	if (command.browserTarget) validateRuntimeValue("target", command.browserTarget);
 	const payloadHash = sha256(stableStringifyJson(command.payload));
 	const canonical = {
 		op: command.op,

@@ -144,6 +144,9 @@ export interface EngineCancelRequest extends EngineTarget {
 	commandId: string;
 	reason?: string;
 	expectedIntentRevision?: number;
+	pendingStartCommandId?: string;
+	expectedStartIntentRevision?: number;
+	principalId?: string;
 }
 
 export type EngineControlInitiator =

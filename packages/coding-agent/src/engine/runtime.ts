@@ -71,6 +71,7 @@ import { engineAgentId, engineAgentInstanceId, engineRouteToken } from "./route"
 import { utf8Chunks } from "./runtime-messages";
 import { runtimeInputBody, runtimeInputPreview } from "./runtime-projection";
 import { runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
+import { validateStartFence } from "./start-fence";
 import {
 	EngineAttemptConflictError,
 	type EngineAttemptRecord,
@@ -653,6 +654,7 @@ export class EngineRuntime {
 	}
 
 	cancel(request: EngineCancelRequest): Promise<EngineControlResult> {
+		validateStartFence(request);
 		return this.#branchControl(request, "stop");
 	}
 
@@ -691,7 +693,11 @@ export class EngineRuntime {
 					"too_late",
 					"Only a paused Attempt can resume; interrupted execution requires Continue",
 				);
-			await this.store.assertIntent(request.agentInstanceId, request.expectedIntentRevision);
+			const startFence =
+				action === "stop" && "pendingStartCommandId" in request && request.pendingStartCommandId
+					? (request as EngineCancelRequest)
+					: undefined;
+			if (!startFence) await this.store.assertIntent(request.agentInstanceId, request.expectedIntentRevision);
 			if (action === "resume" && root && "context" in request)
 				await this.#sendCommandContext(root, request.context, request.commandId);
 			const changed = await this.store.branchIntent(
@@ -699,6 +705,7 @@ export class EngineRuntime {
 				request.commandId,
 				action,
 				request.expectedIntentRevision,
+				startFence,
 			);
 			this.#notifyEvents(changed.events);
 			const apply = async (agentId: string) => {
@@ -815,7 +822,11 @@ export class EngineRuntime {
 		engineGeneration: number;
 		reason?: string;
 		expectedIntentRevision?: number;
+		pendingStartCommandId?: string;
+		expectedStartIntentRevision?: number;
+		principalId?: string;
 	}): Promise<Record<string, unknown>> {
+		validateStartFence(request);
 		if (!request.commandId.trim()) {
 			throw new EngineTargetError("invalid_request", "commandId must be a non-empty string");
 		}
@@ -838,6 +849,9 @@ export class EngineRuntime {
 				commandId: request.commandId,
 				reason: request.reason,
 				expectedIntentRevision: request.expectedIntentRevision,
+				pendingStartCommandId: request.pendingStartCommandId,
+				expectedStartIntentRevision: request.expectedStartIntentRevision,
+				principalId: request.principalId,
 			});
 		};
 		const liveResult = await cancelLiveBinding();

@@ -495,6 +495,13 @@ async function summaryValue(
 		[identity.agent_instance_id],
 	);
 	const authority = Number(attempt?.authority_generation ?? identity.authority_generation);
+	const pendingInputs =
+		attempt && !TERMINAL.has(attempt.state)
+			? await sql.unsafe(
+					"SELECT 1 FROM engine_runtime_inputs WHERE attempt_id=? AND resolved_event_id IS NULL LIMIT 1",
+					[attempt.attempt_id],
+				)
+			: [];
 	return {
 		agentInstanceRef: identity.agent_instance_ref,
 		rootAgentInstanceRef: identity.root_agent_instance_ref,
@@ -521,7 +528,7 @@ async function summaryValue(
 		outcome: attempt && TERMINAL.has(attempt.state) ? attempt.state : null,
 		attention: {
 			held: held.length > 0,
-			needsInput: attempt?.state === "waiting_input",
+			needsInput: pendingInputs.length > 0,
 			queuePending: queue.length > 0,
 		},
 	};
@@ -605,6 +612,14 @@ export async function recordRuntimeProjection(sql: RuntimeSql, event: EngineEven
 	const changes: RuntimeChange[] = [];
 	let detail: Record<string, unknown> | undefined;
 	let kinds = 0;
+	if (event.kind === "command_receipt" && event.payload?.value) {
+		const value = event.payload.value as Record<string, unknown>;
+		const target = value.target as { agentInstanceRef: string };
+		if (target.agentInstanceRef === identity.agent_instance_ref) {
+			changes.push(projectionChange("receipt", identity.agent_instance_ref, event.eventId, event.eventId, value));
+			kinds |= RUNTIME_KIND_MASK.state;
+		}
+	}
 	if (event.kind === "message_updated") {
 		const value = await recordRuntimeMessage(sql, event, identity.agent_instance_ref);
 		changes.push(

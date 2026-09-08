@@ -83,6 +83,7 @@ describe("EngineStore", () => {
 			"tool_started",
 			"tool_approval_requested",
 			"model_started",
+			"holds_changed",
 			"tool_settled",
 			"tool_approval_resolved",
 			"tool_settled",
@@ -90,6 +91,7 @@ describe("EngineStore", () => {
 			"interrupted",
 		]);
 		expect(events.at(-1)?.engineGeneration).toBe(runtime.engineGeneration);
+		expect((await runtime.store.intent("agent-1")).holds).toEqual([expect.objectContaining({ kind: "recovery" })]);
 		expect(events.at(-1)?.payload).toEqual({
 			cause: "engine_lost",
 			error: "engine_lost",
@@ -302,7 +304,10 @@ describe("EngineStore", () => {
 		await reopened.close();
 
 		const restarted = await EngineStore.open(databasePath);
-		expect(await restarted.admitCommand(pending, 2)).toEqual({ status: "claimed" });
+		expect(await restarted.admitCommand(pending, 2)).toMatchObject({
+			status: "replay",
+			receipt: { outcome: "rejected", detail: { code: "interrupted", requiresExplicitContinue: true } },
+		});
 		await expect(
 			restarted.admitCommand(
 				{ ...command, payloadHash: "sha256:payload-2", canonicalHash: "sha256:canonical-2" },

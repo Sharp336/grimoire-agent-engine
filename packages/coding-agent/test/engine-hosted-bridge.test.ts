@@ -85,7 +85,18 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 		});
 		const manager = await jetstreamManager(managerConnection);
 		await manager.streams.delete(ENGINE_COMMAND_STREAM);
-		const rpc = new FakeRpc(startCommand(cwd, profile), { wakeFailures: 1 });
+		const browserTarget = { agentInstanceRef: "grimoire://tasks/p/t/agents/hosted" };
+		const rpc = new FakeRpc(
+			{
+				...startCommand(cwd, profile),
+				agentInstanceRef: browserTarget.agentInstanceRef,
+				principalId: "owner",
+				browserPayloadHash: `sha256:${"a".repeat(64)}`,
+				browserTarget,
+				payload: { ...startCommand(cwd, profile).payload, expectedIntentRevision: 0 },
+			},
+			{ wakeFailures: 1 },
+		);
 		const bridgeErrors: Error[] = [];
 		const bridge = await HostedEngineBridge.connect({
 			rpc,
@@ -115,7 +126,13 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			authenticator: nkeyAuthenticator(engineSeed),
 		});
 		try {
-			await waitFor(() => rpc.events.some(event => event.type === "attempt.completed") || adapterErrors.length > 0);
+			await waitFor(
+				() =>
+					rpc.events.some(event => event.type === "attempt.completed") ||
+					rpc.receipts.some(receipt => receipt.stage === "rejected") ||
+					adapterErrors.length > 0,
+			);
+			expect(rpc.receipts.filter(receipt => receipt.stage === "rejected")).toEqual([]);
 			expect(adapterErrors).toEqual([]);
 			await waitFor(async () => {
 				const [commands, events] = await Promise.all([
@@ -133,6 +150,11 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 				"attempt.completed",
 			]);
 			expect(rpc.terminalStatus).toBe("completed");
+			expect(rpc.receipts.map(receipt => receipt.stage)).toEqual(["engine_accepted", "applied"]);
+			for (const receipt of rpc.receipts) {
+				expect(receipt.target).toEqual(browserTarget);
+				expect(receipt.browserPayloadHash).toBe(`sha256:${"a".repeat(64)}`);
+			}
 			expect(rpc.claimGenerationRequests.length).toBeGreaterThan(0);
 			expect([...new Set(rpc.claimGenerationRequests)]).toEqual([runtime.engineGeneration]);
 			const terminalEvent = rpc.events.find(event => event.type === "attempt.completed");
@@ -475,6 +497,18 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 				2,
 			);
 			const commandAck = await store.appendEvent({ ...oldAck, causationCommandId: "real-control" });
+			await store.admitCommand(
+				{
+					...target,
+					commandId: "start-command",
+					operation: "start",
+					deviceId: "device",
+					engineId: "engine",
+					payloadHash: "start-payload",
+					canonicalHash: "start-canonical",
+				},
+				1,
+			);
 			const terminal = await store.appendEvent({
 				...oldAck,
 				causationCommandId: "start-command",
@@ -488,6 +522,8 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			});
 			await publish(envelope(commandAck));
 			await publish(envelope(terminal));
+			const nativeEvent = await store.appendEvent({ ...terminal, causationCommandId: "native-created-no-job" });
+			await publish(envelope(nativeEvent));
 			await publish(envelope(wake));
 			await waitFor(() => delivered.includes("inbox-wake"), 1_000);
 			expect(delivered).toEqual(["real-control", "start-command", "inbox-wake"]);
@@ -1133,6 +1169,7 @@ describe("hosted child launch", () => {
 });
 
 class FakeRpc implements GrimoireRpc {
+	readonly receipts: Array<Record<string, unknown>> = [];
 	readonly events: Array<Record<string, unknown>> = [];
 	readonly wakes: Array<Record<string, unknown>> = [];
 	readonly wakeAttempts: Array<Record<string, unknown>> = [];
@@ -1164,6 +1201,10 @@ class FakeRpc implements GrimoireRpc {
 
 	async call(_tool: string, arguments_: Record<string, unknown>): Promise<Record<string, unknown>> {
 		switch (arguments_.action) {
+			case "accepted":
+				if (arguments_.lease_token !== this.#leaseToken) throw new Error("active lease is required");
+				this.receipts.push(arguments_.receipt as Record<string, unknown>);
+				return { status: "accepted" };
 			case "claim":
 				if (!Number.isSafeInteger(arguments_.engine_generation) || Number(arguments_.engine_generation) <= 0) {
 					throw new Error("claim engine_generation is required");

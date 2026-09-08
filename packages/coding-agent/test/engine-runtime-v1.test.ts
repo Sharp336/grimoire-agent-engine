@@ -179,6 +179,127 @@ describe("runtime v1 durable boundaries", () => {
 		await expect(store.admitCommand({ ...original, canonicalHash: "different" }, 2)).rejects.toThrow("different");
 		expect((await store.runtimeCommand("missing", { principalId: "owner" })).lookup).toBe("outcome_unknown");
 	});
+	it("cancels an exact Start before ordinary delivery and preserves its fence across reopen", async () => {
+		let store = await createStore();
+		const start = {
+			...command("start-late"),
+			serializedCommand: JSON.stringify({ payload: { expectedIntentRevision: 0 } }),
+		};
+		await store.registerAgent(identity("root"));
+		const target = {
+			...identity("root"),
+			executionId: start.executionId!,
+			attemptId: start.attemptId!,
+			engineGeneration: 1,
+			pendingStartCommandId: start.commandId,
+			expectedStartIntentRevision: 0,
+			expectedIntentRevision: 0,
+		};
+		expect(await store.cancelPendingStart(target, "stop-first")).toMatchObject({
+			status: "cancelled",
+			intentRevision: 1,
+		});
+		await store.close();
+		stores.pop();
+		store = await EngineStore.open(path.join(directories.at(-1)!, "engine.sqlite"));
+		stores.push(store);
+		expect(await store.admitCommand(start, 1)).toMatchObject({
+			status: "replay",
+			receipt: { outcome: "rejected", detail: { code: "cancelled", cancellationCommandId: "stop-first" } },
+		});
+		expect(await store.getAttempt(start.attemptId!)).toBeUndefined();
+		expect((await store.intent(target.agentInstanceId)).manualHold).toBe(true);
+		await expect(store.admitCommand({ ...start, canonicalHash: "changed", attemptId: "other" }, 1)).rejects.toThrow();
+	});
+	it("pins a pending cancellation to the source principal and immutable Start CAS", async () => {
+		const store = await createStore();
+		const start = {
+			...command("pending-exact"),
+			serializedCommand: JSON.stringify({ payload: { expectedIntentRevision: 0 } }),
+		};
+		await store.admitCommand(start, 1);
+		const target = {
+			...identity("root"),
+			executionId: start.executionId!,
+			attemptId: start.attemptId!,
+			engineGeneration: 1,
+			pendingStartCommandId: start.commandId,
+			expectedStartIntentRevision: 0,
+			expectedIntentRevision: 0,
+		};
+		await expect(store.cancelPendingStart({ ...target, principalId: "foreign" }, "foreign-stop")).rejects.toThrow(
+			"immutable target",
+		);
+		await expect(
+			store.cancelPendingStart({ ...target, expectedStartIntentRevision: 1 }, "wrong-cas"),
+		).rejects.toThrow("immutable target");
+		expect((await store.intent(target.agentInstanceId)).intentRevision).toBe(0);
+		expect(await store.cancelPendingStart(target, "exact-stop")).toMatchObject({ status: "cancelled" });
+	});
+	it("uses the factual applied Start revision and rejects an intervening intent mutation", async () => {
+		const store = await createStore();
+		const target = binding("root");
+		const start = {
+			...command(target.commandId),
+			attemptId: target.attemptId,
+			executionId: target.executionId,
+			serializedCommand: JSON.stringify({ payload: { expectedIntentRevision: 0 } }),
+		};
+		await store.admitCommand(start, 1);
+		await store.commitAttemptTransition({ ...target, intentRevision: 7 }, "running", [{ kind: "running" }], {
+			startIntent: { expectedRevision: 0 },
+			settleCommandId: start.commandId,
+			settleCommandReceipt: { outcome: "applied" },
+		});
+		const fence = {
+			...target,
+			principalId: "owner",
+			pendingStartCommandId: start.commandId,
+			expectedStartIntentRevision: 0,
+			expectedIntentRevision: 0,
+		};
+		expect(await store.branchIntent(target.agentInstanceId, "stop-after-bind", "stop", 0, fence)).toMatchObject({
+			intentRevision: 8,
+		});
+		await expect(store.branchIntent(target.agentInstanceId, "delayed-old-stop", "stop", 0, fence)).rejects.toThrow(
+			"Intent changed",
+		);
+	});
+	it("routes frozen browser receipt targets across branch destination changes and preserves stages", async () => {
+		const store = await createStore();
+		const source = identity("root");
+		await store.registerAgent(source);
+		const destination = identity("branch");
+		const scope = { kind: "agent" as const, agentInstanceRef: source.agentInstanceRef, kinds: ["state" as const] };
+		const snapshot = await store.runtimeSnapshot(scope, { principalId: "owner" });
+		const browserTarget = {
+			agentInstanceRef: source.agentInstanceRef,
+			attemptId: "source-attempt",
+			executionId: "source-execution",
+		};
+		const start = {
+			...command("branch-command"),
+			...destination,
+			serializedCommand: JSON.stringify({ browserTarget, payload: { expectedIntentRevision: 0 } }),
+		};
+		await store.admitCommand(start, 1);
+		await store.settleCommand(start.commandId, start.canonicalHash, {
+			outcome: "applied",
+			detail: { intentRevision: 1 },
+		});
+		const queried = await store.runtimeCommand(start.commandId, { principalId: "owner" });
+		expect(queried.target).toEqual(browserTarget);
+		expect(queried.result).toMatchObject({
+			target: { agentInstanceRef: destination.agentInstanceRef, attemptId: start.attemptId, intentRevision: 1 },
+		});
+		const batch = await store.runtimeEvents(eventsRequest(snapshot.epoch, snapshot.watermark, scope));
+		const receipts = batch.changes.filter(change => change.kind === "receipt");
+		expect(receipts.map(change => change.value.stage)).toEqual(["engine_accepted", "applied"]);
+		for (const change of receipts) {
+			validateRuntimeValue("change", change);
+			expect(change.value.target).toEqual(browserTarget);
+		}
+	});
 	it("enforces queue record bounds atomically while reserving control admission", async () => {
 		const store = await createStore();
 		const agent = identity("root");

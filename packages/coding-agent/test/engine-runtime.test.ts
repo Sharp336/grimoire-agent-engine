@@ -4303,6 +4303,8 @@ describe("EngineRuntime", () => {
 			authorityGeneration: 1,
 			payloadHash: "sha256:cancel-profile-resolution-payload",
 			canonicalHash: "sha256:cancel-profile-resolution-command",
+			principalId: "owner-profile-cancellation",
+			serializedCommand: JSON.stringify({ payload: { expectedIntentRevision: 0 } }),
 		};
 		expect(await runtime.store.admitCommand(command, runtime.engineGeneration)).toEqual({ status: "claimed" });
 		const start = runtime.start(
@@ -4315,6 +4317,7 @@ describe("EngineRuntime", () => {
 				authorityGeneration: command.authorityGeneration,
 				cwd,
 				input: "must never reach the model",
+				expectedIntentRevision: 0,
 			},
 			profile,
 		);
@@ -4329,6 +4332,10 @@ describe("EngineRuntime", () => {
 			authorityGeneration: command.authorityGeneration,
 			engineGeneration: runtime.engineGeneration,
 			reason: "cancel provider material lookup",
+			expectedIntentRevision: 0,
+			pendingStartCommandId: command.commandId,
+			expectedStartIntentRevision: 0,
+			principalId: command.principalId,
 		});
 
 		expect(cancelled).toMatchObject({ phase: "applied", preStart: true, manualHold: true });
@@ -4351,6 +4358,48 @@ describe("EngineRuntime", () => {
 			receipt: { outcome: "rejected", detail: { code: "cancelled" } },
 		});
 		await runtime.dispose();
+	}, 60_000);
+
+	it("applies a Stop compiled before Start binding using only the persisted source revision", async () => {
+		const release = Promise.withResolvers<void>();
+		const { runtime, cwd } = await createRuntime(async () => {
+			await release.promise;
+			return true;
+		});
+		const command = {
+			commandId: "start-bound-race",
+			operation: "start" as const,
+			deviceId: "device",
+			engineId: "engine",
+			engineGeneration: runtime.engineGeneration,
+			agentInstanceId: "agent-bound-race",
+			agentInstanceRef: "grimoire://tasks/project/task/agents/bound-race",
+			principalId: "owner",
+			executionId: "execution-bound-race",
+			attemptId: "attempt-bound-race",
+			authorityGeneration: 1,
+			payloadHash: "payload",
+			canonicalHash: "canonical",
+			serializedCommand: JSON.stringify({ payload: { expectedIntentRevision: 0 } }),
+		};
+		try {
+			await runtime.store.admitCommand(command, runtime.engineGeneration);
+			const started = await runtime.start({ ...command, cwd, input: "active", expectedIntentRevision: 0 }, profile);
+			expect(started.intentRevision).toBe(1);
+			const result = await runtime.cancelPendingStart({
+				...command,
+				commandId: "stop-bound-race",
+				pendingStartCommandId: command.commandId,
+				expectedStartIntentRevision: 0,
+				expectedIntentRevision: 0,
+			});
+			expect(result).toMatchObject({ manualHold: true, intentRevision: 2 });
+			expect((await runtime.store.getAttempt(command.attemptId))?.state).toBe("cancel_requested");
+		} finally {
+			release.resolve();
+			await runtime.drain();
+			await runtime.dispose();
+		}
 	}, 60_000);
 
 	for (const op of ["cancel", "pause"] as const) {

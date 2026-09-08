@@ -456,7 +456,8 @@ export class HostedEngineBridge {
 	}
 
 	async #deliverEvent(event: EngineEventEnvelope): Promise<boolean> {
-		if (["attempt.agent_registered", "attempt.holds_changed"].includes(event.type)) return true;
+		if (["attempt.agent_registered", "attempt.holds_changed", "attempt.message_updated"].includes(event.type))
+			return true;
 		if (
 			event.type === "attempt.inbox_changed" &&
 			typeof event.payload?.action === "string" &&
@@ -499,6 +500,11 @@ export class HostedEngineBridge {
 			return true;
 		}
 		let claim = this.#active.get(event.causationCommandId);
+		if (
+			!claim &&
+			(await this.#options.eventStore?.isNativeUnadmittedEvent({ ...event, eventId: Number(event.eventId) }))
+		)
+			return true;
 		if (!claim) {
 			const recovered = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
 				action: "claim",
@@ -527,20 +533,22 @@ export class HostedEngineBridge {
 			this.#active.set(claim.jobId, claim);
 		}
 		if (event.type === "attempt.command_receipt" && event.payload) {
+			const value = (event.payload.value ?? event.payload) as Record<string, unknown>;
+			const receipt: Record<string, unknown> = {
+				...value,
+				browserPayloadHash: value.payloadHash ?? value.browserPayloadHash,
+			};
 			const accepted = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
 				action: "accepted",
 				device_id: this.#options.deviceId,
 				engine_id: this.#options.engineId,
 				job_id: claim.jobId,
 				lease_token: claim.leaseToken,
-				receipt: event.payload,
+				receipt,
 			});
 			if (accepted.status !== "accepted") throw new Error("Hosted command receipt was not persisted");
 			claim.accepted = true;
-			if (
-				event.payload.stage === "rejected" ||
-				(event.payload.stage === "applied" && claim.work.command?.op !== "start")
-			)
+			if (receipt.stage === "rejected" || (receipt.stage === "applied" && claim.work.command?.op !== "start"))
 				this.#active.delete(claim.jobId);
 			while (this.#active.size > runtimeLimits.devicePendingRecords) {
 				const old = [...this.#active.values()].find(item => item.accepted);
