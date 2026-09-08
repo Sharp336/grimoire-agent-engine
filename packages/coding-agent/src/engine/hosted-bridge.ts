@@ -22,6 +22,7 @@ import { engineAgentInstanceId, engineRouteToken } from "./route";
 import type { LegacyOwnershipProof } from "./runtime-ownership";
 import { ENGINE_CONTROL_OPS, runtimeLimits } from "./runtime-protocol";
 import type { EngineStore } from "./store";
+import { waitForEngineWake } from "./wake";
 
 interface BridgeClaim {
 	jobId: string;
@@ -366,11 +367,15 @@ export class HostedEngineBridge {
 					await store.recordOwnershipMigration(unresolved ? "incomplete" : "complete", unresolved);
 			} catch (error) {
 				if (this.#accepting) {
-					await store.recordOwnershipMigration("unavailable", 0);
+					await store.recordOwnershipMigration("unavailable", null);
 					this.#report(error);
 				}
 			}
-			await Promise.race([Bun.sleep(runtimeLimits.reconciliationMs), this.#stop.promise]);
+			await waitForEngineWake(
+				this.#stop.promise,
+				runtimeLimits.reconciliationMs,
+				this.#admissionCancellation.signal,
+			);
 		}
 	}
 
@@ -408,7 +413,11 @@ export class HostedEngineBridge {
 					}
 				}
 				if (this.#options.pollIntervalMs !== undefined)
-					await Promise.race([Bun.sleep(this.#options.pollIntervalMs), this.#stop.promise]);
+					await waitForEngineWake(
+						this.#stop.promise,
+						this.#options.pollIntervalMs,
+						this.#admissionCancellation.signal,
+					);
 				else {
 					const wake = await Promise.race([
 						this.#options.rpc.call(
@@ -429,7 +438,7 @@ export class HostedEngineBridge {
 			} catch (error) {
 				if (!this.#accepting) break;
 				this.#report(error);
-				await Promise.race([Bun.sleep(1000), this.#stop.promise]);
+				await waitForEngineWake(this.#stop.promise, 1000, this.#admissionCancellation.signal);
 			}
 		}
 	}
@@ -640,7 +649,7 @@ export class HostedEngineBridge {
 
 	async #heartbeatLoop(): Promise<void> {
 		while (!this.#stopping) {
-			await Promise.race([Bun.sleep(this.#options.heartbeatIntervalMs ?? 30_000), this.#stop.promise]);
+			await waitForEngineWake(this.#stop.promise, this.#options.heartbeatIntervalMs ?? 30_000);
 			if (this.#stopping) break;
 			for (const claim of this.#active.values()) {
 				if (claim.heartbeatPending || claim.accepted) continue;

@@ -1234,31 +1234,35 @@ function isSocketDisconnect(error: Error): boolean {
 }
 
 function requestOnce(endpoint: string, request: EngineControlQueryRequest, timeoutMs: number): Promise<unknown> {
-	return new Promise((resolve, reject) => {
-		const socket = net.createConnection(endpoint);
-		let buffered = Buffer.alloc(0);
-		const fail = (error: Error) => {
+	const { promise, resolve, reject } = Promise.withResolvers<unknown>();
+	const socket = net.createConnection(endpoint);
+	let buffered = Buffer.alloc(0);
+	let settled = false;
+	const fail = (error: Error) => {
+		if (settled) return;
+		settled = true;
+		socket.destroy();
+		reject(error);
+	};
+	socket.setTimeout(timeoutMs, () => fail(new Error("Engine Control + Query request timed out")));
+	socket.once("error", fail);
+	socket.once("close", () => fail(new Error("Engine Control + Query connection closed before response")));
+	socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
+	socket.on("data", chunk => {
+		buffered = Buffer.concat([buffered, Buffer.from(chunk)]);
+		if (buffered.byteLength > runtimeResponseBytes(request.method))
+			return fail(new Error("Response exceeds method byte budget"));
+		const newline = buffered.indexOf(10);
+		if (newline < 0) return;
+		try {
+			const response = JSON.parse(buffered.subarray(0, newline).toString("utf8")) as EngineControlQueryResponse;
+			if (!response.ok) return fail(Object.assign(new Error(response.error.message), { code: response.error.code }));
+			settled = true;
 			socket.destroy();
-			reject(error);
-		};
-		socket.setTimeout(timeoutMs, () => fail(new Error("Engine Control + Query request timed out")));
-		socket.once("error", fail);
-		socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
-		socket.on("data", chunk => {
-			buffered = Buffer.concat([buffered, Buffer.from(chunk)]);
-			if (buffered.byteLength > runtimeResponseBytes(request.method))
-				return fail(new Error("Response exceeds method byte budget"));
-			const newline = buffered.indexOf(10);
-			if (newline < 0) return;
-			try {
-				const response = JSON.parse(buffered.subarray(0, newline).toString("utf8")) as EngineControlQueryResponse;
-				socket.end();
-				if (!response.ok)
-					return reject(Object.assign(new Error(response.error.message), { code: response.error.code }));
-				resolve(response.result);
-			} catch (error) {
-				fail(error instanceof Error ? error : new Error(String(error)));
-			}
-		});
+			resolve(response.result);
+		} catch (error) {
+			fail(error instanceof Error ? error : new Error(String(error)));
+		}
 	});
+	return promise;
 }

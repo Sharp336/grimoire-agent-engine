@@ -1,4 +1,5 @@
 import * as path from "node:path";
+import { withTimeout } from "@oh-my-pi/pi-utils";
 import { EngineControlQueryClient } from "../../src/engine/control-query";
 import type { EngineCommandEnvelope } from "../../src/engine/nats-adapter";
 import { runtimeRemainingWork, validateRuntimeValue } from "../../src/engine/runtime-protocol";
@@ -17,6 +18,7 @@ const child = Bun.spawn(
 		"1",
 		"--rate",
 		"20",
+		...process.argv.slice(3),
 	],
 	{ stdout: "pipe", stderr: "inherit" },
 );
@@ -98,6 +100,7 @@ try {
 			text: "queued during active fixture",
 			clientMessageId: "fixture-message",
 			expectedIntentRevision: Number(target.intentRevision),
+			deliverAt: Date.now() + 60_000,
 		},
 	};
 	await client.request("command", { command });
@@ -112,7 +115,7 @@ try {
 		throw new Error("Busy enqueue did not preserve its Attempt");
 	const controlled = ready.agents[1];
 	const controlScope = { kind: "agent", agentInstanceRef: controlled.agentInstanceRef, kinds: ["state"] };
-	for (const op of ["pause", "resume", "pause"] as const) {
+	for (const op of ["pause", "resume", "pause", "resume"] as const) {
 		const pinned = (await client.request("runtime.target", { ...controlled, ...access })) as Record<string, unknown>;
 		const cut = (await client.request("runtime.snapshot", { scope: controlScope, ...access })) as {
 			epoch: string;
@@ -164,14 +167,46 @@ try {
 			cursor = changes.throughCursor;
 		}
 	}
+	let observing = true;
+	const observer = new EngineControlQueryClient(runDir, 30_000);
+	const observers = Array.from({ length: 16 }, async (_, index) => {
+		const selected = index % 2 ? detailScope : scope;
+		const initial = (await observer.request("runtime.snapshot", { scope: selected, ...access })) as {
+			epoch: string;
+			watermark: number;
+		};
+		let cursor = initial.watermark;
+		while (observing) {
+			try {
+				const batch = (await observer.request("runtime.events.wait", {
+					scope: selected,
+					...access,
+					epoch: initial.epoch,
+					afterCursor: cursor,
+					timeoutMs: 25_000,
+					limit: 100,
+					maxBytes: 61440,
+					remainingWork: runtimeRemainingWork(),
+				})) as { throughCursor: number };
+				cursor = batch.throughCursor;
+			} catch {
+				// The real IPC owner closes its active observer sockets during shutdown.
+				break;
+			}
+		}
+	});
 	let completion = buffered;
 	for (;;) {
 		const chunk = await reader.read();
 		if (chunk.done) break;
 		completion += decoder.decode(chunk.value, { stream: true });
+		if (completion.split(/\r?\n/).some(line => line.startsWith("{") && line.includes('"kind":"complete"'))) break;
 	}
 	reader.releaseLock();
-	const code = await child.exited;
+	observing = false;
+	const afterComplete = performance.now();
+	const code = await withTimeout(child.exited, 3000, "Engine printed complete but retained a live process handle");
+	await Promise.all(observers);
 	if (code !== 0) throw new Error(`Fixture process exited ${code}`);
 	if (
 		!completion
@@ -188,6 +223,8 @@ try {
 			busyEnqueue: true,
 			pauseResumeSameAttempt: true,
 			finiteHeldShutdown: true,
+			liveObservers: observers.length,
+			processExitAfterCompleteMs: performance.now() - afterComplete,
 			runDir: path.resolve(runDir),
 		}),
 	);

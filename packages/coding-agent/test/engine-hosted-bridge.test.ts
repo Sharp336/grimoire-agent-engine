@@ -27,7 +27,7 @@ import type { LegacyOwnershipCandidate } from "@oh-my-pi/pi-coding-agent/engine/
 import { natsConfig, runEngineService } from "@oh-my-pi/pi-coding-agent/engine/service";
 import { EngineStore } from "@oh-my-pi/pi-coding-agent/engine/store";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { removeSyncWithRetries, Snowflake, withTimeout } from "@oh-my-pi/pi-utils";
 
 const installedNatsServer = path.join(process.env.LOCALAPPDATA ?? "", "Grimoire", "bin", "nats-server.exe");
 const natsServer = process.env.GRIMOIRE_NATS_SERVER ?? installedNatsServer;
@@ -40,111 +40,212 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 		tempDir = undefined;
 	});
 
-	it("imports exact paged legacy ownership proofs and aborts idle admission waits on shutdown", async () => {
-		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-ownership-${Snowflake.next()}-`));
+	it("exits the real Engine process after Resume with native observers and a deferred inbox timer", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-exit-${Snowflake.next()}-`));
 		const broker = await startNatsServer(tempDir);
-		const connection = await connect({ servers: broker.url });
-		await (await jetstreamManager(connection)).streams.add({
-			name: ENGINE_EVENT_STREAM,
-			subjects: ["grimoire.engine.v1.>"],
-		});
-		const store = await EngineStore.open(path.join(tempDir, "engine.sqlite"));
-		await store.nextEngineGeneration();
-		for (let index = 0; index < 2; index++) {
-			const agentInstanceRef = `grimoire://tasks/grimoire/ownership/agents/${index}`;
-			const envelope: EngineCommandEnvelope = {
-				schema: "grimoire.engine.command.v1",
-				commandId: `ownership-${index}`,
-				issuedAt: Date.now(),
-				op: "start",
-				deviceId: "device",
-				engineId: "engine",
-				engineGeneration: 1,
-				agentInstanceId: engineAgentInstanceId(agentInstanceRef),
-				agentInstanceRef,
-				authorityGeneration: 1,
-				attemptId: `ownership-attempt-${index}`,
-				executionId: `ownership-execution-${index}`,
-				payload: { input: "legacy" },
-			};
-			await store.admitCommand(engineCommandIdentity(envelope), 1);
-		}
-		const pageSizes: number[] = [];
-		let waits = 0;
+		const tokenFile = path.join(tempDir, "bridge-token");
+		await Bun.write(tokenFile, "private-fixture-only");
 		const http = Bun.serve({
 			port: 0,
 			hostname: "127.0.0.1",
 			async fetch(request) {
+				if (request.headers.get("authorization") !== "Bearer private-fixture-only")
+					return new Response(null, { status: 401 });
 				const body = (await request.json()) as { id: number; params: { arguments: Record<string, unknown> } };
 				const args = body.params.arguments;
 				const response = (value: Record<string, unknown>) =>
 					Response.json({ jsonrpc: "2.0", id: body.id, result: { content: [], structuredContent: value } });
 				if (args.action === "claim") return response({ status: "no_job" });
-				if (args.action === "ownership") {
-					const candidates = args.candidates as LegacyOwnershipCandidate[];
-					pageSizes.push(candidates.length);
-					return response({
-						status: "ok",
-						results: candidates.map((candidate, index) => ({
-							agentInstanceRef: candidate.agentInstanceRef,
-							sourceCommandId: candidate.sourceCommandId,
-							status: pageSizes.length === 1 && index === 1 ? "deferred" : "verified",
-							principalId: "owner",
-						})),
-					});
-				}
+				if (args.action === "event") return response({ status: "already_terminal" });
+				if (args.action === "ownership") return response({ status: "ok", results: [] });
 				if (args.action === "wait") {
-					waits++;
-					return await new Promise<Response>(resolve => {
-						const timer = setTimeout(() => resolve(response({ generation: 1, changed: false })), 15000);
-						request.signal.addEventListener(
-							"abort",
-							() => {
-								clearTimeout(timer);
-								resolve(new Response(null, { status: 499 }));
-							},
-							{ once: true },
-						);
-					});
+					const wait = Promise.withResolvers<Response>();
+					const timer = setTimeout(() => wait.resolve(response({ generation: 1, changed: false })), 25_000);
+					const abort = () => {
+						clearTimeout(timer);
+						wait.resolve(new Response(null, { status: 499 }));
+					};
+					request.signal.addEventListener("abort", abort, { once: true });
+					try {
+						return await wait.promise;
+					} finally {
+						clearTimeout(timer);
+						request.signal.removeEventListener("abort", abort);
+					}
 				}
-				throw new Error("Unexpected fixture RPC");
+				throw new Error(`Unexpected shutdown fixture action ${String(args.action)}`);
 			},
 		});
-		const errors: Error[] = [];
-		const bridge = await HostedEngineBridge.connect({
-			eventStore: store,
-			deviceId: "device",
-			engineId: "engine",
-			engineGeneration: 1,
-			servers: broker.url,
-			onError: error => errors.push(error),
-			rpc: new HostedGrimoireRpc({
-				serverUrl: `http://127.0.0.1:${http.port}/mcp/client_agents`,
-				token: "private-fixture-only",
-				clientId: "fixture",
-			}),
-		});
+		const child = Bun.spawn(
+			[
+				process.execPath,
+				path.join(import.meta.dir, "fixtures/runtime-v1-smoke.ts"),
+				path.join(tempDir, "engine"),
+				"--nats-url",
+				broker.url,
+				"--bridge-url",
+				`http://127.0.0.1:${http.port}/mcp/client_agents`,
+				"--bridge-token-file",
+				tokenFile,
+			],
+			{ stdout: "pipe", stderr: "pipe", windowsHide: true },
+		);
 		try {
-			await waitFor(
-				async () =>
-					(await store.runtimeSnapshot({ kind: "catalog" }, { principalId: "owner" })).agents.length === 2,
-			);
-			await waitFor(async () => (await store.ownershipMigrationStatus()).status === "complete" && waits === 2);
-			expect(pageSizes).toEqual([2, 1]);
-			const began = performance.now();
-			await bridge.stopAdmission();
-			await bridge.dispose();
-			expect(performance.now() - began).toBeLessThan(1000);
-			expect(errors).toEqual([]);
+			const output = new Response(child.stdout).text();
+			const errors = new Response(child.stderr).text();
+			const code = await withTimeout(child.exited, 20_000, "Native shutdown fixture exceeded its process deadline");
+			expect(await errors).toBe("");
+			expect(code).toBe(0);
+			const result = JSON.parse((await output).trim()) as {
+				result: string;
+				liveObservers: number;
+				processExitAfterCompleteMs: number;
+			};
+			expect(result.result).toBe("PASS");
+			expect(result.liveObservers).toBe(16);
+			expect(result.processExitAfterCompleteMs).toBeLessThan(3000);
 		} finally {
-			await bridge.dispose();
+			if (child.exitCode === null) child.kill();
+			await child.exited;
 			await http.stop(true);
-			await connection.drain();
-			await store.close();
 			broker.process.kill();
 			await broker.process.exited;
 		}
-	}, 30000);
+	}, 30_000);
+
+	it.each([false, true])(
+		"imports exact legacy proofs or stops an unavailable canonical pass (%s)",
+		async unavailable => {
+			tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-ownership-${Snowflake.next()}-`));
+			const broker = await startNatsServer(tempDir);
+			const connection = await connect({ servers: broker.url });
+			await (await jetstreamManager(connection)).streams.add({
+				name: ENGINE_EVENT_STREAM,
+				subjects: ["grimoire.engine.v1.>"],
+			});
+			const store = await EngineStore.open(path.join(tempDir, "engine.sqlite"));
+			await store.nextEngineGeneration();
+			for (let index = 0; index < 2; index++) {
+				const agentInstanceRef = `grimoire://tasks/grimoire/ownership/agents/${index}`;
+				const envelope: EngineCommandEnvelope = {
+					schema: "grimoire.engine.command.v1",
+					commandId: `ownership-${index}`,
+					issuedAt: Date.now(),
+					op: "start",
+					deviceId: "device",
+					engineId: "engine",
+					engineGeneration: 1,
+					agentInstanceId: engineAgentInstanceId(agentInstanceRef),
+					agentInstanceRef,
+					authorityGeneration: 1,
+					attemptId: `ownership-attempt-${index}`,
+					executionId: `ownership-execution-${index}`,
+					payload: { input: "legacy" },
+				};
+				await store.admitCommand(engineCommandIdentity(envelope), 1);
+			}
+			const canonicalRef = "grimoire://tasks/grimoire/ownership/agents/native-only";
+			await store.registerAgent({
+				agentInstanceRef: canonicalRef,
+				agentInstanceId: engineAgentInstanceId(canonicalRef),
+				authorityGeneration: 1,
+			});
+			const pageSizes: number[] = [];
+			let waits = 0;
+			const http = Bun.serve({
+				port: 0,
+				hostname: "127.0.0.1",
+				async fetch(request) {
+					const body = (await request.json()) as { id: number; params: { arguments: Record<string, unknown> } };
+					const args = body.params.arguments;
+					const response = (value: Record<string, unknown>) =>
+						Response.json({ jsonrpc: "2.0", id: body.id, result: { content: [], structuredContent: value } });
+					if (args.action === "claim") return response({ status: "no_job" });
+					if (args.action === "ownership") {
+						const candidates = args.candidates as LegacyOwnershipCandidate[];
+						pageSizes.push(candidates.length);
+						return response({
+							status: "ok",
+							results: candidates.map((candidate, index) => ({
+								...candidate,
+								...(candidate.kind === "canonical_agi" ? { proofSource: "canonical_agi" } : {}),
+								status:
+									(unavailable && candidate.kind === "canonical_agi") ||
+									(pageSizes.length === 1 && index === 1)
+										? "deferred"
+										: "verified",
+								...(unavailable && candidate.kind === "canonical_agi"
+									? { reason: "canonical_source_unavailable" }
+									: {}),
+								principalId: "owner",
+							})),
+						});
+					}
+					if (args.action === "wait") {
+						waits++;
+						return await new Promise<Response>(resolve => {
+							const timer = setTimeout(() => resolve(response({ generation: 1, changed: false })), 15000);
+							request.signal.addEventListener(
+								"abort",
+								() => {
+									clearTimeout(timer);
+									resolve(new Response(null, { status: 499 }));
+								},
+								{ once: true },
+							);
+						});
+					}
+					throw new Error("Unexpected fixture RPC");
+				},
+			});
+			const errors: Error[] = [];
+			const bridge = await HostedEngineBridge.connect({
+				eventStore: store,
+				deviceId: "device",
+				engineId: "engine",
+				engineGeneration: 1,
+				servers: broker.url,
+				onError: error => errors.push(error),
+				rpc: new HostedGrimoireRpc({
+					serverUrl: `http://127.0.0.1:${http.port}/mcp/client_agents`,
+					token: "private-fixture-only",
+					clientId: "fixture",
+				}),
+			});
+			try {
+				await waitFor(
+					async () =>
+						(await store.runtimeSnapshot({ kind: "catalog" }, { principalId: "owner" })).agents.length ===
+						(unavailable ? 2 : 3),
+				);
+				await waitFor(
+					async () =>
+						(await store.ownershipMigrationStatus()).status === (unavailable ? "unavailable" : "complete") &&
+						waits === 2,
+				);
+				if (unavailable) {
+					expect(pageSizes.length).toBeLessThanOrEqual(3);
+					const passes = pageSizes.length;
+					await Bun.sleep(100);
+					expect(pageSizes.length).toBe(passes);
+					expect(errors.map(error => error.message)).toEqual(["Legacy ownership proof page made no progress"]);
+				} else expect(pageSizes).toEqual([3, 1]);
+				const began = performance.now();
+				await bridge.stopAdmission();
+				await bridge.dispose();
+				expect(performance.now() - began).toBeLessThan(1000);
+				if (!unavailable) expect(errors).toEqual([]);
+			} finally {
+				await bridge.dispose();
+				await http.stop(true);
+				await connection.drain();
+				await store.close();
+				broker.process.kill();
+				await broker.process.exited;
+			}
+		},
+		30000,
+	);
 
 	it("retries stranded claims and NAK-redelivers rejected wakes with the current generation", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-host-${Snowflake.next()}-`));

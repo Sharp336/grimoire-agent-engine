@@ -7,21 +7,48 @@ export const RUNTIME_OWNERSHIP_SCHEMA = [
 	"ALTER TABLE engine_agent_identity ADD COLUMN ownership_proof_command_id TEXT",
 ] as const;
 
-export interface LegacyOwnershipCandidate {
+interface OwnershipIdentity {
 	agentInstanceRef: string;
 	agentInstanceId: string;
-	sourceCommandId: string;
-	attemptId: string;
-	executionId: string;
 	authorityGeneration: number;
 }
 
-export interface LegacyOwnershipProof {
-	agentInstanceRef: string;
+export interface LegacyStartOwnershipCandidate extends OwnershipIdentity {
+	kind?: undefined;
 	sourceCommandId: string;
+	attemptId: string;
+	executionId: string;
+}
+
+export interface CanonicalOwnershipCandidate extends OwnershipIdentity {
+	kind: "canonical_agi";
+}
+
+export type LegacyOwnershipCandidate = LegacyStartOwnershipCandidate | CanonicalOwnershipCandidate;
+
+interface OwnershipProofResult {
+	agentInstanceRef: string;
 	status: "verified" | "missing" | "conflict" | "deferred";
 	principalId?: string;
 	reason?: string;
+	proofSource?: "canonical_agi" | "retained_job";
+}
+
+export type LegacyOwnershipProof = OwnershipProofResult &
+	(
+		| { kind?: undefined; sourceCommandId: string }
+		| { kind: "canonical_agi"; agentInstanceId: string; authorityGeneration: number }
+	);
+
+export function ownershipProofMatches(candidate: LegacyOwnershipCandidate, proof: LegacyOwnershipProof): boolean {
+	if (candidate.kind === "canonical_agi")
+		return (
+			proof.kind === "canonical_agi" &&
+			proof.agentInstanceId === candidate.agentInstanceId &&
+			proof.authorityGeneration === candidate.authorityGeneration &&
+			(proof.status !== "verified" || proof.proofSource === "canonical_agi")
+		);
+	return proof.kind === undefined && proof.sourceCommandId === candidate.sourceCommandId;
 }
 
 interface LegacyIdentity {
@@ -29,6 +56,7 @@ interface LegacyIdentity {
 	agent_instance_ref: string;
 	parent_agent_instance_id: string | null;
 	principal_id: string;
+	authority_generation: number;
 }
 
 export interface LegacyOwnershipPage {
@@ -45,7 +73,7 @@ export async function legacyOwnershipPage(
 	after = "",
 ): Promise<LegacyOwnershipPage> {
 	const rows = (await sql.unsafe(
-		`SELECT agent_instance_id,agent_instance_ref,parent_agent_instance_id,principal_id
+		`SELECT agent_instance_id,agent_instance_ref,parent_agent_instance_id,principal_id,authority_generation
 		FROM engine_agent_identity WHERE principal_id='' AND agent_instance_id>? ORDER BY agent_instance_id LIMIT ?`,
 		[after, runtimeLimits.httpPageRecords + 1],
 	)) as LegacyIdentity[];
@@ -77,7 +105,12 @@ export async function legacyOwnershipPage(
 		}>;
 		const command = commands[0];
 		if (!command?.attempt_id || !command.execution_id) {
-			result.unresolved.push(row.agent_instance_ref);
+			result.candidates.push({
+				kind: "canonical_agi",
+				agentInstanceRef: row.agent_instance_ref,
+				agentInstanceId: row.agent_instance_id,
+				authorityGeneration: Number(row.authority_generation),
+			});
 			continue;
 		}
 		result.candidates.push({
@@ -96,7 +129,7 @@ export async function legacyOwnershipPage(
 
 async function identity(sql: RuntimeSql, agentId: string): Promise<LegacyIdentity | undefined> {
 	const rows = (await sql.unsafe(
-		"SELECT agent_instance_id,agent_instance_ref,parent_agent_instance_id,principal_id FROM engine_agent_identity WHERE agent_instance_id=?",
+		"SELECT agent_instance_id,agent_instance_ref,parent_agent_instance_id,principal_id,authority_generation FROM engine_agent_identity WHERE agent_instance_id=?",
 		[agentId],
 	)) as LegacyIdentity[];
 	return rows[0];
@@ -114,7 +147,9 @@ export async function claimLegacyOwnership(
 	const row = await identity(sql, agentId);
 	if (!row) return "missing";
 	if (row.agent_instance_ref !== agentRef) return "conflict";
-	if (proof) {
+	if (proof?.kind === "canonical_agi") {
+		if (Number(row.authority_generation) !== proof.authorityGeneration) return "conflict";
+	} else if (proof) {
 		const commands = await sql.unsafe(
 			`SELECT command_id FROM engine_commands WHERE command_id=? AND operation='start'
 			AND agent_instance_id=? AND agent_instance_ref=? AND attempt_id=? AND execution_id=? AND authority_generation=?`,
@@ -131,7 +166,7 @@ export async function claimLegacyOwnership(
 	await sql.unsafe(
 		`UPDATE engine_agent_identity SET principal_id=?,ownership_proof_command_id=?,summary_json=NULL,
 		membership_revision=0,updated_at=? WHERE agent_instance_id=? AND principal_id=''`,
-		[principalId, proof?.sourceCommandId ?? null, Date.now(), agentId],
+		[principalId, proof?.kind === "canonical_agi" ? null : (proof?.sourceCommandId ?? null), Date.now(), agentId],
 	);
 	return "enrolled";
 }

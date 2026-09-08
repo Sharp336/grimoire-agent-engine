@@ -81,6 +81,7 @@ import {
 	type EngineToolEffectInput,
 	type EngineTransitionEvent,
 } from "./store";
+import { waitForEngineWake } from "./wake";
 
 type EngineEventListener = (event: EngineEvent) => void | Promise<void>;
 
@@ -2419,7 +2420,7 @@ export class EngineRuntime {
 					await signal;
 					continue;
 				}
-				await Promise.race([Bun.sleep(Math.max(0, dueAt - Date.now())), signal]);
+				await waitForEngineWake(signal, dueAt - Date.now());
 				if (this.#disposed) break;
 				const events = await this.store.claimDueInboxWakes(this.engineGeneration);
 				this.#notifyEvents(events);

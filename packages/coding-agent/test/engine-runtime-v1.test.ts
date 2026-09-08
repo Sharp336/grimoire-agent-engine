@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { SQL } from "bun";
 import type { EngineBindingSnapshot, EngineInboxTarget } from "../src/engine/contracts";
 import { engineAgentId, engineAgentInstanceId } from "../src/engine/route";
+import type { CanonicalOwnershipCandidate, LegacyStartOwnershipCandidate } from "../src/engine/runtime-ownership";
 import {
 	RUNTIME_PROTOCOL_HASH,
 	type RuntimeScope,
@@ -131,7 +132,8 @@ describe("runtime v1 durable boundaries", () => {
 		expect(page.candidates).toHaveLength(2);
 		const rootCandidate = page.candidates.find(candidate => candidate.agentInstanceRef === root.agentInstanceRef)!;
 		const childCandidate = page.candidates.find(candidate => candidate.agentInstanceRef === child.agentInstanceRef)!;
-		const proof = (candidate: typeof rootCandidate, principalId = "owner") => ({
+		if (rootCandidate.kind || childCandidate.kind) throw new Error("Retained Start proof was not selected");
+		const proof = (candidate: LegacyStartOwnershipCandidate, principalId = "owner") => ({
 			agentInstanceRef: candidate.agentInstanceRef,
 			sourceCommandId: candidate.sourceCommandId,
 			status: "verified" as const,
@@ -175,13 +177,54 @@ describe("runtime v1 durable boundaries", () => {
 		for (let index = 0; index < runtimeLimits.httpPageRecords + 1; index++)
 			await store.registerAgent(identity(`unproven-${index}`, undefined, ""));
 		const first = await store.reconcileLegacyOwnershipPage("device", "engine");
-		expect(first.candidates).toEqual([]);
-		expect(first.unresolved).toHaveLength(runtimeLimits.httpPageRecords);
+		expect(first.candidates).toHaveLength(runtimeLimits.httpPageRecords);
+		expect(first.candidates.every(candidate => candidate.kind === "canonical_agi")).toBe(true);
+		expect(first.unresolved).toEqual([]);
 		expect(first.nextCursor).toBeString();
 		const second = await store.reconcileLegacyOwnershipPage("device", "engine", first.nextCursor!);
-		expect(second.unresolved).toHaveLength(1);
+		expect(second.candidates).toHaveLength(1);
 		expect(second.nextCursor).toBeNull();
-		expect(new Set([...first.unresolved, ...second.unresolved]).size).toBe(runtimeLimits.httpPageRecords + 1);
+		expect(
+			new Set([...first.candidates, ...second.candidates].map(candidate => candidate.agentInstanceRef)).size,
+		).toBe(runtimeLimits.httpPageRecords + 1);
+	});
+	it("CAS-enrolls canonical legacy identities without fabricated Starts and wakes existing catalog observers", async () => {
+		const store = await createStore();
+		const agent = identity("native-only", undefined, "");
+		await store.registerAgent(agent);
+		const before = await store.runtimeSnapshot({ kind: "catalog" }, { principalId: "owner" });
+		const page = await store.reconcileLegacyOwnershipPage("device", "engine");
+		const candidate = page.candidates[0];
+		if (candidate.kind !== "canonical_agi") throw new Error("Canonical proof was not requested");
+		const proof = (value: CanonicalOwnershipCandidate, principalId = "owner") => ({
+			...value,
+			status: "verified" as const,
+			proofSource: "canonical_agi" as const,
+			principalId,
+		});
+		await expect(
+			store.enrollLegacyOwnership([candidate], [{ ...proof(candidate), agentInstanceId: "forged" }]),
+		).rejects.toThrow("exact requested page");
+		await store.registerAgent({ ...agent, authorityGeneration: 2 });
+		expect(await store.enrollLegacyOwnership([candidate], [proof(candidate)])).toEqual([
+			{ agentInstanceRef: agent.agentInstanceRef, status: "conflict" },
+		]);
+		const current = { ...candidate, authorityGeneration: 2 };
+		const wait = store.waitRuntimeEvents({ ...eventsRequest(before.epoch, before.watermark), timeoutMs: 1000 });
+		expect(await store.enrollLegacyOwnership([current], [proof(current)])).toEqual([
+			{ agentInstanceRef: agent.agentInstanceRef, status: "enrolled" },
+		]);
+		expect((await wait).changes.some(change => change.kind === "summary")).toBe(true);
+		expect((await store.runtimeTarget({ agentInstanceRef: agent.agentInstanceRef, principalId: "owner" })).kind).toBe(
+			"registered",
+		);
+		expect(await store.enrollLegacyOwnership([current], [proof(current)])).toEqual([
+			{ agentInstanceRef: agent.agentInstanceRef, status: "known" },
+		]);
+		expect(await store.enrollLegacyOwnership([current], [proof(current, "foreign")])).toEqual([
+			{ agentInstanceRef: agent.agentInstanceRef, status: "conflict" },
+		]);
+		expect((await store.runtimeSnapshot({ kind: "catalog" }, { principalId: "foreign" })).agents).toEqual([]);
 	});
 	it("rejects unknown ancestry, cross-principal children and reparenting an already projected root", async () => {
 		const store = await createStore();

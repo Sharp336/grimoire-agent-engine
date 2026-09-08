@@ -25,6 +25,7 @@ import {
 	type LegacyOwnershipCandidate,
 	type LegacyOwnershipProof,
 	legacyOwnershipPage,
+	ownershipProofMatches,
 	RUNTIME_OWNERSHIP_SCHEMA,
 } from "./runtime-ownership";
 import {
@@ -821,7 +822,7 @@ export class EngineStore {
 		});
 	}
 
-	async recordOwnershipMigration(status: "complete" | "incomplete" | "unavailable", unresolved: number) {
+	async recordOwnershipMigration(status: "complete" | "incomplete" | "unavailable", unresolved: number | null) {
 		await this.#transaction(async sql => {
 			await sql.unsafe(
 				"INSERT INTO engine_metadata(key,value) VALUES ('ownership_migration',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -848,7 +849,7 @@ export class EngineStore {
 			proofs.some(
 				(proof, index) =>
 					proof.agentInstanceRef !== candidates[index].agentInstanceRef ||
-					proof.sourceCommandId !== candidates[index].sourceCommandId ||
+					!ownershipProofMatches(candidates[index], proof) ||
 					!["verified", "missing", "conflict", "deferred"].includes(proof.status) ||
 					(proof.status === "verified" && (typeof proof.principalId !== "string" || !proof.principalId.trim())),
 			)
@@ -875,9 +876,9 @@ export class EngineStore {
 					await this.#identityEvent(
 						sql,
 						candidate.agentInstanceId,
-						`ownership:${candidate.sourceCommandId}`,
+						`ownership:${candidate.kind === "canonical_agi" ? candidate.agentInstanceId : candidate.sourceCommandId}`,
 						"agent_registered",
-						{},
+						{ ownershipProof: { ...candidate, kind: proof.proofSource ?? "retained_job" } },
 					);
 				results.push({ agentInstanceRef: candidate.agentInstanceRef, status: outcome });
 			}
