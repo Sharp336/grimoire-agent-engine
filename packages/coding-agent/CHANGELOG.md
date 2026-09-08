@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- Restarted each new Attempt on its selected profile route instead of retaining the previous fallback.
 - Explained provider rate limits, temporary failures and retry exhaustion without exposing private connection details.
 - Reported exhausted profile routes when the last fallback still fails after its retries, without marking untried routes unavailable.
 - Preserved the original provider stream failure when retry is handed back to the Engine.

@@ -2,7 +2,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AgentPauseGate } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { isEnoent, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../async/job-manager";
 import { withCapabilityProviderPolicy } from "../capability";
@@ -36,6 +36,7 @@ import {
 	SessionManager,
 } from "../session/session-manager";
 import { migrateToCurrentVersion } from "../session/session-migrations";
+import type { ConfiguredThinkingLevel } from "../thinking";
 import type { EngineChildLaunchResult, EngineChildProfile, EngineInboxToolRequest } from "../tools";
 import {
 	type EngineAttemptState,
@@ -242,6 +243,8 @@ interface LiveBinding extends EngineBindingSnapshot {
 	childLaunchCount: number;
 	modelCallSequence: number;
 	profileRoutes?: EngineProfileRoutes;
+	launchModel?: Model;
+	launchThinkingLevel?: ConfiguredThinkingLevel;
 	profileRouteState?: EngineProfileRouteState;
 	assistantMessageSequence: number;
 	assistantStream?: AssistantStreamState;
@@ -2182,6 +2185,15 @@ export class EngineRuntime {
 				}
 				binding = undefined;
 			} else {
+				if (
+					binding.launchModel &&
+					(binding.session.model?.provider !== binding.launchModel.provider ||
+						binding.session.model?.id !== binding.launchModel.id)
+				) {
+					pendingStartSignal?.throwIfAborted();
+					await binding.session.setModelTemporary(binding.launchModel, binding.launchThinkingLevel);
+					pendingStartSignal?.throwIfAborted();
+				}
 				binding.pauseGate.resume();
 				binding.executionId = request.executionId;
 				binding.attemptId = request.attemptId;
@@ -2617,6 +2629,8 @@ export class EngineRuntime {
 				unsubscribe: () => {},
 				disposeProfile: resolved?.dispose ?? (() => {}),
 				profileRoutes: resolved?.profileRoutes,
+				launchModel: resolved?.profileRoutes ? created.session.model : undefined,
+				launchThinkingLevel: created.session.configuredThinkingLevel(),
 				requireYieldTool: profile.requireYieldTool === true,
 				pauseGate,
 				activeToolCallIds: new Set(),

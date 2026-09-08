@@ -2653,12 +2653,24 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
-	it.each(["answered", "auth_failed", "retry_failed"])(
-		"records actual fallback dispatch and explicit route exhaustion (%s)",
-		async outcome => {
+	it.each([
+		["answered", false],
+		["auth_failed", false],
+		["retry_failed", false],
+		["answered", true],
+		["auth_failed", true],
+		["retry_failed", true],
+	] as const)(
+		"records fallback and restarts the selected route on the next Attempt (%s, restart=%s)",
+		async (outcome, restart) => {
 			const exhausted = outcome !== "answered";
 			const failure = outcome === "retry_failed" ? "503 Service unavailable" : "401 Unauthorized";
-			const primary = createMockModel({ id: "route-primary", responses: [{ throw: failure }] });
+			let primaryAttempts = 0;
+			const primary = createMockModel({
+				id: "route-primary",
+				handler: () =>
+					++primaryAttempts > 1 && !exhausted ? { content: ["primary recovered"] } : { throw: failure },
+			});
 			const fallback = createMockModel({
 				id: "route-fallback",
 				handler: () => (exhausted ? { throw: failure } : { content: ["fallback answered"] }),
@@ -2676,7 +2688,7 @@ describe("EngineRuntime", () => {
 					modelId: model.id,
 				})),
 			};
-			const { runtime, cwd } = await createRuntime((session, input) => session.prompt(input), {
+			const { runtime, cwd, options } = await createRuntime((session, input) => session.prompt(input), {
 				resolveSessionProfile: async () => ({
 					options: { model: primary },
 					profileRoutes: mapping,
@@ -2684,6 +2696,7 @@ describe("EngineRuntime", () => {
 					dispose() {},
 				}),
 			});
+			let currentRuntime = runtime;
 			const wait = spyOn(scheduler, "wait").mockResolvedValue(undefined);
 			try {
 				await runtime.start(
@@ -2718,8 +2731,50 @@ describe("EngineRuntime", () => {
 				expect(events.indexOf(changes.at(-1)!)).toBeLessThan(
 					events.findIndex(event => event.kind === (exhausted ? "failed" : "completed")),
 				);
+				if (restart) {
+					await runtime.dispose();
+					currentRuntime = await EngineRuntime.create(options);
+				}
+				await currentRuntime.start(
+					{
+						commandId: "route-next-start",
+						agentInstanceId: "route-fallback-agent",
+						executionId: "route-next-execution",
+						attemptId: "route-next-attempt",
+						authorityGeneration: 1,
+						cwd,
+						input: "next attempt",
+					},
+					profile,
+				);
+				await currentRuntime.drain();
+				expect(primary.calls).toHaveLength(2);
+				expect(fallback.calls).toHaveLength(outcome === "retry_failed" ? 6 : exhausted ? 2 : 1);
+				if (!exhausted) {
+					expect(
+						primary.calls[1]?.context.messages.some(
+							message =>
+								message.role === "assistant" &&
+								message.content.some(block => block.type === "text" && block.text === "fallback answered"),
+						),
+					).toBe(true);
+				}
+				const next = await currentRuntime.store.getAttempt("route-next-attempt");
+				expect(next?.state).toBe(exhausted ? "failed" : "completed");
+				const nextChanges = (await currentRuntime.store.pendingEvents()).filter(
+					event => event.attemptId === "route-next-attempt" && event.kind === "profile_route_changed",
+				);
+				expect(nextChanges[0]?.payload?.profileRoute).toMatchObject({
+					pendingRouteRef: mapping.primaryRouteRef,
+					fallback: false,
+					phase: "loading",
+				});
+				expect(JSON.parse(next!.profile_route_state!)).toMatchObject({
+					fallback: exhausted,
+					phase: exhausted ? "exhausted" : "active",
+				});
 			} finally {
-				await runtime.dispose();
+				await currentRuntime.dispose();
 				find.mockRestore();
 				key.mockRestore();
 				wait.mockRestore();
