@@ -18,6 +18,8 @@
 
 ### Fixed
 
+- Kept hosted broker profile selections stable across token renewal after profile edits, without bypassing current route or account authorization.
+
 - Kept running Codex-subscription agents on their launch profile after profile edits, without bypassing fresh account quota checks.
 - Isolated route credentials and model settings when several profile slots use the same provider account.
 - Skipped unavailable fallback credentials without losing later approved routes, and respected Stop while those credentials resolve.

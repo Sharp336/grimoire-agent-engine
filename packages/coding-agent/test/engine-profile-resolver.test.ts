@@ -807,7 +807,7 @@ describe("EngineProfileResolver", () => {
 					status: "ready",
 					allowed: true,
 					mode: isFallback ? "hosted_broker" : mode,
-					...(!isFallback ? { executionPin: "a".repeat(64) } : {}),
+					executionPin: (isFallback ? "b" : "a").repeat(64),
 					providerRuntimeId: `artel-${request.providerAccountRef.slice(5)}`,
 					api: "openai-completions",
 					baseUrl:

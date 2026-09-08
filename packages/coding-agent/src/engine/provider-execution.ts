@@ -116,7 +116,8 @@ export class ProviderExecutionClient {
 			!providerRuntimeId ||
 			!validProviderBaseUrl(baseUrl) ||
 			!credential ||
-			(mode === "owner_local" && (typeof pin !== "string" || !/^[a-f0-9]{64}$/.test(pin))) ||
+			typeof pin !== "string" ||
+			!/^[a-f0-9]{64}$/.test(pin) ||
 			(executionPin !== undefined && pin !== executionPin) ||
 			(mode === "hosted_broker" && !credential.startsWith("gri_pbr_"))
 		) {

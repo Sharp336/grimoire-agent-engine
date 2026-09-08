@@ -39,6 +39,7 @@ describe("ProviderExecutionClient", () => {
 					api: "openai-completions",
 					baseUrl: "https://core.invalid/runtime/provider-broker/v1",
 					credential: `gri_pbr_${"a".repeat(48)}`,
+					executionPin: "c".repeat(64),
 				});
 			},
 		);
@@ -48,6 +49,7 @@ describe("ProviderExecutionClient", () => {
 			api: "openai-completions",
 			baseUrl: "https://core.invalid/runtime/provider-broker/v1",
 			credential: `gri_pbr_${"a".repeat(48)}`,
+			executionPin: "c".repeat(64),
 		});
 	});
 
@@ -88,7 +90,7 @@ describe("ProviderExecutionClient", () => {
 		expect(error.code).toBe("provider_execution_invalid_response");
 	});
 
-	it("rejects missing, malformed or replaced owner-local execution pins", async () => {
+	it.each(["owner_local", "hosted_broker"])("rejects missing, malformed or replaced %s execution pins", async mode => {
 		let pin: unknown;
 		const client = new ProviderExecutionClient("http://127.0.0.1/provider-execution", "local-token", async () =>
 			Response.json({
@@ -97,11 +99,11 @@ describe("ProviderExecutionClient", () => {
 				status: "ready",
 				allowed: true,
 				executionMode: "full_agent",
-				mode: "owner_local",
+				mode,
 				providerRuntimeId: "local-provider",
 				api: "openai-completions",
 				baseUrl: "https://provider.invalid/v1",
-				credential: "fixture-secret",
+				credential: mode === "hosted_broker" ? `gri_pbr_${"a".repeat(48)}` : "fixture-secret",
 				executionPin: pin,
 			}),
 		);
