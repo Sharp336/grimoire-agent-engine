@@ -12,7 +12,31 @@ import {
 } from "../src/session/provider-retry-budget";
 
 describe("Engine provider retry budget", () => {
-	it("preserves the physical Retry-After through the real provider stream retry layers", async () => {
+	it.each([
+		{
+			name: "physical Retry-After",
+			response: () => new Response("busy", { status: 429, headers: { "Retry-After": "45" } }),
+			expected: "retry-after-ms=45000",
+		},
+		{
+			name: "HTTP 200 stream failure",
+			response: () =>
+				new Response(
+					'data: {"error":{"message":"upstream overloaded 503","type":"server_error"}}\n\ndata: [DONE]\n\n',
+					{ headers: { "content-type": "text/event-stream" } },
+				),
+			expected: "upstream overloaded 503",
+		},
+		{
+			name: "empty completion",
+			response: () =>
+				new Response(
+					'data: {"id":"empty","object":"chat.completion.chunk","created":0,"model":"gpt-test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+					{ headers: { "content-type": "text/event-stream" } },
+				),
+			expected: "Provider returned an empty completion",
+		},
+	])("preserves $name through the real provider stream retry layers", async ({ response, expected }) => {
 		const model = buildModel({
 			id: "gpt-test",
 			name: "GPT test",
@@ -35,11 +59,11 @@ describe("Engine provider retry budget", () => {
 					apiKey: "test-key",
 					fetch: createProviderRetryBudgetHook().wrapFetch(model, async () => {
 						physicalRequests++;
-						return new Response("busy", { status: 429, headers: { "Retry-After": "45" } });
+						return response();
 					}),
-					providerRetryWait: async (delayMs, signal) => {
+					providerRetryWait: async (delayMs, signal, cause) => {
 						nestedWaits++;
-						await deferNestedProviderRetry(delayMs, signal);
+						await deferNestedProviderRetry(delayMs, signal, cause);
 					},
 				},
 			)
@@ -48,7 +72,7 @@ describe("Engine provider retry budget", () => {
 		);
 		expect(physicalRequests).toBe(1);
 		expect(nestedWaits).toBe(1);
-		expect(String(result.errorMessage ?? result)).toContain("retry-after-ms=45000");
+		expect(String(result.errorMessage ?? result)).toContain(expected);
 	});
 
 	it("resets after every successful logical request across more than four tool turns", async () => {

@@ -569,7 +569,7 @@ export interface StreamOptions {
 	/**
 	 * Optional retry delay hook for tests and transports that need custom scheduling.
 	 */
-	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+	providerRetryWait?: (delayMs: number, signal?: AbortSignal, cause?: Error) => Promise<void>;
 	/**
 	 * Accept a normal provider stop with no visible text or tool call as a
 	 * successful completion. Passive callers and zero-output cache refreshes use

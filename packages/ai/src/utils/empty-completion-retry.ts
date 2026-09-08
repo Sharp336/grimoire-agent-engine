@@ -13,7 +13,7 @@
  */
 import { scheduler } from "node:timers/promises";
 import * as AIError from "../error";
-import type { AssistantMessage, AssistantMessageEvent, Context } from "../types";
+import type { AssistantMessage, AssistantMessageEvent, Context, StreamOptions } from "../types";
 import { AssistantMessageEventStream } from "./event-stream";
 
 export const MAX_EMPTY_COMPLETION_RETRIES = 2;
@@ -57,7 +57,7 @@ function isMeaningfulCompletionEvent(event: AssistantMessageEvent): boolean {
 
 interface StreamRetryOptions {
 	signal?: AbortSignal;
-	providerRetryWait?: (delayMs: number, signal?: AbortSignal) => Promise<void>;
+	providerRetryWait?: StreamOptions["providerRetryWait"];
 	acceptEmptyResponse?: boolean;
 }
 
@@ -167,8 +167,13 @@ export function withReplaySafeStreamRetry<M, O extends StreamRetryOptions>(
 
 			if (delayMs !== undefined && !signal?.aborted) {
 				try {
-					if (options?.providerRetryWait) await options.providerRetryWait(delayMs, signal);
-					else await scheduler.wait(delayMs, { signal });
+					if (options?.providerRetryWait) {
+						const cause = new FinalizedProviderStreamError(
+							failedMessage?.errorMessage ?? "Provider returned an empty completion",
+							failedMessage?.errorStatus,
+						);
+						await options.providerRetryWait(delayMs, signal, cause);
+					} else await scheduler.wait(delayMs, { signal });
 				} catch (waitError) {
 					flush();
 					if (signal?.aborted) {

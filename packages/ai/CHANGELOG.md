@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Included stream failure details in custom retry scheduling hooks instead of losing the original cause.
+
 ## [18.0.7] - 2026-08-26
 
 ### Added
