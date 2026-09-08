@@ -429,6 +429,7 @@ export class EngineProfileResolver {
 				externalCredentialIdentities.set(marker, {
 					identity: executionIdentity,
 					transport: executionTransport(executionMaterial),
+					executionPin: executionMaterial.executionPin,
 				});
 				await authStorage.set(executionMaterial.providerRuntimeId, { type: "api_key", key: marker });
 			} else if (embeddedCredential) {
@@ -570,6 +571,7 @@ export class EngineProfileResolver {
 						externalCredentialIdentities.set(fallbackMarker, {
 							identity: fallbackIdentity,
 							transport: executionTransport(fallbackMaterial),
+							executionPin: fallbackMaterial.executionPin,
 						});
 						await authStorage.set(fallbackMaterial.providerRuntimeId, {
 							type: "api_key",
@@ -885,7 +887,7 @@ async function resolveProviderExecutionCredential(
 	const binding = identities.get(value);
 	if (!binding) return process.env[value] || value;
 	if (!client) throw new Error("Provider execution material is unavailable");
-	const material = await client.resolve(binding.identity, signal);
+	const material = await client.resolve(binding.identity, signal, binding.executionPin);
 	if (stableStringifyJson(executionTransport(material)) !== stableStringifyJson(binding.transport)) {
 		throw new Error("Provider execution transport changed; start a new Attempt with the refreshed profile catalog");
 	}
@@ -894,10 +896,13 @@ async function resolveProviderExecutionCredential(
 
 interface ProviderExecutionBinding {
 	identity: ProviderExecutionIdentity;
-	transport: Omit<ProviderExecutionMaterial, "credential">;
+	transport: Omit<ProviderExecutionMaterial, "credential" | "executionPin">;
+	executionPin?: string;
 }
 
-function executionTransport(material: ProviderExecutionMaterial): Omit<ProviderExecutionMaterial, "credential"> {
+function executionTransport(
+	material: ProviderExecutionMaterial,
+): Omit<ProviderExecutionMaterial, "credential" | "executionPin"> {
 	return {
 		mode: material.mode,
 		providerRuntimeId: material.providerRuntimeId,

@@ -636,12 +636,14 @@ describe("EngineProfileResolver", () => {
 				const request = JSON.parse(String(init?.body));
 				if (init?.signal?.aborted) throw init.signal.reason;
 				const isFallback = request.providerAccountRef === fallbackAccountRef;
+				if (!isFallback) expect(request.executionPin).toBe(calls === 1 ? undefined : "a".repeat(64));
 				return Response.json({
 					...request,
 					schema: "grimoire.provider_execution.result.v1",
 					status: "ready",
 					allowed: true,
 					mode: isFallback ? "hosted_broker" : mode,
+					...(!isFallback ? { executionPin: "a".repeat(64) } : {}),
 					providerRuntimeId: `artel-${request.providerAccountRef.slice(5)}`,
 					api: "openai-completions",
 					baseUrl:
@@ -756,6 +758,7 @@ describe("EngineProfileResolver", () => {
 						status: "ready",
 						allowed: true,
 						mode: "owner_local",
+						executionPin: "a".repeat(64),
 						providerRuntimeId: `runtime-${request.providerAccountRef.slice(5)}`,
 						api: "anthropic-messages",
 						baseUrl: "https://provider.invalid/v1",

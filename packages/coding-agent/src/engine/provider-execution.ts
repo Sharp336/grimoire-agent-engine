@@ -21,6 +21,7 @@ export interface ProviderExecutionMaterial {
 	api: Api;
 	baseUrl: string;
 	credential: string;
+	executionPin?: string;
 }
 
 export class ProviderExecutionError extends Error {
@@ -42,7 +43,11 @@ export class ProviderExecutionClient {
 		readonly requestFetch: Fetch = globalThis.fetch,
 	) {}
 
-	async resolve(identity: ProviderExecutionIdentity, signal?: AbortSignal): Promise<ProviderExecutionMaterial> {
+	async resolve(
+		identity: ProviderExecutionIdentity,
+		signal?: AbortSignal,
+		executionPin?: string,
+	): Promise<ProviderExecutionMaterial> {
 		const requestSignal = signal
 			? AbortSignal.any([signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)])
 			: AbortSignal.timeout(REQUEST_TIMEOUT_MS);
@@ -55,6 +60,7 @@ export class ProviderExecutionClient {
 					schema: "grimoire.provider_execution.request.v1",
 					...identity,
 					executionMode: "full_agent",
+					...(executionPin ? { executionPin } : {}),
 				}),
 				signal: requestSignal,
 			});
@@ -102,6 +108,7 @@ export class ProviderExecutionClient {
 		const providerRuntimeId = typeText(result.providerRuntimeId);
 		const baseUrl = typeText(result.baseUrl);
 		const credential = typeText(result.credential);
+		const pin = result.executionPin;
 		if (
 			(mode !== "owner_local" && mode !== "hosted_broker") ||
 			(api !== "openai-completions" && api !== "anthropic-messages") ||
@@ -109,6 +116,8 @@ export class ProviderExecutionClient {
 			!providerRuntimeId ||
 			!validProviderBaseUrl(baseUrl) ||
 			!credential ||
+			(mode === "owner_local" && (typeof pin !== "string" || !/^[a-f0-9]{64}$/.test(pin))) ||
+			(executionPin !== undefined && pin !== executionPin) ||
 			(mode === "hosted_broker" && !credential.startsWith("gri_pbr_"))
 		) {
 			throw new ProviderExecutionError(
@@ -116,7 +125,14 @@ export class ProviderExecutionClient {
 				"Provider execution returned incomplete material",
 			);
 		}
-		return { mode, api, providerRuntimeId, baseUrl, credential };
+		return {
+			mode,
+			api,
+			providerRuntimeId,
+			baseUrl,
+			credential,
+			...(typeof pin === "string" ? { executionPin: pin } : {}),
+		};
 	}
 }
 
@@ -134,6 +150,8 @@ function publicProviderExecutionMessage(code: string): string {
 		case "provider_execution_identity_unavailable":
 		case "provider_execution_identity_mismatch":
 			return "ProviderAccount or route changed; retry from the refreshed profile catalog";
+		case "provider_execution_pin_invalid":
+			return "AgentProfile execution authorization expired or changed; start a new Attempt";
 		case "provider_credential_binding_mismatch":
 		case "provider_credential_unavailable":
 			return "ProviderAccount local credential is unavailable; reconnect the account on this device";

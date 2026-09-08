@@ -14,6 +14,7 @@
 
 ### Fixed
 
+- Kept owner-local Agent Engine runs on their authorized profile routes after profile edits, while still checking current connection trust and access.
 - Kept queued messages on hold when manual Pause reaches the Engine just after its answer finishes.
 - Restored archives expose verified native conversation history before the first send, without starting an attempt or replaying tools.
 

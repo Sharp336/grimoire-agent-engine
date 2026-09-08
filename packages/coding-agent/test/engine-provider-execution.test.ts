@@ -80,11 +80,36 @@ describe("ProviderExecutionClient", () => {
 				api: "openai-completions",
 				baseUrl: "http://provider.invalid/v1",
 				credential: "secret-value",
+				executionPin: "a".repeat(64),
 			}),
 		);
 		const error = await client.resolve(identity).catch(value => value);
 		expect(error).toBeInstanceOf(ProviderExecutionError);
 		expect(error.code).toBe("provider_execution_invalid_response");
+	});
+
+	it("rejects missing, malformed or replaced owner-local execution pins", async () => {
+		let pin: unknown;
+		const client = new ProviderExecutionClient("http://127.0.0.1/provider-execution", "local-token", async () =>
+			Response.json({
+				...identity,
+				schema: "grimoire.provider_execution.result.v1",
+				status: "ready",
+				allowed: true,
+				executionMode: "full_agent",
+				mode: "owner_local",
+				providerRuntimeId: "local-provider",
+				api: "openai-completions",
+				baseUrl: "https://provider.invalid/v1",
+				credential: "fixture-secret",
+				executionPin: pin,
+			}),
+		);
+		await expect(client.resolve(identity)).rejects.toThrow("incomplete material");
+		pin = "malformed";
+		await expect(client.resolve(identity)).rejects.toThrow("incomplete material");
+		pin = "a".repeat(64);
+		await expect(client.resolve(identity, undefined, "b".repeat(64))).rejects.toThrow("incomplete material");
 	});
 
 	it("aborts the local capability lookup with the model request", async () => {
