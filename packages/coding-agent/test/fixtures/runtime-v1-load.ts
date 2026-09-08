@@ -306,6 +306,27 @@ runtime.store.admitCommand = async (command, generation) => {
 	return result;
 };
 const payload = "x".repeat(1024);
+function measureRead<Args extends unknown[], Result>(
+	method: string,
+	read: (...args: Args) => Promise<Result>,
+): (...args: Args) => Promise<Result> {
+	return async (...args) => {
+		const began = performance.now();
+		const startedAt = Date.now();
+		let status = "ok";
+		try {
+			return await read(...args);
+		} catch (error) {
+			status = "error";
+			throw error;
+		} finally {
+			await writeMetric({ kind: "owner_read", method, startedAt, elapsedMs: performance.now() - began, status });
+		}
+	};
+}
+runtime.store.runtimeSnapshot = measureRead("runtime.snapshot", runtime.store.runtimeSnapshot.bind(runtime.store));
+runtime.store.runtimeQueue = measureRead("runtime.queue", runtime.store.runtimeQueue.bind(runtime.store));
+runtime.sessionHistoryPage = measureRead("runtime.history", runtime.sessionHistoryPage.bind(runtime));
 let produced = 0;
 let commitMs = 0;
 const streams = new Map<string, { revision: number; offset: number }>();
@@ -394,7 +415,9 @@ try {
 	while (!stop.signal.aborted && performance.now() - started < seconds * 1000) {
 		const deadline = started + (++tick * 1000) / rate;
 		for (const binding of bindings) await produce(binding);
-		const targetNoisy = Math.floor(((performance.now() - started) * noisyRate) / 1000);
+		// Preserve the offered ratio under saturation. A wall-clock backlog here can grow
+		// faster than it drains and prevent every nominal AgentInstance from getting its next turn.
+		const targetNoisy = Math.floor((tick * noisyRate) / rate);
 		while (noisy < targetNoisy && !stop.signal.aborted) {
 			noisy++;
 			await produce(noisyBinding!);
@@ -413,6 +436,9 @@ try {
 				at: Date.now(),
 				elapsedMs: performance.now() - started,
 				produced,
+				producerRevisions: Object.fromEntries(
+					[...streams].map(([attemptId, stream]) => [attemptId, stream.revision]),
+				),
 				commitMs,
 				lagP95Ms: lag.percentile(95) / 1e6,
 				lagMaxMs: lag.max / 1e6,
@@ -438,6 +464,13 @@ try {
 	metrics.end();
 	await once(metrics, "finish");
 	console.log(
-		JSON.stringify({ kind: "complete", directory, produced, commitMs, elapsedMs: performance.now() - started }),
+		JSON.stringify({
+			kind: "complete",
+			directory,
+			produced,
+			commitMs,
+			elapsedMs: performance.now() - started,
+			producerRevisions: Object.fromEntries([...streams].map(([attemptId, stream]) => [attemptId, stream.revision])),
+		}),
 	);
 }
