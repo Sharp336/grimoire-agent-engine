@@ -1125,12 +1125,17 @@ export class TurnRecovery {
 	 * Context overflow is NOT retryable (handled by compaction instead).
 	 */
 	isRetryableError(message: AssistantMessage): boolean {
-		const errorMessage = message.errorMessage ?? "";
 		// Route-owned failures also enter recovery at the last slot to publish truthful exhaustion.
 		if (this.#profileRouteIndex() >= 0 && this.#isProfileRouteFailure(message)) return true;
+		return this.#isSameRouteRetryableError(message);
+	}
+
+	#isSameRouteRetryableError(message: AssistantMessage): boolean {
+		const errorMessage = message.errorMessage ?? "";
 		if (isExhaustedProviderRetryMessage(errorMessage) || isPermanentProviderFailureMessage(errorMessage))
 			return false;
-		if (this.#turnRetryPolicy?.transientOnly && isDeferredProviderRetryMessage(errorMessage)) return true;
+		if (this.#turnRetryPolicy?.transientOnly && isDeferredProviderRetryMessage(errorMessage))
+			return !this.#hasReplayUnsafeOutput(message);
 		if (message.stopReason !== "error") return false;
 		if (this.#isUsagePreflightBlocked(message)) return false;
 		const model = this.#host.model();
@@ -2301,7 +2306,8 @@ export class TurnRecovery {
 			}
 		}
 
-		if (providerRouteFailure && !switchedRoute) {
+		const sameRouteRetryable = providerRouteFailure && this.#isSameRouteRetryableError(message);
+		if (providerRouteFailure && !switchedRoute && (retryBudgetExhausted || !sameRouteRetryable)) {
 			// Cancellation or a replaced prompt is not evidence of unhealthy routes.
 			if (
 				!this.#host.abortInProgress() &&
@@ -2311,7 +2317,7 @@ export class TurnRecovery {
 				await this.#host.emitSessionEvent({
 					type: "profile_route_exhausted",
 					reason:
-						retryBudgetExhausted && this.#profileRouteCandidates().length > 0
+						retryBudgetExhausted && (sameRouteRetryable || this.#profileRouteCandidates().length > 0)
 							? "retry_budget"
 							: "routes_unavailable",
 				});

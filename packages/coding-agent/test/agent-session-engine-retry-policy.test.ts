@@ -327,7 +327,7 @@ describe("Engine bounded turn retry policy", () => {
 			responses: MockResponse[],
 			tools: AgentTool[] = [],
 			ordered = false,
-			routeOrder = [0, 1, 2],
+			routeOrder: readonly number[] = [0, 1, 2],
 			maxRetries = ENGINE_POLICY.delaysMs.length,
 		) {
 			const models = routeModels();
@@ -376,7 +376,12 @@ describe("Engine bounded turn retry policy", () => {
 
 		it("follows an explicitly ordered mixed-model chain and never restarts it after exhaustion", async () => {
 			const { session, requested, events } = createRouteSession(
-				[{ throw: "503 route one" }, { throw: "503 route two" }, { throw: "503 route three" }],
+				[
+					{ throw: "503 route one" },
+					{ throw: "503 route two" },
+					{ throw: "503 route three" },
+					{ throw: "503 route three again" },
+				],
 				[],
 				true,
 				[0, 1, 0, 2, 1],
@@ -384,10 +389,10 @@ describe("Engine bounded turn retry policy", () => {
 			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 			await session.prompt("ordered chain");
 			await session.waitForIdle();
-			expect(requested).toEqual(routeModels().map(model => `${model.provider}/${model.id}`));
+			expect(requested).toEqual([...routeModels(), routeModels()[2]!].map(model => `${model.provider}/${model.id}`));
 			expect(events.filter(event => event.type === "retry_fallback_applied")).toHaveLength(2);
 			expect(events.filter(event => event.type === "profile_route_exhausted")).toEqual([
-				{ type: "profile_route_exhausted", reason: "routes_unavailable" },
+				{ type: "profile_route_exhausted", reason: "retry_budget" },
 			]);
 			expect(session.getLastAssistantMessage()?.stopReason).toBe("error");
 		});
@@ -419,6 +424,28 @@ describe("Engine bounded turn retry policy", () => {
 			]);
 		});
 
+		it.each(["503 service unavailable", "engine_provider_retry_deferred: stream retry; retry-after-ms=500"])(
+			"recovers a single-slot transient failure inside the Engine budget: %s",
+			async failure => {
+				const { session, requested, events } = createRouteSession(
+					[{ throw: failure }, { content: ["same route recovered"], stopReason: "stop" }],
+					[],
+					true,
+					[0],
+				);
+				const waits: number[] = [];
+				vi.spyOn(scheduler, "wait").mockImplementation(async delay => {
+					waits.push(Number(delay));
+				});
+				await session.prompt("single slot transient");
+				await session.waitForIdle();
+				expect(requested).toEqual(Array(2).fill(`${routeModels()[0]!.provider}/${routeModels()[0]!.id}`));
+				expect(waits.filter(delay => delay >= 3000)).toEqual([3000]);
+				expect(session.getLastAssistantText()).toBe("same route recovered");
+				expect(events.some(event => event.type === "profile_route_exhausted")).toBe(false);
+			},
+		);
+
 		it("skips a fallback whose credential was revoked instead of hiding the next authorized model", async () => {
 			const { session, requested } = createRouteSession(
 				[{ throw: "503 primary" }, { content: ["third route answered"], stopReason: "stop" }],
@@ -438,13 +465,16 @@ describe("Engine bounded turn retry policy", () => {
 			expect(session.getLastAssistantText()).toBe("third route answered");
 		});
 
-		it("does not replay committed partial output on a different model", async () => {
+		it.each([
+			"OpenAI completions stream closed before a finish_reason was received",
+			"engine_provider_retry_deferred: stream retry; retry-after-ms=500",
+		])("does not replay committed partial output: %s", async failure => {
 			const { session, requested, events } = createRouteSession(
 				[
 					{
 						content: ["already visible"],
 						stopReason: "error",
-						errorMessage: "OpenAI completions stream closed before a finish_reason was received",
+						errorMessage: failure,
 					},
 					{ content: ["must not run"], stopReason: "stop" },
 				],
@@ -599,18 +629,19 @@ describe("Engine bounded turn retry policy", () => {
 			expect(retryContext.filter(message => message.role === "user")).toHaveLength(1);
 		});
 
-		it("stops after the last eligible route", async () => {
+		it("spends remaining transient retries on the last eligible route without restarting the chain", async () => {
 			const { session, requested } = createRouteSession([
 				{ throw: "503 route one" },
 				{ throw: "503 route two" },
 				{ throw: "503 route three" },
+				{ throw: "503 route three again" },
 			]);
 			vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
 
 			await session.prompt("all down");
 			await session.waitForIdle();
 
-			expect(requested).toEqual(routeModels().map(model => `${model.provider}/${model.id}`));
+			expect(requested).toEqual([...routeModels(), routeModels()[2]!].map(model => `${model.provider}/${model.id}`));
 		});
 
 		it.each([false, true])(
@@ -656,28 +687,33 @@ describe("Engine bounded turn retry policy", () => {
 			},
 		);
 
-		it("cancels route backoff without calling the next provider", async () => {
-			const { session, requested } = createRouteSession([
-				{ throw: "503 service unavailable" },
-				{ content: ["must not run"], stopReason: "stop" },
-			]);
-			const waiting = Promise.withResolvers<void>();
-			vi.spyOn(scheduler, "wait").mockImplementation((delay, options) => {
-				if (Number(delay) < 3_000) return Promise.resolve();
-				waiting.resolve();
-				return new Promise((_, reject) => {
-					options?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
-						once: true,
+		it.each([{ routeOrder: [0] }, { routeOrder: [0, 1, 2] }])(
+			"cancels route backoff without another provider request: %j",
+			async ({ routeOrder }) => {
+				const { session, requested } = createRouteSession(
+					[{ throw: "503 service unavailable" }, { content: ["must not run"], stopReason: "stop" }],
+					[],
+					true,
+					routeOrder,
+				);
+				const waiting = Promise.withResolvers<void>();
+				vi.spyOn(scheduler, "wait").mockImplementation((delay, options) => {
+					if (Number(delay) < 3_000) return Promise.resolve();
+					waiting.resolve();
+					return new Promise((_, reject) => {
+						options?.signal?.addEventListener("abort", () => reject(new DOMException("Aborted", "AbortError")), {
+							once: true,
+						});
 					});
 				});
-			});
 
-			const prompt = session.prompt("cancel route");
-			await waiting.promise;
-			await session.abort({ reason: "Stop" });
-			await prompt;
+				const prompt = session.prompt("cancel route");
+				await waiting.promise;
+				await session.abort({ reason: "Stop" });
+				await prompt;
 
-			expect(requested).toEqual([`${routeModels()[0]!.provider}/${routeModels()[0]!.id}`]);
-		});
+				expect(requested).toEqual([`${routeModels()[0]!.provider}/${routeModels()[0]!.id}`]);
+			},
+		);
 	});
 });

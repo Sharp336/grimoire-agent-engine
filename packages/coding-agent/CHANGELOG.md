@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- Retried temporary failures within the remaining Engine budget even when a profile has no later fallback slot.
 - Kept one identifiable assistant reply when context compaction cannot proceed, including after reopening the conversation.
 
 - Kept hosted broker profile selections stable across token renewal after profile edits, without bypassing current route or account authorization.
