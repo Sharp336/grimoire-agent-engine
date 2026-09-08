@@ -12,14 +12,14 @@ import {
 	EngineInboxConflictError,
 	EngineStore,
 } from "@oh-my-pi/pi-coding-agent/engine/store";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
 
 describe("EngineStore", () => {
 	let tempDir: string | undefined;
 
-	afterEach(() => {
-		if (tempDir) removeSyncWithRetries(tempDir);
+	afterEach(async () => {
+		if (tempDir) await removeWithRetries(tempDir);
 		tempDir = undefined;
 	});
 
