@@ -30,7 +30,7 @@ try {
 		| { principalId: string; agents: Array<{ agentInstanceRef: string; attemptId: string; executionId: string }> }
 		| undefined;
 	while (!ready) {
-		const chunk = await reader.read();
+		const chunk = await withTimeout(reader.read(), 30_000, "Fixture startup exceeded its bounded smoke deadline");
 		if (chunk.done) throw new Error(`Fixture exited before ready (${await child.exited})`);
 		buffered += decoder.decode(chunk.value, { stream: true });
 		for (;;) {
@@ -53,6 +53,33 @@ try {
 	};
 	validateRuntimeValue("snapshot", snapshot);
 	if (snapshot.agents.length !== 3) throw new Error("The fixture did not enroll one root and two children");
+	for (const current of ready.agents) {
+		const selected = (await client.request("runtime.snapshot", {
+			scope: {
+				kind: "attempt",
+				agentInstanceRef: current.agentInstanceRef,
+				attemptId: current.attemptId,
+				kinds: ["state", "history"],
+			},
+			...access,
+		})) as { agents: Array<{ attemptId: string; history: { sessionId: string | null; revision: string | null } }> };
+		const boundary = selected.agents[0];
+		if (boundary?.attemptId !== current.attemptId || !boundary.history.sessionId)
+			throw new Error("Initial exact Attempt has no retained history session boundary");
+		const history = (await client.request("runtime.history", {
+			agentInstanceRef: current.agentInstanceRef,
+			attemptId: current.attemptId,
+			limit: 2,
+			...access,
+		})) as { sessionId: string; revision: string };
+		validateRuntimeValue("historyPage", history);
+		if (history.sessionId !== boundary.history.sessionId)
+			throw new Error("Initial history boundary changed session identity");
+		if (current === ready.agents[0] && process.argv.includes("--history-entries")) {
+			if (history.revision !== boundary.history.revision)
+				throw new Error("Prepared history did not publish its retained leaf in the selected snapshot");
+		}
+	}
 	const agent = ready.agents[0];
 	const target = (await client.request("runtime.target", { ...agent, ...access })) as Record<string, unknown>;
 	validateRuntimeValue("nativeTarget", target);
@@ -219,6 +246,7 @@ try {
 			result: "PASS",
 			nativeIpc: true,
 			catalogAgents: snapshot.agents.length,
+			historySessionBoundaries: ready.agents.length,
 			selectedChanges: events.changes.length,
 			busyEnqueue: true,
 			pauseResumeSameAttempt: true,

@@ -4796,7 +4796,7 @@ describe("EngineRuntime", () => {
 			const pausedEvent = await paused;
 
 			const pausedAttempt = await runtime.store.getAttempt(child.attemptId);
-			expect(pausedAttempt).toMatchObject({ state: "paused", transcript_revision: 1 });
+			expect(pausedAttempt).toMatchObject({ state: "paused", transcript_revision: 2 });
 			expect(runtime.getBinding(child.agentInstanceId)).toMatchObject({
 				bindingId: child.bindingId,
 				attemptId: child.attemptId,
@@ -4805,7 +4805,7 @@ describe("EngineRuntime", () => {
 				initiator,
 				attemptState: "paused",
 				controlReadiness: { pause: false, resume: true, steer: true, cancel: true },
-				transcriptCheckpoint: { revision: 1 },
+				transcriptCheckpoint: { revision: 2 },
 			});
 			expect({
 				mailbox: runtime.ircBus.inbox(parent.engineAgentId, { peek: true }),
@@ -4821,9 +4821,9 @@ describe("EngineRuntime", () => {
 			await runtime.resume({ ...child, commandId: `resume-child-${index}`, initiator });
 			const completedEvent = await completed;
 			expect(completedEvent.attemptId).toBe(child.attemptId);
-			expect(completedEvent.payload).toMatchObject({ transcriptCheckpoint: { revision: 2 } });
+			expect(completedEvent.payload).toMatchObject({ transcriptCheckpoint: { revision: 3 } });
 			const completedAttempt = await runtime.store.getAttempt(child.attemptId);
-			expect(completedAttempt).toMatchObject({ state: "completed", transcript_revision: 2 });
+			expect(completedAttempt).toMatchObject({ state: "completed", transcript_revision: 3 });
 			expect(Number(completedAttempt?.transcript_byte_boundary)).toBeGreaterThanOrEqual(
 				Number(pausedAttempt?.transcript_byte_boundary),
 			);
@@ -5362,7 +5362,7 @@ describe("EngineRuntime", () => {
 				sessionPath: expect.any(String),
 				leafEntryId: expect.any(String),
 				byteBoundary: expect.any(Number),
-				revision: 1,
+				revision: 2,
 			},
 		});
 		const completedAttempt = await runtime.store.getAttempt(started.attemptId);
@@ -5372,7 +5372,7 @@ describe("EngineRuntime", () => {
 			transcript_path: expect.any(String),
 			transcript_leaf_entry_id: expect.any(String),
 			transcript_byte_boundary: expect.any(Number),
-			transcript_revision: 1,
+			transcript_revision: 2,
 		});
 		const history = await InternalUrlRouter.instance().resolve(String(completed?.payload?.transcriptRef), {
 			agentRegistry: runtime.agentRegistry,
@@ -5514,7 +5514,7 @@ describe("EngineRuntime", () => {
 		expect(events.find(event => event.kind === "completed")).toBeUndefined();
 		expect(events.find(event => event.kind === "failed")?.payload).toMatchObject({
 			error: "required_yield_not_submitted",
-			transcriptCheckpoint: { revision: 1 },
+			transcriptCheckpoint: { revision: 2 },
 		});
 		expect(prompts).toHaveLength(3);
 		await runtime.dispose();
@@ -5551,7 +5551,7 @@ describe("EngineRuntime", () => {
 		expect(failed?.payload).toMatchObject({
 			error: expect.stringContaining("diagnostic"),
 			transcriptRef: `history://${started.engineAgentId}`,
-			transcriptCheckpoint: { revision: 1 },
+			transcriptCheckpoint: { revision: 2 },
 		});
 		expect(JSON.stringify(failed?.payload)).not.toContain("secretcredential");
 		const modelEffectId = String(events.find(event => event.kind === "model_started")?.payload?.effectId);
@@ -5567,34 +5567,42 @@ describe("EngineRuntime", () => {
 		const { runtime, cwd } = await createRuntime();
 		const failedTwice = Promise.withResolvers<void>();
 		let flushCalls = 0;
-		const flush = spyOn(SessionManager.prototype, "flushAndCheckpoint").mockImplementation(async () => {
+		const originalFlush = SessionManager.prototype.flushAndCheckpoint;
+		const flush = spyOn(SessionManager.prototype, "flushAndCheckpoint").mockImplementation(async function (
+			this: SessionManager,
+		) {
 			flushCalls++;
-			if (flushCalls === 2) failedTwice.resolve();
+			if (flushCalls === 1) return originalFlush.call(this);
+			if (flushCalls === 3) failedTwice.resolve();
 			throw new Error("injected transcript flush failure");
 		});
-		const started = await runtime.start(
-			{
-				commandId: "command-flush-failure",
-				agentInstanceId: "agent-flush-failure",
-				executionId: "execution-flush-failure",
-				attemptId: "attempt-flush-failure",
-				authorityGeneration: 1,
-				cwd,
-				input: "finish",
-			},
-			profile,
-		);
-		await failedTwice.promise;
-		await Bun.sleep(1);
-		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("running");
-		expect(
-			(await runtime.store.pendingEvents()).some(event => event.kind === "completed" || event.kind === "failed"),
-		).toBeFalse();
+		try {
+			const started = await runtime.start(
+				{
+					commandId: "command-flush-failure",
+					agentInstanceId: "agent-flush-failure",
+					executionId: "execution-flush-failure",
+					attemptId: "attempt-flush-failure",
+					authorityGeneration: 1,
+					cwd,
+					input: "finish",
+				},
+				profile,
+			);
+			await failedTwice.promise;
+			await Bun.sleep(1);
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("running");
+			expect(
+				(await runtime.store.pendingEvents()).some(event => event.kind === "completed" || event.kind === "failed"),
+			).toBeFalse();
 
-		flush.mockRestore();
-		await runtime.cancel({ ...started, commandId: "cancel-after-flush-failure" });
-		await runtime.drain();
-		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
+			flush.mockRestore();
+			await runtime.cancel({ ...started, commandId: "cancel-after-flush-failure" });
+			await runtime.drain();
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
+		} finally {
+			flush.mockRestore();
+		}
 		await runtime.dispose();
 	}, 60000);
 

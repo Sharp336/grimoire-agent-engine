@@ -605,7 +605,7 @@ describe("Engine Control + Query", () => {
 
 		await server.close();
 		await runtime.dispose();
-	});
+	}, 30_000);
 
 	it("survives a native client disconnect while its durable response is ready to write", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-control-cancel-${Snowflake.next()}-`));

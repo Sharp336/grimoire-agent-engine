@@ -685,6 +685,20 @@ export async function recordRuntimeProjection(sql: RuntimeSql, event: EngineEven
 					? RUNTIME_KIND_MASK.input
 					: RUNTIME_KIND_MASK.state;
 	}
+	if (event.payload?.transcriptCheckpoint && event.attemptId) {
+		const checkpoint = event.payload.transcriptCheckpoint as { revision: number };
+		changes.push(
+			projectionChange(
+				"invalidate",
+				identity.agent_instance_ref,
+				event.eventId,
+				event.eventId,
+				{ resource: "history", revision: checkpoint.revision },
+				event.attemptId,
+			),
+		);
+		kinds |= RUNTIME_KIND_MASK.history;
+	}
 	await sql.unsafe(
 		`UPDATE engine_event_outbox SET summary_payload=?,membership_payload=?,detail_payload=?,projection_payload=?,projection_kinds=?,projection_principal=?,projection_root=? WHERE event_id=?`,
 		[

@@ -2287,6 +2287,7 @@ export class EngineRuntime {
 				...(preparedHistory ? { historyEdit: preparedHistory.result } : {}),
 			};
 			await this.#commitAttemptTransition(binding, "running", [{ kind: "accepted" }, { kind: "running" }], {
+				transcriptCheckpoint: await binding.session.sessionManager.flushAndCheckpoint(),
 				startIntent: {
 					expectedRevision: request.expectedIntentRevision,
 					explicitContinue,

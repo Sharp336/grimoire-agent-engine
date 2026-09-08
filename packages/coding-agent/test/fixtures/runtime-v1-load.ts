@@ -8,7 +8,7 @@ import { Settings } from "../../src/config/settings";
 import type { EngineBindingSnapshot } from "../../src/engine/contracts";
 import { startEngineControlQueryServer } from "../../src/engine/control-query";
 import { HostedEngineBridge, HostedGrimoireRpc } from "../../src/engine/hosted-bridge";
-import { NatsEngineAdapter } from "../../src/engine/nats-adapter";
+import { type EngineCommandEnvelope, engineCommandIdentity, NatsEngineAdapter } from "../../src/engine/nats-adapter";
 import { engineAgentInstanceId } from "../../src/engine/route";
 import { EngineRuntime } from "../../src/engine/runtime";
 import { RUNTIME_PROTOCOL_HASH } from "../../src/engine/runtime-protocol";
@@ -31,7 +31,9 @@ const rate = Number(args.get("--rate") ?? 20);
 const seconds = Number(args.get("--seconds") ?? 1800);
 const noisyRate = Number(args.get("--noisy-rate") ?? 0);
 const activeAgents = roots * 3 + (noisyRate ? 1 : 0);
-const catalogAgents = Number(args.get("--catalog-agents") ?? activeAgents);
+const legacyOwnership = args.get("--legacy-ownership") === "true";
+const initialAgents = activeAgents + (legacyOwnership ? 4 : 0);
+const catalogAgents = Number(args.get("--catalog-agents") ?? initialAgents);
 const historyEntries = Number(args.get("--history-entries") ?? 0);
 if (
 	![1, 2, 7, 14, 28].includes(roots) ||
@@ -40,7 +42,7 @@ if (
 	seconds <= 0 ||
 	![0, 200].includes(noisyRate) ||
 	!Number.isSafeInteger(catalogAgents) ||
-	catalogAgents < activeAgents ||
+	catalogAgents < initialAgents ||
 	catalogAgents > 10_000 ||
 	!Number.isSafeInteger(historyEntries) ||
 	historyEntries < 0 ||
@@ -127,6 +129,59 @@ runtime = await EngineRuntime.create({
 	},
 });
 const profile = { spawns: "", profileDigest: "runtime-load-profile", enableMCP: false, enableLsp: false };
+const legacySeed: Array<{
+	scenario: string;
+	agentInstanceRef: string;
+	agentInstanceId: string;
+	authorityGeneration: number;
+	command?: EngineCommandEnvelope;
+}> = [];
+if (legacyOwnership) {
+	const readyFile = args.get("--ownership-ready-file");
+	if (!readyFile || !path.isAbsolute(readyFile))
+		throw new Error("Legacy proof fixture requires an absolute --ownership-ready-file barrier");
+	for (const scenario of ["native", "missing", "oversized", "conflict"]) {
+		const name = `legacy-${scenario}`;
+		const agentInstanceRef = `grimoire://tasks/grimoire/runtime-load/agents/${name}`;
+		const identity = {
+			agentInstanceRef,
+			agentInstanceId: engineAgentInstanceId(agentInstanceRef),
+			authorityGeneration: 1,
+		};
+		if (scenario === "native") {
+			await runtime.store.registerAgent(identity);
+			legacySeed.push({ scenario, ...identity });
+		} else {
+			const command: EngineCommandEnvelope = {
+				schema: "grimoire.engine.command.v1",
+				commandId: `fixture-${name}`,
+				op: "start",
+				deviceId,
+				engineId,
+				engineGeneration: runtime.engineGeneration,
+				...identity,
+				attemptId: `attempt-${name}`,
+				executionId: `execution-${name}`,
+				issuedAt: Date.now(),
+				payload: { input: "Historical ownership fixture", cwd, profileDigest: profile.profileDigest },
+			};
+			await runtime.store.admitCommand(engineCommandIdentity(command), runtime.engineGeneration);
+			legacySeed.push({ scenario, ...identity, command });
+		}
+	}
+	const manifestPath = path.join(directory, "legacy-ownership.json");
+	await Bun.write(manifestPath, JSON.stringify({ principalId, deviceId, engineId, candidates: legacySeed }));
+	console.log(JSON.stringify({ kind: "ownership_seed_required", manifestPath, readyFile }));
+	const deadline = Date.now() + 30_000;
+	while (!(await Bun.file(readyFile).exists())) {
+		if (Date.now() >= deadline) {
+			await runtime.dispose();
+			auth.close();
+			throw new Error("Legacy ownership seed barrier timed out");
+		}
+		await Bun.sleep(25);
+	}
+}
 const adapter = natsUrl
 	? await NatsEngineAdapter.connect({
 			runtime,
@@ -200,7 +255,7 @@ for (let i = 0; i < roots; i++) {
 	await enroll(`child-${i}-1`, root);
 }
 const noisyBinding = noisyRate ? await enroll("noisy", undefined, false) : undefined;
-for (let i = activeAgents; i < catalogAgents; i++) {
+for (let i = initialAgents; i < catalogAgents; i++) {
 	const agentInstanceRef = `grimoire://tasks/grimoire/runtime-load/agents/catalog-${i}`;
 	await runtime.store.registerAgent({
 		agentInstanceId: engineAgentInstanceId(agentInstanceRef),
@@ -214,12 +269,14 @@ if (historyEntries) {
 	const session = sessions.get(first.agentInstanceId);
 	if (!session) throw new Error("Fixture root session did not start before history preparation");
 	const existing = session.sessionManager.getEntries().filter(entry => entry.type === "message").length;
-	for (let i = existing; i < historyEntries; i++) {
-		session.sessionManager.appendMessage(
-			{ role: "user", content: `Canonical retained history entry ${i}`, timestamp: Date.now() },
-			{ clientMessageId: `fixture-history-${i}` },
-		);
-	}
+	await session.sessionManager.appendEntriesAtomically(() => {
+		for (let i = existing; i < historyEntries; i++) {
+			session.sessionManager.appendMessage(
+				{ role: "user", content: `Canonical retained history entry ${i}`, timestamp: Date.now() },
+				{ clientMessageId: `fixture-history-${i}` },
+			);
+		}
+	});
 	const transcriptCheckpoint = await session.sessionManager.flushAndCheckpoint();
 	await runtime.store.commitAttemptTransition(first, "running", [], {
 		expectedStates: ["running"],
@@ -235,6 +292,18 @@ const started = performance.now();
 const metrics = fs.createWriteStream(path.join(directory, "metrics.ndjson"), { flags: "wx" });
 const writeMetric = async (value: Record<string, unknown>) => {
 	if (!metrics.write(`${JSON.stringify(value)}\n`)) await once(metrics, "drain");
+};
+const admitCommand = runtime.store.admitCommand.bind(runtime.store);
+runtime.store.admitCommand = async (command, generation) => {
+	const result = await admitCommand(command, generation);
+	if (command.commandId.startsWith("measure-control-"))
+		await writeMetric({
+			kind: "command_admitted",
+			commandId: command.commandId,
+			admittedAt: Date.now(),
+			status: result.status,
+		});
+	return result;
 };
 const payload = "x".repeat(1024);
 let produced = 0;
@@ -291,6 +360,7 @@ console.log(
 		roots,
 		catalogAgents,
 		historyEntries,
+		...(legacyOwnership ? { legacyOwnership: legacySeed } : {}),
 		agents: bindings.map(item => ({
 			agentInstanceRef: item.agentInstanceRef,
 			rootAgentInstanceRef: item.rootAgentInstanceRef,

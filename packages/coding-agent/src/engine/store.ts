@@ -2449,7 +2449,9 @@ export class EngineStore {
 				);
 				if (result.event) committed.push(result.event);
 			}
-			for (const event of events) {
+			const notifications: readonly EngineTransitionEvent[] =
+				events.length || !transcriptCheckpoint ? events : [{ kind: "reconciled" }];
+			for (const event of notifications) {
 				committed.push(
 					await this.#appendTransitionEvent(sql, binding, {
 						...event,
