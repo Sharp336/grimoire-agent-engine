@@ -20,6 +20,8 @@
 
 ### Fixed
 
+- Estimate context for the current model after switching models or falling back, instead of displaying the previous provider's token count.
+
 - Restarted each new Attempt on its selected profile route instead of retaining the previous fallback.
 - Explained provider rate limits, temporary failures and retry exhaustion without exposing private connection details.
 - Reported exhausted profile routes when the last fallback still fails after its retries, without marking untried routes unavailable.

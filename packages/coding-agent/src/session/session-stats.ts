@@ -19,6 +19,7 @@ import { getLatestCompactionEntry } from "./session-context";
 import type { SessionManager } from "./session-manager";
 
 interface PendingContextSnapshot {
+	model?: Pick<Model, "id" | "provider" | "api">;
 	promptTokens: number;
 	nonMessageTokens: number;
 	cutoffCount: number;
@@ -151,7 +152,13 @@ export class SessionStatsTracker {
 		contextWindow?: number;
 		pendingMessages?: AgentMessage[];
 	}): ContextUsageBreakdown | undefined {
-		const rawContextWindow = options?.contextWindow ?? this.#host.model()?.contextWindow ?? 0;
+		const model = this.#host.model();
+		const matchesModel = (anchor: { model: string; provider: string; api: string }) =>
+			model !== undefined &&
+			anchor.model === model.id &&
+			anchor.provider === model.provider &&
+			anchor.api === model.api;
+		const rawContextWindow = options?.contextWindow ?? model?.contextWindow ?? 0;
 		const contextWindow = Number.isFinite(rawContextWindow) && rawContextWindow > 0 ? rawContextWindow : 0;
 		const { skillsTokens, toolsTokens, systemContextTokens, systemPromptTokens } = computeNonMessageBreakdown(
 			this.#host.session,
@@ -166,7 +173,12 @@ export class SessionStatsTracker {
 		let anchored = false;
 		const pendingMessages = options?.pendingMessages ?? [];
 		const pendingTokens = this.#tokenizer.countMessages(pendingMessages);
-		const pending = this.#pendingContextSnapshot;
+		const pendingModel = this.#pendingContextSnapshot?.model;
+		const pending =
+			pendingModel &&
+			matchesModel({ model: pendingModel.id, provider: pendingModel.provider, api: pendingModel.api })
+				? this.#pendingContextSnapshot
+				: undefined;
 
 		let anchorEntry: SessionMessageEntry | undefined;
 		for (let index = branchEntries.length - 1; index > compactionIndex; index--) {
@@ -193,6 +205,7 @@ export class SessionStatsTracker {
 		const anchorEpoch = anchorAssistant?.contextSnapshot?.compactionEpoch ?? 0;
 		const useAnchor =
 			anchorAssistant !== undefined &&
+			matchesModel(anchorAssistant) &&
 			anchorIndex !== -1 &&
 			(!pending || (anchorIndex >= pending.cutoffCount && anchorEpoch >= pending.epoch));
 		if (useAnchor && anchorAssistant) {
@@ -222,7 +235,7 @@ export class SessionStatsTracker {
 
 		if (!anchored && !pending && branchEntries.length === 0) {
 			const liveAnchor = findTranscriptUsageAnchor(activeMessages);
-			if (liveAnchor) {
+			if (liveAnchor && matchesModel(liveAnchor.message)) {
 				const nonMessageTokens =
 					liveAnchor.message.contextSnapshot?.nonMessageTokens ??
 					computeNonMessageTokens(this.#host.session, this.#tokenizer);
@@ -317,8 +330,15 @@ export class SessionStatsTracker {
 	}
 
 	/** Sets or clears the in-flight context snapshot. */
-	setPendingSnapshot(snapshot: Omit<PendingContextSnapshot, "epoch"> | undefined): void {
-		this.#pendingContextSnapshot = snapshot ? { ...snapshot, epoch: this.#compactionEpoch } : undefined;
+	setPendingSnapshot(snapshot: Omit<PendingContextSnapshot, "epoch" | "model"> | undefined): void {
+		const model = this.#host.model();
+		this.#pendingContextSnapshot = snapshot
+			? {
+					...snapshot,
+					epoch: this.#compactionEpoch,
+					model: model && { id: model.id, provider: model.provider, api: model.api },
+				}
+			: undefined;
 		this.#contextUsageRevision++;
 	}
 
