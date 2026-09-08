@@ -19,7 +19,11 @@ const identity: ProviderExecutionIdentity = {
 };
 
 describe("ProviderExecutionClient", () => {
-	it("returns only an exact echoed route capability", async () => {
+	it.each([
+		{ mode: "hosted_broker", api: "openai-completions" },
+		{ mode: "owner_local", api: "openai-responses" },
+	])("resolves exact $mode $api material without changing protocol", async ({ mode, api }) => {
+		const credential = mode === "hosted_broker" ? `gri_pbr_${"a".repeat(48)}` : "fixture-secret";
 		const client = new ProviderExecutionClient(
 			"http://127.0.0.1/provider-execution",
 			"local-token",
@@ -34,21 +38,21 @@ describe("ProviderExecutionClient", () => {
 					schema: "grimoire.provider_execution.result.v1",
 					status: "ready",
 					allowed: true,
-					mode: "hosted_broker",
+					mode,
 					providerRuntimeId: "artel-4444444444444444",
-					api: "openai-completions",
+					api,
 					baseUrl: "https://core.invalid/runtime/provider-broker/v1",
-					credential: `gri_pbr_${"a".repeat(48)}`,
+					credential,
 					executionPin: "c".repeat(64),
 				});
 			},
 		);
 		expect(await client.resolve(identity)).toEqual({
-			mode: "hosted_broker",
+			mode,
 			providerRuntimeId: "artel-4444444444444444",
-			api: "openai-completions",
+			api,
 			baseUrl: "https://core.invalid/runtime/provider-broker/v1",
-			credential: `gri_pbr_${"a".repeat(48)}`,
+			credential,
 			executionPin: "c".repeat(64),
 		});
 	});
@@ -69,7 +73,10 @@ describe("ProviderExecutionClient", () => {
 		expect(safeEngineErrorDetail(error)).toBe(error.message);
 	});
 
-	it("rejects capability material that could expose the credential over plaintext", async () => {
+	it.each([
+		{ mode: "owner_local", api: "openai-completions", baseUrl: "http://provider.invalid/v1" },
+		{ mode: "hosted_broker", api: "openai-responses", baseUrl: "https://core.invalid/runtime/provider-broker/v1" },
+	])("rejects unsupported $mode $api transport at $baseUrl", async ({ mode, api, baseUrl }) => {
 		const client = new ProviderExecutionClient("http://127.0.0.1/provider-execution", "local-token", async () =>
 			Response.json({
 				...identity,
@@ -77,11 +84,11 @@ describe("ProviderExecutionClient", () => {
 				status: "ready",
 				allowed: true,
 				executionMode: "full_agent",
-				mode: "owner_local",
+				mode,
 				providerRuntimeId: "artel-4444444444444444",
-				api: "openai-completions",
-				baseUrl: "http://provider.invalid/v1",
-				credential: "secret-value",
+				api,
+				baseUrl,
+				credential: mode === "hosted_broker" ? `gri_pbr_${"a".repeat(48)}` : "secret-value",
 				executionPin: "a".repeat(64),
 			}),
 		);

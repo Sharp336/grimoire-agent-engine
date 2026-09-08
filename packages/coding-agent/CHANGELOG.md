@@ -4,6 +4,8 @@
 
 ### Added
 
+- Added owner-local Responses API execution for configured providers that require it for reasoning with tools.
+
 - Added attempt-bound profile-route events and restart-safe snapshots, separating pending selection from the observed stream and route exhaustion from a retry-budget stop.
 
 - AgentProfiles can explicitly opt into their saved cross-model fallback order; editing existing same-model profiles does not silently enable it.
