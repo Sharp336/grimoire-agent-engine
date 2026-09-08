@@ -872,6 +872,31 @@ describe("openai-completions compatibility", () => {
 		}
 	});
 
+	it.each([
+		{ id: "grok-4.20-reasoning", compat: undefined, expectedEffort: undefined },
+		{ id: "grok-4.6", compat: undefined, expectedEffort: "high" },
+		{ id: "grok-4.20-reasoning", compat: { supportsReasoningEffort: true }, expectedEffort: "high" },
+	])(
+		"respects Grok effort capabilities through a route-scoped gateway: %j",
+		async ({ id, compat, expectedEffort }) => {
+			const model = buildModel({
+				id,
+				name: id,
+				api: "openai-completions",
+				provider: "artel-route-test",
+				baseUrl: "https://gateway.example.invalid/v1",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 32_000,
+				maxTokens: 8192,
+				compat,
+			});
+			const payload = toObject(await captureOpenAICompletionsPayload(model, baseContext(), { reasoning: "high" }));
+			expect(payload?.reasoning_effort).toBe(expectedEffort);
+		},
+	);
+
 	it("maps qwen chat template reasoning into chat_template_kwargs", async () => {
 		const model: Model<"openai-completions"> = buildModel({
 			...gpt4oMiniSpec,
