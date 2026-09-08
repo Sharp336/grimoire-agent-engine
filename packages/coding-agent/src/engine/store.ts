@@ -13,9 +13,37 @@ import type {
 	EngineInboxTarget,
 	EngineRetryOutcome,
 	EngineRetryState,
+	EngineTarget,
 	EngineToolPolicy,
 } from "./contracts";
+import { EngineTargetError } from "./contracts";
 import { engineAgentId } from "./route";
+import { ENGINE_HISTORY_INDEX_SCHEMA, type EngineNativeHistoryPage } from "./runtime-history";
+import { RUNTIME_MESSAGE_SCHEMA } from "./runtime-messages";
+import {
+	RUNTIME_PROJECTION_SCHEMA,
+	type RuntimeTargetRequest,
+	recordRuntimeProjection,
+	runtimeNativeTarget,
+} from "./runtime-projection";
+import {
+	ENGINE_CONTROL_OPS,
+	type RuntimeAccess,
+	type RuntimeEventBatch,
+	type RuntimeEventsRequest,
+	type RuntimeScope,
+	type RuntimeWork,
+	runtimeLimits,
+} from "./runtime-protocol";
+import { type RuntimeSnapshot, readRuntimeEvents, readRuntimeSnapshot, readRuntimeSummary } from "./runtime-read";
+import {
+	type RuntimePageRequest,
+	type RuntimeResourceRequest,
+	readRuntimeHolds,
+	readRuntimeInput,
+	readRuntimeMessages,
+	readRuntimeResource,
+} from "./runtime-resources";
 
 interface MetadataRow {
 	value: string;
@@ -225,6 +253,7 @@ export interface EngineCommandIdentity {
 	agentInstanceId: string;
 	agentInstanceRef?: string;
 	parentAgentInstanceId?: string;
+	parentAgentInstanceRef?: string;
 	bindingId?: string;
 	bindingGeneration?: number;
 	executionId?: string;
@@ -232,6 +261,37 @@ export interface EngineCommandIdentity {
 	authorityGeneration: number;
 	payloadHash: string;
 	canonicalHash: string;
+	principalId?: string;
+	browserPayloadHash?: string;
+	serializedCommand?: string;
+}
+
+export interface EngineBranchHold {
+	sourceAgentInstanceId: string;
+	sourceAgentInstanceRef: string;
+	commandId: string;
+	generation: number;
+	kind: "pause" | "stop" | "recovery";
+}
+
+export interface EngineRuntimeSnapshot {
+	version: "1.0";
+	scope: RuntimeScope;
+	epoch: string;
+	generation: number;
+	watermark: number;
+	agents: Record<string, unknown>[];
+	nextCursor: string | null;
+}
+
+export interface EngineRuntimeEvents {
+	epoch: string;
+	generation: number;
+	throughCursor: number;
+	events: EngineEvent[];
+	resyncRequired: boolean;
+	reason?: "epoch_changed" | "retention_gap" | "projection_changed";
+	hasMore: boolean;
 }
 
 export type EngineStartConversationIdentity = Pick<
@@ -585,6 +645,41 @@ const SCHEMA_MIGRATIONS = [
 	},
 	{ version: 10, statements: [], requiredColumns: ATTEMPT_RETRY_COLUMNS },
 	{ version: 11, statements: [], requiredColumns: CONVERSATION_IDENTITY_COLUMNS },
+	{
+		version: 12,
+		statements: [
+			...ENGINE_HISTORY_INDEX_SCHEMA,
+			`CREATE TABLE engine_agent_identity (
+			 agent_instance_id TEXT PRIMARY KEY, agent_instance_ref TEXT NOT NULL DEFAULT '',
+			 parent_agent_instance_id TEXT, parent_agent_instance_ref TEXT, principal_id TEXT NOT NULL DEFAULT '',
+			 authority_generation INTEGER NOT NULL DEFAULT 0, intent_revision INTEGER NOT NULL DEFAULT 0,
+			 queue_revision INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
+			`CREATE INDEX engine_agent_parent_idx ON engine_agent_identity(parent_agent_instance_id)`,
+			`CREATE INDEX engine_agent_principal_idx ON engine_agent_identity(principal_id, agent_instance_id)`,
+			`CREATE TABLE engine_branch_holds (
+			 source_agent_instance_id TEXT NOT NULL, kind TEXT NOT NULL CHECK(kind IN ('pause','stop','recovery')),
+			 command_id TEXT NOT NULL, generation INTEGER NOT NULL, created_at INTEGER NOT NULL,
+			 PRIMARY KEY(source_agent_instance_id, kind))`,
+			`CREATE INDEX engine_outbox_agent_idx ON engine_event_outbox(agent_instance_id,event_id)`,
+			`CREATE INDEX engine_outbox_attempt_idx ON engine_event_outbox(attempt_id,event_id)`,
+			`INSERT INTO engine_agent_identity(agent_instance_id,agent_instance_ref,parent_agent_instance_id,authority_generation,intent_revision,created_at,updated_at)
+			 SELECT b.agent_instance_id,COALESCE(c.agent_instance_ref,''),c.parent_agent_instance_id,b.authority_generation,b.intent_revision,b.updated_at,b.updated_at
+			 FROM engine_runtime_bindings b LEFT JOIN engine_commands c ON c.command_id=b.command_id`,
+			`INSERT OR IGNORE INTO engine_agent_identity(agent_instance_id,agent_instance_ref,parent_agent_instance_id,authority_generation,created_at,updated_at)
+			 SELECT agent_instance_id,COALESCE(agent_instance_ref,''),parent_agent_instance_id,authority_generation,received_at,updated_at FROM engine_commands ORDER BY received_at`,
+			`INSERT INTO engine_branch_holds(source_agent_instance_id,kind,command_id,generation,created_at)
+			 SELECT agent_instance_id,'pause',COALESCE(intent_command_id,command_id),intent_revision,updated_at FROM engine_runtime_bindings WHERE manual_hold=1`,
+		],
+		requiredColumns: [
+			["engine_commands", "principal_id", "TEXT NOT NULL DEFAULT ''"],
+			["engine_attempts", "result_payload", "TEXT"],
+			["engine_commands", "browser_payload_hash", "TEXT"],
+			["engine_commands", "payload_bytes", "INTEGER NOT NULL DEFAULT 0"],
+			["engine_commands", "serialized_command", "TEXT"],
+		] as const,
+	},
+	{ version: 13, statements: RUNTIME_PROJECTION_SCHEMA, requiredColumns: [] },
+	{ version: 14, statements: RUNTIME_MESSAGE_SCHEMA, requiredColumns: [] },
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;
@@ -656,6 +751,804 @@ export class EngineStore {
 	readonly #client: SqlClient;
 	readonly sessionStorage: SqlSessionStorage;
 	#transactionTail: Promise<void> = Promise.resolve();
+	#change = Promise.withResolvers<void>();
+	#summaryChange = Promise.withResolvers<void>();
+	#summaryRevision = 0;
+	#closed = false;
+	#changeRevision = 0;
+
+	changeSignal(): Promise<void> {
+		return this.#change.promise;
+	}
+
+	async registerAgent(
+		identity: Pick<
+			EngineCommandIdentity,
+			| "agentInstanceId"
+			| "agentInstanceRef"
+			| "parentAgentInstanceId"
+			| "parentAgentInstanceRef"
+			| "principalId"
+			| "authorityGeneration"
+		>,
+	): Promise<void> {
+		await this.#transaction(sql => this.#registerAgent(sql, identity));
+	}
+
+	async runtimeTarget(request: RuntimeTargetRequest): Promise<Record<string, unknown>> {
+		return await this.#transaction(sql => runtimeNativeTarget(sql, request));
+	}
+
+	async nativeSessionHeader(target: EngineTarget): Promise<{ sessionId: string; cwd: string | null }> {
+		return await this.#transaction(async sql => {
+			const rows = (await sql.unsafe(
+				`SELECT COALESCE(a.transcript_path,b.session_file) AS session_path FROM engine_attempts a
+				LEFT JOIN engine_runtime_bindings b ON b.attempt_id=a.attempt_id WHERE a.agent_instance_id=? AND a.attempt_id=? AND a.execution_id=?
+				AND a.binding_id=? AND a.binding_generation=? AND a.engine_generation=? AND a.authority_generation=?`,
+				[
+					target.agentInstanceId,
+					target.attemptId,
+					target.executionId,
+					target.bindingId,
+					target.bindingGeneration,
+					target.engineGeneration,
+					target.authorityGeneration,
+				],
+			)) as Array<{ session_path: string | null }>;
+			if (!rows[0]?.session_path)
+				throw new EngineTargetError("stale_target", "Exact native session path is not retained");
+			const headers = (await sql.unsafe(
+				"SELECT entry_id,json_extract(entry_json,'$.cwd') AS cwd FROM engine_history_entries WHERE session_path=? AND entry_type='session' ORDER BY ordinal LIMIT 1",
+				[rows[0].session_path],
+			)) as Array<{ entry_id: string; cwd: string | null }>;
+			if (!headers[0]) throw new EngineTargetError("history_expired", "Native session header is not retained");
+			return { sessionId: headers[0].entry_id, cwd: headers[0].cwd };
+		});
+	}
+
+	async runtimeSummary(request: RuntimeAccess & { agentInstanceRef: string }): Promise<Record<string, unknown>> {
+		return await this.#transaction(sql => readRuntimeSummary(sql, request));
+	}
+
+	async runtimeInput(request: RuntimePageRequest): Promise<Record<string, unknown>> {
+		return await this.#transaction(sql => readRuntimeInput(sql, request));
+	}
+	async runtimeHolds(request: RuntimePageRequest): Promise<Record<string, unknown>> {
+		return await this.#transaction(sql => readRuntimeHolds(sql, request));
+	}
+	async runtimeResource(request: RuntimeResourceRequest): Promise<Record<string, unknown>> {
+		return await this.#transaction(sql => readRuntimeResource(sql, request));
+	}
+	async runtimeMessages(request: RuntimePageRequest): Promise<Record<string, unknown>> {
+		return await this.#transaction(sql => readRuntimeMessages(sql, request));
+	}
+
+	async intent(
+		agentInstanceId: string,
+	): Promise<{ intentRevision: number; manualHold: boolean; holds: EngineBranchHold[] }> {
+		return await this.#transaction(async sql => {
+			const rows = (await sql.unsafe("SELECT intent_revision FROM engine_agent_identity WHERE agent_instance_id=?", [
+				agentInstanceId,
+			])) as Array<{ intent_revision: number }>;
+			const holds = await this.#effectiveHolds(sql, agentInstanceId);
+			return { intentRevision: Number(rows[0]?.intent_revision ?? 0), manualHold: holds.length > 0, holds };
+		});
+	}
+
+	async assertIntent(agentInstanceId: string, expectedRevision?: number, unheld = false): Promise<void> {
+		await this.#transaction(sql => this.#assertIntent(sql, agentInstanceId, expectedRevision, unheld));
+	}
+
+	async branchIntent(
+		agentInstanceId: string,
+		commandId: string,
+		action: "pause" | "resume" | "stop" | "continue",
+		expectedRevision?: number,
+	): Promise<{ agentIds: string[]; events: EngineEvent[]; intentRevision: number }> {
+		return await this.#transaction(sql =>
+			this.#branchIntent(sql, agentInstanceId, commandId, action, expectedRevision),
+		);
+	}
+
+	async #branchIntent(
+		sql: SqlClient,
+		agentInstanceId: string,
+		commandId: string,
+		action: "pause" | "resume" | "stop" | "continue",
+		expectedRevision?: number,
+	): Promise<{ agentIds: string[]; events: EngineEvent[]; intentRevision: number }> {
+		await this.#assertIntent(sql, agentInstanceId, expectedRevision);
+		const rows = (await sql.unsafe("SELECT intent_revision FROM engine_agent_identity WHERE agent_instance_id=?", [
+			agentInstanceId,
+		])) as Array<{ intent_revision: number }>;
+		if (!rows[0]) throw new EngineTargetError("agent_not_found", "Unknown branch root");
+		const revision = Number(rows[0].intent_revision) + 1;
+		if (action === "resume" || action === "continue") {
+			await sql.unsafe(
+				`DELETE FROM engine_branch_holds WHERE source_agent_instance_id=? AND ${action === "resume" ? "kind='pause'" : "kind IN ('pause','stop','recovery')"}`,
+				[agentInstanceId],
+			);
+		} else {
+			await sql.unsafe(
+				`INSERT INTO engine_branch_holds(source_agent_instance_id,kind,command_id,generation,created_at) VALUES (?,?,?,?,?) ON CONFLICT(source_agent_instance_id,kind) DO UPDATE SET command_id=excluded.command_id,generation=excluded.generation,created_at=excluded.created_at`,
+				[agentInstanceId, action === "stop" ? "stop" : "pause", commandId, revision, Date.now()],
+			);
+		}
+		const descendants = (await sql.unsafe(
+			`WITH RECURSIVE branch(id) AS (SELECT ? UNION SELECT i.agent_instance_id FROM engine_agent_identity i JOIN branch b ON i.parent_agent_instance_id=b.id) SELECT id FROM branch ORDER BY id`,
+			[agentInstanceId],
+		)) as Array<{ id: string }>;
+		const events: EngineEvent[] = [];
+		for (const { id } of descendants) {
+			const holds = await this.#effectiveHolds(sql, id);
+			await sql.unsafe(
+				"UPDATE engine_agent_identity SET intent_revision=intent_revision+1,updated_at=? WHERE agent_instance_id=?",
+				[Date.now(), id],
+			);
+			await sql.unsafe(
+				"UPDATE engine_runtime_bindings SET manual_hold=?,intent_revision=(SELECT intent_revision FROM engine_agent_identity WHERE agent_instance_id=?),intent_command_id=?,updated_at=? WHERE agent_instance_id=?",
+				[holds.length > 0 ? 1 : 0, id, commandId, Date.now(), id],
+			);
+			events.push(
+				await this.#identityEvent(sql, id, commandId, "holds_changed", {
+					action,
+					sourceAgentInstanceId: agentInstanceId,
+					holds,
+				}),
+			);
+		}
+		return { agentIds: descendants.map(row => row.id), events, intentRevision: revision };
+	}
+
+	async #assertIntent(
+		sql: SqlClient,
+		agentInstanceId: string,
+		expectedRevision?: number,
+		unheld = false,
+	): Promise<void> {
+		const rows = (await sql.unsafe("SELECT intent_revision FROM engine_agent_identity WHERE agent_instance_id=?", [
+			agentInstanceId,
+		])) as Array<{ intent_revision: number }>;
+		if (expectedRevision !== undefined && Number(rows[0]?.intent_revision ?? 0) !== expectedRevision)
+			throw new EngineTargetError("stale_target", "AgentInstance intent revision changed");
+		if (unheld && (await this.#effectiveHolds(sql, agentInstanceId)).length > 0)
+			throw new EngineTargetError("agent_busy", "AgentInstance branch is held");
+	}
+
+	async #registerAgent(
+		sql: SqlClient,
+		identity: Pick<
+			EngineCommandIdentity,
+			| "agentInstanceId"
+			| "agentInstanceRef"
+			| "parentAgentInstanceId"
+			| "parentAgentInstanceRef"
+			| "principalId"
+			| "authorityGeneration"
+		>,
+	): Promise<void> {
+		if (!identity.principalId && identity.parentAgentInstanceId) {
+			const parents = (await sql.unsafe("SELECT principal_id FROM engine_agent_identity WHERE agent_instance_id=?", [
+				identity.parentAgentInstanceId,
+			])) as Array<{ principal_id: string }>;
+			if (parents[0]?.principal_id) identity = { ...identity, principalId: parents[0].principal_id };
+		}
+		if (identity.parentAgentInstanceId === identity.agentInstanceId)
+			throw new EngineTargetError("invalid_request", "AgentInstance cannot be its own parent");
+		const rows = (await sql.unsafe(
+			"SELECT agent_instance_ref,parent_agent_instance_id,principal_id FROM engine_agent_identity WHERE agent_instance_id=?",
+			[identity.agentInstanceId],
+		)) as Array<{ agent_instance_ref: string; parent_agent_instance_id: string | null; principal_id: string }>;
+		const existing = rows[0];
+		if (
+			existing &&
+			((identity.agentInstanceRef &&
+				existing.agent_instance_ref &&
+				identity.agentInstanceRef !== existing.agent_instance_ref) ||
+				(identity.parentAgentInstanceId &&
+					existing.parent_agent_instance_id &&
+					identity.parentAgentInstanceId !== existing.parent_agent_instance_id) ||
+				(identity.principalId && existing.principal_id && identity.principalId !== existing.principal_id))
+		)
+			throw new EngineTargetError("stale_target", "AgentInstance identity is immutable");
+		if (identity.parentAgentInstanceId) {
+			const parents = (await sql.unsafe(
+				`WITH RECURSIVE ancestors(id) AS (SELECT ? UNION SELECT i.parent_agent_instance_id FROM engine_agent_identity i JOIN ancestors a ON i.agent_instance_id=a.id WHERE i.parent_agent_instance_id IS NOT NULL) SELECT id FROM ancestors WHERE id=?`,
+				[identity.parentAgentInstanceId, identity.agentInstanceId],
+			)) as Array<{ id: string }>;
+			if (parents.length) throw new EngineTargetError("invalid_request", "AgentInstance ancestry cycle");
+		}
+		await sql.unsafe(
+			`INSERT INTO engine_agent_identity(agent_instance_id,agent_instance_ref,parent_agent_instance_id,parent_agent_instance_ref,principal_id,authority_generation,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(agent_instance_id) DO UPDATE SET agent_instance_ref=CASE WHEN engine_agent_identity.agent_instance_ref='' THEN excluded.agent_instance_ref ELSE engine_agent_identity.agent_instance_ref END,parent_agent_instance_id=COALESCE(engine_agent_identity.parent_agent_instance_id,excluded.parent_agent_instance_id),parent_agent_instance_ref=COALESCE(engine_agent_identity.parent_agent_instance_ref,excluded.parent_agent_instance_ref),principal_id=CASE WHEN engine_agent_identity.principal_id='' THEN excluded.principal_id ELSE engine_agent_identity.principal_id END,authority_generation=MAX(engine_agent_identity.authority_generation,excluded.authority_generation),updated_at=excluded.updated_at`,
+			[
+				identity.agentInstanceId,
+				identity.agentInstanceRef ?? "",
+				identity.parentAgentInstanceId ?? null,
+				identity.parentAgentInstanceRef ?? null,
+				identity.principalId ?? "",
+				identity.authorityGeneration,
+				Date.now(),
+				Date.now(),
+			],
+		);
+		if (!existing && identity.agentInstanceRef)
+			await this.#identityEvent(
+				sql,
+				identity.agentInstanceId,
+				"register:" + identity.agentInstanceId,
+				"agent_registered",
+				{},
+			);
+	}
+
+	async #identityEvent(
+		sql: SqlClient,
+		agentInstanceId: string,
+		commandId: string,
+		kind: EngineEvent["kind"],
+		payload: Record<string, unknown>,
+	): Promise<EngineEvent> {
+		const rows = (await sql.unsafe("SELECT * FROM engine_runtime_bindings WHERE agent_instance_id=?", [
+			agentInstanceId,
+		])) as BindingRow[];
+		const binding = rows[0];
+		const meta = await this.#runtimeMeta(sql);
+		return await this.#appendEvent(sql, {
+			agentInstanceId,
+			causationCommandId: commandId,
+			executionId: binding?.execution_id ?? "",
+			attemptId: binding?.attempt_id ?? "",
+			bindingId: binding?.binding_id ?? "",
+			engineGeneration: meta.generation,
+			bindingGeneration: Number(binding?.binding_generation ?? 0),
+			authorityGeneration: Number(binding?.authority_generation ?? 0),
+			kind,
+			payload,
+		});
+	}
+
+	async #assertPendingBudget(
+		sql: SqlClient,
+		agentInstanceId: string,
+		bytes: number,
+		control = false,
+		excludingCommandId = "",
+		recordsDelta = 1,
+	): Promise<void> {
+		const controls = [...ENGINE_CONTROL_OPS];
+		const commandWhere = `state='received' AND command_id<>? AND operation ${control ? "IN" : "NOT IN"} (${controls.map(() => "?").join(",")})`;
+		const commands = (await sql.unsafe(
+			`SELECT COUNT(*) AS records,COALESCE(SUM(payload_bytes),0) AS bytes FROM engine_commands WHERE ${commandWhere}`,
+			[excludingCommandId, ...controls],
+		)) as Array<{ records: number; bytes: number }>;
+		const inbox = control
+			? [{ records: 0, bytes: 0 }]
+			: ((await sql.unsafe(
+					"SELECT COUNT(*) AS records,COALESCE(SUM(length(CAST(delivery_payload AS BLOB))+length(CAST(COALESCE(annotation,'') AS BLOB))),0) AS bytes FROM engine_inbox_items WHERE disposition='pending'",
+				)) as Array<{ records: number; bytes: number }>);
+		if (
+			Number(commands[0].records) + Number(inbox[0].records) + recordsDelta >
+				(control ? runtimeLimits.controlPendingRecords : runtimeLimits.devicePendingRecords) ||
+			Number(commands[0].bytes) + Number(inbox[0].bytes) + bytes >
+				(control ? runtimeLimits.controlPendingBytes : runtimeLimits.devicePendingBytes)
+		)
+			throw new EngineTargetError("queue_full", "Device pending admission budget is full");
+		if (control) return;
+		const agentCommands = (await sql.unsafe(
+			`SELECT COUNT(*) AS records,COALESCE(SUM(payload_bytes),0) AS bytes FROM engine_commands WHERE ${commandWhere} AND agent_instance_id=?`,
+			[excludingCommandId, ...controls, agentInstanceId],
+		)) as Array<{ records: number; bytes: number }>;
+		const agentInbox = (await sql.unsafe(
+			"SELECT COUNT(*) AS records,COALESCE(SUM(length(CAST(delivery_payload AS BLOB))+length(CAST(COALESCE(annotation,'') AS BLOB))),0) AS bytes FROM engine_inbox_items WHERE disposition='pending' AND agent_instance_id=?",
+			[agentInstanceId],
+		)) as Array<{ records: number; bytes: number }>;
+		if (
+			Number(agentCommands[0].records) + Number(agentInbox[0].records) + recordsDelta >
+				runtimeLimits.agentPendingRecords ||
+			Number(agentCommands[0].bytes) + Number(agentInbox[0].bytes) + bytes > runtimeLimits.agentPendingBytes
+		)
+			throw new EngineTargetError("queue_full", "AgentInstance pending admission budget is full");
+	}
+
+	async runtimeSnapshot(
+		scope: RuntimeScope,
+		access: RuntimeAccess,
+		cursor?: string,
+		limit = runtimeLimits.httpPageRecords,
+		maxBytes = runtimeLimits.httpPageBytes,
+	): Promise<RuntimeSnapshot> {
+		return await this.#transaction(sql => readRuntimeSnapshot(sql, scope, access, cursor, limit, maxBytes));
+	}
+
+	async runtimeEvents(request: RuntimeEventsRequest): Promise<RuntimeEventBatch> {
+		return await this.#transaction(sql => readRuntimeEvents(sql, request));
+	}
+
+	async waitRuntimeEvents(request: RuntimeEventsRequest, signal?: AbortSignal): Promise<RuntimeEventBatch> {
+		const deadline =
+			Date.now() +
+			Math.min(
+				request.timeoutMs,
+				request.scope.kind === "catalog" ? runtimeLimits.appCursorHeartbeatMs : runtimeLimits.eventWaitMs,
+			);
+		const total: RuntimeWork = { bytes: 0, changes: 0, scannedRows: 0, materializedBytes: 0, elapsedMs: 0 };
+		let afterCursor = request.afterCursor;
+		for (;;) {
+			// Register before the consistent read. Token-only commits do not wake the app writer.
+			const changed = request.scope.kind === "catalog" ? this.#summaryChange.promise : this.changeSignal();
+			const remaining = {
+				...request.remainingWork,
+				scannedRows: request.remainingWork.scannedRows - total.scannedRows,
+				materializedBytes: request.remainingWork.materializedBytes - total.materializedBytes,
+				timeMs: request.remainingWork.timeMs - total.elapsedMs,
+			};
+			const result = await this.runtimeEvents({ ...request, afterCursor, remainingWork: remaining });
+			total.scannedRows += result.work.scannedRows;
+			total.materializedBytes += result.work.materializedBytes;
+			total.elapsedMs += result.work.elapsedMs;
+			if (
+				result.changes.length ||
+				result.hasMore ||
+				request.untilCursor !== undefined ||
+				this.#closed ||
+				signal?.aborted ||
+				Date.now() >= deadline
+			) {
+				Object.assign(result.work, total, { changes: result.changes.length });
+				for (;;) {
+					const bytes = Buffer.byteLength(JSON.stringify(result));
+					if (bytes === result.work.bytes) break;
+					result.work.bytes = bytes;
+				}
+				return result;
+			}
+			afterCursor = result.throughCursor;
+			const wake = Promise.withResolvers<void>();
+			const abort = () => wake.resolve();
+			signal?.addEventListener("abort", abort, { once: true });
+			const timer = setTimeout(abort, Math.max(0, deadline - Date.now()));
+			try {
+				await Promise.race([changed, wake.promise]);
+			} finally {
+				clearTimeout(timer);
+				signal?.removeEventListener("abort", abort);
+			}
+		}
+	}
+
+	async runtimeCommand(
+		commandId: string,
+		access?: RuntimeAccess,
+		browserPayloadHash?: string,
+	): Promise<Record<string, unknown>> {
+		return await this.#transaction(async sql => {
+			const rows = (await sql.unsafe("SELECT * FROM engine_commands WHERE command_id=?", [commandId])) as Array<
+				Record<string, unknown>
+			>;
+			const row = rows[0];
+			if (!row)
+				return {
+					commandId,
+					lookup: "outcome_unknown",
+					dedupHorizonMs: runtimeLimits.dedupHorizonMs,
+					retention: "indefinite",
+				};
+			if (
+				access &&
+				row.principal_id !== access.principalId &&
+				!(row.principal_id === "" && access.authorizedAgentInstanceRefs?.includes(String(row.agent_instance_ref)))
+			)
+				throw new EngineTargetError("agent_not_found", "Unknown authorized command");
+			if (browserPayloadHash && row.browser_payload_hash !== browserPayloadHash)
+				throw new EngineCommandConflictError(commandId);
+			const receipt = row.receipt ? (JSON.parse(String(row.receipt)) as EngineCommandReceipt) : undefined;
+			const attempt = row.attempt_id
+				? ((await sql.unsafe("SELECT state FROM engine_attempts WHERE attempt_id=?", [row.attempt_id]))[0] as
+						| { state: EngineAttemptState }
+						| undefined)
+				: undefined;
+			return {
+				commandId,
+				lookup: row.state === "settled" ? "known" : "pending",
+				stage:
+					receipt?.outcome === "rejected"
+						? "rejected"
+						: row.state !== "settled"
+							? "engine_accepted"
+							: row.operation === "start" && attempt && TERMINAL_ATTEMPT_STATES.has(attempt.state)
+								? "execution_terminal"
+								: "applied",
+				receipt,
+				rawCanonicalHash: row.canonical_hash,
+				browserPayloadHash: row.browser_payload_hash,
+				target: {
+					agentInstanceRef: row.agent_instance_ref,
+					agentInstanceId: row.agent_instance_id,
+					attemptId: row.attempt_id,
+					executionId: row.execution_id,
+				},
+				dedupHorizonMs: runtimeLimits.dedupHorizonMs,
+				dedupUntil: row.settled_at ? Number(row.settled_at) + runtimeLimits.dedupHorizonMs : null,
+				retention: "indefinite",
+			};
+		});
+	}
+
+	async runtimeQueue(
+		agentInstanceId: string,
+		cursor?: string,
+		limit = runtimeLimits.httpPageRecords,
+	): Promise<Record<string, unknown>> {
+		return await this.#transaction(async sql => {
+			const rows = (await sql.unsafe("SELECT queue_revision FROM engine_agent_identity WHERE agent_instance_id=?", [
+				agentInstanceId,
+			])) as Array<{ queue_revision: number }>;
+			const revision = Number(rows[0]?.queue_revision ?? 0);
+			let after = 0;
+			if (cursor) {
+				let parsed: { agentInstanceId: string; revision: number; position: number };
+				try {
+					parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+				} catch {
+					throw new EngineTargetError("stale_target", "Invalid queue cursor");
+				}
+				if (
+					parsed.agentInstanceId !== agentInstanceId ||
+					parsed.revision !== revision ||
+					!Number.isSafeInteger(parsed.position)
+				)
+					throw new EngineTargetError("stale_target", "Queue cursor is stale");
+				after = parsed.position;
+			}
+			const pending = (await sql.unsafe(
+				`${this.#inboxSelect()} WHERE i.agent_instance_id=? AND i.disposition='pending' AND i.position>? ORDER BY i.position,i.queue_id LIMIT ?`,
+				[agentInstanceId, after, Math.min(limit, runtimeLimits.httpPageRecords) + 1],
+			)) as InboxItemRow[];
+			const items: EngineInboxItem[] = [];
+			let bytes = 1024;
+			for (const row of pending.slice(0, limit)) {
+				const item = inboxItemFromRow(row);
+				const size = Buffer.byteLength(JSON.stringify(item));
+				if (bytes + size > runtimeLimits.httpPageBytes - 2048) {
+					if (!items.length)
+						return {
+							agentInstanceId,
+							queueRevision: revision,
+							items: [],
+							nextCursor: cursor ?? null,
+							entryRef: { queueId: row.queue_id, revision: Number(row.revision), bytes: size },
+						};
+					break;
+				}
+				items.push(item);
+				bytes += size;
+			}
+			return {
+				agentInstanceId,
+				queueRevision: revision,
+				items,
+				nextCursor:
+					pending.length > items.length
+						? Buffer.from(
+								JSON.stringify({ agentInstanceId, revision, position: items.at(-1)?.position ?? after }),
+							).toString("base64url")
+						: null,
+			};
+		});
+	}
+
+	async nativeHistoryPage(
+		agentInstanceId: string,
+		cursor?: string,
+		limit = runtimeLimits.httpPageRecords,
+		attemptId?: string,
+	): Promise<EngineNativeHistoryPage> {
+		return await this.#transaction(async sql => {
+			const started = performance.now();
+			const bindings = (await sql.unsafe(
+				"SELECT session_file FROM engine_runtime_bindings WHERE agent_instance_id=?",
+				[agentInstanceId],
+			)) as Array<{ session_file: string | null }>;
+			const attempts = attemptId
+				? ((await sql.unsafe(
+						"SELECT transcript_path,transcript_leaf_entry_id,state FROM engine_attempts WHERE attempt_id=? AND agent_instance_id=?",
+						[attemptId, agentInstanceId],
+					)) as Array<{
+						transcript_path: string | null;
+						transcript_leaf_entry_id: string | null;
+						state: EngineAttemptState;
+					}>)
+				: [];
+			if (attemptId && !attempts[0])
+				throw new EngineTargetError("stale_target", "History Attempt is not owned by this AgentInstance");
+			const sessionPath = attemptId ? attempts[0].transcript_path : bindings[0]?.session_file;
+			if (!sessionPath) throw new EngineTargetError("history_expired", "Native history is not retained");
+			const headers = (await sql.unsafe(
+				"SELECT entry_id FROM engine_history_entries WHERE session_path=? AND entry_type='session' ORDER BY ordinal LIMIT 1",
+				[sessionPath],
+			)) as Array<{ entry_id: string }>;
+			const heads = (await sql.unsafe(
+				"SELECT entry_id FROM engine_history_entries WHERE session_path=? AND entry_type<>'session' ORDER BY ordinal DESC LIMIT 1",
+				[sessionPath],
+			)) as Array<{ entry_id: string }>;
+			const sessionId = headers[0]?.entry_id;
+			if (!sessionId) throw new EngineTargetError("history_expired", "Native history index is unavailable");
+			const anchor =
+				attempts[0] && TERMINAL_ATTEMPT_STATES.has(attempts[0].state)
+					? attempts[0].transcript_leaf_entry_id
+					: (heads[0]?.entry_id ?? null);
+			const revision = anchor ?? "empty";
+			let first = anchor;
+			if (cursor) {
+				let parsed: { agentInstanceId: string; sessionId: string; revision: string; first: string };
+				try {
+					parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+				} catch {
+					throw new EngineTargetError("stale_target", "Invalid history cursor");
+				}
+				if (
+					parsed.agentInstanceId !== agentInstanceId ||
+					parsed.sessionId !== sessionId ||
+					parsed.revision !== revision
+				)
+					throw new EngineTargetError("stale_target", "History changed; reacquire its anchor");
+				first = parsed.first;
+			}
+			const rows = first
+				? ((await sql.unsafe(
+						`WITH RECURSIVE branch(entry_id,parent_entry_id,entry_bytes,depth) AS (SELECT entry_id,parent_entry_id,entry_bytes,0 FROM engine_history_entries WHERE session_path=? AND entry_id=? UNION ALL SELECT h.entry_id,h.parent_entry_id,h.entry_bytes,b.depth+1 FROM engine_history_entries h JOIN branch b ON h.entry_id=b.parent_entry_id WHERE h.session_path=? AND b.depth<?) SELECT * FROM branch ORDER BY depth`,
+						[sessionPath, first, sessionPath, Math.min(limit, runtimeLimits.httpPageRecords)],
+					)) as Array<{ entry_id: string; parent_entry_id: string | null; entry_bytes: number; depth: number }>)
+				: [];
+			const selected: typeof rows = [];
+			let readBytes = 0;
+			let entryRef: EngineNativeHistoryPage["entryRef"];
+			for (const row of rows.slice(0, limit)) {
+				const bytes = Number(row.entry_bytes);
+				if (bytes > runtimeLimits.httpPageBytes - 4096) {
+					if (selected.length) break;
+					entryRef = { entryId: row.entry_id, revision, bytes, method: "runtime.history.entry" };
+					selected.push(row);
+					break;
+				}
+				if (readBytes + bytes > runtimeLimits.httpPageBytes - 4096) break;
+				selected.push(row);
+				readBytes += bytes;
+			}
+			const entries =
+				selected.length && !entryRef
+					? ((await sql.unsafe(
+							`SELECT entry_json FROM engine_history_entries WHERE session_path=? AND entry_id IN (${selected.map(() => "?").join(",")}) ORDER BY ordinal`,
+							[sessionPath, ...selected.map(row => row.entry_id)],
+						)) as Array<{ entry_json: string }>)
+					: [];
+			const nativeEntries = entries.map(row => JSON.parse(row.entry_json) as Record<string, unknown>);
+			const calls: string[] = [];
+			for (const entry of nativeEntries) {
+				const message = entry.message as
+					| { role?: string; content?: Array<{ type?: string; id?: string }> }
+					| undefined;
+				if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
+				for (const part of message.content)
+					if (part.type === "toolCall" && part.id && calls.length < runtimeLimits.httpPageRecords)
+						calls.push(part.id);
+			}
+			const resultRows = calls.length
+				? ((await sql.unsafe(
+						`SELECT entry_id,entry_bytes,tool_call_id FROM engine_history_entries WHERE session_path=? AND tool_call_id IN (${calls.map(() => "?").join(",")}) ORDER BY ordinal LIMIT ?`,
+						[sessionPath, ...calls, runtimeLimits.httpPageRecords],
+					)) as Array<{ entry_id: string; entry_bytes: number; tool_call_id: string }>)
+				: [];
+			const resultIds: string[] = [];
+			const activityRefs: NonNullable<EngineNativeHistoryPage["activityRefs"]> = [];
+			for (const row of resultRows) {
+				if (selected.some(item => item.entry_id === row.entry_id)) continue;
+				const bytes = Number(row.entry_bytes);
+				if (readBytes + bytes > runtimeLimits.httpPageBytes - 8192) {
+					activityRefs.push({
+						toolCallId: row.tool_call_id,
+						entryId: row.entry_id,
+						revision,
+						bytes,
+						method: "runtime.history.entry",
+					});
+					continue;
+				}
+				readBytes += bytes;
+				resultIds.push(row.entry_id);
+			}
+			if (resultIds.length) {
+				const results = (await sql.unsafe(
+					`SELECT entry_json FROM engine_history_entries WHERE session_path=? AND entry_id IN (${resultIds.map(() => "?").join(",")}) ORDER BY ordinal`,
+					[sessionPath, ...resultIds],
+				)) as Array<{ entry_json: string }>;
+				nativeEntries.push(...results.map(row => JSON.parse(row.entry_json) as Record<string, unknown>));
+			}
+			const next = selected.at(-1)?.parent_entry_id ?? null;
+			return {
+				sessionId,
+				revision,
+				anchor,
+				entries: nativeEntries,
+				...(activityRefs.length ? { activityRefs } : {}),
+				nextCursor: next
+					? Buffer.from(JSON.stringify({ agentInstanceId, sessionId, revision, first: next })).toString(
+							"base64url",
+						)
+					: null,
+				...(entryRef ? { entryRef } : {}),
+				visitedRecords:
+					rows.length +
+					resultRows.length +
+					entries.length +
+					resultIds.length +
+					bindings.length +
+					attempts.length +
+					headers.length +
+					heads.length,
+				readBytes,
+				elapsedMs: Math.ceil(performance.now() - started),
+			};
+		});
+	}
+
+	async nativeHistoryEntry(
+		agentInstanceId: string,
+		entryId: string,
+		revision: string,
+		offset = 0,
+		limit = runtimeLimits.deliveryBatchBytes,
+		expectedSessionId?: string,
+	): Promise<Record<string, unknown>> {
+		return await this.#transaction(async sql => {
+			const bindings = (await sql.unsafe(
+				"SELECT session_file FROM engine_runtime_bindings WHERE agent_instance_id=?",
+				[agentInstanceId],
+			)) as Array<{ session_file: string | null }>;
+			const sessionPath = bindings[0]?.session_file;
+			if (!sessionPath) throw new EngineTargetError("history_expired", "Native history expired");
+			const sessions = (await sql.unsafe(
+				"SELECT entry_id FROM engine_history_entries WHERE session_path=? AND entry_type='session' ORDER BY ordinal LIMIT 1",
+				[sessionPath],
+			)) as Array<{ entry_id: string }>;
+			const sessionId = sessions[0]?.entry_id;
+			if (!sessionId || (expectedSessionId && expectedSessionId !== sessionId))
+				throw new EngineTargetError("stale_target", "History session changed");
+			const heads = (await sql.unsafe(
+				"SELECT entry_id FROM engine_history_entries WHERE session_path=? AND entry_type<>'session' ORDER BY ordinal DESC LIMIT 1",
+				[sessionPath],
+			)) as Array<{ entry_id: string }>;
+			if ((heads[0]?.entry_id ?? "empty") !== revision)
+				throw new EngineTargetError("stale_target", "History revision changed");
+			const rows = (await sql.unsafe(
+				"SELECT entry_bytes,substr(CAST(entry_json AS BLOB),?,?) AS chunk FROM engine_history_entries WHERE session_path=? AND entry_id=?",
+				[offset + 1, Math.min(limit, runtimeLimits.deliveryBatchBytes), sessionPath, entryId],
+			)) as Array<{ entry_bytes: number; chunk: Uint8Array }>;
+			if (!rows[0]) throw new EngineTargetError("history_expired", "Native history entry expired");
+			const bytes = Buffer.from(rows[0].chunk);
+			const total = Number(rows[0].entry_bytes);
+			return {
+				sessionId,
+				entryId,
+				revision,
+				offset,
+				totalBytes: total,
+				contentBase64: bytes.toString("base64"),
+				nextOffset: offset + bytes.length < total ? offset + bytes.length : null,
+			};
+		});
+	}
+
+	async waitAttemptResult(
+		agentInstanceId: string,
+		commandId: string,
+		attemptId?: string,
+		signal?: AbortSignal,
+	): Promise<{ attemptId?: string; state: EngineAttemptState; payload: Record<string, unknown> }> {
+		let pinnedAttempt = attemptId;
+		for (;;) {
+			signal?.throwIfAborted();
+			if (this.#closed) throw new EngineTargetError("interrupted", "Engine store closed during child wait");
+			const changed = this.changeSignal();
+			const result = await this.#transaction(async sql => {
+				const commands = (await sql.unsafe(
+					"SELECT agent_instance_id,attempt_id,receipt FROM engine_commands WHERE command_id=?",
+					[commandId],
+				)) as Array<{ agent_instance_id: string; attempt_id: string | null; receipt: string | null }>;
+				const command = commands[0];
+				if (command && command.agent_instance_id !== agentInstanceId)
+					throw new EngineTargetError("stale_target", "Child command belongs to another AgentInstance");
+				if (command?.attempt_id) {
+					if (pinnedAttempt && pinnedAttempt !== command.attempt_id)
+						throw new EngineTargetError("stale_target", "Child Attempt identity changed");
+					pinnedAttempt = command.attempt_id;
+				}
+				const receipt = command?.receipt ? (JSON.parse(command.receipt) as EngineCommandReceipt) : undefined;
+				const attempts = pinnedAttempt
+					? ((await sql.unsafe(
+							"SELECT state,result_payload FROM engine_attempts WHERE attempt_id=? AND agent_instance_id=?",
+							[pinnedAttempt, agentInstanceId],
+						)) as Array<{ state: EngineAttemptState; result_payload: string | null }>)
+					: [];
+				const attempt = attempts[0];
+				if (attempt && TERMINAL_ATTEMPT_STATES.has(attempt.state)) {
+					const events = attempt.result_payload
+						? []
+						: ((await sql.unsafe(
+								"SELECT payload FROM engine_event_outbox WHERE attempt_id=? AND kind IN ('completed','cancelled','failed','interrupted') ORDER BY event_id DESC LIMIT 1",
+								[pinnedAttempt],
+							)) as Array<{ payload: string | null }>);
+					if (!attempt.result_payload && !events[0]) return undefined;
+					return {
+						attemptId: pinnedAttempt,
+						state: attempt.state,
+						payload: JSON.parse(attempt.result_payload ?? events[0].payload ?? "{}") as Record<string, unknown>,
+					};
+				}
+				if (receipt?.outcome === "rejected")
+					return {
+						attemptId: pinnedAttempt,
+						state: "failed" as const,
+						payload: { error: receipt.detail?.message ?? receipt.detail?.code ?? "Child launch rejected" },
+					};
+				return undefined;
+			});
+			if (result) return result;
+			const cancelled = Promise.withResolvers<void>();
+			const abort = () => cancelled.resolve();
+			signal?.addEventListener("abort", abort, { once: true });
+			try {
+				await Promise.race([changed, cancelled.promise]);
+			} finally {
+				signal?.removeEventListener("abort", abort);
+			}
+		}
+	}
+
+	async #runtimeMeta(sql: SqlClient): Promise<{ epoch: string; generation: number; watermark: number }> {
+		const rows = (await sql.unsafe(
+			"SELECT key,value FROM engine_metadata WHERE key IN ('database_id','engine_generation')",
+		)) as Array<{ key: string; value: string }>;
+		const values = Object.fromEntries(rows.map(row => [row.key, row.value]));
+		const cursor = (await sql.unsafe(
+			"SELECT COALESCE(MAX(event_id),0) AS watermark FROM engine_event_outbox",
+		)) as Array<{ watermark: number }>;
+		return {
+			epoch: values.database_id,
+			generation: Number(values.engine_generation ?? 0),
+			watermark: Number(cursor[0].watermark),
+		};
+	}
+
+	async #assertInputRevision(sql: SqlClient, attemptId: string, inputId: string, revision: number): Promise<void> {
+		const rows = (await sql.unsafe(
+			`SELECT event_id FROM engine_event_outbox WHERE attempt_id=? AND kind IN ('input_requested','tool_approval_requested') AND COALESCE(json_extract(payload,'$.inputId'),json_extract(payload,'$.approvalId'))=? ORDER BY event_id DESC LIMIT 1`,
+			[attemptId, inputId],
+		)) as Array<{ event_id: number }>;
+		if (Number(rows[0]?.event_id) !== revision)
+			throw new EngineTargetError("stale_target", "Pending input revision changed");
+	}
+
+	async #effectiveHolds(sql: SqlClient, agentId: string): Promise<EngineBranchHold[]> {
+		const rows = (await sql.unsafe(
+			`WITH RECURSIVE ancestors(id) AS (SELECT ? UNION SELECT i.parent_agent_instance_id FROM engine_agent_identity i JOIN ancestors a ON i.agent_instance_id=a.id WHERE i.parent_agent_instance_id IS NOT NULL)
+		 SELECT h.*,i.agent_instance_ref FROM engine_branch_holds h JOIN ancestors a ON h.source_agent_instance_id=a.id LEFT JOIN engine_agent_identity i ON i.agent_instance_id=h.source_agent_instance_id ORDER BY h.created_at,h.source_agent_instance_id,h.kind`,
+			[agentId],
+		)) as Array<{
+			source_agent_instance_id: string;
+			agent_instance_ref: string;
+			command_id: string;
+			generation: number;
+			kind: EngineBranchHold["kind"];
+		}>;
+		return rows.map(row => ({
+			sourceAgentInstanceId: row.source_agent_instance_id,
+			sourceAgentInstanceRef: row.agent_instance_ref,
+			commandId: row.command_id,
+			generation: Number(row.generation),
+			kind: row.kind,
+		}));
+	}
 
 	private constructor(client: SqlClient, sessionStorage: SqlSessionStorage) {
 		this.#client = client;
@@ -685,12 +1578,26 @@ export class EngineStore {
 	}
 
 	async nextEngineGeneration(): Promise<number> {
-		const rows = (await this.#client.unsafe(
-			`INSERT INTO engine_metadata(key, value) VALUES ('engine_generation', '1')
+		return await this.#transaction(async sql => {
+			const rows = (await sql.unsafe(
+				`INSERT INTO engine_metadata(key, value) VALUES ('engine_generation', '1')
 			 ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1
 			 RETURNING value`,
-		)) as MetadataRow[];
-		return Number(rows[0]?.value ?? 1);
+			)) as MetadataRow[];
+			const generation = Number(rows[0]?.value ?? 1);
+			const identities = (await sql.unsafe(`WITH RECURSIVE tree(id,depth) AS (
+			SELECT agent_instance_id,0 FROM engine_agent_identity WHERE parent_agent_instance_id IS NULL
+			UNION ALL SELECT i.agent_instance_id,t.depth+1 FROM engine_agent_identity i JOIN tree t ON i.parent_agent_instance_id=t.id
+		) SELECT i.agent_instance_id FROM tree t JOIN engine_agent_identity i ON i.agent_instance_id=t.id
+		WHERE i.agent_instance_ref<>'' ORDER BY t.depth,i.agent_instance_id`)) as Array<{ agent_instance_id: string }>;
+			for (const identity of identities) {
+				await this.#identityEvent(sql, identity.agent_instance_id, `generation:${generation}`, "reconciled", {
+					reason: "engine_generation",
+					requiresExplicitContinue: true,
+				});
+			}
+			return generation;
+		});
 	}
 
 	async isCurrentEngineGeneration(engineGeneration: number): Promise<boolean> {
@@ -712,6 +1619,8 @@ export class EngineStore {
 	async enqueueInboxItem(
 		target: EngineInboxTarget,
 		source: EngineInboxSource,
+		expectedIntentRevision?: number,
+		commandId = source.sourceEventId,
 	): Promise<{ item: EngineInboxItem; created: boolean }> {
 		if (!source.sourceEventId.trim() || !source.body.trim()) {
 			throw new EngineInboxConflictError("Inbox sourceEventId and body must be non-empty");
@@ -752,6 +1661,8 @@ export class EngineStore {
 				 WHERE session_id=? AND disposition='pending'`,
 				[target.sessionId],
 			)) as Array<{ position: number }>;
+			await this.#assertIntent(sql, target.agentInstanceId, expectedIntentRevision);
+			await this.#assertPendingBudget(sql, target.agentInstanceId, Buffer.byteLength(source.body), false, commandId);
 			const now = Date.now();
 			await sql.unsafe(
 				`INSERT INTO engine_inbox_items(
@@ -847,11 +1758,20 @@ export class EngineStore {
 		mutationId: string,
 		expectedOrder: readonly string[],
 		desiredOrder: readonly string[],
+		expectedQueueRevision?: number,
 	): Promise<{ items: EngineInboxItem[]; event?: EngineEvent }> {
 		if (!mutationId.trim() || new Set(desiredOrder).size !== desiredOrder.length) {
 			throw new EngineInboxConflictError("Inbox reorder identity and queue IDs must be unique");
 		}
 		return await this.#transaction(async sql => {
+			if (expectedQueueRevision !== undefined) {
+				const revisions = (await sql.unsafe(
+					"SELECT queue_revision FROM engine_agent_identity WHERE agent_instance_id=?",
+					[target.agentInstanceId],
+				)) as Array<{ queue_revision: number }>;
+				if (Number(revisions[0]?.queue_revision ?? 0) !== expectedQueueRevision)
+					throw new EngineInboxConflictError("Queue revision changed");
+			}
 			const rows = (await sql.unsafe(
 				`${this.#inboxSelect()} WHERE i.session_id=? AND i.disposition='pending' ORDER BY i.position, i.queue_id`,
 				[target.sessionId],
@@ -968,6 +1888,18 @@ export class EngineStore {
 					return { status: "replay", receipt: JSON.parse(existing.receipt) as EngineCommandReceipt };
 				}
 				if (Number(existing.processor_generation) === processorGeneration) return { status: "in_progress" };
+				if (existing.processor_generation !== null || command.engineGeneration < processorGeneration) {
+					const receipt: EngineCommandReceipt = {
+						outcome: "rejected",
+						detail: {
+							code: "interrupted",
+							message: "Command admission was interrupted; explicit Continue is required",
+							requiresExplicitContinue: true,
+						},
+					};
+					await this.#settleAdmittedCommand(sql, command.commandId, receipt, command.canonicalHash, true);
+					return { status: "replay", receipt };
+				}
 				await sql.unsafe(
 					`UPDATE engine_commands SET processor_generation=?, updated_at=?
 					 WHERE command_id=? AND state='received'`,
@@ -977,13 +1909,21 @@ export class EngineStore {
 			}
 
 			const now = Date.now();
+			const payloadBytes = Buffer.byteLength(command.serializedCommand ?? "");
+			await this.#assertPendingBudget(
+				sql,
+				command.agentInstanceId,
+				payloadBytes,
+				ENGINE_CONTROL_OPS.has(command.operation),
+			);
+			await this.#registerAgent(sql, command);
 			await sql.unsafe(
 				`INSERT INTO engine_commands(
 				 command_id, operation, device_id, engine_id, engine_generation, agent_instance_id,
 				 agent_instance_ref, parent_agent_instance_id, binding_id, binding_generation,
 				 execution_id, attempt_id, authority_generation, payload_hash, canonical_hash,
-				 state, processor_generation, received_at, updated_at
-				 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?)`,
+				 state, processor_generation, received_at, updated_at,principal_id,browser_payload_hash,payload_bytes,serialized_command
+				 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?,?,?,?,?)`,
 				[
 					command.commandId,
 					command.operation,
@@ -1003,8 +1943,37 @@ export class EngineStore {
 					processorGeneration,
 					now,
 					now,
+					command.principalId ?? "",
+					command.browserPayloadHash ?? null,
+					payloadBytes,
+					command.serializedCommand ?? null,
 				],
 			);
+			if (command.browserPayloadHash)
+				await this.#identityEvent(sql, command.agentInstanceId, command.commandId, "command_receipt", {
+					commandId: command.commandId,
+					browserPayloadHash: command.browserPayloadHash,
+					target: {
+						agentInstanceRef: command.agentInstanceRef,
+						agentInstanceId: command.agentInstanceId,
+						attemptId: command.attemptId,
+						executionId: command.executionId,
+					},
+					stage: "engine_accepted",
+					lookup: "pending",
+				});
+			if (command.engineGeneration < processorGeneration) {
+				const receipt: EngineCommandReceipt = {
+					outcome: "rejected",
+					detail: {
+						code: "interrupted",
+						message: "Command belongs to a previous Engine generation",
+						requiresExplicitContinue: true,
+					},
+				};
+				await this.#settleAdmittedCommand(sql, command.commandId, receipt, command.canonicalHash, true);
+				return { status: "replay", receipt };
+			}
 			return { status: "claimed" };
 		});
 	}
@@ -1027,7 +1996,7 @@ export class EngineStore {
 		target: Pick<
 			EngineCommandIdentity,
 			"agentInstanceId" | "executionId" | "attemptId" | "authorityGeneration" | "engineGeneration"
-		>,
+		> & { expectedIntentRevision?: number },
 		cancellationCommandId: string,
 	): Promise<EnginePendingStartCancellation> {
 		return await this.#transaction(async sql => {
@@ -1054,23 +2023,21 @@ export class EngineStore {
 				}
 			}
 
-			const intentRows = (await sql.unsafe(
-				`UPDATE engine_runtime_bindings
-				 SET manual_hold=1,
-				     intent_revision=CASE WHEN intent_command_id=? THEN intent_revision ELSE intent_revision+1 END,
-				     intent_command_id=?, updated_at=?
-				 WHERE agent_instance_id=? AND authority_generation=?
-				 RETURNING intent_revision`,
-				[
-					cancellationCommandId,
-					cancellationCommandId,
-					Date.now(),
-					target.agentInstanceId,
-					target.authorityGeneration,
-				],
-			)) as Array<{ intent_revision: number }>;
-			const intentRevision = intentRows[0] ? Number(intentRows[0].intent_revision) : undefined;
-			if (start.state === "settled") return { status: "already_cancelled", intentRevision };
+			if (start.state === "settled") {
+				const rows = (await sql.unsafe(
+					"SELECT intent_revision FROM engine_agent_identity WHERE agent_instance_id=?",
+					[target.agentInstanceId],
+				)) as Array<{ intent_revision: number }>;
+				return { status: "already_cancelled", intentRevision: Number(rows[0]?.intent_revision ?? 0) };
+			}
+			const held = await this.#branchIntent(
+				sql,
+				target.agentInstanceId,
+				cancellationCommandId,
+				"stop",
+				target.expectedIntentRevision,
+			);
+			const intentRevision = held.intentRevision;
 
 			const message = "Attempt cancelled before Engine session initialization";
 			await this.#settleAdmittedCommand(
@@ -1221,11 +2188,11 @@ export class EngineStore {
 	}
 
 	async putBinding(binding: EngineBindingSnapshot): Promise<void> {
-		await this.#putBinding(this.#client, binding);
+		await this.#transaction(sql => this.#putBinding(sql, binding));
 	}
 
 	async putAttempt(binding: EngineBindingSnapshot, state: EngineAttemptState, cause?: string): Promise<boolean> {
-		return await this.#putAttempt(this.#client, binding, state, cause);
+		return await this.#transaction(sql => this.#putAttempt(sql, binding, state, cause));
 	}
 
 	async commitAttemptTransition(
@@ -1234,6 +2201,15 @@ export class EngineStore {
 		events: readonly EngineTransitionEvent[],
 		options: {
 			cause?: string;
+			terminalResult?: Record<string, unknown>;
+			intentGuard?: { expectedRevision?: number; requireUnheld?: boolean; inputId?: string; inputRevision?: number };
+			startIntent?: {
+				expectedRevision?: number;
+				explicitContinue?: boolean;
+				allowInheritedHold?: boolean;
+				sourceAgentInstanceId?: string;
+				sourceRevision?: number;
+			};
 			settleCommandId?: string;
 			settleCommandReceipt?: EngineCommandReceipt;
 			expectedStates?: readonly EngineAttemptState[];
@@ -1248,6 +2224,21 @@ export class EngineStore {
 		} = {},
 	): Promise<EngineEvent[]> {
 		return await this.#transaction(async sql => {
+			if (options.intentGuard) {
+				await this.#assertIntent(
+					sql,
+					binding.agentInstanceId,
+					options.intentGuard.expectedRevision,
+					options.intentGuard.requireUnheld,
+				);
+				if (options.intentGuard.inputId && options.intentGuard.inputRevision !== undefined)
+					await this.#assertInputRevision(
+						sql,
+						binding.attemptId,
+						options.intentGuard.inputId,
+						options.intentGuard.inputRevision,
+					);
+			}
 			const rows = (await sql.unsafe("SELECT state, transcript_revision FROM engine_attempts WHERE attempt_id=?", [
 				binding.attemptId,
 			])) as Array<{ state: EngineAttemptState; transcript_revision: number }>;
@@ -1270,11 +2261,44 @@ export class EngineStore {
 			const transcriptCheckpoint = options.transcriptCheckpoint
 				? { ...options.transcriptCheckpoint, revision: Number(currentRow?.transcript_revision ?? 0) + 1 }
 				: undefined;
+			const committed: EngineEvent[] = [];
+			if (options.startIntent) {
+				const intent = options.startIntent;
+				await this.#assertIntent(sql, binding.agentInstanceId, intent.expectedRevision);
+				if (intent.sourceAgentInstanceId)
+					await this.#assertIntent(sql, intent.sourceAgentInstanceId, intent.sourceRevision);
+				if (intent.explicitContinue) {
+					if (intent.expectedRevision === undefined)
+						await this.#assertIntent(sql, binding.agentInstanceId, undefined, true);
+					else
+						committed.push(
+							...(
+								await this.#branchIntent(
+									sql,
+									binding.agentInstanceId,
+									binding.commandId,
+									"continue",
+									intent.expectedRevision,
+								)
+							).events,
+						);
+				} else if (!intent.allowInheritedHold)
+					await this.#assertIntent(sql, binding.agentInstanceId, intent.expectedRevision, true);
+			}
 			await this.#putBinding(sql, binding, options.conversationIdentityDigest);
 			if (!(await this.#putAttempt(sql, binding, state, options.cause, transcriptCheckpoint))) {
 				throw new EngineAttemptConflictError(binding.attemptId);
 			}
+			if (options.terminalResult)
+				await sql.unsafe("UPDATE engine_attempts SET result_payload=? WHERE attempt_id=?", [
+					JSON.stringify(options.terminalResult),
+					binding.attemptId,
+				]);
 			if (options.inboxSessionId) {
+				await sql.unsafe(
+					"UPDATE engine_inbox_items SET session_id=? WHERE session_id=? AND agent_instance_id=? AND disposition='pending'",
+					[options.inboxSessionId, `pending:${binding.agentInstanceId}`, binding.agentInstanceId],
+				);
 				if (options.previousInboxSessionId && options.previousInboxSessionId !== options.inboxSessionId) {
 					await sql.unsafe(
 						`UPDATE engine_inbox_items SET session_id=?, updated_at=?
@@ -1306,7 +2330,6 @@ export class EngineStore {
 					],
 				);
 			}
-			const committed: EngineEvent[] = [];
 			if (options.inboxMutation) {
 				if (!options.inboxSessionId) throw new Error("Inbox mutation requires its session identity");
 				const result = await this.#mutateInboxItem(
@@ -1420,6 +2443,7 @@ export class EngineStore {
 
 	async startToolEffect(target: EngineEventTarget, effect: EngineToolEffectInput): Promise<EngineEvent> {
 		return await this.#transaction(async sql => {
+			await this.#assertIntent(sql, target.agentInstanceId, undefined, true);
 			await this.#insertToolEffect(sql, target, effect, "started");
 			return await this.#appendTransitionEvent(sql, target, {
 				kind: "tool_started",
@@ -1430,6 +2454,7 @@ export class EngineStore {
 
 	async startModelEffect(target: EngineEventTarget, effect: EngineModelEffectInput): Promise<EngineEvent> {
 		return await this.#transaction(async sql => {
+			await this.#assertIntent(sql, target.agentInstanceId, undefined, true);
 			const now = Date.now();
 			await sql.unsafe(
 				`INSERT INTO engine_effects(
@@ -1463,6 +2488,7 @@ export class EngineStore {
 
 	async requestToolApproval(target: EngineEventTarget, effect: EngineToolEffectInput): Promise<EngineEvent> {
 		return await this.#transaction(async sql => {
+			await this.#assertIntent(sql, target.agentInstanceId, undefined, true);
 			await this.#insertToolEffect(sql, target, effect, "planned");
 			const now = Date.now();
 			await sql.unsafe(
@@ -1482,7 +2508,13 @@ export class EngineStore {
 		target: EngineEventTarget,
 		approvalId: string,
 		decision: "approve" | "deny" | "cancelled",
-		options: { reason?: string; causationCommandId?: string; settleCommandId?: string } = {},
+		options: {
+			reason?: string;
+			causationCommandId?: string;
+			settleCommandId?: string;
+			expectedIntentRevision?: number;
+			expectedInputRevision?: number;
+		} = {},
 	): Promise<EngineEvent[]> {
 		return await this.#transaction(async sql => {
 			const rows = (await sql.unsafe(
@@ -1507,6 +2539,17 @@ export class EngineStore {
 			if (row?.approval_state !== "pending" || row.state !== "planned") {
 				throw new EngineEffectConflictError(approvalId);
 			}
+			if (decision !== "cancelled") {
+				await this.#assertIntent(
+					sql,
+					target.agentInstanceId,
+					options.expectedIntentRevision,
+					decision === "approve",
+				);
+				if (options.expectedInputRevision !== undefined)
+					await this.#assertInputRevision(sql, target.attemptId, approvalId, options.expectedInputRevision);
+			}
+
 			const now = Date.now();
 			await sql.unsafe(
 				`UPDATE engine_approvals SET state='resolved', decision=?, reason=?, resolved_command_id=?,
@@ -1757,6 +2800,42 @@ export class EngineStore {
 
 	async interruptGeneration(engineGeneration: number): Promise<EngineEvent[]> {
 		return await this.#transaction(async sql => {
+			const recovery = (await sql.unsafe(
+				`SELECT i.agent_instance_id FROM engine_agent_identity i WHERE EXISTS(SELECT 1 FROM engine_runtime_bindings b WHERE b.agent_instance_id=i.agent_instance_id AND b.engine_generation<? AND b.state='running') OR EXISTS(SELECT 1 FROM engine_inbox_items q WHERE q.agent_instance_id=i.agent_instance_id AND q.disposition='pending') OR EXISTS(SELECT 1 FROM engine_commands c WHERE c.agent_instance_id=i.agent_instance_id AND c.engine_generation<? AND c.state='received')`,
+				[engineGeneration, engineGeneration],
+			)) as Array<{ agent_instance_id: string }>;
+			for (const row of recovery) {
+				await sql.unsafe(
+					"UPDATE engine_agent_identity SET intent_revision=intent_revision+1,updated_at=? WHERE agent_instance_id=?",
+					[Date.now(), row.agent_instance_id],
+				);
+				await sql.unsafe(
+					`INSERT INTO engine_branch_holds(source_agent_instance_id,kind,command_id,generation,created_at) SELECT agent_instance_id,'recovery',?,intent_revision,? FROM engine_agent_identity WHERE agent_instance_id=? ON CONFLICT(source_agent_instance_id,kind) DO UPDATE SET command_id=excluded.command_id,generation=excluded.generation,created_at=excluded.created_at`,
+					[`recovery:${engineGeneration}`, Date.now(), row.agent_instance_id],
+				);
+			}
+			const pending = (await sql.unsafe(
+				"SELECT command_id,canonical_hash FROM engine_commands WHERE engine_generation<? AND state='received'",
+				[engineGeneration],
+			)) as Array<{ command_id: string; canonical_hash: string }>;
+			for (const command of pending)
+				await this.#settleAdmittedCommand(
+					sql,
+					command.command_id,
+					{
+						outcome: "rejected",
+						detail: {
+							code: "interrupted",
+							message: "Engine restarted before command application",
+							requiresExplicitContinue: true,
+						},
+					},
+					command.canonical_hash,
+					true,
+				);
+			await sql.unsafe(
+				`UPDATE engine_runtime_bindings SET manual_hold=1,intent_revision=(SELECT intent_revision FROM engine_agent_identity i WHERE i.agent_instance_id=engine_runtime_bindings.agent_instance_id) WHERE agent_instance_id IN (SELECT source_agent_instance_id FROM engine_branch_holds WHERE kind='recovery')`,
+			);
 			const active = (await sql.unsafe(
 				`SELECT agent_instance_id, execution_id, attempt_id, command_id, binding_id, engine_generation, binding_generation,
 				 authority_generation, state, transcript_session_id, transcript_path, transcript_leaf_entry_id,
@@ -1806,6 +2885,13 @@ export class EngineStore {
 				[now, engineGeneration],
 			);
 			const events: EngineEvent[] = [];
+			for (const row of recovery)
+				events.push(
+					await this.#identityEvent(sql, row.agent_instance_id, `recovery:${engineGeneration}`, "holds_changed", {
+						action: "recovery",
+						requiresExplicitContinue: true,
+					}),
+				);
 			for (const effect of abandonedEffects) {
 				const target = {
 					commandId: effect.command_id,
@@ -1954,6 +3040,9 @@ export class EngineStore {
 	}
 
 	async close(): Promise<void> {
+		this.#closed = true;
+		this.#change.resolve();
+		this.#summaryChange.resolve();
 		await this.drain();
 		await this.#client.end();
 	}
@@ -1996,6 +3085,18 @@ export class EngineStore {
 			);
 		}
 		const revision = item.revision + 1;
+		if (desired.disposition === "pending")
+			await this.#assertPendingBudget(
+				sql,
+				target.agentInstanceId,
+				Buffer.byteLength(desired.deliveryPayload) +
+					Buffer.byteLength(desired.annotation ?? "") -
+					Buffer.byteLength(item.deliveryPayload) -
+					Buffer.byteLength(item.annotation ?? ""),
+				false,
+				causationCommandId,
+				0,
+			);
 		const now = Date.now();
 		await sql.unsafe(
 			`UPDATE engine_inbox_items SET delivery_payload=?, annotation=?, deliver_at=?, wake_intent=?, wake_delivered_at=NULL,
@@ -2079,7 +3180,7 @@ export class EngineStore {
 		}
 	}
 
-	#appendInboxEvent(
+	async #appendInboxEvent(
 		sql: SqlClient,
 		target: EngineInboxTarget,
 		causationCommandId: string,
@@ -2088,6 +3189,10 @@ export class EngineStore {
 		queueId = causationCommandId,
 		extraPayload: Record<string, unknown> = {},
 	): Promise<EngineEvent> {
+		await sql.unsafe(
+			"UPDATE engine_agent_identity SET queue_revision=queue_revision+1,updated_at=? WHERE agent_instance_id=?",
+			[Date.now(), target.agentInstanceId],
+		);
 		return this.#appendEvent(sql, {
 			agentInstanceId: target.agentInstanceId,
 			executionId: target.executionId,
@@ -2142,6 +3247,15 @@ export class EngineStore {
 		binding: EngineBindingSnapshot,
 		conversationIdentityDigest?: string,
 	): Promise<void> {
+		await this.#registerAgent(sql, {
+			agentInstanceId: binding.agentInstanceId,
+			authorityGeneration: binding.authorityGeneration,
+		});
+		await sql.unsafe(
+			"UPDATE engine_agent_identity SET intent_revision=MAX(intent_revision,?),updated_at=? WHERE agent_instance_id=?",
+			[binding.intentRevision ?? 0, Date.now(), binding.agentInstanceId],
+		);
+		const holds = await this.#effectiveHolds(sql, binding.agentInstanceId);
 		await sql.unsafe(
 			`INSERT INTO engine_runtime_bindings(
 			 binding_id, command_id, agent_instance_id, execution_id, attempt_id, engine_agent_id, session_file,
@@ -2157,7 +3271,7 @@ export class EngineStore {
 			 state=excluded.state,
 			 engine_generation=excluded.engine_generation, binding_generation=excluded.binding_generation,
 				 authority_generation=excluded.authority_generation,
-				 manual_hold=excluded.manual_hold, intent_revision=excluded.intent_revision,
+				 manual_hold=excluded.manual_hold, intent_revision=MAX(engine_runtime_bindings.intent_revision,excluded.intent_revision),
 				 intent_command_id=excluded.intent_command_id,
 				 updated_at=excluded.updated_at`,
 			[
@@ -2174,7 +3288,7 @@ export class EngineStore {
 				binding.engineGeneration,
 				binding.bindingGeneration,
 				binding.authorityGeneration,
-				binding.manualHold ? 1 : 0,
+				binding.manualHold || holds.length > 0 ? 1 : 0,
 				binding.intentRevision ?? 0,
 				binding.intentCommandId ?? null,
 				Date.now(),
@@ -2290,6 +3404,9 @@ export class EngineStore {
 				createdAt,
 			],
 		)) as Array<{ event_id: number }>;
+		if (await recordRuntimeProjection(sql, { ...event, eventId: Number(rows[0]?.event_id), seq, createdAt }))
+			this.#summaryRevision++;
+		this.#changeRevision++;
 		return { ...event, eventId: Number(rows[0]?.event_id), seq, createdAt };
 	}
 
@@ -2324,10 +3441,50 @@ export class EngineStore {
 			 WHERE command_id=? AND state='received'`,
 			[receipt.outcome, serialized, now, now, commandId],
 		);
+		const identities = (await sql.unsafe(
+			"SELECT agent_instance_id,agent_instance_ref,attempt_id,execution_id,browser_payload_hash FROM engine_commands WHERE command_id=?",
+			[commandId],
+		)) as Array<{
+			agent_instance_id: string;
+			agent_instance_ref: string;
+			attempt_id: string;
+			execution_id: string;
+			browser_payload_hash: string | null;
+		}>;
+		const identity = identities[0];
+		if (identity?.browser_payload_hash)
+			await this.#identityEvent(sql, identity.agent_instance_id, commandId, "command_receipt", {
+				commandId,
+				browserPayloadHash: identity.browser_payload_hash,
+				target: {
+					agentInstanceRef: identity.agent_instance_ref,
+					agentInstanceId: identity.agent_instance_id,
+					attemptId: identity.attempt_id,
+					executionId: identity.execution_id,
+				},
+				stage: receipt.outcome === "rejected" ? "rejected" : "applied",
+				lookup: "known",
+				receipt,
+			});
 	}
 
 	#transaction<T>(work: (sql: SqlClient) => Promise<T>): Promise<T> {
-		const run = this.#transactionTail.then(() => this.#client.begin("IMMEDIATE", work));
+		const run = this.#transactionTail.then(async () => {
+			const revision = this.#changeRevision;
+			const summaryRevision = this.#summaryRevision;
+			const result = await this.#client.begin("IMMEDIATE", work);
+			if (this.#changeRevision !== revision) {
+				const previous = this.#change;
+				this.#change = Promise.withResolvers<void>();
+				previous.resolve();
+			}
+			if (this.#summaryRevision !== summaryRevision) {
+				const previous = this.#summaryChange;
+				this.#summaryChange = Promise.withResolvers<void>();
+				previous.resolve();
+			}
+			return result;
+		});
 		this.#transactionTail = run.then(
 			() => {},
 			() => {},

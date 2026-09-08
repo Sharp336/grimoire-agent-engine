@@ -37,6 +37,12 @@ import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("EngineRuntime", () => {
 	const tempDirs: string[] = [];
+	const testRuntimes: EngineRuntime[] = [];
+	async function openRuntime(options: EngineRuntimeOptions) {
+		const runtime = await EngineRuntime.create(options);
+		testRuntimes.push(runtime);
+		return runtime;
+	}
 	let sharedDir: string;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
@@ -54,7 +60,8 @@ describe("EngineRuntime", () => {
 		removeSyncWithRetries(sharedDir);
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
+		for (const runtime of testRuntimes.splice(0)) await runtime.dispose();
 		for (const dir of tempDirs.splice(0)) removeSyncWithRetries(dir);
 	});
 
@@ -95,7 +102,7 @@ describe("EngineRuntime", () => {
 		if (options.resolveSessionProfile && !options.resolveSessionContinuation) {
 			options.resolveSessionContinuation = async launch => `test:${launch.profileDigest}`;
 		}
-		const runtime = await EngineRuntime.create(options);
+		const runtime = await openRuntime(options);
 		return { runtime, cwd, options };
 	}
 
@@ -239,7 +246,7 @@ describe("EngineRuntime", () => {
 					timeout: 1000,
 				},
 			};
-			runtime = await EngineRuntime.create(boundOptions);
+			runtime = await openRuntime(boundOptions);
 			const upgraded = await runtime.start(request("route-root", 4), launch);
 			await runtime.drain();
 			expect(upgraded.sessionFile).toBe(first.sessionFile);
@@ -279,7 +286,7 @@ describe("EngineRuntime", () => {
 			unavailable = false;
 			await runtime.dispose();
 			expect(live.owned.size).toBe(0);
-			runtime = await EngineRuntime.create(boundOptions);
+			runtime = await openRuntime(boundOptions);
 			const restarted = await runtime.start(request("route-root", 5), launch);
 			await runtime.drain();
 			expect(restarted.sessionFile).toBe(first.sessionFile);
@@ -292,7 +299,7 @@ describe("EngineRuntime", () => {
 			await runtime.dispose();
 			expect(live.owned.size).toBe(0);
 			owned.stop(true);
-			runtime = await EngineRuntime.create(boundOptions);
+			runtime = await openRuntime(boundOptions);
 			const modelCallsBeforeOffline = mock.calls.length;
 			await expect(runtime.start(request("mcp-offline", 1), launch)).rejects.toThrow(
 				"Hosted Core MCP binding failed",
@@ -338,7 +345,7 @@ describe("EngineRuntime", () => {
 			wakeIntent: true,
 		});
 		await runtime.dispose();
-		let resumed = await EngineRuntime.create(options);
+		let resumed = await openRuntime(options);
 		try {
 			let item = await resumed.store.getInboxItemByQueueId(queued.item.queueId);
 			for (let remaining = 100; !item?.wakeDeliveredAt && remaining > 0; remaining--) {
@@ -411,7 +418,7 @@ describe("EngineRuntime", () => {
 			await dispatch(command);
 			await resumed.drain();
 			await resumed.dispose();
-			resumed = await EngineRuntime.create(options);
+			resumed = await openRuntime(options);
 			await dispatch({ ...command, engineGeneration: resumed.engineGeneration });
 			await resumed.drain();
 			expect(mock.calls).toHaveLength(2);
@@ -895,7 +902,7 @@ describe("EngineRuntime", () => {
 		expect(pages.length).toBeGreaterThan(100);
 		await runtime.dispose();
 
-		runtime = await EngineRuntime.create(options);
+		runtime = await openRuntime(options);
 		const targetRef = "grimoire://tasks/project/restored/agents/agent-restore-target";
 		const target = {
 			agentInstanceId: engineAgentInstanceId(targetRef),
@@ -933,7 +940,7 @@ describe("EngineRuntime", () => {
 		).rejects.toMatchObject({ code: "stale_target" });
 		await runtime.dispose();
 
-		runtime = await EngineRuntime.create(options);
+		runtime = await openRuntime(options);
 		let nextOffset = firstChunk.byteLength;
 		while (nextOffset < checkpoint.byteLength) {
 			const chunk = checkpoint.subarray(nextOffset, Math.min(checkpoint.byteLength, nextOffset + 24_000));
@@ -973,7 +980,7 @@ describe("EngineRuntime", () => {
 			}),
 		).rejects.toMatchObject({ code: "stale_target" });
 		await runtime.dispose();
-		runtime = await EngineRuntime.create({
+		runtime = await openRuntime({
 			...options,
 			resolveSessionContinuation: async () => "restore-profile-failure",
 			resolveSessionProfile: async () => {
@@ -998,7 +1005,7 @@ describe("EngineRuntime", () => {
 		expect(restoredContexts).toHaveLength(0);
 		expect(await runtime.store.getBinding(target.agentInstanceId)).toBeUndefined();
 		await runtime.dispose();
-		runtime = await EngineRuntime.create(options);
+		runtime = await openRuntime(options);
 		await expect(
 			runtime.start(
 				{
@@ -1123,7 +1130,7 @@ describe("EngineRuntime", () => {
 		).rejects.toMatchObject({ code: "stale_target" });
 		await runtime.dispose();
 
-		const secondRestart = await EngineRuntime.create(options);
+		const secondRestart = await openRuntime(options);
 		const afterRestart = await secondRestart.sessionArchive("archive-native-agent", first.contentHash, 0, 24_000);
 		expect(Buffer.from(afterRestart.contentBase64, "base64")).toEqual(body);
 		await secondRestart.dispose();
@@ -1324,7 +1331,7 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 		if (fs.existsSync(retained.sessionFile)) fs.unlinkSync(retained.sessionFile);
 		expect(fs.existsSync(retained.sessionFile)).toBe(false);
-		runtime = await EngineRuntime.create(options);
+		runtime = await openRuntime(options);
 		const restartedStage = await stage(currentCheckpoint, 4);
 		await runtime.start(
 			{
@@ -3172,7 +3179,7 @@ describe("EngineRuntime", () => {
 		await runtimeRef.drain();
 		await runtimeRef.dispose();
 
-		const restarted = await EngineRuntime.create(created.options);
+		const restarted = await openRuntime(created.options);
 		runtimeRef = restarted;
 		await restarted.start(
 			{
@@ -3384,7 +3391,7 @@ describe("EngineRuntime", () => {
 		await runtime.drain();
 		await runtime.dispose();
 
-		const restarted = await EngineRuntime.create(options);
+		const restarted = await openRuntime(options);
 		const second = await restarted.start(
 			{
 				commandId: "command-continuity-b",
@@ -3531,7 +3538,7 @@ describe("EngineRuntime", () => {
 		});
 		await runtime.dispose();
 
-		const restarted = await EngineRuntime.create(options);
+		const restarted = await openRuntime(options);
 		const wakes: string[] = [];
 		expect((await restarted.listInbox(recipient))[0]).toMatchObject({ queueId: queued.queueId, revision: 2 });
 		expect(await restarted.readInbox(recipient, queued.queueId)).toMatchObject({ deliveryPayload: "wake later" });
@@ -3627,7 +3634,7 @@ describe("EngineRuntime", () => {
 		const priorGeneration = runtime.engineGeneration;
 		await runtime.dispose();
 
-		const restarted = await EngineRuntime.create(options);
+		const restarted = await openRuntime(options);
 		const wakes: EngineEvent[] = [];
 		restarted.subscribe(event => {
 			if (event.kind === "inbox_changed" && event.payload?.action === "wake_due") wakes.push(event);
@@ -3938,7 +3945,7 @@ describe("EngineRuntime", () => {
 		}
 
 		await runtime.dispose();
-		const restarted = await EngineRuntime.create(options);
+		const restarted = await openRuntime(options);
 		expect(await restarted.listInbox(prior, true)).toContainEqual(
 			expect.objectContaining({
 				queueId: queued.item.queueId,
@@ -4488,7 +4495,7 @@ describe("EngineRuntime", () => {
 				(await runtime.store.pendingEvents()).some(event => event.kind === "cancelled" || event.kind === "paused"),
 			).toBeFalse();
 			await runtime.dispose();
-			const restarted = await EngineRuntime.create(options);
+			const restarted = await openRuntime(options);
 			try {
 				expect(
 					await restarted.store.admitCommand(engineCommandIdentity(command), restarted.engineGeneration),
@@ -4950,7 +4957,7 @@ describe("EngineRuntime", () => {
 		await runtime.drain();
 		await runtime.dispose();
 
-		const restarted = await EngineRuntime.create(options);
+		const restarted = await openRuntime(options);
 		const wakes: EngineEvent[] = [];
 		restarted.subscribe(event => {
 			if (event.kind === "inbox_changed" && event.payload?.action === "wake_due") wakes.push(event);
@@ -5031,7 +5038,7 @@ describe("EngineRuntime", () => {
 		await runtime.drain();
 		await runtime.dispose();
 
-		const restarted = await EngineRuntime.create(options);
+		const restarted = await openRuntime(options);
 		const duplicate = await restarted.start(request, profile);
 		expect(duplicate.duplicate).toBeTrue();
 		expect(duplicate.state).toBe("released");
@@ -5551,7 +5558,7 @@ describe("EngineRuntime", () => {
 		expect((await preserved.runtime.store.getAttempt("attempt-child-local-completed-1"))?.state).toBe("completed");
 		expect((await preserved.runtime.store.getAttempt("attempt-child-local-cancelled-1"))?.state).toBe("cancelled");
 		await preserved.runtime.dispose();
-		const preservedRestart = await EngineRuntime.create(preserved.options);
+		const preservedRestart = await openRuntime(preserved.options);
 		expect(await preservedRestart.sweepExpiredChildHistory(Date.now() + 61 * 60_000)).toEqual({
 			expired: 0,
 			archived: 0,
@@ -5576,7 +5583,7 @@ describe("EngineRuntime", () => {
 			entries: [{ role: "user", text: "ordinary continuation" }],
 		});
 		await local.runtime.dispose();
-		const restarted = await EngineRuntime.create(local.options);
+		const restarted = await openRuntime(local.options);
 		expect(await restarted.sessionHistory("child-off")).toMatchObject({
 			entries: [{ role: "user", text: "ordinary continuation" }],
 		});
@@ -5617,7 +5624,7 @@ describe("EngineRuntime", () => {
 		await correlated.runtime.drain();
 		await correlated.runtime.dispose();
 
-		const correlatedRestart = await EngineRuntime.create(correlated.options);
+		const correlatedRestart = await openRuntime(correlated.options);
 		const correlatedHistory = await correlatedRestart.sessionHistory("history-correlated-agent");
 		expect(
 			correlatedHistory.entries.map(entry => [entry.text, entry.sourceCommandId, entry.clientMessageId]),

@@ -54,4 +54,6 @@ poetry.lock -text
 
 # Changelogs are append-mostly; auto-merge by unioning both sides.
 packages/*/CHANGELOG.md merge=union
-
+packages/coding-agent/src/engine/runtime-protocol-v1.json text eol=lf
+packages/coding-agent/src/engine/runtime-protocol.mjs text eol=lf
+packages/coding-agent/src/engine/runtime-protocol.d.mts text eol=lf

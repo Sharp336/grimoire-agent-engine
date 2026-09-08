@@ -91,6 +91,10 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 							...request,
 							deviceId: config.deviceId,
 							engineId: config.engineId,
+							waitLocal: (agentInstanceId, commandId, attemptId, signal) => {
+								if (!runtime) throw new Error("Engine runtime is unavailable");
+								return runtime.store.waitAttemptResult(agentInstanceId, commandId, attemptId, signal);
+							},
 							cancelLocal: agentInstanceId =>
 								runtime?.cancelAgentInstance(agentInstanceId, "Parent task aborted") ?? Promise.resolve(),
 						})

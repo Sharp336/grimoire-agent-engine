@@ -71,6 +71,7 @@ export interface EngineStartRequest {
 	/** Canonical hosted identity used for child AgentInstance creation. */
 	agentInstanceRef?: string;
 	parentAgentInstanceId?: string;
+	parentAgentInstanceRef?: string;
 	executionId: string;
 	attemptId: string;
 	authorityGeneration: number;
@@ -97,6 +98,8 @@ export interface EngineStartRequest {
 	mutationId?: string;
 	/** Required to clear a durable manual hold for an explicit user send. */
 	expectedIntentRevision?: number;
+	explicitContinue?: boolean;
+	principalId?: string;
 }
 
 export interface EngineRestoreCheckpointSource {
@@ -105,6 +108,7 @@ export interface EngineRestoreCheckpointSource {
 }
 
 export interface EngineHistoryEditSource {
+	expectedSourceIntentRevision?: number;
 	mode: "edit" | "branch";
 	source: EngineTarget;
 	sourceSessionId: string;
@@ -155,16 +159,25 @@ export interface EngineControlRequest extends EngineTarget {
 }
 
 export interface EngineToolApprovalDecision extends EngineTarget {
+	expectedIntentRevision?: number;
+	expectedInputRevision?: number;
 	commandId: string;
 	approvalId: string;
 	decision: "approve" | "deny";
 	reason?: string;
 }
 
+export interface EngineIndexedInputResult {
+	kind: "submit";
+	results: Array<{ id: string; selectedOptionIndexes: number[]; customInput?: string; note?: string }>;
+}
+
 export interface EngineResolveInputRequest extends EngineTarget {
+	expectedIntentRevision?: number;
+	expectedInputRevision?: number;
 	commandId: string;
 	inputId: string;
-	result: ExtensionAskDialogResult;
+	result: ExtensionAskDialogResult | EngineIndexedInputResult;
 }
 
 export interface EngineReconcileRequest {
@@ -289,6 +302,7 @@ export interface EngineRejectedCommand {
 }
 
 export interface EngineEvent {
+	agentInstanceRef?: string;
 	eventId: number;
 	seq: number;
 	causationCommandId: string;
@@ -300,6 +314,10 @@ export interface EngineEvent {
 	bindingGeneration: number;
 	authorityGeneration: number;
 	kind:
+		| "agent_registered"
+		| "holds_changed"
+		| "command_receipt"
+		| "cancel_requested"
 		| "accepted"
 		| "rejected"
 		| "running"
@@ -324,6 +342,7 @@ export interface EngineEvent {
 		| "retry_settled"
 		| "inbox_changed"
 		| "assistant_snapshot"
+		| "message_updated"
 		| "trace_reasoning"
 		| "trace_tool";
 	payload?: Record<string, unknown>;
@@ -335,6 +354,13 @@ export class EngineTargetError extends Error {
 		readonly code:
 			| "agent_not_found"
 			| "agent_busy"
+			| "queue_full"
+			| "payload_too_large"
+			| "retention_gap"
+			| "epoch_changed"
+			| "projection_changed"
+			| "restore_budget"
+			| "interrupted"
 			| "stale_target"
 			| "too_late"
 			| "invalid_request"
@@ -379,7 +405,9 @@ export function validateStartRequest(request: EngineStartRequest): void {
 				? request.mutationId !== undefined ||
 					request.expectedRevision !== undefined ||
 					(request.input !== undefined && !request.input.trim())
-				: !request.input?.trim() || request.mutationId !== undefined || request.expectedRevision !== undefined
+				: (!request.input?.trim() && !request.explicitContinue) ||
+					request.mutationId !== undefined ||
+					request.expectedRevision !== undefined
 	) {
 		throw new EngineTargetError("invalid_request", "start requires text or a complete queued-item identity");
 	}

@@ -1,0 +1,127 @@
+import * as path from "node:path";
+import { EngineControlQueryClient } from "../../src/engine/control-query";
+import type { EngineCommandEnvelope } from "../../src/engine/nats-adapter";
+import { runtimeRemainingWork, validateRuntimeValue } from "../../src/engine/runtime-protocol";
+
+const runDir = process.argv[2];
+if (!runDir) throw new Error("An explicitly owned, new TEMP run directory is required");
+const child = Bun.spawn(
+	[
+		process.execPath,
+		path.join(import.meta.dir, "runtime-v1-load.ts"),
+		"--run-dir",
+		path.resolve(runDir),
+		"--seconds",
+		"5",
+		"--roots",
+		"1",
+		"--rate",
+		"20",
+	],
+	{ stdout: "pipe", stderr: "inherit" },
+);
+try {
+	const reader = child.stdout.getReader();
+	const decoder = new TextDecoder();
+	let buffered = "";
+	let ready:
+		| { principalId: string; agents: Array<{ agentInstanceRef: string; attemptId: string; executionId: string }> }
+		| undefined;
+	while (!ready) {
+		const chunk = await reader.read();
+		if (chunk.done) throw new Error(`Fixture exited before ready (${await child.exited})`);
+		buffered += decoder.decode(chunk.value, { stream: true });
+		for (;;) {
+			const line = buffered.indexOf("\n");
+			if (line < 0) break;
+			const text = buffered.slice(0, line);
+			buffered = buffered.slice(line + 1);
+			if (!text.startsWith("{")) continue;
+			const value = JSON.parse(text) as { kind: string };
+			if (value.kind === "ready") ready = JSON.parse(text) as typeof ready;
+		}
+	}
+	const client = new EngineControlQueryClient(runDir);
+	const access = { principalId: ready.principalId };
+	const scope = { kind: "catalog" };
+	const snapshot = (await client.request("runtime.snapshot", { scope, ...access })) as {
+		epoch: string;
+		watermark: number;
+		agents: unknown[];
+	};
+	validateRuntimeValue("snapshot", snapshot);
+	if (snapshot.agents.length !== 3) throw new Error("The fixture did not enroll one root and two children");
+	const agent = ready.agents[0];
+	const target = (await client.request("runtime.target", { ...agent, ...access })) as Record<string, unknown>;
+	validateRuntimeValue("nativeTarget", target);
+	if (target.kind !== "bound") throw new Error("Fixture target is not bound");
+	const context = (await client.request("runtime.context", { ...agent, ...access })) as { cwd: string };
+	if (context.cwd !== path.join(path.resolve(runDir), "workspace"))
+		throw new Error("Context did not return the exact native cwd");
+	const detailScope = { kind: "agent", agentInstanceRef: agent.agentInstanceRef, kinds: ["assistant", "state"] };
+	const detail = (await client.request("runtime.snapshot", { scope: detailScope, ...access })) as {
+		epoch: string;
+		watermark: number;
+	};
+	validateRuntimeValue("snapshot", detail);
+	const events = (await client.request("runtime.events.wait", {
+		scope: detailScope,
+		...access,
+		epoch: detail.epoch,
+		afterCursor: detail.watermark,
+		timeoutMs: 1000,
+		limit: 100,
+		maxBytes: 61440,
+		remainingWork: runtimeRemainingWork(),
+	})) as { changes: unknown[] };
+	validateRuntimeValue("eventBatch", events);
+	if (!events.changes.length) throw new Error("The real owner stream produced no selected updates");
+	const command: EngineCommandEnvelope = {
+		schema: "grimoire.engine.command.v1",
+		commandId: "fixture-enqueue",
+		op: "enqueue",
+		deviceId: "runtime-load-device",
+		engineId: "runtime-load-engine",
+		engineGeneration: Number(target.currentEngineGeneration),
+		agentInstanceRef: agent.agentInstanceRef,
+		agentInstanceId: String(target.agentInstanceId),
+		attemptId: agent.attemptId,
+		executionId: agent.executionId,
+		runtimeBindingId: String(target.bindingId),
+		bindingGeneration: Number(target.bindingGeneration),
+		authorityGeneration: Number(target.authorityGeneration),
+		issuedAt: Date.now(),
+		principalId: access.principalId,
+		browserPayloadHash: `sha256:${"a".repeat(64)}`,
+		browserTarget: { agentInstanceRef: agent.agentInstanceRef },
+		payload: {
+			text: "queued during active fixture",
+			clientMessageId: "fixture-message",
+			expectedIntentRevision: Number(target.intentRevision),
+		},
+	};
+	await client.request("command", { command });
+	const summary = (await client.request("runtime.summary", {
+		agentInstanceRef: agent.agentInstanceRef,
+		...access,
+	})) as { summary: { attention: { queuePending: boolean }; target: { attemptId: string } } };
+	validateRuntimeValue("summaryRead", summary);
+	if (!summary.summary.attention.queuePending || summary.summary.target.attemptId !== agent.attemptId)
+		throw new Error("Busy enqueue did not preserve its Attempt");
+	while (!(await reader.read()).done) {}
+	reader.releaseLock();
+	const code = await child.exited;
+	if (code !== 0) throw new Error(`Fixture process exited ${code}`);
+	console.log(
+		JSON.stringify({
+			result: "PASS",
+			nativeIpc: true,
+			catalogAgents: snapshot.agents.length,
+			selectedChanges: events.changes.length,
+			busyEnqueue: true,
+			runDir: path.resolve(runDir),
+		}),
+	);
+} finally {
+	if (child.exitCode === null) child.kill();
+}

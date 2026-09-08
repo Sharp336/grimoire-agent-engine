@@ -15,6 +15,18 @@ import { dispatchEngineCommand, type EngineCommandEnvelope, engineCommandIdentit
 import { safeEngineErrorDetail } from "./public-error";
 import { engineAgentId } from "./route";
 import type { EngineRestoreHistoryTarget, EngineRuntime } from "./runtime";
+import { RuntimeQueryError } from "./runtime-projection";
+import {
+	ENGINE_CONTROL_OPS,
+	RUNTIME_PROTOCOL_HASH,
+	type RuntimeAccess,
+	type RuntimeEventsRequest,
+	type RuntimeScope,
+	type RuntimeWork,
+	runtimeLimits,
+	validateRuntimeValue,
+} from "./runtime-protocol";
+import type { RuntimePageRequest, RuntimeResourceRequest } from "./runtime-resources";
 import { EngineCommandConflictError, type EngineCommandReceipt } from "./store";
 
 export const ENGINE_CONTROL_QUERY_VERSION = "1.0";
@@ -23,6 +35,21 @@ export const ENGINE_CONTROL_QUERY_MAX_RESULT_CHARS = 48_000;
 
 export type EngineControlQueryMethod =
 	| "capabilities"
+	| "runtime.capabilities"
+	| "runtime.snapshot"
+	| "runtime.target"
+	| "runtime.summary"
+	| "runtime.input"
+	| "runtime.holds"
+	| "runtime.resource"
+	| "runtime.messages"
+	| "runtime.events.wait"
+	| "runtime.command.get"
+	| "runtime.context"
+	| "runtime.usage"
+	| "runtime.queue"
+	| "runtime.history"
+	| "runtime.history.entry"
 	| "snapshots.list"
 	| "snapshots.get"
 	| "events.list"
@@ -63,7 +90,7 @@ export type EngineControlQueryResponse =
 			version: "1.0";
 			requestId: string;
 			ok: false;
-			error: { code: string; message: string; retryable: boolean };
+			error: { code: string; message: string; retryable: boolean; work?: RuntimeWork };
 	  };
 
 export interface EnginePublicSnapshot {
@@ -108,7 +135,8 @@ export async function startEngineControlQueryServer(options: ServerOptions): Pro
 	const token = await ensureToken(options.runtimeDir);
 	const endpoint = engineControlQueryEndpoint(options.runtimeDir);
 	if (process.platform !== "win32") await fs.rm(endpoint, { force: true });
-	const server = net.createServer(socket => serveSocket(socket, token, options));
+	const admission = { ordinary: 0, control: 0 };
+	const server = net.createServer(socket => serveSocket(socket, token, options, admission));
 	await new Promise<void>((resolve, reject) => {
 		server.once("error", reject);
 		server.listen(endpoint, () => {
@@ -167,9 +195,15 @@ async function ensureToken(runtimeDir: string): Promise<string> {
 	}
 }
 
-function serveSocket(socket: net.Socket, token: string, options: ServerOptions): void {
+function serveSocket(
+	socket: net.Socket,
+	token: string,
+	options: ServerOptions,
+	admission: { ordinary: number; control: number },
+): void {
 	let buffered = Buffer.alloc(0);
-	let tail = Promise.resolve();
+	const cancellation = new AbortController();
+	socket.on("close", () => cancellation.abort());
 	socket.setTimeout(30_000, () => socket.destroy());
 	socket.on("data", chunk => {
 		buffered = Buffer.concat([buffered, Buffer.from(chunk)]);
@@ -183,16 +217,33 @@ function serveSocket(socket: net.Socket, token: string, options: ServerOptions):
 			if (newline < 0) break;
 			const frame = buffered.subarray(0, newline);
 			buffered = buffered.subarray(newline + 1);
-			tail = tail.then(async () => {
-				const response = await handleFrame(frame, token, options);
-				writeResponse(socket, response);
-			});
+			let control = false;
+			let method = "";
+			try {
+				const parsed = JSON.parse(frame.toString("utf8"));
+				method = typeof parsed.method === "string" ? parsed.method : "";
+				control = parsed.method === "command" && ENGINE_CONTROL_OPS.has(parsed.params?.command?.op);
+			} catch {}
+			const lane = control ? "control" : "ordinary";
+			if (admission[lane] >= (control ? runtimeLimits.controlRpc : runtimeLimits.pendingRpc)) {
+				writeResponse(socket, failure("", "queue_full", "Control + Query request budget is full", true));
+				continue;
+			}
+			admission[lane]++;
+			void handleFrame(frame, token, options, cancellation.signal)
+				.then(response => writeResponse(socket, response, runtimeResponseBytes(method)))
+				.catch(() => socket.destroy())
+				.finally(() => admission[lane]--);
 		}
 	});
-	tail.catch(() => socket.destroy());
 }
 
-async function handleFrame(frame: Buffer, token: string, options: ServerOptions): Promise<EngineControlQueryResponse> {
+async function handleFrame(
+	frame: Buffer,
+	token: string,
+	options: ServerOptions,
+	signal?: AbortSignal,
+): Promise<EngineControlQueryResponse> {
 	if (frame.byteLength === 0 || frame.byteLength > ENGINE_CONTROL_QUERY_MAX_FRAME_BYTES) {
 		return failure("", "frame_too_large", "Request frame is outside the accepted range", false);
 	}
@@ -202,9 +253,10 @@ async function handleFrame(frame: Buffer, token: string, options: ServerOptions)
 		const request = validateRequest(value);
 		requestId = request.requestId;
 		if (!sameSecret(request.token, token)) return failure(requestId, "unauthorized", "Invalid local token", false);
-		const result = await dispatchRequest(request, options);
+		const result = await dispatchRequest(request, options, signal);
 		return success(requestId, result);
 	} catch (error) {
+		if (error instanceof RuntimeQueryError) return failure(requestId, error.code, error.message, false, error.work);
 		if (error instanceof EngineTargetError) return failure(requestId, error.code, error.message, false);
 		if (error instanceof EngineCommandConflictError)
 			return failure(requestId, "command_id_conflict", error.message, false);
@@ -212,9 +264,117 @@ async function handleFrame(frame: Buffer, token: string, options: ServerOptions)
 	}
 }
 
-async function dispatchRequest(request: EngineControlQueryRequest, options: ServerOptions): Promise<unknown> {
+async function dispatchRequest(
+	request: EngineControlQueryRequest,
+	options: ServerOptions,
+	signal?: AbortSignal,
+): Promise<unknown> {
 	const params = request.params ?? {};
 	switch (request.method) {
+		case "runtime.capabilities":
+			return runtimeCapabilities();
+		case "runtime.snapshot":
+			return await options.runtime.store.runtimeSnapshot(
+				runtimeScope(params),
+				runtimeAccess(params),
+				optionalString(params.cursor),
+				optionalLimit(params.limit),
+				params.maxBytes === undefined ? runtimeLimits.httpPageBytes : optionalNonNegativeInteger(params.maxBytes),
+			);
+		case "runtime.events.wait": {
+			validateRuntimeValue("nativeEventsRequest", params);
+			return await options.runtime.store.waitRuntimeEvents(params as unknown as RuntimeEventsRequest, signal);
+		}
+		case "runtime.target":
+			return await runtimeAgent(options.runtime, params);
+		case "runtime.summary":
+			return await options.runtime.store.runtimeSummary({
+				agentInstanceRef: requiredString(params, "agentInstanceRef"),
+				...runtimeAccess(params),
+			});
+		case "runtime.input":
+			return await options.runtime.store.runtimeInput(params as unknown as RuntimePageRequest);
+		case "runtime.holds":
+			return await options.runtime.store.runtimeHolds(params as unknown as RuntimePageRequest);
+		case "runtime.resource":
+			return await options.runtime.store.runtimeResource(params as unknown as RuntimeResourceRequest);
+		case "runtime.messages":
+			return await options.runtime.store.runtimeMessages(params as unknown as RuntimePageRequest);
+		case "runtime.command.get":
+			return await options.runtime.store.runtimeCommand(
+				requiredString(params, "commandId"),
+				runtimeAccess(params),
+				optionalString(params.browserPayloadHash),
+			);
+		case "runtime.context":
+			return await options.runtime.sessionContext(await runtimeTarget(options.runtime, params));
+		case "runtime.usage":
+			return await options.runtime.sessionUsage(await runtimeTarget(options.runtime, params));
+		case "runtime.queue": {
+			const agent = await runtimeAgent(options.runtime, params);
+			return await options.runtime.store.runtimeQueue(
+				requiredString(agent, "agentInstanceId"),
+				optionalString(params.cursor),
+				optionalLimit(params.limit),
+			);
+		}
+		case "runtime.history": {
+			const agent = await runtimeAgent(options.runtime, params);
+			const page = await options.runtime.sessionHistoryPage(
+				requiredString(agent, "agentInstanceId"),
+				optionalString(params.cursor),
+				optionalLimit(params.limit),
+				optionalString(params.attemptId),
+			);
+			const agentInstanceRef = requiredString(params, "agentInstanceRef");
+			const result = {
+				version: "1.0",
+				agentInstanceRef,
+				sessionId: page.sessionId,
+				revision: page.revision,
+				anchor: page.anchor,
+				entries: page.entries,
+				nextCursor: page.nextCursor,
+				...(page.entryRef
+					? {
+							entryRef: {
+								kind: "history_entry",
+								agentInstanceRef,
+								sessionId: page.sessionId,
+								entryId: page.entryRef.entryId,
+								revision: page.revision,
+								mediaType: "application/json",
+								bytes: page.entryRef.bytes,
+							},
+						}
+					: {}),
+				work: {
+					bytes: 0,
+					changes: page.entries.length,
+					scannedRows: page.visitedRecords,
+					materializedBytes: page.readBytes,
+					elapsedMs: page.elapsedMs,
+				},
+			};
+			for (;;) {
+				const bytes = Buffer.byteLength(JSON.stringify(result));
+				if (bytes === result.work.bytes) break;
+				result.work.bytes = bytes;
+			}
+			validateRuntimeValue("historyPage", result);
+			return result;
+		}
+		case "runtime.history.entry": {
+			const agent = await runtimeAgent(options.runtime, params);
+			return await options.runtime.store.nativeHistoryEntry(
+				requiredString(agent, "agentInstanceId"),
+				requiredString(params, "entryId"),
+				requiredString(params, "revision"),
+				optionalNonNegativeInteger(params.offset),
+				params.limit === undefined ? runtimeLimits.deliveryBatchBytes : optionalNonNegativeInteger(params.limit),
+				requiredString(params, "sessionId"),
+			);
+		}
 		case "capabilities":
 			return capabilities(options);
 		case "snapshots.list":
@@ -353,6 +513,7 @@ async function runCommand(options: ServerOptions, command: EngineCommandEnvelope
 
 async function capabilities(options: ServerOptions): Promise<Record<string, unknown>> {
 	return {
+		runtimeProtocol: runtimeCapabilities(),
 		contractVersion: ENGINE_CONTROL_QUERY_VERSION,
 		compatibleVersions: [ENGINE_CONTROL_QUERY_VERSION],
 		storeEpoch: await options.runtime.store.getStoreEpoch(),
@@ -401,6 +562,51 @@ async function capabilities(options: ServerOptions): Promise<Record<string, unkn
 		},
 		rawDiagnostics: false,
 	};
+}
+
+function runtimeCapabilities(): Record<string, unknown> {
+	return { version: "1.0", contractHash: RUNTIME_PROTOCOL_HASH, limits: runtimeLimits };
+}
+
+function runtimeScope(params: Record<string, unknown>): RuntimeScope {
+	validateRuntimeValue("scope", params.scope);
+	return params.scope as RuntimeScope;
+}
+
+function runtimeAccess(params: Record<string, unknown>): RuntimeAccess {
+	const principalId = requiredString(params, "principalId");
+	const authorizedAgentInstanceRefs =
+		params.authorizedAgentInstanceRefs === undefined
+			? undefined
+			: requiredStringArray(params, "authorizedAgentInstanceRefs");
+	for (const ref of authorizedAgentInstanceRefs ?? []) validateRuntimeValue("agi", ref);
+	return { principalId, ...(authorizedAgentInstanceRefs ? { authorizedAgentInstanceRefs } : {}) };
+}
+
+async function runtimeAgent(
+	runtime: EngineRuntime,
+	params: Record<string, unknown>,
+	requireAttempt = false,
+): Promise<Record<string, unknown>> {
+	const agentInstanceRef = requiredString(params, "agentInstanceRef");
+	validateRuntimeValue("agi", agentInstanceRef);
+	const attemptId = requireAttempt ? requiredString(params, "attemptId") : optionalString(params.attemptId);
+	const target = await runtime.store.runtimeTarget({
+		agentInstanceRef,
+		...(attemptId ? { attemptId } : {}),
+		...(params.executionId ? { executionId: requiredString(params, "executionId") } : {}),
+		...(params.rootAgentInstanceRef ? { rootAgentInstanceRef: requiredString(params, "rootAgentInstanceRef") } : {}),
+		...runtimeAccess(params),
+	});
+	validateRuntimeValue("nativeTarget", target);
+	return target;
+}
+
+async function runtimeTarget(runtime: EngineRuntime, params: Record<string, unknown>): Promise<EngineTarget> {
+	const target = await runtimeAgent(runtime, params, true);
+	if (target.kind !== "bound")
+		throw new EngineTargetError("stale_target", "Native read requires a bound exact Attempt");
+	return requiredTarget({ ...target, engineGeneration: target.targetEngineGeneration });
 }
 
 async function listSnapshots(runtime: EngineRuntime, cursor: string | undefined, limit: number) {
@@ -743,6 +949,21 @@ function validateRequest(value: unknown): EngineControlQueryRequest {
 	if (
 		![
 			"capabilities",
+			"runtime.capabilities",
+			"runtime.snapshot",
+			"runtime.target",
+			"runtime.summary",
+			"runtime.input",
+			"runtime.holds",
+			"runtime.resource",
+			"runtime.messages",
+			"runtime.events.wait",
+			"runtime.command.get",
+			"runtime.context",
+			"runtime.usage",
+			"runtime.queue",
+			"runtime.history",
+			"runtime.history.entry",
 			"snapshots.list",
 			"snapshots.get",
 			"events.list",
@@ -786,6 +1007,12 @@ function validateCommand(value: unknown): EngineCommandEnvelope {
 	if (
 		![
 			"start",
+			"enqueue",
+			"queue_edit",
+			"queue_remove",
+			"queue_reorder",
+			"queue_annotate",
+			"queue_defer",
 			"steer",
 			"pause",
 			"resume",
@@ -931,21 +1158,48 @@ function success(requestId: string, result: unknown): EngineControlQueryResponse
 	};
 }
 
-function failure(requestId: string, code: string, message: string, retryable: boolean): EngineControlQueryResponse {
+function failure(
+	requestId: string,
+	code: string,
+	message: string,
+	retryable: boolean,
+	work?: RuntimeWork,
+): EngineControlQueryResponse {
 	return {
 		schema: "grimoire.engine.control_query.response.v1",
 		version: ENGINE_CONTROL_QUERY_VERSION,
 		requestId,
 		ok: false,
-		error: { code, message: message.slice(0, 2_048), retryable },
+		error: { code, message: message.slice(0, 2_048), retryable, ...(work ? { work } : {}) },
 	};
 }
 
-function writeResponse(socket: net.Socket, response: EngineControlQueryResponse): void {
+function runtimeResponseBytes(method: string): number {
+	return [
+		"runtime.snapshot",
+		"runtime.history",
+		"runtime.history.entry",
+		"runtime.queue",
+		"runtime.context",
+		"runtime.usage",
+		"runtime.input",
+		"runtime.holds",
+	].includes(method)
+		? runtimeLimits.httpPageBytes + 4096
+		: ENGINE_CONTROL_QUERY_MAX_FRAME_BYTES;
+}
+
+function writeResponse(
+	socket: net.Socket,
+	response: EngineControlQueryResponse,
+	maxBytes = ENGINE_CONTROL_QUERY_MAX_FRAME_BYTES,
+): void {
 	if (socket.destroyed) return;
 	let serialized = JSON.stringify(response);
-	if (Buffer.byteLength(serialized, "utf8") > ENGINE_CONTROL_QUERY_MAX_FRAME_BYTES) {
-		serialized = JSON.stringify(failure(response.requestId, "response_too_large", "Response exceeds 256 KiB", false));
+	if (Buffer.byteLength(serialized, "utf8") > maxBytes) {
+		serialized = JSON.stringify(
+			failure(response.requestId, "response_too_large", `Response exceeds ${maxBytes} bytes`, false),
+		);
 	}
 	socket.write(`${serialized}\n`);
 }
@@ -963,8 +1217,8 @@ function requestOnce(endpoint: string, request: EngineControlQueryRequest, timeo
 		socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
 		socket.on("data", chunk => {
 			buffered = Buffer.concat([buffered, Buffer.from(chunk)]);
-			if (buffered.byteLength > ENGINE_CONTROL_QUERY_MAX_FRAME_BYTES)
-				return fail(new Error("Response exceeds 256 KiB"));
+			if (buffered.byteLength > runtimeResponseBytes(request.method))
+				return fail(new Error("Response exceeds method byte budget"));
 			const newline = buffered.indexOf(10);
 			if (newline < 0) return;
 			try {

@@ -17,13 +17,19 @@ import {
 } from "@nats-io/jetstream";
 import { connect, type NatsConnection, type NodeConnectionOptions, nanos } from "@nats-io/transport-node";
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
-import type { ExtensionAskDialogResult } from "../extensibility/extensions/types";
 import type { IrcDeliveryReceipt, IrcMessage } from "../irc/bus";
-import type { EngineControlInitiator, EngineEvent, EngineHistoryEditSource, EngineLaunchProfile } from "./contracts";
+import type {
+	EngineControlInitiator,
+	EngineEvent,
+	EngineHistoryEditSource,
+	EngineLaunchProfile,
+	EngineResolveInputRequest,
+} from "./contracts";
 import { EngineTargetError, validateCommandContext } from "./contracts";
 import { safeEngineErrorDetail } from "./public-error";
 import { engineAgentInstanceId, engineRouteToken } from "./route";
 import type { EngineRuntime } from "./runtime";
+import { ENGINE_CONTROL_OPS, runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
 import type { EngineCommandIdentity } from "./store";
 import { EngineCommandConflictError } from "./store";
 
@@ -42,9 +48,18 @@ export type EngineCommandOp =
 	| "release"
 	| "reconcile"
 	| "resolve_tool_approval"
-	| "resolve_input";
+	| "resolve_input"
+	| "enqueue"
+	| "queue_edit"
+	| "queue_remove"
+	| "queue_reorder"
+	| "queue_annotate"
+	| "queue_defer";
 
 export interface EngineCommandEnvelope {
+	principalId?: string;
+	browserPayloadHash?: string;
+	browserTarget?: { agentInstanceRef: string; attemptId?: string; executionId?: string };
 	schema: "grimoire.engine.command.v1";
 	commandId: string;
 	op: EngineCommandOp;
@@ -54,6 +69,7 @@ export interface EngineCommandEnvelope {
 	agentInstanceId: string;
 	agentInstanceRef?: string;
 	parentAgentInstanceId?: string;
+	parentAgentInstanceRef?: string;
 	runtimeBindingId?: string;
 	bindingGeneration?: number;
 	executionId?: string;
@@ -129,7 +145,7 @@ export class NatsEngineAdapter {
 	readonly #consumers = new Set<ConsumerMessages>();
 	readonly #loops = new Set<Promise<void>>();
 	readonly #mailboxes = new Map<string, Promise<void>>();
-	#commandMessages: ConsumerMessages | undefined;
+	#commandMessages = new Set<ConsumerMessages>();
 	#unsubscribeRuntime: () => void = () => {};
 	#unsubscribeRegistry: () => void = () => {};
 	#unsubscribeOutbound: () => void = () => {};
@@ -235,14 +251,36 @@ export class NatsEngineAdapter {
 			throw new StaleEngineLeaseError("Engine generation lease is no longer current");
 		}
 		await this.#ensureStreams();
-		const durable = `engine_${this.engineRoute}`;
-		const filter = `grimoire.engine.v1.d.${this.deviceRoute}.e.${this.engineRoute}.a.*.cmd.*`;
-		await this.#ensureConsumer(ENGINE_COMMAND_STREAM, durable, filter, 128);
-		const consumer = await this.#jetstream.consumers.get(ENGINE_COMMAND_STREAM, durable);
-		const messages = await consumer.consume({ max_messages: 128 });
-		this.#commandMessages = messages;
-		this.#consumers.add(messages);
-		this.#trackLoop(this.#consumeCommands(messages));
+		const prefix = `grimoire.engine.v1.d.${this.deviceRoute}.e.${this.engineRoute}.a.*.cmd.`;
+		const operations: EngineCommandOp[] = [
+			"start",
+			"steer",
+			"pause",
+			"resume",
+			"cancel",
+			"compact",
+			"release",
+			"reconcile",
+			"resolve_input",
+			"resolve_tool_approval",
+			"enqueue",
+			"queue_edit",
+			"queue_remove",
+			"queue_reorder",
+			"queue_annotate",
+			"queue_defer",
+		];
+		for (const control of [false, true]) {
+			const durable = `engine_${this.engineRoute}${control ? "_control" : ""}`;
+			const filters = operations.filter(op => ENGINE_CONTROL_OPS.has(op) === control).map(op => prefix + op);
+			const capacity = control ? runtimeLimits.controlPendingRecords : runtimeLimits.agentPendingRecords;
+			await this.#ensureConsumer(ENGINE_COMMAND_STREAM, durable, filters, capacity);
+			const consumer = await this.#jetstream.consumers.get(ENGINE_COMMAND_STREAM, durable);
+			const messages = await consumer.consume({ max_messages: capacity });
+			this.#commandMessages.add(messages);
+			this.#consumers.add(messages);
+			this.#trackLoop(this.#consumeCommands(messages));
+		}
 		this.#unsubscribeRuntime = this.runtime.subscribe(() => {
 			void this.flushEvents().catch(error => this.#report(error));
 		});
@@ -344,16 +382,36 @@ export class NatsEngineAdapter {
 		});
 	}
 
-	async #ensureConsumer(stream: string, durable: string, filter: string, maxAckPending: number): Promise<void> {
+	async #ensureConsumer(
+		stream: string,
+		durable: string,
+		filter: string | string[],
+		maxAckPending: number,
+	): Promise<void> {
 		try {
 			const current = await this.#manager.consumers.info(stream, durable);
 			if (
-				current.config.filter_subject !== filter ||
+				JSON.stringify(current.config.filter_subjects ?? current.config.filter_subject) !==
+					JSON.stringify(filter) ||
 				current.config.ack_policy !== AckPolicy.Explicit ||
 				current.config.deliver_policy !== DeliverPolicy.All ||
 				current.config.replay_policy !== ReplayPolicy.Instant ||
 				current.config.max_ack_pending !== maxAckPending
 			) {
+				if (
+					stream === ENGINE_COMMAND_STREAM &&
+					Array.isArray(filter) &&
+					current.config.filter_subject ===
+						`grimoire.engine.v1.d.${this.deviceRoute}.e.${this.engineRoute}.a.*.cmd.*`
+				) {
+					await this.#manager.consumers.update(stream, durable, {
+						...current.config,
+						filter_subject: undefined,
+						filter_subjects: filter,
+						max_ack_pending: maxAckPending,
+					});
+					return;
+				}
 				throw new Error(`NATS consumer ${durable} does not match the Engine contract`);
 			}
 			return;
@@ -365,7 +423,7 @@ export class NatsEngineAdapter {
 			ack_policy: AckPolicy.Explicit,
 			deliver_policy: DeliverPolicy.All,
 			replay_policy: ReplayPolicy.Instant,
-			filter_subject: filter,
+			...(Array.isArray(filter) ? { filter_subjects: filter } : { filter_subject: filter }),
 			max_ack_pending: maxAckPending,
 		});
 	}
@@ -398,6 +456,7 @@ export class NatsEngineAdapter {
 			await this.#options.authorizeCommand(command);
 			identity = commandIdentity(command);
 			const admission = await this.runtime.store.admitCommand(identity, this.runtime.engineGeneration);
+			await this.flushEvents();
 			if (admission.status === "replay") {
 				message.ack();
 				return;
@@ -418,7 +477,7 @@ export class NatsEngineAdapter {
 		} catch (error) {
 			if (error instanceof StaleEngineLeaseError) {
 				message.nak(250);
-				void this.#commandMessages?.close();
+				for (const consumer of this.#commandMessages) void consumer.close();
 				this.#report(error);
 				return;
 			}
@@ -467,7 +526,7 @@ export class NatsEngineAdapter {
 				return;
 			}
 			if (error instanceof EngineTargetError) {
-				if (error.code === "agent_busy") {
+				if (error.code === "agent_busy" && !command?.browserPayloadHash) {
 					if (claimed && identity) {
 						await this.runtime.store
 							.releaseCommand(identity.commandId, identity.canonicalHash, this.runtime.engineGeneration)
@@ -694,6 +753,29 @@ export async function dispatchEngineCommand(options: {
 	provisionMailbox?: (agentInstanceId: string) => void | Promise<void>;
 }): Promise<unknown> {
 	const { runtime, command } = options;
+	if (command.browserPayloadHash) {
+		validateRuntimeValue("agi", command.agentInstanceRef);
+		validateRuntimeValue("id", command.commandId);
+		if (!command.principalId?.trim() || !/^sha256:[0-9a-f]{64}$/.test(command.browserPayloadHash))
+			throw new EngineTargetError("invalid_request", "Browser admission requires a principal and canonical hash");
+		if (
+			[
+				"start",
+				"steer",
+				"pause",
+				"resume",
+				"cancel",
+				"compact",
+				"release",
+				"resolve_input",
+				"resolve_tool_approval",
+				"enqueue",
+			].includes(command.op)
+		)
+			requiredRecordInteger(command.payload, "expectedIntentRevision");
+		if (["resolve_input", "resolve_tool_approval"].includes(command.op))
+			requiredRecordInteger(command.payload, "expectedInputRevision");
+	}
 	const context = command.payload.context;
 	validateCommandContext(context);
 	if (context !== undefined && !["start", "steer", "resume"].includes(command.op)) {
@@ -703,6 +785,51 @@ export async function dispatchEngineCommand(options: {
 		throw new EngineTargetError("stale_target", `Engine generation ${command.engineGeneration} is stale`);
 	}
 	switch (command.op) {
+		case "enqueue":
+			return await runtime.enqueueAgentInbox(
+				command.agentInstanceId,
+				{
+					sourceEventId: requiredRecordString(command.payload, "clientMessageId"),
+					sourceType: "user",
+					body: requiredRecordString(command.payload, "text"),
+					deliverAt: optionalRecordInteger(command.payload, "deliverAt"),
+					wakeIntent: true,
+				},
+				optionalRecordInteger(command.payload, "expectedIntentRevision"),
+				command.commandId,
+			);
+		case "queue_edit":
+		case "queue_remove":
+		case "queue_annotate":
+		case "queue_defer": {
+			const value = command.op === "queue_defer" ? (command.payload.deliverAt ?? null) : command.payload.text;
+			if ((command.op === "queue_edit" || command.op === "queue_annotate") && typeof value !== "string")
+				throw new EngineTargetError("invalid_request", "Queue text is required");
+			return await runtime.mutateAgentInbox(command.agentInstanceId, {
+				mutationId: requiredRecordString(command.payload, "mutationId"),
+				queueId: requiredRecordString(command.payload, "queueId"),
+				expectedRevision: requiredRecordInteger(command.payload, "expectedRevision"),
+				op:
+					command.op === "queue_edit"
+						? "edit"
+						: command.op === "queue_remove"
+							? "drop"
+							: command.op === "queue_annotate"
+								? "annotate"
+								: "defer",
+				value: value as string | number | null | undefined,
+			});
+		}
+		case "queue_reorder":
+			return {
+				items: await runtime.reorderAgentInbox(
+					command.agentInstanceId,
+					requiredRecordString(command.payload, "mutationId"),
+					requiredStringList(command.payload, "expectedOrder"),
+					requiredStringList(command.payload, "desiredOrder"),
+					requiredRecordInteger(command.payload, "expectedQueueRevision"),
+				),
+			};
 		case "start": {
 			const executionId = requiredEnvelopeString(command.executionId, "executionId");
 			const attemptId = requiredEnvelopeString(command.attemptId, "attemptId");
@@ -722,7 +849,7 @@ export async function dispatchEngineCommand(options: {
 				command.payload.restoreCheckpoint === undefined ? undefined : parseRestoreCheckpoint(command.payload);
 			const input = queued
 				? undefined
-				: historyEdit
+				: historyEdit || command.payload.explicitContinue === true
 					? optionalRecordString(command.payload, "input")
 					: requiredRecordString(command.payload, "input");
 			const cwd = requiredRecordString(command.payload, "cwd");
@@ -736,6 +863,8 @@ export async function dispatchEngineCommand(options: {
 				const started = await runtime.start(
 					{
 						commandId: command.commandId,
+						principalId: command.principalId,
+						explicitContinue: command.payload.explicitContinue === true,
 						context,
 						agentInstanceId: command.agentInstanceId,
 						agentInstanceRef,
@@ -825,9 +954,16 @@ export async function dispatchEngineCommand(options: {
 				expectedIntentRevision: optionalRecordInteger(command.payload, "expectedIntentRevision"),
 			});
 		case "compact":
-			return await runtime.compact(boundTarget(command));
+			return await runtime.compact(
+				boundTarget(command),
+				optionalRecordInteger(command.payload, "expectedIntentRevision"),
+			);
 		case "release":
-			await runtime.release(boundTarget(command));
+			await runtime.release(
+				boundTarget(command),
+				"requested",
+				optionalRecordInteger(command.payload, "expectedIntentRevision"),
+			);
 			return;
 		case "resolve_tool_approval": {
 			const decision = requiredRecordString(command.payload, "decision");
@@ -837,6 +973,8 @@ export async function dispatchEngineCommand(options: {
 			await runtime.resolveToolApproval({
 				...boundTarget(command),
 				commandId: command.commandId,
+				expectedIntentRevision: optionalRecordInteger(command.payload, "expectedIntentRevision"),
+				expectedInputRevision: optionalRecordInteger(command.payload, "expectedInputRevision"),
 				approvalId: requiredRecordString(command.payload, "approvalId"),
 				decision,
 				reason: optionalRecordString(command.payload, "reason"),
@@ -847,6 +985,8 @@ export async function dispatchEngineCommand(options: {
 			await runtime.resolveInput({
 				...boundTarget(command),
 				commandId: command.commandId,
+				expectedIntentRevision: optionalRecordInteger(command.payload, "expectedIntentRevision"),
+				expectedInputRevision: optionalRecordInteger(command.payload, "expectedInputRevision"),
 				inputId: requiredRecordString(command.payload, "inputId"),
 				result: askDialogResult(command.payload),
 			});
@@ -868,6 +1008,17 @@ function parseRestoreCheckpoint(payload: Record<string, unknown>) {
 	};
 }
 
+function requiredStringList(payload: Record<string, unknown>, key: string): string[] {
+	const value = payload[key];
+	if (
+		!Array.isArray(value) ||
+		value.length > runtimeLimits.agentPendingRecords ||
+		value.some(item => typeof item !== "string" || !item.trim())
+	)
+		throw new EngineTargetError("invalid_request", `${key} must be a bounded string list`);
+	return value as string[];
+}
+
 function parseHistoryEdit(payload: Record<string, unknown>): EngineHistoryEditSource {
 	const historyEdit = requiredRecord(payload, "historyEdit");
 	const mode = requiredRecordString(historyEdit, "mode");
@@ -875,6 +1026,7 @@ function parseHistoryEdit(payload: Record<string, unknown>): EngineHistoryEditSo
 	const source = requiredRecord(historyEdit, "source");
 	return {
 		mode,
+		expectedSourceIntentRevision: optionalRecordInteger(historyEdit, "expectedSourceIntentRevision"),
 		source: {
 			bindingId: requiredRecordString(source, "bindingId"),
 			agentInstanceId: requiredRecordString(source, "agentInstanceId"),
@@ -935,12 +1087,20 @@ function commandIdentity(command: EngineCommandEnvelope): EngineCommandIdentity 
 	const payloadHash = sha256(stableStringifyJson(command.payload));
 	const canonical = {
 		op: command.op,
+		...(command.principalId
+			? {
+					principalId: command.principalId,
+					browserPayloadHash: command.browserPayloadHash,
+					...(command.browserTarget ? { browserTarget: command.browserTarget } : {}),
+				}
+			: {}),
 		deviceId: command.deviceId,
 		engineId: command.engineId,
 		engineGeneration: command.engineGeneration,
 		agentInstanceId: command.agentInstanceId,
 		agentInstanceRef: command.agentInstanceRef,
 		parentAgentInstanceId: command.parentAgentInstanceId,
+		parentAgentInstanceRef: command.parentAgentInstanceRef,
 		bindingId: command.runtimeBindingId,
 		bindingGeneration: command.bindingGeneration,
 		executionId: command.executionId,
@@ -957,6 +1117,7 @@ function commandIdentity(command: EngineCommandEnvelope): EngineCommandIdentity 
 		agentInstanceId: command.agentInstanceId,
 		agentInstanceRef: command.agentInstanceRef,
 		parentAgentInstanceId: command.parentAgentInstanceId,
+		parentAgentInstanceRef: command.parentAgentInstanceRef,
 		bindingId: command.runtimeBindingId,
 		bindingGeneration: command.bindingGeneration,
 		executionId: command.executionId,
@@ -964,6 +1125,9 @@ function commandIdentity(command: EngineCommandEnvelope): EngineCommandIdentity 
 		authorityGeneration: command.authorityGeneration,
 		payloadHash,
 		canonicalHash: sha256(stableStringifyJson(canonical)),
+		principalId: command.principalId,
+		browserPayloadHash: command.browserPayloadHash,
+		serializedCommand: stableStringifyJson(command),
 	};
 }
 
@@ -1056,17 +1220,20 @@ function isCommandOp(value: unknown): value is EngineCommandOp {
 		value === "release" ||
 		value === "reconcile" ||
 		value === "resolve_tool_approval" ||
-		value === "resolve_input"
+		value === "resolve_input" ||
+		["enqueue", "queue_edit", "queue_remove", "queue_reorder", "queue_annotate", "queue_defer"].includes(
+			String(value),
+		)
 	);
 }
 
-function askDialogResult(payload: Record<string, unknown>): ExtensionAskDialogResult {
+function askDialogResult(payload: Record<string, unknown>): EngineResolveInputRequest["result"] {
 	const result = requiredRecord(payload, "result");
 	if (result.kind === "chat") return { kind: "chat" };
 	if (result.kind !== "submit" || !Array.isArray(result.results)) {
 		throw new PoisonMessageError("result must be a chat or submit Ask result");
 	}
-	return result as unknown as ExtensionAskDialogResult;
+	return result as unknown as EngineResolveInputRequest["result"];
 }
 
 function controlInitiator(payload: Record<string, unknown>): EngineControlInitiator {
@@ -1090,7 +1257,7 @@ function boundTarget(command: EngineCommandEnvelope) {
 		executionId: requiredEnvelopeString(command.executionId, "executionId"),
 		attemptId: requiredEnvelopeString(command.attemptId, "attemptId"),
 		authorityGeneration: command.authorityGeneration,
-		engineGeneration: command.engineGeneration,
+		engineGeneration: optionalRecordInteger(command.payload, "targetEngineGeneration") ?? command.engineGeneration,
 		bindingGeneration: requiredSafeInteger(command as unknown as Record<string, unknown>, "bindingGeneration"),
 	};
 }

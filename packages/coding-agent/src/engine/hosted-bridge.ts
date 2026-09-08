@@ -19,6 +19,7 @@ import {
 	type EngineEventEnvelope,
 } from "./nats-adapter";
 import { engineAgentInstanceId, engineRouteToken } from "./route";
+import { ENGINE_CONTROL_OPS, runtimeLimits } from "./runtime-protocol";
 import type { EngineStore } from "./store";
 
 interface BridgeClaim {
@@ -33,6 +34,7 @@ interface BridgeClaim {
 	heartbeatFailures: number;
 	heartbeatPending: boolean;
 	published: boolean;
+	accepted: boolean;
 }
 
 export interface GrimoireRpc {
@@ -145,6 +147,13 @@ export async function launchHostedEngineChild(
 		maxSpawnDepth: number;
 		signal?: AbortSignal;
 		cancelLocal(agentInstanceId: string): Promise<void>;
+		enrollChild?(agentInstanceRef: string, attemptId?: string): Promise<void>;
+		waitLocal?(
+			agentInstanceId: string,
+			commandId: string,
+			attemptId?: string,
+			signal?: AbortSignal,
+		): Promise<{ attemptId?: string; state: string; payload: Record<string, unknown> }>;
 	},
 ): Promise<EngineChildLaunchResult> {
 	request.signal?.throwIfAborted();
@@ -165,39 +174,35 @@ export async function launchHostedEngineChild(
 	const jobId = String(job?.job_id ?? "");
 	if (!agentInstanceId || !agentInstanceRef || !jobId)
 		throw new Error("Grimoire child launch returned no durable identity");
-	while (true) {
-		if (request.signal?.aborted) {
-			await request.cancelLocal(agentInstanceId).catch(() => {});
-			await rpc.call("grimoire_job_cancel", { job_id: jobId, reason: "parent task aborted" }).catch(() => {});
-			return { agentInstanceId, agentInstanceRef, status: "cancelled", error: "Parent task aborted" };
-		}
-		const current = await rpc.call("grimoire_job_get", { job_id: jobId });
-		const currentJob = current.job as Record<string, unknown> | undefined;
-		const status = String(currentJob?.status ?? "");
-		if (["succeeded", "failed", "cancelled", "dead_letter"].includes(status)) {
-			const result = currentJob?.result as Record<string, unknown> | undefined;
-			const event = result?.engine_event as Record<string, unknown> | undefined;
-			const engineResult = result?.engine_result as Record<string, unknown> | undefined;
-			const payload = engineResult ?? (event?.payload as Record<string, unknown> | undefined);
-			// Terminal notification may precede ClientHost's full control-query result.
-			if (result?.status === "pending_engine_result" || (status === "succeeded" && !payload)) {
-				await Bun.sleep(250);
-				continue;
-			}
-			const assistantFinal = engineResult ? engineResult.assistantText : payload?.assistantFinal;
-			return {
-				agentInstanceId,
-				agentInstanceRef,
-				status: status === "succeeded" ? "completed" : status === "cancelled" ? "cancelled" : "failed",
-				assistantFinal: typeof assistantFinal === "string" ? assistantFinal : undefined,
-				transcriptRef: typeof payload?.transcriptRef === "string" ? payload.transcriptRef : undefined,
-				...(payload?.outputTruncated === true ? { outputTruncated: true } : {}),
-				...(status === "succeeded"
-					? {}
-					: { error: String(payload?.error ?? currentJob?.error ?? event?.type ?? status) }),
-			};
-		}
-		await Bun.sleep(250);
+	const envelope =
+		job?.payload && typeof job.payload === "object"
+			? ((job.payload as Record<string, unknown>).command as Record<string, unknown> | undefined)
+			: undefined;
+	const attemptId =
+		typeof envelope?.attemptId === "string"
+			? envelope.attemptId
+			: typeof launched.attempt_id === "string"
+				? launched.attempt_id
+				: undefined;
+	await request.enrollChild?.(agentInstanceRef, attemptId);
+	if (!request.waitLocal) throw new Error("Exact local Attempt result wait is unavailable");
+	try {
+		const result = await request.waitLocal(agentInstanceId, jobId, attemptId, request.signal);
+		if (result.attemptId) await request.enrollChild?.(agentInstanceRef, result.attemptId);
+		return {
+			agentInstanceId,
+			agentInstanceRef,
+			status: result.state === "completed" ? "completed" : result.state === "cancelled" ? "cancelled" : "failed",
+			assistantFinal: typeof result.payload.assistantFinal === "string" ? result.payload.assistantFinal : undefined,
+			transcriptRef: typeof result.payload.transcriptRef === "string" ? result.payload.transcriptRef : undefined,
+			...(result.payload.outputTruncated === true ? { outputTruncated: true } : {}),
+			...(result.state === "completed" ? {} : { error: String(result.payload.error ?? result.state) }),
+		};
+	} catch (error) {
+		if (!request.signal?.aborted) throw error;
+		await request.cancelLocal(agentInstanceId).catch(() => {});
+		await rpc.call("grimoire_job_cancel", { job_id: jobId, reason: "parent task aborted" }).catch(() => {});
+		return { agentInstanceId, agentInstanceRef, status: "cancelled", error: "Parent task aborted" };
 	}
 }
 
@@ -302,48 +307,63 @@ export class HostedEngineBridge {
 		}
 		const consumer = await jetstream(this.#connection).consumers.get(ENGINE_EVENT_STREAM, durable);
 		this.#events = await consumer.consume({ max_messages: 128 });
-		this.#claimLoop = this.#claimCommands();
+		this.#claimLoop = Promise.all([this.#claimCommands("ordinary"), this.#claimCommands("control")]).then(() => {});
 		this.#track(this.#claimLoop);
 		this.#track(this.#eventLoop(this.#events));
 		this.#track(this.#heartbeatLoop());
 	}
 
-	async #claimCommands(): Promise<void> {
+	async #claimCommands(lane: "ordinary" | "control"): Promise<void> {
 		const js = jetstream(this.#connection);
+		let generation = 0;
+		const belongs = (claim: BridgeClaim) =>
+			ENGINE_CONTROL_OPS.has(claim.work.command?.op ?? "") === (lane === "control");
 		while (this.#accepting && !this.#stopping) {
-			const pending = [...this.#active.values()].find(claim => !claim.published);
-			if (pending) {
-				try {
-					await this.#publishClaim(js, pending);
-				} catch (error) {
-					this.#report(error);
-					await Bun.sleep(1_000);
-				}
-				continue;
-			}
-			if (this.#active.size >= 128) {
-				await Bun.sleep(this.#options.pollIntervalMs ?? 250);
-				continue;
-			}
 			try {
-				const result = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
-					action: "claim",
-					device_id: this.#options.deviceId,
-					engine_id: this.#options.engineId,
-					engine_generation: this.#options.engineGeneration,
-					worker_id: `engine-${this.#options.engineGeneration}`,
-					lease_ttl_seconds: 90,
-				});
-				if (result.status !== "claimed") {
-					await Bun.sleep(this.#options.pollIntervalMs ?? 250);
+				const claims = [...this.#active.values()].filter(claim => !claim.accepted && belongs(claim));
+				const pending = claims.find(claim => !claim.published);
+				if (pending) {
+					await this.#publishClaim(js, pending);
 					continue;
 				}
-				const claim = parseClaim(result);
-				this.#active.set(claim.jobId, claim);
-				await this.#publishClaim(js, claim);
+				if (
+					claims.length <
+					(lane === "control" ? runtimeLimits.controlPendingRecords : runtimeLimits.agentPendingRecords)
+				) {
+					const result = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
+						action: "claim",
+						lane,
+						device_id: this.#options.deviceId,
+						engine_id: this.#options.engineId,
+						engine_generation: this.#options.engineGeneration,
+						worker_id: `engine-${this.#options.engineGeneration}`,
+						lease_ttl_seconds: 90,
+					});
+					if (result.status === "claimed") {
+						const claim = parseClaim(result);
+						this.#active.set(claim.jobId, claim);
+						if (!claim.accepted) await this.#publishClaim(js, claim);
+						continue;
+					}
+				}
+				if (this.#options.pollIntervalMs !== undefined)
+					await Promise.race([Bun.sleep(this.#options.pollIntervalMs), this.#stop.promise]);
+				else {
+					const wake = await Promise.race([
+						this.#options.rpc.call("grimoire_agent_engine_bridge", {
+							action: "wait",
+							device_id: this.#options.deviceId,
+							engine_id: this.#options.engineId,
+							wake_generation: generation,
+							timeout_ms: runtimeLimits.reconciliationMs,
+						}),
+						this.#stop.promise.then(() => undefined),
+					]);
+					if (wake && Number.isSafeInteger(wake.generation)) generation = Number(wake.generation);
+				}
 			} catch (error) {
 				this.#report(error);
-				await Bun.sleep(1_000);
+				await Promise.race([Bun.sleep(1000), this.#stop.promise]);
 			}
 		}
 	}
@@ -436,6 +456,7 @@ export class HostedEngineBridge {
 	}
 
 	async #deliverEvent(event: EngineEventEnvelope): Promise<boolean> {
+		if (["attempt.agent_registered", "attempt.holds_changed"].includes(event.type)) return true;
 		if (
 			event.type === "attempt.inbox_changed" &&
 			typeof event.payload?.action === "string" &&
@@ -505,6 +526,30 @@ export class HostedEngineBridge {
 			claim.published = true;
 			this.#active.set(claim.jobId, claim);
 		}
+		if (event.type === "attempt.command_receipt" && event.payload) {
+			const accepted = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
+				action: "accepted",
+				device_id: this.#options.deviceId,
+				engine_id: this.#options.engineId,
+				job_id: claim.jobId,
+				lease_token: claim.leaseToken,
+				receipt: event.payload,
+			});
+			if (accepted.status !== "accepted") throw new Error("Hosted command receipt was not persisted");
+			claim.accepted = true;
+			if (
+				event.payload.stage === "rejected" ||
+				(event.payload.stage === "applied" && claim.work.command?.op !== "start")
+			)
+				this.#active.delete(claim.jobId);
+			while (this.#active.size > runtimeLimits.devicePendingRecords) {
+				const old = [...this.#active.values()].find(item => item.accepted);
+				if (!old) break;
+				this.#active.delete(old.jobId);
+			}
+			return true;
+		}
+
 		const result = await this.#options.rpc.call("grimoire_agent_engine_bridge", {
 			action: "event",
 			device_id: this.#options.deviceId,
@@ -524,7 +569,7 @@ export class HostedEngineBridge {
 			await Promise.race([Bun.sleep(this.#options.heartbeatIntervalMs ?? 30_000), this.#stop.promise]);
 			if (this.#stopping) break;
 			for (const claim of this.#active.values()) {
-				if (claim.heartbeatPending) continue;
+				if (claim.heartbeatPending || claim.accepted) continue;
 				claim.heartbeatPending = true;
 				this.#track(
 					(async () => {
@@ -582,6 +627,7 @@ function parseClaim(value: Record<string, unknown>): BridgeClaim {
 		heartbeatFailures: 0,
 		heartbeatPending: false,
 		published: false,
+		accepted: Boolean(value.delivery_receipt),
 	};
 }
 
