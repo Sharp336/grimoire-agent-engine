@@ -18,6 +18,8 @@
 
 ### Fixed
 
+- Kept one identifiable assistant reply when context compaction cannot proceed, including after reopening the conversation.
+
 - Kept hosted broker profile selections stable across token renewal after profile edits, without bypassing current route or account authorization.
 
 - Kept running Codex-subscription agents on their launch profile after profile edits, without bypassing fresh account quota checks.

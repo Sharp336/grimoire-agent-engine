@@ -938,7 +938,7 @@ export class TurnRecovery {
 		options: { autoContinue: boolean; triggerContextTokens?: number },
 	): Promise<RecoveryCompactionResult> {
 		const compactionEntryBefore = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
-		await this.dropPersistedAssistantTurn(assistantMessage);
+		const droppedEntryId = await this.dropPersistedAssistantTurn(assistantMessage);
 		const result = await this.#host.runAutoCompaction(reason, true, false, allowDefer, {
 			autoContinue: options.autoContinue,
 			triggerContextTokens: options.triggerContextTokens,
@@ -946,13 +946,22 @@ export class TurnRecovery {
 		});
 		const compactionEntryAfter = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
 		if (result.historyRewritten !== true && compactionEntryAfter === compactionEntryBefore) {
-			this.#restoreFailedAssistantTurn(assistantMessage);
+			this.#restoreFailedAssistantTurn(assistantMessage, droppedEntryId);
 		}
 		return result;
 	}
 
-	#restoreFailedAssistantTurn(assistantMessage: AssistantMessage): void {
-		if (!isEmptyErrorTurn(assistantMessage)) this.#host.sessionManager.appendMessage(assistantMessage);
+	#restoreFailedAssistantTurn(assistantMessage: AssistantMessage, droppedEntryId: string | undefined): void {
+		if (!isEmptyErrorTurn(assistantMessage)) {
+			if (droppedEntryId && this.#host.sessionManager.getEntry(droppedEntryId)) {
+				this.#host.withBashBranchTransition(() => {
+					this.#host.sessionManager.branch(droppedEntryId);
+					this.#host.sessionManager.appendCustomEntry("recovery-rollback");
+				});
+			} else {
+				this.#host.sessionManager.appendMessage(assistantMessage);
+			}
+		}
 		const lastMessage = this.#host.agent.state.messages.at(-1);
 		if (
 			lastMessage?.role === "assistant" &&
