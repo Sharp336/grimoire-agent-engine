@@ -19,6 +19,7 @@ import {
 	type EngineEventEnvelope,
 } from "./nats-adapter";
 import { engineAgentInstanceId, engineRouteToken } from "./route";
+import type { LegacyOwnershipProof } from "./runtime-ownership";
 import { ENGINE_CONTROL_OPS, runtimeLimits } from "./runtime-protocol";
 import type { EngineStore } from "./store";
 
@@ -38,7 +39,7 @@ interface BridgeClaim {
 }
 
 export interface GrimoireRpc {
-	call(tool: string, arguments_: Record<string, unknown>): Promise<Record<string, unknown>>;
+	call(tool: string, arguments_: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>>;
 }
 
 export interface HostedGrimoireRpcOptions {
@@ -76,7 +77,11 @@ export class HostedGrimoireRpc implements GrimoireRpc {
 		this.#endpoint = endpoint.toString();
 	}
 
-	async call(tool: string, arguments_: Record<string, unknown>): Promise<Record<string, unknown>> {
+	async call(
+		tool: string,
+		arguments_: Record<string, unknown>,
+		signal?: AbortSignal,
+	): Promise<Record<string, unknown>> {
 		const response = await fetch(this.#endpoint, {
 			method: "POST",
 			redirect: "error",
@@ -99,7 +104,7 @@ export class HostedGrimoireRpc implements GrimoireRpc {
 				method: "tools/call",
 				params: { name: tool, arguments: arguments_ },
 			}),
-			signal: AbortSignal.timeout(30_000),
+			signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30_000)]) : AbortSignal.timeout(30_000),
 		});
 		if (!response.ok) throw new Error(`Grimoire Host returned HTTP ${response.status}`);
 		const json = (await response.json()) as Record<string, unknown>;
@@ -228,6 +233,7 @@ export class HostedEngineBridge {
 	readonly #eventWork = new Set<Promise<void>>();
 	readonly #eventRetries = new Map<string, Set<number>>();
 	readonly #stop = Promise.withResolvers<void>();
+	readonly #admissionCancellation = new AbortController();
 	#claimLoop: Promise<void> = Promise.resolve();
 	#events: ConsumerMessages | undefined;
 	#accepting = true;
@@ -269,6 +275,7 @@ export class HostedEngineBridge {
 
 	async stopAdmission(): Promise<void> {
 		this.#accepting = false;
+		this.#admissionCancellation.abort();
 		await this.#claimLoop;
 	}
 
@@ -311,6 +318,60 @@ export class HostedEngineBridge {
 		this.#track(this.#claimLoop);
 		this.#track(this.#eventLoop(this.#events));
 		this.#track(this.#heartbeatLoop());
+		if (this.#options.eventStore) this.#track(this.#ownershipLoop());
+	}
+
+	async #ownershipLoop(): Promise<void> {
+		const store = this.#options.eventStore!;
+		while (this.#accepting && !this.#stopping) {
+			try {
+				let cursor: string | undefined;
+				let unresolved = 0;
+				do {
+					const page = await store.reconcileLegacyOwnershipPage(
+						this.#options.deviceId,
+						this.#options.engineId,
+						cursor,
+					);
+					unresolved += page.unresolved.length;
+					let candidates = page.candidates;
+					while (candidates.length && this.#accepting && !this.#stopping) {
+						const response = await this.#options.rpc.call(
+							"grimoire_agent_engine_bridge",
+							{
+								action: "ownership",
+								device_id: this.#options.deviceId,
+								engine_id: this.#options.engineId,
+								candidates,
+							},
+							this.#admissionCancellation.signal,
+						);
+						if (response.status !== "ok" || !Array.isArray(response.results))
+							throw new Error("Legacy ownership proof endpoint is unavailable");
+						const proofs = response.results as LegacyOwnershipProof[];
+						const results = await store.enrollLegacyOwnership(candidates, proofs);
+						unresolved += results.filter(
+							result => !["enrolled", "known", "deferred"].includes(result.status),
+						).length;
+						const deferred = candidates.filter((_candidate, index) => proofs[index].status === "deferred");
+						if (deferred.length === candidates.length)
+							throw new Error("Legacy ownership proof page made no progress");
+						candidates = deferred;
+					}
+					cursor = page.nextCursor ?? undefined;
+					// Yield between bounded transactions so migration cannot occupy the control lane.
+					await Bun.sleep(0);
+				} while (cursor && this.#accepting && !this.#stopping);
+				if (this.#accepting)
+					await store.recordOwnershipMigration(unresolved ? "incomplete" : "complete", unresolved);
+			} catch (error) {
+				if (this.#accepting) {
+					await store.recordOwnershipMigration("unavailable", 0);
+					this.#report(error);
+				}
+			}
+			await Promise.race([Bun.sleep(runtimeLimits.reconciliationMs), this.#stop.promise]);
+		}
 	}
 
 	async #claimCommands(lane: "ordinary" | "control"): Promise<void> {
@@ -350,18 +411,23 @@ export class HostedEngineBridge {
 					await Promise.race([Bun.sleep(this.#options.pollIntervalMs), this.#stop.promise]);
 				else {
 					const wake = await Promise.race([
-						this.#options.rpc.call("grimoire_agent_engine_bridge", {
-							action: "wait",
-							device_id: this.#options.deviceId,
-							engine_id: this.#options.engineId,
-							wake_generation: generation,
-							timeout_ms: runtimeLimits.reconciliationMs,
-						}),
+						this.#options.rpc.call(
+							"grimoire_agent_engine_bridge",
+							{
+								action: "wait",
+								device_id: this.#options.deviceId,
+								engine_id: this.#options.engineId,
+								wake_generation: generation,
+								timeout_ms: runtimeLimits.reconciliationMs,
+							},
+							this.#admissionCancellation.signal,
+						),
 						this.#stop.promise.then(() => undefined),
 					]);
 					if (wake && Number.isSafeInteger(wake.generation)) generation = Number(wake.generation);
 				}
 			} catch (error) {
+				if (!this.#accepting) break;
 				this.#report(error);
 				await Promise.race([Bun.sleep(1000), this.#stop.promise]);
 			}

@@ -11,6 +11,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/engine/control-query";
 import type { EngineCommandEnvelope } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
+import { runtimeRemainingWork } from "@oh-my-pi/pi-coding-agent/engine/runtime-protocol";
 import { archiveChildHistory, coreMcpUrl, engineServiceStatus } from "@oh-my-pi/pi-coding-agent/engine/service";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -665,6 +666,53 @@ describe("Engine Control + Query", () => {
 				expect(await client.request("runtime.summary", { agentInstanceRef, principalId: "owner" })).toMatchObject({
 					summary: { agentInstanceRef },
 				});
+			}
+			const snapshot = (await client.request("runtime.snapshot", {
+				scope: { kind: "catalog" },
+				principalId: "owner",
+			})) as {
+				epoch: string;
+				watermark: number;
+			};
+			const waiting = Promise.withResolvers<void>();
+			const waitEvents = runtime.store.waitRuntimeEvents.bind(runtime.store);
+			const wait = spyOn(runtime.store, "waitRuntimeEvents").mockImplementation(async (request, signal) => {
+				waiting.resolve();
+				return await waitEvents(request, signal);
+			});
+			const observer = net.createConnection(server.endpoint);
+			const closed = new Promise<void>(resolve => observer.once("close", () => resolve()));
+			observer.on("error", () => observer.destroy());
+			observer.once("connect", () =>
+				observer.write(
+					`${JSON.stringify({
+						schema: "grimoire.engine.control_query.request.v1",
+						version: "1.0",
+						requestId: "pending-observer",
+						token,
+						method: "runtime.events.wait",
+						params: {
+							scope: { kind: "catalog" },
+							principalId: "owner",
+							epoch: snapshot.epoch,
+							afterCursor: snapshot.watermark,
+							timeoutMs: 25000,
+							limit: 100,
+							maxBytes: 61440,
+							remainingWork: runtimeRemainingWork(),
+						},
+					})}\n`,
+				),
+			);
+			try {
+				await waiting.promise;
+				const began = performance.now();
+				await server.close();
+				await closed;
+				expect(performance.now() - began).toBeLessThan(1000);
+			} finally {
+				observer.destroy();
+				wait.mockRestore();
 			}
 		} finally {
 			await server.close();

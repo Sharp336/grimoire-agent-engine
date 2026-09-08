@@ -575,7 +575,10 @@ export async function recordRuntimeProjection(sql: RuntimeSql, event: EngineEven
 				)) as Array<{ agent_instance_ref: string; root_agent_instance_ref: string }>)
 			: [];
 		identity.parent_agent_instance_ref = parents[0]?.agent_instance_ref || identity.parent_agent_instance_ref;
-		if (identity.parent_agent_instance_ref && !parents[0]?.root_agent_instance_ref) {
+		if (
+			(identity.parent_agent_instance_id || identity.parent_agent_instance_ref) &&
+			!parents[0]?.root_agent_instance_ref
+		) {
 			throw new EngineTargetError("stale_target", "Parent ancestry must be enrolled before child projection");
 		}
 		identity.root_agent_instance_ref = parents[0]?.root_agent_instance_ref || identity.agent_instance_ref;

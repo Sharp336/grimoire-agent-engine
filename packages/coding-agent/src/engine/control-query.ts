@@ -136,7 +136,13 @@ export async function startEngineControlQueryServer(options: ServerOptions): Pro
 	const endpoint = engineControlQueryEndpoint(options.runtimeDir);
 	if (process.platform !== "win32") await fs.rm(endpoint, { force: true });
 	const admission = { ordinary: 0, control: 0 };
-	const server = net.createServer(socket => serveSocket(socket, token, options, admission));
+	const sockets = new Set<net.Socket>();
+	const server = net.createServer(socket => {
+		sockets.add(socket);
+		socket.once("close", () => sockets.delete(socket));
+		serveSocket(socket, token, options, admission);
+	});
+	let closing: Promise<void> | undefined;
 	await new Promise<void>((resolve, reject) => {
 		server.once("error", reject);
 		server.listen(endpoint, () => {
@@ -147,8 +153,16 @@ export async function startEngineControlQueryServer(options: ServerOptions): Pro
 	return {
 		endpoint,
 		async close() {
-			await new Promise<void>((resolve, reject) => server.close(error => (error ? reject(error) : resolve())));
-			if (process.platform !== "win32") await fs.rm(endpoint, { force: true });
+			closing ??= (async () => {
+				const closed = new Promise<void>((resolve, reject) =>
+					server.close(error => (error ? reject(error) : resolve())),
+				);
+				// Closing the listener alone retains 25-second observers and prevents orderly owner shutdown.
+				for (const socket of sockets) socket.destroy();
+				await closed;
+				if (process.platform !== "win32") await fs.rm(endpoint, { force: true });
+			})();
+			await closing;
 		},
 	};
 }
@@ -280,7 +294,10 @@ async function dispatchRequest(
 	const params = request.params ?? {};
 	switch (request.method) {
 		case "runtime.capabilities":
-			return runtimeCapabilities();
+			return {
+				...runtimeCapabilities(),
+				ownershipMigration: await options.runtime.store.ownershipMigrationStatus(),
+			};
 		case "runtime.snapshot":
 			return await options.runtime.store.runtimeSnapshot(
 				runtimeScope(params),
@@ -573,7 +590,7 @@ async function capabilities(options: ServerOptions): Promise<Record<string, unkn
 }
 
 function runtimeCapabilities(): Record<string, unknown> {
-	return { version: "1.0", contractHash: RUNTIME_PROTOCOL_HASH, limits: runtimeLimits };
+	return { version: "1.0", contractHash: RUNTIME_PROTOCOL_HASH, limits: runtimeLimits, ownershipProofVersion: 1 };
 }
 
 function runtimeScope(params: Record<string, unknown>): RuntimeScope {

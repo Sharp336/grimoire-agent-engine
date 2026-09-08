@@ -21,6 +21,13 @@ import { engineAgentId } from "./route";
 import { ENGINE_HISTORY_INDEX_SCHEMA, type EngineNativeHistoryPage } from "./runtime-history";
 import { RUNTIME_MESSAGE_SCHEMA } from "./runtime-messages";
 import {
+	claimLegacyOwnership,
+	type LegacyOwnershipCandidate,
+	type LegacyOwnershipProof,
+	legacyOwnershipPage,
+	RUNTIME_OWNERSHIP_SCHEMA,
+} from "./runtime-ownership";
+import {
 	RUNTIME_PROJECTION_SCHEMA,
 	type RuntimeTargetRequest,
 	recordRuntimeProjection,
@@ -691,6 +698,7 @@ const SCHEMA_MIGRATIONS = [
 	{ version: 13, statements: RUNTIME_PROJECTION_SCHEMA, requiredColumns: [] },
 	{ version: 14, statements: RUNTIME_MESSAGE_SCHEMA, requiredColumns: [] },
 	{ version: 15, statements: START_FENCE_SCHEMA, requiredColumns: [] },
+	{ version: 16, statements: RUNTIME_OWNERSHIP_SCHEMA, requiredColumns: [] },
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;
@@ -789,6 +797,90 @@ export class EngineStore {
 
 	async runtimeTarget(request: RuntimeTargetRequest): Promise<Record<string, unknown>> {
 		return await this.#transaction(sql => runtimeNativeTarget(sql, request));
+	}
+
+	async reconcileLegacyOwnershipPage(deviceId: string, engineId: string, after?: string) {
+		return await this.#transaction(async sql => {
+			const page = await legacyOwnershipPage(sql, deviceId, engineId, after);
+			let inherited = 0;
+			for (const row of page.inherited) {
+				const outcome = await claimLegacyOwnership(sql, row.agentInstanceId, row.agentInstanceRef, row.principalId);
+				if (outcome !== "enrolled") continue;
+				await this.#identityEvent(
+					sql,
+					row.agentInstanceId,
+					`ownership:${row.agentInstanceId}`,
+					"agent_registered",
+					{},
+				);
+				inherited++;
+			}
+			return { candidates: page.candidates, unresolved: page.unresolved, inherited, nextCursor: page.nextCursor };
+		});
+	}
+
+	async recordOwnershipMigration(status: "complete" | "incomplete" | "unavailable", unresolved: number) {
+		await this.#transaction(async sql => {
+			await sql.unsafe(
+				"INSERT INTO engine_metadata(key,value) VALUES ('ownership_migration',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+				[JSON.stringify({ status, unresolved, checkedAt: Date.now() })],
+			);
+		});
+	}
+
+	async ownershipMigrationStatus(): Promise<Record<string, unknown>> {
+		const missing = await this.#client.unsafe("SELECT 1 FROM engine_agent_identity WHERE principal_id='' LIMIT 1");
+		if (!missing.length) return { status: "complete", unresolved: 0 };
+		const rows = (await this.#client.unsafe(
+			"SELECT value FROM engine_metadata WHERE key='ownership_migration'",
+		)) as MetadataRow[];
+		const current = rows[0] ? (JSON.parse(rows[0].value) as Record<string, unknown>) : undefined;
+		return current?.status !== "complete" && current ? current : { status: "pending", unresolved: null };
+	}
+
+	async enrollLegacyOwnership(candidates: LegacyOwnershipCandidate[], proofs: LegacyOwnershipProof[]) {
+		if (
+			candidates.length > runtimeLimits.httpPageRecords ||
+			proofs.length !== candidates.length ||
+			new Set(candidates.map(candidate => candidate.agentInstanceRef)).size !== candidates.length ||
+			proofs.some(
+				(proof, index) =>
+					proof.agentInstanceRef !== candidates[index].agentInstanceRef ||
+					proof.sourceCommandId !== candidates[index].sourceCommandId ||
+					!["verified", "missing", "conflict", "deferred"].includes(proof.status) ||
+					(proof.status === "verified" && (typeof proof.principalId !== "string" || !proof.principalId.trim())),
+			)
+		)
+			throw new EngineTargetError(
+				"invalid_request",
+				"Legacy ownership proofs do not match the exact requested page",
+			);
+		return await this.#transaction(async sql => {
+			const results: Array<{ agentInstanceRef: string; status: string }> = [];
+			for (const [index, proof] of proofs.entries()) {
+				const candidate = candidates[index];
+				const outcome =
+					proof.status === "verified"
+						? await claimLegacyOwnership(
+								sql,
+								candidate.agentInstanceId,
+								candidate.agentInstanceRef,
+								proof.principalId!,
+								candidate,
+							)
+						: proof.status;
+				if (outcome === "enrolled")
+					await this.#identityEvent(
+						sql,
+						candidate.agentInstanceId,
+						`ownership:${candidate.sourceCommandId}`,
+						"agent_registered",
+						{},
+					);
+				results.push({ agentInstanceRef: candidate.agentInstanceRef, status: outcome });
+			}
+			return results;
+		});
 	}
 
 	async nativeSessionHeader(target: EngineTarget): Promise<{ sessionId: string; cwd: string | null }> {
@@ -956,26 +1048,37 @@ export class EngineStore {
 					"Canonical AgentInstance already has a different native identity",
 				);
 		}
-		if (!identity.principalId && identity.parentAgentInstanceId) {
+		if (identity.parentAgentInstanceId) {
 			const parents = (await sql.unsafe("SELECT principal_id FROM engine_agent_identity WHERE agent_instance_id=?", [
 				identity.parentAgentInstanceId,
 			])) as Array<{ principal_id: string }>;
-			if (parents[0]?.principal_id) identity = { ...identity, principalId: parents[0].principal_id };
+			if (parents[0]?.principal_id) {
+				if (identity.principalId && identity.principalId !== parents[0].principal_id)
+					throw new EngineTargetError("stale_target", "Child ownership must match its canonical parent");
+				identity = { ...identity, principalId: parents[0].principal_id };
+			}
 		}
 		if (identity.parentAgentInstanceId === identity.agentInstanceId)
 			throw new EngineTargetError("invalid_request", "AgentInstance cannot be its own parent");
 		const rows = (await sql.unsafe(
-			"SELECT agent_instance_ref,parent_agent_instance_id,principal_id FROM engine_agent_identity WHERE agent_instance_id=?",
+			"SELECT agent_instance_ref,parent_agent_instance_id,principal_id,membership_revision FROM engine_agent_identity WHERE agent_instance_id=?",
 			[identity.agentInstanceId],
-		)) as Array<{ agent_instance_ref: string; parent_agent_instance_id: string | null; principal_id: string }>;
+		)) as Array<{
+			agent_instance_ref: string;
+			parent_agent_instance_id: string | null;
+			principal_id: string;
+			membership_revision: number;
+		}>;
 		const existing = rows[0];
+		if (existing && !existing.principal_id && identity.principalId)
+			throw new EngineTargetError("stale_target", "Legacy ownership requires a verified source proof");
 		if (
 			existing &&
 			((identity.agentInstanceRef &&
 				existing.agent_instance_ref &&
 				identity.agentInstanceRef !== existing.agent_instance_ref) ||
 				(identity.parentAgentInstanceId &&
-					existing.parent_agent_instance_id &&
+					(existing.parent_agent_instance_id || existing.membership_revision) &&
 					identity.parentAgentInstanceId !== existing.parent_agent_instance_id) ||
 				(identity.principalId && existing.principal_id && identity.principalId !== existing.principal_id))
 		)

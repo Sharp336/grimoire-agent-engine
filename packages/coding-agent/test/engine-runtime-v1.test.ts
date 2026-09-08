@@ -102,6 +102,104 @@ describe("runtime v1 durable boundaries", () => {
 			validateRuntimeValue("scope", { kind: "catalog", agentInstanceRef: identity("root").agentInstanceRef }),
 		).toThrow();
 	});
+	it("enrolls only exact proven legacy Starts and inherits ownership after the parent proof", async () => {
+		const store = await createStore();
+		const root = identity("legacy-root", undefined, "");
+		const child = identity("legacy-child", root.agentInstanceId, "");
+		for (const agent of [root, child]) {
+			await store.admitCommand(
+				{
+					...command(`legacy-${agent.agentInstanceId}`),
+					...agent,
+					browserPayloadHash: undefined,
+					serializedCommand: undefined,
+				},
+				1,
+			);
+		}
+		const before = await store.runtimeSnapshot({ kind: "catalog" }, { principalId: "owner" });
+		expect(before.agents).toHaveLength(0);
+		await expect(store.registerAgent({ ...root, principalId: "owner" })).rejects.toMatchObject({
+			code: "stale_target",
+		});
+		await expect(
+			store.admitCommand({ ...command("ownership-bypass"), ...root, principalId: "owner" }, 1),
+		).rejects.toMatchObject({ code: "stale_target" });
+		const page = await store.reconcileLegacyOwnershipPage("device", "engine");
+		expect(page.candidates).toHaveLength(2);
+		const rootCandidate = page.candidates.find(candidate => candidate.agentInstanceRef === root.agentInstanceRef)!;
+		const childCandidate = page.candidates.find(candidate => candidate.agentInstanceRef === child.agentInstanceRef)!;
+		const proof = (candidate: typeof rootCandidate, principalId = "owner") => ({
+			agentInstanceRef: candidate.agentInstanceRef,
+			sourceCommandId: candidate.sourceCommandId,
+			status: "verified" as const,
+			principalId,
+		});
+		expect(await store.enrollLegacyOwnership([childCandidate], [proof(childCandidate)])).toEqual([
+			{ agentInstanceRef: child.agentInstanceRef, status: "parent_pending" },
+		]);
+		await expect(store.enrollLegacyOwnership([rootCandidate], [proof(childCandidate)])).rejects.toThrow(
+			"exact requested page",
+		);
+		expect(
+			await store.enrollLegacyOwnership([{ ...rootCandidate, attemptId: "forged" }], [proof(rootCandidate)]),
+		).toEqual([{ agentInstanceRef: root.agentInstanceRef, status: "conflict" }]);
+		expect(await store.enrollLegacyOwnership([rootCandidate], [proof(rootCandidate)])).toEqual([
+			{ agentInstanceRef: root.agentInstanceRef, status: "enrolled" },
+		]);
+		const inherited = await store.reconcileLegacyOwnershipPage("device", "engine");
+		expect(inherited.inherited).toBe(1);
+		expect(inherited.candidates).toEqual([]);
+		const current = await store.runtimeSnapshot({ kind: "catalog" }, { principalId: "owner" });
+		expect(current.agents).toHaveLength(2);
+		expect(current.agents.find(agent => agent.agentInstanceRef === child.agentInstanceRef)).toMatchObject({
+			rootAgentInstanceRef: root.agentInstanceRef,
+		});
+		const changes = await store.runtimeEvents(eventsRequest(before.epoch, before.watermark));
+		expect(changes.changes.filter(change => change.kind === "summary")).toHaveLength(2);
+		expect(await store.enrollLegacyOwnership([rootCandidate], [proof(rootCandidate)])).toEqual([
+			{ agentInstanceRef: root.agentInstanceRef, status: "known" },
+		]);
+		expect(await store.enrollLegacyOwnership([rootCandidate], [proof(rootCandidate, "other")])).toEqual([
+			{ agentInstanceRef: root.agentInstanceRef, status: "conflict" },
+		]);
+		expect((await store.runtimeSnapshot({ kind: "catalog" }, { principalId: "owner" })).watermark).toBe(
+			current.watermark,
+		);
+		expect((await store.runtimeSnapshot({ kind: "catalog" }, { principalId: "other" })).agents).toEqual([]);
+	});
+	it("discovers legacy ownership in bounded keyset pages without dropping missing source identities", async () => {
+		const store = await createStore();
+		for (let index = 0; index < runtimeLimits.httpPageRecords + 1; index++)
+			await store.registerAgent(identity(`unproven-${index}`, undefined, ""));
+		const first = await store.reconcileLegacyOwnershipPage("device", "engine");
+		expect(first.candidates).toEqual([]);
+		expect(first.unresolved).toHaveLength(runtimeLimits.httpPageRecords);
+		expect(first.nextCursor).toBeString();
+		const second = await store.reconcileLegacyOwnershipPage("device", "engine", first.nextCursor!);
+		expect(second.unresolved).toHaveLength(1);
+		expect(second.nextCursor).toBeNull();
+		expect(new Set([...first.unresolved, ...second.unresolved]).size).toBe(runtimeLimits.httpPageRecords + 1);
+	});
+	it("rejects unknown ancestry, cross-principal children and reparenting an already projected root", async () => {
+		const store = await createStore();
+		await expect(store.registerAgent(identity("orphan", "unknown-parent"))).rejects.toThrow("Parent ancestry");
+		const parent = identity("parent");
+		await store.registerAgent(parent);
+		await expect(store.registerAgent(identity("foreign-child", parent.agentInstanceId, "other"))).rejects.toThrow(
+			"ownership",
+		);
+		const root = identity("registered-root");
+		await store.registerAgent(root);
+		await expect(store.registerAgent({ ...root, parentAgentInstanceId: parent.agentInstanceId })).rejects.toThrow(
+			"immutable",
+		);
+		const snapshot = await store.runtimeSnapshot({ kind: "catalog" }, { principalId: "owner" });
+		expect(snapshot.agents).toHaveLength(2);
+		expect(snapshot.agents.find(agent => agent.agentInstanceRef === root.agentInstanceRef)).toMatchObject({
+			rootAgentInstanceRef: root.agentInstanceRef,
+		});
+	});
 	it("captures a no-gap watermark and discovers newly enrolled children", async () => {
 		const store = await createStore();
 		const root = identity("root");

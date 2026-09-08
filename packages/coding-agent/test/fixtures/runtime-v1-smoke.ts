@@ -108,10 +108,75 @@ try {
 	validateRuntimeValue("summaryRead", summary);
 	if (!summary.summary.attention.queuePending || summary.summary.target.attemptId !== agent.attemptId)
 		throw new Error("Busy enqueue did not preserve its Attempt");
-	while (!(await reader.read()).done) {}
+	const controlled = ready.agents[1];
+	const controlScope = { kind: "agent", agentInstanceRef: controlled.agentInstanceRef, kinds: ["state"] };
+	for (const op of ["pause", "resume", "pause"] as const) {
+		const pinned = (await client.request("runtime.target", { ...controlled, ...access })) as Record<string, unknown>;
+		const cut = (await client.request("runtime.snapshot", { scope: controlScope, ...access })) as {
+			epoch: string;
+			watermark: number;
+		};
+		await client.request("command", {
+			command: {
+				...command,
+				op,
+				commandId: `fixture-${op}-${pinned.intentRevision}`,
+				agentInstanceRef: controlled.agentInstanceRef,
+				agentInstanceId: pinned.agentInstanceId,
+				attemptId: controlled.attemptId,
+				executionId: controlled.executionId,
+				runtimeBindingId: pinned.bindingId,
+				bindingGeneration: pinned.bindingGeneration,
+				authorityGeneration: pinned.authorityGeneration,
+				browserPayloadHash: undefined,
+				browserTarget: undefined,
+				payload: { expectedIntentRevision: pinned.intentRevision, initiator: { kind: "human" } },
+			},
+		});
+		let cursor = cut.watermark;
+		const deadline = Date.now() + 2000;
+		for (;;) {
+			const changes = (await client.request("runtime.events.wait", {
+				scope: controlScope,
+				...access,
+				epoch: cut.epoch,
+				afterCursor: cursor,
+				timeoutMs: 1000,
+				limit: 100,
+				maxBytes: 61440,
+				remainingWork: runtimeRemainingWork(),
+			})) as {
+				throughCursor: number;
+				changes: Array<{ kind: string; value: { state?: string; attemptId?: string } }>;
+			};
+			if (
+				changes.changes.some(
+					change =>
+						change.kind === "state" &&
+						change.value.state === (op === "pause" ? "paused" : "running") &&
+						change.value.attemptId === controlled.attemptId,
+				)
+			)
+				break;
+			if (Date.now() >= deadline) throw new Error(`Exact fixture Attempt failed to reach ${op} quiescence`);
+			cursor = changes.throughCursor;
+		}
+	}
+	let completion = buffered;
+	for (;;) {
+		const chunk = await reader.read();
+		if (chunk.done) break;
+		completion += decoder.decode(chunk.value, { stream: true });
+	}
 	reader.releaseLock();
 	const code = await child.exited;
 	if (code !== 0) throw new Error(`Fixture process exited ${code}`);
+	if (
+		!completion
+			.split(/\r?\n/)
+			.some(line => line.startsWith("{") && (JSON.parse(line) as { kind: string }).kind === "complete")
+	)
+		throw new Error("Fixture exited without completing its owner teardown");
 	console.log(
 		JSON.stringify({
 			result: "PASS",
@@ -119,6 +184,8 @@ try {
 			catalogAgents: snapshot.agents.length,
 			selectedChanges: events.changes.length,
 			busyEnqueue: true,
+			pauseResumeSameAttempt: true,
+			finiteHeldShutdown: true,
 			runDir: path.resolve(runDir),
 		}),
 	);

@@ -12,6 +12,7 @@ import { NatsEngineAdapter } from "../../src/engine/nats-adapter";
 import { engineAgentInstanceId } from "../../src/engine/route";
 import { EngineRuntime } from "../../src/engine/runtime";
 import { RUNTIME_PROTOCOL_HASH } from "../../src/engine/runtime-protocol";
+import type { AgentSession } from "../../src/session/agent-session";
 import { AuthStorage } from "../../src/session/auth-storage";
 
 // Test-only producer. All reads and controls use the production native IPC server.
@@ -29,12 +30,20 @@ const roots = Number(args.get("--roots") ?? 7);
 const rate = Number(args.get("--rate") ?? 20);
 const seconds = Number(args.get("--seconds") ?? 1800);
 const noisyRate = Number(args.get("--noisy-rate") ?? 0);
+const catalogAgents = Number(args.get("--catalog-agents") ?? roots * 3);
+const historyEntries = Number(args.get("--history-entries") ?? 0);
 if (
 	![1, 2, 7, 14, 28].includes(roots) ||
 	![20, 200].includes(rate) ||
 	!Number.isFinite(seconds) ||
 	seconds <= 0 ||
-	![0, 200].includes(noisyRate)
+	![0, 200].includes(noisyRate) ||
+	!Number.isSafeInteger(catalogAgents) ||
+	catalogAgents < roots * 3 ||
+	catalogAgents > 10_000 ||
+	!Number.isSafeInteger(historyEntries) ||
+	historyEntries < 0 ||
+	historyEntries > 100_000
 )
 	throw new Error("Invalid load dimensions");
 const principalId = args.get("--principal") ?? "runtime-load-owner";
@@ -53,13 +62,54 @@ registerMockApi("runtime-v1-load");
 const auth = await AuthStorage.create(path.join(directory, "mock-auth.db"));
 auth.setRuntimeApiKey("mock", "isolated-load-test");
 const models = new ModelRegistry(auth, path.join(directory, "mock-models.yml"));
+const sessionOwners = new Map<string, string>();
+const sessions = new Map<string, AgentSession>();
+const boundaryFile = path.join(cwd, "provider-boundary.txt");
+fs.writeFileSync(boundaryFile, "Controlled provider reached a safe action boundary.\n");
+let runtime: EngineRuntime;
+let boundarySequence = 0;
 const mock = createMockModel({
-	handler: { content: ["controlled load completed"], delayMs: Math.ceil(seconds * 1000 + 60_000) },
+	handler: async (_context, options) => {
+		const agentId = sessionOwners.get(options?.sessionId ?? "");
+		if (!agentId) throw new Error("Fixture provider has no exact session owner");
+		const boundary = Promise.withResolvers<void>();
+		const unsubscribe = runtime.subscribe(event => {
+			if (event.agentInstanceId === agentId && event.kind === "pause_requested") boundary.resolve();
+		});
+		const abort = () => boundary.reject(options?.signal?.reason ?? new Error("Fixture provider cancelled"));
+		options?.signal?.addEventListener("abort", abort, { once: true });
+		if (options?.signal?.aborted) abort();
+		else if (runtime.getBinding(agentId)?.manualHold) boundary.resolve();
+		try {
+			await boundary.promise;
+		} finally {
+			unsubscribe();
+			options?.signal?.removeEventListener("abort", abort);
+		}
+		// End only the mocked in-flight provider call. The real Agent loop parks before this tool.
+		// After Resume the exact Attempt executes the read and starts another controlled call.
+		return {
+			content: [
+				{
+					type: "toolCall",
+					id: `fixture-boundary-${++boundarySequence}`,
+					name: "read",
+					arguments: { path: boundaryFile },
+				},
+			],
+		};
+	},
 });
 const settings = await Settings.loadReadOnly({ cwd, agentDir });
-const runtime = await EngineRuntime.create({
+runtime = await EngineRuntime.create({
 	databasePath: path.join(directory, "engine.sqlite"),
-	dispatchPrompt: (session, input, identity) => session.prompt(input, identity),
+	dispatchPrompt: (session, input, identity) => {
+		const target = runtime.resolveBrokerAgent(session.getAgentId() ?? "");
+		if (!target) throw new Error("Fixture dispatch has no exact Engine binding");
+		sessionOwners.set(session.sessionId, target.agentInstanceId);
+		sessions.set(target.agentInstanceId, session);
+		return session.prompt(input, identity);
+	},
 	sessionDefaults: {
 		cwd,
 		agentDir,
@@ -111,8 +161,12 @@ const server = await startEngineControlQueryServer({
 	engineId,
 	resolveLaunchProfile: () => profile,
 });
-const bindings: Array<EngineBindingSnapshot & { agentInstanceRef: string }> = [];
-const enroll = async (name: string, parent?: EngineBindingSnapshot & { agentInstanceRef: string }) => {
+interface FixtureBinding extends EngineBindingSnapshot {
+	agentInstanceRef: string;
+	rootAgentInstanceRef: string;
+}
+const bindings: FixtureBinding[] = [];
+const enroll = async (name: string, parent?: FixtureBinding): Promise<FixtureBinding> => {
 	const agentInstanceRef = `grimoire://tasks/grimoire/runtime-load/agents/${name}`;
 	const binding = await runtime.start(
 		{
@@ -131,7 +185,11 @@ const enroll = async (name: string, parent?: EngineBindingSnapshot & { agentInst
 		},
 		profile,
 	);
-	const item = { ...binding, agentInstanceRef };
+	const item = {
+		...binding,
+		agentInstanceRef,
+		rootAgentInstanceRef: parent?.rootAgentInstanceRef ?? agentInstanceRef,
+	};
 	bindings.push(item);
 	return item;
 };
@@ -139,6 +197,32 @@ for (let i = 0; i < roots; i++) {
 	const root = await enroll(`root-${i}`);
 	await enroll(`child-${i}-0`, root);
 	await enroll(`child-${i}-1`, root);
+}
+for (let i = bindings.length; i < catalogAgents; i++) {
+	const agentInstanceRef = `grimoire://tasks/grimoire/runtime-load/agents/catalog-${i}`;
+	await runtime.store.registerAgent({
+		agentInstanceId: engineAgentInstanceId(agentInstanceRef),
+		agentInstanceRef,
+		principalId,
+		authorityGeneration: 1,
+	});
+}
+if (historyEntries) {
+	const first = bindings[0];
+	const session = sessions.get(first.agentInstanceId);
+	if (!session) throw new Error("Fixture root session did not start before history preparation");
+	const existing = session.sessionManager.getEntries().filter(entry => entry.type === "message").length;
+	for (let i = existing; i < historyEntries; i++) {
+		session.sessionManager.appendMessage(
+			{ role: "user", content: `Canonical retained history entry ${i}`, timestamp: Date.now() },
+			{ clientMessageId: `fixture-history-${i}` },
+		);
+	}
+	const transcriptCheckpoint = await session.sessionManager.flushAndCheckpoint();
+	await runtime.store.commitAttemptTransition(first, "running", [], {
+		expectedStates: ["running"],
+		transcriptCheckpoint,
+	});
 }
 const stop = new AbortController();
 process.once("SIGINT", () => stop.abort());
@@ -203,8 +287,11 @@ console.log(
 		endpoint: server.endpoint,
 		principalId,
 		roots,
+		catalogAgents,
+		historyEntries,
 		agents: bindings.map(item => ({
 			agentInstanceRef: item.agentInstanceRef,
+			rootAgentInstanceRef: item.rootAgentInstanceRef,
 			attemptId: item.attemptId,
 			executionId: item.executionId,
 		})),

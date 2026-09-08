@@ -3203,6 +3203,11 @@ describe("EngineRuntime", () => {
 			"grimoire://tasks/project/history-task/agents/history-child-unadvertised",
 			parentId,
 		);
+		await runtimeRef.store.registerAgent({
+			agentInstanceId: "another-parent",
+			agentInstanceRef: "grimoire://tasks/project/history-task/agents/another-parent",
+			authorityGeneration: 1,
+		});
 		await startForeign(
 			foreignParentChildId,
 			"grimoire://tasks/project/history-task/agents/history-child-foreign-parent",
@@ -4117,10 +4122,18 @@ describe("EngineRuntime", () => {
 			disposition: "pending",
 		});
 
-		const parentChanged = await start("parent", { parentAgentInstanceId: "parent-agent-b" }, secondProfile);
-		await runtime.drain();
-		expect(parentChanged.sessionFile).not.toBe(dependencyChanged.sessionFile);
-		expect(priorUserMessages.get("parent")).toEqual([]);
+		await expect(start("parent", { parentAgentInstanceId: "parent-agent-b" }, secondProfile)).rejects.toMatchObject({
+			code: "stale_target",
+		});
+		expect(priorUserMessages.has("parent")).toBe(false);
+		expect((await runtime.store.getBinding(dependencyChanged.agentInstanceId))?.sessionFile).toBe(
+			dependencyChanged.sessionFile,
+		);
+		await runtime.store.registerAgent({
+			agentInstanceId: "parent-agent-b",
+			agentInstanceRef: "grimoire://tasks/project-b/task-b/agents/parent-agent-b",
+			authorityGeneration: 1,
+		});
 
 		const projectRef = "grimoire://tasks/project-b/task-b/agents/agent-exact-continuation";
 		await expect(
@@ -5588,6 +5601,13 @@ describe("EngineRuntime", () => {
 	it("preserves terminal child history by default and honors explicit expiry policies", async () => {
 		const starts = new Map<string, number>();
 		const startAgent = async (runtime: EngineRuntime, cwd: string, id: string, input: string, child = true) => {
+			if (child) {
+				await runtime.store.registerAgent({
+					agentInstanceId: "parent-agent",
+					agentInstanceRef: "grimoire://tasks/grimoire/history-test/agents/parent-agent",
+					authorityGeneration: 1,
+				});
+			}
 			const sequence = (starts.get(id) ?? 0) + 1;
 			starts.set(id, sequence);
 			const request = {
