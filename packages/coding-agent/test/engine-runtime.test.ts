@@ -2781,7 +2781,7 @@ describe("EngineRuntime", () => {
 			await runtime.drain();
 			const first = await runtime.store.getAttempt(request.attemptId);
 			expect(first?.state).toBe("completed");
-			expect(JSON.parse(first!.profile_route_state!)).toEqual(completedRoute);
+			expect(JSON.parse(first!.profile_route_state!)).toMatchObject(completedRoute);
 			const response = await client.request("snapshots.get", { attemptId: request.attemptId });
 			expect(response).toMatchObject({ profileRoute: completedRoute });
 			const events = (await runtime.store.pendingEvents()).filter(event => event.attemptId === request.attemptId);
@@ -2790,6 +2790,7 @@ describe("EngineRuntime", () => {
 				{ ...completedRoute, routeRef: undefined, pendingRouteRef: completedRoute.routeRef, phase: "loading" },
 				completedRoute,
 			]);
+			expect(JSON.parse(first!.profile_route_state!).eventSeq).toBe(changes.at(-1)!.seq);
 			expect(events.indexOf(changes[1]!)).toBeLessThan(events.findIndex(event => event.kind === "completed"));
 			await runtime.start(
 				{
@@ -2813,7 +2814,7 @@ describe("EngineRuntime", () => {
 		}
 		const reopened = await EngineRuntime.create({ databasePath: options.databasePath });
 		try {
-			expect(JSON.parse((await reopened.store.getAttempt(request.attemptId))!.profile_route_state!)).toEqual(
+			expect(JSON.parse((await reopened.store.getAttempt(request.attemptId))!.profile_route_state!)).toMatchObject(
 				completedRoute,
 			);
 		} finally {

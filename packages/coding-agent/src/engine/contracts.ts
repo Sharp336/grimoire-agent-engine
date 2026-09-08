@@ -28,6 +28,8 @@ export interface EngineRetryState {
 
 /** Attempt-local routing facts; phase describes routing, not the Attempt's lifecycle. */
 export interface EngineProfileRouteState {
+	/** Durable route-event sequence, present on queried snapshots. */
+	eventSeq?: number;
 	profileRef: string;
 	primaryRouteRef: string;
 	/** Last route observed in an assistant stream, never merely the next selected model. */

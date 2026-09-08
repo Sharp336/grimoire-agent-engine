@@ -1446,10 +1446,15 @@ export class EngineStore {
 				],
 			)) as Array<{ attempt_id: string }>;
 			if (rows.length === 0) return undefined;
-			return await this.#appendTransitionEvent(sql, target, {
+			const event = await this.#appendTransitionEvent(sql, target, {
 				kind: "profile_route_changed",
 				payload: { profileRoute },
 			});
+			await sql.unsafe("UPDATE engine_attempts SET profile_route_state=? WHERE attempt_id=?", [
+				JSON.stringify({ ...profileRoute, eventSeq: event.seq }),
+				target.attemptId,
+			]);
+			return event;
 		});
 	}
 

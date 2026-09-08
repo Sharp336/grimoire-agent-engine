@@ -76,11 +76,14 @@ describe("EngineStore", () => {
 		}
 		const reopened = await EngineStore.open(databasePath);
 		try {
-			expect(JSON.parse((await reopened.getAttempt(binding.attemptId))!.profile_route_state!)).toEqual(state);
+			expect(JSON.parse((await reopened.getAttempt(binding.attemptId))!.profile_route_state!)).toEqual({
+				...state,
+				eventSeq: 1,
+			});
 			expect(
 				(await reopened.listAttempts()).find(attempt => attempt.attempt_id === binding.attemptId)
 					?.profile_route_state,
-			).toBe(JSON.stringify(state));
+			).toBe(JSON.stringify({ ...state, eventSeq: 1 }));
 			expect((await reopened.pendingEvents()).filter(event => event.kind === "profile_route_changed")).toHaveLength(
 				1,
 			);
