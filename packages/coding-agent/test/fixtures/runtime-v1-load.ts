@@ -1,3 +1,4 @@
+import { once } from "node:events";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { monitorEventLoopDelay, performance } from "node:perf_hooks";
@@ -29,7 +30,7 @@ const rate = Number(args.get("--rate") ?? 20);
 const seconds = Number(args.get("--seconds") ?? 1800);
 const noisyRate = Number(args.get("--noisy-rate") ?? 0);
 if (
-	![1, 7, 14, 28].includes(roots) ||
+	![1, 2, 7, 14, 28].includes(roots) ||
 	![20, 200].includes(rate) ||
 	!Number.isFinite(seconds) ||
 	seconds <= 0 ||
@@ -146,11 +147,16 @@ const lag = monitorEventLoopDelay({ resolution: 10 });
 lag.enable();
 const started = performance.now();
 const metrics = fs.createWriteStream(path.join(directory, "metrics.ndjson"), { flags: "wx" });
+const writeMetric = async (value: Record<string, unknown>) => {
+	if (!metrics.write(`${JSON.stringify(value)}\n`)) await once(metrics, "drain");
+};
 const payload = "x".repeat(1024);
 let produced = 0;
 let commitMs = 0;
 const streams = new Map<string, { revision: number; offset: number }>();
 const produce = async (binding: EngineBindingSnapshot & { agentInstanceRef: string }) => {
+	const current = runtime.getBinding(binding.agentInstanceId);
+	if (!current || current.attemptId !== binding.attemptId || current.state !== "running" || current.manualHold) return;
 	const stream = streams.get(binding.attemptId) ?? { revision: 0, offset: 0 };
 	streams.set(binding.attemptId, stream);
 	const baseRevision = stream.revision++;
@@ -178,6 +184,15 @@ const produce = async (binding: EngineBindingSnapshot & { agentInstanceRef: stri
 	});
 	produced++;
 	commitMs += performance.now() - began;
+	if (stream.revision % 20 === 0)
+		await writeMetric({
+			kind: "commit_sample",
+			cursor: event.eventId,
+			committedAt: Date.now(),
+			agentInstanceRef: binding.agentInstanceRef,
+			attemptId: binding.attemptId,
+			revision: stream.revision,
+		});
 	return event.eventId;
 };
 const provenance = await Bun.$`git rev-parse HEAD`.quiet().text();
@@ -224,9 +239,19 @@ try {
 					return 0;
 				}
 			});
-			metrics.write(
-				`${JSON.stringify({ at: Date.now(), elapsedMs: performance.now() - started, produced, commitMs, lagP95Ms: lag.percentile(95) / 1e6, lagMaxMs: lag.max / 1e6, rssBytes: process.memoryUsage().rss, sqliteBytes: files[0], walBytes: files[1], loopUtilization: performance.eventLoopUtilization() })}\n`,
-			);
+			await writeMetric({
+				kind: "metrics",
+				at: Date.now(),
+				elapsedMs: performance.now() - started,
+				produced,
+				commitMs,
+				lagP95Ms: lag.percentile(95) / 1e6,
+				lagMaxMs: lag.max / 1e6,
+				rssBytes: process.memoryUsage().rss,
+				sqliteBytes: files[0],
+				walBytes: files[1],
+				loopUtilization: performance.eventLoopUtilization(),
+			});
 			lag.reset();
 			lastSample = performance.now();
 		}
@@ -241,10 +266,8 @@ try {
 	await adapter?.dispose();
 	await runtime.dispose();
 	auth.close();
-	await new Promise<void>((resolve, reject) => {
-		metrics.once("error", reject);
-		metrics.end(resolve);
-	});
+	metrics.end();
+	await once(metrics, "finish");
 	console.log(
 		JSON.stringify({ kind: "complete", directory, produced, commitMs, elapsedMs: performance.now() - started }),
 	);
