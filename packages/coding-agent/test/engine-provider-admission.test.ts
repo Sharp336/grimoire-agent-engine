@@ -23,6 +23,7 @@ describe("ProviderAdmissionClient", () => {
 				modelId?: string;
 				accountBindingId?: string;
 				usageReport?: UsageReport;
+				executionPin?: string;
 			};
 			if (body.phase === "before") {
 				admissionBefore += 1;
@@ -30,6 +31,7 @@ describe("ProviderAdmissionClient", () => {
 				expect(body.accountBindingId).toBe("acct-1");
 				expect(body.usageReport?.metadata?.accountId).toBe("acct-1");
 				expect(body.usageReport?.raw).toBeUndefined();
+				expect(body.executionPin).toBe("a".repeat(64));
 			} else admissionAfter += 1;
 			return Response.json({ allowed: true, status: "within_weekly_ceiling" });
 		};
@@ -43,7 +45,7 @@ describe("ProviderAdmissionClient", () => {
 			},
 		} as unknown as AuthStorage;
 		const wrapped = new ProviderAdmissionClient("http://127.0.0.1/provider-admission", "token", admissionFetch)
-			.createHook(identity(), authStorage, "https://chatgpt.com/backend-api")
+			.createHook({ ...identity(), executionPin: "a".repeat(64) }, authStorage, "https://chatgpt.com/backend-api")
 			.wrapFetch(model(), async () => {
 				providerCalls += 1;
 				return new Response("ok");
@@ -58,6 +60,27 @@ describe("ProviderAdmissionClient", () => {
 		});
 		expect(invalidations).toBe(4);
 		expect(admissionAfter).toBe(2);
+	});
+
+	it("rejects missing or denied launch pins instead of admitting a mutable subscription profile", async () => {
+		for (const decision of [
+			{ allowed: true },
+			{ allowed: true, executionPin: "bad" },
+			{ allowed: false, status: "provider_identity_stale" },
+		]) {
+			const client = new ProviderAdmissionClient("http://127.0.0.1/admission", "token", async () =>
+				Response.json(decision),
+			);
+			await expect(client.pin(identity(), model().id)).rejects.toBeInstanceOf(ProviderAdmissionError);
+		}
+		const client = new ProviderAdmissionClient("http://127.0.0.1/admission", "token", async (_input, init) => {
+			const request = JSON.parse(String(init?.body));
+			expect(request.phase).toBe("pin");
+			expect(request.modelId).toBe(model().id);
+			expect(request.usageReport).toBeUndefined();
+			return Response.json({ allowed: true, executionPin: "a".repeat(64) });
+		});
+		expect(await client.pin(identity(), model().id)).toBe("a".repeat(64));
 	});
 
 	it("fails closed with a permanent typed error before provider dispatch", async () => {

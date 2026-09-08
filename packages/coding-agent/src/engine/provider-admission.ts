@@ -60,6 +60,7 @@ class ProviderSseOutcome {
 }
 
 export interface ProviderAdmissionIdentity {
+	executionPin?: string;
 	expectedPrincipalId: string;
 	profileRef: string;
 	profileContentHash: string;
@@ -88,6 +89,7 @@ export interface ProviderApiKeyRouteIdentity {
 
 interface ProviderAdmissionDecision {
 	allowed: boolean;
+	executionPin?: string;
 	status?: string;
 	reason?: string;
 }
@@ -144,6 +146,23 @@ export class ProviderAdmissionClient {
 		readonly token: string,
 		readonly requestFetch: Fetch = globalThis.fetch,
 	) {}
+
+	async pin(identity: ProviderAdmissionIdentity, modelId: string, signal?: AbortSignal): Promise<string> {
+		const decision = await this.#post({ phase: "pin", ...identity, modelId }, signal);
+		if (!decision.allowed) {
+			throw new ProviderAdmissionError(
+				decision.status || "provider_admission_denied",
+				"The launch profile could not be authorized",
+			);
+		}
+		if (typeof decision.executionPin !== "string" || !/^[a-f0-9]{64}$/.test(decision.executionPin)) {
+			throw new ProviderAdmissionError(
+				"provider_admission_invalid_response",
+				"The launch profile pin is unavailable",
+			);
+		}
+		return decision.executionPin;
+	}
 
 	createHook(
 		identity: ProviderAdmissionIdentity | undefined,

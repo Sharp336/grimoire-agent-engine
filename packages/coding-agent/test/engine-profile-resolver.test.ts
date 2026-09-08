@@ -681,7 +681,13 @@ describe("EngineProfileResolver", () => {
 			cache,
 			path.join(root, "credentials"),
 			localDb,
-			new ProviderAdmissionClient("http://127.0.0.1/admission", "test-token"),
+			new ProviderAdmissionClient("http://127.0.0.1/admission", "test-token", async (_input, init) => {
+				const request = JSON.parse(String(init?.body));
+				expect(request.phase).toBe("pin");
+				expect(request.profileRef).toBe(profileRef);
+				expect(request.accountBindingId).toBe("account-b");
+				return Response.json({ allowed: true, executionPin: "a".repeat(64) });
+			}),
 		);
 		const resolved = await resolver.resolve(
 			{ spawns: "", profileDigest: hash(profileRef), launchProfileRef: profileRef },

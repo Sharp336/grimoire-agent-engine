@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- Kept running Codex-subscription agents on their launch profile after profile edits, without bypassing fresh account quota checks.
 - Isolated route credentials and model settings when several profile slots use the same provider account.
 - Skipped unavailable fallback credentials without losing later approved routes, and respected Stop while those credentials resolve.
 - Kept owner-local Agent Engine runs on their authorized profile routes after profile edits, while still checking current connection trust and access.

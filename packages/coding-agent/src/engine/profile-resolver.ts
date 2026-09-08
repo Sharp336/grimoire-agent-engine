@@ -15,7 +15,11 @@ import { concreteThinkingLevel, resolveThinkingLevelForModel } from "../thinking
 import type { EngineChildProfile } from "../tools";
 import type { EngineLaunchProfile, EngineProfileRoutes } from "./contracts";
 import { resolveExecutableModelLimits } from "./model-limits";
-import type { ProviderAdmissionClient, ProviderApiKeyRouteIdentity } from "./provider-admission";
+import type {
+	ProviderAdmissionClient,
+	ProviderAdmissionIdentity,
+	ProviderApiKeyRouteIdentity,
+} from "./provider-admission";
 import type {
 	ProviderExecutionClient,
 	ProviderExecutionIdentity,
@@ -358,7 +362,7 @@ export class EngineProfileResolver {
 		const executionMaterial = executionIdentity
 			? await this.providerExecutionClient!.resolve(executionIdentity, signal)
 			: undefined;
-		const admissionIdentity =
+		const admissionIdentity: ProviderAdmissionIdentity | undefined =
 			account.providerKind === "openai_codex_subscription"
 				? {
 						expectedPrincipalId: requiredText(cachedPrincipalId, "cached profile principal"),
@@ -378,6 +382,13 @@ export class EngineProfileResolver {
 		}
 		if (admissionIdentity && !this.providerAdmissionClient) {
 			throw new Error("Provider quota admission is unavailable");
+		}
+		if (admissionIdentity) {
+			admissionIdentity.executionPin = await this.providerAdmissionClient!.pin(
+				admissionIdentity,
+				route.model.modelId,
+				signal,
+			);
 		}
 		const settings = await Settings.loadReadOnly({
 			cwd,
