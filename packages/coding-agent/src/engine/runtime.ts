@@ -341,6 +341,7 @@ export interface EngineRuntimeOptions {
 		options: Partial<CreateAgentSessionOptions>;
 		childProfiles?: EngineChildProfile[];
 		sameModelRouteFallback?: NonNullable<TurnRetryPolicy["sameModelRouteFallback"]>;
+		orderedRouteFallback?: NonNullable<TurnRetryPolicy["orderedRouteFallback"]>;
 		dispose(): void;
 	}>;
 	/** Exact non-secret digest of every external dependency resolved for this launch. */
@@ -2548,6 +2549,7 @@ export class EngineRuntime {
 					allowRetryAfterBeyondMaxDelay: true,
 					deferNestedProviderRetries: true,
 					sameModelRouteFallback: resolved?.sameModelRouteFallback,
+					orderedRouteFallback: resolved?.orderedRouteFallback,
 				},
 				pauseGate,
 				parentAgentId: request.parentAgentInstanceId ? engineAgentId(request.parentAgentInstanceId) : undefined,

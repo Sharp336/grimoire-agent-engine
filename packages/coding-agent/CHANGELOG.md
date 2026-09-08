@@ -4,6 +4,7 @@
 
 ### Added
 
+- AgentProfiles can explicitly opt into their saved cross-model fallback order; editing existing same-model profiles does not silently enable it.
 - Added explicit ordered model/provider recovery for replay-safe failed turns without cycling back to earlier routes.
 - Added restart-safe Agent Engine conversation history plus configurable terminal-child transcript retention.
 - Added authenticated Engine session context, usage, compaction, release, and durable inbox controls for non-TUI clients.
@@ -15,6 +16,7 @@
 
 ### Fixed
 
+- Isolated route credentials and model settings when several profile slots use the same provider account.
 - Skipped unavailable fallback credentials without losing later approved routes, and respected Stop while those credentials resolve.
 - Kept owner-local Agent Engine runs on their authorized profile routes after profile edits, while still checking current connection trust and access.
 - Kept queued messages on hold when manual Pause reaches the Engine just after its answer finishes.

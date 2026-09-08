@@ -19,6 +19,142 @@ const refs = {
 };
 
 describe("EngineProfileResolver", () => {
+	it("isolates same-account models, pins each credential, and follows explicit ordered profile slots", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-engine-ordered-account-"));
+		const cache = path.join(root, "artifacts");
+		await fs.mkdir(cache);
+		const profileRef = "gctx:abababababababab";
+		const accountRef = "gctx:cdcdcdcdcdcdcdcd";
+		const routeRefs = ["gctx:efefefefefefefef", "gctx:ghghghghghghghgh", "gctx:jkjkjkjkjkjkjkjk"];
+		const modelIds = ["gpt-5.6-terra", "gpt-5.6-sol", "plain-model"];
+		const profile = {
+			schema: "grimoire.agent_profile.v1",
+			status: "active",
+			models: routeRefs,
+			allowSameModelProviderFallback: true,
+			allowCrossModelFallback: true,
+		};
+		const pins = new Map<string, string>();
+		const lookups: string[] = [];
+		const execution = new ProviderExecutionClient(
+			"http://127.0.0.1/provider-execution",
+			"fixture-token",
+			async (_url, init) => {
+				const request = JSON.parse(String(init?.body));
+				lookups.push(request.routeRef);
+				const pin = pins.get(request.routeRef) ?? "a".repeat(64);
+				if (request.executionPin !== undefined) expect(request.executionPin).toBe(pin);
+				pins.set(request.routeRef, pin);
+				return Response.json({
+					...request,
+					schema: "grimoire.provider_execution.result.v1",
+					status: "ready",
+					allowed: true,
+					mode: "owner_local",
+					executionPin: pin,
+					providerRuntimeId: "one-shared-account",
+					api: "openai-completions",
+					baseUrl: "https://fixture.invalid/v1",
+					credential: `secret-for-${request.routeRef}`,
+				});
+			},
+		);
+		const resolver = new EngineProfileResolver(
+			cache,
+			path.join(root, "credentials"),
+			undefined,
+			undefined,
+			execution,
+		);
+		try {
+			await artifact(cache, profileRef, "grimoire.agent_profile.v1", profile);
+			await artifact(cache, accountRef, "grimoire.provider_account.v1", {
+				schema: "grimoire.provider_account.v1",
+				status: "active",
+				providerId: "cheapai",
+				api: "openai-completions",
+				baseUrl: "https://fixture.invalid/v1",
+				trusted: true,
+				credential: { type: "api_key", key: `wincred://fixture.${"a".repeat(64)}` },
+			});
+			for (const [index, routeRef] of routeRefs.entries()) {
+				await artifact(cache, routeRef, "grimoire.available_model_route.v1", {
+					schema: "grimoire.available_model_route.v1",
+					status: "active",
+					providerAccountRef: accountRef,
+					model: {
+						modelIdentityId: modelIds[index],
+						providerSurfaceId: "cheapai",
+						modelId: modelIds[index],
+						contextWindow: 32000 + index,
+						maxOutputTokens: 8192,
+						supportsReasoning: index < 2,
+					},
+				});
+			}
+			const launch = { spawns: "", profileDigest: hash(profileRef), launchProfileRef: profileRef };
+			const resolved = await resolver.resolve(launch, root);
+			try {
+				expect(resolved.sameModelRouteFallback).toBeUndefined();
+				expect(resolved.orderedRouteFallback?.selectors).toEqual(
+					routeRefs.map((ref, index) => `artel-route-${ref.slice(5)}/${modelIds[index]}`),
+				);
+				for (const refresh of [false, true]) {
+					if (refresh) await resolved.options.modelRegistry!.refresh("offline");
+					for (const [index, routeRef] of routeRefs.entries()) {
+						const model = resolved.options.modelRegistry!.find(
+							`artel-route-${routeRef.slice(5)}`,
+							modelIds[index]!,
+						)!;
+						expect(model.contextWindow).toBe(32000 + index);
+						expect(await resolved.options.modelRegistry!.getApiKey(model)).toBe(`secret-for-${routeRef}`);
+						expect(lookups.at(-1)).toBe(routeRef);
+					}
+				}
+			} finally {
+				resolved.dispose();
+			}
+			const selected = await resolver.resolve({ ...launch, selectedRouteRef: routeRefs[1] }, root);
+			try {
+				expect(selected.orderedRouteFallback?.selectors).toEqual(
+					routeRefs.slice(1).map((ref, index) => `artel-route-${ref.slice(5)}/${modelIds[index + 1]}`),
+				);
+			} finally {
+				selected.dispose();
+			}
+			const high = await resolver.resolve(
+				{ ...launch, thinkingLevel: ThinkingLevel.Max, minimumThinkingLevel: "high" },
+				root,
+			);
+			try {
+				expect(high.orderedRouteFallback?.selectors).toEqual(
+					routeRefs.slice(0, 2).map((ref, index) => `artel-route-${ref.slice(5)}/${modelIds[index]}`),
+				);
+			} finally {
+				high.dispose();
+			}
+			await artifact(cache, profileRef, "grimoire.agent_profile.v1", { ...profile, allowCrossModelFallback: false });
+			const sameOnly = await resolver.resolve(launch, root);
+			try {
+				expect(sameOnly.orderedRouteFallback).toBeUndefined();
+				expect(sameOnly.sameModelRouteFallback?.selectors).toEqual([
+					`artel-route-${routeRefs[0]!.slice(5)}/${modelIds[0]}`,
+				]);
+			} finally {
+				sameOnly.dispose();
+			}
+			await artifact(cache, profileRef, "grimoire.agent_profile.v1", {
+				...profile,
+				allowCrossModelFallback: "true",
+			});
+			const beforeInvalid = lookups.length;
+			await expect(resolver.resolve(launch, root)).rejects.toThrow("allowCrossModelFallback must be boolean");
+			expect(lookups.length).toBe(beforeInvalid);
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
 	it("builds an ordered runtime chain only from configured routes with the same model identity", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-engine-profile-routes-"));
 		const cache = path.join(root, "artifacts");
@@ -76,17 +212,23 @@ describe("EngineProfileResolver", () => {
 			expect(resolved.options.model?.maxTokens).toBe(128_000);
 			expect(resolved.sameModelRouteFallback).toEqual({
 				modelIdentityId: "claude-opus-5",
-				selectors: ["cheapai/claude-opus-5", "million/claude-opus-5", "aiberm/claude-opus-5"],
+				selectors: [0, 1, 3].map(index => `artel-route-${routeRefs[index]!.slice(5)}/claude-opus-5`),
 			});
-			expect(resolved.options.modelRegistry?.find("million", "claude-opus-5")?.baseUrl).toBe(
-				"https://million.invalid",
-			);
-			expect(resolved.options.modelRegistry?.find("million", "claude-opus-5")?.api).toBe("anthropic-messages");
-			expect(resolved.options.modelRegistry?.find("aiberm", "claude-opus-5")?.baseUrl).toBe(
-				"https://aiberm.invalid",
-			);
-			expect(resolved.options.modelRegistry?.find("different", "claude-opus-5")).toBeUndefined();
-			expect(resolved.options.modelRegistry?.find("hidden", "claude-opus-5")).toBeUndefined();
+			expect(
+				resolved.options.modelRegistry?.find(`artel-route-${routeRefs[1]!.slice(5)}`, "claude-opus-5")?.baseUrl,
+			).toBe("https://million.invalid");
+			expect(
+				resolved.options.modelRegistry?.find(`artel-route-${routeRefs[1]!.slice(5)}`, "claude-opus-5")?.api,
+			).toBe("anthropic-messages");
+			expect(
+				resolved.options.modelRegistry?.find(`artel-route-${routeRefs[3]!.slice(5)}`, "claude-opus-5")?.baseUrl,
+			).toBe("https://aiberm.invalid");
+			expect(
+				resolved.options.modelRegistry?.find(`artel-route-${routeRefs[2]!.slice(5)}`, "claude-opus-5"),
+			).toBeUndefined();
+			expect(
+				resolved.options.modelRegistry?.find(`artel-route-${hiddenRouteRef.slice(5)}`, "claude-opus-5"),
+			).toBeUndefined();
 			expect(resolved.options.authStorage?.get("million")).toEqual({ type: "api_key", key: "million-key" });
 		} finally {
 			resolved.dispose();
@@ -101,8 +243,10 @@ describe("EngineProfileResolver", () => {
 			root,
 		);
 		try {
-			expect(pinned.options.model?.provider).toBe("different");
-			expect(pinned.sameModelRouteFallback?.selectors).toEqual(["different/claude-opus-5"]);
+			expect(pinned.options.model?.provider).toBe(`artel-route-${routeRefs[2]!.slice(5)}`);
+			expect(pinned.sameModelRouteFallback?.selectors).toEqual([
+				`artel-route-${routeRefs[2]!.slice(5)}/claude-opus-5`,
+			]);
 		} finally {
 			pinned.dispose();
 		}
@@ -134,11 +278,11 @@ describe("EngineProfileResolver", () => {
 			root,
 		);
 		try {
-			expect(startupFallback.options.model?.provider).toBe("million");
+			expect(startupFallback.options.model?.provider).toBe(`artel-route-${routeRefs[1]!.slice(5)}`);
 			expect(startupFallback.options.model?.api).toBe("anthropic-messages");
 			expect(startupFallback.sameModelRouteFallback?.selectors).toEqual([
-				"million/claude-opus-5",
-				"aiberm/claude-opus-5",
+				`artel-route-${routeRefs[1]!.slice(5)}/claude-opus-5`,
+				`artel-route-${routeRefs[3]!.slice(5)}/claude-opus-5`,
 			]);
 		} finally {
 			startupFallback.dispose();
@@ -540,9 +684,12 @@ describe("EngineProfileResolver", () => {
 			expect(resolved.options.settings?.get("providers.openaiWebsockets")).toBe("off");
 			expect(resolved.sameModelRouteFallback?.selectors).toEqual([
 				"openai-codex/gpt-5.6-sol",
-				"cheapai-account-1/gpt-5.6-sol",
+				`artel-route-${fallbackRouteRef.slice(5)}/gpt-5.6-sol`,
 			]);
-			const fallbackModel = resolved.options.modelRegistry?.find("cheapai-account-1", "gpt-5.6-sol");
+			const fallbackModel = resolved.options.modelRegistry?.find(
+				`artel-route-${fallbackRouteRef.slice(5)}`,
+				"gpt-5.6-sol",
+			);
 			expect(fallbackModel).toBeDefined();
 			expect(await resolved.options.modelRegistry?.getApiKey(fallbackModel!)).toBe("fallback-key");
 			let fallbackCalls = 0;
@@ -671,11 +818,11 @@ describe("EngineProfileResolver", () => {
 		);
 		try {
 			const model = resolved.options.model!;
-			expect(model.provider).toBe(`artel-${accountRef.slice(5)}`);
+			expect(model.provider).toBe(`artel-route-${routeRef.slice(5)}`);
 			expect(model.baseUrl).toBe("https://cheapai.invalid/v1");
 			expect(await resolved.options.modelRegistry!.getApiKey(model)).toBe("owner-secret");
 			const fallback = resolved.options.modelRegistry!.find(
-				`artel-${fallbackAccountRef.slice(5)}`,
+				`artel-route-${fallbackRouteRef.slice(5)}`,
 				"gpt-5.6-terra",
 			)!;
 			expect(fallback.baseUrl).toBe("https://core.invalid/runtime/provider-broker/v1");
@@ -692,7 +839,7 @@ describe("EngineProfileResolver", () => {
 		const reopened = await AuthStorage.create(credentialDb);
 		try {
 			await reopened.reload();
-			expect(reopened.listStoredCredentials(`artel-${accountRef.slice(5)}`)).toHaveLength(0);
+			expect(reopened.listStoredCredentials(`artel-route-${routeRef.slice(5)}`)).toHaveLength(0);
 		} finally {
 			reopened.close();
 		}

@@ -42,6 +42,7 @@ interface AgentProfile {
 	status?: "active" | "disabled";
 	models: string[];
 	allowSameModelProviderFallback?: boolean;
+	allowCrossModelFallback?: boolean;
 	requireTrustedProvider?: boolean;
 	autoSelectionEnabled?: boolean;
 	tools?: { mode?: "unrestricted" | "allowlist"; names?: string[] };
@@ -102,6 +103,7 @@ export interface ResolvedEngineSessionProfile {
 	>;
 	childProfiles: EngineChildProfile[];
 	sameModelRouteFallback?: NonNullable<TurnRetryPolicy["sameModelRouteFallback"]>;
+	orderedRouteFallback?: NonNullable<TurnRetryPolicy["orderedRouteFallback"]>;
 	dispose(): void;
 }
 
@@ -125,6 +127,9 @@ export class EngineProfileResolver {
 			throw new Error("AgentProfile must contain at least one route");
 		}
 		const spawnPolicy = resolveSpawnPolicy(profile, launch);
+		if (profile.allowCrossModelFallback !== undefined && typeof profile.allowCrossModelFallback !== "boolean") {
+			throw new Error("AgentProfile allowCrossModelFallback must be boolean");
+		}
 		const settings = await Settings.loadReadOnly({
 			cwd,
 			overrides: {
@@ -193,7 +198,7 @@ export class EngineProfileResolver {
 		const configuredRouteRefs = profile.models.map((ref, index) => requiredRef(ref, `models[${index}]`));
 		const childProfiles = await this.#childProfiles(spawnPolicy.childProfileRefs);
 		let sameModelIdentityId: string | undefined;
-		if (profile.allowSameModelProviderFallback) {
+		if (profile.allowSameModelProviderFallback && !profile.allowCrossModelFallback) {
 			const identityCandidates = launch.selectedRouteRef ? [launch.selectedRouteRef] : candidates;
 			for (const routeRef of identityCandidates) {
 				signal?.throwIfAborted();
@@ -232,9 +237,11 @@ export class EngineProfileResolver {
 					childProfiles,
 					cwd,
 					spawnPolicy.maxSpawnDepth,
-					profile.allowSameModelProviderFallback
+					profile.allowSameModelProviderFallback || profile.allowCrossModelFallback
 						? launch.selectedRouteRef
-							? configuredRouteRefs.filter(ref => ref !== routeRef)
+							? profile.allowCrossModelFallback
+								? configuredRouteRefs.slice(configuredRouteRefs.indexOf(routeRef) + 1)
+								: configuredRouteRefs.filter(ref => ref !== routeRef)
 							: candidates.slice(index + 1)
 						: [],
 					signal,
@@ -261,6 +268,9 @@ export class EngineProfileResolver {
 	}
 
 	async #routeCandidates(profile: AgentProfile, selected?: string): Promise<string[]> {
+		if (profile.allowCrossModelFallback !== undefined && typeof profile.allowCrossModelFallback !== "boolean") {
+			throw new Error("AgentProfile allowCrossModelFallback must be boolean");
+		}
 		const configured = profile.models.map((ref, index) => requiredRef(ref, `models[${index}]`));
 		if (selected) {
 			const selectedRef = requiredRef(selected, "selectedRouteRef");
@@ -431,7 +441,7 @@ export class EngineProfileResolver {
 					transport: executionTransport(executionMaterial),
 					executionPin: executionMaterial.executionPin,
 				});
-				await authStorage.set(executionMaterial.providerRuntimeId, { type: "api_key", key: marker });
+				await authStorage.set(routeRuntimeProvider(account, routeRef), { type: "api_key", key: marker });
 			} else if (embeddedCredential) {
 				const sourcePath = path.join(accountDir, "source.json");
 				const source = await readJson(sourcePath);
@@ -469,10 +479,14 @@ export class EngineProfileResolver {
 				ignoreLocalModelConfig: true,
 				cacheDbPath: path.join(accountDir, "models.sqlite"),
 			});
-			const model = buildModel(toModelSpec(route, account, executionMaterial)) as Model;
-			if (executionMaterial) {
+			const model = buildModel(toModelSpec(route, account, routeRef, executionMaterial)) as Model;
+			if (executionMaterial || embeddedCredential?.type === "api_key") {
 				modelRegistry.registerProvider(model.provider, {
-					authStorageManaged: true,
+					...(executionMaterial
+						? { authStorageManaged: true }
+						: embeddedCredential?.type === "api_key"
+							? { apiKey: embeddedCredential.key }
+							: {}),
 					api: model.api,
 					baseUrl: model.baseUrl,
 					headers: account.headers,
@@ -489,7 +503,10 @@ export class EngineProfileResolver {
 					baseUrl: model.baseUrl,
 				});
 			}
-			if (profile.allowSameModelProviderFallback && (embeddedCredential || localBinding)) {
+			if (
+				(profile.allowSameModelProviderFallback || profile.allowCrossModelFallback) &&
+				(embeddedCredential || localBinding)
+			) {
 				for (const fallbackRouteRef of fallbackRouteRefs) {
 					signal?.throwIfAborted();
 					try {
@@ -500,7 +517,8 @@ export class EngineProfileResolver {
 						);
 						if (
 							fallbackRoute.status === "disabled" ||
-							fallbackRoute.model.modelIdentityId !== route.model.modelIdentityId
+							(!profile.allowCrossModelFallback &&
+								fallbackRoute.model.modelIdentityId !== route.model.modelIdentityId)
 						) {
 							continue;
 						}
@@ -530,8 +548,11 @@ export class EngineProfileResolver {
 						}
 						if (!externalFallback) {
 							if (!localBinding) await authStorage.set(fallbackAccount.providerId, fallbackCredential);
-							const fallbackModel = buildModel(toModelSpec(fallbackRoute, fallbackAccount)) as Model;
-							modelRegistry.registerProvider(fallbackAccount.providerId, {
+							const fallbackModel = buildModel(
+								toModelSpec(fallbackRoute, fallbackAccount, fallbackRouteRef),
+							) as Model;
+							profileThinkingLevel(fallbackModel, profile, launch);
+							modelRegistry.registerProvider(fallbackModel.provider, {
 								apiKey: fallbackCredential.key,
 								api: fallbackModel.api,
 								baseUrl: fallbackAccount.baseUrl,
@@ -546,7 +567,7 @@ export class EngineProfileResolver {
 								providerAccountContentHash: fallbackCachedAccount.content_hash,
 								routeRef: fallbackRouteRef,
 								routeContentHash: fallbackCachedRoute.content_hash,
-								providerId: fallbackModel.provider,
+								providerId: fallbackAccount.providerId,
 								runtimeProviderId: fallbackModel.provider,
 								modelId: fallbackModel.id,
 								baseUrl: fallbackModel.baseUrl,
@@ -573,13 +594,14 @@ export class EngineProfileResolver {
 							transport: executionTransport(fallbackMaterial),
 							executionPin: fallbackMaterial.executionPin,
 						});
-						await authStorage.set(fallbackMaterial.providerRuntimeId, {
+						await authStorage.set(routeRuntimeProvider(fallbackAccount, fallbackRouteRef), {
 							type: "api_key",
 							key: fallbackMarker,
 						});
 						const fallbackModel = buildModel(
-							toModelSpec(fallbackRoute, fallbackAccount, fallbackMaterial),
+							toModelSpec(fallbackRoute, fallbackAccount, fallbackRouteRef, fallbackMaterial),
 						) as Model;
+						profileThinkingLevel(fallbackModel, profile, launch);
 						modelRegistry.registerProvider(fallbackModel.provider, {
 							authStorageManaged: true,
 							api: fallbackModel.api,
@@ -613,14 +635,7 @@ export class EngineProfileResolver {
 						: launchRestricted
 							? launchNames
 							: undefined;
-			const thinkingLevel = launch.thinkingLevel ?? profile.generationDefaults?.thinkingLevel;
-			const resolvedThinkingLevel = resolveThinkingLevelForModel(model, concreteThinkingLevel(thinkingLevel));
-			if (
-				launch.minimumThinkingLevel === "high" &&
-				!(["high", "xhigh", "max"] as const).includes(resolvedThinkingLevel as "high" | "xhigh" | "max")
-			) {
-				throw new Error("Selected model cannot satisfy minimum thinking level high");
-			}
+			const resolvedThinkingLevel = profileThinkingLevel(model, profile, launch);
 			return {
 				options: {
 					settings,
@@ -644,14 +659,16 @@ export class EngineProfileResolver {
 					maxSpawnDepth,
 				},
 				childProfiles,
-				...(profile.allowSameModelProviderFallback
-					? {
-							sameModelRouteFallback: {
-								modelIdentityId: route.model.modelIdentityId,
-								selectors: fallbackSelectors,
-							},
-						}
-					: {}),
+				...(profile.allowCrossModelFallback
+					? { orderedRouteFallback: { selectors: fallbackSelectors } }
+					: profile.allowSameModelProviderFallback
+						? {
+								sameModelRouteFallback: {
+									modelIdentityId: route.model.modelIdentityId,
+									selectors: fallbackSelectors,
+								},
+							}
+						: {}),
 				dispose: () => {
 					unsubscribeWriteback();
 					authStorage.close();
@@ -707,6 +724,7 @@ export class EngineProfileResolver {
 function toModelSpec(
 	route: AvailableModelRoute,
 	account: ProviderAccount,
+	routeRef: string,
 	execution?: ProviderExecutionMaterial,
 ): ModelSpec<Api> {
 	const { contextWindow, maxOutputTokens } = resolveExecutableModelLimits(route.model);
@@ -718,7 +736,7 @@ function toModelSpec(
 		requestModelId: route.model.requestModelId,
 		name: route.model.name || route.displayName || route.model.modelId,
 		api: execution?.api ?? nativeProviderApi(account.api),
-		provider: execution?.providerRuntimeId ?? account.providerId,
+		provider: routeRuntimeProvider(account, routeRef),
 		baseUrl: execution?.baseUrl ?? account.baseUrl,
 		headers: account.headers,
 		reasoning: route.model.supportsReasoning === true,
@@ -728,6 +746,28 @@ function toModelSpec(
 		contextWindow: Number(contextWindow),
 		maxTokens: maxOutputTokens,
 	};
+}
+
+function routeRuntimeProvider(account: ProviderAccount, routeRef: string): string {
+	return account.credential?.type === "api_key" ? `artel-route-${routeRef.slice(5)}` : account.providerId;
+}
+
+function profileThinkingLevel(
+	model: Model,
+	profile: AgentProfile,
+	launch: EngineLaunchProfile,
+): CreateAgentSessionOptions["thinkingLevel"] {
+	const level = resolveThinkingLevelForModel(
+		model,
+		concreteThinkingLevel(launch.thinkingLevel ?? profile.generationDefaults?.thinkingLevel),
+	);
+	if (
+		launch.minimumThinkingLevel === "high" &&
+		!(["high", "xhigh", "max"] as const).includes(level as "high" | "xhigh" | "max")
+	) {
+		throw new Error("Selected model cannot satisfy minimum thinking level high");
+	}
+	return level;
 }
 
 function nativeProviderApi(api: Api): Api {
