@@ -18,7 +18,12 @@ import type {
 } from "./contracts";
 import { EngineTargetError } from "./contracts";
 import { engineAgentId } from "./route";
-import { ENGINE_HISTORY_INDEX_SCHEMA, type EngineNativeHistoryPage } from "./runtime-history";
+import {
+	ENGINE_HISTORY_INDEX_SCHEMA,
+	ENGINE_HISTORY_LINEAGE_SCHEMA,
+	type EngineNativeHistoryPage,
+	readNativeHistoryEntry,
+} from "./runtime-history";
 import { RUNTIME_MESSAGE_SCHEMA } from "./runtime-messages";
 import {
 	claimLegacyOwnership,
@@ -702,6 +707,7 @@ const SCHEMA_MIGRATIONS = [
 	{ version: 15, statements: START_FENCE_SCHEMA, requiredColumns: [] },
 	{ version: 16, statements: RUNTIME_OWNERSHIP_SCHEMA, requiredColumns: [] },
 	{ version: 17, statements: RUNTIME_QUEUE_SCHEMA, requiredColumns: [] },
+	{ version: 18, statements: ENGINE_HISTORY_LINEAGE_SCHEMA, requiredColumns: [] },
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;
@@ -1343,6 +1349,8 @@ export class EngineStore {
 		limit = runtimeLimits.httpPageRecords,
 		attemptId?: string,
 	): Promise<EngineNativeHistoryPage> {
+		if (!Number.isSafeInteger(limit) || limit < 1 || limit > runtimeLimits.httpPageRecords)
+			throw new EngineTargetError("invalid_request", "History page limit exceeds the owner record budget");
 		return await this.#transaction(async sql => {
 			const started = performance.now();
 			const bindings = (await sql.unsafe(
@@ -1364,23 +1372,31 @@ export class EngineStore {
 			const sessionPath = attemptId ? attempts[0].transcript_path : bindings[0]?.session_file;
 			if (!sessionPath) throw new EngineTargetError("history_expired", "Native history is not retained");
 			const headers = (await sql.unsafe(
-				"SELECT entry_id FROM engine_history_entries WHERE session_path=? AND entry_type='session' ORDER BY ordinal LIMIT 1",
+				"SELECT h.entry_id,f.history_lineage FROM engine_history_entries h JOIN omp_session_files f ON f.path=h.session_path WHERE h.session_path=? AND h.entry_type='session' ORDER BY h.ordinal LIMIT 1",
 				[sessionPath],
-			)) as Array<{ entry_id: string }>;
+			)) as Array<{ entry_id: string; history_lineage: string }>;
 			const heads = (await sql.unsafe(
 				"SELECT entry_id FROM engine_history_entries WHERE session_path=? AND entry_type<>'session' ORDER BY ordinal DESC LIMIT 1",
 				[sessionPath],
 			)) as Array<{ entry_id: string }>;
 			const sessionId = headers[0]?.entry_id;
 			if (!sessionId) throw new EngineTargetError("history_expired", "Native history index is unavailable");
-			const anchor =
+			let anchor =
 				attempts[0] && TERMINAL_ATTEMPT_STATES.has(attempts[0].state)
 					? attempts[0].transcript_leaf_entry_id
 					: (heads[0]?.entry_id ?? null);
-			const revision = anchor ?? "empty";
+			let revision = anchor ?? "empty";
 			let first = anchor;
+			let cursorRecords = 0;
 			if (cursor) {
-				let parsed: { agentInstanceId: string; sessionId: string; revision: string; first: string };
+				let parsed: {
+					agentInstanceId: string;
+					sessionId: string;
+					attemptId: string | null;
+					revision: string;
+					lineage: string;
+					first: string;
+				};
 				try {
 					parsed = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
 				} catch {
@@ -1389,11 +1405,33 @@ export class EngineStore {
 				if (
 					parsed.agentInstanceId !== agentInstanceId ||
 					parsed.sessionId !== sessionId ||
-					parsed.revision !== revision
+					parsed.attemptId !== (attemptId ?? null) ||
+					parsed.lineage !== headers[0].history_lineage ||
+					typeof parsed.first !== "string" ||
+					typeof parsed.revision !== "string"
 				)
-					throw new EngineTargetError("stale_target", "History changed; reacquire its anchor");
+					throw new EngineTargetError("stale_target", "History identity or immutable lineage changed");
+				const retained = (await sql.unsafe(
+					"SELECT entry_id FROM engine_history_entries WHERE session_path=? AND entry_id IN (?,?)",
+					[sessionPath, parsed.revision, parsed.first],
+				)) as Array<{ entry_id: string }>;
+				cursorRecords = retained.length;
+				if (
+					!retained.some(row => row.entry_id === parsed.revision) ||
+					!retained.some(row => row.entry_id === parsed.first)
+				)
+					throw new EngineTargetError("history_expired", "Pinned history cursor is no longer retained");
+				anchor = parsed.revision;
+				revision = parsed.revision;
 				first = parsed.first;
 			}
+			const cut = anchor
+				? ((await sql.unsafe("SELECT ordinal FROM engine_history_entries WHERE session_path=? AND entry_id=?", [
+						sessionPath,
+						anchor,
+					])) as Array<{ ordinal: number }>)
+				: [];
+			if (anchor && !cut[0]) throw new EngineTargetError("history_expired", "Pinned history anchor expired");
 			const rows = first
 				? ((await sql.unsafe(
 						`WITH RECURSIVE branch(entry_id,parent_entry_id,entry_bytes,depth) AS (SELECT entry_id,parent_entry_id,entry_bytes,0 FROM engine_history_entries WHERE session_path=? AND entry_id=? UNION ALL SELECT h.entry_id,h.parent_entry_id,h.entry_bytes,b.depth+1 FROM engine_history_entries h JOIN branch b ON h.entry_id=b.parent_entry_id WHERE h.session_path=? AND b.depth<?) SELECT * FROM branch ORDER BY depth`,
@@ -1407,7 +1445,12 @@ export class EngineStore {
 				const bytes = Number(row.entry_bytes);
 				if (bytes > runtimeLimits.httpPageBytes - 4096) {
 					if (selected.length) break;
-					entryRef = { entryId: row.entry_id, revision, bytes, method: "runtime.history.entry" };
+					entryRef = {
+						entryId: row.entry_id,
+						revision: headers[0].history_lineage,
+						bytes,
+						method: "runtime.history.entry",
+					};
 					selected.push(row);
 					break;
 				}
@@ -1435,8 +1478,8 @@ export class EngineStore {
 			}
 			const resultRows = calls.length
 				? ((await sql.unsafe(
-						`SELECT entry_id,entry_bytes,tool_call_id FROM engine_history_entries WHERE session_path=? AND tool_call_id IN (${calls.map(() => "?").join(",")}) ORDER BY ordinal LIMIT ?`,
-						[sessionPath, ...calls, runtimeLimits.httpPageRecords],
+						`SELECT entry_id,entry_bytes,tool_call_id FROM engine_history_entries WHERE session_path=? AND tool_call_id IN (${calls.map(() => "?").join(",")}) AND ordinal<=? ORDER BY ordinal LIMIT ?`,
+						[sessionPath, ...calls, Number(cut[0]?.ordinal ?? -1), runtimeLimits.httpPageRecords],
 					)) as Array<{ entry_id: string; entry_bytes: number; tool_call_id: string }>)
 				: [];
 			const resultIds: string[] = [];
@@ -1448,7 +1491,7 @@ export class EngineStore {
 					activityRefs.push({
 						toolCallId: row.tool_call_id,
 						entryId: row.entry_id,
-						revision,
+						revision: headers[0].history_lineage,
 						bytes,
 						method: "runtime.history.entry",
 					});
@@ -1465,19 +1508,43 @@ export class EngineStore {
 				nativeEntries.push(...results.map(row => JSON.parse(row.entry_json) as Record<string, unknown>));
 			}
 			const next = selected.at(-1)?.parent_entry_id ?? null;
+			const continuation = (entry: string | null) =>
+				entry
+					? Buffer.from(
+							JSON.stringify({
+								agentInstanceId,
+								sessionId,
+								attemptId: attemptId ?? null,
+								revision,
+								lineage: headers[0].history_lineage,
+								first: entry,
+							}),
+						).toString("base64url")
+					: null;
 			return {
 				sessionId,
 				revision,
 				anchor,
 				entries: nativeEntries,
 				...(activityRefs.length ? { activityRefs } : {}),
-				nextCursor: next
-					? Buffer.from(JSON.stringify({ agentInstanceId, sessionId, revision, first: next })).toString(
-							"base64url",
-						)
-					: null,
+				nextCursor: continuation(next),
+				...(selected[0]
+					? {
+							projectionFallback: {
+								entryRef: {
+									entryId: selected[0].entry_id,
+									revision: headers[0].history_lineage,
+									bytes: Number(selected[0].entry_bytes),
+									method: "runtime.history.entry" as const,
+								},
+								nextCursor: continuation(selected[0].parent_entry_id),
+							},
+						}
+					: {}),
 				...(entryRef ? { entryRef } : {}),
 				visitedRecords:
+					cursorRecords +
+					cut.length +
 					rows.length +
 					resultRows.length +
 					entries.length +
@@ -1499,44 +1566,11 @@ export class EngineStore {
 		offset = 0,
 		limit = runtimeLimits.deliveryBatchBytes,
 		expectedSessionId?: string,
+		attemptId?: string,
 	): Promise<Record<string, unknown>> {
-		return await this.#transaction(async sql => {
-			const bindings = (await sql.unsafe(
-				"SELECT session_file FROM engine_runtime_bindings WHERE agent_instance_id=?",
-				[agentInstanceId],
-			)) as Array<{ session_file: string | null }>;
-			const sessionPath = bindings[0]?.session_file;
-			if (!sessionPath) throw new EngineTargetError("history_expired", "Native history expired");
-			const sessions = (await sql.unsafe(
-				"SELECT entry_id FROM engine_history_entries WHERE session_path=? AND entry_type='session' ORDER BY ordinal LIMIT 1",
-				[sessionPath],
-			)) as Array<{ entry_id: string }>;
-			const sessionId = sessions[0]?.entry_id;
-			if (!sessionId || (expectedSessionId && expectedSessionId !== sessionId))
-				throw new EngineTargetError("stale_target", "History session changed");
-			const heads = (await sql.unsafe(
-				"SELECT entry_id FROM engine_history_entries WHERE session_path=? AND entry_type<>'session' ORDER BY ordinal DESC LIMIT 1",
-				[sessionPath],
-			)) as Array<{ entry_id: string }>;
-			if ((heads[0]?.entry_id ?? "empty") !== revision)
-				throw new EngineTargetError("stale_target", "History revision changed");
-			const rows = (await sql.unsafe(
-				"SELECT entry_bytes,substr(CAST(entry_json AS BLOB),?,?) AS chunk FROM engine_history_entries WHERE session_path=? AND entry_id=?",
-				[offset + 1, Math.min(limit, runtimeLimits.deliveryBatchBytes), sessionPath, entryId],
-			)) as Array<{ entry_bytes: number; chunk: Uint8Array }>;
-			if (!rows[0]) throw new EngineTargetError("history_expired", "Native history entry expired");
-			const bytes = Buffer.from(rows[0].chunk);
-			const total = Number(rows[0].entry_bytes);
-			return {
-				sessionId,
-				entryId,
-				revision,
-				offset,
-				totalBytes: total,
-				contentBase64: bytes.toString("base64"),
-				nextOffset: offset + bytes.length < total ? offset + bytes.length : null,
-			};
-		});
+		return await this.#transaction(sql =>
+			readNativeHistoryEntry(sql, agentInstanceId, entryId, revision, offset, limit, expectedSessionId, attemptId),
+		);
 	}
 
 	async waitAttemptResult(

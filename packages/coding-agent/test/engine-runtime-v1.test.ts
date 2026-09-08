@@ -665,13 +665,25 @@ describe("runtime v1 durable boundaries", () => {
 		await store.putBinding({ ...binding("history"), sessionFile: sessionPath });
 		const page = await store.nativeHistoryPage(agent.agentInstanceId);
 		expect(page.entries).toHaveLength(100);
-		expect(page.visitedRecords).toBeLessThanOrEqual(204);
+		expect(page.visitedRecords).toBeLessThanOrEqual(runtimeLimits.httpPageRecords * 2 + 10);
 		expect(page.readBytes).toBeLessThan(100_000);
 		expect((page.entries[0] as { id: string }).id).toBe("entry-99900");
 		expect(page.nextCursor).toBeString();
+		const later = store.sessionStorage.openWriter(sessionPath);
+		await later.append(
+			JSON.stringify({
+				type: "message",
+				id: "after-cut",
+				parentId: "entry-99999",
+				timestamp: new Date().toISOString(),
+				message: { role: "user", content: "After pinned page", timestamp: Date.now() },
+			}) + "\n",
+		);
+		await later.close();
 		const prior = await store.nativeHistoryPage(agent.agentInstanceId, page.nextCursor!);
+		expect(prior.revision).toBe(page.revision);
 		expect((prior.entries.at(-1) as { id: string }).id).toBe("entry-99899");
-		expect(prior.visitedRecords).toBeLessThanOrEqual(204);
+		expect(prior.visitedRecords).toBeLessThanOrEqual(runtimeLimits.httpPageRecords * 2 + 10);
 		const giant = JSON.stringify({
 			type: "message",
 			id: "giant",
@@ -686,10 +698,126 @@ describe("runtime v1 durable boundaries", () => {
 		expect(oversized.entries).toEqual([]);
 		expect(oversized.entryRef?.entryId).toBe("giant");
 		expect(oversized.readBytes).toBe(0);
-		const chunk = await store.nativeHistoryEntry(agent.agentInstanceId, "giant", oversized.revision);
+		const chunk = await store.nativeHistoryEntry(agent.agentInstanceId, "giant", oversized.entryRef!.revision);
 		expect(Buffer.from(String(chunk.contentBase64), "base64").length).toBe(runtimeLimits.deliveryBatchBytes);
 		expect(chunk.nextOffset).toBe(runtimeLimits.deliveryBatchBytes);
+		const resource = {
+			kind: "history_entry",
+			agentInstanceRef: agent.agentInstanceRef,
+			sessionId: oversized.sessionId,
+			entryId: "giant",
+			revision: oversized.entryRef!.revision,
+			bytes: oversized.entryRef!.bytes,
+			mediaType: "application/json",
+		};
+		const range = await store.runtimeResource({ principalId: "owner", resource, offset: 65536, limit: 65536 });
+		validateRuntimeValue("httpRange", range);
+		expect(Buffer.from(String(range.contentBase64), "base64")).toEqual(Buffer.from(giant).subarray(65536, 131072));
+		await expect(store.runtimeResource({ principalId: "other", resource, offset: 0, limit: 32 })).rejects.toThrow(
+			"authorized",
+		);
+		await expect(
+			store.runtimeResource({
+				principalId: "owner",
+				resource: { ...resource, bytes: resource.bytes + 1 },
+				offset: 0,
+				limit: 32,
+			}),
+		).rejects.toThrow("size");
+		await store.sessionStorage.writeText(
+			sessionPath,
+			[header, ...entries, giant.replace("giant", "rewritten")].join("\n") + "\n",
+		);
+		await expect(store.runtimeResource({ principalId: "owner", resource, offset: 0, limit: 32 })).rejects.toThrow(
+			"lineage",
+		);
+		await expect(store.nativeHistoryPage(agent.agentInstanceId, page.nextCursor!)).rejects.toThrow("lineage");
 	}, 30_000);
+	it("keeps a retained Attempt history resource pinned across another binding and a store reopen", async () => {
+		const store = await createStore();
+		const databasePath = path.join(directories.at(-1)!, "engine.sqlite");
+		const agent = identity("retained-resource");
+		await store.registerAgent(agent);
+		const first = { ...binding("retained-resource"), sessionFile: "/retained-first.jsonl" };
+		const entry = {
+			type: "message",
+			id: "same-entry",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			message: { role: "assistant", content: "🙂я".repeat(200_000) },
+		};
+		const source =
+			JSON.stringify({ type: "session", version: 3, id: "retained-session", cwd: "/first" }) +
+			"\n" +
+			JSON.stringify(entry) +
+			"\n";
+		await store.sessionStorage.writeText(first.sessionFile, source);
+		await store.commitAttemptTransition(first, "completed", [{ kind: "completed" }], {
+			transcriptCheckpoint: {
+				sessionId: "retained-session",
+				sessionPath: first.sessionFile,
+				leafEntryId: "same-entry",
+				byteBoundary: Buffer.byteLength(source),
+			},
+		});
+		const page = await store.nativeHistoryPage(agent.agentInstanceId, undefined, 100, first.attemptId);
+		const resource = {
+			kind: "history_entry",
+			agentInstanceRef: agent.agentInstanceRef,
+			attemptId: first.attemptId,
+			sessionId: page.sessionId,
+			entryId: "same-entry",
+			revision: page.entryRef!.revision,
+			bytes: page.entryRef!.bytes,
+			mediaType: "application/json",
+		};
+		const writer = store.sessionStorage.openWriter(first.sessionFile);
+		await writer.append(
+			JSON.stringify({
+				...entry,
+				id: "later",
+				parentId: "same-entry",
+				message: { role: "user", content: "later" },
+			}) + "\n",
+		);
+		await writer.close();
+		const next = {
+			...first,
+			sessionFile: "/retained-next.jsonl",
+			attemptId: "next-attempt",
+			executionId: "next-execution",
+			commandId: "next-start",
+		};
+		await store.sessionStorage.writeText(
+			next.sessionFile,
+			JSON.stringify({ type: "session", version: 3, id: "next-session" }) +
+				"\n" +
+				JSON.stringify({ ...entry, message: { role: "assistant", content: "foreign body" } }) +
+				"\n",
+		);
+		await store.commitAttemptTransition(next, "running", [{ kind: "running" }]);
+		await store.close();
+		const reopened = await EngineStore.open(databasePath);
+		stores.push(reopened);
+		const expected = Buffer.from(JSON.stringify(entry));
+		for (let offset = 0; offset < expected.length; offset += 65_536) {
+			const range = await reopened.runtimeResource({ principalId: "owner", resource, offset, limit: 65_536 });
+			validateRuntimeValue("httpRange", range);
+			expect(Buffer.from(String(range.contentBase64), "base64")).toEqual(expected.subarray(offset, offset + 65_536));
+		}
+		await expect(
+			reopened.runtimeResource({
+				principalId: "owner",
+				resource: { ...resource, attemptId: next.attemptId },
+				offset: 0,
+				limit: 100,
+			}),
+		).rejects.toThrow("Attempt");
+		const pinned = await reopened.nativeHistoryPage(agent.agentInstanceId, undefined, 100, first.attemptId);
+		expect(pinned.anchor).toBe("same-entry");
+		expect(pinned.entryRef).toEqual(page.entryRef);
+	}, 30_000);
+
 	it("uses the retained native identity and preserves catalog continuation under a byte budget", async () => {
 		const store = await createStore();
 		const native = { ...identity("native"), agentInstanceId: "native-generated-id" };

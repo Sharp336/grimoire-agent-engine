@@ -340,13 +340,25 @@ async function dispatchRequest(
 			return await options.runtime.store.runtimeQueue(params as unknown as RuntimeQueueRequest);
 		case "runtime.history": {
 			const agent = await runtimeAgent(options.runtime, params);
+			const readStarted = performance.now();
 			const page = await options.runtime.sessionHistoryPage(
 				requiredString(agent, "agentInstanceId"),
+				requiredString(params, "agentInstanceRef"),
 				optionalString(params.cursor),
 				optionalLimit(params.limit),
 				optionalString(params.attemptId),
 			);
 			const agentInstanceRef = requiredString(params, "agentInstanceRef");
+			const resource = (ref: NonNullable<typeof page.entryRef>) => ({
+				kind: "history_entry",
+				agentInstanceRef,
+				sessionId: page.sessionId,
+				entryId: ref.entryId,
+				revision: ref.revision,
+				...(params.attemptId ? { attemptId: params.attemptId } : {}),
+				mediaType: "application/json",
+				bytes: ref.bytes,
+			});
 			const result = {
 				version: "1.0",
 				agentInstanceRef,
@@ -355,27 +367,23 @@ async function dispatchRequest(
 				anchor: page.anchor,
 				entries: page.entries,
 				nextCursor: page.nextCursor,
-				...(page.entryRef
-					? {
-							entryRef: {
-								kind: "history_entry",
-								agentInstanceRef,
-								sessionId: page.sessionId,
-								entryId: page.entryRef.entryId,
-								revision: page.revision,
-								mediaType: "application/json",
-								bytes: page.entryRef.bytes,
-							},
-						}
-					: {}),
+				...(page.entryRef ? { entryRef: resource(page.entryRef) } : {}),
 				work: {
 					bytes: 0,
-					changes: page.entries.length,
+					changes: page.entries.length + (page.entryRef ? 1 : 0),
 					scannedRows: page.visitedRecords,
 					materializedBytes: page.readBytes,
-					elapsedMs: page.elapsedMs,
+					elapsedMs: Math.ceil(performance.now() - readStarted),
 				},
 			};
+			if (Buffer.byteLength(JSON.stringify(result)) > runtimeLimits.httpPageBytes && page.projectionFallback) {
+				// Canonical JSON can expand when tool arguments become public text or an error is echoed.
+				// Advance exactly one native entry; the remaining selected rows stay reachable by the cursor.
+				result.entries = [];
+				result.entryRef = resource(page.projectionFallback.entryRef);
+				result.nextCursor = page.projectionFallback.nextCursor;
+				result.work.changes = 1;
+			}
 			for (;;) {
 				const bytes = Buffer.byteLength(JSON.stringify(result));
 				if (bytes === result.work.bytes) break;
@@ -393,6 +401,7 @@ async function dispatchRequest(
 				optionalNonNegativeInteger(params.offset),
 				params.limit === undefined ? runtimeLimits.deliveryBatchBytes : optionalNonNegativeInteger(params.limit),
 				requiredString(params, "sessionId"),
+				optionalString(params.attemptId),
 			);
 		}
 		case "capabilities":
@@ -886,7 +895,7 @@ function publicEvent(event: EngineEvent): EngineEvent {
 
 function controlReadiness(state: EngineAttemptState) {
 	return {
-		steer: state === "running" || state === "pause_requested" || state === "paused",
+		steer: state === "running",
 		pause: state === "running",
 		resume: state === "paused",
 		cancel: ["running", "pause_requested", "paused", "waiting_input"].includes(state),

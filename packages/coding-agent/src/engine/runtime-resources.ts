@@ -1,4 +1,5 @@
 import { EngineTargetError } from "./contracts";
+import { readNativeHistoryEntry } from "./runtime-history";
 import { runtimeMessageBaselines, runtimeMessageRange } from "./runtime-messages";
 import {
 	type RuntimeIdentityRow,
@@ -233,6 +234,32 @@ export async function readRuntimeResource(
 	if (resource.kind === "queue_item") return await runtimeQueueRange(sql, request, work);
 	const identity = await runtimeIdentity(sql, String(resource.agentInstanceRef), request);
 	work.rows(1);
+	if (resource.kind === "history_entry") {
+		if (resource.mediaType !== "application/json" || resource.contentHash !== undefined)
+			throw new EngineTargetError("stale_target", "History descriptor differs from the native owner resource");
+		const range = await readNativeHistoryEntry(
+			sql,
+			identity.agent_instance_id,
+			String(resource.entryId),
+			String(resource.revision),
+			request.offset,
+			request.limit,
+			String(resource.sessionId),
+			typeof resource.attemptId === "string" ? resource.attemptId : undefined,
+			work,
+		);
+		if (range.totalBytes !== resource.bytes)
+			throw new EngineTargetError("stale_target", "History resource size changed");
+		const result = {
+			resource,
+			offset: range.offset,
+			nextOffset: range.nextOffset,
+			contentBase64: range.contentBase64,
+		};
+		work.finish(result, 1);
+		validateRuntimeValue("httpRange", result);
+		return result;
+	}
 	if (resource.kind !== "input")
 		throw new EngineTargetError("invalid_request", "This resource kind requires its native owner reader");
 	const rows = (await sql.unsafe(

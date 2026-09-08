@@ -25,10 +25,12 @@ import {
 } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
 import { engineAgentInstanceId } from "@oh-my-pi/pi-coding-agent/engine/route";
 import { EngineRuntime, type EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
+import { runtimeLimits, validateRuntimeValue } from "@oh-my-pi/pi-coding-agent/engine/runtime-protocol";
 import { hostedCoreMcpConfig } from "@oh-my-pi/pi-coding-agent/engine/service";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { getLspResourceCounts } from "@oh-my-pi/pi-coding-agent/lsp/client";
 import * as mcpConfig from "@oh-my-pi/pi-coding-agent/mcp/config";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { loadSessionFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { type NativeHistoryForkResult, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -2161,6 +2163,204 @@ describe("EngineRuntime", () => {
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
 		await runtime.dispose();
 	}, 60_000);
+
+	it("resolves the largest indexed Ask reply without echoing or losing canonical option labels", async () => {
+		const questions = Array.from({ length: 2 }, (_, question) => ({
+			id: `question-${question}`,
+			question: "q".repeat(9_000),
+			multi: true,
+			options: Array.from({ length: 32 }, (_, option) => ({
+				label: `${question}:${option}:`.padEnd(2_048, "x"),
+			})),
+		}));
+		const release = Promise.withResolvers<void>();
+		const secondModelCall = Promise.withResolvers<void>();
+		let activeSession: AgentSession | undefined;
+		const mock = createMockModel({
+			responses: (async function* () {
+				yield {
+					content: [{ type: "toolCall" as const, id: "ask-indexed", name: "ask", arguments: { questions } }],
+				};
+				secondModelCall.resolve();
+				await release.promise;
+				yield { content: ["done"] };
+			})(),
+		});
+		const { runtime, cwd } = await createRuntime(
+			(session, input) => {
+				activeSession = session;
+				return session.prompt(input);
+			},
+			{},
+			{ model: mock.model },
+		);
+		const requested = nextEngineEvent(runtime, "input_requested");
+		const started = await runtime.start(
+			{
+				commandId: "command-indexed-start",
+				agentInstanceId: "agent-indexed",
+				executionId: "execution-indexed",
+				attemptId: "attempt-indexed",
+				authorityGeneration: 1,
+				cwd,
+				input: "ask",
+			},
+			{ ...profile, toolNames: ["ask"], restrictToolNames: true },
+		);
+		const input = await requested;
+		const inputId = String(input.payload?.inputId);
+		const expectedIntentRevision = (await runtime.store.intent(started.agentInstanceId)).intentRevision;
+		const result = {
+			kind: "submit" as const,
+			results: questions.map(question => ({
+				id: question.id,
+				selectedOptionIndexes: question.options.map((_, index) => index),
+			})),
+		};
+		expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThan(1_500);
+		const request = {
+			...started,
+			commandId: "command-indexed-reply",
+			inputId,
+			expectedIntentRevision,
+			expectedInputRevision: input.eventId,
+			result,
+		};
+		try {
+			for (const invalid of [
+				{ ...result.results[0], id: "foreign-question" },
+				{ ...result.results[0], selectedOptionIndexes: [32] },
+				{ ...result.results[0], selectedOptionIndexes: [1, 1] },
+				{ ...result.results[0], options: ["forged label"] },
+			]) {
+				await expect(
+					runtime.resolveInput({ ...request, result: { ...result, results: [invalid, result.results[1]] } }),
+				).rejects.toMatchObject({ code: "invalid_request" });
+			}
+			await expect(
+				runtime.resolveInput({ ...request, expectedInputRevision: input.eventId + 1 }),
+			).rejects.toMatchObject({ code: "stale_target" });
+			await expect(
+				runtime.resolveInput({ ...request, expectedIntentRevision: expectedIntentRevision + 1 }),
+			).rejects.toMatchObject({ code: "stale_target" });
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("waiting_input");
+			const resolved = nextEngineEvent(runtime, "input_resolved");
+			await runtime.resolveInput(request);
+			const event = await resolved;
+			expect(event).toMatchObject({ attemptId: started.attemptId, payload: { inputId, result } });
+			expect(Buffer.byteLength(JSON.stringify(event.payload))).toBeLessThan(2_048);
+			await secondModelCall.promise;
+			const toolResult = activeSession?.messages.find(message => message.role === "toolResult");
+			expect(toolResult).toMatchObject({
+				role: "toolResult",
+				toolCallId: "ask-indexed",
+				isError: false,
+				details: {
+					results: questions.map(question => ({
+						id: question.id,
+						question: question.question,
+						multi: true,
+						options: question.options.map(option => option.label),
+						selectedOptions: question.options.map(option => option.label),
+					})),
+				},
+			});
+			expect(Buffer.byteLength(JSON.stringify(toolResult))).toBeGreaterThan(262_144);
+			await expect(runtime.resolveInput(request)).rejects.toMatchObject({ code: "too_late" });
+		} finally {
+			release.resolve();
+		}
+		await runtime.drain();
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
+	}, 30_000);
+
+	it("pages expanding public tool history through exact resources without skipping the retained prefix", async () => {
+		const { runtime, cwd } = await createRuntime();
+		const agentInstanceRef = "grimoire://tasks/grimoire/runtime-test/agents/history-expansion";
+		const agentInstanceId = engineAgentInstanceId(agentInstanceRef);
+		const started = await runtime.start(
+			{
+				commandId: "history-expansion-start",
+				agentInstanceId,
+				agentInstanceRef,
+				principalId: "owner",
+				executionId: "history-expansion-execution",
+				attemptId: "history-expansion-attempt",
+				authorityGeneration: 1,
+				cwd,
+				input: "history",
+			},
+			profile,
+		);
+		await runtime.drain();
+		const timestamp = new Date(0).toISOString();
+		const header = { type: "session", version: 3, id: "expanding-history", timestamp, cwd };
+		const entries = [
+			{ type: "message", id: "prefix", parentId: null, timestamp, message: { role: "user", content: "prefix" } },
+			{
+				type: "message",
+				id: "tool-call",
+				parentId: "prefix",
+				timestamp,
+				message: {
+					role: "assistant",
+					content: [{ type: "toolCall", id: "call", name: "test", arguments: { value: 1 } }],
+				},
+			},
+			{
+				type: "message",
+				id: "tool-result",
+				parentId: "tool-call",
+				timestamp,
+				message: { role: "toolResult", toolCallId: "call", isError: true, content: "x".repeat(600_000) },
+			},
+		];
+		await runtime.store.sessionStorage.writeText(
+			started.sessionFile!,
+			[header, ...entries].map(entry => JSON.stringify(entry)).join("\n") + "\n",
+		);
+		const runtimeDir = path.dirname(cwd);
+		const server = await startEngineControlQueryServer({
+			runtime,
+			runtimeDir,
+			deviceId: "history-device",
+			engineId: "history-engine",
+			resolveLaunchProfile: async () => profile,
+		});
+		const client = new EngineControlQueryClient(runtimeDir);
+		try {
+			const params = { agentInstanceRef, principalId: "owner" };
+			const first = (await client.request("runtime.history", params)) as Record<string, unknown>;
+			validateRuntimeValue("historyPage", first);
+			expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThan(runtimeLimits.httpPageBytes);
+			expect(first).toMatchObject({ entries: [], entryRef: { entryId: "tool-result" }, work: { changes: 1 } });
+			const range = (await client.request("runtime.resource", {
+				principalId: "owner",
+				resource: first.entryRef,
+				offset: 0,
+				limit: 65_536,
+			})) as Record<string, unknown>;
+			validateRuntimeValue("httpRange", range);
+			expect(Buffer.from(String(range.contentBase64), "base64")).toEqual(
+				Buffer.from(JSON.stringify(entries[2])).subarray(0, 65_536),
+			);
+			const second = (await client.request("runtime.history", { ...params, cursor: first.nextCursor })) as Record<
+				string,
+				unknown
+			>;
+			validateRuntimeValue("historyPage", second);
+			expect(second).toMatchObject({ entries: [], entryRef: { entryId: "tool-call" } });
+			const third = (await client.request("runtime.history", { ...params, cursor: second.nextCursor })) as Record<
+				string,
+				unknown
+			>;
+			validateRuntimeValue("historyPage", third);
+			expect(third).toMatchObject({ entries: [{ entryId: "prefix", text: "prefix" }], nextCursor: null });
+			expect(third.revision).toBe(first.revision);
+		} finally {
+			await server.close();
+		}
+	}, 30_000);
 
 	it("cancels an Attempt that is waiting for Ask input", async () => {
 		const questions = [{ id: "confirm", question: "Continue?", options: [{ label: "Yes" }, { label: "No" }] }];
@@ -4804,7 +5004,7 @@ describe("EngineRuntime", () => {
 			expect(pausedEvent.payload).toMatchObject({
 				initiator,
 				attemptState: "paused",
-				controlReadiness: { pause: false, resume: true, steer: true, cancel: true },
+				controlReadiness: { pause: false, resume: true, steer: false, cancel: true },
 				transcriptCheckpoint: { revision: 2 },
 			});
 			expect({

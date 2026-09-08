@@ -1,3 +1,7 @@
+import { EngineTargetError } from "./contracts";
+import type { RuntimeQueryWork, RuntimeSql } from "./runtime-projection";
+import { runtimeLimits } from "./runtime-protocol";
+
 function jsonLines(content: string): string {
 	const array = `'[' || replace(trim(${content},char(10)||char(13)||' '),char(10),',') || ']'`;
 	return `CASE WHEN json_valid(${array}) THEN ${array} ELSE '[]' END`;
@@ -24,6 +28,98 @@ export const ENGINE_HISTORY_INDEX_SCHEMA = [
 	 FROM omp_session_files f,json_each(${jsonLines("f.content")}) j WHERE f.path LIKE '%.jsonl' AND json_type(j.value,'$.id')='text'`,
 ] as const;
 
+export const ENGINE_HISTORY_LINEAGE_SCHEMA = [
+	"ALTER TABLE omp_session_files ADD COLUMN history_lineage TEXT NOT NULL DEFAULT 'legacy'",
+	"CREATE TRIGGER engine_history_lineage_insert AFTER INSERT ON omp_session_files BEGIN UPDATE omp_session_files SET history_lineage=lower(hex(randomblob(16))) WHERE path=NEW.path; END",
+	"CREATE TRIGGER engine_history_lineage_replace AFTER UPDATE OF content ON omp_session_files WHEN length(NEW.content)<length(OLD.content) OR substr(NEW.content,1,length(OLD.content))<>OLD.content BEGIN UPDATE omp_session_files SET history_lineage=lower(hex(randomblob(16))) WHERE path=NEW.path; END",
+	"CREATE INDEX engine_attempts_history_owner_idx ON engine_attempts(agent_instance_id,transcript_session_id)",
+] as const;
+
+export async function readNativeHistoryEntry(
+	sql: RuntimeSql,
+	agentInstanceId: string,
+	entryId: string,
+	revision: string,
+	offset: number,
+	limit: number,
+	expectedSessionId?: string,
+	attemptId?: string,
+	work?: RuntimeQueryWork,
+): Promise<{
+	sessionId: string;
+	entryId: string;
+	revision: string;
+	offset: number;
+	totalBytes: number;
+	contentBase64: string;
+	nextOffset: number | null;
+}> {
+	if (
+		!Number.isSafeInteger(offset) ||
+		offset < 0 ||
+		!Number.isSafeInteger(limit) ||
+		limit < 1 ||
+		limit > runtimeLimits.deliveryBatchBytes
+	)
+		throw new EngineTargetError("invalid_request", "History range is outside the owner byte budget");
+	const attempts = attemptId
+		? ((await sql.unsafe(
+				"SELECT transcript_path AS path FROM engine_attempts WHERE agent_instance_id=? AND attempt_id=? AND transcript_session_id=?",
+				[agentInstanceId, attemptId, expectedSessionId ?? ""],
+			)) as Array<{ path: string | null }>)
+		: expectedSessionId
+			? ((await sql.unsafe(
+					"SELECT transcript_path AS path FROM engine_attempts WHERE agent_instance_id=? AND transcript_session_id=? LIMIT 1",
+					[agentInstanceId, expectedSessionId],
+				)) as Array<{ path: string | null }>)
+			: [];
+	work?.rows(attempts.length);
+	if (attemptId && !attempts[0]?.path)
+		throw new EngineTargetError("stale_target", "History resource does not belong to this exact Attempt");
+	const bindings = attempts[0]?.path
+		? []
+		: ((await sql.unsafe("SELECT session_file AS path FROM engine_runtime_bindings WHERE agent_instance_id=?", [
+				agentInstanceId,
+			])) as Array<{ path: string | null }>);
+	work?.rows(bindings.length);
+	const sessionPath = attempts[0]?.path ?? bindings[0]?.path;
+	if (!sessionPath) throw new EngineTargetError("history_expired", "Native history is not retained");
+	const sessions = (await sql.unsafe(
+		"SELECT h.entry_id,f.history_lineage FROM engine_history_entries h JOIN omp_session_files f ON f.path=h.session_path WHERE h.session_path=? AND h.entry_type='session' ORDER BY h.ordinal LIMIT 1",
+		[sessionPath],
+	)) as Array<{ entry_id: string; history_lineage: string }>;
+	work?.rows(sessions.length);
+	const session = sessions[0];
+	if (
+		!session ||
+		(expectedSessionId && session.entry_id !== expectedSessionId) ||
+		session.history_lineage !== revision
+	)
+		throw new EngineTargetError("stale_target", "History resource session or immutable lineage changed");
+	const rows = (await sql.unsafe(
+		"SELECT entry_bytes,SUBSTR(CAST(entry_json AS BLOB),?,?) AS chunk FROM engine_history_entries WHERE session_path=? AND entry_id=?",
+		[offset + 1, limit, sessionPath, entryId],
+	)) as Array<{ entry_bytes: number; chunk: Uint8Array }>;
+	work?.rows(rows.length);
+	if (!rows[0]) throw new EngineTargetError("history_expired", "Native history entry expired");
+	const bytes = Buffer.from(rows[0].chunk);
+	const total = Number(rows[0].entry_bytes);
+	if (offset > total) throw new EngineTargetError("invalid_request", "History range starts after the retained entry");
+	if (work) {
+		work.value.materializedBytes += bytes.length;
+		work.check();
+	}
+	return {
+		sessionId: session.entry_id,
+		entryId,
+		revision,
+		offset,
+		totalBytes: total,
+		contentBase64: bytes.toString("base64"),
+		nextOffset: offset + bytes.length < total ? offset + bytes.length : null,
+	};
+}
+
 export interface EngineNativeHistoryPage {
 	sessionId: string;
 	revision: string;
@@ -31,6 +127,11 @@ export interface EngineNativeHistoryPage {
 	entries: unknown[];
 	nextCursor: string | null;
 	entryRef?: { entryId: string; revision: string; bytes: number; method: "runtime.history.entry" };
+	/** Exact continuation when the public projection of the first entry needs a resource. */
+	projectionFallback?: {
+		entryRef: NonNullable<EngineNativeHistoryPage["entryRef"]>;
+		nextCursor: string | null;
+	};
 	activityRefs?: Array<{
 		toolCallId: string;
 		entryId: string;

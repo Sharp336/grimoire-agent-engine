@@ -152,12 +152,14 @@ type EngineHistoryActivityBlock = {
 	resultText?: string;
 	resultTruncated?: boolean;
 	resultRef?: {
-		toolCallId: string;
+		kind: "history_entry";
+		agentInstanceRef: string;
+		attemptId?: string;
 		sessionId: string;
 		entryId: string;
 		revision: string;
 		bytes: number;
-		method: "runtime.history.entry";
+		mediaType: "application/json";
 	};
 	error?: string;
 };
@@ -1341,6 +1343,7 @@ export class EngineRuntime {
 
 	async sessionHistoryPage(
 		agentInstanceId: string,
+		agentInstanceRef: string,
 		cursor?: string,
 		limit = runtimeLimits.httpPageRecords,
 		attemptId?: string,
@@ -1350,7 +1353,17 @@ export class EngineRuntime {
 		for (const entry of projected.entries)
 			for (const block of entry.blocks ?? []) {
 				const ref = page.activityRefs?.find(ref => ref.toolCallId === block.toolCallId);
-				if (ref) block.resultRef = { ...ref, sessionId: page.sessionId };
+				if (ref)
+					block.resultRef = {
+						kind: "history_entry",
+						agentInstanceRef,
+						...(attemptId ? { attemptId } : {}),
+						sessionId: page.sessionId,
+						entryId: ref.entryId,
+						revision: ref.revision,
+						bytes: ref.bytes,
+						mediaType: "application/json",
+					};
 			}
 		return { ...page, entries: projected.entries, activityCompleteness: projected.activityCompleteness };
 	}
@@ -4552,7 +4565,7 @@ function controlReadiness(state: EngineAttemptState): Record<string, boolean> {
 	return {
 		pause: state === "running",
 		resume: state === "paused",
-		steer: state === "running" || state === "pause_requested" || state === "paused",
+		steer: state === "running",
 		cancel: state === "running" || state === "pause_requested" || state === "paused" || state === "waiting_input",
 		resolveInput: state === "waiting_input",
 	};
