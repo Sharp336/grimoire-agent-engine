@@ -144,7 +144,7 @@ export class EngineProfileResolver {
 			},
 		});
 		const routes: Record<string, unknown>[] = [];
-		for (const routeRef of await this.#routeCandidates(profile, launch.selectedRouteRef)) {
+		for (const routeRef of await this.#routeCandidates(profile, launch.selectedRouteRef, true)) {
 			try {
 				const cachedRoute = await this.#read(routeRef, "grimoire.available_model_route.v1");
 				const route = parseJson<AvailableModelRoute>(cachedRoute.content, "AvailableModelRoute");
@@ -200,7 +200,7 @@ export class EngineProfileResolver {
 		}
 		const spawnPolicy = resolveSpawnPolicy(profile, launch);
 		const candidates = await this.#routeCandidates(profile, launch.selectedRouteRef);
-		const configuredRouteRefs = profile.models.map((ref, index) => requiredRef(ref, `models[${index}]`));
+		const fallbackCandidates = await this.#routeCandidates(profile, launch.selectedRouteRef, true);
 		const childProfiles = await this.#childProfiles(spawnPolicy.childProfileRefs);
 		let sameModelIdentityId: string | undefined;
 		if (profile.allowSameModelProviderFallback && !profile.allowCrossModelFallback) {
@@ -243,11 +243,7 @@ export class EngineProfileResolver {
 					cwd,
 					spawnPolicy.maxSpawnDepth,
 					profile.allowSameModelProviderFallback || profile.allowCrossModelFallback
-						? launch.selectedRouteRef
-							? profile.allowCrossModelFallback
-								? configuredRouteRefs.slice(configuredRouteRefs.indexOf(routeRef) + 1)
-								: configuredRouteRefs.filter(ref => ref !== routeRef)
-							: candidates.slice(index + 1)
+						? fallbackCandidates.slice(index + 1)
 						: [],
 					signal,
 				);
@@ -272,7 +268,7 @@ export class EngineProfileResolver {
 		throw new Error("No usable AvailableModelRoute in AgentProfile", { cause: lastError });
 	}
 
-	async #routeCandidates(profile: AgentProfile, selected?: string): Promise<string[]> {
+	async #routeCandidates(profile: AgentProfile, selected?: string, includeFallbacks = false): Promise<string[]> {
 		if (profile.allowCrossModelFallback !== undefined && typeof profile.allowCrossModelFallback !== "boolean") {
 			throw new Error("AgentProfile allowCrossModelFallback must be boolean");
 		}
@@ -280,6 +276,10 @@ export class EngineProfileResolver {
 		if (selected) {
 			const selectedRef = requiredRef(selected, "selectedRouteRef");
 			if (!configured.includes(selectedRef)) throw new Error("selectedRouteRef is outside AgentProfile");
+			if (includeFallbacks && profile.allowCrossModelFallback)
+				return configured.slice(configured.indexOf(selectedRef));
+			if (includeFallbacks && profile.allowSameModelProviderFallback)
+				return [selectedRef, ...configured.filter(ref => ref !== selectedRef)];
 			return [selectedRef];
 		}
 		return configured;

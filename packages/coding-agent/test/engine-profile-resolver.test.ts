@@ -19,6 +19,62 @@ const refs = {
 };
 
 describe("EngineProfileResolver", () => {
+	it.each(["ordered", "same-model", "disabled"])(
+		"refreshes eligible fallback dependencies on the next message: %s",
+		async mode => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-engine-profile-digest-"));
+			const cache = path.join(root, "artifacts");
+			await fs.mkdir(cache);
+			const routeRefs = ["gctx:abababababababab", "gctx:cdcdcdcdcdcdcdcd", "gctx:efefefefefefefef"];
+			const accountRefs = ["gctx:5555555555555555", "gctx:2222222222222222", "gctx:3333333333333333"];
+			const profileRef = "gctx:4444444444444444";
+			const resolver = new EngineProfileResolver(cache, path.join(root, "credentials"));
+			const launch = {
+				spawns: "",
+				profileDigest: hash(profileRef),
+				launchProfileRef: profileRef,
+				selectedRouteRef: routeRefs[1],
+			};
+			const revise = async (ref: string) => {
+				const file = Bun.file(path.join(cache, `${ref.slice(5)}.json`));
+				const cached = await file.json();
+				cached.revision++;
+				cached.content_hash = `sha256:${"f".repeat(64)}`;
+				await Bun.write(file, JSON.stringify(cached));
+			};
+			try {
+				await artifact(cache, profileRef, "grimoire.agent_profile.v1", {
+					schema: "grimoire.agent_profile.v1",
+					status: "active",
+					models: routeRefs,
+					allowCrossModelFallback: mode === "ordered",
+					allowSameModelProviderFallback: mode === "same-model",
+				});
+				for (const [index, routeRef] of routeRefs.entries()) {
+					await artifact(cache, routeRef, "grimoire.available_model_route.v1", {
+						providerAccountRef: accountRefs[index],
+					});
+					await artifact(cache, accountRefs[index]!, "grimoire.provider_account.v1", { status: "active" });
+				}
+				const initial = await resolver.continuationDigest(launch, root);
+				await revise(routeRefs[2]!);
+				const routeChanged = await resolver.continuationDigest(launch, root);
+				expect(routeChanged === initial).toBe(mode === "disabled");
+				await revise(accountRefs[2]!);
+				const accountChanged = await resolver.continuationDigest(launch, root);
+				expect(accountChanged === routeChanged).toBe(mode === "disabled");
+				await revise(accountRefs[0]!);
+				const earlierChanged = await resolver.continuationDigest(launch, root);
+				expect(earlierChanged === accountChanged).toBe(mode !== "same-model");
+				expect(await resolver.continuationDigest({ ...launch, selectedRouteRef: routeRefs[2] }, root)).not.toBe(
+					earlierChanged,
+				);
+			} finally {
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		},
+	);
+
 	it("isolates same-account models, pins each credential, and follows explicit ordered profile slots", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-engine-ordered-account-"));
 		const cache = path.join(root, "artifacts");

@@ -28,6 +28,8 @@
 
 ### Fixed
 
+- Refresh changed fallback routes and provider accounts for the next ordinary message while keeping the active Attempt on its launch settings.
+
 - Report archived child transcripts as unavailable instead of silently showing empty history, and reopen the same references after restore.
 
 - Estimate context for the current model after switching models or falling back, instead of displaying the previous provider's token count.
