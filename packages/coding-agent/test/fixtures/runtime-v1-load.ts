@@ -12,6 +12,7 @@ import { type EngineCommandEnvelope, engineCommandIdentity, NatsEngineAdapter } 
 import { engineAgentInstanceId } from "../../src/engine/route";
 import { EngineRuntime } from "../../src/engine/runtime";
 import { RUNTIME_PROTOCOL_HASH } from "../../src/engine/runtime-protocol";
+import { engineServiceStatus } from "../../src/engine/service";
 import type { AgentSession } from "../../src/session/agent-session";
 import { AuthStorage } from "../../src/session/auth-storage";
 
@@ -230,6 +231,23 @@ const server = await startEngineControlQueryServer({
 	engineId,
 	resolveLaunchProfile: () => profile,
 });
+const writeFixtureStatus = async (status: "running" | "stopped") => {
+	const statusPath = path.join(directory, "status.json");
+	const tempPath = `${statusPath}.${process.pid}.tmp`;
+	const value = engineServiceStatus(
+		// Only the existing status projection is used; the outer runner owns the broker.
+		{
+			deviceId,
+			engineId,
+			runtimeDir: directory,
+			databasePath: path.join(directory, "engine.sqlite"),
+			natsServerPath: "",
+		},
+		{ status, pid: process.pid, engineGeneration: runtime.engineGeneration, controlQueryEndpoint: server.endpoint },
+	);
+	await Bun.write(tempPath, JSON.stringify(value));
+	await fs.promises.rename(tempPath, statusPath);
+};
 interface FixtureBinding extends EngineBindingSnapshot {
 	agentInstanceRef: string;
 	rootAgentInstanceRef: string;
@@ -394,6 +412,7 @@ const produce = async (binding: EngineBindingSnapshot & { agentInstanceRef: stri
 	return event.eventId;
 };
 const provenance = await Bun.$`git rev-parse HEAD`.quiet().text();
+await writeFixtureStatus("running");
 console.log(
 	JSON.stringify({
 		kind: "ready",
@@ -521,6 +540,7 @@ try {
 	await bridge?.dispose();
 	await adapter?.dispose();
 	await runtime.dispose();
+	await writeFixtureStatus("stopped");
 	auth.close();
 	metrics.end();
 	await once(metrics, "finish");
