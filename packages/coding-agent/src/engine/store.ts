@@ -1001,9 +1001,9 @@ export class EngineStore {
 	}
 
 	async ownershipMigrationStatus(): Promise<Record<string, unknown>> {
-		const missing = await this.#client.unsafe("SELECT 1 FROM engine_agent_identity WHERE principal_id='' LIMIT 1");
+		const missing = await this.#query("SELECT 1 FROM engine_agent_identity WHERE principal_id='' LIMIT 1");
 		if (!missing.length) return { status: "complete", unresolved: 0 };
-		const rows = (await this.#client.unsafe(
+		const rows = (await this.#query(
 			"SELECT value FROM engine_metadata WHERE key='ownership_migration'",
 		)) as MetadataRow[];
 		const current = rows[0] ? (JSON.parse(rows[0].value) as Record<string, unknown>) : undefined;
@@ -1479,7 +1479,7 @@ export class EngineStore {
 	): Promise<boolean> {
 		return (
 			(
-				await this.#client.unsafe(
+				await this.#query(
 					`SELECT 1 FROM engine_event_outbox e WHERE event_id=? AND agent_instance_id=? AND attempt_id=? AND engine_generation=? AND causation_command_id=?
 		AND NOT EXISTS(SELECT 1 FROM engine_commands c WHERE c.command_id=e.causation_command_id)`,
 					[
@@ -1928,12 +1928,17 @@ export class EngineStore {
 			await client.unsafe("PRAGMA synchronous=FULL");
 			await client.unsafe("PRAGMA busy_timeout=5000");
 			await applySchemaMigrations(client);
+			let sessionQuery = (query: string, values?: unknown[]): Promise<unknown[]> => client.unsafe(query, values);
 			const sessionStorage = await SqlSessionStorage.create({
-				client,
+				client: { options: client.options, unsafe: (query, values) => sessionQuery(query, values) },
 				table: "omp_session_files",
 				createTable: false,
 			});
-			return new EngineStore(client, sessionStorage, resolved);
+			const store = new EngineStore(client, sessionStorage, resolved);
+			// Bootstrap is complete before the store escapes. Every subsequent journal
+			// operation must wait outside unrelated transactions on this SQLite connection.
+			sessionQuery = (query, values) => store.#query(query, values);
+			return store;
 		} catch (error) {
 			await client.end().catch(() => {});
 			throw error;
@@ -1964,23 +1969,21 @@ export class EngineStore {
 	}
 
 	async isCurrentEngineGeneration(engineGeneration: number): Promise<boolean> {
-		const rows = (await this.#client.unsafe(
+		const rows = (await this.#query(
 			`SELECT value FROM engine_metadata WHERE key='engine_generation'`,
 		)) as MetadataRow[];
 		return Number(rows[0]?.value) === engineGeneration;
 	}
 
 	async getStoreEpoch(): Promise<string> {
-		const rows = (await this.#client.unsafe(
-			`SELECT value FROM engine_metadata WHERE key='database_id'`,
-		)) as MetadataRow[];
+		const rows = (await this.#query(`SELECT value FROM engine_metadata WHERE key='database_id'`)) as MetadataRow[];
 		const value = rows[0]?.value;
 		if (!value) throw new Error("Engine database has no stable identity");
 		return value;
 	}
 
 	async getSnapshotEpoch(): Promise<string> {
-		const rows = (await this.#client.unsafe(
+		const rows = (await this.#query(
 			"SELECT value FROM engine_metadata WHERE key='snapshot_cursor_epoch'",
 		)) as MetadataRow[];
 		const identity = await this.getStoreEpoch();
@@ -1988,9 +1991,10 @@ export class EngineStore {
 	}
 
 	/** Caller must hold the runtime maintenance gate: VACUUM may renumber implicit snapshot rowids. */
-	reclaimStorage(): Promise<EngineStorageReclaimResult> {
-		const run = this.#transactionTail.then(async (): Promise<EngineStorageReclaimResult> => {
-			await this.sessionStorage.drain();
+	async reclaimStorage(): Promise<EngineStorageReclaimResult> {
+		// Journal publishes use the same queue; never await them while holding it.
+		await this.sessionStorage.drain();
+		return this.#queueSql(async (): Promise<EngineStorageReclaimResult> => {
 			const beforeBytes = await this.#databaseBytes();
 			const result = async (reason?: EngineStorageReclaimResult["reason"]): Promise<EngineStorageReclaimResult> => {
 				const afterBytes = await this.#databaseBytes();
@@ -2019,12 +2023,6 @@ export class EngineStore {
 			}
 			return result((await this.#checkpointStorage()) ? undefined : "database_busy");
 		});
-		// Maintenance shares the writer queue but must not run inside a SQL transaction.
-		this.#transactionTail = run.then(
-			() => {},
-			() => {},
-		);
-		return run;
 	}
 
 	async #checkpointStorage(): Promise<boolean> {
@@ -2131,7 +2129,7 @@ export class EngineStore {
 
 	async listInboxItems(sessionId: string, includeTerminal = false): Promise<EngineInboxItem[]> {
 		if (!sessionId.trim()) throw new EngineInboxConflictError("Inbox sessionId must be non-empty");
-		const rows = (await this.#client.unsafe(
+		const rows = (await this.#query(
 			`${this.#inboxSelect()} WHERE i.session_id=?${includeTerminal ? "" : " AND i.disposition='pending'"}
 			 ORDER BY i.position, i.queue_id`,
 			[sessionId],
@@ -2140,14 +2138,12 @@ export class EngineStore {
 	}
 
 	async getInboxItem(sessionId: string, queueId: string): Promise<EngineInboxItem | undefined> {
-		const row = await this.#inboxItem(this.#client, sessionId, queueId);
+		const row = await this.#queueSql(() => this.#inboxItem(this.#client, sessionId, queueId));
 		return row ? inboxItemFromRow(row) : undefined;
 	}
 
 	async getInboxItemByQueueId(queueId: string): Promise<EngineInboxItem | undefined> {
-		const rows = (await this.#client.unsafe(`${this.#inboxSelect()} WHERE i.queue_id=?`, [
-			queueId,
-		])) as InboxItemRow[];
+		const rows = (await this.#query(`${this.#inboxSelect()} WHERE i.queue_id=?`, [queueId])) as InboxItemRow[];
 		return rows[0] ? inboxItemFromRow(rows[0]) : undefined;
 	}
 
@@ -2238,7 +2234,7 @@ export class EngineStore {
 	}
 
 	async nextInboxWakeAt(engineGeneration: number): Promise<number | undefined> {
-		const rows = (await this.#client.unsafe(
+		const rows = (await this.#query(
 			`SELECT MIN(COALESCE(i.deliver_at, i.created_at)) AS deliver_at FROM engine_inbox_items i
 			 JOIN engine_runtime_bindings b ON b.agent_instance_id=i.agent_instance_id
 			  AND b.binding_id=i.binding_id AND b.engine_generation=i.engine_generation
@@ -2511,15 +2507,14 @@ export class EngineStore {
 	}
 
 	async agentInstanceIdForEngineAgent(engineAgentId: string): Promise<string | undefined> {
-		const rows = (await this.#client.unsafe(
-			"SELECT agent_instance_id FROM engine_runtime_bindings WHERE engine_agent_id=?",
-			[engineAgentId],
-		)) as Array<{ agent_instance_id: string }>;
+		const rows = (await this.#query("SELECT agent_instance_id FROM engine_runtime_bindings WHERE engine_agent_id=?", [
+			engineAgentId,
+		])) as Array<{ agent_instance_id: string }>;
 		return rows.length === 1 ? rows[0].agent_instance_id : undefined;
 	}
 
 	async getBinding(agentInstanceId: string): Promise<EngineBindingSnapshot | undefined> {
-		const rows = (await this.#client.unsafe(
+		const rows = (await this.#query(
 			`SELECT binding_id, command_id, agent_instance_id, execution_id, attempt_id, engine_agent_id, session_file,
 			 profile_digest, state, engine_generation, binding_generation, authority_generation,
 			 manual_hold, intent_revision, intent_command_id
@@ -2548,7 +2543,7 @@ export class EngineStore {
 	}
 
 	async getStartConversationIdentity(commandId: string): Promise<EngineStartConversationIdentity | undefined> {
-		const rows = (await this.#client.unsafe(
+		const rows = (await this.#query(
 			`SELECT operation, agent_instance_id, agent_instance_ref, parent_agent_instance_id, authority_generation
 			 FROM engine_commands WHERE command_id = ?`,
 			[commandId],
@@ -2571,7 +2566,7 @@ export class EngineStore {
 	}
 
 	async getBindingConversationIdentity(agentInstanceId: string): Promise<string | undefined> {
-		const rows = (await this.#client.unsafe(
+		const rows = (await this.#query(
 			"SELECT conversation_identity_digest FROM engine_runtime_bindings WHERE agent_instance_id = ?",
 			[agentInstanceId],
 		)) as Array<{ conversation_identity_digest: string | null }>;
@@ -2579,7 +2574,7 @@ export class EngineStore {
 	}
 
 	async listExpiredChildHistory(cutoff: number, limit = 100): Promise<ExpiredChildHistory[]> {
-		const rows = (await this.#client.unsafe(
+		const rows = (await this.#query(
 			`SELECT b.agent_instance_id, c.agent_instance_ref, b.attempt_id, b.session_file, a.updated_at
 			 FROM engine_runtime_bindings b
 			 JOIN engine_attempts a ON a.attempt_id=b.attempt_id
@@ -2610,7 +2605,7 @@ export class EngineStore {
 	}
 
 	async listRetainedDirectChildHistory(parentAgentInstanceId: string): Promise<RetainedDirectChildHistory[]> {
-		const rows = (await this.#client.unsafe(
+		const rows = (await this.#query(
 			`SELECT b.agent_instance_id, c.agent_instance_ref, b.engine_agent_id, b.session_file
 			 FROM engine_runtime_bindings b
 			 JOIN engine_attempts a ON a.attempt_id=b.attempt_id
@@ -2635,7 +2630,7 @@ export class EngineStore {
 	}
 
 	async clearBindingSession(agentInstanceId: string, attemptId: string, sessionFile: string): Promise<void> {
-		await this.#client.unsafe(
+		await this.#query(
 			`UPDATE engine_runtime_bindings SET session_file=NULL, updated_at=?
 			 WHERE agent_instance_id=? AND attempt_id=? AND session_file=?`,
 			[Date.now(), agentInstanceId, attemptId, sessionFile],
@@ -2643,7 +2638,7 @@ export class EngineStore {
 	}
 
 	async getHistoryArchive(agentInstanceId: string): Promise<EngineHistoryArchive | undefined> {
-		const rows = (await this.#client.unsafe("SELECT value FROM engine_metadata WHERE key=?", [
+		const rows = (await this.#query("SELECT value FROM engine_metadata WHERE key=?", [
 			`history_archive:${agentInstanceId}`,
 		])) as MetadataRow[];
 		if (!rows[0]) return undefined;
@@ -2661,12 +2656,12 @@ export class EngineStore {
 	async putHistoryArchive(archive: EngineHistoryArchive, previous?: EngineHistoryArchive): Promise<void> {
 		const key = `history_archive:${archive.binding.agentInstanceId}`;
 		const rows = previous
-			? await this.#client.unsafe("UPDATE engine_metadata SET value=? WHERE key=? AND value=? RETURNING key", [
+			? await this.#query("UPDATE engine_metadata SET value=? WHERE key=? AND value=? RETURNING key", [
 					JSON.stringify(archive),
 					key,
 					JSON.stringify(previous),
 				])
-			: await this.#client.unsafe("INSERT OR IGNORE INTO engine_metadata(key,value) VALUES (?,?) RETURNING key", [
+			: await this.#query("INSERT OR IGNORE INTO engine_metadata(key,value) VALUES (?,?) RETURNING key", [
 					key,
 					JSON.stringify(archive),
 				]);
@@ -2674,7 +2669,7 @@ export class EngineStore {
 	}
 
 	async hasOtherSessionBinding(agentInstanceId: string, sessionFile: string): Promise<boolean> {
-		const rows = await this.#client.unsafe(
+		const rows = await this.#query(
 			"SELECT 1 FROM engine_runtime_bindings WHERE session_file=? AND agent_instance_id<>? LIMIT 1",
 			[sessionFile, agentInstanceId],
 		);
@@ -3232,7 +3227,7 @@ export class EngineStore {
 	}
 
 	async getEffect(effectId: string): Promise<EngineEffectRow | undefined> {
-		const rows = (await this.#client.unsafe(
+		const rows = (await this.#query(
 			`SELECT effect_id, agent_instance_id, execution_id, attempt_id, binding_id, engine_generation,
 			 binding_generation, authority_generation, tool_call_id, tool_name, policy, input_hash, effect_kind, state, outcome
 			 FROM engine_effects WHERE effect_id=?`,
@@ -3242,7 +3237,7 @@ export class EngineStore {
 	}
 
 	async getApproval(approvalId: string): Promise<EngineApprovalRow | undefined> {
-		const rows = (await this.#client.unsafe(
+		const rows = (await this.#query(
 			"SELECT approval_id, effect_id, state, decision FROM engine_approvals WHERE approval_id=?",
 			[approvalId],
 		)) as EngineApprovalRow[];
@@ -3250,7 +3245,7 @@ export class EngineStore {
 	}
 
 	async getAttempt(attemptId: string): Promise<EngineAttemptRecord | undefined> {
-		const rows = (await this.#client.unsafe(
+		const rows = (await this.#query(
 			`SELECT rowid AS row_id, agent_instance_id, execution_id, attempt_id, command_id, binding_id,
 			 engine_generation, binding_generation, authority_generation, state, cause, updated_at,
 			 transcript_session_id, transcript_path, transcript_leaf_entry_id,
@@ -3263,7 +3258,7 @@ export class EngineStore {
 	}
 
 	async getAttemptTarget(attemptId: string): Promise<EngineAttemptTargetRecord | undefined> {
-		const rows = (await this.#client.unsafe(
+		const rows = (await this.#query(
 			`SELECT agent_instance_id,execution_id,attempt_id,binding_id,engine_generation,binding_generation,authority_generation,state
 			 FROM engine_attempts WHERE attempt_id=?`,
 			[attemptId],
@@ -3272,7 +3267,7 @@ export class EngineStore {
 	}
 
 	async listAttempts(afterRowId = 0, limit = 100): Promise<EngineAttemptRecord[]> {
-		const rows = (await this.#client.unsafe(
+		const rows = (await this.#query(
 			`SELECT rowid AS row_id, agent_instance_id, execution_id, attempt_id, command_id, binding_id,
 			 engine_generation, binding_generation, authority_generation, state, cause, updated_at,
 			 transcript_session_id, transcript_path, transcript_leaf_entry_id, transcript_byte_boundary,
@@ -3285,7 +3280,7 @@ export class EngineStore {
 	}
 
 	async eventsAfter(attemptId: string, afterEventId = 0, limit = 100): Promise<EngineEvent[]> {
-		const rows = (await this.#client.unsafe(
+		const rows = (await this.#query(
 			`SELECT event_id, seq, causation_command_id, agent_instance_id, execution_id, attempt_id, binding_id,
 			 engine_generation, binding_generation, authority_generation, kind, payload, created_at
 			 FROM engine_event_outbox WHERE attempt_id=? AND event_id>? ORDER BY event_id LIMIT ?`,
@@ -3329,14 +3324,14 @@ export class EngineStore {
 		}
 		// Legacy query/tool mutation IDs also occur in retained outbox events. Only actual
 		// admitted commands have hosted receipts; never infer that distinction from ID shape.
-		const commands = await this.#client.unsafe("SELECT command_id FROM engine_commands WHERE command_id=? LIMIT 1", [
+		const commands = await this.#query("SELECT command_id FROM engine_commands WHERE command_id=? LIMIT 1", [
 			event.causationCommandId,
 		]);
 		return commands.length === 0;
 	}
 
 	async eventBounds(attemptId: string): Promise<{ first: number; last: number }> {
-		const rows = (await this.#client.unsafe(
+		const rows = (await this.#query(
 			"SELECT MIN(event_id) AS first, MAX(event_id) AS last FROM engine_event_outbox WHERE attempt_id=?",
 			[attemptId],
 		)) as Array<{ first: number | null; last: number | null }>;
@@ -3344,7 +3339,7 @@ export class EngineStore {
 	}
 
 	async terminalEvent(attemptId: string): Promise<EngineEvent | undefined> {
-		const rows = (await this.#client.unsafe(
+		const rows = (await this.#query(
 			`SELECT event_id, seq, causation_command_id, agent_instance_id, execution_id, attempt_id, binding_id,
 			 engine_generation, binding_generation, authority_generation, kind, payload, created_at
 			 FROM engine_event_outbox WHERE attempt_id=?
@@ -3570,7 +3565,7 @@ export class EngineStore {
 	}
 
 	async pendingEvents(limit = 100): Promise<EngineEvent[]> {
-		const rows = (await this.#client.unsafe(
+		const rows = (await this.#query(
 			`SELECT event_id, seq, causation_command_id, agent_instance_id, execution_id, attempt_id, binding_id, engine_generation,
 			 binding_generation, authority_generation, kind, payload, created_at
 			 FROM engine_event_outbox WHERE published_at IS NULL ORDER BY event_id LIMIT ?`,
@@ -3586,7 +3581,7 @@ export class EngineStore {
 	): Promise<{ events: EngineEvent[]; throughCursor: number; scannedRecords: number }> {
 		if (!sinkId.trim()) throw new Error("Event sink ID must be non-empty");
 		if (!Number.isSafeInteger(afterEventId) || afterEventId < 0) throw new Error("Invalid event delivery cursor");
-		const rows = (await this.#client.unsafe(
+		const rows = (await this.#query(
 			`WITH page AS MATERIALIZED (
 			 SELECT event_id FROM engine_event_outbox WHERE event_id>? ORDER BY event_id LIMIT ?
 			)
@@ -3646,10 +3641,7 @@ export class EngineStore {
 	}
 
 	async markEventPublished(eventId: number): Promise<void> {
-		await this.#client.unsafe(`UPDATE engine_event_outbox SET published_at=? WHERE event_id=?`, [
-			Date.now(),
-			eventId,
-		]);
+		await this.#query(`UPDATE engine_event_outbox SET published_at=? WHERE event_id=?`, [Date.now(), eventId]);
 	}
 
 	async drain(): Promise<void> {
@@ -4183,9 +4175,24 @@ export class EngineStore {
 		}
 	}
 
+	#query(query: string, values?: unknown[]): Promise<unknown[]> {
+		return this.#queueSql(() => this.#client.unsafe(query, values));
+	}
+
+	#queueSql<T>(work: () => Promise<T>): Promise<T> {
+		// SQLite shares one connection: an unqueued query would join any open
+		// transaction and could be rolled back after reporting a successful write.
+		const run = this.#transactionTail.then(work);
+		this.#transactionTail = run.then(
+			() => {},
+			() => {},
+		);
+		return run;
+	}
+
 	#transaction<T>(work: (sql: SqlClient) => Promise<T>): Promise<T> {
 		this.#streamBatch = undefined;
-		const run = this.#transactionTail.then(async () => {
+		return this.#queueSql(async () => {
 			const revision = this.#changeRevision;
 			const waiters = new Set<RuntimeEventWaiter>();
 			this.#transactionWaiters = waiters;
@@ -4202,10 +4209,5 @@ export class EngineStore {
 				this.#transactionWaiters = undefined;
 			}
 		});
-		this.#transactionTail = run.then(
-			() => {},
-			() => {},
-		);
-		return run;
 	}
 }

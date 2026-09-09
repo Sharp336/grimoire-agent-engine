@@ -563,6 +563,63 @@ describe("runtime v1 durable boundaries", () => {
 			expect(await store.getEffect(effectId)).toBeUndefined();
 		}
 	});
+	it("retains every error result when parallel tool admissions roll back on the shared SQLite connection", async () => {
+		let store = await createStore();
+		const target = await active(store);
+		const sessionPath = path.join(directories.at(-1)!, "parallel-errors.jsonl");
+		const header = { type: "session", id: "parallel-errors", version: 3, timestamp: new Date().toISOString() };
+		await store.sessionStorage.writeText(sessionPath, `${JSON.stringify(header)}\n`);
+		const writer = store.sessionStorage.openWriter(sessionPath);
+		const results: Array<{
+			type: string;
+			id: string;
+			parentId: string | null;
+			message: { role: string; toolCallId: string; content: string };
+		}> = [];
+		await Promise.all(
+			Array.from({ length: 4 }, async (_, index) => {
+				await expect(
+					store.startToolEffect(target, {
+						effectId: `rejected-${index}`,
+						toolCallId: `invalid/${index}`,
+						toolName: "read",
+						policy: "tracked",
+						inputHash: "sha256:rejected",
+					}),
+				).rejects.toMatchObject({ code: "invalid_request" });
+				const entry = {
+					type: "message",
+					id: `result-${index}`,
+					parentId: results.at(-1)?.id ?? null,
+					message: { role: "toolResult", toolCallId: `invalid/${index}`, content: "admission rejected" },
+				};
+				results.push(entry);
+				await writer.append(`${JSON.stringify(entry)}\n`);
+			}),
+		);
+		await writer.close();
+		await store.sessionStorage.drain();
+		const file = path.join(directories.at(-1)!, "engine.sqlite");
+		await store.close();
+		stores.splice(stores.indexOf(store), 1);
+		store = await EngineStore.open(file);
+		stores.push(store);
+		const retained = (await store.sessionStorage.readText(sessionPath))
+			.trim()
+			.split("\n")
+			.map(line => JSON.parse(line));
+		expect(retained).toEqual([header, ...results]);
+		const inspect = new SQL(`sqlite:${file.replaceAll("\\", "/")}`);
+		try {
+			const indexed = (await inspect.unsafe(
+				"SELECT entry_id,parent_entry_id FROM engine_history_entries WHERE session_path=? AND entry_type='message' ORDER BY ordinal",
+				[sessionPath],
+			)) as Array<{ entry_id: string; parent_entry_id: string | null }>;
+			expect(indexed).toEqual(results.map(entry => ({ entry_id: entry.id, parent_entry_id: entry.parentId })));
+		} finally {
+			await inspect.end();
+		}
+	});
 	it("rolls back tool baseline revisions with failed effect transactions and refuses invalid tool identity before admission", async () => {
 		const store = await createStore();
 		const target = await active(store);
