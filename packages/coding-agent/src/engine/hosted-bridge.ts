@@ -623,7 +623,11 @@ export class HostedEngineBridge {
 			});
 			if (accepted.status !== "accepted") throw new Error("Hosted command receipt was not persisted");
 			claim.accepted = true;
-			if (receipt.stage === "rejected" || (receipt.stage === "applied" && claim.work.command?.op !== "start"))
+			if (
+				receipt.stage === "rejected" ||
+				receipt.stage === "execution_terminal" ||
+				(receipt.stage === "applied" && claim.work.command?.op !== "start")
+			)
 				this.#active.delete(claim.jobId);
 			while (this.#active.size > runtimeLimits.devicePendingRecords) {
 				const old = [...this.#active.values()].find(item => item.accepted);
