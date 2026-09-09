@@ -30,6 +30,19 @@ const roots = Number(args.get("--roots") ?? 7);
 const rate = Number(args.get("--rate") ?? 20);
 const seconds = Number(args.get("--seconds") ?? 1800);
 const noisyRate = Number(args.get("--noisy-rate") ?? 0);
+const staircaseSeconds = Number(args.get("--staircase-seconds") ?? 0);
+const staircaseStartFile = args.get("--staircase-start-file");
+if (
+	staircaseSeconds &&
+	(roots !== 28 ||
+		!Number.isInteger(staircaseSeconds) ||
+		staircaseSeconds < 4 ||
+		staircaseSeconds % 4 !== 0 ||
+		staircaseSeconds > seconds ||
+		!staircaseStartFile ||
+		path.resolve(staircaseStartFile) !== path.join(directory, "staircase-start"))
+)
+	throw new Error("Staircase requires 28 roots, four finite equal phases and its owned start marker");
 const activeAgents = roots * 3 + (noisyRate ? 1 : 0);
 const legacyOwnership = args.get("--legacy-ownership") === "true";
 const initialAgents = activeAgents + (legacyOwnership ? 4 : 0);
@@ -289,6 +302,10 @@ process.once("SIGTERM", () => stop.abort());
 const lag = monitorEventLoopDelay({ resolution: 10 });
 lag.enable();
 const started = performance.now();
+let producerStarted = started;
+let staircaseStarted: number | undefined;
+let stage = -1;
+let producingRoots = roots;
 const metrics = fs.createWriteStream(path.join(directory, "metrics.ndjson"), { flags: "wx" });
 const writeMetric = async (value: Record<string, unknown>) => {
 	if (!metrics.write(`${JSON.stringify(value)}\n`)) await once(metrics, "drain");
@@ -372,6 +389,7 @@ const produce = async (binding: EngineBindingSnapshot & { agentInstanceRef: stri
 			agentInstanceRef: binding.agentInstanceRef,
 			attemptId: binding.attemptId,
 			revision,
+			...(staircaseSeconds ? { stage } : {}),
 		});
 	return event.eventId;
 };
@@ -405,6 +423,7 @@ console.log(
 		ratePerAgent: rate,
 		nominalEventsPerSecond: rate * bindings.length,
 		noisyRate,
+		...(staircaseSeconds ? { producingRootStages: [1, 7, 14, 28], staircaseSeconds } : {}),
 		seconds,
 		pid: process.pid,
 		sourceHead: provenance.trim(),
@@ -417,17 +436,45 @@ let noisy = 0;
 let lastSample = started;
 try {
 	while (!stop.signal.aborted && performance.now() - started < seconds * 1000) {
-		const deadline = started + (++tick * 1000) / rate;
+		if (staircaseSeconds && staircaseStarted === undefined) {
+			// The root starts the measured staircase after both real UI observers attach.
+			// Do not use Bun.file().exists(): its cached ENOENT can miss a later marker.
+			try {
+				await fs.promises.access(staircaseStartFile!);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+				await Bun.sleep(25);
+				continue;
+			}
+			staircaseStarted = producerStarted = performance.now();
+		}
+		if (staircaseStarted !== undefined) {
+			const nextStage = Math.min(3, Math.floor((performance.now() - staircaseStarted) / (staircaseSeconds * 250)));
+			if (nextStage !== stage) {
+				stage = nextStage;
+				producingRoots = [1, 7, 14, 28][stage];
+				await writeMetric({
+					kind: "load_stage",
+					stage,
+					producingRoots,
+					producingAgents: producingRoots * 3,
+					at: Date.now(),
+					pid: process.pid,
+					produced,
+				});
+			}
+		}
+		const deadline = producerStarted + (++tick * 1000) / rate;
 		// Preserve the offered ratio under saturation. A wall-clock backlog here can grow
 		// faster than it drains and prevent every nominal AgentInstance from getting its next turn.
 		const targetNoisy = Math.floor((tick * noisyRate) / rate);
 		await Promise.all([
-			...bindings.map(binding => produce(binding)),
+			...bindings.slice(0, producingRoots * 3).map(binding => produce(binding)),
 			(async () => {
 				const pending: Array<Promise<number | undefined>> = [];
 				while (noisy < targetNoisy && !stop.signal.aborted) {
 					noisy++;
-					const delay = started + (noisy * 1000) / noisyRate - performance.now();
+					const delay = producerStarted + (noisy * 1000) / noisyRate - performance.now();
 					if (delay > 0) await Bun.sleep(delay);
 					// Model the independently paced producer. At most one cohort (10 at
 					// 200/s) is outstanding; its next cohort waits for durable admission.
@@ -449,6 +496,7 @@ try {
 				at: Date.now(),
 				elapsedMs: performance.now() - started,
 				produced,
+				...(staircaseSeconds ? { stage, producingRoots } : {}),
 				producerRevisions: Object.fromEntries(
 					[...streams].map(([attemptId, stream]) => [attemptId, stream.revision]),
 				),
