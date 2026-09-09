@@ -32,6 +32,102 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 		tempDir = undefined;
 	});
 
+	it("opens before backlog delivery and stops after one final page without losing restart delivery", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-stop-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const databasePath = path.join(tempDir, "engine.sqlite");
+		let runtime = await EngineRuntime.create({ databasePath });
+		const client = await connect({ servers: broker.url });
+		const options = {
+			deviceId: "stop-device",
+			engineId: "stop-engine",
+			servers: broker.url,
+			authorizeCommand: () => {},
+			authorizeMessage: () => {},
+			resolveLaunchProfile: () => ({ spawns: "", profileDigest: "stop-profile" }),
+		};
+		const pending = runtime.store.pendingEventsForSink.bind(runtime.store);
+		const entered = Promise.withResolvers<void>(),
+			release = Promise.withResolvers<void>();
+		const deliveryFailed = Promise.withResolvers<void>();
+		let pages = 0,
+			adapter: NatsEngineAdapter | undefined,
+			connecting: Promise<NatsEngineAdapter> | undefined;
+		try {
+			for (let index = 0; index < 201; index++)
+				await runtime.store.appendEvent({
+					causationCommandId: `stop-event-${index}`,
+					agentInstanceId: "stop-agent",
+					executionId: "stop-execution",
+					attemptId: "stop-attempt",
+					bindingId: "stop-binding",
+					engineGeneration: runtime.engineGeneration,
+					bindingGeneration: 1,
+					authorityGeneration: 1,
+					kind: "trace_reasoning",
+					payload: { index },
+				});
+			runtime.store.pendingEventsForSink = async (...args) => {
+				pages++;
+				const page = await pending(...args);
+				entered.resolve();
+				await release.promise;
+				return page;
+			};
+			connecting = NatsEngineAdapter.connect({ ...options, runtime }).then(value => {
+				adapter = value;
+				return value;
+			});
+			await entered.promise;
+			await waitFor(async () => Boolean(adapter), 2000);
+			const current = adapter!;
+			const sink = `nats:${current.deviceRoute}:${current.engineRoute}`;
+			let disposed = false;
+			const stopping = current.dispose().then(() => {
+				disposed = true;
+			});
+			await Bun.sleep(25);
+			expect(disposed).toBe(false);
+			release.resolve();
+			await stopping;
+			expect(pages).toBe(2);
+			const acknowledged = await pending(sink);
+			expect(acknowledged.events).toEqual([]);
+			expect(acknowledged.scannedRecords).toBe(100);
+			const finalPage = await pending(sink, 100, acknowledged.throughCursor);
+			expect(finalPage.events).toEqual([]);
+			expect(finalPage.scannedRecords).toBe(100);
+			expect((await pending(sink, 100, finalPage.throughCursor)).events).toHaveLength(1);
+			const manager = await jetstreamManager(client);
+			expect((await manager.streams.info(ENGINE_EVENT_STREAM)).state.messages).toBe(200);
+			runtime.store.pendingEventsForSink = pending;
+			await runtime.dispose();
+			runtime = await EngineRuntime.create({ databasePath });
+			// The retained final event meets a real broker rejection during cold recovery.
+			await manager.streams.update(ENGINE_EVENT_STREAM, { max_msgs: 200, discard: DiscardPolicy.New });
+			adapter = await NatsEngineAdapter.connect({ ...options, runtime, onError: () => deliveryFailed.resolve() });
+			await deliveryFailed.promise;
+			expect((await runtime.store.pendingEventsForSink(sink, 100, finalPage.throughCursor)).events).toHaveLength(1);
+			await manager.streams.update(ENGINE_EVENT_STREAM, { max_msgs: -1, discard: DiscardPolicy.Old });
+			// No new runtime event or explicit flush wakes the adapter after recovery.
+			await waitFor(
+				async () =>
+					(await runtime.store.pendingEventsForSink(sink, 100, finalPage.throughCursor)).events.length === 0,
+				20_000,
+			);
+			expect((await runtime.store.pendingEventsForSink(sink)).events).toEqual([]);
+			expect((await manager.streams.info(ENGINE_EVENT_STREAM)).state.messages).toBe(201);
+		} finally {
+			release.resolve();
+			if (connecting) adapter ??= await connecting;
+			await adapter?.dispose();
+			await runtime.dispose();
+			await client.drain();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 30000);
+
 	it("applies a paused queue command before an unrelated event delivery drain completes", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-queue-${Snowflake.next()}-`));
 		const broker = await startNatsServer(tempDir);

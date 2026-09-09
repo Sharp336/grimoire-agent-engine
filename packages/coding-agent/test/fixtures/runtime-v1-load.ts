@@ -559,18 +559,21 @@ try {
 	await sampling;
 } finally {
 	lag.disable();
+	console.log(JSON.stringify({ kind: "cleanup", step: "server.close" }));
+	await server.close();
 	console.log(JSON.stringify({ kind: "cleanup", step: "bridge.stopAdmission" }));
 	await bridge?.stopAdmission();
 	console.log(JSON.stringify({ kind: "cleanup", step: "adapter.stopAdmission" }));
 	await adapter?.stopAdmission();
-	console.log(JSON.stringify({ kind: "cleanup", step: "server.close" }));
-	await server.close();
-	console.log(JSON.stringify({ kind: "cleanup", step: "bridge.dispose" }));
-	await bridge?.dispose();
+	console.log(JSON.stringify({ kind: "cleanup", step: "runtime.dispose" }));
+	await runtime.dispose({ closeStore: false });
 	console.log(JSON.stringify({ kind: "cleanup", step: "adapter.dispose" }));
 	await adapter?.dispose();
-	console.log(JSON.stringify({ kind: "cleanup", step: "runtime.dispose" }));
-	await runtime.dispose();
+	console.log(JSON.stringify({ kind: "cleanup", step: "bridge.drain" }));
+	await bridge?.drain();
+	console.log(JSON.stringify({ kind: "cleanup", step: "bridge.dispose" }));
+	await bridge?.dispose();
+	await runtime.store.close();
 	await writeFixtureStatus("stopped");
 	auth.close();
 	metrics.end();

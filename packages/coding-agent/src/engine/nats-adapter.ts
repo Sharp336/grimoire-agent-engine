@@ -151,6 +151,7 @@ export class NatsEngineAdapter {
 	#unsubscribeRegistry: () => void = () => {};
 	#unsubscribeOutbound: () => void = () => {};
 	#outboxFlush: Promise<void> | undefined;
+	#outboxRetry: NodeJS.Timeout | undefined;
 	#outboxDirty = false;
 	#outboxCursor = 0;
 	#stopping = false;
@@ -222,12 +223,24 @@ export class NatsEngineAdapter {
 
 	async flushEvents(): Promise<void> {
 		if (this.#outboxFlush) return await this.#outboxFlush;
+		if (this.#disposed) return;
+		clearTimeout(this.#outboxRetry);
+		this.#outboxRetry = undefined;
 		const flush = this.#flushEvents();
 		this.#outboxFlush = flush;
 		let completed = false;
 		try {
 			await flush;
 			completed = true;
+		} catch (error) {
+			if (!this.#disposed && !(error instanceof StaleEngineLeaseError)) {
+				// Retry retained events even when no new runtime activity arrives.
+				this.#outboxRetry = setTimeout(() => {
+					this.#outboxRetry = undefined;
+					this.wakeEvents();
+				}, runtimeLimits.reconciliationMs).unref();
+			}
+			throw error;
 		} finally {
 			if (this.#outboxFlush === flush) this.#outboxFlush = undefined;
 			if (completed && this.#outboxDirty) this.wakeEvents();
@@ -243,9 +256,14 @@ export class NatsEngineAdapter {
 	async dispose(): Promise<void> {
 		if (this.#disposed) return;
 		this.#disposed = true;
+		clearTimeout(this.#outboxRetry);
+		this.#outboxRetry = undefined;
 		await this.stopAdmission();
 		this.#unsubscribeRuntime();
-		await this.flushEvents().catch(error => this.#report(error));
+		// Join its ACK transaction, then take one final page for shutdown events.
+		// A larger backlog remains durable for restart instead of delaying shutdown.
+		await this.#outboxFlush?.catch(error => this.#report(error));
+		await this.#flushEvents().catch(error => this.#report(error));
 		await this.#connection.drain();
 	}
 
@@ -302,7 +320,9 @@ export class NatsEngineAdapter {
 		this.#unsubscribeOutbound = this.runtime.ircBus.setOutboundTransport((message, opts) =>
 			this.#publishPeerMessage(message, opts),
 		);
-		await this.flushEvents();
+		if (!(await this.runtime.store.isCurrentEngineGeneration(this.runtime.engineGeneration)))
+			throw new StaleEngineLeaseError("Engine generation lease is no longer current");
+		this.wakeEvents();
 	}
 
 	async #publishPeerMessage(
@@ -689,7 +709,7 @@ export class NatsEngineAdapter {
 
 	async #flushEvents(): Promise<void> {
 		const sinkId = `nats:${this.deviceRoute}:${this.engineRoute}`;
-		for (;;) {
+		do {
 			this.#outboxDirty = false;
 			if (!(await this.runtime.store.isCurrentEngineGeneration(this.runtime.engineGeneration))) {
 				throw new StaleEngineLeaseError("Engine generation lease is no longer current");
@@ -728,7 +748,7 @@ export class NatsEngineAdapter {
 			// A failed ACK/transaction retries the page; a fresh adapter scans from zero.
 			this.#outboxCursor = page.throughCursor;
 			if (page.events.length === 0) await Bun.sleep(0);
-		}
+		} while (!this.#disposed);
 	}
 
 	#eventEnvelope(event: EngineEvent): EngineEventEnvelope {
