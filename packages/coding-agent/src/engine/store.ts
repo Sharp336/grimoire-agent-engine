@@ -41,7 +41,9 @@ import {
 	RUNTIME_OWNERSHIP_SCHEMA,
 } from "./runtime-ownership";
 import {
+	RUNTIME_KIND_MASK,
 	RUNTIME_PROJECTION_SCHEMA,
+	type RuntimeProjectionNotice,
 	type RuntimeTargetRequest,
 	recordRuntimeProjection,
 	runtimeNativeTarget,
@@ -55,6 +57,7 @@ import {
 	type RuntimeScope,
 	type RuntimeWork,
 	runtimeLimits,
+	validateRuntimeValue,
 } from "./runtime-protocol";
 import { RUNTIME_QUEUE_SCHEMA, type RuntimeQueueRequest, readRuntimeQueue } from "./runtime-queue";
 import { type RuntimeSnapshot, readRuntimeEvents, readRuntimeSnapshot, readRuntimeSummary } from "./runtime-read";
@@ -79,6 +82,32 @@ import {
 
 interface MetadataRow {
 	value: string;
+}
+
+interface RuntimeEventWaiter {
+	scope: RuntimeScope;
+	access: RuntimeAccess;
+	resolve: () => void;
+}
+
+function runtimeWaitMatches(waiter: RuntimeEventWaiter, notice: RuntimeProjectionNotice): boolean {
+	const { scope, access } = waiter;
+	if (
+		notice.principalId !== access.principalId &&
+		!(notice.principalId === "" && access.authorizedAgentInstanceRefs?.includes(notice.agentInstanceRef))
+	)
+		return false;
+	if (scope.kind === "catalog") return notice.summary;
+	if (scope.kind === "branch" && notice.membership && scope.rootAgentInstanceRef === notice.rootAgentInstanceRef)
+		return true;
+	return (scope.kind === "branch" ? scope.interests : [scope]).some(interest => {
+		if (interest.agentInstanceRef !== notice.agentInstanceRef) return false;
+		const mask = interest.kinds.reduce((value, kind) => value | RUNTIME_KIND_MASK[kind], 0);
+		return Boolean(
+			mask &
+				(interest.kind === "attempt" && interest.attemptId !== notice.attemptId ? notice.agentKinds : notice.kinds),
+		);
+	});
 }
 
 function toolEffectPayload(effect: EngineToolEffectInput): Record<string, unknown> {
@@ -802,8 +831,8 @@ export class EngineStore {
 		committed: Promise<EngineEvent[]>;
 	};
 	#change = Promise.withResolvers<void>();
-	#summaryChange = Promise.withResolvers<void>();
-	#summaryRevision = 0;
+	#runtimeWaiters = new Set<RuntimeEventWaiter>();
+	#transactionWaiters?: Set<RuntimeEventWaiter>;
 	#closed = false;
 	#changeRevision = 0;
 
@@ -1227,6 +1256,7 @@ export class EngineStore {
 	}
 
 	async waitRuntimeEvents(request: RuntimeEventsRequest, signal?: AbortSignal): Promise<RuntimeEventBatch> {
+		validateRuntimeValue("nativeEventsRequest", request);
 		const deadline =
 			Date.now() +
 			Math.min(
@@ -1236,44 +1266,51 @@ export class EngineStore {
 		const total: RuntimeWork = { bytes: 0, changes: 0, scannedRows: 0, materializedBytes: 0, elapsedMs: 0 };
 		let afterCursor = request.afterCursor;
 		for (;;) {
-			// Register before the consistent read. Token-only commits do not wake the app writer.
-			const changed = request.scope.kind === "catalog" ? this.#summaryChange.promise : this.changeSignal();
-			const remaining = {
-				...request.remainingWork,
-				scannedRows: request.remainingWork.scannedRows - total.scannedRows,
-				materializedBytes: request.remainingWork.materializedBytes - total.materializedBytes,
-				timeMs: request.remainingWork.timeMs - total.elapsedMs,
-			};
-			const result = await this.runtimeEvents({ ...request, afterCursor, remainingWork: remaining });
-			total.scannedRows += result.work.scannedRows;
-			total.materializedBytes += result.work.materializedBytes;
-			total.elapsedMs += result.work.elapsedMs;
-			if (
-				result.changes.length ||
-				result.hasMore ||
-				request.untilCursor !== undefined ||
-				this.#closed ||
-				signal?.aborted ||
-				Date.now() >= deadline
-			) {
-				Object.assign(result.work, total, { changes: result.changes.length });
-				for (;;) {
-					const bytes = Buffer.byteLength(JSON.stringify(result));
-					if (bytes === result.work.bytes) break;
-					result.work.bytes = bytes;
-				}
-				return result;
-			}
-			afterCursor = result.throughCursor;
-			const wake = Promise.withResolvers<void>();
-			const abort = () => wake.resolve();
-			signal?.addEventListener("abort", abort, { once: true });
-			const timer = setTimeout(abort, Math.max(0, deadline - Date.now()));
+			// Register before the consistent read. Only matching committed projections
+			// wake this waiter; an unobserved sibling must not consume its query budget.
+			const changed = Promise.withResolvers<void>();
+			const waiter: RuntimeEventWaiter = { scope: request.scope, access: request, resolve: changed.resolve };
+			this.#runtimeWaiters.add(waiter);
 			try {
-				await Promise.race([changed, wake.promise]);
+				const remaining = {
+					...request.remainingWork,
+					scannedRows: request.remainingWork.scannedRows - total.scannedRows,
+					materializedBytes: request.remainingWork.materializedBytes - total.materializedBytes,
+					timeMs: request.remainingWork.timeMs - total.elapsedMs,
+				};
+				const result = await this.runtimeEvents({ ...request, afterCursor, remainingWork: remaining });
+				total.scannedRows += result.work.scannedRows;
+				total.materializedBytes += result.work.materializedBytes;
+				total.elapsedMs += result.work.elapsedMs;
+				if (
+					result.changes.length ||
+					result.hasMore ||
+					request.untilCursor !== undefined ||
+					this.#closed ||
+					signal?.aborted ||
+					Date.now() >= deadline
+				) {
+					Object.assign(result.work, total, { changes: result.changes.length });
+					for (;;) {
+						const bytes = Buffer.byteLength(JSON.stringify(result));
+						if (bytes === result.work.bytes) break;
+						result.work.bytes = bytes;
+					}
+					return result;
+				}
+				afterCursor = result.throughCursor;
+				const wake = Promise.withResolvers<void>();
+				const abort = () => wake.resolve();
+				signal?.addEventListener("abort", abort, { once: true });
+				const timer = setTimeout(abort, Math.max(0, deadline - Date.now()));
+				try {
+					await Promise.race([changed.promise, wake.promise]);
+				} finally {
+					clearTimeout(timer);
+					signal?.removeEventListener("abort", abort);
+				}
 			} finally {
-				clearTimeout(timer);
-				signal?.removeEventListener("abort", abort);
+				this.#runtimeWaiters.delete(waiter);
 			}
 		}
 	}
@@ -3338,7 +3375,7 @@ export class EngineStore {
 	async close(): Promise<void> {
 		this.#closed = true;
 		this.#change.resolve();
-		this.#summaryChange.resolve();
+		for (const waiter of this.#runtimeWaiters) waiter.resolve();
 		await this.drain();
 		await this.#client.end();
 	}
@@ -3749,8 +3786,15 @@ export class EngineStore {
 					: null,
 			],
 		)) as Array<{ event_id: number }>;
-		if (await recordRuntimeProjection(sql, { ...event, eventId: Number(rows[0]?.event_id), seq, createdAt }))
-			this.#summaryRevision++;
+		const notice = await recordRuntimeProjection(sql, {
+			...event,
+			eventId: Number(rows[0]?.event_id),
+			seq,
+			createdAt,
+		});
+		if (notice)
+			for (const waiter of this.#runtimeWaiters)
+				if (runtimeWaitMatches(waiter, notice)) this.#transactionWaiters?.add(waiter);
 		this.#changeRevision++;
 		return { ...event, eventId: Number(rows[0]?.event_id), seq, createdAt };
 	}
@@ -3845,19 +3889,20 @@ export class EngineStore {
 		this.#streamBatch = undefined;
 		const run = this.#transactionTail.then(async () => {
 			const revision = this.#changeRevision;
-			const summaryRevision = this.#summaryRevision;
-			const result = await this.#client.begin("IMMEDIATE", work);
-			if (this.#changeRevision !== revision) {
-				const previous = this.#change;
-				this.#change = Promise.withResolvers<void>();
-				previous.resolve();
+			const waiters = new Set<RuntimeEventWaiter>();
+			this.#transactionWaiters = waiters;
+			try {
+				const result = await this.#client.begin("IMMEDIATE", work);
+				if (this.#changeRevision !== revision) {
+					const previous = this.#change;
+					this.#change = Promise.withResolvers<void>();
+					previous.resolve();
+				}
+				for (const waiter of waiters) waiter.resolve();
+				return result;
+			} finally {
+				this.#transactionWaiters = undefined;
 			}
-			if (this.#summaryRevision !== summaryRevision) {
-				const previous = this.#summaryChange;
-				this.#summaryChange = Promise.withResolvers<void>();
-				previous.resolve();
-			}
-			return result;
 		});
 		this.#transactionTail = run.then(
 			() => {},

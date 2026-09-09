@@ -534,12 +534,26 @@ async function summaryValue(
 	};
 }
 
-export async function recordRuntimeProjection(sql: RuntimeSql, event: EngineEvent): Promise<boolean> {
+export interface RuntimeProjectionNotice {
+	agentInstanceRef: string;
+	rootAgentInstanceRef: string;
+	principalId: string;
+	attemptId: string;
+	kinds: number;
+	summary: boolean;
+	membership: boolean;
+	agentKinds: number;
+}
+
+export async function recordRuntimeProjection(
+	sql: RuntimeSql,
+	event: EngineEvent,
+): Promise<RuntimeProjectionNotice | undefined> {
 	const rows = (await sql.unsafe("SELECT * FROM engine_agent_identity WHERE agent_instance_id=?", [
 		event.agentInstanceId,
 	])) as RuntimeIdentityRow[];
 	const identity = rows[0];
-	if (!identity?.agent_instance_ref) return false;
+	if (!identity?.agent_instance_ref) return;
 	if (event.kind === "input_requested" || event.kind === "tool_approval_requested") {
 		const body = runtimeInputBody(event);
 		const preview = runtimeInputPreview(body);
@@ -712,7 +726,29 @@ export async function recordRuntimeProjection(sql: RuntimeSql, event: EngineEven
 			event.eventId,
 		],
 	);
-	return Boolean(summary);
+	return {
+		agentInstanceRef: identity.agent_instance_ref,
+		rootAgentInstanceRef: identity.root_agent_instance_ref,
+		principalId: identity.principal_id,
+		attemptId: event.attemptId,
+		kinds,
+		summary: Boolean(summary),
+		membership: Boolean(membership),
+		agentKinds: changes.reduce(
+			(mask, change) =>
+				change.attemptId === undefined && change.kind !== "state"
+					? mask |
+						(change.kind === "receipt"
+							? RUNTIME_KIND_MASK.state
+							: change.kind === "invalidate" && change.value.resource === "queue"
+								? RUNTIME_KIND_MASK.queue
+								: change.kind === "invalidate" && change.value.resource === "holds"
+									? RUNTIME_KIND_MASK.state
+									: 0)
+					: mask,
+			0,
+		),
+	};
 }
 
 export function projectionChange(

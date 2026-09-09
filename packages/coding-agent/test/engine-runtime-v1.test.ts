@@ -1133,6 +1133,109 @@ describe("runtime v1 durable boundaries", () => {
 			snapshot.agents[0].revision,
 		);
 	});
+	it("keeps a quiet paused detail wait within its budget while an unobserved sibling streams", async () => {
+		const store = await createStore();
+		const root = identity("root");
+		await store.registerAgent(root);
+		for (const name of ["quiet", "noisy"]) {
+			await store.registerAgent(identity(name, root.agentInstanceId));
+			await store.commitAttemptTransition(binding(name), "running", [{ kind: "running" }]);
+		}
+		const quiet = binding("quiet"),
+			noisy = binding("noisy");
+		await store.branchIntent(quiet.agentInstanceId, "pause-quiet", "pause", 0);
+		await store.commitAttemptTransition(quiet, "paused", [{ kind: "paused" }]);
+		const scope: RuntimeScope = {
+			kind: "branch",
+			rootAgentInstanceRef: root.agentInstanceRef,
+			interests: [
+				{
+					kind: "attempt",
+					agentInstanceRef: identity("quiet").agentInstanceRef,
+					attemptId: quiet.attemptId,
+					kinds: ["state", "assistant", "queue", "input", "history", "tool", "usage"],
+				},
+			],
+		};
+		const snapshot = await store.runtimeSnapshot(scope, { principalId: "owner" });
+		const read = store.runtimeEvents.bind(store);
+		let reads = 0;
+		store.runtimeEvents = async request => {
+			reads++;
+			return read(request);
+		};
+		let settled = false;
+		const pending = store
+			.waitRuntimeEvents({
+				...eventsRequest(snapshot.epoch, snapshot.watermark, scope, 5000),
+				remainingWork: { ...runtimeRemainingWork(), scannedRows: 64 },
+			})
+			.then(
+				value => ({ value }),
+				error => ({ error }),
+			)
+			.finally(() => {
+				settled = true;
+			});
+		for (let revision = 1; revision <= 40; revision++) {
+			await store.appendEvent({
+				...noisy,
+				causationCommandId: `noise-${revision}`,
+				kind: "message_updated",
+				payload: {
+					mode: revision === 1 ? "snapshot" : "append",
+					...(revision === 1 ? { partial: false } : { baseRevision: revision - 1 }),
+					messageId: "noisy-message",
+					blockId: "text",
+					stream: "assistant",
+					contentId: "noisy-content",
+					revision,
+					offset: (revision - 1) * 1024,
+					endOffset: revision * 1024,
+					totalBytes: revision * 1024,
+					text: "x".repeat(1024),
+					status: "streaming",
+				},
+			});
+			await Bun.sleep(50);
+		}
+		expect(settled).toBe(false);
+		expect(reads).toBe(1);
+		const inspect = new SQL(`sqlite:${path.join(directories.at(-1)!, "engine.sqlite").replaceAll("\\", "/")}`);
+		try {
+			await inspect.unsafe(`CREATE TRIGGER reject_scope_wake BEFORE INSERT ON engine_event_outbox
+				WHEN NEW.kind='failed' BEGIN SELECT RAISE(ABORT, 'scope rollback'); END`);
+			await expect(
+				store.commitAttemptTransition(quiet, "paused", [{ kind: "paused" }, { kind: "failed" }]),
+			).rejects.toThrow("scope rollback");
+			await inspect.unsafe("DROP TRIGGER reject_scope_wake");
+			expect(reads).toBe(1);
+			expect(settled).toBe(false);
+		} finally {
+			await inspect.end();
+		}
+		await store.branchIntent(quiet.agentInstanceId, "resume-quiet", "resume", 1);
+		const result = await pending;
+		if ("error" in result) throw result.error;
+		expect(result.value.changes.some(change => change.kind === "state")).toBe(true);
+		expect(result.value.work.scannedRows).toBeLessThan(64);
+		expect(reads).toBe(2);
+		expect(result.value.changes.every(change => change.agentInstanceRef === identity("quiet").agentInstanceRef)).toBe(
+			true,
+		);
+		store.runtimeEvents = read;
+		// Branch membership still wakes with no selected child detail and no polling.
+		const membership = store.waitRuntimeEvents(
+			eventsRequest(snapshot.epoch, result.value.throughCursor, scope, 1000),
+		);
+		await store.registerAgent(identity("new-child", root.agentInstanceId));
+		expect(
+			(await membership).changes.some(
+				change =>
+					change.kind === "membership" && change.agentInstanceRef === identity("new-child").agentInstanceRef,
+			),
+		).toBe(true);
+	}, 10000);
 	it("filters selected Attempts before decoding detail and honors a fixed replay head", async () => {
 		const store = await createStore();
 		const root = identity("root");
