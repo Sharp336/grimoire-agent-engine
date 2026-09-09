@@ -1903,6 +1903,8 @@ export class EngineRuntime {
 		if (this.#disposed) return;
 		this.#disposed = true;
 		this.#signalInboxWake();
+		for (const pending of this.#pendingStarts)
+			pending.controller.abort(new EngineTargetError("cancelled", "Engine stopped during profile resolution"));
 		const errors: unknown[] = [];
 		for (const result of await Promise.allSettled(this.#lanes.values())) {
 			if (result.status === "rejected") errors.push(result.reason);
@@ -3295,7 +3297,12 @@ export class EngineRuntime {
 	}
 
 	async #finishPause(binding: LiveBinding, attemptId: string): Promise<void> {
-		while (binding.attemptState === "pause_requested" && binding.attemptId === attemptId) {
+		while (
+			!this.#disposed &&
+			this.#bindings.get(binding.agentInstanceId) === binding &&
+			binding.attemptState === "pause_requested" &&
+			binding.attemptId === attemptId
+		) {
 			const changed = this.store.changeSignal();
 			const progress = binding.pauseProgress.promise;
 			const suspended = new Set<string>(binding.parkedEffectTools);
@@ -3327,9 +3334,10 @@ export class EngineRuntime {
 				...(binding.pauseGate.parked ? [] : [binding.pauseGate.waitUntilParked()]),
 			]);
 		}
+		if (this.#disposed || this.#bindings.get(binding.agentInstanceId) !== binding) return;
 		const transcriptCheckpoint = await binding.session.sessionManager.flushAndCheckpoint();
 		await this.#inLane(binding.agentInstanceId, async () => {
-			if (this.#bindings.get(binding.agentInstanceId) !== binding) return;
+			if (this.#disposed || this.#bindings.get(binding.agentInstanceId) !== binding) return;
 			if (binding.attemptId !== attemptId || binding.attemptState !== "pause_requested") return;
 			const events = [...binding.pauseRequests].map(([commandId, initiator]) => ({
 				kind: "paused" as const,
@@ -3361,10 +3369,16 @@ export class EngineRuntime {
 				return await work();
 			} catch (error) {
 				if (!(error instanceof EngineTargetError) || error.code !== "agent_busy") throw error;
+				this.#throwIfDisposed();
+				if (this.#bindings.get(binding.agentInstanceId) !== binding)
+					throw new EngineTargetError("cancelled", "Attempt binding was released during effect admission");
 				binding.pauseGate.pause();
 				void binding.pauseGate.waitUntilResumed(signal);
 				await this.#inLane(binding.agentInstanceId, async () => {
 					const intent = await this.store.intent(binding.agentInstanceId);
+					this.#throwIfDisposed();
+					if (this.#bindings.get(binding.agentInstanceId) !== binding)
+						throw new EngineTargetError("cancelled", "Attempt binding was released during effect admission");
 					binding.manualHold = intent.manualHold;
 					binding.intentRevision = intent.intentRevision;
 					if (!intent.manualHold || binding.attemptState !== "running") return;
