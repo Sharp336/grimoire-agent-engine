@@ -205,13 +205,13 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			const first = await Promise.all([append(), append(), append()]);
 			await manager.streams.update(ENGINE_EVENT_STREAM, { max_msgs: 1, discard: DiscardPolicy.New });
 			await expect(adapter.flushEvents()).rejects.toThrow();
-			expect((await runtime.store.pendingEventsForSink(sink)).map(event => event.eventId)).toEqual(
+			expect((await runtime.store.pendingEventsForSink(sink)).events.map(event => event.eventId)).toEqual(
 				first.slice(1).map(event => event.eventId),
 			);
 			expect((await manager.streams.info(ENGINE_EVENT_STREAM)).state.messages).toBe(1);
 			await manager.streams.update(ENGINE_EVENT_STREAM, { max_msgs: -1, discard: DiscardPolicy.Old });
 			await adapter.flushEvents();
-			expect(await runtime.store.pendingEventsForSink(sink)).toEqual([]);
+			expect((await runtime.store.pendingEventsForSink(sink)).events).toEqual([]);
 			expect((await manager.streams.info(ENGINE_EVENT_STREAM)).state.messages).toBe(3);
 
 			const second = await Promise.all([append(), append(), append()]);
@@ -220,16 +220,16 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			await expect(adapter.flushEvents()).rejects.toThrow("delivery commit failed");
 			// All three broker ACKs happened, but the whole SQLite marking group rolled back.
 			expect((await manager.streams.info(ENGINE_EVENT_STREAM)).state.messages).toBe(6);
-			expect((await runtime.store.pendingEventsForSink(sink)).map(event => event.eventId)).toEqual(
+			expect((await runtime.store.pendingEventsForSink(sink)).events.map(event => event.eventId)).toEqual(
 				second.map(event => event.eventId),
 			);
 			await inspect.unsafe("DROP TRIGGER reject_delivery_batch");
 			await adapter.flushEvents();
-			expect(await runtime.store.pendingEventsForSink(sink)).toEqual([]);
+			expect((await runtime.store.pendingEventsForSink(sink)).events).toEqual([]);
 			expect((await manager.streams.info(ENGINE_EVENT_STREAM)).state.messages).toBe(6);
-			expect((await runtime.store.pendingEventsForSink("independent-sink")).map(event => event.eventId)).toEqual(
-				[...first, ...second].map(event => event.eventId),
-			);
+			expect(
+				(await runtime.store.pendingEventsForSink("independent-sink")).events.map(event => event.eventId),
+			).toEqual([...first, ...second].map(event => event.eventId));
 
 			// A notification arriving after an empty read but before the drain returns
 			// still wakes the existing flush, without one pending promise per event.
@@ -239,7 +239,7 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			let fence = true;
 			runtime.store.pendingEventsForSink = async (...args) => {
 				const events = await pending(...args);
-				if (fence && events.length === 0) {
+				if (fence && events.scannedRecords === 0) {
 					fence = false;
 					emptyRead.resolve();
 					await releaseRead.promise;
@@ -253,13 +253,81 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 				for (let i = 0; i < 1000; i++) adapter.wakeEvents();
 				releaseRead.resolve();
 				await draining;
-				await waitFor(async () => (await pending(sink)).length === 0);
+				await waitFor(async () => (await pending(sink)).events.length === 0);
 				expect((await manager.streams.info(ENGINE_EVENT_STREAM)).state.messages).toBe(7);
 			} finally {
 				releaseRead.resolve();
 				runtime.store.pendingEventsForSink = pending;
 			}
 		} finally {
+			await inspect.end();
+			await client.drain();
+			await adapter.dispose();
+			await runtime.dispose();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 30000);
+
+	it("drains sparse holes through bounded delivered pages and keeps a warm sink at its tail", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-prefix-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const databasePath = path.join(tempDir, "engine.sqlite");
+		const runtime = await EngineRuntime.create({ databasePath });
+		const adapter = await NatsEngineAdapter.connect({
+			runtime,
+			deviceId: "prefix-device",
+			engineId: "prefix-engine",
+			servers: broker.url,
+			authorizeCommand: () => {},
+			authorizeMessage: () => {},
+			resolveLaunchProfile: () => ({ profileDigest: "prefix-profile", spawns: "" }),
+		});
+		const client = await connect({ servers: broker.url });
+		const inspect = new SQL(`sqlite:${databasePath.replaceAll("\\", "/")}`);
+		const pending = runtime.store.pendingEventsForSink.bind(runtime.store);
+		const reads: Array<{ after: number; scanned: number }> = [];
+		try {
+			const sink = `nats:${adapter.deviceRoute}:${adapter.engineRoute}`;
+			await inspect.unsafe(`WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<1000)
+				INSERT INTO engine_event_outbox(event_id,seq,causation_command_id,agent_instance_id,execution_id,
+				attempt_id,binding_id,engine_generation,binding_generation,authority_generation,kind,payload,created_at)
+				SELECT n,n,'prefix-command','prefix-agent','prefix-execution','prefix-attempt','prefix-binding',1,1,1,
+				'trace_reasoning','{"state":"completed"}',0 FROM ids`);
+			await inspect.unsafe(
+				`INSERT INTO engine_event_deliveries(event_id,sink_id,state,attempts,delivered_at,updated_at)
+				SELECT event_id,?,'delivered',1,0,0 FROM engine_event_outbox WHERE event_id NOT IN (37,989)`,
+				[sink],
+			);
+			runtime.store.pendingEventsForSink = async (...args) => {
+				const page = await pending(...args);
+				reads.push({ after: args[2] ?? 0, scanned: page.scannedRecords });
+				return page;
+			};
+			await adapter.flushEvents();
+			expect(reads.map(read => read.after)).toEqual(Array.from({ length: 11 }, (_, i) => i * 100));
+			expect(reads.every(read => read.scanned <= 100)).toBe(true);
+			const manager = await jetstreamManager(client);
+			expect((await manager.streams.info(ENGINE_EVENT_STREAM)).state.messages).toBe(2);
+			reads.length = 0;
+			await adapter.flushEvents();
+			expect(reads).toEqual([{ after: 1000, scanned: 0 }]);
+			await runtime.store.appendEvent({
+				causationCommandId: "warm-command",
+				agentInstanceId: "warm-agent",
+				executionId: "warm-execution",
+				attemptId: "warm-attempt",
+				bindingId: "warm-binding",
+				engineGeneration: runtime.engineGeneration,
+				bindingGeneration: 1,
+				authorityGeneration: 1,
+				kind: "accepted",
+			});
+			await adapter.flushEvents();
+			expect((await manager.streams.info(ENGINE_EVENT_STREAM)).state.messages).toBe(3);
+			expect(reads.every(read => read.after >= 1000)).toBe(true);
+		} finally {
+			runtime.store.pendingEventsForSink = pending;
 			await inspect.end();
 			await client.drain();
 			await adapter.dispose();
@@ -1051,7 +1119,7 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 		const secondRuntime = await EngineRuntime.create({ databasePath, dispatchPrompt: async () => true });
 		expect(secondRuntime.engineGeneration).toBe(oldStart.engineGeneration + 1);
 		expect(
-			(await secondRuntime.store.pendingEventsForSink("test-recovery-audit")).filter(
+			(await secondRuntime.store.pendingEventsForSink("test-recovery-audit")).events.filter(
 				event => event.causationCommandId === oldStart.commandId && event.kind === "rejected",
 			),
 		).toMatchObject([{ payload: { code: "interrupted", requiresExplicitContinue: true } }]);
@@ -1123,7 +1191,7 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 			expect(resolverCalls).toBe(0);
 			expect(await secondRuntime.store.getAttempt(oldStart.attemptId!)).toBeUndefined();
 			expect(
-				(await secondRuntime.store.pendingEventsForSink("test-recovery-audit")).filter(
+				(await secondRuntime.store.pendingEventsForSink("test-recovery-audit")).events.filter(
 					event => event.causationCommandId === oldStart.commandId && event.kind === "rejected",
 				),
 			).toHaveLength(1);

@@ -152,6 +152,7 @@ export class NatsEngineAdapter {
 	#unsubscribeOutbound: () => void = () => {};
 	#outboxFlush: Promise<void> | undefined;
 	#outboxDirty = false;
+	#outboxCursor = 0;
 	#stopping = false;
 	#disposed = false;
 
@@ -693,11 +694,15 @@ export class NatsEngineAdapter {
 			if (!(await this.runtime.store.isCurrentEngineGeneration(this.runtime.engineGeneration))) {
 				throw new StaleEngineLeaseError("Engine generation lease is no longer current");
 			}
-			const events = await this.runtime.store.pendingEventsForSink(sinkId, runtimeLimits.httpPageRecords);
-			if (events.length === 0) return;
+			const page = await this.runtime.store.pendingEventsForSink(
+				sinkId,
+				runtimeLimits.httpPageRecords,
+				this.#outboxCursor,
+			);
+			if (page.scannedRecords === 0) return;
 			const delivered: number[] = [];
 			try {
-				for (const event of events) {
+				for (const event of page.events) {
 					try {
 						const payload = encodeEnvelope(this.#eventEnvelope(event));
 						await this.#jetstream.publish(this.eventSubject(event.agentInstanceId, event.kind), payload, {
@@ -719,6 +724,10 @@ export class NatsEngineAdapter {
 				// A failed publish commits its acknowledged prefix, never the suffix.
 				await this.runtime.store.markEventsDelivered(delivered, sinkId);
 			}
+			// Advance only after every pending row in this bounded scan is committed.
+			// A failed ACK/transaction retries the page; a fresh adapter scans from zero.
+			this.#outboxCursor = page.throughCursor;
+			if (page.events.length === 0) await Bun.sleep(0);
 		}
 	}
 

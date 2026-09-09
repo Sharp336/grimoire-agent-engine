@@ -527,23 +527,80 @@ describe("EngineStore", () => {
 			authorityGeneration: 1,
 			kind: "accepted",
 		});
-		expect((await store.pendingEventsForSink("nats:a")).map(candidate => candidate.eventId)).toEqual([event.eventId]);
-		expect((await store.pendingEventsForSink("query:a")).map(candidate => candidate.eventId)).toEqual([
+		expect((await store.pendingEventsForSink("nats:a")).events.map(candidate => candidate.eventId)).toEqual([
+			event.eventId,
+		]);
+		expect((await store.pendingEventsForSink("query:a")).events.map(candidate => candidate.eventId)).toEqual([
 			event.eventId,
 		]);
 		await store.markEventDelivered(event.eventId, "nats:a");
-		expect(await store.pendingEventsForSink("nats:a")).toEqual([]);
-		expect((await store.pendingEventsForSink("query:a")).map(candidate => candidate.eventId)).toEqual([
+		expect((await store.pendingEventsForSink("nats:a")).events).toEqual([]);
+		expect((await store.pendingEventsForSink("query:a")).events.map(candidate => candidate.eventId)).toEqual([
 			event.eventId,
 		]);
 		await store.markEventDeliveryFailed(event.eventId, "query:a", "temporary failure");
-		expect((await store.pendingEventsForSink("query:a")).map(candidate => candidate.eventId)).toEqual([
+		expect((await store.pendingEventsForSink("query:a")).events.map(candidate => candidate.eventId)).toEqual([
 			event.eventId,
 		]);
 		await store.markEventDelivered(event.eventId, "query:a");
-		expect(await store.pendingEventsForSink("query:a")).toEqual([]);
+		expect((await store.pendingEventsForSink("query:a")).events).toEqual([]);
 		expect((await store.pendingEvents()).map(candidate => candidate.eventId)).toEqual([event.eventId]);
 		await store.close();
+	});
+
+	it("pages a delivered outbox prefix without losing sparse pending holes or reading delivered bodies", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-sink-pages-${Snowflake.next()}-`));
+		const databasePath = path.join(tempDir, "engine.sqlite");
+		let store = await EngineStore.open(databasePath);
+		const inspect = new Database(databasePath);
+		try {
+			inspect.exec(`WITH RECURSIVE ids(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM ids WHERE n<10000)
+				INSERT INTO engine_event_outbox(event_id,seq,causation_command_id,agent_instance_id,execution_id,
+				attempt_id,binding_id,engine_generation,binding_generation,authority_generation,kind,payload,created_at)
+				SELECT n,n,'sink-command','sink-agent','sink-execution','sink-attempt','sink-binding',1,1,1,
+				'trace_reasoning','{"marker":"retained"}',0 FROM ids;
+				INSERT INTO engine_event_deliveries(event_id,sink_id,state,attempts,delivered_at,updated_at)
+				SELECT event_id,'sink-a','delivered',1,0,0 FROM engine_event_outbox WHERE event_id NOT IN (37,9989);
+				UPDATE engine_event_outbox SET payload='delivered-body-must-not-be-decoded' WHERE event_id=5000;`);
+			await store.markEventDeliveryFailed(9989, "sink-a", "retry this hole");
+			await store.close();
+			store = await EngineStore.open(databasePath);
+			const pending: number[] = [];
+			let cursor = 0;
+			let scans = 0;
+			for (;;) {
+				const page = await store.pendingEventsForSink("sink-a", 100, cursor);
+				expect(page.scannedRecords).toBeLessThanOrEqual(100);
+				if (page.scannedRecords === 0) break;
+				expect(page.throughCursor).toBeGreaterThan(cursor);
+				cursor = page.throughCursor;
+				scans++;
+				pending.push(...page.events.map(event => event.eventId));
+			}
+			expect(scans).toBe(100);
+			expect(cursor).toBe(10000);
+			expect(pending).toEqual([37, 9989]);
+			expect((await store.pendingEventsForSink("sink-b", 100)).events).toHaveLength(100);
+			await store.markEventsDelivered(pending, "sink-a");
+			expect((await store.pendingEventsForSink("sink-a", 100)).events).toEqual([]);
+			const appended = await store.appendEvent({
+				causationCommandId: "after-prefix",
+				agentInstanceId: "new-agent",
+				executionId: "new-execution",
+				attemptId: "new-attempt",
+				bindingId: "new-binding",
+				engineGeneration: 1,
+				bindingGeneration: 1,
+				authorityGeneration: 1,
+				kind: "accepted",
+			});
+			const tail = await store.pendingEventsForSink("sink-a", 100, cursor);
+			expect(tail.scannedRecords).toBe(1);
+			expect(tail.events.map(event => event.eventId)).toEqual([appended.eventId]);
+		} finally {
+			inspect.close();
+			await store.close();
+		}
 	});
 
 	it("commits tool effect and approval state with their events atomically", async () => {
