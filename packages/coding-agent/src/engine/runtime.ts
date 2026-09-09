@@ -251,7 +251,7 @@ interface LiveBinding extends EngineBindingSnapshot {
 	pauseRequests: Map<string, EngineControlInitiator>;
 	resumeCommandIds: Set<string>;
 	traceWriteTail: Promise<void>;
-	streamWriteBatch?: { payloads: Record<string, unknown>[]; bytes: number };
+	messageWriteError?: unknown;
 	retryWriteError?: unknown;
 	traceTools: Map<string, { name: string; startedAt: number }>;
 	childLaunchCount: number;
@@ -2252,6 +2252,7 @@ export class EngineRuntime {
 				binding.parkedEffectTools.clear();
 				binding.traceTools.clear();
 				binding.traceWriteTail = Promise.resolve();
+				binding.messageWriteError = undefined;
 				binding.modelCallSequence = 0;
 				this.#resetAssistantStream(binding);
 				binding.assistantMessageSequence = 0;
@@ -2725,6 +2726,9 @@ export class EngineRuntime {
 				activeModelCalls: new Set(),
 			};
 			liveBinding = binding;
+			created.session.setAssistantMessagePersistence((message, event) =>
+				this.#recordAssistantDelta(binding, message.timestamp, event),
+			);
 			created.setToolUIContext(
 				{
 					...noOpUIContext,
@@ -2736,8 +2740,6 @@ export class EngineRuntime {
 				if (event.type === "message_start" && event.message.role === "assistant") {
 					this.#beginAssistantStream(binding, event.message.timestamp);
 				}
-				if (event.type === "message_update" && event.message.role === "assistant")
-					this.#recordAssistantDelta(binding, event.message.timestamp, event.assistantMessageEvent);
 				if (
 					event.type === "message_update" &&
 					event.message.role === "assistant" &&
@@ -3484,6 +3486,11 @@ export class EngineRuntime {
 		cause?: string,
 	): Promise<void> {
 		await binding.traceWriteTail;
+		if (binding.messageWriteError) {
+			const error = new Error("Engine message content could not be persisted", { cause: binding.messageWriteError });
+			if (state === "completed") throw error;
+			cause = error.message;
+		}
 		if (binding.retryWriteError) {
 			const error = new Error("Engine retry state could not be persisted", { cause: binding.retryWriteError });
 			binding.retryWriteError = undefined;
@@ -3546,7 +3553,6 @@ export class EngineRuntime {
 		kind: "trace_reasoning" | "trace_tool",
 		payload: Record<string, unknown>,
 	): void {
-		binding.streamWriteBatch = undefined;
 		const write = binding.traceWriteTail.then(() => this.#emit(binding, kind, payload));
 		binding.traceWriteTail = write.catch(error => {
 			logger.warn("Engine trace event write failed", {
@@ -3620,7 +3626,11 @@ export class EngineRuntime {
 		return block;
 	}
 
-	#recordAssistantDelta(binding: LiveBinding, timestamp: number, event: AssistantMessageEvent): void {
+	async #recordAssistantDelta(binding: LiveBinding, timestamp: number, event: AssistantMessageEvent): Promise<void> {
+		// The interceptor runs before the public subscriber. Also drain the preceding
+		// message's final write before a new provider block can get ahead of storage.
+		await binding.traceWriteTail;
+		if (binding.messageWriteError) throw binding.messageWriteError;
 		if (
 			event.type !== "text_delta" &&
 			event.type !== "thinking_delta" &&
@@ -3632,7 +3642,9 @@ export class EngineRuntime {
 		if (state.settled || state.attemptId !== binding.attemptId) return;
 		const stream = event.type.startsWith("thinking") ? "thinking" : "assistant";
 		if (event.type === "text_end" || event.type === "thinking_end") {
-			this.#reconcileAssistantBlock(binding, state, event.contentIndex, stream, event.content, "streaming");
+			await this.#persistAssistantWrite(binding, () =>
+				this.#reconcileAssistantBlock(binding, state, event.contentIndex, stream, event.content, "streaming"),
+			);
 			return;
 		}
 		const block = this.#assistantBlock(state, event.contentIndex, stream);
@@ -3643,17 +3655,19 @@ export class EngineRuntime {
 			block.pendingSurrogate = text.at(-1)!;
 			text = text.slice(0, -1);
 		}
-		this.#appendAssistantBlock(binding, state, block, text.toWellFormed(), "streaming");
+		await this.#persistAssistantWrite(binding, () =>
+			this.#appendAssistantBlock(binding, state, block, text.toWellFormed(), "streaming"),
+		);
 	}
 
-	#reconcileAssistantBlock(
+	async #reconcileAssistantBlock(
 		binding: LiveBinding,
 		state: AssistantStreamState,
 		index: number,
 		stream: "assistant" | "thinking",
 		content: string,
 		status: "streaming" | "settled" | "cancelled" | "interrupted",
-	): void {
+	): Promise<void> {
 		let block = this.#assistantBlock(state, index, stream);
 		if (block.settled) return;
 		const text = content.toWellFormed();
@@ -3661,11 +3675,11 @@ export class EngineRuntime {
 			const missing = block.pendingSurrogate + content.slice(block.receivedChars);
 			block.pendingSurrogate = "";
 			block.receivedChars = content.length;
-			this.#appendAssistantBlock(binding, state, block, missing.toWellFormed(), "streaming");
+			await this.#appendAssistantBlock(binding, state, block, missing.toWellFormed(), "streaming");
 		} else if (block.pendingSurrogate) {
 			const pending = block.pendingSurrogate;
 			block.pendingSurrogate = "";
-			this.#appendAssistantBlock(binding, state, block, pending.toWellFormed(), "streaming");
+			await this.#appendAssistantBlock(binding, state, block, pending.toWellFormed(), "streaming");
 		}
 		if (block.hash.copy().digest("hex") !== crypto.createHash("sha256").update(text).digest("hex")) {
 			block = {
@@ -3678,23 +3692,25 @@ export class EngineRuntime {
 				hash: crypto.createHash("sha256"),
 			};
 			state.blocks.set(index, block);
-			this.#appendAssistantBlock(binding, state, block, text, "streaming");
+			await this.#appendAssistantBlock(binding, state, block, text, "streaming");
 		}
 		if (status !== "streaming") {
-			this.#appendAssistantBlock(binding, state, block, "", status);
+			await this.#appendAssistantBlock(binding, state, block, "", status);
 			block.settled = true;
 		}
 	}
 
-	#appendAssistantBlock(
+	async #appendAssistantBlock(
 		binding: LiveBinding,
 		state: AssistantStreamState,
 		block: AssistantBlockState,
 		text: string,
 		status: "streaming" | "settled" | "cancelled" | "interrupted",
-	): void {
-		const chunks = utf8Chunks(text);
-		if (!chunks.length && (status !== "streaming" || block.revision === 0)) chunks.push("");
+	): Promise<void> {
+		const chunks = text ? utf8Chunks(text) : status !== "streaming" || block.revision === 0 ? [""] : [];
+		const target = this.#snapshot(binding);
+		let payloads: Record<string, unknown>[] = [];
+		let bytes = 0;
 		for (const chunk of chunks) {
 			const baseRevision = block.revision++;
 			const offset = block.offset;
@@ -3714,68 +3730,69 @@ export class EngineRuntime {
 				status,
 				...(baseRevision ? { baseRevision } : { partial: false }),
 			};
-			this.#queueAssistantWrite(binding, payload);
+			const payloadBytes = Buffer.byteLength(JSON.stringify(payload));
+			if (
+				bytes + payloadBytes > runtimeLimits.deliveryBatchBytes ||
+				payloads.length >= runtimeLimits.httpPageRecords
+			) {
+				await Promise.all(payloads.map(value => this.#emit(target, "message_updated", value)));
+				payloads = [];
+				bytes = 0;
+			}
+			payloads.push(payload);
+			bytes += payloadBytes;
 		}
+		await Promise.all(payloads.map(value => this.#emit(target, "message_updated", value)));
 	}
 
-	#queueAssistantWrite(binding: LiveBinding, payload: Record<string, unknown>): void {
-		const bytes = Buffer.byteLength(JSON.stringify(payload));
-		let batch = binding.streamWriteBatch;
-		if (
-			!batch ||
-			batch.bytes + bytes > runtimeLimits.deliveryBatchBytes ||
-			batch.payloads.length >= runtimeLimits.httpPageRecords
-		) {
-			const payloads: Record<string, unknown>[] = [];
-			const target = this.#snapshot(binding);
-			const write = binding.traceWriteTail.then(async () => {
-				if (binding.streamWriteBatch?.payloads === payloads) binding.streamWriteBatch = undefined;
-				await Promise.all(payloads.map(value => this.#emit(target, "message_updated", value)));
+	#persistAssistantWrite(binding: LiveBinding, persist: () => Promise<void>): Promise<void> {
+		const write = binding.traceWriteTail.then(async () => {
+			if (binding.messageWriteError) throw binding.messageWriteError;
+			await persist();
+		});
+		binding.traceWriteTail = write.catch(error => {
+			binding.messageWriteError ??= error;
+			binding.session.agent.abort(error);
+			logger.error("Engine message persistence failed", {
+				error: error instanceof Error ? error.message : String(error),
 			});
-			binding.traceWriteTail = write.catch(error => {
-				logger.error("Engine message persistence failed", {
-					error: error instanceof Error ? error.message : String(error),
-				});
-				throw error;
-			});
-			batch = { payloads, bytes: 0 };
-			binding.streamWriteBatch = batch;
-		}
-		batch.payloads.push(payload);
-		batch.bytes += bytes;
+		});
+		return write;
 	}
 
 	#settleAssistantStream(binding: LiveBinding, message: AssistantMessage): void {
 		const state = binding.assistantStream ?? this.#beginAssistantStream(binding, message.timestamp);
 		if (state.attemptId !== binding.attemptId || state.settled) return;
-		for (const [index, part] of message.content.entries()) {
-			if (part.type === "text")
-				this.#reconcileAssistantBlock(
-					binding,
-					state,
-					index,
-					"assistant",
-					part.text,
-					message.stopReason === "aborted"
-						? "cancelled"
-						: message.stopReason === "error"
-							? "interrupted"
-							: "settled",
-				);
-			else if (part.type === "thinking")
-				this.#reconcileAssistantBlock(
-					binding,
-					state,
-					index,
-					"thinking",
-					part.thinking,
-					message.stopReason === "aborted"
-						? "cancelled"
-						: message.stopReason === "error"
-							? "interrupted"
-							: "settled",
-				);
-		}
+		void this.#persistAssistantWrite(binding, async () => {
+			for (const [index, part] of message.content.entries()) {
+				if (part.type === "text")
+					await this.#reconcileAssistantBlock(
+						binding,
+						state,
+						index,
+						"assistant",
+						part.text,
+						message.stopReason === "aborted"
+							? "cancelled"
+							: message.stopReason === "error"
+								? "interrupted"
+								: "settled",
+					);
+				else if (part.type === "thinking")
+					await this.#reconcileAssistantBlock(
+						binding,
+						state,
+						index,
+						"thinking",
+						part.thinking,
+						message.stopReason === "aborted"
+							? "cancelled"
+							: message.stopReason === "error"
+								? "interrupted"
+								: "settled",
+					);
+			}
+		});
 		const fullText = historyMessageText(message.content);
 		state.text = fullText.slice(0, MAX_ASSISTANT_FINAL_CHARS);
 		state.textTruncated = fullText.length > MAX_ASSISTANT_FINAL_CHARS;
@@ -3800,7 +3817,6 @@ export class EngineRuntime {
 			if (state.streamingSnapshots >= MAX_ASSISTANT_STREAMING_SNAPSHOTS) return;
 			state.streamingSnapshots++;
 		}
-		binding.streamWriteBatch = undefined;
 		state.emittedText = state.text;
 		const payload = {
 			assistantMessageId: state.assistantMessageId,
@@ -3832,7 +3848,6 @@ export class EngineRuntime {
 	}
 
 	#resetAssistantStream(binding: LiveBinding): void {
-		binding.streamWriteBatch = undefined;
 		binding.assistantStream = undefined;
 	}
 
@@ -3841,7 +3856,6 @@ export class EngineRuntime {
 		kind: "retry_scheduled" | "retry_settled",
 		retry: import("./contracts").EngineRetryState,
 	): void {
-		binding.streamWriteBatch = undefined;
 		const write = binding.traceWriteTail.then(async () => {
 			const event = await this.store.commitAttemptRetry(binding, retry, { kind, payload: { retry } });
 			if (event) this.#notifyEvents([event]);

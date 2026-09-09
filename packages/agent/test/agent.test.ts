@@ -8,6 +8,42 @@ import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream"
 import { createAssistantMessage } from "./helpers";
 
 describe("Agent", () => {
+	it("waits for assistant persistence before publishing or consuming the next buffered delta", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const mock = createMockModel({ responses: [{ content: ["first", "second"] }] });
+		const deltas: string[] = [];
+		const published: string[] = [];
+		const agent = new Agent({
+			initialState: { model: mock.model },
+			streamFn: mock.stream,
+			onAssistantMessageEvent: async (_message, event) => {
+				if (event.type !== "text_delta") return;
+				deltas.push(event.delta);
+				if (deltas.length === 1) {
+					entered.resolve();
+					await release.promise;
+				}
+			},
+		});
+		agent.subscribe(event => {
+			if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta")
+				published.push(event.assistantMessageEvent.delta);
+		});
+		const run = agent.prompt("answer");
+		try {
+			await entered.promise;
+			await Bun.sleep(20);
+			expect(deltas).toEqual(["first"]);
+			expect(published).toEqual([]);
+		} finally {
+			release.resolve();
+			await run;
+		}
+		expect(deltas).toEqual(["first", "second"]);
+		expect(published).toEqual(deltas);
+	});
+
 	it("keeps steering context and its input atomic while preserving one-at-a-time across inputs", async () => {
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();

@@ -54,6 +54,7 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
 	AssistantMessage,
+	AssistantMessageEvent,
 	CodexCompactionContext,
 	ImageContent,
 	Message,
@@ -517,6 +518,7 @@ export class AgentSession {
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
+	#assistantMessagePersistence?: (message: AssistantMessage, event: AssistantMessageEvent) => Promise<void>;
 	#runStateListeners = new Set<(state: "running" | "idle") => void>();
 	#commandMetadataChangedListeners: CommandMetadataChangedListener[] = [];
 	#sessionChangeCallbacks = new Set<() => void>();
@@ -1464,6 +1466,7 @@ export class AgentSession {
 			this.#streamingEditGuard.preCache(event);
 			this.#streamingEditGuard.maybeAbort(event);
 			this.#loopGuards.onAssistantEvent(message, assistantMessageEvent);
+			return this.#assistantMessagePersistence?.(message, assistantMessageEvent);
 		});
 		// Tool-result hook owns synchronous post-tool actions that must affect the current loop.
 		this.agent.afterToolCall = ctx => this.#afterToolCall(ctx);
@@ -3927,6 +3930,13 @@ export class AgentSession {
 		};
 	}
 
+	/** Await durable streaming writes without replacing the session's synchronous stream guards. */
+	setAssistantMessagePersistence(
+		persist: ((message: AssistantMessage, event: AssistantMessageEvent) => Promise<void>) | undefined,
+	): void {
+		this.#assistantMessagePersistence = persist;
+	}
+
 	/** Attach a durable identity to the exact message currently crossing the persistence boundary. */
 	rememberMessageIdentity(message: AgentMessage, identity: SessionMessageIdentity): void {
 		if (!identity.sourceCommandId && !identity.clientMessageId && !identity.assistantMessageId) return;
@@ -4329,6 +4339,7 @@ export class AgentSession {
 		// is repopulated with exactly the state we are trying to drop.
 		this.agent.setProviderResponseInterceptor(undefined);
 		this.agent.setRawSseEventInterceptor(undefined);
+		this.#assistantMessagePersistence = undefined;
 		let drained = false;
 		try {
 			await withTimeout(

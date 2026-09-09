@@ -187,7 +187,7 @@ export interface AgentOptions {
 	 * Inspect assistant streaming events before they are emitted to subscribers.
 	 * Use this when abort decisions must happen before buffered events continue flowing.
 	 */
-	onAssistantMessageEvent?: (message: AssistantMessage, event: AssistantMessageEvent) => void;
+	onAssistantMessageEvent?: (message: AssistantMessage, event: AssistantMessageEvent) => void | Promise<void>;
 
 	/**
 	 * Called when GPT-5 Harmony protocol leakage is detected and mitigated.
@@ -421,7 +421,7 @@ export class Agent {
 	#onPayload?: SimpleStreamOptions["onPayload"];
 	#onResponse?: SimpleStreamOptions["onResponse"];
 	#onSseEvent?: SimpleStreamOptions["onSseEvent"];
-	#onAssistantMessageEvent?: (message: AssistantMessage, event: AssistantMessageEvent) => void;
+	#onAssistantMessageEvent?: (message: AssistantMessage, event: AssistantMessageEvent) => void | Promise<void>;
 	#onHarmonyLeak?: (event: HarmonyAuditEvent) => void | Promise<void>;
 	#onBeforeYield?: () => Promise<void> | void;
 	#onTurnEnd?: (messages: AgentMessage[], signal?: AbortSignal, context?: AgentTurnEndContext) => Promise<void> | void;
@@ -854,7 +854,7 @@ export class Agent {
 	}
 
 	setAssistantMessageEventInterceptor(
-		fn: ((message: AssistantMessage, event: AssistantMessageEvent) => void) | undefined,
+		fn: ((message: AssistantMessage, event: AssistantMessageEvent) => void | Promise<void>) | undefined,
 	): void {
 		this.#onAssistantMessageEvent = fn;
 	}
