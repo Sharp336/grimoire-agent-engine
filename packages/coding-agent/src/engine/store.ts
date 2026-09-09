@@ -41,6 +41,7 @@ import {
 	RUNTIME_OWNERSHIP_SCHEMA,
 } from "./runtime-ownership";
 import {
+	RUNTIME_EVENT_SCOPE_SCHEMA,
 	RUNTIME_KIND_MASK,
 	RUNTIME_PROJECTION_SCHEMA,
 	RUNTIME_TOOL_SCHEMA,
@@ -756,6 +757,7 @@ const SCHEMA_MIGRATIONS = [
 		requiredColumns: [],
 	},
 	{ version: 21, statements: RUNTIME_TOOL_SCHEMA, requiredColumns: [] },
+	{ version: 22, statements: RUNTIME_EVENT_SCOPE_SCHEMA, requiredColumns: [] },
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;

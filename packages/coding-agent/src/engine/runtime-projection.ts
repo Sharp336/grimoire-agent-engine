@@ -58,6 +58,32 @@ export const RUNTIME_TOOL_SCHEMA = [
 	 WHERE detail_payload IS NOT NULL AND projection_payload IS NOT NULL`,
 ] as const;
 
+export const RUNTIME_EVENT_SCOPE_SCHEMA = [
+	"ALTER TABLE engine_event_outbox ADD COLUMN projection_agent_kinds INTEGER NOT NULL DEFAULT 0",
+	`UPDATE engine_event_outbox SET projection_agent_kinds=(SELECT
+		COALESCE(MAX(CASE WHEN
+			(json_extract(value,'$.kind')='state' AND json_extract(value,'$.value.attemptId') IS NULL)
+			OR (json_extract(value,'$.kind')='receipt' AND json_extract(value,'$.attemptId') IS NULL)
+			OR (json_extract(value,'$.kind')='invalidate' AND json_extract(value,'$.value.resource')='holds' AND json_extract(value,'$.attemptId') IS NULL)
+			THEN 4 ELSE 0 END),0)
+		+COALESCE(MAX(CASE WHEN json_extract(value,'$.kind')='invalidate' AND json_extract(value,'$.value.resource')='queue'
+			AND json_extract(value,'$.attemptId') IS NULL THEN 8 ELSE 0 END),0)
+		FROM json_each(projection_payload)) WHERE projection_payload IS NOT NULL`,
+	"CREATE INDEX engine_runtime_attempt_cursor_idx ON engine_event_outbox(agent_instance_id,attempt_id,event_id) WHERE projection_kinds<>0",
+	"CREATE INDEX engine_runtime_detail_agent_idx ON engine_event_outbox(agent_instance_id,event_id) WHERE detail_payload IS NOT NULL",
+	"CREATE INDEX engine_runtime_assistant_cursor_idx ON engine_event_outbox(agent_instance_id,attempt_id,event_id) WHERE (projection_kinds & 1)<>0",
+	"CREATE INDEX engine_runtime_tool_cursor_idx ON engine_event_outbox(agent_instance_id,attempt_id,event_id) WHERE (projection_kinds & 2)<>0",
+	"CREATE INDEX engine_runtime_state_cursor_idx ON engine_event_outbox(agent_instance_id,attempt_id,event_id) WHERE (projection_kinds & 4)<>0",
+	"CREATE INDEX engine_runtime_queue_cursor_idx ON engine_event_outbox(agent_instance_id,attempt_id,event_id) WHERE (projection_kinds & 8)<>0",
+	"CREATE INDEX engine_runtime_input_cursor_idx ON engine_event_outbox(agent_instance_id,attempt_id,event_id) WHERE (projection_kinds & 16)<>0",
+	"CREATE INDEX engine_runtime_history_cursor_idx ON engine_event_outbox(agent_instance_id,attempt_id,event_id) WHERE (projection_kinds & 32)<>0",
+	"CREATE INDEX engine_runtime_usage_cursor_idx ON engine_event_outbox(agent_instance_id,attempt_id,event_id) WHERE (projection_kinds & 64)<>0",
+	"CREATE INDEX engine_runtime_agent_cursor_idx ON engine_event_outbox(agent_instance_id,event_id) WHERE projection_agent_kinds<>0",
+	"CREATE INDEX engine_runtime_agent_state_cursor_idx ON engine_event_outbox(agent_instance_id,event_id) WHERE (projection_agent_kinds & 4)<>0",
+	"CREATE INDEX engine_runtime_agent_queue_cursor_idx ON engine_event_outbox(agent_instance_id,event_id) WHERE (projection_agent_kinds & 8)<>0",
+	"DROP INDEX engine_runtime_projection_cursor_idx",
+] as const;
+
 const TERMINAL = new Set(["completed", "cancelled", "failed", "interrupted"]);
 const SUMMARY_EVENTS = new Set([
 	"agent_registered",
@@ -791,14 +817,29 @@ export async function recordRuntimeProjection(
 		);
 		kinds |= RUNTIME_KIND_MASK.history;
 	}
+	const agentKinds = changes.reduce((mask, change) => {
+		const attempt = change.kind === "state" ? change.value.attemptId : change.attemptId;
+		if (attempt !== undefined && attempt !== null) return mask;
+		if (change.kind === "state" || change.kind === "receipt") return mask | RUNTIME_KIND_MASK.state;
+		if (change.kind !== "invalidate") return mask;
+		return (
+			mask |
+			(change.value.resource === "holds"
+				? RUNTIME_KIND_MASK.state
+				: change.value.resource === "queue"
+					? RUNTIME_KIND_MASK.queue
+					: 0)
+		);
+	}, 0);
 	await sql.unsafe(
-		`UPDATE engine_event_outbox SET summary_payload=?,membership_payload=?,detail_payload=?,projection_payload=?,projection_kinds=?,projection_principal=?,projection_root=? WHERE event_id=?`,
+		`UPDATE engine_event_outbox SET summary_payload=?,membership_payload=?,detail_payload=?,projection_payload=?,projection_kinds=?,projection_agent_kinds=?,projection_principal=?,projection_root=? WHERE event_id=?`,
 		[
 			summary ? JSON.stringify(summary) : null,
 			membership ? JSON.stringify(membership) : null,
 			detail ? JSON.stringify(detail) : null,
 			changes.length ? JSON.stringify(changes) : null,
 			kinds,
+			agentKinds,
 			identity.principal_id,
 			identity.root_agent_instance_ref,
 			event.eventId,
@@ -812,20 +853,7 @@ export async function recordRuntimeProjection(
 		kinds,
 		summary: Boolean(summary),
 		membership: Boolean(membership),
-		agentKinds: changes.reduce(
-			(mask, change) =>
-				change.attemptId === undefined && change.kind !== "state"
-					? mask |
-						(change.kind === "receipt"
-							? RUNTIME_KIND_MASK.state
-							: change.kind === "invalidate" && change.value.resource === "queue"
-								? RUNTIME_KIND_MASK.queue
-								: change.kind === "invalidate" && change.value.resource === "holds"
-									? RUNTIME_KIND_MASK.state
-									: 0)
-					: mask,
-			0,
-		),
+		agentKinds,
 	};
 }
 

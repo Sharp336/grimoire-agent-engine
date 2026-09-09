@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -14,6 +14,7 @@ import {
 	validateRuntimeValue,
 } from "../src/engine/runtime-protocol";
 import { publicRuntimeQueueItem } from "../src/engine/runtime-queue";
+import { readRuntimeEvents } from "../src/engine/runtime-read";
 import { type EngineCommandIdentity, EngineStore } from "../src/engine/store";
 
 describe("runtime v1 durable boundaries", () => {
@@ -1459,6 +1460,146 @@ describe("runtime v1 durable boundaries", () => {
 			),
 		).toBe(true);
 	}, 10000);
+	it("seeks selected kinds and Attempts before the page limit while retaining AGI-level receipts and queue notices", async () => {
+		const store = await createStore();
+		const old = await active(store);
+		const agent = identity("root");
+		const before = await store.runtimeSnapshot({ kind: "catalog" }, { principalId: "owner" });
+		async function stream(target: EngineBindingSnapshot) {
+			for (let page = 0; page < 20; page++)
+				await Promise.all(
+					Array.from({ length: 50 }, (_, offset) =>
+						store.appendEvent({
+							...target,
+							kind: "message_updated",
+							causationCommandId: target.commandId,
+							payload: {
+								...(page === 0 && offset === 0
+									? { mode: "snapshot", partial: false }
+									: { mode: "append", baseRevision: page * 50 + offset }),
+								messageId: `message-${target.attemptId}`,
+								blockId: "text",
+								stream: "assistant",
+								contentId: `content-${target.attemptId}`,
+								revision: page * 50 + offset + 1,
+								offset: page * 50 + offset,
+								endOffset: page * 50 + offset + 1,
+								totalBytes: page * 50 + offset + 1,
+								text: "x",
+								status: "streaming",
+							},
+						}),
+					),
+				);
+		}
+		await stream(old);
+		await store.commitAttemptTransition(old, "completed", [{ kind: "completed" }]);
+		const target = {
+			...old,
+			attemptId: "next-attempt",
+			executionId: "next-execution",
+			bindingId: "next-binding",
+			commandId: "next-command",
+			bindingGeneration: 2,
+		};
+		await store.commitAttemptTransition(target, "running", [{ kind: "running" }]);
+		await stream(target);
+		await store.startToolEffect(target, {
+			effectId: "selected-effect",
+			toolCallId: "selected-tool",
+			toolName: "read",
+			inputHash: "sha256:private",
+			policy: "tracked",
+		});
+		const pause = await store.commitAttemptTransition(target, "paused", [{ kind: "paused" }]);
+		const receipt = {
+			version: "1.0",
+			commandId: "old-attempt-receipt",
+			payloadHash: `sha256:${"b".repeat(64)}`,
+			target: { agentInstanceRef: agent.agentInstanceRef, attemptId: old.attemptId, executionId: old.executionId },
+			stage: "applied",
+			lookup: "known",
+		};
+		await store.appendEvent({
+			...old,
+			kind: "command_receipt",
+			causationCommandId: receipt.commandId,
+			payload: { value: receipt },
+		});
+		await store.enqueueInboxItem(
+			{ ...old, sessionId: "old-session" },
+			{ sourceEventId: "old-queue", sourceType: "user", body: "queued" },
+		);
+		const scope: RuntimeScope = {
+			kind: "attempt",
+			agentInstanceRef: agent.agentInstanceRef,
+			attemptId: target.attemptId,
+			kinds: ["state", "queue"],
+		};
+		const head = (await store.runtimeSnapshot({ kind: "catalog" }, { principalId: "owner" })).watermark;
+		const request = {
+			...eventsRequest(before.epoch, 0, scope),
+			untilCursor: head,
+			remainingWork: { ...runtimeRemainingWork(), scannedRows: 64 },
+		};
+		const batch = await store.runtimeEvents(request);
+		expect(batch.throughCursor).toBe(head);
+		expect(batch.hasMore).toBeFalse();
+		expect(batch.work.scannedRows).toBeLessThan(32);
+		expect(batch.changes.filter(change => change.kind === "state").map(change => change.value.state)).toEqual([
+			"running",
+			"paused",
+		]);
+		expect(batch.changes.find(change => change.kind === "receipt")?.value).toEqual(receipt);
+		expect(
+			batch.changes.some(change => change.kind === "invalidate" && change.value.resource === "queue"),
+		).toBeTrue();
+		expect(
+			batch.changes
+				.filter(change => change.kind === "state")
+				.every(change => (change.value.tools as unknown[]).length === 0),
+		).toBeTrue();
+		const fullScope: RuntimeScope = {
+			...scope,
+			kinds: ["assistant", "tool", "state", "queue", "input", "history", "usage"],
+		};
+		const full = await store.runtimeEvents(eventsRequest(before.epoch, pause[0].eventId - 1, fullScope));
+		expect(full.changes.find(change => change.kind === "state")?.value.tools).toMatchObject([
+			{ toolCallId: "selected-tool" },
+		]);
+		const other = await active(store, "other");
+		for (const attemptId of ["missing-attempt", other.attemptId]) {
+			const failure = await store.runtimeEvents({ ...request, scope: { ...scope, attemptId } }).then(
+				() => undefined,
+				error => error,
+			);
+			expect(failure).toMatchObject({ code: "stale_target" });
+		}
+		const inspect = new SQL(`sqlite:${path.join(directories.at(-1)!, "engine.sqlite").replaceAll("\\", "/")}`);
+		try {
+			const execute = inspect.unsafe.bind(inspect);
+			const queries: Array<{ query: string; values?: unknown[] | Record<string, unknown> }> = [];
+			const capture = spyOn(inspect, "unsafe").mockImplementation((query, values) => {
+				if (query.startsWith("SELECT e.event_id")) queries.push({ query, values });
+				return execute(query, values);
+			});
+			try {
+				await readRuntimeEvents(inspect, request);
+			} finally {
+				capture.mockRestore();
+			}
+			const plans: string[] = [];
+			for (const query of queries) {
+				const rows = await execute(`EXPLAIN QUERY PLAN ${query.query}`, query.values);
+				plans.push(...rows.map((row: { detail: string }) => row.detail));
+			}
+			expect(plans).toContainEqual(expect.stringContaining("engine_runtime_state_cursor_idx"));
+			expect(plans).toContainEqual(expect.stringContaining("engine_runtime_agent_cursor_idx"));
+			expect(plans.some(plan => plan.includes("SCAN e") || plan.includes("TEMP B-TREE"))).toBeFalse();
+		} finally {
+			await inspect.end();
+		}
+	}, 20000);
 	it("filters selected Attempts before decoding detail and honors a fixed replay head", async () => {
 		const store = await createStore();
 		const root = identity("root");

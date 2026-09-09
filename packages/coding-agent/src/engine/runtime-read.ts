@@ -48,18 +48,17 @@ interface SnapshotCursor {
 
 interface EventMetadata {
 	event_id: number;
-	agent_instance_id: string;
 	agent_instance_ref: string;
-	attempt_id: string;
-	projection_kinds: number;
 }
 
 interface EventSource {
 	where: string;
+	index: string;
 	values: Array<string | number>;
 	column: "summary_payload" | "membership_payload" | "projection_payload";
 	mask?: number;
 	attemptId?: string;
+	agentOnly?: boolean;
 }
 
 function readCursor<T>(cursor: string): T {
@@ -111,7 +110,7 @@ async function summaryAt(
 	work: RuntimeQueryWork,
 ): Promise<Record<string, unknown>> {
 	const rows = (await sql.unsafe(
-		`SELECT summary_payload FROM engine_event_outbox WHERE agent_instance_id=?
+		`SELECT summary_payload FROM engine_event_outbox INDEXED BY engine_runtime_summary_agent_idx WHERE agent_instance_id=?
 		AND summary_payload IS NOT NULL AND event_id<=? ORDER BY event_id DESC LIMIT 1`,
 		[identity.agent_instance_id, cut],
 	)) as Array<{ summary_payload: string }>;
@@ -158,7 +157,7 @@ async function selectedDetail(
 	let detail: Record<string, unknown>;
 	if (attemptId) {
 		const rows = (await sql.unsafe(
-			`SELECT detail_payload FROM engine_event_outbox WHERE attempt_id=?
+			`SELECT detail_payload FROM engine_event_outbox INDEXED BY engine_runtime_detail_attempt_idx WHERE attempt_id=?
 			AND agent_instance_id=? AND detail_payload IS NOT NULL AND event_id<=? ORDER BY event_id DESC LIMIT 1`,
 			[attemptId, identity.agent_instance_id, cut],
 		)) as Array<{ detail_payload: string }>;
@@ -167,7 +166,7 @@ async function selectedDetail(
 		detail = work.decode<Record<string, unknown>>(rows[0].detail_payload);
 	} else {
 		const rows = (await sql.unsafe(
-			`SELECT detail_payload FROM engine_event_outbox WHERE agent_instance_id=?
+			`SELECT detail_payload FROM engine_event_outbox INDEXED BY engine_runtime_detail_agent_idx WHERE agent_instance_id=?
 			AND detail_payload IS NOT NULL AND event_id<=? ORDER BY event_id DESC LIMIT 1`,
 			[identity.agent_instance_id, cut],
 		)) as Array<{ detail_payload: string }>;
@@ -385,6 +384,7 @@ async function eventSources(
 		const sources: EventSource[] = [
 			{
 				where: "e.summary_payload IS NOT NULL AND e.projection_principal=?",
+				index: "engine_runtime_summary_cursor_idx",
 				values: [request.principalId],
 				column: "summary_payload",
 			},
@@ -398,6 +398,7 @@ async function eventSources(
 			if (rows[0])
 				sources.push({
 					where: "e.summary_payload IS NOT NULL AND e.agent_instance_id=?",
+					index: "engine_runtime_summary_agent_idx",
 					values: [rows[0].agent_instance_id],
 					column: "summary_payload",
 				});
@@ -411,6 +412,7 @@ async function eventSources(
 			throw new EngineTargetError("stale_target", "Detail scope requires a canonical root");
 		sources.push({
 			where: "e.membership_payload IS NOT NULL AND e.projection_root=?",
+			index: "engine_runtime_membership_cursor_idx",
 			values: [scope.rootAgentInstanceRef],
 			column: "membership_payload",
 		});
@@ -420,7 +422,14 @@ async function eventSources(
 		if (scope.kind === "branch" && identity.root_agent_instance_ref !== scope.rootAgentInstanceRef)
 			throw new EngineTargetError("stale_target", "Selected detail is outside its root branch");
 		let attemptId = interest.kind === "attempt" ? interest.attemptId : undefined;
-		if (!attemptId) {
+		if (attemptId) {
+			const exact = await sql.unsafe("SELECT 1 FROM engine_attempts WHERE attempt_id=? AND agent_instance_id=?", [
+				attemptId,
+				identity.agent_instance_id,
+			]);
+			work.rows(exact.length);
+			if (!exact.length) throw new EngineTargetError("stale_target", "Exact Attempt is not owned by this agent");
+		} else {
 			const current = (await sql.unsafe("SELECT attempt_id FROM engine_runtime_bindings WHERE agent_instance_id=?", [
 				identity.agent_instance_id,
 			])) as Array<{ attempt_id: string }>;
@@ -428,13 +437,40 @@ async function eventSources(
 			attemptId = current[0]?.attempt_id;
 		}
 		const mask = interest.kinds.reduce((value, kind) => value | RUNTIME_KIND_MASK[kind], 0);
-		sources.push({
-			where: "e.projection_kinds<>0 AND e.agent_instance_id=?",
-			values: [identity.agent_instance_id],
-			column: "projection_payload",
-			mask,
-			attemptId,
-		});
+		const allKinds = Object.values(RUNTIME_KIND_MASK).reduce((value, bit) => value | bit, 0);
+		if (attemptId) {
+			// The full selected view needs one range; a narrower interest uses its
+			// partial index before LIMIT, never a scan of unselected event metadata.
+			for (const kind of mask === allKinds ? [undefined] : interest.kinds) {
+				const bit = kind === undefined ? allKinds : RUNTIME_KIND_MASK[kind];
+				sources.push({
+					where: `${bit === allKinds ? "e.projection_kinds<>0" : `(e.projection_kinds & ${bit})<>0`} AND e.agent_instance_id=? AND e.attempt_id=?`,
+					index: kind === undefined ? "engine_runtime_attempt_cursor_idx" : `engine_runtime_${kind}_cursor_idx`,
+					values: [identity.agent_instance_id, attemptId],
+					column: "projection_payload",
+					mask,
+					attemptId,
+				});
+			}
+		}
+		// Receipts and AGI-level holds/queue invalidations remain relevant across
+		// Attempt changes. Their small indexed stream is distinct from tool/text.
+		const agentMask = mask & (RUNTIME_KIND_MASK.state | RUNTIME_KIND_MASK.queue);
+		if (agentMask)
+			sources.push({
+				where: `${agentMask === (RUNTIME_KIND_MASK.state | RUNTIME_KIND_MASK.queue) ? "e.projection_agent_kinds<>0" : `(e.projection_agent_kinds & ${agentMask})<>0`} AND e.agent_instance_id=?`,
+				index:
+					agentMask === (RUNTIME_KIND_MASK.state | RUNTIME_KIND_MASK.queue)
+						? "engine_runtime_agent_cursor_idx"
+						: agentMask === RUNTIME_KIND_MASK.state
+							? "engine_runtime_agent_state_cursor_idx"
+							: "engine_runtime_agent_queue_cursor_idx",
+				values: [identity.agent_instance_id],
+				column: "projection_payload",
+				mask,
+				attemptId,
+				agentOnly: true,
+			});
 	}
 	return sources;
 }
@@ -442,6 +478,8 @@ async function eventSources(
 function selectedChange(change: RuntimeChange, source: EventSource): boolean {
 	if (source.column !== "projection_payload") return true;
 	const attempt = change.kind === "state" ? (change.value.attemptId ?? undefined) : change.attemptId;
+	if (source.agentOnly && attempt !== undefined) return false;
+	if (change.kind === "state" && attempt === undefined && source.attemptId !== undefined) return false;
 	if (attempt !== undefined && attempt !== source.attemptId) return false;
 	const resource = change.value.resource;
 	const kind =
@@ -459,6 +497,26 @@ function selectedChange(change: RuntimeChange, source: EventSource): boolean {
 		kind in RUNTIME_KIND_MASK &&
 		Boolean((source.mask ?? 0) & RUNTIME_KIND_MASK[kind as keyof typeof RUNTIME_KIND_MASK])
 	);
+}
+
+function selectedStateChange(change: RuntimeChange, source: EventSource): RuntimeChange {
+	if (change.kind !== "state") return change;
+	const mask = source.mask ?? 0;
+	return {
+		...change,
+		value: {
+			...change.value,
+			...(!(mask & RUNTIME_KIND_MASK.tool) ? { tools: [], toolsNextCursor: null } : {}),
+			...(!(mask & RUNTIME_KIND_MASK.input)
+				? {
+						pendingInputs: [],
+						inputsHasMore: Boolean(
+							(change.value.pendingInputs as unknown[]).length || change.value.inputsHasMore,
+						),
+					}
+				: {}),
+		},
+	};
 }
 
 export async function readRuntimeEvents(sql: RuntimeSql, request: RuntimeEventsRequest): Promise<RuntimeEventBatch> {
@@ -496,8 +554,8 @@ export async function readRuntimeEvents(sql: RuntimeSql, request: RuntimeEventsR
 	let cut = head;
 	for (const source of sources) {
 		const rows = (await sql.unsafe(
-			`SELECT e.event_id,e.agent_instance_id,i.agent_instance_ref,e.attempt_id,e.projection_kinds
-			FROM engine_event_outbox e JOIN engine_agent_identity i ON i.agent_instance_id=e.agent_instance_id
+			`SELECT e.event_id,i.agent_instance_ref
+			FROM engine_event_outbox e INDEXED BY ${source.index} JOIN engine_agent_identity i ON i.agent_instance_id=e.agent_instance_id
 			WHERE ${source.where} AND e.event_id>? AND e.event_id<=? ORDER BY e.event_id LIMIT ?`,
 			[...source.values, request.afterCursor, head, sourceLimit],
 		)) as EventMetadata[];
@@ -521,12 +579,6 @@ export async function readRuntimeEvents(sql: RuntimeSql, request: RuntimeEventsR
 		const eventChanges: RuntimeChange[] = [];
 		while (index < candidates.length && Number(candidates[index].row.event_id) === cursor) {
 			const { row, source } = candidates[index++];
-			if (
-				source.column === "projection_payload" &&
-				(!(Number(row.projection_kinds) & (source.mask ?? 0)) ||
-					(source.attemptId !== undefined && row.attempt_id !== source.attemptId))
-			)
-				continue;
 			const bodies = (await sql.unsafe(`SELECT ${source.column} AS body FROM engine_event_outbox WHERE event_id=?`, [
 				cursor,
 			])) as Array<{ body: string }>;
@@ -555,7 +607,7 @@ export async function readRuntimeEvents(sql: RuntimeSql, request: RuntimeEventsR
 							(change.kind !== "invalidate" || existing.value.resource === change.value.resource),
 					)
 				)
-					eventChanges.push(change);
+					eventChanges.push(selectedStateChange(change, source));
 		}
 		const size = eventChanges.reduce((sum, change) => sum + Buffer.byteLength(JSON.stringify(change)) + 1, 0);
 		if (
