@@ -11,9 +11,10 @@ import {
 } from "@oh-my-pi/pi-coding-agent/engine/control-query";
 import type { EngineCommandEnvelope } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
-import { runtimeRemainingWork } from "@oh-my-pi/pi-coding-agent/engine/runtime-protocol";
+import { runtimeLimits, runtimeRemainingWork } from "@oh-my-pi/pi-coding-agent/engine/runtime-protocol";
 import { archiveChildHistory, coreMcpUrl, engineServiceStatus } from "@oh-my-pi/pi-coding-agent/engine/service";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { SQL } from "bun";
 
 describe("Engine Control + Query", () => {
 	let tempDir: string | undefined;
@@ -607,6 +608,105 @@ describe("Engine Control + Query", () => {
 		await runtime.dispose();
 	}, 30_000);
 
+	it("durably rejects an over-budget native branch control without applying partial intent or effects", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-control-budget-${Snowflake.next()}-`));
+		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite") });
+		const agentInstanceRef = "grimoire://tasks/grimoire/control-budget/agents/root";
+		await runtime.store.registerAgent({
+			agentInstanceId: "budget-root",
+			agentInstanceRef,
+			principalId: "owner",
+			authorityGeneration: 1,
+		});
+		const binding = {
+			agentInstanceId: "budget-root",
+			attemptId: "budget-attempt",
+			executionId: "budget-execution",
+			bindingId: "budget-binding",
+			commandId: "budget-start",
+			engineAgentId: "Engine-budget",
+			profileDigest: "profile",
+			state: "running" as const,
+			engineGeneration: runtime.engineGeneration,
+			authorityGeneration: 1,
+			bindingGeneration: 1,
+		};
+		await runtime.store.commitAttemptTransition(binding, "running", [{ kind: "running" }]);
+		const sql = new SQL(`sqlite:${path.join(tempDir, "engine.sqlite").replaceAll("\\", "/")}`);
+		await sql.unsafe(
+			`WITH RECURSIVE children(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM children WHERE n<?)
+			INSERT INTO engine_agent_identity(agent_instance_id,agent_instance_ref,parent_agent_instance_id,principal_id,authority_generation,created_at,updated_at)
+			SELECT 'budget-child-'||n,'grimoire://tasks/grimoire/control-budget/agents/child-'||n,'budget-root','owner',1,1,1 FROM children`,
+			[runtimeLimits.branchControlRecords],
+		);
+		let profileCalls = 0;
+		const server = await startEngineControlQueryServer({
+			runtime,
+			runtimeDir: tempDir,
+			deviceId: "device",
+			engineId: "engine",
+			resolveLaunchProfile: async () => {
+				profileCalls++;
+				return { spawns: "", profileDigest: "profile" };
+			},
+		});
+		try {
+			const client = new EngineControlQueryClient(tempDir);
+			const command: EngineCommandEnvelope = {
+				schema: "grimoire.engine.command.v1",
+				commandId: "pause-over-budget",
+				op: "pause",
+				deviceId: "device",
+				engineId: "engine",
+				engineGeneration: runtime.engineGeneration,
+				agentInstanceId: binding.agentInstanceId,
+				agentInstanceRef,
+				principalId: "owner",
+				authorityGeneration: 1,
+				runtimeBindingId: binding.bindingId,
+				bindingGeneration: 1,
+				attemptId: binding.attemptId,
+				executionId: binding.executionId,
+				issuedAt: Date.now(),
+				payload: { expectedIntentRevision: 0, initiator: { kind: "human" } },
+				browserPayloadHash: `sha256:${"a".repeat(64)}`,
+				browserTarget: { agentInstanceRef, attemptId: binding.attemptId, executionId: binding.executionId },
+			};
+			const denied = await client.request("command", { command }).then(
+				() => null,
+				(error: unknown) => error,
+			);
+			expect(denied).toMatchObject({ code: "restore_budget" });
+			expect(
+				await client.request("runtime.command.get", { principalId: "owner", commandId: command.commandId }),
+			).toMatchObject({
+				stage: "rejected",
+				lookup: "known",
+				target: command.browserTarget,
+				error: { code: "restore_budget" },
+			});
+			expect(
+				(await sql.unsafe("SELECT SUM(intent_revision) AS revision FROM engine_agent_identity"))[0]?.revision,
+			).toBe(0);
+			expect(await sql.unsafe("SELECT * FROM engine_branch_holds")).toHaveLength(0);
+			expect(await sql.unsafe("SELECT * FROM engine_effects")).toHaveLength(0);
+			expect(await sql.unsafe("SELECT kind FROM engine_event_outbox WHERE kind='holds_changed'")).toHaveLength(0);
+			expect(profileCalls).toBe(0);
+			await client.request("command", { command }).then(
+				() => null,
+				(error: unknown) => error,
+			);
+			const records = await sql.unsafe("SELECT command_id,state FROM engine_commands WHERE command_id=?", [
+				command.commandId,
+			]);
+			expect(records).toHaveLength(1);
+			expect(records[0]).toMatchObject({ command_id: command.commandId, state: "settled" });
+		} finally {
+			await server.close();
+			await sql.end();
+			await runtime.dispose();
+		}
+	});
 	it("serves an exact paused tool baseline through the native request validator", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-control-tools-${Snowflake.next()}-`));
 		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite") });
