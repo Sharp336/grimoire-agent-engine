@@ -713,15 +713,20 @@ export class EngineRuntime {
 					"too_late",
 					"Only a paused Attempt can resume; interrupted execution requires Continue",
 				);
-			if (action === "resume" && root && "context" in request)
-				await this.#sendCommandContext(root, request.context, request.commandId);
-			const changed = await this.store.branchIntent(
-				request.agentInstanceId,
-				request.commandId,
-				action,
-				request.expectedIntentRevision,
-				startFence,
-			);
+			let changed: { agentIds: string[]; events: EngineEvent[]; intentRevision: number } | undefined;
+			const changeIntent = async () => {
+				changed = await this.store.branchIntent(
+					request.agentInstanceId,
+					request.commandId,
+					action,
+					request.expectedIntentRevision,
+					startFence,
+				);
+			};
+			if (action === "resume" && root && "context" in request && request.context)
+				await this.#sendCommandContext(root, request.context, request.commandId, changeIntent);
+			else await changeIntent();
+			if (!changed) throw new Error("Command context returned without applying its intent boundary");
 			this.#notifyEvents(changed.events);
 			if (action === "stop") {
 				const descendants = new Set(changed.agentIds);
@@ -3467,7 +3472,12 @@ export class EngineRuntime {
 		);
 	}
 
-	async #sendCommandContext(binding: LiveBinding, context: string | undefined, commandId: string): Promise<void> {
+	async #sendCommandContext(
+		binding: LiveBinding,
+		context: string | undefined,
+		commandId: string,
+		beforeEnqueue?: () => Promise<void>,
+	): Promise<void> {
 		if (!context) return;
 		await binding.session.sendCustomMessage(
 			{
@@ -3476,7 +3486,7 @@ export class EngineRuntime {
 				display: false,
 				details: { sourceCommandId: commandId },
 			},
-			{ triggerTurn: false },
+			{ triggerTurn: false, ...(beforeEnqueue ? { beforeEnqueue } : {}) },
 		);
 	}
 
