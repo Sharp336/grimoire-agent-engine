@@ -11,6 +11,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import type { CompactionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { MemorySessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 
 it("clamps a reserve exceeding the window for small-window threshold recovery bands", () => {
 	const settings = {
@@ -49,6 +50,7 @@ it("clamps a reserve exceeding the window for small-window threshold recovery ba
 describe("AgentSession auto-compaction progress guard", () => {
 	let session: AgentSession;
 	let sessionManager: SessionManager;
+	let sessionStorage: MemorySessionStorage;
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	let compactHookEnabled = true;
@@ -64,7 +66,8 @@ describe("AgentSession auto-compaction progress guard", () => {
 
 	beforeEach(() => {
 		compactHookEnabled = true;
-		sessionManager = SessionManager.inMemory();
+		sessionStorage = new MemorySessionStorage();
+		sessionManager = SessionManager.create(process.cwd(), "/progress-guard-sessions", sessionStorage);
 
 		// The progress-guard tests exercise AgentSession's post-compaction state
 		// transitions, not extension discovery. Keep the production hook boundary
@@ -700,41 +703,105 @@ describe("AgentSession auto-compaction progress guard", () => {
 		);
 	});
 
-	it("restores the persisted overflow error when compaction skips without committing", async () => {
-		// `#runAutoCompaction` returning COMPACTION_CHECK_NONE without writing a
-		// compaction summary (no available model, hook cancel, compaction error)
-		// MUST NOT erase the user-visible assistant error: the transcript would
-		// otherwise lose the only explanation of why the turn stopped.
-		seedPriorTurns();
-		vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([]);
-		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
-		const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
+	it.each(["error", "stop"] as const)(
+		"restores one identified %s turn when overflow compaction skips",
+		async stopReason => {
+			// `#runAutoCompaction` returning COMPACTION_CHECK_NONE without writing a
+			// compaction summary (no available model, hook cancel, compaction error)
+			// MUST NOT erase the user-visible assistant error: the transcript would
+			// otherwise lose the only explanation of why the turn stopped.
+			seedPriorTurns();
+			vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([]);
+			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined as never);
+			const continueSpy = vi.spyOn(session.agent, "continue").mockResolvedValue();
 
-		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
-		session.subscribe(event => {
-			if (event.type === "auto_compaction_end") onCompactionDone();
-		});
+			const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+			session.subscribe(event => {
+				if (event.type === "auto_compaction_start") sessionManager.appendCustomEntry("test-maintenance");
+				if (event.type === "auto_compaction_end") onCompactionDone();
+			});
 
-		const assistantMsg = contentfulOverflowAssistant();
-		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
-		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+			const assistantMsg: AssistantMessage = contentfulOverflowAssistant();
+			assistantMsg.responseId = "response-rollback";
+			assistantMsg.stopReason = stopReason;
+			if (stopReason === "stop") delete assistantMsg.errorMessage;
+			session.rememberMessageIdentity(assistantMsg, { assistantMessageId: "assistant-rollback" });
+			session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
 
-		await compactionDone;
-		await session.waitForIdle();
+			await compactionDone;
+			await session.waitForIdle();
 
-		expect(promptSpy).not.toHaveBeenCalled();
-		expect(continueSpy).not.toHaveBeenCalled();
-		expect(sessionManager.getBranch()).toContainEqual(
-			expect.objectContaining({
-				type: "message",
-				message: expect.objectContaining({
-					role: "assistant",
-					stopReason: "error",
-					errorMessage: assistantMsg.errorMessage,
-				}),
-			}),
-		);
-	});
+			expect(promptSpy).not.toHaveBeenCalled();
+			expect(continueSpy).not.toHaveBeenCalled();
+			const restored = sessionManager
+				.getBranch()
+				.filter(
+					entry =>
+						entry.type === "message" &&
+						entry.message.role === "assistant" &&
+						entry.message.responseId === assistantMsg.responseId,
+				);
+			expect(restored).toHaveLength(1);
+			expect(restored[0]?.type === "message" && restored[0].assistantMessageId).toBe("assistant-rollback");
+			expect(
+				restored[0]?.type === "message" &&
+					restored[0].message.role === "assistant" &&
+					restored[0].message.stopReason,
+			).toBe(stopReason);
+			expect(
+				sessionManager
+					.getEntries()
+					.filter(
+						entry =>
+							entry.type === "message" &&
+							entry.message.role === "assistant" &&
+							entry.message.responseId === assistantMsg.responseId,
+					),
+			).toHaveLength(1);
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected persisted session file");
+			await sessionManager.close();
+			const reopened = await SessionManager.open(sessionFile, undefined, sessionStorage, {
+				suppressBreadcrumb: true,
+			});
+			try {
+				expect(
+					reopened
+						.getBranch()
+						.filter(entry => entry.type === "message" && entry.assistantMessageId === "assistant-rollback")
+						.map(entry => entry.id),
+				).toEqual(restored.map(entry => entry.id));
+				expect(
+					reopened
+						.getEntries()
+						.filter(
+							entry =>
+								entry.type === "message" &&
+								entry.message.role === "assistant" &&
+								entry.message.responseId === assistantMsg.responseId,
+						)
+						.map(entry => entry.id),
+				).toEqual(restored.map(entry => entry.id));
+				const transcript = reopened
+					.buildSessionContext({ transcript: true })
+					.messages.filter(
+						message => message.role === "assistant" && message.responseId === assistantMsg.responseId,
+					);
+				expect(transcript).toHaveLength(1);
+				expect(transcript[0]).toMatchObject({ stopReason, content: assistantMsg.content });
+				expect(
+					reopened
+						.buildSessionContext()
+						.messages.some(
+							message => message.role === "assistant" && message.responseId === assistantMsg.responseId,
+						),
+				).toBe(stopReason === "stop");
+			} finally {
+				await reopened.close();
+			}
+		},
+	);
 
 	it("does not restore a content-less overflow error when compaction skips without committing", async () => {
 		seedPriorTurns();

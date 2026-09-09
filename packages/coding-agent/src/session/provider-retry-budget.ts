@@ -141,14 +141,15 @@ export function createProviderRetryBudgetHook(inner?: ProviderRequestHook): Prov
 }
 
 /** Provider loops call this before replaying an already-failed stream. */
-export async function deferNestedProviderRetry(delayMs: number, signal?: AbortSignal): Promise<void> {
+export async function deferNestedProviderRetry(delayMs: number, signal?: AbortSignal, cause?: Error): Promise<void> {
 	if (signal?.aborted) throw abortError();
 	// Keep the physical response's Retry-After and failure classification when
 	// a provider loop asks to retry with its own shorter default delay.
 	const failure = providerRetryBudget.getStore()?.failure;
 	if (failure !== undefined) throw failure;
 	throw deferredError(
-		`a nested provider stream retry was suppressed; retry-after-ms=${Math.max(0, Math.ceil(delayMs))}`,
+		`${cause?.message ?? "a nested provider stream retry was suppressed"}; retry-after-ms=${Math.max(0, Math.ceil(delayMs))}`,
+		cause ? { cause } : undefined,
 	);
 }
 

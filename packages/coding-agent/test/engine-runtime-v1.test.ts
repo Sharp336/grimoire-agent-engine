@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
 import type { EngineBindingSnapshot, EngineInboxTarget } from "../src/engine/contracts";
 import { engineAgentId, engineAgentInstanceId } from "../src/engine/route";
@@ -22,7 +23,7 @@ describe("runtime v1 durable boundaries", () => {
 	const directories: string[] = [];
 	afterEach(async () => {
 		for (const store of stores.splice(0)) await store.close();
-		for (const directory of directories.splice(0)) fs.rmSync(directory, { recursive: true });
+		for (const directory of directories.splice(0)) await removeWithRetries(directory);
 	});
 	async function createStore() {
 		const directory = fs.mkdtempSync(path.join(os.tmpdir(), "engine-runtime-v1-"));
@@ -545,6 +546,58 @@ describe("runtime v1 durable boundaries", () => {
 		} finally {
 			await inspect.end();
 		}
+	});
+
+	it("projects profile route facts through exact Attempt detail without changing app summaries", async () => {
+		let store = await createStore();
+		const target = await active(store);
+		const agentInstanceRef = identity("root").agentInstanceRef;
+		const scope: RuntimeScope = {
+			kind: "attempt",
+			agentInstanceRef,
+			attemptId: target.attemptId,
+			kinds: ["state", "usage"],
+		};
+		const request = { principalId: "owner", agentInstanceRef, attemptId: target.attemptId };
+		const before = await store.runtimeSnapshot(scope, request);
+		const summary = (await store.runtimeSummary({ principalId: "owner", agentInstanceRef })).summary;
+		const profileRef = "gctx:2222222222222222",
+			primaryRouteRef = "gctx:3333333333333333",
+			routeRef = "gctx:4444444444444444";
+		for (const phase of ["loading", "active", "exhausted"] as const) {
+			const state = { profileRef, primaryRouteRef, routeRef, fallback: true, phase };
+			const event = await store.commitAttemptProfileRoute(target, state);
+			expect(event).toBeDefined();
+			const page = await store.runtimeSnapshot(scope, request);
+			expect(page.agents[0].profileRoute).toMatchObject({
+				state,
+				eventSeq: event!.seq,
+				target: {
+					agentInstanceId: target.agentInstanceId,
+					attemptId: target.attemptId,
+					runtimeBindingId: target.bindingId,
+				},
+			});
+			const changes = await store.runtimeEvents(eventsRequest(before.epoch, event!.eventId - 1, scope));
+			expect(changes.changes.find(change => change.kind === "state")?.value.profileRoute).toEqual(
+				page.agents[0].profileRoute,
+			);
+			expect(
+				changes.changes.some(change => change.kind === "invalidate" && change.value.resource === "context"),
+			).toBeTrue();
+			expect((await store.runtimeSummary({ principalId: "owner", agentInstanceRef })).summary).toEqual(summary);
+		}
+		await expect(store.runtimeSnapshot(scope, { ...request, principalId: "other" })).rejects.toThrow();
+		const file = path.join(directories.at(-1)!, "engine.sqlite");
+		await store.close();
+		stores.splice(stores.indexOf(store), 1);
+		store = await EngineStore.open(file);
+		stores.push(store);
+		expect((await store.runtimeSnapshot(scope, request)).agents[0].profileRoute).toMatchObject({
+			state: { phase: "exhausted", routeRef },
+		});
+		const catalog = await store.runtimeEvents(eventsRequest(before.epoch, before.watermark, { kind: "catalog" }));
+		expect(catalog.changes).toEqual([]);
 	});
 
 	it("emits exact usage and context invalidations after model settlement without token or app churn", async () => {

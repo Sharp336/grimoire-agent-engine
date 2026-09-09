@@ -11,6 +11,7 @@ import { computeContextBreakdown } from "@oh-my-pi/pi-coding-agent/modes/utils/c
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SessionStatsTracker } from "@oh-my-pi/pi-coding-agent/session/session-stats";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("Context usage consolidation", () => {
@@ -101,6 +102,77 @@ describe("Context usage consolidation", () => {
 		const sessionContext = session.buildDisplaySessionContext();
 		agent.replaceMessages(sessionContext.messages);
 	}
+
+	it("estimates with the active model instead of reusing another model's reported context", async () => {
+		const tempDir = TempDir.createSync("@context-model-switch-");
+		try {
+			const { session, sessionManager, agent } = createSession(tempDir);
+			const nonMessageTokens = session.getContextBreakdown()!.usedTokens;
+			const assistant: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "previous model reply" }],
+				api: mockModel.api,
+				provider: mockModel.provider,
+				model: mockModel.id,
+				timestamp: 2000,
+				stopReason: "stop",
+				usage: {
+					input: 40_000,
+					output: 10,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 40_010,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+			};
+			for (const persisted of [false, true]) {
+				if (persisted) sessionManager.appendMessage(assistant);
+				agent.replaceMessages([assistant]);
+				expect(session.getContextBreakdown()?.usedTokens).toBe(40_000);
+				for (const model of [
+					{ ...mockModel, id: "another-model" },
+					{ ...mockModel, provider: "anthropic" },
+					{ ...mockModel, api: "anthropic-messages" as const },
+				]) {
+					agent.setModel(model);
+					const breakdown = session.getContextBreakdown();
+					expect(breakdown?.anchored).toBe(false);
+					expect(breakdown?.usedTokens).toBe(
+						nonMessageTokens + agent.tokenizer.countMessages(agent.state.messages),
+					);
+					agent.setModel(mockModel);
+					expect(session.getContextBreakdown()?.usedTokens).toBe(40_000);
+				}
+			}
+		} finally {
+			await tempDir.remove();
+		}
+	});
+
+	it("drops an in-flight context estimate when a fallback changes the model", async () => {
+		const tempDir = TempDir.createSync("@context-pending-model-");
+		try {
+			const { session, sessionManager, agent } = createSession(tempDir);
+			const tracker = new SessionStatsTracker({
+				session,
+				sessionManager,
+				agent,
+				modelRegistry,
+				model: () => agent.state.model,
+				sessionId: () => "context-test",
+			});
+			const baseline = tracker.getContextBreakdown()!.usedTokens;
+			tracker.setPendingSnapshot({ promptTokens: 40_000, nonMessageTokens: baseline, cutoffCount: 0 });
+			expect(tracker.getContextBreakdown()?.usedTokens).toBe(40_000);
+			agent.setModel({ ...mockModel, id: "fallback-model" });
+			expect(tracker.getContextBreakdown()?.anchored).toBe(false);
+			expect(tracker.getContextBreakdown()?.usedTokens).toBe(baseline);
+			tracker.setPendingSnapshot({ promptTokens: 120, nonMessageTokens: baseline, cutoffCount: 0 });
+			expect(tracker.getContextBreakdown()?.usedTokens).toBe(120);
+		} finally {
+			await tempDir.remove();
+		}
+	});
 
 	it("keeps branch-local anchors safe from sibling branches", async () => {
 		const tempDir = TempDir.createSync("@branch-local-");

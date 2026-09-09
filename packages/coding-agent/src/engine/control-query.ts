@@ -7,6 +7,7 @@ import {
 	type EngineEvent,
 	type EngineInboxMutation,
 	type EngineInboxSource,
+	type EngineProfileRouteState,
 	type EngineTarget,
 	EngineTargetError,
 } from "./contracts";
@@ -59,6 +60,10 @@ export type EngineControlQueryMethod =
 	| "session.context"
 	| "session.history"
 	| "session.archive"
+	| "session.archive.verify"
+	| "session.archive.retire"
+	| "session.archive.restore"
+	| "storage.reclaim"
 	| "session.restore.stage"
 	| "session.restore.history"
 	| "session.usage"
@@ -107,6 +112,7 @@ export interface EnginePublicSnapshot {
 	manualHold: boolean;
 	intentRevision: number;
 	retry?: import("./contracts").EngineRetryState;
+	profileRoute?: EngineProfileRouteState;
 	profileDigest?: string;
 	transcriptRef?: string;
 	updatedAt: number;
@@ -277,7 +283,10 @@ async function handleFrame(
 		const request = validateRequest(value);
 		requestId = request.requestId;
 		if (!sameSecret(request.token, token)) return failure(requestId, "unauthorized", "Invalid local token", false);
-		const result = await dispatchRequest(request, options, signal);
+		const result =
+			request.method === "storage.reclaim"
+				? await options.runtime.reclaimStorage()
+				: await options.runtime.runControlQuery(() => dispatchRequest(request, options, signal));
 		return success(requestId, result);
 	} catch (error) {
 		if (error instanceof RuntimeQueryError) return failure(requestId, error.code, error.message, false, error.work);
@@ -515,6 +524,24 @@ async function dispatchRequest(
 				optionalNonNegativeInteger(params.offset),
 				optionalArchiveLimit(params.limit),
 			);
+		case "session.archive.verify":
+			return await options.runtime.sessionArchiveVerify(
+				requiredTarget(params),
+				requiredString(params, "contentHash"),
+			);
+		case "session.archive.retire":
+			return await options.runtime.sessionArchiveRetire(
+				requiredTarget(params),
+				requiredString(params, "contentHash"),
+				requiredString(params, "archivePath"),
+				requiredString(params, "operationId"),
+			);
+		case "session.archive.restore":
+			return await options.runtime.sessionArchiveRestore(
+				requiredTarget(params),
+				requiredString(params, "contentHash"),
+				requiredString(params, "operationId"),
+			);
 		case "session.restore.history":
 			return await listSessionHistory(
 				options.runtime,
@@ -665,6 +692,10 @@ async function capabilities(options: ServerOptions): Promise<Record<string, unkn
 			"session.context",
 			"session.history",
 			"session.archive",
+			"session.archive.verify",
+			"session.archive.retire",
+			"session.archive.restore",
+			"storage.reclaim",
 			"session.restore.stage",
 			"session.restore.history",
 			"session.usage",
@@ -678,7 +709,18 @@ async function capabilities(options: ServerOptions): Promise<Record<string, unkn
 		limits: { frameBytes: ENGINE_CONTROL_QUERY_MAX_FRAME_BYTES, resultChars: ENGINE_CONTROL_QUERY_MAX_RESULT_CHARS },
 		cursor: { opaque: true, order: "oldest_first", gapIsExplicit: true },
 		historyCursor: { opaque: true, order: "page_chronological", direction: "older", gapIsExplicit: true },
-		sessionArchive: { exactNativeBytes: true, hashPinnedPages: true, maxChunkBytes: 24_000 },
+		sessionArchive: {
+			exactNativeBytes: true,
+			hashPinnedPages: true,
+			sourcePreflight: true,
+			localCompressedProof: true,
+			embeddedBlobs: true,
+			journaledRetirement: true,
+			restoreWithoutRun: true,
+			diskReclaim: true,
+			diskReclaimScope: "engine_database",
+			maxChunkBytes: 24_000,
+		},
 		sessionRestore: {
 			exactNativeBytes: true,
 			hashPinnedChunks: true,
@@ -735,7 +777,7 @@ async function runtimeTarget(runtime: EngineRuntime, params: Record<string, unkn
 }
 
 async function listSnapshots(runtime: EngineRuntime, cursor: string | undefined, limit: number) {
-	const epoch = await runtime.store.getStoreEpoch();
+	const epoch = await runtime.store.getSnapshotEpoch();
 	const after = decodeCursor(cursor, "snapshots", epoch);
 	if (after.resyncRequired)
 		return { items: [], nextCursor: encodeCursor("snapshots", epoch, 0), hasMore: false, resyncRequired: true };
@@ -787,6 +829,9 @@ async function snapshotFromAttempt(
 					}
 				: undefined,
 		profileDigest: exactBinding?.profileDigest,
+		...(attempt.profile_route_state
+			? { profileRoute: JSON.parse(attempt.profile_route_state) as EngineProfileRouteState }
+			: {}),
 		transcriptRef: attempt.transcript_session_id
 			? `history://${binding?.engineAgentId ?? engineAgentId(attempt.agent_instance_id)}`
 			: undefined,
@@ -1097,6 +1142,10 @@ function validateRequest(value: unknown): EngineControlQueryRequest {
 			"session.context",
 			"session.history",
 			"session.archive",
+			"session.archive.verify",
+			"session.archive.retire",
+			"session.archive.restore",
+			"storage.reclaim",
 			"session.restore.stage",
 			"session.restore.history",
 			"session.usage",

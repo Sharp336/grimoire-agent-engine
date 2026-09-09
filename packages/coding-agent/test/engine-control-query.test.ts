@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as net from "node:net";
@@ -22,6 +23,93 @@ describe("Engine Control + Query", () => {
 	afterEach(() => {
 		if (tempDir) removeSyncWithRetries(tempDir);
 		tempDir = undefined;
+	});
+
+	it("reclaims actual database bytes and resyncs snapshot cursors without losing events or retained history", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-reclaim-${Snowflake.next()}-`));
+		const databasePath = path.join(tempDir, "engine.sqlite");
+		const runtime = await EngineRuntime.create({ databasePath });
+		const server = await startEngineControlQueryServer({
+			runtimeDir: tempDir,
+			runtime,
+			deviceId: "test-device",
+			engineId: "test-engine",
+			resolveLaunchProfile: async () => {
+				throw new Error("No model launches in storage test");
+			},
+		});
+		const client = new EngineControlQueryClient(tempDir);
+		const kept = path.join(tempDir, "kept.jsonl");
+		const removed = path.join(tempDir, "removed.jsonl");
+		const content = `${JSON.stringify({ type: "session", id: "kept", version: 3 })}\n`;
+		try {
+			for (const id of ["a", "b"]) {
+				const binding = {
+					bindingId: `binding-${id}`,
+					commandId: `start-${id}`,
+					agentInstanceId: `agent-${id}`,
+					executionId: `execution-${id}`,
+					attemptId: `attempt-${id}`,
+					engineAgentId: `Engine-${id}`,
+					profileDigest: "test-profile",
+					state: "idle" as const,
+					engineGeneration: runtime.engineGeneration,
+					bindingGeneration: 1,
+					authorityGeneration: 1,
+				};
+				await runtime.store.putBinding(binding);
+				await runtime.store.putAttempt(binding, "completed");
+				await runtime.store.appendEvent({ ...binding, causationCommandId: `complete-${id}`, kind: "completed" });
+			}
+			await runtime.store.sessionStorage.writeTextAtomic(kept, content);
+			await runtime.store.sessionStorage.writeTextAtomic(removed, content + "x".repeat(4 * 1024 * 1024));
+			await runtime.store.sessionStorage.unlink(removed);
+			await runtime.store.drain();
+			const fileBytes = () =>
+				fs.statSync(databasePath).size +
+				(fs.existsSync(`${databasePath}-wal`) ? fs.statSync(`${databasePath}-wal`).size : 0);
+			const before = fileBytes();
+			const page = (await client.request("snapshots.list", { limit: 1 })) as { nextCursor: string };
+			const events = (await client.request("events.list", { attemptId: "attempt-a" })) as { nextCursor: string };
+			const identity = await runtime.store.getStoreEpoch();
+			const result = await client.request("storage.reclaim");
+			const after = fileBytes();
+			expect(result).toEqual({
+				schema: "grimoire.engine.storage_reclaim.v1",
+				scope: "engine_database",
+				status: "completed",
+				beforeBytes: before,
+				afterBytes: after,
+				freedBytes: before - after,
+			});
+			expect(before - after).toBeGreaterThan(4 * 1024 * 1024);
+			expect(await runtime.store.getStoreEpoch()).toBe(identity);
+			expect(await runtime.store.sessionStorage.readText(kept)).toBe(content);
+			expect(await client.request("snapshots.list", { cursor: page.nextCursor })).toMatchObject({
+				resyncRequired: true,
+				items: [],
+			});
+			expect(await client.request("snapshots.list")).toMatchObject({
+				resyncRequired: false,
+				items: [{ attemptId: "attempt-a" }, { attemptId: "attempt-b" }],
+			});
+			expect(
+				await client.request("events.list", { attemptId: "attempt-a", cursor: events.nextCursor }),
+			).toMatchObject({ resyncRequired: false });
+			expect((await runtime.store.pendingEvents()).map(event => event.attemptId)).toEqual([
+				"attempt-a",
+				"attempt-b",
+			]);
+			const database = new Database(databasePath, { readonly: true });
+			try {
+				expect(database.query("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
+			} finally {
+				database.close();
+			}
+		} finally {
+			await server.close();
+			await runtime.dispose();
+		}
 	});
 
 	it("serves authenticated durable commands and restart-safe oldest-first queries", async () => {
@@ -310,6 +398,20 @@ describe("Engine Control + Query", () => {
 				.toString("base64"),
 		});
 		let replaceRetainedBinding: boolean | undefined;
+		runtime.sessionArchiveVerify = async (received, contentHash) => {
+			expect(received).toEqual(target);
+			expect(contentHash).toBe(`sha256:${"a".repeat(64)}`);
+			return {
+				schema: "grimoire.engine.session_archive_verification.v1",
+				agentInstanceId: received.agentInstanceId,
+				sessionId: "session-a",
+				contentHash,
+				byteLength: 4,
+				sourceBytes: 3,
+				sourceRetired: false,
+				freedBytes: 0,
+			};
+		};
 		runtime.sessionRestoreStage = async request => {
 			replaceRetainedBinding = request.replaceRetainedBinding;
 			return {
@@ -390,6 +492,15 @@ describe("Engine Control + Query", () => {
 			}),
 		).toMatchObject({ restoreId: "b".repeat(64), nextOffset: 4, complete: true });
 		expect(replaceRetainedBinding).toBe(true);
+		expect(
+			await client.request("session.archive.verify", { ...target, contentHash: `sha256:${"a".repeat(64)}` }),
+		).toMatchObject({ sourceBytes: 3, sourceRetired: false, freedBytes: 0 });
+		await expect(
+			client.request("session.archive.verify", {
+				agentInstanceId: "agent-a",
+				contentHash: `sha256:${"a".repeat(64)}`,
+			}),
+		).rejects.toMatchObject({ code: "invalid_request" });
 		const restoreSelection = {
 			agentInstanceId: "agent-restored",
 			agentInstanceRef: "grimoire://tasks/project/task/agents/agent-restored",

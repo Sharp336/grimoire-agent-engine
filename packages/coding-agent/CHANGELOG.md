@@ -4,6 +4,20 @@
 
 ### Added
 
+- Native history archives now include referenced image payloads and restore them without the original blob store; incomplete copies and conflicting existing blobs are rejected.
+
+- Added idle-only disk reclamation with measured database/WAL savings, low-space deferral and safe snapshot cursor resynchronization.
+
+- Added journaled local history retirement and same-session restoration from a verified compressed copy, with restart recovery and no model call during restore.
+
+- Added exact-target archive preflight that rejects changed native history, attachments, unfinished execution, or pending messages without deleting source data.
+
+- Added owner-local Responses API execution for configured providers that require it for reasoning with tools.
+
+- Added attempt-bound profile-route events and restart-safe snapshots, separating pending selection from the observed stream and route exhaustion from a retry-budget stop.
+
+- AgentProfiles can explicitly opt into their saved cross-model fallback order; editing existing same-model profiles does not silently enable it.
+- Added explicit ordered model/provider recovery for replay-safe failed turns without cycling back to earlier routes.
 - Added restart-safe Agent Engine conversation history plus configurable terminal-child transcript retention.
 - Added authenticated Engine session context, usage, compaction, release, and durable inbox controls for non-TUI clients.
 - Added independent durable Agent Engine event delivery state per sink while retaining SQLite events as the authoritative history.
@@ -14,6 +28,23 @@
 
 ### Fixed
 
+- Report archived child transcripts as unavailable instead of silently showing empty history, and reopen the same references after restore.
+
+- Estimate context for the current model after switching models or falling back, instead of displaying the previous provider's token count.
+
+- Restarted each new Attempt on its selected profile route instead of retaining the previous fallback.
+- Explained provider rate limits, temporary failures and retry exhaustion without exposing private connection details.
+- Reported exhausted profile routes when the last fallback still fails after its retries, without marking untried routes unavailable.
+- Preserved the original provider stream failure when retry is handed back to the Engine.
+- Retried temporary failures within the remaining Engine budget even when a profile has no later fallback slot.
+- Kept one identifiable assistant reply when context compaction cannot proceed, including after reopening the conversation.
+
+- Kept hosted broker profile selections stable across token renewal after profile edits, without bypassing current route or account authorization.
+
+- Kept running Codex-subscription agents on their launch profile after profile edits, without bypassing fresh account quota checks.
+- Isolated route credentials and model settings when several profile slots use the same provider account.
+- Skipped unavailable fallback credentials without losing later approved routes, and respected Stop while those credentials resolve.
+- Kept owner-local Agent Engine runs on their authorized profile routes after profile edits, while still checking current connection trust and access.
 - Kept queued messages on hold when manual Pause reaches the Engine just after its answer finishes.
 - Restored archives expose verified native conversation history before the first send, without starting an attempt or replaying tools.
 

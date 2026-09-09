@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
+import * as fsAsync from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
@@ -12,15 +13,135 @@ import {
 	EngineInboxConflictError,
 	EngineStore,
 } from "@oh-my-pi/pi-coding-agent/engine/store";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { removeWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
 
 describe("EngineStore", () => {
 	let tempDir: string | undefined;
 
-	afterEach(() => {
-		if (tempDir) removeSyncWithRetries(tempDir);
+	afterEach(async () => {
+		if (tempDir) await removeWithRetries(tempDir);
 		tempDir = undefined;
+	});
+
+	it("defers compaction on low disk space and remains usable after a disk probe failure", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-space-${Snowflake.next()}-`));
+		const store = await EngineStore.open(path.join(tempDir, "engine.sqlite"));
+		const source = path.join(tempDir, "removed.jsonl");
+		const retained = path.join(tempDir, "kept.jsonl");
+		const statfs = fsAsync.statfs;
+		const diskProbe = spyOn(fsAsync, "statfs");
+		try {
+			await store.sessionStorage.writeTextAtomic(retained, "retained content");
+			await store.sessionStorage.writeTextAtomic(source, "x".repeat(2 * 1024 * 1024));
+			await store.sessionStorage.unlink(source);
+			const epoch = await store.getSnapshotEpoch();
+			diskProbe.mockResolvedValueOnce({ ...(await statfs(tempDir)), bavail: 0 });
+			expect(await store.reclaimStorage()).toMatchObject({ status: "deferred", reason: "insufficient_space" });
+			expect(await store.getSnapshotEpoch()).toBe(epoch);
+			diskProbe.mockRejectedValueOnce(new Error("simulated disk probe failure"));
+			await expect(store.reclaimStorage()).rejects.toThrow("simulated disk probe failure");
+			expect(await store.sessionStorage.readText(retained)).toBe("retained content");
+			diskProbe.mockRestore();
+			expect(await store.reclaimStorage()).toMatchObject({ status: "completed" });
+			expect(await store.getSnapshotEpoch()).not.toBe(epoch);
+			expect(await store.sessionStorage.readText(retained)).toBe("retained content");
+		} finally {
+			diskProbe.mockRestore();
+			await store.close();
+		}
+	});
+
+	it("defers reclaim while another SQLite reader holds the WAL and retries after it releases", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-reader-${Snowflake.next()}-`));
+		const databasePath = path.join(tempDir, "engine.sqlite");
+		const store = await EngineStore.open(databasePath);
+		const reader = new Database(databasePath);
+		const source = path.join(tempDir, "removed.jsonl");
+		try {
+			await store.sessionStorage.writeTextAtomic(source, "x".repeat(2 * 1024 * 1024));
+			reader.exec("BEGIN");
+			reader.query("SELECT count(*) FROM omp_session_files").get();
+			await store.sessionStorage.unlink(source);
+			const epoch = await store.getSnapshotEpoch();
+			expect(await store.reclaimStorage()).toMatchObject({ status: "deferred", reason: "database_busy" });
+			expect(await store.getSnapshotEpoch()).toBe(epoch);
+			reader.exec("ROLLBACK");
+			expect(await store.reclaimStorage()).toMatchObject({ status: "completed" });
+			expect(reader.query("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
+		} finally {
+			reader.close();
+			await store.close();
+		}
+	}, 15_000);
+
+	it("persists route state with the full Attempt fence and never lends it to another Attempt", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-route-${Snowflake.next()}-`));
+		const databasePath = path.join(tempDir, "engine.sqlite");
+		const store = await EngineStore.open(databasePath);
+		const binding = {
+			bindingId: "binding-route",
+			commandId: "command-route",
+			agentInstanceId: "agent-route",
+			executionId: "execution-route",
+			attemptId: "attempt-route",
+			engineAgentId: "Engine-route",
+			profileDigest: "profile-route",
+			state: "running" as const,
+			engineGeneration: 1,
+			bindingGeneration: 2,
+			authorityGeneration: 3,
+		};
+		const state = {
+			profileRef: "gctx:2222222222222222",
+			primaryRouteRef: "gctx:3333333333333333",
+			routeRef: "gctx:4444444444444444",
+			fallback: true,
+			phase: "active" as const,
+		};
+		try {
+			await store.putBinding(binding);
+			await store.putAttempt(binding, "running");
+			for (const mismatch of [
+				{ attemptId: "wrong" },
+				{ agentInstanceId: "wrong" },
+				{ executionId: "wrong" },
+				{ bindingId: "wrong" },
+				{ engineGeneration: 9 },
+				{ bindingGeneration: 9 },
+				{ authorityGeneration: 9 },
+			]) {
+				expect(await store.commitAttemptProfileRoute({ ...binding, ...mismatch }, state)).toBeUndefined();
+			}
+			expect(await store.pendingEvents()).toEqual([]);
+			expect(await store.commitAttemptProfileRoute(binding, state)).toMatchObject({
+				kind: "profile_route_changed",
+				attemptId: binding.attemptId,
+				payload: { profileRoute: state },
+			});
+			await store.putAttempt(binding, "completed");
+			expect(await store.commitAttemptProfileRoute(binding, { ...state, phase: "exhausted" })).toBeUndefined();
+			await store.putAttempt({ ...binding, attemptId: "next-attempt", executionId: "next-execution" }, "accepted");
+			expect((await store.getAttempt("next-attempt"))?.profile_route_state).toBeNull();
+		} finally {
+			await store.close();
+		}
+		const reopened = await EngineStore.open(databasePath);
+		try {
+			expect(JSON.parse((await reopened.getAttempt(binding.attemptId))!.profile_route_state!)).toEqual({
+				...state,
+				eventSeq: 1,
+			});
+			expect(
+				(await reopened.listAttempts()).find(attempt => attempt.attempt_id === binding.attemptId)
+					?.profile_route_state,
+			).toBe(JSON.stringify({ ...state, eventSeq: 1 }));
+			expect((await reopened.pendingEvents()).filter(event => event.kind === "profile_route_changed")).toHaveLength(
+				1,
+			);
+		} finally {
+			await reopened.close();
+		}
 	});
 
 	it("reconciles unfinished attempts from an earlier engine generation", async () => {
@@ -226,6 +347,12 @@ describe("EngineStore", () => {
 		expect(inspect.query("SELECT version FROM engine_schema_migrations WHERE version=11").get()).toEqual({
 			version: 11,
 		});
+		expect(inspect.query("SELECT version FROM engine_schema_migrations WHERE version=12").get()).toEqual({
+			version: 12,
+		});
+		expect(
+			inspect.query("SELECT name FROM pragma_table_info('engine_attempts') WHERE name=?").get("profile_route_state"),
+		).toEqual({ name: "profile_route_state" });
 		expect(
 			inspect
 				.query("SELECT name FROM pragma_table_info('engine_runtime_bindings') WHERE name=?")
@@ -233,6 +360,67 @@ describe("EngineStore", () => {
 		).toEqual({ name: "conversation_identity_digest" });
 		inspect.close();
 	});
+
+	it.each(["exact", "migration failure", "tampered checksum", "physical mismatch"])(
+		"adopts only the frozen profile schema12 fork: %s",
+		async scenario => {
+			tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-profile-v12-"));
+			const databasePath = path.join(tempDir, "engine.sqlite");
+			const fixture = new Database(databasePath, { create: true });
+			for (const name of ["engine-schema-v10.sql", "engine-schema-profile-v12.sql"])
+				fixture.exec(await Bun.file(path.join(import.meta.dir, "fixtures", name)).text());
+			const prefix = fixture.query("SELECT version,checksum FROM engine_schema_migrations ORDER BY version").all();
+			if (scenario === "migration failure") fixture.exec("CREATE TABLE engine_runtime_messages(conflict TEXT)");
+			if (scenario === "tampered checksum")
+				fixture.exec("UPDATE engine_schema_migrations SET checksum='changed' WHERE version=12");
+			if (scenario === "physical mismatch")
+				fixture.exec("ALTER TABLE engine_attempts DROP COLUMN profile_route_state");
+			fixture.close();
+			if (scenario === "exact") {
+				const store = await EngineStore.open(databasePath);
+				await store.close();
+				const reopened = await EngineStore.open(databasePath);
+				await reopened.close();
+			} else await expect(EngineStore.open(databasePath)).rejects.toThrow();
+			const inspect = new Database(databasePath, { readonly: true });
+			try {
+				expect(
+					inspect.query("SELECT value FROM engine_metadata WHERE key='profile-producer-sentinel'").get(),
+				).toEqual({ value: "retained user state" });
+				expect(
+					inspect
+						.query("SELECT version,checksum FROM engine_schema_migrations WHERE version<12 ORDER BY version")
+						.all(),
+				).toEqual(prefix.slice(0, 11));
+				const receipt = inspect
+					.query("SELECT value FROM engine_metadata WHERE key='schema_fork_profile_route_v12'")
+					.get() as { value: string } | null;
+				if (scenario === "exact") {
+					expect(JSON.parse(receipt!.value)).toEqual(prefix.at(-1));
+					expect(inspect.query("SELECT MAX(version) AS version FROM engine_schema_migrations").get()).toEqual({
+						version: 25,
+					});
+					expect(
+						inspect.query("SELECT name FROM sqlite_master WHERE name='engine_agent_identity'").get(),
+					).not.toBeNull();
+				} else {
+					expect(receipt).toBeNull();
+					expect(inspect.query("SELECT MAX(version) AS version FROM engine_schema_migrations").get()).toEqual({
+						version: 12,
+					});
+					if (scenario !== "tampered checksum")
+						expect(
+							inspect.query("SELECT version,checksum FROM engine_schema_migrations ORDER BY version").all(),
+						).toEqual(prefix);
+					expect(
+						inspect.query("SELECT name FROM sqlite_master WHERE name='engine_agent_identity'").get(),
+					).toBeNull();
+				}
+			} finally {
+				inspect.close();
+			}
+		},
+	);
 
 	it("migrates legacy pending queue and control admission metadata without changing canonical rows", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-store-v22-${Snowflake.next()}-`));

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { type Model, streamSimple } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { safeEngineErrorDetail } from "../src/engine/public-error";
 import type { ProviderRequestHook } from "../src/sdk";
 import {
 	createProviderRetryBudgetHook,
@@ -12,7 +13,34 @@ import {
 } from "../src/session/provider-retry-budget";
 
 describe("Engine provider retry budget", () => {
-	it("preserves the physical Retry-After through the real provider stream retry layers", async () => {
+	it.each([
+		{
+			name: "physical Retry-After",
+			response: () => new Response("busy", { status: 429, headers: { "Retry-After": "45" } }),
+			expected: "retry-after-ms=45000",
+			publicReason: "Provider rate limit reached",
+		},
+		{
+			name: "HTTP 200 stream failure",
+			response: () =>
+				new Response(
+					'data: {"error":{"message":"upstream overloaded 503","type":"server_error"}}\n\ndata: [DONE]\n\n',
+					{ headers: { "content-type": "text/event-stream" } },
+				),
+			expected: "upstream overloaded 503",
+			publicReason: "Provider request failed",
+		},
+		{
+			name: "empty completion",
+			response: () =>
+				new Response(
+					'data: {"id":"empty","object":"chat.completion.chunk","created":0,"model":"gpt-test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+					{ headers: { "content-type": "text/event-stream" } },
+				),
+			expected: "Provider returned an empty completion",
+			publicReason: "Provider request failed",
+		},
+	])("preserves $name through the real provider stream retry layers", async ({ response, expected, publicReason }) => {
 		const model = buildModel({
 			id: "gpt-test",
 			name: "GPT test",
@@ -35,11 +63,11 @@ describe("Engine provider retry budget", () => {
 					apiKey: "test-key",
 					fetch: createProviderRetryBudgetHook().wrapFetch(model, async () => {
 						physicalRequests++;
-						return new Response("busy", { status: 429, headers: { "Retry-After": "45" } });
+						return response();
 					}),
-					providerRetryWait: async (delayMs, signal) => {
+					providerRetryWait: async (delayMs, signal, cause) => {
 						nestedWaits++;
-						await deferNestedProviderRetry(delayMs, signal);
+						await deferNestedProviderRetry(delayMs, signal, cause);
 					},
 				},
 			)
@@ -48,7 +76,10 @@ describe("Engine provider retry budget", () => {
 		);
 		expect(physicalRequests).toBe(1);
 		expect(nestedWaits).toBe(1);
-		expect(String(result.errorMessage ?? result)).toContain("retry-after-ms=45000");
+		expect(String(result.errorMessage ?? result)).toContain(expected);
+		const publicError = safeEngineErrorDetail(result.errorMessage ?? result);
+		expect(publicError).toStartWith(`${publicReason} (diagnostic `);
+		expect(safeEngineErrorDetail(publicError)).toBe(publicError);
 	});
 
 	it("resets after every successful logical request across more than four tool turns", async () => {
@@ -87,13 +118,17 @@ describe("Engine provider retry budget", () => {
 					physicalRequests += 1;
 					return new Response("busy", { status: 503, headers: { "Retry-After": "9" } });
 				});
-				await expect(fetch("https://example.invalid/provider")).rejects.toThrow(PROVIDER_RETRY_DEFERRED_CODE);
+				const error = await fetch("https://example.invalid/provider").catch(reason => reason);
+				expect(String(error)).toContain(PROVIDER_RETRY_DEFERRED_CODE);
+				expect(safeEngineErrorDetail(error)).toStartWith("Provider temporarily unavailable (diagnostic ");
 			}
 			const exhausted = hook.wrapFetch(model, async () => {
 				physicalRequests += 1;
 				return new Response("must not run");
 			});
-			await expect(exhausted("https://example.invalid/provider")).rejects.toThrow(PROVIDER_RETRY_EXHAUSTED_CODE);
+			const error = await exhausted("https://example.invalid/provider").catch(reason => reason);
+			expect(String(error)).toContain(PROVIDER_RETRY_EXHAUSTED_CODE);
+			expect(safeEngineErrorDetail(error)).toStartWith("Provider retry limit reached (diagnostic ");
 		});
 
 		expect({ admissions, physicalRequests }).toEqual({ admissions: 4, physicalRequests: 4 });
@@ -144,6 +179,7 @@ describe("Engine provider retry budget", () => {
 			const error = await fetch("https://example.invalid/provider").catch(reason => reason);
 			expect(error).toMatchObject({ retryable: false });
 			expect(String(error)).toContain(PROVIDER_RETRY_PERMANENT_CODE);
+			expect(safeEngineErrorDetail(error)).toStartWith("Provider rejected the request (diagnostic ");
 		});
 	});
 });

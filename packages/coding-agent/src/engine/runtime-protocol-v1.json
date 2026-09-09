@@ -6,7 +6,7 @@
   "$ref": "#/$defs/request",
   "x-artel": {
     "version": "1.0",
-    "contractRevision": 8,
+    "contractRevision": 9,
     "limits": {
       "wsMessageBytes": 262144,
       "deliveryBatchBytes": 65536,
@@ -2905,6 +2905,9 @@
               "type": "null"
             }
           ]
+        },
+        "profileRoute": {
+          "$ref": "#/$defs/profileRoute"
         }
       },
       "required": [
@@ -5076,6 +5079,113 @@
         "nextCursor",
         "work",
         "items"
+      ],
+      "additionalProperties": false
+    },
+    "profileRouteState": {
+      "type": "object",
+      "properties": {
+        "profileRef": {
+          "type": "string",
+          "pattern": "^gctx:[23456789abcdefghjkmnpqrstuvwxyz]{16}$",
+          "minLength": 21,
+          "maxLength": 21
+        },
+        "primaryRouteRef": {
+          "type": "string",
+          "pattern": "^gctx:[23456789abcdefghjkmnpqrstuvwxyz]{16}$",
+          "minLength": 21,
+          "maxLength": 21
+        },
+        "routeRef": {
+          "type": "string",
+          "pattern": "^gctx:[23456789abcdefghjkmnpqrstuvwxyz]{16}$",
+          "minLength": 21,
+          "maxLength": 21
+        },
+        "pendingRouteRef": {
+          "type": "string",
+          "pattern": "^gctx:[23456789abcdefghjkmnpqrstuvwxyz]{16}$",
+          "minLength": 21,
+          "maxLength": 21
+        },
+        "fallback": {
+          "type": "boolean"
+        },
+        "phase": {
+          "enum": [
+            "loading",
+            "active",
+            "exhausted"
+          ]
+        }
+      },
+      "required": [
+        "profileRef",
+        "primaryRouteRef",
+        "fallback",
+        "phase"
+      ],
+      "additionalProperties": false
+    },
+    "profileRoute": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "$ref": "#/$defs/profileRouteState"
+        },
+        "target": {
+          "type": "object",
+          "properties": {
+            "agentInstanceId": {
+              "$ref": "#/$defs/id"
+            },
+            "executionId": {
+              "$ref": "#/$defs/id"
+            },
+            "attemptId": {
+              "$ref": "#/$defs/id"
+            },
+            "runtimeBindingId": {
+              "$ref": "#/$defs/id"
+            },
+            "engineGeneration": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "bindingGeneration": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            },
+            "authorityGeneration": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 9007199254740991
+            }
+          },
+          "required": [
+            "agentInstanceId",
+            "executionId",
+            "attemptId",
+            "runtimeBindingId",
+            "engineGeneration",
+            "bindingGeneration",
+            "authorityGeneration"
+          ],
+          "additionalProperties": false
+        },
+        "eventSeq": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "state",
+        "target",
+        "eventSeq"
       ],
       "additionalProperties": false
     }

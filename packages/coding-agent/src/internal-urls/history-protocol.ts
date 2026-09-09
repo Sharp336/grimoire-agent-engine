@@ -97,7 +97,9 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 			const lower = agentId.toLowerCase();
 			const restored = retained.find(candidate => candidate.id.toLowerCase() === lower);
 			if (restored && context?.engineHistory) {
-				const messages = await loadSessionMessagesReadOnly(restored.sessionFile, context.engineHistory.storage);
+				const messages = context.engineHistory.readMessages
+					? await context.engineHistory.readMessages(restored.id, restored.sessionFile)
+					: await loadSessionMessagesReadOnly(restored.sessionFile, context.engineHistory.storage);
 				const content = formatSessionHistoryMarkdown(messages, { title: `${restored.id} (parked)` });
 				return {
 					url: url.href,
@@ -124,7 +126,9 @@ export class HistoryProtocolHandler implements ProtocolHandler {
 			messages = ref.session.messages;
 			notes.push("Source: live session");
 		} else if (ref.sessionFile) {
-			messages = await loadSessionMessagesReadOnly(ref.sessionFile, context?.engineHistory?.storage);
+			messages = context?.engineHistory?.readMessages
+				? await context.engineHistory.readMessages(ref.id, ref.sessionFile)
+				: await loadSessionMessagesReadOnly(ref.sessionFile, context?.engineHistory?.storage);
 			notes.push(`Source: session file (read-only, ${ref.status})`);
 		} else {
 			// No live session and no retained sessionFile — try the disk scan before

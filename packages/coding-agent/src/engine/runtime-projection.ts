@@ -188,7 +188,34 @@ export async function runtimeDetail(
 	identity: RuntimeIdentityRow,
 	attempt: RuntimeTargetRow | undefined,
 	revision: number,
+	profileRouteEventSeq?: number,
 ): Promise<Record<string, unknown>> {
+	const routeRows = attempt
+		? ((await sql.unsafe(
+				"SELECT substr(profile_route_state,1,4097) AS value FROM engine_attempts WHERE attempt_id=? AND agent_instance_id=?",
+				[attempt.attempt_id, identity.agent_instance_id],
+			)) as Array<{ value: string | null }>)
+		: [];
+	let profileRoute: Record<string, unknown> | undefined;
+	if (attempt && routeRows[0]?.value) {
+		if (Buffer.byteLength(routeRows[0].value) > 4096)
+			throw new Error("Retained profile route exceeds its metadata budget");
+		const { eventSeq, ...state } = JSON.parse(routeRows[0].value) as Record<string, unknown>;
+		profileRoute = {
+			state,
+			eventSeq: profileRouteEventSeq ?? eventSeq ?? 0,
+			target: {
+				agentInstanceId: identity.agent_instance_id,
+				attemptId: attempt.attempt_id,
+				executionId: attempt.execution_id,
+				runtimeBindingId: attempt.binding_id,
+				engineGeneration: Number(attempt.engine_generation),
+				bindingGeneration: Number(attempt.binding_generation),
+				authorityGeneration: Number(attempt.authority_generation),
+			},
+		};
+		validateRuntimeValue("profileRoute", profileRoute);
+	}
 	const holds = await runtimeHolds(sql, identity.agent_instance_id, runtimeLimits.httpPageRecords + 1);
 	const inputs =
 		attempt && !TERMINAL.has(attempt.state)
@@ -221,6 +248,7 @@ export async function runtimeDetail(
 			...(attempt ? { attemptId: attempt.attempt_id, executionId: attempt.execution_id } : {}),
 		},
 		state: attempt?.state ?? "registered",
+		...(profileRoute ? { profileRoute } : {}),
 		manualHold: holds.length > 0,
 		holds: heldPage,
 		holdsHasMore: holds.length > heldPage.length,
@@ -741,12 +769,13 @@ export async function recordRuntimeProjection(
 		);
 		kinds |= RUNTIME_KIND_MASK.tool;
 	}
-	if (SUMMARY_EVENTS.has(event.kind) || toolEvent) {
+	const routeChanged = event.kind === "profile_route_changed";
+	if (SUMMARY_EVENTS.has(event.kind) || toolEvent || routeChanged) {
 		const attempts = (await sql.unsafe(
 			`SELECT ${targetColumns.join(",")} FROM engine_attempts WHERE attempt_id=? AND agent_instance_id=?`,
 			[event.attemptId, identity.agent_instance_id],
 		)) as RuntimeTargetRow[];
-		detail = await runtimeDetail(sql, identity, attempts[0], event.eventId);
+		detail = await runtimeDetail(sql, identity, attempts[0], event.eventId, routeChanged ? event.seq : undefined);
 		validateRuntimeValue("detailState", detail);
 		if (attempts[0]) {
 			await sql.unsafe("UPDATE engine_attempts SET detail_revision=? WHERE attempt_id=?", [
@@ -754,12 +783,12 @@ export async function recordRuntimeProjection(
 				event.attemptId,
 			]);
 		}
-		if (SUMMARY_EVENTS.has(event.kind)) {
+		if (SUMMARY_EVENTS.has(event.kind) || routeChanged) {
 			changes.push(projectionChange("state", identity.agent_instance_ref, event.eventId, event.eventId, detail));
 			kinds |= RUNTIME_KIND_MASK.state;
 		}
 	}
-	if (event.kind === "model_settled") {
+	if (event.kind === "model_settled" || routeChanged || TERMINAL.has(event.kind)) {
 		for (const resource of ["usage", "context"]) {
 			changes.push(
 				projectionChange(

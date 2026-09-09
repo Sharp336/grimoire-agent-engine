@@ -1,8 +1,10 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
+import * as fsAsync from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { scheduler } from "node:timers/promises";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { defineCapability, loadCapability, registerProvider } from "@oh-my-pi/pi-coding-agent/capability";
@@ -12,6 +14,7 @@ import type {
 	EngineControlInitiator,
 	EngineEvent,
 	EngineLaunchProfile,
+	EngineProfileRouteState,
 	EngineStartRequest,
 } from "@oh-my-pi/pi-coding-agent/engine/contracts";
 import {
@@ -23,7 +26,7 @@ import {
 	type EngineCommandEnvelope,
 	engineCommandIdentity,
 } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
-import { engineAgentInstanceId } from "@oh-my-pi/pi-coding-agent/engine/route";
+import { engineAgentInstanceId, engineRouteToken } from "@oh-my-pi/pi-coding-agent/engine/route";
 import { EngineRuntime, type EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { runtimeLimits, validateRuntimeValue } from "@oh-my-pi/pi-coding-agent/engine/runtime-protocol";
 import { hostedCoreMcpConfig } from "@oh-my-pi/pi-coding-agent/engine/service";
@@ -32,9 +35,11 @@ import { getLspResourceCounts } from "@oh-my-pi/pi-coding-agent/lsp/client";
 import * as mcpConfig from "@oh-my-pi/pi-coding-agent/mcp/config";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { loadSessionFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
+import { BlobStore } from "@oh-my-pi/pi-coding-agent/session/blob-store";
+import { loadSessionFile, loadSessionMessagesReadOnly } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { type NativeHistoryForkResult, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { resolveProviderCandidates } from "@oh-my-pi/pi-coding-agent/web/search/provider";
+import * as utils from "@oh-my-pi/pi-utils";
 import { removeSyncWithRetries, Snowflake, withTimeout } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
 
@@ -115,6 +120,90 @@ describe("EngineRuntime", () => {
 		enableMCP: false,
 		enableLsp: false,
 	};
+
+	it("defers storage reclaim during execution and gates later starts and queries until maintenance settles", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let dispatches = 0;
+		const { runtime, cwd } = await createRuntime(async () => {
+			dispatches++;
+			entered.resolve();
+			await release.promise;
+			return true;
+		});
+		const request = (suffix: string): EngineStartRequest => ({
+			commandId: `reclaim-command-${suffix}`,
+			agentInstanceId: `reclaim-agent-${suffix}`,
+			agentInstanceRef: `grimoire://tasks/project-a/task-a/agents/reclaim-agent-${suffix}`,
+			executionId: `reclaim-execution-${suffix}`,
+			attemptId: `reclaim-attempt-${suffix}`,
+			authorityGeneration: 1,
+			cwd,
+			input: "reclaim test",
+		});
+		const realReclaim = runtime.store.reclaimStorage.bind(runtime.store);
+		const reclaim = spyOn(runtime.store, "reclaimStorage");
+		const maintenanceEntered = Promise.withResolvers<void>();
+		const maintenanceRelease = Promise.withResolvers<void>();
+		try {
+			const first = await runtime.start(request("first"), profile);
+			await entered.promise;
+			expect(await runtime.reclaimStorage()).toMatchObject({
+				status: "deferred",
+				reason: "engine_busy",
+				freedBytes: 0,
+			});
+			expect(reclaim).not.toHaveBeenCalled();
+			expect((await runtime.store.getAttempt(first.attemptId))?.state).toBe("running");
+			release.resolve();
+			await runtime.drain();
+			const queryEntered = Promise.withResolvers<void>();
+			const queryRelease = Promise.withResolvers<void>();
+			const activeQuery = runtime.runControlQuery(async () => {
+				queryEntered.resolve();
+				await queryRelease.promise;
+			});
+			await queryEntered.promise;
+			try {
+				expect(await runtime.reclaimStorage()).toMatchObject({ reason: "engine_busy" });
+			} finally {
+				queryRelease.resolve();
+				await activeQuery;
+			}
+			reclaim.mockImplementationOnce(async () => {
+				maintenanceEntered.resolve();
+				await maintenanceRelease.promise;
+				throw new Error("simulated maintenance failure");
+			});
+			const maintenance = runtime.reclaimStorage();
+			const rejected = maintenance.catch(error => error);
+			await maintenanceEntered.promise;
+			expect(runtime.reclaimStorage()).toBe(maintenance);
+			const started = runtime.start(request("second"), profile);
+			let queryRan = false;
+			const laterQuery = runtime.runControlQuery(async () => {
+				queryRan = true;
+			});
+			await scheduler.yield();
+			expect(dispatches).toBe(1);
+			expect(queryRan).toBe(false);
+			expect(await runtime.store.getAttempt("reclaim-attempt-second")).toBeUndefined();
+			maintenanceRelease.resolve();
+			expect(await rejected).toMatchObject({ message: "simulated maintenance failure" });
+			await started;
+			await laterQuery;
+			await runtime.drain();
+			expect(dispatches).toBe(2);
+			expect(queryRan).toBe(true);
+			reclaim.mockImplementation(realReclaim);
+			expect(await runtime.reclaimStorage()).toMatchObject({ status: "completed" });
+		} finally {
+			release.resolve();
+			maintenanceRelease.resolve();
+			reclaim.mockRestore();
+			await runtime.dispose();
+		}
+	});
 
 	it("binds hosted MCP tools to their own origin across legacy history, children and restart, without fallback", async () => {
 		const live = { owned: new Set<string>(), foreign: new Set<string>() };
@@ -1160,12 +1249,15 @@ describe("EngineRuntime", () => {
 	}, 60_000);
 
 	it("exports exact hash-pinned native session bytes across restart", async () => {
+		const continueTurn = Promise.withResolvers<void>();
+		let holdNextTurn = false;
 		const archiveRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-engine-archive-"));
 		tempDirs.push(archiveRoot);
 		const databaseDir = path.join(archiveRoot, "long-session-root-".repeat(6));
 		fs.mkdirSync(databaseDir);
 		const { runtime, cwd, options } = await createRuntime(
 			async (session, input) => {
+				if (holdNextTurn) await continueTurn.promise;
 				session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
 				session.sessionManager.appendMessage({
 					role: "assistant",
@@ -1189,51 +1281,538 @@ describe("EngineRuntime", () => {
 			},
 			{ databasePath: path.join(databaseDir, "engine.sqlite") },
 		);
-		const started = await runtime.start(
-			{
-				commandId: "archive-native-command",
-				agentInstanceId: "archive-native-agent",
-				executionId: "archive-native-execution",
-				attemptId: "archive-native-attempt",
-				authorityGeneration: 1,
-				cwd,
-				input: "preserve exact native history",
-			},
-			profile,
-		);
-		await runtime.drain();
-		const first = await runtime.sessionArchive("archive-native-agent", undefined, 0, 17);
-		if (!started.sessionFile) throw new Error("Expected archived native session");
-		fs.appendFileSync(started.sessionFile, "\n");
-		const chunks = [Buffer.from(first.contentBase64, "base64")];
-		let offset = first.nextOffset;
-		while (offset !== null) {
-			const page = await runtime.sessionArchive("archive-native-agent", first.contentHash, offset, 17);
-			chunks.push(Buffer.from(page.contentBase64, "base64"));
-			offset = page.nextOffset;
-		}
-		const body = Buffer.concat(chunks);
-		expect(body.byteLength).toBe(first.byteLength);
-		const checkpoint = JSON.parse(body.toString("utf8"));
-		expect(checkpoint.schema).toBe("grimoire.engine.native_session_checkpoint.v1");
-		const nativeSession = Buffer.from(checkpoint.sessionJsonlBase64, "base64").toString("utf8");
-		expect(nativeSession).toContain("preserve exact native history");
-		expect(nativeSession).toContain("archive answer with unicode ☃");
-		expect(checkpoint.artifacts).toEqual([
-			expect.objectContaining({
-				name: "0.read.log",
-				contentBase64: Buffer.from("complete spilled attachment").toString("base64"),
-			}),
-		]);
-		await expect(
-			runtime.sessionArchive("archive-native-agent", `sha256:${"0".repeat(64)}`, 0, 17),
-		).rejects.toMatchObject({ code: "stale_target" });
-		await runtime.dispose();
+		let secondRestart: EngineRuntime | undefined;
+		try {
+			const started = await runtime.start(
+				{
+					commandId: "archive-native-command",
+					agentInstanceId: "archive-native-agent",
+					executionId: "archive-native-execution",
+					attemptId: "archive-native-attempt",
+					authorityGeneration: 1,
+					cwd,
+					input: "preserve exact native history",
+				},
+				profile,
+			);
+			await runtime.drain();
+			if (!started.sessionFile) throw new Error("Expected archived native session");
+			const attachmentsDir = started.sessionFile.slice(0, -".jsonl".length);
+			const binaryAttachment = crypto.randomBytes(96 * 1024 + 1);
+			fs.writeFileSync(path.join(attachmentsDir, "binary.bin"), binaryAttachment);
+			fs.writeFileSync(path.join(attachmentsDir, "empty.bin"), "");
+			const snapshotDir = path.join(
+				databaseDir,
+				"engine-sessions",
+				".archive",
+				engineRouteToken("archive-native-agent"),
+			);
+			const publishFailure = spyOn(fsAsync, "link").mockRejectedValueOnce(
+				Object.assign(new Error("disk full"), { code: "ENOSPC" }),
+			);
+			try {
+				await expect(runtime.sessionArchive("archive-native-agent")).rejects.toMatchObject({ code: "ENOSPC" });
+			} finally {
+				publishFailure.mockRestore();
+			}
+			expect(await runtime.store.sessionStorage.readText(started.sessionFile)).toContain(
+				"preserve exact native history",
+			);
+			expect(fs.readFileSync(path.join(attachmentsDir, "binary.bin"))).toEqual(binaryAttachment);
+			const first = await runtime.sessionArchive("archive-native-agent", undefined, 0, 17);
+			const repeated = await runtime.sessionArchive("archive-native-agent", undefined, 0, 17);
+			expect(repeated).toEqual(first);
+			const sourceBytes =
+				runtime.store.sessionStorage.statSync(started.sessionFile).size +
+				fs
+					.readdirSync(attachmentsDir)
+					.reduce((total, name) => total + fs.statSync(path.join(attachmentsDir, name)).size, 0);
+			await expect(runtime.sessionArchiveVerify(started, first.contentHash)).resolves.toMatchObject({
+				sourceBytes,
+				sourceRetired: false,
+				freedBytes: 0,
+				contentHash: first.contentHash,
+			});
+			await expect(
+				runtime.sessionArchiveVerify({ ...started, authorityGeneration: 2 }, first.contentHash),
+			).rejects.toMatchObject({ code: "stale_target" });
+			const modifiedAttachment = Buffer.from(binaryAttachment);
+			modifiedAttachment[0] ^= 1;
+			fs.writeFileSync(path.join(attachmentsDir, "binary.bin"), modifiedAttachment);
+			try {
+				await expect(runtime.sessionArchiveVerify(started, first.contentHash)).rejects.toMatchObject({
+					code: "stale_target",
+				});
+			} finally {
+				fs.writeFileSync(path.join(attachmentsDir, "binary.bin"), binaryAttachment);
+			}
+			fs.writeFileSync(path.join(attachmentsDir, "late.bin"), "not archived");
+			try {
+				await expect(runtime.sessionArchiveVerify(started, first.contentHash)).rejects.toMatchObject({
+					code: "stale_target",
+				});
+			} finally {
+				fs.unlinkSync(path.join(attachmentsDir, "late.bin"));
+			}
+			const queued = await runtime.enqueueInbox(started, {
+				sourceEventId: "archive-pending-input",
+				sourceType: "user",
+				body: "must not disappear",
+			});
+			await expect(runtime.sessionArchiveVerify(started, first.contentHash)).rejects.toMatchObject({
+				code: "agent_busy",
+			});
+			await runtime.mutateInbox(started, {
+				mutationId: "drop-archive-test-input",
+				queueId: queued.item.queueId,
+				expectedRevision: queued.item.revision,
+				op: "drop",
+			});
+			const payloadPath = path.join(snapshotDir, `${first.contentHash.slice("sha256:".length)}.bin`);
+			const originalPayload = fs.readFileSync(payloadPath);
+			const corruptedPayload = Buffer.from(originalPayload);
+			corruptedPayload[corruptedPayload.length - 1] ^= 1;
+			fs.writeFileSync(payloadPath, corruptedPayload);
+			try {
+				await expect(runtime.sessionArchiveVerify(started, first.contentHash)).rejects.toMatchObject({
+					code: "history_expired",
+				});
+				await expect(runtime.sessionArchive("archive-native-agent")).rejects.toMatchObject({
+					code: "history_expired",
+				});
+				expect(await runtime.store.sessionStorage.readText(started.sessionFile)).toContain(
+					"preserve exact native history",
+				);
+				expect(fs.readdirSync(snapshotDir).some(name => name.endsWith(".tmp"))).toBe(false);
+			} finally {
+				fs.writeFileSync(payloadPath, originalPayload);
+			}
+			await runtime.store.sessionStorage.writeText(
+				started.sessionFile,
+				`${await runtime.store.sessionStorage.readText(started.sessionFile)}\n`,
+			);
+			await expect(runtime.sessionArchiveVerify(started, first.contentHash)).rejects.toMatchObject({
+				code: "stale_target",
+			});
+			const chunks = [Buffer.from(first.contentBase64, "base64")];
+			let offset = first.nextOffset;
+			while (offset !== null) {
+				const page = await runtime.sessionArchive("archive-native-agent", first.contentHash, offset, 24_000);
+				chunks.push(Buffer.from(page.contentBase64, "base64"));
+				offset = page.nextOffset;
+			}
+			const body = Buffer.concat(chunks);
+			expect(body.byteLength).toBe(first.byteLength);
+			expect(`sha256:${crypto.createHash("sha256").update(body).digest("hex")}`).toBe(first.contentHash);
+			const checkpoint = JSON.parse(body.toString("utf8"));
+			expect(checkpoint.schema).toBe("grimoire.engine.native_session_checkpoint.v1");
+			const nativeSession = Buffer.from(checkpoint.sessionJsonlBase64, "base64").toString("utf8");
+			expect(nativeSession).toContain("preserve exact native history");
+			expect(nativeSession).toContain("archive answer with unicode ☃");
+			expect(checkpoint.artifacts).toEqual([
+				expect.objectContaining({
+					name: "0.read.log",
+					contentBase64: Buffer.from("complete spilled attachment").toString("base64"),
+				}),
+				expect.objectContaining({
+					name: "binary.bin",
+					byteLength: binaryAttachment.byteLength,
+					contentBase64: binaryAttachment.toString("base64"),
+				}),
+				expect.objectContaining({ name: "empty.bin", byteLength: 0, contentBase64: "" }),
+			]);
+			await expect(
+				runtime.sessionArchive("archive-native-agent", `sha256:${"0".repeat(64)}`, 0, 17),
+			).rejects.toMatchObject({ code: "stale_target" });
+			await runtime.dispose();
 
-		const secondRestart = await openRuntime(options);
-		const afterRestart = await secondRestart.sessionArchive("archive-native-agent", first.contentHash, 0, 24_000);
-		expect(Buffer.from(afterRestart.contentBase64, "base64")).toEqual(body);
-		await secondRestart.dispose();
+			secondRestart = await openRuntime(options);
+			await expect(secondRestart.sessionArchiveVerify(started, first.contentHash)).rejects.toMatchObject({
+				code: "stale_target",
+			});
+			const fresh = await secondRestart.sessionArchive("archive-native-agent");
+			await expect(secondRestart.sessionArchiveVerify(started, fresh.contentHash)).resolves.toMatchObject({
+				sourceBytes:
+					secondRestart.store.sessionStorage.statSync(started.sessionFile).size +
+					fs
+						.readdirSync(attachmentsDir)
+						.reduce((total, name) => total + fs.statSync(path.join(attachmentsDir, name)).size, 0),
+				sourceRetired: false,
+				freedBytes: 0,
+			});
+			const released = await secondRestart.store.getBinding(started.agentInstanceId);
+			if (!released) throw new Error("Expected retained archive binding");
+			await secondRestart.store.putBinding({ ...released, state: "running" });
+			try {
+				await expect(secondRestart.sessionArchive(started.agentInstanceId)).rejects.toMatchObject({
+					code: "agent_busy",
+				});
+				await expect(secondRestart.sessionArchiveVerify(started, fresh.contentHash)).rejects.toMatchObject({
+					code: "agent_busy",
+				});
+			} finally {
+				await secondRestart.store.putBinding(released);
+			}
+			const afterRestart = await secondRestart.sessionArchive(
+				"archive-native-agent",
+				first.contentHash,
+				body.byteLength - 24_000,
+				24_000,
+			);
+			expect(Buffer.from(afterRestart.contentBase64, "base64")).toEqual(body.subarray(body.byteLength - 24_000));
+			expect(fs.readdirSync(snapshotDir).some(name => name.endsWith(".tmp"))).toBe(false);
+			holdNextTurn = true;
+			const next = await secondRestart.start(
+				{
+					commandId: "archive-new-turn",
+					agentInstanceId: started.agentInstanceId,
+					executionId: "archive-new-execution",
+					attemptId: "archive-new-attempt",
+					authorityGeneration: started.authorityGeneration,
+					cwd,
+					input: "new history after snapshot",
+				},
+				profile,
+			);
+			await expect(secondRestart.sessionArchiveVerify(started, fresh.contentHash)).rejects.toMatchObject({
+				code: "stale_target",
+			});
+			await expect(secondRestart.sessionArchiveVerify(next, fresh.contentHash)).rejects.toMatchObject({
+				code: "agent_busy",
+			});
+			continueTurn.resolve();
+			await secondRestart.drain();
+			await expect(secondRestart.sessionArchiveVerify(next, fresh.contentHash)).rejects.toMatchObject({
+				code: "stale_target",
+			});
+			const latest = await secondRestart.sessionArchive(next.agentInstanceId);
+			const server = await startEngineControlQueryServer({
+				runtime: secondRestart,
+				runtimeDir: databaseDir,
+				deviceId: "archive-test",
+				engineId: "archive-test",
+				resolveLaunchProfile: () => profile,
+			});
+			try {
+				const client = new EngineControlQueryClient(databaseDir);
+				await expect(
+					client.request("session.archive.verify", { ...next, contentHash: latest.contentHash }),
+				).resolves.toMatchObject({ contentHash: latest.contentHash, sourceRetired: false, freedBytes: 0 });
+			} finally {
+				await server.close();
+			}
+			await secondRestart.dispose();
+		} finally {
+			continueTurn.resolve();
+			await runtime.dispose();
+			await secondRestart?.dispose();
+		}
+	}, 60_000);
+
+	it("retires and restores exact SQL history and attachments after partial failures without dispatching a model", async () => {
+		let dispatches = 0;
+		const fixture = await createRuntime(async (session, input) => {
+			dispatches++;
+			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
+			await session.sessionManager.saveArtifact("first attachment", "read");
+			await session.sessionManager.saveArtifact("second attachment", "read");
+			return true;
+		});
+		let runtime = fixture.runtime;
+		const archiveQuery = async (
+			method: "session.archive.retire" | "session.archive.restore",
+			params: Record<string, unknown>,
+		) => {
+			const runtimeDir = path.dirname(fixture.options.databasePath!);
+			const server = await startEngineControlQueryServer({
+				runtime,
+				runtimeDir,
+				deviceId: "retire-test",
+				engineId: "retire-test",
+				resolveLaunchProfile: () => profile,
+			});
+			try {
+				return await new EngineControlQueryClient(runtimeDir).request(method, params);
+			} finally {
+				await server.close();
+			}
+		};
+		try {
+			const target = await runtime.start(
+				{
+					commandId: "retire-start",
+					agentInstanceId: "retire-agent",
+					executionId: "retire-execution",
+					attemptId: "retire-attempt",
+					authorityGeneration: 1,
+					cwd: fixture.cwd,
+					input: "retain my exact history",
+				},
+				profile,
+			);
+			await runtime.drain();
+			if (!target.sessionFile) throw new Error("Expected a native session");
+			const sourceText = await runtime.store.sessionStorage.readText(target.sessionFile);
+			const history = await runtime.sessionHistory(target.agentInstanceId);
+			const attachmentsDir = target.sessionFile.slice(0, -6);
+			const attachments = fs
+				.readdirSync(attachmentsDir)
+				.map(name => ({ name, content: fs.readFileSync(path.join(attachmentsDir, name)) }));
+			const page = await runtime.sessionArchive(target.agentInstanceId);
+			expect(page.nextOffset).toBeNull();
+			const checkpoint = Buffer.from(page.contentBase64, "base64");
+			const archivePath = path.join(path.dirname(fixture.options.databasePath!), `${page.contentHash.slice(7)}.gz`);
+			fs.writeFileSync(archivePath, Bun.gzipSync(checkpoint));
+			const validCompressed = fs.readFileSync(archivePath);
+			fs.writeFileSync(archivePath, Bun.gzipSync(Buffer.from("wrong checkpoint")));
+			await expect(
+				runtime.sessionArchiveRetire(target, page.contentHash, archivePath, "archive-operation-1"),
+			).rejects.toMatchObject({ code: "stale_target" });
+			expect(await runtime.store.getHistoryArchive(target.agentInstanceId)).toBeUndefined();
+			expect(await runtime.store.sessionStorage.readText(target.sessionFile)).toBe(sourceText);
+			fs.writeFileSync(archivePath, validCompressed);
+			await runtime.store.putBinding({
+				...target,
+				bindingId: "borrowed-binding",
+				commandId: "borrowed-command",
+				agentInstanceId: "borrowed-agent",
+				executionId: "borrowed-execution",
+				attemptId: "borrowed-attempt",
+			});
+			await expect(
+				runtime.sessionArchiveRetire(target, page.contentHash, archivePath, "archive-operation-1"),
+			).rejects.toMatchObject({ code: "agent_busy" });
+			expect(await runtime.store.getHistoryArchive(target.agentInstanceId)).toBeUndefined();
+			expect(await runtime.store.sessionStorage.readText(target.sessionFile)).toBe(sourceText);
+			await runtime.store.clearBindingSession("borrowed-agent", "borrowed-attempt", target.sessionFile);
+			const unlink = fsAsync.unlink;
+			let removed = 0;
+			const deletionFailure = spyOn(fsAsync, "unlink").mockImplementation(async filename => {
+				if (String(filename).startsWith(attachmentsDir) && ++removed === 2)
+					throw Object.assign(new Error("file locked"), { code: "EACCES" });
+				return unlink(filename);
+			});
+			try {
+				await expect(
+					runtime.sessionArchiveRetire(target, page.contentHash, archivePath, "archive-operation-1"),
+				).rejects.toMatchObject({ code: "EACCES" });
+			} finally {
+				deletionFailure.mockRestore();
+			}
+			expect(fs.readdirSync(attachmentsDir)).toHaveLength(1);
+			expect((await runtime.store.getHistoryArchive(target.agentInstanceId))?.state).toBe("retiring");
+			await expect(runtime.sessionHistory(target.agentInstanceId)).rejects.toMatchObject({
+				code: "history_expired",
+			});
+			const nextStart = {
+				commandId: "retire-next",
+				agentInstanceId: target.agentInstanceId,
+				executionId: "retire-next-execution",
+				attemptId: "retire-next-attempt",
+				authorityGeneration: 1,
+				cwd: fixture.cwd,
+				input: "must wait for restore",
+			};
+			await expect(runtime.start(nextStart, profile)).rejects.toMatchObject({ code: "history_expired" });
+			await runtime.dispose();
+			runtime = await openRuntime(fixture.options);
+			const bindingCleanupFailure = spyOn(runtime.store, "clearBindingSession").mockRejectedValueOnce(
+				new Error("interrupted metadata cleanup"),
+			);
+			try {
+				await expect(
+					runtime.sessionArchiveRetire(target, page.contentHash, archivePath, "archive-operation-1"),
+				).rejects.toThrow("interrupted metadata cleanup");
+			} finally {
+				bindingCleanupFailure.mockRestore();
+			}
+			expect(await runtime.store.sessionStorage.exists(target.sessionFile)).toBe(false);
+			expect((await runtime.store.getHistoryArchive(target.agentInstanceId))?.state).toBe("retiring");
+			await runtime.dispose();
+			runtime = await openRuntime(fixture.options);
+			const retired = await archiveQuery("session.archive.retire", {
+				...target,
+				contentHash: page.contentHash,
+				archivePath,
+				operationId: "archive-operation-1",
+			});
+			expect(retired).toMatchObject({ state: "retired", sourceRetired: true, freedBytes: 0 });
+			expect(await runtime.reclaimStorage()).toMatchObject({ status: "completed", scope: "engine_database" });
+			expect(await runtime.store.sessionStorage.exists(target.sessionFile)).toBe(false);
+			expect(fs.existsSync(attachmentsDir)).toBe(false);
+			const snapshotDir = path.join(
+				path.dirname(fixture.options.databasePath!),
+				"engine-sessions",
+				".archive",
+				engineRouteToken(target.agentInstanceId),
+			);
+			expect(fs.existsSync(path.join(snapshotDir, `${page.contentHash.slice(7)}.bin`))).toBe(false);
+			expect(retired).toEqual(
+				await runtime.sessionArchiveRetire(target, page.contentHash, archivePath, "archive-operation-1"),
+			);
+			await expect(runtime.start(nextStart, profile)).rejects.toMatchObject({ code: "history_expired" });
+			await expect(
+				runtime.enqueueInbox(target, {
+					sourceType: "user",
+					sourceEventId: "late-input",
+					body: "no hidden restart",
+				}),
+			).rejects.toMatchObject({ code: "history_expired" });
+			const archivedBinding = await runtime.store.getBinding(target.agentInstanceId);
+			if (!archivedBinding) throw new Error("Expected archived binding metadata");
+			const heldRevision = (archivedBinding.intentRevision ?? 0) + 1;
+			await runtime.store.putBinding({
+				...archivedBinding,
+				manualHold: true,
+				intentRevision: heldRevision,
+				intentCommandId: "hold-while-archived",
+			});
+			const link = fsAsync.link;
+			let restoredFiles = 0;
+			const restoreFailure = spyOn(fsAsync, "link").mockImplementation(async (source, destination) => {
+				if (++restoredFiles === 2) throw Object.assign(new Error("disk full"), { code: "ENOSPC" });
+				return link(source, destination);
+			});
+			try {
+				await expect(
+					runtime.sessionArchiveRestore(target, page.contentHash, "archive-operation-1"),
+				).rejects.toMatchObject({ code: "ENOSPC" });
+			} finally {
+				restoreFailure.mockRestore();
+			}
+			expect((await runtime.store.getHistoryArchive(target.agentInstanceId))?.state).toBe("restoring");
+			expect(fs.readdirSync(attachmentsDir)).toHaveLength(1);
+			const interruptedStage = path.join(snapshotDir, "archive-operation-1-crash.restore-tmp");
+			const otherStage = path.join(snapshotDir, "another-operation-crash.restore-tmp");
+			fs.writeFileSync(interruptedStage, "interrupted staged bytes");
+			fs.writeFileSync(otherStage, "not this operation");
+			await expect(runtime.start(nextStart, profile)).rejects.toMatchObject({ code: "history_expired" });
+			await runtime.dispose();
+			runtime = await openRuntime(fixture.options);
+			expect(
+				await archiveQuery("session.archive.restore", {
+					...target,
+					contentHash: page.contentHash,
+					operationId: "archive-operation-1",
+				}),
+			).toMatchObject({
+				state: "restored",
+				sourceRetired: false,
+			});
+			expect(await runtime.store.sessionStorage.readText(target.sessionFile)).toBe(sourceText);
+			expect(fs.existsSync(interruptedStage)).toBe(false);
+			expect(fs.readFileSync(otherStage, "utf8")).toBe("not this operation");
+			expect(fs.readFileSync(archivePath)).toEqual(validCompressed);
+			expect(await runtime.sessionHistory(target.agentInstanceId)).toEqual(history);
+			for (const attachment of attachments)
+				expect(fs.readFileSync(path.join(attachmentsDir, attachment.name))).toEqual(attachment.content);
+			expect(dispatches).toBe(1);
+			expect((await runtime.store.getAttempt(target.attemptId))?.state).toBe("completed");
+			expect(await runtime.store.getBinding(target.agentInstanceId)).toMatchObject({
+				manualHold: true,
+				intentRevision: heldRevision,
+				intentCommandId: "hold-while-archived",
+			});
+			await expect(
+				runtime.sessionArchiveRetire(target, page.contentHash, archivePath, "archive-operation-1"),
+			).rejects.toMatchObject({ code: "stale_target" });
+			await runtime.start({ ...nextStart, expectedIntentRevision: heldRevision }, profile);
+			await runtime.drain();
+			expect(dispatches).toBe(2);
+		} finally {
+			await runtime.dispose();
+		}
+	}, 60_000);
+
+	it("restores archived images without their original blob store and never overwrites conflicting shared blobs", async () => {
+		const blobDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-archive-image-blobs-"));
+		tempDirs.push(blobDir);
+		const blobScope = spyOn(utils, "getBlobsDir").mockReturnValue(blobDir);
+		let runtime: EngineRuntime | undefined;
+		try {
+			expect(utils.getBlobsDir()).toBe(blobDir);
+			const image = Buffer.alloc(2048, 37);
+			const blob = await new BlobStore(blobDir).put(image);
+			let dispatches = 0;
+			const fixture = await createRuntime(async session => {
+				dispatches++;
+				session.sessionManager.appendMessage({
+					role: "user",
+					content: [{ type: "image", mimeType: "image/png", data: image.toString("base64") }],
+					timestamp: Date.now(),
+				});
+				return true;
+			});
+			runtime = fixture.runtime;
+			const target = await runtime.start(
+				{
+					commandId: "image-start",
+					agentInstanceId: "image-agent",
+					executionId: "image-execution",
+					attemptId: "image-attempt",
+					authorityGeneration: 1,
+					cwd: fixture.cwd,
+					input: "image",
+				},
+				profile,
+			);
+			await runtime.drain();
+			if (!target.sessionFile) throw new Error("Expected native image history");
+			const original = await runtime.store.sessionStorage.readText(target.sessionFile);
+			expect(original).toContain(blob.ref);
+			const history = await loadSessionMessagesReadOnly(target.sessionFile, runtime.store.sessionStorage);
+			fs.unlinkSync(blob.path);
+			await expect(runtime.sessionArchive(target.agentInstanceId)).rejects.toMatchObject({ code: "ENOENT" });
+			fs.writeFileSync(blob.path, "corrupt source image");
+			await expect(runtime.sessionArchive(target.agentInstanceId)).rejects.toMatchObject({
+				code: "history_expired",
+			});
+			expect(await runtime.store.sessionStorage.readText(target.sessionFile)).toBe(original);
+			fs.writeFileSync(blob.path, image);
+			const page = await runtime.sessionArchive(target.agentInstanceId);
+			expect(page.nextOffset).toBeNull();
+			const checkpoint = JSON.parse(Buffer.from(page.contentBase64, "base64").toString("utf8"));
+			const destinationRef = "grimoire://tasks/test/image/agents/restored";
+			for (const blobs of [
+				undefined,
+				[{ ...checkpoint.blobs[0], contentBase64: Buffer.alloc(image.length).toString("base64") }],
+			]) {
+				const corrupt = Buffer.from(JSON.stringify({ ...checkpoint, blobs }));
+				await expect(
+					runtime.sessionRestoreStage({
+						agentInstanceId: engineAgentInstanceId(destinationRef),
+						agentInstanceRef: destinationRef,
+						authorityGeneration: 1,
+						contentHash: `sha256:${new Bun.SHA256().update(corrupt).digest("hex")}`,
+						totalBytes: corrupt.length,
+						offset: 0,
+						contentBase64: corrupt.toString("base64"),
+					}),
+				).rejects.toMatchObject({ code: "invalid_request" });
+			}
+			const archivePath = path.join(blobDir, `${page.contentHash.slice(7)}.gz`);
+			fs.writeFileSync(archivePath, Bun.gzipSync(Buffer.from(page.contentBase64, "base64")));
+			await runtime.sessionArchiveRetire(target, page.contentHash, archivePath, "image-archive");
+			expect(fs.readFileSync(blob.path)).toEqual(image);
+			fs.unlinkSync(blob.path);
+			fs.writeFileSync(blob.path, "existing conflicting shared blob");
+			await expect(runtime.sessionArchiveRestore(target, page.contentHash, "image-archive")).rejects.toThrow(
+				"Existing blob conflicts",
+			);
+			expect(fs.readFileSync(blob.path, "utf8")).toBe("existing conflicting shared blob");
+			expect(await runtime.store.sessionStorage.exists(target.sessionFile)).toBe(false);
+			fs.unlinkSync(blob.path);
+			await runtime.dispose();
+			runtime = await openRuntime(fixture.options);
+			await runtime.sessionArchiveRestore(target, page.contentHash, "image-archive");
+			expect(await new BlobStore(blobDir).get(blob.hash)).toEqual(image);
+			expect(await loadSessionMessagesReadOnly(target.sessionFile, runtime.store.sessionStorage)).toEqual(history);
+			expect(await runtime.store.sessionStorage.readText(target.sessionFile)).toBe(original);
+			expect(dispatches).toBe(1);
+		} finally {
+			await runtime?.dispose();
+			blobScope.mockRestore();
+		}
 	}, 60_000);
 
 	it("replaces an exact retained binding on explicit send and fences binding drift", async () => {
@@ -3144,6 +3723,235 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
+	it.each([
+		["answered", false],
+		["auth_failed", false],
+		["retry_failed", false],
+		["answered", true],
+		["auth_failed", true],
+		["retry_failed", true],
+	] as const)(
+		"records fallback and restarts the selected route on the next Attempt (%s, restart=%s)",
+		async (outcome, restart) => {
+			const exhausted = outcome !== "answered";
+			const failure = outcome === "retry_failed" ? "503 Service unavailable" : "401 Unauthorized";
+			let primaryAttempts = 0;
+			const primary = createMockModel({
+				id: "route-primary",
+				handler: () =>
+					++primaryAttempts > 1 && !exhausted ? { content: ["primary recovered"] } : { throw: failure },
+			});
+			const fallback = createMockModel({
+				id: "route-fallback",
+				handler: () => (exhausted ? { throw: failure } : { content: ["fallback answered"] }),
+			});
+			const find = spyOn(modelRegistry, "find").mockImplementation((provider, id) =>
+				[primary, fallback].find(model => model.provider === provider && model.id === id),
+			);
+			const key = spyOn(modelRegistry, "getApiKey").mockResolvedValue("test-key");
+			const mapping = {
+				profileRef: "gctx:2222222222222222",
+				primaryRouteRef: "gctx:3333333333333333",
+				routes: [primary, fallback].map((model, index) => ({
+					routeRef: index === 0 ? "gctx:3333333333333333" : "gctx:4444444444444444",
+					provider: model.provider,
+					modelId: model.id,
+				})),
+			};
+			const { runtime, cwd, options } = await createRuntime((session, input) => session.prompt(input), {
+				resolveSessionProfile: async () => ({
+					options: { model: primary },
+					profileRoutes: mapping,
+					orderedRouteFallback: { selectors: [primary, fallback].map(model => `${model.provider}/${model.id}`) },
+					dispose() {},
+				}),
+			});
+			let currentRuntime = runtime;
+			const wait = spyOn(scheduler, "wait").mockResolvedValue(undefined);
+			try {
+				await runtime.start(
+					{
+						commandId: "route-fallback-start",
+						agentInstanceId: "route-fallback-agent",
+						executionId: "route-fallback-execution",
+						attemptId: "route-fallback-attempt",
+						authorityGeneration: 1,
+						cwd,
+						input: "test fallback",
+					},
+					profile,
+				);
+				await runtime.drain();
+				expect(primary.calls).toHaveLength(1);
+				expect(fallback.calls).toHaveLength(outcome === "retry_failed" ? 3 : 1);
+				const attempt = await runtime.store.getAttempt("route-fallback-attempt");
+				expect(attempt?.state).toBe(exhausted ? "failed" : "completed");
+				const state = JSON.parse(attempt!.profile_route_state!) as EngineProfileRouteState;
+				expect(state).toMatchObject({ fallback: true, phase: exhausted ? "exhausted" : "active" });
+				if (!exhausted) expect(state.routeRef).toBe(mapping.routes[1]!.routeRef);
+				const events = await runtime.store.pendingEvents();
+				const changes = events.filter(event => event.kind === "profile_route_changed");
+				expect(
+					changes.some(
+						event =>
+							(event.payload?.profileRoute as EngineProfileRouteState | undefined)?.pendingRouteRef ===
+							mapping.routes[1]!.routeRef,
+					),
+				).toBe(true);
+				expect(events.indexOf(changes.at(-1)!)).toBeLessThan(
+					events.findIndex(event => event.kind === (exhausted ? "failed" : "completed")),
+				);
+				if (restart) {
+					await runtime.dispose();
+					currentRuntime = await EngineRuntime.create(options);
+				}
+				await currentRuntime.start(
+					{
+						commandId: "route-next-start",
+						agentInstanceId: "route-fallback-agent",
+						executionId: "route-next-execution",
+						attemptId: "route-next-attempt",
+						authorityGeneration: 1,
+						cwd,
+						input: "next attempt",
+					},
+					profile,
+				);
+				await currentRuntime.drain();
+				expect(primary.calls).toHaveLength(2);
+				expect(fallback.calls).toHaveLength(outcome === "retry_failed" ? 6 : exhausted ? 2 : 1);
+				if (!exhausted) {
+					expect(
+						primary.calls[1]?.context.messages.some(
+							message =>
+								message.role === "assistant" &&
+								message.content.some(block => block.type === "text" && block.text === "fallback answered"),
+						),
+					).toBe(true);
+				}
+				const next = await currentRuntime.store.getAttempt("route-next-attempt");
+				expect(next?.state).toBe(exhausted ? "failed" : "completed");
+				const nextChanges = (await currentRuntime.store.pendingEvents()).filter(
+					event => event.attemptId === "route-next-attempt" && event.kind === "profile_route_changed",
+				);
+				expect(nextChanges[0]?.payload?.profileRoute).toMatchObject({
+					pendingRouteRef: mapping.primaryRouteRef,
+					fallback: false,
+					phase: "loading",
+				});
+				expect(JSON.parse(next!.profile_route_state!)).toMatchObject({
+					fallback: exhausted,
+					phase: exhausted ? "exhausted" : "active",
+				});
+			} finally {
+				await currentRuntime.dispose();
+				find.mockRestore();
+				key.mockRestore();
+				wait.mockRestore();
+			}
+		},
+		60_000,
+	);
+
+	it("projects observed profile slots, resets them per Attempt, and retains routing after restart", async () => {
+		const model = createMockModel({ responses: [{ content: ["route answer"] }] });
+		const release = Promise.withResolvers<void>();
+		const entered = Promise.withResolvers<void>();
+		const mapping = {
+			profileRef: "gctx:2222222222222222",
+			primaryRouteRef: "gctx:3333333333333333",
+			routes: [{ routeRef: "gctx:4444444444444444", provider: model.provider, modelId: model.id }],
+		};
+		const { runtime, cwd, options } = await createRuntime(
+			async (session, input) => {
+				if (input === "fail before provider") throw new Error("local input failure");
+				entered.resolve();
+				await release.promise;
+				return session.prompt(input);
+			},
+			{ resolveSessionProfile: async () => ({ options: { model }, profileRoutes: mapping, dispose() {} }) },
+		);
+		const runtimeDir = path.dirname(options.databasePath!);
+		const server = await startEngineControlQueryServer({
+			runtime,
+			runtimeDir,
+			deviceId: "route-device",
+			engineId: "route-engine",
+			resolveLaunchProfile: () => profile,
+		});
+		const client = new EngineControlQueryClient(runtimeDir);
+		const request = {
+			commandId: "route-start",
+			agentInstanceId: "route-agent",
+			executionId: "route-execution",
+			attemptId: "route-attempt",
+			authorityGeneration: 1,
+			cwd,
+			input: "answer",
+		};
+		const completedRoute: EngineProfileRouteState = {
+			profileRef: mapping.profileRef,
+			primaryRouteRef: mapping.primaryRouteRef,
+			routeRef: mapping.routes[0]!.routeRef,
+			fallback: true,
+			phase: "active",
+		};
+		try {
+			const loading = nextEngineEvent(runtime, "profile_route_changed");
+			await runtime.start(request, profile);
+			await entered.promise;
+			expect((await loading).payload?.profileRoute).toEqual({
+				profileRef: mapping.profileRef,
+				primaryRouteRef: mapping.primaryRouteRef,
+				pendingRouteRef: mapping.routes[0]!.routeRef,
+				fallback: true,
+				phase: "loading",
+			});
+			release.resolve();
+			await runtime.drain();
+			const first = await runtime.store.getAttempt(request.attemptId);
+			expect(first?.state).toBe("completed");
+			expect(JSON.parse(first!.profile_route_state!)).toMatchObject(completedRoute);
+			const response = await client.request("snapshots.get", { attemptId: request.attemptId });
+			expect(response).toMatchObject({ profileRoute: completedRoute });
+			const events = (await runtime.store.pendingEvents()).filter(event => event.attemptId === request.attemptId);
+			const changes = events.filter(event => event.kind === "profile_route_changed");
+			expect(changes.map(event => event.payload?.profileRoute)).toEqual([
+				{ ...completedRoute, routeRef: undefined, pendingRouteRef: completedRoute.routeRef, phase: "loading" },
+				completedRoute,
+			]);
+			expect(JSON.parse(first!.profile_route_state!).eventSeq).toBe(changes.at(-1)!.seq);
+			expect(events.indexOf(changes[1]!)).toBeLessThan(events.findIndex(event => event.kind === "completed"));
+			await runtime.start(
+				{
+					...request,
+					commandId: "next-route-start",
+					executionId: "next-route-execution",
+					attemptId: "next-route-attempt",
+					input: "fail before provider",
+				},
+				profile,
+			);
+			await runtime.drain();
+			const failed = await runtime.store.getAttempt("next-route-attempt");
+			expect(failed?.state).toBe("failed");
+			expect(JSON.parse(failed!.profile_route_state!)).toMatchObject({ phase: "loading" });
+			expect(JSON.parse(failed!.profile_route_state!)).not.toHaveProperty("routeRef");
+		} finally {
+			release.resolve();
+			await server.close();
+			await runtime.dispose();
+		}
+		const reopened = await EngineRuntime.create({ databasePath: options.databasePath });
+		try {
+			expect(JSON.parse((await reopened.store.getAttempt(request.attemptId))!.profile_route_state!)).toMatchObject(
+				completedRoute,
+			);
+		} finally {
+			await reopened.dispose();
+		}
+	}, 60_000);
+
 	it("streams bounded assistant snapshots with one identity before terminal settlement", async () => {
 		let retainedSessionManager: SessionManager | undefined;
 		const releaseFinal = Promise.withResolvers<void>();
@@ -3663,6 +4471,7 @@ describe("EngineRuntime", () => {
 		let runtimeRef: EngineRuntime;
 		let advertised = "";
 		const reads = new Map<string, string>();
+		let readChild: ((childId: string) => Promise<string>) | undefined;
 
 		const dispatch: NonNullable<EngineRuntimeOptions["dispatchPrompt"]> = async (session, input, identity) => {
 			session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() }, identity);
@@ -3686,6 +4495,14 @@ describe("EngineRuntime", () => {
 			if (input === "read retained children") {
 				const read = session.getToolByName("read");
 				if (!read) throw new Error("Engine parent did not expose read");
+				let archiveReadSequence = 0;
+				readChild = async childId => {
+					const childEngineId = `Engine-${engineRouteToken(childId)}`;
+					const result = await read.execute(`read-archive-${++archiveReadSequence}-${childId}`, {
+						path: `history://${childEngineId}`,
+					});
+					return result.content.find(part => part.type === "text")?.text ?? "";
+				};
 				for (const childId of [visibleChildId, unadvertisedChildId, foreignParentChildId, foreignTaskChildId]) {
 					const childEngineId = `Engine-${new Bun.SHA256().update(childId).digest("hex").slice(0, 32)}`;
 					try {
@@ -3836,7 +4653,29 @@ describe("EngineRuntime", () => {
 		expect(reads.get(unadvertisedChildId)).toContain(`private marker ${unadvertisedChildId}`);
 		expect(reads.get(foreignParentChildId)).toContain("Unknown agent");
 		expect(reads.get(foreignTaskChildId)).toContain("Unknown agent");
-		await restarted.dispose();
+		try {
+			if (!readChild) throw new Error("Expected the parent's retained-history reader");
+			const child = await restarted.store.getBinding(visibleChildId);
+			if (!child?.sessionFile) throw new Error("Expected retained child session");
+			const childHistory = await restarted.sessionHistory(visibleChildId);
+			const parentHistory = await restarted.sessionHistory(parentId);
+			const snapshot = await restarted.sessionArchive(visibleChildId);
+			expect(snapshot.nextOffset).toBeNull();
+			const archivePath = path.join(
+				path.dirname(created.options.databasePath!),
+				`${snapshot.contentHash.slice(7)}.gz`,
+			);
+			fs.writeFileSync(archivePath, Bun.gzipSync(Buffer.from(snapshot.contentBase64, "base64")));
+			await restarted.sessionArchiveRetire(child, snapshot.contentHash, archivePath, "child-archive-1");
+			await expect(readChild(visibleChildId)).rejects.toThrow("archived");
+			expect(await readChild(unadvertisedChildId)).toContain(`private marker ${unadvertisedChildId}`);
+			expect(await restarted.sessionHistory(parentId)).toEqual(parentHistory);
+			await restarted.sessionArchiveRestore(child, snapshot.contentHash, "child-archive-1");
+			expect(await readChild(visibleChildId)).toContain("retained child transcript marker");
+			expect(await restarted.sessionHistory(visibleChildId)).toEqual(childHistory);
+		} finally {
+			await restarted.dispose();
+		}
 	}, 60_000);
 
 	it("does not expose task when the pinned profile has no child catalog", async () => {
@@ -6578,48 +7417,72 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60000);
 
-	it("fails an attempt when the model turn ends with a provider error", async () => {
-		const { runtime, cwd } = await createRuntime(async session => {
-			Object.defineProperty(session, "getLastAssistantMessage", {
-				value: () => ({
-					role: "assistant",
-					content: [],
-					stopReason: "error",
-					errorMessage: "provider rejected Authorization: Bearer sk-secretcredential1234",
-				}),
+	it.each([
+		{
+			kind: "unclassified",
+			message: "provider rejected Authorization: Bearer sk-secretcredential1234",
+			publicReason: "Error",
+		},
+		{
+			kind: "rate limited",
+			message:
+				"engine_provider_retry_deferred: HTTP 429 Authorization: Bearer sk-secretcredential1234; https://private.invalid/path; retry through Engine",
+			publicReason: "Provider rate limit reached",
+		},
+		{
+			kind: "embedded untrusted code",
+			message: "raw engine_provider_retry_deferred: HTTP 429 sk-secretcredential1234",
+			publicReason: "Error",
+		},
+	])(
+		"fails an attempt safely when the model turn ends with a $kind provider error",
+		async ({ message, publicReason }) => {
+			const { runtime, cwd } = await createRuntime(async session => {
+				Object.defineProperty(session, "getLastAssistantMessage", {
+					value: () => ({
+						role: "assistant",
+						content: [],
+						stopReason: "error",
+						errorMessage: message,
+					}),
+				});
+				return true;
 			});
-			return true;
-		});
-		const started = await runtime.start(
-			{
-				commandId: "command-provider-error",
-				agentInstanceId: "agent-provider-error",
-				executionId: "execution-provider-error",
-				attemptId: "attempt-provider-error",
-				authorityGeneration: 1,
-				cwd,
-				input: "fail",
-			},
-			profile,
-		);
-		await runtime.drain();
-		const events = await runtime.store.pendingEvents();
-		expect(events.find(event => event.kind === "completed")).toBeUndefined();
-		const failed = events.find(event => event.kind === "failed");
-		expect(failed?.payload).toMatchObject({
-			error: expect.stringContaining("diagnostic"),
-			transcriptRef: `history://${started.engineAgentId}`,
-			transcriptCheckpoint: { revision: 2 },
-		});
-		expect(JSON.stringify(failed?.payload)).not.toContain("secretcredential");
-		const modelEffectId = String(events.find(event => event.kind === "model_started")?.payload?.effectId);
-		expect(await runtime.store.getEffect(modelEffectId)).toMatchObject({
-			effect_kind: "model",
-			state: "settled",
-			outcome: "failed",
-		});
-		await runtime.dispose();
-	}, 60000);
+			const started = await runtime.start(
+				{
+					commandId: "command-provider-error",
+					agentInstanceId: "agent-provider-error",
+					executionId: "execution-provider-error",
+					attemptId: "attempt-provider-error",
+					authorityGeneration: 1,
+					cwd,
+					input: "fail",
+				},
+				profile,
+			);
+			await runtime.drain();
+			const events = await runtime.store.pendingEvents();
+			const modelEffectId = String(events.find(event => event.kind === "model_started")?.payload?.effectId);
+			const modelEffect = await runtime.store.getEffect(modelEffectId);
+			await runtime.dispose();
+			expect(events.find(event => event.kind === "completed")).toBeUndefined();
+			const failed = events.find(event => event.kind === "failed");
+			expect(JSON.stringify(failed?.payload)).not.toContain("secretcredential");
+			expect(JSON.stringify(failed?.payload)).not.toContain("private.invalid");
+			expect(failed?.payload?.error).toStartWith(`${publicReason} (diagnostic `);
+			expect(failed?.payload).toMatchObject({
+				error: expect.stringContaining("diagnostic"),
+				transcriptRef: `history://${started.engineAgentId}`,
+				transcriptCheckpoint: { revision: 2 },
+			});
+			expect(modelEffect).toMatchObject({
+				effect_kind: "model",
+				state: "settled",
+				outcome: "failed",
+			});
+		},
+		60000,
+	);
 
 	it("keeps an Attempt nonterminal when transcript durability cannot be proven", async () => {
 		const { runtime, cwd } = await createRuntime();

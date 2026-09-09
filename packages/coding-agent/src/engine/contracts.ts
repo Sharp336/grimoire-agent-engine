@@ -26,6 +26,26 @@ export interface EngineRetryState {
 	error?: string;
 }
 
+/** Attempt-local routing facts; phase describes routing, not the Attempt's lifecycle. */
+export interface EngineProfileRouteState {
+	/** Durable route-event sequence, present on queried snapshots. */
+	eventSeq?: number;
+	profileRef: string;
+	primaryRouteRef: string;
+	/** Last route observed in an assistant stream, never merely the next selected model. */
+	routeRef?: string;
+	pendingRouteRef?: string;
+	fallback: boolean;
+	phase: "loading" | "active" | "exhausted";
+}
+
+/** Immutable, non-secret mapping resolved with the launch profile. */
+export interface EngineProfileRoutes {
+	profileRef: string;
+	primaryRouteRef: string;
+	routes: ReadonlyArray<{ routeRef: string; provider: string; modelId: string }>;
+}
+
 export interface EngineLaunchProfile {
 	/** Empty disables nested agents; "*" enables the native OMP spawn surface. */
 	spawns: string;
@@ -343,6 +363,7 @@ export interface EngineEvent {
 		| "model_settled"
 		| "retry_scheduled"
 		| "retry_settled"
+		| "profile_route_changed"
 		| "inbox_changed"
 		| "assistant_snapshot"
 		| "message_updated"

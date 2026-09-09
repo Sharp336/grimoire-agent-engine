@@ -485,7 +485,7 @@ export class TurnRecovery {
 		const id = this.#classifyRetryMessage(message);
 		const activeModel = this.#host.model();
 		if (!activeModel || !AIError.is(id, AIError.Flag.UsageLimit)) return false;
-		if (this.#sameModelRouteCandidates().length > 0) return false;
+		if (this.#profileRouteCandidates().length > 0) return false;
 
 		let recorded = this.#usageLimitOutcomes.get(message);
 		if (!recorded) {
@@ -938,7 +938,7 @@ export class TurnRecovery {
 		options: { autoContinue: boolean; triggerContextTokens?: number },
 	): Promise<RecoveryCompactionResult> {
 		const compactionEntryBefore = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
-		await this.dropPersistedAssistantTurn(assistantMessage);
+		const droppedEntryId = await this.dropPersistedAssistantTurn(assistantMessage);
 		const result = await this.#host.runAutoCompaction(reason, true, false, allowDefer, {
 			autoContinue: options.autoContinue,
 			triggerContextTokens: options.triggerContextTokens,
@@ -946,13 +946,22 @@ export class TurnRecovery {
 		});
 		const compactionEntryAfter = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
 		if (result.historyRewritten !== true && compactionEntryAfter === compactionEntryBefore) {
-			this.#restoreFailedAssistantTurn(assistantMessage);
+			this.#restoreFailedAssistantTurn(assistantMessage, droppedEntryId);
 		}
 		return result;
 	}
 
-	#restoreFailedAssistantTurn(assistantMessage: AssistantMessage): void {
-		if (!isEmptyErrorTurn(assistantMessage)) this.#host.sessionManager.appendMessage(assistantMessage);
+	#restoreFailedAssistantTurn(assistantMessage: AssistantMessage, droppedEntryId: string | undefined): void {
+		if (!isEmptyErrorTurn(assistantMessage)) {
+			if (droppedEntryId && this.#host.sessionManager.getEntry(droppedEntryId)) {
+				this.#host.withBashBranchTransition(() => {
+					this.#host.sessionManager.branch(droppedEntryId);
+					this.#host.sessionManager.appendCustomEntry("recovery-rollback");
+				});
+			} else {
+				this.#host.sessionManager.appendMessage(assistantMessage);
+			}
+		}
 		const lastMessage = this.#host.agent.state.messages.at(-1);
 		if (
 			lastMessage?.role === "assistant" &&
@@ -1116,11 +1125,17 @@ export class TurnRecovery {
 	 * Context overflow is NOT retryable (handled by compaction instead).
 	 */
 	isRetryableError(message: AssistantMessage): boolean {
+		// Route-owned failures also enter recovery at the last slot to publish truthful exhaustion.
+		if (this.#profileRouteIndex() >= 0 && this.#isProfileRouteFailure(message)) return true;
+		return this.#isSameRouteRetryableError(message);
+	}
+
+	#isSameRouteRetryableError(message: AssistantMessage): boolean {
 		const errorMessage = message.errorMessage ?? "";
-		if (this.#sameModelRouteCandidates().length > 0 && this.#isProviderRouteFailure(message)) return true;
 		if (isExhaustedProviderRetryMessage(errorMessage) || isPermanentProviderFailureMessage(errorMessage))
 			return false;
-		if (this.#turnRetryPolicy?.transientOnly && isDeferredProviderRetryMessage(errorMessage)) return true;
+		if (this.#turnRetryPolicy?.transientOnly && isDeferredProviderRetryMessage(errorMessage))
+			return !this.#hasReplayUnsafeOutput(message);
 		if (message.stopReason !== "error") return false;
 		if (this.#isUsagePreflightBlocked(message)) return false;
 		const model = this.#host.model();
@@ -1160,34 +1175,50 @@ export class TurnRecovery {
 		return AIError.retriable(id);
 	}
 
-	/** Whether the active profile has a later same-identity route for this provider failure. */
-	isSameModelRouteFallbackEligible(message: AssistantMessage): boolean {
-		return this.#sameModelRouteCandidates().length > 0 && this.#isProviderRouteFailure(message);
+	/** Whether the active profile has a later route that can safely replay this failed turn. */
+	isProfileRouteFallbackEligible(message: AssistantMessage): boolean {
+		return this.#profileRouteCandidates().length > 0 && this.#isProfileRouteFailure(message);
 	}
 
 	/** Whether a route hop must retain this assistant boundary for provider-valid continuation. */
-	shouldPreserveSameModelRouteTurn(message: AssistantMessage): boolean {
-		return this.isSameModelRouteFallbackEligible(message) && this.#isPartialProviderContinuation(message);
+	shouldPreserveProfileRouteTurn(message: AssistantMessage): boolean {
+		return (
+			!this.#turnRetryPolicy?.orderedRouteFallback &&
+			this.isProfileRouteFallbackEligible(message) &&
+			this.#isPartialProviderContinuation(message)
+		);
 	}
 
-	#sameModelRouteIndex(): number {
-		const policy = this.#turnRetryPolicy?.sameModelRouteFallback;
+	#profileRouteIndex(): number {
 		const model = this.#host.model();
-		if (!policy || !model) return -1;
-		return policy.selectors.findIndex(selector => {
-			const parsed = parseRetryFallbackSelector(selector, this.#host.modelRegistry);
-			return parsed?.provider === model.provider && parsed.id === model.id;
-		});
+		if (!model) return -1;
+		return this.#profileRouteSelectors().findIndex(
+			selector => selector.provider === model.provider && selector.id === model.id,
+		);
 	}
 
-	#sameModelRouteCandidates(): RetryFallbackSelector[] {
-		const policy = this.#turnRetryPolicy?.sameModelRouteFallback;
-		const index = this.#sameModelRouteIndex();
-		if (!policy || index < 0) return [];
-		return policy.selectors
-			.slice(index + 1)
+	#profileRouteCandidates(): RetryFallbackSelector[] {
+		const index = this.#profileRouteIndex();
+		return index < 0 ? [] : this.#profileRouteSelectors().slice(index + 1);
+	}
+
+	#profileRouteSelectors(): RetryFallbackSelector[] {
+		const policy = this.#turnRetryPolicy?.orderedRouteFallback ?? this.#turnRetryPolicy?.sameModelRouteFallback;
+		const seen = new Set<string>();
+		return (policy?.selectors ?? [])
 			.map(selector => parseRetryFallbackSelector(selector, this.#host.modelRegistry))
-			.filter((selector): selector is RetryFallbackSelector => selector !== undefined);
+			.filter((selector): selector is RetryFallbackSelector => {
+				if (!selector) return false;
+				const key = JSON.stringify([selector.provider, selector.id]);
+				if (seen.has(key)) return false;
+				seen.add(key);
+				return true;
+			});
+	}
+
+	#isProfileRouteFailure(message: AssistantMessage): boolean {
+		if (this.#turnRetryPolicy?.orderedRouteFallback && this.#hasReplayUnsafeOutput(message)) return false;
+		return this.#isProviderRouteFailure(message);
 	}
 
 	#isInterruptedProviderTransport(message: AssistantMessage): boolean {
@@ -1818,23 +1849,42 @@ export class TurnRecovery {
 		return false;
 	}
 
-	async #trySameModelRouteFallback(
+	async #tryProfileRouteFallback(
 		currentSelector: string,
 		failedMessage: AssistantMessage,
 		preserveFailedTurn: boolean,
 	): Promise<boolean> {
 		const ceiling = this.#host.thinkingLevelCeiling();
-		for (const selector of this.#sameModelRouteCandidates()) {
+		const generation = this.#host.promptGeneration();
+		for (const selector of this.#profileRouteCandidates()) {
+			if (this.#host.abortInProgress() || this.#host.isDisposed() || this.#host.promptGeneration() !== generation) {
+				return false;
+			}
 			const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 			const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 			if (!candidate) continue;
 			if (ceiling !== undefined && !modelSupportsEffortCeiling(candidate, ceiling)) continue;
 			if (!this.#host.contextFitsModel(candidate, preserveFailedTurn ? undefined : failedMessage)) continue;
-			const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
+			let apiKey: string | undefined;
+			try {
+				apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
+			} catch {
+				// A revoked or unavailable route does not authorize it and must not hide later approved routes.
+				continue;
+			}
+			if (this.#host.abortInProgress() || this.#host.isDisposed() || this.#host.promptGeneration() !== generation) {
+				return false;
+			}
 			if (!apiKey) continue;
-			return this.applyRetryFallbackCandidate("same-model-route", selector, currentSelector, {
-				pinFallback: true,
-			});
+			return this.applyRetryFallbackCandidate(
+				this.#turnRetryPolicy?.orderedRouteFallback ? "profile-route" : "same-model-route",
+				selector,
+				currentSelector,
+				{
+					pinFallback: true,
+					apiKey,
+				},
+			);
 		}
 		return false;
 	}
@@ -2073,8 +2123,8 @@ export class TurnRecovery {
 		},
 	): Promise<boolean> {
 		const retrySettings = this.#host.settings.getGroup("retry");
-		const sameModelRouteOwned = this.#sameModelRouteIndex() >= 0;
-		const providerRouteFailure = sameModelRouteOwned && this.#isProviderRouteFailure(message);
+		const profileRouteOwned = this.#profileRouteIndex() >= 0;
+		const providerRouteFailure = profileRouteOwned && this.#isProfileRouteFailure(message);
 		if (
 			this.#turnRetryPolicy?.transientOnly &&
 			(options?.fireworksFastFallback || options?.hardErrorFallback) &&
@@ -2116,7 +2166,7 @@ export class TurnRecovery {
 		const id = this.#classifyRetryMessage(message);
 		const preserveFailedTurn =
 			options?.preserveFailedTurn === true ||
-			(providerRouteFailure && this.#isPartialProviderContinuation(message)) ||
+			this.shouldPreserveProfileRouteTurn(message) ||
 			((classifierRefusal || AIError.is(id, AIError.Flag.MalformedFunctionCall)) &&
 				this.#unexecutedToolCallsReplaySafe(message));
 		const rateLimitReason = parseRateLimitReason(errorMessage);
@@ -2156,7 +2206,7 @@ export class TurnRecovery {
 		}
 
 		if (
-			!sameModelRouteOwned &&
+			!profileRouteOwned &&
 			!retryBudgetExhausted &&
 			!staleOpenAIResponsesReplayError &&
 			recordedUsageLimitOutcome
@@ -2202,7 +2252,7 @@ export class TurnRecovery {
 		if (
 			accountPolicyDenial &&
 			currentModel &&
-			!sameModelRouteOwned &&
+			!profileRouteOwned &&
 			!(retryBudgetExhausted && this.#turnRetryPolicy?.sharedFallbackBudget)
 		) {
 			switchedCredential = await this.#host.modelRegistry.authStorage.rotateSessionCredential(
@@ -2222,13 +2272,13 @@ export class TurnRecovery {
 		const thinkingLoop = AIError.is(id, AIError.Flag.ThinkingLoop);
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			if (providerRouteFailure && !(retryBudgetExhausted && this.#turnRetryPolicy?.sharedFallbackBudget)) {
-				switchedRoute = await this.#trySameModelRouteFallback(currentSelector, message, preserveFailedTurn);
+				switchedRoute = await this.#tryProfileRouteFallback(currentSelector, message, preserveFailedTurn);
 				switchedModel = switchedRoute;
 			}
 			// A refusal chain stops at the retry budget: the exhausted-attempt
 			// last resort is for provider failures, not classifier decisions.
 			if (
-				!sameModelRouteOwned &&
+				!profileRouteOwned &&
 				allowModelFallback &&
 				retrySettings.modelFallback &&
 				!thinkingLoop &&
@@ -2256,7 +2306,22 @@ export class TurnRecovery {
 			}
 		}
 
-		if (providerRouteFailure && !switchedRoute) {
+		const sameRouteRetryable = providerRouteFailure && this.#isSameRouteRetryableError(message);
+		if (providerRouteFailure && !switchedRoute && (retryBudgetExhausted || !sameRouteRetryable)) {
+			// Cancellation or a replaced prompt is not evidence of unhealthy routes.
+			if (
+				!this.#host.abortInProgress() &&
+				!this.#host.isDisposed() &&
+				this.#host.promptGeneration() === generation
+			) {
+				await this.#host.emitSessionEvent({
+					type: "profile_route_exhausted",
+					reason:
+						retryBudgetExhausted && this.#profileRouteCandidates().length > 0
+							? "retry_budget"
+							: "routes_unavailable",
+				});
+			}
 			if (this.#retryAttempt > 1) {
 				await this.persistTerminalEmptyErrorTurn(message);
 				const retryErrors = await this.#markPendingRetryErrors({ status: "superseded" });

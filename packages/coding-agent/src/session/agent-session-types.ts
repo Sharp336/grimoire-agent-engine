@@ -139,6 +139,10 @@ export interface TurnRetryPolicy {
 		modelIdentityId: string;
 		selectors: readonly string[];
 	};
+	/** Explicitly approved model/provider order. Only replay-safe failed turns may change models. */
+	orderedRouteFallback?: {
+		selectors: readonly string[];
+	};
 }
 
 /** Dependencies and initial state used to construct an AgentSession. */

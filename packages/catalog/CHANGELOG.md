@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Omitted unsupported reasoning effort for fixed-reasoning Grok models behind OpenAI-compatible gateways.
+
 ## [18.0.7] - 2026-08-26
 
 ### Fixed

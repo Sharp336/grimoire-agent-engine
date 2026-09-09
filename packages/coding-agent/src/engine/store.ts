@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { isEnoent } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
 import type { SessionDurabilityCheckpoint } from "../session/session-manager";
 import { SqlSessionStorage } from "../session/sql-session-storage";
@@ -11,6 +12,7 @@ import type {
 	EngineInboxMutation,
 	EngineInboxSource,
 	EngineInboxTarget,
+	EngineProfileRouteState,
 	EngineRetryOutcome,
 	EngineRetryState,
 	EngineTarget,
@@ -203,6 +205,7 @@ export interface EngineAttemptRow {
 	retry_scheduled_at: number | null;
 	retry_outcome: EngineRetryOutcome | null;
 	retry_error: string | null;
+	profile_route_state: string | null;
 }
 
 export interface EngineAttemptRecord extends EngineAttemptRow {
@@ -492,6 +495,19 @@ export class EngineInboxConflictError extends Error {
 	}
 }
 
+export interface EngineHistoryArchive {
+	schema: "grimoire.engine.history_archive_journal.v1";
+	operationId: string;
+	state: "retiring" | "retired" | "restoring" | "restored";
+	binding: EngineBindingSnapshot & { sessionFile: string };
+	sessionId: string;
+	contentHash: string;
+	nativeBytes: number;
+	archivePath: string;
+	archiveHash: string;
+	archiveBytes: number;
+}
+
 const SCHEMA = [
 	`CREATE TABLE IF NOT EXISTS engine_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS omp_session_files (
@@ -709,6 +725,12 @@ const AGENT_INBOX_SCHEMA = [
 	 ON engine_inbox_items(session_id, disposition, deliver_at, position, queue_id)`,
 ] as const;
 
+const LEGACY_PROFILE_ROUTE_MIGRATION = {
+	version: 12,
+	statements: [],
+	requiredColumns: [["engine_attempts", "profile_route_state", "TEXT"]],
+} as const;
+
 const SCHEMA_MIGRATIONS = [
 	{ version: 1, statements: SCHEMA, requiredColumns: [] },
 	{ version: 2, statements: [], requiredColumns: REQUIRED_COLUMNS },
@@ -789,6 +811,7 @@ const SCHEMA_MIGRATIONS = [
 		],
 		requiredColumns: [],
 	},
+	{ ...LEGACY_PROFILE_ROUTE_MIGRATION, version: 25 },
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;
@@ -801,10 +824,20 @@ interface MigrationRow {
 	checksum: string;
 }
 
-function migrationChecksum(migration: (typeof SCHEMA_MIGRATIONS)[number]): string {
+function migrationChecksum(
+	migration: (typeof SCHEMA_MIGRATIONS)[number] | typeof LEGACY_PROFILE_ROUTE_MIGRATION,
+): string {
 	return new Bun.CryptoHasher("sha256")
 		.update(JSON.stringify({ statements: migration.statements, requiredColumns: migration.requiredColumns }))
 		.digest("hex");
+}
+
+function isLegacyProfileFork(applied: MigrationRow[]): boolean {
+	return (
+		applied.length === 12 &&
+		Number(applied.at(-1)?.version) === 12 &&
+		applied.at(-1)?.checksum === migrationChecksum(LEGACY_PROFILE_ROUTE_MIGRATION)
+	);
 }
 
 function assertSchemaHistory(applied: MigrationRow[]): void {
@@ -829,9 +862,33 @@ async function applySchemaMigrations(client: SqlClient): Promise<void> {
 				applied_at INTEGER NOT NULL
 			)`,
 		);
-		const applied = (await client.unsafe(
+		let applied = (await client.unsafe(
 			"SELECT version, checksum FROM engine_schema_migrations ORDER BY version",
 		)) as MigrationRow[];
+		// The frozen profile producer branched after schema11 and independently used
+		// version12. Adopt only that exact fork, retaining its original receipt in the
+		// same transaction as the runtime314 migrations. Every other mismatch fails.
+		const fork = applied.at(-1);
+		if (fork && isLegacyProfileFork(applied)) {
+			assertSchemaHistory(applied.slice(0, -1));
+			const profileColumns = (await client.unsafe("PRAGMA table_info(engine_attempts)")) as Array<{
+				name: string;
+				type: string;
+			}>;
+			const runtimeTables = await client.unsafe(
+				"SELECT name FROM sqlite_master WHERE type='table' AND name IN ('engine_agent_identity','engine_branch_holds')",
+			);
+			if (
+				!profileColumns.some(column => column.name === "profile_route_state" && column.type === "TEXT") ||
+				runtimeTables.length
+			)
+				throw new Error("Engine profile schema12 fork does not match its physical schema");
+			await client.unsafe("INSERT INTO engine_metadata(key,value) VALUES ('schema_fork_profile_route_v12',?)", [
+				JSON.stringify(fork),
+			]);
+			await client.unsafe("DELETE FROM engine_schema_migrations WHERE version=12 AND checksum=?", [fork.checksum]);
+			applied = applied.slice(0, -1);
+		}
 		assertSchemaHistory(applied);
 		for (const migration of SCHEMA_MIGRATIONS.slice(applied.length)) {
 			for (const statement of migration.statements) await client.unsafe(statement);
@@ -857,8 +914,19 @@ async function applySchemaMigrations(client: SqlClient): Promise<void> {
 	}
 }
 
+export interface EngineStorageReclaimResult {
+	schema: "grimoire.engine.storage_reclaim.v1";
+	scope: "engine_database";
+	status: "completed" | "deferred";
+	reason?: "engine_busy" | "database_busy" | "insufficient_space";
+	beforeBytes?: number;
+	afterBytes?: number;
+	freedBytes: number;
+}
+
 export class EngineStore {
 	readonly #client: SqlClient;
+	readonly #databasePath: string;
 	readonly sessionStorage: SqlSessionStorage;
 	#transactionTail: Promise<void> = Promise.resolve();
 	#streamBatch?: {
@@ -1826,8 +1894,9 @@ export class EngineStore {
 		}));
 	}
 
-	private constructor(client: SqlClient, sessionStorage: SqlSessionStorage) {
+	private constructor(client: SqlClient, sessionStorage: SqlSessionStorage, databasePath: string) {
 		this.#client = client;
+		this.#databasePath = databasePath;
 		this.sessionStorage = sessionStorage;
 	}
 
@@ -1843,7 +1912,7 @@ export class EngineStore {
 				const applied = (await client.unsafe(
 					"SELECT version,checksum FROM engine_schema_migrations ORDER BY version",
 				)) as MigrationRow[];
-				assertSchemaHistory(applied);
+				assertSchemaHistory(isLegacyProfileFork(applied) ? applied.slice(0, -1) : applied);
 			}
 			await client.unsafe("PRAGMA journal_mode=WAL");
 			await client.unsafe("PRAGMA foreign_keys=ON");
@@ -1855,7 +1924,7 @@ export class EngineStore {
 				table: "omp_session_files",
 				createTable: false,
 			});
-			return new EngineStore(client, sessionStorage);
+			return new EngineStore(client, sessionStorage, resolved);
 		} catch (error) {
 			await client.end().catch(() => {});
 			throw error;
@@ -1899,6 +1968,70 @@ export class EngineStore {
 		const value = rows[0]?.value;
 		if (!value) throw new Error("Engine database has no stable identity");
 		return value;
+	}
+
+	async getSnapshotEpoch(): Promise<string> {
+		const rows = (await this.#client.unsafe(
+			"SELECT value FROM engine_metadata WHERE key='snapshot_cursor_epoch'",
+		)) as MetadataRow[];
+		const identity = await this.getStoreEpoch();
+		return rows[0]?.value ? `${identity}:${rows[0].value}` : identity;
+	}
+
+	/** Caller must hold the runtime maintenance gate: VACUUM may renumber implicit snapshot rowids. */
+	reclaimStorage(): Promise<EngineStorageReclaimResult> {
+		const run = this.#transactionTail.then(async (): Promise<EngineStorageReclaimResult> => {
+			await this.sessionStorage.drain();
+			const beforeBytes = await this.#databaseBytes();
+			const result = async (reason?: EngineStorageReclaimResult["reason"]): Promise<EngineStorageReclaimResult> => {
+				const afterBytes = await this.#databaseBytes();
+				return {
+					schema: "grimoire.engine.storage_reclaim.v1",
+					scope: "engine_database",
+					status: reason ? "deferred" : "completed",
+					...(reason ? { reason } : {}),
+					beforeBytes,
+					afterBytes,
+					freedBytes: Math.max(0, beforeBytes - afterBytes),
+				};
+			};
+			if (!(await this.#checkpointStorage())) return result("database_busy");
+			const pages = (await this.#client.unsafe("PRAGMA freelist_count")) as Array<{ freelist_count: number }>;
+			if (Number(pages[0]?.freelist_count) > 0) {
+				const disk = await fs.statfs(path.dirname(this.#databasePath));
+				const requiredBytes = (await fs.stat(this.#databasePath)).size * 2 + 16 * 1024 * 1024;
+				if (disk.bavail * disk.bsize < requiredBytes) return result("insufficient_space");
+				// Persist before VACUUM, with query readers gated, so crash recovery also rejects old cursors.
+				await this.#client.unsafe(
+					"INSERT INTO engine_metadata(key, value) VALUES ('snapshot_cursor_epoch', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+					[crypto.randomUUID()],
+				);
+				await this.#client.unsafe("VACUUM");
+			}
+			return result((await this.#checkpointStorage()) ? undefined : "database_busy");
+		});
+		// Maintenance shares the writer queue but must not run inside a SQL transaction.
+		this.#transactionTail = run.then(
+			() => {},
+			() => {},
+		);
+		return run;
+	}
+
+	async #checkpointStorage(): Promise<boolean> {
+		const rows = (await this.#client.unsafe("PRAGMA wal_checkpoint(TRUNCATE)")) as Array<{ busy: number }>;
+		if (!rows[0] || typeof rows[0].busy !== "number") throw new Error("Invalid SQLite checkpoint result");
+		return rows[0].busy === 0;
+	}
+
+	async #databaseBytes(): Promise<number> {
+		let bytes = (await fs.stat(this.#databasePath)).size;
+		try {
+			bytes += (await fs.stat(`${this.#databasePath}-wal`)).size;
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+		}
+		return bytes;
 	}
 
 	async enqueueInboxItem(
@@ -2368,6 +2501,14 @@ export class EngineStore {
 		});
 	}
 
+	async agentInstanceIdForEngineAgent(engineAgentId: string): Promise<string | undefined> {
+		const rows = (await this.#client.unsafe(
+			"SELECT agent_instance_id FROM engine_runtime_bindings WHERE engine_agent_id=?",
+			[engineAgentId],
+		)) as Array<{ agent_instance_id: string }>;
+		return rows.length === 1 ? rows[0].agent_instance_id : undefined;
+	}
+
 	async getBinding(agentInstanceId: string): Promise<EngineBindingSnapshot | undefined> {
 		const rows = (await this.#client.unsafe(
 			`SELECT binding_id, command_id, agent_instance_id, execution_id, attempt_id, engine_agent_id, session_file,
@@ -2490,6 +2631,45 @@ export class EngineStore {
 			 WHERE agent_instance_id=? AND attempt_id=? AND session_file=?`,
 			[Date.now(), agentInstanceId, attemptId, sessionFile],
 		);
+	}
+
+	async getHistoryArchive(agentInstanceId: string): Promise<EngineHistoryArchive | undefined> {
+		const rows = (await this.#client.unsafe("SELECT value FROM engine_metadata WHERE key=?", [
+			`history_archive:${agentInstanceId}`,
+		])) as MetadataRow[];
+		if (!rows[0]) return undefined;
+		const archive = JSON.parse(rows[0].value) as EngineHistoryArchive;
+		if (
+			archive.schema !== "grimoire.engine.history_archive_journal.v1" ||
+			archive.binding.agentInstanceId !== agentInstanceId ||
+			!["retiring", "retired", "restoring", "restored"].includes(archive.state)
+		) {
+			throw new Error("Invalid native history archive journal");
+		}
+		return archive;
+	}
+
+	async putHistoryArchive(archive: EngineHistoryArchive, previous?: EngineHistoryArchive): Promise<void> {
+		const key = `history_archive:${archive.binding.agentInstanceId}`;
+		const rows = previous
+			? await this.#client.unsafe("UPDATE engine_metadata SET value=? WHERE key=? AND value=? RETURNING key", [
+					JSON.stringify(archive),
+					key,
+					JSON.stringify(previous),
+				])
+			: await this.#client.unsafe("INSERT OR IGNORE INTO engine_metadata(key,value) VALUES (?,?) RETURNING key", [
+					key,
+					JSON.stringify(archive),
+				]);
+		if (!rows.length) throw new EngineTargetError("stale_target", "Native history archive journal changed");
+	}
+
+	async hasOtherSessionBinding(agentInstanceId: string, sessionFile: string): Promise<boolean> {
+		const rows = await this.#client.unsafe(
+			"SELECT 1 FROM engine_runtime_bindings WHERE session_file=? AND agent_instance_id<>? LIMIT 1",
+			[sessionFile, agentInstanceId],
+		);
+		return rows.length > 0;
 	}
 
 	async putBinding(binding: EngineBindingSnapshot): Promise<void> {
@@ -2762,6 +2942,43 @@ export class EngineStore {
 		});
 	}
 
+	/** Retain route truth independently of the bounded event outbox, with the full Attempt fence. */
+	async commitAttemptProfileRoute(
+		target: EngineBindingSnapshot,
+		profileRoute: EngineProfileRouteState,
+	): Promise<EngineEvent | undefined> {
+		return await this.#transaction(async sql => {
+			const rows = (await sql.unsafe(
+				`UPDATE engine_attempts SET profile_route_state=?, updated_at=?
+				 WHERE attempt_id=? AND agent_instance_id=? AND execution_id=? AND binding_id=?
+				 AND engine_generation=? AND binding_generation=? AND authority_generation=?
+				 AND state IN ('running', 'pause_requested', 'paused', 'cancel_requested')
+				 RETURNING attempt_id`,
+				[
+					JSON.stringify(profileRoute),
+					Date.now(),
+					target.attemptId,
+					target.agentInstanceId,
+					target.executionId,
+					target.bindingId,
+					target.engineGeneration,
+					target.bindingGeneration,
+					target.authorityGeneration,
+				],
+			)) as Array<{ attempt_id: string }>;
+			if (rows.length === 0) return undefined;
+			const event = await this.#appendTransitionEvent(sql, target, {
+				kind: "profile_route_changed",
+				payload: { profileRoute },
+			});
+			await sql.unsafe("UPDATE engine_attempts SET profile_route_state=? WHERE attempt_id=?", [
+				JSON.stringify({ ...profileRoute, eventSeq: event.seq }),
+				target.attemptId,
+			]);
+			return event;
+		});
+	}
+
 	async startToolEffect(target: EngineEventTarget, effect: EngineToolEffectInput): Promise<EngineEvent> {
 		return await this.#transaction(async sql => {
 			await this.#assertIntent(sql, target.agentInstanceId, undefined, true);
@@ -3029,7 +3246,7 @@ export class EngineStore {
 			 engine_generation, binding_generation, authority_generation, state, cause, updated_at,
 			 transcript_session_id, transcript_path, transcript_leaf_entry_id,
 			 transcript_byte_boundary, transcript_revision, retry_attempt, retry_max_attempts,
-			 retry_route, retry_delay_ms, retry_scheduled_at, retry_outcome, retry_error
+			 retry_route, retry_delay_ms, retry_scheduled_at, retry_outcome, retry_error, profile_route_state
 			 FROM engine_attempts WHERE attempt_id = ?`,
 			[attemptId],
 		)) as EngineAttemptRecord[];
@@ -3051,7 +3268,7 @@ export class EngineStore {
 			 engine_generation, binding_generation, authority_generation, state, cause, updated_at,
 			 transcript_session_id, transcript_path, transcript_leaf_entry_id, transcript_byte_boundary,
 			 transcript_revision, retry_attempt, retry_max_attempts, retry_route, retry_delay_ms,
-			 retry_scheduled_at, retry_outcome, retry_error
+			 retry_scheduled_at, retry_outcome, retry_error, profile_route_state
 			 FROM engine_attempts WHERE rowid > ? ORDER BY rowid LIMIT ?`,
 			[Math.max(0, Math.floor(afterRowId)), Math.max(1, Math.min(1000, Math.floor(limit)))],
 		)) as EngineAttemptRecord[];
@@ -3170,7 +3387,7 @@ export class EngineStore {
 				`SELECT agent_instance_id, execution_id, attempt_id, command_id, binding_id, engine_generation, binding_generation,
 				 authority_generation, state, transcript_session_id, transcript_path, transcript_leaf_entry_id,
 				 transcript_byte_boundary, transcript_revision, retry_attempt, retry_max_attempts,
-				 retry_route, retry_delay_ms, retry_scheduled_at, retry_outcome, retry_error
+				 retry_route, retry_delay_ms, retry_scheduled_at, retry_outcome, retry_error, profile_route_state
 				 FROM engine_attempts
 				 WHERE engine_generation < ? AND state IN ('accepted', 'running', 'pause_requested', 'paused', 'waiting_input', 'cancel_requested')`,
 				[engineGeneration],
