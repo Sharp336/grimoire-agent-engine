@@ -95,6 +95,45 @@ export function blobExtensionForImageMimeType(mimeType: string | undefined): str
 export class BlobStore {
 	constructor(readonly dir: string) {}
 
+	async restore(hash: string, data: Buffer): Promise<void> {
+		if (!BLOB_HASH_RE.test(hash) || new Bun.SHA256().update(data).digest("hex") !== hash)
+			throw new Error("Archived blob hash does not match");
+		await fsp.mkdir(this.dir, { recursive: true });
+		if ((await fsp.lstat(this.dir)).isSymbolicLink()) throw new Error("Blob directory is unsafe");
+		const destination = path.join(this.dir, hash);
+		const temporary = path.join(this.dir, `${hash}.${crypto.randomUUID()}.restore-tmp`);
+		const handle = await fsp.open(temporary, "wx");
+		try {
+			await handle.writeFile(data);
+			await handle.sync();
+			await handle.close();
+			try {
+				await fsp.link(temporary, destination);
+			} catch (error) {
+				if (!error || typeof error !== "object" || !("code" in error) || error.code !== "EEXIST") throw error;
+				const stat = await fsp.lstat(destination);
+				if (
+					!stat.isFile() ||
+					stat.isSymbolicLink() ||
+					stat.size !== data.byteLength ||
+					!(await fsp.readFile(destination)).equals(data)
+				)
+					throw new Error("Existing blob conflicts with archive");
+			}
+		} finally {
+			await handle.close();
+			await fsp.unlink(temporary);
+		}
+		if (process.platform !== "win32") {
+			const directory = await fsp.open(this.dir, "r");
+			try {
+				await directory.sync();
+			} finally {
+				await directory.close();
+			}
+		}
+	}
+
 	/**
 	 * Write binary data to the blob store.
 	 * @returns SHA-256 hex hash of the data

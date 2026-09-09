@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
+import * as fsAsync from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
@@ -22,6 +23,57 @@ describe("EngineStore", () => {
 		if (tempDir) await removeWithRetries(tempDir);
 		tempDir = undefined;
 	});
+
+	it("defers compaction on low disk space and remains usable after a disk probe failure", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-space-${Snowflake.next()}-`));
+		const store = await EngineStore.open(path.join(tempDir, "engine.sqlite"));
+		const source = path.join(tempDir, "removed.jsonl");
+		const retained = path.join(tempDir, "kept.jsonl");
+		const statfs = fsAsync.statfs;
+		const diskProbe = spyOn(fsAsync, "statfs");
+		try {
+			await store.sessionStorage.writeTextAtomic(retained, "retained content");
+			await store.sessionStorage.writeTextAtomic(source, "x".repeat(2 * 1024 * 1024));
+			await store.sessionStorage.unlink(source);
+			const epoch = await store.getSnapshotEpoch();
+			diskProbe.mockResolvedValueOnce({ ...(await statfs(tempDir)), bavail: 0 });
+			expect(await store.reclaimStorage()).toMatchObject({ status: "deferred", reason: "insufficient_space" });
+			expect(await store.getSnapshotEpoch()).toBe(epoch);
+			diskProbe.mockRejectedValueOnce(new Error("simulated disk probe failure"));
+			await expect(store.reclaimStorage()).rejects.toThrow("simulated disk probe failure");
+			expect(await store.sessionStorage.readText(retained)).toBe("retained content");
+			diskProbe.mockRestore();
+			expect(await store.reclaimStorage()).toMatchObject({ status: "completed" });
+			expect(await store.getSnapshotEpoch()).not.toBe(epoch);
+			expect(await store.sessionStorage.readText(retained)).toBe("retained content");
+		} finally {
+			diskProbe.mockRestore();
+			await store.close();
+		}
+	});
+
+	it("defers reclaim while another SQLite reader holds the WAL and retries after it releases", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-reader-${Snowflake.next()}-`));
+		const databasePath = path.join(tempDir, "engine.sqlite");
+		const store = await EngineStore.open(databasePath);
+		const reader = new Database(databasePath);
+		const source = path.join(tempDir, "removed.jsonl");
+		try {
+			await store.sessionStorage.writeTextAtomic(source, "x".repeat(2 * 1024 * 1024));
+			reader.exec("BEGIN");
+			reader.query("SELECT count(*) FROM omp_session_files").get();
+			await store.sessionStorage.unlink(source);
+			const epoch = await store.getSnapshotEpoch();
+			expect(await store.reclaimStorage()).toMatchObject({ status: "deferred", reason: "database_busy" });
+			expect(await store.getSnapshotEpoch()).toBe(epoch);
+			reader.exec("ROLLBACK");
+			expect(await store.reclaimStorage()).toMatchObject({ status: "completed" });
+			expect(reader.query("PRAGMA integrity_check").get()).toEqual({ integrity_check: "ok" });
+		} finally {
+			reader.close();
+			await store.close();
+		}
+	}, 15_000);
 
 	it("persists route state with the full Attempt fence and never lends it to another Attempt", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-route-${Snowflake.next()}-`));

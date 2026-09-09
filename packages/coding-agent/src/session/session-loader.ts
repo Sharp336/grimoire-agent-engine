@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { getBlobsDir, isEnoent, parseJsonlLenient } from "@oh-my-pi/pi-utils";
-import { BlobStore, isBlobRef, resolveImageData, resolveImageDataUrl } from "./blob-store";
+import { BlobStore, isBlobRef, parseBlobRef, resolveImageData, resolveImageDataUrl } from "./blob-store";
 import { buildSessionContext } from "./session-context";
 import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./session-entries";
 import { migrateToCurrentVersion } from "./session-migrations";
@@ -352,6 +352,41 @@ async function resolvePersistedBlobRefs(value: unknown, blobStore: BlobStore, ke
 	await Promise.all(
 		Object.entries(value).map(([childKey, item]) => resolvePersistedBlobRefs(item, blobStore, childKey)),
 	);
+}
+
+export function collectPersistedBlobHashes(entries: readonly unknown[]): string[] {
+	const hashes = new Set<string>();
+	const pending: Array<{ value: unknown; key?: string }> = entries.map(value => ({ value }));
+	const add = (ref: string) => {
+		const hash = parseBlobRef(ref);
+		if (!hash) throw new Error("Native history contains an invalid image blob reference");
+		hashes.add(hash);
+	};
+	while (pending.length) {
+		const item = pending.pop();
+		if (!item) break;
+		const { value, key } = item;
+		if (shouldResolveImagePayload(value, key)) {
+			add(value.data);
+			continue;
+		}
+		if (Array.isArray(value)) {
+			for (const child of value) pending.push({ value: child, key });
+			continue;
+		}
+		if (typeof value !== "object" || value === null) continue;
+		if (
+			"type" in value &&
+			value.type === "image_generation_call" &&
+			"result" in value &&
+			typeof value.result === "string" &&
+			isBlobRef(value.result)
+		)
+			add(value.result);
+		if (hasImageUrl(value) && isBlobRef(value.image_url)) add(value.image_url);
+		for (const [childKey, child] of Object.entries(value)) pending.push({ value: child, key: childKey });
+	}
+	return [...hashes].sort();
 }
 
 /**

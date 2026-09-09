@@ -5,6 +5,7 @@
  * providing access to agent outputs and server resources without exposing filesystem paths.
  */
 
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
 import type { MCPManager } from "../mcp";
@@ -22,6 +23,8 @@ export interface EngineHistoryRef {
 export interface EngineHistoryAccess {
 	refs: readonly EngineHistoryRef[];
 	storage: SessionStorage;
+	/** Serialize parked transcript reads with native archive/restore, when Engine-owned. */
+	readMessages?: (engineAgentId: string, sessionFile: string) => Promise<AgentMessage[]>;
 }
 
 /**

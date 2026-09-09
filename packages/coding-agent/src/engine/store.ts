@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { isEnoent } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
 import type { SessionDurabilityCheckpoint } from "../session/session-manager";
 import { SqlSessionStorage } from "../session/sql-session-storage";
@@ -16,6 +17,7 @@ import type {
 	EngineRetryState,
 	EngineToolPolicy,
 } from "./contracts";
+import { EngineTargetError } from "./contracts";
 import { engineAgentId } from "./route";
 
 interface MetadataRow {
@@ -350,6 +352,19 @@ export class EngineInboxConflictError extends Error {
 	}
 }
 
+export interface EngineHistoryArchive {
+	schema: "grimoire.engine.history_archive_journal.v1";
+	operationId: string;
+	state: "retiring" | "retired" | "restoring" | "restored";
+	binding: EngineBindingSnapshot & { sessionFile: string };
+	sessionId: string;
+	contentHash: string;
+	nativeBytes: number;
+	archivePath: string;
+	archiveHash: string;
+	archiveBytes: number;
+}
+
 const SCHEMA = [
 	`CREATE TABLE IF NOT EXISTS engine_metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL)`,
 	`CREATE TABLE IF NOT EXISTS omp_session_files (
@@ -655,13 +670,25 @@ async function applySchemaMigrations(client: SqlClient): Promise<void> {
 	}
 }
 
+export interface EngineStorageReclaimResult {
+	schema: "grimoire.engine.storage_reclaim.v1";
+	scope: "engine_database";
+	status: "completed" | "deferred";
+	reason?: "engine_busy" | "database_busy" | "insufficient_space";
+	beforeBytes?: number;
+	afterBytes?: number;
+	freedBytes: number;
+}
+
 export class EngineStore {
 	readonly #client: SqlClient;
+	readonly #databasePath: string;
 	readonly sessionStorage: SqlSessionStorage;
 	#transactionTail: Promise<void> = Promise.resolve();
 
-	private constructor(client: SqlClient, sessionStorage: SqlSessionStorage) {
+	private constructor(client: SqlClient, sessionStorage: SqlSessionStorage, databasePath: string) {
 		this.#client = client;
+		this.#databasePath = databasePath;
 		this.sessionStorage = sessionStorage;
 	}
 
@@ -680,7 +707,7 @@ export class EngineStore {
 				table: "omp_session_files",
 				createTable: false,
 			});
-			return new EngineStore(client, sessionStorage);
+			return new EngineStore(client, sessionStorage, resolved);
 		} catch (error) {
 			await client.end().catch(() => {});
 			throw error;
@@ -710,6 +737,70 @@ export class EngineStore {
 		const value = rows[0]?.value;
 		if (!value) throw new Error("Engine database has no stable identity");
 		return value;
+	}
+
+	async getSnapshotEpoch(): Promise<string> {
+		const rows = (await this.#client.unsafe(
+			"SELECT value FROM engine_metadata WHERE key='snapshot_cursor_epoch'",
+		)) as MetadataRow[];
+		const identity = await this.getStoreEpoch();
+		return rows[0]?.value ? `${identity}:${rows[0].value}` : identity;
+	}
+
+	/** Caller must hold the runtime maintenance gate: VACUUM may renumber implicit snapshot rowids. */
+	reclaimStorage(): Promise<EngineStorageReclaimResult> {
+		const run = this.#transactionTail.then(async (): Promise<EngineStorageReclaimResult> => {
+			await this.sessionStorage.drain();
+			const beforeBytes = await this.#databaseBytes();
+			const result = async (reason?: EngineStorageReclaimResult["reason"]): Promise<EngineStorageReclaimResult> => {
+				const afterBytes = await this.#databaseBytes();
+				return {
+					schema: "grimoire.engine.storage_reclaim.v1",
+					scope: "engine_database",
+					status: reason ? "deferred" : "completed",
+					...(reason ? { reason } : {}),
+					beforeBytes,
+					afterBytes,
+					freedBytes: Math.max(0, beforeBytes - afterBytes),
+				};
+			};
+			if (!(await this.#checkpointStorage())) return result("database_busy");
+			const pages = (await this.#client.unsafe("PRAGMA freelist_count")) as Array<{ freelist_count: number }>;
+			if (Number(pages[0]?.freelist_count) > 0) {
+				const disk = await fs.statfs(path.dirname(this.#databasePath));
+				const requiredBytes = (await fs.stat(this.#databasePath)).size * 2 + 16 * 1024 * 1024;
+				if (disk.bavail * disk.bsize < requiredBytes) return result("insufficient_space");
+				// Persist before VACUUM, with query readers gated, so crash recovery also rejects old cursors.
+				await this.#client.unsafe(
+					"INSERT INTO engine_metadata(key, value) VALUES ('snapshot_cursor_epoch', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+					[crypto.randomUUID()],
+				);
+				await this.#client.unsafe("VACUUM");
+			}
+			return result((await this.#checkpointStorage()) ? undefined : "database_busy");
+		});
+		// Maintenance shares the writer queue but must not run inside a SQL transaction.
+		this.#transactionTail = run.then(
+			() => {},
+			() => {},
+		);
+		return run;
+	}
+
+	async #checkpointStorage(): Promise<boolean> {
+		const rows = (await this.#client.unsafe("PRAGMA wal_checkpoint(TRUNCATE)")) as Array<{ busy: number }>;
+		if (!rows[0] || typeof rows[0].busy !== "number") throw new Error("Invalid SQLite checkpoint result");
+		return rows[0].busy === 0;
+	}
+
+	async #databaseBytes(): Promise<number> {
+		let bytes = (await fs.stat(this.#databasePath)).size;
+		try {
+			bytes += (await fs.stat(`${this.#databasePath}-wal`)).size;
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+		}
+		return bytes;
 	}
 
 	async enqueueInboxItem(
@@ -1099,6 +1190,14 @@ export class EngineStore {
 		});
 	}
 
+	async agentInstanceIdForEngineAgent(engineAgentId: string): Promise<string | undefined> {
+		const rows = (await this.#client.unsafe(
+			"SELECT agent_instance_id FROM engine_runtime_bindings WHERE engine_agent_id=?",
+			[engineAgentId],
+		)) as Array<{ agent_instance_id: string }>;
+		return rows.length === 1 ? rows[0].agent_instance_id : undefined;
+	}
+
 	async getBinding(agentInstanceId: string): Promise<EngineBindingSnapshot | undefined> {
 		const rows = (await this.#client.unsafe(
 			`SELECT binding_id, command_id, agent_instance_id, execution_id, attempt_id, engine_agent_id, session_file,
@@ -1221,6 +1320,45 @@ export class EngineStore {
 			 WHERE agent_instance_id=? AND attempt_id=? AND session_file=?`,
 			[Date.now(), agentInstanceId, attemptId, sessionFile],
 		);
+	}
+
+	async getHistoryArchive(agentInstanceId: string): Promise<EngineHistoryArchive | undefined> {
+		const rows = (await this.#client.unsafe("SELECT value FROM engine_metadata WHERE key=?", [
+			`history_archive:${agentInstanceId}`,
+		])) as MetadataRow[];
+		if (!rows[0]) return undefined;
+		const archive = JSON.parse(rows[0].value) as EngineHistoryArchive;
+		if (
+			archive.schema !== "grimoire.engine.history_archive_journal.v1" ||
+			archive.binding.agentInstanceId !== agentInstanceId ||
+			!["retiring", "retired", "restoring", "restored"].includes(archive.state)
+		) {
+			throw new Error("Invalid native history archive journal");
+		}
+		return archive;
+	}
+
+	async putHistoryArchive(archive: EngineHistoryArchive, previous?: EngineHistoryArchive): Promise<void> {
+		const key = `history_archive:${archive.binding.agentInstanceId}`;
+		const rows = previous
+			? await this.#client.unsafe("UPDATE engine_metadata SET value=? WHERE key=? AND value=? RETURNING key", [
+					JSON.stringify(archive),
+					key,
+					JSON.stringify(previous),
+				])
+			: await this.#client.unsafe("INSERT OR IGNORE INTO engine_metadata(key,value) VALUES (?,?) RETURNING key", [
+					key,
+					JSON.stringify(archive),
+				]);
+		if (!rows.length) throw new EngineTargetError("stale_target", "Native history archive journal changed");
+	}
+
+	async hasOtherSessionBinding(agentInstanceId: string, sessionFile: string): Promise<boolean> {
+		const rows = await this.#client.unsafe(
+			"SELECT 1 FROM engine_runtime_bindings WHERE session_file=? AND agent_instance_id<>? LIMIT 1",
+			[sessionFile, agentInstanceId],
+		);
+		return rows.length > 0;
 	}
 
 	async putBinding(binding: EngineBindingSnapshot): Promise<void> {

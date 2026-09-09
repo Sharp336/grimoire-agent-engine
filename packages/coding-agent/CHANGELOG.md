@@ -4,6 +4,14 @@
 
 ### Added
 
+- Native history archives now include referenced image payloads and restore them without the original blob store; incomplete copies and conflicting existing blobs are rejected.
+
+- Added idle-only disk reclamation with measured database/WAL savings, low-space deferral and safe snapshot cursor resynchronization.
+
+- Added journaled local history retirement and same-session restoration from a verified compressed copy, with restart recovery and no model call during restore.
+
+- Added exact-target archive preflight that rejects changed native history, attachments, unfinished execution, or pending messages without deleting source data.
+
 - Added owner-local Responses API execution for configured providers that require it for reasoning with tools.
 
 - Added attempt-bound profile-route events and restart-safe snapshots, separating pending selection from the observed stream and route exhaustion from a retry-budget stop.
@@ -19,6 +27,8 @@
 - Added exact local OMP account bindings for Grimoire AgentProfiles, so Artel can use an existing Codex subscription without copying OAuth credentials.
 
 ### Fixed
+
+- Report archived child transcripts as unavailable instead of silently showing empty history, and reopen the same references after restore.
 
 - Estimate context for the current model after switching models or falling back, instead of displaying the previous provider's token count.
 
