@@ -363,6 +363,7 @@ export class EngineTargetError extends Error {
 			| "epoch_changed"
 			| "projection_changed"
 			| "restore_budget"
+			| "source_unavailable"
 			| "interrupted"
 			| "stale_target"
 			| "too_late"

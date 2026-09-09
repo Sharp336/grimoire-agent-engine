@@ -2,6 +2,7 @@ import { EngineTargetError } from "./contracts";
 import type { HistoryLifecycleContext } from "./runtime-lifecycle";
 import type { RuntimeQueryWork, RuntimeSql } from "./runtime-projection";
 import { runtimeLimits } from "./runtime-protocol";
+import { RuntimeTextReader } from "./runtime-text";
 
 function jsonLines(content: string): string {
 	const array = `'[' || replace(trim(${content},char(10)||char(13)||' '),char(10),',') || ']'`;
@@ -34,6 +35,21 @@ export const ENGINE_HISTORY_LINEAGE_SCHEMA = [
 	"CREATE TRIGGER engine_history_lineage_insert AFTER INSERT ON omp_session_files BEGIN UPDATE omp_session_files SET history_lineage=lower(hex(randomblob(16))) WHERE path=NEW.path; END",
 	"CREATE TRIGGER engine_history_lineage_replace AFTER UPDATE OF content ON omp_session_files WHEN length(NEW.content)<length(OLD.content) OR substr(NEW.content,1,length(OLD.content))<>OLD.content BEGIN UPDATE omp_session_files SET history_lineage=lower(hex(randomblob(16))) WHERE path=NEW.path; END",
 	"CREATE INDEX engine_attempts_history_owner_idx ON engine_attempts(agent_instance_id,transcript_session_id)",
+] as const;
+
+// Incremental SQLite TEXT reads require a rowid table. Keep the same canonical
+// data, primary key, secondary indexes and session-file triggers; no shadow store.
+export const ENGINE_HISTORY_ROWID_SCHEMA = [
+	"CREATE TABLE engine_history_entries_rowid(session_path TEXT NOT NULL,entry_id TEXT NOT NULL,parent_entry_id TEXT,ordinal INTEGER NOT NULL,entry_type TEXT NOT NULL,entry_role TEXT,entry_json TEXT NOT NULL,entry_bytes INTEGER NOT NULL,tool_call_id TEXT,source_command_id TEXT,assistant_message_id TEXT,PRIMARY KEY(session_path,entry_id))",
+	"INSERT INTO engine_history_entries_rowid SELECT session_path,entry_id,parent_entry_id,ordinal,entry_type,entry_role,entry_json,entry_bytes,tool_call_id,source_command_id,assistant_message_id FROM engine_history_entries",
+	...(["insert", "append", "replace", "remove", "move"] as const).map(name => `DROP TRIGGER engine_history_${name}`),
+	"DROP TABLE engine_history_entries",
+	"ALTER TABLE engine_history_entries_rowid RENAME TO engine_history_entries",
+	...ENGINE_HISTORY_INDEX_SCHEMA.filter(
+		statement => statement.startsWith("CREATE INDEX") || statement.startsWith("CREATE TRIGGER"),
+	),
+	"CREATE INDEX engine_history_header_idx ON engine_history_entries(session_path,entry_type,ordinal)",
+	"CREATE INDEX engine_attempts_history_path_idx ON engine_attempts(agent_instance_id,transcript_session_id,transcript_path)",
 ] as const;
 
 export async function readNativeHistoryEntry(
@@ -98,17 +114,19 @@ export async function readNativeHistoryEntry(
 	)
 		throw new EngineTargetError("stale_target", "History resource session or immutable lineage changed");
 	const rows = (await sql.unsafe(
-		"SELECT entry_bytes,SUBSTR(CAST(entry_json AS BLOB),?,?) AS chunk FROM engine_history_entries WHERE session_path=? AND entry_id=?",
-		[offset + 1, limit, sessionPath, entryId],
-	)) as Array<{ entry_bytes: number; chunk: Uint8Array }>;
+		"SELECT entry_bytes FROM engine_history_entries WHERE session_path=? AND entry_id=?",
+		[sessionPath, entryId],
+	)) as Array<{ entry_bytes: number }>;
 	work?.rows(rows.length);
 	if (!rows[0]) throw new EngineTargetError("history_expired", "Native history entry expired");
-	const bytes = Buffer.from(rows[0].chunk);
 	const total = Number(rows[0].entry_bytes);
 	if (offset > total) throw new EngineTargetError("invalid_request", "History range starts after the retained entry");
-	if (work) {
-		work.value.materializedBytes += bytes.length;
-		work.check();
+	const reader = await RuntimeTextReader.open(sql, agentInstanceId, work);
+	let bytes: Buffer;
+	try {
+		bytes = reader.history(sessionPath, session.entry_id, entryId, revision, total, offset, limit, attemptId);
+	} finally {
+		reader.close();
 	}
 	return {
 		sessionId: session.entry_id,

@@ -1,6 +1,7 @@
 import { type EngineInboxItem, EngineTargetError } from "./contracts";
 import { RuntimeQueryError, RuntimeQueryWork, type RuntimeSql, runtimeIdentity } from "./runtime-projection";
 import { type RuntimeAccess, runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
+import { RuntimeTextReader } from "./runtime-text";
 
 export const RUNTIME_QUEUE_SCHEMA = [
 	"CREATE INDEX engine_inbox_agent_page_idx ON engine_inbox_items(agent_instance_id,disposition,position,queue_id)",
@@ -145,7 +146,7 @@ export function publicRuntimeQueueItem(
 }
 
 async function readItem(
-	sql: RuntimeSql,
+	reader: RuntimeTextReader,
 	agentInstanceRef: string,
 	row: QueueMetadata,
 	work: RuntimeQueryWork,
@@ -167,15 +168,17 @@ async function readItem(
 	const expected = fields.reduce((sum, field) => sum + Math.min(lengths[field], bound), 0);
 	if (work.value.materializedBytes + expected > work.remaining.materializedBytes)
 		throw new RuntimeQueryError("restore_budget", "Queue materialization budget is exhausted", { ...work.value });
-	const values = (await sql.unsafe(
-		`SELECT ${fields.map(field => `SUBSTR(CAST(${columns[field]} AS BLOB),1,?) AS ${field}`).join(",")}
-		FROM engine_inbox_items i JOIN engine_inbox_sources s ON s.source_event_id=i.source_event_id WHERE i.queue_id=?`,
-		[bound, bound, bound, row.queue_id],
-	)) as Array<Record<QueueField, Uint8Array | null>>;
-	work.rows(values.length * 2);
-	const value = values[0];
-	for (const field of fields) work.value.materializedBytes += value[field]?.length ?? 0;
-	work.check();
+	const value = reader.queue(
+		row.queue_id,
+		Number(row.revision),
+		{
+			deliveryPayload: row.deliveryPayload,
+			annotation: row.annotation,
+			sender: row.sender,
+		},
+		0,
+		bound,
+	);
 	return publicRuntimeQueueItem(
 		agentInstanceRef,
 		{
@@ -183,8 +186,8 @@ async function readItem(
 			sourceEventId: row.source_event_id,
 			sourceType: row.source_type,
 			deliveryPayload: utf8Prefix(value.deliveryPayload!),
-			...(value.annotation !== null ? { annotation: utf8Prefix(value.annotation) } : {}),
-			...(value.sender !== null ? { sender: utf8Prefix(value.sender) } : {}),
+			...(value.annotation != null ? { annotation: utf8Prefix(value.annotation) } : {}),
+			...(value.sender != null ? { sender: utf8Prefix(value.sender) } : {}),
 			...(row.deliver_at !== null ? { deliverAt: Number(row.deliver_at) } : {}),
 			wakeIntent: Boolean(row.wake_intent),
 			position: Number(row.position),
@@ -252,12 +255,17 @@ export async function readRuntimeQueue(
 	work.check();
 	const items: Record<string, unknown>[] = [];
 	let bytes = runtimeLimits.bulkPreviewBytes;
-	for (const row of rows.slice(0, limit)) {
-		const item = await readItem(sql, request.agentInstanceRef, row, work);
-		const size = Buffer.byteLength(JSON.stringify(item));
-		if (bytes + size > runtimeLimits.httpPageBytes) break;
-		items.push(item);
-		bytes += size + 1;
+	const reader = rows.length ? await RuntimeTextReader.open(sql, identity.agent_instance_id, work) : null;
+	try {
+		for (const row of rows.slice(0, limit)) {
+			const item = await readItem(reader!, request.agentInstanceRef, row, work);
+			const size = Buffer.byteLength(JSON.stringify(item));
+			if (bytes + size > runtimeLimits.httpPageBytes) break;
+			items.push(item);
+			bytes += size + 1;
+		}
+	} finally {
+		reader?.close();
 	}
 	const last = items.at(-1);
 	const result = {
@@ -309,15 +317,20 @@ export async function runtimeQueueRange(
 		request.offset > Number(row.bytes)
 	)
 		throw new EngineTargetError("stale_target", "Queue resource identity, revision or range changed");
-	const chunks = (await sql.unsafe(
-		`SELECT SUBSTR(CAST(${column} AS BLOB),?,?) AS chunk
-		FROM engine_inbox_items i JOIN engine_inbox_sources s ON s.source_event_id=i.source_event_id WHERE i.queue_id=?`,
-		[request.offset + 1, request.limit, String(resource.queueId)],
-	)) as Array<{ chunk: Uint8Array }>;
-	work.rows(chunks.length * 2);
-	const stored = Buffer.from(chunks[0].chunk);
-	work.value.materializedBytes += stored.length;
-	work.check();
+	const reader = await RuntimeTextReader.open(sql, identity.agent_instance_id, work);
+	let stored: Buffer;
+	try {
+		const field = resource.field as QueueField;
+		stored = reader.queue(
+			String(resource.queueId),
+			Number(row.revision),
+			{ [field]: Number(row.bytes) },
+			request.offset,
+			request.limit,
+		)[field]!;
+	} finally {
+		reader.close();
+	}
 	if (stored.length && (stored[0] & 0xc0) === 0x80)
 		throw new EngineTargetError("invalid_request", "Queue range must start on a UTF-8 boundary");
 	const bytes = Buffer.from(utf8Prefix(stored));
