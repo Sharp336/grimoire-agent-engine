@@ -459,6 +459,125 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 		}
 	}, 60_000);
 
+	it("releases a Start claim only after its execution-terminal receipt is persisted", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `artel-bridge-terminal-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const connection = await connect({ servers: broker.url });
+		const manager = await jetstreamManager(connection);
+		await manager.streams.add({ name: ENGINE_EVENT_STREAM, subjects: ["grimoire.engine.v1.>"] });
+		const command = startCommand(tempDir, {});
+		const terminalEntered = Promise.withResolvers<void>();
+		const persistTerminal = Promise.withResolvers<void>();
+		const persisted: string[] = [];
+		const errors: Error[] = [];
+		let terminal = false;
+		let terminalReplays = 0;
+		const rpc: GrimoireRpc = {
+			async call(_tool, args) {
+				if (args.action === "claim") {
+					if (!args.job_id) return { status: "no_job" };
+					if (terminal) return { status: "already_terminal" };
+					return {
+						status: "claimed",
+						job_id: command.commandId,
+						lease_token: "terminal-lease",
+						operation_type: "agent_engine_command",
+						work: { kind: "command", command: { ...command, engineGeneration: 1 } },
+					};
+				}
+				if (args.action === "heartbeat") return { status: "renewed" };
+				if (args.action === "accepted") {
+					expect(args.lease_token).toBe("terminal-lease");
+					const receipt = args.receipt as Record<string, unknown>;
+					if (receipt.stage === "execution_terminal") {
+						terminalEntered.resolve();
+						await persistTerminal.promise;
+						terminal = true;
+					}
+					persisted.push(String(receipt.stage));
+					return { status: "accepted" };
+				}
+				if (args.action === "event" && terminal) {
+					terminalReplays++;
+					return { status: "already_terminal" };
+				}
+				throw new Error(`Unexpected terminal fixture action ${String(args.action)}`);
+			},
+		};
+		const bridge = await HostedEngineBridge.connect({
+			rpc,
+			deviceId: command.deviceId,
+			engineId: command.engineId,
+			engineGeneration: 1,
+			servers: broker.url,
+			pollIntervalMs: 10,
+			onError: error => errors.push(error),
+		});
+		const publish = async (seq: number, stage: string) => {
+			const event: EngineEventEnvelope = {
+				schema: "grimoire.engine.event.v1",
+				eventId: String(seq),
+				agentSeq: seq,
+				causationCommandId: command.commandId,
+				deviceId: command.deviceId,
+				engineId: command.engineId,
+				engineGeneration: 1,
+				agentInstanceId: command.agentInstanceId,
+				runtimeBindingId: "terminal-binding",
+				bindingGeneration: 1,
+				executionId: command.executionId!,
+				attemptId: command.attemptId!,
+				authorityGeneration: command.authorityGeneration,
+				type: "attempt.command_receipt",
+				at: Date.now(),
+				payload: {
+					value: {
+						version: "1.0",
+						commandId: command.commandId,
+						payloadHash: `sha256:${"a".repeat(64)}`,
+						target: { agentInstanceRef: "grimoire://tasks/grimoire/terminal/agents/start" },
+						stage,
+						lookup: "known",
+					},
+				},
+			};
+			await jetstream(connection).publish(
+				`grimoire.engine.v1.d.${engineRouteToken(command.deviceId)}.e.${engineRouteToken(command.engineId)}.a.${engineRouteToken(command.agentInstanceId)}.evt.receipt`,
+				JSON.stringify(event),
+			);
+		};
+		try {
+			await publish(1, "applied");
+			await waitFor(() => persisted.length === 1);
+			const active = await bridge.drain(50).then(
+				() => null,
+				(error: unknown) => error,
+			);
+			expect(String(active)).toContain("1 active claim(s)");
+			await publish(2, "execution_terminal");
+			await withTimeout(terminalEntered.promise, 2000, "Terminal receipt did not reach hosted persistence");
+			const unpersisted = await bridge.drain(50).then(
+				() => null,
+				(error: unknown) => error,
+			);
+			expect(String(unpersisted)).toContain("1 active claim(s)");
+			persistTerminal.resolve();
+			await waitFor(() => persisted.length === 2);
+			await bridge.drain(2000);
+			await publish(3, "execution_terminal");
+			await waitFor(() => terminalReplays === 1);
+			await bridge.drain(2000);
+			expect(persisted).toEqual(["applied", "execution_terminal"]);
+			expect(errors).toHaveLength(0);
+		} finally {
+			persistTerminal.resolve();
+			await bridge.dispose();
+			await connection.drain();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 10000);
+
 	it("delivers other agents promptly while preserving failed-agent order and draining admitted callbacks", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `artel-bridge-concurrency-${Snowflake.next()}-`));
 		const broker = await startNatsServer(tempDir);
