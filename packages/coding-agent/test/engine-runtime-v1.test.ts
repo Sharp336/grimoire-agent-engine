@@ -1167,7 +1167,8 @@ describe("runtime v1 durable boundaries", () => {
 		});
 		const recovered = await store.runtimeCommand(legacy.commandId, { principalId: "owner" });
 		expect(recovered.result).toMatchObject({
-			item: { queueId: queued.item.queueId, deliveryPayload: "short", partial: false },
+			partial: true,
+			unavailable: "legacy_result_exceeds_projection_limit",
 		});
 		expect(JSON.stringify(recovered)).not.toContain("private source");
 		expect(JSON.stringify(recovered)).not.toContain("sourceBody");
@@ -1183,13 +1184,136 @@ describe("runtime v1 durable boundaries", () => {
 			lookup: "known",
 			result: {
 				partial: true,
-				unavailable: "legacy_queue_revision_not_retained",
-				queueId: queued.item.queueId,
-				revision: queued.item.revision,
+				unavailable: "legacy_result_exceeds_projection_limit",
 			},
 		});
 		expect(unavailable.target).toEqual(recovered.target);
 		expect(unavailable.payloadHash).toBe(recovered.payloadHash);
+	});
+	it("keeps oversized retained receipts bounded on replay and refuses unavailable frozen targets without rewriting authority", async () => {
+		let store = await createStore();
+		await store.registerAgent(identity("source-browser"));
+		const frozenTarget = {
+			agentInstanceRef: identity("source-browser").agentInstanceRef,
+			attemptId: "browser-attempt",
+			executionId: "browser-execution",
+		};
+		const applied = {
+			...command("huge-applied", "enqueue"),
+			serializedCommand: JSON.stringify({ browserTarget: frozenTarget }),
+		};
+		await store.admitCommand(applied, 1);
+		const receipt = { outcome: "applied" as const, detail: { result: "native-result".repeat(700_000) } };
+		await store.settleCommand(applied.commandId, applied.canonicalHash, receipt);
+		const first = await store.runtimeCommand(applied.commandId, { principalId: "owner" });
+		expect(first).toMatchObject({
+			stage: "applied",
+			lookup: "known",
+			target: frozenTarget,
+			payloadHash: applied.browserPayloadHash,
+			result: { partial: true, unavailable: "legacy_result_exceeds_projection_limit" },
+		});
+		expect(Buffer.byteLength(JSON.stringify(first))).toBeLessThan(runtimeLimits.liveChangeBytes);
+		const replay = await store.admitCommand(applied, 1);
+		expect(replay).toMatchObject({ status: "replay", receipt: { outcome: "applied", detail: { partial: true } } });
+		expect(Buffer.byteLength(JSON.stringify(replay))).toBeLessThan(runtimeLimits.liveChangeBytes);
+		const duplicateSettlement = await store.settleCommand(applied.commandId, applied.canonicalHash, receipt).then(
+			() => undefined,
+			error => error,
+		);
+		expect(duplicateSettlement).toMatchObject({ code: "restore_budget" });
+		await expect(
+			store.settleCommand(applied.commandId, applied.canonicalHash, { outcome: "applied", detail: {} }),
+		).rejects.toThrow("another receipt");
+		expect((await store.runtimeCommand(applied.commandId, { principalId: "owner" })).target).toEqual(frozenTarget);
+		await expect(store.admitCommand({ ...applied, canonicalHash: "changed" }, 1)).rejects.toThrow(
+			"different canonical",
+		);
+		await expect(store.runtimeCommand(applied.commandId, { principalId: "foreign" })).rejects.toThrow("authorized");
+		const rejected = {
+			...command("huge-rejected", "steer"),
+			serializedCommand: JSON.stringify({ browserTarget: frozenTarget }),
+		};
+		await store.admitCommand(rejected, 1);
+		await store.settleCommand(rejected.commandId, rejected.canonicalHash, {
+			outcome: "rejected",
+			detail: { message: "rejected".repeat(1_000_000) },
+		});
+		expect(await store.runtimeCommand(rejected.commandId, { principalId: "owner" })).toMatchObject({
+			stage: "rejected",
+			lookup: "known",
+			target: frozenTarget,
+		});
+		await store.close();
+		stores.splice(stores.indexOf(store), 1);
+		store = await EngineStore.open(path.join(directories.at(-1)!, "engine.sqlite"));
+		stores.push(store);
+		expect(await store.runtimeCommand(applied.commandId, { principalId: "owner" })).toEqual(first);
+		expect(await store.admitCommand(applied, 1)).toEqual(replay);
+		const native = new SQL(`sqlite:${path.join(directories.at(-1)!, "engine.sqlite").replaceAll("\\", "/")}`);
+		try {
+			await native.unsafe("UPDATE engine_commands SET serialized_command=? WHERE command_id=?", [
+				JSON.stringify({
+					browserTarget: frozenTarget,
+					retainedLegacy: "x".repeat(runtimeLimits.bootstrapMaterializedBytes),
+				}),
+				applied.commandId,
+			]);
+			const unavailable = await store.runtimeCommand(applied.commandId, { principalId: "owner" }).then(
+				() => undefined,
+				error => error,
+			);
+			expect(unavailable).toMatchObject({ code: "source_unavailable" });
+			expect(await store.admitCommand(applied, 1)).toMatchObject({
+				status: "replay",
+				receipt: { outcome: "applied" },
+			});
+			const row = (
+				await native.unsafe(
+					"SELECT outcome,state,OCTET_LENGTH(receipt) AS bytes FROM engine_commands WHERE command_id=?",
+					[applied.commandId],
+				)
+			)[0];
+			expect(row).toMatchObject({
+				state: "settled",
+				outcome: "applied",
+				bytes: Buffer.byteLength(JSON.stringify(receipt)),
+			});
+		} finally {
+			await native.end();
+		}
+	});
+	it("rolls back receipt settlement when its bounded receipt event fails", async () => {
+		const store = await createStore();
+		const cmd = command("receipt-rollback", "enqueue");
+		await store.admitCommand(cmd, 1);
+		const sql = new SQL(`sqlite:${path.join(directories.at(-1)!, "engine.sqlite").replaceAll("\\", "/")}`);
+		try {
+			const before = await sql.unsafe("SELECT MAX(event_id) AS watermark FROM engine_event_outbox");
+			await sql.unsafe(
+				"CREATE TRIGGER reject_receipt_projection BEFORE INSERT ON engine_event_outbox WHEN NEW.kind='command_receipt' BEGIN SELECT RAISE(ABORT,'receipt rollback'); END",
+			);
+			const result = await store
+				.settleCommand(cmd.commandId, cmd.canonicalHash, {
+					outcome: "applied",
+					detail: { text: "x".repeat(8_000_000) },
+				})
+				.then(
+					() => undefined,
+					error => error,
+				);
+			expect(result).toBeInstanceOf(Error);
+			expect(await store.runtimeCommand(cmd.commandId, { principalId: "owner" })).toMatchObject({
+				stage: "engine_accepted",
+				lookup: "pending",
+			});
+			expect(await sql.unsafe("SELECT MAX(event_id) AS watermark FROM engine_event_outbox")).toEqual(before);
+			expect(
+				(await sql.unsafe("SELECT state,receipt FROM engine_commands WHERE command_id=?", [cmd.commandId]))[0],
+			).toEqual(expect.objectContaining({ state: "received", receipt: null }));
+		} finally {
+			await sql.end();
+		}
 	});
 	it("commits concurrent stream appends before their readers and rolls back a failed stream group without acknowledgements", async () => {
 		const store = await createStore();

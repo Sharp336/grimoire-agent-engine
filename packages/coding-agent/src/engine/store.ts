@@ -65,7 +65,12 @@ import {
 } from "./runtime-protocol";
 import { RUNTIME_QUEUE_SCHEMA, type RuntimeQueueRequest, readRuntimeQueue } from "./runtime-queue";
 import { type RuntimeSnapshot, readRuntimeEvents, readRuntimeSnapshot, readRuntimeSummary } from "./runtime-read";
-import { canonicalRuntimeReceipt, readRuntimeReceipt } from "./runtime-receipts";
+import {
+	boundedStoredReceipt,
+	canonicalRuntimeReceipt,
+	readRuntimeReceipt,
+	type StoredReceiptRow,
+} from "./runtime-receipts";
 import {
 	type RuntimePageRequest,
 	type RuntimeResourceRequest,
@@ -1320,6 +1325,11 @@ export class EngineStore {
 			if (browserPayloadHash && row.browser_payload_hash !== browserPayloadHash)
 				throw new EngineCommandConflictError(commandId);
 			const canonicalRow = await readRuntimeReceipt(sql, commandId);
+			if (canonicalRow?.target_unavailable && canonicalRow.browser_payload_hash)
+				throw new EngineTargetError(
+					"source_unavailable",
+					"The frozen browser target exceeds its native read budget",
+				);
 			const receipt = canonicalRow?.receipt ? (JSON.parse(canonicalRow.receipt) as EngineCommandReceipt) : undefined;
 			const canonical = canonicalRow && canonicalRuntimeReceipt(canonicalRow);
 			const attempt = row.attempt_id
@@ -2133,18 +2143,20 @@ export class EngineStore {
 	async admitCommand(command: EngineCommandIdentity, processorGeneration: number): Promise<EngineCommandAdmission> {
 		return await this.#transaction(async sql => {
 			const rows = (await sql.unsafe(
-				`SELECT canonical_hash, state, processor_generation, receipt
+				`SELECT canonical_hash, state, processor_generation, outcome,OCTET_LENGTH(receipt) AS receipt_bytes,
+				 CASE WHEN OCTET_LENGTH(receipt)<=${runtimeLimits.liveChangeBytes} THEN receipt END AS receipt
 				 FROM engine_commands WHERE command_id = ?`,
 				[command.commandId],
-			)) as CommandRow[];
+			)) as Array<CommandRow & StoredReceiptRow>;
 			const existing = rows[0];
 			if (existing) {
 				if (existing.canonical_hash !== command.canonicalHash) {
 					throw new EngineCommandConflictError(command.commandId);
 				}
 				if (existing.state === "settled") {
-					if (!existing.receipt) throw new Error(`Settled command ${command.commandId} has no receipt`);
-					return { status: "replay", receipt: JSON.parse(existing.receipt) as EngineCommandReceipt };
+					const receipt = boundedStoredReceipt(existing);
+					if (!receipt) throw new Error(`Settled command ${command.commandId} has no receipt`);
+					return { status: "replay", receipt };
 				}
 				if (Number(existing.processor_generation) === processorGeneration) return { status: "in_progress" };
 				if (existing.processor_generation !== null || command.engineGeneration < processorGeneration) {
@@ -3805,9 +3817,9 @@ export class EngineStore {
 		required = false,
 	): Promise<void> {
 		const rows = (await sql.unsafe(
-			"SELECT canonical_hash, state, processor_generation, receipt FROM engine_commands WHERE command_id = ?",
+			"SELECT canonical_hash,state,processor_generation,OCTET_LENGTH(receipt) AS receipt_bytes FROM engine_commands WHERE command_id=?",
 			[commandId],
-		)) as CommandRow[];
+		)) as Array<Omit<CommandRow, "receipt"> & { receipt_bytes: number }>;
 		const existing = rows[0];
 		if (!existing) {
 			if (required) throw new Error(`Command ${commandId} was not admitted`);
@@ -3818,7 +3830,19 @@ export class EngineStore {
 		}
 		const serialized = JSON.stringify(receipt);
 		if (existing.state === "settled") {
-			if (existing.receipt !== serialized) throw new Error(`Command ${commandId} already has another receipt`);
+			const bytes = Buffer.byteLength(serialized);
+			if (Number(existing.receipt_bytes) !== bytes)
+				throw new Error(`Command ${commandId} already has another receipt`);
+			if (bytes * 2 + runtimeLimits.bulkPreviewBytes > runtimeLimits.bootstrapMaterializedBytes)
+				throw new EngineTargetError(
+					"restore_budget",
+					"Exact legacy settlement comparison exceeds its native read budget",
+				);
+			const matches = await sql.unsafe("SELECT 1 FROM engine_commands WHERE command_id=? AND receipt=?", [
+				commandId,
+				serialized,
+			]);
+			if (!matches.length) throw new Error(`Command ${commandId} already has another receipt`);
 			return;
 		}
 		const now = Date.now();
