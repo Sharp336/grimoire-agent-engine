@@ -29,6 +29,7 @@
 ### Fixed
 
 - Refresh changed fallback routes and provider accounts for the next ordinary message while keeping the active Attempt on its launch settings.
+- Reject oversized retained profile metadata before reading its body, preserving the original data for recovery.
 
 - Report archived child transcripts as unavailable instead of silently showing empty history, and reopen the same references after restore.
 

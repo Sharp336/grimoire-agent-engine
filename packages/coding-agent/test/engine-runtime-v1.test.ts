@@ -548,6 +548,71 @@ describe("runtime v1 durable boundaries", () => {
 		}
 	});
 
+	it("refuses oversized retained profile metadata without losing its bytes or blocking an unrelated agent", async () => {
+		let store = await createStore();
+		const target = await active(store);
+		await active(store, "sibling");
+		const agentInstanceRef = identity("root").agentInstanceRef;
+		const scope: RuntimeScope = { kind: "attempt", agentInstanceRef, attemptId: target.attemptId, kinds: ["state"] };
+		const request = { principalId: "owner", agentInstanceRef, attemptId: target.attemptId };
+		const state = {
+			profileRef: "gctx:2222222222222222",
+			primaryRouteRef: "gctx:3333333333333333",
+			routeRef: "gctx:4444444444444444",
+			fallback: true,
+			phase: "active" as const,
+		};
+		await store.commitAttemptProfileRoute(target, state);
+		const before = await store.getAttempt(target.attemptId);
+		expect(JSON.parse(before!.profile_route_state!)).toMatchObject(state);
+		const file = path.join(directories.at(-1)!, "engine.sqlite");
+		const sql = new SQL(`sqlite:${file.replaceAll("\\", "/")}`);
+		const retained = JSON.stringify({ ...state, legacy: "界".repeat(1024 * 1024) });
+		try {
+			await sql.unsafe("UPDATE engine_attempts SET profile_route_state=? WHERE attempt_id=?", [
+				retained,
+				target.attemptId,
+			]);
+			const readProfile = () => store.getAttempt(target.attemptId);
+			const listProfiles = () => store.listAttempts();
+			const projectDetail = () => store.commitAttemptTransition(target, "paused", [{ kind: "paused" }]);
+			for (const read of [readProfile, listProfiles, projectDetail]) {
+				const error = await read().then(
+					() => null,
+					(error: unknown) => error,
+				);
+				expect(error, read.name).toMatchObject({ code: "source_unavailable" });
+			}
+			const attempts = (await sql.unsafe("SELECT state FROM engine_attempts WHERE attempt_id=?", [
+				target.attemptId,
+			])) as Array<{ state: string }>;
+			expect(attempts).toEqual([{ state: "running" }]);
+			expect((await store.runtimeSnapshot(scope, request)).agents[0].profileRoute).toMatchObject({ state });
+			expect((await store.getAttempt("attempt-sibling"))?.state).toBe("running");
+			const foreign = await store.runtimeSnapshot(scope, { ...request, principalId: "foreign" }).then(
+				() => null,
+				(error: unknown) => error,
+			);
+			expect(foreign).toMatchObject({ code: "agent_not_found" });
+			await store.close();
+			stores.splice(stores.indexOf(store), 1);
+			store = await EngineStore.open(file);
+			stores.push(store);
+			expect(
+				await readProfile().then(
+					() => null,
+					(error: unknown) => error,
+				),
+			).toMatchObject({ code: "source_unavailable" });
+			const rows = await sql.unsafe("SELECT profile_route_state FROM engine_attempts WHERE attempt_id=?", [
+				target.attemptId,
+			]);
+			expect(rows[0].profile_route_state).toBe(retained);
+		} finally {
+			await sql.end();
+		}
+	});
+
 	it("projects profile route facts through exact Attempt detail without changing app summaries", async () => {
 		let store = await createStore();
 		const target = await active(store);

@@ -46,10 +46,13 @@ import {
 } from "./runtime-ownership";
 import { assertRuntimePendingBudget, RUNTIME_PENDING_SCHEMA } from "./runtime-pending";
 import {
+	boundedProfileRoute,
 	RUNTIME_EVENT_SCOPE_SCHEMA,
 	RUNTIME_KIND_MASK,
+	RUNTIME_PROFILE_ROUTE_COLUMNS,
 	RUNTIME_PROJECTION_SCHEMA,
 	RUNTIME_TOOL_SCHEMA,
+	type RuntimeProfileRouteRow,
 	type RuntimeProjectionNotice,
 	type RuntimeTargetRequest,
 	recordRuntimeProjection,
@@ -212,6 +215,12 @@ export interface EngineAttemptRecord extends EngineAttemptRow {
 	row_id: number;
 	cause: string | null;
 	updated_at: number;
+}
+
+function attemptRecordFromRow(row: EngineAttemptRecord & RuntimeProfileRouteRow): EngineAttemptRecord {
+	boundedProfileRoute(row);
+	const { profile_route_bytes: _bytes, ...attempt } = row;
+	return attempt;
 }
 
 export type EngineAttemptTargetRecord = Pick<
@@ -3246,11 +3255,11 @@ export class EngineStore {
 			 engine_generation, binding_generation, authority_generation, state, cause, updated_at,
 			 transcript_session_id, transcript_path, transcript_leaf_entry_id,
 			 transcript_byte_boundary, transcript_revision, retry_attempt, retry_max_attempts,
-			 retry_route, retry_delay_ms, retry_scheduled_at, retry_outcome, retry_error, profile_route_state
+			 retry_route, retry_delay_ms, retry_scheduled_at, retry_outcome, retry_error, ${RUNTIME_PROFILE_ROUTE_COLUMNS}
 			 FROM engine_attempts WHERE attempt_id = ?`,
 			[attemptId],
-		)) as EngineAttemptRecord[];
-		return rows[0];
+		)) as Array<EngineAttemptRecord & RuntimeProfileRouteRow>;
+		return rows[0] ? attemptRecordFromRow(rows[0]) : undefined;
 	}
 
 	async getAttemptTarget(attemptId: string): Promise<EngineAttemptTargetRecord | undefined> {
@@ -3268,11 +3277,11 @@ export class EngineStore {
 			 engine_generation, binding_generation, authority_generation, state, cause, updated_at,
 			 transcript_session_id, transcript_path, transcript_leaf_entry_id, transcript_byte_boundary,
 			 transcript_revision, retry_attempt, retry_max_attempts, retry_route, retry_delay_ms,
-			 retry_scheduled_at, retry_outcome, retry_error, profile_route_state
+			 retry_scheduled_at, retry_outcome, retry_error, ${RUNTIME_PROFILE_ROUTE_COLUMNS}
 			 FROM engine_attempts WHERE rowid > ? ORDER BY rowid LIMIT ?`,
 			[Math.max(0, Math.floor(afterRowId)), Math.max(1, Math.min(1000, Math.floor(limit)))],
-		)) as EngineAttemptRecord[];
-		return rows;
+		)) as Array<EngineAttemptRecord & RuntimeProfileRouteRow>;
+		return rows.map(attemptRecordFromRow);
 	}
 
 	async eventsAfter(attemptId: string, afterEventId = 0, limit = 100): Promise<EngineEvent[]> {
@@ -3387,11 +3396,11 @@ export class EngineStore {
 				`SELECT agent_instance_id, execution_id, attempt_id, command_id, binding_id, engine_generation, binding_generation,
 				 authority_generation, state, transcript_session_id, transcript_path, transcript_leaf_entry_id,
 				 transcript_byte_boundary, transcript_revision, retry_attempt, retry_max_attempts,
-				 retry_route, retry_delay_ms, retry_scheduled_at, retry_outcome, retry_error, profile_route_state
+				 retry_route, retry_delay_ms, retry_scheduled_at, retry_outcome, retry_error
 				 FROM engine_attempts
 				 WHERE engine_generation < ? AND state IN ('accepted', 'running', 'pause_requested', 'paused', 'waiting_input', 'cancel_requested')`,
 				[engineGeneration],
-			)) as EngineAttemptRow[];
+			)) as Array<Omit<EngineAttemptRow, "profile_route_state">>;
 			const abandonedEffects = (await sql.unsafe(
 				`SELECT e.effect_id, e.command_id, e.agent_instance_id, e.execution_id, e.attempt_id, e.binding_id,
 				 e.engine_generation, e.binding_generation, e.authority_generation, e.tool_call_id, e.tool_name,

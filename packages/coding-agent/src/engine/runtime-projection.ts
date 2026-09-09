@@ -14,6 +14,23 @@ import { runtimeToolBaselines } from "./runtime-resources";
 import { readStartExpectedRevision } from "./start-fence";
 
 export type RuntimeSql = InstanceType<typeof SQL>;
+
+export interface RuntimeProfileRouteRow {
+	profile_route_state: string | null;
+	profile_route_bytes: number | null;
+}
+
+export const RUNTIME_PROFILE_ROUTE_COLUMNS = `
+	CASE WHEN OCTET_LENGTH(profile_route_state)<=${runtimeLimits.bulkPreviewBytes}
+	THEN profile_route_state END AS profile_route_state,
+	OCTET_LENGTH(profile_route_state) AS profile_route_bytes`;
+
+export function boundedProfileRoute(row: RuntimeProfileRouteRow): string | null {
+	if (Number(row.profile_route_bytes) > runtimeLimits.bulkPreviewBytes)
+		throw new EngineTargetError("source_unavailable", "Retained profile route exceeds its metadata budget");
+	return row.profile_route_state;
+}
+
 export const RUNTIME_PROJECTION_SCHEMA = [
 	"ALTER TABLE engine_agent_identity ADD COLUMN root_agent_instance_ref TEXT NOT NULL DEFAULT ''",
 	"ALTER TABLE engine_agent_identity ADD COLUMN summary_revision INTEGER NOT NULL DEFAULT 0",
@@ -192,15 +209,14 @@ export async function runtimeDetail(
 ): Promise<Record<string, unknown>> {
 	const routeRows = attempt
 		? ((await sql.unsafe(
-				"SELECT substr(profile_route_state,1,4097) AS value FROM engine_attempts WHERE attempt_id=? AND agent_instance_id=?",
+				`SELECT ${RUNTIME_PROFILE_ROUTE_COLUMNS} FROM engine_attempts WHERE attempt_id=? AND agent_instance_id=?`,
 				[attempt.attempt_id, identity.agent_instance_id],
-			)) as Array<{ value: string | null }>)
+			)) as RuntimeProfileRouteRow[])
 		: [];
+	const retainedRoute = routeRows[0] ? boundedProfileRoute(routeRows[0]) : null;
 	let profileRoute: Record<string, unknown> | undefined;
-	if (attempt && routeRows[0]?.value) {
-		if (Buffer.byteLength(routeRows[0].value) > 4096)
-			throw new Error("Retained profile route exceeds its metadata budget");
-		const { eventSeq, ...state } = JSON.parse(routeRows[0].value) as Record<string, unknown>;
+	if (attempt && retainedRoute) {
+		const { eventSeq, ...state } = JSON.parse(retainedRoute) as Record<string, unknown>;
 		profileRoute = {
 			state,
 			eventSeq: profileRouteEventSeq ?? eventSeq ?? 0,
