@@ -40,6 +40,7 @@ import {
 	ownershipProofMatches,
 	RUNTIME_OWNERSHIP_SCHEMA,
 } from "./runtime-ownership";
+import { assertRuntimePendingBudget, RUNTIME_PENDING_SCHEMA } from "./runtime-pending";
 import {
 	RUNTIME_EVENT_SCOPE_SCHEMA,
 	RUNTIME_KIND_MASK,
@@ -758,6 +759,7 @@ const SCHEMA_MIGRATIONS = [
 	},
 	{ version: 21, statements: RUNTIME_TOOL_SCHEMA, requiredColumns: [] },
 	{ version: 22, statements: RUNTIME_EVENT_SCOPE_SCHEMA, requiredColumns: [] },
+	{ version: 23, statements: RUNTIME_PENDING_SCHEMA, requiredColumns: [] },
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;
@@ -1204,49 +1206,6 @@ export class EngineStore {
 			kind,
 			payload,
 		});
-	}
-
-	async #assertPendingBudget(
-		sql: SqlClient,
-		agentInstanceId: string,
-		bytes: number,
-		control = false,
-		excludingCommandId = "",
-		recordsDelta = 1,
-	): Promise<void> {
-		const controls = [...ENGINE_CONTROL_OPS];
-		const commandWhere = `state='received' AND command_id<>? AND operation ${control ? "IN" : "NOT IN"} (${controls.map(() => "?").join(",")})`;
-		const commands = (await sql.unsafe(
-			`SELECT COUNT(*) AS records,COALESCE(SUM(payload_bytes),0) AS bytes FROM engine_commands WHERE ${commandWhere}`,
-			[excludingCommandId, ...controls],
-		)) as Array<{ records: number; bytes: number }>;
-		const inbox = control
-			? [{ records: 0, bytes: 0 }]
-			: ((await sql.unsafe(
-					"SELECT COUNT(*) AS records,COALESCE(SUM(octet_length(delivery_payload)+COALESCE(octet_length(annotation),0)),0) AS bytes FROM engine_inbox_items WHERE disposition='pending'",
-				)) as Array<{ records: number; bytes: number }>);
-		if (
-			Number(commands[0].records) + Number(inbox[0].records) + recordsDelta >
-				(control ? runtimeLimits.controlPendingRecords : runtimeLimits.devicePendingRecords) ||
-			Number(commands[0].bytes) + Number(inbox[0].bytes) + bytes >
-				(control ? runtimeLimits.controlPendingBytes : runtimeLimits.devicePendingBytes)
-		)
-			throw new EngineTargetError("queue_full", "Device pending admission budget is full");
-		if (control) return;
-		const agentCommands = (await sql.unsafe(
-			`SELECT COUNT(*) AS records,COALESCE(SUM(payload_bytes),0) AS bytes FROM engine_commands WHERE ${commandWhere} AND agent_instance_id=?`,
-			[excludingCommandId, ...controls, agentInstanceId],
-		)) as Array<{ records: number; bytes: number }>;
-		const agentInbox = (await sql.unsafe(
-			"SELECT COUNT(*) AS records,COALESCE(SUM(octet_length(delivery_payload)+COALESCE(octet_length(annotation),0)),0) AS bytes FROM engine_inbox_items WHERE disposition='pending' AND agent_instance_id=?",
-			[agentInstanceId],
-		)) as Array<{ records: number; bytes: number }>;
-		if (
-			Number(agentCommands[0].records) + Number(agentInbox[0].records) + recordsDelta >
-				runtimeLimits.agentPendingRecords ||
-			Number(agentCommands[0].bytes) + Number(agentInbox[0].bytes) + bytes > runtimeLimits.agentPendingBytes
-		)
-			throw new EngineTargetError("queue_full", "AgentInstance pending admission budget is full");
 	}
 
 	async runtimeSnapshot(
@@ -1945,7 +1904,13 @@ export class EngineStore {
 				[target.sessionId],
 			)) as Array<{ position: number }>;
 			await this.#assertIntent(sql, target.agentInstanceId, expectedIntentRevision);
-			await this.#assertPendingBudget(sql, target.agentInstanceId, Buffer.byteLength(source.body), false, commandId);
+			await assertRuntimePendingBudget(
+				sql,
+				target.agentInstanceId,
+				Buffer.byteLength(source.body),
+				false,
+				commandId,
+			);
 			const now = Date.now();
 			await sql.unsafe(
 				`INSERT INTO engine_inbox_items(
@@ -2193,7 +2158,7 @@ export class EngineStore {
 
 			const now = Date.now();
 			const payloadBytes = Buffer.byteLength(command.serializedCommand ?? "");
-			await this.#assertPendingBudget(
+			await assertRuntimePendingBudget(
 				sql,
 				command.agentInstanceId,
 				payloadBytes,
@@ -2205,8 +2170,8 @@ export class EngineStore {
 				 command_id, operation, device_id, engine_id, engine_generation, agent_instance_id,
 				 agent_instance_ref, parent_agent_instance_id, binding_id, binding_generation,
 				 execution_id, attempt_id, authority_generation, payload_hash, canonical_hash,
-				 state, processor_generation, received_at, updated_at,principal_id,browser_payload_hash,payload_bytes,serialized_command
-				 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?,?,?,?,?)`,
+				 state, processor_generation, received_at, updated_at,principal_id,browser_payload_hash,payload_bytes,serialized_command,control_admission
+				 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?,?,?,?,?,?)`,
 				[
 					command.commandId,
 					command.operation,
@@ -2230,6 +2195,7 @@ export class EngineStore {
 					command.browserPayloadHash ?? null,
 					payloadBytes,
 					command.serializedCommand ?? null,
+					ENGINE_CONTROL_OPS.has(command.operation) ? 1 : 0,
 				],
 			);
 			if (command.operation === "start") {
@@ -3439,7 +3405,7 @@ export class EngineStore {
 		}
 		const revision = item.revision + 1;
 		if (desired.disposition === "pending")
-			await this.#assertPendingBudget(
+			await assertRuntimePendingBudget(
 				sql,
 				target.agentInstanceId,
 				Buffer.byteLength(desired.deliveryPayload) +

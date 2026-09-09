@@ -735,6 +735,167 @@ describe("runtime v1 durable boundaries", () => {
 		expect((page.items as unknown[]).length).toBe(runtimeLimits.httpPageRecords);
 		expect(page.nextCursor).toBeString();
 	});
+	it("keeps exact pending queue counts through edits, rollback, consumption and reopen", async () => {
+		let store = await createStore();
+		const target: EngineInboxTarget = { ...(await active(store)), sessionId: "count-session" };
+		const scope: RuntimeScope = {
+			kind: "agent",
+			agentInstanceRef: identity("root").agentInstanceRef,
+			kinds: ["queue"],
+		};
+		const count = async () => (await store.runtimeSnapshot(scope, { principalId: "owner" })).agents[0].queue;
+		expect(await count()).toMatchObject({ pendingCount: 0 });
+		const { item } = await store.enqueueInboxItem(target, {
+			sourceEventId: "count-item",
+			sourceType: "user",
+			body: "before",
+		});
+		expect(await count()).toMatchObject({ pendingCount: 1 });
+		const edited = await store.mutateInboxItem(target, {
+			mutationId: "count-edit",
+			queueId: item.queueId,
+			expectedRevision: 1,
+			op: "edit",
+			value: "after",
+		});
+		expect(await count()).toMatchObject({ pendingCount: 1 });
+		const databasePath = path.join(directories.at(-1)!, "engine.sqlite");
+		const inspect = new SQL(`sqlite:${databasePath.replaceAll("\\", "/")}`);
+		try {
+			await inspect.unsafe(
+				"CREATE TRIGGER fail_count_event BEFORE INSERT ON engine_event_outbox WHEN NEW.causation_command_id='count-rollback' BEGIN SELECT RAISE(ABORT,'count rollback'); END",
+			);
+			const failure = await store
+				.enqueueInboxItem(target, { sourceEventId: "count-rollback", sourceType: "user", body: "must roll back" })
+				.then(
+					() => undefined,
+					error => error,
+				);
+			expect(failure).toBeInstanceOf(Error);
+			expect(await count()).toMatchObject({ pendingCount: 1 });
+			const counts = await inspect.unsafe(
+				"SELECT queue_pending_count FROM engine_agent_identity WHERE agent_instance_id=?",
+				[target.agentInstanceId],
+			);
+			expect(counts.length).toBe(1);
+			expect(counts[0].queue_pending_count).toBe(1);
+			await inspect.unsafe("DROP TRIGGER fail_count_event");
+		} finally {
+			await inspect.end();
+		}
+		await store.close();
+		stores.splice(stores.indexOf(store), 1);
+		store = await EngineStore.open(databasePath);
+		stores.push(store);
+		expect(await count()).toMatchObject({ pendingCount: 1 });
+		await store.mutateInboxItem(target, {
+			mutationId: "count-consume",
+			queueId: item.queueId,
+			expectedRevision: edited.revision,
+			op: "acknowledge",
+		});
+		expect(await count()).toMatchObject({ pendingCount: 0 });
+	});
+	it("reserves all control records when the device ordinary record budget is full", async () => {
+		const store = await createStore();
+		const first = { ...command("device-0", "enqueue"), ...identity("device-agent-0") };
+		for (let n = 0; n < runtimeLimits.devicePendingRecords; n++) {
+			const agent = identity(`device-agent-${Math.floor(n / runtimeLimits.agentPendingRecords)}`);
+			await store.admitCommand({ ...command(`device-${n}`, "enqueue"), ...agent }, 1);
+		}
+		const overflow = { ...command("device-overflow", "enqueue"), ...identity("new-device-agent") };
+		const rejected = await store.admitCommand(overflow, 1).then(
+			() => undefined,
+			error => error,
+		);
+		expect(rejected).toMatchObject({ code: "queue_full" });
+		for (let n = 0; n < runtimeLimits.controlPendingRecords; n++)
+			expect(
+				(await store.admitCommand({ ...command(`reserved-${n}`, "cancel"), ...identity("device-agent-0") }, 1))
+					.status,
+			).toBe("claimed");
+		const controlOverflow = await store
+			.admitCommand({ ...command("reserved-overflow", "cancel"), ...identity("device-agent-0") }, 1)
+			.then(
+				() => undefined,
+				error => error,
+			);
+		expect(controlOverflow).toMatchObject({ code: "queue_full" });
+		await store.settleCommand(first.commandId, first.canonicalHash, { outcome: "applied" });
+		expect((await store.admitCommand(overflow, 1)).status).toBe("claimed");
+		const inspect = new SQL(`sqlite:${path.join(directories.at(-1)!, "engine.sqlite").replaceAll("\\", "/")}`);
+		try {
+			const counts = await inspect.unsafe(
+				"SELECT control_admission,COUNT(*) AS count FROM engine_commands WHERE state='received' GROUP BY control_admission ORDER BY control_admission",
+			);
+			expect(counts.length).toBe(2);
+			expect(counts[0].control_admission).toBe(0);
+			expect(counts[0].count).toBe(runtimeLimits.devicePendingRecords);
+			expect(counts[1].control_admission).toBe(1);
+			expect(counts[1].count).toBe(runtimeLimits.controlPendingRecords);
+		} finally {
+			await inspect.end();
+		}
+	}, 90000);
+	it("enforces independent device and reserved-control byte budgets using real serialized commands", async () => {
+		const store = await createStore();
+		const bytes = runtimeLimits.deliveryBatchBytes;
+		const payload = JSON.stringify({ text: "x".repeat(bytes - 11) });
+		expect(Buffer.byteLength(payload)).toBe(bytes);
+		const perAgent = Math.floor(runtimeLimits.agentPendingBytes / bytes);
+		const records = Math.floor(runtimeLimits.devicePendingBytes / bytes);
+		expect(records).toBeLessThan(runtimeLimits.devicePendingRecords);
+		for (let n = 0; n < records; n++)
+			await store.admitCommand(
+				{
+					...command(`bytes-${n}`, "enqueue"),
+					...identity(`bytes-agent-${Math.floor(n / perAgent)}`),
+					serializedCommand: payload,
+				},
+				1,
+			);
+		const overflow = {
+			...command("bytes-overflow", "enqueue"),
+			...identity("new-byte-agent"),
+			serializedCommand: payload,
+		};
+		expect(
+			await store.admitCommand(overflow, 1).then(
+				() => undefined,
+				error => error,
+			),
+		).toMatchObject({ code: "queue_full" });
+		const controls = Math.floor(runtimeLimits.controlPendingBytes / bytes);
+		expect(controls).toBeLessThan(runtimeLimits.controlPendingRecords);
+		for (let n = 0; n < controls; n++)
+			expect(
+				(
+					await store.admitCommand(
+						{
+							...command(`reserved-bytes-${n}`, "cancel"),
+							...identity("bytes-agent-0"),
+							serializedCommand: payload,
+						},
+						1,
+					)
+				).status,
+			).toBe("claimed");
+		expect(
+			await store
+				.admitCommand(
+					{
+						...command("reserved-bytes-overflow", "cancel"),
+						...identity("bytes-agent-0"),
+						serializedCommand: payload,
+					},
+					1,
+				)
+				.then(
+					() => undefined,
+					error => error,
+				),
+		).toMatchObject({ code: "queue_full" });
+	}, 90000);
 	it("reads huge legacy queue fields through bounded previews and exact UTF-8 ranges", async () => {
 		const store = await createStore();
 		const agent = identity("queue-large");

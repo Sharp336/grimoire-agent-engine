@@ -117,6 +117,7 @@ export interface RuntimeIdentityRow {
 	authority_generation: number;
 	intent_revision: number;
 	queue_revision: number;
+	queue_pending_count: number;
 	root_agent_instance_ref: string;
 	summary_revision: number;
 	summary_json: string | null;
@@ -178,10 +179,6 @@ export async function runtimeDetail(
 	revision: number,
 ): Promise<Record<string, unknown>> {
 	const holds = await runtimeHolds(sql, identity.agent_instance_id, runtimeLimits.httpPageRecords + 1);
-	const queue = (await sql.unsafe(
-		"SELECT COUNT(*) AS count FROM engine_inbox_items WHERE agent_instance_id=? AND disposition='pending'",
-		[identity.agent_instance_id],
-	)) as Array<{ count: number }>;
 	const inputs =
 		attempt && !TERMINAL.has(attempt.state)
 			? ((await sql.unsafe(
@@ -218,8 +215,8 @@ export async function runtimeDetail(
 		holdsHasMore: holds.length > heldPage.length,
 		queue: {
 			revision: Number(identity.queue_revision),
-			pendingCount: Number(queue[0].count),
-			hasMore: Number(queue[0].count) > 0,
+			pendingCount: Number(identity.queue_pending_count),
+			hasMore: Number(identity.queue_pending_count) > 0,
 		},
 		pendingInputs: inputPage,
 		inputsHasMore: inputs.length > inputPage.length,
@@ -543,10 +540,6 @@ async function summaryValue(
 		SELECT 1 FROM engine_branch_holds h JOIN ancestors a ON h.source_agent_instance_id=a.id LIMIT 1`,
 		[identity.agent_instance_id],
 	);
-	const queue = await sql.unsafe(
-		"SELECT 1 FROM engine_inbox_items WHERE agent_instance_id=? AND disposition='pending' LIMIT 1",
-		[identity.agent_instance_id],
-	);
 	const authority = Number(attempt?.authority_generation ?? identity.authority_generation);
 	const pendingInputs =
 		attempt && !TERMINAL.has(attempt.state)
@@ -582,7 +575,7 @@ async function summaryValue(
 		attention: {
 			held: held.length > 0,
 			needsInput: pendingInputs.length > 0,
-			queuePending: queue.length > 0,
+			queuePending: Number(identity.queue_pending_count) > 0,
 		},
 	};
 }
