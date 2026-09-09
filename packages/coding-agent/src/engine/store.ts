@@ -3306,18 +3306,30 @@ export class EngineStore {
 		return rows.map(eventFromRow);
 	}
 
-	async pendingEventsForSink(sinkId: string, limit = 100): Promise<EngineEvent[]> {
+	async pendingEventsForSink(
+		sinkId: string,
+		limit = 100,
+		afterEventId = 0,
+	): Promise<{ events: EngineEvent[]; throughCursor: number; scannedRecords: number }> {
 		if (!sinkId.trim()) throw new Error("Event sink ID must be non-empty");
+		if (!Number.isSafeInteger(afterEventId) || afterEventId < 0) throw new Error("Invalid event delivery cursor");
 		const rows = (await this.#client.unsafe(
-			`SELECT e.event_id, e.seq, e.causation_command_id, e.agent_instance_id, e.execution_id, e.attempt_id,
-			 e.binding_id, e.engine_generation, e.binding_generation, e.authority_generation, e.kind, e.payload, e.created_at
-			 FROM engine_event_outbox e
+			`WITH page AS MATERIALIZED (
+			 SELECT event_id FROM engine_event_outbox WHERE event_id>? ORDER BY event_id LIMIT ?
+			)
+			 SELECT e.event_id, e.seq, e.causation_command_id, e.agent_instance_id, e.execution_id, e.attempt_id,
+			 e.binding_id, e.engine_generation, e.binding_generation, e.authority_generation, e.kind,
+			 CASE WHEN d.state='delivered' THEN NULL ELSE e.payload END AS payload, e.created_at, d.state AS delivery_state
+			 FROM page JOIN engine_event_outbox e ON e.event_id=page.event_id
 			 LEFT JOIN engine_event_deliveries d ON d.event_id=e.event_id AND d.sink_id=?
-			 WHERE d.event_id IS NULL OR d.state='pending'
-			 ORDER BY e.event_id LIMIT ?`,
-			[sinkId, Math.max(1, Math.min(1000, Math.floor(limit)))],
-		)) as EventRow[];
-		return rows.map(eventFromRow);
+			 ORDER BY e.event_id`,
+			[afterEventId, Math.max(1, Math.min(1000, Math.floor(limit))), sinkId],
+		)) as Array<EventRow & { delivery_state: string | null }>;
+		return {
+			events: rows.filter(row => row.delivery_state !== "delivered").map(eventFromRow),
+			throughCursor: rows.at(-1)?.event_id ?? afterEventId,
+			scannedRecords: rows.length,
+		};
 	}
 
 	async markEventDeliveryFailed(eventId: number, sinkId: string, error: string): Promise<void> {

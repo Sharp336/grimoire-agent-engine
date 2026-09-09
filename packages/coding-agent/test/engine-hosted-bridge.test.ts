@@ -1029,9 +1029,9 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			await bridge.drain();
 			expect(rpc.terminalStatus).toBe("interrupted");
 			expect(rpc.events.filter(event => event.type === "attempt.interrupted")).toHaveLength(1);
-			expect(await runtime.store.pendingEventsForSink(`nats:${adapter.deviceRoute}:${adapter.engineRoute}`)).toEqual(
-				[],
-			);
+			expect(
+				(await runtime.store.pendingEventsForSink(`nats:${adapter.deviceRoute}:${adapter.engineRoute}`)).events,
+			).toEqual([]);
 		} finally {
 			await bridge.dispose();
 			await adapter.dispose();
