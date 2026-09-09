@@ -4,6 +4,8 @@
 
 ### Added
 
+- Model reference queries expose supported effort levels to headless clients, including bounded batch discovery.
+
 - Native history archives now include referenced image payloads and restore them without the original blob store; incomplete copies and conflicting existing blobs are rejected.
 
 - Added idle-only disk reclamation with measured database/WAL savings, low-space deferral and safe snapshot cursor resynchronization.

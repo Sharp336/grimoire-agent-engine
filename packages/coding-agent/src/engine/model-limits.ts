@@ -1,10 +1,12 @@
 import { getBundledModelReferenceIndex } from "@oh-my-pi/pi-catalog/identity/bundled";
+import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 
 export interface ResolvedModelLimits {
 	contextWindow: number;
 	maxOutputTokens: number;
 	referenceProvider: string;
 	referenceModelId: string;
+	reasoningEfforts: readonly string[];
 }
 
 /** Resolve execution limits from the exact model identity through the bundled canonical reference index. */
@@ -30,6 +32,7 @@ export function resolveCanonicalModelLimits(modelIdentityId: string): ResolvedMo
 		maxOutputTokens,
 		referenceProvider: reference.provider,
 		referenceModelId: reference.id,
+		reasoningEfforts: getSupportedEfforts(reference),
 	};
 }
 

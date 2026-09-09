@@ -252,6 +252,17 @@ describe("Engine Control + Query", () => {
 			status: "unknown",
 			modelIdentityId: "private-provider/custom-model",
 		});
+		// Consumers must get the model's effort ladder, not just a saved profile's default.
+		expect(
+			await client.request("models.reference", { modelIds: ["gpt-5.6-sol", "deepseek-v4-flash", "private/custom"] }),
+		).toMatchObject({
+			models: [
+				{ status: "resolved", reasoningEfforts: ["low", "medium", "high", "xhigh", "max"] },
+				{ status: "resolved", reasoningEfforts: ["low", "high", "max"] },
+				{ status: "unknown", modelIdentityId: "private/custom" },
+			],
+		});
+		await expect(client.request("models.reference", { modelIds: Array(65).fill("gpt-5.6-sol") })).rejects.toThrow();
 		expect(
 			await rawRequest(
 				server.endpoint,

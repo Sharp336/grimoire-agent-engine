@@ -571,6 +571,19 @@ async function dispatchRequest(
 		case "session.usage":
 			return await options.runtime.sessionUsage(requiredTarget(params), signal);
 		case "models.reference": {
+			if (params.modelIds !== undefined) {
+				const ids = requiredStringArray(params, "modelIds");
+				if (ids.length > 64 || ids.some(id => id.length > 300))
+					throw new Error("At most 64 bounded model ids are allowed");
+				return {
+					models: ids.map(modelIdentityId => {
+						const reference = resolveCanonicalModelLimits(modelIdentityId);
+						return reference
+							? { status: "resolved", modelIdentityId, ...reference }
+							: { status: "unknown", modelIdentityId };
+					}),
+				};
+			}
 			const modelIdentityId = requiredString(params, "modelIdentityId");
 			const limits = resolveCanonicalModelLimits(modelIdentityId);
 			return limits ? { status: "resolved", modelIdentityId, ...limits } : { status: "unknown", modelIdentityId };
