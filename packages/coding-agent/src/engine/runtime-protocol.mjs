@@ -49,7 +49,7 @@ const encodedBytes = value => new TextEncoder().encode(value).byteLength;
 const projectionLimits = {
   agentSummary: 'summaryBytes', detailState: 'detailStateBytes', change: 'liveChangeBytes',
   bulkPreview: 'bulkPreviewBytes', snapshot: 'httpPageBytes', historyPage: 'httpPageBytes',
-  inputDetail: 'httpPageBytes', inputPage: 'httpPageBytes', holdsPage: 'httpPageBytes', messagesPage: 'httpPageBytes',
+  inputDetail: 'httpPageBytes', inputPage: 'httpPageBytes', holdsPage: 'httpPageBytes', messagesPage: 'httpPageBytes', toolsPage: 'httpPageBytes',
   queuePage: 'httpPageBytes', queueItem: 'liveChangeBytes',
 };
 
@@ -83,7 +83,7 @@ function validProjection(name, value) {
   }
   if (name === 'detailState') {
     if ((value.target.attemptId ?? null) !== value.attemptId) return false;
-    if (value.attemptId === null && value.messages.length) return false;
+    if (value.attemptId === null && (value.messages.length || value.tools.length || value.toolsNextCursor !== null)) return false;
     if (value.messages.some(message => message.resource && (message.resource.agentInstanceRef !== value.agentInstanceRef
       || message.resource.attemptId !== value.attemptId))) return false;
   }
@@ -96,8 +96,12 @@ function validProjection(name, value) {
     if (resource && (resource.agentInstanceRef !== value.agentInstanceRef
       || (resource.attemptId !== undefined && resource.attemptId !== value.attemptId))) return false;
   }
-  if (name === 'toolChange') {
-    for (const resource of [value.value.result, value.value.preview?.resource]) {
+  if (['toolChange', 'detailState', 'toolsPage'].includes(name)) {
+    const tools = name === 'toolChange' ? [value.value] : name === 'detailState' ? value.tools : value.items;
+    if (name !== 'toolChange' && (new Set(tools.map(tool => tool.toolCallId)).size !== tools.length
+      || tools.some(tool => tool.revision > value.revision || !['started', 'unknown'].includes(tool.phase)))) return false;
+    if (name === 'toolsPage' && value.work.changes < tools.length) return false;
+    for (const tool of tools) for (const resource of [tool.result, tool.preview?.resource]) {
       if (resource && (resource.agentInstanceRef !== value.agentInstanceRef
         || resource.attemptId !== value.attemptId)) return false;
     }
@@ -162,7 +166,7 @@ export function canonicalRuntimeJson(value, depth = 0) {
 }
 
 export function validateRuntimeValue(name, value) {
-  const maxBytes = ['snapshot', 'summarySnapshot', 'detailSnapshot', 'historyPage', 'inputDetail', 'inputPage', 'holdsPage', 'messagesPage', 'queuePage'].includes(name) ? runtimeLimits.httpPageBytes : runtimeLimits.wsMessageBytes;
+  const maxBytes = ['snapshot', 'summarySnapshot', 'detailSnapshot', 'historyPage', 'inputDetail', 'inputPage', 'holdsPage', 'messagesPage', 'toolsPage', 'queuePage'].includes(name) ? runtimeLimits.httpPageBytes : runtimeLimits.wsMessageBytes;
   const canonical = canonicalRuntimeJson(value);
   if (new TextEncoder().encode(canonical).byteLength > maxBytes) throw new RuntimeProtocolError('payload_too_large', 'Runtime payload is too large. Use an HTTP attachment.');
   if (!matches({ $ref: `#/$defs/${name}` }, value)) throw new RuntimeProtocolError('invalid_params', `Invalid runtime ${name}.`);

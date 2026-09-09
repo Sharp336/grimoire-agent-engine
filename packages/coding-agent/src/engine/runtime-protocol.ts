@@ -6,8 +6,11 @@ import {
 } from "./runtime-protocol.mjs";
 import protocol from "./runtime-protocol-v1.json" with { type: "json" };
 
-export const RUNTIME_PROTOCOL_HASH = "sha256:a79e0c5810dbe4a2ba5061f0634c56024c561f48fff9e43e7f7027ebdc0ae6e0";
+export const RUNTIME_PROTOCOL_HASH = "sha256:c452c90ed9da3c60ae95f5bf7615df5fd9af17c27d9cadbc9d5db3d46cef495a";
 export const runtimeLimits = protocol["x-artel"].limits;
+export const runtimeToolPageRecords = protocol.$defs.toolsPage.properties.items.maxItems;
+export const runtimeToolIdChars = protocol.$defs.id.maxLength;
+export const runtimeToolNameChars = protocol.$defs.toolDetail.properties.name.maxLength;
 export const ENGINE_CONTROL_OPS = new Set(["pause", "resume", "cancel", "resolve_input", "resolve_tool_approval"]);
 
 export type RuntimeDetailKind = "assistant" | "tool" | "state" | "queue" | "input" | "history" | "usage";

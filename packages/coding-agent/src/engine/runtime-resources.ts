@@ -8,7 +8,14 @@ import {
 	type RuntimeSql,
 	runtimeIdentity,
 } from "./runtime-projection";
-import { type RuntimeAccess, runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
+import {
+	type RuntimeAccess,
+	runtimeLimits,
+	runtimeToolIdChars,
+	runtimeToolNameChars,
+	runtimeToolPageRecords,
+	validateRuntimeValue,
+} from "./runtime-protocol";
 import { runtimeQueueRange } from "./runtime-queue";
 
 export interface RuntimePageRequest extends RuntimeAccess {
@@ -43,7 +50,11 @@ function queryWork(): RuntimeQueryWork {
 	});
 }
 
-function cursorPosition(request: RuntimePageRequest, revision: number, initial: string | number): string | number {
+function cursorPosition(
+	request: Pick<RuntimePageRequest, "agentInstanceRef" | "attemptId" | "revision" | "cursor">,
+	revision: number,
+	initial: string | number,
+): string | number {
 	if (request.revision !== undefined && request.revision !== revision)
 		throw new EngineTargetError("stale_target", "Owner collection revision changed");
 	if (!request.cursor) return initial;
@@ -63,7 +74,11 @@ function cursorPosition(request: RuntimePageRequest, revision: number, initial: 
 	return parsed.after;
 }
 
-function cursorNext(request: RuntimePageRequest, revision: number, after: string | number): string {
+function cursorNext(
+	request: Pick<RuntimePageRequest, "agentInstanceRef" | "attemptId">,
+	revision: number,
+	after: string | number,
+): string {
 	return Buffer.from(
 		JSON.stringify({
 			agent: request.agentInstanceRef,
@@ -341,5 +356,69 @@ export async function readRuntimeMessages(
 	};
 	work.finish(result, messages.items.length);
 	validateRuntimeValue("messagesPage", result);
+	return result;
+}
+
+export async function runtimeToolBaselines(
+	sql: RuntimeSql,
+	request: Pick<RuntimePageRequest, "agentInstanceRef" | "attemptId" | "revision" | "cursor" | "limit">,
+	revision: number,
+	work?: RuntimeQueryWork,
+	maxBytes = runtimeLimits.bulkPreviewBytes * 2,
+): Promise<{ items: Record<string, unknown>[]; nextCursor: string | null }> {
+	const after = String(cursorPosition(request, revision, ""));
+	const limit = Math.min(request.limit ?? runtimeToolPageRecords, runtimeToolPageRecords);
+	const rows = (await sql.unsafe(
+		`SELECT effect_id,substr(tool_call_id,1,?) AS tool_call_id,substr(tool_name,1,?) AS tool_name,state,runtime_event_id
+		FROM engine_effects WHERE attempt_id=? AND effect_kind='tool' AND state IN ('started','unknown')
+		AND effect_id>? ORDER BY effect_id LIMIT ?`,
+		[runtimeToolIdChars + 1, runtimeToolNameChars + 1, request.attemptId!, after, limit + 1],
+	)) as Array<{ effect_id: string; tool_call_id: string; tool_name: string; state: string; runtime_event_id: number }>;
+	work?.rows(rows.length);
+	const items: Record<string, unknown>[] = [];
+	let bytes = 2;
+	let position = after;
+	for (const row of rows.slice(0, limit)) {
+		const item = {
+			toolCallId: row.tool_call_id,
+			name: row.tool_name,
+			phase: row.state === "unknown" ? "unknown" : "started",
+			revision: Number(row.runtime_event_id),
+		};
+		validateRuntimeValue("toolSnapshot", item);
+		const json = JSON.stringify(item);
+		if (bytes + Buffer.byteLength(json) + 1 > maxBytes) break;
+		items.push(work ? work.decode<Record<string, unknown>>(json) : item);
+		bytes += Buffer.byteLength(json) + 1;
+		position = row.effect_id;
+	}
+	return {
+		items,
+		nextCursor: items.length < rows.length ? cursorNext(request, revision, position) : null,
+	};
+}
+
+export async function readRuntimeTools(sql: RuntimeSql, request: RuntimePageRequest): Promise<Record<string, unknown>> {
+	const { principalId: _principal, authorizedAgentInstanceRefs: _refs, ...read } = request;
+	validateRuntimeValue("detailPageRequest", read);
+	const work = queryWork();
+	await readIdentity(sql, request, work);
+	const attempts = (await sql.unsafe("SELECT tool_revision FROM engine_attempts WHERE attempt_id=?", [
+		request.attemptId!,
+	])) as Array<{ tool_revision: number }>;
+	work.rows(attempts.length);
+	const revision = Number(attempts[0].tool_revision);
+	const tools = await runtimeToolBaselines(sql, request, revision, work, runtimeLimits.httpPageBytes / 2);
+	const result = {
+		version: "1.0",
+		agentInstanceRef: request.agentInstanceRef,
+		attemptId: request.attemptId,
+		revision,
+		items: tools.items,
+		nextCursor: tools.nextCursor,
+		work: work.value,
+	};
+	work.finish(result, tools.items.length);
+	validateRuntimeValue("toolsPage", result);
 	return result;
 }

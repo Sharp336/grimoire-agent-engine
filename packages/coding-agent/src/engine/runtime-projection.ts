@@ -9,6 +9,7 @@ import {
 	runtimeLimits,
 	validateRuntimeValue,
 } from "./runtime-protocol";
+import { runtimeToolBaselines } from "./runtime-resources";
 
 export type RuntimeSql = InstanceType<typeof SQL>;
 export const RUNTIME_PROJECTION_SCHEMA = [
@@ -39,6 +40,22 @@ export const RUNTIME_PROJECTION_SCHEMA = [
 	"CREATE INDEX engine_runtime_identity_ref_idx ON engine_agent_identity(agent_instance_ref)",
 	"CREATE INDEX engine_runtime_root_idx ON engine_agent_identity(root_agent_instance_ref,agent_instance_id)",
 	"CREATE INDEX engine_runtime_pending_start_idx ON engine_commands(agent_instance_id,received_at) WHERE operation='start' AND state='received'",
+] as const;
+
+export const RUNTIME_TOOL_SCHEMA = [
+	"ALTER TABLE engine_attempts ADD COLUMN tool_revision INTEGER NOT NULL DEFAULT 0",
+	"ALTER TABLE engine_effects ADD COLUMN runtime_event_id INTEGER NOT NULL DEFAULT 0",
+	"CREATE INDEX engine_runtime_active_tool_idx ON engine_effects(attempt_id,effect_id) WHERE effect_kind='tool' AND state IN ('started','unknown')",
+	`WITH revisions AS MATERIALIZED (
+		SELECT json_extract(payload,'$.invocationId') AS effect_id,MAX(event_id) AS revision
+		FROM engine_event_outbox WHERE kind IN ('tool_started','tool_settled') GROUP BY 1)
+	 UPDATE engine_effects SET runtime_event_id=COALESCE((SELECT revision FROM revisions r WHERE r.effect_id=engine_effects.effect_id),0)
+	 WHERE effect_kind='tool'`,
+	"UPDATE engine_attempts SET tool_revision=COALESCE((SELECT MAX(runtime_event_id) FROM engine_effects f WHERE f.attempt_id=engine_attempts.attempt_id AND f.effect_kind='tool'),0)",
+	"UPDATE engine_event_outbox SET detail_payload=json_set(detail_payload,'$.tools',json('[]'),'$.toolsNextCursor',NULL) WHERE detail_payload IS NOT NULL",
+	`UPDATE engine_event_outbox SET projection_payload=(SELECT json_group_array(json(CASE WHEN json_extract(value,'$.kind')='state'
+	 THEN json_set(value,'$.value.tools',json('[]'),'$.value.toolsNextCursor',NULL) ELSE value END)) FROM json_each(projection_payload))
+	 WHERE detail_payload IS NOT NULL AND projection_payload IS NOT NULL`,
 ] as const;
 
 const TERMINAL = new Set(["completed", "cancelled", "failed", "interrupted"]);
@@ -93,6 +110,7 @@ export interface RuntimeTargetRow {
 	detail_revision: number;
 	input_revision: number;
 	message_revision: number;
+	tool_revision: number;
 }
 
 export const RUNTIME_KIND_MASK = {
@@ -151,6 +169,13 @@ export async function runtimeDetail(
 		runtimeLimits.bulkPreviewBytes * 2,
 		runtimeLimits.httpPageRecords,
 	);
+	const tools = attempt
+		? await runtimeToolBaselines(
+				sql,
+				{ agentInstanceRef: identity.agent_instance_ref, attemptId: attempt.attempt_id },
+				Number(attempt.tool_revision),
+			)
+		: { items: [], nextCursor: null };
 	return {
 		agentInstanceRef: identity.agent_instance_ref,
 		attemptId: attempt?.attempt_id ?? null,
@@ -180,6 +205,8 @@ export async function runtimeDetail(
 		},
 		messages: [],
 		messagesHasMore: false,
+		tools: tools.items,
+		toolsNextCursor: tools.nextCursor,
 	};
 }
 
@@ -549,6 +576,18 @@ export async function recordRuntimeProjection(
 	sql: RuntimeSql,
 	event: EngineEvent,
 ): Promise<RuntimeProjectionNotice | undefined> {
+	const toolEvent = event.kind === "tool_started" || event.kind === "tool_settled";
+	if (toolEvent) {
+		await sql.unsafe(
+			"UPDATE engine_effects SET runtime_event_id=? WHERE effect_id=? AND attempt_id=? AND agent_instance_id=? AND effect_kind='tool'",
+			[event.eventId, String(event.payload?.invocationId), event.attemptId, event.agentInstanceId],
+		);
+		await sql.unsafe("UPDATE engine_attempts SET tool_revision=? WHERE attempt_id=? AND agent_instance_id=?", [
+			event.eventId,
+			event.attemptId,
+			event.agentInstanceId,
+		]);
+	}
 	const rows = (await sql.unsafe("SELECT * FROM engine_agent_identity WHERE agent_instance_id=?", [
 		event.agentInstanceId,
 	])) as RuntimeIdentityRow[];
@@ -651,7 +690,29 @@ export async function recordRuntimeProjection(
 		);
 		kinds |= RUNTIME_KIND_MASK.assistant;
 	}
-	if (SUMMARY_EVENTS.has(event.kind)) {
+	if (toolEvent) {
+		changes.push(
+			projectionChange(
+				"tool",
+				identity.agent_instance_ref,
+				event.eventId,
+				event.eventId,
+				{
+					toolCallId: event.payload?.toolCallId,
+					name: event.payload?.toolName,
+					phase:
+						event.kind === "tool_started"
+							? "started"
+							: event.payload?.status === "completed"
+								? "finished"
+								: event.payload?.status,
+				},
+				event.attemptId,
+			),
+		);
+		kinds |= RUNTIME_KIND_MASK.tool;
+	}
+	if (SUMMARY_EVENTS.has(event.kind) || toolEvent) {
 		const attempts = (await sql.unsafe("SELECT * FROM engine_attempts WHERE attempt_id=? AND agent_instance_id=?", [
 			event.attemptId,
 			identity.agent_instance_id,
@@ -664,8 +725,25 @@ export async function recordRuntimeProjection(
 				event.attemptId,
 			]);
 		}
-		changes.push(projectionChange("state", identity.agent_instance_ref, event.eventId, event.eventId, detail));
-		kinds |= RUNTIME_KIND_MASK.state;
+		if (SUMMARY_EVENTS.has(event.kind)) {
+			changes.push(projectionChange("state", identity.agent_instance_ref, event.eventId, event.eventId, detail));
+			kinds |= RUNTIME_KIND_MASK.state;
+		}
+	}
+	if (event.kind === "model_settled") {
+		for (const resource of ["usage", "context"]) {
+			changes.push(
+				projectionChange(
+					"invalidate",
+					identity.agent_instance_ref,
+					event.eventId,
+					event.eventId,
+					{ resource, revision: event.eventId },
+					event.attemptId,
+				),
+			);
+		}
+		kinds |= RUNTIME_KIND_MASK.usage;
 	}
 	const resource =
 		event.kind === "inbox_changed"

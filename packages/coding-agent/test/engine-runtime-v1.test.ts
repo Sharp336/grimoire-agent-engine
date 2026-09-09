@@ -97,6 +97,229 @@ describe("runtime v1 durable boundaries", () => {
 		await store.commitAttemptTransition(target, "running", [{ kind: "running" }]);
 		return target;
 	}
+	it("reopens bounded active tool baselines and rejects a continuation after exact lifecycle changes", async () => {
+		let store = await createStore();
+		const target = await active(store);
+		const agent = identity("root");
+		const request = { principalId: "owner", agentInstanceRef: agent.agentInstanceRef, attemptId: target.attemptId };
+		const scope: RuntimeScope = {
+			kind: "attempt",
+			agentInstanceRef: agent.agentInstanceRef,
+			attemptId: target.attemptId,
+			kinds: ["tool"],
+		};
+		const before = await store.runtimeSnapshot({ kind: "catalog" }, { principalId: "owner" });
+		const revisions: number[] = [];
+		for (let i = 0; i < 20; i++) {
+			const event = await store.startToolEffect(target, {
+				effectId: `effect-${String(i).padStart(2, "0")}`,
+				toolCallId: `tool-${String(i).padStart(2, "0")}`,
+				toolName: "read",
+				policy: "tracked",
+				inputHash: "sha256:private-input-hash",
+			});
+			revisions.push(event.eventId);
+		}
+		await store.requestToolApproval(target, {
+			effectId: "effect-permit",
+			toolCallId: "tool-permit",
+			toolName: "write",
+			policy: "permit",
+			inputHash: "sha256:approval",
+		});
+		const snapshot = await store.runtimeSnapshot(scope, request);
+		const detail = snapshot.agents[0];
+		const tools = detail.tools as Array<{ toolCallId: string; revision: number; phase: string }>;
+		expect(tools.map(tool => tool.toolCallId)).toEqual(
+			Array.from({ length: 16 }, (_, i) => `tool-${String(i).padStart(2, "0")}`),
+		);
+		expect(tools.map(tool => tool.revision)).toEqual(revisions.slice(0, 16));
+		expect(tools.every(tool => tool.phase === "started")).toBeTrue();
+		expect(snapshot.work.changes).toBe(17);
+		const cursor = String(detail.toolsNextCursor);
+		const remaining = await store.runtimeTools({ ...request, cursor });
+		expect(remaining).toMatchObject({
+			revision: revisions.at(-1),
+			nextCursor: null,
+			items: [
+				{ toolCallId: "tool-16" },
+				{ toolCallId: "tool-17" },
+				{ toolCallId: "tool-18" },
+				{ toolCallId: "tool-19" },
+			],
+		});
+		expect((remaining.work as { scannedRows: number }).scannedRows).toBeLessThan(20);
+		await store.appendEvent({
+			...target,
+			causationCommandId: target.commandId,
+			kind: "message_updated",
+			payload: {
+				mode: "snapshot",
+				messageId: "unselected",
+				blockId: "text",
+				stream: "assistant",
+				contentId: "unselected-content",
+				revision: 1,
+				offset: 0,
+				endOffset: 1,
+				totalBytes: 1,
+				text: "x",
+				status: "streaming",
+				partial: false,
+			},
+		});
+		expect(await store.runtimeTools({ ...request, cursor })).toMatchObject({
+			revision: revisions.at(-1),
+			items: remaining.items,
+		});
+		await expect(store.runtimeTools({ ...request, principalId: "foreign", cursor })).rejects.toMatchObject({
+			code: "agent_not_found",
+		});
+		await expect(store.runtimeTools({ ...request, attemptId: "other-attempt", cursor })).rejects.toMatchObject({
+			code: "stale_target",
+		});
+		const rootSummary = (before.agents[0] as { revision: number }).revision;
+		const catalog = await store.runtimeEvents(eventsRequest(before.epoch, before.watermark));
+		expect(catalog.changes.filter(change => change.kind === "summary")).toHaveLength(1); // pending permit needs attention
+		expect(catalog.changes.every(change => change.kind !== "tool")).toBeTrue();
+		expect(Number(catalog.changes[0]?.revision)).toBeGreaterThan(rootSummary);
+		const file = path.join(directories.at(-1)!, "engine.sqlite");
+		await store.close();
+		stores.splice(stores.indexOf(store), 1);
+		store = await EngineStore.open(file);
+		stores.push(store);
+		const reopened = await store.runtimeSnapshot(scope, request);
+		expect(reopened.agents[0].tools).toEqual(tools);
+		expect(reopened.agents[0].toolsNextCursor).toBe(cursor);
+		const settled = await store.settleToolEffect(target, "effect-19", "completed");
+		await expect(store.runtimeTools({ ...request, cursor })).rejects.toMatchObject({ code: "stale_target" });
+		const terminal = await store.runtimeEvents(eventsRequest(before.epoch, settled.eventId - 1, scope));
+		expect(terminal.changes).toMatchObject([
+			{
+				kind: "tool",
+				attemptId: target.attemptId,
+				revision: settled.eventId,
+				value: { toolCallId: "tool-19", phase: "finished" },
+			},
+		]);
+		await store.resolveToolApproval(target, "effect-permit", "deny");
+		const live = await store.runtimeEvents(eventsRequest(before.epoch, settled.eventId, scope));
+		expect(live.changes.some(change => change.kind === "tool" && change.value.phase === "denied")).toBeTrue();
+		await store.interruptGeneration(2);
+		const recovered = await store.runtimeTools(request);
+		expect((recovered.items as Array<{ phase: string }>).every(tool => tool.phase === "unknown")).toBeTrue();
+		expect(
+			(recovered.items as Array<{ toolCallId: string }>).some(
+				tool => tool.toolCallId === "tool-19" || tool.toolCallId === "tool-permit",
+			),
+		).toBeFalse();
+	});
+	it("keeps a continued tool snapshot at its original cut while fresh reads follow settlement", async () => {
+		const store = await createStore();
+		const target = await active(store);
+		const agent = identity("root");
+		const request = { principalId: "owner", agentInstanceRef: agent.agentInstanceRef, attemptId: target.attemptId };
+		await store.startToolEffect(target, {
+			effectId: "effect-cut",
+			toolCallId: "tool-cut",
+			toolName: "read",
+			policy: "tracked",
+			inputHash: "sha256:cut",
+		});
+		const scope: RuntimeScope = {
+			kind: "branch",
+			rootAgentInstanceRef: agent.agentInstanceRef,
+			interests: [
+				{ kind: "attempt", agentInstanceRef: agent.agentInstanceRef, attemptId: target.attemptId, kinds: ["tool"] },
+			],
+		};
+		const first = await store.runtimeSnapshot(scope, request, undefined, 1);
+		expect(first.members).toHaveLength(1);
+		expect(first.agents).toHaveLength(0);
+		await store.settleToolEffect(target, "effect-cut", "completed");
+		const continued = await store.runtimeSnapshot(scope, request, first.nextCursor!, 1);
+		expect(continued.watermark).toBe(first.watermark);
+		expect(continued.agents[0].tools).toMatchObject([{ toolCallId: "tool-cut", phase: "started" }]);
+		expect((await store.runtimeTools(request)).items).toEqual([]);
+		expect((await store.runtimeSnapshot(scope, request)).agents[0].tools).toEqual([]);
+	});
+	it("rolls back tool baseline revisions with failed effect transactions and refuses invalid tool identity before admission", async () => {
+		const store = await createStore();
+		const target = await active(store);
+		const request = {
+			principalId: "owner",
+			agentInstanceRef: identity("root").agentInstanceRef,
+			attemptId: target.attemptId,
+		};
+		const effect = {
+			effectId: "effect-atomic",
+			toolCallId: "tool-atomic",
+			toolName: "read",
+			policy: "tracked" as const,
+			inputHash: "sha256:atomic",
+		};
+		const inspect = new SQL(`sqlite:${path.join(directories.at(-1)!, "engine.sqlite").replaceAll("\\", "/")}`);
+		const rejectRevision = `CREATE TRIGGER reject_tool_revision BEFORE UPDATE OF tool_revision ON engine_attempts
+			BEGIN SELECT RAISE(ABORT, 'tool revision rollback'); END`;
+		try {
+			const initial = await store.runtimeTools(request);
+			await inspect.unsafe(rejectRevision);
+			await expect(store.startToolEffect(target, effect)).rejects.toThrow("tool revision rollback");
+			expect(await store.getEffect(effect.effectId)).toBeUndefined();
+			expect(await store.runtimeTools(request)).toMatchObject({ revision: initial.revision, items: [] });
+			await inspect.unsafe("DROP TRIGGER reject_tool_revision");
+			const started = await store.startToolEffect(target, effect);
+			await inspect.unsafe(rejectRevision);
+			await expect(store.settleToolEffect(target, effect.effectId, "completed")).rejects.toThrow(
+				"tool revision rollback",
+			);
+			expect(await store.getEffect(effect.effectId)).toMatchObject({ state: "started" });
+			expect(await store.runtimeTools(request)).toMatchObject({
+				revision: started.eventId,
+				items: [{ revision: started.eventId, phase: "started" }],
+			});
+			await inspect.unsafe("DROP TRIGGER reject_tool_revision");
+			await expect(
+				store.startToolEffect(target, { ...effect, effectId: "effect-invalid", toolCallId: "invalid/id" }),
+			).rejects.toMatchObject({ code: "invalid_request" });
+			expect(await store.getEffect("effect-invalid")).toBeUndefined();
+		} finally {
+			await inspect.end();
+		}
+	});
+
+	it("emits exact usage and context invalidations after model settlement without token or app churn", async () => {
+		const store = await createStore();
+		const target = await active(store);
+		const agent = identity("root");
+		const scope: RuntimeScope = {
+			kind: "attempt",
+			agentInstanceRef: agent.agentInstanceRef,
+			attemptId: target.attemptId,
+			kinds: ["usage"],
+		};
+		const before = await store.runtimeSnapshot(scope, { principalId: "owner" });
+		const effect = { effectId: "model-usage", modelCallId: "model-call", inputHash: "sha256:private" };
+		await store.startModelEffect(target, effect);
+		const settled = await store.settleModelEffect(target, effect, "completed");
+		const batch = await store.runtimeEvents(eventsRequest(before.epoch, before.watermark, scope));
+		expect(batch.changes).toMatchObject([
+			{
+				kind: "invalidate",
+				attemptId: target.attemptId,
+				revision: settled.eventId,
+				value: { resource: "usage", revision: settled.eventId },
+			},
+			{
+				kind: "invalidate",
+				attemptId: target.attemptId,
+				revision: settled.eventId,
+				value: { resource: "context", revision: settled.eventId },
+			},
+		]);
+		expect((await store.runtimeEvents(eventsRequest(before.epoch, before.watermark))).changes).toEqual([]);
+		expect(JSON.stringify(batch)).not.toContain("sha256:private");
+	});
 	it("settles active message status atomically with recovery without changing the retained resource", async () => {
 		const store = await createStore();
 		const target = await active(store);

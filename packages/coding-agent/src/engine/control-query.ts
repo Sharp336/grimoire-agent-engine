@@ -44,6 +44,7 @@ export type EngineControlQueryMethod =
 	| "runtime.holds"
 	| "runtime.resource"
 	| "runtime.messages"
+	| "runtime.tools"
 	| "runtime.events.wait"
 	| "runtime.command.get"
 	| "runtime.context"
@@ -326,6 +327,8 @@ async function dispatchRequest(
 			return await options.runtime.store.runtimeResource(params as unknown as RuntimeResourceRequest);
 		case "runtime.messages":
 			return await options.runtime.store.runtimeMessages(params as unknown as RuntimePageRequest);
+		case "runtime.tools":
+			return await options.runtime.store.runtimeTools(params as unknown as RuntimePageRequest);
 		case "runtime.command.get":
 			return await options.runtime.store.runtimeCommand(
 				requiredString(params, "commandId"),
@@ -1305,6 +1308,7 @@ function runtimeResponseBytes(method: string): number {
 		"runtime.context",
 		"runtime.usage",
 		"runtime.input",
+		"runtime.tools",
 		"runtime.holds",
 	].includes(method)
 		? runtimeLimits.httpPageBytes + 4096

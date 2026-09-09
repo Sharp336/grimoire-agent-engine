@@ -21,6 +21,7 @@ import {
 	runtimeProjectionHash,
 	validateRuntimeValue,
 } from "./runtime-protocol";
+import { runtimeToolBaselines } from "./runtime-resources";
 
 export interface RuntimeSnapshot {
 	version: "1.0";
@@ -178,6 +179,24 @@ async function selectedDetail(
 		detail = work.decode<Record<string, unknown>>(rows[0].detail_payload);
 	}
 	// Only the chosen kinds acquire resources. The remaining fields are bounded metadata.
+	if (!interest.kinds.includes("tool")) detail = { ...detail, tools: [], toolsNextCursor: null };
+	else if (attemptId) {
+		const attempts = (await sql.unsafe("SELECT tool_revision FROM engine_attempts WHERE attempt_id=?", [
+			attemptId,
+		])) as Array<{ tool_revision: number }>;
+		work.rows(attempts.length);
+		// A continued snapshot may precede a lifecycle mutation. Its persisted detail
+		// keeps that cut; the explicit tools cursor rejects a changed collection.
+		if (Number(attempts[0].tool_revision) <= cut) {
+			const tools = await runtimeToolBaselines(
+				sql,
+				{ agentInstanceRef: identity.agent_instance_ref, attemptId },
+				Number(attempts[0].tool_revision),
+				work,
+			);
+			detail = { ...detail, tools: tools.items, toolsNextCursor: tools.nextCursor };
+		}
+	}
 	if (!interest.kinds.includes("input"))
 		detail = {
 			...detail,
@@ -346,7 +365,12 @@ export async function readRuntimeSnapshot(
 		position.detail < interests.length
 	)
 		page.nextCursor = encodeCursor(position);
-	work.finish(page, page.agents.length + (page.members?.length ?? 0));
+	work.finish(
+		page,
+		page.agents.length +
+			(page.members?.length ?? 0) +
+			page.agents.reduce((sum, agent) => sum + (Array.isArray(agent.tools) ? agent.tools.length : 0), 0),
+	);
 	validateRuntimeValue("snapshot", page);
 	return page;
 }
@@ -527,7 +551,8 @@ export async function readRuntimeEvents(sql: RuntimeSql, request: RuntimeEventsR
 						existing =>
 							existing.kind === change.kind &&
 							existing.agentInstanceRef === change.agentInstanceRef &&
-							existing.revision === change.revision,
+							existing.revision === change.revision &&
+							(change.kind !== "invalidate" || existing.value.resource === change.value.resource),
 					)
 				)
 					eventChanges.push(change);

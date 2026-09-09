@@ -43,6 +43,7 @@ import {
 import {
 	RUNTIME_KIND_MASK,
 	RUNTIME_PROJECTION_SCHEMA,
+	RUNTIME_TOOL_SCHEMA,
 	type RuntimeProjectionNotice,
 	type RuntimeTargetRequest,
 	recordRuntimeProjection,
@@ -69,6 +70,7 @@ import {
 	readRuntimeInput,
 	readRuntimeMessages,
 	readRuntimeResource,
+	readRuntimeTools,
 } from "./runtime-resources";
 import {
 	cancelIntentRevision,
@@ -753,6 +755,7 @@ const SCHEMA_MIGRATIONS = [
 		],
 		requiredColumns: [],
 	},
+	{ version: 21, statements: RUNTIME_TOOL_SCHEMA, requiredColumns: [] },
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;
@@ -984,6 +987,9 @@ export class EngineStore {
 	}
 	async runtimeMessages(request: RuntimePageRequest): Promise<Record<string, unknown>> {
 		return await this.#transaction(sql => readRuntimeMessages(sql, request));
+	}
+	async runtimeTools(request: RuntimePageRequest): Promise<Record<string, unknown>> {
+		return await this.#transaction(sql => readRuntimeTools(sql, request));
 	}
 
 	async intent(
@@ -3558,6 +3564,7 @@ export class EngineStore {
 		effect: EngineToolEffectInput,
 		state: "planned" | "started",
 	): Promise<void> {
+		validateRuntimeValue("toolDetail", { toolCallId: effect.toolCallId, name: effect.toolName, phase: "started" });
 		const now = Date.now();
 		await sql.unsafe(
 			`INSERT INTO engine_effects(
