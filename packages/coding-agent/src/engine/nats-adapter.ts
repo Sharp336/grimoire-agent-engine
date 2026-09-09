@@ -151,6 +151,7 @@ export class NatsEngineAdapter {
 	#unsubscribeRegistry: () => void = () => {};
 	#unsubscribeOutbound: () => void = () => {};
 	#outboxFlush: Promise<void> | undefined;
+	#outboxDirty = false;
 	#stopping = false;
 	#disposed = false;
 
@@ -222,11 +223,20 @@ export class NatsEngineAdapter {
 		if (this.#outboxFlush) return await this.#outboxFlush;
 		const flush = this.#flushEvents();
 		this.#outboxFlush = flush;
+		let completed = false;
 		try {
 			await flush;
+			completed = true;
 		} finally {
 			if (this.#outboxFlush === flush) this.#outboxFlush = undefined;
+			if (completed && this.#outboxDirty) this.wakeEvents();
 		}
+	}
+
+	wakeEvents(): void {
+		this.#outboxDirty = true;
+		if (this.#disposed || this.#outboxFlush) return;
+		void this.flushEvents().catch(error => this.#report(error));
 	}
 
 	async dispose(): Promise<void> {
@@ -282,9 +292,7 @@ export class NatsEngineAdapter {
 			this.#consumers.add(messages);
 			this.#trackLoop(this.#consumeCommands(messages));
 		}
-		this.#unsubscribeRuntime = this.runtime.subscribe(() => {
-			void this.flushEvents().catch(error => this.#report(error));
-		});
+		this.#unsubscribeRuntime = this.runtime.subscribe(() => this.wakeEvents());
 		this.#unsubscribeRegistry = this.runtime.agentRegistry.onChange(event => {
 			if (event.type !== "registered" || event.ref.kind === "advisor") return;
 			const broker = this.runtime.resolveBrokerAgent(event.ref.id);
@@ -678,27 +686,35 @@ export class NatsEngineAdapter {
 	async #flushEvents(): Promise<void> {
 		const sinkId = `nats:${this.deviceRoute}:${this.engineRoute}`;
 		for (;;) {
+			this.#outboxDirty = false;
 			if (!(await this.runtime.store.isCurrentEngineGeneration(this.runtime.engineGeneration))) {
 				throw new StaleEngineLeaseError("Engine generation lease is no longer current");
 			}
-			const events = await this.runtime.store.pendingEventsForSink(sinkId, 100);
+			const events = await this.runtime.store.pendingEventsForSink(sinkId, runtimeLimits.httpPageRecords);
 			if (events.length === 0) return;
-			for (const event of events) {
-				const envelope = this.#eventEnvelope(event);
-				const payload = encodeEnvelope(envelope);
-				try {
-					await this.#jetstream.publish(this.eventSubject(event.agentInstanceId, event.kind), payload, {
-						msgID: String(event.eventId),
-					});
-				} catch (error) {
-					await this.runtime.store.markEventDeliveryFailed(
-						event.eventId,
-						sinkId,
-						error instanceof Error ? error.message : String(error),
-					);
-					throw error;
+			const delivered: number[] = [];
+			try {
+				for (const event of events) {
+					try {
+						const payload = encodeEnvelope(this.#eventEnvelope(event));
+						await this.#jetstream.publish(this.eventSubject(event.agentInstanceId, event.kind), payload, {
+							msgID: String(event.eventId),
+						});
+					} catch (error) {
+						await this.runtime.store.markEventDeliveryFailed(
+							event.eventId,
+							sinkId,
+							error instanceof Error ? error.message : String(error),
+						);
+						throw error;
+					}
+					delivered.push(event.eventId);
 				}
-				await this.runtime.store.markEventDelivered(event.eventId, sinkId);
+			} finally {
+				// Only broker-acknowledged events enter this FULL transaction. A crash
+				// before it commits replays the same msgIDs through JetStream dedup.
+				// A failed publish commits its acknowledged prefix, never the suffix.
+				await this.runtime.store.markEventsDelivered(delivered, sinkId);
 			}
 		}
 	}

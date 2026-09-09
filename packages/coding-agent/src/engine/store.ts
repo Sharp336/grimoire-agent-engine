@@ -717,6 +717,13 @@ const SCHEMA_MIGRATIONS = [
 	{ version: 17, statements: RUNTIME_QUEUE_SCHEMA, requiredColumns: [] },
 	{ version: 18, statements: ENGINE_HISTORY_LINEAGE_SCHEMA, requiredColumns: [] },
 	{ version: 19, statements: RUNTIME_LIFECYCLE_SCHEMA, requiredColumns: [] },
+	{
+		version: 20,
+		statements: [
+			"CREATE INDEX engine_runtime_messages_unsettled_idx ON engine_runtime_messages(attempt_id,status,created_event_id)",
+		],
+		requiredColumns: [],
+	},
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;
@@ -2522,6 +2529,14 @@ export class EngineStore {
 					JSON.stringify(options.terminalResult),
 					binding.attemptId,
 				]);
+			if (TERMINAL_ATTEMPT_STATES.has(state))
+				committed.push(
+					...(await this.#settleRuntimeMessages(
+						sql,
+						binding,
+						state === "completed" ? "settled" : state === "cancelled" ? "cancelled" : "interrupted",
+					)),
+				);
 			if (options.inboxSessionId) {
 				await sql.unsafe(
 					"UPDATE engine_inbox_items SET session_id=? WHERE session_id=? AND agent_instance_id=? AND disposition='pending'",
@@ -3156,6 +3171,17 @@ export class EngineStore {
 				);
 			}
 			for (const attempt of active) {
+				const target = {
+					commandId: attempt.command_id,
+					agentInstanceId: attempt.agent_instance_id,
+					executionId: attempt.execution_id,
+					attemptId: attempt.attempt_id,
+					engineGeneration,
+					bindingId: attempt.binding_id,
+					bindingGeneration: Number(attempt.binding_generation),
+					authorityGeneration: Number(attempt.authority_generation),
+				};
+				events.push(...(await this.#settleRuntimeMessages(sql, target, "interrupted")));
 				const transcriptCheckpoint =
 					Number(attempt.transcript_revision) > 0 &&
 					attempt.transcript_session_id &&
@@ -3171,31 +3197,18 @@ export class EngineStore {
 							}
 						: undefined;
 				events.push(
-					await this.#appendTransitionEvent(
-						sql,
-						{
-							commandId: attempt.command_id,
-							agentInstanceId: attempt.agent_instance_id,
-							executionId: attempt.execution_id,
-							attemptId: attempt.attempt_id,
-							engineGeneration,
-							bindingId: attempt.binding_id,
-							bindingGeneration: Number(attempt.binding_generation),
-							authorityGeneration: Number(attempt.authority_generation),
+					await this.#appendTransitionEvent(sql, target, {
+						kind: "interrupted",
+						payload: {
+							cause: "engine_lost",
+							error: "engine_lost",
+							lostEngineGeneration: Number(attempt.engine_generation),
+							...(transcriptCheckpoint
+								? { transcriptRef: `history://${engineAgentId(attempt.agent_instance_id)}` }
+								: {}),
+							...(transcriptCheckpoint ? { transcriptCheckpoint } : {}),
 						},
-						{
-							kind: "interrupted",
-							payload: {
-								cause: "engine_lost",
-								error: "engine_lost",
-								lostEngineGeneration: Number(attempt.engine_generation),
-								...(transcriptCheckpoint
-									? { transcriptRef: `history://${engineAgentId(attempt.agent_instance_id)}` }
-									: {}),
-								...(transcriptCheckpoint ? { transcriptCheckpoint } : {}),
-							},
-						},
-					),
+					}),
 				);
 			}
 			return events;
@@ -3285,17 +3298,29 @@ export class EngineStore {
 	}
 
 	async markEventDelivered(eventId: number, sinkId: string): Promise<void> {
+		await this.markEventsDelivered([eventId], sinkId);
+	}
+
+	async markEventsDelivered(eventIds: readonly number[], sinkId: string): Promise<void> {
 		if (!sinkId.trim()) throw new Error("Event sink ID must be non-empty");
+		if (
+			eventIds.length > runtimeLimits.httpPageRecords ||
+			eventIds.some(id => !Number.isSafeInteger(id) || id < 1) ||
+			new Set(eventIds).size !== eventIds.length
+		)
+			throw new Error("Event delivery acknowledgements must be a bounded page of distinct event IDs");
+		if (eventIds.length === 0) return;
 		const now = Date.now();
-		await this.#transaction(sql =>
-			sql.unsafe(
-				`INSERT INTO engine_event_deliveries(event_id, sink_id, state, attempts, delivered_at, updated_at)
+		await this.#transaction(async sql => {
+			for (const eventId of eventIds)
+				await sql.unsafe(
+					`INSERT INTO engine_event_deliveries(event_id, sink_id, state, attempts, delivered_at, updated_at)
 			 VALUES (?, ?, 'delivered', 1, ?, ?)
 			 ON CONFLICT(event_id, sink_id) DO UPDATE SET state='delivered', attempts=attempts+1,
 			 last_error=NULL, delivered_at=excluded.delivered_at, updated_at=excluded.updated_at`,
-				[eventId, sinkId, now, now],
-			),
-		);
+					[eventId, sinkId, now, now],
+				);
+		});
 	}
 
 	async markEventPublished(eventId: number): Promise<void> {
@@ -3621,6 +3646,51 @@ export class EngineStore {
 			],
 		)) as Array<{ attempt_id: string }>;
 		return rows.length === 1;
+	}
+
+	async #settleRuntimeMessages(
+		sql: SqlClient,
+		target: EngineTarget & { commandId: string },
+		status: "settled" | "cancelled" | "interrupted",
+	): Promise<EngineEvent[]> {
+		const events: EngineEvent[] = [];
+		for (;;) {
+			// Read only indexed metadata. Retained multi-MiB text remains in its existing
+			// immutable event chunks; an empty append versions the terminal baseline.
+			const rows = (await sql.unsafe(
+				`SELECT message_id,block_id,stream,content_id,revision,total_bytes FROM engine_runtime_messages
+				WHERE attempt_id=? AND status='streaming' ORDER BY created_event_id LIMIT ?`,
+				[target.attemptId, runtimeLimits.httpPageRecords],
+			)) as Array<{
+				message_id: string;
+				block_id: string;
+				stream: string;
+				content_id: string;
+				revision: number;
+				total_bytes: number;
+			}>;
+			for (const row of rows)
+				events.push(
+					await this.#appendTransitionEvent(sql, target, {
+						kind: "message_updated",
+						payload: {
+							mode: "append",
+							messageId: row.message_id,
+							blockId: row.block_id,
+							stream: row.stream,
+							contentId: row.content_id,
+							baseRevision: Number(row.revision),
+							revision: Number(row.revision) + 1,
+							offset: Number(row.total_bytes),
+							endOffset: Number(row.total_bytes),
+							totalBytes: Number(row.total_bytes),
+							text: "",
+							status,
+						},
+					}),
+				);
+			if (rows.length < runtimeLimits.httpPageRecords) return events;
+		}
 	}
 
 	#appendTransitionEvent(

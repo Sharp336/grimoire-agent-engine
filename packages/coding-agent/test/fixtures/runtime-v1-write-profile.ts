@@ -14,6 +14,7 @@ const runDir = path.resolve(args.get("--run-dir") ?? "");
 const count = Number(args.get("--events") ?? 1000);
 const agents = Number(args.get("--agents") ?? 21);
 const concurrency = Number(args.get("--concurrency") ?? 1);
+const delivery = args.get("--delivery") ?? "none";
 if (
 	!args.has("--run-dir") ||
 	fs.existsSync(runDir) ||
@@ -25,7 +26,8 @@ if (
 	agents > 100 ||
 	!Number.isSafeInteger(concurrency) ||
 	concurrency < 1 ||
-	concurrency > agents
+	concurrency > agents ||
+	!["none", "single", "batch"].includes(delivery)
 )
 	throw new Error("An owned new run directory and bounded dimensions are required");
 fs.mkdirSync(runDir, { recursive: true });
@@ -53,6 +55,7 @@ SqlSessionStorage.create = async options => {
 								"engine_agent_seq",
 								"engine_event_outbox",
 								"engine_runtime_messages",
+								"engine_event_deliveries",
 								"engine_agent_identity",
 								"engine_attempts",
 							].find(table => statement.includes(table)) ?? "other";
@@ -117,7 +120,7 @@ const text = "x".repeat(1024);
 const append = async (index: number) => {
 	const revision = ++revisions[index];
 	const started = performance.now();
-	await store.appendEvent({
+	const event = await store.appendEvent({
 		...bindings[index],
 		causationCommandId: `sample-${index}-${revision}`,
 		kind: "message_updated",
@@ -137,12 +140,18 @@ const append = async (index: number) => {
 		},
 	});
 	elapsed.push(performance.now() - started);
+	return event.eventId;
 };
 enabled = true;
 const started = performance.now();
 try {
-	for (let i = 0; i < count; i += concurrency)
-		await Promise.all(Array.from({ length: Math.min(concurrency, count - i) }, (_, n) => append((i + n) % agents)));
+	for (let i = 0; i < count; i += concurrency) {
+		const eventIds = await Promise.all(
+			Array.from({ length: Math.min(concurrency, count - i) }, (_, n) => append((i + n) % agents)),
+		);
+		if (delivery === "single") for (const id of eventIds) await store.markEventDelivered(id, "profile-sink");
+		else if (delivery === "batch") await store.markEventsDelivered(eventIds, "profile-sink");
+	}
 } finally {
 	enabled = false;
 	await store.close();
@@ -154,6 +163,7 @@ const result = {
 	count,
 	agents,
 	concurrency,
+	delivery,
 	elapsedMs,
 	updatesPerSecond: (count * 1000) / elapsedMs,
 	...timing,

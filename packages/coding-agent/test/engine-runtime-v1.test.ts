@@ -97,6 +97,52 @@ describe("runtime v1 durable boundaries", () => {
 		await store.commitAttemptTransition(target, "running", [{ kind: "running" }]);
 		return target;
 	}
+	it("settles active message status atomically with recovery without changing the retained resource", async () => {
+		const store = await createStore();
+		const target = await active(store);
+		const request = {
+			agentInstanceRef: identity("root").agentInstanceRef,
+			attemptId: target.attemptId,
+			principalId: "owner",
+		};
+		await store.appendEvent({
+			...target,
+			causationCommandId: target.commandId,
+			kind: "message_updated",
+			payload: {
+				mode: "snapshot",
+				messageId: "active-message",
+				blockId: "text",
+				stream: "assistant",
+				contentId: "active-content",
+				revision: 1,
+				offset: 0,
+				endOffset: 5,
+				totalBytes: 5,
+				text: "hello",
+				status: "streaming",
+				partial: false,
+			},
+		});
+		const before = await store.runtimeMessages(request);
+		const inspect = new SQL(`sqlite:${path.join(directories.at(-1)!, "engine.sqlite").replaceAll("\\", "/")}`);
+		try {
+			await inspect.unsafe(`CREATE TRIGGER reject_recovery BEFORE INSERT ON engine_event_outbox
+				WHEN NEW.kind='interrupted' BEGIN SELECT RAISE(ABORT, 'recovery rollback'); END`);
+			await expect(store.interruptGeneration(2)).rejects.toThrow("recovery rollback");
+			expect((await store.runtimeMessages(request)).items).toEqual(before.items);
+			expect((await store.getAttempt(target.attemptId))?.state).toBe("running");
+			await inspect.unsafe("DROP TRIGGER reject_recovery");
+			const events = await store.interruptGeneration(2);
+			expect(events.map(event => event.kind)).toContain("message_updated");
+			const after = await store.runtimeMessages(request);
+			expect(after.items).toMatchObject([{ revision: 2, status: "interrupted", text: "hello", totalBytes: 5 }]);
+			await store.interruptGeneration(3);
+			expect((await store.runtimeMessages(request)).items).toEqual(after.items);
+		} finally {
+			await inspect.end();
+		}
+	});
 	it("pins canonical schema bytes and validates the strict scope union", async () => {
 		const bytes = await Bun.file(new URL("../src/engine/runtime-protocol-v1.json", import.meta.url)).arrayBuffer();
 		expect(`sha256:${new Bun.CryptoHasher("sha256").update(bytes).digest("hex")}`).toBe(RUNTIME_PROTOCOL_HASH);

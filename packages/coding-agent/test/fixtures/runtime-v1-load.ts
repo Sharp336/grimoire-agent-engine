@@ -361,6 +361,9 @@ const produce = async (binding: EngineBindingSnapshot & { agentInstanceRef: stri
 	});
 	produced++;
 	commitMs += performance.now() - began;
+	// Match the product runtime's post-COMMIT coalesced outbox wake. Provider
+	// admission does not wait for an unrelated sink's entire durable backlog.
+	adapter?.wakeEvents();
 	if (revision % 20 === 0)
 		await writeMetric({
 			kind: "commit_sample",
@@ -433,7 +436,6 @@ try {
 				await Promise.all(pending);
 			})(),
 		]);
-		await adapter?.flushEvents();
 		if (performance.now() - lastSample >= 1000) {
 			const files = ["engine.sqlite", "engine.sqlite-wal"].map(file => {
 				try {
