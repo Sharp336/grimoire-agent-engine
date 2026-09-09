@@ -723,6 +723,13 @@ export class EngineRuntime {
 				startFence,
 			);
 			this.#notifyEvents(changed.events);
+			if (action === "stop") {
+				const descendants = new Set(changed.agentIds);
+				for (const pending of this.#pendingStarts) {
+					if (descendants.has(pending.target.agentInstanceId))
+						pending.controller.abort(new EngineTargetError("cancelled", "Engine branch stopped"));
+				}
+			}
 			const apply = async (agentId: string) => {
 				const binding = this.#bindings.get(agentId);
 				if (!binding) return;
@@ -801,7 +808,10 @@ export class EngineRuntime {
 			};
 			await apply(request.agentInstanceId);
 			await Promise.all(
-				changed.agentIds.filter(id => id !== request.agentInstanceId).map(id => this.#inLane(id, () => apply(id))),
+				changed.agentIds
+					// A pending child has no effects to quiesce. Its eventual admission inherits the durable hold.
+					.filter(id => id !== request.agentInstanceId && this.#bindings.has(id))
+					.map(id => this.#inLane(id, () => apply(id))),
 			);
 			this.#signalInboxWake();
 			const intent = await this.store.intent(request.agentInstanceId);

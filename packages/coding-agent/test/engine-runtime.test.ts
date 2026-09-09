@@ -5256,6 +5256,104 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60000);
 
+	for (const action of ["pause", "stop"] as const) {
+		it(`applies parent ${action} while an enrolled child is still resolving its profile`, async () => {
+			const resolving = Promise.withResolvers<AbortSignal>();
+			const releaseProfile = Promise.withResolvers<void>();
+			const parentPrompt = Promise.withResolvers<boolean>();
+			const prompts: string[] = [];
+			let resolutions = 0;
+			const { runtime, cwd } = await createRuntime(
+				async (_session, input) => {
+					prompts.push(input);
+					return input === "parent work" ? parentPrompt.promise : true;
+				},
+				{
+					resolveSessionProfile: async (_launch, _cwd, signal) => {
+						if (resolutions++ === 0) return { options: {}, dispose() {} };
+						if (!signal) throw new Error("Child Start must have cancellation");
+						resolving.resolve(signal);
+						const blocked = Promise.withResolvers<void>();
+						const abort = () => blocked.reject(signal.reason);
+						signal.addEventListener("abort", abort, { once: true });
+						try {
+							await Promise.race([releaseProfile.promise, blocked.promise]);
+						} finally {
+							signal.removeEventListener("abort", abort);
+						}
+						return { options: {}, dispose() {} };
+					},
+				},
+			);
+			const parent = await runtime.start(
+				{
+					commandId: `branch-${action}-parent-start`,
+					agentInstanceId: `branch-${action}-parent`,
+					agentInstanceRef: `grimoire://tasks/p/t/agents/branch-${action}-parent`,
+					executionId: `branch-${action}-parent-execution`,
+					attemptId: `branch-${action}-parent-attempt`,
+					authorityGeneration: 1,
+					cwd,
+					input: "parent work",
+				},
+				profile,
+			);
+			const childRequest: EngineStartRequest = {
+				commandId: `branch-${action}-child-start`,
+				agentInstanceId: `branch-${action}-child`,
+				agentInstanceRef: `grimoire://tasks/p/t/agents/branch-${action}-child`,
+				parentAgentInstanceId: parent.agentInstanceId,
+				executionId: `branch-${action}-child-execution`,
+				attemptId: `branch-${action}-child-attempt`,
+				authorityGeneration: 1,
+				cwd,
+				input: "child work",
+			};
+			const child = runtime.start(childRequest, profile).then(
+				value => ({ value }),
+				error => ({ error }),
+			);
+			const signal = await resolving.promise;
+			const childPaused = nextEngineEvent(runtime, "paused", childRequest.attemptId);
+			const control =
+				action === "pause"
+					? runtime.pause({
+							...parent,
+							commandId: "parent-pause-during-child-profile",
+							initiator: { kind: "human" },
+						})
+					: runtime.cancel({ ...parent, commandId: "parent-stop-during-child-profile" });
+			try {
+				const result = await withTimeout(control, 2000, "Parent control waited for child profile");
+				expect(result.manualHold).toBe(true);
+				expect((await runtime.store.intent(childRequest.agentInstanceId)).manualHold).toBe(true);
+				if (action === "stop") {
+					expect(signal.aborted).toBe(true);
+					expect(await child).toHaveProperty("error");
+					expect(await runtime.store.getAttempt(childRequest.attemptId)).toBeUndefined();
+				} else {
+					expect(signal.aborted).toBe(false);
+					releaseProfile.resolve();
+					expect(await child).toHaveProperty("value");
+					await withTimeout(childPaused, 2000, "Held child did not become quiescent");
+					expect((await runtime.store.getAttempt(childRequest.attemptId))?.state).toBe("paused");
+				}
+				expect(prompts).toEqual(["parent work"]);
+				if (action === "pause") {
+					const childCompleted = nextEngineEvent(runtime, "completed", childRequest.attemptId);
+					parentPrompt.resolve(true);
+					await runtime.resume({ ...parent, commandId: "resume-held-new-child", initiator: { kind: "human" } });
+					await withTimeout(childCompleted, 2000, "Resumed child did not execute");
+					expect(prompts).toEqual(["parent work", "child work"]);
+				}
+			} finally {
+				releaseProfile.resolve();
+				parentPrompt.resolve(true);
+				await Promise.allSettled([child, control]);
+				await runtime.dispose();
+			}
+		}, 15000);
+	}
 	it("pauses and resumes the same child Attempt without waking its parent", async () => {
 		const prompts = new Map<string, PromiseWithResolvers<boolean>>();
 		const { runtime, cwd } = await createRuntime(session => {
@@ -6331,10 +6429,10 @@ describe("EngineRuntime", () => {
 	}, 60000);
 });
 
-function nextEngineEvent(runtime: EngineRuntime, kind: EngineEvent["kind"]): Promise<EngineEvent> {
+function nextEngineEvent(runtime: EngineRuntime, kind: EngineEvent["kind"], attemptId?: string): Promise<EngineEvent> {
 	const result = Promise.withResolvers<EngineEvent>();
 	const unsubscribe = runtime.subscribe(event => {
-		if (event.kind !== kind) return;
+		if (event.kind !== kind || (attemptId && event.attemptId !== attemptId)) return;
 		unsubscribe();
 		result.resolve(event);
 	});
