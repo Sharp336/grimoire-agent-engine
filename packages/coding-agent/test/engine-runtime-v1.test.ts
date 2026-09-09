@@ -1853,6 +1853,46 @@ describe("runtime v1 durable boundaries", () => {
 			"authorized",
 		);
 	});
+	it("fences input response by its exact metadata revision after newer unrelated inputs", async () => {
+		const store = await createStore();
+		const target = await active(store);
+		const inputs = [];
+		for (let n = 0; n < 40; n++) {
+			const inputId = `metadata-input-${n}`;
+			const [event] = await store.commitAttemptTransition(target, "waiting_input", [
+				{
+					kind: "input_requested",
+					payload: { inputId, questions: [{ id: "q", question: "Choose", options: [{ label: "Yes" }] }] },
+				},
+			]);
+			inputs.push({ inputId, revision: event.eventId });
+		}
+		const first = inputs[0];
+		const resolve = (inputId: string, inputRevision: number) =>
+			store.commitAttemptTransition(target, "running", [{ kind: "input_resolved", payload: { inputId } }], {
+				expectedStates: ["waiting_input"],
+				intentGuard: { expectedRevision: 0, requireUnheld: true, inputId, inputRevision },
+			});
+		for (const [inputId, revision] of [
+			[first.inputId, inputs.at(-1)!.revision],
+			["missing-input", first.revision],
+		] as const) {
+			const rejected = await resolve(inputId, revision).then(
+				() => undefined,
+				error => error,
+			);
+			expect(rejected).toMatchObject({ code: "stale_target" });
+			expect((await store.getAttempt(target.attemptId))?.state).toBe("waiting_input");
+		}
+		await resolve(first.inputId, first.revision);
+		expect((await store.getAttempt(target.attemptId))?.state).toBe("running");
+		const pending = await store.runtimeInput({
+			principalId: "owner",
+			agentInstanceRef: identity("root").agentInstanceRef,
+			attemptId: target.attemptId,
+		});
+		expect((pending.items as unknown[]).length).toBe(39);
+	});
 	it("reads oversized input through an exact retained resource without losing controls", async () => {
 		const store = await createStore();
 		const target = await active(store);
