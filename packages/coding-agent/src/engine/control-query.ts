@@ -1082,6 +1082,7 @@ function validateRequest(value: unknown): EngineControlQueryRequest {
 			"runtime.holds",
 			"runtime.resource",
 			"runtime.messages",
+			"runtime.tools",
 			"runtime.events.wait",
 			"runtime.command.get",
 			"runtime.context",

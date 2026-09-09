@@ -607,6 +607,69 @@ describe("Engine Control + Query", () => {
 		await runtime.dispose();
 	}, 30_000);
 
+	it("serves an exact paused tool baseline through the native request validator", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-control-tools-${Snowflake.next()}-`));
+		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite") });
+		const agentInstanceRef = "grimoire://tasks/grimoire/control-tools/agents/agent";
+		await runtime.store.registerAgent({
+			agentInstanceId: "control-tools",
+			agentInstanceRef,
+			principalId: "owner",
+			authorityGeneration: 1,
+		});
+		const target = {
+			agentInstanceId: "control-tools",
+			attemptId: "tools-attempt",
+			executionId: "tools-execution",
+			bindingId: "tools-binding",
+			commandId: "tools-start",
+			engineAgentId: "Engine-tools",
+			profileDigest: "profile",
+			state: "running" as const,
+			engineGeneration: runtime.engineGeneration,
+			authorityGeneration: 1,
+			bindingGeneration: 1,
+		};
+		await runtime.store.commitAttemptTransition(target, "paused", [{ kind: "paused" }]);
+		const server = await startEngineControlQueryServer({
+			runtime,
+			runtimeDir: tempDir,
+			deviceId: "device",
+			engineId: "engine",
+			resolveLaunchProfile: async () => ({ spawns: "", profileDigest: "profile" }),
+		});
+		try {
+			const client = new EngineControlQueryClient(tempDir);
+			const request = { agentInstanceRef, attemptId: target.attemptId, principalId: "owner", limit: 16 };
+			expect(await client.request("runtime.tools", request)).toMatchObject({
+				version: "1.0",
+				agentInstanceRef,
+				attemptId: target.attemptId,
+				revision: 0,
+				items: [],
+				nextCursor: null,
+			});
+			await runtime.store.startToolEffect(target, {
+				effectId: "ipc-effect",
+				toolCallId: "ipc-tool",
+				toolName: "read",
+				policy: "tracked",
+				inputHash: "sha256:private",
+			});
+			expect(await client.request("runtime.tools", request)).toMatchObject({
+				items: [{ toolCallId: "ipc-tool", phase: "started" }],
+				nextCursor: null,
+			});
+			const denied = await client.request("runtime.tools", { ...request, principalId: "foreign" }).then(
+				() => undefined,
+				error => error,
+			);
+			expect(denied).toMatchObject({ code: "agent_not_found" });
+		} finally {
+			await server.close();
+			await runtime.dispose();
+		}
+	});
 	it("survives a native client disconnect while its durable response is ready to write", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-control-cancel-${Snowflake.next()}-`));
 		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite") });
