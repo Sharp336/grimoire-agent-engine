@@ -35,7 +35,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { loadSessionFile } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { type NativeHistoryForkResult, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { resolveProviderCandidates } from "@oh-my-pi/pi-coding-agent/web/search/provider";
-import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { removeSyncWithRetries, Snowflake, withTimeout } from "@oh-my-pi/pi-utils";
 
 describe("EngineRuntime", () => {
 	const tempDirs: string[] = [];
@@ -2852,6 +2852,148 @@ describe("EngineRuntime", () => {
 		});
 		await runtime.dispose();
 	}, 60_000);
+
+	it("applies Pause while a native usage query is pending and aborts the provider on IPC close", async () => {
+		const entered = Promise.withResolvers<void>();
+		const aborted = Promise.withResolvers<void>();
+		const provider = Promise.withResolvers<void>();
+		const prompt = Promise.withResolvers<boolean>();
+		const ready = Promise.withResolvers<void>();
+		const { runtime, cwd } = await createRuntime(async session => {
+			session.fetchUsageReports = async signal => {
+				signal?.addEventListener("abort", () => aborted.resolve(), { once: true });
+				entered.resolve();
+				await provider.promise;
+				return [];
+			};
+			ready.resolve();
+			return await prompt.promise;
+		});
+		const agentInstanceRef = "grimoire://tasks/grimoire/runtime-test/agents/usage-control";
+		const runtimeDir = path.join(cwd, "control-query");
+		fs.mkdirSync(runtimeDir);
+		const server = await startEngineControlQueryServer({
+			runtime,
+			runtimeDir,
+			deviceId: "device",
+			engineId: "engine",
+			resolveLaunchProfile: () => profile,
+		});
+		const client = new EngineControlQueryClient(runtimeDir);
+		let usage: Promise<unknown> = Promise.resolve();
+		try {
+			const started = await runtime.start(
+				{
+					commandId: "start-usage-control",
+					agentInstanceId: engineAgentInstanceId(agentInstanceRef),
+					agentInstanceRef,
+					principalId: "owner",
+					executionId: "execution-usage-control",
+					attemptId: "attempt-usage-control",
+					authorityGeneration: 1,
+					cwd,
+					input: "test pending usage",
+				},
+				profile,
+			);
+			await ready.promise;
+			usage = client
+				.request("runtime.usage", { agentInstanceRef, attemptId: started.attemptId, principalId: "owner" })
+				.then(
+					() => undefined,
+					error => error,
+				);
+			await withTimeout(entered.promise, 2_000, "Native usage query did not reach the provider");
+			const paused = await withTimeout(
+				runtime.pause({ ...started, commandId: "pause-during-usage", initiator: { kind: "human" } }),
+				2_000,
+				"Provider usage blocked Pause",
+			);
+			expect(paused.manualHold).toBeTrue();
+			expect((await runtime.store.intent(started.agentInstanceId)).manualHold).toBeTrue();
+			await server.close();
+			expect(await usage).toBeInstanceOf(Error);
+			await withTimeout(aborted.promise, 2_000, "Disconnected usage query retained its provider request");
+		} finally {
+			await server.close();
+			provider.resolve();
+			prompt.resolve(true);
+			await usage;
+			await runtime.dispose();
+		}
+	}, 20_000);
+
+	it("rejects late usage from the previous Attempt and reads its retained header without loading history", async () => {
+		const entered = Promise.withResolvers<void>();
+		const provider = Promise.withResolvers<void>();
+		let calls = 0;
+		const { runtime, cwd } = await createRuntime(async session => {
+			session.fetchUsageReports = async () => {
+				calls++;
+				entered.resolve();
+				await provider.promise;
+				return [];
+			};
+			return true;
+		});
+		const request = {
+			commandId: "usage-history-first",
+			agentInstanceId: "usage-history-agent",
+			executionId: "usage-history-execution-first",
+			attemptId: "usage-history-attempt-first",
+			authorityGeneration: 1,
+			cwd,
+			input: "first usage Attempt",
+		};
+		const first = await runtime.start(request, profile);
+		await runtime.drain();
+		const firstHeader = await runtime.store.nativeSessionHeader(first);
+		const usage = runtime.sessionUsage(first).then(
+			() => undefined,
+			error => error,
+		);
+		try {
+			await entered.promise;
+			const second = await withTimeout(
+				runtime.start(
+					{
+						...request,
+						commandId: "usage-history-second",
+						executionId: "usage-history-execution-second",
+						attemptId: "usage-history-attempt-second",
+						input: "second usage Attempt",
+					},
+					profile,
+				),
+				2_000,
+				"Previous usage query blocked the next Attempt",
+			);
+			provider.resolve();
+			expect(await usage).toMatchObject({ code: "stale_target" });
+			await runtime.drain();
+			const read = spyOn(runtime.store.sessionStorage, "readText").mockRejectedValue(
+				new Error("Full history read forbidden"),
+			);
+			try {
+				expect(await runtime.sessionUsage(first)).toMatchObject({
+					attemptId: first.attemptId,
+					sessionId: firstHeader.sessionId,
+					status: "not_ready",
+					local: null,
+					provider: { status: "unavailable", reason: "session_not_active" },
+				});
+				expect(calls).toBe(1);
+				expect(read).not.toHaveBeenCalled();
+				expect(runtime.getBinding(first.agentInstanceId)?.attemptId).toBe(second.attemptId);
+			} finally {
+				read.mockRestore();
+			}
+		} finally {
+			provider.resolve();
+			await usage;
+			await runtime.dispose();
+		}
+	}, 20_000);
 
 	it("reports unsupported provider usage when no reports exist", async () => {
 		const { runtime, cwd } = await createRuntime(async session => {

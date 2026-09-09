@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { AgentPauseGate } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, AssistantMessageEvent } from "@oh-my-pi/pi-ai";
-import { isEnoent, logger, stableStringifyJson } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, stableStringifyJson, withTimeout } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../async/job-manager";
 import { withCapabilityProviderPolicy } from "../capability";
 import { SETTINGS_SCHEMA, type SettingPath, withSettingsScope } from "../config/settings";
@@ -1224,54 +1224,69 @@ export class EngineRuntime {
 		});
 	}
 
-	sessionUsage(target: EngineTarget): Promise<Record<string, unknown>> {
-		return this.#inLane(target.agentInstanceId, async () => {
-			if (!this.#bindings.has(target.agentInstanceId)) {
-				const retained = await this.#requireSessionTarget(target);
+	async sessionUsage(target: EngineTarget, signal?: AbortSignal): Promise<Record<string, unknown>> {
+		const captured = await this.#inLane(target.agentInstanceId, async () => {
+			if (this.#bindings.get(target.agentInstanceId)?.attemptId !== target.attemptId) {
+				const retained = await this.store.nativeSessionHeader(target);
 				return {
-					schema: "grimoire.engine.session_usage.v1",
-					status: "not_ready",
-					attemptId: retained.attemptId,
-					sessionId: retained.sessionId,
-					local: null,
-					provider: { status: "unavailable", reason: "session_not_active" },
+					response: {
+						schema: "grimoire.engine.session_usage.v1",
+						status: "not_ready",
+						attemptId: target.attemptId,
+						sessionId: retained.sessionId,
+						local: null,
+						provider: { status: "unavailable", reason: "session_not_active" },
+					},
 				};
 			}
 			const binding = this.#requireTarget(target);
 			const model = binding.session.model;
-			const local = binding.session.getSessionStats();
-			try {
-				const reports = await binding.session.fetchUsageReports();
-				return {
+			return {
+				session: binding.session,
+				response: {
 					schema: "grimoire.engine.session_usage.v1",
 					attemptId: binding.attemptId,
 					sessionId: binding.session.sessionId,
 					model: model ? { provider: model.provider, id: model.id } : null,
-					local,
-					provider: reports?.length
-						? {
-								status: "available",
-								fetchedAt: Math.max(0, ...reports.map(report => report.fetchedAt)),
-								reports: reports.map(report => ({
-									provider: report.provider,
-									fetchedAt: report.fetchedAt,
-									limits: report.limits,
-									...(report.resetCredits ? { resetCredits: report.resetCredits } : {}),
-									...(report.notes ? { notes: report.notes } : {}),
-								})),
-							}
-						: { status: "unavailable", reason: "provider_usage_not_supported" },
-				};
-			} catch {
-				return {
-					schema: "grimoire.engine.session_usage.v1",
-					attemptId: binding.attemptId,
-					sessionId: binding.session.sessionId,
-					model: model ? { provider: model.provider, id: model.id } : null,
-					local,
-					provider: { status: "unavailable", reason: "provider_usage_fetch_failed" },
-				};
+					local: binding.session.getSessionStats(),
+				},
+			};
+		});
+		if (!captured.session) return captured.response;
+		signal?.throwIfAborted();
+		const controller = new AbortController();
+		let provider: Record<string, unknown>;
+		try {
+			const reports = await withTimeout(
+				captured.session.fetchUsageReports(controller.signal),
+				runtimeLimits.bootstrapTimeoutMs,
+				"Provider usage query timed out",
+				signal,
+			);
+			provider = reports?.length
+				? {
+						status: "available",
+						fetchedAt: Math.max(0, ...reports.map(report => report.fetchedAt)),
+						reports: reports.map(report => ({
+							provider: report.provider,
+							fetchedAt: report.fetchedAt,
+							limits: report.limits,
+							...(report.resetCredits ? { resetCredits: report.resetCredits } : {}),
+							...(report.notes ? { notes: report.notes } : {}),
+						})),
+					}
+				: { status: "unavailable", reason: "provider_usage_not_supported" };
+		} catch (error) {
+			if (signal?.aborted) throw error;
+			provider = { status: "unavailable", reason: "provider_usage_fetch_failed" };
+		} finally {
+			controller.abort();
+		}
+		return await this.#inLane(target.agentInstanceId, async () => {
+			if (this.#requireTarget(target).session !== captured.session) {
+				throw new EngineTargetError("stale_target", "Session changed during provider usage query");
 			}
+			return { ...captured.response, provider };
 		});
 	}
 

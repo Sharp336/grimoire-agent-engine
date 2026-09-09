@@ -335,7 +335,7 @@ async function dispatchRequest(
 		case "runtime.context":
 			return await options.runtime.sessionContext(await runtimeTarget(options.runtime, params));
 		case "runtime.usage":
-			return await options.runtime.sessionUsage(await runtimeTarget(options.runtime, params));
+			return await options.runtime.sessionUsage(await runtimeTarget(options.runtime, params), signal);
 		case "runtime.queue":
 			return await options.runtime.store.runtimeQueue(params as unknown as RuntimeQueueRequest);
 		case "runtime.history": {
@@ -539,7 +539,7 @@ async function dispatchRequest(
 				replaceRetainedBinding: optionalBoolean(params.replaceRetainedBinding),
 			});
 		case "session.usage":
-			return await options.runtime.sessionUsage(requiredTarget(params));
+			return await options.runtime.sessionUsage(requiredTarget(params), signal);
 		case "models.reference": {
 			const modelIdentityId = requiredString(params, "modelIdentityId");
 			const limits = resolveCanonicalModelLimits(modelIdentityId);
