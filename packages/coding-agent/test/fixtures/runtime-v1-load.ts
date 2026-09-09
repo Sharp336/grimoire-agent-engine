@@ -325,8 +325,14 @@ let staircaseStarted: number | undefined;
 let stage = -1;
 let producingRoots = roots;
 const metrics = fs.createWriteStream(path.join(directory, "metrics.ndjson"), { flags: "wx" });
+let metricsDrain: Promise<void> | undefined;
 const writeMetric = async (value: Record<string, unknown>) => {
-	if (!metrics.write(`${JSON.stringify(value)}\n`)) await once(metrics, "drain");
+	if (!metrics.write(`${JSON.stringify(value)}\n`)) {
+		metricsDrain ??= once(metrics, "drain").then(() => {
+			metricsDrain = undefined;
+		});
+		await metricsDrain;
+	}
 };
 const admitCommand = runtime.store.admitCommand.bind(runtime.store);
 runtime.store.admitCommand = async (command, generation) => {
