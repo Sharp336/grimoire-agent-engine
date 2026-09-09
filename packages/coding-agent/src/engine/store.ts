@@ -21,6 +21,7 @@ import { engineAgentId } from "./route";
 import {
 	ENGINE_HISTORY_INDEX_SCHEMA,
 	ENGINE_HISTORY_LINEAGE_SCHEMA,
+	ENGINE_HISTORY_ROWID_SCHEMA,
 	type EngineNativeHistoryPage,
 	readNativeHistoryEntry,
 } from "./runtime-history";
@@ -760,6 +761,16 @@ const SCHEMA_MIGRATIONS = [
 	{ version: 21, statements: RUNTIME_TOOL_SCHEMA, requiredColumns: [] },
 	{ version: 22, statements: RUNTIME_EVENT_SCOPE_SCHEMA, requiredColumns: [] },
 	{ version: 23, statements: RUNTIME_PENDING_SCHEMA, requiredColumns: [] },
+	{
+		version: 24,
+		statements: [
+			...ENGINE_HISTORY_ROWID_SCHEMA,
+			...RUNTIME_LIFECYCLE_SCHEMA.filter(statement =>
+				statement.startsWith("CREATE TRIGGER engine_history_identity_"),
+			),
+		],
+		requiredColumns: [],
+	},
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;

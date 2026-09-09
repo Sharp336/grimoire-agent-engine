@@ -12,6 +12,7 @@ import {
 	validateRuntimeValue,
 } from "./runtime-protocol";
 import { runtimeQueueRange } from "./runtime-queue";
+import { RuntimeTextReader } from "./runtime-text";
 
 export interface RuntimePageRequest extends RuntimeAccess {
 	agentInstanceRef: string;
@@ -367,14 +368,20 @@ export async function readRuntimeResource(
 		request.offset > Number(row.bytes)
 	)
 		throw new EngineTargetError("stale_target", "Input resource identity, revision or range changed");
-	const chunks = (await sql.unsafe(
-		"SELECT SUBSTR(CAST(input_body AS BLOB),?,?) AS chunk FROM engine_event_outbox WHERE event_id=?",
-		[request.offset + 1, request.limit, row.created_event_id],
-	)) as Array<{ chunk: Uint8Array }>;
-	work.rows(chunks.length);
-	const bytes = Buffer.from(chunks[0].chunk);
-	work.value.materializedBytes += bytes.length;
-	work.check();
+	const reader = await RuntimeTextReader.open(sql, identity.agent_instance_id, work);
+	let bytes: Buffer;
+	try {
+		bytes = reader.input(
+			String(resource.attemptId),
+			String(resource.inputId),
+			Number(resource.revision),
+			Number(row.bytes),
+			request.offset,
+			request.limit,
+		);
+	} finally {
+		reader.close();
+	}
 	const end = request.offset + bytes.length;
 	const result = {
 		resource,

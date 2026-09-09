@@ -1061,7 +1061,8 @@ describe("runtime v1 durable boundaries", () => {
 		const work = page.work as { bytes: number; materializedBytes: number; scannedRows: number };
 		expect(work.bytes).toBe(Buffer.byteLength(JSON.stringify(page)));
 		expect(work.materializedBytes).toBeLessThan(16_384);
-		expect(work.scannedRows).toBeLessThanOrEqual(7);
+		// Includes the second connection's exact owner/epoch guard, not only the output rows.
+		expect(work.scannedRows).toBeLessThanOrEqual(16);
 		expect(
 			Buffer.byteLength(
 				JSON.stringify({ deliveryPayload: item.deliveryPayload, annotation: item.annotation, sender: item.sender }),
