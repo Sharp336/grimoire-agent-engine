@@ -1415,6 +1415,9 @@ export class EngineRuntime {
 			}
 			throw error;
 		}
+		if (Math.ceil(Buffer.byteLength(content, "utf8") / 3) * 4 > MAX_NATIVE_RESTORE_BYTES) {
+			throw new EngineTargetError("history_expired", "Native session archive exceeds the accepted range");
+		}
 		const loaded = await loadSessionFile(sessionFile, this.store.sessionStorage);
 		const header = loaded.entries[0];
 		if (header?.type !== "session") {
@@ -1433,7 +1436,6 @@ export class EngineRuntime {
 				if (!isEnoent(error)) throw error;
 			}
 		}
-		const artifacts: NativeSessionCheckpoint["artifacts"] = [];
 		for (const artifactFile of artifactFiles) {
 			const name = path.basename(artifactFile);
 			if (
@@ -1442,56 +1444,111 @@ export class EngineRuntime {
 			) {
 				throw new EngineTargetError("history_expired", "Native session artifact path is invalid");
 			}
-			const artifactBytes = await fs.readFile(artifactFile);
-			artifacts.push({
-				name,
-				contentHash: `sha256:${crypto.createHash("sha256").update(artifactBytes).digest("hex")}`,
-				byteLength: artifactBytes.byteLength,
-				contentBase64: artifactBytes.toString("base64"),
-			});
 		}
-		const bytes = Buffer.from(
-			`${JSON.stringify({
-				schema: "grimoire.engine.native_session_checkpoint.v1",
-				sessionId: header.id,
-				sessionJsonlHash: `sha256:${crypto.createHash("sha256").update(content, "utf8").digest("hex")}`,
-				sessionJsonlBase64: Buffer.from(content, "utf8").toString("base64"),
-				artifacts,
-			})}\n`,
-			"utf8",
-		);
-		if (bytes.byteLength > MAX_NATIVE_RESTORE_BYTES) {
-			throw new EngineTargetError("history_expired", "Native session archive exceeds the accepted range");
-		}
-		const contentHash = `sha256:${crypto.createHash("sha256").update(bytes).digest("hex")}`;
 		const snapshotDir = this.#sessionArchiveSnapshotDir(agentInstanceId);
-		const payloadPath = path.join(snapshotDir, `${contentHash.slice("sha256:".length)}.bin`);
-		const metadataPath = path.join(snapshotDir, `${contentHash.slice("sha256:".length)}.json`);
 		await fs.mkdir(snapshotDir, { recursive: true });
-		try {
-			await fs.writeFile(payloadPath, bytes, { flag: "wx" });
-		} catch (error) {
-			if (!isEexist(error)) throw error;
-			const existing = await fs.readFile(payloadPath);
-			if (!existing.equals(bytes)) {
-				throw new EngineTargetError("history_expired", "Native session archive snapshot is corrupt");
+		const temporaryPath = path.join(snapshotDir, `${crypto.randomUUID()}.tmp`);
+		const output = await fs.open(temporaryPath, "wx");
+		const digest = crypto.createHash("sha256");
+		let byteLength = 0;
+		let contentHash: string;
+		let payloadPath: string;
+		const write = async (text: string) => {
+			const bytes = Buffer.from(text, "utf8");
+			if (byteLength + bytes.byteLength > MAX_NATIVE_RESTORE_BYTES) {
+				throw new EngineTargetError("history_expired", "Native session archive exceeds the accepted range");
 			}
+			await output.writeFile(bytes);
+			digest.update(bytes);
+			byteLength += bytes.byteLength;
+		};
+		try {
+			await write(
+				`{"schema":"grimoire.engine.native_session_checkpoint.v1","sessionId":${JSON.stringify(header.id)},` +
+					`"sessionJsonlHash":"sha256:${crypto.createHash("sha256").update(content, "utf8").digest("hex")}","sessionJsonlBase64":"`,
+			);
+			const sessionBytes = Buffer.from(content, "utf8");
+			const chunkBytes = 48 * 1024;
+			for (let offset = 0; offset < sessionBytes.byteLength; offset += chunkBytes) {
+				await write(sessionBytes.subarray(offset, offset + chunkBytes).toString("base64"));
+			}
+			await write('","artifacts":[');
+			for (const [index, artifactFile] of artifactFiles.entries()) {
+				const artifact = await fs.open(artifactFile, "r");
+				try {
+					const stat = await artifact.stat();
+					if (!stat.isFile() || Math.ceil(stat.size / 3) * 4 > MAX_NATIVE_RESTORE_BYTES - byteLength) {
+						throw new EngineTargetError("history_expired", "Native session artifact exceeds the accepted range");
+					}
+					const expectedHash = await hashNativeArchiveFile(artifact);
+					await write(
+						`${index ? "," : ""}{"name":${JSON.stringify(path.basename(artifactFile))},` +
+							`"contentHash":"${expectedHash}","byteLength":${stat.size},"contentBase64":"`,
+					);
+					const actualHash = crypto.createHash("sha256");
+					const buffer = Buffer.alloc(chunkBytes);
+					for (let offset = 0; offset < stat.size; offset += chunkBytes) {
+						const length = Math.min(chunkBytes, stat.size - offset);
+						const { bytesRead } = await artifact.read(buffer, 0, length, offset);
+						if (bytesRead !== length) {
+							throw new EngineTargetError("stale_target", "Native session artifact changed during archival");
+						}
+						const chunk = buffer.subarray(0, bytesRead);
+						actualHash.update(chunk);
+						await write(chunk.toString("base64"));
+					}
+					if (
+						(await artifact.stat()).size !== stat.size ||
+						`sha256:${actualHash.digest("hex")}` !== expectedHash
+					) {
+						throw new EngineTargetError("stale_target", "Native session artifact changed during archival");
+					}
+					await write('"}');
+				} finally {
+					await artifact.close();
+				}
+			}
+			await write("]}\n");
+			await output.sync();
+			await output.close();
+			contentHash = `sha256:${digest.digest("hex")}`;
+			payloadPath = path.join(snapshotDir, `${contentHash.slice("sha256:".length)}.bin`);
+			await verifyNativeArchiveFile(temporaryPath, byteLength, contentHash);
+			try {
+				await fs.link(temporaryPath, payloadPath);
+			} catch (error) {
+				if (!isEexist(error)) throw error;
+				await verifyNativeArchiveFile(payloadPath, byteLength, contentHash);
+			}
+		} finally {
+			await output.close();
+			await fs.unlink(temporaryPath);
 		}
+		const metadataPath = path.join(snapshotDir, `${contentHash.slice("sha256:".length)}.json`);
 		const metadata: NativeSessionArchiveMetadata = {
 			schema: "grimoire.engine.native_session_archive_snapshot.v1",
 			agentInstanceId,
 			sessionId: header.id,
 			contentHash,
-			byteLength: bytes.byteLength,
+			byteLength,
 		};
+		const metadataFile = await fs.open(temporaryPath, "wx");
 		try {
-			await fs.writeFile(metadataPath, `${JSON.stringify(metadata)}\n`, { encoding: "utf8", flag: "wx" });
-		} catch (error) {
-			if (!isEexist(error)) throw error;
-			const existing = JSON.parse(await fs.readFile(metadataPath, "utf8")) as NativeSessionArchiveMetadata;
-			if (stableStringifyJson(existing) !== stableStringifyJson(metadata)) {
-				throw new EngineTargetError("history_expired", "Native session archive metadata is corrupt");
+			await metadataFile.writeFile(`${JSON.stringify(metadata)}\n`, "utf8");
+			await metadataFile.sync();
+			await metadataFile.close();
+			try {
+				await fs.link(temporaryPath, metadataPath);
+			} catch (error) {
+				if (!isEexist(error)) throw error;
+				const existing = JSON.parse(await fs.readFile(metadataPath, "utf8")) as NativeSessionArchiveMetadata;
+				if (stableStringifyJson(existing) !== stableStringifyJson(metadata)) {
+					throw new EngineTargetError("history_expired", "Native session archive metadata is corrupt");
+				}
 			}
+		} finally {
+			await metadataFile.close();
+			await fs.unlink(temporaryPath);
 		}
 		return { ...metadata, payloadPath };
 	}
@@ -4364,6 +4421,40 @@ function optionalInputResultBoolean(
 	if (value === undefined) return {};
 	if (typeof value !== "boolean") throw new EngineTargetError("invalid_request", `${key} must be a boolean`);
 	return { [key]: value };
+}
+
+async function hashNativeArchiveFile(file: fs.FileHandle): Promise<string> {
+	const digest = crypto.createHash("sha256");
+	const buffer = Buffer.alloc(48 * 1024);
+	const size = (await file.stat()).size;
+	if (size > MAX_NATIVE_RESTORE_BYTES) {
+		throw new EngineTargetError("history_expired", "Native session archive exceeds the accepted range");
+	}
+	let offset = 0;
+	while (offset < size) {
+		const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.byteLength, size - offset), offset);
+		if (!bytesRead) {
+			throw new EngineTargetError("stale_target", "Native session archive changed during verification");
+		}
+		digest.update(buffer.subarray(0, bytesRead));
+		offset += bytesRead;
+	}
+	if ((await file.stat()).size !== size) {
+		throw new EngineTargetError("stale_target", "Native session archive changed during verification");
+	}
+	return `sha256:${digest.digest("hex")}`;
+}
+
+async function verifyNativeArchiveFile(filePath: string, byteLength: number, contentHash: string): Promise<void> {
+	const file = await fs.open(filePath, "r");
+	try {
+		const stat = await file.stat();
+		if (!stat.isFile() || stat.size !== byteLength || (await hashNativeArchiveFile(file)) !== contentHash) {
+			throw new EngineTargetError("history_expired", "Native session archive snapshot is corrupt");
+		}
+	} finally {
+		await file.close();
+	}
 }
 
 function sha256(value: string): string {

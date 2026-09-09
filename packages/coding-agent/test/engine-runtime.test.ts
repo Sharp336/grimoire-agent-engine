@@ -1,6 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it, spyOn } from "bun:test";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
+import * as fsAsync from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
@@ -25,7 +26,7 @@ import {
 	type EngineCommandEnvelope,
 	engineCommandIdentity,
 } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
-import { engineAgentInstanceId } from "@oh-my-pi/pi-coding-agent/engine/route";
+import { engineAgentInstanceId, engineRouteToken } from "@oh-my-pi/pi-coding-agent/engine/route";
 import { EngineRuntime, type EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { hostedCoreMcpConfig } from "@oh-my-pi/pi-coding-agent/engine/service";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
@@ -1097,18 +1098,59 @@ describe("EngineRuntime", () => {
 			profile,
 		);
 		await runtime.drain();
-		const first = await runtime.sessionArchive("archive-native-agent", undefined, 0, 17);
 		if (!started.sessionFile) throw new Error("Expected archived native session");
+		const attachmentsDir = started.sessionFile.slice(0, -".jsonl".length);
+		const binaryAttachment = crypto.randomBytes(96 * 1024 + 1);
+		fs.writeFileSync(path.join(attachmentsDir, "binary.bin"), binaryAttachment);
+		fs.writeFileSync(path.join(attachmentsDir, "empty.bin"), "");
+		const snapshotDir = path.join(
+			databaseDir,
+			"engine-sessions",
+			".archive",
+			engineRouteToken("archive-native-agent"),
+		);
+		const publishFailure = spyOn(fsAsync, "link").mockRejectedValueOnce(
+			Object.assign(new Error("disk full"), { code: "ENOSPC" }),
+		);
+		try {
+			await expect(runtime.sessionArchive("archive-native-agent")).rejects.toMatchObject({ code: "ENOSPC" });
+		} finally {
+			publishFailure.mockRestore();
+		}
+		expect(await runtime.store.sessionStorage.readText(started.sessionFile)).toContain(
+			"preserve exact native history",
+		);
+		expect(fs.readFileSync(path.join(attachmentsDir, "binary.bin"))).toEqual(binaryAttachment);
+		const first = await runtime.sessionArchive("archive-native-agent", undefined, 0, 17);
+		const repeated = await runtime.sessionArchive("archive-native-agent", undefined, 0, 17);
+		expect(repeated).toEqual(first);
+		const payloadPath = path.join(snapshotDir, `${first.contentHash.slice("sha256:".length)}.bin`);
+		const originalPayload = fs.readFileSync(payloadPath);
+		const corruptedPayload = Buffer.from(originalPayload);
+		corruptedPayload[corruptedPayload.length - 1] ^= 1;
+		fs.writeFileSync(payloadPath, corruptedPayload);
+		try {
+			await expect(runtime.sessionArchive("archive-native-agent")).rejects.toMatchObject({
+				code: "history_expired",
+			});
+			expect(await runtime.store.sessionStorage.readText(started.sessionFile)).toContain(
+				"preserve exact native history",
+			);
+			expect(fs.readdirSync(snapshotDir).some(name => name.endsWith(".tmp"))).toBe(false);
+		} finally {
+			fs.writeFileSync(payloadPath, originalPayload);
+		}
 		fs.appendFileSync(started.sessionFile, "\n");
 		const chunks = [Buffer.from(first.contentBase64, "base64")];
 		let offset = first.nextOffset;
 		while (offset !== null) {
-			const page = await runtime.sessionArchive("archive-native-agent", first.contentHash, offset, 17);
+			const page = await runtime.sessionArchive("archive-native-agent", first.contentHash, offset, 24_000);
 			chunks.push(Buffer.from(page.contentBase64, "base64"));
 			offset = page.nextOffset;
 		}
 		const body = Buffer.concat(chunks);
 		expect(body.byteLength).toBe(first.byteLength);
+		expect(`sha256:${crypto.createHash("sha256").update(body).digest("hex")}`).toBe(first.contentHash);
 		const checkpoint = JSON.parse(body.toString("utf8"));
 		expect(checkpoint.schema).toBe("grimoire.engine.native_session_checkpoint.v1");
 		const nativeSession = Buffer.from(checkpoint.sessionJsonlBase64, "base64").toString("utf8");
@@ -1119,6 +1161,12 @@ describe("EngineRuntime", () => {
 				name: "0.read.log",
 				contentBase64: Buffer.from("complete spilled attachment").toString("base64"),
 			}),
+			expect.objectContaining({
+				name: "binary.bin",
+				byteLength: binaryAttachment.byteLength,
+				contentBase64: binaryAttachment.toString("base64"),
+			}),
+			expect.objectContaining({ name: "empty.bin", byteLength: 0, contentBase64: "" }),
 		]);
 		await expect(
 			runtime.sessionArchive("archive-native-agent", `sha256:${"0".repeat(64)}`, 0, 17),
@@ -1126,8 +1174,14 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 
 		const secondRestart = await EngineRuntime.create(options);
-		const afterRestart = await secondRestart.sessionArchive("archive-native-agent", first.contentHash, 0, 24_000);
-		expect(Buffer.from(afterRestart.contentBase64, "base64")).toEqual(body);
+		const afterRestart = await secondRestart.sessionArchive(
+			"archive-native-agent",
+			first.contentHash,
+			body.byteLength - 24_000,
+			24_000,
+		);
+		expect(Buffer.from(afterRestart.contentBase64, "base64")).toEqual(body.subarray(body.byteLength - 24_000));
+		expect(fs.readdirSync(snapshotDir).some(name => name.endsWith(".tmp"))).toBe(false);
 		await secondRestart.dispose();
 	}, 60_000);
 
