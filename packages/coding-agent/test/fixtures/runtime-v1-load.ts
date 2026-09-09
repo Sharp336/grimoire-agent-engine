@@ -32,6 +32,9 @@ const roots = Number(args.get("--roots") ?? 7);
 const rate = Number(args.get("--rate") ?? 20);
 const seconds = Number(args.get("--seconds") ?? 1800);
 const cpuProfileSeconds = Number(args.get("--cpu-profile-seconds") ?? 0);
+const stability = args.get("--stability") === "true";
+if (stability && (cpuProfileSeconds || args.has("--staircase-seconds")))
+	throw new Error("Stability does not run CPU or capacity measurements");
 if (!Number.isInteger(cpuProfileSeconds) || cpuProfileSeconds < 0 || cpuProfileSeconds > Math.min(60, seconds))
 	throw new Error("CPU diagnostic sampling must be within the finite producer run and at most60 seconds");
 const noisyRate = Number(args.get("--noisy-rate") ?? 0);
@@ -322,7 +325,7 @@ const stop = new AbortController();
 process.once("SIGINT", () => stop.abort());
 process.once("SIGTERM", () => stop.abort());
 const lag = monitorEventLoopDelay({ resolution: 10 });
-lag.enable();
+if (!stability) lag.enable();
 const started = performance.now();
 let producerStarted = started;
 let staircaseStarted: number | undefined;
@@ -341,7 +344,7 @@ const writeMetric = async (value: Record<string, unknown>) => {
 const admitCommand = runtime.store.admitCommand.bind(runtime.store);
 runtime.store.admitCommand = async (command, generation) => {
 	const result = await admitCommand(command, generation);
-	if (command.commandId.startsWith("measure-control-"))
+	if (!stability && command.commandId.startsWith("measure-control-"))
 		await writeMetric({
 			kind: "command_admitted",
 			commandId: command.commandId,
@@ -368,9 +371,11 @@ function measureRead<Args extends unknown[], Result>(
 		}
 	};
 }
-runtime.store.runtimeSnapshot = measureRead("runtime.snapshot", runtime.store.runtimeSnapshot.bind(runtime.store));
-runtime.store.runtimeQueue = measureRead("runtime.queue", runtime.store.runtimeQueue.bind(runtime.store));
-runtime.sessionHistoryPage = measureRead("runtime.history", runtime.sessionHistoryPage.bind(runtime));
+if (!stability) {
+	runtime.store.runtimeSnapshot = measureRead("runtime.snapshot", runtime.store.runtimeSnapshot.bind(runtime.store));
+	runtime.store.runtimeQueue = measureRead("runtime.queue", runtime.store.runtimeQueue.bind(runtime.store));
+	runtime.sessionHistoryPage = measureRead("runtime.history", runtime.sessionHistoryPage.bind(runtime));
+}
 let produced = 0;
 let commitMs = 0;
 const streams = new Map<string, { revision: number; offset: number }>();
@@ -406,11 +411,11 @@ const produce = async (binding: EngineBindingSnapshot & { agentInstanceRef: stri
 		},
 	});
 	produced++;
-	commitMs += performance.now() - began;
+	if (!stability) commitMs += performance.now() - began;
 	// Match the product runtime's post-COMMIT coalesced outbox wake. Provider
 	// admission does not wait for an unrelated sink's entire durable backlog.
 	adapter?.wakeEvents();
-	if (revision % 20 === 0)
+	if (!stability && revision % 20 === 0)
 		await writeMetric({
 			kind: "commit_sample",
 			cursor: event.eventId,
@@ -454,6 +459,7 @@ console.log(
 		streamFormat: "attemptId:revision\\n, padded with x to 1024 ASCII bytes",
 		nominalEventsPerSecond: rate * bindings.length,
 		noisyRate,
+		stability,
 		...(staircaseSeconds ? { producingRootStages: [1, 7, 14, 28], staircaseSeconds } : {}),
 		seconds,
 		pid: process.pid,
@@ -545,13 +551,17 @@ try {
 				producerRevisions: Object.fromEntries(
 					[...streams].map(([attemptId, stream]) => [attemptId, stream.revision]),
 				),
-				commitMs,
-				lagP95Ms: lag.percentile(95) / 1e6,
-				lagMaxMs: lag.max / 1e6,
 				rssBytes: process.memoryUsage().rss,
-				sqliteBytes: files[0],
-				walBytes: files[1],
-				loopUtilization: performance.eventLoopUtilization(),
+				...(!stability
+					? {
+							commitMs,
+							lagP95Ms: lag.percentile(95) / 1e6,
+							lagMaxMs: lag.max / 1e6,
+							sqliteBytes: files[0],
+							walBytes: files[1],
+							loopUtilization: performance.eventLoopUtilization(),
+						}
+					: {}),
 			});
 			lag.reset();
 			lastSample = performance.now();
