@@ -29,11 +29,11 @@ export async function readRuntimeReceipt(sql: RuntimeSql, commandId: string): Pr
 	const rows = (await sql.unsafe(
 		`SELECT c.command_id,c.operation,c.agent_instance_id,c.agent_instance_ref,c.attempt_id,c.execution_id,c.principal_id,c.state,
 		c.browser_payload_hash,json_extract(c.serialized_command,'$.browserTarget') AS browser_target,c.authority_generation,
-		CASE WHEN LENGTH(CAST(c.receipt AS BLOB))<=${runtimeLimits.liveChangeBytes} THEN c.receipt ELSE NULL END AS receipt,
-		LENGTH(CAST(c.receipt AS BLOB)) AS receipt_bytes,c.outcome,c.settled_at,i.intent_revision,
-		CASE WHEN LENGTH(CAST(c.receipt AS BLOB))>${runtimeLimits.liveChangeBytes} AND c.operation IN ('enqueue','queue_edit','queue_remove','queue_annotate','queue_defer')
+		CASE WHEN OCTET_LENGTH(c.receipt)<=${runtimeLimits.liveChangeBytes} THEN c.receipt ELSE NULL END AS receipt,
+		OCTET_LENGTH(c.receipt) AS receipt_bytes,c.outcome,c.settled_at,i.intent_revision,
+		CASE WHEN OCTET_LENGTH(c.receipt)>${runtimeLimits.liveChangeBytes} AND c.operation IN ('enqueue','queue_edit','queue_remove','queue_annotate','queue_defer')
 		THEN SUBSTR(COALESCE(json_extract(c.receipt,'$.detail.item.queueId'),json_extract(c.receipt,'$.detail.queueId')),1,${runtimeLimits.bulkPreviewBytes}) END AS queue_id,
-		CASE WHEN LENGTH(CAST(c.receipt AS BLOB))>${runtimeLimits.liveChangeBytes} AND c.operation IN ('enqueue','queue_edit','queue_remove','queue_annotate','queue_defer')
+		CASE WHEN OCTET_LENGTH(c.receipt)>${runtimeLimits.liveChangeBytes} AND c.operation IN ('enqueue','queue_edit','queue_remove','queue_annotate','queue_defer')
 		THEN COALESCE(json_extract(c.receipt,'$.detail.item.revision'),json_extract(c.receipt,'$.detail.revision')) END AS queue_revision,
 		CASE WHEN c.outcome='rejected' THEN 'rejected' WHEN c.state<>'settled' THEN 'engine_accepted'
 		WHEN c.operation='start' AND a.state IN ('completed','cancelled','failed','interrupted') THEN 'execution_terminal' ELSE 'applied' END AS stage

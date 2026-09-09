@@ -1223,7 +1223,7 @@ export class EngineStore {
 		const inbox = control
 			? [{ records: 0, bytes: 0 }]
 			: ((await sql.unsafe(
-					"SELECT COUNT(*) AS records,COALESCE(SUM(length(CAST(delivery_payload AS BLOB))+length(CAST(COALESCE(annotation,'') AS BLOB))),0) AS bytes FROM engine_inbox_items WHERE disposition='pending'",
+					"SELECT COUNT(*) AS records,COALESCE(SUM(octet_length(delivery_payload)+COALESCE(octet_length(annotation),0)),0) AS bytes FROM engine_inbox_items WHERE disposition='pending'",
 				)) as Array<{ records: number; bytes: number }>);
 		if (
 			Number(commands[0].records) + Number(inbox[0].records) + recordsDelta >
@@ -1238,7 +1238,7 @@ export class EngineStore {
 			[excludingCommandId, ...controls, agentInstanceId],
 		)) as Array<{ records: number; bytes: number }>;
 		const agentInbox = (await sql.unsafe(
-			"SELECT COUNT(*) AS records,COALESCE(SUM(length(CAST(delivery_payload AS BLOB))+length(CAST(COALESCE(annotation,'') AS BLOB))),0) AS bytes FROM engine_inbox_items WHERE disposition='pending' AND agent_instance_id=?",
+			"SELECT COUNT(*) AS records,COALESCE(SUM(octet_length(delivery_payload)+COALESCE(octet_length(annotation),0)),0) AS bytes FROM engine_inbox_items WHERE disposition='pending' AND agent_instance_id=?",
 			[agentInstanceId],
 		)) as Array<{ records: number; bytes: number }>;
 		if (

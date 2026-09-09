@@ -60,8 +60,8 @@ interface QueueMetadata {
 
 const metadataSelect = `SELECT i.queue_id,SUBSTR(i.source_event_id,1,${runtimeLimits.bulkPreviewBytes}) AS source_event_id,
 	s.source_type,i.deliver_at,i.wake_intent,i.position,i.disposition,i.revision,i.created_at,i.updated_at,
-	LENGTH(CAST(i.delivery_payload AS BLOB)) AS deliveryPayload,LENGTH(CAST(i.annotation AS BLOB)) AS annotation,
-	LENGTH(CAST(s.sender AS BLOB)) AS sender,LENGTH(CAST(i.source_event_id AS BLOB)) AS identity_bytes
+	OCTET_LENGTH(i.delivery_payload) AS deliveryPayload,OCTET_LENGTH(i.annotation) AS annotation,
+	OCTET_LENGTH(s.sender) AS sender,OCTET_LENGTH(i.source_event_id) AS identity_bytes
 	FROM engine_inbox_items i JOIN engine_inbox_sources s ON s.source_event_id=i.source_event_id`;
 
 function utf8Prefix(bytes: Uint8Array, maximum = bytes.length): string {
@@ -294,7 +294,7 @@ export async function runtimeQueueRange(
 	const column = columns[resource.field as QueueField];
 	if (!column) throw new EngineTargetError("invalid_request", "Unknown queue resource field");
 	const rows = (await sql.unsafe(
-		`SELECT i.revision,LENGTH(CAST(${column} AS BLOB)) AS bytes
+		`SELECT i.revision,OCTET_LENGTH(${column}) AS bytes
 		FROM engine_inbox_items i JOIN engine_inbox_sources s ON s.source_event_id=i.source_event_id
 		WHERE i.agent_instance_id=? AND i.queue_id=?`,
 		[identity.agent_instance_id, String(resource.queueId)],

@@ -162,7 +162,7 @@ export async function readRuntimeInput(sql: RuntimeSql, request: RuntimePageRequ
 	await readIdentity(sql, request, work);
 	if (request.inputId) {
 		const rows = (await sql.unsafe(
-			`SELECT p.created_event_id,LENGTH(CAST(e.input_body AS BLOB)) AS bytes FROM engine_runtime_inputs p
+			`SELECT p.created_event_id,OCTET_LENGTH(e.input_body) AS bytes FROM engine_runtime_inputs p
 			JOIN engine_event_outbox e ON e.event_id=p.created_event_id
 			WHERE p.attempt_id=? AND p.input_id=? AND p.resolved_event_id IS NULL`,
 			[request.attemptId!, request.inputId],
@@ -278,7 +278,7 @@ export async function readRuntimeResource(
 	if (resource.kind !== "input")
 		throw new EngineTargetError("invalid_request", "This resource kind requires its native owner reader");
 	const rows = (await sql.unsafe(
-		`SELECT p.created_event_id,LENGTH(CAST(e.input_body AS BLOB)) AS bytes
+		`SELECT p.created_event_id,OCTET_LENGTH(e.input_body) AS bytes
 		FROM engine_runtime_inputs p JOIN engine_event_outbox e ON e.event_id=p.created_event_id
 		WHERE e.agent_instance_id=? AND p.attempt_id=? AND p.input_id=?`,
 		[identity.agent_instance_id, String(resource.attemptId), String(resource.inputId)],
