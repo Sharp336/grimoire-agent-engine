@@ -3064,14 +3064,45 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
-	it("retains a three MiB provider burst before completion and reopens its exact bounded message resource", async () => {
-		const text = crypto.randomBytes((3 * 1024 * 1024 * 3) / 4).toString("base64");
+	it("backpressures a three MiB provider burst until durable writes and reopens its exact bounded message resource", async () => {
+		const prefix = `${"x".repeat(4095)}${'😀"\\\n'.repeat(1024)}`;
+		const text =
+			prefix +
+			crypto
+				.randomBytes((3 * 1024 * 1024 * 3) / 4)
+				.toString("base64")
+				.slice(0, 3 * 1024 * 1024 - Buffer.byteLength(prefix));
 		const mock = createMockModel({ responses: [{ content: [text] }] });
+		const writeEntered = Promise.withResolvers<void>();
+		const releaseWrite = Promise.withResolvers<void>();
+		let publishedDeltas = 0;
 		const { runtime, cwd, options } = await createRuntime(
-			(session, input) => session.prompt(input),
+			(session, input) => {
+				session.subscribe(event => {
+					if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta")
+						publishedDeltas++;
+				});
+				return session.prompt(input);
+			},
 			{},
 			{ model: mock.model },
 		);
+		const append = runtime.store.appendEvent.bind(runtime.store);
+		let inFlightBytes = 0;
+		let maxInFlightBytes = 0;
+		const slowStore = spyOn(runtime.store, "appendEvent").mockImplementation(async event => {
+			if (event.kind !== "message_updated") return append(event);
+			const bytes = Buffer.byteLength(JSON.stringify(event.payload));
+			inFlightBytes += bytes;
+			maxInFlightBytes = Math.max(maxInFlightBytes, inFlightBytes);
+			writeEntered.resolve();
+			try {
+				await releaseWrite.promise;
+				return await append(event);
+			} finally {
+				inFlightBytes -= bytes;
+			}
+		});
 		const agentInstanceRef = "grimoire://tasks/grimoire/burst/agents/large";
 		const started = await runtime.start(
 			{
@@ -3087,7 +3118,18 @@ describe("EngineRuntime", () => {
 			},
 			profile,
 		);
-		await runtime.drain();
+		try {
+			await writeEntered.promise;
+			await Bun.sleep(20);
+			expect(publishedDeltas).toBe(0);
+			expect(maxInFlightBytes).toBeLessThanOrEqual(runtimeLimits.deliveryBatchBytes);
+		} finally {
+			releaseWrite.resolve();
+			await runtime.drain();
+			slowStore.mockRestore();
+		}
+		expect(publishedDeltas).toBe(1);
+		expect(maxInFlightBytes).toBeLessThanOrEqual(runtimeLimits.deliveryBatchBytes);
 		const completedAttempt = await runtime.store.getAttempt(started.attemptId);
 		expect(completedAttempt?.state, completedAttempt?.cause ?? undefined).toBe("completed");
 		const request = { agentInstanceRef, attemptId: started.attemptId, principalId: "burst-owner" };
@@ -3118,6 +3160,55 @@ describe("EngineRuntime", () => {
 		expect(hash.digest("hex")).toBe(crypto.createHash("sha256").update(text).digest("hex"));
 		await reopened.dispose();
 	}, 60_000);
+
+	it("fails the Attempt when a streaming content commit fails and does not consume the next provider delta", async () => {
+		const mock = createMockModel({ responses: [{ content: ["first", "second"] }] });
+		let publishedDeltas = 0;
+		const { runtime, cwd } = await createRuntime(
+			(session, input) => {
+				session.subscribe(event => {
+					if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta")
+						publishedDeltas++;
+				});
+				return session.prompt(input);
+			},
+			{},
+			{ model: mock.model },
+		);
+		const append = runtime.store.appendEvent.bind(runtime.store);
+		let failedWrites = 0;
+		const brokenStore = spyOn(runtime.store, "appendEvent").mockImplementation(async event => {
+			if (event.kind === "message_updated") {
+				failedWrites++;
+				throw new Error("isolated stream commit failure");
+			}
+			return append(event);
+		});
+		try {
+			const started = await runtime.start(
+				{
+					commandId: "stream-failure-start",
+					agentInstanceId: "stream-failure-agent",
+					executionId: "stream-failure-execution",
+					attemptId: "stream-failure-attempt",
+					authorityGeneration: 1,
+					cwd,
+					input: "answer",
+				},
+				profile,
+			);
+			await runtime.drain();
+			expect(await runtime.store.getAttempt(started.attemptId)).toMatchObject({
+				state: "failed",
+				cause: "Engine message content could not be persisted",
+			});
+			expect(failedWrites).toBe(1);
+			expect(publishedDeltas).toBe(0);
+			expect(mock.calls).toHaveLength(1);
+		} finally {
+			brokenStore.mockRestore();
+		}
+	}, 30_000);
 
 	it("settles a partial assistant snapshot before Stop cancels its Attempt", async () => {
 		const releasePrompt = Promise.withResolvers<void>();

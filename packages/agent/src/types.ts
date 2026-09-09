@@ -392,8 +392,9 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/**
 	 * Inspect assistant streaming events before they are published to the outer agent event stream.
 	 * Callers may abort synchronously to stop consuming buffered provider events.
+	 * A returned promise applies consumer backpressure before the next event is consumed.
 	 */
-	onAssistantMessageEvent?: (message: AssistantMessage, event: AssistantMessageEvent) => void;
+	onAssistantMessageEvent?: (message: AssistantMessage, event: AssistantMessageEvent) => void | Promise<void>;
 
 	/**
 	 * Called when GPT-5 Harmony protocol leakage is detected and mitigated.

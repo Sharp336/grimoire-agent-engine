@@ -1892,7 +1892,8 @@ async function streamAssistantResponse(
 								}
 								partialMessage = event.partial;
 								context.messages[context.messages.length - 1] = partialMessage;
-								config.onAssistantMessageEvent?.(partialMessage, event);
+								const intercepted = config.onAssistantMessageEvent?.(partialMessage, event);
+								if (intercepted) await response.trackLocalWork(intercepted);
 								// `message` and `assistantMessageEvent.partial` intentionally share one
 								// immutable snapshot of the streaming partial: every message_update
 								// consumer treats both as read-only, so cloning the identical partial
