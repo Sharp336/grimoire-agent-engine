@@ -1,5 +1,6 @@
 import { EngineTargetError } from "./contracts";
 import type { RuntimeSql } from "./runtime-projection";
+import { runtimeLimits } from "./runtime-protocol";
 
 /** A trusted delivery reference to one immutable Start, never a replacement for general intent CAS. */
 export interface EngineStartFence {
@@ -30,6 +31,23 @@ export interface EngineStartRow {
 	start_applied_intent_revision: number | null;
 	state: "received" | "settled";
 	receipt: string | null;
+	receipt_bytes: number;
+	source_unavailable: number;
+	source_bytes: number;
+}
+
+const startSourceBytes =
+	runtimeLimits.bootstrapMaterializedBytes - runtimeLimits.liveChangeBytes - runtimeLimits.bulkPreviewBytes;
+
+export async function readStartExpectedRevision(sql: RuntimeSql, commandId: string): Promise<number | null> {
+	const rows = (await sql.unsafe(
+		`SELECT CASE WHEN OCTET_LENGTH(serialized_command)<=${startSourceBytes} THEN json_extract(serialized_command,'$.payload.expectedIntentRevision') END AS expected,
+		 COALESCE(OCTET_LENGTH(serialized_command),0)>${startSourceBytes} AS source_unavailable FROM engine_commands WHERE command_id=?`,
+		[commandId],
+	)) as Array<{ expected: number | null; source_unavailable: number }>;
+	if (rows[0]?.source_unavailable)
+		throw new EngineTargetError("source_unavailable", "Exact Start revision exceeds its native read budget");
+	return rows[0]?.expected ?? null;
 }
 
 export const START_FENCE_SCHEMA = [
@@ -57,11 +75,16 @@ export function validateStartFence(target: EngineStartFence): boolean {
 export async function readTargetStart(
 	sql: RuntimeSql,
 	target: EnginePendingStartTarget,
+	sourceBudgetBytes = startSourceBytes,
 ): Promise<EngineStartRow | undefined> {
+	const sourceLimit = Math.max(0, Math.min(startSourceBytes, sourceBudgetBytes));
 	const rows = (await sql.unsafe(
 		`SELECT command_id,canonical_hash,agent_instance_id,execution_id,attempt_id,authority_generation,engine_generation,
-		principal_id,json_extract(serialized_command,'$.payload.expectedIntentRevision') AS expected,
-		start_applied_intent_revision,state,receipt FROM engine_commands
+		principal_id,CASE WHEN OCTET_LENGTH(serialized_command)<=${sourceLimit} THEN json_extract(serialized_command,'$.payload.expectedIntentRevision') END AS expected,
+		COALESCE(OCTET_LENGTH(serialized_command),0)>${sourceLimit} AS source_unavailable,
+		COALESCE(OCTET_LENGTH(serialized_command),0) AS source_bytes,
+		start_applied_intent_revision,state,OCTET_LENGTH(receipt) AS receipt_bytes,
+		CASE WHEN OCTET_LENGTH(receipt)<=${runtimeLimits.liveChangeBytes} THEN receipt END AS receipt FROM engine_commands
 		WHERE operation='start' AND ${target.pendingStartCommandId ? "command_id=?" : "agent_instance_id=? AND execution_id=? AND attempt_id=?"}
 		ORDER BY received_at DESC LIMIT 1`,
 		target.pendingStartCommandId
@@ -76,9 +99,15 @@ export async function readTargetStart(
 			start.attempt_id !== target.attemptId ||
 			Number(start.authority_generation) !== target.authorityGeneration ||
 			Number(start.engine_generation) > target.engineGeneration ||
-			(target.principalId !== undefined && start.principal_id !== target.principalId) ||
-			(target.expectedStartIntentRevision !== undefined && start.expected !== target.expectedStartIntentRevision)
+			(target.principalId !== undefined && start.principal_id !== target.principalId)
 		)
+			throw new EngineTargetError(
+				"stale_target",
+				"Start cancellation reference does not match its immutable target",
+			);
+		if (start.source_unavailable)
+			throw new EngineTargetError("source_unavailable", "Exact Start revision exceeds its native read budget");
+		if (target.expectedStartIntentRevision !== undefined && start.expected !== target.expectedStartIntentRevision)
 			throw new EngineTargetError(
 				"stale_target",
 				"Start cancellation reference does not match its immutable target",
@@ -90,9 +119,10 @@ export async function readTargetStart(
 export async function cancelIntentRevision(
 	sql: RuntimeSql,
 	target: EnginePendingStartTarget,
+	knownStart?: EngineStartRow | null,
 ): Promise<number | undefined> {
 	if (!validateStartFence(target)) return target.expectedIntentRevision;
-	const start = await readTargetStart(sql, target);
+	const start = knownStart === undefined ? await readTargetStart(sql, target) : knownStart;
 	const rows = (await sql.unsafe("SELECT intent_revision FROM engine_agent_identity WHERE agent_instance_id=?", [
 		target.agentInstanceId,
 	])) as Array<{ intent_revision: number }>;

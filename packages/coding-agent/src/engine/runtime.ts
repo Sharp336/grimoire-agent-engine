@@ -74,7 +74,7 @@ import { runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
 import { validateStartFence } from "./start-fence";
 import {
 	EngineAttemptConflictError,
-	type EngineAttemptRecord,
+	type EngineAttemptTargetRecord,
 	EngineInboxConflictError,
 	type EngineModelEffectInput,
 	EngineStore,
@@ -681,7 +681,7 @@ export class EngineRuntime {
 		return this.#inLane(request.agentInstanceId, async () => {
 			this.#throwIfDisposed();
 			const durable = await this.store.getBinding(request.agentInstanceId);
-			const attempt = await this.store.getAttempt(request.attemptId);
+			const attempt = await this.store.getAttemptTarget(request.attemptId);
 			if (!durable || !attempt) throw new EngineTargetError("agent_not_found", "Unknown branch target");
 			if (durable.attemptId !== request.attemptId || !this.#attemptMatchesTarget(attempt, request))
 				throw new EngineTargetError("stale_target", "Branch target is stale");
@@ -807,12 +807,10 @@ export class EngineRuntime {
 				}
 			};
 			await apply(request.agentInstanceId);
-			await Promise.all(
-				changed.agentIds
-					// A pending child has no effects to quiesce. Its eventual admission inherits the durable hold.
-					.filter(id => id !== request.agentInstanceId && this.#bindings.has(id))
-					.map(id => this.#inLane(id, () => apply(id))),
-			);
+			for (const id of changed.agentIds) {
+				// A pending child has no effects to quiesce. Its eventual admission inherits the durable hold.
+				if (id !== request.agentInstanceId && this.#bindings.has(id)) await this.#inLane(id, () => apply(id));
+			}
 			this.#signalInboxWake();
 			const intent = await this.store.intent(request.agentInstanceId);
 			const result: EngineControlResult = {
@@ -4191,7 +4189,7 @@ export class EngineRuntime {
 		return { ...target, sessionId };
 	}
 
-	#attemptMatchesTarget(attempt: EngineAttemptRecord, target: EngineTarget): boolean {
+	#attemptMatchesTarget(attempt: EngineAttemptTargetRecord, target: EngineTarget): boolean {
 		return (
 			attempt.agent_instance_id === target.agentInstanceId &&
 			attempt.execution_id === target.executionId &&

@@ -1,5 +1,6 @@
 import type { SQL } from "bun";
 import { type EngineEvent, EngineTargetError } from "./contracts";
+import { runtimeHoldRows } from "./runtime-holds";
 import { recordRuntimeMessage } from "./runtime-messages";
 import {
 	type RuntimeAccess,
@@ -10,6 +11,7 @@ import {
 	validateRuntimeValue,
 } from "./runtime-protocol";
 import { runtimeToolBaselines } from "./runtime-resources";
+import { readStartExpectedRevision } from "./start-fence";
 
 export type RuntimeSql = InstanceType<typeof SQL>;
 export const RUNTIME_PROJECTION_SCHEMA = [
@@ -140,6 +142,23 @@ export interface RuntimeTargetRow {
 	tool_revision: number;
 }
 
+// Projection needs only fixed identity/state metadata, never retained retry/error bodies.
+const targetColumns = [
+	"attempt_id",
+	"execution_id",
+	"authority_generation",
+	"engine_generation",
+	"binding_id",
+	"binding_generation",
+	"state",
+	"transcript_session_id",
+	"transcript_leaf_entry_id",
+	"detail_revision",
+	"input_revision",
+	"message_revision",
+	"tool_revision",
+] as const;
+
 export const RUNTIME_KIND_MASK = {
 	assistant: 1,
 	tool: 2,
@@ -155,15 +174,7 @@ export async function runtimeHolds(
 	agentId: string,
 	limit: number,
 ): Promise<Record<string, unknown>[]> {
-	const rows = (await sql.unsafe(
-		`WITH RECURSIVE ancestors(id) AS (
-		SELECT ? UNION SELECT i.parent_agent_instance_id FROM engine_agent_identity i JOIN ancestors a ON i.agent_instance_id=a.id
-		WHERE i.parent_agent_instance_id IS NOT NULL)
-		SELECT i.agent_instance_ref,h.command_id,h.generation,h.kind FROM engine_branch_holds h
-		JOIN ancestors a ON h.source_agent_instance_id=a.id JOIN engine_agent_identity i ON i.agent_instance_id=h.source_agent_instance_id
-		ORDER BY h.source_agent_instance_id,h.kind LIMIT ?`,
-		[agentId, limit],
-	)) as Array<{ agent_instance_ref: string; command_id: string; generation: number; kind: string }>;
+	const rows = await runtimeHoldRows(sql, agentId, limit);
 	return rows.map(row => ({
 		sourceAgentInstanceRef: row.agent_instance_ref,
 		commandId: row.command_id,
@@ -454,7 +465,7 @@ export async function runtimeNativeTarget(
 		authorityGeneration: Number(identity.authority_generation),
 	};
 	const attempts = (await sql.unsafe(
-		`SELECT a.* FROM engine_attempts a
+		`SELECT ${targetColumns.map(column => `a.${column}`).join(",")} FROM engine_attempts a
 		LEFT JOIN engine_runtime_bindings b ON b.agent_instance_id=a.agent_instance_id
 		WHERE a.agent_instance_id=? AND ${request.attemptId ? "a.attempt_id=?" : "a.attempt_id=b.attempt_id"} LIMIT 1`,
 		[identity.agent_instance_id, ...(request.attemptId ? [request.attemptId] : [])],
@@ -464,10 +475,11 @@ export async function runtimeNativeTarget(
 		if (request.executionId && request.executionId !== attempt.execution_id)
 			throw new EngineTargetError("stale_target", "Execution no longer matches the exact Attempt");
 		const starts = (await sql.unsafe(
-			"SELECT command_id,json_extract(serialized_command,'$.payload.expectedIntentRevision') AS expected FROM engine_commands WHERE operation='start' AND attempt_id=? AND agent_instance_id=? LIMIT 1",
+			"SELECT command_id FROM engine_commands WHERE operation='start' AND attempt_id=? AND agent_instance_id=? LIMIT 1",
 			[attempt.attempt_id, identity.agent_instance_id],
-		)) as Array<{ command_id: string; expected: number | null }>;
+		)) as Array<{ command_id: string }>;
 		const start = starts[0];
+		const expected = start ? await readStartExpectedRevision(sql, start.command_id) : null;
 		return {
 			kind: "bound",
 			...common,
@@ -477,8 +489,8 @@ export async function runtimeNativeTarget(
 			targetEngineGeneration: Number(attempt.engine_generation),
 			bindingId: attempt.binding_id,
 			bindingGeneration: Number(attempt.binding_generation),
-			...(start && Number.isSafeInteger(start.expected) && Number(start.expected) >= 0
-				? { startCommandId: start.command_id, startExpectedIntentRevision: Number(start.expected) }
+			...(start && Number.isSafeInteger(expected) && Number(expected) >= 0
+				? { startCommandId: start.command_id, startExpectedIntentRevision: Number(expected) }
 				: {}),
 		};
 	}
@@ -490,10 +502,7 @@ export async function runtimeNativeTarget(
 	)) as PendingTargetRow[];
 	if (pending[0]) {
 		const target = pending[0];
-		const starts = (await sql.unsafe(
-			"SELECT json_extract(serialized_command,'$.payload.expectedIntentRevision') AS expected FROM engine_commands WHERE command_id=?",
-			[target.command_id],
-		)) as Array<{ expected: number | null }>;
+		const expected = await readStartExpectedRevision(sql, target.command_id);
 		if (request.executionId && request.executionId !== target.execution_id)
 			throw new EngineTargetError("stale_target", "Pending execution does not match");
 		return {
@@ -504,8 +513,8 @@ export async function runtimeNativeTarget(
 			executionId: target.execution_id,
 			authorityGeneration: Number(target.authority_generation),
 			targetEngineGeneration: Number(target.engine_generation),
-			...(Number.isSafeInteger(starts[0]?.expected) && Number(starts[0].expected) >= 0
-				? { startExpectedIntentRevision: Number(starts[0].expected) }
+			...(Number.isSafeInteger(expected) && Number(expected) >= 0
+				? { startExpectedIntentRevision: Number(expected) }
 				: {}),
 		};
 	}
@@ -521,7 +530,7 @@ async function summaryValue(
 ): Promise<Record<string, unknown>> {
 	const meta = await runtimeMeta(sql);
 	const attempts = (await sql.unsafe(
-		`SELECT a.* FROM engine_runtime_bindings b JOIN engine_attempts a ON a.attempt_id=b.attempt_id
+		`SELECT ${targetColumns.map(column => `a.${column}`).join(",")} FROM engine_runtime_bindings b JOIN engine_attempts a ON a.attempt_id=b.attempt_id
 		WHERE b.agent_instance_id=?`,
 		[identity.agent_instance_id],
 	)) as RuntimeTargetRow[];
@@ -533,13 +542,7 @@ async function summaryValue(
 		ORDER BY received_at DESC LIMIT 1`,
 		[identity.agent_instance_id],
 	)) as PendingTargetRow[];
-	const held = await sql.unsafe(
-		`WITH RECURSIVE ancestors(id) AS (
-		SELECT ? UNION SELECT i.parent_agent_instance_id FROM engine_agent_identity i JOIN ancestors a ON i.agent_instance_id=a.id
-		WHERE i.parent_agent_instance_id IS NOT NULL)
-		SELECT 1 FROM engine_branch_holds h JOIN ancestors a ON h.source_agent_instance_id=a.id LIMIT 1`,
-		[identity.agent_instance_id],
-	);
+	const held = await runtimeHoldRows(sql, identity.agent_instance_id, 1);
 	const authority = Number(attempt?.authority_generation ?? identity.authority_generation);
 	const pendingInputs =
 		attempt && !TERMINAL.has(attempt.state)
@@ -739,10 +742,10 @@ export async function recordRuntimeProjection(
 		kinds |= RUNTIME_KIND_MASK.tool;
 	}
 	if (SUMMARY_EVENTS.has(event.kind) || toolEvent) {
-		const attempts = (await sql.unsafe("SELECT * FROM engine_attempts WHERE attempt_id=? AND agent_instance_id=?", [
-			event.attemptId,
-			identity.agent_instance_id,
-		])) as RuntimeTargetRow[];
+		const attempts = (await sql.unsafe(
+			`SELECT ${targetColumns.join(",")} FROM engine_attempts WHERE attempt_id=? AND agent_instance_id=?`,
+			[event.attemptId, identity.agent_instance_id],
+		)) as RuntimeTargetRow[];
 		detail = await runtimeDetail(sql, identity, attempts[0], event.eventId);
 		validateRuntimeValue("detailState", detail);
 		if (attempts[0]) {

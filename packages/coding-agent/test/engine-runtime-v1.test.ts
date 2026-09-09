@@ -98,6 +98,141 @@ describe("runtime v1 durable boundaries", () => {
 		await store.commitAttemptTransition(target, "running", [{ kind: "running" }]);
 		return target;
 	}
+	async function seedRetainedChildren(sql: SQL, parent: string, count: number, padding = "") {
+		await sql.begin(async tx => {
+			for (let index = 0; index < count; index++) {
+				const agent = identity(`${parent}-retained-${index}${padding}`);
+				await tx.unsafe(
+					`INSERT INTO engine_agent_identity(agent_instance_id,agent_instance_ref,parent_agent_instance_id,parent_agent_instance_ref,root_agent_instance_ref,principal_id,authority_generation,created_at,updated_at,membership_revision)
+					 VALUES (?,?,?,?,?,'owner',1,1,1,1)`,
+					[
+						agent.agentInstanceId,
+						agent.agentInstanceRef,
+						identity(parent).agentInstanceId,
+						identity(parent).agentInstanceRef,
+						identity(parent).agentInstanceRef,
+					],
+				);
+			}
+		});
+	}
+	it("refuses a too-wide branch atomically without imposing a device AgentInstance cap", async () => {
+		const store = await createStore();
+		await store.registerAgent(identity("wide"));
+		await store.registerAgent(identity("sibling"));
+		const sql = new SQL(`sqlite:${path.join(directories.at(-1)!, "engine.sqlite").replaceAll("\\", "/")}`);
+		try {
+			await seedRetainedChildren(sql, "wide", runtimeLimits.branchControlRecords);
+			const before = await sql.unsafe(
+				"SELECT agent_instance_id,intent_revision,summary_revision,summary_json FROM engine_agent_identity ORDER BY agent_instance_id",
+			);
+			const cut = await sql.unsafe("SELECT MAX(event_id) AS id FROM engine_event_outbox");
+			const error = await store.branchIntent(identity("wide").agentInstanceId, "pause-wide", "pause", 0).then(
+				() => null,
+				(error: unknown) => error,
+			);
+			expect(error).toMatchObject({ code: "restore_budget" });
+			expect(
+				await sql.unsafe(
+					"SELECT agent_instance_id,intent_revision,summary_revision,summary_json FROM engine_agent_identity ORDER BY agent_instance_id",
+				),
+			).toEqual(before);
+			expect(await sql.unsafe("SELECT MAX(event_id) AS id FROM engine_event_outbox")).toEqual(cut);
+			expect(await sql.unsafe("SELECT * FROM engine_branch_holds")).toHaveLength(0);
+			await store.registerAgent(identity("after-limit"));
+			await store.branchIntent(identity("sibling").agentInstanceId, "pause-sibling", "pause", 0);
+			expect((await store.intent(identity("sibling").agentInstanceId)).manualHold).toBe(true);
+			expect((await store.intent(identity("wide").agentInstanceId)).manualHold).toBe(false);
+		} finally {
+			await sql.end();
+		}
+	});
+	it("rolls back cumulative branch materialization and deadline failures instead of publishing partial holds", async () => {
+		const store = await createStore();
+		await store.registerAgent(identity("heavy"));
+		const sql = new SQL(`sqlite:${path.join(directories.at(-1)!, "engine.sqlite").replaceAll("\\", "/")}`);
+		try {
+			await seedRetainedChildren(sql, "heavy", 512, "x".repeat(700));
+			const cut = await sql.unsafe("SELECT MAX(event_id) AS id FROM engine_event_outbox");
+			const before = await sql.unsafe("SELECT SUM(intent_revision) AS revision FROM engine_agent_identity");
+			const error = await store.branchIntent(identity("heavy").agentInstanceId, "pause-heavy", "pause", 0).then(
+				() => null,
+				(error: unknown) => error,
+			);
+			expect(error).toMatchObject({ code: "restore_budget" });
+			expect(String(error)).toContain("materialization");
+			expect(await sql.unsafe("SELECT SUM(intent_revision) AS revision FROM engine_agent_identity")).toEqual(before);
+			expect(await sql.unsafe("SELECT MAX(event_id) AS id FROM engine_event_outbox")).toEqual(cut);
+			expect(await sql.unsafe("SELECT * FROM engine_branch_holds")).toHaveLength(0);
+			let ticks = 0;
+			const clock = spyOn(performance, "now").mockImplementation(() => ticks++ * runtimeLimits.bootstrapTimeoutMs);
+			try {
+				const expired = await store
+					.branchIntent(identity("heavy").agentInstanceId, "pause-expired", "pause", 0)
+					.then(
+						() => null,
+						(error: unknown) => error,
+					);
+				expect(expired).toMatchObject({ code: "restore_budget" });
+				expect(String(expired)).toContain("deadline");
+			} finally {
+				clock.mockRestore();
+			}
+			expect(await sql.unsafe("SELECT MAX(event_id) AS id FROM engine_event_outbox")).toEqual(cut);
+			expect(await sql.unsafe("SELECT * FROM engine_branch_holds")).toHaveLength(0);
+		} finally {
+			await sql.end();
+		}
+	});
+	it("keeps deep internal hold and cycle checks finite while preserving usable hold continuation", async () => {
+		const store = await createStore();
+		const sql = new SQL(`sqlite:${path.join(directories.at(-1)!, "engine.sqlite").replaceAll("\\", "/")}`);
+		try {
+			await sql.begin(async tx => {
+				for (let index = 0; index <= runtimeLimits.ancestorRecords; index++) {
+					const agent = identity(`chain-${index}`);
+					await tx.unsafe(
+						"INSERT INTO engine_agent_identity(agent_instance_id,agent_instance_ref,parent_agent_instance_id,principal_id,authority_generation,created_at,updated_at) VALUES (?,?,?,'owner',1,1,1)",
+						[
+							agent.agentInstanceId,
+							agent.agentInstanceRef,
+							index ? identity(`chain-${index - 1}`).agentInstanceId : null,
+						],
+					);
+				}
+				await tx.unsafe("INSERT INTO engine_branch_holds VALUES (?,'pause','old-hold',1,1)", [
+					identity("chain-0").agentInstanceId,
+				]);
+			});
+			expect((await store.intent(identity("chain-650").agentInstanceId)).holds).toEqual([
+				expect.objectContaining({ commandId: "old-hold" }),
+			]);
+			const tooDeep = identity(`chain-${runtimeLimits.ancestorRecords}`);
+			expect(
+				await store.intent(tooDeep.agentInstanceId).then(
+					() => null,
+					(error: unknown) => error,
+				),
+			).toMatchObject({ code: "restore_budget" });
+			expect(
+				await store.registerAgent(identity("cycle-probe", tooDeep.agentInstanceId)).then(
+					() => null,
+					(error: unknown) => error,
+				),
+			).toMatchObject({ code: "restore_budget" });
+			const page = await store.runtimeHolds({
+				principalId: "owner",
+				agentInstanceRef: tooDeep.agentInstanceRef,
+				limit: 1,
+			});
+			expect(page.nextCursor).not.toBeNull();
+			expect((page.work as { scannedRows: number }).scannedRows).toBeLessThanOrEqual(
+				runtimeLimits.bootstrapScannedRows,
+			);
+		} finally {
+			await sql.end();
+		}
+	});
 	it("pages a deep canonical hold chain without rescanning or trusting a changed continuation", async () => {
 		const store = await createStore();
 		const sql = new SQL(`sqlite:${path.join(directories.at(-1)!, "engine.sqlite").replaceAll("\\", "/")}`);
@@ -771,6 +906,86 @@ describe("runtime v1 durable boundaries", () => {
 		).rejects.toThrow("immutable target");
 		expect((await store.intent(target.agentInstanceId)).intentRevision).toBe(0);
 		expect(await store.cancelPendingStart(target, "exact-stop")).toMatchObject({ status: "cancelled" });
+	});
+	it("refuses oversized retained Start metadata for resolver and cancellation without changing its immutable target", async () => {
+		const store = await createStore();
+		const start = {
+			...command("legacy-start"),
+			serializedCommand: JSON.stringify({ payload: { expectedIntentRevision: 0 } }),
+		};
+		await store.admitCommand(start, 1);
+		const agent = identity("root");
+		const target = {
+			...agent,
+			executionId: start.executionId!,
+			attemptId: start.attemptId!,
+			engineGeneration: 1,
+			pendingStartCommandId: start.commandId,
+			expectedStartIntentRevision: 0,
+			expectedIntentRevision: 0,
+		};
+		const request = { principalId: "owner", agentInstanceRef: agent.agentInstanceRef, attemptId: start.attemptId! };
+		expect(await store.runtimeTarget(request)).toMatchObject({ kind: "pending", startExpectedIntentRevision: 0 });
+		const sql = new SQL(`sqlite:${path.join(directories.at(-1)!, "engine.sqlite").replaceAll("\\", "/")}`);
+		try {
+			await sql.unsafe("UPDATE engine_commands SET serialized_command=? WHERE command_id=?", [
+				JSON.stringify({
+					payload: { expectedIntentRevision: 0, text: "x".repeat(runtimeLimits.bootstrapMaterializedBytes) },
+				}),
+				start.commandId,
+			]);
+			for (const read of [() => store.runtimeTarget(request), () => store.cancelPendingStart(target, "legacy-stop")])
+				expect(
+					await read().then(
+						() => null,
+						(error: unknown) => error,
+					),
+				).toMatchObject({ code: "source_unavailable" });
+			expect(
+				await store.runtimeTarget({ ...request, principalId: "foreign" }).then(
+					() => null,
+					(error: unknown) => error,
+				),
+			).toMatchObject({ code: "agent_not_found" });
+			expect((await store.intent(agent.agentInstanceId)).intentRevision).toBe(0);
+			expect(await sql.unsafe("SELECT * FROM engine_start_cancellations")).toHaveLength(0);
+			const bound = {
+				...binding("root"),
+				commandId: start.commandId,
+				attemptId: start.attemptId!,
+				executionId: start.executionId!,
+			};
+			await store.commitAttemptTransition(bound, "running", [{ kind: "running" }]);
+			expect(
+				await store.runtimeTarget(request).then(
+					() => null,
+					(error: unknown) => error,
+				),
+			).toMatchObject({ code: "source_unavailable" });
+			await sql.unsafe("UPDATE engine_commands SET serialized_command=? WHERE command_id=?", [
+				start.serializedCommand,
+				start.commandId,
+			]);
+			expect(await store.runtimeTarget(request)).toMatchObject({
+				kind: "bound",
+				startCommandId: start.commandId,
+				startExpectedIntentRevision: 0,
+			});
+			await store.settleCommand(start.commandId, start.canonicalHash, {
+				outcome: "rejected",
+				detail: { code: "cancelled", oldText: "x".repeat(runtimeLimits.liveChangeBytes) },
+			});
+			expect(
+				await store.cancelPendingStart(target, "legacy-settled-stop").then(
+					() => null,
+					(error: unknown) => error,
+				),
+			).toMatchObject({ code: "source_unavailable" });
+			expect(await sql.unsafe("SELECT * FROM engine_start_cancellations")).toHaveLength(0);
+			expect((await store.intent(agent.agentInstanceId)).intentRevision).toBe(0);
+		} finally {
+			await sql.end();
+		}
 	});
 	it("uses the factual applied Start revision and rejects an intervening intent mutation", async () => {
 		const store = await createStore();
@@ -1515,6 +1730,46 @@ describe("runtime v1 durable boundaries", () => {
 				first.activityNextCursor!,
 			),
 		).rejects.toThrow("lineage");
+	});
+	it("refuses an oversized retained session header without loading the transcript or guessing cwd", async () => {
+		const store = await createStore();
+		await store.registerAgent(identity("header"));
+		const sessionPath = "/runtime-large-header.jsonl";
+		const header = {
+			type: "session",
+			version: 3,
+			id: "session-header",
+			timestamp: new Date(0).toISOString(),
+			cwd: "/exact-cwd",
+		};
+		await store.sessionStorage.writeText(sessionPath, JSON.stringify(header) + "\n");
+		const target = { ...binding("header"), sessionFile: sessionPath };
+		await store.commitAttemptTransition(target, "running", [{ kind: "running" }]);
+		expect(await store.nativeSessionHeader(target)).toEqual({ sessionId: header.id, cwd: header.cwd });
+		await store.sessionStorage.writeText(
+			sessionPath,
+			JSON.stringify({ ...header, oldMetadata: "x".repeat(runtimeLimits.bootstrapMaterializedBytes) }) + "\n",
+		);
+		const fullRead = spyOn(store.sessionStorage, "readText").mockRejectedValue(
+			new Error("Transcript materialization forbidden"),
+		);
+		try {
+			expect(
+				await store.nativeSessionHeader(target).then(
+					() => null,
+					(error: unknown) => error,
+				),
+			).toMatchObject({ code: "source_unavailable" });
+			expect(
+				await store.nativeSessionHeader({ ...target, attemptId: "foreign" }).then(
+					() => null,
+					(error: unknown) => error,
+				),
+			).toMatchObject({ code: "stale_target" });
+			expect(fullRead).not.toHaveBeenCalled();
+		} finally {
+			fullRead.mockRestore();
+		}
 	});
 	it("bounds native history reads by the page instead of the 100,000-entry transcript", async () => {
 		const store = await createStore();

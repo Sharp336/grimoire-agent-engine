@@ -25,6 +25,7 @@ import {
 	type EngineNativeHistoryPage,
 	readNativeHistoryEntry,
 } from "./runtime-history";
+import { BranchControlWork, runtimeAncestorIds, runtimeBranchIds, runtimeHoldRows } from "./runtime-holds";
 import {
 	type HistoryLifecycleContext,
 	lifecycleSummary,
@@ -209,6 +210,18 @@ export interface EngineAttemptRecord extends EngineAttemptRow {
 	cause: string | null;
 	updated_at: number;
 }
+
+export type EngineAttemptTargetRecord = Pick<
+	EngineAttemptRecord,
+	| "agent_instance_id"
+	| "execution_id"
+	| "attempt_id"
+	| "binding_id"
+	| "engine_generation"
+	| "binding_generation"
+	| "authority_generation"
+	| "state"
+>;
 
 export interface ExpiredChildHistory {
 	agentInstanceId: string;
@@ -984,10 +997,13 @@ export class EngineStore {
 			if (!rows[0]?.session_path)
 				throw new EngineTargetError("stale_target", "Exact native session path is not retained");
 			const headers = (await sql.unsafe(
-				"SELECT entry_id,json_extract(entry_json,'$.cwd') AS cwd FROM engine_history_entries WHERE session_path=? AND entry_type='session' ORDER BY ordinal LIMIT 1",
+				`SELECT entry_id,CASE WHEN OCTET_LENGTH(entry_json)<=${runtimeLimits.bootstrapMaterializedBytes - runtimeLimits.bulkPreviewBytes} THEN json_extract(entry_json,'$.cwd') END AS cwd,
+				OCTET_LENGTH(entry_json)>${runtimeLimits.bootstrapMaterializedBytes - runtimeLimits.bulkPreviewBytes} AS source_unavailable FROM engine_history_entries WHERE session_path=? AND entry_type='session' ORDER BY ordinal LIMIT 1`,
 				[rows[0].session_path],
-			)) as Array<{ entry_id: string; cwd: string | null }>;
+			)) as Array<{ entry_id: string; cwd: string | null; source_unavailable: number }>;
 			if (!headers[0]) throw new EngineTargetError("history_expired", "Native session header is not retained");
+			if (headers[0].source_unavailable)
+				throw new EngineTargetError("source_unavailable", "Native session header exceeds its metadata read budget");
 			return { sessionId: headers[0].entry_id, cwd: headers[0].cwd };
 		});
 	}
@@ -1014,13 +1030,18 @@ export class EngineStore {
 
 	async intent(
 		agentInstanceId: string,
-	): Promise<{ intentRevision: number; manualHold: boolean; holds: EngineBranchHold[] }> {
+	): Promise<{ intentRevision: number; manualHold: boolean; holds: EngineBranchHold[]; holdsHasMore: boolean }> {
 		return await this.#transaction(async sql => {
 			const rows = (await sql.unsafe("SELECT intent_revision FROM engine_agent_identity WHERE agent_instance_id=?", [
 				agentInstanceId,
 			])) as Array<{ intent_revision: number }>;
 			const holds = await this.#effectiveHolds(sql, agentInstanceId);
-			return { intentRevision: Number(rows[0]?.intent_revision ?? 0), manualHold: holds.length > 0, holds };
+			return {
+				intentRevision: Number(rows[0]?.intent_revision ?? 0),
+				manualHold: holds.length > 0,
+				holds: holds.slice(0, runtimeLimits.httpPageRecords),
+				holdsHasMore: holds.length > runtimeLimits.httpPageRecords,
+			};
 		});
 	}
 
@@ -1036,12 +1057,22 @@ export class EngineStore {
 		startFence?: EnginePendingStartTarget,
 	): Promise<{ agentIds: string[]; events: EngineEvent[]; intentRevision: number }> {
 		return await this.#transaction(async sql => {
+			const work = new BranchControlWork();
+			sql = work.bind(sql);
 			if (startFence) {
-				if (action !== "stop" || !(await readTargetStart(sql, startFence)))
-					throw new EngineTargetError("stale_target", "Cancellation requires its exact admitted Start");
-				expectedRevision = await cancelIntentRevision(sql, startFence);
+				const start =
+					action === "stop"
+						? await readTargetStart(
+								sql,
+								startFence,
+								work.remainingBytes - runtimeLimits.liveChangeBytes - runtimeLimits.bulkPreviewBytes,
+							)
+						: undefined;
+				if (!start) throw new EngineTargetError("stale_target", "Cancellation requires its exact admitted Start");
+				work.materializeBytes(start.source_bytes);
+				expectedRevision = await cancelIntentRevision(sql, startFence, start);
 			}
-			return await this.#branchIntent(sql, agentInstanceId, commandId, action, expectedRevision);
+			return await this.#branchIntent(sql, agentInstanceId, commandId, action, expectedRevision, work);
 		});
 	}
 
@@ -1051,7 +1082,11 @@ export class EngineStore {
 		commandId: string,
 		action: "pause" | "resume" | "stop" | "continue",
 		expectedRevision?: number,
+		boundWork?: BranchControlWork,
 	): Promise<{ agentIds: string[]; events: EngineEvent[]; intentRevision: number }> {
+		const work = boundWork ?? new BranchControlWork();
+		if (!boundWork) sql = work.bind(sql);
+		const agentIds = await runtimeBranchIds(sql, agentInstanceId);
 		await this.#assertIntent(sql, agentInstanceId, expectedRevision);
 		const rows = (await sql.unsafe("SELECT intent_revision FROM engine_agent_identity WHERE agent_instance_id=?", [
 			agentInstanceId,
@@ -1069,12 +1104,8 @@ export class EngineStore {
 				[agentInstanceId, action === "stop" ? "stop" : "pause", commandId, revision, Date.now()],
 			);
 		}
-		const descendants = (await sql.unsafe(
-			`WITH RECURSIVE branch(id) AS (SELECT ? UNION SELECT i.agent_instance_id FROM engine_agent_identity i JOIN branch b ON i.parent_agent_instance_id=b.id) SELECT id FROM branch ORDER BY id`,
-			[agentInstanceId],
-		)) as Array<{ id: string }>;
 		const events: EngineEvent[] = [];
-		for (const { id } of descendants) {
+		for (const id of agentIds) {
 			const holds = await this.#effectiveHolds(sql, id);
 			await sql.unsafe(
 				"UPDATE engine_agent_identity SET intent_revision=intent_revision+1,updated_at=? WHERE agent_instance_id=?",
@@ -1088,11 +1119,13 @@ export class EngineStore {
 				await this.#identityEvent(sql, id, commandId, "holds_changed", {
 					action,
 					sourceAgentInstanceId: agentInstanceId,
-					holds,
+					holds: holds.slice(0, runtimeLimits.httpPageRecords),
+					holdsHasMore: holds.length > runtimeLimits.httpPageRecords,
 				}),
 			);
 		}
-		return { agentIds: descendants.map(row => row.id), events, intentRevision: revision };
+		work.materialize(events);
+		return { agentIds, events, intentRevision: revision };
 	}
 
 	async #assertIntent(
@@ -1169,11 +1202,9 @@ export class EngineStore {
 		)
 			throw new EngineTargetError("stale_target", "AgentInstance identity is immutable");
 		if (identity.parentAgentInstanceId) {
-			const parents = (await sql.unsafe(
-				`WITH RECURSIVE ancestors(id) AS (SELECT ? UNION SELECT i.parent_agent_instance_id FROM engine_agent_identity i JOIN ancestors a ON i.agent_instance_id=a.id WHERE i.parent_agent_instance_id IS NOT NULL) SELECT id FROM ancestors WHERE id=?`,
-				[identity.parentAgentInstanceId, identity.agentInstanceId],
-			)) as Array<{ id: string }>;
-			if (parents.length) throw new EngineTargetError("invalid_request", "AgentInstance ancestry cycle");
+			const parents = await runtimeAncestorIds(sql, identity.parentAgentInstanceId);
+			if (parents.includes(identity.agentInstanceId))
+				throw new EngineTargetError("invalid_request", "AgentInstance ancestry cycle");
 		}
 		await sql.unsafe(
 			`INSERT INTO engine_agent_identity(agent_instance_id,agent_instance_ref,parent_agent_instance_id,parent_agent_instance_ref,principal_id,authority_generation,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(agent_instance_id) DO UPDATE SET agent_instance_ref=CASE WHEN engine_agent_identity.agent_instance_ref='' THEN excluded.agent_instance_ref ELSE engine_agent_identity.agent_instance_ref END,parent_agent_instance_id=COALESCE(engine_agent_identity.parent_agent_instance_id,excluded.parent_agent_instance_id),parent_agent_instance_ref=COALESCE(engine_agent_identity.parent_agent_instance_ref,excluded.parent_agent_instance_ref),principal_id=CASE WHEN engine_agent_identity.principal_id='' THEN excluded.principal_id ELSE engine_agent_identity.principal_id END,authority_generation=MAX(engine_agent_identity.authority_generation,excluded.authority_generation),updated_at=excluded.updated_at`,
@@ -1205,9 +1236,10 @@ export class EngineStore {
 		kind: EngineEvent["kind"],
 		payload: Record<string, unknown>,
 	): Promise<EngineEvent> {
-		const rows = (await sql.unsafe("SELECT * FROM engine_runtime_bindings WHERE agent_instance_id=?", [
-			agentInstanceId,
-		])) as BindingRow[];
+		const rows = (await sql.unsafe(
+			"SELECT execution_id,attempt_id,binding_id,binding_generation,authority_generation FROM engine_runtime_bindings WHERE agent_instance_id=?",
+			[agentInstanceId],
+		)) as BindingRow[];
 		const binding = rows[0];
 		const meta = await this.#runtimeMeta(sql);
 		return await this.#appendEvent(sql, {
@@ -1784,17 +1816,7 @@ export class EngineStore {
 	}
 
 	async #effectiveHolds(sql: SqlClient, agentId: string): Promise<EngineBranchHold[]> {
-		const rows = (await sql.unsafe(
-			`WITH RECURSIVE ancestors(id) AS (SELECT ? UNION SELECT i.parent_agent_instance_id FROM engine_agent_identity i JOIN ancestors a ON i.agent_instance_id=a.id WHERE i.parent_agent_instance_id IS NOT NULL)
-		 SELECT h.*,i.agent_instance_ref FROM engine_branch_holds h JOIN ancestors a ON h.source_agent_instance_id=a.id LEFT JOIN engine_agent_identity i ON i.agent_instance_id=h.source_agent_instance_id ORDER BY h.created_at,h.source_agent_instance_id,h.kind`,
-			[agentId],
-		)) as Array<{
-			source_agent_instance_id: string;
-			agent_instance_ref: string;
-			command_id: string;
-			generation: number;
-			kind: EngineBranchHold["kind"];
-		}>;
+		const rows = await runtimeHoldRows(sql, agentId, runtimeLimits.httpPageRecords + 1);
 		return rows.map(row => ({
 			sourceAgentInstanceId: row.source_agent_instance_id,
 			sourceAgentInstanceRef: row.agent_instance_ref,
@@ -2280,10 +2302,22 @@ export class EngineStore {
 		cancellationCommandId: string,
 	): Promise<EnginePendingStartCancellation> {
 		return await this.#transaction(async sql => {
+			const work = new BranchControlWork();
+			sql = work.bind(sql);
 			const fenced = validateStartFence(target);
-			const start = await readTargetStart(sql, target);
+			const start = await readTargetStart(
+				sql,
+				target,
+				work.remainingBytes - runtimeLimits.liveChangeBytes - runtimeLimits.bulkPreviewBytes,
+			);
+			if (start) work.materializeBytes(start.source_bytes);
 			if (!start && !fenced) return { status: "not_found" };
 			if (start?.state === "settled") {
+				if (start.receipt_bytes > runtimeLimits.liveChangeBytes)
+					throw new EngineTargetError(
+						"source_unavailable",
+						"Legacy cancellation outcome cannot be read within its native budget",
+					);
 				const receipt = start.receipt ? (JSON.parse(start.receipt) as EngineCommandReceipt) : undefined;
 				if (receipt?.outcome !== "rejected" || receipt.detail?.code !== "cancelled") {
 					return { status: "too_late" };
@@ -2297,9 +2331,16 @@ export class EngineStore {
 				)) as Array<{ intent_revision: number }>;
 				return { status: "already_cancelled", intentRevision: Number(rows[0]?.intent_revision ?? 0) };
 			}
-			const expected = await cancelIntentRevision(sql, target);
+			const expected = await cancelIntentRevision(sql, target, start ?? null);
 			await writeStartCancellation(sql, target, cancellationCommandId);
-			const held = await this.#branchIntent(sql, target.agentInstanceId, cancellationCommandId, "stop", expected);
+			const held = await this.#branchIntent(
+				sql,
+				target.agentInstanceId,
+				cancellationCommandId,
+				"stop",
+				expected,
+				work,
+			);
 			const intentRevision = held.intentRevision;
 			if (!start) return { status: "cancelled", intentRevision };
 
@@ -2992,6 +3033,15 @@ export class EngineStore {
 			 FROM engine_attempts WHERE attempt_id = ?`,
 			[attemptId],
 		)) as EngineAttemptRecord[];
+		return rows[0];
+	}
+
+	async getAttemptTarget(attemptId: string): Promise<EngineAttemptTargetRecord | undefined> {
+		const rows = (await this.#client.unsafe(
+			`SELECT agent_instance_id,execution_id,attempt_id,binding_id,engine_generation,binding_generation,authority_generation,state
+			 FROM engine_attempts WHERE attempt_id=?`,
+			[attemptId],
+		)) as EngineAttemptTargetRecord[];
 		return rows[0];
 	}
 
