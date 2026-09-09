@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { DiscardPolicy, jetstream, jetstreamManager } from "@nats-io/jetstream";
 import { connect } from "@nats-io/transport-node";
+import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
@@ -14,7 +15,7 @@ import {
 	engineCommandIdentity,
 	NatsEngineAdapter,
 } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
-import { engineAgentId } from "@oh-my-pi/pi-coding-agent/engine/route";
+import { engineAgentId, engineAgentInstanceId } from "@oh-my-pi/pi-coding-agent/engine/route";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
@@ -30,6 +31,144 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 		if (tempDir) removeSyncWithRetries(tempDir);
 		tempDir = undefined;
 	});
+
+	it("applies a paused queue command before an unrelated event delivery drain completes", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-queue-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const auth = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		auth.setRuntimeApiKey("mock", "isolated-test");
+		const models = new ModelRegistry(auth, path.join(tempDir, "models.yml"));
+		const cwd = path.join(tempDir, "workspace");
+		fs.mkdirSync(cwd);
+		const boundaryPath = path.join(cwd, "boundary.txt");
+		fs.writeFileSync(boundaryPath, "safe boundary");
+		registerMockApi("nats-queue-boundary");
+		const providerEntered = Promise.withResolvers<void>();
+		const providerBoundary = Promise.withResolvers<void>();
+		let providerCalls = 0;
+		const mock = createMockModel({
+			handler: async () => {
+				providerCalls++;
+				providerEntered.resolve();
+				await providerBoundary.promise;
+				return {
+					content: [{ type: "toolCall", id: "read-boundary", name: "read", arguments: { path: boundaryPath } }],
+				};
+			},
+		});
+		const runtime = await EngineRuntime.create({
+			databasePath: path.join(tempDir, "engine.sqlite"),
+			dispatchPrompt: (session, input, identity) => session.prompt(input, identity),
+			sessionDefaults: {
+				cwd,
+				agentDir: path.join(tempDir, "agent"),
+				settings: await Settings.loadReadOnly({ cwd, agentDir: path.join(tempDir, "agent") }),
+				model: mock.model,
+				modelRegistry: models,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+			},
+		});
+		const profile = { spawns: "", profileDigest: "queue-profile", enableMCP: false, enableLsp: false };
+		const errors: Error[] = [];
+		const adapter = await NatsEngineAdapter.connect({
+			runtime,
+			deviceId: "queue-device",
+			engineId: "queue-engine",
+			servers: broker.url,
+			authorizeCommand: () => {},
+			authorizeMessage: () => {},
+			resolveLaunchProfile: () => profile,
+			onError: error => errors.push(error),
+		});
+		const client = await connect({ servers: broker.url });
+		const pending = runtime.store.pendingEventsForSink.bind(runtime.store);
+		const releaseDelivery = Promise.withResolvers<void>();
+		try {
+			const agentInstanceRef = "grimoire://tasks/grimoire/queue-boundary/agents/paused";
+			const started = await runtime.start(
+				{
+					commandId: "queue-start",
+					agentInstanceRef,
+					agentInstanceId: engineAgentInstanceId(agentInstanceRef),
+					principalId: "queue-owner",
+					executionId: "queue-execution",
+					attemptId: "queue-attempt",
+					authorityGeneration: 1,
+					cwd,
+					input: "work",
+				},
+				profile,
+			);
+			await providerEntered.promise;
+			const hold = await runtime.pause({ ...started, commandId: "queue-pause", initiator: { kind: "human" } });
+			providerBoundary.resolve();
+			await waitFor(async () => (await runtime.store.getAttempt(started.attemptId))?.state === "paused");
+			await adapter.flushEvents();
+			const deliveryEntered = Promise.withResolvers<void>();
+			runtime.store.pendingEventsForSink = async (...args) => {
+				deliveryEntered.resolve();
+				await releaseDelivery.promise;
+				return await pending(...args);
+			};
+			const draining = adapter.flushEvents();
+			await deliveryEntered.promise;
+			const command: EngineCommandEnvelope = {
+				schema: "grimoire.engine.command.v1",
+				commandId: "queued-while-delivery-busy",
+				op: "enqueue",
+				deviceId: "queue-device",
+				engineId: "queue-engine",
+				engineGeneration: runtime.engineGeneration,
+				agentInstanceRef,
+				agentInstanceId: started.agentInstanceId,
+				principalId: "queue-owner",
+				browserPayloadHash: `sha256:${"a".repeat(64)}`,
+				browserTarget: { agentInstanceRef },
+				authorityGeneration: 1,
+				issuedAt: Date.now(),
+				payload: {
+					clientMessageId: "paused-queue-item",
+					text: "remain queued",
+					expectedIntentRevision: hold.intentRevision,
+				},
+			};
+			await jetstream(client).publish(
+				adapter.commandSubject(started.agentInstanceId, "enqueue"),
+				JSON.stringify(command),
+			);
+			await waitFor(
+				async () =>
+					(await runtime.store.runtimeCommand(command.commandId, { principalId: "queue-owner" })).stage ===
+					"applied",
+				2000,
+			);
+			expect(await runtime.listInbox(started)).toMatchObject([
+				{ queueId: "paused-queue-item", disposition: "pending", deliveryPayload: "remain queued" },
+			]);
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("paused");
+			expect((await runtime.store.intent(started.agentInstanceId)).manualHold).toBe(true);
+			expect(providerCalls).toBe(1);
+			expect(errors).toEqual([]);
+			releaseDelivery.resolve();
+			await draining;
+		} finally {
+			providerBoundary.resolve();
+			releaseDelivery.resolve();
+			runtime.store.pendingEventsForSink = pending;
+			await client.drain();
+			await adapter.dispose();
+			await runtime.dispose();
+			auth.close();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 30000);
 
 	it("commits only the broker acknowledged prefix and deduplicates replay after delivery transaction failure", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-delivery-${Snowflake.next()}-`));

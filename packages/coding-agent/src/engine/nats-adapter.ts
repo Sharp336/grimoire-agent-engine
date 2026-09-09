@@ -465,7 +465,9 @@ export class NatsEngineAdapter {
 			await this.#options.authorizeCommand(command);
 			identity = commandIdentity(command);
 			const admission = await this.runtime.store.admitCommand(identity, this.runtime.engineGeneration);
-			await this.flushEvents();
+			// Admission is durable before dispatch. A busy event sink must not hold
+			// command application behind the entire device's unrelated event backlog.
+			this.wakeEvents();
 			if (admission.status === "replay") {
 				message.ack();
 				return;
@@ -594,6 +596,7 @@ export class NatsEngineAdapter {
 			this.#report(error);
 		} finally {
 			clearInterval(heartbeat);
+			this.wakeEvents();
 		}
 	}
 
