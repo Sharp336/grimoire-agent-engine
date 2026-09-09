@@ -36,6 +36,7 @@ import { loadSessionFile } from "@oh-my-pi/pi-coding-agent/session/session-loade
 import { type NativeHistoryForkResult, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { resolveProviderCandidates } from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import { removeSyncWithRetries, Snowflake, withTimeout } from "@oh-my-pi/pi-utils";
+import { SQL } from "bun";
 
 describe("EngineRuntime", () => {
 	const tempDirs: string[] = [];
@@ -593,6 +594,74 @@ describe("EngineRuntime", () => {
 		}
 	}, 60_000);
 
+	it("rejects an over-budget Resume before adding its context to the live or retained session", async () => {
+		const entered = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		const { runtime, cwd, options } = await createRuntime(async () => {
+			entered.resolve();
+			await release.promise;
+			return true;
+		});
+		const started = await runtime.start(
+			{
+				commandId: "budget-context-start",
+				agentInstanceId: "budget-context-root",
+				executionId: "budget-context-execution",
+				attemptId: "budget-context-attempt",
+				authorityGeneration: 1,
+				cwd,
+				input: "hold this Attempt",
+			},
+			profile,
+		);
+		await entered.promise;
+		const paused = nextEngineEvent(runtime, "paused");
+		const hold = await runtime.pause({
+			...started,
+			commandId: "budget-context-pause",
+			initiator: { kind: "human" },
+			expectedIntentRevision: 0,
+		});
+		release.resolve();
+		await paused;
+		const session = runtime.agentRegistry.get(started.engineAgentId)!.session!;
+		await session.sessionManager.flush();
+		await runtime.store.assertIntent(started.agentInstanceId, hold.intentRevision);
+		const messages = JSON.stringify(session.messages);
+		const retained = JSON.stringify(session.sessionManager.buildSessionContext().messages);
+		const sql = new SQL(`sqlite:${options.databasePath!.replaceAll("\\", "/")}`);
+		try {
+			await sql.unsafe(
+				`WITH RECURSIVE children(n) AS (SELECT 1 UNION ALL SELECT n+1 FROM children WHERE n<?)
+				INSERT INTO engine_agent_identity(agent_instance_id,agent_instance_ref,parent_agent_instance_id,principal_id,authority_generation,created_at,updated_at)
+				SELECT 'budget-context-child-'||n,'grimoire://tasks/grimoire/context-budget/agents/child-'||n,?,'',1,1,1 FROM children`,
+				[runtimeLimits.branchControlRecords, started.agentInstanceId],
+			);
+			const error = await runtime
+				.resume({
+					...started,
+					commandId: "budget-context-resume",
+					initiator: { kind: "human" },
+					expectedIntentRevision: hold.intentRevision,
+					context: "This rejected context must never reach the agent",
+				})
+				.then(
+					() => null,
+					(error: unknown) => error,
+				);
+			expect(error).toMatchObject({ code: "restore_budget" });
+			expect(JSON.stringify(session.messages)).toBe(messages);
+			expect(JSON.stringify(session.sessionManager.buildSessionContext().messages)).toBe(retained);
+			expect(await runtime.store.getBinding(started.agentInstanceId)).toMatchObject({
+				manualHold: true,
+				intentRevision: hold.intentRevision,
+			});
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("paused");
+		} finally {
+			await sql.end();
+			await runtime.dispose();
+		}
+	});
 	it("keeps failed resume held and failed running steer pending, with rejected durable replay", async () => {
 		const entered = Promise.withResolvers<void>();
 		const release = Promise.withResolvers<void>();

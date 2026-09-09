@@ -609,7 +609,11 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 				),
 			);
 			await adapter.flushEvents();
-			await waitFor(() => eventsA.length >= 5 && eventsB.length >= 5);
+			await waitFor(
+				() =>
+					eventsA.some(event => event.type === "attempt.completed") &&
+					eventsB.some(event => event.type === "attempt.completed"),
+			);
 			expect(eventsA.every(event => event.agentInstanceId === "agent-a")).toBeTrue();
 			expect(eventsB.every(event => event.agentInstanceId === "agent-b")).toBeTrue();
 			expect(eventsA.map(event => event.type)).toEqual([

@@ -6660,6 +6660,8 @@ export class AgentSession {
 			deliverAs?: "steer" | "followUp" | "nextTurn";
 			queueChipText?: string;
 			acceptTerminalEmptyStop?: boolean;
+			/** Run after preparation, before the message changes any agent/session queue. */
+			beforeEnqueue?: () => Promise<void>;
 		},
 	): Promise<boolean> {
 		const normalizedPayload = normalizeCustomMessagePayload<T>(message);
@@ -6682,6 +6684,7 @@ export class AgentSession {
 			timestamp: Date.now(),
 		};
 		const normalizedAppMessage = await this.#normalizeAgentMessageImages(appMessage);
+		if (options?.beforeEnqueue) await options.beforeEnqueue();
 		if (this.isStreaming) {
 			if (options?.deliverAs === "nextTurn") {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, options?.triggerTurn ?? false);
