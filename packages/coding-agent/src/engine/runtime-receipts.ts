@@ -1,7 +1,22 @@
 import type { EngineInboxItem } from "./contracts";
 import type { RuntimeSql } from "./runtime-projection";
 import { runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
-import { publicRuntimeQueueItem, readRuntimeQueue } from "./runtime-queue";
+import { publicRuntimeQueueItem } from "./runtime-queue";
+import type { EngineCommandReceipt } from "./store";
+
+export interface StoredReceiptRow {
+	receipt: string | null;
+	receipt_bytes: number;
+	outcome: EngineCommandReceipt["outcome"] | null;
+}
+
+export function boundedStoredReceipt(row: StoredReceiptRow): EngineCommandReceipt | undefined {
+	if (row.receipt_bytes > runtimeLimits.liveChangeBytes) {
+		if (row.outcome !== "applied" && row.outcome !== "rejected") throw new Error("Invalid durable receipt outcome");
+		return { outcome: row.outcome, detail: { partial: true, unavailable: "legacy_result_exceeds_projection_limit" } };
+	}
+	return row.receipt ? (JSON.parse(row.receipt) as EngineCommandReceipt) : undefined;
+}
 
 export interface RuntimeReceiptRow {
 	command_id: string;
@@ -15,26 +30,24 @@ export interface RuntimeReceiptRow {
 	state: string;
 	browser_payload_hash: string | null;
 	browser_target: string | null;
+	target_unavailable: number;
 	authority_generation: number;
 	intent_revision: number | null;
 	receipt: string | null;
 	settled_at: number | null;
 	receipt_bytes: number;
-	queue_id: string | null;
-	queue_revision: number | null;
-	outcome: string | null;
+	outcome: EngineCommandReceipt["outcome"] | null;
 }
 
 export async function readRuntimeReceipt(sql: RuntimeSql, commandId: string): Promise<RuntimeReceiptRow | undefined> {
+	const sourceBytes =
+		runtimeLimits.bootstrapMaterializedBytes - runtimeLimits.liveChangeBytes - runtimeLimits.bulkPreviewBytes;
 	const rows = (await sql.unsafe(
 		`SELECT c.command_id,c.operation,c.agent_instance_id,c.agent_instance_ref,c.attempt_id,c.execution_id,c.principal_id,c.state,
-		c.browser_payload_hash,json_extract(c.serialized_command,'$.browserTarget') AS browser_target,c.authority_generation,
+		c.browser_payload_hash,CASE WHEN OCTET_LENGTH(c.serialized_command)<=${sourceBytes} THEN json_extract(c.serialized_command,'$.browserTarget') END AS browser_target,
+		COALESCE(OCTET_LENGTH(c.serialized_command),0)>${sourceBytes} AS target_unavailable,c.authority_generation,
 		CASE WHEN OCTET_LENGTH(c.receipt)<=${runtimeLimits.liveChangeBytes} THEN c.receipt ELSE NULL END AS receipt,
 		OCTET_LENGTH(c.receipt) AS receipt_bytes,c.outcome,c.settled_at,i.intent_revision,
-		CASE WHEN OCTET_LENGTH(c.receipt)>${runtimeLimits.liveChangeBytes} AND c.operation IN ('enqueue','queue_edit','queue_remove','queue_annotate','queue_defer')
-		THEN SUBSTR(COALESCE(json_extract(c.receipt,'$.detail.item.queueId'),json_extract(c.receipt,'$.detail.queueId')),1,${runtimeLimits.bulkPreviewBytes}) END AS queue_id,
-		CASE WHEN OCTET_LENGTH(c.receipt)>${runtimeLimits.liveChangeBytes} AND c.operation IN ('enqueue','queue_edit','queue_remove','queue_annotate','queue_defer')
-		THEN COALESCE(json_extract(c.receipt,'$.detail.item.revision'),json_extract(c.receipt,'$.detail.revision')) END AS queue_revision,
 		CASE WHEN c.outcome='rejected' THEN 'rejected' WHEN c.state<>'settled' THEN 'engine_accepted'
 		WHEN c.operation='start' AND a.state IN ('completed','cancelled','failed','interrupted') THEN 'execution_terminal' ELSE 'applied' END AS stage
 		FROM engine_commands c LEFT JOIN engine_agent_identity i ON i.agent_instance_id=c.agent_instance_id
@@ -43,25 +56,9 @@ export async function readRuntimeReceipt(sql: RuntimeSql, commandId: string): Pr
 	)) as RuntimeReceiptRow[];
 	const row = rows[0];
 	if (row && row.receipt_bytes > runtimeLimits.liveChangeBytes) {
-		let detail: Record<string, unknown> = { partial: true, unavailable: "legacy_result_exceeds_projection_limit" };
-		if (row.queue_id && row.agent_instance_ref && row.principal_id) {
-			const page = await readRuntimeQueue(sql, {
-				agentInstanceRef: row.agent_instance_ref,
-				principalId: row.principal_id,
-				queueId: row.queue_id,
-			});
-			const item = (page.items as Record<string, unknown>[])[0];
-			detail =
-				item?.revision === row.queue_revision
-					? { item }
-					: {
-							partial: true,
-							unavailable: "legacy_queue_revision_not_retained",
-							queueId: row.queue_id,
-							revision: row.queue_revision,
-						};
-		}
-		row.receipt = JSON.stringify({ outcome: row.outcome, detail });
+		// Do not extract even a small JSON property from an oversized legacy cell.
+		// Its exact queue revision may no longer exist; outcome is separately durable.
+		row.receipt = JSON.stringify(boundedStoredReceipt(row));
 	}
 	if (row?.receipt && row.agent_instance_ref && (row.operation.startsWith("queue_") || row.operation === "enqueue")) {
 		const receipt = JSON.parse(row.receipt) as { outcome: string; detail?: Record<string, unknown> };
@@ -81,7 +78,7 @@ export async function readRuntimeReceipt(sql: RuntimeSql, commandId: string): Pr
 }
 
 export function canonicalRuntimeReceipt(row: RuntimeReceiptRow): Record<string, unknown> | undefined {
-	if (!row.browser_payload_hash || !row.agent_instance_ref) return undefined;
+	if (!row.browser_payload_hash || !row.agent_instance_ref || row.target_unavailable) return undefined;
 	const receipt = row.receipt
 		? (JSON.parse(row.receipt) as { outcome: string; detail?: Record<string, unknown> })
 		: undefined;

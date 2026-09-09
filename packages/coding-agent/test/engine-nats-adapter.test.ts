@@ -8,6 +8,11 @@ import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
+	EngineControlQueryClient,
+	type EngineControlQueryServer,
+	startEngineControlQueryServer,
+} from "@oh-my-pi/pi-coding-agent/engine/control-query";
+import {
 	AGENT_MESSAGE_STREAM,
 	ENGINE_COMMAND_STREAM,
 	ENGINE_EVENT_STREAM,
@@ -17,6 +22,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
 import { engineAgentId, engineAgentInstanceId } from "@oh-my-pi/pi-coding-agent/engine/route";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
+import { runtimeLimits } from "@oh-my-pi/pi-coding-agent/engine/runtime-protocol";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
@@ -31,6 +37,80 @@ describe.skipIf(!fs.existsSync(natsServer))("NatsEngineAdapter", () => {
 		if (tempDir) removeSyncWithRetries(tempDir);
 		tempDir = undefined;
 	});
+	it("acknowledges oversized retained receipts through NATS and native IPC without starting another Attempt", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-receipt-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite") });
+		const client = await connect({ servers: broker.url });
+		const command = startCommand(runtime.engineGeneration, "legacy-receipt-agent", "legacy-receipt", tempDir);
+		command.agentInstanceRef = "grimoire://tasks/grimoire/legacy-receipt/agents/agent";
+		command.principalId = "owner";
+		command.browserPayloadHash = `sha256:${"a".repeat(64)}`;
+		command.browserTarget = { agentInstanceRef: command.agentInstanceRef };
+		const identity = engineCommandIdentity(command);
+		let profiles = 0;
+		const errors: Error[] = [];
+		const options = {
+			runtime,
+			runtimeDir: tempDir,
+			deviceId: command.deviceId,
+			engineId: command.engineId,
+			servers: broker.url,
+			authorizeCommand: () => {},
+			authorizeMessage: () => {},
+			resolveLaunchProfile: () => {
+				profiles++;
+				return { spawns: "", profileDigest: "legacy" };
+			},
+			onError: (error: Error) => errors.push(error),
+		};
+		let server: EngineControlQueryServer | undefined;
+		let adapter: NatsEngineAdapter | undefined;
+		try {
+			await runtime.store.admitCommand(identity, runtime.engineGeneration);
+			await runtime.store.settleCommand(identity.commandId, identity.canonicalHash, {
+				outcome: "applied",
+				detail: { text: "legacy".repeat(1_400_000) },
+			});
+			server = await startEngineControlQueryServer(options);
+			adapter = await NatsEngineAdapter.connect(options);
+			const native = new EngineControlQueryClient(tempDir);
+			const receipt = await native.request("command", { command });
+			expect(receipt).toEqual({
+				outcome: "applied",
+				detail: { partial: true, unavailable: "legacy_result_exceeds_projection_limit" },
+			});
+			expect(Buffer.byteLength(JSON.stringify(receipt))).toBeLessThan(runtimeLimits.liveChangeBytes);
+			expect(
+				await native.request("runtime.command.get", { commandId: command.commandId, principalId: "owner" }),
+			).toMatchObject({
+				stage: "applied",
+				lookup: "known",
+				target: command.browserTarget,
+				payloadHash: command.browserPayloadHash,
+			});
+			const manager = await jetstreamManager(client);
+			await jetstream(client).publish(
+				adapter.commandSubject(command.agentInstanceId, command.op),
+				JSON.stringify(command),
+				{ msgID: "retained-replay" },
+			);
+			await waitFor(async () => {
+				const info = await manager.consumers.info(ENGINE_COMMAND_STREAM, `engine_${adapter!.engineRoute}`);
+				return info.delivered.consumer_seq > 0 && info.num_ack_pending === 0;
+			});
+			expect(profiles).toBe(0);
+			expect(await runtime.store.getAttempt(command.attemptId!)).toBeUndefined();
+			expect(errors).toEqual([]);
+		} finally {
+			await server?.close();
+			await adapter?.dispose();
+			await runtime.dispose();
+			await client.drain();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 30_000);
 
 	it("opens before backlog delivery and stops after one final page without losing restart delivery", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-nats-stop-${Snowflake.next()}-`));
