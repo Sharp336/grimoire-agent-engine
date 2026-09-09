@@ -1,3 +1,4 @@
+import { profile as sampleCpu } from "bun:jsc";
 import { once } from "node:events";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -30,6 +31,9 @@ if (fs.existsSync(directory)) throw new Error("Load fixture requires a new, expl
 const roots = Number(args.get("--roots") ?? 7);
 const rate = Number(args.get("--rate") ?? 20);
 const seconds = Number(args.get("--seconds") ?? 1800);
+const cpuProfileSeconds = Number(args.get("--cpu-profile-seconds") ?? 0);
+if (!Number.isInteger(cpuProfileSeconds) || cpuProfileSeconds < 0 || cpuProfileSeconds > Math.min(60, seconds))
+	throw new Error("CPU diagnostic sampling must be within the finite producer run and at most60 seconds");
 const noisyRate = Number(args.get("--noisy-rate") ?? 0);
 const staircaseSeconds = Number(args.get("--staircase-seconds") ?? 0);
 const staircaseStartFile = args.get("--staircase-start-file");
@@ -459,6 +463,20 @@ console.log(
 let tick = 0;
 let noisy = 0;
 let lastSample = started;
+// Native sampling includes all Engine JS while the finite callback is pending.
+// Save before teardown, so a lifecycle failure cannot discard the diagnosis.
+const sampling = cpuProfileSeconds
+	? sampleCpu(async () => {
+			await Bun.sleep(cpuProfileSeconds * 1000);
+		}).then(result => {
+			fs.writeFileSync(path.join(directory, "cpu-profile.json"), JSON.stringify(result));
+			console.log(JSON.stringify({ kind: "cpu_profile_saved", seconds: cpuProfileSeconds }));
+		})
+	: Promise.resolve();
+void sampling.catch(error => {
+	console.error(error);
+	stop.abort();
+});
 try {
 	while (!stop.signal.aborted && performance.now() - started < seconds * 1000) {
 		if (staircaseSeconds && staircaseStarted === undefined) {
@@ -538,13 +556,20 @@ try {
 		}
 		await Bun.sleep(Math.max(0, deadline - performance.now()));
 	}
+	await sampling;
 } finally {
 	lag.disable();
+	console.log(JSON.stringify({ kind: "cleanup", step: "bridge.stopAdmission" }));
 	await bridge?.stopAdmission();
+	console.log(JSON.stringify({ kind: "cleanup", step: "adapter.stopAdmission" }));
 	await adapter?.stopAdmission();
+	console.log(JSON.stringify({ kind: "cleanup", step: "server.close" }));
 	await server.close();
+	console.log(JSON.stringify({ kind: "cleanup", step: "bridge.dispose" }));
 	await bridge?.dispose();
+	console.log(JSON.stringify({ kind: "cleanup", step: "adapter.dispose" }));
 	await adapter?.dispose();
+	console.log(JSON.stringify({ kind: "cleanup", step: "runtime.dispose" }));
 	await runtime.dispose();
 	await writeFixtureStatus("stopped");
 	auth.close();
