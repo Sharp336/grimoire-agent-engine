@@ -611,19 +611,16 @@ export async function recordRuntimeProjection(
 		event.agentInstanceId,
 	])) as RuntimeIdentityRow[];
 	const identity = rows[0];
-	if (!identity?.agent_instance_ref) return;
 	if (event.kind === "input_requested" || event.kind === "tool_approval_requested") {
-		const body = runtimeInputBody(event);
-		const preview = runtimeInputPreview(body);
 		await sql.unsafe(
 			"INSERT INTO engine_runtime_inputs(attempt_id,input_id,kind,created_event_id) VALUES (?,?,?,?)",
-			[event.attemptId, String(body.inputId), String(body.kind), event.eventId],
+			[
+				event.attemptId,
+				String(event.payload?.inputId ?? event.payload?.approvalId),
+				event.kind === "input_requested" ? "question" : "tool_approval",
+				event.eventId,
+			],
 		);
-		await sql.unsafe("UPDATE engine_event_outbox SET input_body=?,input_preview=? WHERE event_id=?", [
-			JSON.stringify(body),
-			JSON.stringify(preview),
-			event.eventId,
-		]);
 		await sql.unsafe("UPDATE engine_attempts SET input_revision=? WHERE attempt_id=?", [
 			event.eventId,
 			event.attemptId,
@@ -636,6 +633,16 @@ export async function recordRuntimeProjection(
 		await sql.unsafe("UPDATE engine_attempts SET input_revision=? WHERE attempt_id=?", [
 			event.eventId,
 			event.attemptId,
+		]);
+	}
+	if (!identity?.agent_instance_ref) return;
+	if (event.kind === "input_requested" || event.kind === "tool_approval_requested") {
+		const body = runtimeInputBody(event);
+		const preview = runtimeInputPreview(body);
+		await sql.unsafe("UPDATE engine_event_outbox SET input_body=?,input_preview=? WHERE event_id=?", [
+			JSON.stringify(body),
+			JSON.stringify(preview),
+			event.eventId,
 		]);
 	}
 	let membership: Record<string, unknown> | undefined;

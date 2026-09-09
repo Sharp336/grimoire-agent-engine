@@ -1755,7 +1755,7 @@ export class EngineStore {
 
 	async #assertInputRevision(sql: SqlClient, attemptId: string, inputId: string, revision: number): Promise<void> {
 		const rows = (await sql.unsafe(
-			`SELECT event_id FROM engine_event_outbox WHERE attempt_id=? AND kind IN ('input_requested','tool_approval_requested') AND COALESCE(json_extract(payload,'$.inputId'),json_extract(payload,'$.approvalId'))=? ORDER BY event_id DESC LIMIT 1`,
+			"SELECT created_event_id AS event_id FROM engine_runtime_inputs WHERE attempt_id=? AND input_id=?",
 			[attemptId, inputId],
 		)) as Array<{ event_id: number }>;
 		if (Number(rows[0]?.event_id) !== revision)
