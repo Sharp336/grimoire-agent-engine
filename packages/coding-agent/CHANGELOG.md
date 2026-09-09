@@ -30,6 +30,8 @@
 
 ### Fixed
 
+- Codex Responses tool calls retain their complete provider correlation IDs through execution, runtime snapshots and restart instead of failing admission.
+
 - Refresh changed fallback routes and provider accounts for the next ordinary message while keeping the active Attempt on its launch settings.
 - Reject oversized retained profile metadata before reading its body, preserving the original data for recovery.
 

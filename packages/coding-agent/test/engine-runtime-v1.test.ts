@@ -503,6 +503,66 @@ describe("runtime v1 durable boundaries", () => {
 		expect((await store.runtimeTools(request)).items).toEqual([]);
 		expect((await store.runtimeSnapshot(scope, request)).agents[0].tools).toEqual([]);
 	});
+	it("preserves native Responses tool correlation through admission, settlement and reopen", async () => {
+		let store = await createStore();
+		const target = await active(store);
+		const agentInstanceRef = identity("root").agentInstanceRef;
+		const request = { principalId: "owner", agentInstanceRef, attemptId: target.attemptId };
+		const scope: RuntimeScope = { kind: "attempt", agentInstanceRef, attemptId: target.attemptId, kinds: ["tool"] };
+		const before = await store.runtimeSnapshot(scope, request);
+		const toolCallId = `call_${"a".repeat(24)}|fc_${"b".repeat(50)}`;
+		const effect = {
+			effectId: "native-effect",
+			toolCallId,
+			toolName: "read",
+			policy: "tracked" as const,
+			inputHash: "sha256:native",
+		};
+		const started = await store.startToolEffect(target, effect);
+		expect((await store.runtimeTools(request)).items).toMatchObject([{ toolCallId, phase: "started" }]);
+		await expect(store.runtimeTools({ ...request, principalId: "foreign" })).rejects.toMatchObject({
+			code: "agent_not_found",
+		});
+		const file = path.join(directories.at(-1)!, "engine.sqlite");
+		await store.close();
+		stores.splice(stores.indexOf(store), 1);
+		store = await EngineStore.open(file);
+		stores.push(store);
+		expect((await store.runtimeTools(request)).items).toMatchObject([{ toolCallId, phase: "started" }]);
+		await expect(
+			store.settleToolEffect({ ...target, attemptId: "another-attempt" }, effect.effectId, "completed"),
+		).rejects.toThrow();
+		expect(await store.getEffect(effect.effectId)).toMatchObject({ tool_call_id: toolCallId, state: "started" });
+		await store.settleToolEffect(target, effect.effectId, "completed");
+		const changes = await store.runtimeEvents(eventsRequest(before.epoch, started.eventId, scope));
+		expect(changes.changes.filter(change => change.kind === "tool")).toMatchObject([
+			{ value: { toolCallId, phase: "finished" } },
+		]);
+		expect((await store.runtimeTools(request)).items).toEqual([]);
+		await store.close();
+		stores.splice(stores.indexOf(store), 1);
+		store = await EngineStore.open(file);
+		stores.push(store);
+		expect(await store.getEffect(effect.effectId)).toMatchObject({
+			tool_call_id: toolCallId,
+			state: "settled",
+			outcome: "completed",
+		});
+		for (const [index, invalid] of [
+			"call_|",
+			"|fc_1",
+			"call_1|fc_1|extra",
+			"call_1/fc_1",
+			"call_1|fc_1\n",
+			"x".repeat(201),
+		].entries()) {
+			const effectId = `invalid-native-${index}`;
+			await expect(
+				store.startToolEffect(target, { ...effect, effectId, toolCallId: invalid }),
+			).rejects.toMatchObject({ code: "invalid_request" });
+			expect(await store.getEffect(effectId)).toBeUndefined();
+		}
+	});
 	it("rolls back tool baseline revisions with failed effect transactions and refuses invalid tool identity before admission", async () => {
 		const store = await createStore();
 		const target = await active(store);

@@ -6,7 +6,7 @@
   "$ref": "#/$defs/request",
   "x-artel": {
     "version": "1.0",
-    "contractRevision": 9,
+    "contractRevision": 10,
     "limits": {
       "wsMessageBytes": 262144,
       "deliveryBatchBytes": 65536,
@@ -274,6 +274,13 @@
       "minLength": 1,
       "maxLength": 200,
       "pattern": "^[A-Za-z0-9_.:-]+$"
+    },
+    "toolCallId": {
+      "description": "Exact provider correlation ID: a legacy ID or two nonempty IDs joined by one pipe. The final negative lookahead requires absolute end of input, including for trailing newlines.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9_.:-]+(?:\\|[A-Za-z0-9_.:-]+)?(?![\\s\\S])"
     },
     "agi": {
       "type": "string",
@@ -2934,7 +2941,7 @@
       "type": "object",
       "properties": {
         "toolCallId": {
-          "$ref": "#/$defs/id"
+          "$ref": "#/$defs/toolCallId"
         },
         "name": {
           "type": "string",
@@ -4990,7 +4997,7 @@
       "type": "object",
       "properties": {
         "toolCallId": {
-          "$ref": "#/$defs/id"
+          "$ref": "#/$defs/toolCallId"
         },
         "name": {
           "type": "string",
