@@ -3083,7 +3083,7 @@ describe("EngineRuntime", () => {
 		);
 		await runtime.drain();
 		const completedAttempt = await runtime.store.getAttempt(started.attemptId);
-		expect(completedAttempt?.state, completedAttempt?.cause).toBe("completed");
+		expect(completedAttempt?.state, completedAttempt?.cause ?? undefined).toBe("completed");
 		const request = { agentInstanceRef, attemptId: started.attemptId, principalId: "burst-owner" };
 		const page = await runtime.store.runtimeMessages(request);
 		const baseline = (page.items as Array<Record<string, unknown>>)[0];
