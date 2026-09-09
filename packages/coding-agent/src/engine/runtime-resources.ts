@@ -1,13 +1,8 @@
+import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { EngineTargetError } from "./contracts";
 import { readNativeHistoryEntry } from "./runtime-history";
 import { runtimeMessageBaselines, runtimeMessageRange } from "./runtime-messages";
-import {
-	type RuntimeIdentityRow,
-	RuntimeQueryError,
-	RuntimeQueryWork,
-	type RuntimeSql,
-	runtimeIdentity,
-} from "./runtime-projection";
+import { type RuntimeIdentityRow, RuntimeQueryWork, type RuntimeSql, runtimeIdentity } from "./runtime-projection";
 import {
 	type RuntimeAccess,
 	runtimeLimits,
@@ -39,6 +34,15 @@ interface ResourceCursor {
 	revision: number;
 	after: string | number;
 }
+
+interface HoldPosition {
+	ancestor: string;
+	afterKind: string;
+}
+
+// A continuation may start above the authorized leaf only when this owner minted it.
+// Restart invalidates these reconstructable read cursors; no command identity is affected.
+const holdCursorKey = randomBytes(32);
 
 function queryWork(): RuntimeQueryWork {
 	return new RuntimeQueryWork({
@@ -114,40 +118,111 @@ export async function readRuntimeHolds(sql: RuntimeSql, request: RuntimePageRequ
 	const work = queryWork();
 	const identity = await readIdentity(sql, request, work);
 	const revision = Number(identity.intent_revision);
-	const after = String(cursorPosition(request, revision, ""));
+	if (request.revision !== undefined && request.revision !== revision)
+		throw new EngineTargetError("stale_target", "Owner collection revision changed");
+	if (request.attemptId) {
+		const current = (await sql.unsafe("SELECT attempt_id FROM engine_runtime_bindings WHERE agent_instance_id=?", [
+			identity.agent_instance_id,
+		])) as Array<{ attempt_id: string }>;
+		work.rows(current.length);
+		if (current[0]?.attempt_id !== request.attemptId)
+			throw new EngineTargetError("stale_target", "Hold read no longer names the current Attempt");
+	}
+	const metadata = (await sql.unsafe(
+		"SELECT key,value FROM engine_metadata WHERE key IN ('database_id','engine_generation') ORDER BY key",
+	)) as Array<{ key: string; value: string }>;
+	work.rows(metadata.length);
+	const context = JSON.stringify([
+		metadata,
+		request.principalId,
+		request.agentInstanceRef,
+		request.attemptId ?? null,
+		revision,
+		Number(identity.membership_revision),
+	]);
+	const signature = (body: string) =>
+		createHmac("sha256", holdCursorKey).update(context).update("\0").update(body).digest("base64url");
+	const nextCursor = (position: HoldPosition) => {
+		const body = Buffer.from(JSON.stringify(position)).toString("base64url");
+		return `h1.${body}.${signature(body)}`;
+	};
+	let position: HoldPosition = { ancestor: identity.agent_instance_id, afterKind: "" };
+	if (request.cursor) {
+		const [version, body, mac, extra] = request.cursor.split(".");
+		if (
+			version !== "h1" ||
+			!body ||
+			!mac ||
+			extra !== undefined ||
+			!/^[A-Za-z0-9_-]{43}$/.test(mac) ||
+			!timingSafeEqual(Buffer.from(mac), Buffer.from(signature(body)))
+		)
+			throw new EngineTargetError("stale_target", "Hold continuation changed owner, identity or revision");
+		try {
+			position = JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as HoldPosition;
+		} catch {
+			throw new EngineTargetError("stale_target", "Invalid hold continuation");
+		}
+		if (typeof position.ancestor !== "string" || !["", "pause", "recovery", "stop"].includes(position.afterKind))
+			throw new EngineTargetError("stale_target", "Invalid hold position");
+	}
+	// Every ancestor has at most three canonical holds (enforced by the table CHECK/PK).
+	const ancestorLimit = Math.floor((runtimeLimits.bootstrapScannedRows - work.value.scannedRows) / 4);
 	const ancestors = (await sql.unsafe(
-		`WITH RECURSIVE ancestors(id,parent,depth) AS (
-		SELECT agent_instance_id,parent_agent_instance_id,0 FROM engine_agent_identity WHERE agent_instance_id=?
-		UNION ALL SELECT i.agent_instance_id,i.parent_agent_instance_id,a.depth+1 FROM engine_agent_identity i JOIN ancestors a ON i.agent_instance_id=a.parent WHERE a.depth<?)
-		SELECT id,parent,depth FROM ancestors ORDER BY depth`,
-		[identity.agent_instance_id, runtimeLimits.bootstrapScannedRows],
-	)) as Array<{ id: string; parent: string | null; depth: number }>;
+		`WITH RECURSIVE ancestors(id,parent,agent_instance_ref,depth) AS (
+		SELECT agent_instance_id,parent_agent_instance_id,agent_instance_ref,0 FROM engine_agent_identity WHERE agent_instance_id=?
+		UNION ALL SELECT i.agent_instance_id,i.parent_agent_instance_id,i.agent_instance_ref,a.depth+1 FROM engine_agent_identity i JOIN ancestors a ON i.agent_instance_id=a.parent WHERE a.depth<?)
+		SELECT id,parent,agent_instance_ref,depth FROM ancestors ORDER BY depth`,
+		[position.ancestor, ancestorLimit - 1],
+	)) as Array<{ id: string; parent: string | null; agent_instance_ref: string; depth: number }>;
 	work.rows(ancestors.length);
-	if (ancestors.at(-1)?.parent)
-		throw new RuntimeQueryError("restore_budget", "Ancestry exceeds this bounded hold read", { ...work.value });
+	if (!ancestors.length) throw new EngineTargetError("stale_target", "Hold ancestor is no longer present");
 	const limit = request.limit ?? runtimeLimits.httpPageRecords;
 	const rows = (await sql.unsafe(
-		`SELECT i.agent_instance_ref,h.command_id,h.generation,h.kind,h.source_agent_instance_id||':'||h.kind AS position
-		FROM engine_branch_holds h JOIN engine_agent_identity i ON i.agent_instance_id=h.source_agent_instance_id
-		WHERE h.source_agent_instance_id IN (${ancestors.map(() => "?").join(",")}) AND h.source_agent_instance_id||':'||h.kind>?
-		ORDER BY h.source_agent_instance_id,h.kind LIMIT ?`,
-		[...ancestors.map(row => row.id), after, limit + 1],
-	)) as Array<{ agent_instance_ref: string; command_id: string; generation: number; kind: string; position: string }>;
+		`SELECT source_agent_instance_id,command_id,generation,kind FROM engine_branch_holds
+		WHERE source_agent_instance_id IN (${ancestors.map(() => "?").join(",")}) ORDER BY source_agent_instance_id,kind`,
+		ancestors.map(row => row.id),
+	)) as Array<{ source_agent_instance_id: string; command_id: string; generation: number; kind: string }>;
 	work.rows(rows.length);
-	const selected = rows.slice(0, limit);
+	work.value.materializedBytes += Buffer.byteLength(JSON.stringify([identity, metadata, ancestors, rows]));
+	work.check();
+	const byAncestor = new Map<string, typeof rows>();
+	for (const row of rows) {
+		const list = byAncestor.get(row.source_agent_instance_id) ?? [];
+		list.push(row);
+		byAncestor.set(row.source_agent_instance_id, list);
+	}
+	const items: Array<Record<string, unknown>> = [];
+	let continuation: HoldPosition | undefined;
+	for (const ancestor of ancestors) {
+		const holds = byAncestor.get(ancestor.id) ?? [];
+		for (const hold of holds) {
+			if (ancestor.id === position.ancestor && hold.kind <= position.afterKind) continue;
+			if (items.length === limit) {
+				continuation = {
+					ancestor: ancestor.id,
+					afterKind: ancestor.id === position.ancestor ? position.afterKind : "",
+				};
+				break;
+			}
+			items.push({
+				sourceAgentInstanceRef: ancestor.agent_instance_ref,
+				commandId: hold.command_id,
+				generation: Number(hold.generation),
+				kind: hold.kind,
+			});
+			position = { ancestor: ancestor.id, afterKind: hold.kind };
+		}
+		if (continuation) break;
+	}
+	if (!continuation && ancestors.at(-1)?.parent) continuation = { ancestor: ancestors.at(-1)!.parent!, afterKind: "" };
 	const result = {
 		version: "1.0",
 		agentInstanceRef: request.agentInstanceRef,
 		attemptId: request.attemptId ?? null,
 		revision,
-		nextCursor:
-			rows.length > selected.length ? cursorNext(request, revision, selected.at(-1)?.position ?? after) : null,
-		items: selected.map(row => ({
-			sourceAgentInstanceRef: row.agent_instance_ref,
-			commandId: row.command_id,
-			generation: Number(row.generation),
-			kind: row.kind,
-		})),
+		nextCursor: continuation ? nextCursor(continuation) : null,
+		items,
 		work: work.value,
 	};
 	work.finish(result, result.items.length);

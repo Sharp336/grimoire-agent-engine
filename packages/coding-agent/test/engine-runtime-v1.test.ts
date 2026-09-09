@@ -98,6 +98,129 @@ describe("runtime v1 durable boundaries", () => {
 		await store.commitAttemptTransition(target, "running", [{ kind: "running" }]);
 		return target;
 	}
+	it("pages a deep canonical hold chain without rescanning or trusting a changed continuation", async () => {
+		const store = await createStore();
+		const sql = new SQL(`sqlite:${path.join(directories.at(-1)!, "engine.sqlite").replaceAll("\\", "/")}`);
+		const heldDepths = [0, 10, 333, 620, 649];
+		try {
+			await sql.begin(async tx => {
+				for (let depth = 0; depth <= 650; depth++) {
+					const agent = identity(`deep-${depth}`);
+					await tx.unsafe(
+						`INSERT INTO engine_agent_identity(agent_instance_id,agent_instance_ref,parent_agent_instance_id,parent_agent_instance_ref,root_agent_instance_ref,principal_id,authority_generation,created_at,updated_at)
+						VALUES (?,?,?,?,?,?,1,1,1)`,
+						[
+							agent.agentInstanceId,
+							agent.agentInstanceRef,
+							depth ? identity(`deep-${depth - 1}`).agentInstanceId : null,
+							depth ? identity(`deep-${depth - 1}`).agentInstanceRef : null,
+							identity("deep-0").agentInstanceRef,
+							"owner",
+						],
+					);
+				}
+				for (const depth of heldDepths)
+					await tx.unsafe(
+						"INSERT INTO engine_branch_holds(source_agent_instance_id,kind,command_id,generation,created_at) VALUES (?,'pause',?,1,1)",
+						[identity(`deep-${depth}`).agentInstanceId, `hold-${depth}`],
+					);
+			});
+		} finally {
+			await sql.end();
+		}
+		const request = { principalId: "owner", agentInstanceRef: identity("deep-650").agentInstanceRef, limit: 1 };
+		const first = await store.runtimeHolds(request);
+		expect(first.items).toEqual([
+			{
+				sourceAgentInstanceRef: identity("deep-649").agentInstanceRef,
+				commandId: "hold-649",
+				generation: 1,
+				kind: "pause",
+			},
+		]);
+		const firstCursor = String(first.nextCursor);
+		let page = first;
+		const commands: string[] = [];
+		let totalRows = 0;
+		for (let n = 0; n < 12; n++) {
+			validateRuntimeValue("holdsPage", page);
+			const work = page.work as { scannedRows: number; materializedBytes: number };
+			expect(work.scannedRows).toBeLessThanOrEqual(runtimeLimits.bootstrapScannedRows);
+			expect(work.materializedBytes).toBeGreaterThan(0);
+			totalRows += work.scannedRows;
+			commands.push(...(page.items as Array<{ commandId: string }>).map(item => item.commandId));
+			if (page.nextCursor === null) break;
+			page = await store.runtimeHolds({ ...request, cursor: String(page.nextCursor) });
+		}
+		expect(page.nextCursor).toBeNull();
+		expect(commands).toEqual(heldDepths.toReversed().map(depth => `hold-${depth}`));
+		expect(totalRows).toBeLessThan(1_500);
+		for (const changed of [
+			{ ...request, cursor: `${firstCursor.slice(0, -1)}!` },
+			{ ...request, agentInstanceRef: identity("deep-333").agentInstanceRef, cursor: firstCursor },
+			{ ...request, principalId: "foreign", cursor: firstCursor },
+		]) {
+			const rejected = await store.runtimeHolds(changed).then(
+				() => undefined,
+				error => error,
+			);
+			expect(rejected).toBeInstanceOf(Error);
+		}
+		await store.branchIntent(identity("deep-650").agentInstanceId, "new-leaf-hold", "pause", 0);
+		const stale = await store.runtimeHolds({ ...request, cursor: firstCursor }).then(
+			() => undefined,
+			error => error,
+		);
+		expect(stale).toMatchObject({ code: "stale_target" });
+	});
+
+	it("pins hold pages to their exact current Attempt and resumes within one ancestor", async () => {
+		const store = await createStore();
+		const target = await active(store);
+		const agent = identity("root");
+		await store.branchIntent(agent.agentInstanceId, "hold-pause", "pause", 0);
+		await store.branchIntent(agent.agentInstanceId, "hold-stop", "stop", 1);
+		const request = {
+			principalId: "owner",
+			agentInstanceRef: agent.agentInstanceRef,
+			attemptId: target.attemptId,
+			revision: 2,
+			limit: 1,
+		};
+		const first = await store.runtimeHolds(request);
+		expect(first.items).toMatchObject([{ commandId: "hold-pause", kind: "pause" }]);
+		const cursor = String(first.nextCursor);
+		const second = await store.runtimeHolds({ ...request, cursor });
+		expect(second.items).toMatchObject([{ commandId: "hold-stop", kind: "stop" }]);
+		expect(second.nextCursor).toBeNull();
+		const [version, body, mac] = cursor.split(".");
+		const position = JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as {
+			ancestor: string;
+			afterKind: string;
+		};
+		position.ancestor = identity("foreign").agentInstanceId;
+		const forged = `${version}.${Buffer.from(JSON.stringify(position)).toString("base64url")}.${mac}`;
+		const denied = await store.runtimeHolds({ ...request, cursor: forged }).then(
+			() => undefined,
+			error => error,
+		);
+		expect(denied).toMatchObject({ code: "stale_target" });
+		const malformed = await store.runtimeHolds({ ...request, cursor: `h1.e30.${"界".repeat(43)}` }).then(
+			() => undefined,
+			error => error,
+		);
+		expect(malformed).toMatchObject({ code: "stale_target" });
+		const restartedAttempt = { ...target, attemptId: "newer-attempt", executionId: "newer-execution" };
+		await store.commitAttemptTransition(restartedAttempt, "running", [{ kind: "running" }]);
+		const stale = await store.runtimeHolds({ ...request, cursor }).then(
+			() => undefined,
+			error => error,
+		);
+		expect(stale).toMatchObject({ code: "stale_target" });
+		const current = await store.runtimeHolds({ ...request, attemptId: restartedAttempt.attemptId });
+		expect(current.items).toMatchObject([{ commandId: "hold-pause" }]);
+	});
+
 	it("reopens bounded active tool baselines and rejects a continuation after exact lifecycle changes", async () => {
 		let store = await createStore();
 		const target = await active(store);
