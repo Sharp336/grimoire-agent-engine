@@ -2359,13 +2359,19 @@ describe("EngineRuntime", () => {
 				work: { changes: 1 },
 			});
 			expect(lifecycle.activityNextCursor).toBeString();
-			await expect(
-				client.request("runtime.history", {
-					...params,
-					cursor: one.nextCursor,
-					activityCursor: one.activityNextCursor,
-				}),
-			).rejects.toThrow();
+			// Settle native-pipe rejection before Bun's matcher can poll a nested event loop.
+			expect(
+				await client
+					.request("runtime.history", {
+						...params,
+						cursor: one.nextCursor,
+						activityCursor: one.activityNextCursor,
+					})
+					.then(
+						() => null,
+						(error: unknown) => error,
+					),
+			).toMatchObject({ code: "invalid_request" });
 			const range = (await client.request("runtime.resource", {
 				principalId: "owner",
 				resource: first.entryRef,
