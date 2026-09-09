@@ -6,7 +6,7 @@
   "$ref": "#/$defs/request",
   "x-artel": {
     "version": "1.0",
-    "contractRevision": 7,
+    "contractRevision": 8,
     "limits": {
       "wsMessageBytes": 262144,
       "deliveryBatchBytes": 65536,
@@ -22,6 +22,10 @@
       "devicePendingBytes": 134217728,
       "controlPendingRecords": 64,
       "controlPendingBytes": 1048576,
+      "ancestorRecords": 1024,
+      "branchControlRecords": 1024,
+      "branchControlScannedRows": 1048576,
+      "branchControlMaterializedBytes": 4194304,
       "httpPageRecords": 100,
       "httpPageBytes": 1048576,
       "httpConcurrentPages": 2,
