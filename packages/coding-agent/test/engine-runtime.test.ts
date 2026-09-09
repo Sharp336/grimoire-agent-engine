@@ -5354,6 +5354,142 @@ describe("EngineRuntime", () => {
 			}
 		}, 15000);
 	}
+	it("cancels pending profile resolution before waiting for shutdown lanes", async () => {
+		const resolving = Promise.withResolvers<AbortSignal>();
+		const releaseProfile = Promise.withResolvers<void>();
+		let dispatched = false;
+		const { runtime, cwd } = await createRuntime(
+			async () => {
+				dispatched = true;
+				return true;
+			},
+			{
+				resolveSessionProfile: async (_launch, _cwd, signal) => {
+					if (!signal) throw new Error("Start must have cancellation");
+					resolving.resolve(signal);
+					const aborted = Promise.withResolvers<void>();
+					const abort = () => aborted.reject(signal.reason);
+					signal.addEventListener("abort", abort, { once: true });
+					try {
+						await Promise.race([releaseProfile.promise, aborted.promise]);
+					} finally {
+						signal.removeEventListener("abort", abort);
+					}
+					return { options: {}, dispose() {} };
+				},
+			},
+		);
+		const pending = runtime
+			.start(
+				{
+					commandId: "shutdown-profile-start",
+					agentInstanceId: "shutdown-profile-agent",
+					executionId: "shutdown-profile-execution",
+					attemptId: "shutdown-profile-attempt",
+					authorityGeneration: 1,
+					cwd,
+					input: "work",
+				},
+				profile,
+			)
+			.then(
+				value => ({ value }),
+				error => ({ error }),
+			);
+		const signal = await resolving.promise;
+		const disposed = runtime.dispose({ closeStore: false });
+		try {
+			await withTimeout(disposed, 2000, "Shutdown waited for pending profile resolution");
+			expect(signal.aborted).toBeTrue();
+			expect(await pending).toHaveProperty("error");
+			expect(dispatched).toBeFalse();
+			expect(await runtime.store.getAttempt("shutdown-profile-attempt")).toBeUndefined();
+		} finally {
+			releaseProfile.resolve();
+			await Promise.allSettled([pending, disposed]);
+			await runtime.store.close();
+		}
+	}, 15000);
+
+	it("disposes a newborn held child while its effect admission is returning", async () => {
+		const parentPrompt = Promise.withResolvers<boolean>();
+		const busyReached = Promise.withResolvers<void>();
+		const returnBusy = Promise.withResolvers<void>();
+		const prompts: string[] = [];
+		const { runtime, cwd } = await createRuntime(async (_session, input) => {
+			prompts.push(input);
+			return input === "parent work" ? parentPrompt.promise : true;
+		});
+		const parent = await runtime.start(
+			{
+				commandId: "dispose-held-parent-start",
+				agentInstanceId: "dispose-held-parent",
+				agentInstanceRef: "grimoire://tasks/p/t/agents/dispose-held-parent",
+				executionId: "dispose-held-parent-execution",
+				attemptId: "dispose-held-parent-attempt",
+				authorityGeneration: 1,
+				cwd,
+				input: "parent work",
+			},
+			profile,
+		);
+		await runtime.pause({ ...parent, commandId: "dispose-held-parent-pause", initiator: { kind: "human" } });
+		const originalAdmission = runtime.store.startModelEffect.bind(runtime.store);
+		const admission = spyOn(runtime.store, "startModelEffect").mockImplementation(async (target, effect) => {
+			try {
+				return await originalAdmission(target, effect);
+			} catch (error) {
+				busyReached.resolve();
+				await returnBusy.promise;
+				throw error;
+			}
+		});
+		try {
+			const child = await runtime.start(
+				{
+					commandId: "dispose-held-child-start",
+					agentInstanceId: "dispose-held-child",
+					agentInstanceRef: "grimoire://tasks/p/t/agents/dispose-held-child",
+					parentAgentInstanceId: parent.agentInstanceId,
+					executionId: "dispose-held-child-execution",
+					attemptId: "dispose-held-child-attempt",
+					authorityGeneration: 1,
+					cwd,
+					input: "child work",
+				},
+				profile,
+			);
+			await withTimeout(busyReached.promise, 2000, "Held child did not reach effect admission");
+			const session = runtime.agentRegistry.get(child.engineAgentId)?.session;
+			if (!session) throw new Error("Child session is unavailable");
+			const originalAbort = session.abort.bind(session);
+			const abort = spyOn(session, "abort").mockImplementation(options => {
+				returnBusy.resolve();
+				return originalAbort(options);
+			});
+			parentPrompt.resolve(true);
+			try {
+				await withTimeout(runtime.dispose({ closeStore: false }), 2000, "Held child disposal did not finish");
+			} finally {
+				abort.mockRestore();
+			}
+			expect(prompts).toEqual(["parent work"]);
+			expect(await runtime.store.getAttempt(child.attemptId)).toMatchObject({ state: "interrupted" });
+			expect((await runtime.store.intent(child.agentInstanceId)).manualHold).toBeTrue();
+			expect(
+				(await runtime.store.pendingEvents()).filter(
+					event => event.attemptId === child.attemptId && event.kind === "pause_requested",
+				),
+			).toHaveLength(0);
+		} finally {
+			returnBusy.resolve();
+			parentPrompt.resolve(true);
+			admission.mockRestore();
+			await runtime.dispose({ closeStore: false });
+			await runtime.store.close();
+		}
+	}, 15000);
+
 	it("pauses and resumes the same child Attempt without waking its parent", async () => {
 		const prompts = new Map<string, PromiseWithResolvers<boolean>>();
 		const { runtime, cwd } = await createRuntime(session => {
