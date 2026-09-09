@@ -5559,6 +5559,235 @@ describe("EngineRuntime", () => {
 		}
 	}, 15000);
 
+	for (const action of ["pause", "stop"] as const) {
+		it(`keeps nested TaskTool waits quiescent under parent ${action} while an independent root completes`, async () => {
+			const leafEntered = Promise.withResolvers<void>();
+			const releaseLeaf = Promise.withResolvers<void>();
+			const siblingEntered = Promise.withResolvers<void>();
+			const releaseSibling = Promise.withResolvers<void>();
+			const waitsReady = Promise.withResolvers<void>();
+			const waiting = new Set<string>();
+			const results: Array<{ agent: string; attemptId?: string; state: string; payload: Record<string, unknown> }> =
+				[];
+			const ref = (name: string) => `grimoire://tasks/grimoire/nested-wait/agents/${action}-${name}`;
+			const requestFor = (name: string, cwd: string, parentAgentInstanceId?: string): EngineStartRequest => ({
+				commandId: `${action}-${name}-start`,
+				agentInstanceId: engineAgentInstanceId(ref(name)),
+				agentInstanceRef: ref(name),
+				parentAgentInstanceId,
+				executionId: `${action}-${name}-execution`,
+				attemptId: `${action}-${name}-attempt`,
+				authorityGeneration: 1,
+				cwd,
+				input: `nested-${name}-work`,
+			});
+			const parentProfile: EngineLaunchProfile = {
+				...profile,
+				spawns: "*",
+				maxSpawnDepth: 2,
+				maxChildren: 1,
+				childProfileRefs: ["gctx:2222222222222222"],
+				toolNames: ["task"],
+				restrictToolNames: true,
+			};
+			const mock = createMockModel({
+				handler: async (context, options) => {
+					const user = context.messages.find(message => message.role === "user");
+					const input =
+						typeof user?.content === "string"
+							? user.content
+							: (user?.content
+									.filter(part => part.type === "text")
+									.map(part => part.text)
+									.join("") ?? "");
+					for (const name of ["root", "middle"]) {
+						if (!input.includes(`nested-${name}-work`)) continue;
+						if (context.messages.some(message => message.role === "toolResult"))
+							return { content: [`${name}-result-after-child`] };
+						return {
+							content: [
+								{
+									type: "toolCall",
+									id: `${name}-wait`,
+									name: "task",
+									arguments: {
+										profileRef: "gctx:2222222222222222",
+										workStepId: name === "root" ? "middle" : "leaf",
+									},
+								},
+							],
+						};
+					}
+					if (input.includes("nested-leaf-work")) {
+						leafEntered.resolve();
+						const abort = () => releaseLeaf.resolve();
+						options?.signal?.addEventListener("abort", abort, { once: true });
+						try {
+							await releaseLeaf.promise;
+							options?.signal?.throwIfAborted();
+							return { content: ["leaf-exact-result"] };
+						} finally {
+							options?.signal?.removeEventListener("abort", abort);
+						}
+					}
+					if (!input.includes("nested-sibling-work")) throw new Error("Unexpected nested fixture input");
+					siblingEntered.resolve();
+					await releaseSibling.promise;
+					return { content: ["independent-sibling-result"] };
+				},
+			});
+			let runtimeRef: EngineRuntime;
+			const { runtime, cwd } = await createRuntime(
+				(session, input, identity) => session.prompt(input, identity),
+				{
+					resolveSessionProfile: async () => ({
+						options: {},
+						childProfiles: [{ profileRef: "gctx:2222222222222222", displayName: "Nested worker" }],
+						dispose() {},
+					}),
+					launchChild: async request => {
+						const child = requestFor(request.workStepId, request.cwd, request.parentAgentInstanceId);
+						await request.enrollChild(child.agentInstanceRef!, child.attemptId);
+						await runtimeRef.start(
+							child,
+							request.maxSpawnDepth > 0 ? { ...parentProfile, maxSpawnDepth: request.maxSpawnDepth } : profile,
+						);
+						waiting.add(request.workStepId);
+						if (waiting.size === 2) waitsReady.resolve();
+						try {
+							const result = await runtimeRef.store.waitAttemptResult(
+								child.agentInstanceId,
+								child.commandId,
+								child.attemptId,
+								request.signal,
+							);
+							results.push({ agent: request.workStepId, ...result });
+							return {
+								agentInstanceId: child.agentInstanceId,
+								agentInstanceRef: child.agentInstanceRef,
+								status:
+									result.state === "completed"
+										? "completed"
+										: result.state === "cancelled"
+											? "cancelled"
+											: "failed",
+								assistantFinal: String(result.payload.assistantFinal ?? ""),
+							};
+						} catch (error) {
+							if (!request.signal?.aborted) throw error;
+							return {
+								agentInstanceId: child.agentInstanceId,
+								status: "cancelled",
+								error: "Parent task aborted",
+							};
+						} finally {
+							waiting.delete(request.workStepId);
+						}
+					},
+				},
+				{ model: mock.model },
+			);
+			runtimeRef = runtime;
+			try {
+				const root = await runtime.start(requestFor("root", cwd), parentProfile);
+				await withTimeout(
+					Promise.all([leafEntered.promise, waitsReady.promise]),
+					5000,
+					"Nested TaskTool waits did not enroll",
+				);
+				const middle = runtime.getBinding(engineAgentInstanceId(ref("middle")))!;
+				const leaf = runtime.getBinding(engineAgentInstanceId(ref("leaf")))!;
+				expect(runtime.agentRegistry.get(root.engineAgentId)?.session?.isStreaming).toBeTrue();
+				expect(runtime.agentRegistry.get(middle.engineAgentId)?.session?.isStreaming).toBeTrue();
+				const leafPaused = nextEngineEvent(runtime, "paused", leaf.attemptId);
+				await runtime.pause({ ...leaf, commandId: "leaf-own-pause", initiator: { kind: "human" } });
+				releaseLeaf.resolve();
+				await withTimeout(leafPaused, 5000, "Leaf did not reach its own safe pause");
+				expect(waiting.size).toBe(2);
+				expect(results).toHaveLength(0);
+				const sibling = await runtime.start(requestFor("sibling", cwd), profile);
+				await withTimeout(siblingEntered.promise, 5000, "Independent root did not enter provider");
+				if (action === "pause") {
+					const paused = Promise.all([
+						nextEngineEvent(runtime, "paused", root.attemptId),
+						nextEngineEvent(runtime, "paused", middle.attemptId),
+					]);
+					await runtime.pause({ ...root, commandId: "nested-parent-pause", initiator: { kind: "human" } });
+					await withTimeout(paused, 5000, "Nested waits prevented parent quiescence");
+					expect(waiting.size).toBe(2);
+					expect(results).toHaveLength(0);
+				} else {
+					await runtime.cancel({ ...root, commandId: "nested-parent-stop" });
+				}
+				releaseSibling.resolve();
+				const siblingResult = await withTimeout(
+					runtime.store.waitAttemptResult(sibling.agentInstanceId, `${action}-sibling-start`, sibling.attemptId),
+					5000,
+					"Held branch blocked independent root",
+				);
+				expect(siblingResult).toMatchObject({
+					attemptId: sibling.attemptId,
+					state: "completed",
+					payload: { assistantFinal: "independent-sibling-result" },
+				});
+				expect((await runtime.store.intent(sibling.agentInstanceId)).manualHold).toBeFalse();
+				if (action === "pause") {
+					expect((await runtime.store.getAttempt(root.attemptId))?.state).toBe("paused");
+					await runtime.resume({ ...root, commandId: "nested-parent-resume", initiator: { kind: "human" } });
+					const ownHold = await runtime.store.intent(leaf.agentInstanceId);
+					expect(ownHold.holds.map(hold => hold.commandId)).toEqual(["leaf-own-pause"]);
+					expect((await runtime.store.getAttempt(leaf.attemptId))?.state).toBe("paused");
+					expect(waiting.size).toBe(2);
+					await runtime.resume({
+						...leaf,
+						commandId: "leaf-own-resume",
+						initiator: { kind: "human" },
+						expectedIntentRevision: ownHold.intentRevision,
+					});
+				}
+				await withTimeout(runtime.drain(), 5000, "Nested task waits did not finish after explicit release/Stop");
+				for (const [name, target] of [
+					["root", root],
+					["middle", middle],
+					["leaf", leaf],
+				] as const) {
+					const result = await runtime.store.waitAttemptResult(
+						target.agentInstanceId,
+						`${action}-${name}-start`,
+						target.attemptId,
+					);
+					expect(result).toMatchObject({
+						attemptId: target.attemptId,
+						state: action === "pause" ? "completed" : "cancelled",
+					});
+					if (action === "pause")
+						expect(result.payload.assistantFinal).toBe(
+							name === "leaf" ? "leaf-exact-result" : `${name}-result-after-child`,
+						);
+					else expect((await runtime.store.intent(target.agentInstanceId)).manualHold).toBeTrue();
+				}
+				expect(waiting.size).toBe(0);
+				if (action === "pause") {
+					expect(results.map(result => [result.agent, result.attemptId, result.payload.assistantFinal])).toEqual([
+						["leaf", leaf.attemptId, "leaf-exact-result"],
+						["middle", middle.attemptId, "middle-result-after-child"],
+					]);
+				}
+				expect(
+					(await runtime.store.pendingEvents()).filter(
+						event =>
+							event.agentInstanceId === sibling.agentInstanceId &&
+							["pause_requested", "paused", "cancelled"].includes(event.kind),
+					),
+				).toHaveLength(0);
+			} finally {
+				releaseLeaf.resolve();
+				releaseSibling.resolve();
+				await runtime.dispose();
+			}
+		}, 20000);
+	}
+
 	it("pauses and resumes the same child Attempt without waking its parent", async () => {
 		const prompts = new Map<string, PromiseWithResolvers<boolean>>();
 		const { runtime, cwd } = await createRuntime(session => {
