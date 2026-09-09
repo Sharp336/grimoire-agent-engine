@@ -234,6 +234,113 @@ describe("EngineStore", () => {
 		inspect.close();
 	});
 
+	it("migrates legacy pending queue and control admission metadata without changing canonical rows", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-store-v22-${Snowflake.next()}-`));
+		const databasePath = path.join(tempDir, "engine.sqlite");
+		const fixture = new Database(databasePath, { create: true });
+		fixture.exec(await Bun.file(path.join(import.meta.dir, "fixtures", "engine-schema-v22.sql")).text());
+		const prefix = fixture.query("SELECT version,checksum FROM engine_schema_migrations ORDER BY version").all();
+		const commandsSql =
+			"SELECT command_id,operation,serialized_command,state,receipt FROM engine_commands ORDER BY command_id";
+		const queueSql =
+			"SELECT i.queue_id,s.body,i.delivery_payload,i.disposition,i.revision FROM engine_inbox_items i JOIN engine_inbox_sources s USING(source_event_id) ORDER BY i.queue_id";
+		const commands = fixture.query(commandsSql).all();
+		const queue = fixture.query(queueSql).all();
+		const history = fixture.query("SELECT path,content FROM omp_session_files ORDER BY path").all();
+		expect(prefix).toHaveLength(22);
+		expect(
+			fixture.query("SELECT name FROM pragma_table_info('engine_commands') WHERE name='control_admission'").get(),
+		).toBeNull();
+		expect(
+			fixture
+				.query("SELECT name FROM pragma_table_info('engine_agent_identity') WHERE name='queue_pending_count'")
+				.get(),
+		).toBeNull();
+		fixture.close();
+
+		let store = await EngineStore.open(databasePath);
+		const inspect = new Database(databasePath);
+		const countsSql =
+			"SELECT agent_instance_id,queue_pending_count FROM engine_agent_identity ORDER BY agent_instance_id";
+		try {
+			expect(
+				inspect
+					.query("SELECT version,checksum FROM engine_schema_migrations WHERE version<=22 ORDER BY version")
+					.all(),
+			).toEqual(prefix);
+			expect(inspect.query(commandsSql).all()).toEqual(commands);
+			expect(inspect.query(queueSql).all()).toEqual(queue);
+			expect(inspect.query("SELECT path,content FROM omp_session_files ORDER BY path").all()).toEqual(history);
+			expect(inspect.query(countsSql).all()).toEqual([
+				{ agent_instance_id: "legacy-a", queue_pending_count: 2 },
+				{ agent_instance_id: "legacy-b", queue_pending_count: 1 },
+			]);
+			expect(
+				inspect
+					.query(
+						"SELECT operation,control_admission FROM engine_commands WHERE state='received' ORDER BY operation",
+					)
+					.all(),
+			).toEqual([
+				{ operation: "cancel", control_admission: 1 },
+				{ operation: "enqueue", control_admission: 0 },
+				{ operation: "pause", control_admission: 1 },
+				{ operation: "resolve_input", control_admission: 1 },
+				{ operation: "resolve_tool_approval", control_admission: 1 },
+				{ operation: "resume", control_admission: 1 },
+				{ operation: "steer", control_admission: 0 },
+			]);
+			const target = {
+				agentInstanceId: "legacy-a",
+				sessionId: "session-legacy-a",
+				bindingId: "binding-legacy-a",
+				executionId: "execution-legacy-a",
+				attemptId: "attempt-legacy-a",
+				authorityGeneration: 1,
+				engineGeneration: 1,
+				bindingGeneration: 1,
+			};
+			inspect.exec(
+				"CREATE TRIGGER migration_queue_rollback BEFORE INSERT ON engine_event_outbox WHEN NEW.causation_command_id='migration-rollback' BEGIN SELECT RAISE(ABORT,'migration rollback'); END",
+			);
+			const rejected = await store
+				.enqueueInboxItem(target, {
+					sourceEventId: "migration-rollback",
+					sourceType: "user",
+					body: "Must not remain",
+				})
+				.then(
+					() => undefined,
+					error => error,
+				);
+			expect(rejected).toBeInstanceOf(Error);
+			expect(inspect.query(queueSql).all()).toEqual(queue);
+			expect(
+				inspect
+					.query("SELECT queue_pending_count FROM engine_agent_identity WHERE agent_instance_id='legacy-a'")
+					.get(),
+			).toEqual({ queue_pending_count: 2 });
+			inspect.exec("DROP TRIGGER migration_queue_rollback");
+			await store.mutateInboxItem(target, {
+				mutationId: "consume-after-upgrade",
+				queueId: "legacy-a-pending-1",
+				expectedRevision: 1,
+				op: "acknowledge",
+			});
+			await store.close();
+			store = await EngineStore.open(databasePath);
+			expect(inspect.query(countsSql).all()).toEqual([
+				{ agent_instance_id: "legacy-a", queue_pending_count: 1 },
+				{ agent_instance_id: "legacy-b", queue_pending_count: 1 },
+			]);
+			expect(inspect.query(commandsSql).all()).toEqual(commands);
+			expect((await store.getInboxItemByQueueId("legacy-a-pending-1"))?.disposition).toBe("acknowledged");
+		} finally {
+			inspect.close();
+			await store.close();
+		}
+	});
+
 	it("rejects a database created by a newer Engine schema", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-store-newer-${Snowflake.next()}-`));
 		const databasePath = path.join(tempDir, "engine.sqlite");
