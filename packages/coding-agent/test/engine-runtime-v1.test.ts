@@ -636,6 +636,75 @@ describe("runtime v1 durable boundaries", () => {
 		expect(unavailable.target).toEqual(recovered.target);
 		expect(unavailable.payloadHash).toBe(recovered.payloadHash);
 	});
+	it("commits concurrent stream appends before their readers and rolls back a failed stream group without acknowledgements", async () => {
+		const store = await createStore();
+		const target = await active(store);
+		const agent = identity("root");
+		const write = (revision: number, text: string, baseRevision = revision - 1) =>
+			store.appendEvent({
+				...target,
+				causationCommandId: `stream-${revision}`,
+				kind: "message_updated",
+				payload: {
+					mode: revision === 1 ? "snapshot" : "append",
+					...(revision === 1 ? { partial: false } : { baseRevision }),
+					messageId: "group-message",
+					blockId: "text",
+					contentId: "group-content",
+					stream: "assistant",
+					revision,
+					offset: revision - 1,
+					endOffset: revision,
+					totalBytes: revision,
+					text,
+					status: "streaming",
+				},
+			});
+		const first = write(1, "a");
+		const second = write(2, "b");
+		const barrier = store.runtimeSnapshot(
+			{
+				kind: "attempt",
+				agentInstanceRef: agent.agentInstanceRef,
+				attemptId: target.attemptId,
+				kinds: ["assistant"],
+			},
+			{ principalId: "owner" },
+		);
+		const third = write(3, "c");
+		const [a, b, cut, c] = await Promise.all([first, second, barrier, third]);
+		expect(a.eventId).toBeLessThan(b.eventId);
+		expect(cut.watermark).toBe(b.eventId);
+		expect(c.eventId).toBeGreaterThan(cut.watermark);
+		const rejected = await Promise.allSettled([write(4, "d"), write(5, "e", 100)]);
+		expect(rejected.map(value => value.status)).toEqual(["rejected", "rejected"]);
+		const afterFailure = await store.runtimeSnapshot(
+			{
+				kind: "attempt",
+				agentInstanceRef: agent.agentInstanceRef,
+				attemptId: target.attemptId,
+				kinds: ["assistant"],
+			},
+			{ principalId: "owner" },
+		);
+		expect(afterFailure.watermark).toBe(c.eventId);
+		const retried = await write(4, "d");
+		expect(retried.seq).toBe(c.seq + 1);
+		const resource = {
+			kind: "message",
+			agentInstanceRef: agent.agentInstanceRef,
+			attemptId: target.attemptId,
+			messageId: "group-message",
+			blockId: "text",
+			stream: "assistant",
+			contentId: "group-content",
+			revision: 4,
+			bytes: 4,
+			mediaType: "text/plain; charset=utf-8",
+		};
+		const range = await store.runtimeResource({ principalId: "owner", resource, offset: 0, limit: 4 });
+		expect(Buffer.from(String(range.contentBase64), "base64").toString("utf8")).toBe("abcd");
+	});
 	it("pins bounded lifecycle pages to reachable native entries and their immutable event cut", async () => {
 		const store = await createStore();
 		const agent = identity("lifecycle");

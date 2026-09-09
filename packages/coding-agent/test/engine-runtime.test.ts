@@ -3058,6 +3058,61 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
+	it("retains a three MiB provider burst before completion and reopens its exact bounded message resource", async () => {
+		const text = crypto.randomBytes((3 * 1024 * 1024 * 3) / 4).toString("base64");
+		const mock = createMockModel({ responses: [{ content: [text] }] });
+		const { runtime, cwd, options } = await createRuntime(
+			(session, input) => session.prompt(input),
+			{},
+			{ model: mock.model },
+		);
+		const agentInstanceRef = "grimoire://tasks/grimoire/burst/agents/large";
+		const started = await runtime.start(
+			{
+				commandId: "burst-start",
+				agentInstanceRef,
+				agentInstanceId: engineAgentInstanceId(agentInstanceRef),
+				principalId: "burst-owner",
+				executionId: "burst-execution",
+				attemptId: "burst-attempt",
+				authorityGeneration: 1,
+				cwd,
+				input: "large answer",
+			},
+			profile,
+		);
+		await runtime.drain();
+		const completedAttempt = await runtime.store.getAttempt(started.attemptId);
+		expect(completedAttempt?.state, completedAttempt?.cause).toBe("completed");
+		const request = { agentInstanceRef, attemptId: started.attemptId, principalId: "burst-owner" };
+		const page = await runtime.store.runtimeMessages(request);
+		const baseline = (page.items as Array<Record<string, unknown>>)[0];
+		expect(baseline).toMatchObject({ status: "settled", partial: true, totalBytes: 3 * 1024 * 1024 });
+		expect((page.work as { scannedRows: number }).scannedRows).toBeLessThan(10);
+		const resource = baseline.resource as Record<string, unknown>;
+		await runtime.dispose();
+		const reopened = await openRuntime(options);
+		expect((await reopened.store.runtimeMessages(request)).items).toEqual(page.items);
+		const hash = crypto.createHash("sha256");
+		let offset = 0;
+		do {
+			const range = await reopened.store.runtimeResource({
+				principalId: "burst-owner",
+				resource,
+				offset,
+				limit: 65536,
+			});
+			const bytes = Buffer.from(String(range.contentBase64), "base64");
+			expect(bytes.byteLength).toBeLessThanOrEqual(65536);
+			new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+			hash.update(bytes);
+			offset += bytes.byteLength;
+			expect(range.nextOffset).toBe(offset === baseline.totalBytes ? null : offset);
+		} while (offset < Number(baseline.totalBytes));
+		expect(hash.digest("hex")).toBe(crypto.createHash("sha256").update(text).digest("hex"));
+		await reopened.dispose();
+	}, 60_000);
+
 	it("settles a partial assistant snapshot before Stop cancels its Attempt", async () => {
 		const releasePrompt = Promise.withResolvers<void>();
 		const mock = createMockModel();

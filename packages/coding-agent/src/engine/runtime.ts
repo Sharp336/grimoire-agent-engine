@@ -251,6 +251,7 @@ interface LiveBinding extends EngineBindingSnapshot {
 	pauseRequests: Map<string, EngineControlInitiator>;
 	resumeCommandIds: Set<string>;
 	traceWriteTail: Promise<void>;
+	streamWriteBatch?: { payloads: Record<string, unknown>[]; bytes: number };
 	retryWriteError?: unknown;
 	traceTools: Map<string, { name: string; startedAt: number }>;
 	childLaunchCount: number;
@@ -3545,6 +3546,7 @@ export class EngineRuntime {
 		kind: "trace_reasoning" | "trace_tool",
 		payload: Record<string, unknown>,
 	): void {
+		binding.streamWriteBatch = undefined;
 		const write = binding.traceWriteTail.then(() => this.#emit(binding, kind, payload));
 		binding.traceWriteTail = write.catch(error => {
 			logger.warn("Engine trace event write failed", {
@@ -3712,14 +3714,35 @@ export class EngineRuntime {
 				status,
 				...(baseRevision ? { baseRevision } : { partial: false }),
 			};
-			const write = binding.traceWriteTail.then(() => this.#emit(binding, "message_updated", payload));
+			this.#queueAssistantWrite(binding, payload);
+		}
+	}
+
+	#queueAssistantWrite(binding: LiveBinding, payload: Record<string, unknown>): void {
+		const bytes = Buffer.byteLength(JSON.stringify(payload));
+		let batch = binding.streamWriteBatch;
+		if (
+			!batch ||
+			batch.bytes + bytes > runtimeLimits.deliveryBatchBytes ||
+			batch.payloads.length >= runtimeLimits.httpPageRecords
+		) {
+			const payloads: Record<string, unknown>[] = [];
+			const target = this.#snapshot(binding);
+			const write = binding.traceWriteTail.then(async () => {
+				if (binding.streamWriteBatch?.payloads === payloads) binding.streamWriteBatch = undefined;
+				await Promise.all(payloads.map(value => this.#emit(target, "message_updated", value)));
+			});
 			binding.traceWriteTail = write.catch(error => {
 				logger.error("Engine message persistence failed", {
 					error: error instanceof Error ? error.message : String(error),
 				});
 				throw error;
 			});
+			batch = { payloads, bytes: 0 };
+			binding.streamWriteBatch = batch;
 		}
+		batch.payloads.push(payload);
+		batch.bytes += bytes;
 	}
 
 	#settleAssistantStream(binding: LiveBinding, message: AssistantMessage): void {
@@ -3777,6 +3800,7 @@ export class EngineRuntime {
 			if (state.streamingSnapshots >= MAX_ASSISTANT_STREAMING_SNAPSHOTS) return;
 			state.streamingSnapshots++;
 		}
+		binding.streamWriteBatch = undefined;
 		state.emittedText = state.text;
 		const payload = {
 			assistantMessageId: state.assistantMessageId,
@@ -3808,6 +3832,7 @@ export class EngineRuntime {
 	}
 
 	#resetAssistantStream(binding: LiveBinding): void {
+		binding.streamWriteBatch = undefined;
 		binding.assistantStream = undefined;
 	}
 
@@ -3816,6 +3841,7 @@ export class EngineRuntime {
 		kind: "retry_scheduled" | "retry_settled",
 		retry: import("./contracts").EngineRetryState,
 	): void {
+		binding.streamWriteBatch = undefined;
 		const write = binding.traceWriteTail.then(async () => {
 			const event = await this.store.commitAttemptRetry(binding, retry, { kind, payload: { retry } });
 			if (event) this.#notifyEvents([event]);

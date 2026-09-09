@@ -335,13 +335,14 @@ const produce = async (binding: EngineBindingSnapshot & { agentInstanceRef: stri
 	if (!current || current.attemptId !== binding.attemptId || current.state !== "running" || current.manualHold) return;
 	const stream = streams.get(binding.attemptId) ?? { revision: 0, offset: 0 };
 	streams.set(binding.attemptId, stream);
-	const baseRevision = stream.revision++;
+	const revision = ++stream.revision;
+	const baseRevision = revision - 1;
 	const offset = stream.offset;
 	stream.offset += Buffer.byteLength(payload);
 	const began = performance.now();
 	const event = await runtime.store.appendEvent({
 		...binding,
-		causationCommandId: `load-${stream.revision}`,
+		causationCommandId: `load-${revision}`,
 		kind: "message_updated",
 		payload: {
 			mode: baseRevision ? "append" : "snapshot",
@@ -349,7 +350,7 @@ const produce = async (binding: EngineBindingSnapshot & { agentInstanceRef: stri
 			blockId: "text",
 			stream: "assistant",
 			contentId: `content-${binding.attemptId}`,
-			revision: stream.revision,
+			revision,
 			offset,
 			endOffset: stream.offset,
 			totalBytes: stream.offset,
@@ -360,14 +361,14 @@ const produce = async (binding: EngineBindingSnapshot & { agentInstanceRef: stri
 	});
 	produced++;
 	commitMs += performance.now() - began;
-	if (stream.revision % 20 === 0)
+	if (revision % 20 === 0)
 		await writeMetric({
 			kind: "commit_sample",
 			cursor: event.eventId,
 			committedAt: Date.now(),
 			agentInstanceRef: binding.agentInstanceRef,
 			attemptId: binding.attemptId,
-			revision: stream.revision,
+			revision,
 		});
 	return event.eventId;
 };
@@ -414,14 +415,24 @@ let lastSample = started;
 try {
 	while (!stop.signal.aborted && performance.now() - started < seconds * 1000) {
 		const deadline = started + (++tick * 1000) / rate;
-		for (const binding of bindings) await produce(binding);
 		// Preserve the offered ratio under saturation. A wall-clock backlog here can grow
 		// faster than it drains and prevent every nominal AgentInstance from getting its next turn.
 		const targetNoisy = Math.floor((tick * noisyRate) / rate);
-		while (noisy < targetNoisy && !stop.signal.aborted) {
-			noisy++;
-			await produce(noisyBinding!);
-		}
+		await Promise.all([
+			...bindings.map(binding => produce(binding)),
+			(async () => {
+				const pending: Array<Promise<number | undefined>> = [];
+				while (noisy < targetNoisy && !stop.signal.aborted) {
+					noisy++;
+					const delay = started + (noisy * 1000) / noisyRate - performance.now();
+					if (delay > 0) await Bun.sleep(delay);
+					// Model the independently paced producer. At most one cohort (10 at
+					// 200/s) is outstanding; its next cohort waits for durable admission.
+					pending.push(produce(noisyBinding!));
+				}
+				await Promise.all(pending);
+			})(),
+		]);
 		await adapter?.flushEvents();
 		if (performance.now() - lastSample >= 1000) {
 			const files = ["engine.sqlite", "engine.sqlite-wal"].map(file => {

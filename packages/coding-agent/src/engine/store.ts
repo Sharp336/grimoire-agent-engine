@@ -789,6 +789,11 @@ export class EngineStore {
 	readonly #client: SqlClient;
 	readonly sessionStorage: SqlSessionStorage;
 	#transactionTail: Promise<void> = Promise.resolve();
+	#streamBatch?: {
+		events: Array<Omit<EngineEvent, "eventId" | "seq" | "createdAt">>;
+		bytes: number;
+		committed: Promise<EngineEvent[]>;
+	};
 	#change = Promise.withResolvers<void>();
 	#summaryChange = Promise.withResolvers<void>();
 	#summaryRevision = 0;
@@ -3198,7 +3203,47 @@ export class EngineStore {
 	}
 
 	async appendEvent(event: Omit<EngineEvent, "eventId" | "seq" | "createdAt">): Promise<EngineEvent> {
-		return await this.#transaction(sql => this.#appendEvent(sql, event));
+		if (event.kind !== "message_updated") return await this.#transaction(sql => this.#appendEvent(sql, event));
+		// Runtime callers may pass a richer live binding. Queue only durable fields,
+		// never retain/serialize the session, provider or other live binding objects.
+		event = {
+			agentInstanceId: event.agentInstanceId,
+			executionId: event.executionId,
+			attemptId: event.attemptId,
+			bindingId: event.bindingId,
+			engineGeneration: event.engineGeneration,
+			bindingGeneration: event.bindingGeneration,
+			authorityGeneration: event.authorityGeneration,
+			causationCommandId: event.causationCommandId,
+			kind: event.kind,
+			payload: event.payload,
+		};
+		const bytes = Buffer.byteLength(JSON.stringify(event));
+		if (bytes > runtimeLimits.deliveryBatchBytes)
+			return await this.#transaction(sql => this.#appendEvent(sql, event));
+		let batch = this.#streamBatch;
+		if (
+			!batch ||
+			batch.bytes + bytes > runtimeLimits.deliveryBatchBytes ||
+			batch.events.length >= runtimeLimits.httpPageRecords
+		) {
+			const events: Array<Omit<EngineEvent, "eventId" | "seq" | "createdAt">> = [];
+			// Reserve the existing writer position immediately. Commands and reads seal
+			// this batch, so later text cannot move across their transaction boundary.
+			const committed = this.#transaction(async sql => {
+				if (this.#streamBatch?.events === events) this.#streamBatch = undefined;
+				const results: EngineEvent[] = [];
+				for (const item of events) results.push(await this.#appendEvent(sql, item));
+				return results;
+			});
+			batch = { events, bytes: 0, committed };
+			this.#streamBatch = batch;
+		}
+		const index = batch.events.length;
+		batch.events.push(event);
+		batch.bytes += bytes;
+		// The shared promise settles after the original FULL transaction commits.
+		return (await batch.committed)[index];
 	}
 
 	async pendingEvents(limit = 100): Promise<EngineEvent[]> {
@@ -3727,6 +3772,7 @@ export class EngineStore {
 	}
 
 	#transaction<T>(work: (sql: SqlClient) => Promise<T>): Promise<T> {
+		this.#streamBatch = undefined;
 		const run = this.#transactionTail.then(async () => {
 			const revision = this.#changeRevision;
 			const summaryRevision = this.#summaryRevision;
