@@ -350,7 +350,6 @@ runtime.store.admitCommand = async (command, generation) => {
 		});
 	return result;
 };
-const payload = "x".repeat(1024);
 function measureRead<Args extends unknown[], Result>(
 	method: string,
 	read: (...args: Args) => Promise<Result>,
@@ -381,6 +380,8 @@ const produce = async (binding: EngineBindingSnapshot & { agentInstanceRef: stri
 	const stream = streams.get(binding.attemptId) ?? { revision: 0, offset: 0 };
 	streams.set(binding.attemptId, stream);
 	const revision = ++stream.revision;
+	// Distinct blocks make loss, reordering and duplicate delivery observable.
+	const payload = `${binding.attemptId}:${revision}\n`.padEnd(1024, "x");
 	const baseRevision = revision - 1;
 	const offset = stream.offset;
 	stream.offset += Buffer.byteLength(payload);
@@ -450,6 +451,7 @@ console.log(
 				}
 			: {}),
 		ratePerAgent: rate,
+		streamFormat: "attemptId:revision\\n, padded with x to 1024 ASCII bytes",
 		nominalEventsPerSecond: rate * bindings.length,
 		noisyRate,
 		...(staircaseSeconds ? { producingRootStages: [1, 7, 14, 28], staircaseSeconds } : {}),
