@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Codex now honors an explicit reasoning-off selection instead of using the provider default.
 - Provider compatibility retries no longer lower or remove explicitly enabled reasoning, and learned effort mappings no longer override a later selection.
 - Included stream failure details in custom retry scheduling hooks instead of losing the original cause.
 

@@ -12,6 +12,7 @@ import {
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { isOpenAIResponsesProgressEvent } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { configureCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { CodexCompactionRequestContext, Context, FetchImpl, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -166,12 +167,20 @@ describe("openai-codex optional response controls", () => {
 		expect("stream_options" in suppressed).toBe(false);
 	});
 
-	it("disables native reasoning with effort none when an external scratchpad replaces it", async () => {
+	it("sends effort none when reasoning is explicitly disabled or replaced by an external scratchpad", async () => {
 		const model = createCodexModel("gpt-5.5");
-		const body = await buildTransformedCodexRequestBody(model, createCodexTestContext(), {
-			forceReasoningOff: true,
-		});
-		expect(body.reasoning).toEqual({ effort: "none" });
+		for (const offOptions of [{ disableReasoning: true }, { forceReasoningOff: true }]) {
+			const requests: CapturedCodexRequest[] = [];
+			const result = await streamSimple(model, createCodexTestContext(), {
+				...offOptions,
+				apiKey: createCodexTestToken(),
+				preferWebsockets: false,
+				fetch: createCodexFetchMock(createCodexSse(COMPLETED_CODEX_EVENTS), request => requests.push(request)),
+			}).result();
+			expect(result.stopReason).toBe("stop");
+			expect(requests).toHaveLength(1);
+			expect(requests[0].body.reasoning).toEqual({ effort: "none" });
+		}
 	});
 
 	it("forces reasoning.context to all_turns for Responses Lite", async () => {
