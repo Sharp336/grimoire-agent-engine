@@ -4,6 +4,8 @@
 
 ### Added
 
+- History keeps retry activity between its actual responses and distinguishes Attempt completion from rejected control commands.
+
 - Intermediate messages and tool-only responses refresh durable history before the whole run finishes, without changing task status.
 
 - Runtime tool updates preserve their source assistant message and block through approval, settlement and restart.

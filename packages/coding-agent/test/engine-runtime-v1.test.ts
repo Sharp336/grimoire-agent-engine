@@ -1861,6 +1861,94 @@ describe("runtime v1 durable boundaries", () => {
 		const range = await store.runtimeResource({ principalId: "owner", resource, offset: 0, limit: 4 });
 		expect(Buffer.from(String(range.contentBase64), "base64").toString("utf8")).toBe("abcd");
 	});
+	it("anchors retry events between their native responses and distinguishes rejected controls from Attempt completion", async () => {
+		const store = await createStore();
+		const agent = identity("retry-chronology");
+		await store.registerAgent(agent);
+		const target = { ...binding("retry-chronology"), sessionFile: "/retry-chronology.jsonl" };
+		await store.commitAttemptTransition(target, "running", [{ kind: "running" }]);
+		const emit = (
+			kind: "assistant_snapshot" | "retry_scheduled" | "retry_settled" | "rejected" | "completed",
+			payload = {},
+		) => store.appendEvent({ ...target, causationCommandId: target.commandId, kind, payload });
+		await emit("assistant_snapshot", { assistantMessageId: "failed-response", text: "" });
+		const retry = await emit("retry_scheduled");
+		const rejected = await emit("rejected");
+		await emit("assistant_snapshot", { assistantMessageId: "final-response", text: "Answer" });
+		await emit("retry_settled");
+		const completed = await emit("completed");
+		await emit("assistant_snapshot", { assistantMessageId: "failed-response", text: "" });
+		const entries = [
+			{ type: "session", version: 3, id: "retry-session", timestamp: new Date(0).toISOString(), cwd: "/test" },
+			{
+				type: "message",
+				id: "user",
+				parentId: null,
+				sourceCommandId: target.commandId,
+				timestamp: new Date(3000).toISOString(),
+				message: { role: "user", content: "Start" },
+			},
+			{
+				type: "message",
+				id: "failure",
+				parentId: "user",
+				assistantMessageId: "failed-response",
+				timestamp: new Date(2000).toISOString(),
+				message: { role: "assistant", content: [], stopReason: "error" },
+			},
+			{
+				type: "message",
+				id: "final",
+				parentId: "failure",
+				assistantMessageId: "final-response",
+				timestamp: new Date(1000).toISOString(),
+				message: { role: "assistant", content: [{ type: "text", text: "Answer" }], stopReason: "stop" },
+			},
+		];
+		await store.sessionStorage.writeText(
+			target.sessionFile,
+			entries.map(entry => JSON.stringify(entry)).join("\n") + "\n",
+		);
+		const history = await store.nativeHistoryPage(agent.agentInstanceId, undefined, 50);
+		const page = await store.nativeLifecyclePage(
+			agent.agentInstanceId,
+			agent.agentInstanceRef,
+			50,
+			undefined,
+			history.lifecycleContext,
+		);
+		expect(page.activities.find(event => event.eventId === String(retry.eventId))).toMatchObject({
+			afterEntryId: "failure",
+			terminal: false,
+		});
+		expect(page.activities.find(event => event.eventId === String(rejected.eventId))).toMatchObject({
+			afterEntryId: "failure",
+			status: "failed",
+			terminal: false,
+		});
+		expect(page.activities.find(event => event.eventId === String(completed.eventId))).toMatchObject({
+			afterEntryId: "final",
+			terminal: true,
+		});
+		expect(page.activities.find(event => event.status === "started")).toMatchObject({
+			afterEntryId: "user",
+			terminal: false,
+		});
+		for (const event of page.activities) validateRuntimeValue("lifecycleActivity", event);
+		const lastEntry = await store.nativeHistoryPage(agent.agentInstanceId, undefined, 1);
+		const partial = await store.nativeLifecyclePage(
+			agent.agentInstanceId,
+			agent.agentInstanceRef,
+			50,
+			undefined,
+			lastEntry.lifecycleContext,
+		);
+		const partialRetry = partial.activities.find(event => event.eventId === String(retry.eventId));
+		expect(partialRetry).toBeDefined();
+		expect(partialRetry?.afterEntryId).toBeUndefined();
+		expect(partialRetry?.beforeEntryId).toBeUndefined();
+		expect(partial.work.scannedRows).toBeLessThan(runtimeLimits.bootstrapScannedRows);
+	});
 	it("pins bounded lifecycle pages to reachable native entries and their immutable event cut", async () => {
 		const store = await createStore();
 		const agent = identity("lifecycle");

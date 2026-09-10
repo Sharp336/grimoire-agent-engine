@@ -197,25 +197,33 @@ export async function readHistoryLifecycle(
 	work.rows(rows.length);
 	work.value.materializedBytes += Buffer.byteLength(JSON.stringify(rows));
 	work.check();
-	const anchors = new Map<string, string[]>();
+	const anchors = new Map<string, Array<{ entryId: string; eventId: number }>>();
 	if (context.currentAttemptId) anchors.set(context.currentAttemptId, []);
 	for (const row of rows) {
-		let matches: Array<{ attempt_id: string }> = [];
-		if (row.source_command_id)
+		let matches: Array<{ attempt_id: string; event_id?: number }> = [];
+		if (row.source_command_id) {
 			matches = (await sql.unsafe(
 				"SELECT attempt_id FROM engine_event_outbox WHERE agent_instance_id=? AND causation_command_id=? AND event_id<=? AND attempt_id<>'' ORDER BY event_id DESC LIMIT 1",
 				[context.agentInstanceId, row.source_command_id, context.watermark],
 			)) as Array<{ attempt_id: string }>;
-		else if (row.assistant_message_id) {
+			work.rows(matches.length);
+			work.value.materializedBytes += Buffer.byteLength(JSON.stringify(matches));
+			work.check();
+			if (matches.length)
+				matches = (await sql.unsafe(
+					"SELECT attempt_id,event_id FROM engine_event_outbox WHERE agent_instance_id=? AND causation_command_id=? AND attempt_id=? AND event_id<=? ORDER BY event_id ASC LIMIT 1",
+					[context.agentInstanceId, row.source_command_id, matches[0].attempt_id, context.watermark],
+				)) as Array<{ attempt_id: string; event_id: number }>;
+		} else if (row.assistant_message_id) {
 			matches = (await sql.unsafe(
-				"SELECT attempt_id FROM engine_runtime_messages WHERE agent_instance_id=? AND message_id=? AND created_event_id<=? LIMIT 1",
+				"SELECT attempt_id,event_id FROM engine_event_outbox WHERE agent_instance_id=? AND history_assistant_id=? AND event_id<=? ORDER BY event_id ASC LIMIT 1",
 				[context.agentInstanceId, row.assistant_message_id, context.watermark],
-			)) as Array<{ attempt_id: string }>;
+			)) as Array<{ attempt_id: string; event_id: number }>;
 			if (!matches.length)
 				matches = (await sql.unsafe(
-					"SELECT attempt_id FROM engine_event_outbox WHERE agent_instance_id=? AND history_assistant_id=? AND event_id<=? ORDER BY event_id DESC LIMIT 1",
+					"SELECT attempt_id,created_event_id AS event_id FROM engine_runtime_messages WHERE agent_instance_id=? AND message_id=? AND created_event_id<=? LIMIT 1",
 					[context.agentInstanceId, row.assistant_message_id, context.watermark],
-				)) as Array<{ attempt_id: string }>;
+				)) as Array<{ attempt_id: string; event_id: number }>;
 		}
 		work.rows(matches.length);
 		work.value.materializedBytes += Buffer.byteLength(JSON.stringify(matches));
@@ -223,7 +231,8 @@ export async function readHistoryLifecycle(
 		const attempt = matches[0]?.attempt_id;
 		if (!attempt) continue;
 		const entries = anchors.get(attempt) ?? [];
-		if (row.entry_role === "user" || row.entry_role === "assistant") entries.push(row.entry_id);
+		if ((row.entry_role === "user" || row.entry_role === "assistant") && matches[0].event_id !== undefined)
+			entries.push({ entryId: row.entry_id, eventId: Number(matches[0].event_id) });
 		anchors.set(attempt, entries);
 	}
 	const readEvent = async (attempt: string, prior: number): Promise<LifecycleRow | undefined> => {
@@ -249,7 +258,9 @@ export async function readHistoryLifecycle(
 		const row = pending.shift()!;
 		const mapped = lifecycleKinds[row.kind];
 		const entryIds = anchors.get(row.attempt_id) ?? [];
-		const anchor = row.kind === "running" ? entryIds[0] : entryIds.at(-1);
+		// Native entry dates can drift and the last response may belong to a later
+		// retry. Only already-originated entries at this exact event cut can anchor it.
+		const anchor = entryIds.findLast(entry => entry.eventId <= Number(row.event_id))?.entryId;
 		const activity = {
 			id: `engine:${context.sessionId}:${agentInstanceRef}:${row.attempt_id}:${row.event_id}`,
 			kind: "lifecycle",
@@ -261,6 +272,7 @@ export async function readHistoryLifecycle(
 			eventId: String(row.event_id),
 			seq: Number(row.seq),
 			status: mapped[0],
+			terminal: ["completed", "failed", "cancelled", "interrupted"].includes(row.kind),
 			label: mapped[1],
 			at: Number(row.created_at),
 			...(row.causation_command_id ? { causationCommandId: row.causation_command_id } : {}),

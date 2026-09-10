@@ -4936,6 +4936,9 @@
         "kind": {
           "const": "lifecycle"
         },
+        "terminal": {
+          "type": "boolean"
+        },
         "source": {
           "const": "engine"
         },
