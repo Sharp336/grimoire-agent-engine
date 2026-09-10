@@ -247,6 +247,7 @@ describe("Engine Control + Query", () => {
 			modelIdentityId: "gpt-5.6-terra",
 			contextWindow: 1_050_000,
 			maxOutputTokens: 128_000,
+			inputModalities: ["text", "image"],
 		});
 		expect(await client.request("models.reference", { modelIdentityId: "private-provider/custom-model" })).toEqual({
 			status: "unknown",
@@ -262,6 +263,7 @@ describe("Engine Control + Query", () => {
 				{
 					status: "resolved",
 					reasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+					inputModalities: ["text", "image"],
 					reasoningOffApis: expect.arrayContaining([
 						"openai-completions",
 						"openai-responses",

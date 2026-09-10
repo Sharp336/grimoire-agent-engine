@@ -4,6 +4,8 @@
 
 ### Added
 
+- Model reference queries expose image-input capabilities; profiles inherit exact catalog capabilities only when a route has no explicit input restriction.
+
 - History keeps retry activity between its actual responses and distinguishes Attempt completion from rejected control commands.
 
 - Intermediate messages and tool-only responses refresh durable history before the whole run finishes, without changing task status.

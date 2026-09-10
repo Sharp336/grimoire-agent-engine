@@ -751,9 +751,9 @@ function toModelSpec(
 	const { contextWindow, maxOutputTokens } = resolveExecutableModelLimits(route.model);
 	const api = execution?.api ?? nativeProviderApi(account.api);
 	const reference = resolveCanonicalModelLimits(route.model.modelId);
-	const input = uniqueStrings(route.model.inputModalities ?? ["text"]).filter(
-		(value): value is "text" | "image" => value === "text" || value === "image",
-	);
+	const input = uniqueStrings(
+		route.model.inputModalities?.length ? route.model.inputModalities : (reference?.inputModalities ?? ["text"]),
+	).filter((value): value is "text" | "image" => value === "text" || value === "image");
 	return {
 		id: route.model.modelId,
 		requestModelId: route.model.requestModelId,
@@ -1103,7 +1103,7 @@ function externalCredentialOverlay(store: AuthCredentialStore): AuthCredentialSt
 	});
 }
 
-function uniqueStrings(values: unknown[]): string[] {
+function uniqueStrings(values: readonly unknown[]): string[] {
 	return [...new Set(values.filter((value): value is string => typeof value === "string" && value.trim().length > 0))];
 }
 

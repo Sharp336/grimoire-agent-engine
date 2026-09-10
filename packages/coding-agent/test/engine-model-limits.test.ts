@@ -18,6 +18,7 @@ describe("Engine provider model limits", () => {
 		expect(resolveCanonicalModelLimits("claude-opus-5")).toMatchObject({
 			contextWindow: 1_000_000,
 			maxOutputTokens: 128_000,
+			inputModalities: ["text", "image"],
 		});
 		expect(resolveCanonicalModelLimits("claude-sonnet-5")).toMatchObject({
 			contextWindow: 1_000_000,

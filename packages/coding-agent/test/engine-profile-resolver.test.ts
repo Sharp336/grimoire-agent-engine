@@ -148,6 +148,7 @@ describe("EngineProfileResolver", () => {
 						contextWindow: 32000 + index,
 						maxOutputTokens: 8192,
 						supportsReasoning: index < 2,
+						inputModalities: index === 1 ? ["text"] : [],
 					},
 				});
 			}
@@ -175,6 +176,7 @@ describe("EngineProfileResolver", () => {
 							modelIds[index]!,
 						)!;
 						expect(model.contextWindow).toBe(32000 + index);
+						expect(model.input).toEqual(index === 0 ? ["text", "image"] : ["text"]);
 						expect(await resolved.options.modelRegistry!.getApiKey(model)).toBe(`secret-for-${routeRef}`);
 						expect(lookups.at(-1)).toBe(routeRef);
 					}
@@ -364,7 +366,20 @@ describe("EngineProfileResolver", () => {
 					const reply = await streamSimple(
 						registered,
 						{
-							messages: [{ role: "user", content: "hello", timestamp: 0 }],
+							messages: [
+								{
+									role: "user",
+									content: [
+										{ type: "text", text: "hello" },
+										{
+											type: "image",
+											mimeType: "image/png",
+											data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jM1sAAAAASUVORK5CYII=",
+										},
+									],
+									timestamp: 0,
+								},
+							],
 						},
 						{
 							apiKey: "fixture",
@@ -374,6 +389,21 @@ describe("EngineProfileResolver", () => {
 					).result();
 					expect(reply.stopReason).toBe("stop");
 					expect(requests.map(request => request.reasoning_effort)).toEqual(["max"]);
+					expect(requests[0]?.messages).toEqual(
+						expect.arrayContaining([
+							expect.objectContaining({
+								role: "user",
+								content: expect.arrayContaining([
+									expect.objectContaining({
+										type: "image_url",
+										image_url: expect.objectContaining({
+											url: expect.stringMatching(/^data:image\/png;base64,/),
+										}),
+									}),
+								]),
+							}),
+						]),
+					);
 					expect(resolved.options.model?.contextWindow).toBe(1_000_000);
 					expect(resolved.options.model?.maxTokens).toBe(128_000);
 					expect(resolved.sameModelRouteFallback).toEqual({

@@ -10,6 +10,7 @@ export interface ResolvedModelLimits {
 	referenceModelId: string;
 	reasoningEfforts: readonly Effort[];
 	reasoningOffApis: readonly Api[];
+	inputModalities: readonly ("text" | "image")[];
 }
 
 /** Resolve execution limits from the exact model identity through the bundled canonical reference index. */
@@ -55,6 +56,7 @@ export function resolveCanonicalModelLimits(modelIdentityId: string): ResolvedMo
 		referenceModelId: reference.id,
 		reasoningEfforts: getSupportedEfforts(reference),
 		reasoningOffApis,
+		inputModalities: [...reference.input],
 	};
 }
 
