@@ -3122,6 +3122,7 @@ export class AgentSession {
 			// `#yieldTerminationPending` sticky flag clears on the next `prompt()`.
 			if (successfulYieldMessage || this.#yieldTerminationPending) {
 				this.#lastSuccessfulYieldToolCallId = undefined;
+				this.#recovery.resolveRetry();
 				if (successfulYieldMessage && activeGoal) {
 					maintenanceRoute(
 						yieldOnThisMessage

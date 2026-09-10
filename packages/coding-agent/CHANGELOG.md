@@ -30,6 +30,7 @@
 
 ### Fixed
 
+- Agent runs now finish after a successful retried yield instead of remaining stuck in recovery.
 - Artel Opus/Fable routes preserve the advertised max effort when executing through OpenAI-compatible gateways.
 - Engine profiles reject unsupported explicit effort instead of silently launching at another level.
 - Preserve conversation history when concurrent tool admissions fail, instead of losing successfully saved results to an unrelated transaction rollback.

@@ -82,14 +82,15 @@ function emptyStop(): MockResponse {
 	};
 }
 
-async function createHarness(responses: MockResponse[]): Promise<Harness & { mock: MockModel }> {
+async function createHarness(responses: MockResponse[], retry = false): Promise<Harness & { mock: MockModel }> {
 	const tempDir = TempDir.createSync("@pi-yield-empty-stop-");
 
 	const mock = createMockModel({ responses });
 	const modelRegistry = sharedModelRegistry;
 	const settings = Settings.isolated({
 		"compaction.enabled": false,
-		"retry.enabled": false,
+		"retry.enabled": retry,
+		"retry.baseDelayMs": 5,
 		"todo.enabled": false,
 		"todo.eager": "default",
 		"todo.reminders": false,
@@ -150,6 +151,20 @@ afterEach(async () => {
 });
 
 describe("AgentSession yield empty-stop suppression", () => {
+	it("settles prompt and idle after a retried provider response ends in yield", async () => {
+		const { session, mock } = await createHarness(
+			[{ throw: "503 service unavailable" }, yieldCall("recovered", "call-yield-retry")],
+			true,
+		);
+		const completed = session.prompt("recover then yield").then(async () => {
+			await session.waitForIdle();
+			return "completed";
+		});
+		const outcome = await Promise.race([completed, Bun.sleep(2_000).then(() => "still-running")]);
+		expect(mock.calls).toHaveLength(2);
+		expect(outcome).toBe("completed");
+	});
+
 	it("does not continue to a trailing empty assistant stop after a successful yield", async () => {
 		const { session, mock } = await createHarness([yieldCall("done", "call-yield-done")]);
 
