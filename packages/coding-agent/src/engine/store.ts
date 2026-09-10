@@ -133,6 +133,7 @@ function toolEffectPayload(effect: EngineToolEffectInput): Record<string, unknow
 		toolName: effect.toolName,
 		policy: effect.policy,
 		inputHash: effect.inputHash,
+		...(effect.origin ? { origin: effect.origin } : {}),
 	};
 }
 
@@ -143,6 +144,9 @@ function effectInputFromRow(row: EngineEffectRow): EngineToolEffectInput {
 		toolName: row.tool_name,
 		policy: row.policy,
 		inputHash: row.input_hash,
+		...(row.assistant_message_id && row.assistant_block_id
+			? { origin: { messageId: row.assistant_message_id, blockId: row.assistant_block_id } }
+			: {}),
 	};
 }
 
@@ -422,6 +426,7 @@ export interface EngineToolEffectInput {
 	toolName: string;
 	policy: EngineToolPolicy;
 	inputHash: string;
+	origin?: { messageId: string; blockId: string };
 }
 
 export interface EngineModelEffectInput {
@@ -441,6 +446,8 @@ export interface EngineEffectRow {
 	authority_generation: number;
 	tool_call_id: string;
 	tool_name: string;
+	assistant_message_id: string | null;
+	assistant_block_id: string | null;
 	policy: EngineToolPolicy;
 	input_hash: string;
 	effect_kind: "tool" | "model";
@@ -821,6 +828,17 @@ const SCHEMA_MIGRATIONS = [
 		requiredColumns: [],
 	},
 	{ ...LEGACY_PROFILE_ROUTE_MIGRATION, version: 25 },
+	{
+		version: 26,
+		statements: [
+			"ALTER TABLE engine_effects ADD COLUMN assistant_message_id TEXT",
+			"ALTER TABLE engine_effects ADD COLUMN assistant_block_id TEXT",
+		],
+		requiredColumns: [
+			["engine_effects", "assistant_message_id", "TEXT"],
+			["engine_effects", "assistant_block_id", "TEXT"],
+		] as const,
+	},
 ] as const;
 
 const CURRENT_SCHEMA_VERSION = SCHEMA_MIGRATIONS.at(-1)!.version;
@@ -3062,6 +3080,7 @@ export class EngineStore {
 			const rows = (await sql.unsafe(
 				`SELECT e.effect_id, e.command_id, e.agent_instance_id, e.execution_id, e.attempt_id, e.binding_id,
 				 e.engine_generation, e.binding_generation, e.authority_generation, e.tool_call_id, e.tool_name,
+				 e.assistant_message_id, e.assistant_block_id,
 				 e.policy, e.input_hash, e.effect_kind, e.state, e.outcome, a.state AS approval_state, a.decision
 				 FROM engine_approvals a JOIN engine_effects e ON e.effect_id=a.effect_id
 				 WHERE a.approval_id=? AND e.agent_instance_id=? AND e.execution_id=? AND e.attempt_id=?
@@ -3156,7 +3175,7 @@ export class EngineStore {
 				 AND engine_generation=? AND binding_generation=? AND authority_generation=? AND state='started'
 				 RETURNING effect_id, command_id, agent_instance_id, execution_id, attempt_id, binding_id,
 				 engine_generation, binding_generation, authority_generation, tool_call_id, tool_name,
-				 policy, input_hash, effect_kind, state, outcome`,
+				 policy, input_hash, effect_kind, state, outcome, assistant_message_id, assistant_block_id`,
 				[
 					outcome,
 					options.error ?? null,
@@ -3229,7 +3248,8 @@ export class EngineStore {
 	async getEffect(effectId: string): Promise<EngineEffectRow | undefined> {
 		const rows = (await this.#query(
 			`SELECT effect_id, agent_instance_id, execution_id, attempt_id, binding_id, engine_generation,
-			 binding_generation, authority_generation, tool_call_id, tool_name, policy, input_hash, effect_kind, state, outcome
+			 binding_generation, authority_generation, tool_call_id, tool_name, policy, input_hash, effect_kind, state, outcome,
+			 assistant_message_id, assistant_block_id
 			 FROM engine_effects WHERE effect_id=?`,
 			[effectId],
 		)) as EngineEffectRow[];
@@ -3399,6 +3419,7 @@ export class EngineStore {
 			const abandonedEffects = (await sql.unsafe(
 				`SELECT e.effect_id, e.command_id, e.agent_instance_id, e.execution_id, e.attempt_id, e.binding_id,
 				 e.engine_generation, e.binding_generation, e.authority_generation, e.tool_call_id, e.tool_name,
+				 e.assistant_message_id, e.assistant_block_id,
 				 e.policy, e.input_hash, e.effect_kind, e.state, e.outcome, a.approval_id, a.state AS approval_state
 				 FROM engine_effects e LEFT JOIN engine_approvals a ON a.effect_id=e.effect_id
 				 WHERE e.engine_generation < ? AND e.state IN ('planned', 'started')
@@ -3823,14 +3844,19 @@ export class EngineStore {
 		effect: EngineToolEffectInput,
 		state: "planned" | "started",
 	): Promise<void> {
-		validateRuntimeValue("toolDetail", { toolCallId: effect.toolCallId, name: effect.toolName, phase: "started" });
+		validateRuntimeValue("toolDetail", {
+			toolCallId: effect.toolCallId,
+			name: effect.toolName,
+			phase: "started",
+			...(effect.origin ? { origin: effect.origin } : {}),
+		});
 		const now = Date.now();
 		await sql.unsafe(
 			`INSERT INTO engine_effects(
 			 effect_id, command_id, agent_instance_id, execution_id, attempt_id, binding_id,
 			 engine_generation, binding_generation, authority_generation, tool_call_id, tool_name,
-			 policy, input_hash, state, created_at, started_at, updated_at
-			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 policy, input_hash, state, created_at, started_at, updated_at, assistant_message_id, assistant_block_id
+			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			[
 				effect.effectId,
 				target.commandId,
@@ -3849,6 +3875,8 @@ export class EngineStore {
 				now,
 				state === "started" ? now : null,
 				now,
+				effect.origin?.messageId ?? null,
+				effect.origin?.blockId ?? null,
 			],
 		);
 	}

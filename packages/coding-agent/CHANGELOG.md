@@ -4,6 +4,8 @@
 
 ### Added
 
+- Runtime tool updates preserve their source assistant message and block through approval, settlement and restart.
+
 - Retained assistant history preserves text positions among public reasoning and tool calls.
 
 - Retained assistant history exposes failure and interruption outcomes, including empty failed responses, without exposing provider diagnostics.

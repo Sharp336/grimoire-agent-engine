@@ -6,6 +6,7 @@ import { type RuntimeIdentityRow, RuntimeQueryWork, type RuntimeSql, runtimeIden
 import {
 	type RuntimeAccess,
 	runtimeLimits,
+	runtimeOriginIdChars,
 	runtimeToolIdChars,
 	runtimeToolNameChars,
 	runtimeToolPageRecords,
@@ -451,11 +452,28 @@ export async function runtimeToolBaselines(
 	const after = String(cursorPosition(request, revision, ""));
 	const limit = Math.min(request.limit ?? runtimeToolPageRecords, runtimeToolPageRecords);
 	const rows = (await sql.unsafe(
-		`SELECT effect_id,substr(tool_call_id,1,?) AS tool_call_id,substr(tool_name,1,?) AS tool_name,state,runtime_event_id
+		`SELECT effect_id,substr(tool_call_id,1,?) AS tool_call_id,substr(tool_name,1,?) AS tool_name,state,runtime_event_id,
+		substr(assistant_message_id,1,?) AS assistant_message_id,substr(assistant_block_id,1,?) AS assistant_block_id
 		FROM engine_effects WHERE attempt_id=? AND effect_kind='tool' AND state IN ('started','unknown')
 		AND effect_id>? ORDER BY effect_id LIMIT ?`,
-		[runtimeToolIdChars + 1, runtimeToolNameChars + 1, request.attemptId!, after, limit + 1],
-	)) as Array<{ effect_id: string; tool_call_id: string; tool_name: string; state: string; runtime_event_id: number }>;
+		[
+			runtimeToolIdChars + 1,
+			runtimeToolNameChars + 1,
+			runtimeOriginIdChars + 1,
+			runtimeOriginIdChars + 1,
+			request.attemptId!,
+			after,
+			limit + 1,
+		],
+	)) as Array<{
+		effect_id: string;
+		tool_call_id: string;
+		tool_name: string;
+		state: string;
+		runtime_event_id: number;
+		assistant_message_id: string | null;
+		assistant_block_id: string | null;
+	}>;
 	work?.rows(rows.length);
 	const items: Record<string, unknown>[] = [];
 	let bytes = 2;
@@ -464,6 +482,9 @@ export async function runtimeToolBaselines(
 		const item = {
 			toolCallId: row.tool_call_id,
 			name: row.tool_name,
+			...(row.assistant_message_id && row.assistant_block_id
+				? { origin: { messageId: row.assistant_message_id, blockId: row.assistant_block_id } }
+				: {}),
 			phase: row.state === "unknown" ? "unknown" : "started",
 			revision: Number(row.runtime_event_id),
 		};

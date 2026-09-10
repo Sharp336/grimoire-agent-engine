@@ -398,7 +398,7 @@ describe("EngineStore", () => {
 				if (scenario === "exact") {
 					expect(JSON.parse(receipt!.value)).toEqual(prefix.at(-1));
 					expect(inspect.query("SELECT MAX(version) AS version FROM engine_schema_migrations").get()).toEqual({
-						version: 25,
+						version: 26,
 					});
 					expect(
 						inspect.query("SELECT name FROM sqlite_master WHERE name='engine_agent_identity'").get(),

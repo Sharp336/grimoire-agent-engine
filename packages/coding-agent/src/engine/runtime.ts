@@ -292,6 +292,7 @@ interface LiveBinding extends EngineBindingSnapshot {
 	assistantMessageSequence: number;
 	assistantStream?: AssistantStreamState;
 	lastAssistantMessageId?: string;
+	toolOrigins?: { attemptId: string; blocks: Map<string, NonNullable<EngineToolEffectInput["origin"]>> };
 	activeModelCalls: Set<Promise<void>>;
 	pendingInput?: PendingInput;
 }
@@ -327,6 +328,7 @@ interface ToolInvocationRecord {
 	toolCallId: string;
 	toolName: string;
 	inputHash: string;
+	origin?: EngineToolEffectInput["origin"];
 	target: EngineBindingSnapshot;
 	done: Promise<void>;
 	resolveDone: () => void;
@@ -3670,6 +3672,9 @@ export class EngineRuntime {
 		call: ToolExecutionHookCall,
 		signal?: AbortSignal,
 	): Promise<ToolExecutionHookToken | undefined> {
+		// The tool's source blocks must be durable before publishing its admission.
+		await binding.traceWriteTail;
+		if (binding.messageWriteError) throw binding.messageWriteError;
 		const policy = profile.toolPolicies?.[call.toolName] ?? "unrestricted";
 		const input = stableStringifyJson(call.input);
 		const inputHash = sha256(input);
@@ -3684,6 +3689,10 @@ export class EngineRuntime {
 			toolCallId: call.toolCallId,
 			toolName: call.toolName,
 			inputHash,
+			origin:
+				binding.toolOrigins?.attemptId === binding.attemptId
+					? binding.toolOrigins.blocks.get(call.toolCallId)
+					: undefined,
 			target: this.#snapshot(binding),
 			done: done.promise,
 			resolveDone: done.resolve,
@@ -3815,6 +3824,7 @@ export class EngineRuntime {
 			toolName: record.toolName,
 			policy: record.policy,
 			inputHash: record.inputHash,
+			...(record.origin ? { origin: record.origin } : {}),
 		};
 	}
 
@@ -4421,6 +4431,18 @@ export class EngineRuntime {
 	#settleAssistantStream(binding: LiveBinding, message: AssistantMessage): void {
 		const state = binding.assistantStream ?? this.#beginAssistantStream(binding, message.timestamp);
 		if (state.attemptId !== binding.attemptId || state.settled) return;
+		// These are the exact native blocks which may execute next, not a guess
+		// based on the latest text or wall-clock timestamps. Replace per response.
+		binding.toolOrigins = {
+			attemptId: state.attemptId,
+			blocks: new Map(
+				message.content.flatMap((part, index) =>
+					part.type === "toolCall"
+						? [[part.id, { messageId: state.assistantMessageId, blockId: `block_${index}` }] as const]
+						: [],
+				),
+			),
+		};
 		void this.#persistAssistantWrite(binding, async () => {
 			for (const [index, part] of message.content.entries()) {
 				if (part.type === "text")

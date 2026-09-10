@@ -6,7 +6,7 @@
   "$ref": "#/$defs/request",
   "x-artel": {
     "version": "1.0",
-    "contractRevision": 10,
+    "contractRevision": 11,
     "limits": {
       "wsMessageBytes": 262144,
       "deliveryBatchBytes": 65536,
@@ -2937,9 +2937,25 @@
       ],
       "additionalProperties": false
     },
+    "toolOrigin": {
+      "type": "object",
+      "properties": {
+        "messageId": {
+          "$ref": "#/$defs/id"
+        },
+        "blockId": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": ["messageId", "blockId"],
+      "additionalProperties": false
+    },
     "toolDetail": {
       "type": "object",
       "properties": {
+        "origin": {
+          "$ref": "#/$defs/toolOrigin"
+        },
         "toolCallId": {
           "$ref": "#/$defs/toolCallId"
         },
@@ -4996,6 +5012,9 @@
     "toolSnapshot": {
       "type": "object",
       "properties": {
+        "origin": {
+          "$ref": "#/$defs/toolOrigin"
+        },
         "toolCallId": {
           "$ref": "#/$defs/toolCallId"
         },

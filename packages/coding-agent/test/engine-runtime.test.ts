@@ -4116,6 +4116,15 @@ describe("EngineRuntime", () => {
 		const snapshots = events.filter(event => event.kind === "assistant_snapshot");
 		const messageIds = [...new Set(snapshots.map(event => String(event.payload?.assistantMessageId)))];
 		expect(messageIds).toHaveLength(2);
+		const toolEvents = events.filter(event => event.kind === "tool_started" || event.kind === "tool_settled");
+		expect(toolEvents.map(event => event.payload)).toMatchObject([
+			{ toolCallId: "read-stream", origin: { messageId: messageIds[0], blockId: "block_2" } },
+			{ toolCallId: "read-stream", origin: { messageId: messageIds[0], blockId: "block_2" } },
+		]);
+		const precedingBlocks = events.filter(
+			event => event.kind === "message_updated" && event.payload?.messageId === messageIds[0],
+		);
+		expect(precedingBlocks.at(-1)!.eventId).toBeLessThan(toolEvents[0]!.eventId);
 		for (const assistantMessageId of messageIds) {
 			const revisions = snapshots
 				.filter(event => event.payload?.assistantMessageId === assistantMessageId)

@@ -377,6 +377,7 @@ describe("runtime v1 durable boundaries", () => {
 				toolName: "read",
 				policy: "tracked",
 				inputHash: "sha256:private-input-hash",
+				...(i === 19 ? {} : { origin: { messageId: "assistant_parallel", blockId: `block_${i}` } }),
 			});
 			revisions.push(event.eventId);
 		}
@@ -386,6 +387,7 @@ describe("runtime v1 durable boundaries", () => {
 			toolName: "write",
 			policy: "permit",
 			inputHash: "sha256:approval",
+			origin: { messageId: "assistant_permission", blockId: "block_1" },
 		});
 		const snapshot = await store.runtimeSnapshot(scope, request);
 		const detail = snapshot.agents[0];
@@ -395,6 +397,11 @@ describe("runtime v1 durable boundaries", () => {
 		);
 		expect(tools.map(tool => tool.revision)).toEqual(revisions.slice(0, 16));
 		expect(tools.every(tool => tool.phase === "started")).toBeTrue();
+		expect(tools).toMatchObject(
+			Array.from({ length: 16 }, (_, i) => ({
+				origin: { messageId: "assistant_parallel", blockId: `block_${i}` },
+			})),
+		);
 		expect(snapshot.work.changes).toBe(17);
 		const cursor = String(detail.toolsNextCursor);
 		const remaining = await store.runtimeTools({ ...request, cursor });
@@ -402,13 +409,14 @@ describe("runtime v1 durable boundaries", () => {
 			revision: revisions.at(-1),
 			nextCursor: null,
 			items: [
-				{ toolCallId: "tool-16" },
+				{ toolCallId: "tool-16", origin: { messageId: "assistant_parallel", blockId: "block_16" } },
 				{ toolCallId: "tool-17" },
 				{ toolCallId: "tool-18" },
 				{ toolCallId: "tool-19" },
 			],
 		});
 		expect((remaining.work as { scannedRows: number }).scannedRows).toBeLessThan(20);
+		expect((remaining.items as Record<string, unknown>[]).at(-1)).not.toHaveProperty("origin");
 		await store.appendEvent({
 			...target,
 			causationCommandId: target.commandId,
@@ -465,9 +473,15 @@ describe("runtime v1 durable boundaries", () => {
 		await store.resolveToolApproval(target, "effect-permit", "deny");
 		const live = await store.runtimeEvents(eventsRequest(before.epoch, settled.eventId, scope));
 		expect(live.changes.some(change => change.kind === "tool" && change.value.phase === "denied")).toBeTrue();
+		expect(
+			live.changes.find(change => change.kind === "tool" && change.value.phase === "denied")?.value.origin,
+		).toEqual({ messageId: "assistant_permission", blockId: "block_1" });
 		await store.interruptGeneration(2);
 		const recovered = await store.runtimeTools(request);
 		expect((recovered.items as Array<{ phase: string }>).every(tool => tool.phase === "unknown")).toBeTrue();
+		expect((recovered.items as Record<string, unknown>[])[0]).toMatchObject({
+			origin: { messageId: "assistant_parallel", blockId: "block_0" },
+		});
 		expect(
 			(recovered.items as Array<{ toolCallId: string }>).some(
 				tool => tool.toolCallId === "tool-19" || tool.toolCallId === "tool-permit",
@@ -511,15 +525,17 @@ describe("runtime v1 durable boundaries", () => {
 		const scope: RuntimeScope = { kind: "attempt", agentInstanceRef, attemptId: target.attemptId, kinds: ["tool"] };
 		const before = await store.runtimeSnapshot(scope, request);
 		const toolCallId = `call_${"a".repeat(24)}|fc_${"b".repeat(50)}`;
+		const origin = { messageId: "assistant_native", blockId: "block_2" };
 		const effect = {
 			effectId: "native-effect",
+			origin,
 			toolCallId,
 			toolName: "read",
 			policy: "tracked" as const,
 			inputHash: "sha256:native",
 		};
 		const started = await store.startToolEffect(target, effect);
-		expect((await store.runtimeTools(request)).items).toMatchObject([{ toolCallId, phase: "started" }]);
+		expect((await store.runtimeTools(request)).items).toMatchObject([{ toolCallId, phase: "started", origin }]);
 		await expect(store.runtimeTools({ ...request, principalId: "foreign" })).rejects.toMatchObject({
 			code: "agent_not_found",
 		});
@@ -528,7 +544,7 @@ describe("runtime v1 durable boundaries", () => {
 		stores.splice(stores.indexOf(store), 1);
 		store = await EngineStore.open(file);
 		stores.push(store);
-		expect((await store.runtimeTools(request)).items).toMatchObject([{ toolCallId, phase: "started" }]);
+		expect((await store.runtimeTools(request)).items).toMatchObject([{ toolCallId, phase: "started", origin }]);
 		await expect(
 			store.settleToolEffect({ ...target, attemptId: "another-attempt" }, effect.effectId, "completed"),
 		).rejects.toThrow();
@@ -536,7 +552,7 @@ describe("runtime v1 durable boundaries", () => {
 		await store.settleToolEffect(target, effect.effectId, "completed");
 		const changes = await store.runtimeEvents(eventsRequest(before.epoch, started.eventId, scope));
 		expect(changes.changes.filter(change => change.kind === "tool")).toMatchObject([
-			{ value: { toolCallId, phase: "finished" } },
+			{ value: { toolCallId, phase: "finished", origin } },
 		]);
 		expect((await store.runtimeTools(request)).items).toEqual([]);
 		await store.close();
@@ -547,7 +563,18 @@ describe("runtime v1 durable boundaries", () => {
 			tool_call_id: toolCallId,
 			state: "settled",
 			outcome: "completed",
+			assistant_message_id: origin.messageId,
+			assistant_block_id: origin.blockId,
 		});
+		await expect(
+			store.startToolEffect(target, {
+				...effect,
+				effectId: "bad-origin",
+				toolCallId: "bad-origin",
+				origin: { ...origin, blockId: "" },
+			}),
+		).rejects.toMatchObject({ code: "invalid_request" });
+		expect(await store.getEffect("bad-origin")).toBeUndefined();
 		for (const [index, invalid] of [
 			"call_|",
 			"|fc_1",
