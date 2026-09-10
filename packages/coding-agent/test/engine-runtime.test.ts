@@ -5,8 +5,11 @@ import * as fsAsync from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import type { ThinkingConfig } from "@oh-my-pi/pi-catalog/types";
 import { defineCapability, loadCapability, registerProvider } from "@oh-my-pi/pi-coding-agent/capability";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { settings as ambientSettings, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -120,6 +123,99 @@ describe("EngineRuntime", () => {
 		enableMCP: false,
 		enableLsp: false,
 	};
+
+	it("keeps each launch's actual settings on its initiating native message after profile change and restart", async () => {
+		const mock = createMockModel({ reasoning: true, handler: { content: ["done"] } });
+		Object.assign(mock, {
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.High] } satisfies ThinkingConfig,
+		});
+		const setup = await createRuntime((session, input, identity) => session.prompt(input, identity), {
+			resolveSessionProfile: async launch => ({
+				options: { model: mock.model, thinkingLevel: launch.thinkingLevel },
+				dispose() {},
+			}),
+		});
+		const request = (suffix: string): EngineStartRequest => ({
+			commandId: `snapshot-command-${suffix}`,
+			agentInstanceRef: "grimoire://tasks/grimoire/snapshots/agents/one",
+			profileSelectionRevision: suffix === "one" ? 4 : 8,
+			clientMessageId: `snapshot-client-${suffix}`,
+			agentInstanceId: "snapshot-agent",
+			executionId: `snapshot-execution-${suffix}`,
+			attemptId: `snapshot-attempt-${suffix}`,
+			authorityGeneration: 1,
+			cwd: setup.cwd,
+			input: "same text",
+		});
+		const selected = { ...profile, launchProfileRef: "gctx:2222222222222222", thinkingLevel: ThinkingLevel.High };
+		await setup.runtime.start(request("one"), selected);
+		await setup.runtime.drain();
+		await setup.runtime.start(request("two"), {
+			...selected,
+			profileDigest: "changed-profile",
+			launchProfileRef: "gctx:3333333333333333",
+			thinkingLevel: ThinkingLevel.Low,
+		});
+		await setup.runtime.drain();
+		await setup.runtime.dispose();
+		const reopened = await openRuntime(setup.options);
+		const users = (await reopened.sessionHistory("snapshot-agent")).entries.filter(entry => entry.role === "user");
+		expect(
+			users.map(entry => [
+				entry.sourceCommandId,
+				entry.launchSnapshot?.attemptId,
+				entry.launchSnapshot?.profileRef,
+				entry.launchSnapshot?.thinkingLevel,
+			]),
+		).toEqual([
+			["snapshot-command-one", "snapshot-attempt-one", selected.launchProfileRef, "high"],
+			["snapshot-command-two", "snapshot-attempt-two", "gctx:3333333333333333", "low"],
+		]);
+		expect(users[0].launchSnapshot?.model).toEqual({
+			provider: mock.model.provider,
+			id: mock.model.id,
+			contextWindow: mock.model.contextWindow,
+		});
+		expect(new Set(users.map(entry => entry.launchSnapshot?.profileDigest)).size).toBe(2);
+		expect(
+			users.map(entry => [entry.launchSnapshot?.previousSelectionRevision, entry.launchSnapshot?.selectionRevision]),
+		).toEqual([
+			[0, 4],
+			[4, 8],
+		]);
+		let cursor: string | undefined;
+		const pagedSnapshots = [];
+		for (let pageIndex = 0; pageIndex < 16; pageIndex++) {
+			const page = await reopened.sessionHistoryPage("snapshot-agent", request("one").agentInstanceRef!, cursor, 1);
+			pagedSnapshots.push(...page.entries.filter(entry => entry.role === "user").map(entry => entry.launchSnapshot));
+			cursor = page.nextCursor ?? undefined;
+			if (!cursor) break;
+		}
+		expect(cursor).toBeUndefined();
+		expect(pagedSnapshots).toEqual(users.toReversed().map(entry => entry.launchSnapshot));
+		for (const call of mock.calls) {
+			expect(JSON.stringify(call.context)).not.toContain('"launchSnapshot"');
+			expect(JSON.stringify(call.context)).not.toContain('"profileDigest"');
+		}
+		const malformed = await createRuntime(async (session, input, identity) => {
+			const launchSnapshot = { ...identity!.launchSnapshot!, credential: "not-public" };
+			session.sessionManager.appendMessage(
+				{ role: "user", content: input, timestamp: Date.now() },
+				{ ...identity, launchSnapshot },
+			);
+			return true;
+		});
+		await malformed.runtime.start({ ...request("malformed"), cwd: malformed.cwd }, selected);
+		await malformed.runtime.drain();
+		expect((await malformed.runtime.sessionHistory("snapshot-agent")).entries[0]).not.toHaveProperty(
+			"launchSnapshot",
+		);
+		expect(
+			(await reopened.sessionHistory("snapshot-agent")).entries
+				.filter(entry => entry.role === "assistant")
+				.every(entry => !entry.launchSnapshot),
+		).toBe(true);
+	});
 
 	it("defers storage reclaim during execution and gates later starts and queries until maintenance settles", async () => {
 		const entered = Promise.withResolvers<void>();
@@ -670,6 +766,11 @@ describe("EngineRuntime", () => {
 				clientMessageId: "steer-body-b",
 				message: { role: "user", content: [{ type: "text", text: "B" }] },
 			});
+			expect(
+				history.entries.find(
+					entry => entry.type === "message" && entry.sourceCommandId === "steer-context-accepted",
+				),
+			).not.toHaveProperty("launchSnapshot");
 			expect(await runtime.readInbox(second, queued.item.queueId)).toMatchObject({
 				sourceBody: "B",
 				deliveryPayload: "B",
@@ -3965,6 +4066,7 @@ describe("EngineRuntime", () => {
 						{ type: "thinking" as const, thinking: "private streaming reasoning sentinel" },
 						"Inspecting the file.",
 						{ type: "toolCall" as const, id: "read-stream", name: "read", arguments: { path: "private.txt" } },
+						"Waiting for the read result.",
 					],
 				};
 				finalCall.resolve();
@@ -3995,12 +4097,13 @@ describe("EngineRuntime", () => {
 			{ ...profile, toolNames: ["read"], restrictToolNames: true },
 		);
 		await finalCall.promise;
-		expect(await firstSnapshot).toMatchObject({
+		const first = await firstSnapshot;
+		expect({ attemptId: first.attemptId, payload: first.payload }).toMatchObject({
 			attemptId: started.attemptId,
 			payload: {
 				assistantMessageId: expect.stringMatching(/^assistant_[0-9a-f]{32}$/),
 				revision: 1,
-				text: "Inspecting the file.",
+				text: expect.stringContaining("Inspecting the file."),
 				status: "streaming",
 				textTruncated: false,
 			},
@@ -4042,6 +4145,7 @@ describe("EngineRuntime", () => {
 				status: "available",
 				text: "private streaming reasoning sentinel",
 			}),
+			expect.objectContaining({ kind: "text", blockIndex: 1, text: "Inspecting the file." }),
 			expect.objectContaining({
 				kind: "tool_call",
 				toolCallId: "read-stream",
@@ -4050,8 +4154,30 @@ describe("EngineRuntime", () => {
 				toolStatus: "succeeded",
 				resultText: expect.stringContaining("private tool output sentinel"),
 			}),
+			expect.objectContaining({ kind: "text", blockIndex: 3, text: "Waiting for the read result." }),
 		]);
 		expect(assistantEntries[0]?.blocks?.[0]?.blockId).toContain(`history:${history.sessionId}:`);
+		let cursor: string | undefined;
+		let foundMixedPage = false;
+		for (let pageNumber = 0; pageNumber < 8; pageNumber++) {
+			const page = await runtime.sessionHistoryPage(
+				started.agentInstanceId,
+				"grimoire://tasks/grimoire/stream/agents/agent-assistant-stream",
+				cursor,
+				1,
+			);
+			const mixed = page.entries.find(entry => entry.entryId === assistantEntries[0]?.entryId);
+			if (mixed) {
+				expect(mixed.blocks?.map(block => [block.kind, block.blockIndex, block.text])).toEqual(
+					assistantEntries[0]?.blocks?.map(block => [block.kind, block.blockIndex, block.text]),
+				);
+				foundMixedPage = true;
+				break;
+			}
+			if (!page.nextCursor) break;
+			cursor = page.nextCursor;
+		}
+		expect(foundMixedPage).toBe(true);
 		const hiddenEntry = retainedSessionManager?.appendMessage({
 			role: "assistant",
 			content: [{ type: "redactedThinking", data: "HIDDEN-PROVIDER-PAYLOAD" }],
@@ -4307,6 +4433,10 @@ describe("EngineRuntime", () => {
 		const firstCancelled = events.findIndex(event => event.kind === "cancelled");
 		expect(events.indexOf(snapshots.at(-1)!)).toBeLessThan(firstCancelled);
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
+		const retainedAnswer = (await runtime.sessionHistory(started.agentInstanceId)).entries.find(
+			entry => entry.assistantMessageId === snapshots[0]?.payload?.assistantMessageId,
+		);
+		expect(retainedAnswer).toMatchObject({ text: "a".repeat(400), stopReason: "aborted" });
 		await runtime.dispose();
 	}, 60_000);
 
@@ -7438,13 +7568,27 @@ describe("EngineRuntime", () => {
 		"fails an attempt safely when the model turn ends with a $kind provider error",
 		async ({ message, publicReason }) => {
 			const { runtime, cwd } = await createRuntime(async session => {
+				const answer: AssistantMessage = {
+					role: "assistant",
+					content: [{ type: "text", text: publicReason === "Error" ? "Partial response" : "" }],
+					api: "openai-responses",
+					provider: "mock",
+					model: "mock",
+					timestamp: Date.now(),
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "error",
+					errorMessage: message,
+				};
+				session.sessionManager.appendMessage(answer);
 				Object.defineProperty(session, "getLastAssistantMessage", {
-					value: () => ({
-						role: "assistant",
-						content: [],
-						stopReason: "error",
-						errorMessage: message,
-					}),
+					value: () => answer,
 				});
 				return true;
 			});
@@ -7464,6 +7608,18 @@ describe("EngineRuntime", () => {
 			const events = await runtime.store.pendingEvents();
 			const modelEffectId = String(events.find(event => event.kind === "model_started")?.payload?.effectId);
 			const modelEffect = await runtime.store.getEffect(modelEffectId);
+			const history = await runtime.sessionHistory(started.agentInstanceId);
+			expect(history.entries).toHaveLength(1);
+			expect(history.entries[0]).toMatchObject({ role: "assistant", stopReason: "error" });
+			expect(history.entries[0]).not.toHaveProperty("errorMessage");
+			expect(JSON.stringify(history)).not.toContain("secretcredential");
+			const paged = await runtime.sessionHistoryPage(
+				started.agentInstanceId,
+				"grimoire://tasks/grimoire/provider-error/agents/agent-provider-error",
+				undefined,
+				1,
+			);
+			expect(paged.entries[0]).toMatchObject({ entryId: history.entries[0]?.entryId, stopReason: "error" });
 			await runtime.dispose();
 			expect(events.find(event => event.kind === "completed")).toBeUndefined();
 			const failed = events.find(event => event.kind === "failed");

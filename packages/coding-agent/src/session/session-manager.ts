@@ -2229,6 +2229,9 @@ export class SessionManager {
 			...(identity?.sourceCommandId ? { sourceCommandId: identity.sourceCommandId } : {}),
 			...(identity?.clientMessageId ? { clientMessageId: identity.clientMessageId } : {}),
 			...(identity?.assistantMessageId ? { assistantMessageId: identity.assistantMessageId } : {}),
+			...(message.role === "user" && identity?.sourceCommandId && identity.launchSnapshot
+				? { launchSnapshot: structuredClone(identity.launchSnapshot) }
+				: {}),
 		};
 		this.#recordEntry(entry);
 		return entry.id;

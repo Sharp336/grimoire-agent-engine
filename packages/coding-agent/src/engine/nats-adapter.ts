@@ -928,6 +928,7 @@ export async function dispatchEngineCommand(options: {
 						authorityGeneration: command.authorityGeneration,
 						cwd,
 						clientMessageId: optionalRecordString(command.payload, "clientMessageId"),
+						profileSelectionRevision: optionalRecordInteger(command.payload, "profileSelectionRevision"),
 						...(queued
 							? {
 									queueId: requiredRecordString(command.payload, "queueId"),

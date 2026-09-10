@@ -38,6 +38,7 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
+import type { SessionLaunchSnapshot } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
 /** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
@@ -357,6 +358,8 @@ export interface PromptOptions {
 	skipCompactionCheck?: boolean;
 	/** Engine command that introduced the exact persisted user message. */
 	sourceCommandId?: string;
+	/** Immutable Engine launch settings kept outside provider message content. */
+	launchSnapshot?: SessionLaunchSnapshot;
 	/** Opaque client identity used to reconcile an optimistic user message. */
 	clientMessageId?: string;
 }

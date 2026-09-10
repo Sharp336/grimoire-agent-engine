@@ -63,6 +63,22 @@ export interface SessionEntryBase {
 	timestamp: string;
 }
 
+/** Public settings captured at ordinary Engine launch, never provider credentials. */
+export interface SessionLaunchSnapshot {
+	schema: "engine.launch_snapshot.v1";
+	agentInstanceId: string;
+	agentInstanceRef?: string | null;
+	executionId: string;
+	attemptId: string;
+	profileRef: string | null;
+	profileDigest: string;
+	selectionRevision?: number | null;
+	previousSelectionRevision?: number | null;
+	thinkingLevel: string | null;
+	model: { provider: string; id: string; contextWindow: number | null } | null;
+	routes: ReadonlyArray<{ routeRef: string; provider: string; modelId: string }>;
+}
+
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
 	message: AgentMessage;
@@ -72,11 +88,13 @@ export interface SessionMessageEntry extends SessionEntryBase {
 	clientMessageId?: string;
 	/** Stable Engine identity used to reconcile streamed assistant snapshots with durable history. */
 	assistantMessageId?: string;
+	/** Only on the user message that starts an ordinary execution, not steering. */
+	launchSnapshot?: SessionLaunchSnapshot;
 }
 
 export type SessionMessageIdentity = Pick<
 	SessionMessageEntry,
-	"sourceCommandId" | "clientMessageId" | "assistantMessageId"
+	"sourceCommandId" | "clientMessageId" | "assistantMessageId" | "launchSnapshot"
 >;
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {

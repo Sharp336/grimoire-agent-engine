@@ -31,7 +31,7 @@ import type { AgentSession } from "../session/agent-session";
 import type { TurnRetryPolicy } from "../session/agent-session-types";
 import { BLOB_HASH_RE, BlobStore } from "../session/blob-store";
 import { createProviderRetryBudgetHook } from "../session/provider-retry-budget";
-import type { SessionEntry, SessionMessageIdentity } from "../session/session-entries";
+import type { SessionEntry, SessionLaunchSnapshot, SessionMessageIdentity } from "../session/session-entries";
 import {
 	collectPersistedBlobHashes,
 	loadSessionFile,
@@ -168,7 +168,7 @@ export interface EngineRestoreHistoryTarget {
 type EngineHistoryActivityBlock = {
 	blockId: string;
 	blockIndex: number;
-	kind: "reasoning" | "tool_call";
+	kind: "text" | "reasoning" | "tool_call";
 	status: "available" | "unavailable";
 	text?: string;
 	textTruncated?: boolean;
@@ -285,6 +285,7 @@ interface LiveBinding extends EngineBindingSnapshot {
 	childLaunchCount: number;
 	modelCallSequence: number;
 	profileRoutes?: EngineProfileRoutes;
+	launchProfileRef?: string;
 	launchModel?: Model;
 	launchThinkingLevel?: ConfiguredThinkingLevel;
 	profileRouteState?: EngineProfileRouteState;
@@ -1356,6 +1357,8 @@ export class EngineRuntime {
 			sourceCommandId?: string;
 			clientMessageId?: string;
 			assistantMessageId?: string;
+			launchSnapshot?: SessionLaunchSnapshot;
+			stopReason?: "stop" | "length" | "toolUse" | "aborted" | "error";
 			blocks?: EngineHistoryActivityBlock[];
 		}>;
 		activityCompleteness: "complete" | "legacy_messages_only";
@@ -2938,6 +2941,7 @@ export class EngineRuntime {
 				preparedHistory?.dispatchKind ??
 					(explicitContinue && request.input === undefined && !queuedItem ? "continue" : undefined),
 				request.context,
+				{ profileSelectionRevision: request.profileSelectionRevision, agentInstanceRef: request.agentInstanceRef },
 			),
 		);
 		this.#signalInboxWake();
@@ -3282,6 +3286,7 @@ export class EngineRuntime {
 				unsubscribe: () => {},
 				disposeProfile: resolved?.dispose ?? (() => {}),
 				profileRoutes: resolved?.profileRoutes,
+				launchProfileRef: profile.launchProfileRef,
 				launchModel: resolved?.profileRoutes ? created.session.model : undefined,
 				launchThinkingLevel: created.session.configuredThinkingLevel(),
 				requireYieldTool: profile.requireYieldTool === true,
@@ -4065,9 +4070,46 @@ export class EngineRuntime {
 		identity?: SessionMessageIdentity,
 		kind: HistoryDispatchKind = "prompt",
 		context?: string,
+		selection?: Pick<EngineStartRequest, "profileSelectionRevision" | "agentInstanceRef">,
 	): Promise<void> {
 		const attemptId = binding.attemptId;
 		const attemptMessageStart = binding.session.messages.length;
+		// Capture only the initiating prompt. Steering and internal reminders must
+		// not pretend to apply a new profile; native message identity owns the data.
+		if (kind === "prompt" && identity?.sourceCommandId) {
+			const model = binding.session.model;
+			let previousSelectionRevision: number | null = 0;
+			const branch = binding.session.sessionManager.getBranch();
+			for (let index = branch.length - 1; index >= 0; index--) {
+				const entry = branch[index];
+				if (entry.type !== "message" || entry.message.role !== "user") continue;
+				const previous = historyLaunchSnapshot(entry.launchSnapshot);
+				if (!previous) {
+					previousSelectionRevision = null;
+					break;
+				}
+				if (previous.agentInstanceId !== binding.agentInstanceId) continue;
+				previousSelectionRevision = previous.selectionRevision ?? null;
+				break;
+			}
+			identity = {
+				...identity,
+				launchSnapshot: {
+					schema: "engine.launch_snapshot.v1",
+					agentInstanceId: binding.agentInstanceId,
+					agentInstanceRef: selection?.agentInstanceRef ?? null,
+					executionId: binding.executionId,
+					attemptId,
+					profileRef: binding.profileRoutes?.profileRef ?? binding.launchProfileRef ?? null,
+					profileDigest: binding.profileDigest,
+					selectionRevision: selection?.profileSelectionRevision ?? null,
+					previousSelectionRevision,
+					thinkingLevel: binding.session.configuredThinkingLevel() ?? null,
+					model: model ? { provider: model.provider, id: model.id, contextWindow: model.contextWindow } : null,
+					routes: structuredClone(binding.profileRoutes?.routes ?? []),
+				},
+			};
+		}
 		try {
 			await this.#sendCommandContext(binding, context, identity?.sourceCommandId ?? binding.commandId);
 			await this.#dispatchModel(binding, input, identity, kind);
@@ -5083,6 +5125,49 @@ function activeSessionBranch(entries: SessionEntry[]): SessionEntry[] {
 	return branch.reverse();
 }
 
+function historyLaunchSnapshot(value: SessionLaunchSnapshot | undefined): SessionLaunchSnapshot | undefined {
+	const text = (item: unknown): item is string => typeof item === "string" && item.length > 0 && item.length <= 512;
+	const context = (item: unknown) => item === null || (Number.isSafeInteger(item) && Number(item) >= 0);
+	if (
+		!value ||
+		typeof value !== "object" ||
+		Object.keys(value)
+			.filter(key => !["selectionRevision", "previousSelectionRevision", "agentInstanceRef"].includes(key))
+			.sort()
+			.join(",") !==
+			"agentInstanceId,attemptId,executionId,model,profileDigest,profileRef,routes,schema,thinkingLevel" ||
+		value.schema !== "engine.launch_snapshot.v1" ||
+		(value.selectionRevision !== undefined &&
+			value.selectionRevision !== null &&
+			(!Number.isSafeInteger(value.selectionRevision) || value.selectionRevision < 1)) ||
+		(value.previousSelectionRevision !== undefined &&
+			value.previousSelectionRevision !== null &&
+			(!Number.isSafeInteger(value.previousSelectionRevision) || value.previousSelectionRevision < 0)) ||
+		(value.agentInstanceRef !== undefined && value.agentInstanceRef !== null && !text(value.agentInstanceRef)) ||
+		![value.agentInstanceId, value.executionId, value.attemptId, value.profileDigest].every(text) ||
+		(value.profileRef !== null && !text(value.profileRef)) ||
+		(value.thinkingLevel !== null && !text(value.thinkingLevel)) ||
+		(value.model !== null &&
+			(!value.model ||
+				Object.keys(value.model).sort().join(",") !== "contextWindow,id,provider" ||
+				!text(value.model.id) ||
+				!text(value.model.provider) ||
+				!context(value.model.contextWindow))) ||
+		!Array.isArray(value.routes) ||
+		value.routes.length > 64 ||
+		!value.routes.every(
+			route =>
+				route &&
+				Object.keys(route).sort().join(",") === "modelId,provider,routeRef" &&
+				text(route.routeRef) &&
+				text(route.provider) &&
+				text(route.modelId),
+		)
+	)
+		return undefined;
+	return structuredClone(value);
+}
+
 function projectHistoryEntries(sessionId: string, branch: SessionEntry[], preview = true) {
 	const messageLimit = preview ? MAX_HISTORY_MESSAGE_CHARS : Infinity;
 	const activityLimit = preview ? MAX_HISTORY_ACTIVITY_CHARS : Infinity;
@@ -5096,6 +5181,8 @@ function projectHistoryEntries(sessionId: string, branch: SessionEntry[], previe
 		sourceCommandId?: string;
 		clientMessageId?: string;
 		assistantMessageId?: string;
+		launchSnapshot?: SessionLaunchSnapshot;
+		stopReason?: "stop" | "length" | "toolUse" | "aborted" | "error";
 		blocks?: EngineHistoryActivityBlock[];
 	}> = [];
 	const toolBlocks = new Map<string, EngineHistoryActivityBlock>();
@@ -5118,13 +5205,19 @@ function projectHistoryEntries(sessionId: string, branch: SessionEntry[], previe
 		const fullText = historyMessageText(entry.message.content);
 		const blocks =
 			entry.message.role === "assistant"
-				? historyActivityBlocks(sessionId, entry.id, entry.message.content, activityLimit)
+				? historyActivityBlocks(sessionId, entry.id, entry.message.content, activityLimit, messageLimit)
 				: [];
 		for (const block of blocks) {
 			if (block.toolCallId) toolBlocks.set(block.toolCallId, block);
 		}
-		sawActivity ||= blocks.length > 0;
-		if (!fullText && blocks.length === 0) continue;
+		sawActivity ||= blocks.some(block => block.kind !== "text");
+		const stopReason =
+			entry.message.role === "assistant" ? assistantSnapshotStopReason(entry.message.stopReason) : undefined;
+		if (!fullText && blocks.length === 0 && stopReason !== "error" && stopReason !== "aborted") continue;
+		const launchSnapshot =
+			entry.message.role === "user" && entry.sourceCommandId
+				? historyLaunchSnapshot(entry.launchSnapshot)
+				: undefined;
 		entries.push({
 			entryId: entry.id,
 			parentEntryId: null,
@@ -5135,6 +5228,8 @@ function projectHistoryEntries(sessionId: string, branch: SessionEntry[], previe
 			...(blocks.length ? { blocks } : {}),
 			...(entry.message.role === "user" && entry.sourceCommandId ? { sourceCommandId: entry.sourceCommandId } : {}),
 			...(entry.message.role === "user" && entry.clientMessageId ? { clientMessageId: entry.clientMessageId } : {}),
+			...(launchSnapshot ? { launchSnapshot } : {}),
+			...(stopReason ? { stopReason } : {}),
 			...(entry.message.role === "assistant" && entry.assistantMessageId
 				? { assistantMessageId: entry.assistantMessageId }
 				: {}),
@@ -5189,11 +5284,24 @@ function historyActivityBlocks(
 	entryId: string,
 	content: unknown,
 	limit = MAX_HISTORY_ACTIVITY_CHARS,
+	textLimit = MAX_HISTORY_MESSAGE_CHARS,
 ): EngineHistoryActivityBlock[] {
 	if (!Array.isArray(content)) return [];
 	return content.flatMap<EngineHistoryActivityBlock>((raw, blockIndex) => {
 		if (!raw || typeof raw !== "object") return [];
 		const block = raw as Record<string, unknown>;
+		if (block.type === "text" && typeof block.text === "string" && block.text) {
+			return [
+				{
+					blockId: `history:${sessionId}:${entryId}:${blockIndex}`,
+					blockIndex,
+					kind: "text",
+					status: "available",
+					text: block.text.slice(0, textLimit),
+					textTruncated: block.text.length > textLimit,
+				},
+			];
+		}
 		if (block.type === "thinking" || block.type === "redactedThinking") {
 			const value = historyActivityText(
 				block.type === "thinking" && typeof block.thinking === "string" ? block.thinking : "",

@@ -6284,7 +6284,7 @@ export class AgentSession {
 	async steer(
 		text: string,
 		images?: ImageContent[],
-		identity?: Pick<PromptOptions, "sourceCommandId" | "clientMessageId">,
+		identity?: Pick<PromptOptions, "sourceCommandId" | "clientMessageId" | "launchSnapshot">,
 		context?: CustomMessagePayload,
 	): Promise<void> {
 		if (text.startsWith("/")) {
@@ -6367,7 +6367,7 @@ export class AgentSession {
 		text: string,
 		images: ImageContent[] | undefined,
 		mode: "steer" | "followUp",
-		identity?: Pick<PromptOptions, "sourceCommandId" | "clientMessageId">,
+		identity?: Pick<PromptOptions, "sourceCommandId" | "clientMessageId" | "launchSnapshot">,
 		context?: CustomMessagePayload,
 	): Promise<void> {
 		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
@@ -6414,12 +6414,13 @@ export class AgentSession {
 
 	#rememberUserMessageIdentity(
 		message: AgentMessage,
-		identity?: Pick<PromptOptions, "sourceCommandId" | "clientMessageId">,
+		identity?: Pick<PromptOptions, "sourceCommandId" | "clientMessageId" | "launchSnapshot">,
 	): void {
 		if (message.role !== "user" || (!identity?.sourceCommandId && !identity?.clientMessageId)) return;
 		this.#messageIdentities.set(message, {
 			...(identity.sourceCommandId ? { sourceCommandId: identity.sourceCommandId } : {}),
 			...(identity.clientMessageId ? { clientMessageId: identity.clientMessageId } : {}),
+			...(identity.launchSnapshot ? { launchSnapshot: structuredClone(identity.launchSnapshot) } : {}),
 		});
 	}
 

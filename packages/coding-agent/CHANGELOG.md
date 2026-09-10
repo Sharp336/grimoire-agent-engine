@@ -4,6 +4,12 @@
 
 ### Added
 
+- Retained assistant history preserves text positions among public reasoning and tool calls.
+
+- Retained assistant history exposes failure and interruption outcomes, including empty failed responses, without exposing provider diagnostics.
+
+- Native initiating messages retain their actual launch profile, model, effort and context settings across profile changes and restart.
+
 - Model reference queries expose supported effort levels to headless clients, including bounded batch discovery.
 
 - Native history archives now include referenced image payloads and restore them without the original blob store; incomplete copies and conflicting existing blobs are rejected.

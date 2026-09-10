@@ -87,6 +87,8 @@ export interface EngineStartRequest {
 	commandId: string;
 	/** Opaque UI identity for the exact user message introduced by this command. */
 	clientMessageId?: string;
+	/** Canonical AGI revision whose selected profile matches this compiled launch. */
+	profileSelectionRevision?: number;
 	agentInstanceId: string;
 	/** Canonical hosted identity used for child AgentInstance creation. */
 	agentInstanceRef?: string;
@@ -401,6 +403,12 @@ export class EngineTargetError extends Error {
 
 export function validateStartRequest(request: EngineStartRequest): void {
 	validateCommandContext(request.context);
+	if (
+		request.profileSelectionRevision !== undefined &&
+		(!Number.isSafeInteger(request.profileSelectionRevision) || request.profileSelectionRevision < 1)
+	) {
+		throw new EngineTargetError("invalid_request", "Invalid profile selection revision");
+	}
 	for (const [name, value] of Object.entries({
 		commandId: request.commandId,
 		agentInstanceId: request.agentInstanceId,
