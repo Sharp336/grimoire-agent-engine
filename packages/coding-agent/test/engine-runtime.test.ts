@@ -28,7 +28,12 @@ import {
 } from "@oh-my-pi/pi-coding-agent/engine/nats-adapter";
 import { engineAgentInstanceId, engineRouteToken } from "@oh-my-pi/pi-coding-agent/engine/route";
 import { EngineRuntime, type EngineRuntimeOptions } from "@oh-my-pi/pi-coding-agent/engine/runtime";
-import { runtimeLimits, validateRuntimeValue } from "@oh-my-pi/pi-coding-agent/engine/runtime-protocol";
+import {
+	type RuntimeScope,
+	runtimeLimits,
+	runtimeRemainingWork,
+	validateRuntimeValue,
+} from "@oh-my-pi/pi-coding-agent/engine/runtime-protocol";
 import { hostedCoreMcpConfig } from "@oh-my-pi/pi-coding-agent/engine/service";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { getLspResourceCounts } from "@oh-my-pi/pi-coding-agent/lsp/client";
@@ -2921,6 +2926,285 @@ describe("EngineRuntime", () => {
 		await runtime.drain();
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
 	}, 30_000);
+
+	for (const queued of [false, true]) {
+		it(`publishes ${queued ? "queued" : "ordinary"} Start user history while the provider is still running`, async () => {
+			const dispatchEntered = Promise.withResolvers<void>();
+			const allowAppend = Promise.withResolvers<void>();
+			const providerEntered = Promise.withResolvers<void>();
+			const releaseProvider = Promise.withResolvers<void>();
+			const input = "The new user message must be visible before the answer.";
+			const mock = createMockModel({
+				responses: [
+					...(queued ? [{ content: ["previous answer"] }] : []),
+					async () => {
+						providerEntered.resolve();
+						await releaseProvider.promise;
+						return { content: ["new answer"] };
+					},
+				],
+			});
+			const { runtime, cwd, options } = await createRuntime(
+				async (session, text, identity) => {
+					if (text === input) {
+						dispatchEntered.resolve();
+						await allowAppend.promise;
+					}
+					return session.prompt(text, identity);
+				},
+				{},
+				{ model: mock.model },
+			);
+			const agentInstanceRef = `grimoire://tasks/grimoire/runtime-test/agents/user-history-${queued}`;
+			const request: EngineStartRequest = {
+				commandId: "history-user-start",
+				agentInstanceId: engineAgentInstanceId(agentInstanceRef),
+				agentInstanceRef,
+				principalId: "history-owner",
+				executionId: "history-user-execution",
+				attemptId: "history-user-attempt",
+				authorityGeneration: 1,
+				cwd,
+				input,
+				clientMessageId: "history-user-message",
+			};
+			const server = await startEngineControlQueryServer({
+				runtime,
+				runtimeDir: path.dirname(options.databasePath!),
+				deviceId: "history-device",
+				engineId: "history-engine",
+				resolveLaunchProfile: () => profile,
+			});
+			const client = new EngineControlQueryClient(path.dirname(options.databasePath!));
+			const replicated: string[] = [];
+			const replicate = (entry: { id: string }) => {
+				replicated.push(entry.id);
+			};
+			const newerReplicate = (_entry: { id: string }) => {};
+			const createManager = SessionManager.create.bind(SessionManager);
+			let observedManager: SessionManager | undefined;
+			const creation = spyOn(SessionManager, "create").mockImplementation((...args) => {
+				const manager = createManager(...args);
+				if (args[0] === cwd) {
+					manager.onEntryAppended = replicate;
+					observedManager = manager;
+				}
+				return manager;
+			});
+			try {
+				if (queued) {
+					const previous = await runtime.start(
+						{
+							...request,
+							commandId: "history-previous-start",
+							attemptId: "history-previous-attempt",
+							executionId: "history-previous-execution",
+							input: "previous user",
+						},
+						profile,
+					);
+					await runtime.drain();
+					const held = await runtime.pause({
+						...previous,
+						commandId: "history-previous-pause",
+						initiator: { kind: "human" },
+						expectedIntentRevision: previous.intentRevision,
+					});
+					const item = await runtime.enqueueInbox(previous, {
+						sourceEventId: "history-queue-user",
+						sourceType: "user",
+						body: input,
+						createdAt: Date.now(),
+					});
+					delete request.input;
+					delete request.clientMessageId;
+					Object.assign(request, {
+						queueId: item.item.queueId,
+						expectedRevision: item.item.revision,
+						mutationId: "history-queue-consume",
+						expectedIntentRevision: held.intentRevision,
+						explicitContinue: true,
+					});
+				}
+				const started = await runtime.start(request, profile);
+				await withTimeout(dispatchEntered.promise, 2_000, "Start did not reach the controlled prompt boundary");
+				const scope: RuntimeScope = {
+					kind: "attempt",
+					agentInstanceRef,
+					attemptId: started.attemptId,
+					kinds: ["history", "state"],
+				};
+				const before = await runtime.store.runtimeSnapshot(scope, { principalId: "history-owner" });
+				const params = { agentInstanceRef, attemptId: started.attemptId, principalId: "history-owner", limit: 40 };
+				const initial = (await client.request("runtime.history", params)) as { entries: Array<{ text: string }> };
+				expect(initial.entries.some(entry => entry.text === input)).toBeFalse();
+				const published = nextEngineEvent(runtime, "reconciled", started.attemptId);
+				allowAppend.resolve();
+				await withTimeout(providerEntered.promise, 2_000, "User append did not reach the held provider");
+				const event = await withTimeout(published, 2_000, "Durable user append did not invalidate public history");
+				const changes = await runtime.store.runtimeEvents({
+					scope,
+					principalId: "history-owner",
+					epoch: before.epoch,
+					afterCursor: before.watermark,
+					timeoutMs: 0,
+					limit: 100,
+					maxBytes: 61_440,
+					remainingWork: runtimeRemainingWork(),
+				});
+				expect(changes.changes).toContainEqual(
+					expect.objectContaining({
+						kind: "invalidate",
+						agentInstanceRef,
+						attemptId: started.attemptId,
+						cursor: event.eventId,
+						value: expect.objectContaining({ resource: "history" }),
+					}),
+				);
+				const page = (await client.request("runtime.history", params)) as {
+					entries: Array<{
+						entryId: string;
+						role: string;
+						text: string;
+						sourceCommandId?: string;
+						clientMessageId?: string;
+					}>;
+				};
+				validateRuntimeValue("historyPage", page);
+				const users = page.entries.filter(entry => entry.role === "user" && entry.text === input);
+				expect(users).toHaveLength(1);
+				expect(users[0]).toMatchObject({
+					sourceCommandId: request.commandId,
+					clientMessageId: queued ? "history-queue-user" : "history-user-message",
+				});
+				expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("running");
+				const after = await runtime.store.runtimeSnapshot(scope, { principalId: "history-owner" });
+				expect(after.agents[0]?.history).toMatchObject({ leafEntryId: users[0].entryId });
+				expect(replicated.filter(id => id === users[0].entryId)).toHaveLength(1);
+				if (queued)
+					expect(await runtime.readInbox(started, request.queueId!)).toMatchObject({
+						disposition: "acknowledged",
+						revision: 2,
+					});
+				if (queued) observedManager!.onEntryAppended = newerReplicate;
+			} finally {
+				allowAppend.resolve();
+				releaseProvider.resolve();
+				try {
+					await runtime.drain();
+					await server.close();
+					await runtime.dispose();
+				} finally {
+					creation.mockRestore();
+				}
+			}
+			// Releasing the Engine restores its predecessor, but must not remove a newer collab owner.
+			expect(observedManager?.onEntryAppended).toBe(queued ? newerReplicate : replicate);
+		}, 20_000);
+	}
+
+	it("does not publish a cancelled user append into the next Attempt", async () => {
+		const dispatchEntered = Promise.withResolvers<void>();
+		const allowAppend = Promise.withResolvers<void>();
+		const releaseProvider = Promise.withResolvers<void>();
+		const stopAdmitted = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			responses: [
+				async () => {
+					await releaseProvider.promise;
+					return { content: ["answer"] };
+				},
+				{ content: ["next answer"] },
+			],
+		});
+		const { runtime, cwd } = await createRuntime(
+			async (session, text, identity) => {
+				if (text === "cancel this user append") {
+					dispatchEntered.resolve();
+					await allowAppend.promise;
+				}
+				return session.prompt(text, identity);
+			},
+			{},
+			{ model: mock.model },
+		);
+		let stopOnAppend: (() => void) | undefined;
+		const createManager = SessionManager.create.bind(SessionManager);
+		const creation = spyOn(SessionManager, "create").mockImplementation((...args) => {
+			const manager = createManager(...args);
+			if (args[0] === cwd) {
+				manager.onEntryAppended = entry => {
+					if (entry.type !== "message" || entry.message.role !== "user") return;
+					// The existing collab tap admits Stop before the Engine queues its history publication.
+					stopOnAppend?.();
+					stopOnAppend = undefined;
+				};
+			}
+			return manager;
+		});
+		try {
+			const request: EngineStartRequest = {
+				commandId: "history-cancel-start",
+				agentInstanceId: "history-cancel-agent",
+				executionId: "history-cancel-execution",
+				attemptId: "history-cancel-attempt",
+				authorityGeneration: 1,
+				cwd,
+				input: "cancel this user append",
+			};
+			const started = await runtime.start(request, profile);
+			await withTimeout(dispatchEntered.promise, 2_000, "Start did not reach the append boundary");
+			stopOnAppend = () => {
+				runtime
+					.cancel({ ...started, commandId: "history-cancel-stop" })
+					.then(() => stopAdmitted.resolve(), stopAdmitted.reject);
+			};
+			allowAppend.resolve();
+			await withTimeout(stopAdmitted.promise, 2_000, "Stop deadlocked with the history write tail");
+			releaseProvider.resolve();
+			await withTimeout(runtime.drain(), 3_000, "Cancelled append did not quiesce");
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
+			const stoppedEvents = await runtime.store.pendingEvents();
+			expect(
+				stoppedEvents.filter(event => event.kind === "reconciled" && event.attemptId === started.attemptId),
+			).toHaveLength(0);
+			const stopped = await runtime.store.intent(started.agentInstanceId);
+			const next = await runtime.start(
+				{
+					...request,
+					commandId: "history-next-start",
+					attemptId: "history-next-attempt",
+					executionId: "history-next-execution",
+					input: "only the next Attempt owns this user append",
+					expectedIntentRevision: stopped.intentRevision,
+					explicitContinue: true,
+				},
+				profile,
+			);
+			await withTimeout(runtime.drain(), 3_000, "Next Attempt did not finish");
+			expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
+			expect((await runtime.store.getAttempt(next.attemptId))?.state).toBe("completed");
+			const events = await runtime.store.pendingEvents();
+			expect(events.filter(event => event.kind === "reconciled").map(event => event.attemptId)).toEqual([
+				next.attemptId,
+			]);
+			const history = await runtime.sessionHistory(next.agentInstanceId);
+			expect(history.entries.filter(entry => entry.role === "user").map(entry => entry.text)).toEqual([
+				request.input!,
+				"only the next Attempt owns this user append",
+			]);
+		} finally {
+			stopOnAppend = undefined;
+			allowAppend.resolve();
+			releaseProvider.resolve();
+			try {
+				await runtime.drain();
+				await runtime.dispose();
+			} finally {
+				creation.mockRestore();
+			}
+		}
+	}, 20_000);
 
 	it("pages expanding public tool history through exact resources without skipping the retained prefix", async () => {
 		const { runtime, cwd } = await createRuntime();

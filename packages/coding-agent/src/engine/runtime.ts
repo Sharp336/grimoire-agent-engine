@@ -3311,7 +3311,56 @@ export class EngineRuntime {
 				},
 				true,
 			);
-			binding.unsubscribe = created.session.subscribe(event => {
+			const session = created.session;
+			const manager = session.sessionManager;
+			const previousEntryAppended = manager.onEntryAppended;
+			let observingEntries = true;
+			const onEntryAppended = (entry: SessionEntry) => {
+				try {
+					previousEntryAppended?.(entry);
+				} finally {
+					if (entry.type === "message" && entry.message.role === "user") {
+						const target = this.#snapshot(binding);
+						const sessionId = manager.getSessionId();
+						const sessionFile = manager.getSessionFile();
+						const current = () =>
+							observingEntries &&
+							!this.#disposed &&
+							this.#bindings.get(target.agentInstanceId) === binding &&
+							binding.session === session &&
+							manager.getSessionId() === sessionId &&
+							manager.getSessionFile() === sessionFile &&
+							binding.sessionFile === sessionFile &&
+							binding.bindingId === target.bindingId &&
+							binding.attemptId === target.attemptId &&
+							binding.executionId === target.executionId &&
+							binding.authorityGeneration === target.authorityGeneration &&
+							!TERMINAL_ATTEMPT_STATES.has(binding.attemptState) &&
+							binding.attemptState !== "cancel_requested";
+						// The append tap is synchronous; indexed storage may still have queued writes.
+						const checkpoint = binding.traceWriteTail.then(() =>
+							current() ? manager.flushAndCheckpoint() : undefined,
+						);
+						const failed = (error: unknown) => {
+							if (current()) binding.messageWriteError ??= error;
+						};
+						binding.traceWriteTail = checkpoint.then(() => {}, failed);
+						// A Stop/Start lane may drain traceWriteTail. Do not put that lane back in its tail.
+						this.#trackRun(
+							this.#inLane(target.agentInstanceId, async () => {
+								const durable = await checkpoint;
+								if (!durable || !current()) return;
+								await this.#commitAttemptTransition(binding, binding.attemptState, [], {
+									expectedStates: [binding.attemptState],
+									transcriptCheckpoint: durable,
+								});
+							}).catch(failed),
+						);
+					}
+				}
+			};
+			manager.onEntryAppended = onEntryAppended;
+			const unsubscribe = session.subscribe(event => {
 				if (event.type === "message_start" && event.message.role === "assistant") {
 					this.#queueProfileRoute(binding, "active", event.message);
 					this.#beginAssistantStream(binding, event.message.timestamp);
@@ -3403,6 +3452,11 @@ export class EngineRuntime {
 					this.agentRegistry.setStatus(binding.engineAgentId, "idle", binding.session);
 				}
 			});
+			binding.unsubscribe = () => {
+				observingEntries = false;
+				unsubscribe();
+				if (manager.onEntryAppended === onEntryAppended) manager.onEntryAppended = previousEntryAppended;
+			};
 			unsubscribeCreated = binding.unsubscribe;
 			this.#bindings.set(request.agentInstanceId, binding);
 			return binding;
