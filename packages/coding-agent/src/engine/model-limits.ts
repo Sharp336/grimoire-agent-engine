@@ -1,3 +1,4 @@
+import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModelReferenceIndex } from "@oh-my-pi/pi-catalog/identity/bundled";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 
@@ -6,7 +7,7 @@ export interface ResolvedModelLimits {
 	maxOutputTokens: number;
 	referenceProvider: string;
 	referenceModelId: string;
-	reasoningEfforts: readonly string[];
+	reasoningEfforts: readonly Effort[];
 }
 
 /** Resolve execution limits from the exact model identity through the bundled canonical reference index. */

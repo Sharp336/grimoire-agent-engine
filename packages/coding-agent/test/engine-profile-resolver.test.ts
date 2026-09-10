@@ -3,11 +3,14 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { FetchImpl } from "@oh-my-pi/pi-ai";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/registry/oauth";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { EngineProfileResolver } from "../src/engine/profile-resolver";
 import { ProviderAdmissionClient } from "../src/engine/provider-admission";
 import { ProviderExecutionClient } from "../src/engine/provider-execution";
 import { AuthStorage } from "../src/session/auth-storage";
+import { concreteThinkingLevel, toReasoningEffort } from "../src/thinking";
 
 const refs = {
 	profile: "gctx:2222222222222222",
@@ -200,6 +203,11 @@ describe("EngineProfileResolver", () => {
 			} finally {
 				high.dispose();
 			}
+			await expect(
+				resolver.resolve({ ...launch, thinkingLevel: ThinkingLevel.Minimal }, root).then(resolved => {
+					resolved.dispose();
+				}),
+			).rejects.toThrow("Requested thinking level minimal is not supported");
 			await artifact(cache, profileRef, "grimoire.agent_profile.v1", { ...profile, allowCrossModelFallback: false });
 			const sameOnly = await resolver.resolve(launch, root);
 			try {
@@ -222,150 +230,191 @@ describe("EngineProfileResolver", () => {
 		}
 	});
 
-	it("builds an ordered runtime chain only from configured routes with the same model identity", async () => {
-		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-engine-profile-routes-"));
-		const cache = path.join(root, "artifacts");
-		await fs.mkdir(cache);
-		const profileRef = "gctx:bbbbbbbbbbbbbbbb";
-		const routeRefs = [
-			"gctx:cccccccccccccccc",
-			"gctx:dddddddddddddddd",
-			"gctx:hhhhhhhhhhhhhhhh",
-			"gctx:jjjjjjjjjjjjjjjj",
-		];
-		const hiddenRouteRef = "gctx:kkkkkkkkkkkkkkkk";
-		const providers = ["cheapai", "million", "different", "aiberm"];
-		await artifact(cache, profileRef, "grimoire.agent_profile.v1", {
-			schema: "grimoire.agent_profile.v1",
-			status: "active",
-			models: routeRefs,
-			allowSameModelProviderFallback: true,
-		});
-		for (const [index, routeRef] of [...routeRefs, hiddenRouteRef].entries()) {
-			const provider = index === routeRefs.length ? "hidden" : providers[index];
-			const accountRef = `gctx:${String(index + 2).repeat(16)}`;
-			await artifact(cache, routeRef, "grimoire.available_model_route.v1", {
-				schema: "grimoire.available_model_route.v1",
-				status: "active",
-				providerAccountRef: accountRef,
-				model: {
-					modelIdentityId: provider === "different" ? "claude-sonnet-5" : "claude-opus-5",
-					providerSurfaceId: provider,
-					modelId: "claude-opus-5",
-					...(index === 0 ? {} : { contextWindow: 200_000, maxOutputTokens: 32_000 }),
-					supportsTools: true,
-					supportsReasoning: provider !== "different",
-				},
-			});
-			await artifact(cache, accountRef, "grimoire.provider_account.v1", {
-				schema: "grimoire.provider_account.v1",
-				status: "active",
-				providerId: provider,
-				api: index === 0 ? "openai_chat_completions" : index === 1 ? "anthropic_messages" : "anthropic-messages",
-				baseUrl: `https://${provider}.invalid`,
-				trusted: true,
-				credential: { type: "api_key", key: `${provider}-key` },
-			});
-		}
+	it.each(["claude-opus-5", "claude-fable-5"])(
+		"preserves max and same-model fallback for %s routes",
+		async modelId => {
+			const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-engine-profile-routes-"));
+			const cache = path.join(root, "artifacts");
+			await fs.mkdir(cache);
+			try {
+				const profileRef = "gctx:bbbbbbbbbbbbbbbb";
+				const routeRefs = [
+					"gctx:cccccccccccccccc",
+					"gctx:dddddddddddddddd",
+					"gctx:hhhhhhhhhhhhhhhh",
+					"gctx:jjjjjjjjjjjjjjjj",
+				];
+				const hiddenRouteRef = "gctx:kkkkkkkkkkkkkkkk";
+				const providers = ["cheapai", "million", "different", "aiberm"];
+				await artifact(cache, profileRef, "grimoire.agent_profile.v1", {
+					schema: "grimoire.agent_profile.v1",
+					status: "active",
+					models: routeRefs,
+					allowSameModelProviderFallback: true,
+				});
+				for (const [index, routeRef] of [...routeRefs, hiddenRouteRef].entries()) {
+					const provider = index === routeRefs.length ? "hidden" : providers[index];
+					const accountRef = `gctx:${String(index + 2).repeat(16)}`;
+					await artifact(cache, routeRef, "grimoire.available_model_route.v1", {
+						schema: "grimoire.available_model_route.v1",
+						status: "active",
+						providerAccountRef: accountRef,
+						model: {
+							modelIdentityId: provider === "different" ? "claude-sonnet-5" : modelId,
+							providerSurfaceId: provider,
+							modelId,
+							...(index === 0 ? {} : { contextWindow: 200_000, maxOutputTokens: 32_000 }),
+							supportsTools: true,
+							supportsReasoning: provider !== "different",
+						},
+					});
+					await artifact(cache, accountRef, "grimoire.provider_account.v1", {
+						schema: "grimoire.provider_account.v1",
+						status: "active",
+						providerId: provider,
+						api:
+							index === 0
+								? "openai_chat_completions"
+								: index === 1
+									? "anthropic_messages"
+									: "anthropic-messages",
+						baseUrl: `https://${provider}.invalid`,
+						trusted: true,
+						credential: { type: "api_key", key: `${provider}-key` },
+					});
+				}
 
-		const resolver = new EngineProfileResolver(cache, path.join(root, "credentials"));
-		const resolved = await resolver.resolve(
-			{ spawns: "", profileDigest: hash(profileRef), launchProfileRef: profileRef },
-			root,
-		);
-		try {
-			expect(resolved.options.model?.api).toBe("openai-completions");
-			expect(resolved.options.model?.contextWindow).toBe(1_000_000);
-			expect(resolved.options.model?.maxTokens).toBe(128_000);
-			expect(resolved.sameModelRouteFallback).toEqual({
-				modelIdentityId: "claude-opus-5",
-				selectors: [0, 1, 3].map(index => `artel-route-${routeRefs[index]!.slice(5)}/claude-opus-5`),
-			});
-			expect(
-				resolved.options.modelRegistry?.find(`artel-route-${routeRefs[1]!.slice(5)}`, "claude-opus-5")?.baseUrl,
-			).toBe("https://million.invalid");
-			expect(
-				resolved.options.modelRegistry?.find(`artel-route-${routeRefs[1]!.slice(5)}`, "claude-opus-5")?.api,
-			).toBe("anthropic-messages");
-			expect(
-				resolved.options.modelRegistry?.find(`artel-route-${routeRefs[3]!.slice(5)}`, "claude-opus-5")?.baseUrl,
-			).toBe("https://aiberm.invalid");
-			expect(
-				resolved.options.modelRegistry?.find(`artel-route-${routeRefs[2]!.slice(5)}`, "claude-opus-5"),
-			).toBeUndefined();
-			expect(
-				resolved.options.modelRegistry?.find(`artel-route-${hiddenRouteRef.slice(5)}`, "claude-opus-5"),
-			).toBeUndefined();
-			expect(resolved.options.authStorage?.get("million")).toEqual({ type: "api_key", key: "million-key" });
-		} finally {
-			resolved.dispose();
-		}
-		const pinned = await resolver.resolve(
-			{
-				spawns: "",
-				profileDigest: hash(profileRef),
-				launchProfileRef: profileRef,
-				selectedRouteRef: routeRefs[2],
-			},
-			root,
-		);
-		try {
-			expect(pinned.options.model?.provider).toBe(`artel-route-${routeRefs[2]!.slice(5)}`);
-			expect(pinned.sameModelRouteFallback?.selectors).toEqual([
-				`artel-route-${routeRefs[2]!.slice(5)}/claude-opus-5`,
-			]);
-		} finally {
-			pinned.dispose();
-		}
-		await expect(
-			resolver.resolve(
-				{
-					spawns: "",
-					profileDigest: hash(profileRef),
-					launchProfileRef: profileRef,
-					selectedRouteRef: routeRefs[2],
-					thinkingLevel: ThinkingLevel.Max,
-					minimumThinkingLevel: "high",
-				},
-				root,
-			),
-		).rejects.toThrow("minimum thinking level high");
+				const resolver = new EngineProfileResolver(cache, path.join(root, "credentials"));
+				const resolved = await resolver.resolve(
+					{
+						spawns: "",
+						profileDigest: hash(profileRef),
+						launchProfileRef: profileRef,
+						thinkingLevel: ThinkingLevel.Max,
+					},
+					root,
+				);
+				try {
+					expect(resolved.options.model?.api).toBe("openai-completions");
+					expect(resolved.options.thinkingLevel).toBe(ThinkingLevel.Max);
+					const registered = resolved.options.modelRegistry?.find(resolved.options.model!.provider, modelId);
+					if (!registered) throw new Error("Resolved model was not registered");
+					const requests: Record<string, unknown>[] = [];
+					const fetchMock: FetchImpl = async (_input, init) => {
+						requests.push(JSON.parse(String(init?.body)));
+						return new Response(
+							'data: {"choices":[{"index":0,"delta":{"content":"ok"}}]}\n\ndata: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+							{ headers: { "content-type": "text/event-stream" } },
+						);
+					};
+					const reply = await streamSimple(
+						registered,
+						{
+							messages: [{ role: "user", content: "hello", timestamp: 0 }],
+						},
+						{
+							apiKey: "fixture",
+							fetch: fetchMock,
+							reasoning: toReasoningEffort(concreteThinkingLevel(resolved.options.thinkingLevel)),
+						},
+					).result();
+					expect(reply.stopReason).toBe("stop");
+					expect(requests.map(request => request.reasoning_effort)).toEqual(["max"]);
+					expect(resolved.options.model?.contextWindow).toBe(1_000_000);
+					expect(resolved.options.model?.maxTokens).toBe(128_000);
+					expect(resolved.sameModelRouteFallback).toEqual({
+						modelIdentityId: modelId,
+						selectors: [0, 1, 3].map(index => `artel-route-${routeRefs[index]!.slice(5)}/${modelId}`),
+					});
+					expect(
+						resolved.options.modelRegistry?.find(`artel-route-${routeRefs[1]!.slice(5)}`, modelId)?.baseUrl,
+					).toBe("https://million.invalid");
+					expect(resolved.options.modelRegistry?.find(`artel-route-${routeRefs[1]!.slice(5)}`, modelId)?.api).toBe(
+						"anthropic-messages",
+					);
+					expect(
+						resolved.options.modelRegistry?.find(`artel-route-${routeRefs[3]!.slice(5)}`, modelId)?.baseUrl,
+					).toBe("https://aiberm.invalid");
+					expect(
+						resolved.options.modelRegistry?.find(`artel-route-${routeRefs[2]!.slice(5)}`, modelId),
+					).toBeUndefined();
+					expect(
+						resolved.options.modelRegistry?.find(`artel-route-${hiddenRouteRef.slice(5)}`, modelId),
+					).toBeUndefined();
+					expect(resolved.options.authStorage?.get("million")).toEqual({ type: "api_key", key: "million-key" });
+				} finally {
+					resolved.dispose();
+				}
+				const pinned = await resolver.resolve(
+					{
+						spawns: "",
+						profileDigest: hash(profileRef),
+						launchProfileRef: profileRef,
+						selectedRouteRef: routeRefs[2],
+					},
+					root,
+				);
+				try {
+					expect(pinned.options.model?.provider).toBe(`artel-route-${routeRefs[2]!.slice(5)}`);
+					expect(pinned.sameModelRouteFallback?.selectors).toEqual([
+						`artel-route-${routeRefs[2]!.slice(5)}/${modelId}`,
+					]);
+				} finally {
+					pinned.dispose();
+				}
+				await expect(
+					resolver.resolve(
+						{
+							spawns: "",
+							profileDigest: hash(profileRef),
+							launchProfileRef: profileRef,
+							selectedRouteRef: routeRefs[2],
+							thinkingLevel: ThinkingLevel.Max,
+							minimumThinkingLevel: "high",
+						},
+						root,
+					),
+				).rejects.toThrow("minimum thinking level high");
 
-		await artifact(cache, "gctx:2222222222222222", "grimoire.provider_account.v1", {
-			schema: "grimoire.provider_account.v1",
-			status: "disabled",
-			providerId: "cheapai",
-			api: "anthropic-messages",
-			baseUrl: "https://cheapai.invalid",
-			trusted: true,
-			credential: { type: "api_key", key: "cheapai-key" },
-		});
-		const startupFallback = await resolver.resolve(
-			{ spawns: "", profileDigest: hash(profileRef), launchProfileRef: profileRef },
-			root,
-		);
-		try {
-			expect(startupFallback.options.model?.provider).toBe(`artel-route-${routeRefs[1]!.slice(5)}`);
-			expect(startupFallback.options.model?.api).toBe("anthropic-messages");
-			expect(startupFallback.sameModelRouteFallback?.selectors).toEqual([
-				`artel-route-${routeRefs[1]!.slice(5)}/claude-opus-5`,
-				`artel-route-${routeRefs[3]!.slice(5)}/claude-opus-5`,
-			]);
-		} finally {
-			startupFallback.dispose();
-		}
-		await expect(
-			resolver.resolve(
-				{
-					spawns: "",
-					profileDigest: hash(profileRef),
-					launchProfileRef: profileRef,
-					selectedRouteRef: routeRefs[0],
-				},
-				root,
-			),
-		).rejects.toThrow("No usable AvailableModelRoute");
-	});
+				await artifact(cache, "gctx:2222222222222222", "grimoire.provider_account.v1", {
+					schema: "grimoire.provider_account.v1",
+					status: "disabled",
+					providerId: "cheapai",
+					api: "anthropic-messages",
+					baseUrl: "https://cheapai.invalid",
+					trusted: true,
+					credential: { type: "api_key", key: "cheapai-key" },
+				});
+				const startupFallback = await resolver.resolve(
+					{ spawns: "", profileDigest: hash(profileRef), launchProfileRef: profileRef },
+					root,
+				);
+				try {
+					expect(startupFallback.options.model?.provider).toBe(`artel-route-${routeRefs[1]!.slice(5)}`);
+					expect(startupFallback.options.model?.api).toBe("anthropic-messages");
+					expect(startupFallback.sameModelRouteFallback?.selectors).toEqual([
+						`artel-route-${routeRefs[1]!.slice(5)}/${modelId}`,
+						`artel-route-${routeRefs[3]!.slice(5)}/${modelId}`,
+					]);
+				} finally {
+					startupFallback.dispose();
+				}
+				await expect(
+					resolver.resolve(
+						{
+							spawns: "",
+							profileDigest: hash(profileRef),
+							launchProfileRef: profileRef,
+							selectedRouteRef: routeRefs[0],
+						},
+						root,
+					),
+				).rejects.toThrow("No usable AvailableModelRoute");
+			} finally {
+				await fs.rm(root, { recursive: true, force: true });
+			}
+		},
+	);
 
 	it("resolves an exact trusted fallback without ambient model or credentials", async () => {
 		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-engine-profile-"));

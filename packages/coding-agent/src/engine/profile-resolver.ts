@@ -14,7 +14,7 @@ import { AuthStorage, SqliteAuthCredentialStore } from "../session/auth-storage"
 import { concreteThinkingLevel, resolveThinkingLevelForModel } from "../thinking";
 import type { EngineChildProfile } from "../tools";
 import type { EngineLaunchProfile, EngineProfileRoutes } from "./contracts";
-import { resolveExecutableModelLimits } from "./model-limits";
+import { resolveCanonicalModelLimits, resolveExecutableModelLimits } from "./model-limits";
 import type {
 	ProviderAdmissionClient,
 	ProviderAdmissionIdentity,
@@ -27,6 +27,8 @@ import type {
 } from "./provider-execution";
 
 const GCTX = /^gctx:[23456789abcdefghjkmnpqrstuvwxyz]{16}$/;
+
+class ProfileThinkingLevelError extends Error {}
 
 interface CachedArtifact {
 	schema: "grimoire.client_cached_artifact.v1";
@@ -249,20 +251,13 @@ export class EngineProfileResolver {
 				);
 			} catch (error) {
 				if (signal?.aborted) throw signal.reason;
-				if (
-					launch.selectedRouteRef &&
-					error instanceof Error &&
-					error.message === "Selected model cannot satisfy minimum thinking level high"
-				) {
+				if (launch.selectedRouteRef && error instanceof ProfileThinkingLevelError) {
 					throw error;
 				}
 				lastError = error;
 			}
 		}
-		if (
-			lastError instanceof Error &&
-			lastError.message === "Selected model cannot satisfy minimum thinking level high"
-		) {
+		if (lastError instanceof ProfileThinkingLevelError) {
 			throw lastError;
 		}
 		throw new Error("No usable AvailableModelRoute in AgentProfile", { cause: lastError });
@@ -754,6 +749,8 @@ function toModelSpec(
 	execution?: ProviderExecutionMaterial,
 ): ModelSpec<Api> {
 	const { contextWindow, maxOutputTokens } = resolveExecutableModelLimits(route.model);
+	const api = execution?.api ?? nativeProviderApi(account.api);
+	const reference = resolveCanonicalModelLimits(route.model.modelId);
 	const input = uniqueStrings(route.model.inputModalities ?? ["text"]).filter(
 		(value): value is "text" | "image" => value === "text" || value === "image",
 	);
@@ -761,11 +758,16 @@ function toModelSpec(
 		id: route.model.modelId,
 		requestModelId: route.model.requestModelId,
 		name: route.model.name || route.displayName || route.model.modelId,
-		api: execution?.api ?? nativeProviderApi(account.api),
+		api,
 		provider: routeRuntimeProvider(account, routeRef),
 		baseUrl: execution?.baseUrl ?? account.baseUrl,
 		headers: account.headers,
 		reasoning: route.model.supportsReasoning === true,
+		// Match the exact catalog scale exposed by ClientHost instead of the
+		// generic OpenAI ladder. A rejecting gateway must fail, not lower Max.
+		...(api === "openai-completions" && route.model.supportsReasoning && reference?.referenceProvider === "anthropic"
+			? { thinking: { mode: "effort" as const, efforts: reference.reasoningEfforts } }
+			: {}),
 		supportsTools: route.model.supportsTools,
 		input: input.length ? input : ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -783,15 +785,18 @@ function profileThinkingLevel(
 	profile: AgentProfile,
 	launch: EngineLaunchProfile,
 ): CreateAgentSessionOptions["thinkingLevel"] {
-	const level = resolveThinkingLevelForModel(
-		model,
-		concreteThinkingLevel(launch.thinkingLevel ?? profile.generationDefaults?.thinkingLevel),
-	);
+	const requested = concreteThinkingLevel(launch.thinkingLevel ?? profile.generationDefaults?.thinkingLevel);
+	const level = resolveThinkingLevelForModel(model, requested);
 	if (
 		launch.minimumThinkingLevel === "high" &&
 		!(["high", "xhigh", "max"] as const).includes(level as "high" | "xhigh" | "max")
 	) {
-		throw new Error("Selected model cannot satisfy minimum thinking level high");
+		throw new ProfileThinkingLevelError("Selected model cannot satisfy minimum thinking level high");
+	}
+	if (requested !== undefined && requested !== level) {
+		throw new ProfileThinkingLevelError(
+			`Requested thinking level ${requested} is not supported by ${model.provider}/${model.id}`,
+		);
 	}
 	return level;
 }
@@ -811,6 +816,7 @@ function toProviderModel(
 		api: model.api,
 		baseUrl: model.baseUrl,
 		reasoning: model.reasoning,
+		thinking: model.thinking,
 		input: model.input,
 		supportsTools: model.supportsTools,
 		cost: model.cost,

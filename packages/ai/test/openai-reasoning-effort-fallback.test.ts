@@ -332,7 +332,7 @@ describe("OpenAI reasoning effort fallback retry", () => {
 		expect(chain.lastParams?.reasoning?.effort).toBe("max");
 	});
 
-	it("retries pipe-delimited reasoning.effort errors with the nearest supported tier", async () => {
+	it("surfaces an unsupported max instead of retrying at a lower effort", async () => {
 		const bodies: Record<string, unknown>[] = [];
 		const fetchMock: FetchImpl = Object.assign(
 			async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -349,8 +349,51 @@ describe("OpenAI reasoning effort fallback retry", () => {
 			reasoning: "max",
 		}).result();
 
-		expect(result.stopReason).toBe("stop");
-		expect(bodies.map(body => (body.reasoning as { effort?: string } | undefined)?.effort)).toEqual(["max", "xhigh"]);
+		expect(result.stopReason).toBe("error");
+		expect(bodies.map(body => (body.reasoning as { effort?: string } | undefined)?.effort)).toEqual(["max"]);
+	});
+
+	it("does not reuse a learned medium-to-high mapping after selecting xhigh", async () => {
+		const bodies: Record<string, unknown>[] = [];
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const fetchMock: FetchImpl = async (_input, init) => {
+			bodies.push(parseJsonBody(init));
+			return bodies.length === 1 ? invalidMediumReasoningResponse() : createResponsesSseResponse();
+		};
+		for (const reasoning of ["medium", "xhigh"] as const) {
+			const result = await streamOpenAIResponses(createResponsesModel(), testContext, {
+				apiKey: "test-key",
+				fetch: fetchMock,
+				reasoning,
+				providerSessionState,
+			}).result();
+			expect(result.stopReason).toBe("stop");
+		}
+		expect(bodies.map(body => (body.reasoning as { effort?: string } | undefined)?.effort)).toEqual([
+			"medium",
+			"high",
+			"xhigh",
+		]);
+	});
+
+	it("does not strip explicitly enabled reasoning when a gateway rejects its field", async () => {
+		const bodies: Record<string, unknown>[] = [];
+		const fetchMock: FetchImpl = async (_input, init) => {
+			bodies.push(parseJsonBody(init));
+			return bodies.length === 1
+				? Response.json(
+						{ error: { message: "Unsupported parameter: reasoning_effort", param: "reasoning_effort" } },
+						{ status: 400 },
+					)
+				: createChatSseResponse();
+		};
+		const result = await streamOpenAICompletions(createCompletionsModel(), testContext, {
+			apiKey: "test-key",
+			fetch: fetchMock,
+			reasoning: "high",
+		}).result();
+		expect(result.stopReason).toBe("error");
+		expect(bodies.map(body => body.reasoning_effort)).toEqual(["high"]);
 	});
 
 	it("retries medium as high when medium is missing and high is the closest upper tier", async () => {
@@ -519,7 +562,7 @@ describe("OpenAI reasoning effort fallback retry", () => {
 		expect(bodies[1]!.chat_template_kwargs).toEqual({ preserve_thinking: true, enable_thinking: true });
 	});
 
-	it("remaps a rejected kwargs effort value in both spellings when the error lists allowed levels", async () => {
+	it("does not lower a rejected kwargs effort even when both spellings exist", async () => {
 		const bodies: Record<string, unknown>[] = [];
 		const fetchMock: FetchImpl = Object.assign(
 			async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
@@ -537,11 +580,9 @@ describe("OpenAI reasoning effort fallback retry", () => {
 			reasoning: "xhigh",
 		}).result();
 
-		expect(result.stopReason).toBe("stop");
-		expect(bodies).toHaveLength(2);
+		expect(result.stopReason).toBe("error");
+		expect(bodies).toHaveLength(1);
 		expect(bodies[0]!.reasoning_effort).toBe("xhigh");
-		expect(bodies[1]!.reasoning_effort).toBe("high");
-		// The kwargs twin must not keep the stale rejected value.
-		expect(bodies[1]!.chat_template_kwargs).toEqual({ preserve_thinking: true, reasoning_effort: "high" });
+		expect(bodies[0]!.chat_template_kwargs).toEqual({ preserve_thinking: true, reasoning_effort: "xhigh" });
 	});
 });

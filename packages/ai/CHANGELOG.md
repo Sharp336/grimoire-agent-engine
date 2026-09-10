@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Provider compatibility retries no longer lower or remove explicitly enabled reasoning, and learned effort mappings no longer override a later selection.
 - Included stream failure details in custom retry scheduling hooks instead of losing the original cause.
 
 ## [18.0.7] - 2026-08-26

@@ -30,6 +30,8 @@
 
 ### Fixed
 
+- Artel Opus/Fable routes preserve the advertised max effort when executing through OpenAI-compatible gateways.
+- Engine profiles reject unsupported explicit effort instead of silently launching at another level.
 - Preserve conversation history when concurrent tool admissions fail, instead of losing successfully saved results to an unrelated transaction rollback.
 
 - Codex Responses tool calls retain their complete provider correlation IDs through execution, runtime snapshots and restart instead of failing admission.

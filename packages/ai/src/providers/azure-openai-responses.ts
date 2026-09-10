@@ -150,6 +150,7 @@ const streamAzureOpenAIResponsesOnce = (
 				"azure-responses",
 				url,
 				typeof params.model === "string" ? params.model : model.id,
+				params,
 			);
 			const attemptedReasoningEffortFallbacks = new Set<string>();
 			let openaiStream: AsyncIterable<ResponseStreamEvent>;
