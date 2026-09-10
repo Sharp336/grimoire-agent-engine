@@ -530,6 +530,34 @@ export class HostedEngineBridge {
 		}
 	}
 
+	async #eventJobId(event: EngineEventEnvelope): Promise<string> {
+		// Command receipts belong to their command; inherited lifecycle effects belong to the affected Start.
+		if (event.type.startsWith("command.") || event.type === "attempt.command_receipt")
+			return event.causationCommandId;
+		const activeCause = this.#active.get(event.causationCommandId)?.work.command;
+		const storedCause = activeCause
+			? undefined
+			: await this.#options.eventStore?.getStartConversationIdentity(event.causationCommandId);
+		const causeAgentId = activeCause?.agentInstanceId ?? storedCause?.agentInstanceId;
+		if (!causeAgentId || causeAgentId === event.agentInstanceId) return event.causationCommandId;
+		if (!["pause", "resume", "cancel"].includes(activeCause?.op ?? storedCause?.operation ?? ""))
+			throw new Error("Cross-agent Engine event requires a branch control command");
+		const attempt = await this.#options.eventStore?.getAttempt(event.attemptId);
+		if (
+			!attempt ||
+			attempt.agent_instance_id !== event.agentInstanceId ||
+			attempt.execution_id !== event.executionId ||
+			attempt.attempt_id !== event.attemptId ||
+			attempt.binding_id !== event.runtimeBindingId ||
+			attempt.engine_generation !== event.engineGeneration ||
+			attempt.binding_generation !== event.bindingGeneration ||
+			attempt.authority_generation !== event.authorityGeneration
+		)
+			throw new Error("Inherited Engine event does not match its exact native Attempt");
+		// ClientHost validates the original control's ownership and frozen ancestor chain at this recipient.
+		return attempt.command_id;
+	}
+
 	async #deliverEvent(event: EngineEventEnvelope): Promise<boolean> {
 		if (["attempt.agent_registered", "attempt.holds_changed", "attempt.message_updated"].includes(event.type))
 			return true;
@@ -574,7 +602,8 @@ export class HostedEngineBridge {
 			}
 			return true;
 		}
-		let claim = this.#active.get(event.causationCommandId);
+		const jobId = await this.#eventJobId(event);
+		let claim = this.#active.get(jobId);
 		if (
 			!claim &&
 			(await this.#options.eventStore?.isNativeUnadmittedEvent({ ...event, eventId: Number(event.eventId) }))
@@ -587,7 +616,7 @@ export class HostedEngineBridge {
 				engine_id: this.#options.engineId,
 				engine_generation: this.#options.engineGeneration,
 				worker_id: `engine-${this.#options.engineGeneration}`,
-				job_id: event.causationCommandId,
+				job_id: jobId,
 				lease_ttl_seconds: 90,
 			});
 			if (recovered.status !== "claimed") {
@@ -595,18 +624,33 @@ export class HostedEngineBridge {
 					action: "event",
 					device_id: this.#options.deviceId,
 					engine_id: this.#options.engineId,
-					job_id: event.causationCommandId,
+					job_id: jobId,
 					event,
 				});
 				return terminal.status === "already_terminal";
 			}
 			claim = parseClaim(recovered);
-			if (claim.jobId !== event.causationCommandId || claim.operationType !== "agent_engine_command") {
+			if (claim.jobId !== jobId || claim.operationType !== "agent_engine_command") {
 				throw new Error("Recovered Agent Engine claim does not match its event");
 			}
 			claim.published = true;
-			this.#active.set(claim.jobId, claim);
 		}
+		if (jobId !== event.causationCommandId) {
+			const command = claim.work.command;
+			if (
+				command?.op !== "start" ||
+				command.commandId !== jobId ||
+				command.deviceId !== event.deviceId ||
+				command.engineId !== event.engineId ||
+				command.agentInstanceId !== event.agentInstanceId ||
+				command.executionId !== event.executionId ||
+				command.attemptId !== event.attemptId ||
+				command.engineGeneration !== event.engineGeneration ||
+				command.authorityGeneration !== event.authorityGeneration
+			)
+				throw new Error("Inherited Engine event claim does not match its exact native Attempt");
+		}
+		this.#active.set(claim.jobId, claim);
 		if (event.type === "attempt.command_receipt" && event.payload) {
 			const value = (event.payload.value ?? event.payload) as Record<string, unknown>;
 			const receipt: Record<string, unknown> = {
@@ -641,12 +685,12 @@ export class HostedEngineBridge {
 			action: "event",
 			device_id: this.#options.deviceId,
 			engine_id: this.#options.engineId,
-			job_id: event.causationCommandId,
+			job_id: jobId,
 			lease_token: claim.leaseToken,
 			event,
 		});
 		if (["completed", "cancelled", "failed", "already_terminal"].includes(String(result.status))) {
-			this.#active.delete(event.causationCommandId);
+			this.#active.delete(jobId);
 		}
 		return true;
 	}

@@ -596,12 +596,25 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			async call(_tool, args) {
 				if (args.action === "claim") {
 					if (!args.job_id) return { status: "no_job" };
+					const agentId = String(args.job_id).slice("command-".length);
 					return {
 						status: "claimed",
 						job_id: args.job_id,
 						lease_token: "lease",
 						operation_type: "agent_engine_command",
-						work: { kind: "command", command: { ...startCommand(tempDir!, {}), commandId: args.job_id } },
+						work: {
+							kind: "command",
+							command: {
+								...startCommand(tempDir!, {}),
+								commandId: args.job_id,
+								agentInstanceId: agentId,
+								deviceId: "device",
+								engineId: "engine",
+								engineGeneration: 1,
+								attemptId: `attempt-${agentId}`,
+								executionId: `execution-${agentId}`,
+							},
+						},
 					};
 				}
 				if (args.action === "heartbeat") {
@@ -876,6 +889,158 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			await waitFor(() => errors.length === 2);
 			expect(delivered).toEqual(["real-control", "start-command", "inbox-wake", "old-query-ack", "unknown-job"]);
 			expect((await manager.consumers.info(ENGINE_EVENT_STREAM, durable)).num_ack_pending).toBe(2);
+		} finally {
+			await bridge.dispose();
+			await connection.drain();
+			await store.close();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 15_000);
+
+	it("delivers inherited control events to the retained child Start after its parent control already settled", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `artel-bridge-inherited-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const connection = await connect({ servers: broker.url });
+		const manager = await jetstreamManager(connection);
+		await manager.streams.add({ name: ENGINE_EVENT_STREAM, subjects: ["grimoire.engine.v1.>"] });
+		const dbPath = path.join(tempDir, "engine.sqlite");
+		let store = await EngineStore.open(dbPath);
+		const start = { ...startCommand(tempDir, {}), engineGeneration: 1 };
+		const child: EngineBindingSnapshot = {
+			...start,
+			bindingId: "child-binding",
+			executionId: start.executionId!,
+			attemptId: start.attemptId!,
+			engineAgentId: "child-agent",
+			profileDigest: "profile",
+			bindingGeneration: 1,
+			state: "idle",
+		};
+		const controls: EngineCommandEnvelope[] = ["pause", "resume", "cancel"].map(op => ({
+			...start,
+			op: op as "pause" | "resume" | "cancel",
+			commandId: `parent-${op}`,
+			agentInstanceId: "parent",
+			attemptId: "parent-attempt",
+			executionId: "parent-execution",
+			payload: {},
+		}));
+		const ownControl: EngineCommandEnvelope = { ...start, op: "pause", commandId: "child-pause", payload: {} };
+		for (const command of [start, ...controls, ownControl]) {
+			await store.admitCommand(engineCommandIdentity(command), 1);
+			await store.settleCommand(command.commandId, engineCommandIdentity(command).canonicalHash, {
+				outcome: "applied",
+			});
+		}
+		await store.putAttempt(child, "cancelled");
+		// A newer binding must not steal delayed events belonging to the original Attempt.
+		await store.putBinding({ ...child, commandId: "later-start", attemptId: "later-attempt", state: "running" });
+		const events: EngineEvent[] = [];
+		for (const [kind, cause] of [
+			["pause_requested", "parent-pause"],
+			["paused", "parent-pause"],
+			["resumed", "parent-resume"],
+			["input_resolved", "parent-cancel"],
+			["cancelled", "parent-cancel"],
+		] as const) {
+			events.push(await store.appendEvent({ ...child, kind, causationCommandId: cause, payload: {} }));
+		}
+		await store.close();
+		store = await EngineStore.open(dbPath);
+		const delivered: Array<{ jobId: string; event: EngineEventEnvelope }> = [];
+		const claims: string[] = [];
+		const errors: Error[] = [];
+		let childTerminal = false;
+		let recoverExactAttempt = false;
+		const bridge = await HostedEngineBridge.connect({
+			eventStore: store,
+			deviceId: start.deviceId,
+			engineId: start.engineId,
+			engineGeneration: 2,
+			servers: broker.url,
+			pollIntervalMs: 10,
+			onError: error => errors.push(error),
+			rpc: {
+				async call(_tool, args) {
+					if (args.action === "claim") {
+						if (!args.job_id) return { status: "no_job" };
+						const jobId = String(args.job_id);
+						claims.push(jobId);
+						if (jobId.startsWith("parent-") || (jobId === start.commandId && childTerminal))
+							return { status: "already_terminal" };
+						const command =
+							jobId === ownControl.commandId
+								? ownControl
+								: { ...start, attemptId: recoverExactAttempt ? start.attemptId : "different-attempt" };
+						return {
+							status: "claimed",
+							job_id: command.commandId,
+							lease_token: `lease-${command.commandId}`,
+							operation_type: "agent_engine_command",
+							work: { kind: "command", command },
+						};
+					}
+					if (args.action === "heartbeat") return { status: "renewed" };
+					if (args.action !== "event")
+						throw new Error(`Unexpected inherited-control action ${String(args.action)}`);
+					const jobId = String(args.job_id);
+					const event = args.event as EngineEventEnvelope;
+					delivered.push({ jobId, event });
+					// The old ClientHost shortcut silently consumed child events at the settled parent job.
+					if (jobId.startsWith("parent-") || (jobId === start.commandId && childTerminal))
+						return { status: "already_terminal" };
+					expect(args.lease_token).toBe(`lease-${jobId}`);
+					if (event.type === "attempt.cancelled") childTerminal = true;
+					return { status: childTerminal || jobId === ownControl.commandId ? "cancelled" : "recorded" };
+				},
+			},
+		});
+		const publish = async (event: EngineEventEnvelope) => {
+			await jetstream(connection).publish(
+				`grimoire.engine.v1.d.${engineRouteToken(start.deviceId)}.e.${engineRouteToken(start.engineId)}.a.${engineRouteToken(event.agentInstanceId)}.evt.changed`,
+				JSON.stringify(event),
+			);
+		};
+		const envelope = (event: EngineEvent): EngineEventEnvelope => ({
+			...event,
+			schema: "grimoire.engine.event.v1",
+			eventId: String(event.eventId),
+			agentSeq: event.seq,
+			deviceId: start.deviceId,
+			engineId: start.engineId,
+			runtimeBindingId: event.bindingId,
+			type: event.kind === "input_resolved" ? "input.resolved" : `attempt.${event.kind}`,
+			at: event.createdAt,
+		});
+		try {
+			await publish(envelope(events[0]));
+			await waitFor(() => errors.length === 1);
+			expect(errors[0].message).toContain("claim does not match its exact native Attempt");
+			expect(delivered).toHaveLength(0);
+			recoverExactAttempt = true;
+			for (const event of events.slice(1)) await publish(envelope(event));
+			await waitFor(() => delivered.length === events.length);
+			expect(delivered.map(item => item.jobId)).toEqual(events.map(() => start.commandId));
+			expect(delivered.map(item => item.event.causationCommandId)).toEqual(
+				events.map(item => item.causationCommandId),
+			);
+			expect(childTerminal).toBe(true);
+			expect(claims).toEqual([start.commandId, start.commandId]);
+			await bridge.drain(2000);
+			await publish(envelope(events.at(-1)!));
+			await waitFor(() => delivered.length === 6);
+			expect(delivered[5].jobId).toBe(start.commandId);
+			await publish({ ...envelope(events[1]), causationCommandId: ownControl.commandId });
+			await waitFor(() => delivered.length === 7);
+			expect(delivered[6].jobId).toBe(ownControl.commandId);
+			await bridge.drain(2000);
+			// Even an already-terminal recipient cannot swallow a foreign or stale native tuple.
+			await publish({ ...envelope(events[4]), bindingGeneration: 99 });
+			await publish({ ...envelope(events[4]), agentInstanceId: "foreign-child" });
+			await waitFor(() => errors.length === 3);
+			expect(delivered).toHaveLength(7);
+			expect(errors.every(error => error.message.includes("exact native Attempt"))).toBe(true);
 		} finally {
 			await bridge.dispose();
 			await connection.drain();
