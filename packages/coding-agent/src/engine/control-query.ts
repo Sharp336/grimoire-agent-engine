@@ -976,6 +976,8 @@ function publicEvent(event: EngineEvent): EngineEvent {
 	const payload = event.payload;
 	if (!payload) return event;
 	switch (event.kind) {
+		case "history_checkpoint":
+			return { ...event, payload: {} };
 		case "trace_reasoning":
 			return { ...event, payload: pick(payload, ["state"]) };
 		case "assistant_snapshot":

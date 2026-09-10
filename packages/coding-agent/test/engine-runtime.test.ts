@@ -4053,6 +4053,118 @@ describe("EngineRuntime", () => {
 		}
 	}, 60_000);
 
+	it("publishes durable tool-only and intermediate history while the next response is still running", async () => {
+		const release = Promise.withResolvers<void>();
+		const reachedFinal = Promise.withResolvers<void>();
+		const retained = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			responses: (async function* () {
+				yield {
+					content: [
+						{ type: "toolCall" as const, id: "only-tool", name: "read", arguments: { path: "input.txt" } },
+					],
+				};
+				yield {
+					content: [
+						"Intermediate answer",
+						{ type: "toolCall" as const, id: "next-tool", name: "read", arguments: { path: "input.txt" } },
+					],
+				};
+				reachedFinal.resolve();
+				await release.promise;
+				yield { content: ["Final answer"] };
+			})(),
+		});
+		const { runtime, cwd, options } = await createRuntime(
+			(session, input) => session.prompt(input),
+			{},
+			{ model: mock.model },
+		);
+		fs.writeFileSync(path.join(cwd, "input.txt"), "Retained tool result");
+		const agentInstanceId = "incremental-history";
+		const agentInstanceRef = "grimoire://tasks/grimoire/history-checkpoint/agents/owner";
+		const attemptId = "incremental-history-attempt";
+		await runtime.store.registerAgent({
+			agentInstanceId,
+			agentInstanceRef,
+			principalId: "owner",
+			authorityGeneration: 1,
+		});
+		const checkpoints: EngineEvent[] = [];
+		const unsubscribe = runtime.subscribe(async event => {
+			if (
+				event.attemptId !== attemptId ||
+				event.kind !== "history_checkpoint" ||
+				!event.payload?.transcriptCheckpoint
+			)
+				return;
+			checkpoints.push(event);
+			try {
+				const page = await runtime.sessionHistoryPage(agentInstanceId, agentInstanceRef, undefined, 100, attemptId);
+				const assistants = page.entries.filter(entry => entry.role === "assistant");
+				if (
+					assistants.length === 2 &&
+					assistants.every(entry => entry.blocks?.some(block => block.toolStatus === "succeeded"))
+				)
+					retained.resolve();
+			} catch (error) {
+				retained.reject(error);
+			}
+		});
+		try {
+			await runtime.start(
+				{
+					commandId: "incremental-history-start",
+					agentInstanceId,
+					executionId: "incremental-history-execution",
+					attemptId,
+					authorityGeneration: 1,
+					cwd,
+					input: "Read twice",
+				},
+				{ ...profile, toolNames: ["read"], restrictToolNames: true },
+			);
+			await withTimeout(reachedFinal.promise, 10_000, "Provider did not reach the held final response");
+			await withTimeout(
+				retained.promise,
+				10_000,
+				"No history invalidation exposed retained tool-only results before completion",
+			);
+			expect((await runtime.store.getAttempt(attemptId))?.state).toBe("running");
+			const page = await runtime.sessionHistoryPage(agentInstanceId, agentInstanceRef, undefined, 100, attemptId);
+			const assistants = page.entries.filter(entry => entry.role === "assistant");
+			expect(assistants.map(entry => entry.text)).toEqual(["", "Intermediate answer"]);
+			expect(assistants.map(entry => entry.blocks?.find(block => block.kind === "tool_call")?.toolCallId)).toEqual([
+				"only-tool",
+				"next-tool",
+			]);
+			expect(assistants.every(entry => entry.assistantMessageId)).toBe(true);
+			const latest = checkpoints.at(-1)!;
+			expect((await runtime.store.getAttempt(attemptId))?.transcript_revision).toBe(
+				Number((latest.payload!.transcriptCheckpoint as { revision: number }).revision),
+			);
+			const inspect = new SQL(`sqlite:${options.databasePath.replaceAll("\\", "/")}`);
+			try {
+				const rows = await inspect.unsafe(
+					"SELECT summary_payload,projection_payload FROM engine_event_outbox WHERE attempt_id=? AND kind='history_checkpoint'",
+					[attemptId],
+				);
+				for (const row of rows) {
+					expect(row.summary_payload).toBeNull();
+					const changes = JSON.parse(row.projection_payload);
+					expect(changes).toMatchObject([{ kind: "invalidate", attemptId, value: { resource: "history" } }]);
+					expect(changes).toHaveLength(1);
+				}
+			} finally {
+				await inspect.end();
+			}
+		} finally {
+			release.resolve();
+			unsubscribe();
+			await runtime.drain();
+		}
+	}, 30_000);
+
 	it("streams bounded assistant snapshots with one identity before terminal settlement", async () => {
 		let retainedSessionManager: SessionManager | undefined;
 		const releaseFinal = Promise.withResolvers<void>();

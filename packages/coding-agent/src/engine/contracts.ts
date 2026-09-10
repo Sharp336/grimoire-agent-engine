@@ -368,6 +368,7 @@ export interface EngineEvent {
 		| "profile_route_changed"
 		| "inbox_changed"
 		| "assistant_snapshot"
+		| "history_checkpoint"
 		| "message_updated"
 		| "trace_reasoning"
 		| "trace_tool";

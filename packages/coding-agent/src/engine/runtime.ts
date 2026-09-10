@@ -3335,6 +3335,7 @@ export class EngineRuntime {
 				if (event.type === "message_end" && event.message.role === "assistant") {
 					this.#settleAssistantStream(binding, event.message);
 				}
+				if (event.type === "message_end") this.#queueHistoryCheckpoint(binding);
 				if (event.type === "message_update" && event.assistantMessageEvent.type === "thinking_end") {
 					this.#queueTraceEvent(binding, "trace_reasoning", { state: "completed" });
 				}
@@ -4225,6 +4226,35 @@ export class EngineRuntime {
 		binding.traceWriteTail = write.catch(error => {
 			logger.warn("Engine trace event write failed", {
 				kind,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
+	}
+
+	#queueHistoryCheckpoint(binding: LiveBinding): void {
+		const attemptId = binding.attemptId;
+		const write = binding.traceWriteTail.then(async () => {
+			// message_end is emitted before native persistence finishes. Only publish
+			// a durable cut; tool-only responses have no assistant_snapshot to await.
+			await binding.session.settleInFlightMessagePersistence();
+			await this.#inLane(binding.agentInstanceId, async () => {
+				if (
+					this.#disposed ||
+					this.#bindings.get(binding.agentInstanceId) !== binding ||
+					binding.attemptId !== attemptId ||
+					!["running", "pause_requested", "paused", "waiting_input"].includes(binding.attemptState)
+				)
+					return;
+				const transcriptCheckpoint = await binding.session.sessionManager.flushAndCheckpoint();
+				await this.#commitAttemptTransition(binding, binding.attemptState, [{ kind: "history_checkpoint" }], {
+					expectedStates: [binding.attemptState],
+					transcriptCheckpoint,
+				});
+			});
+		});
+		binding.traceWriteTail = write.catch(error => {
+			binding.messageWriteError ??= error;
+			logger.warn("Engine history checkpoint write failed", {
 				error: error instanceof Error ? error.message : String(error),
 			});
 		});

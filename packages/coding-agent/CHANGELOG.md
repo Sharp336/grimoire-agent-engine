@@ -4,6 +4,8 @@
 
 ### Added
 
+- Intermediate messages and tool-only responses refresh durable history before the whole run finishes, without changing task status.
+
 - Runtime tool updates preserve their source assistant message and block through approval, settlement and restart.
 
 - Retained assistant history preserves text positions among public reasoning and tool calls.
