@@ -254,12 +254,23 @@ describe("Engine Control + Query", () => {
 		});
 		// Consumers must get the model's effort ladder, not just a saved profile's default.
 		expect(
-			await client.request("models.reference", { modelIds: ["gpt-5.6-sol", "deepseek-v4-flash", "private/custom"] }),
+			await client.request("models.reference", {
+				modelIds: ["gpt-5.6-sol", "deepseek-v4-flash", "private/custom", "gemini-3.1-pro-preview"],
+			}),
 		).toMatchObject({
 			models: [
-				{ status: "resolved", reasoningEfforts: ["low", "medium", "high", "xhigh", "max"] },
+				{
+					status: "resolved",
+					reasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+					reasoningOffApis: expect.arrayContaining([
+						"openai-completions",
+						"openai-responses",
+						"openai-codex-responses",
+					]),
+				},
 				{ status: "resolved", reasoningEfforts: ["low", "high", "max"] },
 				{ status: "unknown", modelIdentityId: "private/custom" },
+				{ status: "resolved", reasoningOffApis: [] },
 			],
 		});
 		await expect(client.request("models.reference", { modelIds: Array(65).fill("gpt-5.6-sol") })).rejects.toThrow();

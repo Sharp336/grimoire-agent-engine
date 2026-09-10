@@ -30,6 +30,7 @@
 
 ### Fixed
 
+- Explicit reasoning-off selections retain their wire meaning on supported profile routes instead of silently becoming low effort.
 - Agent runs now finish after a successful retried yield instead of remaining stuck in recovery.
 - Artel Opus/Fable routes preserve the advertised max effort when executing through OpenAI-compatible gateways.
 - Engine profiles reject unsupported explicit effort instead of silently launching at another level.

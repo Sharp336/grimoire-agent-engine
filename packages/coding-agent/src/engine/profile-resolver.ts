@@ -768,6 +768,9 @@ function toModelSpec(
 		...(api === "openai-completions" && route.model.supportsReasoning && reference?.referenceProvider === "anthropic"
 			? { thinking: { mode: "effort" as const, efforts: reference.reasoningEfforts } }
 			: {}),
+		...(reference?.referenceProvider === "openai" && reference.reasoningOffApis.includes(api)
+			? { compat: { reasoningDisableMode: "none-effort" as const } }
+			: {}),
 		supportsTools: route.model.supportsTools,
 		input: input.length ? input : ["text"],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -786,6 +789,20 @@ function profileThinkingLevel(
 	launch: EngineLaunchProfile,
 ): CreateAgentSessionOptions["thinkingLevel"] {
 	const requested = concreteThinkingLevel(launch.thinkingLevel ?? profile.generationDefaults?.thinkingLevel);
+	if (requested === "off" && model.thinking?.requiresEffort === true && model.thinking?.suppressWhenOff !== true) {
+		throw new ProfileThinkingLevelError(
+			`Model ${model.provider}/${model.id} requires reasoning and cannot disable it`,
+		);
+	}
+	if (
+		requested === "off" &&
+		model.reasoning &&
+		model.compat &&
+		"reasoningDisableMode" in model.compat &&
+		(model.compat.reasoningDisableMode === "lowest-effort" || model.compat.reasoningDisableMode === "omit")
+	) {
+		throw new ProfileThinkingLevelError(`Model ${model.provider}/${model.id} has no explicit reasoning-off mapping`);
+	}
 	const level = resolveThinkingLevelForModel(model, requested);
 	if (
 		launch.minimumThinkingLevel === "high" &&

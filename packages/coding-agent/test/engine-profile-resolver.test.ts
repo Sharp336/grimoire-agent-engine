@@ -10,7 +10,7 @@ import { EngineProfileResolver } from "../src/engine/profile-resolver";
 import { ProviderAdmissionClient } from "../src/engine/provider-admission";
 import { ProviderExecutionClient } from "../src/engine/provider-execution";
 import { AuthStorage } from "../src/session/auth-storage";
-import { concreteThinkingLevel, toReasoningEffort } from "../src/thinking";
+import { concreteThinkingLevel, shouldDisableReasoning, toReasoningEffort } from "../src/thinking";
 
 const refs = {
 	profile: "gctx:2222222222222222",
@@ -208,6 +208,34 @@ describe("EngineProfileResolver", () => {
 					resolved.dispose();
 				}),
 			).rejects.toThrow("Requested thinking level minimal is not supported");
+			const off = await resolver.resolve({ ...launch, thinkingLevel: ThinkingLevel.Off }, root);
+			try {
+				const requests: Record<string, unknown>[] = [];
+				const response = await streamSimple(
+					off.options.model!,
+					{
+						messages: [{ role: "user", content: "hello", timestamp: 0 }],
+					},
+					{
+						apiKey: "fixture",
+						disableReasoning: shouldDisableReasoning(concreteThinkingLevel(off.options.thinkingLevel)),
+						fetch: async (_input, init) => {
+							requests.push(JSON.parse(String(init?.body)));
+							return new Response(
+								'data: {"choices":[{"index":0,"delta":{"content":"ok"}}]}\n\ndata: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\ndata: [DONE]\n\n',
+								{ headers: { "content-type": "text/event-stream" } },
+							);
+						},
+					},
+				).result();
+				expect(response.stopReason).toBe("stop");
+				expect(requests.map(request => request.reasoning_effort)).toEqual(["none"]);
+			} finally {
+				off.dispose();
+			}
+			await expect(
+				resolver.resolve({ ...launch, thinkingLevel: ThinkingLevel.Off, minimumThinkingLevel: "high" }, root),
+			).rejects.toThrow("minimum thinking level high");
 			await artifact(cache, profileRef, "grimoire.agent_profile.v1", { ...profile, allowCrossModelFallback: false });
 			const sameOnly = await resolver.resolve(launch, root);
 			try {
@@ -225,6 +253,32 @@ describe("EngineProfileResolver", () => {
 			const beforeInvalid = lookups.length;
 			await expect(resolver.resolve(launch, root)).rejects.toThrow("allowCrossModelFallback must be boolean");
 			expect(lookups.length).toBe(beforeInvalid);
+			await artifact(cache, profileRef, "grimoire.agent_profile.v1", {
+				...profile,
+				models: [routeRefs[0]],
+				allowCrossModelFallback: false,
+			});
+			for (const [modelId, expectedError] of [
+				["gemini-3.1-pro-preview", "requires reasoning"],
+				["grok-4.6", "no explicit reasoning-off mapping"],
+			]) {
+				await artifact(cache, routeRefs[0]!, "grimoire.available_model_route.v1", {
+					schema: "grimoire.available_model_route.v1",
+					status: "active",
+					providerAccountRef: accountRef,
+					model: {
+						modelIdentityId: modelId,
+						modelId,
+						providerSurfaceId: "cheapai",
+						contextWindow: 32000,
+						maxOutputTokens: 8192,
+						supportsReasoning: true,
+					},
+				});
+				await expect(resolver.resolve({ ...launch, thinkingLevel: ThinkingLevel.Off }, root)).rejects.toThrow(
+					expectedError!,
+				);
+			}
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
 		}
