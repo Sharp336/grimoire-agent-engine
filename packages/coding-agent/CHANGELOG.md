@@ -42,6 +42,8 @@
 
 ### Fixed
 
+- Retry history stays after an empty failed response, including after restart.
+
 - Explicit reasoning-off selections retain their wire meaning on supported profile routes instead of silently becoming low effort.
 - Agent runs now finish after a successful retried yield instead of remaining stuck in recovery.
 - Artel Opus/Fable routes preserve the advertised max effort when executing through OpenAI-compatible gateways.

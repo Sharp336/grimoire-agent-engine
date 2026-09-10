@@ -4511,9 +4511,9 @@ export class EngineRuntime {
 		binding.session.rememberMessageIdentity(message, {
 			assistantMessageId: state.assistantMessageId,
 		});
-		if (state.text || state.streamingSnapshots > 0) {
-			this.#emitAssistantSnapshot(binding, state, "settled", assistantSnapshotStopReason(message.stopReason));
-		}
+		// Empty failures and tool-only responses still own a native history entry.
+		// Publish its identity before subsequent retry/lifecycle events on this lane.
+		this.#emitAssistantSnapshot(binding, state, "settled", assistantSnapshotStopReason(message.stopReason));
 		binding.assistantStream = undefined;
 	}
 

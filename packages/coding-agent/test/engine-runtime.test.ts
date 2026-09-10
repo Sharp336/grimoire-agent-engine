@@ -4165,6 +4165,79 @@ describe("EngineRuntime", () => {
 		}
 	}, 30_000);
 
+	it("anchors a retry after its empty failed response through native execution and restart", async () => {
+		const mock = createMockModel({
+			responses: [{ throw: "503 service unavailable" }, { content: ["Recovered answer"] }],
+		});
+		const { runtime, cwd, options } = await createRuntime(
+			(session, input, identity) => session.prompt(input, identity),
+			{},
+			{ model: mock.model },
+		);
+		const agentInstanceId = "empty-retry-history";
+		const agentInstanceRef = "grimoire://tasks/grimoire/empty-retry-history/agents/owner";
+		const attemptId = "empty-retry-attempt";
+		await runtime.store.registerAgent({
+			agentInstanceId,
+			agentInstanceRef,
+			principalId: "owner",
+			authorityGeneration: 1,
+		});
+		await runtime.start(
+			{
+				commandId: "empty-retry-command",
+				agentInstanceId,
+				agentInstanceRef,
+				executionId: "empty-retry-execution",
+				attemptId,
+				authorityGeneration: 1,
+				cwd,
+				input: "Recover from a transient error",
+			},
+			profile,
+		);
+		await runtime.drain();
+		expect(mock.calls).toHaveLength(2);
+		const events = await runtime.store.pendingEvents();
+		const retry = events.find(event => event.kind === "retry_scheduled")!;
+		const page = await runtime.sessionHistoryPage(agentInstanceId, agentInstanceRef, undefined, 100, attemptId);
+		const lifecycle = await runtime.store.nativeLifecyclePage(
+			agentInstanceId,
+			agentInstanceRef,
+			100,
+			attemptId,
+			page.lifecycleContext,
+		);
+		const assistants = page.entries.filter(entry => entry.role === "assistant");
+		expect(assistants.map(entry => [entry.text, entry.stopReason])).toEqual([
+			["", "error"],
+			["Recovered answer", "stop"],
+		]);
+		expect(lifecycle.activities.find(event => event.eventId === String(retry.eventId))).toMatchObject({
+			afterEntryId: assistants[0].entryId,
+			terminal: false,
+		});
+		const failure = events.find(
+			event =>
+				event.kind === "assistant_snapshot" &&
+				event.payload?.assistantMessageId === assistants[0].assistantMessageId,
+		)!;
+		expect(failure.payload).toMatchObject({ text: "", stopReason: "error", historyEntryId: assistants[0].entryId });
+		expect(failure.eventId).toBeLessThan(retry.eventId);
+		await runtime.dispose();
+		const reopened = await openRuntime(options);
+		const retained = await reopened.sessionHistoryPage(agentInstanceId, agentInstanceRef, undefined, 100, attemptId);
+		const retainedLifecycle = await reopened.store.nativeLifecyclePage(
+			agentInstanceId,
+			agentInstanceRef,
+			100,
+			attemptId,
+			retained.lifecycleContext,
+		);
+		expect(retainedLifecycle.activities).toEqual(lifecycle.activities);
+		expect(retained.entries).toEqual(page.entries);
+	}, 30_000);
+
 	it("streams bounded assistant snapshots with one identity before terminal settlement", async () => {
 		let retainedSessionManager: SessionManager | undefined;
 		const releaseFinal = Promise.withResolvers<void>();
