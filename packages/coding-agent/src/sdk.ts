@@ -385,6 +385,8 @@ export interface CreateAgentSessionOptions {
 	pauseGate?: AgentPauseGate;
 	/** Wraps every physical provider HTTP request for admission and accounting. */
 	providerRequestHook?: ProviderRequestHook;
+	/** Owner-supplied external agent loop; not a model API transport replacement. */
+	externalLoop?: AgentOptions["externalLoop"];
 
 	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
 	authStorage?: AuthStorage;
@@ -3548,6 +3550,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const kimiApiFormatSetting = settings.get("providers.kimiApiFormat");
 		const kimiApiFormat = kimiApiFormatSetting === "auto" ? undefined : kimiApiFormatSetting;
 		agent = new Agent({
+			externalLoop: options.externalLoop,
 			initialState: {
 				systemPrompt,
 				model,

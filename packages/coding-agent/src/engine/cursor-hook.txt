@@ -1,0 +1,25 @@
+// Executed by the official Cursor plugin hook runner, not by the model.
+const fs = require("node:fs");
+const path = require("node:path");
+let input = "";
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", chunk => {
+  input += chunk;
+  if (input.length > 4 * 1024 * 1024) process.exit(2);
+});
+process.stdin.on("end", async () => {
+  try {
+    const event = JSON.parse(input.replace(/^\uFEFF/, ""));
+    const connection = JSON.parse(fs.readFileSync(path.join(__dirname, "connection.json"), "utf8"));
+    const response = await fetch(connection.url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${connection.token}` },
+      body: JSON.stringify(event),
+      signal: AbortSignal.timeout(115000),
+    });
+    if (!response.ok) process.exit(2);
+    const result = await response.json();
+    if (result.permission !== "allow" && result.permission !== "deny") process.exit(2);
+    process.stdout.write(JSON.stringify(result));
+  } catch { process.stdout.write(JSON.stringify({ permission: "deny", agent_message: "Artel tool approval is unavailable." })); }
+});

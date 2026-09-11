@@ -4,6 +4,8 @@
 
 ### Added
 
+- Experimental Cursor headless sessions retain native history and enforce per-tool permissions; profile activation remains disabled pending full integration.
+
 - Official Cursor ACP session adapter with exact-session restore and bounded cancellation.
 
 - Model reference queries expose image-input capabilities; profiles inherit exact catalog capabilities only when a route has no explicit input restriction.
