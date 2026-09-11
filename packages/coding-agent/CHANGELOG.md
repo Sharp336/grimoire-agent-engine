@@ -4,6 +4,8 @@
 
 ### Added
 
+- Official Cursor ACP session adapter with exact-session restore and bounded cancellation.
+
 - Model reference queries expose image-input capabilities; profiles inherit exact catalog capabilities only when a route has no explicit input restriction.
 
 - History keeps retry activity between its actual responses and distinguishes Attempt completion from rejected control commands.
