@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Embedded runtimes can supply an external agent loop while retaining native events and message state.
+
 ## [18.0.7] - 2026-08-26
 
 ### Fixed

@@ -6,10 +6,11 @@ import {
 } from "./runtime-protocol.mjs";
 import protocol from "./runtime-protocol-v1.json" with { type: "json" };
 
-export const RUNTIME_PROTOCOL_HASH = "sha256:2d5dd5cc336488ff4fbfca57a1fff0dd214bc3c00c35f7c4076f4d7cf209791d";
+export const RUNTIME_PROTOCOL_HASH = "sha256:a3db12c9a14fd1aa3f12c09ba1c0aa92ec8e3139dd9846f0259ca1325128de53";
+export const runtimeOriginIdChars = protocol.$defs.id.maxLength;
 export const runtimeLimits = protocol["x-artel"].limits;
 export const runtimeToolPageRecords = protocol.$defs.toolsPage.properties.items.maxItems;
-export const runtimeToolIdChars = protocol.$defs.id.maxLength;
+export const runtimeToolIdChars = protocol.$defs.toolCallId.maxLength;
 export const runtimeToolNameChars = protocol.$defs.toolDetail.properties.name.maxLength;
 export const ENGINE_CONTROL_OPS = new Set(["pause", "resume", "cancel", "resolve_input", "resolve_tool_approval"]);
 

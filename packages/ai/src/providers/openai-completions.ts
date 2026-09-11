@@ -720,6 +720,7 @@ const streamOpenAICompletionsOnce = (
 					"chat-completions",
 					trimmedBaseUrl,
 					params.model,
+					params,
 				);
 				const requestReasoningEffortFallback = requestReasoningEffortFallbacks.has(reasoningEffortFallbackKey)
 					? requestReasoningEffortFallbacks.get(reasoningEffortFallbackKey)

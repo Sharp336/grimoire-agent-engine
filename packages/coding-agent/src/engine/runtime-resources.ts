@@ -1,11 +1,14 @@
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
+import { getBlobsDir } from "@oh-my-pi/pi-utils";
+import { BlobStore } from "../session/blob-store";
 import { EngineTargetError } from "./contracts";
-import { readNativeHistoryEntry } from "./runtime-history";
+import { readNativeHistoryAttachment, readNativeHistoryEntry, readNativeHistoryImage } from "./runtime-history";
 import { runtimeMessageBaselines, runtimeMessageRange } from "./runtime-messages";
 import { type RuntimeIdentityRow, RuntimeQueryWork, type RuntimeSql, runtimeIdentity } from "./runtime-projection";
 import {
 	type RuntimeAccess,
 	runtimeLimits,
+	runtimeOriginIdChars,
 	runtimeToolIdChars,
 	runtimeToolNameChars,
 	runtimeToolPageRecords,
@@ -313,6 +316,7 @@ export async function readRuntimeInput(sql: RuntimeSql, request: RuntimePageRequ
 export async function readRuntimeResource(
 	sql: RuntimeSql,
 	request: RuntimeResourceRequest,
+	blobs?: BlobStore,
 ): Promise<Record<string, unknown>> {
 	validateRuntimeValue("resourceReadRequest", {
 		resource: request.resource,
@@ -325,6 +329,22 @@ export async function readRuntimeResource(
 	if (resource.kind === "queue_item") return await runtimeQueueRange(sql, request, work);
 	const identity = await runtimeIdentity(sql, String(resource.agentInstanceRef), request);
 	work.rows(1);
+	if (resource.kind === "history_image" || resource.kind === "history_attachment") {
+		if (request.offset > Number(resource.bytes))
+			throw new EngineTargetError("invalid_request", "Image range starts after EOF");
+		const result = await (resource.kind === "history_image" ? readNativeHistoryImage : readNativeHistoryAttachment)(
+			sql,
+			identity.agent_instance_id,
+			resource,
+			request.offset,
+			request.limit,
+			blobs ?? new BlobStore(getBlobsDir()),
+			work,
+		);
+		work.finish(result, 1);
+		validateRuntimeValue("httpRange", result);
+		return result;
+	}
 	if (resource.kind === "history_entry") {
 		if (resource.mediaType !== "application/json" || resource.contentHash !== undefined)
 			throw new EngineTargetError("stale_target", "History descriptor differs from the native owner resource");
@@ -451,11 +471,28 @@ export async function runtimeToolBaselines(
 	const after = String(cursorPosition(request, revision, ""));
 	const limit = Math.min(request.limit ?? runtimeToolPageRecords, runtimeToolPageRecords);
 	const rows = (await sql.unsafe(
-		`SELECT effect_id,substr(tool_call_id,1,?) AS tool_call_id,substr(tool_name,1,?) AS tool_name,state,runtime_event_id
+		`SELECT effect_id,substr(tool_call_id,1,?) AS tool_call_id,substr(tool_name,1,?) AS tool_name,state,runtime_event_id,
+		substr(assistant_message_id,1,?) AS assistant_message_id,substr(assistant_block_id,1,?) AS assistant_block_id
 		FROM engine_effects WHERE attempt_id=? AND effect_kind='tool' AND state IN ('started','unknown')
 		AND effect_id>? ORDER BY effect_id LIMIT ?`,
-		[runtimeToolIdChars + 1, runtimeToolNameChars + 1, request.attemptId!, after, limit + 1],
-	)) as Array<{ effect_id: string; tool_call_id: string; tool_name: string; state: string; runtime_event_id: number }>;
+		[
+			runtimeToolIdChars + 1,
+			runtimeToolNameChars + 1,
+			runtimeOriginIdChars + 1,
+			runtimeOriginIdChars + 1,
+			request.attemptId!,
+			after,
+			limit + 1,
+		],
+	)) as Array<{
+		effect_id: string;
+		tool_call_id: string;
+		tool_name: string;
+		state: string;
+		runtime_event_id: number;
+		assistant_message_id: string | null;
+		assistant_block_id: string | null;
+	}>;
 	work?.rows(rows.length);
 	const items: Record<string, unknown>[] = [];
 	let bytes = 2;
@@ -464,6 +501,9 @@ export async function runtimeToolBaselines(
 		const item = {
 			toolCallId: row.tool_call_id,
 			name: row.tool_name,
+			...(row.assistant_message_id && row.assistant_block_id
+				? { origin: { messageId: row.assistant_message_id, blockId: row.assistant_block_id } }
+				: {}),
 			phase: row.state === "unknown" ? "unknown" : "started",
 			revision: Number(row.runtime_event_id),
 		};

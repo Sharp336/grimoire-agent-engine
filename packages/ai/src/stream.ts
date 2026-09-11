@@ -2185,7 +2185,7 @@ function mapOptionsForApi<TApi extends Api>(
 				codexCompaction: options?.codexCompaction,
 				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
 				textVerbosity: options?.textVerbosity,
-				forceReasoningOff: options?.forceReasoningOff,
+				forceReasoningOff: options?.forceReasoningOff || options?.disableReasoning,
 			});
 
 		case "google-generative-ai": {

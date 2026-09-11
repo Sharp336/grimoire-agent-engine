@@ -69,8 +69,9 @@ export function createOpenAIReasoningEffortFallbackKey(
 	endpoint: "chat-completions" | "responses" | "azure-responses",
 	baseUrl: string | undefined,
 	wireModelId: string | undefined,
+	params: unknown,
 ): string {
-	return `${endpoint}:${baseUrl ?? ""}:${wireModelId ?? ""}`;
+	return `${endpoint}:${baseUrl ?? ""}:${wireModelId ?? ""}:${readOpenAIReasoningEffort(params) ?? ""}`;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -271,10 +272,6 @@ function parseAllowedReasoningValues(message: string, currentEffort: string): Se
 	return values;
 }
 
-function orderedEnabledAllowedValues(allowed: Set<string>): string[] {
-	return ENABLED_REASONING_VALUES.filter(value => allowed.has(value));
-}
-
 function lowestEnabledAllowedValue(allowed: Set<string>): string | undefined {
 	for (const value of ENABLED_REASONING_VALUES) {
 		if (allowed.has(value)) return value;
@@ -283,30 +280,13 @@ function lowestEnabledAllowedValue(allowed: Set<string>): string | undefined {
 }
 
 function nearestEnabledReasoningFallback(currentEffort: string, allowed: Set<string>): string | undefined {
-	const current = currentEffort.toLowerCase();
-	const allowedEnabled = orderedEnabledAllowedValues(allowed);
-	if (allowedEnabled.length === 0) return undefined;
-	if (current === "minimal" && allowedEnabled.includes("low")) return "low";
-	if (current === "xhigh" && allowedEnabled.includes("max")) return "max";
-	if (current === "xhigh" && allowedEnabled.includes("high")) return "high";
-	if (current === "max" && allowedEnabled.includes("xhigh")) return "xhigh";
-	const currentRank = REASONING_VALUE_RANK[current];
+	const currentRank = REASONING_VALUE_RANK[currentEffort.toLowerCase()];
 	if (currentRank === undefined) return undefined;
-	let best: string | undefined;
-	let bestDistance = Number.POSITIVE_INFINITY;
-	let bestRank = Number.NEGATIVE_INFINITY;
-	for (const candidate of allowedEnabled) {
-		if (candidate === current) continue;
-		const candidateRank = REASONING_VALUE_RANK[candidate];
-		if (candidateRank === undefined) continue;
-		const distance = Math.abs(candidateRank - currentRank);
-		if (distance < bestDistance || (distance === bestDistance && candidateRank > bestRank)) {
-			best = candidate;
-			bestDistance = distance;
-			bestRank = candidateRank;
-		}
-	}
-	return best;
+	// A provider error may upgrade a missing tier, but must not silently
+	// weaken the requested reasoning floor. Let route fallback handle failure.
+	return ENABLED_REASONING_VALUES.find(
+		candidate => allowed.has(candidate) && REASONING_VALUE_RANK[candidate]! > currentRank,
+	);
 }
 
 /**
@@ -353,12 +333,12 @@ export function resolveOpenAIReasoningEffortFallback(
 	const message = collectMessageParts(error, captured);
 	const allowed = parseAllowedReasoningValues(message, currentEffort);
 	const normalizedCurrent = currentEffort.toLowerCase();
-	if (allowed === undefined) return null;
+	if (allowed === undefined) return options?.explicitDisable || normalizedCurrent === "none" ? null : undefined;
 	if (options?.explicitDisable) {
 		if (normalizedCurrent !== "none" && allowed.has("none")) return "none";
 		const fallback = lowestEnabledAllowedValue(allowed);
 		return fallback && fallback !== normalizedCurrent ? fallback : null;
 	}
 	if (normalizedCurrent === "none") return null;
-	return nearestEnabledReasoningFallback(normalizedCurrent, allowed) ?? null;
+	return nearestEnabledReasoningFallback(normalizedCurrent, allowed);
 }

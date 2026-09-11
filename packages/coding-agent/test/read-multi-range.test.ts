@@ -63,8 +63,8 @@ describe("read tool multi-range selector", () => {
 		const firstLine = text.split("\n")[0];
 
 		// A same-basename file elsewhere in the tree must not capture a
-		// follow-up edit, so the header retains the workspace-relative path.
-		expect(firstLine).toBe(`[${path.join("src", "nested", "numbered.txt")}#${firstLine.slice(-5, -1)}]`);
+		// follow-up edit, so the header retains the portable workspace-relative path.
+		expect(firstLine).toMatch(/^\[src\/nested\/numbered\.txt#[^\]]+\]$/);
 	});
 
 	it("returns both ranges separated by an elision marker", async () => {

@@ -25,6 +25,55 @@ describe("Engine Control + Query", () => {
 		tempDir = undefined;
 	});
 
+	it("stages and removes message-owned attachment chunks through the authenticated native transport", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-upload-${Snowflake.next()}-`));
+		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite") });
+		const server = await startEngineControlQueryServer({
+			runtimeDir: tempDir,
+			runtime,
+			deviceId: "test-device",
+			engineId: "test-engine",
+			resolveLaunchProfile: async () => {
+				throw new Error("Uploads must not launch a model");
+			},
+		});
+		const client = new EngineControlQueryClient(tempDir);
+		const bytes = Buffer.from("partial");
+		const request = {
+			principalId: "alice",
+			uploadId: "wire-upload",
+			clientMessageId: "message-a",
+			name: "file.txt",
+			mediaType: "text/plain",
+			bytes: 100,
+			contentHash: `sha256:${"0".repeat(64)}`,
+			offset: 0,
+			contentBase64: bytes.toString("base64"),
+		};
+		try {
+			expect(await client.request("attachments.stage", request)).toMatchObject({
+				complete: false,
+				nextOffset: bytes.length,
+			});
+			expect(await client.request("attachments.stage", request)).toMatchObject({
+				complete: false,
+				nextOffset: bytes.length,
+			});
+			await expect(client.request("attachments.stage", { ...request, principalId: "" })).rejects.toThrow();
+			await expect(
+				client.request("attachments.stage", { ...request, sourcePath: "C:/private.txt" }),
+			).rejects.toThrow("Invalid runtime");
+			expect(
+				await client.request("attachments.remove", { principalId: "alice", uploadId: request.uploadId }),
+			).toEqual({ removed: true });
+			await expect(client.request("attachments.stage", request)).rejects.toThrow("removed");
+			expect(await client.request("snapshots.list")).toMatchObject({ items: [] });
+		} finally {
+			await server.close();
+			await runtime.dispose();
+		}
+	});
+
 	it("reclaims actual database bytes and resyncs snapshot cursors without losing events or retained history", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-reclaim-${Snowflake.next()}-`));
 		const databasePath = path.join(tempDir, "engine.sqlite");
@@ -247,11 +296,35 @@ describe("Engine Control + Query", () => {
 			modelIdentityId: "gpt-5.6-terra",
 			contextWindow: 1_050_000,
 			maxOutputTokens: 128_000,
+			inputModalities: ["text", "image"],
 		});
 		expect(await client.request("models.reference", { modelIdentityId: "private-provider/custom-model" })).toEqual({
 			status: "unknown",
 			modelIdentityId: "private-provider/custom-model",
 		});
+		// Consumers must get the model's effort ladder, not just a saved profile's default.
+		expect(
+			await client.request("models.reference", {
+				modelIds: ["gpt-5.6-sol", "deepseek-v4-flash", "private/custom", "gemini-3.1-pro-preview"],
+			}),
+		).toMatchObject({
+			models: [
+				{
+					status: "resolved",
+					reasoningEfforts: ["low", "medium", "high", "xhigh", "max"],
+					inputModalities: ["text", "image"],
+					reasoningOffApis: expect.arrayContaining([
+						"openai-completions",
+						"openai-responses",
+						"openai-codex-responses",
+					]),
+				},
+				{ status: "resolved", reasoningEfforts: ["low", "high", "max"] },
+				{ status: "unknown", modelIdentityId: "private/custom" },
+				{ status: "resolved", reasoningOffApis: [] },
+			],
+		});
+		await expect(client.request("models.reference", { modelIds: Array(65).fill("gpt-5.6-sol") })).rejects.toThrow();
 		expect(
 			await rawRequest(
 				server.endpoint,

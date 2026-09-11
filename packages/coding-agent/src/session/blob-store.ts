@@ -8,6 +8,14 @@ const BLOB_PREFIX = "blob:sha256:";
 /** Canonical blob hash shape: exactly 64 lowercase hex chars (a SHA-256 digest). */
 export const BLOB_HASH_RE = /^[a-f0-9]{64}$/;
 
+export const BLOB_RANGE_BYTES = 65_536;
+
+export interface BlobRange {
+	data: Buffer;
+	totalBytes: number;
+	nextOffset: number | null;
+}
+
 export interface BlobPutOptions {
 	/** Optional file extension for a sidecar hardlink/copy that OS openers can type-detect. */
 	extension?: string;
@@ -94,6 +102,108 @@ export function blobExtensionForImageMimeType(mimeType: string | undefined): str
 
 export class BlobStore {
 	constructor(readonly dir: string) {}
+
+	/** Import a completed upload without buffering it or exposing a partial canonical blob.
+	 * The caller owns admission/ACL for sourcePath; a blob hash alone is not authorization.
+	 */
+	async importFile(
+		sourcePath: string,
+		expected: { hash: string; bytes: number },
+		signal?: AbortSignal,
+	): Promise<BlobPutResult> {
+		if (!BLOB_HASH_RE.test(expected.hash) || !Number.isSafeInteger(expected.bytes) || expected.bytes < 0)
+			throw new Error("Invalid upload blob identity");
+		signal?.throwIfAborted();
+		const sourceStat = await fsp.lstat(sourcePath);
+		if (!sourceStat.isFile() || sourceStat.isSymbolicLink() || sourceStat.size !== expected.bytes)
+			throw new Error("Upload source is unsafe or its size changed");
+		await fsp.mkdir(this.dir, { recursive: true });
+		const directory = await fsp.lstat(this.dir);
+		if (!directory.isDirectory() || directory.isSymbolicLink()) throw new Error("Blob directory is unsafe");
+		const destination = path.join(this.dir, expected.hash);
+		const temporary = path.join(this.dir, `${expected.hash}.${crypto.randomUUID()}.upload-tmp`);
+		const source = await fsp.open(sourcePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+		let ownsTemporary = false;
+		try {
+			const opened = await source.stat();
+			if (
+				!opened.isFile() ||
+				opened.dev !== sourceStat.dev ||
+				opened.ino !== sourceStat.ino ||
+				opened.size !== expected.bytes
+			)
+				throw new Error("Upload source changed before capture");
+			const output = await fsp.open(temporary, "wx");
+			ownsTemporary = true;
+			try {
+				const hash = new Bun.SHA256();
+				const buffer = Buffer.alloc(BLOB_RANGE_BYTES);
+				let offset = 0;
+				while (offset < expected.bytes) {
+					signal?.throwIfAborted();
+					const { bytesRead } = await source.read(
+						buffer,
+						0,
+						Math.min(buffer.length, expected.bytes - offset),
+						offset,
+					);
+					if (!bytesRead) throw new Error("Upload source ended before its declared size");
+					const chunk = buffer.subarray(0, bytesRead);
+					hash.update(chunk);
+					await output.writeFile(chunk);
+					offset += bytesRead;
+				}
+				const after = await source.stat();
+				if (after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs)
+					throw new Error("Upload source changed during capture");
+				if (hash.digest("hex") !== expected.hash) throw new Error("Upload blob hash does not match");
+				await output.sync();
+			} finally {
+				await output.close();
+			}
+			signal?.throwIfAborted();
+			try {
+				// Same-directory hardlink publishes atomically and never overwrites another writer.
+				await fsp.link(temporary, destination);
+			} catch (error) {
+				if (!error || typeof error !== "object" || !("code" in error) || error.code !== "EEXIST") throw error;
+				const hash = new Bun.SHA256();
+				let offset = 0;
+				for (;;) {
+					signal?.throwIfAborted();
+					const range = await this.getRange(expected.hash, offset, BLOB_RANGE_BYTES);
+					if (!range || range.totalBytes !== expected.bytes)
+						throw new Error("Existing blob conflicts with upload");
+					hash.update(range.data);
+					if (range.nextOffset === null) break;
+					offset = range.nextOffset;
+				}
+				if (hash.digest("hex") !== expected.hash) throw new Error("Existing blob conflicts with upload");
+			}
+			if (process.platform !== "win32") {
+				const handle = await fsp.open(this.dir, "r");
+				try {
+					await handle.sync();
+				} finally {
+					await handle.close();
+				}
+			}
+			return {
+				hash: expected.hash,
+				path: destination,
+				displayPath: destination,
+				get ref() {
+					return `${BLOB_PREFIX}${expected.hash}`;
+				},
+			};
+		} finally {
+			try {
+				await source.close();
+			} finally {
+				if (ownsTemporary) await fsp.unlink(temporary);
+			}
+		}
+	}
 
 	async restore(hash: string, data: Buffer): Promise<void> {
 		if (!BLOB_HASH_RE.test(hash) || new Bun.SHA256().update(data).digest("hex") !== hash)
@@ -202,6 +312,51 @@ export class BlobStore {
 		} catch (err) {
 			if (isEnoent(err)) return null;
 			throw err;
+		}
+	}
+
+	/** Bounded binary read. Callers must authorize the owning session before exposing a blob. */
+	async getRange(hash: string, offset: number, limit: number): Promise<BlobRange | null> {
+		if (!BLOB_HASH_RE.test(hash)) throw new Error("Invalid blob hash");
+		if (
+			!Number.isSafeInteger(offset) ||
+			offset < 0 ||
+			!Number.isSafeInteger(limit) ||
+			limit < 1 ||
+			limit > BLOB_RANGE_BYTES
+		)
+			throw new Error("Invalid blob byte range");
+		const blobPath = path.join(this.dir, hash);
+		try {
+			const directory = await fsp.lstat(this.dir);
+			const before = await fsp.lstat(blobPath);
+			if (!directory.isDirectory() || directory.isSymbolicLink() || !before.isFile() || before.isSymbolicLink())
+				throw new Error("Blob path is unsafe");
+			const handle = await fsp.open(blobPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW ?? 0));
+			try {
+				const opened = await handle.stat();
+				if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino)
+					throw new Error("Blob identity changed");
+				if (!Number.isSafeInteger(opened.size) || offset > opened.size)
+					throw new Error("Blob range starts after EOF");
+				const data = Buffer.alloc(Math.min(limit, opened.size - offset));
+				let read = 0;
+				while (read < data.length) {
+					const { bytesRead } = await handle.read(data, read, data.length - read, offset + read);
+					if (!bytesRead) throw new Error("Blob changed during read");
+					read += bytesRead;
+				}
+				const after = await handle.stat();
+				if (after.size !== opened.size || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs)
+					throw new Error("Blob changed during read");
+				const end = offset + data.length;
+				return { data, totalBytes: opened.size, nextOffset: end < opened.size ? end : null };
+			} finally {
+				await handle.close();
+			}
+		} catch (error) {
+			if (isEnoent(error)) return null;
+			throw error;
 		}
 	}
 

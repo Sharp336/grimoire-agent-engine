@@ -1,8 +1,14 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { getBlobsDir, isEnoent, parseJsonlLenient } from "@oh-my-pi/pi-utils";
+import { getBlobsDir, isEnoent, isRecord, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 import { BlobStore, isBlobRef, parseBlobRef, resolveImageData, resolveImageDataUrl } from "./blob-store";
 import { buildSessionContext } from "./session-context";
-import type { FileEntry, RawFileEntry, SessionEntry, SessionHeader } from "./session-entries";
+import {
+	copyOriginalAttachments,
+	type FileEntry,
+	type RawFileEntry,
+	type SessionEntry,
+	type SessionHeader,
+} from "./session-entries";
 import { migrateToCurrentVersion } from "./session-migrations";
 import { isImageBlock, isImageDataPayload } from "./session-persistence";
 import { FileSessionStorage, type SessionStorage } from "./session-storage";
@@ -356,6 +362,17 @@ async function resolvePersistedBlobRefs(value: unknown, blobStore: BlobStore, ke
 
 export function collectPersistedBlobHashes(entries: readonly unknown[]): string[] {
 	const hashes = new Set<string>();
+	for (const entry of entries) {
+		if (
+			isRecord(entry) &&
+			entry.type === "message" &&
+			isRecord(entry.message) &&
+			entry.message.role === "user" &&
+			entry.originalAttachments !== undefined
+		)
+			for (const attachment of copyOriginalAttachments(entry.originalAttachments))
+				hashes.add(attachment.contentHash.slice(7));
+	}
 	const pending: Array<{ value: unknown; key?: string }> = entries.map(value => ({ value }));
 	const add = (ref: string) => {
 		const hash = parseBlobRef(ref);

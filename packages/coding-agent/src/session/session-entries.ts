@@ -63,6 +63,22 @@ export interface SessionEntryBase {
 	timestamp: string;
 }
 
+/** Public settings captured at ordinary Engine launch, never provider credentials. */
+export interface SessionLaunchSnapshot {
+	schema: "engine.launch_snapshot.v1";
+	agentInstanceId: string;
+	agentInstanceRef?: string | null;
+	executionId: string;
+	attemptId: string;
+	profileRef: string | null;
+	profileDigest: string;
+	selectionRevision?: number | null;
+	previousSelectionRevision?: number | null;
+	thinkingLevel: string | null;
+	model: { provider: string; id: string; contextWindow: number | null } | null;
+	routes: ReadonlyArray<{ routeRef: string; provider: string; modelId: string }>;
+}
+
 export interface SessionMessageEntry extends SessionEntryBase {
 	type: "message";
 	message: AgentMessage;
@@ -72,11 +88,59 @@ export interface SessionMessageEntry extends SessionEntryBase {
 	clientMessageId?: string;
 	/** Stable Engine identity used to reconcile streamed assistant snapshots with durable history. */
 	assistantMessageId?: string;
+	/** Only on the user message that starts an ordinary execution, not steering. */
+	launchSnapshot?: SessionLaunchSnapshot;
+	/** Original uploaded bytes, independent of provider image normalization. Never provider prompt content. */
+	originalAttachments?: SessionOriginalAttachment[];
+}
+
+export interface SessionOriginalAttachment {
+	name: string;
+	mediaType: string;
+	bytes: number;
+	contentHash: string;
+}
+
+/** Copy only the portable public descriptor fields; paths/credentials never become attachment metadata. */
+export function copyOriginalAttachments(value: unknown): SessionOriginalAttachment[] {
+	if (!Array.isArray(value)) throw new Error("Invalid original attachment descriptors");
+	const result: SessionOriginalAttachment[] = [];
+	let metadataBytes = 2;
+	for (const candidate of value as unknown[]) {
+		if (!candidate || typeof candidate !== "object") throw new Error("Invalid original attachment descriptor");
+		const item = candidate as Record<string, unknown>;
+		if (
+			typeof item.name !== "string" ||
+			!item.name.trim() ||
+			item.name.length > 255 ||
+			/[\x00-\x1f\x7f/\\]/.test(item.name) ||
+			typeof item.mediaType !== "string" ||
+			item.mediaType.length > 128 ||
+			!/^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/.test(item.mediaType) ||
+			typeof item.bytes !== "number" ||
+			!Number.isSafeInteger(item.bytes) ||
+			item.bytes < 0 ||
+			typeof item.contentHash !== "string" ||
+			item.contentHash.length !== 71 ||
+			!/^sha256:[a-f0-9]{64}$/.test(item.contentHash)
+		)
+			throw new Error("Invalid original attachment descriptor");
+		const descriptor = {
+			name: item.name,
+			mediaType: item.mediaType,
+			bytes: item.bytes,
+			contentHash: item.contentHash,
+		};
+		metadataBytes += Buffer.byteLength(JSON.stringify(descriptor)) + (result.length ? 1 : 0);
+		if (metadataBytes > 262_144) throw new Error("Original attachment metadata exceeds the message metadata budget");
+		result.push(descriptor);
+	}
+	return result;
 }
 
 export type SessionMessageIdentity = Pick<
 	SessionMessageEntry,
-	"sourceCommandId" | "clientMessageId" | "assistantMessageId"
+	"sourceCommandId" | "clientMessageId" | "assistantMessageId" | "launchSnapshot" | "originalAttachments"
 >;
 
 export interface ThinkingLevelChangeEntry extends SessionEntryBase {

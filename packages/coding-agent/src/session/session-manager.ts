@@ -40,6 +40,7 @@ import {
 	CURRENT_SESSION_VERSION,
 	type CustomEntry,
 	type CustomMessageEntry,
+	copyOriginalAttachments,
 	type FileEntry,
 	type LabelEntry,
 	type ModeChangeEntry,
@@ -2229,6 +2230,12 @@ export class SessionManager {
 			...(identity?.sourceCommandId ? { sourceCommandId: identity.sourceCommandId } : {}),
 			...(identity?.clientMessageId ? { clientMessageId: identity.clientMessageId } : {}),
 			...(identity?.assistantMessageId ? { assistantMessageId: identity.assistantMessageId } : {}),
+			...(message.role === "user" && identity?.originalAttachments
+				? { originalAttachments: copyOriginalAttachments(identity.originalAttachments) }
+				: {}),
+			...(message.role === "user" && identity?.sourceCommandId && identity.launchSnapshot
+				? { launchSnapshot: structuredClone(identity.launchSnapshot) }
+				: {}),
 		};
 		this.#recordEntry(entry);
 		return entry.id;
@@ -2843,6 +2850,9 @@ export class SessionManager {
 				parentId: prefix.at(-1)?.id ?? null,
 				timestamp: nowIso(),
 				message: editedHistoryMessage(selected, options.edit.text),
+				...(selected.message.role === "user" && selected.originalAttachments
+					? { originalAttachments: copyOriginalAttachments(selected.originalAttachments) }
+					: {}),
 				...(options.edit.identity?.sourceCommandId
 					? { sourceCommandId: options.edit.identity.sourceCommandId }
 					: {}),

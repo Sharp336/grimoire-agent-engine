@@ -321,6 +321,7 @@ import {
 	USER_INTERRUPT_LABEL,
 } from "./messages";
 import { ModelControls, type ModelControlsHost } from "./model-controls";
+import { withOriginalAttachmentNotices } from "./original-attachments";
 import { isPrewalkPlanNudge, PrewalkCoordinator, type PrewalkCoordinatorHost } from "./prewalk";
 import {
 	isAdvisorCard,
@@ -335,7 +336,12 @@ import { type AdvisorStats, SessionAdvisors, type SessionAdvisorsHost } from "./
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getRestorableSessionModels } from "./session-context";
 import { formatSessionDumpText } from "./session-dump-format";
-import type { BranchSummaryEntry, NewSessionOptions, SessionMessageIdentity } from "./session-entries";
+import {
+	type BranchSummaryEntry,
+	copyOriginalAttachments,
+	type NewSessionOptions,
+	type SessionMessageIdentity,
+} from "./session-entries";
 import { SessionHandoff, type SessionHandoffHost } from "./session-handoff";
 import {
 	COMPACTION_CHECK_NONE,
@@ -3122,6 +3128,7 @@ export class AgentSession {
 			// `#yieldTerminationPending` sticky flag clears on the next `prompt()`.
 			if (successfulYieldMessage || this.#yieldTerminationPending) {
 				this.#lastSuccessfulYieldToolCallId = undefined;
+				this.#recovery.resolveRetry();
 				if (successfulYieldMessage && activeGoal) {
 					maintenanceRoute(
 						yieldOnThisMessage
@@ -3934,6 +3941,13 @@ export class AgentSession {
 		persist: ((message: AssistantMessage, event: AssistantMessageEvent) => Promise<void>) | undefined,
 	): void {
 		this.#assistantMessagePersistence = persist;
+	}
+
+	/** Decorate provider input without changing canonical user content or turn-event ordering. */
+	withOriginalAttachmentNotices(messages: AgentMessage[]): AgentMessage[] {
+		return withOriginalAttachmentNotices(messages, this.sessionManager.getBranch(), message =>
+			this.#messageIdentities.get(message),
+		);
 	}
 
 	/** Attach a durable identity to the exact message currently crossing the persistence boundary. */
@@ -6283,7 +6297,7 @@ export class AgentSession {
 	async steer(
 		text: string,
 		images?: ImageContent[],
-		identity?: Pick<PromptOptions, "sourceCommandId" | "clientMessageId">,
+		identity?: Pick<PromptOptions, "sourceCommandId" | "clientMessageId" | "launchSnapshot" | "originalAttachments">,
 		context?: CustomMessagePayload,
 	): Promise<void> {
 		if (text.startsWith("/")) {
@@ -6366,7 +6380,7 @@ export class AgentSession {
 		text: string,
 		images: ImageContent[] | undefined,
 		mode: "steer" | "followUp",
-		identity?: Pick<PromptOptions, "sourceCommandId" | "clientMessageId">,
+		identity?: Pick<PromptOptions, "sourceCommandId" | "clientMessageId" | "launchSnapshot" | "originalAttachments">,
 		context?: CustomMessagePayload,
 	): Promise<void> {
 		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
@@ -6413,12 +6427,22 @@ export class AgentSession {
 
 	#rememberUserMessageIdentity(
 		message: AgentMessage,
-		identity?: Pick<PromptOptions, "sourceCommandId" | "clientMessageId">,
+		identity?: Pick<PromptOptions, "sourceCommandId" | "clientMessageId" | "launchSnapshot" | "originalAttachments">,
 	): void {
-		if (message.role !== "user" || (!identity?.sourceCommandId && !identity?.clientMessageId)) return;
+		if (
+			message.role !== "user" ||
+			(!identity?.sourceCommandId && !identity?.clientMessageId && !identity?.originalAttachments)
+		)
+			return;
 		this.#messageIdentities.set(message, {
 			...(identity.sourceCommandId ? { sourceCommandId: identity.sourceCommandId } : {}),
-			...(identity.clientMessageId ? { clientMessageId: identity.clientMessageId } : {}),
+			...(identity.clientMessageId || identity.originalAttachments?.length
+				? { clientMessageId: identity.clientMessageId ?? Snowflake.next() }
+				: {}),
+			...(identity.launchSnapshot ? { launchSnapshot: structuredClone(identity.launchSnapshot) } : {}),
+			...(identity.originalAttachments
+				? { originalAttachments: copyOriginalAttachments(identity.originalAttachments) }
+				: {}),
 		});
 	}
 

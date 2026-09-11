@@ -5,8 +5,11 @@ import * as fsAsync from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import type { ThinkingConfig } from "@oh-my-pi/pi-catalog/types";
 import { defineCapability, loadCapability, registerProvider } from "@oh-my-pi/pi-coding-agent/capability";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { settings as ambientSettings, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -41,8 +44,10 @@ import * as mcpConfig from "@oh-my-pi/pi-coding-agent/mcp/config";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { BlobStore } from "@oh-my-pi/pi-coding-agent/session/blob-store";
+import { withOriginalAttachment } from "@oh-my-pi/pi-coding-agent/session/original-attachments";
 import { loadSessionFile, loadSessionMessagesReadOnly } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { type NativeHistoryForkResult, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { normalizeModelContextImages } from "@oh-my-pi/pi-coding-agent/utils/image-loading";
 import { resolveProviderCandidates } from "@oh-my-pi/pi-coding-agent/web/search/provider";
 import * as utils from "@oh-my-pi/pi-utils";
 import { removeSyncWithRetries, Snowflake, withTimeout } from "@oh-my-pi/pi-utils";
@@ -95,6 +100,7 @@ describe("EngineRuntime", () => {
 		});
 		const options: EngineRuntimeOptions = {
 			databasePath: path.join(tempDir, "engine.sqlite"),
+			attachmentBlobStore: new BlobStore(path.join(tempDir, "upload-blobs")),
 			dispatchPrompt,
 			sessionDefaults: {
 				cwd,
@@ -125,6 +131,576 @@ describe("EngineRuntime", () => {
 		enableMCP: false,
 		enableLsp: false,
 	};
+
+	it("lets a native text model read an uploaded file without UI and retains the original handle after restart", async () => {
+		const blobDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-native-file-read-"));
+		tempDirs.push(blobDir);
+		const payload = "first line\nORIGINAL_FILE_CONTENT_42\nlast line\n";
+		let calls = 0;
+		let uri = "";
+		const mock = createMockModel({
+			handler: context => {
+				if (++calls % 2 === 1) {
+					const user = context.messages.filter(message => message.role === "user").at(-1)!;
+					const text =
+						typeof user.content === "string"
+							? user.content
+							: user.content
+									.filter(part => part.type === "text")
+									.map(part => part.text)
+									.join("\n");
+					expect(text).not.toContain("ORIGINAL_FILE_CONTENT_42");
+					uri = text.match(/attachment:\/\/original\/message\/[A-Za-z0-9%_-]+\/0/)?.[0] ?? "";
+					expect(uri).not.toBe("");
+					return { content: [{ type: "toolCall", name: "read", arguments: { path: `${uri}:2` } }] };
+				}
+				const result = context.messages.filter(message => message.role === "toolResult").at(-1)!;
+				expect(result.isError).not.toBeTrue();
+				expect(JSON.stringify(result.content)).toContain("ORIGINAL_FILE_CONTENT_42");
+				return { content: ["read completed"] };
+			},
+		});
+		const setup = await createRuntime(undefined, {
+			dispatchPrompt: undefined,
+			attachmentBlobStore: new BlobStore(blobDir),
+			resolveSessionProfile: async () => ({ options: { model: mock.model }, dispose() {} }),
+		});
+		const blobScope = spyOn(utils, "getBlobsDir").mockReturnValue(blobDir);
+		try {
+			await setup.runtime.attachmentUploads.stage("alice", {
+				uploadId: "file-upload",
+				clientMessageId: "file-message",
+				name: "notes.txt",
+				mediaType: "text/plain",
+				bytes: Buffer.byteLength(payload),
+				contentHash: `sha256:${new Bun.SHA256().update(payload).digest("hex")}`,
+				offset: 0,
+				contentBase64: Buffer.from(payload).toString("base64"),
+			});
+			await expect(
+				setup.runtime.start(
+					{
+						commandId: "file-denied",
+						principalId: "alice",
+						clientMessageId: "file-message",
+						attachmentUploadIds: ["file-upload"],
+						agentInstanceId: "file-denied-agent",
+						executionId: "file-denied-execution",
+						attemptId: "file-denied-attempt",
+						authorityGeneration: 1,
+						cwd: setup.cwd,
+					},
+					{ ...profile, restrictToolNames: true, toolNames: ["glob"] },
+				),
+			).rejects.toMatchObject({ code: "invalid_request" });
+			expect(calls).toBe(0);
+			expect(await setup.runtime.store.getAttempt("file-denied-attempt")).toBeUndefined();
+			const started = await setup.runtime.start(
+				{
+					commandId: "file-start",
+					principalId: "alice",
+					clientMessageId: "file-message",
+					attachmentUploadIds: ["file-upload"],
+					agentInstanceId: "file-agent",
+					executionId: "file-execution",
+					attemptId: "file-attempt",
+					authorityGeneration: 1,
+					cwd: setup.cwd,
+					explicitContinue: true,
+				},
+				profile,
+			);
+			await setup.runtime.drain();
+			expect(calls).toBe(2);
+			const ref = "grimoire://tasks/grimoire/file-test/agents/one";
+			const page = await setup.runtime.sessionHistoryPage(started.agentInstanceId, ref);
+			const user = page.entries.find(entry => entry.role === "user")!;
+			expect(user.text).toBe("");
+			expect(user.attachments?.[0]).toMatchObject({ name: "notes.txt", status: "available" });
+			await setup.runtime.dispose();
+			const restarted = await openRuntime(setup.options);
+			const originalUri = uri;
+			await restarted.start(
+				{
+					commandId: "file-resume",
+					principalId: "alice",
+					agentInstanceId: "file-agent",
+					executionId: "file-resume-execution",
+					attemptId: "file-resume-attempt",
+					authorityGeneration: 1,
+					cwd: setup.cwd,
+					explicitContinue: true,
+				},
+				profile,
+			);
+			await restarted.drain();
+			expect(calls).toBe(4);
+			expect(uri).toBe(originalUri);
+			const manager = await SessionManager.open(started.sessionFile!, undefined, restarted.store.sessionStorage);
+			let copiedPath = "";
+			expect(
+				await withOriginalAttachment(manager, uri, async filePath => {
+					copiedPath = filePath;
+					return Bun.file(filePath).text();
+				}),
+			).toBe(payload);
+			expect(fs.existsSync(copiedPath)).toBeFalse();
+			await expect(
+				withOriginalAttachment(SessionManager.inMemory(), uri, async () => "must not run"),
+			).rejects.toThrow("session branch");
+			const controller = new AbortController();
+			controller.abort();
+			await expect(
+				withOriginalAttachment(manager, uri, async () => "must not run", controller.signal),
+			).rejects.toThrow();
+			await expect(
+				withOriginalAttachment(manager, uri, async filePath => {
+					copiedPath = filePath;
+					throw new Error("read failed");
+				}),
+			).rejects.toThrow("read failed");
+			expect(fs.existsSync(copiedPath)).toBeFalse();
+			const original = user.attachments![0].resource!;
+			fs.writeFileSync(path.join(blobDir, original.contentHash.slice(7)), Buffer.alloc(original.bytes, 65));
+			await expect(withOriginalAttachment(manager, uri, async () => "must not run")).rejects.toThrow("SHA-256");
+		} finally {
+			for (const runtime of testRuntimes.splice(0)) await runtime.dispose();
+			blobScope.mockRestore();
+		}
+	});
+
+	it("delivers staged images through native start, queue and steer into provider input and retained user history", async () => {
+		const blobDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-upload-originals-"));
+		tempDirs.push(blobDir);
+		const reached = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let calls = 0;
+		const mock = createMockModel({
+			handler: async () => {
+				if (++calls === 1) {
+					reached.resolve();
+					await release.promise;
+				}
+				return { content: ["image response"] };
+			},
+		});
+		mock.input.push("image");
+		const setup = await createRuntime(undefined, {
+			attachmentBlobStore: new BlobStore(blobDir),
+			dispatchPrompt: undefined,
+			resolveSessionProfile: async () => ({ options: { model: mock.model }, dispose() {} }),
+		});
+		const png = Buffer.from(
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+			"base64",
+		);
+		const originalAttachment = {
+			name: "pixel.png",
+			mediaType: "image/png",
+			bytes: png.length,
+			contentHash: `sha256:${new Bun.SHA256().update(png).digest("hex")}`,
+		};
+		const agentInstanceRef = "grimoire://tasks/grimoire/attachment-test/agents/one";
+		const base: EngineCommandEnvelope = {
+			schema: "grimoire.engine.command.v1",
+			commandId: "image-start",
+			op: "start",
+			principalId: "alice",
+			deviceId: "test-device",
+			engineId: "test-engine",
+			engineGeneration: setup.runtime.engineGeneration,
+			agentInstanceId: "image-agent",
+			agentInstanceRef,
+			executionId: "image-execution",
+			attemptId: "image-attempt",
+			authorityGeneration: 1,
+			issuedAt: Date.now(),
+			payload: {
+				cwd: setup.cwd,
+				profileDigest: profile.profileDigest,
+				clientMessageId: "image-message",
+				attachmentUploadIds: ["first-image"],
+				explicitContinue: true,
+			},
+		};
+		const dispatch = (command: EngineCommandEnvelope) =>
+			dispatchEngineCommand({ runtime: setup.runtime, command, resolveLaunchProfile: () => profile });
+		const stage = async (uploadId: string, clientMessageId: string) => {
+			await setup.runtime.attachmentUploads.stage("alice", {
+				uploadId,
+				clientMessageId,
+				name: "pixel.png",
+				mediaType: "image/png",
+				bytes: png.length,
+				contentHash: `sha256:${new Bun.SHA256().update(png).digest("hex")}`,
+				offset: 0,
+				contentBase64: png.toString("base64"),
+			});
+		};
+		const blobScope = spyOn(utils, "getBlobsDir").mockReturnValue(blobDir);
+		try {
+			await stage("first-image", "image-message");
+			await dispatch(base);
+			await withTimeout(reached.promise, 5000, "Image-only start did not reach the provider");
+			const binding = setup.runtime.getBinding(base.agentInstanceId)!;
+			const runningCommand = {
+				...base,
+				runtimeBindingId: binding.bindingId,
+				bindingGeneration: binding.bindingGeneration,
+			};
+			await stage("queued-image", "queued-message");
+			await dispatch({
+				...runningCommand,
+				op: "enqueue",
+				commandId: "enqueue-image",
+				payload: {
+					clientMessageId: "queued-message",
+					text: "queued caption",
+					attachmentUploadIds: ["queued-image"],
+				},
+			});
+			expect(mock.calls).toHaveLength(1);
+			expect((await setup.runtime.listInbox(binding)).map(item => item.sourceEventId)).toEqual(["queued-message"]);
+			await stage("steer-image", "steer-message");
+			const steer = {
+				...runningCommand,
+				op: "steer" as const,
+				commandId: "steer-image-command",
+				payload: {
+					clientMessageId: "steer-message",
+					text: "steered caption",
+					attachmentUploadIds: ["steer-image"],
+				},
+			};
+			await dispatch(steer);
+			await dispatch(steer);
+			release.resolve();
+			await setup.runtime.drain();
+			expect((await setup.runtime.listInbox(binding)).map(item => item.sourceEventId)).toEqual(["queued-message"]);
+			await setup.runtime.store.claimDueInboxWakes(setup.runtime.engineGeneration);
+			const queued = (await setup.runtime.store.getInboxItemByQueueId("queued-message"))!;
+			const intent = await setup.runtime.store.intent(base.agentInstanceId);
+			const queueStart: EngineCommandEnvelope = {
+				...base,
+				commandId: "queue-image-start",
+				attemptId: "queued-attempt",
+				executionId: "queued-execution",
+				payload: {
+					cwd: setup.cwd,
+					profileDigest: profile.profileDigest,
+					queueId: queued.queueId,
+					expectedRevision: queued.revision,
+					mutationId: "consume-image",
+					expectedIntentRevision: intent.intentRevision,
+					explicitContinue: true,
+				},
+			};
+			await expect(
+				dispatch({
+					...queueStart,
+					commandId: "wrong-queued-identity",
+					payload: { ...queueStart.payload, clientMessageId: "different-message" },
+				}),
+			).rejects.toMatchObject({ code: "invalid_request" });
+			expect((await setup.runtime.store.getInboxItemByQueueId(queued.queueId))?.disposition).toBe("pending");
+			await dispatch(queueStart);
+			await setup.runtime.drain();
+			await dispatch(queueStart);
+			expect((await setup.runtime.store.getInboxItemByQueueId(queued.queueId))?.disposition).toBe("acknowledged");
+			const lastCallUsers = mock.calls.at(-1)!.context.messages.filter(message => message.role === "user");
+			expect(lastCallUsers).toHaveLength(3);
+			expect(
+				lastCallUsers.map(message =>
+					JSON.stringify(message.content).match(/attachment:\/\/original\/message\/[^/]+\/0/g),
+				),
+			).toEqual([
+				["attachment://original/message/image-message/0"],
+				["attachment://original/message/steer-message/0"],
+				["attachment://original/message/queued-message/0"],
+			]);
+			const providerImages = await normalizeModelContextImages(
+				[{ type: "image", mimeType: "image/png", data: png.toString("base64") }],
+				{ model: mock.model },
+			);
+			for (const message of lastCallUsers) {
+				expect(message).not.toHaveProperty("originalAttachments");
+				expect(Array.isArray(message.content) ? message.content.filter(part => part.type === "image") : []).toEqual(
+					providerImages ?? [],
+				);
+			}
+			expect(providerImages?.[0]?.data).not.toBe(png.toString("base64"));
+			await setup.runtime.dispose();
+			const reopened = await openRuntime(setup.options);
+			const page = await reopened.sessionHistoryPage(base.agentInstanceId, agentInstanceRef, undefined, 100);
+			const users = page.entries.filter(entry => entry.role === "user");
+			expect(users.map(entry => entry.clientMessageId)).toEqual([
+				"image-message",
+				"steer-message",
+				"queued-message",
+			]);
+			expect(users.map(entry => entry.images?.length)).toEqual([1, 1, 1]);
+			for (const entry of users) {
+				expect(entry.attachments).toHaveLength(1);
+				expect(entry.attachments?.[0].resource).toMatchObject({
+					...originalAttachment,
+					kind: "history_attachment",
+					attachmentIndex: 0,
+				});
+				validateRuntimeValue("resourceReadRequest", {
+					resource: entry.attachments?.[0].resource,
+					offset: 0,
+					limit: 65536,
+				});
+			}
+			expect(users.map(entry => entry.text)).toEqual([
+				"\n[Image]",
+				"steered caption\n[Image]",
+				"queued caption\n[Image]",
+			]);
+			const source = (await reopened.store.getBinding(base.agentInstanceId))!;
+			const loaded = await loadSessionFile(source.sessionFile!, reopened.store.sessionStorage);
+			const nativeUsers = loaded.entries.filter(entry => entry.type === "message" && entry.message.role === "user");
+			expect(nativeUsers).toHaveLength(3);
+			for (const entry of nativeUsers) expect(entry).toHaveProperty("originalAttachments", [originalAttachment]);
+			const archive = await reopened.sessionArchive(base.agentInstanceId);
+			expect(archive.nextOffset).toBeNull();
+			const checkpoint = JSON.parse(Buffer.from(archive.contentBase64, "base64").toString("utf8"));
+			expect(checkpoint.blobs).toContainEqual({
+				name: originalAttachment.contentHash.slice(7),
+				contentHash: originalAttachment.contentHash,
+				byteLength: png.length,
+				contentBase64: png.toString("base64"),
+			});
+			for (const replacement of [{ bytes: png.length + 1 }, { name: "../escape" }]) {
+				const jsonl = Buffer.from(checkpoint.sessionJsonlBase64, "base64")
+					.toString("utf8")
+					.split("\n")
+					.filter(Boolean)
+					.map(line => {
+						const entry = JSON.parse(line) as { originalAttachments?: object[] };
+						if (entry.originalAttachments)
+							entry.originalAttachments = entry.originalAttachments.map(item => ({ ...item, ...replacement }));
+						return JSON.stringify(entry);
+					})
+					.join("\n");
+				const corrupt = Buffer.from(
+					JSON.stringify({
+						...checkpoint,
+						sessionJsonlBase64: Buffer.from(jsonl).toString("base64"),
+						sessionJsonlHash: `sha256:${new Bun.SHA256().update(jsonl).digest("hex")}`,
+					}),
+				);
+				const destinationRef = "grimoire://tasks/grimoire/attachment-test/agents/corrupt-restore";
+				await expect(
+					reopened.sessionRestoreStage({
+						agentInstanceId: engineAgentInstanceId(destinationRef),
+						agentInstanceRef: destinationRef,
+						authorityGeneration: 1,
+						totalBytes: corrupt.length,
+						offset: 0,
+						contentHash: `sha256:${new Bun.SHA256().update(corrupt).digest("hex")}`,
+						contentBase64: corrupt.toString("base64"),
+					}),
+				).rejects.toMatchObject({ code: "invalid_request" });
+			}
+			const archivePath = path.join(blobDir, `${archive.contentHash.slice(7)}.gz`);
+			fs.writeFileSync(archivePath, Bun.gzipSync(Buffer.from(archive.contentBase64, "base64")));
+			await reopened.sessionArchiveRetire(source, archive.contentHash, archivePath, "original-retire");
+			const originalPath = path.join(blobDir, originalAttachment.contentHash.slice(7));
+			fs.unlinkSync(originalPath);
+			await reopened.sessionArchiveRestore(source, archive.contentHash, "original-retire");
+			expect(fs.readFileSync(originalPath)).toEqual(png);
+			const restored = await loadSessionFile(source.sessionFile!, reopened.store.sessionStorage);
+			expect(restored.entries.filter(entry => entry.type === "message" && entry.message.role === "user")).toEqual(
+				nativeUsers,
+			);
+			const sourceHistory = await reopened.sessionHistory(base.agentInstanceId);
+			if (!sourceHistory.sessionLeafEntryId) throw new Error("Expected retained image history leaf");
+			for (const mode of ["branch", "edit"] as const) {
+				const fork = await reopened.start(
+					{
+						commandId: `${mode}-original`,
+						agentInstanceId: mode === "edit" ? base.agentInstanceId : "original-branch",
+						executionId: `${mode}-original-execution`,
+						attemptId: `${mode}-original-attempt`,
+						authorityGeneration: 1,
+						cwd: setup.cwd,
+						historyEdit: {
+							mode,
+							source,
+							sourceSessionId: sourceHistory.sessionId,
+							expectedLeafEntryId: sourceHistory.sessionLeafEntryId,
+							entryId: users[0]!.entryId,
+							...(mode === "edit" ? { replacementText: "new image caption" } : {}),
+						},
+					},
+					profile,
+				);
+				await reopened.drain();
+				const forked = await loadSessionFile(fork.sessionFile!, reopened.store.sessionStorage);
+				const forkUser = forked.entries.find(entry => entry.type === "message" && entry.message.role === "user");
+				expect(forkUser).toHaveProperty("originalAttachments", [originalAttachment]);
+				const forkArchive = await reopened.sessionArchive(fork.agentInstanceId);
+				expect(forkArchive.nextOffset).toBeNull();
+				expect(JSON.parse(Buffer.from(forkArchive.contentBase64, "base64").toString("utf8")).blobs).toEqual(
+					checkpoint.blobs,
+				);
+			}
+		} finally {
+			release.resolve();
+			for (const runtime of testRuntimes.splice(0)) await runtime.dispose();
+			blobScope.mockRestore();
+		}
+	}, 30_000);
+
+	it("refuses missing or unsupported images before model dispatch and leaves failed queued delivery pending", async () => {
+		const mock = createMockModel({ handler: { content: ["must not run"] } });
+		const { runtime, cwd } = await createRuntime(undefined, {
+			dispatchPrompt: undefined,
+			resolveSessionProfile: async () => ({ options: { model: mock.model }, dispose() {} }),
+		});
+		const png = Buffer.from(
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+			"base64",
+		);
+		const request: EngineStartRequest = {
+			commandId: "reject-start",
+			principalId: "alice",
+			clientMessageId: "image-message",
+			attachmentUploadIds: ["image"],
+			agentInstanceId: "reject-agent",
+			executionId: "reject-execution",
+			attemptId: "reject-attempt",
+			authorityGeneration: 1,
+			cwd,
+		};
+		await expect(runtime.start(request, profile)).rejects.toThrow("owner");
+		await runtime.attachmentUploads.stage("alice", {
+			uploadId: "image",
+			clientMessageId: "image-message",
+			name: "pixel.png",
+			mediaType: "image/png",
+			bytes: png.length,
+			contentHash: `sha256:${new Bun.SHA256().update(png).digest("hex")}`,
+			offset: 0,
+			contentBase64: png.toString("base64"),
+		});
+		await expect(runtime.start(request, profile)).rejects.toThrow("does not accept images");
+		expect(mock.calls).toHaveLength(0);
+		expect(await runtime.store.getAttempt(request.attemptId)).toBeUndefined();
+		const queued = await runtime.enqueueAgentInbox(request.agentInstanceId, {
+			sourceEventId: "image-message",
+			sourceType: "user",
+			body: "",
+			attachments: { principalId: "alice", uploadIds: ["image"] },
+		});
+		await runtime.attachmentUploads.remove("alice", "image");
+		const queuedRequest = {
+			...request,
+			attachmentUploadIds: undefined,
+			queueId: queued.item.queueId,
+			expectedRevision: queued.item.revision,
+			mutationId: "consume-removed",
+			expectedIntentRevision: (await runtime.store.intent(request.agentInstanceId)).intentRevision,
+			explicitContinue: true,
+		};
+		await expect(runtime.start(queuedRequest, profile)).rejects.toThrow("removed");
+		expect((await runtime.store.getInboxItemByQueueId(queued.item.queueId))?.disposition).toBe("pending");
+		expect(mock.calls).toHaveLength(0);
+	});
+
+	it("keeps each launch's actual settings on its initiating native message after profile change and restart", async () => {
+		const mock = createMockModel({ reasoning: true, handler: { content: ["done"] } });
+		Object.assign(mock, {
+			thinking: { mode: "effort", efforts: [Effort.Low, Effort.High] } satisfies ThinkingConfig,
+		});
+		const setup = await createRuntime((session, input, identity) => session.prompt(input, identity), {
+			resolveSessionProfile: async launch => ({
+				options: { model: mock.model, thinkingLevel: launch.thinkingLevel },
+				dispose() {},
+			}),
+		});
+		const request = (suffix: string): EngineStartRequest => ({
+			commandId: `snapshot-command-${suffix}`,
+			agentInstanceRef: "grimoire://tasks/grimoire/snapshots/agents/one",
+			profileSelectionRevision: suffix === "one" ? 4 : 8,
+			clientMessageId: `snapshot-client-${suffix}`,
+			agentInstanceId: "snapshot-agent",
+			executionId: `snapshot-execution-${suffix}`,
+			attemptId: `snapshot-attempt-${suffix}`,
+			authorityGeneration: 1,
+			cwd: setup.cwd,
+			input: "same text",
+		});
+		const selected = { ...profile, launchProfileRef: "gctx:2222222222222222", thinkingLevel: ThinkingLevel.High };
+		await setup.runtime.start(request("one"), selected);
+		await setup.runtime.drain();
+		await setup.runtime.start(request("two"), {
+			...selected,
+			profileDigest: "changed-profile",
+			launchProfileRef: "gctx:3333333333333333",
+			thinkingLevel: ThinkingLevel.Low,
+		});
+		await setup.runtime.drain();
+		await setup.runtime.dispose();
+		const reopened = await openRuntime(setup.options);
+		const users = (await reopened.sessionHistory("snapshot-agent")).entries.filter(entry => entry.role === "user");
+		expect(
+			users.map(entry => [
+				entry.sourceCommandId,
+				entry.launchSnapshot?.attemptId,
+				entry.launchSnapshot?.profileRef,
+				entry.launchSnapshot?.thinkingLevel,
+			]),
+		).toEqual([
+			["snapshot-command-one", "snapshot-attempt-one", selected.launchProfileRef, "high"],
+			["snapshot-command-two", "snapshot-attempt-two", "gctx:3333333333333333", "low"],
+		]);
+		expect(users[0].launchSnapshot?.model).toEqual({
+			provider: mock.model.provider,
+			id: mock.model.id,
+			contextWindow: mock.model.contextWindow,
+		});
+		expect(new Set(users.map(entry => entry.launchSnapshot?.profileDigest)).size).toBe(2);
+		expect(
+			users.map(entry => [entry.launchSnapshot?.previousSelectionRevision, entry.launchSnapshot?.selectionRevision]),
+		).toEqual([
+			[0, 4],
+			[4, 8],
+		]);
+		let cursor: string | undefined;
+		const pagedSnapshots = [];
+		for (let pageIndex = 0; pageIndex < 16; pageIndex++) {
+			const page = await reopened.sessionHistoryPage("snapshot-agent", request("one").agentInstanceRef!, cursor, 1);
+			pagedSnapshots.push(...page.entries.filter(entry => entry.role === "user").map(entry => entry.launchSnapshot));
+			cursor = page.nextCursor ?? undefined;
+			if (!cursor) break;
+		}
+		expect(cursor).toBeUndefined();
+		expect(pagedSnapshots).toEqual(users.toReversed().map(entry => entry.launchSnapshot));
+		for (const call of mock.calls) {
+			expect(JSON.stringify(call.context)).not.toContain('"launchSnapshot"');
+			expect(JSON.stringify(call.context)).not.toContain('"profileDigest"');
+		}
+		const malformed = await createRuntime(async (session, input, identity) => {
+			const launchSnapshot = { ...identity!.launchSnapshot!, credential: "not-public" };
+			session.sessionManager.appendMessage(
+				{ role: "user", content: input, timestamp: Date.now() },
+				{ ...identity, launchSnapshot },
+			);
+			return true;
+		});
+		await malformed.runtime.start({ ...request("malformed"), cwd: malformed.cwd }, selected);
+		await malformed.runtime.drain();
+		expect((await malformed.runtime.sessionHistory("snapshot-agent")).entries[0]).not.toHaveProperty(
+			"launchSnapshot",
+		);
+		expect(
+			(await reopened.sessionHistory("snapshot-agent")).entries
+				.filter(entry => entry.role === "assistant")
+				.every(entry => !entry.launchSnapshot),
+		).toBe(true);
+	});
 
 	it("defers storage reclaim during execution and gates later starts and queries until maintenance settles", async () => {
 		const entered = Promise.withResolvers<void>();
@@ -675,6 +1251,11 @@ describe("EngineRuntime", () => {
 				clientMessageId: "steer-body-b",
 				message: { role: "user", content: [{ type: "text", text: "B" }] },
 			});
+			expect(
+				history.entries.find(
+					entry => entry.type === "message" && entry.sourceCommandId === "steer-context-accepted",
+				),
+			).not.toHaveProperty("launchSnapshot");
 			expect(await runtime.readInbox(second, queued.item.queueId)).toMatchObject({
 				sourceBody: "B",
 				deliveryPayload: "B",
@@ -1728,6 +2309,132 @@ describe("EngineRuntime", () => {
 			await runtime.dispose();
 		}
 	}, 60_000);
+
+	it.each(["inline", "blob"])(
+		"projects %s user and tool-result images from their own retained entries across restart",
+		async storage => {
+			const blobDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-history-image-blobs-"));
+			tempDirs.push(blobDir);
+			const blobScope = spyOn(utils, "getBlobsDir").mockReturnValue(blobDir);
+			const png = Buffer.from(
+				"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=",
+				"base64",
+			);
+			const image = storage === "inline" ? png : Buffer.concat([png, Buffer.alloc(2048)]);
+			const agentInstanceId = "history-image-agent";
+			const agentInstanceRef = "grimoire://tasks/grimoire/image-history/agents/owner";
+			try {
+				const fixture = await createRuntime(async session => {
+					session.sessionManager.appendMessage({
+						role: "user",
+						content: [
+							{ type: "text", text: "Uploaded image" },
+							{ type: "image", mimeType: "image/png", data: image.toString("base64") },
+							{ type: "text", text: "After uploaded image" },
+						],
+						timestamp: 1,
+					});
+					session.sessionManager.appendMessage({
+						role: "assistant",
+						content: [
+							{ type: "text", text: "Reading image" },
+							{ type: "toolCall", id: "read-image", name: "read", arguments: { path: "picture.png" } },
+						],
+						api: "openai-responses",
+						provider: "mock",
+						model: "mock",
+						timestamp: 2,
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "toolUse",
+					});
+					session.sessionManager.appendMessage({
+						role: "toolResult",
+						toolCallId: "read-image",
+						toolName: "read",
+						content: [
+							{ type: "text", text: "Before result image" },
+							{ type: "image", mimeType: "image/png", data: image.toString("base64") },
+							{ type: "text", text: "After result image" },
+						],
+						isError: false,
+						timestamp: 3,
+					});
+					return true;
+				});
+				await fixture.runtime.store.registerAgent({
+					agentInstanceId,
+					agentInstanceRef,
+					principalId: "owner",
+					authorityGeneration: 1,
+				});
+				const started = await fixture.runtime.start(
+					{
+						commandId: "history-image-start",
+						agentInstanceId,
+						agentInstanceRef,
+						executionId: "history-image-execution",
+						attemptId: "history-image-attempt",
+						authorityGeneration: 1,
+						cwd: fixture.cwd,
+						input: "images",
+					},
+					profile,
+				);
+				await fixture.runtime.drain();
+				const page = await fixture.runtime.sessionHistoryPage(
+					agentInstanceId,
+					agentInstanceRef,
+					undefined,
+					100,
+					started.attemptId,
+				);
+				const user = page.entries.find(entry => entry.role === "user")!;
+				const assistant = page.entries.find(entry => entry.role === "assistant")!;
+				expect(user.images).toMatchObject([{ status: "available" }]);
+				const upload = user.images![0].resource!;
+				const result = assistant.blocks!.find(block => block.toolCallId === "read-image")!.images![0].resource!;
+				expect(upload).toMatchObject({ entryId: user.entryId, blockIndex: 1, bytes: image.length });
+				expect(result.entryId).not.toBe(assistant.entryId);
+				expect(result).toMatchObject({ blockIndex: 1, contentHash: upload.contentHash, revision: upload.revision });
+				expect(user.blocks?.map(block => [block.blockIndex, block.text])).toEqual([
+					[0, "Uploaded image"],
+					[2, "After uploaded image"],
+				]);
+				expect(assistant.blocks!.find(block => block.toolCallId === "read-image")!.resultBlocks).toMatchObject([
+					{ blockIndex: 0, text: "Before result image" },
+					{ blockIndex: 1, image: { resource: result } },
+					{ blockIndex: 2, text: "After result image" },
+				]);
+				expect(page.entries.map(entry => entry.role)).toEqual(["user", "assistant"]);
+				expect(JSON.stringify(page.entries)).not.toContain(image.toString("base64"));
+				for (const resource of [upload, result]) {
+					const read = await fixture.runtime.store.runtimeResource({
+						principalId: "owner",
+						resource: { ...resource },
+						offset: 0,
+						limit: 65_536,
+					});
+					expect(Buffer.from(String(read.contentBase64), "base64")).toEqual(image);
+				}
+				await fixture.runtime.dispose();
+				const reopened = await openRuntime(fixture.options);
+				expect(
+					(await reopened.sessionHistoryPage(agentInstanceId, agentInstanceRef, undefined, 100, started.attemptId))
+						.entries,
+				).toEqual(page.entries);
+			} finally {
+				blobScope.mockRestore();
+			}
+		},
+		30_000,
+	);
 
 	it("restores archived images without their original blob store and never overwrites conflicting shared blobs", async () => {
 		const blobDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-archive-image-blobs-"));
@@ -4236,6 +4943,191 @@ describe("EngineRuntime", () => {
 		}
 	}, 60_000);
 
+	it("publishes durable tool-only and intermediate history while the next response is still running", async () => {
+		const release = Promise.withResolvers<void>();
+		const reachedFinal = Promise.withResolvers<void>();
+		const retained = Promise.withResolvers<void>();
+		const mock = createMockModel({
+			responses: (async function* () {
+				yield {
+					content: [
+						{ type: "toolCall" as const, id: "only-tool", name: "read", arguments: { path: "input.txt" } },
+					],
+				};
+				yield {
+					content: [
+						"Intermediate answer",
+						{ type: "toolCall" as const, id: "next-tool", name: "read", arguments: { path: "input.txt" } },
+					],
+				};
+				reachedFinal.resolve();
+				await release.promise;
+				yield { content: ["Final answer"] };
+			})(),
+		});
+		const { runtime, cwd, options } = await createRuntime(
+			(session, input) => session.prompt(input),
+			{},
+			{ model: mock.model },
+		);
+		fs.writeFileSync(path.join(cwd, "input.txt"), "Retained tool result");
+		const agentInstanceId = "incremental-history";
+		const agentInstanceRef = "grimoire://tasks/grimoire/history-checkpoint/agents/owner";
+		const attemptId = "incremental-history-attempt";
+		await runtime.store.registerAgent({
+			agentInstanceId,
+			agentInstanceRef,
+			principalId: "owner",
+			authorityGeneration: 1,
+		});
+		const checkpoints: EngineEvent[] = [];
+		const unsubscribe = runtime.subscribe(async event => {
+			if (
+				event.attemptId !== attemptId ||
+				event.kind !== "history_checkpoint" ||
+				!event.payload?.transcriptCheckpoint
+			)
+				return;
+			checkpoints.push(event);
+			try {
+				const page = await runtime.sessionHistoryPage(agentInstanceId, agentInstanceRef, undefined, 100, attemptId);
+				const assistants = page.entries.filter(entry => entry.role === "assistant");
+				if (
+					assistants.length === 2 &&
+					assistants.every(entry => entry.blocks?.some(block => block.toolStatus === "succeeded"))
+				)
+					retained.resolve();
+			} catch (error) {
+				retained.reject(error);
+			}
+		});
+		try {
+			await runtime.start(
+				{
+					commandId: "incremental-history-start",
+					agentInstanceId,
+					executionId: "incremental-history-execution",
+					attemptId,
+					authorityGeneration: 1,
+					cwd,
+					input: "Read twice",
+				},
+				{ ...profile, toolNames: ["read"], restrictToolNames: true },
+			);
+			await withTimeout(reachedFinal.promise, 10_000, "Provider did not reach the held final response");
+			await withTimeout(
+				retained.promise,
+				10_000,
+				"No history invalidation exposed retained tool-only results before completion",
+			);
+			expect((await runtime.store.getAttempt(attemptId))?.state).toBe("running");
+			const page = await runtime.sessionHistoryPage(agentInstanceId, agentInstanceRef, undefined, 100, attemptId);
+			const assistants = page.entries.filter(entry => entry.role === "assistant");
+			expect(assistants.map(entry => entry.text)).toEqual(["", "Intermediate answer"]);
+			expect(assistants.map(entry => entry.blocks?.find(block => block.kind === "tool_call")?.toolCallId)).toEqual([
+				"only-tool",
+				"next-tool",
+			]);
+			expect(assistants.every(entry => entry.assistantMessageId)).toBe(true);
+			const latest = checkpoints.at(-1)!;
+			expect((await runtime.store.getAttempt(attemptId))?.transcript_revision).toBe(
+				Number((latest.payload!.transcriptCheckpoint as { revision: number }).revision),
+			);
+			const inspect = new SQL(`sqlite:${options.databasePath.replaceAll("\\", "/")}`);
+			try {
+				const rows = await inspect.unsafe(
+					"SELECT summary_payload,projection_payload FROM engine_event_outbox WHERE attempt_id=? AND kind='history_checkpoint'",
+					[attemptId],
+				);
+				for (const row of rows) {
+					expect(row.summary_payload).toBeNull();
+					const changes = JSON.parse(row.projection_payload);
+					expect(changes).toMatchObject([{ kind: "invalidate", attemptId, value: { resource: "history" } }]);
+					expect(changes).toHaveLength(1);
+				}
+			} finally {
+				await inspect.end();
+			}
+		} finally {
+			release.resolve();
+			unsubscribe();
+			await runtime.drain();
+		}
+	}, 30_000);
+
+	it("anchors a retry after its empty failed response through native execution and restart", async () => {
+		const mock = createMockModel({
+			responses: [{ throw: "503 service unavailable" }, { content: ["Recovered answer"] }],
+		});
+		const { runtime, cwd, options } = await createRuntime(
+			(session, input, identity) => session.prompt(input, identity),
+			{},
+			{ model: mock.model },
+		);
+		const agentInstanceId = "empty-retry-history";
+		const agentInstanceRef = "grimoire://tasks/grimoire/empty-retry-history/agents/owner";
+		const attemptId = "empty-retry-attempt";
+		await runtime.store.registerAgent({
+			agentInstanceId,
+			agentInstanceRef,
+			principalId: "owner",
+			authorityGeneration: 1,
+		});
+		await runtime.start(
+			{
+				commandId: "empty-retry-command",
+				agentInstanceId,
+				agentInstanceRef,
+				executionId: "empty-retry-execution",
+				attemptId,
+				authorityGeneration: 1,
+				cwd,
+				input: "Recover from a transient error",
+			},
+			profile,
+		);
+		await runtime.drain();
+		expect(mock.calls).toHaveLength(2);
+		const events = await runtime.store.pendingEvents();
+		const retry = events.find(event => event.kind === "retry_scheduled")!;
+		const page = await runtime.sessionHistoryPage(agentInstanceId, agentInstanceRef, undefined, 100, attemptId);
+		const lifecycle = await runtime.store.nativeLifecyclePage(
+			agentInstanceId,
+			agentInstanceRef,
+			100,
+			attemptId,
+			page.lifecycleContext,
+		);
+		const assistants = page.entries.filter(entry => entry.role === "assistant");
+		expect(assistants.map(entry => [entry.text, entry.stopReason])).toEqual([
+			["", "error"],
+			["Recovered answer", "stop"],
+		]);
+		expect(lifecycle.activities.find(event => event.eventId === String(retry.eventId))).toMatchObject({
+			afterEntryId: assistants[0].entryId,
+			terminal: false,
+		});
+		const failure = events.find(
+			event =>
+				event.kind === "assistant_snapshot" &&
+				event.payload?.assistantMessageId === assistants[0].assistantMessageId,
+		)!;
+		expect(failure.payload).toMatchObject({ text: "", stopReason: "error", historyEntryId: assistants[0].entryId });
+		expect(failure.eventId).toBeLessThan(retry.eventId);
+		await runtime.dispose();
+		const reopened = await openRuntime(options);
+		const retained = await reopened.sessionHistoryPage(agentInstanceId, agentInstanceRef, undefined, 100, attemptId);
+		const retainedLifecycle = await reopened.store.nativeLifecyclePage(
+			agentInstanceId,
+			agentInstanceRef,
+			100,
+			attemptId,
+			retained.lifecycleContext,
+		);
+		expect(retainedLifecycle.activities).toEqual(lifecycle.activities);
+		expect(retained.entries).toEqual(page.entries);
+	}, 30_000);
+
 	it("streams bounded assistant snapshots with one identity before terminal settlement", async () => {
 		let retainedSessionManager: SessionManager | undefined;
 		const releaseFinal = Promise.withResolvers<void>();
@@ -4249,6 +5141,7 @@ describe("EngineRuntime", () => {
 						{ type: "thinking" as const, thinking: "private streaming reasoning sentinel" },
 						"Inspecting the file.",
 						{ type: "toolCall" as const, id: "read-stream", name: "read", arguments: { path: "private.txt" } },
+						"Waiting for the read result.",
 					],
 				};
 				finalCall.resolve();
@@ -4279,12 +5172,13 @@ describe("EngineRuntime", () => {
 			{ ...profile, toolNames: ["read"], restrictToolNames: true },
 		);
 		await finalCall.promise;
-		expect(await firstSnapshot).toMatchObject({
+		const first = await firstSnapshot;
+		expect({ attemptId: first.attemptId, payload: first.payload }).toMatchObject({
 			attemptId: started.attemptId,
 			payload: {
 				assistantMessageId: expect.stringMatching(/^assistant_[0-9a-f]{32}$/),
 				revision: 1,
-				text: "Inspecting the file.",
+				text: expect.stringContaining("Inspecting the file."),
 				status: "streaming",
 				textTruncated: false,
 			},
@@ -4297,6 +5191,15 @@ describe("EngineRuntime", () => {
 		const snapshots = events.filter(event => event.kind === "assistant_snapshot");
 		const messageIds = [...new Set(snapshots.map(event => String(event.payload?.assistantMessageId)))];
 		expect(messageIds).toHaveLength(2);
+		const toolEvents = events.filter(event => event.kind === "tool_started" || event.kind === "tool_settled");
+		expect(toolEvents.map(event => event.payload)).toMatchObject([
+			{ toolCallId: "read-stream", origin: { messageId: messageIds[0], blockId: "block_2" } },
+			{ toolCallId: "read-stream", origin: { messageId: messageIds[0], blockId: "block_2" } },
+		]);
+		const precedingBlocks = events.filter(
+			event => event.kind === "message_updated" && event.payload?.messageId === messageIds[0],
+		);
+		expect(precedingBlocks.at(-1)!.eventId).toBeLessThan(toolEvents[0]!.eventId);
 		for (const assistantMessageId of messageIds) {
 			const revisions = snapshots
 				.filter(event => event.payload?.assistantMessageId === assistantMessageId)
@@ -4326,6 +5229,7 @@ describe("EngineRuntime", () => {
 				status: "available",
 				text: "private streaming reasoning sentinel",
 			}),
+			expect.objectContaining({ kind: "text", blockIndex: 1, text: "Inspecting the file." }),
 			expect.objectContaining({
 				kind: "tool_call",
 				toolCallId: "read-stream",
@@ -4334,8 +5238,30 @@ describe("EngineRuntime", () => {
 				toolStatus: "succeeded",
 				resultText: expect.stringContaining("private tool output sentinel"),
 			}),
+			expect.objectContaining({ kind: "text", blockIndex: 3, text: "Waiting for the read result." }),
 		]);
 		expect(assistantEntries[0]?.blocks?.[0]?.blockId).toContain(`history:${history.sessionId}:`);
+		let cursor: string | undefined;
+		let foundMixedPage = false;
+		for (let pageNumber = 0; pageNumber < 8; pageNumber++) {
+			const page = await runtime.sessionHistoryPage(
+				started.agentInstanceId,
+				"grimoire://tasks/grimoire/stream/agents/agent-assistant-stream",
+				cursor,
+				1,
+			);
+			const mixed = page.entries.find(entry => entry.entryId === assistantEntries[0]?.entryId);
+			if (mixed) {
+				expect(mixed.blocks?.map(block => [block.kind, block.blockIndex, block.text])).toEqual(
+					assistantEntries[0]?.blocks?.map(block => [block.kind, block.blockIndex, block.text]),
+				);
+				foundMixedPage = true;
+				break;
+			}
+			if (!page.nextCursor) break;
+			cursor = page.nextCursor;
+		}
+		expect(foundMixedPage).toBe(true);
 		const hiddenEntry = retainedSessionManager?.appendMessage({
 			role: "assistant",
 			content: [{ type: "redactedThinking", data: "HIDDEN-PROVIDER-PAYLOAD" }],
@@ -4591,6 +5517,10 @@ describe("EngineRuntime", () => {
 		const firstCancelled = events.findIndex(event => event.kind === "cancelled");
 		expect(events.indexOf(snapshots.at(-1)!)).toBeLessThan(firstCancelled);
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("cancelled");
+		const retainedAnswer = (await runtime.sessionHistory(started.agentInstanceId)).entries.find(
+			entry => entry.assistantMessageId === snapshots[0]?.payload?.assistantMessageId,
+		);
+		expect(retainedAnswer).toMatchObject({ text: "a".repeat(400), stopReason: "aborted" });
 		await runtime.dispose();
 	}, 60_000);
 
@@ -7722,13 +8652,27 @@ describe("EngineRuntime", () => {
 		"fails an attempt safely when the model turn ends with a $kind provider error",
 		async ({ message, publicReason }) => {
 			const { runtime, cwd } = await createRuntime(async session => {
+				const answer: AssistantMessage = {
+					role: "assistant",
+					content: [{ type: "text", text: publicReason === "Error" ? "Partial response" : "" }],
+					api: "openai-responses",
+					provider: "mock",
+					model: "mock",
+					timestamp: Date.now(),
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "error",
+					errorMessage: message,
+				};
+				session.sessionManager.appendMessage(answer);
 				Object.defineProperty(session, "getLastAssistantMessage", {
-					value: () => ({
-						role: "assistant",
-						content: [],
-						stopReason: "error",
-						errorMessage: message,
-					}),
+					value: () => answer,
 				});
 				return true;
 			});
@@ -7748,6 +8692,18 @@ describe("EngineRuntime", () => {
 			const events = await runtime.store.pendingEvents();
 			const modelEffectId = String(events.find(event => event.kind === "model_started")?.payload?.effectId);
 			const modelEffect = await runtime.store.getEffect(modelEffectId);
+			const history = await runtime.sessionHistory(started.agentInstanceId);
+			expect(history.entries).toHaveLength(1);
+			expect(history.entries[0]).toMatchObject({ role: "assistant", stopReason: "error" });
+			expect(history.entries[0]).not.toHaveProperty("errorMessage");
+			expect(JSON.stringify(history)).not.toContain("secretcredential");
+			const paged = await runtime.sessionHistoryPage(
+				started.agentInstanceId,
+				"grimoire://tasks/grimoire/provider-error/agents/agent-provider-error",
+				undefined,
+				1,
+			);
+			expect(paged.entries[0]).toMatchObject({ entryId: history.entries[0]?.entryId, stopReason: "error" });
 			await runtime.dispose();
 			expect(events.find(event => event.kind === "completed")).toBeUndefined();
 			const failed = events.find(event => event.kind === "failed");

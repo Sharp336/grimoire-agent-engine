@@ -85,8 +85,12 @@ export interface EngineLaunchProfile {
 
 export interface EngineStartRequest {
 	commandId: string;
+	/** Ready uploads owned by principalId and bound to clientMessageId. */
+	attachmentUploadIds?: string[];
 	/** Opaque UI identity for the exact user message introduced by this command. */
 	clientMessageId?: string;
+	/** Canonical AGI revision whose selected profile matches this compiled launch. */
+	profileSelectionRevision?: number;
 	agentInstanceId: string;
 	/** Canonical hosted identity used for child AgentInstance creation. */
 	agentInstanceRef?: string;
@@ -150,6 +154,8 @@ export interface EngineTarget {
 
 export interface EngineSteerRequest extends EngineTarget {
 	commandId: string;
+	principalId?: string;
+	attachmentUploadIds?: string[];
 	context?: string;
 	/** Opaque UI identity for the exact user message introduced by this command. */
 	clientMessageId?: string;
@@ -225,11 +231,18 @@ export interface EngineInboxTarget extends EngineTarget {
 	sessionId: string;
 }
 
+/** Immutable upload references; principal is supplied by the authenticated command adapter. */
+export interface EngineMessageAttachments {
+	principalId: string;
+	uploadIds: string[];
+}
+
 export interface EngineInboxSource {
 	sourceEventId: string;
 	sourceType: EngineInboxSourceType;
 	sender?: string;
 	body: string;
+	attachments?: EngineMessageAttachments;
 	createdAt?: number;
 	deliverAt?: number;
 	wakeIntent?: boolean;
@@ -244,6 +257,7 @@ export interface EngineInboxItem {
 	sourceType: EngineInboxSourceType;
 	sender?: string;
 	sourceBody: string;
+	attachments?: EngineMessageAttachments;
 	deliveryPayload: string;
 	annotation?: string;
 	deliverAt?: number;
@@ -366,6 +380,7 @@ export interface EngineEvent {
 		| "profile_route_changed"
 		| "inbox_changed"
 		| "assistant_snapshot"
+		| "history_checkpoint"
 		| "message_updated"
 		| "trace_reasoning"
 		| "trace_tool";
@@ -401,6 +416,12 @@ export class EngineTargetError extends Error {
 
 export function validateStartRequest(request: EngineStartRequest): void {
 	validateCommandContext(request.context);
+	if (
+		request.profileSelectionRevision !== undefined &&
+		(!Number.isSafeInteger(request.profileSelectionRevision) || request.profileSelectionRevision < 1)
+	) {
+		throw new EngineTargetError("invalid_request", "Invalid profile selection revision");
+	}
 	for (const [name, value] of Object.entries({
 		commandId: request.commandId,
 		agentInstanceId: request.agentInstanceId,
@@ -415,6 +436,8 @@ export function validateStartRequest(request: EngineStartRequest): void {
 	const queued = request.queueId !== undefined;
 	const historyEdit = request.historyEdit;
 	const restoreCheckpoint = request.restoreCheckpoint;
+	if (request.attachmentUploadIds !== undefined && (queued || historyEdit || restoreCheckpoint))
+		throw new EngineTargetError("invalid_request", "Explicit attachments require an ordinary message start");
 	if (
 		queued
 			? !request.queueId?.trim() ||
@@ -430,7 +453,7 @@ export function validateStartRequest(request: EngineStartRequest): void {
 				? request.mutationId !== undefined ||
 					request.expectedRevision !== undefined ||
 					(request.input !== undefined && !request.input.trim())
-				: (!request.input?.trim() && !request.explicitContinue) ||
+				: (!request.input?.trim() && !request.explicitContinue && !request.attachmentUploadIds?.length) ||
 					request.mutationId !== undefined ||
 					request.expectedRevision !== undefined
 	) {

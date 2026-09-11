@@ -93,6 +93,8 @@ export type Provider = string;
 export type ThinkingBudgets = { [key in Effort]?: number };
 
 export interface Usage {
+	/** Provider accounting is incomplete; numeric placeholders must not be displayed as measured usage/cost. */
+	unavailable?: boolean;
 	/** Non-cached conversation input tokens (matches the bucket the provider bills as new input). */
 	input: number;
 	/** Total conversation output tokens for the turn, including thinking, assistant text, and tool-call argument tokens. */

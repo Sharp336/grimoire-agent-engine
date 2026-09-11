@@ -490,6 +490,7 @@ const streamOpenAIResponsesOnce = (
 					"responses",
 					resolvedBaseUrl,
 					typeof requestParams.model === "string" ? requestParams.model : model.id,
+					requestParams,
 				);
 				const requestReasoningEffortFallback = requestReasoningEffortFallbacks.has(fallbackKey)
 					? requestReasoningEffortFallbacks.get(fallbackKey)
@@ -539,6 +540,7 @@ const streamOpenAIResponsesOnce = (
 					"responses",
 					resolvedBaseUrl,
 					typeof requestParams.model === "string" ? requestParams.model : model.id,
+					requestParams,
 				);
 				activeRequestParams = requestParams;
 				return callWithCopilotModelRetry(

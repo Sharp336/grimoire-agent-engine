@@ -44,9 +44,10 @@ async function pendingTotal(
 	if (control || total.records > limit) return total;
 	const inbox = (await sql.unsafe(
 		`SELECT COUNT(*) AS records,COALESCE(SUM(bytes),0) AS bytes FROM (
-		 SELECT octet_length(delivery_payload)+COALESCE(octet_length(annotation),0) AS bytes
-		 FROM engine_inbox_items INDEXED BY engine_pending_inbox_budget_idx
-		 WHERE disposition='pending' ${agentInstanceId ? "AND agent_instance_id=?" : ""} LIMIT ?)`,
+		 SELECT octet_length(i.delivery_payload)+COALESCE(octet_length(i.annotation),0)+COALESCE(octet_length(s.attachment_refs),0) AS bytes
+		 FROM engine_inbox_items i INDEXED BY engine_pending_inbox_budget_idx
+		 JOIN engine_inbox_sources s ON s.source_event_id=i.source_event_id
+		 WHERE i.disposition='pending' ${agentInstanceId ? "AND i.agent_instance_id=?" : ""} LIMIT ?)`,
 		[...(agentInstanceId ? [agentInstanceId] : []), limit - total.records + 1],
 	)) as PendingTotal[];
 	return { records: total.records + Number(inbox[0].records), bytes: total.bytes + Number(inbox[0].bytes) };

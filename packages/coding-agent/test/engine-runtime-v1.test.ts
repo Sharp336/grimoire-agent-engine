@@ -6,6 +6,7 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
 import type { EngineBindingSnapshot, EngineInboxTarget } from "../src/engine/contracts";
 import { engineAgentId, engineAgentInstanceId } from "../src/engine/route";
+import { nativeHistoryAttachments, nativeHistoryImages } from "../src/engine/runtime-history";
 import type { CanonicalOwnershipCandidate, LegacyStartOwnershipCandidate } from "../src/engine/runtime-ownership";
 import {
 	RUNTIME_PROTOCOL_HASH,
@@ -16,7 +17,9 @@ import {
 } from "../src/engine/runtime-protocol";
 import { publicRuntimeQueueItem } from "../src/engine/runtime-queue";
 import { readRuntimeEvents } from "../src/engine/runtime-read";
+import { readRuntimeResource } from "../src/engine/runtime-resources";
 import { type EngineCommandIdentity, EngineStore } from "../src/engine/store";
+import { BlobStore } from "../src/session/blob-store";
 
 describe("runtime v1 durable boundaries", () => {
 	const stores: EngineStore[] = [];
@@ -377,6 +380,7 @@ describe("runtime v1 durable boundaries", () => {
 				toolName: "read",
 				policy: "tracked",
 				inputHash: "sha256:private-input-hash",
+				...(i === 19 ? {} : { origin: { messageId: "assistant_parallel", blockId: `block_${i}` } }),
 			});
 			revisions.push(event.eventId);
 		}
@@ -386,6 +390,7 @@ describe("runtime v1 durable boundaries", () => {
 			toolName: "write",
 			policy: "permit",
 			inputHash: "sha256:approval",
+			origin: { messageId: "assistant_permission", blockId: "block_1" },
 		});
 		const snapshot = await store.runtimeSnapshot(scope, request);
 		const detail = snapshot.agents[0];
@@ -395,6 +400,11 @@ describe("runtime v1 durable boundaries", () => {
 		);
 		expect(tools.map(tool => tool.revision)).toEqual(revisions.slice(0, 16));
 		expect(tools.every(tool => tool.phase === "started")).toBeTrue();
+		expect(tools).toMatchObject(
+			Array.from({ length: 16 }, (_, i) => ({
+				origin: { messageId: "assistant_parallel", blockId: `block_${i}` },
+			})),
+		);
 		expect(snapshot.work.changes).toBe(17);
 		const cursor = String(detail.toolsNextCursor);
 		const remaining = await store.runtimeTools({ ...request, cursor });
@@ -402,13 +412,14 @@ describe("runtime v1 durable boundaries", () => {
 			revision: revisions.at(-1),
 			nextCursor: null,
 			items: [
-				{ toolCallId: "tool-16" },
+				{ toolCallId: "tool-16", origin: { messageId: "assistant_parallel", blockId: "block_16" } },
 				{ toolCallId: "tool-17" },
 				{ toolCallId: "tool-18" },
 				{ toolCallId: "tool-19" },
 			],
 		});
 		expect((remaining.work as { scannedRows: number }).scannedRows).toBeLessThan(20);
+		expect((remaining.items as Record<string, unknown>[]).at(-1)).not.toHaveProperty("origin");
 		await store.appendEvent({
 			...target,
 			causationCommandId: target.commandId,
@@ -465,9 +476,15 @@ describe("runtime v1 durable boundaries", () => {
 		await store.resolveToolApproval(target, "effect-permit", "deny");
 		const live = await store.runtimeEvents(eventsRequest(before.epoch, settled.eventId, scope));
 		expect(live.changes.some(change => change.kind === "tool" && change.value.phase === "denied")).toBeTrue();
+		expect(
+			live.changes.find(change => change.kind === "tool" && change.value.phase === "denied")?.value.origin,
+		).toEqual({ messageId: "assistant_permission", blockId: "block_1" });
 		await store.interruptGeneration(2);
 		const recovered = await store.runtimeTools(request);
 		expect((recovered.items as Array<{ phase: string }>).every(tool => tool.phase === "unknown")).toBeTrue();
+		expect((recovered.items as Record<string, unknown>[])[0]).toMatchObject({
+			origin: { messageId: "assistant_parallel", blockId: "block_0" },
+		});
 		expect(
 			(recovered.items as Array<{ toolCallId: string }>).some(
 				tool => tool.toolCallId === "tool-19" || tool.toolCallId === "tool-permit",
@@ -502,6 +519,136 @@ describe("runtime v1 durable boundaries", () => {
 		expect(continued.agents[0].tools).toMatchObject([{ toolCallId: "tool-cut", phase: "started" }]);
 		expect((await store.runtimeTools(request)).items).toEqual([]);
 		expect((await store.runtimeSnapshot(scope, request)).agents[0].tools).toEqual([]);
+	});
+	it("preserves native Responses tool correlation through admission, settlement and reopen", async () => {
+		let store = await createStore();
+		const target = await active(store);
+		const agentInstanceRef = identity("root").agentInstanceRef;
+		const request = { principalId: "owner", agentInstanceRef, attemptId: target.attemptId };
+		const scope: RuntimeScope = { kind: "attempt", agentInstanceRef, attemptId: target.attemptId, kinds: ["tool"] };
+		const before = await store.runtimeSnapshot(scope, request);
+		const toolCallId = `call_${"a".repeat(24)}|fc_${"b".repeat(50)}`;
+		const origin = { messageId: "assistant_native", blockId: "block_2" };
+		const effect = {
+			effectId: "native-effect",
+			origin,
+			toolCallId,
+			toolName: "read",
+			policy: "tracked" as const,
+			inputHash: "sha256:native",
+		};
+		const started = await store.startToolEffect(target, effect);
+		expect((await store.runtimeTools(request)).items).toMatchObject([{ toolCallId, phase: "started", origin }]);
+		await expect(store.runtimeTools({ ...request, principalId: "foreign" })).rejects.toMatchObject({
+			code: "agent_not_found",
+		});
+		const file = path.join(directories.at(-1)!, "engine.sqlite");
+		await store.close();
+		stores.splice(stores.indexOf(store), 1);
+		store = await EngineStore.open(file);
+		stores.push(store);
+		expect((await store.runtimeTools(request)).items).toMatchObject([{ toolCallId, phase: "started", origin }]);
+		await expect(
+			store.settleToolEffect({ ...target, attemptId: "another-attempt" }, effect.effectId, "completed"),
+		).rejects.toThrow();
+		expect(await store.getEffect(effect.effectId)).toMatchObject({ tool_call_id: toolCallId, state: "started" });
+		await store.settleToolEffect(target, effect.effectId, "completed");
+		const changes = await store.runtimeEvents(eventsRequest(before.epoch, started.eventId, scope));
+		expect(changes.changes.filter(change => change.kind === "tool")).toMatchObject([
+			{ value: { toolCallId, phase: "finished", origin } },
+		]);
+		expect((await store.runtimeTools(request)).items).toEqual([]);
+		await store.close();
+		stores.splice(stores.indexOf(store), 1);
+		store = await EngineStore.open(file);
+		stores.push(store);
+		expect(await store.getEffect(effect.effectId)).toMatchObject({
+			tool_call_id: toolCallId,
+			state: "settled",
+			outcome: "completed",
+			assistant_message_id: origin.messageId,
+			assistant_block_id: origin.blockId,
+		});
+		await expect(
+			store.startToolEffect(target, {
+				...effect,
+				effectId: "bad-origin",
+				toolCallId: "bad-origin",
+				origin: { ...origin, blockId: "" },
+			}),
+		).rejects.toMatchObject({ code: "invalid_request" });
+		expect(await store.getEffect("bad-origin")).toBeUndefined();
+		for (const [index, invalid] of [
+			"call_|",
+			"|fc_1",
+			"call_1|fc_1|extra",
+			"call_1/fc_1",
+			"call_1|fc_1\n",
+			"x".repeat(201),
+		].entries()) {
+			const effectId = `invalid-native-${index}`;
+			await expect(
+				store.startToolEffect(target, { ...effect, effectId, toolCallId: invalid }),
+			).rejects.toMatchObject({ code: "invalid_request" });
+			expect(await store.getEffect(effectId)).toBeUndefined();
+		}
+	});
+	it("retains every error result when parallel tool admissions roll back on the shared SQLite connection", async () => {
+		let store = await createStore();
+		const target = await active(store);
+		const sessionPath = path.join(directories.at(-1)!, "parallel-errors.jsonl");
+		const header = { type: "session", id: "parallel-errors", version: 3, timestamp: new Date().toISOString() };
+		await store.sessionStorage.writeText(sessionPath, `${JSON.stringify(header)}\n`);
+		const writer = store.sessionStorage.openWriter(sessionPath);
+		const results: Array<{
+			type: string;
+			id: string;
+			parentId: string | null;
+			message: { role: string; toolCallId: string; content: string };
+		}> = [];
+		await Promise.all(
+			Array.from({ length: 4 }, async (_, index) => {
+				await expect(
+					store.startToolEffect(target, {
+						effectId: `rejected-${index}`,
+						toolCallId: `invalid/${index}`,
+						toolName: "read",
+						policy: "tracked",
+						inputHash: "sha256:rejected",
+					}),
+				).rejects.toMatchObject({ code: "invalid_request" });
+				const entry = {
+					type: "message",
+					id: `result-${index}`,
+					parentId: results.at(-1)?.id ?? null,
+					message: { role: "toolResult", toolCallId: `invalid/${index}`, content: "admission rejected" },
+				};
+				results.push(entry);
+				await writer.append(`${JSON.stringify(entry)}\n`);
+			}),
+		);
+		await writer.close();
+		await store.sessionStorage.drain();
+		const file = path.join(directories.at(-1)!, "engine.sqlite");
+		await store.close();
+		stores.splice(stores.indexOf(store), 1);
+		store = await EngineStore.open(file);
+		stores.push(store);
+		const retained = (await store.sessionStorage.readText(sessionPath))
+			.trim()
+			.split("\n")
+			.map(line => JSON.parse(line));
+		expect(retained).toEqual([header, ...results]);
+		const inspect = new SQL(`sqlite:${file.replaceAll("\\", "/")}`);
+		try {
+			const indexed = (await inspect.unsafe(
+				"SELECT entry_id,parent_entry_id FROM engine_history_entries WHERE session_path=? AND entry_type='message' ORDER BY ordinal",
+				[sessionPath],
+			)) as Array<{ entry_id: string; parent_entry_id: string | null }>;
+			expect(indexed).toEqual(results.map(entry => ({ entry_id: entry.id, parent_entry_id: entry.parentId })));
+		} finally {
+			await inspect.end();
+		}
 	});
 	it("rolls back tool baseline revisions with failed effect transactions and refuses invalid tool identity before admission", async () => {
 		const store = await createStore();
@@ -1717,6 +1864,94 @@ describe("runtime v1 durable boundaries", () => {
 		const range = await store.runtimeResource({ principalId: "owner", resource, offset: 0, limit: 4 });
 		expect(Buffer.from(String(range.contentBase64), "base64").toString("utf8")).toBe("abcd");
 	});
+	it("anchors retry events between their native responses and distinguishes rejected controls from Attempt completion", async () => {
+		const store = await createStore();
+		const agent = identity("retry-chronology");
+		await store.registerAgent(agent);
+		const target = { ...binding("retry-chronology"), sessionFile: "/retry-chronology.jsonl" };
+		await store.commitAttemptTransition(target, "running", [{ kind: "running" }]);
+		const emit = (
+			kind: "assistant_snapshot" | "retry_scheduled" | "retry_settled" | "rejected" | "completed",
+			payload = {},
+		) => store.appendEvent({ ...target, causationCommandId: target.commandId, kind, payload });
+		await emit("assistant_snapshot", { assistantMessageId: "failed-response", text: "" });
+		const retry = await emit("retry_scheduled");
+		const rejected = await emit("rejected");
+		await emit("assistant_snapshot", { assistantMessageId: "final-response", text: "Answer" });
+		await emit("retry_settled");
+		const completed = await emit("completed");
+		await emit("assistant_snapshot", { assistantMessageId: "failed-response", text: "" });
+		const entries = [
+			{ type: "session", version: 3, id: "retry-session", timestamp: new Date(0).toISOString(), cwd: "/test" },
+			{
+				type: "message",
+				id: "user",
+				parentId: null,
+				sourceCommandId: target.commandId,
+				timestamp: new Date(3000).toISOString(),
+				message: { role: "user", content: "Start" },
+			},
+			{
+				type: "message",
+				id: "failure",
+				parentId: "user",
+				assistantMessageId: "failed-response",
+				timestamp: new Date(2000).toISOString(),
+				message: { role: "assistant", content: [], stopReason: "error" },
+			},
+			{
+				type: "message",
+				id: "final",
+				parentId: "failure",
+				assistantMessageId: "final-response",
+				timestamp: new Date(1000).toISOString(),
+				message: { role: "assistant", content: [{ type: "text", text: "Answer" }], stopReason: "stop" },
+			},
+		];
+		await store.sessionStorage.writeText(
+			target.sessionFile,
+			entries.map(entry => JSON.stringify(entry)).join("\n") + "\n",
+		);
+		const history = await store.nativeHistoryPage(agent.agentInstanceId, undefined, 50);
+		const page = await store.nativeLifecyclePage(
+			agent.agentInstanceId,
+			agent.agentInstanceRef,
+			50,
+			undefined,
+			history.lifecycleContext,
+		);
+		expect(page.activities.find(event => event.eventId === String(retry.eventId))).toMatchObject({
+			afterEntryId: "failure",
+			terminal: false,
+		});
+		expect(page.activities.find(event => event.eventId === String(rejected.eventId))).toMatchObject({
+			afterEntryId: "failure",
+			status: "failed",
+			terminal: false,
+		});
+		expect(page.activities.find(event => event.eventId === String(completed.eventId))).toMatchObject({
+			afterEntryId: "final",
+			terminal: true,
+		});
+		expect(page.activities.find(event => event.status === "started")).toMatchObject({
+			afterEntryId: "user",
+			terminal: false,
+		});
+		for (const event of page.activities) validateRuntimeValue("lifecycleActivity", event);
+		const lastEntry = await store.nativeHistoryPage(agent.agentInstanceId, undefined, 1);
+		const partial = await store.nativeLifecyclePage(
+			agent.agentInstanceId,
+			agent.agentInstanceRef,
+			50,
+			undefined,
+			lastEntry.lifecycleContext,
+		);
+		const partialRetry = partial.activities.find(event => event.eventId === String(retry.eventId));
+		expect(partialRetry).toBeDefined();
+		expect(partialRetry?.afterEntryId).toBeUndefined();
+		expect(partialRetry?.beforeEntryId).toBeUndefined();
+		expect(partial.work.scannedRows).toBeLessThan(runtimeLimits.bootstrapScannedRows);
+	});
 	it("pins bounded lifecycle pages to reachable native entries and their immutable event cut", async () => {
 		const store = await createStore();
 		const agent = identity("lifecycle");
@@ -1986,6 +2221,225 @@ describe("runtime v1 durable boundaries", () => {
 		);
 		await expect(store.nativeHistoryPage(agent.agentInstanceId, page.nextCursor!)).rejects.toThrow("lineage");
 	}, 30_000);
+	it("downloads original files only through their authorized message descriptor and rejects changed ownership or metadata", async () => {
+		const store = await createStore();
+		const directory = directories.at(-1)!;
+		const blobs = new BlobStore(path.join(directory, "blobs"));
+		const bytes = Buffer.from(Array.from({ length: 130_017 }, (_, index) => index % 251));
+		const saved = await blobs.put(bytes);
+		const unrelated = await blobs.put(Buffer.from("not owned by this message"));
+		const agent = identity("file-resource");
+		await store.registerAgent(agent);
+		const target = { ...binding("file-resource"), sessionFile: "/file-resource.jsonl" };
+		const header = { type: "session", version: 3, id: "file-session", cwd: "/test" };
+		const message = {
+			type: "message",
+			id: "file-entry",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			message: { role: "user", content: "" },
+			originalAttachments: [
+				{
+					name: "report.bin",
+					mediaType: "application/octet-stream",
+					bytes: bytes.length,
+					contentHash: `sha256:${saved.hash}`,
+				},
+			],
+		};
+		const source = `${JSON.stringify(header)}\n${JSON.stringify(message)}\n`;
+		await store.sessionStorage.writeText(target.sessionFile, source);
+		await store.commitAttemptTransition(target, "completed", [{ kind: "completed" }], {
+			transcriptCheckpoint: {
+				sessionId: header.id,
+				sessionPath: target.sessionFile,
+				leafEntryId: message.id,
+				byteBoundary: Buffer.byteLength(source),
+			},
+		});
+		const page = await store.nativeHistoryPage(agent.agentInstanceId, undefined, 100, target.attemptId);
+		const resource = (await nativeHistoryAttachments(page, agent.agentInstanceRef, blobs)).get(message.id)![0]
+			.resource!;
+		validateRuntimeValue("resourceReadRequest", { resource, offset: 0, limit: 65536 });
+		const sql = new SQL(`sqlite:${path.join(directory, "engine.sqlite").replaceAll("\\", "/")}`);
+		const read = (changes: Record<string, unknown> = {}, principalId = "owner", offset = 0, limit = 65536) =>
+			readRuntimeResource(sql, { principalId, resource: { ...resource, ...changes }, offset, limit }, blobs);
+		try {
+			const pieces: Buffer[] = [];
+			for (let offset = 0; offset < bytes.length; offset += 65536) {
+				const result = await read({}, "owner", offset);
+				validateRuntimeValue("httpRange", result);
+				pieces.push(Buffer.from(String(result.contentBase64), "base64"));
+			}
+			expect(Buffer.concat(pieces)).toEqual(bytes);
+			expect(await read({}, "owner", bytes.length)).toMatchObject({ contentBase64: "", nextOffset: null });
+			await expect(read({}, "other")).rejects.toThrow("authorized");
+			for (const change of [
+				{ contentHash: `sha256:${unrelated.hash}` },
+				{ attachmentIndex: 1 },
+				{ name: "other.bin" },
+				{ mediaType: "text/plain" },
+				{ bytes: bytes.length + 1 },
+				{ attemptId: "other-attempt" },
+				{ sessionId: "other-session" },
+				{ entryId: "other-entry" },
+				{ revision: "other-lineage" },
+			])
+				await expect(read(change)).rejects.toMatchObject({
+					code: expect.stringMatching(/stale_target|history_expired/),
+				});
+			await expect(read({ attachmentIndex: -1 })).rejects.toMatchObject({ code: "invalid_request" });
+			await expect(read({}, "owner", 0, 65537)).rejects.toMatchObject({ code: "invalid_request" });
+			await expect(read({}, "owner", bytes.length + 1)).rejects.toMatchObject({ code: "invalid_request" });
+			await fs.promises.writeFile(saved.path, Buffer.from("truncated"));
+			await expect(read()).rejects.toMatchObject({ code: "stale_target" });
+			await fs.promises.unlink(saved.path);
+			await expect(read()).rejects.toMatchObject({ code: "history_expired" });
+			expect(
+				(await nativeHistoryAttachments(page, agent.agentInstanceRef, blobs)).get(message.id)![0],
+			).toMatchObject({ name: "report.bin", status: "unavailable", reason: "history_expired" });
+			await blobs.put(bytes);
+			await store.sessionStorage.writeText(
+				target.sessionFile,
+				`${JSON.stringify(header)}\n${JSON.stringify({ ...message, message: { role: "assistant", content: "not user owned" } })}\n`,
+			);
+			await expect(read()).rejects.toMatchObject({ code: "stale_target" });
+			const replaced = await store.nativeHistoryPage(agent.agentInstanceId, undefined, 100, target.attemptId);
+			expect(await nativeHistoryAttachments(replaced, agent.agentInstanceRef, blobs)).toEqual(new Map());
+			await expect(read({ revision: replaced.lifecycleContext.lineage })).rejects.toMatchObject({
+				code: "stale_target",
+			});
+		} finally {
+			await sql.close();
+		}
+	});
+
+	it("serves image ranges only for the exact authorized retained content block, never for a bare blob hash", async () => {
+		const store = await createStore();
+		const directory = directories.at(-1)!;
+		const blobs = new BlobStore(path.join(directory, "blobs"));
+		const bytes = Buffer.from(Array.from({ length: 130_017 }, (_, index) => index % 251));
+		const saved = await blobs.put(bytes);
+		const unrelated = await blobs.put(Buffer.from("not present in this history"));
+		const agent = identity("image-resource");
+		await store.registerAgent(agent);
+		const target = { ...binding("image-resource"), sessionFile: "/image-resource.jsonl" };
+		const header = JSON.stringify({ type: "session", version: 3, id: "image-session", cwd: "/test" });
+		const message = {
+			type: "message",
+			id: "image-entry",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			message: {
+				role: "toolResult",
+				toolCallId: "image-read",
+				content: [
+					{ type: "text", text: "image follows" },
+					{ type: "image", mimeType: "image/png", data: saved.ref },
+				],
+			},
+		};
+		const source = `${header}\n${JSON.stringify(message)}\n`;
+		await store.sessionStorage.writeText(target.sessionFile, source);
+		await store.commitAttemptTransition(target, "completed", [{ kind: "completed" }], {
+			transcriptCheckpoint: {
+				sessionId: "image-session",
+				sessionPath: target.sessionFile,
+				leafEntryId: "image-entry",
+				byteBoundary: Buffer.byteLength(source),
+			},
+		});
+		const page = await store.nativeHistoryPage(agent.agentInstanceId, undefined, 100, target.attemptId);
+		const descriptors = await nativeHistoryImages(page, agent.agentInstanceRef, blobs);
+		const resource = descriptors.get("image-entry")![0].resource!;
+		validateRuntimeValue("resourceReadRequest", { resource, offset: 0, limit: 65_536 });
+		expect(resource).toMatchObject({ entryId: "image-entry", blockIndex: 1, bytes: bytes.length });
+		expect(resource.revision).not.toBe(page.revision);
+		const sql = new SQL(`sqlite:${path.join(directory, "engine.sqlite").replaceAll("\\", "/")}`);
+		const lineage = await sql.unsafe("SELECT history_lineage FROM omp_session_files WHERE path=?", [
+			target.sessionFile,
+		]);
+		expect(resource.revision).toBe(String(lineage[0].history_lineage));
+		const read = (changes: Record<string, unknown> = {}, principalId = "owner", offset = 0, limit = 65_536) =>
+			readRuntimeResource(sql, { principalId, resource: { ...resource, ...changes }, offset, limit }, blobs);
+		try {
+			const pieces: Buffer[] = [];
+			for (let offset = 0; offset < bytes.length; offset += 65_536) {
+				const result = await read({}, "owner", offset);
+				validateRuntimeValue("httpRange", result);
+				pieces.push(Buffer.from(String(result.contentBase64), "base64"));
+			}
+			expect(Buffer.concat(pieces)).toEqual(bytes);
+			expect(await read({}, "owner", bytes.length)).toMatchObject({ contentBase64: "", nextOffset: null });
+			await expect(read({}, "other")).rejects.toThrow("authorized");
+			await expect(read({ contentHash: `sha256:${unrelated.hash}` })).rejects.toThrow("content block");
+			await expect(read({ blockIndex: 0 })).rejects.toThrow("content block");
+			await expect(read({ mediaType: "image/jpeg" })).rejects.toThrow("content block");
+			await expect(read({ bytes: bytes.length + 1 })).rejects.toThrow("size");
+			await expect(read({ attemptId: "other-attempt" })).rejects.toThrow("Attempt");
+			await expect(read({ revision: "changed-lineage" })).rejects.toThrow("lineage");
+			await expect(read({ blockIndex: -1 })).rejects.toMatchObject({ code: "invalid_request" });
+			await expect(read({ mediaType: "image/svg+xml" })).rejects.toMatchObject({ code: "invalid_request" });
+			await expect(read({}, "owner", 0, 65_537)).rejects.toMatchObject({ code: "invalid_request" });
+			await expect(read({}, "owner", bytes.length + 1)).rejects.toMatchObject({ code: "invalid_request" });
+			await fs.promises.unlink(saved.path);
+			await expect(read()).rejects.toMatchObject({ code: "history_expired" });
+			expect((await nativeHistoryImages(page, agent.agentInstanceRef, blobs)).get("image-entry")).toEqual([
+				{ entryId: "image-entry", blockIndex: 1, status: "unavailable", reason: "history_expired" },
+			]);
+			await blobs.put(bytes);
+			await store.sessionStorage.writeText(
+				target.sessionFile,
+				`${header}\n${JSON.stringify({ ...message, message: { role: "user", content: "replaced" } })}\n`,
+			);
+			await expect(read()).rejects.toThrow("lineage");
+			await store.sessionStorage.writeText(
+				target.sessionFile,
+				`${header}\n${JSON.stringify({
+					...message,
+					message: {
+						...message.message,
+						content: [
+							{ type: "image", mimeType: "image/png" },
+							{ type: "image", mimeType: "image/png", data: "not base64" },
+							{ type: "image", mimeType: "image/svg+xml", data: "PHN2Zy8+" },
+						],
+					},
+				})}\n`,
+			);
+			const unavailable = await nativeHistoryImages(
+				await store.nativeHistoryPage(agent.agentInstanceId, undefined, 100, target.attemptId),
+				agent.agentInstanceRef,
+				blobs,
+			);
+			expect(unavailable.get("image-entry")).toEqual([
+				{ entryId: "image-entry", blockIndex: 0, status: "unavailable", reason: "invalid_image" },
+				{ entryId: "image-entry", blockIndex: 1, status: "unavailable", reason: "invalid_image" },
+				{ entryId: "image-entry", blockIndex: 2, status: "unavailable", reason: "unsupported_format" },
+			]);
+			const largeMessage = {
+				...message,
+				message: {
+					...message.message,
+					content: [{ type: "text", text: "x".repeat(runtimeLimits.httpPageBytes) }, message.message.content[1]],
+				},
+			};
+			await store.sessionStorage.writeText(target.sessionFile, `${header}\n${JSON.stringify(largeMessage)}\n`);
+			const updated = await sql.unsafe("SELECT history_lineage FROM omp_session_files WHERE path=?", [
+				target.sessionFile,
+			]);
+			resource.revision = String(updated[0].history_lineage);
+			const blobRead = spyOn(blobs, "getRange");
+			try {
+				await expect(read()).rejects.toMatchObject({ code: "restore_budget" });
+				expect(blobRead).not.toHaveBeenCalled();
+			} finally {
+				blobRead.mockRestore();
+			}
+		} finally {
+			await sql.close();
+		}
+	});
 	it("keeps a retained Attempt history resource pinned across another binding and a store reopen", async () => {
 		const store = await createStore();
 		const databasePath = path.join(directories.at(-1)!, "engine.sqlite");

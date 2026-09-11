@@ -4,6 +4,26 @@
 
 ### Added
 
+- Experimental Cursor headless sessions retain native history and enforce per-tool permissions; profile activation remains disabled pending full integration.
+
+- Official Cursor ACP session adapter with exact-session restore and bounded cancellation.
+
+- Model reference queries expose image-input capabilities; profiles inherit exact catalog capabilities only when a route has no explicit input restriction.
+
+- History keeps retry activity between its actual responses and distinguishes Attempt completion from rejected control commands.
+
+- Intermediate messages and tool-only responses refresh durable history before the whole run finishes, without changing task status.
+
+- Runtime tool updates preserve their source assistant message and block through approval, settlement and restart.
+
+- Retained assistant history preserves text positions among public reasoning and tool calls.
+
+- Retained assistant history exposes failure and interruption outcomes, including empty failed responses, without exposing provider diagnostics.
+
+- Native initiating messages retain their actual launch profile, model, effort and context settings across profile changes and restart.
+
+- Model reference queries expose supported effort levels to headless clients, including bounded batch discovery.
+
 - Native history archives now include referenced image payloads and restore them without the original blob store; incomplete copies and conflicting existing blobs are rejected.
 
 - Added idle-only disk reclamation with measured database/WAL savings, low-space deferral and safe snapshot cursor resynchronization.
@@ -27,6 +47,16 @@
 - Added exact local OMP account bindings for Grimoire AgentProfiles, so Artel can use an existing Codex subscription without copying OAuth credentials.
 
 ### Fixed
+
+- Retry history stays after an empty failed response, including after restart.
+
+- Explicit reasoning-off selections retain their wire meaning on supported profile routes instead of silently becoming low effort.
+- Agent runs now finish after a successful retried yield instead of remaining stuck in recovery.
+- Artel Opus/Fable routes preserve the advertised max effort when executing through OpenAI-compatible gateways.
+- Engine profiles reject unsupported explicit effort instead of silently launching at another level.
+- Preserve conversation history when concurrent tool admissions fail, instead of losing successfully saved results to an unrelated transaction rollback.
+
+- Codex Responses tool calls retain their complete provider correlation IDs through execution, runtime snapshots and restart instead of failing admission.
 
 - Refresh changed fallback routes and provider accounts for the next ordinary message while keeping the active Attempt on its launch settings.
 - Reject oversized retained profile metadata before reading its body, preserving the original data for recovery.

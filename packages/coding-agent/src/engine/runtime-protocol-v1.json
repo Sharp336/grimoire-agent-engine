@@ -6,7 +6,7 @@
   "$ref": "#/$defs/request",
   "x-artel": {
     "version": "1.0",
-    "contractRevision": 9,
+    "contractRevision": 12,
     "limits": {
       "wsMessageBytes": 262144,
       "deliveryBatchBytes": 65536,
@@ -269,11 +269,252 @@
     }
   },
   "$defs": {
+    "attachmentUploadIds": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/id" }
+    },
+    "composerText": {
+      "type": "string",
+      "maxLength": 196608
+    },
+    "attachment": {
+      "type": "object",
+      "properties": {
+        "uploadId": {
+          "$ref": "#/$defs/id"
+        },
+        "clientMessageId": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f\\u007f/\\\\]+(?![\\s\\S])"
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 128,
+          "pattern": "^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+(?![\\s\\S])"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "contentHash": {
+          "type": "string",
+          "minLength": 71,
+          "maxLength": 71,
+          "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+        }
+      },
+      "required": [
+        "uploadId",
+        "clientMessageId",
+        "name",
+        "mediaType",
+        "bytes",
+        "contentHash"
+      ],
+      "additionalProperties": false
+    },
+    "attachmentStageRequest": {
+      "type": "object",
+      "properties": {
+        "uploadId": {
+          "$ref": "#/$defs/id"
+        },
+        "clientMessageId": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f\\u007f/\\\\]+(?![\\s\\S])"
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 128,
+          "pattern": "^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+(?![\\s\\S])"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "contentHash": {
+          "type": "string",
+          "minLength": 71,
+          "maxLength": 71,
+          "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "contentBase64": {
+          "type": "string",
+          "maxLength": 87384,
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?(?![\\s\\S])"
+        }
+      },
+      "required": [
+        "uploadId",
+        "clientMessageId",
+        "name",
+        "mediaType",
+        "bytes",
+        "contentHash",
+        "offset",
+        "contentBase64"
+      ],
+      "additionalProperties": false
+    },
+    "nativeAttachmentStageRequest": {
+      "type": "object",
+      "properties": {
+        "uploadId": {
+          "$ref": "#/$defs/id"
+        },
+        "clientMessageId": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255,
+          "pattern": "^[^\\u0000-\\u001f\\u007f/\\\\]+(?![\\s\\S])"
+        },
+        "mediaType": {
+          "type": "string",
+          "minLength": 3,
+          "maxLength": 128,
+          "pattern": "^[a-z0-9!#$&^_.+-]+/[a-z0-9!#$&^_.+-]+(?![\\s\\S])"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "contentHash": {
+          "type": "string",
+          "minLength": 71,
+          "maxLength": 71,
+          "pattern": "^sha256:[a-f0-9]{64}(?![\\s\\S])"
+        },
+        "offset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "contentBase64": {
+          "type": "string",
+          "maxLength": 87384,
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?(?![\\s\\S])"
+        },
+        "principalId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "uploadId",
+        "clientMessageId",
+        "name",
+        "mediaType",
+        "bytes",
+        "contentHash",
+        "offset",
+        "contentBase64",
+        "principalId"
+      ],
+      "additionalProperties": false
+    },
+    "attachmentStageResult": {
+      "type": "object",
+      "properties": {
+        "attachment": {
+          "$ref": "#/$defs/attachment"
+        },
+        "nextOffset": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "complete": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "attachment",
+        "nextOffset",
+        "complete"
+      ],
+      "additionalProperties": false
+    },
+    "attachmentRemoveRequest": {
+      "type": "object",
+      "properties": {
+        "uploadId": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": [
+        "uploadId"
+      ],
+      "additionalProperties": false
+    },
+    "nativeAttachmentRemoveRequest": {
+      "type": "object",
+      "properties": {
+        "uploadId": {
+          "$ref": "#/$defs/id"
+        },
+        "principalId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      },
+      "required": [
+        "uploadId",
+        "principalId"
+      ],
+      "additionalProperties": false
+    },
+    "attachmentRemoveResult": {
+      "type": "object",
+      "properties": {
+        "removed": {
+          "const": true
+        }
+      },
+      "required": [
+        "removed"
+      ],
+      "additionalProperties": false
+    },
     "id": {
       "type": "string",
       "minLength": 1,
       "maxLength": 200,
       "pattern": "^[A-Za-z0-9_.:-]+$"
+    },
+    "toolCallId": {
+      "description": "Exact provider correlation ID: a legacy ID or two nonempty IDs joined by one pipe. The final negative lookahead requires absolute end of input, including for trailing newlines.",
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 200,
+      "pattern": "^[A-Za-z0-9_.:-]+(?:\\|[A-Za-z0-9_.:-]+)?(?![\\s\\S])"
     },
     "agi": {
       "type": "string",
@@ -596,10 +837,13 @@
                   "maxLength": 32000
                 },
                 "text": {
-                  "$ref": "#/$defs/text"
+                  "$ref": "#/$defs/composerText"
                 },
                 "clientMessageId": {
                   "$ref": "#/$defs/id"
+                },
+                "attachmentUploadIds": {
+                  "$ref": "#/$defs/attachmentUploadIds"
                 }
               },
               "required": [
@@ -653,10 +897,13 @@
                   "maxLength": 32000
                 },
                 "text": {
-                  "$ref": "#/$defs/text"
+                  "$ref": "#/$defs/composerText"
                 },
                 "clientMessageId": {
                   "$ref": "#/$defs/id"
+                },
+                "attachmentUploadIds": {
+                  "$ref": "#/$defs/attachmentUploadIds"
                 }
               },
               "required": [
@@ -698,10 +945,13 @@
               "type": "object",
               "properties": {
                 "text": {
-                  "$ref": "#/$defs/text"
+                  "$ref": "#/$defs/composerText"
                 },
                 "clientMessageId": {
                   "$ref": "#/$defs/id"
+                },
+                "attachmentUploadIds": {
+                  "$ref": "#/$defs/attachmentUploadIds"
                 },
                 "deliverAt": {
                   "type": "integer",
@@ -750,10 +1000,13 @@
                   "type": "object",
                   "properties": {
                     "text": {
-                      "$ref": "#/$defs/text"
+                      "$ref": "#/$defs/composerText"
                     },
                     "clientMessageId": {
                       "$ref": "#/$defs/id"
+                    },
+                    "attachmentUploadIds": {
+                      "$ref": "#/$defs/attachmentUploadIds"
                     }
                   },
                   "required": [
@@ -2457,6 +2710,12 @@
     "bulkResource": {
       "oneOf": [
         {
+          "$ref": "#/$defs/historyImageResource"
+        },
+        {
+          "$ref": "#/$defs/historyAttachmentResource"
+        },
+        {
           "type": "object",
           "properties": {
             "kind": {
@@ -2511,6 +2770,41 @@
           "$ref": "#/$defs/queueResource"
         }
       ]
+    },
+    "historyAttachmentResource": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "history_attachment" },
+        "agentInstanceRef": { "$ref": "#/$defs/agi" },
+        "attemptId": { "$ref": "#/$defs/id" },
+        "sessionId": { "$ref": "#/$defs/id" },
+        "entryId": { "$ref": "#/$defs/id" },
+        "revision": { "$ref": "#/$defs/id" },
+        "attachmentIndex": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "name": { "type": "string", "minLength": 1, "maxLength": 255 },
+        "mediaType": { "type": "string", "minLength": 3, "maxLength": 128 },
+        "bytes": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "contentHash": { "$ref": "#/$defs/hash" }
+      },
+      "required": ["kind", "agentInstanceRef", "attemptId", "sessionId", "entryId", "revision", "attachmentIndex", "name", "mediaType", "bytes", "contentHash"],
+      "additionalProperties": false
+    },
+    "historyImageResource": {
+      "type": "object",
+      "properties": {
+        "kind": { "const": "history_image" },
+        "agentInstanceRef": { "$ref": "#/$defs/agi" },
+        "attemptId": { "$ref": "#/$defs/id" },
+        "sessionId": { "$ref": "#/$defs/id" },
+        "entryId": { "$ref": "#/$defs/id" },
+        "revision": { "$ref": "#/$defs/id" },
+        "blockIndex": { "type": "integer", "minimum": 0, "maximum": 65535 },
+        "mediaType": { "enum": ["image/png", "image/jpeg", "image/gif", "image/webp"] },
+        "bytes": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "contentHash": { "$ref": "#/$defs/hash" }
+      },
+      "required": ["kind", "agentInstanceRef", "attemptId", "sessionId", "entryId", "revision", "blockIndex", "mediaType", "bytes", "contentHash"],
+      "additionalProperties": false
     },
     "bulkPreview": {
       "type": "object",
@@ -2930,11 +3224,27 @@
       ],
       "additionalProperties": false
     },
+    "toolOrigin": {
+      "type": "object",
+      "properties": {
+        "messageId": {
+          "$ref": "#/$defs/id"
+        },
+        "blockId": {
+          "$ref": "#/$defs/id"
+        }
+      },
+      "required": ["messageId", "blockId"],
+      "additionalProperties": false
+    },
     "toolDetail": {
       "type": "object",
       "properties": {
+        "origin": {
+          "$ref": "#/$defs/toolOrigin"
+        },
         "toolCallId": {
-          "$ref": "#/$defs/id"
+          "$ref": "#/$defs/toolCallId"
         },
         "name": {
           "type": "string",
@@ -4913,6 +5223,9 @@
         "kind": {
           "const": "lifecycle"
         },
+        "terminal": {
+          "type": "boolean"
+        },
         "source": {
           "const": "engine"
         },
@@ -4989,8 +5302,11 @@
     "toolSnapshot": {
       "type": "object",
       "properties": {
+        "origin": {
+          "$ref": "#/$defs/toolOrigin"
+        },
         "toolCallId": {
-          "$ref": "#/$defs/id"
+          "$ref": "#/$defs/toolCallId"
         },
         "name": {
           "type": "string",

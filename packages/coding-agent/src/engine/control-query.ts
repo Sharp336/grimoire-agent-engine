@@ -16,6 +16,7 @@ import { dispatchEngineCommand, type EngineCommandEnvelope, engineCommandIdentit
 import { safeEngineErrorDetail } from "./public-error";
 import { engineAgentId } from "./route";
 import type { EngineRestoreHistoryTarget, EngineRuntime } from "./runtime";
+import type { EngineAttachmentStageRequest } from "./runtime-attachments";
 import { RuntimeQueryError } from "./runtime-projection";
 import {
 	ENGINE_CONTROL_OPS,
@@ -65,6 +66,8 @@ export type EngineControlQueryMethod =
 	| "session.archive.restore"
 	| "storage.reclaim"
 	| "session.restore.stage"
+	| "attachments.stage"
+	| "attachments.remove"
 	| "session.restore.history"
 	| "session.usage"
 	| "models.reference"
@@ -568,9 +571,37 @@ async function dispatchRequest(
 				contentBase64: requiredString(params, "contentBase64"),
 				replaceRetainedBinding: optionalBoolean(params.replaceRetainedBinding),
 			});
+		case "attachments.stage": {
+			validateRuntimeValue("nativeAttachmentStageRequest", params);
+			const { principalId, ...chunk } = params;
+			return await options.runtime.attachmentUploads.stage(
+				principalId as string,
+				chunk as unknown as EngineAttachmentStageRequest,
+				signal,
+			);
+		}
+		case "attachments.remove":
+			validateRuntimeValue("nativeAttachmentRemoveRequest", params);
+			return await options.runtime.attachmentUploads.remove(
+				requiredString(params, "principalId"),
+				requiredString(params, "uploadId"),
+			);
 		case "session.usage":
 			return await options.runtime.sessionUsage(requiredTarget(params), signal);
 		case "models.reference": {
+			if (params.modelIds !== undefined) {
+				const ids = requiredStringArray(params, "modelIds");
+				if (ids.length > 64 || ids.some(id => id.length > 300))
+					throw new Error("At most 64 bounded model ids are allowed");
+				return {
+					models: ids.map(modelIdentityId => {
+						const reference = resolveCanonicalModelLimits(modelIdentityId);
+						return reference
+							? { status: "resolved", modelIdentityId, ...reference }
+							: { status: "unknown", modelIdentityId };
+					}),
+				};
+			}
 			const modelIdentityId = requiredString(params, "modelIdentityId");
 			const limits = resolveCanonicalModelLimits(modelIdentityId);
 			return limits ? { status: "resolved", modelIdentityId, ...limits } : { status: "unknown", modelIdentityId };
@@ -697,6 +728,8 @@ async function capabilities(options: ServerOptions): Promise<Record<string, unkn
 			"session.archive.restore",
 			"storage.reclaim",
 			"session.restore.stage",
+			"attachments.stage",
+			"attachments.remove",
 			"session.restore.history",
 			"session.usage",
 			"models.reference",
@@ -963,6 +996,8 @@ function publicEvent(event: EngineEvent): EngineEvent {
 	const payload = event.payload;
 	if (!payload) return event;
 	switch (event.kind) {
+		case "history_checkpoint":
+			return { ...event, payload: {} };
 		case "trace_reasoning":
 			return { ...event, payload: pick(payload, ["state"]) };
 		case "assistant_snapshot":
@@ -1147,6 +1182,8 @@ function validateRequest(value: unknown): EngineControlQueryRequest {
 			"session.archive.restore",
 			"storage.reclaim",
 			"session.restore.stage",
+			"attachments.stage",
+			"attachments.remove",
 			"session.restore.history",
 			"session.usage",
 			"models.reference",

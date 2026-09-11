@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Usage records can mark unavailable provider accounting instead of asserting measured zero usage.
+
 ### Fixed
 
 - Omitted unsupported reasoning effort for fixed-reasoning Grok models behind OpenAI-compatible gateways.

@@ -773,6 +773,7 @@ export async function recordRuntimeProjection(
 				{
 					toolCallId: event.payload?.toolCallId,
 					name: event.payload?.toolName,
+					...(event.payload?.origin ? { origin: event.payload.origin } : {}),
 					phase:
 						event.kind === "tool_started"
 							? "started"
