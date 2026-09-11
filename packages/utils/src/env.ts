@@ -11,7 +11,10 @@ const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 export function removePrivateRuntimeEnv(env: Record<string, string | undefined>, extraKeys: string[] = []): void {
 	const explicit = new Set(extraKeys.map(key => key.toUpperCase()));
 	for (const key of Object.keys(env)) {
-		if (explicit.has(key.toUpperCase()) || /^GRIMOIRE_.*(?:TOKEN|BEARER|SECRET|PASSWORD|KEY)$/i.test(key)) {
+		if (
+			explicit.has(key.toUpperCase()) ||
+			/^(?:(?:GRIMOIRE|ARTEL)_.*(?:TOKEN|BEARER|SECRET|PASSWORD|KEY)|ARTEL_(?:LOCAL|UPSTREAM)_BEARER_.+)$/i.test(key)
+		) {
 			delete env[key];
 		}
 	}

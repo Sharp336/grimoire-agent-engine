@@ -178,6 +178,9 @@ describe("filterChildShellEnv", () => {
 			GRIMOIRE_CLIENT_PROVIDER_BINDING_KEY: "synthetic-binding",
 			grimoire_session_token: "synthetic-case",
 			CUSTOM_AUTH: "synthetic-custom",
+			ARTEL_LOCAL_BEARER_fixture: "synthetic-local",
+			ARTEL_UPSTREAM_BEARER_fixture: "synthetic-session",
+			ARTEL_SHARED_CLIENT_HOST_TOKEN: "synthetic-client-host",
 			GRIMOIRE_SERVER_URL: "http://127.0.0.1:9",
 		};
 		const serviceToken = env.CUSTOM_AUTH;
@@ -188,7 +191,7 @@ describe("filterChildShellEnv", () => {
 				process.execPath,
 				"--no-env-file",
 				"-e",
-				"process.stdout.write(JSON.stringify(Object.keys(process.env).filter(k => /GRIMOIRE|CUSTOM_AUTH/i.test(k))))",
+				"process.stdout.write(JSON.stringify(Object.keys(process.env).filter(k => /GRIMOIRE|ARTEL|CUSTOM_AUTH/i.test(k))))",
 			],
 			{
 				cwd,
