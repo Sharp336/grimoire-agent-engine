@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Agent tools no longer inherit private Grimoire transport credentials or provider binding keys from the Engine process.
+
 ### Added
 
 - Experimental Cursor headless sessions retain native history and enforce per-tool permissions; profile activation remains disabled pending full integration.

@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Args, Command, Flags, renderCommandHelp } from "@oh-my-pi/pi-utils/cli";
 import { getAgentDir } from "@oh-my-pi/pi-utils/dirs";
+import { removePrivateRuntimeEnv } from "@oh-my-pi/pi-utils/env";
 import { engineHelp as commandHelp } from "../cli/command-help";
 import {
 	EngineControlQueryClient,
@@ -119,6 +120,8 @@ export default class Engine extends Command {
 		const tokenEnv = flags["token-env"] ?? "GRIMOIRE_ACCESS_TOKEN";
 		const serverUrl = flags["server-url"] ?? process.env.GRIMOIRE_SERVER_URL;
 		const token = process.env[tokenEnv] ?? process.env.GRIMOIRE_TOKEN ?? process.env.GRIMOIRE_OIDC_BEARER_TOKEN;
+		// The service keeps the bearer in its private config. Tools must not inherit it.
+		removePrivateRuntimeEnv(process.env, [tokenEnv]);
 		const defaultArtifactCacheRoot = process.env.LOCALAPPDATA
 			? path.join(process.env.LOCALAPPDATA, "Grimoire", "offline-cache", "default", "artifacts")
 			: undefined;
