@@ -165,6 +165,7 @@ import {
 	USER_INTERRUPT_LABEL,
 	wrapSteeringForModel,
 } from "./session/messages";
+import { withOriginalAttachment } from "./session/original-attachments";
 import { clampProviderContextImages } from "./session/provider-image-budget";
 import { deferNestedProviderRetry, withProviderRetryBudget } from "./session/provider-retry-budget";
 import {
@@ -1914,6 +1915,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getInspectImageModeOverride: () => session?.getInspectImageModeOverride(),
 			getServiceTierByFamily: () => session?.serviceTierByFamily,
 			getImageAttachments: () => session?.getImageAttachments() ?? [],
+			withOriginalAttachment: (uri, read, signal) => withOriginalAttachment(sessionManager, uri, read, signal),
 			getPlanModeState: () => session?.getPlanModeState(),
 			getPlanReferencePath: () => session?.getPlanReferencePath() ?? "local://PLAN.md",
 			getGoalModeState: () => session?.getGoalModeState(),
@@ -3414,14 +3416,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Final convertToLlm: live provider replay drops API-level refusal errors,
 		// then applies secret obfuscation to the remaining outbound context.
 		const convertToLlmFinal = (messages: AgentMessage[]): Message[] => {
-			const converted = filterProviderReplayMessages(convertToLlmWithBlockImages(messages));
+			// Input events are deliberately emitted after provider preparation. Use
+			// the pending message identity as well as retained history, before any
+			// steering wrapper copies the message. Never persist the generated notice.
+			const withFiles = session?.withOriginalAttachmentNotices(messages) ?? messages;
+			const converted = filterProviderReplayMessages(convertToLlmWithBlockImages(wrapSteeringForModel(withFiles)));
 			if (!obfuscator?.hasSecrets()) return converted;
 			return obfuscateMessages(obfuscator, converted);
 		};
 
 		const transformContext = async (messages: AgentMessage[], _signal?: AbortSignal) => {
 			const withContext = await extensionRunner.emitContext(messages);
-			return wrapSteeringForModel(withContext);
+			return withContext;
 		};
 		// Per-request provider-context transforms. Obfuscate FIRST so secrets are
 		// redacted from text before snapcompact rasterizes it into PNG frames. Clamp
@@ -4146,7 +4152,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					cwd: sessionManager.getCwd(),
 					cwdResolver: () => sessionManager.getCwd(),
 					convertToLlm: convertToLlmFinal,
-					transformContext: async messages => wrapSteeringForModel(messages),
+					transformContext: async messages => messages,
 					transformProviderContext: async (context, transformModel) => {
 						let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
 						transformed = clampProviderContextImages(transformed, transformModel);

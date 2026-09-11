@@ -6,6 +6,7 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
 import type { EngineBindingSnapshot, EngineInboxTarget } from "../src/engine/contracts";
 import { engineAgentId, engineAgentInstanceId } from "../src/engine/route";
+import { nativeHistoryAttachments, nativeHistoryImages } from "../src/engine/runtime-history";
 import type { CanonicalOwnershipCandidate, LegacyStartOwnershipCandidate } from "../src/engine/runtime-ownership";
 import {
 	RUNTIME_PROTOCOL_HASH,
@@ -16,7 +17,9 @@ import {
 } from "../src/engine/runtime-protocol";
 import { publicRuntimeQueueItem } from "../src/engine/runtime-queue";
 import { readRuntimeEvents } from "../src/engine/runtime-read";
+import { readRuntimeResource } from "../src/engine/runtime-resources";
 import { type EngineCommandIdentity, EngineStore } from "../src/engine/store";
+import { BlobStore } from "../src/session/blob-store";
 
 describe("runtime v1 durable boundaries", () => {
 	const stores: EngineStore[] = [];
@@ -2218,6 +2221,225 @@ describe("runtime v1 durable boundaries", () => {
 		);
 		await expect(store.nativeHistoryPage(agent.agentInstanceId, page.nextCursor!)).rejects.toThrow("lineage");
 	}, 30_000);
+	it("downloads original files only through their authorized message descriptor and rejects changed ownership or metadata", async () => {
+		const store = await createStore();
+		const directory = directories.at(-1)!;
+		const blobs = new BlobStore(path.join(directory, "blobs"));
+		const bytes = Buffer.from(Array.from({ length: 130_017 }, (_, index) => index % 251));
+		const saved = await blobs.put(bytes);
+		const unrelated = await blobs.put(Buffer.from("not owned by this message"));
+		const agent = identity("file-resource");
+		await store.registerAgent(agent);
+		const target = { ...binding("file-resource"), sessionFile: "/file-resource.jsonl" };
+		const header = { type: "session", version: 3, id: "file-session", cwd: "/test" };
+		const message = {
+			type: "message",
+			id: "file-entry",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			message: { role: "user", content: "" },
+			originalAttachments: [
+				{
+					name: "report.bin",
+					mediaType: "application/octet-stream",
+					bytes: bytes.length,
+					contentHash: `sha256:${saved.hash}`,
+				},
+			],
+		};
+		const source = `${JSON.stringify(header)}\n${JSON.stringify(message)}\n`;
+		await store.sessionStorage.writeText(target.sessionFile, source);
+		await store.commitAttemptTransition(target, "completed", [{ kind: "completed" }], {
+			transcriptCheckpoint: {
+				sessionId: header.id,
+				sessionPath: target.sessionFile,
+				leafEntryId: message.id,
+				byteBoundary: Buffer.byteLength(source),
+			},
+		});
+		const page = await store.nativeHistoryPage(agent.agentInstanceId, undefined, 100, target.attemptId);
+		const resource = (await nativeHistoryAttachments(page, agent.agentInstanceRef, blobs)).get(message.id)![0]
+			.resource!;
+		validateRuntimeValue("resourceReadRequest", { resource, offset: 0, limit: 65536 });
+		const sql = new SQL(`sqlite:${path.join(directory, "engine.sqlite").replaceAll("\\", "/")}`);
+		const read = (changes: Record<string, unknown> = {}, principalId = "owner", offset = 0, limit = 65536) =>
+			readRuntimeResource(sql, { principalId, resource: { ...resource, ...changes }, offset, limit }, blobs);
+		try {
+			const pieces: Buffer[] = [];
+			for (let offset = 0; offset < bytes.length; offset += 65536) {
+				const result = await read({}, "owner", offset);
+				validateRuntimeValue("httpRange", result);
+				pieces.push(Buffer.from(String(result.contentBase64), "base64"));
+			}
+			expect(Buffer.concat(pieces)).toEqual(bytes);
+			expect(await read({}, "owner", bytes.length)).toMatchObject({ contentBase64: "", nextOffset: null });
+			await expect(read({}, "other")).rejects.toThrow("authorized");
+			for (const change of [
+				{ contentHash: `sha256:${unrelated.hash}` },
+				{ attachmentIndex: 1 },
+				{ name: "other.bin" },
+				{ mediaType: "text/plain" },
+				{ bytes: bytes.length + 1 },
+				{ attemptId: "other-attempt" },
+				{ sessionId: "other-session" },
+				{ entryId: "other-entry" },
+				{ revision: "other-lineage" },
+			])
+				await expect(read(change)).rejects.toMatchObject({
+					code: expect.stringMatching(/stale_target|history_expired/),
+				});
+			await expect(read({ attachmentIndex: -1 })).rejects.toMatchObject({ code: "invalid_request" });
+			await expect(read({}, "owner", 0, 65537)).rejects.toMatchObject({ code: "invalid_request" });
+			await expect(read({}, "owner", bytes.length + 1)).rejects.toMatchObject({ code: "invalid_request" });
+			await fs.promises.writeFile(saved.path, Buffer.from("truncated"));
+			await expect(read()).rejects.toMatchObject({ code: "stale_target" });
+			await fs.promises.unlink(saved.path);
+			await expect(read()).rejects.toMatchObject({ code: "history_expired" });
+			expect(
+				(await nativeHistoryAttachments(page, agent.agentInstanceRef, blobs)).get(message.id)![0],
+			).toMatchObject({ name: "report.bin", status: "unavailable", reason: "history_expired" });
+			await blobs.put(bytes);
+			await store.sessionStorage.writeText(
+				target.sessionFile,
+				`${JSON.stringify(header)}\n${JSON.stringify({ ...message, message: { role: "assistant", content: "not user owned" } })}\n`,
+			);
+			await expect(read()).rejects.toMatchObject({ code: "stale_target" });
+			const replaced = await store.nativeHistoryPage(agent.agentInstanceId, undefined, 100, target.attemptId);
+			expect(await nativeHistoryAttachments(replaced, agent.agentInstanceRef, blobs)).toEqual(new Map());
+			await expect(read({ revision: replaced.lifecycleContext.lineage })).rejects.toMatchObject({
+				code: "stale_target",
+			});
+		} finally {
+			await sql.close();
+		}
+	});
+
+	it("serves image ranges only for the exact authorized retained content block, never for a bare blob hash", async () => {
+		const store = await createStore();
+		const directory = directories.at(-1)!;
+		const blobs = new BlobStore(path.join(directory, "blobs"));
+		const bytes = Buffer.from(Array.from({ length: 130_017 }, (_, index) => index % 251));
+		const saved = await blobs.put(bytes);
+		const unrelated = await blobs.put(Buffer.from("not present in this history"));
+		const agent = identity("image-resource");
+		await store.registerAgent(agent);
+		const target = { ...binding("image-resource"), sessionFile: "/image-resource.jsonl" };
+		const header = JSON.stringify({ type: "session", version: 3, id: "image-session", cwd: "/test" });
+		const message = {
+			type: "message",
+			id: "image-entry",
+			parentId: null,
+			timestamp: new Date(0).toISOString(),
+			message: {
+				role: "toolResult",
+				toolCallId: "image-read",
+				content: [
+					{ type: "text", text: "image follows" },
+					{ type: "image", mimeType: "image/png", data: saved.ref },
+				],
+			},
+		};
+		const source = `${header}\n${JSON.stringify(message)}\n`;
+		await store.sessionStorage.writeText(target.sessionFile, source);
+		await store.commitAttemptTransition(target, "completed", [{ kind: "completed" }], {
+			transcriptCheckpoint: {
+				sessionId: "image-session",
+				sessionPath: target.sessionFile,
+				leafEntryId: "image-entry",
+				byteBoundary: Buffer.byteLength(source),
+			},
+		});
+		const page = await store.nativeHistoryPage(agent.agentInstanceId, undefined, 100, target.attemptId);
+		const descriptors = await nativeHistoryImages(page, agent.agentInstanceRef, blobs);
+		const resource = descriptors.get("image-entry")![0].resource!;
+		validateRuntimeValue("resourceReadRequest", { resource, offset: 0, limit: 65_536 });
+		expect(resource).toMatchObject({ entryId: "image-entry", blockIndex: 1, bytes: bytes.length });
+		expect(resource.revision).not.toBe(page.revision);
+		const sql = new SQL(`sqlite:${path.join(directory, "engine.sqlite").replaceAll("\\", "/")}`);
+		const lineage = await sql.unsafe("SELECT history_lineage FROM omp_session_files WHERE path=?", [
+			target.sessionFile,
+		]);
+		expect(resource.revision).toBe(String(lineage[0].history_lineage));
+		const read = (changes: Record<string, unknown> = {}, principalId = "owner", offset = 0, limit = 65_536) =>
+			readRuntimeResource(sql, { principalId, resource: { ...resource, ...changes }, offset, limit }, blobs);
+		try {
+			const pieces: Buffer[] = [];
+			for (let offset = 0; offset < bytes.length; offset += 65_536) {
+				const result = await read({}, "owner", offset);
+				validateRuntimeValue("httpRange", result);
+				pieces.push(Buffer.from(String(result.contentBase64), "base64"));
+			}
+			expect(Buffer.concat(pieces)).toEqual(bytes);
+			expect(await read({}, "owner", bytes.length)).toMatchObject({ contentBase64: "", nextOffset: null });
+			await expect(read({}, "other")).rejects.toThrow("authorized");
+			await expect(read({ contentHash: `sha256:${unrelated.hash}` })).rejects.toThrow("content block");
+			await expect(read({ blockIndex: 0 })).rejects.toThrow("content block");
+			await expect(read({ mediaType: "image/jpeg" })).rejects.toThrow("content block");
+			await expect(read({ bytes: bytes.length + 1 })).rejects.toThrow("size");
+			await expect(read({ attemptId: "other-attempt" })).rejects.toThrow("Attempt");
+			await expect(read({ revision: "changed-lineage" })).rejects.toThrow("lineage");
+			await expect(read({ blockIndex: -1 })).rejects.toMatchObject({ code: "invalid_request" });
+			await expect(read({ mediaType: "image/svg+xml" })).rejects.toMatchObject({ code: "invalid_request" });
+			await expect(read({}, "owner", 0, 65_537)).rejects.toMatchObject({ code: "invalid_request" });
+			await expect(read({}, "owner", bytes.length + 1)).rejects.toMatchObject({ code: "invalid_request" });
+			await fs.promises.unlink(saved.path);
+			await expect(read()).rejects.toMatchObject({ code: "history_expired" });
+			expect((await nativeHistoryImages(page, agent.agentInstanceRef, blobs)).get("image-entry")).toEqual([
+				{ entryId: "image-entry", blockIndex: 1, status: "unavailable", reason: "history_expired" },
+			]);
+			await blobs.put(bytes);
+			await store.sessionStorage.writeText(
+				target.sessionFile,
+				`${header}\n${JSON.stringify({ ...message, message: { role: "user", content: "replaced" } })}\n`,
+			);
+			await expect(read()).rejects.toThrow("lineage");
+			await store.sessionStorage.writeText(
+				target.sessionFile,
+				`${header}\n${JSON.stringify({
+					...message,
+					message: {
+						...message.message,
+						content: [
+							{ type: "image", mimeType: "image/png" },
+							{ type: "image", mimeType: "image/png", data: "not base64" },
+							{ type: "image", mimeType: "image/svg+xml", data: "PHN2Zy8+" },
+						],
+					},
+				})}\n`,
+			);
+			const unavailable = await nativeHistoryImages(
+				await store.nativeHistoryPage(agent.agentInstanceId, undefined, 100, target.attemptId),
+				agent.agentInstanceRef,
+				blobs,
+			);
+			expect(unavailable.get("image-entry")).toEqual([
+				{ entryId: "image-entry", blockIndex: 0, status: "unavailable", reason: "invalid_image" },
+				{ entryId: "image-entry", blockIndex: 1, status: "unavailable", reason: "invalid_image" },
+				{ entryId: "image-entry", blockIndex: 2, status: "unavailable", reason: "unsupported_format" },
+			]);
+			const largeMessage = {
+				...message,
+				message: {
+					...message.message,
+					content: [{ type: "text", text: "x".repeat(runtimeLimits.httpPageBytes) }, message.message.content[1]],
+				},
+			};
+			await store.sessionStorage.writeText(target.sessionFile, `${header}\n${JSON.stringify(largeMessage)}\n`);
+			const updated = await sql.unsafe("SELECT history_lineage FROM omp_session_files WHERE path=?", [
+				target.sessionFile,
+			]);
+			resource.revision = String(updated[0].history_lineage);
+			const blobRead = spyOn(blobs, "getRange");
+			try {
+				await expect(read()).rejects.toMatchObject({ code: "restore_budget" });
+				expect(blobRead).not.toHaveBeenCalled();
+			} finally {
+				blobRead.mockRestore();
+			}
+		} finally {
+			await sql.close();
+		}
+	});
 	it("keeps a retained Attempt history resource pinned across another binding and a store reopen", async () => {
 		const store = await createStore();
 		const databasePath = path.join(directories.at(-1)!, "engine.sqlite");

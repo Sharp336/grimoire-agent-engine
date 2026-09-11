@@ -20,6 +20,7 @@ import type {
 } from "./contracts";
 import { EngineTargetError } from "./contracts";
 import { engineAgentId } from "./route";
+import { messageAttachmentReferences } from "./runtime-attachments";
 import {
 	ENGINE_HISTORY_INDEX_SCHEMA,
 	ENGINE_HISTORY_LINEAGE_SCHEMA,
@@ -288,6 +289,7 @@ interface InboxItemRow {
 	source_type: EngineInboxItem["sourceType"];
 	sender: string | null;
 	source_body: string;
+	attachment_refs: string | null;
 	delivery_payload: string;
 	annotation: string | null;
 	deliver_at: number | null;
@@ -310,6 +312,9 @@ function inboxItemFromRow(row: InboxItemRow): EngineInboxItem {
 		sourceType: row.source_type,
 		...(row.sender ? { sender: row.sender } : {}),
 		sourceBody: row.source_body,
+		...(row.attachment_refs !== null
+			? { attachments: messageAttachmentReferences(JSON.parse(row.attachment_refs)) }
+			: {}),
 		deliveryPayload: row.delivery_payload,
 		...(row.annotation !== null ? { annotation: row.annotation } : {}),
 		...(row.deliver_at !== null ? { deliverAt: Number(row.deliver_at) } : {}),
@@ -838,6 +843,11 @@ const SCHEMA_MIGRATIONS = [
 			["engine_effects", "assistant_message_id", "TEXT"],
 			["engine_effects", "assistant_block_id", "TEXT"],
 		] as const,
+	},
+	{
+		version: 27,
+		statements: ["ALTER TABLE engine_inbox_sources ADD COLUMN attachment_refs TEXT"],
+		requiredColumns: [["engine_inbox_sources", "attachment_refs", "TEXT"]] as const,
 	},
 ] as const;
 
@@ -2065,23 +2075,38 @@ export class EngineStore {
 		expectedIntentRevision?: number,
 		commandId = source.sourceEventId,
 	): Promise<{ item: EngineInboxItem; created: boolean }> {
-		if (!source.sourceEventId.trim() || !source.body.trim()) {
-			throw new EngineInboxConflictError("Inbox sourceEventId and body must be non-empty");
+		const attachments =
+			source.attachments === undefined ? undefined : messageAttachmentReferences(source.attachments);
+		const attachmentRefs = attachments ? JSON.stringify(attachments) : null;
+		if (attachments) {
+			validateRuntimeValue("id", source.sourceEventId);
+			if (source.sourceType !== "user")
+				throw new EngineInboxConflictError("Only user messages may reference uploaded attachments");
+		}
+		if (!source.sourceEventId.trim() || (!source.body.trim() && !attachments)) {
+			throw new EngineInboxConflictError("Inbox requires a sourceEventId and text or attachments");
 		}
 		if (source.createdAt !== undefined && (!Number.isSafeInteger(source.createdAt) || source.createdAt < 0)) {
 			throw new EngineInboxConflictError("Inbox createdAt must be a non-negative safe integer");
 		}
 		return await this.#transaction(async sql => {
 			const sourceRows = (await sql.unsafe(
-				`SELECT source_type, sender, body, created_at FROM engine_inbox_sources WHERE source_event_id=?`,
+				`SELECT source_type, sender, body, created_at, attachment_refs FROM engine_inbox_sources WHERE source_event_id=?`,
 				[source.sourceEventId],
-			)) as Array<{ source_type: string; sender: string | null; body: string; created_at: number }>;
+			)) as Array<{
+				source_type: string;
+				sender: string | null;
+				body: string;
+				created_at: number;
+				attachment_refs: string | null;
+			}>;
 			const existingSource = sourceRows[0];
 			if (
 				existingSource &&
 				(existingSource.source_type !== source.sourceType ||
 					existingSource.sender !== (source.sender ?? null) ||
 					existingSource.body !== source.body ||
+					existingSource.attachment_refs !== attachmentRefs ||
 					(source.createdAt !== undefined && Number(existingSource.created_at) !== source.createdAt))
 			) {
 				throw new EngineInboxConflictError(`Inbox source ${source.sourceEventId} has different immutable content`);
@@ -2089,9 +2114,9 @@ export class EngineStore {
 			if (!existingSource) {
 				const createdAt = source.createdAt ?? Date.now();
 				await sql.unsafe(
-					`INSERT INTO engine_inbox_sources(source_event_id, source_type, sender, body, created_at)
-					 VALUES (?, ?, ?, ?, ?)`,
-					[source.sourceEventId, source.sourceType, source.sender ?? null, source.body, createdAt],
+					`INSERT INTO engine_inbox_sources(source_event_id, source_type, sender, body, created_at, attachment_refs)
+					 VALUES (?, ?, ?, ?, ?, ?)`,
+					[source.sourceEventId, source.sourceType, source.sender ?? null, source.body, createdAt, attachmentRefs],
 				);
 			}
 			const existing = await this.#inboxItem(sql, target.sessionId, source.sourceEventId);
@@ -2108,7 +2133,7 @@ export class EngineStore {
 			await assertRuntimePendingBudget(
 				sql,
 				target.agentInstanceId,
-				Buffer.byteLength(source.body),
+				Buffer.byteLength(source.body) + Buffer.byteLength(attachmentRefs ?? ""),
 				false,
 				commandId,
 			);
@@ -3681,7 +3706,7 @@ export class EngineStore {
 	#inboxSelect(): string {
 		return `SELECT i.queue_id, i.session_id, i.agent_instance_id, i.execution_id, i.attempt_id,
 		 i.binding_id, i.engine_generation, i.binding_generation, i.authority_generation,
-		 i.source_event_id, s.source_type, s.sender, s.body AS source_body,
+		 i.source_event_id, s.source_type, s.sender, s.body AS source_body, s.attachment_refs,
 		 i.delivery_payload, i.annotation, i.deliver_at, i.wake_intent, i.wake_delivered_at, i.position,
 		 i.disposition, i.revision, i.created_at, i.updated_at
 		 FROM engine_inbox_items i JOIN engine_inbox_sources s ON s.source_event_id=i.source_event_id`;
@@ -3774,8 +3799,8 @@ export class EngineStore {
 	#applyInboxMutation(item: EngineInboxItem, mutation: EngineInboxMutation): EngineInboxItem {
 		switch (mutation.op) {
 			case "edit": {
-				if (typeof mutation.value !== "string" || !mutation.value.trim()) {
-					throw new EngineInboxConflictError("Inbox delivery payload must be a non-empty string");
+				if (typeof mutation.value !== "string" || (!mutation.value.trim() && !item.attachments)) {
+					throw new EngineInboxConflictError("Inbox delivery payload requires text or retained attachments");
 				}
 				return mutation.value === item.deliveryPayload ? item : { ...item, deliveryPayload: mutation.value };
 			}

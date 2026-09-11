@@ -29,6 +29,7 @@ import { EngineTargetError, validateCommandContext } from "./contracts";
 import { safeEngineErrorDetail } from "./public-error";
 import { engineRouteToken } from "./route";
 import type { EngineRuntime } from "./runtime";
+import { messageAttachmentReferences } from "./runtime-attachments";
 import { ENGINE_CONTROL_OPS, runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
 import { publicRuntimeQueueItem } from "./runtime-queue";
 import type { EngineCommandIdentity } from "./store";
@@ -833,6 +834,15 @@ export async function dispatchEngineCommand(options: {
 	if (command.engineGeneration !== runtime.engineGeneration) {
 		throw new EngineTargetError("stale_target", `Engine generation ${command.engineGeneration} is stale`);
 	}
+	const attachments =
+		command.payload.attachmentUploadIds === undefined
+			? undefined
+			: messageAttachmentReferences({
+					principalId: command.principalId ?? "",
+					uploadIds: requiredStringList(command.payload, "attachmentUploadIds"),
+				});
+	if (attachments && !["start", "steer", "enqueue"].includes(command.op))
+		throw new EngineTargetError("invalid_request", "Attachments are supported only on message commands");
 	switch (command.op) {
 		case "enqueue": {
 			const agentInstanceRef = requiredEnvelopeString(command.agentInstanceRef, "agentInstanceRef");
@@ -841,7 +851,8 @@ export async function dispatchEngineCommand(options: {
 				{
 					sourceEventId: requiredRecordString(command.payload, "clientMessageId"),
 					sourceType: "user",
-					body: requiredRecordString(command.payload, "text"),
+					body: messageText(command.payload, "text", Boolean(attachments)),
+					...(attachments ? { attachments } : {}),
 					deliverAt: optionalRecordInteger(command.payload, "deliverAt"),
 					wakeIntent: true,
 				},
@@ -900,9 +911,11 @@ export async function dispatchEngineCommand(options: {
 				command.payload.restoreCheckpoint === undefined ? undefined : parseRestoreCheckpoint(command.payload);
 			const input = queued
 				? undefined
-				: historyEdit || command.payload.explicitContinue === true
-					? optionalRecordString(command.payload, "input")
-					: requiredRecordString(command.payload, "input");
+				: attachments
+					? messageText(command.payload, "input", true)
+					: historyEdit || command.payload.explicitContinue === true
+						? optionalRecordString(command.payload, "input")
+						: requiredRecordString(command.payload, "input");
 			const cwd = requiredRecordString(command.payload, "cwd");
 			const profileDigest = requiredRecordString(command.payload, "profileDigest");
 			try {
@@ -915,6 +928,7 @@ export async function dispatchEngineCommand(options: {
 					{
 						commandId: command.commandId,
 						principalId: command.principalId,
+						attachmentUploadIds: attachments?.uploadIds,
 						explicitContinue: command.payload.explicitContinue === true,
 						context,
 						agentInstanceId: command.agentInstanceId,
@@ -961,13 +975,15 @@ export async function dispatchEngineCommand(options: {
 				...boundTarget(command),
 				commandId: command.commandId,
 				context,
+				principalId: command.principalId,
+				attachmentUploadIds: attachments?.uploadIds,
 				...(typeof command.payload.queueId === "string"
 					? {
 							queueId: requiredRecordString(command.payload, "queueId"),
 							expectedRevision: requiredRecordInteger(command.payload, "expectedRevision"),
 							mutationId: requiredRecordString(command.payload, "mutationId"),
 						}
-					: { message: requiredRecordString(command.payload, "text") }),
+					: { message: messageText(command.payload, "text", Boolean(attachments)) }),
 				clientMessageId: optionalRecordString(command.payload, "clientMessageId"),
 				expectedIntentRevision: optionalRecordInteger(command.payload, "expectedIntentRevision"),
 			});
@@ -1233,6 +1249,14 @@ function requiredRecord(record: Record<string, unknown>, key: string): Record<st
 		throw new PoisonMessageError(`${key} must be an object`);
 	}
 	return value as Record<string, unknown>;
+}
+
+function messageText(record: Record<string, unknown>, key: string, hasAttachments: boolean): string {
+	if (!hasAttachments) return requiredRecordString(record, key);
+	const value = record[key];
+	if (value === undefined) return "";
+	if (typeof value !== "string") throw new EngineTargetError("invalid_request", `${key} must be a string`);
+	return value;
 }
 
 function requiredRecordString(record: Record<string, unknown>, key: string): string {

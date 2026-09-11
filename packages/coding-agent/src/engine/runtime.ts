@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
 import { AgentPauseGate } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, AssistantMessageEvent, Model } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, AssistantMessageEvent, ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getBlobsDir, isEnoent, logger, stableStringifyJson, withTimeout } from "@oh-my-pi/pi-utils";
 import { AsyncJobManager } from "../async/job-manager";
 import { withCapabilityProviderPolicy } from "../capability";
@@ -31,7 +31,12 @@ import type { AgentSession } from "../session/agent-session";
 import type { TurnRetryPolicy } from "../session/agent-session-types";
 import { BLOB_HASH_RE, BlobStore } from "../session/blob-store";
 import { createProviderRetryBudgetHook } from "../session/provider-retry-budget";
-import type { SessionEntry, SessionLaunchSnapshot, SessionMessageIdentity } from "../session/session-entries";
+import {
+	copyOriginalAttachments,
+	type SessionEntry,
+	type SessionLaunchSnapshot,
+	type SessionMessageIdentity,
+} from "../session/session-entries";
 import {
 	collectPersistedBlobHashes,
 	loadSessionFile,
@@ -61,6 +66,7 @@ import {
 	type EngineInboxSource,
 	type EngineInboxTarget,
 	type EngineLaunchProfile,
+	type EngineMessageAttachments,
 	type EnginePeerMessage,
 	type EngineProfileRouteState,
 	type EngineProfileRoutes,
@@ -81,6 +87,15 @@ import {
 import { withProviderObservationContext } from "./provider-admission";
 import { safeEngineErrorDetail } from "./public-error";
 import { engineAgentId, engineAgentInstanceId, engineRouteToken } from "./route";
+import { EngineAttachmentUploads, messageAttachmentReferences } from "./runtime-attachments";
+import {
+	type EngineHistoryAttachment,
+	type EngineHistoryImage,
+	type EngineHistoryMediaBlock,
+	historyMediaBlocks,
+	nativeHistoryAttachments,
+	nativeHistoryImages,
+} from "./runtime-history";
 import { utf8Chunks } from "./runtime-messages";
 import { runtimeInputBody, runtimeInputPreview } from "./runtime-projection";
 import { runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
@@ -179,6 +194,8 @@ type EngineHistoryActivityBlock = {
 	toolStatus?: "unknown" | "succeeded" | "failed";
 	resultText?: string;
 	resultTruncated?: boolean;
+	images?: EngineHistoryImage[];
+	resultBlocks?: EngineHistoryMediaBlock[];
 	resultRef?: {
 		kind: "history_entry";
 		agentInstanceRef: string;
@@ -391,12 +408,15 @@ export interface EngineRuntimeOptions {
 		| "spawns"
 		| "toolExecutionHook"
 	>;
+	/** Optional isolated blob store for embedded runtimes/tests; production uses the configured canonical store. */
+	attachmentBlobStore?: BlobStore;
 	/** Test/integration seam; production uses AgentSession.prompt directly. */
 	dispatchPrompt?: (
 		session: AgentSession,
 		input: string,
 		identity?: SessionMessageIdentity,
 		kind?: HistoryDispatchKind,
+		images?: ImageContent[],
 	) => Promise<boolean>;
 	resolveSessionProfile?: (
 		profile: EngineLaunchProfile,
@@ -438,6 +458,7 @@ export class EngineRuntime {
 	readonly ircBus = new IrcBus(this.agentRegistry, this.agentLifecycle);
 	readonly engineGeneration: number;
 	readonly store: EngineStore;
+	readonly attachmentUploads: EngineAttachmentUploads;
 	readonly #sessionDefaults: EngineRuntimeOptions["sessionDefaults"];
 	readonly #mcpServer: EngineRuntimeOptions["mcpServer"];
 	readonly #dispatchPrompt: (
@@ -445,6 +466,7 @@ export class EngineRuntime {
 		input: string,
 		identity?: SessionMessageIdentity,
 		kind?: HistoryDispatchKind,
+		images?: ImageContent[],
 	) => Promise<boolean>;
 	readonly #resolveSessionProfile: EngineRuntimeOptions["resolveSessionProfile"];
 	readonly #resolveSessionContinuation: EngineRuntimeOptions["resolveSessionContinuation"];
@@ -473,12 +495,12 @@ export class EngineRuntime {
 		this.#mcpServer = options.mcpServer;
 		this.#dispatchPrompt =
 			options.dispatchPrompt ??
-			((session, input, identity, kind = "prompt") => {
+			((session, input, identity, kind = "prompt", images) => {
 				if (kind === "continue") return session.continueNativeHistory().then(() => true);
 				if (kind === "continue_after_assistant") {
 					return session.prompt(input, { synthetic: true, expandPromptTemplates: false, attribution: "agent" });
 				}
-				return session.prompt(input, identity);
+				return session.prompt(input, { ...identity, ...(images?.length ? { images } : {}) });
 			});
 		this.#resolveSessionProfile = options.resolveSessionProfile;
 		this.#resolveSessionContinuation = options.resolveSessionContinuation;
@@ -490,6 +512,10 @@ export class EngineRuntime {
 		this.#childHistoryRetention = options.childHistoryRetention ?? "local";
 		this.#archiveChildHistory = options.archiveChildHistory;
 		this.#sessionRoot = path.join(path.dirname(path.resolve(options.databasePath)), "engine-sessions");
+		this.attachmentUploads = new EngineAttachmentUploads(
+			path.join(path.dirname(this.#sessionRoot), "engine-uploads"),
+			options.attachmentBlobStore ?? new BlobStore(getBlobsDir()),
+		);
 	}
 
 	static async create(options: EngineRuntimeOptions): Promise<EngineRuntime> {
@@ -547,6 +573,10 @@ export class EngineRuntime {
 
 	start(request: EngineStartRequest, profile: EngineLaunchProfile): Promise<EngineStartResult> {
 		validateStartRequest(request);
+		if (request.attachmentUploadIds !== undefined) {
+			const references = this.#messageAttachments(request);
+			request = { ...request, attachmentUploadIds: references!.uploadIds };
+		}
 		if (!profile.profileDigest.trim()) {
 			throw new EngineTargetError("invalid_request", "profileDigest must be a non-empty string");
 		}
@@ -582,6 +612,10 @@ export class EngineRuntime {
 	steer(request: EngineSteerRequest): Promise<EngineControlResult> {
 		validateCommandContext(request.context);
 		const queued = request.queueId !== undefined;
+		if (request.attachmentUploadIds !== undefined) {
+			if (queued) throw new EngineTargetError("invalid_request", "Queued steer uses its retained attachments");
+			request = { ...request, attachmentUploadIds: this.#messageAttachments(request)!.uploadIds };
+		}
 		if (
 			!request.commandId.trim() ||
 			(request.clientMessageId !== undefined &&
@@ -594,7 +628,9 @@ export class EngineRuntime {
 					!Number.isSafeInteger(request.expectedIntentRevision) ||
 					request.expectedIntentRevision! < 0 ||
 					request.message !== undefined
-				: !request.message?.trim() || request.mutationId !== undefined || request.expectedRevision !== undefined)
+				: (!request.message?.trim() && !request.attachmentUploadIds?.length) ||
+					request.mutationId !== undefined ||
+					request.expectedRevision !== undefined)
 		) {
 			throw new EngineTargetError("invalid_request", "steer requires text or a complete queued-item identity");
 		}
@@ -616,6 +652,25 @@ export class EngineRuntime {
 					`Inbox item ${request.queueId} is no longer pending at that revision`,
 				);
 			}
+			if (item && request.clientMessageId !== undefined && request.clientMessageId !== item.sourceEventId)
+				throw new EngineTargetError(
+					"invalid_request",
+					"Queued delivery clientMessageId must match the retained message",
+				);
+			const references = item?.attachments ?? this.#messageAttachments(request);
+			const preparedAttachments = references
+				? await this.attachmentUploads.prepareForMessage(
+						item?.sourceEventId ?? request.clientMessageId!,
+						references,
+					)
+				: undefined;
+			const images = preparedAttachments?.images;
+			this.#assertAttachmentSupport(binding.session, images, preparedAttachments?.originalAttachments);
+			if (binding.state !== "running" || !binding.session.isStreaming)
+				throw new EngineTargetError(
+					"too_late",
+					"The Attempt stopped streaming while attachments were being prepared",
+				);
 			const previousIntent = this.#setManualHold(binding, request.commandId, request.expectedIntentRevision, false);
 			const previousState = binding.attemptState;
 			const result = this.#controlResult(
@@ -625,10 +680,11 @@ export class EngineRuntime {
 			);
 			try {
 				await binding.session.steer(
-					item?.deliveryPayload ?? request.message!,
-					undefined,
+					item?.deliveryPayload ?? request.message ?? "",
+					images,
 					{
 						sourceCommandId: request.commandId,
+						...(preparedAttachments ? { originalAttachments: preparedAttachments.originalAttachments } : {}),
 						...(request.clientMessageId
 							? { clientMessageId: request.clientMessageId }
 							: item?.sourceType === "user"
@@ -1163,8 +1219,10 @@ export class EngineRuntime {
 	}
 
 	enqueueInbox(target: EngineTarget, source: EngineInboxSource): Promise<{ item: EngineInboxItem; created: boolean }> {
+		if (source.attachments) source = { ...source, attachments: messageAttachmentReferences(source.attachments) };
 		return this.#inLane(target.agentInstanceId, async () => {
 			const retained = await this.#requireSessionTarget(target);
+			if (source.attachments) await this.attachmentUploads.resolveMessage(source.sourceEventId, source.attachments);
 			const queued = await this.store.enqueueInboxItem(retained, source);
 			if (queued.created) {
 				this.#signalInboxWake();
@@ -1196,7 +1254,9 @@ export class EngineRuntime {
 		expectedIntentRevision?: number,
 		commandId = source.sourceEventId,
 	): Promise<{ item: EngineInboxItem; created: boolean }> {
+		if (source.attachments) source = { ...source, attachments: messageAttachmentReferences(source.attachments) };
 		return this.#inLane(agentInstanceId, async () => {
+			if (source.attachments) await this.attachmentUploads.resolveMessage(source.sourceEventId, source.attachments);
 			const result = await this.store.enqueueInboxItem(
 				await this.#agentInboxTarget(agentInstanceId),
 				source,
@@ -1362,6 +1422,7 @@ export class EngineRuntime {
 			launchSnapshot?: SessionLaunchSnapshot;
 			stopReason?: "stop" | "length" | "toolUse" | "aborted" | "error";
 			blocks?: EngineHistoryActivityBlock[];
+			images?: EngineHistoryImage[];
 		}>;
 		activityCompleteness: "complete" | "legacy_messages_only";
 	}> {
@@ -1426,7 +1487,15 @@ export class EngineRuntime {
 		attemptId?: string,
 	) {
 		const page = await this.store.nativeHistoryPage(agentInstanceId, cursor, limit, attemptId);
-		const projected = projectHistoryEntries(page.sessionId, page.entries as SessionEntry[], false);
+		const images = await nativeHistoryImages(page, agentInstanceRef, new BlobStore(getBlobsDir()));
+		const attachments = await nativeHistoryAttachments(page, agentInstanceRef, new BlobStore(getBlobsDir()));
+		const projected = projectHistoryEntries(
+			page.sessionId,
+			page.entries as SessionEntry[],
+			false,
+			images,
+			attachments,
+		);
 		for (const entry of projected.entries)
 			for (const block of entry.blocks ?? []) {
 				const ref = page.activityRefs?.find(ref => ref.toolCallId === block.toolCallId);
@@ -2770,12 +2839,26 @@ export class EngineRuntime {
 				`Inbox item ${request.queueId} is no longer pending at that wake revision`,
 			);
 		}
+		if (queuedItem && request.clientMessageId !== undefined && request.clientMessageId !== queuedItem.sourceEventId)
+			throw new EngineTargetError(
+				"invalid_request",
+				"Queued delivery clientMessageId must match the retained message",
+			);
 		if (binding && queuedItem && queuedItem.sessionId !== binding.session.sessionId) {
 			throw new EngineTargetError("stale_target", `Inbox item ${queuedItem.queueId} belongs to another session`);
 		}
 		if (binding && (binding.state === "running" || binding.session.isStreaming)) {
 			throw new EngineTargetError("agent_busy", `AgentInstance ${request.agentInstanceId} is busy`);
 		}
+		const references = queuedItem?.attachments ?? this.#messageAttachments(request);
+		const preparedAttachments = references
+			? await this.attachmentUploads.prepareForMessage(
+					queuedItem?.sourceEventId ?? request.clientMessageId!,
+					references,
+					pendingStartSignal,
+				)
+			: undefined;
+		const images = preparedAttachments?.images;
 		const continuationDigest = await this.#continuationDigest(request, profile);
 		const conversationIdentityDigest = await this.#conversationIdentityDigest(request);
 		const preparedHistory = await this.#prepareHistoryStart(request);
@@ -2849,6 +2932,12 @@ export class EngineRuntime {
 				preparedSession,
 				pendingStartSignal,
 			);
+		try {
+			this.#assertAttachmentSupport(binding.session, images, preparedAttachments?.originalAttachments);
+		} catch (error) {
+			await this.#discardBinding(binding);
+			throw error;
+		}
 		if (preparedHistory?.pendingInboxSourceSessionId) {
 			binding.pendingInboxSourceSessionId = preparedHistory.pendingInboxSourceSessionId;
 		}
@@ -2934,6 +3023,7 @@ export class EngineRuntime {
 				preparedHistory?.dispatchInput ?? queuedItem?.deliveryPayload ?? request.input ?? "",
 				{
 					sourceCommandId: request.commandId,
+					...(preparedAttachments ? { originalAttachments: preparedAttachments.originalAttachments } : {}),
 					...(request.clientMessageId
 						? { clientMessageId: request.clientMessageId }
 						: queuedItem?.sourceType === "user"
@@ -2941,9 +3031,15 @@ export class EngineRuntime {
 							: {}),
 				},
 				preparedHistory?.dispatchKind ??
-					(explicitContinue && request.input === undefined && !queuedItem ? "continue" : undefined),
+					(explicitContinue &&
+					request.input === undefined &&
+					!queuedItem &&
+					!preparedAttachments?.originalAttachments.length
+						? "continue"
+						: undefined),
 				request.context,
 				{ profileSelectionRevision: request.profileSelectionRevision, agentInstanceRef: request.agentInstanceRef },
+				images,
 			),
 		);
 		this.#signalInboxWake();
@@ -3988,16 +4084,58 @@ export class EngineRuntime {
 		}
 	}
 
+	#messageAttachments(
+		request: Pick<EngineStartRequest, "principalId" | "clientMessageId" | "attachmentUploadIds">,
+	): EngineMessageAttachments | undefined {
+		if (request.attachmentUploadIds === undefined) return undefined;
+		validateRuntimeValue("id", request.clientMessageId);
+		return messageAttachmentReferences({
+			principalId: request.principalId ?? "",
+			uploadIds: request.attachmentUploadIds,
+		});
+	}
+
+	#assertAttachmentSupport(
+		session: AgentSession,
+		images: ImageContent[] | undefined,
+		originals?: SessionMessageIdentity["originalAttachments"],
+	): void {
+		if (originals && originals.length > (images?.length ?? 0) && !session.getEnabledToolNames().includes("read"))
+			throw new EngineTargetError(
+				"invalid_request",
+				"This profile does not provide the read tool required for file attachments",
+			);
+		if (!images?.length) return;
+		if (!session.model?.input.includes("image") || session.settings.get("images.blockImages"))
+			throw new EngineTargetError(
+				"invalid_request",
+				"The selected model or profile does not accept images; choose an image-capable route",
+			);
+	}
+
 	async #dispatchModel(
 		binding: LiveBinding,
 		input: string,
 		identity?: SessionMessageIdentity,
 		kind: HistoryDispatchKind = "prompt",
+		images?: ImageContent[],
 	): Promise<boolean> {
 		const completed = Promise.withResolvers<void>();
 		binding.activeModelCalls.add(completed.promise);
 		const modelCallId = `model-${++binding.modelCallSequence}`;
-		const inputHash = sha256(input);
+		const inputHash =
+			images?.length || identity?.originalAttachments?.length
+				? sha256(
+						stableStringifyJson({
+							input,
+							originalAttachments: identity?.originalAttachments,
+							images: images?.map(image => ({
+								mimeType: image.mimeType,
+								hash: sha256(Buffer.from(image.data, "base64")),
+							})),
+						}),
+					)
+				: sha256(input);
 		const effect: EngineModelEffectInput = {
 			effectId: `model_${sha256(`${binding.bindingId}\0${binding.attemptId}\0${modelCallId}`).slice(0, 32)}`,
 			modelCallId,
@@ -4013,7 +4151,9 @@ export class EngineRuntime {
 			let dispatched: boolean;
 			try {
 				dispatched = await withProviderObservationContext(effect, () =>
-					this.#withSessionScope(binding, () => this.#dispatchPrompt(binding.session, input, identity, kind)),
+					this.#withSessionScope(binding, () =>
+						this.#dispatchPrompt(binding.session, input, identity, kind, images),
+					),
 				);
 				const current = binding.session.getLastAssistantMessage();
 				if (current !== previous && current?.stopReason === "error") {
@@ -4082,6 +4222,7 @@ export class EngineRuntime {
 		kind: HistoryDispatchKind = "prompt",
 		context?: string,
 		selection?: Pick<EngineStartRequest, "profileSelectionRevision" | "agentInstanceRef">,
+		images?: ImageContent[],
 	): Promise<void> {
 		const attemptId = binding.attemptId;
 		const attemptMessageStart = binding.session.messages.length;
@@ -4123,7 +4264,7 @@ export class EngineRuntime {
 		}
 		try {
 			await this.#sendCommandContext(binding, context, identity?.sourceCommandId ?? binding.commandId);
-			await this.#dispatchModel(binding, input, identity, kind);
+			await this.#dispatchModel(binding, input, identity, kind, images);
 			for (let reminder = 0; reminder < 2 && binding.requireYieldTool; reminder++) {
 				await binding.pauseGate.waitUntilResumed();
 				if (
@@ -5220,7 +5361,13 @@ function historyLaunchSnapshot(value: SessionLaunchSnapshot | undefined): Sessio
 	return structuredClone(value);
 }
 
-function projectHistoryEntries(sessionId: string, branch: SessionEntry[], preview = true) {
+function projectHistoryEntries(
+	sessionId: string,
+	branch: SessionEntry[],
+	preview = true,
+	images?: Map<string, EngineHistoryImage[]>,
+	attachments?: Map<string, EngineHistoryAttachment[]>,
+) {
 	const messageLimit = preview ? MAX_HISTORY_MESSAGE_CHARS : Infinity;
 	const activityLimit = preview ? MAX_HISTORY_ACTIVITY_CHARS : Infinity;
 	const entries: Array<{
@@ -5236,6 +5383,8 @@ function projectHistoryEntries(sessionId: string, branch: SessionEntry[], previe
 		launchSnapshot?: SessionLaunchSnapshot;
 		stopReason?: "stop" | "length" | "toolUse" | "aborted" | "error";
 		blocks?: EngineHistoryActivityBlock[];
+		images?: EngineHistoryImage[];
+		attachments?: EngineHistoryAttachment[];
 	}> = [];
 	const toolBlocks = new Map<string, EngineHistoryActivityBlock>();
 	let sawActivity = false;
@@ -5246,6 +5395,10 @@ function projectHistoryEntries(sessionId: string, branch: SessionEntry[], previe
 			if (!block) continue;
 			const fullResult = historyMessageText(entry.message.content);
 			block.toolStatus = entry.message.isError ? "failed" : "succeeded";
+			if (images?.has(entry.id)) {
+				block.images = images.get(entry.id);
+				block.resultBlocks = historyMediaBlocks(entry.message.content, block.images!);
+			}
 			if (fullResult) {
 				block.resultText = fullResult.slice(0, activityLimit);
 				block.resultTruncated = fullResult.length > activityLimit;
@@ -5256,7 +5409,7 @@ function projectHistoryEntries(sessionId: string, branch: SessionEntry[], previe
 		if (entry.message.role !== "user" && entry.message.role !== "assistant") continue;
 		const fullText = historyMessageText(entry.message.content);
 		const blocks =
-			entry.message.role === "assistant"
+			entry.message.role === "assistant" || images?.has(entry.id)
 				? historyActivityBlocks(sessionId, entry.id, entry.message.content, activityLimit, messageLimit)
 				: [];
 		for (const block of blocks) {
@@ -5265,7 +5418,14 @@ function projectHistoryEntries(sessionId: string, branch: SessionEntry[], previe
 		sawActivity ||= blocks.some(block => block.kind !== "text");
 		const stopReason =
 			entry.message.role === "assistant" ? assistantSnapshotStopReason(entry.message.stopReason) : undefined;
-		if (!fullText && blocks.length === 0 && stopReason !== "error" && stopReason !== "aborted") continue;
+		if (
+			!fullText &&
+			blocks.length === 0 &&
+			!attachments?.has(entry.id) &&
+			stopReason !== "error" &&
+			stopReason !== "aborted"
+		)
+			continue;
 		const launchSnapshot =
 			entry.message.role === "user" && entry.sourceCommandId
 				? historyLaunchSnapshot(entry.launchSnapshot)
@@ -5278,6 +5438,8 @@ function projectHistoryEntries(sessionId: string, branch: SessionEntry[], previe
 			createdAt: entry.timestamp,
 			textTruncated: fullText.length > messageLimit,
 			...(blocks.length ? { blocks } : {}),
+			...(images?.has(entry.id) ? { images: images.get(entry.id) } : {}),
+			...(attachments?.has(entry.id) ? { attachments: attachments.get(entry.id) } : {}),
 			...(entry.message.role === "user" && entry.sourceCommandId ? { sourceCommandId: entry.sourceCommandId } : {}),
 			...(entry.message.role === "user" && entry.clientMessageId ? { clientMessageId: entry.clientMessageId } : {}),
 			...(launchSnapshot ? { launchSnapshot } : {}),
@@ -5658,7 +5820,7 @@ async function verifyNativeArchiveFile(filePath: string, byteLength: number, con
 	}
 }
 
-function sha256(value: string): string {
+function sha256(value: string | Uint8Array): string {
 	return crypto.createHash("sha256").update(value).digest("hex");
 }
 
@@ -5734,7 +5896,30 @@ function parseNativeSessionCheckpoint(bytes: Buffer): NativeSessionCheckpoint {
 	}
 	const portableNames = new Set<string>();
 	let artifactBytes = 0;
-	const blobHashes = new Set(collectPersistedBlobHashes(entries));
+	let blobHashes: Set<string>;
+	const originalSizes = new Map<string, number>();
+	try {
+		blobHashes = new Set(collectPersistedBlobHashes(entries));
+		for (const entry of entries) {
+			if (
+				entry.type !== "message" ||
+				!entry.message ||
+				typeof entry.message !== "object" ||
+				!("role" in entry.message) ||
+				entry.message.role !== "user" ||
+				entry.originalAttachments === undefined
+			)
+				continue;
+			for (const attachment of copyOriginalAttachments(entry.originalAttachments)) {
+				const hash = attachment.contentHash.slice(7);
+				if (originalSizes.has(hash) && originalSizes.get(hash) !== attachment.bytes)
+					throw new Error("Conflicting original attachment sizes");
+				originalSizes.set(hash, attachment.bytes);
+			}
+		}
+	} catch {
+		throw new EngineTargetError("invalid_request", "Restore history attachment descriptors are invalid");
+	}
 	for (const [kind, files] of [
 		["artifacts", checkpoint.artifacts],
 		["blobs", checkpoint.blobs ?? []],
@@ -5772,6 +5957,12 @@ function parseNativeSessionCheckpoint(bytes: Buffer): NativeSessionCheckpoint {
 					!blobHashes.delete(artifact.name))
 			)
 				throw new EngineTargetError("invalid_request", "Restore image blob does not match history");
+			if (
+				kind === "blobs" &&
+				originalSizes.has(artifact.name) &&
+				originalSizes.get(artifact.name) !== artifact.byteLength
+			)
+				throw new EngineTargetError("invalid_request", "Restore original attachment size does not match its bytes");
 			portableNames.add(portableName);
 			const content = decodeCanonicalBase64(artifact.contentBase64, `Artifact ${artifact.name}`);
 			artifactBytes += content.byteLength;

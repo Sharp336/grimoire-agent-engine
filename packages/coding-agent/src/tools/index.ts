@@ -500,6 +500,12 @@ export interface ToolSession {
 	getTelemetry?: () => AgentTelemetryConfig | undefined;
 	/** Return image attachments visible to tools for resolving labels such as `Image #1`. */
 	getImageAttachments?: () => ImageAttachmentEntry[];
+	/** Read a verified temporary copy of an original upload owned by this exact session branch. */
+	withOriginalAttachment?: <T>(
+		uri: string,
+		read: (filePath: string) => Promise<T>,
+		signal?: AbortSignal,
+	) => Promise<T>;
 }
 
 export type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool | null>;

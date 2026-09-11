@@ -5,6 +5,7 @@ import * as fsAsync from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { EngineRuntime } from "@oh-my-pi/pi-coding-agent/engine/runtime";
+import { runtimeLimits } from "@oh-my-pi/pi-coding-agent/engine/runtime-protocol";
 import {
 	EngineAttemptConflictError,
 	EngineCommandConflictError,
@@ -398,7 +399,7 @@ describe("EngineStore", () => {
 				if (scenario === "exact") {
 					expect(JSON.parse(receipt!.value)).toEqual(prefix.at(-1));
 					expect(inspect.query("SELECT MAX(version) AS version FROM engine_schema_migrations").get()).toEqual({
-						version: 26,
+						version: 27,
 					});
 					expect(
 						inspect.query("SELECT name FROM sqlite_master WHERE name='engine_agent_identity'").get(),
@@ -621,6 +622,155 @@ describe("EngineStore", () => {
 			),
 		).rejects.toBeInstanceOf(EngineCommandConflictError);
 		await restarted.close();
+	});
+
+	it("migrates text-only inboxes and preserves attachment identity through edit, retry, reorder and restart", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-inbox-attachments-${Snowflake.next()}-`));
+		const databasePath = path.join(tempDir, "engine.sqlite");
+		const target = {
+			sessionId: "session-inbox",
+			bindingId: "binding-inbox",
+			agentInstanceId: "agent-inbox",
+			executionId: "execution-inbox",
+			attemptId: "attempt-inbox",
+			authorityGeneration: 1,
+			engineGeneration: 1,
+			bindingGeneration: 1,
+		};
+		let store = await EngineStore.open(databasePath);
+		try {
+			await store.enqueueInboxItem(target, {
+				sourceEventId: "legacy-text",
+				sourceType: "user",
+				body: "keep this text",
+			});
+			await store.close();
+			const legacy = new Database(databasePath);
+			let prefix: unknown[];
+			try {
+				// Reconstruct the exact pre-attachment shape using the unchanged migration prefix.
+				legacy.exec("ALTER TABLE engine_inbox_sources DROP COLUMN attachment_refs");
+				legacy.exec("DELETE FROM engine_schema_migrations WHERE version=27");
+				prefix = legacy.query("SELECT version,checksum FROM engine_schema_migrations ORDER BY version").all();
+			} finally {
+				legacy.close();
+			}
+			store = await EngineStore.open(databasePath);
+			const inspect = new Database(databasePath);
+			try {
+				expect(
+					inspect
+						.query("SELECT version,checksum FROM engine_schema_migrations WHERE version<=26 ORDER BY version")
+						.all(),
+				).toEqual(prefix);
+			} finally {
+				inspect.close();
+			}
+			expect(await store.getInboxItem(target.sessionId, "legacy-text")).toMatchObject({
+				sourceBody: "keep this text",
+				deliveryPayload: "keep this text",
+			});
+			expect((await store.getInboxItem(target.sessionId, "legacy-text"))?.attachments).toBeUndefined();
+			const source = {
+				sourceEventId: "message-files",
+				sourceType: "user" as const,
+				body: "",
+				attachments: { principalId: "alice", uploadIds: ["image-b", "file-a"] },
+			};
+			const concurrent = await Promise.all(Array.from({ length: 5 }, () => store.enqueueInboxItem(target, source)));
+			expect(concurrent.filter(result => result.created)).toHaveLength(1);
+			await store.mutateInboxItem(target, {
+				mutationId: "caption",
+				queueId: source.sourceEventId,
+				expectedRevision: 1,
+				op: "edit",
+				value: "new caption",
+			});
+			const cleared = await store.mutateInboxItem(target, {
+				mutationId: "clear-caption",
+				queueId: source.sourceEventId,
+				expectedRevision: 2,
+				op: "edit",
+				value: "",
+			});
+			expect(cleared).toMatchObject({ sourceBody: "", deliveryPayload: "", attachments: source.attachments });
+			for (const attachments of [
+				undefined,
+				{ ...source.attachments, principalId: "bob" },
+				{ ...source.attachments, uploadIds: ["file-a", "image-b"] },
+				{ ...source.attachments, uploadIds: ["image-b"] },
+			]) {
+				await expect(store.enqueueInboxItem(target, { ...source, attachments })).rejects.toBeInstanceOf(
+					EngineInboxConflictError,
+				);
+			}
+			await expect(
+				store.enqueueInboxItem(target, { ...source, sourceEventId: "invalid-agent", sourceType: "agent" }),
+			).rejects.toThrow("Only user");
+			await expect(
+				store.enqueueInboxItem(target, {
+					...source,
+					sourceEventId: "duplicate-ids",
+					attachments: { principalId: "alice", uploadIds: ["same", "same"] },
+				}),
+			).rejects.toThrow("duplicate");
+			await store.reorderInboxItems(
+				target,
+				"move-files",
+				["legacy-text", "message-files"],
+				["message-files", "legacy-text"],
+			);
+			await store.close();
+			store = await EngineStore.open(databasePath);
+			const restored = await store.listInboxItems(target.sessionId);
+			expect(restored.map(item => item.queueId)).toEqual(["message-files", "legacy-text"]);
+			expect(restored[0]).toMatchObject({ sourceBody: "", deliveryPayload: "", attachments: source.attachments });
+			expect(await store.enqueueInboxItem(target, source)).toMatchObject({
+				created: false,
+				item: { attachments: source.attachments },
+			});
+			await store.mutateInboxItem(target, {
+				mutationId: "drop-files",
+				queueId: source.sourceEventId,
+				expectedRevision: restored[0]!.revision,
+				op: "drop",
+			});
+			expect((await store.listInboxItems(target.sessionId)).map(item => item.queueId)).toEqual(["legacy-text"]);
+			expect((await store.getInboxItem(target.sessionId, "message-files"))?.attachments).toEqual(source.attachments);
+		} finally {
+			await store.close();
+		}
+	});
+
+	it("counts retained attachment references in pending-byte admission, rolling back an over-budget enqueue", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-attachment-budget-${Snowflake.next()}-`));
+		const store = await EngineStore.open(path.join(tempDir, "engine.sqlite"));
+		const target = {
+			sessionId: "session-budget",
+			bindingId: "binding-budget",
+			agentInstanceId: "agent-budget",
+			executionId: "execution-budget",
+			attemptId: "attempt-budget",
+			authorityGeneration: 1,
+			engineGeneration: 1,
+			bindingGeneration: 1,
+		};
+		const attachments = { principalId: "alice", uploadIds: ["retained-upload-a"] };
+		try {
+			await store.enqueueInboxItem(target, {
+				sourceEventId: "full",
+				sourceType: "user",
+				attachments,
+				body: "x".repeat(runtimeLimits.agentPendingBytes - Buffer.byteLength(JSON.stringify(attachments)) - 10),
+			});
+			await expect(
+				store.enqueueInboxItem(target, { sourceEventId: "over", sourceType: "user", body: "elevenbytes" + "!" }),
+			).rejects.toThrow("budget");
+			expect((await store.listInboxItems(target.sessionId)).map(item => item.queueId)).toEqual(["full"]);
+			await expect(store.getInboxItem(target.sessionId, "over")).resolves.toBeUndefined();
+		} finally {
+			await store.close();
+		}
 	});
 
 	it("keeps immutable inbox facts and fenced mutable order across restart", async () => {

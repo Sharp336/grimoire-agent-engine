@@ -900,6 +900,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		suffixResolution: { from: string; to: string } | undefined,
 		signal: AbortSignal | undefined,
 		allowBridge = true,
+		immutable = false,
 	): Promise<{
 		outputText: string;
 		columnTruncated: number;
@@ -1043,7 +1044,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				recordSeenLinesFromBody(this.session, absolutePath, tag, outputText);
 				outputText = `${formatReadHashlineHeader(formatPathRelativeToCwd(absolutePath, this.session.cwd), tag)}\n${outputText}`;
 			}
-		} else if (rawSelector && visibleSpans.length > 0) {
+		} else if (!immutable && rawSelector && visibleSpans.length > 0) {
 			const rawSeenLines = lineNumbersFromSpans(visibleSpans);
 			if (rawSeenLines.length > 0) {
 				if (buffered) {
@@ -1081,10 +1082,33 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
 		_toolContext?: AgentToolContext,
+		originalPath?: string,
 	): Promise<AgentToolResult<ReadToolDetails>> {
+		const immutable = originalPath !== undefined;
 		let { path: readPath } = params;
 		if (readPath.startsWith("file://")) {
 			readPath = expandPath(readPath);
+		}
+		if (readPath.startsWith("attachment://original/")) {
+			if (!this.session.withOriginalAttachment)
+				throw new ToolError("Original attachments are unavailable in this session");
+			const target = splitInternalUrlSel(readPath);
+			return this.session.withOriginalAttachment(
+				target.path,
+				async filePath => {
+					const result = await this.#executeInner(
+						_toolCallId,
+						{ path: `${filePath}${target.sel === undefined ? "" : `:${target.sel}`}` },
+						signal,
+						_onUpdate,
+						_toolContext,
+						target.path,
+					);
+					result.details = { ...result.details, resolvedPath: target.path };
+					return result;
+				},
+				signal,
+			);
 		}
 
 		if (IMAGE_ATTACHMENT_URI_REGEX.test(readPath)) {
@@ -1108,7 +1132,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 			return this.#readConflictRegion(conflictUri.id, conflictUri.scope);
 		}
-		const displayMode = resolveFileDisplayMode(this.session);
+		const displayMode = resolveFileDisplayMode(this.session, { immutable });
 
 		const parsedUrlTarget = parseReadUrlTarget(readPath);
 		if (parsedUrlTarget) {
@@ -1317,6 +1341,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		}
 
 		if (parsed.kind === "conflicts") {
+			if (immutable) throw new ToolError("Original attachments are immutable; use a normal text read");
 			return this.#readFileConflicts(absolutePath, suffixResolution, signal);
 		}
 
@@ -1334,7 +1359,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const imageMetadata = await readImageMetadata(absolutePath);
 		const mimeType = imageMetadata?.mimeType;
 		const ext = path.extname(absolutePath).toLowerCase();
-		const resolvedDisplayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
+		const resolvedDisplayPath = originalPath ?? formatPathRelativeToCwd(absolutePath, this.session.cwd);
 		const shouldConvertWithMarkit = CONVERTIBLE_EXTENSIONS.has(ext);
 
 		// Profiler reports (macOS `sample` call trees, V8 `.cpuprofile` JSON):
@@ -1349,15 +1374,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				if (isMultiRange(parsed) && parsed.kind === "lines") {
 					return buildInMemoryMultiRangeResult(this.session, rendered, parsed.ranges, {
 						details: { resolvedPath: absolutePath },
-						sourcePath: absolutePath,
+						sourcePath: originalPath ?? absolutePath,
 						entityLabel: "profile summary",
+						immutable,
 					});
 				}
 				const { offset, limit } = selToOffsetLimit(parsed);
 				return buildInMemoryTextResult(this.session, rendered, offset, limit, {
 					details: { resolvedPath: absolutePath },
-					sourcePath: absolutePath,
+					sourcePath: originalPath ?? absolutePath,
 					entityLabel: "profile summary",
+					immutable,
 				});
 			}
 		}
@@ -1393,15 +1420,17 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			if (isMultiRange(parsed) && parsed.kind === "lines") {
 				return buildInMemoryMultiRangeResult(this.session, notebookText, parsed.ranges, {
 					details: { resolvedPath: absolutePath },
-					sourcePath: absolutePath,
+					sourcePath: originalPath ?? absolutePath,
 					entityLabel: "notebook",
+					immutable,
 				});
 			}
 			const { offset, limit } = selToOffsetLimit(parsed);
 			return buildInMemoryTextResult(this.session, notebookText, offset, limit, {
 				details: { resolvedPath: absolutePath },
-				sourcePath: absolutePath,
+				sourcePath: originalPath ?? absolutePath,
 				entityLabel: "notebook",
+				immutable,
 			});
 		} else if (shouldConvertWithMarkit) {
 			// Convert document via markit.
@@ -1419,8 +1448,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 							resolvedPath: absolutePath,
 							contentType: this.session.settings.get("read.renderMarkdown") ? "text/markdown" : undefined,
 						},
-						sourcePath: absolutePath,
+						sourcePath: originalPath ?? absolutePath,
 						entityLabel: "document",
+						immutable,
 					});
 				}
 				const { offset, limit } = selToOffsetLimit(parsed);
@@ -1429,8 +1459,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						resolvedPath: absolutePath,
 						contentType: this.session.settings.get("read.renderMarkdown") ? "text/markdown" : undefined,
 					},
-					sourcePath: absolutePath,
+					sourcePath: originalPath ?? absolutePath,
 					entityLabel: "document",
+					immutable,
 					raw: isRawSelector(parsed),
 				});
 			} else if (result.error) {
@@ -1524,6 +1555,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						displayMode,
 						suffixResolution,
 						undefined, // plain-file read: deterministic and fast, never abort mid-read
+						!immutable,
+						immutable,
 					);
 					if (multiResult.bridgeResult) return multiResult.bridgeResult;
 					content = [{ type: "text", text: multiResult.outputText }];
@@ -1537,7 +1570,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					const { offset, limit } = selToOffsetLimit(parsed);
 					// Try ACP bridge first — editor's in-memory buffer is source of truth.
 					// Request full text so local range rendering keeps normal context and line numbers.
-					const bridgePromise = routeReadThroughBridge(this.session, absolutePath);
+					const bridgePromise = immutable ? undefined : routeReadThroughBridge(this.session, absolutePath);
 					if (bridgePromise !== undefined) {
 						try {
 							const bridgeText = await bridgePromise;
@@ -1810,7 +1843,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					if (hashContext?.tag) {
 						recordSeenLinesFromBody(this.session, absolutePath, hashContext.tag, outputText);
 					}
-					if (rawSelector && !firstLineExceedsLimit && collectedLines.length > 0) {
+					if (!immutable && rawSelector && !firstLineExceedsLimit && collectedLines.length > 0) {
 						// A raw read emits no header, but recording the range it displayed
 						// lets a same-content hashline tag inherit its provenance.
 						const seenLines = contiguousLineNumbers(startLineDisplay, collectedLines.length);
@@ -1829,7 +1862,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						details.displayContent = capturedDisplayContent;
 					}
 
-					if (!firstLineExceedsLimit && collectedLines.length > 0) {
+					if (!immutable && !firstLineExceedsLimit && collectedLines.length > 0) {
 						const blocks = scanConflictLines(collectedLines, startLineDisplay);
 						if (blocks.length > 0) {
 							const history = getConflictHistory(this.session);
@@ -1880,7 +1913,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 		}
 		const resultBuilder = toolResult(details).content(content);
-		if (sourcePath) {
+		if (originalPath) {
+			resultBuilder.sourceInternal(originalPath);
+		} else if (sourcePath) {
 			resultBuilder.sourcePath(sourcePath);
 		}
 		if (truncationInfo) {

@@ -25,6 +25,55 @@ describe("Engine Control + Query", () => {
 		tempDir = undefined;
 	});
 
+	it("stages and removes message-owned attachment chunks through the authenticated native transport", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-upload-${Snowflake.next()}-`));
+		const runtime = await EngineRuntime.create({ databasePath: path.join(tempDir, "engine.sqlite") });
+		const server = await startEngineControlQueryServer({
+			runtimeDir: tempDir,
+			runtime,
+			deviceId: "test-device",
+			engineId: "test-engine",
+			resolveLaunchProfile: async () => {
+				throw new Error("Uploads must not launch a model");
+			},
+		});
+		const client = new EngineControlQueryClient(tempDir);
+		const bytes = Buffer.from("partial");
+		const request = {
+			principalId: "alice",
+			uploadId: "wire-upload",
+			clientMessageId: "message-a",
+			name: "file.txt",
+			mediaType: "text/plain",
+			bytes: 100,
+			contentHash: `sha256:${"0".repeat(64)}`,
+			offset: 0,
+			contentBase64: bytes.toString("base64"),
+		};
+		try {
+			expect(await client.request("attachments.stage", request)).toMatchObject({
+				complete: false,
+				nextOffset: bytes.length,
+			});
+			expect(await client.request("attachments.stage", request)).toMatchObject({
+				complete: false,
+				nextOffset: bytes.length,
+			});
+			await expect(client.request("attachments.stage", { ...request, principalId: "" })).rejects.toThrow();
+			await expect(
+				client.request("attachments.stage", { ...request, sourcePath: "C:/private.txt" }),
+			).rejects.toThrow("Invalid runtime");
+			expect(
+				await client.request("attachments.remove", { principalId: "alice", uploadId: request.uploadId }),
+			).toEqual({ removed: true });
+			await expect(client.request("attachments.stage", request)).rejects.toThrow("removed");
+			expect(await client.request("snapshots.list")).toMatchObject({ items: [] });
+		} finally {
+			await server.close();
+			await runtime.dispose();
+		}
+	});
+
 	it("reclaims actual database bytes and resyncs snapshot cursors without losing events or retained history", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `omp-engine-reclaim-${Snowflake.next()}-`));
 		const databasePath = path.join(tempDir, "engine.sqlite");

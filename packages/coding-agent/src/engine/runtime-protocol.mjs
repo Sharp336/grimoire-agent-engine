@@ -55,6 +55,19 @@ const projectionLimits = {
 
 // JSON Schema covers the shape; these are the cross-field byte/identity invariants.
 function validProjection(name, value) {
+  if (name === 'command' && ['launch', 'continue', 'enqueue', 'steer'].includes(value.action)) {
+    const p = value.payload;
+    if (p.attachmentUploadIds && (!Object.hasOwn(p, 'text') || !p.clientMessageId)) return false;
+    if (Object.hasOwn(p, 'text') && !p.text.length && !p.attachmentUploadIds?.length) return false;
+  }
+  if (['attachment', 'attachmentStageRequest', 'nativeAttachmentStageRequest'].includes(name) && !value.name.trim()) return false;
+  if (name === 'attachmentStageRequest' || name === 'nativeAttachmentStageRequest') {
+    const decoded = atob(value.contentBase64);
+    if (btoa(decoded) !== value.contentBase64 || decoded.length > runtimeLimits.httpRangeBytes
+      || (!decoded.length && value.bytes !== 0) || value.offset + decoded.length > value.bytes) return false;
+  }
+  if (name === 'attachmentStageResult' && (value.nextOffset > value.attachment.bytes
+    || value.complete !== (value.nextOffset === value.attachment.bytes))) return false;
   const bound = projectionLimits[name];
   if (bound && encodedBytes(JSON.stringify(value)) > runtimeLimits[bound]) return false;
   if (name === 'command' && ['continue', 'history-branch-and-run'].includes(value.action)
