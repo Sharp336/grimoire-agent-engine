@@ -1,6 +1,7 @@
 // Explicit manual real-provider probe. Does not create an Artel task or claim UI acceptance.
-import { Agent } from "@oh-my-pi/pi-agent-core";
+
 import * as path from "node:path";
+import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { CursorCliSession } from "../../src/engine/cursor-cli";
 import { cursorTurn } from "../../src/engine/cursor-turn";
