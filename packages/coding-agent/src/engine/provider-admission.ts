@@ -3,9 +3,9 @@ import type { Model, SimpleStreamOptions, UsageReport } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import {
 	attachLatencyResponse,
-	latencyPhysicalRequest,
 	type LatencyAudit,
 	type LatencyRequest,
+	latencyPhysicalRequest,
 } from "@oh-my-pi/pi-utils/latency-audit";
 import type { ProviderRequestHook } from "../sdk";
 import type { AuthStorage } from "../session/auth-storage";

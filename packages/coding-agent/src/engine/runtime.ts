@@ -9,11 +9,11 @@ import { getBlobsDir, isEnoent, logger, stableStringifyJson, withTimeout } from 
 import {
 	attachLatencyPersistence,
 	createLatencyAudit,
+	type LatencyAudit,
 	latencyFetch,
 	latencyFirst,
 	latencyNormalizedSource,
 	latencyPersistenceSource,
-	type LatencyAudit,
 } from "@oh-my-pi/pi-utils/latency-audit";
 import { AsyncJobManager } from "../async/job-manager";
 import { withCapabilityProviderPolicy } from "../capability";

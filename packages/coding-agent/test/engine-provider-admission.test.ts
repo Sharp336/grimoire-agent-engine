@@ -5,7 +5,12 @@ import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-comple
 import type { Context, FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { logger } from "@oh-my-pi/pi-utils";
-import { LatencyAudit, latencyFetch, latencyNormalizedSource } from "@oh-my-pi/pi-utils/latency-audit";
+import {
+	attachLatencyResponse,
+	LatencyAudit,
+	latencyFetch,
+	latencyNormalizedSource,
+} from "@oh-my-pi/pi-utils/latency-audit";
 import {
 	ProviderAdmissionClient,
 	ProviderAdmissionError,
@@ -136,6 +141,67 @@ describe("ProviderAdmissionClient", () => {
 			expect(JSON.stringify(logs.mock.calls)).not.toContain("secret-");
 		} finally {
 			logs.mockRestore();
+		}
+	});
+
+	it("does not attribute buffered or transformed healer output to a later matching fragment", async () => {
+		const selected = buildModel({
+			id: "claude-sonnet-5",
+			name: "Fixture",
+			api: "openai-completions",
+			provider: "cheapai",
+			baseUrl: "https://cheapai.invalid/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 1_000,
+		});
+		for (const fragments of [
+			["<", "<"],
+			["<think>secret-thinking</think>", "secret-output"],
+		]) {
+			const audit = new LatencyAudit({ effectId: "healer-effect", modelCallId: "model-1" });
+			const run = async (probe?: LatencyAudit) => {
+				const stream = streamOpenAICompletions(
+					selected,
+					{ messages: [] },
+					{
+						apiKey: "secret-test-key",
+						fetch: async () => {
+							const response = new Response(
+								fragments
+									.map(content => `data: ${JSON.stringify({ choices: [{ delta: { content } }] })}\n\n`)
+									.join("") + "data: [DONE]\n\n",
+								{ headers: { "content-type": "text/event-stream" } },
+							);
+							if (probe)
+								attachLatencyResponse(response, {
+									audit: probe,
+									fields: { physicalRequestOrdinal: 1 },
+									first: new Set(),
+								});
+							return response;
+						},
+					},
+				);
+				const output: string[] = [];
+				for await (const event of stream) {
+					if (event.type === "text_delta" || event.type === "thinking_delta")
+						output.push(`${event.type}:${event.delta}`);
+				}
+				expect((await stream.result()).stopReason).toBe("stop");
+				return output;
+			};
+			expect(await run(audit)).toEqual(await run());
+			const normalized = audit.marks.filter(mark => mark.stage === "normalized_first");
+			expect(normalized.map(mark => mark.stream)).toEqual(
+				fragments[0] === "<" ? ["assistant"] : ["thinking", "assistant"],
+			);
+			for (const mark of normalized) {
+				expect(mark.sourceCorrelation).toBe("unknown");
+				expect(mark.parsedAt).toBeUndefined();
+			}
 		}
 	});
 

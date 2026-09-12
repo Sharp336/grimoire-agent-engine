@@ -5,10 +5,10 @@ import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { $env, logger, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
 import {
+	type LatencySource,
 	latencyFirst,
 	latencyNormalized,
 	latencyParsedSource,
-	type LatencySource,
 } from "@oh-my-pi/pi-utils/latency-audit";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
@@ -918,6 +918,7 @@ const streamOpenAICompletionsOnce = (
 			};
 			let auditSource: LatencySource | undefined;
 			let auditDirect = false;
+			let auditHealingPassThrough = true;
 			const appendText = (
 				message: AssistantMessage,
 				eventStream: AssistantMessageEventStream,
@@ -1201,11 +1202,7 @@ const streamOpenAICompletionsOnce = (
 
 					const normalizedDeltaText = normalizeStreamingContentText(choice.delta.content);
 					if (normalizedDeltaText.length > 0) {
-						// Buffered/healed adapters need source lineage before their split can be accepted.
-						auditDirect =
-							typeof choice.delta.content === "string" &&
-							!streamMarkupHealing &&
-							!stripDeepseekChatTemplateTokens;
+						auditDirect = typeof choice.delta.content === "string" && !stripDeepseekChatTemplateTokens;
 						if (normalizedDeltaText.trim())
 							latencyFirst(
 								auditSource,
@@ -1222,6 +1219,12 @@ const streamOpenAICompletionsOnce = (
 							const healingEvents = hasStructuredToolCalls
 								? streamMarkupHealing.feedEventsWithoutCalls(normalizedDeltaText)
 								: streamMarkupHealing.feedEvents(normalizedDeltaText);
+							// ponytail: after any buffering/transformation, exact lineage needs scanner provenance.
+							auditHealingPassThrough &&=
+								healingEvents.length === 1 &&
+								healingEvents[0]?.type === "text" &&
+								healingEvents[0].text === normalizedDeltaText;
+							auditDirect &&= auditHealingPassThrough;
 							for (const event of healingEvents) {
 								emitHealingEvent(event, suppressHealedThinking);
 							}
