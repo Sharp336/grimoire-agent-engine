@@ -245,7 +245,13 @@ function assertDepthAndSpawnAllowed(request: StructuredSubagentRequest, agentNam
 export async function resolveEffectiveSubagentPolicy(
 	request: StructuredSubagentRequest,
 ): Promise<EffectiveSubagentPolicy> {
-	// Engine attempts retain their sealed policy; standalone sessions may refresh it.
+	if (request.session.engineMode) {
+		throw new StructuredSubagentError(
+			"preflight",
+			"Engine children must use the task tool with profileRef and workStepId from the pinned child catalog. If task is unavailable, configure child profiles on the parent AgentProfile first.",
+		);
+	}
+	// Standalone callers may also supply a sealed policy snapshot.
 	if (!request.session.settings.isReadOnly()) await request.session.settings.reloadFromDisk();
 	const spawnPolicy = resolveSpawnPolicy(request.session.getSessionSpawns());
 	const agentName = request.agent?.trim() || spawnPolicy.defaultAgent;

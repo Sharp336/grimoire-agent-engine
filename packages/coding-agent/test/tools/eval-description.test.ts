@@ -44,6 +44,12 @@ function wireCellFields(tool: EvalTool): {
 }
 
 describe("eval tool description", () => {
+	it("does not advertise legacy agent() in Engine sessions", () => {
+		const session = makeSession({ spawns: "*" });
+		session.engineMode = true;
+		expect(new EvalTool(session).description).not.toContain("agent(prompt");
+	});
+
 	it("advertises agent() when spawns are allowed", () => {
 		const text = getEvalToolDescription({ py: true, js: true, spawns: true });
 		expect(text).toContain("agent(prompt");

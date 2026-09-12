@@ -95,6 +95,22 @@ afterEach(() => {
 });
 
 describe("structured subagent primitive", () => {
+	it("rejects Engine legacy launches before discovery, artifacts or dispatch", async () => {
+		const artifactsBefore = artifactsDirsFromRegistry();
+		const engineSession = session();
+		engineSession.engineMode = true;
+		const discover = vi.spyOn(discoveryModule, "discoverAgents");
+		const dispatch = vi.spyOn(executorModule, "runSubprocess");
+		for (const invocationKind of ["task", "eval"] as const) {
+			await expect(runStructuredSubagent(request({ session: engineSession, invocationKind }))).rejects.toThrow(
+				"task tool with profileRef and workStepId",
+			);
+		}
+		expect(discover).not.toHaveBeenCalled();
+		expect(dispatch).not.toHaveBeenCalled();
+		expect(artifactsDirsFromRegistry()).toEqual(artifactsBefore);
+	});
+
 	it("launches task and eval children from sealed settings without relaxing spawn policy", async () => {
 		mockDiscovery();
 		const dispatch = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());

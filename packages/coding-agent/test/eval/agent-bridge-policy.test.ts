@@ -158,6 +158,16 @@ function spyConcurrencyBarrier(limit: number): { maxInFlight: () => number } {
 }
 
 describe("runEvalAgent", () => {
+	it("directs Engine callers to canonical task dispatch without starting a legacy child", async () => {
+		const session = makeSession();
+		session.engineMode = true;
+		const dispatch = vi.spyOn(taskExecutor, "runSubprocess");
+		await expect(runEvalAgent({ prompt: "Review this context." }, { session })).rejects.toThrow(
+			"task tool with profileRef and workStepId",
+		);
+		expect(dispatch).not.toHaveBeenCalled();
+	});
+
 	afterEach(() => {
 		vi.restoreAllMocks();
 		AgentRegistry.resetGlobalForTests();

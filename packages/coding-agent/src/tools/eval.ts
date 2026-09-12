@@ -329,7 +329,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			base = getEvalToolDescription();
 		} else {
 			const backends = resolveEvalBackends(this.session);
-			const sessionSpawns = this.session.getSessionSpawns?.() ?? "*";
+			const sessionSpawns = this.session.engineMode ? false : (this.session.getSessionSpawns?.() ?? "*");
 			base = getEvalToolDescription({
 				py: backends.python,
 				js: backends.js,
