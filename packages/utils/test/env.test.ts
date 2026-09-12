@@ -8,6 +8,7 @@ import {
 	filterProcessEnv,
 	getDbBusyTimeoutMs,
 	parseEnvFile,
+	removePrivateRuntimeEnv,
 	setInteractiveHost,
 } from "@oh-my-pi/pi-utils/env";
 
@@ -170,6 +171,44 @@ describe("filterProcessEnv", () => {
 });
 
 describe("filterChildShellEnv", () => {
+	it("keeps transport secrets out of child processes while preserving the service credential", async () => {
+		const cwd = path.dirname(writeTempEnv(""));
+		const env = {
+			GRIMOIRE_AGENT_ENGINE_UPSTREAM_TOKEN: "synthetic-upstream",
+			GRIMOIRE_CLIENT_PROVIDER_BINDING_KEY: "synthetic-binding",
+			grimoire_session_token: "synthetic-case",
+			CUSTOM_AUTH: "synthetic-custom",
+			ARTEL_LOCAL_BEARER_fixture: "synthetic-local",
+			ARTEL_UPSTREAM_BEARER_fixture: "synthetic-session",
+			ARTEL_SHARED_CLIENT_HOST_TOKEN: "synthetic-client-host",
+			GRIMOIRE_SERVER_URL: "http://127.0.0.1:9",
+		};
+		const serviceToken = env.CUSTOM_AUTH;
+		removePrivateRuntimeEnv(env, ["CUSTOM_AUTH"]);
+		const child = filterChildShellEnv({ ...env, GRIMOIRE_ACCESS_TOKEN: "synthetic-reintroduced" }, cwd);
+		const proc = Bun.spawn(
+			[
+				process.execPath,
+				"--no-env-file",
+				"-e",
+				"process.stdout.write(JSON.stringify(Object.keys(process.env).filter(k => /GRIMOIRE|ARTEL|CUSTOM_AUTH/i.test(k))))",
+			],
+			{
+				cwd,
+				env: child,
+				stdout: "pipe",
+				stderr: "pipe",
+			},
+		);
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		expect(exitCode, stderr).toBe(0);
+		expect(JSON.parse(stdout)).toEqual(["GRIMOIRE_SERVER_URL"]);
+		expect(serviceToken).toBe("synthetic-custom");
+	});
 	// filterChildShellEnv resolves the mode-local dotenv name from the *launch*
 	// NODE_ENV (on Linux, /proc/self/environ — e.g. `test` inside a parallel
 	// bun-test worker), so the fixture must target that same mode instead of
