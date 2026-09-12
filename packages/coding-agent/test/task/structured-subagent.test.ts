@@ -8,6 +8,7 @@ import {
 	resetRegisteredArtifactDirsForTests,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/registry-helpers";
 import * as planHandoff from "@oh-my-pi/pi-coding-agent/plan-mode/plan-handoff";
+import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
@@ -94,6 +95,25 @@ afterEach(() => {
 });
 
 describe("structured subagent primitive", () => {
+	it("launches task and eval children from sealed settings without relaxing spawn policy", async () => {
+		mockDiscovery();
+		const dispatch = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+		const sealedSession = session();
+		sealedSession.settings = await Settings.loadReadOnly({
+			inMemory: true,
+			overrides: { "task.maxRecursionDepth": 2, "task.isolation.mode": "none" },
+		});
+		for (const invocationKind of ["task", "eval"] as const) {
+			const completed = await runStructuredSubagent(request({ session: sealedSession, invocationKind }));
+			expect(completed.result.exitCode).toBe(0);
+		}
+		expect(dispatch).toHaveBeenCalledTimes(2);
+		expect(() => sealedSession.settings.override("task.maxRecursionDepth", 0)).toThrow("read-only");
+		sealedSession.getSessionSpawns = () => "none";
+		await expect(runStructuredSubagent(request({ session: sealedSession }))).rejects.toThrow("Cannot spawn");
+		expect(dispatch).toHaveBeenCalledTimes(2);
+	});
+
 	it("uses caller, agent, then session schemas in precedence order", async () => {
 		mockDiscovery();
 		const callerSchema = { type: "object", properties: { caller: { type: "string" } } };
@@ -192,6 +212,9 @@ describe("structured subagent primitive", () => {
 			expect(policy.modelOverride).toEqual(["kimi-code/k3:max"]);
 		} finally {
 			liveSettings.cancelPendingSaves();
+			// Release SQLite and Bun's cached file handles before removing the Windows fixture.
+			AgentStorage.resetInstance();
+			Bun.gc(true);
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});
