@@ -15,6 +15,7 @@
  *   chain-state detectors, which regex over `error.message`.
  */
 import { fetchWithRetry, readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
+import { latencyParsedObserver } from "@oh-my-pi/pi-utils/latency-audit";
 import * as AIError from "../error";
 import { OpenAIHttpError } from "../error";
 
@@ -113,7 +114,19 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		});
 	}
 	return {
-		events: readSseJson<TEvent>(response.body, init.signal, init.onSseEvent),
+		events: readSseJson<TEvent>(
+			response.body,
+			init.signal,
+			init.onSseEvent,
+			latencyParsedObserver(
+				response,
+				init.url.startsWith("https:")
+					? "https_sse_json"
+					: init.url.startsWith("http:")
+						? "http_sse_json"
+						: "unknown_sse_json",
+			),
+		),
 		response,
 		requestId: response.headers.get("x-request-id"),
 	};

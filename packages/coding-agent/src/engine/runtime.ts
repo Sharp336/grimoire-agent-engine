@@ -6,6 +6,15 @@ import { createGunzip } from "node:zlib";
 import { AgentPauseGate } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, AssistantMessageEvent, ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getBlobsDir, isEnoent, logger, stableStringifyJson, withTimeout } from "@oh-my-pi/pi-utils";
+import {
+	attachLatencyPersistence,
+	createLatencyAudit,
+	latencyFetch,
+	latencyFirst,
+	latencyNormalizedSource,
+	latencyPersistenceSource,
+	type LatencyAudit,
+} from "@oh-my-pi/pi-utils/latency-audit";
 import { AsyncJobManager } from "../async/job-manager";
 import { withCapabilityProviderPolicy } from "../capability";
 import { SETTINGS_SCHEMA, type SettingPath, withSettingsScope } from "../config/settings";
@@ -84,7 +93,7 @@ import {
 	validateCommandContext,
 	validateStartRequest,
 } from "./contracts";
-import { withProviderObservationContext } from "./provider-admission";
+import { markProviderLatency, withProviderObservationContext } from "./provider-admission";
 import { safeEngineErrorDetail, safeHostedMcpFailure } from "./public-error";
 import { engineAgentId, engineAgentInstanceId, engineRouteToken } from "./route";
 import { EngineAttachmentUploads, messageAttachmentReferences } from "./runtime-attachments";
@@ -593,8 +602,20 @@ export class EngineRuntime {
 			controller: new AbortController(),
 		};
 		this.#pendingStarts.add(pending);
-		return this.#inLanes(laneIds, () => this.#startInLane(request, profile, pending.controller.signal))
+		const audit = createLatencyAudit({
+			commandId: request.commandId,
+			clientMessageId: request.clientMessageId,
+			agentInstanceId: request.agentInstanceId,
+			attemptId: request.attemptId,
+			executionId: request.executionId,
+		});
+		audit?.mark("start_enter");
+		return this.#inLanes(laneIds, () => {
+			audit?.mark("lane_ready");
+			return this.#startInLane(request, profile, pending.controller.signal, audit);
+		})
 			.catch(async error => {
+				audit?.mark("start_error");
 				if (
 					error instanceof EngineTargetError &&
 					(error.code === "agent_busy" || error.code === "stale_target") &&
@@ -606,7 +627,10 @@ export class EngineRuntime {
 				}
 				throw error;
 			})
-			.finally(() => this.#pendingStarts.delete(pending));
+			.finally(() => {
+				this.#pendingStarts.delete(pending);
+				audit?.finish("start_settled");
+			});
 	}
 
 	steer(request: EngineSteerRequest): Promise<EngineControlResult> {
@@ -2767,6 +2791,7 @@ export class EngineRuntime {
 		request: EngineStartRequest,
 		profile: EngineLaunchProfile,
 		pendingStartSignal: AbortSignal,
+		audit?: LatencyAudit,
 	): Promise<EngineStartResult> {
 		this.#throwIfDisposed();
 		let binding = this.#bindings.get(request.agentInstanceId);
@@ -2864,6 +2889,7 @@ export class EngineRuntime {
 		const preparedHistory = await this.#prepareHistoryStart(request);
 		const preparedRestore = await this.#prepareRestoreStart(request);
 		const preparedSession = preparedHistory?.sessionManager ?? preparedRestore?.sessionManager;
+		audit?.mark("binding_prepare");
 
 		if (binding) {
 			if (binding.state === "running" || binding.session.isStreaming) {
@@ -2921,9 +2947,11 @@ export class EngineRuntime {
 				binding.pauseRequests.clear();
 				binding.resumeCommandIds.clear();
 				binding.session.setAttemptId(request.attemptId);
+				audit?.mark("binding_reused");
 			}
 		}
-		if (!binding)
+		if (!binding) {
+			audit?.mark("binding_open_start");
 			binding = await this.#openBinding(
 				request,
 				profile,
@@ -2932,6 +2960,8 @@ export class EngineRuntime {
 				preparedSession,
 				pendingStartSignal,
 			);
+			audit?.mark("binding_open_done");
+		}
 		try {
 			this.#assertAttachmentSupport(binding.session, images, preparedAttachments?.originalAttachments);
 		} catch (error) {
@@ -2966,6 +2996,7 @@ export class EngineRuntime {
 				),
 				...(preparedHistory ? { historyEdit: preparedHistory.result } : {}),
 			};
+			audit?.mark("acceptance_checkpoint_start");
 			await this.#commitAttemptTransition(binding, "running", [{ kind: "accepted" }, { kind: "running" }], {
 				transcriptCheckpoint: await binding.session.sessionManager.flushAndCheckpoint(),
 				startIntent: {
@@ -2991,6 +3022,7 @@ export class EngineRuntime {
 						}
 					: {}),
 			});
+			audit?.mark("acceptance_checkpoint_done");
 			delete binding.previousInboxSessionId;
 			delete binding.pendingInboxSourceSessionId;
 			delete binding.uncommittedForkSessionFile;
@@ -3276,14 +3308,16 @@ export class EngineRuntime {
 					wrapFetch: (model, fetch) => {
 						const wrapped = createProviderRetryBudgetHook(
 							resolved?.options.providerRequestHook ?? this.#sessionDefaults?.providerRequestHook,
-						).wrapFetch(model, fetch);
+						).wrapFetch(model, (input, init) => latencyFetch(fetch, input, init));
 						return async (input, init) => {
 							if (!liveBinding) throw new Error("Provider boundary has no Engine binding");
+							markProviderLatency("intent_admission_start");
 							await this.#admitEffect(
 								liveBinding,
 								() => this.store.assertIntent(liveBinding!.agentInstanceId, undefined, true),
 								init?.signal ?? undefined,
 							);
+							markProviderLatency("intent_admission_done");
 							return await wrapped(input, init);
 						};
 					},
@@ -4198,25 +4232,42 @@ export class EngineRuntime {
 			modelCallId,
 			inputHash,
 		};
+		const audit = createLatencyAudit({
+			commandId: identity?.sourceCommandId ?? binding.commandId,
+			clientMessageId: identity?.clientMessageId,
+			agentInstanceId: binding.agentInstanceId,
+			attemptId: binding.attemptId,
+			executionId: binding.executionId,
+			engineGeneration: binding.engineGeneration,
+			effectId: effect.effectId,
+			modelCallId,
+		});
+		audit?.mark("model_admission_start");
 		try {
 			const started = await this.#admitEffect(binding, () =>
 				this.store.startModelEffect(this.#snapshot(binding), effect),
 			);
 			this.#notifyEvents([started]);
+			audit?.mark("model_started", { eventId: started.eventId });
 			this.#queueProfileRoute(binding, "loading");
 			const previous = binding.session.getLastAssistantMessage();
 			let dispatched: boolean;
 			try {
-				dispatched = await withProviderObservationContext(effect, () =>
-					this.#withSessionScope(binding, () =>
-						this.#dispatchPrompt(binding.session, input, identity, kind, images),
-					),
+				audit?.mark("prompt_dispatch");
+				dispatched = await withProviderObservationContext(
+					effect,
+					() =>
+						this.#withSessionScope(binding, () =>
+							this.#dispatchPrompt(binding.session, input, identity, kind, images),
+						),
+					audit,
 				);
 				const current = binding.session.getLastAssistantMessage();
 				if (current !== previous && current?.stopReason === "error") {
 					throw new Error(current.errorMessage?.trim() || "Model request failed");
 				}
 			} catch (error) {
+				audit?.mark("model_failed");
 				const message = error instanceof Error ? error.message : String(error);
 				const settled = await this.store.settleModelEffect(
 					this.#snapshot(binding),
@@ -4229,8 +4280,10 @@ export class EngineRuntime {
 			}
 			const settled = await this.store.settleModelEffect(this.#snapshot(binding), effect, "completed");
 			this.#notifyEvents([settled]);
+			audit?.mark("model_completed", { eventId: settled.eventId });
 			return dispatched;
 		} finally {
+			audit?.finish("model_settled");
 			completed.resolve();
 			binding.activeModelCalls.delete(completed.promise);
 			await binding.pauseGate.waitUntilResumed();
@@ -4523,9 +4576,13 @@ export class EngineRuntime {
 	}
 
 	async #recordAssistantDelta(binding: LiveBinding, timestamp: number, event: AssistantMessageEvent): Promise<void> {
+		const auditSource = latencyNormalizedSource(event);
+		const auditStream = event.type.startsWith("thinking") ? "thinking" : "assistant";
+		latencyFirst(auditSource, "persistence_enter", auditStream);
 		// The interceptor runs before the public subscriber. Also drain the preceding
 		// message's final write before a new provider block can get ahead of storage.
 		await binding.traceWriteTail;
+		latencyFirst(auditSource, "persistence_tail_ready", auditStream);
 		if (binding.messageWriteError) throw binding.messageWriteError;
 		if (
 			event.type !== "text_delta" &&
@@ -4544,6 +4601,7 @@ export class EngineRuntime {
 			return;
 		}
 		const block = this.#assistantBlock(state, event.contentIndex, stream);
+		attachLatencyPersistence(block, auditSource);
 		block.receivedChars += event.delta.length;
 		let text = block.pendingSurrogate + event.delta;
 		block.pendingSurrogate = "";
@@ -4626,6 +4684,17 @@ export class EngineRuntime {
 				status,
 				...(baseRevision ? { baseRevision } : { partial: false }),
 			};
+			const auditSource = latencyPersistenceSource(block);
+			if (
+				chunk.trim() &&
+				latencyFirst(auditSource, "persistence_payload", block.stream, {
+					messageId: state.assistantMessageId,
+					blockId: block.blockId,
+					chars: chunk.length,
+				})
+			) {
+				attachLatencyPersistence(payload, auditSource);
+			}
 			const payloadBytes = Buffer.byteLength(JSON.stringify(payload));
 			if (
 				bytes + payloadBytes > runtimeLimits.deliveryBatchBytes ||
@@ -5152,12 +5221,16 @@ export class EngineRuntime {
 		causationCommandId = target.commandId,
 	): Promise<void> {
 		const { commandId: _, ...eventTarget } = target;
+		const auditSource = payload ? latencyPersistenceSource(payload) : undefined;
+		const auditStream = typeof payload?.stream === "string" ? payload.stream : "unknown";
+		latencyFirst(auditSource, "append_call", auditStream);
 		const event = await this.store.appendEvent({
 			...eventTarget,
 			causationCommandId,
 			kind,
 			payload,
 		});
+		latencyFirst(auditSource, "append_committed", auditStream, { eventId: event.eventId, cursor: event.eventId });
 		this.#notifyEvents([event]);
 	}
 

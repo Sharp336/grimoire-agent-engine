@@ -1,6 +1,12 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Model, SimpleStreamOptions, UsageReport } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
+import {
+	attachLatencyResponse,
+	latencyPhysicalRequest,
+	type LatencyAudit,
+	type LatencyRequest,
+} from "@oh-my-pi/pi-utils/latency-audit";
 import type { ProviderRequestHook } from "../sdk";
 import type { AuthStorage } from "../session/auth-storage";
 
@@ -100,6 +106,7 @@ interface ProviderObservationContext {
 	modelCallId: string;
 	physicalRequestOrdinal: number;
 	readonly pending: Set<Promise<unknown>>;
+	readonly audit?: LatencyAudit;
 }
 
 type ProviderObservationOutcome = "success" | "rate_limited" | "timeout" | "provider_error" | "transport_error";
@@ -109,9 +116,10 @@ const providerObservationContext = new AsyncLocalStorage<ProviderObservationCont
 export async function withProviderObservationContext<T>(
 	identity: { effectId: string; modelCallId: string },
 	callback: () => Promise<T>,
+	audit?: LatencyAudit,
 ): Promise<T> {
 	return await providerObservationContext.run(
-		{ ...identity, physicalRequestOrdinal: 0, pending: new Set() },
+		{ ...identity, physicalRequestOrdinal: 0, pending: new Set(), audit },
 		async () => {
 			let completed = false;
 			try {
@@ -127,6 +135,11 @@ export async function withProviderObservationContext<T>(
 			}
 		},
 	);
+}
+
+export function markProviderLatency(stage: string): void {
+	const context = providerObservationContext.getStore();
+	context?.audit?.mark(stage, { physicalRequestOrdinal: context.physicalRequestOrdinal + 1 });
 }
 
 export class ProviderAdmissionError extends Error {
@@ -198,6 +211,7 @@ export class ProviderAdmissionClient {
 				? AbortSignal.any([signal, AbortSignal.timeout(ADMISSION_TIMEOUT_MS)])
 				: AbortSignal.timeout(ADMISSION_TIMEOUT_MS);
 			let reports: UsageReport[] | null;
+			markProviderLatency("usage_refresh_start");
 			try {
 				await raceWithSignal(
 					authStorage.invalidateUsageCache(identity.providerId, admissionSignal),
@@ -218,6 +232,7 @@ export class ProviderAdmissionClient {
 				);
 			}
 			const report = selectExactUsageReport(reports, identity);
+			markProviderLatency("usage_refresh_done");
 			if (!report) {
 				throw new ProviderAdmissionError(
 					"provider_usage_unavailable",
@@ -230,7 +245,9 @@ export class ProviderAdmissionClient {
 				modelId: model.id,
 				usageReport: withoutRaw(report),
 			};
+			markProviderLatency("quota_before_start");
 			const decision = await this.#post(request, signal);
+			markProviderLatency("quota_before_done");
 			if (!decision.allowed) {
 				throw new ProviderAdmissionError(
 					decision.status || "provider_admission_denied",
@@ -256,11 +273,40 @@ export class ProviderAdmissionClient {
 		const context = providerObservationContext.getStore();
 		if (!context) return await fetch(input, init);
 		const ordinal = ++context.physicalRequestOrdinal;
+		const auditRequest: LatencyRequest | undefined = context.audit
+			? {
+					audit: context.audit,
+					first: new Set(),
+					fields: {
+						effectId: context.effectId,
+						modelCallId: context.modelCallId,
+						physicalRequestOrdinal: ordinal,
+						api: model.api,
+						modelId: model.id,
+						providerId: model.provider,
+						routeRef: identity.routeRef,
+					},
+				}
+			: undefined;
 		const startedAt = performance.now();
 		try {
-			const response = await fetch(input, init);
-			return this.#observeResponse(identity, model, response, init?.signal, context, ordinal, startedAt);
+			const response = auditRequest
+				? await latencyPhysicalRequest.run(auditRequest, () => fetch(input, init))
+				: await fetch(input, init);
+			const observed = this.#observeResponse(
+				identity,
+				model,
+				response,
+				init?.signal,
+				context,
+				ordinal,
+				startedAt,
+				auditRequest,
+			);
+			attachLatencyResponse(observed, auditRequest);
+			return observed;
 		} catch (error) {
+			auditRequest?.audit.mark("request_wrapper_error", auditRequest.fields);
 			if (init?.signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) throw error;
 			const status = httpStatusFromError(error);
 			this.#queueObservation(identity, model, context, ordinal, startedAt, {
@@ -286,6 +332,7 @@ export class ProviderAdmissionClient {
 		context: ProviderObservationContext,
 		ordinal: number,
 		startedAt: number,
+		auditRequest?: LatencyRequest,
 	): Response {
 		const outcome = response.ok
 			? "success"
@@ -295,6 +342,7 @@ export class ProviderAdmissionClient {
 					? "timeout"
 					: "provider_error";
 		if (!response.body || !response.ok) {
+			auditRequest?.audit.mark("response_terminal", { ...auditRequest.fields, statusCode: response.status });
 			this.#queueObservation(identity, model, context, ordinal, startedAt, { outcome, statusCode: response.status });
 			return response;
 		}
@@ -312,6 +360,7 @@ export class ProviderAdmissionClient {
 				try {
 					const next = await reader.read();
 					if (next.done) {
+						auditRequest?.audit.mark("transport_eof", auditRequest.fields);
 						if (semanticOutcome?.push(new Uint8Array(), true)) {
 							settle({ outcome: "provider_error", statusCode: response.status });
 						} else settle({ outcome, statusCode: response.status });
@@ -323,11 +372,16 @@ export class ProviderAdmissionClient {
 						controller.enqueue(next.value);
 					}
 				} catch (error) {
+					auditRequest?.audit.mark("transport_error", auditRequest.fields);
 					settle({ outcome: "transport_error" });
 					controller.error(error);
 				}
 			},
 			cancel: reason => {
+				auditRequest?.audit.mark(
+					signal?.aborted ? "transport_aborted" : "transport_cancelled",
+					auditRequest.fields,
+				);
 				if (signal?.aborted) settled = true;
 				return reader.cancel(reason);
 			},

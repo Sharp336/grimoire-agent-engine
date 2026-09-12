@@ -1,17 +1,183 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import type { Model, UsageReport } from "@oh-my-pi/pi-ai";
 import { streamOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type { Context, FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { logger } from "@oh-my-pi/pi-utils";
+import { LatencyAudit, latencyFetch, latencyNormalizedSource } from "@oh-my-pi/pi-utils/latency-audit";
 import {
 	ProviderAdmissionClient,
 	ProviderAdmissionError,
 	withProviderObservationContext,
 } from "../src/engine/provider-admission";
 import type { AuthStorage } from "../src/session/auth-storage";
+import { createProviderRetryBudgetHook, withProviderRetryBudget } from "../src/session/provider-retry-budget";
 
 describe("ProviderAdmissionClient", () => {
+	it("keeps first nonempty content on its Response after another fetch, without changing emitted content", async () => {
+		const route = {
+			...identity(),
+			runtimeProviderId: "cheapai",
+			modelId: "claude-sonnet-5",
+			baseUrl: "https://cheapai.invalid/v1",
+		};
+		const selected = buildModel({
+			id: route.modelId,
+			name: "Fixture",
+			api: "openai-completions",
+			provider: route.runtimeProviderId,
+			baseUrl: route.baseUrl,
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 1_000,
+		});
+		const hook = new ProviderAdmissionClient("http://127.0.0.1/admission", "secret-test-key", async () =>
+			Response.json({ allowed: true }),
+		).createHook(undefined, {} as AuthStorage, "", [route]);
+		const identityFields = { effectId: "audit-effect", modelCallId: "model-1" };
+		const audit = new LatencyAudit(identityFields);
+		const logs = spyOn(logger, "info").mockImplementation(() => {});
+		const run = async (probe?: LatencyAudit) => {
+			let calls = 0;
+			let controller: ReadableStreamDefaultController<Uint8Array>;
+			const opened = Promise.withResolvers<void>();
+			const consumerReached = Promise.withResolvers<void>();
+			const consumerRelease = Promise.withResolvers<void>();
+			const encoder = new TextEncoder();
+			const frame = (delta: object) =>
+				encoder.encode(
+					`data: ${JSON.stringify({
+						id: "response-one",
+						choices: [{ index: 0, delta }],
+					})}\n\n`,
+				);
+			const raw: FetchImpl = async () => {
+				calls++;
+				if (calls > 1)
+					return new Response("data: [DONE]\n\n", { headers: { "content-type": "text/event-stream" } });
+				return new Response(
+					new ReadableStream<Uint8Array>({
+						start(value) {
+							controller = value;
+							value.enqueue(frame({ role: "assistant" }));
+							value.enqueue(frame({ reasoning_content: "\n", content: " " }));
+							opened.resolve();
+						},
+					}),
+					{ headers: { "content-type": "text/event-stream" } },
+				);
+			};
+			const wrapped = hook.wrapFetch(selected, (input, init) => latencyFetch(raw, input, init));
+			return await withProviderObservationContext(
+				identityFields,
+				async () => {
+					const stream = streamOpenAICompletions(
+						selected,
+						{ messages: [{ role: "user", content: "secret-input", timestamp: 0 }] },
+						{ apiKey: "secret-test-key", fetch: wrapped },
+					);
+					const output: string[] = [];
+					const consuming = (async () => {
+						for await (const event of stream) {
+							if (event.type !== "text_delta" && event.type !== "thinking_delta") continue;
+							output.push(`${event.type}:${event.delta}`);
+							if (!event.delta.trim()) continue;
+							if (probe) expect(latencyNormalizedSource(event)?.request.fields.physicalRequestOrdinal).toBe(1);
+							else expect(latencyNormalizedSource(event)).toBeUndefined();
+							consumerReached.resolve();
+							await consumerRelease.promise;
+						}
+					})();
+					try {
+						await opened.promise;
+						// A later response must never steal the first response's late parser content.
+						await (await wrapped(`${route.baseUrl}/chat/completions`)).text();
+						controller!.enqueue(frame({ content: "secret-output" }));
+						controller!.enqueue(encoder.encode("data: [DONE]\n\n"));
+						controller!.close();
+						await Promise.race([consumerReached.promise, consuming]);
+						if (probe) {
+							const first = probe.marks.find(mark => mark.stage === "normalized_first");
+							expect(first).toMatchObject({
+								physicalRequestOrdinal: 1,
+								stream: "assistant",
+								chars: 13,
+								sourceCorrelation: "direct",
+							});
+							expect(first!.parsedAt).toBeLessThanOrEqual(first!.at);
+							expect(
+								probe.marks.some(mark => mark.stage === "normalized_first" && mark.stream === "thinking"),
+							).toBe(false);
+						}
+					} finally {
+						consumerRelease.resolve();
+					}
+					await consuming;
+					expect((await stream.result()).stopReason).toBe("stop");
+					return output;
+				},
+				probe,
+			);
+		};
+		try {
+			const disabled = await run();
+			expect(logs.mock.calls.filter(([message]) => message === "artel.latency")).toEqual([]);
+			expect(await run(audit)).toEqual(disabled);
+			audit.finish("fixture_settled");
+			expect(
+				audit.marks.filter(mark => mark.stage === "fetch_start").map(mark => mark.physicalRequestOrdinal),
+			).toEqual([1, 2]);
+			expect(
+				audit.marks.some(mark => mark.stage === "no_content_on_terminal" && mark.physicalRequestOrdinal === 2),
+			).toBe(true);
+			expect(JSON.stringify(logs.mock.calls)).not.toContain("secret-");
+		} finally {
+			logs.mockRestore();
+		}
+	});
+
+	it("does not count a retry-budget rejection as a physical provider dispatch", async () => {
+		const audit = new LatencyAudit({ effectId: "budget-effect", modelCallId: "model-1" });
+		const hook = new ProviderAdmissionClient("http://127.0.0.1/admission", "token", async () =>
+			Response.json({ allowed: true }),
+		).createHook(
+			identity(),
+			{
+				invalidateUsageCache: async () => {},
+				fetchUsageReports: async () => [usageReport()],
+			} as unknown as AuthStorage,
+			"",
+		);
+		let rawCalls = 0;
+		await withProviderRetryBudget(1, () =>
+			withProviderObservationContext(
+				audit.identity as { effectId: string; modelCallId: string },
+				async () => {
+					const wrapped = createProviderRetryBudgetHook(hook).wrapFetch(model(), (input, init) =>
+						latencyFetch(
+							async () => {
+								rawCalls++;
+								return new Response("ok");
+							},
+							input,
+							init,
+						),
+					);
+					await (await wrapped("https://provider.invalid")).text();
+					await expect(wrapped("https://provider.invalid")).rejects.toThrow("retry");
+				},
+				audit,
+			),
+		);
+		expect(rawCalls).toBe(1);
+		expect(audit.marks.filter(mark => mark.stage === "fetch_start")).toHaveLength(1);
+		const before = audit.marks.find(mark => mark.stage === "quota_before_done")!;
+		const fetch = audit.marks.find(mark => mark.stage === "fetch_start")!;
+		expect(before.at).toBeLessThanOrEqual(fetch.at);
+	});
 	it("admits each physical fetch and invalidates freshness after each result", async () => {
 		let admissionBefore = 0;
 		let admissionAfter = 0;

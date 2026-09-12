@@ -4,12 +4,19 @@ import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import type { ResolvedOpenAICompat } from "@oh-my-pi/pi-catalog/types";
 import { $env, logger, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
+import {
+	latencyFirst,
+	latencyNormalized,
+	latencyParsedSource,
+	type LatencySource,
+} from "@oh-my-pi/pi-utils/latency-audit";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
 import { getEnvApiKey } from "../stream";
 import type {
 	AssistantMessage,
+	AssistantMessageEvent,
 	Context,
 	Message,
 	MessageAttribution,
@@ -909,6 +916,8 @@ const streamOpenAICompletionsOnce = (
 				if (currentBlock?.type !== "toolCall") finishCurrentBlock(currentBlock);
 				finishPendingToolCallBlocks();
 			};
+			let auditSource: LatencySource | undefined;
+			let auditDirect = false;
 			const appendText = (
 				message: AssistantMessage,
 				eventStream: AssistantMessageEventStream,
@@ -925,12 +934,14 @@ const streamOpenAICompletionsOnce = (
 					eventStream.push({ type: "text_start", contentIndex: blockIndex(currentBlock), partial: message });
 				}
 				currentBlock.text += text;
-				eventStream.push({
+				const event: AssistantMessageEvent = {
 					type: "text_delta",
 					contentIndex: blockIndex(currentBlock),
 					delta: text,
 					partial: message,
-				});
+				};
+				latencyNormalized(event, auditSource, "assistant", text, event.contentIndex, auditDirect);
+				eventStream.push(event);
 			};
 			const appendThinking = (
 				message: AssistantMessage,
@@ -957,12 +968,14 @@ const streamOpenAICompletionsOnce = (
 					currentBlock.thinkingSignature = signature;
 				}
 				currentBlock.thinking += thinking;
-				eventStream.push({
+				const event: AssistantMessageEvent = {
 					type: "thinking_delta",
 					contentIndex: blockIndex(currentBlock),
 					delta: thinking,
 					partial: message,
-				});
+				};
+				latencyNormalized(event, auditSource, "thinking", thinking, event.contentIndex, auditDirect);
+				eventStream.push(event);
 			};
 
 			const appendTextDelta = (text: string): void => {
@@ -1104,6 +1117,8 @@ const streamOpenAICompletionsOnce = (
 				if (!chunk || typeof chunk !== "object") continue;
 				const streamError = createOpenAICompletionsStreamError(chunk, model.provider);
 				if (streamError) throw streamError;
+				auditSource = latencyParsedSource(chunk);
+				auditDirect = false;
 
 				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
 				// and each chunk in a streamed completion carries the same id.
@@ -1167,6 +1182,15 @@ const streamOpenAICompletionsOnce = (
 					}
 
 					if (foundReasoningField) {
+						auditDirect = !explicitReasoningDeltasMayBeCumulative;
+						if (foundReasoningDelta.trim())
+							latencyFirst(
+								auditSource,
+								"parsed_candidate_first",
+								"thinking",
+								{ chars: foundReasoningDelta.length },
+								auditSource?.parsedAt,
+							);
 						appendThinkingDelta(
 							foundReasoningDelta,
 							foundReasoningField,
@@ -1177,6 +1201,19 @@ const streamOpenAICompletionsOnce = (
 
 					const normalizedDeltaText = normalizeStreamingContentText(choice.delta.content);
 					if (normalizedDeltaText.length > 0) {
+						// Buffered/healed adapters need source lineage before their split can be accepted.
+						auditDirect =
+							typeof choice.delta.content === "string" &&
+							!streamMarkupHealing &&
+							!stripDeepseekChatTemplateTokens;
+						if (normalizedDeltaText.trim())
+							latencyFirst(
+								auditSource,
+								"parsed_candidate_first",
+								"assistant",
+								{ chars: normalizedDeltaText.length },
+								auditSource?.parsedAt,
+							);
 						if (!firstTokenTime) firstTokenTime = performance.now();
 						const hasStructuredToolCalls =
 							Array.isArray(choice.delta.tool_calls) && choice.delta.tool_calls.length > 0;
@@ -1333,6 +1370,7 @@ const streamOpenAICompletionsOnce = (
 				if (streamFinishedAt !== undefined && sawUsagePayload && !awaitTrailingUsageDetails) break;
 			}
 
+			auditDirect = false;
 			if (streamMarkupHealing) {
 				for (const event of streamMarkupHealing.flushEvents()) {
 					emitHealingEvent(event, suppressHealedThinking);

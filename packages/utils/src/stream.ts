@@ -240,6 +240,7 @@ export async function* readSseJson<T>(
 	stream: ReadableStream<Uint8Array>,
 	signal?: AbortSignal,
 	onEvent?: SseEventObserver,
+	onParsed?: (value: T) => void,
 ): AsyncGenerator<T> {
 	for await (const sse of readSseEvents(stream, signal)) {
 		const isTrailing = trailingEvents.has(sse);
@@ -250,7 +251,13 @@ export async function* readSseJson<T>(
 			continue;
 		}
 		try {
-			yield JSON.parse(data) as T;
+			const value = JSON.parse(data) as T;
+			try {
+				onParsed?.(value);
+			} catch {
+				/* Diagnostic observers cannot change parsing. */
+			}
+			yield value;
 		} catch (err) {
 			if (err instanceof SyntaxError && isTrailing && isRecoverableTrailingJson(data)) {
 				return;
