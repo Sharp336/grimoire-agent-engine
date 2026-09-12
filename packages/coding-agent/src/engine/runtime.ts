@@ -3448,16 +3448,19 @@ export class EngineRuntime {
 							if (current()) binding.messageWriteError ??= error;
 						};
 						binding.traceWriteTail = checkpoint.then(() => {}, failed);
-						// A Stop/Start lane may drain traceWriteTail. Do not put that lane back in its tail.
+						// Earlier history writes may need this lane; drain them before acquiring it.
 						this.#trackRun(
-							this.#inLane(target.agentInstanceId, async () => {
-								const durable = await checkpoint;
-								if (!durable || !current()) return;
-								await this.#commitAttemptTransition(binding, binding.attemptState, [], {
-									expectedStates: [binding.attemptState],
-									transcriptCheckpoint: durable,
-								});
-							}).catch(failed),
+							checkpoint
+								.then(durable =>
+									this.#inLane(target.agentInstanceId, async () => {
+										if (!durable || !current()) return;
+										await this.#commitAttemptTransition(binding, binding.attemptState, [], {
+											expectedStates: [binding.attemptState],
+											transcriptCheckpoint: durable,
+										});
+									}),
+								)
+								.catch(failed),
 						);
 					}
 				}

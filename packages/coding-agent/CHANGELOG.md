@@ -48,6 +48,8 @@
 
 ### Fixed
 
+- Agent replies no longer stall while saving the user's message before the first response.
+
 - Retry history stays after an empty failed response, including after restart.
 
 - Explicit reasoning-off selections retain their wire meaning on supported profile routes instead of silently becoming low effort.

@@ -3634,6 +3634,47 @@ describe("EngineRuntime", () => {
 		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
 	}, 30_000);
 
+	it("completes a native prompt when user persistence and history checkpoints share the lane", async () => {
+		const mock = createMockModel({ responses: [{ content: ["checkpoint answer"] }] });
+		const { runtime, cwd } = await createRuntime(undefined, {
+			dispatchPrompt: undefined,
+			resolveSessionProfile: async () => ({
+				options: { model: mock.model },
+				profileRoutes: {
+					profileRef: "gctx:2222222222222222",
+					primaryRouteRef: "gctx:3333333333333333",
+					routes: [{ routeRef: "gctx:3333333333333333", provider: mock.model.provider, modelId: mock.model.id }],
+				},
+				dispose() {},
+			}),
+		});
+		const started = await runtime.start(
+			{
+				commandId: "checkpoint-cycle-start",
+				agentInstanceId: "checkpoint-cycle-agent",
+				executionId: "checkpoint-cycle-execution",
+				attemptId: "checkpoint-cycle-attempt",
+				authorityGeneration: 1,
+				cwd,
+				input: "checkpoint question",
+			},
+			profile,
+		);
+		// Use the real prompt path: message_end precedes native user append. A mocked
+		// dispatch that appends directly never exercises the two checkpoint queues.
+		await withTimeout(runtime.drain(), 3_000, "User checkpoint deadlocked with the history lane");
+		expect((await runtime.store.getAttempt(started.attemptId))?.state).toBe("completed");
+		const history = await runtime.sessionHistory(started.agentInstanceId);
+		expect(history.entries.filter(entry => entry.role === "user").map(entry => entry.text)).toEqual([
+			"checkpoint question",
+		]);
+		expect(history.entries.filter(entry => entry.role === "assistant").map(entry => entry.text)).toEqual([
+			"checkpoint answer",
+		]);
+		const events = await runtime.store.pendingEvents();
+		expect(events.some(event => event.kind === "history_checkpoint")).toBeTrue();
+	}, 10_000);
+
 	for (const queued of [false, true]) {
 		it(`publishes ${queued ? "queued" : "ordinary"} Start user history while the provider is still running`, async () => {
 			const dispatchEntered = Promise.withResolvers<void>();
