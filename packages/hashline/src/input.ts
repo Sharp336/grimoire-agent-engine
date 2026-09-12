@@ -183,6 +183,15 @@ function splitRawSections(input: string, options: SplitOptions = {}): RawSection
 	const stripped = stripLeadingBlankLines(normalizeFallbackInput(input, options));
 	const lines = stripped.split(/\r?\n/);
 	const firstLine = lines[0] ?? "";
+	const rejectIndentedHeader = (line: string) => {
+		const candidate = line.trimStart();
+		if (candidate !== line && candidate.startsWith(HL_FILE_PREFIX)) {
+			throw new Error(
+				`Hashline file section header must start at column 0; remove leading whitespace before ${JSON.stringify(candidate)}.`,
+			);
+		}
+	};
+	rejectIndentedHeader(firstLine);
 
 	if (parseHashlineHeaderLine(firstLine, options.cwd) === null) {
 		// Catch unified-diff hunk-header contamination on the first line so
@@ -214,6 +223,7 @@ function splitRawSections(input: string, options: SplitOptions = {}): RawSection
 
 	for (const line of lines) {
 		const trimmed = line.trimEnd();
+		rejectIndentedHeader(line);
 		const token = TOKENIZER.tokenize(line);
 		if (token.kind === "envelope-end" || token.kind === "abort") break;
 		if (token.kind === "envelope-begin") continue;

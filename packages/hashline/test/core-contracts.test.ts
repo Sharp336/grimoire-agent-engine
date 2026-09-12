@@ -76,6 +76,36 @@ class BlockingFilesystem extends InMemoryFilesystem {
 	}
 }
 
+describe("hashline file section boundaries", () => {
+	for (const indent of [" ", "\t"]) {
+		it(`rejects an indented second header before any file changes (${JSON.stringify(indent)})`, async () => {
+			const first = "C:/work/component.tsx";
+			const second = "C:/work/styles.css";
+			const original = "one\ntwo\nthree\n";
+			const fixture = new InMemoryFilesystem([
+				[first, original],
+				[second, original],
+			]);
+			const snapshots = new InMemorySnapshotStore();
+			const firstTag = snapshots.record(first, original);
+			const secondTag = snapshots.record(second, original);
+			const input = `[${first}#${firstTag}]\nPUT 1.=1:\n+changed\n${indent}[${second}#${secondTag}]\nPUT 3.=3:\n+css`;
+			const apply = async () => new Patcher({ fs: fixture, snapshots }).apply(Patch.parse(input));
+			await expect(apply()).rejects.toThrow(/header|indent|whitespace/i);
+			expect(fixture.get(first)).toBe(original);
+			expect(fixture.get(second)).toBe(original);
+		});
+	}
+	it("keeps valid sections and explicit header-shaped body rows distinct", () => {
+		const patch = Patch.parse(
+			"[a.ts#1A2B]\nPUT 1.=1:\n+ [b.css#3C4D]\n+\tkeep indentation\n[b.css#3C4D]\nPUT 1.=1:\n+style",
+		);
+		expect(patch.sections.map(section => section.path)).toEqual(["a.ts", "b.css"]);
+		expect(patch.sections[0].applyTo("before\n").text).toBe(" [b.css#3C4D]\n\tkeep indentation\n");
+		expect(patch.sections[1].applyTo("before\n").text).toBe("style\n");
+	});
+});
+
 describe("hashline normalization", () => {
 	it("preserves the first newline style when restoring mixed-ending files", () => {
 		expect(detectLineEnding("a\r\nb\nc")).toBe("\r\n");
