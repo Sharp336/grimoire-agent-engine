@@ -12,6 +12,12 @@ export function safeEngineErrorDetail(error: unknown): string {
 	const name = error instanceof Error ? error.name || "Error" : "Error";
 	const message = error instanceof Error ? error.message : String(error);
 	const sanitized = sanitizeEngineErrorDetail(message).slice(0, 2_048);
+	if (
+		/^Hosted Core MCP binding failed(?:: (?:HTTP \d{3}|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN))? \(diagnostic [0-9a-f]{12}\)$/.test(
+			message,
+		)
+	)
+		return message;
 	if (SAFE_ENGINE_ERROR.test(sanitized)) return sanitized;
 	const fingerprint = createHash("sha256").update(`${name}\0${message}`).digest("hex").slice(0, 12);
 	let publicName = name;
@@ -32,6 +38,14 @@ export function safeEngineErrorDetail(error: unknown): string {
 			break;
 	}
 	return `${publicName} (diagnostic ${fingerprint})`;
+}
+
+/** MCP responses can contain credentials or arbitrary server text. Keep only
+ * the connection failure category and a fingerprint, never the response body. */
+export function safeHostedMcpFailure(message: string): string {
+	const category = message.match(/\b(?:HTTP \d{3}|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN)\b/)?.[0];
+	const fingerprint = createHash("sha256").update(`Error\0${message}`).digest("hex").slice(0, 12);
+	return `Hosted Core MCP binding failed${category ? `: ${category}` : ""} (diagnostic ${fingerprint})`;
 }
 
 function sanitizeEngineErrorDetail(message: string): string {

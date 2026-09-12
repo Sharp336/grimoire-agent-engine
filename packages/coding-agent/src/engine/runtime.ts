@@ -85,7 +85,7 @@ import {
 	validateStartRequest,
 } from "./contracts";
 import { withProviderObservationContext } from "./provider-admission";
-import { safeEngineErrorDetail } from "./public-error";
+import { safeEngineErrorDetail, safeHostedMcpFailure } from "./public-error";
 import { engineAgentId, engineAgentInstanceId, engineRouteToken } from "./route";
 import { EngineAttachmentUploads, messageAttachmentReferences } from "./runtime-attachments";
 import {
@@ -3339,7 +3339,7 @@ export class EngineRuntime {
 						ready.promise,
 						mcpManager.connectServers({ grimoire_engine: this.#mcpServer }, {}, event => {
 							if (event.type === "connected") ready.resolve();
-							if (event.type === "failed") ready.reject(new Error("Hosted Core MCP binding failed"));
+							if (event.type === "failed") ready.reject(new Error(safeHostedMcpFailure(event.error)));
 						}),
 					]);
 					sessionOptions.mcpManager = mcpManager;
