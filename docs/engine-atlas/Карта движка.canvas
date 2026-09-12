@@ -1,0 +1,109 @@
+{
+  "nodes": [
+    {
+      "id": "intro",
+      "type": "text",
+      "x": 0,
+      "y": 0,
+      "width": 1160,
+      "height": 145,
+      "text": "# Движок Артели\nИсполнение, контекст и действия — карта для разбора перед переписыванием.\n\n[[Путь сообщения.canvas|Проследить сообщение →]]  ·  [[Начать здесь|Как пользоваться]]"
+    },
+    {
+      "id": "n0",
+      "type": "file",
+      "file": "Модули/Исполнение.md",
+      "x": 0,
+      "y": 220,
+      "width": 340,
+      "height": 270
+    },
+    {
+      "id": "n1",
+      "type": "file",
+      "file": "Модули/Сессия.md",
+      "x": 410,
+      "y": 220,
+      "width": 340,
+      "height": 270
+    },
+    {
+      "id": "n2",
+      "type": "file",
+      "file": "Модули/Цикл агента.md",
+      "x": 820,
+      "y": 220,
+      "width": 340,
+      "height": 270
+    },
+    {
+      "id": "n3",
+      "type": "file",
+      "file": "Модули/Хранение.md",
+      "x": 0,
+      "y": 570,
+      "width": 340,
+      "height": 270
+    },
+    {
+      "id": "n4",
+      "type": "file",
+      "file": "Модули/Инструменты.md",
+      "x": 410,
+      "y": 570,
+      "width": 340,
+      "height": 270
+    },
+    {
+      "id": "n5",
+      "type": "file",
+      "file": "Модули/Модели.md",
+      "x": 820,
+      "y": 570,
+      "width": 340,
+      "height": 270
+    }
+  ],
+  "edges": [
+    {
+      "id": "e01",
+      "fromNode": "n0",
+      "fromSide": "right",
+      "toNode": "n1",
+      "toSide": "left",
+      "color": "#66665f"
+    },
+    {
+      "id": "e12",
+      "fromNode": "n1",
+      "fromSide": "right",
+      "toNode": "n2",
+      "toSide": "left",
+      "color": "#66665f"
+    },
+    {
+      "id": "e03",
+      "fromNode": "n0",
+      "fromSide": "bottom",
+      "toNode": "n3",
+      "toSide": "top",
+      "color": "#66665f"
+    },
+    {
+      "id": "e25",
+      "fromNode": "n2",
+      "fromSide": "bottom",
+      "toNode": "n5",
+      "toSide": "top",
+      "color": "#66665f"
+    },
+    {
+      "id": "e24",
+      "fromNode": "n2",
+      "fromSide": "bottom",
+      "toNode": "n4",
+      "toSide": "top",
+      "color": "#66665f"
+    }
+  ]
+}

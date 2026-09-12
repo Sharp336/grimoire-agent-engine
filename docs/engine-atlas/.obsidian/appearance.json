@@ -1,0 +1,11 @@
+{
+  "theme": "obsidian",
+  "accentColor": "#97a557",
+  "baseFontSize": 17,
+  "enabledCssSnippets": [
+    "artel"
+  ],
+  "interfaceFontFamily": "Segoe UI",
+  "textFontFamily": "Segoe UI",
+  "monospaceFontFamily": "Cascadia Code"
+}

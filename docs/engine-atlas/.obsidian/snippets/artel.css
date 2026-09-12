@@ -1,0 +1,23 @@
+/* Artel palette from artel-prototype/DESIGN.md; no community plugins. */
+.theme-dark {
+ --background-primary:#141412; --background-primary-alt:#1a1a18;
+ --background-secondary:#1a1a18; --background-secondary-alt:#212120;
+ --background-modifier-border:#333331; --text-normal:#e4e4e0;
+ --text-muted:#a8a8a2; --text-faint:#8e8e88;
+ --interactive-accent:#97a557; --text-accent:#b3c46a;
+ --h1-size:1.65em; --h2-size:1.15em; --h3-size:0.9em;
+ --h1-weight:600; --line-height-normal:1.6;
+ --canvas-background:#141412;
+}
+.canvas-node-container { border-radius:14px; background:#1a1a18; border:1px solid #45453f; box-shadow:0 8px 28px #0003; }
+.canvas-node-content.markdown-embed { padding:14px 18px; }
+.canvas-node .markdown-preview-view { padding:16px 22px; }
+.canvas-node h1 { letter-spacing:-0.035em; margin-top:0.2em; }
+.canvas-node h3 { color:var(--text-muted); font-variant-numeric:tabular-nums; letter-spacing:0.08em; }
+.canvas-node a.internal-link { color:#b3c46a; text-decoration:none; }
+.canvas-node a.internal-link:hover { text-decoration:underline; }
+.canvas-node.is-focused .canvas-node-container { border-color:#97a557; }
+.canvas-edges path.canvas-display-path { stroke:#77776d; stroke-width:2px; }
+.canvas-path-label { background:#212120; color:#a8a8a2; }
+.canvas-node[data-node-id="intro"] .canvas-node-container { border-color:transparent; background:transparent; box-shadow:none; }
+.canvas-node[data-node-id="intro"] h1 { font-size:2.6em; }

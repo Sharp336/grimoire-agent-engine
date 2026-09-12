@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Rejected provider metric observations now leave a bounded diagnostic without exposing credentials or response content.
+
 - Agent tools no longer inherit private Grimoire transport credentials or provider binding keys from the Engine process.
 
 ### Added
