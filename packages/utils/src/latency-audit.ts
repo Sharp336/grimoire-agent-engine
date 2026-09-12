@@ -118,9 +118,12 @@ export interface LatencyRequest {
 export interface LatencySource {
 	readonly request: LatencyRequest;
 	readonly parsedAt: number;
+	readonly sourceCorrelation?: "direct" | "unknown";
 }
 
 export const latencyPhysicalRequest = new AsyncLocalStorage<LatencyRequest>();
+// Only entered for an enabled Engine model audit; carries no prompt or session data.
+export const latencyPreparation = new AsyncLocalStorage<LatencyAudit>();
 
 export function latencyFetch(
 	fetch: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
@@ -194,7 +197,29 @@ export function latencyNormalized(
 			sourceCorrelation: direct ? "direct" : "unknown",
 		})
 	) {
-		normalized.set(event, source);
+		normalized.set(event, { ...source, sourceCorrelation: direct ? "direct" : "unknown" });
+	}
+}
+
+export function latencyProjected(
+	event: object,
+	source: LatencySource | undefined,
+	stream: string,
+	text: string,
+	contentIndex: number,
+	unchanged: boolean,
+): void {
+	if (!source || !text.trim()) return;
+	const projected = unchanged ? source : { ...source, sourceCorrelation: "unknown" as const };
+	if (
+		latencyFirst(projected, "projected_first", stream, {
+			chars: text.length,
+			contentIndex,
+			parsedAt: projected.sourceCorrelation === "direct" ? projected.parsedAt : undefined,
+			sourceCorrelation: projected.sourceCorrelation,
+		})
+	) {
+		normalized.set(event, projected);
 	}
 }
 
@@ -203,8 +228,8 @@ export function latencyNormalizedSource(event: object): LatencySource | undefine
 }
 
 // These are only the first substantive source events, blocks and payloads, never text itself.
-export function attachLatencyPersistence(target: object, source: LatencySource | undefined): void {
-	if (source) persisted.set(target, source);
+export function attachLatencyPersistence(target: object, source: LatencySource | undefined, unchanged = true): void {
+	if (source) persisted.set(target, unchanged ? source : { ...source, sourceCorrelation: "unknown" });
 }
 
 export function latencyPersistenceSource(target: object): LatencySource | undefined {

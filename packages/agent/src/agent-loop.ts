@@ -47,6 +47,7 @@ import {
 	signalListLabel,
 } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { logger, sanitizeText, structuredCloneJSON } from "@oh-my-pi/pi-utils";
+import { latencyPreparation } from "@oh-my-pi/pi-utils/latency-audit";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { agentPauseGate } from "./pause";
 import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
@@ -1146,7 +1147,10 @@ async function runLoopBody(
 
 					for (;;) {
 						preparedProviderCall = await prepareProviderCall(currentContext, config, signal);
+						const audit = latencyPreparation.getStore();
+						if (config.beforeModelCall) audit?.mark("provider_preflight_start");
 						gateResult = (await config.beforeModelCall?.(preparedProviderCall.context, signal)) || undefined;
+						if (config.beforeModelCall) audit?.mark("provider_preflight_done");
 						if (config.beforeModelCall && signal?.aborted) gateResult = { stop: true };
 						if (gateResult?.stop || !(await waitWhilePaused(config, signal)) || signal?.aborted) break;
 
@@ -1556,13 +1560,19 @@ async function prepareProviderCall(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 ): Promise<PreparedProviderCall> {
+	const audit = latencyPreparation.getStore();
+	audit?.mark("provider_context_start");
 	const model = config.getModel?.() ?? config.model;
 	let messages = context.messages;
 	if (config.transformContext) {
+		audit?.mark("provider_transform_context_start");
 		messages = await config.transformContext(messages, signal);
+		audit?.mark("provider_transform_context_done");
 	}
 
+	audit?.mark("provider_convert_messages_start");
 	const llmMessages = await config.convertToLlm(messages);
+	audit?.mark("provider_convert_messages_done");
 	const normalizedMessages = normalizeMessagesForProvider(llmMessages, model);
 	const ownedDialect: Dialect | undefined = config.dialect ?? resolveOwnedDialectFromEnv(Bun.env.PI_DIALECT);
 	const pruneToolDescriptions = !!config.pruneToolDescriptions && !ownedDialect;
@@ -1584,7 +1594,9 @@ async function prepareProviderCall(
 		};
 	}
 	if (config.transformProviderContext) {
+		audit?.mark("provider_transform_wire_context_start");
 		llmContext = await config.transformProviderContext(llmContext, model);
+		audit?.mark("provider_transform_wire_context_done");
 	}
 
 	let promptToolWireTools: Context["tools"];
@@ -1597,6 +1609,7 @@ async function prepareProviderCall(
 			tools: undefined,
 		};
 	}
+	audit?.mark("provider_context_done");
 	return { model, context: llmContext, promptToolWireTools, ownedDialect };
 }
 
@@ -1618,6 +1631,7 @@ async function streamAssistantResponse(
 	forcedToolChoice?: ToolChoice,
 	prepared?: PreparedProviderCall,
 ): Promise<AssistantMessage> {
+	const audit = latencyPreparation.getStore();
 	const providerCall = prepared ?? (await prepareProviderCall(context, config, signal));
 	const { model, context: llmContext, promptToolWireTools, ownedDialect } = providerCall;
 
@@ -1651,8 +1665,10 @@ async function streamAssistantResponse(
 			: providerAbortSignals.length === 1
 				? providerAbortSignals[0]!
 				: AbortSignal.any(providerAbortSignals);
+	audit?.mark("provider_key_start");
 	const requestApiKey = (config.getApiKey ? await config.getApiKey(model) : undefined) ?? config.apiKey;
 	const resolvedApiKey = await resolveApiKeyOnce(requestApiKey, finalRequestSignal);
+	audit?.mark("provider_key_done");
 	const apiKey = isApiKeyResolver(requestApiKey) ? seedApiKeyResolver(resolvedApiKey, requestApiKey) : requestApiKey;
 
 	// Re-resolve metadata after credential selection so the per-request value
@@ -1709,6 +1725,7 @@ async function streamAssistantResponse(
 
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
+			audit?.mark("provider_stream_dispatch");
 			let response = await streamFunction(model, llmContext, {
 				...config,
 				apiKey,

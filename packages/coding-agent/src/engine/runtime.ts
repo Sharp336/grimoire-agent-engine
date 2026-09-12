@@ -2959,6 +2959,7 @@ export class EngineRuntime {
 				conversationIdentityDigest,
 				preparedSession,
 				pendingStartSignal,
+				audit,
 			);
 			audit?.mark("binding_open_done");
 		}
@@ -3165,6 +3166,7 @@ export class EngineRuntime {
 		conversationIdentityDigest: string,
 		preparedSessionManager?: SessionManager,
 		pendingStartSignal?: AbortSignal,
+		audit?: LatencyAudit,
 	): Promise<LiveBinding> {
 		let created: Awaited<ReturnType<typeof createAgentSession>> | undefined;
 		let unsubscribeCreated: (() => void) | undefined;
@@ -3176,9 +3178,12 @@ export class EngineRuntime {
 			if (preparedSessionManager && !uncommittedForkSessionFile)
 				throw new Error("Prepared session was not durably materialized");
 			pendingStartSignal?.throwIfAborted();
+			audit?.mark("binding_profile_start");
 			const resolved = await this.#resolveSessionProfile?.(profile, request.cwd, pendingStartSignal);
+			audit?.mark("binding_profile_done");
 			disposeResolved = resolved?.dispose;
 			pendingStartSignal?.throwIfAborted();
+			audit?.mark("binding_history_start");
 			const prior = await this.store.getBinding(request.agentInstanceId);
 			const profileDigest = continuationDigest;
 			const bindingGeneration = (prior?.bindingGeneration ?? 0) + 1;
@@ -3217,6 +3222,7 @@ export class EngineRuntime {
 					sessionManager = SessionManager.create(request.cwd, sessionDir, this.store.sessionStorage);
 				}
 			}
+			audit?.mark("binding_history_done");
 			const id = engineAgentId(request.agentInstanceId);
 			const pauseGate = new AgentPauseGate();
 			let liveBinding: LiveBinding | undefined;
@@ -3287,7 +3293,9 @@ export class EngineRuntime {
 							},
 						}
 					: undefined;
+			audit?.mark("binding_child_history_start");
 			const engineHistory = await this.#retainedDirectChildHistory(request, profile, prior);
+			audit?.mark("binding_child_history_done");
 			const sessionOptions: CreateAgentSessionOptions = {
 				...this.#sessionDefaults,
 				cwd: request.cwd,
@@ -3367,6 +3375,7 @@ export class EngineRuntime {
 				// A hosted session never inherits an ambient manager, including from a profile.
 				sessionOptions.mcpManager = undefined;
 				if (sessionOptions.enableMCP !== false && sessionOptions.restrictToolNames !== true) {
+					audit?.mark("binding_mcp_connect_start");
 					mcpManager = new MCPManager(request.cwd, null);
 					const ready = Promise.withResolvers<void>();
 					await Promise.all([
@@ -3377,12 +3386,17 @@ export class EngineRuntime {
 						}),
 					]);
 					sessionOptions.mcpManager = mcpManager;
+					audit?.mark("binding_mcp_connect_done");
 				}
 			}
+			audit?.mark("binding_session_create_start");
 			created = await createAgentSession(sessionOptions);
+			audit?.mark("binding_session_create_done");
 			if (mcpManager) {
 				const session = created.session;
+				audit?.mark("binding_mcp_refresh_start");
 				await session.refreshMCPTools(mcpManager.getTools());
+				audit?.mark("binding_mcp_refresh_done");
 				mcpManager.setOnToolsChanged(async tools => {
 					if (session.isDisposed) return;
 					await session.refreshMCPTools(tools).catch(() => {
@@ -4578,7 +4592,10 @@ export class EngineRuntime {
 	async #recordAssistantDelta(binding: LiveBinding, timestamp: number, event: AssistantMessageEvent): Promise<void> {
 		const auditSource = latencyNormalizedSource(event);
 		const auditStream = event.type.startsWith("thinking") ? "thinking" : "assistant";
-		latencyFirst(auditSource, "persistence_enter", auditStream);
+		latencyFirst(auditSource, "persistence_enter", auditStream, {
+			parsedAt: auditSource?.sourceCorrelation === "direct" ? auditSource.parsedAt : undefined,
+			sourceCorrelation: auditSource?.sourceCorrelation,
+		});
 		// The interceptor runs before the public subscriber. Also drain the preceding
 		// message's final write before a new provider block can get ahead of storage.
 		await binding.traceWriteTail;
@@ -4601,7 +4618,6 @@ export class EngineRuntime {
 			return;
 		}
 		const block = this.#assistantBlock(state, event.contentIndex, stream);
-		attachLatencyPersistence(block, auditSource);
 		block.receivedChars += event.delta.length;
 		let text = block.pendingSurrogate + event.delta;
 		block.pendingSurrogate = "";
@@ -4609,8 +4625,10 @@ export class EngineRuntime {
 			block.pendingSurrogate = text.at(-1)!;
 			text = text.slice(0, -1);
 		}
+		const wellFormed = text.toWellFormed();
+		attachLatencyPersistence(block, auditSource, wellFormed === event.delta);
 		await this.#persistAssistantWrite(binding, () =>
-			this.#appendAssistantBlock(binding, state, block, text.toWellFormed(), "streaming"),
+			this.#appendAssistantBlock(binding, state, block, wellFormed, "streaming"),
 		);
 	}
 
@@ -4685,15 +4703,18 @@ export class EngineRuntime {
 				...(baseRevision ? { baseRevision } : { partial: false }),
 			};
 			const auditSource = latencyPersistenceSource(block);
+			const direct = chunks.length === 1 && auditSource?.sourceCorrelation === "direct";
 			if (
 				chunk.trim() &&
 				latencyFirst(auditSource, "persistence_payload", block.stream, {
 					messageId: state.assistantMessageId,
 					blockId: block.blockId,
 					chars: chunk.length,
+					parsedAt: direct ? auditSource?.parsedAt : undefined,
+					sourceCorrelation: direct ? "direct" : "unknown",
 				})
 			) {
-				attachLatencyPersistence(payload, auditSource);
+				attachLatencyPersistence(payload, auditSource, direct);
 			}
 			const payloadBytes = Buffer.byteLength(JSON.stringify(payload));
 			if (

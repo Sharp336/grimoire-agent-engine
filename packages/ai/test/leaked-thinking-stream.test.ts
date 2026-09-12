@@ -15,6 +15,7 @@ import { getStreamingPartialJson, setStreamingPartialJson } from "@oh-my-pi/pi-a
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { wrapLeakedThinkingStream } from "@oh-my-pi/pi-ai/utils/leaked-thinking-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { LatencyAudit, latencyNormalized, latencyNormalizedSource } from "@oh-my-pi/pi-utils/latency-audit";
 import { withOfficialAnthropicEndpoint } from "./helpers";
 
 /** Minimal assistant message; `content`/`stopReason` overridden per event. */
@@ -96,22 +97,29 @@ async function nextToolSnapshot(iterator: AsyncIterator<AssistantMessageEvent>):
 withOfficialAnthropicEndpoint();
 
 describe("wrapLeakedThinkingStream", () => {
-	async function runLeakedText(chunks: readonly string[]): Promise<{
+	async function runLeakedText(
+		chunks: readonly string[],
+		audit?: LatencyAudit,
+		direct = true,
+	): Promise<{
 		events: AssistantMessageEvent[];
 		result: AssistantMessage;
 	}> {
 		let text = "";
+		const request = audit ? { audit, fields: { physicalRequestOrdinal: 1 }, first: new Set<string>() } : undefined;
 		return runWrapper(inner => {
 			inner.push({ type: "start", partial: msg() });
 			inner.push({ type: "text_start", contentIndex: 0, partial: msg({ content: [{ type: "text", text: "" }] }) });
 			for (const chunk of chunks) {
 				text += chunk;
-				inner.push({
+				const event: AssistantMessageEvent = {
 					type: "text_delta",
 					contentIndex: 0,
 					delta: chunk,
 					partial: msg({ content: [{ type: "text", text }] }),
-				});
+				};
+				latencyNormalized(event, request ? { request, parsedAt: 1 } : undefined, "assistant", chunk, 0, direct);
+				inner.push(event);
 			}
 			inner.push({
 				type: "text_end",
@@ -122,6 +130,30 @@ describe("wrapLeakedThinkingStream", () => {
 			inner.push({ type: "done", reason: "stop", message: msg({ content: [{ type: "text", text }] }) });
 		});
 	}
+
+	it("keeps private source lineage through healing without falsely timing held or rewritten text", async () => {
+		for (const [chunks, direct, correlation] of [
+			[["plain answer"], true, "direct"],
+			[["<", "<"], true, "unknown"],
+			[["<think>reason</think>", "answer"], true, "unknown"],
+			[["already transformed"], false, "unknown"],
+		] as const) {
+			const audit = new LatencyAudit({ modelCallId: "projection-fixture" });
+			const observed = await runLeakedText(chunks, audit, direct);
+			expect(observed).toEqual(await runLeakedText(chunks));
+			const first = observed.events.find(
+				event => (event.type === "text_delta" || event.type === "thinking_delta") && event.delta.trim(),
+			)!;
+			expect(latencyNormalizedSource(first)?.request.audit).toBe(audit);
+			expect(latencyNormalizedSource(first)?.sourceCorrelation).toBe(correlation);
+			const projected = audit.marks.filter(mark => mark.stage === "projected_first");
+			expect(projected.length).toBeGreaterThan(0);
+			for (const mark of projected) {
+				expect(mark.sourceCorrelation).toBe(correlation);
+				expect(mark.parsedAt).toBe(correlation === "direct" ? 1 : undefined);
+			}
+		}
+	});
 
 	it("splits a leaked fence into structured blocks live during streaming", async () => {
 		const leaked = "Visible before.```thinking\nplan\n```Visible after.";
@@ -631,6 +663,7 @@ describe("wrapLeakedThinkingStream", () => {
 				{ type: "text", text: "answer" },
 			],
 		});
+		const audit = new LatencyAudit({ modelCallId: "native-thinking-fixture" });
 		const nativeRun = await runWrapper(inner => {
 			inner.push({ type: "start", partial: msg() });
 			inner.push({
@@ -638,12 +671,21 @@ describe("wrapLeakedThinkingStream", () => {
 				contentIndex: 0,
 				partial: msg({ content: [{ type: "thinking", thinking: "" }] }),
 			});
-			inner.push({
+			const delta: AssistantMessageEvent = {
 				type: "thinking_delta",
 				contentIndex: 0,
 				delta: "native reasoning",
 				partial: msg({ content: [{ type: "thinking", thinking: "native reasoning", thinkingSignature: "tk" }] }),
-			});
+			};
+			latencyNormalized(
+				delta,
+				{ request: { audit, fields: {}, first: new Set() }, parsedAt: 1 },
+				"thinking",
+				delta.delta,
+				0,
+				true,
+			);
+			inner.push(delta);
 			inner.push({
 				type: "thinking_end",
 				contentIndex: 0,
@@ -658,6 +700,13 @@ describe("wrapLeakedThinkingStream", () => {
 		expect(thinks(nativeRun.result)[0]?.thinking).toBe("native reasoning");
 		expect(thinks(nativeRun.result)[0]?.thinkingSignature).toBe("tk");
 		expect(texts(nativeRun.result)).toEqual(["answer"]);
+		const firstThinking = nativeRun.events.find(event => event.type === "thinking_delta")!;
+		expect(latencyNormalizedSource(firstThinking)?.request.audit).toBe(audit);
+		expect(audit.marks.find(mark => mark.stage === "projected_first")).toMatchObject({
+			stream: "thinking",
+			sourceCorrelation: "direct",
+			parsedAt: 1,
+		});
 	});
 
 	it("heals a terminal error message and keeps its error stop reason", async () => {

@@ -99,6 +99,7 @@ import {
 	stringProperty,
 	withTimeout,
 } from "@oh-my-pi/pi-utils";
+import { latencyPreparation } from "@oh-my-pi/pi-utils/latency-audit";
 import { type AdvisorConfig, type AdvisorRuntimeStatus, loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, type AsyncJobFilter, AsyncJobManager } from "../async";
 import { reset as resetCapabilities } from "../capability";
@@ -5672,12 +5673,15 @@ export class AgentSession {
 	 * the ACP agent) use this to know whether to expect an `agent_end` event.
 	 */
 	async prompt(text: string, options?: PromptOptions): Promise<boolean> {
+		const audit = latencyPreparation.getStore();
+		audit?.mark("prompt_message_prepare_start");
 		// A manual `/compact` runs with the agent subscription disconnected until its
 		// cleanup finally re-drains the preserved queues. Starting a turn before then
 		// would neither persist nor forward its events and could race the in-flight
 		// history rewrite. `abort` still overtakes compaction; ordinary prompts wait
 		// here. No-op when no manual compaction is active.
 		await this.#maintenance.manualCompactionCleanup;
+		audit?.mark("prompt_manual_compaction_ready");
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 		// Slash/custom-command handling below rewrites `text`; keep the original
 		// so a dropped prompt is handed back exactly as the user typed it.
@@ -5798,6 +5802,7 @@ export class AgentSession {
 
 		let dispatched = false;
 		try {
+			audit?.mark("prompt_message_prepare_done");
 			dispatched = await this.#promptWithMessage(message, expandedText, {
 				...options,
 				images: normalizedImages,
@@ -5909,9 +5914,12 @@ export class AgentSession {
 		this.#beginInFlight();
 		const generation = this.#promptGeneration;
 		this.#promptSequence++;
+		const audit = latencyPreparation.getStore();
 		try {
+			audit?.mark("prompt_preflight_start");
 			await this.#recovery.maybeRestoreRetryFallbackPrimary();
 			if (!(await this.#runUsageAwarePreflightForNextModelCall())) return false;
+			audit?.mark("prompt_preflight_done");
 			// Flush any pending bash messages before the new prompt
 			await this.#bash.flushPending();
 			this.#eval.flushPending();
@@ -5931,7 +5939,9 @@ export class AgentSession {
 			}
 
 			// Validate API key
+			audit?.mark("prompt_key_start");
 			const apiKey = await this.#modelRegistry.getApiKey(this.model, this.sessionId);
+			audit?.mark("prompt_key_done");
 			if (!apiKey) {
 				throw new Error(
 					`No API key found for ${this.model.provider}.\n\n` +
@@ -5949,9 +5959,12 @@ export class AgentSession {
 				!options?.skipCompactionCheck &&
 				(lastAssistant.stopReason === "error" || lastAssistant.stopReason === "length")
 			) {
+				audit?.mark("prompt_recovery_compaction_start");
 				await this.#maintenance.checkCompaction(lastAssistant, false, false, false);
+				audit?.mark("prompt_recovery_compaction_done");
 			}
 
+			audit?.mark("prompt_context_start");
 			await this.#prewalk.armPlanYoloIfNeeded();
 
 			// Build messages array (session context, eager todo prelude, then active prompt message)
@@ -6015,11 +6028,15 @@ export class AgentSession {
 			const disposingBeforeTransition = this.#isDisposed;
 			await this.#memory.transition;
 			if ((this.#isDisposed && !disposingBeforeTransition) || this.#promptGeneration !== generation) return false;
+			audit?.mark("prompt_context_done");
+			audit?.mark("prompt_system_prompt_start");
 			const beforeAgentStartSystemPrompt = await this.#buildSystemPromptForAgentStart(expandedText);
+			audit?.mark("prompt_system_prompt_done");
 
 			let baseXdevCatalogDelivered = true;
 			// Emit before_agent_start extension event
 			if (this.#extensionRunner) {
+				audit?.mark("prompt_extensions_start");
 				const result = await this.#extensionRunner.emitBeforeAgentStart(
 					expandedText,
 					options?.images,
@@ -6058,6 +6075,7 @@ export class AgentSession {
 					this.#tools.clearTurnSystemPromptOverride();
 					this.agent.setSystemPrompt(beforeAgentStartSystemPrompt);
 				}
+				audit?.mark("prompt_extensions_done");
 			} else {
 				this.#tools.clearTurnSystemPromptOverride();
 				this.agent.setSystemPrompt(beforeAgentStartSystemPrompt);
@@ -6077,7 +6095,9 @@ export class AgentSession {
 			// back to a concrete level inside the helper.
 			const isUserTurn = message.role === "user" || (message.role === "custom" && isUserInvokedSkillPrompt(message));
 			if (this.isAutoThinking && isUserTurn) {
+				audit?.mark("prompt_auto_thinking_start");
 				await this.#models.applyAutoThinkingLevel(expandedText, generation);
+				audit?.mark("prompt_auto_thinking_done");
 				if (this.#promptGeneration !== generation) {
 					return false;
 				}
@@ -6089,12 +6109,15 @@ export class AgentSession {
 				messages.splice(xdevMountNoticeIndex, 0, xdevMountNotice);
 			}
 
+			audit?.mark("prompt_compaction_start");
 			await this.#maintenance.runPrePromptCompactionIfNeeded(messages);
+			audit?.mark("prompt_compaction_done");
 			if (this.#promptGeneration !== generation) {
 				return false;
 			}
 
 			const agentPromptOptions = options?.toolChoice ? { toolChoice: options.toolChoice } : undefined;
+			audit?.mark("prompt_token_snapshot_start");
 			const nonMessageTokens = computeNonMessageTokens(this, this.agent.tokenizer);
 			const contextWindow = this.model?.contextWindow ?? 0;
 			const breakdown = this.getContextBreakdown({ contextWindow, pendingMessages: messages });
@@ -6119,7 +6142,9 @@ export class AgentSession {
 			if (planReferenceMessage) {
 				this.#planReferenceSent = true;
 			}
+			audit?.mark("prompt_token_snapshot_done");
 			try {
+				audit?.mark("prompt_agent_dispatch");
 				await this.#recovery.promptAgentWithIdleRetry(messages, agentPromptOptions);
 			} finally {
 				this.#stats.setPendingSnapshot(undefined);

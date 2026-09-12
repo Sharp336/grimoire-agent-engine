@@ -2,6 +2,7 @@ import { describe, expect, it, spyOn } from "bun:test";
 import type { Model, UsageReport } from "@oh-my-pi/pi-ai";
 import { streamOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
+import { stream } from "@oh-my-pi/pi-ai/stream";
 import type { Context, FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -10,6 +11,7 @@ import {
 	LatencyAudit,
 	latencyFetch,
 	latencyNormalizedSource,
+	latencyPreparation,
 } from "@oh-my-pi/pi-utils/latency-audit";
 import {
 	ProviderAdmissionClient,
@@ -23,7 +25,7 @@ describe("ProviderAdmissionClient", () => {
 	it("keeps first nonempty content on its Response after another fetch, without changing emitted content", async () => {
 		const route = {
 			...identity(),
-			runtimeProviderId: "cheapai",
+			runtimeProviderId: "artel-route-fixture",
 			modelId: "claude-sonnet-5",
 			baseUrl: "https://cheapai.invalid/v1",
 		};
@@ -79,19 +81,22 @@ describe("ProviderAdmissionClient", () => {
 			return await withProviderObservationContext(
 				identityFields,
 				async () => {
-					const stream = streamOpenAICompletions(
+					expect(latencyPreparation.getStore()).toBe(probe);
+					const response = stream(
 						selected,
 						{ messages: [{ role: "user", content: "secret-input", timestamp: 0 }] },
 						{ apiKey: "secret-test-key", fetch: wrapped },
 					);
 					const output: string[] = [];
 					const consuming = (async () => {
-						for await (const event of stream) {
+						for await (const event of response) {
 							if (event.type !== "text_delta" && event.type !== "thinking_delta") continue;
 							output.push(`${event.type}:${event.delta}`);
 							if (!event.delta.trim()) continue;
-							if (probe) expect(latencyNormalizedSource(event)?.request.fields.physicalRequestOrdinal).toBe(1);
-							else expect(latencyNormalizedSource(event)).toBeUndefined();
+							if (probe) {
+								expect(latencyNormalizedSource(event)?.request.fields.physicalRequestOrdinal).toBe(1);
+								expect(latencyNormalizedSource(event)?.sourceCorrelation).toBe("direct");
+							} else expect(latencyNormalizedSource(event)).toBeUndefined();
 							consumerReached.resolve();
 							await consumerRelease.promise;
 						}
@@ -121,7 +126,7 @@ describe("ProviderAdmissionClient", () => {
 						consumerRelease.resolve();
 					}
 					await consuming;
-					expect((await stream.result()).stopReason).toBe("stop");
+					expect((await response.result()).stopReason).toBe("stop");
 					return output;
 				},
 				probe,

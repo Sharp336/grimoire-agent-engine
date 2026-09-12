@@ -25,10 +25,12 @@
  * events are forwarded verbatim.
  */
 
+import { type LatencySource, latencyNormalizedSource, latencyProjected } from "@oh-my-pi/pi-utils/latency-audit";
 import { isAnthropicServerToolHistoryBlock } from "../providers/anthropic-wire";
 import type {
 	AnthropicServerToolContent,
 	AssistantMessage,
+	AssistantMessageEvent,
 	ImageContent,
 	TextContent,
 	ThinkingContent,
@@ -84,6 +86,7 @@ export function wrapLeakedThinkingStream(inner: AssistantMessageEventStream): As
 							event.contentIndex,
 							event.delta,
 							block?.type === "text" ? block.textSignature : undefined,
+							latencyNormalizedSource(event),
 						);
 						break;
 					}
@@ -94,6 +97,7 @@ export function wrapLeakedThinkingStream(inner: AssistantMessageEventStream): As
 							event.contentIndex,
 							event.delta,
 							block?.type === "thinking" ? block.thinkingSignature : undefined,
+							latencyNormalizedSource(event),
 						);
 						break;
 					}
@@ -176,6 +180,9 @@ class LeakedThinkingProjector {
 	#sourceAnchors = new Map<ProjectedContent, number>();
 	/** Latest non-undefined text signature seen, stamped onto held-back text flushed later. */
 	#lastTextSignature: string | undefined;
+	#auditTextSource: LatencySource | undefined;
+	// Once healing holds or changes text, a later equal fragment is not proof of provenance.
+	#auditTextPassThrough = true;
 	/** Forwarded native tool calls, keyed by the inner stream's `contentIndex`. */
 	#toolBlocks = new Map<number, { index: number; block: StreamingToolCall }>();
 	/** Projected native thinking blocks, keyed by the inner stream's `contentIndex`. */
@@ -190,7 +197,7 @@ class LeakedThinkingProjector {
 	}
 
 	/** Feed a visible-text delta through the healer, splitting leaked fences live. */
-	text(srcIndex: number, delta: string, signature: string | undefined): void {
+	text(srcIndex: number, delta: string, signature: string | undefined, source?: LatencySource): void {
 		const startsSource = this.#activeTextSourceIndex !== srcIndex;
 		if (this.#activeTextSourceIndex !== undefined && startsSource) {
 			this.#flushHealer();
@@ -200,11 +207,20 @@ class LeakedThinkingProjector {
 		this.#activeTextSourceIndex = srcIndex;
 		this.#fedTextLengths.set(srcIndex, (this.#fedTextLengths.get(srcIndex) ?? 0) + delta.length);
 		if (startsSource || signature !== undefined) this.#lastTextSignature = signature;
-		this.#apply(this.#healer.feedEvents(delta), this.#lastTextSignature, srcIndex);
+		const events = this.#healer.feedEvents(delta);
+		this.#auditTextPassThrough &&= events.length === 1 && events[0]?.type === "text" && events[0].text === delta;
+		this.#auditTextSource ??= source;
+		this.#apply(
+			events,
+			this.#lastTextSignature,
+			srcIndex,
+			source ?? this.#auditTextSource,
+			this.#auditTextPassThrough && source !== undefined,
+		);
 	}
 
 	/** Forward a native thinking delta, preserving its source block identity and signature. */
-	thinking(srcIndex: number, delta: string, signature: string | undefined): void {
+	thinking(srcIndex: number, delta: string, signature: string | undefined, source?: LatencySource): void {
 		let index = this.#thinkingBlocks.get(srcIndex);
 		if (index === undefined) {
 			if (this.#thinking && this.#pendingThinkingEnds.has(this.#thinking.index)) this.#closeThinking();
@@ -215,7 +231,14 @@ class LeakedThinkingProjector {
 		const block = this.#partial.content[index] as ThinkingContent;
 		block.thinking += delta;
 		if (signature !== undefined) block.thinkingSignature = signature;
-		this.#out.push({ type: "thinking_delta", contentIndex: index, delta, partial: this.#partial });
+		const event: AssistantMessageEvent = {
+			type: "thinking_delta",
+			contentIndex: index,
+			delta,
+			partial: this.#partial,
+		};
+		latencyProjected(event, source, "thinking", delta, index, true);
+		this.#out.push(event);
 	}
 
 	/**
@@ -359,7 +382,12 @@ class LeakedThinkingProjector {
 			}
 			this.#activeTextSourceIndex = srcIndex;
 			this.#lastTextSignature = block.textSignature;
-			this.#apply(this.#healer.feedEvents(block.text.slice(fedLength)), this.#lastTextSignature, srcIndex);
+			this.#apply(
+				this.#healer.feedEvents(block.text.slice(fedLength)),
+				this.#lastTextSignature,
+				srcIndex,
+				this.#auditTextSource,
+			);
 		}
 		this.#flushHealer();
 		this.#closeText();
@@ -367,14 +395,26 @@ class LeakedThinkingProjector {
 		return this.#mergeServerToolHistory(message);
 	}
 
-	#apply(events: readonly StreamMarkupHealingEvent[], signature: string | undefined, srcIndex: number): void {
+	#apply(
+		events: readonly StreamMarkupHealingEvent[],
+		signature: string | undefined,
+		srcIndex: number,
+		source?: LatencySource,
+		unchanged = false,
+	): void {
 		for (const event of events) {
-			if (event.type === "text") this.#emitText(event.text, signature, srcIndex);
-			else if (event.type === "thinking") this.#emitHealedThinking(event.thinking, srcIndex);
+			if (event.type === "text") this.#emitText(event.text, signature, srcIndex, source, unchanged);
+			else if (event.type === "thinking") this.#emitHealedThinking(event.thinking, srcIndex, source);
 		}
 	}
 
-	#emitText(text: string, signature: string | undefined, srcIndex: number): void {
+	#emitText(
+		text: string,
+		signature: string | undefined,
+		srcIndex: number,
+		source?: LatencySource,
+		unchanged = false,
+	): void {
 		if (text.length === 0) return;
 		this.#closeThinking();
 		if (!this.#text) {
@@ -389,16 +429,30 @@ class LeakedThinkingProjector {
 		}
 		const block = this.#partial.content[this.#text.index] as TextContent;
 		block.text += text;
-		this.#out.push({ type: "text_delta", contentIndex: this.#text.index, delta: text, partial: this.#partial });
+		const event: AssistantMessageEvent = {
+			type: "text_delta",
+			contentIndex: this.#text.index,
+			delta: text,
+			partial: this.#partial,
+		};
+		latencyProjected(event, source, "assistant", text, event.contentIndex, unchanged);
+		this.#out.push(event);
 	}
 
 	/** Healed (leaked) thinking carries no signature, matching the source fence. */
-	#emitHealedThinking(text: string, srcIndex: number): void {
+	#emitHealedThinking(text: string, srcIndex: number, source?: LatencySource): void {
 		if (text.length === 0) return;
 		const index = this.#openThinking(srcIndex);
 		const block = this.#partial.content[index] as ThinkingContent;
 		block.thinking += text;
-		this.#out.push({ type: "thinking_delta", contentIndex: index, delta: text, partial: this.#partial });
+		const event: AssistantMessageEvent = {
+			type: "thinking_delta",
+			contentIndex: index,
+			delta: text,
+			partial: this.#partial,
+		};
+		latencyProjected(event, source, "thinking", text, index, false);
+		this.#out.push(event);
 	}
 
 	#openThinking(srcIndex: number): number {
@@ -415,8 +469,9 @@ class LeakedThinkingProjector {
 	#flushHealer(): void {
 		const srcIndex = this.#activeTextSourceIndex;
 		if (srcIndex !== undefined) {
-			this.#apply(this.#healer.flushEvents(), this.#lastTextSignature, srcIndex);
+			this.#apply(this.#healer.flushEvents(), this.#lastTextSignature, srcIndex, this.#auditTextSource);
 		}
+		this.#auditTextSource = undefined;
 		this.#activeTextSourceIndex = undefined;
 	}
 

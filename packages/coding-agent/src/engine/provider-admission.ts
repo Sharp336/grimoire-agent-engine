@@ -6,6 +6,7 @@ import {
 	type LatencyAudit,
 	type LatencyRequest,
 	latencyPhysicalRequest,
+	latencyPreparation,
 } from "@oh-my-pi/pi-utils/latency-audit";
 import type { ProviderRequestHook } from "../sdk";
 import type { AuthStorage } from "../session/auth-storage";
@@ -123,7 +124,7 @@ export async function withProviderObservationContext<T>(
 		async () => {
 			let completed = false;
 			try {
-				const value = await callback();
+				const value = await (audit ? latencyPreparation.run(audit, callback) : latencyPreparation.exit(callback));
 				completed = true;
 				return value;
 			} finally {
