@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { logger } from "./logger";
+import * as logger from "./logger";
 
 // Private, opt-in Artel measurement data. Never pass payloads, URLs or errors here.
 interface AuditIdentity {
