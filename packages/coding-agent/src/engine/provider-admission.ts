@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Model, SimpleStreamOptions, UsageReport } from "@oh-my-pi/pi-ai";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { ProviderRequestHook } from "../sdk";
 import type { AuthStorage } from "../session/auth-storage";
 
@@ -371,14 +372,25 @@ export class ProviderAdmissionClient {
 	}
 
 	async #postObservation(body: Record<string, unknown>): Promise<void> {
+		let failureStatus = "provider_observation_unavailable";
 		for (let attempt = 0; attempt < 2; attempt++) {
 			try {
 				const decision = await this.#post(body, undefined);
 				if (decision.allowed) return;
-			} catch {
+				failureStatus = decision.status || "provider_observation_rejected";
+			} catch (error) {
+				failureStatus =
+					error instanceof ProviderAdmissionError ? error.code : "provider_observation_transport_error";
 				// Retry once with the same observation id; Core deduplicates lost acknowledgements.
 			}
 		}
+		logger.warn("Provider route observation was not recorded", {
+			observationId: body.observationId,
+			effectId: body.effectId,
+			routeRef: body.routeRef,
+			status: failureStatus,
+			attempts: 2,
+		});
 	}
 
 	async #post(body: Record<string, unknown>, signal: AbortSignal | undefined): Promise<ProviderAdmissionDecision> {
