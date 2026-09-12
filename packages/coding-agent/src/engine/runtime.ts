@@ -4680,6 +4680,7 @@ export class EngineRuntime {
 		status: "streaming" | "settled" | "cancelled" | "interrupted",
 	): Promise<void> {
 		const chunks = text ? utf8Chunks(text) : status !== "streaming" || block.revision === 0 ? [""] : [];
+		const singleChunk = Buffer.byteLength(text) <= runtimeLimits.bulkPreviewBytes;
 		const target = this.#snapshot(binding);
 		let payloads: Record<string, unknown>[] = [];
 		let bytes = 0;
@@ -4703,7 +4704,7 @@ export class EngineRuntime {
 				...(baseRevision ? { baseRevision } : { partial: false }),
 			};
 			const auditSource = latencyPersistenceSource(block);
-			const direct = chunks.length === 1 && auditSource?.sourceCorrelation === "direct";
+			const direct = singleChunk && auditSource?.sourceCorrelation === "direct";
 			if (
 				chunk.trim() &&
 				latencyFirst(auditSource, "persistence_payload", block.stream, {
