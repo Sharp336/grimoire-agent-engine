@@ -5425,6 +5425,37 @@
           "minLength": 21,
           "maxLength": 21
         },
+        "slotId": {
+          "$ref": "#/$defs/id"
+        },
+        "thinkingLevel": {
+          "oneOf": [
+            {
+              "type": "string",
+              "enum": [
+                "auto",
+                "off",
+                "minimal",
+                "low",
+                "medium",
+                "high",
+                "xhigh",
+                "max"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "thinkingSource": {
+          "enum": [
+            "launch",
+            "slot",
+            "profile",
+            "model"
+          ]
+        },
         "fallback": {
           "type": "boolean"
         },

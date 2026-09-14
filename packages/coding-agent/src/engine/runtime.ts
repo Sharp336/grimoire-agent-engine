@@ -1185,7 +1185,7 @@ export class EngineRuntime {
 			if (expectedIntentRevision !== undefined) {
 				const hold = await this.store.branchIntent(
 					target.agentInstanceId,
-					"session-exit:" + target.attemptId,
+					`session-exit:${target.attemptId}`,
 					"stop",
 					expectedIntentRevision,
 				);
@@ -2938,6 +2938,7 @@ export class EngineRuntime {
 				binding.traceWriteTail = Promise.resolve();
 				binding.messageWriteError = undefined;
 				binding.modelCallSequence = 0;
+				binding.childLaunchCount = 0;
 				binding.profileRouteState = undefined;
 				this.#resetAssistantStream(binding);
 				binding.assistantMessageSequence = 0;
@@ -4865,6 +4866,19 @@ export class EngineRuntime {
 			primaryRouteRef: mapping.primaryRouteRef,
 			...(routeRef ? { routeRef } : {}),
 			...(phase === "loading" ? { pendingRouteRef: matched.routeRef } : {}),
+			...(phase === "active" && matched.slotId
+				? {
+						slotId: matched.slotId,
+						thinkingLevel: binding.session.thinkingLevel ?? null,
+						thinkingSource: matched.thinkingSource,
+					}
+				: phase === "exhausted" && previous?.slotId
+					? {
+							slotId: previous.slotId,
+							thinkingLevel: previous.thinkingLevel,
+							thinkingSource: previous.thinkingSource,
+						}
+					: {}),
 			fallback: matched.routeRef !== mapping.primaryRouteRef,
 			phase,
 		};

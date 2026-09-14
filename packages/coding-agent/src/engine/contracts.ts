@@ -35,6 +35,10 @@ export interface EngineProfileRouteState {
 	/** Last route observed in an assistant stream, never merely the next selected model. */
 	routeRef?: string;
 	pendingRouteRef?: string;
+	/** Present only after this exact slot was observed serving an assistant stream. */
+	slotId?: string;
+	thinkingLevel?: string | null;
+	thinkingSource?: "launch" | "slot" | "profile" | "model";
 	fallback: boolean;
 	phase: "loading" | "active" | "exhausted";
 }
@@ -43,7 +47,14 @@ export interface EngineProfileRouteState {
 export interface EngineProfileRoutes {
 	profileRef: string;
 	primaryRouteRef: string;
-	routes: ReadonlyArray<{ routeRef: string; provider: string; modelId: string }>;
+	routes: ReadonlyArray<{
+		routeRef: string;
+		provider: string;
+		modelId: string;
+		slotId?: string;
+		thinkingLevel?: string | null;
+		thinkingSource?: "launch" | "slot" | "profile" | "model";
+	}>;
 }
 
 export interface EngineLaunchProfile {

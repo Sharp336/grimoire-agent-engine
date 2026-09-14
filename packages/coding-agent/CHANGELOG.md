@@ -7,6 +7,7 @@
 - Rejected provider metric observations now leave a bounded diagnostic without exposing credentials or response content.
 
 - Agent tools no longer inherit private Grimoire transport credentials or provider binding keys from the Engine process.
+- An idle binding reused for a new Attempt now starts the AgentProfile maxChildren ceiling from zero instead of inheriting the previous Attempt's child launch count; failed launches still consume the allowance and the cap still holds within a single Attempt.
 
 ### Added
 

@@ -5634,6 +5634,100 @@ describe("EngineRuntime", () => {
 		await runtime.dispose();
 	}, 60_000);
 
+	it("resets the child launch ceiling when an idle root binding is reused for a new Attempt", async () => {
+		let resultsA: string[] = [];
+		let resultsB: string[] = [];
+		const launches: string[] = [];
+		const { runtime, cwd } = await createRuntime(
+			async (session, input) => {
+				session.sessionManager.appendMessage({ role: "user", content: input, timestamp: Date.now() });
+				const task = session.getToolByName("task");
+				if (!task) throw new Error("Engine root did not expose task");
+				const results = await Promise.all(
+					Array.from({ length: 3 }, (_, index) =>
+						task.execute(`tool-child-${index}`, {
+							profileRef: "gctx:2222222222222222",
+							workStepId: `child-step-${index}`,
+						}),
+					),
+				);
+				const texts = results.map(result => result.content.find(part => part.type === "text")?.text ?? "");
+				if (input === "first round") resultsA = texts;
+				else resultsB = texts;
+				return true;
+			},
+			{
+				resolveSessionProfile: async () => ({
+					options: {},
+					childProfiles: [{ profileRef: "gctx:2222222222222222", displayName: "Worker" }],
+					dispose() {},
+				}),
+				launchChild: async request => {
+					launches.push(request.parentAttemptId);
+					if (request.parentAttemptId === "attempt-b" && request.toolCallId === "tool-child-0") {
+						throw new Error("child unavailable");
+					}
+					return {
+						agentInstanceId: `child-${request.toolCallId}`,
+						status: "completed",
+						assistantFinal: `done ${request.toolCallId}`,
+					};
+				},
+			},
+		);
+		const parentProfile: EngineLaunchProfile = {
+			...profile,
+			spawns: "*",
+			maxSpawnDepth: 1,
+			maxChildren: 2,
+			childProfileRefs: ["gctx:2222222222222222"],
+		};
+		const first = await runtime.start(
+			{
+				commandId: "command-parent-reuse-a",
+				agentInstanceId: "parent-reuse-agent",
+				agentInstanceRef: "grimoire://tasks/p/t/agents/parent-reuse-agent",
+				executionId: "execution-parent-reuse-a",
+				attemptId: "attempt-a",
+				authorityGeneration: 1,
+				cwd,
+				input: "first round",
+			},
+			parentProfile,
+		);
+		await runtime.drain();
+		const second = await runtime.start(
+			{
+				commandId: "command-parent-reuse-b",
+				agentInstanceId: "parent-reuse-agent",
+				agentInstanceRef: "grimoire://tasks/p/t/agents/parent-reuse-agent",
+				executionId: "execution-parent-reuse-b",
+				attemptId: "attempt-b",
+				authorityGeneration: 1,
+				cwd,
+				input: "second round",
+			},
+			parentProfile,
+		);
+		await runtime.drain();
+		expect(second.bindingGeneration).toBe(first.bindingGeneration);
+		expect(runtime.agentRegistry.get(second.engineAgentId)?.session).toBe(
+			runtime.agentRegistry.get(first.engineAgentId)?.session,
+		);
+		expect(resultsA.slice(0, 2)).toEqual(["done tool-child-0", "done tool-child-1"]);
+		expect(resultsA[2]).toContain("maxChildren ceiling (2) reached");
+		expect(resultsB[0]).toContain("Task execution failed: child unavailable");
+		expect(resultsB[1]).toBe("done tool-child-1");
+		expect(resultsB[2]).toContain("maxChildren ceiling (2) reached");
+		expect(launches).toEqual(["attempt-a", "attempt-a", "attempt-b", "attempt-b"]);
+		const entries = (await runtime.sessionHistory("parent-reuse-agent")).entries;
+		expect(entries.filter(entry => entry.role === "user").map(entry => entry.text)).toEqual([
+			"first round",
+			"second round",
+		]);
+		await runtime.dispose();
+	}, 60_000);
+
 	it("binds native task discovery to each parent and exposes a failed launch as an error", async () => {
 		const parents = ["first", "second"] as const;
 		const ref = (id: string) => `grimoire://tasks/project/${id}/agents/parent-${id}`;

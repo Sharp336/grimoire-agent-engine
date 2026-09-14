@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { ResolvedThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, AuthCredential, AuthCredentialStore, Model, ModelSpec, StoredAuthCredential } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { stableStringifyJson } from "@oh-my-pi/pi-utils";
@@ -11,6 +12,7 @@ import { SETTINGS_SCHEMA, type SettingPath, Settings } from "../config/settings"
 import type { CreateAgentSessionOptions } from "../sdk";
 import type { TurnRetryPolicy } from "../session/agent-session-types";
 import { AuthStorage, SqliteAuthCredentialStore } from "../session/auth-storage";
+import { formatRetryFallbackSelector } from "../session/retry-fallback-chains";
 import { concreteThinkingLevel, resolveThinkingLevelForModel } from "../thinking";
 import type { EngineChildProfile } from "../tools";
 import type { EngineLaunchProfile, EngineProfileRoutes } from "./contracts";
@@ -47,6 +49,7 @@ interface AgentProfile {
 	description?: string;
 	status?: "active" | "disabled";
 	models: string[];
+	modelSlots?: { id: string; routeRef: string; thinkingLevel?: CreateAgentSessionOptions["thinkingLevel"] | null }[];
 	allowSameModelProviderFallback?: boolean;
 	allowCrossModelFallback?: boolean;
 	requireTrustedProvider?: boolean;
@@ -264,6 +267,26 @@ export class EngineProfileResolver {
 	}
 
 	async #routeCandidates(profile: AgentProfile, selected?: string, includeFallbacks = false): Promise<string[]> {
+		if (profile.modelSlots !== undefined) {
+			const ids = new Set<string>();
+			if (!Array.isArray(profile.modelSlots) || profile.modelSlots.length !== profile.models.length)
+				throw new Error("AgentProfile slots must match models");
+			for (const [index, slot] of profile.modelSlots.entries()) {
+				if (
+					!slot ||
+					typeof slot.id !== "string" ||
+					!/^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$/.test(slot.id) ||
+					ids.has(slot.id) ||
+					slot.routeRef !== profile.models[index] ||
+					(slot.thinkingLevel !== undefined &&
+						slot.thinkingLevel !== null &&
+						!["auto", "off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(slot.thinkingLevel))
+				) {
+					throw new Error("AgentProfile slot identity or thinking is invalid");
+				}
+				ids.add(slot.id);
+			}
+		}
 		if (profile.allowCrossModelFallback !== undefined && typeof profile.allowCrossModelFallback !== "boolean") {
 			throw new Error("AgentProfile allowCrossModelFallback must be boolean");
 		}
@@ -500,7 +523,13 @@ export class EngineProfileResolver {
 					models: [toProviderModel(model)],
 				});
 			}
-			const fallbackSelectors = [formatModelStringWithRouting(model)];
+			const resolvedThinkingLevel = profileThinkingLevel(model, profile, launch, routeRef);
+			const routeThinking = new Map([[routeRef, resolvedThinkingLevel]]);
+			const fallbackSelectors = [
+				profile.modelSlots
+					? formatRetryFallbackSelector(model, resolvedThinkingLevel)
+					: formatModelStringWithRouting(model),
+			];
 			const fallbackApiKeyRoutes: ProviderApiKeyRouteIdentity[] = [];
 			if (executionIdentity) {
 				fallbackApiKeyRoutes.push({
@@ -558,7 +587,8 @@ export class EngineProfileResolver {
 							const fallbackModel = buildModel(
 								toModelSpec(fallbackRoute, fallbackAccount, fallbackRouteRef),
 							) as Model;
-							profileThinkingLevel(fallbackModel, profile, launch);
+							const fallbackThinking = profileThinkingLevel(fallbackModel, profile, launch, fallbackRouteRef);
+							routeThinking.set(fallbackRouteRef, fallbackThinking);
 							modelRegistry.registerProvider(fallbackModel.provider, {
 								apiKey: fallbackCredential.key,
 								api: fallbackModel.api,
@@ -579,7 +609,9 @@ export class EngineProfileResolver {
 								modelId: fallbackModel.id,
 								baseUrl: fallbackModel.baseUrl,
 							});
-							const selector = formatModelStringWithRouting(fallbackModel);
+							const selector = profile.modelSlots
+								? formatRetryFallbackSelector(fallbackModel, fallbackThinking)
+								: formatModelStringWithRouting(fallbackModel);
 							if (!fallbackSelectors.includes(selector)) fallbackSelectors.push(selector);
 							continue;
 						}
@@ -608,7 +640,8 @@ export class EngineProfileResolver {
 						const fallbackModel = buildModel(
 							toModelSpec(fallbackRoute, fallbackAccount, fallbackRouteRef, fallbackMaterial),
 						) as Model;
-						profileThinkingLevel(fallbackModel, profile, launch);
+						const fallbackThinking = profileThinkingLevel(fallbackModel, profile, launch, fallbackRouteRef);
+						routeThinking.set(fallbackRouteRef, fallbackThinking);
 						modelRegistry.registerProvider(fallbackModel.provider, {
 							authStorageManaged: true,
 							api: fallbackModel.api,
@@ -622,7 +655,9 @@ export class EngineProfileResolver {
 							modelId: fallbackModel.id,
 							baseUrl: fallbackModel.baseUrl,
 						});
-						const selector = formatModelStringWithRouting(fallbackModel);
+						const selector = profile.modelSlots
+							? formatRetryFallbackSelector(fallbackModel, fallbackThinking)
+							: formatModelStringWithRouting(fallbackModel);
 						if (!fallbackSelectors.includes(selector)) fallbackSelectors.push(selector);
 					} catch {
 						if (signal?.aborted) throw signal.reason;
@@ -642,7 +677,16 @@ export class EngineProfileResolver {
 						: launchRestricted
 							? launchNames
 							: undefined;
-			const resolvedThinkingLevel = profileThinkingLevel(model, profile, launch);
+			const slotEvidence = (ref: string) => {
+				const slot = profile.modelSlots?.find(item => item.routeRef === ref);
+				return slot
+					? {
+							slotId: slot.id,
+							thinkingLevel: routeThinking.get(ref) ?? null,
+							thinkingSource: profileThinkingRequest(profile, launch, ref).source,
+						}
+					: {};
+			};
 			return {
 				options: {
 					settings,
@@ -670,13 +714,14 @@ export class EngineProfileResolver {
 					profileRef,
 					primaryRouteRef: launch.selectedRouteRef ?? requiredRef(profile.models[0], "primary route"),
 					routes: [
-						{ routeRef, provider: model.provider, modelId: model.id },
+						{ routeRef, provider: model.provider, modelId: model.id, ...slotEvidence(routeRef) },
 						...fallbackApiKeyRoutes
 							.filter(candidate => candidate.routeRef !== routeRef)
 							.map(candidate => ({
 								routeRef: candidate.routeRef,
 								provider: candidate.runtimeProviderId,
 								modelId: candidate.modelId,
+								...slotEvidence(candidate.routeRef),
 							})),
 					],
 				},
@@ -783,12 +828,34 @@ function routeRuntimeProvider(account: ProviderAccount, routeRef: string): strin
 	return account.credential?.type === "api_key" ? `artel-route-${routeRef.slice(5)}` : account.providerId;
 }
 
+function profileThinkingRequest(
+	profile: AgentProfile,
+	launch: EngineLaunchProfile,
+	routeRef: string,
+): {
+	value: CreateAgentSessionOptions["thinkingLevel"];
+	source: "launch" | "slot" | "profile" | "model";
+} {
+	if (launch.thinkingLevel !== undefined) return { value: launch.thinkingLevel, source: "launch" };
+	const slot = profile.modelSlots?.find(item => item.routeRef === routeRef);
+	if (slot && Object.hasOwn(slot, "thinkingLevel"))
+		return {
+			value: slot.thinkingLevel ?? undefined,
+			source: slot.thinkingLevel == null || slot.thinkingLevel === "auto" ? "model" : "slot",
+		};
+	return {
+		value: profile.generationDefaults?.thinkingLevel,
+		source: profile.generationDefaults?.thinkingLevel === undefined ? "model" : "profile",
+	};
+}
+
 function profileThinkingLevel(
 	model: Model,
 	profile: AgentProfile,
 	launch: EngineLaunchProfile,
-): CreateAgentSessionOptions["thinkingLevel"] {
-	const requested = concreteThinkingLevel(launch.thinkingLevel ?? profile.generationDefaults?.thinkingLevel);
+	routeRef: string,
+): ResolvedThinkingLevel | undefined {
+	const requested = concreteThinkingLevel(profileThinkingRequest(profile, launch, routeRef).value);
 	if (requested === "off" && model.thinking?.requiresEffort === true && model.thinking?.suppressWhenOff !== true) {
 		throw new ProfileThinkingLevelError(
 			`Model ${model.provider}/${model.id} requires reasoning and cannot disable it`,
