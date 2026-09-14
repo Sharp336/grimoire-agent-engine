@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
+import { ProviderHttpError } from "../error";
 import type {
 	CredentialRankingContext,
 	CredentialRankingStrategy,
@@ -430,10 +431,14 @@ export const openaiCodexUsageProvider: UsageProvider = {
 			const response = await ctx.fetch(url, { headers, signal: params.signal });
 			if (!response.ok) {
 				ctx.logger?.warn("Codex usage request failed", { status: response.status, provider: params.provider });
+				if (response.status === 401 || response.status === 403) {
+					throw new ProviderHttpError("Codex usage authorization failed", response.status);
+				}
 				return null;
 			}
 			payload = await response.json();
 		} catch (error) {
+			if (error instanceof ProviderHttpError) throw error;
 			ctx.logger?.warn("Codex usage request error", { provider: params.provider, error: String(error) });
 			return null;
 		}

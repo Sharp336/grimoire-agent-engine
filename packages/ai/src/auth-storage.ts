@@ -3328,10 +3328,47 @@ export class AuthStorage {
 		if (providerImpl.supports && !providerImpl.supports(params)) return null;
 
 		try {
-			const report = await providerImpl.fetchUsage(params, {
+			const context = {
 				fetch: this.#usageFetch,
 				logger: this.#usageLogger,
-			});
+			};
+			let report: UsageReport | null;
+			try {
+				report = await providerImpl.fetchUsage(params, context);
+			} catch (error) {
+				// Codex may reject an access token before its advertised expiry.
+				// Refresh only this stored credential, once, without disabling it or
+				// rotating to a different account from an advisory usage probe.
+				if (
+					request.provider !== "openai-codex" ||
+					!(error instanceof AIError.ProviderHttpError) ||
+					error.status !== 401 ||
+					params.credential !== request.credential
+				)
+					throw error;
+				this.#usageCache.set(this.#buildUsageReportCacheKey(request), { value: null, expiresAt: 0 });
+				const credential = this.#buildRefreshableOauthCredential(params.credential);
+				const credentialId = this.#findStoredCredentialIdForUsageCredential(request.provider, params.credential);
+				if (!credential || credentialId === undefined) throw error;
+				const { credential: refreshed } = await this.refreshStoredOAuthCredential(request.provider, {
+					credentialId,
+					observedCredential: credential,
+					credentialFromRow: row => row,
+					forceRefresh: true,
+					signal: timeoutSignal,
+					refresh: (current, signal) =>
+						this.#requestOAuthCredentialRefresh(
+							request.provider,
+							current,
+							credentialId,
+							timeoutSignal && signal ? AbortSignal.any([timeoutSignal, signal]) : (timeoutSignal ?? signal),
+						),
+				});
+				if (!refreshed) throw error;
+				const next = this.#mergeRefreshedUsageCredential(params.credential, refreshed);
+				params = { ...params, credential: next, accountKey: this.#buildUsageCacheIdentity(next) };
+				report = await providerImpl.fetchUsage(params, context);
+			}
 			// Attribute the report to the credential's organization. The orgId and
 			// orgName fallbacks apply independently: Claude's usage endpoint stamps
 			// orgId from the `anthropic-organization-id` response header but never

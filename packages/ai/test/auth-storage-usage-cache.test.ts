@@ -21,6 +21,7 @@ import {
 import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { alibabaTokenPlanUsageProvider } from "@oh-my-pi/pi-ai/usage/alibaba-token-plan";
 import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
+import { openaiCodexUsageProvider } from "@oh-my-pi/pi-ai/usage/openai-codex";
 import { serializeAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 
 function anthropicReports(reports: UsageReport[] | null): UsageReport[] {
@@ -116,6 +117,76 @@ function oauthRow(id: number, email: string): StoredAuthCredential {
 	};
 	return { id, provider: "anthropic", credential, disabledCause: null };
 }
+
+describe("Codex usage authorization recovery", () => {
+	it.each([
+		{ status: 401, recovery: "ok", refreshes: 1, requests: 2, reports: 1 },
+		{ status: 401, recovery: "rejected", refreshes: 1, requests: 2, reports: 0 },
+		{ status: 401, recovery: "revoked", refreshes: 1, requests: 1, reports: 0 },
+		{ status: 403, recovery: "ok", refreshes: 0, requests: 1, reports: 0 },
+	])("handles $status / $recovery without stale quota or account rotation", async scenario => {
+		const row = oauthRow(1, "fixture@example.com");
+		row.provider = "openai-codex";
+		const store = makeStore([row]);
+		let failing = false;
+		let requests = 0;
+		let refreshes = 0;
+		let writes = 0;
+		store.updateAuthCredential = (id, credential) => {
+			expect(id).toBe(row.id);
+			writes++;
+			row.credential = credential;
+		};
+		const tokens: string[] = [];
+		const usageFetch = (async (_url, init) => {
+			if (!String(_url).endsWith("wham/usage")) return Response.json({});
+			const headers = new Headers(init?.headers);
+			expect(headers.get("ChatGPT-Account-Id")).toBe("account-1");
+			if (failing) {
+				requests++;
+				tokens.push(headers.get("Authorization") ?? "");
+				if (requests === 1 || scenario.recovery !== "ok") return new Response(null, { status: scenario.status });
+			}
+			return Response.json({
+				rate_limit: {
+					allowed: true,
+					limit_reached: false,
+					primary_window: {
+						used_percent: 20,
+						limit_window_seconds: 18000,
+						reset_at: 2000000000,
+					},
+				},
+			});
+		}) as typeof fetch;
+		const storage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? openaiCodexUsageProvider : undefined),
+			usageFetch,
+			refreshOAuthCredential: async (_provider, credentialId, credential) => {
+				refreshes++;
+				expect(credentialId).toBe(1);
+				expect(credential.accountId).toBe("account-1");
+				if (scenario.recovery === "revoked") throw new Error("invalid_grant");
+				return { ...credential, access: "fresh-access", refresh: "fresh-refresh", expires: Date.now() + 3600000 };
+			},
+		});
+		try {
+			await storage.reload();
+			expect(await storage.fetchUsageReports()).toHaveLength(1);
+			expireCachePayloads(store);
+			failing = true;
+			expect(await storage.fetchUsageReports()).toHaveLength(scenario.reports);
+			expect(requests).toBe(scenario.requests);
+			expect(refreshes).toBe(scenario.refreshes);
+			expect(writes).toBe(scenario.requests === 2 ? 1 : 0);
+			expect(tokens[0]).toBe("Bearer oat-1");
+			if (scenario.requests === 2) expect(tokens[1]).toBe("Bearer fresh-access");
+			expect(row.disabledCause).toBeNull();
+		} finally {
+			storage.close();
+		}
+	});
+});
 
 function makeReport(account: string): UsageReport {
 	return {
