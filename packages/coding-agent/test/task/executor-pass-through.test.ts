@@ -47,8 +47,6 @@ function createMockSession(onPrompt: (params: { emit: (event: AgentSessionEvent)
 			onPrompt({ emit });
 		},
 		waitForIdle: async () => {},
-		prepareForHeadlessAdvisorDrain: () => {},
-		waitForAdvisorCatchup: async () => true,
 		getLastAssistantMessage: () => undefined,
 		abort: async () => {},
 		dispose: async () => {},

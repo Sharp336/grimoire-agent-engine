@@ -3,7 +3,6 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import {
 	SETTING_TABS,
 	SETTINGS_SCHEMA,
-	type SettingPath,
 	type SettingTab,
 	TAB_GROUPS,
 } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
@@ -78,23 +77,6 @@ describe("settings layout", () => {
 		const values = def.options.map(option => option.value);
 		expect(values).toContain("silver16-bw");
 		expect(values).toEqual([...SETTINGS_SCHEMA["snapcompact.shape"].values]);
-	});
-
-	it("hides advisor dependent settings when advisor is disabled", () => {
-		const advisorDependentPaths: SettingPath[] = ["advisor.syncBacklog", "advisor.immuneTurns"];
-		const advisorDependentPathSet = new Set(advisorDependentPaths);
-		const defs = getSettingsForTab("model").filter(def => advisorDependentPathSet.has(def.path));
-
-		expect(defs.map(def => def.path)).toEqual(advisorDependentPaths);
-		for (const def of defs) {
-			expect(def.condition?.()).toBe(false);
-		}
-
-		Settings.instance.set("advisor.enabled", true);
-
-		for (const def of defs) {
-			expect(def.condition?.()).toBe(true);
-		}
 	});
 
 	it("shows the unexpected-stop classifier setting only in smart mode", () => {

@@ -2070,10 +2070,6 @@ export class Settings {
 		// the incoherent "hashline edits without addressable anchors" state.
 		delete raw.readHashLines;
 
-		// serviceTier (single enum with scoped openai-only/claude-only sentinels)
-		// → per-family tier.openai/tier.anthropic/tier.google; serviceTierSubagent
-		// → tier.subagent; serviceTierAdvisor → tier.advisor. `fastModeScope` is
-		// dropped — per-family scoping is now expressed by the three tier settings.
 		const tierObj = isRecord(raw.tier) ? raw.tier : {};
 		let tierTouched = false;
 		const setTier = (family: string, value: unknown): void => {
@@ -2110,49 +2106,8 @@ export class Settings {
 			setTier("subagent", mapInheritTier(raw.serviceTierSubagent));
 			delete raw.serviceTierSubagent;
 		}
-		if ("serviceTierAdvisor" in raw) {
-			setTier("advisor", mapInheritTier(raw.serviceTierAdvisor));
-			delete raw.serviceTierAdvisor;
-		}
 		if (tierTouched) raw.tier = tierObj;
 		delete raw.fastModeScope;
-
-		// advisor.subagents (blanket advisor on every spawned subagent) → per-agent
-		// task.agentAdvisor, migrated to the bundled generic `task` agent. An
-		// explicit boolean maps to "on"/"off" IN THE SAME LAYER — migration runs
-		// per file, so a project-level `false` must keep overriding a global
-		// `true` after both layers migrate.
-		{
-			const advisorObj = isRecord(raw.advisor) ? raw.advisor : undefined;
-			const legacySubagents =
-				advisorObj && "subagents" in advisorObj ? advisorObj.subagents : raw["advisor.subagents"];
-			if (typeof legacySubagents === "boolean") {
-				const taskObj = isRecord(raw.task) ? raw.task : {};
-				const agentAdvisor = isRecord(taskObj.agentAdvisor) ? taskObj.agentAdvisor : {};
-				if (!("task" in agentAdvisor)) agentAdvisor.task = legacySubagents ? "on" : "off";
-				taskObj.agentAdvisor = agentAdvisor;
-				raw.task = taskObj;
-			}
-			if (advisorObj) delete advisorObj.subagents;
-			delete raw["advisor.subagents"];
-		}
-
-		// Early per-agent toggles were persisted as booleans even though the
-		// runtime record contract is "on"/"off"/model pattern. Normalize each
-		// layer before merging so project-level false still overrides global true.
-		{
-			const taskObj = isRecord(raw.task) ? raw.task : undefined;
-			if (taskObj) {
-				for (const key of ["agentPrewalk", "agentAdvisor"]) {
-					const overrides = isRecord(taskObj[key]) ? taskObj[key] : undefined;
-					if (!overrides) continue;
-					for (const agentName in overrides) {
-						const value = overrides[agentName];
-						if (typeof value === "boolean") overrides[agentName] = value ? "on" : "off";
-					}
-				}
-			}
-		}
 
 		// v17 renames that used to nest under a boolean parent path:
 		//   dev.autoqa.consent -> dev.autoqaConsent

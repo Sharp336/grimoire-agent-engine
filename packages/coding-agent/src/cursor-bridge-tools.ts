@@ -1,13 +1,3 @@
-/**
- * Per-call tools the Cursor exec bridge needs but the model-facing registry
- * cannot supply.
- *
- * Both bridge callsites — the primary session and the advisor roster — build
- * the same instances, and both must apply the session's approval wrapper. A
- * raw tool here silently escapes the gate every registry call goes through, so
- * the construction lives in one place rather than being repeated per callsite.
- */
-
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { EditTool } from "./edit";
 import type { ExtensionRunner } from "./extensibility/extensions";
@@ -54,21 +44,6 @@ export function createBridgeEditTool(session: ToolSession, extensionRunner: Exte
 	return new ExtensionToolWrapper(editTool, extensionRunner);
 }
 
-/**
- * The tool map the exec bridge should run, given the map a caller granted.
- *
- * `pi_edit` needs a `replace`-mode instance, but only when `edit` was granted:
- * the tool is constructed rather than looked up, so substituting
- * unconditionally would hand a restricted roster a mutating tool it was denied
- * (issue #5680). The granted map is never mutated: an unsubstituted result is a
- * copy, so a caller without an `edit` grant cannot accidentally gain one.
- *
- * The advisor roster passes its granted map here. The primary session
- * advertises hashline `edit` as MCP and still serves the replace-mode
- * instance through the bridge's `getEditReplaceTool` accessor — not the
- * `getTool` fallback, which doubles as the agent loop's resolver for
- * unadvertised calls and must stay device-only.
- */
 export function bridgeToolMap(
 	granted: ReadonlyMap<string, AgentTool>,
 	createEditTool: (() => AgentTool | undefined) | undefined,

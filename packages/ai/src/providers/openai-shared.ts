@@ -2121,7 +2121,7 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 	// DeepSeek-family Responses targets (e.g. opencode-go) reject a thinking-mode
 	// continuation whose replayed assistant turns carry no reasoning item: "The
 	// reasoning_text in the thinking mode must be passed back to the API." After a
-	// cross-model prewalk hand-off or a compaction that drops the native replay
+	// cross-model hand-off or a compaction that drops the native replay
 	// payload, the block re-encode below demotes reasoning to text and emits no
 	// reasoning item. Track reasoning emission so a placeholder can be synthesized,
 	// mirroring the chat-completions `requiresReasoningContentForAllAssistantTurns`

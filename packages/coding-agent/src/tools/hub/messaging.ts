@@ -52,7 +52,7 @@ export interface HubListParams {
 }
 
 function isAddressablePeer(ref: { id: string; kind: string; status: string }, senderId: string): boolean {
-	return ref.id !== senderId && ref.kind !== "advisor" && ref.status !== "aborted";
+	return ref.id !== senderId && ref.status !== "aborted";
 }
 
 function resolveHubListLimit(limit: number | undefined): number {

@@ -671,25 +671,6 @@ describe("IRC", () => {
 			expect(text).not.toContain("0-Parked");
 		});
 
-		it("op=list hides advisor-kind refs from the peer roster", async () => {
-			const sub = makeFakeSession();
-			registry.register({ id: "0-Worker", displayName: "task", kind: "sub", session: sub.session });
-			registry.register({
-				id: "0-Main/advisor",
-				displayName: "advisor",
-				kind: "advisor",
-				session: null,
-				status: "parked",
-			});
-
-			const tool = new HubTool(makeToolSession(registry, "0-Main"));
-			const result = await tool.execute("call-1", { op: "list" });
-			const details = result.details as CoordinationDetails | undefined;
-			const peerIds = details?.peers?.map(peer => peer.id) ?? [];
-			expect(peerIds).toContain("0-Worker");
-			expect(peerIds).not.toContain("0-Main/advisor");
-		});
-
 		it("op=send returns receipts immediately without waiting for a reply", async () => {
 			const sub = makeFakeSession();
 			registry.register({ id: "0-Sub", displayName: "task", kind: "sub", session: sub.session });

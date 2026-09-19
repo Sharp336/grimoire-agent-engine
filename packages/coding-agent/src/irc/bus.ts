@@ -148,14 +148,6 @@ export class IrcBus {
 				error: `Agent "${message.to}" was hard-aborted and cannot be messaged or revived. Its transcript remains readable at history://${message.to}.`,
 			};
 		}
-		// Advisor refs are observability-only transcripts, never messageable peers.
-		if (ref.kind === "advisor") {
-			return {
-				to: message.to,
-				outcome: "failed",
-				error: `Agent "${message.to}" is a read-only advisor transcript and cannot be messaged.`,
-			};
-		}
 
 		// A `parked` recipient always needs the lifecycle to revive it — this is
 		// read from *this* bus's registry, so it holds for any registry. The

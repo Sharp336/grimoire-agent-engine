@@ -516,18 +516,6 @@ function queueCustomSteer(session: AgentSession, chip: string, content = "skill 
 	});
 }
 
-function queueAdvisorSteer(session: AgentSession, note = "consider X"): void {
-	session.agent.steer({
-		role: "custom",
-		customType: "advisor",
-		content: `Advisor:\n- [blocker] ${note}`,
-		display: true,
-		attribution: "agent",
-		details: { notes: [{ note, severity: "blocker" }] },
-		timestamp: Date.now(),
-	});
-}
-
 /** Mirror a hidden magic-keyword companion notice (`display:false`, `attribution:"user"`). */
 function queueMagicCompanion(session: AgentSession, customType = "ultrathink-notice"): void {
 	session.agent.steer({
@@ -635,52 +623,6 @@ describe("AgentSession derived queued custom display", () => {
 
 		expect(session.popLastQueuedMessage()?.text).toBe("/skill:foo bar");
 		expect(session.getQueuedMessages().steering).toEqual([]);
-	});
-
-	it("counts a queued advisor card as pending work but keeps it out of chips and restore", async () => {
-		fixture = await createRealSession();
-		const { session } = fixture;
-		queueAdvisorSteer(session, "guard the null path");
-
-		// Advisor cards are real pending work (feeds hasPendingMessages/empty-Enter abort)...
-		expect(session.queuedMessageCount).toBe(1);
-		// ...but are never editable user input.
-		expect(session.getQueuedMessages().steering).toEqual([]);
-
-		// clearQueue must not surface the advisor note for editor restore, and must
-		// leave the card queued so the abort/resume path still delivers it.
-		const cleared = session.clearQueue();
-		expect(cleared.steering).toEqual([]);
-		expect(cleared.followUp).toEqual([]);
-		expect(session.agent.peekSteeringQueue()).toHaveLength(1);
-		expect(session.popLastQueuedMessage()).toBeUndefined();
-	});
-
-	it("clearQueue restores user messages but preserves a queued advisor card", async () => {
-		fixture = await createRealSession();
-		const { session } = fixture;
-		queueCustomSteer(session, "/skill:foo bar");
-		queueAdvisorSteer(session, "rename the symbol");
-
-		const cleared = session.clearQueue();
-		expect(cleared.steering).toEqual([{ text: "/skill:foo bar", images: undefined }]);
-		// The advisor card survives in the agent-core queue; the user's message left.
-		const remaining = session.agent.peekSteeringQueue();
-		expect(remaining).toHaveLength(1);
-		expect(remaining[0]).toMatchObject({ customType: "advisor" });
-	});
-
-	it("popLastQueuedMessage steps over an advisor card to the user message", async () => {
-		fixture = await createRealSession();
-		const { session } = fixture;
-		queueCustomSteer(session, "/skill:foo bar");
-		queueAdvisorSteer(session, "watch the race");
-
-		expect(session.popLastQueuedMessage()?.text).toBe("/skill:foo bar");
-		// Advisor card remains queued, not restored.
-		const remaining = session.agent.peekSteeringQueue();
-		expect(remaining).toHaveLength(1);
-		expect(remaining[0]).toMatchObject({ customType: "advisor" });
 	});
 
 	it("clearQueue drops a queued magic-keyword companion with its dequeued user prompt", async () => {

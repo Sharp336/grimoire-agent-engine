@@ -179,7 +179,6 @@ describe("AgentSession Gemini header-runaway interrupt", () => {
 			"compaction.enabled": false,
 			"retry.enabled": false,
 			"todo.enabled": false,
-			"advisor.enabled": false,
 			"model.loopGuard.enabled": true,
 			"model.loopGuard.toolCallReminder": true,
 			...overrides,

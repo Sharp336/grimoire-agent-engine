@@ -1011,18 +1011,7 @@ function shouldInheritDefaultBeforePriority(role: ModelRole): boolean {
 	return role === "smol" || role === "slow" || role === "designer";
 }
 
-/**
- * Roles that have no priority.json chain of their own reuse another role's
- * list. The advisor — a second-opinion reviewer — defaults to the `slow`
- * reasoning chain, but (unlike the `slow` role, see
- * {@link shouldInheritDefaultBeforePriority}) never inherits the primary's
- * model, so it stays a distinct strong model out of the box. The `tiny` role —
- * the override for online title/memory/classifier tasks — reuses the `smol`
- * fast chain so an unset tiny role auto-resolves to the same fast model smol
- * would pick.
- */
 const ROLE_PRIORITY_ALIAS: Partial<Record<ModelRole, keyof typeof MODEL_PRIO>> = {
-	advisor: "slow",
 	tiny: "smol",
 };
 
@@ -1202,74 +1191,6 @@ export function resolveAgentModelSelection(options: AgentModelPatternResolutionO
 /** Effective agent model patterns alone, for callers with no interest in role identity. */
 export function resolveAgentModelPatterns(options: AgentModelPatternResolutionOptions): string[] {
 	return resolveEffectiveAgentModelSelection(options).patterns;
-}
-
-/** Default prewalk hand-off target when no explicit target is configured. */
-export const DEFAULT_PREWALK_TARGET = "@smol";
-
-export interface AgentPrewalkResolutionOptions {
-	/** `task.agentPrewalk` settings value for this agent: `"on"`, `"off"`, or a model pattern. */
-	settingsOverride?: string;
-	/** Agent definition `prewalk` frontmatter: `true` = default target, string = custom target pattern. */
-	agentPrewalk?: boolean | string;
-}
-
-/**
- * Effective prewalk target pattern for a subagent, or `undefined` when prewalk
- * is disabled. The settings override decides enablement first ("off" wins,
- * "on" enables with the agent's own target or {@link DEFAULT_PREWALK_TARGET},
- * any other value is a custom target pattern); otherwise the agent
- * definition's `prewalk` field applies. Role aliases in the returned pattern
- * are expanded later by {@link resolveModelOverride}.
- */
-export function resolveAgentPrewalkPattern(options: AgentPrewalkResolutionOptions): string | undefined {
-	const agentPattern =
-		typeof options.agentPrewalk === "string" && options.agentPrewalk.trim() ? options.agentPrewalk.trim() : undefined;
-	const override = options.settingsOverride?.trim();
-	if (override) {
-		const lowered = override.toLowerCase();
-		if (lowered === "off" || lowered === "false") return undefined;
-		if (lowered === "on" || lowered === "true") return agentPattern ?? DEFAULT_PREWALK_TARGET;
-		return override;
-	}
-	if (options.agentPrewalk === true) return DEFAULT_PREWALK_TARGET;
-	return agentPattern;
-}
-
-export interface AgentAdvisorResolutionOptions {
-	/** `task.agentAdvisor` settings value for this agent: `"on"`, `"off"`, or a model pattern. */
-	settingsOverride?: string;
-	/** Agent definition `advisor` frontmatter: `true` = default advisor-role model, string = custom model pattern. */
-	agentAdvisor?: boolean | string;
-}
-
-/** Effective advisor for one spawned agent: absent `model` resolves through the `advisor` role. */
-export interface AgentAdvisorSelection {
-	model?: string;
-}
-
-/**
- * Effective advisor selection for a subagent, or `undefined` when the agent
- * runs unadvised. The settings override decides enablement first ("off" wins,
- * "on" enables with the agent's own model pattern or the `advisor` role, any
- * other value is a custom model pattern); otherwise the agent definition's
- * `advisor` field applies. A returned pattern lands on the spawned session's
- * `modelRoles.advisor`, so role aliases and `:level` suffixes resolve there.
- */
-export function resolveAgentAdvisorSelection(
-	options: AgentAdvisorResolutionOptions,
-): AgentAdvisorSelection | undefined {
-	const agentPattern =
-		typeof options.agentAdvisor === "string" && options.agentAdvisor.trim() ? options.agentAdvisor.trim() : undefined;
-	const override = options.settingsOverride?.trim();
-	if (override) {
-		const lowered = override.toLowerCase();
-		if (lowered === "off" || lowered === "false") return undefined;
-		if (lowered === "on" || lowered === "true") return { model: agentPattern };
-		return { model: override };
-	}
-	if (options.agentAdvisor === true) return {};
-	return agentPattern ? { model: agentPattern } : undefined;
 }
 
 /**
@@ -1534,25 +1455,6 @@ export function resolveRoleSelection(
 		}
 	}
 	return undefined;
-}
-
-/**
- * Resolve the model for the `advisor` role. A configured `modelRoles.advisor`
- * wins outright (a bad override surfaces as no model rather than silently
- * running something else); when unset it falls back to the `slow` priority
- * chain via {@link ROLE_PRIORITY_ALIAS} — a strong reasoning model that, unlike
- * the `slow` role itself, never inherits the primary's model. Returns undefined
- * only when no candidate in the resolved chain is available.
- */
-export function resolveAdvisorRoleSelection(
-	settings: Settings,
-	availableModels: Model<Api>[],
-): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
-	const resolved = resolveModelRoleValue(formatModelRoleAlias("advisor"), availableModels, {
-		settings,
-		matchPreferences: getModelMatchPreferences(settings),
-	});
-	return resolved.model ? { model: resolved.model, thinkingLevel: resolved.thinkingLevel } : undefined;
 }
 
 /**

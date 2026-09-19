@@ -433,7 +433,7 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "agents",
 		icon: "agents",
-		description: "Open the agents hub (per-agent model, prewalk, and advisor)",
+		description: "Open the agents hub (per-agent model and enabled state)",
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showAgentsDashboard();
 			runtime.ctx.editor.setText("");

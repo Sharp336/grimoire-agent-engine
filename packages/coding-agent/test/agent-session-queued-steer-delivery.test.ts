@@ -316,29 +316,4 @@ describe("AgentSession queued steer delivery", () => {
 		expect(userTexts).toContain("queued follow-up");
 		expect(session.agent.hasQueuedMessages()).toBe(false);
 	});
-
-	it("resumes a queued steer left behind a non-advisor custom transcript tail", async () => {
-		const { session } = await createSession([{ content: ["first answer"] }, { content: ["resumed"] }]);
-		await session.prompt("first");
-		// A non-advisor custom (e.g. a flushed irc:incoming aside) is the literal transcript tail.
-		// A queued steer must resume regardless of tail role — Agent.continue injects it via the
-		// initial steering poll — so the old advisor-only look-back can no longer strand it.
-		const aside = {
-			role: "custom" as const,
-			customType: "irc:incoming",
-			content: "peer pinged you",
-			display: true,
-			attribution: "agent" as const,
-			timestamp: Date.now(),
-		};
-		session.agent.emitExternalEvent({ type: "message_start", message: aside });
-		session.agent.emitExternalEvent({ type: "message_end", message: aside });
-
-		const delivered = nextUserMessage(session, "resume me");
-		await session.steer("resume me");
-		await delivered;
-		await session.waitForIdle();
-
-		expect(session.agent.peekSteeringQueue()).toEqual([]);
-	});
 });

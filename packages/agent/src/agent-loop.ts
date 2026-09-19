@@ -639,9 +639,8 @@ function buildAgentEndEvent(
  * A {@link TERMINAL_TOOL_RESULT_ABORT_REASON} abort is the exception: it is a
  * graceful yield (e.g. a subagent's final `yield` tool), not a user interrupt.
  * The completed tool batch is persisted and the turn must still reach
- * `onTurnEnd` so per-turn bookkeeping — notably advisor review of the yield
- * delta (#9505) — runs exactly as it does for a plain end-of-turn message. The
- * hook receives no signal in that case so downstream waits (advisor catch-up)
+ * `onTurnEnd` so per-turn bookkeeping runs as it does for a plain end-of-turn
+ * message. The hook receives no signal in that case so downstream waits
  * behave identically to a normal final turn instead of short-circuiting on the
  * spent abort.
  */

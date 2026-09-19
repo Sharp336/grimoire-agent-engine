@@ -32,13 +32,8 @@ export function getAgentTombstonePath(sessionFile: string): string {
 export type AgentStatus = "running" | "idle" | "parked" | "aborted";
 /** Provenance of a displayed duration: active runtime, transcript span, or unavailable. */
 type AgentDurationKind = "active" | "span" | "unknown";
-/**
- * - `main`/`sub`: the user-facing agent tree (driving agent + task subagents).
- * - `advisor`: a passive review transcript persisted like a subagent for usage
- *   attribution and Agent Hub observability, but never a peer — hidden from
- *   agent-facing rosters (`hub`, `history://`) and not messageable/revivable.
- */
-export type AgentKind = "main" | "sub" | "advisor";
+
+export type AgentKind = "main" | "sub";
 
 /** Persisted per-agent totals reconstructed from the child session transcript. */
 export interface AgentMetricsSummary {
@@ -270,15 +265,8 @@ export class AgentRegistry {
 		return [...this.#refs.values()];
 	}
 
-	/**
-	 * Returns every alive agent (running | idle) except the caller. Advisor refs
-	 * are observability-only transcripts, never peers, so they are excluded.
-	 * Flat namespace: every other agent is visible.
-	 */
 	listVisibleTo(id: string): AgentRef[] {
-		return this.list().filter(
-			ref => ref.id !== id && ref.kind !== "advisor" && (ref.status === "running" || ref.status === "idle"),
-		);
+		return this.list().filter(ref => ref.id !== id && (ref.status === "running" || ref.status === "idle"));
 	}
 
 	/** Whether a ref's claimed running state is corroborated by its attached live session. */

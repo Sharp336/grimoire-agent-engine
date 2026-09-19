@@ -103,13 +103,10 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 | `--print-thoughts` | Include thinking blocks in print-mode text output. |
 | `--external-thinking` | Use a private scratchpad while disabling supported GPT/Claude/Gemini reasoning. Use at your own risk: providers have flagged this request shape as abuse. |
 
-#### Prewalk and plan modes
+#### Plan modes
 
 | Flag | Description |
 | --- | --- |
-| `--prewalk` | Switch to a fast/cheap model at the first edit/write after the plan's todo list exists (default off; see `prewalk.enabled`). |
-| `--no-prewalk` | Disable prewalk even if `prewalk.enabled` is set. |
-| `--prewalk-into <id>` | Target model for prewalk (default the `smol` role). |
 | `--plan-yolo` | Force read-only plan mode at start, auto-approve the plan on the model's first resolve call, then switch to `--plan-yolo-into` to implement it. |
 | `--plan-yolo-into <id>` | Target model for plan-yolo execution (default the `smol` role). |
 
@@ -123,7 +120,6 @@ See [providers](./providers.md) and [models](./models.md) for model resolution.
 | `--no-pty` | Disable PTY-based interactive bash execution. |
 | `--approval-mode <mode>` | Override `tools.approvalMode` for this session (`always-ask`, `write`, or `yolo`). See [approval mode](./approval-mode.md). |
 | `--auto-approve`, `--yolo` | Auto-approve all tool calls (skip approval prompts). |
-| `--advisor` | Enable the advisor runtime (passively reviews each turn and injects notes). See [advisor / watchdog](./advisor-watchdog.md). |
 | `--max-time <duration>` | Stop the session after this duration (e.g. `600`, `10m`, `1h`). |
 
 #### Extensions, hooks, skills, and rules
@@ -186,8 +182,6 @@ Related flags for headless runs:
 - `--no-title` — skip title auto-generation (also `PI_NO_TITLE`).
 - `--max-time <duration>` — bound the run.
 
-The [advisor / watchdog](./advisor-watchdog.md#headless-runs) doc describes
-print-mode disposal semantics when the advisor runtime is enabled.
 
 ### Output modes (`--mode`)
 

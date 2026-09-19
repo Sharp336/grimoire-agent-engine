@@ -146,7 +146,6 @@ describe("hub jobs snapshot", () => {
 		registerRunningSub(registry, "Worker");
 		registerRunningSub(registry, "Idler");
 		registry.setStatus("Idler", "idle");
-		registry.register({ id: "advisor", displayName: "advisor", kind: "advisor", session: null });
 		registry.register({ id: "Main", displayName: "Main", kind: "main", session: null });
 		const tool = new HubTool(createToolSession({ manager: createManager(), registry, agentId: "Main" }));
 

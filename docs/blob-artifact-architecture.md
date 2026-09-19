@@ -77,7 +77,7 @@ Non-persistent sessions without an adopted manager can store `saveArtifact(...)`
 
 ### Agent output IDs (`agent://`)
 
-`AgentOutputManager` allocates IDs from the requested name, used verbatim the first time and suffixed (`-2`, `-3`, …) only when repeated. Nested outputs use a dot-qualified parent prefix (for example `Parent.Child`). Initialization scans both `.md` outputs and `.jsonl` child-session files so resume cannot clobber either; the reserved advisor transcript stem is never allocated unchanged.
+`AgentOutputManager` allocates IDs from the requested name, used verbatim the first time and suffixed (`-2`, `-3`, …) only when repeated. Nested outputs use a dot-qualified parent prefix (for example `Parent.Child`). Initialization scans both `.md` outputs and `.jsonl` child-session files so resume cannot clobber either.
 
 ## Persistence dataflow
 

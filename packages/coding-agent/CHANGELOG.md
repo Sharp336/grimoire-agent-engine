@@ -5,6 +5,7 @@
 ### Removed
 
 - Optional voice runtime and associated native audio bindings; automatic Codex credit redemption, excess uploaders, Ruby/Julia eval, built-in opinionated rules, and terminal animation extras.
+- Removed Advisor background reviews and Prewalk while preserving PlanYolo and normal agents.
 
 ### Fixed
 

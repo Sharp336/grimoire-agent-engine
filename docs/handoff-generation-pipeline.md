@@ -102,7 +102,7 @@ If text was generated and not aborted, `SessionMaintenance.handoff()` commits th
 
 1. Wraps the document as a compaction summary: `upsertFileOperations(document, readFiles, modifiedFiles, …)` appends the cumulative `<files>` tag from the preparation's file operations; `{ readFiles, modifiedFiles }` becomes the entry `details`.
 2. Appends a regular `CompactionEntry` (`appendCompaction(summary, undefined, firstKeptEntryId, tokensBefore, details, false, undefined)`).
-3. Rebuilds the display context, replaces live agent messages, re-anchors stats (`rebaseAfterCompaction`), resets the plan reference, advisor runtimes (`"handoff"`), and todo phases, and closes provider sessions whose history was rewritten.
+3. Rebuilds the display context, replaces live agent messages, re-anchors stats (`rebaseAfterCompaction`), resets the plan reference, and todo phases, and closes provider sessions whose history was rewritten.
 4. Emits the `session_compact` extension hook with the saved entry.
 5. Returns `{ document, savedPath? }`.
 
@@ -183,7 +183,7 @@ High-level state flow:
 4. Generation controller created (`isGeneratingHandoff = true`); `generateHandoffFromContext(...)` sends one cache-aligned side request, with a one-time `"auto"` tool-choice compatibility retry when required.
 5. Assistant text blocks are joined; tool-call blocks are discarded; secret placeholders are restored locally.
 6. If missing text → manual throws / auto returns `undefined`; if aborted → cancellation error.
-7. If present: append the `CompactionEntry`, rebuild the agent context, reset plan/advisor/todo runtime state, close rewritten provider sessions, emit `session_compact`.
+7. If present: append the `CompactionEntry`, rebuild the agent context, reset plan/todo runtime state, close rewritten provider sessions, emit `session_compact`.
 8. Controller rebuilds chat UI and announces success.
 9. The generation controller clears in `finally`.
 

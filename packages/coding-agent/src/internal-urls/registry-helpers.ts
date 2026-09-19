@@ -66,21 +66,6 @@ export function artifactsDirsFromRegistry(options?: {
 	return dirs;
 }
 
-/**
- * Recursively scan artifacts dirs for agent session transcripts, keyed by
- * agent id (the `.jsonl` basename). Used by `history://` so transcripts of
- * agents no longer in the registry (unregistered one-shot helpers, released
- * agents, or any agent after session resume) remain reachable — mirroring how
- * `agent://` reads `.md` outputs straight off disk.
- *
- * Layout follows `task/index.ts`: a subagent's transcript is
- * `<artifactsDir>/<AgentId>.jsonl`, and its own children nest one level deeper
- * under `<artifactsDir>/<AgentId>/<AgentId>.<ChildId>.jsonl`. Advisor
- * transcripts (`__advisor*.jsonl`) are observability-only and excluded;
- * EPERM-rewrite backups (`.bak`) are skipped. When the same id appears in
- * multiple dirs, the first hit wins (registry dirs are scanned first; a
- * `preferredDir` from the caller root is scanned before them).
- */
 export async function sessionFilesFromDisk(
 	preferredDir?: string,
 	agentRegistry: AgentRegistry = AgentRegistry.global(),
@@ -104,8 +89,7 @@ export async function sessionFilesFromDisk(
 			}
 			if (!entry.isFile()) continue;
 			const name = entry.name;
-			if (!name.endsWith(".jsonl")) continue;
-			if (name.startsWith("__advisor")) continue;
+			if (!name.endsWith(".jsonl") || /^__advisor(?:\.[^.]+)?\.jsonl$/.test(name)) continue;
 			const id = name.slice(0, -".jsonl".length);
 			if (!found.has(id)) found.set(id, path.join(dir, name));
 		}
@@ -134,8 +118,7 @@ export async function hasResolvableTranscript(
 		const registry = agentRegistry;
 		const lower = agentId.toLowerCase();
 		let ref = registry.get(agentId);
-		if (ref?.kind === "advisor") ref = undefined;
-		ref ??= registry.list().find(candidate => candidate.kind !== "advisor" && candidate.id.toLowerCase() === lower);
+		ref ??= registry.list().find(candidate => candidate.id.toLowerCase() === lower);
 		if (ref?.session) return true;
 		if (ref?.sessionFile && (await isReadableFile(ref.sessionFile))) return true;
 		const files = await sessionFilesFromDisk(undefined, registry);

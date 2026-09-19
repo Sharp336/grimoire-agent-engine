@@ -271,9 +271,6 @@ export interface ToolSession {
 	outputSchemaMode?: StructuredSubagentSchemaMode;
 	/** Whether to include the yield tool by default */
 	requireYieldTool?: boolean;
-	/** Session starts with a prewalk hand-off armed. Keeps `todo` in yield-gated
-	 *  (subagent) registries: the prewalk plan nudge + todo gate need it. */
-	prewalkArmed?: boolean;
 	/**
 	 * Constrain the active set to the caller's explicit built-in names (plus a
 	 * required yield tool). Suppresses automatic tool-set expansion.
@@ -630,8 +627,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "bash") return session.settings.get("bash.enabled");
 		if (name === "eval") return allowEval;
 		if (name === "debug") return session.settings.get("debug.enabled");
-		if (name === "todo")
-			return (!includeYield || session.prewalkArmed === true) && session.settings.get("todo.enabled");
+		if (name === "todo") return !includeYield && session.settings.get("todo.enabled");
 		if (name === "glob") return session.settings.get("glob.enabled");
 		if (name === "grep") return session.settings.get("grep.enabled");
 		if (name === "github") return session.settings.get("github.enabled");

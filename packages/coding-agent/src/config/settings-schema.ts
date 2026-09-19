@@ -181,7 +181,7 @@ export const TAB_METADATA: Record<SettingTab, { label: string; icon: `tab.${stri
  */
 export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	appearance: ["Theme", "Composer", "Status Line", "Display", "Images"],
-	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor", "Prewalk", "Vision"],
+	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Vision"],
 	interaction: [
 		"Input",
 		"Approvals",
@@ -502,61 +502,6 @@ export const SETTINGS_SCHEMA = {
 					description: "Also block all system sleep on AC and declare the user active (caffeinate -i -d -s -u)",
 				},
 			],
-		},
-	},
-	"advisor.enabled": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "model",
-			group: "Advisor",
-			label: "Enable Advisor",
-			description:
-				"Pair a second model (assigned to the 'advisor' role) that passively reviews each turn and injects notes.",
-		},
-	},
-	"prewalk.enabled": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "model",
-			group: "Prewalk",
-			label: "Enable Prewalk",
-			description:
-				"Start on the active model, then switch to a fast/cheap model (default the 'smol' role) at the first edit/write after the plan nudge's todo list exists — the strong model plans, commits the todos, and starts the implementation before handing off. Overridable per session with --prewalk / --no-prewalk.",
-		},
-	},
-	"advisor.syncBacklog": {
-		type: "enum",
-		values: ["off", "1", "3", "5"] as const,
-		default: "off",
-		ui: {
-			tab: "model",
-			group: "Advisor",
-			label: "Advisor Sync Backlog",
-			description:
-				"Pause the main agent for up to 30 seconds if the advisor falls behind by this many turns. Off disables catch-up delays.",
-			condition: "advisorEnabled",
-		},
-	},
-	"advisor.immuneTurns": {
-		type: "number",
-		default: 3,
-		ui: {
-			tab: "model",
-			group: "Advisor",
-			label: "Advisor Immune Turns",
-			description:
-				"After an advisor concern or blocker interrupts, route further concerns/blockers non-interruptingly for this many primary turns.",
-			options: [
-				{ value: "0", label: "0 turns", description: "Allow every concern/blocker to interrupt." },
-				{ value: "1", label: "1 turn" },
-				{ value: "2", label: "2 turns" },
-				{ value: "3", label: "3 turns", description: "Default." },
-				{ value: "4", label: "4 turns" },
-				{ value: "5", label: "5 turns" },
-			],
-			condition: "advisorEnabled",
 		},
 	},
 	shellPath: { type: "string", default: undefined },
@@ -1683,21 +1628,6 @@ export const SETTINGS_SCHEMA = {
 			description:
 				"Service Tier for spawned task/eval subagents. Inherit = match the main agent's live per-family tiers (tracks /fast); pick a value to apply it to whichever family the subagent's model belongs to.",
 			options: SERVICE_TIER_INHERIT_OPTIONS,
-		},
-	},
-
-	"tier.advisor": {
-		type: "enum",
-		values: SERVICE_TIER_INHERIT_SETTING_VALUES,
-		default: "none",
-		ui: {
-			tab: "model",
-			group: "Sampling",
-			label: "Service Tier — Advisor",
-			description:
-				"Service Tier for the advisor model. None = standard processing; Inherit = match the main agent's live per-family tiers; pick a value to apply it to the advisor model's family.",
-			options: SERVICE_TIER_INHERIT_OPTIONS,
-			condition: "advisorEnabled",
 		},
 	},
 
@@ -4314,25 +4244,6 @@ export const SETTINGS_SCHEMA = {
 	"task.agentModelOverrides": {
 		type: "record",
 		default: DEFAULT_AGENT_MODEL_OVERRIDES,
-	},
-	"task.agentPrewalk": {
-		type: "record",
-		default: {} as Record<string, string>,
-	},
-	"task.agentAdvisor": {
-		type: "record",
-		default: {} as Record<string, string>,
-	},
-	"task.prewalk": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "tasks",
-			group: "Subagents",
-			label: "Generic Task Prewalk",
-			description:
-				"Arm prewalk for the bundled generic `task` subagent: it starts on its resolved model, plans and begins the implementation, then hands off to the 'smol' role at its first edit/write. Per-agent overrides (task.agentPrewalk, configured from the /agents hub) and user agent `prewalk` frontmatter apply regardless of this toggle.",
-		},
 	},
 
 	"tasks.todoClearDelay": {

@@ -303,7 +303,6 @@ export interface SessionMaintenanceHost {
 	resetCodexProviderAfterCompaction(compaction: CodexCompactionContext): void;
 	resetPlanReference(): void;
 	syncTodoPhasesFromBranch(): void;
-	resetAdvisorRuntimes(reason?: string): void;
 	rebaseAfterCompaction(): void;
 	recordAnchoredHistoryRewrite(tokensRemoved: number): void;
 	getContextBreakdown(options?: {
@@ -454,7 +453,6 @@ export class SessionMaintenance {
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes("prune-tool-outputs");
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		return result;
@@ -498,7 +496,6 @@ export class SessionMaintenance {
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes("prune-stale-tool-results");
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		return result;
@@ -549,7 +546,6 @@ export class SessionMaintenance {
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes("drop-images");
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		return { removed };
 	}
@@ -596,7 +592,6 @@ export class SessionMaintenance {
 			await this.#host.sessionManager.rewriteEntries();
 			const sessionContext = this.#host.buildDisplaySessionContext();
 			this.#host.agent.replaceMessages(sessionContext.messages);
-			this.#host.resetAdvisorRuntimes("shake");
 			this.#host.closeCodexProviderSessionsForHistoryRewrite();
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, thinkingBlocksDropped: removed, tokensFreed: 0 };
 		}
@@ -659,7 +654,6 @@ export class SessionMaintenance {
 		await this.#host.sessionManager.rewriteEntries();
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
-		this.#host.resetAdvisorRuntimes("shake");
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 
 		return {
@@ -1039,7 +1033,6 @@ export class SessionMaintenance {
 				preserveData,
 				method: fromExtension ? undefined : selectedMethod,
 				codexCompaction,
-				advisorResetReason: "compact",
 			});
 
 			const compactionResult: CompactionResult = {
@@ -1161,7 +1154,6 @@ export class SessionMaintenance {
 			preserveData: undefined,
 			method: "handoff",
 			codexCompaction: undefined,
-			advisorResetReason: "handoff",
 		});
 		return result;
 	}
@@ -1405,12 +1397,6 @@ export class SessionMaintenance {
 		return this.#armedSpeculationValid(run.armed) ? run.armed : undefined;
 	}
 
-	/**
-	 * Append a compaction entry and run the shared post-commit sequence:
-	 * rebuild the display context, swap live agent messages, re-anchor stats,
-	 * reset plan/advisor/todo runtime state derived from the replaced history,
-	 * reset provider sessions, and emit the `session_compact` extension hook.
-	 */
 	async #commitCompactionEntry(args: {
 		summary: string;
 		shortSummary: string | undefined;
@@ -1422,7 +1408,6 @@ export class SessionMaintenance {
 		method: CompactionMethod | undefined;
 		codexCompaction: CodexCompactionContext | undefined;
 		providerReplayThroughEntryId?: string;
-		advisorResetReason: string;
 		detachExtensionEmit?: boolean;
 	}): Promise<CompactionEntry | undefined> {
 		const entryId = this.#host.sessionManager.appendCompaction(
@@ -1447,7 +1432,6 @@ export class SessionMaintenance {
 		// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
 		// the plan from disk and re-injects it on the next turn (issue #1246).
 		this.#host.resetPlanReference();
-		this.#host.resetAdvisorRuntimes(args.advisorResetReason);
 		this.#host.syncTodoPhasesFromBranch();
 		if (args.codexCompaction) {
 			this.#host.resetCodexProviderAfterCompaction(args.codexCompaction);
@@ -2748,12 +2732,7 @@ export class SessionMaintenance {
 		const sessionContext = this.#host.buildDisplaySessionContext();
 		this.#host.agent.replaceMessages(sessionContext.messages);
 		this.#host.rebaseAfterCompaction();
-		// Same post-rewrite bookkeeping as the regular compaction append: the
-		// rebuilt context no longer carries the transient plan reference (#1246),
-		// and advisor cursors / todo phases were derived from the replaced
-		// history.
 		this.#host.resetPlanReference();
-		this.#host.resetAdvisorRuntimes("compaction-rescue");
 		this.#host.syncTodoPhasesFromBranch();
 		this.#host.closeCodexProviderSessionsForHistoryRewrite();
 		// Extensions must see the entry that is now active, not (only) the one
@@ -3669,7 +3648,6 @@ export class SessionMaintenance {
 			codexCompaction: args.codexCompaction,
 			method: args.method,
 			providerReplayThroughEntryId: args.providerReplayThroughEntryId,
-			advisorResetReason: "auto-compaction",
 			detachExtensionEmit: detachPostCommit,
 		});
 

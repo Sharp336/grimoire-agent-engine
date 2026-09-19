@@ -59,7 +59,7 @@ bun run serve --port 4700
   ```
 
   `benchmark` is `harbor`, `edit`, or `snapcompact`. Harbor uses `dataset`,
-  `include`, `timeoutMultiplier`, and `prewalk`; edit uses `include` as task IDs;
+  `include` and `timeoutMultiplier`; edit uses `include` as task IDs;
   SnapCompact uses `conditions` and treats `tasks` as the passage limit.
 - `GET /api/runs/:name` — `{ run, traces }` (syncs native artifacts on read).
 - `POST /api/runs/:name/cancel` — cancel a manager-launched run.

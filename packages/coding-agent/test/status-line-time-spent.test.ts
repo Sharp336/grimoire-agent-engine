@@ -41,7 +41,6 @@ function createCtx(activeMs: number): SegmentContext {
 		options: {},
 		planMode: null,
 		loopMode: null,
-		prewalk: null,
 		goalMode: null,
 		usageStats: {
 			input: 0,

@@ -29,7 +29,6 @@ function createFlushHarness(): FlushHarness {
 	const { promise: promptReleased, resolve: resolvePrompt } = Promise.withResolvers<void>();
 	let subscriber: ((event: AgentSessionEvent) => void) | undefined;
 	let disposed = false;
-	let advisorDrainPrepared = false;
 
 	const session = {
 		sessionManager: {
@@ -47,12 +46,6 @@ function createFlushHarness(): FlushHarness {
 			markPromptStarted();
 			await promptReleased;
 			return true;
-		},
-		prepareForHeadlessAdvisorDrain: () => {
-			advisorDrainPrepared = true;
-		},
-		waitForAdvisorCatchup: async () => {
-			if (!advisorDrainPrepared) throw new Error("advisor catch-up started before headless delivery was armed");
 		},
 		dispose: async () => {
 			disposed = true;

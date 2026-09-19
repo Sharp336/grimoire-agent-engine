@@ -45,12 +45,6 @@ const CURSOR_TODO_PHASE = "Tasks";
  */
 type CursorBridgeTool = AgentTool<any, any, any>;
 
-/**
- * The live MCP connections Cursor's resource frames are answered from.
- *
- * Named so every construction site can hand over the same adapter; a session
- * and its advisors share one set of connections.
- */
 export interface CursorMcpResourceAdapter {
 	serverNames(): string[];
 	getServerResources(
@@ -79,23 +73,7 @@ interface CursorExecBridgeOptions {
 	getEditReplaceTool?: () => CursorBridgeTool | undefined;
 	getToolContext?: () => AgentToolContext | undefined;
 	emitEvent?: (event: AgentEvent) => void;
-	/**
-	 * Whether frames that mutate the filesystem WITHOUT running a registry tool
-	 * may do so: the native `delete` frame, and a `read_mcp_resource` carrying
-	 * `download_path`. Both write or remove workspace files directly instead of
-	 * consulting {@link tools}, so a background read-only advisor could touch
-	 * files it was never granted a mutating tool for (issue #5680 review).
-	 *
-	 * This is a grant, not a policy: it answers "did the session hand this
-	 * channel a file-writing tool", which callers derive from their own roster
-	 * before any bridge-specific rewriting. A resolver keeps that answer current
-	 * when runtime tool selection upgrades a restricted transport. The primary
-	 * Cursor session moves `edit` out of {@link tools} and serves it through
-	 * {@link getEditReplaceTool}, so reading the map here would deny an edit-only
-	 * session. Defaults to allowed to preserve the primary agent's behavior;
-	 * callers with a restricted tool set (advisors) opt out. The user's approval
-	 * policy is resolved separately, per call.
-	 */
+
 	allowDirectFileMutation?: boolean | (() => boolean);
 	/**
 	 * Mirror Cursor's server-owned todo list into local session state. Cursor

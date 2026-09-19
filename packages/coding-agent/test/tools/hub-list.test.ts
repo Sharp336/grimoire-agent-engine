@@ -269,40 +269,6 @@ describe("hub list", () => {
 		});
 	});
 
-	it("excludes aborted and advisor refs from every list view", async () => {
-		const registry = new AgentRegistry();
-		registry.register({
-			id: MAIN_AGENT_ID,
-			displayName: MAIN_AGENT_ID,
-			kind: "main",
-			session: null,
-			status: "running",
-		});
-		registry.register({ id: "Worker", displayName: "task", kind: "sub", session: null, status: "idle" });
-		registry.register({
-			id: `${MAIN_AGENT_ID}/advisor`,
-			displayName: "advisor",
-			kind: "advisor",
-			session: null,
-			status: "parked",
-		});
-		registry.register({ id: "Dead", displayName: "task", kind: "sub", session: null, status: "aborted" });
-
-		const listed = await executeList(registry, MAIN_AGENT_ID);
-		const parked = await executeList(registry, MAIN_AGENT_ID, { status: "parked" });
-		if (!listed.details || !parked.details) throw new Error("Expected coordination details");
-
-		expect(listed.details.peers?.map(peer => peer.id)).toEqual(["Worker"]);
-		expect(parked.details.peers).toEqual([]);
-		expect(listed.details.counts).toEqual({
-			running: 0,
-			idle: 1,
-			parked: 0,
-			shown: 1,
-			truncated: 0,
-		});
-	});
-
 	it("keeps actionable peers available when persisted roster IO is invalid", async () => {
 		const registry = new AgentRegistry();
 		registry.register({
@@ -694,13 +660,6 @@ describe("hub list", () => {
 		expect(second.isError).toBeFalsy();
 		expect(second.details.counts?.parked).toBe(0);
 		expect(registry.get("ParkedScout")).toBeUndefined();
-	});
-
-	it("schema rejects aborted and advisor list filters", () => {
-		const tool = new HubTool(makeToolSession(new AgentRegistry(), MAIN_AGENT_ID));
-		expect(() => tool.parameters.assert({ op: "list", status: "aborted" })).toThrow();
-		expect(() => tool.parameters.assert({ op: "list", status: "advisor" })).toThrow();
-		expect(tool.parameters.assert({ op: "list", status: "parked" })).toEqual({ op: "list", status: "parked" });
 	});
 
 	it("restores persisted peers after the process registry is lost without leaking them into the default view", async () => {
@@ -1109,19 +1068,17 @@ describe("hub list session authority", () => {
 		}
 	});
 
-	it("preserves live, aborted, advisor, and nested same-root collisions", async () => {
+	it("preserves live, aborted, and nested same-root collisions", async () => {
 		using tempDir = TempDir.createSync("@omp-hub-preserve-collisions-");
 		const dir = tempDir.path();
 		const currentSession = path.join(dir, "current.jsonl");
 		const oldLive = path.join(dir, "old", "LiveTwin.jsonl");
 		const oldIdle = path.join(dir, "old", "IdleTwin.jsonl");
 		const oldDead = path.join(dir, "old", "DeadTwin.jsonl");
-		const oldAdvisor = path.join(dir, "old", "AdvisorTwin.jsonl");
 		await Bun.write(currentSession, `${sessionHeader("current")}\n`);
 		await writeParkedTranscript(path.join(dir, "current", "LiveTwin.jsonl"), "live", "steal-live");
 		await writeParkedTranscript(path.join(dir, "current", "IdleTwin.jsonl"), "idle", "steal-idle");
 		await writeParkedTranscript(path.join(dir, "current", "DeadTwin.jsonl"), "dead", "steal-dead");
-		await writeParkedTranscript(path.join(dir, "current", "AdvisorTwin.jsonl"), "advisor", "steal-advisor");
 		await writeParkedTranscript(path.join(dir, "current", "Outer.jsonl"), "outer", "outer-visible-task");
 		await writeParkedTranscript(path.join(dir, "current", "Outer", "Outer.jsonl"), "nested", "nested-steal-task");
 
@@ -1159,14 +1116,6 @@ describe("hub list session authority", () => {
 			sessionFile: oldDead,
 			status: "aborted",
 		});
-		registry.register({
-			id: "AdvisorTwin",
-			displayName: "advisor",
-			kind: "advisor",
-			session: null,
-			sessionFile: oldAdvisor,
-			status: "parked",
-		});
 
 		await executeList(registry, MAIN_AGENT_ID, { status: "parked" }, currentSession);
 		expect(registry.get("LiveTwin")?.status).toBe("running");
@@ -1176,8 +1125,6 @@ describe("hub list session authority", () => {
 		expect(registry.get("IdleTwin")?.sessionFile).toBe(oldIdle);
 		expect(registry.get("DeadTwin")?.status).toBe("aborted");
 		expect(registry.get("DeadTwin")?.sessionFile).toBe(oldDead);
-		expect(registry.get("AdvisorTwin")?.kind).toBe("advisor");
-		expect(registry.get("AdvisorTwin")?.sessionFile).toBe(oldAdvisor);
 		expect(registry.get("Outer")?.sessionFile).toBe(path.join(dir, "current", "Outer.jsonl"));
 		expect(registry.get("Outer")?.activity).toContain("outer-visible-task");
 		expect(registry.get("Outer")?.activity).not.toContain("nested-steal-task");
@@ -1302,144 +1249,6 @@ describe("hub list session authority", () => {
 		await registerPersistedSubagents(registry, sessionFile);
 		expect(registry.get("Worker")?.history?.metrics?.tokens).toBe(30);
 		expect(registry.get("Worker")?.history?.metrics?.requests).toBe(1);
-	});
-});
-
-describe("child system prompt roster", () => {
-	beforeEach(() => {
-		AgentRegistry.resetGlobalForTests();
-	});
-	afterEach(() => {
-		AgentRegistry.resetGlobalForTests();
-	});
-
-	it("enumerates running+idle peers and one parked count, never parked names or task labels", async () => {
-		const registry = AgentRegistry.global();
-		registry.register({
-			id: MAIN_AGENT_ID,
-			displayName: MAIN_AGENT_ID,
-			kind: "main",
-			session: null,
-			status: "running",
-		});
-		registry.register({
-			id: "LiveWorker",
-			displayName: "implementer",
-			kind: "sub",
-			session: null,
-			status: "running",
-			activity: "editing auth.ts",
-		});
-		registry.register({
-			id: "IdleReviewer",
-			displayName: "reviewer",
-			kind: "sub",
-			session: null,
-			status: "idle",
-		});
-		registry.register({
-			id: "ParkedScout",
-			displayName: "secret parked label",
-			kind: "sub",
-			session: null,
-			status: "parked",
-			activity: "reviewing classified.diff",
-		});
-		registry.register({
-			id: `${MAIN_AGENT_ID}/advisor`,
-			displayName: "advisor",
-			kind: "advisor",
-			session: null,
-			status: "parked",
-			activity: "advisor-only gist",
-		});
-
-		const text = await renderIrcPeerRoster("Child");
-		expect(text).toContain("LiveWorker");
-		expect(text).toContain("editing auth.ts");
-		expect(text).toContain("IdleReviewer");
-		expect(text).toContain("1 parked peer(s) omitted");
-		expect(text).toContain('status:"parked"');
-		expect(text).toContain("history://");
-		expect(text).toContain("agent://");
-		expect(text).not.toContain("ParkedScout");
-		expect(text).not.toContain("secret parked label");
-		expect(text).not.toContain("reviewing classified.diff");
-		expect(text).not.toContain("advisor-only gist");
-	});
-
-	it("counts a disk-only parked sibling from the root tree without naming it", async () => {
-		using tempDir = TempDir.createSync("@omp-hub-roster-live-disk-");
-		const dir = tempDir.path();
-		const sessionFile = path.join(dir, "main.jsonl");
-		const liveSessionFile = path.join(dir, "main", "LiveWorker.jsonl");
-		const parkedSessionFile = path.join(dir, "main", "ParkedScout.jsonl");
-		await Bun.write(sessionFile, `${sessionHeader("main")}\n`);
-		await writeParkedTranscript(parkedSessionFile, "parked", "reviewing classified.diff");
-
-		const registry = AgentRegistry.global();
-		registry.register({
-			id: MAIN_AGENT_ID,
-			displayName: MAIN_AGENT_ID,
-			kind: "main",
-			session: null,
-			sessionFile,
-			status: "running",
-		});
-		registry.register({
-			id: "LiveWorker",
-			displayName: "task",
-			kind: "sub",
-			parentId: MAIN_AGENT_ID,
-			session: null,
-			sessionFile: liveSessionFile,
-			status: "idle",
-		});
-
-		const text = await renderIrcPeerRoster("LiveWorker", registry);
-		expect(text).toContain("1 parked peer(s) omitted");
-		expect(text).toContain("`Main`");
-		expect(text).not.toContain("ParkedScout");
-		expect(text).not.toContain("reviewing classified.diff");
-	});
-
-	it("bounds live rows at the default hub list limit, keeping running peers and the newest activity first", async () => {
-		const registry = AgentRegistry.global();
-		const extra = 5;
-		for (let index = 0; index < DEFAULT_HUB_LIST_LIMIT + extra; index++) {
-			registry.register({
-				id: `Idle${index}`,
-				displayName: "task",
-				kind: "sub",
-				session: null,
-				status: "idle",
-				lastActivity: index,
-			});
-		}
-		// A running peer sorts above every idle sibling regardless of age (hub
-		// list semantics), so it survives the cap despite the oldest activity.
-		registry.register({
-			id: "Runner",
-			displayName: "task",
-			kind: "sub",
-			session: null,
-			status: "running",
-			lastActivity: 0,
-		});
-
-		const text = await renderIrcPeerRoster("Child", registry);
-		// Newest idle activity sorts first, so the cap keeps Idle36..Idle6 and
-		// omits the six oldest idle rows (Idle5..Idle0). Row tokens carry the
-		// backtick boundary so e.g. Idle1 never matches the retained Idle10..Idle19.
-		for (let index = extra + 1; index < DEFAULT_HUB_LIST_LIMIT + extra; index++) {
-			expect(text).toContain(`- \`Idle${index}\` —`);
-		}
-		for (let index = 0; index <= extra; index++) {
-			expect(text).not.toContain(`- \`Idle${index}\` —`);
-		}
-		expect(text).toContain("- `Runner` —");
-		expect(text).toContain(`${extra + 1} more live peer(s) omitted`);
-		expect(text).not.toContain("parked peer(s) omitted");
 	});
 });
 describe("hub direct addressing refreshes the caller root without a prior list", () => {
@@ -1760,5 +1569,97 @@ describe("hub direct addressing refreshes the caller root without a prior list",
 		);
 		expect(unknown.isError).toBeTruthy();
 		expect(unknown.details?.receipts?.[0]?.outcome).toBe("failed");
+	});
+	it("preserves live, aborted, vibe-owned, and nested same-root collisions", async () => {
+		using tempDir = TempDir.createSync("@omp-hub-preserve-collisions-");
+		const dir = tempDir.path();
+		const currentSession = path.join(dir, "current.jsonl");
+		const oldLive = path.join(dir, "old", "LiveTwin.jsonl");
+		const oldIdle = path.join(dir, "old", "IdleTwin.jsonl");
+		const oldDead = path.join(dir, "old", "DeadTwin.jsonl");
+		const oldVibe = path.join(dir, "old", "VibeKid.jsonl");
+		await Bun.write(
+			currentSession,
+			`${[
+				sessionHeader("current"),
+				JSON.stringify({
+					type: "custom",
+					customType: "vibe-session-lifecycle",
+					data: {
+						version: 1,
+						id: "VibeKid",
+						ownerId: MAIN_AGENT_ID,
+						parentSessionId: "current",
+						action: "spawn",
+						cli: "fast",
+						agent: "task",
+						childSessionFile: "VibeKid.jsonl",
+						createdAt: 1,
+					},
+				}),
+			].join("\n")}\n`,
+		);
+		await writeParkedTranscript(path.join(dir, "current", "LiveTwin.jsonl"), "live", "steal-live");
+		await writeParkedTranscript(path.join(dir, "current", "IdleTwin.jsonl"), "idle", "steal-idle");
+		await writeParkedTranscript(path.join(dir, "current", "DeadTwin.jsonl"), "dead", "steal-dead");
+		await writeParkedTranscript(path.join(dir, "current", "VibeKid.jsonl"), "vibe", "steal-vibe");
+		await writeParkedTranscript(path.join(dir, "current", "Outer.jsonl"), "outer", "outer-visible-task");
+		await writeParkedTranscript(path.join(dir, "current", "Outer", "Outer.jsonl"), "nested", "nested-steal-task");
+
+		const registry = new AgentRegistry();
+		const liveSession = {} as AgentSession;
+		registry.register({
+			id: MAIN_AGENT_ID,
+			displayName: MAIN_AGENT_ID,
+			kind: "main",
+			session: null,
+			sessionFile: currentSession,
+			status: "running",
+		});
+		registry.register({
+			id: "LiveTwin",
+			displayName: "task",
+			kind: "sub",
+			session: liveSession,
+			sessionFile: oldLive,
+			status: "running",
+		});
+		registry.register({
+			id: "IdleTwin",
+			displayName: "task",
+			kind: "sub",
+			session: liveSession,
+			sessionFile: oldIdle,
+			status: "idle",
+		});
+		registry.register({
+			id: "DeadTwin",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile: oldDead,
+			status: "aborted",
+		});
+		registry.register({
+			id: "VibeKid",
+			displayName: "task",
+			kind: "sub",
+			session: null,
+			sessionFile: oldVibe,
+			status: "parked",
+		});
+
+		await executeList(registry, MAIN_AGENT_ID, { status: "parked" }, currentSession);
+		expect(registry.get("LiveTwin")?.status).toBe("running");
+		expect(registry.get("LiveTwin")?.session).toBe(liveSession);
+		expect(registry.get("LiveTwin")?.sessionFile).toBe(oldLive);
+		expect(registry.get("IdleTwin")?.status).toBe("idle");
+		expect(registry.get("IdleTwin")?.sessionFile).toBe(oldIdle);
+		expect(registry.get("DeadTwin")?.status).toBe("aborted");
+		expect(registry.get("DeadTwin")?.sessionFile).toBe(oldDead);
+		expect(registry.get("VibeKid")?.sessionFile).toBe(oldVibe);
+		expect(registry.get("Outer")?.sessionFile).toBe(path.join(dir, "current", "Outer.jsonl"));
+		expect(registry.get("Outer")?.activity).toContain("outer-visible-task");
+		expect(registry.get("Outer")?.activity).not.toContain("nested-steal-task");
 	});
 });

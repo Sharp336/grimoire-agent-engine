@@ -25,9 +25,9 @@ import { createAssistantMessage, createUserMessage } from "./helpers";
 
 declare module "@oh-my-pi/pi-agent-core/types" {
 	interface CustomAgentMessages {
-		advisor: {
+		"system-notice": {
 			role: "custom";
-			customType: "advisor";
+			customType: "system-notice";
 			content: string;
 			display: boolean;
 			attribution: "agent";
@@ -1578,7 +1578,7 @@ describe("agentLoop with AgentMessage", () => {
 		expect(sawInterruptInContext).toBe(true);
 	});
 
-	it("should skip remaining tool calls with system advisory wording when advisor steering is queued", async () => {
+	it("should skip remaining tool calls with system advisory wording when system steering is queued", async () => {
 		const toolSchema = type({ value: "string" });
 		const executed: string[] = [];
 		const tool: AgentTool<typeof toolSchema, { value: string }> = {
@@ -1598,15 +1598,15 @@ describe("agentLoop with AgentMessage", () => {
 
 		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
 
-		const advisorMessage: AgentMessage = {
+		const systemMessage: AgentMessage = {
 			role: "custom",
-			customType: "advisor",
+			customType: "system-notice",
 			content: "pause before continuing",
 			display: true,
 			attribution: "agent",
 			timestamp: Date.now(),
 		};
-		let advisorDelivered = false;
+		let systemDelivered = false;
 
 		const mock = createMockModel({
 			responses: [
@@ -1625,15 +1625,15 @@ describe("agentLoop with AgentMessage", () => {
 			convertToLlm: identityConverter,
 			interruptMode: "immediate",
 			hasSteeringMessages: () => {
-				if (executed.length < 1 || advisorDelivered) {
+				if (executed.length < 1 || systemDelivered) {
 					return { queued: false };
 				}
 				return { queued: true, source: "system" };
 			},
 			getSteeringMessages: async () => {
-				if (executed.length >= 1 && !advisorDelivered) {
-					advisorDelivered = true;
-					return [advisorMessage];
+				if (executed.length >= 1 && !systemDelivered) {
+					systemDelivered = true;
+					return [systemMessage];
 				}
 				return [];
 			},
@@ -1661,14 +1661,14 @@ describe("agentLoop with AgentMessage", () => {
 		expect(skippedContent.text).toContain("Do not count this skipped result as completed work");
 		expect(skippedContent.text).toContain("retry the skipped tool if it is still needed");
 
-		const advisorInjected = events.some(
+		const systemInjected = events.some(
 			event =>
 				event.type === "message_start" &&
 				event.message.role === "custom" &&
-				event.message.customType === "advisor" &&
+				event.message.customType === "system-notice" &&
 				event.message.content === "pause before continuing",
 		);
-		expect(advisorInjected).toBe(true);
+		expect(systemInjected).toBe(true);
 	});
 
 	it("drains queued steering by aborting an interruptible tool mid-wait", async () => {

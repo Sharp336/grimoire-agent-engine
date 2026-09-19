@@ -16,8 +16,6 @@ import { ModelRegistry } from "../config/model-registry";
 import {
 	formatModelSelectorValue,
 	formatModelStringWithRouting,
-	resolveAgentAdvisorSelection,
-	resolveAgentPrewalkPattern,
 	resolveConfiguredModelPatterns,
 	resolveExplicitModelRole,
 	resolveModelOverride,
@@ -44,14 +42,14 @@ import { AgentLifecycleManager, type AgentReviver } from "../registry/agent-life
 import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { ensurePersistedRoster, isCurrentSessionRosterRef } from "../registry/persisted-agents";
 import { type CreateAgentSessionOptions, createAgentSession, discoverAuthStorage } from "../sdk";
-import type { AgentSession, AgentSessionEvent, Prewalk } from "../session/agent-session";
+import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import { type ArtifactManager, writeArtifact } from "../session/artifacts";
 import { ASYNC_RESULT_MESSAGE_TYPE } from "../session/async-job-delivery";
 import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../session/messages";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
-import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
+import { type ConfiguredThinkingLevel, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
@@ -66,7 +64,6 @@ import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
 import { attributeSubagentError } from "./error-attribution";
 import { generateTaskLabel } from "./label";
-import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import {
@@ -324,12 +321,7 @@ export function collectIrcPeerRoster(
 	}));
 	let parkedCount = 0;
 	for (const ref of registry.list()) {
-		if (
-			ref.id !== selfId &&
-			ref.kind !== "advisor" &&
-			ref.status === "parked" &&
-			isCurrentSessionRosterRef(ref, rootSessionFile)
-		) {
+		if (ref.id !== selfId && ref.status === "parked" && isCurrentSessionRosterRef(ref, rootSessionFile)) {
 			parkedCount++;
 		}
 	}
@@ -953,9 +945,6 @@ export function createSubagentSettings(
 			// the parent task approval is the authorization boundary. Use yolo mode
 			// to preserve unattended subagent execution. User `tools.approval` policies still apply.
 			"tools.approvalMode": "yolo",
-			// Subagents run unadvised by default; runSubprocess opts a spawn back in
-			// per agent (frontmatter `advisor` / `task.agentAdvisor`) via overrides.
-			"advisor.enabled": false,
 			...overrides,
 		},
 		{ storage: baseSettings.getStorage() },
@@ -1749,11 +1738,6 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 	};
 
 	const attach = (session: AgentSession): (() => void) => {
-		// The session owns attribution: it knows which model produced its output
-		// and withholds an armed-but-unproven fallback. Re-deriving that here from
-		// the event stream got it wrong twice over — the stream also carries
-		// advisor turns running on a different model, and a routing switch was
-		// read as evidence the target had served.
 		const publishServingModel = (): void => {
 			const serving = session.servingModel;
 			if (!serving) return;
@@ -2524,15 +2508,6 @@ export async function finalizeSubagentLifecycle(args: {
 	const ownsRef = Boolean(ref && ref.session === args.session);
 	const cleanupDeadlineAt = args.cleanupDeadlineAt ?? Date.now() + 5000;
 	const disposeSession = async (): Promise<void> => {
-		// On a graceful finish (e.g. a `yield`) the advisor's review of the final
-		// turn was enqueued at turn end but may still be draining. Give it a
-		// chance to land in the transcript before the runtime is torn down —
-		// mirroring print mode's headless drain — bounded by the shared cleanup
-		// deadline. Hard aborts skip this to keep kill teardown fast.
-		if (!args.aborted) {
-			args.session.prepareForHeadlessAdvisorDrain();
-			await args.session.waitForAdvisorCatchup(Math.max(0, cleanupDeadlineAt - Date.now()));
-		}
 		const disposal = args.session.dispose();
 		const remainingMs = Math.max(0, cleanupDeadlineAt - Date.now());
 		try {
@@ -2801,26 +2776,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	}
 
 	const settings = options.settings ?? Settings.isolated();
-	// Per-agent advisor: the agent definition's `advisor` frontmatter or the
-	// `task.agentAdvisor` settings override (agent name → "on"/"off"/model
-	// pattern) pairs the spawned session with an advisor. Subagents default to
-	// no advisor (createSubagentSettings forces `advisor.enabled` off); an
-	// explicit model pattern lands on the child's `modelRoles.advisor` so role
-	// aliases and `:level` suffixes resolve inside the spawned session.
-	const advisorSelection = resolveAgentAdvisorSelection({
-		settingsOverride: settings.get("task.agentAdvisor")[agent.name],
-		agentAdvisor: agent.advisor,
-	});
 	const subagentSettings = createSubagentSettings(
 		settings,
 		{
 			...(agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined),
 			// Isolated runs must not expose roots outside the worktree.
 			...(worktree !== undefined ? { "workspace.additionalDirectories": [] } : undefined),
-			...(advisorSelection ? { "advisor.enabled": true } : undefined),
-			...(advisorSelection?.model
-				? { modelRoles: { ...settings.getModelRoles(), advisor: advisorSelection.model } }
-				: undefined),
 		},
 		options.parentServiceTier,
 	);
@@ -3081,39 +3042,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// Setup below can fail before this promise's consumption boundary.
 			// Observe rejection immediately while preserving it for the later await.
 			sessionManagerPromise.catch(() => {});
-			// Per-agent prewalk: the agent definition's `prewalk` frontmatter or the
-			// `task.agentPrewalk` settings override hands the subagent off to a
-			// fast/cheap target at its first edit/write — the same mechanism as the
-			// session-level --prewalk. The bundled generic `task` agent has no
-			// frontmatter default; the `task.prewalk` toggle (default off) arms it.
-			// Resolution failures skip prewalk instead of failing the spawn.
-			let prewalk: Prewalk | undefined;
-			const prewalkPattern = resolveAgentPrewalkPattern({
-				settingsOverride: settings.get("task.agentPrewalk")[agent.name],
-				agentPrewalk: resolveAgentPrewalkDefault(agent, settings.get("task.prewalk")),
-			});
-			if (prewalkPattern) {
-				await awaitAbortable(modelRegistry.awaitBackgroundRefresh());
-				const resolvedPrewalk = resolveModelOverride([prewalkPattern], modelRegistry, settings);
-				const target = resolvedPrewalk.model;
-				if (!target || !modelRegistry.hasConfiguredAuth(target)) {
-					logger.warn("Subagent prewalk target unavailable; skipping prewalk", {
-						agent: agent.name,
-						pattern: prewalkPattern,
-						warning: resolvedPrewalk.warning,
-					});
-				} else if (prewalkWouldBeNoop(model, effectiveThinkingLevel, target, resolvedPrewalk.thinkingLevel)) {
-					// Same model AND same effective thinking level: switching would only
-					// inject the plan/checklist nudges for no gain — skip. An effort-only
-					// delta on the same model still arms (it is a real cheapening hand-off).
-					logger.debug("Subagent prewalk target matches starting model and thinking level; skipping prewalk", {
-						agent: agent.name,
-						pattern: prewalkPattern,
-					});
-				} else {
-					prewalk = { target, thinkingLevel: resolvedPrewalk.thinkingLevel };
-				}
-			}
 
 			const restrictToolNames = options.restrictToolNames === true;
 			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
@@ -3218,7 +3146,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				},
 				sessionManager: sessionManagerForRun,
 				hasUI: false,
-				prewalk,
 				spawns: spawnsEnv,
 				taskDepth: childDepth,
 				parentTaskPrefix: id,
@@ -3333,10 +3260,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				});
 			}
 
-			// Todos are parent-owned bookkeeping and stripped from subagents —
-			// except under prewalk, whose plan nudge + todo gate require the
-			// subagent to commit its own todo list before the hand-off.
-			const isParentOwnedTool = (name: string): boolean => !prewalk && name === "todo";
+			const isParentOwnedTool = (name: string): boolean => name === "todo";
 			const subagentToolNames = session.getEnabledToolNames();
 			const filteredSubagentTools = subagentToolNames.filter(name => !isParentOwnedTool(name));
 			if (filteredSubagentTools.length !== subagentToolNames.length) {
@@ -3362,7 +3286,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				readOnly: isReadOnlyAgent(agent),
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
-				advisor: advisorSelection ? (advisorSelection.model ?? "on") : undefined,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,
@@ -3484,14 +3407,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			let deferredSessionShutdown: Promise<void> | undefined;
 			const deferCleanup = (completion: Promise<void>): void => {
 				lateCleanups.push(completion);
-				// The run's terminal outcome (a successful `yield`, or a genuine
-				// abort) is already settled; `aborted` reflects the authoritative
-				// run status after the abort-signal reconciliation below. Late
-				// cleanup (advisor drain, session disposal, owner-job reaping)
-				// draining past the deadline is orthogonal — it MUST NOT downgrade
-				// a non-aborted run to `aborted`, which discarded valid `agent()`
-				// results (issue #9670). The deferred work still completes
-				// asynchronously via `lateCleanups`/`onCleanupDeferred`.
 				if (!aborted) return;
 				exitCode = 1;
 				abortReasonText = `cleanup exceeded ${cleanupGraceMs} ms`;

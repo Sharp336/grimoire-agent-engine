@@ -2,11 +2,9 @@
  * Contract: plan mode converges on `ask`/`write xd://propose` regardless of how a turn
  * ends, and non-user producers cannot keep it spinning.
  *
- *  T1. An advisor concern in plan mode is recorded as a visible card but never
- *      wakes an autonomous primary turn.
- *  T2. An idle IRC message in plan mode is folded into context ("injected"),
+ *  T1. An idle IRC message in plan mode is folded into context ("injected"),
  *      not woken.
- *  T3. A plan-mode turn that stops without a decision tool call is reminded at the
+ *  T2. A plan-mode turn that stops without a decision tool call is reminded at the
  *      terminal settle, bounded by PLAN_MODE_REMINDER_MAX (then yields to the
  *      user), and either decision tool resets the counter.
  */
@@ -95,7 +93,6 @@ function countReminders(messages: readonly AgentMessage[]): number {
 interface PlanHarness {
 	session: AgentSession;
 	mock: MockModel;
-	advisorMock?: MockModel;
 	sideMock?: MockModel;
 	isDeviceOnlyWrite: () => boolean;
 	isPendingFullWriteDescription: () => boolean;
@@ -136,7 +133,6 @@ describe("AgentSession plan-mode convergence", () => {
 	async function createPlanSession(
 		responses: MockResponse[],
 		options?: {
-			advisorResponses?: MockResponse[];
 			sideResponses?: MockResponse[];
 			planYolo?: boolean;
 			initialPlanTools?: string[];
@@ -186,13 +182,6 @@ describe("AgentSession plan-mode convergence", () => {
 		});
 		currentAgent = agent;
 
-		let advisorMock: MockModel | undefined;
-		let advisorStreamFn: StreamFn | undefined;
-		if (options?.advisorResponses) {
-			advisorMock = createMockModel({ responses: options.advisorResponses });
-			advisorStreamFn = advisorMock.stream;
-		}
-
 		let sideMock: MockModel | undefined;
 		let sideStreamFn: StreamFn | undefined;
 		if (options?.sideResponses) {
@@ -217,8 +206,6 @@ describe("AgentSession plan-mode convergence", () => {
 			setPendingFullWriteDescription: enabled => {
 				pendingFullWriteDescription = enabled;
 			},
-			advisorTools: [],
-			advisorStreamFn,
 			sideStreamFn,
 			planYolo: options?.planYolo ? { target: model } : undefined,
 			xdev,
@@ -234,38 +221,11 @@ describe("AgentSession plan-mode convergence", () => {
 		return {
 			session: created,
 			mock,
-			advisorMock,
 			sideMock,
 			isDeviceOnlyWrite: () => deviceOnlyWrite,
 			isPendingFullWriteDescription: () => pendingFullWriteDescription,
 		};
 	}
-
-	it("T1: an advisor concern does not wake the primary in plan mode", async () => {
-		const harness = await createPlanSession([], {
-			advisorResponses: [
-				{
-					content: [
-						{ type: "toolCall", name: "advise", arguments: { note: "tighten the plan", severity: "concern" } },
-					],
-				},
-			],
-		});
-		harness.session.settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
-		expect(harness.session.setAdvisorEnabled(true)).toBe(true);
-		const advisor = harness.session.getAdvisorAgent();
-		if (!advisor) throw new Error("Expected advisor agent to be live");
-
-		await advisor.prompt("inspect current turn").catch(() => {});
-		await harness.session.waitForIdle();
-
-		const advisorCards = harness.session.agent.state.messages.filter(
-			m => m.role === "custom" && m.customType === "advisor",
-		);
-		expect(advisorCards.length).toBeGreaterThanOrEqual(1);
-		expect(harness.mock.calls.length).toBe(0);
-		expect(harness.advisorMock?.calls.length ?? 0).toBeGreaterThanOrEqual(1);
-	});
 
 	it("T2: an idle IRC message does not wake an autonomous turn in plan mode", async () => {
 		const harness = await createPlanSession([]);

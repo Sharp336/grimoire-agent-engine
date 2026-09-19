@@ -149,8 +149,8 @@ describe("SettingsList", () => {
 		const list = new SettingsList(
 			[
 				{
-					id: "advisor.syncBacklog",
-					label: "Advisor Sync Backlog",
+					id: "queue.backlog",
+					label: "Queue Backlog",
 					currentValue: JSON.parse("1"),
 					values: ["off", "1", "3", "5"],
 				},
@@ -161,7 +161,7 @@ describe("SettingsList", () => {
 			() => {},
 		);
 
-		expect(list.render(40)[0]).toBe("→ Advisor Sync Backlog  1");
+		expect(list.render(40)[0]).toBe("→ Queue Backlog  1");
 	});
 
 	it("filters settings with printable search text", () => {

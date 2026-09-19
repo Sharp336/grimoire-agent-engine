@@ -54,9 +54,7 @@ function createMockSession(
 		extensionRunner: undefined,
 		subscribe: () => () => {},
 		prompt: async () => {},
-		prepareForHeadlessAdvisorDrain: () => {},
 		setTextOutputCommitted: () => {},
-		waitForAdvisorCatchup: async () => true,
 		dispose,
 	} as unknown as AgentSession;
 }

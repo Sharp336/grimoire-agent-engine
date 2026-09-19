@@ -186,8 +186,6 @@ function createScriptedSession(
 			emittedGate.resolve();
 		},
 		waitForIdle: async () => {},
-		prepareForHeadlessAdvisorDrain: () => {},
-		waitForAdvisorCatchup: async () => true,
 		getLastAssistantMessage: () => undefined,
 		abort: async () => {
 			aborted = true;

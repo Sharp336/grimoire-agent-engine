@@ -76,8 +76,6 @@ function createMockSession(
 			await onPrompt({ text, options, promptIndex, emit, state });
 		},
 		waitForIdle: async () => {},
-		prepareForHeadlessAdvisorDrain: () => {},
-		waitForAdvisorCatchup: async () => true,
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
 		abort: async () => {},
 		dispose: async () => {},

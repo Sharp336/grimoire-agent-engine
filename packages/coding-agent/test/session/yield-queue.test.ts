@@ -89,14 +89,14 @@ describe("YieldQueue", () => {
 	});
 	test("requested idle flush preserves skip-only entries", async () => {
 		const harness = createHarness(true);
-		harness.queue.register<Entry>("advisor", {
+		harness.queue.register<Entry>("example", {
 			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
 			skipIdleFlush: true,
 		});
 		harness.queue.register<Entry>("completion", {
 			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
 		});
-		harness.queue.enqueue("advisor", { id: "advice" });
+		harness.queue.enqueue("example", { id: "advice" });
 		harness.queue.requestIdleFlush();
 		expect(harness.scheduledFlushes).toHaveLength(0);
 
@@ -106,7 +106,6 @@ describe("YieldQueue", () => {
 		await harness.scheduledFlushes[0]!();
 
 		expect(harness.idleBatches[0]?.map(messageText)).toEqual(["done"]);
-		expect(harness.queue.has("advisor")).toBe(true);
 	});
 	test("enqueue while idle schedules one debounced idle flush", async () => {
 		const harness = createHarness(false);

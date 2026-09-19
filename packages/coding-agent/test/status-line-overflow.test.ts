@@ -54,7 +54,6 @@ function createCtx(overrides?: {
 		},
 		planMode: null,
 		loopMode: null,
-		prewalk: null,
 		goalMode: null,
 		usageStats: {
 			input: 0,
@@ -101,8 +100,6 @@ function createStatusLineSession(sessionName: string, modelName?: string) {
 		isStreaming: false,
 		isAutoThinking: false,
 		autoResolvedThinkingLevel: () => undefined,
-		isAdvisorActive: () => false,
-		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
 		isFastModeActive: () => false,
 		getAsyncJobSnapshot: () => ({ running: [] }),
 		getCurrentModel: () => undefined,

@@ -46,12 +46,6 @@ export function isServiceTierForFamily(family: string, tier: unknown): tier is S
 	return values.includes(tier);
 }
 
-/**
- * Inherit-capable single value for the subagent/advisor tiers. The chosen tier
- * is broadcast across families and applied to whichever family the spawned
- * model belongs to (clamped to what that family realizes); `"inherit"` defers
- * to the main agent's live per-family selection.
- */
 export const SERVICE_TIER_INHERIT_SETTING_VALUES = [
 	"inherit",
 	"none",
@@ -116,13 +110,6 @@ export function buildServiceTierByFamily(openai: string, anthropic: string, goog
 	return out;
 }
 
-/**
- * Broadcast a single chosen tier across families, clamped to what each family
- * realizes: OpenAI takes any tier, Anthropic only `priority`, Google only
- * `flex`/`priority`. Used by the subagent/advisor single-value settings and the
- * `omp bench --service-tier` flag, which apply one tier to whatever family the
- * target model belongs to.
- */
 export function serviceTierForAllFamilies(tier: ServiceTier | undefined): ServiceTierByFamily {
 	if (!tier) return {};
 	const out: ServiceTierByFamily = { openai: tier };
@@ -131,15 +118,6 @@ export function serviceTierForAllFamilies(tier: ServiceTier | undefined): Servic
 	return out;
 }
 
-/**
- * Resolve a subagent/advisor service-tier setting to a per-family map.
- *
- * - A concrete tier is broadcast across families (see
- *   {@link serviceTierForAllFamilies}).
- * - `"none"` yields an empty map.
- * - `"inherit"` defers to `inherited` — the parent's live per-family tiers when
- *   a live session supplied them, else the empty map.
- */
 export function resolveSubagentServiceTier(setting: string, inherited: ServiceTierByFamily): ServiceTierByFamily {
 	if (setting === "inherit") return inherited;
 	return serviceTierForAllFamilies(serviceTierSettingToTier(setting));

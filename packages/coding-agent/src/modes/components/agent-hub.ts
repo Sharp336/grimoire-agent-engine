@@ -812,9 +812,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		add(
 			theme.fg(
 				"dim",
-				ref.kind === "advisor" || ref.history?.readOnly
-					? "Read-only · 0 LoC"
-					: "Shared workspace · per-agent LoC not attributable",
+				ref.history?.readOnly ? "Read-only · 0 LoC" : "Shared workspace · per-agent LoC not attributable",
 			),
 		);
 		const artifacts = ref.history;
@@ -856,9 +854,6 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		}
 		if (this.#viewMode === "roster" && ref.parentId && ref.parentId !== MAIN_AGENT_ID) {
 			fields.push(theme.fg("dim", `↳ ${sanitizeDisplayText(ref.parentId)}`));
-		}
-		if (ref.kind === "advisor") {
-			fields.push(theme.fg("warning", "read-only"));
 		}
 		const unread = this.#irc.unreadCount(ref.id);
 		if (unread > 0) {
@@ -1030,9 +1025,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#activateAgent(ref: AgentRef): void {
 		this.#notice = undefined;
 		const focusAgent = this.#focusAgent;
-		// Aborted agents and advisor refs are read-only transcripts with no
-		// revivable session; open the in-hub viewer instead of failing ensureLive.
-		if (ref.kind === "advisor" || ref.status === "aborted" || !focusAgent) {
+		if (ref.status === "aborted" || !focusAgent) {
 			this.openChat(ref.id);
 			return;
 		}
@@ -1050,11 +1043,6 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#reviveSelected(): void {
 		const ref = this.#rows[this.#selectedRow];
 		if (!ref) return;
-		if (ref.kind === "advisor") {
-			this.#notice = `"${ref.id}" is a read-only advisor transcript — nothing to revive.`;
-			this.#requestRender();
-			return;
-		}
 		if (ref.status !== "parked") {
 			this.#notice = `Agent "${ref.id}" is ${ref.status} — only parked agents can be revived.`;
 			this.#requestRender();
@@ -1074,11 +1062,6 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#killSelected(): void {
 		const ref = this.#rows[this.#selectedRow];
 		if (!ref) return;
-		if (ref.kind === "advisor") {
-			this.#notice = `"${ref.id}" is a read-only advisor transcript — cannot be killed.`;
-			this.#requestRender();
-			return;
-		}
 		this.#notice = undefined;
 		void (async () => {
 			try {

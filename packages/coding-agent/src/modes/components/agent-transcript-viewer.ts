@@ -1,18 +1,3 @@
-/**
- * Fullscreen transcript viewer.
- *
- * `AgentHubOverlayComponent.openChat` mounts this as a `fullscreen` overlay
- * (`ui.showOverlay(..., { fullscreen: true })`), so it borrows the terminal's
- * alternate screen buffer (the vim/less idiom) and paints the whole screen — no
- * compositing into the live transcript's scrollback. It renders a parked
- * subagent / advisor transcript that has no live in-view session.
- *
- * Local transcripts tail append-only growth: unchanged file identity plus stable
- * sentinels means only newly appended JSONL is parsed and rendered. Rewrites,
- * truncation, rotation, or sentinel drift fall back to a full rebuild so changed
- * historical entries cannot leave stale components behind. Collab guests use the
- * same append path over the host's byte-capped transcript reads.
- */
 import * as fs from "node:fs";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { type Component, Editor, matchesKey, routeSgrMouseInput, ScrollView, type TUI } from "@oh-my-pi/pi-tui";
@@ -56,7 +41,6 @@ export interface AgentTranscriptViewerDeps {
 	onHubClose: () => void;
 }
 
-/** How often to re-stat a file-backed transcript for growth (advisor/live tail). */
 const POLL_MS = 250;
 
 const SENTINEL_BYTES = 4096;
@@ -175,10 +159,9 @@ export class AgentTranscriptViewer implements Component {
 		this.#pollTimer.unref?.();
 	}
 
-	/** Advisor and aborted-agent transcripts are read-only. */
 	get #sendable(): boolean {
 		const ref = this.deps.registry.get(this.deps.agentId);
-		if (!ref || ref.kind === "advisor" || ref.status === "aborted") return false;
+		if (!ref || ref.status === "aborted") return false;
 		return Boolean(this.deps.lifecycle);
 	}
 

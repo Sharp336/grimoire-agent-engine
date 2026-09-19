@@ -319,8 +319,8 @@ describe("convertToLlm custom message mapping", () => {
 		const messages: AgentMessage[] = [
 			{
 				role: "custom",
-				customType: "advisor",
-				content: [{ type: "text", text: "Advisor body" }, image],
+				customType: "example",
+				content: [{ type: "text", text: "Example body" }, image],
 				display: true,
 				attribution: "agent",
 				timestamp: Date.now(),
@@ -335,7 +335,7 @@ describe("convertToLlm custom message mapping", () => {
 		if (converted[0]?.role !== "developer" || !Array.isArray(converted[0].content)) {
 			throw new Error("Expected developer custom text");
 		}
-		expect(converted[0].content).toEqual([{ type: "text", text: "Advisor body" }]);
+		expect(converted[0].content).toEqual([{ type: "text", text: "Example body" }]);
 		if (converted[1]?.role !== "user" || !Array.isArray(converted[1].content)) {
 			throw new Error("Expected user custom images");
 		}

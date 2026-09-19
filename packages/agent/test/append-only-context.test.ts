@@ -626,7 +626,7 @@ describe("message sync", () => {
 		] as any);
 		expect(mgr.log.length).toBe(2);
 
-		// Public log clear used by advisor reset: it intentionally empties the
+		// Public log clear used by context reset: it intentionally empties the
 		// provider-bound message log but does not touch the private sync cursor.
 		mgr.log.clear();
 		expect(mgr.log.length).toBe(0);

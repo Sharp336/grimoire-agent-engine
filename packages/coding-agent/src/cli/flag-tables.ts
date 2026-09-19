@@ -143,9 +143,6 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--plan": (result, value) => {
 		result.plan = value;
 	},
-	"--prewalk-into": (result, value) => {
-		result.prewalkInto = value;
-	},
 	"--plan-yolo-into": (result, value) => {
 		result.planYoloInto = value;
 	},
@@ -299,10 +296,9 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--no-lsp",
 	"--no-pty",
 	"--hide-thinking",
-	"--advisor",
+
 	"--external-thinking",
-	"--prewalk",
-	"--no-prewalk",
+
 	"--plan-yolo",
 	"--print",
 	"--print-thoughts",

@@ -314,7 +314,7 @@ export class NatsEngineAdapter {
 		}
 		this.#unsubscribeRuntime = this.runtime.subscribe(() => this.wakeEvents());
 		this.#unsubscribeRegistry = this.runtime.agentRegistry.onChange(event => {
-			if (event.type !== "registered" || event.ref.kind === "advisor") return;
+			if (event.type !== "registered") return;
 			const broker = this.runtime.resolveBrokerAgent(event.ref.id);
 			if (broker) void this.provisionMailbox(broker.agentInstanceId).catch(error => this.#report(error));
 		});

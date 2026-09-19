@@ -106,7 +106,7 @@ describe("InteractiveMode deferred command preview", () => {
 		mode.presentCommandOutput([new Text("spacer", 1, 0), new Text("usage panel", 1, 0)]);
 		expect(noticeText(mode)).toContain("1 command output");
 
-		mode.presentCommandOutput(new Text("advisor panel", 1, 0));
+		mode.presentCommandOutput(new Text("example panel", 1, 0));
 		expect(noticeText(mode)).toContain("2 command outputs");
 	});
 

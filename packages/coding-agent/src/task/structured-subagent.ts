@@ -194,7 +194,6 @@ function createPlanModeAgent(agent: AgentDefinition): AgentDefinition {
 		systemPrompt: `${planModeSubagentPrompt}\n\n${agent.systemPrompt}`,
 		tools,
 		spawns: undefined,
-		prewalk: undefined,
 	};
 }
 

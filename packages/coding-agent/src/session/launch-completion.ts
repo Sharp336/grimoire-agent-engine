@@ -9,9 +9,8 @@ export const LAUNCH_COMPLETION_MESSAGE_TYPE = "launch-completion";
 /** One broker completion awaiting injection into its owning session. */
 export type LaunchCompletionEntry = DaemonCompletionNotification;
 
-/** Whether a broker completion belongs to the primary session or its advisor. */
 export function isLaunchCompletionOwner(owner: string, sessionId: string): boolean {
-	return owner === sessionId || owner === `${sessionId}-advisor`;
+	return owner === sessionId;
 }
 
 /** Build one model-visible notification per terminal supervised process exit. */
