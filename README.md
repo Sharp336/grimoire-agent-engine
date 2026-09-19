@@ -195,27 +195,23 @@ Perfect edits, fewer tokens. The model points at anchors instead of retyping the
 
 Other harnesses bolt on gh_issue_view, gh_pr_view, gh_search — each with its own parameters the agent has to learn and you have to debug. We skipped that. read already handles paths; PRs are paths. One interface to teach the model, one surface to keep correct.
 
-### 13 · Memory the agent curates
-
-The agent remembers your codebase between sessions. It writes facts mid-run with retain, captures reusable lessons with learn, pulls them back with recall, and compresses each session into a mental model that loads on the first turn of the next one. Pick the engine with `memory.backend` — local, Hindsight, or Mnemopi. Project-scoped by default, so what it learns about this repo stays with this repo.
-
-### 14 · ACP: editor-drivable agent
+### 13 · ACP: editor-drivable agent
 
 Run omp inside Zed and you get the same agent you drive from the terminal — reading the buffer you're actually looking at, writing through the editor's save path, spawning shells in the editor's terminal. Destructive tools pause for a permission prompt you can answer once and forget. No bridge, no plugin, no second brain to keep in sync.
 
-### 15 · Inherits what your other tools already wrote
+### 14 · Inherits what your other tools already wrote
 
 Every other agent ships an importer and expects you to convert. omp reads the eight formats already on disk in their native shape — Cursor MDC, Cline .clinerules, Codex AGENTS.md, Copilot applyTo, and the rest. No migration script, no YAML-to-TOML port, no "supported subset" footnotes. The config your team wrote last quarter still works tonight.
 
-### 16 · omp commit: atomic splits, validated messages
+### 15 · omp commit: atomic splits, validated messages
 
 omp reads the working tree through git_overview, git_file_diff, and git_hunk, then splits unrelated changes into atomic commits ordered by their dependencies. Cycles are rejected before anything is written. Source files score above tests, docs, and configs, so the headline commit is the one that matters. Lock files are excluded from analysis entirely.
 
-### 17 · Read PRs. _Walk skills._ Pull JSON out of subagents.
+### 16 · Read PRs. _Walk skills._ Pull JSON out of subagents.
 
 Sixteen internal schemes — `pr://`, `issue://`, `agent://`, `skill://`, `ssh://`, and the rest — resolve transparently inside every FS-shaped tool the agent already calls. `read pr://1428` returns the same shape as `read src/foo.ts`. `grep` walks a diff like a directory. `agent://<id>/findings.0.path` pulls a field out of a subagent's output by path.
 
-### 18 · Conflict resolution, made easy.
+### 17 · Conflict resolution, made easy.
 
 Each merge conflict becomes one URL. The agent writes `@theirs`, `@ours`, or `@base` to `conflict://N` and the file resolves cleanly. Bulk form: `conflict://*`.
 
@@ -223,7 +219,7 @@ Each merge conflict becomes one URL. The agent writes `@theirs`, `@ours`, or `@b
 
 _[Watch the capture ↗](https://omp.sh/clips/conflict.mp4)_
 
-### 19 · Preview, then accept.
+### 18 · Preview, then accept.
 
 `ast_edit` returns a _(proposed)_ card with the replacement count. The change is staged. The agent writes a one-line reason to `xd://resolve`; the TUI turns it into an **Accept** card and the disk move happens — atomic, all or nothing.
 
@@ -231,11 +227,11 @@ _[Watch the capture ↗](https://omp.sh/clips/conflict.mp4)_
 
 _[Watch the capture ↗](https://omp.sh/clips/codemod.mp4)_
 
-### 20 · Drives a _real browser_. _Or your Slack?_
+### 19 · Drives a _real browser_. _Or your Slack?_
 
 Stealth's on by default, so pages see a normal user instead of a headless bot. The same API drives any Electron app in place — point it at Slack and the agent reads your DMs the way it reads the web. Or skip the sandbox entirely: the browser relay extension lets the agent adopt the Chrome tabs you already have open, without stealing focus.
 
-### 21 · Hands on the desktop itself
+### 20 · Hands on the desktop itself
 
 `computer` runs persistent JavaScript against the real host: enumerate windows and displays, capture screenshots, send native input, walk the OS accessibility tree, touch the clipboard. Not the browser tool, no DOM — the same desktop you're looking at.
 
@@ -281,18 +277,12 @@ Stealth's on by default, so pages see a normal user instead of a headless bot. T
 - `inspect_image` — vision-model analysis of a local image file.
 - `tts` — text-to-speech via xAI Grok Voice — five built-in voices, WAV or MP3.
 
-**Memory & skills**
+**Session controls**
 
 - `checkpoint` — mark conversation state for a later collapse-and-report.
 - `rewind` — prune exploratory context, keep a concise report.
-- `retain` — queue durable facts into the active memory bank.
-- `recall` — search the memory bank for raw memories.
-- `reflect` — synthesize an answer over the bank.
-- `memory_edit` — update, forget, or invalidate stored memories by id.
-- `learn` — capture a reusable lesson; optionally promote it into a managed skill.
-- `manage_skill` — create, update, or delete an isolated managed skill.
 
-Setting-gated, off by default: `github`, `security_scan`, `generate_image`, `tts`, `checkpoint`, `rewind`, and the memory tools (`retain`/`recall`/`reflect`/`memory_edit`, per `memory.backend`). `inspect_image` activates automatically when the active model can't see.
+Setting-gated, off by default: `github`, `security_scan`, `generate_image`, `tts`, `checkpoint`, and `rewind`. `inspect_image` activates automatically when the active model can't see.
 
 [Full reference →](https://omp.sh/docs/tools)
 
@@ -629,7 +619,6 @@ For architecture and contribution guidelines, see [packages/coding-agent/DEVELOP
 | **[@oh-my-pi/pi-utils](packages/utils)**                                      | Shared utilities (logging, streams, dirs/env/process helpers)               |
 | **[@oh-my-pi/pi-wire](packages/wire)**                                        | Shared native tool-call intent field               |
 | **[@oh-my-pi/hashline](packages/hashline)**                                   | Line-anchored patch language and applier behind the `edit` tool             |
-| **[@oh-my-pi/pi-mnemopi](packages/mnemopi)**                                  | Local SQLite memory engine for Oh My Pi agents                              |
 | **[@oh-my-pi/snapcompact](packages/snapcompact)**                             | Bitmap-frame context compression package and SQuAD eval suite               |
 | **[@oh-my-pi/browser-relay](packages/browser-relay)**                         | Chrome extension that lets the browser tool drive your existing tabs        |
 | **[@oh-my-pi/pi-metaharness](packages/metaharness)**                          | Unified benchmark runners, Harbor run storage, REST/SSE API, live dashboard |

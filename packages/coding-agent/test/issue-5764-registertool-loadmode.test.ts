@@ -112,9 +112,6 @@ describe("issue #5764: registerTool loadMode default", () => {
 		for (const name in ESSENTIAL_BUILTIN_TOOL_NAMES) {
 			const factory = BUILTIN_TOOLS[name as keyof typeof BUILTIN_TOOLS];
 			expect(factory, `${name} must be a built-in factory`).toBeDefined();
-			// learn/manage_skill are conditional (need an autolearn backend) and
-			// return null in a default session; their essential loadMode is covered
-			// by autolearn-tools-gating.test.ts. Assert the rest build as essential.
 			const tool = await factory(session);
 			if (!tool) continue;
 			expect(tool.loadMode, `${name} must declare loadMode "essential"`).toBe("essential");

@@ -6,8 +6,6 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
-import { MnemopiSessionState, setMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -140,11 +138,9 @@ describe("AgentSession concurrent disposal", () => {
 		await shared.dispose({ timeoutMs: 1_000 });
 	});
 
-	it("starts independent writers together and closes persistence after their barrier", async () => {
+	it("closes persistence after the owned async manager settles", async () => {
 		const owned = new AsyncJobManager({ maxRunningJobs: 1, retentionMs: 1_000, onJobComplete: () => {} });
 		const asyncGate = Promise.withResolvers<void>();
-		const hindsightGate = Promise.withResolvers<void>();
-		const mnemopiGate = Promise.withResolvers<void>();
 		const asyncStarted = Promise.withResolvers<void>();
 		const order: string[] = [];
 		vi.spyOn(owned, "dispose").mockImplementation(async () => {
@@ -156,23 +152,6 @@ describe("AgentSession concurrent disposal", () => {
 		});
 
 		const current = createSession(owned);
-		const hindsight: HindsightSessionState = Object.create(HindsightSessionState.prototype);
-		vi.spyOn(hindsight, "flushRetainQueue").mockImplementation(async () => {
-			order.push("hindsight:start");
-			await hindsightGate.promise;
-			order.push("hindsight:end");
-		});
-		vi.spyOn(hindsight, "dispose").mockImplementation(() => {});
-		current.setHindsightSessionState(hindsight);
-
-		const mnemopi: MnemopiSessionState = Object.create(MnemopiSessionState.prototype);
-		vi.spyOn(mnemopi, "dispose").mockImplementation(async () => {
-			order.push("mnemopi:start");
-			await mnemopiGate.promise;
-			order.push("mnemopi:end");
-		});
-		setMnemopiSessionState(current, mnemopi);
-
 		let persistenceClosed = false;
 		vi.spyOn(current.sessionManager, "close").mockImplementation(async () => {
 			persistenceClosed = true;
@@ -182,25 +161,16 @@ describe("AgentSession concurrent disposal", () => {
 		const dispose = current.dispose();
 		try {
 			await asyncStarted.promise;
-			await Promise.resolve();
-			expect(order).toContain("hindsight:start");
-			expect(order).toContain("mnemopi:start");
 			expect(order).not.toContain("async:end");
-			expect(order).not.toContain("hindsight:end");
-			expect(order).not.toContain("mnemopi:end");
 			expect(persistenceClosed).toBe(false);
 		} finally {
 			asyncGate.resolve();
-			hindsightGate.resolve();
-			mnemopiGate.resolve();
 		}
 		await dispose;
 		session = undefined;
 
 		const closeAt = order.indexOf("session:close");
 		expect(closeAt).toBeGreaterThan(order.indexOf("async:end"));
-		expect(closeAt).toBeGreaterThan(order.indexOf("hindsight:end"));
-		expect(closeAt).toBeGreaterThan(order.indexOf("mnemopi:end"));
 	});
 
 	it("bounds post-prompt work that ignores abort", async () => {

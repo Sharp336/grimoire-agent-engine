@@ -5,28 +5,28 @@ import * as path from "node:path";
 import { discoverAndLoadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
-const TOOL_NAME = "legacy-multi-file-tool";
+const TOOL_NAME = "native-multi-file-tool";
 
-describe("issue #983: multi-file legacy Pi extensions", () => {
+describe("issue #983: multi-file native extensions", () => {
 	const tempDirs: string[] = [];
 
 	afterEach(async () => {
 		await Promise.all(tempDirs.splice(0).map(dir => removeWithRetries(dir)));
 	});
 
-	it("loads legacy Pi extensions whose sibling TypeScript files import each other via relative paths", async () => {
+	it("loads native extensions whose sibling TypeScript files import each other via relative paths", async () => {
 		const projectDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-issue-983-project-"));
 		tempDirs.push(projectDir);
-		const extensionDir = path.join(projectDir, "legacy-pi-multi-file-extension");
+		const extensionDir = path.join(projectDir, "native-multi-file-extension");
 
 		await fs.mkdir(extensionDir, { recursive: true });
 		await Bun.write(
 			path.join(extensionDir, "package.json"),
 			JSON.stringify(
 				{
-					name: "legacy-pi-multi-file-extension",
+					name: "native-multi-file-extension",
 					version: "1.0.0",
-					pi: {
+					omp: {
 						extensions: ["./index.ts"],
 					},
 				},

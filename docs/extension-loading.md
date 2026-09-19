@@ -18,7 +18,7 @@ Extension loading builds a list of module entry files, imports each module with 
 - `src/extensibility/extensions/index.ts` — public exports
 - `src/extensibility/extensions/runner.ts` — runtime/event execution after load
 - `src/discovery/builtin.ts` — native auto-discovery provider for extension modules
-- `src/extensibility/plugins/legacy-pi-compat.ts` — in-place module graph loading and host-package compatibility rewriting
+- `src/extensibility/plugins/native-module.ts` — in-place imports and host-package resolution for source and compiled builds
 - `src/config/settings.ts` — loads merged `extensions` / `disabledExtensions` settings
 
 ---
@@ -33,7 +33,7 @@ Native `extension-module` discovery comes from:
 
 - Project directory: `<cwd>/.omp/extensions`
 - User directory: the active agent directory's `extensions/` (default `~/.omp/agent/extensions`)
-- Native legacy/settings JSON entries: `<cwd>/.omp/settings.json#extensions` and the active agent directory's `settings.json#extensions`
+- Native settings JSON entries: `<cwd>/.omp/settings.json#extensions` and the active agent directory's `settings.json#extensions`
 
 The project root is the native provider's `.omp` directory (`SOURCE_PATHS.native.projectDir`), cwd-only; it does not walk ancestors. The user root is the active profile's agent directory via `getAgentDir()`, so under `omp --profile <name>` it becomes `~/.omp/profiles/<name>/agent/extensions` (and it honors `PI_CODING_AGENT_DIR`). See [Profiles](./config-usage.md#profiles).
 
@@ -223,12 +223,16 @@ Implication: if the same module path is both auto-discovered and explicitly conf
 
 ## Module import and factory contract
 
-Each candidate path is loaded via `loadLegacyPiModule()` (`src/extensibility/plugins/legacy-pi-compat.ts`):
+Each candidate path is loaded via `loadNativeModule()` (`src/extensibility/plugins/native-module.ts`):
 
-- the entry's realpath is resolved, then dynamically imported with an `?mtime` cache-buster so edited source reloads
-- a scoped Bun `onLoad` hook rewrites legacy pi-package specifiers (`@mariozechner/*`, `@earendil-works/*`) and bare `@sinclair/typebox` onto the host-bundled copies before evaluation
+- the absolute entry path is imported in place with a unique `?load=<n>` query, so extension-relative files and assets keep their native location
+- in source runs, current `@oh-my-pi/*` host packages resolve from the coding-agent package
+- in compiled runs, current host packages come from the bundled `omp-native-extension-modules` loader registry
+- ordinary extension dependencies use Bun's normal package resolution from the extension package and must be installed there
 - factory is selected by `getExtensionFactory(module)`: the module itself if it is a function, otherwise `module.default`
 - factory must be a function (`ExtensionFactory`) and may return `void` or a promise; loading awaits it before continuing to the next path
+
+The loader does not rewrite legacy package aliases or transform extension source. Port imports to current package names before loading.
 
 If export is not a function, that path fails with a structured error and loading continues.
 

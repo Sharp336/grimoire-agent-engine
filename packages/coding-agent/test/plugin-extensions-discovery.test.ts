@@ -5,9 +5,6 @@ import * as path from "node:path";
 import { discoverAndLoadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { getAgentDir, getPluginsDir, removeSyncWithRetries, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
-const currentPiCodingAgentPath = Bun.resolveSync("@oh-my-pi/pi-coding-agent", import.meta.dir);
-const currentPiExtensionsPath = Bun.resolveSync("@oh-my-pi/pi-coding-agent/extensibility/extensions", import.meta.dir);
-
 describe("plugin extension discovery", () => {
 	let projectDir: TempDir;
 	let tempHome = "";
@@ -93,70 +90,7 @@ describe("plugin extension discovery", () => {
 		expect(extension?.commands.has("plugin-ext")).toBe(true);
 	});
 
-	it("loads installed legacy Pi plugin extensions from Windows drive-letter paths", async () => {
-		const pluginsDir = getPluginsDir();
-		const pluginDir = path.join(pluginsDir, "node_modules", "legacy-pi-plugin");
-		const extensionPath = path.join(pluginDir, "dist", "extension.ts");
-		removeSyncWithRetries(path.join(pluginsDir, "node_modules"));
-		fs.mkdirSync(path.dirname(extensionPath), { recursive: true });
-		fs.writeFileSync(
-			path.join(pluginsDir, "package.json"),
-			JSON.stringify({
-				name: "omp-plugins",
-				private: true,
-				dependencies: {
-					"legacy-pi-plugin": "1.0.0",
-				},
-			}),
-		);
-		fs.writeFileSync(
-			path.join(pluginDir, "package.json"),
-			JSON.stringify({
-				name: "legacy-pi-plugin",
-				version: "1.0.0",
-				pi: {
-					extensions: ["./dist/extension.ts"],
-				},
-			}),
-		);
-		fs.writeFileSync(
-			extensionPath,
-			[
-				'import * as nodePath from "path";',
-				'if (false) import("./optional-missing.js");',
-				'import { isToolCallEventType as legacyRoot } from "@mariozechner/pi-coding-agent";',
-				'import { isToolCallEventType as legacyExtensions } from "@mariozechner/pi-coding-agent/extensibility/extensions";',
-				`import { isToolCallEventType as modernRoot } from ${JSON.stringify(currentPiCodingAgentPath)};`,
-				`import { isToolCallEventType as modernExtensions } from ${JSON.stringify(currentPiExtensionsPath)};`,
-				"",
-				'if (legacyRoot !== modernRoot) throw new Error("legacy root import did not remap");',
-				'if (legacyExtensions !== modernExtensions) throw new Error("legacy extension import did not remap");',
-				'if (typeof nodePath.join !== "function") throw new Error("node builtin import did not resolve");',
-				"",
-				"export default function(pi) {",
-				"\tconst { Type } = pi.typebox;",
-				"\tpi.registerTool({",
-				'\t\tname: "legacy-pi-ext",',
-				'\t\tdescription: "Legacy Pi extension smoke test",',
-				"\t\tparameters: Type.Object({}),",
-				'\t\texecute: async () => ({ content: [{ type: "text", text: "ok" }] }),',
-				"\t});",
-				"}",
-			].join("\n"),
-		);
-
-		const result = await discoverAndLoadExtensions([], projectDir.path());
-		const extension = result.extensions.find(ext => ext.path === extensionPath);
-
-		if (process.platform === "win32") {
-			expect(extensionPath).toMatch(/^[A-Za-z]:\\/);
-		}
-		expect(result.errors).toHaveLength(0);
-		expect(extension).toBeDefined();
-		expect(extension?.tools.has("legacy-pi-ext")).toBe(true);
-	});
-
-	it("loads installed legacy Pi plugin extensions that use package imports", async () => {
+	it("loads installed plugin extensions that use package imports", async () => {
 		const pluginsDir = getPluginsDir();
 		const pluginDir = path.join(pluginsDir, "node_modules", "package-import-plugin");
 		const extensionPath = path.join(pluginDir, "src", "index.ts");
@@ -180,7 +114,7 @@ describe("plugin extension discovery", () => {
 				imports: {
 					"#src/*": "./src/*",
 				},
-				pi: {
+				omp: {
 					extensions: ["./src/index.ts"],
 				},
 			}),
@@ -197,13 +131,7 @@ describe("plugin extension discovery", () => {
 		);
 		fs.writeFileSync(
 			path.join(pluginDir, "src", "feature", "command.ts"),
-			[
-				'import { isToolCallEventType as legacyExtensions } from "@earendil-works/pi-coding-agent/extensibility/extensions";',
-				`import { isToolCallEventType as modernExtensions } from ${JSON.stringify(currentPiExtensionsPath)};`,
-				"",
-				'if (legacyExtensions !== modernExtensions) throw new Error("legacy extension import did not remap");',
-				'export const commandName = "package-import-ext";',
-			].join("\n"),
+			["", 'export const commandName = "package-import-ext";'].join("\n"),
 		);
 
 		const result = await discoverAndLoadExtensions([], projectDir.path());
@@ -242,7 +170,7 @@ describe("plugin extension discovery", () => {
 						import: "./import/*",
 					},
 				},
-				pi: {
+				omp: {
 					extensions: ["./src/index.ts"],
 				},
 			}),
@@ -300,7 +228,7 @@ describe("plugin extension discovery", () => {
 				imports: {
 					"#schema": "./src/schema.json",
 				},
-				pi: {
+				omp: {
 					extensions: ["./src/index.ts"],
 				},
 			}),
@@ -350,7 +278,7 @@ describe("plugin extension discovery", () => {
 					"#src/internal": null,
 					"#src/*": "./src/*",
 				},
-				pi: {
+				omp: {
 					extensions: ["./src/index.ts"],
 				},
 			}),
@@ -402,7 +330,7 @@ describe("plugin extension discovery", () => {
 						default: "./src/blocked.ts",
 					},
 				},
-				pi: {
+				omp: {
 					extensions: ["./src/index.ts"],
 				},
 			}),
@@ -427,7 +355,7 @@ describe("plugin extension discovery", () => {
 		expect(extension).toBeUndefined();
 	});
 
-	it("rewrites side-effect imports of package-import aliases and legacy Pi scopes", async () => {
+	it("loads side-effect imports of package aliases across sibling modules", async () => {
 		const pluginsDir = getPluginsDir();
 		const pluginDir = path.join(pluginsDir, "node_modules", "side-effect-plugin");
 		const extensionPath = path.join(pluginDir, "src", "index.ts");
@@ -451,7 +379,7 @@ describe("plugin extension discovery", () => {
 				imports: {
 					"#src/*": "./src/*",
 				},
-				pi: {
+				omp: {
 					extensions: ["./src/index.ts"],
 				},
 			}),
@@ -459,10 +387,7 @@ describe("plugin extension discovery", () => {
 		fs.writeFileSync(
 			extensionPath,
 			[
-				// Side-effect imports — no `from`, no dynamic `import()`. The
-				// regex matchers must walk and rewrite both shapes so the legacy
-				// `@earendil-works` import inside `register.ts` resolves to the
-				// host `@oh-my-pi` package.
+				// Side-effect imports use native package aliases across sibling modules.
 				'import "#src/register";',
 				'import "./marker";',
 				"",
@@ -477,10 +402,7 @@ describe("plugin extension discovery", () => {
 		fs.writeFileSync(
 			path.join(pluginDir, "src", "register.ts"),
 			[
-				'import { isToolCallEventType as legacyExtensions } from "@earendil-works/pi-coding-agent/extensibility/extensions";',
-				`import { isToolCallEventType as modernExtensions } from ${JSON.stringify(currentPiExtensionsPath)};`,
 				"",
-				'if (legacyExtensions !== modernExtensions) throw new Error("legacy side-effect import did not remap");',
 				"(globalThis as { __sideEffectMarker?: { ok: boolean; runs: number } }).__sideEffectMarker = { ok: true, runs: 1 };",
 			].join("\n"),
 		);
@@ -528,7 +450,7 @@ describe("plugin extension discovery", () => {
 			JSON.stringify({
 				name: "dir-entry-plugin",
 				version: "1.0.0",
-				pi: {
+				omp: {
 					// Directory entry — loader must resolve to the directory's index file.
 					extensions: [".pi/extensions/dir-entry"],
 				},
@@ -574,7 +496,7 @@ describe("plugin extension discovery", () => {
 			JSON.stringify({
 				name: "subdir-entry-plugin",
 				version: "1.0.0",
-				pi: {
+				omp: {
 					// Directory entry with no direct index — the loader must scan one
 					// level and pick up `extensions/<name>/index.ts` (pi package layout).
 					extensions: ["./extensions"],
@@ -621,7 +543,7 @@ describe("plugin extension discovery", () => {
 			JSON.stringify({
 				name: "nested-manifest-plugin",
 				version: "1.0.0",
-				pi: { extensions: ["./extensions"] },
+				omp: { extensions: ["./extensions"] },
 			}),
 		);
 		// Child package declares its real entry via its own manifest; the index.ts
@@ -679,7 +601,7 @@ describe("plugin extension discovery", () => {
 			JSON.stringify({
 				name: "missing-decl-plugin",
 				version: "1.0.0",
-				pi: { extensions: ["./extensions"] },
+				omp: { extensions: ["./extensions"] },
 			}),
 		);
 		// The child manifest is authoritative: it declares ./dist/real-ext.ts, which does

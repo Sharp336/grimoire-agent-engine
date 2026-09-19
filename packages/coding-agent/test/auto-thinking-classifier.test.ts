@@ -20,7 +20,7 @@ import {
 	resolveProvisionalAutoLevel,
 	resolveTaskEffortLevel,
 } from "@oh-my-pi/pi-coding-agent/thinking";
-import type { TinyMemoryLocalModelKey } from "@oh-my-pi/pi-coding-agent/tiny/models";
+import type { TinyCompletionLocalModelKey } from "@oh-my-pi/pi-coding-agent/tiny/models";
 import { tinyModelClient } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 
 describe("auto thinking classifier helpers", () => {
@@ -28,7 +28,7 @@ describe("auto thinking classifier helpers", () => {
 		vi.restoreAllMocks();
 	});
 
-	function createLocalClassifierFixture(autoThinkingModel: TinyMemoryLocalModelKey) {
+	function createLocalClassifierFixture(autoThinkingModel: TinyCompletionLocalModelKey) {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-6");
 		if (!model) throw new Error("Expected bundled Claude Sonnet 4.6 model");
 

@@ -506,54 +506,6 @@ describe("AgentSession concurrent prompt guard", () => {
 		expect(extensionRunner.emitSessionStop).toHaveBeenCalledTimes(1);
 	});
 
-	it("continues session_stop feedback in ACP sessions with deferred client turns", async () => {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
-		const mock = createMockModel({
-			handler: () => ({ content: ["Done"] }),
-		});
-		const agent = new Agent({
-			getApiKey: () => "test-key",
-			initialState: { model, systemPrompt: ["Test"], tools: [] },
-			streamFn: mock.stream,
-			convertToLlm,
-		});
-		let stopCount = 0;
-		const extensionRunner = {
-			emit: vi.fn().mockResolvedValue(undefined),
-			emitBeforeAgentStart: vi.fn().mockResolvedValue(undefined),
-			hasHandlers: vi.fn((eventType: string) => eventType === "session_stop"),
-			emitSessionStop: vi.fn(() => {
-				stopCount++;
-				if (stopCount === 1) {
-					return Promise.resolve({ continue: true, additionalContext: "ACP stop continuation." });
-				}
-				return Promise.resolve(undefined);
-			}),
-		} as unknown as ExtensionRunner;
-		const sessionManager = SessionManager.inMemory();
-		const settings = Settings.isolated();
-		const modelRegistry = sharedModelRegistry;
-		session = new AgentSession({ agent, sessionManager, settings, modelRegistry, extensionRunner });
-		session.setClientBridge({
-			capabilities: {},
-			deferAgentInitiatedTurns: true,
-		});
-
-		await session.prompt("First message");
-		await session.waitForIdle();
-
-		expect(mock.calls).toHaveLength(2);
-		expect(
-			mock.calls[1]?.context.messages.some(message =>
-				typeof message.content === "string"
-					? message.content.includes("ACP stop continuation.")
-					: message.content.some(
-							content => content.type === "text" && content.text.includes("ACP stop continuation."),
-						),
-			),
-		).toBe(true);
-	});
-
 	it("does not emit session_stop for subagent sessions", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const mock = createMockModel({
@@ -696,68 +648,6 @@ describe("AgentSession concurrent prompt guard", () => {
 
 		releaseExtension();
 		await session.waitForIdle();
-	});
-
-	it("queues idle ACP client-triggered custom messages instead of starting an ownerless turn", async () => {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
-		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
-		const agent = new Agent({
-			getApiKey: () => "test-key",
-			initialState: {
-				model,
-				systemPrompt: ["Test"],
-				tools: [],
-			},
-			convertToLlm,
-			streamFn: mock.stream,
-		});
-
-		const sessionManager = SessionManager.inMemory();
-		const settings = Settings.isolated();
-		const modelRegistry = sharedModelRegistry;
-		session = new AgentSession({
-			agent,
-			sessionManager,
-			settings,
-			modelRegistry,
-		});
-		session.setClientBridge({
-			capabilities: {},
-			deferAgentInitiatedTurns: true,
-		});
-
-		await session.prompt("First message");
-		expect(session.isStreaming).toBe(false);
-		const callsAfterFirstPrompt = mock.calls.length;
-
-		await session.sendCustomMessage(
-			{
-				customType: "async-result",
-				content: "Background result",
-				display: true,
-				attribution: "agent",
-			},
-			{ deliverAs: "followUp", triggerTurn: true },
-		);
-
-		expect(mock.calls).toHaveLength(callsAfterFirstPrompt);
-		expect(session.isStreaming).toBe(false);
-
-		await session.prompt("Next user prompt");
-		await session.dispose();
-		session = undefined as unknown as AgentSession;
-		expect(mock.calls).toHaveLength(callsAfterFirstPrompt + 1);
-		expect(
-			mock.calls.at(-1)?.context.messages.some(message => {
-				if (typeof message.content === "string") {
-					return message.content.includes("Background result");
-				}
-
-				return message.content.some(
-					content => content.type === "text" && content.text.includes("Background result"),
-				);
-			}),
-		).toBe(true);
 	});
 });
 
