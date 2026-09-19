@@ -1522,7 +1522,6 @@ describe("ExtensionRunner", () => {
 				tempDir.path(),
 				sessionManager,
 				modelRegistry,
-				undefined,
 				Settings.isolated({ "extensionHandlers.toolCallTimeoutMs": 10 }),
 			);
 			const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
@@ -1593,7 +1592,6 @@ describe("ExtensionRunner", () => {
 						tempDir.path(),
 						sessionManager,
 						modelRegistry,
-						undefined,
 						Settings.isolated({ "extensionHandlers.toolCallTimeoutMs": configuredTimeout }),
 					);
 					let settled = false;

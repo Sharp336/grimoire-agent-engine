@@ -130,6 +130,7 @@ describe("Tavily web search provider", () => {
 		};
 
 		const response = await searchTavily({
+			...makeParams("Oh My Pi omp latest release notes agents"),
 			numSearchResults: 5,
 			recency: "month",
 			fetch: fetchMock,

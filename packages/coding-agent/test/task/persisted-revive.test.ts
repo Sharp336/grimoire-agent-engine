@@ -189,7 +189,7 @@ describe("persisted subagent revival", () => {
 
 	it("strips synthetic write from legacy read-only cold revival", async () => {
 		const cwd = makeTempDir("@pi-read-only-revive-");
-		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, {
 			tools: ["read", "write", "yield"],
 			readOnly: true,
 		});
@@ -211,7 +211,7 @@ describe("persisted subagent revival", () => {
 
 	it("preserves explicitly writable cold-revival contracts", async () => {
 		const cwd = makeTempDir("@pi-write-revive-");
-		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, {
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, {
 			tools: ["read", "write", "yield"],
 			readOnly: false,
 		});
