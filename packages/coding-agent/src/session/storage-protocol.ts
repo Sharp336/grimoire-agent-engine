@@ -71,6 +71,7 @@ export interface StorageRead {
 export interface StorageReceiptRequest {
 	requestId: StorageId;
 	familyId: StorageId;
+	generationId: StorageId;
 	operationId: StorageId;
 	incarnation: number;
 }
@@ -138,9 +139,17 @@ export interface StorageResponseBase {
 	error?: StorageError;
 }
 
-export interface StorageWriteResponse extends StorageResponseBase {
+export interface StorageWriteSuccessResponse extends StorageResponseBase {
 	receipt: StorageReceipt;
+	error?: never;
 }
+
+export interface StorageWriteErrorResponse extends StorageResponseBase {
+	error: StorageError;
+	receipt?: never;
+}
+
+export type StorageWriteResponse = StorageWriteSuccessResponse | StorageWriteErrorResponse;
 
 export interface StorageBarrierResponse extends StorageResponseBase {
 	familyId: StorageId;
@@ -156,8 +165,12 @@ export interface StorageReadResponse extends StorageResponseBase {
 	throughSeq: number;
 	durableThroughSeq: number;
 	liveThroughSeq: number;
-	events: readonly StorageEntry[];
+	events: readonly StorageReadEntry[];
 	nextCursor: string | null;
+}
+
+export interface StorageReadEntry extends StorageEntry {
+	seq: number;
 }
 
 export interface StorageReceiptResponse extends StorageResponseBase {
