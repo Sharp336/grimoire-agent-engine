@@ -12,7 +12,7 @@ import {
 	getConfigRootDir,
 	getPythonGatewayDir,
 	getSessionsDir,
-	getStatsDbPath,
+	getSnapcompactSavingsJournalPath,
 	normalizeProfileName,
 	resolveProfileEnv,
 	setAgentDir,
@@ -128,7 +128,7 @@ describe("profile directories", () => {
 		expect(getAgentDir()).toBe(agent);
 		expect(getAgentDbPath()).toBe(path.join(agent, "agent.db"));
 		expect(getSessionsDir()).toBe(path.join(agent, "sessions"));
-		expect(getStatsDbPath()).toBe(path.join(root, "stats.db"));
+		expect(getSnapcompactSavingsJournalPath()).toBe(path.join(root, "snapcompact-savings.jsonl"));
 	});
 
 	it("treats the default profile as regular mode", () => {

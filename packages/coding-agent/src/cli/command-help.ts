@@ -23,10 +23,6 @@ export const browserRelayHelp = {
 	description: "Run the local CDP relay that lets the browser tool drive your own Chrome tabs",
 } satisfies CommandMetadata;
 
-export const cleanseHelp = {
-	description: "Detect and fix project diagnostics with weighted parallel subagents",
-} satisfies CommandMetadata;
-
 export const commitHelp = { description: "Generate a commit message and update changelogs" } satisfies CommandMetadata;
 
 export const completionsHelp = {
@@ -34,10 +30,6 @@ export const completionsHelp = {
 } satisfies CommandMetadata;
 
 export const completeHelp = { hidden: true } satisfies CommandMetadata;
-
-export const compressHelp = {
-	description: "Rewrite a text file into the dense prompt register, reporting what it drops",
-} satisfies CommandMetadata;
 
 export const configHelp = { description: "Manage configuration settings" } satisfies CommandMetadata;
 
@@ -76,8 +68,6 @@ export const installHelp = {
 	description: "Install or link an extension package (alias of `plugin install`/`plugin link`)",
 } satisfies CommandMetadata;
 
-export const joinHelp = { description: "Join a shared collab session (same as /join)" } satisfies CommandMetadata;
-
 export const modelsHelp = { description: "List, search, and refresh available models" } satisfies CommandMetadata;
 
 export const pluginHelp = { description: "Manage plugins (install, uninstall, list, etc.)" } satisfies CommandMetadata;
@@ -99,10 +89,6 @@ export const sayHelp = {
 
 export const searchHelp = { description: "Test web search providers" } satisfies CommandMetadata;
 
-export const shareHelp = {
-	description: "Share a saved session via an encrypted link (same as /share)",
-} satisfies CommandMetadata;
-
 export const setupHelp = {
 	description: "Run onboarding setup or install dependencies for optional features",
 } satisfies CommandMetadata;
@@ -110,8 +96,6 @@ export const setupHelp = {
 export const shellHelp = { description: "Interactive shell console" } satisfies CommandMetadata;
 
 export const sshHelp = { description: "Manage SSH host configurations" } satisfies CommandMetadata;
-
-export const statsHelp = { description: "View usage statistics" } satisfies CommandMetadata;
 
 export const tinyModelsHelp = {
 	description: "Download tiny local models (session titles + memory)",

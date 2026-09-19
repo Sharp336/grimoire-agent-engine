@@ -61,8 +61,6 @@ export interface Args {
 	providerSessionId?: string;
 	providerPromptCacheKey?: string;
 	fork?: string;
-	/** Collab link to join at startup (set by the `join` subcommand; no CLI flag). */
-	join?: string;
 	models?: string[];
 	tools?: string[];
 	noTools?: boolean;
@@ -75,7 +73,6 @@ export interface Args {
 	pluginDirs?: string[];
 	print?: boolean;
 	printThoughts?: boolean;
-	export?: string;
 	noSkills?: boolean;
 	skills?: string[];
 	noRules?: boolean;

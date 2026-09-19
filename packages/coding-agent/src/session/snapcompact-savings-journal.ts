@@ -20,12 +20,12 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { getStatsDbPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { getSnapcompactSavingsJournalPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
 
 export interface SnapcompactSavingsRecord {
 	/** Epoch milliseconds when the swap was applied. */
 	ts: number;
-	/** Session file path (matches the stats `messages.session_file` key). */
+	/** Session file path identifying the persisted conversation. */
 	session: string;
 	provider: string;
 	model: string;
@@ -33,9 +33,9 @@ export interface SnapcompactSavingsRecord {
 	savedTokens: number;
 }
 
-/** `~/.omp/.../snapcompact-savings.jsonl`, colocated with stats.db. */
+/** `~/.omp/.../snapcompact-savings.jsonl`. */
 export function snapcompactSavingsJournalPath(): string {
-	return path.join(path.dirname(getStatsDbPath()), "snapcompact-savings.jsonl");
+	return getSnapcompactSavingsJournalPath();
 }
 
 /**

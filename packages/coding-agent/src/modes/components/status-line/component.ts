@@ -32,7 +32,6 @@ import { getPreset } from "./presets";
 import { renderSegment, type SegmentContext } from "./segments";
 import { getSeparator } from "./separators";
 import type {
-	CollabStatus,
 	EffectiveStatusLineSettings,
 	StatusLineSegmentId,
 	StatusLineSegmentOptions,
@@ -405,15 +404,6 @@ export class StatusLineComponent implements Component {
 	#planModeStatus: { enabled: boolean; paused: boolean } | null = null;
 	#loopModeStatus: SegmentContext["loopMode"] = null;
 	#goalModeStatus: { enabled: boolean; paused: boolean } | null = null;
-	#vibeModeStatus: { enabled: boolean } | null = null;
-	/**
-	 * Injected aggregator that returns the aggregate tok/s of this session's
-	 * live vibe worker sessions, or null when no workers are streaming. Kept as
-	 * a callback so the render layer doesn't import the heavy vibe/task
-	 * dependency graph; interactive-mode wires it to VibeSessionRegistry.
-	 */
-	#vibeWorkerTokenRate: (() => number | null) | null = null;
-	#collabStatus: CollabStatus | null = null;
 	#focusedAgentId: string | undefined;
 	#activeRepoCache: ActiveRepoCache | undefined;
 
@@ -569,7 +559,7 @@ export class StatusLineComponent implements Component {
 	 */
 	setSubagentHubHint(_hint: string | undefined): void {}
 
-	/** Active subagent count as currently displayed (collab state mirroring). */
+	/** Active subagent count as currently displayed. */
 	get subagentCount(): number {
 		return this.#subagentCount;
 	}
@@ -577,7 +567,7 @@ export class StatusLineComponent implements Component {
 	/**
 	 * Reset the currently-attached session's active-time accumulators so
 	 * the `time_spent` segment starts from zero. Called from `/clear`,
-	 * fresh-session, and joined-collab paths; both the completed
+	 * and fresh-session paths; both the completed
 	 * accumulator and any in-flight window are dropped, so a reset
 	 * mid-turn ignores the running window (the matching `markActivityEnd`
 	 * will see an idle meter and no-op).
@@ -664,25 +654,6 @@ export class StatusLineComponent implements Component {
 
 	setGoalModeStatus(status: { enabled: boolean; paused: boolean } | undefined): void {
 		this.#goalModeStatus = status ?? null;
-	}
-
-	setVibeModeStatus(status: { enabled: boolean } | undefined): void {
-		this.#vibeModeStatus = status ?? null;
-	}
-
-	/**
-	 * Inject the aggregator that returns the aggregate tok/s of this session's
-	 * live vibe worker sessions (null when no workers are streaming). Wired by
-	 * interactive-mode, which owns the VibeSessionRegistry coupling, so the
-	 * render layer stays off the heavy vibe/task dependency graph. Pass
-	 * `undefined` to clear.
-	 */
-	setVibeWorkerTokenRateProvider(provider: (() => number | null) | undefined): void {
-		this.#vibeWorkerTokenRate = provider ?? null;
-	}
-
-	setCollabStatus(status: CollabStatus | null): void {
-		this.#collabStatus = status;
 	}
 
 	/** Set the callback that presents detected Codex reset celebrations, or clear it with `undefined`. */
@@ -1181,31 +1152,13 @@ export class StatusLineComponent implements Component {
 
 		return stalePr ?? null;
 	}
-
 	#getTokensPerSecond(): number | null {
-		// Aggregate tok/s across the main session AND every live vibe worker.
-		// In vibe mode the director is often idle while workers stream, so the
-		// main session's own rate alone would show a stale/zero value while
-		// parallel work is actively generating tokens.
-		const workerRate = this.#getVibeWorkerTokensPerSecond();
-		if (workerRate !== null) {
-			// At least one worker is streaming — add the director's live rate
-			// only when it is itself streaming (a finalized last-turn rate would
-			// double-count and overstate throughput).
-			const mainRate = this.session.isStreaming ? calculateTokensPerSecond(this.session.state.messages, true) : 0;
-			return (mainRate ?? 0) + workerRate;
-		}
-
-		// No workers streaming — fall back to the main session's own rate with
-		// its sticky per-assistant-message cache so the badge doesn't flicker
-		// off in the brief gap between stream end and the finalized message.
 		return this.#getMainSessionTokensPerSecond();
 	}
 
 	/**
 	 * Main session's tok/s with sticky caching keyed on the last assistant
-	 * message timestamp. Preserves the pre-aggregation behavior when no vibe
-	 * workers are active.
+	 * message timestamp.
 	 */
 	#getMainSessionTokensPerSecond(): number | null {
 		let lastAssistantTimestamp: number | null = null;
@@ -1235,17 +1188,6 @@ export class StatusLineComponent implements Component {
 		}
 
 		return null;
-	}
-
-	/**
-	 * Aggregate tok/s across every live vibe worker session owned by this
-	 * session. Returns null when no workers are streaming (so the main
-	 * session's own rate shines through unchanged). The aggregation itself is
-	 * injected via {@link setVibeWorkerTokenRateProvider} to keep this render
-	 * layer off the heavy vibe/task dependency graph.
-	 */
-	#getVibeWorkerTokensPerSecond(): number | null {
-		return this.#vibeWorkerTokenRate?.() ?? null;
 	}
 
 	#formatUsageContextKey(activeProvider: string | undefined, identity: OAuthAccountIdentity | undefined): string {
@@ -1603,7 +1545,7 @@ export class StatusLineComponent implements Component {
 	 * last assistant's real prompt-token count — so the bar matches the provider
 	 * and the `/context` panel — and reports `null` while that count is unknown
 	 * (right after compaction, before the next response). Exposed (non-private)
-	 * for unit tests and the collab host's state broadcast.
+	 * for unit tests.
 	 */
 	getCachedContextBreakdown(): { usedTokens: number; contextWindow: number } {
 		const messages = this.session.messages ?? EMPTY_MESSAGES;
@@ -1688,14 +1630,6 @@ export class StatusLineComponent implements Component {
 		let contextTokens = breakdown.usedTokens;
 		contextWindow = breakdown.contextWindow || contextWindow;
 		let contextPercent: number | null = contextWindow > 0 ? (breakdown.usedTokens / contextWindow) * 100 : null;
-		// Collab guest: context comes from the host's state frames — the local
-		// replica does no accounting of its own.
-		const collabState = this.#collabStatus?.stateOverride;
-		if (collabState?.contextUsage) {
-			contextWindow = collabState.contextUsage.contextWindow || contextWindow;
-			contextTokens = collabState.contextUsage.tokens ?? contextTokens;
-			contextPercent = collabState.contextUsage.percent ?? contextPercent;
-		}
 
 		const shouldResolveActiveRepo = this.#gitEnabled() && (includePath || includeGit || includePr);
 		const projectDir = getProjectDir();
@@ -1738,8 +1672,6 @@ export class StatusLineComponent implements Component {
 					? { enabled: true }
 					: null,
 			goalMode: this.#goalModeStatus,
-			vibeMode: this.#vibeModeStatus,
-			collab: this.#collabStatus,
 			usageStats,
 			contextPercent,
 			contextTokens,
@@ -1989,7 +1921,7 @@ export class StatusLineComponent implements Component {
 				// Preserve the current working directory as long as possible. The
 				// previous right-to-left pop could collapse a normal-width bar to
 				// just the model segment, hiding the path before less-critical left
-				// segments such as model/mode/collab were removed.
+				// segments such as model/mode were removed.
 				for (let i = leftSegIds.length - 1; i >= 0; i--) {
 					if (leftSegIds[i] !== "path") return i;
 				}

@@ -179,7 +179,6 @@ import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool
 };
 import rewindReportTemplate from "../prompts/system/rewind-report.md" with { type: "text" };
 import sideChannelNoToolsReminder from "../prompts/system/side-channel-no-tools.md" with { type: "text" };
-import vibeModeActivePrompt from "../prompts/system/vibe-mode-active.md" with { type: "text" };
 import {
 	deobfuscateAssistantContent,
 	deobfuscateSessionContext,
@@ -223,7 +222,6 @@ import type { InspectImageMode } from "../utils/inspect-image-mode";
 import { resumeCommand } from "../utils/resume-command";
 import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
-import type { VibeModeState } from "../vibe/state";
 import type { AgentSessionEvent, AgentSessionEventListener } from "./agent-session-events";
 import type {
 	AgentSessionConfig,
@@ -538,7 +536,6 @@ export class AgentSession {
 	#planModeState: PlanModeState | undefined;
 	/** Session-scoped `/vision` override; undefined = follow persisted `inspect_image.mode`. */
 	#inspectImageModeOverride: InspectImageMode | undefined;
-	#vibeModeState: VibeModeState | undefined;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
 	readonly #advisors: SessionAdvisors;
@@ -1379,7 +1376,6 @@ export class AgentSession {
 		this.#tools = new SessionTools(sessionToolsHost, {
 			autoApprove: config.autoApprove,
 			toolRegistry: config.toolRegistry,
-			createVibeTools: config.createVibeTools,
 			createComputerTool: config.createComputerTool,
 			createThinkTool: config.createThinkTool,
 			createInspectImageTool: config.createInspectImageTool,
@@ -4864,21 +4860,6 @@ export class AgentSession {
 		return this.#tools.getAllToolInfos();
 	}
 
-	/** Installs and activates the ephemeral vibe tool set. */
-	activateVibeTools(baseToolNames: string[]): Promise<void> {
-		return this.#tools.activateVibeTools(baseToolNames);
-	}
-
-	/** Uninstalls vibe tools and activates the replacement set. */
-	deactivateVibeTools(nextToolNames: string[]): Promise<void> {
-		return this.#tools.deactivateVibeTools(nextToolNames);
-	}
-
-	/** Removes vibe tools without restoring a source-session snapshot. */
-	removeVibeToolsPreservingActive(): Promise<void> {
-		return this.#tools.removeVibeToolsPreservingActive();
-	}
-
 	#resolveActiveEditMode(): EditMode {
 		return this.#tools.resolveActiveEditMode();
 	}
@@ -5221,20 +5202,6 @@ export class AgentSession {
 		this.#goalModeState = state;
 	}
 
-	getVibeModeState(): VibeModeState | undefined {
-		return this.#vibeModeState;
-	}
-
-	setVibeModeState(state: VibeModeState | undefined): void {
-		this.#vibeModeState = state;
-	}
-
-	#assertVibeSessionTransitionAllowed(action: string): void {
-		if (this.#vibeModeState?.enabled) {
-			throw new Error(`Cannot ${action} while vibe mode is active. Exit vibe mode first.`);
-		}
-	}
-
 	get goalRuntime(): GoalRuntime {
 		return this.#goalRuntime;
 	}
@@ -5356,21 +5323,6 @@ export class AgentSession {
 
 	async sendGoalModeContext(options?: { deliverAs?: "steer" | "followUp" | "nextTurn" }): Promise<void> {
 		const message = this.#buildGoalModeMessage();
-		if (!message) return;
-		await this.sendCustomMessage(
-			{
-				customType: message.customType,
-				content: message.content,
-				display: message.display,
-				details: message.details,
-				attribution: message.attribution,
-			},
-			options ? { deliverAs: options.deliverAs } : undefined,
-		);
-	}
-
-	async sendVibeModeContext(options?: { deliverAs?: "steer" | "followUp" | "nextTurn" }): Promise<void> {
-		const message = this.#buildVibeModeMessage();
 		if (!message) return;
 		await this.sendCustomMessage(
 			{
@@ -5527,20 +5479,6 @@ export class AgentSession {
 			role: "custom",
 			customType: "goal-mode-context",
 			content: prompt.render(goalModeContextPrompt, { goalContext: content, todoContext }),
-			display: false,
-			attribution: "agent",
-			timestamp: Date.now(),
-		};
-	}
-
-	#buildVibeModeMessage(): CustomMessage | null {
-		if (!this.#vibeModeState?.enabled) return null;
-		return {
-			role: "custom",
-			customType: "vibe-mode-context",
-			content: prompt.render(vibeModeActivePrompt, {
-				todoAvailable: this.getActiveToolNames().includes("todo"),
-			}),
 			display: false,
 			attribution: "agent",
 			timestamp: Date.now(),
@@ -5981,10 +5919,6 @@ export class AgentSession {
 			if (goalModeMessage) {
 				messages.push(goalModeMessage);
 			}
-			const vibeModeMessage = this.#buildVibeModeMessage();
-			if (vibeModeMessage) {
-				messages.push(vibeModeMessage);
-			}
 			if (options?.prependMessages) {
 				messages.push(...options.prependMessages);
 			}
@@ -6408,7 +6342,7 @@ export class AgentSession {
 		identity?: Pick<PromptOptions, "sourceCommandId" | "clientMessageId" | "launchSnapshot" | "originalAttachments">,
 		context?: CustomMessagePayload,
 	): Promise<void> {
-		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
+		// A queued user message (RPC/SDK steer or follow-up, or a typed message
 		// while streaming) is a deliberate resume; re-enable advisor auto-resume that
 		// a user interrupt suppressed.
 		this.#advisors.autoResumeSuppressed = false;
@@ -7209,7 +7143,6 @@ export class AgentSession {
 	 * @returns true if completed, false if cancelled by hook
 	 */
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
-		this.#assertVibeSessionTransitionAllowed("start a new session");
 		const previousSessionFile = this.sessionFile;
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
@@ -7325,7 +7258,6 @@ export class AgentSession {
 	 * @returns true if completed, false if cancelled by hook or not persisting
 	 */
 	async fork(): Promise<boolean> {
-		this.#assertVibeSessionTransitionAllowed("fork the session");
 		const previousSessionFile = this.sessionFile;
 		const previousSessionId = this.sessionManager.getSessionId();
 
@@ -7398,7 +7330,6 @@ export class AgentSession {
 
 	/** Move the active session and artifacts after enforcing mode transition invariants. */
 	async moveSession(newCwd: string, targetSessionDir?: string): Promise<void> {
-		this.#assertVibeSessionTransitionAllowed("move the session");
 		await this.sessionManager.moveTo(newCwd, targetSessionDir);
 	}
 
@@ -9697,27 +9628,6 @@ export class AgentSession {
 			.finally(() => {
 				coordinator.sweepInFlight = false;
 			});
-	}
-
-	/**
-	 * Export session to HTML.
-	 * @param outputPath Optional output path
-	 * @param useUserThemes Bundle the dark and light TUI themes selected in settings
-	 */
-	async exportToHtml(outputPath?: string, useUserThemes = false): Promise<string> {
-		// Lazy import: the export module embeds the HTML template and pre-built
-		// tool renderers as text; only `/export` should pay that load.
-		const { exportSessionToHtml } = await import("../export/html");
-		return exportSessionToHtml(this.sessionManager, this.state, {
-			outputPath,
-			palette: useUserThemes ? "theme" : "web",
-			themeNames: useUserThemes
-				? {
-						dark: this.settings.get("theme.dark") ?? "titanium",
-						light: this.settings.get("theme.light") ?? "light",
-					}
-				: undefined,
-		});
 	}
 
 	// =========================================================================

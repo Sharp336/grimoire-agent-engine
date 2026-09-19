@@ -14,7 +14,6 @@ import { handleMcpAcp } from "./helpers/mcp";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
 import { describeRedeemOutcome, type ResetUsageAccount, toResetUsageAccounts } from "./helpers/reset-usage";
 import { matchSessionPinAccounts, toSessionPinAccounts } from "./helpers/session-pin";
-import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-dashboard";
 import { handleTodoAcp } from "./helpers/todo";
 import { buildUsageReportText } from "./helpers/usage-report";
 import type { SlashCommandRuntime, SlashCommandSpec } from "./types";
@@ -336,26 +335,6 @@ export const BUILTIN_SESSION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			}
 			runtime.ctx.showStatus("Usage: /usage [show|reset [account|active]]");
 			runtime.ctx.editor.setText("");
-		},
-	},
-	{
-		name: "stats",
-		icon: "stats",
-		description: "Launch the local stats dashboard",
-		inlineHint: "[--port <port>] [--host <host>]",
-		allowArgs: true,
-		handle: async (command, runtime) => {
-			const parsed = parseStatsDashboardArgs(command.args);
-			if ("error" in parsed) return usage(parsed.error, runtime);
-
-			await runtime.output("Syncing session files...");
-			try {
-				const result = await launchStatsDashboard(parsed);
-				await runtime.output(result.message);
-			} catch (error) {
-				await runtime.output(`Stats dashboard failed: ${errorMessage(error)}`);
-			}
-			return commandConsumed();
 		},
 	},
 	{

@@ -723,9 +723,9 @@ export function getNativesDir(): string {
 	return dirs.rootSubdir("natives", "cache");
 }
 
-/** Get the stats database path (~/.omp/stats.db). */
-export function getStatsDbPath(): string {
-	return dirs.rootSubdir("stats.db", "data");
+/** Get the SnapCompact savings journal path (~/.omp/snapcompact-savings.jsonl). */
+export function getSnapcompactSavingsJournalPath(): string {
+	return dirs.rootSubdir("snapcompact-savings.jsonl", "data");
 }
 
 /** Get the autoresearch state directory (~/.omp/autoresearch). */

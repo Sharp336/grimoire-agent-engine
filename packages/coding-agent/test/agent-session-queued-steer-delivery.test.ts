@@ -1,10 +1,10 @@
 /**
- * Contract: a custom message steered into a streaming session (the collab-host
+ * Contract: a custom message steered into a streaming session (the extension
  * and skill-prompt path: `promptCustomMessage(..., { streamingBehavior: "steer" })`)
  * is always delivered — never silently stranded in the agent's steering queue.
  *
- * Two regression seams, both observed as "guest messages just disappear" in
- * collab sessions:
+ * Two regression seams, both observed as "extension messages just disappear" in
+ * extension sessions:
  *  1. A steer landing at the run's yield boundary (after the stop-boundary
  *     dequeue) must force another turn instead of stranding.
  *  2. A steer landing while the prompt unwinds (isStreaming stays true through
@@ -27,7 +27,7 @@ import type { SessionMessageEntry } from "@oh-my-pi/pi-coding-agent/session/sess
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
-const COLLAB_PROMPT_TYPE = "collab-prompt";
+const CUSTOM_PROMPT_TYPE = "custom-prompt";
 
 interface SteerHarness {
 	session: AgentSession;
@@ -80,13 +80,13 @@ describe("AgentSession queued steer delivery", () => {
 		return { session, sessionManager, mock };
 	}
 
-	function steerCollabPrompt(target: AgentSession, text: string): Promise<void> {
+	function steerCustomPrompt(target: AgentSession, text: string): Promise<void> {
 		return target.promptCustomMessage(
 			{
-				customType: COLLAB_PROMPT_TYPE,
+				customType: CUSTOM_PROMPT_TYPE,
 				content: text,
 				display: true,
-				details: { from: "guest" },
+				details: { from: "extension" },
 				attribution: "user",
 			},
 			{ streamingBehavior: "steer" },
@@ -112,23 +112,23 @@ describe("AgentSession queued steer delivery", () => {
 		return promise;
 	}
 
-	/** Resolves with the entry text when a collab-prompt entry is persisted. */
-	function nextCollabEntry(sessionManager: SessionManager): Promise<string> {
+	/** Resolves with the entry text when a custom-prompt entry is persisted. */
+	function nextCustomEntry(sessionManager: SessionManager): Promise<string> {
 		const { promise, resolve } = Promise.withResolvers<string>();
 		sessionManager.onEntryAppended = entry => {
-			if (entry.type === "custom_message" && entry.customType === COLLAB_PROMPT_TYPE) {
+			if (entry.type === "custom_message" && entry.customType === CUSTOM_PROMPT_TYPE) {
 				resolve(typeof entry.content === "string" ? entry.content : JSON.stringify(entry.content));
 			}
 		};
 		return promise;
 	}
 
-	it("delivers a collab steer that lands at the run's yield boundary", async () => {
+	it("delivers a custom steer that lands at the run's yield boundary", async () => {
 		const { session, sessionManager, mock } = await createSession([
 			{ content: ["host answer"] },
-			{ content: ["ack guest"] },
+			{ content: ["ack extension"] },
 		]);
-		const entryAppended = nextCollabEntry(sessionManager);
+		const entryAppended = nextCustomEntry(sessionManager);
 
 		let streamingAtInject: boolean | undefined;
 		let injected = false;
@@ -137,13 +137,13 @@ describe("AgentSession queued steer delivery", () => {
 			injected = true;
 			// The session is still mid-prompt here, so this takes the steer path.
 			streamingAtInject = session.isStreaming;
-			await steerCollabPrompt(session, "guest steer at yield");
+			await steerCustomPrompt(session, "extension steer at yield");
 		});
 
 		await session.prompt("hello");
 
 		expect(streamingAtInject).toBe(true);
-		expect(await entryAppended).toBe("guest steer at yield");
+		expect(await entryAppended).toBe("extension steer at yield");
 		expect(mock.calls.length).toBe(2);
 		expect(session.agent.hasQueuedMessages()).toBe(false);
 	});
@@ -186,9 +186,9 @@ describe("AgentSession queued steer delivery", () => {
 	it("drains a steer stranded in the agent queue when the session settles", async () => {
 		const { session, sessionManager, mock } = await createSession([
 			{ content: ["host answer"] },
-			{ content: ["ack guest"] },
+			{ content: ["ack extension"] },
 		]);
-		const entryAppended = nextCollabEntry(sessionManager);
+		const entryAppended = nextCustomEntry(sessionManager);
 
 		// Inject from the wire agent_end subscriber: it fires synchronously while
 		// the session settles (#promptInFlightCount just hit 0), after the agent
@@ -202,10 +202,10 @@ describe("AgentSession queued steer delivery", () => {
 			if (agentEnds === 1) {
 				session.agent.steer({
 					role: "custom",
-					customType: COLLAB_PROMPT_TYPE,
-					content: "guest steer at settle",
+					customType: CUSTOM_PROMPT_TYPE,
+					content: "extension steer at settle",
 					display: true,
-					details: { from: "guest" },
+					details: { from: "extension" },
 					attribution: "user",
 					timestamp: Date.now(),
 				});
@@ -215,7 +215,7 @@ describe("AgentSession queued steer delivery", () => {
 		});
 
 		await session.prompt("hello");
-		expect(await entryAppended).toBe("guest steer at settle");
+		expect(await entryAppended).toBe("extension steer at settle");
 		await secondRunDone.promise;
 
 		expect(mock.calls.length).toBe(2);

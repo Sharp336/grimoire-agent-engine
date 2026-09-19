@@ -111,7 +111,6 @@ export * from "./security-scan";
 export * from "./think";
 export * from "./todo";
 export * from "./tts";
-export * from "./vibe";
 export * from "./write";
 export * from "./xdev";
 export * from "./yield";

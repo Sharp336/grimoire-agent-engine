@@ -88,22 +88,6 @@ const LEFT_TAP_WINDOW_MS = 500;
 const SPLIT_MIN_WIDTH = 96;
 const DETAIL_MIN_WIDTH = 34;
 const ROSTER_MIN_WIDTH = 48;
-/** Result of one host-backed transcript read for the Agent Hub viewer. */
-export interface AgentHubRemoteTranscript {
-	text: string;
-	newSize: number;
-	/** Terminal read failure reported by the host; guests should surface it instead of retrying hot. */
-	error?: string;
-}
-
-/** Guest-side proxy for hub actions executed on the collab host. */
-export interface AgentHubRemote {
-	chat(id: string, text: string): void;
-	kill(id: string): void;
-	revive(id: string): void;
-	/** Mirrors readFileIncremental: text from fromByte (complete JSONL lines), newSize = next fromByte base; null = temporarily unavailable. */
-	readTranscript(id: string, fromByte: number): Promise<AgentHubRemoteTranscript | null>;
-}
 
 export interface AgentHubDeps {
 	/** Progress/status snapshot source (task lifecycle + progress channels). */
@@ -135,13 +119,10 @@ export interface AgentHubDeps {
 	proseOnlyThinking?: () => boolean;
 	/** Keys toggling tool output expansion (app.tools.expand). */
 	expandKeys?: KeyId[];
-	/** Focus the main view on this agent's live session (ctx.focusAgentSession). When absent (collab guest, tests), Enter opens the in-hub chat view instead. */
+	/** Focus the main view on this agent's live session (ctx.focusAgentSession). When absent (e.g. tests), Enter opens the in-hub chat view instead. */
 	focusAgent?: (id: string) => Promise<void>;
 	/** Current main session file; used to seed parked historical subagents after restart. */
 	sessionFile?: string | null;
-
-	/** Collab guest: route actions/transcripts to the host instead of local sessions. */
-	remote?: AgentHubRemote;
 }
 
 export class AgentHubOverlayComponent extends Container implements SelectListMouseTarget {
@@ -156,7 +137,6 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 	#unsubscribers: Array<() => void> = [];
 	#ageTimer: NodeJS.Timeout | undefined;
 	#dataChangeTimer?: NodeJS.Timeout;
-	#remote: AgentHubRemote | undefined;
 	#disposed = false;
 	/** Resolves after persisted historical subagents have been registered and rows refreshed. */
 	readonly persistedSubagentsReady: Promise<void>;
@@ -233,8 +213,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		this.#onDone = deps.onDone;
 		this.#requestRender = deps.requestRender;
 		this.#hubKeys = deps.hubKeys;
-		this.#remote = deps.remote;
-		this.#loadingPersistedSubagents = !this.#remote && Boolean(deps.sessionFile?.endsWith(".jsonl"));
+		this.#loadingPersistedSubagents = Boolean(deps.sessionFile?.endsWith(".jsonl"));
 		this.#ui =
 			deps.ui ??
 			({
@@ -260,21 +239,19 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		}, AGE_TICK_MS);
 		this.#ageTimer.unref?.();
 
-		this.persistedSubagentsReady = this.#remote
-			? Promise.resolve()
-			: registerPersistedSubagents(this.#registry, deps.sessionFile, {
-					shouldContinue: () => !this.#disposed,
-				})
-					.then(() => {
-						if (!this.#disposed) this.#refreshRows();
-					})
-					.catch((error: unknown) => {
-						logger.warn("Failed to register persisted subagents", { error });
-					})
-					.finally(() => {
-						this.#loadingPersistedSubagents = false;
-						if (!this.#disposed) this.#requestRender();
-					});
+		this.persistedSubagentsReady = registerPersistedSubagents(this.#registry, deps.sessionFile, {
+			shouldContinue: () => !this.#disposed,
+		})
+			.then(() => {
+				if (!this.#disposed) this.#refreshRows();
+			})
+			.catch((error: unknown) => {
+				logger.warn("Failed to register persisted subagents", { error });
+			})
+			.finally(() => {
+				this.#loadingPersistedSubagents = false;
+				if (!this.#disposed) this.#requestRender();
+			});
 		this.#refreshRows();
 	}
 
@@ -364,9 +341,8 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		viewer = new AgentTranscriptViewer({
 			agentId: id,
 			registry: this.#registry,
-			remote: this.#remote,
 			observers: this.#observers,
-			lifecycle: this.#remote ? undefined : this.#lifecycle,
+			lifecycle: this.#lifecycle,
 			ui: this.#ui,
 			getTool: this.#getTool,
 			isBuiltInTool: this.#isBuiltInTool,
@@ -1056,7 +1032,7 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 		const focusAgent = this.#focusAgent;
 		// Aborted agents and advisor refs are read-only transcripts with no
 		// revivable session; open the in-hub viewer instead of failing ensureLive.
-		if (ref.kind === "advisor" || ref.status === "aborted" || this.#remote || !focusAgent) {
+		if (ref.kind === "advisor" || ref.status === "aborted" || !focusAgent) {
 			this.openChat(ref.id);
 			return;
 		}
@@ -1085,11 +1061,6 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			return;
 		}
 		this.#notice = undefined;
-		if (this.#remote) {
-			this.#remote.revive(ref.id);
-			this.#requestRender();
-			return;
-		}
 		// Fire-and-forget; failures surface as an inline notice
 		this.#lifecycle()
 			.ensureLive(ref.id)
@@ -1109,12 +1080,6 @@ export class AgentHubOverlayComponent extends Container implements SelectListMou
 			return;
 		}
 		this.#notice = undefined;
-		if (this.#remote) {
-			this.#remote.kill(ref.id);
-			this.#refreshRows();
-			this.#requestRender();
-			return;
-		}
 		void (async () => {
 			try {
 				if (ref.status === "running" && ref.session) {

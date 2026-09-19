@@ -11,7 +11,6 @@ import {
 } from "@oh-my-pi/pi-ai/utils/schema";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createTools, HIDDEN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
-import { createVibeTools } from "@oh-my-pi/pi-coding-agent/tools/vibe";
 
 interface ToolSchemaEntry {
 	name: string;
@@ -56,13 +55,6 @@ const toolSchemasPromise: Promise<ToolSchemaEntry[]> = (async () => {
 		const schema = toolWireSchema(tool);
 		if (asSchemaObject(schema)) {
 			byToolName.set(name, schema);
-		}
-	}
-
-	for (const tool of createVibeTools(session)) {
-		const schema = toolWireSchema(tool);
-		if (asSchemaObject(schema)) {
-			byToolName.set(tool.name, schema);
 		}
 	}
 

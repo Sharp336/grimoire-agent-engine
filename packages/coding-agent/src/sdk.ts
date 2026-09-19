@@ -207,7 +207,6 @@ import {
 	BashTool,
 	BUILTIN_TOOLS,
 	createTools,
-	createVibeTools,
 	type DeferredDiagnosticsEntry,
 	defaultLoadModeForToolName,
 	discoverStartupLspServers,
@@ -250,7 +249,6 @@ import { normalizeProviderContextImagesForModel } from "./utils/image-loading";
 import { formatLocalCalendarDate } from "./utils/local-date";
 import { normalizePromptPath } from "./utils/prompt-path";
 import { buildNamedToolChoice } from "./utils/tool-choice";
-import { VibeSessionRegistry } from "./vibe/runtime";
 import { buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 
 type McpNotificationEntry = {
@@ -3781,10 +3779,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			createInspectImageTool: restrictToolNames
 				? undefined
 				: async () => (await BUILTIN_TOOLS.inspect_image(toolSession)) ?? null,
-			createVibeTools:
-				!options.engineMode && (options.taskDepth ?? 0) === 0 && !options.parentTaskPrefix
-					? () => createVibeTools(toolSession)
-					: undefined,
 			builtInToolNames: builtInRegistryToolNames,
 			mcpManagerToolNames: initialMcpManagerToolNames,
 			transformContext,
@@ -4004,23 +3998,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 					// AgentSession.dispose() would otherwise set its guards.
 					session.beginDispose();
 					if (agentKind === "main") {
-						// Top-level teardown owns the global agent lifecycle: park timers,
-						// adopted subagent sessions, revivers. Tear it down while shared
-						// resources (kernels, MCP, LSP) are still live. Subagent disposal
-						// must NOT touch the global lifecycle.
-						if (!options.engineMode) {
-							const vibeRegistry = VibeSessionRegistry.global();
-							const vibeParentSession = {
-								getAgentId: () => resolvedAgentId,
-								getSessionId: () => sessionManager.getSessionId(),
-								getSessionFile: () => sessionManager.getSessionFile() ?? null,
-								sessionManager,
-								asyncJobManager: scopedAsyncJobManager,
-								settings,
-								getActiveModelString,
-							};
-							await vibeRegistry.suspendScope(vibeRegistry.ownerScope(vibeParentSession), scopedAsyncJobManager);
-						}
 						if (ownedAgentLifecycle) await ownedAgentLifecycle.dispose();
 					}
 					await originalDispose();

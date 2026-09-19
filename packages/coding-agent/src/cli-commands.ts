@@ -52,11 +52,6 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.browserRelayHelp,
 	},
 	{
-		name: "cleanse",
-		load: () => import("./commands/cleanse").then(m => m.default),
-		help: commandHelp.cleanseHelp,
-	},
-	{
 		name: "commit",
 		load: () => import("./commands/commit").then(m => m.default),
 		help: commandHelp.commitHelp,
@@ -70,11 +65,6 @@ export const commands: CommandEntry[] = [
 		name: "__complete",
 		load: () => import("./commands/complete").then(m => m.default),
 		help: commandHelp.completeHelp,
-	},
-	{
-		name: "compress",
-		load: () => import("./commands/compress").then(m => m.default),
-		help: commandHelp.compressHelp,
 	},
 	{
 		name: "config",
@@ -133,11 +123,6 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.installHelp,
 	},
 	{
-		name: "join",
-		load: () => import("./commands/join").then(m => m.default),
-		help: commandHelp.joinHelp,
-	},
-	{
 		name: "models",
 		load: () => import("./commands/models").then(m => m.default),
 		help: commandHelp.modelsHelp,
@@ -156,11 +141,6 @@ export const commands: CommandEntry[] = [
 		name: "say",
 		load: () => import("./commands/say").then(m => m.default),
 		help: commandHelp.sayHelp,
-	},
-	{
-		name: "share",
-		load: () => import("./commands/share").then(m => m.default),
-		help: commandHelp.shareHelp,
 	},
 	{
 		name: "setup",
@@ -186,11 +166,6 @@ export const commands: CommandEntry[] = [
 		name: "ssh",
 		load: () => import("./commands/ssh").then(m => m.default),
 		help: commandHelp.sshHelp,
-	},
-	{
-		name: "stats",
-		load: () => import("./commands/stats").then(m => m.default),
-		help: commandHelp.statsHelp,
 	},
 	{
 		name: "update",

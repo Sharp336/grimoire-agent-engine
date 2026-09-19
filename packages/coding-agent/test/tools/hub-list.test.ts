@@ -390,7 +390,7 @@ describe("hub list", () => {
 	});
 
 	it("retries persisted roster scan after a root transcript read failure", async () => {
-		using tempDir = TempDir.createSync("@omp-hub-list-vibe-read-retry-");
+		using tempDir = TempDir.createSync("@omp-hub-list-read-retry-");
 		const dir = tempDir.path();
 		const sessionFile = path.join(dir, "main.jsonl");
 		const transcriptFile = path.join(dir, "main", "ParkedScout.jsonl");
@@ -1109,7 +1109,7 @@ describe("hub list session authority", () => {
 		}
 	});
 
-	it("preserves live, aborted, advisor, vibe-owned, and nested same-root collisions", async () => {
+	it("preserves live, aborted, advisor, and nested same-root collisions", async () => {
 		using tempDir = TempDir.createSync("@omp-hub-preserve-collisions-");
 		const dir = tempDir.path();
 		const currentSession = path.join(dir, "current.jsonl");
@@ -1117,33 +1117,11 @@ describe("hub list session authority", () => {
 		const oldIdle = path.join(dir, "old", "IdleTwin.jsonl");
 		const oldDead = path.join(dir, "old", "DeadTwin.jsonl");
 		const oldAdvisor = path.join(dir, "old", "AdvisorTwin.jsonl");
-		const oldVibe = path.join(dir, "old", "VibeKid.jsonl");
-		await Bun.write(
-			currentSession,
-			`${[
-				sessionHeader("current"),
-				JSON.stringify({
-					type: "custom",
-					customType: "vibe-session-lifecycle",
-					data: {
-						version: 1,
-						id: "VibeKid",
-						ownerId: MAIN_AGENT_ID,
-						parentSessionId: "current",
-						action: "spawn",
-						cli: "fast",
-						agent: "task",
-						childSessionFile: "VibeKid.jsonl",
-						createdAt: 1,
-					},
-				}),
-			].join("\n")}\n`,
-		);
+		await Bun.write(currentSession, `${sessionHeader("current")}\n`);
 		await writeParkedTranscript(path.join(dir, "current", "LiveTwin.jsonl"), "live", "steal-live");
 		await writeParkedTranscript(path.join(dir, "current", "IdleTwin.jsonl"), "idle", "steal-idle");
 		await writeParkedTranscript(path.join(dir, "current", "DeadTwin.jsonl"), "dead", "steal-dead");
 		await writeParkedTranscript(path.join(dir, "current", "AdvisorTwin.jsonl"), "advisor", "steal-advisor");
-		await writeParkedTranscript(path.join(dir, "current", "VibeKid.jsonl"), "vibe", "steal-vibe");
 		await writeParkedTranscript(path.join(dir, "current", "Outer.jsonl"), "outer", "outer-visible-task");
 		await writeParkedTranscript(path.join(dir, "current", "Outer", "Outer.jsonl"), "nested", "nested-steal-task");
 
@@ -1189,14 +1167,6 @@ describe("hub list session authority", () => {
 			sessionFile: oldAdvisor,
 			status: "parked",
 		});
-		registry.register({
-			id: "VibeKid",
-			displayName: "task",
-			kind: "sub",
-			session: null,
-			sessionFile: oldVibe,
-			status: "parked",
-		});
 
 		await executeList(registry, MAIN_AGENT_ID, { status: "parked" }, currentSession);
 		expect(registry.get("LiveTwin")?.status).toBe("running");
@@ -1208,7 +1178,6 @@ describe("hub list session authority", () => {
 		expect(registry.get("DeadTwin")?.sessionFile).toBe(oldDead);
 		expect(registry.get("AdvisorTwin")?.kind).toBe("advisor");
 		expect(registry.get("AdvisorTwin")?.sessionFile).toBe(oldAdvisor);
-		expect(registry.get("VibeKid")?.sessionFile).toBe(oldVibe);
 		expect(registry.get("Outer")?.sessionFile).toBe(path.join(dir, "current", "Outer.jsonl"));
 		expect(registry.get("Outer")?.activity).toContain("outer-visible-task");
 		expect(registry.get("Outer")?.activity).not.toContain("nested-steal-task");

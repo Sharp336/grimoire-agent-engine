@@ -29,7 +29,6 @@ import { readToolRenderer } from "./read";
 import { resolveRenderer } from "./resolve";
 import { thinkToolRenderer } from "./think";
 import { todoToolRenderer } from "./todo";
-import { createVibeToolRenderer } from "./vibe";
 import { writeToolRenderer } from "./write";
 import { setXdevRendererLookup } from "./xdev";
 
@@ -111,7 +110,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	lsp: lspToolRenderer as ToolRenderer,
 	inspect_image: inspectImageToolRenderer as ToolRenderer,
 	// Lazy getter: `hubToolRenderer` lives in a module whose deps (messaging →
-	// persisted-agents → vibe/runtime → task/executor → sdk) close an import
+	// persisted-agents → task/executor → sdk) close an import
 	// cycle back here, so reading it at init order-dependently hits its
 	// temporal dead zone. Deferring the read to first access sidesteps it.
 	get hub(): ToolRenderer {
@@ -138,11 +137,6 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	github: githubToolRenderer as ToolRenderer,
 	goal: goalToolRenderer as ToolRenderer,
 	web_search: webSearchToolRenderer as ToolRenderer,
-	vibe_spawn: createVibeToolRenderer("spawn") as ToolRenderer,
-	vibe_send: createVibeToolRenderer("send") as ToolRenderer,
-	vibe_wait: createVibeToolRenderer("wait") as ToolRenderer,
-	vibe_kill: createVibeToolRenderer("kill") as ToolRenderer,
-	vibe_list: createVibeToolRenderer("list") as ToolRenderer,
 	write: writeToolRenderer as ToolRenderer,
 };
 

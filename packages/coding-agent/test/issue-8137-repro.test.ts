@@ -98,53 +98,6 @@ describe("issue #8137 — inline /skill in mode-command prompts", () => {
 		expect(message?.details).toMatchObject({ name: "grilling", args: "do X" });
 	});
 
-	it("dispatches an inline /skill invocation from a /vibe prompt as a skill message", async () => {
-		vi.spyOn(session, "activateVibeTools").mockResolvedValue(undefined);
-		const promptCustomMessage = vi.spyOn(session, "promptCustomMessage").mockResolvedValue(undefined);
-		let submitted: { text: string } | undefined;
-		mode.onInputCallback = input => {
-			submitted = input;
-		};
-
-		await mode.handleVibeModeCommand("do X /skill:grilling");
-
-		expect(mode.vibeModeEnabled).toBe(true);
-		expect(submitted).toBeUndefined();
-		expect(promptCustomMessage).toHaveBeenCalledTimes(1);
-		const [message] = promptCustomMessage.mock.calls[0] ?? [];
-		expect(message?.customType).toBe(SKILL_PROMPT_MESSAGE_TYPE);
-		expect(message?.details).toMatchObject({ name: "grilling", args: "do X" });
-	});
-
-	it("clears /plan and /vibe drafts before awaiting the skill turn", async () => {
-		for (const [name, handlerName] of [
-			["plan", "handlePlanModeCommand"],
-			["vibe", "handleVibeModeCommand"],
-		] as const) {
-			let finishTurn!: () => void;
-			const turn = new Promise<void>(resolve => {
-				finishTurn = resolve;
-			});
-			const handleModeCommand = vi.fn((_prompt?: string) => turn);
-			const clearDraft = vi.fn();
-			const setText = vi.fn();
-			const command = BUILTIN_MODE_SLASH_COMMANDS.find(candidate => candidate.name === name);
-			if (!command?.handleTui) throw new Error(`Expected /${name} TUI handler`);
-
-			const inFlight = command.handleTui(
-				{ name, args: "do X /skill:grilling", text: `/${name} do X /skill:grilling` },
-				{ ctx: { [handlerName]: handleModeCommand, editor: { clearDraft, setText } } } as never,
-			);
-			await Promise.resolve();
-			const clearedBeforeTurnFinished = clearDraft.mock.calls.length + setText.mock.calls.length;
-			finishTurn();
-			await inFlight;
-
-			expect(handleModeCommand.mock.calls[0]?.[0]).toBe("do X /skill:grilling");
-			expect(clearedBeforeTurnFinished).toBe(1);
-		}
-	});
-
 	it("forwards draft images into the dispatched skill message", async () => {
 		const promptCustomMessage = vi.spyOn(session, "promptCustomMessage").mockResolvedValue(undefined);
 		const image = { type: "image" as const, data: "aGk=", mimeType: "image/png" };
@@ -177,5 +130,30 @@ describe("issue #8137 — inline /skill in mode-command prompts", () => {
 		expect(mode.planModeEnabled).toBe(true);
 		expect(promptCustomMessage).not.toHaveBeenCalled();
 		expect(submitted?.text).toBe("just plan the migration");
+	});
+	it("clears /plan drafts before awaiting the skill turn", async () => {
+		for (const [name, handlerName] of [["plan", "handlePlanModeCommand"]] as const) {
+			let finishTurn!: () => void;
+			const turn = new Promise<void>(resolve => {
+				finishTurn = resolve;
+			});
+			const handleModeCommand = vi.fn((_prompt?: string) => turn);
+			const clearDraft = vi.fn();
+			const setText = vi.fn();
+			const command = BUILTIN_MODE_SLASH_COMMANDS.find(candidate => candidate.name === name);
+			if (!command?.handleTui) throw new Error(`Expected /${name} TUI handler`);
+
+			const inFlight = command.handleTui(
+				{ name, args: "do X /skill:grilling", text: `/${name} do X /skill:grilling` },
+				{ ctx: { [handlerName]: handleModeCommand, editor: { clearDraft, setText } } } as never,
+			);
+			await Promise.resolve();
+			const clearedBeforeTurnFinished = clearDraft.mock.calls.length + setText.mock.calls.length;
+			finishTurn();
+			await inFlight;
+
+			expect(handleModeCommand.mock.calls[0]?.[0]).toBe("do X /skill:grilling");
+			expect(clearedBeforeTurnFinished).toBe(1);
+		}
 	});
 });

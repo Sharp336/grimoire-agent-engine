@@ -16,7 +16,6 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { visitEntriesFromFileStream } from "@oh-my-pi/pi-coding-agent/session/session-loader";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getBundledAgent } from "@oh-my-pi/pi-coding-agent/task/agents";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -423,68 +422,6 @@ describe("Agent hub Enter activation", () => {
 		} finally {
 			vi.useRealTimers();
 		}
-	});
-
-	it("does not generically revive active or tombstoned Vibe children copied by a post-exit fork", async () => {
-		using tempDir = TempDir.createSync("@omp-agent-hub-vibe-fork-");
-		const manager = SessionManager.create(tempDir.path(), tempDir.path());
-		manager.appendModeChange("vibe");
-		const parentSessionId = manager.getSessionId();
-		for (const id of ["ActiveVibe", "KilledVibe"]) {
-			manager.appendCustomEntry("vibe-session-lifecycle", {
-				version: 1,
-				action: "spawn",
-				id,
-				ownerId: "Main",
-				parentSessionId,
-				cli: "fast",
-				agent: "sonic",
-				childSessionFile: `${id}.jsonl`,
-				createdAt: Date.now(),
-			});
-		}
-		manager.appendCustomEntry("vibe-session-lifecycle", {
-			version: 1,
-			action: "tombstone",
-			id: "KilledVibe",
-			ownerId: "Main",
-			parentSessionId,
-			reason: "mode-exit",
-		});
-		manager.appendModeChange("none");
-		await manager.ensureOnDisk();
-		await manager.flush();
-		const sourceSessionFile = manager.getSessionFile();
-		if (!sourceSessionFile) throw new Error("Expected source session file");
-		const sourceArtifacts = sourceSessionFile.slice(0, -6);
-		await fs.mkdir(sourceArtifacts, { recursive: true });
-		for (const id of ["ActiveVibe", "KilledVibe"]) {
-			await fs.writeFile(path.join(sourceArtifacts, `${id}.jsonl`), "persisted child");
-		}
-		await fs.writeFile(path.join(sourceArtifacts, "OrdinaryTask.jsonl"), persistedChildJsonl("OrdinaryTask"));
-		const fork = await manager.fork();
-		if (!fork) throw new Error("Expected persisted fork");
-		await fs.cp(sourceArtifacts, fork.newSessionFile.slice(0, -6), { recursive: true });
-		await manager.close();
-
-		const agents = new AgentRegistry();
-		const hub = new AgentHubOverlayComponent({
-			settings: Settings.isolated(),
-			observers: new SessionObserverRegistry(),
-			hubKeys: [],
-			onDone: () => {},
-			requestRender: () => {},
-			registry: agents,
-			irc: new IrcBus(agents),
-			focusAgent: async () => {},
-			sessionFile: fork.newSessionFile,
-		});
-		await hub.persistedSubagentsReady;
-
-		expect(agents.get("ActiveVibe")).toBeUndefined();
-		expect(agents.get("KilledVibe")).toBeUndefined();
-		expect(agents.get("OrdinaryTask")?.status).toBe("parked");
-		hub.dispose();
 	});
 
 	it("selector controller restores focus to the editor after Enter focuses an agent", async () => {

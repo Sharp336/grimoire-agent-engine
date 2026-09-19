@@ -53,10 +53,8 @@ import {
 } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { reset as resetCapabilities } from "../capability";
-import type { CollabGuestLink } from "../collab/guest";
-import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "../config/keybindings";
-import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
+import { type ResolvedModelRoleValue } from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import {
 	isSettingsInitialized,
@@ -99,7 +97,7 @@ import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" wit
 import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with {
 	type: "text",
 };
-import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
+import { type AgentRegistry } from "../registry/agent-registry";
 import {
 	type AgentSession,
 	type AgentSessionEvent,
@@ -151,12 +149,6 @@ import {
 	setSessionTerminalTitle,
 	setTerminalTitleStateEnabled,
 } from "../utils/title-generator";
-import {
-	aggregateVibeWorkerTokensPerSecond,
-	type VibeOwnerScope,
-	type VibeParentSession,
-	VibeSessionRegistry,
-} from "../vibe/runtime";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import { AttachmentChipsBand } from "./components/attachment-chips";
 import type { BashExecutionComponent } from "./components/bash-execution";
@@ -178,7 +170,6 @@ import type { LspServerInfo as WelcomeLspServerInfo } from "./components/welcome
 import { Composer } from "./composer";
 import { writeComposerWelcomeCache } from "./composer-cache";
 import { BtwController } from "./controllers/btw-controller";
-import { CleanseCommandController } from "./controllers/cleanse-command-controller";
 import { CommandController } from "./controllers/command-controller";
 import { EventController } from "./controllers/event-controller";
 import { ExtensionUiController } from "./controllers/extension-ui-controller";
@@ -392,17 +383,6 @@ function formatContextTokenCount(value: number): string {
 	return formatNumber(Math.max(0, Math.round(value))).toLowerCase();
 }
 
-/**
- * Reads a tool-name snapshot out of a persisted `mode_change` payload. Session
- * files are user-editable and survive across versions, so anything that is not
- * a plain array of strings is treated as absent rather than trusted.
- */
-function readPersistedToolNames(value: unknown): string[] | undefined {
-	if (!Array.isArray(value)) return undefined;
-	if (!value.every(name => typeof name === "string")) return undefined;
-	return value as string[];
-}
-
 export function shouldEnterPlanModeOnStartup(
 	sessionManager: Pick<SessionManager, "buildSessionContext" | "getEntries">,
 	sessionSettings: Pick<Settings, "get">,
@@ -587,7 +567,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	subagentContainer: Container;
 	btwContainer: Container;
 	omfgContainer: Container;
-	cleanseContainer: Container;
 	errorBannerContainer: Container;
 	modelCycleContainer: Container;
 	deferredCommandContainer: Container;
@@ -609,7 +588,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	planModePaused = false;
 	goalModeEnabled = false;
 	goalModePaused = false;
-	vibeModeEnabled = false;
 	planModePlanFilePath: string | undefined = undefined;
 	loopModeEnabled = false;
 	loopModePaused = false;
@@ -710,8 +688,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	fileSlashCommands: Set<string> = new Set();
 	skillCommands: Map<string, Skill> = new Map();
 	oauthManualInput: OAuthManualInputManager = new OAuthManualInputManager();
-	collabHost?: CollabHost;
-	collabGuest?: CollabGuestLink;
 
 	#pendingCommandOutput: Component[] = [];
 	#pendingCommandOutputSessionId: string | undefined;
@@ -728,9 +704,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #startupChangelog: StartupChangelogSelection | undefined;
 	#planModePreviousTools: string[] | undefined;
 	#goalModePreviousTools: string[] | undefined;
-	#vibeModePreviousTools: string[] | undefined;
-	#vibeModeOwnerScope: VibeOwnerScope | undefined;
-	#vibeScopeSuspendedForSwitch = false;
 	#goalContinuationTimer: NodeJS.Timeout | undefined;
 	#goalTurnHadToolCalls = false;
 	#goalContinuationTurnInFlight = false;
@@ -755,7 +728,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #btwController: BtwController;
 	readonly #tanCommandController: TanCommandController;
 	readonly #omfgController: OmfgController;
-	readonly #cleanseController: CleanseCommandController;
 	readonly #commandController: CommandController;
 	readonly #todoCommandController: TodoCommandController;
 	readonly #liveCommandController: LiveCommandController;
@@ -929,7 +901,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.subagentContainer = new AnchoredLiveContainer();
 		this.btwContainer = new AnchoredLiveContainer();
 		this.omfgContainer = new AnchoredLiveContainer();
-		this.cleanseContainer = new AnchoredLiveContainer();
 		this.errorBannerContainer = new AnchoredLiveContainer();
 		this.modelCycleContainer = new AnchoredLiveContainer();
 		this.deferredCommandContainer = new AnchoredLiveContainer();
@@ -978,13 +949,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.statusLine.setCodexResetFireworksHandler(event => {
 			this.#codexResetFireworksController.show(event);
 		});
-		// Vibe worker tok/s aggregator — keeps the status-line render layer off
-		// the heavy vibe/task dependency graph. The director is often idle while
-		// workers stream, so without this the tok/s badge would show a stale
-		// value while parallel work is actively generating tokens.
-		this.statusLine.setVibeWorkerTokenRateProvider(() =>
-			aggregateVibeWorkerTokensPerSecond(this.session.getAgentId() ?? MAIN_AGENT_ID),
-		);
 
 		this.hideToolActivity = settings.get("display.hideToolActivity");
 		this.chatContainer.setToolActivityVisible(!this.hideToolActivity);
@@ -1020,7 +984,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#btwController = new BtwController(this);
 		this.#tanCommandController = new TanCommandController(this);
 		this.#omfgController = new OmfgController(this);
-		this.#cleanseController = new CleanseCommandController(this);
 		this.#extensionUiController = new ExtensionUiController(this);
 		this.#eventController = new EventController(this);
 		this.#commandController = new CommandController(this);
@@ -1193,7 +1156,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.subagentContainer,
 			this.btwContainer,
 			this.omfgContainer,
-			this.cleanseContainer,
 			this.errorBannerContainer,
 			this.modelCycleContainer,
 			this.deferredCommandContainer,
@@ -1290,7 +1252,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Restore mode from session (e.g. plan mode on resume)
 		this.session.setSessionBeforeSwitchReconciler?.(async () => {
 			await this.#liveCommandController.stop();
-			await this.#quiesceVibeForSessionSwitch();
 		});
 		this.session.setSessionSwitchReconciler?.(() => this.#reconcileModeFromSession({ preserveActiveGoal: true }));
 		await logger.time("InteractiveMode.init:reconcileMode", () => this.#reconcileModeFromSession());
@@ -1684,11 +1645,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#deferLoopAutoSubmit(() => {
 				void this.#runLoopIteration(action, prompt);
 			});
-			return;
-		}
-
-		if (action === "reset" && this.vibeModeEnabled) {
-			this.disableLoopMode("Exit vibe mode before using reset loops. Loop mode disabled.");
 			return;
 		}
 
@@ -2100,9 +2056,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
-	/** Refresh the running-subagents status badge from the active local or collab registry. */
+	/** Refresh the running-subagents status badge from the active local registry. */
 	syncRunningSubagentBadge(options: { requestRender?: boolean } = {}): void {
-		const registry = getRunningSubagentBadgeRegistry(this.collabGuest);
+		const registry = getRunningSubagentBadgeRegistry();
 		if (this.#agentRegistrySubscriptionTarget !== registry) {
 			this.#agentRegistryUnsubscribe?.();
 			this.#agentRegistrySubscriptionTarget = registry;
@@ -2689,34 +2645,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
-	#updateVibeModeStatus(): void {
-		this.statusLine.setVibeModeStatus(this.vibeModeEnabled ? { enabled: true } : undefined);
-		this.ui.requestRender();
-	}
-
-	#vibeParentSession(): VibeParentSession {
-		return {
-			getAgentId: () => this.session.getAgentId() ?? null,
-			getSessionId: () => this.sessionManager.getSessionId(),
-			getSessionFile: () => this.sessionManager.getSessionFile() ?? null,
-			sessionManager: this.sessionManager,
-			asyncJobManager: this.session.asyncJobManager,
-			settings: this.session.settings,
-			// Resolve restored/switched-to workers against this session's active model
-			// (same as the spawn-path ToolSession), not the settings default. This is
-			// the primary fallback in resolveAgentModelPatterns, so the `good` worker's
-			// pi/task inheritance tracks the reopened session's model.
-			getActiveModelString: () => (this.session.model ? formatModelString(this.session.model) : undefined),
-		};
-	}
-
-	async #quiesceVibeForSessionSwitch(): Promise<void> {
-		const ownerScope = this.#vibeModeOwnerScope;
-		if (!this.vibeModeEnabled || !ownerScope) return;
-		await VibeSessionRegistry.global().suspendScope(ownerScope, this.session.asyncJobManager);
-		this.#vibeScopeSuspendedForSwitch = true;
-	}
-
 	#updateGoalModeStatus(): void {
 		const status =
 			this.goalModeEnabled || this.goalModePaused
@@ -2900,10 +2828,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	async #clearTransientModeState(options?: {
-		preserveVibe?: boolean;
-		vibeScopeAlreadySuspended?: boolean;
-	}): Promise<void> {
+	async #clearTransientModeState(): Promise<void> {
 		if (this.planModeEnabled || this.planModePaused) {
 			this.session.setPlanModeState(undefined);
 			try {
@@ -2938,49 +2863,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#cancelGoalContinuation();
 			this.#updateGoalModeStatus();
 		}
-
-		if (this.vibeModeEnabled && !options?.preserveVibe) {
-			const ownerScope = this.#vibeModeOwnerScope;
-			// This runs only from #reconcileModeFromSession, i.e. after switchSession
-			// already loaded and restored the target session's active tools. The
-			// #vibeModePreviousTools snapshot belongs to the SOURCE session, so
-			// applying it here would clobber the target's tools — strip only the
-			// transient vibe tools and keep the target's active set intact.
-			await this.session.removeVibeToolsPreservingActive();
-			this.session.setVibeModeState(undefined);
-			this.vibeModeEnabled = false;
-			this.#vibeModePreviousTools = undefined;
-			this.#vibeModeOwnerScope = undefined;
-			if (ownerScope && !options?.vibeScopeAlreadySuspended) {
-				await VibeSessionRegistry.global().suspendScope(ownerScope, this.session.asyncJobManager);
-			}
-			this.#updateVibeModeStatus();
-		}
 	}
 
 	/** Reconcile mode state from session entries on resume/switch. */
 	async #reconcileModeFromSession(options?: { preserveActiveGoal?: boolean }): Promise<void> {
-		const vibeScopeAlreadySuspended = this.#vibeScopeSuspendedForSwitch;
-		this.#vibeScopeSuspendedForSwitch = false;
 		const sessionContext = this.sessionManager.buildSessionContext();
-		const vibeSession = this.#vibeParentSession();
-		const targetVibeScope = VibeSessionRegistry.global().ownerScope(vibeSession);
-		const preserveVibe =
-			this.vibeModeEnabled &&
-			sessionContext.mode === "vibe" &&
-			this.#vibeModeOwnerScope?.ownerId === targetVibeScope.ownerId &&
-			this.#vibeModeOwnerScope.parentSessionId === targetVibeScope.parentSessionId &&
-			this.#vibeModeOwnerScope.parentSessionFile === targetVibeScope.parentSessionFile;
-		// #clearTransientModeState below keeps the live active set instead of
-		// applying a snapshot, so for a vibe -> vibe switch the live toolset is
-		// already the reduced vibe set and cannot serve as the pre-vibe snapshot.
-		// That is the only case the persisted snapshot is for: a cold resume or a
-		// switch in from a non-vibe session built its toolset from the current CLI
-		// flags and settings, and that set — not a historical one — is what exiting
-		// vibe must restore.
-		const vibeToolsetLostToTeardown = this.vibeModeEnabled && !preserveVibe;
-		await this.#clearTransientModeState({ preserveVibe, vibeScopeAlreadySuspended });
-		await VibeSessionRegistry.global().rehydrate(vibeSession);
+		await this.#clearTransientModeState();
 		const goalEnabled = this.session.settings.get("goal.enabled");
 		if (!goalEnabled && (sessionContext.mode === "goal" || sessionContext.mode === "goal_paused")) {
 			this.session.goalRuntime.clearAccounting();
@@ -3014,17 +2902,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		this.session.goalRuntime.clearAccounting();
-		if (sessionContext.mode === "vibe") {
-			if (!preserveVibe) {
-				await this.#enterVibeMode({
-					persistModeChange: false,
-					previousTools: vibeToolsetLostToTeardown
-						? readPersistedToolNames(sessionContext.modeData?.previousTools)
-						: undefined,
-				});
-			}
-			return;
-		}
 		if (!this.session.settings.get("plan.enabled")) {
 			// Clear stale plan/plan_paused mode so re-enabling the setting
 			// later doesn't unexpectedly restore an old plan session.
@@ -3053,10 +2930,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (this.goalModeEnabled || this.goalModePaused) {
 			this.showWarning("Exit goal mode first.");
-			return;
-		}
-		if (this.vibeModeEnabled) {
-			this.showWarning("Exit vibe mode first.");
 			return;
 		}
 
@@ -3167,7 +3040,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// the next one. The turn-start `plan-mode-active.md` block orders the model
 		// to keep planning until it writes a plan to `xd://propose`, so without
 		// interrupting the live turn the agent keeps acting in plan mode until it
-		// emits a plan (issue #9699). Mirror `#exitVibeMode`: abort inside
+		// emits a plan (issue #9699). Abort inside
 		// `runModeExitTeardown` so a queued steer/follow-up cannot restart on the
 		// still-live plan toolset before teardown restores the previous tools
 		// (issue #8326).
@@ -3260,10 +3133,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (this.planModeEnabled || this.planModePaused) {
 			this.showWarning("Exit plan mode first.");
-			return;
-		}
-		if (this.vibeModeEnabled) {
-			this.showWarning("Exit vibe mode first.");
 			return;
 		}
 		const previousTools = this.session.getEnabledToolNames().filter(name => name !== "goal");
@@ -3810,10 +3679,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning("Exit goal mode first.");
 			return false;
 		}
-		if (this.vibeModeEnabled) {
-			this.showWarning("Exit vibe mode first.");
-			return false;
-		}
 		if (this.planModeEnabled) {
 			const planFilePath = this.planModePlanFilePath ?? (await this.#getPlanFilePath());
 			if (await this.#hasPlanModeDraftContent(planFilePath)) {
@@ -3868,124 +3733,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		return false;
 	}
 
-	/**
-	 * `/vibe` toggle. Entering installs the ephemeral vibe tools, strips the
-	 * active toolset down to `read`, optional parent-owned `todo`, plus those
-	 * tools, and injects the director context. Exiting unregisters them, restores
-	 * the previous toolset, and kills every worker session so workers cannot
-	 * outlive the mode that directs them.
-	 */
-	async handleVibeModeCommand(
-		initialPrompt?: string,
-		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
-	): Promise<boolean> {
-		if (this.vibeModeEnabled) {
-			await this.#exitVibeMode();
-			return false;
-		}
-		if (this.planModeEnabled || this.planModePaused) {
-			this.showWarning("Exit plan mode first.");
-			return false;
-		}
-		if (this.goalModeEnabled || this.goalModePaused) {
-			this.showWarning("Exit goal mode first.");
-			return false;
-		}
-		await this.#enterVibeMode();
-		if (!initialPrompt) return false;
-		if (isKnownSkillCommand(this, initialPrompt)) {
-			await invokeSkillCommandFromText(this, initialPrompt, "steer", {
-				images: input?.images,
-				propagateErrors: true,
-			});
-			return true;
-		}
-		if (this.session.isStreaming) {
-			const images = input?.images?.length ? input.images : undefined;
-			await this.withLocalSubmission(
-				initialPrompt,
-				() => this.session.prompt(initialPrompt, { streamingBehavior: "steer", images }),
-				{ imageCount: images?.length ?? 0 },
-			);
-			return true;
-		}
-		if (this.onInputCallback) {
-			this.onInputCallback(this.startPendingSubmission({ text: initialPrompt, ...input }, { preserveDraft: true }));
-			return true;
-		}
-		return false;
-	}
-
-	async #enterVibeMode(options?: { persistModeChange?: boolean; previousTools?: string[] }): Promise<void> {
-		if (this.vibeModeEnabled) {
-			return;
-		}
-		if (this.planModeEnabled || this.planModePaused) {
-			this.showWarning("Exit plan mode first.");
-			return;
-		}
-		if (this.goalModeEnabled || this.goalModePaused) {
-			this.showWarning("Exit goal mode first.");
-			return;
-		}
-
-		const vibeRegistry = VibeSessionRegistry.global();
-		const ownerScope = vibeRegistry.ownerScope(this.#vibeParentSession());
-		vibeRegistry.activateScope(ownerScope);
-		// When a vibe session switches into another session that is also in vibe
-		// mode, the teardown keeps the live active set, which is by then the reduced
-		// vibe set, so re-snapshotting it here would make the snapshot useless. That
-		// path passes the pre-vibe toolset recorded on the target's own mode_change
-		// entry instead.
-		const previousTools = options?.previousTools ?? this.session.getEnabledToolNames();
-		const vibeBaseTools = ["read"];
-		if (this.session.hasBuiltInTool("todo")) vibeBaseTools.push("todo");
-		await this.session.activateVibeTools(vibeBaseTools);
-		this.#vibeModePreviousTools = previousTools;
-		this.#vibeModeOwnerScope = ownerScope;
-		this.vibeModeEnabled = true;
-		// Suppress cache-miss marker on the next turn: vibe mode changes the
-		// injected context, which predictably invalidates the cache.
-		this.lastAssistantUsage = undefined;
-		this.session.setVibeModeState({ enabled: true });
-		if (this.session.isStreaming) {
-			await this.session.sendVibeModeContext({ deliverAs: "steer" });
-		}
-		this.#updateVibeModeStatus();
-		if (options?.persistModeChange !== false) this.sessionManager.appendModeChange("vibe", { previousTools });
-		this.showStatus(
-			"Vibe mode enabled. You direct fast/good worker sessions; toolset is read + optional parent Todo + vibe tools.",
-		);
-	}
-
-	async #exitVibeMode(): Promise<void> {
-		if (!this.vibeModeEnabled) {
-			return;
-		}
-		// Tear down with the queued-message drain suppressed: aborting the active
-		// turn would otherwise let a queued user steer/follow-up restart on the
-		// still-live Vibe tools before this teardown removes them (issue #8326).
-		let killed = 0;
-		await this.session.runModeExitTeardown(async () => {
-			if (this.session.isStreaming) {
-				await this.session.abort();
-			}
-			killed = await VibeSessionRegistry.global().killAll(this.#vibeParentSession(), this.#vibeModeOwnerScope);
-			await this.session.deactivateVibeTools(this.#vibeModePreviousTools ?? []);
-			this.session.setVibeModeState(undefined);
-		});
-		this.vibeModeEnabled = false;
-		this.#vibeModePreviousTools = undefined;
-		this.#vibeModeOwnerScope = undefined;
-		this.lastAssistantUsage = undefined;
-		this.#updateVibeModeStatus();
-		this.showStatus(
-			killed > 0
-				? `Vibe mode disabled. Killed ${killed} worker session${killed === 1 ? "" : "s"}.`
-				: "Vibe mode disabled.",
-		);
-	}
-
 	async #handleGoalBudgetCommand(rawBudget: string): Promise<void> {
 		const state = this.session.getGoalModeState();
 		if (!this.goalModeEnabled || !state?.enabled) {
@@ -4018,10 +3765,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	): Promise<boolean> {
 		if (this.planModeEnabled || this.planModePaused) {
 			this.showWarning("Exit plan mode first.");
-			return false;
-		}
-		if (this.vibeModeEnabled) {
-			this.showWarning("Exit vibe mode first.");
 			return false;
 		}
 		if (!this.session.settings.get("goal.enabled")) {
@@ -4061,10 +3804,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		try {
 			if (this.planModeEnabled || this.planModePaused) {
 				this.showWarning("Exit plan mode first.");
-				return false;
-			}
-			if (this.vibeModeEnabled) {
-				this.showWarning("Exit vibe mode first.");
 				return false;
 			}
 			if (!this.session.settings.get("goal.enabled")) {
@@ -4654,7 +4393,6 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		this.#btwController.dispose();
 		this.#omfgController.dispose();
-		this.#cleanseController.dispose();
 		this.#focusController.dispose();
 
 		// Surface an explicit "Closing session…" line so the user sees a reason
@@ -5146,11 +4884,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#uiHelpers.extractAssistantText(message);
 	}
 
-	// Command handling
-	handleExportCommand(text: string): Promise<void> {
-		return this.#commandController.handleExportCommand(text);
-	}
-
 	async handleDumpCommand(): Promise<void> {
 		return this.#commandController.handleDumpCommand();
 	}
@@ -5161,10 +4894,6 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleDebugTranscriptCommand(): Promise<void> {
 		return this.#commandController.handleDebugTranscriptCommand();
-	}
-
-	handleShareCommand(): Promise<void> {
-		return this.#commandController.handleShareCommand();
 	}
 
 	handleTodoCommand(args: string): Promise<void> {
@@ -5203,23 +4932,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#commandController.handleContextCommand();
 	}
 
-	#vibeSessionTransitionBlocked(): boolean {
-		if (!this.vibeModeEnabled) return false;
-		this.showWarning("Exit vibe mode first.");
-		return true;
-	}
-
 	#prepareSessionSwitch(): void {
 		this.#btwController.dispose();
 		this.#omfgController.dispose();
-		this.#cleanseController.dispose();
 		this.#extensionUiController.clearExtensionTerminalInputListeners();
 		this.clearPinnedError();
 		this.#hidePlanReview();
 	}
 
 	async handleClearCommand(): Promise<void> {
-		if (this.#vibeSessionTransitionBlocked()) return;
 		this.#prepareSessionSwitch();
 		await this.#commandController.handleClearCommand();
 	}
@@ -5233,21 +4954,17 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async handleDropCommand(): Promise<void> {
-		if (this.#vibeSessionTransitionBlocked()) return;
 		this.#prepareSessionSwitch();
 		await this.#commandController.handleDropCommand();
 	}
 
 	async handleForkCommand(): Promise<void> {
-		if (this.#vibeSessionTransitionBlocked()) return;
 		this.#btwController.dispose();
 		this.#omfgController.dispose();
-		this.#cleanseController.dispose();
 		await this.#commandController.handleForkCommand();
 	}
 
 	async handleMoveCommand(targetPath?: string): Promise<void> {
-		if (this.#vibeSessionTransitionBlocked()) return;
 		await this.#commandController.handleMoveCommand(targetPath);
 	}
 
@@ -5472,7 +5189,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#btwController.dispose();
 		this.#omfgController.dispose();
-		this.#cleanseController.dispose();
 		this.resetObserverRegistry();
 		await this.#selectorController.handleResumeSession(sessionPath, { settingsFlushed: true });
 	}
@@ -5599,7 +5315,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 			this.#btwController.dispose();
 			this.#omfgController.dispose();
-			this.#cleanseController.dispose();
 			await this.renderInitialMessages({ clearTerminalHistory: true });
 			this.updateEditorBorderColor();
 			this.showStatus(
@@ -5620,18 +5335,6 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleOmfgEscape(): boolean {
 		return this.#omfgController.handleEscape();
-	}
-
-	handleCleanseCommand(args: string): Promise<void> {
-		return this.#cleanseController.start(args);
-	}
-
-	hasActiveCleanse(): boolean {
-		return this.#cleanseController.hasActiveRun();
-	}
-
-	handleCleanseEscape(): boolean {
-		return this.#cleanseController.handleEscape();
 	}
 
 	cycleThinkingLevel(): void {

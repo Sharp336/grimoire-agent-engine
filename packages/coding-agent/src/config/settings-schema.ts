@@ -1,12 +1,10 @@
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
-import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 import {
 	type BlobDestinationId,
 	type BlobDestinationMetadata,
 	BUILTIN_BLOB_DESTINATIONS,
 } from "../blob-broker/destinations";
-import { DEFAULT_RELAY_URL } from "../collab/protocol";
 import { DEFAULT_LIVE_VOICE, LIVE_VOICE_OPTIONS, LIVE_VOICE_VALUES } from "../live/voices";
 import {
 	COMPACTION_METHOD_CHOICES,
@@ -203,7 +201,6 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Approvals",
 		"Notifications",
 		"Speech",
-		"Collab",
 		"Magic Keywords",
 		"Startup & Updates",
 		"Power (macOS)",
@@ -254,8 +251,7 @@ export type StatusLineSegmentId =
 	| "cache_write"
 	| "cache_hit"
 	| "session_name"
-	| "usage"
-	| "collab";
+	| "usage";
 
 /** Submenu choice metadata. */
 export type SubmenuOption<V extends string = string> = {
@@ -2314,88 +2310,6 @@ export const SETTINGS_SCHEMA = {
 				{ value: "300", label: "5 minutes" },
 				{ value: "600", label: "10 minutes" },
 			],
-		},
-	},
-
-	// Collab
-	"collab.relayUrl": {
-		type: "string",
-		default: DEFAULT_RELAY_URL,
-		ui: {
-			tab: "interaction",
-			group: "Collab",
-			label: "Relay URL",
-			description: "Relay used by /collab (wss://host[:port])",
-		},
-	},
-
-	"collab.webUrl": {
-		type: "string",
-		default: "",
-		ui: {
-			tab: "interaction",
-			group: "Collab",
-			label: "Web UI URL",
-			description:
-				"Browser UI used by /collab links; empty derives from collab.relayUrl; explicit http:// is localhost-only",
-		},
-	},
-
-	"collab.displayName": {
-		type: "string",
-		default: "",
-		ui: {
-			tab: "interaction",
-			group: "Collab",
-			label: "Display Name",
-			description: "Name shown to other collab participants (default: OS username)",
-		},
-	},
-
-	"share.serverUrl": {
-		type: "string",
-		default: DEFAULT_SHARE_URL,
-		ui: {
-			tab: "interaction",
-			group: "Collab",
-			label: "Share Server",
-			description:
-				"Share viewer/upload base used by /share (encrypted blob upload + viewer; links are <base>/<id>#<key>)",
-		},
-	},
-
-	"share.store": {
-		type: "enum",
-		values: ["blob", "gist"] as const,
-		default: "blob",
-		ui: {
-			tab: "interaction",
-			group: "Collab",
-			label: "Share Store",
-			description: "Where /share uploads the encrypted session blob",
-			options: [
-				{
-					value: "blob",
-					label: "Encrypted Blob",
-					description: "Upload to the share server (no GitHub account needed; avoids gist API rate limits)",
-				},
-				{
-					value: "gist",
-					label: "GitHub Gist",
-					description: "Push to a secret gist (needs authenticated gh), falling back to the share server",
-				},
-			],
-		},
-	},
-
-	"share.redactSecrets": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "interaction",
-			group: "Collab",
-			label: "Share Secret Redaction",
-			description: "Run the secret obfuscator over /share snapshots before upload (uses the secrets.* config)",
 		},
 	},
 

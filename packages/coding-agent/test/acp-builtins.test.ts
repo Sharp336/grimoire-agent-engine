@@ -614,31 +614,6 @@ describe("session lifecycle commands", () => {
 });
 
 describe("wave 3 commands", () => {
-	// /export
-	it("/export: calls exportToHtml with the given arg and outputs the path", async () => {
-		const { output, runtime } = createRuntime();
-		const result = await executeAcpBuiltinSlashCommand("/export /tmp/out.html", runtime);
-		expect(result).toEqual({ consumed: true });
-		expect(output[0]).toBe("Session exported to: /tmp/out.html");
-	});
-
-	it("/export: uses default path when no arg given", async () => {
-		const { output, runtime } = createRuntime();
-		const result = await executeAcpBuiltinSlashCommand("/export", runtime);
-		expect(result).toEqual({ consumed: true });
-		expect(output[0]).toContain("Session exported to:");
-	});
-
-	it("/export: returns usage on exportToHtml failure", async () => {
-		const { output, session, runtime } = createRuntime();
-		session.exportToHtml = async () => {
-			throw new Error("disk full");
-		};
-		const result = await executeAcpBuiltinSlashCommand("/export", runtime);
-		expect(result).toEqual({ consumed: true });
-		expect(output[0]).toContain("Failed to export session: disk full");
-	});
-
 	// /todo
 	it("/todo no-args: outputs empty state message when no todos", async () => {
 		const { output, runtime } = createRuntime();

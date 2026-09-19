@@ -268,12 +268,6 @@ const modeSegment: StatusLineSegment = {
 			return renderGoalMode(ctx, goal);
 		}
 
-		const vibe = ctx.vibeMode;
-		if (vibe?.enabled) {
-			const content = withIcon(theme.icon.agents, "Vibe");
-			return { content: theme.fg("accent", content), visible: true };
-		}
-
 		const loop = ctx.loopMode;
 		if (loop) {
 			const icon = loop.state === "paused" ? theme.icon.pause || theme.icon.loop : theme.icon.loop;
@@ -644,18 +638,6 @@ const sessionNameSegment: StatusLineSegment = {
 	},
 };
 
-const collabSegment: StatusLineSegment = {
-	id: "collab",
-	render(ctx) {
-		if (!ctx.collab) return { content: "", visible: false };
-		const label =
-			ctx.collab.role === "host"
-				? `⇄ collab:${ctx.collab.participantCount}`
-				: `⇄ collab guest:${ctx.collab.participantCount}`;
-		return { content: theme.fg("accent", label), visible: true };
-	},
-};
-
 function pickUsageColor(percent: number): "muted" | "warning" | "error" {
 	if (percent >= 80) return "error";
 	if (percent >= 50) return "warning";
@@ -752,7 +734,6 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	cache_hit: cacheHitSegment,
 	session_name: sessionNameSegment,
 	usage: usageSegment,
-	collab: collabSegment,
 };
 
 export function renderSegment(id: StatusLineSegmentId, ctx: SegmentContext): RenderedSegment {

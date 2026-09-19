@@ -99,7 +99,6 @@ import {
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
 import { SessionManager } from "./session/session-manager";
-import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { shouldShowStartupSplash } from "./startup-splash";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
@@ -494,7 +493,6 @@ async function runInteractiveMode(
 	eventBus?: EventBus,
 	initialMessage?: string,
 	initialImages?: ImageContent[],
-	joinLink?: string,
 	startBackgroundModelDiscovery?: () => Promise<void>,
 	startupLease?: ComposerLease,
 ): Promise<void> {
@@ -593,12 +591,6 @@ async function runInteractiveMode(
 		} else if (notify.kind === "info") {
 			mode.showStatus(notify.message);
 		}
-	}
-
-	// `omp join <link>`: dispatch through the same builtin path as a typed
-	// `/join` so collab guards and error rendering stay in one place.
-	if (joinLink !== undefined) {
-		await executeBuiltinSlashCommand(`/join ${joinLink}`, { ctx: mode });
 	}
 
 	if (initialMessage !== undefined) {
@@ -1361,21 +1353,6 @@ export async function runRootCommand(
 			process.exit(0);
 		}
 
-		if (parsedArgs.export) {
-			let result: string;
-			try {
-				const outputPath = parsedArgs.messages.length > 0 ? parsedArgs.messages[0] : undefined;
-				const { exportFromFile } = await import("./export/html");
-				result = await exportFromFile(parsedArgs.export, outputPath);
-			} catch (error: unknown) {
-				const message = error instanceof Error ? error.message : "Failed to export session";
-				process.stderr.write(`${chalk.red(`Error: ${message}`)}\n`);
-				process.exit(1);
-			}
-			writeStartupNotice(parsedArgs, `Exported to: ${result}\n`);
-			process.exit(0);
-		}
-
 		if ((parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") && parsedArgs.fileArgs.length > 0) {
 			process.stderr.write(`${chalk.red("Error: @file arguments are not supported in RPC mode")}\n`);
 			process.exit(1);
@@ -1905,7 +1882,7 @@ export async function runRootCommand(
 			}
 
 			// Cold-revive support: a `parked` subagent ref restored from disk (Agent Hub
-			// scan, collab mirror, resumed process) has a sessionFile but no in-memory
+			// scan, resumed process) has a sessionFile but no in-memory
 			// reviver, so `ensureLive` (IRC sends, hub focus) would refuse it. Install a
 			// factory — bound to THIS top-level session — that rebuilds the subagent from
 			// its persisted JSONL (see persisted-revive.ts). Scoped to the non-ACP
@@ -2009,7 +1986,6 @@ export async function runRootCommand(
 						eventBus,
 						initialMessage,
 						initialImages,
-						parsedArgs.join,
 						startBackgroundModelDiscovery,
 						startupLease,
 					);

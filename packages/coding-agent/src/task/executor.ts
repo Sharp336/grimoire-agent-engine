@@ -2388,7 +2388,7 @@ export interface IrcWakeTurnMonitorOptions {
 
 /**
  * Bracket a kept-alive subagent's autonomous IRC wake turns with a task run
- * monitor so RPC/collab subscribers see the same `subagent_lifecycle` /
+ * monitor so RPC subscribers see the same `subagent_lifecycle` /
  * `subagent_progress` frames a first run emits. Shared by the live executor
  * reviver and the persisted cold-revive path so a resumed process's parked
  * subagents are not blind spots. The observer runs after the session has

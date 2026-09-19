@@ -388,18 +388,6 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		},
 	},
 	{
-		name: "cleanse",
-		icon: "stethoscope",
-		description: "Detect and fix project diagnostics with weighted parallel subagents",
-		inlineHint: "[request] [--all]",
-		allowArgs: true,
-		handleTui: async (command, runtime) => {
-			const args = command.text.slice(`/${command.name}`.length).trim();
-			runtime.ctx.editor.setText("");
-			await runtime.ctx.handleCleanseCommand(args);
-		},
-	},
-	{
 		name: "retry",
 		icon: "redo",
 		description: "Retry the last failed agent turn",
@@ -451,7 +439,6 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		acpInputHint: "<subcommand>",
 		subcommands: [
 			{ name: "view", description: "Show current memory injection payload" },
-			{ name: "stats", description: "Show memory backend statistics" },
 			{ name: "diagnose", description: "Run memory backend diagnostics" },
 			{ name: "clear", description: "Clear persisted memory data and artifacts" },
 			{ name: "reset", description: "Alias for clear" },

@@ -90,11 +90,11 @@ For a dispatch, set the agent name and task:
 
 After dispatch, press `Alt+A` to open [Agent Hub](./agent-hub.md). Its live roster shows each task agent's status, current activity, model, age, and usage. Select an agent to read its transcript and steer it directly; parked agents can be revived from the same view.
 
-### `vibe_spawn` tier routing
+### Task model routing
 
-`vibe_spawn` maps `fast` to bundled `sonic` and `good` to bundled `task`. Both resolve through `task.agentModelOverrides` before their bundled agent model defaults (`src/vibe/runtime.ts`, `src/task/agents.ts`).
+Task agents resolve through `task.agentModelOverrides` before their bundled agent model defaults (`src/task/agents.ts`).
 
-Route these tiers through roles by keeping aliases in `task.agentModelOverrides` and concrete selectors only in `modelRoles`:
+Route agents through roles by keeping aliases in `task.agentModelOverrides` and concrete selectors only in `modelRoles`:
 
 ```yaml
 task:

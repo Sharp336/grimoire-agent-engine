@@ -1754,10 +1754,10 @@ export class EventController {
 		// the turn-end teardown now would stop the loader the live turn just created,
 		// leaving "Working…" gone while the agent keeps running. The live turn owns
 		// the loader and finalizes it at its own agent_end (isStreaming === false by
-		// then). Mirrors the collab guest's !isStreaming loader reconciler.
+		// then).
 		if (this.ctx.session.isStreaming) return;
 		// A non-terminal settle (`isTerminal: false`) is a scheduling pause, not the
-		// end of the run: an unsuppressed async job (a `/vibe` worker turn, a bash
+		// end of the run: an unsuppressed async job (a task turn, a bash
 		// `async` job, etc.) will re-wake the loop when its result is delivered.
 		// `AgentSession` tags this on the deferred event (see `#hasPendingAsyncWake`
 		// in agent-session.ts). Skip the idle title/loader teardown so the tab keeps
