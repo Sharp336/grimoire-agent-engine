@@ -9,7 +9,6 @@
  * incremental, unstripped). Image builds set `ci` for a stripped addon.
  */
 
-import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import * as path from "node:path";
@@ -20,44 +19,6 @@ import { generateEnumExports } from "./gen-enums";
 // pcre2-sys prefers a system libpcre2 when pkg-config finds one. Keep the
 // static build so the local addon never retains host Homebrew paths.
 process.env.PCRE2_SYS_STATIC ??= "1";
-
-// Windows: cc-rs and rustc auto-locate cl.exe/link.exe through the VS
-// registry, but the cmake crate (audiopus_sys' bundled opus) needs cmake —
-// and its Ninja generator needs ninja — on PATH. VS Build Tools ships both
-// without exposing them, so outside a vcvars prompt the build dies on
-// "cmake not found". Resolve the VS install via vswhere and append its
-// CMake/Ninja dirs, keeping any user-provided tools ahead.
-if (process.platform === "win32" && (!Bun.which("cmake") || !Bun.which("ninja"))) {
-	const vswhere = path.join(
-		process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)",
-		"Microsoft Visual Studio",
-		"Installer",
-		"vswhere.exe",
-	);
-	const probe = Bun.spawnSync(
-		[
-			vswhere,
-			"-latest",
-			"-products",
-			"*",
-			"-requires",
-			"Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-			"-property",
-			"installationPath",
-		],
-		{ stdout: "pipe", stderr: "pipe" },
-	);
-	const vsRoot = probe.exitCode === 0 ? probe.stdout.toString("utf-8").trim() : "";
-	if (vsRoot) {
-		const cmakeExt = path.join(vsRoot, "Common7", "IDE", "CommonExtensions", "Microsoft", "CMake");
-		const extraDirs = [path.join(cmakeExt, "CMake", "bin"), path.join(cmakeExt, "Ninja")].filter(dir =>
-			fsSync.existsSync(dir),
-		);
-		if (extraDirs.length > 0) {
-			process.env.PATH = [process.env.PATH ?? "", ...extraDirs].filter(Boolean).join(path.delimiter);
-		}
-	}
-}
 
 const repoRoot = path.join(import.meta.dir, "../../..");
 const rustDir = path.join(repoRoot, "crates/pi-natives");

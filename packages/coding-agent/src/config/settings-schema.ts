@@ -5,14 +5,11 @@ import {
 	type BlobDestinationMetadata,
 	BUILTIN_BLOB_DESTINATIONS,
 } from "../blob-broker/destinations";
-import { DEFAULT_LIVE_VOICE, LIVE_VOICE_OPTIONS, LIVE_VOICE_VALUES } from "../live/voices";
 import {
 	COMPACTION_METHOD_CHOICES,
 	type CompactionMethod,
 	DEFAULT_COMPACTION_METHOD_ORDER,
 } from "../session/compaction-methods";
-import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS, STT_MODEL_VALUES } from "../stt/models";
-import { STT_SUBMIT_TRIGGER_OPTIONS, STT_SUBMIT_TRIGGER_VALUES } from "../stt/submit-trigger";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking";
 import {
 	TINY_MODEL_DEVICE_DEFAULT,
@@ -36,14 +33,6 @@ import {
 	TINY_TITLE_MODEL_VALUES,
 } from "../tiny/models";
 import { IMAGE_PROVIDER_CHOICES, type ImageProvider } from "../tools/image-providers";
-import {
-	DEFAULT_TTS_LOCAL_MODEL_KEY,
-	DEFAULT_TTS_VOICE,
-	TTS_LOCAL_MODEL_OPTIONS,
-	TTS_LOCAL_MODEL_VALUES,
-	TTS_LOCAL_VOICE_OPTIONS,
-	TTS_LOCAL_VOICE_VALUES,
-} from "../tts/models";
 import { EDIT_MODES } from "../utils/edit-mode";
 import {
 	DEFAULT_WEB_SEARCH_TIMEOUT_SECONDS,
@@ -1023,7 +1012,7 @@ export const SETTINGS_SCHEMA = {
 
 	"images.urls.backends": {
 		type: "array",
-		default: ["provider-files", "tailscale", "cloudflared", "litterbox"] as BlobDestinationId[],
+		default: ["provider-files"] as BlobDestinationId[],
 		ui: {
 			tab: "model",
 			group: "Vision",
@@ -1043,18 +1032,6 @@ export const SETTINGS_SCHEMA = {
 		type: "record",
 		default: {} as Partial<Record<BlobDestinationId, Record<string, string>>>,
 		credential: true,
-	},
-
-	"images.urls.command": {
-		type: "string",
-		default: undefined,
-		ui: {
-			tab: "model",
-			group: "Vision",
-			label: "Image Upload Command",
-			description:
-				"Argv template for the command backend; {file} is the image path, {mime}/{ext} optional. The last URL printed on stdout is used (e.g. pasta -b -f {file})",
-		},
 	},
 
 	"images.urls.publicBaseUrl": {
@@ -1196,18 +1173,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"tui.codexResetFireworks": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "appearance",
-			group: "Display",
-			label: "Codex Reset Fireworks",
-			description:
-				"Celebrate unscheduled Codex weekly usage resets and newly banked saved resets with a top-third fireworks overlay that remains until Escape",
-		},
-	},
-
 	"tui.titleState": {
 		type: "boolean",
 		default: true,
@@ -1240,23 +1205,6 @@ export const SETTINGS_SCHEMA = {
 			group: "Display",
 			label: "Tight Layout",
 			description: "Remove the 1-character horizontal padding from the left and right of the terminal output",
-		},
-	},
-
-	"display.shimmer": {
-		type: "enum",
-		values: ["classic", "kitt", "disabled"] as const,
-		default: "classic",
-		ui: {
-			tab: "appearance",
-			group: "Display",
-			label: "Shimmer",
-			description: "Animation style for working/loading messages",
-			options: [
-				{ value: "classic", label: "Classic", description: "Soft cosine wave sweeping across the text" },
-				{ value: "kitt", label: "KITT Scanner", description: "Knight Rider 1982 red light bouncing left-right" },
-				{ value: "disabled", label: "Disabled", description: "No animation; static muted text" },
-			],
 		},
 	},
 
@@ -2090,18 +2038,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"startup.showSplash": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "interaction",
-			group: "Startup & Updates",
-			label: "Show Startup Splash",
-			description:
-				"Show the full animated setup splash on normal interactive startup without rerunning setup. Quiet Startup still suppresses it.",
-		},
-	},
-
 	"startup.setupWizard": {
 		type: "boolean",
 		default: true,
@@ -2310,50 +2246,6 @@ export const SETTINGS_SCHEMA = {
 				{ value: "300", label: "5 minutes" },
 				{ value: "600", label: "10 minutes" },
 			],
-		},
-	},
-
-	// Speech-to-text
-	"stt.enabled": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "interaction",
-			group: "Speech",
-			label: "Speech-to-Text",
-			description: "Enable speech-to-text input via microphone",
-		},
-	},
-
-	"stt.language": {
-		type: "string",
-		default: "en",
-	},
-
-	"stt.modelName": {
-		type: "enum",
-		values: STT_MODEL_VALUES,
-		default: DEFAULT_STT_MODEL_KEY,
-		ui: {
-			tab: "interaction",
-			group: "Speech",
-			label: "Speech Model",
-			description:
-				"Local on-device speech model. Parakeet TDT v3 (sherpa-onnx) is the SoTA default; Whisper base/small/large-v3-turbo tiers (transformers.js) trade size for multilingual coverage. Downloaded on first use.",
-			options: STT_MODEL_OPTIONS,
-		},
-	},
-	"stt.submitTrigger": {
-		type: "enum",
-		values: STT_SUBMIT_TRIGGER_VALUES,
-		default: "never",
-		ui: {
-			tab: "interaction",
-			group: "Speech",
-			label: "Speech-to-Text Submit Trigger",
-			description:
-				"Choose when speech dictation automatically submits: Never, Release (2+ words), Release with complete sentence, or When I Say Submit.",
-			options: STT_SUBMIT_TRIGGER_OPTIONS,
 		},
 	},
 
@@ -3373,17 +3265,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"ttsr.builtinRules": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "context",
-			group: "Rules (TTSR)",
-			label: "Built-in Rules",
-			description: "Load the default rules shipped with the agent (override individually with ttsr.disabledRules)",
-		},
-	},
-
 	"ttsr.disabledRules": {
 		type: "array",
 		default: [] as string[],
@@ -3833,28 +3714,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"eval.rb": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "shell",
-			group: "Eval & Runtimes",
-			label: "Ruby Eval Backend",
-			description: "Allow the eval tool to dispatch Ruby cells to the persistent Ruby kernel",
-		},
-	},
-
-	"eval.jl": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "shell",
-			group: "Eval & Runtimes",
-			label: "Julia Eval Backend",
-			description: "Allow the eval tool to dispatch Julia cells to the persistent Julia kernel",
-		},
-	},
-
 	"eval.autoBackground.enabled": {
 		type: "boolean",
 		default: false,
@@ -3892,28 +3751,6 @@ export const SETTINGS_SCHEMA = {
 			label: "Python Interpreter",
 			description:
 				"Optional path to an exact Python executable. When set, automatic Python runtime discovery is skipped.",
-		},
-	},
-	"ruby.interpreter": {
-		type: "string",
-		default: "",
-		ui: {
-			tab: "shell",
-			group: "Eval & Runtimes",
-			label: "Ruby Interpreter",
-			description:
-				"Optional path to an exact Ruby executable. When set, automatic Ruby runtime discovery is skipped.",
-		},
-	},
-	"julia.interpreter": {
-		type: "string",
-		default: "",
-		ui: {
-			tab: "shell",
-			group: "Eval & Runtimes",
-			label: "Julia Interpreter",
-			description:
-				"Optional path to an exact Julia executable. When set, automatic Julia runtime discovery is skipped.",
 		},
 	},
 
@@ -4134,17 +3971,6 @@ export const SETTINGS_SCHEMA = {
 			group: "Available Tools",
 			label: "Launch",
 			description: "Enable the launch tool for supervising shared long-running project processes",
-		},
-	},
-
-	"speechgen.enabled": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "tools",
-			group: "Available Tools",
-			label: "Speech Generation",
-			description: "Enable the tts tool for on-device (Kokoro) or xAI Grok Voice speech-file synthesis",
 		},
 	},
 	"generate_image.enabled": {
@@ -5262,122 +5088,6 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
-	"live.voice": {
-		type: "enum",
-		values: LIVE_VOICE_VALUES,
-		default: DEFAULT_LIVE_VOICE,
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Live Voice",
-			description: "Voice used by Codex-backed realtime voice sessions",
-			options: LIVE_VOICE_OPTIONS,
-		},
-	},
-	"providers.tts": {
-		type: "enum",
-		values: ["auto", "local", "xai", "deepinfra"] as const,
-		default: "auto",
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Text-to-Speech Provider",
-			description:
-				"Backend for the tts tool: local on-device neural TTS (Kokoro-82M), xAI Grok Voice, or DeepInfra speech",
-			options: [
-				{
-					value: "auto",
-					label: "Auto",
-					description: "Prefer local on-device TTS; route .mp3 output to xAI when credentials exist",
-				},
-				{ value: "local", label: "Local", description: "On-device neural TTS (Kokoro-82M); output is WAV/PCM16" },
-				{
-					value: "xai",
-					label: "xAI Grok Voice",
-					description: "Requires xAI Grok OAuth or XAI_API_KEY; MP3 or WAV",
-				},
-				{
-					value: "deepinfra",
-					label: "DeepInfra Speech",
-					description: "Requires DEEPINFRA_API_KEY; MP3 or WAV",
-				},
-			],
-		},
-	},
-	"tts.localModel": {
-		type: "enum",
-		values: TTS_LOCAL_MODEL_VALUES,
-		default: DEFAULT_TTS_LOCAL_MODEL_KEY,
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Local TTS Model",
-			description: "On-device neural TTS model (Kokoro-82M) used by the local TTS backend",
-			options: TTS_LOCAL_MODEL_OPTIONS,
-		},
-	},
-	"tts.localVoice": {
-		type: "enum",
-		values: TTS_LOCAL_VOICE_VALUES,
-		default: DEFAULT_TTS_VOICE,
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Local TTS Voice",
-			description: "Kokoro voice used by the local TTS backend (American/British, female/male)",
-			options: TTS_LOCAL_VOICE_OPTIONS,
-		},
-	},
-	"speech.enabled": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Speech Vocalization",
-			description: "Speak the assistant's output aloud through the speakers as it streams",
-		},
-	},
-	"speech.mode": {
-		type: "enum",
-		values: ["all", "assistant", "yield"] as const,
-		default: "assistant",
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Speech Vocalization Mode",
-			description:
-				"What to speak: all = assistant messages + thinking; assistant = messages only; yield = only the final message at turn end",
-			options: [
-				{ value: "all", label: "All (messages + thinking)" },
-				{ value: "assistant", label: "Assistant messages" },
-				{ value: "yield", label: "Final message only" },
-			],
-		},
-	},
-	"speech.enhanced": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Enhanced Speech Rewriting",
-			description:
-				"Rewrite assistant output into natural spoken prose with the tiny/smol model before synthesis (describes code, drops links and markdown). Falls back to mechanical cleanup on failure",
-		},
-	},
-	"speech.voice": {
-		type: "enum",
-		values: TTS_LOCAL_VOICE_VALUES,
-		default: DEFAULT_TTS_VOICE,
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Speech Vocalization Voice",
-			description: "Kokoro voice used when speaking the assistant's output aloud",
-			options: TTS_LOCAL_VOICE_OPTIONS,
-		},
-	},
 	"providers.tinyModel": {
 		type: "enum",
 		values: TINY_TITLE_MODEL_VALUES,
@@ -5655,60 +5365,6 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 	// Codex saved rate-limit resets (auto-redeem)
-	"codexResets.autoRedeem": {
-		type: "enum",
-		values: ["unset", "yes", "no"] as const,
-		default: "unset" as const,
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Codex Auto-Redeem Saved Resets",
-			description:
-				"Spend saved Codex rate-limit resets automatically: restore an account blocked by an exhausted 5h or weekly window when a turn is stuck and no other account can take over, and salvage credits that are about to expire. unset asks before the first spend, yes spends without prompting, and no disables both checks.",
-			options: [
-				{
-					value: "unset",
-					label: "Unset",
-					description: "Check eligibility, then ask before spending the first saved reset.",
-				},
-				{ value: "yes", label: "Yes", description: "Spend eligible saved resets without prompting." },
-				{ value: "no", label: "No", description: "Do not run the saved-reset auto-redeem check." },
-			],
-		},
-	},
-	"codexResets.minBlockedMinutes": {
-		type: "number",
-		default: 60,
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Codex Auto-Redeem Min Block",
-			description:
-				"Only auto-redeem when the natural unblock — the latest reset among the exhausted 5h/weekly windows — is at least this many minutes away (don't spend a scarce credit to save a short wait). Raise it (e.g. 360) to ignore 5h-only blocks.",
-		},
-	},
-	"codexResets.keepCredits": {
-		type: "number",
-		default: 0,
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Codex Auto-Redeem Reserve",
-			description:
-				"Never auto-spend below this many saved resets (0 = the last credit may be spent automatically). Credits about to expire are exempt — a reserved credit that expires preserves nothing.",
-		},
-	},
-	"codexResets.salvageHorizonHours": {
-		type: "number",
-		default: 12,
-		ui: {
-			tab: "providers",
-			group: "Services",
-			label: "Codex Reset Salvage Horizon",
-			description:
-				"Spend a saved Codex reset automatically when it would otherwise expire within this many hours and either chat window (5h or weekly) has meaningful usage to restore (0 disables expiry salvage).",
-		},
-	},
 	"provider.appendOnlyContext": {
 		type: "enum",
 		values: ["auto", "on", "off"] as const,
@@ -6106,7 +5762,6 @@ export interface TtsrSettings {
 	repeatMode: "once" | "after-gap";
 	repeatGap: number;
 	/** Bucketing-only (read by bucketRules, not the TtsrManager). */
-	builtinRules?: boolean;
 	/** Bucketing-only (read by bucketRules, not the TtsrManager). */
 	disabledRules?: string[];
 }
@@ -6134,13 +5789,6 @@ export interface ThinkingBudgetsSettings {
 	max: number;
 }
 
-export interface SttSettings {
-	enabled: boolean;
-	language: string | undefined;
-	modelName: string;
-	streaming: boolean;
-}
-
 export interface BashInterceptorRule {
 	pattern: string;
 	flags?: string;
@@ -6157,14 +5805,6 @@ export interface ShellMinimizerSettings {
 	maxCaptureBytes: number;
 	sourceOutlineLevel: "default" | "aggressive";
 	legacyFilters: boolean | undefined;
-}
-export type CodexAutoRedeemMode = "unset" | "yes" | "no";
-
-export interface CodexResetsSettings {
-	autoRedeem: CodexAutoRedeemMode;
-	minBlockedMinutes: number;
-	keepCredits: number;
-	salvageHorizonHours: number;
 }
 
 export interface GcSettings {
@@ -6191,12 +5831,10 @@ export interface GroupTypeMap {
 	exa: ExaSettings;
 	statusLine: StatusLineSettings;
 	thinkingBudgets: ThinkingBudgetsSettings;
-	stt: SttSettings;
 	modelRoles: Record<string, string>;
 	modelTags: ModelTagsSettings;
 	cycleOrder: string[];
 	shellMinimizer: ShellMinimizerSettings;
-	codexResets: CodexResetsSettings;
 	gc: GcSettings;
 }
 

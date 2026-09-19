@@ -2,7 +2,6 @@ import {
 	type Component,
 	padding,
 	replaceTabs,
-	TERMINAL,
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
@@ -31,15 +30,11 @@ export const WELCOME_LSP_SLOTS = 4;
 
 /** Trailing marker that flags a tip as a "what's new" callout. Stripped before
  *  wrapping (with any preceding whitespace) and replaced by {@link NEW_TAG_TEXT}
- *  painted as a shimmering rainbow. Non-global so `.test` stays stateless. */
+ *  painted with the active theme. Non-global so `.test` stays stateless. */
 const NEW_TIP_MARKER = /\s*\[NEW\]\s*$/;
 
 /** Visible text rendered in place of {@link NEW_TIP_MARKER}. */
 const NEW_TAG_TEXT = "NEW!";
-
-/** Milliseconds for one full hue rotation of the rainbow "NEW!" tag. */
-const NEW_GLOW_PERIOD_MS = 1500;
-
 /** Selection weight for "[NEW]" tips; ordinary tips weigh 1, so a freshly added
  *  affordance surfaces this many times as often. */
 const NEW_TIP_WEIGHT = 4;
@@ -59,30 +54,7 @@ export function pickWeightedTip(tips: readonly string[], r: number): string {
 	return tips[tips.length - 1] ?? "";
 }
 
-type ColorEncoding = "ansi-16m" | "ansi-256";
-
-/** Paint each glyph of {@link NEW_TAG_TEXT} on a moving HSL rainbow. `phase`
- *  rotates the hue offset cyclically; successive renders with increasing phase
- *  shimmer, while a fixed phase yields a still rainbow. */
-function renderNewTag(phase: number, encoding: ColorEncoding): string {
-	const bold = "\x1b[1m";
-	const reset = "\x1b[0m";
-	const wrapped = ((phase % 1) + 1) % 1;
-	const chars = [...NEW_TAG_TEXT];
-	let out = bold;
-	let prev = "";
-	for (let i = 0; i < chars.length; i++) {
-		const hue = Math.round(((i / chars.length + wrapped) % 1) * 360);
-		const color = Bun.color(`hsl(${hue}, 95%, 60%)`, encoding) ?? "";
-		if (color !== prev) {
-			out += color;
-			prev = color;
-		}
-		out += chars[i];
-	}
-	return out + reset;
-}
-export function renderWelcomeTip(tip: string, boxWidth: number, phase = 0): string[] {
+export function renderWelcomeTip(tip: string, boxWidth: number): string[] {
 	const label = "Tip: ";
 	const labelWidth = visibleWidth(label);
 	const bodyBudget = boxWidth - 1 - labelWidth; // 1 = leading indent
@@ -107,11 +79,10 @@ export function renderWelcomeTip(tip: string, boxWidth: number, phase = 0): stri
 	});
 
 	if (isNew) {
-		// Append the rainbow tag to the final body line when it fits within the
+		// Append the themed tag to the final body line when it fits within the
 		// box; otherwise drop it onto its own indented continuation line so the
 		// styled glyphs never overflow or reflow the wrapped body.
-		const encoding: ColorEncoding = TERMINAL.trueColor ? "ansi-16m" : "ansi-256";
-		const tag = renderNewTag(phase, encoding);
+		const tag = theme.bold(theme.fg("accent", NEW_TAG_TEXT));
 		const tagWidth = 1 + visibleWidth(NEW_TAG_TEXT); // 1 = space separator
 		const lastLine = lines[lines.length - 1];
 		if (lastLine !== undefined && visibleWidth(lastLine) + tagWidth <= boxWidth) {
@@ -139,13 +110,9 @@ export interface LspServerInfo {
  * Premium welcome screen with block-based OMP logo and two-column layout.
  */
 export class WelcomeComponent implements Component {
-	#animStart: number | null = null;
-	#animTimer: Timer | null = null;
-	#requestRender: (() => void) | null = null;
 	#selectedTip: string | undefined;
 	// Render cache: the welcome box is the first transcript-area component, so
 	// returning a stable array reference keeps the whole frame prefix stable.
-	// Bypassed while the intro animation runs (every frame differs).
 	#cachedWidth = -1;
 	#cachedLines: string[] | undefined;
 
@@ -171,55 +138,9 @@ export class WelcomeComponent implements Component {
 		this.#cachedWidth = -1;
 		this.#cachedLines = undefined;
 	}
-	/** The intro keeps the welcome block mutable; settling lets it retire to history. */
+	/** The welcome block can retire to terminal history. */
 	isTranscriptBlockFinalized(): boolean {
-		return this.#animTimer == null;
-	}
-
-	/**
-	 * Play a one-shot intro that sweeps the gradient through every phase
-	 * before settling on the resting frame. Safe to call multiple times —
-	 * subsequent calls reset and replay.
-	 */
-	playIntro(requestRender: () => void): void {
-		this.#stopAnimation();
-		this.#requestRender = requestRender;
-		this.#animStart = performance.now();
-		this.#requestRender();
-		this.#animTimer = setInterval(() => {
-			const elapsed = performance.now() - (this.#animStart ?? 0);
-			if (elapsed >= INTRO_MS) {
-				this.#stopAnimation();
-			}
-			this.#requestRender?.();
-		}, INTRO_TICK_MS);
-	}
-
-	#stopAnimation(): void {
-		if (this.#animTimer != null) {
-			clearInterval(this.#animTimer);
-			this.#animTimer = null;
-		}
-		this.#animStart = null;
-		this.#requestRender = null;
-		// The settled (resting) frame differs from the last intro frame.
-		this.invalidate();
-	}
-
-	/**
-	 * Redirect a running intro's render callback to a new target when a host
-	 * remounts this component mid-animation.
-	 * Returns true while the intro is still animating; false = no-op (settled).
-	 */
-	retargetIntro(requestRender: () => void): boolean {
-		if (this.#animTimer == null) return false;
-		this.#requestRender = requestRender;
 		return true;
-	}
-
-	/** Stop the intro immediately and settle on the resting frame. Safe when idle. */
-	stopIntro(): void {
-		this.#stopAnimation();
 	}
 
 	/** Update the version embedded in the welcome border title. */
@@ -245,18 +166,10 @@ export class WelcomeComponent implements Component {
 	}
 
 	render(termWidth: number): readonly string[] {
-		const animating = this.#animStart != null;
-		if (!animating && this.#cachedLines && this.#cachedWidth === termWidth) {
-			return this.#cachedLines;
-		}
+		if (this.#cachedLines && this.#cachedWidth === termWidth) return this.#cachedLines;
 		const lines = this.#renderLines(termWidth);
-		if (animating) {
-			this.#cachedLines = undefined;
-			this.#cachedWidth = -1;
-		} else {
-			this.#cachedLines = lines;
-			this.#cachedWidth = termWidth;
-		}
+		this.#cachedLines = lines;
+		this.#cachedWidth = termWidth;
 		return lines;
 	}
 
@@ -288,8 +201,8 @@ export class WelcomeComponent implements Component {
 		const leftCol = showRightColumn ? dualLeftCol : boxWidth - 2;
 		const rightCol = showRightColumn ? dualRightCol : 0;
 
-		// Logo: pick a frame from the intro animation if active, else the resting frame.
-		const logoColored = this.#currentLogoFrame();
+		// Static logo follows the active theme.
+		const logoColored = PI_LOGO.map(line => theme.fg("accent", line));
 
 		// Left column - centered content
 		const leftLines = [
@@ -426,13 +339,7 @@ export class WelcomeComponent implements Component {
 	 */
 	#renderTip(boxWidth: number): string[] {
 		const tip = this.tip;
-		if (!tip) return [];
-		// A trailing "[NEW]" marker paints an animated rainbow "NEW!" tag. Derive
-		// its hue phase from wall-clock time so it shimmers across the welcome
-		// intro's re-render frames, then settles into a still rainbow once the box
-		// caches its resting frame. Non-"[NEW]" tips ignore the phase entirely.
-		const phase = NEW_TIP_MARKER.test(tip) ? performance.now() / NEW_GLOW_PERIOD_MS : 0;
-		return renderWelcomeTip(tip, boxWidth, phase);
+		return tip ? renderWelcomeTip(tip, boxWidth) : [];
 	}
 
 	/** Center text within a given width */
@@ -470,139 +377,7 @@ export class WelcomeComponent implements Component {
 		}
 		return str + padding(width - visLen);
 	}
-
-	/** Pick the logo frame for the current intro phase, or the resting frame. */
-	#currentLogoFrame(): readonly string[] {
-		if (this.#animStart == null) return REST_FRAME;
-		const elapsed = performance.now() - this.#animStart;
-		if (elapsed >= INTRO_MS) return REST_FRAME;
-		return introLogoFrame(elapsed / INTRO_MS);
-	}
 }
 
 /** Block-grid brand mark shared by the welcome and setup surfaces. */
 export const PI_LOGO = ["████████████", "   ██  ██   ", "   ██  ██   ", "   ▒▒  ██   ", "       ██   "];
-
-/** Multi-stop palette for the diagonal gradient. */
-const GRADIENT_STOPS: ReadonlyArray<readonly [number, number, number]> = [
-	[248, 79, 204], // oklch(0.7 0.24 340)
-	[147, 98, 244], // oklch(0.62 0.21 295)
-	[0, 219, 228], // oklch(0.81 0.14 200)
-];
-
-/** 256-color ramp fallback when truecolor isn't available. */
-const GRADIENT_RAMP_256 = [206, 170, 134, 99, 69, 74, 44];
-
-/** Half-width of the shine highlight band, expressed in gradient-t units. */
-const SHINE_HALF_WIDTH = 0.18;
-
-export interface ShineConfig {
-	/** Overall opacity of the shine overlay, in [0, 1]. */
-	strength: number;
-	/** Center of the shine band along the diagonal, in [0, 1]. */
-	pos: number;
-}
-
-/**
- * Resolve the gradient SGR foreground escape for a normalized position `t`
- * (0..1) along the diagonal, compositing the optional sliding shine highlight.
- * Shared by {@link gradientLogo} and the setup splash so both stay
- * color-identical (truecolor when available, 256-color ramp otherwise).
- */
-export function gradientEscape(t: number, shine?: ShineConfig): string {
-	const shineStrength = shine && shine.strength > 0 ? shine.strength : 0;
-	const shinePos = shine ? shine.pos : 0;
-	if (TERMINAL.trueColor) {
-		// 5-stop palette widens the visible color range and avoids the
-		// deep-blue valley a naive HSL lerp falls into.
-		const stops = GRADIENT_STOPS;
-		const seg = t * (stops.length - 1);
-		const i = Math.min(stops.length - 2, Math.floor(seg));
-		const f = seg - i;
-		const a = stops[i];
-		const b = stops[i + 1];
-		let r = a[0] + (b[0] - a[0]) * f;
-		let g = a[1] + (b[1] - a[1]) * f;
-		let bl = a[2] + (b[2] - a[2]) * f;
-		if (shineStrength > 0) {
-			const dist = Math.abs(t - shinePos);
-			const intensity = Math.max(0, 1 - dist / SHINE_HALF_WIDTH) * shineStrength;
-			if (intensity > 0) {
-				r += (255 - r) * intensity;
-				g += (255 - g) * intensity;
-				bl += (255 - bl) * intensity;
-			}
-		}
-		return `\x1b[38;2;${Math.round(r)};${Math.round(g)};${Math.round(bl)}m`;
-	}
-	const ramp = GRADIENT_RAMP_256;
-	let idx = Math.min(ramp.length - 1, Math.max(0, Math.floor(t * (ramp.length - 1) + 0.5)));
-	if (shineStrength > 0) {
-		const dist = Math.abs(t - shinePos);
-		const intensity = Math.max(0, 1 - dist / SHINE_HALF_WIDTH) * shineStrength;
-		// Promote to the brightest ramp slot when the shine band peaks here.
-		if (intensity > 0.5) idx = ramp.length - 1;
-	}
-	return `\x1b[38;5;${ramp[idx]}m`;
-}
-
-/**
- * Apply a multi-stop diagonal gradient (top-left → bottom-right) plus an
- * optional sliding shine band across multi-line art. `phase` (0..1) shifts the
- * gradient along the diagonal, wrapping at 1. When `shine` is provided, a soft
- * white highlight is composited on top, centered at `shine.pos`.
- */
-export function gradientLogo(lines: readonly string[], phase = 0, shine?: ShineConfig): string[] {
-	const reset = "\x1b[0m";
-	const rows = lines.length;
-	const cols = Math.max(...lines.map(l => l.length));
-	const xSpan = Math.max(1, cols - 1);
-	const ySpan = Math.max(1, rows - 1);
-	const normalizedPhase = ((phase % 1) + 1) % 1;
-	return lines.map((line, y) => {
-		let result = "";
-		for (let x = 0; x < line.length; x++) {
-			const char = line[x];
-			if (char === " ") {
-				result += char;
-				continue;
-			}
-			// SVG's (0,0) → (1,1) gradient projects both normalized axes
-			// equally: top-right and bottom-left land on the purple midpoint.
-			const base = (x / xSpan + y / ySpan) / 2;
-			const t = normalizedPhase === 0 ? base : (base + normalizedPhase) % 1;
-			result += gradientEscape(t, shine) + char + reset;
-		}
-		return result;
-	});
-}
-
-/** Total length of the intro animation. */
-const INTRO_MS = 3000;
-/** Render cadence during the intro (~30fps). */
-const INTRO_TICK_MS = 33;
-/** Number of full gradient rotations the sweep performs before settling. */
-const INTRO_SWEEPS = 2.5;
-/** Number of times the shine highlight crosses the diagonal across the intro. */
-const INTRO_SHINE_TRAVERSALS = 3;
-
-/**
- * Logo frame for a normalized intro progress in [0, 1).
- *
- * Ease-out cubic so the spin decelerates into the resting state. The gradient
- * sweeps backward through INTRO_SWEEPS full rotations (`eased == 1` → phase =
- * 0 = resting frame) while the shine traverses the diagonal at a steady pace,
- * decoupled from the gradient phase so the two layers parallax; its strength
- * fades with the same ease-out curve so the highlight is gone by the resting
- * frame.
- */
-function introLogoFrame(progress: number): string[] {
-	const eased = 1 - (1 - progress) ** 3;
-	const phase = ((((1 - eased) * INTRO_SWEEPS) % 1) + 1) % 1;
-	const shinePos = (((progress * INTRO_SHINE_TRAVERSALS) % 1) + 1) % 1;
-	const shineStrength = (1 - eased) ** 1.5;
-	return gradientLogo(PI_LOGO, phase, { strength: shineStrength, pos: shinePos });
-}
-
-/** Resting gradient frame, cached for re-renders outside of the intro. */
-const REST_FRAME = gradientLogo(PI_LOGO, 0);

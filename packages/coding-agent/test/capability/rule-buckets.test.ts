@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
+import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import { bucketRules } from "@oh-my-pi/pi-coding-agent/capability/rule-buckets";
 import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 
@@ -80,36 +80,6 @@ describe("bucketRules", () => {
 
 		expect(mgr.hasRules()).toBe(false);
 	});
-
-	it("builtinRules:false drops builtin-defaults rules but keeps the rest", () => {
-		const mgr = new TtsrManager();
-		const builtin = makeRule({
-			name: "builtin-foo",
-			condition: ["FORBIDDEN"],
-			_source: source(BUILTIN_DEFAULTS_PROVIDER_ID),
-		});
-		const userRule = makeRule({ name: "user-foo", condition: ["BANNED"], _source: source("native") });
-
-		bucketRules([builtin, userRule], mgr, { builtinRules: false });
-
-		expect(mgr.checkDelta("contains FORBIDDEN token", { source: "text" })).toHaveLength(0);
-		mgr.resetBuffer();
-		expect(mgr.checkDelta("contains BANNED token", { source: "text" }).map(r => r.name)).toEqual(["user-foo"]);
-	});
-
-	it("includes builtin-defaults rules when builtinRules is unset (default on)", () => {
-		const mgr = new TtsrManager();
-		const builtin = makeRule({
-			name: "builtin-foo",
-			condition: ["FORBIDDEN"],
-			_source: source(BUILTIN_DEFAULTS_PROVIDER_ID),
-		});
-
-		bucketRules([builtin], mgr);
-
-		expect(mgr.checkDelta("contains FORBIDDEN token", { source: "text" }).map(r => r.name)).toEqual(["builtin-foo"]);
-	});
-
 	it("falls condition rules through to the rulebook when ttsr is disabled on the manager", () => {
 		const mgr = new TtsrManager({
 			enabled: false,

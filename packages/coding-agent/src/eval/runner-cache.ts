@@ -1,7 +1,7 @@
 /**
  * Shared on-disk staging for subprocess kernel runner scripts.
  *
- * Each language kernel (Python/Julia/Ruby) ships its runner as a compiled-in
+ * Each language kernel (Python) ships its runner as a compiled-in
  * text asset, then stages it under `os.tmpdir()` so the interpreter can load it
  * as a normal file. Staging is cached per language directory so repeated kernel
  * starts within a process avoid redundant writes.

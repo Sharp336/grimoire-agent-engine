@@ -182,7 +182,6 @@ describe("task progress rendering", () => {
 		const settings = Settings.instance;
 		const readSetting: Settings["get"] = settings.get.bind(settings);
 		vi.spyOn(settings, "get").mockImplementation(<P extends SettingPath>(path: P): SettingValue<P> => {
-			if (path === "display.shimmer") return "disabled" as SettingValue<P>;
 			return readSetting(path);
 		});
 		const options: RenderResultOptions = { expanded: false, isPartial: true, spinnerFrame: 0 };

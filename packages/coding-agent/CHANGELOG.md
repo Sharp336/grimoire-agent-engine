@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Removed
+
+- Optional voice runtime and associated native audio bindings; automatic Codex credit redemption, excess uploaders, Ruby/Julia eval, built-in opinionated rules, and terminal animation extras.
+
 ### Fixed
 
 - Rejected provider metric observations now leave a bounded diagnostic without exposing credentials or response content.

@@ -11,7 +11,6 @@ import { contextHasImageUrls, supportsRemoteImageUrls } from "../src/blob-broker
 import { ImageUrlService } from "../src/blob-broker/service";
 import { type BlobPersistence, BlobRegistry } from "../src/blob-broker/store";
 import { wrapStreamFnWithBlobUrlFallback } from "../src/blob-broker/stream-fallback";
-import { createCommandUploader, extractUploadUrl, splitCommandTemplate } from "../src/blob-broker/uploaders";
 import { BlobStore as SessionBlobStore } from "../src/session/blob-store";
 
 const PNG_B64 = Buffer.from("blob-broker-test-bytes-1").toString("base64");
@@ -328,41 +327,6 @@ describe("supportsRemoteImageUrls", () => {
 		expect(supportsRemoteImageUrls(makeModel("openai-completions", "moonshot"))).toBe(false);
 		expect(supportsRemoteImageUrls(makeModel("google-gemini-cli", "google-gemini-cli"))).toBe(false);
 		expect(supportsRemoteImageUrls(makeModel("bedrock-converse-stream", "amazon-bedrock"))).toBe(false);
-	});
-});
-
-describe("uploaders", () => {
-	it("splits command templates with quotes and substitutes after splitting", () => {
-		expect(splitCommandTemplate(`pasta -b -f {file}`)).toEqual(["pasta", "-b", "-f", "{file}"]);
-		expect(splitCommandTemplate(`up --name "two words" '{file}'`)).toEqual(["up", "--name", "two words", "{file}"]);
-		expect(splitCommandTemplate(`a\\ b c`)).toEqual(["a b", "c"]);
-	});
-
-	it("extracts the last url on stdout and trims trailing punctuation", () => {
-		expect(extractUploadUrl("uploading...\ndone: https://i.example/x.png.\n")).toBe("https://i.example/x.png");
-		expect(extractUploadUrl("progress 10%\nprogress 99%")).toBeNull();
-	});
-
-	it("runs a command uploader end to end against a stub binary", async () => {
-		const stub = path.join(os.tmpdir(), `omp-test-uploader-${process.pid}.sh`);
-		await Bun.write(
-			stub,
-			`#!/bin/sh\ntest -s "$2" || exit 3\necho "uploaded $2"\necho "https://files.example/abc.$3"\n`,
-		);
-		await fs.promises.chmod(stub, 0o755);
-		cleanups.push(() => void fs.promises.rm(stub, { force: true }));
-
-		const uploader = createCommandUploader(`${stub} --x {file} {ext}`);
-		const publication = await uploader.upload({
-			bytes: new Uint8Array(Buffer.from("payload")),
-			mimeType: "image/png",
-			extension: "png",
-		});
-		expect(publication).toEqual({
-			url: "https://files.example/abc.png",
-			destination: "command",
-			bytes: 7,
-		});
 	});
 });
 

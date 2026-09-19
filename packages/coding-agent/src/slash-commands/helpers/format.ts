@@ -1,4 +1,3 @@
-import { shimmerText } from "../../modes/theme/shimmer";
 import { theme as currentTheme, type Theme } from "../../modes/theme/theme";
 
 /** Format a millisecond duration as a coarse-grained human label. */
@@ -37,10 +36,10 @@ function resolveProgressBarTheme(uiTheme: ProgressBarTheme | undefined): Progres
  */
 export function renderAsciiBar(fraction: number | undefined, width = 24, uiTheme?: ProgressBarTheme): string {
 	const progressBarTheme = resolveProgressBarTheme(uiTheme);
-	if (fraction === undefined) return `[${shimmerText("·".repeat(width), progressBarTheme)}]`;
+	if (fraction === undefined) return `[${progressBarTheme.fg("accent", "·".repeat(width))}]`;
 	const clamped = Math.min(Math.max(fraction, 0), 1);
 	const filled = Math.round(clamped * width);
 	const pct = Math.round(clamped * 100);
 	const bar = `${"█".repeat(filled)}${"░".repeat(Math.max(0, width - filled))}`;
-	return `[${shimmerText(bar, progressBarTheme)}] ${pct}%`;
+	return `[${progressBarTheme.fg("accent", bar)}] ${pct}%`;
 }

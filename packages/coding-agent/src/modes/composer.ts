@@ -72,7 +72,6 @@ export interface ComposerOptions {
 /** Controls the first terminal paint for a composer that does not already own the terminal. */
 export interface ComposerStartOptions {
 	readonly clearScrollback?: boolean;
-	readonly playWelcomeIntro?: boolean;
 	/**
 	 * Paint without owning stdin: the tty keeps cooked-mode echo/editing so
 	 * typing stays visible while startup module loading blocks the event loop.
@@ -196,7 +195,7 @@ export class Composer implements TerminalFrameProvider {
 		this.editor.setActionKeys("app.exit", ["ctrl+d"]);
 		this.editor.onClear = () => this.#handleInterrupt();
 		this.editor.onExit = () => this.#requestExit(0);
-		this.editor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(this.editor));
+		this.editor.setRepaintHandler(() => this.ui.requestComponentRender(this.editor));
 
 		if (!this.#preferences.quiet) this.#ensureWelcome();
 		this.#rebuildHeader();
@@ -468,7 +467,6 @@ export class Composer implements TerminalFrameProvider {
 		if (this.#started || this.#stopped) return;
 		this.#started = true;
 		this.ui.start({ clearScrollback: options.clearScrollback === true, deferInput: options.deferInput === true });
-		if (options.playWelcomeIntro !== false) this.playWelcomeIntro();
 	}
 	/** Take raw-input ownership after a deferred-input start. Idempotent. */
 	enableInput(): void {
@@ -499,12 +497,10 @@ export class Composer implements TerminalFrameProvider {
 			autocorrect: this.#preferences.spellingAutocorrect,
 		});
 		if (this.#preferences.quiet) {
-			this.#welcome?.stopIntro();
 			this.#welcome = undefined;
 		} else {
 			this.#ensureWelcome();
 			this.#welcome?.invalidate();
-			if (wasQuiet && this.#started) this.playWelcomeIntro();
 		}
 		if (wasQuiet !== this.#preferences.quiet) this.#rebuildHeader();
 		this.ui.requestRender();
@@ -563,11 +559,6 @@ export class Composer implements TerminalFrameProvider {
 		this.ui.requestRender();
 	}
 
-	/** Play or replay the welcome intro against the stable header render target. */
-	playWelcomeIntro(): void {
-		this.#welcome?.playIntro(() => this.ui.requestComponentRender(this.#header));
-	}
-
 	/** Transfer terminal ownership to InteractiveMode without stopping the composer. */
 	transfer(): void {
 		if (!this.#started || this.#stopped || this.#transferred) {
@@ -579,7 +570,6 @@ export class Composer implements TerminalFrameProvider {
 	/** Stop a composer that has not transferred terminal ownership. */
 	stop(): void {
 		if (!this.#started || this.#stopped || this.#transferred) return;
-		this.#welcome?.stopIntro();
 		this.ui.stop();
 		this.#stopped = true;
 	}
@@ -626,7 +616,6 @@ export class Composer implements TerminalFrameProvider {
 	#requestExit(code: number): void {
 		// Remains live after transfer until InteractiveMode installs its configured handlers.
 		if (this.#stopped) return;
-		this.#welcome?.stopIntro();
 		if (this.#started) this.ui.stop();
 		this.#stopped = true;
 		this.#exit(code);

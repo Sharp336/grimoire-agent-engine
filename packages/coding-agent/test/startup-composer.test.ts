@@ -144,7 +144,7 @@ describe("Composer prepaint", () => {
 
 			expect(mode.ui).toBe(adoptedComposer.ui);
 			expect(mode.editor).toBe(adoptedComposer.editor);
-			await mode.init({ suppressWelcomeIntro: true });
+			await mode.init({});
 
 			expect(mode.ui).toBe(adoptedComposer.ui);
 			expect(mode.editor).toBe(adoptedComposer.editor);
@@ -205,7 +205,7 @@ describe("Composer prepaint", () => {
 		const prompt = vi.spyOn(testSession.session, "prompt");
 
 		try {
-			const initializing = mode.init({ suppressWelcomeIntro: true });
+			const initializing = mode.init({});
 			await enteredInit.promise;
 			terminal.sendInput("alpha");
 			terminal.sendInput("\r");
@@ -288,7 +288,7 @@ describe("Composer prepaint", () => {
 		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
 
 		try {
-			await mode.init({ suppressWelcomeIntro: true });
+			await mode.init({});
 			await terminal.waitForRender();
 			expect(mode.editor.getExpandedText()).toBe(draft);
 			expect(draft.split("\n")).toHaveLength(18);
@@ -451,7 +451,7 @@ describe("Composer prepaint", () => {
 			terminal.sendInput(" between");
 			expect(mode.editor.getExpandedText()).toBe("draft message between");
 			await terminal.waitForRender();
-			await mode.init({ suppressWelcomeIntro: true });
+			await mode.init({});
 			await terminal.waitForRender();
 
 			expect(terminal.starts).toBe(1);

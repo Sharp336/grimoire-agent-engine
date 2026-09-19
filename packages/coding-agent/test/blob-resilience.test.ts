@@ -19,7 +19,7 @@ function injectedFetch(implementation: ProbeFetch): typeof globalThis.fetch {
 	return Object.assign(implementation, { preconnect: globalThis.fetch.preconnect });
 }
 
-function publication(destination: "direct" | "chevereto", url: string): BlobPublication {
+function publication(destination: "direct" | "ssh", url: string): BlobPublication {
 	return { destination, url, bytes: IMAGE_BYTES.byteLength };
 }
 
@@ -100,9 +100,9 @@ function directConfig(origin?: string): BlobBrokerWorkerConfig {
 	};
 }
 
-function cheveretoConfig(origin: string): BlobBrokerWorkerConfig {
+function sshConfig(origin: string): BlobBrokerWorkerConfig {
 	return {
-		kind: "chevereto",
+		kind: "ssh",
 		options: { endpoint: `${origin}/upload` },
 		credentials: { apiKey: "test-key" },
 		bindHost: "127.0.0.1",
@@ -202,7 +202,7 @@ describe("FallbackBlobBackend", () => {
 			async ensureBlob(_key, _mimeType, getBytes) {
 				calls.push("second");
 				expect(getBytes()).toEqual(IMAGE_BYTES);
-				return publication("chevereto", "https://healthy.example/image.png");
+				return publication("ssh", "https://healthy.example/image.png");
 			},
 			async ensureLazy() {
 				return null;
@@ -216,7 +216,7 @@ describe("FallbackBlobBackend", () => {
 				byteCalls++;
 				return IMAGE_BYTES;
 			}),
-		).toEqual(publication("chevereto", "https://healthy.example/image.png"));
+		).toEqual(publication("ssh", "https://healthy.example/image.png"));
 		expect(calls).toEqual(["first", "second"]);
 		expect(byteCalls).toBe(1);
 	});
@@ -275,7 +275,7 @@ describe("FallbackBlobBackend", () => {
 describe("ImageUrlService ordered failover", () => {
 	it("keeps a healthy publication stable and advances past its destination when rejected", async () => {
 		const edge = startUploadEdge();
-		const broker = service([cheveretoConfig(edge.origin), directConfig(edge.origin)]);
+		const broker = service([sshConfig(edge.origin), directConfig(edge.origin)]);
 		const pristine = imageContext();
 
 		const first = await broker.decorateContext(pristine, model);
@@ -300,7 +300,7 @@ describe("ImageUrlService ordered failover", () => {
 
 	it("materializes a lazy frame before retrying through the following uploader", async () => {
 		const edge = startUploadEdge();
-		const broker = service([directConfig(edge.origin), cheveretoConfig(edge.origin)]);
+		const broker = service([directConfig(edge.origin), sshConfig(edge.origin)]);
 		const frames = await broker.frameSink.framesFor(
 			"lazy resilience frame\n".repeat(20),
 			snapcompact.resolveShape(),

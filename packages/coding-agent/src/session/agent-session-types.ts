@@ -37,7 +37,6 @@ import type { IrcBus } from "../irc/bus";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
-import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
 import type { SessionLaunchSnapshot, SessionOriginalAttachment } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
@@ -243,7 +242,6 @@ export interface AgentSessionConfig {
 	/** Prefer websocket transport for OpenAI Codex requests when supported. */
 	preferWebsockets?: boolean;
 	/** Codex saved-reset coordinator; defaults to the process-wide singleton so concurrent sessions can't double-spend. Inject a fresh one in tests. */
-	codexResetCoordinator?: CodexAutoRedeemCoordinator;
 	/** Provider payload hook used by the active session request path. */
 	onPayload?: SimpleStreamOptions["onPayload"];
 	/** Provider response hook used by the active session request path. */

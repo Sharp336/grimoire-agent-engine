@@ -208,7 +208,6 @@ describe("setup wizard persistence", () => {
 		const hideOverlay = mock(() => {});
 		const setFocus = mock((_component: unknown) => {});
 		const requestRender = mock(() => {});
-		const playWelcomeIntro = mock(() => {});
 		let component: SetupWizardComponent | undefined;
 		const scene: SetupScene = {
 			id: "providers",
@@ -223,7 +222,6 @@ describe("setup wizard persistence", () => {
 		};
 		const ctx = {
 			settings,
-			playWelcomeIntro,
 			ui: {
 				terminal: { rows: 24 },
 				showOverlay: (nextComponent: SetupWizardComponent) => {
@@ -235,13 +233,12 @@ describe("setup wizard persistence", () => {
 			},
 		} as unknown as InteractiveModeContext;
 
-		const pending = runSetupWizard(ctx, [scene], { markComplete: false, playWelcomeIntro: false });
+		const pending = runSetupWizard(ctx, [scene], { markComplete: false });
 		component?.handleInput?.("\n");
 		component?.handleInput?.("\n");
 		await pending;
 
 		expect(settings.get("setupVersion")).toBe(0);
-		expect(playWelcomeIntro).not.toHaveBeenCalled();
 		expect(hideOverlay).toHaveBeenCalledTimes(1);
 		expect(setFocus).toHaveBeenCalled();
 	});

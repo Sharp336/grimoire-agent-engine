@@ -23,7 +23,7 @@ describe("renderWelcomeTip", () => {
 		}
 	});
 
-	it("replaces a trailing [NEW] marker with a rainbow NEW! tag", () => {
+	it("replaces a trailing [NEW] marker with a themed NEW! tag", () => {
 		const lines = renderWelcomeTip("Try the shiny advisor [NEW]", 60);
 		const plain = lines.map(line => Bun.stripANSI(line)).join("\n");
 		const styled = lines.join("\n");
@@ -31,7 +31,6 @@ describe("renderWelcomeTip", () => {
 		expect(plain).toContain("Try the shiny advisor");
 		expect(plain).not.toContain("[NEW]"); // literal marker stripped
 		expect(plain).toContain("NEW!"); // replaced by the visible tag
-		expect(styled).toContain("\x1b[1m"); // tag is bold
 		expect(styled).not.toBe(plain); // tag carries SGR color escapes
 	});
 
@@ -46,16 +45,6 @@ describe("renderWelcomeTip", () => {
 			expect(lines.map(l => Bun.stripANSI(l)).join("\n")).toContain("NEW!");
 		}
 	});
-
-	it("shimmers the tag across phases without changing visible text", () => {
-		const tip = "Fresh feature here [NEW]";
-		const still = renderWelcomeTip(tip, 60, 0);
-		const shifted = renderWelcomeTip(tip, 60, 0.5);
-
-		expect(shifted.join("\n")).not.toBe(still.join("\n")); // hues rotate
-		expect(shifted.map(l => Bun.stripANSI(l))).toEqual(still.map(l => Bun.stripANSI(l)));
-	});
-
 	it("leaves tips without the marker untouched", () => {
 		const lines = renderWelcomeTip("Plain old tip", 60);
 		const plain = lines.map(line => Bun.stripANSI(line)).join("\n");

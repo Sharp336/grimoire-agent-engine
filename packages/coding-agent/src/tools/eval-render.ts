@@ -45,8 +45,6 @@ export const EVAL_DEFAULT_PREVIEW_LINES = 10;
 
 function languageForHighlighter(language: EvalLanguage | undefined): "python" | "javascript" | "ruby" | "julia" {
 	if (language === "js") return "javascript";
-	if (language === "ruby") return "ruby";
-	if (language === "julia") return "julia";
 	return "python";
 }
 
@@ -79,8 +77,6 @@ interface EvalRenderCell {
 
 function normalizeRenderLanguage(value: string | undefined): EvalLanguage {
 	if (value === "js") return "js";
-	if (value === "rb" || value === "ruby") return "ruby";
-	if (value === "jl" || value === "julia") return "julia";
 	return "python";
 }
 

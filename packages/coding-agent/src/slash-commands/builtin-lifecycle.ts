@@ -376,18 +376,6 @@ export const BUILTIN_LIFECYCLE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> =
 		},
 	},
 	{
-		name: "omfg",
-		icon: "rule",
-		description: "Forge a TTSR rule from a complaint to stop a recurring behavior",
-		inlineHint: "<complaint>",
-		allowArgs: true,
-		handleTui: async (command, runtime) => {
-			const complaint = command.text.slice(`/${command.name}`.length).trim();
-			runtime.ctx.editor.setText("");
-			await runtime.ctx.handleOmfgCommand(complaint);
-		},
-	},
-	{
 		name: "retry",
 		icon: "redo",
 		description: "Retry the last failed agent turn",

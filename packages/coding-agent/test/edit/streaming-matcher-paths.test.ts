@@ -167,31 +167,19 @@ describe("EDIT_MODE_STRATEGIES.matcherEntries", () => {
 	});
 });
 
-/**
- * Integration: a hashline edit payload whose only path lives in the
- * `[demo.ts#TAG]` section header must trigger the bundled `ts-no-any` rule
- * — exactly the scenario the regression in #3646 was missing. The strategy
- * outputs feed `TtsrManager.checkSnapshot` the same way `AgentSession`'s
- * TTSR pipeline does after the fix.
- */
-import { getCapability } from "@oh-my-pi/pi-coding-agent/capability";
-import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule, ruleCapability } from "@oh-my-pi/pi-coding-agent/capability/rule";
-import type { LoadContext } from "@oh-my-pi/pi-coding-agent/capability/types";
+import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 // Register all discovery providers as a side effect.
-import "@oh-my-pi/pi-coding-agent/discovery";
 import { TtsrManager } from "@oh-my-pi/pi-coding-agent/export/ttsr";
 
 async function loadBundledTsNoAnyRule(): Promise<Rule> {
-	const cap = getCapability(ruleCapability.id);
-	if (!cap) throw new Error("rules capability missing");
-	const provider = cap.providers.find(p => p.id === BUILTIN_DEFAULTS_PROVIDER_ID);
-	if (!provider) throw new Error("builtin-defaults provider missing");
-	const ctx: LoadContext = { cwd: "/tmp", home: "/tmp/home", repoRoot: null };
-	const load = provider.load as (ctx: LoadContext) => Promise<{ items: Rule[] }>;
-	const { items } = await load(ctx);
-	const rule = items.find(r => r.name === "ts-no-any");
-	if (!rule) throw new Error("bundled ts-no-any rule not registered");
-	return rule;
+	return {
+		name: "ts-no-any",
+		path: "/tmp/project/rule.md",
+		content: "Use explicit types",
+		condition: ["\\bany\\b"],
+		scope: ["tool:edit(*.ts)"],
+		_source: { provider: "project", providerName: "Project", path: "/tmp/project/rule.md", level: "project" },
+	};
 }
 
 describe("hashline edit + path-scoped TTSR (regression: #3646)", () => {

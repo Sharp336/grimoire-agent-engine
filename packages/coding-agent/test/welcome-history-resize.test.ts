@@ -95,7 +95,7 @@ function startRetiredWelcome(modelName: string): { composer: Composer; terminal:
 		welcome: { version: "test", modelName, providerName: "test-provider" },
 	});
 	composer.setRuntimeChildren([new TranscriptContainer(), new MutableComposerTail()]);
-	composer.start({ playWelcomeIntro: false });
+	composer.start({});
 	return { composer, terminal };
 }
 
@@ -143,7 +143,7 @@ describe("composer welcome native-history resize", () => {
 		const transcript = new TranscriptContainer();
 		const tail = new MutableComposerTail();
 		composer.setRuntimeChildren([transcript, tail]);
-		composer.start({ playWelcomeIntro: false });
+		composer.start({});
 
 		expect(countRows(plainBuffer(terminal), "Welcome back!")).toBe(1);
 		expect(offered).toHaveLength(1);
@@ -264,7 +264,7 @@ describe("composer welcome native-history resize", () => {
 			welcome: { version: "test", modelName: "test-model", providerName: "test-provider" },
 		});
 		composer.setRuntimeChildren([new TranscriptContainer(), new MutableComposerTail()]);
-		composer.start({ playWelcomeIntro: false });
+		composer.start({});
 		await scheduler.settle(terminal);
 
 		const narrow = plainBuffer(terminal);
@@ -294,7 +294,7 @@ describe("composer welcome native-history resize", () => {
 		const transcript = new TranscriptContainer();
 		for (let id = 0; id < 4; id++) transcript.addChild(new WidthTranscriptBlock(id));
 		composer.setRuntimeChildren([transcript, new MutableComposerTail()]);
-		composer.start({ playWelcomeIntro: false });
+		composer.start({});
 		await scheduler.settle(terminal);
 
 		expect(plainBuffer(terminal)).toContain("block-0@20");
@@ -320,7 +320,7 @@ describe("composer welcome native-history resize", () => {
 		const transcript = new TranscriptContainer();
 		transcript.addChild(new WidthTranscriptBlock(1));
 		composer.setRuntimeChildren([transcript, new MutableComposerTail()]);
-		composer.start({ playWelcomeIntro: false });
+		composer.start({});
 		await scheduler.settle(terminal);
 		expect(transcript.blockStates()).toEqual(["settled"]);
 

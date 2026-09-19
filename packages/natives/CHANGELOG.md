@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Removed
+
+- Optional native voice capture/playback, Opus, and live WebRTC bindings.
+
 ## [18.0.6] - 2026-08-26
 
 ### Fixed

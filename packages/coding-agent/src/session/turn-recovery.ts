@@ -163,7 +163,6 @@ export interface TurnRecoveryHost {
 	 * live usage-limit error — authoritative for the active account when the
 	 * usage report still shows a pre-block snapshot.
 	 */
-	maybeAutoRedeemCodexReset(activeBlockUnblockAtMs?: number): Promise<boolean>;
 	runAutoCompaction(
 		reason: "overflow" | "threshold" | "idle" | "incomplete",
 		willRetry: boolean,
@@ -2211,14 +2210,7 @@ export class TurnRecovery {
 			!staleOpenAIResponsesReplayError &&
 			recordedUsageLimitOutcome
 		) {
-			if (
-				recordedUsageLimitOutcome.switchedCredential ||
-				// Convert the parsed hint to an absolute timestamp NOW, before the
-				// hook's usage IO — a duration re-anchored after slow fetches drifts.
-				(await this.#host.maybeAutoRedeemCodexReset(
-					parsedRetryAfterMs === undefined ? undefined : Date.now() + parsedRetryAfterMs,
-				))
-			) {
+			if (recordedUsageLimitOutcome.switchedCredential) {
 				switchedCredential = true;
 				delayMs = 0;
 			} else {
