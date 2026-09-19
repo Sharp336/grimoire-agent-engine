@@ -64,7 +64,7 @@ async function linkNativeFile(file: string): Promise<{ contents: string; loader:
 					}));
 					// Avoid matching absolute build entrypoints: broad entry hooks panic in Bun 1.4.
 					build.onResolve({ filter: /^(?:\.{1,2}[\/]|node:|bun:|@|[a-zA-Z_-][^:]*$)/ }, args => {
-						if (args.kind === "entry-point") return { path: args.path };
+						if (args.kind === "entry-point-build") return { path: args.path };
 						// Synchronous require closures must be linked together, never await runtime onLoad.
 						if (args.kind === "require-call" || args.kind === "require-resolve") return undefined;
 						if (!args.path.startsWith("node:") && !args.path.startsWith("bun:")) {
