@@ -14,6 +14,10 @@ import {
 } from "../../../src/modes/components/custom-editor";
 import { getEditorTheme, initTheme, theme } from "../../../src/modes/theme/theme";
 
+function makeEditor(): { editor: CustomEditor } {
+	return { editor: new CustomEditor(getEditorTheme()) };
+}
+
 const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
 

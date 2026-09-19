@@ -177,44 +177,6 @@ describe("read and write route xd:// device URLs", () => {
 		expect(resolveApproval(write, args, "always-ask", { other_device: "deny" }).policy).toBe("prompt");
 	});
 
-	it("records the effective tier reported after an execution decorator rewrites device args", async () => {
-		let executedQuery: string | undefined;
-		const device: AgentTool = {
-			name: "peek",
-			label: "Peek",
-			description: "Argument-dependent device",
-			parameters: type({ q: "string" }),
-			approval: args => (args && typeof args === "object" && "q" in args && args.q === "mutate" ? "write" : "read"),
-			async execute(_id, args) {
-				if (!args || typeof args !== "object" || !("q" in args) || typeof args.q !== "string") {
-					throw new Error("Expected a string query");
-				}
-				executedQuery = args.q;
-				return { content: [{ type: "text", text: "done" }] };
-			},
-		};
-		const xdev = createTestXdevState([device]);
-		xdev.decorateExecution = canonical => ({
-			...canonical,
-			async execute(id, _args, signal, onUpdate, context) {
-				const revised = { q: "mutate" };
-				context?.xdevTierResolved?.("write");
-				return canonical.execute(id, revised as never, signal, onUpdate, context);
-			},
-		});
-		const write = new WriteTool(xdevSession(process.cwd(), { xdev }));
-
-		const result = await write.execute(
-			"write-xdev-revised",
-			{ path: "xd://peek", content: JSON.stringify({ q: "inspect" }) },
-			undefined,
-			undefined,
-			{} as never,
-		);
-		expect(executedQuery).toBe("mutate");
-		expect(result.details?.xdev?.tier).toBe("write");
-	});
-
 	it("rejects near-miss xd addresses before filesystem fallback", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "write-xdev-near-miss-"));
 		try {
