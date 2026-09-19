@@ -1,7 +1,7 @@
 /**
  * Deferred-cleanup outcome contract (issue #9670).
  *
- * When a subagent's teardown (advisor catch-up, session disposal, owner-job
+ * When a subagent's teardown (session disposal, owner-job
  * reaping) drains past the shared cleanup deadline, `runSubprocess` hands the
  * remaining work off asynchronously. That hand-off MUST NOT rewrite the run's
  * terminal outcome: a successful `yield` stays a success, and a genuinely
@@ -82,8 +82,6 @@ function mockSession(opts: {
 			opts.onPrompt(emit);
 		},
 		waitForIdle: async () => {},
-		prepareForHeadlessAdvisorDrain: () => {},
-		waitForAdvisorCatchup: async () => true,
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
 		hasPendingAsyncWork: () => false,
 		getAsyncJobSnapshot: () => ({ running: [], recent: [] }),

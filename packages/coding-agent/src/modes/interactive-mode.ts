@@ -5155,10 +5155,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleDumpCommand();
 	}
 
-	handleAdvisorDumpCommand(isRaw?: boolean) {
-		return this.#commandController.handleAdvisorDumpCommand(isRaw);
-	}
-
 	handleDebugTranscriptCommand(): Promise<void> {
 		return this.#commandController.handleDebugTranscriptCommand();
 	}
@@ -5173,10 +5169,6 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleSessionCommand(): Promise<void> {
 		return this.#commandController.handleSessionCommand();
-	}
-
-	handleAdvisorStatusCommand(): Promise<void> {
-		return this.#commandController.handleAdvisorStatusCommand();
 	}
 
 	handleJobsCommand(): Promise<void> {
@@ -5415,10 +5407,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	// Selector handling
 	showSettingsSelector(): void {
 		this.#selectorController.showSettingsSelector();
-	}
-
-	showAdvisorConfigure(): void {
-		this.#selectorController.showAdvisorConfigure();
 	}
 
 	showHistorySearch(): void {

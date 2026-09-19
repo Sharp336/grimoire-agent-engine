@@ -83,13 +83,4 @@ describe("AgentOutputManager", () => {
 		expect(await mgr.allocate("Gone")).toBe("Gone-2");
 		expect(await mgr.allocate("Fresh")).toBe("Fresh");
 	});
-
-	it("reserves the advisor transcript stem so a task can't clobber __advisor.jsonl", async () => {
-		const mgr = new AgentOutputManager(() => null);
-		// A subagent allocated `__advisor` would write `__advisor.jsonl`, colliding with
-		// the advisor transcript in the same artifacts dir; the stem is pre-reserved.
-		expect(await mgr.allocate("__advisor")).toBe("__advisor-2");
-		// Unrelated names sharing the prefix are unaffected.
-		expect(await mgr.allocate("__advisor-notes")).toBe("__advisor-notes");
-	});
 });

@@ -20,12 +20,6 @@ export const launchHelp = {
 		smol: Flags.string({ description: "Smol/fast model for lightweight tasks (or PI_SMOL_MODEL env)" }),
 		slow: Flags.string({ description: "Slow/reasoning model for thorough analysis (or PI_SLOW_MODEL env)" }),
 		plan: Flags.string({ description: "Plan model for architectural planning (or PI_PLAN_MODEL env)" }),
-		prewalk: Flags.boolean({
-			description:
-				"Switch from the active model to a fast/cheap model at the first edit/write after the plan's todo list exists (default off; see prewalk.enabled)",
-		}),
-		"no-prewalk": Flags.boolean({ description: "Disable prewalk even if prewalk.enabled is set" }),
-		"prewalk-into": Flags.string({ description: 'Target model for prewalk (default the "smol" role)' }),
 		"plan-yolo": Flags.boolean({
 			description:
 				"Force read-only plan mode at start, auto-approve the plan on the model's first resolve call, then switch to --plan-yolo-into to implement it",
@@ -73,9 +67,6 @@ export const launchHelp = {
 		}),
 		"hide-thinking": Flags.boolean({
 			description: "Hide thinking blocks in TUI output (display only, does not disable model thinking)",
-		}),
-		advisor: Flags.boolean({
-			description: "Enable the advisor runtime (passively reviews each turn and injects notes)",
 		}),
 		"external-thinking": Flags.boolean({
 			description:

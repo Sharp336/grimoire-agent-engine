@@ -39,12 +39,7 @@ describe("print-mode error exit disposes the session before exit", () => {
 			sessionManager: { buildSessionContext: () => ({ messages: [] }), getEntries: () => [] },
 			state: { messages: [errorMsg] },
 			getLastAssistantMessage: () => errorMsg,
-			prepareForHeadlessAdvisorDrain: () => {},
 			setTextOutputCommitted: () => {},
-			waitForAdvisorCatchup: async () => {
-				order.push("catchup");
-				return true;
-			},
 			dispose: async () => {
 				order.push("dispose");
 			},
@@ -69,6 +64,6 @@ describe("print-mode error exit disposes the session before exit", () => {
 			flushSpy.mockRestore();
 		}
 
-		expect(order).toEqual(["catchup", "flush", "dispose", "exit"]);
+		expect(order).toEqual(["flush", "dispose", "exit"]);
 	});
 });

@@ -1,20 +1,6 @@
-/**
- * Builds transcript components from persisted session message entries — the
- * file/remote-backed counterpart to {@link UiHelpers.addMessageToChat} (which is
- * bound to the live InteractiveModeContext). Used by the fullscreen transcript
- * viewer ({@link AgentTranscriptViewer}) to render a parked subagent / advisor /
- * collab-guest transcript that has no live session.
- *
- * Unlike the old incremental hub sync, {@link ChatTranscriptBuilder.rebuild}
- * always discards prior components and rebuilds the whole transcript from the
- * supplied entries. Re-rendering a growing transcript is therefore O(n) in the
- * entry count, but it cannot duplicate or misorder rows the way incremental
- * component reuse could.
- */
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import type { TUI } from "@oh-my-pi/pi-tui";
-import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
 import type { MessageRenderer } from "../../extensibility/extensions/types";
@@ -27,7 +13,6 @@ import {
 	type SkillPromptDetails,
 } from "../../session/messages";
 import type { SessionMessageEntry } from "../../session/session-entries";
-import { theme } from "../theme/theme";
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
@@ -39,7 +24,6 @@ import {
 	resolveAssistantErrorPresentation,
 	splitAssistantMessageToolTimeline,
 } from "../utils/transcript-render-helpers";
-import { createAdvisorMessageCard } from "./advisor-message";
 import { AssistantMessageComponent } from "./assistant-message";
 import { createBackgroundTanDispatchBlock } from "./background-tan-message";
 import { BashExecutionComponent } from "./bash-execution";
@@ -257,11 +241,6 @@ export class ChatTranscriptBuilder {
 				const textContent = message.role === "user" ? userMessageText(message) : "";
 				if (textContent) {
 					const isSynthetic = message.role === "developer" ? true : (message.synthetic ?? false);
-					// Synthetic (agent-attributed) inputs — chiefly the advisor's `Session
-					// update` replay dumps — can be hundreds of KiB of Markdown each.
-					// Rendering their full body on cold open blocked the TUI (issue #6308);
-					// collapse them behind a compact summary that builds Markdown only on
-					// ctrl+o expand. Real user prompts stay fully rendered.
 					if (isSynthetic) {
 						const collapsed = new CollapsedSyntheticMessageComponent(textContent);
 						this.#trackExpandable(collapsed);
@@ -495,11 +474,6 @@ export class ChatTranscriptBuilder {
 			message.customType === "irc:relay"
 		) {
 			this.container.addChild(buildIrcMessageCard(message, () => this.#expanded));
-			return;
-		}
-		if (message.customType === "advisor") {
-			const details = (message as CustomMessage<AdvisorMessageDetails>).details;
-			this.container.addChild(createAdvisorMessageCard(details, () => this.#expanded, theme));
 			return;
 		}
 		if (message.customType === LAUNCH_COMPLETION_MESSAGE_TYPE) {

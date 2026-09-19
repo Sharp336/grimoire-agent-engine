@@ -74,7 +74,6 @@ export type SymbolKey =
 	// Icons
 	| "icon.model"
 	| "icon.plan"
-	| "icon.prewalk"
 	| "icon.goal"
 	| "icon.pause"
 	| "icon.loop"
@@ -91,7 +90,6 @@ export type SymbolKey =
 	| "icon.context"
 	| "icon.cost"
 	| "icon.subscription"
-	| "icon.advisor"
 	| "icon.time"
 	| "icon.pi"
 	| "icon.ghost"
@@ -192,8 +190,7 @@ export type SymbolKey =
 	| "md.hrChar"
 	| "md.bullet"
 	| "md.colorSwatch"
-	// Advisor note rail
-	| "advisor.rail"
+
 	// Language/file type icons
 	| "lang.default"
 	| "lang.typescript"
@@ -328,7 +325,6 @@ export type SlashCommandIconName =
 	// Shared icon.* symbols
 	| "model"
 	| "plan"
-	| "prewalk"
 	| "goal"
 	| "pause"
 	| "loop"
@@ -341,7 +337,6 @@ export type SlashCommandIconName =
 	| "tree"
 	| "signIn"
 	| "signOut"
-	| "advisor"
 	| "host"
 	| "package"
 	| "fast"
@@ -419,7 +414,6 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	// Icons
 	"icon.model": "⬢",
 	"icon.plan": "🗺",
-	"icon.prewalk": "🏃",
 	"icon.goal": "🎯",
 	"icon.pause": "⏸",
 	"icon.loop": "↻",
@@ -436,7 +430,6 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"icon.context": "◫",
 	"icon.cost": "💲",
 	"icon.subscription": "(sub)",
-	"icon.advisor": "👁",
 	"icon.time": "⏱",
 	"icon.pi": "π",
 	"icon.ghost": "👻",
@@ -536,9 +529,6 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"md.hrChar": "─",
 	"md.bullet": "•",
 	"md.colorSwatch": "■",
-	// Advisor note rail (heavier than md.quoteBorder so notes read as a distinct voice)
-	"advisor.rail": "▎",
-	// Language/file icons (emoji-centric, no Nerd Font required)
 	"lang.default": "⌘",
 	"lang.typescript": "🟦",
 	"lang.javascript": "🟨",
@@ -740,7 +730,6 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.model": "\uec19",
 	// pick:  | alt:  
 	"icon.plan": "\uf2d2",
-	"icon.prewalk": "\uf29d",
 	// pick:  (nf-fa-bullseye) | alt:  (nf-md-target) ◎ ⌖
 	"icon.goal": "\uf140",
 	// pick:  (nf-fa-pause) | alt: ⏸ ||
@@ -773,7 +762,6 @@ const NERD_SYMBOLS: SymbolMap = {
 	// pick: 󰙺 (nf-md-currency_usd_off)
 	"icon.subscription": "\u{f067a}",
 	// pick:  (nf-cod-eye)
-	"icon.advisor": "\uea70",
 	// pick:  | alt: ◷ ◴
 	"icon.time": "\uf017",
 	// pick:  | alt: π ∏ ∑
@@ -849,7 +837,6 @@ const NERD_SYMBOLS: SymbolMap = {
 	"cmd.expand": "\u{f004c}",
 	// pick:  (nf-fa-desktop) | alt:  (nf-oct-device_desktop)
 	"cmd.computer": "\uf108",
-	// pick:  (nf-fa-eye) | alt:  (nf-cod-eye, matches icon.advisor)
 	"cmd.eye": "\uf06e",
 	// pick:  (nf-fa-tasks) | alt:  (nf-cod-checklist)
 	"cmd.todo": "\uf0ae",
@@ -954,7 +941,6 @@ const NERD_SYMBOLS: SymbolMap = {
 	// pick: ■ | alt:  (U+F096)
 	"md.colorSwatch": "■",
 	// pick: ▎ | alt: ┃ │
-	"advisor.rail": "▎",
 	// Language icons (nerd font devicons)
 	"lang.default": "",
 	"lang.typescript": "\u{E628}",
@@ -1104,7 +1090,6 @@ const ASCII_SYMBOLS: SymbolMap = {
 	// Icons
 	"icon.model": "[M]",
 	"icon.plan": "plan",
-	"icon.prewalk": "prewalk",
 	"icon.goal": "goal",
 	"icon.pause": "||",
 	"icon.loop": "loop",
@@ -1121,7 +1106,6 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"icon.context": "ctx:",
 	"icon.cost": "$",
 	"icon.subscription": "(sub)",
-	"icon.advisor": "(adv)",
 	"icon.time": "t:",
 	"icon.pi": "pi",
 	"icon.ghost": "@",
@@ -1219,7 +1203,6 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"md.hrChar": "-",
 	"md.bullet": "*",
 	"md.colorSwatch": "[]",
-	"advisor.rail": "|",
 	// Language icons (ASCII uses abbreviations)
 	"lang.default": "code",
 	"lang.typescript": "ts",

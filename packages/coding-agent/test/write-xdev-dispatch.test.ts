@@ -97,7 +97,7 @@ describe("read and write route xd:// device URLs", () => {
 			expect(previewResult.isError).toBeUndefined();
 			expect(previewResult.details?.xdev?.tool).toBe("ast_edit");
 			expect(previewResult.details?.xdev?.mode).toBe("execute");
-			// The dispatch records the wrapped tool's approval tier so prewalk can
+			// The dispatch records the wrapped tool's approval tier so callers can
 			// tell a mutation from a read-only device call (issue #7312).
 			expect(previewResult.details?.xdev?.tier).toBe("write");
 			const previewText = previewResult.content.find(entry => entry.type === "text")?.text ?? "";

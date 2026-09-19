@@ -1,15 +1,3 @@
-/**
- * Fullscreen /agents hub, shown on the alternate screen like /models.
- *
- * Layout mirrors the model hub: a sidebar of scopes (All agents, per-source
- * groups, "+ New agent"), a body listing agents with type-to-filter search,
- * and a footer that turns into a chip strip while configuring. Enter on an
- * agent opens its property strip (enabled / model / prewalk / advisor); a
- * property opens a value strip whose "pick model…" chip dives into the real
- * ModelBrowser and whose "pattern…" chip opens an inline pattern input, so
- * every per-agent knob is picked instead of memorized.
- */
-
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
@@ -33,9 +21,7 @@ import type { EffectiveExtensionRoots } from "../../capability/types";
 import { getConfigDirs } from "../../config";
 import type { ModelRegistry } from "../../config/model-registry";
 import {
-	resolveAgentAdvisorSelection,
 	resolveAgentModelPatterns,
-	resolveAgentPrewalkPattern,
 	resolveConfiguredModelPatterns,
 	resolveModelOverride,
 } from "../../config/model-resolver";
@@ -45,7 +31,6 @@ import agentCreationUserPrompt from "../../prompts/system/agent-creation-user.md
 import { createAgentSession } from "../../sdk";
 import { refreshAgentDiscovery } from "../../task";
 import { discoverAgents } from "../../task/discovery";
-import { resolveAgentPrewalkDefault } from "../../task/prewalk";
 import type { AgentDefinition, AgentSource } from "../../task/types";
 import { shortenPath } from "../../tools/render-utils";
 import { getEditorTheme, theme } from "../theme/theme";
@@ -63,10 +48,6 @@ interface HubAgent extends AgentDefinition {
 	disabled: boolean;
 	/** `task.agentModelOverrides[name]` as a comma-joined pattern list. */
 	overrideModel?: string;
-	/** `task.agentPrewalk[name]`: "on", "off", or a model pattern. */
-	prewalkOverride?: string;
-	/** `task.agentAdvisor[name]`: "on", "off", or a model pattern. */
-	advisorOverride?: string;
 }
 
 const SOURCE_LABEL: Record<AgentSource, string> = {
@@ -88,7 +69,7 @@ interface SidebarEntry {
 type ListRow = { kind: "agent"; agent: HubAgent } | { kind: "new" };
 
 /** The per-agent knob a strip or the model browser is editing. */
-type PropertyKind = "model" | "prewalk" | "advisor";
+type PropertyKind = "model";
 
 interface StripChip {
 	label: string;
@@ -311,8 +292,6 @@ export class AgentsHubComponent implements Component {
 			const { agents } = await discoverAgents(this.#cwd, undefined, this.#extensionRoots());
 			const disabled = new Set(this.#settings.get("task.disabledAgents") ?? []);
 			const overrides = this.#settings.get("task.agentModelOverrides") ?? {};
-			const prewalkOverrides = this.#settings.get("task.agentPrewalk") ?? {};
-			const advisorOverrides = this.#settings.get("task.agentAdvisor") ?? {};
 			this.#allAgents = agents
 				.slice()
 				.sort((a, b) => {
@@ -327,8 +306,6 @@ export class AgentsHubComponent implements Component {
 						...agent,
 						disabled: disabled.has(agent.name),
 						overrideModel: overrideModel || undefined,
-						prewalkOverride: prewalkOverrides[agent.name]?.trim() || undefined,
-						advisorOverride: advisorOverrides[agent.name]?.trim() || undefined,
 					};
 				});
 			this.#buildSidebar();
@@ -416,21 +393,6 @@ export class AgentsHubComponent implements Component {
 		return `${model.provider}/${model.id}${level}`;
 	}
 
-	#effectivePrewalkPattern(agent: HubAgent): string | undefined {
-		return resolveAgentPrewalkPattern({
-			settingsOverride: agent.prewalkOverride,
-			agentPrewalk: resolveAgentPrewalkDefault(agent, this.#settings.get("task.prewalk") ?? false),
-		});
-	}
-
-	#effectiveAdvisorPattern(agent: HubAgent): string | undefined {
-		const selection = resolveAgentAdvisorSelection({
-			settingsOverride: agent.advisorOverride,
-			agentAdvisor: agent.advisor,
-		});
-		return selection ? (selection.model ?? "@advisor") : undefined;
-	}
-
 	// ═══════════════════════════════════════════════════════════════════════
 	// Mutations
 	// ═══════════════════════════════════════════════════════════════════════
@@ -452,23 +414,13 @@ export class AgentsHubComponent implements Component {
 			const value = this.#overrideFor(agent, property)?.trim();
 			if (value) overrides[agent.name] = value;
 		}
-		const key =
-			property === "model"
-				? "task.agentModelOverrides"
-				: property === "prewalk"
-					? "task.agentPrewalk"
-					: "task.agentAdvisor";
-		this.#settings.set(key, overrides);
+		this.#settings.set("task.agentModelOverrides", overrides);
 	}
 
 	#overrideFor(agent: HubAgent, property: PropertyKind): string | undefined {
 		switch (property) {
 			case "model":
 				return agent.overrideModel;
-			case "prewalk":
-				return agent.prewalkOverride;
-			case "advisor":
-				return agent.advisorOverride;
 		}
 	}
 
@@ -477,12 +429,6 @@ export class AgentsHubComponent implements Component {
 		switch (property) {
 			case "model":
 				agent.overrideModel = trimmed;
-				break;
-			case "prewalk":
-				agent.prewalkOverride = trimmed;
-				break;
-			case "advisor":
-				agent.advisorOverride = trimmed;
 				break;
 		}
 		this.#persistRecord(property);
@@ -499,14 +445,6 @@ export class AgentsHubComponent implements Component {
 				const base = agent.overrideModel ?? (patterns.length > 0 ? patterns.join(",") : "session model");
 				return `${agent.name} model: ${base}${resolved ? ` → ${resolved}` : ""}`;
 			}
-			case "prewalk": {
-				const pattern = this.#effectivePrewalkPattern(agent);
-				return `${agent.name} prewalk: ${pattern ? `on (${pattern})` : "off"}`;
-			}
-			case "advisor": {
-				const pattern = this.#effectiveAdvisorPattern(agent);
-				return `${agent.name} advisor: ${pattern ? `on (${pattern})` : "off"}`;
-			}
 		}
 	}
 
@@ -518,14 +456,6 @@ export class AgentsHubComponent implements Component {
 		switch (property) {
 			case "model":
 				return agent.overrideModel ?? "auto";
-			case "prewalk": {
-				const pattern = this.#effectivePrewalkPattern(agent);
-				return pattern ?? "off";
-			}
-			case "advisor": {
-				const pattern = this.#effectiveAdvisorPattern(agent);
-				return pattern ?? "off";
-			}
 		}
 	}
 
@@ -549,7 +479,7 @@ export class AgentsHubComponent implements Component {
 		this.#strip = {
 			kind: "chips",
 			agent,
-			chips: [enabledChip, propertyChip("model"), propertyChip("prewalk"), propertyChip("advisor")],
+			chips: [enabledChip, propertyChip("model")],
 			index: 1,
 		};
 	}
@@ -1265,10 +1195,6 @@ export class AgentsHubComponent implements Component {
 					: name;
 			const badges: string[] = [];
 			if (agent.overrideModel) badges.push(theme.fg("warning", agent.overrideModel));
-			const prewalk = this.#effectivePrewalkPattern(agent);
-			if (prewalk) badges.push(theme.fg("dim", `pre:${prewalk}`));
-			const advisor = this.#effectiveAdvisorPattern(agent);
-			if (advisor) badges.push(theme.fg("dim", `adv:${advisor}`));
 			const sourceTag = theme.fg("dim", SOURCE_LABEL[agent.source].toLowerCase());
 			let line = ` ${cursor} ${dot} ${nameStyled}  ${sourceTag}`;
 			const right = badges.join("  ");
@@ -1296,13 +1222,7 @@ export class AgentsHubComponent implements Component {
 			const resolved = this.#resolvePatterns(patterns);
 			const modelLine = `${theme.fg("muted", "model:")} ${patterns.length > 0 ? replaceTabs(patterns.join(",")) : theme.fg("dim", "(session model)")}${resolved ? ` ${theme.fg("dim", "→")} ${theme.fg("success", resolved)}` : ""}`;
 			lines.push(truncateToWidth(` ${modelLine}`, width));
-			const prewalk = this.#effectivePrewalkPattern(agent);
-			const advisor = this.#effectiveAdvisorPattern(agent);
-			const flagLine = [
-				`${theme.fg("muted", "prewalk:")} ${prewalk ? theme.fg("success", prewalk) : theme.fg("dim", "off")}`,
-				`${theme.fg("muted", "advisor:")} ${advisor ? theme.fg("success", advisor) : theme.fg("dim", "off")}`,
-				agent.filePath ? theme.fg("dim", shortenPath(agent.filePath)) : "",
-			]
+			const flagLine = [agent.filePath ? theme.fg("dim", shortenPath(agent.filePath)) : ""]
 				.filter(Boolean)
 				.join("   ");
 			lines.push(truncateToWidth(` ${flagLine}`, width));

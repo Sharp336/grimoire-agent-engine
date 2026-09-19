@@ -45,15 +45,6 @@ import { replaceTabs } from "./render-utils";
 import type { ToolActivitySummary, ToolRenderer } from "./renderers";
 import { renderError, ToolAbortError, ToolError } from "./tool-errors";
 
-/**
- * Discoverable built-ins that must stay top-level even when xdev mounting is
- * active: `todo` feeds the todo prelude/prewalk machinery, `ask` is the
- * model's user-interaction affordance, `grep` is the redirect target of the
- * bash interceptor rules, and `web_search` is invoked directly by most models
- * (which have no notion of the `xd://` protocol) so hiding it behind dispatch
- * makes it unreachable in practice (issue #5973) — each loses its harness
- * integration or usability if hidden behind dispatch.
- */
 export const XDEV_KEEP_TOP_LEVEL: Record<string, true> = {
 	todo: true,
 	ask: true,
@@ -91,12 +82,7 @@ export interface XdevDispatch {
 	mode: "help" | "execute";
 	/** Validated inner args, kept for renderer delegation on result rebuilds. */
 	args?: Record<string, unknown>;
-	/**
-	 * Approval tier of the wrapped tool for {@link args} (`read` = no workspace
-	 * mutation). Absent for `help` dispatches and calls whose tier could not be
-	 * resolved. Consumed by the prewalk coordinator to skip read-only device
-	 * calls when deciding the model hand-off (issue #7312).
-	 */
+
 	tier?: ToolTier;
 	/** Details object returned by the wrapped tool, when executed. */
 	inner?: unknown;
@@ -425,11 +411,6 @@ export async function dispatchXdevTool(
 		}
 
 		const validated = parseDeviceArgs(canonical as AiTool, content, toolCallId, () => renderDocs(canonical));
-		// Record the wrapped tool's approval tier so the prewalk coordinator can
-		// tell a read-only device call (e.g. `lsp` navigation) from a real
-		// workspace mutation without re-decoding the payload. Best-effort: a
-		// throwing approval leaves the tier absent (prewalk then declines to
-		// switch), unlike the write gate which fails closed to `exec`.
 		let tier: ToolTier | undefined;
 		try {
 			tier = resolveToolTier(canonical, validated);

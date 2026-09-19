@@ -36,7 +36,6 @@ const GOLDENS: { source: string; context: Record<string, unknown>; expected: str
 			model: "slow",
 			thinkingLevel: "high",
 			blocking: true,
-			prewalk: false,
 			autoloadSkills: ["react"],
 			body: "Body",
 		},

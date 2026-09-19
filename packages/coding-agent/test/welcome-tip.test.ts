@@ -24,11 +24,11 @@ describe("renderWelcomeTip", () => {
 	});
 
 	it("replaces a trailing [NEW] marker with a rainbow NEW! tag", () => {
-		const lines = renderWelcomeTip("Try the shiny advisor [NEW]", 60);
+		const lines = renderWelcomeTip("Try the shiny example [NEW]", 60);
 		const plain = lines.map(line => Bun.stripANSI(line)).join("\n");
 		const styled = lines.join("\n");
 
-		expect(plain).toContain("Try the shiny advisor");
+		expect(plain).toContain("Try the shiny example");
 		expect(plain).not.toContain("[NEW]"); // literal marker stripped
 		expect(plain).toContain("NEW!"); // replaced by the visible tag
 		expect(styled).toContain("\x1b[1m"); // tag is bold
@@ -39,7 +39,7 @@ describe("renderWelcomeTip", () => {
 		// A width that leaves the wrapped body ending near the right edge forces
 		// the tag onto its own continuation line rather than overflowing.
 		for (const width of [24, 40, 60]) {
-			const lines = renderWelcomeTip("Turn on the advisor to review every turn [NEW]", width);
+			const lines = renderWelcomeTip("Turn on the example to review every turn [NEW]", width);
 			for (const line of lines) {
 				expect(visibleWidth(line)).toBeLessThanOrEqual(width);
 			}

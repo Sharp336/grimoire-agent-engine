@@ -66,7 +66,7 @@ describe("pause screen", () => {
 			expect(lines.length).toBe(24);
 			const text = lines.map(stripAnsi).join("\n");
 			expect(text).toContain("P A U S E D");
-			expect(text).toContain("Main agent, subagents, and advisor");
+			expect(text).toContain("Main agent and subagents");
 			expect(text).toContain("paused for 1:05");
 			expect(text).toContain("esc · enter · space — resume");
 			expect(text).toContain("█".repeat(5));

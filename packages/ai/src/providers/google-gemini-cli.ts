@@ -1023,7 +1023,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 						const streamed = await streamResponse(currentResponse);
 						// Eventless silence may fail over to the alternate Antigravity
 						// endpoint. Once thinking has streamed, the endpoint is already
-						// committed downstream; Advisor mode may accept that silence,
+						// committed downstream; An explicit opt-in may accept that silence,
 						// while normal sessions surface it to final-output recovery.
 						const thoughtOnly = hasThinkingOutput();
 						const acceptedSilence =

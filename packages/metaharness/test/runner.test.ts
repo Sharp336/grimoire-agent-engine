@@ -17,13 +17,13 @@ describe("generic agent-arg / env passthrough", () => {
 			"--model",
 			"anthropic/claude-opus-4-8",
 			"--agent-arg",
-			"--prewalk",
+			"--external-thinking",
 			"--agent-arg",
-			"--prewalk-into",
+			"--model",
 			"--agent-arg",
 			"google/gemini-3.5-flash",
 		]);
-		expect(cfg.agentArgs).toEqual(["--prewalk", "--prewalk-into", "google/gemini-3.5-flash"]);
+		expect(cfg.agentArgs).toEqual(["--external-thinking", "--model", "google/gemini-3.5-flash"]);
 
 		const env = buildHarborEnv(cfg, "/tmp/models.yml", null, "test");
 		expect(JSON.parse(env.OMP_BENCH_AGENT_ARGS ?? "[]")).toEqual(cfg.agentArgs);

@@ -50,8 +50,6 @@ function createHangingSession(): HangingSessionHandle {
 		waitForIdle: async () => {
 			await hang;
 		},
-		prepareForHeadlessAdvisorDrain: () => {},
-		waitForAdvisorCatchup: async () => true,
 		getLastAssistantMessage: () => undefined,
 		abort: async () => {
 			abortCount += 1;
@@ -153,8 +151,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			},
 			prompt: async () => true,
 			waitForIdle: async () => {},
-			prepareForHeadlessAdvisorDrain: () => {},
-			waitForAdvisorCatchup: async () => true,
 			getLastAssistantMessage: () => undefined,
 			abort: async () => {},
 			dispose: async () => {},
@@ -306,8 +302,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			waitForIdle: async () => {
 				await hang;
 			},
-			prepareForHeadlessAdvisorDrain: () => {},
-			waitForAdvisorCatchup: async () => true,
 			getLastAssistantMessage: () => undefined,
 			abort: async () => {
 				abortCount += 1;
@@ -405,8 +399,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 					isError: false,
 				} as AgentSessionEvent);
 			},
-			prepareForHeadlessAdvisorDrain: () => {},
-			waitForAdvisorCatchup: async () => true,
 			getLastAssistantMessage: () => yieldAssistantMessage as never,
 			abort: async () => {
 				abortCount += 1;
@@ -534,8 +526,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 					} as AgentSessionEvent);
 				}
 			},
-			prepareForHeadlessAdvisorDrain: () => {},
-			waitForAdvisorCatchup: async () => true,
 			getLastAssistantMessage: () => lastAssistantMessage as never,
 			abort: async () => {
 				abortCount += 1;
@@ -655,8 +645,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 				} as unknown as AgentSessionEvent);
 				abortCountAfterFollowingTurn = abortCount;
 			},
-			prepareForHeadlessAdvisorDrain: () => {},
-			waitForAdvisorCatchup: async () => true,
 			getLastAssistantMessage: () => lastAssistantMessage as never,
 			abort: async () => {
 				abortCount += 1;
@@ -727,8 +715,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			},
 			prompt: async () => true,
 			waitForIdle: async () => {},
-			prepareForHeadlessAdvisorDrain: () => {},
-			waitForAdvisorCatchup: async () => true,
 			getLastAssistantMessage: () => undefined,
 			abort: async () => {},
 			dispose: async () => {},
@@ -787,8 +773,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 			waitForIdle: async () => {
 				await hang;
 			},
-			prepareForHeadlessAdvisorDrain: () => {},
-			waitForAdvisorCatchup: async () => true,
 			getLastAssistantMessage: () => undefined,
 			abort: async () => {
 				abortCount += 1;
@@ -847,8 +831,6 @@ describe("runSubprocess wall clock (task.maxRuntimeMs)", () => {
 				return true;
 			},
 			waitForIdle: async () => {},
-			prepareForHeadlessAdvisorDrain: () => {},
-			waitForAdvisorCatchup: async () => true,
 			getLastAssistantMessage: () => undefined,
 			abort: async () => {
 				abortCount += 1;

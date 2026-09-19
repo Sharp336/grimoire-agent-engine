@@ -10,7 +10,6 @@ import {
 	TruncatedText,
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
-import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { TreeFilterMode } from "../../config/settings-schema";
 import { theme } from "../../modes/theme/theme";
 import {
@@ -59,52 +58,6 @@ type FilterMode = TreeFilterMode;
 interface ToolCallInfo {
 	name: string;
 	arguments: Record<string, unknown>;
-}
-
-/** Advisor note metadata surfaced on a single session-tree row. */
-interface AdvisorTreeDisplay {
-	/** Non-default advisor names then severities, comma-joined (e.g. `sec, blocker`). */
-	qualifier: string;
-	/** Note bodies joined into one line. */
-	text: string;
-}
-
-/**
- * Collapse a raw advisor field (a `WATCHDOG.yml`-supplied name or severity) to
- * a single safe line: strip ANSI/control characters via the shared sanitizer,
- * then fold the tab/newline it intentionally preserves into spaces so the value
- * cannot split or misalign a session-tree row.
- */
-function sanitizeAdvisorField(value: string): string {
-	return sanitizeText(value)
-		.replace(/[\n\t]/g, " ")
-		.trim();
-}
-
-/**
- * Extract display metadata from an advisor custom-message's `details.notes`,
- * ignoring the model-facing `<advisory>` wrapper stored in `content`. Collects
- * distinct non-default advisor names and severities so the tree row can tag the
- * note the way its transcript card does.
- */
-function advisorTreeDisplay(details: unknown): AdvisorTreeDisplay {
-	if (!isRecord(details) || !Array.isArray(details.notes)) return { qualifier: "", text: "" };
-	const notes: string[] = [];
-	const advisors: string[] = [];
-	const severities: string[] = [];
-	for (const note of details.notes) {
-		if (!isRecord(note)) continue;
-		if (typeof note.note === "string") notes.push(note.note);
-		if (typeof note.advisor === "string") {
-			const name = sanitizeAdvisorField(note.advisor);
-			if (name && name !== "default" && !advisors.includes(name)) advisors.push(name);
-		}
-		if (typeof note.severity === "string") {
-			const severity = sanitizeAdvisorField(note.severity);
-			if (severity && !severities.includes(severity)) severities.push(severity);
-		}
-	}
-	return { qualifier: [...advisors, ...severities].join(", "), text: notes.join(" ") };
 }
 
 /**
@@ -460,11 +413,7 @@ class TreeList implements Component {
 			}
 			case "custom_message": {
 				parts.push(entry.customType);
-				if (entry.customType === "advisor") {
-					const { qualifier, text } = advisorTreeDisplay(entry.details);
-					if (qualifier) parts.push(qualifier);
-					if (text) parts.push(text);
-				} else {
+				{
 					const content = stripSystemWrapperTags(this.#joinTextContent(entry.content)).slice(0, SEARCH_TEXT_LIMIT);
 					if (content) parts.push(content);
 				}
@@ -754,12 +703,6 @@ class TreeList implements Component {
 				break;
 			}
 			case "custom_message": {
-				if (entry.customType === "advisor") {
-					const { qualifier, text } = advisorTreeDisplay(entry.details);
-					const label = qualifier ? `advisor (${qualifier}): ` : "advisor: ";
-					result = theme.fg("customMessageLabel", label) + normalize(text);
-					break;
-				}
 				const content = stripSystemWrapperTags(this.#joinTextContent(entry.content));
 				result = theme.fg("customMessageLabel", `[${entry.customType}]: `) + normalize(content);
 				break;

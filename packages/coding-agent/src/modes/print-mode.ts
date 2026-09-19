@@ -31,11 +31,6 @@ export interface PrintModeOptions {
 	planYolo?: boolean;
 }
 
-/** Matches the longest built-in provider request deadline while bounding tool-loop stalls. */
-export const PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS = 10 * 60_000;
-/** Error exits cannot hold automation for the full normal drain budget. */
-export const PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS = 30_000;
-
 /** Drop the provider-opaque replay payload (e.g. encrypted reasoning items) before printing. */
 function stripProviderPayload<T extends AgentMessage>(message: T): T {
 	if (!("providerPayload" in message) || message.providerPayload === undefined) return message;
@@ -129,14 +124,6 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		},
 	});
 
-	// `plan.defaultOnStartup` opens fresh *interactive* sessions in plan mode so a
-	// human can review the plan before it executes. Headless print mode has no
-	// surface to review, approve, or exit a plan from, and the turn carries no
-	// deterministic way out of plan mode — the model must voluntarily emit a valid
-	// `xd://propose` execute-dispatch, and when it does not the run strands until
-	// the deadline (issue #8272). So do not honor the startup default here; the
-	// supported headless plan flow is `--plan-yolo` (auto-approve → implement),
-	// which is wired independently through the prewalk coordinator.
 	const planStartupIgnored =
 		session.settings.get("plan.defaultOnStartup") &&
 		session.settings.get("plan.enabled") &&
@@ -178,10 +165,6 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		await logger.time("print:prompt:next", () => session.prompt(message));
 	}
 
-	// From this point onward a late blocker must be recorded without starting a
-	// primary turn whose response print mode would never emit.
-	session.prepareForHeadlessAdvisorDrain();
-
 	// In text mode, output final response
 	if (mode === "text") {
 		// Read via the session accessor, not the raw state tail: a classifier
@@ -197,14 +180,6 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 				!isSilentAbort(assistantMsg)
 			) {
 				const errorLine = sanitizeText(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
-				// This branch hard-exits, bypassing the `await session.dispose()` at
-				// the end of runPrintMode. Flush telemetry and dispose the session
-				// HERE so error spans reach the exporter (the postmortem `exit`
-				// handler can't await) and the browser reaper installed in
-				// `dispose()` (releaseTabsForOwner) actually runs — otherwise an
-				// OMP-owned Chromium survives this exit (issue #5643). `dispose()`
-				// is idempotent, so the unreachable call below is a harmless no-op.
-				await session.waitForAdvisorCatchup(PRINT_MODE_ERROR_ADVISOR_DRAIN_TIMEOUT_MS);
 				await flushTelemetryExport();
 				await session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
 				const flushed = process.stderr.write(`${errorLine}\n`);
@@ -235,11 +210,6 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		session.setTextOutputCommitted(true);
 	}
 
-	await session.waitForAdvisorCatchup(PRINT_MODE_ADVISOR_DRAIN_TIMEOUT_MS);
-
-	// Block shutdown until every serialized stdout write (including the final
-	// agent_end and late JSON advisor events) has drained; process.exit would
-	// otherwise discard the buffered tail and truncate the last record.
 	await stdoutTail;
 	await session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS });
 }

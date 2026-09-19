@@ -30,7 +30,7 @@ function ccaChunk(text: string): Record<string, unknown> {
 
 /**
  * `{ response: { candidates } }` envelope carrying only a thinking part with `finishReason: STOP` —
- * the intentional-silence Advisor case (#8480): no visible text and no tool call.
+ * the intentional-silence case (#8480): no visible text and no tool call.
  */
 function ccaThinkingOnlyChunk(thinking: string): Record<string, unknown> {
 	return {
@@ -438,7 +438,7 @@ describe("Google empty-response retry (Cloud Code Assist path)", () => {
 		expect(result.errorMessage).toBeUndefined();
 	});
 
-	it("accepts Advisor silence without failover after thought events start", async () => {
+	it("accepts explicitly permitted silence without failover after thought events start", async () => {
 		const requestedEndpoints: string[] = [];
 		const fetchMock: FetchImpl = async input => {
 			const endpoint = endpointFromInput(input);

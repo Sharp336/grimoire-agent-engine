@@ -4,20 +4,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentEvent, AgentTool, AgentToolContext } from "@oh-my-pi/pi-agent-core";
-import { type BlockState, handleServerMessage, type ToolCallState } from "@oh-my-pi/pi-ai/providers/cursor";
 import { buildPiLsResult, piTruncation } from "@oh-my-pi/pi-ai/providers/cursor/exec-modern";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai/types";
-import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
-import {
-	AgentClientMessageSchema,
-	AgentServerMessageSchema,
-	DeleteArgsSchema,
-	ExecServerMessageSchema,
-	McpArgsSchema,
-	ReadArgsSchema,
-	ShellArgsSchema,
-} from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
-import { create, fromBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
+import { DeleteArgsSchema, ReadArgsSchema, ShellArgsSchema } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
+import { create } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
 import {
@@ -35,7 +24,6 @@ import { BUILTIN_TOOLS, GrepTool, ReadTool, type Tool, type ToolSession } from "
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import type { TruncationMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-import { AdviseTool } from "../src/advisor/advise-tool";
 
 function createTestSession(cwd: string, overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -372,31 +360,6 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 		expect(await Bun.file(target).text()).toBe("alpha\nbeta\n");
 	});
 
-	it("substitutes a replace-mode edit into a granted advisor tool map", async () => {
-		// The advisor roster hands the bridge the instances it built for the
-		// advisor's own loop — default `hashline` mode, whose schema is a single
-		// `input` string. A `pi_edit` frame's `old_string`/`new_string` args fail
-		// substitution the advisor path applies before constructing handlers.
-		const target = path.join(cwd, "sample.txt");
-		await Bun.write(target, "alpha\nbeta\n");
-		const session = createTestSession(cwd);
-		const advisorEdit = new EditTool(session);
-		expect(advisorEdit.mode).not.toBe("replace");
-		const granted = new Map<string, Tool>([["edit", advisorEdit]]);
-
-		const bridged = bridgeToolMap(granted, () => createBridgeEditTool(session, passthroughRunner()));
-		const handlers = new CursorExecHandlers({ cwd, tools: bridged });
-		const result = await handlers.piEdit({
-			toolCallId: "e3",
-			args: { path: target, edits: [{ oldText: "beta", newText: "gamma" }] },
-		} as never);
-
-		expect(result.isError).toBeFalsy();
-		expect(await Bun.file(target).text()).toBe("alpha\ngamma\n");
-		// The advisor's own loop must keep the exact instance it was handed.
-		expect(granted.get("edit")).toBe(advisorEdit);
-	});
-
 	it("runs the replace-mode instance even when the registry still holds another mode", async () => {
 		// Hashline `edit` stays advertised as MCP. `executeTool` prefers the map
 		// over the `getTool` fallback, so without an explicit replace-mode
@@ -446,7 +409,7 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 
 	it("leaves an ungranted tool map without an edit tool", async () => {
 		// The bridge tool is constructed, not looked up, so substituting for a
-		// roster that was never granted `edit` would hand a read-only advisor a
+		// roster that was never granted `edit` would hand a read-only agent a
 		// mutating tool (issue #5680). The frame must fail instead.
 		const target = path.join(cwd, "sample.txt");
 		await Bun.write(target, "alpha\nbeta\n");
@@ -561,7 +524,7 @@ describe("bridge tool resolution beyond the model-facing registry", () => {
 	});
 
 	it("denies a pi_write frame the user's policy blocks when the tool came from the caller's map", async () => {
-		// The advisor hands the bridge its own tool map. Those instances are run
+		// The caller hands the bridge its own tool map. Those instances are run
 		// directly by `piWrite`/`piBash`, so an unwrapped one executes whatever
 		// the frame asks regardless of `tools.approval.<tool>` — supplying
 		// `getToolContext` alone does not gate anything, because the gate lives
@@ -1343,162 +1306,8 @@ describe("CursorExecHandlers mounted tool bridge", () => {
 	});
 });
 
-function cursorAssistantMessage(): AssistantMessage {
-	return {
-		role: "assistant",
-		content: [],
-		api: "cursor-agent",
-		provider: "cursor",
-		model: "gpt-5.6-sol-medium",
-		usage: {
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			totalTokens: 0,
-			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-		},
-		stopReason: "stop",
-		timestamp: 0,
-	};
-}
-
-function newBlockState(): BlockState {
-	let textBlock: BlockState["currentTextBlock"] = null;
-	let thinkingBlock: BlockState["currentThinkingBlock"] = null;
-	let toolCall: ToolCallState | null = null;
-	return {
-		get currentTextBlock() {
-			return textBlock;
-		},
-		get currentThinkingBlock() {
-			return thinkingBlock;
-		},
-		get currentToolCall() {
-			return toolCall;
-		},
-		firstTokenTime: undefined,
-		openToolCalls: new Map<string, ToolCallState>(),
-		resolvedMcpToolCallIds: new Set<string>(),
-		setTextBlock: b => {
-			textBlock = b;
-		},
-		setThinkingBlock: b => {
-			thinkingBlock = b;
-		},
-		setToolCall: t => {
-			toolCall = t;
-		},
-		setFirstTokenTime: () => {},
-	};
-}
-
-// Regression for issue #5680: the advisor's own tools run through the same
-// Cursor exec bridge the primary agent uses. Without a bridge wired into the
-// advisor Agent, the server's `mcpArgs` dispatch for `advise` comes back
-// `toolNotFound` and no advice is ever routed. This drives the real provider
-// dispatch to prove a bridge built over the advisor's tool set executes the
-// `advise` MCP call and returns a success frame.
-describe("CursorExecHandlers advise routing (issue #5680)", () => {
-	function adviseServerMessage(note: string) {
-		return create(AgentServerMessageSchema, {
-			message: {
-				case: "execServerMessage",
-				value: create(ExecServerMessageSchema, {
-					id: 1,
-					execId: "exec-advise-1",
-					message: {
-						case: "mcpArgs",
-						value: create(McpArgsSchema, {
-							name: "advise",
-							toolName: "advise",
-							toolCallId: "call-advise-1",
-							providerIdentifier: "pi-agent",
-							args: { note: new TextEncoder().encode(JSON.stringify(note)) },
-						}),
-					},
-				}),
-			},
-		});
-	}
-
-	function decodeMcpResultCase(chunk: unknown): string | undefined {
-		const buf = chunk as Buffer;
-		const client = fromBinary(AgentClientMessageSchema, buf.subarray(5));
-		if (client.message.case !== "execClientMessage") return undefined;
-		const exec = client.message.value;
-		return exec.message.case === "mcpResult" ? exec.message.value.result.case : undefined;
-	}
-
-	it("executes the advise MCP call through the bridge and routes the note", async () => {
-		const advised: Array<{ note: string; severity?: string }> = [];
-		const adviseTool = new AdviseTool((note, severity) => advised.push({ note, severity }));
-		const handlers = new CursorExecHandlers({
-			cwd: ".",
-			tools: new Map([["advise", adviseTool as unknown as AgentTool]]),
-		});
-
-		const output = cursorAssistantMessage();
-		const stream = new AssistantMessageEventStream();
-		const state = newBlockState();
-		const written: unknown[] = [];
-		const h2Request = {
-			write: (chunk: unknown) => {
-				written.push(chunk);
-				return true;
-			},
-		} as unknown as Parameters<typeof handleServerMessage>[5];
-
-		await handleServerMessage(
-			adviseServerMessage("Consider the empty-input edge case"),
-			output,
-			stream,
-			state,
-			new Map(),
-			h2Request,
-			handlers,
-			undefined,
-			{ sawTokenDelta: false },
-			[],
-		);
-
-		expect(advised).toEqual([{ note: "Consider the empty-input edge case", severity: undefined }]);
-		expect(written.length).toBe(1);
-		expect(decodeMcpResultCase(written[0])).toBe("success");
-	});
-
-	it("returns toolNotFound when no bridge is wired (the unfixed advisor path)", async () => {
-		const output = cursorAssistantMessage();
-		const stream = new AssistantMessageEventStream();
-		const state = newBlockState();
-		const written: unknown[] = [];
-		const h2Request = {
-			write: (chunk: unknown) => {
-				written.push(chunk);
-				return true;
-			},
-		} as unknown as Parameters<typeof handleServerMessage>[5];
-
-		await handleServerMessage(
-			adviseServerMessage("never delivered"),
-			output,
-			stream,
-			state,
-			new Map(),
-			h2Request,
-			undefined,
-			undefined,
-			{ sawTokenDelta: false },
-			[],
-		);
-
-		expect(written.length).toBe(1);
-		expect(decodeMcpResultCase(written[0])).toBe("toolNotFound");
-	});
-});
-
 // Regression for the #5686 review: Cursor's native `delete` frame removes files
-// directly (bypassing the tool map), so a read-only advisor that was granted no
+// directly (bypassing the tool map), so a read-only agent that was granted no
 // mutating tool must not be able to delete workspace files.
 describe("CursorExecHandlers native delete gating (issue #5680)", () => {
 	let cwd: string;

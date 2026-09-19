@@ -144,40 +144,6 @@ describe("AgentsHub configuration strips", () => {
 		expect(settings.get("task.disabledAgents")).toEqual([]);
 	});
 
-	test("Enter opens the property strip; advisor → on persists task.agentAdvisor", async () => {
-		mockAgents();
-		const settings = Settings.isolated();
-		const { hub, strip } = await createHub(settings);
-		hub.handleInput("\r"); // agent strip for `dev`
-		expect(strip()).toContain("dev →");
-		hub.handleInput("\x1b[C"); // model → prewalk
-		hub.handleInput("\x1b[C"); // prewalk → advisor
-		hub.handleInput("\r"); // advisor value strip
-		expect(strip()).toContain("dev · advisor →");
-		hub.handleInput("\x1b[C"); // agent default → on
-		hub.handleInput("\r");
-		expect(settings.get("task.agentAdvisor")).toEqual({ dev: "on" });
-		expect(strip()).toContain("dev advisor: on (@advisor)");
-	});
-
-	test("pattern… commits a custom advisor pattern and empty submit clears it", async () => {
-		mockAgents();
-		const settings = Settings.isolated();
-		settings.set("task.agentAdvisor", { dev: "on" });
-		const { hub, type } = await createHub(settings);
-		hub.handleInput("\r");
-		hub.handleInput("\x1b[C");
-		hub.handleInput("\x1b[C");
-		hub.handleInput("\r"); // advisor strip
-		// agent default → on → off → pick model… → pattern…
-		for (let i = 0; i < 4; i++) hub.handleInput("\x1b[C");
-		hub.handleInput("\r"); // pattern input, pre-filled "on"
-		type("\x7f\x7f"); // clear the prefill
-		type("moonshot/k3:high");
-		hub.handleInput("\r");
-		expect(settings.get("task.agentAdvisor")).toEqual({ dev: "moonshot/k3:high" });
-	});
-
 	test("pick model… dives into the model browser and persists the model override", async () => {
 		mockAgents();
 		const settings = Settings.isolated();

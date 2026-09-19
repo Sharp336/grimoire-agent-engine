@@ -2,7 +2,7 @@
 
 Agent Hub is the interactive TUI for watching and controlling subagents associated with the current session. It combines a live roster, per-agent activity and usage, transcript access, steering, revive, and kill controls. The main agent is not listed because its conversation is the ambient session view.
 
-The Hub also discovers parked subagents from the current session's persisted artifacts when a session is resumed. Advisor transcript files appear as read-only rows.
+The Hub also discovers parked subagents from the current session's persisted artifacts when a session is resumed.
 
 ## Open the Hub
 
@@ -66,20 +66,11 @@ For a normal local subagent, `Enter` or click focuses the main TUI on that agent
 
 Steering uses the normal prompt path, so the message and response are written to the subagent's persisted session history. While a subagent is focused, `Esc` returns to the main session; it does not interrupt the subagent.
 
-Contexts without a local focusable session use the Hub's full-screen transcript viewer instead. This includes collab guests and advisor rows. The viewer incrementally tails the file-backed transcript and provides an input line only when the selected agent can be messaged. Sending there has the same semantics: revive if parked, steer if running, and prompt if idle.
+Contexts without a local focusable session use the Hub's full-screen transcript viewer instead. This includes collab guests. The viewer incrementally tails the file-backed transcript and provides an input line only when the selected agent can be messaged. Sending there has the same semantics: revive if parked, steer if running, and prompt if idle.
 
-## Persisted agents and advisors
+## Persisted agents
 
 Opening the Hub for a persisted session scans that session's artifact tree. Historical subagent JSONL files become parked rows; a killed agent's tombstone keeps it aborted. Nested subagents retain their parent/child lineage. Output and patch artifacts are attached to the corresponding inspector row.
-
-Advisor transcript files (`__advisor*.jsonl`) appear as `advisor`-kind rows under their owning session. They are observability records, not peers:
-
-- their transcripts can be opened and followed;
-- they cannot be messaged;
-- they cannot be revived;
-- they cannot be killed.
-
-These restrictions also apply to collab guests controlling the host's Hub.
 
 ## Related surfaces
 
@@ -90,6 +81,5 @@ Agent Hub is the human-facing live session view. Adjacent commands and internal 
 - `agent://<id>` resolves a subagent's saved final output artifact; it is not the live transcript.
 - `hub` `list` exposes the peer roster to the coding agent, and `hub` `send` steers or follows up with a normal subagent programmatically. Messaging a parked subagent revives it.
 
-Advisor rows are intentionally excluded from the agent-facing `hub`, `history://`, and `agent://` peer workflows.
 
-See also [Task Agent Discovery and Selection](./task-agent-discovery.md), [Collaboration](./collab.md), and [Advisor, WATCHDOG.md, and WATCHDOG.yml](./advisor-watchdog.md).
+See also [Task Agent Discovery and Selection](./task-agent-discovery.md), [Collaboration](./collab.md).

@@ -417,7 +417,7 @@ export interface StreamOptions {
 	 *
 	 * This is an ownership flag, not a general provider default: exactly one
 	 * primary agent loop sharing `providerSessionState` should enable it.
-	 * Side-channel and advisor requests must leave it unset.
+	 * Side-channel requests must leave it unset.
 	 */
 	anthropicCacheRefresh?: boolean;
 	/** @internal Marks a replay-only Anthropic request that must use non-streaming `max_tokens: 0`. */

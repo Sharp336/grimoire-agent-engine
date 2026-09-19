@@ -145,7 +145,7 @@ describe("pi-native parseRequest", () => {
 		expect(parsed.options.loopGuard).toEqual({ enabled: false });
 	});
 
-	it("forwards acceptEmptyResponse so a passive Google advisor can accept silence server-side", () => {
+	it("forwards acceptEmptyResponse so a passive Google request can accept silence server-side", () => {
 		const parsed = parseRequest({
 			modelId: "google/gemini-3.6-flash",
 			context: baseContext,

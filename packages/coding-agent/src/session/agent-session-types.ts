@@ -1,11 +1,4 @@
-import type {
-	Agent,
-	AgentMessage,
-	AgentTool,
-	AgentToolContext,
-	StreamFn,
-	ThinkingLevel,
-} from "@oh-my-pi/pi-agent-core";
+import type { Agent, AgentMessage, AgentTool, StreamFn, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type {
 	Context,
 	Effort,
@@ -19,13 +12,11 @@ import type {
 	ToolChoice,
 } from "@oh-my-pi/pi-ai";
 import type { postmortem } from "@oh-my-pi/pi-utils";
-import type { AdvisorConfig } from "../advisor";
 import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager } from "../async";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings, SkillsSettings } from "../config/settings";
-import type { CursorMcpResourceAdapter } from "../cursor";
 import type { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
@@ -75,15 +66,6 @@ export interface AsyncJobSnapshot {
 }
 
 export type { ShakeMode, ShakeResult } from "./shake-types";
-
-/**
- * Prewalk switches an active session one-way from its starting model to a
- * fast/cheap target after implementation begins.
- */
-export interface Prewalk {
-	target: Model;
-	thinkingLevel?: ConfiguredThinkingLevel;
-}
 
 /**
  * PlanYolo starts in read-only plan mode, auto-approves the proposal, then
@@ -179,8 +161,6 @@ export interface AgentSessionConfig {
 	initialRetryFallback?: InitialRetryFallbackState;
 	/** Caller-owned automatic turn recovery policy. */
 	turnRetryPolicy?: TurnRetryPolicy;
-	/** Prewalk from the starting model to a fast/cheap target after implementation begins. */
-	prewalk?: Prewalk;
 	/** Force read-only plan mode at start, auto-approve, then switch to the target. */
 	planYolo?: PlanYolo;
 	/** Initial per-family service tiers for the live session. */
@@ -240,8 +220,6 @@ export interface AgentSessionConfig {
 	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 	/** Stream wrapper for side-channel requests. */
 	sideStreamFn?: StreamFn;
-	/** Stream wrapper for advisor requests. */
-	advisorStreamFn?: StreamFn;
 	/** Prefer websocket transport for OpenAI Codex requests when supported. */
 	preferWebsockets?: boolean;
 	/** Codex saved-reset coordinator; defaults to the process-wide singleton so concurrent sessions can't double-spend. Inject a fresh one in tests. */
@@ -291,45 +269,6 @@ export interface AgentSessionConfig {
 	providerSessionId?: string;
 	/** Whether the provider prompt-cache key was explicit or fork-inherited. */
 	providerPromptCacheKeySource?: "explicit" | "fork";
-	/** Full advisor toolset built against an advisor-scoped tool session. */
-	advisorTools?: AgentTool[];
-	/**
-	 * Build a `grep` honoring a Cursor `pi_grep` frame's own context width and
-	 * match cap, against the advisor-scoped tool session. Without it an advisor
-	 * running on Cursor silently drops both fields.
-	 */
-	advisorCreateGrepTool?(options: { context?: number; totalMatchLimit?: number }): AgentTool | undefined;
-	/**
-	 * Build the `replace`-mode `edit` a Cursor `pi_edit` frame needs, against the
-	 * advisor-scoped tool session. The advisor's ordinary instance follows the
-	 * configured `edit.mode` and rejects the frame's `old_string`/`new_string` args.
-	 */
-	advisorCreateEditTool?(): AgentTool | undefined;
-	/**
-	 * The execute-time context the advisor's bridge tools resolve approval from.
-	 *
-	 * `ExtensionToolWrapper` reads `tools.approvalMode`, per-tool
-	 * `tools.approval.<tool>` policies and `autoApprove` only from this context;
-	 * with none it defaults to `yolo` with empty policies, so a bridge tool would
-	 * run a native frame the user configured `ask` or `deny` for.
-	 */
-	advisorGetToolContext?: () => AgentToolContext | undefined;
-	/**
-	 * The live MCP connections the advisor's Cursor resource frames answer from.
-	 *
-	 * Advisors share the session's connections and may be granted tools from
-	 * those same servers; without this their `list_mcp_resources` reports an
-	 * empty catalog and every `read_mcp_resource` a `not_found`.
-	 */
-	advisorMcpResources?: CursorMcpResourceAdapter;
-	/** Preloaded watchdog prompt content for the advisor. */
-	advisorWatchdogPrompt?: string;
-	/** Shared advisor instructions loaded from WATCHDOG.yml. */
-	advisorSharedInstructions?: string;
-	/** Project context rendered for advisor sessions. */
-	advisorContextPrompt?: string;
-	/** Advisors discovered from WATCHDOG.yml. */
-	advisorConfigs?: AdvisorConfig[];
 	/** Strip tool descriptions from provider-bound side-request tool specs. */
 	pruneToolDescriptions?: boolean;
 	/** Disconnect the MCP manager owned by this session during disposal. */

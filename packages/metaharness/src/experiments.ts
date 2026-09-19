@@ -19,7 +19,7 @@ export interface ArmSummary {
 	run: RunRow;
 	/** Arm label: job name minus the experiment prefix. */
 	arm: string;
-	/** Human config line: models plus prewalk description when known. */
+
 	config: string;
 	/** Observed pass% over decided trials. */
 	passPct: number | null;
@@ -67,27 +67,6 @@ export function armOf(jobName: string): string {
 	return jobName.length > exp.length ? jobName.slice(exp.length + 1) : jobName;
 }
 
-function prewalkLabel(prewalkJson: string | null): string {
-	if (!prewalkJson) return "";
-	try {
-		// Historical rows may hold legacy reasoning-slide JSON ({model, turns, onAction, plan}).
-		const parsed = JSON.parse(prewalkJson) as {
-			into?: string;
-			model?: string;
-			turns?: number;
-			onAction?: boolean;
-			plan?: boolean;
-		};
-		if (parsed.model) {
-			const trigger = parsed.onAction ? "on first edit/write" : `after ${parsed.turns} turns`;
-			return ` → ${parsed.model} ${trigger}${parsed.plan ? " +plan" : ""}`;
-		}
-		return ` → ${parsed.into ?? "smol"} at first action`;
-	} catch {
-		return "";
-	}
-}
-
 export function summarizeArm(run: RunRow, traces: TraceRow[]): ArmSummary {
 	// Every observed stat is computed over DECIDED trials only — numerator and
 	// denominator from the same population. `run.costUsd` includes in-flight
@@ -118,7 +97,7 @@ export function summarizeArm(run: RunRow, traces: TraceRow[]): ArmSummary {
 	return {
 		run,
 		arm: armOf(run.jobName),
-		config: `${run.benchmark} · ${run.models}${prewalkLabel(run.prewalk)}`,
+		config: `${run.benchmark} · ${run.models}`,
 		passPct,
 		costPerTask,
 		meanTrialMs,

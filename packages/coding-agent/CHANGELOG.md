@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Removed
+
+- Removed Advisor background reviews and Prewalk while preserving PlanYolo and normal agents.
+
 ### Fixed
 
 - Rejected provider metric observations now leave a bounded diagnostic without exposing credentials or response content.

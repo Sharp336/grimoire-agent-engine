@@ -257,7 +257,7 @@ function convertMessages(model: Model<"ollama-chat">, context: Context): OllamaM
 		// when it's an agent-owned control instruction (empty/unexpected-stop
 		// retries, checkpoint rewind warning, todo reminders — all carry
 		// `attribution: "agent"`), but a user-attributed developer turn (auto-learn
-		// capture nudge, advisor cards, file-mention companions) drops to `user`.
+		// capture nudge, file-mention companions) drops to `user`.
 		// That keeps the in-conversation byte prefix stable for prefix caches
 		// (llama.cpp, #3456) without demoting mandatory agent reminders.
 		const developerRole =

@@ -263,8 +263,8 @@ describe("Agent", () => {
 							} else {
 								agent.steer({
 									role: "custom",
-									customType: "advisor",
-									content: "advisor steering",
+									customType: "system-notice",
+									content: "system steering",
 									display: true,
 									attribution: "agent",
 									timestamp: Date.now(),

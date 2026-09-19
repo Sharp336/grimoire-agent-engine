@@ -107,15 +107,4 @@ describe("hasResolvableTranscript", () => {
 			await removeWithRetries(dir);
 		}
 	});
-
-	it("excludes advisor refs, matching history:// visibility", async () => {
-		AgentRegistry.global().register({
-			id: "__advisor1",
-			displayName: "advisor",
-			kind: "advisor",
-			session: fakeLiveSession(),
-			status: "running",
-		});
-		expect(await hasResolvableTranscript("__advisor1")).toBe(false);
-	});
 });

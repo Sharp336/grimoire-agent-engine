@@ -371,15 +371,6 @@ export async function executeCancel(
 	return buildJobResult(session, manager, "cancel", visibleJobs(manager, ids, ownerId), cancelOutcomes);
 }
 
-/**
- * Kill a non-job-backed agent registration named by `id`: abort any in-flight
- * turn, then release it from the lifecycle (dispose session + unregister). This
- * is the only kill path for a keep-alive subagent that was budget-aborted, went
- * `idle`/`parked`, and outlived its job row — otherwise it is unstoppable short
- * of a broker restart (issue #6315). Scoped to the caller's own descendants so
- * cross-agent kills stay impossible; a bare test/SDK caller (no owner id) may
- * target any sub. Never touches Main, the caller, or advisor transcripts.
- */
 async function cancelAgentRegistration(
 	session: ToolSession,
 	ownerId: string | undefined,

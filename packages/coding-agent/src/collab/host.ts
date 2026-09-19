@@ -23,7 +23,7 @@ import type {
 } from "@oh-my-pi/pi-wire";
 import type { InteractiveModeContext } from "../modes/types";
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
-import { type AgentRef, AgentRegistry } from "../registry/agent-registry";
+import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSessionEvent } from "../session/agent-session";
 import { stripImagesFromMessage, USER_INTERRUPT_LABEL } from "../session/messages";
 import type { SessionEntry as StoredSessionEntry } from "../session/session-entries";
@@ -54,7 +54,6 @@ const STATE_TRIGGER_EVENTS: Record<string, true> = {
 	tool_execution_end: true,
 	thinking_level_changed: true,
 	model_changed: true,
-	advisor_cost_changed: true,
 	auto_compaction_end: true,
 };
 
@@ -556,24 +555,19 @@ export class CollabHost {
 	}
 
 	#snapshotAgents(): AgentSnapshot[] {
-		return (
-			AgentRegistry.global()
-				.list()
-				// Advisor transcripts are local observability only; never mirror them to
-				// guests (the wire AgentSnapshot kind has no `advisor`, and guests must not
-				// be able to chat/kill/revive them).
-				.filter((ref): ref is AgentRef & { kind: "main" | "sub" } => ref.kind !== "advisor")
-				.map(ref => ({
-					id: ref.id,
-					displayName: ref.displayName,
-					kind: ref.kind,
-					parentId: ref.parentId,
-					status: ref.status,
-					hasSessionFile: !!ref.sessionFile,
-					createdAt: ref.createdAt,
-					lastActivity: ref.lastActivity,
-				}))
-		);
+		return AgentRegistry.global()
+			.list()
+
+			.map(ref => ({
+				id: ref.id,
+				displayName: ref.displayName,
+				kind: ref.kind,
+				parentId: ref.parentId,
+				status: ref.status,
+				hasSessionFile: !!ref.sessionFile,
+				createdAt: ref.createdAt,
+				lastActivity: ref.lastActivity,
+			}));
 	}
 
 	#scheduleAgentsBroadcast(): void {
@@ -587,12 +581,6 @@ export class CollabHost {
 	#handleAgentCmd(cmd: "chat" | "kill" | "revive", agentId: string, text: string | undefined, fromPeer: number): void {
 		if (!this.#peers.get(fromPeer)?.canWrite) {
 			this.#rejectReadOnly("agent control", fromPeer);
-			return;
-		}
-		// Advisor refs are excluded from snapshots, but reject control by id defensively:
-		// a stale/malicious client must never chat/kill/revive a read-only advisor transcript.
-		if (AgentRegistry.global().get(agentId)?.kind === "advisor") {
-			this.#socket?.send({ t: "error", message: `agent ${agentId}: advisor transcripts are read-only` }, fromPeer);
 			return;
 		}
 		const fail = (err: unknown) => {

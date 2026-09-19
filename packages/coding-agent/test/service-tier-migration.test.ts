@@ -9,7 +9,7 @@ import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } f
 
 // Locks the back-compat migration of the legacy single `serviceTier` enum (with
 // scoped `openai-only`/`claude-only` sentinels) plus `serviceTierSubagent`/
-// `serviceTierAdvisor`/`fastModeScope` into the per-family `tier.*` settings.
+// `fastModeScope` into the per-family `tier.*` settings.
 describe("serviceTier → tier.* settings migration", () => {
 	let settingsState: SettingsTestState | undefined;
 	let tempDir: TempDir;
@@ -64,19 +64,9 @@ describe("serviceTier → tier.* settings migration", () => {
 		expect(settings.get("tier.anthropic")).toBe("none");
 	});
 
-	it("carries subagent/advisor over and drops scoped sentinels", async () => {
-		const settings = await loadWith({
-			serviceTierSubagent: "claude-only",
-			serviceTierAdvisor: "flex",
-		});
-		expect(settings.get("tier.subagent")).toBe("priority"); // claude-only → priority
-		expect(settings.get("tier.advisor")).toBe("flex");
-	});
-
 	it("leaves a fresh config on the per-family defaults", async () => {
 		const settings = await loadWith({});
 		expect(settings.get("tier.openai")).toBe("none");
 		expect(settings.get("tier.subagent")).toBe("inherit");
-		expect(settings.get("tier.advisor")).toBe("none");
 	});
 });

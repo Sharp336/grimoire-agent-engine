@@ -68,10 +68,6 @@ export class TanCommandController {
 		}
 
 		const parentSessionId = session.sessionId;
-		// Providers route on `promptCacheKey ?? sessionId`, so the parent's live
-		// requests may cache under a pinned key that differs from its session id
-		// (the parent being itself a fork/tan). Mirror exactly what the parent
-		// populated the cache under — same rule as advisor and handoff calls.
 		const parentPromptCacheKey = session.agent.promptCacheKey ?? parentSessionId;
 		const thinkingLevel = session.configuredThinkingLevel();
 		const systemPrompt = [...session.systemPrompt];

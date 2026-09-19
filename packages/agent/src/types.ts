@@ -130,7 +130,7 @@ export function isSoftToolRequirement(directive: ToolChoiceDirective | undefined
 
 /**
  * Source category for a queued steering interrupt observed without consuming the queue.
- * Distinguishes real-user, agent-authored, system/advisor, and unknown steering.
+ * Distinguishes real-user, agent-authored, system-authored, and unknown steering.
  */
 export type SteeringInterruptSource = "user" | "agent" | "system" | "unknown";
 

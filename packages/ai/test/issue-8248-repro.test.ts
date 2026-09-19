@@ -4,7 +4,7 @@ import type { AssistantMessage, Context, Model } from "@oh-my-pi/pi-ai/types";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
-// Issue #8248: with prewalk enabled, OMP switches into a DeepSeek Responses
+// Issue #8248: when OMP switches into a DeepSeek Responses
 // target (opencode-go) after mid-run compaction. The replayed assistant turns
 // were minted by the previous model, so the Responses input builder re-encodes
 // them and demotes their reasoning to plain text, emitting no reasoning item.
@@ -74,14 +74,14 @@ const usage = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 } as const;
 
-describe("issue #8248: DeepSeek Responses reasoning replay after prewalk/compaction", () => {
+describe("issue #8248: DeepSeek Responses reasoning replay after model switch/compaction", () => {
 	it("targets a reasoning Responses model that requires reasoning replay", () => {
 		expect(deepseek.api).toBe("openai-responses");
 		expect(deepseek.compat.requiresReasoningContentForAllAssistantTurns).toBe(true);
 	});
 
-	it("synthesizes a reasoning item for a foreign assistant turn replayed after a prewalk switch", async () => {
-		// Kept-tail turn minted by the previous model (prewalk hopped gpt-5.6-sol
+	it("synthesizes a reasoning item for a foreign assistant turn replayed after a model switch", async () => {
+		// Kept-tail turn minted by the previous model (the model switched from gpt-5.6-sol
 		// -> deepseek). Same api, different provider+model -> block re-encode.
 		const prior: AssistantMessage = {
 			role: "assistant",

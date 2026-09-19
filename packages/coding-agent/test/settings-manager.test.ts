@@ -279,7 +279,7 @@ describe("Settings", () => {
 				YAML.stringify({ modelRoles: { default: "keep/default" }, custom: { keep: true } }, null, 2),
 			);
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
-			const corrupted = 'modelRoles:\n  default: keep/default\n  advisor: "unterminated\ncustom:\n  keep: true\n';
+			const corrupted = 'modelRoles:\n  default: keep/default\n  commit: "unterminated\ncustom:\n  keep: true\n';
 			await Bun.write(projectConfigPath, corrupted);
 
 			settings.setProjectModelRole("smol", "new/smol");
@@ -904,18 +904,18 @@ describe("Settings", () => {
 
 		it("preserves concurrent external per-role edits when saving one global role", async () => {
 			await writeSettings({
-				modelRoles: { default: "anthropic/claude-sonnet-4-5", advisor: "moonshot/kimi-k2" },
+				modelRoles: { default: "anthropic/claude-sonnet-4-5", commit: "moonshot/kimi-k2" },
 			});
 
 			// Process loads its #global snapshot.
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 
-			// External edit (another omp instance / manual edit): changes advisor,
+			// External edit (another omp instance / manual edit): changes commit,
 			// adds vision. This process's #global is now stale.
 			await writeSettings({
 				modelRoles: {
 					default: "anthropic/claude-sonnet-4-5",
-					advisor: "moonshot/kimi-k3:max",
+					commit: "moonshot/kimi-k3:max",
 					vision: "anthropic/claude-haiku-4-5",
 				},
 			});
@@ -925,13 +925,13 @@ describe("Settings", () => {
 			await settings.flush();
 
 			const savedSettings = await readSettings();
-			// The role we changed lands…
+			// The role we changed landsвЂ¦
 			expect((savedSettings.modelRoles as Record<string, string>).smol).toBe("anthropic/claude-haiku-4-5");
-			// …and the concurrent external per-role edits survive rather than
+			// вЂ¦and the concurrent external per-role edits survive rather than
 			// being clobbered by our stale whole-map snapshot.
 			expect(savedSettings.modelRoles).toEqual({
 				default: "anthropic/claude-sonnet-4-5",
-				advisor: "moonshot/kimi-k3:max",
+				commit: "moonshot/kimi-k3:max",
 				vision: "anthropic/claude-haiku-4-5",
 				smol: "anthropic/claude-haiku-4-5",
 			});
@@ -955,21 +955,21 @@ describe("Settings", () => {
 
 			settings.setModelRole("smol", "anthropic/claude-haiku-4-5");
 			await firstSaveEntered.promise;
-			settings.setModelRole("advisor", "moonshot/kimi-k3:max");
+			settings.setModelRole("commit", "moonshot/kimi-k3:max");
 			releaseFirstSave.resolve();
 			await firstSaveFinished.promise;
 
 			expect((await readSettings()).modelRoles).toEqual({
 				default: "anthropic/claude-sonnet-4-5",
 				smol: "anthropic/claude-haiku-4-5",
-				advisor: "moonshot/kimi-k3:max",
+				commit: "moonshot/kimi-k3:max",
 			});
 
 			await writeSettings({
 				modelRoles: {
 					default: "anthropic/claude-sonnet-4-5",
 					smol: "anthropic/claude-haiku-4-5",
-					advisor: "external/new-advisor",
+					commit: "external/new-commit",
 				},
 			});
 			await settings.flush();
@@ -977,7 +977,7 @@ describe("Settings", () => {
 			expect((await readSettings()).modelRoles).toEqual({
 				default: "anthropic/claude-sonnet-4-5",
 				smol: "anthropic/claude-haiku-4-5",
-				advisor: "external/new-advisor",
+				commit: "external/new-commit",
 			});
 		});
 

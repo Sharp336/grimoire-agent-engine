@@ -45,8 +45,6 @@ function makeSession(sessionName = "Cache Session") {
 		isAutoThinking: false,
 		autoResolvedThinkingLevel: () => undefined,
 		isFastModeActive: () => false,
-		isAdvisorActive: () => false,
-		getAdvisorStatusOverview: () => ({ configured: false, advisors: [] }),
 		getAsyncJobSnapshot: () => ({ running: [] }),
 		settings: { get: () => false },
 		modelRegistry: { isUsingOAuth: () => false },

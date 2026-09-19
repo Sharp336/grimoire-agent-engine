@@ -98,13 +98,6 @@ export type SettingDef =
 const CONDITIONS: Record<string, () => boolean> = {
 	macOS: () => process.platform === "darwin",
 	hasImageProtocol: () => !!TERMINAL.imageProtocol,
-	advisorEnabled: () => {
-		try {
-			return Settings.instance.get("advisor.enabled") === true;
-		} catch {
-			return false;
-		}
-	},
 	hindsightActive: () => {
 		try {
 			return Settings.instance.get("memory.backend") === "hindsight";

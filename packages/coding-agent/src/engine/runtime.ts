@@ -4857,7 +4857,6 @@ export class EngineRuntime {
 		const provider = message?.provider ?? binding.session.model?.provider;
 		const modelId = message?.model ?? binding.session.model?.id;
 		const matched = mapping.routes.find(route => route.provider === provider && route.modelId === modelId);
-		// An advisor or an unconfigured model is not a profile slot; never guess by model name.
 		if (!matched) return;
 		const previous = binding.profileRouteState;
 		const routeRef = phase === "active" ? matched.routeRef : previous?.routeRef;

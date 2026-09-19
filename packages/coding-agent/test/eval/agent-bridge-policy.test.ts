@@ -415,13 +415,6 @@ describe("runEvalAgent", () => {
 		const order: string[] = [];
 		let disposed = false;
 		const cleanupSession = {
-			prepareForHeadlessAdvisorDrain: () => {
-				order.push("prepare");
-			},
-			waitForAdvisorCatchup: async () => {
-				order.push("catchup");
-				return true;
-			},
 			dispose: async () => {
 				order.push("dispose");
 				disposed = true;
@@ -450,9 +443,7 @@ describe("runEvalAgent", () => {
 		await runEvalAgent({ prompt: "hello", label: "Cleanup" }, { session: makeSession() });
 
 		expect(disposed).toBe(true);
-		// The advisor's final-turn review is drained before the runtime is torn
-		// down (#9505): a graceful subagent finish must not abandon the yield.
-		expect(order).toEqual(["prepare", "catchup", "dispose"]);
+		expect(order).toEqual(["dispose"]);
 		expect(AgentRegistry.global().get("Cleanup")).toBeUndefined();
 		expect(
 			AgentRegistry.global()

@@ -2,7 +2,6 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
-import { ADVISOR_TRANSCRIPT_FILENAME, isAdvisorTranscriptName } from "../advisor/transcript-recorder";
 import { resolveExplicitModelRole } from "../config/model-resolver";
 import { assistantTurnProducedOutput } from "../session/messages";
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "../session/session-entries";
@@ -20,13 +19,6 @@ import {
 
 /** Maximum prefix entries inspected for task metadata. */
 const MAX_METADATA_LINES = 64;
-/**
- * Upper bound on records scanned to compute an advisor transcript's Hub metrics.
- * Well above any healthy advisor file (post issue #9553 the file grows O(new
- * content)); it exists only so a legacy multi-GB transcript can't stall the
- * render thread when the Hub roster is built.
- */
-const MAX_ADVISOR_HISTORY_LINES = 200_000;
 
 interface PersistedAgentMetadata {
 	activity?: string;
@@ -178,16 +170,8 @@ async function readPersistedAgentHistory(
 				const message = recordOf(record.message);
 				if (message?.role === "assistant") assistantById.set(id, assistantMetrics(message));
 			},
-			// Advisor transcripts are the one file that can grow pathologically large
-			// (issue #9553); cap their scan so one bad transcript can't stall the Hub
-			// on the render thread. Healthy advisor files sit far below this bound,
-			// so their metrics stay exact; a capped legacy file reports approximate
-			// (lower-bound) cost/tokens rather than freezing `hub list`.
 			{
 				shouldContinue,
-				maxRecords: isAdvisorTranscriptName(path.basename(transcript.sessionFile))
-					? MAX_ADVISOR_HISTORY_LINES
-					: undefined,
 			},
 		);
 	} catch (error) {
@@ -591,7 +575,6 @@ export async function ensurePersistedRoster(
 	return root;
 }
 
-/** Register persisted subagent and advisor transcripts as parked registry refs. */
 export async function registerPersistedSubagents(
 	registry: AgentRegistry,
 	sessionFile: string | null | undefined,
@@ -669,59 +652,14 @@ async function registerPersistedSubagentsFromDir(
 			await Bun.sleep(0);
 		}
 		if (!shouldContinue()) return;
-		if (!entry.isFile() || !entry.name.endsWith(".jsonl") || entry.name.includes(".bak")) continue;
-		const sessionFile = path.join(dir, entry.name);
-		// The advisor transcript is observability-only: register it as a non-peer
-		// `advisor` kind under its owning session so the Hub can show its read-only
-		// transcript, but it never joins agent-facing rosters and is not revivable.
-		if (isAdvisorTranscriptName(entry.name)) {
-			const owner = parentId ?? MAIN_AGENT_ID;
-			// `__advisor.jsonl` → the default advisor (no slug); `__advisor.<slug>.jsonl`
-			// → a named advisor, keyed and labeled by its slug.
-			const slug =
-				entry.name === ADVISOR_TRANSCRIPT_FILENAME ? "" : entry.name.slice("__advisor.".length, -".jsonl".length);
-			const advisorId = slug ? `${owner}/advisor:${slug}` : `${owner}/advisor`;
-			const displayName = slug ? `advisor:${slug}` : "advisor";
-			const existing = registry.get(advisorId);
-			// Never clobber a non-advisor ref that happens to share this id (a freak
-			// user task literally named `<owner>/advisor`): leave it, skip the advisor.
-			if (existing && existing.kind !== "advisor") continue;
-			if (existing?.sessionFile !== sessionFile) {
-				const metadata = await readPersistedAgentMetadata(sessionFile);
-				if (!shouldContinue()) return;
-				// The id is reused across `/new`; refresh it to the current session's file.
-				if (existing) registry.unregister(advisorId);
-				registry.register({
-					id: advisorId,
-					displayName,
-					kind: "advisor",
-					parentId: owner,
-					session: null,
-					sessionFile,
-					activity: metadata.activity,
-					createdAt: metadata.createdAt,
-					lastActivity: metadata.lastActivity,
-					history: { ...metadata.history, readOnly: true },
-					status: "parked",
-				});
-				owned?.set(advisorId, sessionFile);
-				transcripts.push({
-					id: advisorId,
-					sessionFile,
-					createdAt: metadata.createdAt,
-					lastActivity: metadata.lastActivity,
-				});
-			} else if (existing) {
-				owned?.set(advisorId, sessionFile);
-				transcripts.push({
-					id: advisorId,
-					sessionFile,
-					createdAt: existing.createdAt,
-					lastActivity: existing.lastActivity,
-				});
-			}
+		if (
+			!entry.isFile() ||
+			!entry.name.endsWith(".jsonl") ||
+			entry.name.includes(".bak") ||
+			/^__advisor(?:\.[^.]+)?\.jsonl$/.test(entry.name)
+		)
 			continue;
-		}
+		const sessionFile = path.join(dir, entry.name);
 		const id = entry.name.slice(0, -6);
 		const existing = registry.get(id);
 		if (vibeOwnedIds.has(id) && existing?.sessionFile !== sessionFile) continue;

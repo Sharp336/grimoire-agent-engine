@@ -1,10 +1,5 @@
 import * as path from "node:path";
-import {
-	expandRoleAlias,
-	formatModelString,
-	getModelMatchPreferences,
-	resolveCliModel,
-} from "../config/model-resolver";
+import { formatModelString } from "../config/model-resolver";
 import type { SettingPath, Settings } from "../config/settings";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
@@ -584,33 +579,6 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			}
 			runtime.ctx.showStatus("Usage: /vision [on|off|auto|status]");
 			runtime.ctx.editor.setText("");
-		},
-	},
-	{
-		name: "prewalk",
-		icon: "prewalk",
-		description: "Switch to a fast/cheap model at the next action (works even without --prewalk)",
-		acpDescription: "Prewalk at the next action",
-		handle: async (_command, runtime) => {
-			const rolePattern = expandRoleAlias("@smol", runtime.settings);
-			const resolved = resolveCliModel({
-				cliModel: rolePattern,
-				modelRegistry: runtime.session.modelRegistry,
-				preferences: getModelMatchPreferences(runtime.settings),
-			});
-			if (resolved.error || !resolved.model) {
-				return usage(resolved.error ?? `Model "${rolePattern}" not found`, runtime);
-			}
-			if (!runtime.session.modelRegistry.hasConfiguredAuth(resolved.model)) {
-				return usage(`No API key for ${resolved.model.provider}/${resolved.model.id}`, runtime);
-			}
-			const armed = runtime.session.armPrewalk(resolved.model, resolved.thinkingLevel);
-			if (armed) {
-				await runtime.output(
-					`Prewalk on: switching to ${resolved.model.provider}/${resolved.model.id} at the next edit/write (todo-gated).`,
-				);
-			}
-			return commandConsumed();
 		},
 	},
 ];

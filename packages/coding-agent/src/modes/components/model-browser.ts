@@ -1,12 +1,3 @@
-/**
- * Frameless, reusable model browser: a fuzzy search row, a windowed model
- * list with role chips and metadata columns, and a selection detail block.
- *
- * Hosts own the surrounding chrome and the data scope — the fullscreen
- * /models hub ({@link ./model-hub}) feeds it scope-filtered items plus role
- * state, while the advisor config overlay embeds it as a plain "pick one
- * model" list.
- */
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";

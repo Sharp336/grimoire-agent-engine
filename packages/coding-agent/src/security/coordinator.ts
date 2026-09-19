@@ -234,10 +234,6 @@ async function createDefaultSecuritySession(input: SecurityScanSessionFactoryInp
 		...scanSettings.get("task.agentModelOverrides"),
 		"security-reviewer": modelSelector,
 	});
-	scanSettings.override("task.agentPrewalk", {
-		...scanSettings.get("task.agentPrewalk"),
-		"security-reviewer": "off",
-	});
 	const { session } = await createAgentSession({
 		cwd: input.executionRoot,
 		authStorage: input.host.authStorage,

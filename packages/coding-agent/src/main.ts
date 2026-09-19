@@ -34,7 +34,6 @@ import { getLatestRelease } from "./cli/update-cli";
 import { findConfigFile } from "./config";
 import { ModelRegistry } from "./config/model-registry";
 import {
-	DEFAULT_PREWALK_TARGET,
 	expandRoleAlias,
 	formatModelSelectorValue,
 	getModelMatchPreferences,
@@ -148,19 +147,11 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"task.maxRecursionDepth",
 	"task.disabledAgents",
 	"task.agentModelOverrides",
-	"task.agentPrewalk",
-	"task.agentAdvisor",
+
 	// Memory subsystems are off-by-default for RPC/ACP hosts; embedders that want
 	// memory should opt in explicitly through their own settings layer.
 	"memory.backend",
 	"memories.enabled",
-	// Advisor is interactive-session assistance. Protocol hosts opt in explicitly
-	// instead of inheriting a user's globally-enabled local preference, and when
-	// they do opt in they get the default tuning rather than the user's local tuning.
-	"advisor.enabled",
-	"advisor.syncBacklog",
-	"advisor.immuneTurns",
-	"tier.advisor",
 ];
 
 const RPC_BACKGROUND_DEFAULTED_SETTING_PATHS: SettingPath[] = [
@@ -1187,39 +1178,6 @@ export async function buildSessionOptions(
 		options.modelPattern = parsed.models;
 	}
 
-	if (parsed.noPrewalk && (parsed.prewalk || parsed.prewalkInto !== undefined)) {
-		throw new Error("--no-prewalk cannot be combined with --prewalk or --prewalk-into");
-	}
-	const explicitPrewalk = parsed.prewalk === true || parsed.prewalkInto !== undefined;
-	const prewalkEnabled = parsed.noPrewalk
-		? false
-		: explicitPrewalk
-			? true
-			: !restoringSession && activeSettings.get("prewalk.enabled");
-	if (prewalkEnabled) {
-		const rolePattern = expandRoleAlias(parsed.prewalkInto ?? DEFAULT_PREWALK_TARGET, activeSettings);
-		const resolved = resolveCliModel({ cliModel: rolePattern, modelRegistry, preferences: modelMatchPreferences });
-		if (resolved.warning) {
-			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
-		}
-		// Prewalk is an optional optimization (off by default): switch to a fast
-		// model at the first edit. If its hand-off target can't be resolved or has
-		// no configured auth, warn and leave prewalk unarmed rather than aborting
-		// startup and locking the user out of the app (issue #6064).
-		if (resolved.error || !resolved.model) {
-			const target = parsed.prewalkInto ?? DEFAULT_PREWALK_TARGET;
-			process.stderr.write(
-				`${chalk.yellow(`Warning: prewalk disabled — ${resolved.error ?? `model "${target}" not found`}`)}\n`,
-			);
-		} else if (!modelRegistry.hasConfiguredAuth(resolved.model)) {
-			process.stderr.write(
-				`${chalk.yellow(`Warning: prewalk disabled — no API key for ${resolved.model.provider}/${resolved.model.id}`)}\n`,
-			);
-		} else {
-			options.prewalk = { target: resolved.model, thinkingLevel: resolved.thinkingLevel };
-		}
-	}
-
 	if (parsed.planYoloInto !== undefined && !parsed.planYolo) {
 		throw new Error("--plan-yolo-into requires --plan-yolo");
 	}
@@ -1504,10 +1462,6 @@ export async function runRootCommand(
 		// Apply --hide-thinking CLI flag (ephemeral, not persisted)
 		if (parsedArgs.hideThinking) {
 			settingsInstance.override("hideThinkingBlock", true);
-		}
-		// Apply --advisor CLI flag (ephemeral, not persisted)
-		if (parsedArgs.advisor) {
-			settingsInstance.override("advisor.enabled", true);
 		}
 		// Apply --external-thinking CLI flag (ephemeral, not persisted)
 		if (parsedArgs.externalThinking) {

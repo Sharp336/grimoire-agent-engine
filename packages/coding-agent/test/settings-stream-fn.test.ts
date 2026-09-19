@@ -3,9 +3,7 @@
  * (`providers.openrouterVariant`, `providers.antigravityEndpoint`,
  * `providers.stream*TimeoutSeconds`, `providers.maxInFlightRequests`,
  * `model.loopGuard.*`, `textVerbosity` for Responses-family requests)
- * options win — the same wiring the main agent and the advisor agent share so
- * OpenRouter sticky-routing / response caching behaves the same on advisor turns
- * (can1357/oh-my-pi#3639).
+ * options win consistently for main agents and subagents.
  */
 import { describe, expect, it } from "bun:test";
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";

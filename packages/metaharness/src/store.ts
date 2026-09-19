@@ -27,13 +27,12 @@ export interface RunRow {
 	dataset: string;
 	agent: string;
 	models: string;
-	/** JSON prewalk config (`{ into?: string }`); older rows may hold legacy reasoning-slide JSON. */
-	prewalk: string | null;
+
 	/** Benchmark-specific launch configuration. */
 	config: Record<string, unknown>;
 	/** Role inside the experiment (baseline vs treatment); "" when unspecified. */
 	role: RunRole;
-	/** One-line description of what this arm tests (e.g. "prewalk→flash at first edit/write"). */
+
 	note: string;
 	/** Display-name override for the arm; "" falls back to the jobName-derived arm label. */
 	label: string;
@@ -85,7 +84,7 @@ export interface LaunchRecord {
 	dataset: string;
 	agent: string;
 	models: string[];
-	prewalk?: { into?: string };
+
 	pid: number;
 	role?: RunRole;
 	note?: string;
@@ -99,7 +98,6 @@ CREATE TABLE IF NOT EXISTS runs (
 	dataset TEXT NOT NULL DEFAULT '',
 	agent TEXT NOT NULL DEFAULT 'omp',
 	models TEXT NOT NULL DEFAULT '',
-	prewalk TEXT,
 	role TEXT NOT NULL DEFAULT '',
 	note TEXT NOT NULL DEFAULT '',
 	label TEXT NOT NULL DEFAULT '',
@@ -207,12 +205,6 @@ export class RunStore {
 		if (!runColumns.has("metrics_json")) {
 			this.#db.run("ALTER TABLE runs ADD COLUMN metrics_json TEXT NOT NULL DEFAULT '{}'");
 		}
-		if (runColumns.has("slide") && !runColumns.has("prewalk")) {
-			this.#db.run("ALTER TABLE runs RENAME COLUMN slide TO prewalk");
-		}
-		if (!runColumns.has("slide") && !runColumns.has("prewalk")) {
-			this.#db.run("ALTER TABLE runs ADD COLUMN prewalk TEXT");
-		}
 		const traceColumns = new Set(
 			(this.#db.query("PRAGMA table_info(trials)").all() as Array<{ name: string }>).map(c => c.name),
 		);
@@ -229,8 +221,8 @@ export class RunStore {
 		this.#db
 			.query(
 				`INSERT INTO runs
-				 (job_name, benchmark, dataset, agent, models, prewalk, role, note, config_json, status, pid, created_at)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
+				 (job_name, benchmark, dataset, agent, models, role, note, config_json, status, pid, created_at)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'running', ?, ?)
 				 ON CONFLICT(job_name) DO UPDATE SET
 					benchmark = excluded.benchmark, pid = excluded.pid, status = 'running',
 					config_json = excluded.config_json,
@@ -243,7 +235,6 @@ export class RunStore {
 				launch.dataset,
 				launch.agent,
 				launch.models.join(","),
-				launch.prewalk ? JSON.stringify(launch.prewalk) : null,
 				launch.role ?? "",
 				launch.note ?? "",
 				JSON.stringify(launch.config ?? {}),
@@ -509,7 +500,7 @@ function rowToRun(r: Record<string, unknown>): RunRow {
 		dataset: String(r.dataset),
 		agent: String(r.agent),
 		models: String(r.models),
-		prewalk: r.prewalk === null ? null : String(r.prewalk),
+
 		config: JSON.parse(String(r.config_json ?? "{}")),
 		role: String(r.role ?? "") as RunRole,
 		note: String(r.note ?? ""),

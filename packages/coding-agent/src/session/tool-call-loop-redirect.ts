@@ -12,13 +12,6 @@ export interface ToolCallLoopRedirectDetails {
 	resultSummary: string;
 }
 
-/**
- * Renders the corrective a repeated tool call earns. Shared by the primary
- * session's `LoopGuards` and the advisor's own loop guard: both bounds speak
- * with one wording, while each wraps it in the message shape its own agent
- * converts to LLM context (the primary maps custom messages, the advisor runs
- * the default converter that keeps only LLM-native roles).
- */
 export function renderToolCallLoopRedirect(detection: RepeatedToolCallDetection): string {
 	return prompt.render(toolCallLoopRedirectTemplate, {
 		tool_name: detection.toolName,
