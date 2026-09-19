@@ -91,8 +91,8 @@ describe("native session storage contract", () => {
 
 	it("preserves session identity and completed entries on cold reopen", async () => {
 		using tempDir = TempDir.createSync("@omp-native-contract-");
-		const cwd = `${tempDir.path}/project`;
-		const sessionDir = `${tempDir.path}/sessions`;
+		const cwd = `${tempDir.path()}/project`;
+		const sessionDir = `${tempDir.path()}/sessions`;
 		const storage = new FileSessionStorage();
 		const sessionFile = SessionManager.createEmptySessionFile(cwd, storage);
 		const manager = await SessionManager.open(sessionFile, sessionDir, storage, { suppressBreadcrumb: true });
@@ -107,13 +107,17 @@ describe("native session storage contract", () => {
 	});
 
 	it("seals the journal so shutdown cannot report a dropped append as durable", async () => {
-		const manager = SessionManager.inMemory("/tmp/native-contract");
+		using tempDir = TempDir.createSync("@omp-native-contract-seal-");
+		const storage = new FileSessionStorage();
+		const sessionFile = SessionManager.createEmptySessionFile(tempDir.path(), storage);
+		const manager = await SessionManager.open(sessionFile, tempDir.path(), storage, { suppressBreadcrumb: true });
 		manager.appendMessage(user("before seal", 1));
-		const retained = manager.getEntries().length;
+		await manager.close();
+		const persisted = await Bun.file(sessionFile).text();
 		manager.releaseRetainedEntries();
 		manager.appendMessage(user("after seal", 2));
-		expect(manager.getEntries()).toHaveLength(retained);
-		await manager.close();
+		expect(manager.getEntries()).toHaveLength(0);
+		expect(await Bun.file(sessionFile).text()).toBe(persisted);
 	});
 
 	it("pins the Core-owned protocol identity without a second schema", () => {
