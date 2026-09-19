@@ -83,7 +83,6 @@ import {
 	toReasoningEffort,
 } from "../thinking";
 import type { AgentSessionEvent } from "./agent-session-events";
-import type { ClientBridge } from "./client-bridge";
 import { resolveCompactionMethodOrder } from "./compaction-methods";
 import type { CustomMessage, CustomMessagePayload } from "./messages";
 import { isAdvisorCard, isTerminalTextAssistantAnswer } from "./queued-messages";
@@ -243,9 +242,7 @@ export interface SessionAdvisorsHost {
 	onSseEvent: SimpleStreamOptions["onSseEvent"] | undefined;
 	isDisposed(): boolean;
 	abortInProgress(): boolean;
-	allowAgentInitiatedTurns(): boolean;
 	planModeState(): PlanModeState | undefined;
-	clientBridge(): ClientBridge | undefined;
 	emitSessionEvent(event: AgentSessionEvent): Promise<void>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	sendCustomMessage(message: CustomMessagePayload, options?: AdvisorMessageDeliveryOptions): Promise<boolean>;
@@ -1163,11 +1160,7 @@ export class SessionAdvisors {
 		//  - Plan mode: only user-driven turns converge on ask/resolve.
 		//  - ACP bridges with `deferAgentInitiatedTurns`: the client cannot show an
 		//    agent-initiated turn as busy, so idle triggers are refused (#5628 review).
-		const cannotAutoTrigger =
-			!this.#host.agent.state.isStreaming &&
-			this.#host.clientBridge()?.deferAgentInitiatedTurns === true &&
-			!this.#host.allowAgentInitiatedTurns();
-		if (this.#host.planModeState()?.enabled || cannotAutoTrigger) {
+		if (this.#host.planModeState()?.enabled) {
 			this.#host.preserveAdvisorCard({
 				role: "custom",
 				customType: "advisor",

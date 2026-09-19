@@ -15,7 +15,6 @@ import {
 	type ImageMetadata,
 	isProbablyBinary,
 	isProbablyBinaryHeader,
-	logger,
 	prompt,
 	readImageMetadata,
 } from "@oh-my-pi/pi-utils";
@@ -114,7 +113,7 @@ import {
 import { type PdfImageReadTarget, renderPdfPageScreenshot, splitPdfImageReadPath } from "./read-pdf";
 import { isMultiRange, isRawSelector, type ParsedSelector, parseSel, selToOffsetLimit } from "./read-selector";
 import { readSqlite, resolveSqliteReadPath } from "./read-sqlite";
-import { isProseSummaryPath, renderSummary, routeReadThroughBridge, trySummarize } from "./read-summary";
+import { isProseSummaryPath, renderSummary, trySummarize } from "./read-summary";
 import { formatBytes, shortenPath } from "./render-utils";
 import { REPORT_ISSUE_DEVICE_NAME, reportIssueDeviceUsage } from "./report-tool-issue";
 import { isResolutionDeviceName, resolutionDeviceUsage } from "./resolve";
@@ -526,14 +525,7 @@ const IMAGE_ATTACHMENT_URI_REGEX = /^attachment:\/\/[1-9]\d*$/;
 
 // Maximum image file size (20MB) - larger images will be rejected to prevent OOM during serialization
 const MAX_IMAGE_SIZE = MAX_IMAGE_INPUT_BYTES;
-
 const readSchema = type({
-	path: type("string").describe(
-		"Local path, internal URI (e.g. memory://, skill://), or URL. Inline selectors are supported.",
-	),
-});
-
-const readSchemaWithoutMemory = type({
 	path: type("string").describe("Local path, internal URI (e.g. skill://), or URL. Inline selectors are supported."),
 });
 
@@ -628,7 +620,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly loadMode = "essential";
 	description: string;
 	get parameters(): typeof readSchema {
-		return this.session.settings.get("memory.backend") === "off" ? readSchemaWithoutMemory : readSchema;
+		return readSchema;
 	}
 	readonly strict = true;
 
@@ -884,9 +876,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	}
 
 	/**
-	 * Render multiple non-contiguous ranges of a local file. ACP bridge takes
-	 * priority when present (editor buffer is source of truth); otherwise ranges
-	 * are sliced out of `buffered` when the caller already materialized the file,
+	 * Render multiple non-contiguous ranges of a local file. Ranges are sliced out of `buffered` when the caller already materialized the file,
 	 * and streamed independently with their own line/byte budget when it did not.
 	 * Out-of-bounds ranges surface as inline notices rather than aborting the read.
 	 */
@@ -897,44 +887,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		buffered: BufferedFileText | undefined,
 		parsed: ParsedSelector,
 		displayMode: { hashLines: boolean; lineNumbers: boolean },
-		suffixResolution: { from: string; to: string } | undefined,
 		signal: AbortSignal | undefined,
-		allowBridge = true,
 		immutable = false,
 	): Promise<{
 		outputText: string;
 		columnTruncated: number;
 		displayContent?: { text: string; startLine: number; lineNumbers?: Array<number | null> };
-		bridgeResult?: AgentToolResult<ReadToolDetails>;
 	}> {
 		const rawSelector = isRawSelector(parsed);
-
-		// ACP bridge first — the editor's in-memory buffer is source of truth.
-		const bridgePromise = allowBridge ? routeReadThroughBridge(this.session, absolutePath) : undefined;
-		if (bridgePromise !== undefined) {
-			try {
-				const bridgeText = await bridgePromise;
-				const bridgeResult = buildInMemoryMultiRangeResult(this.session, bridgeText, ranges, {
-					details: markMarkdownContentType(
-						this.session,
-						{ resolvedPath: absolutePath, suffixResolution },
-						absolutePath,
-					),
-					sourcePath: absolutePath,
-					entityLabel: "file",
-					raw: rawSelector,
-				});
-				if (suffixResolution) {
-					const notice = `[Path '${suffixResolution.from}' not found; resolved to '${suffixResolution.to}' via suffix match]`;
-					const firstText = bridgeResult.content.find((c): c is TextContent => c.type === "text");
-					if (firstText) firstText.text = `${notice}\n${firstText.text}`;
-				}
-				return { outputText: "", columnTruncated: 0, bridgeResult };
-			} catch (error) {
-				logger.warn("ACP fs readTextFile failed; falling back to disk", { path: absolutePath, error });
-			}
-		}
-
 		const shouldAddHashLines = !rawSelector && displayMode.hashLines;
 		const shouldAddLineNumbers = rawSelector ? false : shouldAddHashLines ? false : displayMode.lineNumbers;
 		const maxColumns = resolveOutputMaxColumns(this.session.settings);
@@ -1553,12 +1513,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						buffered,
 						parsed,
 						displayMode,
-						suffixResolution,
 						undefined, // plain-file read: deterministic and fast, never abort mid-read
-						!immutable,
 						immutable,
 					);
-					if (multiResult.bridgeResult) return multiResult.bridgeResult;
 					content = [{ type: "text", text: multiResult.outputText }];
 					sourcePath = absolutePath;
 					details = multiResult.displayContent ? { displayContent: multiResult.displayContent } : {};
@@ -1568,33 +1525,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				} else {
 					// Raw text or line-range mode
 					const { offset, limit } = selToOffsetLimit(parsed);
-					// Try ACP bridge first — editor's in-memory buffer is source of truth.
 					// Request full text so local range rendering keeps normal context and line numbers.
-					const bridgePromise = immutable ? undefined : routeReadThroughBridge(this.session, absolutePath);
-					if (bridgePromise !== undefined) {
-						try {
-							const bridgeText = await bridgePromise;
-							const bridgeResult = buildInMemoryTextResult(this.session, bridgeText, offset, limit, {
-								details: markMarkdownContentType(
-									this.session,
-									{ resolvedPath: absolutePath, suffixResolution },
-									absolutePath,
-								),
-								sourcePath: absolutePath,
-								entityLabel: "file",
-								raw: isRawSelector(parsed),
-							});
-							if (suffixResolution) {
-								const notice = `[Path '${suffixResolution.from}' not found; resolved to '${suffixResolution.to}' via suffix match]`;
-								const firstText = bridgeResult.content.find((c): c is TextContent => c.type === "text");
-								if (firstText) firstText.text = `${notice}\n${firstText.text}`;
-							}
-							return bridgeResult;
-						} catch (error) {
-							logger.warn("ACP fs readTextFile failed; falling back to disk", { path: absolutePath, error });
-						}
-					}
-
 					// User-requested 0-indexed range start. Lines BEFORE this become
 					// leading context (added below if offset is explicit). Raw mode
 					// never adds context: without line numbers the padding is
@@ -2043,11 +1974,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				buffered,
 				parsedSel,
 				displayMode,
-				undefined,
 				signal,
-				false,
 			);
-			if (read.bridgeResult) return read.bridgeResult;
 			if (read.displayContent) details.displayContent = read.displayContent;
 			let text = read.outputText;
 			if (!rawSelector && artifact.size > MAX_ARTIFACT_RAW_INLINE_BYTES) {

@@ -5,7 +5,7 @@ import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleSelection } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
 import unexpectedStopClassifierPrompt from "../prompts/system/unexpected-stop-classifier.md" with { type: "text" };
-import { isTinyMemoryLocalModelKey, ONLINE_MEMORY_MODEL_KEY } from "../tiny/models";
+import { isTinyCompletionLocalModelKey, ONLINE_COMPLETION_MODEL_KEY } from "../tiny/models";
 import { tinyModelClient } from "../tiny/title-client";
 
 const CLASSIFIER_SYSTEM_PROMPT = prompt.render(unexpectedStopClassifierPrompt);
@@ -68,10 +68,10 @@ export async function classifyUnexpectedStop(
 ): Promise<boolean | undefined> {
 	const backend = deps.settings.get("providers.unexpectedStopModel");
 	try {
-		if (backend === ONLINE_MEMORY_MODEL_KEY) {
+		if (backend === ONLINE_COMPLETION_MODEL_KEY) {
 			return await classifyOnline(text, deps);
 		}
-		if (isTinyMemoryLocalModelKey(backend)) {
+		if (isTinyCompletionLocalModelKey(backend)) {
 			return await classifyLocal(text, backend, deps);
 		}
 		return undefined;
@@ -132,7 +132,7 @@ async function classifyLocal(
 	modelKey: string,
 	deps: ClassifyUnexpectedStopDeps,
 ): Promise<boolean | undefined> {
-	if (!isTinyMemoryLocalModelKey(modelKey)) {
+	if (!isTinyCompletionLocalModelKey(modelKey)) {
 		throw new Error(`unexpected-stop: unsupported local classifier model: ${modelKey}`);
 	}
 	const builtPrompt = prompt.render(unexpectedStopClassifierPrompt, { message: text });

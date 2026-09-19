@@ -96,18 +96,10 @@ export class AgentBusyError extends Error {
 		this.name = "AgentBusyError";
 	}
 }
-export type ExternalAgentLoop = (
-	prompts: AgentMessage[] | undefined,
-	context: AgentContext,
-	signal: AbortSignal,
-) => AsyncIterable<AgentEvent>;
 
 export interface AgentOptions {
 	initialState?: Partial<AgentState>;
 	pauseGate?: AgentPauseGate;
-	/** An external runtime owns its turn/tools; normal Agent history events are retained. */
-	externalLoop?: ExternalAgentLoop;
-
 	/**
 	 * Converts AgentMessage[] to LLM-compatible Message[] before each LLM call.
 	 * Default filters to user/assistant/toolResult and converts attachments.
@@ -446,7 +438,6 @@ export class Agent {
 	#cursorToolResultBuffer: CursorToolResultEntry[] = [];
 
 	streamFn: StreamFn;
-	#externalLoop?: ExternalAgentLoop;
 	getApiKey?: (model: Model) => Promise<ApiKey | undefined> | ApiKey | undefined;
 	/**
 	 * Hook invoked after tool arguments are validated and before execution.
@@ -480,7 +471,6 @@ export class Agent {
 		this.#followUpMode = opts.followUpMode || "one-at-a-time";
 		this.#interruptMode = opts.interruptMode || "immediate";
 		this.streamFn = opts.streamFn || streamSimple;
-		this.#externalLoop = opts.externalLoop;
 		this.#sessionId = opts.sessionId;
 		this.#deadline = opts.deadline;
 		this.#promptCacheKey = opts.promptCacheKey;
@@ -1013,8 +1003,6 @@ export class Agent {
 	/** Enqueue one indivisible steering input with its context companions. */
 	steerBatch(messages: readonly AgentMessage[]): void {
 		if (!messages.length) return;
-		if (this.#externalLoop)
-			throw new Error("This external runtime does not support steering; queue the message instead");
 		const batch = Symbol();
 		for (const message of messages) this.#steeringBatches.set(message, batch);
 		this.#steeringQueue.push(...messages);
@@ -1549,11 +1537,9 @@ export class Agent {
 		let turnOpen = false;
 
 		try {
-			const stream = this.#externalLoop
-				? this.#externalLoop(messages, context, loopSignal)
-				: messages
-					? agentLoop(messages, context, config, loopSignal, this.streamFn)
-					: agentLoopContinue(context, config, loopSignal, this.streamFn);
+			const stream = messages
+				? agentLoop(messages, context, config, loopSignal, this.streamFn)
+				: agentLoopContinue(context, config, loopSignal, this.streamFn);
 
 			for await (const event of stream) {
 				if (event.type === "turn_start") turnOpen = true;

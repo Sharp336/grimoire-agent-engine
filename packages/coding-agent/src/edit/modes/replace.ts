@@ -9,8 +9,6 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { FileDiagnosticsResult, WritethroughCallback, WritethroughDeferredHandle } from "../../lsp";
 import type { ToolSession } from "../../tools";
-import { routeWriteThroughBridge } from "../../tools/acp-bridge";
-import { invalidateFsScanAfterWrite } from "../../tools/fs-cache-invalidation";
 import { enforcePlanModeWrite, resolvePlanPath } from "../../tools/plan-mode-guard";
 import type { AppliedEditObserver } from "../blackbox";
 import { generateDiffString, replaceText } from "../diff";
@@ -1185,15 +1183,6 @@ export async function executeReplace(
 
 	// Route through ACP bridge when available; skips internal artifacts.
 	let diagnostics: FileDiagnosticsResult | undefined;
-	if (await routeWriteThroughBridge(session, path, absolutePath, finalContent, signal)) {
-		// bridge handled the write; diagnostics not available via writethrough
-	} else {
-		diagnostics = await writethrough(absolutePath, finalContent, signal, Bun.file(absolutePath), batchRequest, dst =>
-			dst === absolutePath ? beginDeferredDiagnosticsForPath(absolutePath) : undefined,
-		);
-		invalidateFsScanAfterWrite(absolutePath);
-	}
-
 	const diffResult = generateDiffString(normalizedContent, result.content, undefined, { path });
 	await onApplied?.({ path: absolutePath, prev: rawContent, next: finalContent });
 	const editResult = createEditResult({

@@ -18,17 +18,17 @@ import { tinyModelDeviceSettingToEnv } from "./device";
 import { tinyModelDtypeSettingToEnv } from "./dtype";
 import {
 	isTinyLocalModelKey,
-	isTinyMemoryLocalModelKey,
+	isTinyCompletionLocalModelKey,
 	isTinyTitleLocalModelKey,
 	type TinyLocalModelKey,
-	type TinyMemoryLocalModelKey,
+	type TinyCompletionLocalModelKey,
 	type TinyTitleLocalModelKey,
 } from "./models";
 import type { TinyTitleProgressEvent, TinyTitleWorkerInbound, TinyTitleWorkerOutbound } from "./title-protocol";
 
 type PendingRequest =
 	| { kind: "generate"; modelKey: TinyTitleLocalModelKey; resolve: (title: string | null) => void }
-	| { kind: "complete"; modelKey: TinyMemoryLocalModelKey; resolve: (text: string | null) => void }
+	| { kind: "complete"; modelKey: TinyCompletionLocalModelKey; resolve: (text: string | null) => void }
 	| { kind: "download"; modelKey: TinyLocalModelKey; resolve: (result: TinyTitleDownloadResult) => void };
 
 export interface TinyTitleDownloadResult {
@@ -267,7 +267,7 @@ export class TinyTitleClient {
 	}
 
 	async complete(modelKey: string, prompt: string, options: TinyModelCompletionOptions = {}): Promise<string | null> {
-		if (!isTinyMemoryLocalModelKey(modelKey)) return null;
+		if (!isTinyCompletionLocalModelKey(modelKey)) return null;
 		if (options.signal?.aborted || this.#failedModels.has(modelKey)) return null;
 
 		try {

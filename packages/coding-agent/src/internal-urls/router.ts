@@ -11,7 +11,6 @@ import { HistoryProtocolHandler } from "./history-protocol";
 import { IssueProtocolHandler, PrProtocolHandler } from "./issue-pr-protocol";
 import { LocalProtocolHandler } from "./local-protocol";
 import { McpProtocolHandler } from "./mcp-protocol";
-import { MemoryProtocolHandler } from "./memory-protocol";
 import { OmpProtocolHandler } from "./omp-protocol";
 import { extractUriScheme, parseInternalUrl } from "./parse";
 import { RuleProtocolHandler } from "./rule-protocol";
@@ -38,7 +37,6 @@ export class InternalUrlRouter {
 		this.register(new OmpProtocolHandler());
 		this.register(new AgentProtocolHandler());
 		this.register(new ArtifactProtocolHandler());
-		this.register(new MemoryProtocolHandler());
 		this.register(new LocalProtocolHandler());
 		this.register(new VaultProtocolHandler());
 		this.register(new SkillProtocolHandler());

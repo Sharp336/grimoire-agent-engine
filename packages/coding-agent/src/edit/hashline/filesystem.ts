@@ -23,7 +23,6 @@ import { isEnoent } from "@oh-my-pi/pi-utils";
 import type { FileDiagnosticsResult, WritethroughCallback, WritethroughDeferredHandle } from "../../lsp";
 import { FileChangeType, notifyWorkspaceWatchedFiles } from "../../lsp/client";
 import type { ToolSession } from "../../tools";
-import { routeWriteThroughBridge } from "../../tools/acp-bridge";
 import { assertEditableFileContent } from "../../tools/auto-generated-guard";
 import { deleteFileWithFallback, writeFileWithFallback } from "../../tools/file-write-fallback";
 import { invalidateFsScanAfterWrite } from "../../tools/fs-cache-invalidation";
@@ -209,30 +208,6 @@ export class HashlineFilesystem extends Filesystem {
 		// client reformatted on save). `WriteResult.text` must stay in
 		// view-space — the same space `readText` returns — so a follow-up
 		// `readText` sees exactly what this write reports.
-		const bridgeResult = await routeWriteThroughBridge(
-			this.session,
-			relativePath,
-			absolutePath,
-			finalContent,
-			this.#signal,
-		);
-		if (bridgeResult) {
-			this.#diagnosticsByPath.set(relativePath, undefined);
-			if (!bridgeResult.driftedFromRequest) {
-				// No client-side transform: the view we sent is what's on disk.
-				return { text: content };
-			}
-			// Drifted (e.g. format-on-save): re-derive the view from what
-			// actually landed on disk instead of assuming `content` still
-			// matches. Falls back to `content` if the drifted file can't be
-			// re-read as a valid view (e.g. a formatter broke notebook JSON).
-			try {
-				return { text: await readEditFileText(absolutePath, relativePath) };
-			} catch {
-				return { text: content };
-			}
-		}
-
 		const diagnostics = await this.#writethrough(
 			absolutePath,
 			finalContent,

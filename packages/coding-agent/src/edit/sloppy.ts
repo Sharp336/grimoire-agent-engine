@@ -4,8 +4,6 @@ import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import type { FileDiagnosticsResult, WritethroughCallback, WritethroughDeferredHandle } from "../lsp";
 import type { ToolSession } from "../tools";
-import { routeWriteThroughBridge } from "../tools/acp-bridge";
-import { invalidateFsScanAfterWrite } from "../tools/fs-cache-invalidation";
 import { enforcePlanModeWrite, resolvePlanPath } from "../tools/plan-mode-guard";
 import type { AppliedEditObserver } from "./blackbox";
 import { type DiffError, type DiffResult, generateDiffString } from "./diff";
@@ -3929,20 +3927,6 @@ export async function executeSloppy(
 
 		// Route through ACP bridge when available; skips internal artifacts.
 		let diagnostics: FileDiagnosticsResult | undefined;
-		if (await routeWriteThroughBridge(session, entry.path, entry.absolutePath, finalContent, signal)) {
-			// bridge handled the write; diagnostics not available via writethrough
-		} else {
-			diagnostics = await writethrough(
-				entry.absolutePath,
-				finalContent,
-				signal,
-				Bun.file(entry.absolutePath),
-				sectionBatch,
-				dst => (dst === entry.absolutePath ? beginDeferredDiagnosticsForPath(entry.absolutePath) : undefined),
-			);
-			invalidateFsScanAfterWrite(entry.absolutePath);
-		}
-
 		const diffResult = generateDiffString(entry.normalizedContent, entry.newContent, undefined, { path: entry.path });
 		await onApplied?.({ path: entry.absolutePath, prev: entry.rawContent, next: finalContent });
 		const editResult = createEditResult({

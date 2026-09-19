@@ -253,8 +253,6 @@ export interface XdevState {
 	readonly builtInNames: Set<string>;
 	/** Whether a name is active at the top level. */
 	readonly isActive: (name: string) => boolean;
-	/** Optional execution-only decorator, such as the ACP permission gate. */
-	decorateExecution?(tool: Tool): Tool;
 }
 
 /** Full-doc character budget for system-prompt mounted-device sections. */
@@ -278,7 +276,7 @@ export function resolveMountedXdevTool(state: XdevState, name: string): Tool | u
 /** Resolve a mounted tool with its execution-only permission decorator. */
 export function resolveMountedXdevExecutable(state: XdevState, name: string): Tool | undefined {
 	const tool = resolveMountedXdevTool(state, name);
-	return tool && state.decorateExecution ? state.decorateExecution(tool) : tool;
+	return tool;
 }
 /** Mounted tools in presentation order, resolved from the canonical map. */
 export function listXdevTools(state: XdevState): Tool[] {
@@ -445,7 +443,7 @@ export async function dispatchXdevTool(
 						isError: partial.isError,
 					})
 			: undefined;
-		const executable = state.decorateExecution?.(canonical) ?? canonical;
+		const executable = canonical;
 		const executionContext = context
 			? {
 					...context,

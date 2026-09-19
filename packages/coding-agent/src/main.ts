@@ -108,8 +108,6 @@ import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking"
 import type { LspStartupServerInfo } from "./tools";
 import { getChangelogPath, resolveStartupChangelogForDisplay, type StartupChangelogSelection } from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
-
-type RunAcpMode = (createSession: AcpSessionFactory) => Promise<never>;
 type RunPrintMode = (session: AgentSession, options: PrintModeOptions) => Promise<void>;
 type RunRpcMode = (
 	session: AgentSession,
@@ -150,10 +148,6 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"task.agentModelOverrides",
 	"task.agentPrewalk",
 	"task.agentAdvisor",
-	// Memory subsystems are off-by-default for RPC/ACP hosts; embedders that want
-	// memory should opt in explicitly through their own settings layer.
-	"memory.backend",
-	"memories.enabled",
 	// Advisor is interactive-session assistance. Protocol hosts opt in explicitly
 	// instead of inheriting a user's globally-enabled local preference, and when
 	// they do opt in they get the default tuning rather than the user's local tuning.
@@ -189,10 +183,6 @@ function applyDefaultSettingOverrides(settingPaths: SettingPath[], targetSetting
 function applyRpcDefaultSettingOverrides(targetSettings: Settings = settings): void {
 	applyDefaultSettingOverrides(HOST_DEFAULTED_SETTING_PATHS, targetSettings);
 	applyDefaultSettingOverrides(RPC_BACKGROUND_DEFAULTED_SETTING_PATHS, targetSettings);
-}
-
-function applyAcpDefaultSettingOverrides(targetSettings: Settings = settings): void {
-	applyDefaultSettingOverrides(HOST_DEFAULTED_SETTING_PATHS, targetSettings);
 }
 
 /** Reads a non-TTY stdin stream as prompt text. */
@@ -363,24 +353,6 @@ export async function submitInteractiveInput(
 	}
 }
 
-interface AcpSessionHandle {
-	session: AgentSession;
-	setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
-}
-
-type AcpSessionFactory = (cwd: string, options?: { interactivePrompts?: boolean }) => Promise<AcpSessionHandle>;
-
-export interface AcpSessionFactoryOptions {
-	baseOptions: CreateAgentSessionOptions;
-	settings: Settings;
-	sessionDir?: string;
-	authStorage: AuthStorage;
-	modelRegistry: ModelRegistry;
-	parsedArgs: Pick<Args, "apiKey" | "trustedExtensions" | "tools">;
-	rawArgs: string[];
-	createSession: (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
-}
-
 async function loadTrustedSessionExtensions(
 	options: Pick<CreateAgentSessionOptions, "additionalExtensionPaths">,
 	cwd: string,
@@ -399,83 +371,6 @@ async function loadTrustedSessionExtensions(
 		}
 	}
 	return loadExtensions(paths, cwd, eventBus);
-}
-
-/**
- * Build the per-`session/new` factory used by ACP mode.
- *
- * MCP servers in ACP sessions are owned exclusively by the ACP client, which
- * supplies them through `session/new.mcpServers` and re-applies them via
- * {@link AcpAgent#configureMcpServers}. We therefore force `enableMCP: false`
- * on every session created here so {@link createAgentSession} skips the on-disk
- * `.mcp.json` discovery path — otherwise host MCP tools land in the session's
- * tool registry and shadow the client-supplied servers (issue #1234).
- */
-export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSessionFactory {
-	return async (cwd, factoryOptions) => {
-		const nextSettings = await args.settings.cloneForCwd(cwd);
-		const nextSessionManager = SessionManager.create(cwd, args.sessionDir);
-		const agentId = `acp:${nextSessionManager.getSessionId()}`;
-		// `baseOptions.titleSystemPrompt` is resolved from the launch cwd; an ACP
-		// host can open `session/new` for any client-supplied workspace, so
-		// re-discover `TITLE_SYSTEM.md` against THIS session's `cwd` to keep the
-		// replan-driven title refresh consistent with the target project's
-		// policy (PR #3736 follow-up).
-		const titleSystemPromptSource = discoverTitleSystemPromptFile(cwd);
-		const titleSystemPrompt = await resolvePromptInput(titleSystemPromptSource, "title system prompt");
-		const eventBus = new EventBus();
-		const trustedExtensions =
-			args.parsedArgs.trustedExtensions && args.parsedArgs.trustedExtensions.length > 0
-				? await loadTrustedSessionExtensions(args.baseOptions, cwd, eventBus)
-				: undefined;
-		if (trustedExtensions && trustedExtensions.errors.length > 0) {
-			throw new Error(
-				`Trusted extension failed to load: ${trustedExtensions.errors.map(item => item.error).join("; ")}`,
-			);
-		}
-		const { session: nextSession, setToolUIContext } = await args.createSession({
-			...args.baseOptions,
-			cwd,
-			sessionManager: nextSessionManager,
-			settings: nextSettings,
-			authStorage: args.authStorage,
-			modelRegistry: args.modelRegistry,
-			agentId,
-			// ACP defers the `ask` capability and reserve-policy confirmation until
-			// client capabilities are known, without enabling other UI-only behavior.
-			interactivePrompts: factoryOptions?.interactivePrompts,
-			deferUsageReserveConfirmation: true,
-			enableMCP: false,
-			titleSystemPrompt,
-			eventBus,
-			preloadedExtensions: trustedExtensions,
-		});
-		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
-			args.authStorage.setRuntimeApiKey(nextSession.model.provider, args.parsedArgs.apiKey);
-		}
-		const runner = nextSession.extensionRunner;
-		const reparsedArgs = applyExtensionFlags(
-			runner
-				? {
-						getFlags: () => runner.getFlags(),
-						setFlagValue: (name, value) => {
-							runner.setFlagValue(name, value);
-						},
-					}
-				: undefined,
-			args.rawArgs,
-		);
-		const requestedTools = reparsedArgs?.tools ?? args.parsedArgs.tools;
-		if (requestedTools) {
-			try {
-				validateToolNames(requestedTools, nextSession.getAllToolNames());
-			} catch (error) {
-				await nextSession.dispose();
-				throw error;
-			}
-		}
-		return { session: nextSession, setToolUIContext };
-	};
 }
 
 async function runInteractiveMode(
@@ -1332,7 +1227,6 @@ interface RunRootCommandDependencies {
 	createAgentSession?: typeof createAgentSession;
 	discoverAuthStorage?: typeof discoverAuthStorage;
 	selectSession?: typeof selectSession;
-	runAcpMode?: RunAcpMode;
 	createForeignSessionStore?: (source: ForeignSessionSource) => ForeignSessionStore;
 	settings?: Settings;
 	forceSetupWizard?: boolean;
@@ -1414,7 +1308,7 @@ export async function runRootCommand(
 		// Classify the host before opening auth or settings storage so every
 		// session-critical database connection picks the right busy timeout.
 		// See getDbBusyTimeoutMs().
-		const isProtocolMode = mode === "rpc" || mode === "rpc-ui" || mode === "acp";
+		const isProtocolMode = mode === "rpc" || mode === "rpc-ui";
 		// Protocol modes own stdin; treating it as prompt text would consume JSON-RPC frames before their transports start.
 		const pipedInput = isProtocolMode ? undefined : await logger.time("readPipedInput", readPipedInput);
 		const autoPrint = pipedInput !== undefined && !parsedArgs.print && parsedArgs.mode === undefined;
@@ -1457,8 +1351,7 @@ export async function runRootCommand(
 		}
 		if (parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") {
 			applyRpcDefaultSettingOverrides(settingsInstance);
-		} else if (parsedArgs.mode === "acp") {
-			applyAcpDefaultSettingOverrides(settingsInstance);
+		} else {
 		}
 
 		// The registry composes policy-dependent metadata synchronously, including
@@ -1470,12 +1363,7 @@ export async function runRootCommand(
 		if (parsedArgs.noPty || parsedArgs.mode === "rpc-ui") {
 			Bun.env.PI_NO_PTY = "1";
 		}
-		if (
-			parsedArgs.noTitle ||
-			parsedArgs.mode === "rpc" ||
-			parsedArgs.mode === "rpc-ui" ||
-			parsedArgs.mode === "acp"
-		) {
+		if (parsedArgs.noTitle || parsedArgs.mode === "rpc" || parsedArgs.mode === "rpc-ui") {
 			Bun.env.PI_NO_TITLE = "1";
 		}
 
@@ -1787,22 +1675,7 @@ export async function runRootCommand(
 			return result;
 		};
 
-		if (mode === "acp") {
-			const createAcpSession = createAcpSessionFactory({
-				baseOptions: sessionOptions,
-				settings: settingsInstance,
-				sessionDir: parsedArgs.sessionDir,
-				authStorage,
-				modelRegistry,
-				parsedArgs,
-				rawArgs,
-				createSession,
-			});
-			// Branch-only protocol runner: keep ACP server code out of normal interactive startup.
-			const runAcpMode = deps.runAcpMode ?? (await import("./modes/acp/acp-mode")).runAcpMode;
-			stopStartupWatchdog();
-			await runAcpMode(createAcpSession);
-		} else {
+		{
 			// Resolve extension-registered CLI flags before creating the session so a
 			// bad `@file` fails fast WITHOUT leaving a junk session/breadcrumb
 			// (createAgentSession writes the terminal breadcrumb eagerly). Loading the

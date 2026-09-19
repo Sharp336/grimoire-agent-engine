@@ -1,34 +1,33 @@
 import * as path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils/fs-error";
 
-/** Build-time specifier resolved to bundled legacy Pi module namespaces. */
-export const LEGACY_PI_MODULES_SPECIFIER = "omp-legacy-pi-modules";
+/** Build-time specifier resolved to bundled native extension module namespaces. */
+export const NATIVE_EXTENSION_MODULES_SPECIFIER = "omp-native-extension-modules";
 
-const VIRTUAL_NAMESPACE = "omp-legacy-pi-modules-build";
+const VIRTUAL_NAMESPACE = "omp-native-extension-modules-build";
 const packageDir = path.resolve(import.meta.dir, "..");
 const repoRoot = path.resolve(packageDir, "..", "..");
 
 interface BundledPackage {
 	readonly dir: string;
 	readonly identifier: string;
-	readonly rootShim: string | null;
 }
 
 const BUNDLED_PACKAGES: readonly BundledPackage[] = [
-	{ dir: "agent", identifier: "PiAgentCore", rootShim: null },
-	{ dir: "ai", identifier: "PiAi", rootShim: "legacy-pi-ai-shim.ts" },
-	{ dir: "coding-agent", identifier: "PiCodingAgent", rootShim: "legacy-pi-coding-agent-shim.ts" },
-	{ dir: "natives", identifier: "PiNatives", rootShim: null },
-	{ dir: "tui", identifier: "PiTui", rootShim: "legacy-pi-tui-shim.ts" },
-	{ dir: "utils", identifier: "PiUtils", rootShim: null },
+	{ dir: "omptype", identifier: "OmpType" },
+	{ dir: "catalog", identifier: "PiCatalog" },
+	{ dir: "agent", identifier: "PiAgentCore" },
+	{ dir: "ai", identifier: "PiAi" },
+	{ dir: "coding-agent", identifier: "PiCodingAgent" },
+	{ dir: "natives", identifier: "PiNatives" },
+	{ dir: "tui", identifier: "PiTui" },
+	{ dir: "utils", identifier: "PiUtils" },
 ];
 
-const TYPEBOX_MODULE_KEY = "typebox";
-const TYPEBOX_COMPAT_MODULE = "legacy-typebox.ts";
 const SKIPPED_WILDCARD_BASENAMES = new Set(["index"]);
 const MAIN_THREAD_UNSAFE_WILDCARD_BASENAMES = new Set(["worker-entry"]);
 
-/** One namespace module the binary must retain for legacy extension imports. */
+/** One namespace module the binary must retain for native extension imports. */
 export interface BundledPiEntry {
 	/** Canonical import key exposed to extensions. */
 	readonly key: string;
@@ -91,12 +90,8 @@ function exportImportTarget(value: unknown): string | null {
 	return null;
 }
 
-function shimSpecifier(file: string): string {
-	return path.join(packageDir, "src", "extensibility", file);
-}
-
 /**
- * Derive the bundled legacy Pi module surface from current package exports.
+ * Derive the bundled native extension module surface from current package exports.
  * Named wildcard exports are expanded from source; root catch-alls stay out to
  * avoid importing CLI entrypoints and other non-extension surfaces.
  */
@@ -122,7 +117,7 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 			throw new Error(`Bundled Pi package manifest has no name: ${manifestPath}`);
 		}
 		const exportsField = isRecord(manifest.exports) ? manifest.exports : {};
-		const rootSpecifier = pkg.rootShim ? shimSpecifier(pkg.rootShim) : manifest.name;
+		const rootSpecifier = manifest.name;
 		addEntry(manifest.name, `bundled${pkg.identifier}`, rootSpecifier);
 
 		for (const exportKey in exportsField) {
@@ -175,12 +170,11 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 		}
 	}
 
-	addEntry(TYPEBOX_MODULE_KEY, "bundledTypeBoxShim", shimSpecifier(TYPEBOX_COMPAT_MODULE));
 	return entries;
 }
 
 /** Render the lazy loader registry; exported so tests can execute the generated module. */
-export function __renderLegacyPiVirtualModule(entries: readonly BundledPiEntry[]): string {
+export function __renderNativeExtensionVirtualModule(entries: readonly BundledPiEntry[]): string {
 	const loaders = entries.map(
 		entry => `const ${entry.binding} = () => import(${JSON.stringify(entry.importSpecifier)});`,
 	);
@@ -189,17 +183,17 @@ export function __renderLegacyPiVirtualModule(entries: readonly BundledPiEntry[]
 }
 
 /**
- * Build plugin that materializes lazy legacy Pi module loaders entirely in
+ * Build plugin that materializes lazy native extension module loaders entirely in
  * memory. Literal dynamic imports retain every compile-time edge without
  * evaluating unrelated host modules during extension bootstrap.
  */
-export async function createLegacyPiVirtualModulePlugin(): Promise<Bun.BunPlugin> {
-	const source = __renderLegacyPiVirtualModule(await collectBundledPiEntries());
+export async function createNativeExtensionVirtualModulePlugin(): Promise<Bun.BunPlugin> {
+	const source = __renderNativeExtensionVirtualModule(await collectBundledPiEntries());
 	return {
-		name: "omp:legacy-pi-modules",
+		name: "omp:native-extension-modules",
 		setup(build) {
-			build.onResolve({ filter: /^omp-legacy-pi-modules$/ }, () => ({
-				path: LEGACY_PI_MODULES_SPECIFIER,
+			build.onResolve({ filter: /^omp-native-extension-modules$/ }, () => ({
+				path: NATIVE_EXTENSION_MODULES_SPECIFIER,
 				namespace: VIRTUAL_NAMESPACE,
 			}));
 			build.onLoad({ filter: /.*/, namespace: VIRTUAL_NAMESPACE }, () => ({ contents: source, loader: "ts" }));
