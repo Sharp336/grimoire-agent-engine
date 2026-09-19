@@ -119,6 +119,9 @@ export async function collectBundledPiEntries(): Promise<BundledPiEntry[]> {
 		const exportsField = isRecord(manifest.exports) ? manifest.exports : {};
 		const rootSpecifier = manifest.name;
 		addEntry(manifest.name, `bundled${pkg.identifier}`, rootSpecifier);
+		if (pkg.dir === "omptype") {
+			addEntry(`${manifest.name}/typebox`, "bundledOmpTypeTypebox", `${manifest.name}/typebox`);
+		}
 
 		for (const exportKey in exportsField) {
 			if (!exportKey.startsWith("./") || exportKey === "." || exportKey.includes("*")) continue;
