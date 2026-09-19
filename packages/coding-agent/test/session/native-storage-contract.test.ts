@@ -7,6 +7,7 @@ import { SessionManager } from "../../src/session/session-manager";
 import { FileSessionStorage } from "../../src/session/session-storage";
 import {
 	assertStorageProtocolHash,
+	STORAGE_PROTOCOL_REVISION,
 	STORAGE_PROTOCOL_SCHEMA,
 	STORAGE_PROTOCOL_SCHEMA_HASH,
 	STORAGE_PROTOCOL_VERSION,
@@ -133,14 +134,15 @@ describe("native session storage contract", () => {
 		});
 		expect(request.schema).toBe(STORAGE_PROTOCOL_SCHEMA);
 		expect(request.version).toBe(STORAGE_PROTOCOL_VERSION);
+		expect(STORAGE_PROTOCOL_REVISION).toBe(8);
 		expect(STORAGE_PROTOCOL_SCHEMA_HASH).toBe(
-			"sha256:69681e02b9f1d775896c487effed440eb657b756d05b19c66cfaadf8a256615e",
+			"sha256:2d8da049a00600324c082fc32004765fbfaaf2a855f988853c3575bdb42e1954",
 		);
 		expect(() => assertStorageProtocolHash(STORAGE_PROTOCOL_SCHEMA_HASH)).not.toThrow();
 		expect(() => assertStorageProtocolHash("sha256:stale")).toThrow(/Unsupported storage protocol schema hash/);
 	});
 
-	it("requires rev6 incarnation and receipt identity fields at compile time", () => {
+	it("requires rev8 incarnation and receipt identity fields at compile time", () => {
 		const write = storageProtocolRequest("write", {
 			write: {
 				requestId: "request-1",
