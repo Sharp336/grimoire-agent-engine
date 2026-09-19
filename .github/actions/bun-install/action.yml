@@ -15,7 +15,7 @@ runs:
         run: |
            # bun is baked into the omp-kata runner image — reuse it only when it
            # matches the repo pin (package.json "packageManager"). A lagging
-           # preloaded bun skews version-sensitive codegen (gen:tool-views) and
+           # preloaded bun skews version-sensitive codegen and
            # test-runner behavior, so a mismatch fetches the pinned build instead.
            want="$(sed -n 's/.*"packageManager": *"bun@\([^"]*\)".*/\1/p' package.json)"
            if [ -z "$want" ]; then

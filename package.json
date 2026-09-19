@@ -142,7 +142,6 @@
     "lint:py": "ruff check python && ruff format --check python",
     "fix:py": "ruff check --fix python && ruff format python",
     "prepublishOnly": "bun run check",
-    "prepare": "bun run gen:tool-views",
     "publish": "bun run prepublishOnly && npm publish -ws --access public",
     "publish:dry": "bun run prepublishOnly && npm publish -ws --access public --dry-run",
     "release": "bun scripts/release.ts",
