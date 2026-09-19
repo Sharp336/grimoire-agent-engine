@@ -135,4 +135,32 @@ describe("native session storage contract", () => {
 		expect(() => assertStorageProtocolHash(STORAGE_PROTOCOL_SCHEMA_HASH)).not.toThrow();
 		expect(() => assertStorageProtocolHash("sha256:stale")).toThrow(/Unsupported storage protocol schema hash/);
 	});
+
+	it("requires rev6 incarnation and receipt identity fields at compile time", () => {
+		const write = storageProtocolRequest("write", {
+			write: {
+				requestId: "request-1",
+				operationId: "operation-1",
+				familyId: "family-1",
+				generationId: "generation-1",
+				firstSeq: 1,
+				entries: [{ entryId: "entry-1", parentId: null, kind: "message", payload: {} }],
+				durability: "required",
+				dependencies: [],
+				payloadHash: `sha256:${"0".repeat(64)}`,
+				incarnation: 1,
+			},
+		});
+		const receipt = storageProtocolRequest("receipt", {
+			receipt: {
+				requestId: "request-2",
+				familyId: "family-1",
+				generationId: "generation-1",
+				operationId: "operation-1",
+				incarnation: 1,
+			},
+		});
+		expect(write.operation).toBe("write");
+		expect(receipt.operation).toBe("receipt");
+	});
 });
