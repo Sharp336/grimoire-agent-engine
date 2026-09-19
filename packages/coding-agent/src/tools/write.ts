@@ -36,7 +36,6 @@ import writeDeviceOnlyDescription from "../prompts/tools/write-device-only.md" w
 import type { ToolSession } from "../sdk";
 import { fileHyperlink, framedBlock, renderStatusLine } from "../tui";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
-import { routeWriteThroughBridge } from "./acp-bridge";
 import { resolveToolTier, truncateForPrompt } from "./approval";
 import { assertEditableFile } from "./auto-generated-guard";
 import {
@@ -1295,29 +1294,6 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 			// Try ACP bridge first for editor-visible filesystem paths. Internal
 			// artifacts such as local:// plans are owned by OMP, not the editor.
-			const bridgeWrite = await routeWriteThroughBridge(this.session, path, absolutePath, cleanContent, signal);
-			if (bridgeWrite) {
-				// `write` always replaces the whole file, so (unlike hashline's
-				// hunk-scoped diff) there's no size cost to keying the header/
-				// executable-bit check on the verified post-write content —
-				// use it so a drifted write (e.g. client format-on-save) still
-				// hands back a tag that matches what's actually on disk.
-				const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, bridgeWrite.text);
-				const header = maybeWriteSnapshotHeader(this.session, absolutePath, bridgeWrite.text);
-				const writeLine = `Successfully wrote ${cleanContent.length} bytes to ${displayPath}`;
-				let resultText = header ? `${header}\n${writeLine}` : writeLine;
-				if (stripped) {
-					resultText += `\nNote: auto-stripped hashline display prefixes from content before writing.`;
-				}
-				if (madeExecutable) {
-					resultText += `\n${EXECUTABLE_NOTICE}`;
-				}
-				return {
-					content: [{ type: "text", text: resultText }],
-					details: { resolvedPath: absolutePath, madeExecutable: madeExecutable || undefined },
-				};
-			}
-
 			const diagnostics = await this.#writethrough(
 				absolutePath,
 				cleanContent,

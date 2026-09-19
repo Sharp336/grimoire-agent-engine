@@ -25,10 +25,10 @@ import {
 	AUTO_THINKING_MODEL_OPTIONS,
 	AUTO_THINKING_MODEL_VALUES,
 	ONLINE_AUTO_THINKING_MODEL_KEY,
-	ONLINE_MEMORY_MODEL_KEY,
+	ONLINE_COMPLETION_MODEL_KEY,
 	ONLINE_TINY_TITLE_MODEL_KEY,
-	TINY_MEMORY_MODEL_OPTIONS,
-	TINY_MEMORY_MODEL_VALUES,
+	TINY_COMPLETION_MODEL_OPTIONS,
+	TINY_COMPLETION_MODEL_VALUES,
 	TINY_TITLE_MODEL_OPTIONS,
 	TINY_TITLE_MODEL_VALUES,
 } from "../tiny/models";
@@ -139,7 +139,6 @@ export type SettingTab =
 	| "model"
 	| "interaction"
 	| "context"
-	| "memory"
 	| "files"
 	| "shell"
 	| "tools"
@@ -155,7 +154,6 @@ export const SETTING_TABS: SettingTab[] = [
 	"model",
 	"interaction",
 	"context",
-	"memory",
 	"files",
 	"shell",
 	"tools",
@@ -169,7 +167,6 @@ export const TAB_METADATA: Record<SettingTab, { label: string; icon: `tab.${stri
 	model: { label: "Model", icon: "tab.model" },
 	interaction: { label: "Interaction", icon: "tab.interaction" },
 	context: { label: "Context", icon: "tab.context" },
-	memory: { label: "Memory", icon: "tab.memory" },
 	files: { label: "Files", icon: "tab.files" },
 	shell: { label: "Shell", icon: "tab.shell" },
 	tools: { label: "Tools", icon: "tab.tools" },
@@ -197,7 +194,6 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Git",
 	],
 	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
-	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight"],
 	files: ["Editing", "Reading", "Read Summaries", "LSP"],
 	shell: ["Bash", "Eval & Runtimes"],
 	tools: [
@@ -383,7 +379,6 @@ const EMPTY_NUMBER_RECORD: Record<string, number> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const DEFAULT_TOOL_CALL_LOOP_EXEMPT_TOOLS: string[] = ["hub"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
-const HINDSIGHT_RECALL_TYPES_DEFAULT: string[] = ["world", "experience"];
 export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	{
 		pattern: "^\\s*(cat|head|tail|less|more)\\s+",
@@ -2695,505 +2690,7 @@ export const SETTINGS_SCHEMA = {
 	"branchSummary.reserveTokens": { type: "number", default: 16384 },
 
 	// Memories
-	// Legacy local-memory enable flag kept only for back-compat migration.
-	// Hidden from UI — users should use `memory.backend` instead.
-	"memories.enabled": {
-		type: "boolean",
-		default: false,
-	},
 
-	"memories.maxRolloutsPerStartup": { type: "number", default: 64 },
-
-	"memories.maxRolloutAgeDays": { type: "number", default: 30 },
-
-	"memories.minRolloutIdleHours": { type: "number", default: 12 },
-
-	"memories.threadScanLimit": { type: "number", default: 300 },
-
-	"memories.maxRawMemoriesForGlobal": { type: "number", default: 200 },
-
-	"memories.stage1Concurrency": { type: "number", default: 8 },
-
-	"memories.stage1LeaseSeconds": { type: "number", default: 120 },
-
-	"memories.stage1RetryDelaySeconds": { type: "number", default: 120 },
-
-	"memories.phase2LeaseSeconds": { type: "number", default: 180 },
-
-	"memories.phase2RetryDelaySeconds": { type: "number", default: 180 },
-
-	"memories.phase2HeartbeatSeconds": { type: "number", default: 30 },
-
-	"memories.rolloutPayloadPercent": { type: "number", default: 0.7 },
-
-	"memories.phase1InputTokenLimit": { type: "number", default: 4000 },
-
-	"memories.fallbackTokenLimit": { type: "number", default: 16000 },
-
-	"memories.summaryInjectionTokenLimit": { type: "number", default: 5000 },
-
-	// Memory backend selector — picks between local memories pipeline,
-	// Mnemopi local SQLite, Hindsight remote memory, or off. The legacy
-	// `memories.enabled` flag is migration input only; see config/settings.ts.
-	"memory.backend": {
-		type: "enum",
-		values: ["off", "local", "hindsight", "mnemopi"] as const,
-		default: "off",
-		ui: {
-			tab: "memory",
-			group: "General",
-			label: "Memory Backend",
-			description: "Off, local summary pipeline, Mnemopi SQLite, or Hindsight remote memory",
-			options: [
-				{ value: "off", label: "Off", description: "No memory subsystem runs" },
-				{ value: "local", label: "Local", description: "Local rollout summarisation pipeline (memory_summary.md)" },
-				{ value: "hindsight", label: "Hindsight", description: "Vectorize Hindsight remote memory service" },
-				{
-					value: "mnemopi",
-					label: "Mnemopi",
-					description: "Local SQLite recall/retain backend with optional embeddings",
-				},
-			],
-		},
-	},
-
-	// Auto-Learn (experimental): post-stop nudge to capture lessons to memory
-	// and mint/enhance isolated managed skills under ~/.omp/agent/managed-skills.
-	// Master flag is default-off → zero footprint; sub-flags gate behaviour.
-	"autolearn.enabled": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "memory",
-			group: "Auto-Learn",
-			label: "Auto-Learn (experimental)",
-			description:
-				"After the agent stops, nudge it to capture lessons to memory and create/enhance isolated managed skills",
-		},
-	},
-	"autolearn.autoContinue": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "memory",
-			group: "Auto-Learn",
-			label: "Auto-run capture at stop",
-			description:
-				"When on, auto-run one private capture turn at stop (uses extra tokens). When off, only standing auto-learn guidance remains.",
-			condition: "autolearnActive",
-		},
-	},
-	// Config-file-only knob (numbers without `options` are hidden from the UI).
-	"autolearn.minToolCalls": { type: "number", default: 5 },
-
-	// Mnemopi local SQLite memory backend.
-	"mnemopi.dbPath": {
-		type: "string",
-		default: undefined,
-		ui: {
-			tab: "memory",
-			group: "Mnemopi",
-			label: "Mnemopi DB Path",
-			description: "Optional SQLite DB path. Defaults to the agent memories directory.",
-			condition: "mnemopiActive",
-		},
-	},
-	"mnemopi.bank": {
-		type: "string",
-		default: undefined,
-		ui: {
-			tab: "memory",
-			group: "Mnemopi",
-			label: "Mnemopi Bank",
-			description: "Optional shared bank base name. Per-project modes derive project-local banks from it.",
-			condition: "mnemopiActive",
-		},
-	},
-	"mnemopi.scoping": {
-		type: "enum",
-		values: ["global", "per-project", "per-project-tagged"] as const,
-		default: "per-project",
-		ui: {
-			tab: "memory",
-			group: "Mnemopi",
-			label: "Mnemopi Scoping",
-			description:
-				"global = one shared bank; per-project = isolated bank per cwd; per-project-tagged = project-local writes plus global recall visibility",
-			options: [
-				{
-					value: "global",
-					label: "Global",
-					description: "One shared Mnemopi bank for every project",
-				},
-				{
-					value: "per-project",
-					label: "Per project",
-					description: "Project-local Mnemopi bank per cwd basename",
-				},
-				{
-					value: "per-project-tagged",
-					label: "Per project (tagged)",
-					description: "Write to a project-local bank but merge project + shared recall results",
-				},
-			],
-			condition: "mnemopiActive",
-		},
-	},
-	"mnemopi.embeddingVariant": {
-		type: "enum",
-		values: ["en", "multilingual"] as const,
-		default: "en",
-		ui: {
-			tab: "memory",
-			group: "Mnemopi",
-			label: "Embedding variant",
-			description:
-				"Local embedding model family. en = stronger English model; multilingual = cross-language model. Changing this rebuilds existing memory embeddings on next start.",
-			options: [
-				{
-					value: "en",
-					label: "English (bge-base-en-v1.5)",
-					description: "BAAI/bge-base-en-v1.5 (768d), English-only",
-				},
-				{
-					value: "multilingual",
-					label: "Multilingual (multilingual-e5-large)",
-					description: "intfloat/multilingual-e5-large (1024d), cross-language recall",
-				},
-			],
-			condition: "mnemopiActive",
-		},
-	},
-	"mnemopi.autoRecall": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "memory",
-			group: "Mnemopi",
-			label: "Mnemopi Auto Recall",
-			description: "Recall local memories into the first turn of each session",
-			condition: "mnemopiActive",
-		},
-	},
-	"mnemopi.autoRetain": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "memory",
-			group: "Mnemopi",
-			label: "Mnemopi Auto Retain",
-			description: "Retain completed conversation turns into local Mnemopi memory",
-			condition: "mnemopiActive",
-		},
-	},
-	"mnemopi.polyphonicRecall": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "memory",
-			group: "Mnemopi",
-			label: "Mnemopi Polyphonic Recall",
-			description: "Enable 4-voice recall (vector, graph, fact, temporal) fused with reciprocal rank fusion",
-			condition: "mnemopiActive",
-		},
-	},
-	"mnemopi.enhancedRecall": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "memory",
-			group: "Mnemopi",
-			label: "Mnemopi Enhanced Recall",
-			description: "Enable the tiered query result cache for repeated and similar recall queries",
-			condition: "mnemopiActive",
-		},
-	},
-	"mnemopi.proactiveLinking": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "memory",
-			group: "Mnemopi",
-			label: "Mnemopi Proactive Linking",
-			description:
-				"Ingest new memories into the episodic graph as they are stored, linking them to related entities and memories",
-			condition: "mnemopiActive",
-		},
-	},
-	"mnemopi.noEmbeddings": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "memory",
-			group: "Mnemopi",
-			label: "Mnemopi Disable Embeddings",
-			description: "Force deterministic FTS-only recall instead of vector embeddings",
-			condition: "mnemopiActive",
-		},
-	},
-	"mnemopi.embeddingModel": {
-		type: "string",
-		default: undefined,
-		ui: {
-			tab: "memory",
-			group: "Mnemopi",
-			label: "Mnemopi Embedding Model",
-			description:
-				"Advanced: explicit embedding model id that overrides the variant. Leave empty to use mnemopi.embeddingVariant.",
-			condition: "mnemopiActive",
-		},
-	},
-	"mnemopi.embeddingApiUrl": {
-		type: "string",
-		default: undefined,
-		ui: {
-			tab: "memory",
-			group: "Mnemopi",
-			label: "Mnemopi Embedding API URL",
-			description: "Optional OpenAI-compatible embedding endpoint passed to Mnemopi",
-			condition: "mnemopiActive",
-		},
-	},
-	"mnemopi.embeddingApiKey": {
-		type: "string",
-		credential: true,
-		default: undefined,
-		ui: {
-			tab: "memory",
-			group: "Mnemopi",
-			label: "Mnemopi Embedding API Key",
-			description: "Optional embedding API key passed to Mnemopi",
-			condition: "mnemopiActive",
-		},
-	},
-	"mnemopi.llmMode": {
-		type: "enum",
-		values: ["none", "smol", "remote"] as const,
-		default: "smol",
-		ui: {
-			tab: "memory",
-			group: "Mnemopi",
-			label: "Mnemopi LLM Mode",
-			description:
-				"Use no LLM, the online tiny model (the TINY role from /models, else @smol), or a remote OpenAI-compatible endpoint",
-			condition: "mnemopiActive",
-			options: [
-				{ value: "none", label: "None", description: "Disable Mnemopi LLM-backed extraction" },
-				{
-					value: "smol",
-					label: "Online (tiny)",
-					description: "Use the online tiny model (the TINY role from /models, else @smol)",
-				},
-				{ value: "remote", label: "Remote", description: "Use the Mnemopi remote LLM settings below" },
-			],
-		},
-	},
-	"mnemopi.llmBaseUrl": {
-		type: "string",
-		default: undefined,
-		ui: {
-			tab: "memory",
-			group: "Mnemopi",
-			label: "Mnemopi LLM Base URL",
-			description: "Optional OpenAI-compatible LLM endpoint for Mnemopi remote mode",
-			condition: "mnemopiActive",
-		},
-	},
-	"mnemopi.llmApiKey": {
-		type: "string",
-		credential: true,
-		default: undefined,
-		ui: {
-			tab: "memory",
-			group: "Mnemopi",
-			label: "Mnemopi LLM API Key",
-			description: "Optional LLM API key for Mnemopi remote mode",
-			condition: "mnemopiActive",
-		},
-	},
-	"mnemopi.llmModel": {
-		type: "string",
-		default: undefined,
-		ui: {
-			tab: "memory",
-			group: "Mnemopi",
-			label: "Mnemopi LLM Model",
-			description: "Optional LLM model name for Mnemopi remote mode",
-			condition: "mnemopiActive",
-		},
-	},
-	"mnemopi.retainEveryNTurns": { type: "number", default: 4 },
-	"mnemopi.recallLimit": { type: "number", default: 8 },
-	"mnemopi.recallContextTurns": { type: "number", default: 3 },
-	"mnemopi.recallMaxQueryChars": { type: "number", default: 4000 },
-	"mnemopi.injectionTokenLimit": { type: "number", default: 5000 },
-	"mnemopi.debug": { type: "boolean", default: false },
-
-	// Hindsight (https://hindsight.vectorize.io)
-	"hindsight.apiUrl": {
-		type: "string",
-		default: "http://localhost:8888",
-		ui: {
-			tab: "memory",
-			group: "Hindsight",
-			label: "Hindsight API URL",
-			description: "Hindsight server URL (Cloud or self-hosted)",
-			condition: "hindsightActive",
-		},
-	},
-
-	"hindsight.apiToken": {
-		type: "string",
-		credential: true,
-		default: undefined,
-		ui: {
-			tab: "memory",
-			group: "Hindsight",
-			label: "Hindsight API Token",
-			description: "Bearer token for authenticated Hindsight servers",
-			condition: "hindsightActive",
-		},
-	},
-
-	"hindsight.bankId": {
-		type: "string",
-		default: undefined,
-		ui: {
-			tab: "memory",
-			group: "Hindsight",
-			label: "Hindsight Bank ID",
-			description: "Memory bank identifier (default: project name)",
-			condition: "hindsightActive",
-		},
-	},
-
-	"hindsight.bankIdPrefix": { type: "string", default: undefined },
-	"hindsight.scoping": {
-		type: "enum",
-		values: ["global", "per-project", "per-project-tagged"] as const,
-		default: "per-project-tagged",
-		ui: {
-			tab: "memory",
-			group: "Hindsight",
-			label: "Hindsight Scoping",
-			description:
-				"global = one shared bank; per-project = isolated bank per cwd; per-project-tagged = shared bank with project tags so global + project memories merge on recall",
-			options: [
-				{
-					value: "global",
-					label: "Global",
-					description: "One shared bank — every project sees the same memories",
-				},
-				{
-					value: "per-project",
-					label: "Per project",
-					description: "Isolated bank per cwd basename — projects cannot see each other's memories",
-				},
-				{
-					value: "per-project-tagged",
-					label: "Per project (tagged)",
-					description:
-						"Shared bank, retains tagged with project:<cwd>. Recall surfaces project + untagged global memories together",
-				},
-			],
-			condition: "hindsightActive",
-		},
-	},
-	"hindsight.bankMission": { type: "string", default: undefined },
-	"hindsight.retainMission": { type: "string", default: undefined },
-
-	"hindsight.autoRecall": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "memory",
-			group: "Hindsight",
-			label: "Hindsight Auto Recall",
-			description: "Recall memories on the first turn of each session",
-			condition: "hindsightActive",
-		},
-	},
-	"hindsight.autoRetain": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "memory",
-			group: "Hindsight",
-			label: "Hindsight Auto Retain",
-			description: "Retain transcript every N turns and at session boundaries",
-			condition: "hindsightActive",
-		},
-	},
-
-	"hindsight.retainMode": {
-		type: "enum",
-		values: ["full-session", "last-turn"] as const,
-		default: "full-session",
-		ui: {
-			tab: "memory",
-			group: "Hindsight",
-			label: "Hindsight Retain Mode",
-			description: "full-session = upsert one document per session, last-turn = chunked",
-			options: [
-				{
-					value: "full-session",
-					label: "Full session",
-					description: "Upsert one document per session (recommended)",
-				},
-				{ value: "last-turn", label: "Last turn", description: "Chunked retention sliced by turn boundaries" },
-			],
-			condition: "hindsightActive",
-		},
-	},
-	"hindsight.retainEveryNTurns": { type: "number", default: 3 },
-	"hindsight.retainOverlapTurns": { type: "number", default: 2 },
-	"hindsight.retainContext": { type: "string", default: "omp" },
-
-	"hindsight.recallBudget": {
-		type: "enum",
-		values: ["low", "mid", "high"] as const,
-		default: "mid",
-	},
-	"hindsight.recallMaxTokens": { type: "number", default: 1024 },
-	"hindsight.recallContextTurns": { type: "number", default: 1 },
-	"hindsight.recallMaxQueryChars": { type: "number", default: 800 },
-	"hindsight.recallTypes": { type: "array", default: HINDSIGHT_RECALL_TYPES_DEFAULT },
-
-	"hindsight.debug": { type: "boolean", default: false },
-
-	"hindsight.requestTimeoutMs": { type: "number", default: 30_000 },
-	"hindsight.reflectTimeoutMs": { type: "number", default: 120_000 },
-	"hindsight.recallTimeoutMs": { type: "number", default: 30_000 },
-	"hindsight.retainTimeoutMs": { type: "number", default: 60_000 },
-
-	"hindsight.mentalModelsEnabled": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "memory",
-			group: "Hindsight",
-			label: "Hindsight Mental Models",
-			description:
-				"Read curated reflect summaries (mental models) into developer instructions at boot. Loads existing models on the bank — does not write. Pair with hindsight.mentalModelAutoSeed to also auto-create the built-in seed set.",
-			condition: "hindsightActive",
-		},
-	},
-	"hindsight.mentalModelAutoSeed": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "memory",
-			group: "Hindsight",
-			label: "Hindsight Mental Model Auto-Seed",
-			description:
-				"At session start, create any built-in mental models (project-conventions, project-decisions, user-preferences) that do not yet exist on the bank.",
-			condition: "hindsightActive",
-		},
-	},
-	"hindsight.mentalModelRefreshIntervalMs": { type: "number", default: 5 * 60 * 1000 },
-	"hindsight.mentalModelMaxRenderChars": { type: "number", default: 16_000 },
-
-	// TTSR
 	"ttsr.enabled": {
 		type: "boolean",
 		default: true,
@@ -5110,7 +4607,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Tiny Model",
 			label: "Tiny Model Device",
 			description:
-				"ONNX execution provider for local tiny models (titles + memory). Default uses CPU-only inference. The PI_TINY_DEVICE env var overrides this.",
+				"ONNX execution provider for local tiny models (titles + completion). Default uses CPU-only inference. The PI_TINY_DEVICE env var overrides this.",
 			options: TINY_MODEL_DEVICE_SETTING_OPTIONS,
 		},
 	},
@@ -5125,20 +4622,6 @@ export const SETTINGS_SCHEMA = {
 			description:
 				"ONNX quantization/precision for local tiny models. Default uses each model's shipped dtype (q4); lower precision is faster, higher is more faithful. The PI_TINY_DTYPE env var overrides this.",
 			options: TINY_MODEL_DTYPE_SETTING_OPTIONS,
-		},
-	},
-	"providers.memoryModel": {
-		type: "enum",
-		values: TINY_MEMORY_MODEL_VALUES,
-		default: ONLINE_MEMORY_MODEL_KEY,
-		ui: {
-			tab: "memory",
-			group: "General",
-			label: "Memory Model",
-			description:
-				"Mnemopi LLM for fact extraction + consolidation: online (the TINY role from /models, else smol/remote) by default, or a local on-device model",
-			condition: "mnemopiActive",
-			options: TINY_MEMORY_MODEL_OPTIONS,
 		},
 	},
 
@@ -5200,8 +4683,8 @@ export const SETTINGS_SCHEMA = {
 	},
 	"providers.unexpectedStopModel": {
 		type: "enum",
-		values: TINY_MEMORY_MODEL_VALUES,
-		default: ONLINE_MEMORY_MODEL_KEY,
+		values: TINY_COMPLETION_MODEL_VALUES,
+		default: ONLINE_COMPLETION_MODEL_KEY,
 		ui: {
 			tab: "providers",
 			group: "Tiny Model",
@@ -5209,7 +4692,7 @@ export const SETTINGS_SCHEMA = {
 			description:
 				"Classifier for Smart unexpected-stop detection: online (the TINY role from /models, else smol) by default, or a local on-device model.",
 			condition: "unexpectedStopSmart",
-			options: TINY_MEMORY_MODEL_OPTIONS,
+			options: TINY_COMPLETION_MODEL_OPTIONS,
 		},
 	},
 
@@ -5695,24 +5178,6 @@ export interface RetrySettings {
 	usageReservePolicy: "confirm" | "auto" | "fail-closed";
 }
 
-export interface MemoriesSettings {
-	enabled: boolean;
-	maxRolloutsPerStartup: number;
-	maxRolloutAgeDays: number;
-	minRolloutIdleHours: number;
-	threadScanLimit: number;
-	maxRawMemoriesForGlobal: number;
-	stage1Concurrency: number;
-	stage1LeaseSeconds: number;
-	stage1RetryDelaySeconds: number;
-	phase2LeaseSeconds: number;
-	phase2RetryDelaySeconds: number;
-	phase2HeartbeatSeconds: number;
-	rolloutPayloadPercent: number;
-	fallbackTokenLimit: number;
-	summaryInjectionTokenLimit: number;
-}
-
 export interface TodoCompletionSettings {
 	enabled: boolean;
 	maxReminders: number;
@@ -5823,7 +5288,6 @@ export interface GroupTypeMap {
 	title: TitleSettings;
 	contextPromotion: ContextPromotionSettings;
 	retry: RetrySettings;
-	memories: MemoriesSettings;
 	branchSummary: BranchSummarySettings;
 	skills: SkillsSettings;
 	commit: CommitSettings;

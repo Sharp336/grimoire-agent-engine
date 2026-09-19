@@ -11,7 +11,7 @@ import { loadCapability } from "../../discovery";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
 import type { CustomMessagePayload } from "../../session/messages";
-import * as typebox from "../legacy-typebox";
+import * as typebox from "@oh-my-pi/omptype/typebox";
 import { resolvePath, withHostGuard } from "../utils";
 import { execCommand } from "./runner";
 import type { ExecOptions, HookAPI, HookFactory, HookMessageRenderer, RegisteredCommand } from "./types";

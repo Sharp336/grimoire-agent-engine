@@ -94,7 +94,6 @@ async function showHelp(config: CliConfig<CommandMetadata>): Promise<void> {
  */
 async function runSmokeTest(): Promise<void> {
 	const { smokeTestTinyTitleWorker } = await import("./tiny/title-client");
-	const { smokeTestMnemopiEmbedWorker } = await import("./mnemopi/embed-client");
 	const { smokeTestJsEvalWorker } = await import("./eval/js/context-manager");
 	// Other smoke dependencies stay lazy so normal CLI startup does not load their worker clients.
 	const { smokeTestDaemonBroker } = await import("./launch/client");
@@ -105,7 +104,6 @@ async function runSmokeTest(): Promise<void> {
 	await smokeTestTinyTitleWorker();
 	await smokeTestJsEvalWorker();
 	await smokeTestComputerWorker();
-	await smokeTestMnemopiEmbedWorker();
 	await smokeTestDaemonBroker();
 	await smokeTestLspMux();
 	await smokeTestBlobBroker();
@@ -117,7 +115,6 @@ const TINY_WORKER_ARG = "__omp_worker_tiny_inference";
 const TAB_WORKER_ARG = "__omp_worker_tab";
 const JS_EVAL_WORKER_ARG = "__omp_worker_js_eval";
 const JS_EVAL_PROCESS_ARG = "__omp_worker_js_eval_process";
-const MNEMOPI_EMBED_WORKER_ARG = "__omp_worker_mnemopi_embed";
 
 async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === TINY_WORKER_ARG) {
@@ -154,11 +151,6 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 			transport => startJsEvalProcess(transport, interceptUnhandledRejections),
 			{ rethrowConnectedSendErrors: true },
 		);
-		return true;
-	}
-	if (arg === MNEMOPI_EMBED_WORKER_ARG) {
-		const { startMnemopiEmbedWorker } = await import("./mnemopi/embed-worker");
-		await runIpcSubprocessWorker(startMnemopiEmbedWorker);
 		return true;
 	}
 	if (arg === TERMINAL_OUTPUT_WORKER_ARG) {

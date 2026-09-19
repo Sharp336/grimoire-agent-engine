@@ -15,7 +15,6 @@ export * from "./issue-pr-protocol";
 export * from "./json-query";
 export * from "./local-protocol";
 export * from "./mcp-protocol";
-export * from "./memory-protocol";
 export * from "./omp-protocol";
 export * from "./parse";
 export * from "./router";

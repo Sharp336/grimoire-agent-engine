@@ -385,7 +385,6 @@ export interface InteractiveModeContext {
 	handleShakeCommand(mode: ShakeMode): Promise<void>;
 	handleMoveCommand(targetPath?: string): Promise<void>;
 	handleRenameCommand(title: string): Promise<void>;
-	handleMemoryCommand(text: string): Promise<void>;
 	executeCompaction(
 		customInstructionsOrOptions?: string | CompactOptions,
 		isAuto?: boolean,

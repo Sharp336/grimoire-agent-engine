@@ -41,7 +41,7 @@ export const launchHelp = {
 		cwd: Flags.string({ description: "Directory to start in (overrides the launch cwd)" }),
 		mode: Flags.string({
 			description: "Output mode: text (default), json, rpc, or rpc-ui",
-			options: ["text", "json", "rpc", "acp", "rpc-ui"],
+			options: ["text", "json", "rpc", "rpc-ui"],
 		}),
 		config: Flags.string({
 			description: "Load an extra config.yml-style overlay for this run (repeatable)",

@@ -26,8 +26,8 @@ import difficultyLocalPrompt from "../prompts/system/auto-thinking-difficulty-lo
 import { clampAutoThinkingEffort } from "../thinking";
 import { preprocessTinyMessage } from "../tiny/message-preproc";
 import {
-	isTinyMemoryLocalModelKey,
-	isTinyMemoryReasoningModelKey,
+	isTinyCompletionLocalModelKey,
+	isTinyCompletionReasoningModelKey,
 	ONLINE_AUTO_THINKING_MODEL_KEY,
 } from "../tiny/models";
 import { tinyModelClient } from "../tiny/title-client";
@@ -157,10 +157,10 @@ async function classifyOnline(input: string, deps: ClassifyDifficultyDeps, ceili
 }
 
 async function classifyLocal(input: string, modelKey: string, deps: ClassifyDifficultyDeps): Promise<Effort> {
-	if (!isTinyMemoryLocalModelKey(modelKey)) {
+	if (!isTinyCompletionLocalModelKey(modelKey)) {
 		throw new Error(`auto-thinking: unsupported local classifier model: ${modelKey}`);
 	}
-	const maxTokens = isTinyMemoryReasoningModelKey(modelKey)
+	const maxTokens = isTinyCompletionReasoningModelKey(modelKey)
 		? Math.max(LOCAL_ANSWER_MAX_TOKENS, LOCAL_REASONING_MAX_TOKENS)
 		: LOCAL_ANSWER_MAX_TOKENS;
 	const builtPrompt = prompt.render(difficultyLocalPrompt, { prompt: input });

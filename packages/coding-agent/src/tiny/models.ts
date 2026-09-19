@@ -108,18 +108,18 @@ export function getTinyTitleModelSpec(key: TinyTitleLocalModelKey): (typeof TINY
 	return spec;
 }
 
-/** Default memory model: the online path (the configured smol / remote LLM; no local download). */
-export const ONLINE_MEMORY_MODEL_KEY = "online";
-/** Recommended local model for memory tasks when none is named. */
-export const DEFAULT_MEMORY_LOCAL_MODEL_KEY = "lfm2-1.2b";
+/** Default completion model: the online path (the configured smol / remote LLM; no local download). */
+export const ONLINE_COMPLETION_MODEL_KEY = "online";
+/** Recommended local model for completion tasks when none is named. */
+export const DEFAULT_COMPLETION_LOCAL_MODEL_KEY = "lfm2-1.2b";
 
 /**
- * Local models for Mnemopi memory tasks (fact extraction + consolidation).
+ * Local models for native completion and classification tasks.
  * These are larger (1B-1.7B) than the title models: structured extraction and
  * faithful summarization need more capacity than 3-6 word titles. All q4.
  * Ranking/recipe rationale lives in docs/local-models.md.
  */
-export const TINY_MEMORY_LOCAL_MODELS = [
+export const TINY_COMPLETION_LOCAL_MODELS = [
 	{
 		key: "qwen3-1.7b",
 		repo: "onnx-community/Qwen3-1.7B-ONNX",
@@ -167,8 +167,8 @@ export const TINY_MEMORY_LOCAL_MODELS = [
 	},
 ] as const satisfies readonly TinyTitleLocalModelSpec[];
 
-export const TINY_MEMORY_MODEL_VALUES = [
-	ONLINE_MEMORY_MODEL_KEY,
+export const TINY_COMPLETION_MODEL_VALUES = [
+	ONLINE_COMPLETION_MODEL_KEY,
 	"qwen3-1.7b",
 	"llama3.2:3b",
 	"gemma-3-1b",
@@ -176,59 +176,64 @@ export const TINY_MEMORY_MODEL_VALUES = [
 	"lfm2-1.2b",
 ] as const;
 
-export type TinyMemoryModelKey = (typeof TINY_MEMORY_MODEL_VALUES)[number];
-export type TinyMemoryLocalModelKey = (typeof TINY_MEMORY_LOCAL_MODELS)[number]["key"];
+export type TinyCompletionModelKey = (typeof TINY_COMPLETION_MODEL_VALUES)[number];
+export type TinyCompletionLocalModelKey = (typeof TINY_COMPLETION_LOCAL_MODELS)[number]["key"];
 
-type MissingTinyMemoryModelValue = Exclude<
-	typeof ONLINE_MEMORY_MODEL_KEY | TinyMemoryLocalModelKey,
-	TinyMemoryModelKey
+type MissingTinyCompletionModelValue = Exclude<
+	typeof ONLINE_COMPLETION_MODEL_KEY | TinyCompletionLocalModelKey,
+	TinyCompletionModelKey
 >;
-type ExtraTinyMemoryModelValue = Exclude<TinyMemoryModelKey, typeof ONLINE_MEMORY_MODEL_KEY | TinyMemoryLocalModelKey>;
-const TINY_MEMORY_MODEL_VALUES_MATCH_REGISTRY: MissingTinyMemoryModelValue extends never
-	? ExtraTinyMemoryModelValue extends never
+type ExtraTinyCompletionModelValue = Exclude<
+	TinyCompletionModelKey,
+	typeof ONLINE_COMPLETION_MODEL_KEY | TinyCompletionLocalModelKey
+>;
+const TINY_COMPLETION_MODEL_VALUES_MATCH_REGISTRY: MissingTinyCompletionModelValue extends never
+	? ExtraTinyCompletionModelValue extends never
 		? true
 		: never
 	: never = true;
-void TINY_MEMORY_MODEL_VALUES_MATCH_REGISTRY;
+void TINY_COMPLETION_MODEL_VALUES_MATCH_REGISTRY;
 
-export const TINY_MEMORY_MODEL_OPTIONS = [
+export const TINY_COMPLETION_MODEL_OPTIONS = [
 	{
-		value: ONLINE_MEMORY_MODEL_KEY,
+		value: ONLINE_COMPLETION_MODEL_KEY,
 		label: "Online (TINY role, else @smol)",
 		description:
 			"Use the online model: the TINY role from /models when set, otherwise @smol. No local model download or on-device inference.",
 	},
-	...TINY_MEMORY_LOCAL_MODELS.map(model => ({
+	...TINY_COMPLETION_LOCAL_MODELS.map(model => ({
 		value: model.key,
 		label: model.label,
 		description: model.description,
 	})),
-] satisfies ReadonlyArray<{ value: TinyMemoryModelKey; label: string; description: string }>;
+] satisfies ReadonlyArray<{ value: TinyCompletionModelKey; label: string; description: string }>;
 
-export function isTinyMemoryLocalModelKey(value: string): value is TinyMemoryLocalModelKey {
-	return TINY_MEMORY_LOCAL_MODELS.some(model => model.key === value);
+export function isTinyCompletionLocalModelKey(value: string): value is TinyCompletionLocalModelKey {
+	return TINY_COMPLETION_LOCAL_MODELS.some(model => model.key === value);
 }
 
-export function getTinyMemoryModelSpec(key: TinyMemoryLocalModelKey): (typeof TINY_MEMORY_LOCAL_MODELS)[number] {
-	const spec = TINY_MEMORY_LOCAL_MODELS.find(model => model.key === key);
+export function getTinyCompletionModelSpec(
+	key: TinyCompletionLocalModelKey,
+): (typeof TINY_COMPLETION_LOCAL_MODELS)[number] {
+	const spec = TINY_COMPLETION_LOCAL_MODELS.find(model => model.key === key);
 	if (!spec) throw new Error(`Unknown tiny memory model: ${key}`);
 	return spec;
 }
 
 /** Return whether a memory local model may emit reasoning tokens before answers. */
-export function isTinyMemoryReasoningModelKey(key: TinyMemoryLocalModelKey): boolean {
-	const spec = getTinyMemoryModelSpec(key);
+export function isTinyCompletionReasoningModelKey(key: TinyCompletionLocalModelKey): boolean {
+	const spec = getTinyCompletionModelSpec(key);
 	return "reasoning" in spec && spec.reasoning === true;
 }
 
 /** Any local model key (title or memory), used by the shared inference worker. */
-export type TinyLocalModelKey = TinyTitleLocalModelKey | TinyMemoryLocalModelKey;
+export type TinyLocalModelKey = TinyTitleLocalModelKey | TinyCompletionLocalModelKey;
 
 /** Resolve a local model spec by key across both the title and memory registries. */
 export function getTinyLocalModelSpec(key: string): TinyTitleLocalModelSpec | undefined {
 	return (
 		TINY_TITLE_LOCAL_MODELS.find(model => model.key === key) ??
-		TINY_MEMORY_LOCAL_MODELS.find(model => model.key === key)
+		TINY_COMPLETION_LOCAL_MODELS.find(model => model.key === key)
 	);
 }
 
@@ -239,7 +244,7 @@ export function isTinyLocalModelKey(value: string): value is TinyLocalModelKey {
 /** Combined local model registry (title + memory) for the shared tiny-models CLI. */
 export const TINY_LOCAL_MODELS = [
 	...TINY_TITLE_LOCAL_MODELS,
-	...TINY_MEMORY_LOCAL_MODELS,
+	...TINY_COMPLETION_LOCAL_MODELS,
 ] as const satisfies readonly TinyTitleLocalModelSpec[];
 
 /**
@@ -249,9 +254,9 @@ export const TINY_LOCAL_MODELS = [
  * 1B+ memory models classify coding difficulty far more reliably than the
  * sub-1B title models.
  */
-export const ONLINE_AUTO_THINKING_MODEL_KEY = ONLINE_MEMORY_MODEL_KEY;
-export const AUTO_THINKING_MODEL_VALUES = TINY_MEMORY_MODEL_VALUES;
-export type AutoThinkingModelKey = TinyMemoryModelKey;
+export const ONLINE_AUTO_THINKING_MODEL_KEY = ONLINE_COMPLETION_MODEL_KEY;
+export const AUTO_THINKING_MODEL_VALUES = TINY_COMPLETION_MODEL_VALUES;
+export type AutoThinkingModelKey = TinyCompletionModelKey;
 
 export const AUTO_THINKING_MODEL_OPTIONS = [
 	{
@@ -260,7 +265,7 @@ export const AUTO_THINKING_MODEL_OPTIONS = [
 		description:
 			"Classify prompt difficulty online with the TINY role model (set one in /models) or @smol; no local download or on-device inference.",
 	},
-	...TINY_MEMORY_LOCAL_MODELS.map(model => ({
+	...TINY_COMPLETION_LOCAL_MODELS.map(model => ({
 		value: model.key,
 		label: model.label,
 		description: model.description,

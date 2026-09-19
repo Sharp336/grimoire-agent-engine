@@ -30,8 +30,8 @@ import * as PiCodingAgent from "../../index";
 import type { CustomMessagePayload } from "../../session/messages";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import { EventBus } from "../../utils/event-bus";
-import * as TypeBox from "../legacy-typebox";
-import { installLegacyPiSpecifierShim, loadLegacyPiModule } from "../plugins/legacy-pi-compat";
+import * as TypeBox from "@oh-my-pi/omptype/typebox";
+import { installNativeModuleResolver, loadNativeModule } from "../plugins/native-module";
 import { getAllPluginExtensionPaths } from "../plugins/loader";
 
 import { resolvePath, withHostGuard } from "../utils";
@@ -52,7 +52,7 @@ import type {
 	ToolInfo,
 } from "./types";
 
-installLegacyPiSpecifierShim();
+installNativeModuleResolver();
 
 type HandlerFn = (...args: unknown[]) => Promise<unknown>;
 type LoadedExtensionModule = ExtensionFactory | { default?: ExtensionFactory };
@@ -382,7 +382,7 @@ async function runExtensionFactory(
 async function importExtensionModule(extensionPath: string, cwd: string): Promise<PreparedExtension> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
 	try {
-		const module = (await withHostGuard(() => loadLegacyPiModule(resolvedPath))) as LoadedExtensionModule;
+		const module = (await withHostGuard(() => loadNativeModule(resolvedPath))) as LoadedExtensionModule;
 		const factory = getExtensionFactory(module);
 
 		if (typeof factory !== "function") {

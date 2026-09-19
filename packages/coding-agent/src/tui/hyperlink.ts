@@ -8,13 +8,7 @@
 import * as url from "node:url";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { isSettingsInitialized, settings } from "../config/settings";
-import {
-	LocalProtocolHandler,
-	memoryRootsFromRegistry,
-	parseInternalUrl,
-	resolveLocalUrlToPath,
-	resolveMemoryUrlToPath,
-} from "../internal-urls";
+import { LocalProtocolHandler, resolveLocalUrlToPath } from "../internal-urls";
 
 const OSC = "\x1b]";
 const ST = "\x1b\\";
@@ -158,18 +152,6 @@ export function tryResolveInternalUrlSync(input: string): string | undefined {
 			const opts = LocalProtocolHandler.resolveOptions();
 			if (!opts) return undefined;
 			return resolveLocalUrlToPath(input, opts);
-		}
-		if (input.startsWith("memory://")) {
-			const url = parseInternalUrl(input);
-			const roots = memoryRootsFromRegistry();
-			for (const root of roots) {
-				try {
-					return resolveMemoryUrlToPath(url, root);
-				} catch {
-					// Try the next root; some sessions may not have this namespace mounted.
-				}
-			}
-			return undefined;
 		}
 	} catch {
 		return undefined;

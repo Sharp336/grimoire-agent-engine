@@ -512,11 +512,6 @@ export class SelectorController {
 					this.ctx.showError(`Failed to apply xd:// prompt docs setting: ${err}`);
 				});
 				break;
-			case "memory.backend":
-				void this.ctx.session.applyMemoryBackend().catch(err => {
-					this.ctx.showError(`Failed to apply memory backend: ${err}`);
-				});
-				break;
 			case "inspect_image.mode":
 				void this.ctx.session.applyInspectImageModeChange().catch(err => {
 					this.ctx.showError(`Failed to apply vision mode: ${err}`);

@@ -105,27 +105,6 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
-	hindsightActive: () => {
-		try {
-			return Settings.instance.get("memory.backend") === "hindsight";
-		} catch {
-			return false;
-		}
-	},
-	mnemopiActive: () => {
-		try {
-			return Settings.instance.get("memory.backend") === "mnemopi";
-		} catch {
-			return false;
-		}
-	},
-	autolearnActive: () => {
-		try {
-			return Settings.instance.get("autolearn.enabled") === true;
-		} catch {
-			return false;
-		}
-	},
 	autoThinkingActive: () => {
 		try {
 			return Settings.instance.get("defaultThinkingLevel") === "auto";

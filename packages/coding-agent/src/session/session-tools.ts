@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import type { Agent, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { isRecord, logger, prompt, stringProperty, untilAborted } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
@@ -14,9 +14,6 @@ import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
 import { type LocalProtocolOptions, XD_URL_PREFIX } from "../internal-urls";
 import { deduplicateMCPToolsByName } from "../mcp/tool-bridge";
-import { resolveMemoryBackend } from "../memory-backend/resolve";
-import { MEMORY_BACKEND_TOOL_NAMES } from "../memory-backend/tool-names";
-import type { MemoryBackendStartOptions } from "../memory-backend/types";
 import xdevMountNoticePrompt from "../prompts/system/xdev-mount-notice.md" with { type: "text" };
 import { usesCodexTaskPrompt } from "../task/prompt-policy";
 import { isMCPToolName, normalizeToolNames } from "../tools/builtin-names";
@@ -24,18 +21,9 @@ import { computerExposureMode } from "../tools/computer/exposure";
 import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isFilesystemSourcePath } from "../tools/path-utils";
 import { supportsExternalThinking } from "../tools/think";
-import { ToolAbortError, ToolError } from "../tools/tool-errors";
 import { isMountableUnderXdev, listXdevTools, type XdevState, xdevDocsFor, xdevEntries } from "../tools/xdev";
 import { type EditMode, resolveEditMode } from "../utils/edit-mode";
 import { type InspectImageMode, isInspectImageToolActive } from "../utils/inspect-image-mode";
-import {
-	extractPermissionLocations,
-	getPermissionIntent,
-	PERMISSION_OPTIONS,
-	PERMISSION_OPTIONS_BY_ID,
-	PERMISSION_REQUIRED_TOOLS,
-} from "./acp-permission-gate";
-import type { ClientBridge, ClientBridgePermissionOutcome } from "./client-bridge";
 import { buildToolNamespacesInfo, resolveCodeMode, type ToolNamespacesInfo } from "./code-mode";
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
@@ -49,17 +37,13 @@ export interface SessionToolsHost {
 	effectiveExtensionRoots(): EffectiveExtensionRoots;
 	modelRegistry: ModelRegistry;
 	extensionRunner(): ExtensionRunner | undefined;
-	clientBridge(): ClientBridge | undefined;
 	agentKind(): "main" | "sub";
 	isDisposed(): boolean;
 	isStreaming(): boolean;
 	queuedMessageCount(): number;
 	planModeEnabled(): boolean;
 	model(): Model | undefined;
-	memoryBackendSession(): MemoryBackendStartOptions["session"];
 	clearInheritedProviderPromptCacheKey(): void;
-	clearMemoryPromotionSnapshot(): void;
-	captureMemoryPromotionSnapshot(prompt: string[]): void;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	notifyCommandMetadataChanged(): void;
 	localProtocolOptions(): LocalProtocolOptions;
@@ -71,7 +55,6 @@ export interface SessionToolsHost {
 }
 
 interface SessionToolsOptions {
-	autoApprove?: boolean;
 	toolRegistry?: Map<string, AgentTool>;
 	createComputerTool?: () => Promise<AgentTool | null>;
 	/** Creates the private `think` scratchpad tool for runtime setting changes. */
@@ -193,7 +176,6 @@ interface XdevMountNoticeDetails {
 /** Owns tool registration, presentation, prompt rebuilding, skills, and permissions. */
 export class SessionTools {
 	readonly #host: SessionToolsHost;
-	#autoApprove: boolean;
 	#toolRegistry: Map<string, AgentTool>;
 	#createComputerTool: SessionToolsOptions["createComputerTool"];
 	#createThinkTool: SessionToolsOptions["createThinkTool"];
@@ -261,11 +243,9 @@ export class SessionTools {
 	#skillWarnings: SkillWarning[];
 	#skillsSettings: SkillsSettings | undefined;
 	#skillsReloadable: boolean;
-	#acpPermissionDecisions = new Map<string, "allow_always" | "reject_always">();
 
 	constructor(host: SessionToolsHost, options: SessionToolsOptions) {
 		this.#host = host;
-		this.#autoApprove = options.autoApprove === true;
 		this.#toolRegistry = options.toolRegistry ?? new Map();
 		this.#createComputerTool = options.createComputerTool;
 		this.#createThinkTool = options.createThinkTool;
@@ -295,7 +275,6 @@ export class SessionTools {
 		if (this.#xdev && this.#xdev.tools !== this.#toolRegistry) {
 			throw new Error("xd:// state must reference the canonical session tool map");
 		}
-		if (this.#xdev) this.#xdev.decorateExecution = tool => this.#wrapToolForAcpPermission(tool);
 		this.#setActiveToolNames = options.setActiveToolNames;
 		this.#baseSystemPrompt = options.baseSystemPrompt;
 		this.#skills = options.skills ?? [];
@@ -360,21 +339,6 @@ export class SessionTools {
 		return this.#skillsSettings;
 	}
 
-	/** Drops cached per-session ACP `allow_always`/`reject_always` decisions. */
-	clearAcpPermissionDecisions(): void {
-		this.#acpPermissionDecisions.clear();
-	}
-
-	/** Drops cached ACP decisions and re-wraps active tools after the client changes. */
-	refreshAcpPermissionGates(): void {
-		this.#acpPermissionDecisions.clear();
-		const activeTools = this.getActiveToolNames()
-			.map(name => this.#toolRegistry.get(name))
-			.filter((tool): tool is AgentTool => tool !== undefined)
-			.map(tool => this.#wrapToolForAcpPermission(tool));
-		this.#host.agent.setTools(activeTools);
-	}
-
 	#getActiveNonMCPToolNames(): string[] {
 		return this.getEnabledToolNames().filter(name => !isMCPToolName(name) && this.#toolRegistry.has(name));
 	}
@@ -410,7 +374,7 @@ export class SessionTools {
 	getToolForEvalBridge(name: string): AgentTool | undefined {
 		if (!this.getEnabledToolNames().includes(name)) return undefined;
 		const tool = this.#toolRegistry.get(name);
-		return tool ? this.#wrapToolForAcpPermission(tool) : undefined;
+		return tool;
 	}
 
 	/** Canonical allowlist advertised by and enforced for the eval bridge. */
@@ -663,125 +627,6 @@ export class SessionTools {
 		return this.getEnabledToolNames().filter(name => isMCPToolName(name) && this.#toolRegistry.has(name));
 	}
 
-	/**
-	 * Wrap a tool with a permission-gate proxy when an ACP client is connected.
-	 * Only wraps tools whose name is in PERMISSION_REQUIRED_TOOLS and only when
-	 * the bridge exposes `requestPermission`. No-ops for all other cases.
-	 *
-	 * When the user has explicitly opted into `yolo` / auto-approve behavior (via
-	 * the SDK/CLI `autoApprove` flag or a configured `tools.approvalMode: yolo`),
-	 * skips the gate unless the per-tool policy explicitly requires a prompt or
-	 * deny. The schema default is also `yolo`, so an explicit configuration or
-	 * explicit session flag is required: default-config ACP sessions keep the
-	 * client-side permission gate.
-	 */
-	#wrapToolForAcpPermission<T extends AgentTool>(tool: T): T {
-		const bridge = this.#host.clientBridge();
-		// Match the capability+method gating pattern used by read/write/bash.
-		if (!bridge?.capabilities.requestPermission || !bridge.requestPermission) return tool;
-		if (PERMISSION_REQUIRED_TOOLS[tool.name] !== true) return tool;
-		// Skip the gate only on explicit yolo opt-in; honour per-tool policies
-		// that require a prompt or deny (matching the normal approval wrapper).
-		if (this.#isExplicitAutoApproveMode()) {
-			const userPolicies = (this.#host.settings.get("tools.approval") ?? {}) as Record<string, unknown>;
-			const toolPolicy = userPolicies[tool.name];
-			if (!toolPolicy || toolPolicy === "allow") return tool;
-		}
-		return new Proxy(tool, {
-			get: (target, prop) => {
-				if (prop !== "execute") return target[prop as keyof T];
-				return async (
-					toolCallId: string,
-					args: unknown,
-					signal: AbortSignal | undefined,
-					onUpdate: never,
-					ctx: never,
-				) => {
-					const permissionIntent = getPermissionIntent(target.name, args);
-					if (!permissionIntent) {
-						return await target.execute(toolCallId, args as never, signal, onUpdate, ctx);
-					}
-					const command =
-						target.name === "bash" && args && typeof args === "object" && !Array.isArray(args)
-							? stringProperty(args, "command")
-							: undefined;
-					const commandContent = command
-						? [{ type: "content" as const, content: { type: "text" as const, text: `$ ${command}` } }]
-						: undefined;
-					// Short-circuit on persisted decisions.
-					const persisted = this.#acpPermissionDecisions.get(permissionIntent.cacheKey);
-					if (persisted === "allow_always") {
-						return await target.execute(toolCallId, args as never, signal, onUpdate, ctx);
-					}
-					if (persisted === "reject_always") {
-						throw new ToolError(`Tool call rejected by user (preference)`);
-					}
-					if (signal?.aborted) {
-						throw new ToolAbortError("Permission request cancelled");
-					}
-					type PermissionRaceResult =
-						| { kind: "permission"; outcome: ClientBridgePermissionOutcome }
-						| { kind: "aborted" };
-					const { promise: abortPromise, resolve: resolveAbort } = Promise.withResolvers<PermissionRaceResult>();
-					const onAbort = () => resolveAbort({ kind: "aborted" });
-					signal?.addEventListener("abort", onAbort, { once: true });
-					let raced: PermissionRaceResult;
-					try {
-						const permissionPromise = bridge.requestPermission!(
-							{
-								toolCallId,
-								toolName: target.name,
-								title: permissionIntent.title,
-								...(target.name === "bash" ? { kind: "execute" } : {}),
-								status: "pending",
-								rawInput: args,
-								...(commandContent ? { content: commandContent } : {}),
-								locations: extractPermissionLocations(
-									args,
-									this.#host.sessionManager.getCwd(),
-									permissionIntent.paths,
-								),
-							},
-							PERMISSION_OPTIONS,
-							signal,
-						).then(outcome => ({ kind: "permission" as const, outcome }));
-						raced = await Promise.race([permissionPromise, abortPromise]);
-					} finally {
-						signal?.removeEventListener("abort", onAbort);
-					}
-					if (raced.kind === "aborted" || signal?.aborted) {
-						throw new ToolAbortError("Permission request cancelled");
-					}
-					const outcome = raced.outcome;
-					if (outcome.outcome === "cancelled") {
-						throw new ToolAbortError("Permission request cancelled");
-					}
-					const selectedOption = PERMISSION_OPTIONS_BY_ID.get(outcome.optionId);
-					if (!selectedOption) {
-						throw new ToolError(`Tool permission response used unknown option ID: ${outcome.optionId}`);
-					}
-					if (selectedOption.kind === "allow_always") {
-						this.#acpPermissionDecisions.set(permissionIntent.cacheKey, "allow_always");
-					} else if (selectedOption.kind === "reject_always") {
-						this.#acpPermissionDecisions.set(permissionIntent.cacheKey, "reject_always");
-					}
-					if (selectedOption.kind === "reject_once" || selectedOption.kind === "reject_always") {
-						throw new ToolError(`Tool call rejected by user (${target.name})`);
-					}
-					return await target.execute(toolCallId, args as never, signal, onUpdate, ctx);
-				};
-			},
-		}) as T;
-	}
-
-	#isExplicitAutoApproveMode(): boolean {
-		return (
-			this.#autoApprove ||
-			(this.#host.settings.isConfigured("tools.approvalMode") &&
-				this.#host.settings.get("tools.approvalMode") === "yolo")
-		);
-	}
-
 	/** Applies an enabled tool set and reconciles its `xd://` partition. */
 	applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
 		return this.runToolRegistryMutation(
@@ -853,7 +698,7 @@ export class SessionTools {
 		const validToolNames: string[] = [];
 		for (const { name, tool } of selectedTools) {
 			if (mountNames.has(name)) continue;
-			tools.push(this.#wrapToolForAcpPermission(tool));
+			tools.push(tool);
 			validToolNames.push(name);
 		}
 
@@ -868,7 +713,7 @@ export class SessionTools {
 		if (transportNeeded && builtInWriteAvailable) {
 			const write = this.#toolRegistry.get("write");
 			if (write && !validToolNames.includes("write")) {
-				tools.push(this.#wrapToolForAcpPermission(write));
+				tools.push(write);
 				validToolNames.push("write");
 			}
 		} else if (
@@ -1004,7 +849,6 @@ export class SessionTools {
 			if (rebuiltSystemPrompt && rebuiltSignature) {
 				if (this.#lastAppliedToolSignature !== undefined) this.#host.clearInheritedProviderPromptCacheKey();
 				this.#baseSystemPrompt = rebuiltSystemPrompt;
-				this.#host.clearMemoryPromotionSnapshot();
 				this.#applyAgentSystemPrompt(this.#baseSystemPrompt);
 				this.#lastAppliedToolSignature = rebuiltSignature;
 				this.#promptModelKey = this.#currentPromptModelKey();
@@ -1291,29 +1135,6 @@ export class SessionTools {
 		}
 	}
 
-	/** Replaces memory-backend tools while preserving unrelated selections. */
-	replaceMemoryTools(tools: AgentTool[]): Promise<void> {
-		return this.runToolRegistryMutation(async () => {
-			const removed = new Set<string>(MEMORY_BACKEND_TOOL_NAMES.filter(name => this.#builtInToolNames.has(name)));
-			const nextActive = this.getEnabledToolNames().filter(name => !removed.has(name));
-			for (const name of removed) {
-				this.#toolRegistry.delete(name);
-				this.#builtInToolNames.delete(name);
-			}
-
-			for (const tool of tools) {
-				if (!MEMORY_BACKEND_TOOL_NAMES.some(name => name === tool.name) || this.#toolRegistry.has(tool.name)) {
-					continue;
-				}
-				const wrapped = this.#wrapRuntimeTool(tool);
-				this.#toolRegistry.set(wrapped.name, wrapped);
-				this.#builtInToolNames.add(wrapped.name);
-				nextActive.push(wrapped.name);
-			}
-			await this.#applyActiveToolsByName([...new Set(nextActive)]);
-		});
-	}
-
 	/**
 	 * Session-scoped enable/disable for the settings-gated `computer` tool.
 	 *
@@ -1527,7 +1348,6 @@ export class SessionTools {
 		if (this.#host.isDisposed()) return;
 		this.#baseSystemPrompt = built.systemPrompt;
 		this.#basePromptXdevNames = new Set(built.xdevCatalogNames);
-		this.#host.clearMemoryPromotionSnapshot();
 		if (
 			previousBaseSystemPrompt.length !== this.#baseSystemPrompt.length ||
 			previousBaseSystemPrompt.some((part, index) => part !== this.#baseSystemPrompt[index])
@@ -1543,46 +1363,6 @@ export class SessionTools {
 			.map(name => this.#toolRegistry.get(name))
 			.filter((tool): tool is AgentTool => tool != null);
 		this.#lastAppliedToolSignature = this.#computeAppliedToolSignature(promptToolNames, promptTools, directToolNames);
-	}
-
-	/** Applies one-turn memory prompt injection before an agent run. */
-	async buildSystemPromptForAgentStart(promptText: string): Promise<string[]> {
-		const backend = await resolveMemoryBackend(this.#host.settings);
-		if (!backend.beforeAgentStartPrompt) return this.#baseSystemPrompt;
-
-		try {
-			const injected = await backend.beforeAgentStartPrompt(this.#host.memoryBackendSession(), promptText);
-			if (!injected) return this.#baseSystemPrompt;
-
-			const previousBaseSystemPrompt = this.#baseSystemPrompt;
-			try {
-				await this.refreshBaseSystemPrompt();
-			} catch (refreshErr) {
-				logger.debug("Memory backend prompt refresh after beforeAgentStartPrompt failed", {
-					backend: backend.id,
-					error: String(refreshErr),
-				});
-			}
-
-			if (
-				this.#baseSystemPrompt.length !== previousBaseSystemPrompt.length ||
-				this.#baseSystemPrompt.some((part, index) => part !== previousBaseSystemPrompt[index])
-			) {
-				return this.#baseSystemPrompt;
-			}
-
-			this.#host.captureMemoryPromotionSnapshot(previousBaseSystemPrompt);
-			const stablePrompt = [...previousBaseSystemPrompt, injected];
-			this.#baseSystemPrompt = stablePrompt;
-			this.#applyAgentSystemPrompt(stablePrompt);
-			return stablePrompt;
-		} catch (err) {
-			logger.debug("Memory backend beforeAgentStartPrompt failed", {
-				backend: backend.id,
-				error: String(err),
-			});
-			return this.#baseSystemPrompt;
-		}
 	}
 
 	/**

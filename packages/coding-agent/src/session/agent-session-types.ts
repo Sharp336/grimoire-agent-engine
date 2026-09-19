@@ -40,12 +40,8 @@ import type { XdevState } from "../tools/xdev";
 import type { SessionLaunchSnapshot, SessionOriginalAttachment } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 
-/** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
-export const SHUTDOWN_CONSOLIDATE_BUDGET_MS = 1_500;
-
 /** Options controlling session disposal. */
 export interface AgentSessionDisposeOptions {
-	mnemopiConsolidateTimeoutMs?: number;
 	/**
 	 * Deadline for the settle/drain wait before the terminal memory release
 	 * (default 5s). The bounded-teardown paths (signal handlers, tests) may
@@ -199,12 +195,6 @@ export interface AgentSessionConfig {
 	/** Custom TypeScript slash commands. */
 	customCommands?: LoadedCustomCommand[];
 	skillsSettings?: SkillsSettings;
-	/** Agent directory used when changing memory backends in a live session. */
-	memoryAgentDir?: string;
-	/** Recursion depth used to suppress live backend replacement in subagents. */
-	memoryTaskDepth?: number;
-	/** Creates built-in memory tools for the current backend. */
-	createMemoryTools?: () => Promise<AgentTool[]>;
 	/** Creates the built-in `computer` tool for session-scoped runtime enablement (see {@link AgentSession.setComputerToolEnabled}). */
 	createComputerTool?: () => Promise<AgentTool | null>;
 	/** Creates the private `think` scratchpad tool for runtime setting changes. */

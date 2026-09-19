@@ -465,8 +465,6 @@ function buildExecutorOptions(
 		preloadedCustomToolPaths: restrictToolNames ? [] : session.customToolPaths,
 		localProtocolOptions,
 		parentArtifactManager: session.getArtifactManager?.() ?? undefined,
-		parentHindsightSessionState: session.getHindsightSessionState?.(),
-		parentMnemopiSessionState: session.getMnemopiSessionState?.(),
 		parentTelemetry: session.getTelemetry?.(),
 		parentEvalSessionId: request.shareEvalSession === false ? undefined : (session.getEvalSessionId?.() ?? undefined),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,

@@ -637,8 +637,6 @@ export interface BuildSystemPromptOptions {
 	secretsEnabled?: boolean;
 	/** Pre-loaded workspace tree (skips discovery if provided). May be a Promise to allow early kick-off. */
 	workspaceTree?: WorkspaceTree | Promise<WorkspaceTree>;
-	/** Whether the local memory://root summary is active. */
-	memoryRootEnabled?: boolean;
 	/** Whether the read-only security:// resource namespace is active. */
 	securityEnabled?: boolean;
 	/** Active model identifier (e.g. "anthropic/claude-opus-4") used by prompt policy and optionally surfaced. */
@@ -682,7 +680,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	if ($env.NULL_PROMPT === "true") {
 		return { systemPrompt: [] };
 	}
-
 	const {
 		customPrompt,
 		resolvedCustomPrompt: providedResolvedCustomPrompt,
@@ -709,7 +706,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		secretsEnabled = false,
 		workspaceTree: providedWorkspaceTree,
 		scoutAvailable = true,
-		memoryRootEnabled = false,
 		securityEnabled = false,
 		model,
 		includeModelInPrompt = true,
@@ -1004,7 +1000,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		scoutAvailable,
 		taskIrcEnabled,
 		secretsEnabled,
-		hasMemoryRoot: memoryRootEnabled,
 		securityEnabled,
 		hasObsidian: hasObsidian(),
 		includeWorkspaceTree,
