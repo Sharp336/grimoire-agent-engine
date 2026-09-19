@@ -8,9 +8,9 @@
 export const STORAGE_PROTOCOL_SCHEMA = "artel.storage.protocol.v1" as const;
 export const STORAGE_PROTOCOL_VERSION = "1.0" as const;
 /** Canonical Core schema revision consumed by this Engine adapter. */
-export const STORAGE_PROTOCOL_REVISION = 8 as const;
+export const STORAGE_PROTOCOL_REVISION = 9 as const;
 export const STORAGE_PROTOCOL_SCHEMA_HASH =
-	"sha256:2d8da049a00600324c082fc32004765fbfaaf2a855f988853c3575bdb42e1954" as const;
+	"sha256:0752791051853f4d769162a7cceb4927ca5bfe3b009b74f24f56a19c7e065a93" as const;
 
 export type StorageOperation = "write" | "barrier" | "read_range" | "read_context" | "receipt" | "health" | "metrics";
 
@@ -20,7 +20,29 @@ export type StoragePayload = Record<string, unknown>;
 export interface StorageDependency {
 	familyId: StorageId;
 	generationId: StorageId;
+	/** Safe integer prefix; zero is already satisfied. */
 	throughSeq: number;
+}
+
+export interface StorageLineage {
+	/** Immutable ancestry; nonzero parent cut must also be an explicit write dependency. */
+	parentGenerationId: StorageId;
+	forkCutSeq: number;
+	forkLeafId: StorageId | null;
+}
+
+/** Native properties remain lossless; storage watermarks/fences are server-owned. */
+export interface StorageNativeHead extends StoragePayload {
+	/** Omission selects the final new entry; null selects the before-first-entry position. */
+	leafId?: StorageId | null;
+	lineage?: StorageLineage;
+	contextAnchors?: StoragePayload;
+	appliedThroughSeq?: never;
+	durableThroughSeq?: never;
+	acceptedThroughSeq?: never;
+	incarnation?: never;
+	firstSeq?: never;
+	throughSeq?: never;
 }
 
 export interface StorageEntry {
@@ -37,13 +59,15 @@ export interface StorageWrite {
 	operationId: StorageId;
 	familyId: StorageId;
 	generationId: StorageId;
+	/** Next contiguous reserved sequence, or appliedThroughSeq + 1 with no queued predecessor. */
 	firstSeq: number;
 	entries: readonly StorageEntry[];
-	head?: StoragePayload;
+	head?: StorageNativeHead;
 	state?: StoragePayload;
 	effect?: StoragePayload;
 	durability: "buffered" | "required";
 	dependencies: readonly StorageDependency[];
+	/** JCS of the complete write, excluding only requestId/payloadHash; includes incarnation. */
 	payloadHash: `sha256:${string}`;
 	incarnation: number;
 }
@@ -63,7 +87,9 @@ export interface StorageRead {
 	familyId: StorageId;
 	generationId: StorageId;
 	leafId?: StorageId;
+	/** Frozen cut, defaults to durableThroughSeq. Zero selects the empty prefix. */
 	cutSeq?: number;
+	/** Opaque token bound to kind, scope, frozen cut, leaf and traversal position. */
 	cursor?: string;
 	maxRecords: number;
 	maxBytes: number;
@@ -78,15 +104,19 @@ export interface StorageReceiptRequest {
 	incarnation: number;
 }
 
-export interface StorageProtocolRequest {
+interface StorageRequestBase {
 	schema: typeof STORAGE_PROTOCOL_SCHEMA;
 	version: typeof STORAGE_PROTOCOL_VERSION;
-	operation: StorageOperation;
-	write?: StorageWrite;
-	barrier?: StorageBarrier;
-	read?: StorageRead;
-	receipt?: StorageReceiptRequest;
 }
+
+export type StorageRequestBody =
+	| { operation: "write"; write: StorageWrite; barrier?: never; read?: never; receipt?: never }
+	| { operation: "barrier"; barrier: StorageBarrier; write?: never; read?: never; receipt?: never }
+	| { operation: "read_range" | "read_context"; read: StorageRead; write?: never; barrier?: never; receipt?: never }
+	| { operation: "receipt"; receipt: StorageReceiptRequest; write?: never; barrier?: never; read?: never }
+	| { operation: "health" | "metrics"; write?: never; barrier?: never; read?: never; receipt?: never };
+
+export type StorageProtocolRequest = StorageRequestBase & StorageRequestBody;
 
 export type StorageAdmissionState = "rejected_before_admission" | "admitted_pending" | "admitted";
 export type StorageAppliedState = "not_applied" | "applied";
@@ -102,6 +132,7 @@ export type StorageOutcome =
 	| "stale_incarnation";
 
 export interface StorageReceipt {
+	/** Unique within familyId; generationId/incarnation retain the original write identity. */
 	operationId: StorageId;
 	familyId: StorageId;
 	generationId: StorageId;
@@ -137,8 +168,9 @@ export interface StorageResponseBase {
 	schema: StorageResponseSchema;
 	version: typeof STORAGE_PROTOCOL_VERSION;
 	requestId: StorageId;
+	/** Current owner fence; an embedded receipt may retain an earlier incarnation. */
 	incarnation: number;
-	error?: StorageError;
+	error?: never;
 }
 
 export interface StorageWriteSuccessResponse extends StorageResponseBase {
@@ -146,14 +178,17 @@ export interface StorageWriteSuccessResponse extends StorageResponseBase {
 	error?: never;
 }
 
-export interface StorageWriteErrorResponse extends StorageResponseBase {
+/** Common failure for every operation; no success-only fields are fabricated. */
+export interface StorageErrorResponse extends Omit<StorageResponseBase, "requestId" | "error"> {
+	/** Null only for authenticated malformed input without a usable request ID. */
+	requestId: StorageId | null;
 	error: StorageError;
-	receipt?: never;
 }
 
+export type StorageWriteErrorResponse = StorageErrorResponse;
 export type StorageWriteResponse = StorageWriteSuccessResponse | StorageWriteErrorResponse;
 
-export interface StorageBarrierResponse extends StorageResponseBase {
+export interface StorageBarrierSuccessResponse extends StorageResponseBase {
 	familyId: StorageId;
 	generationId: StorageId;
 	throughSeq: number;
@@ -161,9 +196,12 @@ export interface StorageBarrierResponse extends StorageResponseBase {
 	dependencies: readonly StorageDependency[];
 }
 
-export interface StorageReadResponse extends StorageResponseBase {
+export type StorageBarrierResponse = StorageBarrierSuccessResponse | StorageErrorResponse;
+
+export interface StorageReadSuccessResponse extends StorageResponseBase {
 	familyId: StorageId;
 	generationId: StorageId;
+	/** Frozen read cut; durable/live watermarks may advance independently. */
 	throughSeq: number;
 	durableThroughSeq: number;
 	liveThroughSeq: number;
@@ -171,24 +209,32 @@ export interface StorageReadResponse extends StorageResponseBase {
 	nextCursor: string | null;
 }
 
+export type StorageReadResponse = StorageReadSuccessResponse | StorageErrorResponse;
+
 export interface StorageReadEntry extends StorageEntry {
 	seq: number;
 }
 
-export interface StorageReceiptResponse extends StorageResponseBase {
+export interface StorageReceiptSuccessResponse extends StorageResponseBase {
 	receipt: StorageReceipt;
 }
 
-export interface StorageHealthResponse extends Omit<StorageResponseBase, "requestId"> {
+export type StorageReceiptResponse = StorageReceiptSuccessResponse | StorageErrorResponse;
+
+export interface StorageHealthSuccessResponse extends Omit<StorageResponseBase, "requestId"> {
 	status: "ok" | "degraded" | "stopped";
 	ready: boolean;
 	owner: StorageId;
 }
 
-export interface StorageMetricsResponse extends Omit<StorageResponseBase, "requestId"> {
+export type StorageHealthResponse = StorageHealthSuccessResponse | StorageErrorResponse;
+
+export interface StorageMetricsSuccessResponse extends Omit<StorageResponseBase, "requestId"> {
 	queue: StoragePayload;
 	rocksdb?: StoragePayload;
 }
+
+export type StorageMetricsResponse = StorageMetricsSuccessResponse | StorageErrorResponse;
 
 export type StorageProtocolResponse =
 	| StorageWriteResponse
@@ -213,14 +259,33 @@ export function assertStorageProtocolHash(hash: string): void {
 	}
 }
 
+export function storageProtocolRequest(operation: "write", request: { write: StorageWrite }): StorageProtocolRequest;
+export function storageProtocolRequest(
+	operation: "barrier",
+	request: { barrier: StorageBarrier },
+): StorageProtocolRequest;
+export function storageProtocolRequest(
+	operation: "read_range" | "read_context",
+	request: { read: StorageRead },
+): StorageProtocolRequest;
+export function storageProtocolRequest(
+	operation: "receipt",
+	request: { receipt: StorageReceiptRequest },
+): StorageProtocolRequest;
+export function storageProtocolRequest(operation: "health" | "metrics"): StorageProtocolRequest;
 export function storageProtocolRequest(
 	operation: StorageOperation,
-	request: Omit<StorageProtocolRequest, "schema" | "version" | "operation"> = {},
+	request: {
+		write?: StorageWrite;
+		barrier?: StorageBarrier;
+		read?: StorageRead;
+		receipt?: StorageReceiptRequest;
+	} = {},
 ): StorageProtocolRequest {
 	return {
 		schema: STORAGE_PROTOCOL_SCHEMA,
 		version: STORAGE_PROTOCOL_VERSION,
 		operation,
 		...request,
-	};
+	} as StorageProtocolRequest;
 }
