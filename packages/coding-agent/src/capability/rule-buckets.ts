@@ -11,7 +11,7 @@
  *   3. rulebook — has a `description`
  */
 import type { TtsrManager } from "../export/ttsr";
-import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule } from "./rule";
+import type { Rule } from "./rule";
 
 export interface RuleBuckets {
 	rulebookRules: Rule[];
@@ -22,7 +22,6 @@ export interface BucketRulesOptions {
 	/** Rule names to drop entirely (bundled defaults and user rules alike). */
 	disabledRules?: readonly string[];
 	/** When false, drop every rule from the bundled `builtin-defaults` provider. */
-	builtinRules?: boolean;
 }
 
 /**
@@ -35,7 +34,6 @@ export function bucketRules(
 	ttsrManager: TtsrManager,
 	options: BucketRulesOptions = {},
 ): RuleBuckets {
-	const includeBuiltin = options.builtinRules !== false;
 	const disabled = new Set<string>();
 	for (const raw of options.disabledRules ?? []) {
 		const name = raw.trim();
@@ -47,7 +45,6 @@ export function bucketRules(
 
 	for (const rule of rules) {
 		if (disabled.has(rule.name)) continue;
-		if (!includeBuiltin && rule._source?.provider === BUILTIN_DEFAULTS_PROVIDER_ID) continue;
 
 		const hasTtsrCondition =
 			(rule.condition && rule.condition.length > 0) || (rule.astCondition && rule.astCondition.length > 0);

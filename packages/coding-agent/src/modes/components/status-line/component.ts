@@ -22,11 +22,6 @@ import { calculateTokensPerSecond } from "../../../utils/token-rate";
 import { sanitizeStatusText } from "../../shared";
 import { theme } from "../../theme/theme";
 import { type CompactionBoundaries, computeCompactionBoundaries } from "../../utils/context-usage";
-import {
-	type CodexResetFireworksEvent,
-	type CodexResetUsageSnapshot,
-	detectCodexResetFireworks,
-} from "../codex-reset-fireworks";
 import { canReuseCachedPr, createPrCacheContext, isSamePrCacheContext, type PrCacheContext } from "./git-utils";
 import { getPreset } from "./presets";
 import { renderSegment, type SegmentContext } from "./segments";
@@ -59,32 +54,6 @@ interface UsageScopeGroup {
 
 function normalizeUsageScopeValue(value: unknown): string | undefined {
 	return typeof value === "string" && value.trim() ? value.trim().toLowerCase() : undefined;
-}
-
-/**
- * Fireworks are stateful, so their report match must be stricter than the
- * status display's fallback matching: every known credential identifier must
- * be present and equal or a workspace sibling can mutate this account's
- * baseline.
- */
-function codexReportMatchesExactIdentity(report: UsageReport, identity: OAuthAccountIdentity | undefined): boolean {
-	if (!identity) return false;
-	const accountId = normalizeUsageScopeValue(identity.accountId);
-	const email = normalizeUsageScopeValue(identity.email);
-	const projectId = normalizeUsageScopeValue(identity.projectId);
-	const orgId = normalizeUsageScopeValue(identity.orgId);
-	if (!accountId && !email && !projectId && !orgId) return false;
-
-	const metadata = report.metadata ?? {};
-	const reportAccountId =
-		normalizeUsageScopeValue(metadata.accountId) ?? normalizeUsageScopeValue(metadata.account_id);
-	const reportProjectId =
-		normalizeUsageScopeValue(metadata.projectId) ?? normalizeUsageScopeValue(metadata.project_id);
-	if (accountId && reportAccountId !== accountId) return false;
-	if (email && normalizeUsageScopeValue(metadata.email) !== email) return false;
-	if (projectId && reportProjectId !== projectId) return false;
-	if (orgId && normalizeUsageScopeValue(metadata.orgId) !== orgId) return false;
-	return true;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -463,8 +432,6 @@ export class StatusLineComponent implements Component {
 	// until a newer request has applied.
 	#usageRefreshSequence = 0;
 	#latestAppliedUsageRefreshSequence = 0;
-	#codexResetSnapshots = new Map<string, CodexResetUsageSnapshot>();
-	#onCodexResetFireworks: ((event: CodexResetFireworksEvent) => void) | undefined;
 	// Context-usage memo. The status line redraws on every agent event, so the
 	// hot path must not recompute context tokens unless an input changed.
 	// `getContextUsage()` anchors on the last assistant's real prompt-token
@@ -685,11 +652,6 @@ export class StatusLineComponent implements Component {
 		this.#collabStatus = status;
 	}
 
-	/** Set the callback that presents detected Codex reset celebrations, or clear it with `undefined`. */
-	setCodexResetFireworksHandler(handler: ((event: CodexResetFireworksEvent) => void) | undefined): void {
-		this.#onCodexResetFireworks = handler;
-	}
-
 	setHookStatus(key: string, text: string | undefined): void {
 		if (text === undefined) {
 			this.#hookStatuses.delete(key);
@@ -755,8 +717,6 @@ export class StatusLineComponent implements Component {
 		this.#onBranchChange = null;
 		this.#stopSpeculationBlink();
 		this.#clearUsageStartTimer();
-		this.#onCodexResetFireworks = undefined;
-		this.#codexResetSnapshots.clear();
 		this.#retireGitWatcher();
 	}
 
@@ -1341,21 +1301,12 @@ export class StatusLineComponent implements Component {
 			modelId: activeModelId,
 			identity: activeIdentity,
 		});
-		const resetSnapshot =
-			activeProvider === "openai-codex" ? this.#normalizeCodexResetSnapshot(reports, activeIdentity) : null;
 		const usageChanged = this.#cachedUsage !== normalized;
 		this.#cachedUsage = normalized;
 		this.#usageFetchedAt = Date.now();
 		// Usage fetch is async; without a repaint the top border stays blank until
 		// some unrelated event (git resolve, keystroke, …) rebuilds it.
 		if (usageChanged) this.#onBranchChange?.();
-		if (!resetSnapshot) return;
-		const contextKey = this.#formatUsageContextKey(activeProvider, activeIdentity);
-		const previous = this.#codexResetSnapshots.get(contextKey);
-		this.#codexResetSnapshots.set(contextKey, resetSnapshot);
-		if (!previous || !settings.get("tui.codexResetFireworks")) return;
-		const event = detectCodexResetFireworks(previous, resetSnapshot);
-		if (event) this.#onCodexResetFireworks?.(event);
 	}
 
 	#observeLateUsageRefresh(session: AgentSession, reportsPromise: Promise<unknown>, sequence: number): void {
@@ -1381,72 +1332,6 @@ export class StatusLineComponent implements Component {
 		} finally {
 			signal.removeEventListener("abort", onAbort);
 		}
-	}
-
-	#normalizeCodexResetSnapshot(
-		reports: unknown,
-		activeIdentity: OAuthAccountIdentity | undefined,
-	): CodexResetUsageSnapshot | null {
-		if (!Array.isArray(reports)) return null;
-		let matchingReport: UsageReport | undefined;
-		for (const report of reports) {
-			if (!report || typeof report !== "object") continue;
-			if (
-				!("provider" in report) ||
-				report.provider !== "openai-codex" ||
-				!("limits" in report) ||
-				!Array.isArray(report.limits)
-			) {
-				continue;
-			}
-			// The report boundary above validates the fields this extractor iterates;
-			// optional metadata and credit fields are narrowed again before use.
-			const usageReport = report as UsageReport;
-			if (!codexReportMatchesExactIdentity(usageReport, activeIdentity)) continue;
-			matchingReport = usageReport;
-			break;
-		}
-		if (!matchingReport) return null;
-
-		const plan =
-			typeof matchingReport.metadata?.planType === "string" && matchingReport.metadata.planType
-				? matchingReport.metadata.planType
-				: undefined;
-		let sevenDay: CodexResetUsageSnapshot["sevenDay"];
-		let sevenDayTier: string | undefined;
-		for (const limit of matchingReport.limits) {
-			if (!limit || typeof limit !== "object") continue;
-			const candidate = limit as {
-				scope?: { windowId?: string; tier?: string };
-				window?: { resetsAt?: number };
-				amount?: { usedFraction?: number };
-			};
-			const fraction = candidate.amount?.usedFraction;
-			if (candidate.scope?.windowId !== "7d" || typeof fraction !== "number" || !Number.isFinite(fraction)) {
-				continue;
-			}
-			const tier =
-				typeof candidate.scope?.tier === "string" && candidate.scope.tier ? candidate.scope.tier : undefined;
-			if (sevenDay && (sevenDayTier === undefined || tier)) continue;
-			const resetsAt = candidate.window?.resetsAt;
-			sevenDay = {
-				percent: fraction * 100,
-				resetsAt: typeof resetsAt === "number" && Number.isFinite(resetsAt) ? resetsAt : undefined,
-				tier,
-				plan,
-			};
-			sevenDayTier = tier;
-		}
-
-		const fetchedAt = matchingReport.fetchedAt;
-		const availableCount = matchingReport.resetCredits?.availableCount;
-		const observedAt = typeof fetchedAt === "number" && Number.isFinite(fetchedAt) ? fetchedAt : undefined;
-		const savedResets =
-			typeof availableCount === "number" && Number.isFinite(availableCount)
-				? Math.max(0, Math.trunc(availableCount))
-				: undefined;
-		if (!sevenDay && savedResets === undefined) return null;
-		return { observedAt, sevenDay, savedResets };
 	}
 
 	#normalizeUsageReports(

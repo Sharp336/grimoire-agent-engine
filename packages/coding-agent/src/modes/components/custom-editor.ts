@@ -21,7 +21,7 @@ import {
 	renderPlaceholders,
 } from "../composer-attachments";
 import { MacOSSpellingProvider, type SpellingFeatures } from "../macos-spelling";
-import { hasMagicKeyword, highlightMagicKeywords } from "../magic-keywords";
+import { highlightMagicKeywords } from "../magic-keywords";
 import { isQueuedMessageList, parseQueueShorthand, QUEUE_LIST_MARKER_RE } from "../queue-input";
 import { fgOrPlain, theme } from "../theme/theme";
 
@@ -122,34 +122,6 @@ const ABSOLUTE_PATH_PREFIX_REGEX = new RegExp(`^${ABSOLUTE_PATH_PREFIX_SOURCE}`)
  * terminal asserting the space belongs to the path.
  */
 const INTERIOR_PATH_ANCHOR_REGEX = new RegExp(String.raw`(?<!\\)\s(?:${ABSOLUTE_PATH_PREFIX_SOURCE}|\.\.?[\\/])`);
-
-/** Max gap (ms) between two spaces for the later one to count as OS key auto-repeat rather than a
- *  deliberate press. OS auto-repeat is fast; a deliberate tap (even a fast one) is slower. */
-export const SPACE_REPEAT_MAX_GAP_MS = 120;
-/** Two consecutive inter-space gaps are "mechanical" (machine-driven auto-repeat) when both are
- *  within {@link SPACE_REPEAT_MAX_GAP_MS} and differ by no more than this — an absolute jitter floor
- *  or, for slower repeat rates, {@link SPACE_REPEAT_JITTER_RATIO} of the smaller gap. OS key-repeat
- *  is metronomic; a human smashing the bar is fast but irregular, so its deltas never stay this
- *  steady. */
-export const SPACE_REPEAT_JITTER_MS = 18;
-export const SPACE_REPEAT_JITTER_RATIO = 0.35;
-/** Consecutive mechanical (fast + steady) deltas that confirm the space bar is held and start
- *  recording. Needs a sustained metronomic cadence, so jittery smashing and deliberate taps never
- *  reach it. */
-export const SPACE_HOLD_MECHANICAL_RUN = 2;
-/** Idle gap (ms) after the last repeated space that counts as the space bar being released, ending
- *  the push-to-talk recording. Must comfortably exceed the OS key-repeat interval. */
-export const SPACE_HOLD_RELEASE_MS = 250;
-
-/** Whether two consecutive inter-space gaps look machine-driven: both within the auto-repeat band
- *  and steady enough (small absolute or proportional difference). OS key-repeat is metronomic, so
- *  its successive deltas match closely; human smashing is fast but irregular and deliberate taps are
- *  too slow, so neither passes. */
-function gapsAreMechanical(gap: number, prevGap: number): boolean {
-	if (gap > SPACE_REPEAT_MAX_GAP_MS || prevGap > SPACE_REPEAT_MAX_GAP_MS) return false;
-	const tolerance = Math.max(SPACE_REPEAT_JITTER_MS, Math.min(gap, prevGap) * SPACE_REPEAT_JITTER_RATIO);
-	return Math.abs(gap - prevGap) <= tolerance;
-}
 
 function isPastedPathSeparator(char: string | undefined): boolean {
 	return char === undefined || char === " " || char === "\t" || char === "\r" || char === "\n";
@@ -447,7 +419,7 @@ export class CustomEditor extends Editor {
 		super(pickEditorTheme(args));
 		const requestTextAssistRepaint = (): void => {
 			this.invalidate();
-			this.#requestShimmerRepaint?.();
+			this.#requestRepaint?.();
 		};
 		this.#spelling.onUpdate = requestTextAssistRepaint;
 		this.onTextAssistApplied = requestTextAssistRepaint;
@@ -545,28 +517,14 @@ export class CustomEditor extends Editor {
 		if (!links || this.pendingImages !== images) return;
 		this.pendingImageLinks = links;
 		this.imageLinks = links;
-		this.#requestShimmerRepaint?.();
+		this.#requestRepaint?.();
 	}
 
 	/** Treat image/paste references — compact chip tokens and bracketed markers alike — as
 	 *  indivisible: a stray backspace deletes the whole token instead of corrupting it. */
 	override atomicTokenPattern = COMPOSER_TOKEN_REGEX;
-
-	/** Magic-keyword shimmer cadence — drives one editor repaint every 70 ms while
-	 *  a keyword is on screen and the prompt is focused. ~14 frames/s is smooth
-	 *  without flooding the renderer. */
-	static readonly SHIMMER_FRAME_MS = 70;
-	/** Time for the gradient to sweep one full cycle across each keyword. */
-	static readonly SHIMMER_PERIOD_MS = 1800;
-
-	/** Per-render scratch flag: did any layout line in this render contain a magic
-	 *  keyword that should shimmer? Reset by {@link #scheduleShimmerIfNeeded} each
-	 *  time a frame is queued. */
-	#shimmerTimer: Timer | undefined;
-	/** Repaint hook the host wires once at construction. Called from the shimmer
-	 *  timer to request the next animation frame. Undefined when nobody is
-	 *  listening (tests, headless callers); the timer chain still self-cleans. */
-	#requestShimmerRepaint: (() => void) | undefined;
+	/** Host repaint hook for asynchronously materialized attachment links. */
+	#requestRepaint: (() => void) | undefined;
 	#queueDecorationText: string | undefined;
 	#decorationLines: readonly string[] = [""];
 	#queueShorthandActive = false;
@@ -577,9 +535,6 @@ export class CustomEditor extends Editor {
 	 *  item markers use the accent color so separate follow-ups remain visible while composing. */
 	override decorateText = (text: string, context: EditorTextDecorationContext): string => {
 		const editorText = this.getText();
-		const animated = this.focused && this.#shimmerEnabled() && hasMagicKeyword(editorText);
-		const phase = animated ? (Date.now() % CustomEditor.SHIMMER_PERIOD_MS) / CustomEditor.SHIMMER_PERIOD_MS : 0;
-		if (animated) this.#scheduleShimmerFrame();
 		if (this.#queueDecorationText !== editorText) {
 			this.#queueDecorationText = editorText;
 			this.#decorationLines = this.getLines();
@@ -605,7 +560,7 @@ export class CustomEditor extends Editor {
 						line: context.line,
 						startCol: context.startCol + sourceOffset,
 					},
-					span => highlightMagicKeywords(span, undefined, phase),
+					span => highlightMagicKeywords(span),
 				);
 				if (this.#queueShorthandActive && (value.startsWith("->") || value.startsWith("=>"))) {
 					const icon = typeof theme === "undefined" ? "➤" : theme.nav.selected;
@@ -638,16 +593,6 @@ export class CustomEditor extends Editor {
 			},
 		});
 	};
-
-	/** Optional test override for the magic-keyword shimmer gate. */
-	magicKeywordsEnabledOverride: boolean | undefined;
-
-	/**
-	 * Host-owned setting reader. Startup defaults to enabled without loading the
-	 * settings graph; InteractiveMode replaces this with the live session setting.
-	 */
-	magicKeywordsEnabled: () => boolean = () => true;
-
 	/**
 	 * Late-bound OSC hyperlink renderer. Startup stays plain until the full
 	 * interactive graph supplies the settings-aware implementation.
@@ -659,32 +604,13 @@ export class CustomEditor extends Editor {
 		renderLabel: (text: string) => string,
 	) => string = (label, _index, _imageLinks, renderLabel) => renderLabel(label);
 
-	#shimmerEnabled(): boolean {
-		return this.magicKeywordsEnabledOverride ?? this.magicKeywordsEnabled();
-	}
-
 	/** Bind the host's render request callback. Idempotent — the host wires this
 	 *  once after construction (and again after `setEditorComponent` swaps the
-	 *  editor). Passing `undefined` clears any pending frame. */
-	setShimmerRepaintHandler(handler: (() => void) | undefined): void {
-		this.#requestShimmerRepaint = handler;
-		if (!handler && this.#shimmerTimer) {
-			clearTimeout(this.#shimmerTimer);
-			this.#shimmerTimer = undefined;
-		}
+	 *  editor). Passing `undefined` detaches the callback. */
+	setRepaintHandler(handler: (() => void) | undefined): void {
+		this.#requestRepaint = handler;
 	}
 
-	/** Schedule one shimmer frame if none is already pending. The next render
-	 *  decides whether to schedule another, so the chain stops by itself when
-	 *  `focused` flips off or the keyword leaves the buffer. */
-	#scheduleShimmerFrame(): void {
-		if (this.#shimmerTimer || !this.#requestShimmerRepaint) return;
-		this.#shimmerTimer = setTimeout(() => {
-			this.#shimmerTimer = undefined;
-			this.#requestShimmerRepaint?.();
-		}, CustomEditor.SHIMMER_FRAME_MS);
-		this.#shimmerTimer.unref?.();
-	}
 	onEscape?: () => void;
 	onClear?: () => void;
 	onExit?: () => void;
@@ -715,17 +641,6 @@ export class CustomEditor extends Editor {
 	onCapsLock?: () => void;
 	/** Called when left-arrow is pressed while the editor is empty (cursor necessarily at start). */
 	onLeftAtStart?: () => void;
-
-	/** Fired when a sustained space-bar hold is recognized — the push-to-talk STT start. The
-	 *  optimistically-typed spaces have already been deleted by the time this runs. */
-	onSpaceHoldStart?: () => void;
-	/** Fired when the held space bar is released (detected as an idle gap with no further repeated
-	 *  spaces) — the push-to-talk STT stop. */
-	onSpaceHoldEnd?: () => void;
-	/** Gate for the space-hold gesture. Returns false to keep the space bar inserting spaces
-	 *  normally; wired to `stt.enabled` so disabling STT restores plain space behavior. */
-	sttHoldEnabled?: () => boolean;
-
 	/** Custom key handlers from extensions and non-built-in app actions. */
 	#customKeyHandlers = new Map<KeyId, () => void>();
 	#customMatchKeys = new Map<string, () => void>();
@@ -742,18 +657,6 @@ export class CustomEditor extends Editor {
 	/** Input chunks deferred behind an in-flight paste, drained in FIFO order once the paste
 	 *  count returns to zero. */
 	#pendingInput: string[] = [];
-	/** Spaces actually inserted in the current run; tracked back out when a hold is recognized. */
-	#spaceRunInserted = 0;
-	/** Consecutive "mechanical" deltas (fast + steady); a sustained run of these confirms a held bar. */
-	#mechanicalRun = 0;
-	/** Inter-space gap (ms) of the previous space pair, compared against the next to judge steadiness. */
-	#prevSpaceGap: number | undefined;
-	/** Monotonic timestamp (ms) of the last space, to measure the gap to the next one. */
-	#lastSpaceAt = Number.NEGATIVE_INFINITY;
-	/** True while a recognized space-hold push-to-talk recording is in progress. */
-	#spaceHoldActive = false;
-	/** Idle timer that fires `onSpaceHoldEnd` once repeated spaces stop arriving. */
-	#spaceHoldTimer: NodeJS.Timeout | undefined;
 	#actionKeys = new Map<ConfigurableEditorAction, KeyId[]>(
 		Object.entries(DEFAULT_ACTION_KEYS).map(([action, keys]) => [action as ConfigurableEditorAction, [...keys]]),
 	);
@@ -809,90 +712,6 @@ export class CustomEditor extends Editor {
 	clearCustomKeyHandlers(): void {
 		this.#customKeyHandlers.clear();
 		this.#rebuildCustomMatchKeys();
-	}
-
-	#spaceHoldGestureEnabled(): boolean {
-		return this.onSpaceHoldStart !== undefined && (this.sttHoldEnabled?.() ?? false) && !this.isShowingAutocomplete();
-	}
-
-	/** Drive the space-hold push-to-talk state machine. Returns true when the gesture consumed the
-	 *  input so it must not reach normal editing. A held space bar emits OS auto-repeat: a *steady*
-	 *  stream of spaces at a fixed fast interval. We watch the inter-space deltas and only recognize a
-	 *  hold once {@link SPACE_HOLD_MECHANICAL_RUN} consecutive deltas are "mechanical" — both
-	 *  auto-repeat-fast and near-identical (see {@link gapsAreMechanical}). Smashing the bar is fast
-	 *  but jittery and deliberate taps are too slow, so neither escalates and both keep typing real
-	 *  spaces; the few spaces typed before a real hold is recognized are tracked back out. */
-	#handleSpaceHold(data: string, canonical: string | undefined): boolean {
-		const isSpace = canonical === "space";
-		if (this.#spaceHoldActive) {
-			if (isSpace) {
-				// Auto-repeat while held: swallow it and keep the release timer alive.
-				this.#armSpaceHoldReleaseTimer();
-				return true;
-			}
-			// Any non-space means the bar was released — stop recording, then let the key through.
-			this.#endSpaceHold();
-			return false;
-		}
-		if (!isSpace) {
-			this.#resetSpaceRun();
-			return false;
-		}
-		if (!this.#spaceHoldGestureEnabled()) return false;
-		const now = performance.now();
-		const gap = now - this.#lastSpaceAt;
-		const prevGap = this.#prevSpaceGap;
-		this.#lastSpaceAt = now;
-		this.#prevSpaceGap = gap;
-		if (prevGap === undefined || !gapsAreMechanical(gap, prevGap)) {
-			// First space, a deliberate tap, or jittery smashing: not a steady machine cadence yet, so
-			// type a real space and reset the mechanical run.
-			this.#mechanicalRun = 0;
-			super.handleInput(data);
-			this.#spaceRunInserted++;
-			return true;
-		}
-		// Steady fast repeat: swallow it. Once the cadence has held for SPACE_HOLD_MECHANICAL_RUN
-		// deltas it's a held bar — track back the few pre-burst spaces already typed and start.
-		if (++this.#mechanicalRun >= SPACE_HOLD_MECHANICAL_RUN) {
-			this.deleteBeforeCursor(this.#spaceRunInserted);
-			this.#resetSpaceRun();
-			this.#beginSpaceHold();
-		}
-		return true;
-	}
-
-	#resetSpaceRun(): void {
-		this.#spaceRunInserted = 0;
-		this.#mechanicalRun = 0;
-		this.#prevSpaceGap = undefined;
-		this.#lastSpaceAt = Number.NEGATIVE_INFINITY;
-	}
-
-	#beginSpaceHold(): void {
-		this.#spaceHoldActive = true;
-		this.#armSpaceHoldReleaseTimer();
-		this.onSpaceHoldStart?.();
-	}
-
-	#armSpaceHoldReleaseTimer(): void {
-		if (this.#spaceHoldTimer) clearTimeout(this.#spaceHoldTimer);
-		this.#spaceHoldTimer = setTimeout(() => {
-			this.#spaceHoldTimer = undefined;
-			this.#endSpaceHold();
-		}, SPACE_HOLD_RELEASE_MS);
-		this.#spaceHoldTimer.unref?.();
-	}
-
-	#endSpaceHold(): void {
-		if (!this.#spaceHoldActive) return;
-		this.#spaceHoldActive = false;
-		this.#resetSpaceRun();
-		if (this.#spaceHoldTimer) {
-			clearTimeout(this.#spaceHoldTimer);
-			this.#spaceHoldTimer = undefined;
-		}
-		this.onSpaceHoldEnd?.();
 	}
 
 	/** Decrement {@link #pasteInFlight} once an async paste settles and, when the count returns
@@ -986,7 +805,6 @@ export class CustomEditor extends Editor {
 		}
 
 		// Space-hold push-to-talk: a sustained space bar starts/stops STT instead of typing spaces.
-		if (this.#handleSpaceHold(data, canonical)) return;
 
 		// One union probe decides whether any per-action interception below can
 		// match — plain typing then skips the ~20 per-action set lookups per key.

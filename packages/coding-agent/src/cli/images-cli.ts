@@ -42,7 +42,6 @@ import {
 	readBlobBrokerSavingsStatus,
 } from "../blob-broker/savings";
 import { providerFileCachePath, resolveBlobBrokerConfigs } from "../blob-broker/service";
-import { createConfiguredUploader } from "../blob-broker/uploaders";
 import { Settings } from "../config/settings";
 
 export const IMAGES_ACTIONS = ["status", "doctor", "probe", "purge"] as const;
@@ -191,18 +190,7 @@ export type ImagesCommandResult =
 	| ImagesPurgeResult
 	| ImagesErrorResult;
 
-const BINARY_BY_DESTINATION: Readonly<Partial<Record<BlobDestinationId, string>>> = {
-	cloudflared: "cloudflared",
-	"named-cloudflared": "cloudflared",
-	ngrok: "ngrok",
-	tailscale: "tailscale",
-	"localhost-run": "ssh",
-	pinggy: "ssh",
-	ssh: "ssh",
-	devtunnel: "devtunnel",
-	zrok: "zrok",
-	bore: "bore",
-};
+const BINARY_BY_DESTINATION: Readonly<Partial<Record<BlobDestinationId, string>>> = { ssh: "ssh" };
 
 function defaultResolveConfig(settings: Settings, projectDir: string): ImagesResolvedConfig {
 	return {
@@ -446,21 +434,13 @@ function configChecks(config: ImagesResolvedConfig, deps: ImagesCliDependencies)
 				.filter(field => field.required && !configuredValue(runtime.credentials[field.key]))
 				.map(field => field.key);
 			const missing = [...missingOptions, ...missingCredentials];
-			let runtimeError: string | undefined;
-			if (missing.length === 0) {
-				try {
-					createConfiguredUploader(backend, runtime);
-				} catch (error) {
-					runtimeError = safeDetail(error);
-				}
-			}
 			checks.push({
 				name: `config:${backend}`,
-				severity: missing.length === 0 && runtimeError === undefined ? "ok" : "error",
+				severity: missing.length === 0 ? "ok" : "error",
 				detail:
 					missing.length > 0
 						? `Missing required fields: ${missing.join(", ")}`
-						: (runtimeError ?? "Required configuration is present"),
+						: "Required configuration is present",
 			});
 		}
 		const binary = BINARY_BY_DESTINATION[backend];

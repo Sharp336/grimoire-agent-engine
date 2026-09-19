@@ -1956,7 +1956,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 		const { session } = await createAgentSession({
 			...baseOptions(tempDir),
-			settings: Settings.isolated({ "speechgen.enabled": true }),
 		});
 
 		try {
@@ -2010,7 +2009,6 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			Settings.isolated({
 				"providers.imageOrder": ["openai"],
 				"generate_image.enabled": true,
-				"speechgen.enabled": true,
 				"memory.backend": "hindsight",
 				"autolearn.enabled": true,
 			});

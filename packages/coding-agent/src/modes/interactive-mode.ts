@@ -43,7 +43,6 @@ import {
 	adjustHsv,
 	formatNumber,
 	getProjectDir,
-	hsvToRgb,
 	isEnoent,
 	logger,
 	postmortem,
@@ -117,7 +116,6 @@ import type { SessionManager } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { formatDuration } from "../slash-commands/helpers/format";
-import { STTController, type SttState } from "../stt";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { labelEchoesHandle } from "../task/label";
 import { agentTypeBadge, formatTaskId } from "../task/render";
@@ -135,7 +133,6 @@ import {
 	setActiveTodoDescriptionsProvider,
 	todoMatchesAnyDescription,
 } from "../tools/todo";
-import { vocalizer } from "../tts/vocalizer";
 import { renderTreeList } from "../tui/tree-list";
 import { formatStartupChangelogSummary, type StartupChangelogSelection } from "../utils/changelog";
 import { copyToClipboard } from "../utils/clipboard";
@@ -161,7 +158,6 @@ import type { AssistantMessageComponent } from "./components/assistant-message";
 import { AttachmentChipsBand } from "./components/attachment-chips";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import { ChatBlock, type ChatBlockHost } from "./components/chat-block";
-import { CodexResetFireworksController } from "./components/codex-reset-fireworks";
 import { CustomEditor } from "./components/custom-editor";
 import { DynamicBorder } from "./components/dynamic-border";
 import { ErrorBannerComponent } from "./components/error-banner";
@@ -183,9 +179,7 @@ import { CommandController } from "./controllers/command-controller";
 import { EventController } from "./controllers/event-controller";
 import { ExtensionUiController } from "./controllers/extension-ui-controller";
 import { InputController } from "./controllers/input-controller";
-import { LiveCommandController } from "./controllers/live-command-controller";
 import { MCPCommandController } from "./controllers/mcp-command-controller";
-import { OmfgController } from "./controllers/omfg-controller";
 import { SelectorController } from "./controllers/selector-controller";
 import { SessionFocusController } from "./controllers/session-focus-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
@@ -213,7 +207,6 @@ import { runProviderSetupWizard } from "./setup-wizard/lazy";
 import { interruptHint } from "./shared";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "./skill-command";
 import { clearMermaidCache } from "./theme/mermaid-cache";
-import { type ShimmerPalette, shimmerEnabled, shimmerSegments, shimmerText } from "./theme/shimmer";
 import type { Theme } from "./theme/theme";
 import {
 	getEditorTheme,
@@ -240,12 +233,6 @@ import { UiHelpers } from "./utils/ui-helpers";
 
 const STILL_CLOSING_DELAY_MS = 3_000;
 
-const HINT_SHIMMER_PALETTE: ShimmerPalette = {
-	low: "dim",
-	mid: "muted",
-	high: "borderAccent",
-};
-
 interface WorkingMessageAccent {
 	main: string;
 	dim: string;
@@ -257,40 +244,11 @@ interface WorkingMessageAccentCacheKey {
 	sessionAccentEnabled: boolean;
 }
 
-/**
- * Intern the shimmer palettes for each `WorkingMessageAccent` so `compile()`
- * inside `shimmerSegments` sees a stable palette object between animation
- * ticks. Allocating fresh palette literals every frame guaranteed a cache miss
- * on the Symbol-keyed compiled-ANSI slot and forced `resolveTierAnsi` to walk
- * every tier open/close for the ~30fps loader redraw (issue #4377).
- */
-const workingMessagePaletteCache = new WeakMap<WorkingMessageAccent, { main: ShimmerPalette; hint: ShimmerPalette }>();
-
-function workingMessagePalettes(accent: WorkingMessageAccent): { main: ShimmerPalette; hint: ShimmerPalette } {
-	let entry = workingMessagePaletteCache.get(accent);
-	if (!entry) {
-		entry = {
-			main: { low: "dim", mid: { ansi: accent.main }, high: { ansi: accent.main }, bold: true },
-			hint: { low: "dim", mid: { ansi: accent.dim }, high: { ansi: accent.dim } },
-		};
-		workingMessagePaletteCache.set(accent, entry);
-	}
-	return entry;
-}
-
 function renderWorkingMessage(message: string, accent?: WorkingMessageAccent): string {
-	const palettes = accent ? workingMessagePalettes(accent) : undefined;
-	const palette = palettes?.main;
 	const hint = interruptHint();
-	if (!message.endsWith(hint)) return shimmerText(message, theme, palette);
-	const header = message.slice(0, -hint.length);
-	return shimmerSegments(
-		[
-			{ text: header, palette },
-			{ text: hint, palette: palettes?.hint ?? HINT_SHIMMER_PALETTE },
-		],
-		theme,
-	);
+	const color = (text: string) => (accent ? `${accent.main}${text}\x1b[39m` : theme.fg("accent", text));
+	if (!message.endsWith(hint)) return color(message);
+	return color(message.slice(0, -hint.length)) + (accent ? `${accent.dim}${hint}\x1b[39m` : theme.fg("dim", hint));
 }
 
 const EDITOR_MAX_HEIGHT_MIN = 6;
@@ -586,7 +544,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	todoContainer: Container;
 	subagentContainer: Container;
 	btwContainer: Container;
-	omfgContainer: Container;
 	cleanseContainer: Container;
 	errorBannerContainer: Container;
 	modelCycleContainer: Container;
@@ -750,15 +707,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly lspServers: LspStartupServerInfo[] | undefined = undefined;
 	mcpManager?: MCPManager;
 	readonly #toolUiContextSetter: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
-
-	readonly #codexResetFireworksController: CodexResetFireworksController;
 	readonly #btwController: BtwController;
 	readonly #tanCommandController: TanCommandController;
-	readonly #omfgController: OmfgController;
 	readonly #cleanseController: CleanseCommandController;
 	readonly #commandController: CommandController;
 	readonly #todoCommandController: TodoCommandController;
-	readonly #liveCommandController: LiveCommandController;
 	readonly #eventController: EventController;
 	get eventController(): EventController {
 		return this.#eventController;
@@ -816,11 +769,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.pendingTools.clear();
 	}
 	readonly #uiHelpers: UiHelpers;
-	#sttController: STTController | undefined;
-	#voiceAnimationInterval: NodeJS.Timeout | undefined;
-	#voiceHue = 0;
-	#voicePreviousShowHardwareCursor: boolean | null = null;
-	#voicePreviousUseTerminalCursor: boolean | null = null;
 	#resizeHandler?: () => void;
 	#observerRegistry: SessionObserverRegistry;
 	#eventBus?: EventBus;
@@ -879,7 +827,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.composer.setPreferences(preferences);
 		this.ui = this.composer.ui;
 		this.editor = this.composer.editor;
-		this.editor.magicKeywordsEnabled = () => this.settings.get("magicKeywords.enabled");
 		this.editor.imageReferenceHyperlink = imageReferenceHyperlink;
 		this.#ownsStartedUi = wasStarted;
 		this.#startupSubmitGated = true;
@@ -928,7 +875,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.todoContainer = new TodoHudContainer(this);
 		this.subagentContainer = new AnchoredLiveContainer();
 		this.btwContainer = new AnchoredLiveContainer();
-		this.omfgContainer = new AnchoredLiveContainer();
 		this.cleanseContainer = new AnchoredLiveContainer();
 		this.errorBannerContainer = new AnchoredLiveContainer();
 		this.modelCycleContainer = new AnchoredLiveContainer();
@@ -944,7 +890,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.onAutocompleteUpdate = () => {
 			this.ui.requestRender();
 		};
-		this.editor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(this.editor));
+		this.editor.setRepaintHandler(() => this.ui.requestComponentRender(this.editor));
 		this.#syncEditorMaxHeight();
 		// Sync editor geometry only. TUI owns the alternate-buffer drag paint and
 		// settled normal-buffer repaint for each SIGWINCH.
@@ -974,10 +920,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editorContainer.addChild(this.editor);
 		this.statusLine = new StatusLineComponent(session);
 		this.statusLine.setAutoCompactEnabled(session.autoCompactionEnabled);
-		this.#codexResetFireworksController = new CodexResetFireworksController(this);
-		this.statusLine.setCodexResetFireworksHandler(event => {
-			this.#codexResetFireworksController.show(event);
-		});
 		// Vibe worker tok/s aggregator — keeps the status-line render layer off
 		// the heavy vibe/task dependency graph. The director is often idle while
 		// workers stream, so without this the tok/s badge would show a stale
@@ -1019,13 +961,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#uiHelpers = new UiHelpers(this);
 		this.#btwController = new BtwController(this);
 		this.#tanCommandController = new TanCommandController(this);
-		this.#omfgController = new OmfgController(this);
 		this.#cleanseController = new CleanseCommandController(this);
 		this.#extensionUiController = new ExtensionUiController(this);
 		this.#eventController = new EventController(this);
 		this.#commandController = new CommandController(this);
 		this.#todoCommandController = new TodoCommandController(this);
-		this.#liveCommandController = new LiveCommandController(this);
 		this.#selectorController = new SelectorController(this);
 		this.#focusController = new SessionFocusController(this);
 		this.#inputController = new InputController(this);
@@ -1085,10 +1025,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			const failure = this.#mcpFailedServers.get(serverName);
 			return failure === undefined ? [] : [{ serverName, ...failure }];
 		});
-	}
-
-	playWelcomeIntro(): void {
-		this.composer.playWelcomeIntro();
 	}
 
 	async init(options: InteractiveModeInitOptions = {}): Promise<void> {
@@ -1185,27 +1121,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender();
 		});
 		this.composer.setStatusComponent(this.statusLine);
-
-		this.composer.setRuntimeChildren([
-			this.chatContainer,
-			this.pendingMessagesContainer,
-			this.todoContainer,
-			this.subagentContainer,
-			this.btwContainer,
-			this.omfgContainer,
-			this.cleanseContainer,
-			this.errorBannerContainer,
-			this.modelCycleContainer,
-			this.deferredCommandContainer,
-			// Working loader / transient status sits below the sticky todo + subagent
-			// HUDs, just above the editor's hook-widget top margin — so it reads next to
-			// the prompt while keeping the one-line gap above the editor.
-			this.statusContainer,
-			this.attachmentChipsContainer,
-			this.hookWidgetContainerAbove,
-			this.editorContainer,
-			this.hookWidgetContainerBelow,
-		]);
 		this.ui.setFocus(this.editor);
 		this.syncComposerShape();
 
@@ -1236,7 +1151,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!this.#ownsStartedUi) {
 			this.composer.start({
 				clearScrollback: options.clearInitialTerminalHistory === true,
-				playWelcomeIntro: !options.suppressWelcomeIntro,
 			});
 			this.#ownsStartedUi = true;
 		}
@@ -1289,7 +1203,6 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Restore mode from session (e.g. plan mode on resume)
 		this.session.setSessionBeforeSwitchReconciler?.(async () => {
-			await this.#liveCommandController.stop();
 			await this.#quiesceVibeForSessionSwitch();
 		});
 		this.session.setSessionSwitchReconciler?.(() => this.#reconcileModeFromSession({ preserveActiveGoal: true }));
@@ -4600,18 +4513,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.loadingAnimation) {
 			this.#stopLoadingAnimation(false);
 		}
-		this.#cleanupMicAnimation();
 		// Stop the shared tool-spinner ticker: a live block missed by per-component
 		// stopAnimation would otherwise keep an 80ms interval pinning the process.
 		stopSharedSpinnerTicker();
-		this.#liveCommandController.dispose();
 		this.#cancelTodoAutoClearTimer();
 		this.#cancelObserverUiSyncTimer();
 		this.#cancelGoalContinuation();
-		if (this.#sttController) {
-			this.#sttController.dispose();
-			this.#sttController = undefined;
-		}
 		this.#extensionUiController.clearExtensionTerminalInputListeners();
 		this.#extensionUiController.clearHookWidgets();
 		this.#extensionUiController.disposeComposerShapes();
@@ -4624,7 +4531,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#agentRegistryUnsubscribe = undefined;
 		this.#agentRegistrySubscriptionTarget = undefined;
 		this.#eventController.dispose();
-		this.#codexResetFireworksController.dispose();
 		this.statusLine.dispose();
 		if (this.#resizeHandler) {
 			process.stdout.removeListener("resize", this.#resizeHandler);
@@ -4649,11 +4555,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	async shutdown(): Promise<void> {
 		if (this.#isShuttingDown) return;
 		this.#isShuttingDown = true;
-
-		await this.#liveCommandController.stop();
-
 		this.#btwController.dispose();
-		this.#omfgController.dispose();
 		this.#cleanseController.dispose();
 		this.#focusController.dispose();
 
@@ -4743,7 +4645,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			autocorrect: this.settings.get("spelling.autocorrect"),
 		});
 		nextEditor.viewportRowsProvider = () => this.ui.terminal.rows;
-		nextEditor.magicKeywordsEnabled = () => this.settings.get("magicKeywords.enabled");
 		nextEditor.imageReferenceHyperlink = imageReferenceHyperlink;
 		nextEditor.onAutocompleteCancel = () => {
 			this.ui.requestRender(true);
@@ -4751,7 +4652,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.onAutocompleteUpdate = () => {
 			this.ui.requestRender();
 		};
-		nextEditor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(nextEditor));
+		nextEditor.setRepaintHandler(() => this.ui.requestComponentRender(nextEditor));
 		this.editor = nextEditor;
 		this.composer.setEditor(nextEditor);
 		this.syncComposerShape();
@@ -5006,10 +4907,6 @@ export class InteractiveMode implements InteractiveModeContext {
 				renderWorkingMessage(message, this.#getWorkingMessageAccent())) as LoaderMessageColorFn & {
 				animated?: true;
 			};
-			// Shimmer drives the 30fps redraw; when it is disabled the working
-			// message is static, so leave `animated` unset and let the loader use
-			// the spinner-only ~12.5fps cadence instead of repainting a frozen line.
-			if (shimmerEnabled()) messageColorFn.animated = true;
 			this.loadingAnimation = new Loader(
 				this.ui,
 				spinner => {
@@ -5211,7 +5108,6 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	#prepareSessionSwitch(): void {
 		this.#btwController.dispose();
-		this.#omfgController.dispose();
 		this.#cleanseController.dispose();
 		this.#extensionUiController.clearExtensionTerminalInputListeners();
 		this.clearPinnedError();
@@ -5241,7 +5137,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	async handleForkCommand(): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
 		this.#btwController.dispose();
-		this.#omfgController.dispose();
 		this.#cleanseController.dispose();
 		await this.#commandController.handleForkCommand();
 	}
@@ -5257,100 +5152,6 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleMemoryCommand(text: string): Promise<void> {
 		return this.#commandController.handleMemoryCommand(text);
-	}
-
-	async handleSTTToggle(): Promise<void> {
-		if (this.#liveCommandController.active) {
-			this.showWarning("End live mode before using push-to-talk speech input.");
-			return;
-		}
-		if (!settings.get("stt.enabled")) {
-			this.showWarning("Speech-to-text is disabled. Enable it in settings: stt.enabled");
-			return;
-		}
-		if (!this.#sttController) {
-			this.#sttController = new STTController();
-		}
-		await this.#sttController.toggle(this.editor, {
-			showWarning: (msg: string) => this.showWarning(msg),
-			showStatus: (msg: string) => this.showStatus(msg),
-			requestRender: () => this.ui.requestRender(),
-			onStateChange: (state: SttState) => {
-				// Duck assistant speech while the user is talking (push-to-talk); restore after.
-				if (state === "recording") vocalizer.duck();
-				else vocalizer.unduck();
-				if (state === "recording") {
-					this.#voicePreviousShowHardwareCursor = this.ui.getShowHardwareCursor();
-					this.#voicePreviousUseTerminalCursor = this.editor.getUseTerminalCursor();
-					this.ui.setShowHardwareCursor(false);
-					this.editor.setUseTerminalCursor(false);
-					this.#startMicAnimation();
-				} else if (state === "transcribing") {
-					this.#stopMicAnimation();
-					this.#setMicCursor({ r: 200, g: 200, b: 200 });
-				} else {
-					this.#cleanupMicAnimation();
-				}
-				this.ui.requestRender();
-			},
-		});
-	}
-
-	/** Start or stop the Codex-backed realtime voice surface. */
-	async handleLiveCommand(): Promise<void> {
-		if (this.#sttController && this.#sttController.state !== "idle") {
-			this.showWarning("Finish the current speech-to-text capture before starting live mode.");
-			return;
-		}
-		await this.#liveCommandController.handleCommand();
-	}
-
-	#setMicCursor(color: { r: number; g: number; b: number }): void {
-		this.editor.cursorOverride = `\x1b[38;2;${color.r};${color.g};${color.b}m${theme.icon.mic}\x1b[0m`;
-		// Theme symbols can be wide (for example, 🎤), so measure the rendered override.
-		this.editor.cursorOverrideWidth = visibleWidth(this.editor.cursorOverride);
-	}
-
-	#updateMicIcon(): void {
-		const { r, g, b } = hsvToRgb({ h: this.#voiceHue, s: 0.9, v: 1.0 });
-		this.#setMicCursor({ r, g, b });
-	}
-
-	#startMicAnimation(): void {
-		if (this.#voiceAnimationInterval) return;
-		this.#voiceHue = 0;
-		this.#updateMicIcon();
-		this.#voiceAnimationInterval = setInterval(() => {
-			this.#voiceHue = (this.#voiceHue + 8) % 360;
-			this.#updateMicIcon();
-			// Component-scoped: the hue sweep only recolors the editor's cursor
-			// glyph, so the transcript subtree is reused per animation frame.
-			this.ui.requestComponentRender(this.editor);
-		}, 60);
-	}
-
-	#stopMicAnimation(): void {
-		if (this.#voiceAnimationInterval) {
-			clearInterval(this.#voiceAnimationInterval);
-			this.#voiceAnimationInterval = undefined;
-		}
-	}
-
-	#cleanupMicAnimation(): void {
-		if (this.#voiceAnimationInterval) {
-			clearInterval(this.#voiceAnimationInterval);
-			this.#voiceAnimationInterval = undefined;
-		}
-		this.editor.cursorOverride = undefined;
-		this.editor.cursorOverrideWidth = undefined;
-		if (this.#voicePreviousShowHardwareCursor !== null) {
-			this.ui.setShowHardwareCursor(this.#voicePreviousShowHardwareCursor);
-			this.#voicePreviousShowHardwareCursor = null;
-		}
-		if (this.#voicePreviousUseTerminalCursor !== null) {
-			this.editor.setUseTerminalCursor(this.#voicePreviousUseTerminalCursor);
-			this.#voicePreviousUseTerminalCursor = null;
-		}
 	}
 
 	async showDebugSelector(): Promise<void> {
@@ -5471,7 +5272,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		this.#btwController.dispose();
-		this.#omfgController.dispose();
 		this.#cleanseController.dispose();
 		this.resetObserverRegistry();
 		await this.#selectorController.handleResumeSession(sessionPath, { settingsFlushed: true });
@@ -5598,7 +5398,6 @@ export class InteractiveMode implements InteractiveModeContext {
 				return;
 			}
 			this.#btwController.dispose();
-			this.#omfgController.dispose();
 			this.#cleanseController.dispose();
 			await this.renderInitialMessages({ clearTerminalHistory: true });
 			this.updateEditorBorderColor();
@@ -5608,18 +5407,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		} catch (error) {
 			this.showError(`Cannot branch /btw: ${error instanceof Error ? error.message : String(error)}`);
 		}
-	}
-
-	handleOmfgCommand(complaint: string): Promise<void> {
-		return this.#omfgController.start(complaint);
-	}
-
-	hasActiveOmfg(): boolean {
-		return this.#omfgController.hasActiveRequest();
-	}
-
-	handleOmfgEscape(): boolean {
-		return this.#omfgController.handleEscape();
 	}
 
 	handleCleanseCommand(args: string): Promise<void> {

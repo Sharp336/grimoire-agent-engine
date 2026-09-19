@@ -404,25 +404,14 @@ export interface ExecuteWithKernelBaseParams<
 	kernel: GenericKernel<TEnv>;
 	code: string;
 	options: TOptions | undefined;
-	/** Prefix for the per-execution run id (e.g. `"py"`, `"rb"`, `"jl"`). */
+	/** Prefix for the per-execution run id (e.g. `"py"`). */
 	runIdPrefix: string;
 	/** Human-readable language label used in the failure log line. */
 	errorLogLabel: string;
-	/**
-	 * Julia surfaces eval-timeout control events through its normal status path,
-	 * so they must NOT be filtered out the way the JS-status backends do.
-	 */
-	isJulia?: boolean;
 	cancelledErrorClass: CancelledErrorClass;
 	buildKernelEnvPatch: (options: TOptions) => TEnv;
 	formatKernelTimeoutAnnotation: (executionTimeoutMs: number | undefined, kernelKilled: boolean) => string;
 	formatTimeoutAnnotation: (executionTimeoutMs: number | undefined) => string | undefined;
-	/**
-	 * Override how the wall-clock deadline is derived from options. Defaults to
-	 * {@link getExecutionDeadlineMs}; Julia passes the pre-computed `deadlineMs`
-	 * straight through instead of re-deriving from `timeoutMs`.
-	 */
-	resolveDeadlineMs?: (options: TOptions | undefined) => number | undefined;
 }
 
 export async function executeWithKernelBase<
@@ -435,12 +424,10 @@ export async function executeWithKernelBase<
 		options,
 		runIdPrefix,
 		errorLogLabel,
-		isJulia,
 		cancelledErrorClass,
 		buildKernelEnvPatch,
 		formatKernelTimeoutAnnotation,
 		formatTimeoutAnnotation,
-		resolveDeadlineMs,
 	} = params;
 
 	const settings = await Settings.init();
@@ -453,7 +440,7 @@ export async function executeWithKernelBase<
 	});
 
 	const displayOutputs: KernelDisplayOutput[] = [];
-	const deadlineMs = (resolveDeadlineMs ?? getExecutionDeadlineMs)(options);
+	const deadlineMs = getExecutionDeadlineMs(options);
 	const remainingMs = getRemainingTimeoutMs(deadlineMs);
 	const executionTimeoutMs = remainingMs !== undefined && remainingMs > 0 ? remainingMs : undefined;
 	// The wall-clock timeout must abort through the same shield the bridge
@@ -477,7 +464,7 @@ export async function executeWithKernelBase<
 		if (output.type === "status") {
 			abortShield.handleStatus?.(output.event);
 			options?.onStatus?.(output.event);
-			if (!isJulia && isEvalTimeoutControlEvent(output.event)) return;
+			if (isEvalTimeoutControlEvent(output.event)) return;
 		}
 		displayOutputs.push(output);
 	};
@@ -488,7 +475,7 @@ export async function executeWithKernelBase<
 	// Two aborts cross the bridge, and conflating them is what let a cancelled
 	// turn keep working. Delegated work (above all the subagents `agent()`
 	// spawns) gets the caller's real signal so it dies with the turn — shielding
-	// it here made Python/Ruby/Julia fan-outs outlive a cancel indefinitely,
+	// it here made Python fan-outs outlive a cancel indefinitely,
 	// while JS cells, which never route through this shield, stopped fine. The
 	// shielded signal only governs how long the host waits on a call, holding
 	// the cell open across a critical phase (isolation worktree setup,

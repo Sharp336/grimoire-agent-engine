@@ -28,7 +28,6 @@ import { isTinyTitleLocalModelKey } from "../../tiny/models";
 import { tinyTitleClient } from "../../tiny/title-client";
 import type { TinyTitleProgressEvent } from "../../tiny/title-protocol";
 import { shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
-import { vocalizer } from "../../tts/vocalizer";
 import {
 	copyToClipboard,
 	readImageFromClipboard,
@@ -356,9 +355,6 @@ export class InputController {
 			if (this.ctx.hasActiveBtw() && this.ctx.handleBtwEscape()) {
 				return;
 			}
-			if (this.ctx.hasActiveOmfg() && this.ctx.handleOmfgEscape()) {
-				return;
-			}
 			if (this.ctx.hasActiveCleanse() && this.ctx.handleCleanseEscape()) {
 				return;
 			}
@@ -380,15 +376,6 @@ export class InputController {
 				}
 				if (aborted) return;
 			}
-
-			if (vocalizer.isSpeaking()) {
-				// Playback from the completed response can overlap the next agent
-				// turn. Silence it before interrupting any ongoing main-turn work.
-				vocalizer.clear();
-				this.ctx.lastEscapeTime = 0;
-				return;
-			}
-
 			if (this.ctx.loopModeEnabled) {
 				if (this.ctx.session.isStreaming) {
 					this.#abortStreamingTurn();
@@ -553,18 +540,6 @@ export class InputController {
 		for (const key of this.ctx.keybindings.getKeys("app.message.followUp")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => void this.handleFollowUp());
 		}
-		for (const key of this.ctx.keybindings.getKeys("app.stt.toggle")) {
-			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handleSTTToggle());
-		}
-		for (const key of this.ctx.keybindings.getKeys("app.live.toggle")) {
-			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handleLiveCommand());
-		}
-		// Hold the space bar to push-to-talk: the editor recognizes the auto-repeat burst, tracks
-		// the spam back out, and toggles STT on hold start / release. Gated on `stt.enabled` so a
-		// disabled STT leaves the space bar typing normally.
-		this.ctx.editor.sttHoldEnabled = () => settings.get("stt.enabled");
-		this.ctx.editor.onSpaceHoldStart = () => void this.ctx.handleSTTToggle();
-		this.ctx.editor.onSpaceHoldEnd = () => void this.ctx.handleSTTToggle();
 		for (const key of this.ctx.keybindings.getKeys("app.clipboard.copyLine")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.handleCopyCurrentLine());
 		}

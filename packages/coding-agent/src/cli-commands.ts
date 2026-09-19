@@ -153,11 +153,6 @@ export const commands: CommandEntry[] = [
 		help: commandHelp.psHelp,
 	},
 	{
-		name: "say",
-		load: () => import("./commands/say").then(m => m.default),
-		help: commandHelp.sayHelp,
-	},
-	{
 		name: "share",
 		load: () => import("./commands/share").then(m => m.default),
 		help: commandHelp.shareHelp,

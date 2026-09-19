@@ -15,7 +15,7 @@ import * as path from "node:path";
 import { AstMatchStrictness, astMatch, FileType, type GlobMatch, glob } from "@oh-my-pi/pi-natives";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { getProjectDir } from "@oh-my-pi/pi-utils/dirs";
-import { BUILTIN_DEFAULTS_PROVIDER_ID, compileRuleCondition, type Rule, ruleCapability } from "../capability/rule";
+import { compileRuleCondition, type Rule, ruleCapability } from "../capability/rule";
 import { bucketRules } from "../capability/rule-buckets";
 import { Settings } from "../config/settings";
 import type { TtsrSettings } from "../config/settings-schema";
@@ -252,11 +252,7 @@ async function createTtsrManager(settings?: TtsrSettings): Promise<TtsrManager> 
 	return new TtsrManager(settings);
 }
 
-function filterTtsrRulesForScan(
-	rules: readonly Rule[],
-	options: { builtinRules?: boolean; disabledRules?: readonly string[] } = {},
-): Rule[] {
-	const includeBuiltin = options.builtinRules !== false;
+function filterTtsrRulesForScan(rules: readonly Rule[], options: { disabledRules?: readonly string[] } = {}): Rule[] {
 	const disabled = new Set<string>();
 	for (const raw of options.disabledRules ?? []) {
 		const name = raw.trim();
@@ -264,7 +260,6 @@ function filterTtsrRulesForScan(
 	}
 	return rules.filter(rule => {
 		if (disabled.has(rule.name)) return false;
-		if (!includeBuiltin && rule._source?.provider === BUILTIN_DEFAULTS_PROVIDER_ID) return false;
 		return (rule.condition && rule.condition.length > 0) || (rule.astCondition && rule.astCondition.length > 0);
 	});
 }
@@ -276,7 +271,6 @@ async function loadProjectTtsrRules(cwd: string): Promise<{ rules: Rule[]; manag
 	const manager = await createTtsrManager(ttsrSettings);
 	const result = await loadCapability<Rule>(ruleCapability.id, { cwd });
 	bucketRules(result.items, manager, {
-		builtinRules: ttsrSettings.builtinRules,
 		disabledRules: ttsrSettings.disabledRules,
 	});
 	return { rules: manager.getRules(), manager };
@@ -291,7 +285,6 @@ async function loadProjectScanRules(cwd: string): Promise<Rule[]> {
 	}
 	const result = await loadCapability<Rule>(ruleCapability.id, { cwd });
 	return filterTtsrRulesForScan(result.items, {
-		builtinRules: ttsrSettings.builtinRules,
 		disabledRules: ttsrSettings.disabledRules,
 	});
 }
@@ -317,7 +310,6 @@ async function loadIsolatedRule(rulePath: string): Promise<{ rules: Rule[]; mana
 		interruptMode: "always",
 		repeatMode: "once",
 		repeatGap: 10,
-		builtinRules: true,
 		disabledRules: [],
 	});
 	if (!manager.addRule(rule)) {

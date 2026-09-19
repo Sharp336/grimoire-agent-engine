@@ -27,23 +27,3 @@ export interface BlobPublication {
 	/** Provider-assigned object identifier. */
 	remoteId?: string;
 }
-
-/** Immutable input supplied to a blob uploader. */
-export interface BlobUploadRequest {
-	/** Raw blob bytes. */
-	bytes: Uint8Array;
-	/** Internet media type of the blob. */
-	mimeType: string;
-	/** File extension without a leading dot. */
-	extension: string;
-	/** Preferred remote filename when a backend supports naming. */
-	filename?: string;
-}
-
-/** A configured destination capable of publishing blobs. */
-export interface BlobUploader {
-	/** Registry destination implemented by this uploader. */
-	readonly destination: BlobDestinationId;
-	/** Publish one blob and return its durable publication metadata. */
-	upload(request: BlobUploadRequest): Promise<BlobPublication>;
-}

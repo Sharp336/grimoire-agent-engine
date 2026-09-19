@@ -17,7 +17,6 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
-import { shimmerEnabled, shimmerText } from "../modes/theme/shimmer";
 import type { Theme } from "../modes/theme/theme";
 import vibeKillDescription from "../prompts/tools/vibe-kill.md" with { type: "text" };
 import vibeListDescription from "../prompts/tools/vibe-list.md" with { type: "text" };
@@ -394,8 +393,8 @@ function tvScreen(
 	);
 	const badge = formatBadge(screen.cli, stateToColor(screen.state), uiTheme);
 	const idText =
-		live && options.spinnerFrame !== undefined && shimmerEnabled()
-			? shimmerText(screen.id, uiTheme)
+		live && options.spinnerFrame !== undefined
+			? uiTheme.fg("accent", screen.id)
 			: uiTheme.fg(live ? "accent" : "toolOutput", screen.id);
 	const headParts = [icon, badge, idText, uiTheme.fg("dim", settledStatus ?? screen.state)];
 	const turnsLabel = `${screen.turns}t${screen.queued > 0 ? `+${screen.queued}q` : ""}`;
@@ -419,8 +418,8 @@ function tvScreen(
 			const detail = screen.lastIntent ?? screen.currentToolArgs;
 			const label = `${screen.currentTool}${detail ? `: ${detail}` : ""}`;
 			const painted =
-				options.spinnerFrame !== undefined && shimmerEnabled()
-					? shimmerText(frameText(label, TV_LINE_MAX), uiTheme)
+				options.spinnerFrame !== undefined
+					? uiTheme.fg("accent", frameText(label, TV_LINE_MAX))
 					: uiTheme.fg("muted", frameText(label, TV_LINE_MAX));
 			body.push(`${uiTheme.fg("accent", hook)} ${painted}`);
 		} else if (screen.lastIntent) {

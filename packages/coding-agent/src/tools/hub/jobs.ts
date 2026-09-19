@@ -10,7 +10,6 @@ import { Text } from "@oh-my-pi/pi-tui";
 import type { AsyncJob, AsyncJobManager, AsyncJobType } from "../../async";
 import { settings } from "../../config/settings";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
-import { shimmerEnabled, shimmerText } from "../../modes/theme/shimmer";
 import type { Theme } from "../../modes/theme/theme";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
@@ -614,15 +613,8 @@ export function jobsRenderResult(
 		render(width: number): readonly string[] {
 			const expanded = options.expanded;
 			const spinnerFrame = options.spinnerFrame ?? 0;
-			// Running-job labels shimmer while the wait block is live; the band
-			// phase is Date.now()-sampled at render time, so serving cached bytes
-			// would pin it to the ~12.5fps spinner-glyph cadence instead of the
-			// 30fps redraw. Bypass the cache while any row animates, and key on
-			// the animation state so a sealed block never hits stale shimmered
-			// bytes (spinnerFrame falls back to 0 on both sides of the seal).
-			const shimmerActive = counts.running > 0 && options.spinnerFrame !== undefined && shimmerEnabled();
-			const key = new Hasher().bool(expanded).u32(width).u32(spinnerFrame).bool(shimmerActive).digest();
-			if (!shimmerActive && cached?.key === key) return cached.lines;
+			const key = new Hasher().bool(expanded).u32(width).u32(spinnerFrame).digest();
+			if (cached?.key === key) return cached.lines;
 
 			const itemLines = renderTreeList<JobSnapshot>(
 				{
@@ -665,17 +657,9 @@ export function jobsRenderResult(
 										),
 									)}`
 								: "";
-						// Running rows in a live block shimmer their label; once the block
-						// stops animating (sealed, or a settled snapshot — spinnerFrame
-						// cleared) they render static so scrollback never keeps a mid-sweep
-						// shimmer band.
 						const live = job.status === "running" && options.spinnerFrame !== undefined;
 						const headRaw = visibleLabelLines[0] ?? "";
-						const headLabel = live
-							? shimmerEnabled()
-								? shimmerText(headRaw, uiTheme)
-								: uiTheme.fg("accent", headRaw)
-							: uiTheme.fg("toolOutput", headRaw);
+						const headLabel = live ? uiTheme.fg("accent", headRaw) : uiTheme.fg("toolOutput", headRaw);
 						lines.push(
 							`${icon}${idPart} ${typeBadge} ${headLabel}${modelText}${modelText ? uiTheme.sep.dot : " "}${durationText}`,
 						);

@@ -59,7 +59,6 @@ import type {
 	ImageContent,
 	Message,
 	Model,
-	OAuthAccountIdentity,
 	ProviderResponseMetadata,
 	ProviderSessionState,
 	ResetCreditAccountStatus,
@@ -86,7 +85,6 @@ import { MacOSPowerAssertion } from "@oh-my-pi/pi-natives";
 import {
 	$env,
 	escapeXmlText,
-	formatDuration,
 	getAgentDbPath,
 	isBunTestRuntime,
 	isEnoent,
@@ -264,20 +262,6 @@ import {
 	semanticToolResult,
 } from "./checkpoint-entries";
 import type { ClientBridge } from "./client-bridge";
-import {
-	type CodexAutoRedeemCoordinator,
-	type CodexResetAction,
-	type CodexResetPlan,
-	type CodexResetTrigger,
-	defaultCodexAutoRedeemCoordinator,
-	isTerminalRedeemOutcome,
-	overlayLiveResetCredits,
-	planCodexResetRedemptions,
-	REDEEM_RETRY_DEFER_MS,
-	SWEEP_MIN_INTERVAL_MS,
-	shouldEvaluateCodexAutoRedeem,
-	shouldPromptCodexAutoRedeem,
-} from "./codex-auto-reset";
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
 import {
@@ -619,8 +603,6 @@ export class AgentSession {
 	#autolearnCaptureAbortController: AbortController | undefined;
 	#autolearnCaptureTask: Promise<void> | undefined;
 	#isDisposed = false;
-	/** Process-wide by default (double-spend safety across sessions); injectable for tests. */
-	#codexResetCoordinator: CodexAutoRedeemCoordinator;
 	// Extension system
 	#extensionRunner: ExtensionRunner | undefined = undefined;
 	/**
@@ -1031,7 +1013,6 @@ export class AgentSession {
 				configured: this.settings.get("extensions") ?? [],
 				configuredLevel: this.settings.extensionsSourceLevel(),
 			}));
-		this.#codexResetCoordinator = config.codexResetCoordinator ?? defaultCodexAutoRedeemCoordinator;
 		const bashHost: BashRunnerHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -1172,7 +1153,6 @@ export class AgentSession {
 			sessionMessageAlreadyPersisted: message => this.#sessionMessageAlreadyPersisted(message),
 			setModelWithProviderSessionReset: model => this.#setModelWithProviderSessionReset(model),
 			resetCurrentResponsesProviderSession: reason => this.#resetCurrentResponsesProviderSession(reason),
-			maybeAutoRedeemCodexReset: activeBlockUnblockAtMs => this.#maybeAutoRedeemCodexReset(activeBlockUnblockAtMs),
 			runAutoCompaction: (reason, willRetry, deferred, allowDefer, options) =>
 				this.#maintenance.runAutoCompaction(reason, willRetry, deferred, allowDefer, options),
 			withBashBranchTransition: operation => this.#bash.withBranchTransition(operation),
@@ -8114,7 +8094,7 @@ export class AgentSession {
 	 * does not block on, or interfere with, any in-flight main turn. The
 	 * session's history and persisted state are NOT modified by this call.
 	 *
-	 * Used by `BtwController` (`/btw`) and `OmfgController` (`/omfg`) to share
+	 * Used by `BtwController` (`/btw`) to share
 	 * the snapshot + stream pipeline. The snapshot includes any in-flight
 	 * streaming assistant text so the model sees the half-finished response
 	 * rather than missing context.
@@ -9322,7 +9302,6 @@ export class AgentSession {
 		// Every fresh usage snapshot doubles as the salvage-sweep heartbeat: the
 		// status line calls this every 5 minutes while the TUI is open, so
 		// expiring saved Codex resets are caught even when nothing is blocked.
-		if (reports) this.#maybeScheduleCodexResetSweep(reports);
 		return reports;
 	}
 
@@ -9393,310 +9372,6 @@ export class AgentSession {
 			baseUrlResolver: provider => this.#modelRegistry.getProviderBaseUrl?.(provider),
 			signal,
 		});
-	}
-	/**
-	 * Ask before the first auto-spend (`codexResets.autoRedeem === "unset"`).
-	 * The answer is persisted, so this fires at most once per install. Headless
-	 * hosts get a one-shot notice per episode instead of a prompt.
-	 */
-	async #confirmCodexAutoRedeem(
-		actions: CodexResetAction[],
-		coordinator: CodexAutoRedeemCoordinator,
-	): Promise<boolean> {
-		const first = actions[0];
-		if (!first) return false;
-		const runner = this.#extensionRunner;
-		if (!runner?.hasUI()) {
-			if (!coordinator.notifiedKeys.has(first.attemptKey)) {
-				coordinator.notifiedKeys.add(first.attemptKey);
-				this.emitNotice(
-					"warning",
-					"Saved Codex resets are eligible to spend, but auto-redeem is unset and no prompt UI is available. Run `/usage reset` or set codexResets.autoRedeem.",
-					"codex-auto-reset",
-				);
-			}
-			return false;
-		}
-
-		const lines = actions.map(action =>
-			action.reason === "blocked-account"
-				? `${action.label} is blocked by the Codex ${(action.blockedWindows ?? []).join(" + ") || "usage"} limit for about ${formatDuration(action.remainingMs ?? 0)}.`
-				: `${action.label}: a saved reset expires in ${formatDuration(action.expiresInMs ?? 0)} (${action.salvageWindow ?? "weekly"} window ${Math.round((action.salvageUsedFraction ?? action.weeklyUsedFraction ?? 0) * 100)}% used).`,
-		);
-		const question =
-			actions.length === 1
-				? `Spend a saved Codex rate-limit reset?\n${lines[0]}`
-				: `Spend ${actions.length} saved Codex rate-limit resets?\n${lines.join("\n")}`;
-		try {
-			const choice = await runner.getUIContext().select(question, [
-				{
-					label: "Yes",
-					description: "Redeem now and remember yes for future eligible Codex resets.",
-				},
-				{
-					label: "No",
-					description: "Do not auto-redeem saved Codex resets.",
-				},
-			]);
-			if (choice === "Yes") {
-				this.settings.set("codexResets.autoRedeem", "yes");
-				return true;
-			}
-			if (choice === "No") {
-				this.settings.set("codexResets.autoRedeem", "no");
-			}
-		} catch (error) {
-			logger.warn("codex-auto-reset prompt failed", { error: String(error) });
-		}
-		return false;
-	}
-
-	/** Run the pure planner over a usage snapshot with this session's settings. */
-	#planCodexResets(
-		trigger: CodexResetTrigger,
-		reports: UsageReport[] | null,
-		identity: OAuthAccountIdentity | undefined,
-		coordinator: CodexAutoRedeemCoordinator,
-		activeBlockUnblockAtMs?: number,
-	): CodexResetPlan {
-		const cfg = this.settings.getGroup("codexResets");
-		const model = this.model;
-		const plan = planCodexResetRedemptions({
-			nowMs: Date.now(),
-			trigger,
-			provider: model?.provider ?? "",
-			modelId: model?.id ?? "",
-			settings: {
-				enabled: shouldEvaluateCodexAutoRedeem(cfg.autoRedeem),
-				minBlockedMinutes: Math.max(0, cfg.minBlockedMinutes),
-				keepCredits: Math.max(0, Math.trunc(cfg.keepCredits)),
-				salvageHorizonMs: Math.max(0, cfg.salvageHorizonHours) * 3_600_000,
-			},
-			identity,
-			reports,
-			attemptedKeys: coordinator.attemptedKeys,
-			deferredUntilByKey: coordinator.deferredUntilByKey,
-			lastAttemptAtByAccount: coordinator.lastAttemptAtByAccount,
-			activeBlockUnblockAtMs,
-		});
-		if (plan.skipped.length > 0) {
-			logger.debug("codex-auto-reset: plan", { trigger, actions: plan.actions.length, skipped: plan.skipped });
-		}
-		return plan;
-	}
-
-	/**
-	 * Spend planned resets in order, re-checking the process-wide attempt set
-	 * immediately before each consume so a concurrent pass can never
-	 * double-spend an episode. Returns how many credits were actually redeemed.
-	 */
-	async #executeCodexResetActions(
-		actions: CodexResetAction[],
-		coordinator: CodexAutoRedeemCoordinator,
-	): Promise<number> {
-		const authStorage = this.#modelRegistry.authStorage;
-		let redeemed = 0;
-		for (const action of actions) {
-			if (coordinator.attemptedKeys.has(action.attemptKey)) continue;
-			// Commit the attempt BEFORE acting so this episode can never re-enter.
-			coordinator.attemptedKeys.add(action.attemptKey);
-			coordinator.lastAttemptAtByAccount.set(action.accountKey, Date.now());
-			let outcome: ResetCreditRedeemOutcome;
-			try {
-				outcome = await authStorage.redeemResetCredit({
-					target: action.target,
-					baseUrlResolver: provider => this.#modelRegistry.getProviderBaseUrl?.(provider),
-					// Not tied to the retry abort controller: aborting a consume
-					// mid-flight leaves credit state unknown.
-					signal: AbortSignal.timeout(15_000),
-				});
-			} catch (error) {
-				// Thrown transport failure (network error, 15s timeout): same policy
-				// as a non-terminal code — release the episode and retry after the
-				// deferral. The next pass re-plans on a FRESH snapshot, so if an
-				// ambiguous timeout actually landed server-side the spent credit is
-				// gone from the plan before any retry could double-spend.
-				coordinator.attemptedKeys.delete(action.attemptKey);
-				coordinator.deferredUntilByKey.set(action.attemptKey, Date.now() + REDEEM_RETRY_DEFER_MS);
-				logger.warn("codex-auto-reset: redeem threw, deferred", {
-					account: action.accountKey,
-					error: String(error),
-				});
-				continue;
-			}
-			if (!isTerminalRedeemOutcome(outcome.code)) {
-				// `nothing_to_reset` (limits not constrained enough yet) or a
-				// transport failure: the credit is STILL BANKED. Release the episode
-				// and park it so a later pass retries once usage grows or the outage
-				// clears — burying a live credit here is how resets expire unused.
-				coordinator.attemptedKeys.delete(action.attemptKey);
-				coordinator.deferredUntilByKey.set(action.attemptKey, Date.now() + REDEEM_RETRY_DEFER_MS);
-			}
-			switch (outcome.code) {
-				case "reset": {
-					redeemed++;
-					const left =
-						action.availableCount === undefined ? undefined : ` (${Math.max(0, action.availableCount - 1)} left)`;
-					const detail =
-						action.reason === "expiring-credit"
-							? `it was set to expire in ${formatDuration(action.expiresInMs ?? 0)}`
-							: "retrying now";
-					this.emitNotice(
-						"info",
-						`Auto-redeemed a saved Codex rate-limit reset for ${action.label}${left ?? ""}; ${detail}.`,
-						"codex-auto-reset",
-					);
-					break;
-				}
-				case "already_redeemed":
-					this.emitNotice(
-						"warning",
-						`A saved Codex reset for ${action.label} was already redeemed elsewhere.`,
-						"codex-auto-reset",
-					);
-					break;
-				case "no_credit":
-					logger.debug("codex-auto-reset: no_credit (snapshot/live mismatch)", { account: action.accountKey });
-					break;
-				case "nothing_to_reset":
-					// Routine for opportunistic salvage on a partially-used window —
-					// keep the transcript quiet; a blocked turn's user is watching.
-					if (action.reason === "blocked-account") {
-						this.emitNotice(
-							"warning",
-							`Codex reset for ${action.label} reported nothing to reset; will retry later.`,
-							"codex-auto-reset",
-						);
-					} else {
-						logger.debug("codex-auto-reset: nothing_to_reset deferred", { account: action.accountKey });
-					}
-					break;
-				default:
-					if (action.reason === "blocked-account") {
-						this.emitNotice(
-							"warning",
-							`Codex auto-redeem for ${action.label} failed (${outcome.code}); will retry later.`,
-							"codex-auto-reset",
-						);
-					} else {
-						logger.warn("codex-auto-reset: consume failed, deferred", {
-							account: action.accountKey,
-							code: outcome.code,
-						});
-					}
-					break;
-			}
-		}
-		// Reflect the reset in the next snapshot (redeem already invalidated the cache).
-		if (redeemed > 0) void this.fetchUsageReports();
-		return redeemed;
-	}
-
-	/**
-	 * Auto-redeem hook for {@link AgentSession.#handleRetryableError}'s
-	 * usage-limit branch. Returns `true` only when a saved Codex reset was
-	 * actually spent (so the caller retries immediately). Usage is
-	 * force-refreshed first, but the live 429's parsed unblock timestamp
-	 * (`activeBlockUnblockAtMs`, captured at the error) stays authoritative for
-	 * the active account: the refreshed snapshot can still predate the block
-	 * (in-flight fetch adoption, last-good-on-failure under `/wham/usage` IP
-	 * throttling), and with no usable report at all the planner synthesizes the
-	 * active candidate and lets the redeem re-check credits live. The plan
-	 * covers ALL stored accounts — restoring an exhausted sibling clears its
-	 * credential blocks, so the retry's re-rank picks it up even when the
-	 * active account has no credits. The "unset" mode asks before spending;
-	 * "yes" skips the prompt; "no" avoids the eligibility IO entirely.
-	 * Per-account in-flight dedup lets concurrent sessions adopt one pass
-	 * instead of double-spending.
-	 */
-	async #maybeAutoRedeemCodexReset(activeBlockUnblockAtMs?: number): Promise<boolean> {
-		const coordinator = this.#codexResetCoordinator;
-		const cfg = this.settings.getGroup("codexResets");
-		const model = this.model;
-		// Cheap exits before any IO.
-		if (!shouldEvaluateCodexAutoRedeem(cfg.autoRedeem) || !model || model.provider !== "openai-codex") return false;
-		const authStorage = this.#modelRegistry.authStorage;
-		// Capture identity BEFORE awaits: markUsageLimitReached leaves the
-		// usage-limit session credential sticky, so this names the blocked account.
-		const identity = authStorage.getOAuthAccountIdentity("openai-codex", this.sessionId);
-		const accountKey = (identity?.accountId ?? identity?.email)?.trim().toLowerCase();
-		if (!accountKey) return false;
-		const existing = coordinator.inFlightByAccount.get(accountKey);
-		if (existing) return existing;
-
-		const run = (async (): Promise<boolean> => {
-			// Live data: the cached report predates the block that got us here.
-			await authStorage.invalidateUsageCache("openai-codex");
-			const reports = await this.fetchUsageReports();
-			// Live per-account credit counts: `/wham/usage` counts can be stale or
-			// pre-feature, and a stale ZERO is never corrected by the detail merge
-			// (it only runs when the usage payload already reports a positive
-			// count) — so report counts must never veto a spend or fake a reserve.
-			let effectiveReports = reports;
-			try {
-				const statuses = await this.listResetCredits(AbortSignal.timeout(10_000));
-				effectiveReports = overlayLiveResetCredits(reports, statuses);
-			} catch (error) {
-				logger.debug("codex-auto-reset: live credit listing failed; keeping report counts", {
-					error: String(error),
-				});
-			}
-			const plan = this.#planCodexResets("blocked", effectiveReports, identity, coordinator, activeBlockUnblockAtMs);
-			if (plan.actions.length === 0) return false;
-			if (
-				shouldPromptCodexAutoRedeem(cfg.autoRedeem) &&
-				!(await this.#confirmCodexAutoRedeem(plan.actions, coordinator))
-			) {
-				return false;
-			}
-			return (await this.#executeCodexResetActions(plan.actions, coordinator)) > 0;
-		})()
-			.catch(error => {
-				// Eligibility IO (cache invalidation / usage fetch) failed; the
-				// retry pipeline must keep running, so a blocked pass never rejects.
-				logger.warn("codex-auto-reset: blocked pass failed", { account: accountKey, error: String(error) });
-				return false;
-			})
-			.finally(() => coordinator.inFlightByAccount.delete(accountKey));
-		coordinator.inFlightByAccount.set(accountKey, run);
-		return run;
-	}
-
-	/**
-	 * Salvage-sweep entry, piggybacked on every successful usage fetch. Spends
-	 * saved Codex resets that would otherwise expire (the `expiring-credit`
-	 * rule in `./codex-auto-reset`) across ALL stored accounts, regardless of
-	 * the active model or blocked state. Fire-and-forget: never delays the
-	 * fetch, never runs concurrently with itself or a blocked pass, and the
-	 * attempt keys make re-sweeps of the same snapshot no-ops.
-	 */
-	#maybeScheduleCodexResetSweep(reports: UsageReport[]): void {
-		const coordinator = this.#codexResetCoordinator;
-		const cfg = this.settings.getGroup("codexResets");
-		if (!shouldEvaluateCodexAutoRedeem(cfg.autoRedeem) || cfg.salvageHorizonHours <= 0) return;
-		// A blocked pass is planning over the same snapshot; let it own the spend.
-		if (coordinator.sweepInFlight || coordinator.inFlightByAccount.size > 0) return;
-		const now = Date.now();
-		if (now - coordinator.lastSweepAt < SWEEP_MIN_INTERVAL_MS) return;
-		if (!reports.some(r => r.provider === "openai-codex" && (r.resetCredits?.credits?.length ?? 0) > 0)) return;
-		coordinator.sweepInFlight = true;
-		coordinator.lastSweepAt = now;
-		coordinator.sweepPromise = (async () => {
-			const identity = this.#modelRegistry.authStorage.getOAuthAccountIdentity("openai-codex", this.sessionId);
-			const plan = this.#planCodexResets("sweep", reports, identity, coordinator);
-			if (plan.actions.length === 0) return;
-			if (
-				shouldPromptCodexAutoRedeem(cfg.autoRedeem) &&
-				!(await this.#confirmCodexAutoRedeem(plan.actions, coordinator))
-			) {
-				return;
-			}
-			await this.#executeCodexResetActions(plan.actions, coordinator);
-		})()
-			.catch(error => logger.warn("codex-reset sweep failed", { error: String(error) }))
-			.finally(() => {
-				coordinator.sweepInFlight = false;
-			});
 	}
 
 	/**

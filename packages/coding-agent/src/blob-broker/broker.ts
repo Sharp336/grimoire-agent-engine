@@ -33,10 +33,9 @@ import type {
 	BlobBrokerWorkerConfig,
 	BlobStoreStatus,
 } from "./protocol";
-import type { BlobPublication, BlobUploadRequest, RemoteDeleteAction } from "./publication";
-import { BlobRegistry, type BlobRegistryEntry, EXT_BY_MIME, type LazyBlobFetcher } from "./store";
+import type { BlobPublication, RemoteDeleteAction } from "./publication";
+import { BlobRegistry, type BlobRegistryEntry, type LazyBlobFetcher } from "./store";
 import { DestinationUnavailableError } from "./uploader-runtime";
-import { createConfiguredUploader, memoizeUploader } from "./uploaders";
 
 /** Turns blob bytes into externally fetchable publications. */
 export interface BlobBackend {
@@ -54,19 +53,7 @@ export interface BlobBackend {
 	stop(): void;
 }
 
-const SERVE_KINDS: Readonly<Partial<Record<BlobDestinationId, true>>> = {
-	cloudflared: true,
-	ngrok: true,
-	tailscale: true,
-	ssh: true,
-	direct: true,
-	"localhost-run": true,
-	pinggy: true,
-	devtunnel: true,
-	zrok: true,
-	bore: true,
-	"named-cloudflared": true,
-};
+const SERVE_KINDS: Readonly<Partial<Record<BlobDestinationId, true>>> = { direct: true, ssh: true };
 
 /** Whether a destination exposes the local blob server. */
 export function isServeKind(kind: BlobDestinationId): kind is ExposureKind {
@@ -85,7 +72,6 @@ export class LocalBlobBackend implements BlobBackend {
 	#server: Bun.Server<undefined> | undefined;
 	#exposure: { baseUrl: string; stop(): void } | undefined;
 	#startPromise: Promise<string | null> | undefined;
-	#upload: ((hash: string, request: BlobUploadRequest) => Promise<BlobPublication | null>) | undefined;
 	#fetch: typeof globalThis.fetch;
 	#dead = false;
 
@@ -93,23 +79,14 @@ export class LocalBlobBackend implements BlobBackend {
 	constructor(config: BlobBrokerWorkerConfig, fetchFn: typeof globalThis.fetch = globalThis.fetch) {
 		this.#config = config;
 		this.#fetch = fetchFn;
-		const servesBlobs = isServeKind(config.kind);
-		const uploader = servesBlobs
-			? null
-			: createConfiguredUploader(config.kind, {
-					options: config.options,
-					credentials: config.credentials,
-				});
-		if (!servesBlobs && !uploader) {
-			throw new DestinationUnavailableError(config.kind, "no built-in uploader or serving adapter is implemented");
-		}
+		if (!isServeKind(config.kind))
+			throw new DestinationUnavailableError(config.kind, "unsupported blob serving destination");
 		this.#store = new BlobRegistry({ persist: config.persist });
-		if (uploader) this.#upload = memoizeUploader(uploader);
 	}
 
 	/** Whether this backend can render blobs on fetch. */
 	get supportsLazy(): boolean {
-		return this.#upload === undefined;
+		return true;
 	}
 
 	/**
@@ -117,7 +94,6 @@ export class LocalBlobBackend implements BlobBackend {
 	 * public base URL or `null` after a failure (sticky for this backend).
 	 */
 	ensureStarted(): Promise<string | null> {
-		if (this.#upload) return Promise.resolve(null);
 		this.#startPromise ??= this.#start();
 		return this.#startPromise;
 	}
@@ -185,24 +161,6 @@ export class LocalBlobBackend implements BlobBackend {
 	/** Ensure eager bytes have a stable publication. */
 	async ensureBlob(key: string, mimeType: string, getBytes: () => Uint8Array): Promise<BlobPublication | null> {
 		if (this.#dead) return null;
-		if (this.#upload) {
-			const existing = this.#store.lookup(key);
-			if (
-				existing?.publication &&
-				(existing.publication.expiresAt === undefined || existing.publication.expiresAt > Date.now())
-			) {
-				return existing.publication;
-			}
-			const bytes = getBytes();
-			if (bytes.byteLength === 0) return null;
-			const publication = await this.#upload(key, {
-				bytes,
-				mimeType,
-				extension: EXT_BY_MIME[mimeType] ?? "bin",
-			});
-			if (publication) this.#store.recordPublication(key, mimeType, publication);
-			return publication;
-		}
 		const baseUrl = await this.ensureStarted();
 		if (!baseUrl || this.#dead) return null;
 		const existing = this.#store.lookup(key);
@@ -215,12 +173,6 @@ export class LocalBlobBackend implements BlobBackend {
 	/** Probe for an existing (persisted or live) registration without bytes. */
 	async lookupBlob(key: string): Promise<BlobPublication | null> {
 		if (this.#dead) return null;
-		if (this.#upload) {
-			const publication = this.#store.lookup(key)?.publication;
-			return publication && (publication.expiresAt === undefined || publication.expiresAt > Date.now())
-				? publication
-				: null;
-		}
 		const baseUrl = await this.ensureStarted();
 		if (!baseUrl || this.#dead) return null;
 		const existing = this.#store.lookup(key);
@@ -229,7 +181,7 @@ export class LocalBlobBackend implements BlobBackend {
 
 	/** Ensure a lazy producer has a stable publication. */
 	async ensureLazy(key: string, mimeType: string, fetcher: LazyBlobFetcher): Promise<BlobPublication | null> {
-		if (this.#dead || this.#upload) return null;
+		if (this.#dead) return null;
 		const baseUrl = await this.ensureStarted();
 		if (!baseUrl || this.#dead) return null;
 		return this.#publish(key, baseUrl, this.#store.registerLazy(key, mimeType, fetcher));
@@ -256,13 +208,6 @@ export class LocalBlobBackend implements BlobBackend {
 	/** Perform an actual request through the public exposure health endpoint. */
 	async probePublicHealth(timeoutMs?: number): Promise<BlobBrokerProbeResponse> {
 		const startedAt = performance.now();
-		if (this.#upload) {
-			return {
-				ok: false,
-				durationMs: Math.round(performance.now() - startedAt),
-				detail: "upload destinations do not expose a broker health endpoint",
-			};
-		}
 		const baseUrl = this.#exposure?.baseUrl ?? (await this.ensureStarted());
 		if (!baseUrl || this.#dead) {
 			return {
@@ -335,11 +280,10 @@ export class LocalBlobBackend implements BlobBackend {
 		}
 		if (includeProbe) {
 			const probe = await this.probePublicHealth();
-			const unsupported = this.#upload !== undefined;
 			checks.push({
 				name: "health",
 				ok: probe.ok,
-				status: probe.ok ? "pass" : unsupported ? "warn" : "fail",
+				status: probe.ok ? "pass" : "fail",
 				detail: probe.detail,
 			});
 		}

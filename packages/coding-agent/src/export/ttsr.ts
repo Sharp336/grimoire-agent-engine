@@ -58,7 +58,6 @@ const DEFAULT_SETTINGS: Required<TtsrSettings> = {
 	interruptMode: "always",
 	repeatMode: "once",
 	repeatGap: 10,
-	builtinRules: true,
 	disabledRules: [],
 };
 

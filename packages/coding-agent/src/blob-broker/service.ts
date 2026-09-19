@@ -575,10 +575,6 @@ export function resolveBlobBrokerConfigs(settings: Settings, projectDir: string)
 	for (const destination of settings.get("images.urls.backends")) {
 		if (destination === "provider-files") continue;
 		const options = destinationOptions(optionsByDestination[destination]);
-		if (destination === "command" && typeof options.command !== "string") {
-			const command = settings.get("images.urls.command");
-			if (command) options.command = command;
-		}
 		const configuredBaseUrl = options.publicBaseUrl;
 		const configuredBindHost = options.bindHost;
 		const configuredSshTarget = options.sshTarget ?? options.host;

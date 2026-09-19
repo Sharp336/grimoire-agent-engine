@@ -1,5 +1,5 @@
 /**
- * Bounded runtime-availability probe shared by the Python/Ruby/Julia eval
+ * Bounded runtime-availability probe shared by the Python eval
  * backends.
  *
  * Each per-language `checkXKernelAvailability` helper runs a tiny "does this

@@ -77,8 +77,7 @@
     "puppeteer-core": "catalog:"
   },
   "optionalDependencies": {
-    "@huggingface/transformers": "catalog:",
-    "sherpa-onnx-node": "1.13.2"
+    "@huggingface/transformers": "catalog:"
   },
   "devDependencies": {
     "@types/bun": "catalog:"
@@ -526,14 +525,6 @@
     "./ssh/*": {
       "types": "./src/ssh/*.ts",
       "import": "./src/ssh/*.ts"
-    },
-    "./stt": {
-      "types": "./src/stt/index.ts",
-      "import": "./src/stt/index.ts"
-    },
-    "./stt/*": {
-      "types": "./src/stt/*.ts",
-      "import": "./src/stt/*.ts"
     },
     "./task": {
       "types": "./src/task/index.ts",

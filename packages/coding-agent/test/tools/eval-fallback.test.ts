@@ -105,15 +105,9 @@ describe("EvalTool language dispatch", () => {
 		expect(probeSpy.mock.calls[0]?.[1]).toMatchObject({ timeoutMs: 1_000 });
 	});
 
-	for (const testCase of [
-		{ language: "py", backend: evalIndex.pythonBackend },
-		{ language: "rb", backend: evalIndex.rubyBackend },
-		{ language: "jl", backend: evalIndex.juliaBackend },
-	] as const) {
+	for (const testCase of [{ language: "py", backend: evalIndex.pythonBackend }] as const) {
 		it(`preserves caller cancellation during ${testCase.language} availability probing`, async () => {
 			const settings = Settings.isolated();
-			if (testCase.language === "rb") settings.set("eval.rb", true);
-			if (testCase.language === "jl") settings.set("eval.jl", true);
 			const controller = new AbortController();
 			vi.spyOn(testCase.backend, "isAvailable").mockImplementation(async () => {
 				controller.abort();
@@ -178,8 +172,6 @@ describe("EvalTool language dispatch", () => {
 		expect(resolveEvalBackends(makeSession(settings))).toEqual({
 			python: true,
 			js: false,
-			ruby: false,
-			julia: false,
 		});
 	});
 

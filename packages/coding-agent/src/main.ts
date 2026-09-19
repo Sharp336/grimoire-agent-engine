@@ -100,7 +100,6 @@ import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } fr
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
 import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
-import { shouldShowStartupSplash } from "./startup-splash";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
@@ -490,7 +489,6 @@ async function runInteractiveMode(
 	mcpManager: MCPManager | undefined,
 	resuming: boolean,
 	forceSetupWizard: boolean,
-	showStartupSplash: boolean,
 	eventBus?: EventBus,
 	initialMessage?: string,
 	initialImages?: ImageContent[],
@@ -518,7 +516,6 @@ async function runInteractiveMode(
 
 	let setupWizard: typeof SetupWizardModule | undefined;
 	let setupScenes: SetupScene[] = [];
-	let playStartupSplash = false;
 	try {
 		// Cold-launch gate: the full setup wizard (every scene + the overlay and
 		// their TUI/OAuth/search/theme deps) is heavy, yet the common case only needs
@@ -527,7 +524,7 @@ async function runInteractiveMode(
 		// setting needs the shared setup splash renderer.
 		const storedSetupVersion = settings.get("setupVersion");
 		setupWizard =
-			forceSetupWizard || storedSetupVersion < CURRENT_SETUP_VERSION || showStartupSplash
+			forceSetupWizard || storedSetupVersion < CURRENT_SETUP_VERSION
 				? await import("./modes/setup-wizard")
 				: undefined;
 		setupScenes = setupWizard
@@ -538,11 +535,9 @@ async function runInteractiveMode(
 					force: forceSetupWizard,
 				})
 			: [];
-		playStartupSplash = showStartupSplash && setupScenes.length === 0;
 
 		await logger.time("InteractiveMode.init", () =>
 			mode.init({
-				suppressWelcomeIntro: resuming || setupScenes.length > 0 || playStartupSplash,
 				clearInitialTerminalHistory: true,
 				recentSessions: startupLease?.recentSessions,
 			}),
@@ -552,11 +547,6 @@ async function runInteractiveMode(
 		mode.stop();
 		throw error;
 	}
-
-	if (setupWizard && playStartupSplash) {
-		await setupWizard.runStartupSplash(mode);
-	}
-
 	if (setupWizard && setupScenes.length > 0) {
 		await setupWizard.runSetupWizard(mode, setupScenes);
 	}
@@ -1862,16 +1852,6 @@ export async function runRootCommand(
 				stdinContent: pipedInput,
 			});
 
-			const showStartupSplash = shouldShowStartupSplash({
-				configured: settingsInstance.get("startup.showSplash"),
-				isInteractive,
-				resuming: Boolean(parsedArgs.continue || parsedArgs.resume || parsedArgs.fork || foreignSource),
-				quiet: settingsInstance.get("startup.quiet"),
-				timing: Boolean($env.PI_TIMING),
-				stdinIsTTY: process.stdin.isTTY,
-				stdoutIsTTY: process.stdout.isTTY,
-			});
-
 			// Startup changelog is only consumed by interactive mode below; kick the
 			// CHANGELOG.md parse off now so it overlaps session creation instead of
 			// serializing after it.
@@ -2005,7 +1985,6 @@ export async function runRootCommand(
 						mcpManager,
 						Boolean(parsedArgs.continue || parsedArgs.resume || parsedArgs.fork || foreignSource),
 						deps.forceSetupWizard === true,
-						showStartupSplash,
 						eventBus,
 						initialMessage,
 						initialImages,

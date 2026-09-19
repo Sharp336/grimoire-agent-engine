@@ -23,7 +23,6 @@ import "../capability/tool";
 import "./agent-plugins";
 import "./agents-md";
 import "./builtin";
-import "./builtin-defaults";
 import "./claude";
 import "./claude-plugins";
 import "./cline";

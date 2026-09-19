@@ -89,7 +89,6 @@ export type TodoPhase = {
 };
 
 export interface InteractiveModeInitOptions {
-	suppressWelcomeIntro?: boolean;
 	clearInitialTerminalHistory?: boolean;
 	/** Recent-session rows loaded by the prepaint composer while runtime modules initialized. */
 	recentSessions?: Promise<RecentSession[] | undefined>;
@@ -113,7 +112,6 @@ export interface InteractiveModeContext {
 	todoContainer: Container;
 	subagentContainer: Container;
 	btwContainer: Container;
-	omfgContainer: Container;
 	cleanseContainer: Container;
 	errorBannerContainer: Container;
 	modelCycleContainer: Container;
@@ -237,7 +235,6 @@ export interface InteractiveModeContext {
 
 	// Lifecycle
 	init(options?: InteractiveModeInitOptions): Promise<void>;
-	playWelcomeIntro(): void;
 	shutdown(): Promise<void>;
 	checkShutdownRequested(): Promise<void>;
 
@@ -399,9 +396,6 @@ export interface InteractiveModeContext {
 	handleMoveCommand(targetPath?: string): Promise<void>;
 	handleRenameCommand(title: string): Promise<void>;
 	handleMemoryCommand(text: string): Promise<void>;
-	handleSTTToggle(): Promise<void>;
-	/** Start or stop the Codex-backed realtime voice session. */
-	handleLiveCommand(): Promise<void>;
 	executeCompaction(
 		customInstructionsOrOptions?: string | CompactOptions,
 		isAuto?: boolean,
@@ -462,9 +456,6 @@ export interface InteractiveModeContext {
 		leafId: string,
 		sessionId: string,
 	): Promise<void>;
-	handleOmfgCommand(complaint: string): Promise<void>;
-	hasActiveOmfg(): boolean;
-	handleOmfgEscape(): boolean;
 	handleCleanseCommand(args: string): Promise<void>;
 	hasActiveCleanse(): boolean;
 	handleCleanseEscape(): boolean;
