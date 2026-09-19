@@ -70,11 +70,10 @@ Current runtime behavior:
 
 ## Discovery pipeline
 
-`loadSkills()` in `packages/coding-agent/src/extensibility/skills.ts` does three passes:
+`loadSkills()` in `packages/coding-agent/src/extensibility/skills.ts` does two passes:
 
-1. **Capability providers** via `loadCapability("skills")` (the managed/auto-learn provider's skills are skipped here and handled in pass 3)
+1. **Capability providers** via `loadCapability("skills")`.
 2. **Custom directories** via `scanSkillsFromDir(..., { requireDescription: true })` (one-level directory enumeration). A custom-directory skill overrides a same-named default provider skill; duplicate custom-directory names remain first-wins.
-3. **Managed (auto-learn) skills** (`omp-managed` provider) resolved dead-last, so any same-named enabled authored skill from a provider or custom directory takes precedence
 
 If `skills.enabled` is `false`, discovery returns no skills.
 
@@ -93,7 +92,6 @@ Current registered skill providers:
    - `codex`
 5. `opencode` (priority 55)
 6. `github` (priority 30) — `.github/skills/<name>/SKILL.md` (GitHub Agent Skills layout, project-only)
-7. `omp-managed` (priority 5) — auto-learn skills under `~/.omp/agent/managed-skills`, registered in `src/discovery/builtin.ts` and discovered unconditionally (only writing/nudging is gated by `autolearn.enabled`); always defers to a same-named authored skill
 
 Dedup key is skill name. First item with a given name wins.
 

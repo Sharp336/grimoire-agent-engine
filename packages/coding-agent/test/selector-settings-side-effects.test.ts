@@ -67,17 +67,6 @@ describe("selector setting side effects", () => {
 		expect(invalidate).toHaveBeenCalledTimes(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
-	it("applies memory backend changes to the live session", () => {
-		const applyMemoryBackend = vi.fn(async () => {});
-		const controller = new SelectorController({
-			session: { applyMemoryBackend },
-			showError: vi.fn(),
-		} as unknown as InteractiveModeContext);
-
-		controller.handleSettingChange("memory.backend", "mnemopi");
-
-		expect(applyMemoryBackend).toHaveBeenCalledTimes(1);
-	});
 	it("stops the live advisor runtime when advisor.enabled is turned off in /settings", () => {
 		const setAdvisorEnabled = vi.fn();
 		const invalidate = vi.fn();

@@ -18,7 +18,7 @@
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `path` | `string` | No | Glob, file, directory, or path-backed internal URL. Separate multiple targets with `;`; omitted or empty defaults to `.`. Existing paths containing delimiters remain literal when they exist. Each target becomes its own walk root and multi-target scans run concurrently. `memory://` alone supports internal-URL glob patterns; `ssh://` is rejected because it has no local backing path. |
+| `path` | `string` | No | Glob, file, directory, or path-backed internal URL. Separate multiple targets with `;`; omitted or empty defaults to `.`. Existing paths containing delimiters remain literal when they exist. Each target becomes its own walk root and multi-target scans run concurrently. Internal-URL glob patterns and `ssh://` inputs are rejected. |
 | `hidden` | `boolean` | No | Include hidden files. Defaults to `true`. |
 | `gitignore` | `boolean` | No | Respect `.gitignore` during local native globbing. Defaults to `true`; set `false` to include gitignored files. |
 | `limit` | `number` | No | Max returned paths. Defaults to `200`; finite positive inputs are floored then clamped to `1..200`. |
@@ -67,7 +67,7 @@ The tool returns a single text block plus structured `details`.
 - **Single glob path**: one input parsed by `parseFindPattern()`.
 - **Multi-path search**: multiple inputs resolved by `resolveExplicitFindPatterns()` into per-entry targets, each walked as its own root concurrently and merged afterwards.
 - **Partial multi-path search with missing inputs**: local multi-path calls skip missing base paths and surface them as `missingPaths` / `Skipped missing paths: ...`.
-- **Internal URL input**: exact path-backed URLs are supported. `memory://` additionally supports glob patterns against its backing tree. Other internal-URL globs and every `ssh://` input are rejected.
+- **Internal URL input**: exact path-backed URLs are supported. Internal-URL globs and every `ssh://` input are rejected.
 - **Custom delegated search**: uses injected `GlobOperations` instead of local fs + native glob.
 
 ## Side Effects
@@ -100,7 +100,7 @@ The tool returns a single text block plus structured `details`.
   - `Path is not a directory: ...`
   - timeout result text is `glob timed out after <seconds>s; returning <N> partial matches — narrow the pattern instead of retrying blindly` and is returned as a successful, truncated partial result rather than an error.
   - `find cannot operate on a remote ssh:// path: ...` for SSH inputs.
-  - `Glob patterns are not supported for internal URLs: ...` except for `memory://` patterns.
+  - `Glob patterns are not supported for internal URLs: ...`.
   - `Cannot find internal URL without a backing file: ...` for virtual-only resources.
 - If the caller aborts, the local branch converts `AbortError` into `ToolAbortError`.
 - Non-`ENOENT` stat failures and other unexpected errors are rethrown.

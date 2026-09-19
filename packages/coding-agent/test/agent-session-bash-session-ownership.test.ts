@@ -7,11 +7,12 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as bashExecutor from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
-import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import { createBashTool } from "@oh-my-pi/pi-coding-agent/extensibility/legacy-pi-coding-agent-shim";
+import type { ExtensionRunner, ToolShellEnvironmentHook } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { createAssistantMessage, createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
@@ -94,6 +95,19 @@ describe("AgentSession bash session ownership", () => {
 		return sessionFile;
 	}
 
+	function createBashDefinition(
+		shellEnv: ToolShellEnvironmentHook,
+	): BashTool & { shellEnv: ToolShellEnvironmentHook } {
+		return Object.assign(
+			new BashTool({
+				cwd: tempDir.path(),
+				hasUI: false,
+				settings: Settings.instance,
+			} as ToolSession),
+			{ shellEnv },
+		);
+	}
+
 	it("does not flush a pending bash result into a replacement session", async () => {
 		createSession();
 		let forceStreaming = true;
@@ -128,11 +142,8 @@ describe("AgentSession bash session ownership", () => {
 			env: { PATH: Bun.env.PATH ?? "", HOME: tempDir.path(), SHELL: shell },
 			prefix: undefined,
 		});
-		const spawnHook = vi.fn(spawn => ({
-			...spawn,
-			env: { ...spawn.env, OMP_USER_SHELL_ENV: "extension-value" },
-		}));
-		const definition = createBashTool(tempDir.path(), { spawnHook });
+		const shellEnv = vi.fn(() => ({ OMP_USER_SHELL_ENV: "extension-value" }));
+		const definition = createBashDefinition(shellEnv);
 		const extensionRunner = {
 			hasHandlers: vi.fn(() => false),
 			getRegisteredTool: vi.fn((name: string) => (name === "bash" ? { definition } : undefined)),
@@ -146,7 +157,7 @@ describe("AgentSession bash session ownership", () => {
 		});
 
 		expect(result.output).toBe("extension-value");
-		expect(spawnHook).toHaveBeenCalledWith(
+		expect(shellEnv).toHaveBeenCalledWith(
 			expect.objectContaining({
 				command: 'printf "%s" "$OMP_USER_SHELL_ENV"',
 				cwd: tempDir.path(),
@@ -156,7 +167,7 @@ describe("AgentSession bash session ownership", () => {
 
 	it("forwards a hook-injected variable even when process.env already mirrors its value", async () => {
 		// Regression: an extension may both mirror a variable into process.env (so
-		// MCP servers and workers inherit it) and inject it via its spawnHook. The
+		// MCP servers and workers inherit it) and inject it via its shellEnv. The
 		// hook adapter forwards only entries differing from the baseline it is
 		// handed; diffing against process.env made the mirrored value look
 		// unchanged and dropped it, while the child shell's real base env (the
@@ -173,11 +184,8 @@ describe("AgentSession bash session ownership", () => {
 		const previousMirror = process.env.OMP_USER_SHELL_MIRROR;
 		process.env.OMP_USER_SHELL_MIRROR = "mirrored-value";
 		try {
-			const spawnHook = vi.fn(spawn => ({
-				...spawn,
-				env: { ...spawn.env, OMP_USER_SHELL_MIRROR: "mirrored-value" },
-			}));
-			const definition = createBashTool(tempDir.path(), { spawnHook });
+			const shellEnv = vi.fn(() => ({ OMP_USER_SHELL_MIRROR: "mirrored-value" }));
+			const definition = createBashDefinition(shellEnv);
 			const extensionRunner = {
 				hasHandlers: vi.fn(() => false),
 				getRegisteredTool: vi.fn((name: string) => (name === "bash" ? { definition } : undefined)),
@@ -216,11 +224,11 @@ describe("AgentSession bash session ownership", () => {
 			prefix: undefined,
 		};
 		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue(cachedShellConfig);
-		const spawnHook = vi.fn(context => {
+		const shellEnv = vi.fn(context => {
 			context.env.OMP_INJECTED_TOKEN = "injected-value";
-			return context;
+			return { OMP_INJECTED_TOKEN: context.env.OMP_INJECTED_TOKEN };
 		});
-		const definition = createBashTool(tempDir.path(), { spawnHook });
+		const definition = createBashDefinition(shellEnv);
 		const extensionRunner = {
 			hasHandlers: vi.fn(() => false),
 			getRegisteredTool: vi.fn((name: string) => (name === "bash" ? { definition } : undefined)),
@@ -240,10 +248,10 @@ describe("AgentSession bash session ownership", () => {
 	});
 
 	it("does not run the shell environment hook when a user_bash handler replaces the result", async () => {
-		const spawnHook = vi.fn(() => {
+		const shellEnv = vi.fn(() => {
 			throw new Error("shell env hook must not run when user_bash supplies a replacement result");
 		});
-		const definition = createBashTool(tempDir.path(), { spawnHook });
+		const definition = createBashDefinition(shellEnv);
 		const emitUserBash = vi.fn().mockResolvedValue({ result: bashResult });
 		const extensionRunner = {
 			hasHandlers: vi.fn((eventType: string) => eventType === "user_bash"),
@@ -257,7 +265,7 @@ describe("AgentSession bash session ownership", () => {
 		const result = await session.executeBash("replaced-command", undefined, { useUserShell: true });
 
 		expect(result).toEqual(bashResult);
-		expect(spawnHook).not.toHaveBeenCalled();
+		expect(shellEnv).not.toHaveBeenCalled();
 	});
 
 	it("keeps a queued bash result on the branch discarded by an empty stop", async () => {
@@ -531,34 +539,5 @@ describe("AgentSession bash session ownership", () => {
 		expect(
 			session.messages.some(message => message.role === "bashExecution" && message.command === "old-branch-command"),
 		).toBe(false);
-	});
-});
-
-describe("legacy spawnHook shellEnv adapter", () => {
-	it("forwards only the hook's added or changed variables, not the spread baseline", () => {
-		const definition = createBashTool(process.cwd(), {
-			spawnHook: context => ({ ...context, env: { ...context.env, EXTRA: "1", CHANGED: "new" } }),
-		});
-		const result = definition.shellEnv?.({
-			command: "true",
-			cwd: process.cwd(),
-			env: { KEPT: "kept", CHANGED: "old" },
-		});
-		expect(result).toEqual({ EXTRA: "1", CHANGED: "new" });
-	});
-	it("forwards changes when the hook mutates its environment in place", () => {
-		const definition = createBashTool(process.cwd(), {
-			spawnHook: context => {
-				context.env.EXTRA = "1";
-				context.env.CHANGED = "new";
-				return context;
-			},
-		});
-		const result = definition.shellEnv?.({
-			command: "true",
-			cwd: process.cwd(),
-			env: { KEPT: "kept", CHANGED: "old" },
-		});
-		expect(result).toEqual({ EXTRA: "1", CHANGED: "new" });
 	});
 });

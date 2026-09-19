@@ -173,9 +173,8 @@ keeping the conversation you can see.
   abort it first.
 - Closes every cached provider-session state entry (server-side conversation /
   prompt-cache handles) and reports how many were pruned.
-- Mints a fresh provider session id and re-keys hindsight and mnemopi memory to
-  it, and invalidates the append-only context so the next turn re-sends the full
-  local transcript to the provider.
+- Mints a fresh provider session id and invalidates the append-only context so
+  the next turn re-sends the full local transcript to the provider.
 - Leaves the local transcript, session file, and session identity unchanged, so
   nothing you have said or received is lost.
 
@@ -198,9 +197,9 @@ command aborts it and waits for it to stop before resetting.
   state, checkpoint/rewind and deferred tool state, and session-stop
   continuation state. It also cancels this agent's queued continuation work and
   async bash/task jobs.
-- Rotates provider-side session state, re-primes advisors, invalidates
-  append-only model context, and resets memory promotion so the next turn
-  rebuilds from the base system prompt and current project instructions.
+- Rotates provider-side session state, re-primes advisors, and invalidates
+  append-only model context so the next turn rebuilds from the base system
+  prompt and current project instructions.
 - Retains the session id, title, cwd, model, settings, active plan path, and
   transcript file.
 - Appends a durable `reset_boundary`. The collapsed live transcript and rebuilt
@@ -323,18 +322,18 @@ This is startup-only behavior; there is no interactive `/continue` slash command
 
 1. Emit `session_before_switch` with `reason: "resume"` and `targetSessionFile` (cancellable).
 2. Disconnect the agent event subscription, abort in-flight work, and run the optional pre-switch reconciler.
-3. Flush pending bash/session writes and capture rollback state: session manager state; agent messages and all queues; model/thinking/service tiers; tools and prompts; provider/cache ids; memory promotion; and checkpoint rewind state.
+3. Flush pending bash/session writes and capture rollback state: session manager state; agent messages and all queues; model/thinking/service tiers; tools and prompts; provider/cache ids; and checkpoint rewind state.
 4. Clear agent and next-turn queues. For a different file, drain/detach advisor recorders.
-5. `sessionManager.setSessionFile(sessionPath)`, update provider-cache/session ids and memory keys, build the display context, and rehydrate checkpoint state.
+5. `sessionManager.setSessionFile(sessionPath)`, update provider-cache/session ids, build the display context, and rehydrate checkpoint state.
 6. Emit `session_switch` with `reason: "resume"`.
 7. Replace agent messages, reset advisor state, and synchronize todos. Close cached provider sessions for a different file, or for a same-file reload whose replay messages changed.
 8. Restore an available persisted model. If the loaded branch ended with an interrupted turn, append its synthetic abort message and rebuild context.
 9. Restore configured/effective thinking and per-family service tiers, falling back to current settings when the target branch has no corresponding entries.
-10. For a different transcript, reset memory context; for any conversation rewrite, clear session-scoped tool state.
+10. For any conversation rewrite, clear session-scoped tool state.
 11. Reconnect agent events, run the optional session-switch reconciler (interactive mode uses it to re-enter persisted modes such as plan), and best-effort refresh the workspace-root system-prompt block. Reconciler/prompt-refresh errors are logged rather than rolling back the committed switch.
 12. Restore target advisor cost state, finish the bash transition, and notify session-change callbacks when the session id changed.
 
-If a throwing step in the guarded transition fails, `switchSession()` restores the captured session, agent queues/messages, tools/prompts, model/thinking/service-tier, provider/cache, memory, and checkpoint state; it reconnects the prior agent subscription and re-runs mode reconciliation before rethrowing.
+If a throwing step in the guarded transition fails, `switchSession()` restores the captured session, agent queues/messages, tools/prompts, model/thinking/service-tier, provider/cache, and checkpoint state; it reconnects the prior agent subscription and re-runs mode reconciliation before rethrowing.
 
 No new session file is created by `switchSession()` itself.
 

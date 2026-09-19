@@ -1,13 +1,11 @@
 # Embedded Local Tiny-Model Experiments
 
 This document summarizes the experiments behind the optional **local** tiny-model paths for
-session-title generation (`providers.tinyModel`), Mnemopi memory extraction/consolidation
-(`providers.memoryModel`), and the `auto` thinking-level difficulty classifier
-(`providers.autoThinkingModel`, which uses the memory-model registry). It is a factual engineering
-record for maintainers: what we measured, which recipes won, and which models we shipped. All three
-settings default to `online`, so existing users incur no downloads or on-device inference cost unless
-they opt in. On the online path, the configured `tiny` role is preferred and the task-specific online
-fallback is used when that role is unset.
+session-title generation (`providers.tinyModel`) and the `auto` thinking-level difficulty classifier
+(`providers.autoThinkingModel`). It is a factual engineering record for maintainers: what we measured,
+which recipes won, and which models we shipped. Both settings default to `online`, so existing users
+incur no downloads or on-device inference cost unless they opt in. On the online path, the configured
+`tiny` role is preferred and the task-specific online fallback is used when that role is unset.
 
 ## Runtime / environment findings
 
@@ -53,7 +51,7 @@ fallback is used when that role is unset.
   load, slightly slower inference; `all` = default.
 - **First run** downloads weights from the HF Hub to a cache dir (q4 weights ~200MB–1.1GB depending
   on model); subsequent **warm** loads are sub-second to ~3s. Inference is async and
-  background-friendly for memory tasks; titles are semi-interactive.
+  background-friendly for classification tasks; titles are semi-interactive.
 
 ## Task 1: Session title generation (`providers.tinyModel`)
 
@@ -85,75 +83,26 @@ fallback is used when that role is unset.
 **Shipped local options**: `lfm2-350m`, `qwen3-0.6b`, `gemma-270m`, `qwen2.5-0.5b`, `lfm2-700m`.
 **Default setting**: `online`. The default local download for `omp tiny-models` is `lfm2-700m`.
 
-## Task 2: Mnemopi memory (`providers.memoryModel`)
+## Task 2: Auto thinking classifier (`providers.autoThinkingModel`)
 
-Mnemopi runs two small-LLM tasks:
+The classifier chooses a concrete reasoning effort for each prompt.
 
-1. **Extraction** — pull durable, structured items from a single message.
-2. **Consolidation** — summarize a list of memories into 1–3 faithful sentences.
-
-These need **bigger models than titles: 1B–1.7B**. We tested LFM2-1.2B, Qwen2.5-1.5B, Qwen3-1.7B,
-and gemma-3-1b (q4, CPU) via four parallel agents each running 27–31 experiments.
-
-### Extraction findings
-
-The stock 5-category JSON prompt fails on small models in two ways:
-
-1. The all-empty example `{"facts":[],...}` gets **copied verbatim** → 0 facts extracted.
-2. Capable models emit **JSON objects inside arrays**, which Mnemopi's `String(item)` coerces into
-   the literal string `[object Object]`.
-
-The robust fix is a **one-item-per-line output format** (consumed by Mnemopi's parser line-fallback)
-or a **flat JSON array of strings**. Every model also over-extracts pure small talk; an explicit
-chit-chat → NONE example is the best mitigation.
-
-### Technique polarity flips vs titles
-
-- At 1B+, **few-shot is the dominant quality lever**: e.g. Qwen2.5-1.5B extraction F1 0.52 → 0.83
-  going 1 → 3 shots; gemma recall 0.65 → 0.92 with 2 shots.
-- **Prefill HURTS extraction** — it forces output on small talk, producing false positives.
-- **System-split** (instructions in the system role) helps models that have a system role.
-- **Greedy >= temperature** for both tasks.
-- **Token biasing** is again a no-op.
-
-### Per-model verdicts (head-to-head, 16-fixture set)
-
-- **Qwen3-1.7B** — most disciplined extraction: returns empty on small talk, no buried-fact leak,
-  preserves language, clean flat JSON. Weaknesses: coarse granularity, missed a multi-turn value
-  update.
-- **Qwen2.5-1.5B** — best extraction granularity (atomic facts), caught the value update, zero
-  small-talk leakage. Weaknesses: weakest consolidation (run-on, no dedup) and one degenerate
-  buried-fact output.
-- **gemma-3-1b** — best consolidation (dedup works, faithful, clean single-memory). Weaknesses: leaks
-  small talk and translated German.
-- **LFM2-1.2B** — solid and fastest to load. Weaknesses: `Label: value` noise, small-talk + buried
-  leaks, a fluffy single-memory summary.
-
-### Recommendation and current availability
-
-The experiments favored **Qwen3-1.7B** for extraction precision, but the shipped ONNX export cannot
-currently run under `onnxruntime-node`: its RotaryEmbedding cache updates are unsupported. The
-runtime rejects this choice before loading the model rather than failing during inference.
-
-Of the runnable options, the registry marks `lfm2-1.2b` as the recommended local memory model.
-`gemma-3-1b` favors consolidation quality, while `qwen2.5-1.5b` favors fine-grained extraction.
-
-**Configured local options**: `llama3.2:3b`, `qwen3-1.7b` (currently disabled as described above),
-`gemma-3-1b`, `qwen2.5-1.5b`, `lfm2-1.2b`.
-**Default setting**: `online`.
-
-### Known Mnemopi parser bugs (surfaced by these experiments)
-
-- `String(item)` produces `[object Object]` on object array items.
-- The line-fallback drops items `<=10` chars, so a correct short fact like `Name: Can` is discarded.
+- The default `online` path uses the configured `tiny` or `smol` role and classifies into the
+  target model's supported effort levels.
+- A local model uses the shared completion-model registry and a three-bucket
+  `trivial` / `moderate` / `hard` prompt, mapped to `low` / `high` / `xhigh`.
+- Local completion models need more capacity than title generation. The default local option is
+  `lfm2-1.2b`; `qwen3-1.7b` remains disabled because its ONNX RotaryEmbedding cache updates are
+  unsupported by `onnxruntime-node`.
+- Classification failures fall back to a concrete effort in the caller rather than failing the turn.
 
 ## Integration notes
 
-- `providers.tinyModel`, `providers.memoryModel`, and `providers.autoThinkingModel` default to
-  `online`, so existing users get **no downloads or on-device inference cost** unless they opt in.
-- Local inference runs **in a worker** (off the main thread); models are cached on disk and
-  downloaded on first use.
-- The memory local path applies the refined recipes (line-format + small-talk-guarded extraction
-  prompt, hardened consolidation prompt) via Mnemopi prompt overrides; the **online path is
-  unchanged**.
-- `providers.autoThinkingModel` uses the same shipped local options as `providers.memoryModel`.
+- `providers.tinyModel` and `providers.autoThinkingModel` default to `online`, so existing users get
+  no downloads or on-device inference cost unless they opt in.
+- Local inference runs in a worker off the main thread; models are cached on disk and downloaded on
+  first use.
+- `providers.tinyModelDevice` / `PI_TINY_DEVICE` and `providers.tinyModelDtype` /
+  `PI_TINY_DTYPE` select the local runtime device and precision.
+- Auto thinking uses the completion-capable local model registry; title generation keeps its smaller,
+  task-specific model set.
