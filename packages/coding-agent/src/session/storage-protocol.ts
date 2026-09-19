@@ -8,7 +8,7 @@
 export const STORAGE_PROTOCOL_SCHEMA = "artel.storage.protocol.v1" as const;
 export const STORAGE_PROTOCOL_VERSION = "1.0" as const;
 export const STORAGE_PROTOCOL_SCHEMA_HASH =
-	"sha256:09137f606a52bf6ff9ca8055caa0ca8470b21be9406ee924e424b3ce42d08a90" as const;
+	"sha256:69681e02b9f1d775896c487effed440eb657b756d05b19c66cfaadf8a256615e" as const;
 
 export type StorageOperation = "write" | "barrier" | "read_range" | "read_context" | "receipt" | "health" | "metrics";
 
