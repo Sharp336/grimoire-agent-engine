@@ -3,9 +3,12 @@ import type { EngineEvent, EngineTarget } from "../src/engine/contracts";
 import { decodeCursor, encodeCursor } from "../src/engine/rocks-runtime-cursor";
 import { nativeEntry } from "../src/engine/rocks-runtime-history";
 import { projectEvent, projectionId, settleRuntimeMessages } from "../src/engine/rocks-runtime-projection";
+import type { RocksCommand } from "../src/engine/rocks-runtime-rows";
 import { queryWork, RocksEngineStore } from "../src/engine/rocks-runtime-store";
+import { RocksEngineMutations } from "../src/engine/rocks-store";
 import type { RuntimeEventsRequest } from "../src/engine/runtime-protocol";
 import { RuntimeRecords, RuntimeTransaction } from "../src/engine/runtime-records";
+import type { EngineCommandIdentity } from "../src/engine/store";
 import { StorageClient } from "../src/session/storage-client";
 import {
 	STORAGE_PROTOCOL_SCHEMA_HASH,
@@ -154,6 +157,93 @@ async function append(
 	return event;
 }
 describe("Rocks runtime atomic public projections", () => {
+	test("settlement publishes a canonical receipt with the command's frozen identity", async () => {
+		const rows = fixture();
+		const identity: EngineCommandIdentity = {
+			commandId: "frozen-command",
+			operation: "steer",
+			deviceId: "device",
+			engineId: "engine",
+			engineGeneration: 1,
+			agentInstanceId: "a",
+			agentInstanceRef: ref,
+			executionId: "frozen-execution",
+			attemptId: "frozen-attempt",
+			bindingId: "frozen-binding",
+			bindingGeneration: 3,
+			authorityGeneration: 1,
+			payloadHash: `sha256:${"a".repeat(64)}`,
+			browserPayloadHash: `sha256:${"a".repeat(64)}`,
+			canonicalHash: `sha256:${"b".repeat(64)}`,
+			serializedCommand: JSON.stringify({
+				browserTarget: {
+					agentInstanceRef: ref,
+					attemptId: "frozen-attempt",
+					executionId: "frozen-execution",
+				},
+			}),
+		};
+		rows.seed("command", identity.commandId, {
+			command_id: identity.commandId,
+			agent_instance_id: identity.agentInstanceId,
+			processor_generation: 1,
+			state: "received",
+			canonical_hash: identity.canonicalHash,
+			payload_bytes: 1,
+			control_admission: 0,
+			engine_generation: 1,
+			operation: identity.operation,
+			identity,
+			receipt: null,
+			received_at: 1,
+			updated_at: 1,
+			pending_accounted: false,
+		} satisfies RocksCommand);
+		const tx = new RuntimeTransaction(rows);
+		const mutations = new RocksEngineMutations(rows.client, async () => {});
+		await mutations.settle(
+			tx,
+			identity.commandId,
+			{ outcome: "applied", detail: { persisted: true } },
+			identity.canonicalHash,
+			true,
+		);
+		const event = await tx.get<EngineEvent>("event", "11");
+		expect(event).toMatchObject({
+			causationCommandId: identity.commandId,
+			agentInstanceId: identity.agentInstanceId,
+			executionId: identity.executionId,
+			attemptId: identity.attemptId,
+			bindingId: identity.bindingId,
+			bindingGeneration: identity.bindingGeneration,
+			kind: "command_receipt",
+			payload: {
+				value: {
+					version: "1.0",
+					commandId: identity.commandId,
+					payloadHash: identity.browserPayloadHash,
+					target: {
+						agentInstanceRef: ref,
+						attemptId: identity.attemptId,
+						executionId: identity.executionId,
+					},
+					stage: "applied",
+					lookup: "known",
+					result: {
+						persisted: true,
+						target: {
+							agentInstanceRef: ref,
+							attemptId: identity.attemptId,
+							executionId: identity.executionId,
+							authorityGeneration: 1,
+							intentRevision: 0,
+						},
+					},
+				},
+			},
+		});
+		expect(event?.payload).not.toHaveProperty("receipt");
+	});
 	test("new input and its attention/detail appear in the same mutation; resolution removes pending input", async () => {
 		const tx = new RuntimeTransaction(fixture());
 		await append(tx, "input_requested", {

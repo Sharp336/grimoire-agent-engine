@@ -10,6 +10,7 @@ import {
 	ReplayPolicy,
 } from "@nats-io/jetstream";
 import { connect, type NatsConnection, type NodeConnectionOptions } from "@nats-io/transport-node";
+import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import type { EngineChildLaunchResult } from "../tools";
 import {
 	type AgentMessageEnvelope,
@@ -561,6 +562,8 @@ export class HostedEngineBridge {
 	}
 
 	async #deliverEvent(event: EngineEventEnvelope): Promise<boolean> {
+		const normalizedReceipt = await this.#normalizeCommandReceipt(event);
+		if (normalizedReceipt) event = normalizedReceipt.event;
 		if (["attempt.agent_registered", "attempt.holds_changed", "attempt.message_updated"].includes(event.type))
 			return true;
 		if (
@@ -654,7 +657,7 @@ export class HostedEngineBridge {
 		}
 		this.#active.set(claim.jobId, claim);
 		if (event.type === "attempt.command_receipt" && event.payload) {
-			const value = (event.payload.value ?? event.payload) as Record<string, unknown>;
+			const value = normalizedReceipt?.value ?? ((event.payload.value ?? event.payload) as Record<string, unknown>);
 			const receipt: Record<string, unknown> = {
 				...value,
 				browserPayloadHash: value.payloadHash ?? value.browserPayloadHash,
@@ -695,6 +698,85 @@ export class HostedEngineBridge {
 			this.#active.delete(jobId);
 		}
 		return true;
+	}
+
+	async #normalizeCommandReceipt(
+		event: EngineEventEnvelope,
+	): Promise<{ event: EngineEventEnvelope; value: Record<string, unknown> } | undefined> {
+		if (event.type !== "attempt.command_receipt") return undefined;
+		const payload = recordValue(event.payload);
+		const current = recordValue(payload?.value);
+		if (current) return { event, value: current };
+
+		// RocksDB releases before the canonical receipt projection emitted
+		// {commandId, receipt} and used the current binding for the event tuple.
+		// Recover only that exact retained shape from the native command row.
+		const commandId = payload?.commandId;
+		const rawReceipt = recordValue(payload?.receipt);
+		if (typeof commandId !== "string" || commandId !== event.causationCommandId || !rawReceipt) {
+			throw new Error("Invalid Engine command receipt payload");
+		}
+		const store = this.#options.eventStore;
+		if (!store) throw new Error("Legacy Engine command receipt requires native command recovery");
+		const [recovered, frozenValue] = await Promise.all([
+			store.runtimeCommand(commandId),
+			store.getStartConversationIdentity(commandId),
+		]);
+		const target = recordValue(recovered.target);
+		const frozen = recordValue(frozenValue);
+		if (
+			recovered.commandId !== commandId ||
+			recovered.lookup !== "known" ||
+			typeof recovered.payloadHash !== "string" ||
+			!frozen ||
+			frozen.commandId !== commandId ||
+			frozen.payloadHash !== recovered.payloadHash ||
+			frozen.browserPayloadHash !== recovered.payloadHash ||
+			frozen.deviceId !== event.deviceId ||
+			frozen.engineId !== event.engineId ||
+			frozen.engineGeneration !== event.engineGeneration ||
+			frozen.agentInstanceId !== event.agentInstanceId ||
+			frozen.authorityGeneration !== event.authorityGeneration ||
+			!target ||
+			typeof target.agentInstanceRef !== "string" ||
+			target.agentInstanceRef !== frozen.agentInstanceRef ||
+			stableStringifyJson(recovered.receipt) !== stableStringifyJson(rawReceipt)
+		) {
+			throw new Error("Legacy Engine command receipt does not match its retained native command");
+		}
+		const rejectedBeforeBinding =
+			recovered.stage === "rejected" &&
+			event.attemptId === "" &&
+			event.executionId === "" &&
+			event.runtimeBindingId === "" &&
+			event.bindingGeneration === 0 &&
+			(frozen.bindingId === undefined || frozen.bindingId === "") &&
+			(frozen.bindingGeneration === undefined || frozen.bindingGeneration === 0);
+		for (const [eventKey, targetKey] of [
+			["attemptId", "attemptId"],
+			["executionId", "executionId"],
+		] as const) {
+			if (typeof frozen[targetKey] !== "string")
+				throw new Error("Legacy Engine command receipt has no frozen native target");
+			if (target[targetKey] !== undefined && target[targetKey] !== frozen[targetKey])
+				throw new Error("Legacy Engine command receipt conflicts with its browser target");
+			if (event[eventKey] !== frozen[targetKey] && !rejectedBeforeBinding)
+				throw new Error("Legacy Engine command receipt does not match its exact native Attempt");
+		}
+		const value = Object.fromEntries(
+			["version", "commandId", "payloadHash", "target", "stage", "lookup", "dedupUntil", "result", "error"]
+				.filter(key => key in recovered)
+				.map(key => [key, recovered[key]]),
+		);
+		return {
+			value,
+			event: {
+				...event,
+				attemptId: String(frozen.attemptId),
+				executionId: String(frozen.executionId),
+				payload: { value },
+			},
+		};
 	}
 
 	async #heartbeatLoop(): Promise<void> {
@@ -762,6 +844,10 @@ function parseClaim(value: Record<string, unknown>): BridgeClaim {
 		published: false,
 		accepted: Boolean(value.delivery_receipt),
 	};
+}
+
+function recordValue(value: unknown): Record<string, unknown> | undefined {
+	return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
 
 function parseEvent(data: Uint8Array): EngineEventEnvelope {

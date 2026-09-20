@@ -13,7 +13,7 @@ import type {
 	EngineRetryState,
 } from "./contracts";
 import { EngineTargetError } from "./contracts";
-import { projectionId, settleRuntimeMessages } from "./rocks-runtime-projection";
+import { projectionId, runtimeReceipt, settleRuntimeMessages } from "./rocks-runtime-projection";
 import {
 	bindingSnapshot,
 	bindingTarget,
@@ -607,15 +607,37 @@ export class RocksEngineMutations {
 		}
 		if (row.pending_accounted)
 			await this.pendingBudget(tx, row.agent_instance_id, Boolean(row.control_admission), -1, -row.payload_bytes);
-		await tx.put("command", id, {
+		const settled: RocksCommand = {
 			...row,
 			state: "settled",
 			processor_generation: null,
 			pending_accounted: false,
 			receipt,
 			updated_at: Date.now(),
-		});
-		await this.identityEvent(tx, row.agent_instance_id, id, "command_receipt", { receipt, commandId: id });
+		};
+		await tx.put("command", id, settled);
+		const identity = await tx.get<RocksIdentity>("identity", row.agent_instance_id);
+		const attempt = row.identity.attemptId
+			? await tx.get<RocksAttempt>("attempt", row.identity.attemptId)
+			: undefined;
+		const value = runtimeReceipt(settled, identity, attempt);
+		if (value) {
+			const command = row.identity;
+			await this.append(
+				tx,
+				{
+					commandId: id,
+					agentInstanceId: row.agent_instance_id,
+					executionId: command.executionId ?? "",
+					attemptId: command.attemptId ?? "",
+					bindingId: command.bindingId ?? "",
+					engineGeneration: command.engineGeneration,
+					bindingGeneration: command.bindingGeneration ?? 0,
+					authorityGeneration: command.authorityGeneration,
+				},
+				{ kind: "command_receipt", payload: { value } },
+			);
+		}
 	}
 
 	async append(tx: RuntimeTransaction, target: EventTarget, event: EngineTransitionEvent): Promise<EngineEvent> {

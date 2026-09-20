@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -577,6 +577,173 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			await broker.process.exited;
 		}
 	}, 10000);
+
+	it("repairs the retained pre-bind Rocks receipt without accepting a wrong non-empty Attempt", async () => {
+		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `artel-bridge-legacy-receipt-${Snowflake.next()}-`));
+		const broker = await startNatsServer(tempDir);
+		const connection = await connect({ servers: broker.url });
+		const manager = await jetstreamManager(connection);
+		await manager.streams.add({ name: ENGINE_EVENT_STREAM, subjects: ["grimoire.engine.v1.>"] });
+		const store = await EngineStore.open(path.join(tempDir, "engine.sqlite"));
+		const agentInstanceRef = "grimoire://tasks/grimoire/legacy-receipt/agents/retained";
+		const command = (commandId: string, op: EngineCommandEnvelope["op"]): EngineCommandEnvelope => {
+			const envelope: EngineCommandEnvelope = {
+				schema: "grimoire.engine.command.v1",
+				commandId,
+				issuedAt: Date.now(),
+				op,
+				deviceId: "legacy-device",
+				engineId: "legacy-engine",
+				engineGeneration: 1,
+				agentInstanceId: "legacy-agent",
+				agentInstanceRef,
+				executionId: `execution-${commandId}`,
+				attemptId: `attempt-${commandId}`,
+				authorityGeneration: 1,
+				principalId: "owner",
+				payload: { input: commandId },
+			};
+			return {
+				...envelope,
+				browserPayloadHash: engineCommandIdentity(envelope).payloadHash,
+				browserTarget: {
+					agentInstanceRef,
+					attemptId: envelope.attemptId,
+					executionId: envelope.executionId,
+				},
+			};
+		};
+		const rejected = command("legacy-rejected", "start");
+		const applied = command("legacy-applied", "steer");
+		const identities = new Map(
+			[rejected, applied].map(item => {
+				const identity = engineCommandIdentity(item);
+				return [identity.commandId, identity] as const;
+			}),
+		);
+		for (const identity of identities.values()) await store.admitCommand(identity, 1);
+		const rejectedReceipt = { outcome: "rejected", detail: { code: "queue_full" } } as const;
+		const appliedReceipt = { outcome: "applied", detail: { persisted: true } } as const;
+		await store.settleCommand(rejected.commandId, identities.get(rejected.commandId)!.canonicalHash, rejectedReceipt);
+		await store.settleCommand(applied.commandId, identities.get(applied.commandId)!.canonicalHash, appliedReceipt);
+		const identityLookup = spyOn(store, "getStartConversationIdentity").mockImplementation(async commandId =>
+			identities.get(commandId),
+		);
+		const terminalEvents: EngineEventEnvelope[] = [];
+		const accepted: Record<string, unknown>[] = [];
+		const errors: Error[] = [];
+		const bridge = await HostedEngineBridge.connect({
+			eventStore: store,
+			deviceId: rejected.deviceId,
+			engineId: rejected.engineId,
+			engineGeneration: 1,
+			servers: broker.url,
+			pollIntervalMs: 10,
+			onError: error => errors.push(error),
+			rpc: {
+				async call(_tool, args) {
+					if (args.action === "claim") {
+						if (!args.job_id) return { status: "no_job" };
+						if (args.job_id === rejected.commandId) return { status: "already_terminal" };
+						if (args.job_id === applied.commandId)
+							return {
+								status: "claimed",
+								job_id: applied.commandId,
+								lease_token: "applied-lease",
+								operation_type: "agent_engine_command",
+								work: { kind: "command", command: applied },
+							};
+						throw new Error(`Unexpected legacy receipt claim ${String(args.job_id)}`);
+					}
+					if (args.action === "event") {
+						const event = args.event as EngineEventEnvelope;
+						if (
+							event.attemptId !== rejected.attemptId ||
+							event.executionId !== rejected.executionId ||
+							(event.payload?.value as Record<string, unknown> | undefined)?.stage !== "rejected"
+						)
+							throw new Error("ClientHost rejected the retained receipt identity");
+						terminalEvents.push(event);
+						return { status: "already_terminal" };
+					}
+					if (args.action === "accepted") {
+						expect(args.lease_token).toBe("applied-lease");
+						accepted.push(args.receipt as Record<string, unknown>);
+						return { status: "accepted" };
+					}
+					if (args.action === "heartbeat") return { status: "renewed" };
+					throw new Error(`Unexpected legacy receipt action ${String(args.action)}`);
+				},
+			},
+		});
+		const durable = `host_${engineRouteToken(rejected.deviceId)}_${engineRouteToken(rejected.engineId)}`;
+		const publish = async (
+			sequence: number,
+			item: EngineCommandEnvelope,
+			receipt: Record<string, unknown>,
+			identity: { attemptId: string; executionId: string },
+		) => {
+			const event: EngineEventEnvelope = {
+				schema: "grimoire.engine.event.v1",
+				eventId: String(sequence),
+				agentSeq: sequence,
+				causationCommandId: item.commandId,
+				deviceId: item.deviceId,
+				engineId: item.engineId,
+				engineGeneration: 1,
+				agentInstanceId: item.agentInstanceId,
+				runtimeBindingId: "",
+				bindingGeneration: 0,
+				executionId: identity.executionId,
+				attemptId: identity.attemptId,
+				authorityGeneration: item.authorityGeneration,
+				type: "attempt.command_receipt",
+				at: Date.now(),
+				payload: { commandId: item.commandId, receipt },
+			};
+			await jetstream(connection).publish(
+				`grimoire.engine.v1.d.${engineRouteToken(item.deviceId)}.e.${engineRouteToken(item.engineId)}.a.${engineRouteToken(item.agentInstanceId)}.evt.receipt`,
+				JSON.stringify(event),
+			);
+		};
+		try {
+			await publish(1, rejected, rejectedReceipt, { attemptId: "", executionId: "" });
+			await waitFor(() => terminalEvents.length === 1, 2_000);
+			expect(terminalEvents[0]).toMatchObject({
+				attemptId: rejected.attemptId,
+				executionId: rejected.executionId,
+				payload: { value: { commandId: rejected.commandId, stage: "rejected", lookup: "known" } },
+			});
+			await waitFor(async () => (await manager.consumers.info(ENGINE_EVENT_STREAM, durable)).num_ack_pending === 0);
+
+			await publish(2, applied, appliedReceipt, {
+				attemptId: applied.attemptId!,
+				executionId: applied.executionId!,
+			});
+			await waitFor(() => accepted.length === 1);
+			expect(accepted[0]).toMatchObject({
+				commandId: applied.commandId,
+				stage: "applied",
+				lookup: "known",
+				browserPayloadHash: applied.browserPayloadHash,
+			});
+			await waitFor(async () => (await manager.consumers.info(ENGINE_EVENT_STREAM, durable)).num_ack_pending === 0);
+
+			await publish(3, rejected, rejectedReceipt, {
+				attemptId: "wrong-attempt",
+				executionId: rejected.executionId!,
+			});
+			await waitFor(() => errors.some(error => error.message.includes("exact native Attempt")));
+			expect((await manager.consumers.info(ENGINE_EVENT_STREAM, durable)).num_ack_pending).toBe(1);
+		} finally {
+			identityLookup.mockRestore();
+			await bridge.dispose();
+			await connection.drain();
+			await store.close();
+			broker.process.kill();
+			await broker.process.exited;
+		}
+	}, 15_000);
 
 	it("delivers other agents promptly while preserving failed-agent order and draining admitted callbacks", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `artel-bridge-concurrency-${Snowflake.next()}-`));
