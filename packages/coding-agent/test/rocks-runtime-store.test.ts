@@ -19,7 +19,7 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING)(
 			engineId: "fixture-engine",
 			engineGeneration: generation,
 			agentInstanceId: `agent-${suffix}`,
-			agentInstanceRef: `grimoire://agents/${suffix}`,
+			agentInstanceRef: `grimoire://tasks/grimoire/runtime-fixture/agents/${suffix}`,
 			executionId: `execution-${suffix}`,
 			attemptId: `attempt-${suffix}`,
 			authorityGeneration: 1,
@@ -134,7 +134,7 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING)(
 					...command,
 					commandId: `pending-${suffix}-${index}`,
 					agentInstanceId: recoveryAgent,
-					agentInstanceRef: `grimoire://agents/${recoveryAgent}`,
+					agentInstanceRef: `grimoire://tasks/grimoire/runtime-fixture/agents/${recoveryAgent}`,
 					operation: "steer",
 					canonicalHash: `pending-${index}`,
 					executionId: `recover-execution-${suffix}`,
@@ -169,7 +169,7 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING)(
 			...command,
 			commandId: `cancel-before-start-${suffix}`,
 			agentInstanceId: `cancel-agent-${suffix}`,
-			agentInstanceRef: `grimoire://agents/cancel-${suffix}`,
+			agentInstanceRef: `grimoire://tasks/grimoire/runtime-fixture/agents/cancel-${suffix}`,
 			engineGeneration: nextGeneration,
 		};
 		await store.registerAgent(cancelled);

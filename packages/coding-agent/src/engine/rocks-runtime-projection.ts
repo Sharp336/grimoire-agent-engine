@@ -42,7 +42,8 @@ const summaryEvents = new Set([
 	"tool_approval_resolved",
 	"inbox_changed",
 ]);
-export const projectionId = (subtype: string, ...parts: string[]) => JSON.stringify([subtype, ...parts]);
+export const projectionId = (subtype: string, ...parts: string[]) =>
+	`projection_${new Bun.CryptoHasher("sha256").update(JSON.stringify([subtype, ...parts])).digest("hex")}`;
 export interface RocksProjection {
 	subtype: string;
 	agent_instance_id: string;
@@ -80,6 +81,46 @@ function merged<T extends object>(
 		else values.set(staged.id, staged.value);
 	}
 	return [...values.values()].filter(matches);
+}
+
+async function pendingStartCommand(tx: RuntimeTransaction, agent: string, currentAttemptId?: string) {
+	// The identity and aggregate predicates fence this bounded observation without
+	// adding every pending command to the 100-record atomic mutation read set.
+	await tx.get("identity", agent);
+	await tx.get("metadata", `budget:ordinary:${agent}`);
+	await tx.get("metadata", "budget:control:device");
+	const rows: RocksCommand[] = [];
+	let cursor: string | undefined;
+	let bytes = 0;
+	do {
+		const page = await tx.records.query("command_agent_pending", [agent], cursor, 100, undefined, tx.control);
+		for (const row of page.records) {
+			if (!row.value) continue;
+			bytes += Buffer.byteLength(JSON.stringify(row.value));
+			rows.push(row.value as unknown as RocksCommand);
+		}
+		if (
+			rows.length > runtimeLimits.agentPendingRecords + runtimeLimits.controlPendingRecords ||
+			bytes > (runtimeLimits.agentPendingBytes + runtimeLimits.controlPendingBytes) * 2
+		)
+			throw new EngineTargetError("queue_full", "Pending summary observation exceeds its bounded budget");
+		cursor = page.nextCursor ?? undefined;
+	} while (cursor);
+	const pending = merged(
+		tx,
+		"command",
+		rows,
+		row => row.command_id,
+		row =>
+			row.agent_instance_id === agent &&
+			row.state === "received" &&
+			row.operation === "start" &&
+			row.identity.attemptId !== currentAttemptId,
+	)
+		.sort((a, b) => a.received_at - b.received_at || a.command_id.localeCompare(b.command_id))
+		.at(-1);
+	if (pending) await tx.get("command", pending.command_id);
+	return pending;
 }
 export async function messageRows(tx: RuntimeTransaction, attemptId: string): Promise<RocksProjection[]> {
 	const rows = await tx.query<RocksProjection>("projection_attempt" as StorageRuntimeIndex, ["message", attemptId]);
@@ -466,19 +507,7 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 				? attempt
 				: await tx.get<RocksAttempt>("attempt", binding.attempt_id)
 			: undefined;
-		const pending = merged(
-			tx,
-			"command",
-			await tx.query<RocksCommand>("command_agent_pending", [event.agentInstanceId]),
-			row => row.command_id,
-			row =>
-				row.agent_instance_id === event.agentInstanceId &&
-				row.state === "received" &&
-				row.operation === "start" &&
-				row.identity.attemptId !== current?.attempt_id,
-		)
-			.sort((a, b) => a.received_at - b.received_at)
-			.at(-1);
+		const pending = await pendingStartCommand(tx, event.agentInstanceId, current?.attempt_id);
 		const detail = await projectedDetail(tx, identity, current, event.eventId);
 		const value = {
 			agentInstanceRef: identity.agent_instance_ref,
@@ -675,7 +704,16 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 		);
 	}
 	await tx.put("identity", event.agentInstanceId, identity);
-	if (attempt) await tx.put("attempt", attempt.attempt_id, attempt);
+	if (attempt) {
+		if (terminal.has(attempt.state)) {
+			const effects = await tx.get<{ count: number }>(
+				"metadata",
+				`effects:${attempt.attempt_id}:${attempt.binding_id}`,
+			);
+			if (effects?.count) throw new EngineTargetError("agent_busy", "Terminal attempt still has open effects");
+		}
+		await tx.put("attempt", attempt.attempt_id, attempt);
+	}
 	await tx.put("event", String(event.eventId), {
 		...stored,
 		projection_principal: identity.principal_id,
