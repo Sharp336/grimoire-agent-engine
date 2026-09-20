@@ -227,6 +227,13 @@ export class RocksEngineMutations {
 		if (identity.parentAgentInstanceId === identity.agentInstanceId)
 			throw new EngineTargetError("invalid_request", "AgentInstance cannot be its own parent");
 		const existing = await tx.get<RocksIdentity>("identity", identity.agentInstanceId);
+		if (
+			existing &&
+			!existing.parent_agent_instance_id &&
+			identity.parentAgentInstanceId &&
+			existing.membership_revision > 0
+		)
+			throw new EngineTargetError("stale_target", "An existing branch cannot be reparented by registration");
 		let parent: RocksIdentity | undefined;
 		if (identity.parentAgentInstanceId) {
 			parent = await tx.get<RocksIdentity>("identity", identity.parentAgentInstanceId);
@@ -303,6 +310,9 @@ export class RocksEngineMutations {
 		row.parent_agent_instance_ref ??= identity.parentAgentInstanceRef ?? null;
 		row.principal_id ||= identity.principalId ?? "";
 		row.root_agent_instance_ref ||= parent?.root_agent_instance_ref || row.agent_instance_ref;
+		if (identity.parentAgentInstanceId && !existing?.parent_agent_instance_id)
+			row.root_agent_instance_ref =
+				parent?.root_agent_instance_ref || identity.parentAgentInstanceRef || row.agent_instance_ref;
 		row.authority_generation = Math.max(row.authority_generation, identity.authorityGeneration);
 		await tx.put("identity", identity.agentInstanceId, row);
 		if (!existing && row.agent_instance_ref)
@@ -752,6 +762,7 @@ export class RocksEngineMutations {
 			options.transcriptCheckpoint && "native" in options.transcriptCheckpoint
 				? (options.transcriptCheckpoint.native as StorageDependency)
 				: undefined;
+		if (state === "completed" && !native) throw new EngineAttemptConflictError(binding.attemptId);
 		return this.mutation(
 			binding.agentInstanceId,
 			async tx => {
@@ -1139,6 +1150,7 @@ export class RocksEngineMutations {
 		outcome: "completed" | "failed" | "cancelled",
 		options: { error?: string; jobIds?: string[]; checkpoint?: SessionDurabilityCheckpoint } = {},
 	): Promise<EngineEvent> {
+		if (outcome === "completed" && !options.checkpoint?.native) throw new EngineEffectConflictError(id);
 		return this.mutation(
 			target.agentInstanceId,
 			tx => this.effectSettle(tx, target, id, outcome, { error: options.error, jobIds: options.jobIds }),
@@ -1152,6 +1164,7 @@ export class RocksEngineMutations {
 		error?: string,
 		checkpoint?: SessionDurabilityCheckpoint,
 	): Promise<EngineEvent> {
+		if (outcome === "completed" && !checkpoint?.native) throw new EngineEffectConflictError(effect.effectId);
 		return this.mutation(
 			target.agentInstanceId,
 			tx => this.effectSettle(tx, target, effect.effectId, outcome, error ? { error } : {}),
@@ -1234,6 +1247,7 @@ export class RocksEngineMutations {
 		return this.mutation(target.agentInstanceId, async tx => {
 			const row = await tx.get<RocksAttempt>("attempt", target.attemptId);
 			if (!row || !this.sameFence(row, target) || terminal.has(row.state)) return undefined;
+			await this.assertFence(tx, target);
 			await tx.put("attempt", target.attemptId, {
 				...row,
 				retry_attempt: retry.attempt,
@@ -1254,13 +1268,14 @@ export class RocksEngineMutations {
 		return this.mutation(target.agentInstanceId, async tx => {
 			const row = await tx.get<RocksAttempt>("attempt", target.attemptId);
 			if (!row || !this.sameFence(row, target) || terminal.has(row.state)) return undefined;
+			await this.assertFence(tx, target);
 			await tx.put("attempt", target.attemptId, { ...row, profile_route_state: JSON.stringify(state) });
 			const event = await this.append(tx, target, {
 				kind: "profile_route_changed",
 				payload: { profileRoute: state },
 			});
 			await tx.put("attempt", target.attemptId, {
-				...row,
+				...(await tx.get<RocksAttempt>("attempt", target.attemptId)),
 				profile_route_state: JSON.stringify({ ...state, eventSeq: event.seq }),
 			});
 			return event;
@@ -1383,8 +1398,17 @@ export class RocksEngineMutations {
 		item: RocksInbox,
 	): Promise<EngineEvent> {
 		const identity = await tx.get<RocksIdentity>("identity", target.agentInstanceId);
-		if (identity)
-			await tx.put("identity", target.agentInstanceId, { ...identity, queue_revision: identity.queue_revision + 1 });
+		if (identity) {
+			const pending =
+				identity.queue_pending_count +
+				(action === "queued" ? 1 : action === "acknowledge" || action === "drop" ? -1 : 0);
+			if (pending < 0) throw new EngineInboxConflictError("Inbox pending count is invalid");
+			await tx.put("identity", target.agentInstanceId, {
+				...identity,
+				queue_revision: identity.queue_revision + 1,
+				queue_pending_count: pending,
+			});
+		}
 		return this.append(
 			tx,
 			{ ...target, commandId: command },
@@ -1485,10 +1509,18 @@ export class RocksEngineMutations {
 	async rearmInboxWake(id: string, revision: number): Promise<boolean> {
 		return this.mutation(`inbox:${id}`, async tx => {
 			const item = await tx.get<RocksInbox>("inbox", id);
-			if (!item || item.revision !== revision || item.disposition !== "pending") return false;
+			if (
+				!item ||
+				item.revision !== revision ||
+				item.disposition !== "pending" ||
+				!item.wake_intent ||
+				item.wake_delivered_at === null
+			)
+				return false;
 			delete item.wakeDeliveredAt;
 			item.wake_delivered_at = null;
 			item.revision++;
+			item.updatedAt = Date.now();
 			await tx.put("inbox", id, item);
 			return true;
 		});
@@ -1591,6 +1623,11 @@ export class RocksEngineMutations {
 					item.wakeDeliveredAt = now;
 					item.revision++;
 					await tx.put("inbox", item.queueId, item);
+					if (identity)
+						await tx.put("identity", item.agent_instance_id, {
+							...identity,
+							queue_revision: identity.queue_revision + 1,
+						});
 					return this.append(
 						tx,
 						{ ...bindingSnapshot(binding), commandId: `inbox-wake:${item.queueId}:${item.revision}` },
