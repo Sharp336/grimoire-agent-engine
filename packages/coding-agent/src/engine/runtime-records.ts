@@ -117,7 +117,14 @@ export class RuntimeTransaction {
 		if (this.#read.size > 100) throw new StorageClientError("backpressure", "Runtime atomic record budget exceeded");
 		const key = recordKey(kind, id);
 		this.#deletes.delete(key);
-		this.#puts.set(key, { kind, id, value: value as StoragePayload });
+		const payload = JSON.parse(
+			JSON.stringify(value, (_key, item: unknown) => {
+				if (typeof item === "number" && !Number.isFinite(item))
+					throw new TypeError("Runtime values must be finite JSON");
+				return item;
+			}),
+		) as StoragePayload;
+		this.#puts.set(key, { kind, id, value: payload });
 	}
 	async delete(kind: StorageRuntimeKind, id: string): Promise<void> {
 		await this.get(kind, id);

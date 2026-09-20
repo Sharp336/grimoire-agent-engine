@@ -1,0 +1,1509 @@
+import type { SessionDurabilityCheckpoint } from "../session/session-manager";
+import type { StorageClient } from "../session/storage-client";
+import type { StorageDependency } from "../session/storage-protocol";
+import type {
+	EngineAttemptState,
+	EngineBindingSnapshot,
+	EngineEvent,
+	EngineInboxItem,
+	EngineInboxMutation,
+	EngineInboxSource,
+	EngineInboxTarget,
+	EngineProfileRouteState,
+	EngineRetryState,
+} from "./contracts";
+import { EngineTargetError } from "./contracts";
+import {
+	bindingSnapshot,
+	bindingTarget,
+	type RocksAttempt,
+	type RocksBinding,
+	type RocksCommand,
+	type RocksEffect,
+	type RocksEvent,
+	type RocksHold,
+	type RocksIdentity,
+	type RocksInbox,
+} from "./rocks-runtime-rows";
+import { ENGINE_CONTROL_OPS, runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
+import { RuntimeRecords, RuntimeTransaction } from "./runtime-records";
+import {
+	type EngineApprovalRow,
+	EngineAttemptConflictError,
+	type EngineBranchHold,
+	type EngineCommandAdmission,
+	EngineCommandConflictError,
+	type EngineCommandIdentity,
+	type EngineCommandReceipt,
+	EngineEffectConflictError,
+	EngineInboxConflictError,
+	type EngineModelEffectInput,
+	type EngineToolEffectInput,
+	type EngineTransitionEvent,
+} from "./store";
+
+type EventTarget = Pick<
+	EngineBindingSnapshot,
+	| "commandId"
+	| "agentInstanceId"
+	| "executionId"
+	| "attemptId"
+	| "bindingId"
+	| "engineGeneration"
+	| "bindingGeneration"
+	| "authorityGeneration"
+>;
+type AgentIdentity = Pick<
+	EngineCommandIdentity,
+	| "agentInstanceId"
+	| "agentInstanceRef"
+	| "parentAgentInstanceId"
+	| "parentAgentInstanceRef"
+	| "principalId"
+	| "authorityGeneration"
+>;
+const terminal = new Set<EngineAttemptState>(["completed", "failed", "cancelled", "interrupted"]);
+
+export interface RocksTransitionOptions {
+	cause?: string;
+	terminalResult?: Record<string, unknown>;
+	intentGuard?: { expectedRevision?: number; requireUnheld?: boolean; inputId?: string; inputRevision?: number };
+	startIntent?: {
+		expectedRevision?: number;
+		explicitContinue?: boolean;
+		allowInheritedHold?: boolean;
+		sourceAgentInstanceId?: string;
+		sourceRevision?: number;
+	};
+	settleCommandId?: string;
+	settleCommandReceipt?: EngineCommandReceipt;
+	expectedStates?: readonly EngineAttemptState[];
+	requireNew?: boolean;
+	transcriptCheckpoint?: SessionDurabilityCheckpoint;
+	inboxSessionId?: string;
+	inboxMutation?: EngineInboxMutation;
+	inboxMutationCausationCommandId?: string;
+	conversationIdentityDigest?: string;
+	previousInboxSessionId?: string;
+	pendingInboxSourceSessionId?: string;
+}
+
+/** Product state transitions remain here; the storage owner checks every observed revision and commits the batch. */
+export class RocksEngineMutations {
+	readonly records: RuntimeRecords;
+	#change = Promise.withResolvers<void>();
+	constructor(
+		readonly storageClient: StorageClient,
+		readonly projectEvent: (tx: RuntimeTransaction, event: EngineEvent) => Promise<void>,
+	) {
+		this.records = new RuntimeRecords(storageClient);
+	}
+	changeSignal(): Promise<void> {
+		return this.#change.promise;
+	}
+	async mutation<T>(
+		scope: string,
+		work: (tx: RuntimeTransaction) => Promise<T>,
+		dependencies: StorageDependency[] = [],
+		durability: "required" | "buffered" = "required",
+	): Promise<T> {
+		const result = await this.records.mutate(scope, work, dependencies, durability);
+		const change = this.#change;
+		this.#change = Promise.withResolvers<void>();
+		change.resolve();
+		return result;
+	}
+	async nextEngineGeneration(): Promise<number> {
+		return this.mutation("engine", async tx => {
+			const previous = await tx.get<{ generation: number; store_epoch: string; snapshot_epoch: string }>(
+				"metadata",
+				"engine",
+			);
+			const value = {
+				subtype: "engine",
+				generation: (previous?.generation ?? 0) + 1,
+				store_epoch: previous?.store_epoch ?? crypto.randomUUID(),
+				snapshot_epoch: crypto.randomUUID(),
+			};
+			await tx.put("metadata", "engine", value);
+			return value.generation;
+		});
+	}
+	async isCurrentEngineGeneration(generation: number): Promise<boolean> {
+		return (await this.records.get("metadata", "engine")).value?.generation === generation;
+	}
+	async getStoreEpoch(): Promise<string> {
+		return String((await this.records.get("metadata", "engine")).value?.store_epoch ?? "");
+	}
+	async getSnapshotEpoch(): Promise<string> {
+		return String((await this.records.get("metadata", "engine")).value?.snapshot_epoch ?? "");
+	}
+	async getBinding(id: string): Promise<EngineBindingSnapshot | undefined> {
+		const row = (await this.records.get("binding", id)).value as unknown as RocksBinding | null;
+		return row ? bindingSnapshot(row) : undefined;
+	}
+	async getAttempt(id: string): Promise<RocksAttempt | undefined> {
+		return ((await this.records.get("attempt", id)).value as unknown as RocksAttempt) ?? undefined;
+	}
+	async getAttemptTarget(id: string): Promise<RocksAttempt | undefined> {
+		return this.getAttempt(id);
+	}
+	async getEffect(id: string): Promise<RocksEffect | undefined> {
+		return ((await this.records.get("effect", id)).value as unknown as RocksEffect) ?? undefined;
+	}
+	async getApproval(id: string): Promise<EngineApprovalRow | undefined> {
+		return ((await this.records.get("approval", id)).value as unknown as EngineApprovalRow) ?? undefined;
+	}
+	async getBindingConversationIdentity(id: string): Promise<string | undefined> {
+		return (await this.records.get("binding", id)).value?.conversation_identity_digest as string | undefined;
+	}
+	async getStartConversationIdentity(id: string): Promise<EngineCommandIdentity | undefined> {
+		return ((await this.records.get("command", id)).value as unknown as RocksCommand | null)?.identity;
+	}
+	async agentInstanceIdForEngineAgent(id: string): Promise<string | undefined> {
+		return (await this.records.query("binding_engine_agent", [id])).records[0]?.value?.agent_instance_id as
+			| string
+			| undefined;
+	}
+
+	async counter(tx: RuntimeTransaction, id: string, subtype: string, delta: number): Promise<number> {
+		const row = await tx.get<{ count: number }>("metadata", id);
+		const count = (row?.count ?? 0) + delta;
+		if (!Number.isSafeInteger(count) || count < 0)
+			throw new EngineTargetError("invalid_request", "Runtime counter is invalid");
+		await tx.put("metadata", id, { subtype, count });
+		return count;
+	}
+	async assertFence(tx: RuntimeTransaction, target: EventTarget): Promise<void> {
+		const engine = await tx.get<{ generation: number }>("metadata", "engine");
+		if (engine?.generation !== target.engineGeneration)
+			throw new EngineTargetError("stale_target", "Engine generation changed");
+		const binding = await tx.get<RocksBinding>("binding", target.agentInstanceId);
+		if (binding && !this.sameFence(binding, target)) throw new EngineAttemptConflictError(target.attemptId);
+	}
+	sameFence(
+		row: Pick<
+			RocksBinding,
+			| "agent_instance_id"
+			| "execution_id"
+			| "attempt_id"
+			| "binding_id"
+			| "engine_generation"
+			| "binding_generation"
+			| "authority_generation"
+		>,
+		target: EventTarget,
+	): boolean {
+		return (
+			row.agent_instance_id === target.agentInstanceId &&
+			row.execution_id === target.executionId &&
+			row.attempt_id === target.attemptId &&
+			row.binding_id === target.bindingId &&
+			row.engine_generation === target.engineGeneration &&
+			row.binding_generation === target.bindingGeneration &&
+			row.authority_generation === target.authorityGeneration
+		);
+	}
+	async registerAgent(identity: AgentIdentity): Promise<void> {
+		await this.mutation(identity.agentInstanceId, tx => this.register(tx, identity));
+	}
+	async register(tx: RuntimeTransaction, input: AgentIdentity): Promise<void> {
+		let identity = input;
+		if (identity.parentAgentInstanceId === identity.agentInstanceId)
+			throw new EngineTargetError("invalid_request", "AgentInstance cannot be its own parent");
+		const existing = await tx.get<RocksIdentity>("identity", identity.agentInstanceId);
+		let parent: RocksIdentity | undefined;
+		if (identity.parentAgentInstanceId) {
+			parent = await tx.get<RocksIdentity>("identity", identity.parentAgentInstanceId);
+			if (parent?.principal_id) {
+				if (identity.principalId && identity.principalId !== parent.principal_id)
+					throw new EngineTargetError("stale_target", "Child ownership must match parent");
+				identity = { ...identity, principalId: parent.principal_id };
+			}
+		}
+		if (
+			existing &&
+			((identity.agentInstanceRef &&
+				existing.agent_instance_ref &&
+				identity.agentInstanceRef !== existing.agent_instance_ref) ||
+				(identity.principalId && existing.principal_id !== identity.principalId) ||
+				(identity.parentAgentInstanceId &&
+					existing.parent_agent_instance_id &&
+					identity.parentAgentInstanceId !== existing.parent_agent_instance_id))
+		)
+			throw new EngineTargetError("stale_target", "AgentInstance identity is immutable");
+		if (!existing) {
+			// A checked registry guard protects alias/ancestry empty predicates from concurrent registration.
+			const engine = await tx.get<{ subtype: string; generation: number; identity_revision?: number }>(
+				"metadata",
+				"engine",
+			);
+			if (!engine) throw new Error("Engine generation must be initialized before registration");
+			await tx.put("metadata", "engine", { ...engine, identity_revision: (engine.identity_revision ?? 0) + 1 });
+			if (identity.agentInstanceRef) {
+				const aliases = await tx.query<RocksIdentity>("identity_ref", [identity.agentInstanceRef]);
+				if (aliases.some(row => row.agent_instance_id !== identity.agentInstanceId))
+					throw new EngineTargetError("stale_target", "Canonical identity already has a native identity");
+			}
+			const ancestors = new Set([identity.agentInstanceId]);
+			let ancestor = parent;
+			while (ancestor) {
+				if (ancestors.has(ancestor.agent_instance_id) || ancestors.size > 64)
+					throw new EngineTargetError("invalid_request", "Invalid or excessive AgentInstance ancestry");
+				ancestors.add(ancestor.agent_instance_id);
+				ancestor = ancestor.parent_agent_instance_id
+					? await tx.get<RocksIdentity>("identity", ancestor.parent_agent_instance_id)
+					: undefined;
+			}
+			if (parent)
+				await tx.put("identity", parent.agent_instance_id, {
+					...parent,
+					membership_revision: parent.membership_revision + 1,
+				});
+		}
+		const row: RocksIdentity = {
+			agent_instance_id: identity.agentInstanceId,
+			agent_instance_ref: identity.agentInstanceRef ?? "",
+			parent_agent_instance_id: identity.parentAgentInstanceId ?? null,
+			parent_agent_instance_ref: identity.parentAgentInstanceRef ?? null,
+			principal_id: identity.principalId ?? "",
+			authority_generation: identity.authorityGeneration,
+			intent_revision: 0,
+			queue_revision: 0,
+			queue_pending_count: 0,
+			root_agent_instance_ref: parent?.root_agent_instance_ref || identity.agentInstanceRef || "",
+			summary_revision: 0,
+			summary_json: null,
+			membership_revision: 0,
+			created_at: Date.now(),
+			updated_at: Date.now(),
+			...existing,
+		};
+		row.agent_instance_ref ||= identity.agentInstanceRef ?? "";
+		row.authority_generation = Math.max(row.authority_generation, identity.authorityGeneration);
+		await tx.put("identity", identity.agentInstanceId, row);
+		if (!existing && row.agent_instance_ref)
+			await this.identityEvent(
+				tx,
+				row.agent_instance_id,
+				`register:${row.agent_instance_id}`,
+				"agent_registered",
+				{},
+			);
+	}
+	async holds(tx: RuntimeTransaction, id: string): Promise<EngineBranchHold[]> {
+		const result: EngineBranchHold[] = [];
+		const seen = new Set<string>();
+		while (id) {
+			if (seen.has(id) || seen.size >= 64)
+				throw new EngineTargetError("invalid_request", "Invalid AgentInstance ancestry");
+			seen.add(id);
+			const identity = await tx.get<RocksIdentity>("identity", id);
+			for (const kind of ["pause", "stop", "recovery"] as const) {
+				const hold = await tx.get<RocksHold>("hold", `${id}:${kind}`);
+				if (hold)
+					result.push({
+						sourceAgentInstanceId: id,
+						sourceAgentInstanceRef: identity?.agent_instance_ref ?? "",
+						kind,
+						commandId: hold.command_id,
+						generation: hold.generation,
+					});
+			}
+			id = identity?.parent_agent_instance_id ?? "";
+		}
+		return result;
+	}
+	async checkIntent(tx: RuntimeTransaction, id: string, expected?: number, unheld = false): Promise<void> {
+		const row = await tx.get<RocksIdentity>("identity", id);
+		if (expected !== undefined && (row?.intent_revision ?? 0) !== expected)
+			throw new EngineTargetError("stale_target", "AgentInstance intent revision changed");
+		if (unheld && (await this.holds(tx, id)).length)
+			throw new EngineTargetError("agent_busy", "AgentInstance branch is held");
+	}
+	async intent(id: string) {
+		const tx = new RuntimeTransaction(this.records);
+		const row = await tx.get<RocksIdentity>("identity", id);
+		const holds = await this.holds(tx, id);
+		return {
+			intentRevision: row?.intent_revision ?? 0,
+			manualHold: holds.length > 0,
+			holds: holds.slice(0, runtimeLimits.httpPageRecords),
+			holdsHasMore: holds.length > runtimeLimits.httpPageRecords,
+		};
+	}
+	async assertIntent(id: string, expected?: number, unheld = false): Promise<void> {
+		await this.checkIntent(new RuntimeTransaction(this.records), id, expected, unheld);
+	}
+
+	async pendingBudget(
+		tx: RuntimeTransaction,
+		agent: string,
+		control: boolean,
+		countDelta: number,
+		bytesDelta: number,
+	): Promise<void> {
+		for (const scope of control ? ["device"] : ["device", agent]) {
+			const id = `budget:${control ? "control" : "ordinary"}:${scope}`;
+			const old = await tx.get<{ count: number; bytes: number }>("metadata", id);
+			const count = (old?.count ?? 0) + countDelta;
+			const bytes = (old?.bytes ?? 0) + bytesDelta;
+			const maxCount = control
+				? runtimeLimits.controlPendingRecords
+				: scope === "device"
+					? runtimeLimits.devicePendingRecords
+					: runtimeLimits.agentPendingRecords;
+			const maxBytes = control
+				? runtimeLimits.controlPendingBytes
+				: scope === "device"
+					? runtimeLimits.devicePendingBytes
+					: runtimeLimits.agentPendingBytes;
+			if (count < 0 || bytes < 0) throw new Error("Runtime admission budget underflow");
+			if (count > maxCount || bytes > maxBytes)
+				throw new EngineTargetError("queue_full", "Pending admission budget is full");
+			await tx.put("metadata", id, { subtype: "pending_budget", count, bytes, scope, control });
+		}
+	}
+	async admitCommand(command: EngineCommandIdentity, processorGeneration: number): Promise<EngineCommandAdmission> {
+		return this.mutation(command.agentInstanceId, async tx => {
+			const old = await tx.get<RocksCommand>("command", command.commandId);
+			if (old) {
+				if (old.canonical_hash !== command.canonicalHash) throw new EngineCommandConflictError(command.commandId);
+				if (old.state === "settled") {
+					if (!old.receipt) throw new Error("Settled command has no receipt");
+					return { status: "replay", receipt: old.receipt };
+				}
+				if (old.processor_generation === processorGeneration) return { status: "in_progress" };
+				if (old.processor_generation !== null || command.engineGeneration < processorGeneration) {
+					const receipt = this.interruptedReceipt();
+					await this.settle(tx, command.commandId, receipt, command.canonicalHash);
+					return { status: "replay", receipt };
+				}
+				await tx.put("command", command.commandId, {
+					...old,
+					processor_generation: processorGeneration,
+					updated_at: Date.now(),
+				});
+				return { status: "claimed" };
+			}
+			const control = ENGINE_CONTROL_OPS.has(command.operation);
+			const bytes = Buffer.byteLength(command.serializedCommand ?? "");
+			await this.pendingBudget(tx, command.agentInstanceId, control, 1, bytes);
+			await this.register(tx, command);
+			await tx.put("command", command.commandId, {
+				command_id: command.commandId,
+				agent_instance_id: command.agentInstanceId,
+				processor_generation: processorGeneration,
+				state: "received",
+				canonical_hash: command.canonicalHash,
+				payload_bytes: bytes,
+				control_admission: control ? 1 : 0,
+				engine_generation: command.engineGeneration,
+				operation: command.operation,
+				identity: command,
+				receipt: null,
+				received_at: Date.now(),
+				updated_at: Date.now(),
+				pending_accounted: true,
+			} satisfies RocksCommand);
+			if (command.engineGeneration < processorGeneration) {
+				const receipt = this.interruptedReceipt();
+				await this.settle(tx, command.commandId, receipt);
+				return { status: "replay", receipt };
+			}
+			return { status: "claimed" };
+		});
+	}
+	interruptedReceipt(): EngineCommandReceipt {
+		return {
+			outcome: "rejected",
+			detail: {
+				code: "interrupted",
+				message: "Execution was interrupted; explicit Continue is required",
+				requiresExplicitContinue: true,
+			},
+		};
+	}
+	async releaseCommand(id: string, hash: string, processor: number): Promise<void> {
+		await this.mutation(`command:${id}`, async tx => {
+			const row = await tx.get<RocksCommand>("command", id);
+			if (row?.state === "received" && row.canonical_hash === hash && row.processor_generation === processor)
+				await tx.put("command", id, { ...row, processor_generation: null });
+		});
+	}
+	async settleCommand(id: string, hash: string, receipt: EngineCommandReceipt): Promise<void> {
+		await this.mutation(`command:${id}`, tx => this.settle(tx, id, receipt, hash, true));
+	}
+	async settle(
+		tx: RuntimeTransaction,
+		id: string,
+		receipt: EngineCommandReceipt,
+		hash?: string,
+		required = false,
+	): Promise<void> {
+		const row = await tx.get<RocksCommand>("command", id);
+		if (!row) {
+			if (required) throw new Error(`Command ${id} was not admitted`);
+			return;
+		}
+		if (hash && hash !== row.canonical_hash) throw new EngineCommandConflictError(id);
+		if (row.state === "settled") {
+			if (JSON.stringify(row.receipt) !== JSON.stringify(receipt)) throw new EngineCommandConflictError(id);
+			return;
+		}
+		if (row.pending_accounted)
+			await this.pendingBudget(tx, row.agent_instance_id, Boolean(row.control_admission), -1, -row.payload_bytes);
+		await tx.put("command", id, {
+			...row,
+			state: "settled",
+			processor_generation: null,
+			pending_accounted: false,
+			receipt,
+			updated_at: Date.now(),
+		});
+		await this.identityEvent(tx, row.agent_instance_id, id, "command_receipt", { receipt, commandId: id });
+	}
+
+	async append(tx: RuntimeTransaction, target: EventTarget, event: EngineTransitionEvent): Promise<EngineEvent> {
+		const seq = await this.counter(tx, `agent-seq:${target.agentInstanceId}`, "agent_seq", 1);
+		const eventId = await this.counter(tx, "events", "event_counter", 1);
+		const stored: RocksEvent = {
+			eventId,
+			seq,
+			createdAt: Date.now(),
+			causationCommandId: event.causationCommandId ?? target.commandId,
+			agentInstanceId: target.agentInstanceId,
+			executionId: target.executionId,
+			attemptId: target.attemptId,
+			bindingId: target.bindingId,
+			engineGeneration: target.engineGeneration,
+			bindingGeneration: target.bindingGeneration,
+			authorityGeneration: target.authorityGeneration,
+			kind: event.kind,
+			...(event.payload ? { payload: event.payload } : {}),
+			event_id: eventId,
+			agent_instance_id: target.agentInstanceId,
+			attempt_id: target.attemptId,
+			published_at: null,
+		};
+		await tx.put("event", String(eventId), stored);
+		await this.projectEvent(tx, stored);
+		return stored;
+	}
+	async identityEvent(
+		tx: RuntimeTransaction,
+		id: string,
+		commandId: string,
+		kind: EngineEvent["kind"],
+		payload: Record<string, unknown>,
+	): Promise<EngineEvent> {
+		const identity = await tx.get<RocksIdentity>("identity", id);
+		const binding = await tx.get<RocksBinding>("binding", id);
+		const engine = await tx.get<{ generation: number }>("metadata", "engine");
+		return this.append(
+			tx,
+			{
+				commandId,
+				agentInstanceId: id,
+				executionId: binding?.execution_id ?? "",
+				attemptId: binding?.attempt_id ?? "",
+				bindingId: binding?.binding_id ?? "",
+				engineGeneration: engine?.generation ?? 0,
+				bindingGeneration: binding?.binding_generation ?? 0,
+				authorityGeneration: identity?.authority_generation ?? 0,
+			},
+			{ kind, payload },
+		);
+	}
+	async appendEvent(event: Omit<EngineEvent, "eventId" | "seq" | "createdAt">): Promise<EngineEvent> {
+		return this.mutation(
+			event.agentInstanceId,
+			async tx => {
+				const target = { ...event, commandId: event.causationCommandId };
+				await this.assertFence(tx, target);
+				return this.append(tx, target, { kind: event.kind, payload: event.payload });
+			},
+			[],
+			["message_updated", "assistant_snapshot", "trace_reasoning", "trace_tool"].includes(event.kind)
+				? "buffered"
+				: "required",
+		);
+	}
+	async commitEvent(
+		target: EventTarget,
+		event: EngineTransitionEvent,
+		command?: string,
+		receipt: EngineCommandReceipt | "applied" | "rejected" = "applied",
+	): Promise<EngineEvent> {
+		return this.mutation(target.agentInstanceId, async tx => {
+			await this.assertFence(tx, target);
+			const result = await this.append(tx, target, event);
+			if (command) await this.settle(tx, command, typeof receipt === "string" ? { outcome: receipt } : receipt);
+			return result;
+		});
+	}
+	async bind(tx: RuntimeTransaction, binding: EngineBindingSnapshot, digest?: string): Promise<void> {
+		await this.register(tx, {
+			agentInstanceId: binding.agentInstanceId,
+			authorityGeneration: binding.authorityGeneration,
+		});
+		const old = await tx.get<RocksBinding>("binding", binding.agentInstanceId);
+		const identity = (await tx.get<RocksIdentity>("identity", binding.agentInstanceId))!;
+		identity.intent_revision = Math.max(identity.intent_revision, binding.intentRevision ?? 0);
+		await tx.put("identity", binding.agentInstanceId, identity);
+		await tx.put("binding", binding.agentInstanceId, {
+			...bindingTarget(binding),
+			command_id: binding.commandId,
+			engine_agent_id: binding.engineAgentId,
+			session_file: binding.sessionFile ?? null,
+			profile_digest: binding.profileDigest,
+			conversation_identity_digest: digest ?? old?.conversation_identity_digest ?? null,
+			state: binding.state,
+			manual_hold: binding.manualHold || (await this.holds(tx, binding.agentInstanceId)).length ? 1 : 0,
+			intent_revision: identity.intent_revision,
+			intent_command_id: binding.intentCommandId ?? null,
+			updated_at: Date.now(),
+		} satisfies RocksBinding);
+	}
+	async putBinding(binding: EngineBindingSnapshot): Promise<void> {
+		await this.mutation(binding.agentInstanceId, tx => this.bind(tx, binding));
+	}
+	async commitBindingEvent(
+		binding: EngineBindingSnapshot,
+		event: EngineTransitionEvent,
+		id: string,
+		receipt: EngineCommandReceipt,
+	): Promise<EngineEvent> {
+		return this.mutation(binding.agentInstanceId, async tx => {
+			await this.assertFence(tx, binding);
+			await this.bind(tx, binding);
+			const result = await this.append(tx, binding, event);
+			await this.settle(tx, id, receipt);
+			return result;
+		});
+	}
+	async putAttempt(binding: EngineBindingSnapshot, state: EngineAttemptState, cause?: string): Promise<boolean> {
+		await this.commitAttemptTransition(binding, state, [], { cause });
+		return true;
+	}
+	async commitAttemptTransition(
+		binding: EngineBindingSnapshot,
+		state: EngineAttemptState,
+		events: readonly EngineTransitionEvent[],
+		options: RocksTransitionOptions = {},
+	): Promise<EngineEvent[]> {
+		const native =
+			options.transcriptCheckpoint && "native" in options.transcriptCheckpoint
+				? (options.transcriptCheckpoint.native as StorageDependency)
+				: undefined;
+		return this.mutation(
+			binding.agentInstanceId,
+			async tx => {
+				const engine = await tx.get<{ generation: number }>("metadata", "engine");
+				if (engine?.generation !== binding.engineGeneration)
+					throw new EngineAttemptConflictError(binding.attemptId);
+				if (options.intentGuard)
+					await this.checkIntent(
+						tx,
+						binding.agentInstanceId,
+						options.intentGuard.expectedRevision,
+						options.intentGuard.requireUnheld,
+					);
+				const old = await tx.get<RocksAttempt>("attempt", binding.attemptId);
+				if (
+					(options.requireNew && old) ||
+					(options.expectedStates && (!old || !options.expectedStates.includes(old.state))) ||
+					(old && !this.sameFence(old, binding))
+				)
+					throw new EngineAttemptConflictError(binding.attemptId);
+				if (
+					options.intentGuard?.inputRevision !== undefined &&
+					old?.input_revision !== options.intentGuard.inputRevision
+				)
+					throw new EngineTargetError("stale_target", "Pending input revision changed");
+				if (terminal.has(state)) {
+					const effects = await tx.get<{ count: number }>(
+						"metadata",
+						`effects:${binding.attemptId}:${binding.bindingId}`,
+					);
+					if (effects?.count) throw new EngineEffectConflictError(binding.attemptId);
+				}
+				const committed: EngineEvent[] = [];
+				if (options.startIntent) {
+					const guard = options.startIntent;
+					await this.checkIntent(tx, binding.agentInstanceId, guard.expectedRevision);
+					if (guard.sourceAgentInstanceId)
+						await this.checkIntent(tx, guard.sourceAgentInstanceId, guard.sourceRevision);
+					if (guard.explicitContinue && guard.expectedRevision !== undefined)
+						committed.push(
+							...(
+								await this.changeIntent(
+									tx,
+									binding.agentInstanceId,
+									binding.commandId,
+									"continue",
+									guard.expectedRevision,
+								)
+							).events,
+						);
+					else if (!guard.allowInheritedHold) await this.checkIntent(tx, binding.agentInstanceId, undefined, true);
+				}
+				await this.bind(tx, binding, options.conversationIdentityDigest);
+				const checkpoint = options.transcriptCheckpoint;
+				const row: RocksAttempt = {
+					...bindingTarget(binding),
+					command_id: binding.commandId,
+					row_id: old?.row_id ?? Date.now(),
+					state,
+					cause: options.cause ?? null,
+					updated_at: Date.now(),
+					transcript_session_id: null,
+					transcript_path: null,
+					transcript_leaf_entry_id: null,
+					transcript_byte_boundary: null,
+					transcript_revision: 0,
+					retry_attempt: 0,
+					retry_max_attempts: 0,
+					retry_route: null,
+					retry_delay_ms: null,
+					retry_scheduled_at: null,
+					retry_outcome: null,
+					retry_error: null,
+					profile_route_state: null,
+					result_payload: null,
+					detail_revision: 0,
+					input_revision: 0,
+					message_revision: 0,
+					tool_revision: 0,
+					...old,
+				};
+				Object.assign(row, { state, cause: options.cause ?? null, updated_at: Date.now() });
+				if (options.terminalResult) row.result_payload = options.terminalResult;
+				if (checkpoint)
+					Object.assign(row, {
+						transcript_session_id: checkpoint.sessionId,
+						transcript_path: checkpoint.sessionPath,
+						transcript_leaf_entry_id: checkpoint.leafEntryId,
+						transcript_byte_boundary: checkpoint.byteBoundary,
+						transcript_revision: (old?.transcript_revision ?? 0) + 1,
+						...(native ? { transcript_native: native } : {}),
+					});
+				await tx.put("attempt", binding.attemptId, row);
+				if (options.inboxSessionId) {
+					const pending = await tx.query<RocksInbox>("inbox_agent", [binding.agentInstanceId, "pending"]);
+					for (const item of pending)
+						await tx.put("inbox", item.queue_id, {
+							...item,
+							...bindingTarget(binding),
+							sessionId: options.inboxSessionId,
+							session_id: options.inboxSessionId,
+							attemptId: binding.attemptId,
+							wake_delivered_at: null,
+							wakeDeliveredAt: undefined,
+						});
+				}
+				if (options.inboxMutation) {
+					if (!options.inboxSessionId)
+						throw new EngineInboxConflictError("Inbox mutation requires a session identity");
+					const result = await this.mutateInbox(
+						tx,
+						{ ...binding, sessionId: options.inboxSessionId },
+						options.inboxMutation,
+						options.inboxMutationCausationCommandId,
+					);
+					if (result.event) committed.push(result.event);
+				}
+				for (const event of events.length || !checkpoint
+					? events
+					: [{ kind: "reconciled" } as EngineTransitionEvent])
+					committed.push(
+						await this.append(tx, binding, {
+							...event,
+							...(checkpoint
+								? {
+										payload: {
+											...event.payload,
+											transcriptCheckpoint: { ...checkpoint, revision: row.transcript_revision },
+										},
+									}
+								: {}),
+						}),
+					);
+				if (options.settleCommandId)
+					await this.settle(tx, options.settleCommandId, options.settleCommandReceipt ?? { outcome: "applied" });
+				return committed;
+			},
+			native
+				? [{ familyId: native.familyId, generationId: native.generationId, throughSeq: native.throughSeq }]
+				: [],
+		);
+	}
+
+	async changeIntent(
+		tx: RuntimeTransaction,
+		id: string,
+		commandId: string,
+		action: "pause" | "resume" | "stop" | "continue",
+		expected?: number,
+	) {
+		await this.checkIntent(tx, id, expected);
+		const root = await tx.get<RocksIdentity>("identity", id);
+		if (!root) throw new EngineTargetError("agent_not_found", "Unknown branch root");
+		if (action === "resume" || action === "continue") {
+			for (const kind of action === "resume" ? ["pause"] : ["pause", "stop", "recovery"])
+				await tx.delete("hold", `${id}:${kind}`);
+		} else
+			await tx.put("hold", `${id}:${action === "stop" ? "stop" : "pause"}`, {
+				source_agent_instance_id: id,
+				agent_instance_id: id,
+				kind: action === "stop" ? "stop" : "pause",
+				command_id: commandId,
+				generation: root.intent_revision + 1,
+			});
+		const agentIds = [id];
+		const events: EngineEvent[] = [];
+		for (let index = 0; index < agentIds.length; index++) {
+			if (agentIds.length > 64)
+				throw new EngineTargetError("restore_budget", "Branch control exceeds its atomic budget");
+			const agent = agentIds[index];
+			const row = (await tx.get<RocksIdentity>("identity", agent))!;
+			const children = await tx.query<RocksIdentity>("identity_parent", [agent]);
+			for (const child of children) {
+				if (agentIds.includes(child.agent_instance_id)) throw new Error("Agent ancestry cycle");
+				agentIds.push(child.agent_instance_id);
+			}
+			await tx.put("identity", agent, { ...row, intent_revision: row.intent_revision + 1 });
+			const holds = await this.holds(tx, agent);
+			const binding = await tx.get<RocksBinding>("binding", agent);
+			if (binding)
+				await tx.put("binding", agent, {
+					...binding,
+					manual_hold: holds.length ? 1 : 0,
+					intent_revision: row.intent_revision + 1,
+					intent_command_id: commandId,
+				});
+			events.push(
+				await this.identityEvent(tx, agent, commandId, "holds_changed", {
+					action,
+					sourceAgentInstanceId: id,
+					holds,
+					holdsHasMore: false,
+				}),
+			);
+		}
+		return { agentIds, events, intentRevision: root.intent_revision + 1 };
+	}
+	async branchIntent(
+		id: string,
+		commandId: string,
+		action: "pause" | "resume" | "stop" | "continue",
+		expected?: number,
+	) {
+		return this.mutation(id, tx => this.changeIntent(tx, id, commandId, action, expected));
+	}
+
+	async effectStart(
+		target: EventTarget,
+		input: EngineToolEffectInput | EngineModelEffectInput,
+		model: boolean,
+		approval: boolean,
+	): Promise<EngineEvent> {
+		return this.mutation(target.agentInstanceId, async tx => {
+			await this.assertFence(tx, target);
+			await this.checkIntent(tx, target.agentInstanceId, undefined, true);
+			if (await tx.get("effect", input.effectId)) throw new EngineEffectConflictError(input.effectId);
+			const tool = "toolCallId" in input ? input : undefined;
+			const modelCall = "modelCallId" in input ? input.modelCallId : "";
+			const row: RocksEffect = {
+				agent_instance_id: target.agentInstanceId,
+				execution_id: target.executionId,
+				attempt_id: target.attemptId,
+				binding_id: target.bindingId,
+				engine_generation: target.engineGeneration,
+				binding_generation: target.bindingGeneration,
+				authority_generation: target.authorityGeneration,
+				effect_id: input.effectId,
+				command_id: target.commandId,
+				tool_call_id: tool?.toolCallId ?? modelCall,
+				tool_name: tool?.toolName ?? "model_dispatch",
+				policy: tool?.policy ?? "unrestricted",
+				input_hash: input.inputHash,
+				assistant_message_id: tool?.origin?.messageId ?? null,
+				assistant_block_id: tool?.origin?.blockId ?? null,
+				effect_kind: model ? "model" : "tool",
+				state: approval ? "planned" : "started",
+				outcome: null,
+				created_at: Date.now(),
+				updated_at: Date.now(),
+				runtime_event_id: 0,
+			};
+			await tx.put("effect", input.effectId, row);
+			await this.counter(tx, `effects:${target.attemptId}:${target.bindingId}`, "open_effects", 1);
+			if (approval)
+				await tx.put("approval", input.effectId, {
+					approval_id: input.effectId,
+					effect_id: input.effectId,
+					state: "pending",
+					decision: null,
+					updated_at: Date.now(),
+				});
+			return this.append(tx, target, {
+				kind: approval ? "tool_approval_requested" : model ? "model_started" : "tool_started",
+				payload: model
+					? { effectId: input.effectId, modelCallId: modelCall }
+					: {
+							invocationId: input.effectId,
+							toolCallId: tool?.toolCallId,
+							toolName: tool?.toolName,
+							policy: tool?.policy,
+							inputHash: input.inputHash,
+							...(tool?.origin ? { origin: tool.origin } : {}),
+							...(approval ? { approvalId: input.effectId } : {}),
+						},
+			});
+		});
+	}
+	async startToolEffect(target: EventTarget, effect: EngineToolEffectInput): Promise<EngineEvent> {
+		return this.effectStart(target, effect, false, false);
+	}
+	async startModelEffect(target: EventTarget, effect: EngineModelEffectInput): Promise<EngineEvent> {
+		return this.effectStart(target, effect, true, false);
+	}
+	async requestToolApproval(target: EventTarget, effect: EngineToolEffectInput): Promise<EngineEvent> {
+		return this.effectStart(target, effect, false, true);
+	}
+	async effectSettle(
+		tx: RuntimeTransaction,
+		target: EventTarget,
+		id: string,
+		outcome: RocksEffect["outcome"],
+		options: { error?: string; jobIds?: string[] } = {},
+	): Promise<EngineEvent> {
+		await this.assertFence(tx, target);
+		const row = await tx.get<RocksEffect>("effect", id);
+		if (!row || !this.sameFence(row, target) || !["started", "planned"].includes(row.state))
+			throw new EngineEffectConflictError(id);
+		await tx.put("effect", id, {
+			...row,
+			state: outcome === "unknown" ? "unknown" : "settled",
+			outcome,
+			...options,
+			updated_at: Date.now(),
+		});
+		await this.counter(tx, `effects:${target.attemptId}:${target.bindingId}`, "open_effects", -1);
+		return this.append(tx, target, {
+			kind: row.effect_kind === "model" ? "model_settled" : "tool_settled",
+			payload: {
+				...(row.effect_kind === "model"
+					? { effectId: id, modelCallId: row.tool_call_id }
+					: {
+							invocationId: id,
+							toolCallId: row.tool_call_id,
+							toolName: row.tool_name,
+							policy: row.policy,
+							inputHash: row.input_hash,
+						}),
+				status: outcome,
+				...options,
+			},
+		});
+	}
+	async settleToolEffect(
+		target: EventTarget,
+		id: string,
+		outcome: "completed" | "failed" | "cancelled",
+		options: { error?: string; jobIds?: string[] } = {},
+	): Promise<EngineEvent> {
+		return this.mutation(target.agentInstanceId, tx => this.effectSettle(tx, target, id, outcome, options));
+	}
+	async settleModelEffect(
+		target: EventTarget,
+		effect: EngineModelEffectInput,
+		outcome: "completed" | "failed",
+		error?: string,
+	): Promise<EngineEvent> {
+		return this.mutation(target.agentInstanceId, tx =>
+			this.effectSettle(tx, target, effect.effectId, outcome, error ? { error } : {}),
+		);
+	}
+	async resolveToolApproval(
+		target: EventTarget,
+		id: string,
+		decision: "approve" | "deny" | "cancelled",
+		options: {
+			reason?: string;
+			causationCommandId?: string;
+			settleCommandId?: string;
+			expectedIntentRevision?: number;
+			expectedInputRevision?: number;
+		} = {},
+	): Promise<EngineEvent[]> {
+		return this.mutation(target.agentInstanceId, async tx => {
+			await this.assertFence(tx, target);
+			const approval = await tx.get<EngineApprovalRow>("approval", id);
+			const effect = await tx.get<RocksEffect>("effect", id);
+			if (approval?.state !== "pending" || effect?.state !== "planned" || !this.sameFence(effect, target))
+				throw new EngineEffectConflictError(id);
+			if (decision !== "cancelled")
+				await this.checkIntent(tx, target.agentInstanceId, options.expectedIntentRevision, decision === "approve");
+			if (options.expectedInputRevision !== undefined) {
+				const attempt = await tx.get<RocksAttempt>("attempt", target.attemptId);
+				if (attempt?.input_revision !== options.expectedInputRevision)
+					throw new EngineTargetError("stale_target", "Input revision changed");
+			}
+			await tx.put("approval", id, {
+				...approval,
+				state: "resolved",
+				decision,
+				reason: options.reason ?? null,
+				updated_at: Date.now(),
+			});
+			const events = [
+				await this.append(tx, target, {
+					kind: "tool_approval_resolved",
+					causationCommandId: options.causationCommandId,
+					payload: { approvalId: id, decision, ...(options.reason ? { reason: options.reason } : {}) },
+				}),
+			];
+			if (decision === "approve") {
+				await tx.put("effect", id, { ...effect, state: "started", updated_at: Date.now() });
+				events.push(
+					await this.append(tx, target, {
+						kind: "tool_started",
+						payload: {
+							invocationId: id,
+							toolCallId: effect.tool_call_id,
+							toolName: effect.tool_name,
+							policy: effect.policy,
+							inputHash: effect.input_hash,
+						},
+					}),
+				);
+			} else
+				events.push(
+					await this.effectSettle(
+						tx,
+						target,
+						id,
+						decision === "deny" ? "denied" : "cancelled",
+						options.reason ? { error: options.reason } : {},
+					),
+				);
+			if (options.settleCommandId) await this.settle(tx, options.settleCommandId, { outcome: "applied" });
+			return events;
+		});
+	}
+
+	async commitAttemptRetry(
+		target: EngineBindingSnapshot,
+		retry: EngineRetryState,
+		event: EngineTransitionEvent,
+	): Promise<EngineEvent | undefined> {
+		return this.mutation(target.agentInstanceId, async tx => {
+			const row = await tx.get<RocksAttempt>("attempt", target.attemptId);
+			if (!row || !this.sameFence(row, target) || terminal.has(row.state)) return undefined;
+			await tx.put("attempt", target.attemptId, {
+				...row,
+				retry_attempt: retry.attempt,
+				retry_max_attempts: retry.maxAttempts,
+				retry_route: retry.route ?? row.retry_route,
+				retry_delay_ms: retry.delayMs ?? row.retry_delay_ms,
+				retry_scheduled_at: retry.scheduledAt ?? row.retry_scheduled_at,
+				retry_outcome: retry.outcome ?? null,
+				retry_error: retry.error ?? null,
+			});
+			return this.append(tx, target, event);
+		});
+	}
+	async commitAttemptProfileRoute(
+		target: EngineBindingSnapshot,
+		state: EngineProfileRouteState,
+	): Promise<EngineEvent | undefined> {
+		return this.mutation(target.agentInstanceId, async tx => {
+			const row = await tx.get<RocksAttempt>("attempt", target.attemptId);
+			if (!row || !this.sameFence(row, target) || terminal.has(row.state)) return undefined;
+			await tx.put("attempt", target.attemptId, { ...row, profile_route_state: JSON.stringify(state) });
+			const event = await this.append(tx, target, {
+				kind: "profile_route_changed",
+				payload: { profileRoute: state },
+			});
+			await tx.put("attempt", target.attemptId, {
+				...row,
+				profile_route_state: JSON.stringify({ ...state, eventSeq: event.seq }),
+			});
+			return event;
+		});
+	}
+
+	async enqueueInboxItem(
+		target: EngineInboxTarget,
+		source: EngineInboxSource,
+		expectedIntentRevision?: number,
+		commandId = source.sourceEventId,
+	): Promise<{ item: EngineInboxItem; created: boolean }> {
+		validateRuntimeValue("id", source.sourceEventId);
+		if (!source.body.trim() && !source.attachments)
+			throw new EngineInboxConflictError("Inbox requires text or attachments");
+		return this.mutation(target.agentInstanceId, async tx => {
+			await this.checkIntent(tx, target.agentInstanceId, expectedIntentRevision);
+			const original = await tx.get<{
+				body: string;
+				source_type: string;
+				sender: string | null;
+				attachment_refs: unknown;
+			}>("inbox", `source:${source.sourceEventId}`);
+			if (
+				original &&
+				(original.body !== source.body ||
+					original.source_type !== source.sourceType ||
+					original.sender !== (source.sender ?? null) ||
+					JSON.stringify(original.attachment_refs) !== JSON.stringify(source.attachments ?? null))
+			)
+				throw new EngineInboxConflictError("Inbox source has different immutable content");
+			const old = await tx.get<RocksInbox>("inbox", source.sourceEventId);
+			if (old) {
+				if (old.sessionId !== target.sessionId) throw new EngineInboxConflictError("Inbox session changed");
+				return { item: old, created: false };
+			}
+			if (!original)
+				await tx.put("inbox", `source:${source.sourceEventId}`, {
+					subtype: "source",
+					source_event_id: source.sourceEventId,
+					body: source.body,
+					source_type: source.sourceType,
+					sender: source.sender ?? null,
+					attachment_refs: source.attachments ?? null,
+					created_at: source.createdAt ?? Date.now(),
+				});
+			const command = await tx.get<RocksCommand>("command", commandId);
+			if (command?.pending_accounted) {
+				await this.pendingBudget(
+					tx,
+					command.agent_instance_id,
+					Boolean(command.control_admission),
+					-1,
+					-command.payload_bytes,
+				);
+				await tx.put("command", commandId, { ...command, pending_accounted: false });
+			}
+			await this.pendingBudget(
+				tx,
+				target.agentInstanceId,
+				false,
+				1,
+				Buffer.byteLength(source.body) + Buffer.byteLength(JSON.stringify(source.attachments ?? null)),
+			);
+			const position = await this.counter(tx, `inbox-position:${target.sessionId}`, "inbox_position", 1024);
+			const item: RocksInbox = {
+				subtype: "item",
+				queueId: source.sourceEventId,
+				queue_id: source.sourceEventId,
+				source_event_id: source.sourceEventId,
+				sessionId: target.sessionId,
+				session_id: target.sessionId,
+				agentInstanceId: target.agentInstanceId,
+				agent_instance_id: target.agentInstanceId,
+				attemptId: target.attemptId,
+				attempt_id: target.attemptId,
+				execution_id: target.executionId,
+				binding_id: target.bindingId,
+				engine_generation: target.engineGeneration,
+				binding_generation: target.bindingGeneration,
+				authority_generation: target.authorityGeneration,
+				sourceEventId: source.sourceEventId,
+				sourceType: source.sourceType,
+				...(source.sender ? { sender: source.sender } : {}),
+				sourceBody: source.body,
+				deliveryPayload: source.body,
+				...(source.attachments ? { attachments: source.attachments } : {}),
+				...(source.deliverAt !== undefined ? { deliverAt: source.deliverAt } : {}),
+				deliver_at: source.deliverAt ?? null,
+				wakeIntent: source.wakeIntent ?? false,
+				wake_intent: source.wakeIntent ? 1 : 0,
+				wake_delivered_at: null,
+				position,
+				disposition: "pending",
+				revision: 1,
+				createdAt: Date.now(),
+				updatedAt: Date.now(),
+			};
+			await tx.put("inbox", item.queueId, item);
+			await this.inboxEvent(tx, target, commandId, "queued", item);
+			return { item, created: true };
+		});
+	}
+	async inboxEvent(
+		tx: RuntimeTransaction,
+		target: EngineInboxTarget,
+		command: string,
+		action: string,
+		item: RocksInbox,
+	): Promise<EngineEvent> {
+		const identity = await tx.get<RocksIdentity>("identity", target.agentInstanceId);
+		if (identity)
+			await tx.put("identity", target.agentInstanceId, { ...identity, queue_revision: identity.queue_revision + 1 });
+		return this.append(
+			tx,
+			{ ...target, commandId: command },
+			{
+				kind: "inbox_changed",
+				payload: { action, queueId: item.queueId, revision: item.revision, sourceEventId: item.sourceEventId },
+			},
+		);
+	}
+	async mutateInbox(
+		tx: RuntimeTransaction,
+		target: EngineInboxTarget,
+		mutation: EngineInboxMutation,
+		command = mutation.mutationId,
+	): Promise<{ item: EngineInboxItem; event?: EngineEvent }> {
+		const old = await tx.get<RocksInbox>("inbox", mutation.queueId);
+		if (!old || old.session_id !== target.sessionId || !this.sameFence(old, { ...target, commandId: command }))
+			throw new EngineInboxConflictError("Inbox target changed");
+		if (old.revision !== mutation.expectedRevision) throw new EngineInboxConflictError("Inbox revision changed");
+		if (old.disposition !== "pending") throw new EngineInboxConflictError("Inbox item is already settled");
+		const item = { ...old };
+		if (mutation.op === "edit") {
+			if (typeof mutation.value !== "string" || (!mutation.value.trim() && !item.attachments))
+				throw new EngineInboxConflictError("Inbox requires text or attachments");
+			item.deliveryPayload = mutation.value;
+		} else if (mutation.op === "annotate") {
+			if (mutation.value !== null && typeof mutation.value !== "string")
+				throw new EngineInboxConflictError("Invalid annotation");
+			item.annotation = mutation.value?.trim() || undefined;
+		} else if (mutation.op === "defer") {
+			if (
+				mutation.value !== null &&
+				(typeof mutation.value !== "number" || !Number.isSafeInteger(mutation.value) || mutation.value < 0)
+			)
+				throw new EngineInboxConflictError("Invalid delivery instant");
+			item.deliverAt = mutation.value ?? undefined;
+			item.deliver_at = mutation.value;
+			item.wakeIntent = true;
+			item.wake_intent = 1;
+		} else item.disposition = mutation.op === "acknowledge" ? "acknowledged" : "dropped";
+		const oldBytes =
+			Buffer.byteLength(old.deliveryPayload) +
+			Buffer.byteLength(old.annotation ?? "") +
+			Buffer.byteLength(JSON.stringify(old.attachments ?? null));
+		const newBytes =
+			Buffer.byteLength(item.deliveryPayload) +
+			Buffer.byteLength(item.annotation ?? "") +
+			Buffer.byteLength(JSON.stringify(item.attachments ?? null));
+		await this.pendingBudget(
+			tx,
+			target.agentInstanceId,
+			false,
+			item.disposition === "pending" ? 0 : -1,
+			item.disposition === "pending" ? newBytes - oldBytes : -oldBytes,
+		);
+		item.revision++;
+		item.updatedAt = Date.now();
+		item.wake_delivered_at = null;
+		delete item.wakeDeliveredAt;
+		await tx.put("inbox", item.queueId, item);
+		return { item, event: await this.inboxEvent(tx, target, command, mutation.op, item) };
+	}
+	async mutateInboxItem(target: EngineInboxTarget, mutation: EngineInboxMutation): Promise<EngineInboxItem> {
+		return (await this.mutateInboxItemWithEvent(target, mutation)).item;
+	}
+	async mutateInboxItemWithEvent(
+		target: EngineInboxTarget,
+		mutation: EngineInboxMutation,
+		command?: string,
+	): Promise<{ item: EngineInboxItem; event?: EngineEvent }> {
+		return this.mutation(target.agentInstanceId, tx => this.mutateInbox(tx, target, mutation, command));
+	}
+	async listInboxItems(session: string, includeTerminal = false): Promise<EngineInboxItem[]> {
+		const result: EngineInboxItem[] = [];
+		for (const state of includeTerminal ? ["pending", "acknowledged", "dropped"] : ["pending"]) {
+			const page = await this.records.query("inbox_session", [session, state]);
+			if (page.nextCursor) throw new EngineTargetError("restore_budget", "Inbox exceeds bounded working set");
+			result.push(...page.records.map(row => row.value as unknown as RocksInbox));
+		}
+		return result.sort((a, b) => a.position - b.position || a.queueId.localeCompare(b.queueId));
+	}
+	async getInboxItem(session: string, id: string): Promise<EngineInboxItem | undefined> {
+		const row = await this.getInboxItemByQueueId(id);
+		return row?.sessionId === session ? row : undefined;
+	}
+	async getInboxItemByQueueId(id: string): Promise<EngineInboxItem | undefined> {
+		const row = (await this.records.get("inbox", id)).value as unknown as RocksInbox | null;
+		return row?.subtype === "item" ? row : undefined;
+	}
+	async rearmInboxWake(id: string, revision: number): Promise<boolean> {
+		return this.mutation(`inbox:${id}`, async tx => {
+			const item = await tx.get<RocksInbox>("inbox", id);
+			if (!item || item.revision !== revision || item.disposition !== "pending") return false;
+			delete item.wakeDeliveredAt;
+			item.wake_delivered_at = null;
+			item.revision++;
+			await tx.put("inbox", id, item);
+			return true;
+		});
+	}
+	async reorderInboxItems(
+		target: EngineInboxTarget,
+		id: string,
+		expected: readonly string[],
+		desired: readonly string[],
+	): Promise<EngineInboxItem[]> {
+		return (await this.reorderInboxItemsWithEvent(target, id, expected, desired)).items;
+	}
+	async reorderInboxItemsWithEvent(
+		target: EngineInboxTarget,
+		id: string,
+		expected: readonly string[],
+		desired: readonly string[],
+		revision?: number,
+	): Promise<{ items: EngineInboxItem[]; event?: EngineEvent }> {
+		if (!id || new Set(desired).size !== desired.length)
+			throw new EngineInboxConflictError("Reorder IDs must be unique");
+		return this.mutation(target.agentInstanceId, async tx => {
+			const identity = await tx.get<RocksIdentity>("identity", target.agentInstanceId);
+			if (revision !== undefined && identity?.queue_revision !== revision)
+				throw new EngineInboxConflictError("Queue revision changed");
+			const rows = await tx.query<RocksInbox>("inbox_session", [target.sessionId, "pending"]);
+			for (const row of rows)
+				if (!this.sameFence(row, { ...target, commandId: id }))
+					throw new EngineInboxConflictError("Inbox target changed");
+			rows.sort((a, b) => a.position - b.position || a.queueId.localeCompare(b.queueId));
+			const current = rows.map(row => row.queueId);
+			if (JSON.stringify(current) === JSON.stringify(desired)) return { items: rows };
+			if (
+				JSON.stringify(current) !== JSON.stringify(expected) ||
+				current.length !== desired.length ||
+				desired.some(key => !current.includes(key))
+			)
+				throw new EngineInboxConflictError("Inbox order changed");
+			const items: RocksInbox[] = [];
+			for (const [index, key] of desired.entries()) {
+				const row = rows.find(item => item.queueId === key)!;
+				row.position = (index + 1) * 1024;
+				row.revision++;
+				row.wake_delivered_at = null;
+				delete row.wakeDeliveredAt;
+				await tx.put("inbox", key, row);
+				items.push(row);
+			}
+			return { items, ...(items[0] ? { event: await this.inboxEvent(tx, target, id, "reorder", items[0]) } : {}) };
+		});
+	}
+	async nextInboxWakeAt(generation: number): Promise<number | undefined> {
+		const page = await this.records.query("inbox_wake", [generation]);
+		for (const record of page.records) {
+			const item = record.value as unknown as RocksInbox;
+			const binding = await this.getBinding(item.agent_instance_id);
+			if (!binding || binding.manualHold || binding.state === "running") continue;
+			const first = (await this.records.query("inbox_session", [item.sessionId, "pending"], undefined, 1))
+				.records[0];
+			if (first?.id === item.queueId) return item.deliver_at ?? item.createdAt;
+		}
+		return undefined;
+	}
+	async claimDueInboxWakes(generation: number, now = Date.now()): Promise<EngineEvent[]> {
+		const page = await this.records.query("inbox_wake", [generation]);
+		const events: EngineEvent[] = [];
+		for (const record of page.records) {
+			const observed = record.value as unknown as RocksInbox;
+			if ((observed.deliver_at ?? observed.createdAt) > now) break;
+			const event = await this.mutation(observed.agent_instance_id, async tx => {
+				const item = await tx.get<RocksInbox>("inbox", record.id);
+				if (!item || item.disposition !== "pending" || item.wake_delivered_at !== null) return;
+				const binding = await tx.get<RocksBinding>("binding", item.agent_instance_id);
+				const identity = await tx.get<RocksIdentity>("identity", item.agent_instance_id);
+				if (
+					!binding ||
+					binding.manual_hold ||
+					binding.state === "running" ||
+					(await this.holds(tx, item.agent_instance_id)).length
+				)
+					return;
+				const pending = await tx.query<RocksInbox>("inbox_session", [item.sessionId, "pending"]);
+				pending.sort((a, b) => a.position - b.position || a.queueId.localeCompare(b.queueId));
+				if (pending[0]?.queueId !== item.queueId) return;
+				item.wake_delivered_at = now;
+				item.wakeDeliveredAt = now;
+				item.revision++;
+				await tx.put("inbox", item.queueId, item);
+				return this.append(
+					tx,
+					{ ...bindingSnapshot(binding), commandId: `inbox-wake:${item.queueId}:${item.revision}` },
+					{
+						kind: "inbox_changed",
+						payload: {
+							action: "wake_due",
+							queueId: item.queueId,
+							revision: item.revision,
+							intentRevision: identity?.intent_revision ?? 0,
+							manualHold: false,
+						},
+					},
+				);
+			});
+			if (event) events.push(event);
+		}
+		return events;
+	}
+
+	async interruptGeneration(generation: number): Promise<EngineEvent[]> {
+		// Recovery starts before admission. Each bounded identity transaction fences its own effects and commands.
+		const events: EngineEvent[] = [];
+		let cursor: string | undefined;
+		do {
+			const page = await this.records.query("kind_primary", ["identity"], cursor, 50);
+			for (const record of page.records) {
+				const id = record.id;
+				const changed = await this.mutation(id, async tx => {
+					const identity = await tx.get<RocksIdentity>("identity", id);
+					if (!identity) return [];
+					const binding = await tx.get<RocksBinding>("binding", id);
+					const commands = await tx.query<RocksCommand>("command_agent_pending", [id]);
+					const affected =
+						commands.some(row => row.engine_generation < generation) ||
+						Boolean(binding && binding.engine_generation < generation && binding.state === "running");
+					if (!affected) return [];
+					identity.intent_revision++;
+					await tx.put("identity", id, identity);
+					await tx.put("hold", `${id}:recovery`, {
+						source_agent_instance_id: id,
+						agent_instance_id: id,
+						kind: "recovery",
+						command_id: `recovery:${generation}`,
+						generation: identity.intent_revision,
+					});
+					const result: EngineEvent[] = [];
+					for (const command of commands)
+						if (command.engine_generation < generation)
+							await this.settle(tx, command.command_id, this.interruptedReceipt());
+					if (binding && binding.engine_generation < generation) {
+						const attempt = await tx.get<RocksAttempt>("attempt", binding.attempt_id);
+						if (attempt && !terminal.has(attempt.state)) {
+							for (const state of ["planned", "started"]) {
+								const effects = await tx.query<RocksEffect>("effect_attempt", [binding.attempt_id, state]);
+								for (const effect of effects) {
+									if (effect.binding_id !== binding.binding_id) continue;
+									await tx.put("effect", effect.effect_id, {
+										...effect,
+										state: state === "started" ? "unknown" : "settled",
+										outcome: state === "started" ? "unknown" : "cancelled",
+										error: "engine_lost",
+									});
+									const approval = await tx.get<EngineApprovalRow>("approval", effect.effect_id);
+									if (approval?.state === "pending")
+										await tx.put("approval", effect.effect_id, {
+											...approval,
+											state: "resolved",
+											decision: "cancelled",
+											reason: "engine_lost",
+										});
+									await this.counter(
+										tx,
+										`effects:${binding.attempt_id}:${binding.binding_id}`,
+										"open_effects",
+										-1,
+									);
+									result.push(
+										await this.append(
+											tx,
+											{ ...bindingSnapshot(binding), engineGeneration: generation },
+											{
+												kind: effect.effect_kind === "model" ? "model_settled" : "tool_settled",
+												payload: {
+													effectId: effect.effect_id,
+													invocationId: effect.effect_id,
+													status: state === "started" ? "unknown" : "cancelled",
+													error: "engine_lost",
+												},
+											},
+										),
+									);
+								}
+							}
+							await tx.put("attempt", binding.attempt_id, {
+								...attempt,
+								state: "interrupted",
+								cause: "engine_lost",
+								retry_outcome: attempt.retry_outcome === "waiting" ? "interrupted" : attempt.retry_outcome,
+							});
+							result.push(
+								await this.append(
+									tx,
+									{ ...bindingSnapshot(binding), engineGeneration: generation },
+									{ kind: "interrupted", payload: { reason: "engine_lost", requiresExplicitContinue: true } },
+								),
+							);
+						}
+						await tx.put("binding", id, {
+							...binding,
+							state: "released",
+							manual_hold: 1,
+							intent_revision: identity.intent_revision,
+						});
+					}
+					result.push(
+						await this.identityEvent(tx, id, `recovery:${generation}`, "holds_changed", {
+							action: "recovery",
+							requiresExplicitContinue: true,
+						}),
+					);
+					return result;
+				});
+				events.push(...changed);
+			}
+			// This scan updates identities. Restart a bounded partition from its last stable primary ID is handled by the owner cursor.
+			cursor = page.nextCursor ?? undefined;
+		} while (cursor);
+		return events;
+	}
+	async pendingEvents(limit = 100): Promise<EngineEvent[]> {
+		return (await this.records.query("event_pending", [], undefined, Math.max(1, Math.min(1000, limit)))).records.map(
+			row => row.value as unknown as RocksEvent,
+		);
+	}
+	async pendingEventsForSink(
+		sink: string,
+		limit = 100,
+		after = 0,
+	): Promise<{ events: EngineEvent[]; throughCursor: number; scannedRecords: number }> {
+		const page = await this.records.query("event_all", [], undefined, Math.max(1, Math.min(1000, limit)));
+		const events: EngineEvent[] = [];
+		let throughCursor = after;
+		for (const row of page.records) {
+			const event = row.value as unknown as RocksEvent;
+			if (event.eventId <= after) continue;
+			throughCursor = event.eventId;
+			if ((await this.records.get("delivery", `${sink}:${event.eventId}`)).value?.state !== "delivered")
+				events.push(event);
+		}
+		return { events, throughCursor, scannedRecords: page.records.length };
+	}
+	async markEventDeliveryFailed(id: number, sink: string, error: string): Promise<void> {
+		await this.mutation(`delivery:${sink}`, async tx => {
+			const old = await tx.get<{ state: string; attempts: number }>("delivery", `${sink}:${id}`);
+			if (old?.state === "delivered") return;
+			await tx.put("delivery", `${sink}:${id}`, {
+				event_id: id,
+				sink_id: sink,
+				state: "pending",
+				attempts: (old?.attempts ?? 0) + 1,
+				last_error: error.slice(0, 2048),
+			});
+		});
+	}
+	async markEventDelivered(id: number, sink: string): Promise<void> {
+		await this.markEventsDelivered([id], sink);
+	}
+	async markEventsDelivered(ids: readonly number[], sink: string): Promise<void> {
+		await this.mutation(`delivery:${sink}`, async tx => {
+			for (const id of ids)
+				await tx.put("delivery", `${sink}:${id}`, { event_id: id, sink_id: sink, state: "delivered" });
+		});
+	}
+	async markEventPublished(id: number): Promise<void> {
+		await this.mutation(`event:${id}`, async tx => {
+			const event = await tx.get<RocksEvent>("event", String(id));
+			if (event) await tx.put("event", String(id), { ...event, published_at: Date.now() });
+		});
+	}
+}
