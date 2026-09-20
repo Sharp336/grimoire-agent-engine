@@ -21,6 +21,12 @@ class StructuredStore implements NativeSessionStorage {
 	archiveReads = 0;
 	fail = false;
 	rejectRewrite = false;
+	constructor(readonly parent?: StructuredStore) {}
+	initializeFork(source: NativeSessionPosition, checkpoint: NativeSessionCheckpoint): NativeSessionTicket {
+		if (!this.parent || this.parent.seq !== source.throughSeq) throw new Error("Missing immutable test parent cut");
+		this.entries = structuredClone(this.parent.entries);
+		return this.append([], checkpoint);
+	}
 	append(entries: readonly SessionEntry[], checkpoint: NativeSessionCheckpoint): NativeSessionTicket {
 		if (this.fail) throw new Error("admission capacity exhausted");
 		this.entries.push(...structuredClone(entries));
@@ -86,6 +92,26 @@ class StructuredStore implements NativeSessionStorage {
 }
 
 describe("structured native SessionManager", () => {
+	it("forks a fresh native generation from the durable context without archive materialization", async () => {
+		const source = new StructuredStore();
+		const manager = SessionManager.createNative("/source", source);
+		manager.appendModelChange("openai/model");
+		const archived = manager.appendMessage({ role: "user", content: "archive", timestamp: 1 });
+		const kept = manager.appendMessage({ role: "user", content: "keep", timestamp: 2 });
+		manager.appendCompaction("summary", undefined, kept, 100);
+		await manager.flush();
+		const target = new StructuredStore(source);
+		const fork = await SessionManager.forkNativeContext(source, target, "/target");
+		expect(fork.getSessionId()).not.toBe(manager.getSessionId());
+		expect(fork.buildSessionContext()).toEqual(manager.buildSessionContext());
+		expect(source.readIds).not.toContain(archived);
+		expect(source.archiveReads).toBe(0);
+		fork.appendMessage({ role: "user", content: "only fork", timestamp: 3 });
+		await fork.flush();
+		expect((await SessionManager.openNative(target)).buildSessionContext()).toEqual(fork.buildSessionContext());
+		expect(source.entries).toHaveLength(4);
+		expect(target.checkpoint.header.parentSession).toBe(manager.getSessionId());
+	});
 	it("rolls back edits and metadata reparenting after a known CAS rejection", async () => {
 		const storage = new StructuredStore();
 		const manager = SessionManager.createNative("/native", storage);

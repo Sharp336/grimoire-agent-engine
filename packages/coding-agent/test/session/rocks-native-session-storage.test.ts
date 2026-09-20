@@ -34,6 +34,7 @@ it("persists structured native checkpoints through the shared HTTP client and re
 			if (body.operation === "write") {
 				latest = body.write;
 				writes.push(latest);
+				if (latest.head?.lineage) seq = 0;
 				expect(latest.firstSeq).toBe(seq + 1);
 				if (latest.nativeEdits) expect(latest.expectedThroughSeq).toBe(seq);
 				for (const edit of latest.nativeEdits ?? []) {
@@ -127,6 +128,18 @@ it("persists structured native checkpoints through the shared HTTP client and re
 		expect(writes.at(-1)?.expectedThroughSeq).toBe(checkpoint.native!.throughSeq);
 		expect((await SessionManager.openNative(storage)).buildSessionContext()).toEqual(cold.buildSessionContext());
 		expect(client.pending).toEqual({ write: 0, read: 0, control: 0, writeBytes: 0 });
+		const current = await storage.readContext();
+		const target = new RocksNativeSessionStorage(client, "f", "fork");
+		await target.initializeFork(current.position, current.checkpoint).completion;
+		expect(writes.at(-1)?.entries).toEqual([]);
+		expect(writes.at(-1)?.head?.lineage).toEqual({
+			parentGenerationId: "g",
+			forkCutSeq: current.throughSeq,
+			forkLeafId: current.checkpoint.leafId,
+		});
+		expect(writes.at(-1)?.dependencies).toEqual([
+			{ familyId: "f", generationId: "g", throughSeq: current.throughSeq },
+		]);
 	} finally {
 		await server.stop(true);
 	}

@@ -50,6 +50,8 @@ export class NativeSessionWriteRejectedError extends Error {}
 /** One session/generation on the shared Engine storage client, never a JSONL facade. */
 export interface NativeSessionStorage {
 	readonly locator: string;
+	/** Initialize a fresh generation by immutable lineage, without copying historical entries. */
+	initializeFork(source: NativeSessionPosition, checkpoint: NativeSessionCheckpoint): NativeSessionTicket;
 	/** Reserve finite admission synchronously or throw; never enqueue an unbounded promise tail. */
 	append(
 		entries: readonly SessionEntry[],

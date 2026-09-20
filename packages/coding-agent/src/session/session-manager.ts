@@ -676,6 +676,41 @@ export class SessionManager {
 		return manager;
 	}
 
+	/** Fork the source's durable working context into a new same-family generation; no archive copy. */
+	static async forkNativeContext(
+		source: NativeSessionStorage,
+		target: NativeSessionStorage,
+		cwd: string,
+		sessionDir = getSessionsDir(),
+	): Promise<SessionManager> {
+		const loaded = await source.readContext();
+		const manager = SessionManager.createNative(cwd, target, sessionDir);
+		const sourceHeader = loaded.checkpoint.header;
+		manager.#header.parentSession = sourceHeader.id;
+		manager.#header.providerPromptCacheKey = sourceHeader.providerPromptCacheKey ?? sourceHeader.id;
+		manager.#header.title = sourceHeader.title;
+		manager.#header.titleSource = sourceHeader.titleSource;
+		manager.#additionalDirectories = (sourceHeader.additionalDirectories ?? []).filter(
+			directory => directory !== path.resolve(cwd),
+		);
+		manager.#header.additionalDirectories = manager.#additionalDirectories.length
+			? manager.#additionalDirectories
+			: undefined;
+		manager.#applyEntries(manager.#header, structuredClone(loaded.entries));
+		manager.#index.setLeaf(loaded.checkpoint.leafId);
+		manager.#nativeStartId = loaded.checkpoint.contextStartId;
+		manager.#nativePrefix = structuredClone(loaded.checkpoint.prefix);
+		manager.#nativeComplete = false;
+		const checkpoint = manager.#nativeCheckpoint();
+		const ticket = target.initializeFork(loaded.position, checkpoint);
+		manager.#nativeTicket = ticket;
+		await ticket.completion;
+		manager.#rememberNativeVersions(manager.#entries);
+		manager.#nativeBaselineCheckpoint = structuredClone(checkpoint);
+		if (manager.sanitizeLoadedOpenAIResponsesReplayMetadata()) await manager.rewriteEntries();
+		return manager;
+	}
+
 	#rememberNativeVersions(entries: readonly SessionEntry[]): void {
 		for (const entry of entries) this.#nativeVersions.set(entry.id, JSON.stringify(entry));
 	}

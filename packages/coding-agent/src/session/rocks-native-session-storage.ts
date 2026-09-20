@@ -10,6 +10,15 @@ import type { SessionEntry } from "./session-entries";
 import { type StorageClient, StorageClientError } from "./storage-client";
 import type { StorageEntry, StoragePayload, StorageReadSuccessResponse, StorageWrite } from "./storage-protocol";
 
+export function parseNativeSessionLocator(locator: string): { familyId: string; generationId: string } {
+	const match = /^native:([^/]+)\/([^/]+)$/.exec(locator);
+	if (!match) throw new Error("Invalid native session locator");
+	const familyId = decodeURIComponent(match[1]);
+	const generationId = decodeURIComponent(match[2]);
+	if (!familyId || !generationId) throw new Error("Invalid native session locator scope");
+	return { familyId, generationId };
+}
+
 function nativeEntry(entry: SessionEntry): StorageEntry {
 	return {
 		entryId: entry.id,
@@ -107,6 +116,17 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 		return this.#submit(entries, checkpoint, durability);
 	}
 
+	initializeFork(source: NativeSessionPosition, checkpoint: NativeSessionCheckpoint): NativeSessionTicket {
+		if (
+			this.#throughSeq !== 0 ||
+			source.familyId !== this.#familyId ||
+			source.generationId === this.#generationId ||
+			source.incarnation !== this.#client.incarnation
+		)
+			throw new Error("Native fork requires a fresh generation in the same family and incarnation");
+		return this.#submit([], checkpoint, "required", undefined, source);
+	}
+
 	rewrite(
 		entries: readonly SessionEntry[],
 		deletedIds: readonly string[],
@@ -124,6 +144,7 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 		checkpoint: NativeSessionCheckpoint,
 		durability: "buffered" | "required",
 		nativeEdits?: StorageWrite["nativeEdits"],
+		forkSource?: NativeSessionPosition,
 	): NativeSessionTicket {
 		if (this.#failure) throw this.#failure;
 		if (this.#conditionalWrite || (nativeEdits && this.#pendingWrites > 0))
@@ -137,10 +158,30 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 				generationId: this.#generationId,
 				firstSeq,
 				entries: entries.map(nativeEntry),
-				head: { leafId: checkpoint.leafId, contextAnchors: { startEntryId: checkpoint.contextStartId } },
+				head: {
+					leafId: checkpoint.leafId,
+					contextAnchors: { startEntryId: checkpoint.contextStartId },
+					...(forkSource
+						? {
+								lineage: {
+									parentGenerationId: forkSource.generationId,
+									forkCutSeq: forkSource.throughSeq,
+									forkLeafId: checkpoint.leafId,
+								},
+							}
+						: {}),
+				},
 				state: { native: JSON.parse(JSON.stringify(checkpoint)) },
 				durability,
-				dependencies: [],
+				dependencies: forkSource
+					? [
+							{
+								familyId: forkSource.familyId,
+								generationId: forkSource.generationId,
+								throughSeq: forkSource.throughSeq,
+							},
+						]
+					: [],
 				...(nativeEdits ? { nativeEdits, expectedThroughSeq: this.#throughSeq } : {}),
 			})
 			.then(receipt => {
