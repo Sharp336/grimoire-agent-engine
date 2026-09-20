@@ -89,6 +89,42 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING)(
 			transcriptCheckpoint: checkpoint,
 		});
 		expect((await store.getAttempt(binding.attemptId))?.transcript_native?.throughSeq).toBe(1);
+		const attachments = { principalId: "fixture-owner", uploadIds: ["upload-one"] };
+		const inboxTarget = { ...binding, sessionId: familyId };
+		const queued = await store.enqueueInboxItem(inboxTarget, {
+			sourceEventId: `inbox-${suffix}`,
+			sourceType: "user",
+			body: "hé",
+			attachments,
+			createdAt: 1,
+		});
+		const budgetId = `budget:ordinary:${binding.agentInstanceId}`;
+		expect((await store.records.get("metadata", budgetId)).value).toMatchObject({
+			count: 1,
+			bytes: Buffer.byteLength("hé") + Buffer.byteLength(JSON.stringify(attachments)),
+		});
+		await expect(
+			store.enqueueInboxItem(inboxTarget, {
+				sourceEventId: `inbox-${suffix}`,
+				sourceType: "user",
+				body: "hé",
+				attachments,
+				createdAt: 2,
+			}),
+		).rejects.toThrow();
+		await store.mutateInboxItem(inboxTarget, {
+			mutationId: "drop-one",
+			queueId: queued.item.queueId,
+			expectedRevision: queued.item.revision,
+			op: "drop",
+		});
+		await store.mutateInboxItem(inboxTarget, {
+			mutationId: "drop-replay",
+			queueId: queued.item.queueId,
+			expectedRevision: queued.item.revision,
+			op: "drop",
+		});
+		expect((await store.records.get("metadata", budgetId)).value).toMatchObject({ count: 0, bytes: 0 });
 
 		// More than a single 100-record CAS/query budget must remain recoverable.
 		const recoveryAgent = `recovery-${suffix}`;
@@ -129,6 +165,32 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING)(
 			expect.arrayContaining(["pause", "recovery"]),
 		);
 		expect(notifications).toBeGreaterThan(0);
+		const cancelled = {
+			...command,
+			commandId: `cancel-before-start-${suffix}`,
+			agentInstanceId: `cancel-agent-${suffix}`,
+			agentInstanceRef: `grimoire://agents/cancel-${suffix}`,
+			engineGeneration: nextGeneration,
+		};
+		await store.registerAgent(cancelled);
+		const cancellation = await store.cancelPendingStart(
+			{
+				agentInstanceId: cancelled.agentInstanceId,
+				executionId: cancelled.executionId!,
+				attemptId: cancelled.attemptId!,
+				authorityGeneration: 1,
+				engineGeneration: nextGeneration,
+				principalId: cancelled.principalId,
+				pendingStartCommandId: cancelled.commandId,
+				expectedStartIntentRevision: 0,
+				expectedIntentRevision: 0,
+			},
+			"cancel-exact-start",
+		);
+		expect(cancellation.status).toBe("cancelled");
+		const replay = await store.admitCommand(cancelled, nextGeneration);
+		expect(replay.status).toBe("replay");
+		if (replay.status === "replay") expect(replay.receipt.detail?.code).toBe("cancelled");
 		await store.close();
 	},
 	60_000,

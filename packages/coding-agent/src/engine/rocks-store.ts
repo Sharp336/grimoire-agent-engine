@@ -758,10 +758,7 @@ export class RocksEngineMutations {
 		events: readonly EngineTransitionEvent[],
 		options: RocksTransitionOptions = {},
 	): Promise<EngineEvent[]> {
-		const native =
-			options.transcriptCheckpoint && "native" in options.transcriptCheckpoint
-				? (options.transcriptCheckpoint.native as StorageDependency)
-				: undefined;
+		const native = options.transcriptCheckpoint?.native;
 		if (state === "completed" && !native) throw new EngineAttemptConflictError(binding.attemptId);
 		return this.mutation(
 			binding.agentInstanceId,
@@ -929,9 +926,7 @@ export class RocksEngineMutations {
 					await this.settle(tx, options.settleCommandId, options.settleCommandReceipt ?? { outcome: "applied" });
 				return committed;
 			},
-			native
-				? [{ familyId: native.familyId, generationId: native.generationId, throughSeq: native.throughSeq }]
-				: [],
+			this.checkpointDependencies(options.transcriptCheckpoint),
 		);
 	}
 
