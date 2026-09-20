@@ -1,13 +1,131 @@
 import { expect, it } from "bun:test";
+import type { NativeSessionCheckpoint } from "../../src/session/native-session-storage";
 import { RocksNativeSessionStorage } from "../../src/session/rocks-native-session-storage";
 import { SessionManager } from "../../src/session/session-manager";
 import { StorageClient } from "../../src/session/storage-client";
 import {
 	STORAGE_PROTOCOL_SCHEMA_HASH,
+	type StorageBarrier,
+	type StorageBarrierSuccessResponse,
 	type StorageEntry,
 	type StorageProtocolRequest,
+	type StorageReceipt,
 	type StorageWrite,
 } from "../../src/session/storage-protocol";
+
+class DelayedStorageClient extends StorageClient {
+	readonly writes: Array<{
+		input: Omit<StorageWrite, "requestId" | "payloadHash" | "incarnation">;
+		resolve(receipt: StorageReceipt): void;
+		reject(error: Error): void;
+	}> = [];
+	readonly barriers: number[] = [];
+	constructor() {
+		super({
+			url: "http://127.0.0.1:1",
+			token: "0123456789012345",
+			incarnation: 1,
+			protocolHash: STORAGE_PROTOCOL_SCHEMA_HASH,
+		});
+	}
+	override write(input: Omit<StorageWrite, "requestId" | "payloadHash" | "incarnation">): Promise<StorageReceipt> {
+		const { promise, resolve, reject } = Promise.withResolvers<StorageReceipt>();
+		this.writes.push({ input, resolve, reject });
+		return promise;
+	}
+	async apply(index: number): Promise<void> {
+		const { input, resolve } = this.writes[index];
+		resolve({
+			...input,
+			payloadHash: "sha256:test",
+			incarnation: 1,
+			throughSeq: input.firstSeq + Math.max(1, input.entries.length) - 1,
+			admissionState: "admitted",
+			appliedState: "applied",
+			durabilityState: "not_required",
+			outcome: "success",
+		});
+		await Bun.sleep(0);
+	}
+	override async barrier(
+		input: Omit<StorageBarrier, "requestId" | "incarnation">,
+	): Promise<StorageBarrierSuccessResponse> {
+		this.barriers.push(input.throughSeq);
+		return {
+			...input,
+			schema: "artel.storage.protocol.response.v1",
+			version: "1.0",
+			requestId: "barrier",
+			incarnation: 1,
+			durableThroughSeq: input.throughSeq,
+		};
+	}
+}
+
+it("keeps ordinary appends in prefix order and flushes only after every buffered write applies", async () => {
+	const client = new DelayedStorageClient();
+	const manager = SessionManager.createNative("/ordered", new RocksNativeSessionStorage(client, "ordered", "root"));
+	for (let index = 0; index < 11; index++)
+		manager.appendMessage({ role: "user", content: String(index), timestamp: index });
+	let flushed = false;
+	const flush = manager.flushAndCheckpoint().then(checkpoint => {
+		flushed = true;
+		return checkpoint;
+	});
+	for (let index = 0; index < 11; index++) {
+		expect(client.writes).toHaveLength(index + 1);
+		expect(client.writes[index].input.firstSeq).toBe(index + 1);
+		expect(client.writes[index].input.durability).toBe("buffered");
+		expect(flushed).toBe(false);
+		expect(client.barriers).toEqual([]);
+		await client.apply(index);
+	}
+	expect((await flush).native?.throughSeq).toBe(11);
+	expect(client.barriers).toEqual([11]);
+});
+
+it("rejects bounded append admission without leaving the rejected entry in the manager", async () => {
+	const client = new DelayedStorageClient();
+	const storage = new RocksNativeSessionStorage(client, "bounded", "root", { maxPendingWrites: 2 });
+	const manager = SessionManager.createNative("/bounded", storage);
+	for (let index = 0; index < 2; index++)
+		manager.appendMessage({ role: "user", content: String(index), timestamp: index });
+	expect(() => manager.appendMessage({ role: "user", content: "rejected", timestamp: 2 })).toThrow("admission budget");
+	expect(manager.getContextBranch()).toHaveLength(2);
+	await expect(manager.flush()).rejects.toThrow("admission budget");
+	await client.apply(0);
+	await client.apply(1);
+	expect(client.writes.map(write => write.input.firstSeq)).toEqual([1, 2]);
+	const checkpoint = client.writes[1].input.state?.native as NativeSessionCheckpoint;
+	const next = storage.append([], checkpoint, "buffered");
+	expect(next.position.throughSeq).toBe(3);
+	await client.apply(2);
+	await next.completion;
+	const byteClient = new DelayedStorageClient();
+	const byteManager = SessionManager.createNative(
+		"/bytes",
+		new RocksNativeSessionStorage(byteClient, "bytes", "root", { maxPendingBytes: 1 }),
+	);
+	expect(() => byteManager.appendMessage({ role: "user", content: "界", timestamp: 1 })).toThrow(
+		"byte admission budget",
+	);
+	expect(byteManager.getContextBranch()).toEqual([]);
+	expect(byteClient.writes).toEqual([]);
+});
+
+it("rejects flush and queued successors when an earlier native prefix fails", async () => {
+	const client = new DelayedStorageClient();
+	const manager = SessionManager.createNative("/failed", new RocksNativeSessionStorage(client, "failed", "root"));
+	for (let index = 0; index < 3; index++)
+		manager.appendMessage({ role: "user", content: String(index), timestamp: index });
+	const flush = manager.flushAndCheckpoint();
+	void flush.catch(() => {});
+	client.writes[0].reject(new Error("prefix failed"));
+	await expect(flush).rejects.toThrow("prefix failed");
+	expect(client.writes).toHaveLength(1);
+	expect(client.barriers).toEqual([]);
+	expect(() => manager.appendMessage({ role: "user", content: "later", timestamp: 4 })).toThrow("prefix failed");
+});
 
 it("persists structured native checkpoints through the shared HTTP client and reads frozen bounded context/children", async () => {
 	let latest: StorageWrite;

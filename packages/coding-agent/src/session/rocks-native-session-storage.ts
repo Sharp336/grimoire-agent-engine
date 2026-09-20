@@ -72,6 +72,10 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 	#throughSeq = 0;
 	#failure?: Error;
 	#pendingWrites = 0;
+	#pendingBytes = 0;
+	#writeTail: Promise<void> = Promise.resolve();
+	#maxPendingWrites: number;
+	#maxPendingBytes: number;
 	#conditionalWrite = false;
 	#maxRecords: number;
 	#maxBytes: number;
@@ -80,22 +84,24 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 		client: StorageClient,
 		familyId: string,
 		generationId: string,
-		limits = { maxRecords: 128, maxBytes: 1_048_576 },
+		limits: { maxRecords?: number; maxBytes?: number; maxPendingWrites?: number; maxPendingBytes?: number } = {},
 	) {
+		const { maxRecords = 128, maxBytes = 1_048_576, maxPendingWrites = 32, maxPendingBytes = 8_388_608 } = limits;
 		if (
 			!familyId ||
 			!generationId ||
-			!Number.isSafeInteger(limits.maxRecords) ||
-			limits.maxRecords < 1 ||
-			!Number.isSafeInteger(limits.maxBytes) ||
-			limits.maxBytes < 1
+			[maxRecords, maxBytes, maxPendingWrites, maxPendingBytes].some(
+				value => !Number.isSafeInteger(value) || value < 1,
+			)
 		)
 			throw new Error("Invalid native storage scope or read bounds");
 		this.#client = client;
 		this.#familyId = familyId;
 		this.#generationId = generationId;
-		this.#maxRecords = limits.maxRecords;
-		this.#maxBytes = limits.maxBytes;
+		this.#maxRecords = maxRecords;
+		this.#maxBytes = maxBytes;
+		this.#maxPendingWrites = maxPendingWrites;
+		this.#maxPendingBytes = maxPendingBytes;
 		this.locator = `native:${encodeURIComponent(familyId)}/${encodeURIComponent(generationId)}`;
 	}
 
@@ -149,41 +155,51 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 		if (this.#failure) throw this.#failure;
 		if (this.#conditionalWrite || (nativeEdits && this.#pendingWrites > 0))
 			throw new NativeSessionWriteRejectedError("Native conditional edit requires an idle scope");
+		if (this.#pendingWrites >= this.#maxPendingWrites)
+			throw new NativeSessionWriteRejectedError("Native pending write admission budget exhausted");
 		const firstSeq = this.#throughSeq + 1;
 		const throughSeq = this.#throughSeq + Math.max(1, entries.length);
-		const completion = this.#client
-			.write({
-				operationId: Bun.randomUUIDv7(),
-				familyId: this.#familyId,
-				generationId: this.#generationId,
-				firstSeq,
-				entries: entries.map(nativeEntry),
-				head: {
-					leafId: checkpoint.leafId,
-					contextAnchors: { startEntryId: checkpoint.contextStartId },
-					...(forkSource
-						? {
-								lineage: {
-									parentGenerationId: forkSource.generationId,
-									forkCutSeq: forkSource.throughSeq,
-									forkLeafId: checkpoint.leafId,
-								},
-							}
-						: {}),
-				},
-				state: { native: JSON.parse(JSON.stringify(checkpoint)) },
-				durability,
-				dependencies: forkSource
-					? [
-							{
-								familyId: forkSource.familyId,
-								generationId: forkSource.generationId,
-								throughSeq: forkSource.throughSeq,
+		const serialized = JSON.stringify({
+			operationId: Bun.randomUUIDv7(),
+			familyId: this.#familyId,
+			generationId: this.#generationId,
+			firstSeq,
+			entries: entries.map(nativeEntry),
+			head: {
+				leafId: checkpoint.leafId,
+				contextAnchors: { startEntryId: checkpoint.contextStartId },
+				...(forkSource
+					? {
+							lineage: {
+								parentGenerationId: forkSource.generationId,
+								forkCutSeq: forkSource.throughSeq,
+								forkLeafId: checkpoint.leafId,
 							},
-						]
-					: [],
-				...(nativeEdits ? { nativeEdits, expectedThroughSeq: this.#throughSeq } : {}),
-			})
+						}
+					: {}),
+			},
+			state: { native: JSON.parse(JSON.stringify(checkpoint)) },
+			durability,
+			dependencies: forkSource
+				? [
+						{
+							familyId: forkSource.familyId,
+							generationId: forkSource.generationId,
+							throughSeq: forkSource.throughSeq,
+						},
+					]
+				: [],
+			...(nativeEdits ? { nativeEdits, expectedThroughSeq: this.#throughSeq } : {}),
+		} satisfies Omit<StorageWrite, "requestId" | "payloadHash" | "incarnation">);
+		// Bound both wire bytes and the retained snapshot, before reserving a sequence.
+		const bytes = Math.max(Buffer.byteLength(serialized), serialized.length * 2);
+		if (this.#pendingBytes + bytes > this.#maxPendingBytes)
+			throw new NativeSessionWriteRejectedError("Native pending byte admission budget exhausted");
+		const submit = () => this.#client.write(JSON.parse(serialized));
+		// Buffered writes resolve at application, not WAL durability. The next prefix
+		// cannot overtake it; a failed prefix also rejects all already admitted successors.
+		const write = this.#pendingWrites === 0 ? submit() : this.#writeTail.then(submit);
+		const completion = write
 			.then(receipt => {
 				if (receipt.throughSeq !== throughSeq) throw new Error("Native storage receipt has the wrong prefix");
 			})
@@ -198,9 +214,12 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 			})
 			.finally(() => {
 				this.#pendingWrites--;
+				this.#pendingBytes -= bytes;
 				if (nativeEdits) this.#conditionalWrite = false;
 			});
 		this.#pendingWrites++;
+		this.#pendingBytes += bytes;
+		this.#writeTail = completion;
 		if (nativeEdits) this.#conditionalWrite = true;
 		this.#throughSeq = throughSeq;
 		return { position: this.#position(), completion };
