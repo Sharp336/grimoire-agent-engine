@@ -66,7 +66,7 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 	}
 
 	deliver(event: T): void {
-		const release = this.#admission?.reserve(event);
+		const release = this.#admission?.reserve(event, this instanceof AssistantMessageEventStream ? event : undefined);
 		const waiter = this.waiting.shift();
 		if (waiter) {
 			const result = { value: event, done: false };

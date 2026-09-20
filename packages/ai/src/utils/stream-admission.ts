@@ -98,10 +98,10 @@ export class StreamAdmission {
 		return () => this.#listeners.delete(listener);
 	}
 
-	reserve(event: unknown): () => void {
+	reserve(event: unknown, sharedPartialEnvelope?: unknown): () => void {
 		this.check();
 		if (this.#events >= this.limits.maxEvents) this.#overflow("maxEvents");
-		const bytes = this.#eventBytes(event);
+		const bytes = this.#eventBytes(event, sharedPartialEnvelope);
 		if (this.#bytes + bytes > this.limits.maxQueuedBytes) this.#overflow("maxQueuedBytes");
 		this.#events++;
 		this.#bytes += bytes;
@@ -116,7 +116,7 @@ export class StreamAdmission {
 		};
 	}
 
-	#eventBytes(event: unknown): number {
+	#eventBytes(event: unknown, sharedPartialEnvelope?: unknown): number {
 		let bytes = 0;
 		const seen = new Set<object>();
 		const visit = (value: unknown, depth: number): void => {
@@ -126,9 +126,9 @@ export class StreamAdmission {
 			if (typeof value !== "object" || value === null || seen.has(value)) return;
 			seen.add(value);
 			for (const key of Object.keys(value)) {
-				// Mutable provider partials are shared working state, bounded by
-				// ingress separately. Never serialize a growing partial per token.
-				if (key === "partial") continue;
+				// Only the typed assistant stream's root partial is shared provider
+				// working state. Nested snapshots and arbitrary callback data count.
+				if (key === "partial" && depth === 0 && value === sharedPartialEnvelope) continue;
 				visit(key, depth + 1);
 				visit((value as Record<string, unknown>)[key], depth + 1);
 			}

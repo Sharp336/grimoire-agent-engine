@@ -2,7 +2,8 @@ import { expect, test } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { AgentPauseGate } from "../../agent/src/pause";
 import { streamSimple } from "../src/stream";
-import { EventStream } from "../src/utils/event-stream";
+import type { AssistantMessage } from "../src/types";
+import { AssistantMessageEventStream, EventStream } from "../src/utils/event-stream";
 import {
 	boundedProviderBody,
 	enqueueStreamWork,
@@ -75,6 +76,70 @@ test("byte overflow cannot resolve a terminal success; draining releases its cha
 	expect(() => stream.push("x".repeat(100))).toThrow("maxEventBytes");
 	stream.push("done");
 	await expect(stream.result()).rejects.toThrow("maxEventBytes");
+});
+
+test.each([
+	[300_000, "maxEventBytes", 0],
+	[200_000, "maxQueuedBytes", 5],
+] as const)("native nested partial snapshots enforce %s chars against %s", async (length, limit, admitted) => {
+	const admission = new StreamAdmission();
+	const stream = runWithStreamAdmission(
+		admission,
+		() =>
+			new EventStream<unknown>(
+				() => false,
+				event => event,
+			),
+	);
+	let produced = 0;
+	expect(() => {
+		for (let index = 0; index < 12; index++) {
+			const message = {
+				role: "assistant",
+				content: [
+					{
+						type: "toolCall",
+						id: `call${index}`,
+						name: "write",
+						arguments: { partial: String(index).padStart(8, "0") + "x".repeat(length) },
+					},
+				],
+			};
+			stream.push({
+				type: "message_update",
+				message,
+				assistantMessageEvent: { type: "toolcall_delta", delta: "x", partial: message },
+			});
+			produced++;
+		}
+	}).toThrow(limit);
+	expect(produced).toBe(admitted);
+	await expect(stream.result()).rejects.toThrow(limit);
+	expect(admission.metrics.peakBytes).toBeLessThanOrEqual(admission.limits.maxQueuedBytes);
+	expect(admission.metrics).toMatchObject({ events: 0, bytes: 0, aborted: limit });
+});
+
+test("only a typed assistant event's root partial is shared; callbacks and nested tool fields are charged", () => {
+	const partial = { role: "assistant", content: [{ type: "text", text: "x".repeat(300_000) }] } as AssistantMessage;
+	const admission = new StreamAdmission();
+	const stream = runWithStreamAdmission(admission, () => new AssistantMessageEventStream());
+	stream.push({ type: "text_delta", contentIndex: 0, delta: "x", partial });
+	expect(admission.metrics.bytes).toBeLessThan(1024);
+	for (const _event of stream.drain()) {
+		/* Release the known shared envelope. */
+	}
+	expect(() => admission.reserve({ type: "text_delta", partial })).toThrow("maxEventBytes");
+
+	const toolAdmission = new StreamAdmission();
+	const toolStream = runWithStreamAdmission(toolAdmission, () => new AssistantMessageEventStream());
+	expect(() =>
+		toolStream.push({
+			type: "toolcall_end",
+			contentIndex: 0,
+			partial,
+			toolCall: { type: "toolCall", id: "call", name: "write", arguments: { partial: "x".repeat(300_000) } },
+		}),
+	).toThrow("maxEventBytes");
 });
 
 test("normal terminal consumption releases all tickets and local work is finite", async () => {
