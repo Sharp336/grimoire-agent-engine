@@ -1,9 +1,10 @@
 import type { StorageRuntimeIndex } from "../session/storage-protocol";
 import { type EngineTarget, EngineTargetError } from "./contracts";
+import { decodeCursor, encodeCursor } from "./rocks-runtime-cursor";
 import type { ProjectedEvent, RocksProjection } from "./rocks-runtime-projection";
 import { projectionId, terminal } from "./rocks-runtime-projection";
 import type { RocksAttempt, RocksBinding, RocksCommand } from "./rocks-runtime-rows";
-import { decodeCursor, encodeCursor, queryWork, type RocksEngineStore } from "./rocks-runtime-store";
+import { queryWork, type RocksEngineStore } from "./rocks-runtime-store";
 import type { EngineNativeHistoryPage } from "./runtime-history";
 import type { HistoryLifecycleContext } from "./runtime-lifecycle";
 import { type RuntimeRemainingWork, runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
@@ -111,7 +112,7 @@ export async function nativeHistoryPage(
 	let next = position.next;
 	let entryRef: EngineNativeHistoryPage["entryRef"];
 	let first: string | null = null;
-	const lineage = encodeCursor(["native-cut", agentId, attemptId ?? null, selected.path], {
+	const lineage = encodeCursor(["native-cut", agentId, selected.path], {
 		...selected.scope,
 		sessionId: session.id,
 		cutSeq: position.cutSeq,
@@ -156,8 +157,12 @@ export async function nativeHistoryPage(
 	for (const entry of entries) {
 		if (typeof entry.sourceCommandId === "string") {
 			const command = await store.row<RocksCommand>("command", entry.sourceCommandId);
-			if (command?.agent_instance_id === agentId && command.identity.attemptId)
-				anchors.push({ attemptId: command.identity.attemptId, entryId: String(entry.id), eventId: 0 });
+			const owner = await store.row<RocksProjection>(
+				"projection",
+				projectionId("ownership", "command", entry.sourceCommandId),
+			);
+			if (command?.agent_instance_id === agentId && command.identity.attemptId && owner)
+				anchors.push({ attemptId: command.identity.attemptId, entryId: String(entry.id), eventId: owner.position });
 		} else if (typeof entry.assistantMessageId === "string") {
 			const owner = await store.row<RocksProjection>(
 				"projection",
@@ -202,11 +207,7 @@ export async function nativeEntry(
 	attemptId?: string,
 ): Promise<Record<string, unknown>> {
 	const selected = await nativeScope(store, agentId, attemptId);
-	const cut = decodeCursor<NativeCut | undefined>(
-		revision,
-		["native-cut", agentId, attemptId ?? null, selected.path],
-		undefined,
-	);
+	const cut = decodeCursor<NativeCut | undefined>(revision, ["native-cut", agentId, selected.path], undefined);
 	if (
 		!cut ||
 		cut.familyId !== selected.scope.familyId ||
@@ -248,7 +249,13 @@ export async function nativeHistoryEntry(
 	if (offset > bytes.length) throw new EngineTargetError("invalid_request", "History range starts after EOF");
 	const end = Math.min(offset + limit, bytes.length);
 	return {
-		sessionId: expectedSessionId ?? (await nativeScope(store, agentId, attemptId)).attempt?.transcript_session_id,
+		sessionId:
+			expectedSessionId ??
+			decodeCursor<NativeCut | undefined>(
+				revision,
+				["native-cut", agentId, (await nativeScope(store, agentId, attemptId)).path],
+				undefined,
+			)?.sessionId,
 		entryId,
 		revision,
 		offset,
@@ -301,8 +308,9 @@ export async function nativeLifecyclePage(
 		...(pinned.currentAttemptId ? [pinned.currentAttemptId] : []),
 		...(pinned.anchors ?? []).map(row => row.attemptId),
 	]);
+	let pageMore = false;
 	const candidates: ProjectedEvent[] = [];
-	for (const id of attempts) {
+	for (const id of limit > 0 ? attempts : []) {
 		const page = await store.storageClient.runtimeQuery({
 			selector: {
 				type: "index",
@@ -313,6 +321,7 @@ export async function nativeLifecyclePage(
 			maxRecords: Math.max(1, Math.min(limit + 1, runtimeLimits.httpPageRecords)),
 			maxBytes: Math.min(runtimeLimits.httpPageBytes, work.remaining.materializedBytes),
 		});
+		pageMore ||= Boolean(page.nextCursor);
 		work.rows(page.records.length);
 		work.value.materializedBytes += jsonBytes(page);
 		work.check();
@@ -351,10 +360,13 @@ export async function nativeLifecyclePage(
 		activities.push(activity);
 		before = event.eventId;
 	}
-	const more = candidates.length > activities.length;
+	const more = limit === 0 || pageMore || candidates.length > activities.length;
 	if (!activities.length && more && limit > 0)
 		throw new EngineTargetError("restore_budget", "Lifecycle item cannot fit its requested page");
 	const result = {
+		sessionId: pinned.sessionId,
+		revision: pinned.anchor ?? "empty",
+		anchor: pinned.anchor,
 		activities: activities.reverse(),
 		activityNextCursor: more ? encodeCursor(cursorScope, { context: pinned, before }) : null,
 		work: work.value,

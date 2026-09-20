@@ -1,7 +1,7 @@
-import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import type { StorageClient } from "../session/storage-client";
 import type { StorageRuntimeIndex, StorageRuntimeRecord } from "../session/storage-protocol";
 import { type EngineAttemptState, type EngineEvent, type EngineTarget, EngineTargetError } from "./contracts";
+import { decodeCursor, encodeCursor } from "./rocks-runtime-cursor";
 import {
 	nativeHistoryEntry,
 	nativeHistoryPage,
@@ -15,7 +15,9 @@ import {
 	projectedHolds,
 	projectionId,
 	type RocksProjection,
+	runtimeReceipt,
 	terminal,
+	toolSnapshot,
 } from "./rocks-runtime-projection";
 import { runtimeResource } from "./rocks-runtime-resources";
 import type {
@@ -51,12 +53,10 @@ import {
 } from "./runtime-protocol";
 import { publicRuntimeQueueItem, type RuntimeQueueRequest } from "./runtime-queue";
 import type { RuntimeSnapshot } from "./runtime-read";
-import { canonicalRuntimeReceipt, type RuntimeReceiptRow } from "./runtime-receipts";
 import { RuntimeTransaction } from "./runtime-records";
 import type { RuntimePageRequest, RuntimeResourceRequest } from "./runtime-resources";
 import { EngineCommandConflictError, type EngineHistoryArchive, type RetainedDirectChildHistory } from "./store";
 
-const cursorKey = randomBytes(32);
 const size = (value: unknown) => Buffer.byteLength(JSON.stringify(value));
 export function queryWork(remaining?: RuntimeRemainingWork): RuntimeQueryWork {
 	return new RuntimeQueryWork(
@@ -68,24 +68,6 @@ export function queryWork(remaining?: RuntimeRemainingWork): RuntimeQueryWork {
 			timeMs: runtimeLimits.bootstrapTimeoutMs,
 		},
 	);
-}
-export function encodeCursor(scope: unknown, value: unknown): string {
-	const body = Buffer.from(JSON.stringify({ scope, value })).toString("base64url");
-	return `${body}.${createHmac("sha256", cursorKey).update(body).digest("base64url")}`;
-}
-export function decodeCursor<T>(cursor: string | undefined, scope: unknown, initial: T): T {
-	if (!cursor) return initial;
-	try {
-		const [body, mac, extra] = cursor.split(".");
-		const signature = createHmac("sha256", cursorKey).update(body).digest("base64url");
-		if (extra || mac?.length !== signature.length || !timingSafeEqual(Buffer.from(mac), Buffer.from(signature)))
-			throw new Error("signature");
-		const decoded = JSON.parse(Buffer.from(body, "base64url").toString("utf8")) as { scope: unknown; value: T };
-		if (JSON.stringify(decoded.scope) !== JSON.stringify(scope)) throw new Error("scope");
-		return decoded.value;
-	} catch {
-		throw new EngineTargetError("stale_target", "Read cursor changed scope or revision");
-	}
 }
 function account(work: RuntimeQueryWork, rows: unknown[]): void {
 	work.rows(rows.length);
@@ -112,6 +94,64 @@ function readRequest(request: RuntimePageRequest | RuntimeQueueRequest, type: st
 
 /** Current projections and native history share the owner; this class never opens a legacy database. */
 export class RocksEngineStore extends RocksEngineMutations {
+	async ownershipMigrationStatus(): Promise<Record<string, unknown>> {
+		return { status: "complete", unresolved: 0 };
+	}
+	async hasOtherSessionBinding(agentId: string, sessionFile: string): Promise<boolean> {
+		const page = await this.records.query("binding_session", [sessionFile], undefined, 2);
+		return page.records.some(row => row.value?.agent_instance_id !== agentId);
+	}
+	async isNativeUnadmittedEvent(
+		event: Pick<EngineEvent, "eventId" | "agentInstanceId" | "attemptId" | "engineGeneration" | "causationCommandId">,
+	): Promise<boolean> {
+		const stored = await this.row<EngineEvent>("event", String(event.eventId));
+		return Boolean(
+			stored &&
+				stored.agentInstanceId === event.agentInstanceId &&
+				stored.attemptId === event.attemptId &&
+				stored.engineGeneration === event.engineGeneration &&
+				stored.causationCommandId === event.causationCommandId &&
+				!(await this.row<RocksCommand>("command", event.causationCommandId)),
+		);
+	}
+	async isInboxNotificationAcknowledgement(event: EngineEvent): Promise<boolean> {
+		if (
+			event.kind !== "inbox_changed" ||
+			event.payload?.action !== "acknowledge" ||
+			!Number.isSafeInteger(event.eventId) ||
+			event.eventId < 1 ||
+			typeof event.payload.queueId !== "string" ||
+			!event.payload.queueId.trim() ||
+			!Number.isSafeInteger(event.payload.revision) ||
+			Number(event.payload.revision) < 1
+		)
+			return false;
+		const [stored] = await this.eventsAfter(event.attemptId, event.eventId - 1, 1);
+		if (!stored) return false;
+		for (const key of [
+			"eventId",
+			"seq",
+			"causationCommandId",
+			"agentInstanceId",
+			"executionId",
+			"attemptId",
+			"bindingId",
+			"engineGeneration",
+			"bindingGeneration",
+			"authorityGeneration",
+			"kind",
+			"createdAt",
+		] as const) {
+			if (stored[key] !== event[key]) return false;
+		}
+		for (const key of ["action", "queueId", "revision", "sourceEventId"] as const) {
+			if (stored.payload?.[key] !== event.payload?.[key]) return false;
+		}
+		// Legacy query/tool mutation IDs also occur in retained outbox events. Only actual
+		// admitted commands have hosted receipts; never infer that distinction from ID shape.
+		return !(await this.row<RocksCommand>("command", event.causationCommandId));
+	}
+
 	async getHistoryArchive(_agentId: string): Promise<EngineHistoryArchive | undefined> {
 		return undefined;
 	}
@@ -326,7 +366,11 @@ export class RocksEngineStore extends RocksEngineMutations {
 		const identity = await this.identity(request.agentInstanceRef, request);
 		if (request.rootAgentInstanceRef && request.rootAgentInstanceRef !== identity.root_agent_instance_ref)
 			throw new EngineTargetError("stale_target", "Target is outside its authorized root");
-		const attempt = await this.attempt(identity, request.attemptId);
+		const attempt = request.attemptId
+			? await this.row<RocksAttempt>("attempt", request.attemptId)
+			: await this.attempt(identity);
+		if (attempt && attempt.agent_instance_id !== identity.agent_instance_id)
+			throw new EngineTargetError("stale_target", "Exact Attempt is not owned by this agent");
 		const common = {
 			agentInstanceRef: request.agentInstanceRef,
 			agentInstanceId: identity.agent_instance_id,
@@ -365,7 +409,12 @@ export class RocksEngineStore extends RocksEngineMutations {
 					row => row.operation === "start" && (!request.attemptId || row.identity.attemptId === request.attemptId),
 				)
 				.at(-1);
-			if (pending)
+			if (pending) {
+				if (request.executionId && request.executionId !== pending.identity.executionId)
+					throw new EngineTargetError("stale_target", "Pending execution changed");
+				const command = pending.identity.serializedCommand
+					? (JSON.parse(pending.identity.serializedCommand) as { expectedIntentRevision?: number })
+					: undefined;
 				result = {
 					kind: "pending",
 					...common,
@@ -374,8 +423,11 @@ export class RocksEngineStore extends RocksEngineMutations {
 					executionId: pending.identity.executionId,
 					authorityGeneration: pending.identity.authorityGeneration,
 					targetEngineGeneration: pending.engine_generation,
+					...(command?.expectedIntentRevision !== undefined
+						? { startExpectedIntentRevision: command.expectedIntentRevision }
+						: {}),
 				};
-			else if (request.attemptId || request.executionId)
+			} else if (request.attemptId || request.executionId)
 				throw new EngineTargetError("stale_target", "Exact Attempt is not present");
 		}
 		await this.assertCut(cut);
@@ -547,7 +599,12 @@ export class RocksEngineStore extends RocksEngineMutations {
 		for (let i = 0; i < (request.queueId ? 1 : (request.limit ?? runtimeLimits.httpPageRecords)); i++) {
 			const page = request.queueId
 				? { records: [await this.records.get("inbox", request.queueId)], nextCursor: null }
-				: await this.records.query("inbox_agent", [identity.agent_instance_id, "pending"], cursor, 1);
+				: await this.records.query(
+						"inbox_agent_pending" as StorageRuntimeIndex,
+						[identity.agent_instance_id],
+						cursor,
+						1,
+					);
 			account(work, page.records);
 			const row = page.records[0]?.value as unknown as RocksInbox | undefined;
 			if (!row) break;
@@ -590,7 +647,7 @@ export class RocksEngineStore extends RocksEngineMutations {
 		if (request.revision !== undefined && request.revision !== revision)
 			throw new EngineTargetError("stale_target", "Tool revision changed");
 		const scope = ["tools", cut.epoch, cut.generation, request.agentInstanceRef, attempt.attempt_id, revision];
-		let position = decodeCursor(request.cursor, scope, { state: 0, cursor: undefined as string | undefined });
+		let position = decodeCursor(request.cursor, scope, { state: 0, after: undefined as string | undefined });
 		const items: Record<string, unknown>[] = [];
 		while (
 			position.state < 2 &&
@@ -599,27 +656,17 @@ export class RocksEngineStore extends RocksEngineMutations {
 			const page = await this.records.query(
 				"effect_attempt",
 				[attempt.attempt_id, ["started", "unknown"][position.state]],
-				position.cursor,
+				undefined,
 				1,
+				position.after ? [position.after] : undefined,
 			);
 			account(work, page.records);
 			const row = page.records[0]?.value as unknown as RocksEffect | undefined;
-			if (row?.effect_kind === "tool") {
-				const item = {
-					toolCallId: row.tool_call_id,
-					name: row.tool_name,
-					...(row.assistant_message_id && row.assistant_block_id
-						? { origin: { messageId: row.assistant_message_id, blockId: row.assistant_block_id } }
-						: {}),
-					phase: row.state === "unknown" ? "unknown" : "started",
-					revision: row.runtime_event_id,
-				};
-				validateRuntimeValue("toolSnapshot", item);
-				items.push(item);
-			}
-			position = page.nextCursor
-				? { ...position, cursor: page.nextCursor }
-				: { state: position.state + 1, cursor: undefined };
+			if (row?.effect_kind === "tool") items.push(toolSnapshot(row));
+			position =
+				page.nextCursor && row
+					? { state: position.state, after: row.effect_id }
+					: { state: position.state + 1, after: undefined };
 		}
 		await this.assertCut(cut, work);
 		return finish(
@@ -1010,54 +1057,8 @@ export class RocksEngineStore extends RocksEngineMutations {
 			throw new EngineCommandConflictError(commandId);
 		const agent = await this.row<RocksIdentity>("identity", row.agent_instance_id);
 		const attempt = identity.attemptId ? await this.row<RocksAttempt>("attempt", identity.attemptId) : undefined;
-		const stage =
-			row.receipt?.outcome === "rejected"
-				? "rejected"
-				: row.state !== "settled"
-					? "engine_accepted"
-					: row.operation === "start" && attempt && terminal.has(attempt.state)
-						? "execution_terminal"
-						: "applied";
-		const payload = identity.serializedCommand
-			? (JSON.parse(identity.serializedCommand) as { browserTarget?: unknown })
-			: undefined;
-		const canonical: RuntimeReceiptRow = {
-			command_id: commandId,
-			operation: row.operation,
-			agent_instance_id: row.agent_instance_id,
-			agent_instance_ref: identity.agentInstanceRef ?? null,
-			attempt_id: identity.attemptId ?? null,
-			execution_id: identity.executionId ?? null,
-			principal_id: identity.principalId ?? "",
-			stage,
-			state: row.state,
-			browser_payload_hash: identity.browserPayloadHash ?? null,
-			browser_target: payload?.browserTarget ? JSON.stringify(payload.browserTarget) : null,
-			target_unavailable: 0,
-			authority_generation: identity.authorityGeneration,
-			intent_revision: agent?.intent_revision ?? 0,
-			receipt: row.receipt ? JSON.stringify(row.receipt) : null,
-			settled_at: row.state === "settled" ? row.updated_at : null,
-			receipt_bytes: row.receipt ? size(row.receipt) : 0,
-			outcome: row.receipt?.outcome ?? null,
-		};
-		return {
-			commandId,
-			lookup: row.state === "settled" ? "known" : "pending",
-			stage,
-			receipt: row.receipt,
-			rawCanonicalHash: row.canonical_hash,
-			browserPayloadHash: identity.browserPayloadHash,
-			target: {
-				agentInstanceRef: identity.agentInstanceRef,
-				agentInstanceId: row.agent_instance_id,
-				attemptId: identity.attemptId,
-				executionId: identity.executionId,
-			},
-			dedupHorizonMs: runtimeLimits.dedupHorizonMs,
-			dedupUntil: canonical.settled_at === null ? null : canonical.settled_at + runtimeLimits.dedupHorizonMs,
-			retention: "indefinite",
-			...canonicalRuntimeReceipt(canonical),
-		};
+		const receipt = runtimeReceipt(row, agent, attempt);
+		if (!receipt) throw new EngineTargetError("stale_target", "Command receipt has no canonical agent identity");
+		return receipt;
 	}
 }

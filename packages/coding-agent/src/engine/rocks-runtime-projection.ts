@@ -1,5 +1,6 @@
 import type { StorageRuntimeIndex } from "../session/storage-protocol";
 import { type EngineEvent, type EngineTarget, EngineTargetError } from "./contracts";
+import { encodeCursor } from "./rocks-runtime-cursor";
 import type {
 	RocksAttempt,
 	RocksBinding,
@@ -12,7 +13,7 @@ import type {
 import { lifecycleSummary } from "./runtime-lifecycle";
 import { utf8Tail } from "./runtime-messages";
 import { boundedItems, projectionChange, runtimeInputBody } from "./runtime-projection";
-import { type RuntimeChange, runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
+import { type RuntimeChange, runtimeLimits, runtimeToolPageRecords, validateRuntimeValue } from "./runtime-protocol";
 import { canonicalRuntimeReceipt, type RuntimeReceiptRow } from "./runtime-receipts";
 import type { RuntimeTransaction } from "./runtime-records";
 import type { EngineTransitionEvent } from "./store";
@@ -67,7 +68,7 @@ export interface ProjectedEvent extends RocksEvent {
 
 function merged<T extends object>(
 	tx: RuntimeTransaction,
-	kind: "projection" | "command",
+	kind: "projection" | "command" | "effect",
 	rows: T[],
 	id: (value: T) => string,
 	matches: (value: T) => boolean,
@@ -200,6 +201,58 @@ export async function projectedHolds(
 	return holds;
 }
 
+export function toolSnapshot(row: RocksEffect): Record<string, unknown> {
+	const item = {
+		toolCallId: row.tool_call_id,
+		name: row.tool_name,
+		...(row.assistant_message_id && row.assistant_block_id
+			? { origin: { messageId: row.assistant_message_id, blockId: row.assistant_block_id } }
+			: {}),
+		phase: row.state === "unknown" ? "unknown" : "started",
+		revision: row.runtime_event_id,
+	};
+	validateRuntimeValue("toolSnapshot", item);
+	return item;
+}
+async function projectedTools(
+	tx: RuntimeTransaction,
+	identity: RocksIdentity,
+	attempt: RocksAttempt | undefined,
+): Promise<{ tools: Record<string, unknown>[]; toolsNextCursor: string | null }> {
+	if (!attempt) return { tools: [], toolsNextCursor: null };
+	const tools: Record<string, unknown>[] = [];
+	const meta = await tx.get<{ store_epoch: string; generation: number }>("metadata", "engine");
+	const scope = [
+		"tools",
+		meta?.store_epoch ?? "",
+		meta?.generation ?? 0,
+		identity.agent_instance_ref,
+		attempt.attempt_id,
+		attempt.tool_revision,
+	];
+	for (const [stateIndex, state] of ["started", "unknown"].entries()) {
+		const rows = merged(
+			tx,
+			"effect",
+			await tx.query<RocksEffect>("effect_attempt", [attempt.attempt_id, state]),
+			row => row.effect_id,
+			row => row.attempt_id === attempt.attempt_id && row.state === state && row.effect_kind === "tool",
+		).sort((a, b) => a.effect_id.localeCompare(b.effect_id));
+		let after: string | undefined;
+		for (const row of rows) {
+			const item = toolSnapshot(row);
+			if (
+				tools.length >= runtimeToolPageRecords ||
+				Buffer.byteLength(JSON.stringify([...tools, item])) > runtimeLimits.bulkPreviewBytes * 2
+			)
+				return { tools, toolsNextCursor: encodeCursor(scope, { state: stateIndex, after }) };
+			tools.push(item);
+			after = row.effect_id;
+		}
+	}
+	return { tools, toolsNextCursor: null };
+}
+
 export async function projectedDetail(
 	tx: RuntimeTransaction,
 	identity: RocksIdentity,
@@ -272,8 +325,7 @@ export async function projectedDetail(
 		},
 		messages: [],
 		messagesHasMore: false,
-		tools: [],
-		toolsNextCursor: null,
+		...(await projectedTools(tx, identity, attempt)),
 	};
 }
 
@@ -337,6 +389,26 @@ export async function projectEvent(tx: RuntimeTransaction, event: EngineEvent): 
 			if (previous) await tx.put("projection", id, { ...previous, resolved: true });
 		}
 		if (attempt) attempt.input_revision = event.eventId;
+	}
+	if (attempt && terminal.has(event.kind)) {
+		const inputs = merged(
+			tx,
+			"projection",
+			await tx.query<RocksProjection>("projection_attempt" as StorageRuntimeIndex, ["input", attempt.attempt_id]),
+			row => projectionId("input", attempt.attempt_id, String(row.value.inputId)),
+			row => row.subtype === "input" && row.attempt_id === attempt.attempt_id && !row.resolved,
+		);
+		for (const input of inputs)
+			await tx.put("projection", projectionId("input", attempt.attempt_id, String(input.value.inputId)), {
+				...input,
+				resolved: true,
+			});
+		if (inputs.length) attempt.input_revision = event.eventId;
+	}
+	if (event.causationCommandId) {
+		const id = projectionId("ownership", "command", event.causationCommandId);
+		if (!(await tx.get<RocksProjection>("projection", id)))
+			await putProjection(tx, event, "ownership", id, { eventId: event.eventId });
 	}
 	let membership: Record<string, unknown> | null = null;
 	if (!identity.root_agent_instance_ref || !identity.membership_revision) {

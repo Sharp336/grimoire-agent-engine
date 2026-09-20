@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { EngineEvent, EngineTarget } from "../src/engine/contracts";
+import { decodeCursor, encodeCursor } from "../src/engine/rocks-runtime-cursor";
 import { projectEvent, projectionId, settleRuntimeMessages } from "../src/engine/rocks-runtime-projection";
-import { decodeCursor, encodeCursor } from "../src/engine/rocks-runtime-store";
 import { RuntimeRecords, RuntimeTransaction } from "../src/engine/runtime-records";
 import { StorageClient } from "../src/session/storage-client";
 import {
@@ -35,7 +35,7 @@ class Rows extends RuntimeRecords {
 		key: Array<string | number | null>,
 	): Promise<StorageRuntimeQueryResponse> {
 		const rows = [...this.values.values()].filter(row =>
-			index === "projection_attempt"
+			String(index) === "projection_attempt"
 				? row.kind === "projection" &&
 					row.value?.subtype === key[0] &&
 					row.value?.attempt_id === key[1] &&
