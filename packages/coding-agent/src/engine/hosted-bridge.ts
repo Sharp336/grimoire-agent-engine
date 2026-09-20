@@ -10,7 +10,6 @@ import {
 	ReplayPolicy,
 } from "@nats-io/jetstream";
 import { connect, type NatsConnection, type NodeConnectionOptions } from "@nats-io/transport-node";
-import { stableStringifyJson } from "@oh-my-pi/pi-utils";
 import type { EngineChildLaunchResult } from "../tools";
 import {
 	type AgentMessageEnvelope,
@@ -562,8 +561,6 @@ export class HostedEngineBridge {
 	}
 
 	async #deliverEvent(event: EngineEventEnvelope): Promise<boolean> {
-		const normalizedReceipt = await this.#normalizeCommandReceipt(event);
-		if (normalizedReceipt) event = normalizedReceipt.event;
 		if (["attempt.agent_registered", "attempt.holds_changed", "attempt.message_updated"].includes(event.type))
 			return true;
 		if (
@@ -657,7 +654,7 @@ export class HostedEngineBridge {
 		}
 		this.#active.set(claim.jobId, claim);
 		if (event.type === "attempt.command_receipt" && event.payload) {
-			const value = normalizedReceipt?.value ?? ((event.payload.value ?? event.payload) as Record<string, unknown>);
+			const value = (event.payload.value ?? event.payload) as Record<string, unknown>;
 			const receipt: Record<string, unknown> = {
 				...value,
 				browserPayloadHash: value.payloadHash ?? value.browserPayloadHash,
@@ -698,91 +695,6 @@ export class HostedEngineBridge {
 			this.#active.delete(jobId);
 		}
 		return true;
-	}
-
-	async #normalizeCommandReceipt(
-		event: EngineEventEnvelope,
-	): Promise<{ event: EngineEventEnvelope; value: Record<string, unknown> } | undefined> {
-		if (event.type !== "attempt.command_receipt") return undefined;
-		const payload = recordValue(event.payload);
-		const current = recordValue(payload?.value);
-		// Canonical receipts keep their exact envelope identity and are validated by ClientHost.
-		if (current) return { event, value: current };
-
-		// RocksDB releases before the canonical receipt projection emitted
-		// {commandId, receipt} and used the current binding for the event tuple.
-		// Recover only that exact retained shape from the native command row.
-		const commandId = payload?.commandId;
-		const rawReceipt = recordValue(payload?.receipt);
-		if (typeof commandId !== "string" || commandId !== event.causationCommandId || !rawReceipt) {
-			throw new Error("Invalid Engine command receipt payload");
-		}
-		const store = this.#options.eventStore;
-		if (!store) throw new Error("Legacy Engine command receipt requires native command recovery");
-		const [recovered, frozenValue] = await Promise.all([
-			store.runtimeCommand(commandId),
-			store.getStartConversationIdentity(commandId),
-		]);
-		const target = recordValue(recovered.target);
-		const frozen = recordValue(frozenValue);
-		const serialized =
-			typeof frozen?.serializedCommand === "string" ? recordValue(JSON.parse(frozen.serializedCommand)) : undefined;
-		const browserTarget = recordValue(serialized?.browserTarget);
-		const frozenBindingId = frozen?.bindingId === undefined ? "" : frozen.bindingId;
-		const frozenBindingGeneration = frozen?.bindingGeneration === undefined ? 0 : frozen.bindingGeneration;
-		if (
-			recovered.commandId !== commandId ||
-			recovered.lookup !== "known" ||
-			typeof recovered.payloadHash !== "string" ||
-			!frozen ||
-			frozen.commandId !== commandId ||
-			frozen.canonicalHash !== recovered.rawCanonicalHash ||
-			frozen.browserPayloadHash !== recovered.payloadHash ||
-			serialized?.commandId !== commandId ||
-			serialized?.browserPayloadHash !== frozen.browserPayloadHash ||
-			frozen.deviceId !== event.deviceId ||
-			frozen.engineId !== event.engineId ||
-			!Number.isSafeInteger(frozen.engineGeneration) ||
-			Number(frozen.engineGeneration) < 1 ||
-			frozen.agentInstanceId !== event.agentInstanceId ||
-			typeof frozen.agentInstanceRef !== "string" ||
-			frozen.authorityGeneration !== event.authorityGeneration ||
-			!Number.isSafeInteger(frozen.authorityGeneration) ||
-			Number(frozen.authorityGeneration) < 0 ||
-			typeof frozen.attemptId !== "string" ||
-			typeof frozen.executionId !== "string" ||
-			typeof frozenBindingId !== "string" ||
-			!Number.isSafeInteger(frozenBindingGeneration) ||
-			Number(frozenBindingGeneration) < 0 ||
-			!target ||
-			!browserTarget ||
-			browserTarget.agentInstanceRef !== frozen.agentInstanceRef ||
-			stableStringifyJson(target) !== stableStringifyJson(browserTarget) ||
-			stableStringifyJson(recovered.receipt) !== stableStringifyJson(rawReceipt)
-		) {
-			throw new Error("Legacy Engine command receipt does not match its retained native command");
-		}
-		const value = Object.fromEntries(
-			["version", "commandId", "payloadHash", "target", "stage", "lookup", "dedupUntil", "result", "error"]
-				.filter(key => key in recovered)
-				.map(key => [key, recovered[key]]),
-		);
-		return {
-			value,
-			event: {
-				...event,
-				deviceId: String(frozen.deviceId),
-				engineId: String(frozen.engineId),
-				engineGeneration: Number(frozen.engineGeneration),
-				agentInstanceId: String(frozen.agentInstanceId),
-				runtimeBindingId: String(frozenBindingId),
-				bindingGeneration: Number(frozenBindingGeneration),
-				attemptId: String(frozen.attemptId),
-				executionId: String(frozen.executionId),
-				authorityGeneration: Number(frozen.authorityGeneration),
-				payload: { value },
-			},
-		};
 	}
 
 	async #heartbeatLoop(): Promise<void> {
@@ -850,10 +762,6 @@ function parseClaim(value: Record<string, unknown>): BridgeClaim {
 		published: false,
 		accepted: Boolean(value.delivery_receipt),
 	};
-}
-
-function recordValue(value: unknown): Record<string, unknown> | undefined {
-	return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
 }
 
 function parseEvent(data: Uint8Array): EngineEventEnvelope {
