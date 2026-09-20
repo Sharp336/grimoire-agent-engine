@@ -951,6 +951,22 @@ async function listSessionHistory(
 	limit: number,
 	restore?: EngineRestoreHistoryTarget,
 ) {
+	if (runtime.storageMode === "native" && !restore) {
+		const page = await runtime.sessionHistoryPage(agentInstanceId, agentInstanceId, cursor, limit);
+		return {
+			schema: "grimoire.engine.session_history.v1",
+			agentInstanceId,
+			sessionId: page.sessionId,
+			leafEntryId: page.anchor,
+			sessionLeafEntryId: page.anchor,
+			entries: page.entries,
+			previousCursor: page.nextCursor,
+			hasMore: page.nextCursor !== null,
+			resyncRequired: false,
+			activityCompleteness: page.activityCompleteness,
+			...(page.entryRef ? { entryRef: page.entryRef } : {}),
+		};
+	}
 	const epoch = await runtime.store.getStoreEpoch();
 	const history = await runtime.sessionHistory(agentInstanceId, restore);
 	const scope = restore ? JSON.stringify([agentInstanceId, restore]) : agentInstanceId;

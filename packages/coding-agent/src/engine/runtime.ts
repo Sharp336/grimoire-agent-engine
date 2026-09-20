@@ -46,9 +46,11 @@ import type { AgentSession } from "../session/agent-session";
 import type { TurnRetryPolicy } from "../session/agent-session-types";
 import { BLOB_HASH_RE, BlobStore } from "../session/blob-store";
 import { createProviderRetryBudgetHook } from "../session/provider-retry-budget";
+import { parseNativeSessionLocator, RocksNativeSessionStorage } from "../session/rocks-native-session-storage";
 import {
 	copyOriginalAttachments,
 	type SessionEntry,
+	type SessionHeader,
 	type SessionLaunchSnapshot,
 	type SessionMessageIdentity,
 } from "../session/session-entries";
@@ -57,7 +59,7 @@ import {
 	loadSessionFile,
 	loadSessionMessagesReadOnly,
 	parseSessionContent,
-	type SessionLoadResult,
+	resolveBlobRefsInEntries,
 } from "../session/session-loader";
 import {
 	type NativeHistoryForkResult,
@@ -65,6 +67,7 @@ import {
 	SessionManager,
 } from "../session/session-manager";
 import { migrateToCurrentVersion } from "../session/session-migrations";
+import { readStorageBinding, StorageClient } from "../session/storage-client";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { EngineChildLaunchResult, EngineChildProfile, EngineInboxToolRequest } from "../tools";
 import {
@@ -102,6 +105,7 @@ import {
 import { markProviderLatency, withProviderObservationContext } from "./provider-admission";
 import { safeEngineErrorDetail, safeHostedMcpFailure } from "./public-error";
 import { RocksEngineMutations } from "./rocks-store";
+import { RocksEngineStore } from "./rocks-runtime-store";
 import { engineAgentId, engineAgentInstanceId, engineRouteToken } from "./route";
 import { EngineAttachmentUploads, messageAttachmentReferences } from "./runtime-attachments";
 import {
@@ -130,6 +134,7 @@ import {
 import { waitForEngineWake } from "./wake";
 
 type EngineEventListener = (event: EngineEvent) => void | Promise<void>;
+export type EngineRuntimeStore = EngineStore | RocksEngineStore;
 
 const MAX_ASSISTANT_FINAL_CHARS = 48_000;
 const MAX_INPUT_FIELD_CHARS = 48_000;
@@ -476,7 +481,7 @@ export class EngineRuntime {
 	readonly asyncJobManager = new AsyncJobManager({ requireAttemptId: true });
 	readonly ircBus = new IrcBus(this.agentRegistry, this.agentLifecycle);
 	readonly engineGeneration: number;
-	readonly store: EngineStore;
+	readonly store: EngineRuntimeStore;
 	readonly attachmentUploads: EngineAttachmentUploads;
 	readonly #sessionDefaults: EngineRuntimeOptions["sessionDefaults"];
 	readonly #mcpServer: EngineRuntimeOptions["mcpServer"];
@@ -509,7 +514,7 @@ export class EngineRuntime {
 	#storageMaintenance?: Promise<EngineStorageReclaimResult>;
 	#activeControlQueries = 0;
 
-	private constructor(store: EngineStore, engineGeneration: number, options: EngineRuntimeOptions) {
+	private constructor(store: EngineRuntimeStore, engineGeneration: number, options: EngineRuntimeOptions) {
 		this.store = store;
 		this.engineGeneration = engineGeneration;
 		this.#sessionDefaults = options.sessionDefaults;
@@ -540,12 +545,50 @@ export class EngineRuntime {
 	}
 
 	static async create(options: EngineRuntimeOptions): Promise<EngineRuntime> {
-		const store = await EngineStore.open(options.databasePath);
+		const binding = readStorageBinding();
+		const store = binding
+			? new RocksEngineStore(new StorageClient(binding))
+			: await EngineStore.open(options.databasePath);
 		const engineGeneration = await store.nextEngineGeneration();
 		const runtime = new EngineRuntime(store, engineGeneration, options);
+		runtime.#attachStorageFailure();
 		await runtime.#reconcileLostAttempts();
 		runtime.#inboxWakeRun = runtime.#runInboxWakeLoop();
 		return runtime;
+	}
+
+	get storageMode(): "native" | "legacy" {
+		return this.store instanceof RocksEngineStore ? "native" : "legacy";
+	}
+
+	#legacyStore(): EngineStore {
+		if (this.store instanceof RocksEngineStore) {
+			throw new EngineTargetError("invalid_request", "This archive operation is not supported by native storage");
+		}
+		return this.store;
+	}
+
+	#nativeSessionStorage(locator: string): RocksNativeSessionStorage {
+		if (!(this.store instanceof RocksEngineStore)) throw new Error("Native storage is not configured");
+		const { familyId, generationId } = parseNativeSessionLocator(locator);
+		return new RocksNativeSessionStorage(this.store.storageClient, familyId, generationId);
+	}
+
+	async #sessionHeader(locator: string): Promise<SessionHeader | undefined> {
+		if (this.store instanceof RocksEngineStore) {
+			return (await this.#nativeSessionStorage(locator).readContext()).checkpoint.header;
+		}
+		const loaded = await loadSessionFile(locator, this.#legacyStore().sessionStorage);
+		return loaded.entries[0]?.type === "session" ? loaded.entries[0] : undefined;
+	}
+
+	async #readSessionMessages(locator: string) {
+		if (!(this.store instanceof RocksEngineStore)) {
+			return loadSessionMessagesReadOnly(locator, this.#legacyStore().sessionStorage);
+		}
+		const manager = await SessionManager.openNative(this.#nativeSessionStorage(locator));
+		await resolveBlobRefsInEntries(manager.getWorkingEntries(), new BlobStore(getBlobsDir()));
+		return manager.buildSessionContext({ transcript: true, collapseCompactedHistory: true }).messages;
 	}
 
 	subscribe(listener: EngineEventListener): () => void {
@@ -1464,6 +1507,7 @@ export class EngineRuntime {
 	}> {
 		return await this.#inLane(agentInstanceId, async () => {
 			this.#throwIfDisposed();
+			this.#legacyStore(); // Full JSONL history is the legacy API; native callers use sessionHistoryPage.
 			const archive = await this.store.getHistoryArchive(agentInstanceId);
 			if (!restore && archive && archive.state !== "restored") {
 				throw new EngineTargetError(
@@ -1501,7 +1545,7 @@ export class EngineRuntime {
 					}
 					throw new EngineTargetError("agent_not_found", `No retained OMP session for ${agentInstanceId}`);
 				}
-				const loaded = await loadSessionFile(binding.sessionFile, this.store.sessionStorage);
+				const loaded = await loadSessionFile(binding.sessionFile, this.#legacyStore().sessionStorage);
 				if (loaded.entries.length === 0 || loaded.entries[0]?.type !== "session") {
 					throw new EngineTargetError("agent_not_found", `No retained OMP session for ${agentInstanceId}`);
 				}
@@ -1607,6 +1651,7 @@ export class EngineRuntime {
 	}
 
 	async #idleArchiveBinding(agentInstanceId: string): Promise<EngineBindingSnapshot & { sessionFile: string }> {
+		this.#legacyStore();
 		this.#throwIfDisposed();
 		const live = this.#bindings.get(agentInstanceId);
 		if (
@@ -1654,7 +1699,7 @@ export class EngineRuntime {
 		const checkpoint = parseNativeSessionCheckpoint(await fs.readFile(snapshot.payloadPath));
 		let content: string;
 		try {
-			content = await this.store.sessionStorage.readText(binding.sessionFile);
+			content = await this.#legacyStore().sessionStorage.readText(binding.sessionFile);
 		} catch (error) {
 			if (!isEnoent(error)) throw error;
 			throw new EngineTargetError("history_expired", "Native archive source history is unavailable");
@@ -1723,6 +1768,7 @@ export class EngineRuntime {
 		archivePath: string,
 		operationId: string,
 	): Promise<Record<string, unknown>> {
+		this.#legacyStore();
 		return await this.#inLane(target.agentInstanceId, async () => {
 			this.#throwIfDisposed();
 			if (!/^[A-Za-z0-9_-]{8,128}$/.test(operationId))
@@ -1761,7 +1807,7 @@ export class EngineRuntime {
 					archiveBytes: compressed.archiveBytes,
 				};
 				await this.#archiveSourceFiles(candidate, compressed.checkpoint);
-				await this.store.putHistoryArchive(candidate, journal);
+				await this.#legacyStore().putHistoryArchive(candidate, journal);
 				journal = candidate;
 			}
 			if (compressed.archiveHash !== journal.archiveHash || compressed.nativeBytes !== journal.nativeBytes) {
@@ -1776,16 +1822,20 @@ export class EngineRuntime {
 				if (!isEnoent(error)) throw error;
 			}
 			try {
-				await this.store.sessionStorage.unlink(journal.binding.sessionFile);
+				await this.#legacyStore().sessionStorage.unlink(journal.binding.sessionFile);
 			} catch (error) {
 				if (!isEnoent(error)) throw error;
 			}
-			await this.store.sessionStorage.drain();
-			await this.store.clearBindingSession(target.agentInstanceId, target.attemptId, journal.binding.sessionFile);
+			await this.#legacyStore().sessionStorage.drain();
+			await this.#legacyStore().clearBindingSession(
+				target.agentInstanceId,
+				target.attemptId,
+				journal.binding.sessionFile,
+			);
 			// Keep the Engine checkpoint until the compressed copy is independently readable after retirement.
 			await readCompressedNativeArchive(journal.archivePath, journal.contentHash);
 			const complete: EngineHistoryArchive = { ...journal, state: "retired" };
-			await this.store.putHistoryArchive(complete, journal);
+			await this.#legacyStore().putHistoryArchive(complete, journal);
 			await this.#discardRetiredCheckpoint(complete);
 			return this.#archiveResult(complete);
 		});
@@ -1796,6 +1846,7 @@ export class EngineRuntime {
 		contentHash: string,
 		operationId: string,
 	): Promise<Record<string, unknown>> {
+		this.#legacyStore();
 		return await this.#inLane(target.agentInstanceId, async () => {
 			this.#throwIfDisposed();
 			let journal = await this.store.getHistoryArchive(target.agentInstanceId);
@@ -1811,7 +1862,7 @@ export class EngineRuntime {
 			const existing = await this.#archiveSourceFiles(journal, compressed.checkpoint);
 			if (journal.state !== "restoring") {
 				const restoring: EngineHistoryArchive = { ...journal, state: "restoring" };
-				await this.store.putHistoryArchive(restoring, journal);
+				await this.#legacyStore().putHistoryArchive(restoring, journal);
 				journal = restoring;
 			}
 			const artifactsDir = journal.binding.sessionFile.slice(0, -".jsonl".length);
@@ -1845,19 +1896,19 @@ export class EngineRuntime {
 					await fs.unlink(temporary);
 				}
 			}
-			await this.store.sessionStorage.writeTextAtomic(
+			await this.#legacyStore().sessionStorage.writeTextAtomic(
 				journal.binding.sessionFile,
 				new TextDecoder("utf-8", { fatal: true }).decode(
 					decodeCanonicalBase64(compressed.checkpoint.sessionJsonlBase64, "Archive session"),
 				),
 			);
-			await this.store.sessionStorage.drain();
+			await this.#legacyStore().sessionStorage.drain();
 			const current = await this.store.getBinding(target.agentInstanceId);
 			if (!current) throw new EngineTargetError("stale_target", "Archive binding disappeared");
 			this.#assertArchiveRequest(journal, current, contentHash, journal.archivePath);
 			await this.store.putBinding({ ...current, sessionFile: journal.binding.sessionFile, state: "released" });
 			const restored: EngineHistoryArchive = { ...journal, state: "restored" };
-			await this.store.putHistoryArchive(restored, journal);
+			await this.#legacyStore().putHistoryArchive(restored, journal);
 			return this.#archiveResult(restored);
 		});
 	}
@@ -1941,7 +1992,7 @@ export class EngineRuntime {
 		if (!attempt || !TERMINAL_ATTEMPT_STATES.has(attempt.state))
 			throw new EngineTargetError("agent_busy", "Archive Attempt is not terminal");
 		try {
-			const text = await this.store.sessionStorage.readText(source);
+			const text = await this.#legacyStore().sessionStorage.readText(source);
 			if (`sha256:${sha256(text)}` !== checkpoint.sessionJsonlHash)
 				throw new EngineTargetError("stale_target", "Archive source history changed");
 		} catch (error) {
@@ -1979,7 +2030,7 @@ export class EngineRuntime {
 	): Promise<NativeSessionArchiveMetadata & { payloadPath: string }> {
 		let content: string;
 		try {
-			content = await this.store.sessionStorage.readText(sessionFile);
+			content = await this.#legacyStore().sessionStorage.readText(sessionFile);
 		} catch (error) {
 			if (isEnoent(error)) {
 				throw new EngineTargetError(
@@ -1992,7 +2043,7 @@ export class EngineRuntime {
 		if (Math.ceil(Buffer.byteLength(content, "utf8") / 3) * 4 > MAX_NATIVE_RESTORE_BYTES) {
 			throw new EngineTargetError("history_expired", "Native session archive exceeds the accepted range");
 		}
-		const loaded = await loadSessionFile(sessionFile, this.store.sessionStorage);
+		const loaded = await loadSessionFile(sessionFile, this.#legacyStore().sessionStorage);
 		const header = loaded.entries[0];
 		if (header?.type !== "session") {
 			throw new EngineTargetError("history_expired", `Native session archive is invalid for ${agentInstanceId}`);
@@ -2188,6 +2239,7 @@ export class EngineRuntime {
 		contentBase64: string;
 		replaceRetainedBinding?: boolean;
 	}): Promise<{ restoreId: string; contentHash: string; totalBytes: number; nextOffset: number; complete: boolean }> {
+		this.#legacyStore();
 		return await this.#inLane(request.agentInstanceId, async () => {
 			this.#throwIfDisposed();
 			if (!request.agentInstanceId.trim() || !request.agentInstanceRef.trim()) {
@@ -2358,8 +2410,9 @@ export class EngineRuntime {
 		if (this.#childHistoryRetention === "local") {
 			return { expired: 0, archived: 0, deleted: 0, retained: 0 };
 		}
+		this.#legacyStore();
 		const cutoff = now - this.#childHistoryTtlMinutes * 60_000;
-		const candidates = await this.store.listExpiredChildHistory(cutoff);
+		const candidates = await this.#legacyStore().listExpiredChildHistory(cutoff);
 		let archived = 0;
 		let deleted = 0;
 		let retained = 0;
@@ -2384,10 +2437,10 @@ export class EngineRuntime {
 				try {
 					let content: string;
 					try {
-						content = await this.store.sessionStorage.readText(candidate.sessionFile);
+						content = await this.#legacyStore().sessionStorage.readText(candidate.sessionFile);
 					} catch (error) {
 						if (!isEnoent(error)) throw error;
-						await this.store.clearBindingSession(
+						await this.#legacyStore().clearBindingSession(
 							candidate.agentInstanceId,
 							candidate.attemptId,
 							candidate.sessionFile,
@@ -2401,10 +2454,10 @@ export class EngineRuntime {
 					}
 					const live = this.#bindings.get(candidate.agentInstanceId);
 					if (live) await this.#terminateBinding(live, "requested");
-					await this.store.sessionStorage.deleteSessionWithArtifacts(candidate.sessionFile);
+					await this.#legacyStore().sessionStorage.deleteSessionWithArtifacts(candidate.sessionFile);
 					localDeleted = true;
 					deleted++;
-					await this.store.clearBindingSession(
+					await this.#legacyStore().clearBindingSession(
 						candidate.agentInstanceId,
 						candidate.attemptId,
 						candidate.sessionFile,
@@ -2487,6 +2540,7 @@ export class EngineRuntime {
 	}
 
 	reclaimStorage(): Promise<EngineStorageReclaimResult> {
+		this.#legacyStore();
 		this.#throwIfDisposed();
 		if (this.#storageMaintenance) return this.#storageMaintenance;
 		if (
@@ -2520,7 +2574,7 @@ export class EngineRuntime {
 					await binding.traceWriteTail;
 					await binding.session.sessionManager.flushAndCheckpoint();
 				}
-				return await this.store.reclaimStorage();
+				return await this.#legacyStore().reclaimStorage();
 			})
 			.finally(() => {
 				if (this.#storageMaintenance === maintenance) this.#storageMaintenance = undefined;
@@ -2567,6 +2621,7 @@ export class EngineRuntime {
 	async #prepareHistoryStart(request: EngineStartRequest): Promise<PreparedHistoryStart | undefined> {
 		const edit = request.historyEdit;
 		if (!edit) return undefined;
+		this.#legacyStore();
 		const sameAgent = request.agentInstanceId === edit.source.agentInstanceId;
 		if ((edit.mode === "edit") !== sameAgent) {
 			throw new EngineTargetError(
@@ -2610,7 +2665,7 @@ export class EngineRuntime {
 		if (!source.sessionFile) throw new EngineTargetError("history_expired", "History source session is unavailable");
 		if (live) await live.session.sessionManager.flushAndCheckpoint();
 
-		const loaded = await loadSessionFile(source.sessionFile, this.store.sessionStorage);
+		const loaded = await loadSessionFile(source.sessionFile, this.#legacyStore().sessionStorage);
 		if (loaded.entries.length === 0 || loaded.entries[0]?.type !== "session") {
 			throw new EngineTargetError("history_expired", "History source session is unavailable");
 		}
@@ -2637,7 +2692,7 @@ export class EngineRuntime {
 			request.cwd,
 			edit.entryId,
 			sessionDir,
-			this.store.sessionStorage,
+			this.#legacyStore().sessionStorage,
 			{
 				leafEntryId: edit.expectedLeafEntryId,
 				...(edit.mode === "edit"
@@ -2743,6 +2798,7 @@ export class EngineRuntime {
 
 	async #prepareRestoreStart(request: EngineStartRequest): Promise<PreparedRestoreStart | undefined> {
 		if (!request.restoreCheckpoint) return undefined;
+		this.#legacyStore();
 		if (!request.agentInstanceRef) {
 			throw new EngineTargetError("invalid_request", "Restored start requires agentInstanceRef");
 		}
@@ -2756,7 +2812,7 @@ export class EngineRuntime {
 		await restoreCheckpointBlobs(checkpoint);
 		const artifactsDir = materialized.slice(0, -".jsonl".length);
 		await fs.rm(artifactsDir, { recursive: true, force: true });
-		await this.store.sessionStorage.writeText(
+		await this.#legacyStore().sessionStorage.writeText(
 			materialized,
 			new TextDecoder("utf-8", { fatal: true }).decode(
 				decodeCanonicalBase64(checkpoint.sessionJsonlBase64, "Session JSONL"),
@@ -2771,7 +2827,7 @@ export class EngineRuntime {
 					decodeCanonicalBase64(artifact.contentBase64, "Artifact"),
 				);
 			}
-			const loaded = await loadSessionFile(materialized, this.store.sessionStorage);
+			const loaded = await loadSessionFile(materialized, this.#legacyStore().sessionStorage);
 			if (loaded.entries[0]?.type !== "session" || loaded.entries[0].id !== checkpoint.sessionId) {
 				throw new EngineTargetError("history_expired", "Restore checkpoint native session is invalid");
 			}
@@ -2780,13 +2836,15 @@ export class EngineRuntime {
 				materialized,
 				request.cwd,
 				sessionDir,
-				this.store.sessionStorage,
+				this.#legacyStore().sessionStorage,
 				{ copyArtifacts: true, suppressBreadcrumb: true },
 			);
 		} finally {
-			await this.store.sessionStorage.unlink(materialized).catch(error => {
-				if (!isEnoent(error)) throw error;
-			});
+			await this.#legacyStore()
+				.sessionStorage.unlink(materialized)
+				.catch(error => {
+					if (!isEnoent(error)) throw error;
+				});
 			await fs.rm(artifactsDir, { recursive: true, force: true });
 		}
 		return { sessionManager, stageDir };
@@ -3104,7 +3162,7 @@ export class EngineRuntime {
 		const errors: unknown[] = [];
 		await collectFailure(errors, () => sessionManager.close());
 		if (sessionFile) {
-			await collectFailure(errors, () => this.store.sessionStorage.deleteSessionWithArtifacts(sessionFile));
+			await collectFailure(errors, () => this.#legacyStore().sessionStorage.deleteSessionWithArtifacts(sessionFile));
 		}
 		throwCollectedFailures(errors, "Prepared session cleanup failed");
 	}
@@ -3210,9 +3268,12 @@ export class EngineRuntime {
 				prior.profileDigest === profileDigest &&
 				profile.continuationPolicy !== "fresh"
 			) {
-				sessionManager = await SessionManager.open(prior.sessionFile, sessionDir, this.store.sessionStorage, {
-					initialCwd: request.cwd,
-				});
+				sessionManager =
+					this.store instanceof RocksEngineStore
+						? await SessionManager.openNative(this.#nativeSessionStorage(prior.sessionFile), sessionDir)
+						: await SessionManager.open(prior.sessionFile, sessionDir, this.store.sessionStorage, {
+								initialCwd: request.cwd,
+							});
 			} else if (!preparedSessionManager) {
 				previousInboxSessionId = prior?.sessionFile
 					? await this.#conversationCarrySource(prior, request, profile, conversationIdentityDigest)
@@ -3221,19 +3282,37 @@ export class EngineRuntime {
 					// A profile/dependency change needs a fresh AgentSession so none of the old
 					// model, tools, settings, or admission policy survives. Fork only the durable
 					// conversation branch, then rebuild the runtime from the newly resolved profile.
-					sessionManager = await SessionManager.forkFrom(
-						prior.sessionFile,
-						request.cwd,
-						sessionDir,
-						this.store.sessionStorage,
-					);
-					uncommittedForkSessionFile = sessionManager.getSessionFile();
-					if (!uncommittedForkSessionFile) throw new Error("Carried AgentSession was not durably materialized");
+					if (this.store instanceof RocksEngineStore) {
+						const source = this.#nativeSessionStorage(prior.sessionFile);
+						const { familyId } = parseNativeSessionLocator(prior.sessionFile);
+						const target = new RocksNativeSessionStorage(this.store.storageClient, familyId, crypto.randomUUID());
+						sessionManager = await SessionManager.forkNativeContext(source, target, request.cwd, sessionDir);
+					} else {
+						sessionManager = await SessionManager.forkFrom(
+							prior.sessionFile,
+							request.cwd,
+							sessionDir,
+							this.store.sessionStorage,
+						);
+						uncommittedForkSessionFile = sessionManager.getSessionFile();
+						if (!uncommittedForkSessionFile) throw new Error("Carried AgentSession was not durably materialized");
+					}
 					// Workspace roots are executable authority, not conversation history. The
 					// new profile/settings snapshot repopulates its own roots during session setup.
 					await sessionManager.setAdditionalDirectories([]);
 				} else {
-					sessionManager = SessionManager.create(request.cwd, sessionDir, this.store.sessionStorage);
+					sessionManager =
+						this.store instanceof RocksEngineStore
+							? SessionManager.createNative(
+									request.cwd,
+									new RocksNativeSessionStorage(
+										this.store.storageClient,
+										request.agentInstanceId,
+										crypto.randomUUID(),
+									),
+									sessionDir,
+								)
+							: SessionManager.create(request.cwd, sessionDir, this.store.sessionStorage);
 				}
 			}
 			audit?.mark("binding_history_done");
@@ -3466,6 +3545,7 @@ export class EngineRuntime {
 				activeModelCalls: new Set(),
 			};
 			liveBinding = binding;
+			this.#bindMessagePersistence(binding);
 			created.session.setAssistantMessagePersistence((message, event) =>
 				this.#recordAssistantDelta(binding, message.timestamp, event),
 			);
@@ -3621,6 +3701,7 @@ export class EngineRuntime {
 			});
 			binding.unsubscribe = () => {
 				observingEntries = false;
+				binding.session.setMessagePersistedHandler(null);
 				unsubscribe();
 				if (manager.onEntryAppended === onEntryAppended) manager.onEntryAppended = previousEntryAppended;
 			};
@@ -3640,7 +3721,7 @@ export class EngineRuntime {
 				forkSessionManager.seal();
 				await collectFailure(cleanupErrors, () => forkSessionManager.close());
 				await collectFailure(cleanupErrors, () =>
-					this.store.sessionStorage.deleteSessionWithArtifacts(forkSessionFile),
+					this.#legacyStore().sessionStorage.deleteSessionWithArtifacts(forkSessionFile),
 				);
 			}
 			if (disposeResolved) await collectFailure(cleanupErrors, disposeResolved);
@@ -3660,19 +3741,19 @@ export class EngineRuntime {
 	): Promise<EngineHistoryAccess> {
 		const access: EngineHistoryAccess = {
 			refs: [],
-			storage: this.store.sessionStorage,
 			readMessages: async (id, sessionFile) => {
 				const agentInstanceId = await this.store.agentInstanceIdForEngineAgent(id);
-				if (!agentInstanceId) return await loadSessionMessagesReadOnly(sessionFile, this.store.sessionStorage);
+				if (!agentInstanceId)
+					throw new EngineTargetError("agent_not_found", "Unknown retained Engine history owner");
 				return await this.#inLane(agentInstanceId, async () => {
 					const archive = await this.store.getHistoryArchive(agentInstanceId);
 					if (archive && archive.state !== "restored" && archive.binding.sessionFile === sessionFile) {
 						throw new EngineTargetError("history_expired", "This history is archived; restore it before reading");
 					}
-					if (!(await this.store.sessionStorage.exists(sessionFile))) {
+					if (this.store instanceof EngineStore && !(await this.store.sessionStorage.exists(sessionFile))) {
 						throw new EngineTargetError("history_expired", "Retained Engine history is unavailable");
 					}
-					return await loadSessionMessagesReadOnly(sessionFile, this.store.sessionStorage);
+					return await this.#readSessionMessages(sessionFile);
 				});
 			},
 		};
@@ -3690,8 +3771,7 @@ export class EngineRuntime {
 		for (const child of await this.store.listRetainedDirectChildHistory(request.agentInstanceId)) {
 			if (taskRefFromAgentInstanceRef(child.agentInstanceRef) !== parentTaskRef) continue;
 			if (child.engineAgentId !== engineAgentId(child.agentInstanceId)) continue;
-			const loaded = await loadSessionFile(child.sessionFile, this.store.sessionStorage);
-			const header = loaded.entries[0];
+			const header = await this.#sessionHeader(child.sessionFile);
 			if (header?.type !== "session" || typeof header.cwd !== "string") continue;
 			if ((await canonicalWorkspacePath(header.cwd)) !== canonicalCwd) continue;
 			refs.push({
@@ -3752,13 +3832,12 @@ export class EngineRuntime {
 				return undefined;
 			}
 		}
-		let loaded: SessionLoadResult;
+		let header: SessionHeader | undefined;
 		try {
-			loaded = await loadSessionFile(prior.sessionFile, this.store.sessionStorage);
+			header = await this.#sessionHeader(prior.sessionFile);
 		} catch (error) {
 			throw new Error("Retained AgentSession conversation could not be loaded", { cause: error });
 		}
-		const header = loaded?.entries[0];
 		if (header?.type !== "session" || typeof header.cwd !== "string") {
 			throw new Error("Retained AgentSession conversation is missing or invalid");
 		}
@@ -4483,7 +4562,7 @@ export class EngineRuntime {
 		if (kind === "prompt" && identity?.sourceCommandId) {
 			const model = binding.session.model;
 			let previousSelectionRevision: number | null = 0;
-			const branch = binding.session.sessionManager.getBranch();
+			const branch = binding.session.sessionManager.getContextBranch();
 			for (let index = branch.length - 1; index >= 0; index--) {
 				const entry = branch[index];
 				if (entry.type !== "message" || entry.message.role !== "user") continue;
@@ -4982,7 +5061,7 @@ export class EngineRuntime {
 			if (status === "settled") {
 				await binding.session.settleInFlightMessagePersistence();
 				historyEntryId = binding.session.sessionManager
-					.getBranch()
+					.getContextBranch()
 					.find(entry => entry.type === "message" && entry.assistantMessageId === state.assistantMessageId)?.id;
 			}
 			await this.#emit(binding, "assistant_snapshot", {
@@ -5207,7 +5286,7 @@ export class EngineRuntime {
 		const uncommittedForkSessionFile = binding.uncommittedForkSessionFile;
 		if (uncommittedForkSessionFile) {
 			await collectFailure(errors, () =>
-				this.store.sessionStorage.deleteSessionWithArtifacts(uncommittedForkSessionFile),
+				this.#legacyStore().sessionStorage.deleteSessionWithArtifacts(uncommittedForkSessionFile),
 			);
 		}
 		throwCollectedFailures(errors, `Engine binding ${binding.agentInstanceId} admission cleanup failed`);
@@ -5282,8 +5361,7 @@ export class EngineRuntime {
 		}
 		let sessionId = (await this.store.getAttempt(target.attemptId))?.transcript_session_id;
 		if (!sessionId) {
-			const loaded = await loadSessionFile(binding.sessionFile, this.store.sessionStorage);
-			if (loaded.entries[0]?.type === "session") sessionId = loaded.entries[0].id;
+			sessionId = (await this.#sessionHeader(binding.sessionFile))?.id;
 		}
 		if (!sessionId) throw new EngineTargetError("agent_not_found", "No retained session for this AgentInstance");
 		return { ...binding, sessionId };
@@ -5323,8 +5401,7 @@ export class EngineRuntime {
 		if (!currentSessionId) {
 			currentSessionId = (await this.store.getAttempt(binding.attemptId))?.transcript_session_id ?? undefined;
 			if (!currentSessionId && binding.sessionFile) {
-				const loaded = await loadSessionFile(binding.sessionFile, this.store.sessionStorage);
-				if (loaded.entries[0]?.type === "session") currentSessionId = loaded.entries[0].id;
+				currentSessionId = (await this.#sessionHeader(binding.sessionFile))?.id;
 			}
 		}
 		if (currentSessionId !== sessionId) {

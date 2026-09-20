@@ -19,9 +19,9 @@ import {
 	type EngineEventEnvelope,
 } from "./nats-adapter";
 import { engineAgentInstanceId, engineRouteToken } from "./route";
+import type { EngineRuntimeStore } from "./runtime";
 import type { LegacyOwnershipProof } from "./runtime-ownership";
 import { ENGINE_CONTROL_OPS, runtimeLimits } from "./runtime-protocol";
-import type { EngineStore } from "./store";
 import { waitForEngineWake } from "./wake";
 
 interface BridgeClaim {
@@ -214,7 +214,7 @@ export async function launchHostedEngineChild(
 
 export interface HostedEngineBridgeOptions {
 	rpc: GrimoireRpc;
-	eventStore?: EngineStore;
+	eventStore?: EngineRuntimeStore;
 	deviceId: string;
 	engineId: string;
 	engineGeneration: number;

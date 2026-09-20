@@ -20,12 +20,13 @@ export interface EngineHistoryRef {
 	sessionFile: string;
 }
 
-export interface EngineHistoryAccess {
+export type EngineHistoryAccess = {
 	refs: readonly EngineHistoryRef[];
-	storage: SessionStorage;
 	/** Serialize parked transcript reads with native archive/restore, when Engine-owned. */
-	readMessages?: (engineAgentId: string, sessionFile: string) => Promise<AgentMessage[]>;
-}
+} & (
+	| { readMessages: (engineAgentId: string, sessionFile: string) => Promise<AgentMessage[]>; storage?: SessionStorage }
+	| { storage: SessionStorage; readMessages?: never }
+);
 
 /**
  * Raw resource payload returned by protocol handlers. The `immutable` flag is
