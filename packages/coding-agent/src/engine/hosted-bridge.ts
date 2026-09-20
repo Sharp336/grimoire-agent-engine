@@ -706,6 +706,7 @@ export class HostedEngineBridge {
 		if (event.type !== "attempt.command_receipt") return undefined;
 		const payload = recordValue(event.payload);
 		const current = recordValue(payload?.value);
+		// Canonical receipts keep their exact envelope identity and are validated by ClientHost.
 		if (current) return { event, value: current };
 
 		// RocksDB releases before the canonical receipt projection emitted
@@ -727,6 +728,8 @@ export class HostedEngineBridge {
 		const serialized =
 			typeof frozen?.serializedCommand === "string" ? recordValue(JSON.parse(frozen.serializedCommand)) : undefined;
 		const browserTarget = recordValue(serialized?.browserTarget);
+		const frozenBindingId = frozen?.bindingId === undefined ? "" : frozen.bindingId;
+		const frozenBindingGeneration = frozen?.bindingGeneration === undefined ? 0 : frozen.bindingGeneration;
 		if (
 			recovered.commandId !== commandId ||
 			recovered.lookup !== "known" ||
@@ -735,34 +738,29 @@ export class HostedEngineBridge {
 			frozen.commandId !== commandId ||
 			frozen.canonicalHash !== recovered.rawCanonicalHash ||
 			frozen.browserPayloadHash !== recovered.payloadHash ||
+			serialized?.commandId !== commandId ||
+			serialized?.browserPayloadHash !== frozen.browserPayloadHash ||
 			frozen.deviceId !== event.deviceId ||
 			frozen.engineId !== event.engineId ||
-			frozen.engineGeneration !== event.engineGeneration ||
+			!Number.isSafeInteger(frozen.engineGeneration) ||
+			Number(frozen.engineGeneration) < 1 ||
 			frozen.agentInstanceId !== event.agentInstanceId ||
+			typeof frozen.agentInstanceRef !== "string" ||
 			frozen.authorityGeneration !== event.authorityGeneration ||
+			!Number.isSafeInteger(frozen.authorityGeneration) ||
+			Number(frozen.authorityGeneration) < 0 ||
+			typeof frozen.attemptId !== "string" ||
+			typeof frozen.executionId !== "string" ||
+			typeof frozenBindingId !== "string" ||
+			!Number.isSafeInteger(frozenBindingGeneration) ||
+			Number(frozenBindingGeneration) < 0 ||
 			!target ||
 			!browserTarget ||
+			browserTarget.agentInstanceRef !== frozen.agentInstanceRef ||
 			stableStringifyJson(target) !== stableStringifyJson(browserTarget) ||
 			stableStringifyJson(recovered.receipt) !== stableStringifyJson(rawReceipt)
 		) {
 			throw new Error("Legacy Engine command receipt does not match its retained native command");
-		}
-		const rejectedBeforeBinding =
-			recovered.stage === "rejected" &&
-			event.attemptId === "" &&
-			event.executionId === "" &&
-			event.runtimeBindingId === "" &&
-			event.bindingGeneration === 0 &&
-			(frozen.bindingId === undefined || frozen.bindingId === "") &&
-			(frozen.bindingGeneration === undefined || frozen.bindingGeneration === 0);
-		for (const [eventKey, targetKey] of [
-			["attemptId", "attemptId"],
-			["executionId", "executionId"],
-		] as const) {
-			if (typeof frozen[targetKey] !== "string")
-				throw new Error("Legacy Engine command receipt has no frozen native target");
-			if (event[eventKey] !== frozen[targetKey] && !rejectedBeforeBinding)
-				throw new Error("Legacy Engine command receipt does not match its exact native Attempt");
 		}
 		const value = Object.fromEntries(
 			["version", "commandId", "payloadHash", "target", "stage", "lookup", "dedupUntil", "result", "error"]
@@ -773,8 +771,15 @@ export class HostedEngineBridge {
 			value,
 			event: {
 				...event,
+				deviceId: String(frozen.deviceId),
+				engineId: String(frozen.engineId),
+				engineGeneration: Number(frozen.engineGeneration),
+				agentInstanceId: String(frozen.agentInstanceId),
+				runtimeBindingId: String(frozenBindingId),
+				bindingGeneration: Number(frozenBindingGeneration),
 				attemptId: String(frozen.attemptId),
 				executionId: String(frozen.executionId),
+				authorityGeneration: Number(frozen.authorityGeneration),
 				payload: { value },
 			},
 		};

@@ -578,7 +578,7 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 		}
 	}, 10000);
 
-	it("repairs the retained pre-bind Rocks receipt without accepting a wrong non-empty Attempt", async () => {
+	it("repairs polluted legacy receipt identity while keeping canonical receipt identity strict", async () => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `artel-bridge-legacy-receipt-${Snowflake.next()}-`));
 		const broker = await startNatsServer(tempDir);
 		const connection = await connect({ servers: broker.url });
@@ -616,6 +616,11 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			};
 		};
 		const rejected = command("legacy-rejected", "start");
+		rejected.browserTarget = {
+			agentInstanceRef,
+			attemptId: "browser-attempt-before-restart",
+			executionId: "browser-execution-before-restart",
+		};
 		const applied = command("legacy-applied", "steer");
 		applied.browserTarget = {
 			agentInstanceRef,
@@ -690,6 +695,7 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			item: EngineCommandEnvelope,
 			receipt: Record<string, unknown>,
 			identity: { attemptId: string; executionId: string },
+			overrides: Partial<EngineEventEnvelope> = {},
 		) => {
 			const event: EngineEventEnvelope = {
 				schema: "grimoire.engine.event.v1",
@@ -707,7 +713,8 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 				authorityGeneration: item.authorityGeneration,
 				type: "attempt.command_receipt",
 				at: Date.now(),
-				payload: { commandId: item.commandId, receipt },
+				...overrides,
+				payload: overrides.payload ?? { commandId: item.commandId, receipt },
 			};
 			await jetstream(connection).publish(
 				`grimoire.engine.v1.d.${engineRouteToken(item.deviceId)}.e.${engineRouteToken(item.engineId)}.a.${engineRouteToken(item.agentInstanceId)}.evt.receipt`,
@@ -715,19 +722,45 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			);
 		};
 		try {
-			await publish(1, rejected, rejectedReceipt, { attemptId: "", executionId: "" });
+			await publish(
+				1,
+				rejected,
+				rejectedReceipt,
+				{
+					attemptId: rejected.browserTarget!.attemptId!,
+					executionId: rejected.browserTarget!.executionId!,
+				},
+				{
+					engineGeneration: 2,
+					runtimeBindingId: "browser-binding-after-restart",
+					bindingGeneration: 8,
+				},
+			);
 			await waitFor(() => terminalEvents.length === 1, 2_000);
 			expect(terminalEvents[0]).toMatchObject({
 				attemptId: rejected.attemptId,
 				executionId: rejected.executionId,
+				engineGeneration: rejected.engineGeneration,
+				runtimeBindingId: "",
+				bindingGeneration: 0,
 				payload: { value: { commandId: rejected.commandId, stage: "rejected", lookup: "known" } },
 			});
 			await waitFor(async () => (await manager.consumers.info(ENGINE_EVENT_STREAM, durable)).num_ack_pending === 0);
 
-			await publish(2, applied, appliedReceipt, {
-				attemptId: applied.attemptId!,
-				executionId: applied.executionId!,
-			});
+			await publish(
+				2,
+				applied,
+				appliedReceipt,
+				{
+					attemptId: applied.browserTarget!.attemptId!,
+					executionId: applied.browserTarget!.executionId!,
+				},
+				{
+					engineGeneration: 2,
+					runtimeBindingId: "second-browser-binding-after-restart",
+					bindingGeneration: 9,
+				},
+			);
 			await waitFor(() => accepted.length === 1);
 			expect(accepted[0]).toMatchObject({
 				commandId: applied.commandId,
@@ -743,9 +776,36 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 
 			await publish(3, rejected, rejectedReceipt, {
 				attemptId: "wrong-attempt",
-				executionId: rejected.executionId!,
+				executionId: "wrong-execution",
 			});
-			await waitFor(() => errors.some(error => error.message.includes("exact native Attempt")));
+			await waitFor(() => terminalEvents.length === 2);
+			expect(terminalEvents[1]).toMatchObject({
+				attemptId: rejected.attemptId,
+				executionId: rejected.executionId,
+				engineGeneration: rejected.engineGeneration,
+				runtimeBindingId: "",
+				bindingGeneration: 0,
+			});
+			await waitFor(async () => (await manager.consumers.info(ENGINE_EVENT_STREAM, durable)).num_ack_pending === 0);
+
+			await publish(
+				4,
+				rejected,
+				rejectedReceipt,
+				{ attemptId: "wrong-canonical-attempt", executionId: rejected.executionId! },
+				{
+					payload: {
+						value: {
+							commandId: rejected.commandId,
+							stage: "rejected",
+							lookup: "known",
+							payloadHash: rejected.browserPayloadHash,
+							target: rejected.browserTarget,
+						},
+					},
+				},
+			);
+			await waitFor(() => errors.some(error => error.message.includes("retained receipt identity")));
 			expect((await manager.consumers.info(ENGINE_EVENT_STREAM, durable)).num_ack_pending).toBe(1);
 		} finally {
 			identityLookup.mockRestore();
