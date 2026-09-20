@@ -181,13 +181,27 @@ export class BashRunner {
 	withBranchTransition<T>(mutate: () => T): T {
 		const transition = this.beginSessionTransition();
 		let transitioned = false;
+		let pending = false;
 		try {
 			const result = mutate();
 			this.markSessionTransition(transition);
 			transitioned = true;
+			if (result instanceof Promise) {
+				pending = true;
+				return result.then(
+					value => {
+						this.finishSessionTransition(transition, true);
+						return value;
+					},
+					error => {
+						this.finishSessionTransition(transition, false);
+						throw error;
+					},
+				) as T;
+			}
 			return result;
 		} finally {
-			this.finishSessionTransition(transition, transitioned);
+			if (!pending) this.finishSessionTransition(transition, transitioned);
 		}
 	}
 

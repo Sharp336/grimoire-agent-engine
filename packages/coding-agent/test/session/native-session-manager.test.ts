@@ -173,6 +173,52 @@ describe("structured native SessionManager", () => {
 		expect((await SessionManager.openNative(storage)).buildSessionContext()).toEqual(manager.buildSessionContext());
 	});
 
+	it.each([false, true])("keeps the selected service tier when sibling order is reversed=%s", async reverse => {
+		const storage = new StructuredStore();
+		const manager = SessionManager.createNative("/native", storage);
+		const root = manager.appendMessage({ role: "user", content: "root", timestamp: 1 });
+		const doomed = manager.appendMessage({ role: "user", content: "discard", timestamp: 2 });
+		const hidden = manager.appendServiceTierChange({ openai: "flex" });
+		manager.branch(doomed);
+		const selected = manager.appendServiceTierChange({ anthropic: "priority" });
+		await manager.flush();
+		const cold = await SessionManager.openNative(storage);
+		const readChildren = storage.readChildren.bind(storage);
+		storage.readChildren = async parentId => {
+			const children = await readChildren(parentId);
+			return reverse ? children.reverse() : children;
+		};
+		await cold.discardEntryDurably(doomed);
+		const reopened = await SessionManager.openNative(storage);
+		expect(reopened.buildSessionContext().serviceTier).toEqual({ anthropic: "priority" });
+		expect(reopened.getEntry(hidden)?.parentId).toBe(root);
+		expect(reopened.getEntry(selected)?.parentId).toBe(hidden);
+		expect(reopened.getEntry(reopened.getLeafId()!)?.parentId).toBe(selected);
+		expect(storage.entries.some(entry => entry.id === doomed)).toBe(false);
+		expect(storage.archiveReads).toBe(0);
+	});
+
+	it("retains a selected service descendant and its null reset when discarding its ancestor", async () => {
+		const storage = new StructuredStore();
+		const manager = SessionManager.createNative("/native", storage);
+		manager.appendMessage({ role: "user", content: "root", timestamp: 1 });
+		const doomed = manager.appendMessage({ role: "user", content: "discard", timestamp: 2 });
+		manager.appendServiceTierChange({ openai: "flex" });
+		manager.branch(doomed);
+		const selected = manager.appendServiceTierChange({ anthropic: "priority" });
+		const reset = manager.appendServiceTierChange(null);
+		await manager.flush();
+		const cold = await SessionManager.openNative(storage);
+		const readChildren = storage.readChildren.bind(storage);
+		storage.readChildren = async parentId => (await readChildren(parentId)).reverse();
+		await cold.discardEntryDurably(doomed);
+		const reopened = await SessionManager.openNative(storage);
+		expect(reopened.buildSessionContext().serviceTier).toBeUndefined();
+		expect(reopened.getEntry(reset)?.parentId).toBe(selected);
+		expect(reopened.getEntry(reopened.getLeafId()!)?.parentId).toBe(reset);
+		expect(storage.archiveReads).toBe(0);
+	});
+
 	it("does not double-count archive usage across repeated branch selection and reset in an atomic batch", async () => {
 		const storage = new StructuredStore();
 		const manager = SessionManager.createNative("/native", storage);

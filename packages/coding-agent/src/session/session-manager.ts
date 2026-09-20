@@ -3102,6 +3102,10 @@ export class SessionManager {
 	async discardEntryDurably(entryId: string): Promise<void> {
 		const entry = this.#index.get(entryId);
 		if (!entry) return;
+		// Storage's child-ID order is not chronology. Keep the selected service
+		// branch last so hidden siblings cannot replace its effective settings.
+		const selectedLeafId = this.#index.leafId();
+		const selectedChildId = this.#index.pathTo(selectedLeafId).find(child => child.parentId === entryId)?.id;
 		let children = this.#index.childrenOf(entryId);
 		if (this.#nativeStorage) {
 			await this.flush();
@@ -3127,12 +3131,14 @@ export class SessionManager {
 			const canReparentChildren = children.every(child => child.type === "service_tier_change");
 			let leafId = entry.parentId;
 			if (canReparentChildren) {
+				children.sort((left, right) => Number(left.id === selectedChildId) - Number(right.id === selectedChildId));
 				for (const child of children) {
 					child.parentId = leafId;
 					leafId = child.id;
 				}
 				this.#entries = this.#entries.filter(candidate => candidate.id !== entryId);
 				this.#index.rebuild(this.#entries);
+				if (selectedChildId && children.some(child => child.id === selectedChildId)) leafId = selectedLeafId;
 			}
 			this.branchWithSummary(leafId, "", {
 				kind: DISCARDED_ENTRY_BRANCH_MARKER,

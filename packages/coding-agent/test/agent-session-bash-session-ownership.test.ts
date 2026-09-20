@@ -10,6 +10,7 @@ import * as bashExecutor from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import type { ExtensionRunner, ToolShellEnvironmentHook } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { BashRunner } from "@oh-my-pi/pi-coding-agent/session/bash-runner";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
@@ -86,6 +87,49 @@ describe("AgentSession bash session ownership", () => {
 		} as unknown as ExtensionRunner;
 		return { completion, emitUserBash, extensionRunner };
 	}
+
+	it.each([false, true])(
+		"settles async branch ownership only after durable success or rollback=%s",
+		async rollback => {
+			const manager = SessionManager.inMemory(tempDir.path());
+			additionalManagers.push(manager);
+			const root = manager.appendMessage({ role: "user", content: "root", timestamp: 1 });
+			const oldLeaf = manager.appendMessage({ role: "user", content: "old", timestamp: 2 });
+			const { completion, extensionRunner } = createGatedBashRunner();
+			const runner = new BashRunner({
+				agent: new Agent(),
+				sessionManager: manager,
+				settings: Settings.isolated(),
+				extensionRunner: () => extensionRunner,
+				isStreaming: () => false,
+			});
+			const bash = runner.executeBash("pending-owner");
+			const durable = Promise.withResolvers<void>();
+			const transition = runner.withBranchTransition(async () => {
+				manager.branch(root);
+				await durable.promise;
+				if (rollback) {
+					manager.branch(oldLeaf);
+					throw new Error("CAS rejected");
+				}
+			});
+			void transition.catch(() => {});
+			completion.resolve({ result: bashResult });
+			await Bun.sleep(0);
+			expect(
+				manager.getEntries().filter(entry => entry.type === "message" && entry.message.role === "bashExecution"),
+			).toEqual([]);
+			durable.resolve();
+			if (rollback) await expect(transition).rejects.toThrow("CAS rejected");
+			else await transition;
+			await bash;
+			const result = manager
+				.getEntries()
+				.find(entry => entry.type === "message" && entry.message.role === "bashExecution");
+			expect(result?.parentId).toBe(oldLeaf);
+			expect(manager.getContextBranch().some(entry => entry.id === result?.id)).toBe(rollback);
+		},
+	);
 
 	async function seedPersistedSession(): Promise<string> {
 		await session.prompt("seed prompt");

@@ -8,6 +8,7 @@ import type { Model, Usage } from "@oh-my-pi/pi-catalog/types";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import {
 	type RecoveryCompactionResult,
 	TurnRecovery,
@@ -115,6 +116,38 @@ describe("TurnRecovery replay-unsafe output classification", () => {
 	afterAll(() => {
 		authStorage.close();
 		tempDir.removeSync();
+	});
+
+	it("waits for persistence and retains the selected branch until durable discard succeeds", async () => {
+		const manager = SessionManager.inMemory(tempDir.path());
+		manager.appendMessage({ role: "user", content: "root", timestamp: 1 });
+		const message = makeMessage([], model);
+		message.stopReason = "stop";
+		const doomed = manager.appendMessage(message);
+		const selected = manager.appendServiceTierChange({ anthropic: "priority" });
+		const persistence = Promise.withResolvers<void>();
+		let discards = 0;
+		manager.discardEntryDurably = async entryId => {
+			discards++;
+			expect(entryId).toBe(doomed);
+			expect(manager.getLeafId()).toBe(selected);
+			throw new Error("CAS rejected");
+		};
+		const host = createHost(model, modelRegistry);
+		host.sessionManager = manager;
+		host.agent = { state: { messages: [message] }, replaceMessages() {} } as never;
+		host.waitForSessionMessagePersistence = () => persistence.promise;
+		const recovery = new TurnRecovery(host);
+		const pending = recovery.handleEmptyAssistantStop(message);
+		void pending.catch(() => {});
+		await Bun.sleep(0);
+		expect(discards).toBe(0);
+		expect(manager.getLeafId()).toBe(selected);
+		persistence.resolve();
+		await expect(pending).rejects.toThrow("CAS rejected");
+		expect(discards).toBe(1);
+		expect(manager.getLeafId()).toBe(selected);
+		await manager.close();
 	});
 
 	it("rolls back a usage fallback cancelled during model reconciliation", async () => {

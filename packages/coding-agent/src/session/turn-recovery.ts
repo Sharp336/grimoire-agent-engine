@@ -910,8 +910,12 @@ export class TurnRecovery {
 	 * reload or after a mid-retry process kill.
 	 */
 	async #dropAssistantTurnDurably(assistantMessage: AssistantMessage): Promise<void> {
-		const droppedEntryId = await this.#dropPersistedAssistantTurn(assistantMessage);
-		if (droppedEntryId) await this.#host.sessionManager.discardEntryDurably(droppedEntryId);
+		await this.#host.waitForSessionMessagePersistence(assistantMessage);
+		// Native rewind trims the old branch out of memory. Let durable discard
+		// inspect and atomically reparent it before moving the selected leaf.
+		const droppedEntryId = this.discardAssistantTurn(assistantMessage, false);
+		if (droppedEntryId)
+			await this.#host.withBashBranchTransition(() => this.#host.sessionManager.discardEntryDurably(droppedEntryId));
 	}
 
 	/**
@@ -1012,7 +1016,7 @@ export class TurnRecovery {
 	 * the Gemini header-runaway interrupt, which must not replay a partial,
 	 * loop-fueling thinking block.
 	 */
-	discardAssistantTurn(assistantMessage: AssistantMessage): string | undefined {
+	discardAssistantTurn(assistantMessage: AssistantMessage, rewind = true): string | undefined {
 		this.removeAssistantMessageFromActiveContext(assistantMessage);
 
 		const branch = this.#host.sessionManager.getContextBranch();
@@ -1036,6 +1040,7 @@ export class TurnRecovery {
 		if (!branchEntry) {
 			return undefined;
 		}
+		if (!rewind) return branchEntry.id;
 		this.#host.withBashBranchTransition(() => {
 			if (branchEntry.parentId === null) {
 				this.#host.sessionManager.resetLeaf();
