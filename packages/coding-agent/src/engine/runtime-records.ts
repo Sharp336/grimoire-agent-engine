@@ -67,7 +67,9 @@ export class RuntimeRecords {
 		const familyId = scopeId(scope);
 		const run = (this.#tails.get(familyId) ?? Promise.resolve()).then(async () => {
 			for (let attempt = 0; attempt < 4; attempt++) {
-				const tx = new RuntimeTransaction(this, durability === "required");
+				// Every mutation depends on its read/check prefix. Keep those reads on the
+				// reserved lane so observer traffic cannot reject a content write midway.
+				const tx = new RuntimeTransaction(this, true);
 				const result = await work(tx);
 				const runtime = tx.mutation();
 				if (!runtime.puts.length && !runtime.deletes.length) return result;
@@ -78,7 +80,7 @@ export class RuntimeRecords {
 						maxRecords: 1,
 						maxBytes: 1024,
 					},
-					durability === "required",
+					true,
 				);
 				try {
 					await this.client.write(

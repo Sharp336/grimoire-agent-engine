@@ -1,4 +1,5 @@
 import { expect, it } from "bun:test";
+import { RuntimeRecords } from "../../src/engine/runtime-records";
 import { StorageClient, storageCanonicalJson } from "../../src/session/storage-client";
 import { STORAGE_PROTOCOL_SCHEMA_HASH, type StorageWrite } from "../../src/session/storage-protocol";
 
@@ -6,7 +7,11 @@ interface TestRequest {
 	operation: string;
 	write: StorageWrite;
 	receipt: { requestId: string };
-	read: { requestId: string };
+	read: { requestId: string; familyId: string; generationId: string };
+	query: {
+		requestId: string;
+		selector: { type: "records"; keys: Array<{ kind: "metadata"; id: string }> };
+	};
 }
 
 const input = {
@@ -110,6 +115,98 @@ it("rejects overflow synchronously while retaining separate read and required-co
 		expect(client.pending.writeBytes).toBe(0);
 	} finally {
 		gate.resolve();
+		await server.stop(true);
+	}
+});
+
+it("keeps buffered runtime mutations on reserved control reads when observer reads fill their lane", async () => {
+	const observerStarted = Promise.withResolvers<void>();
+	const releaseObserver = Promise.withResolvers<void>();
+	const controlStarted = Promise.withResolvers<void>();
+	const releaseControl = Promise.withResolvers<void>();
+	let observer: Promise<unknown> | undefined;
+	let control: Promise<unknown> | undefined;
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		async fetch(request) {
+			const body = (await request.json()) as TestRequest;
+			if (body.operation === "runtime_query") {
+				const keys = body.query.selector.keys;
+				if (keys.some(key => key.id === "observer")) {
+					observerStarted.resolve();
+					await releaseObserver.promise;
+				} else if (keys.some(key => key.id === "control")) {
+					controlStarted.resolve();
+					await releaseControl.promise;
+				}
+				return envelope(body.query.requestId, {
+					records: keys.map(key => ({ ...key, revision: null, value: null })),
+					nextCursor: null,
+				});
+			}
+			if (body.operation === "read_range") {
+				return envelope(body.read.requestId, {
+					familyId: body.read.familyId,
+					generationId: body.read.generationId,
+					throughSeq: 0,
+					durableThroughSeq: 0,
+					liveThroughSeq: 0,
+					events: [],
+					nextCursor: null,
+				});
+			}
+			return envelope(body.write.requestId, { receipt: receipt(body.write) });
+		},
+	});
+	try {
+		const client = new StorageClient(binding(server.port!), { readRequests: 1, controlRequests: 1 });
+		observer = client.runtimeQuery({
+			selector: { type: "records", keys: [{ kind: "metadata", id: "observer" }] },
+			maxRecords: 1,
+			maxBytes: 1024,
+		});
+		await observerStarted.promise;
+
+		const records = new RuntimeRecords(client);
+		expect(
+			await records.mutate(
+				"runtime-scope",
+				async tx => {
+					await tx.put("metadata", "target", { value: "persisted" });
+					return "persisted";
+				},
+				[],
+				"buffered",
+			),
+		).toBe("persisted");
+		releaseObserver.resolve();
+		await observer;
+
+		control = client.runtimeQuery(
+			{
+				selector: { type: "records", keys: [{ kind: "metadata", id: "control" }] },
+				maxRecords: 1,
+				maxBytes: 1024,
+			},
+			true,
+		);
+		await controlStarted.promise;
+		await expect(
+			records.mutate(
+				"blocked-scope",
+				async tx => tx.put("metadata", "blocked", { value: "rejected" }),
+				[],
+				"buffered",
+			),
+		).rejects.toThrow("admission budget");
+		releaseControl.resolve();
+		await control;
+	} finally {
+		releaseObserver.resolve();
+		releaseControl.resolve();
+		await observer?.catch(() => {});
+		await control?.catch(() => {});
 		await server.stop(true);
 	}
 });
