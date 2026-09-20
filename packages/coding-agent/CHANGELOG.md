@@ -17,6 +17,8 @@
 
 ### Added
 
+- ClientHost-bound Engine chats use native RocksDB history, retain conversation and launch settings across profile changes, and resume without loading the full archive.
+
 - Experimental Cursor headless sessions retain native history and enforce per-tool permissions; profile activation remains disabled pending full integration.
 
 - Official Cursor ACP session adapter with exact-session restore and bounded cancellation.
