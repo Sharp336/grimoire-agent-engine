@@ -22,6 +22,7 @@ import { engineAgentInstanceId, engineRouteToken } from "./route";
 import type { EngineRuntimeStore } from "./runtime";
 import type { LegacyOwnershipProof } from "./runtime-ownership";
 import { ENGINE_CONTROL_OPS, runtimeLimits } from "./runtime-protocol";
+import { EngineStore } from "./store";
 import { waitForEngineWake } from "./wake";
 
 interface BridgeClaim {
@@ -319,11 +320,12 @@ export class HostedEngineBridge {
 		this.#track(this.#claimLoop);
 		this.#track(this.#eventLoop(this.#events));
 		this.#track(this.#heartbeatLoop());
-		if (this.#options.eventStore) this.#track(this.#ownershipLoop());
+		if (this.#options.eventStore instanceof EngineStore) this.#track(this.#ownershipLoop());
 	}
 
 	async #ownershipLoop(): Promise<void> {
 		const store = this.#options.eventStore!;
+		if (!(store instanceof EngineStore)) return;
 		while (this.#accepting && !this.#stopping) {
 			try {
 				let cursor: string | undefined;

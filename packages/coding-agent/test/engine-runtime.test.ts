@@ -52,6 +52,7 @@ import { resolveProviderCandidates } from "@oh-my-pi/pi-coding-agent/web/search/
 import * as utils from "@oh-my-pi/pi-utils";
 import { removeSyncWithRetries, Snowflake, withTimeout } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
+import { legacyEngineStore } from "./helpers/legacy-engine-store";
 
 describe("EngineRuntime", () => {
 	const tempDirs: string[] = [];
@@ -236,7 +237,11 @@ describe("EngineRuntime", () => {
 			await restarted.drain();
 			expect(calls).toBe(4);
 			expect(uri).toBe(originalUri);
-			const manager = await SessionManager.open(started.sessionFile!, undefined, restarted.store.sessionStorage);
+			const manager = await SessionManager.open(
+				started.sessionFile!,
+				undefined,
+				legacyEngineStore(restarted).sessionStorage,
+			);
 			let copiedPath = "";
 			expect(
 				await withOriginalAttachment(manager, uri, async filePath => {
@@ -458,7 +463,7 @@ describe("EngineRuntime", () => {
 				"queued caption\n[Image]",
 			]);
 			const source = (await reopened.store.getBinding(base.agentInstanceId))!;
-			const loaded = await loadSessionFile(source.sessionFile!, reopened.store.sessionStorage);
+			const loaded = await loadSessionFile(source.sessionFile!, legacyEngineStore(reopened).sessionStorage);
 			const nativeUsers = loaded.entries.filter(entry => entry.type === "message" && entry.message.role === "user");
 			expect(nativeUsers).toHaveLength(3);
 			for (const entry of nativeUsers) expect(entry).toHaveProperty("originalAttachments", [originalAttachment]);
@@ -510,7 +515,7 @@ describe("EngineRuntime", () => {
 			fs.unlinkSync(originalPath);
 			await reopened.sessionArchiveRestore(source, archive.contentHash, "original-retire");
 			expect(fs.readFileSync(originalPath)).toEqual(png);
-			const restored = await loadSessionFile(source.sessionFile!, reopened.store.sessionStorage);
+			const restored = await loadSessionFile(source.sessionFile!, legacyEngineStore(reopened).sessionStorage);
 			expect(restored.entries.filter(entry => entry.type === "message" && entry.message.role === "user")).toEqual(
 				nativeUsers,
 			);
@@ -537,7 +542,7 @@ describe("EngineRuntime", () => {
 					profile,
 				);
 				await reopened.drain();
-				const forked = await loadSessionFile(fork.sessionFile!, reopened.store.sessionStorage);
+				const forked = await loadSessionFile(fork.sessionFile!, legacyEngineStore(reopened).sessionStorage);
 				const forkUser = forked.entries.find(entry => entry.type === "message" && entry.message.role === "user");
 				expect(forkUser).toHaveProperty("originalAttachments", [originalAttachment]);
 				const forkArchive = await reopened.sessionArchive(fork.agentInstanceId);
@@ -722,8 +727,8 @@ describe("EngineRuntime", () => {
 			cwd,
 			input: "reclaim test",
 		});
-		const realReclaim = runtime.store.reclaimStorage.bind(runtime.store);
-		const reclaim = spyOn(runtime.store, "reclaimStorage");
+		const realReclaim = legacyEngineStore(runtime).reclaimStorage.bind(runtime.store);
+		const reclaim = spyOn(legacyEngineStore(runtime), "reclaimStorage");
 		const maintenanceEntered = Promise.withResolvers<void>();
 		const maintenanceRelease = Promise.withResolvers<void>();
 		try {
@@ -903,7 +908,7 @@ describe("EngineRuntime", () => {
 			await runtime.start(request("route-root", 3), launch);
 			await runtime.drain();
 			expect(lastMcpTools()).toEqual(["mcp__foreign_probe"]);
-			const oldHistory = await loadSessionFile(first.sessionFile!, runtime.store.sessionStorage);
+			const oldHistory = await loadSessionFile(first.sessionFile!, legacyEngineStore(runtime).sessionStorage);
 			const oldMessages = oldHistory.entries.filter(entry => entry.type === "message");
 			expect(oldMessages).toHaveLength(6);
 			await runtime.dispose();
@@ -964,7 +969,7 @@ describe("EngineRuntime", () => {
 			await runtime.drain();
 			expect(restarted.sessionFile).toBe(first.sessionFile);
 			expect(lastMcpTools()).toEqual(["mcp__grimoire_engine_owned_probe"]);
-			const retained = await loadSessionFile(restarted.sessionFile!, runtime.store.sessionStorage);
+			const retained = await loadSessionFile(restarted.sessionFile!, legacyEngineStore(runtime).sessionStorage);
 			expect(retained.entries[0]).toEqual(oldHistory.entries[0]);
 			expect(retained.entries.filter(entry => entry.type === "message").slice(0, 6)).toEqual(oldMessages);
 			expect(retained.entries.filter(entry => entry.type === "message")).toHaveLength(10);
@@ -1071,7 +1076,7 @@ describe("EngineRuntime", () => {
 			]);
 			const binding = await resumed.store.getBinding(started.agentInstanceId);
 			expect(binding?.sessionFile).toBe(started.sessionFile);
-			const history = await loadSessionFile(binding!.sessionFile!, resumed.store.sessionStorage);
+			const history = await loadSessionFile(binding!.sessionFile!, legacyEngineStore(resumed).sessionStorage);
 			const contexts = history.entries.filter(
 				entry => entry.type === "custom_message" && entry.customType === "engine-command-context",
 			);
@@ -1096,7 +1101,7 @@ describe("EngineRuntime", () => {
 			await dispatch({ ...command, engineGeneration: resumed.engineGeneration });
 			await resumed.drain();
 			expect(mock.calls).toHaveLength(2);
-			const replayHistory = await loadSessionFile(binding!.sessionFile!, resumed.store.sessionStorage);
+			const replayHistory = await loadSessionFile(binding!.sessionFile!, legacyEngineStore(resumed).sessionStorage);
 			expect(
 				replayHistory.entries.filter(entry => entry.type === "message" || entry.type === "custom_message"),
 			).toEqual(history.entries.filter(entry => entry.type === "message" || entry.type === "custom_message"));
@@ -1235,7 +1240,7 @@ describe("EngineRuntime", () => {
 			await runtime.drain();
 			expect(mock.calls).toHaveLength(3);
 			expect(JSON.stringify(mock.calls[2].context.messages)).toContain("STEER_R3");
-			const history = await loadSessionFile(second.sessionFile!, runtime.store.sessionStorage);
+			const history = await loadSessionFile(second.sessionFile!, legacyEngineStore(runtime).sessionStorage);
 			expect(JSON.stringify(history.entries)).not.toContain("stale-resume-context");
 			expect(JSON.stringify(history.entries)).not.toContain("stale-steer-context");
 			expect(
@@ -1493,7 +1498,7 @@ describe("EngineRuntime", () => {
 			} finally {
 				bodyFailure.mockRestore();
 			}
-			const failedHistory = await loadSessionFile(started.sessionFile!, runtime.store.sessionStorage);
+			const failedHistory = await loadSessionFile(started.sessionFile!, legacyEngineStore(runtime).sessionStorage);
 			expect(
 				failedHistory.entries.filter(
 					entry => entry.type === "custom_message" && entry.customType === "engine-command-context",
@@ -1516,7 +1521,10 @@ describe("EngineRuntime", () => {
 					expect.objectContaining({ role: "developer", content: [{ type: "text", text: retry.payload.context }] }),
 				]),
 			);
-			const recoveredHistory = await loadSessionFile(started.sessionFile!, runtime.store.sessionStorage);
+			const recoveredHistory = await loadSessionFile(
+				started.sessionFile!,
+				legacyEngineStore(runtime).sessionStorage,
+			);
 			expect(
 				recoveredHistory.entries.filter(
 					entry => entry.type === "message" && entry.clientMessageId === "context-failure-body-b",
@@ -1901,7 +1909,7 @@ describe("EngineRuntime", () => {
 			} finally {
 				publishFailure.mockRestore();
 			}
-			expect(await runtime.store.sessionStorage.readText(started.sessionFile)).toContain(
+			expect(await legacyEngineStore(runtime).sessionStorage.readText(started.sessionFile)).toContain(
 				"preserve exact native history",
 			);
 			expect(fs.readFileSync(path.join(attachmentsDir, "binary.bin"))).toEqual(binaryAttachment);
@@ -1909,7 +1917,7 @@ describe("EngineRuntime", () => {
 			const repeated = await runtime.sessionArchive("archive-native-agent", undefined, 0, 17);
 			expect(repeated).toEqual(first);
 			const sourceBytes =
-				runtime.store.sessionStorage.statSync(started.sessionFile).size +
+				legacyEngineStore(runtime).sessionStorage.statSync(started.sessionFile).size +
 				fs
 					.readdirSync(attachmentsDir)
 					.reduce((total, name) => total + fs.statSync(path.join(attachmentsDir, name)).size, 0);
@@ -1966,16 +1974,16 @@ describe("EngineRuntime", () => {
 				await expect(runtime.sessionArchive("archive-native-agent")).rejects.toMatchObject({
 					code: "history_expired",
 				});
-				expect(await runtime.store.sessionStorage.readText(started.sessionFile)).toContain(
+				expect(await legacyEngineStore(runtime).sessionStorage.readText(started.sessionFile)).toContain(
 					"preserve exact native history",
 				);
 				expect(fs.readdirSync(snapshotDir).some(name => name.endsWith(".tmp"))).toBe(false);
 			} finally {
 				fs.writeFileSync(payloadPath, originalPayload);
 			}
-			await runtime.store.sessionStorage.writeText(
+			await legacyEngineStore(runtime).sessionStorage.writeText(
 				started.sessionFile,
-				`${await runtime.store.sessionStorage.readText(started.sessionFile)}\n`,
+				`${await legacyEngineStore(runtime).sessionStorage.readText(started.sessionFile)}\n`,
 			);
 			await expect(runtime.sessionArchiveVerify(started, first.contentHash)).rejects.toMatchObject({
 				code: "stale_target",
@@ -2019,7 +2027,7 @@ describe("EngineRuntime", () => {
 			const fresh = await secondRestart.sessionArchive("archive-native-agent");
 			await expect(secondRestart.sessionArchiveVerify(started, fresh.contentHash)).resolves.toMatchObject({
 				sourceBytes:
-					secondRestart.store.sessionStorage.statSync(started.sessionFile).size +
+					legacyEngineStore(secondRestart).sessionStorage.statSync(started.sessionFile).size +
 					fs
 						.readdirSync(attachmentsDir)
 						.reduce((total, name) => total + fs.statSync(path.join(attachmentsDir, name)).size, 0),
@@ -2138,7 +2146,7 @@ describe("EngineRuntime", () => {
 			);
 			await runtime.drain();
 			if (!target.sessionFile) throw new Error("Expected a native session");
-			const sourceText = await runtime.store.sessionStorage.readText(target.sessionFile);
+			const sourceText = await legacyEngineStore(runtime).sessionStorage.readText(target.sessionFile);
 			const history = await runtime.sessionHistory(target.agentInstanceId);
 			const attachmentsDir = target.sessionFile.slice(0, -6);
 			const attachments = fs
@@ -2155,7 +2163,7 @@ describe("EngineRuntime", () => {
 				runtime.sessionArchiveRetire(target, page.contentHash, archivePath, "archive-operation-1"),
 			).rejects.toMatchObject({ code: "stale_target" });
 			expect(await runtime.store.getHistoryArchive(target.agentInstanceId)).toBeUndefined();
-			expect(await runtime.store.sessionStorage.readText(target.sessionFile)).toBe(sourceText);
+			expect(await legacyEngineStore(runtime).sessionStorage.readText(target.sessionFile)).toBe(sourceText);
 			fs.writeFileSync(archivePath, validCompressed);
 			await runtime.store.putBinding({
 				...target,
@@ -2169,8 +2177,8 @@ describe("EngineRuntime", () => {
 				runtime.sessionArchiveRetire(target, page.contentHash, archivePath, "archive-operation-1"),
 			).rejects.toMatchObject({ code: "agent_busy" });
 			expect(await runtime.store.getHistoryArchive(target.agentInstanceId)).toBeUndefined();
-			expect(await runtime.store.sessionStorage.readText(target.sessionFile)).toBe(sourceText);
-			await runtime.store.clearBindingSession("borrowed-agent", "borrowed-attempt", target.sessionFile);
+			expect(await legacyEngineStore(runtime).sessionStorage.readText(target.sessionFile)).toBe(sourceText);
+			await legacyEngineStore(runtime).clearBindingSession("borrowed-agent", "borrowed-attempt", target.sessionFile);
 			const unlink = fsAsync.unlink;
 			let removed = 0;
 			const deletionFailure = spyOn(fsAsync, "unlink").mockImplementation(async filename => {
@@ -2202,7 +2210,7 @@ describe("EngineRuntime", () => {
 			await expect(runtime.start(nextStart, profile)).rejects.toMatchObject({ code: "history_expired" });
 			await runtime.dispose();
 			runtime = await openRuntime(fixture.options);
-			const bindingCleanupFailure = spyOn(runtime.store, "clearBindingSession").mockRejectedValueOnce(
+			const bindingCleanupFailure = spyOn(legacyEngineStore(runtime), "clearBindingSession").mockRejectedValueOnce(
 				new Error("interrupted metadata cleanup"),
 			);
 			try {
@@ -2212,7 +2220,7 @@ describe("EngineRuntime", () => {
 			} finally {
 				bindingCleanupFailure.mockRestore();
 			}
-			expect(await runtime.store.sessionStorage.exists(target.sessionFile)).toBe(false);
+			expect(await legacyEngineStore(runtime).sessionStorage.exists(target.sessionFile)).toBe(false);
 			expect((await runtime.store.getHistoryArchive(target.agentInstanceId))?.state).toBe("retiring");
 			await runtime.dispose();
 			runtime = await openRuntime(fixture.options);
@@ -2224,7 +2232,7 @@ describe("EngineRuntime", () => {
 			});
 			expect(retired).toMatchObject({ state: "retired", sourceRetired: true, freedBytes: 0 });
 			expect(await runtime.reclaimStorage()).toMatchObject({ status: "completed", scope: "engine_database" });
-			expect(await runtime.store.sessionStorage.exists(target.sessionFile)).toBe(false);
+			expect(await legacyEngineStore(runtime).sessionStorage.exists(target.sessionFile)).toBe(false);
 			expect(fs.existsSync(attachmentsDir)).toBe(false);
 			const snapshotDir = path.join(
 				path.dirname(fixture.options.databasePath!),
@@ -2285,7 +2293,7 @@ describe("EngineRuntime", () => {
 				state: "restored",
 				sourceRetired: false,
 			});
-			expect(await runtime.store.sessionStorage.readText(target.sessionFile)).toBe(sourceText);
+			expect(await legacyEngineStore(runtime).sessionStorage.readText(target.sessionFile)).toBe(sourceText);
 			expect(fs.existsSync(interruptedStage)).toBe(false);
 			expect(fs.readFileSync(otherStage, "utf8")).toBe("not this operation");
 			expect(fs.readFileSync(archivePath)).toEqual(validCompressed);
@@ -2470,16 +2478,19 @@ describe("EngineRuntime", () => {
 			);
 			await runtime.drain();
 			if (!target.sessionFile) throw new Error("Expected native image history");
-			const original = await runtime.store.sessionStorage.readText(target.sessionFile);
+			const original = await legacyEngineStore(runtime).sessionStorage.readText(target.sessionFile);
 			expect(original).toContain(blob.ref);
-			const history = await loadSessionMessagesReadOnly(target.sessionFile, runtime.store.sessionStorage);
+			const history = await loadSessionMessagesReadOnly(
+				target.sessionFile,
+				legacyEngineStore(runtime).sessionStorage,
+			);
 			fs.unlinkSync(blob.path);
 			await expect(runtime.sessionArchive(target.agentInstanceId)).rejects.toMatchObject({ code: "ENOENT" });
 			fs.writeFileSync(blob.path, "corrupt source image");
 			await expect(runtime.sessionArchive(target.agentInstanceId)).rejects.toMatchObject({
 				code: "history_expired",
 			});
-			expect(await runtime.store.sessionStorage.readText(target.sessionFile)).toBe(original);
+			expect(await legacyEngineStore(runtime).sessionStorage.readText(target.sessionFile)).toBe(original);
 			fs.writeFileSync(blob.path, image);
 			const page = await runtime.sessionArchive(target.agentInstanceId);
 			expect(page.nextOffset).toBeNull();
@@ -2512,14 +2523,16 @@ describe("EngineRuntime", () => {
 				"Existing blob conflicts",
 			);
 			expect(fs.readFileSync(blob.path, "utf8")).toBe("existing conflicting shared blob");
-			expect(await runtime.store.sessionStorage.exists(target.sessionFile)).toBe(false);
+			expect(await legacyEngineStore(runtime).sessionStorage.exists(target.sessionFile)).toBe(false);
 			fs.unlinkSync(blob.path);
 			await runtime.dispose();
 			runtime = await openRuntime(fixture.options);
 			await runtime.sessionArchiveRestore(target, page.contentHash, "image-archive");
 			expect(await new BlobStore(blobDir).get(blob.hash)).toEqual(image);
-			expect(await loadSessionMessagesReadOnly(target.sessionFile, runtime.store.sessionStorage)).toEqual(history);
-			expect(await runtime.store.sessionStorage.readText(target.sessionFile)).toBe(original);
+			expect(
+				await loadSessionMessagesReadOnly(target.sessionFile, legacyEngineStore(runtime).sessionStorage),
+			).toEqual(history);
+			expect(await legacyEngineStore(runtime).sessionStorage.readText(target.sessionFile)).toBe(original);
 			expect(dispatches).toBe(1);
 		} finally {
 			await runtime?.dispose();
@@ -3026,7 +3039,9 @@ describe("EngineRuntime", () => {
 			const prepared = (await fork.mock.results[0]!.value) as NativeHistoryForkResult;
 			const sessionFile = prepared.sessionManager.getSessionFile();
 			expect(sessionFile).toBeDefined();
-			await expect(runtime.store.sessionStorage.readText(sessionFile!)).rejects.toMatchObject({ code: "ENOENT" });
+			await expect(legacyEngineStore(runtime).sessionStorage.readText(sessionFile!)).rejects.toMatchObject({
+				code: "ENOENT",
+			});
 			expect(await runtime.store.getBinding("cleanup-branch")).toBeUndefined();
 			expect(await runtime.store.getAttempt("cleanup-branch")).toBeUndefined();
 			expect(await runtime.sessionHistory(source.agentInstanceId)).toEqual(history);
@@ -3995,7 +4010,7 @@ describe("EngineRuntime", () => {
 				message: { role: "toolResult", toolCallId: "call", isError: true, content: "x".repeat(600_000) },
 			},
 		];
-		await runtime.store.sessionStorage.writeText(
+		await legacyEngineStore(runtime).sessionStorage.writeText(
 			started.sessionFile!,
 			[header, ...entries].map(entry => JSON.stringify(entry)).join("\n") + "\n",
 		);
@@ -4651,7 +4666,7 @@ describe("EngineRuntime", () => {
 			provider.resolve();
 			expect(await usage).toMatchObject({ code: "stale_target" });
 			await runtime.drain();
-			const read = spyOn(runtime.store.sessionStorage, "readText").mockRejectedValue(
+			const read = spyOn(legacyEngineStore(runtime).sessionStorage, "readText").mockRejectedValue(
 				new Error("Full history read forbidden"),
 			);
 			try {
@@ -6271,7 +6286,7 @@ describe("EngineRuntime", () => {
 			profile,
 		);
 		await runtime.drain();
-		const storage = runtime.store.sessionStorage;
+		const storage = legacyEngineStore(runtime).sessionStorage;
 		const readText = storage.readText.bind(storage);
 		const failedRead = spyOn(storage, "readText").mockImplementation(async file => {
 			if (file === first.sessionFile) throw new Error("injected retained storage failure");
@@ -7032,7 +7047,7 @@ describe("EngineRuntime", () => {
 			wakeIntent: true,
 		});
 		if (!first.sessionFile) throw new Error("Expected the retained session file");
-		const storage = runtime.store.sessionStorage;
+		const storage = legacyEngineStore(runtime).sessionStorage;
 		const sessionDir = path.dirname(first.sessionFile);
 		const filesBefore = storage.listFilesSync(sessionDir, "*.jsonl").sort();
 		const command = {

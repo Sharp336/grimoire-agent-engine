@@ -8,7 +8,7 @@ import {
 	NativeSessionWriteRejectedError,
 } from "../../src/session/native-session-storage";
 import { buildSessionContext } from "../../src/session/session-context";
-import type { SessionEntry } from "../../src/session/session-entries";
+import type { SessionEntry, SessionLaunchSnapshot } from "../../src/session/session-entries";
 import { SessionManager } from "../../src/session/session-manager";
 import { getLatestTodoPhasesFromEntries } from "../../src/tools/todo";
 
@@ -92,6 +92,39 @@ class StructuredStore implements NativeSessionStorage {
 }
 
 describe("structured native SessionManager", () => {
+	it("retains the preceding launch revision across cold compaction without reading its archived user", async () => {
+		const storage = new StructuredStore();
+		const manager = SessionManager.createNative("/native", storage);
+		const launch: SessionLaunchSnapshot = {
+			schema: "engine.launch_snapshot.v1",
+			agentInstanceId: "agent",
+			executionId: "execution",
+			attemptId: "attempt",
+			profileRef: null,
+			profileDigest: "profile",
+			selectionRevision: 7,
+			thinkingLevel: null,
+			model: null,
+			routes: [],
+		};
+		const archived = manager.appendMessage(
+			{ role: "user", content: "prior launch", timestamp: 1 },
+			{
+				sourceCommandId: "command",
+				launchSnapshot: launch,
+			},
+		);
+		manager.appendCompaction("summary", undefined, "outside-active-branch", 100);
+		await manager.flush();
+		const reopened = await SessionManager.openNative(storage);
+		expect(reopened.getLastUserLaunchSnapshot("agent")?.selectionRevision).toBe(7);
+		expect(storage.readIds).not.toContain(archived);
+		expect(storage.archiveReads).toBe(0);
+		reopened.appendMessage({ role: "user", content: "unannotated steer", timestamp: 2 });
+		reopened.appendCompaction("next summary", undefined, "outside-active-branch", 100);
+		await reopened.flush();
+		expect((await SessionManager.openNative(storage)).getLastUserLaunchSnapshot("agent")).toBeNull();
+	});
 	it("forks a fresh native generation from the durable context without archive materialization", async () => {
 		const source = new StructuredStore();
 		const manager = SessionManager.createNative("/source", source);

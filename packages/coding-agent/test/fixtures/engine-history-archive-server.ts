@@ -6,6 +6,7 @@ import { engineAgentId, engineRouteToken } from "../../src/engine/route";
 import { EngineRuntime } from "../../src/engine/runtime";
 import { BlobStore } from "../../src/session/blob-store";
 import { SessionManager } from "../../src/session/session-manager";
+import { legacyEngineStore } from "../helpers/legacy-engine-store";
 
 const root = process.argv[2];
 if (!root || !path.isAbsolute(root) || !path.basename(root).startsWith("history-engine-")) {
@@ -20,7 +21,7 @@ try {
 	const manager = SessionManager.create(
 		root,
 		path.join(root, "engine-sessions", engineRouteToken(agentInstanceId)),
-		runtime.store.sessionStorage,
+		legacyEngineStore(runtime).sessionStorage,
 	);
 	for (let index = 0; index < 3; index++) {
 		manager.appendMessage({

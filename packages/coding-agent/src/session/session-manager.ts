@@ -65,6 +65,7 @@ import {
 	type SessionEntry,
 	type SessionHeader,
 	type SessionInitEntry,
+	type SessionLaunchSnapshot,
 	type SessionMessageEntry,
 	type SessionMessageIdentity,
 	type SessionTitleSource,
@@ -443,6 +444,7 @@ export type ReadonlySessionManager = Pick<
 	| "getEntries"
 	| "getTree"
 	| "getContextBranch"
+	| "getLastUserLaunchSnapshot"
 	| "getWorkingEntries"
 	| "materializeHistory"
 	| "getUsageStatistics"
@@ -741,7 +743,10 @@ export class SessionManager {
 		const initial = this.#nativeComplete ? undefined : this.#nativePrefix;
 		const pins = new Map(Object.entries(structuredClone(initial?.credentialPins ?? {})));
 		let lastModelChangeRole = initial?.lastModelChangeRole;
+		let lastUserLaunchSnapshot = initial?.lastUserLaunchSnapshot;
 		for (const candidate of preceding) {
+			if (candidate.type === "message" && candidate.message.role === "user")
+				lastUserLaunchSnapshot = candidate.launchSnapshot ?? null;
 			if (candidate.type === "model_change") lastModelChangeRole = candidate.role ?? "default";
 			if (candidate.type === "credential_pin")
 				pins.set(candidate.provider, { hash: candidate.hash, lastUsedAt: Date.parse(candidate.timestamp) });
@@ -759,6 +764,7 @@ export class SessionManager {
 			todoState: getLatestTodoStateEntry(preceding) ?? initial?.todoState,
 			rewind: resolveCheckpointRewindState(preceding, initial?.rewind),
 			archiveUsage: initial?.archiveUsage,
+			lastUserLaunchSnapshot,
 		};
 		this.#nativeStartId = startId;
 	}
@@ -3036,6 +3042,22 @@ export class SessionManager {
 
 	getHeader(): SessionHeader | null {
 		return this.#header;
+	}
+
+	/** Undefined means no earlier user; null means its launch metadata is unknown. */
+	getLastUserLaunchSnapshot(agentInstanceId: string): SessionLaunchSnapshot | null | undefined {
+		const branch = this.getContextBranch();
+		for (let index = branch.length - 1; index >= 0; index--) {
+			const entry = branch[index];
+			if (entry.type !== "message" || entry.message.role !== "user") continue;
+			if (!entry.launchSnapshot) return null;
+			if (entry.launchSnapshot.agentInstanceId === agentInstanceId) return entry.launchSnapshot;
+		}
+		if (this.#nativeComplete) return undefined;
+		const previous = this.#nativePrefix.lastUserLaunchSnapshot;
+		if (previous?.agentInstanceId === agentInstanceId) return previous;
+		// Older checkpoints or another agent's lineage cannot prove this is the first launch.
+		return previous !== undefined || this.#nativePrefix.entryTypes.includes("message") ? null : undefined;
 	}
 
 	/** All session entries (excludes header). Returns a shallow copy. */

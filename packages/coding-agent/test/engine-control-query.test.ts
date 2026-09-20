@@ -16,6 +16,7 @@ import { runtimeLimits, runtimeRemainingWork } from "@oh-my-pi/pi-coding-agent/e
 import { archiveChildHistory, coreMcpUrl, engineServiceStatus } from "@oh-my-pi/pi-coding-agent/engine/service";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { SQL } from "bun";
+import { legacyEngineStore } from "./helpers/legacy-engine-store";
 
 describe("Engine Control + Query", () => {
 	let tempDir: string | undefined;
@@ -110,9 +111,12 @@ describe("Engine Control + Query", () => {
 				await runtime.store.putAttempt(binding, "completed");
 				await runtime.store.appendEvent({ ...binding, causationCommandId: `complete-${id}`, kind: "completed" });
 			}
-			await runtime.store.sessionStorage.writeTextAtomic(kept, content);
-			await runtime.store.sessionStorage.writeTextAtomic(removed, content + "x".repeat(4 * 1024 * 1024));
-			await runtime.store.sessionStorage.unlink(removed);
+			await legacyEngineStore(runtime).sessionStorage.writeTextAtomic(kept, content);
+			await legacyEngineStore(runtime).sessionStorage.writeTextAtomic(
+				removed,
+				content + "x".repeat(4 * 1024 * 1024),
+			);
+			await legacyEngineStore(runtime).sessionStorage.unlink(removed);
 			await runtime.store.drain();
 			const fileBytes = () =>
 				fs.statSync(databasePath).size +
@@ -133,7 +137,7 @@ describe("Engine Control + Query", () => {
 			});
 			expect(before - after).toBeGreaterThan(4 * 1024 * 1024);
 			expect(await runtime.store.getStoreEpoch()).toBe(identity);
-			expect(await runtime.store.sessionStorage.readText(kept)).toBe(content);
+			expect(await legacyEngineStore(runtime).sessionStorage.readText(kept)).toBe(content);
 			expect(await client.request("snapshots.list", { cursor: page.nextCursor })).toMatchObject({
 				resyncRequired: true,
 				items: [],

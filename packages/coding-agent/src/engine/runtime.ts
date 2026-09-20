@@ -1983,7 +1983,7 @@ export class EngineRuntime {
 			current.state === "running" ||
 			this.#bindings.has(current.agentInstanceId) ||
 			(current.sessionFile !== undefined && current.sessionFile !== source) ||
-			(await this.store.hasOtherSessionBinding(current.agentInstanceId, source)) ||
+			(await this.#legacyStore().hasOtherSessionBinding(current.agentInstanceId, source)) ||
 			(await this.store.listInboxItems(journal.sessionId)).length > 0
 		) {
 			throw new EngineTargetError("agent_busy", "Archive source is still in use");
@@ -4564,20 +4564,9 @@ export class EngineRuntime {
 		// not pretend to apply a new profile; native message identity owns the data.
 		if (kind === "prompt" && identity?.sourceCommandId) {
 			const model = binding.session.model;
-			let previousSelectionRevision: number | null = 0;
-			const branch = binding.session.sessionManager.getContextBranch();
-			for (let index = branch.length - 1; index >= 0; index--) {
-				const entry = branch[index];
-				if (entry.type !== "message" || entry.message.role !== "user") continue;
-				const previous = historyLaunchSnapshot(entry.launchSnapshot);
-				if (!previous) {
-					previousSelectionRevision = null;
-					break;
-				}
-				if (previous.agentInstanceId !== binding.agentInstanceId) continue;
-				previousSelectionRevision = previous.selectionRevision ?? null;
-				break;
-			}
+			const previous = binding.session.sessionManager.getLastUserLaunchSnapshot(binding.agentInstanceId);
+			const previousSelectionRevision =
+				previous === undefined ? 0 : (historyLaunchSnapshot(previous)?.selectionRevision ?? null);
 			identity = {
 				...identity,
 				launchSnapshot: {

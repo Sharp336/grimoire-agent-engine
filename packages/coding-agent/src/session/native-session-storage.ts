@@ -1,6 +1,6 @@
 import type { CheckpointRewindPrefix } from "./checkpoint-entries";
 import type { SessionContextState } from "./session-context";
-import type { SessionEntry, SessionHeader, UsageStatistics } from "./session-entries";
+import type { SessionEntry, SessionHeader, SessionLaunchSnapshot, UsageStatistics } from "./session-entries";
 
 /** State before contextStartId, not a second transcript or a reconstructed prompt. */
 export interface NativeContextPrefix {
@@ -12,6 +12,8 @@ export interface NativeContextPrefix {
 	todoState?: SessionEntry;
 	rewind?: CheckpointRewindPrefix;
 	archiveUsage?: UsageStatistics;
+	/** Last archived user launch; null preserves an unannotated user message. */
+	lastUserLaunchSnapshot?: SessionLaunchSnapshot | null;
 }
 
 export interface NativeSessionCheckpoint {
