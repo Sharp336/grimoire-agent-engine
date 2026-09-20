@@ -101,6 +101,7 @@ import {
 } from "./contracts";
 import { markProviderLatency, withProviderObservationContext } from "./provider-admission";
 import { safeEngineErrorDetail, safeHostedMcpFailure } from "./public-error";
+import { RocksEngineMutations } from "./rocks-store";
 import { engineAgentId, engineAgentInstanceId, engineRouteToken } from "./route";
 import { EngineAttachmentUploads, messageAttachmentReferences } from "./runtime-attachments";
 import {
@@ -366,6 +367,8 @@ interface ToolInvocationRecord {
 	done: Promise<void>;
 	resolveDone: () => void;
 	settled: boolean;
+	checkpoint?: SessionDurabilityCheckpoint;
+	outcome?: { status: "completed" | "failed" | "cancelled"; error?: string; jobIds?: string[] };
 }
 
 interface PendingToolApproval {
@@ -501,6 +504,8 @@ export class EngineRuntime {
 	#inboxWakeSignal = Promise.withResolvers<void>();
 	#inboxWakeRun?: Promise<void>;
 	#disposed = false;
+	#storageFailure?: Error;
+	#storageFailureUnsubscribe?: () => void;
 	#storageMaintenance?: Promise<EngineStorageReclaimResult>;
 	#activeControlQueries = 0;
 
@@ -2534,6 +2539,7 @@ export class EngineRuntime {
 	async dispose(options: { closeStore?: boolean } = {}): Promise<void> {
 		if (this.#disposed) return;
 		this.#disposed = true;
+		this.#storageFailureUnsubscribe?.();
 		this.#signalInboxWake();
 		for (const pending of this.#pendingStarts)
 			pending.controller.abort(new EngineTargetError("cancelled", "Engine stopped during profile resolution"));
@@ -3883,6 +3889,7 @@ export class EngineRuntime {
 		// The tool's source blocks must be durable before publishing its admission.
 		await binding.traceWriteTail;
 		if (binding.messageWriteError) throw binding.messageWriteError;
+		const checkpoint = await this.#effectCheckpoint(binding);
 		const policy = profile.toolPolicies?.[call.toolName] ?? "unrestricted";
 		const input = stableStringifyJson(call.input);
 		const inputHash = sha256(input);
@@ -3912,7 +3919,10 @@ export class EngineRuntime {
 			binding.parkedEffectTools.add(call.toolCallId);
 			const event = await this.#admitEffect(
 				binding,
-				() => this.store.startToolEffect(record.target, this.#toolEffect(record)),
+				() =>
+					this.store instanceof RocksEngineMutations
+						? this.store.startToolEffect(record.target, this.#toolEffect(record), checkpoint)
+						: this.store.startToolEffect(record.target, this.#toolEffect(record)),
 				signal,
 			).finally(() => binding.parkedEffectTools.delete(call.toolCallId));
 			this.#notifyEvents([event]);
@@ -3936,9 +3946,13 @@ export class EngineRuntime {
 		try {
 			const binding = this.#bindings.get(record.target.agentInstanceId);
 			if (!binding) throw new EngineTargetError("stale_target", "Approval binding was released");
+			const checkpoint = await this.#effectCheckpoint(binding);
 			const event = await this.#admitEffect(
 				binding,
-				() => this.store.requestToolApproval(record.target, this.#toolEffect(record)),
+				() =>
+					this.store instanceof RocksEngineMutations
+						? this.store.requestToolApproval(record.target, this.#toolEffect(record), checkpoint)
+						: this.store.requestToolApproval(record.target, this.#toolEffect(record)),
 				signal,
 			);
 			this.#notifyEvents([event]);
@@ -3971,6 +3985,50 @@ export class EngineRuntime {
 		);
 	}
 
+	#bindMessagePersistence(binding: LiveBinding): void {
+		if (!(this.store instanceof RocksEngineMutations)) return;
+		binding.session.setMessagePersistedHandler(async message => {
+			if (message.role !== "toolResult") return;
+			const record = [...this.#toolInvocations.values()].find(
+				candidate =>
+					candidate.target.bindingId === binding.bindingId &&
+					candidate.target.attemptId === binding.attemptId &&
+					candidate.toolCallId === message.toolCallId,
+			);
+			if (!record) return;
+			// Runs inside the persistence slot: draining that slot here would deadlock.
+			record.checkpoint = await binding.session.sessionManager.flushAndCheckpoint();
+			if (record.outcome)
+				await this.#completeToolInvocation(
+					record,
+					record.outcome.status,
+					record.outcome.error,
+					record.outcome.jobIds,
+				);
+		});
+	}
+
+	#attachStorageFailure(): void {
+		if (!(this.store instanceof RocksEngineMutations)) return;
+		this.#storageFailureUnsubscribe = this.store.storageClient.onFailure(error => {
+			this.#storageFailure = error;
+			for (const pending of this.#pendingStarts) pending.controller.abort(error);
+			for (const binding of this.#bindings.values()) {
+				binding.manualHold = true;
+				binding.messageWriteError = error;
+				binding.session.agent.abort(error);
+			}
+			for (const record of this.#toolInvocations.values()) record.resolveDone();
+			this.#toolInvocations.clear();
+		});
+	}
+
+	async #effectCheckpoint(binding: LiveBinding): Promise<SessionDurabilityCheckpoint | undefined> {
+		if (!(this.store instanceof RocksEngineMutations)) return undefined;
+		await binding.session.settleInFlightMessagePersistence();
+		return binding.session.sessionManager.flushAndCheckpoint();
+	}
+
 	#afterToolExecution(
 		token: ToolExecutionHookToken,
 		call: ToolExecutionHookCall,
@@ -3981,48 +4039,67 @@ export class EngineRuntime {
 		const jobs = this.asyncJobManager
 			.getAllJobs({ ownerId: record.target.engineAgentId, attemptId: record.target.attemptId })
 			.filter(job => job.sourceToolCallId === record.toolCallId);
-		if (jobs.length === 0) {
-			this.#completeToolInvocation(record, outcome.isError ? "failed" : "completed", outcome.error);
-			return;
-		}
-		void Promise.all(jobs.map(job => job.promise)).then(() => {
+		const settle = async () => {
 			const failed = jobs.find(job => job.status === "failed");
 			const cancelled = jobs.find(job => job.status === "cancelled");
-			const status = outcome.isError || failed ? "failed" : cancelled ? "cancelled" : "completed";
-			this.#completeToolInvocation(
-				record,
-				status,
-				outcome.error ?? failed?.errorText,
-				jobs.map(job => job.id),
-			);
+			record.outcome = {
+				status: outcome.isError || failed ? "failed" : cancelled ? "cancelled" : "completed",
+				error: outcome.error ?? failed?.errorText,
+				jobIds: jobs.map(job => job.id),
+			};
+			// Native completion is gated by the toolResult persistence callback.
+			if (!(this.store instanceof RocksEngineMutations) || record.checkpoint)
+				await this.#completeToolInvocation(
+					record,
+					record.outcome.status,
+					record.outcome.error,
+					record.outcome.jobIds,
+				);
+		};
+		void (jobs.length ? Promise.all(jobs.map(job => job.promise)).then(settle) : settle()).catch(error =>
+			this.#toolSettlementFailed(record, error),
+		);
+	}
+
+	#toolSettlementFailed(record: ToolInvocationRecord, error: unknown): void {
+		const failure = error instanceof Error ? error : new Error(String(error));
+		const binding = this.#bindings.get(record.target.agentInstanceId);
+		if (binding && binding.bindingId === record.target.bindingId) {
+			binding.messageWriteError = failure;
+			binding.session.agent.abort(failure);
+		}
+		this.#toolInvocations.delete(record.invocationId);
+		record.resolveDone();
+		logger.warn("Engine tool effect settlement failed", {
+			invocationId: record.invocationId,
+			error: failure.message,
 		});
 	}
 
-	#completeToolInvocation(
+	async #completeToolInvocation(
 		record: ToolInvocationRecord,
 		status: "completed" | "failed" | "cancelled",
 		error?: string,
 		jobIds?: string[],
-	): void {
+	): Promise<void> {
 		if (record.settled) return;
 		record.settled = true;
-		void this.store
-			.settleToolEffect(record.target, record.invocationId, status, {
-				...(error ? { error: error.slice(0, 2_048) } : {}),
-				...(jobIds?.length ? { jobIds } : {}),
-			})
-			.then(event => {
-				this.#notifyEvents([event]);
-				this.#toolInvocations.delete(record.invocationId);
-				record.resolveDone();
-			})
-			.catch(error => {
-				record.settled = false;
-				logger.warn("Engine tool effect settlement failed", {
-					invocationId: record.invocationId,
-					error: error instanceof Error ? error.message : String(error),
-				});
-			});
+		try {
+			const options = { ...(error ? { error: error.slice(0, 2_048) } : {}), ...(jobIds?.length ? { jobIds } : {}) };
+			const event =
+				this.store instanceof RocksEngineMutations
+					? await this.store.settleToolEffect(record.target, record.invocationId, status, {
+							...options,
+							checkpoint: record.checkpoint,
+						})
+					: await this.store.settleToolEffect(record.target, record.invocationId, status, options);
+			this.#notifyEvents([event]);
+			this.#toolInvocations.delete(record.invocationId);
+			record.resolveDone();
+		} catch (error) {
+			this.#toolSettlementFailed(record, error);
+			throw error;
+		}
 	}
 
 	#toolEffect(record: ToolInvocationRecord): EngineToolEffectInput {
@@ -4264,8 +4341,11 @@ export class EngineRuntime {
 		});
 		audit?.mark("model_admission_start");
 		try {
+			const admissionCheckpoint = await this.#effectCheckpoint(binding);
 			const started = await this.#admitEffect(binding, () =>
-				this.store.startModelEffect(this.#snapshot(binding), effect),
+				this.store instanceof RocksEngineMutations
+					? this.store.startModelEffect(this.#snapshot(binding), effect, admissionCheckpoint)
+					: this.store.startModelEffect(this.#snapshot(binding), effect),
 			);
 			this.#notifyEvents([started]);
 			audit?.mark("model_started", { eventId: started.eventId });
@@ -4282,23 +4362,39 @@ export class EngineRuntime {
 						),
 					audit,
 				);
+				binding.streamAdmission?.check();
+				if (binding.messageWriteError) throw binding.messageWriteError;
 				const current = binding.session.getLastAssistantMessage();
-				if (current !== previous && current?.stopReason === "error") {
+				if (current !== previous && (current?.stopReason === "error" || current?.stopReason === "aborted")) {
 					throw new Error(current.errorMessage?.trim() || "Model request failed");
 				}
 			} catch (error) {
 				audit?.mark("model_failed");
 				const message = error instanceof Error ? error.message : String(error);
-				const settled = await this.store.settleModelEffect(
-					this.#snapshot(binding),
-					effect,
-					"failed",
-					message.slice(0, 2_048),
-				);
+				const checkpoint = await this.#effectCheckpoint(binding);
+				const settled =
+					this.store instanceof RocksEngineMutations
+						? await this.store.settleModelEffect(
+								this.#snapshot(binding),
+								effect,
+								"failed",
+								message.slice(0, 2_048),
+								checkpoint,
+							)
+						: await this.store.settleModelEffect(
+								this.#snapshot(binding),
+								effect,
+								"failed",
+								message.slice(0, 2_048),
+							);
 				this.#notifyEvents([settled]);
 				throw error;
 			}
-			const settled = await this.store.settleModelEffect(this.#snapshot(binding), effect, "completed");
+			const checkpoint = await this.#effectCheckpoint(binding);
+			const settled =
+				this.store instanceof RocksEngineMutations
+					? await this.store.settleModelEffect(this.#snapshot(binding), effect, "completed", undefined, checkpoint)
+					: await this.store.settleModelEffect(this.#snapshot(binding), effect, "completed");
 			this.#notifyEvents([settled]);
 			audit?.mark("model_completed", { eventId: settled.eventId });
 			return dispatched;
@@ -5274,7 +5370,9 @@ export class EngineRuntime {
 	}
 
 	async #reconcileLostAttempts(): Promise<void> {
-		this.#notifyEvents(await this.store.interruptGeneration(this.engineGeneration));
+		if (this.store instanceof RocksEngineMutations)
+			await this.store.interruptGeneration(this.engineGeneration, events => this.#notifyEvents(events));
+		else this.#notifyEvents(await this.store.interruptGeneration(this.engineGeneration));
 	}
 
 	async #emit(
@@ -5504,6 +5602,7 @@ export class EngineRuntime {
 	}
 
 	#throwIfDisposed(): void {
+		if (this.#storageFailure) throw this.#storageFailure;
 		if (this.#disposed) throw new Error("EngineRuntime is disposed");
 	}
 }

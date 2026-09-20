@@ -129,6 +129,7 @@ export type StorageRuntimeIndex =
 	| "approval_state"
 	| "inbox_source"
 	| "inbox_session"
+	| "inbox_agent_pending"
 	| "inbox_agent"
 	| "inbox_wake"
 	| "hold_agent"
@@ -140,6 +141,13 @@ export type StorageRuntimeIndex =
 	| "projection_target"
 	| "session_agent"
 	| "session_updated"
+	| "event_projection"
+	| "event_message"
+	| "event_message_revision"
+	| "projection_attempt"
+	| "identity_root"
+	| "event_lifecycle"
+	| "attempt_all"
 	| "kind_primary";
 
 export interface StorageRuntimeQuery {

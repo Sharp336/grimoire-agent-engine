@@ -28,6 +28,7 @@ import {
 import { messageAttachmentReferences } from "./runtime-attachments";
 import { ENGINE_CONTROL_OPS, runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
 import { RuntimeRecords, RuntimeTransaction } from "./runtime-records";
+import { type EnginePendingStartTarget, validateStartFence } from "./start-fence";
 import {
 	type EngineApprovalRow,
 	EngineAttemptConflictError,
@@ -39,6 +40,7 @@ import {
 	EngineEffectConflictError,
 	EngineInboxConflictError,
 	type EngineModelEffectInput,
+	type EnginePendingStartCancellation,
 	type EngineToolEffectInput,
 	type EngineTransitionEvent,
 } from "./store";
@@ -63,6 +65,11 @@ type AgentIdentity = Pick<
 	| "principalId"
 	| "authorityGeneration"
 >;
+interface StartCancellation {
+	subtype: "start_cancellation";
+	target: EnginePendingStartTarget;
+	cancellationCommandId: string;
+}
 const terminal = new Set<EngineAttemptState>(["completed", "failed", "cancelled", "interrupted"]);
 
 export interface RocksTransitionOptions {
@@ -415,6 +422,23 @@ export class RocksEngineMutations {
 				updated_at: Date.now(),
 				pending_accounted: true,
 			} satisfies RocksCommand);
+			if (command.operation === "start") {
+				const cancelled = await tx.get<StartCancellation>("metadata", `start-cancellation:${command.commandId}`);
+				if (cancelled) {
+					const admitted = (await tx.get<RocksCommand>("command", command.commandId))!;
+					this.validateStartTarget(admitted, cancelled.target);
+					const receipt: EngineCommandReceipt = {
+						outcome: "rejected",
+						detail: {
+							code: "cancelled",
+							message: "Exact Start was cancelled before admission",
+							cancellationCommandId: cancelled.cancellationCommandId,
+						},
+					};
+					await this.settle(tx, command.commandId, receipt);
+					return { status: "replay", receipt };
+				}
+			}
 			if (command.engineGeneration < processorGeneration) {
 				const receipt = this.interruptedReceipt();
 				await this.settle(tx, command.commandId, receipt);
@@ -432,6 +456,108 @@ export class RocksEngineMutations {
 				requiresExplicitContinue: true,
 			},
 		};
+	}
+	startExpected(command: EngineCommandIdentity): number | undefined {
+		if (!command.serializedCommand) return undefined;
+		const value = JSON.parse(command.serializedCommand) as { payload?: { expectedIntentRevision?: number } };
+		return value.payload?.expectedIntentRevision;
+	}
+	validateStartTarget(command: RocksCommand, target: EnginePendingStartTarget): void {
+		const identity = command.identity;
+		if (
+			command.operation !== "start" ||
+			identity.agentInstanceId !== target.agentInstanceId ||
+			identity.executionId !== target.executionId ||
+			identity.attemptId !== target.attemptId ||
+			identity.authorityGeneration !== target.authorityGeneration ||
+			identity.engineGeneration > target.engineGeneration ||
+			(target.principalId !== undefined && identity.principalId !== target.principalId) ||
+			(target.expectedStartIntentRevision !== undefined &&
+				this.startExpected(identity) !== target.expectedStartIntentRevision)
+		)
+			throw new EngineTargetError("stale_target", "Start cancellation reference does not match immutable target");
+	}
+	async targetStart(tx: RuntimeTransaction, target: EnginePendingStartTarget): Promise<RocksCommand | undefined> {
+		const command = target.pendingStartCommandId
+			? await tx.get<RocksCommand>("command", target.pendingStartCommandId)
+			: (await tx.query<RocksCommand>("command_agent_pending", [target.agentInstanceId])).find(
+					row =>
+						row.operation === "start" &&
+						row.identity.executionId === target.executionId &&
+						row.identity.attemptId === target.attemptId,
+				);
+		if (command) this.validateStartTarget(command, target);
+		return command;
+	}
+	async cancelRevision(
+		tx: RuntimeTransaction,
+		target: EnginePendingStartTarget,
+		start?: RocksCommand,
+	): Promise<number | undefined> {
+		if (!validateStartFence(target)) return target.expectedIntentRevision;
+		const identity = await tx.get<RocksIdentity>("identity", target.agentInstanceId);
+		const current = identity?.intent_revision ?? -1;
+		if (
+			target.expectedIntentRevision === current ||
+			(start &&
+				target.expectedIntentRevision === target.expectedStartIntentRevision &&
+				start.start_applied_intent_revision === current)
+		)
+			return current;
+		throw new EngineTargetError("stale_target", "Intent changed after exact Start admission");
+	}
+	async cancelPendingStart(
+		target: EnginePendingStartTarget,
+		cancellationCommandId: string,
+	): Promise<EnginePendingStartCancellation> {
+		return this.mutation(target.agentInstanceId, async tx => {
+			const fenced = validateStartFence(target);
+			const start = await this.targetStart(tx, target);
+			if (!start && !fenced) return { status: "not_found" };
+			if (start?.state === "settled")
+				return start.receipt?.outcome === "rejected" && start.receipt.detail?.code === "cancelled"
+					? {
+							status: "already_cancelled",
+							intentRevision:
+								(await tx.get<RocksIdentity>("identity", target.agentInstanceId))?.intent_revision ?? 0,
+						}
+					: { status: "too_late" };
+			const expected = await this.cancelRevision(tx, target, start);
+			if (fenced) {
+				const key = `start-cancellation:${target.pendingStartCommandId}`;
+				const old = await tx.get<StartCancellation>("metadata", key);
+				if (
+					old &&
+					(old.target.agentInstanceId !== target.agentInstanceId ||
+						old.target.executionId !== target.executionId ||
+						old.target.attemptId !== target.attemptId ||
+						old.target.authorityGeneration !== target.authorityGeneration ||
+						old.target.principalId !== target.principalId ||
+						old.target.expectedStartIntentRevision !== target.expectedStartIntentRevision)
+				)
+					throw new EngineTargetError("stale_target", "Start cancellation identity already bound");
+				if (!old)
+					await tx.put("metadata", key, {
+						subtype: "start_cancellation",
+						target,
+						cancellationCommandId,
+					} satisfies StartCancellation);
+			}
+			const held = await this.changeIntent(tx, target.agentInstanceId, cancellationCommandId, "stop", expected);
+			if (!start) return { status: "cancelled", intentRevision: held.intentRevision };
+			const detail = {
+				code: "cancelled",
+				message: "Attempt cancelled before Engine session initialization",
+				cancellationCommandId,
+			};
+			await this.settle(tx, start.command_id, { outcome: "rejected", detail }, start.canonical_hash, true);
+			const event = await this.append(
+				tx,
+				{ ...target, commandId: start.command_id, bindingId: "", bindingGeneration: 0 },
+				{ kind: "rejected", payload: detail },
+			);
+			return { status: "cancelled", intentRevision: held.intentRevision, event };
+		});
 	}
 	async releaseCommand(id: string, hash: string, processor: number): Promise<void> {
 		await this.mutation(`command:${id}`, async tx => {
@@ -709,7 +835,10 @@ export class RocksEngineMutations {
 					...old,
 				};
 				Object.assign(row, { state, cause: options.cause ?? null, updated_at: Date.now() });
-				if (terminal.has(state) && row.retry_outcome === "waiting")
+				if (
+					(state === "completed" || state === "failed" || state === "cancelled" || state === "interrupted") &&
+					row.retry_outcome === "waiting"
+				)
 					row.retry_outcome = state === "completed" ? "succeeded" : state;
 				if (options.terminalResult) row.result_payload = options.terminalResult;
 				if (checkpoint)
@@ -723,7 +852,7 @@ export class RocksEngineMutations {
 					});
 				await tx.put("attempt", binding.attemptId, row);
 				if (options.inboxSessionId) {
-					const pending = await tx.query<RocksInbox>("inbox_agent", [binding.agentInstanceId, "pending"]);
+					const pending = await tx.query<RocksInbox>("inbox_agent_pending", [binding.agentInstanceId]);
 					for (const item of pending)
 						await tx.put("inbox", item.queue_id, {
 							...item,
@@ -831,79 +960,111 @@ export class RocksEngineMutations {
 		commandId: string,
 		action: "pause" | "resume" | "stop" | "continue",
 		expected?: number,
+		startFence?: EnginePendingStartTarget,
 	) {
-		return this.mutation(id, tx => this.changeIntent(tx, id, commandId, action, expected));
+		return this.mutation(id, async tx => {
+			if (startFence) {
+				const start = action === "stop" ? await this.targetStart(tx, startFence) : undefined;
+				if (!start) throw new EngineTargetError("stale_target", "Cancellation requires its exact admitted Start");
+				expected = await this.cancelRevision(tx, startFence, start);
+			}
+			return this.changeIntent(tx, id, commandId, action, expected);
+		});
 	}
 
+	checkpointDependencies(checkpoint?: SessionDurabilityCheckpoint): StorageDependency[] {
+		const native = checkpoint?.native;
+		if (!native) return [];
+		if (native.incarnation !== this.storageClient.incarnation)
+			throw new EngineTargetError("stale_target", "Native checkpoint owner changed");
+		return [{ familyId: native.familyId, generationId: native.generationId, throughSeq: native.throughSeq }];
+	}
 	async effectStart(
 		target: EventTarget,
 		input: EngineToolEffectInput | EngineModelEffectInput,
 		model: boolean,
 		approval: boolean,
+		checkpoint?: SessionDurabilityCheckpoint,
 	): Promise<EngineEvent> {
-		return this.mutation(target.agentInstanceId, async tx => {
-			await this.assertFence(tx, target);
-			await this.checkIntent(tx, target.agentInstanceId, undefined, true);
-			if (await tx.get("effect", input.effectId)) throw new EngineEffectConflictError(input.effectId);
-			const tool = "toolCallId" in input ? input : undefined;
-			const modelCall = "modelCallId" in input ? input.modelCallId : "";
-			const row: RocksEffect = {
-				agent_instance_id: target.agentInstanceId,
-				execution_id: target.executionId,
-				attempt_id: target.attemptId,
-				binding_id: target.bindingId,
-				engine_generation: target.engineGeneration,
-				binding_generation: target.bindingGeneration,
-				authority_generation: target.authorityGeneration,
-				effect_id: input.effectId,
-				command_id: target.commandId,
-				tool_call_id: tool?.toolCallId ?? modelCall,
-				tool_name: tool?.toolName ?? "model_dispatch",
-				policy: tool?.policy ?? "unrestricted",
-				input_hash: input.inputHash,
-				assistant_message_id: tool?.origin?.messageId ?? null,
-				assistant_block_id: tool?.origin?.blockId ?? null,
-				effect_kind: model ? "model" : "tool",
-				state: approval ? "planned" : "started",
-				outcome: null,
-				created_at: Date.now(),
-				updated_at: Date.now(),
-				runtime_event_id: 0,
-			};
-			await tx.put("effect", input.effectId, row);
-			await this.counter(tx, `effects:${target.attemptId}:${target.bindingId}`, "open_effects", 1);
-			if (approval)
-				await tx.put("approval", input.effectId, {
-					approval_id: input.effectId,
+		return this.mutation(
+			target.agentInstanceId,
+			async tx => {
+				await this.assertFence(tx, target);
+				await this.checkIntent(tx, target.agentInstanceId, undefined, true);
+				if (await tx.get("effect", input.effectId)) throw new EngineEffectConflictError(input.effectId);
+				const tool = "toolCallId" in input ? input : undefined;
+				const modelCall = "modelCallId" in input ? input.modelCallId : "";
+				const row: RocksEffect = {
+					agent_instance_id: target.agentInstanceId,
+					execution_id: target.executionId,
+					attempt_id: target.attemptId,
+					binding_id: target.bindingId,
+					engine_generation: target.engineGeneration,
+					binding_generation: target.bindingGeneration,
+					authority_generation: target.authorityGeneration,
 					effect_id: input.effectId,
-					state: "pending",
-					decision: null,
+					command_id: target.commandId,
+					tool_call_id: tool?.toolCallId ?? modelCall,
+					tool_name: tool?.toolName ?? "model_dispatch",
+					policy: tool?.policy ?? "unrestricted",
+					input_hash: input.inputHash,
+					assistant_message_id: tool?.origin?.messageId ?? null,
+					assistant_block_id: tool?.origin?.blockId ?? null,
+					effect_kind: model ? "model" : "tool",
+					state: approval ? "planned" : "started",
+					outcome: null,
+					created_at: Date.now(),
 					updated_at: Date.now(),
+					runtime_event_id: 0,
+				};
+				await tx.put("effect", input.effectId, row);
+				await this.counter(tx, `effects:${target.attemptId}:${target.bindingId}`, "open_effects", 1);
+				if (approval)
+					await tx.put("approval", input.effectId, {
+						approval_id: input.effectId,
+						effect_id: input.effectId,
+						state: "pending",
+						decision: null,
+						updated_at: Date.now(),
+					});
+				return this.append(tx, target, {
+					kind: approval ? "tool_approval_requested" : model ? "model_started" : "tool_started",
+					payload: model
+						? { effectId: input.effectId, modelCallId: modelCall }
+						: {
+								invocationId: input.effectId,
+								toolCallId: tool?.toolCallId,
+								toolName: tool?.toolName,
+								policy: tool?.policy,
+								inputHash: input.inputHash,
+								...(tool?.origin ? { origin: tool.origin } : {}),
+								...(approval ? { approvalId: input.effectId } : {}),
+							},
 				});
-			return this.append(tx, target, {
-				kind: approval ? "tool_approval_requested" : model ? "model_started" : "tool_started",
-				payload: model
-					? { effectId: input.effectId, modelCallId: modelCall }
-					: {
-							invocationId: input.effectId,
-							toolCallId: tool?.toolCallId,
-							toolName: tool?.toolName,
-							policy: tool?.policy,
-							inputHash: input.inputHash,
-							...(tool?.origin ? { origin: tool.origin } : {}),
-							...(approval ? { approvalId: input.effectId } : {}),
-						},
-			});
-		});
+			},
+			this.checkpointDependencies(checkpoint),
+		);
 	}
-	async startToolEffect(target: EventTarget, effect: EngineToolEffectInput): Promise<EngineEvent> {
-		return this.effectStart(target, effect, false, false);
+	async startToolEffect(
+		target: EventTarget,
+		effect: EngineToolEffectInput,
+		checkpoint?: SessionDurabilityCheckpoint,
+	): Promise<EngineEvent> {
+		return this.effectStart(target, effect, false, false, checkpoint);
 	}
-	async startModelEffect(target: EventTarget, effect: EngineModelEffectInput): Promise<EngineEvent> {
-		return this.effectStart(target, effect, true, false);
+	async startModelEffect(
+		target: EventTarget,
+		effect: EngineModelEffectInput,
+		checkpoint?: SessionDurabilityCheckpoint,
+	): Promise<EngineEvent> {
+		return this.effectStart(target, effect, true, false, checkpoint);
 	}
-	async requestToolApproval(target: EventTarget, effect: EngineToolEffectInput): Promise<EngineEvent> {
-		return this.effectStart(target, effect, false, true);
+	async requestToolApproval(
+		target: EventTarget,
+		effect: EngineToolEffectInput,
+		checkpoint?: SessionDurabilityCheckpoint,
+	): Promise<EngineEvent> {
+		return this.effectStart(target, effect, false, true, checkpoint);
 	}
 	async effectSettle(
 		tx: RuntimeTransaction,
@@ -949,18 +1110,25 @@ export class RocksEngineMutations {
 		target: EventTarget,
 		id: string,
 		outcome: "completed" | "failed" | "cancelled",
-		options: { error?: string; jobIds?: string[] } = {},
+		options: { error?: string; jobIds?: string[]; checkpoint?: SessionDurabilityCheckpoint } = {},
 	): Promise<EngineEvent> {
-		return this.mutation(target.agentInstanceId, tx => this.effectSettle(tx, target, id, outcome, options));
+		return this.mutation(
+			target.agentInstanceId,
+			tx => this.effectSettle(tx, target, id, outcome, { error: options.error, jobIds: options.jobIds }),
+			this.checkpointDependencies(options.checkpoint),
+		);
 	}
 	async settleModelEffect(
 		target: EventTarget,
 		effect: EngineModelEffectInput,
 		outcome: "completed" | "failed",
 		error?: string,
+		checkpoint?: SessionDurabilityCheckpoint,
 	): Promise<EngineEvent> {
-		return this.mutation(target.agentInstanceId, tx =>
-			this.effectSettle(tx, target, effect.effectId, outcome, error ? { error } : {}),
+		return this.mutation(
+			target.agentInstanceId,
+			tx => this.effectSettle(tx, target, effect.effectId, outcome, error ? { error } : {}),
+			this.checkpointDependencies(checkpoint),
 		);
 	}
 	async resolveToolApproval(
@@ -1346,181 +1514,252 @@ export class RocksEngineMutations {
 		});
 	}
 	async nextInboxWakeAt(generation: number): Promise<number | undefined> {
-		const page = await this.records.query("inbox_wake", [generation]);
-		for (const record of page.records) {
-			const item = record.value as unknown as RocksInbox;
-			const binding = await this.getBinding(item.agent_instance_id);
-			if (!binding || binding.manualHold || binding.state === "running") continue;
-			const first = (await this.records.query("inbox_session", [item.sessionId, "pending"], undefined, 1))
-				.records[0];
-			if (first?.id === item.queueId) return item.deliver_at ?? item.createdAt;
-		}
+		let after: Array<string | number | null> | undefined;
+		do {
+			const page = await this.records.query("inbox_wake", [], undefined, 50, after);
+			for (const record of page.records) {
+				const item = record.value as unknown as RocksInbox;
+				if (item.engine_generation !== generation) continue;
+				const binding = await this.getBinding(item.agent_instance_id);
+				if (!binding || binding.manualHold || binding.state === "running") continue;
+				const first = (await this.records.query("inbox_session", [item.sessionId, "pending"], undefined, 1))
+					.records[0];
+				if (first?.id === item.queueId) return item.deliver_at ?? item.createdAt;
+			}
+			const last = page.records.at(-1);
+			after = page.nextCursor && last ? [(last.value as unknown as RocksInbox).deliver_at, last.id] : undefined;
+		} while (after);
 		return undefined;
 	}
 	async claimDueInboxWakes(generation: number, now = Date.now()): Promise<EngineEvent[]> {
-		const page = await this.records.query("inbox_wake", [generation]);
 		const events: EngineEvent[] = [];
-		for (const record of page.records) {
-			const observed = record.value as unknown as RocksInbox;
-			if ((observed.deliver_at ?? observed.createdAt) > now) break;
-			const event = await this.mutation(observed.agent_instance_id, async tx => {
-				const item = await tx.get<RocksInbox>("inbox", record.id);
-				if (!item || item.disposition !== "pending" || item.wake_delivered_at !== null) return;
-				const binding = await tx.get<RocksBinding>("binding", item.agent_instance_id);
-				const identity = await tx.get<RocksIdentity>("identity", item.agent_instance_id);
-				if (
-					!binding ||
-					binding.manual_hold ||
-					binding.state === "running" ||
-					(await this.holds(tx, item.agent_instance_id)).length
-				)
-					return;
-				const pending = await tx.query<RocksInbox>("inbox_session", [item.sessionId, "pending"]);
-				pending.sort((a, b) => a.position - b.position || a.queueId.localeCompare(b.queueId));
-				if (pending[0]?.queueId !== item.queueId) return;
-				item.wake_delivered_at = now;
-				item.wakeDeliveredAt = now;
-				item.revision++;
-				await tx.put("inbox", item.queueId, item);
-				return this.append(
-					tx,
-					{ ...bindingSnapshot(binding), commandId: `inbox-wake:${item.queueId}:${item.revision}` },
-					{
-						kind: "inbox_changed",
-						payload: {
-							action: "wake_due",
-							queueId: item.queueId,
-							revision: item.revision,
-							intentRevision: identity?.intent_revision ?? 0,
-							manualHold: false,
+		let after: Array<string | number | null> | undefined;
+		do {
+			const page = await this.records.query("inbox_wake", [], undefined, 50, after);
+			for (const record of page.records) {
+				const observed = record.value as unknown as RocksInbox;
+				if (observed.engine_generation !== generation) continue;
+				if ((observed.deliver_at ?? observed.createdAt) > now) continue;
+				const event = await this.mutation(observed.agent_instance_id, async tx => {
+					const item = await tx.get<RocksInbox>("inbox", record.id);
+					if (
+						item?.disposition !== "pending" ||
+						item.wake_delivered_at !== null ||
+						item.engine_generation !== generation
+					)
+						return;
+					const binding = await tx.get<RocksBinding>("binding", item.agent_instance_id);
+					const identity = await tx.get<RocksIdentity>("identity", item.agent_instance_id);
+					if (
+						!binding ||
+						binding.manual_hold ||
+						binding.state === "running" ||
+						(await this.holds(tx, item.agent_instance_id)).length
+					)
+						return;
+					const pending = await tx.query<RocksInbox>("inbox_session", [item.sessionId, "pending"]);
+					pending.sort((a, b) => a.position - b.position || a.queueId.localeCompare(b.queueId));
+					if (pending[0]?.queueId !== item.queueId) return;
+					item.wake_delivered_at = now;
+					item.wakeDeliveredAt = now;
+					item.revision++;
+					await tx.put("inbox", item.queueId, item);
+					return this.append(
+						tx,
+						{ ...bindingSnapshot(binding), commandId: `inbox-wake:${item.queueId}:${item.revision}` },
+						{
+							kind: "inbox_changed",
+							payload: {
+								action: "wake_due",
+								queueId: item.queueId,
+								revision: item.revision,
+								intentRevision: identity?.intent_revision ?? 0,
+								manualHold: false,
+							},
 						},
-					},
-				);
-			});
-			if (event) events.push(event);
-		}
+					);
+				});
+				if (event) events.push(event);
+				if (events.length >= 25) return events;
+			}
+			const last = page.records.at(-1);
+			after = page.nextCursor && last ? [(last.value as unknown as RocksInbox).deliver_at, last.id] : undefined;
+		} while (after);
 		return events;
 	}
 
 	async interruptGeneration(generation: number, notify?: (events: EngineEvent[]) => void): Promise<EngineEvent[]> {
-		// Recovery starts before admission. Each bounded identity transaction fences its own effects and commands.
+		// Admission starts only after this scan. Every bounded commit records its own guarded decisions.
 		const events: EngineEvent[] = [];
+		const deliver = (changed: EngineEvent[]) => {
+			if (notify) notify(changed);
+			else {
+				if (events.length + changed.length > 1000)
+					throw new EngineTargetError("restore_budget", "Use paged recovery notifications");
+				events.push(...changed);
+			}
+		};
 		let after: string | undefined;
 		do {
 			const page = await this.records.query(
 				"kind_primary",
 				["identity"],
 				undefined,
-				50,
+				25,
 				after ? [after] : undefined,
 			);
 			for (const record of page.records) {
 				const id = record.id;
-				const changed = await this.mutation(id, async tx => {
-					const identity = await tx.get<RocksIdentity>("identity", id);
-					if (!identity) return [];
-					const binding = await tx.get<RocksBinding>("binding", id);
-					const commands = await tx.query<RocksCommand>("command_agent_pending", [id]);
-					const inbox = await tx.query<RocksInbox>("inbox_agent", [id, "pending"]);
-					const affected =
-						commands.some(row => row.engine_generation < generation) ||
-						inbox.some(row => row.engine_generation < generation) ||
-						Boolean(
-							binding && binding.engine_generation < generation && !["released", "idle"].includes(binding.state),
-						);
-					if (!affected) return [];
-					identity.intent_revision++;
-					await tx.put("identity", id, identity);
-					await tx.put("hold", `${id}:recovery`, {
-						source_agent_instance_id: id,
-						agent_instance_id: id,
-						kind: "recovery",
-						command_id: `recovery:${generation}`,
-						generation: identity.intent_revision,
+				let held = false;
+				const ensureHold = async () => {
+					if (held) return;
+					deliver(
+						await this.mutation(id, async tx => {
+							const identity = await tx.get<RocksIdentity>("identity", id);
+							if (!identity) return [];
+							const hold = await tx.get<RocksHold>("hold", `${id}:recovery`);
+							if (hold?.command_id === `recovery:${generation}`) return [];
+							identity.intent_revision++;
+							await tx.put("identity", id, identity);
+							await tx.put("hold", `${id}:recovery`, {
+								source_agent_instance_id: id,
+								agent_instance_id: id,
+								kind: "recovery",
+								command_id: `recovery:${generation}`,
+								generation: identity.intent_revision,
+							});
+							const binding = await tx.get<RocksBinding>("binding", id);
+							if (binding)
+								await tx.put("binding", id, {
+									...binding,
+									manual_hold: 1,
+									intent_revision: identity.intent_revision,
+								});
+							return [
+								await this.identityEvent(tx, id, `recovery:${generation}`, "holds_changed", {
+									action: "recovery",
+									requiresExplicitContinue: true,
+								}),
+							];
+						}),
+					);
+					held = true;
+				};
+				const pendingInbox = await this.records.query("inbox_agent_pending", [id], undefined, 1);
+				if (pendingInbox.records.some(row => Number(row.value?.engine_generation) < generation)) await ensureHold();
+				// Requery the shrinking pending index; never carry its mutable cursor across a write.
+				for (;;) {
+					const pending = await this.records.query("command_agent_pending", [id], undefined, 1);
+					const command = pending.records[0]?.value as unknown as RocksCommand | undefined;
+					if (!command || command.engine_generation >= generation) break;
+					await ensureHold();
+					await this.mutation(id, async tx => {
+						const current = await tx.get<RocksCommand>("command", command.command_id);
+						if (current?.state === "received" && current.engine_generation < generation)
+							await this.settle(tx, current.command_id, this.interruptedReceipt());
 					});
-					const result: EngineEvent[] = [];
-					for (const command of commands)
-						if (command.engine_generation < generation)
-							await this.settle(tx, command.command_id, this.interruptedReceipt());
-					if (binding && binding.engine_generation < generation) {
-						const attempt = await tx.get<RocksAttempt>("attempt", binding.attempt_id);
-						if (attempt && !terminal.has(attempt.state)) {
-							for (const state of ["planned", "started"]) {
-								const effects = await tx.query<RocksEffect>("effect_attempt", [binding.attempt_id, state]);
-								for (const effect of effects) {
-									if (effect.binding_id !== binding.binding_id) continue;
-									await tx.put("effect", effect.effect_id, {
-										...effect,
-										state: state === "started" ? "unknown" : "settled",
-										outcome: state === "started" ? "unknown" : "cancelled",
-										error: "engine_lost",
-									});
-									const approval = await tx.get<EngineApprovalRow>("approval", effect.effect_id);
-									if (approval?.state === "pending")
-										await tx.put("approval", effect.effect_id, {
-											...approval,
-											state: "resolved",
-											decision: "cancelled",
-											reason: "engine_lost",
+				}
+				let attemptAfter: Array<string | number | null> | undefined;
+				do {
+					const attempts = await this.records.query("attempt_agent", [id], undefined, 25, attemptAfter);
+					for (const entry of attempts.records) {
+						const observed = entry.value as unknown as RocksAttempt;
+						if (observed.engine_generation >= generation || terminal.has(observed.state)) continue;
+						await ensureHold();
+						const target: EventTarget = {
+							commandId: observed.command_id,
+							agentInstanceId: id,
+							executionId: observed.execution_id,
+							attemptId: observed.attempt_id,
+							bindingId: observed.binding_id,
+							engineGeneration: generation,
+							bindingGeneration: observed.binding_generation,
+							authorityGeneration: observed.authority_generation,
+						};
+						for (const state of ["planned", "started"])
+							for (;;) {
+								const effects = await this.records.query(
+									"effect_attempt",
+									[observed.attempt_id, state],
+									undefined,
+									1,
+								);
+								const effectId = effects.records[0]?.id;
+								if (!effectId) break;
+								deliver(
+									await this.mutation(id, async tx => {
+										const effect = await tx.get<RocksEffect>("effect", effectId);
+										if (!effect || effect.state !== state || effect.engine_generation >= generation)
+											return [];
+										await tx.put("effect", effectId, {
+											...effect,
+											state: state === "started" ? "unknown" : "settled",
+											outcome: state === "started" ? "unknown" : "cancelled",
+											error: "engine_lost",
 										});
-									await this.counter(
-										tx,
-										`effects:${binding.attempt_id}:${binding.binding_id}`,
-										"open_effects",
-										-1,
-									);
-									result.push(
-										await this.append(
+										const approval = await tx.get<EngineApprovalRow>("approval", effectId);
+										if (approval?.state === "pending")
+											await tx.put("approval", effectId, {
+												...approval,
+												state: "resolved",
+												decision: "cancelled",
+												reason: "engine_lost",
+											});
+										await this.counter(
 											tx,
-											{ ...bindingSnapshot(binding), engineGeneration: generation },
-											{
+											`effects:${effect.attempt_id}:${effect.binding_id}`,
+											"open_effects",
+											-1,
+										);
+										return [
+											await this.append(tx, target, {
 												kind: effect.effect_kind === "model" ? "model_settled" : "tool_settled",
 												payload: {
-													effectId: effect.effect_id,
-													invocationId: effect.effect_id,
+													effectId,
+													invocationId: effectId,
+													toolCallId: effect.tool_call_id,
 													status: state === "started" ? "unknown" : "cancelled",
 													error: "engine_lost",
 												},
-											},
-										),
-									);
-								}
+											}),
+										];
+									}),
+								);
 							}
-							await tx.put("attempt", binding.attempt_id, {
-								...attempt,
-								state: "interrupted",
-								cause: "engine_lost",
-								retry_outcome: attempt.retry_outcome === "waiting" ? "interrupted" : attempt.retry_outcome,
-							});
-							result.push(
-								await this.append(
-									tx,
-									{ ...bindingSnapshot(binding), engineGeneration: generation },
-									{ kind: "interrupted", payload: { reason: "engine_lost", requiresExplicitContinue: true } },
-								),
-							);
-						}
-						await tx.put("binding", id, {
-							...binding,
-							state: "released",
-							manual_hold: 1,
-							intent_revision: identity.intent_revision,
-						});
+						deliver(
+							await this.mutation(id, async tx => {
+								const attempt = await tx.get<RocksAttempt>("attempt", observed.attempt_id);
+								if (!attempt || terminal.has(attempt.state) || attempt.engine_generation >= generation)
+									return [];
+								const open = await tx.get<{ count: number }>(
+									"metadata",
+									`effects:${attempt.attempt_id}:${attempt.binding_id}`,
+								);
+								if (open?.count) throw new EngineEffectConflictError(attempt.attempt_id);
+								await tx.put("attempt", attempt.attempt_id, {
+									...attempt,
+									state: "interrupted",
+									cause: "engine_lost",
+									retry_outcome: attempt.retry_outcome === "waiting" ? "interrupted" : attempt.retry_outcome,
+								});
+								return [
+									await this.append(tx, target, {
+										kind: "interrupted",
+										payload: { reason: "engine_lost", requiresExplicitContinue: true },
+									}),
+								];
+							}),
+						);
 					}
-					result.push(
-						await this.identityEvent(tx, id, `recovery:${generation}`, "holds_changed", {
-							action: "recovery",
-							requiresExplicitContinue: true,
-						}),
-					);
-					return result;
-				});
-				if (notify) notify(changed);
-				else {
-					if (events.length + changed.length > 1000)
-						throw new EngineTargetError("restore_budget", "Use paged recovery notifications");
-					events.push(...changed);
-				}
+					const last = attempts.records.at(-1);
+					attemptAfter = attempts.nextCursor && last ? [Number(last.value?.created_at), last.id] : undefined;
+				} while (attemptAfter);
+				if (held)
+					await this.mutation(id, async tx => {
+						const binding = await tx.get<RocksBinding>("binding", id);
+						if (binding && binding.engine_generation < generation)
+							await tx.put("binding", id, { ...binding, state: "released", manual_hold: 1 });
+					});
 			}
 			after = page.nextCursor ? page.records.at(-1)?.id : undefined;
 		} while (after);
