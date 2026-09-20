@@ -724,6 +724,9 @@ export class HostedEngineBridge {
 		]);
 		const target = recordValue(recovered.target);
 		const frozen = recordValue(frozenValue);
+		const serialized =
+			typeof frozen?.serializedCommand === "string" ? recordValue(JSON.parse(frozen.serializedCommand)) : undefined;
+		const browserTarget = recordValue(serialized?.browserTarget);
 		if (
 			recovered.commandId !== commandId ||
 			recovered.lookup !== "known" ||
@@ -738,8 +741,8 @@ export class HostedEngineBridge {
 			frozen.agentInstanceId !== event.agentInstanceId ||
 			frozen.authorityGeneration !== event.authorityGeneration ||
 			!target ||
-			typeof target.agentInstanceRef !== "string" ||
-			target.agentInstanceRef !== frozen.agentInstanceRef ||
+			!browserTarget ||
+			stableStringifyJson(target) !== stableStringifyJson(browserTarget) ||
 			stableStringifyJson(recovered.receipt) !== stableStringifyJson(rawReceipt)
 		) {
 			throw new Error("Legacy Engine command receipt does not match its retained native command");
@@ -758,8 +761,6 @@ export class HostedEngineBridge {
 		] as const) {
 			if (typeof frozen[targetKey] !== "string")
 				throw new Error("Legacy Engine command receipt has no frozen native target");
-			if (target[targetKey] !== undefined && target[targetKey] !== frozen[targetKey])
-				throw new Error("Legacy Engine command receipt conflicts with its browser target");
 			if (event[eventKey] !== frozen[targetKey] && !rejectedBeforeBinding)
 				throw new Error("Legacy Engine command receipt does not match its exact native Attempt");
 		}

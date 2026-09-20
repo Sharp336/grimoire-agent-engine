@@ -617,6 +617,11 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 		};
 		const rejected = command("legacy-rejected", "start");
 		const applied = command("legacy-applied", "steer");
+		applied.browserTarget = {
+			agentInstanceRef,
+			attemptId: "browser-attempt-before-native-bind",
+			executionId: "browser-execution-before-native-bind",
+		};
 		const identities = new Map(
 			[rejected, applied].map(item => {
 				const identity = engineCommandIdentity(item);
@@ -729,6 +734,10 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 				stage: "applied",
 				lookup: "known",
 				browserPayloadHash: applied.browserPayloadHash,
+				target: applied.browserTarget,
+				result: {
+					target: { attemptId: applied.attemptId, executionId: applied.executionId },
+				},
 			});
 			await waitFor(async () => (await manager.consumers.info(ENGINE_EVENT_STREAM, durable)).num_ack_pending === 0);
 
