@@ -25,6 +25,7 @@ import {
 	type RocksIdentity,
 	type RocksInbox,
 } from "./rocks-runtime-rows";
+import { messageAttachmentReferences } from "./runtime-attachments";
 import { ENGINE_CONTROL_OPS, runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
 import { RuntimeRecords, RuntimeTransaction } from "./runtime-records";
 import {
@@ -226,13 +227,17 @@ export class RocksEngineMutations {
 			((identity.agentInstanceRef &&
 				existing.agent_instance_ref &&
 				identity.agentInstanceRef !== existing.agent_instance_ref) ||
-				(identity.principalId && existing.principal_id !== identity.principalId) ||
+				(identity.principalId && existing.principal_id && existing.principal_id !== identity.principalId) ||
 				(identity.parentAgentInstanceId &&
 					existing.parent_agent_instance_id &&
 					identity.parentAgentInstanceId !== existing.parent_agent_instance_id))
 		)
 			throw new EngineTargetError("stale_target", "AgentInstance identity is immutable");
-		if (!existing) {
+		const completingIdentity =
+			!existing ||
+			(!existing.agent_instance_ref && identity.agentInstanceRef) ||
+			(!existing.parent_agent_instance_id && identity.parentAgentInstanceId);
+		if (completingIdentity) {
 			// A checked registry guard protects alias/ancestry empty predicates from concurrent registration.
 			const engine = await tx.get<{ subtype: string; generation: number; identity_revision?: number }>(
 				"metadata",
@@ -255,7 +260,7 @@ export class RocksEngineMutations {
 					? await tx.get<RocksIdentity>("identity", ancestor.parent_agent_instance_id)
 					: undefined;
 			}
-			if (parent)
+			if (parent && !existing?.parent_agent_instance_id)
 				await tx.put("identity", parent.agent_instance_id, {
 					...parent,
 					membership_revision: parent.membership_revision + 1,
@@ -280,6 +285,10 @@ export class RocksEngineMutations {
 			...existing,
 		};
 		row.agent_instance_ref ||= identity.agentInstanceRef ?? "";
+		row.parent_agent_instance_id ??= identity.parentAgentInstanceId ?? null;
+		row.parent_agent_instance_ref ??= identity.parentAgentInstanceRef ?? null;
+		row.principal_id ||= identity.principalId ?? "";
+		row.root_agent_instance_ref ||= parent?.root_agent_instance_ref || row.agent_instance_ref;
 		row.authority_generation = Math.max(row.authority_generation, identity.authorityGeneration);
 		await tx.put("identity", identity.agentInstanceId, row);
 		if (!existing && row.agent_instance_ref)
@@ -543,12 +552,24 @@ export class RocksEngineMutations {
 		});
 	}
 	async bind(tx: RuntimeTransaction, binding: EngineBindingSnapshot, digest?: string): Promise<void> {
+		const engine = await tx.get<{ generation: number }>("metadata", "engine");
+		if (engine?.generation !== binding.engineGeneration) throw new EngineAttemptConflictError(binding.attemptId);
 		await this.register(tx, {
 			agentInstanceId: binding.agentInstanceId,
 			authorityGeneration: binding.authorityGeneration,
 		});
 		const old = await tx.get<RocksBinding>("binding", binding.agentInstanceId);
 		const identity = (await tx.get<RocksIdentity>("identity", binding.agentInstanceId))!;
+		if (
+			binding.authorityGeneration < identity.authority_generation ||
+			(old &&
+				(binding.engineGeneration < old.engine_generation ||
+					binding.authorityGeneration < old.authority_generation ||
+					(binding.engineGeneration === old.engine_generation &&
+						(binding.bindingGeneration < old.binding_generation ||
+							(binding.bindingGeneration === old.binding_generation && !this.sameFence(old, binding))))))
+		)
+			throw new EngineAttemptConflictError(binding.attemptId);
 		identity.intent_revision = Math.max(identity.intent_revision, binding.intentRevision ?? 0);
 		await tx.put("identity", binding.agentInstanceId, identity);
 		await tx.put("binding", binding.agentInstanceId, {
@@ -649,11 +670,21 @@ export class RocksEngineMutations {
 					else if (!guard.allowInheritedHold) await this.checkIntent(tx, binding.agentInstanceId, undefined, true);
 				}
 				await this.bind(tx, binding, options.conversationIdentityDigest);
+				if (options.startIntent) {
+					const command = await tx.get<RocksCommand>("command", binding.commandId);
+					const identity = await tx.get<RocksIdentity>("identity", binding.agentInstanceId);
+					if (command?.operation === "start" && command.state === "received")
+						await tx.put("command", binding.commandId, {
+							...command,
+							start_applied_intent_revision: identity?.intent_revision ?? 0,
+						});
+				}
 				const checkpoint = options.transcriptCheckpoint;
 				const row: RocksAttempt = {
 					...bindingTarget(binding),
 					command_id: binding.commandId,
 					row_id: old?.row_id ?? Date.now(),
+					created_at: old?.created_at ?? Date.now(),
 					state,
 					cause: options.cause ?? null,
 					updated_at: Date.now(),
@@ -678,6 +709,8 @@ export class RocksEngineMutations {
 					...old,
 				};
 				Object.assign(row, { state, cause: options.cause ?? null, updated_at: Date.now() });
+				if (terminal.has(state) && row.retry_outcome === "waiting")
+					row.retry_outcome = state === "completed" ? "succeeded" : state;
 				if (options.terminalResult) row.result_payload = options.terminalResult;
 				if (checkpoint)
 					Object.assign(row, {
@@ -881,7 +914,11 @@ export class RocksEngineMutations {
 	): Promise<EngineEvent> {
 		await this.assertFence(tx, target);
 		const row = await tx.get<RocksEffect>("effect", id);
-		if (!row || !this.sameFence(row, target) || !["started", "planned"].includes(row.state))
+		if (
+			!row ||
+			!this.sameFence(row, target) ||
+			(row.state !== "started" && !(row.state === "planned" && (outcome === "denied" || outcome === "cancelled")))
+		)
 			throw new EngineEffectConflictError(id);
 		await tx.put("effect", id, {
 			...row,
@@ -1041,6 +1078,13 @@ export class RocksEngineMutations {
 		expectedIntentRevision?: number,
 		commandId = source.sourceEventId,
 	): Promise<{ item: EngineInboxItem; created: boolean }> {
+		const attachments =
+			source.attachments === undefined ? undefined : messageAttachmentReferences(source.attachments);
+		source = { ...source, attachments };
+		if (attachments && source.sourceType !== "user")
+			throw new EngineInboxConflictError("Only user messages may reference uploaded attachments");
+		if (source.createdAt !== undefined && (!Number.isSafeInteger(source.createdAt) || source.createdAt < 0))
+			throw new EngineInboxConflictError("Invalid inbox source timestamp");
 		validateRuntimeValue("id", source.sourceEventId);
 		if (!source.body.trim() && !source.attachments)
 			throw new EngineInboxConflictError("Inbox requires text or attachments");
@@ -1051,18 +1095,21 @@ export class RocksEngineMutations {
 				source_type: string;
 				sender: string | null;
 				attachment_refs: unknown;
+				created_at: number;
 			}>("inbox", `source:${source.sourceEventId}`);
 			if (
 				original &&
 				(original.body !== source.body ||
 					original.source_type !== source.sourceType ||
 					original.sender !== (source.sender ?? null) ||
-					JSON.stringify(original.attachment_refs) !== JSON.stringify(source.attachments ?? null))
+					JSON.stringify(original.attachment_refs) !== JSON.stringify(source.attachments ?? null) ||
+					(source.createdAt !== undefined && original.created_at !== source.createdAt))
 			)
 				throw new EngineInboxConflictError("Inbox source has different immutable content");
 			const old = await tx.get<RocksInbox>("inbox", source.sourceEventId);
 			if (old) {
-				if (old.sessionId !== target.sessionId) throw new EngineInboxConflictError("Inbox session changed");
+				if (old.sessionId !== target.sessionId || !this.sameFence(old, { ...target, commandId }))
+					throw new EngineInboxConflictError("Inbox session changed");
 				return { item: old, created: false };
 			}
 			if (!original)
@@ -1091,7 +1138,8 @@ export class RocksEngineMutations {
 				target.agentInstanceId,
 				false,
 				1,
-				Buffer.byteLength(source.body) + Buffer.byteLength(JSON.stringify(source.attachments ?? null)),
+				Buffer.byteLength(source.body) +
+					Buffer.byteLength(source.attachments ? JSON.stringify(source.attachments) : ""),
 			);
 			const position = await this.counter(tx, `inbox-position:${target.sessionId}`, "inbox_position", 1024);
 			const item: RocksInbox = {
@@ -1160,8 +1208,6 @@ export class RocksEngineMutations {
 		const old = await tx.get<RocksInbox>("inbox", mutation.queueId);
 		if (!old || old.session_id !== target.sessionId || !this.sameFence(old, { ...target, commandId: command }))
 			throw new EngineInboxConflictError("Inbox target changed");
-		if (old.revision !== mutation.expectedRevision) throw new EngineInboxConflictError("Inbox revision changed");
-		if (old.disposition !== "pending") throw new EngineInboxConflictError("Inbox item is already settled");
 		const item = { ...old };
 		if (mutation.op === "edit") {
 			if (typeof mutation.value !== "string" || (!mutation.value.trim() && !item.attachments))
@@ -1182,14 +1228,24 @@ export class RocksEngineMutations {
 			item.wakeIntent = true;
 			item.wake_intent = 1;
 		} else item.disposition = mutation.op === "acknowledge" ? "acknowledged" : "dropped";
+		if (
+			item.deliveryPayload === old.deliveryPayload &&
+			item.annotation === old.annotation &&
+			item.deliverAt === old.deliverAt &&
+			item.wakeIntent === old.wakeIntent &&
+			item.disposition === old.disposition
+		)
+			return { item: old };
+		if (old.revision !== mutation.expectedRevision) throw new EngineInboxConflictError("Inbox revision changed");
+		if (old.disposition !== "pending") throw new EngineInboxConflictError("Inbox item is already settled");
 		const oldBytes =
 			Buffer.byteLength(old.deliveryPayload) +
 			Buffer.byteLength(old.annotation ?? "") +
-			Buffer.byteLength(JSON.stringify(old.attachments ?? null));
+			Buffer.byteLength(old.attachments ? JSON.stringify(old.attachments) : "");
 		const newBytes =
 			Buffer.byteLength(item.deliveryPayload) +
 			Buffer.byteLength(item.annotation ?? "") +
-			Buffer.byteLength(JSON.stringify(item.attachments ?? null));
+			Buffer.byteLength(item.attachments ? JSON.stringify(item.attachments) : "");
 		await this.pendingBudget(
 			tx,
 			target.agentInstanceId,
@@ -1346,12 +1402,18 @@ export class RocksEngineMutations {
 		return events;
 	}
 
-	async interruptGeneration(generation: number): Promise<EngineEvent[]> {
+	async interruptGeneration(generation: number, notify?: (events: EngineEvent[]) => void): Promise<EngineEvent[]> {
 		// Recovery starts before admission. Each bounded identity transaction fences its own effects and commands.
 		const events: EngineEvent[] = [];
-		let cursor: string | undefined;
+		let after: string | undefined;
 		do {
-			const page = await this.records.query("kind_primary", ["identity"], cursor, 50);
+			const page = await this.records.query(
+				"kind_primary",
+				["identity"],
+				undefined,
+				50,
+				after ? [after] : undefined,
+			);
 			for (const record of page.records) {
 				const id = record.id;
 				const changed = await this.mutation(id, async tx => {
@@ -1359,9 +1421,13 @@ export class RocksEngineMutations {
 					if (!identity) return [];
 					const binding = await tx.get<RocksBinding>("binding", id);
 					const commands = await tx.query<RocksCommand>("command_agent_pending", [id]);
+					const inbox = await tx.query<RocksInbox>("inbox_agent", [id, "pending"]);
 					const affected =
 						commands.some(row => row.engine_generation < generation) ||
-						Boolean(binding && binding.engine_generation < generation && binding.state === "running");
+						inbox.some(row => row.engine_generation < generation) ||
+						Boolean(
+							binding && binding.engine_generation < generation && !["released", "idle"].includes(binding.state),
+						);
 					if (!affected) return [];
 					identity.intent_revision++;
 					await tx.put("identity", id, identity);
@@ -1449,11 +1515,15 @@ export class RocksEngineMutations {
 					);
 					return result;
 				});
-				events.push(...changed);
+				if (notify) notify(changed);
+				else {
+					if (events.length + changed.length > 1000)
+						throw new EngineTargetError("restore_budget", "Use paged recovery notifications");
+					events.push(...changed);
+				}
 			}
-			// This scan updates identities. Restart a bounded partition from its last stable primary ID is handled by the owner cursor.
-			cursor = page.nextCursor ?? undefined;
-		} while (cursor);
+			after = page.nextCursor ? page.records.at(-1)?.id : undefined;
+		} while (after);
 		return events;
 	}
 	async pendingEvents(limit = 100): Promise<EngineEvent[]> {
@@ -1466,7 +1536,7 @@ export class RocksEngineMutations {
 		limit = 100,
 		after = 0,
 	): Promise<{ events: EngineEvent[]; throughCursor: number; scannedRecords: number }> {
-		const page = await this.records.query("event_all", [], undefined, Math.max(1, Math.min(1000, limit)));
+		const page = await this.records.query("event_all", [], undefined, Math.max(1, Math.min(1000, limit)), [after]);
 		const events: EngineEvent[] = [];
 		let throughCursor = after;
 		for (const row of page.records) {

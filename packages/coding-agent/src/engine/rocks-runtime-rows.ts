@@ -26,6 +26,7 @@ export interface RocksBinding {
 	updated_at: number;
 }
 export interface RocksAttempt extends EngineAttemptRecord {
+	created_at: number;
 	result_payload: Record<string, unknown> | null;
 	detail_revision: number;
 	input_revision: number;
