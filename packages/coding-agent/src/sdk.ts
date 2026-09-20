@@ -1436,18 +1436,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// evidence that the old process can no longer finish that turn. Preserve the
 	// partial transcript and append one terminal aborted assistant record before
 	// rebuilding runtime context. The helper is idempotent once that record exists.
-	let existingBranch = logger.time("getSessionBranch", () => sessionManager.getBranch());
+	let existingBranch = logger.time("getSessionBranch", () => sessionManager.getContextBranch());
 	const interruptedTurnAbort = createInterruptedTurnAbortMessage(existingBranch);
 	if (interruptedTurnAbort) {
 		sessionManager.appendMessage(interruptedTurnAbort);
-		existingBranch = logger.time("getRecoveredSessionBranch", () => sessionManager.getBranch());
+		existingBranch = logger.time("getRecoveredSessionBranch", () => sessionManager.getContextBranch());
 	}
 	let existingSession = logger.time("loadSessionContext", () =>
 		deobfuscateSessionContext(sessionManager.buildSessionContext(), obfuscator),
 	);
 	const hasExistingSession = existingBranch.length > 0;
-	const hasThinkingEntry = existingBranch.some(entry => entry.type === "thinking_level_change");
-	const hasServiceTierEntry = existingBranch.some(entry => entry.type === "service_tier_change");
+	const hasThinkingEntry = sessionManager.hasContextEntryType("thinking_level_change");
+	const hasServiceTierEntry = sessionManager.hasContextEntryType("service_tier_change");
 
 	const deferredModelPatterns = Array.isArray(options.modelPattern)
 		? options.modelPattern.map(pattern => pattern.trim()).filter(Boolean)
@@ -2668,7 +2668,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			});
 			if (selectedModelAbort) {
 				sessionManager.appendMessage(selectedModelAbort);
-				existingBranch = logger.time("getRecoveredUserTailBranch", () => sessionManager.getBranch());
+				existingBranch = logger.time("getRecoveredUserTailBranch", () => sessionManager.getContextBranch());
 				existingSession = logger.time("loadRecoveredUserTailContext", () =>
 					deobfuscateSessionContext(sessionManager.buildSessionContext(), obfuscator),
 				);

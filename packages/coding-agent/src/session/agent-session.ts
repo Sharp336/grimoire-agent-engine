@@ -243,12 +243,7 @@ import {
 	buildAsyncResultBatchMessage,
 } from "./async-job-delivery";
 import { BashRunner, type BashRunnerHost } from "./bash-runner";
-import {
-	checkpointStartedAtFromEntry,
-	completedRewindFromEntry,
-	isSuccessfulCheckpointEntry,
-	semanticToolResult,
-} from "./checkpoint-entries";
+import { resolveCheckpointRewindState, semanticToolResult } from "./checkpoint-entries";
 import { recordCredentialPin, seedCredentialPins } from "./credential-pin";
 import { EvalRunner, type EvalRunnerHost } from "./eval-runner";
 import {
@@ -378,7 +373,7 @@ const noOpUIContext: ExtensionUIContext = {
 
 type MessageEndPersistenceSlot = {
 	readonly promise: Promise<void>;
-	persist: (persistMessage: () => void) => Promise<void>;
+	persist: (persistMessage: () => void | Promise<void>) => Promise<void>;
 	release: () => void;
 };
 
@@ -1916,11 +1911,8 @@ export class AgentSession {
 	#recordSessionExit(reason: postmortem.Reason | "dispose"): void {
 		if (this.#exitRecorded) return;
 		this.#exitRecorded = true;
-		const pendingToolCalls = collectPendingToolCalls(this.sessionManager.getBranch());
-		if (
-			pendingToolCalls.length === 0 &&
-			!this.sessionManager.getEntries().some(entry => entry.type === "message" && entry.message.role === "assistant")
-		) {
+		const pendingToolCalls = collectPendingToolCalls(this.sessionManager.getContextBranch());
+		if (pendingToolCalls.length === 0 && !this.sessionManager.hasAssistantMessage()) {
 			return;
 		}
 		const kind: SessionExitData["kind"] =
@@ -2067,6 +2059,7 @@ export class AgentSession {
 	 */
 	async settleInFlightMessagePersistence(): Promise<void> {
 		await Promise.allSettled([...this.#pendingMessageEndPersistence.values()]);
+		if (this.#messagePersistenceFailure) throw this.#messagePersistenceFailure;
 	}
 
 	/**
@@ -2133,7 +2126,7 @@ export class AgentSession {
 			persist: async persistMessage => {
 				await previous;
 				try {
-					persistMessage();
+					await persistMessage();
 				} finally {
 					resolve();
 					clear();
@@ -2169,7 +2162,7 @@ export class AgentSession {
 	 * detects staleness itself and rebuilds. No mutation call site has to
 	 * remember to invalidate anything.
 	 *
-	 * Pre-#3629 the equivalent was `sessionManager.getBranch()` called twice
+	 * Pre-#3629 the equivalent was `sessionManager.getContextBranch()` called twice
 	 * per turn message, each call rebuilding the path via O(n²) `unshift` and
 	 * structurally JSON-comparing every entry — seconds of synchronous work
 	 * per `onTurnEnd` on a long session and the load-bearing source of the
@@ -2195,7 +2188,7 @@ export class AgentSession {
 
 	#buildPersistedMessageKeySet(): Set<string> {
 		const keys = new Set<string>();
-		for (const entry of this.sessionManager.getBranch()) {
+		for (const entry of this.sessionManager.getContextBranch()) {
 			if (entry.type !== "message") continue;
 			const key = sessionMessagePersistenceKey(entry.message);
 			if (key !== undefined) keys.add(key);
@@ -2213,7 +2206,7 @@ export class AgentSession {
 		const identity = this.#messageIdentities.get(message);
 		if (identity?.sourceCommandId || identity?.clientMessageId || identity?.assistantMessageId) {
 			return this.sessionManager
-				.getBranch()
+				.getContextBranch()
 				.some(
 					entry =>
 						entry.type === "message" &&
@@ -2227,7 +2220,7 @@ export class AgentSession {
 		if (key === undefined) return false;
 		const keys = this.#ensurePersistedMessageKeys();
 		if (!keys.has(key)) return false;
-		const branch = this.sessionManager.getBranch();
+		const branch = this.sessionManager.getContextBranch();
 		for (let index = branch.length - 1; index >= 0; index--) {
 			const entry = branch[index];
 			if (entry.type !== "message") continue;
@@ -2321,22 +2314,29 @@ export class AgentSession {
 		};
 	}
 
-	#persistMessageEnd(message: AgentMessage): void {
-		if (message.role === "hookMessage" || message.role === "custom") {
-			this.sessionManager.appendCustomMessageEntry(
-				message.customType,
-				message.content,
-				message.display,
-				message.details,
-				message.attribution ?? "agent",
-			);
+	async #persistMessageEnd(message: AgentMessage): Promise<void> {
+		try {
+			if (message.role === "hookMessage" || message.role === "custom") {
+				this.sessionManager.appendCustomMessageEntry(
+					message.customType,
+					message.content,
+					message.display,
+					message.details,
+					message.attribution ?? "agent",
+				);
 
-			if (message.role === "custom" && message.customType === "ttsr-injection") {
-				this.#ttsr.markInjectedFromDetails(message.details);
+				if (message.role === "custom" && message.customType === "ttsr-injection") {
+					this.#ttsr.markInjectedFromDetails(message.details);
+				}
+				await this.#messagePersistedHandler?.(message);
+				return;
 			}
-			return;
+			this.#persistSessionMessageIfMissing(message);
+			await this.#messagePersistedHandler?.(message);
+		} catch (error) {
+			this.#messagePersistenceFailure = error instanceof Error ? error : new Error(String(error));
+			throw this.#messagePersistenceFailure;
 		}
-		this.#persistSessionMessageIfMissing(message);
 	}
 
 	/**
@@ -2569,7 +2569,7 @@ export class AgentSession {
 					const persistMessageEnd = () => this.#persistMessageEnd(event.message);
 					try {
 						if (messageEndPersistence) await messageEndPersistence.persist(persistMessageEnd);
-						else persistMessageEnd();
+						else await persistMessageEnd();
 					} catch (persistenceError) {
 						logger.warn("Failed to persist message after session event emission failed", {
 							error: String(persistenceError),
@@ -2634,7 +2634,7 @@ export class AgentSession {
 			if (messageEndPersistence) {
 				await messageEndPersistence.persist(persistMessageEnd);
 			} else {
-				persistMessageEnd();
+				await persistMessageEnd();
 			}
 			if (interruptedThinkingMessage) {
 				this.sessionManager.appendCustomMessageEntry(
@@ -2739,7 +2739,7 @@ export class AgentSession {
 					// checkpoint; locate the toolResult's own entry by identity since the
 					// transient reminder entry follows it (last-entry would branch-cut the
 					// reminder instead of leaving it on the active path).
-					const entries = this.sessionManager.getEntries();
+					const entries = this.sessionManager.getWorkingEntries();
 					let checkpointEntryId: string | null = null;
 					for (let i = entries.length - 1; i >= 0; i--) {
 						const entry = entries[i];
@@ -3709,9 +3709,17 @@ export class AgentSession {
 		this.#assistantMessagePersistence = persist;
 	}
 
+	#messagePersistedHandler: ((message: AgentMessage) => Promise<void>) | undefined;
+	#messagePersistenceFailure: Error | undefined;
+
+	/** Runs after canonical append, inside its persistence slot. Do not drain that slot from this callback. */
+	setMessagePersistedHandler(handler: ((message: AgentMessage) => Promise<void>) | null): void {
+		this.#messagePersistedHandler = handler ?? undefined;
+	}
+
 	/** Decorate provider input without changing canonical user content or turn-event ordering. */
 	withOriginalAttachmentNotices(messages: AgentMessage[]): AgentMessage[] {
-		return withOriginalAttachmentNotices(messages, this.sessionManager.getBranch(), message =>
+		return withOriginalAttachmentNotices(messages, this.sessionManager.getContextBranch(), message =>
 			this.#messageIdentities.get(message),
 		);
 	}
@@ -4845,26 +4853,10 @@ export class AgentSession {
 	 */
 	#rehydrateCheckpointRewindState(): void {
 		this.#clearCheckpointRuntimeState();
-		let completed: CompletedRewindState | undefined;
-		let pending: { entryId: string; startedAt: string; messageCount: number } | undefined;
-		let messageCount = 0;
-		for (const entry of this.sessionManager.getBranch()) {
-			if (entry.type === "message") messageCount++;
-			if (isSuccessfulCheckpointEntry(entry)) {
-				completed = undefined;
-				pending = {
-					entryId: entry.id,
-					startedAt: checkpointStartedAtFromEntry(entry) ?? entry.timestamp,
-					messageCount,
-				};
-				continue;
-			}
-			const completedFromEntry = completedRewindFromEntry(entry);
-			if (completedFromEntry) {
-				completed = completedFromEntry;
-				pending = undefined;
-			}
-		}
+		const { completed, pending } = resolveCheckpointRewindState(
+			this.sessionManager.getContextBranch(),
+			this.sessionManager.getCheckpointRewindPrefix(),
+		);
 		if (pending) {
 			this.#checkpointState = {
 				checkpointEntryId: pending.entryId,
@@ -7825,7 +7817,7 @@ export class AgentSession {
 
 			const model = this.model;
 			if (model) {
-				const interruptedTurnAbort = createInterruptedTurnAbortMessage(this.sessionManager.getBranch(), {
+				const interruptedTurnAbort = createInterruptedTurnAbortMessage(this.sessionManager.getContextBranch(), {
 					api: model.api,
 					provider: model.provider,
 					model: model.id,
@@ -7837,9 +7829,11 @@ export class AgentSession {
 				}
 			}
 
-			const hasThinkingEntry = this.sessionManager.getBranch().some(entry => entry.type === "thinking_level_change");
+			const hasThinkingEntry = this.sessionManager
+				.getContextBranch()
+				.some(entry => entry.type === "thinking_level_change");
 			const hasServiceTierEntry = this.sessionManager
-				.getBranch()
+				.getContextBranch()
 				.some(entry => entry.type === "service_tier_change");
 			const defaultThinkingLevel = parseConfiguredThinkingLevel(this.settings.get("defaultThinkingLevel"));
 			const configuredServiceTierByFamily = buildServiceTierByFamily(

@@ -79,3 +79,37 @@ export function checkpointStartedAtFromEntry(entry: SessionEntry): string | unde
 	}
 	return entry.timestamp;
 }
+
+/** Compact native state before a retained context range. */
+export interface CheckpointRewindPrefix {
+	completed?: CompletedRewindState;
+	pending?: { entryId: string; startedAt: string; messageCount: number };
+	messageCount: number;
+}
+
+export function resolveCheckpointRewindState(
+	entries: readonly SessionEntry[],
+	initial?: CheckpointRewindPrefix,
+): CheckpointRewindPrefix {
+	let completed = initial?.completed;
+	let pending = initial?.pending;
+	let messageCount = initial?.messageCount ?? 0;
+	for (const entry of entries) {
+		if (entry.type === "message") messageCount++;
+		if (isSuccessfulCheckpointEntry(entry)) {
+			completed = undefined;
+			pending = {
+				entryId: entry.id,
+				startedAt: checkpointStartedAtFromEntry(entry) ?? entry.timestamp,
+				messageCount,
+			};
+			continue;
+		}
+		const restored = completedRewindFromEntry(entry);
+		if (restored) {
+			completed = restored;
+			pending = undefined;
+		}
+	}
+	return { completed, pending, messageCount };
+}

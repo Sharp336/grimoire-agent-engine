@@ -21,6 +21,7 @@ import {
 import type { StructuredSubagentSchemaMode } from "../task/types";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore } from "./blob-store";
+import { type CheckpointRewindPrefix, resolveCheckpointRewindState } from "./checkpoint-entries";
 import type { CompactionMethod } from "./compaction-methods";
 import {
 	type BashExecutionMessage,
@@ -32,7 +33,19 @@ import {
 	sanitizeRehydratedOpenAIResponsesAssistantMessage,
 	stripInternalDetailsFields,
 } from "./messages";
-import { type BuildSessionContextOptions, buildSessionContext, type SessionContext } from "./session-context";
+import {
+	type NativeContextPrefix,
+	type NativeSessionCheckpoint,
+	type NativeSessionStorage,
+	type NativeSessionTicket,
+	NativeSessionWriteRejectedError,
+} from "./native-session-storage";
+import {
+	type BuildSessionContextOptions,
+	buildSessionContext,
+	resolveSessionContextState,
+	type SessionContext,
+} from "./session-context";
 import {
 	type BranchSummaryEntry,
 	type CompactionEntry,
@@ -42,6 +55,7 @@ import {
 	type CustomMessageEntry,
 	copyOriginalAttachments,
 	type FileEntry,
+	getLatestTodoStateEntry,
 	type LabelEntry,
 	type ModeChangeEntry,
 	type ModelChangeEntry,
@@ -428,6 +442,9 @@ export type ReadonlySessionManager = Pick<
 	| "getHeader"
 	| "getEntries"
 	| "getTree"
+	| "getContextBranch"
+	| "getWorkingEntries"
+	| "materializeHistory"
 	| "getUsageStatistics"
 	| "putBlob"
 	| "putBlobSync"
@@ -454,6 +471,8 @@ export interface SessionDurabilityCheckpoint {
 	sessionPath: string;
 	leafEntryId: string;
 	byteBoundary: number;
+	/** RocksDB prefix; byteBoundary is zero for native records, never a JSONL offset. */
+	native?: NativeSessionTicket["position"];
 }
 
 interface DiskQueueOptions {
@@ -530,6 +549,19 @@ export class SessionManager {
 	#header!: SessionHeader;
 	#titleUpdatedAt = "";
 	#hasTitleSlot = true;
+	#nativeStorage?: NativeSessionStorage;
+	#nativeTicket?: NativeSessionTicket;
+	#nativeComplete = true;
+	#nativeStartId: string | null = null;
+	#nativePrefix: NativeContextPrefix = {
+		settings: resolveSessionContextState([]),
+		credentialPins: {},
+		hasAssistant: false,
+		entryTypes: [],
+	};
+	#nativeBatch?: SessionEntry[];
+	#nativeVersions = new Map<string, string>();
+	#nativeBaselineCheckpoint?: NativeSessionCheckpoint;
 	#entries: SessionEntry[] = [];
 	#index = new SessionEntryIndex();
 
@@ -617,6 +649,182 @@ export class SessionManager {
 		this.#blobs = new BlobStore(getBlobsDir());
 
 		if (persist && sessionDir) this.#storage.ensureDirSync(sessionDir);
+	}
+
+	/** Create a new logical native journal. It never opens a JSONL writer. */
+	static createNative(cwd: string, storage: NativeSessionStorage, sessionDir = getSessionsDir()): SessionManager {
+		const manager = new SessionManager(cwd, sessionDir, false, new MemorySessionStorage());
+		manager.#suppressBreadcrumb = true;
+		manager.#resetToNewSession();
+		manager.#nativeStorage = storage;
+		manager.#sessionFile = storage.locator;
+		return manager;
+	}
+
+	static async openNative(storage: NativeSessionStorage, sessionDir = getSessionsDir()): Promise<SessionManager> {
+		const loaded = await storage.readContext();
+		const manager = SessionManager.createNative(loaded.checkpoint.header.cwd, storage, sessionDir);
+		manager.#applyEntries(loaded.checkpoint.header, loaded.entries);
+		manager.#index.setLeaf(loaded.checkpoint.leafId);
+		manager.#nativePrefix = loaded.checkpoint.prefix;
+		manager.#nativeStartId = loaded.checkpoint.contextStartId;
+		manager.#nativeComplete = loaded.complete;
+		manager.#nativeTicket = { position: loaded.position, completion: Promise.resolve() };
+		manager.#additionalDirectories = loaded.checkpoint.header.additionalDirectories ?? [];
+		manager.#rememberNativeVersions(loaded.entries);
+		manager.#nativeBaselineCheckpoint = structuredClone(loaded.checkpoint);
+		return manager;
+	}
+
+	#rememberNativeVersions(entries: readonly SessionEntry[]): void {
+		for (const entry of entries) this.#nativeVersions.set(entry.id, JSON.stringify(entry));
+	}
+
+	#nativeCheckpoint(): NativeSessionCheckpoint {
+		return {
+			schema: "omp.native.context.v1",
+			header: { ...this.#header },
+			leafId: this.#index.leafId(),
+			contextStartId: this.#nativeStartId,
+			prefix: { ...this.#nativePrefix, archiveUsage: this.#captureNativeArchiveUsage() },
+		};
+	}
+
+	#advanceNativeAnchor(entry: SessionEntry): void {
+		if (!this.#nativeStartId) this.#nativeStartId = entry.id;
+		if (entry.type !== "compaction" && entry.type !== "reset_boundary") return;
+		const branch = this.getContextBranch();
+		let startId = entry.type === "compaction" ? entry.firstKeptEntryId : entry.id;
+		let start = branch.findIndex(candidate => candidate.id === startId);
+		// Native builder emits only the summary when firstKeptEntryId is absent on this path.
+		if (start < 0) {
+			startId = entry.id;
+			start = branch.findIndex(candidate => candidate.id === entry.id);
+		}
+		if (start < 0) throw new Error("Native context boundary is outside the current branch");
+		const preceding = branch.slice(0, start);
+		const initial = this.#nativeComplete ? undefined : this.#nativePrefix;
+		const pins = new Map(Object.entries(structuredClone(initial?.credentialPins ?? {})));
+		let lastModelChangeRole = initial?.lastModelChangeRole;
+		for (const candidate of preceding) {
+			if (candidate.type === "model_change") lastModelChangeRole = candidate.role ?? "default";
+			if (candidate.type === "credential_pin")
+				pins.set(candidate.provider, { hash: candidate.hash, lastUsedAt: Date.parse(candidate.timestamp) });
+			if (candidate.type === "message" && candidate.message.role === "assistant") {
+				const pin = pins.get(candidate.message.provider);
+				if (pin) pin.lastUsedAt = Math.max(pin.lastUsedAt, candidate.message.timestamp);
+			}
+		}
+		this.#nativePrefix = {
+			settings: resolveSessionContextState(preceding, initial?.settings),
+			credentialPins: Object.fromEntries(pins),
+			lastModelChangeRole,
+			hasAssistant: (initial?.hasAssistant ?? false) || preceding.some(isAssistantEntry),
+			entryTypes: [...new Set([...(initial?.entryTypes ?? []), ...preceding.map(candidate => candidate.type)])],
+			todoState: getLatestTodoStateEntry(preceding) ?? initial?.todoState,
+			rewind: resolveCheckpointRewindState(preceding, initial?.rewind),
+			archiveUsage: initial?.archiveUsage,
+		};
+		this.#nativeStartId = startId;
+	}
+
+	#captureNativeArchiveUsage(): UsageStatistics {
+		const branch = this.getContextBranch();
+		const start = branch.findIndex(entry => entry.id === this.#nativeStartId);
+		const retained = new Set(branch.slice(Math.max(0, start)).map(entry => entry.id));
+		const archiveUsage = {
+			...(this.#nativeComplete
+				? emptyUsageStatistics()
+				: (this.#nativePrefix.archiveUsage ?? emptyUsageStatistics())),
+		};
+		for (const entry of this.#entries) if (!retained.has(entry.id)) addUsage(archiveUsage, entryUsage(entry));
+		return archiveUsage;
+	}
+
+	#trimNativeContext(): void {
+		if (!this.#nativeStorage) return;
+		const branch = this.getContextBranch();
+		const start = branch.findIndex(entry => entry.id === this.#nativeStartId);
+		if (start < 0 && this.#nativeStartId) throw new Error("Native context start is missing from the current branch");
+		const retained = branch.slice(start);
+		const ids = new Set(retained.map(entry => entry.id));
+		const excluded = this.#entries.filter(entry => !ids.has(entry.id));
+		if (!excluded.length) return;
+		for (const entry of excluded) this.#nativeVersions.delete(entry.id);
+		this.#entries = retained;
+		this.#index.rebuild(retained);
+		this.#nativeComplete = false;
+	}
+
+	#writeNative(entries: readonly SessionEntry[], durability: "buffered" | "required"): NativeSessionTicket {
+		if (this.#diskFailure) throw this.#diskFailure;
+		if (!this.#nativeStorage) throw new Error("Native storage is not configured");
+		try {
+			const checkpoint = this.#nativeCheckpoint();
+			const ticket = this.#nativeStorage.append(entries, checkpoint, durability);
+			this.#nativeTicket = ticket;
+			this.#nativePrefix = checkpoint.prefix;
+			this.#nativeBaselineCheckpoint = structuredClone(checkpoint);
+			this.#rememberNativeVersions(entries);
+			void ticket.completion.catch(error => this.#noteDiskFailure(error));
+			return ticket;
+		} catch (error) {
+			throw this.#noteDiskFailure(error);
+		}
+	}
+
+	/** Active native working set; deliberately not the archive/full-tree API. */
+	getContextBranch(): SessionEntry[] {
+		return this.#index.pathTo(this.#index.leafId());
+	}
+
+	getTodoStateEntries(): SessionEntry[] {
+		return [
+			...(!this.#nativeComplete && this.#nativePrefix.todoState ? [this.#nativePrefix.todoState] : []),
+			...this.getContextBranch(),
+		];
+	}
+
+	getCheckpointRewindPrefix(): CheckpointRewindPrefix | undefined {
+		return this.#nativeComplete ? undefined : this.#nativePrefix.rewind;
+	}
+
+	getWorkingEntries(): SessionEntry[] {
+		return [...this.#entries];
+	}
+
+	hasContextEntryType(type: SessionEntry["type"]): boolean {
+		return (
+			(!this.#nativeComplete && this.#nativePrefix.entryTypes.includes(type)) ||
+			this.getContextBranch().some(entry => entry.type === type)
+		);
+	}
+
+	hasAssistantMessage(): boolean {
+		return (!this.#nativeComplete && this.#nativePrefix.hasAssistant) || this.#entries.some(isAssistantEntry);
+	}
+
+	#requireFullHistory(): void {
+		if (!this.#nativeComplete)
+			throw new Error("Full native history is not loaded; await materializeHistory() explicitly");
+	}
+
+	async materializeHistory(): Promise<void> {
+		if (!this.#nativeStorage || this.#nativeComplete) return;
+		await this.flush();
+		const before = this.#nativeTicket;
+		const loaded = await this.#nativeStorage.readArchive();
+		if (before !== this.#nativeTicket)
+			throw new Error("Native history changed during explicit materialization; retry at an idle boundary");
+		this.#applyEntries(loaded.checkpoint.header, loaded.entries);
+		this.#index.setLeaf(loaded.checkpoint.leafId);
+		this.#nativeComplete = true;
+		this.#nativeStartId = loaded.checkpoint.contextStartId;
+		this.#nativePrefix = loaded.checkpoint.prefix;
+		this.#nativeTicket = { position: loaded.position, completion: Promise.resolve() };
+		this.#nativeBaselineCheckpoint = structuredClone(loaded.checkpoint);
+		this.#nativeVersions.clear();
+		this.#rememberNativeVersions(loaded.entries);
 	}
 
 	#rememberBreadcrumb(cwd: string, sessionFile: string, fresh = false): void {
@@ -1220,7 +1428,58 @@ export class SessionManager {
 	}
 
 	#setLeaf(id: string | null): void {
+		const previousLeaf = this.#index.leafId();
+		const previousStart = this.#nativeStartId;
+		const previousPrefix = this.#nativePrefix;
+		if (this.#nativeStorage && id !== null && !this.#nativeComplete) {
+			const selected = this.#index.pathTo(id);
+			if (
+				selected[0]?.parentId &&
+				!selected.some(entry => entry.type === "compaction" || entry.type === "reset_boundary")
+			) {
+				throw new Error("Branch before the retained native boundary requires await materializeHistory() first");
+			}
+		}
 		this.#index.setLeaf(id);
+		if (this.#nativeStorage) {
+			if (id === null) {
+				this.#nativeStartId = null;
+				this.#nativePrefix = {
+					settings: resolveSessionContextState([]),
+					credentialPins: {},
+					hasAssistant: false,
+					entryTypes: [],
+					archiveUsage: this.#nativePrefix.archiveUsage,
+				};
+			} else {
+				const branch = this.getContextBranch();
+				const boundary = [...branch]
+					.reverse()
+					.find(entry => entry.type === "compaction" || entry.type === "reset_boundary");
+				if (boundary) this.#advanceNativeAnchor(boundary);
+				else {
+					this.#nativeStartId = branch[0]?.id ?? null;
+					this.#nativePrefix = {
+						settings: resolveSessionContextState([]),
+						credentialPins: {},
+						hasAssistant: false,
+						entryTypes: [],
+						archiveUsage: this.#nativePrefix.archiveUsage,
+					};
+				}
+			}
+			if (!this.#nativeBatch) {
+				try {
+					this.#writeNative([], "buffered");
+				} catch (error) {
+					this.#index.setLeaf(previousLeaf);
+					this.#nativeStartId = previousStart;
+					this.#nativePrefix = previousPrefix;
+					throw error;
+				}
+				this.#trimNativeContext();
+			}
+		}
 		const batch = this.#atomicEntryBatch;
 		if (batch && !batch.collecting) {
 			batch.externalLeafChanged = true;
@@ -1233,8 +1492,30 @@ export class SessionManager {
 			logger.warn("Dropped session entry appended after terminal release", { type: entry.type });
 			return;
 		}
+		if (this.#nativeStorage && this.#diskFailure) throw this.#diskFailure;
 		this.#entries.push(entry);
 		this.#index.insert(entry);
+		if (this.#nativeStorage) {
+			const prefix = this.#nativePrefix;
+			const startId = this.#nativeStartId;
+			try {
+				this.#advanceNativeAnchor(entry);
+				if (this.#nativeBatch) this.#nativeBatch.push(entry);
+				else this.#writeNative([entry], "buffered");
+			} catch (error) {
+				this.#entries.pop();
+				this.#index.rebuild(this.#entries);
+				this.#index.setLeaf(entry.parentId);
+				this.#nativePrefix = prefix;
+				this.#nativeStartId = startId;
+				throw error;
+			}
+			if (!this.#nativeBatch) {
+				if (entry.type === "compaction" || entry.type === "reset_boundary") this.#trimNativeContext();
+				this.#notifyEntryAppended(entry);
+			}
+			return;
+		}
 		const batch = this.#atomicEntryBatch;
 		if (batch?.collecting) batch.entryIds.add(entry.id);
 		if (batch && !batch.collecting) {
@@ -1306,7 +1587,7 @@ export class SessionManager {
 
 		if (this.#artifactManager && this.#artifactManagerSessionFile === sessionFile) return this.#artifactManager;
 
-		this.#artifactManager = new ArtifactManager(sessionFile.slice(0, -JSONL_SUFFIX_LENGTH));
+		this.#artifactManager = new ArtifactManager(this.getArtifactsDir()!);
 		this.#artifactManagerSessionFile = sessionFile;
 		return this.#artifactManager;
 	}
@@ -1365,10 +1646,21 @@ export class SessionManager {
 	 * Set `persist` false when the original session is intentionally being dropped.
 	 */
 	cloneCurrentSession(options?: { persist?: boolean }): SessionManager {
-		const persist = options?.persist ?? this.#persist;
-		const clone = new SessionManager(this.#cwd, this.#sessionDir, persist, this.#storage);
+		const persist = options?.persist ?? (this.#nativeStorage !== undefined || this.#persist);
+		const clone = new SessionManager(this.#cwd, this.#sessionDir, persist && !this.#nativeStorage, this.#storage);
 		clone.#suppressBreadcrumb = true;
 		clone.restoreState(this.captureState());
+		if (this.#nativeStorage) {
+			if (persist) {
+				clone.#nativeStorage = this.#nativeStorage;
+				clone.#nativeTicket = this.#nativeTicket;
+			}
+			clone.#nativeComplete = this.#nativeComplete;
+			clone.#nativePrefix = structuredClone(this.#nativePrefix);
+			clone.#nativeStartId = this.#nativeStartId;
+			clone.#nativeVersions = new Map(this.#nativeVersions);
+			clone.#nativeBaselineCheckpoint = structuredClone(this.#nativeBaselineCheckpoint);
+		}
 		if (!persist) {
 			clone.#sessionFile = undefined;
 			clone.#fileIsCurrent = false;
@@ -1405,6 +1697,7 @@ export class SessionManager {
 
 	/** Switch to a different session file (resume / branch). */
 	async setSessionFile(sessionFile: string): Promise<void> {
+		if (this.#nativeStorage) throw new Error("Switch native sessions with openNative(), not the JSONL loader");
 		await this.#setSessionFile(sessionFile);
 	}
 
@@ -1462,6 +1755,7 @@ export class SessionManager {
 
 	/** Start a new session. Drains and closes any existing writer first. */
 	async newSession(options?: NewSessionOptions): Promise<string | undefined> {
+		if (this.#nativeStorage) throw new Error("New native session requires a new storage scope and createNative()");
 		await this.#drainAndCloseWriter();
 		return this.#resetToNewSession(options);
 	}
@@ -1657,6 +1951,10 @@ export class SessionManager {
 	 * session/new must create a discoverable file immediately).
 	 */
 	async ensureOnDisk(): Promise<void> {
+		if (this.#nativeStorage) {
+			if (!this.#nativeTicket) await this.#writeNative([], "required").completion;
+			return;
+		}
 		if (!this.#persist || !this.#sessionFile) return;
 		this.#forceFileCreation = true;
 		if (this.#fileIsCurrent && !this.#rewriteRequired) return;
@@ -1700,6 +1998,57 @@ export class SessionManager {
 	}
 
 	async #appendEntriesAtomicallyLocked<T>(append: () => T): Promise<T> {
+		if (this.#nativeStorage) {
+			if (this.#nativeBatch) throw new Error("Native atomic batch is already active");
+			const before = [...this.#entries];
+			const leaf = this.#index.leafId();
+			const checkpoint = this.#nativeCheckpoint();
+			const versions = new Map(this.#nativeVersions);
+			const baseline = this.#nativeBaselineCheckpoint;
+			const entries: SessionEntry[] = [];
+			this.#nativeBatch = entries;
+			let result: T;
+			try {
+				result = append();
+			} catch (error) {
+				this.#entries = before;
+				this.#index.rebuild(before);
+				this.#index.setLeaf(leaf);
+				this.#nativePrefix = checkpoint.prefix;
+				this.#nativeStartId = checkpoint.contextStartId;
+				throw error;
+			} finally {
+				this.#nativeBatch = undefined;
+			}
+			let ticket: NativeSessionTicket;
+			try {
+				ticket = this.#writeNative(entries, "required");
+			} catch (error) {
+				this.#entries = before;
+				this.#index.rebuild(before);
+				this.#index.setLeaf(leaf);
+				this.#nativePrefix = checkpoint.prefix;
+				this.#nativeStartId = checkpoint.contextStartId;
+				throw error;
+			}
+			try {
+				await ticket.completion;
+			} catch (error) {
+				if (error instanceof NativeSessionWriteRejectedError && this.#nativeTicket === ticket) {
+					this.#entries = before;
+					this.#index.rebuild(before);
+					this.#index.setLeaf(leaf);
+					this.#nativePrefix = checkpoint.prefix;
+					this.#nativeStartId = checkpoint.contextStartId;
+					this.#nativeVersions = versions;
+					this.#nativeBaselineCheckpoint = baseline;
+				}
+				throw error;
+			}
+			this.#trimNativeContext();
+			for (const entry of entries) this.#notifyEntryAppended(entry);
+			return result;
+		}
 		if (!this.#persist || !this.#sessionFile) return append();
 		if (this.#atomicEntryBatch) throw new Error("Atomic persistence lock ownership was violated.");
 		try {
@@ -1763,6 +2112,7 @@ export class SessionManager {
 	 * entry remains intended (for example, an explicit terminal tombstone).
 	 */
 	recoverPersistenceFromCurrentState(): Promise<void> {
+		if (this.#nativeStorage) return this.flush();
 		return this.#withAtomicPersistenceLock(async () => {
 			if (!this.#persist || !this.#sessionFile) return;
 			if (this.#atomicEntryBatch) throw new Error("Atomic persistence lock ownership was violated.");
@@ -1775,6 +2125,16 @@ export class SessionManager {
 
 	/** Flush pending writes. Call before switching sessions or on shutdown. */
 	async flush(): Promise<void> {
+		if (this.#nativeStorage) {
+			if (this.#diskFailure) throw this.#diskFailure;
+			const ticket = this.#nativeTicket;
+			if (ticket) {
+				await ticket.completion;
+				await this.#nativeStorage.barrier(ticket.position);
+			}
+			if (this.#diskFailure) throw this.#diskFailure;
+			return;
+		}
 		if (!this.#persist || !this.#sessionFile) return;
 		await this.#scheduleDiskWork(async () => {
 			if (this.#writer?.isOpen()) await this.#writer.flush();
@@ -1788,6 +2148,21 @@ export class SessionManager {
 
 	/** Materialize and drain the exact transcript prefix referenced by an Engine state transition. */
 	async flushAndCheckpoint(): Promise<SessionDurabilityCheckpoint> {
+		if (this.#nativeStorage) {
+			const leafEntryId = this.#index.leafId();
+			if (!leafEntryId) throw new Error("Cannot checkpoint an empty native context");
+			const ticket = this.#nativeTicket ?? this.#writeNative([], "required");
+			await ticket.completion;
+			await this.#nativeStorage.barrier(ticket.position);
+			if (this.#diskFailure) throw this.#diskFailure;
+			return {
+				sessionId: this.#sessionId,
+				sessionPath: this.#nativeStorage.locator,
+				leafEntryId,
+				byteBoundary: 0,
+				native: ticket.position,
+			};
+		}
 		await this.ensureOnDisk();
 		await this.flush();
 		const sessionPath = this.#sessionFile;
@@ -1809,6 +2184,8 @@ export class SessionManager {
 	 * history, and Ctrl+C must not rebuild the whole JSONL string just to flush.
 	 */
 	flushSync(): void {
+		if (this.#nativeStorage)
+			throw new Error("Native storage requires await flush(); synchronous durability is unavailable");
 		if (!this.#persist || !this.#sessionFile) return;
 		if (this.#atomicEntryBatch) throw new Error("Cannot synchronously flush during an atomic session batch.");
 		if (this.#diskFailure) throw this.#diskFailure;
@@ -1856,6 +2233,10 @@ export class SessionManager {
 
 	/** Flush, then close the append writer. */
 	async close(): Promise<void> {
+		if (this.#nativeStorage) {
+			await this.flush();
+			return;
+		}
 		if (!this.#persist) return;
 		await this.#scheduleDiskWork(async () => {
 			const hadWriter = this.#writer !== undefined;
@@ -1911,6 +2292,13 @@ export class SessionManager {
 		this.seal();
 		this.#entries = [];
 		this.#index.clear();
+		this.#nativeVersions.clear();
+		this.#nativePrefix = {
+			settings: resolveSessionContextState([]),
+			credentialPins: {},
+			hasAssistant: false,
+			entryTypes: [],
+		};
 		this.#closeWriterEventually();
 	}
 
@@ -1930,6 +2318,10 @@ export class SessionManager {
 	 * roots at launch never materializes an empty resumable session file.
 	 */
 	async #persistWorkspaceDirectoriesChange(): Promise<void> {
+		if (this.#nativeStorage) {
+			await this.#writeNative([], "required").completion;
+			return;
+		}
 		if (!this.#persist || !this.#sessionFile || !this.#shouldHaveSessionFile()) return;
 		this.#rewriteRequired = true;
 		await this.#rewriteAtomically();
@@ -1992,7 +2384,12 @@ export class SessionManager {
 	}
 
 	getUsageStatistics(): UsageStatistics {
-		return this.#index.usageSnapshot();
+		const usage = this.#index.usageSnapshot();
+		if (!this.#nativeComplete && this.#nativePrefix.archiveUsage) {
+			for (const key of Object.keys(usage) as (keyof UsageStatistics)[])
+				usage[key] += this.#nativePrefix.archiveUsage[key];
+		}
+		return usage;
 	}
 
 	/**
@@ -2002,7 +2399,7 @@ export class SessionManager {
 	beginTurnBudget(total: number | null, hard: boolean): void {
 		this.#turnBudgetTotal = total;
 		this.#turnBudgetHard = hard;
-		this.#turnOutputBaseline = this.#index.usageSnapshot().output;
+		this.#turnOutputBaseline = this.getUsageStatistics().output;
 		this.#turnEvalOutput = 0;
 	}
 
@@ -2011,7 +2408,7 @@ export class SessionManager {
 	}
 
 	getTurnBudget(): { total: number | null; spent: number; hard: boolean } {
-		const mainOutput = Math.max(0, this.#index.usageSnapshot().output - this.#turnOutputBaseline);
+		const mainOutput = Math.max(0, this.getUsageStatistics().output - this.#turnOutputBaseline);
 		return { total: this.#turnBudgetTotal, spent: mainOutput + this.#turnEvalOutput, hard: this.#turnBudgetHard };
 	}
 
@@ -2039,12 +2436,15 @@ export class SessionManager {
 	 * (issue #8860).
 	 */
 	isSessionOnDisk(): boolean {
+		if (this.#nativeStorage) return this.#nativeTicket !== undefined;
 		return !!this.#sessionFile && this.#storage.existsSync(this.#sessionFile);
 	}
 
 	getArtifactsDir(): string | null {
 		if (this.#adoptedArtifactManager) return this.#adoptedArtifactManager.dir;
-		return artifactsDirectoryFor(this.#sessionFile);
+		return this.#nativeStorage
+			? path.join(this.#sessionDir, this.#sessionId)
+			: artifactsDirectoryFor(this.#sessionFile);
 	}
 
 	adoptArtifactManager(manager: ArtifactManager): void {
@@ -2177,6 +2577,12 @@ export class SessionManager {
 		};
 		if (previousTitle) entry.previousTitle = previousTitle;
 		if (trigger) entry.trigger = trigger;
+		if (this.#nativeStorage) {
+			this.#recordEntry(entry);
+			await this.flush();
+			this.#notifySessionNameListeners();
+			return true;
+		}
 		this.#entries.push(entry);
 		this.#index.insert(entry);
 		this.#notifyEntryAppended(entry);
@@ -2376,8 +2782,45 @@ export class SessionManager {
 	 * outputs). Use sparingly.
 	 */
 	async rewriteEntries(): Promise<void> {
+		if (this.#nativeStorage) {
+			await this.flush();
+			const appended = this.#entries.filter(entry => !this.#nativeVersions.has(entry.id));
+			const entries = this.#entries.filter(
+				entry => this.#nativeVersions.has(entry.id) && this.#nativeVersions.get(entry.id) !== JSON.stringify(entry),
+			);
+			const ids = new Set(this.#entries.map(entry => entry.id));
+			const deleted = [...this.#nativeVersions.keys()].filter(id => !ids.has(id));
+			if (!entries.length && !deleted.length && !appended.length) return;
+			let admitted = false;
+			try {
+				const checkpoint = this.#nativeCheckpoint();
+				const ticket = this.#nativeStorage.rewrite(entries, deleted, checkpoint, appended);
+				admitted = true;
+				this.#nativeTicket = ticket;
+				await ticket.completion;
+				this.#nativePrefix = checkpoint.prefix;
+				this.#nativeBaselineCheckpoint = structuredClone(checkpoint);
+				this.#rememberNativeVersions([...entries, ...appended]);
+				for (const id of deleted) this.#nativeVersions.delete(id);
+				this.#trimNativeContext();
+			} catch (error) {
+				if (!admitted || error instanceof NativeSessionWriteRejectedError) this.#restoreNativeBaseline();
+				throw this.#noteDiskFailure(error);
+			}
+			return;
+		}
 		if (!this.#persist || !this.#sessionFile) return;
 		await this.#rewriteAtomically();
+	}
+
+	#restoreNativeBaseline(): void {
+		const checkpoint = this.#nativeBaselineCheckpoint;
+		if (!checkpoint) return;
+		const entries = [...this.#nativeVersions.values()].map(value => JSON.parse(value) as SessionEntry);
+		this.#applyEntries(structuredClone(checkpoint.header), entries);
+		this.#index.setLeaf(checkpoint.leafId);
+		this.#nativePrefix = structuredClone(checkpoint.prefix);
+		this.#nativeStartId = checkpoint.contextStartId;
 	}
 
 	/**
@@ -2423,8 +2866,8 @@ export class SessionManager {
 
 	/** All unique TTSR rule names injected on the current branch (root → leaf). */
 	getInjectedTtsrRules(): string[] {
-		const names = new Set<string>();
-		for (const entry of this.getBranch()) {
+		const names = new Set(this.#nativeComplete ? [] : this.#nativePrefix.settings.injectedTtsrRules);
+		for (const entry of this.getContextBranch()) {
 			if (entry.type !== "ttsr_injection") continue;
 			for (const name of entry.injectedRules) names.add(name);
 		}
@@ -2454,8 +2897,10 @@ export class SessionManager {
 	 * the last turn seeds a warm sticky instead of a stale one.
 	 */
 	getCredentialPins(): Map<string, { hash: string; lastUsedAt: number }> {
-		const pins = new Map<string, { hash: string; lastUsedAt: number }>();
-		for (const entry of this.getBranch()) {
+		const pins = new Map<string, { hash: string; lastUsedAt: number }>(
+			this.#nativeComplete ? [] : Object.entries(structuredClone(this.#nativePrefix.credentialPins)),
+		);
+		for (const entry of this.getContextBranch()) {
 			if (entry.type === "credential_pin") {
 				pins.set(entry.provider, { hash: entry.hash, lastUsedAt: new Date(entry.timestamp).getTime() });
 			} else if (entry.type === "message" && entry.message.role === "assistant") {
@@ -2479,20 +2924,23 @@ export class SessionManager {
 	 * model change has been recorded.
 	 */
 	getLastModelChangeRole(): string | undefined {
-		const branch = this.getBranch();
+		const branch = this.getContextBranch();
 		for (let index = branch.length - 1; index >= 0; index--) {
 			const entry = branch[index];
 			if (entry.type === "model_change") return entry.role ?? "default";
 		}
-		return undefined;
+		return this.#nativeComplete ? undefined : this.#nativePrefix.lastModelChangeRole;
 	}
 
 	getEntry(id: string): SessionEntry | undefined {
-		return this.#index.get(id);
+		const entry = this.#index.get(id);
+		if (!entry) this.#requireFullHistory();
+		return entry;
 	}
 
 	/** All direct children of an entry. */
 	getChildren(parentId: string): SessionEntry[] {
+		this.#requireFullHistory();
 		return this.#index.childrenOf(parentId);
 	}
 
@@ -2516,6 +2964,7 @@ export class SessionManager {
 	 * entry types; use buildSessionContext() for the resolved LLM messages.
 	 */
 	getBranch(fromId?: string): SessionEntry[] {
+		this.#requireFullHistory();
 		return this.#index.pathTo(fromId ?? this.#index.leafId());
 	}
 
@@ -2524,7 +2973,14 @@ export class SessionManager {
 	 * the full-history display transcript, from the current leaf path.
 	 */
 	buildSessionContext(options?: BuildSessionContextOptions): SessionContext {
-		return buildSessionContext(this.#entries, this.#index.leafId(), this.#index.entriesById(), options);
+		if (options?.transcript && !options.collapseCompactedHistory) this.#requireFullHistory();
+		return buildSessionContext(
+			this.#entries,
+			this.#index.leafId(),
+			this.#index.entriesById(),
+			options,
+			this.#nativeComplete ? undefined : this.#nativePrefix.settings,
+		);
 	}
 
 	/** Strip stale OpenAI Responses assistant replay metadata from loaded entries. */
@@ -2549,6 +3005,7 @@ export class SessionManager {
 
 	/** All session entries (excludes header). Returns a shallow copy. */
 	getEntries(): SessionEntry[] {
+		this.#requireFullHistory();
 		return [...this.#entries];
 	}
 
@@ -2557,6 +3014,7 @@ export class SessionManager {
 	 * entries (broken parent chain) are returned as roots too.
 	 */
 	getTree(): SessionTreeNode[] {
+		this.#requireFullHistory();
 		return this.#index.tree(this.#entries);
 	}
 
@@ -2587,22 +3045,53 @@ export class SessionManager {
 	async discardEntryDurably(entryId: string): Promise<void> {
 		const entry = this.#index.get(entryId);
 		if (!entry) return;
-		const children = this.#index.childrenOf(entryId);
-		const canReparentChildren = children.every(child => child.type === "service_tier_change");
-		let leafId = entry.parentId;
-		if (canReparentChildren) {
-			for (const child of children) {
-				child.parentId = leafId;
-				leafId = child.id;
+		let children = this.#index.childrenOf(entryId);
+		if (this.#nativeStorage) {
+			await this.flush();
+			const before = this.#nativeTicket;
+			if (!before) throw new Error("Native discard has no persisted source cut");
+			children = await this.#nativeStorage.readChildren(entryId, before.position);
+			if (before !== this.#nativeTicket)
+				throw new Error("Native history changed during discard; retry at an idle boundary");
+			if (children.every(child => child.type === "service_tier_change")) {
+				for (const child of children) {
+					if (!this.#index.has(child.id)) {
+						this.#entries.push(child);
+						this.#rememberNativeVersions([child]);
+					}
+				}
+				this.#index.rebuild(this.#entries);
+				children = children.map(child => this.#index.get(child.id)!);
 			}
-			this.#entries = this.#entries.filter(candidate => candidate.id !== entryId);
-			this.#index.rebuild(this.#entries);
 		}
-		this.branchWithSummary(leafId, "", {
-			kind: DISCARDED_ENTRY_BRANCH_MARKER,
-			discardedEntryId: entryId,
-		});
+		const nativeBatch = this.#nativeStorage ? ([] as SessionEntry[]) : undefined;
+		if (nativeBatch) this.#nativeBatch = nativeBatch;
+		try {
+			const canReparentChildren = children.every(child => child.type === "service_tier_change");
+			let leafId = entry.parentId;
+			if (canReparentChildren) {
+				for (const child of children) {
+					child.parentId = leafId;
+					leafId = child.id;
+				}
+				this.#entries = this.#entries.filter(candidate => candidate.id !== entryId);
+				this.#index.rebuild(this.#entries);
+			}
+			this.branchWithSummary(leafId, "", {
+				kind: DISCARDED_ENTRY_BRANCH_MARKER,
+				discardedEntryId: entryId,
+			});
+		} catch (error) {
+			if (nativeBatch) this.#restoreNativeBaseline();
+			throw error;
+		} finally {
+			if (nativeBatch) this.#nativeBatch = undefined;
+		}
+		if (nativeBatch) {
+			if (this.#nativeStartId === entryId) this.#nativeStartId = this.getContextBranch()[0]?.id ?? null;
+		}
 		await this.rewriteEntries();
+		if (nativeBatch) for (const appended of nativeBatch) this.#notifyEntryAppended(appended);
 	}
 
 	/** Like branch(), but also records a branch_summary of the abandoned path. */

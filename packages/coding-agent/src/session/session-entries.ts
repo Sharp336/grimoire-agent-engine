@@ -385,3 +385,21 @@ export interface UsageStatistics {
 	premiumRequests: number;
 	cost: number;
 }
+
+/** Latest authoritative todo snapshot, shared by native prefix capture and todo restore. */
+export function getLatestTodoStateEntry(entries: readonly SessionEntry[]): SessionEntry | undefined {
+	for (let index = entries.length - 1; index >= 0; index--) {
+		const entry = entries[index];
+		const data =
+			entry.type === "custom" && entry.customType === "user_todo_edit"
+				? entry.data
+				: entry.type === "message" &&
+						entry.message.role === "toolResult" &&
+						entry.message.toolName === "todo" &&
+						!entry.message.isError
+					? entry.message.details
+					: undefined;
+		if (data && typeof data === "object" && "phases" in data && Array.isArray(data.phases)) return entry;
+	}
+	return undefined;
+}

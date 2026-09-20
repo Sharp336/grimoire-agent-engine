@@ -598,7 +598,7 @@ export class TurnRecovery {
 		const persistenceKey = sessionMessagePersistenceKey(message);
 		if (!persistenceKey) return;
 		let branchEntry: SessionEntry | undefined;
-		for (const entry of this.#host.sessionManager.getBranch().slice().reverse()) {
+		for (const entry of this.#host.sessionManager.getContextBranch().slice().reverse()) {
 			if (entry.type !== "message" || entry.message.role !== "assistant") continue;
 			if (sessionMessagePersistenceKey(entry.message) !== persistenceKey) continue;
 			if (!sameMessageContent(entry.message, message) && !this.#isSameAssistantMessage(entry.message, message)) {
@@ -632,7 +632,7 @@ export class TurnRecovery {
 		completion: { status: "recovered"; supersedingMessage: AssistantMessage } | { status: "superseded" },
 	): Promise<RetryErrorUpdate[]> {
 		if (this.#pendingRetryErrors.length === 0) return [];
-		const branch = this.#host.sessionManager.getBranch();
+		const branch = this.#host.sessionManager.getContextBranch();
 		const branchById = new Map<string, SessionEntry>();
 		for (const entry of branch) {
 			branchById.set(entry.id, entry);
@@ -936,14 +936,14 @@ export class TurnRecovery {
 		allowDefer: boolean,
 		options: { autoContinue: boolean; triggerContextTokens?: number },
 	): Promise<RecoveryCompactionResult> {
-		const compactionEntryBefore = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
+		const compactionEntryBefore = getLatestCompactionEntry(this.#host.sessionManager.getContextBranch());
 		const droppedEntryId = await this.dropPersistedAssistantTurn(assistantMessage);
 		const result = await this.#host.runAutoCompaction(reason, true, false, allowDefer, {
 			autoContinue: options.autoContinue,
 			triggerContextTokens: options.triggerContextTokens,
 			phase: "mid_turn",
 		});
-		const compactionEntryAfter = getLatestCompactionEntry(this.#host.sessionManager.getBranch());
+		const compactionEntryAfter = getLatestCompactionEntry(this.#host.sessionManager.getContextBranch());
 		if (result.historyRewritten !== true && compactionEntryAfter === compactionEntryBefore) {
 			this.#restoreFailedAssistantTurn(assistantMessage, droppedEntryId);
 		}
@@ -972,7 +972,7 @@ export class TurnRecovery {
 	}
 
 	#discardAcceptedTerminalEmptyStop(assistantMessage: AssistantMessage): void {
-		const branch = this.#host.sessionManager.getBranch();
+		const branch = this.#host.sessionManager.getContextBranch();
 		const branchEntry = branch
 			.slice()
 			.reverse()
@@ -1015,7 +1015,7 @@ export class TurnRecovery {
 	discardAssistantTurn(assistantMessage: AssistantMessage): string | undefined {
 		this.removeAssistantMessageFromActiveContext(assistantMessage);
 
-		const branch = this.#host.sessionManager.getBranch();
+		const branch = this.#host.sessionManager.getContextBranch();
 		const persistedEntryId = this.#host.persistedAssistantEntryId(assistantMessage);
 		const branchEntry =
 			(persistedEntryId === undefined

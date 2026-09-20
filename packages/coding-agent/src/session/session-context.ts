@@ -170,11 +170,86 @@ export function getOpenAiRemoteCompactionPayload(
 	};
 }
 
+/** Native settings preceding a retained context range; contains no prompt/messages. */
+export interface SessionContextState extends Omit<SessionContext, "messages" | "cacheMissExplainedAt"> {
+	hasExplicitDefaultModel: boolean;
+}
+
+export function resolveSessionContextState(
+	path: readonly SessionEntry[],
+	initial?: SessionContextState,
+): SessionContextState {
+	let thinkingLevel: string | undefined = initial?.thinkingLevel ?? "off";
+	let configuredThinkingLevel = initial?.configuredThinkingLevel;
+	let serviceTier = initial?.serviceTier;
+	const models: Record<string, string> = { ...initial?.models };
+	const injectedTtsrRulesSet = new Set(initial?.injectedTtsrRules ?? []);
+	let mode = initial?.mode ?? "none";
+	let modeData = initial?.modeData;
+	// Track whether an explicit `model_change` with role="default" has been
+	// seen on this path. Once a user (or the agent itself) records an
+	// explicit default, later assistant-message inference must NOT overwrite
+	// it: temporary fallbacks (retry fallback, context promotion) and
+	// server-side model downgrades both produce assistant messages tagged
+	// with the wrong model id, which previously clobbered the user's pick on
+	// resume (issue #849).
+	let hasExplicitDefaultModel = initial?.hasExplicitDefaultModel ?? false;
+
+	for (const entry of path) {
+		if (entry.type === "thinking_level_change") {
+			thinkingLevel = entry.thinkingLevel ?? "off";
+			configuredThinkingLevel = entry.configured ?? entry.thinkingLevel ?? undefined;
+		} else if (entry.type === "model_change") {
+			// New format: { model: "provider/id", role?: string }
+			if (entry.model) {
+				const role = entry.role ?? "default";
+				models[role] = entry.model;
+				if (role === "default") {
+					hasExplicitDefaultModel = true;
+				}
+			}
+		} else if (entry.type === "service_tier_change") {
+			serviceTier = coerceServiceTierByFamily(entry.serviceTier);
+		} else if (entry.type === "message" && entry.message.role === "assistant") {
+			// Legacy fallback: infer default model from assistant messages only
+			// when no explicit `model_change` (role=default) entry has been
+			// recorded yet. Newer sessions always record an explicit default
+			// model_change at the start of the conversation, so this branch is
+			// only used to keep pre-model_change sessions working.
+			if (!hasExplicitDefaultModel) {
+				models.default = `${entry.message.provider}/${entry.message.model}`;
+			}
+		} else if (entry.type === "ttsr_injection") {
+			// Collect injected TTSR rule names
+			for (const ruleName of entry.injectedRules) {
+				injectedTtsrRulesSet.add(ruleName);
+			}
+		} else if (entry.type === "mode_change") {
+			mode = entry.mode;
+			modeData = entry.data;
+		}
+	}
+
+	const injectedTtsrRules = Array.from(injectedTtsrRulesSet);
+
+	return {
+		thinkingLevel,
+		configuredThinkingLevel,
+		serviceTier,
+		models,
+		injectedTtsrRules,
+		mode,
+		modeData,
+		hasExplicitDefaultModel,
+	};
+}
+
 export function buildSessionContext(
 	entries: SessionEntry[],
 	leafId?: string | null,
 	byId?: Map<string, SessionEntry>,
 	options?: BuildSessionContextOptions,
+	initialState?: SessionContextState,
 ): SessionContext {
 	// Build uuid index if not available
 	if (!byId) {
@@ -228,62 +303,9 @@ export function buildSessionContext(
 	}
 	path.reverse();
 
-	// Extract settings and find compaction
-	let thinkingLevel: string | undefined = "off";
-	let configuredThinkingLevel: string | undefined;
-	let serviceTier: ServiceTierByFamily | undefined;
-	const models: Record<string, string> = {};
-	let compaction: CompactionEntry | null = null;
-	const injectedTtsrRulesSet = new Set<string>();
-	let mode = "none";
-	let modeData: Record<string, unknown> | undefined;
-	// Track whether an explicit `model_change` with role="default" has been
-	// seen on this path. Once a user (or the agent itself) records an
-	// explicit default, later assistant-message inference must NOT overwrite
-	// it: temporary fallbacks (retry fallback, context promotion) and
-	// server-side model downgrades both produce assistant messages tagged
-	// with the wrong model id, which previously clobbered the user's pick on
-	// resume (issue #849).
-	let hasExplicitDefaultModel = false;
-
-	for (const entry of path) {
-		if (entry.type === "thinking_level_change") {
-			thinkingLevel = entry.thinkingLevel ?? "off";
-			configuredThinkingLevel = entry.configured ?? entry.thinkingLevel ?? undefined;
-		} else if (entry.type === "model_change") {
-			// New format: { model: "provider/id", role?: string }
-			if (entry.model) {
-				const role = entry.role ?? "default";
-				models[role] = entry.model;
-				if (role === "default") {
-					hasExplicitDefaultModel = true;
-				}
-			}
-		} else if (entry.type === "service_tier_change") {
-			serviceTier = coerceServiceTierByFamily(entry.serviceTier);
-		} else if (entry.type === "message" && entry.message.role === "assistant") {
-			// Legacy fallback: infer default model from assistant messages only
-			// when no explicit `model_change` (role=default) entry has been
-			// recorded yet. Newer sessions always record an explicit default
-			// model_change at the start of the conversation, so this branch is
-			// only used to keep pre-model_change sessions working.
-			if (!hasExplicitDefaultModel) {
-				models.default = `${entry.message.provider}/${entry.message.model}`;
-			}
-		} else if (entry.type === "compaction") {
-			compaction = entry;
-		} else if (entry.type === "ttsr_injection") {
-			// Collect injected TTSR rule names
-			for (const ruleName of entry.injectedRules) {
-				injectedTtsrRulesSet.add(ruleName);
-			}
-		} else if (entry.type === "mode_change") {
-			mode = entry.mode;
-			modeData = entry.data;
-		}
-	}
-
-	const injectedTtsrRules = Array.from(injectedTtsrRulesSet);
+	const { thinkingLevel, configuredThinkingLevel, serviceTier, models, injectedTtsrRules, mode, modeData } =
+		resolveSessionContextState(path, initialState);
+	const compaction = getLatestCompactionEntry(path);
 
 	// Index on the path of the latest `/clear` boundary, or -1 when none. The
 	// collapsed live transcript and the model-context rebuild start emission
