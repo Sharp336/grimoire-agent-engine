@@ -1,7 +1,9 @@
-import { describe, expect, test } from "bun:test";
+import { describe, expect, spyOn, test } from "bun:test";
 import type { EngineEvent, EngineTarget } from "../src/engine/contracts";
 import { decodeCursor, encodeCursor } from "../src/engine/rocks-runtime-cursor";
+import { nativeEntry } from "../src/engine/rocks-runtime-history";
 import { projectEvent, projectionId, settleRuntimeMessages } from "../src/engine/rocks-runtime-projection";
+import { RocksEngineStore } from "../src/engine/rocks-runtime-store";
 import { RuntimeRecords, RuntimeTransaction } from "../src/engine/runtime-records";
 import { StorageClient } from "../src/session/storage-client";
 import {
@@ -33,24 +35,43 @@ class Rows extends RuntimeRecords {
 	override async query(
 		index: StorageRuntimeIndex,
 		key: Array<string | number | null>,
+		cursor?: string,
+		maxRecords = 100,
+		after?: Array<string | number | null>,
 	): Promise<StorageRuntimeQueryResponse> {
-		const rows = [...this.values.values()].filter(row =>
-			String(index) === "projection_attempt"
-				? row.kind === "projection" &&
-					row.value?.subtype === key[0] &&
-					row.value?.attempt_id === key[1] &&
-					!row.value?.resolved
-				: index === "command_agent_pending"
-					? row.kind === "command" && row.value?.agent_instance_id === key[0] && row.value?.state === "received"
-					: false,
-		);
+		let rows = [...this.values.values()].filter(row => {
+			const v = row.value;
+			switch (String(index)) {
+				case "projection_attempt":
+					return row.kind === "projection" && v?.subtype === key[0] && v?.attempt_id === key[1] && !v?.resolved;
+				case "command_agent_pending":
+					return row.kind === "command" && v?.agent_instance_id === key[0] && v?.state === "received";
+				case "effect_attempt":
+					return row.kind === "effect" && v?.attempt_id === key[0] && v?.state === key[1];
+				case "identity_ref":
+					return row.kind === "identity" && v?.agent_instance_ref === key[0];
+				case "inbox_agent_pending":
+					return row.kind === "inbox" && v?.agent_instance_id === key[0] && v?.disposition === "pending";
+				case "event_message_revision":
+					return row.kind === "event" && v?.message_content_id === key[0] && v?.message_revision === key[1];
+				case "event_message":
+					return row.kind === "event" && v?.message_content_id === key[0];
+				default:
+					return false;
+			}
+		});
+		if (index === "effect_attempt") rows.sort((a, b) => a.id.localeCompare(b.id));
+		if (after && index === "effect_attempt") rows = rows.filter(row => row.id > String(after[0]));
+		const start = Number(cursor ?? 0);
+		const next = start + maxRecords < rows.length ? String(start + maxRecords) : null;
+		rows = rows.slice(start, start + maxRecords);
 		return {
 			schema: "artel.storage.protocol.response.v1",
 			version: "1.0",
 			requestId: "test",
 			incarnation: 1,
 			records: structuredClone(rows),
-			nextCursor: null,
+			nextCursor: next,
 			indexRevision: 1,
 		};
 	}
@@ -67,6 +88,8 @@ const target: EngineTarget & { commandId: string } = {
 };
 function fixture(): Rows {
 	const rows = new Rows();
+	rows.seed("metadata", "engine", { store_epoch: "epoch", generation: 1 });
+	rows.seed("metadata", "events", { count: 10 });
 	rows.seed("identity", "a", {
 		agent_instance_id: "a",
 		agent_instance_ref: "grimoire://tasks/grimoire/runtime-test/agents/a",
@@ -208,5 +231,191 @@ describe("Rocks runtime atomic public projections", () => {
 		expect(() => decodeCursor(cursor, ["messages", "other", "attempt", 7], "")).toThrow("scope");
 		expect(() => decodeCursor(cursor, ["messages", "agent", "attempt", 8], "")).toThrow("scope");
 		expect(() => decodeCursor(`x${cursor}`, scope, "")).toThrow("scope");
+	});
+});
+function storeWith(rows: Rows): RocksEngineStore {
+	const store = new RocksEngineStore(rows.client);
+	spyOn(store.records, "get").mockImplementation((kind, id) => rows.get(kind, id));
+	spyOn(store.records, "query").mockImplementation((index, key, cursor, max, after) =>
+		rows.query(index, key, cursor, max, after),
+	);
+	return store;
+}
+const ref = "grimoire://tasks/grimoire/runtime-test/agents/a";
+describe("Rocks bounded reader contracts", () => {
+	test("terminal state resolves pending inputs and keeps newly staged active tools in its atomic detail", async () => {
+		const tx = new RuntimeTransaction(fixture());
+		await tx.put("effect", "tool", {
+			effect_id: "tool",
+			effect_kind: "tool",
+			attempt_id: "attempt",
+			state: "started",
+			tool_call_id: "call",
+			tool_name: "read",
+			runtime_event_id: 1,
+		});
+		await append(tx, "input_requested", {
+			inputId: "input",
+			questions: [{ id: "q", question: "Continue?", options: [{ label: "Yes" }] }],
+		});
+		const detail = (await tx.get<{ detail_payload: { tools: unknown[] } }>("event", "1"))?.detail_payload;
+		expect(detail?.tools).toEqual([{ toolCallId: "call", name: "read", phase: "started", revision: 1 }]);
+		await append(tx, "completed", {}, 2);
+		expect(
+			(await tx.get<{ resolved: boolean }>("projection", projectionId("input", "attempt", "input")))?.resolved,
+		).toBe(true);
+		expect((await tx.get<{ input_revision: number }>("attempt", "attempt"))?.input_revision).toBe(2);
+	});
+	test("atomic tool baseline continuation starts after its visible prefix without stale index cursors", async () => {
+		const rows = fixture();
+		const tx = new RuntimeTransaction(rows);
+		for (let i = 0; i < 18; i++) {
+			const id = `effect-${String(i).padStart(2, "0")}`;
+			await tx.put("effect", id, {
+				effect_id: id,
+				effect_kind: "tool",
+				attempt_id: "attempt",
+				state: "started",
+				tool_call_id: id,
+				tool_name: "read",
+				runtime_event_id: 1,
+			});
+		}
+		const attempt = await tx.get<Record<string, unknown>>("attempt", "attempt");
+		await tx.put("attempt", "attempt", { ...attempt, tool_revision: 1 });
+		await append(tx, "running", {});
+		const detail = (await tx.get<{ detail_payload: { tools: unknown[]; toolsNextCursor: string } }>("event", "1"))!
+			.detail_payload;
+		expect(detail.tools).toHaveLength(16);
+		for (const put of tx.mutation().puts) rows.seed(put.kind, put.id, put.value);
+		const page = await storeWith(rows).runtimeTools({
+			principalId: "p",
+			agentInstanceRef: ref,
+			attemptId: "attempt",
+			cursor: detail.toolsNextCursor,
+		});
+		expect((page.items as Array<{ toolCallId: string }>).map(item => item.toolCallId)).toEqual([
+			"effect-16",
+			"effect-17",
+		]);
+		expect(page.nextCursor).toBeNull();
+	});
+
+	test("queue reads use the pending partition and reject cross-principal access before returning data", async () => {
+		const rows = fixture();
+		for (const disposition of ["pending", "acknowledged"])
+			rows.seed("inbox", disposition, {
+				subtype: "item",
+				agent_instance_id: "a",
+				queue_id: disposition,
+				queueId: disposition,
+				sourceType: "user",
+				source_event_id: disposition,
+				sourceEventId: disposition,
+				deliveryPayload: "hello",
+				wakeIntent: false,
+				position: 1,
+				disposition,
+				revision: 1,
+				createdAt: 1,
+				updatedAt: 1,
+			});
+		const store = storeWith(rows);
+		const page = await store.runtimeQueue({ agentInstanceRef: ref, principalId: "p", limit: 1 });
+		expect((page.items as Array<{ queueId: string }>).map(item => item.queueId)).toEqual(["pending"]);
+		expect(store.records.query).toHaveBeenCalledWith("inbox_agent_pending", ["a"], undefined, 1);
+		await expect(store.runtimeQueue({ agentInstanceRef: ref, principalId: "other", limit: 1 })).rejects.toThrow(
+			"authorized",
+		);
+	});
+	test("message resource bounds preserve UTF-8 and reject an interior codepoint offset", async () => {
+		const rows = fixture();
+		const tx = new RuntimeTransaction(rows);
+		await append(tx, "message_updated", {
+			mode: "snapshot",
+			messageId: "m",
+			blockId: "b",
+			stream: "assistant",
+			contentId: "content",
+			revision: 1,
+			offset: 0,
+			endOffset: 5,
+			totalBytes: 5,
+			text: "a\u20acb",
+			status: "streaming",
+			partial: false,
+		});
+		for (const put of tx.mutation().puts) rows.seed(put.kind, put.id, put.value);
+		const store = storeWith(rows);
+		const resource = {
+			kind: "message",
+			agentInstanceRef: ref,
+			attemptId: "attempt",
+			messageId: "m",
+			blockId: "b",
+			stream: "assistant",
+			contentId: "content",
+			revision: 1,
+			mediaType: "text/plain; charset=utf-8",
+			bytes: 5,
+		};
+		const page = await store.runtimeResource({ principalId: "p", resource, offset: 0, limit: 3 });
+		expect(Buffer.from(String(page.contentBase64), "base64").toString()).toBe("a");
+		expect(page.nextOffset).toBe(1);
+		await expect(store.runtimeResource({ principalId: "p", resource, offset: 2, limit: 3 })).rejects.toThrow("UTF-8");
+	});
+	test("native history cursor pins leaf/cut while later writes advance and resource can select its exact attempt", async () => {
+		const rows = fixture();
+		rows.seed("binding", "a", { agent_instance_id: "a", attempt_id: "attempt", session_file: "native:family/gen" });
+		const store = storeWith(rows);
+		let live = 2;
+		const read = spyOn(store.storageClient, "readContext").mockImplementation(async input => {
+			const leaf = input.leafId ?? (live === 2 ? "e2" : "e3");
+			const n = Number(leaf.slice(1));
+			return {
+				schema: "artel.storage.protocol.response.v1",
+				version: "1.0",
+				requestId: "read",
+				incarnation: 1,
+				familyId: "family",
+				generationId: "gen",
+				throughSeq: input.cutSeq ?? live,
+				durableThroughSeq: live,
+				liveThroughSeq: live,
+				head: { leafId: live === 2 ? "e2" : "e3" },
+				state: { native: { header: { id: "native-session" } } },
+				events: [
+					{
+						entryId: leaf,
+						parentId: n > 1 ? `e${n - 1}` : null,
+						kind: "message",
+						seq: n,
+						payload: {
+							id: leaf,
+							type: "message",
+							parentId: n > 1 ? `e${n - 1}` : null,
+							message: { role: "user", content: "hello" },
+						},
+					},
+				],
+				nextCursor: null,
+			};
+		});
+		const first = await store.nativeHistoryPage("a", undefined, 1);
+		live = 3;
+		const second = await store.nativeHistoryPage("a", first.nextCursor ?? undefined, 1);
+		expect(first.revision).toBe("e2");
+		expect(second.revision).toBe("e2");
+		expect(second.entries.map(entry => (entry as { id: string }).id)).toEqual(["e1"]);
+		const resource = await nativeEntry(
+			store,
+			"a",
+			"e2",
+			first.lifecycleContext!.lineage,
+			"native-session",
+			"attempt",
+		);
+		expect(resource.id).toBe("e2");
+		expect(read.mock.calls.at(-1)?.[0]).toMatchObject({ cutSeq: 2, leafId: "e2", maxRecords: 1 });
 	});
 });

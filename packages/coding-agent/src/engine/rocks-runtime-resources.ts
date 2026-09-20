@@ -158,6 +158,8 @@ export async function runtimeResource(
 			}
 			if (inline) bytes = inline;
 			else {
+				if (offset > Number(resource.bytes))
+					throw new EngineTargetError("invalid_request", "Resource range starts after EOF");
 				const range = await new BlobStore(getBlobsDir()).getRange(hash!, offset, limit);
 				if (!range) throw new EngineTargetError("history_expired", "Original resource bytes are unavailable");
 				if (range.totalBytes !== resource.bytes || offset > range.totalBytes)

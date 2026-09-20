@@ -7,6 +7,7 @@ import type { RocksAttempt, RocksBinding, RocksCommand } from "./rocks-runtime-r
 import { queryWork, type RocksEngineStore } from "./rocks-runtime-store";
 import type { EngineNativeHistoryPage } from "./runtime-history";
 import type { HistoryLifecycleContext } from "./runtime-lifecycle";
+import type { RuntimeQueryWork } from "./runtime-projection";
 import { type RuntimeRemainingWork, runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
 
 interface NativeScope {
@@ -25,12 +26,13 @@ export async function nativeScope(
 	store: RocksEngineStore,
 	agentId: string,
 	attemptId?: string,
+	work?: RuntimeQueryWork,
 ): Promise<{ scope: NativeScope; path: string; attempt?: RocksAttempt; currentAttemptId: string | null }> {
-	const binding = await store.row<RocksBinding>("binding", agentId);
+	const binding = await store.row<RocksBinding>("binding", agentId, work);
 	const attempt = attemptId
-		? await store.row<RocksAttempt>("attempt", attemptId)
+		? await store.row<RocksAttempt>("attempt", attemptId, work)
 		: binding
-			? await store.row<RocksAttempt>("attempt", binding.attempt_id)
+			? await store.row<RocksAttempt>("attempt", binding.attempt_id, work)
 			: undefined;
 	if (attemptId && (!attempt || attempt.agent_instance_id !== agentId))
 		throw new EngineTargetError("stale_target", "History Attempt belongs to another agent");
@@ -82,8 +84,9 @@ export async function nativeHistoryPage(
 	if (!Number.isInteger(limit) || limit < 1 || limit > runtimeLimits.httpPageRecords)
 		throw new EngineTargetError("invalid_request", "History page limit exceeds the owner budget");
 	const started = performance.now();
-	const selected = await nativeScope(store, agentId, attemptId);
-	const meta = await store.meta();
+	const metadataWork = queryWork();
+	const selected = await nativeScope(store, agentId, attemptId, metadataWork);
+	const meta = await store.meta(metadataWork);
 	const cursorScope = ["history", agentId, attemptId ?? null, selected.path, meta.epoch, meta.generation];
 	const initial = await store.storageClient.readContext({
 		...selected.scope,
@@ -156,10 +159,11 @@ export async function nativeHistoryPage(
 	const anchors: LifecycleContext["anchors"] = [];
 	for (const entry of entries) {
 		if (typeof entry.sourceCommandId === "string") {
-			const command = await store.row<RocksCommand>("command", entry.sourceCommandId);
+			const command = await store.row<RocksCommand>("command", entry.sourceCommandId, metadataWork);
 			const owner = await store.row<RocksProjection>(
 				"projection",
 				projectionId("ownership", "command", entry.sourceCommandId),
+				metadataWork,
 			);
 			if (command?.agent_instance_id === agentId && command.identity.attemptId && owner)
 				anchors.push({ attemptId: command.identity.attemptId, entryId: String(entry.id), eventId: owner.position });
@@ -167,6 +171,7 @@ export async function nativeHistoryPage(
 			const owner = await store.row<RocksProjection>(
 				"projection",
 				projectionId("ownership", agentId, entry.assistantMessageId),
+				metadataWork,
 			);
 			if (owner) anchors.push({ attemptId: owner.attempt_id, entryId: String(entry.id), eventId: owner.position });
 		}
@@ -193,8 +198,8 @@ export async function nativeHistoryPage(
 		lifecycleContext,
 		...(entryRef ? { entryRef } : {}),
 		...(fallback ? { projectionFallback: fallback } : {}),
-		visitedRecords: visited,
-		readBytes,
+		visitedRecords: visited + metadataWork.value.scannedRows,
+		readBytes: readBytes + metadataWork.value.materializedBytes,
 		elapsedMs: Math.ceil(performance.now() - started),
 	};
 }
@@ -290,7 +295,7 @@ export async function nativeLifecyclePage(
 	remaining?: RuntimeRemainingWork,
 ) {
 	const work = queryWork(remaining);
-	const selected = await nativeScope(store, agentId, attemptId);
+	const selected = await nativeScope(store, agentId, attemptId, work);
 	const cursorScope = ["lifecycle", agentId, agentRef, attemptId ?? null, selected.path];
 	const position = decodeCursor(cursor, cursorScope, {
 		context: context as LifecycleContext | undefined,

@@ -1,5 +1,5 @@
 import type { StorageRuntimeIndex } from "../session/storage-protocol";
-import { type EngineEvent, type EngineTarget, EngineTargetError } from "./contracts";
+import { type EngineEvent, type EngineInboxItem, type EngineTarget, EngineTargetError } from "./contracts";
 import { encodeCursor } from "./rocks-runtime-cursor";
 import type {
 	RocksAttempt,
@@ -12,8 +12,9 @@ import type {
 } from "./rocks-runtime-rows";
 import { lifecycleSummary } from "./runtime-lifecycle";
 import { utf8Tail } from "./runtime-messages";
-import { boundedItems, projectionChange, runtimeInputBody } from "./runtime-projection";
+import { boundedItems, projectionChange, type RuntimeQueryWork, runtimeInputBody } from "./runtime-projection";
 import { type RuntimeChange, runtimeLimits, runtimeToolPageRecords, validateRuntimeValue } from "./runtime-protocol";
+import { publicRuntimeQueueItem } from "./runtime-queue";
 import { canonicalRuntimeReceipt, type RuntimeReceiptRow } from "./runtime-receipts";
 import type { RuntimeTransaction } from "./runtime-records";
 import type { EngineTransitionEvent } from "./store";
@@ -150,6 +151,22 @@ export function runtimeReceipt(
 				: row.operation === "start" && attempt && terminal.has(attempt.state)
 					? "execution_terminal"
 					: "applied";
+	let receipt = row.receipt ? structuredClone(row.receipt) : null;
+	if (
+		receipt?.outcome === "applied" &&
+		receipt.detail &&
+		command.agentInstanceRef &&
+		(row.operation.startsWith("queue_") || row.operation === "enqueue")
+	) {
+		const detail = receipt.detail;
+		const item = (detail.item ?? (detail.queueId ? detail : undefined)) as Record<string, unknown> | undefined;
+		if (item?.queueId && typeof item.partial !== "boolean") {
+			const projected = publicRuntimeQueueItem(command.agentInstanceRef, item as unknown as EngineInboxItem);
+			receipt.detail = detail.item ? { ...detail, item: projected } : { item: projected };
+		} else if (Array.isArray(detail.items)) receipt.detail = { reordered: detail.items.length };
+	}
+	if (receipt && Buffer.byteLength(JSON.stringify(receipt)) > runtimeLimits.liveChangeBytes)
+		receipt = { outcome: receipt.outcome, detail: { partial: true, unavailable: "result_exceeds_projection_limit" } };
 	const canonical: RuntimeReceiptRow = {
 		command_id: row.command_id,
 		operation: row.operation,
@@ -165,9 +182,9 @@ export function runtimeReceipt(
 		target_unavailable: 0,
 		authority_generation: command.authorityGeneration,
 		intent_revision: identity?.intent_revision ?? 0,
-		receipt: row.receipt ? JSON.stringify(row.receipt) : null,
+		receipt: receipt ? JSON.stringify(receipt) : null,
 		settled_at: row.state === "settled" ? row.updated_at : null,
-		receipt_bytes: row.receipt ? Buffer.byteLength(JSON.stringify(row.receipt)) : 0,
+		receipt_bytes: receipt ? Buffer.byteLength(JSON.stringify(receipt)) : 0,
 		outcome: row.receipt?.outcome ?? null,
 	};
 	return canonicalRuntimeReceipt(canonical);
@@ -176,6 +193,7 @@ export function runtimeReceipt(
 export async function projectedHolds(
 	tx: RuntimeTransaction,
 	identity: RocksIdentity,
+	work?: RuntimeQueryWork,
 ): Promise<Record<string, unknown>[]> {
 	const holds: Record<string, unknown>[] = [];
 	const seen = new Set<string>();
@@ -186,6 +204,11 @@ export async function projectedHolds(
 		seen.add(current.agent_instance_id);
 		for (const kind of ["pause", "stop", "recovery"]) {
 			const hold = await tx.get<RocksHold>("hold", `${current.agent_instance_id}:${kind}`);
+			if (work) {
+				work.rows(1);
+				work.value.materializedBytes += Buffer.byteLength(JSON.stringify(hold ?? null));
+				work.check();
+			}
 			if (hold)
 				holds.push({
 					sourceAgentInstanceRef: current.agent_instance_ref,
@@ -194,9 +217,15 @@ export async function projectedHolds(
 					kind: hold.kind,
 				});
 		}
+		const hasParent = Boolean(current.parent_agent_instance_id);
 		current = current.parent_agent_instance_id
 			? await tx.get<RocksIdentity>("identity", current.parent_agent_instance_id)
 			: undefined;
+		if (work && hasParent) {
+			work.rows(1);
+			work.value.materializedBytes += Buffer.byteLength(JSON.stringify(current ?? null));
+			work.check();
+		}
 	}
 	return holds;
 }

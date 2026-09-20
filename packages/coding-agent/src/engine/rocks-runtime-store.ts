@@ -11,7 +11,6 @@ import {
 import {
 	type ProjectedEvent,
 	projectEvent,
-	projectedDetail,
 	projectedHolds,
 	projectionId,
 	type RocksProjection,
@@ -46,6 +45,7 @@ import {
 	type RuntimeEventsRequest,
 	type RuntimeRemainingWork,
 	type RuntimeScope,
+	type RuntimeWork,
 	runtimeLimits,
 	runtimeProjectionHash,
 	runtimeToolPageRecords,
@@ -568,8 +568,7 @@ export class RocksEngineStore extends RocksEngineMutations {
 			throw new EngineTargetError("stale_target", "Hold revision changed");
 		const scope = ["holds", cut.epoch, cut.generation, request.agentInstanceRef, request.attemptId, revision];
 		const offset = decodeCursor<number>(request.cursor, scope, 0);
-		const rows = await projectedHolds(new RuntimeTransaction(this.records), identity);
-		account(work, rows);
+		const rows = await projectedHolds(new RuntimeTransaction(this.records), identity, work);
 		const items = rows.slice(offset, offset + (request.limit ?? runtimeLimits.httpPageRecords));
 		await this.assertCut(cut, work);
 		return finish(
@@ -699,9 +698,9 @@ export class RocksEngineStore extends RocksEngineMutations {
 			projectionId("detail", identity.agent_instance_id, attempt?.attempt_id ?? ""),
 			work,
 		);
-		let detail =
-			row?.value ??
-			(await projectedDetail(new RuntimeTransaction(this.records), identity, attempt, identity.summary_revision));
+		let detail = row?.value;
+		if (!detail) throw new EngineTargetError("projection_changed", "Detail projection is not retained");
+		if (!interest.kinds.includes("tool")) detail = { ...detail, tools: [], toolsNextCursor: null };
 		if (!interest.kinds.includes("input"))
 			detail = {
 				...detail,
@@ -715,6 +714,10 @@ export class RocksEngineStore extends RocksEngineMutations {
 				attemptId: attempt.attempt_id,
 				limit: 16,
 			});
+			const messageWork = messages.work as RuntimeWork;
+			work.value.scannedRows += messageWork.scannedRows;
+			work.value.materializedBytes += messageWork.materializedBytes;
+			work.check();
 			const selected: unknown[] = [];
 			for (const message of messages.items as unknown[]) {
 				if (size({ ...detail, messages: [...selected, message] }) > runtimeLimits.detailStateBytes) break;
@@ -732,6 +735,10 @@ export class RocksEngineStore extends RocksEngineMutations {
 				agentInstanceRef: interest.agentInstanceRef,
 				attemptId: attempt.attempt_id,
 			});
+			const toolWork = tools.work as RuntimeWork;
+			work.value.scannedRows += toolWork.scannedRows;
+			work.value.materializedBytes += toolWork.materializedBytes;
+			work.check();
 			detail = { ...detail, tools: tools.items, toolsNextCursor: tools.nextCursor };
 		}
 		return detail;
@@ -882,7 +889,13 @@ export class RocksEngineStore extends RocksEngineMutations {
 		if (request.afterCursor > meta.watermark)
 			throw new RuntimeQueryError("retention_gap", "Event cursor is outside retention", work.value);
 		const head = Math.min(request.untilCursor ?? meta.watermark, meta.watermark);
-		const sources: Array<{ key: string[]; kind?: string; attempt?: string; agentOnly?: boolean }> = [];
+		const sources: Array<{
+			key: string[];
+			kind?: string;
+			attempt?: string;
+			agentOnly?: boolean;
+			selected?: string[];
+		}> = [];
 		if (request.scope.kind === "catalog") {
 			sources.push({ key: ["summary", request.principalId, "", ""] });
 			for (const ref of request.authorizedAgentInstanceRefs ?? []) {
@@ -915,9 +928,15 @@ export class RocksEngineStore extends RocksEngineMutations {
 							key: ["detail", identity.agent_instance_id, attempt.attempt_id, kind],
 							kind,
 							attempt: attempt.attempt_id,
+							selected: interest.kinds,
 						});
 					if (kind === "state" || kind === "queue")
-						sources.push({ key: ["agent", identity.agent_instance_id, "", kind], kind, agentOnly: true });
+						sources.push({
+							key: ["agent", identity.agent_instance_id, "", kind],
+							kind,
+							agentOnly: true,
+							selected: interest.kinds,
+						});
 				}
 			}
 		}
@@ -965,6 +984,25 @@ export class RocksEngineStore extends RocksEngineMutations {
 							(source.agentOnly ? attempt === undefined || attempt === null : attempt === source.attempt)
 						);
 					});
+				changes = changes.map(change =>
+					change.kind !== "state"
+						? change
+						: {
+								...change,
+								value: {
+									...change.value,
+									...(!source.selected?.includes("tool") ? { tools: [], toolsNextCursor: null } : {}),
+									...(!source.selected?.includes("input")
+										? {
+												pendingInputs: [],
+												inputsHasMore: Boolean(
+													(change.value.pendingInputs as unknown[]).length || change.value.inputsHasMore,
+												),
+											}
+										: {}),
+								},
+							},
+				);
 				const existing = candidates.get(event.eventId) ?? [];
 				for (const change of changes)
 					if (!existing.some(item => JSON.stringify(item) === JSON.stringify(change))) existing.push(change);
@@ -1022,7 +1060,7 @@ export class RocksEngineStore extends RocksEngineMutations {
 			clearTimeout(timer);
 			signal?.removeEventListener("abort", abort);
 		}
-		return this.runtimeEvents({
+		const next = await this.runtimeEvents({
 			...request,
 			afterCursor: result.throughCursor,
 			remainingWork: {
@@ -1032,6 +1070,18 @@ export class RocksEngineStore extends RocksEngineMutations {
 				timeMs: request.remainingWork.timeMs - result.work.elapsedMs,
 			},
 		});
+		next.work.scannedRows += result.work.scannedRows;
+		next.work.materializedBytes += result.work.materializedBytes;
+		next.work.elapsedMs += result.work.elapsedMs;
+		for (;;) {
+			const bytes = size(next);
+			if (bytes === next.work.bytes) break;
+			next.work.bytes = bytes;
+		}
+		if (next.work.bytes > request.maxBytes)
+			throw new RuntimeQueryError("restore_budget", "Event read exceeds its byte budget", next.work);
+		validateRuntimeValue("eventBatch", next);
+		return next;
 	}
 	async runtimeCommand(
 		commandId: string,
@@ -1058,7 +1108,30 @@ export class RocksEngineStore extends RocksEngineMutations {
 		const agent = await this.row<RocksIdentity>("identity", row.agent_instance_id);
 		const attempt = identity.attemptId ? await this.row<RocksAttempt>("attempt", identity.attemptId) : undefined;
 		const receipt = runtimeReceipt(row, agent, attempt);
-		if (!receipt) throw new EngineTargetError("stale_target", "Command receipt has no canonical agent identity");
-		return receipt;
+		return {
+			commandId,
+			lookup: row.state === "settled" ? "known" : "pending",
+			stage:
+				row.receipt?.outcome === "rejected"
+					? "rejected"
+					: row.state !== "settled"
+						? "engine_accepted"
+						: row.operation === "start" && attempt && terminal.has(attempt.state)
+							? "execution_terminal"
+							: "applied",
+			receipt: row.receipt ?? undefined,
+			rawCanonicalHash: row.canonical_hash,
+			browserPayloadHash: identity.browserPayloadHash,
+			target: {
+				agentInstanceRef: identity.agentInstanceRef,
+				agentInstanceId: row.agent_instance_id,
+				attemptId: identity.attemptId,
+				executionId: identity.executionId,
+			},
+			dedupHorizonMs: runtimeLimits.dedupHorizonMs,
+			dedupUntil: row.state === "settled" ? row.updated_at + runtimeLimits.dedupHorizonMs : null,
+			retention: "indefinite",
+			...receipt,
+		};
 	}
 }
