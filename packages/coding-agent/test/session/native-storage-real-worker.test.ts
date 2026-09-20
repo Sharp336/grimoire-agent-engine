@@ -2,10 +2,17 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { RocksNativeSessionStorage } from "../../src/session/rocks-native-session-storage";
+import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { ModelRegistry } from "../../src/config/model-registry";
+import { Settings } from "../../src/config/settings";
+import type { EngineEvent, EngineLaunchProfile } from "../../src/engine/contracts";
+import { EngineRuntime, type EngineRuntimeOptions } from "../../src/engine/runtime";
+import { BlobStore } from "../../src/session/blob-store";
+import { parseNativeSessionLocator, RocksNativeSessionStorage } from "../../src/session/rocks-native-session-storage";
 import { SessionManager } from "../../src/session/session-manager";
 import { StorageClient } from "../../src/session/storage-client";
 import { STORAGE_PROTOCOL_SCHEMA_HASH } from "../../src/session/storage-protocol";
+import { createInMemoryAuthStorage } from "../helpers/agent-session-setup";
 
 interface StorageRuntimeManifest {
 	schema: string;
@@ -106,6 +113,190 @@ const expectedSourceCommit = Bun.env.ARTEL_STORAGE_EXPECTED_SOURCE_COMMIT;
 const requestedRunRoot = Bun.env.ARTEL_STORAGE_TEST_RUN_ROOT;
 
 describe.skipIf(!runtimeRoot || !expectedSourceCommit || !requestedRunRoot)("real native storage bridge", () => {
+	it("retains successful assistants when reported usage exceeds the route context window", async () => {
+		if (!runtimeRoot || !expectedSourceCommit || !requestedRunRoot)
+			throw new Error("Real worker fixture is not configured");
+		if (!/^[a-f0-9]{40}$/.test(expectedSourceCommit)) throw new Error("Expected source commit must be exact");
+		const runRoot = path.resolve(`${requestedRunRoot}-successful-overflow`);
+		const canonicalTempRoot = await fs.realpath(os.tmpdir());
+		const canonicalRunRoot = path.join(await fs.realpath(path.dirname(runRoot)), path.basename(runRoot));
+		const relativeRunRoot = path.relative(canonicalTempRoot, canonicalRunRoot);
+		if (
+			!relativeRunRoot ||
+			relativeRunRoot.startsWith("..") ||
+			path.isAbsolute(relativeRunRoot) ||
+			!path.basename(runRoot).startsWith("artel-")
+		)
+			throw new Error("Real worker fixture requires a new artel-* directory under the system TEMP root");
+		await fs.mkdir(runRoot, { recursive: false });
+
+		const manifest = (await Bun.file(path.join(runtimeRoot, "manifest.json")).json()) as StorageRuntimeManifest;
+		expect(manifest.schema).toBe("artel.storage.runtime.v1");
+		expect(manifest.source_commit).toBe(expectedSourceCommit);
+		const binaryRecord = manifest.files.find(file => file.role === "storage");
+		const protocolRecord = manifest.files.find(file => file.role === "protocol");
+		if (!binaryRecord || !protocolRecord) throw new Error("Storage runtime manifest is incomplete");
+		const executable = path.join(runtimeRoot, binaryRecord.path);
+		const protocol = path.join(runtimeRoot, protocolRecord.path);
+		const binaryHash = await hashFile(executable);
+		const protocolHash = `sha256:${await hashFile(protocol)}`;
+		expect(binaryHash).toBe(binaryRecord.sha256);
+		expect(protocolHash).toBe(`sha256:${protocolRecord.sha256}`);
+		expect(protocolHash).toBe(STORAGE_PROTOCOL_SCHEMA_HASH);
+
+		const tokenFile = path.join(runRoot, "token.txt");
+		const token = Array.from(crypto.getRandomValues(new Uint8Array(32)), byte =>
+			byte.toString(16).padStart(2, "0"),
+		).join("");
+		await Bun.write(tokenFile, token);
+		const worker = await startWorker(
+			executable,
+			path.join(runRoot, "data"),
+			tokenFile,
+			path.join(runRoot, "ready.json"),
+		);
+		const binding = {
+			url: worker.ready.url,
+			token,
+			incarnation: worker.ready.incarnation,
+			protocolHash,
+		};
+		const storageClient = new StorageClient(binding);
+		const previousBinding = Bun.env.GRIMOIRE_STORAGE_BINDING;
+		Bun.env.GRIMOIRE_STORAGE_BINDING = JSON.stringify(binding);
+
+		registerMockApi("native-real-worker-successful-overflow");
+		const usage = {
+			input: 2,
+			output: 105,
+			cacheRead: 0,
+			cacheWrite: 39_642,
+			totalTokens: 39_749,
+		};
+		const mock = createMockModel({
+			contextWindow: 32_000,
+			responses: [
+				{ content: ["first visible answer"], stopReason: "stop", usage },
+				{ content: ["second visible answer"], stopReason: "stop", usage },
+			],
+		});
+		const auth = createInMemoryAuthStorage();
+		auth.setRuntimeApiKey("mock", "test-key");
+		const modelRegistry = new ModelRegistry(auth);
+		const cwd = path.join(runRoot, "workspace");
+		const agentDir = path.join(runRoot, "agent");
+		await fs.mkdir(cwd);
+		await fs.mkdir(agentDir);
+		const settings = await Settings.loadReadOnly({
+			cwd,
+			agentDir,
+			overrides: {
+				"compaction.enabled": true,
+				"compaction.asyncEnabled": false,
+				"compaction.methodOrder": ["shake"],
+				"contextPromotion.enabled": false,
+			},
+		});
+		const options: EngineRuntimeOptions = {
+			databasePath: path.join(runRoot, "engine.sqlite"),
+			attachmentBlobStore: new BlobStore(path.join(runRoot, "upload-blobs")),
+			sessionDefaults: {
+				cwd,
+				agentDir,
+				settings,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				modelRegistry,
+				model: mock.model,
+			},
+		};
+		const profile: EngineLaunchProfile = {
+			spawns: "",
+			profileDigest: "native-real-worker-successful-overflow-v1",
+			enableMCP: false,
+			enableLsp: false,
+		};
+		const agentInstanceId = "native-real-worker-successful-overflow-agent";
+		const agentInstanceRef = "grimoire://tasks/grimoire/native-real-worker-successful-overflow/agents/owner";
+		let runtime: EngineRuntime | undefined;
+		let locator: string | undefined;
+		const retainedAssistantHistoryEntryIds: string[] = [];
+		try {
+			for (let turn = 1; turn <= 2; turn++) {
+				runtime = await EngineRuntime.create(options);
+				const events: EngineEvent[] = [];
+				const unsubscribe = runtime.subscribe(event => {
+					events.push(event);
+				});
+				const attemptId = `native-real-worker-successful-overflow-attempt-${turn}`;
+				const started = await runtime.start(
+					{
+						commandId: `native-real-worker-successful-overflow-command-${turn}`,
+						agentInstanceId,
+						agentInstanceRef,
+						executionId: `native-real-worker-successful-overflow-execution-${turn}`,
+						attemptId,
+						authorityGeneration: 1,
+						cwd,
+						input: `turn ${turn}`,
+					},
+					profile,
+				);
+				await runtime.drain();
+				unsubscribe();
+				const snapshot = events.findLast(
+					event =>
+						event.kind === "assistant_snapshot" &&
+						event.attemptId === attemptId &&
+						typeof event.payload?.stopReason === "string",
+				);
+				const historyEntryId =
+					typeof snapshot?.payload?.historyEntryId === "string" ? snapshot.payload.historyEntryId : null;
+				const attempt = await runtime.store.getAttempt(attemptId);
+				if (!attempt?.transcript_path) throw new Error("Attempt did not retain its native session locator");
+				locator ??= String(attempt.transcript_path);
+				expect(String(attempt.transcript_path)).toBe(locator);
+				expect(String(started.sessionFile)).toBe(locator);
+				const { familyId, generationId } = parseNativeSessionLocator(locator);
+				const raw = await storageClient.readContext({
+					familyId,
+					generationId,
+					maxRecords: 100,
+					maxBytes: 1_048_576,
+				});
+				const history = await runtime.sessionHistoryPage(
+					agentInstanceId,
+					agentInstanceRef,
+					undefined,
+					100,
+					attemptId,
+				);
+				expect(snapshot?.payload?.stopReason).toBe("stop");
+				expect(typeof historyEntryId).toBe("string");
+				retainedAssistantHistoryEntryIds.push(String(historyEntryId));
+				expect(attempt.transcript_leaf_entry_id).toBe(historyEntryId);
+				expect(raw.head?.leafId).toBe(historyEntryId);
+				expect(history.entries.filter(entry => entry.role === "user")).toHaveLength(turn);
+				expect(history.entries.filter(entry => entry.role === "assistant")).toHaveLength(turn);
+				await runtime.dispose();
+				runtime = undefined;
+			}
+			expect(mock.calls).toHaveLength(2);
+			expect(new Set(retainedAssistantHistoryEntryIds).size).toBe(2);
+		} finally {
+			await runtime?.dispose();
+			if (previousBinding === undefined) delete Bun.env.GRIMOIRE_STORAGE_BINDING;
+			else Bun.env.GRIMOIRE_STORAGE_BINDING = previousBinding;
+			auth.close();
+			await worker.stop();
+		}
+	}, 60_000);
+
 	it("preserves the S1 context through bounded reads and a real worker cold restart", async () => {
 		if (!runtimeRoot || !expectedSourceCommit || !requestedRunRoot)
 			throw new Error("Real worker fixture is not configured");

@@ -1759,8 +1759,13 @@ export class SessionMaintenance {
 			});
 			return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
 		}
+		// Usage can exceed a route's advertised window on a successful turn.
+		// Keep that answer and use threshold maintenance below, not failed-turn recovery.
 		const overflowEvidence =
-			sameModel && !errorIsFromBeforeCompaction && AIError.isContextOverflow(assistantMessage, contextWindow);
+			assistantMessage.stopReason === "error" &&
+			sameModel &&
+			!errorIsFromBeforeCompaction &&
+			AIError.isContextOverflow(assistantMessage, contextWindow);
 		if (overflowEvidence || (payloadRejection && !trustedPayloadRejection)) {
 			this.#host.removeAssistantMessageFromActiveContext(assistantMessage);
 
