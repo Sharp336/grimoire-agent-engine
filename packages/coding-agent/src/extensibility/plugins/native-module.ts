@@ -21,9 +21,22 @@ function sourcePath(file: string): string {
 	return fs.realpathSync(filePath(file));
 }
 
+function ownFile(file: string): void {
+	if (ownedFiles.has(file)) return;
+	ownedFiles.add(file);
+	// Bun's runtime onLoad cannot fall through; never match unrelated host files.
+	const filter = new RegExp(`^${file.split(/[\\/]/).map(RegExp.escape).join("[\\\\/]")}(?:\\?load=\\d+)?$`);
+	Bun.plugin({
+		name: namespace,
+		setup(build) {
+			build.onLoad({ filter, namespace: "file" }, () => linkNativeFile(file));
+		},
+	});
+}
+
 function recordDependency(specifier: string, importer: string): void {
 	const resolved = Bun.resolveSync(specifier, path.dirname(sourcePath(importer)));
-	if (codePattern.test(resolved)) ownedFiles.add(sourcePath(resolved));
+	if (codePattern.test(resolved)) ownFile(sourcePath(resolved));
 }
 
 async function hostModuleSource(key: string): Promise<string> {
@@ -100,7 +113,7 @@ async function linkNativeFile(file: string): Promise<{ contents: string; loader:
 	return { contents: await output.outputs[0].text(), loader: "js" };
 }
 
-/** Install process hooks once; files outside the reached extension graph fall through synchronously. */
+/** Track relative imports once; load hooks are registered only for reached extension files. */
 export function installNativeModuleResolver(): void {
 	if (installed) return;
 	installed = true;
@@ -112,11 +125,6 @@ export function installNativeModuleResolver(): void {
 				if (args.importer && ownedFiles.has(filePath(args.importer))) recordDependency(args.path, args.importer);
 				return undefined;
 			});
-			build.onLoad({ filter: codePattern, namespace: "file" }, args => {
-				const file = filePath(args.path);
-				if (!ownedFiles.has(file)) return undefined;
-				return linkNativeFile(file);
-			});
 		},
 	});
 }
@@ -125,7 +133,7 @@ export function installNativeModuleResolver(): void {
 export async function loadNativeModule(file: string): Promise<unknown> {
 	installNativeModuleResolver();
 	const absolute = sourcePath(path.resolve(file));
-	ownedFiles.add(absolute);
+	ownFile(absolute);
 	const specifier = process.platform === "win32" ? pathToFileURL(absolute).href : absolute;
 	return import(`${specifier}?load=${++loadTag}`);
 }
