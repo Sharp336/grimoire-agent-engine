@@ -65,6 +65,7 @@ import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { spillToDescription } from "../utils/schema/spill";
 import { createSdkStreamRequestOptions } from "../utils/sdk-stream-timeout";
 import { notifyRawSseEvent } from "../utils/sse-debug";
+import { boundedProviderBody, getStreamAdmission } from "../utils/stream-admission";
 import { isForcedToolChoice } from "../utils/tool-choice";
 import {
 	AnthropicConnectionTimeoutError,
@@ -1433,7 +1434,8 @@ async function* iterateAnthropicEvents(
 	let sawMessageStart = false;
 	let sawMessageEnd = false;
 
-	for await (const sse of readSseEvents(response.body, signal)) {
+	for await (const sse of readSseEvents(boundedProviderBody(response.body), signal)) {
+		getStreamAdmission()?.admitProviderEvent();
 		notifyRawSseEvent(onSseEvent, sse);
 		if (sse.event === "error") {
 			throw createAnthropicSseStreamError(sse.data);
@@ -1803,6 +1805,13 @@ const streamAnthropicOnce = (
 	context: Context,
 	options?: AnthropicOptions,
 ): AssistantMessageEventStream => {
+	const admission = getStreamAdmission();
+	if (admission) {
+		options = {
+			...options,
+			signal: options?.signal ? AbortSignal.any([options.signal, admission.signal]) : admission.signal,
+		};
+	}
 	const stream = new AssistantMessageEventStream();
 
 	(async () => {

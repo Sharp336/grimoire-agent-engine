@@ -5,6 +5,12 @@ import { pipeline } from "node:stream/promises";
 import { createGunzip } from "node:zlib";
 import { AgentPauseGate } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, AssistantMessageEvent, ImageContent, Model } from "@oh-my-pi/pi-ai";
+import {
+	enqueueStreamWork,
+	runWithStreamAdmission,
+	StreamAdmission,
+	StreamAdmissionError,
+} from "@oh-my-pi/pi-ai/utils/stream-admission";
 import { getBlobsDir, isEnoent, logger, stableStringifyJson, withTimeout } from "@oh-my-pi/pi-utils";
 import {
 	attachLatencyPersistence,
@@ -305,6 +311,7 @@ interface LiveBinding extends EngineBindingSnapshot {
 	pauseRequests: Map<string, EngineControlInitiator>;
 	resumeCommandIds: Set<string>;
 	traceWriteTail: Promise<void>;
+	streamAdmission?: StreamAdmission;
 	messageWriteError?: unknown;
 	retryWriteError?: unknown;
 	traceTools: Map<string, { name: string; startedAt: number }>;
@@ -3490,26 +3497,24 @@ export class EngineRuntime {
 							!TERMINAL_ATTEMPT_STATES.has(binding.attemptState) &&
 							binding.attemptState !== "cancel_requested";
 						// The append tap is synchronous; indexed storage may still have queued writes.
-						const checkpoint = binding.traceWriteTail.then(() =>
+						const checkpoint = this.#queueBindingWrite(binding, { type: "user_checkpoint" }, async () =>
 							current() ? manager.flushAndCheckpoint() : undefined,
 						);
 						const failed = (error: unknown) => {
 							if (current()) binding.messageWriteError ??= error;
 						};
-						binding.traceWriteTail = checkpoint.then(() => {}, failed);
 						// Earlier history writes may need this lane; drain them before acquiring it.
 						this.#trackRun(
-							checkpoint
-								.then(durable =>
-									this.#inLane(target.agentInstanceId, async () => {
-										if (!durable || !current()) return;
-										await this.#commitAttemptTransition(binding, binding.attemptState, [], {
-											expectedStates: [binding.attemptState],
-											transcriptCheckpoint: durable,
-										});
-									}),
-								)
-								.catch(failed),
+							enqueueStreamWork(binding.streamAdmission, checkpoint, target, async () => {
+								const durable = await checkpoint;
+								await this.#inLane(target.agentInstanceId, async () => {
+									if (!durable || !current()) return;
+									await this.#commitAttemptTransition(binding, binding.attemptState, [], {
+										expectedStates: [binding.attemptState],
+										transcriptCheckpoint: durable,
+									});
+								});
+							}).catch(failed),
 						);
 					}
 				}
@@ -4301,7 +4306,7 @@ export class EngineRuntime {
 			audit?.finish("model_settled");
 			completed.resolve();
 			binding.activeModelCalls.delete(completed.promise);
-			await binding.pauseGate.waitUntilResumed();
+			await binding.pauseGate.waitUntilResumed(binding.streamAdmission?.signal);
 		}
 	}
 
@@ -4341,6 +4346,32 @@ export class EngineRuntime {
 	}
 
 	async #runPrompt(
+		binding: LiveBinding,
+		input: string,
+		identity?: SessionMessageIdentity,
+		kind: HistoryDispatchKind = "prompt",
+		context?: string,
+		selection?: Pick<EngineStartRequest, "profileSelectionRevision" | "agentInstanceRef">,
+		images?: ImageContent[],
+	): Promise<void> {
+		const admission = new StreamAdmission();
+		binding.streamAdmission = admission;
+		const detach = admission.onAbort(error => {
+			binding.messageWriteError ??= error;
+			binding.session.agent.abort(error);
+		});
+		try {
+			await runWithStreamAdmission(admission, () =>
+				this.#runAdmittedPrompt(binding, input, identity, kind, context, selection, images),
+			);
+		} finally {
+			detach();
+			logger.debug("Engine stream admission settled", { attemptId: binding.attemptId, ...admission.metrics });
+			if (binding.streamAdmission === admission) binding.streamAdmission = undefined;
+		}
+	}
+
+	async #runAdmittedPrompt(
 		binding: LiveBinding,
 		input: string,
 		identity?: SessionMessageIdentity,
@@ -4391,7 +4422,8 @@ export class EngineRuntime {
 			await this.#sendCommandContext(binding, context, identity?.sourceCommandId ?? binding.commandId);
 			await this.#dispatchModel(binding, input, identity, kind, images);
 			for (let reminder = 0; reminder < 2 && binding.requireYieldTool; reminder++) {
-				await binding.pauseGate.waitUntilResumed();
+				await binding.pauseGate.waitUntilResumed(binding.streamAdmission?.signal);
+				binding.streamAdmission?.check();
 				if (
 					terminalYield(binding.session.messages, attemptMessageStart).found ||
 					binding.attemptState !== "running"
@@ -4403,13 +4435,21 @@ export class EngineRuntime {
 				);
 			}
 			await this.#waitForAttemptQuiescence(binding, attemptId);
+			binding.streamAdmission?.check();
 			if (binding.requireYieldTool && !terminalYield(binding.session.messages, attemptMessageStart).found) {
 				throw new Error("required_yield_not_submitted");
 			}
 			await this.#settleAttempt(binding, attemptId, attemptMessageStart, "completed");
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
-			await this.#settleAttempt(binding, attemptId, attemptMessageStart, "failed", message);
+			const overflow = binding.streamAdmission?.signal.reason instanceof StreamAdmissionError;
+			await this.#settleAttempt(
+				binding,
+				attemptId,
+				attemptMessageStart,
+				overflow ? "interrupted" : "failed",
+				message,
+			);
 		}
 	}
 
@@ -4417,12 +4457,15 @@ export class EngineRuntime {
 		binding: LiveBinding,
 		attemptId: string,
 		attemptMessageStart: number,
-		state: "completed" | "failed",
+		state: "completed" | "failed" | "interrupted",
 		cause?: string,
 	): Promise<void> {
 		await binding.traceWriteTail;
 		if (binding.messageWriteError) {
-			const error = new Error("Engine message content could not be persisted", { cause: binding.messageWriteError });
+			const error =
+				binding.messageWriteError instanceof StreamAdmissionError
+					? binding.messageWriteError
+					: new Error("Engine message content could not be persisted", { cause: binding.messageWriteError });
 			if (state === "completed") throw error;
 			cause = error.message;
 		}
@@ -4433,15 +4476,27 @@ export class EngineRuntime {
 			cause = error.message;
 		}
 		for (;;) {
-			await binding.pauseGate.waitUntilResumed();
+			if (state !== "interrupted") await binding.pauseGate.waitUntilResumed();
 			const retry = await this.#inLane(binding.agentInstanceId, async () => {
 				if (this.#bindings.get(binding.agentInstanceId) !== binding || binding.attemptId !== attemptId)
 					return false;
-				if (binding.attemptState === "pause_requested" || binding.attemptState === "paused") return true;
-				if (binding.attemptState !== "running") return false;
+				if (
+					state !== "interrupted" &&
+					(binding.attemptState === "pause_requested" || binding.attemptState === "paused")
+				)
+					return true;
+				const expectedState = binding.attemptState;
+				if (
+					!(state === "interrupted"
+						? ["running", "pause_requested", "paused", "waiting_input"].includes(expectedState)
+						: expectedState === "running")
+				)
+					return false;
 				const transcriptCheckpoint = await binding.session.sessionManager.flushAndCheckpoint();
+				const previousHold = binding.manualHold;
 				binding.state = "idle";
 				binding.attemptState = state;
+				if (state === "interrupted") binding.manualHold = true;
 				try {
 					await this.#commitAttemptTransition(
 						binding,
@@ -4462,7 +4517,7 @@ export class EngineRuntime {
 						],
 						{
 							cause,
-							expectedStates: ["running"],
+							expectedStates: [expectedState],
 							transcriptCheckpoint,
 							...(state === "completed"
 								? { terminalResult: this.#completionPayload(binding, attemptMessageStart, true) }
@@ -4471,7 +4526,8 @@ export class EngineRuntime {
 					);
 				} catch (error) {
 					binding.state = "running";
-					binding.attemptState = "running";
+					binding.attemptState = expectedState;
+					binding.manualHold = previousHold;
 					throw error;
 				}
 				return false;
@@ -4488,18 +4544,12 @@ export class EngineRuntime {
 		kind: "trace_reasoning" | "trace_tool",
 		payload: Record<string, unknown>,
 	): void {
-		const write = binding.traceWriteTail.then(() => this.#emit(binding, kind, payload));
-		binding.traceWriteTail = write.catch(error => {
-			logger.warn("Engine trace event write failed", {
-				kind,
-				error: error instanceof Error ? error.message : String(error),
-			});
-		});
+		void this.#queueBindingWrite(binding, payload, () => this.#emit(binding, kind, payload));
 	}
 
 	#queueHistoryCheckpoint(binding: LiveBinding): void {
 		const attemptId = binding.attemptId;
-		const write = binding.traceWriteTail.then(async () => {
+		void this.#queueBindingWrite(binding, { type: "history_checkpoint" }, async () => {
 			// message_end is emitted before native persistence finishes. Only publish
 			// a durable cut; tool-only responses have no assistant_snapshot to await.
 			await binding.session.settleInFlightMessagePersistence();
@@ -4516,12 +4566,6 @@ export class EngineRuntime {
 					expectedStates: [binding.attemptState],
 					transcriptCheckpoint,
 				});
-			});
-		});
-		binding.traceWriteTail = write.catch(error => {
-			binding.messageWriteError ??= error;
-			logger.warn("Engine history checkpoint write failed", {
-				error: error instanceof Error ? error.message : String(error),
 			});
 		});
 	}
@@ -4613,7 +4657,7 @@ export class EngineRuntime {
 		if (state.settled || state.attemptId !== binding.attemptId) return;
 		const stream = event.type.startsWith("thinking") ? "thinking" : "assistant";
 		if (event.type === "text_end" || event.type === "thinking_end") {
-			await this.#persistAssistantWrite(binding, () =>
+			await this.#persistAssistantWrite(binding, event.content, () =>
 				this.#reconcileAssistantBlock(binding, state, event.contentIndex, stream, event.content, "streaming"),
 			);
 			return;
@@ -4628,7 +4672,7 @@ export class EngineRuntime {
 		}
 		const wellFormed = text.toWellFormed();
 		attachLatencyPersistence(block, auditSource, wellFormed === event.delta);
-		await this.#persistAssistantWrite(binding, () =>
+		await this.#persistAssistantWrite(binding, wellFormed, () =>
 			this.#appendAssistantBlock(binding, state, block, wellFormed, "streaming"),
 		);
 	}
@@ -4733,19 +4777,30 @@ export class EngineRuntime {
 		await Promise.all(payloads.map(value => this.#emit(target, "message_updated", value)));
 	}
 
-	#persistAssistantWrite(binding: LiveBinding, persist: () => Promise<void>): Promise<void> {
-		const write = binding.traceWriteTail.then(async () => {
+	#queueBindingWrite<T>(binding: LiveBinding, payload: unknown, work: () => Promise<T>): Promise<T> {
+		const failed = (error: unknown) => {
+			binding.messageWriteError ??= error;
+			binding.session.agent.abort(error);
+			logger.error("Engine bounded write failed", { error: error instanceof Error ? error.message : String(error) });
+		};
+		let write: Promise<T>;
+		try {
+			write = enqueueStreamWork(binding.streamAdmission, binding.traceWriteTail, payload, work);
+		} catch (error) {
+			failed(error);
+			write = Promise.reject(error);
+			void write.catch(() => {});
+			return write;
+		}
+		binding.traceWriteTail = write.then(() => {}, failed);
+		return write;
+	}
+
+	#persistAssistantWrite(binding: LiveBinding, payload: unknown, persist: () => Promise<void>): Promise<void> {
+		return this.#queueBindingWrite(binding, payload, async () => {
 			if (binding.messageWriteError) throw binding.messageWriteError;
 			await persist();
 		});
-		binding.traceWriteTail = write.catch(error => {
-			binding.messageWriteError ??= error;
-			binding.session.agent.abort(error);
-			logger.error("Engine message persistence failed", {
-				error: error instanceof Error ? error.message : String(error),
-			});
-		});
-		return write;
 	}
 
 	#settleAssistantStream(binding: LiveBinding, message: AssistantMessage): void {
@@ -4763,7 +4818,7 @@ export class EngineRuntime {
 				),
 			),
 		};
-		void this.#persistAssistantWrite(binding, async () => {
+		void this.#persistAssistantWrite(binding, message, async () => {
 			for (const [index, part] of message.content.entries()) {
 				if (part.type === "text")
 					await this.#reconcileAssistantBlock(
@@ -4826,7 +4881,7 @@ export class EngineRuntime {
 			...(stopReason ? { stopReason } : {}),
 			textTruncated: state.textTruncated,
 		};
-		const write = binding.traceWriteTail.then(async () => {
+		void this.#queueBindingWrite(binding, payload, async () => {
 			let historyEntryId: string | undefined;
 			if (status === "settled") {
 				await binding.session.settleInFlightMessagePersistence();
@@ -4837,12 +4892,6 @@ export class EngineRuntime {
 			await this.#emit(binding, "assistant_snapshot", {
 				...payload,
 				...(historyEntryId ? { historyEntryId } : {}),
-			});
-		});
-		binding.traceWriteTail = write.catch(error => {
-			logger.warn("Engine assistant snapshot write failed", {
-				status,
-				error: error instanceof Error ? error.message : String(error),
 			});
 		});
 	}
@@ -4885,15 +4934,9 @@ export class EngineRuntime {
 		binding.profileRouteState = profileRoute;
 		// Capture identity now: queued writes must not borrow a later Attempt on this binding.
 		const target = this.#snapshot(binding);
-		const write = binding.traceWriteTail.then(async () => {
+		void this.#queueBindingWrite(binding, profileRoute, async () => {
 			const event = await this.store.commitAttemptProfileRoute(target, profileRoute);
 			if (event) this.#notifyEvents([event]);
-		});
-		binding.traceWriteTail = write.catch(error => {
-			binding.retryWriteError ??= error;
-			logger.warn("Engine profile route state write failed", {
-				error: error instanceof Error ? error.message : String(error),
-			});
 		});
 	}
 
@@ -4902,28 +4945,23 @@ export class EngineRuntime {
 		kind: "retry_scheduled" | "retry_settled",
 		retry: import("./contracts").EngineRetryState,
 	): void {
-		const write = binding.traceWriteTail.then(async () => {
+		void this.#queueBindingWrite(binding, retry, async () => {
 			const event = await this.store.commitAttemptRetry(binding, retry, { kind, payload: { retry } });
 			if (event) this.#notifyEvents([event]);
-		});
-		binding.traceWriteTail = write.catch(error => {
-			binding.retryWriteError ??= error;
-			logger.warn("Engine retry state write failed", {
-				kind,
-				error: error instanceof Error ? error.message : String(error),
-			});
 		});
 	}
 
 	async #waitForAttemptQuiescence(binding: LiveBinding, attemptId: string): Promise<void> {
 		const filter = { ownerId: binding.engineAgentId, attemptId };
 		for (;;) {
-			await binding.pauseGate.waitUntilResumed();
+			await binding.pauseGate.waitUntilResumed(binding.streamAdmission?.signal);
+			binding.streamAdmission?.check();
 			await binding.session.waitForIdle();
 			await this.asyncJobManager.waitForOwnerJobs(binding.engineAgentId, { attemptId });
 			await this.asyncJobManager.drainDeliveries({ filter });
 			await this.#waitForToolInvocations(binding, attemptId);
-			await binding.pauseGate.waitUntilResumed();
+			await binding.pauseGate.waitUntilResumed(binding.streamAdmission?.signal);
+			binding.streamAdmission?.check();
 			await binding.session.waitForIdle();
 			if (
 				this.asyncJobManager.getRunningJobs(filter).length === 0 &&

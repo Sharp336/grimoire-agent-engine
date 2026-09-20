@@ -1,5 +1,6 @@
 import * as AIError from "../error";
 import type { AssistantMessage, AssistantMessageEvent } from "../types";
+import { getStreamAdmission } from "./stream-admission";
 
 /** Anything a stream watchdog can consult for in-flight consumer-side local work. */
 export interface LocalWorkSource {
@@ -15,6 +16,10 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 	resultSettled = false;
 	#failed = false;
 	#error: unknown = undefined;
+	readonly #admission = getStreamAdmission();
+	#releases: Array<(() => void) | undefined> = [];
+	#deliveredReleases = new WeakMap<object, () => void>();
+	#detachAdmission: (() => void) | undefined;
 	/**
 	 * Consumer-side local operations currently in flight for this stream — a
 	 * provider transport waiting on a server-requested local tool bridge
@@ -46,32 +51,43 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		this.rejectFinalResult = reject;
 		this.isComplete = isComplete;
 		this.extractResult = extractResult;
+		this.#detachAdmission = this.#admission?.onAbort(error => this.fail(error));
 	}
 
 	push(event: T): void {
 		if (this.done) return;
+		this.deliver(event);
 
 		if (this.isComplete(event)) {
 			this.done = true;
 			this.resultSettled = true;
 			this.resolveFinalResult(this.extractResult(event));
 		}
-
-		// Deliver to waiting consumer or queue it
-		const waiter = this.waiting.shift();
-		if (waiter) {
-			waiter.resolve({ value: event, done: false });
-		} else {
-			this.queue.push(event);
-		}
 	}
 
 	deliver(event: T): void {
+		const release = this.#admission?.reserve(event);
 		const waiter = this.waiting.shift();
 		if (waiter) {
-			waiter.resolve({ value: event, done: false });
+			const result = { value: event, done: false };
+			if (release) this.#deliveredReleases.set(result, release);
+			waiter.resolve(result);
 		} else {
 			this.queue.push(event);
+			this.#releases.push(release);
+		}
+	}
+
+	/** Drain through accounting rather than mutating the public queue directly. */
+	*drain(): Generator<T> {
+		while (this.queue.length > 0) {
+			const event = this.queue.shift()!;
+			const release = this.#releases.shift();
+			try {
+				yield event;
+			} finally {
+				release?.();
+			}
 		}
 	}
 
@@ -109,6 +125,12 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 		this.#error = err;
 		this.resultSettled = true;
 		this.rejectFinalResult(err);
+		if (this.#admission) {
+			this.queue.length = 0;
+			for (const release of this.#releases) release?.();
+			this.#releases.length = 0;
+		}
+		this.#detachAdmission?.();
 		while (this.waiting.length > 0) {
 			const waiter = this.waiting.shift()!;
 			waiter.reject(err);
@@ -116,20 +138,29 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 	}
 
 	async *[Symbol.asyncIterator](): AsyncIterator<T> {
-		while (true) {
-			if (this.queue.length > 0) {
-				yield this.queue.shift()!;
-			} else if (this.#failed) {
-				throw this.#error;
-			} else if (this.done) {
-				return;
-			} else {
-				const result = await new Promise<IteratorResult<T>>((resolve, reject) =>
-					this.waiting.push({ resolve, reject }),
-				);
-				if (result.done) return;
-				yield result.value;
+		try {
+			while (true) {
+				if (this.queue.length > 0) {
+					yield* this.drain();
+				} else if (this.#failed) {
+					throw this.#error;
+				} else if (this.done) {
+					this.#detachAdmission?.();
+					return;
+				} else {
+					const waiter = Promise.withResolvers<IteratorResult<T>>();
+					this.waiting.push(waiter);
+					const result = await waiter.promise;
+					if (result.done) return;
+					try {
+						yield result.value;
+					} finally {
+						this.#deliveredReleases.get(result)?.();
+					}
+				}
 			}
+		} finally {
+			if (this.done) this.#detachAdmission?.();
 		}
 	}
 
@@ -157,11 +188,13 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 	 * the event silence while it is pending as a provider stall.
 	 */
 	async trackLocalWork<TWork>(work: Promise<TWork>): Promise<TWork> {
+		const release = this.#admission?.reserveLocalWork();
 		this.#pendingLocalWork++;
 		try {
 			return await work;
 		} finally {
 			this.#pendingLocalWork--;
+			release?.();
 		}
 	}
 }
@@ -188,14 +221,7 @@ export class AssistantMessageEventStream extends EventStream<AssistantMessageEve
 			AIError.classifyMessage(event.error);
 		}
 
-		// Completion resolves the final result and still emits the terminal event.
-		if (this.isComplete(event)) {
-			this.done = true;
-			this.resultSettled = true;
-			this.resolveFinalResult(this.extractResult(event));
-		}
-
-		this.deliver(event);
+		super.push(event);
 	}
 
 	override end(result?: AssistantMessage): void {

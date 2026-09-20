@@ -731,8 +731,7 @@ const streamOpenAIResponsesOnce = (
 				const attemptStream = new AssistantMessageEventStream();
 				let forwardAttemptLive = false;
 				const forwardAttemptEvents = () => {
-					for (const event of attemptStream.queue) stream.push(event);
-					attemptStream.queue.length = 0;
+					for (const event of attemptStream.drain()) stream.push(event);
 				};
 				nativeOutputItems.length = 0;
 				const timedOpenaiStream = iterateWithIdleTimeout(openaiStream, {

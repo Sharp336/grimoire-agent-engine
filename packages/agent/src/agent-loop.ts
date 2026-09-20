@@ -9,6 +9,7 @@ import {
 	type ComputerSafetyCheck,
 	type Context,
 	EventStream,
+	getStreamAdmission,
 	isApiKeyResolver,
 	type Model,
 	resolveApiKeyOnce,
@@ -531,6 +532,8 @@ export function agentLoop(
 	signal?: AbortSignal,
 	streamFn?: StreamFn,
 ): EventStream<AgentEvent, AgentMessage[]> {
+	const admission = getStreamAdmission();
+	if (admission) signal = signal ? AbortSignal.any([signal, admission.signal]) : admission.signal;
 	const stream = createAgentStream();
 
 	(async () => {
@@ -543,9 +546,8 @@ export function agentLoop(
 			(prompt as CommittableAsideMessage)[ASIDE_MESSAGE_COMMIT]?.();
 		}
 
-		stream.push({ type: "agent_start" });
-
 		try {
+			stream.push({ type: "agent_start" });
 			await runLoop(currentContext, newMessages, config, signal, stream, streamFn, prompts);
 		} catch (err) {
 			stream.fail(err);
@@ -569,6 +571,8 @@ export function agentLoopContinue(
 	signal?: AbortSignal,
 	streamFn?: StreamFn,
 ): EventStream<AgentEvent, AgentMessage[]> {
+	const admission = getStreamAdmission();
+	if (admission) signal = signal ? AbortSignal.any([signal, admission.signal]) : admission.signal;
 	if (context.messages.length === 0) {
 		throw new Error("Cannot continue: no messages in context");
 	}
@@ -583,9 +587,8 @@ export function agentLoopContinue(
 		const newMessages: AgentMessage[] = [];
 		const currentContext: AgentContext = { ...context, messages: [...context.messages] };
 
-		stream.push({ type: "agent_start" });
-
 		try {
+			stream.push({ type: "agent_start" });
 			await runLoop(currentContext, newMessages, config, signal, stream, streamFn);
 		} catch (err) {
 			stream.fail(err);
@@ -1926,6 +1929,9 @@ async function streamAssistantResponse(
 				}
 			} finally {
 				detachAbortListener?.();
+				// The terminal branch returns from this manual iterator. Release its
+				// yielded admission ticket just as a for-await loop would.
+				if (response.done) await responseIterator.return?.();
 			}
 
 			let trailing = await response.result();

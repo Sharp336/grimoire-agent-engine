@@ -48,6 +48,7 @@ export * from "./utils/glyph-codec";
 export * from "./utils/openrouter-headers";
 export * from "./utils/retry";
 export * from "./utils/schema";
+export * from "./utils/stream-admission";
 export * from "./utils/thinking-loop";
 export * from "./utils/tool-call-loop-guard";
 export * from "./utils/validation";
