@@ -147,14 +147,20 @@ export interface StorageRuntimeQuery {
 	incarnation: number;
 	selector:
 		| { type: "records"; keys: StorageRuntimeKey[] }
-		| { type: "index"; index: StorageRuntimeIndex; key: Array<string | number>; cursor?: string };
+		| {
+				type: "index";
+				index: StorageRuntimeIndex;
+				key: Array<string | number | null>;
+				cursor?: string;
+				after?: Array<string | number | null>;
+		  };
 	maxRecords: number;
 	maxBytes: number;
 }
 export interface StorageRuntimeQueryResponse extends StorageResponseBase {
 	records: StorageRuntimeRecord[];
 	nextCursor: string | null;
-	indexRevision: number;
+	indexRevision?: number;
 }
 
 export interface StorageBarrier {

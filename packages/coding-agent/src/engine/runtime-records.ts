@@ -31,12 +31,14 @@ export class RuntimeRecords {
 	}
 	query(
 		index: StorageRuntimeIndex,
-		key: Array<string | number>,
+		key: Array<string | number | null>,
 		cursor?: string,
 		maxRecords = 100,
+		after?: Array<string | number | null>,
 	): Promise<StorageRuntimeQueryResponse> {
+		if (cursor && after) throw new TypeError("Runtime query cannot combine cursor and after");
 		return this.client.runtimeQuery({
-			selector: { type: "index", index, key, ...(cursor ? { cursor } : {}) },
+			selector: { type: "index", index, key, ...(cursor ? { cursor } : {}), ...(after ? { after } : {}) },
 			maxRecords,
 			maxBytes: 1024 * 1024,
 		});
@@ -109,6 +111,7 @@ export class RuntimeTransaction {
 		if (!row) {
 			row = await this.records.get(kind, id);
 			this.#read.set(key, row);
+			this.#checkBudget();
 		}
 		return row.value ? (structuredClone(row.value) as T) : undefined;
 	}
@@ -132,7 +135,7 @@ export class RuntimeTransaction {
 		this.#puts.delete(key);
 		this.#deletes.set(key, { kind, id });
 	}
-	async query<T extends object>(index: StorageRuntimeIndex, key: Array<string | number>): Promise<T[]> {
+	async query<T extends object>(index: StorageRuntimeIndex, key: Array<string | number | null>): Promise<T[]> {
 		const page = await this.records.query(index, key);
 		if (page.nextCursor)
 			throw new StorageClientError("backpressure", "Atomic runtime mutation exceeds its bounded index page");
@@ -140,12 +143,24 @@ export class RuntimeTransaction {
 			const id = recordKey(row.kind, row.id);
 			if (!this.#read.has(id)) this.#read.set(id, row);
 		}
+		this.#checkBudget();
 		return page.records.flatMap(row => {
 			const id = recordKey(row.kind, row.id);
 			if (this.#deletes.has(id)) return [];
 			const value = this.#puts.get(id)?.value ?? row.value;
 			return value ? [structuredClone(value) as T] : [];
 		});
+	}
+	staged<T extends object>(kind: StorageRuntimeKind): Array<{ id: string; value: T | null }> {
+		return [
+			...[...this.#puts.values()]
+				.filter(row => row.kind === kind)
+				.map(row => ({ id: row.id, value: structuredClone(row.value) as T })),
+			...[...this.#deletes.values()].filter(row => row.kind === kind).map(row => ({ id: row.id, value: null })),
+		];
+	}
+	#checkBudget(): void {
+		if (this.#read.size > 100) throw new StorageClientError("backpressure", "Runtime atomic record budget exceeded");
 	}
 	mutation(): StorageRuntimeMutation {
 		return {
