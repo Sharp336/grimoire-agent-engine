@@ -730,7 +730,7 @@ export class HostedEngineBridge {
 			typeof recovered.payloadHash !== "string" ||
 			!frozen ||
 			frozen.commandId !== commandId ||
-			frozen.payloadHash !== recovered.payloadHash ||
+			frozen.canonicalHash !== recovered.rawCanonicalHash ||
 			frozen.browserPayloadHash !== recovered.payloadHash ||
 			frozen.deviceId !== event.deviceId ||
 			frozen.engineId !== event.engineId ||

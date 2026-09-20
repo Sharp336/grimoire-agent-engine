@@ -605,7 +605,9 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 			};
 			return {
 				...envelope,
-				browserPayloadHash: engineCommandIdentity(envelope).payloadHash,
+				// ClientHost may enrich the Engine payload after hashing the browser command.
+				// The retained receipt carries this browser hash, not the enriched payload hash.
+				browserPayloadHash: `sha256:${"a".repeat(64)}`,
 				browserTarget: {
 					agentInstanceRef,
 					attemptId: envelope.attemptId,
@@ -621,6 +623,7 @@ describe.skipIf(!fs.existsSync(natsServer))("HostedEngineBridge", () => {
 				return [identity.commandId, identity] as const;
 			}),
 		);
+		expect(identities.get(rejected.commandId)!.payloadHash).not.toBe(rejected.browserPayloadHash);
 		for (const identity of identities.values()) await store.admitCommand(identity, 1);
 		const rejectedReceipt = { outcome: "rejected", detail: { code: "queue_full" } } as const;
 		const appliedReceipt = { outcome: "applied", detail: { persisted: true } } as const;
