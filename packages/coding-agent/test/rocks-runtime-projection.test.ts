@@ -3,13 +3,15 @@ import type { EngineEvent, EngineTarget } from "../src/engine/contracts";
 import { decodeCursor, encodeCursor } from "../src/engine/rocks-runtime-cursor";
 import { nativeEntry } from "../src/engine/rocks-runtime-history";
 import { projectEvent, projectionId, settleRuntimeMessages } from "../src/engine/rocks-runtime-projection";
-import { RocksEngineStore } from "../src/engine/rocks-runtime-store";
+import { queryWork, RocksEngineStore } from "../src/engine/rocks-runtime-store";
+import type { RuntimeEventsRequest } from "../src/engine/runtime-protocol";
 import { RuntimeRecords, RuntimeTransaction } from "../src/engine/runtime-records";
 import { StorageClient } from "../src/session/storage-client";
 import {
 	STORAGE_PROTOCOL_SCHEMA_HASH,
 	type StorageRuntimeIndex,
 	type StorageRuntimeKind,
+	type StorageRuntimeQuery,
 	type StorageRuntimeQueryResponse,
 	type StorageRuntimeRecord,
 } from "../src/session/storage-protocol";
@@ -243,6 +245,105 @@ function storeWith(rows: Rows): RocksEngineStore {
 }
 const ref = "grimoire://tasks/grimoire/runtime-test/agents/a";
 describe("Rocks bounded reader contracts", () => {
+	test("default 1024-event recovery pages within owner bounds without fencing later reads", async () => {
+		const rows = fixture();
+		rows.seed("metadata", "events", { count: 1024 });
+		const tx = new RuntimeTransaction(rows);
+		await append(tx, "running", {});
+		const projected = await tx.get<{ summary_payload: Record<string, unknown> }>("event", "1");
+		let requests = 0;
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				requests++;
+				const { query } = (await request.json()) as { query: StorageRuntimeQuery };
+				const envelope = {
+					schema: "artel.storage.protocol.response.v1",
+					version: "1.0",
+					incarnation: 1,
+					requestId: query.requestId,
+				};
+				// Same admission bounds as the Rust owner: invalid queries fence StorageClient.
+				if (
+					query.maxRecords < 1 ||
+					query.maxRecords > 1000 ||
+					query.maxBytes < 1024 ||
+					query.maxBytes > 4 * 1024 * 1024
+				)
+					return Response.json(
+						{ ...envelope, error: { code: "schema_error", message: "runtime query bounds exceeded" } },
+						{ status: 400 },
+					);
+				const after = query.selector.type === "index" ? Number(query.selector.after?.[0] ?? 0) : 0;
+				const end = Math.min(1024, after + query.maxRecords);
+				return Response.json({
+					...envelope,
+					indexRevision: 1,
+					nextCursor: end < 1024 ? String(end) : null,
+					records: Array.from({ length: end - after }, (_, index) => ({
+						kind: "event",
+						id: String(after + index + 1),
+						revision: 1,
+						value: {
+							eventId: after + index + 1,
+							summary_payload: { ...projected!.summary_payload, revision: after + index + 1 },
+						},
+					})),
+				});
+			},
+		});
+		const client = new StorageClient({
+			url: server.url.origin,
+			token: "test-only-not-a-credential",
+			incarnation: 1,
+			protocolHash: STORAGE_PROTOCOL_SCHEMA_HASH,
+		});
+		const store = new RocksEngineStore(client);
+		const read = spyOn(store.records, "get").mockImplementation((kind, id) => rows.get(kind, id));
+		try {
+			const request: RuntimeEventsRequest = {
+				scope: { kind: "catalog" },
+				epoch: "epoch",
+				principalId: "p",
+				afterCursor: 0,
+				limit: 1024,
+				maxBytes: 65536,
+				timeoutMs: 0,
+				remainingWork: {
+					bytes: 65536,
+					changes: 1024,
+					scannedRows: 8192,
+					materializedBytes: 4 * 1024 * 1024,
+					timeMs: 2000,
+				},
+			};
+			const seen: number[] = [];
+			for (let page = 0; page < 1024; page++) {
+				const batch = await store.runtimeEvents(request);
+				seen.push(...batch.changes.map(change => change.cursor));
+				expect(batch.throughCursor).toBeGreaterThan(request.afterCursor);
+				request.afterCursor = batch.throughCursor;
+				request.untilCursor = batch.headCursor;
+				if (!batch.hasMore) break;
+			}
+			expect(seen).toEqual(Array.from({ length: 1024 }, (_, index) => index + 1));
+			expect(request.afterCursor).toBe(1024);
+			expect(requests).toBeGreaterThan(1);
+			const before = requests;
+			const work = queryWork({ ...request.remainingWork, materializedBytes: 1024 });
+			work.value.materializedBytes = 1;
+			await expect(store.indexedEvents(["summary", "p", "", ""], 0, 1024, work)).rejects.toMatchObject({
+				code: "restore_budget",
+			});
+			expect(requests).toBe(before);
+			expect(client.failure).toBeUndefined();
+			expect((await store.runtimeEvents(request)).changes).toEqual([]);
+		} finally {
+			read.mockRestore();
+			await server.stop(true);
+		}
+	});
 	test("terminal state resolves pending inputs and keeps newly staged active tools in its atomic detail", async () => {
 		const tx = new RuntimeTransaction(fixture());
 		await tx.put("effect", "tool", {

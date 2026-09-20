@@ -4,7 +4,7 @@ import { decodeCursor, encodeCursor } from "./rocks-runtime-cursor";
 import type { ProjectedEvent, RocksProjection } from "./rocks-runtime-projection";
 import { projectionId, terminal } from "./rocks-runtime-projection";
 import type { RocksAttempt, RocksBinding, RocksCommand } from "./rocks-runtime-rows";
-import { queryWork, type RocksEngineStore } from "./rocks-runtime-store";
+import { queryWork, type RocksEngineStore, runtimeQueryBytes } from "./rocks-runtime-store";
 import type { EngineNativeHistoryPage } from "./runtime-history";
 import type { HistoryLifecycleContext } from "./runtime-lifecycle";
 import type { RuntimeQueryWork } from "./runtime-projection";
@@ -324,7 +324,7 @@ export async function nativeLifecyclePage(
 				after: [position.before],
 			},
 			maxRecords: Math.max(1, Math.min(limit + 1, runtimeLimits.httpPageRecords)),
-			maxBytes: Math.min(runtimeLimits.httpPageBytes, work.remaining.materializedBytes),
+			maxBytes: runtimeQueryBytes(work),
 		});
 		pageMore ||= Boolean(page.nextCursor);
 		work.rows(page.records.length);

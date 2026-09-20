@@ -74,6 +74,13 @@ function account(work: RuntimeQueryWork, rows: unknown[]): void {
 	work.value.materializedBytes += size(rows);
 	work.check();
 }
+export function runtimeQueryBytes(work: RuntimeQueryWork): number {
+	work.check();
+	const bytes = Math.min(1024 * 1024, work.remaining.materializedBytes - work.value.materializedBytes);
+	if (bytes < 1024)
+		throw new RuntimeQueryError("restore_budget", "Runtime query byte budget exhausted", { ...work.value });
+	return bytes;
+}
 function finish<T>(
 	type: string,
 	result: T,
@@ -875,8 +882,9 @@ export class RocksEngineStore extends RocksEngineMutations {
 	): Promise<{ rows: ProjectedEvent[]; more: boolean }> {
 		const page = await this.storageClient.runtimeQuery({
 			selector: { type: "index", index: "event_projection" as StorageRuntimeIndex, key, after: [after] },
-			maxRecords: limit,
-			maxBytes: Math.min(1024 * 1024, work.remaining.materializedBytes - work.value.materializedBytes),
+			// Browser event batches allow 1024; each native owner page allows at most 1000.
+			maxRecords: Math.min(1000, limit),
+			maxBytes: runtimeQueryBytes(work),
 		});
 		account(work, page.records);
 		return { rows: page.records.map(row => row.value as unknown as ProjectedEvent), more: page.nextCursor !== null };
