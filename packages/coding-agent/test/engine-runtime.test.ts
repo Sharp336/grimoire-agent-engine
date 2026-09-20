@@ -7707,15 +7707,17 @@ describe("EngineRuntime", () => {
 		);
 		await runtime.pause({ ...parent, commandId: "dispose-held-parent-pause", initiator: { kind: "human" } });
 		const originalAdmission = runtime.store.startModelEffect.bind(runtime.store);
-		const admission = spyOn(runtime.store, "startModelEffect").mockImplementation(async (target, effect) => {
-			try {
-				return await originalAdmission(target, effect);
-			} catch (error) {
-				busyReached.resolve();
-				await returnBusy.promise;
-				throw error;
-			}
-		});
+		const admission = spyOn(legacyEngineStore(runtime), "startModelEffect").mockImplementation(
+			async (target, effect) => {
+				try {
+					return await originalAdmission(target, effect);
+				} catch (error) {
+					busyReached.resolve();
+					await returnBusy.promise;
+					throw error;
+				}
+			},
+		);
 		try {
 			const child = await runtime.start(
 				{

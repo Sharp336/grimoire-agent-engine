@@ -4566,7 +4566,7 @@ export class EngineRuntime {
 			const model = binding.session.model;
 			const previous = binding.session.sessionManager.getLastUserLaunchSnapshot(binding.agentInstanceId);
 			const previousSelectionRevision =
-				previous === undefined ? 0 : (historyLaunchSnapshot(previous)?.selectionRevision ?? null);
+				previous === undefined ? 0 : (historyLaunchSnapshot(previous ?? undefined)?.selectionRevision ?? null);
 			identity = {
 				...identity,
 				launchSnapshot: {
