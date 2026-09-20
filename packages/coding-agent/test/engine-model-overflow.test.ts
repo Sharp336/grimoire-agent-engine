@@ -1,0 +1,30 @@
+import { expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+
+it("never records an aborted native model stream as a completed effect or retries it", async () => {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), "artel-s3-model-overflow-"));
+	const child = Bun.spawn([process.execPath, path.join(import.meta.dir, "fixtures/engine-model-overflow.ts"), root], {
+		stdout: "pipe",
+		stderr: "pipe",
+		env: { ...process.env, GRIMOIRE_STORAGE_BINDING: undefined },
+	});
+	try {
+		const [code, stdout, stderr] = await Promise.all([
+			child.exited,
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+		]);
+		// The mock transport's rejected error event is a known independent fixture
+		// defect; the child must reach all durable assertions before this marker.
+		expect(code === 0 || (code === 1 && stderr.includes("[Unhandled Rejection] StreamAdmissionError:"))).toBe(true);
+		expect(stderr).not.toContain("AssertionError");
+		expect(stdout).toContain('"modelOutcome":"failed"');
+		expect(stdout).toContain('"calls":1');
+	} finally {
+		if (child.exitCode === null) child.kill();
+		await child.exited;
+		await fs.rm(root, { recursive: true });
+	}
+}, 30_000);

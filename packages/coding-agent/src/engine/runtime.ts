@@ -104,8 +104,8 @@ import {
 } from "./contracts";
 import { markProviderLatency, withProviderObservationContext } from "./provider-admission";
 import { safeEngineErrorDetail, safeHostedMcpFailure } from "./public-error";
-import { RocksEngineMutations } from "./rocks-store";
 import { RocksEngineStore } from "./rocks-runtime-store";
+import { RocksEngineMutations } from "./rocks-store";
 import { engineAgentId, engineAgentInstanceId, engineRouteToken } from "./route";
 import { EngineAttachmentUploads, messageAttachmentReferences } from "./runtime-attachments";
 import {
@@ -4097,6 +4097,9 @@ export class EngineRuntime {
 				binding.messageWriteError = error;
 				binding.session.agent.abort(error);
 			}
+			for (const approval of this.#pendingToolApprovals.values())
+				approval.resolve({ decision: "cancelled", reason: error.message });
+			this.#pendingToolApprovals.clear();
 			for (const record of this.#toolInvocations.values()) record.resolveDone();
 			this.#toolInvocations.clear();
 		});

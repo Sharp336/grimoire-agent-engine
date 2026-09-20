@@ -13,6 +13,7 @@ import type {
 	EngineRetryState,
 } from "./contracts";
 import { EngineTargetError } from "./contracts";
+import { projectionId, settleRuntimeMessages } from "./rocks-runtime-projection";
 import {
 	bindingSnapshot,
 	bindingTarget,
@@ -105,6 +106,12 @@ export class RocksEngineMutations {
 		readonly projectEvent: (tx: RuntimeTransaction, event: EngineEvent) => Promise<void>,
 	) {
 		this.records = new RuntimeRecords(storageClient);
+	}
+	async drain(): Promise<void> {
+		await this.records.drain();
+	}
+	async close(): Promise<void> {
+		await this.drain();
 	}
 	changeSignal(): Promise<void> {
 		return this.#change.promise;
@@ -763,11 +770,16 @@ export class RocksEngineMutations {
 					(old && !this.sameFence(old, binding))
 				)
 					throw new EngineAttemptConflictError(binding.attemptId);
-				if (
-					options.intentGuard?.inputRevision !== undefined &&
-					old?.input_revision !== options.intentGuard.inputRevision
-				)
-					throw new EngineTargetError("stale_target", "Pending input revision changed");
+				if (options.intentGuard?.inputRevision !== undefined) {
+					const input = options.intentGuard.inputId
+						? await tx.get<{ value: { revision: number } }>(
+								"projection",
+								projectionId("input", binding.attemptId, options.intentGuard.inputId),
+							)
+						: undefined;
+					if ((input?.value.revision ?? old?.input_revision) !== options.intentGuard.inputRevision)
+						throw new EngineTargetError("stale_target", "Pending input revision changed");
+				}
 				if (terminal.has(state)) {
 					const effects = await tx.get<{ count: number }>(
 						"metadata",
@@ -851,6 +863,15 @@ export class RocksEngineMutations {
 						...(native ? { transcript_native: native } : {}),
 					});
 				await tx.put("attempt", binding.attemptId, row);
+				if (terminal.has(state))
+					committed.push(
+						...(await settleRuntimeMessages(
+							tx,
+							binding,
+							state === "cancelled" ? "cancelled" : state === "interrupted" ? "interrupted" : "settled",
+							(tx, target, event) => this.append(tx, target, event),
+						)),
+					);
 				if (options.inboxSessionId) {
 					const pending = await tx.query<RocksInbox>("inbox_agent_pending", [binding.agentInstanceId]);
 					for (const item of pending)
@@ -1743,6 +1764,9 @@ export class RocksEngineMutations {
 									retry_outcome: attempt.retry_outcome === "waiting" ? "interrupted" : attempt.retry_outcome,
 								});
 								return [
+									...(await settleRuntimeMessages(tx, target, "interrupted", (tx, target, event) =>
+										this.append(tx, target, event),
+									)),
 									await this.append(tx, target, {
 										kind: "interrupted",
 										payload: { reason: "engine_lost", requiresExplicitContinue: true },

@@ -144,9 +144,9 @@ describe("native session storage contract", () => {
 		});
 		expect(request.schema).toBe(STORAGE_PROTOCOL_SCHEMA);
 		expect(request.version).toBe(STORAGE_PROTOCOL_VERSION);
-		expect(STORAGE_PROTOCOL_REVISION).toBe(9);
+		expect(STORAGE_PROTOCOL_REVISION).toBe(11);
 		expect(STORAGE_PROTOCOL_SCHEMA_HASH).toBe(
-			"sha256:0752791051853f4d769162a7cceb4927ca5bfe3b009b74f24f56a19c7e065a93",
+			"sha256:f36386741fd92df4fc376112dabbdd972432a0b8099d82c611ce98abee5fe560",
 		);
 		expect(() => assertStorageProtocolHash(STORAGE_PROTOCOL_SCHEMA_HASH)).not.toThrow();
 		expect(() => assertStorageProtocolHash("sha256:stale")).toThrow(/Unsupported storage protocol schema hash/);

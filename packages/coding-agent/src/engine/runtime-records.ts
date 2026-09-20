@@ -44,6 +44,10 @@ export class RuntimeRecords {
 		});
 	}
 
+	async drain(): Promise<void> {
+		// Fixed set of admitted family tails. Callers fence new admission before shutdown.
+		await Promise.all([...this.#tails.values()]);
+	}
 	mutate<T>(
 		scope: string,
 		work: (tx: RuntimeTransaction) => Promise<T>,
