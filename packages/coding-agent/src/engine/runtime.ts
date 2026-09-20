@@ -3713,6 +3713,10 @@ export class EngineRuntime {
 			if (unsubscribeCreated) await collectFailure(cleanupErrors, unsubscribeCreated);
 			const createdSession = created?.session;
 			if (createdSession) await collectFailure(cleanupErrors, () => createdSession.dispose());
+			if (!createdSession && sessionManager && !uncommittedForkSessionFile) {
+				const openedManager = sessionManager;
+				await collectFailure(cleanupErrors, () => openedManager.close());
+			}
 			const createdMcpManager = mcpManager;
 			if (createdMcpManager) await collectFailure(cleanupErrors, () => createdMcpManager.disconnectAll());
 			if (uncommittedForkSessionFile && sessionManager) {
@@ -3743,8 +3747,7 @@ export class EngineRuntime {
 			refs: [],
 			readMessages: async (id, sessionFile) => {
 				const agentInstanceId = await this.store.agentInstanceIdForEngineAgent(id);
-				if (!agentInstanceId)
-					throw new EngineTargetError("agent_not_found", "Unknown retained Engine history owner");
+				if (!agentInstanceId) return await this.#readSessionMessages(sessionFile);
 				return await this.#inLane(agentInstanceId, async () => {
 					const archive = await this.store.getHistoryArchive(agentInstanceId);
 					if (archive && archive.state !== "restored" && archive.binding.sessionFile === sessionFile) {

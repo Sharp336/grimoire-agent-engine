@@ -952,7 +952,11 @@ async function listSessionHistory(
 	restore?: EngineRestoreHistoryTarget,
 ) {
 	if (runtime.storageMode === "native" && !restore) {
-		const page = await runtime.sessionHistoryPage(agentInstanceId, agentInstanceId, cursor, limit);
+		const binding = await runtime.store.getBinding(agentInstanceId);
+		const identity = binding && (await runtime.store.getStartConversationIdentity(binding.commandId));
+		if (!identity?.agentInstanceRef)
+			throw new EngineTargetError("agent_not_found", "Native history requires its canonical AgentInstance identity");
+		const page = await runtime.sessionHistoryPage(agentInstanceId, identity.agentInstanceRef, cursor, limit);
 		return {
 			schema: "grimoire.engine.session_history.v1",
 			agentInstanceId,
