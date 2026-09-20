@@ -1,8 +1,11 @@
 import { expect, it } from "bun:test";
-import type { NativeSessionCheckpoint } from "../../src/session/native-session-storage";
+import {
+	type NativeSessionCheckpoint,
+	NativeSessionWriteRejectedError,
+} from "../../src/session/native-session-storage";
 import { RocksNativeSessionStorage } from "../../src/session/rocks-native-session-storage";
 import { SessionManager } from "../../src/session/session-manager";
-import { StorageClient } from "../../src/session/storage-client";
+import { StorageClient, StorageClientError } from "../../src/session/storage-client";
 import {
 	STORAGE_PROTOCOL_SCHEMA_HASH,
 	type StorageBarrier,
@@ -126,6 +129,40 @@ it("rejects flush and queued successors when an earlier native prefix fails", as
 	expect(client.barriers).toEqual([]);
 	expect(() => manager.appendMessage({ role: "user", content: "later", timestamp: 4 })).toThrow("prefix failed");
 });
+
+it.each([
+	{ edit: true, code: "sequence_gap", message: "write does not follow accepted prefix", rollback: true },
+	{ edit: true, code: "sequence_gap", message: "apply predecessor missing", rollback: false },
+	{ edit: true, code: "outcome_unknown", message: "response lost", rollback: false },
+	{ edit: false, code: "sequence_gap", message: "write does not follow accepted prefix", rollback: false },
+] as const)(
+	"rolls back only proven conditional pre-admission rejection: %j",
+	async ({ edit, code, message, rollback }) => {
+		const client = new DelayedStorageClient();
+		const manager = SessionManager.createNative(
+			"/rejected",
+			new RocksNativeSessionStorage(client, "rejected", "root"),
+		);
+		const id = manager.appendMessage({ role: "user", content: "accepted", timestamp: 1 });
+		await client.apply(0);
+		const entry = manager.getEntry(id);
+		if (entry?.type !== "message" || entry.message.role !== "user") throw new Error("Expected user entry");
+		if (edit) entry.message.content = "unconfirmed";
+		else manager.appendMessage({ role: "user", content: "unconfirmed", timestamp: 2 });
+		const completion = (edit ? manager.rewriteEntries() : manager.flush()).catch(error => error);
+		await Bun.sleep(0);
+		const error = new StorageClientError(code, message);
+		client.writes[1].reject(error);
+		const observed: unknown = await completion;
+		if (rollback) expect(observed).toBeInstanceOf(NativeSessionWriteRejectedError);
+		else expect(observed).toBe(error);
+		if (edit) {
+			const restored = manager.getEntry(id);
+			if (restored?.type !== "message" || restored.message.role !== "user") throw new Error("Expected user entry");
+			expect(restored.message.content).toBe(rollback ? "accepted" : "unconfirmed");
+		} else expect(manager.getContextBranch()).toHaveLength(2);
+	},
+);
 
 it("persists structured native checkpoints through the shared HTTP client and reads frozen bounded context/children", async () => {
 	let latest: StorageWrite;

@@ -204,8 +204,16 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 				if (receipt.throughSeq !== throughSeq) throw new Error("Native storage receipt has the wrong prefix");
 			})
 			.catch(error => {
+				// The owner rejects this stale conditional prefix before admission. Other
+				// sequence gaps can occur at apply/barrier time and are not this rollback proof.
+				const rejectedPrefix =
+					nativeEdits !== undefined &&
+					error instanceof StorageClientError &&
+					error.code === "sequence_gap" &&
+					error.message === "write does not follow accepted prefix";
 				this.#failure =
-					error instanceof StorageClientError && ["conflict", "backpressure"].includes(error.code)
+					error instanceof StorageClientError &&
+					(["conflict", "backpressure"].includes(error.code) || rejectedPrefix)
 						? new NativeSessionWriteRejectedError(error.message)
 						: error instanceof Error
 							? error
