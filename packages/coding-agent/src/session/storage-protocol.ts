@@ -12,7 +12,16 @@ export const STORAGE_PROTOCOL_REVISION = 9 as const;
 export const STORAGE_PROTOCOL_SCHEMA_HASH =
 	"sha256:0752791051853f4d769162a7cceb4927ca5bfe3b009b74f24f56a19c7e065a93" as const;
 
-export type StorageOperation = "write" | "barrier" | "read_range" | "read_context" | "receipt" | "health" | "metrics";
+export type StorageOperation =
+	| "write"
+	| "barrier"
+	| "read_range"
+	| "read_context"
+	| "read_children"
+	| "receipt"
+	| "health"
+	| "metrics"
+	| "runtime_query";
 
 export type StorageId = string;
 export type StoragePayload = Record<string, unknown>;
@@ -70,6 +79,82 @@ export interface StorageWrite {
 	/** JCS of the complete write, excluding only requestId/payloadHash; includes incarnation. */
 	payloadHash: `sha256:${string}`;
 	incarnation: number;
+	runtime?: StorageRuntimeMutation;
+	expectedThroughSeq?: number;
+	nativeEdits?: readonly { entryId: string; entry: StorageEntry | null }[];
+}
+
+export type StorageRuntimeKind =
+	| "metadata"
+	| "identity"
+	| "binding"
+	| "attempt"
+	| "command"
+	| "effect"
+	| "approval"
+	| "inbox"
+	| "hold"
+	| "event"
+	| "delivery"
+	| "projection"
+	| "session";
+export interface StorageRuntimeKey {
+	kind: StorageRuntimeKind;
+	id: string;
+}
+export interface StorageRuntimeRecord extends StorageRuntimeKey {
+	revision: number | null;
+	value: StoragePayload | null;
+}
+export interface StorageRuntimeMutation {
+	checks: Array<StorageRuntimeKey & { revision: number | null }>;
+	puts: Array<StorageRuntimeKey & { value: StoragePayload }>;
+	deletes: StorageRuntimeKey[];
+}
+export type StorageRuntimeIndex =
+	| "identity_ref"
+	| "identity_parent"
+	| "identity_principal"
+	| "binding_engine_agent"
+	| "binding_session"
+	| "binding_generation"
+	| "attempt_agent"
+	| "attempt_generation"
+	| "command_agent_pending"
+	| "command_processor"
+	| "effect_attempt_call"
+	| "effect_attempt"
+	| "effect_generation"
+	| "approval_effect"
+	| "approval_state"
+	| "inbox_source"
+	| "inbox_session"
+	| "inbox_agent"
+	| "inbox_wake"
+	| "hold_agent"
+	| "event_agent"
+	| "event_attempt"
+	| "event_all"
+	| "event_pending"
+	| "delivery_pending"
+	| "projection_target"
+	| "session_agent"
+	| "session_updated"
+	| "kind_primary";
+
+export interface StorageRuntimeQuery {
+	requestId: string;
+	incarnation: number;
+	selector:
+		| { type: "records"; keys: StorageRuntimeKey[] }
+		| { type: "index"; index: StorageRuntimeIndex; key: Array<string | number>; cursor?: string };
+	maxRecords: number;
+	maxBytes: number;
+}
+export interface StorageRuntimeQueryResponse extends StorageResponseBase {
+	records: StorageRuntimeRecord[];
+	nextCursor: string | null;
+	indexRevision: number;
 }
 
 export interface StorageBarrier {
@@ -87,6 +172,7 @@ export interface StorageRead {
 	familyId: StorageId;
 	generationId: StorageId;
 	leafId?: StorageId;
+	parentId?: StorageId;
 	/** Frozen cut, defaults to durableThroughSeq. Zero selects the empty prefix. */
 	cutSeq?: number;
 	/** Opaque token bound to kind, scope, frozen cut, leaf and traversal position. */
@@ -112,8 +198,22 @@ interface StorageRequestBase {
 export type StorageRequestBody =
 	| { operation: "write"; write: StorageWrite; barrier?: never; read?: never; receipt?: never }
 	| { operation: "barrier"; barrier: StorageBarrier; write?: never; read?: never; receipt?: never }
-	| { operation: "read_range" | "read_context"; read: StorageRead; write?: never; barrier?: never; receipt?: never }
+	| {
+			operation: "read_range" | "read_context" | "read_children";
+			read: StorageRead;
+			write?: never;
+			barrier?: never;
+			receipt?: never;
+	  }
 	| { operation: "receipt"; receipt: StorageReceiptRequest; write?: never; barrier?: never; read?: never }
+	| {
+			operation: "runtime_query";
+			query: StorageRuntimeQuery;
+			write?: never;
+			barrier?: never;
+			read?: never;
+			receipt?: never;
+	  }
 	| { operation: "health" | "metrics"; write?: never; barrier?: never; read?: never; receipt?: never };
 
 export type StorageProtocolRequest = StorageRequestBase & StorageRequestBody;
@@ -207,6 +307,8 @@ export interface StorageReadSuccessResponse extends StorageResponseBase {
 	liveThroughSeq: number;
 	events: readonly StorageReadEntry[];
 	nextCursor: string | null;
+	head?: StorageNativeHead | null;
+	state?: StoragePayload | null;
 }
 
 export type StorageReadResponse = StorageReadSuccessResponse | StorageErrorResponse;
@@ -242,7 +344,8 @@ export type StorageProtocolResponse =
 	| StorageReadResponse
 	| StorageReceiptResponse
 	| StorageHealthResponse
-	| StorageMetricsResponse;
+	| StorageMetricsResponse
+	| StorageRuntimeQueryResponse;
 
 /** Small transport boundary; Engine integration is intentionally deferred to S3. */
 export interface StorageProtocolTransport {
@@ -265,7 +368,7 @@ export function storageProtocolRequest(
 	request: { barrier: StorageBarrier },
 ): StorageProtocolRequest;
 export function storageProtocolRequest(
-	operation: "read_range" | "read_context",
+	operation: "read_range" | "read_context" | "read_children",
 	request: { read: StorageRead },
 ): StorageProtocolRequest;
 export function storageProtocolRequest(
@@ -274,12 +377,17 @@ export function storageProtocolRequest(
 ): StorageProtocolRequest;
 export function storageProtocolRequest(operation: "health" | "metrics"): StorageProtocolRequest;
 export function storageProtocolRequest(
+	operation: "runtime_query",
+	request: { query: StorageRuntimeQuery },
+): StorageProtocolRequest;
+export function storageProtocolRequest(
 	operation: StorageOperation,
 	request: {
 		write?: StorageWrite;
 		barrier?: StorageBarrier;
 		read?: StorageRead;
 		receipt?: StorageReceiptRequest;
+		query?: StorageRuntimeQuery;
 	} = {},
 ): StorageProtocolRequest {
 	return {
