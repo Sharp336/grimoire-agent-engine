@@ -389,6 +389,8 @@ export class RocksEngineMutations {
 	}
 	async admitCommand(command: EngineCommandIdentity, processorGeneration: number): Promise<EngineCommandAdmission> {
 		return this.mutation(command.agentInstanceId, async tx => {
+			if ((await tx.get<{ generation: number }>("metadata", "engine"))?.generation !== processorGeneration)
+				throw new EngineTargetError("stale_target", "Command processor generation changed");
 			const old = await tx.get<RocksCommand>("command", command.commandId);
 			if (old) {
 				if (old.canonical_hash !== command.canonicalHash) throw new EngineCommandConflictError(command.commandId);
@@ -1012,6 +1014,10 @@ export class RocksEngineMutations {
 			async tx => {
 				await this.assertFence(tx, target);
 				await this.checkIntent(tx, target.agentInstanceId, undefined, true);
+				const binding = await tx.get<RocksBinding>("binding", target.agentInstanceId);
+				const attempt = await tx.get<RocksAttempt>("attempt", target.attemptId);
+				if (!binding || !attempt || !this.sameFence(attempt, target) || terminal.has(attempt.state))
+					throw new EngineEffectConflictError(input.effectId);
 				if (await tx.get("effect", input.effectId)) throw new EngineEffectConflictError(input.effectId);
 				const tool = "toolCallId" in input ? input : undefined;
 				const modelCall = "modelCallId" in input ? input.modelCallId : "";

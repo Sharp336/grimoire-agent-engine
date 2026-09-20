@@ -16,15 +16,18 @@ const scopeId = (scope: string) => `runtime_${new Bun.CryptoHasher("sha256").upd
 /** Finite runtime catalog; transactions contain data and revision checks, never query expressions. */
 export class RuntimeRecords {
 	readonly #tails = new Map<string, Promise<void>>();
-	#pending = 0;
+	#pending = { required: 0, buffered: 0 };
 	constructor(readonly client: StorageClient) {}
 
-	async get(kind: StorageRuntimeKind, id: string): Promise<StorageRuntimeRecord> {
-		const page = await this.client.runtimeQuery({
-			selector: { type: "records", keys: [{ kind, id }] },
-			maxRecords: 1,
-			maxBytes: 1024 * 1024,
-		});
+	async get(kind: StorageRuntimeKind, id: string, control = false): Promise<StorageRuntimeRecord> {
+		const page = await this.client.runtimeQuery(
+			{
+				selector: { type: "records", keys: [{ kind, id }] },
+				maxRecords: 1,
+				maxBytes: 1024 * 1024,
+			},
+			control,
+		);
 		const record = page.records.find(row => row.kind === kind && row.id === id);
 		if (!record) throw new StorageClientError("storage_error", "Exact runtime query omitted its key");
 		return record;
@@ -35,13 +38,17 @@ export class RuntimeRecords {
 		cursor?: string,
 		maxRecords = 100,
 		after?: Array<string | number | null>,
+		control = false,
 	): Promise<StorageRuntimeQueryResponse> {
 		if (cursor && after) throw new TypeError("Runtime query cannot combine cursor and after");
-		return this.client.runtimeQuery({
-			selector: { type: "index", index, key, ...(cursor ? { cursor } : {}), ...(after ? { after } : {}) },
-			maxRecords,
-			maxBytes: 1024 * 1024,
-		});
+		return this.client.runtimeQuery(
+			{
+				selector: { type: "index", index, key, ...(cursor ? { cursor } : {}), ...(after ? { after } : {}) },
+				maxRecords,
+				maxBytes: 1024 * 1024,
+			},
+			control,
+		);
 	}
 
 	async drain(): Promise<void> {
@@ -54,32 +61,39 @@ export class RuntimeRecords {
 		dependencies: StorageDependency[] = [],
 		durability: "required" | "buffered" = "required",
 	): Promise<T> {
-		if (this.#pending >= 32) throw new StorageClientError("backpressure", "Runtime mutation admission exhausted");
-		this.#pending++;
+		if (this.#pending[durability] >= (durability === "required" ? 8 : 32))
+			throw new StorageClientError("backpressure", "Runtime mutation admission exhausted");
+		this.#pending[durability]++;
 		const familyId = scopeId(scope);
 		const run = (this.#tails.get(familyId) ?? Promise.resolve()).then(async () => {
 			for (let attempt = 0; attempt < 4; attempt++) {
-				const tx = new RuntimeTransaction(this);
+				const tx = new RuntimeTransaction(this, durability === "required");
 				const result = await work(tx);
 				const runtime = tx.mutation();
 				if (!runtime.puts.length && !runtime.deletes.length) return result;
-				const cut = await this.client.readRange({
-					familyId,
-					generationId: "runtime",
-					maxRecords: 1,
-					maxBytes: 1024,
-				});
-				try {
-					await this.client.write({
-						operationId: crypto.randomUUID(),
+				const cut = await this.client.readRange(
+					{
 						familyId,
 						generationId: "runtime",
-						firstSeq: cut.liveThroughSeq + 1,
-						entries: [],
-						runtime,
-						dependencies,
-						durability,
-					});
+						maxRecords: 1,
+						maxBytes: 1024,
+					},
+					durability === "required",
+				);
+				try {
+					await this.client.write(
+						{
+							operationId: crypto.randomUUID(),
+							familyId,
+							generationId: "runtime",
+							firstSeq: cut.liveThroughSeq + 1,
+							entries: [],
+							runtime,
+							dependencies,
+							durability,
+						},
+						durability === "required",
+					);
 					return result;
 				} catch (error) {
 					if (!(error instanceof StorageClientError) || error.code !== "conflict" || attempt === 3) throw error;
@@ -93,7 +107,7 @@ export class RuntimeRecords {
 		);
 		this.#tails.set(familyId, tail);
 		return run.finally(() => {
-			this.#pending--;
+			this.#pending[durability]--;
 			if (this.#tails.get(familyId) === tail) this.#tails.delete(familyId);
 		});
 	}
@@ -104,7 +118,10 @@ export class RuntimeTransaction {
 	readonly #read = new Map<string, StorageRuntimeRecord>();
 	readonly #puts = new Map<string, StorageRuntimeKey & { value: StoragePayload }>();
 	readonly #deletes = new Map<string, StorageRuntimeKey>();
-	constructor(readonly records: RuntimeRecords) {}
+	constructor(
+		readonly records: RuntimeRecords,
+		readonly control = false,
+	) {}
 
 	async get<T extends object>(kind: StorageRuntimeKind, id: string): Promise<T | undefined> {
 		const key = recordKey(kind, id);
@@ -113,7 +130,7 @@ export class RuntimeTransaction {
 		if (pending) return pending.value as T;
 		let row = this.#read.get(key);
 		if (!row) {
-			row = await this.records.get(kind, id);
+			row = await this.records.get(kind, id, this.control);
 			this.#read.set(key, row);
 			this.#checkBudget();
 		}
@@ -140,7 +157,7 @@ export class RuntimeTransaction {
 		this.#deletes.set(key, { kind, id });
 	}
 	async query<T extends object>(index: StorageRuntimeIndex, key: Array<string | number | null>): Promise<T[]> {
-		const page = await this.records.query(index, key);
+		const page = await this.records.query(index, key, undefined, 100, undefined, this.control);
 		if (page.nextCursor)
 			throw new StorageClientError("backpressure", "Atomic runtime mutation exceeds its bounded index page");
 		for (const row of page.records) {

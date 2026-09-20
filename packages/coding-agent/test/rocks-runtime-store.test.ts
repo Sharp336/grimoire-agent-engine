@@ -1,0 +1,135 @@
+import { expect, it } from "bun:test";
+import type { EngineBindingSnapshot } from "../src/engine/contracts";
+import { RocksEngineStore } from "../src/engine/rocks-runtime-store";
+import type { EngineCommandIdentity } from "../src/engine/store";
+import { readStorageBinding, StorageClient } from "../src/session/storage-client";
+
+// Supplied only by an isolated real Rust worker fixture; never production state.
+it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING)(
+	"commits replay, native dependencies, terminal guards and bounded recovery on the real owner",
+	async () => {
+		const client = new StorageClient(readStorageBinding(process.env.ARTEL_STORAGE_TEST_BINDING)!);
+		const store = new RocksEngineStore(client);
+		const generation = await store.nextEngineGeneration();
+		const suffix = crypto.randomUUID();
+		const command: EngineCommandIdentity = {
+			commandId: `command-${suffix}`,
+			operation: "start",
+			deviceId: "fixture-device",
+			engineId: "fixture-engine",
+			engineGeneration: generation,
+			agentInstanceId: `agent-${suffix}`,
+			agentInstanceRef: `grimoire://agents/${suffix}`,
+			executionId: `execution-${suffix}`,
+			attemptId: `attempt-${suffix}`,
+			authorityGeneration: 1,
+			principalId: "fixture-owner",
+			payloadHash: "payload",
+			canonicalHash: "canonical",
+			serializedCommand: JSON.stringify({ payload: { expectedIntentRevision: 0 } }),
+		};
+		expect(await store.admitCommand(command, generation)).toEqual({ status: "claimed" });
+		expect(await store.admitCommand(command, generation)).toEqual({ status: "in_progress" });
+		await expect(store.admitCommand({ ...command, canonicalHash: "changed" }, generation)).rejects.toThrow();
+		const binding: EngineBindingSnapshot = {
+			commandId: command.commandId,
+			agentInstanceId: command.agentInstanceId,
+			executionId: command.executionId!,
+			attemptId: command.attemptId!,
+			bindingId: `binding-${suffix}`,
+			engineAgentId: `native-${suffix}`,
+			profileDigest: "fixture-profile",
+			state: "running",
+			engineGeneration: generation,
+			bindingGeneration: 1,
+			authorityGeneration: 1,
+		};
+		await store.commitAttemptTransition(binding, "running", [{ kind: "running" }], {
+			requireNew: true,
+			settleCommandId: command.commandId,
+		});
+		expect(await store.admitCommand(command, generation)).toEqual({
+			status: "replay",
+			receipt: { outcome: "applied" },
+		});
+		await expect(store.putBinding({ ...binding, bindingId: "stale-binding" })).rejects.toThrow();
+		expect((await store.getBinding(command.agentInstanceId))?.bindingId).toBe(binding.bindingId);
+		const familyId = `native-${suffix}`;
+		await client.write({
+			operationId: `native-write-${suffix}`,
+			familyId,
+			generationId: "main",
+			firstSeq: 1,
+			entries: [
+				{
+					entryId: "result",
+					parentId: null,
+					kind: "message",
+					payload: { role: "assistant", content: "durable result" },
+				},
+			],
+			durability: "required",
+			dependencies: [],
+		});
+		const checkpoint = {
+			sessionId: familyId,
+			sessionPath: `native://${familyId}/main`,
+			leafEntryId: "result",
+			byteBoundary: 0,
+			native: { familyId, generationId: "main", throughSeq: 1, incarnation: client.incarnation },
+		};
+		const effect = { effectId: `effect-${suffix}`, modelCallId: "call-1", inputHash: "input" };
+		await store.startModelEffect(binding, effect, checkpoint);
+		await expect(
+			store.commitAttemptTransition({ ...binding, state: "idle" }, "completed", [{ kind: "completed" }]),
+		).rejects.toThrow();
+		expect((await store.getAttempt(binding.attemptId))?.state).toBe("running");
+		await store.settleModelEffect(binding, effect, "completed", undefined, checkpoint);
+		await store.commitAttemptTransition({ ...binding, state: "idle" }, "completed", [{ kind: "completed" }], {
+			transcriptCheckpoint: checkpoint,
+		});
+		expect((await store.getAttempt(binding.attemptId))?.transcript_native?.throughSeq).toBe(1);
+
+		// More than a single 100-record CAS/query budget must remain recoverable.
+		const recoveryAgent = `recovery-${suffix}`;
+		for (let index = 0; index < 105; index++)
+			await store.admitCommand(
+				{
+					...command,
+					commandId: `pending-${suffix}-${index}`,
+					agentInstanceId: recoveryAgent,
+					agentInstanceRef: `grimoire://agents/${recoveryAgent}`,
+					operation: "steer",
+					canonicalHash: `pending-${index}`,
+					executionId: `recover-execution-${suffix}`,
+					attemptId: `recover-attempt-${suffix}`,
+				},
+				generation,
+			);
+		const active = {
+			...binding,
+			agentInstanceId: recoveryAgent,
+			commandId: `pending-${suffix}-0`,
+			executionId: `recover-execution-${suffix}`,
+			attemptId: `recover-attempt-${suffix}`,
+			bindingId: `recover-binding-${suffix}`,
+		};
+		await store.commitAttemptTransition(active, "running", [{ kind: "running" }], { requireNew: true });
+		await store.startModelEffect(active, { ...effect, effectId: `open-${suffix}` }, checkpoint);
+		await store.branchIntent(recoveryAgent, `pause-${suffix}`, "pause", 0);
+		const nextGeneration = await store.nextEngineGeneration();
+		let notifications = 0;
+		await store.interruptGeneration(nextGeneration, events => {
+			notifications += events.length;
+		});
+		expect((await store.getAttempt(active.attemptId))?.state).toBe("interrupted");
+		expect((await store.getEffect(`open-${suffix}`))?.outcome).toBe("unknown");
+		expect((await store.records.query("command_agent_pending", [recoveryAgent])).records).toHaveLength(0);
+		expect((await store.intent(recoveryAgent)).holds.map(hold => hold.kind)).toEqual(
+			expect.arrayContaining(["pause", "recovery"]),
+		);
+		expect(notifications).toBeGreaterThan(0);
+		await store.close();
+	},
+	60_000,
+);

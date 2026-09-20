@@ -72,7 +72,7 @@ it("recovers the original durable receipt after a lost write response, without s
 	}
 });
 
-it("rejects overflow synchronously while retaining a separate read lane", async () => {
+it("rejects overflow synchronously while retaining separate read and required-control lanes", async () => {
 	const gate = Promise.withResolvers<void>();
 	const server = Bun.serve({
 		hostname: "127.0.0.1",
@@ -80,7 +80,7 @@ it("rejects overflow synchronously while retaining a separate read lane", async 
 		async fetch(request) {
 			const body = (await request.json()) as TestRequest;
 			if (body.operation === "write") {
-				await gate.promise;
+				if (body.write.durability === "buffered") await gate.promise;
 				return envelope(body.write.requestId, { receipt: receipt(body.write) });
 			}
 			return envelope(body.read.requestId, {
@@ -96,12 +96,15 @@ it("rejects overflow synchronously while retaining a separate read lane", async 
 	});
 	try {
 		const client = new StorageClient(binding(server.port!), { writeRequests: 1 });
-		const first = client.write(input);
+		const first = client.write({ ...input, durability: "buffered" });
 		expect(() => client.write({ ...input, operationId: "op-two" })).toThrow("admission budget");
 		expect(
 			(await client.readRange({ familyId: "family", generationId: "generation", maxRecords: 1, maxBytes: 1024 }))
 				.events,
 		).toEqual([]);
+		expect((await client.write({ ...input, familyId: "control", operationId: "terminal" }, true)).outcome).toBe(
+			"success",
+		);
 		gate.resolve();
 		await first;
 		expect(client.pending.writeBytes).toBe(0);

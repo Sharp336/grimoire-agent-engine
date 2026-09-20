@@ -128,13 +128,13 @@ export class StorageClient {
 		return () => this.#listeners.delete(listener);
 	}
 
-	write(input: WriteInput): Promise<StorageReceipt> {
+	write(input: WriteInput, control = false): Promise<StorageReceipt> {
 		const payload = { ...input, incarnation: this.incarnation };
 		const payloadHash =
 			`sha256:${new Bun.CryptoHasher("sha256").update(storageCanonicalJson(payload)).digest("hex")}` as const;
 		const write: StorageWrite = { ...payload, payloadHash, requestId: crypto.randomUUID() };
 		const body = this.#body("write", "write", write);
-		const release = this.#reserve("write", Buffer.byteLength(body));
+		const release = this.#reserve(control ? "control" : "write", Buffer.byteLength(body));
 		return this.#write(write, body).finally(release);
 	}
 
@@ -146,8 +146,11 @@ export class StorageClient {
 		});
 	}
 
-	readRange(input: Omit<StorageRead, "requestId" | "incarnation">): Promise<StorageReadSuccessResponse> {
-		return this.#read("range", input);
+	readRange(
+		input: Omit<StorageRead, "requestId" | "incarnation">,
+		control = false,
+	): Promise<StorageReadSuccessResponse> {
+		return this.#read("range", input, control);
 	}
 	readContext(input: Omit<StorageRead, "requestId" | "incarnation">): Promise<StorageReadSuccessResponse> {
 		return this.#read("context", input);
@@ -155,23 +158,35 @@ export class StorageClient {
 	readChildren(input: Omit<StorageRead, "requestId" | "incarnation">): Promise<StorageReadSuccessResponse> {
 		return this.#read("children", input);
 	}
-	runtimeQuery(input: Omit<StorageRuntimeQuery, "requestId" | "incarnation">): Promise<StorageRuntimeQueryResponse> {
-		return this.#request("read", "/v1/runtime/query", "runtime_query", "query", input).then(response => {
-			if (!("records" in response) || !Array.isArray(response.records) || response.records.length > input.maxRecords)
-				throw this.#fence("storage_error", "Invalid bounded runtime query response");
-			return response as StorageRuntimeQueryResponse;
-		});
+	runtimeQuery(
+		input: Omit<StorageRuntimeQuery, "requestId" | "incarnation">,
+		control = false,
+	): Promise<StorageRuntimeQueryResponse> {
+		return this.#request(control ? "control" : "read", "/v1/runtime/query", "runtime_query", "query", input).then(
+			response => {
+				if (
+					!("records" in response) ||
+					!Array.isArray(response.records) ||
+					response.records.length > input.maxRecords
+				)
+					throw this.#fence("storage_error", "Invalid bounded runtime query response");
+				return response as StorageRuntimeQueryResponse;
+			},
+		);
 	}
 
 	#read(
 		kind: "range" | "context" | "children",
 		input: Omit<StorageRead, "requestId" | "incarnation">,
+		control = false,
 	): Promise<StorageReadSuccessResponse> {
-		return this.#request("read", `/v1/read/${kind}`, `read_${kind}`, "read", input).then(response => {
-			if (!("events" in response) || !Array.isArray(response.events) || response.events.length > input.maxRecords)
-				throw this.#fence("storage_error", "Invalid bounded storage read response");
-			return response as StorageReadSuccessResponse;
-		});
+		return this.#request(control ? "control" : "read", `/v1/read/${kind}`, `read_${kind}`, "read", input).then(
+			response => {
+				if (!("events" in response) || !Array.isArray(response.events) || response.events.length > input.maxRecords)
+					throw this.#fence("storage_error", "Invalid bounded storage read response");
+				return response as StorageReadSuccessResponse;
+			},
+		);
 	}
 
 	#request(
