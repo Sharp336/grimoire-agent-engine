@@ -10,6 +10,7 @@ import {
 	runWithStreamAdmission,
 	StreamAdmission,
 	StreamAdmissionError,
+	type StreamAdmissionLimits,
 } from "@oh-my-pi/pi-ai/utils/stream-admission";
 import { getBlobsDir, isEnoent, logger, stableStringifyJson, withTimeout } from "@oh-my-pi/pi-utils";
 import {
@@ -408,6 +409,8 @@ interface PreparedRestoreStart {
 
 export interface EngineRuntimeOptions {
 	databasePath: string;
+	/** Reduced only by isolated acceptance fixtures; production uses the bounded defaults. */
+	streamAdmissionLimits?: Partial<StreamAdmissionLimits>;
 	/** Hosted Core binding. Credentials stay in memory; undefined preserves standalone discovery. */
 	mcpServer?: MCPHttpServerConfig;
 	childHistoryTtlMinutes?: number;
@@ -498,6 +501,7 @@ export class EngineRuntime {
 	readonly #childHistoryTtlMinutes: number;
 	readonly #childHistoryRetention: "local" | "off" | "grimoire";
 	readonly #archiveChildHistory: EngineRuntimeOptions["archiveChildHistory"];
+	readonly #streamAdmissionLimits: EngineRuntimeOptions["streamAdmissionLimits"];
 	readonly #bindings = new Map<string, LiveBinding>();
 	readonly #lanes = new Map<string, Promise<void>>();
 	readonly #runs = new Set<Promise<void>>();
@@ -519,6 +523,7 @@ export class EngineRuntime {
 		this.engineGeneration = engineGeneration;
 		this.#sessionDefaults = options.sessionDefaults;
 		this.#mcpServer = options.mcpServer;
+		this.#streamAdmissionLimits = options.streamAdmissionLimits;
 		this.#dispatchPrompt =
 			options.dispatchPrompt ??
 			((session, input, identity, kind = "prompt", images) => {
@@ -2993,6 +2998,8 @@ export class EngineRuntime {
 					await binding.session.setModelTemporary(binding.launchModel, binding.launchThinkingLevel);
 					pendingStartSignal?.throwIfAborted();
 				}
+				binding.bindingGeneration++;
+				binding.bindingId = `${engineRouteToken(binding.agentInstanceId)}:${binding.bindingGeneration}`;
 				binding.pauseGate.resume();
 				binding.executionId = request.executionId;
 				binding.attemptId = request.attemptId;
@@ -4535,7 +4542,7 @@ export class EngineRuntime {
 		selection?: Pick<EngineStartRequest, "profileSelectionRevision" | "agentInstanceRef">,
 		images?: ImageContent[],
 	): Promise<void> {
-		const admission = new StreamAdmission();
+		const admission = new StreamAdmission(this.#streamAdmissionLimits);
 		binding.streamAdmission = admission;
 		const detach = admission.onAbort(error => {
 			binding.messageWriteError ??= error;

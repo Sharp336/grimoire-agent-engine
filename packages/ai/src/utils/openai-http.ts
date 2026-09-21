@@ -23,6 +23,7 @@ export { OpenAIHttpError };
 
 import type { FetchImpl } from "../types";
 import type { CapturedHttpErrorResponse } from "./http-inspector";
+import { boundedProviderBody, getStreamAdmission, type StreamAdmission } from "./stream-admission";
 
 /**
  * Total attempts (initial + retries). Parity with the removed SDK clients'
@@ -81,6 +82,16 @@ export interface OpenAIStreamHandle<TEvent> {
 	requestId: string | null;
 }
 
+async function* admitProviderEvents<TEvent>(
+	events: AsyncIterable<TEvent>,
+	admission: StreamAdmission | undefined,
+): AsyncGenerator<TEvent> {
+	for await (const event of events) {
+		admission?.admitProviderEvent();
+		yield event;
+	}
+}
+
 /**
  * POST a JSON body and stream back decoded SSE events.
  *
@@ -89,6 +100,7 @@ export interface OpenAIStreamHandle<TEvent> {
  * watchdog timers and abort-reason bookkeeping.
  */
 export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): Promise<OpenAIStreamHandle<TEvent>> {
+	const admission = getStreamAdmission();
 	const response = await fetchWithRetry(init.url, {
 		method: "POST",
 		headers: { "Content-Type": "application/json", Accept: "text/event-stream", ...init.headers },
@@ -114,18 +126,21 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		});
 	}
 	return {
-		events: readSseJson<TEvent>(
-			response.body,
-			init.signal,
-			init.onSseEvent,
-			latencyParsedObserver(
-				response,
-				init.url.startsWith("https:")
-					? "https_sse_json"
-					: init.url.startsWith("http:")
-						? "http_sse_json"
-						: "unknown_sse_json",
+		events: admitProviderEvents(
+			readSseJson<TEvent>(
+				boundedProviderBody(response.body),
+				init.signal,
+				init.onSseEvent,
+				latencyParsedObserver(
+					response,
+					init.url.startsWith("https:")
+						? "https_sse_json"
+						: init.url.startsWith("http:")
+							? "http_sse_json"
+							: "unknown_sse_json",
+				),
 			),
+			admission,
 		),
 		response,
 		requestId: response.headers.get("x-request-id"),

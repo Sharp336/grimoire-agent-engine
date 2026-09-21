@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { ModelRegistry } from "../../src/config/model-registry";
 import { Settings } from "../../src/config/settings";
 import type { EngineEvent, EngineLaunchProfile } from "../../src/engine/contracts";
@@ -521,4 +522,213 @@ describe.skipIf(!runtimeRoot || !expectedSourceCommit || !requestedRunRoot)("rea
 			);
 		}
 	});
+
+	it("bounds the OpenAI SSE parser inside Engine and requires an explicit native-session continuation", async () => {
+		if (!runtimeRoot || !expectedSourceCommit || !requestedRunRoot)
+			throw new Error("Real worker fixture is not configured");
+		const runRoot = path.resolve(`${requestedRunRoot}-openai-stream-admission`);
+		const canonicalTempRoot = await fs.realpath(os.tmpdir());
+		const canonicalRunRoot = path.join(await fs.realpath(path.dirname(runRoot)), path.basename(runRoot));
+		const relativeRunRoot = path.relative(canonicalTempRoot, canonicalRunRoot);
+		if (
+			!relativeRunRoot ||
+			relativeRunRoot.startsWith("..") ||
+			path.isAbsolute(relativeRunRoot) ||
+			!path.basename(runRoot).startsWith("artel-")
+		)
+			throw new Error("Real worker fixture requires a new artel-* directory under the system TEMP root");
+		await fs.mkdir(runRoot, { recursive: false });
+
+		const manifest = (await Bun.file(path.join(runtimeRoot, "manifest.json")).json()) as StorageRuntimeManifest;
+		expect(manifest.source_commit).toBe(expectedSourceCommit);
+		const binaryRecord = manifest.files.find(file => file.role === "storage");
+		const protocolRecord = manifest.files.find(file => file.role === "protocol");
+		if (!binaryRecord || !protocolRecord) throw new Error("Storage runtime manifest is incomplete");
+		const executable = path.join(runtimeRoot, binaryRecord.path);
+		const protocolHash = `sha256:${await hashFile(path.join(runtimeRoot, protocolRecord.path))}`;
+		expect(protocolHash).toBe(STORAGE_PROTOCOL_SCHEMA_HASH);
+
+		const tokenFile = path.join(runRoot, "token.txt");
+		const token = Array.from(crypto.getRandomValues(new Uint8Array(32)), byte =>
+			byte.toString(16).padStart(2, "0"),
+		).join("");
+		await Bun.write(tokenFile, token);
+		const worker = await startWorker(
+			executable,
+			path.join(runRoot, "data"),
+			tokenFile,
+			path.join(runRoot, "ready.json"),
+		);
+		const binding = {
+			url: worker.ready.url,
+			token,
+			incarnation: worker.ready.incarnation,
+			protocolHash,
+		};
+		const previousBinding = Bun.env.GRIMOIRE_STORAGE_BINDING;
+		Bun.env.GRIMOIRE_STORAGE_BINDING = JSON.stringify(binding);
+		let requests = 0;
+		const frame = (content: string, finishReason: string | null = null) =>
+			`data: ${JSON.stringify({
+				id: "chatcmpl-s31",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: "s31-openai-stream",
+				choices: [{ index: 0, delta: content ? { content } : {}, finish_reason: finishReason }],
+			})}\n\n`;
+		const server = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			async fetch(request) {
+				requests++;
+				await request.arrayBuffer();
+				const body =
+					requests === 1
+						? [
+								frame("S31_T2_DURABLE_PREFIX"),
+								frame("-1"),
+								frame("-2"),
+								frame("-3"),
+								frame("LATE_CALLBACK_MUST_NOT_PERSIST", "stop"),
+								"data: [DONE]\n\n",
+							].join("")
+						: `${frame("S31_T2_EXPLICIT_CONTINUE_OK", "stop")}data: [DONE]\n\n`;
+				return new Response(body, { headers: { "content-type": "text/event-stream" } });
+			},
+		});
+		const provider = "s31-openai-stream";
+		const model = buildModel({
+			id: "s31-openai-stream",
+			name: "S3.1 OpenAI stream acceptance",
+			api: "openai-completions",
+			provider,
+			baseUrl: `${server.url}v1`,
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 32_000,
+			maxTokens: 1_024,
+		});
+		const auth = createInMemoryAuthStorage();
+		auth.setRuntimeApiKey(provider, "fixture-key");
+		const modelRegistry = new ModelRegistry(auth);
+		const cwd = path.join(runRoot, "workspace");
+		const agentDir = path.join(runRoot, "agent");
+		await fs.mkdir(cwd);
+		await fs.mkdir(agentDir);
+		const settings = await Settings.loadReadOnly({ cwd, agentDir });
+		const runtime = await EngineRuntime.create({
+			databasePath: path.join(runRoot, "engine.sqlite"),
+			streamAdmissionLimits: { maxProviderEvents: 4 },
+			sessionDefaults: {
+				cwd,
+				agentDir,
+				settings,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				modelRegistry,
+				model,
+			},
+		});
+		const agentInstanceId = "s31-openai-stream-agent";
+		const agentInstanceRef = "grimoire://tasks/grimoire/s31-openai-stream/agents/owner";
+		const profile: EngineLaunchProfile = {
+			spawns: "",
+			profileDigest: "s31-openai-stream-profile-v1",
+			enableMCP: false,
+			enableLsp: false,
+		};
+		try {
+			const first = await runtime.start(
+				{
+					commandId: "s31-openai-stream-command-1",
+					agentInstanceId,
+					agentInstanceRef,
+					executionId: "s31-openai-stream-execution-1",
+					attemptId: "s31-openai-stream-attempt-1",
+					authorityGeneration: 1,
+					cwd,
+					input: "S31_T2_DURABLE_PREFIX",
+				},
+				profile,
+			);
+			await runtime.drain();
+			const interrupted = await runtime.store.getAttempt("s31-openai-stream-attempt-1");
+			const firstEvents = (await runtime.store.pendingEvents()).filter(
+				event => event.attemptId === "s31-openai-stream-attempt-1",
+			);
+			expect(runtime.storageMode).toBe("native");
+			expect(interrupted?.state).toBe("interrupted");
+			expect(requests).toBe(1);
+			expect(firstEvents.filter(event => event.kind === "model_settled")).toHaveLength(1);
+			expect(firstEvents.find(event => event.kind === "model_settled")?.payload?.status).toBe("failed");
+			expect(firstEvents.some(event => event.kind === "completed")).toBe(false);
+			const interruptedHistory = await runtime.sessionHistoryPage(
+				agentInstanceId,
+				agentInstanceRef,
+				undefined,
+				100,
+				"s31-openai-stream-attempt-1",
+			);
+			expect(interruptedHistory.entries.some(entry => JSON.stringify(entry).includes("S31_T2_DURABLE_PREFIX"))).toBe(
+				true,
+			);
+			expect(
+				interruptedHistory.entries.some(entry => JSON.stringify(entry).includes("LATE_CALLBACK_MUST_NOT_PERSIST")),
+			).toBe(false);
+
+			const continued = await runtime.start(
+				{
+					commandId: "s31-openai-stream-command-2",
+					agentInstanceId,
+					agentInstanceRef,
+					executionId: "s31-openai-stream-execution-2",
+					attemptId: "s31-openai-stream-attempt-2",
+					authorityGeneration: 1,
+					expectedIntentRevision: first.intentRevision,
+					explicitContinue: true,
+					cwd,
+					input: "Continue explicitly after the interrupted stream.",
+				},
+				profile,
+			);
+			await runtime.drain();
+			const completed = await runtime.store.getAttempt("s31-openai-stream-attempt-2");
+			const finalHistory = await runtime.sessionHistoryPage(
+				agentInstanceId,
+				agentInstanceRef,
+				undefined,
+				100,
+				"s31-openai-stream-attempt-2",
+			);
+			expect(completed?.state).toBe("completed");
+			expect(requests).toBe(2);
+			expect(continued.sessionFile).toBe(first.sessionFile);
+			expect(continued.bindingGeneration).toBe(first.bindingGeneration + 1);
+			expect(continued.bindingId).not.toBe(first.bindingId);
+			expect(finalHistory.entries.some(entry => JSON.stringify(entry).includes("S31_T2_EXPLICIT_CONTINUE_OK"))).toBe(
+				true,
+			);
+			expect(
+				finalHistory.entries.some(entry => JSON.stringify(entry).includes("LATE_CALLBACK_MUST_NOT_PERSIST")),
+			).toBe(false);
+			const settledFirstEvents = (await runtime.store.pendingEvents()).filter(
+				event => event.attemptId === "s31-openai-stream-attempt-1",
+			);
+			expect(settledFirstEvents.filter(event => event.kind === "model_settled")).toHaveLength(1);
+			expect(settledFirstEvents.some(event => event.kind === "completed")).toBe(false);
+		} finally {
+			await runtime.dispose();
+			auth.close();
+			server.stop(true);
+			if (previousBinding === undefined) delete Bun.env.GRIMOIRE_STORAGE_BINDING;
+			else Bun.env.GRIMOIRE_STORAGE_BINDING = previousBinding;
+			await worker.stop();
+		}
+	}, 60_000);
 });

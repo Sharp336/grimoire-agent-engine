@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Native Engine sessions now advance their binding fence before an explicit continuation Attempt.
 - Native sessions start on Bun 1.4 without extension loading intercepting unrelated modules.
 - Rejected provider metric observations now leave a bounded diagnostic without exposing credentials or response content.
 
