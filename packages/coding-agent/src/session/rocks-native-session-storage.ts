@@ -1,3 +1,5 @@
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { getBlobsDir } from "@oh-my-pi/pi-utils";
 import { BLOB_RANGE_BYTES, BlobStore, parseBlobRef } from "./blob-store";
 import {
@@ -13,6 +15,8 @@ import { type StorageClient, StorageClientError } from "./storage-client";
 import type { StorageEntry, StoragePayload, StorageReadSuccessResponse, StorageWrite } from "./storage-protocol";
 
 const NATIVE_ENTRY_BLOB_SCHEMA = "omp.native.entry.blob.v1" as const;
+export const NATIVE_ENTRY_BLOB_GC_GUARD_FILE = ".native-entry-blobs";
+const NATIVE_ENTRY_BLOB_GC_GUARD_CONTENT = '{"schema":"omp.native.entry.blob.gc-guard.v1"}\n';
 const NATIVE_INLINE_ENTRY_PAYLOAD_BYTES = 192 * 1024;
 const NATIVE_ENTRY_BLOB_MAX_BYTES = 8 * 1024 * 1024;
 const NATIVE_WRITE_INPUT_MAX_BYTES = 1024 * 1024 - 4096;
@@ -39,6 +43,56 @@ function nativeEntryBlobMarker(payload: StoragePayload): NativeEntryBlobMarker |
 	)
 		throw new Error("Invalid native entry blob marker");
 	return payload as NativeEntryBlobMarker;
+}
+
+function errorCode(error: unknown): string | undefined {
+	return typeof error === "object" && error !== null && "code" in error
+		? String((error as { code?: unknown }).code)
+		: undefined;
+}
+
+async function ensureNativeEntryBlobGcGuard(blobs: BlobStore): Promise<void> {
+	await fs.mkdir(blobs.dir, { recursive: true });
+	const guard = path.join(blobs.dir, NATIVE_ENTRY_BLOB_GC_GUARD_FILE);
+	const temporary = `${guard}.${crypto.randomUUID()}.tmp`;
+	let failed = false;
+	let failure: unknown;
+	try {
+		const handle = await fs.open(temporary, "wx");
+		try {
+			await handle.writeFile(NATIVE_ENTRY_BLOB_GC_GUARD_CONTENT);
+			await handle.sync();
+		} finally {
+			await handle.close();
+		}
+		try {
+			await fs.link(temporary, guard);
+		} catch (error) {
+			if (errorCode(error) !== "EEXIST") throw error;
+			const existing = await fs.lstat(guard);
+			if (!existing.isFile() || existing.isSymbolicLink()) throw new Error("Native entry blob GC guard is unsafe");
+		}
+		if (process.platform !== "win32") {
+			const directory = await fs.open(blobs.dir, "r");
+			try {
+				await directory.sync();
+			} finally {
+				await directory.close();
+			}
+		}
+	} catch (error) {
+		failed = true;
+		failure = error;
+	}
+	try {
+		await fs.unlink(temporary);
+	} catch (error) {
+		if (errorCode(error) !== "ENOENT" && !failed) {
+			failed = true;
+			failure = error;
+		}
+	}
+	if (failed) throw failure;
 }
 
 function prepareNativeWrite(write: NativeWriteInput): { write: NativeWriteInput; blobs: Map<string, Buffer> } {
@@ -297,8 +351,10 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 		if (this.#pendingBytes + bytes > this.#maxPendingBytes)
 			throw new NativeSessionWriteRejectedError("Native pending byte admission budget exhausted");
 		const prepared = prepareNativeWrite(JSON.parse(serialized) as NativeWriteInput);
+		const hasBlobReferences = prepared.blobs.size > 0 || JSON.stringify(prepared.write).includes("blob:sha256:");
 		const submit = async () => {
 			for (const [hash, data] of prepared.blobs) await this.#blobs.restore(hash, data);
+			if (hasBlobReferences) await ensureNativeEntryBlobGcGuard(this.#blobs);
 			return this.#client.write(prepared.write);
 		};
 		// Buffered writes resolve at application, not WAL durability. The next prefix

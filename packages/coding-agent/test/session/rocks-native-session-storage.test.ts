@@ -8,7 +8,10 @@ import {
 	type NativeSessionCheckpoint,
 	NativeSessionWriteRejectedError,
 } from "../../src/session/native-session-storage";
-import { RocksNativeSessionStorage } from "../../src/session/rocks-native-session-storage";
+import {
+	NATIVE_ENTRY_BLOB_GC_GUARD_FILE,
+	RocksNativeSessionStorage,
+} from "../../src/session/rocks-native-session-storage";
 import { SessionManager } from "../../src/session/session-manager";
 import { StorageClient, StorageClientError } from "../../src/session/storage-client";
 import {
@@ -296,6 +299,9 @@ it("persists oversized native text, image, tool, and signed payloads exactly thr
 		await manager.flushAndCheckpoint();
 
 		expect(writes).toHaveLength(1);
+		expect(await Bun.file(path.join(blobs.dir, NATIVE_ENTRY_BLOB_GC_GUARD_FILE)).json()).toEqual({
+			schema: "omp.native.entry.blob.gc-guard.v1",
+		});
 		expect(wireBytes.every(bytes => bytes < 1024 * 1024)).toBe(true);
 		expect(stored).toHaveLength(expected.length);
 		const byId = new Map(stored.map(entry => [entry.entryId, entry]));

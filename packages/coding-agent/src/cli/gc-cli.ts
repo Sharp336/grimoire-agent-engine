@@ -6,8 +6,10 @@ import { getAgentDir, getBlobsDir, getHistoryDbPath, getModelDbPath, getSessions
 import { Settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
 import { BLOB_HASH_RE } from "../session/blob-store";
+import { NATIVE_ENTRY_BLOB_GC_GUARD_FILE, parseNativeSessionLocator } from "../session/rocks-native-session-storage";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { FileSessionStorage } from "../session/session-storage";
+import * as storageClient from "../session/storage-client";
 
 const BLOB_FILE_RE = /^([a-f0-9]{64})(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/;
 const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/gi;
@@ -89,6 +91,11 @@ interface BlobCandidate {
 	paths: string[];
 	bytes: number;
 	mtimeMs: number;
+}
+
+interface NativeStorageScope {
+	familyId: string;
+	generationId: string;
 }
 
 interface ArchiveCandidate {
@@ -266,6 +273,13 @@ async function collectBackupJsonlFiles(root: string): Promise<string[]> {
 	}
 }
 
+function collectBlobHashes(text: string, hashes: Set<string>): void {
+	for (const match of text.matchAll(BLOB_REF_RE)) {
+		const hash = match[1]?.toLowerCase();
+		if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
+	}
+}
+
 async function collectReferencedBlobHashes(sessionRoots: string[]): Promise<Set<string>> {
 	const hashes = new Set<string>();
 	for (const root of sessionRoots) {
@@ -275,14 +289,103 @@ async function collectReferencedBlobHashes(sessionRoots: string[]): Promise<Set<
 			...(await collectBackupJsonlFiles(root)),
 		];
 		for (const file of files) {
-			const text = await readTextIfPresent(file);
-			for (const match of text.matchAll(BLOB_REF_RE)) {
-				const hash = match[1]?.toLowerCase();
-				if (hash && BLOB_HASH_RE.test(hash)) hashes.add(hash);
-			}
+			collectBlobHashes(await readTextIfPresent(file), hashes);
 		}
 	}
 	return hashes;
+}
+
+function addNativeStorageScope(scopes: Map<string, NativeStorageScope>, value: Record<string, unknown>): void {
+	const transcript = value.transcript_native;
+	if (transcript !== undefined) {
+		if (!transcript || typeof transcript !== "object" || Array.isArray(transcript)) {
+			throw new Error("Native transcript scope is invalid");
+		}
+		const { familyId, generationId } = transcript as Record<string, unknown>;
+		if (typeof familyId !== "string" || !familyId || typeof generationId !== "string" || !generationId) {
+			throw new Error("Native transcript scope is invalid");
+		}
+		scopes.set(`${familyId}\0${generationId}`, { familyId, generationId });
+	}
+	const locator = value.session_file;
+	if (typeof locator !== "string" || !locator.startsWith("native:")) return;
+	const scope = parseNativeSessionLocator(locator);
+	scopes.set(`${scope.familyId}\0${scope.generationId}`, scope);
+}
+
+async function hasNativeEntryBlobGcGuard(blobDir: string): Promise<boolean> {
+	try {
+		const guard = await fs.lstat(path.join(blobDir, NATIVE_ENTRY_BLOB_GC_GUARD_FILE));
+		if (!guard.isFile() || guard.isSymbolicLink()) throw new Error("Native entry blob GC guard is unsafe");
+		return true;
+	} catch (error) {
+		if (codeOf(error) === "ENOENT") return false;
+		throw error;
+	}
+}
+
+async function collectNativeStorageBlobHashes(hashes: Set<string>, blobDir: string): Promise<void> {
+	const binding = storageClient.readStorageBinding();
+	if (!binding) {
+		if (await hasNativeEntryBlobGcGuard(blobDir))
+			throw new Error("ClientHost storage binding is required to scan native entry blob references");
+		return;
+	}
+	const client = new storageClient.StorageClient(binding);
+	const scopes = new Map<string, NativeStorageScope>();
+	for (const kind of ["attempt", "binding"] as const) {
+		let cursor: string | undefined;
+		let indexRevision: number | undefined;
+		const cursors = new Set<string>();
+		do {
+			const page = await client.runtimeQuery({
+				selector: { type: "index", index: "kind_primary", key: [kind], ...(cursor ? { cursor } : {}) },
+				maxRecords: 100,
+				maxBytes: 1024 * 1024,
+			});
+			for (const record of page.records) {
+				if (record.kind !== kind) throw new Error("Native storage scope query returned a different kind");
+				if (record.value) {
+					collectBlobHashes(JSON.stringify(record.value), hashes);
+					addNativeStorageScope(scopes, record.value);
+				}
+			}
+			if (indexRevision !== undefined && page.indexRevision !== indexRevision)
+				throw new Error("Native storage scope index changed during scan");
+			indexRevision ??= page.indexRevision;
+			if (page.nextCursor && cursors.has(page.nextCursor)) throw new Error("Native storage scope cursor repeated");
+			if (page.nextCursor) cursors.add(page.nextCursor);
+			cursor = page.nextCursor ?? undefined;
+		} while (cursor);
+	}
+	for (const scope of scopes.values()) {
+		let cursor: string | undefined;
+		let cutSeq: number | undefined;
+		const cursors = new Set<string>();
+		do {
+			const page = await client.readRange({
+				...scope,
+				cursor,
+				cutSeq,
+				maxRecords: 128,
+				maxBytes: 1024 * 1024,
+			});
+			if (
+				page.familyId !== scope.familyId ||
+				page.generationId !== scope.generationId ||
+				!Number.isSafeInteger(page.throughSeq) ||
+				page.throughSeq < 0 ||
+				(cutSeq !== undefined && page.throughSeq !== cutSeq)
+			) {
+				throw new Error("Native storage blob scan changed scope or frozen cut");
+			}
+			cutSeq = page.throughSeq;
+			collectBlobHashes(JSON.stringify({ events: page.events, head: page.head, state: page.state }), hashes);
+			if (page.nextCursor && cursors.has(page.nextCursor)) throw new Error("Native storage blob cursor repeated");
+			if (page.nextCursor) cursors.add(page.nextCursor);
+			cursor = page.nextCursor ?? undefined;
+		} while (cursor);
+	}
 }
 
 async function collectBlobCandidates(blobDir: string): Promise<BlobCandidate[]> {
@@ -325,6 +428,13 @@ async function runBlobGc(options: ResolvedGcOptions, archiveSessionsRoot: string
 		bytes: 0,
 		errors: [],
 	};
+	try {
+		await collectNativeStorageBlobHashes(referenced, blobDir);
+		result.referenced = referenced.size;
+	} catch (error) {
+		result.errors.push(`native storage scan: ${errorMessage(error)}`);
+		return result;
+	}
 
 	const deleteBeforeMs = Date.now() - GC_WRITE_GRACE_MS;
 	for (const candidate of candidates) {
