@@ -1,5 +1,5 @@
 import { expect, it } from "bun:test";
-import type { EngineBindingSnapshot } from "../src/engine/contracts";
+import type { EngineBindingSnapshot, EngineEvent } from "../src/engine/contracts";
 import { RocksEngineStore } from "../src/engine/rocks-runtime-store";
 import type { EngineCommandIdentity } from "../src/engine/store";
 import { readStorageBinding, StorageClient } from "../src/session/storage-client";
@@ -151,15 +151,55 @@ it.skipIf(!process.env.ARTEL_STORAGE_TEST_BINDING)(
 			bindingId: `recover-binding-${suffix}`,
 		};
 		await store.commitAttemptTransition(active, "running", [{ kind: "running" }], { requireNew: true });
-		await store.startModelEffect(active, { ...effect, effectId: `open-${suffix}` }, checkpoint);
+		const recoveryToolEffect = {
+			effectId: `a-open-tool-${suffix}`,
+			toolCallId: "tool-call-1",
+			toolName: "fixture-tool",
+			policy: "tracked" as const,
+			inputHash: "tool-input",
+			origin: { messageId: "assistant-message-1", blockId: "assistant-block-1" },
+		};
+		const recoveryModelEffect = { ...effect, effectId: `z-open-model-${suffix}` };
+		await store.startToolEffect(active, recoveryToolEffect, checkpoint);
+		await store.startModelEffect(active, recoveryModelEffect, checkpoint);
 		await store.branchIntent(recoveryAgent, `pause-${suffix}`, "pause", 0);
 		const nextGeneration = await store.nextEngineGeneration();
 		let notifications = 0;
+		const recoveryEvents: EngineEvent[] = [];
 		await store.interruptGeneration(nextGeneration, events => {
 			notifications += events.length;
+			recoveryEvents.push(...events);
 		});
 		expect((await store.getAttempt(active.attemptId))?.state).toBe("interrupted");
-		expect((await store.getEffect(`open-${suffix}`))?.outcome).toBe("unknown");
+		expect((await store.getEffect(recoveryToolEffect.effectId))?.outcome).toBe("unknown");
+		expect((await store.getEffect(recoveryModelEffect.effectId))?.outcome).toBe("unknown");
+		expect(
+			recoveryEvents.find(
+				event => event.kind === "tool_settled" && event.payload?.invocationId === recoveryToolEffect.effectId,
+			)?.payload,
+		).toMatchObject({
+			invocationId: recoveryToolEffect.effectId,
+			toolCallId: recoveryToolEffect.toolCallId,
+			toolName: recoveryToolEffect.toolName,
+			policy: recoveryToolEffect.policy,
+			inputHash: recoveryToolEffect.inputHash,
+			origin: recoveryToolEffect.origin,
+			status: "unknown",
+			error: "engine_lost",
+		});
+		expect(
+			recoveryEvents.find(
+				event => event.kind === "model_settled" && event.payload?.effectId === recoveryModelEffect.effectId,
+			)?.payload,
+		).toMatchObject({
+			effectId: recoveryModelEffect.effectId,
+			modelCallId: recoveryModelEffect.modelCallId,
+			status: "unknown",
+			error: "engine_lost",
+		});
+		expect(
+			(await store.records.get("metadata", `effects:${active.attemptId}:${active.bindingId}`)).value,
+		).toMatchObject({ count: 0 });
 		expect((await store.records.query("command_agent_pending", [recoveryAgent])).records).toHaveLength(0);
 		expect((await store.intent(recoveryAgent)).holds.map(hold => hold.kind)).toEqual(
 			expect.arrayContaining(["pause", "recovery"]),

@@ -73,6 +73,23 @@ interface StartCancellation {
 }
 const terminal = new Set<EngineAttemptState>(["completed", "failed", "cancelled", "interrupted"]);
 
+function modelEffectPayload(effect: RocksEffect): Record<string, unknown> {
+	return { effectId: effect.effect_id, modelCallId: effect.tool_call_id };
+}
+
+function toolEffectPayload(effect: RocksEffect): Record<string, unknown> {
+	return {
+		invocationId: effect.effect_id,
+		toolCallId: effect.tool_call_id,
+		toolName: effect.tool_name,
+		policy: effect.policy,
+		inputHash: effect.input_hash,
+		...(effect.assistant_message_id && effect.assistant_block_id
+			? { origin: { messageId: effect.assistant_message_id, blockId: effect.assistant_block_id } }
+			: {}),
+	};
+}
+
 export interface RocksTransitionOptions {
 	cause?: string;
 	terminalResult?: Record<string, unknown>;
@@ -1147,15 +1164,7 @@ export class RocksEngineMutations {
 		return this.append(tx, target, {
 			kind: row.effect_kind === "model" ? "model_settled" : "tool_settled",
 			payload: {
-				...(row.effect_kind === "model"
-					? { effectId: id, modelCallId: row.tool_call_id }
-					: {
-							invocationId: id,
-							toolCallId: row.tool_call_id,
-							toolName: row.tool_name,
-							policy: row.policy,
-							inputHash: row.input_hash,
-						}),
+				...(row.effect_kind === "model" ? modelEffectPayload(row) : toolEffectPayload(row)),
 				status: outcome,
 				...options,
 			},
@@ -1796,9 +1805,9 @@ export class RocksEngineMutations {
 											await this.append(tx, target, {
 												kind: effect.effect_kind === "model" ? "model_settled" : "tool_settled",
 												payload: {
-													effectId,
-													invocationId: effectId,
-													toolCallId: effect.tool_call_id,
+													...(effect.effect_kind === "model"
+														? modelEffectPayload(effect)
+														: toolEffectPayload(effect)),
 													status: state === "started" ? "unknown" : "cancelled",
 													error: "engine_lost",
 												},
