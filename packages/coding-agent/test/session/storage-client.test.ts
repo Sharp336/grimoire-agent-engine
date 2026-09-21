@@ -229,6 +229,64 @@ it("fences all later calls after the owner incarnation changes", async () => {
 	}
 });
 
+it("keeps a matching server schema rejection local while fencing a protocol mismatch", async () => {
+	let requests = 0;
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		async fetch(request) {
+			requests++;
+			const body = (await request.json()) as TestRequest;
+			if (requests === 1)
+				return envelope(body.read.requestId, {
+					error: { code: "schema_error", message: "entry payload exceeds its schema budget", retryable: false },
+				});
+			if (requests === 3)
+				return Response.json({
+					schema: "wrong.storage.protocol",
+					version: "1.0",
+					requestId: body.read.requestId,
+					incarnation: 1,
+				});
+			return envelope(body.read.requestId, {
+				familyId: body.read.familyId,
+				generationId: body.read.generationId,
+				throughSeq: 0,
+				durableThroughSeq: 0,
+				liveThroughSeq: 0,
+				events: [],
+				nextCursor: null,
+			});
+		},
+	});
+	try {
+		const client = new StorageClient(binding(server.port!));
+		await expect(
+			client.readRange({ familyId: "rejected", generationId: "one", maxRecords: 1, maxBytes: 1024 }),
+		).rejects.toThrow("entry payload exceeds its schema budget");
+		expect(client.failure).toBeUndefined();
+		expect(
+			(
+				await client.readRange({
+					familyId: "unrelated",
+					generationId: "two",
+					maxRecords: 1,
+					maxBytes: 1024,
+				})
+			).events,
+		).toEqual([]);
+		await expect(
+			client.readRange({ familyId: "broken", generationId: "three", maxRecords: 1, maxBytes: 1024 }),
+		).rejects.toThrow("protocol mismatch");
+		expect(() =>
+			client.readRange({ familyId: "later", generationId: "four", maxRecords: 1, maxBytes: 1024 }),
+		).toThrow("protocol mismatch");
+		expect(requests).toBe(3);
+	} finally {
+		await server.stop(true);
+	}
+});
+
 it("hashes JCS numeric keys in lexical order and rejects lossy non-JSON payloads", () => {
 	const actual = storageCanonicalJson({ "2": "two", "10": "ten", nested: { z: 1, a: -0 } });
 	// Rust serde_jcs consumes these exact bytes before checking the hash.

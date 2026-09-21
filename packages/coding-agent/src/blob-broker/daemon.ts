@@ -8,6 +8,7 @@
  * failure returns `null` so callers fall back to an in-process backend.
  */
 
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { logger, ptree } from "@oh-my-pi/pi-utils";
@@ -15,7 +16,7 @@ import { daemonClientForProject } from "../launch/client";
 import { describeQuietly, stopQuietly, waitReady } from "../launch/ensure";
 import { daemonRuntimeDir } from "../launch/paths";
 import { resolveWorkerSpawnCmd, SMOKE_TEST_TIMEOUT_MS, workerEnvFromParent } from "../subprocess/worker-client";
-import type { BlobBackend } from "./broker";
+import { type BlobBackend, LocalBlobBackend } from "./broker";
 import {
 	BLOB_BROKER_CONFIG_ENV,
 	BLOB_BROKER_DAEMON_NAME,
@@ -288,8 +289,59 @@ export async function connectDaemonBlobBackend(
 	}
 }
 
-/** Exercise worker-host blob daemon startup and the /info probe for distribution smoke tests. */
+async function smokeTestWindowsBlobFallback(): Promise<void> {
+	const root = await fs.mkdtemp(path.join(os.tmpdir(), `omp-blob-smoke-${process.pid.toString(36)}-`));
+	const blobsDir = path.join(root, "blobs");
+	await fs.mkdir(blobsDir, { recursive: true });
+	const config: BlobBrokerWorkerConfig = {
+		kind: "direct",
+		options: {},
+		credentials: {},
+		bindHost: "127.0.0.1",
+		persist: {
+			blobsDir,
+			indexPath: path.join(root, "urls-index.json"),
+			savingsPath: path.join(root, "savings.jsonl"),
+			ttlMs: 60_000,
+		},
+	};
+	const expected = Buffer.from([0x00, 0xff, 0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x80, 0x7f]);
+	let backend = new LocalBlobBackend(config);
+	try {
+		const publication = await backend.ensureBlob("smoke", "image/png", () => expected);
+		if (publication?.destination !== "direct" || publication.bytes !== expected.byteLength)
+			throw new Error("blob broker smoke failed: fallback returned incomplete publication metadata");
+		const served = await fetch(publication.url);
+		if (!served.ok || !Buffer.from(await served.arrayBuffer()).equals(expected))
+			throw new Error(`blob broker smoke failed: fallback byte roundtrip returned ${served.status}`);
+		const firstStatus = backend.storeStatus().metrics;
+		if (
+			firstStatus.activeBlobs !== 1 ||
+			firstStatus.hits !== 1 ||
+			firstStatus.bytesServed !== expected.byteLength ||
+			firstStatus.diskBytes !== expected.byteLength
+		)
+			throw new Error("blob broker smoke failed: fallback metrics did not roundtrip");
+
+		backend.stop();
+		backend = new LocalBlobBackend(config);
+		const resumed = await backend.lookupBlob("smoke");
+		if (!resumed) throw new Error("blob broker smoke failed: fallback persistence did not restore publication");
+		const persisted = await fetch(resumed.url);
+		if (!persisted.ok || !Buffer.from(await persisted.arrayBuffer()).equals(expected))
+			throw new Error(`blob broker smoke failed: persisted byte roundtrip returned ${persisted.status}`);
+		const purged = await backend.purge({ all: true, apply: true });
+		if (purged.purgedBlobs !== 1 || backend.storeStatus().metrics.activeBlobs !== 0)
+			throw new Error("blob broker smoke failed: fallback purge did not remove the registration");
+	} finally {
+		backend.stop();
+		await fs.rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
+	}
+}
+
+/** Exercise the packaged blob path used by this platform for distribution smoke tests. */
 export async function smokeTestBlobBroker(): Promise<void> {
+	if (process.platform === "win32") return smokeTestWindowsBlobFallback();
 	const socket = path.join(os.tmpdir(), `omp-blob-smoke-${process.pid.toString(36)}.sock`);
 	const config: BlobBrokerWorkerConfig = {
 		kind: "direct",

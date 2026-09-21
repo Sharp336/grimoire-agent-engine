@@ -1,4 +1,9 @@
 import { expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
+import type { AssistantMessage, ToolResultMessage, UserMessage } from "@oh-my-pi/pi-ai";
+import { TempDir } from "@oh-my-pi/pi-utils";
+import { BlobStore, parseBlobRef } from "../../src/session/blob-store";
 import {
 	type NativeSessionCheckpoint,
 	NativeSessionWriteRejectedError,
@@ -164,6 +169,173 @@ it.each([
 	},
 );
 
+it("persists oversized native text, image, tool, and signed payloads exactly through bounded blobs", async () => {
+	using tempDir = TempDir.createSync("@omp-native-entry-blobs-");
+	const blobs = new BlobStore(path.join(tempDir.path(), "blobs"));
+	const stored: StorageEntry[] = [];
+	const writes: StorageWrite[] = [];
+	const wireBytes: number[] = [];
+	let latest: StorageWrite | undefined;
+	let seq = 0;
+	const server = Bun.serve({
+		hostname: "127.0.0.1",
+		port: 0,
+		async fetch(request) {
+			const raw = await request.text();
+			wireBytes.push(Buffer.byteLength(raw));
+			const body = JSON.parse(raw) as StorageProtocolRequest;
+			const response = (requestId: string, fields: object) =>
+				Response.json({
+					schema: "artel.storage.protocol.response.v1",
+					version: "1.0",
+					requestId,
+					incarnation: 1,
+					...fields,
+				});
+			if (body.operation === "write") {
+				latest = body.write;
+				writes.push(body.write);
+				stored.push(...body.write.entries);
+				seq += Math.max(1, body.write.entries.length);
+				return response(body.write.requestId, {
+					receipt: {
+						...body.write,
+						throughSeq: seq,
+						admissionState: "admitted",
+						appliedState: "applied",
+						durabilityState: "durable",
+						outcome: "success",
+					},
+				});
+			}
+			if (body.operation === "barrier")
+				return response(body.barrier.requestId, { ...body.barrier, durableThroughSeq: seq });
+			if (body.operation !== "read_context") throw new Error(`Unexpected operation ${body.operation}`);
+			const offset = Number(body.read.cursor ?? 0);
+			const result = stored.toReversed();
+			const events = result.slice(offset, offset + body.read.maxRecords);
+			return response(body.read.requestId, {
+				familyId: body.read.familyId,
+				generationId: body.read.generationId,
+				throughSeq: body.read.cutSeq ?? seq,
+				durableThroughSeq: seq,
+				liveThroughSeq: seq,
+				head: latest?.head,
+				state: latest?.state,
+				events,
+				nextCursor: offset + events.length < result.length ? String(offset + events.length) : null,
+			});
+		},
+	});
+	try {
+		const client = new StorageClient({
+			url: `http://127.0.0.1:${server.port}`,
+			token: "0123456789012345",
+			incarnation: 1,
+			protocolHash: STORAGE_PROTOCOL_SCHEMA_HASH,
+		});
+		const storage = new RocksNativeSessionStorage(client, "large", "root", {}, blobs);
+		const manager = SessionManager.createNative("/large-native", storage);
+		const largeText = `leading\u0000${"界-text-".repeat(45_000)}trailing`;
+		const imageData = Buffer.from(Uint8Array.from({ length: 230_000 }, (_, index) => (index * 31) & 0xff)).toString(
+			"base64",
+		);
+		const toolPayload = `tool:${'{\\"nested\\":true}|'.repeat(18_000)}`;
+		const opaqueSignature = `sig:${'\\u0000|\\"|\\\\|Ж|'.repeat(24_000)}:end`;
+		const textMessage: UserMessage = { role: "user", content: largeText, timestamp: 1 };
+		const imageMessage: UserMessage = {
+			role: "user",
+			content: [{ type: "image", data: imageData, mimeType: "image/png", detail: "original" }],
+			timestamp: 2,
+		};
+		const assistant: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "retain exact signed reasoning", thinkingSignature: opaqueSignature },
+				{ type: "toolCall", id: "large-tool", name: "write", arguments: { payload: toolPayload } },
+			],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-test",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: 3,
+		};
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "large-tool",
+			toolName: "write",
+			content: [{ type: "text", text: `result:${"tool-output|".repeat(24_000)}` }],
+			isError: false,
+			timestamp: 4,
+		};
+		const ids: string[] = [];
+		const pressureIds: string[] = [];
+		await manager.appendEntriesAtomically(() => {
+			ids.push(manager.appendMessage(textMessage));
+			ids.push(manager.appendMessage(imageMessage));
+			ids.push(manager.appendMessage(assistant));
+			ids.push(manager.appendMessage(toolResult));
+			for (let index = 0; index < 9; index++)
+				pressureIds.push(
+					manager.appendMessage({
+						role: "user",
+						content: `${index}:${"request-pressure|".repeat(7_500)}`,
+						timestamp: 5 + index,
+					}),
+				);
+		});
+		const expected = structuredClone(manager.getWorkingEntries());
+		await manager.flushAndCheckpoint();
+
+		expect(writes).toHaveLength(1);
+		expect(wireBytes.every(bytes => bytes < 1024 * 1024)).toBe(true);
+		expect(stored).toHaveLength(expected.length);
+		const byId = new Map(stored.map(entry => [entry.entryId, entry]));
+		for (const id of ids) expect(byId.get(id)?.payload).toMatchObject({ schema: "omp.native.entry.blob.v1" });
+		expect(pressureIds.some(id => byId.get(id)?.payload.schema === "omp.native.entry.blob.v1")).toBe(true);
+		const refs = stored
+			.filter(entry => entry.payload.schema === "omp.native.entry.blob.v1")
+			.map(entry => String(entry.payload.ref));
+		const hashes = refs.map(ref => parseBlobRef(ref));
+		expect(hashes.every(Boolean)).toBe(true);
+		expect(new Set(hashes).size).toBe(hashes.length);
+
+		const cold = await SessionManager.openNative(new RocksNativeSessionStorage(client, "large", "root", {}, blobs));
+		expect(cold.getWorkingEntries()).toEqual(expected);
+		const signed = cold.getEntry(ids[2]);
+		if (signed?.type !== "message" || signed.message.role !== "assistant")
+			throw new Error("Expected restored assistant entry");
+		expect(signed.message.content[0]).toEqual({
+			type: "thinking",
+			thinking: "retain exact signed reasoning",
+			thinkingSignature: opaqueSignature,
+		});
+
+		const hash = hashes[0]!;
+		const blobPath = path.join(blobs.dir, hash);
+		const original = await fs.readFile(blobPath);
+		await fs.unlink(blobPath);
+		await expect(new RocksNativeSessionStorage(client, "large", "root", {}, blobs).readContext()).rejects.toThrow(
+			/blob.*missing/i,
+		);
+		await blobs.restore(hash, original);
+		await fs.writeFile(blobPath, Buffer.alloc(original.byteLength, 0x5a));
+		await expect(new RocksNativeSessionStorage(client, "large", "root", {}, blobs).readContext()).rejects.toThrow(
+			/blob.*hash/i,
+		);
+	} finally {
+		await server.stop(true);
+	}
+});
+
 it("persists structured native checkpoints through the shared HTTP client and reads frozen bounded context/children", async () => {
 	let latest: StorageWrite;
 	let seq = 0;
@@ -211,7 +383,7 @@ it("persists structured native checkpoints through the shared HTTP client and re
 			}
 			if (body.operation === "barrier")
 				return response(body.barrier.requestId, { ...body.barrier, durableThroughSeq: seq });
-			if (body.operation !== "read_context" && body.operation !== "read_children")
+			if (body.operation !== "read_context" && body.operation !== "read_children" && body.operation !== "read_range")
 				throw new Error(`Unexpected archive request ${body.operation}`);
 			const read = body.read;
 			cuts.push(read.cutSeq);
@@ -220,6 +392,8 @@ it("persists structured native checkpoints through the shared HTTP client and re
 			const result: StorageEntry[] = [];
 			if (body.operation === "read_children") {
 				if (read.cursor) result.push(...entries.filter(entry => entry.parentId === read.parentId));
+			} else if (body.operation === "read_range") {
+				result.push(...entries.toReversed());
 			} else {
 				let id = latest.head?.leafId;
 				while (id) {
@@ -229,7 +403,7 @@ it("persists structured native checkpoints through the shared HTTP client and re
 					id = entry.parentId;
 				}
 			}
-			const offset = body.operation === "read_context" ? Number(read.cursor ?? 0) : 0;
+			const offset = body.operation === "read_children" ? 0 : Number(read.cursor ?? 0);
 			const events = result.slice(offset, offset + 1);
 			readIds.push(...events.map(entry => entry.entryId));
 			return response(read.requestId, {
@@ -264,6 +438,9 @@ it("persists structured native checkpoints through the shared HTTP client and re
 		await manager.appendEntriesAtomically(() => {
 			manager.appendModelChange("openai/model");
 			archived = manager.appendMessage({ role: "user", content: "archive", timestamp: 1 });
+			manager.appendLabelChange(archived, "first");
+			manager.appendLabelChange(archived, "second");
+			manager.appendLabelChange(archived, undefined);
 			kept = manager.appendMessage({ role: "user", content: "keep", timestamp: 2 });
 			manager.appendCompaction("summary", undefined, kept, 100);
 		});
@@ -274,6 +451,9 @@ it("persists structured native checkpoints through the shared HTTP client and re
 		expect(cuts.slice(0, 2)).toEqual([undefined, checkpoint.native!.throughSeq]);
 		expect(await storage.readChildren(kept, checkpoint.native!)).toHaveLength(1);
 		expect(operations.filter(value => value === "read_children")).toHaveLength(2);
+		await cold.materializeHistory();
+		expect(cold.getEntries().map(candidate => candidate.id)).toEqual(entries.map(candidate => candidate.entryId));
+		expect(cold.getLabel(archived)).toBeUndefined();
 		const entry = cold.getEntry(kept)!;
 		if (entry.type !== "message" || entry.message.role !== "user") throw new Error("Expected retained user message");
 		entry.message.content = "changed";

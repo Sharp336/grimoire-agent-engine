@@ -8,6 +8,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import { LocalBlobBackend } from "../src/blob-broker/broker";
 import { contextHasImageUrls, supportsRemoteImageUrls } from "../src/blob-broker/context-images";
+import { smokeTestBlobBroker } from "../src/blob-broker/daemon";
 import { ImageUrlService } from "../src/blob-broker/service";
 import { type BlobPersistence, BlobRegistry } from "../src/blob-broker/store";
 import { wrapStreamFnWithBlobUrlFallback } from "../src/blob-broker/stream-fallback";
@@ -71,6 +72,13 @@ function makeService(): ImageUrlService {
 afterAll(() => {
 	for (const cleanup of cleanups) cleanup();
 });
+
+it.skipIf(process.platform !== "win32")(
+	"smokes the packaged Windows fallback with exact persistent bytes",
+	async () => {
+		await smokeTestBlobBroker();
+	},
+);
 
 describe("LocalBlobBackend (serve mode)", () => {
 	it("serves registered blobs over HTTP with stable per-content urls", async () => {

@@ -332,6 +332,8 @@ export class StorageClient {
 			if ("requestId" in result && result.requestId !== requestId && result.requestId !== null)
 				throw this.#fence("storage_error", "Storage response identity mismatch");
 			if (result.error) {
+				if (result.error.code === "schema_error" && result.requestId === requestId)
+					throw new StorageClientError(result.error.code, result.error.message);
 				if (["storage_error", "stale_incarnation", "schema_error"].includes(result.error.code))
 					throw this.#fence(result.error.code, result.error.message);
 				throw new StorageClientError(result.error.code, result.error.message);

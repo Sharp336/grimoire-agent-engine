@@ -1,3 +1,5 @@
+import { getBlobsDir } from "@oh-my-pi/pi-utils";
+import { BLOB_RANGE_BYTES, BlobStore, parseBlobRef } from "./blob-store";
 import {
 	type NativeSessionCheckpoint,
 	type NativeSessionPosition,
@@ -9,6 +11,71 @@ import {
 import type { SessionEntry } from "./session-entries";
 import { type StorageClient, StorageClientError } from "./storage-client";
 import type { StorageEntry, StoragePayload, StorageReadSuccessResponse, StorageWrite } from "./storage-protocol";
+
+const NATIVE_ENTRY_BLOB_SCHEMA = "omp.native.entry.blob.v1" as const;
+const NATIVE_INLINE_ENTRY_PAYLOAD_BYTES = 192 * 1024;
+const NATIVE_ENTRY_BLOB_MAX_BYTES = 8 * 1024 * 1024;
+const NATIVE_WRITE_INPUT_MAX_BYTES = 1024 * 1024 - 4096;
+
+type NativeWriteInput = Omit<StorageWrite, "requestId" | "payloadHash" | "incarnation">;
+type NativeEntryBlobMarker = StoragePayload & {
+	schema: typeof NATIVE_ENTRY_BLOB_SCHEMA;
+	ref: string;
+	bytes: number;
+};
+
+function markerFor(hash: string, bytes: number): NativeEntryBlobMarker {
+	return { schema: NATIVE_ENTRY_BLOB_SCHEMA, ref: `blob:sha256:${hash}`, bytes };
+}
+
+function nativeEntryBlobMarker(payload: StoragePayload): NativeEntryBlobMarker | undefined {
+	if (payload.schema !== NATIVE_ENTRY_BLOB_SCHEMA) return undefined;
+	if (
+		typeof payload.ref !== "string" ||
+		typeof payload.bytes !== "number" ||
+		!Number.isSafeInteger(payload.bytes) ||
+		payload.bytes < 1 ||
+		payload.bytes > NATIVE_ENTRY_BLOB_MAX_BYTES
+	)
+		throw new Error("Invalid native entry blob marker");
+	return payload as NativeEntryBlobMarker;
+}
+
+function prepareNativeWrite(write: NativeWriteInput): { write: NativeWriteInput; blobs: Map<string, Buffer> } {
+	const candidates: Array<{ entry: StorageEntry; data: Buffer; externalized: boolean }> = [];
+	for (const entry of write.entries) {
+		const data = Buffer.from(JSON.stringify(entry.payload), "utf8");
+		if (data.byteLength > NATIVE_ENTRY_BLOB_MAX_BYTES)
+			throw new NativeSessionWriteRejectedError("Native entry payload exceeds the 8 MiB blob budget");
+		candidates.push({ entry, data, externalized: false });
+	}
+	for (const edit of write.nativeEdits ?? []) {
+		if (!edit.entry) continue;
+		const data = Buffer.from(JSON.stringify(edit.entry.payload), "utf8");
+		if (data.byteLength > NATIVE_ENTRY_BLOB_MAX_BYTES)
+			throw new NativeSessionWriteRejectedError("Native entry payload exceeds the 8 MiB blob budget");
+		candidates.push({ entry: edit.entry, data, externalized: false });
+	}
+
+	const blobs = new Map<string, Buffer>();
+	const externalize = (candidate: (typeof candidates)[number]) => {
+		if (candidate.externalized) return;
+		const hash = new Bun.SHA256().update(candidate.data).digest("hex");
+		candidate.entry.payload = markerFor(hash, candidate.data.byteLength);
+		candidate.externalized = true;
+		blobs.set(hash, candidate.data);
+	};
+	for (const candidate of candidates) {
+		if (candidate.data.byteLength > NATIVE_INLINE_ENTRY_PAYLOAD_BYTES) externalize(candidate);
+	}
+	for (const candidate of candidates.toSorted((left, right) => right.data.byteLength - left.data.byteLength)) {
+		if (Buffer.byteLength(JSON.stringify(write)) <= NATIVE_WRITE_INPUT_MAX_BYTES) break;
+		externalize(candidate);
+	}
+	if (Buffer.byteLength(JSON.stringify(write)) > NATIVE_WRITE_INPUT_MAX_BYTES)
+		throw new NativeSessionWriteRejectedError("Native write exceeds the storage request byte budget");
+	return { write, blobs };
+}
 
 export function parseNativeSessionLocator(locator: string): { familyId: string; generationId: string } {
 	const match = /^native:([^/]+)\/([^/]+)$/.exec(locator);
@@ -28,8 +95,39 @@ function nativeEntry(entry: SessionEntry): StorageEntry {
 	};
 }
 
-function decodeEntry(entry: StorageEntry): SessionEntry {
-	const value = entry.payload;
+async function decodeEntry(entry: StorageEntry, blobs: BlobStore): Promise<SessionEntry> {
+	const marker = nativeEntryBlobMarker(entry.payload);
+	let value: StoragePayload = entry.payload;
+	if (marker) {
+		const hash = parseBlobRef(marker.ref);
+		if (!hash) throw new Error("Native entry blob marker has an invalid reference");
+		const chunks: Buffer[] = [];
+		const digest = new Bun.SHA256();
+		let offset = 0;
+		while (offset < marker.bytes) {
+			const range = await blobs.getRange(hash, offset, BLOB_RANGE_BYTES);
+			if (!range) throw new Error(`Native entry blob ${hash} is missing`);
+			if (range.totalBytes !== marker.bytes) throw new Error(`Native entry blob ${hash} has the wrong byte length`);
+			if (!range.data.byteLength || offset + range.data.byteLength > marker.bytes)
+				throw new Error(`Native entry blob ${hash} returned an invalid byte range`);
+			chunks.push(range.data);
+			digest.update(range.data);
+			const nextOffset = offset + range.data.byteLength;
+			if (range.nextOffset !== (nextOffset < marker.bytes ? nextOffset : null))
+				throw new Error(`Native entry blob ${hash} returned a discontinuous byte range`);
+			offset = nextOffset;
+		}
+		if (digest.digest("hex") !== hash) throw new Error(`Native entry blob ${hash} hash does not match its contents`);
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(Buffer.concat(chunks, marker.bytes).toString("utf8"));
+		} catch (error) {
+			throw new Error(`Native entry blob ${hash} does not contain valid JSON`, { cause: error });
+		}
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+			throw new Error(`Native entry blob ${hash} does not contain an entry payload`);
+		value = parsed as StoragePayload;
+	}
 	if (
 		value.id !== entry.entryId ||
 		value.parentId !== entry.parentId ||
@@ -79,12 +177,14 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 	#conditionalWrite = false;
 	#maxRecords: number;
 	#maxBytes: number;
+	#blobs: BlobStore;
 
 	constructor(
 		client: StorageClient,
 		familyId: string,
 		generationId: string,
 		limits: { maxRecords?: number; maxBytes?: number; maxPendingWrites?: number; maxPendingBytes?: number } = {},
+		blobs: BlobStore = new BlobStore(getBlobsDir()),
 	) {
 		const { maxRecords = 128, maxBytes = 1_048_576, maxPendingWrites = 32, maxPendingBytes = 8_388_608 } = limits;
 		if (
@@ -102,6 +202,7 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 		this.#maxBytes = maxBytes;
 		this.#maxPendingWrites = maxPendingWrites;
 		this.#maxPendingBytes = maxPendingBytes;
+		this.#blobs = blobs;
 		this.locator = `native:${encodeURIComponent(familyId)}/${encodeURIComponent(generationId)}`;
 	}
 
@@ -190,12 +291,16 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 					]
 				: [],
 			...(nativeEdits ? { nativeEdits, expectedThroughSeq: this.#throughSeq } : {}),
-		} satisfies Omit<StorageWrite, "requestId" | "payloadHash" | "incarnation">);
+		} satisfies NativeWriteInput);
 		// Bound both wire bytes and the retained snapshot, before reserving a sequence.
 		const bytes = Math.max(Buffer.byteLength(serialized), serialized.length * 2);
 		if (this.#pendingBytes + bytes > this.#maxPendingBytes)
 			throw new NativeSessionWriteRejectedError("Native pending byte admission budget exhausted");
-		const submit = () => this.#client.write(JSON.parse(serialized));
+		const prepared = prepareNativeWrite(JSON.parse(serialized) as NativeWriteInput);
+		const submit = async () => {
+			for (const [hash, data] of prepared.blobs) await this.#blobs.restore(hash, data);
+			return this.#client.write(prepared.write);
+		};
 		// Buffered writes resolve at application, not WAL durability. The next prefix
 		// cannot overtake it; a failed prefix also rejects all already admitted successors.
 		const write = this.#pendingWrites === 0 ? submit() : this.#writeTail.then(submit);
@@ -273,7 +378,7 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 			});
 			this.#validatePage(page, position.throughSeq);
 			for (const entry of page.events) {
-				const child = decodeEntry(entry);
+				const child = await decodeEntry(entry, this.#blobs);
 				if (child.parentId !== parentId) throw new Error("Native children page returned a different parent");
 				// One content child selects the native preserve-subtree branch; no need to read its siblings.
 				if (child.type !== "service_tier_change") return [child];
@@ -325,7 +430,7 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 			for (const entry of page.events) {
 				if (seen.has(entry.entryId)) throw new Error("Native read repeated an entry");
 				seen.add(entry.entryId);
-				entries.push(decodeEntry(entry));
+				entries.push(await decodeEntry(entry, this.#blobs));
 			}
 			if (page.nextCursor && page.nextCursor === cursor) throw new Error("Native read cursor did not advance");
 			cursor = page.nextCursor ?? undefined;
@@ -341,8 +446,8 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 			const oldest = entries.at(-1);
 			if (checkpoint.contextStartId ? oldest?.id !== checkpoint.contextStartId : oldest?.parentId != null)
 				throw new Error("Native context did not reach its checkpoint anchor");
-			entries.reverse();
 		}
+		entries.reverse();
 		this.#throughSeq = Math.max(this.#throughSeq, cutSeq);
 		return { checkpoint, entries, throughSeq: cutSeq, position: this.#position(cutSeq), complete: archive };
 	}

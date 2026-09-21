@@ -262,7 +262,7 @@ export class BlobStore {
 			},
 		};
 
-		await Bun.write(blobPath, data);
+		await this.restore(hash, data);
 		await ensureDisplayPath(blobPath, displayPath, data);
 		return result;
 	}
