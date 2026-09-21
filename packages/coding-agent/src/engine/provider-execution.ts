@@ -2,6 +2,7 @@ import type { Api, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 
 type Fetch = NonNullable<SimpleStreamOptions["fetch"]>;
 const REQUEST_TIMEOUT_MS = 10_000;
+const HOSTED_BROKER_API_PATH = "/runtime/provider-broker/v1";
 
 export interface ProviderExecutionIdentity {
 	expectedPrincipalId: string;
@@ -116,7 +117,7 @@ export class ProviderExecutionClient {
 				!(mode === "owner_local" && api === "openai-responses")) ||
 			result.executionMode !== "full_agent" ||
 			!providerRuntimeId ||
-			!validProviderBaseUrl(baseUrl) ||
+			!validProviderBaseUrl(baseUrl, mode) ||
 			!credential ||
 			typeof pin !== "string" ||
 			!/^[a-f0-9]{64}$/.test(pin) ||
@@ -170,12 +171,18 @@ function publicProviderExecutionMessage(code: string): string {
 	}
 }
 
-function validProviderBaseUrl(value: string): boolean {
+function validProviderBaseUrl(value: string, mode: ProviderExecutionMaterial["mode"]): boolean {
 	try {
 		const url = new URL(value);
+		const hostname = url.hostname.toLowerCase().replace(/\.$/, "");
+		const loopback = ["127.0.0.1", "[::1]", "::1", "localhost"].includes(hostname);
+		const privateHostedBroker =
+			mode === "hosted_broker" &&
+			url.protocol === "http:" &&
+			url.pathname === HOSTED_BROKER_API_PATH &&
+			isRfc1918Hostname(hostname);
 		return (
-			(url.protocol === "https:" ||
-				(url.protocol === "http:" && ["127.0.0.1", "[::1]", "localhost"].includes(url.hostname))) &&
+			(url.protocol === "https:" || (url.protocol === "http:" && (loopback || privateHostedBroker))) &&
 			!url.username &&
 			!url.password &&
 			!url.search &&
@@ -184,4 +191,16 @@ function validProviderBaseUrl(value: string): boolean {
 	} catch {
 		return false;
 	}
+}
+
+function isRfc1918Hostname(hostname: string): boolean {
+	const octets = hostname.split(".").map(value => Number(value));
+	if (octets.length !== 4 || octets.some(value => !Number.isInteger(value) || value < 0 || value > 255)) {
+		return false;
+	}
+	return (
+		octets[0] === 10 ||
+		(octets[0] === 172 && octets[1] !== undefined && octets[1] >= 16 && octets[1] <= 31) ||
+		(octets[0] === 192 && octets[1] === 168)
+	);
 }

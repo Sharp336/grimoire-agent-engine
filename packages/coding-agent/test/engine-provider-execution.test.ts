@@ -20,9 +20,28 @@ const identity: ProviderExecutionIdentity = {
 
 describe("ProviderExecutionClient", () => {
 	it.each([
-		{ mode: "hosted_broker", api: "openai-completions" },
-		{ mode: "owner_local", api: "openai-responses" },
-	])("resolves exact $mode $api material without changing protocol", async ({ mode, api }) => {
+		{
+			mode: "hosted_broker",
+			api: "openai-completions",
+			baseUrl: "https://core.invalid/runtime/provider-broker/v1",
+		},
+		{
+			mode: "hosted_broker",
+			api: "openai-completions",
+			baseUrl: "http://10.42.71.145:18767/runtime/provider-broker/v1",
+		},
+		{
+			mode: "hosted_broker",
+			api: "openai-completions",
+			baseUrl: "http://172.31.255.255/runtime/provider-broker/v1",
+		},
+		{
+			mode: "hosted_broker",
+			api: "openai-completions",
+			baseUrl: "http://192.168.1.10/runtime/provider-broker/v1",
+		},
+		{ mode: "owner_local", api: "openai-responses", baseUrl: "https://provider.invalid/v1" },
+	])("resolves exact $mode $api material at $baseUrl", async ({ mode, api, baseUrl }) => {
 		const credential = mode === "hosted_broker" ? `gri_pbr_${"a".repeat(48)}` : "fixture-secret";
 		const client = new ProviderExecutionClient(
 			"http://127.0.0.1/provider-execution",
@@ -41,7 +60,7 @@ describe("ProviderExecutionClient", () => {
 					mode,
 					providerRuntimeId: "artel-4444444444444444",
 					api,
-					baseUrl: "https://core.invalid/runtime/provider-broker/v1",
+					baseUrl,
 					credential,
 					executionPin: "c".repeat(64),
 				});
@@ -51,7 +70,7 @@ describe("ProviderExecutionClient", () => {
 			mode,
 			providerRuntimeId: "artel-4444444444444444",
 			api,
-			baseUrl: "https://core.invalid/runtime/provider-broker/v1",
+			baseUrl,
 			credential,
 			executionPin: "c".repeat(64),
 		});
@@ -75,7 +94,23 @@ describe("ProviderExecutionClient", () => {
 
 	it.each([
 		{ mode: "owner_local", api: "openai-completions", baseUrl: "http://provider.invalid/v1" },
+		{
+			mode: "owner_local",
+			api: "openai-responses",
+			baseUrl: "http://10.42.71.145:18767/runtime/provider-broker/v1",
+		},
 		{ mode: "hosted_broker", api: "openai-responses", baseUrl: "https://core.invalid/runtime/provider-broker/v1" },
+		{ mode: "hosted_broker", api: "openai-completions", baseUrl: "http://10.42.71.145:18767/v1" },
+		{
+			mode: "hosted_broker",
+			api: "openai-completions",
+			baseUrl: "http://172.32.0.1/runtime/provider-broker/v1",
+		},
+		{
+			mode: "hosted_broker",
+			api: "openai-completions",
+			baseUrl: "http://provider.invalid/runtime/provider-broker/v1",
+		},
 	])("rejects unsupported $mode $api transport at $baseUrl", async ({ mode, api, baseUrl }) => {
 		const client = new ProviderExecutionClient("http://127.0.0.1/provider-execution", "local-token", async () =>
 			Response.json({
