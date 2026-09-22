@@ -109,7 +109,7 @@ export async function runtimeResource(
 			throw new EngineTargetError("stale_target", "Input resource changed identity or revision");
 		bytes = Buffer.from(JSON.stringify(row.body));
 	} else if (["history_entry", "history_image", "history_attachment"].includes(String(resource.kind))) {
-		const entry = await nativeEntry(
+		const { entry } = await nativeEntry(
 			store,
 			identity.agent_instance_id,
 			String(resource.entryId),

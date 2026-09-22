@@ -14,10 +14,8 @@ interface NativeScope {
 	familyId: string;
 	generationId: string;
 }
-interface NativeCut extends NativeScope {
-	cutSeq: number;
-	sessionId: string;
-}
+const nativeCutScope = (agentId: string, path: string) =>
+	new Bun.CryptoHasher("sha256").update(JSON.stringify(["native-cut", agentId, path])).digest("hex");
 interface LifecycleContext extends HistoryLifecycleContext {
 	anchors: Array<{ attemptId: string; entryId: string; eventId: number }>;
 }
@@ -115,11 +113,8 @@ export async function nativeHistoryPage(
 	let next = position.next;
 	let entryRef: EngineNativeHistoryPage["entryRef"];
 	let first: string | null = null;
-	const lineage = encodeCursor(["native-cut", agentId, selected.path], {
-		...selected.scope,
-		sessionId: session.id,
-		cutSeq: position.cutSeq,
-	} satisfies NativeCut);
+	// Resource revisions obey the public 200-character ID bound, even for long native locators.
+	const lineage = encodeCursor(nativeCutScope(agentId, selected.path), position.cutSeq);
 	let fallback: EngineNativeHistoryPage["projectionFallback"];
 	const continuation = (value: string | null) =>
 		value ? encodeCursor(cursorScope, { ...position, next: value }) : null;
@@ -210,26 +205,24 @@ export async function nativeEntry(
 	revision: string,
 	expectedSessionId?: string,
 	attemptId?: string,
-): Promise<Record<string, unknown>> {
+): Promise<{ sessionId: string; entry: Record<string, unknown> }> {
 	const selected = await nativeScope(store, agentId, attemptId);
-	const cut = decodeCursor<NativeCut | undefined>(revision, ["native-cut", agentId, selected.path], undefined);
-	if (
-		!cut ||
-		cut.familyId !== selected.scope.familyId ||
-		cut.generationId !== selected.scope.generationId ||
-		(expectedSessionId && cut.sessionId !== expectedSessionId)
-	)
+	const cutSeq = decodeCursor<number | undefined>(revision, nativeCutScope(agentId, selected.path), undefined);
+	if (cutSeq === undefined || !Number.isSafeInteger(cutSeq) || cutSeq < 0)
 		throw new EngineTargetError("stale_target", "Native history resource changed scope");
 	const page = await store.storageClient.readContext({
 		...selected.scope,
-		cutSeq: cut.cutSeq,
+		cutSeq,
 		leafId: entryId,
 		maxRecords: 1,
 		maxBytes: runtimeLimits.httpPageBytes,
 	});
-	if (header(page.state).id !== cut.sessionId || page.events[0]?.entryId !== entryId)
+	const sessionId = header(page.state).id;
+	if (expectedSessionId && sessionId !== expectedSessionId)
+		throw new EngineTargetError("stale_target", "Native history resource changed session");
+	if (page.events[0]?.entryId !== entryId)
 		throw new EngineTargetError("history_expired", "Native history entry is unavailable");
-	return page.events[0].payload;
+	return { sessionId, entry: page.events[0].payload };
 }
 export async function nativeHistoryEntry(
 	store: RocksEngineStore,
@@ -249,18 +242,12 @@ export async function nativeHistoryEntry(
 		limit > runtimeLimits.deliveryBatchBytes
 	)
 		throw new EngineTargetError("invalid_request", "History range exceeds its byte budget");
-	const entry = await nativeEntry(store, agentId, entryId, revision, expectedSessionId, attemptId);
+	const { sessionId, entry } = await nativeEntry(store, agentId, entryId, revision, expectedSessionId, attemptId);
 	const bytes = Buffer.from(JSON.stringify(entry));
 	if (offset > bytes.length) throw new EngineTargetError("invalid_request", "History range starts after EOF");
 	const end = Math.min(offset + limit, bytes.length);
 	return {
-		sessionId:
-			expectedSessionId ??
-			decodeCursor<NativeCut | undefined>(
-				revision,
-				["native-cut", agentId, (await nativeScope(store, agentId, attemptId)).path],
-				undefined,
-			)?.sessionId,
+		sessionId,
 		entryId,
 		revision,
 		offset,

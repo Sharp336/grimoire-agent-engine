@@ -6,7 +6,7 @@ import { projectEvent, projectionId, settleRuntimeMessages } from "../src/engine
 import type { RocksCommand } from "../src/engine/rocks-runtime-rows";
 import { queryWork, RocksEngineStore } from "../src/engine/rocks-runtime-store";
 import { RocksEngineMutations } from "../src/engine/rocks-store";
-import type { RuntimeEventsRequest } from "../src/engine/runtime-protocol";
+import { type RuntimeEventsRequest, validateRuntimeValue } from "../src/engine/runtime-protocol";
 import { RuntimeRecords, RuntimeTransaction } from "../src/engine/runtime-records";
 import type { EngineCommandIdentity } from "../src/engine/store";
 import { StorageClient } from "../src/session/storage-client";
@@ -606,7 +606,22 @@ describe("Rocks bounded reader contracts", () => {
 			"native-session",
 			"attempt",
 		);
-		expect(resource.id).toBe("e2");
+		expect(resource.entry.id).toBe("e2");
+		expect(resource.sessionId).toBe("native-session");
+		validateRuntimeValue("bulkResource", {
+			kind: "history_entry",
+			agentInstanceRef: "grimoire://tasks/grimoire/runtime-test/agents/a",
+			sessionId: "native-session",
+			entryId: "e2",
+			revision: first.lifecycleContext.lineage,
+			mediaType: "application/json",
+			bytes: 100,
+		});
 		expect(read.mock.calls.at(-1)?.[0]).toMatchObject({ cutSeq: 2, leafId: "e2", maxRecords: 1 });
+		await expect(nativeEntry(store, "a", "e2", first.lifecycleContext.lineage, "other-session")).rejects.toThrow(
+			"changed session",
+		);
+		rows.seed("binding", "a", { agent_instance_id: "a", attempt_id: "attempt", session_file: "native:family/other" });
+		await expect(nativeEntry(store, "a", "e2", first.lifecycleContext.lineage)).rejects.toThrow("changed scope");
 	});
 });
