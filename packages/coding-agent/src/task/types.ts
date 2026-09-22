@@ -157,16 +157,18 @@ export const taskSchema = type({
 	"+": "delete",
 });
 
-/** Engine-mode task calls select a Grimoire WorkStep and AgentProfile, never an ambient OMP role. */
+/** Engine-mode task calls carry a local assignment and an explicit cached AgentProfile. */
 export const engineTaskSchema = type({
 	profileRef: "string",
-	workStepId: "string",
+	"workStepId?": "string",
+	assignment: "string",
 	"+": "delete",
 });
 
 export interface EngineTaskParams {
 	profileRef?: string;
 	workStepId?: string;
+	assignment?: string;
 }
 const taskSchemaNoIsolation = type({
 	"name?": "string",

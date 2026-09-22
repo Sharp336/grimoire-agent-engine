@@ -19,6 +19,7 @@ import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
 import type { EffectiveExtensionRoots } from "../capability/types";
+import { MAX_ENGINE_CHILD_ASSIGNMENT_BYTES } from "../engine/contracts";
 import type { Theme } from "../modes/theme/theme";
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
@@ -517,6 +518,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const engine = args as EngineTaskParams;
 			if (typeof engine.profileRef === "string") lines.push(`Profile: ${truncateForPrompt(engine.profileRef)}`);
 			if (typeof engine.workStepId === "string") lines.push(`WorkStep: ${truncateForPrompt(engine.workStepId)}`);
+			if (typeof engine.assignment === "string") lines.push(`Assignment: ${truncateForPrompt(engine.assignment)}`);
 			return lines;
 		}
 		if (typeof params.agent === "string") {
@@ -613,7 +615,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		if (this.session.engineChildLauncher) {
 			const params = args as EngineTaskParams;
 			return renderTaskCall(
-				{ agent: params.profileRef, task: `Grimoire WorkStep ${params.workStepId ?? ""}` },
+				{
+					agent: params.profileRef,
+					task: params.assignment?.trim() || `Grimoire WorkStep ${params.workStepId ?? ""}`,
+				},
 				options,
 				theme,
 			);
@@ -1100,18 +1105,23 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const launcher = this.session.engineChildLauncher!;
-		const profileRef = params.profileRef?.trim();
-		const workStepId = params.workStepId?.trim();
-		if (!profileRef || !workStepId) return createTaskModeError("profileRef and workStepId are required");
+		const profileRef = typeof params.profileRef === "string" ? params.profileRef.trim() : "";
+		const workStepId = typeof params.workStepId === "string" ? params.workStepId.trim() || undefined : undefined;
+		const assignment = typeof params.assignment === "string" ? params.assignment.trim() : "";
+		if (!profileRef) return createTaskModeError("profileRef is required");
+		if (!assignment) return createTaskModeError("assignment is required");
+		if (Buffer.byteLength(assignment, "utf8") > MAX_ENGINE_CHILD_ASSIGNMENT_BYTES) {
+			return createTaskModeError(`assignment exceeds ${MAX_ENGINE_CHILD_ASSIGNMENT_BYTES} bytes`);
+		}
 		const profile = launcher.profiles.find(candidate => candidate.profileRef === profileRef);
 		if (!profile) return createTaskModeError(`AgentProfile ${profileRef} is not in the pinned child catalog`);
 		const startedAt = Date.now();
 		onUpdate?.({
-			content: [{ type: "text", text: `Launching ${profile.displayName} for WorkStep ${workStepId}...` }],
+			content: [{ type: "text", text: `Launching ${profile.displayName}...` }],
 			details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },
 		});
 		try {
-			const child = await launcher.launch({ profileRef, workStepId, toolCallId, signal });
+			const child = await launcher.launch({ profileRef, workStepId, assignment, toolCallId, signal });
 			const durationMs = Date.now() - startedAt;
 			const output = child.assistantFinal ?? child.error ?? "";
 			const transcriptNotice =
@@ -1127,8 +1137,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				id: child.agentInstanceId,
 				agent: profile.displayName,
 				agentSource: "user",
-				task: workStepId,
-				assignment: workStepId,
+				task: assignment,
+				assignment,
 				exitCode: failed ? 1 : 0,
 				output,
 				stderr: child.error ?? "",

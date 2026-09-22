@@ -126,9 +126,11 @@ export class StreamAdmission {
 			if (typeof value !== "object" || value === null || seen.has(value)) return;
 			seen.add(value);
 			for (const key of Object.keys(value)) {
-				// Only the typed assistant stream's root partial is shared provider
-				// working state. Nested snapshots and arbitrary callback data count.
-				if (key === "partial" && depth === 0 && value === sharedPartialEnvelope) continue;
+				// The typed assistant stream's partial may sit inside a message_update
+				// envelope. It is the same provider working object, so charge it once
+				// wherever that shared object appears; unrelated nested payloads still
+				// count toward the event budget.
+				if (value === sharedPartialEnvelope) continue;
 				visit(key, depth + 1);
 				visit((value as Record<string, unknown>)[key], depth + 1);
 			}

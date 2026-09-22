@@ -5582,7 +5582,7 @@ describe("EngineRuntime", () => {
 
 	it("launches six pinned children in parallel and rejects the seventh", async () => {
 		let taskResults: string[] = [];
-		const launches: Array<{ toolCallId: string; workStepId: string; maxSpawnDepth: number }> = [];
+		const launches: Array<{ toolCallId: string; workStepId?: string; maxSpawnDepth: number }> = [];
 		const { runtime, cwd } = await createRuntime(
 			async session => {
 				const task = session.getToolByName("task");
@@ -5592,6 +5592,7 @@ describe("EngineRuntime", () => {
 						task.execute(`tool-child-${index}`, {
 							profileRef: "gctx:2222222222222222",
 							workStepId: `child-step-${index}`,
+							assignment: `Do child step ${index}`,
 						}),
 					),
 				);
@@ -5663,6 +5664,7 @@ describe("EngineRuntime", () => {
 						task.execute(`tool-child-${index}`, {
 							profileRef: "gctx:2222222222222222",
 							workStepId: `child-step-${index}`,
+							assignment: `Do child step ${index}`,
 						}),
 					),
 				);
@@ -5725,7 +5727,7 @@ describe("EngineRuntime", () => {
 			parentProfile,
 		);
 		await runtime.drain();
-		expect(second.bindingGeneration).toBe(first.bindingGeneration);
+		expect(second.bindingGeneration).toBe(first.bindingGeneration + 1);
 		expect(runtime.agentRegistry.get(second.engineAgentId)?.session).toBe(
 			runtime.agentRegistry.get(first.engineAgentId)?.session,
 		);
@@ -5757,6 +5759,7 @@ describe("EngineRuntime", () => {
 				const result = await task.execute("delegate", {
 					profileRef: "gctx:2222222222222222",
 					workStepId: "child",
+					assignment: "Do child work",
 				});
 				results.set(input, result.isError);
 				if (input === "first") {
@@ -5845,6 +5848,7 @@ describe("EngineRuntime", () => {
 				const result = await task.execute("spawn-history-child", {
 					profileRef: "gctx:2222222222222222",
 					workStepId: "child-history",
+					assignment: "Inspect child history",
 				});
 				advertised = result.content.find(part => part.type === "text")?.text ?? "";
 				session.sessionManager.appendMessage({
@@ -6148,7 +6152,7 @@ describe("EngineRuntime", () => {
 			},
 			profile,
 		);
-		expect(second.bindingGeneration).toBe(first.bindingGeneration);
+		expect(second.bindingGeneration).toBe(first.bindingGeneration + 1);
 		expect(runtime.agentRegistry.get(second.engineAgentId)?.session).toBe(firstSession);
 		await expect(
 			runtime.start(
@@ -7818,6 +7822,7 @@ describe("EngineRuntime", () => {
 									arguments: {
 										profileRef: "gctx:2222222222222222",
 										workStepId: name === "root" ? "middle" : "leaf",
+										assignment: name === "root" ? "middle" : "leaf",
 									},
 								},
 							],
@@ -7851,13 +7856,13 @@ describe("EngineRuntime", () => {
 						dispose() {},
 					}),
 					launchChild: async request => {
-						const child = requestFor(request.workStepId, request.cwd, request.parentAgentInstanceId);
+						const child = requestFor(request.assignment, request.cwd, request.parentAgentInstanceId);
 						await request.enrollChild(child.agentInstanceRef!, child.attemptId);
 						await runtimeRef.start(
 							child,
 							request.maxSpawnDepth > 0 ? { ...parentProfile, maxSpawnDepth: request.maxSpawnDepth } : profile,
 						);
-						waiting.add(request.workStepId);
+						waiting.add(request.assignment);
 						if (waiting.size === 2) waitsReady.resolve();
 						try {
 							const result = await runtimeRef.store.waitAttemptResult(
@@ -7866,7 +7871,7 @@ describe("EngineRuntime", () => {
 								child.attemptId,
 								request.signal,
 							);
-							results.push({ agent: request.workStepId, ...result });
+							results.push({ agent: request.assignment, ...result });
 							return {
 								agentInstanceId: child.agentInstanceId,
 								agentInstanceRef: child.agentInstanceRef,
@@ -7886,7 +7891,7 @@ describe("EngineRuntime", () => {
 								error: "Parent task aborted",
 							};
 						} finally {
-							waiting.delete(request.workStepId);
+							waiting.delete(request.assignment);
 						}
 					},
 				},

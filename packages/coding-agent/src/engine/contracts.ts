@@ -57,6 +57,8 @@ export interface EngineProfileRoutes {
 	}>;
 }
 
+export const MAX_ENGINE_CHILD_ASSIGNMENT_BYTES = 32 * 1024;
+
 export interface EngineLaunchProfile {
 	/** Empty disables nested agents; "*" enables the native OMP spawn surface. */
 	spawns: string;

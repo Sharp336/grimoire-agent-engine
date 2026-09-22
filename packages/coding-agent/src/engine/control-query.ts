@@ -626,7 +626,7 @@ async function dispatchRequest(
 				),
 			};
 		case "command":
-			return await runCommand(options, validateCommand(params.command));
+			return await runEngineCommand(options, validateCommand(params.command));
 	}
 }
 
@@ -646,7 +646,10 @@ function finishRuntimeHistory(result: { work: RuntimeWork }, started: number): v
 	validateRuntimeValue("historyPage", result);
 }
 
-async function runCommand(options: ServerOptions, command: EngineCommandEnvelope): Promise<EngineCommandReceipt> {
+export async function runEngineCommand(
+	options: Pick<ServerOptions, "runtime" | "deviceId" | "engineId" | "resolveLaunchProfile" | "provisionMailbox">,
+	command: EngineCommandEnvelope,
+): Promise<EngineCommandReceipt> {
 	if (command.deviceId !== options.deviceId || command.engineId !== options.engineId) {
 		throw new EngineTargetError("invalid_request", "Command identity does not match this Engine service");
 	}
@@ -676,6 +679,9 @@ async function runCommand(options: ServerOptions, command: EngineCommandEnvelope
 			resolveLaunchProfile: options.resolveLaunchProfile,
 			provisionMailbox: options.provisionMailbox,
 		});
+		// Native start commits its receipt atomically with the Attempt. Preserve that exact receipt.
+		const committed = await options.runtime.store.admitCommand(identity, options.runtime.engineGeneration);
+		if (committed.status === "replay") return committed.receipt;
 		const receipt: EngineCommandReceipt = {
 			outcome: "applied",
 			...(detail && typeof detail === "object" && !Array.isArray(detail)

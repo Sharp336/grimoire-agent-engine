@@ -128,6 +128,38 @@ test("only a typed assistant event's root partial is shared; callbacks and neste
 	for (const _event of stream.drain()) {
 		/* Release the known shared envelope. */
 	}
+	const nestedAdmission = new StreamAdmission();
+	const nestedStream = runWithStreamAdmission(nestedAdmission, () => new AssistantMessageEventStream());
+	// Provider adapters wrap the shared partial in a message_update envelope;
+	// that object must not be charged a second time.
+	nestedStream.push({
+		type: "message_update",
+		message: partial,
+		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x", partial },
+	});
+	expect(nestedAdmission.metrics.bytes).toBeLessThan(1024);
+	for (const _event of nestedStream.drain()) {
+		/* Release the nested shared envelope. */
+	}
+	const genericAdmission = new StreamAdmission();
+	const genericStream = runWithStreamAdmission(
+		genericAdmission,
+		() =>
+			new EventStream<unknown>(
+				() => false,
+				() => undefined,
+			),
+	);
+	// AgentSession uses a generic EventStream for message_update envelopes.
+	genericStream.push({
+		type: "message_update",
+		message: partial,
+		assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "x", partial },
+	});
+	expect(genericAdmission.metrics.bytes).toBeLessThan(1024);
+	for (const _event of genericStream.drain()) {
+		/* Release the generic shared envelope. */
+	}
 	expect(() => admission.reserve({ type: "text_delta", partial })).toThrow("maxEventBytes");
 
 	const toolAdmission = new StreamAdmission();

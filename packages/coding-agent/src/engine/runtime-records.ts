@@ -12,10 +12,13 @@ import type {
 
 const recordKey = (kind: StorageRuntimeKind, id: string) => `${kind}\0${id}`;
 const scopeId = (scope: string) => `runtime_${new Bun.CryptoHasher("sha256").update(scope).digest("hex")}`;
+const PENDING_LIMITS = { required: 8, buffered: 32 } as const;
+const PER_SCOPE_PENDING_LIMITS = { required: 4, buffered: 16 } as const;
 
 /** Finite runtime catalog; transactions contain data and revision checks, never query expressions. */
 export class RuntimeRecords {
 	readonly #tails = new Map<string, Promise<void>>();
+	readonly #pendingByFamily = new Map<string, { required: number; buffered: number }>();
 	#pending = { required: 0, buffered: 0 };
 	constructor(readonly client: StorageClient) {}
 
@@ -61,10 +64,16 @@ export class RuntimeRecords {
 		dependencies: StorageDependency[] = [],
 		durability: "required" | "buffered" = "required",
 	): Promise<T> {
-		if (this.#pending[durability] >= (durability === "required" ? 8 : 32))
+		const familyId = scopeId(scope);
+		const familyPending = this.#pendingByFamily.get(familyId) ?? { required: 0, buffered: 0 };
+		if (
+			this.#pending[durability] >= PENDING_LIMITS[durability] ||
+			familyPending[durability] >= PER_SCOPE_PENDING_LIMITS[durability]
+		)
 			throw new StorageClientError("backpressure", "Runtime mutation admission exhausted");
 		this.#pending[durability]++;
-		const familyId = scopeId(scope);
+		familyPending[durability]++;
+		this.#pendingByFamily.set(familyId, familyPending);
 		const run = (this.#tails.get(familyId) ?? Promise.resolve()).then(async () => {
 			for (let attempt = 0; attempt < 4; attempt++) {
 				// Every mutation depends on its read/check prefix. Keep those reads on the
@@ -110,6 +119,8 @@ export class RuntimeRecords {
 		this.#tails.set(familyId, tail);
 		return run.finally(() => {
 			this.#pending[durability]--;
+			familyPending[durability]--;
+			if (familyPending.required === 0 && familyPending.buffered === 0) this.#pendingByFamily.delete(familyId);
 			if (this.#tails.get(familyId) === tail) this.#tails.delete(familyId);
 		});
 	}

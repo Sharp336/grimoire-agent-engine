@@ -126,6 +126,36 @@ export class EngineProfileResolver {
 		readonly providerExecutionClient?: ProviderExecutionClient,
 	) {}
 
+	/** Build a child launch snapshot from the cached profile, capped by the parent's remaining depth. */
+	async resolveChildLaunchProfile(profileRef: string, remainingDepth: number): Promise<EngineLaunchProfile> {
+		const ref = requiredRef(profileRef, "profileRef");
+		if (!Number.isSafeInteger(remainingDepth) || remainingDepth < 0 || remainingDepth > 31) {
+			throw new Error("remainingDepth must be between 0 and 31");
+		}
+		const cached = await this.#read(ref, "grimoire.agent_profile.v1");
+		const profile = parseJson<AgentProfile>(cached.content, "AgentProfile");
+		if (
+			profile.schema !== "grimoire.agent_profile.v1" ||
+			profile.status === "disabled" ||
+			!Array.isArray(profile.models) ||
+			!profile.models.length
+		) {
+			throw new Error("Child AgentProfile must contain at least one route");
+		}
+		const depth = Math.min(remainingDepth, profile.maxSpawnDepth ?? 0);
+		const childProfileRefs = profile.childProfiles ?? [];
+		const launch: EngineLaunchProfile = {
+			spawns: depth > 0 ? "*" : "",
+			profileDigest: cached.content_hash,
+			launchProfileRef: ref,
+			maxSpawnDepth: depth,
+			maxChildren: depth > 0 ? (profile.maxChildren ?? 0) : 0,
+			childProfileRefs: depth > 0 ? childProfileRefs : [],
+		};
+		resolveSpawnPolicy(profile, launch);
+		return launch;
+	}
+
 	async continuationDigest(launch: EngineLaunchProfile, cwd: string): Promise<string> {
 		const profileRef = requiredRef(launch.launchProfileRef, "launchProfileRef");
 		const cachedProfile = await this.#read(profileRef, "grimoire.agent_profile.v1");

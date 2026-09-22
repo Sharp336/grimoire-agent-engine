@@ -211,6 +211,31 @@ it("keeps buffered runtime mutations on reserved control reads when observer rea
 	}
 });
 
+it("keeps one runtime scope from consuming the whole required mutation budget", async () => {
+	const release = Promise.withResolvers<void>();
+	const client = {
+		runtimeQuery: async (query: { selector: { keys: Array<{ kind: string; id: string }> } }) => ({
+			records: query.selector.keys.map(key => ({ ...key, revision: null, value: null })),
+			nextCursor: null,
+		}),
+		readRange: async () => ({ liveThroughSeq: 0 }),
+		write: async () => {
+			await release.promise;
+			return {};
+		},
+	} as unknown as StorageClient;
+	const records = new RuntimeRecords(client);
+	const mutate = (scope: string, id: number) =>
+		records.mutate(scope, async tx => {
+			await tx.put("metadata", `${scope}-${id}`, { scope, id });
+		});
+	const firstScope = Array.from({ length: 4 }, (_, id) => mutate("hot", id));
+	const secondScope = Array.from({ length: 4 }, (_, id) => mutate("cold", id));
+	expect(() => mutate("hot", 4)).toThrow("admission exhausted");
+	release.resolve();
+	await Promise.all([...firstScope, ...secondScope]);
+});
+
 it("fences all later calls after the owner incarnation changes", async () => {
 	const server = Bun.serve({
 		hostname: "127.0.0.1",

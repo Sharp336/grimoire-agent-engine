@@ -66,7 +66,28 @@ export class EventStream<T, R = T> implements AsyncIterable<T> {
 	}
 
 	deliver(event: T): void {
-		const release = this.#admission?.reserve(event, this instanceof AssistantMessageEventStream ? event : undefined);
+		let sharedPartialEnvelope: unknown;
+		if (typeof event === "object" && event !== null) {
+			const value = event as Record<string, unknown>;
+			const assistantEvent = value.assistantMessageEvent;
+			if (assistantEvent && typeof assistantEvent === "object" && assistantEvent !== null) {
+				const typedEvent = assistantEvent as Record<string, unknown>;
+				if (
+					typedEvent.type === "text_start" ||
+					typedEvent.type === "text_delta" ||
+					typedEvent.type === "text_end" ||
+					typedEvent.type === "thinking_start" ||
+					typedEvent.type === "thinking_delta" ||
+					typedEvent.type === "thinking_end"
+				) {
+					const partial = typedEvent.partial;
+					sharedPartialEnvelope = value.message === partial ? partial : undefined;
+				}
+			} else if ("partial" in value) {
+				sharedPartialEnvelope = value.partial;
+			}
+		}
+		const release = this.#admission?.reserve(event, sharedPartialEnvelope);
 		const waiter = this.waiting.shift();
 		if (waiter) {
 			const result = { value: event, done: false };

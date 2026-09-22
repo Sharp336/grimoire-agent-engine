@@ -141,6 +141,76 @@ export class HostedGrimoireRpc implements GrimoireRpc {
 	}
 }
 
+/** Delivered through the existing bounded event outbox, independently of local execution. */
+export async function projectLocalEngineChild(
+	rpc: GrimoireRpc,
+	command: EngineCommandEnvelope,
+	event: EngineEventEnvelope,
+): Promise<void> {
+	const states: Record<string, string> = {
+		"attempt.started": "active",
+		"attempt.resumed": "active",
+		"attempt.paused": "waiting",
+		"attempt.waiting_input": "waiting",
+		"attempt.completed": "completed",
+		"attempt.failed": "failed",
+		"attempt.cancelled": "cancelled",
+		"attempt.interrupted": "blocked",
+	};
+	const status = states[event.type];
+	if (!status) return;
+	const ref = command.agentInstanceRef;
+	const match = /^grimoire:\/\/tasks\/([^/]+)\/([^/]+)\/agents\/([^/]+)$/.exec(ref ?? "");
+	const child = command.payload.localChild as Record<string, unknown> | undefined;
+	if (
+		!match ||
+		!child ||
+		!command.parentAgentInstanceRef ||
+		command.agentInstanceId !== event.agentInstanceId ||
+		command.attemptId !== event.attemptId ||
+		command.executionId !== event.executionId ||
+		command.authorityGeneration !== event.authorityGeneration
+	) {
+		throw new Error("Local child projection does not match its admitted command");
+	}
+	const created = await rpc.call("grimoire_agent_instance", {
+		action: "create",
+		project_id: match[1],
+		task_id: match[2],
+		agent_instance_id: match[3],
+		parent_agent_ref: command.parentAgentInstanceRef,
+		work_step_id: child.workStepId ?? null,
+		objective: String(command.payload.input).slice(0, 16_000),
+		status,
+		context_refs: [child.profileRef],
+		visibility: "private",
+		requested_execution: {
+			role: "executor",
+			parent_attempt_id: child.parentAttemptId,
+			agent_profile_ref: child.profileRef,
+			selection: { mode: "manual" },
+		},
+	});
+	const agent = created.agent_instance as Record<string, unknown> | undefined;
+	if (
+		!agent ||
+		(agent.agent_instance_ref ?? agent.grimoire_uri) !== ref ||
+		agent.parent_agent_ref !== command.parentAgentInstanceRef ||
+		agent.owner_principal_id !== command.principalId
+	) {
+		throw new Error("Local child projection returned a different identity or owner");
+	}
+	if (agent.status !== status) {
+		await rpc.call("grimoire_agent_instance", {
+			action: "update",
+			agent_instance_ref: ref,
+			expected_revision: agent.revision,
+			status,
+			current_focus: `Local Engine Attempt ${command.attemptId}: ${status}`,
+		});
+	}
+}
+
 export async function launchHostedEngineChild(
 	rpc: GrimoireRpc,
 	request: {
@@ -215,6 +285,8 @@ export async function launchHostedEngineChild(
 
 export interface HostedEngineBridgeOptions {
 	rpc: GrimoireRpc;
+	/** Optional lifecycle projection for locally admitted children; never schedules execution. */
+	projectionRpc?: GrimoireRpc;
 	eventStore?: EngineRuntimeStore;
 	deviceId: string;
 	engineId: string;
@@ -605,6 +677,14 @@ export class HostedEngineBridge {
 			return true;
 		}
 		const jobId = await this.#eventJobId(event);
+		const localStart = await this.#options.eventStore?.getStartConversationIdentity(jobId);
+		if (localStart?.serializedCommand) {
+			const command = JSON.parse(localStart.serializedCommand) as EngineCommandEnvelope;
+			if (command.payload.localChild) {
+				if (this.#options.projectionRpc) await projectLocalEngineChild(this.#options.projectionRpc, command, event);
+				return true;
+			}
+		}
 		let claim = this.#active.get(jobId);
 		if (
 			!claim &&

@@ -5,14 +5,16 @@ import * as path from "node:path";
 import { nkeyAuthenticator, nkeys } from "@nats-io/transport-node";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import type { MCPHttpServerConfig } from "../mcp/types";
-import { type EngineLaunchProfile, EngineTargetError } from "./contracts";
-import { type EngineControlQueryServer, startEngineControlQueryServer } from "./control-query";
-import { HostedEngineBridge, HostedGrimoireRpc, launchHostedEngineChild } from "./hosted-bridge";
+import type { EngineChildLaunchResult } from "../tools";
+import { type EngineLaunchProfile, EngineTargetError, MAX_ENGINE_CHILD_ASSIGNMENT_BYTES } from "./contracts";
+import { type EngineControlQueryServer, runEngineCommand, startEngineControlQueryServer } from "./control-query";
+import { HostedEngineBridge, HostedGrimoireRpc } from "./hosted-bridge";
 import { type EngineCommandEnvelope, NatsEngineAdapter } from "./nats-adapter";
 import { EngineProfileResolver } from "./profile-resolver";
 import { ProviderAdmissionClient } from "./provider-admission";
 import { ProviderExecutionClient } from "./provider-execution";
-import { EngineRuntime } from "./runtime";
+import { engineAgentInstanceId, engineRouteToken } from "./route";
+import { EngineRuntime, type EngineRuntimeOptions } from "./runtime";
 
 export interface EngineServiceConfig {
 	deviceId: string;
@@ -85,19 +87,16 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 			resolveSessionContinuation: profileResolver
 				? (profile, cwd) => profileResolver.continuationDigest(profile, cwd)
 				: undefined,
-			launchChild: rpc
-				? request =>
-						launchHostedEngineChild(rpc, {
+			launchChild: profileResolver
+				? request => {
+						if (!runtime) throw new Error("Engine runtime is unavailable");
+						return launchLocalEngineChild(runtime, profileResolver, {
 							...request,
 							deviceId: config.deviceId,
 							engineId: config.engineId,
-							waitLocal: (agentInstanceId, commandId, attemptId, signal) => {
-								if (!runtime) throw new Error("Engine runtime is unavailable");
-								return runtime.store.waitAttemptResult(agentInstanceId, commandId, attemptId, signal);
-							},
-							cancelLocal: agentInstanceId =>
-								runtime?.cancelAgentInstance(agentInstanceId, "Parent task aborted") ?? Promise.resolve(),
-						})
+							provisionMailbox: agentInstanceId => adapter?.provisionMailbox(agentInstanceId),
+						});
+					}
 				: undefined,
 		});
 		await runtime.sweepExpiredChildHistory().catch(reportServiceError);
@@ -138,6 +137,7 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 		if (config.hosted && rpc) {
 			bridge = await HostedEngineBridge.connect({
 				rpc,
+				projectionRpc: new HostedGrimoireRpc({ ...config.hosted, serverUrl: coreMcpUrl(config.hosted.serverUrl) }),
 				eventStore: runtime.store,
 				deviceId: config.deviceId,
 				engineId: config.engineId,
@@ -178,6 +178,110 @@ export async function runEngineService(config: EngineServiceConfig, stop?: Promi
 		bridgeKey.clear();
 		await writeStatus(config, { status: "stopped", pid: process.pid }).catch(() => {});
 		await serviceLock.release().catch(reportServiceError);
+	}
+}
+
+export async function launchLocalEngineChild(
+	runtime: EngineRuntime,
+	profileResolver: EngineProfileResolver,
+	request: Parameters<NonNullable<EngineRuntimeOptions["launchChild"]>>[0] & {
+		deviceId: string;
+		engineId: string;
+		provisionMailbox?(agentInstanceId: string): void | Promise<void>;
+	},
+): Promise<EngineChildLaunchResult> {
+	request.signal?.throwIfAborted();
+	const assignment = request.assignment?.trim();
+	if (!assignment) throw new Error("Child assignment is required");
+	if (Buffer.byteLength(assignment, "utf8") > MAX_ENGINE_CHILD_ASSIGNMENT_BYTES) {
+		throw new Error(`Child assignment exceeds ${MAX_ENGINE_CHILD_ASSIGNMENT_BYTES} bytes`);
+	}
+	const seed = [request.parentAgentInstanceRef, request.parentAttemptId, request.toolCallId].join("\0");
+	const parent = /^(grimoire:\/\/tasks\/[^/]+\/[^/]+)\/agents\/[^/]+$/.exec(request.parentAgentInstanceRef);
+	if (!parent) throw new Error("Parent AgentInstanceRef must belong to a Task");
+	const agentInstanceRef = `${parent[1]}/agents/agent_${engineRouteToken(seed)}`;
+	const agentInstanceId = engineAgentInstanceId(agentInstanceRef);
+	const commandId = `cmd_local_${engineRouteToken(`${seed}\0command`)}`;
+	const executionId = `exec_local_${engineRouteToken(`${seed}\0execution`)}`;
+	const attemptId = `attempt_local_${engineRouteToken(`${seed}\0attempt`)}`;
+	const retained = await runtime.store.getStartConversationIdentity(commandId);
+	const prior = retained?.serializedCommand
+		? (JSON.parse(retained.serializedCommand) as EngineCommandEnvelope)
+		: undefined;
+	const launchProfile = prior
+		? (prior.payload.launchProfile as EngineLaunchProfile)
+		: await profileResolver.resolveChildLaunchProfile(request.profileRef, request.maxSpawnDepth);
+	const command: EngineCommandEnvelope = {
+		schema: "grimoire.engine.command.v1",
+		commandId,
+		op: "start",
+		deviceId: request.deviceId,
+		engineId: request.engineId,
+		engineGeneration: prior?.engineGeneration ?? runtime.engineGeneration,
+		agentInstanceId,
+		agentInstanceRef,
+		parentAgentInstanceId: request.parentAgentInstanceId,
+		parentAgentInstanceRef: request.parentAgentInstanceRef,
+		executionId,
+		attemptId,
+		authorityGeneration: request.authorityGeneration,
+		principalId: request.principalId,
+		issuedAt: prior?.issuedAt ?? Date.now(),
+		payload: {
+			input: assignment,
+			cwd: request.cwd,
+			profileDigest: launchProfile.profileDigest,
+			launchProfile,
+			localChild: {
+				parentAttemptId: request.parentAttemptId,
+				toolCallId: request.toolCallId,
+				profileRef: request.profileRef,
+				maxSpawnDepth: request.maxSpawnDepth,
+				workStepId: request.workStepId,
+			},
+		},
+	};
+	const cancel = () => {
+		void runtime.cancelAgentInstance(agentInstanceId, "Parent task aborted").catch(reportServiceError);
+	};
+	request.signal?.addEventListener("abort", cancel, { once: true });
+	try {
+		request.signal?.throwIfAborted();
+		await request.enrollChild(agentInstanceRef, attemptId);
+		request.signal?.throwIfAborted();
+		await runEngineCommand(
+			{
+				runtime,
+				deviceId: request.deviceId,
+				engineId: request.engineId,
+				resolveLaunchProfile: () => {
+					request.signal?.throwIfAborted();
+					return launchProfile;
+				},
+				provisionMailbox: async id => {
+					await request.provisionMailbox?.(id);
+					request.signal?.throwIfAborted();
+				},
+			},
+			command,
+		);
+		const result = await runtime.store.waitAttemptResult(agentInstanceId, commandId, attemptId, request.signal);
+		if (result.attemptId) await request.enrollChild(agentInstanceRef, result.attemptId);
+		return {
+			agentInstanceId,
+			agentInstanceRef,
+			status: result.state === "completed" ? "completed" : result.state === "cancelled" ? "cancelled" : "failed",
+			assistantFinal: typeof result.payload.assistantFinal === "string" ? result.payload.assistantFinal : undefined,
+			transcriptRef: typeof result.payload.transcriptRef === "string" ? result.payload.transcriptRef : undefined,
+			...(result.payload.outputTruncated === true ? { outputTruncated: true } : {}),
+			...(result.state === "completed" ? {} : { error: String(result.payload.error ?? result.state) }),
+		};
+	} catch (error) {
+		if (!request.signal?.aborted) throw error;
+		await runtime.cancelAgentInstance(agentInstanceId, "Parent task aborted").catch(() => {});
+		return { agentInstanceId, agentInstanceRef, status: "cancelled", error: "Parent task aborted" };
+	} finally {
+		request.signal?.removeEventListener("abort", cancel);
 	}
 }
 

@@ -148,6 +148,11 @@ const ENGINE_TURN_RETRY_DELAYS_MS = [3_000, 15_000, 30_000] as const;
 const TERMINAL_ATTEMPT_STATES = new Set<EngineAttemptState>(["completed", "cancelled", "failed", "interrupted"]);
 const MAX_NATIVE_RESTORE_BYTES = 128 * 1024 * 1024;
 const MAX_NATIVE_RESTORE_CHUNK_BYTES = 24_000;
+// Provider bursts are chunked into bounded durable writes below. Keep the
+// transport admission window large enough for one bounded 3 MiB response
+// while leaving the shared AI admission defaults unchanged.
+const ENGINE_STREAM_ADMISSION_MAX_EVENT_BYTES = 16 * 1024 * 1024;
+const ENGINE_STREAM_ADMISSION_MAX_QUEUED_BYTES = 64 * 1024 * 1024;
 
 interface NativeRestoreStageMetadata {
 	schema: "grimoire.engine.native_session_restore_stage.v1";
@@ -322,7 +327,7 @@ interface LiveBinding extends EngineBindingSnapshot {
 	messageWriteError?: unknown;
 	retryWriteError?: unknown;
 	traceTools: Map<string, { name: string; startedAt: number }>;
-	childLaunchCount: number;
+	childLaunches: Set<string>;
 	modelCallSequence: number;
 	profileRoutes?: EngineProfileRoutes;
 	launchProfileRef?: string;
@@ -463,8 +468,11 @@ export interface EngineRuntimeOptions {
 		parentAgentInstanceId: string;
 		parentAgentInstanceRef: string;
 		parentAttemptId: string;
+		principalId?: string;
+		authorityGeneration: number;
 		profileRef: string;
-		workStepId: string;
+		workStepId?: string;
+		assignment: string;
 		toolCallId: string;
 		cwd: string;
 		maxSpawnDepth: number;
@@ -3016,7 +3024,7 @@ export class EngineRuntime {
 				binding.traceWriteTail = Promise.resolve();
 				binding.messageWriteError = undefined;
 				binding.modelCallSequence = 0;
-				binding.childLaunchCount = 0;
+				binding.childLaunches.clear();
 				binding.profileRouteState = undefined;
 				this.#resetAssistantStream(binding);
 				binding.assistantMessageSequence = 0;
@@ -3349,7 +3357,8 @@ export class EngineRuntime {
 							profiles: childProfiles,
 							launch: async (child: {
 								profileRef: string;
-								workStepId: string;
+								workStepId?: string;
+								assignment: string;
 								toolCallId: string;
 								signal?: AbortSignal;
 							}) => {
@@ -3361,16 +3370,18 @@ export class EngineRuntime {
 								) {
 									throw new Error(`AgentProfile ${child.profileRef} is outside the pinned child catalog`);
 								}
-								if (parent.childLaunchCount >= maxChildren) {
+								if (!parent.childLaunches.has(child.toolCallId) && parent.childLaunches.size >= maxChildren) {
 									throw new Error(`AgentProfile maxChildren ceiling (${maxChildren}) reached`);
 								}
-								parent.childLaunchCount++;
+								parent.childLaunches.add(child.toolCallId);
 								try {
 									return await this.#launchChild!({
 										...child,
 										parentAgentInstanceId: parent.agentInstanceId,
 										parentAgentInstanceRef: request.agentInstanceRef!,
 										parentAttemptId: parent.attemptId,
+										principalId: request.principalId,
+										authorityGeneration: request.authorityGeneration,
 										cwd: request.cwd,
 										maxSpawnDepth: Math.max(0, (profile.maxSpawnDepth ?? 0) - 1),
 										enrollChild: async (agentInstanceRef, attemptId) => {
@@ -3478,13 +3489,20 @@ export class EngineRuntime {
 					audit?.mark("binding_mcp_connect_start");
 					mcpManager = new MCPManager(request.cwd, null);
 					const ready = Promise.withResolvers<void>();
-					await Promise.all([
-						ready.promise,
-						mcpManager.connectServers({ grimoire_engine: this.#mcpServer }, {}, event => {
-							if (event.type === "connected") ready.resolve();
-							if (event.type === "failed") ready.reject(new Error(safeHostedMcpFailure(event.error)));
-						}),
-					]);
+					try {
+						await Promise.all([
+							ready.promise,
+							mcpManager.connectServers({ grimoire_engine: this.#mcpServer }, {}, event => {
+								if (event.type === "connected") ready.resolve();
+								if (event.type === "failed") ready.reject(new Error(safeHostedMcpFailure(event.error)));
+							}),
+						]);
+					} catch (error) {
+						if (!request.parentAgentInstanceId) throw error;
+						await mcpManager.disconnectAll();
+						mcpManager = undefined;
+						logger.warn("Child is continuing with local tools; hosted MCP is unavailable");
+					}
 					sessionOptions.mcpManager = mcpManager;
 					audit?.mark("binding_mcp_connect_done");
 				}
@@ -3546,7 +3564,7 @@ export class EngineRuntime {
 				resumeCommandIds: new Set(),
 				traceWriteTail: Promise.resolve(),
 				traceTools: new Map(),
-				childLaunchCount: 0,
+				childLaunches: new Set(),
 				modelCallSequence: 0,
 				assistantMessageSequence: 0,
 				activeModelCalls: new Set(),
@@ -4246,6 +4264,9 @@ export class EngineRuntime {
 
 	/** Cancel an Engine child when its parent task call is aborted. */
 	async cancelAgentInstance(agentInstanceId: string, reason: string): Promise<void> {
+		for (const pending of this.#pendingStarts) {
+			if (pending.target.agentInstanceId === agentInstanceId) pending.controller.abort(new Error(reason));
+		}
 		const binding = this.#bindings.get(agentInstanceId);
 		if (
 			binding?.attemptState !== "running" &&
@@ -4542,7 +4563,11 @@ export class EngineRuntime {
 		selection?: Pick<EngineStartRequest, "profileSelectionRevision" | "agentInstanceRef">,
 		images?: ImageContent[],
 	): Promise<void> {
-		const admission = new StreamAdmission(this.#streamAdmissionLimits);
+		const configuredLimits = this.#streamAdmissionLimits;
+		const maxQueuedBytes = configuredLimits?.maxQueuedBytes ?? ENGINE_STREAM_ADMISSION_MAX_QUEUED_BYTES;
+		const maxEventBytes =
+			configuredLimits?.maxEventBytes ?? Math.min(ENGINE_STREAM_ADMISSION_MAX_EVENT_BYTES, maxQueuedBytes);
+		const admission = new StreamAdmission({ ...configuredLimits, maxQueuedBytes, maxEventBytes });
 		binding.streamAdmission = admission;
 		const detach = admission.onAbort(error => {
 			binding.messageWriteError ??= error;

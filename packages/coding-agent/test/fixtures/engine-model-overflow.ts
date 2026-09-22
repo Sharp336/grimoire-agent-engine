@@ -25,6 +25,9 @@ const modelRegistry = new ModelRegistry(auth, path.join(root, "models.yml"));
 const settings = await Settings.loadReadOnly({ cwd, agentDir });
 const runtime = await EngineRuntime.create({
 	databasePath: path.join(root, "engine.sqlite"),
+	// Keep this fixture focused on the shared 1 MiB admission contract; the
+	// production Engine window is wider so its durable writer can chunk bursts.
+	streamAdmissionLimits: { maxQueuedBytes: 4 * 1024 * 1024, maxEventBytes: 1024 * 1024 },
 	dispatchPrompt: (session, input) => session.prompt(input),
 	sessionDefaults: {
 		cwd,

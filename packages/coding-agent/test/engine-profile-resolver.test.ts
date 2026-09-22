@@ -22,6 +22,41 @@ const refs = {
 };
 
 describe("EngineProfileResolver", () => {
+	it("builds a bounded child launch snapshot from the cached profile", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-engine-child-launch-profile-"));
+		const cache = path.join(root, "artifacts");
+		await fs.mkdir(cache);
+		const profileRef = "gctx:bbbbbbbbbbbbbbbb";
+		const childRef = "gctx:cccccccccccccccc";
+		try {
+			await artifact(cache, profileRef, "grimoire.agent_profile.v1", {
+				schema: "grimoire.agent_profile.v1",
+				status: "active",
+				models: ["gctx:dddddddddddddddd"],
+				childProfiles: [childRef],
+				maxSpawnDepth: 3,
+				maxChildren: 4,
+			});
+			const resolver = new EngineProfileResolver(cache, path.join(root, "credentials"));
+			expect(await resolver.resolveChildLaunchProfile(profileRef, 2)).toMatchObject({
+				spawns: "*",
+				profileDigest: hash(profileRef),
+				launchProfileRef: profileRef,
+				maxSpawnDepth: 2,
+				maxChildren: 4,
+				childProfileRefs: [childRef],
+			});
+			expect(await resolver.resolveChildLaunchProfile(profileRef, 0)).toMatchObject({
+				spawns: "",
+				maxSpawnDepth: 0,
+				maxChildren: 0,
+				childProfileRefs: [],
+			});
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
+
 	it.each(["ordered", "same-model", "disabled"])(
 		"refreshes eligible fallback dependencies on the next message: %s",
 		async mode => {

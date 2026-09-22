@@ -168,7 +168,7 @@ describe("task approval details surface the dispatch", () => {
 });
 
 describe("Engine task profile dispatch", () => {
-	it("requires an explicit cached AgentProfile and launches the bound WorkStep", async () => {
+	it("requires an explicit cached AgentProfile and launches an assignment without a hosted WorkStep", async () => {
 		const calls: unknown[] = [];
 		const tool = await TaskTool.create({
 			cwd: "/tmp",
@@ -181,7 +181,8 @@ describe("Engine task profile dispatch", () => {
 				profiles: [{ profileRef: "gctx:2222222222222222", displayName: "Opus worker" }],
 				async launch(request: {
 					profileRef: string;
-					workStepId: string;
+					workStepId?: string;
+					assignment: string;
 					toolCallId: string;
 					signal?: AbortSignal;
 				}) {
@@ -200,7 +201,7 @@ describe("Engine task profile dispatch", () => {
 		expect(tool.description).toContain("gctx:2222222222222222");
 		const rejected = await tool.execute("call-0", {
 			profileRef: "gctx:3333333333333333",
-			workStepId: "implement",
+			assignment: "Inspect the local child path",
 		});
 		expect(rejected.content[0]).toMatchObject({ type: "text" });
 		expect(rejected.isError).toBeTrue();
@@ -208,12 +209,12 @@ describe("Engine task profile dispatch", () => {
 
 		const result = await tool.execute("call-1", {
 			profileRef: "gctx:2222222222222222",
-			workStepId: "implement",
+			assignment: "Inspect the local child path",
 		});
 		expect(calls).toHaveLength(1);
 		expect(calls[0]).toMatchObject({
 			profileRef: "gctx:2222222222222222",
-			workStepId: "implement",
+			assignment: "Inspect the local child path",
 			toolCallId: "call-1",
 		});
 		expect(result.details?.results[0]).toMatchObject({
@@ -250,7 +251,7 @@ describe("Engine task profile dispatch", () => {
 
 		const result = await tool.execute("call-failed", {
 			profileRef: "gctx:2222222222222222",
-			workStepId: "implement",
+			assignment: "Inspect the local child path",
 		});
 		expect(result.isError).toBeTrue();
 		expect(result.content[0]).toMatchObject({

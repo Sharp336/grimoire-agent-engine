@@ -160,7 +160,8 @@ export interface EngineChildLauncher {
 	profiles: readonly EngineChildProfile[];
 	launch(request: {
 		profileRef: string;
-		workStepId: string;
+		workStepId?: string;
+		assignment: string;
 		toolCallId: string;
 		signal?: AbortSignal;
 	}): Promise<EngineChildLaunchResult>;

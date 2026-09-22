@@ -401,7 +401,12 @@ export interface EngineRuntimeEvents {
 
 export type EngineStartConversationIdentity = Pick<
 	EngineCommandIdentity,
-	"operation" | "agentInstanceId" | "agentInstanceRef" | "parentAgentInstanceId" | "authorityGeneration"
+	| "operation"
+	| "agentInstanceId"
+	| "agentInstanceRef"
+	| "parentAgentInstanceId"
+	| "authorityGeneration"
+	| "serializedCommand"
 >;
 
 export interface EngineCommandReceipt {
@@ -2587,7 +2592,7 @@ export class EngineStore {
 
 	async getStartConversationIdentity(commandId: string): Promise<EngineStartConversationIdentity | undefined> {
 		const rows = (await this.#query(
-			`SELECT operation, agent_instance_id, agent_instance_ref, parent_agent_instance_id, authority_generation
+			`SELECT operation, agent_instance_id, agent_instance_ref, parent_agent_instance_id, authority_generation, serialized_command
 			 FROM engine_commands WHERE command_id = ?`,
 			[commandId],
 		)) as Array<{
@@ -2596,11 +2601,13 @@ export class EngineStore {
 			agent_instance_ref: string | null;
 			parent_agent_instance_id: string | null;
 			authority_generation: number;
+			serialized_command: string | null;
 		}>;
 		const row = rows[0];
 		if (!row) return undefined;
 		return {
 			operation: row.operation,
+			serializedCommand: row.serialized_command ?? undefined,
 			agentInstanceId: row.agent_instance_id,
 			...(row.agent_instance_ref ? { agentInstanceRef: row.agent_instance_ref } : {}),
 			...(row.parent_agent_instance_id ? { parentAgentInstanceId: row.parent_agent_instance_id } : {}),
