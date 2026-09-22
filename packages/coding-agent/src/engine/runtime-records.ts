@@ -18,6 +18,7 @@ const PER_SCOPE_PENDING_LIMITS = { required: 4, buffered: 16 } as const;
 /** Finite runtime catalog; transactions contain data and revision checks, never query expressions. */
 export class RuntimeRecords {
 	readonly #tails = new Map<string, Promise<void>>();
+	#eventTail = Promise.resolve();
 	readonly #pendingByFamily = new Map<string, { required: number; buffered: number }>();
 	#pending = { required: 0, buffered: 0 };
 	constructor(readonly client: StorageClient) {}
@@ -58,6 +59,14 @@ export class RuntimeRecords {
 		// Fixed set of admitted family tails. Callers fence new admission before shutdown.
 		await Promise.all([...this.#tails.values()]);
 	}
+	async #reserveEvents(): Promise<() => void> {
+		// ponytail: serialize the shared event counter; owner-assigned sequences if throughput requires it.
+		const previous = this.#eventTail;
+		const next = Promise.withResolvers<void>();
+		this.#eventTail = next.promise;
+		await previous;
+		return () => next.resolve();
+	}
 	mutate<T>(
 		scope: string,
 		work: (tx: RuntimeTransaction) => Promise<T>,
@@ -74,44 +83,54 @@ export class RuntimeRecords {
 		this.#pending[durability]++;
 		familyPending[durability]++;
 		this.#pendingByFamily.set(familyId, familyPending);
-		const run = (this.#tails.get(familyId) ?? Promise.resolve()).then(async () => {
-			for (let attempt = 0; attempt < 4; attempt++) {
-				// Every mutation depends on its read/check prefix. Keep those reads on the
-				// reserved lane so observer traffic cannot reject a content write midway.
-				const tx = new RuntimeTransaction(this, true);
-				const result = await work(tx);
-				const runtime = tx.mutation();
-				if (!runtime.puts.length && !runtime.deletes.length) return result;
-				const cut = await this.client.readRange(
-					{
-						familyId,
-						generationId: "runtime",
-						maxRecords: 1,
-						maxBytes: 1024,
-					},
-					true,
-				);
-				try {
-					await this.client.write(
+		let releaseEvents: (() => void) | undefined;
+		const reserveEvents = async () => {
+			// The global event cursor must follow commit order. Waiters are already
+			// bounded by mutation admission; one active transaction per session is fair.
+			releaseEvents ??= await this.#reserveEvents();
+		};
+		const run = (this.#tails.get(familyId) ?? Promise.resolve())
+			.then(async () => {
+				for (let attempt = 0; attempt < 4; attempt++) {
+					// Every mutation depends on its read/check prefix. Keep those reads on the
+					// reserved lane so observer traffic cannot reject a content write midway.
+					// Keep the sequence reservation across CAS retries: earlier reads may
+					// have become stale while waiting, but a busy neighbor cannot starve retry.
+					const tx = new RuntimeTransaction(this, true, reserveEvents);
+					const result = await work(tx);
+					const runtime = tx.mutation();
+					if (!runtime.puts.length && !runtime.deletes.length) return result;
+					const cut = await this.client.readRange(
 						{
-							operationId: crypto.randomUUID(),
 							familyId,
 							generationId: "runtime",
-							firstSeq: cut.liveThroughSeq + 1,
-							entries: [],
-							runtime,
-							dependencies,
-							durability,
+							maxRecords: 1,
+							maxBytes: 1024,
 						},
-						durability === "required",
+						true,
 					);
-					return result;
-				} catch (error) {
-					if (!(error instanceof StorageClientError) || error.code !== "conflict" || attempt === 3) throw error;
+					try {
+						await this.client.write(
+							{
+								operationId: crypto.randomUUID(),
+								familyId,
+								generationId: "runtime",
+								firstSeq: cut.liveThroughSeq + 1,
+								entries: [],
+								runtime,
+								dependencies,
+								durability,
+							},
+							durability === "required",
+						);
+						return result;
+					} catch (error) {
+						if (!(error instanceof StorageClientError) || error.code !== "conflict" || attempt === 3) throw error;
+					}
 				}
-			}
-			throw new StorageClientError("conflict", "Runtime mutation conflict budget exhausted");
-		});
+				throw new StorageClientError("conflict", "Runtime mutation conflict budget exhausted");
+			})
+			.finally(() => releaseEvents?.());
 		const tail = run.then(
 			() => {},
 			() => {},
@@ -134,6 +153,7 @@ export class RuntimeTransaction {
 	constructor(
 		readonly records: RuntimeRecords,
 		readonly control = false,
+		readonly reserveEvents: () => Promise<void> = async () => {},
 	) {}
 
 	async get<T extends object>(kind: StorageRuntimeKind, id: string): Promise<T | undefined> {

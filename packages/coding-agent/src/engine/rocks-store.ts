@@ -658,6 +658,7 @@ export class RocksEngineMutations {
 	}
 
 	async append(tx: RuntimeTransaction, target: EventTarget, event: EngineTransitionEvent): Promise<EngineEvent> {
+		await tx.reserveEvents();
 		const seq = await this.counter(tx, `agent-seq:${target.agentInstanceId}`, "agent_seq", 1);
 		const eventId = await this.counter(tx, "events", "event_counter", 1);
 		const stored: RocksEvent = {

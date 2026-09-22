@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Pause and Resume remain responsive while neighboring native sessions produce events.
 - Child agents start from a local assignment even when Grimoire is unavailable, retain their results across retries and restarts, and sync their lifecycle after reconnection.
 - Native Engine sessions now advance their binding fence before an explicit continuation Attempt.
 - Native sessions start on Bun 1.4 without extension loading intercepting unrelated modules.
