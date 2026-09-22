@@ -219,11 +219,12 @@ it.skipIf(!Bun.env.ARTEL_STORAGE_TEST_BINDING || !Bun.env.ARTEL_STORAGE_TEST_RUN
 					authorityGeneration: 1,
 					expectedIntentRevision: branch.intentRevision,
 					cwd,
-					input: "CONTINUE",
+					explicitContinue: true,
 				},
 				profile,
 			);
 			await runtime.drain();
+			expect((await runtime.store.getAttempt(`${id}-continue-attempt`))?.state).toBe("completed");
 			expect(contexts[3]).toContain("BRANCH");
 			expect(contexts[3]).toContain("ANSWER-2");
 			expect(contexts[3]).not.toContain("EDITED");

@@ -40,6 +40,7 @@ import { withLspSessionScope } from "../lsp/client";
 import { MCPManager } from "../mcp/manager";
 import type { MCPHttpServerConfig } from "../mcp/types";
 import historyEditContinuePrompt from "../prompts/system/history-edit-continue.md" with { type: "text" };
+import manualContinuePrompt from "../prompts/system/manual-continue.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession } from "../sdk";
@@ -535,9 +536,14 @@ export class EngineRuntime {
 		this.#dispatchPrompt =
 			options.dispatchPrompt ??
 			((session, input, identity, kind = "prompt", images) => {
-				if (kind === "continue") return session.continueNativeHistory().then(() => true);
-				if (kind === "continue_after_assistant") {
-					return session.prompt(input, { synthetic: true, expandPromptTemplates: false, attribution: "agent" });
+				if (kind === "continue" && session.messages.at(-1)?.role !== "assistant")
+					return session.continueNativeHistory().then(() => true);
+				if (kind === "continue_after_assistant" || kind === "continue") {
+					return session.prompt(kind === "continue" ? manualContinuePrompt : input, {
+						synthetic: true,
+						expandPromptTemplates: false,
+						attribution: "agent",
+					});
 				}
 				return session.prompt(input, { ...identity, ...(images?.length ? { images } : {}) });
 			});

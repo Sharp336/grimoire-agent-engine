@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- Explicit Continue works after a restart when the last retained message is an assistant response.
 - Pause and Resume remain responsive while neighboring native sessions produce events.
 - Child agents start from a local assignment even when Grimoire is unavailable, retain their results across retries and restarts, and sync their lifecycle after reconnection.
 - Native Engine sessions now advance their binding fence before an explicit continuation Attempt.
