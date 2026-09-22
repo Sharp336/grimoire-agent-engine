@@ -39,8 +39,8 @@ import { IrcBus, type IrcDeliveryReceipt } from "../irc/bus";
 import { withLspSessionScope } from "../lsp/client";
 import { MCPManager } from "../mcp/manager";
 import type { MCPHttpServerConfig } from "../mcp/types";
+import engineContinuePrompt from "../prompts/system/engine-continue.md" with { type: "text" };
 import historyEditContinuePrompt from "../prompts/system/history-edit-continue.md" with { type: "text" };
-import manualContinuePrompt from "../prompts/system/manual-continue.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import { type CreateAgentSessionOptions, createAgentSession } from "../sdk";
@@ -539,7 +539,7 @@ export class EngineRuntime {
 				if (kind === "continue" && session.messages.at(-1)?.role !== "assistant")
 					return session.continueNativeHistory().then(() => true);
 				if (kind === "continue_after_assistant" || kind === "continue") {
-					return session.prompt(kind === "continue" ? manualContinuePrompt : input, {
+					return session.prompt(kind === "continue" ? engineContinuePrompt : input, {
 						synthetic: true,
 						expandPromptTemplates: false,
 						attribution: "agent",
