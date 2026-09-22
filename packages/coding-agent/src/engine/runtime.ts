@@ -2634,7 +2634,6 @@ export class EngineRuntime {
 	async #prepareHistoryStart(request: EngineStartRequest): Promise<PreparedHistoryStart | undefined> {
 		const edit = request.historyEdit;
 		if (!edit) return undefined;
-		this.#legacyStore();
 		const sameAgent = request.agentInstanceId === edit.source.agentInstanceId;
 		if ((edit.mode === "edit") !== sameAgent) {
 			throw new EngineTargetError(
@@ -2678,50 +2677,75 @@ export class EngineRuntime {
 		if (!source.sessionFile) throw new EngineTargetError("history_expired", "History source session is unavailable");
 		if (live) await live.session.sessionManager.flushAndCheckpoint();
 
-		const loaded = await loadSessionFile(source.sessionFile, this.#legacyStore().sessionStorage);
-		if (loaded.entries.length === 0 || loaded.entries[0]?.type !== "session") {
-			throw new EngineTargetError("history_expired", "History source session is unavailable");
-		}
-		migrateToCurrentVersion(loaded.entries);
-		const sourceSessionId = loaded.entries[0].id;
-		const branch = activeSessionBranch(
-			loaded.entries.filter((entry): entry is SessionEntry => entry.type !== "session"),
-		);
-		if (sourceSessionId !== edit.sourceSessionId || branch.at(-1)?.id !== edit.expectedLeafEntryId) {
-			throw new EngineTargetError("stale_target", "History source session or leaf changed");
-		}
-		const selectedEntry = branch.find(entry => entry.id === edit.entryId);
-		if (
-			selectedEntry?.type !== "message" ||
-			(selectedEntry.message.role !== "user" && selectedEntry.message.role !== "assistant")
-		) {
-			throw new EngineTargetError("stale_target", "History entry is not an active user or assistant message");
-		}
+		const sourceSessionId = (await this.#sessionHeader(source.sessionFile))?.id;
+		if (!sourceSessionId || sourceSessionId !== edit.sourceSessionId)
+			throw new EngineTargetError("stale_target", "History source session changed");
 		const hasPendingInbox = edit.mode === "edit" && (await this.store.listInboxItems(sourceSessionId)).length > 0;
-
 		const sessionDir = path.join(this.#sessionRoot, engineRouteToken(request.agentInstanceId));
-		const forked: NativeHistoryForkResult = await SessionManager.forkNativeHistory(
-			source.sessionFile,
-			request.cwd,
-			edit.entryId,
-			sessionDir,
-			this.#legacyStore().sessionStorage,
-			{
-				leafEntryId: edit.expectedLeafEntryId,
-				...(edit.mode === "edit"
-					? {
-							edit: {
-								entryId: edit.entryId,
-								text: edit.replacementText!,
-								identity: {
-									sourceCommandId: request.commandId,
-									...(request.clientMessageId ? { clientMessageId: request.clientMessageId } : {}),
-								},
+		const forkOptions = {
+			leafEntryId: edit.expectedLeafEntryId,
+			...(edit.mode === "edit"
+				? {
+						edit: {
+							entryId: edit.entryId,
+							text: edit.replacementText!,
+							identity: {
+								sourceCommandId: request.commandId,
+								...(request.clientMessageId ? { clientMessageId: request.clientMessageId } : {}),
 							},
-						}
-					: {}),
-			},
-		);
+						},
+					}
+				: {}),
+		};
+		let forked: NativeHistoryForkResult;
+		if (this.store instanceof RocksEngineStore) {
+			const nativeSource = this.#nativeSessionStorage(source.sessionFile);
+			const { familyId } = parseNativeSessionLocator(source.sessionFile);
+			const nativeTarget = new RocksNativeSessionStorage(this.store.storageClient, familyId, crypto.randomUUID());
+			const manager = await SessionManager.forkNativeContext(nativeSource, nativeTarget, request.cwd, sessionDir, {
+				...forkOptions,
+				entryId: edit.entryId,
+			});
+			const selected = manager.getLeafEntry();
+			if (
+				selected?.type !== "message" ||
+				(selected.message.role !== "user" && selected.message.role !== "assistant")
+			)
+				throw new EngineTargetError("stale_target", "Native fork lost its selected message");
+			forked = {
+				sessionManager: manager,
+				selectedRole: selected.message.role,
+				selectedEntryId: edit.entryId,
+				...(edit.mode === "edit" ? { replacementEntryId: selected.id } : {}),
+			};
+		} else {
+			const loaded = await loadSessionFile(source.sessionFile, this.store.sessionStorage);
+			if (loaded.entries.length === 0 || loaded.entries[0]?.type !== "session") {
+				throw new EngineTargetError("history_expired", "History source session is unavailable");
+			}
+			migrateToCurrentVersion(loaded.entries);
+			const branch = activeSessionBranch(
+				loaded.entries.filter((entry): entry is SessionEntry => entry.type !== "session"),
+			);
+			if (sourceSessionId !== edit.sourceSessionId || branch.at(-1)?.id !== edit.expectedLeafEntryId) {
+				throw new EngineTargetError("stale_target", "History source session or leaf changed");
+			}
+			const selectedEntry = branch.find(entry => entry.id === edit.entryId);
+			if (
+				selectedEntry?.type !== "message" ||
+				(selectedEntry.message.role !== "user" && selectedEntry.message.role !== "assistant")
+			) {
+				throw new EngineTargetError("stale_target", "History entry is not an active user or assistant message");
+			}
+			forked = await SessionManager.forkNativeHistory(
+				source.sessionFile,
+				request.cwd,
+				edit.entryId,
+				sessionDir,
+				this.store.sessionStorage,
+				forkOptions,
+			);
+		}
 
 		const branchInput = edit.mode === "branch" && request.input?.trim() ? request.input : undefined;
 		const dispatchKind: HistoryDispatchKind = branchInput
@@ -3749,9 +3773,11 @@ export class EngineRuntime {
 				const forkSessionFile = uncommittedForkSessionFile;
 				forkSessionManager.seal();
 				await collectFailure(cleanupErrors, () => forkSessionManager.close());
-				await collectFailure(cleanupErrors, () =>
-					this.#legacyStore().sessionStorage.deleteSessionWithArtifacts(forkSessionFile),
-				);
+				// Failed native generations are unbound immutable data; never delete their inherited source.
+				if (!(this.store instanceof RocksEngineStore))
+					await collectFailure(cleanupErrors, () =>
+						this.#legacyStore().sessionStorage.deleteSessionWithArtifacts(forkSessionFile),
+					);
 			}
 			if (disposeResolved) await collectFailure(cleanupErrors, disposeResolved);
 			if (cleanupErrors.length > 0) {

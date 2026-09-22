@@ -684,8 +684,19 @@ export class SessionManager {
 		target: NativeSessionStorage,
 		cwd: string,
 		sessionDir = getSessionsDir(),
+		history?: NativeHistoryForkOptions & { entryId: string },
 	): Promise<SessionManager> {
-		const loaded = await source.readContext();
+		const loaded = await source.readContext(
+			history ? { entryId: history.entryId, expectedLeafEntryId: history.leafEntryId } : undefined,
+		);
+		const selected = history ? loaded.entries.at(-1) : undefined;
+		if (
+			history &&
+			(selected?.id !== history.entryId ||
+				selected.type !== "message" ||
+				(selected.message.role !== "user" && selected.message.role !== "assistant"))
+		)
+			throw new Error("Native history selection is not a user or assistant message");
 		const manager = SessionManager.createNative(cwd, target, sessionDir);
 		const sourceHeader = loaded.checkpoint.header;
 		manager.#header.parentSession = sourceHeader.id;
@@ -702,13 +713,34 @@ export class SessionManager {
 		manager.#index.setLeaf(loaded.checkpoint.leafId);
 		manager.#nativeStartId = loaded.checkpoint.contextStartId;
 		manager.#nativePrefix = structuredClone(loaded.checkpoint.prefix);
-		manager.#nativeComplete = false;
+		manager.#nativeComplete = loaded.complete;
+		if (history?.edit) {
+			if (history.edit.entryId !== history.entryId) throw new Error("Edit entryId must match selectedEntryId");
+			// Inherit only the original prefix. The replacement has a fresh identity in the new generation.
+			manager.#entries.pop();
+			manager.#index.rebuild(manager.#entries);
+			manager.#index.setLeaf(selected!.parentId);
+			if (manager.#nativeStartId === selected!.id) manager.#nativeStartId = manager.#entries[0]?.id ?? null;
+		}
 		const checkpoint = manager.#nativeCheckpoint();
 		const ticket = target.initializeFork(loaded.position, checkpoint);
 		manager.#nativeTicket = ticket;
 		await ticket.completion;
 		manager.#rememberNativeVersions(manager.#entries);
 		manager.#nativeBaselineCheckpoint = structuredClone(checkpoint);
+		if (history?.edit && selected?.type === "message") {
+			const replacement: SessionMessageEntry = {
+				type: "message",
+				...manager.#freshEntryFields(),
+				message: editedHistoryMessage(selected, history.edit.text),
+				...(selected.message.role === "user" && selected.originalAttachments
+					? { originalAttachments: copyOriginalAttachments(selected.originalAttachments) }
+					: {}),
+				...history.edit.identity,
+			};
+			manager.#recordEntry(replacement);
+			await manager.flushAndCheckpoint();
+		}
 		if (manager.sanitizeLoadedOpenAIResponsesReplayMetadata()) await manager.rewriteEntries();
 		return manager;
 	}

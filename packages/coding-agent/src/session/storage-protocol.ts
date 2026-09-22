@@ -186,6 +186,8 @@ export interface StorageRead {
 	familyId: StorageId;
 	generationId: StorageId;
 	leafId?: StorageId;
+	/** Inclusive ancestor boundary; the owner validates membership on the selected path. */
+	startEntryId?: StorageId;
 	parentId?: StorageId;
 	/** Frozen cut, defaults to durableThroughSeq. Zero selects the empty prefix. */
 	cutSeq?: number;

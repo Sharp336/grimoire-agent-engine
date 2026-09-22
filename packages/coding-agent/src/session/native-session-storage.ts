@@ -69,7 +69,7 @@ export interface NativeSessionStorage {
 	/** Fixed prefix captured by the caller, not a drain that future writes can extend. */
 	barrier(position: NativeSessionPosition): Promise<void>;
 	/** Bounded pages at one frozen cut; does not visit archive entries before the checkpoint. */
-	readContext(): Promise<NativeSessionRead>;
+	readContext(selection?: { entryId: string; expectedLeafEntryId: string }): Promise<NativeSessionRead>;
 	/** Explicit expensive consumer; pagination remains bounded even when materializing the archive. */
 	readArchive(): Promise<NativeSessionRead>;
 	readChildren(parentId: string, position: NativeSessionPosition): Promise<SessionEntry[]>;

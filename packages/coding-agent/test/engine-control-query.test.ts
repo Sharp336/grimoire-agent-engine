@@ -1,5 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
+import assert from "node:assert/strict";
 import * as fs from "node:fs";
 import * as net from "node:net";
 import * as os from "node:os";
@@ -60,14 +61,16 @@ describe("Engine Control + Query", () => {
 				complete: false,
 				nextOffset: bytes.length,
 			});
-			await expect(client.request("attachments.stage", { ...request, principalId: "" })).rejects.toThrow();
-			await expect(
+			// Bun 1.4 Windows crashes in rejects.toThrow on this native transport path.
+			await assert.rejects(client.request("attachments.stage", { ...request, principalId: "" }), /Invalid runtime/);
+			await assert.rejects(
 				client.request("attachments.stage", { ...request, sourcePath: "C:/private.txt" }),
-			).rejects.toThrow("Invalid runtime");
+				/Invalid runtime/,
+			);
 			expect(
 				await client.request("attachments.remove", { principalId: "alice", uploadId: request.uploadId }),
 			).toEqual({ removed: true });
-			await expect(client.request("attachments.stage", request)).rejects.toThrow("removed");
+			await assert.rejects(client.request("attachments.stage", request), /removed/);
 			expect(await client.request("snapshots.list")).toMatchObject({ items: [] });
 		} finally {
 			await server.close();

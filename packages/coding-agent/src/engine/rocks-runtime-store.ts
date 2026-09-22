@@ -943,6 +943,7 @@ export class RocksEngineStore extends RocksEngineMutations {
 							key: ["agent", identity.agent_instance_id, "", kind],
 							kind,
 							agentOnly: true,
+							attempt: attempt?.attempt_id,
 							selected: interest.kinds,
 						});
 				}
@@ -989,7 +990,11 @@ export class RocksEngineStore extends RocksEngineMutations {
 									: change.kind;
 						return (
 							kind === source.kind &&
-							(source.agentOnly ? attempt === undefined || attempt === null : attempt === source.attempt)
+							// State has no top-level attemptId, so the owner indexes it in the agent channel.
+							// Its nested target still fences delivery to the selected Attempt.
+							(source.agentOnly
+								? attempt == null || (change.kind === "state" && attempt === source.attempt)
+								: attempt === source.attempt)
 						);
 					});
 				changes = changes.map(change =>

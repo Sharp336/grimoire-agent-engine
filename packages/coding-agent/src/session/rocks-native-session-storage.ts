@@ -10,6 +10,7 @@ import {
 	type NativeSessionTicket,
 	NativeSessionWriteRejectedError,
 } from "./native-session-storage";
+import { resolveSessionContextState } from "./session-context";
 import type { SessionEntry } from "./session-entries";
 import { type StorageClient, StorageClientError } from "./storage-client";
 import type { StorageEntry, StoragePayload, StorageReadSuccessResponse, StorageWrite } from "./storage-protocol";
@@ -406,8 +407,115 @@ export class RocksNativeSessionStorage implements NativeSessionStorage {
 		await this.#client.barrier({ ...position, dependencies: [] });
 	}
 
-	readContext(): Promise<NativeSessionRead> {
-		return this.#read(false);
+	readContext(selection?: { entryId: string; expectedLeafEntryId: string }): Promise<NativeSessionRead> {
+		return selection ? this.#readSelectedContext(selection) : this.#read(false);
+	}
+
+	async #readSelectedContext(selection: { entryId: string; expectedLeafEntryId: string }): Promise<NativeSessionRead> {
+		const scope = { familyId: this.#familyId, generationId: this.#generationId };
+		const one = { maxRecords: 1, maxBytes: this.#maxBytes };
+		const initial = await this.#client.readContext({ ...scope, ...one });
+		const current = checkpointFrom(initial);
+		if (current.leafId !== selection.expectedLeafEntryId) throw new Error("Native history source leaf changed");
+		const cutSeq = initial.throughSeq;
+		// Validate selected ancestry with the owner's indexed membership check, without reading the suffix.
+		await this.#client.readContext({
+			...scope,
+			...one,
+			cutSeq,
+			leafId: current.leafId!,
+			startEntryId: selection.entryId,
+		});
+		let generationId = this.#generationId;
+		let generationCut = cutSeq;
+		let historical: NativeSessionCheckpoint | undefined;
+		let found = false;
+		for (let depth = 0; depth < 64; depth++) {
+			// A fork's first write retains its immutable lineage even after later heads change.
+			const first = await this.#client.readContext({ ...scope, ...one, generationId, cutSeq: 1 });
+			const lineage = first.head?.lineage;
+			if (lineage?.forkLeafId) {
+				try {
+					await this.#client.readContext({
+						...scope,
+						...one,
+						generationId,
+						cutSeq: generationCut,
+						leafId: lineage.forkLeafId,
+						startEntryId: selection.entryId,
+					});
+					generationId = lineage.parentGenerationId;
+					generationCut = lineage.forkCutSeq;
+					continue;
+				} catch (error) {
+					if (
+						!(error instanceof StorageClientError) ||
+						!error.message.includes("context start not on selected ancestry")
+					)
+						throw error;
+				}
+			}
+			const selected = await this.#client.readContext({
+				...scope,
+				...one,
+				generationId,
+				cutSeq: generationCut,
+				leafId: selection.entryId,
+			});
+			const entry = selected.events[0];
+			if (entry?.entryId !== selection.entryId) throw new Error("Native history entry is unavailable");
+			// Read the prefix preceding this entry, never the current (possibly later compacted) summary.
+			const before = await this.#client.readContext({ ...scope, ...one, generationId, cutSeq: entry.seq - 1 });
+			historical = before.state?.native as NativeSessionCheckpoint | undefined;
+			found = true;
+			break;
+		}
+		if (!found) throw new Error("Native history lineage exceeds its read bound");
+		const startEntryId = historical?.contextStartId ?? undefined;
+		const entries: SessionEntry[] = [];
+		let cursor: string | undefined;
+		let bytes = 0;
+		do {
+			const page = await this.#client.readContext({
+				...scope,
+				cutSeq,
+				leafId: selection.entryId,
+				startEntryId,
+				cursor,
+				maxRecords: this.#maxRecords,
+				maxBytes: this.#maxBytes,
+			});
+			this.#validatePage(page, cutSeq);
+			bytes += Buffer.byteLength(JSON.stringify(page));
+			// Blob markers are small; reserve their decoded payload before materializing any entry.
+			for (const entry of page.events) bytes += nativeEntryBlobMarker(entry.payload)?.bytes ?? 0;
+			if (entries.length + page.events.length > 4096 || bytes > 64 * 1024 * 1024)
+				throw new Error("Native history working context exceeds its read bound");
+			for (const entry of page.events) entries.push(await decodeEntry(entry, this.#blobs));
+			if (page.nextCursor && page.nextCursor === cursor) throw new Error("Native history cursor did not advance");
+			cursor = page.nextCursor ?? undefined;
+		} while (cursor);
+		entries.reverse();
+		if (entries.at(-1)?.id !== selection.entryId) throw new Error("Native history selected entry is missing");
+		const checkpoint = structuredClone(historical ?? current);
+		checkpoint.header = structuredClone(current.header);
+		checkpoint.leafId = selection.entryId;
+		checkpoint.contextStartId = entries[0]?.id ?? null;
+		// Before the first checkpoint the complete path supplies all context; no future prefix is used.
+		if (!historical)
+			checkpoint.prefix = {
+				settings: resolveSessionContextState([]),
+				credentialPins: {},
+				hasAssistant: false,
+				entryTypes: [],
+			};
+		return {
+			checkpoint,
+			entries,
+			throughSeq: cutSeq,
+			position: this.#position(cutSeq),
+			complete: !entries[0]?.parentId,
+		};
 	}
 	readArchive(): Promise<NativeSessionRead> {
 		return this.#read(true);
