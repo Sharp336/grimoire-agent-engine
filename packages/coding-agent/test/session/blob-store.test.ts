@@ -12,6 +12,22 @@ import {
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 describe("BlobStore image display paths", () => {
+	it("publishes synchronously without replacing an existing canonical body", async () => {
+		using tempDir = TempDir.createSync("@omp-blob-store-sync-");
+		const store = new BlobStore(tempDir.path());
+		const data = Buffer.from("accepted image bytes");
+		const first = store.putSync(data, { extension: "png" });
+		const before = await fs.stat(first.path);
+		const repeated = store.putSync(data, { extension: "png" });
+		expect(repeated.path).toBe(first.path);
+		expect((await fs.stat(first.path)).ino).toBe(before.ino);
+		expect(await fs.readFile(first.displayPath)).toEqual(data);
+		const conflict = Buffer.alloc(data.length, 7);
+		await fs.writeFile(first.path, conflict);
+		expect(() => store.putSync(data)).toThrow("conflicts");
+		expect(await fs.readFile(first.path)).toEqual(conflict);
+	});
+
 	it("creates an extension-bearing sidecar for image blobs while keeping canonical refs extensionless", async () => {
 		using tempDir = TempDir.createSync("@omp-blob-store-image-link-");
 		const store = new BlobStore(tempDir.path());
@@ -34,7 +50,7 @@ describe("BlobStore image display paths", () => {
 		const hash = parseBlobRef(ref);
 
 		expect(hash).toBeTruthy();
-		expect(await Bun.file(`${tempDir.path()}/${hash}.webp`).bytes()).toEqual(new Uint8Array(data));
+		expect(await Bun.file(path.join(store.liveDir, `${hash}.webp`)).bytes()).toEqual(new Uint8Array(data));
 		expect(await resolveImageData(store, ref)).toBe(data.toString("base64"));
 	});
 
@@ -120,7 +136,7 @@ describe("BlobStore completed upload import", () => {
 		expect(first.ref).toBe(`blob:sha256:${expected.hash}`);
 		expect(await fs.readFile(first.path)).toEqual(data);
 		expect(await fs.readFile(source)).toEqual(data);
-		expect(await fs.readdir(store.dir)).toEqual([expected.hash]);
+		expect(await fs.readdir(store.liveDir)).toEqual([expected.hash]);
 		await Bun.write(source, Buffer.alloc(0));
 		const empty = await store.importFile(source, { hash: new Bun.SHA256().digest("hex"), bytes: 0 });
 		expect((await fs.stat(empty.path)).size).toBe(0);
@@ -136,12 +152,13 @@ describe("BlobStore completed upload import", () => {
 		await expect(store.importFile(source, { ...expected, bytes: data.length + 1 })).rejects.toThrow("size");
 		await expect(store.importFile(source, { ...expected, hash: "../outside" })).rejects.toThrow("identity");
 		await expect(store.importFile(source, { ...expected, hash: "0".repeat(64) })).rejects.toThrow("hash");
-		expect(await fs.readdir(store.dir)).toEqual([]);
+		expect(await fs.readdir(store.liveDir).catch(() => [])).toEqual([]);
 		const corrupted = Buffer.alloc(data.length, 42);
-		await Bun.write(path.join(store.dir, expected.hash), corrupted);
+		await fs.mkdir(store.liveDir, { recursive: true });
+		await Bun.write(path.join(store.liveDir, expected.hash), corrupted);
 		await expect(store.importFile(source, expected)).rejects.toThrow("conflicts");
-		expect(await fs.readFile(path.join(store.dir, expected.hash))).toEqual(corrupted);
-		expect(await fs.readdir(store.dir)).toEqual([expected.hash]);
+		expect(await fs.readFile(path.join(store.liveDir, expected.hash))).toEqual(corrupted);
+		expect(await fs.readdir(store.liveDir)).toEqual([expected.hash]);
 	});
 
 	it("cancels between chunks without publishing and rejects linked destinations or non-file sources", async () => {
@@ -163,7 +180,7 @@ describe("BlobStore completed upload import", () => {
 		} finally {
 			abort.mockRestore();
 		}
-		expect(await fs.readdir(store.dir)).toEqual([]);
+		expect(await fs.readdir(store.liveDir).catch(() => [])).toEqual([]);
 		expect(await fs.readFile(source)).toEqual(data);
 		await expect(store.importFile(tempDir.path(), expected)).rejects.toThrow("unsafe");
 		const linked = path.join(tempDir.path(), "linked");
@@ -173,6 +190,6 @@ describe("BlobStore completed upload import", () => {
 		} finally {
 			await fs.unlink(linked);
 		}
-		expect(await fs.readdir(store.dir)).toEqual([]);
+		expect(await fs.readdir(store.liveDir).catch(() => [])).toEqual([]);
 	});
 });

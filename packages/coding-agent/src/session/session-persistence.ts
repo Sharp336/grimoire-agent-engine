@@ -94,6 +94,16 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 	if (shouldExternalizeImagePayload(obj, key)) {
 		return { ...obj, data: externalizeImageDataSync(blobStore, obj.data, obj.mimeType) };
 	}
+	if (
+		typeof obj === "object" &&
+		"type" in obj &&
+		(obj.type === "input_image" || obj.type === "computer_screenshot") &&
+		"image_url" in obj &&
+		typeof obj.image_url === "string" &&
+		isImageDataUrl(obj.image_url)
+	) {
+		return { ...obj, image_url: externalizeImageDataUrlSync(blobStore, obj.image_url) };
+	}
 	// Signed content is bound to its exact bytes: a truncated `thinking`/`text`/
 	// `arguments` no longer matches its signature and a truncated
 	// `redacted_thinking` blob is undecryptable, so the provider 400s the replay.
@@ -129,9 +139,6 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 	}
 
 	if (typeof obj === "string") {
-		if (key === "image_url" && isImageDataUrl(obj)) {
-			return externalizeImageDataUrlSync(blobStore, obj);
-		}
 		if (obj.length > MAX_PERSIST_CHARS) {
 			// Defensive: signature keys normally sit on blocks the guard above returns
 			// verbatim, but if one is reached here (unknown carrier shape), preserve it —

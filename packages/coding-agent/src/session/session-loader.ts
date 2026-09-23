@@ -321,7 +321,14 @@ export async function visitEntriesFromFile(
  * provider image URLs back to the inline data expected by downstream transports. Mutates entries in place.
  */
 function hasImageUrl(value: unknown): value is { image_url: string } {
-	return typeof value === "object" && value !== null && "image_url" in value && typeof value.image_url === "string";
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"type" in value &&
+		(value.type === "input_image" || value.type === "computer_screenshot") &&
+		"image_url" in value &&
+		typeof value.image_url === "string"
+	);
 }
 
 function shouldResolveImagePayload(value: unknown, key: string | undefined): value is { data: string } {

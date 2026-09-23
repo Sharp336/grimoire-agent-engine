@@ -4,18 +4,13 @@ import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { isEnoent, parseImageMetadata, SUPPORTED_IMAGE_MIME_TYPES } from "@oh-my-pi/pi-utils";
 import { BLOB_RANGE_BYTES, type BlobStore } from "../session/blob-store";
 import { copyOriginalAttachments, type SessionOriginalAttachment } from "../session/session-entries";
+import { readStorageBinding, StorageClient, storageCanonicalJson } from "../session/storage-client";
 import { MAX_IMAGE_INPUT_BYTES } from "../utils/image-loading";
-import { type EngineMessageAttachments, EngineTargetError } from "./contracts";
+import { type EngineAttachmentDescriptor, type EngineMessageAttachments, EngineTargetError } from "./contracts";
 import { runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
+import { RuntimeRecords } from "./runtime-records";
 
-export interface EngineAttachment {
-	uploadId: string;
-	clientMessageId: string;
-	name: string;
-	mediaType: string;
-	bytes: number;
-	contentHash: string;
-}
+export interface EngineAttachment extends EngineAttachmentDescriptor {}
 
 export interface EngineAttachmentStageRequest extends EngineAttachment {
 	offset: number;
@@ -36,6 +31,13 @@ function invalid(message: string): never {
 function attachmentOwner(principalId: string): void {
 	if (typeof principalId !== "string" || !principalId.trim() || principalId.length > 1024)
 		invalid("An authenticated attachment owner is required");
+}
+
+export function attachmentUploadKey(principalId: string, uploadId: string): { key: string; ownerHash: string } {
+	attachmentOwner(principalId);
+	validateRuntimeValue("id", uploadId);
+	const ownerHash = new Bun.SHA256().update(principalId).digest("hex");
+	return { ownerHash, key: new Bun.SHA256().update(`${ownerHash}\0${uploadId}`).digest("hex") };
 }
 
 /** Validate and snapshot before any await. Order is part of message identity, not a set. */
@@ -65,7 +67,7 @@ export function messageAttachmentReferences(value: EngineMessageAttachments): En
 	return { principalId: value.principalId, uploadIds: [...value.uploadIds] };
 }
 
-function attachmentIdentity(value: EngineAttachment): EngineAttachment {
+export function attachmentIdentity(value: EngineAttachment): EngineAttachment {
 	if (!value || typeof value !== "object") invalid("Attachment identity is required");
 	for (const id of [value.uploadId, value.clientMessageId]) validateRuntimeValue("id", id);
 	if (
@@ -104,16 +106,117 @@ function attachmentIdentity(value: EngineAttachment): EngineAttachment {
  */
 export class EngineAttachmentUploads {
 	#lanes = new Map<string, Promise<void>>();
+	readonly #records?: RuntimeRecords;
 	constructor(
 		readonly root: string,
 		readonly blobs: BlobStore,
-	) {}
+		records?: RuntimeRecords,
+	) {
+		const binding = records ? undefined : readStorageBinding();
+		this.#records = records ?? (binding ? new RuntimeRecords(new StorageClient(binding)) : undefined);
+	}
+
+	async #publish(principalId: string, attachment: EngineAttachment, state: "publishing" | "ready"): Promise<void> {
+		const records = this.#records;
+		if (!records) return;
+		const { key, ownerHash } = this.#key(principalId, attachment.uploadId);
+		await records.mutate(`blob-upload:${key}`, async tx => {
+			const id = `blob-upload:${key}`;
+			const old = await tx.get<{ subtype: string; owner_hash: string; attachment: EngineAttachment; state: string }>(
+				"metadata",
+				id,
+			);
+			if (
+				old &&
+				(old.subtype !== "blob_upload" ||
+					old.owner_hash !== ownerHash ||
+					storageCanonicalJson(old.attachment) !== storageCanonicalJson(attachment))
+			)
+				throw new EngineTargetError("stale_target", "Attachment identity changed or was removed");
+			if (old?.state === "ready" || old?.state === state) return;
+			await tx.put("metadata", id, { subtype: "blob_upload", owner_hash: ownerHash, attachment, state });
+		});
+	}
+
+	/** Reconcile old ready manifests before managed GC is allowed to delete unindexed bodies. */
+	async reconcileReady(): Promise<void> {
+		if (!this.#records) return;
+		let directory: fs.Dir;
+		try {
+			directory = await fs.promises.opendir(this.root);
+		} catch (error) {
+			if (isEnoent(error)) {
+				await this.#reconcilePublishing();
+				return;
+			}
+			throw error;
+		}
+		for await (const entry of directory) {
+			if (!entry.isDirectory() || !/^[a-f0-9]{64}$/.test(entry.name)) continue;
+			const dir = await this.#directory(entry.name, false);
+			try {
+				await this.#assertPresent(dir);
+			} catch (error) {
+				if (error instanceof EngineTargetError && error.code === "stale_target") {
+					await this.#records.mutate(`blob-upload:${entry.name}`, async tx => {
+						await tx.delete("metadata", `blob-upload:${entry.name}`);
+					});
+					continue;
+				}
+				throw error;
+			}
+			const manifest = await this.#manifest(dir);
+			if (manifest.state !== "ready") continue;
+			const row = (await this.#records.get("metadata", `blob-upload:${entry.name}`, true)).value;
+			if (row?.subtype === "blob_upload" && row.state === "ready") continue;
+			const attachment = manifest.attachment;
+			const key = new Bun.SHA256().update(`${manifest.ownerHash}\0${attachment.uploadId}`).digest("hex");
+			if (key !== entry.name) throw new Error("Upload manifest owner changed");
+			await this.#records.mutate(`blob-upload:${key}`, async tx => {
+				await tx.put("metadata", `blob-upload:${key}`, {
+					subtype: "blob_upload",
+					owner_hash: manifest.ownerHash,
+					attachment,
+					state: "publishing",
+				});
+			});
+			await this.#records.mutate(`blob-upload:${key}`, async tx => {
+				await tx.put("metadata", `blob-upload:${key}`, {
+					subtype: "blob_upload",
+					owner_hash: manifest.ownerHash,
+					attachment,
+					state: "ready",
+				});
+			});
+		}
+		await this.#reconcilePublishing();
+	}
+
+	async #reconcilePublishing(): Promise<void> {
+		if (!this.#records) return;
+		let after: string | undefined;
+		for (;;) {
+			const page = await this.#records.query(
+				"kind_primary",
+				["metadata"],
+				undefined,
+				100,
+				after ? [after] : undefined,
+			);
+			for (const row of page.records) {
+				if (row.value?.subtype !== "blob_upload" || row.value.state !== "publishing") continue;
+				await this.#records.mutate(`blob-upload:${row.id}`, async tx => {
+					const current = await tx.get<{ state: string }>("metadata", row.id);
+					if (current?.state === "publishing") await tx.delete("metadata", row.id);
+				});
+			}
+			if (!page.nextCursor) return;
+			after = page.records.at(-1)!.id;
+		}
+	}
 
 	#key(principalId: string, uploadId: string): { key: string; ownerHash: string } {
-		attachmentOwner(principalId);
-		validateRuntimeValue("id", uploadId);
-		const ownerHash = new Bun.SHA256().update(principalId).digest("hex");
-		return { ownerHash, key: new Bun.SHA256().update(`${ownerHash}\0${uploadId}`).digest("hex") };
+		return attachmentUploadKey(principalId, uploadId);
 	}
 
 	async #lane<T>(key: string, action: () => Promise<T>): Promise<T> {
@@ -274,6 +377,8 @@ export class EngineAttachmentUploads {
 			if (manifest.ownerHash !== ownerHash || JSON.stringify(manifest.attachment) !== JSON.stringify(attachment))
 				throw new EngineTargetError("stale_target", "Attachment identity changed or was removed");
 			if (manifest.state === "ready") {
+				await this.#publish(principalId, attachment, "publishing");
+				await this.#publish(principalId, attachment, "ready");
 				const range = await this.blobs.getRange(attachment.contentHash.slice(7), offset, Math.max(1, chunk.length));
 				if (!range || range.totalBytes !== attachment.bytes || !range.data.equals(chunk))
 					throw new EngineTargetError("stale_target", "Attachment retry differs from the completed upload");
@@ -312,11 +417,13 @@ export class EngineAttachmentUploads {
 				await handle.close();
 			}
 			if (currentBytes === attachment.bytes) {
+				await this.#publish(principalId, attachment, "publishing");
 				await this.blobs.importFile(
 					payload,
 					{ hash: attachment.contentHash.slice(7), bytes: attachment.bytes },
 					signal,
 				);
+				await this.#publish(principalId, attachment, "ready");
 				await this.#save(dir, { ...manifest, state: "ready" });
 				await fs.promises.unlink(payload);
 			}
@@ -344,6 +451,18 @@ export class EngineAttachmentUploads {
 		const { key, ownerHash } = this.#key(principalId, uploadId);
 		return this.#lane(key, async () => {
 			try {
+				const record = this.#records
+					? (await this.#records.get("metadata", `blob-upload:${key}`, true)).value
+					: undefined;
+				if (record?.subtype === "blob_upload" && record.owner_hash === ownerHash && record.state === "ready") {
+					const attachment = attachmentIdentity(record.attachment as EngineAttachment);
+					if (attachment.uploadId !== uploadId || attachment.clientMessageId !== clientMessageId)
+						throw new EngineTargetError("stale_target", "Attachment is not ready for this message");
+					const range = await this.blobs.getRange(attachment.contentHash.slice(7), 0, 1);
+					if (!range || range.totalBytes !== attachment.bytes)
+						throw new EngineTargetError("source_unavailable", "Attachment bytes are no longer retained");
+					return attachment;
+				}
 				const dir = await this.#directory(key, false);
 				await this.#assertPresent(dir);
 				const manifest = await this.#manifest(dir);
@@ -371,8 +490,20 @@ export class EngineAttachmentUploads {
 		clientMessageId: string,
 		references: EngineMessageAttachments,
 		signal?: AbortSignal,
+		accepted?: readonly EngineAttachment[],
 	): Promise<{ images: ImageContent[]; originalAttachments: SessionOriginalAttachment[] }> {
-		const attachments = await this.resolveMessage(clientMessageId, references, signal);
+		const attachments = accepted
+			? accepted.map(attachmentIdentity)
+			: await this.resolveMessage(clientMessageId, references, signal);
+		if (
+			accepted &&
+			(attachments.length !== references.uploadIds.length ||
+				attachments.some(
+					(item, index) =>
+						item.uploadId !== references.uploadIds[index] || item.clientMessageId !== clientMessageId,
+				))
+		)
+			throw new EngineTargetError("stale_target", "Accepted attachment snapshot differs from the queue");
 		const originalAttachments = copyOriginalAttachments(attachments);
 		let total = 0;
 		for (const attachment of attachments) {
@@ -432,6 +563,10 @@ export class EngineAttachmentUploads {
 			await fs.promises.unlink(path.join(dir, "payload.bin")).catch(error => {
 				if (!isEnoent(error)) throw error;
 			});
+			if (this.#records)
+				await this.#records.mutate(`blob-upload:${key}`, async tx => {
+					await tx.delete("metadata", `blob-upload:${key}`);
+				});
 			// Canonical blobs may already be shared with retained history. Never delete them here.
 			return { removed: true };
 		});

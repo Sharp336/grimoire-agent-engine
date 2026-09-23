@@ -61,6 +61,7 @@ export interface RocksEffect extends EngineEffectRow {
 }
 export interface RocksInbox extends EngineInboxItem {
 	subtype: "item";
+	attachment_descriptors?: EngineInboxItem["attachmentDescriptors"];
 	queue_id: string;
 	source_event_id: string;
 	session_id: string;

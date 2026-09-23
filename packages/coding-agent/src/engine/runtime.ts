@@ -521,6 +521,7 @@ export class EngineRuntime {
 	readonly #sessionRoot: string;
 	#inboxWakeSignal = Promise.withResolvers<void>();
 	#inboxWakeRun?: Promise<void>;
+	#nativeDeleteRun?: Promise<void>;
 	#disposed = false;
 	#storageFailure?: Error;
 	#storageFailureUnsubscribe?: () => void;
@@ -560,6 +561,7 @@ export class EngineRuntime {
 		this.attachmentUploads = new EngineAttachmentUploads(
 			path.join(path.dirname(this.#sessionRoot), "engine-uploads"),
 			options.attachmentBlobStore ?? new BlobStore(getBlobsDir()),
+			store instanceof RocksEngineStore ? store.records : undefined,
 		);
 	}
 
@@ -570,6 +572,13 @@ export class EngineRuntime {
 			: await EngineStore.open(options.databasePath);
 		const engineGeneration = await store.nextEngineGeneration();
 		const runtime = new EngineRuntime(store, engineGeneration, options);
+		if (store instanceof RocksEngineStore) {
+			await runtime.attachmentUploads.reconcileReady();
+			await store.reconcileAcceptedAttachments(runtime.attachmentUploads);
+			runtime.#nativeDeleteRun = store.reconcilePendingNativeDeletes().catch(error => {
+				logger.warn("Native generation deletion recovery failed", { error: String(error) });
+			});
+		}
 		runtime.#attachStorageFailure();
 		await runtime.#reconcileLostAttempts();
 		runtime.#inboxWakeRun = runtime.#runInboxWakeLoop();
@@ -760,6 +769,8 @@ export class EngineRuntime {
 				? await this.attachmentUploads.prepareForMessage(
 						item?.sourceEventId ?? request.clientMessageId!,
 						references,
+						undefined,
+						item?.attachmentDescriptors,
 					)
 				: undefined;
 			const images = preparedAttachments?.images;
@@ -1320,7 +1331,8 @@ export class EngineRuntime {
 		if (source.attachments) source = { ...source, attachments: messageAttachmentReferences(source.attachments) };
 		return this.#inLane(target.agentInstanceId, async () => {
 			const retained = await this.#requireSessionTarget(target);
-			if (source.attachments) await this.attachmentUploads.resolveMessage(source.sourceEventId, source.attachments);
+			if (source.attachments && !(this.store instanceof RocksEngineStore))
+				await this.attachmentUploads.resolveMessage(source.sourceEventId, source.attachments);
 			const queued = await this.store.enqueueInboxItem(retained, source);
 			if (queued.created) {
 				this.#signalInboxWake();
@@ -1354,7 +1366,8 @@ export class EngineRuntime {
 	): Promise<{ item: EngineInboxItem; created: boolean }> {
 		if (source.attachments) source = { ...source, attachments: messageAttachmentReferences(source.attachments) };
 		return this.#inLane(agentInstanceId, async () => {
-			if (source.attachments) await this.attachmentUploads.resolveMessage(source.sourceEventId, source.attachments);
+			if (source.attachments && !(this.store instanceof RocksEngineStore))
+				await this.attachmentUploads.resolveMessage(source.sourceEventId, source.attachments);
 			const result = await this.store.enqueueInboxItem(
 				await this.#agentInboxTarget(agentInstanceId),
 				source,
@@ -2095,7 +2108,14 @@ export class EngineRuntime {
 		if (header?.type !== "session") {
 			throw new EngineTargetError("history_expired", `Native session archive is invalid for ${agentInstanceId}`);
 		}
-		const blobFiles = collectPersistedBlobHashes(loaded.entries).map(hash => path.join(getBlobsDir(), hash));
+		const blobStore = new BlobStore(getBlobsDir());
+		const blobFiles = await Promise.all(
+			collectPersistedBlobHashes(loaded.entries).map(async hash => {
+				const existing = await blobStore.existingPath(hash);
+				if (!existing) throw new EngineTargetError("history_expired", "Native image blob is unavailable");
+				return existing;
+			}),
+		);
 		if (blobFiles.length && (await fs.lstat(getBlobsDir())).isSymbolicLink())
 			throw new EngineTargetError("history_expired", "Native image blob directory is unsafe");
 		const artifactsDir = sessionFile.endsWith(".jsonl") ? sessionFile.slice(0, -".jsonl".length) : "";
@@ -2632,6 +2652,7 @@ export class EngineRuntime {
 
 	async drain(): Promise<void> {
 		await this.#storageMaintenance;
+		await this.#nativeDeleteRun;
 		await Promise.all(this.#lanes.values());
 		await Promise.all(this.#runs);
 		await this.store.drain();
@@ -2658,6 +2679,7 @@ export class EngineRuntime {
 		}
 		const inboxWakeRun = this.#inboxWakeRun;
 		if (inboxWakeRun) await collectFailure(errors, () => inboxWakeRun);
+		if (this.#nativeDeleteRun) await collectFailure(errors, () => this.#nativeDeleteRun!);
 		await collectFailure(errors, () => this.agentLifecycle.dispose());
 		await collectFailure(errors, () => this.asyncJobManager.dispose({ timeoutMs: 3_000 }));
 		await collectFailure(errors, () => this.ircBus.dispose());
@@ -3023,6 +3045,7 @@ export class EngineRuntime {
 					queuedItem?.sourceEventId ?? request.clientMessageId!,
 					references,
 					pendingStartSignal,
+					queuedItem?.attachmentDescriptors,
 				)
 			: undefined;
 		const images = preparedAttachments?.images;

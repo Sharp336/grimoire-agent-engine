@@ -26,6 +26,37 @@ function messageEntry(message: ToolResultMessage): ToolResultEntry {
 }
 
 describe("session image persistence", () => {
+	it("externalizes only typed image URL objects", async () => {
+		using tempDir = TempDir.createSync("@session-typed-image-url-");
+		const blobStore = new BlobStore(tempDir.path());
+		const imageUrl =
+			"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
+		const original = messageEntry({
+			role: "toolResult",
+			toolCallId: "typed-image",
+			toolName: "read",
+			content: [text("opaque result")],
+			details: {
+				userData: { image_url: imageUrl },
+				typedImage: { type: "input_image", image_url: imageUrl },
+			},
+			isError: false,
+			timestamp: Date.now(),
+		});
+		const persisted = prepareEntryForPersistence(original, blobStore) as ToolResultEntry;
+		const details = persisted.message.details as {
+			userData: { image_url: string };
+			typedImage: { image_url: string };
+		};
+		expect(details.userData.image_url).toBe(imageUrl);
+		expect(isBlobRef(details.typedImage.image_url)).toBe(true);
+		const loaded: FileEntry[] = [structuredClone(persisted)];
+		await resolveBlobRefsInEntries(loaded, blobStore);
+		const restored = (loaded[0] as ToolResultEntry).message.details as typeof details;
+		expect(restored.userData.image_url).toBe(imageUrl);
+		expect(restored.typedImage.image_url).toBe(imageUrl);
+	});
+
 	it("externalizes and resolves content images and tool detail image payloads", async () => {
 		using tempDir = TempDir.createSync("@session-image-persistence-");
 		const blobStore = new BlobStore(tempDir.path());

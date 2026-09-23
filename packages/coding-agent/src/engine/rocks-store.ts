@@ -1,10 +1,10 @@
+import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { createHash } from "node:crypto";
+import { parseNativeSessionLocator } from "../session/rocks-native-session-storage";
 import type { SessionDurabilityCheckpoint } from "../session/session-manager";
 import type { StorageClient } from "../session/storage-client";
 import type { StorageDependency } from "../session/storage-protocol";
-import { parseNativeSessionLocator } from "../session/rocks-native-session-storage";
 import type {
 	EngineAttemptState,
 	EngineBindingSnapshot,
@@ -30,7 +30,12 @@ import {
 	type RocksIdentity,
 	type RocksInbox,
 } from "./rocks-runtime-rows";
-import { messageAttachmentReferences } from "./runtime-attachments";
+import {
+	attachmentIdentity,
+	attachmentUploadKey,
+	type EngineAttachment,
+	messageAttachmentReferences,
+} from "./runtime-attachments";
 import { ENGINE_CONTROL_OPS, runtimeLimits, validateRuntimeValue } from "./runtime-protocol";
 import { RuntimeRecords, RuntimeTransaction } from "./runtime-records";
 import { type EnginePendingStartTarget, validateStartFence } from "./start-fence";
@@ -151,10 +156,12 @@ export class RocksEngineMutations {
 	}
 	async nextEngineGeneration(): Promise<number> {
 		const floorPath = process.env.GRIMOIRE_ENGINE_GENERATION_FLOOR_FILE;
-		const saved = floorPath ? await fs.readFile(floorPath, "utf8").catch(error => {
-			if (error?.code === "ENOENT") return "0";
-			throw error;
-		}) : "0";
+		const saved = floorPath
+			? await fs.readFile(floorPath, "utf8").catch(error => {
+					if (error?.code === "ENOENT") return "0";
+					throw error;
+				})
+			: "0";
 		const floor = Number(saved.trim());
 		if (!Number.isSafeInteger(floor) || floor < 0) throw new Error("Invalid Engine generation floor");
 		const restoreEpoch = process.env.GRIMOIRE_STORAGE_RESTORE_ID;
@@ -208,9 +215,18 @@ export class RocksEngineMutations {
 	}
 	async chatLifecycleStatus(id: string, principalId: string) {
 		const identity = (await this.records.get("identity", id)).value as unknown as RocksIdentity | null;
-		if (!identity || identity.principal_id !== principalId) throw new EngineTargetError("agent_not_found", "Unknown chat");
-		return { agentInstanceId: id, status: identity.deleted_at ? "deleted" as const : identity.archived_at ? "archived" as const : "active" as const,
-			revision: identity.lifecycle_revision ?? 0, operationId: identity.lifecycle_operation_id ?? null };
+		if (!identity || identity.principal_id !== principalId)
+			throw new EngineTargetError("agent_not_found", "Unknown chat");
+		return {
+			agentInstanceId: id,
+			status: identity.deleted_at
+				? ("deleted" as const)
+				: identity.archived_at
+					? ("archived" as const)
+					: ("active" as const),
+			revision: identity.lifecycle_revision ?? 0,
+			operationId: identity.lifecycle_operation_id ?? null,
+		};
 	}
 	async archivedChats(principalId: string, cursor?: string) {
 		const page = await this.records.query("kind_primary", ["identity"], cursor, 100);
@@ -218,9 +234,15 @@ export class RocksEngineMutations {
 			chats: page.records.flatMap(record => {
 				const identity = record.value as unknown as RocksIdentity | null;
 				return identity?.principal_id === principalId && identity.archived_at && !identity.deleted_at
-					? [{ agentInstanceId: identity.agent_instance_id, agentInstanceRef: identity.agent_instance_ref,
-						summary: JSON.parse(identity.summary_json ?? "null"), revision: identity.lifecycle_revision ?? 0,
-						archivedAt: identity.archived_at }]
+					? [
+							{
+								agentInstanceId: identity.agent_instance_id,
+								agentInstanceRef: identity.agent_instance_ref,
+								summary: JSON.parse(identity.summary_json ?? "null"),
+								revision: identity.lifecycle_revision ?? 0,
+								archivedAt: identity.archived_at,
+							},
+						]
 					: [];
 			}),
 			nextCursor: page.nextCursor,
@@ -235,54 +257,140 @@ export class RocksEngineMutations {
 	): Promise<{ status: "active" | "archived" | "deleted"; revision: number; operationId: string }> {
 		validateRuntimeValue("id", id);
 		validateRuntimeValue("id", operationId);
-		return this.mutation(id, async tx => {
+		const result = await this.mutation(id, async tx => {
 			const identity = await tx.get<RocksIdentity>("identity", id);
-			if (!identity || identity.principal_id !== principalId) throw new EngineTargetError("agent_not_found", "Unknown chat");
+			if (!identity || identity.principal_id !== principalId)
+				throw new EngineTargetError("agent_not_found", "Unknown chat");
 			const current = () => ({
-				status: identity.deleted_at ? "deleted" as const : identity.archived_at ? "archived" as const : "active" as const,
+				status: identity.deleted_at
+					? ("deleted" as const)
+					: identity.archived_at
+						? ("archived" as const)
+						: ("active" as const),
 				revision: identity.lifecycle_revision ?? 0,
 				operationId,
 			});
 			if (identity.lifecycle_operation_id === operationId) {
-				if (identity.lifecycle_action !== action) throw new EngineTargetError("invalid_request", "Lifecycle operation ID was reused");
+				if (identity.lifecycle_action !== action)
+					throw new EngineTargetError("invalid_request", "Lifecycle operation ID was reused");
 				return current();
 			}
 			if ((identity.lifecycle_revision ?? 0) !== expectedRevision)
 				throw new EngineTargetError("stale_target", "Chat lifecycle revision changed");
-			if (identity.deleted_at || action === "archive" && identity.archived_at || action === "unarchive" && !identity.archived_at)
+			if (
+				identity.deleted_at ||
+				(action === "archive" && identity.archived_at) ||
+				(action === "unarchive" && !identity.archived_at)
+			)
 				throw new EngineTargetError("invalid_request", "Chat lifecycle transition is unavailable");
 			const binding = await tx.get<RocksBinding>("binding", id);
 			if (binding) {
 				const attempt = await tx.get<RocksAttempt>("attempt", binding.attempt_id);
-				if (attempt && !terminal.has(attempt.state)) throw new EngineTargetError("agent_busy", "Stop the active chat first");
+				if (attempt && !terminal.has(attempt.state))
+					throw new EngineTargetError("agent_busy", "Stop the active chat first");
 			}
 			if (action === "delete") {
-				if (binding?.session_file) {
-					if (!binding.session_file.startsWith("native:"))
-						throw new EngineTargetError("invalid_request", "Only native history can be deleted here");
-					const { familyId, generationId } = parseNativeSessionLocator(binding.session_file);
-					const digest = createHash("sha256").update(`${familyId}\0${generationId}`).digest("hex");
-					await tx.put("metadata", `native-delete:${digest}`, {
-						subtype: "native_tombstone", family_id: familyId, generation_id: generationId,
-						agent_instance_id: id, operation_id: operationId, deleted_at: Date.now(),
-					});
-				}
+				if (binding?.session_file && !binding.session_file.startsWith("native:"))
+					throw new EngineTargetError("invalid_request", "Only native history can be deleted here");
+				await tx.put("metadata", `native-delete-progress:${id}`, {
+					subtype: "native_delete_progress",
+					agent_instance_id: id,
+					operation_id: operationId,
+					deleted_at: Date.now(),
+					session_file: binding?.session_file ?? null,
+					after: null,
+					complete: false,
+				});
 				for (const kind of ["pause", "stop", "recovery"]) await tx.delete("hold", `${id}:${kind}`);
 			}
 			const now = Date.now();
 			await tx.put("identity", id, {
 				...identity,
-				archived_at: action === "archive" ? now : action === "unarchive" ? null : identity.archived_at ?? null,
-				deleted_at: action === "delete" ? now : identity.deleted_at ?? null,
+				archived_at: action === "archive" ? now : action === "unarchive" ? null : (identity.archived_at ?? null),
+				deleted_at: action === "delete" ? now : (identity.deleted_at ?? null),
 				lifecycle_revision: expectedRevision + 1,
 				lifecycle_operation_id: operationId,
 				lifecycle_action: action,
 				intent_revision: identity.intent_revision + 1,
 				updated_at: now,
 			});
-			return { status: action === "delete" ? "deleted" as const : action === "archive" ? "archived" as const : "active" as const,
-				revision: expectedRevision + 1, operationId };
+			return {
+				status:
+					action === "delete"
+						? ("deleted" as const)
+						: action === "archive"
+							? ("archived" as const)
+							: ("active" as const),
+				revision: expectedRevision + 1,
+				operationId,
+			};
 		});
+		if (action === "delete") await this.reconcileDeletedNativeGenerations(id);
+		return result;
+	}
+
+	/** Persist one bounded page before advancing the cursor; safe to resume after a crash. */
+	async reconcileDeletedNativeGenerations(id: string): Promise<void> {
+		interface DeleteProgress {
+			subtype: "native_delete_progress";
+			agent_instance_id: string;
+			operation_id: string;
+			deleted_at: number;
+			session_file: string | null;
+			after: [number, string] | null;
+			complete: boolean;
+		}
+		for (;;) {
+			const progress = (await this.records.get("metadata", `native-delete-progress:${id}`, true))
+				.value as DeleteProgress | null;
+			if (!progress || progress.complete) return;
+			const page = await this.records.query("attempt_agent", [id], undefined, 16, progress.after ?? undefined, true);
+			const candidates = new Map<string, { familyId: string; generationId: string }>();
+			const include = (familyId: string, generationId: string) => {
+				if (!familyId || !generationId) throw new Error("Native delete encountered an invalid generation");
+				candidates.set(`${familyId}\0${generationId}`, { familyId, generationId });
+			};
+			if (!progress.after && progress.session_file) {
+				const { familyId, generationId } = parseNativeSessionLocator(progress.session_file);
+				include(familyId, generationId);
+			}
+			for (const row of page.records) {
+				const native = (row.value as unknown as RocksAttempt | null)?.transcript_native;
+				if (native) include(native.familyId, native.generationId);
+			}
+			const eligible: Array<{ familyId: string; generationId: string }> = [];
+			for (const candidate of candidates.values()) {
+				const locator = `native:${encodeURIComponent(candidate.familyId)}/${encodeURIComponent(candidate.generationId)}`;
+				const bindings = await this.records.query("binding_session", [locator], undefined, 100, undefined, true);
+				if (bindings.nextCursor || bindings.records.some(row => row.value?.agent_instance_id !== id)) continue;
+				eligible.push(candidate);
+			}
+			await this.mutation(id, async tx => {
+				const current = await tx.get<DeleteProgress>("metadata", `native-delete-progress:${id}`);
+				if (!current || current.complete || JSON.stringify(current.after) !== JSON.stringify(progress.after))
+					return;
+				for (const { familyId, generationId } of eligible) {
+					const digest = createHash("sha256").update(`${familyId}\0${generationId}`).digest("hex");
+					await tx.put("metadata", `native-delete:${digest}`, {
+						subtype: "native_tombstone",
+						family_id: familyId,
+						generation_id: generationId,
+						agent_instance_id: id,
+						operation_id: progress.operation_id,
+						deleted_at: progress.deleted_at,
+					});
+				}
+				const last = page.records.at(-1);
+				const createdAt = last?.value?.created_at;
+				if (last && (!Number.isSafeInteger(createdAt) || Number(createdAt) < 0))
+					throw new Error("Native delete attempt cursor is invalid");
+				await tx.put("metadata", `native-delete-progress:${id}`, {
+					...current,
+					after: last ? [Number(createdAt), last.id] : current.after,
+					complete: page.nextCursor === null,
+				});
+			});
+		}
 	}
 	async getAttempt(id: string): Promise<RocksAttempt | undefined> {
 		return ((await this.records.get("attempt", id)).value as unknown as RocksAttempt) ?? undefined;
@@ -1449,6 +1557,7 @@ export class RocksEngineMutations {
 				source_type: string;
 				sender: string | null;
 				attachment_refs: unknown;
+				attachment_descriptors?: EngineAttachment[];
 				created_at: number;
 			}>("inbox", `source:${source.sourceEventId}`);
 			if (
@@ -1466,14 +1575,34 @@ export class RocksEngineMutations {
 					throw new EngineInboxConflictError("Inbox session changed");
 				return { item: old, created: false };
 			}
+			const attachmentDescriptors: EngineAttachment[] = original?.attachment_descriptors ?? [];
+			if (!original && attachments) {
+				for (const uploadId of attachments.uploadIds) {
+					const { key, ownerHash } = attachmentUploadKey(attachments.principalId, uploadId);
+					const upload = await tx.get<{
+						subtype: string;
+						owner_hash: string;
+						state: string;
+						attachment: EngineAttachment;
+					}>("metadata", `blob-upload:${key}`);
+					if (upload?.subtype !== "blob_upload" || upload.owner_hash !== ownerHash || upload.state !== "ready")
+						throw new EngineInboxConflictError("Attachment is not ready for this owner");
+					const descriptor = attachmentIdentity(upload.attachment);
+					if (descriptor.uploadId !== uploadId || descriptor.clientMessageId !== source.sourceEventId)
+						throw new EngineInboxConflictError("Attachment belongs to another message");
+					attachmentDescriptors.push(descriptor);
+				}
+			}
 			if (!original)
 				await tx.put("inbox", `source:${source.sourceEventId}`, {
 					subtype: "source",
+					agent_instance_id: target.agentInstanceId,
 					source_event_id: source.sourceEventId,
 					body: source.body,
 					source_type: source.sourceType,
 					sender: source.sender ?? null,
 					attachment_refs: source.attachments ?? null,
+					...(attachmentDescriptors.length ? { attachment_descriptors: attachmentDescriptors } : {}),
 					created_at: source.createdAt ?? Date.now(),
 				});
 			const command = await tx.get<RocksCommand>("command", commandId);
@@ -1518,6 +1647,9 @@ export class RocksEngineMutations {
 				sourceBody: source.body,
 				deliveryPayload: source.body,
 				...(source.attachments ? { attachments: source.attachments } : {}),
+				...(attachmentDescriptors.length
+					? { attachmentDescriptors, attachment_descriptors: attachmentDescriptors }
+					: {}),
 				...(source.deliverAt !== undefined ? { deliverAt: source.deliverAt } : {}),
 				deliver_at: source.deliverAt ?? null,
 				wakeIntent: source.wakeIntent ?? false,

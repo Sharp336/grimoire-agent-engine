@@ -250,6 +250,15 @@ export interface EngineMessageAttachments {
 	uploadIds: string[];
 }
 
+export interface EngineAttachmentDescriptor {
+	uploadId: string;
+	clientMessageId: string;
+	name: string;
+	mediaType: string;
+	bytes: number;
+	contentHash: string;
+}
+
 export interface EngineInboxSource {
 	sourceEventId: string;
 	sourceType: EngineInboxSourceType;
@@ -271,6 +280,7 @@ export interface EngineInboxItem {
 	sender?: string;
 	sourceBody: string;
 	attachments?: EngineMessageAttachments;
+	attachmentDescriptors?: EngineAttachmentDescriptor[];
 	deliveryPayload: string;
 	annotation?: string;
 	deliverAt?: number;

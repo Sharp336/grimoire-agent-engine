@@ -1,6 +1,12 @@
 import type { StorageClient } from "../session/storage-client";
 import type { StorageRuntimeIndex, StorageRuntimeRecord } from "../session/storage-protocol";
-import { type EngineAttemptState, type EngineEvent, type EngineTarget, EngineTargetError } from "./contracts";
+import {
+	type EngineAttachmentDescriptor,
+	type EngineAttemptState,
+	type EngineEvent,
+	type EngineTarget,
+	EngineTargetError,
+} from "./contracts";
 import { decodeCursor, encodeCursor } from "./rocks-runtime-cursor";
 import {
 	nativeHistoryEntry,
@@ -28,6 +34,7 @@ import type {
 	RocksInbox,
 } from "./rocks-runtime-rows";
 import { RocksEngineMutations } from "./rocks-store";
+import type { EngineAttachmentUploads } from "./runtime-attachments";
 import type { EngineNativeHistoryPage } from "./runtime-history";
 import type { HistoryLifecycleContext } from "./runtime-lifecycle";
 import {
@@ -101,6 +108,70 @@ function readRequest(request: RuntimePageRequest | RuntimeQueueRequest, type: st
 
 /** Current projections and native history share the owner; this class never opens a legacy database. */
 export class RocksEngineStore extends RocksEngineMutations {
+	async reconcilePendingNativeDeletes(): Promise<void> {
+		let after: string | undefined;
+		for (;;) {
+			const page = await this.records.query(
+				"kind_primary",
+				["metadata"],
+				undefined,
+				100,
+				after ? [after] : undefined,
+				true,
+			);
+			for (const row of page.records) {
+				if (row.value?.subtype === "native_delete_progress" && row.value.complete !== true) {
+					await this.reconcileDeletedNativeGenerations(String(row.value.agent_instance_id));
+				}
+			}
+			if (!page.nextCursor) return;
+			after = page.records.at(-1)!.id;
+		}
+	}
+	async reconcileAcceptedAttachments(uploads: EngineAttachmentUploads): Promise<boolean> {
+		let after: string | undefined;
+		let complete = true;
+		for (;;) {
+			const page = await this.records.query("kind_primary", ["inbox"], undefined, 100, after ? [after] : undefined);
+			for (const row of page.records) {
+				if (row.value?.subtype !== "item" || !row.value.attachments || row.value.attachment_descriptors) continue;
+				const item = row.value as unknown as RocksInbox;
+				let descriptors: EngineAttachmentDescriptor[];
+				try {
+					descriptors = await uploads.resolveMessage(item.sourceEventId, item.attachments!);
+				} catch {
+					complete = false;
+					continue;
+				}
+				await this.mutation(item.agentInstanceId, async tx => {
+					const current = await tx.get<RocksInbox>("inbox", row.id);
+					const source = await tx.get<Record<string, unknown>>("inbox", `source:${item.sourceEventId}`);
+					if (!source) {
+						complete = false;
+						return;
+					}
+					if (!current || current.attachment_descriptors) return;
+					await tx.put("inbox", `source:${item.sourceEventId}`, {
+						...source,
+						agent_instance_id: item.agentInstanceId,
+						attachment_descriptors: descriptors,
+					});
+					await tx.put("inbox", row.id, {
+						...current,
+						attachmentDescriptors: descriptors,
+						attachment_descriptors: descriptors,
+					});
+				});
+			}
+			if (!page.nextCursor) break;
+			after = page.records.at(-1)!.id;
+		}
+		if (complete)
+			await this.mutation("blob-migration", async tx => {
+				await tx.put("metadata", "blob-migration", { subtype: "blob_migration", state: "complete" });
+			});
+		return complete;
+	}
 	async ownershipMigrationStatus(): Promise<Record<string, unknown>> {
 		return { status: "complete", unresolved: 0 };
 	}
@@ -829,7 +900,10 @@ export class RocksEngineStore extends RocksEngineMutations {
 			if (scope.kind === "catalog" && (identity.archived_at || identity.deleted_at)) {
 				if (position.memberSource > 0) position.memberSource++;
 				else if (next) position.cursor = next;
-				else { position.memberSource++; position.cursor = undefined; }
+				else {
+					position.memberSource++;
+					position.cursor = undefined;
+				}
 				continue;
 			}
 			const value =
